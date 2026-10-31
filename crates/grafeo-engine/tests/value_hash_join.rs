@@ -486,29 +486,31 @@ fn the_labels_of_a_later_pattern_check_the_joined_rows() {
     }
 }
 
-/// A statement that writes keeps the scan per row: a write above the join
-/// can change keys the later input rows read (the scan per row reads them
-/// when each chunk of rows arrives, a hash join would key them once). Here
-/// the first 2048 input rows move the keys of the ten nodes by 2048, and the
-/// next rows meet them there again: 20 matches.
+/// A statement that writes sees the keys as they were when it started
+/// (#677): a write above the join does not change the keys later input rows
+/// meet. Here the rows move the keys of the ten nodes by 2048, and the rows
+/// from 2048 on do not meet them there again: 10 matches, each node moved
+/// once. (Before, the first 2048 rows moved the keys and the next rows met
+/// them again: 20 matches.)
 #[test]
-fn a_statement_that_writes_keeps_the_scan_per_row() {
+fn a_statement_that_writes_sees_the_keys_of_its_start() {
     let db = GrafeoDB::new_in_memory();
     db.execute("UNWIND range(0, 9) AS k INSERT (:T {k: k})")
         .unwrap();
     let session = db.session();
     let query = "UNWIND range(0, 2999) AS i WITH {k: i} AS r MATCH (t:T) WHERE t.k = r.k \
                  SET t.k = t.k + 2048 RETURN count(*) AS n";
-    assert!(!explain(&session, Language::Cypher, query).contains("[hash join"));
-    assert_eq!(run(&session, Language::Cypher, query), [[Value::Int64(20)]]);
+    assert_eq!(run(&session, Language::Cypher, query), [[Value::Int64(10)]]);
     let mut keys: Vec<Value> = run(&session, Language::Cypher, "MATCH (t:T) RETURN t.k")
         .into_iter()
         .map(|row| row[0].clone())
         .collect();
     keys.sort_by_key(|key| format!("{key:?}"));
-    assert_eq!(keys, (4096..4106).map(Value::Int64).collect::<Vec<_>>());
+    assert_eq!(keys, (2048..2058).map(Value::Int64).collect::<Vec<_>>());
 
-    // Writes that do not touch the keys keep the scan per row too.
+    // CREATE, INSERT and DETACH DELETE read their input whole before the
+    // first write, so the keys are those of the start and the join is the
+    // hash join.
     for (language, query, expected) in [
         (
             Language::Cypher,
@@ -531,7 +533,28 @@ fn a_statement_that_writes_keeps_the_scan_per_row() {
     ] {
         let db = files();
         let session = db.session();
-        assert_rows_and_plan(&session, language, query, &expected, None);
+        assert_rows_and_plan(
+            &session,
+            language,
+            query,
+            &expected,
+            Some("t.filePath = f.path"),
+        );
+    }
+
+    // MERGE writes row by row and sees its own earlier rows: the scan stays
+    // per row.
+    for language in LANGUAGES {
+        let db = files();
+        let session = db.session();
+        assert_rows_and_plan(
+            &session,
+            language,
+            "MATCH (f:File) MATCH (t:TypeDefinition) WHERE t.filePath = f.path \
+             MERGE (:Seen {path: f.path}) RETURN f.path, t.name",
+            &definitions(),
+            None,
+        );
     }
 }
 
@@ -748,7 +771,13 @@ fn a_subquery_beside_the_key_filters_the_joined_rows() {
             );
             let plan = explain(&session, language, query);
             let lines = lines(&plan);
-            let subquery = lines.iter().position(|line| line.contains("Subquery("));
+            // The subquery filters the joined rows: its filter, or the semi
+            // join of a delim join, sits above the hash join.
+            let subquery = lines.iter().position(|line| {
+                line.contains("EXISTS {")
+                    || line.contains("COUNT {")
+                    || line.contains("Join (Semi)")
+            });
             let join = lines.iter().position(|line| line.contains("[hash join"));
             assert!(
                 subquery.is_some() && subquery < join,

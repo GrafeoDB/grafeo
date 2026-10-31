@@ -57,8 +57,9 @@ tests:
       rows:
         - [Mia]
 
+  # Only Laptop Pro (1299.99) costs over 500, in Alix's orders; Vincent's
+  # Tablet Mini is 499.99.
   - name: exists_multi_hop
-    skip: "multi-hop EXISTS returns incomplete results"
     query: |
       MATCH (c:Customer)
       WHERE EXISTS {
@@ -70,7 +71,6 @@ tests:
       ordered: true
       rows:
         - [Alix]
-        - [Vincent]
 
   - name: exists_with_aggregation_filter
     query: |
@@ -130,8 +130,9 @@ tests:
         - [Gus]
         - [Vincent]
 
+  # Ties on the count order by name: Graph Databases before Wireless
+  # Headphones.
   - name: count_subquery_for_reviews
-    skip: "COUNT subquery ordering"
     query: |
       MATCH (p:Product)
       RETURN p.name, COUNT { MATCH (:Customer)-[:REVIEWED]->(p) } AS review_count
@@ -139,8 +140,8 @@ tests:
     expect:
       ordered: true
       rows:
-        - [Wireless Headphones, 2]
         - [Graph Databases, 2]
+        - [Wireless Headphones, 2]
         - [Laptop Pro, 1]
         - [Tablet Mini, 1]
         - [Rust Programming, 0]
@@ -150,8 +151,9 @@ tests:
   # Correlated subqueries (subquery references outer variable)
   # ---------------------------------------------------------------------------
 
+  # Products rated over 4.0: Laptop Pro (4.5), Wireless Headphones (4.2) and
+  # Graph Databases (4.9). Gus reviewed the Headphones.
   - name: correlated_exists_with_property
-    skip: "correlated subquery property filter"
     query: |
       MATCH (c:Customer)
       WHERE EXISTS {
@@ -163,6 +165,7 @@ tests:
       ordered: true
       rows:
         - [Alix]
+        - [Gus]
         - [Jules]
         - [Vincent]
 
@@ -184,8 +187,10 @@ tests:
   # Subquery patterns with different relationships
   # ---------------------------------------------------------------------------
 
+  # Alix (Laptop Pro, Wireless Headphones), Gus (Wireless Headphones), Jules
+  # and Vincent (Graph Databases) each reviewed a product they ordered; Mia
+  # reviewed nothing.
   - name: customer_who_ordered_and_reviewed_same_product
-    skip: "multi-pattern in EXISTS subquery"
     query: |
       MATCH (c:Customer)
       WHERE EXISTS {
@@ -197,10 +202,12 @@ tests:
       ordered: true
       rows:
         - [Alix]
+        - [Gus]
+        - [Jules]
         - [Vincent]
 
+  # Rust Programming is in ORD-007 and ORD-008.
   - name: products_in_multiple_orders
-    skip: "COUNT subquery comparison in WHERE"
     query: |
       MATCH (p:Product)
       WHERE COUNT { MATCH (:Order)-[:CONTAINS]->(p) } > 1
@@ -210,6 +217,7 @@ tests:
       rows:
         - [Graph Databases]
         - [Laptop Pro]
+        - [Rust Programming]
         - [Wireless Headphones]
 
   # ---------------------------------------------------------------------------

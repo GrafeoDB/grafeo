@@ -1,0 +1,383 @@
+# SPARQL groups whose first element is an OPTIONAL or a MINUS
+#
+# SPARQL 1.1 Query 18.2.2.6 starts every group with the empty pattern Z,
+# whose one solution binds nothing. A group that opens with OPTIONAL { P }
+# is LeftJoin(Z, P): P's solutions when it has any, else Z's one empty
+# solution. A group that opens with MINUS { P } is Minus(Z, P) = Z, as the
+# empty solution shares no variable with any solution of P (18.5). Both were
+# evaluated as P itself (#702).
+
+meta:
+  language: sparql
+  model: rdf
+  section: optional
+  title: A group that opens with OPTIONAL or MINUS
+  dataset: empty
+  requires: [sparql, rdf]
+
+tests:
+
+  # ---------------------------------------------------------------------------
+  # MINUS first: one empty solution
+  # ---------------------------------------------------------------------------
+
+  - name: a_lone_minus_counts_one_solution
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/alix> <http://ex.org/name> "Alix" .
+          <http://ex.org/gus> <http://ex.org/name> "Gus" .
+          <http://ex.org/vincent> <http://ex.org/name> "Vincent" .
+        }
+    query: "SELECT (COUNT(*) AS ?c) WHERE { MINUS { ?s <http://ex.org/name> ?n } }"
+    expect:
+      rows:
+        - [1]
+
+  - name: a_lone_minus_selects_one_empty_row
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/alix> <http://ex.org/name> "Alix" .
+          <http://ex.org/gus> <http://ex.org/name> "Gus" .
+          <http://ex.org/vincent> <http://ex.org/name> "Vincent" .
+        }
+    query: "SELECT * WHERE { MINUS { ?s <http://ex.org/name> ?n } }"
+    expect:
+      count: 1
+
+  # ---------------------------------------------------------------------------
+  # OPTIONAL first: P's solutions, or one empty solution when P has none
+  # ---------------------------------------------------------------------------
+
+  - name: a_lone_optional_without_a_match_counts_one_solution
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/alix> <http://ex.org/name> "Alix" .
+        }
+    query: "SELECT (COUNT(*) AS ?c) WHERE { OPTIONAL { ?s <http://ex.org/none> ?o } }"
+    expect:
+      rows:
+        - [1]
+
+  - name: a_lone_optional_without_a_match_selects_one_empty_row
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/alix> <http://ex.org/name> "Alix" .
+        }
+    query: "SELECT * WHERE { OPTIONAL { ?s <http://ex.org/none> ?o } }"
+    expect:
+      count: 1
+
+  - name: an_optional_without_a_match_before_a_pattern_keeps_the_pattern
+    # Join(LeftJoin(Z, P), X) = X when P has no solution.
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/alix> <http://ex.org/name> "Alix" .
+          <http://ex.org/gus> <http://ex.org/name> "Gus" .
+        }
+    query: |
+      SELECT ?x WHERE {
+        OPTIONAL { ?s <http://ex.org/none> ?o }
+        ?x <http://ex.org/name> "Alix"
+      }
+    expect:
+      rows:
+        - [http://ex.org/alix]
+
+  - name: an_optional_without_a_match_before_a_pattern_on_its_variable_keeps_the_pattern
+    # The empty solution leaves ?s unbound, and an unbound variable is
+    # compatible with every value (18.3): the join keeps Alix.
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/alix> <http://ex.org/age> 30 .
+          <http://ex.org/gus> <http://ex.org/age> 40 .
+        }
+    query: |
+      SELECT ?s WHERE {
+        OPTIONAL { ?s <http://ex.org/none> ?o }
+        ?s <http://ex.org/age> 30
+      }
+    expect:
+      rows:
+        - [http://ex.org/alix]
+
+  - name: a_leading_optional_that_matches_gives_one_row_per_match
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/alix> <http://ex.org/name> "Alix" .
+          <http://ex.org/gus> <http://ex.org/name> "Gus" .
+          <http://ex.org/vincent> <http://ex.org/name> "Vincent" .
+        }
+    query: "SELECT ?s ?n WHERE { OPTIONAL { ?s <http://ex.org/name> ?n } }"
+    expect:
+      rows:
+        - [http://ex.org/alix, Alix]
+        - [http://ex.org/gus, Gus]
+        - [http://ex.org/vincent, Vincent]
+
+  - name: a_bind_then_an_optional_without_a_match_keeps_the_bind
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/alix> <http://ex.org/name> "Alix" .
+        }
+    query: "SELECT ?v ?o WHERE { BIND(1 AS ?v) OPTIONAL { ?s <http://ex.org/none> ?o } }"
+    expect:
+      rows:
+        - [1, null]
+
+  # ---------------------------------------------------------------------------
+  # Controls
+  # ---------------------------------------------------------------------------
+
+  - name: an_empty_group_selects_one_empty_row
+    query: "SELECT * WHERE { }"
+    expect:
+      count: 1
+
+  - name: an_empty_group_counts_one_solution
+    query: "SELECT (COUNT(*) AS ?c) WHERE { }"
+    expect:
+      rows:
+        - [1]
+
+  - name: a_minus_before_a_pattern_keeps_the_pattern
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/alix> <http://ex.org/name> "Alix" .
+          <http://ex.org/gus> <http://ex.org/name> "Gus" .
+          <http://ex.org/vincent> <http://ex.org/name> "Vincent" .
+        }
+    query: |
+      SELECT ?x WHERE {
+        MINUS { ?s <http://ex.org/name> ?n }
+        ?x <http://ex.org/name> ?v
+      }
+    expect:
+      rows:
+        - [http://ex.org/alix]
+        - [http://ex.org/gus]
+        - [http://ex.org/vincent]
+
+  - name: a_group_of_only_a_minus_joined_to_a_pattern_keeps_the_pattern
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/alix> <http://ex.org/name> "Alix" .
+          <http://ex.org/gus> <http://ex.org/name> "Gus" .
+          <http://ex.org/vincent> <http://ex.org/name> "Vincent" .
+        }
+    query: |
+      SELECT (COUNT(*) AS ?c) WHERE {
+        ?x <http://ex.org/name> "Alix"
+        { MINUS { ?s <http://ex.org/name> ?n } }
+      }
+    expect:
+      rows:
+        - [1]
+
+  # ---------------------------------------------------------------------------
+  # The same groups inside GRAPH, a UNION branch and a sub-SELECT
+  # ---------------------------------------------------------------------------
+
+  - name: a_lone_minus_inside_a_graph_is_one_empty_solution
+    setup:
+      - |
+        INSERT DATA {
+          GRAPH <http://ex.org/people> {
+            <http://ex.org/alix> <http://ex.org/name> "Alix" .
+            <http://ex.org/gus> <http://ex.org/name> "Gus" .
+          }
+        }
+    query: |
+      SELECT (COUNT(*) AS ?c) WHERE {
+        GRAPH <http://ex.org/people> { MINUS { ?s <http://ex.org/name> ?n } }
+      }
+    expect:
+      rows:
+        - [1]
+
+  - name: a_lone_optional_without_a_match_inside_a_graph_is_one_empty_solution
+    setup:
+      - |
+        INSERT DATA {
+          GRAPH <http://ex.org/people> {
+            <http://ex.org/alix> <http://ex.org/name> "Alix" .
+          }
+        }
+    query: |
+      SELECT (COUNT(*) AS ?c) WHERE {
+        GRAPH <http://ex.org/people> { OPTIONAL { ?s <http://ex.org/none> ?o } }
+      }
+    expect:
+      rows:
+        - [1]
+
+  - name: a_lone_optional_inside_a_graph_variable_is_one_solution_per_graph
+    # GRAPH ?g { P } joins P's solutions in each named graph with ?g; the
+    # empty solution in each graph gives one row per graph.
+    setup:
+      - |
+        INSERT DATA {
+          GRAPH <http://ex.org/people> { <http://ex.org/alix> <http://ex.org/name> "Alix" . }
+          GRAPH <http://ex.org/staff> { <http://ex.org/gus> <http://ex.org/name> "Gus" . }
+        }
+    query: |
+      SELECT ?g WHERE {
+        GRAPH ?g { OPTIONAL { ?s <http://ex.org/none> ?o } }
+      }
+    expect:
+      rows:
+        - [http://ex.org/people]
+        - [http://ex.org/staff]
+
+  - name: an_empty_group_inside_a_graph_variable_is_one_solution_per_graph
+    # The empty pattern itself: one solution in each named graph.
+    setup:
+      - |
+        INSERT DATA {
+          GRAPH <http://ex.org/people> { <http://ex.org/alix> <http://ex.org/name> "Alix" . }
+          GRAPH <http://ex.org/staff> { <http://ex.org/gus> <http://ex.org/name> "Gus" . }
+        }
+    query: "SELECT ?g WHERE { GRAPH ?g { } }"
+    expect:
+      rows:
+        - [http://ex.org/people]
+        - [http://ex.org/staff]
+
+  - name: a_lone_optional_in_a_union_branch_adds_one_empty_solution
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/alix> <http://ex.org/name> "Alix" .
+          <http://ex.org/gus> <http://ex.org/name> "Gus" .
+          <http://ex.org/vincent> <http://ex.org/name> "Vincent" .
+        }
+    query: |
+      SELECT ?n WHERE {
+        { OPTIONAL { ?s <http://ex.org/none> ?o } }
+        UNION
+        { ?s <http://ex.org/name> ?n }
+      }
+    expect:
+      rows:
+        - [null]
+        - [Alix]
+        - [Gus]
+        - [Vincent]
+
+  - name: a_lone_minus_in_a_union_branch_adds_one_empty_solution
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/alix> <http://ex.org/name> "Alix" .
+          <http://ex.org/gus> <http://ex.org/name> "Gus" .
+          <http://ex.org/vincent> <http://ex.org/name> "Vincent" .
+        }
+    query: |
+      SELECT ?n WHERE {
+        { ?s <http://ex.org/name> ?n }
+        UNION
+        { MINUS { ?s <http://ex.org/name> ?n } }
+      }
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]
+        - [null]
+
+  - name: a_lone_minus_in_a_sub_select_counts_one
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/alix> <http://ex.org/name> "Alix" .
+          <http://ex.org/gus> <http://ex.org/name> "Gus" .
+          <http://ex.org/vincent> <http://ex.org/name> "Vincent" .
+        }
+    query: |
+      SELECT ?c WHERE {
+        { SELECT (COUNT(*) AS ?c) WHERE { MINUS { ?s <http://ex.org/name> ?n } } }
+      }
+    expect:
+      rows:
+        - [1]
+
+  - name: a_lone_optional_without_a_match_in_a_sub_select_counts_one
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/alix> <http://ex.org/name> "Alix" .
+        }
+    query: |
+      SELECT ?c WHERE {
+        { SELECT (COUNT(*) AS ?c) WHERE { OPTIONAL { ?s <http://ex.org/none> ?o } } }
+      }
+    expect:
+      rows:
+        - [1]
+
+  # ---------------------------------------------------------------------------
+  # ASK and CONSTRUCT read the same one solution
+  # ---------------------------------------------------------------------------
+
+  - name: ask_of_a_lone_minus_is_true
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/alix> <http://ex.org/name> "Alix" .
+        }
+    query: "ASK { MINUS { ?s <http://ex.org/name> ?n } }"
+    expect:
+      columns: [boolean]
+      rows:
+        - [true]
+
+  - name: ask_of_a_lone_optional_without_a_match_is_true
+    query: "ASK { OPTIONAL { ?s <http://ex.org/none> ?o } }"
+    expect:
+      columns: [boolean]
+      rows:
+        - [true]
+
+  - name: construct_of_constants_from_a_lone_minus_builds_one_triple
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/alix> <http://ex.org/name> "Alix" .
+          <http://ex.org/gus> <http://ex.org/name> "Gus" .
+        }
+    query: |
+      CONSTRUCT { <http://ex.org/log> <http://ex.org/note> "once" }
+      WHERE { MINUS { ?s <http://ex.org/name> ?n } }
+    expect:
+      rows:
+        - [http://ex.org/log, http://ex.org/note, once]
+
+  - name: construct_from_the_variables_of_a_lone_minus_builds_nothing
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/alix> <http://ex.org/name> "Alix" .
+          <http://ex.org/gus> <http://ex.org/name> "Gus" .
+        }
+    query: |
+      CONSTRUCT { ?s <http://ex.org/seen> ?n }
+      WHERE { MINUS { ?s <http://ex.org/name> ?n } }
+    expect:
+      count: 0
+
+  - name: construct_of_constants_from_a_lone_optional_without_a_match_builds_one_triple
+    query: |
+      CONSTRUCT { <http://ex.org/log> <http://ex.org/note> "once" }
+      WHERE { OPTIONAL { ?s <http://ex.org/none> ?o } }
+    expect:
+      rows:
+        - [http://ex.org/log, http://ex.org/note, once]

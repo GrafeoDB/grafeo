@@ -20,18 +20,20 @@ use super::common::{
 };
 use crate::query::plan::{
     self as plan, AddLabelOp, AggregateExpr, AggregateFunction, AggregateOp, ApplyOp, BinaryOp,
-    CallProcedureOp, CountExpr, CreateElement, CreateOp, DeleteNodeOp, EntityKind, ExceptOp,
-    ExpandDirection, ExpandOp, HorizontalAggregateOp, IntersectOp, JoinCondition, JoinOp, JoinType,
-    LeftJoinOp, LoadDataFormat, LoadDataOp, LogicalExpression, LogicalOperator, LogicalPlan,
-    MergeOp, NodeScanOp, NullsOrdering, OtherwiseOp, ParameterScanOp, PathMode, ProcedureYield,
-    ProjectOp, Projection, RemoveLabelOp, ReturnItem, ReturnOp, SetPropertyOp,
-    ShortestPathEdgeCondition, ShortestPathOp, SortKey, SortOrder, UnaryOp, UnionOp, UnwindOp,
+    CallProcedureOp, Callee, CountExpr, CreateElement, CreateOp, DeleteNodeOp, EntityKind,
+    ExceptOp, ExpandDirection, ExpandOp, HorizontalAggregateOp, IntersectOp, JoinCondition, JoinOp,
+    JoinType, LeftJoinOp, LoadDataFormat, LoadDataOp, LogicalExpression, LogicalOperator,
+    LogicalPlan, MapProjectionEntry, MergeOp, NodeScanOp, NullsOrdering, OtherwiseOp,
+    ParameterScanOp, PathMode, ProcedureYield, ProjectOp, Projection, RemoveLabelOp, ReturnItem,
+    ReturnOp, SetPropertyOp, ShortestPathEdgeCondition, ShortestPathOp, SortKey, SortOrder,
+    UnaryOp, UnionOp, UnwindOp,
 };
 #[cfg(test)]
 use crate::query::plan::{FilterOp, LimitOp, SkipOp};
 use grafeo_adapters::query::gql::{self, ast};
 use grafeo_common::types::Value;
 use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind, Result};
+use grafeo_core::execution::operators::Volatility;
 
 /// Result of translating a GQL query: either a logical plan, session command, or schema command.
 #[derive(Debug)]
@@ -96,6 +98,8 @@ struct GqlTranslator {
     /// pattern. An aggregate over one is computed per row
     /// (see `take_horizontal_aggregates`).
     group_list_variables: std::cell::RefCell<HashMap<String, String>>,
+    /// A reserved lexical temporary, stable when a group key is translated again.
+    let_values_name: std::cell::OnceCell<String>,
     /// The variables of the row the `CALL` subquery being translated runs
     /// for (`None` outside one, or when they are not known): what a nested
     /// subquery's `RETURN *` leaves out.
@@ -108,6 +112,10 @@ struct GqlTranslator {
     /// What the WITH just translated projects, for an ORDER BY statement
     /// right after it (see `sort`); `None` after any other clause.
     sort_scope: std::cell::RefCell<Option<sort::SortScope>>,
+    /// Whether a path function of a quantified edge's variable reads the
+    /// path that edge walks (`nodes(k)` of `-[k]->{1,3}`), as SQL/PGQ reads
+    /// it (see [`GqlTranslator::group_path_call`]).
+    group_variables_as_paths: bool,
 }
 
 /// The rows a query passes to the one after `NEXT`: its final `RETURN` as a
@@ -197,6 +205,219 @@ fn return_as_with(plan: LogicalOperator) -> LogicalOperator {
     }
 }
 
+/// Inline simultaneous bindings only when substitution preserves lexical scope
+/// and evaluation count. Unsafe substitutions retain their lexical bindings.
+fn try_inline_let_bindings(
+    expr: LogicalExpression,
+    bindings: &[(String, LogicalExpression)],
+) -> Option<LogicalExpression> {
+    inline_let_expression(expr, bindings, &HashSet::new(), false)
+}
+
+fn inline_let_expression(
+    expr: LogicalExpression,
+    bindings: &[(String, LogicalExpression)],
+    bound: &HashSet<String>,
+    duplicated: bool,
+) -> Option<LogicalExpression> {
+    let rewrite = |expr| inline_let_expression(expr, bindings, bound, duplicated);
+    let rename = |name: String| match rewrite(LogicalExpression::Variable(name))? {
+        LogicalExpression::Variable(name) => Some(name),
+        _ => None,
+    };
+    Some(match expr {
+        LogicalExpression::Variable(name) => {
+            if let Some((_, value)) = bindings
+                .iter()
+                .find(|(binding, _)| binding == &name && !bound.contains(binding))
+            {
+                // Only a replacement is duplicated. An unrelated return alias
+                // or an existing volatile sort key need not block substitution.
+                // Do not apply this LET's bindings to an enclosing-scope value.
+                inline_let_expression(value.clone(), &[], &HashSet::new(), true)?;
+                let mut free = HashSet::new();
+                collect_expression_variables(value, &mut free);
+                if !free.is_disjoint(bound) {
+                    return None;
+                }
+                value.clone()
+            } else {
+                LogicalExpression::Variable(name)
+            }
+        }
+        LogicalExpression::Literal(_) | LogicalExpression::Parameter(_) => expr,
+        LogicalExpression::Property { variable, property } => LogicalExpression::Property {
+            variable: rename(variable)?,
+            property,
+        },
+        LogicalExpression::Labels(name) => LogicalExpression::Labels(rename(name)?),
+        LogicalExpression::Type(name) => LogicalExpression::Type(rename(name)?),
+        LogicalExpression::Id(name) => LogicalExpression::Id(rename(name)?),
+        LogicalExpression::Binary { left, op, right } => LogicalExpression::Binary {
+            left: Box::new(rewrite(*left)?),
+            op,
+            right: Box::new(rewrite(*right)?),
+        },
+        LogicalExpression::Unary { op, operand } => LogicalExpression::Unary {
+            op,
+            operand: Box::new(rewrite(*operand)?),
+        },
+        LogicalExpression::FunctionCall {
+            callee,
+            name,
+            args,
+            distinct,
+        } => {
+            if duplicated
+                && matches!(callee, Callee::Builtin(function)
+                if function.volatility(args.len()) == Volatility::Volatile)
+            {
+                return None;
+            }
+            LogicalExpression::FunctionCall {
+                callee,
+                name,
+                distinct,
+                args: args.into_iter().map(rewrite).collect::<Option<_>>()?,
+            }
+        }
+        LogicalExpression::SparqlCall { name, args } => LogicalExpression::SparqlCall {
+            name,
+            args: args.into_iter().map(rewrite).collect::<Option<_>>()?,
+        },
+        LogicalExpression::List(items) => {
+            LogicalExpression::List(items.into_iter().map(rewrite).collect::<Option<_>>()?)
+        }
+        LogicalExpression::Map(entries) => LogicalExpression::Map(
+            entries
+                .into_iter()
+                .map(|(key, value)| Some((key, rewrite(value)?)))
+                .collect::<Option<_>>()?,
+        ),
+        LogicalExpression::IndexAccess { base, index } => LogicalExpression::IndexAccess {
+            base: Box::new(rewrite(*base)?),
+            index: Box::new(rewrite(*index)?),
+        },
+        LogicalExpression::MapAccess { base, key } => LogicalExpression::MapAccess {
+            base: Box::new(rewrite(*base)?),
+            key,
+        },
+        LogicalExpression::SliceAccess { base, start, end } => LogicalExpression::SliceAccess {
+            base: Box::new(rewrite(*base)?),
+            start: match start {
+                Some(expr) => Some(Box::new(rewrite(*expr)?)),
+                None => None,
+            },
+            end: match end {
+                Some(expr) => Some(Box::new(rewrite(*expr)?)),
+                None => None,
+            },
+        },
+        LogicalExpression::Case {
+            operand,
+            when_clauses,
+            else_clause,
+        } => LogicalExpression::Case {
+            operand: match operand {
+                Some(expr) => Some(Box::new(rewrite(*expr)?)),
+                None => None,
+            },
+            when_clauses: when_clauses
+                .into_iter()
+                .map(|(when, then)| Some((rewrite(when)?, rewrite(then)?)))
+                .collect::<Option<_>>()?,
+            else_clause: match else_clause {
+                Some(expr) => Some(Box::new(rewrite(*expr)?)),
+                None => None,
+            },
+        },
+        LogicalExpression::ListComprehension {
+            variable,
+            list_expr,
+            filter_expr,
+            map_expr,
+        } => {
+            let list_expr = Box::new(rewrite(*list_expr)?);
+            let mut local = bound.clone();
+            local.insert(variable.clone());
+            let rewrite_body = |expr| inline_let_expression(expr, bindings, &local, duplicated);
+            LogicalExpression::ListComprehension {
+                variable,
+                list_expr,
+                filter_expr: match filter_expr {
+                    Some(expr) => Some(Box::new(rewrite_body(*expr)?)),
+                    None => None,
+                },
+                map_expr: Box::new(rewrite_body(*map_expr)?),
+            }
+        }
+        LogicalExpression::ListPredicate {
+            kind,
+            variable,
+            list_expr,
+            predicate,
+        } => {
+            let list_expr = Box::new(rewrite(*list_expr)?);
+            let mut local = bound.clone();
+            local.insert(variable.clone());
+            LogicalExpression::ListPredicate {
+                kind,
+                variable,
+                list_expr,
+                predicate: Box::new(inline_let_expression(
+                    *predicate, bindings, &local, duplicated,
+                )?),
+            }
+        }
+        LogicalExpression::Reduce {
+            accumulator,
+            initial,
+            variable,
+            list,
+            expression,
+        } => {
+            let initial = Box::new(rewrite(*initial)?);
+            let list = Box::new(rewrite(*list)?);
+            let mut local = bound.clone();
+            local.insert(accumulator.clone());
+            local.insert(variable.clone());
+            LogicalExpression::Reduce {
+                accumulator,
+                initial,
+                variable,
+                list,
+                expression: Box::new(inline_let_expression(
+                    *expression,
+                    bindings,
+                    &local,
+                    duplicated,
+                )?),
+            }
+        }
+        LogicalExpression::MapProjection { base, entries } => LogicalExpression::MapProjection {
+            base: rename(base)?,
+            entries: entries
+                .into_iter()
+                .map(|entry| {
+                    Some(match entry {
+                        MapProjectionEntry::LiteralEntry(key, value) => {
+                            MapProjectionEntry::LiteralEntry(key, rewrite(value)?)
+                        }
+                        MapProjectionEntry::PropertySelector(_)
+                        | MapProjectionEntry::AllProperties => entry,
+                    })
+                })
+                .collect::<Option<_>>()?,
+        },
+        // These plans own scopes and may correlate with a LET binding. Keep
+        // lexical names intact instead of guessing at their free variables.
+        LogicalExpression::ExistsSubquery(_)
+        | LogicalExpression::CountSubquery(_)
+        | LogicalExpression::ValueSubquery(_)
+        | LogicalExpression::PatternComprehension { .. } => return None,
+    })
+}
+
 /// The sort `keys` of a `RETURN` rewritten to read the `RETURN`'s input: each
 /// alias replaced by its expression (a property of an alias that is a
 /// variable by that variable's property). `None` when a key still reads an
@@ -216,7 +437,7 @@ fn keys_before_return(keys: &[SortKey], ret: &ReturnOp) -> Option<Vec<SortKey>> 
     keys.iter()
         .map(|key| {
             let expression =
-                GqlTranslator::substitute_let_bindings(key.expression.clone(), &aliases);
+                GqlTranslator::substitute_return_aliases(key.expression.clone(), &aliases);
             let mut read = HashSet::new();
             collect_expression_variables(&expression, &mut read);
             let reads_an_alias = read.iter().any(|name| {
@@ -337,16 +558,69 @@ fn unfocused(statement: &ast::Statement) -> &ast::Statement {
     }
 }
 
+/// The graph pattern of a SQL/PGQ `GRAPH_TABLE`, translated as GQL
+/// translates it: SQL/PGQ takes its graph patterns from GQL (ISO/IEC
+/// 9075-16), so its `MATCH`, `OPTIONAL MATCH` and the expressions over their
+/// variables have GQL's semantics, search prefixes, path variables and
+/// quantified paths included.
+#[cfg(feature = "sql-pgq")]
+pub(crate) struct GraphPatternTranslator(GqlTranslator);
+
+#[cfg(feature = "sql-pgq")]
+impl GraphPatternTranslator {
+    /// A translator for the statement `query`, whose text the generated
+    /// names skip.
+    pub(crate) fn new(query: &str) -> Self {
+        Self(GqlTranslator {
+            group_variables_as_paths: true,
+            ..GqlTranslator::new(query)
+        })
+    }
+
+    /// The plan of `first`, then of each of `optional`, joined to the rows
+    /// before it as GQL joins an `OPTIONAL MATCH`.
+    pub(crate) fn translate_matches(
+        &self,
+        first: &ast::MatchClause,
+        optional: &[ast::MatchClause],
+    ) -> Result<LogicalOperator> {
+        let mut plan = self.0.translate_match(first)?;
+        for clause in optional {
+            let right = self.0.translate_match(clause)?;
+            plan = optional_join(plan, right, None);
+        }
+        Ok(plan)
+    }
+
+    /// `expr`, over the variables of the graph pattern.
+    pub(crate) fn translate_expression(&self, expr: &ast::Expression) -> Result<LogicalExpression> {
+        self.0.translate_expression(expr)
+    }
+
+    /// The call `name(args)` when it is a path function of a quantified
+    /// edge's variable (see [`GqlTranslator::group_path_call`]).
+    pub(crate) fn group_path_call(
+        &self,
+        name: &str,
+        args: &[ast::Expression],
+        distinct: bool,
+    ) -> Option<Result<LogicalExpression>> {
+        self.0.group_path_call(name, args, distinct)
+    }
+}
+
 impl GqlTranslator {
     /// A translator for the statement `query`, whose text the generated
     /// names skip.
     fn new(query: &str) -> Self {
         Self {
             group_list_variables: std::cell::RefCell::new(HashMap::new()),
+            let_values_name: std::cell::OnceCell::new(),
             call_scope: std::cell::RefCell::new(None),
             names: GeneratedNames::new(query),
             call_imports: CallImports::default(),
             sort_scope: std::cell::RefCell::new(None),
+            group_variables_as_paths: false,
         }
     }
 
@@ -392,9 +666,11 @@ impl GqlTranslator {
             ast::Statement::CompositeQuery { left, op, right } => {
                 self.translate_composite_query(left, *op, right)
             }
-            ast::Statement::SessionCommand(_) => Err(Error::Internal(
-                "Session commands cannot be executed as queries".to_string(),
-            )),
+            // A command inside a statement, such as `RETURN 1 AS x NEXT COMMIT`.
+            ast::Statement::SessionCommand(_) => Err(Error::from(QueryError::semantic(
+                "a transaction or session command cannot be part of another statement, such as \
+                 a NEXT chain: run it as a statement of its own",
+            ))),
             ast::Statement::Explain(inner) | ast::Statement::Profile(inner) => {
                 self.translate_statement(inner)
             }
@@ -496,6 +772,7 @@ impl GqlTranslator {
                     .extract_aggregates_and_groups(
                         &return_clause.items,
                         !return_clause.group_by.is_empty(),
+                        &mut plan,
                     )?;
                 // Explicit GROUP BY wins over the keys implied by the items.
                 let (group_by, imports_read) = if return_clause.group_by.is_empty() {
@@ -746,21 +1023,21 @@ impl GqlTranslator {
                         plan = self.translate_merge(merge_clause, plan)?;
                     }
                     ast::QueryClause::Let(bindings) => {
-                        // LET var = expr translates to a Project that adds the bound
-                        // variables as additional columns in the current pipeline.
-                        let mut projections = Vec::new();
+                        // `LET a = e1, b = e2` is `LET a = e1 LET b = e2` (ISO
+                        // GQL, let statement): each definition is a Project
+                        // that adds its column, so a later one reads the
+                        // earlier ones.
                         for (name, expr) in bindings {
                             let logical_expr = self.translate_expression(expr)?;
-                            projections.push(Projection {
-                                expression: logical_expr,
-                                alias: Some(name.clone()),
+                            plan = LogicalOperator::Project(ProjectOp {
+                                projections: vec![Projection {
+                                    expression: logical_expr,
+                                    alias: Some(name.clone()),
+                                }],
+                                input: Box::new(plan),
+                                pass_through_input: true,
                             });
                         }
-                        plan = LogicalOperator::Project(ProjectOp {
-                            projections,
-                            input: Box::new(plan),
-                            pass_through_input: true,
-                        });
                     }
                     ast::QueryClause::Remove(remove_clause) => {
                         plan = Self::apply_remove(plan, remove_clause);
@@ -1000,6 +1277,7 @@ impl GqlTranslator {
                 .extract_aggregates_and_groups(
                     &return_items,
                     !query.return_clause.group_by.is_empty() || having_aggregates,
+                    &mut plan,
                 )?;
             // HAVING's aggregates are numbered after the `_agg_N` ones of the
             // RETURN list (which skip the names the statement spells, so the
@@ -1049,6 +1327,7 @@ impl GqlTranslator {
                         condition,
                         &mut having_counter,
                         &mut aggregates,
+                        &mut plan,
                     )?))
                 }
                 Some(condition) => {
@@ -1191,7 +1470,9 @@ impl GqlTranslator {
         })
     }
 
-    fn substitute_let_bindings(
+    // Preserve ORDER BY's existing alias rewrite and sort placement. Return
+    // aliases belong to a projection; they are not lexical LET bindings.
+    fn substitute_return_aliases(
         expr: LogicalExpression,
         bindings: &[(String, LogicalExpression)],
     ) -> LogicalExpression {
@@ -1217,13 +1498,13 @@ impl GqlTranslator {
                 _ => expr,
             },
             LogicalExpression::Binary { left, op, right } => LogicalExpression::Binary {
-                left: Box::new(Self::substitute_let_bindings(*left, bindings)),
+                left: Box::new(Self::substitute_return_aliases(*left, bindings)),
                 op,
-                right: Box::new(Self::substitute_let_bindings(*right, bindings)),
+                right: Box::new(Self::substitute_return_aliases(*right, bindings)),
             },
             LogicalExpression::Unary { op, operand } => LogicalExpression::Unary {
                 op,
-                operand: Box::new(Self::substitute_let_bindings(*operand, bindings)),
+                operand: Box::new(Self::substitute_return_aliases(*operand, bindings)),
             },
             LogicalExpression::FunctionCall {
                 callee,
@@ -1235,12 +1516,64 @@ impl GqlTranslator {
                 name,
                 args: args
                     .into_iter()
-                    .map(|a| Self::substitute_let_bindings(a, bindings))
+                    .map(|a| Self::substitute_return_aliases(a, bindings))
                     .collect(),
                 distinct,
             },
             other => other,
         }
+    }
+
+    /// Share LET semantics between scalar expressions and extracted aggregates.
+    fn substitute_let_bindings(
+        &self,
+        body: LogicalExpression,
+        bindings: &[(String, LogicalExpression)],
+    ) -> Result<LogicalExpression> {
+        if let Some(inlined) = try_inline_let_bindings(body.clone(), bindings) {
+            return Ok(inlined);
+        }
+        // A lexical binding avoids capture and evaluates each value once.
+        // Retain the written name so correlated subplans see the same scope.
+        let scalar = |variable, value, body| LogicalExpression::IndexAccess {
+            base: Box::new(LogicalExpression::ListComprehension {
+                variable,
+                list_expr: Box::new(LogicalExpression::List(vec![value])),
+                filter_expr: None,
+                map_expr: Box::new(body),
+            }),
+            index: Box::new(LogicalExpression::Literal(Value::Int64(0))),
+        };
+        if let [(name, value)] = bindings {
+            return Ok(scalar(name.clone(), value.clone(), body));
+        }
+        if bindings.is_empty() {
+            return Ok(body);
+        }
+        // Evaluate every value in the enclosing scope, before any names bind.
+        // Each fallback closes over its own temporary. Reusing the reserved
+        // name is safe in nested scopes and keeps GROUP BY expression identity
+        // stable across repeated translations of the same written expression.
+        let values_name = self
+            .let_values_name
+            .get_or_init(|| self.names.next("_let_values_"))
+            .clone();
+        let values = bindings.iter().map(|(_, value)| value.clone()).collect();
+        let mut body = body;
+        for (index, (name, _)) in bindings.iter().enumerate().rev() {
+            let index = i64::try_from(index).map_err(|_| {
+                Error::from(QueryError::new(
+                    QueryErrorKind::Semantic,
+                    "Too many LET bindings",
+                ))
+            })?;
+            let value = LogicalExpression::IndexAccess {
+                base: Box::new(LogicalExpression::Variable(values_name.clone())),
+                index: Box::new(LogicalExpression::Literal(Value::Int64(index))),
+            };
+            body = scalar(name.clone(), value, body);
+        }
+        Ok(scalar(values_name, LogicalExpression::List(values), body))
     }
 
     /// Extracts all named variables from a GQL AST pattern.
@@ -1268,11 +1601,13 @@ impl GqlTranslator {
             ast::Pattern::Quantified {
                 pattern,
                 subpath_var,
+                anchors,
                 ..
             } => {
                 if let Some(v) = subpath_var {
                     vars.insert(v.clone());
                 }
+                vars.extend(anchors.variables().cloned());
                 vars.extend(Self::pattern_variables(pattern));
             }
             ast::Pattern::Union(patterns) | ast::Pattern::MultisetUnion(patterns) => {
@@ -1628,7 +1963,7 @@ impl GqlTranslator {
 
             if has_aggregates {
                 let (aggregates, auto_group_by, mut post_return) =
-                    self.extract_aggregates_and_groups(&items, false)?;
+                    self.extract_aggregates_and_groups(&items, false, &mut plan)?;
                 let imports_read = super::common::resolve_implicitly_grouped(
                     "WITH",
                     post_return.as_deref_mut().unwrap_or_default(),
@@ -1899,16 +2234,11 @@ impl GqlTranslator {
         let of_optional_match = after_optional_match && !where_clause.filter;
         Ok(
             if of_optional_match && let LogicalOperator::LeftJoin(left_join) = plan {
-                let (join, post_filter) = build_left_join_with_predicates(
+                build_left_join_with_predicates(
                     left_join,
                     Some(predicate),
                     self.call_scope.borrow().as_ref(),
-                );
-                if let Some(pf) = post_filter {
-                    wrap_filter(join, pf)
-                } else {
-                    join
-                }
+                )
             } else {
                 wrap_filter(plan, predicate)
             },
@@ -2078,6 +2408,311 @@ impl GqlTranslator {
         Ok(search)
     }
 
+    /// The most repetitions a quantified path pattern of more than one edge
+    /// is unrolled to (see [`translate_quantified_path`](Self::translate_quantified_path)):
+    /// its plan holds one chain per count, so it grows with the upper bound.
+    pub(crate) const MAX_UNROLLED_REPETITIONS: u32 = 16;
+
+    /// A quantified path pattern of more than one edge,
+    /// `(s)((a)-[e]->(m)-[f]->(b) WHERE ...){m,n}(t)` (G047 to G050): for each
+    /// count from `m` to `n`, one chain of the pattern repeated that many
+    /// times, the rows of all of them together (`UNION ALL`). Each repetition
+    /// starts at the last node of the one before (both `b` and `a`). The
+    /// `WHERE`, and each element's own, holds for each repetition on its
+    /// variables. Outside the pattern each inner variable is the list of its
+    /// values, one per repetition (a group variable, ISO/IEC 39075:2024
+    /// 16.7); the first and the last node are single nodes. No repetition
+    /// gives the first node as the last, with empty lists. A pattern without
+    /// an upper bound, or of more than [`Self::MAX_UNROLLED_REPETITIONS`], is
+    /// refused: a repeat operator would take it.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the parts of the quantified pattern and of its translation"
+    )]
+    fn translate_quantified_path(
+        &self,
+        path: &ast::PathPattern,
+        (min, max): (u32, Option<u32>),
+        where_clause: Option<&ast::Expression>,
+        anchors: &ast::QuantifiedAnchors,
+        input: Option<LogicalOperator>,
+        path_alias: Option<&str>,
+        path_mode: PathMode,
+    ) -> Result<LogicalOperator> {
+        let unsupported = |what: String| {
+            Error::from(QueryError::unsupported(format!(
+                "a quantified path pattern of more than one edge {what}"
+            )))
+        };
+        let Some(max) = max else {
+            return Err(unsupported(
+                "needs an upper bound, as in {1,3}: repeating it without one is not supported yet"
+                    .to_string(),
+            ));
+        };
+        if max > Self::MAX_UNROLLED_REPETITIONS {
+            return Err(unsupported(format!(
+                "allows at most {} repetitions",
+                Self::MAX_UNROLLED_REPETITIONS
+            )));
+        }
+        if min == 0 && path_alias.is_some() {
+            return Err(unsupported(
+                "with a path variable needs at least one repetition, as in {1,3}".to_string(),
+            ));
+        }
+        let segment = Segment::of(path);
+        let condition = segment
+            .conditions(where_clause)
+            .into_iter()
+            .map(|condition| self.translate_expression(condition))
+            .collect::<Result<Vec<_>>>()?;
+        let condition = LogicalExpression::conjunction(condition);
+        let mut first = match &anchors.source {
+            Some(anchor) => joined_node(anchor, &segment.source),
+            None => segment.source.clone(),
+        };
+        let mut last = match &anchors.target {
+            Some(anchor) => joined_node(anchor, &segment.target),
+            None => segment.target.clone(),
+        };
+        let first_name = first
+            .variable
+            .get_or_insert_with(|| self.names.next("_rep_"))
+            .clone();
+        let last_name = last
+            .variable
+            .get_or_insert_with(|| self.names.next("_rep_"))
+            .clone();
+        // The inner variables bound outside as lists: all but the first and
+        // the last node's, which name single nodes.
+        let groups: Vec<String> = segment
+            .variables()
+            .into_iter()
+            .filter(|name| *name != first_name && *name != last_name)
+            .collect();
+        // A union lines its inputs up by position: every chain keeps the
+        // same columns, in one order.
+        let mut columns: Vec<String> = match &input {
+            Some(input) => {
+                let mut bound: Vec<String> = input
+                    .bound_variables(None)
+                    .ok_or_else(|| unsupported("is not supported after this clause".to_string()))?
+                    .into_iter()
+                    .collect();
+                bound.sort();
+                bound
+            }
+            None => Vec::new(),
+        };
+        for name in [
+            Some(first_name.as_str()),
+            Some(last_name.as_str()),
+            path_alias,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if !columns.iter().any(|column| column == name) {
+                columns.push(name.to_string());
+            }
+        }
+
+        let mut branches = Vec::new();
+        for count in min..=max {
+            let (plan, repetitions) = if count == 0 {
+                let node = ast::Pattern::Node(joined_node(&first, &last));
+                let plan =
+                    self.translate_pattern_with_alias(&node, input.clone(), None, path_mode)?;
+                (plan, Vec::new())
+            } else {
+                let (chain, repetitions) = self.unrolled_chain(&segment, count, &first, &last);
+                let mut plan = self.translate_path_pattern_with_alias(
+                    &chain,
+                    input.clone(),
+                    path_alias,
+                    path_mode,
+                )?;
+                if let Some(condition) = &condition {
+                    for names in &repetitions {
+                        plan = wrap_filter(plan, bound_as(names.clone(), condition.clone()));
+                    }
+                }
+                (plan, repetitions)
+            };
+            let mut projections: Vec<Projection> = columns
+                .iter()
+                .map(|column| {
+                    // No repetition: the last node is the first.
+                    let source = if count == 0 && *column == last_name {
+                        &first_name
+                    } else {
+                        column
+                    };
+                    Projection {
+                        expression: LogicalExpression::Variable(source.clone()),
+                        alias: Some(column.clone()),
+                    }
+                })
+                .collect();
+            for group in &groups {
+                let values = repetitions
+                    .iter()
+                    .filter_map(|names| {
+                        names
+                            .iter()
+                            .find(|(name, _)| name == group)
+                            .map(|(_, column)| LogicalExpression::Variable(column.clone()))
+                    })
+                    .collect();
+                projections.push(Projection {
+                    expression: LogicalExpression::List(values),
+                    alias: Some(group.clone()),
+                });
+            }
+            branches.push(LogicalOperator::Project(ProjectOp {
+                projections,
+                input: Box::new(plan),
+                pass_through_input: false,
+            }));
+        }
+        if branches.len() == 1 {
+            return Ok(branches.remove(0));
+        }
+        Ok(LogicalOperator::Union(UnionOp { inputs: branches }))
+    }
+
+    /// The path of `segment` repeated `count` times (at least once) from
+    /// `first` to `last`, both named, and per repetition the column of each
+    /// of its variables (see [`bound_as`]). Each inner variable gets a column
+    /// of its own in each repetition; the nodes between two repetitions are
+    /// `segment.target` joined with `segment.source`.
+    fn unrolled_chain(
+        &self,
+        segment: &Segment,
+        count: u32,
+        first: &ast::NodePattern,
+        last: &ast::NodePattern,
+    ) -> (ast::PathPattern, Vec<Vec<(String, String)>>) {
+        let mut source_column = first.variable.clone();
+        let mut edges = Vec::new();
+        let mut repetitions = Vec::new();
+        for repetition in 0..count {
+            let mut names = Vec::new();
+            if let (Some(name), Some(column)) = (&segment.source.variable, &source_column) {
+                names.push((name.clone(), column.clone()));
+            }
+            for (index, inner) in segment.edges.iter().enumerate() {
+                let mut edge = inner.clone();
+                if let Some(name) = &inner.variable {
+                    let fresh = self.names.next("_rep_");
+                    names.push((name.clone(), fresh.clone()));
+                    edge.variable = Some(fresh);
+                }
+                if index + 1 < segment.edges.len() {
+                    if let Some(name) = &inner.target.variable {
+                        let fresh = self.names.next("_rep_");
+                        names.push((name.clone(), fresh.clone()));
+                        edge.target.variable = Some(fresh);
+                    }
+                } else {
+                    let target = if repetition + 1 == count {
+                        last.clone()
+                    } else {
+                        let mut joint = joined_node(&segment.target, &segment.source);
+                        joint.variable = Some(self.names.next("_rep_"));
+                        joint
+                    };
+                    if let (Some(name), Some(column)) = (&segment.target.variable, &target.variable)
+                    {
+                        names.push((name.clone(), column.clone()));
+                    }
+                    source_column.clone_from(&target.variable);
+                    edge.target = target;
+                }
+                edges.push(edge);
+            }
+            repetitions.push(names);
+        }
+        let chain = ast::PathPattern {
+            source: first.clone(),
+            edges,
+            span: None,
+        };
+        (chain, repetitions)
+    }
+
+    /// A quantified path pattern of one edge, `((a)-[e]->(b) WHERE ...){m,n}`
+    /// (G050): a variable-length edge of `m` to `n` hops, whose `WHERE` holds
+    /// for each step (ISO/IEC 39075:2024 16.7), not once for the whole path.
+    /// A condition on the step's edge alone (and outer variables) is the
+    /// edge's own `WHERE`, checked on each edge during the search; one on the
+    /// step's nodes is checked over each step of the path (see
+    /// [`every_step_matches`](crate::query::translators::common::every_step_matches)).
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the parts of the quantified pattern and of its translation"
+    )]
+    fn translate_quantified_edge(
+        &self,
+        path: &ast::PathPattern,
+        (min, max): (u32, Option<u32>),
+        where_clause: Option<&ast::Expression>,
+        anchors: &ast::QuantifiedAnchors,
+        input: Option<LogicalOperator>,
+        path_alias: Option<&str>,
+        path_mode: PathMode,
+    ) -> Result<LogicalOperator> {
+        use crate::query::translators::common::{StepVariables, every_step_matches};
+
+        // The step's variables are the inner pattern's; the path runs from
+        // the first node (the source anchor joined with the step's source) to
+        // the last (the step's target joined with the target anchor).
+        let step = StepVariables {
+            source: path.source.variable.clone(),
+            edge: path.edges[0].variable.clone(),
+            target: path.edges[0].target.variable.clone(),
+        };
+        let mut path = path.clone();
+        if let Some(anchor) = &anchors.source {
+            path.source = joined_node(anchor, &path.source);
+        }
+        let edge = &mut path.edges[0];
+        if let Some(anchor) = &anchors.target {
+            edge.target = joined_node(anchor, &edge.target);
+        }
+        edge.min_hops = Some(min);
+        edge.max_hops = max;
+        let mut step_condition = None;
+        if let Some(where_expr) = where_clause {
+            let condition = self.translate_expression(where_expr)?;
+            let mut read = HashSet::new();
+            collect_expression_variables(&condition, &mut read);
+            let reads = |name: &Option<String>| name.as_ref().is_some_and(|n| read.contains(n));
+            if edge.variable.is_some() && !reads(&step.source) && !reads(&step.target) {
+                edge.where_clause = Some(match edge.where_clause.take() {
+                    Some(own) => ast::Expression::Binary {
+                        left: Box::new(own),
+                        op: ast::BinaryOp::And,
+                        right: Box::new(where_expr.clone()),
+                    },
+                    None => where_expr.clone(),
+                });
+            } else {
+                step_condition = Some(condition);
+            }
+        }
+        let Some(condition) = step_condition else {
+            return self.translate_path_pattern_with_alias(&path, input, path_alias, path_mode);
+        };
+        // The steps are read from the path, which needs a name.
+        let path_alias = path_alias.map_or_else(|| self.names.next("_step_path_"), String::from);
+        let plan =
+            self.translate_path_pattern_with_alias(&path, input, Some(&path_alias), path_mode)?;
+        let predicate = every_step_matches(&path_alias, self.names.next("_step_"), step, condition);
+        Ok(wrap_filter(plan, predicate))
+    }
+
     fn translate_pattern_with_alias(
         &self,
         pattern: &ast::Pattern,
@@ -2097,6 +2732,7 @@ impl GqlTranslator {
                 subpath_var,
                 path_mode: inner_path_mode,
                 where_clause,
+                anchors,
             } => {
                 // G049: Inner path mode overrides the outer path mode if set.
                 let effective_mode = inner_path_mode.as_ref().map_or(path_mode, |m| match m {
@@ -2113,39 +2749,44 @@ impl GqlTranslator {
                 // Quantified path pattern: repeat the inner pattern min..max times.
                 // For now, translate as a variable-length expansion if the inner
                 // pattern is a simple single-edge path.
-                let mut result = match pattern.as_ref() {
-                    ast::Pattern::Path(path) if path.edges.len() == 1 => {
-                        // Single-edge quantified: equivalent to variable-length edge
-                        let mut modified_path = path.clone();
-                        let edge = &mut modified_path.edges[0];
-                        edge.min_hops = Some(*min);
-                        edge.max_hops = *max;
-                        self.translate_path_pattern_with_alias(
-                            &modified_path,
+                match pattern.as_ref() {
+                    ast::Pattern::Path(path) if path.edges.len() == 1 => self
+                        .translate_quantified_edge(
+                            path,
+                            (*min, *max),
+                            where_clause.as_ref(),
+                            anchors,
                             input,
                             effective_alias,
                             effective_mode,
-                        )
-                    }
-                    _ => {
-                        // Multi-edge or complex quantified patterns: translate the
-                        // inner pattern once (future: iterate with backtracking).
-                        self.translate_pattern_with_alias(
+                        ),
+                    ast::Pattern::Path(path) => self.translate_quantified_path(
+                        path,
+                        (*min, *max),
+                        where_clause.as_ref(),
+                        anchors,
+                        input,
+                        effective_alias,
+                        effective_mode,
+                    ),
+                    // A parenthesized union or node: once, as written.
+                    _ if *min == 1 && *max == Some(1) => {
+                        let mut result = self.translate_pattern_with_alias(
                             pattern,
                             input,
                             effective_alias,
                             effective_mode,
-                        )
+                        )?;
+                        if let Some(where_expr) = where_clause {
+                            let filter_expr = self.translate_expression(where_expr)?;
+                            result = wrap_filter(result, filter_expr);
+                        }
+                        Ok(result)
                     }
-                }?;
-
-                // G050: Apply WHERE clause as a filter on the quantified pattern output
-                if let Some(where_expr) = where_clause {
-                    let filter_expr = self.translate_expression(where_expr)?;
-                    result = wrap_filter(result, filter_expr);
+                    _ => Err(Error::from(QueryError::unsupported(
+                        "a quantifier on a union or a lone node pattern is not supported yet",
+                    ))),
                 }
-
-                Ok(result)
             }
             ast::Pattern::Union(patterns) => {
                 // Union of alternative patterns: UNION ALL of each translated pattern
@@ -2485,7 +3126,12 @@ impl GqlTranslator {
                     }
                 }
             }
-            ast::Pattern::Quantified { pattern: inner, .. } => {
+            ast::Pattern::Quantified {
+                pattern: inner,
+                anchors,
+                ..
+            } => {
+                vars.extend(anchors.variables().cloned());
                 Self::collect_pattern_vars_inner(inner, vars);
             }
             ast::Pattern::Union(patterns) | ast::Pattern::MultisetUnion(patterns) => {
@@ -2536,6 +3182,119 @@ struct PathSearch {
 }
 
 use aggregate::contains_aggregate;
+
+/// The repeated part of a quantified path pattern of more than one edge,
+/// with the conditions that name its variables taken out of its elements:
+/// each repetition checks them on its own variables (see
+/// `GqlTranslator::translate_quantified_path`).
+struct Segment {
+    source: ast::NodePattern,
+    edges: Vec<ast::EdgePattern>,
+    target: ast::NodePattern,
+    /// The element `WHERE` clauses, taken out.
+    element_conditions: Vec<ast::Expression>,
+}
+
+impl Segment {
+    fn of(path: &ast::PathPattern) -> Self {
+        let mut element_conditions = Vec::new();
+        let mut take = |condition: &mut Option<ast::Expression>| {
+            if let Some(condition) = condition.take() {
+                element_conditions.push(condition);
+            }
+        };
+        let mut source = path.source.clone();
+        take(&mut source.where_clause);
+        let mut edges = path.edges.clone();
+        for edge in &mut edges {
+            take(&mut edge.where_clause);
+            take(&mut edge.target.where_clause);
+        }
+        let target = edges
+            .last()
+            .map_or_else(|| source.clone(), |edge| edge.target.clone());
+        Self {
+            source,
+            edges,
+            target,
+            element_conditions,
+        }
+    }
+
+    /// The pattern's `WHERE` and the element conditions.
+    fn conditions<'a>(
+        &'a self,
+        where_clause: Option<&'a ast::Expression>,
+    ) -> Vec<&'a ast::Expression> {
+        where_clause
+            .into_iter()
+            .chain(&self.element_conditions)
+            .collect()
+    }
+
+    /// The variables the segment names, in pattern order, each once.
+    fn variables(&self) -> Vec<String> {
+        let mut names: Vec<String> = Vec::new();
+        let elements = std::iter::once(&self.source.variable).chain(
+            self.edges
+                .iter()
+                .flat_map(|edge| [&edge.variable, &edge.target.variable]),
+        );
+        for name in elements.flatten() {
+            if !names.contains(name) {
+                names.push(name.clone());
+            }
+        }
+        names
+    }
+}
+
+/// One node of two juxtaposed node patterns (G047): the variable of the
+/// first that has one, the labels, properties and `WHERE` of both.
+fn joined_node(first: &ast::NodePattern, second: &ast::NodePattern) -> ast::NodePattern {
+    let mut node = first.clone();
+    node.variable = first.variable.clone().or_else(|| second.variable.clone());
+    for label in &second.labels {
+        if !node.labels.contains(label) {
+            node.labels.push(label.clone());
+        }
+    }
+    node.label_expression = match (node.label_expression.take(), &second.label_expression) {
+        (Some(left), Some(right)) => {
+            Some(ast::LabelExpression::Conjunction(vec![left, right.clone()]))
+        }
+        (left, right) => left.or_else(|| right.clone()),
+    };
+    node.properties.extend(second.properties.iter().cloned());
+    node.where_clause = match (node.where_clause.take(), &second.where_clause) {
+        (Some(left), Some(right)) => Some(ast::Expression::Binary {
+            left: Box::new(left),
+            op: ast::BinaryOp::And,
+            right: Box::new(right.clone()),
+        }),
+        (left, right) => left.or_else(|| right.clone()),
+    };
+    node
+}
+
+/// `predicate` with each name of `names` bound to its column, `all(name IN
+/// [column] WHERE ...)` per name: a condition written on one repetition's
+/// variables reads that repetition's columns.
+fn bound_as(names: Vec<(String, String)>, predicate: LogicalExpression) -> LogicalExpression {
+    names
+        .into_iter()
+        .rev()
+        .fold(predicate, |predicate, (name, column)| {
+            LogicalExpression::ListPredicate {
+                kind: crate::query::plan::ListPredicateKind::All,
+                variable: name,
+                list_expr: Box::new(LogicalExpression::List(vec![LogicalExpression::Variable(
+                    column,
+                )])),
+                predicate: Box::new(predicate),
+            }
+        })
+}
 
 #[cfg(test)]
 mod tests {

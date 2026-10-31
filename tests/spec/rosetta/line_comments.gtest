@@ -1,0 +1,33 @@
+# Rosetta: line comments
+#
+# `//` starts a line comment in GQL and in Cypher. `--` is a comment in GQL
+# only: Cypher has no such comment (openCypher comments are `//` and
+# `/* */`), so there it stays an error.
+
+meta:
+  model: lpg
+  section: rosetta
+  title: Line comments
+  dataset: empty
+  requires: [cypher]
+
+tests:
+
+  - name: a_double_slash_comment_works_in_both
+    variants:
+      gql: |
+        // the answer
+        RETURN 1 AS x // trailing
+      cypher: |
+        // the answer
+        RETURN 1 AS x // trailing
+    expect:
+      rows:
+        - [1]
+
+  - name: a_double_dash_comment_is_an_error_in_cypher
+    variants:
+      cypher: "RETURN 1 AS x -- trailing"
+    expect:
+      error: ""
+      gql_status: "42001"

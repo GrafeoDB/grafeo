@@ -34,6 +34,9 @@ pub struct GrafeoTransaction {
     pub(crate) session: parking_lot::Mutex<Option<grafeo_engine::session::Session>>,
     pub(crate) committed: bool,
     pub(crate) rolled_back: bool,
+    /// A commit was tried and failed: the transaction ended without its
+    /// changes, and a rollback has nothing to do.
+    pub(crate) commit_failed: bool,
 }
 
 impl Drop for GrafeoTransaction {

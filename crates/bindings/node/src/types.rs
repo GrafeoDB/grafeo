@@ -12,6 +12,7 @@
 //! | `Date`           | `Timestamp`   | Millisecond precision          |
 //! | `BigInt`         | `Int64/Decimal` | Past 64 bits an exact `Decimal`, past 38 digits an error |
 //! | `Float32Array`   | `Vector`      |                                |
+//! | `Float64Array`   | `Vector`      | Each element the nearest 32-bit float |
 //! | RDF/JS term      | `RdfTerm`     | `{ termType, value, language, datatype, equals }`, as results give it; read by `termType` and `value` |
 
 use std::collections::{BTreeMap, HashMap};
@@ -170,6 +171,17 @@ pub fn js_to_named_value(env: Env, val: Unknown<'_>, what: &str, name: &str) -> 
 
 /// Converts a JavaScript value to a Grafeo Value.
 pub fn js_to_value(env: &Env, val: Unknown<'_>) -> Result<Value> {
+    #![allow(
+        clippy::trivially_copy_pass_by_ref,
+        reason = "napi passes Env by reference to every conversion"
+    )]
+    js_to_value_at(env, val, 0)
+}
+
+/// [`js_to_value`] for a value inside `depth` arrays and objects: one
+/// nested deeper than a stored value is refused before its conversion
+/// recurses further (a deep one would overflow the stack).
+fn js_to_value_at(env: &Env, val: Unknown<'_>, depth: usize) -> Result<Value> {
     #![allow(clippy::trivially_copy_pass_by_ref)] // Env refs are conventional in napi
     let value_type = val.get_type()?;
     match value_type {
@@ -227,7 +239,7 @@ pub fn js_to_value(env: &Env, val: Unknown<'_>) -> Result<Value> {
         ValueType::Object => {
             // SAFETY: type was checked as Object by the match arm, so cast is valid
             let obj: Object<'_> = unsafe { val.cast()? };
-            js_object_to_value(env, &obj)
+            js_object_to_value(env, &obj, depth)
         }
         _ => Err(napi::Error::new(
             napi::Status::InvalidArg,
@@ -236,16 +248,56 @@ pub fn js_to_value(env: &Env, val: Unknown<'_>) -> Result<Value> {
     }
 }
 
-/// Converts a JavaScript object (Array, Buffer, Date, or plain object) to a Grafeo Value.
-fn js_object_to_value(env: &Env, obj: &Object<'_>) -> Result<Value> {
+/// The error of an array or object nested deeper than a stored value.
+fn too_deep() -> napi::Error {
+    napi::Error::new(
+        napi::Status::InvalidArg,
+        format!(
+            "the value nests arrays and objects more than {} levels deep",
+            grafeo_common::storage::MAX_PROPERTY_VALUE_DEPTH
+        ),
+    )
+}
+
+/// Converts a JavaScript object (Array, Buffer, Date, or plain object),
+/// inside `depth` arrays and objects, to a Grafeo Value.
+fn js_object_to_value(env: &Env, obj: &Object<'_>, depth: usize) -> Result<Value> {
     if obj.is_array()? {
+        if depth >= grafeo_common::storage::MAX_PROPERTY_VALUE_DEPTH {
+            return Err(too_deep());
+        }
         let len = obj.get_array_length()?;
         let mut items = Vec::with_capacity(len as usize);
         for i in 0..len {
             let elem: Unknown<'_> = obj.get_element(i)?;
-            items.push(js_to_value(env, elem)?);
+            items.push(js_to_value_at(env, elem, depth + 1)?);
         }
         return Ok(Value::List(items.into()));
+    }
+
+    // A Float32Array or Float64Array is a vector. This comes before the
+    // buffer check: Node-API reports every typed array as a buffer.
+    if obj.is_typedarray()? {
+        // SAFETY: obj.is_typedarray() returned true, and env/obj are valid in this scope
+        let ta: TypedArray<'_> =
+            unsafe { Unknown::from_raw_unchecked(env.raw(), obj.raw()).cast()? };
+        if ta.typed_array_type == TypedArrayType::Float32 {
+            // SAFETY: typed array type was verified as Float32, and env/obj are valid
+            let f32arr: Float32Array =
+                unsafe { Unknown::from_raw_unchecked(env.raw(), obj.raw()).cast()? };
+            return Ok(Value::Vector(f32arr.to_vec().into()));
+        }
+        if ta.typed_array_type == TypedArrayType::Float64 {
+            // SAFETY: typed array type was verified as Float64, and env/obj are valid
+            let f64arr: Float64Array =
+                unsafe { Unknown::from_raw_unchecked(env.raw(), obj.raw()).cast()? };
+            #[allow(
+                clippy::cast_possible_truncation,
+                reason = "a vector holds 32-bit floats: each element is the nearest one, as vector() makes it"
+            )]
+            let elements: Vec<f32> = f64arr.iter().map(|x| *x as f32).collect();
+            return Ok(Value::Vector(elements.into()));
+        }
     }
 
     if obj.is_buffer()? {
@@ -266,19 +318,6 @@ fn js_object_to_value(env: &Env, obj: &Object<'_>) -> Result<Value> {
         return Ok(Value::Timestamp(Timestamp::from_micros(micros)));
     }
 
-    // Check for TypedArray (Float32Array for vectors)
-    if obj.is_typedarray()? {
-        // SAFETY: obj.is_typedarray() returned true, and env/obj are valid in this scope
-        let ta: TypedArray<'_> =
-            unsafe { Unknown::from_raw_unchecked(env.raw(), obj.raw()).cast()? };
-        if ta.typed_array_type == TypedArrayType::Float32 {
-            // SAFETY: typed array type was verified as Float32, and env/obj are valid
-            let f32arr: Float32Array =
-                unsafe { Unknown::from_raw_unchecked(env.raw(), obj.raw()).cast()? };
-            return Ok(Value::Vector(f32arr.to_vec().into()));
-        }
-    }
-
     // An RDF/JS term, as a SPARQL result gives it or another library makes
     // it, is that term.
     if let Some(term) = rdfjs_term(obj)? {
@@ -286,6 +325,9 @@ fn js_object_to_value(env: &Env, obj: &Object<'_>) -> Result<Value> {
     }
 
     // Plain object -> Map
+    if depth >= grafeo_common::storage::MAX_PROPERTY_VALUE_DEPTH {
+        return Err(too_deep());
+    }
     let keys = obj.get_property_names()?;
     let len = keys.get_array_length()?;
     let mut map = BTreeMap::new();
@@ -293,7 +335,10 @@ fn js_object_to_value(env: &Env, obj: &Object<'_>) -> Result<Value> {
         let key: JsString = keys.get_element(i)?;
         let key_str = key.into_utf8()?.into_owned()?;
         let value: Unknown<'_> = obj.get_named_property(&key_str)?;
-        map.insert(PropertyKey::new(key_str), js_to_value(env, value)?);
+        map.insert(
+            PropertyKey::new(key_str),
+            js_to_value_at(env, value, depth + 1)?,
+        );
     }
     // A tagged object (`{ $decimal: "1.50" }` alone, `{ $date: "2024-01-15" }`,
     // ...) is the value it stands for, as in the JSON the other bindings send.

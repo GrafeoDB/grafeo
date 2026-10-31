@@ -15,6 +15,7 @@ use std::sync::Arc;
 
 use grafeo_common::types::{LogicalType, Value};
 
+use super::filter::Predicate;
 use super::parameter_scan::ParameterState;
 use super::{DataChunk, Operator, OperatorResult};
 use crate::execution::chunk::ColumnTypes;
@@ -34,6 +35,9 @@ use crate::execution::vector::ValueVector;
 ///
 /// A row keeps the column types of the rows it combines (and the injected
 /// values those of their outer columns): a node or edge stays one.
+///
+/// With a guard ([`with_guard`](Self::with_guard)), a row the guard rejects
+/// does not run the inner plan at all.
 pub struct ApplyOperator {
     outer: Box<dyn Operator>,
     inner: Box<dyn Operator>,
@@ -43,12 +47,16 @@ pub struct ApplyOperator {
     param_col_indices: Vec<usize>,
     /// What an outer row becomes, given the inner plan's rows for it.
     mode: RowMode,
+    /// The rows the inner plan runs for, and the inner columns of the others.
+    guard: Option<RowGuard>,
     /// Whether the whole outer input is read before the inner plan runs.
     outer_first: bool,
     /// The outer input's chunks, when it is read first.
     outer_chunks: Option<VecDeque<DataChunk>>,
     /// Buffered outer rows waiting to be combined with inner results.
     state: ApplyState,
+    /// Output chunks built and not yet returned, in order.
+    ready: VecDeque<DataChunk>,
 }
 
 /// What the Apply makes of an outer row, given the rows the inner plan
@@ -78,6 +86,14 @@ enum RowMode {
     Unit,
 }
 
+/// Which outer rows run the inner plan (see [`ApplyOperator::with_guard`]).
+struct RowGuard {
+    /// Whether a row runs the inner plan.
+    predicate: Box<dyn Predicate>,
+    /// The inner columns of a row that does not.
+    skipped: Vec<Value>,
+}
+
 enum ApplyState {
     /// Pull next outer chunk, process row-by-row.
     Init,
@@ -104,9 +120,11 @@ impl ApplyOperator {
             param_state: None,
             param_col_indices: Vec::new(),
             mode: RowMode::Join,
+            guard: None,
             outer_first: false,
             outer_chunks: None,
             state: ApplyState::Init,
+            ready: VecDeque::new(),
         }
     }
 
@@ -126,9 +144,11 @@ impl ApplyOperator {
             param_state: Some(param_state),
             param_col_indices,
             mode: RowMode::Join,
+            guard: None,
             outer_first: false,
             outer_chunks: None,
             state: ApplyState::Init,
+            ready: VecDeque::new(),
         }
     }
 
@@ -166,6 +186,20 @@ impl ApplyOperator {
     #[must_use]
     pub fn with_unit(mut self) -> Self {
         self.mode = RowMode::Unit;
+        self
+    }
+
+    /// Runs the inner plan only for the outer rows `predicate` passes: any
+    /// other row comes out once, with `skipped` as its inner columns, as if
+    /// the inner plan had given that one row (a count of 0, a null value).
+    /// For a row that would give the same, this saves the parameters, the
+    /// reset and the run of the inner plan: the per-row cost of an `EXISTS`
+    /// in `(n.active = false AND EXISTS {...}) OR ...` for the rows whose
+    /// other conjunct is false. Applies in the modes that add the inner
+    /// columns (the default and [`with_optional`](Self::with_optional)).
+    #[must_use]
+    pub fn with_guard(mut self, predicate: Box<dyn Predicate>, skipped: Vec<Value>) -> Self {
+        self.guard = Some(RowGuard { predicate, skipped });
         self
     }
 
@@ -253,9 +287,13 @@ impl ApplyOperator {
 
 impl Operator for ApplyOperator {
     fn next(&mut self) -> OperatorResult {
+        if let Some(chunk) = self.ready.pop_front() {
+            return Ok(Some(chunk));
+        }
         if self.outer_first && self.outer_chunks.is_none() {
             let mut chunks = VecDeque::new();
             while let Some(chunk) = self.outer.next()? {
+                crate::execution::deadline::check()?;
                 chunks.push_back(chunk);
             }
             self.outer_chunks = Some(chunks);
@@ -287,75 +325,112 @@ impl Operator for ApplyOperator {
                         let row = selected[*outer_row];
                         let outer_values = Self::extract_row(outer_chunk, row);
 
-                        // Inject outer values into the inner plan's parameter state,
-                        // with the types of the columns they come from
-                        if let Some(ref param_state) = self.param_state {
-                            let injected: Vec<Value> = self
-                                .param_col_indices
-                                .iter()
-                                .map(|&idx| outer_values.get(idx).cloned().unwrap_or(Value::Null))
-                                .collect();
-                            let types: Vec<LogicalType> = self
-                                .param_col_indices
-                                .iter()
-                                .map(|&idx| {
-                                    outer_chunk
-                                        .column(idx)
-                                        .map_or(LogicalType::Any, |col| col.data_type().clone())
-                                })
-                                .collect();
-                            param_state.set_typed_values(injected, types);
-                        }
-
-                        // Reset and run inner plan for this outer row
-                        self.inner.reset();
-
-                        match self.mode {
-                            // EXISTS flag mode: append boolean column, keep all rows
-                            RowMode::ExistsFlag => {
-                                let has_results = self.inner.next()?.is_some();
-                                let mut combined = outer_values;
-                                combined.push(Value::Bool(has_results));
-                                output.push(combined);
+                        // A row the guard rejects gives the skipped values,
+                        // without parameters or a run of the inner plan
+                        let skipped = match &self.guard {
+                            Some(guard)
+                                if matches!(
+                                    self.mode,
+                                    RowMode::Join | RowMode::Optional { .. }
+                                ) && !guard.predicate.evaluate(outer_chunk, row)? =>
+                            {
+                                Some(&guard.skipped)
                             }
-                            // EXISTS mode: check for row existence without
-                            // appending inner columns
-                            RowMode::Exists { keep_matches } => {
-                                let has_results = self.inner.next()?.is_some();
-                                if has_results == keep_matches {
-                                    output.push(outer_values);
+                            _ => None,
+                        };
+                        if let Some(skipped) = skipped {
+                            let mut combined = outer_values;
+                            combined.extend(skipped.iter().cloned());
+                            output.push(combined);
+                        } else {
+                            // Inject outer values into the inner plan's parameter state,
+                            // with the types of the columns they come from
+                            if let Some(ref param_state) = self.param_state {
+                                let injected: Vec<Value> = self
+                                    .param_col_indices
+                                    .iter()
+                                    .map(|&idx| {
+                                        outer_values.get(idx).cloned().unwrap_or(Value::Null)
+                                    })
+                                    .collect();
+                                let types: Vec<LogicalType> = self
+                                    .param_col_indices
+                                    .iter()
+                                    .map(|&idx| {
+                                        outer_chunk
+                                            .column(idx)
+                                            .map_or(LogicalType::Any, |col| col.data_type().clone())
+                                    })
+                                    .collect();
+                                param_state.set_typed_values(injected, types);
+                            }
+
+                            // Reset and run inner plan for this outer row
+                            self.inner.reset();
+
+                            match self.mode {
+                                // EXISTS flag mode: append boolean column, keep all rows
+                                RowMode::ExistsFlag => {
+                                    let has_results = self.inner.next()?.is_some();
+                                    let mut combined = outer_values;
+                                    combined.push(Value::Bool(has_results));
+                                    output.push(combined);
                                 }
-                            }
-                            // Unit mode: run the inner plan to its end for its
-                            // writes, keep the outer row once
-                            RowMode::Unit => {
-                                while self.inner.next()?.is_some() {}
-                                output.push(outer_values);
-                            }
-                            RowMode::Join | RowMode::Optional { .. } => {
-                                let pre_len = output.len();
-                                while let Some(inner_chunk) = self.inner.next()? {
-                                    inner_types.add(&inner_chunk);
-                                    for inner_row in inner_chunk.selected_indices() {
-                                        let inner_values =
-                                            Self::extract_row(&inner_chunk, inner_row);
-                                        let mut combined = outer_values.clone();
-                                        combined.extend(inner_values);
-                                        output.push(combined);
+                                // EXISTS mode: check for row existence without
+                                // appending inner columns
+                                RowMode::Exists { keep_matches } => {
+                                    let has_results = self.inner.next()?.is_some();
+                                    if has_results == keep_matches {
+                                        output.push(outer_values);
                                     }
                                 }
+                                // Unit mode: run the inner plan to its end for its
+                                // writes, keep the outer row once
+                                RowMode::Unit => {
+                                    while self.inner.next()?.is_some() {
+                                        crate::execution::deadline::check()?;
+                                    }
+                                    output.push(outer_values);
+                                }
+                                RowMode::Join | RowMode::Optional { .. } => {
+                                    let pre_len = output.len();
+                                    while let Some(inner_chunk) = self.inner.next()? {
+                                        // Node and edge IDs in one column would
+                                        // lose which is which (a UNION of the
+                                        // two): the rows so far go out first.
+                                        if !output.is_empty() && inner_types.mixes_ids(&inner_chunk)
+                                        {
+                                            let types = Self::output_types(
+                                                self.mode,
+                                                outer_chunk,
+                                                inner_types,
+                                            );
+                                            self.ready.push_back(Self::build_chunk(output, &types));
+                                            output.clear();
+                                            *inner_types = ColumnTypes::default();
+                                        }
+                                        inner_types.add(&inner_chunk);
+                                        for inner_row in inner_chunk.selected_indices() {
+                                            let inner_values =
+                                                Self::extract_row(&inner_chunk, inner_row);
+                                            let mut combined = outer_values.clone();
+                                            combined.extend(inner_values);
+                                            output.push(combined);
+                                        }
+                                    }
 
-                                // OPTIONAL: emit outer row with NULLs when inner
-                                // produced nothing
-                                if let RowMode::Optional { inner_column_count } = self.mode
-                                    && output.len() == pre_len
-                                {
-                                    let mut combined = outer_values;
-                                    combined.extend(std::iter::repeat_n(
-                                        Value::Null,
-                                        inner_column_count,
-                                    ));
-                                    output.push(combined);
+                                    // OPTIONAL: emit outer row with NULLs when inner
+                                    // produced nothing
+                                    if let RowMode::Optional { inner_column_count } = self.mode
+                                        && output.len() == pre_len
+                                    {
+                                        let mut combined = outer_values;
+                                        combined.extend(std::iter::repeat_n(
+                                            Value::Null,
+                                            inner_column_count,
+                                        ));
+                                        output.push(combined);
+                                    }
                                 }
                             }
                         }
@@ -365,9 +440,11 @@ impl Operator for ApplyOperator {
                         // Flush when we have enough rows
                         if output.len() >= 1024 {
                             let types = Self::output_types(self.mode, outer_chunk, inner_types);
-                            let chunk = Self::build_chunk(output, &types);
+                            self.ready.push_back(Self::build_chunk(output, &types));
                             output.clear();
                             *inner_types = ColumnTypes::default();
+                        }
+                        if let Some(chunk) = self.ready.pop_front() {
                             return Ok(Some(chunk));
                         }
                     }
@@ -375,8 +452,10 @@ impl Operator for ApplyOperator {
                     // Finished this outer chunk; flush any remaining output
                     if !output.is_empty() {
                         let types = Self::output_types(self.mode, outer_chunk, inner_types);
-                        let chunk = Self::build_chunk(output, &types);
+                        self.ready.push_back(Self::build_chunk(output, &types));
                         output.clear();
+                    }
+                    if let Some(chunk) = self.ready.pop_front() {
                         self.state = ApplyState::Init;
                         return Ok(Some(chunk));
                     }
@@ -394,6 +473,7 @@ impl Operator for ApplyOperator {
         self.inner.reset();
         self.outer_chunks = None;
         self.state = ApplyState::Init;
+        self.ready.clear();
     }
 
     fn name(&self) -> &'static str {
@@ -712,6 +792,200 @@ mod tests {
             "without unit mode, a row per inner row"
         );
         assert_eq!(written.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    /// Counts the rows it passes on and the times it is reset (once per outer
+    /// row that runs the inner plan).
+    struct RunCounting {
+        input: Box<dyn Operator>,
+        rows: Arc<std::sync::atomic::AtomicI64>,
+        resets: Arc<std::sync::atomic::AtomicI64>,
+    }
+
+    impl Operator for RunCounting {
+        fn next(&mut self) -> OperatorResult {
+            let chunk = self.input.next()?;
+            if let Some(chunk) = &chunk {
+                let rows = i64::try_from(chunk.row_count()).unwrap();
+                self.rows
+                    .fetch_add(rows, std::sync::atomic::Ordering::SeqCst);
+            }
+            Ok(chunk)
+        }
+
+        fn reset(&mut self) {
+            self.resets
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.input.reset();
+        }
+
+        fn name(&self) -> &'static str {
+            "RunCounting"
+        }
+
+        fn into_any(self: Box<Self>) -> Box<dyn std::any::Any + Send> {
+            self
+        }
+    }
+
+    /// A guard that rejects the outer rows whose tag (column 1) is `tag`.
+    struct TagIsNot(i64);
+
+    impl Predicate for TagIsNot {
+        fn evaluate(
+            &self,
+            chunk: &DataChunk,
+            row: usize,
+        ) -> Result<bool, super::super::OperatorError> {
+            Ok(chunk.column(1).and_then(|c| c.get_value(row)) != Some(Value::Int64(self.0)))
+        }
+    }
+
+    /// An Apply over outer rows (a list, a tag): [1, 2] tagged 3, [] tagged
+    /// 19 and null tagged 88. The inner plan unwinds the list. With
+    /// `guard`, the row tagged 3 is rejected and gets `skipped`.
+    fn guarded_apply(
+        optional: bool,
+        guard: bool,
+    ) -> (
+        ApplyOperator,
+        Arc<std::sync::atomic::AtomicI64>,
+        Arc<std::sync::atomic::AtomicI64>,
+    ) {
+        let mut builder = DataChunkBuilder::new(&[LogicalType::Any, LogicalType::Int64]);
+        for (list, tag) in [
+            (Value::from(vec![Value::Int64(1), Value::Int64(2)]), 3),
+            (Value::from(Vec::<Value>::new()), 19),
+            (Value::Null, 88),
+        ] {
+            builder.column_mut(0).unwrap().push_value(list);
+            builder.column_mut(1).unwrap().push_value(Value::Int64(tag));
+            builder.advance_row();
+        }
+        let outer = Box::new(MockOperator {
+            chunks: vec![builder.finish()],
+            position: 0,
+        });
+        let state = Arc::new(ParameterState::new(vec!["list".to_string()]));
+        let unwind = super::super::UnwindOperator::new(
+            Box::new(ParameterScanOperator::new(Arc::clone(&state))),
+            0,
+            "item".to_string(),
+            vec![LogicalType::Any, LogicalType::Any],
+            false,
+            false,
+        );
+        let rows = Arc::new(std::sync::atomic::AtomicI64::new(0));
+        let resets = Arc::new(std::sync::atomic::AtomicI64::new(0));
+        let inner = Box::new(RunCounting {
+            input: Box::new(unwind),
+            rows: Arc::clone(&rows),
+            resets: Arc::clone(&resets),
+        });
+        let mut apply = ApplyOperator::new_correlated(outer, inner, state, vec![0]);
+        if optional {
+            apply = apply.with_optional(2);
+        }
+        if guard {
+            apply = apply.with_guard(
+                Box::new(TagIsNot(3)),
+                vec![Value::from("skipped"), Value::Int64(0)],
+            );
+        }
+        (apply, rows, resets)
+    }
+
+    /// Each output row as (tag, the inner item column).
+    fn tags_and_items(apply: &mut ApplyOperator) -> Vec<(Value, Value)> {
+        let mut out = Vec::new();
+        while let Some(chunk) = apply.next().unwrap() {
+            for row in chunk.selected_indices() {
+                out.push((
+                    chunk
+                        .column(1)
+                        .unwrap()
+                        .get_value(row)
+                        .unwrap_or(Value::Null),
+                    chunk
+                        .column(3)
+                        .unwrap()
+                        .get_value(row)
+                        .unwrap_or(Value::Null),
+                ));
+            }
+        }
+        out
+    }
+
+    /// A row the guard rejects comes out once, with the skipped values as its
+    /// inner columns, and the inner plan does not run for it: no parameters,
+    /// no reset, no rows. The rows the guard passes run as without a guard.
+    #[test]
+    fn a_guard_skips_the_inner_plan_for_the_rows_it_rejects() {
+        let (mut plain, plain_rows, _) = guarded_apply(false, false);
+        assert_eq!(
+            tags_and_items(&mut plain),
+            [
+                (Value::Int64(3), Value::Int64(1)),
+                (Value::Int64(3), Value::Int64(2)),
+            ],
+            "control: without a guard the row tagged 3 runs, the others give no rows"
+        );
+        assert_eq!(plain_rows.load(std::sync::atomic::Ordering::SeqCst), 2);
+
+        let (mut guarded, rows, resets) = guarded_apply(false, true);
+        assert_eq!(
+            tags_and_items(&mut guarded),
+            [(Value::Int64(3), Value::Int64(0))],
+            "the rejected row once, with the skipped values; the others give no rows"
+        );
+        assert_eq!(
+            rows.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "no inner rows"
+        );
+        assert!(
+            resets.load(std::sync::atomic::Ordering::SeqCst) <= 2,
+            "at most one reset per row the guard passes"
+        );
+        let skipped_rows = |apply: &mut ApplyOperator| {
+            let mut texts = Vec::new();
+            while let Some(chunk) = apply.next().unwrap() {
+                for row in chunk.selected_indices() {
+                    texts.push(chunk.column(2).unwrap().get_value(row));
+                }
+            }
+            texts
+        };
+        let (mut again, _, _) = guarded_apply(false, true);
+        assert_eq!(skipped_rows(&mut again), [Some(Value::from("skipped"))]);
+    }
+
+    /// In optional mode a passed row without inner rows gets nulls, and the
+    /// rejected row its skipped values.
+    #[test]
+    fn a_guard_in_optional_mode() {
+        let (mut guarded, rows, _) = guarded_apply(true, true);
+        assert_eq!(
+            tags_and_items(&mut guarded),
+            [
+                (Value::Int64(3), Value::Int64(0)),
+                (Value::Int64(19), Value::Null),
+                (Value::Int64(88), Value::Null),
+            ]
+        );
+        assert_eq!(rows.load(std::sync::atomic::Ordering::SeqCst), 0);
+        let (mut plain, _, _) = guarded_apply(true, false);
+        assert_eq!(
+            tags_and_items(&mut plain),
+            [
+                (Value::Int64(3), Value::Int64(1)),
+                (Value::Int64(3), Value::Int64(2)),
+                (Value::Int64(19), Value::Null),
+                (Value::Int64(88), Value::Null),
+            ],
+            "control: without a guard"
+        );
     }
 
     /// Rows without columns (the one empty row a query starts from) come out

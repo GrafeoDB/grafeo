@@ -280,6 +280,32 @@ impl PyGraphHandle {
         direct::upsert_summary(py, &summary)
     }
 
+    /// Updates existing nodes of this graph, one per row, matched by `key`
+    /// and all of `labels`; creates nothing (see `GrafeoDB.update_nodes`).
+    ///
+    /// Returns:
+    ///     dict with `updated`, `skipped` and `skipped_rows`.
+    ///
+    /// Example:
+    ///     graph.update_nodes(["Graph", "File"], [{"id": "f1", "size": 4}])
+    #[pyo3(signature = (labels, rows, key="id"))]
+    fn update_nodes<'py>(
+        &self,
+        py: Python<'py>,
+        labels: Vec<String>,
+        rows: &Bound<'_, PyList>,
+        key: &str,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let labels: Vec<&str> = labels.iter().map(String::as_str).collect();
+        let rows = direct::properties_list(rows)?;
+        let summary = self.graph_released(py, |graph| {
+            Ok(direct::DirectTarget::update_nodes(
+                graph, &labels, key, rows,
+            )?)
+        })?;
+        direct::update_summary(py, &summary)
+    }
+
     /// Creates or updates one edge of `edge_type` per row between existing
     /// nodes, in one statement.
     ///

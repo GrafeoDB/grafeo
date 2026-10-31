@@ -13,7 +13,7 @@ use std::cell::RefCell;
     test
 ))]
 use std::collections::HashSet;
-#[cfg(any(feature = "graphql", feature = "gremlin", feature = "sql-pgq", test))]
+#[cfg(any(feature = "graphql", feature = "gremlin", test))]
 use std::sync::atomic::{AtomicU32, Ordering};
 
 #[cfg(any(feature = "gql", feature = "cypher", feature = "sql-pgq", test))]
@@ -377,6 +377,7 @@ pub(crate) fn with_imports(
 /// its value before planning, which renames its column after the value
 /// (`3`, not `$x`), so a reference by name would no longer find it; the value
 /// is the same on every row of the group, so reading it again is the key.
+#[cfg(feature = "gql")]
 pub(crate) fn group_key_reference(key: &LogicalExpression) -> LogicalExpression {
     match key {
         LogicalExpression::Parameter(_) => key.clone(),
@@ -616,12 +617,12 @@ pub(crate) fn capitalize_first(s: &str) -> String {
 ///
 /// Replaces the duplicated `var_counter: AtomicU32` + `next_var()` pattern
 /// used across multiple translators.
-#[cfg(any(feature = "graphql", feature = "gremlin", feature = "sql-pgq", test))]
+#[cfg(any(feature = "graphql", feature = "gremlin", test))]
 pub(crate) struct VarGen {
     counter: AtomicU32,
 }
 
-#[cfg(any(feature = "graphql", feature = "gremlin", feature = "sql-pgq", test))]
+#[cfg(any(feature = "graphql", feature = "gremlin", test))]
 impl VarGen {
     /// Creates a new variable generator starting from 0.
     pub fn new() -> Self {
@@ -995,17 +996,98 @@ pub(crate) fn every_edge_matches(
     }
 }
 
+/// The variables of one step of a single-edge quantified path pattern
+/// `((source)-[edge]->(target) WHERE ...){m,n}`, each the name the pattern
+/// gives it (`None` for an anonymous element).
+#[cfg(any(feature = "gql", test))]
+pub(crate) struct StepVariables {
+    pub(crate) source: Option<String>,
+    pub(crate) edge: Option<String>,
+    pub(crate) target: Option<String>,
+}
+
+/// `predicate` for every step of `path`, the path of a single-edge quantified
+/// path pattern whose `WHERE` it is: inside the pattern its variables are one
+/// step's (ISO/IEC 39075:2024 16.7), so step `index` binds the source to node
+/// `index` of the path, the edge to its edge `index` and the target to node
+/// `index + 1`, in the order the path is walked, which holds for every
+/// direction. A path of no step meets it.
+#[cfg(any(feature = "gql", test))]
+pub(crate) fn every_step_matches(
+    path: &str,
+    index: String,
+    step: StepVariables,
+    predicate: LogicalExpression,
+) -> LogicalExpression {
+    let element = |list: BuiltinFunction, offset: i64| {
+        let position = LogicalExpression::Variable(index.clone());
+        let position = if offset == 0 {
+            position
+        } else {
+            LogicalExpression::Binary {
+                left: Box::new(position),
+                op: BinaryOp::Add,
+                right: Box::new(LogicalExpression::Literal(Value::Int64(offset))),
+            }
+        };
+        LogicalExpression::List(vec![LogicalExpression::IndexAccess {
+            base: Box::new(LogicalExpression::builtin(
+                list,
+                vec![LogicalExpression::Variable(path.to_string())],
+            )),
+            index: Box::new(position),
+        }])
+    };
+    let mut predicate = predicate;
+    for (variable, list, offset) in [
+        (step.target, BuiltinFunction::Nodes, 1),
+        (step.edge, BuiltinFunction::Edges, 0),
+        (step.source, BuiltinFunction::Nodes, 0),
+    ] {
+        if let Some(variable) = variable {
+            // One element bound under the step's name.
+            predicate = LogicalExpression::ListPredicate {
+                kind: crate::query::plan::ListPredicateKind::All,
+                variable,
+                list_expr: Box::new(element(list, offset)),
+                predicate: Box::new(predicate),
+            };
+        }
+    }
+    let last_step = LogicalExpression::Binary {
+        left: Box::new(LogicalExpression::builtin(
+            BuiltinFunction::Size,
+            vec![LogicalExpression::builtin(
+                BuiltinFunction::Edges,
+                vec![LogicalExpression::Variable(path.to_string())],
+            )],
+        )),
+        op: BinaryOp::Sub,
+        right: Box::new(LogicalExpression::Literal(Value::Int64(1))),
+    };
+    LogicalExpression::ListPredicate {
+        kind: crate::query::plan::ListPredicateKind::All,
+        variable: index,
+        list_expr: Box::new(LogicalExpression::builtin(
+            BuiltinFunction::Range,
+            vec![LogicalExpression::Literal(Value::Int64(0)), last_step],
+        )),
+        predicate: Box::new(predicate),
+    }
+}
+
 /// Dotted access `base.key` into a map value (`n.meta.route`), or into a node
 /// or edge that is not a pattern variable (`startNode(r).name`,
 /// `head(rs).w`, `x.msg.id` of `{msg: m}`), for the GQL and Cypher
-/// translators.
+/// translators. Aggregate bases such as `head(collect(n)).name` and
+/// `collect(n)[0].name` are supported after the translator extracts the
+/// aggregate and replaces it with a reference to its result.
 ///
 /// # Errors
 ///
-/// Returns an error when `base` can be neither a map nor a node or edge (a
-/// number, a string), or reads an aggregate (`head(collect(n)).name`, whose
-/// aggregate the translators do not take out of a key read), so the read
-/// would give null without saying why.
+/// Returns an error when `base` cannot be a map, a node or an edge (for
+/// example, a number or a string), or still contains an unresolved aggregate.
+/// These bases cannot be evaluated as a property read at this stage.
 #[cfg(any(feature = "gql", feature = "cypher", feature = "sql-pgq", test))]
 pub(crate) fn map_access(base: LogicalExpression, key: &str) -> Result<LogicalExpression> {
     if calls_an_aggregate(&base) {
@@ -1269,17 +1351,15 @@ fn split_conjuncts_recursive(expr: LogicalExpression, out: &mut Vec<LogicalExpre
 /// the join condition.
 #[cfg(any(feature = "gql", feature = "cypher", test))]
 pub(crate) struct ClassifiedPredicates {
-    /// Conjuncts with an `EXISTS`, `COUNT` or value subquery or a pattern
-    /// comprehension that read no variable only the optional side binds (see
-    /// [`classify_optional_predicates`]): a Filter above the LeftJoin.
-    pub post_filters: Vec<LogicalExpression>,
     /// Conjuncts that read no variable only the left side binds (the optional
     /// side's own variables, the variables both sides share, or none): a
     /// filter on the right input of the LeftJoin.
     pub right_filters: Vec<LogicalExpression>,
-    /// Conjuncts that read a variable only the left side binds: conditions
-    /// of the LeftJoin, which reads the joined row (a left row none of whose
-    /// pairs pass them keeps nulls).
+    /// Conjuncts that read a variable only the left side binds, and those
+    /// with a subquery whose reads are not known here: conditions of the
+    /// LeftJoin, which decide the matches of each left row before a row
+    /// without one keeps nulls (one with a subquery runs per left row, see
+    /// `Planner::plan_left_join`).
     pub cross_filters: Vec<LogicalExpression>,
 }
 
@@ -1288,12 +1368,14 @@ pub(crate) struct ClassifiedPredicates {
 /// goes on from, `right_vars` those of its pattern (see
 /// [`ClassifiedPredicates`]).
 ///
-/// A conjunct with a subquery or pattern comprehension keeps the placement it
-/// had before: [`collect_expression_variables`] does not see what the
-/// subquery reads, so it cannot be placed by its variables, and the join
-/// condition cannot run a subquery. One that reads a variable only the
-/// optional side binds is a right filter, any other one stays a filter above
-/// the join.
+/// A conjunct with a subquery is placed by what its subqueries read too
+/// (see [`subquery_reads`]): one that reads no variable only the left side
+/// binds is a filter on the optional side, like any other such conjunct
+/// (`OPTIONAL MATCH (n)-[:R]->(t) WHERE n.id = 6 OR EXISTS { MATCH
+/// (n)-[:R]->(u) }` keeps every `n`, with nulls where none matches), which
+/// runs once over the optional side's rows. Any other one (it reads a left
+/// variable, or what it reads is not known) is a condition of the join,
+/// which the planner runs per left row. No conjunct filters above the join.
 #[cfg(any(feature = "gql", feature = "cypher", test))]
 pub(crate) fn classify_optional_predicates(
     predicate: LogicalExpression,
@@ -1301,7 +1383,6 @@ pub(crate) fn classify_optional_predicates(
     right_vars: &HashSet<String>,
 ) -> ClassifiedPredicates {
     let conjuncts = split_conjuncts(predicate);
-    let mut post_filters = Vec::new();
     let mut right_filters = Vec::new();
     let mut cross_filters = Vec::new();
 
@@ -1309,25 +1390,22 @@ pub(crate) fn classify_optional_predicates(
         let mut referenced = HashSet::new();
         collect_expression_variables(&conjunct, &mut referenced);
 
-        let has_right_only_var = referenced
-            .iter()
-            .any(|v| right_vars.contains(v) && !left_vars.contains(v));
         let has_left_only_var = referenced
             .iter()
             .any(|v| left_vars.contains(v) && !right_vars.contains(v));
 
-        if has_subquery(&conjunct) {
-            let all_in_right = referenced.iter().all(|v| right_vars.contains(v));
-            if has_right_only_var && all_in_right {
-                right_filters.push(conjunct);
-            } else if has_left_only_var && has_right_only_var {
-                cross_filters.push(conjunct);
-            } else {
-                post_filters.push(conjunct);
-            }
-        } else if has_left_only_var {
+        if has_subquery(&conjunct)
+            && let Some(read) = subquery_reads(&conjunct)
+            && !referenced
+                .iter()
+                .chain(&read)
+                .any(|v| left_vars.contains(v) && !right_vars.contains(v))
+        {
+            right_filters.push(conjunct);
+        } else if has_subquery(&conjunct) || has_left_only_var {
             // `p.id IN xs`, `forum.id = x`, `x = 3`: the joined row has the
-            // left side's value
+            // left side's value. A subquery that may read it runs on the
+            // joined row too, inside the optional match.
             cross_filters.push(conjunct);
         } else {
             // `p.name = 'Gus'`, a condition on a variable both sides share
@@ -1338,84 +1416,43 @@ pub(crate) fn classify_optional_predicates(
     }
 
     ClassifiedPredicates {
-        post_filters,
         right_filters,
         cross_filters,
     }
 }
 
-/// Whether `expr` has an `EXISTS`, `COUNT` or value subquery or a pattern
-/// comprehension, whose plan may read variables of the row that
-/// [`collect_expression_variables`] does not list.
+/// The variables the `EXISTS`, `COUNT` and `VALUE` subqueries of
+/// `expression` name (see `subplan_variables`), or `None` when one names
+/// what is not known here or `expression` holds another kind (a pattern
+/// comprehension, a subquery inside a list comprehension).
 #[cfg(any(feature = "gql", feature = "cypher", test))]
-fn has_subquery(expr: &LogicalExpression) -> bool {
-    match expr {
-        LogicalExpression::ExistsSubquery(_)
-        | LogicalExpression::CountSubquery(_)
-        | LogicalExpression::ValueSubquery(_)
-        | LogicalExpression::PatternComprehension { .. } => true,
-        LogicalExpression::Literal(_)
-        | LogicalExpression::Variable(_)
-        | LogicalExpression::Property { .. }
-        | LogicalExpression::Parameter(_)
-        | LogicalExpression::Labels(_)
-        | LogicalExpression::Type(_)
-        | LogicalExpression::Id(_) => false,
-        LogicalExpression::Binary { left, right, .. } => has_subquery(left) || has_subquery(right),
-        LogicalExpression::Unary { operand, .. } => has_subquery(operand),
-        LogicalExpression::FunctionCall { args: items, .. }
-        | LogicalExpression::SparqlCall { args: items, .. }
-        | LogicalExpression::List(items) => {
-            items.iter().any(has_subquery)
+fn subquery_reads(expression: &LogicalExpression) -> Option<HashSet<String>> {
+    let mut rest = expression.clone();
+    let mut read = Some(HashSet::new());
+    let _ = crate::query::planner::lpg::subquery::visit_subqueries(&mut rest, &mut |subquery| {
+        if let LogicalExpression::ExistsSubquery(plan)
+        | LogicalExpression::CountSubquery(plan)
+        | LogicalExpression::ValueSubquery(plan) = subquery
+        {
+            match (
+                read.as_mut(),
+                crate::query::planner::lpg::subquery::subplan_variables(plan),
+            ) {
+                (Some(read), Some(names)) => read.extend(names),
+                _ => read = None,
+            }
         }
-        LogicalExpression::Map(pairs) => pairs.iter().any(|(_, value)| has_subquery(value)),
-        LogicalExpression::IndexAccess { base, index } => has_subquery(base) || has_subquery(index),
-        LogicalExpression::MapAccess { base, .. } => has_subquery(base),
-        LogicalExpression::SliceAccess { base, start, end } => {
-            has_subquery(base)
-                || start.as_deref().is_some_and(has_subquery)
-                || end.as_deref().is_some_and(has_subquery)
-        }
-        LogicalExpression::Case {
-            operand,
-            when_clauses,
-            else_clause,
-        } => {
-            operand.as_deref().is_some_and(has_subquery)
-                || when_clauses
-                    .iter()
-                    .any(|(condition, result)| has_subquery(condition) || has_subquery(result))
-                || else_clause.as_deref().is_some_and(has_subquery)
-        }
-        LogicalExpression::ListComprehension {
-            list_expr,
-            filter_expr,
-            map_expr,
-            ..
-        } => {
-            has_subquery(list_expr)
-                || filter_expr.as_deref().is_some_and(has_subquery)
-                || has_subquery(map_expr)
-        }
-        LogicalExpression::ListPredicate {
-            list_expr,
-            predicate,
-            ..
-        } => has_subquery(list_expr) || has_subquery(predicate),
-        LogicalExpression::MapProjection { entries, .. } => entries.iter().any(|entry| {
-            matches!(
-                entry,
-                crate::query::plan::MapProjectionEntry::LiteralEntry(_, value) if has_subquery(value)
-            )
-        }),
-        LogicalExpression::Reduce {
-            initial,
-            list,
-            expression,
-            ..
-        } => has_subquery(initial) || has_subquery(list) || has_subquery(expression),
+        *subquery = LogicalExpression::Literal(Value::Null);
+        Ok(())
+    });
+    if has_subquery(&rest) {
+        return None;
     }
+    read
 }
+
+#[cfg(any(feature = "gql", feature = "cypher", test))]
+pub(crate) use crate::query::plan::has_subquery;
 
 /// Collects all variables produced by a logical operator's subtree.
 #[cfg(any(feature = "gql", feature = "cypher", test))]
@@ -1763,16 +1800,16 @@ fn join_conjuncts(conjuncts: Vec<LogicalExpression>) -> Option<LogicalExpression
 /// 2. Classifies the conjuncts (see [`classify_optional_predicates`])
 /// 3. Pushes those that read no left-only variable as a Filter on the right
 ///    input
-/// 4. Adds those that read a left-only variable to `LeftJoinOp.condition`,
-///    which decides which pairs of rows are matches (a left row without one
-///    keeps nulls)
-/// 5. Returns the LeftJoin and any remaining post-filters to apply above
+/// 4. Adds the others (a left-only variable, a subquery whose reads are not
+///    known) to `LeftJoinOp.condition`, which decides which pairs of rows
+///    are matches (a left row without one keeps nulls); no WHERE conjunct
+///    filters above the join
 #[cfg(any(feature = "gql", feature = "cypher", test))]
 pub(crate) fn build_left_join_with_predicates(
     left_join: LeftJoinOp,
     predicate: Option<LogicalExpression>,
     imports: Option<&HashSet<String>>,
-) -> (LogicalOperator, Option<LogicalExpression>) {
+) -> LogicalOperator {
     let LeftJoinOp {
         left,
         right,
@@ -1780,12 +1817,11 @@ pub(crate) fn build_left_join_with_predicates(
     } = left_join;
     let (left, right) = (*left, *right);
     let Some(predicate) = predicate else {
-        let join = LogicalOperator::LeftJoin(LeftJoinOp {
+        return LogicalOperator::LeftJoin(LeftJoinOp {
             left: Box::new(left),
             right: Box::new(right),
             condition,
         });
-        return (join, None);
     };
 
     // Collect variables from each side
@@ -1813,16 +1849,11 @@ pub(crate) fn build_left_join_with_predicates(
             .collect(),
     );
 
-    let join = LogicalOperator::LeftJoin(LeftJoinOp {
+    LogicalOperator::LeftJoin(LeftJoinOp {
         left: Box::new(left),
         right: Box::new(filtered_right),
         condition: cross_condition,
-    });
-
-    // Combine remaining post-filters
-    let post_filter = LogicalExpression::conjunction(classified.post_filters);
-
-    (join, post_filter)
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -2174,6 +2205,57 @@ pub(crate) fn wrap_return(
 #[cfg(any(feature = "gql", feature = "cypher", test))]
 pub(crate) fn no_result(input: LogicalOperator) -> LogicalOperator {
     wrap_return(input, Vec::new(), false)
+}
+
+/// The `hasLabel` predicate of a label expression on `variable`: `A|B` any
+/// of them, `A&B` all, `!A` not, `%` any label (ISO/IEC 39075:2024 16.8, and
+/// the label expressions of SQL/PGQ, which reads GQL's element patterns).
+#[cfg(any(feature = "gql", feature = "sql-pgq"))]
+pub(crate) fn label_expression_predicate(
+    variable: &str,
+    expr: &grafeo_adapters::query::gql::ast::LabelExpression,
+) -> LogicalExpression {
+    use grafeo_adapters::query::gql::ast::LabelExpression;
+    match expr {
+        LabelExpression::Label(name) => LogicalExpression::builtin(
+            crate::query::plan::BuiltinFunction::HasLabel,
+            vec![
+                LogicalExpression::Variable(variable.to_string()),
+                LogicalExpression::Literal(grafeo_common::types::Value::from(name.as_str())),
+            ],
+        ),
+        LabelExpression::Conjunction(operands) => LogicalExpression::conjunction(
+            operands
+                .iter()
+                .map(|operand| label_expression_predicate(variable, operand)),
+        )
+        .expect("conjunction has at least one operand"),
+        LabelExpression::Disjunction(operands) => LogicalExpression::disjunction(
+            operands
+                .iter()
+                .map(|operand| label_expression_predicate(variable, operand)),
+        )
+        .expect("disjunction has at least one operand"),
+        LabelExpression::Negation(inner) => LogicalExpression::Unary {
+            op: crate::query::plan::UnaryOp::Not,
+            operand: Box::new(label_expression_predicate(variable, inner)),
+        },
+        // Any label: true for an element with at least one, so an unlabeled
+        // node does not match `(n:%)`.
+        LabelExpression::Wildcard => LogicalExpression::Binary {
+            left: Box::new(LogicalExpression::builtin(
+                crate::query::plan::BuiltinFunction::Size,
+                vec![LogicalExpression::builtin(
+                    crate::query::plan::BuiltinFunction::Labels,
+                    vec![LogicalExpression::Variable(variable.to_string())],
+                )],
+            )),
+            op: crate::query::plan::BinaryOp::Gt,
+            right: Box::new(LogicalExpression::Literal(
+                grafeo_common::types::Value::Int64(0),
+            )),
+        },
+    }
 }
 
 #[cfg(test)]
@@ -2679,7 +2761,6 @@ mod tests {
             1,
             "left-only should be a join condition"
         );
-        assert!(result.post_filters.is_empty());
         assert!(result.right_filters.is_empty());
     }
 
@@ -2700,7 +2781,6 @@ mod tests {
 
         let result = classify_optional_predicates(combined, &left_vars, &right_vars);
         assert_eq!(result.right_filters.len(), 2, "both filter the matches");
-        assert!(result.post_filters.is_empty());
         assert!(result.cross_filters.is_empty());
     }
 
@@ -2714,7 +2794,6 @@ mod tests {
         };
 
         let result = classify_optional_predicates(pred, &left_vars, &right_vars);
-        assert!(result.post_filters.is_empty());
         assert_eq!(
             result.right_filters.len(),
             1,
@@ -2742,7 +2821,6 @@ mod tests {
         };
 
         let result = classify_optional_predicates(pred, &left_vars, &right_vars);
-        assert!(result.post_filters.is_empty());
         assert_eq!(
             result.right_filters.len(),
             1,
@@ -2752,7 +2830,7 @@ mod tests {
 
     #[test]
     fn classify_mixed_and_predicate() {
-        // n.active AND m.age > 30 should split into post-filter and right-filter
+        // Both n.active and m.age read the optional side's variables.
         let left_vars: HashSet<String> = ["n".into()].into_iter().collect();
         let right_vars: HashSet<String> = ["n".into(), "m".into()].into_iter().collect();
 
@@ -2776,18 +2854,8 @@ mod tests {
 
         let result = classify_optional_predicates(combined, &left_vars, &right_vars);
 
-        // n.active -> n is in both left and right, so all_in_right = true
-        // It should be classified as right_filter since n is available on right side.
-        // Actually n.active references only n, which IS in right_vars too.
-        // So both predicates should be right_filters.
-        // BUT we also need to check: n.active only references n, which is in left_vars.
-        // Since n is in BOTH sets, all_in_left AND all_in_right are true.
-        // The logic checks all_in_right FIRST, so it goes to right_filters.
-        assert_eq!(
-            result.right_filters.len() + result.post_filters.len(),
-            2,
-            "two conjuncts should be classified"
-        );
+        assert_eq!(result.right_filters.len(), 2, "both filter the matches");
+        assert!(result.cross_filters.is_empty());
     }
 
     // --- collect_expression_variables ---

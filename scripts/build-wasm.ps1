@@ -22,7 +22,7 @@ $ErrorActionPreference = "Stop"
 
 $CrateDir = "crates\bindings\wasm"
 if (-not $OutDir) { $OutDir = "$CrateDir\pkg" }
-$Profile = if ($Release) { "release" } else { "minimal-size" }
+$Profile = if ($Release) { "release" } else { "wasm" }
 
 Write-Host "Building WASM (profile: $Profile, target: $Target)"
 
@@ -37,7 +37,8 @@ Write-Host "  cargo build..."
 if ($LASTEXITCODE -ne 0) { throw "Cargo build failed" }
 
 # Determine output path
-$WasmFile = "target\wasm32-unknown-unknown\$Profile\grafeo_wasm.wasm"
+$TargetDir = if ($env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR } else { "target" }
+$WasmFile = "$TargetDir\wasm32-unknown-unknown\$Profile\grafeo_wasm.wasm"
 if (-not (Test-Path $WasmFile)) {
     throw "Error: $WasmFile not found"
 }

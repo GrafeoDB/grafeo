@@ -60,6 +60,8 @@ WHERE { ex:alix foaf:name ?name }
 Literals represent data values:
 
 ```sparql
+PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+
 # Plain literal
 SELECT ?person
 WHERE { ?person foaf:name "Alix" }
@@ -69,6 +71,7 @@ SELECT ?label
 WHERE { ?x rdfs:label ?label FILTER(LANG(?label) = "en") }
 
 # Typed literal
+PREFIX foaf: <http://xmlns.com/foaf/0.1/>
 SELECT ?person
 WHERE { ?person foaf:age "30"^^xsd:integer }
 ```
@@ -88,6 +91,15 @@ WHERE {
 ```
 
 Results include people without email addresses (with `?email` unbound).
+
+A `FILTER` at the top of the `OPTIONAL` group decides which matches extend a row, and reads the row and the match
+together, as SPARQL 1.1 defines it: in `OPTIONAL { ?person ex:age ?age FILTER(?age > ?min) }`, `?min` can come from
+before the `OPTIONAL`. A `FILTER` in a group nested inside the `OPTIONAL` reads that group alone. A group that opens
+with `OPTIONAL` keeps one empty row when nothing matches.
+
+A variable that an `OPTIONAL`, or one branch of a `UNION`, leaves unbound joins with any value of a later pattern
+(SPARQL 1.1 compatible solutions): in `?s :name ?n OPTIONAL { ?s :city ?c } ?b :label ?c`, a person without a city
+is joined with every label.
 
 ## UNION Patterns
 
@@ -121,6 +133,9 @@ WHERE {
 }
 ```
 
+A group that holds only a `MINUS`, `{ MINUS { ... } }`, is one empty solution, as SPARQL 1.1 defines it, so a
+`DELETE ... WHERE` over it deletes nothing.
+
 ## Graph Patterns
 
 Query specific named graphs:
@@ -137,6 +152,7 @@ WHERE {
 }
 
 # Query with graph variable
+PREFIX foaf: <http://xmlns.com/foaf/0.1/>
 SELECT ?g ?name
 WHERE {
     GRAPH ?g {
@@ -144,6 +160,10 @@ WHERE {
     }
 }
 ```
+
+`GRAPH ?g { ... }` evaluates its pattern once per named graph (the ones `FROM NAMED` lists, if any), as SPARQL 1.1
+does, so `SELECT ?g WHERE { GRAPH ?g { } }` lists the named graphs. Inside it, a `MINUS` that shares only `?g` with
+the rows removes nothing.
 
 ## Nested Patterns
 
@@ -175,6 +195,9 @@ WHERE {
     BIND(UCASE(?name) AS ?upperName)
 }
 ```
+
+`BIND` to a variable already in scope in its group, such as `{ ?s :p ?o BIND(1 AS ?o) }`, is a syntax error that
+names the variable, as SPARQL 1.1 requires, also in the `WHERE` of an update.
 
 ## VALUES
 

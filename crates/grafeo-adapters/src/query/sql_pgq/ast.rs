@@ -8,9 +8,9 @@ use grafeo_common::utils::error::SourceSpan;
 
 // Re-use GQL pattern and expression types for the inner MATCH clause
 pub use crate::query::gql::ast::{
-    AliasedPattern, BinaryOp, CallStatement, EdgeDirection, EdgePattern, Expression, Literal,
-    MatchClause, NodePattern, OrderByClause, OrderByItem, PathPattern, Pattern, ReturnClause,
-    ReturnItem, SortOrder as GqlSortOrder, UnaryOp, WhereClause, YieldItem,
+    AliasedPattern, BinaryOp, CallStatement, EdgeDirection, EdgePattern, Expression,
+    LabelExpression, Literal, MatchClause, NodePattern, OrderByClause, OrderByItem, PathPattern,
+    Pattern, ReturnClause, ReturnItem, SortOrder as GqlSortOrder, UnaryOp, WhereClause, YieldItem,
 };
 
 /// A SQL/PGQ statement.
@@ -74,11 +74,20 @@ pub struct SelectStatement {
     /// Optional ORDER BY clause.
     pub order_by: Option<Vec<SortItem>>,
     /// Optional LIMIT.
-    pub limit: Option<u64>,
+    pub limit: Option<RowCount>,
     /// Optional OFFSET.
-    pub offset: Option<u64>,
+    pub offset: Option<RowCount>,
     /// Source span.
     pub span: Option<SourceSpan>,
+}
+
+/// The count of a LIMIT or OFFSET: an integer, or a parameter that holds one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RowCount {
+    /// An integer written in the query.
+    Literal(u64),
+    /// A parameter (`$limit`), read when the query runs.
+    Parameter(String),
 }
 
 /// SELECT list items.

@@ -404,6 +404,234 @@ mod tests {
     }
 
     // ====================================================================
+    // 10.1 - BIND scope: the target must not be in scope (18.2.1)
+    // ====================================================================
+
+    /// The W3C negative syntax tests `syntax-BINDscope6.rq` to `8.rq`, as
+    /// the test suite writes them, with the variable the error names.
+    const W3C_BIND_SCOPE_NEGATIVES: [(&str, &str, &str); 3] = [
+        (
+            "syntax-BINDscope6",
+            "PREFIX : <http://www.example.org>
+             SELECT *
+             WHERE {
+                :s :p ?o .
+                :s :q ?o1 .
+                BIND((1+?o) AS ?o1)
+             }",
+            "?o1",
+        ),
+        (
+            "syntax-BINDscope7",
+            "PREFIX : <http://www.example.org>
+             SELECT *
+             WHERE {
+                {
+                :s :p ?o .
+                :s :q ?o1 .
+                }
+                BIND((1+?o) AS ?o1)
+             }",
+            "?o1",
+        ),
+        (
+            "syntax-BINDscope8",
+            "PREFIX : <http://www.example.org>
+            SELECT *
+              {
+                {
+                   { :s :p ?Y }
+                   UNION
+                   { :s :p ?Z }
+                }
+               BIND (1 AS ?Y)
+             }",
+            "?Y",
+        ),
+    ];
+
+    /// The W3C positive syntax tests `syntax-BINDscope1.rq` to `5.rq`.
+    const W3C_BIND_SCOPE_POSITIVES: [(&str, &str); 5] = [
+        (
+            "syntax-BINDscope1",
+            "PREFIX : <http://www.example.org>
+             SELECT *
+             WHERE {
+                :s :p ?o .
+                BIND((1+?o) AS ?o1)
+                :s :q ?o1
+             }",
+        ),
+        (
+            "syntax-BINDscope2",
+            "PREFIX : <http://www.example.org>
+             SELECT *
+             WHERE {
+                :s :p ?o .
+                :s :q ?o1
+                { BIND((1+?o) AS ?o1) }
+             }",
+        ),
+        (
+            "syntax-BINDscope3",
+            "PREFIX : <http://www.example.org>
+             SELECT *
+             WHERE {
+                {
+                :s :p ?o .
+                :s :q ?o1
+                }
+                { BIND((1+?o) AS ?o1) }
+             }",
+        ),
+        (
+            "syntax-BINDscope4",
+            "PREFIX : <http://www.example.org>
+            SELECT *
+               {
+                { BIND (1 AS ?Y) }
+                 UNION
+                { :s :p ?Y }
+              }",
+        ),
+        (
+            "syntax-BINDscope5",
+            "PREFIX : <http://www.example.org>
+            SELECT *
+               {
+                { :s :p ?Y }
+                 UNION
+                { BIND (1 AS ?Y) }
+               }",
+        ),
+    ];
+
+    /// Collects the cases of `cases` that `sparql::parse` accepts, or refuses
+    /// without naming the variable.
+    fn not_refused(cases: &[(&str, &str, &str)]) -> Vec<String> {
+        cases
+            .iter()
+            .filter_map(|(name, query, variable)| match sparql::parse(query) {
+                Ok(_) => Some(format!("{name}: accepted")),
+                Err(error) if !error.to_string().contains(variable) => Some(format!(
+                    "{name}: refused without naming {variable}: {error}"
+                )),
+                Err(_) => None,
+            })
+            .collect()
+    }
+
+    /// Collects the cases of `cases` that `sparql::parse` refuses.
+    fn not_accepted(cases: &[(&str, &str)]) -> Vec<String> {
+        cases
+            .iter()
+            .filter_map(|(name, query)| {
+                sparql::parse(query)
+                    .err()
+                    .map(|error| format!("{name}: {error}"))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn sec10_1_w3c_bind_scope_negatives_are_refused() {
+        let failures = not_refused(&W3C_BIND_SCOPE_NEGATIVES);
+        assert!(failures.is_empty(), "\n{}", failures.join("\n"));
+    }
+
+    #[test]
+    fn sec10_1_w3c_bind_scope_positives_are_accepted() {
+        let failures = not_accepted(&W3C_BIND_SCOPE_POSITIVES);
+        assert!(failures.is_empty(), "\n{}", failures.join("\n"));
+    }
+
+    /// Every form that puts the target in scope before the BIND, in a query
+    /// and in an update's WHERE (#703).
+    #[test]
+    fn sec10_1_bind_to_a_variable_in_scope_is_refused() {
+        let failures = not_refused(&[
+            (
+                "a triple pattern",
+                "SELECT ?s ?o WHERE { ?s <urn:p> ?o BIND(<urn:z> AS ?o) }",
+                "?o",
+            ),
+            (
+                "VALUES",
+                r#"SELECT ?o WHERE { VALUES ?o { "x" } BIND("y" AS ?o) }"#,
+                "?o",
+            ),
+            (
+                "an OPTIONAL that may bind nothing",
+                r#"SELECT ?o WHERE { ?s <urn:p> ?v OPTIONAL { ?s <urn:q> ?o } BIND("y" AS ?o) }"#,
+                "?o",
+            ),
+            (
+                "an earlier BIND",
+                "SELECT ?x WHERE { BIND(1 AS ?x) BIND(2 AS ?x) }",
+                "?x",
+            ),
+            (
+                "a sub-SELECT that projects it",
+                "SELECT ?n WHERE { { SELECT ?n WHERE { ?s <urn:name> ?n } } BIND(1 AS ?n) }",
+                "?n",
+            ),
+            (
+                "a GRAPH pattern",
+                "SELECT ?o WHERE { GRAPH <urn:g> { ?s <urn:p> ?o } BIND(1 AS ?o) }",
+                "?o",
+            ),
+            (
+                "an INSERT's WHERE",
+                "INSERT { <urn:w> <urn:got> ?o } WHERE { ?s <urn:p> ?o BIND(<urn:z3> AS ?o) }",
+                "?o",
+            ),
+            (
+                "a DELETE's WHERE",
+                "DELETE { ?s <urn:p> ?o } WHERE { ?s <urn:p> ?o BIND(<urn:z3> AS ?o) }",
+                "?o",
+            ),
+        ]);
+        assert!(failures.is_empty(), "\n{}", failures.join("\n"));
+    }
+
+    /// Forms that put nothing in scope, or only in another group: the BIND
+    /// stays legal.
+    #[test]
+    fn sec10_1_bind_of_a_variable_out_of_scope_is_accepted() {
+        let failures = not_accepted(&[
+            (
+                "after a FILTER that mentions it",
+                r#"SELECT ?f WHERE { ?s <urn:p> ?o FILTER(?f = "y") BIND("y" AS ?f) }"#,
+            ),
+            (
+                "after a FILTER EXISTS whose pattern binds it",
+                "SELECT ?x WHERE { ?s <urn:p> ?o FILTER EXISTS { ?s <urn:q> ?x } BIND(1 AS ?x) }",
+            ),
+            (
+                "after a MINUS whose pattern binds it",
+                r#"SELECT ?m WHERE { ?s <urn:p> ?o MINUS { ?s <urn:q> ?m } BIND("y" AS ?m) }"#,
+            ),
+            (
+                "in a nested group, of a variable a later sibling binds",
+                r#"SELECT ?s WHERE { { BIND("y" AS ?n) } ?s <urn:p> ?n }"#,
+            ),
+            (
+                "of a variable a sub-SELECT uses but does not project",
+                r#"SELECT ?w WHERE { { SELECT ?s WHERE { ?s <urn:p> ?w } } BIND("y" AS ?w) }"#,
+            ),
+            (
+                "inside an OPTIONAL, of a variable of the outer group",
+                "SELECT ?o WHERE { ?s <urn:p> ?o OPTIONAL { BIND(1 AS ?o) } }",
+            ),
+            (
+                "before the pattern that binds it",
+                "SELECT ?o WHERE { BIND(1 AS ?o) ?s <urn:p> ?o }",
+            ),
+        ]);
+        assert!(failures.is_empty(), "\n{}", failures.join("\n"));
+    }
+
+    // ====================================================================
     // 11 - Aggregates
     // ====================================================================
 

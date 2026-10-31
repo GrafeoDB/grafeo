@@ -108,6 +108,10 @@ pub use grafeo_engine::cdc;
 pub use grafeo_engine::database;
 #[cfg(feature = "gql")]
 pub use grafeo_engine::import;
+pub use grafeo_engine::loader;
+// Re-export the syntax `GrafeoDB::load_rdf` reads
+#[cfg(feature = "triple-store")]
+pub use grafeo_engine::RdfFormat;
 pub use grafeo_engine::memory_usage;
 pub use grafeo_engine::session;
 

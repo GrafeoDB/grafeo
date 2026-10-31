@@ -132,6 +132,17 @@ let keys = KeyChain::new(*master_key);
 
 An encrypted database writes no spill files: spill files are not encrypted, so it gets no spill path (`<file>.spill/` for other databases), and `Config::validate` refuses an explicit `spill_path`, or a section pinned to `TierOverride::ForceDisk`, together with `encryption`. In 0.6.0 a memory limit therefore cannot move the data of an encrypted database to disk.
 
+### What Encryption Protects Against
+
+Encryption keeps the data confidential: someone who can only read the files (a stolen disk, a copied backup) learns nothing beyond what the table above lists as not encrypted. Each encrypted section and WAL record is also authenticated, so a changed byte in it fails to decrypt instead of being read.
+
+It does not protect against someone who can write the files:
+
+- **Headers**: the file and database headers carry only a checksum, not a keyed signature, so they can be rewritten. A damaged active database header makes Grafeo open the other header slot, the checkpoint before it.
+- **Freshness**: an older copy of the database file and its WAL can be put back, or the WAL cut short, and Grafeo opens it as the current state. A keyed header signature, planned for the 0.7 format revision ([#676](https://github.com/GrafeoDB/grafeo/issues/676)), will stop rewritten headers and switched slots, but not a whole older copy put back: telling that apart needs a reference kept outside the files.
+
+If that matters, keep write access to the files to the database process (see [File System Permissions](#1-file-system-permissions)), and record the epoch the database reached (`current_epoch()`) somewhere the files' attacker cannot write, such as your application's own store or a key management service, to compare after each open.
+
 ### Keys
 
 The key chain derives the keys with HKDF-SHA256, one per database and component: `"grafeo-container"` for the file, with the database id from the file header, and `"grafeo-wal-segment"` for each segment of its WAL, with the database id and the segment's random salt. Two databases configured with the same master key therefore have different keys, and a copy made with `save()` gets a new database id and keys of its own.

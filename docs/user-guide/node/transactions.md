@@ -25,9 +25,9 @@ try {
 }
 ```
 
-## Using `using` (Node.js 22+)
+## Using `using` (Node.js 24+)
 
-With explicit resource management, the transaction auto-rolls back if `commit()` is not called:
+With explicit resource management (Node.js 24+, or TypeScript compiled to an older target), the transaction rolls back at the end of its block if `commit()` is not called:
 
 ```typescript
 {
@@ -45,7 +45,7 @@ With explicit resource management, the transaction auto-rolls back if `commit()`
 const tx = db.beginTransaction();
 
 // Explicit isolation level
-const tx = db.beginTransaction('serializable');
+const tx = db.beginTransaction('read_committed');
 ```
 
 Available levels:
@@ -54,7 +54,7 @@ Available levels:
 | ----- | ----------- |
 | `read_committed` | See committed data from other transactions |
 | `snapshot` (default) | See a consistent snapshot from transaction start |
-| `serializable` | Full serializability, detects write conflicts |
+| `serializable` | Not available yet: refused for now: snapshot isolation is the strongest level until queries record their reads |
 
 ## Query Languages in Transactions
 
@@ -64,7 +64,7 @@ All query languages work inside transactions:
 const tx = db.beginTransaction();
 await tx.execute("INSERT (:Person {name: 'Alix'})");           // GQL
 await tx.executeCypher("CREATE (:Person {name: 'Gus'})");      // Cypher
-await tx.executeSparql("INSERT DATA { :s :p :o }");            // SPARQL
+await tx.executeSparql("PREFIX : <http://example.org/> INSERT DATA { :s :p :o }"); // SPARQL
 await tx.executeGremlin("g.addV('Person').property('name','Harm')"); // Gremlin
 tx.commit();
 ```

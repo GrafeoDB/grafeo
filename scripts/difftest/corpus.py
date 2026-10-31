@@ -159,6 +159,17 @@ def search(grafeo):
     return db
 
 
+def list_embeddings(grafeo):
+    """A 3-dimensional cosine vector index on `Doc.emb`, `Doc` Amsterdam with the vector
+    [0, 0, 1] and `Doc` Lisbon without an `emb` (#587)."""
+    db = grafeo.GrafeoDB()
+    db.execute(
+        "INSERT (:Doc {name: 'Amsterdam', emb: vector([0.0, 0.0, 1.0])}), (:Doc {name: 'Lisbon'})"
+    )
+    db.execute("CREATE VECTOR INDEX doc_emb ON :Doc(emb) DIMENSION 3 METRIC 'cosine'")
+    return db
+
+
 def typed(grafeo):
     """Type DDL and the writes after it: `City` with a node type default (`country`
     'NL'), `ROUTE` between cities with an edge type default (`km` 88), Paris to Prague
@@ -249,6 +260,18 @@ def weighted(grafeo):
     return db
 
 
+def decimal_weights(grafeo):
+    """Three nodes s (0), m (1) and t (2) with edges whose weights, capacities and costs are
+    decimals: s -> m (w 0.25, cap 2.5, cost 0.5), m -> t (w 0.5, cap 4.5, cost 0.25) and
+    s -> t (w 1.0, cap 2.0, cost 3.0). For section DE."""
+    db = grafeo.GrafeoDB()
+    db.execute(
+        "INSERT (s:N)-[:R {w: 0.25, cap: 2.5, cost: 0.5}]->(m:N), "
+        "(m)-[:R {w: 0.5, cap: 4.5, cost: 0.25}]->(t:N), (s)-[:R {w: 1.0, cap: 2.0, cost: 3.0}]->(t)"
+    )
+    return db
+
+
 def leads(grafeo):
     """Node type `Customer (spend FLOAT64)` and two leads with an integer `spend`, for
     section CF, whose cases add the label in order."""
@@ -329,9 +352,61 @@ WRITE_FIXTURES = {
     "merges": {"CC"},
     "leads": {"CF"},
     "quoted": {"CK"},
+    "list_embeddings": {"DH"},
     # CP1 runs after BB and its insert is refused, so BB reads the fixture as built
     "typed": {"BB", "CP"},
 }
+
+
+def codegraph(grafeo):
+    """A code graph for the selector plans: 200 `Graph` nodes (`i` 1 to 200, `zero: 0`);
+    six `Graph:Method` nodes (`i` 1001 to 1006, 1001 to 1004 active with `zero: 1`, 1005
+    and 1006 inactive with `zero: 0`), each with an `R` edge to a `Target` (`i` 1 to 6)
+    and three CALLS edges to `Call` nodes (`k` 1 to 3); four `Graph:File` nodes (`i` 2001
+    to 2004, active but 2004, `zero: 0`) CONTAINing Methods; USES between Methods: 1001 and 1002
+    both ways, 1002 to 1003, 1003 to 1004, 1004 to itself, 1005 to 1001."""
+    db = grafeo.GrafeoDB()
+    db.execute("UNWIND range(1, 200) AS i INSERT (:Graph {i: i, zero: 0, w: 100 + i})")
+    db.execute(
+        "UNWIND range(1, 6) AS k INSERT (:Graph:Method {i: 1000 + k, active: k <= 4, "
+        "zero: CASE WHEN k <= 4 THEN 1 ELSE 0 END, w: 1000 + k})-[:R {w: k}]->(:Target {i: k, w: 300 + k})"
+    )
+    db.execute(
+        "MATCH (n:Method) UNWIND range(1, 3) AS k INSERT (n)-[:CALLS {w: k}]->(:Call {k: k, w: 400 + k})"
+    )
+    db.execute(
+        "UNWIND range(1, 4) AS k INSERT (:Graph:File {i: 2000 + k, active: k <= 3, zero: 0, w: 2000 + k})"
+    )
+    for source, target, edge_type in [
+        (2001, 1001, "CONTAINS"),
+        (2001, 1002, "CONTAINS"),
+        (2002, 1003, "CONTAINS"),
+        (1001, 1002, "USES"),
+        (1002, 1001, "USES"),
+        (1002, 1003, "USES"),
+        (1003, 1004, "USES"),
+        (1004, 1004, "USES"),
+        (1005, 1001, "USES"),
+    ]:
+        db.execute(
+            f"MATCH (a {{i: {source}}}), (b {{i: {target}}}) INSERT (a)-[:{edge_type} {{w: 1}}]->(b)"
+        )
+    return db
+
+
+def unlabeled(grafeo):
+    """Three labeled nodes and one without a label: `Message:Post` (`id` 1),
+    `Message:Comment` (2), `Person` (3) and none (4), `w` 100 to 103; the person KNOWS the
+    post and LIKES the unlabeled node."""
+    db = grafeo.GrafeoDB()
+    db.execute(
+        "INSERT (:Message:Post {id: 1, w: 100}), (:Message:Comment {id: 2, w: 101}), "
+        "(:Person {id: 3, w: 102}), ({id: 4, w: 103})"
+    )
+    db.execute("MATCH (p {id: 3}), (m {id: 1}) INSERT (p)-[:KNOWS {w: 1}]->(m)")
+    db.execute("MATCH (p {id: 3}), (n {id: 4}) INSERT (p)-[:LIKES {w: 2}]->(n)")
+    return db
+
 
 FIXTURES = {
     "rdf": rdf,
@@ -344,6 +419,7 @@ FIXTURES = {
     "labels_indexed": labels_indexed,
     "labels_compacted": labels_compacted,
     "search": search,
+    "list_embeddings": list_embeddings,
     "typed": typed,
     "mixed": mixed,
     "mixed_indexed": mixed_indexed,
@@ -351,9 +427,12 @@ FIXTURES = {
     "loops": loops,
     "merges": merges,
     "weighted": weighted,
+    "decimal_weights": decimal_weights,
     "leads": leads,
     "quoted": quoted,
     "graphs": graphs,
+    "codegraph": codegraph,
+    "unlabeled": unlabeled,
 }
 
 CASES: list[Case] = []
@@ -677,6 +756,8 @@ for case_id, query in [
     ("N9", "MATCH (a:Person)-[r]->() WITH a, count(r) AS n RETURN a.name AS a, a.w AS w, n"),
     ("N10", "MATCH ()-[r:KNOWS]->() WITH r, count(*) AS n RETURN r.w AS w, n"),
     ("N11", "MATCH (c:City) OPTIONAL MATCH (p:Person)-[:LIVES_IN]->(c) RETURN c.name AS c, c.w AS w, p.name AS p"),
+    # An edge from one part of a subquery and a node from the other stay what they are (0.6.0 read the node as an edge)
+    ("N12", "MATCH (a:Person {name: 'Alix'}) CALL { WITH a MATCH (a)-[r:KNOWS]->() RETURN r AS x UNION ALL WITH a MATCH (a)-[:KNOWS]->(b) RETURN b AS x } RETURN x.w AS w"),
 ]:
     case(case_id, query)
 
@@ -2103,5 +2184,218 @@ for case_id, query in [
     ("DD6", "SELECT ?v (LANG(?v) AS ?l) WHERE { ex:a ex:v ?v }"),
 ]:
     case(case_id, RDF_PREFIXES + query, SPARQL, "rdf_writes")
+
+# DE: graph algorithms read decimal weights, capacities and costs (0.6.0 read them as 1.0,
+#     a cost as 0.0): the route through m (DE1), the spanning tree (DE2), the flow (DE3) and
+#     its cost (DE4)
+for case_id, query in [
+    ("DE1", "CALL grafeo.dijkstra({source: 0, weight: 'w'}) YIELD node_id, distance RETURN node_id, distance ORDER BY node_id"),
+    ("DE2", "CALL grafeo.kruskal({weight: 'w'}) YIELD source, target, weight RETURN source, target, weight ORDER BY weight"),
+    ("DE3", "CALL grafeo.max_flow({source: 0, sink: 2, capacity: 'cap'}) YIELD source, target, flow, max_flow RETURN source, target, flow, max_flow ORDER BY source, target"),
+    ("DE4", "CALL grafeo.min_cost_max_flow({source: 0, sink: 2, capacity: 'cap', cost: 'cost'}) YIELD source, target, flow, cost RETURN source, target, flow, cost ORDER BY source, target"),
+]:
+    ordered(case_id, query, GQL, "decimal_weights")
+
+# DF: an aggregate inside another expression aggregates (#539; 0.6.0 refused it or gave a
+#     row per input row): a key read of a collected node (DF1), an index of and a map of a
+#     collect (DF2), an aggregate over a LET variable (DF3); a LET variable inside a list,
+#     a map and CASE reads its value (DF4)
+for case_id, query, languages in [
+    ("DF1", "MATCH (p:Person) WITH p ORDER BY p.name RETURN head(collect(p)).name AS first", BOTH),
+    ("DF2", "MATCH (p:Person) WITH p ORDER BY p.name RETURN collect(p.name)[0] AS first, {names: collect(p.name)} AS m", BOTH),
+    ("DF3", "MATCH (p:Person) RETURN LET x = p.age IN max(x) END AS oldest", GQL),
+    ("DF4", "MATCH (p:Person {name: 'Alix'}) RETURN LET x = p.age IN [x, {age: x}, CASE WHEN x > 18 THEN x END] END AS l", GQL),
+]:
+    case(case_id, query, languages)
+
+# DG: a doubled backtick in a Cypher delimited name is one backtick (DG1, #579; a syntax
+#     error in 0.6.0); size and toList of a vector read its elements (DG2, DG3, #585)
+for case_id, query, languages in [
+    ("DG1", "RETURN 1 AS `a``b`", CYPHER),
+    ("DG2", "RETURN size(vector([1.0, 2.0, 3.0])) AS n", BOTH),
+    ("DG3", "RETURN toList(vector([0.5, 0.25])) AS l", BOTH),
+]:
+    case(case_id, query, languages)
+
+# DH: a numeric list written to a vector-indexed property is a VECTOR the index finds (#587;
+#     0.6.0 stored a LIST the search left out): a GQL float list (DH1), a SET of integers
+#     (DH2), a Cypher CREATE (DH3); a list of another size fails as a vector of that size does
+#     (DH4); without an index a list stays a LIST (DH5); the stored types (DH6) and a search
+#     that finds all four vectors (DH7)
+for case_id, query, languages in [
+    ("DH1", "INSERT (:Doc {name: 'Rome', emb: [0.6, 0.8, 0.0]})", GQL),
+    ("DH2", "MATCH (d:Doc {name: 'Lisbon'}) SET d.emb = [0, 1, 0]", GQL),
+    ("DH3", "CREATE (:Doc {name: 'Vienna', emb: [1, 0, 0]})", CYPHER),
+    ("DH4", "INSERT (:Doc {name: 'Oslo', emb: [1.0, 0.0]})", GQL),
+    ("DH5", "INSERT (:Draft {name: 'Madrid', emb: [1.0, 0.0]})", GQL),
+]:
+    case(case_id, query, languages, "list_embeddings")
+ordered("DH6", "MATCH (d) WHERE d.emb IS NOT NULL RETURN d.name AS name, d.emb IS TYPED LIST AS list ORDER BY name", GQL, "list_embeddings")
+ordered("DH7", "CALL grafeo.search.vector('Doc', 'emb', [0.6, 0.8, 0.0], 10) YIELD node_id RETURN node_id ORDER BY node_id", BOTH, "list_embeddings")
+
+# DI: SQL/PGQ path components (#705): NODES(p) and EDGES(p) hold every node and edge of the
+#     walk, in walk order, as COLUMNS (DI1), from a fixed start over one and two hops (DI2),
+#     for zero hops (DI3), counted in COLUMNS (DI4) and filtered in the pattern's WHERE (DI5)
+for case_id, query in [
+    ("DI1", "SELECT * FROM GRAPH_TABLE (MATCH (a:Person {name: 'Jules'})-[p:KNOWS*1..1]->(b:Person) COLUMNS (NODES(p) AS ns, EDGES(p) AS es, LENGTH(p) AS hops))"),
+    ("DI2", "SELECT * FROM GRAPH_TABLE (MATCH (a:Person {name: 'Gus'})-[p:KNOWS*1..2]->(b:Person) COLUMNS (NODES(p) AS ns, EDGES(p) AS es, LENGTH(p) AS hops)) ORDER BY hops"),
+    ("DI3", "SELECT * FROM GRAPH_TABLE (MATCH (a:Person {name: 'Mia'})-[p:KNOWS*0..0]->(b:Person) COLUMNS (NODES(p) AS ns, EDGES(p) AS es, LENGTH(p) AS hops))"),
+    ("DI4", "SELECT * FROM GRAPH_TABLE (MATCH (a:Person {name: 'Alix'})-[p:KNOWS*1..2]->(b:Person) COLUMNS (b.name AS name, CARDINALITY(NODES(p)) AS nodes, CARDINALITY(EDGES(p)) AS edges))"),
+    ("DI5", "SELECT * FROM GRAPH_TABLE (MATCH (a:Person {name: 'Alix'})-[p:KNOWS*1..2]->(b:Person) WHERE CARDINALITY(NODES(p)) = 3 COLUMNS (b.name AS name))"),
+]:
+    case(case_id, query, SQL)
+
+# DJ: a decimal sum is exact in any row order (#669; 0.6.0 failed with 22003 when a running
+#     total passed 38 digits, so [a, a, -a] failed where [a, -a, a] did not): the three orders
+#     in GQL (DJ1 to DJ3) and Cypher (DJ4 to DJ6); an average of two 38-digit values is
+#     that value (DJ7, DJ8), where 0.6.0 failed on their sum
+for case_id, query, languages in [
+    ("DJ1", "UNWIND [9999999999999999999999999999999999999.0, 9999999999999999999999999999999999999.0, -9999999999999999999999999999999999999.0] AS x RETURN sum(x) AS s", GQL),
+    ("DJ2", "UNWIND [9999999999999999999999999999999999999.0, -9999999999999999999999999999999999999.0, 9999999999999999999999999999999999999.0] AS x RETURN sum(x) AS s", GQL),
+    ("DJ3", "UNWIND [-9999999999999999999999999999999999999.0, 9999999999999999999999999999999999999.0, 9999999999999999999999999999999999999.0] AS x RETURN sum(x) AS s", GQL),
+    ("DJ4", "UNWIND [toDecimal('9999999999999999999999999999999999999.0'), toDecimal('9999999999999999999999999999999999999.0'), toDecimal('-9999999999999999999999999999999999999.0')] AS x RETURN sum(x) AS s", CYPHER),
+    ("DJ5", "UNWIND [toDecimal('9999999999999999999999999999999999999.0'), toDecimal('-9999999999999999999999999999999999999.0'), toDecimal('9999999999999999999999999999999999999.0')] AS x RETURN sum(x) AS s", CYPHER),
+    ("DJ6", "UNWIND [toDecimal('-9999999999999999999999999999999999999.0'), toDecimal('9999999999999999999999999999999999999.0'), toDecimal('9999999999999999999999999999999999999.0')] AS x RETURN sum(x) AS s", CYPHER),
+    ("DJ7", "UNWIND [9999999999999999999999999999999999999.9, 9999999999999999999999999999999999999.9] AS x RETURN avg(x) AS a", GQL),
+    ("DJ8", "UNWIND [toDecimal('9999999999999999999999999999999999999.9'), toDecimal('9999999999999999999999999999999999999.9')] AS x RETURN avg(x) AS a", CYPHER),
+]:
+    case(case_id, query, languages, "empty")
+
+# DK: a WHERE inside a GQL quantified pattern holds per step (#678 item 2; 0.6.0 checked it
+#     once over the edge list, and a node condition was an undefined variable): an edge
+#     condition (DK1), a node condition (DK2); a two-edge quantified pattern repeats within
+#     its bounds (DK3, DK4; 0.6.0 took the segment once); an unbounded walk has no hop cap
+#     (DK5, DK6; 0.6.0 stopped after min + 100 hops)
+for case_id, query, fixture in [
+    ("DK1", "MATCH (s:Person {name: 'Alix'})((a)-[e:KNOWS]->(b) WHERE e.w > 1){1,3}(t) RETURN t.name AS t, [x IN e | x.w] AS ws", "social"),
+    ("DK2", "MATCH (s:Person {name: 'Alix'})((a)-[e:KNOWS]->(b) WHERE a.age < b.age){1,3}(t) RETURN t.name AS t", "social"),
+    ("DK3", "MATCH (s:Person {name: 'Gus'})((a)-[:KNOWS]->(m)-[:KNOWS]->(b)){1,2}(t) RETURN t.name AS t", "social"),
+    ("DK4", "MATCH (s:Person {name: 'Gus'})((a)-[:KNOWS]->(m)-[:KNOWS]->(b)){0,1}(t) RETURN t.name AS t", "social"),
+    ("DK5", "MATCH (a:N {i: 0})-[:NEXT]->{1,}(b) RETURN count(*) AS n", "chain"),
+    ("DK6", "MATCH (a:N {i: 4800})-[*]->(b) RETURN count(*) AS n, max(b.i) AS last", "chain"),
+]:
+    case(case_id, query, GQL, fixture)
+
+# DL: SPARQL group algebra. A FILTER inside OPTIONAL reads the joined solution (DL1 to DL3,
+#     #701; 0.6.0 read the optional pattern alone); a group that opens with MINUS or with
+#     an OPTIONAL without a match is one empty solution (DL4 to DL6, #702; 0.6.0 gave the
+#     inner pattern); a BIND to a variable in scope is a syntax error (DL7, #703; 0.6.0
+#     overwrote it); FILTER EXISTS keeps a row once and binds nothing (DL8), NOT EXISTS
+#     without a shared variable removes every row when its pattern matches (DL9, DL10); a
+#     variable an OPTIONAL left unbound is compatible with every value of a later pattern
+#     (DL6, DL11)
+for case_id, query in [
+    ("DL1", "SELECT ?n ?c WHERE { ?s ex:name ?n OPTIONAL { ?s ex:city ?c FILTER(!BOUND(?n)) } }"),
+    ("DL2", "SELECT ?s ?l WHERE { ?s ex:city ?c OPTIONAL { ?c ex:label ?l FILTER(STRENDS(STR(?s), \"alix\")) } }"),
+    ("DL3", "SELECT (COUNT(?c) AS ?k) WHERE { ?s ex:name ?n OPTIONAL { ?s ex:city ?c FILTER(!BOUND(?n)) } }"),
+    ("DL4", "SELECT (COUNT(*) AS ?c) WHERE { MINUS { ?s ex:name ?n } }"),
+    ("DL5", "SELECT (COUNT(*) AS ?c) WHERE { OPTIONAL { ?s ex:none ?o } }"),
+    ("DL6", "SELECT ?s WHERE { OPTIONAL { ?s ex:none ?o } ?s ex:age 40 }"),
+    ("DL7", "SELECT ?s ?n WHERE { ?s ex:name ?n BIND(\"x\" AS ?n) }"),
+    ("DL8", "SELECT * WHERE { ?s ex:name ?n FILTER EXISTS { ?s ex:nick ?k } }"),
+    ("DL9", "SELECT (COUNT(*) AS ?c) WHERE { ?s ex:name ?n FILTER NOT EXISTS { ?x ex:label ?l } }"),
+    ("DL10", "ASK { FILTER NOT EXISTS { ?s ex:name ?n } }"),
+    ("DL11", "SELECT ?n ?c WHERE { ?s ex:name ?n OPTIONAL { ?s ex:city ?c } ?c ex:label ?l }"),
+]:
+    case(case_id, RDF_PREFIXES + query, SPARQL, "rdf")
+
+# DM: expression results. Cypher sums no values to 0, GQL keeps null (DM1 to DM3); a float
+#     remainder by zero is NaN (DM4, DM5); toString spells the infinities Infinity and
+#     -Infinity (DM6); toInteger trims text and truncates decimal text (DM7); toInteger of
+#     NaN is null (DM8)
+for case_id, query, languages in [
+    ("DM1", "UNWIND [] AS x RETURN sum(x) AS s, count(x) AS c, avg(x) AS a", CYPHER),
+    ("DM2", "UNWIND [[1, null], [2, 5], [2, null]] AS r RETURN r[0] AS g, sum(r[1]) AS s ORDER BY g", CYPHER),
+    ("DM3", "UNWIND [] AS x RETURN sum(x) AS s, count(x) AS c, avg(x) AS a", GQL),
+    ("DM4", "RETURN 1.5e0 % 0 AS a, toFloat(1) % 0 AS b", GQL),
+    ("DM5", "RETURN 1.5 % 0 AS a, toFloat(1) % 0.0 AS b", CYPHER),
+    ("DM6", "RETURN toString(Infinity) AS a, toString(-Infinity) AS b, toString(NaN) AS c", BOTH),
+    ("DM7", "RETURN toInteger(' 42 ') AS a, toInteger('4.2') AS b, toInteger('-4.7') AS c, toFloat(' 1.5 ') AS d, toInteger('x') AS e", BOTH),
+    ("DM8", "RETURN toInteger(NaN) AS a", BOTH),
+]:
+    case(case_id, query, languages, "empty")
+
+# DN: selector plans (0.6.1, Deriva). An OR of labels scans each label (DN1, DN2); a
+#     top-level EXISTS runs once over the distinct values of the variables it shares:
+#     several EXISTS sharing n (DN3), one sharing n and m (DN4), NOT EXISTS (DN5), outer rows
+#     that repeat n stay once each (DN6), an empty outer (DN7), and a subquery that divides
+#     by zero for nodes no outer row holds does not run for them (DN8, DN9; 0.6.0 failed
+#     with division by zero); an EXISTS inside an OR waits for its sibling conjuncts (DN10,
+#     DN11; 0.6.0 failed with division by zero); a pattern with several labels scans the
+#     smallest, also in an EXISTS (DN12, DN13); a label test the scan holds is no filter
+#     (DN14), one on another label is that label (DN15); a negative slice bound counts from
+#     the end (DN16, DN17; 0.6.0 gave an empty or the whole list)
+for case_id, query, languages in [
+    ("DN1", "MATCH (n:Graph) WHERE n:Method OR n:File RETURN n.i AS i", BOTH),
+    ("DN2", "MATCH (n:Graph) WHERE n.active AND ((n:Method AND NOT EXISTS { MATCH (n)-[:USES]->(m) WHERE m.i > 1003 }) OR (n:File AND EXISTS { MATCH (n)-[:CONTAINS]->() })) RETURN n.i AS i", BOTH),
+    ("DN3", "MATCH (n:Method) WHERE n.active AND EXISTS { MATCH (n)-[:R]->(t) WHERE t.i > 1 } AND EXISTS { MATCH (n)-[:USES]->() } RETURN n.i AS i", BOTH),
+    ("DN4", "MATCH (n:Method)-[:USES]->(m:Method) WHERE EXISTS { MATCH (m)-[:USES]->(n) } RETURN n.i AS a, m.i AS b", BOTH),
+    ("DN5", "MATCH (n:Method) WHERE NOT EXISTS { MATCH (n)-[:USES]->(m) WHERE m.i > 1003 } RETURN n.i AS i", BOTH),
+    ("DN6", "MATCH (n:Method)-[:CALLS]->(c) WHERE EXISTS { MATCH (n)<-[:USES]-() } RETURN n.i AS i, c.k AS k", BOTH),
+    ("DN7", "MATCH (n:Method) WHERE n.i > 5000 AND EXISTS { MATCH (m:Graph) WHERE 10 / m.zero > n.i } RETURN count(n) AS c", BOTH),
+    ("DN8", "MATCH (n:Method) WHERE n.active AND EXISTS { MATCH (n)-[:R]->(t) WHERE 10 / n.zero > 0 } RETURN count(n) AS c", BOTH),
+    ("DN9", "MATCH (n:Method)-[:CALLS]->(c) WHERE n.active AND EXISTS { MATCH (t:Target) WHERE t.i = n.i - 1000 AND 10 / n.zero > 0 } RETURN count(*) AS c", BOTH),
+    ("DN10", "MATCH (n:Graph) WHERE n.active AND ((n:Method AND EXISTS { MATCH (n)-[:CALLS|CONTAINS]->(c) WHERE 10 / n.zero > 0 }) OR n.zz = 1) RETURN count(n) AS c", BOTH),
+    ("DN11", "MATCH (n:Graph) WHERE ((EXISTS { MATCH (n)-[:CALLS|CONTAINS]->(c) WHERE 10 / n.zero > 0 } AND n:Method) OR n.zz = 1) AND n.active RETURN count(n) AS c", BOTH),
+    ("DN12", "MATCH (e:Graph:Method) RETURN e.i AS i", BOTH),
+    ("DN13", "MATCH (t:Target) WHERE EXISTS { MATCH (e:Graph:Method)-[:R]->(t) } RETURN t.i AS i", BOTH),
+    ("DN14", "MATCH (n:Method) WHERE 'Method' IN labels(n) RETURN count(n) AS c", BOTH),
+    ("DN15", "MATCH (n:Graph) WHERE 'File' IN labels(n) RETURN n.i AS i", BOTH),
+]:
+    case(case_id, query, languages, "codegraph")
+for case_id, query in [
+    ("DN16", "RETURN [1, 2, 3, 4, 5][-2..] AS a, [1, 2, 3, 4, 5][..-2] AS b, [1, 2, 3, 4, 5][-3..-1] AS c, [1, 2, 3, 4, 5][1..-1] AS d, [1, 2, 3][-10..2] AS e"),
+    ("DN17", "UNWIND range(1, 5) AS x WITH collect(x) AS xs RETURN xs[-2..] AS a, xs[..-3] AS b, xs[1..3] AS c"),
+]:
+    case(case_id, query, BOTH, "empty")
+# DN18, DN19: a subquery in an AND chain whose other conjuncts are false is skipped for that row,
+#     and the same subquery outside the chain still gives its real value (DN18); a null
+#     conjunct does not skip it (DN19)
+for case_id, query in [
+    ("DN18", "MATCH (n:Method) RETURN n.i AS i, (n.active AND COUNT { MATCH (n)-[:USES]->() } > 0) AS a, COUNT { MATCH (n)-[:USES]->() } AS c"),
+    ("DN19", "MATCH (n:Method) WHERE NOT (n.missing = 1 AND EXISTS { MATCH (n)-[:USES]->() }) RETURN n.i AS i"),
+]:
+    case(case_id, query, BOTH, "codegraph")
+# DN20 to DN27: an EXISTS that is not a top-level conjunct runs once over the distinct values
+#     it shares (a mark join), with the rows of running it per row: in OR (DN20), NOT EXISTS
+#     in OR (DN21), in CASE (DN22), two in one predicate (DN23), beside a top-level EXISTS
+#     (DN24), behind a guard on the shared variable that rejects the rows it would divide by
+#     zero for (DN25; 0.6.0 failed with division by zero), a shared variable that is null
+#     (DN26), and in the WHERE of an OPTIONAL MATCH over the outer variable, which keeps
+#     every outer row (DN27; 0.6.0 dropped the rows the WHERE rejects)
+for case_id, query in [
+    ("DN20", "MATCH (n:Method) WHERE n.i = 1006 OR EXISTS { MATCH (n)-[:USES]->(m) WHERE m.active } RETURN n.i AS i"),
+    ("DN21", "MATCH (n:Method) WHERE n.i = 1001 OR NOT EXISTS { MATCH (n)-[:USES]->(m) WHERE m.i > 1002 } RETURN n.i AS i"),
+    ("DN22", "MATCH (n:Method) WHERE CASE WHEN EXISTS { MATCH (n)-[:USES]->(m) WHERE m.active } THEN n.i > 1002 ELSE n.i = 1006 END RETURN n.i AS i"),
+    ("DN23", "MATCH (n:Method) WHERE EXISTS { MATCH (n)-[:USES]->(m) WHERE m.i > 1003 } OR EXISTS { MATCH (n)<-[:USES]-(m) WHERE m.i = 1005 } RETURN n.i AS i"),
+    ("DN24", "MATCH (n:Method) WHERE EXISTS { MATCH (n)-[:R]->(t) WHERE t.i > 1 } AND (n.i = 1006 OR EXISTS { MATCH (n)-[:USES]->(m) WHERE m.active }) RETURN n.i AS i"),
+    ("DN25", "MATCH (n:Method) WHERE (n.zero <> 0 AND EXISTS { MATCH (n)-[:USES]->(m) WHERE 10 / n.zero > 0 }) OR n.i = 1006 RETURN n.i AS i"),
+    ("DN26", "MATCH (n:Method) OPTIONAL MATCH (n)<-[:USES]-(p) WITH n, p WHERE n.i = 1006 OR EXISTS { MATCH (p)-[:USES]->(m) WHERE m.i > 1003 } RETURN n.i AS i, p.i AS p"),
+    ("DN27", "MATCH (n:Method) OPTIONAL MATCH (n)-[:R]->(t) WHERE EXISTS { MATCH (n)-[:USES]->(m) WHERE m.i > 1003 } RETURN n.i AS i, t.i AS t"),
+]:
+    case(case_id, query, BOTH, "codegraph")
+
+# DO: the wildcard label `%` is "has a label" (ISO/IEC 39075 16.8), so it leaves out a node
+#     without one: IS % (DO1; 0.6.0 matched every node), :% (DO2), IS !% and :!% (DO3, DO4);
+#     a label expression after `:` that starts with `!` or `(` (DO5 to DO7, syntax errors in
+#     0.6.0), and on a node an edge reaches (DO8, DO9); SQL/PGQ the same (DO10 to DO12)
+for case_id, query in [
+    ("DO1", "MATCH (n IS %) RETURN n.id AS id"),
+    ("DO2", "MATCH (n:%) RETURN n.id AS id"),
+    ("DO3", "MATCH (n IS !%) RETURN n.id AS id"),
+    ("DO4", "MATCH (n:!%) RETURN n.id AS id"),
+    ("DO5", "MATCH (n:!Comment) RETURN n.id AS id"),
+    ("DO6", "MATCH (n:(Post|Comment)&Message) RETURN n.id AS id"),
+    ("DO7", "MATCH (n:!(Post|Comment)) RETURN n.id AS id"),
+    ("DO8", "MATCH (:Person)-[]->(m:%) RETURN m.id AS id"),
+    ("DO9", "MATCH (:Person)-[]->(m:!%) RETURN m.id AS id"),
+]:
+    case(case_id, query, GQL, "unlabeled")
+for case_id, query in [
+    ("DO10", "SELECT id FROM GRAPH_TABLE (MATCH (n IS %) COLUMNS (n.id AS id))"),
+    ("DO11", "SELECT id FROM GRAPH_TABLE (MATCH (n:!%) COLUMNS (n.id AS id))"),
+    ("DO12", "SELECT id FROM GRAPH_TABLE (MATCH (n:!(Post|Comment)) COLUMNS (n.id AS id))"),
+]:
+    case(case_id, query, SQL, "unlabeled")
 
 # fmt: on

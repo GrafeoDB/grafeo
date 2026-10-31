@@ -32,9 +32,13 @@ use crate::query::planner::{PhysicalPlan, convert_aggregate_function, convert_fi
 use crate::transaction::RdfWriter;
 
 mod evaluator;
+mod exists_pair;
+mod named_graphs;
 mod order;
+mod path_per_row;
 mod term_ids;
 mod terms;
+mod triple_lookup;
 
 use evaluator::RdfExpressionPredicate;
 use grafeo_common::types::TermId;
@@ -188,6 +192,7 @@ impl RdfPlanner {
     /// Returns results as the values GraphQL reads for terms (an IRI as its
     /// text, a numeric literal as its number) instead of RDF terms.
     #[must_use]
+    #[cfg(rdf_language)]
     pub(crate) fn with_query_values(mut self, query_values: bool) -> Self {
         self.query_values = query_values;
         self
@@ -195,7 +200,9 @@ impl RdfPlanner {
 
     /// Plans with the writer of the transaction the plan runs in: its
     /// updates record their triples through it, and its scans see them.
+    /// Only an RDF query runs in a transaction that writes triples.
     #[must_use]
+    #[cfg(any(rdf_language, test))]
     pub(crate) fn with_writer(mut self, writer: Option<RdfWriter>) -> Self {
         self.writer = writer;
         self
@@ -339,6 +346,19 @@ impl RdfPlanner {
         let result = match op {
             LogicalOperator::TripleScan(scan) => self.plan_triple_scan(scan),
             LogicalOperator::PropertyPath(path) => self.plan_property_path(path),
+            LogicalOperator::NamedGraphs(graphs) => {
+                let op: Box<dyn Operator> = Box::new(named_graphs::NamedGraphsOperator::new(
+                    Arc::clone(&self.store),
+                    self.writer.clone(),
+                    graphs.dataset.clone(),
+                    Arc::clone(&self.terms),
+                ));
+                Ok((
+                    op,
+                    vec![graphs.variable.clone()],
+                    vec![LogicalType::RdfTermId],
+                ))
+            }
             LogicalOperator::Filter(filter) => self.plan_filter(filter),
             LogicalOperator::Project(project) => self.plan_project(project),
             LogicalOperator::Limit(limit) => self.plan_limit(limit),
@@ -367,6 +387,12 @@ impl RdfPlanner {
                 let op: Box<dyn Operator> = Box::new(SingleRowOperator::new());
                 Ok((op, vec![], vec![]))
             }
+            // A stub must not report success: LOAD fails until it reads
+            // files, also with SILENT.
+            LogicalOperator::LoadGraph(_) => Err(Error::from(QueryError::new(
+                QueryErrorKind::Unsupported,
+                "SPARQL LOAD is not supported yet: insert the data with INSERT DATA, or load                  files with the Rust API's load_turtle and load_ntriples",
+            ))),
             _ => Err(Error::Internal(format!(
                 "Unsupported RDF operator: {:?}",
                 std::mem::discriminant(op)
@@ -379,7 +405,30 @@ impl RdfPlanner {
         &self,
         path: &crate::query::plan::PropertyPathOp,
     ) -> Result<(Box<dyn Operator>, Vec<String>, Vec<LogicalType>)> {
-        use grafeo_core::execution::operators::{RdfPathConfig, RdfPathGraph, RdfPathOperator};
+        let operator = self.path_source().operator(self.path_config(path)?);
+        let columns = operator.columns();
+        let types = vec![LogicalType::RdfTermId; columns.len()];
+        let operator = self.intern(Box::new(operator), (0..columns.len()).collect());
+        Ok((operator, columns, types))
+    }
+
+    /// What the query's path searches read with (see
+    /// [`path_per_row::PathSource`]).
+    fn path_source(&self) -> path_per_row::PathSource {
+        path_per_row::PathSource {
+            store: Arc::clone(&self.store),
+            budget: self.path_search_budget,
+            deadline: self.deadline,
+            overlay: self.writer.as_ref().map(RdfWriter::path_overlay),
+        }
+    }
+
+    /// The search of `path`: its ends, graph and step.
+    fn path_config(
+        &self,
+        path: &crate::query::plan::PropertyPathOp,
+    ) -> Result<grafeo_core::execution::operators::RdfPathConfig> {
+        use grafeo_core::execution::operators::{RdfPathConfig, RdfPathGraph};
         let graph = match path.graph.as_ref() {
             Some(TripleComponent::Variable(_)) => {
                 RdfPathGraph::NamedGraphs(path.dataset.as_ref().map(|ds| ds.named_graphs.clone()))
@@ -409,32 +458,76 @@ impl RdfPlanner {
                 RdfPathGraph::Union(ds.default_graphs.clone())
             }),
         };
-        let operator = RdfPathOperator::new(
+        Ok(RdfPathConfig {
+            subject: component_to_term(&path.subject),
+            object: component_to_term(&path.object),
+            subject_var: path.subject.as_variable().map(str::to_string),
+            object_var: path.object.as_variable().map(str::to_string),
+            graph_var: path
+                .graph
+                .as_ref()
+                .and_then(TripleComponent::as_variable)
+                .map(str::to_string),
+            min_hops: !path.zero_length,
+            path: path.path.clone(),
+            graph,
+            transaction_id: None,
+            chunk_capacity: self.chunk_size,
+            zero_length_in_graph: false,
+        })
+    }
+
+    /// The search per row of a join of a property path with `other`, the
+    /// join's other side, when `other` always binds the path's subject or
+    /// object (see [`path_per_row`]): the path's config with those ends left
+    /// open, their columns in `other_columns`, and the path's own columns.
+    /// `None` when `other` binds neither end, or holds a column of the path's
+    /// free end or graph variable without always binding it (a join then
+    /// checks the pairs).
+    fn path_per_row(
+        &self,
+        path: &crate::query::plan::PropertyPathOp,
+        other: &LogicalOperator,
+        other_columns: &[String],
+    ) -> Result<Option<path_per_row::PathPerRowPlan>> {
+        let Some(bound) = crate::query::plan::always_bound(other) else {
+            return Ok(None);
+        };
+        let column = |component: &TripleComponent| {
+            component
+                .as_variable()
+                .filter(|variable| bound.contains(*variable))
+                .and_then(|variable| other_columns.iter().position(|c| c == variable))
+        };
+        let (subject_column, object_column) = (column(&path.subject), column(&path.object));
+        if subject_column.is_none() && object_column.is_none() {
+            return Ok(None);
+        }
+        let mut config = self.path_config(path)?;
+        // Between two variables the zero-length solutions are the graph's
+        // terms: a row's term outside the graph has none.
+        config.zero_length_in_graph =
+            path.subject.as_variable().is_some() && path.object.as_variable().is_some();
+        if subject_column.is_some() {
+            config.subject_var = None;
+        }
+        if object_column.is_some() {
+            config.object_var = None;
+        }
+        let columns = grafeo_core::execution::operators::RdfPathOperator::new(
             Arc::clone(&self.store),
-            RdfPathConfig {
-                subject: component_to_term(&path.subject),
-                object: component_to_term(&path.object),
-                subject_var: path.subject.as_variable().map(str::to_string),
-                object_var: path.object.as_variable().map(str::to_string),
-                graph_var: path
-                    .graph
-                    .as_ref()
-                    .and_then(TripleComponent::as_variable)
-                    .map(str::to_string),
-                min_hops: !path.zero_length,
-                path: path.path.clone(),
-                graph,
-                transaction_id: None,
-                chunk_capacity: self.chunk_size,
-            },
+            config.clone(),
         )
-        .with_memory_budget(self.path_search_budget)
-        .with_deadline(self.deadline)
-        .with_read_overlay(self.writer.as_ref().map(RdfWriter::path_overlay));
-        let columns = operator.columns();
-        let types = vec![LogicalType::RdfTermId; columns.len()];
-        let operator = self.intern(Box::new(operator), (0..columns.len()).collect());
-        Ok((operator, columns, types))
+        .columns();
+        if columns.iter().any(|name| other_columns.contains(name)) {
+            return Ok(None);
+        }
+        Ok(Some(path_per_row::PathPerRowPlan {
+            config,
+            subject_column,
+            object_column,
+            columns,
+        }))
     }
 
     /// Plans a triple scan operator.
@@ -445,6 +538,19 @@ impl RdfPlanner {
         &self,
         scan: &TripleScanOp,
     ) -> Result<(Box<dyn Operator>, Vec<String>, Vec<LogicalType>)> {
+        let (scan_op, columns) = self.triple_scan(scan, [false; 3]);
+        let types = vec![LogicalType::RdfTermId; columns.len()];
+        Ok((Box::new(scan_op), columns, types))
+    }
+
+    /// The scan of `scan`'s pattern and its columns, its variables in
+    /// subject, predicate, object and graph order, without the positions
+    /// `left_out` marks (which a row fills in, see [`triple_lookup`]).
+    fn triple_scan(
+        &self,
+        scan: &TripleScanOp,
+        left_out: [bool; 3],
+    ) -> (RdfTripleScanOperator, Vec<String>) {
         // Build the triple pattern for querying the store
         let pattern = self.build_triple_pattern(scan);
 
@@ -452,17 +558,16 @@ impl RdfPlanner {
         let mut columns = Vec::new();
         let mut output_mask = [false, false, false, false]; // s, p, o, g
 
-        if let TripleComponent::Variable(name) = &scan.subject {
-            columns.push(name.clone());
-            output_mask[0] = true;
-        }
-        if let TripleComponent::Variable(name) = &scan.predicate {
-            columns.push(name.clone());
-            output_mask[1] = true;
-        }
-        if let TripleComponent::Variable(name) = &scan.object {
-            columns.push(name.clone());
-            output_mask[2] = true;
+        for (position, component) in [&scan.subject, &scan.predicate, &scan.object]
+            .into_iter()
+            .enumerate()
+        {
+            if let TripleComponent::Variable(name) = component
+                && !left_out[position]
+            {
+                columns.push(name.clone());
+                output_mask[position] = true;
+            }
         }
         if let Some(TripleComponent::Variable(name)) = &scan.graph {
             columns.push(name.clone());
@@ -492,8 +597,129 @@ impl RdfPlanner {
         )
         .with_writer(self.writer.clone())
         .with_read_counter(self.read_counter());
-        let types = vec![LogicalType::RdfTermId; columns.len()];
-        Ok((Box::new(scan_op), columns, types))
+        (scan_op, columns)
+    }
+
+    /// The lookup join of `scan` with `other`, the join's other side, when
+    /// `other` always binds a variable of the pattern (see
+    /// [`triple_lookup`]): the full scan, the scan a row fills in, the plan
+    /// and the columns the join adds. `None` when `other` binds none, holds
+    /// a free variable of the pattern without always binding it (a join
+    /// then checks the pairs), the pattern repeats a variable, or has a
+    /// graph variable or an input.
+    fn triple_lookup(
+        &self,
+        scan: &TripleScanOp,
+        other: &LogicalOperator,
+        other_columns: &[String],
+        scan_estimate: Option<f64>,
+        other_estimate: Option<f64>,
+    ) -> Option<Box<triple_lookup::TripleLookupParts>> {
+        if scan.input.is_some() || matches!(scan.graph, Some(TripleComponent::Variable(_))) {
+            return None;
+        }
+        // More rows than look up, known while planning: the hash join, without
+        // reading the first rows to find out. Only a scan's or a VALUES
+        // block's estimate counts: a join's (left x right / 10) overstates a
+        // star of patterns on one subject, which the switch at run time
+        // handles.
+        let other_estimate = other_estimate.filter(|_| {
+            matches!(
+                other,
+                LogicalOperator::TripleScan(_)
+                    | LogicalOperator::Union(_)
+                    | LogicalOperator::Bind(_)
+                    | LogicalOperator::Empty
+            )
+        });
+        let limit = triple_lookup::lookup_limit(scan_estimate);
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "the limit is at most LOOKUP_ROWS, which an f64 holds exactly"
+        )]
+        let limit_rows = limit as f64;
+        if other_estimate.is_some_and(|rows| rows > limit_rows) {
+            return None;
+        }
+        let bound_names = crate::query::plan::always_bound(other)?;
+        let variables: Vec<(usize, &str)> = [&scan.subject, &scan.predicate, &scan.object]
+            .into_iter()
+            .enumerate()
+            .filter_map(|(position, component)| match component {
+                TripleComponent::Variable(name) => Some((position, name.as_str())),
+                _ => None,
+            })
+            .collect();
+        let mut seen = std::collections::HashSet::new();
+        if !variables.iter().all(|(_, name)| seen.insert(*name)) {
+            return None;
+        }
+        let mut left_out = [false; 3];
+        let mut bound = Vec::new();
+        let mut added = Vec::new();
+        let mut added_names = Vec::new();
+        for (full_column, &(position, name)) in variables.iter().enumerate() {
+            match other_columns.iter().position(|column| column == name) {
+                Some(column) if bound_names.contains(name) => {
+                    left_out[position] = true;
+                    bound.push((position, column, full_column));
+                }
+                Some(_) => return None,
+                None => {
+                    added.push(full_column);
+                    added_names.push(name.to_string());
+                }
+            }
+        }
+        if bound.is_empty() {
+            return None;
+        }
+        let (full, full_columns) = self.triple_scan(scan, [false; 3]);
+        let (lookup, _) = self.triple_scan(scan, left_out);
+        Some(Box::new(triple_lookup::TripleLookupParts {
+            full,
+            lookup,
+            plan: triple_lookup::TripleLookupPlan { bound, added },
+            full_columns,
+            added_names,
+            limit,
+        }))
+    }
+
+    /// The lookup join of `parts` over `input` (see [`triple_lookup`]), its
+    /// columns those of `input`, then the added ones. Out of line: it holds
+    /// two scans, which would enlarge `plan_join`'s frame at every join of a
+    /// chain.
+    #[inline(never)]
+    fn lookup_join(
+        &self,
+        parts: Box<triple_lookup::TripleLookupParts>,
+        input: Box<dyn Operator>,
+        columns: Vec<String>,
+        types: Vec<LogicalType>,
+        cardinalities: Option<(f64, f64)>,
+        left: bool,
+    ) -> (Box<dyn Operator>, Vec<String>, Vec<LogicalType>) {
+        let mut out_columns = columns.clone();
+        let mut out_types = types.clone();
+        out_types.extend(std::iter::repeat_n(
+            LogicalType::RdfTermId,
+            parts.added_names.len(),
+        ));
+        out_columns.extend(parts.added_names.iter().cloned());
+        let operator = triple_lookup::TripleLookupOperator::new(
+            input,
+            *parts,
+            triple_lookup::HashJoinInputs {
+                columns,
+                types,
+                cardinalities,
+                left,
+            },
+            Arc::clone(&self.terms),
+            self.chunk_size,
+        );
+        (Box::new(operator), out_columns, out_types)
     }
 
     /// Builds a TriplePattern from a TripleScanOp.
@@ -597,7 +823,7 @@ impl RdfPlanner {
 
         // Use Anti for NOT EXISTS, Semi for EXISTS
         let (result_op, result_columns) = if is_negated {
-            common::build_anti_join(
+            common::build_not_exists_join(
                 left_op,
                 right_op,
                 left_columns,
@@ -617,6 +843,78 @@ impl RdfPlanner {
         Ok((result_op, result_columns, left_types))
     }
 
+    /// The condition of an `OPTIONAL`'s left join, over the merged solution
+    /// of a pair (SPARQL 1.1 sec 18.5): a variable both sides have reads the
+    /// right side's value where the left leaves it unbound, and each
+    /// conjunct that is an `EXISTS` or `NOT EXISTS` is decided per pair (see
+    /// [`exists_pair`]).
+    fn left_join_condition(
+        &self,
+        condition: &LogicalExpression,
+        left_columns: &[String],
+        right_columns: &[String],
+    ) -> Result<Box<dyn grafeo_core::execution::operators::JoinCondition>> {
+        use grafeo_core::execution::operators::{JoinCondition, JoinedRowCondition};
+
+        let mut conjuncts = Vec::new();
+        conjuncts_of(condition, &mut conjuncts);
+        let mut tests = Vec::new();
+        let mut rest = Vec::new();
+        for conjunct in conjuncts {
+            match self.extract_exists_pattern(conjunct) {
+                Some((subquery, negated)) => {
+                    let (op, columns, _) = self.plan_operator(subquery)?;
+                    let (keys, subquery_columns) = columns
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(at, name)| {
+                            let left = left_columns.iter().position(|c| c == name);
+                            let right = right_columns.iter().position(|c| c == name);
+                            (left.is_some() || right.is_some()).then_some(((left, right), at))
+                        })
+                        .unzip();
+                    tests.push(exists_pair::ExistsTest::new(
+                        op,
+                        negated,
+                        keys,
+                        subquery_columns,
+                    ));
+                }
+                None => rest.push(conjunct.clone()),
+            }
+        }
+        let rest = LogicalExpression::conjunction(rest)
+            .map(|rest| -> Result<Box<dyn JoinCondition>> {
+                let mut variable_columns: HashMap<String, usize> = HashMap::new();
+                for (i, name) in left_columns.iter().chain(right_columns).enumerate() {
+                    variable_columns.entry(name.clone()).or_insert(i);
+                }
+                // A variable both sides have reads the right side's value
+                // where the left leaves it unbound (sec 18.5, LeftJoin).
+                let fallback_columns: HashMap<String, usize> = right_columns
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, name)| left_columns.contains(name))
+                    .map(|(i, name)| (name.clone(), left_columns.len() + i))
+                    .collect();
+                let predicate = RdfExpressionPredicate::new(
+                    convert_filter_expression(&rest)?,
+                    variable_columns,
+                    Arc::clone(&self.terms),
+                    self.clock,
+                )
+                .with_fallback_columns(fallback_columns);
+                Ok(Box::new(JoinedRowCondition::new(Box::new(predicate))))
+            })
+            .transpose()?;
+        if tests.is_empty() {
+            return rest.ok_or_else(|| {
+                Error::Internal("a left join condition with no conjunct".to_string())
+            });
+        }
+        Ok(Box::new(exists_pair::ExistsPairCondition::new(tests, rest)))
+    }
+
     /// Plans a DISTINCT operator.
     fn plan_distinct(
         &self,
@@ -624,7 +922,12 @@ impl RdfPlanner {
     ) -> Result<(Box<dyn Operator>, Vec<String>, Vec<LogicalType>)> {
         use crate::query::planner::common;
         let (input_op, columns, types) = self.plan_operator(&distinct.input)?;
-        let (op, cols) = common::build_distinct(input_op, columns, distinct.columns.as_deref());
+        let (op, cols) = common::build_distinct(
+            input_op,
+            columns,
+            distinct.columns.as_deref(),
+            grafeo_common::types::TemporalComparison::TypesApart,
+        );
         Ok((op, cols, types))
     }
 
@@ -989,6 +1292,8 @@ impl RdfPlanner {
                     agg_expr.function,
                     LogicalAggregateFunction::Sum | LogicalAggregateFunction::Avg
                 ),
+                // SPARQL compares its terms as they are.
+                temporal: grafeo_common::types::TemporalComparison::TypesApart,
             });
         }
 
@@ -1141,12 +1446,11 @@ impl RdfPlanner {
         // Predicate-bound: ?s <pred> ?o
         if s_var && !p_var && o_var {
             if let TripleComponent::Iri(pred_iri) = &scan.predicate {
-                let stats = self.store.get_or_collect_statistics();
-                if let Some(pred_stats) = stats.get_predicate(pred_iri) {
-                    // reason: predicate triple count will not exceed i64::MAX
-                    #[allow(clippy::cast_possible_wrap)]
-                    return Some(pred_stats.triple_count as i64);
-                }
+                // From the index, not the statistics: they may be stale.
+                let count = self
+                    .store
+                    .count_with_predicate(&Term::iri(pred_iri.clone()));
+                return i64::try_from(count).ok();
             }
             return None;
         }
@@ -1191,8 +1495,152 @@ impl RdfPlanner {
         join: &crate::query::plan::JoinOp,
     ) -> Result<(Box<dyn Operator>, Vec<String>, Vec<LogicalType>)> {
         use crate::query::planner::common;
+        let first_entry = self.profile_entries.borrow().len();
         let (left_op, left_columns, left_types) = self.plan_operator(&join.left)?;
+        let right_entry = self.profile_entries.borrow().len();
         let (right_op, right_columns, right_types) = self.plan_operator(&join.right)?;
+
+        // A path with an end the other side binds: one search per row from
+        // that end (the path's operator planned above reads nothing until it
+        // runs, and is dropped).
+        let per_row = match (join.left.as_ref(), join.right.as_ref()) {
+            (_, LogicalOperator::PropertyPath(path)) => self
+                .path_per_row(path, &join.left, &left_columns)?
+                .map(|plan| (plan, true)),
+            (LogicalOperator::PropertyPath(path), _) => self
+                .path_per_row(path, &join.right, &right_columns)?
+                .map(|plan| (plan, false)),
+            _ => None,
+        };
+        if let Some((plan, path_on_right)) = per_row {
+            let (input, mut columns, mut types, path_entry) = if path_on_right {
+                (left_op, left_columns, left_types, right_entry)
+            } else {
+                (right_op, right_columns, right_types, first_entry)
+            };
+            // The path's PROFILE line joins the search's.
+            if let Some(entry) = self.profile_entries.borrow_mut().get_mut(path_entry) {
+                entry.absorbed = true;
+            }
+            types.extend(std::iter::repeat_n(
+                LogicalType::RdfTermId,
+                plan.columns.len(),
+            ));
+            let operator = path_per_row::PathPerRowOperator {
+                input,
+                source: self.path_source(),
+                config: plan.config,
+                subject_column: plan.subject_column,
+                object_column: plan.object_column,
+                path_columns: plan.columns.len(),
+                terms: Arc::clone(&self.terms),
+            };
+            columns.extend(plan.columns);
+            return Ok((Box::new(operator), columns, types));
+        }
+
+        // A triple pattern with a variable the other side binds: a lookup
+        // per row of that side (the scan planned above reads nothing until
+        // it runs, and is dropped). Of two patterns, the one estimated to
+        // match more triples is looked up; a wrong guess costs at most
+        // `LOOKUP_ROWS` lookups before the join hashes the scan.
+        let left_estimate = estimate_operator_cardinality(&join.left, &self.store);
+        let right_estimate = estimate_operator_cardinality(&join.right, &self.store);
+        let lookup = match (join.left.as_ref(), join.right.as_ref()) {
+            (LogicalOperator::TripleScan(left), LogicalOperator::TripleScan(right)) => {
+                if left_estimate > right_estimate {
+                    self.triple_lookup(
+                        left,
+                        &join.right,
+                        &right_columns,
+                        left_estimate,
+                        right_estimate,
+                    )
+                    .map(|plan| (plan, false))
+                    .or_else(|| {
+                        self.triple_lookup(
+                            right,
+                            &join.left,
+                            &left_columns,
+                            right_estimate,
+                            left_estimate,
+                        )
+                        .map(|plan| (plan, true))
+                    })
+                } else {
+                    self.triple_lookup(
+                        right,
+                        &join.left,
+                        &left_columns,
+                        right_estimate,
+                        left_estimate,
+                    )
+                    .map(|plan| (plan, true))
+                    .or_else(|| {
+                        self.triple_lookup(
+                            left,
+                            &join.right,
+                            &right_columns,
+                            left_estimate,
+                            right_estimate,
+                        )
+                        .map(|plan| (plan, false))
+                    })
+                }
+            }
+            (_, LogicalOperator::TripleScan(right)) => self
+                .triple_lookup(
+                    right,
+                    &join.left,
+                    &left_columns,
+                    right_estimate,
+                    left_estimate,
+                )
+                .map(|plan| (plan, true)),
+            (LogicalOperator::TripleScan(left), _) => self
+                .triple_lookup(
+                    left,
+                    &join.right,
+                    &right_columns,
+                    left_estimate,
+                    right_estimate,
+                )
+                .map(|plan| (plan, false)),
+            _ => None,
+        };
+        if let Some((parts, scan_on_right)) = lookup {
+            let (input, columns, types, scan_entry, cardinalities) = if scan_on_right {
+                let estimates = left_estimate.zip(right_estimate);
+                (left_op, left_columns, left_types, right_entry, estimates)
+            } else {
+                let estimates = right_estimate.zip(left_estimate);
+                (right_op, right_columns, right_types, first_entry, estimates)
+            };
+            // The scan's PROFILE line joins the lookup's.
+            if let Some(entry) = self.profile_entries.borrow_mut().get_mut(scan_entry) {
+                entry.absorbed = true;
+            }
+            return Ok(self.lookup_join(parts, input, columns, types, cardinalities, false));
+        }
+        let loose = loosely_shared(
+            crate::query::plan::always_bound(&join.left),
+            crate::query::plan::always_bound(&join.right),
+            &left_columns,
+            &right_columns,
+        );
+        if !loose.is_empty() {
+            return Ok(common::build_compatible_join(
+                left_op,
+                right_op,
+                &left_columns,
+                &right_columns,
+                &left_types,
+                &right_types,
+                &loose,
+                grafeo_core::execution::operators::JoinType::Inner,
+                None,
+            ));
+        }
 
         // Estimate cardinalities for build-side selection
         let cardinalities = estimate_operator_cardinality(&join.left, &self.store)
@@ -1210,13 +1658,76 @@ impl RdfPlanner {
     }
 
     /// Plans a LEFT JOIN operator (for SPARQL OPTIONAL) using HashJoin.
+    ///
+    /// The condition (the FILTERs of `OPTIONAL { P FILTER(F) }`) decides which
+    /// pairs are matches over the merged solution (LeftJoin, SPARQL 1.1 sec
+    /// 18.5), so a left row none of whose pairs pass it is kept alone. It
+    /// reads the joined row: the left columns, then the right ones (a name
+    /// both sides have reads the left one, which the join keys make equal).
     fn plan_left_join(
         &self,
         join: &LeftJoinOp,
     ) -> Result<(Box<dyn Operator>, Vec<String>, Vec<LogicalType>)> {
         use crate::query::planner::common;
         let (left_op, left_columns, left_types) = self.plan_operator(&join.left)?;
+        let right_entry = self.profile_entries.borrow().len();
         let (right_op, right_columns, right_types) = self.plan_operator(&join.right)?;
+
+        // `OPTIONAL { ?s p ?o }` whose subject or object the left side binds,
+        // with no condition: a lookup per left row, which keeps a row with
+        // no triple (see `triple_lookup`).
+        if join.condition.is_none()
+            && let LogicalOperator::TripleScan(scan) = join.right.as_ref()
+        {
+            let left_estimate = estimate_operator_cardinality(&join.left, &self.store);
+            let right_estimate = estimate_operator_cardinality(&join.right, &self.store);
+            if let Some(parts) = self.triple_lookup(
+                scan,
+                &join.left,
+                &left_columns,
+                right_estimate,
+                left_estimate,
+            ) {
+                // The scan's PROFILE line joins the lookup's.
+                if let Some(entry) = self.profile_entries.borrow_mut().get_mut(right_entry) {
+                    entry.absorbed = true;
+                }
+                let cardinalities = left_estimate.zip(right_estimate);
+                return Ok(self.lookup_join(
+                    parts,
+                    left_op,
+                    left_columns,
+                    left_types,
+                    cardinalities,
+                    true,
+                ));
+            }
+        }
+        let residual = match &join.condition {
+            Some(condition) => {
+                Some(self.left_join_condition(condition, &left_columns, &right_columns)?)
+            }
+            None => None,
+        };
+        let loose = loosely_shared(
+            crate::query::plan::always_bound(&join.left),
+            crate::query::plan::always_bound(&join.right),
+            &left_columns,
+            &right_columns,
+        );
+        if !loose.is_empty() {
+            return Ok(common::build_compatible_join(
+                left_op,
+                right_op,
+                &left_columns,
+                &right_columns,
+                &left_types,
+                &right_types,
+                &loose,
+                grafeo_core::execution::operators::JoinType::Left,
+                residual,
+            ));
+        }
         Ok(common::build_left_join(
             left_op,
             right_op,
@@ -1224,11 +1735,17 @@ impl RdfPlanner {
             &right_columns,
             &left_types,
             &right_types,
-            std::convert::identity,
+            |join| match residual {
+                Some(residual) => join.with_residual(residual),
+                None => join,
+            },
         ))
     }
 
     /// Plans an ANTI JOIN operator (for SPARQL MINUS).
+    ///
+    /// A shared variable a side may leave unbound still hashes here (see
+    /// [`loosely_shared`] for the joins that check it per pair).
     fn plan_anti_join(
         &self,
         join: &AntiJoinOp,
@@ -1270,30 +1787,62 @@ impl RdfPlanner {
         }
 
         // Plan all inputs and estimate cardinalities
-        let mut planned: Vec<(Box<dyn Operator>, Vec<String>, Vec<LogicalType>, f64)> = Vec::new();
+        type Planned = (
+            Box<dyn Operator>,
+            Vec<String>,
+            Vec<LogicalType>,
+            f64,
+            Option<std::collections::HashSet<String>>,
+        );
+        let mut planned: Vec<Planned> = Vec::new();
         for input in &mwj.inputs {
             let (op, cols, types) = self.plan_operator(input)?;
             let card = estimate_operator_cardinality(input, &self.store).unwrap_or(1000.0);
-            planned.push((op, cols, types, card));
+            let bound = crate::query::plan::always_bound(input);
+            planned.push((op, cols, types, card, bound));
         }
 
         // Sort by cardinality (smallest first) so we build on smaller inputs
         planned.sort_by(|a, b| a.3.partial_cmp(&b.3).unwrap_or(std::cmp::Ordering::Equal));
 
-        // Fold left-to-right with pairwise hash joins
-        let (mut current_op, mut current_cols, mut current_types, mut current_card) =
+        // Fold left-to-right with pairwise hash joins; a shared variable a
+        // side may leave unbound is checked per pair (see `loosely_shared`).
+        let (mut current_op, mut current_cols, mut current_types, mut current_card, mut bound) =
             planned.remove(0);
-        for (right_op, right_cols, right_types, right_card) in planned {
-            let cardinalities = Some((current_card, right_card));
-            let (joined_op, joined_cols, joined_types) = common::build_inner_join(
-                current_op,
-                right_op,
+        for (right_op, right_cols, right_types, right_card, right_bound) in planned {
+            let loose = loosely_shared(
+                bound.clone(),
+                right_bound.clone(),
                 &current_cols,
                 &right_cols,
-                &current_types,
-                &right_types,
-                cardinalities,
             );
+            let (joined_op, joined_cols, joined_types) = if loose.is_empty() {
+                common::build_inner_join(
+                    current_op,
+                    right_op,
+                    &current_cols,
+                    &right_cols,
+                    &current_types,
+                    &right_types,
+                    Some((current_card, right_card)),
+                )
+            } else {
+                common::build_compatible_join(
+                    current_op,
+                    right_op,
+                    &current_cols,
+                    &right_cols,
+                    &current_types,
+                    &right_types,
+                    &loose,
+                    grafeo_core::execution::operators::JoinType::Inner,
+                    None,
+                )
+            };
+            bound = bound.zip(right_bound).map(|(mut left, right)| {
+                left.extend(right);
+                left
+            });
             // Rough estimate for cascaded join output
             current_card = (current_card * right_card * 0.1).max(1.0);
             current_op = joined_op;
@@ -1469,6 +2018,17 @@ impl RdfPlanner {
         let subject = self.component_to_term(&insert.subject)?;
         let predicate = self.component_to_term(&insert.predicate)?;
         let object = self.component_to_term(&insert.object)?;
+        // A literal subject or a predicate that is not an IRI is no RDF
+        // triple: a template skips it (above), data written out is refused.
+        if !is_valid_triple(&subject, &predicate) {
+            return Err(Error::from(QueryError::new(
+                QueryErrorKind::Semantic,
+                format!(
+                    "INSERT DATA: {subject} {predicate} is not a triple's subject and predicate: \
+                     a subject is an IRI or a blank node, a predicate an IRI"
+                ),
+            )));
+        }
 
         let triple = Triple::new(subject, predicate, object);
         let operator = Box::new(RdfInsertTripleOperator::new(
@@ -2492,6 +3052,7 @@ fn copy_column(input: &DataChunk, from: usize, rows: &[usize], output: &mut Data
 ///
 /// Groups the graph IRI, scan-all flag, and SPARQL dataset restriction
 /// to keep the operator constructor argument count manageable.
+#[derive(Clone)]
 struct GraphContext {
     /// Named graph to query. `None` = default graph.
     graph: Option<String>,
@@ -2991,6 +3552,23 @@ impl RdfTripleScanOperator {
         }
     }
 
+    /// The same scan of `pattern`, nothing read yet (a lookup per row, see
+    /// [`triple_lookup`]).
+    fn with_pattern(&self, pattern: TriplePattern) -> Self {
+        Self {
+            store: Arc::clone(&self.store),
+            pattern,
+            output_mask: self.output_mask,
+            graph_context: self.graph_context.clone(),
+            chunk_size: self.chunk_size,
+            triples: None,
+            position: 0,
+            terms: Arc::clone(&self.terms),
+            writer: self.writer.clone(),
+            reads: self.reads.clone(),
+        }
+    }
+
     /// Makes the scan see the writes of the transaction of `writer`
     /// (read-your-writes).
     fn with_writer(mut self, writer: Option<RdfWriter>) -> Self {
@@ -3372,6 +3950,22 @@ fn estimate_operator_cardinality(
                     | crate::query::plan::TripleComponent::LangLiteral { .. }
             );
 
+            // With a predicate, its own counts from the optimizer's
+            // statistics (cached, see `RdfStore::get_or_collect_statistics`).
+            if let crate::query::plan::TripleComponent::Iri(predicate) = &scan.predicate
+                && let Some(counted) = store
+                    .get_or_collect_statistics()
+                    .get_predicate(&format!("<{predicate}>"))
+            {
+                let triples = counted.triple_count as f64;
+                let estimate = match (s_bound, o_bound) {
+                    (true, true) => 1.0,
+                    (true, false) => triples / counted.distinct_subjects.max(1) as f64,
+                    (false, true) => triples / counted.distinct_objects.max(1) as f64,
+                    (false, false) => triples,
+                };
+                return Some(estimate.max(1.0));
+            }
             let estimate = match (s_bound, p_bound, o_bound) {
                 (true, true, true) => 1.0,
                 (true, true, false) => total / stats.subject_count.max(1) as f64,
@@ -3399,6 +3993,14 @@ fn estimate_operator_cardinality(
                 estimate_operator_cardinality(&l.input, store)
             }
         }
+        // A VALUES block is a union of one row each (see the translator).
+        LogicalOperator::Empty => Some(1.0),
+        LogicalOperator::Bind(bind) => estimate_operator_cardinality(&bind.input, store),
+        LogicalOperator::Union(union) => union
+            .inputs
+            .iter()
+            .map(|input| estimate_operator_cardinality(input, store))
+            .sum::<Option<f64>>(),
         _ => None,
     }
 }
@@ -3419,6 +4021,41 @@ use crate::query::planner::common::{
 // ============================================================================
 // Tests
 // ============================================================================
+
+/// The shared columns of a join that a side may leave unbound: those not in
+/// both sides' [`always_bound`](crate::query::plan::always_bound) sets. An
+/// operator the analysis does not know counts as binding all its columns.
+fn loosely_shared(
+    left: Option<std::collections::HashSet<String>>,
+    right: Option<std::collections::HashSet<String>>,
+    left_columns: &[String],
+    right_columns: &[String],
+) -> Vec<String> {
+    let bound = |side: &Option<std::collections::HashSet<String>>, name: &String| {
+        side.as_ref().is_none_or(|bound| bound.contains(name))
+    };
+    left_columns
+        .iter()
+        .filter(|name| right_columns.contains(name))
+        .filter(|name| !(bound(&left, name) && bound(&right, name)))
+        .cloned()
+        .collect()
+}
+
+/// The conjuncts of `expression`, its `AND`s taken apart.
+fn conjuncts_of<'a>(expression: &'a LogicalExpression, into: &mut Vec<&'a LogicalExpression>) {
+    match expression {
+        LogicalExpression::Binary {
+            left,
+            op: crate::query::plan::BinaryOp::And,
+            right,
+        } => {
+            conjuncts_of(left, into);
+            conjuncts_of(right, into);
+        }
+        other => into.push(other),
+    }
+}
 
 #[cfg(test)]
 mod tests {

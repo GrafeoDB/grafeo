@@ -225,6 +225,7 @@ nav:
       - Type System: user-guide/gql/types.md
       - Schema & DDL: user-guide/gql/schema.md
       - Transactions & Sessions: user-guide/gql/transactions.md
+      - Coming from Cypher: user-guide/gql/coming-from-cypher.md
     - Cypher Query Language:
       - user-guide/cypher/index.md
       - Basic Queries: user-guide/cypher/basic-queries.md

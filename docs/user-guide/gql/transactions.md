@@ -37,12 +37,11 @@ START TRANSACTION ISOLATION LEVEL READ COMMITTED
 -- Snapshot isolation (repeatable reads)
 START TRANSACTION ISOLATION LEVEL SNAPSHOT ISOLATION
 
--- Serializable (strongest isolation)
-START TRANSACTION ISOLATION LEVEL SERIALIZABLE
-
 -- Combine with access mode
-START TRANSACTION READ ONLY ISOLATION LEVEL SERIALIZABLE
+START TRANSACTION READ ONLY ISOLATION LEVEL SNAPSHOT ISOLATION
 ```
+
+`ISOLATION LEVEL SERIALIZABLE` parses, but is refused with `GRAFEO-Q004` for now: snapshot isolation is the strongest level until queries record their reads, which preventing write skew needs (see [Isolation Levels](../transactions.md#isolation-levels)).
 
 ### Committing and Rolling Back
 

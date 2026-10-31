@@ -196,9 +196,13 @@ CREATE OR REPLACE GRAPH TYPE social_network (
 -- With key label sets (GG21)
 CREATE GRAPH TYPE labeled_type (
     NODE TYPE Person KEY (PersonLabel) (name STRING NOT NULL, age INTEGER),
-    EDGE TYPE KNOWS
+    EDGE TYPE KNOWS ()
 )
 ```
+
+A `NODE TYPE` or `EDGE TYPE` with a property list, even an empty one (`EDGE TYPE KNOWS ()`), or with a `KEY`
+clause, defines the type in the graph type. A bare name (`EDGE TYPE KNOWS`) refers to a type that already exists
+in the catalog.
 
 The element types can also be written as patterns, in braces as ISO GQL writes them or in parentheses. An edge pattern declares its edge type with the node types at its ends as the only sources and targets:
 

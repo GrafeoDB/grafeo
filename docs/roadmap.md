@@ -15,34 +15,38 @@ For what has shipped, see the [CHANGELOG](changelog.md).
 | **0.3** | AI compatibility: vector type, HNSW index, SIMD distance functions, quantization, hybrid graph and vector queries |
 | **0.4** | Developer accessibility: Node.js, Go and WASM bindings, SQL/PGQ, CLI, filtered vector search |
 | **0.5.0 to 0.5.44** | Beta: text and hybrid search, 25+ graph algorithms callable from queries, schema and constraints, RDF with SPARQL and SHACL, single-file storage, encryption at rest, backup, access control, compact and tiered storage, C#, Dart and C bindings; 0.5.43 was a stabilization release and 0.5.44 a durability and consistency release |
+| [**0.6.0**](https://github.com/GrafeoDB/grafeo/milestone/10) | Dependable by design: one storage format with WAL v2, chunked sections past 4 GiB and automatic migration; transactions that own their changes, with snapshot isolation on every read path; a row-group store with incremental checkpoints and online backups; time travel; exact decimals; RDF terms through SPARQL |
 
 ---
 
-## Planned: finishing the beta
+## Planned
 
-The 0.6 series makes Grafeo dependable by design: durable and crash-safe persistence, real snapshot isolation, and memory use close to what a dense layout needs, followed by driver, protocol and language completeness.
+First we fix what 0.6.0 got wrong and prove that its storage holds up. Then comes a faster query engine, the remaining driver, protocol and language work, and binding parity. 0.7.0 is the one planned release that changes the file format, followed by the features that build on it, and then 1.0. Each release ships when its planned work passes its checks; the dates on the milestones are targets.
 
 | Release | Focus |
 | --- | --- |
-| [**0.6.0**](https://github.com/GrafeoDB/grafeo/milestone/10) | One storage format: WAL v2 and chunked sections without the 4 GiB limit, with automatic migration. Transactions own their changes: versioned properties and labels, a commit that is logged before it becomes visible. A compact-core store: a dense memory layout, enforced memory limits, incremental checkpoints |
-| [**0.6.1**](https://github.com/GrafeoDB/grafeo/milestone/4) | Transaction fixes on the new model; ADBC driver, SPARQL 1.1 Protocol and Graph Store Protocol, GQL vector types |
-| [**0.6.2**](https://github.com/GrafeoDB/grafeo/milestone/5) | To be planned |
-| [**0.6.3**](https://github.com/GrafeoDB/grafeo/milestone/6) | Push-only execution engine and benchmark-gated parallelism |
-| [**0.6.4**](https://github.com/GrafeoDB/grafeo/milestone/7) | API parity across bindings, feature flag cleanup, query language completeness, test depth |
+| [**0.6.1**](https://github.com/GrafeoDB/grafeo/milestone/4) | Fixes for problems found in 0.6.0: backups, very long queries, decimal arithmetic, time travel and transaction edge cases, and docs that promise too much |
+| [**0.6.2**](https://github.com/GrafeoDB/grafeo/milestone/5) | Stability: test storage and transactions against power loss, damaged files and heavy concurrency; open a database without loading all of it, so a database larger than its memory limit opens and answers queries while the store stays within that limit |
+| [**0.6.3**](https://github.com/GrafeoDB/grafeo/milestone/6) | Faster queries: first a planner that sends ordinary queries to the fast paths Grafeo already has (factorized counts, worst-case optimal joins, counts read from node degrees), then a new query engine, query memory kept within the limit, and a plan cache that replans when the data changes |
+| [**0.6.4**](https://github.com/GrafeoDB/grafeo/milestone/16) | Queries that use several cores where benchmarks show a gain, real `Serializable` isolation, an ordered property index for range conditions and top-k queries, and databases with vector indexes that open without rebuilding them |
+| [**0.6.5**](https://github.com/GrafeoDB/grafeo/milestone/7) | Drivers, protocols and languages that need no file format change: the ADBC driver, the SPARQL 1.1 Protocol and Graph Store Protocol, missing GQL syntax, and more complete GQL, Cypher and SQL/PGQ support; GraphQL and Gremlin keep what works and refuse the rest with a clear error |
+| [**0.6.6**](https://github.com/GrafeoDB/grafeo/milestone/11) | The same API in every binding, simpler feature flags, deeper tests, and a check that every documented guarantee holds |
+| [**0.7.0**](https://github.com/GrafeoDB/grafeo/milestone/8) | The data model release: type inheritance, a stored property schema per label, RDF stored like the property graph so every SPARQL read sees one snapshot, geospatial points, integrity protection for encrypted databases, the RDF 1.2 data model and GQL vector types in one file format change, and the removal of everything 0.6 deprecated |
+| [**0.7.1**](https://github.com/GrafeoDB/grafeo/milestone/12) | Features on the new data model: SPARQL 1.2, and queries that match a type together with the types that extend it |
+| [**0.7.2**](https://github.com/GrafeoDB/grafeo/milestone/13), [**0.7.3**](https://github.com/GrafeoDB/grafeo/milestone/15) | Room for work not planned yet, with no file format changes |
+| [**1.0**](https://github.com/GrafeoDB/grafeo/milestone/14) | Stable: no new features, the public API and file format frozen, semantic versioning from here on |
 
-The 0.6.0 storage format change is the only planned migration: older files are converted automatically on their first read-write open, and the old file is kept next to the new one (see [Versioning](versioning.md)).
+0.7.0 is the last planned file format change before 1.0. A 0.6 database is converted automatically the first time 0.7 opens it for writing, and the old file is kept next to the new one (see [Versioning](versioning.md)). 0.7 no longer opens 0.5.x databases: open each one for writing with 0.6 first.
 
 ---
 
-## Next
+## After 1.0
 
 | Release | Focus |
 | --- | --- |
-| [**0.7.0**](https://github.com/GrafeoDB/grafeo/milestone/8) | Release candidate: no new features, blocker review and final audit, removal of the deprecated feature profile names. If it works in 0.7, it works in 1.0 |
-| [**0.8.0**](https://github.com/GrafeoDB/grafeo/milestone/9) | Per-graph access control with pluggable authentication (JWT, OIDC), reactive event bus |
-| **1.0** | Stable: semantic versioning commitment, public API frozen |
+| [**1.1**](https://github.com/GrafeoDB/grafeo/milestone/9) | Enterprise features: per-graph access control with pluggable authentication (JWT, OIDC), enterprise authorization (row-level security, property masking, `GRANT` and `REVOKE`), a reactive event bus, and inbound connectors starting with Kafka |
 
-**Later, not scheduled**: enterprise authorization (row-level security, property masking, `GRANT`/`REVOKE`, LDAP and SAML), inbound connectors starting with Kafka, distributed deployment, more language bindings.
+**Later, not scheduled**: distributed deployment, more language bindings.
 
 ---
 

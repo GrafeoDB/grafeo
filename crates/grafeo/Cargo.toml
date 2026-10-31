@@ -28,7 +28,7 @@ default = ["embedded"]
 # Atomic query language features
 gql = ["grafeo-engine/gql"]
 cypher = ["grafeo-engine/cypher"]
-sparql = ["grafeo-engine/sparql", "grafeo-engine/triple-store"]
+sparql = ["grafeo-engine/sparql", "triple-store"]
 gremlin = ["grafeo-engine/gremlin"]
 graphql = ["grafeo-engine/graphql"]
 sql-pgq = ["grafeo-engine/sql-pgq"]
@@ -44,7 +44,7 @@ embed = ["grafeo-engine/embed"]  # Opt-in ONNX embedding generation (~17MB)
 languages = ["gql", "cypher", "sparql", "gremlin", "graphql", "sql-pgq"]  # All query languages
 storage = ["wal", "grafeo-file", "spill", "mmap"]  # Persistent storage (WAL, single-file, disk spill, mmap)
 algos = ["grafeo-engine/algos"]  # Graph algorithms (SSSP, PageRank, etc.)
-triple-store = ["grafeo-engine/triple-store"]  # RDF triple store
+triple-store = ["grafeo-engine/triple-store", "regex"]  # RDF triple store, with the full regex for SPARQL REGEX
 regex = ["grafeo-engine/regex"]  # Full regex (default for non-WASM)
 regex-lite = ["grafeo-engine/regex-lite"]  # Lightweight regex (for WASM)
 shacl = ["grafeo-engine/shacl"]  # SHACL shapes constraint language (W3C validation)

@@ -783,6 +783,9 @@ pub enum IndexNameKindRecord {
     BTree,
     /// A full-text index.
     FullText,
+    /// A vector index. Added in 0.6.1, after the others so they keep their
+    /// encoding: a file with one cannot be read by 0.6.0.
+    Vector,
 }
 
 /// The name `CREATE INDEX` gave an index, for `SHOW INDEXES` and
@@ -1824,6 +1827,7 @@ mod tests {
             ("doc_hash", IndexNameKindRecord::Hash),
             ("doc_btree", IndexNameKindRecord::BTree),
             ("doc_text", IndexNameKindRecord::FullText),
+            ("doc_vector", IndexNameKindRecord::Vector),
         ] {
             records.push(CatalogRecord::IndexName(IndexNameRecord {
                 name: name.into(),
@@ -2087,6 +2091,44 @@ mod tests {
         assert_eq!(encoded, EXPECTED, "{encoded:?}");
     }
 
+    /// The name of a vector index, a kind 0.6.1 added at the end of
+    /// `IndexNameKindRecord` so the earlier kinds keep their codes: its
+    /// layout is pinned as the other records' are.
+    #[test]
+    fn a_vector_index_name_record_is_pinned() {
+        #[rustfmt::skip]
+        const EXPECTED: &[u8] = &[
+            8, 1, 17, 0, 0, 0, // kind 8 (IndexName), required, 17 bytes
+            7, 100, 111, 99, 95, 101, 109, 98, // "doc_emb"
+            3, 68, 111, 99, // on "Doc"
+            3, 101, 109, 98, // "emb"
+            3, // vector
+        ];
+        let record = CatalogRecord::IndexName(IndexNameRecord {
+            name: "doc_emb".into(),
+            label: "Doc".into(),
+            property: "emb".into(),
+            kind: IndexNameKindRecord::Vector,
+        });
+        assert_eq!(framed(&record), EXPECTED);
+        assert_eq!(read_all(EXPECTED).unwrap(), [record]);
+    }
+
+    /// A reader that does not know a kind code refuses the record instead of
+    /// reading another kind: a name record with kind code 4 does not decode.
+    #[test]
+    fn an_unknown_index_name_kind_is_refused() {
+        #[rustfmt::skip]
+        const UNKNOWN: &[u8] = &[
+            8, 1, 17, 0, 0, 0,
+            7, 100, 111, 99, 95, 101, 109, 98,
+            3, 68, 111, 99,
+            3, 101, 109, 98,
+            4, // no such kind
+        ];
+        assert!(read_all(UNKNOWN).is_err());
+    }
+
     /// The codes of property types and the variant indices of the other
     /// enums are part of the format.
     #[test]
@@ -2214,9 +2256,10 @@ mod tests {
                 IndexNameKindRecord::Hash,
                 IndexNameKindRecord::BTree,
                 IndexNameKindRecord::FullText,
+                IndexNameKindRecord::Vector,
             ]
             .map(|variant| bincode_of(&variant)),
-            [[0], [1], [2]]
+            [[0], [1], [2], [3]]
         );
     }
 

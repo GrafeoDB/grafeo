@@ -2353,14 +2353,16 @@ impl<'a> Parser<'a> {
         )
     }
 
-    /// Get the text of the current token as an identifier.
+    /// Get the text of the current token as an identifier: a quoted one
+    /// without its backticks, and a doubled backtick inside is one backtick
+    /// (`` `a``b` `` is ``a`b``).
     fn get_identifier_text(&self) -> String {
-        let mut text = self.current.text.clone();
-        // Remove backticks from quoted identifier
+        let text = &self.current.text;
         if self.current.kind == TokenKind::QuotedIdentifier {
-            text = text[1..text.len() - 1].to_string();
+            text[1..text.len() - 1].replace("``", "`")
+        } else {
+            text.clone()
         }
-        text
     }
 
     fn peek_kind(&mut self) -> TokenKind {
@@ -2948,6 +2950,71 @@ impl<'a> Parser<'a> {
         })
     }
 
+    /// Reads the same scalar, temporal and nested list property types as GQL,
+    /// by the rules of `query::schema` (the depth of `LIST<...>` levels, the
+    /// two-word `DATETIME` types). List levels are counted rather than
+    /// recursed into. A quoted name stays one name.
+    fn parse_property_type_name(&mut self) -> Result<String> {
+        use crate::query::schema::{
+            datetime_type_prefix, list_type_depth_error, property_type_kind, unknown_property_type,
+        };
+
+        let mut levels = 0;
+        let mut data_type = loop {
+            let quoted = self.current.kind == TokenKind::QuotedIdentifier;
+            let mut name = self.expect_identifier()?;
+            if !quoted && name.eq_ignore_ascii_case("LIST") && self.current.kind == TokenKind::Lt {
+                levels += 1;
+                if let Some(message) = list_type_depth_error(levels) {
+                    return Err(self.error(&message));
+                }
+                self.advance(); // <
+                continue;
+            }
+            if !quoted && let Some(prefix) = datetime_type_prefix(&name) {
+                if !self.is_contextual("DATETIME") {
+                    return Err(self.error(&format!("Expected DATETIME after {prefix}")));
+                }
+                self.advance();
+                break format!("{prefix} DATETIME");
+            }
+            if property_type_kind(&name).is_none() {
+                return Err(self.error(&unknown_property_type(&name)));
+            }
+            // DECIMAL(precision[, scale]), spelled as the catalog prints it.
+            if self.current.kind == TokenKind::LParen
+                && grafeo_common::types::DecimalType::from_name(&name) == Some(None)
+            {
+                let mut written = format!("{name}(");
+                self.advance();
+                while !matches!(self.current.kind, TokenKind::RParen | TokenKind::Eof) {
+                    written.push_str(&self.current.text);
+                    self.advance();
+                }
+                self.expect(TokenKind::RParen)?;
+                written.push(')');
+                name = match grafeo_common::types::DecimalType::from_name(&written) {
+                    Some(Some(decimal)) => decimal.to_string(),
+                    _ => {
+                        return Err(self.error(&format!(
+                            "{written}: {}",
+                            grafeo_common::types::DecimalError::InvalidPrecision
+                        )));
+                    }
+                };
+            }
+            break name;
+        };
+        for _ in 0..levels {
+            if self.current.kind != TokenKind::Gt {
+                return Err(self.error(&format!("Expected '>' to close LIST<{data_type}")));
+            }
+            self.advance();
+            data_type = format!("LIST<{data_type}>");
+        }
+        Ok(data_type)
+    }
+
     /// Parses inline property definitions: `{ prop TYPE [NOT NULL], ... }`
     ///
     /// Supports both GQL-style (`prop TYPE`) and Neo4j-style (`prop :: TYPE`).
@@ -2969,34 +3036,7 @@ impl<'a> Parser<'a> {
                 self.advance(); // consume second :
             }
 
-            // A type Grafeo supports, as in GQL's type DDL: any other name
-            // used to declare an `ANY` property.
-            let mut data_type = self.expect_identifier()?;
-            if crate::query::schema::property_type_kind(&data_type).is_none() {
-                return Err(self.error(&crate::query::schema::unknown_property_type(&data_type)));
-            }
-            // DECIMAL(precision[, scale]), spelled as the catalog prints it
-            if self.current.kind == TokenKind::LParen
-                && grafeo_common::types::DecimalType::from_name(&data_type) == Some(None)
-            {
-                let mut written = format!("{data_type}(");
-                self.advance();
-                while !matches!(self.current.kind, TokenKind::RParen | TokenKind::Eof) {
-                    written.push_str(&self.current.text);
-                    self.advance();
-                }
-                self.expect(TokenKind::RParen)?;
-                written.push(')');
-                data_type = match grafeo_common::types::DecimalType::from_name(&written) {
-                    Some(Some(decimal)) => decimal.to_string(),
-                    _ => {
-                        return Err(self.error(&format!(
-                            "{written}: {}",
-                            grafeo_common::types::DecimalError::InvalidPrecision
-                        )));
-                    }
-                };
-            }
+            let data_type = self.parse_property_type_name()?;
 
             // Optional NOT NULL
             let nullable = if self.current.kind == TokenKind::Not {
@@ -5133,6 +5173,43 @@ mod tests {
             };
             let text = format!("{statement:?}");
             assert!(text.contains("OptionalMatch"), "{query}: {text}");
+        }
+    }
+
+    /// The property types the parser refuses: malformed lists, unknown or
+    /// out-of-range element types, quoted keywords, and lists nested deeper
+    /// than a value may be. What it accepts is checked end to end in the
+    /// engine's `cypher_type_ddl` tests.
+    #[test]
+    fn cypher_property_type_errors_and_list_depth_are_bounded() {
+        for data_type in [
+            "ZONED",
+            "LOCAL STRING",
+            "LIST<>",
+            "LIST<STRING",
+            "LIST<STRING>>",
+            "LIST<UNKNOWN_TYPE>",
+            "LIST<DECIMAL(0,0)>",
+            "`LIST<STRING>`",
+            "`LIST`<STRING>",
+            "`ZONED` DATETIME",
+            "`LOCAL` DATETIME",
+        ] {
+            parse_err(&format!(
+                "ALTER CURRENT GRAPH TYPE SET {{ (:T {{a {data_type}}}) }}"
+            ));
+        }
+        let nested = |depth: usize| format!("{}INT64{}", "LIST<".repeat(depth), ">".repeat(depth));
+        for depth in [129, 100_000] {
+            let query = format!(
+                "ALTER CURRENT GRAPH TYPE SET {{ (:T {{a {}}}) }}",
+                nested(depth)
+            );
+            let error = Parser::new(&query).parse().unwrap_err().to_string();
+            assert!(
+                error.contains("A property type nests at most 128 LIST<...> levels"),
+                "depth {depth}: {error}"
+            );
         }
     }
 }

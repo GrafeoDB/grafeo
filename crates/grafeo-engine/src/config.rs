@@ -554,9 +554,11 @@ pub struct Config {
 
     /// Maximum time a single query may run before being cancelled.
     ///
-    /// When set, the executor checks the deadline between operator batches and
-    /// returns `QueryError::timeout()` if the wall-clock limit is exceeded.
-    /// `None` means no timeout (queries may run indefinitely).
+    /// When set, the deadline is checked between the chunks a query returns
+    /// and once per chunk inside the operators that read or make many rows
+    /// before they return one (aggregates, sorts, joins, filters, `UNWIND`),
+    /// so a query fails with a timeout error within about one chunk of work
+    /// past the limit. `None` means no timeout (queries may run indefinitely).
     ///
     /// Default: 30 seconds. Use `with_query_timeout()` to change or
     /// `without_query_timeout()` to disable.

@@ -7,7 +7,7 @@
 // Re-export AggregateState so both pull and push operators import from one place.
 pub use super::aggregate::AggregateState;
 
-use grafeo_common::types::Value;
+use grafeo_common::types::{TemporalComparison, Value};
 
 use crate::execution::DataChunk;
 
@@ -97,9 +97,21 @@ pub struct AggregateExpr {
     /// (an unbound operand, NULL, is skipped), AVG divides by XPath's rules,
     /// and a group without operands gives 0.
     pub rdf_literals: bool,
+    /// How DISTINCT, MIN and MAX read a local datetime against a zoned one:
+    /// as the statement's `=` and `<` read them (see
+    /// [`TemporalComparison::normalize`]). `TypesApart`, the default, reads
+    /// every value as itself.
+    pub temporal: TemporalComparison,
 }
 
 impl AggregateExpr {
+    /// The expression with `temporal` as its reading of temporal values.
+    #[must_use]
+    pub fn with_temporal(mut self, temporal: TemporalComparison) -> Self {
+        self.temporal = temporal;
+        self
+    }
+
     /// Creates a COUNT(*) expression.
     pub fn count_star() -> Self {
         Self {
@@ -111,6 +123,7 @@ impl AggregateExpr {
             percentile: None,
             separator: None,
             rdf_literals: false,
+            temporal: TemporalComparison::TypesApart,
         }
     }
 
@@ -125,6 +138,7 @@ impl AggregateExpr {
             percentile: None,
             separator: None,
             rdf_literals: false,
+            temporal: TemporalComparison::TypesApart,
         }
     }
 
@@ -139,6 +153,7 @@ impl AggregateExpr {
             percentile: None,
             separator: None,
             rdf_literals: false,
+            temporal: TemporalComparison::TypesApart,
         }
     }
 
@@ -153,6 +168,7 @@ impl AggregateExpr {
             percentile: None,
             separator: None,
             rdf_literals: false,
+            temporal: TemporalComparison::TypesApart,
         }
     }
 
@@ -167,6 +183,7 @@ impl AggregateExpr {
             percentile: None,
             separator: None,
             rdf_literals: false,
+            temporal: TemporalComparison::TypesApart,
         }
     }
 
@@ -181,6 +198,7 @@ impl AggregateExpr {
             percentile: None,
             separator: None,
             rdf_literals: false,
+            temporal: TemporalComparison::TypesApart,
         }
     }
 
@@ -195,6 +213,7 @@ impl AggregateExpr {
             percentile: None,
             separator: None,
             rdf_literals: false,
+            temporal: TemporalComparison::TypesApart,
         }
     }
 
@@ -209,6 +228,7 @@ impl AggregateExpr {
             percentile: None,
             separator: None,
             rdf_literals: false,
+            temporal: TemporalComparison::TypesApart,
         }
     }
 
@@ -223,6 +243,7 @@ impl AggregateExpr {
             percentile: None,
             separator: None,
             rdf_literals: false,
+            temporal: TemporalComparison::TypesApart,
         }
     }
 
@@ -237,6 +258,7 @@ impl AggregateExpr {
             percentile: None,
             separator: None,
             rdf_literals: false,
+            temporal: TemporalComparison::TypesApart,
         }
     }
 
@@ -251,6 +273,7 @@ impl AggregateExpr {
             percentile: None,
             separator: None,
             rdf_literals: false,
+            temporal: TemporalComparison::TypesApart,
         }
     }
 
@@ -269,6 +292,7 @@ impl AggregateExpr {
             percentile: Some(percentile.clamp(0.0, 1.0)),
             separator: None,
             rdf_literals: false,
+            temporal: TemporalComparison::TypesApart,
         }
     }
 
@@ -287,6 +311,7 @@ impl AggregateExpr {
             percentile: Some(percentile.clamp(0.0, 1.0)),
             separator: None,
             rdf_literals: false,
+            temporal: TemporalComparison::TypesApart,
         }
     }
 
@@ -331,6 +356,16 @@ impl HashableValue {
     }
 }
 
+impl HashableValue {
+    /// The identity of `value` as `temporal` reads it: under GQL's reading a
+    /// local datetime is one value with the zoned datetime of its instant
+    /// (see [`TemporalComparison::normalize`]).
+    #[must_use]
+    pub fn under(value: &Value, temporal: TemporalComparison) -> Self {
+        Self::from(temporal.normalize(value).as_ref())
+    }
+}
+
 impl From<&Value> for HashableValue {
     fn from(value: &Value) -> Self {
         Self(grafeo_common::types::HashableValue(representative(value)))
@@ -362,9 +397,21 @@ impl From<Value> for HashableValue {
 pub(crate) struct RowKey(Vec<HashableValue>);
 
 impl RowKey {
-    /// The key of `values`.
+    /// The key of `values`, every value read as itself.
+    #[cfg(test)]
     pub(crate) fn of(values: &[Value]) -> Self {
-        Self(values.iter().map(HashableValue::from).collect())
+        Self::of_under(values, TemporalComparison::TypesApart)
+    }
+
+    /// The key of `values`, read as `temporal` reads them (see
+    /// [`TemporalComparison::normalize`]).
+    pub(crate) fn of_under(values: &[Value], temporal: TemporalComparison) -> Self {
+        Self(
+            values
+                .iter()
+                .map(|value| HashableValue::under(value, temporal))
+                .collect(),
+        )
     }
 
     /// The values of `row` in `columns`, a missing one as null.
@@ -380,33 +427,49 @@ impl RowKey {
             .collect()
     }
 
-    /// The key of `row` in `columns`.
-    pub(crate) fn from_row(chunk: &DataChunk, row: usize, columns: &[usize]) -> Self {
+    /// The key of `row` in `columns`, its values read as `temporal` reads
+    /// them (see [`TemporalComparison::normalize`]).
+    pub(crate) fn from_row(
+        chunk: &DataChunk,
+        row: usize,
+        columns: &[usize],
+        temporal: TemporalComparison,
+    ) -> Self {
         Self(
             columns
                 .iter()
-                .map(|&column| Self::identity(chunk, row, column))
+                .map(|&column| Self::identity(chunk, row, column, temporal))
                 .collect(),
         )
     }
 
-    /// The key of `row` in every column of `chunk`.
-    pub(crate) fn from_all_columns(chunk: &DataChunk, row: usize) -> Self {
+    /// The key of `row` in every column of `chunk`, read as `temporal`
+    /// reads its values.
+    pub(crate) fn from_all_columns(
+        chunk: &DataChunk,
+        row: usize,
+        temporal: TemporalComparison,
+    ) -> Self {
         Self(
             (0..chunk.column_count())
-                .map(|column| Self::identity(chunk, row, column))
+                .map(|column| Self::identity(chunk, row, column, temporal))
                 .collect(),
         )
     }
 
-    /// The identity of the value of `row` in `column`, a missing one as null.
-    fn identity(chunk: &DataChunk, row: usize, column: usize) -> HashableValue {
-        HashableValue::from(
-            chunk
-                .column(column)
-                .and_then(|values| values.get_value(row))
-                .unwrap_or(Value::Null),
-        )
+    /// The identity of the value of `row` in `column`, a missing one as
+    /// null.
+    fn identity(
+        chunk: &DataChunk,
+        row: usize,
+        column: usize,
+        temporal: TemporalComparison,
+    ) -> HashableValue {
+        let value = chunk
+            .column(column)
+            .and_then(|values| values.get_value(row))
+            .unwrap_or(Value::Null);
+        HashableValue::under(&value, temporal)
     }
 
     /// The representatives of the key's values: equal keys have equal

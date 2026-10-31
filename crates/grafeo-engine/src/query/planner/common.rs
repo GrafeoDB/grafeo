@@ -8,7 +8,7 @@
 use crate::query::plan::{
     BinaryOp, ListPredicateKind, LogicalExpression, LogicalOperator, MapProjectionEntry, UnaryOp,
 };
-use grafeo_common::types::{LogicalType, Value};
+use grafeo_common::types::{LogicalType, TemporalComparison, Value};
 use grafeo_common::utils::error::{Error, Result};
 use grafeo_core::execution::operators::{
     DistinctOperator, ExceptOperator, HashJoinOperator, IntersectOperator,
@@ -39,25 +39,26 @@ pub(crate) fn build_skip(
 /// Builds a DISTINCT physical operator.
 ///
 /// Handles both full-row dedup and column-specific dedup (when `distinct.columns` is set).
+/// The keys read a local datetime against a zoned one as `temporal` reads it
+/// (the statement's `=`; `TypesApart` for SPARQL, which compares its terms as
+/// they are).
 pub(crate) fn build_distinct(
     input: Box<dyn Operator>,
     columns: Vec<String>,
     distinct_columns: Option<&[String]>,
+    temporal: TemporalComparison,
 ) -> (Box<dyn Operator>, Vec<String>) {
-    let operator: Box<dyn Operator> = if let Some(dist_cols) = distinct_columns {
-        let col_indices: Vec<usize> = dist_cols
-            .iter()
-            .filter_map(|name| columns.iter().position(|c| c == name))
-            .collect();
-        if col_indices.is_empty() {
-            Box::new(DistinctOperator::new(input))
-        } else {
-            Box::new(DistinctOperator::on_columns(input, col_indices))
-        }
+    let col_indices: Vec<usize> = distinct_columns
+        .into_iter()
+        .flatten()
+        .filter_map(|name| columns.iter().position(|c| c == name))
+        .collect();
+    let operator = if col_indices.is_empty() {
+        DistinctOperator::new(input)
     } else {
-        Box::new(DistinctOperator::new(input))
+        DistinctOperator::on_columns(input, col_indices)
     };
-    (operator, columns)
+    (Box::new(operator.with_temporal(temporal)), columns)
 }
 
 /// Builds a UNION physical operator from multiple pre-planned inputs.
@@ -75,25 +76,29 @@ pub(crate) fn build_union(
     Ok((operator, columns))
 }
 
-/// Builds an EXCEPT physical operator.
+/// Builds an EXCEPT physical operator whose rows read a local datetime
+/// against a zoned one as `temporal` reads it (the statement's `=`).
 pub(crate) fn build_except(
     left: Box<dyn Operator>,
     right: Box<dyn Operator>,
     columns: Vec<String>,
     all: bool,
+    temporal: TemporalComparison,
 ) -> (Box<dyn Operator>, Vec<String>) {
-    let operator = Box::new(ExceptOperator::new(left, right, all));
+    let operator = Box::new(ExceptOperator::new(left, right, all).with_temporal(temporal));
     (operator, columns)
 }
 
-/// Builds an INTERSECT physical operator.
+/// Builds an INTERSECT physical operator whose rows read a local datetime
+/// against a zoned one as `temporal` reads it (the statement's `=`).
 pub(crate) fn build_intersect(
     left: Box<dyn Operator>,
     right: Box<dyn Operator>,
     columns: Vec<String>,
     all: bool,
+    temporal: TemporalComparison,
 ) -> (Box<dyn Operator>, Vec<String>) {
-    let operator = Box::new(IntersectOperator::new(left, right, all));
+    let operator = Box::new(IntersectOperator::new(left, right, all).with_temporal(temporal));
     (operator, columns)
 }
 
@@ -134,13 +139,14 @@ pub(crate) fn build_inner_join(
         PhysicalJoinType::Inner
     };
 
-    // Decide whether to swap sides: build on the smaller input.
-    // Only swap for equi-joins (not cross joins) and when left is significantly larger.
+    // Decide whether to swap sides: build on the smaller input. The right
+    // side is the build side, so swap for an equi-join (not a cross join)
+    // whose left side is clearly the smaller.
     let swap_sides = matches!(join_type, PhysicalJoinType::Inner)
-        && cardinalities.is_some_and(|(left_card, right_card)| right_card < left_card * 0.8);
+        && cardinalities.is_some_and(|(left_card, right_card)| left_card < right_card * 0.8);
 
     if swap_sides {
-        // Swap: right becomes probe, left becomes build
+        // Swap: right becomes probe, left (the smaller) becomes build
         // Output order is right+left from the join, then we project back to left+right
         let mut join_columns: Vec<String> = right_columns.to_vec();
         join_columns.extend(left_columns.iter().cloned());
@@ -247,13 +253,28 @@ pub(crate) fn build_anti_join(
     right_columns: &[String],
     schema: Vec<LogicalType>,
 ) -> (Box<dyn Operator>, Vec<String>) {
-    let (probe_keys, build_keys) = find_shared_join_keys(&left_columns, right_columns);
-
     // No shared variables: MINUS is a no-op (keep all left rows).
-    if probe_keys.is_empty() {
+    if find_shared_join_keys(&left_columns, right_columns)
+        .0
+        .is_empty()
+    {
         return (left, left_columns);
     }
+    build_not_exists_join(left, right, left_columns, right_columns, schema)
+}
 
+/// Builds the ANTI JOIN of `FILTER NOT EXISTS`: the left rows that no right
+/// row matches on the shared variables. Unlike MINUS, a right side that
+/// shares no variable matches every left row, so any right row removes them
+/// all (`{ FILTER NOT EXISTS { P } }` is empty when P has a solution).
+pub(crate) fn build_not_exists_join(
+    left: Box<dyn Operator>,
+    right: Box<dyn Operator>,
+    left_columns: Vec<String>,
+    right_columns: &[String],
+    schema: Vec<LogicalType>,
+) -> (Box<dyn Operator>, Vec<String>) {
+    let (probe_keys, build_keys) = find_shared_join_keys(&left_columns, right_columns);
     let operator: Box<dyn Operator> = Box::new(HashJoinOperator::new(
         left,
         right,
@@ -350,6 +371,89 @@ pub(crate) fn build_left_join(
     } else {
         (join_op, output_columns, join_schema)
     }
+}
+
+/// Builds a SPARQL join (`PhysicalJoinType::Inner`) or left join
+/// (`PhysicalJoinType::Left`) where the shared variables in `loose` may be
+/// unbound on a side: two rows are compatible when they agree on the shared
+/// variables both bind (SPARQL 1.1 sec 18.3). It hashes on the other shared
+/// variables, checks the loose ones per pair (an unbound one agrees with any
+/// value) and outputs the bound value of each; `residual` must hold for a
+/// pair too. The output is the left columns, then the right ones the left
+/// does not have.
+#[cfg(feature = "triple-store")]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the two sides of the join and how they meet"
+)]
+pub(crate) fn build_compatible_join(
+    left: Box<dyn Operator>,
+    right: Box<dyn Operator>,
+    left_columns: &[String],
+    right_columns: &[String],
+    left_types: &[LogicalType],
+    right_types: &[LogicalType],
+    loose: &[String],
+    join_type: PhysicalJoinType,
+    residual: Option<Box<dyn grafeo_core::execution::operators::JoinCondition>>,
+) -> (Box<dyn Operator>, Vec<String>, Vec<LogicalType>) {
+    let mut probe_keys = Vec::new();
+    let mut build_keys = Vec::new();
+    let mut pairs = Vec::new();
+    for (right_index, name) in right_columns.iter().enumerate() {
+        if let Some(left_index) = left_columns.iter().position(|c| c == name) {
+            if loose.contains(name) {
+                pairs.push((left_index, right_index));
+            } else {
+                probe_keys.push(left_index);
+                build_keys.push(right_index);
+            }
+        }
+    }
+    let mut join_schema = left_types.to_vec();
+    join_schema.extend(right_types.iter().cloned());
+    let condition = grafeo_core::execution::operators::CompatibleCondition::new(pairs, residual);
+    let join_op: Box<dyn Operator> = Box::new(
+        HashJoinOperator::new(
+            left,
+            right,
+            probe_keys,
+            build_keys,
+            join_type,
+            join_schema.clone(),
+        )
+        .with_residual(Box::new(condition)),
+    );
+
+    let width = left_columns.len();
+    let mut projections = Vec::new();
+    let mut output_columns = Vec::new();
+    let mut output_types = Vec::new();
+    for (left_index, name) in left_columns.iter().enumerate() {
+        let shared = right_columns.iter().position(|c| c == name);
+        projections.push(match shared {
+            Some(right_index) if loose.contains(name) => ProjectExpr::Coalesce {
+                first: left_index,
+                second: width + right_index,
+            },
+            _ => ProjectExpr::Column(left_index),
+        });
+        output_columns.push(name.clone());
+        output_types.push(join_schema[left_index].clone());
+    }
+    for (right_index, name) in right_columns.iter().enumerate() {
+        if !left_columns.contains(name) {
+            projections.push(ProjectExpr::Column(width + right_index));
+            output_columns.push(name.clone());
+            output_types.push(join_schema[width + right_index].clone());
+        }
+    }
+    let operator = Box::new(ProjectOperator::new(
+        join_op,
+        projections,
+        output_types.clone(),
+    ));
+    (operator, output_columns, output_types)
 }
 
 /// Finds shared variable names between two column lists and returns
@@ -821,7 +925,8 @@ mod tests {
         chunk
     }
 
-    /// Cardinalities where right (100) < left (1000) * 0.8 trigger the swap branch.
+    /// Cardinalities where left (100) < right (1000) * 0.8 trigger the swap
+    /// branch, which builds on the smaller left side.
     #[test]
     fn test_inner_join_swap_sides_preserves_types() {
         let left_cols = vec!["s".to_string(), "name".to_string()];
@@ -839,7 +944,7 @@ mod tests {
             &right_cols,
             &left_types,
             &right_types,
-            Some((1000.0, 100.0)),
+            Some((100.0, 1000.0)),
         );
 
         assert_eq!(output_columns, vec!["s", "name", "age"]);
@@ -850,7 +955,8 @@ mod tests {
         );
     }
 
-    /// Cardinalities where left (100) < right (1000) skip the swap.
+    /// Cardinalities where right (100) is the smaller skip the swap: the
+    /// right side is the build side already.
     #[test]
     fn test_inner_join_no_swap_preserves_types() {
         let left_cols = vec!["s".to_string(), "name".to_string()];
@@ -868,7 +974,7 @@ mod tests {
             &right_cols,
             &left_types,
             &right_types,
-            Some((100.0, 1000.0)),
+            Some((1000.0, 100.0)),
         );
 
         assert_eq!(output_columns, vec!["s", "name", "age"]);
@@ -928,6 +1034,102 @@ mod tests {
         assert_eq!(
             output_types,
             vec![LogicalType::String, LogicalType::String, LogicalType::Int64]
+        );
+    }
+
+    /// An input of `chunks` chunks of two rows that counts its pulls.
+    struct Counted {
+        chunks: usize,
+        types: Vec<LogicalType>,
+        pulls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl Operator for Counted {
+        fn next(&mut self) -> OperatorResult {
+            self.pulls
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if self.chunks == 0 {
+                return Ok(None);
+            }
+            self.chunks -= 1;
+            Ok(Some(make_chunk(&self.types)))
+        }
+
+        fn reset(&mut self) {}
+
+        fn name(&self) -> &'static str {
+            "Counted"
+        }
+
+        fn into_any(self: Box<Self>) -> Box<dyn std::any::Any + Send> {
+            self
+        }
+    }
+
+    /// The pulls of the left and the right input of an equi-join on `s`, three
+    /// chunks each, when the join gives its first chunk: the input it hashes
+    /// is read to its end (four pulls) before the other gives its first chunk.
+    fn pulls_after_the_first_chunk(cardinalities: Option<(f64, f64)>) -> (usize, usize) {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let left_cols = vec!["s".to_string(), "name".to_string()];
+        let right_cols = vec!["s".to_string(), "age".to_string()];
+        let left_types = vec![LogicalType::String, LogicalType::String];
+        let right_types = vec![LogicalType::String, LogicalType::Int64];
+        let left_pulls = Arc::new(AtomicUsize::new(0));
+        let right_pulls = Arc::new(AtomicUsize::new(0));
+        let left: Box<dyn Operator> = Box::new(Counted {
+            chunks: 3,
+            types: left_types.clone(),
+            pulls: Arc::clone(&left_pulls),
+        });
+        let right: Box<dyn Operator> = Box::new(Counted {
+            chunks: 3,
+            types: right_types.clone(),
+            pulls: Arc::clone(&right_pulls),
+        });
+        let (mut join, _, _) = build_inner_join(
+            left,
+            right,
+            &left_cols,
+            &right_cols,
+            &left_types,
+            &right_types,
+            cardinalities,
+        );
+        let first = join.next().unwrap();
+        assert!(first.is_some_and(|chunk| chunk.row_count() > 0));
+        (
+            left_pulls.load(Ordering::Relaxed),
+            right_pulls.load(Ordering::Relaxed),
+        )
+    }
+
+    /// The join hashes the smaller input: the left one when it is clearly
+    /// smaller (below 0.8 of the right), otherwise the right one, and the
+    /// right one without estimates.
+    #[test]
+    fn the_join_hashes_the_smaller_input() {
+        assert_eq!(
+            pulls_after_the_first_chunk(Some((100.0, 1000.0))),
+            (4, 1),
+            "the left is smaller: it is hashed"
+        );
+        assert_eq!(
+            pulls_after_the_first_chunk(Some((1000.0, 100.0))),
+            (1, 4),
+            "the right is smaller: it is hashed"
+        );
+        assert_eq!(
+            pulls_after_the_first_chunk(Some((900.0, 1000.0))),
+            (1, 4),
+            "the left is not clearly smaller: the right is hashed"
+        );
+        assert_eq!(
+            pulls_after_the_first_chunk(None),
+            (1, 4),
+            "no estimates: the right is hashed"
         );
     }
 }

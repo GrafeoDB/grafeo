@@ -25,7 +25,9 @@ use std::borrow::Cow;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use grafeo_common::change::{Before, DataOp, Labels, PendingVersion, Properties, Table};
+use grafeo_common::change::{
+    Before, ChangeMark, DataOp, Labels, PendingVersion, Properties, Table,
+};
 use grafeo_common::storage::value_codec::{MAX_PROPERTY_VALUE_DEPTH, nests_too_deep};
 use grafeo_common::types::{
     ArcStr, EdgeId, NodeId, PropertyKey, PropertyMap, ReadView, TransactionId, Value,
@@ -43,7 +45,7 @@ use crate::graph::{Direction, GraphStore};
 
 /// The property name of a map assignment: `SET n = {...}` or `SET n += {...}`
 /// arrive as one `("*", map)` pair.
-const MAP_ASSIGNMENT: &str = "*";
+pub const MAP_ASSIGNMENT: &str = "*";
 
 /// A node or an edge, for the writes both have.
 #[derive(Clone, Copy)]
@@ -289,6 +291,23 @@ impl GraphWriter {
     #[must_use]
     pub fn transaction_id(&self) -> Option<TransactionId> {
         self.view.transaction
+    }
+
+    /// The position after the transaction's last change, see
+    /// [`ChangeRecorder::change_mark`].
+    #[must_use]
+    pub fn change_mark(&self) -> Option<ChangeMark> {
+        self.recording.recorder.change_mark()
+    }
+
+    /// The nodes the transaction's changes after `mark` write, see
+    /// [`ChangeRecorder::nodes_written_after`].
+    pub fn nodes_written_after(
+        &self,
+        mark: ChangeMark,
+        nodes: &mut Vec<NodeId>,
+    ) -> Option<ChangeMark> {
+        self.recording.recorder.nodes_written_after(mark, nodes)
     }
 
     /// The node as this writer's transaction sees it, its own writes included.
@@ -1332,16 +1351,21 @@ fn record_applied(
     op: DataOp,
     applied: Applied,
 ) -> Result<bool, OperatorError> {
-    match applied {
+    let changed = match applied {
         Applied::Changed { before, version } => {
             recording.recorder.record(op, before, version)?;
-            Ok(true)
+            true
         }
-        Applied::Unchanged => Ok(false),
+        Applied::Unchanged => false,
         // Committed at once without a before-image (an immediate write whose
         // entries nothing reads): nothing to record.
-        Applied::Committed => Ok(true),
+        Applied::Committed => true,
+    };
+    if changed {
+        grafeo_common::testing::commit_hook::run_after_data_write()
+            .map_err(|_| OperatorError::Execution("injected data-write failure".to_string()))?;
     }
+    Ok(changed)
 }
 
 /// The statement error of a write the graph's backend refused: a node

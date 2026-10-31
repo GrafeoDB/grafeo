@@ -22,7 +22,7 @@ func (db *Database) CreateNode(labels []string, properties map[string]any) (*Nod
 
 	var cProps *C.char
 	if properties != nil {
-		propsJSON, err := json.Marshal(properties)
+		propsJSON, err := marshalJSON(properties)
 		if err != nil {
 			return nil, err
 		}
@@ -115,7 +115,7 @@ func (db *Database) DetachDeleteNode(id uint64) (bool, error) {
 func (db *Database) SetNodeProperty(id uint64, key string, value any) error {
 	cKey := C.CString(key)
 	defer C.free(unsafe.Pointer(cKey))
-	valueJSON, err := json.Marshal(value)
+	valueJSON, err := marshalJSON(value)
 	if err != nil {
 		return err
 	}

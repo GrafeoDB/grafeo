@@ -107,6 +107,7 @@ regex-lite = "0.1"
 unicode-normalization = "0.1.26"
 
 # Testing
+num-bigint = "0.5"
 proptest = "1"
 criterion = { package = "codspeed-criterion-compat", version = "4" }
 tempfile = "3"
@@ -221,3 +222,10 @@ lto = "fat"
 codegen-units = 1
 strip = true
 panic = "abort"
+
+# The WASM packages: optimized for speed at a small size. Measured 2026-10-30
+# on the browser build: "s" is 1.55x faster than "z" overall (4.8x on inserts)
+# for 18% more gzipped bytes, and "3" adds another 22% for 4% more speed.
+[profile.wasm]
+inherits = "minimal-size"
+opt-level = "s"

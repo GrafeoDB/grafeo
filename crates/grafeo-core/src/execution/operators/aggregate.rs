@@ -7,10 +7,11 @@
 //! Shared types ([`AggregateFunction`], [`AggregateExpr`], [`HashableValue`]) live in
 //! the [`super::accumulator`] module.
 
+use grafeo_common::types::TemporalComparison;
 use grafeo_common::utils::hash::FxHashSet as HashSet;
 use indexmap::IndexMap;
 
-use grafeo_common::types::{Decimal, Duration, LogicalType, Value};
+use grafeo_common::types::{Decimal, DecimalSum, Duration, LogicalType, Value};
 
 use super::accumulator::{AggregateExpr, AggregateFunction, HashableValue, RowKey};
 use super::{Operator, OperatorError, OperatorResult};
@@ -40,15 +41,14 @@ pub enum AggregateState {
     SumFloat(f64, f64, i64),
     /// Sum distinct state (float sum, compensation, count, seen values).
     SumFloatDistinct(f64, f64, i64, HashSet<HashableValue>),
-    /// Exact sum of decimals and integers (`None` once it needs more than
-    /// 38 digits, which fails at [`finalize`](Self::finalize)), count of
+    /// Exact sum of decimals and integers, the same in any order (a sum
+    /// past 38 digits fails at [`finalize`](Self::finalize)), count of
     /// values added.
-    SumDecimal(Option<Decimal>, i64),
+    SumDecimal(DecimalSum, i64),
     /// Average state (sum, count).
     Avg(f64, i64),
-    /// Exact average of decimals and integers: their sum (`None` once it
-    /// needs more than 38 digits) and count.
-    AvgDecimal(Option<Decimal>, i64),
+    /// Exact average of decimals and integers: their sum and count.
+    AvgDecimal(DecimalSum, i64),
     /// Average distinct state (sum, count, seen values).
     AvgDistinct(f64, i64, HashSet<HashableValue>),
     /// Min state: the least value, in the order of ORDER BY (openCypher
@@ -122,14 +122,7 @@ pub enum AggregateState {
     SparqlError,
 }
 
-/// The decimal of a float sum that holds a whole number exactly (a sum of
-/// integers, or no value yet): integers below 2^53 are exact in a float.
-/// An integer sum as an exact decimal, `None` past 38 digits.
-fn exact_sum(sum: i128) -> Option<Decimal> {
-    Decimal::new(sum, 0).ok()
-}
-
-/// The error of a decimal sum past 38 digits.
+/// The error of a sum of durations past the duration range.
 fn duration_sum_out_of_range() -> OperatorError {
     OperatorError::numeric_out_of_range("sum of durations past the duration range")
 }
@@ -143,10 +136,13 @@ fn checked_duration_sum(a: Duration, b: Duration) -> Option<Duration> {
     ))
 }
 
+/// The error of a decimal sum past 38 digits.
 fn decimal_sum_out_of_range() -> OperatorError {
     OperatorError::numeric_out_of_range("sum of more than 38 digits")
 }
 
+/// The decimal of a float sum that holds a whole number exactly (a sum of
+/// integers, or no value yet): integers below 2^53 are exact in a float.
 fn exact_whole(sum: f64) -> Option<Decimal> {
     const EXACT: f64 = 9_007_199_254_740_992.0;
     if sum.fract() == 0.0 && sum.abs() < EXACT {
@@ -171,12 +167,12 @@ impl AggregateState {
             // SPARQL's AVG divides by XPath's rules: the average of integers
             // and decimals is a decimal (a double operand makes it a double).
             AggregateState::Avg(..) if expr.rdf_literals => AggregateState::SparqlNumbers(
-                Box::new(AggregateState::AvgDecimal(Some(Decimal::from_i64(0)), 0)),
+                Box::new(AggregateState::AvgDecimal(DecimalSum::new(), 0)),
             ),
             AggregateState::AvgDistinct(..) if expr.rdf_literals => {
                 AggregateState::SparqlNumbers(Box::new(AggregateState::Distinct {
                     seen: HashSet::default(),
-                    inner: Box::new(AggregateState::AvgDecimal(Some(Decimal::from_i64(0)), 0)),
+                    inner: Box::new(AggregateState::AvgDecimal(DecimalSum::new(), 0)),
                 }))
             }
             AggregateState::AvgDecimal(..) if expr.rdf_literals => {
@@ -330,6 +326,13 @@ impl AggregateState {
     /// aggregates, pass `Some(value)`. A null operand leaves every state as it
     /// was: aggregates skip nulls, also as the first operand of a group.
     pub fn update(&mut self, value: Option<Value>) {
+        self.update_under(value, TemporalComparison::TypesApart);
+    }
+
+    /// Updates the state with a new value (see [`Self::update`]), DISTINCT,
+    /// MIN and MAX reading a local datetime against a zoned one as
+    /// `temporal` reads it (the statement's `=` and `<`).
+    pub fn update_under(&mut self, value: Option<Value>, temporal: TemporalComparison) {
         if matches!(value, Some(Value::Null)) {
             return;
         }
@@ -345,7 +348,7 @@ impl AggregateState {
             }
             AggregateState::CountDistinct(count, seen) => {
                 if let Some(ref v) = value {
-                    let hashable = HashableValue::from(v);
+                    let hashable = HashableValue::under(v, temporal);
                     if seen.insert(hashable) {
                         *count += 1;
                     }
@@ -356,7 +359,8 @@ impl AggregateState {
                     *sum += i128::from(v);
                     *count += 1;
                 } else if let Some(Value::Decimal(d)) = value {
-                    let total = exact_sum(*sum).and_then(|whole| whole.checked_add(&d).ok());
+                    let mut total = DecimalSum::from_i128(*sum);
+                    total.add(&d);
                     *self = AggregateState::SumDecimal(total, *count + 1);
                 } else if let Some(Value::Float64(v)) = value {
                     // Convert to float sum, carrying count forward
@@ -370,13 +374,14 @@ impl AggregateState {
             }
             AggregateState::SumIntDistinct(sum, count, seen) => {
                 if let Some(ref v) = value {
-                    let hashable = HashableValue::from(v);
+                    let hashable = HashableValue::under(v, temporal);
                     if seen.insert(hashable) {
                         if let Value::Int64(i) = v {
                             *sum += i128::from(*i);
                             *count += 1;
                         } else if let Value::Decimal(d) = v {
-                            let total = exact_sum(*sum).and_then(|whole| whole.checked_add(d).ok());
+                            let mut total = DecimalSum::from_i128(*sum);
+                            total.add(d);
                             *self = AggregateState::Distinct {
                                 seen: std::mem::take(seen),
                                 inner: Box::new(AggregateState::SumDecimal(total, *count + 1)),
@@ -405,18 +410,17 @@ impl AggregateState {
             }
             AggregateState::SumDecimal(total, count) => match value {
                 Some(Value::Decimal(d)) => {
-                    *total = total.and_then(|t| t.checked_add(&d).ok());
+                    total.add(&d);
                     *count += 1;
                 }
                 Some(Value::Int64(i)) => {
-                    *total = total.and_then(|t| t.checked_add(&Decimal::from_i64(i)).ok());
+                    total.add(&Decimal::from_i64(i));
                     *count += 1;
                 }
-                // A float (or an RDF numeric string) makes the sum a float;
-                // a sum past 38 digits stays null.
+                // A float (or an RDF numeric string) makes the sum a float.
                 Some(ref v) => {
-                    if let (Some(t), Some(num)) = (*total, value_to_f64(v)) {
-                        *self = AggregateState::SumFloat(t.to_f64() + num, 0.0, *count + 1);
+                    if let Some(num) = value_to_f64(v) {
+                        *self = AggregateState::SumFloat(total.to_f64() + num, 0.0, *count + 1);
                     }
                 }
                 None => {}
@@ -436,7 +440,7 @@ impl AggregateState {
             }
             AggregateState::SumFloatDistinct(sum, comp, count, seen) => {
                 if let Some(ref v) = value {
-                    let hashable = HashableValue::from(v);
+                    let hashable = HashableValue::under(v, temporal);
                     if seen.insert(hashable)
                         && let Some(num) = value_to_f64(v)
                     {
@@ -453,7 +457,9 @@ impl AggregateState {
                 // average becomes exact.
                 if let Some(Value::Decimal(d)) = value {
                     if let Some(whole) = exact_whole(*sum) {
-                        let total = whole.checked_add(&d).ok();
+                        let mut total = DecimalSum::new();
+                        total.add(&whole);
+                        total.add(&d);
                         *self = AggregateState::AvgDecimal(total, *count + 1);
                     } else {
                         *sum += d.to_f64();
@@ -463,16 +469,16 @@ impl AggregateState {
             }
             AggregateState::AvgDecimal(total, count) => match value {
                 Some(Value::Decimal(d)) => {
-                    *total = total.and_then(|t| t.checked_add(&d).ok());
+                    total.add(&d);
                     *count += 1;
                 }
                 Some(Value::Int64(i)) => {
-                    *total = total.and_then(|t| t.checked_add(&Decimal::from_i64(i)).ok());
+                    total.add(&Decimal::from_i64(i));
                     *count += 1;
                 }
                 Some(ref v) => {
-                    if let (Some(t), Some(num)) = (*total, value_to_f64(v)) {
-                        *self = AggregateState::Avg(t.to_f64() + num, *count + 1);
+                    if let Some(num) = value_to_f64(v) {
+                        *self = AggregateState::Avg(total.to_f64() + num, *count + 1);
                     }
                 }
                 None => {}
@@ -487,12 +493,14 @@ impl AggregateState {
             }
             AggregateState::AvgDistinct(sum, count, seen) => {
                 if let Some(ref v) = value {
-                    let hashable = HashableValue::from(v);
+                    let hashable = HashableValue::under(v, temporal);
                     if let Value::Decimal(d) = v
                         && let Some(whole) = exact_whole(*sum)
                     {
                         if seen.insert(hashable) {
-                            let total = whole.checked_add(d).ok();
+                            let mut total = DecimalSum::new();
+                            total.add(&whole);
+                            total.add(d);
                             *self = AggregateState::Distinct {
                                 seen: std::mem::take(seen),
                                 inner: Box::new(AggregateState::AvgDecimal(total, *count + 1)),
@@ -511,18 +519,20 @@ impl AggregateState {
             // order of the input (a value never replaced one of another type).
             AggregateState::Min(min) => {
                 if let Some(v) = value
-                    && min
-                        .as_ref()
-                        .is_none_or(|current| compare_values_total(&v, current).is_lt())
+                    && min.as_ref().is_none_or(|current| {
+                        compare_values_total(&temporal.normalize(&v), &temporal.normalize(current))
+                            .is_lt()
+                    })
                 {
                     *min = Some(v);
                 }
             }
             AggregateState::Max(max) => {
                 if let Some(v) = value
-                    && max
-                        .as_ref()
-                        .is_none_or(|current| compare_values_total(&v, current).is_gt())
+                    && max.as_ref().is_none_or(|current| {
+                        compare_values_total(&temporal.normalize(&v), &temporal.normalize(current))
+                            .is_gt()
+                    })
                 {
                     *max = Some(v);
                 }
@@ -544,7 +554,7 @@ impl AggregateState {
             }
             AggregateState::CollectDistinct(list, seen) => {
                 if let Some(v) = value {
-                    let hashable = HashableValue::from(&v);
+                    let hashable = HashableValue::under(&v, temporal);
                     if seen.insert(hashable) {
                         list.push(v);
                     }
@@ -580,7 +590,7 @@ impl AggregateState {
             }
             AggregateState::GroupConcatDistinct(list, _sep, seen) => {
                 if let Some(v) = value {
-                    let hashable = HashableValue::from(&v);
+                    let hashable = HashableValue::under(&v, temporal);
                     if seen.insert(hashable) {
                         list.push(agg_value_to_string(&v));
                     }
@@ -597,11 +607,11 @@ impl AggregateState {
             }
             AggregateState::Distinct { seen, inner } => match &value {
                 Some(operand) => {
-                    if seen.insert(HashableValue::from(operand)) {
-                        inner.update(value);
+                    if seen.insert(HashableValue::under(operand, temporal)) {
+                        inner.update_under(value, temporal);
                     }
                 }
-                None => inner.update(None),
+                None => inner.update_under(None, temporal),
             },
             AggregateState::SumDuration(total, count)
             | AggregateState::AvgDuration(total, count) => {
@@ -613,7 +623,7 @@ impl AggregateState {
             AggregateState::InvalidOperand(_) => {}
             AggregateState::SparqlNumbers(inner) => match value {
                 Some(Value::Int64(_) | Value::Float64(_) | Value::Decimal(_)) | None => {
-                    inner.update(value);
+                    inner.update_under(value, temporal);
                 }
                 Some(_) => *self = AggregateState::SparqlError,
             },
@@ -777,8 +787,9 @@ impl AggregateState {
     ///
     /// # Errors
     ///
-    /// An integer sum outside the 64-bit range, and a decimal sum or average
-    /// whose sum needs more than 38 digits, are out of range (22003).
+    /// An integer sum outside the 64-bit range, a decimal sum whose value
+    /// needs more than 38 digits and a duration sum that does not fit are
+    /// out of range (22003); a decimal average always fits.
     pub fn finalize(&self) -> Result<Value, OperatorError> {
         Ok(match self {
             AggregateState::Count(count) | AggregateState::CountDistinct(count, _) => {
@@ -828,18 +839,19 @@ impl AggregateState {
             }
             AggregateState::SparqlNumbers(inner) => return inner.finalize(),
             AggregateState::SparqlError => Value::Null,
+            // Checked once it is final: a step past 38 digits that later
+            // rows took back is no error (#669).
             AggregateState::SumDecimal(total, _) => {
-                Value::Decimal(total.ok_or_else(decimal_sum_out_of_range)?)
+                Value::Decimal(total.total().map_err(|_| decimal_sum_out_of_range())?)
             }
-            // The average of decimals by the rule of decimal division.
-            AggregateState::AvgDecimal(total, count) => {
-                let total = total.ok_or_else(decimal_sum_out_of_range)?;
-                Value::Decimal(
-                    total
-                        .checked_div(&Decimal::from_i64(*count))
-                        .map_err(|_| decimal_sum_out_of_range())?,
-                )
-            }
+            // The average of decimals by the rule of decimal division; it
+            // always fits, as no average is beyond the largest row.
+            AggregateState::AvgDecimal(total, count) => Value::Decimal(
+                u64::try_from(*count)
+                    .ok()
+                    .and_then(|count| total.average(count).ok())
+                    .ok_or_else(decimal_sum_out_of_range)?,
+            ),
             AggregateState::Min(extreme) | AggregateState::Max(extreme) => {
                 extreme.clone().unwrap_or(Value::Null)
             }
@@ -1044,7 +1056,7 @@ fn agg_value_to_string(val: &Value) -> String {
     match val {
         Value::String(s) => s.to_string(),
         Value::Int64(i) => i.to_string(),
-        Value::Float64(f) => f.to_string(),
+        Value::Float64(f) => super::value_utils::float_text(*f),
         Value::Bool(b) => b.to_string(),
         Value::Null => String::new(),
         other => format!("{other:?}"),
@@ -1082,6 +1094,10 @@ pub struct HashAggregateOperator {
     aggregation_complete: bool,
     /// Results iterator.
     results: Option<std::vec::IntoIter<(RowKey, Group)>>,
+    /// How the keys read a local datetime against a zoned one (see
+    /// [`TemporalComparison::normalize`]); `TypesApart` reads every value
+    /// as itself.
+    temporal: TemporalComparison,
 }
 
 impl HashAggregateOperator {
@@ -1107,7 +1123,25 @@ impl HashAggregateOperator {
             groups: IndexMap::new(),
             aggregation_complete: false,
             results: None,
+            temporal: TemporalComparison::TypesApart,
         }
+    }
+
+    /// The operator with `temporal` as the reading of its group keys and of
+    /// its aggregates' DISTINCT, MIN and MAX (the statement's `=`).
+    #[must_use]
+    pub fn with_temporal(mut self, temporal: TemporalComparison) -> Self {
+        self.temporal = temporal;
+        for aggregate in &mut self.aggregates {
+            aggregate.temporal = temporal;
+        }
+        self
+    }
+
+    /// How the group keys read temporal values (see [`Self::with_temporal`]).
+    #[must_use]
+    pub fn temporal(&self) -> TemporalComparison {
+        self.temporal
     }
 
     /// The output column types: the group keys' input types (see
@@ -1132,6 +1166,7 @@ impl HashAggregateOperator {
     /// Performs the aggregation.
     fn aggregate(&mut self) -> Result<(), OperatorError> {
         while let Some(chunk) = self.child.next()? {
+            crate::execution::deadline::check()?;
             self.input_types.add(&chunk);
             for row in chunk.selected_indices() {
                 // Get or create aggregate states for this group; a new group
@@ -1140,7 +1175,7 @@ impl HashAggregateOperator {
                 let aggregates = &self.aggregates;
                 let states = &mut self
                     .groups
-                    .entry(RowKey::from_row(&chunk, row, group_columns))
+                    .entry(RowKey::from_row(&chunk, row, group_columns, self.temporal))
                     .or_insert_with(|| Group {
                         key_values: RowKey::values_of(&chunk, row, group_columns),
                         states: aggregates.iter().map(AggregateState::for_expr).collect(),
@@ -1175,21 +1210,23 @@ impl HashAggregateOperator {
 
                     // For COUNT without DISTINCT, always update. For others, skip nulls.
                     match (agg.function, agg.distinct) {
-                        (AggregateFunction::Count, false) => states[i].update(None),
+                        (AggregateFunction::Count, false) => {
+                            states[i].update_under(None, agg.temporal);
+                        }
                         (AggregateFunction::Count, true) => {
                             // COUNT DISTINCT needs the value to track unique values
                             if value.is_some() && !matches!(value, Some(Value::Null)) {
-                                states[i].update(value);
+                                states[i].update_under(value, agg.temporal);
                             }
                         }
                         (AggregateFunction::CountNonNull, _) => {
                             if value.is_some() && !matches!(value, Some(Value::Null)) {
-                                states[i].update(value);
+                                states[i].update_under(value, agg.temporal);
                             }
                         }
                         _ => {
                             if value.is_some() && !matches!(value, Some(Value::Null)) {
-                                states[i].update(value);
+                                states[i].update_under(value, agg.temporal);
                             }
                         }
                     }
@@ -1212,23 +1249,6 @@ impl Operator for HashAggregateOperator {
         // Perform aggregation if not done
         if !self.aggregation_complete {
             self.aggregate()?;
-        }
-
-        // Special case: no groups (global aggregation with no data)
-        if self.groups.is_empty() && self.results.is_none() && self.group_columns.is_empty() {
-            // For global aggregation (no GROUP BY), return one row with initial values
-            let mut builder = DataChunkBuilder::with_capacity(&self.output_schema, 1);
-
-            for agg in &self.aggregates {
-                let value = AggregateState::for_expr(agg).finalize_for(agg)?;
-                if let Some(col) = builder.column_mut(self.group_columns.len()) {
-                    col.push_value(value);
-                }
-            }
-            builder.advance_row();
-
-            self.results = Some(Vec::new().into_iter()); // Mark as done
-            return Ok(Some(builder.finish()));
         }
 
         let types = self.output_types();
@@ -1318,6 +1338,16 @@ impl SimpleAggregateOperator {
             done: false,
         }
     }
+
+    /// The operator with `temporal` as the reading of its aggregates'
+    /// DISTINCT, MIN and MAX (the statement's `=` and `<`).
+    #[must_use]
+    pub fn with_temporal(mut self, temporal: TemporalComparison) -> Self {
+        for aggregate in &mut self.aggregates {
+            aggregate.temporal = temporal;
+        }
+        self
+    }
 }
 
 impl Operator for SimpleAggregateOperator {
@@ -1328,6 +1358,7 @@ impl Operator for SimpleAggregateOperator {
 
         // Process all input
         while let Some(chunk) = self.child.next()? {
+            crate::execution::deadline::check()?;
             for row in chunk.selected_indices() {
                 for (i, agg) in self.aggregates.iter().enumerate() {
                     // Binary set functions: read two column values
@@ -1355,21 +1386,23 @@ impl Operator for SimpleAggregateOperator {
                     };
 
                     match (agg.function, agg.distinct) {
-                        (AggregateFunction::Count, false) => self.states[i].update(None),
+                        (AggregateFunction::Count, false) => {
+                            self.states[i].update_under(None, agg.temporal);
+                        }
                         (AggregateFunction::Count, true) => {
                             // COUNT DISTINCT needs the value to track unique values
                             if value.is_some() && !matches!(value, Some(Value::Null)) {
-                                self.states[i].update(value);
+                                self.states[i].update_under(value, agg.temporal);
                             }
                         }
                         (AggregateFunction::CountNonNull, _) => {
                             if value.is_some() && !matches!(value, Some(Value::Null)) {
-                                self.states[i].update(value);
+                                self.states[i].update_under(value, agg.temporal);
                             }
                         }
                         _ => {
                             if value.is_some() && !matches!(value, Some(Value::Null)) {
-                                self.states[i].update(value);
+                                self.states[i].update_under(value, agg.temporal);
                             }
                         }
                     }
@@ -2047,6 +2080,7 @@ mod tests {
             percentile: None,
             separator: None,
             rdf_literals: false,
+            temporal: TemporalComparison::TypesApart,
         };
 
         let mut agg =
@@ -2070,6 +2104,7 @@ mod tests {
             percentile: None,
             separator: None,
             rdf_literals: false,
+            temporal: TemporalComparison::TypesApart,
         };
 
         let mut agg =
@@ -2218,6 +2253,7 @@ mod tests {
             percentile: None,
             separator: None,
             rdf_literals: false,
+            temporal: TemporalComparison::TypesApart,
         };
 
         let mut agg = SimpleAggregateOperator::new(
@@ -2245,6 +2281,7 @@ mod tests {
             percentile: None,
             separator: None,
             rdf_literals: false,
+            temporal: TemporalComparison::TypesApart,
         };
 
         let mut agg = SimpleAggregateOperator::new(
@@ -2276,6 +2313,7 @@ mod tests {
             percentile: None,
             separator: None,
             rdf_literals: false,
+            temporal: TemporalComparison::TypesApart,
         };
 
         let mut agg = SimpleAggregateOperator::new(

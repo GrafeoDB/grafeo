@@ -51,7 +51,7 @@ typedef enum {
 typedef enum {
     GRAFEO_ISOLATION_READ_COMMITTED = 0,
     GRAFEO_ISOLATION_SNAPSHOT       = 1,
-    GRAFEO_ISOLATION_SERIALIZABLE   = 2
+    GRAFEO_ISOLATION_SERIALIZABLE   = 2  /* refused for now: snapshot isolation is the strongest level */
 } GrafeoIsolationLevel;
 
 typedef enum {
@@ -90,6 +90,20 @@ void        grafeo_clear_error(void);
 #endif
 
 /* ---- Lifecycle ----------------------------------------------------------- */
+
+/* A database handle lives from grafeo_open* to grafeo_free_database:
+     - grafeo_close flushes pending writes and releases the file, and
+       reports a failure through its status and grafeo_last_error(). Calling
+       it again does nothing and returns GRAFEO_OK; every other call on the
+       handle afterwards returns GRAFEO_ERROR_DATABASE.
+     - grafeo_free_database frees the handle, closing the database first if
+       it is still open (an error there is not reported: call grafeo_close
+       first to see it). A graph handle (grafeo_graph) keeps the database
+       open until it is freed too.
+     - Call grafeo_free_database exactly once per handle, and use no handle
+       after it: the memory is gone, so a second call, or any call after
+       it, is undefined behavior, as with free(). NULL is accepted and
+       ignored by both. */
 
 GrafeoDatabase* grafeo_open_memory(void);
 GrafeoDatabase* grafeo_open(const char* path);

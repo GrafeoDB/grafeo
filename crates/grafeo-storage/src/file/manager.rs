@@ -21,6 +21,7 @@ use grafeo_common::utils::hash::FxHashSet;
 use parking_lot::Mutex;
 
 use super::format::MAGIC;
+use super::holder::{self, OpenHere};
 use super::v3::alloc::{PageAllocator, PageRun};
 use super::v3::directory::SkippedEntry;
 use super::v3::header::{
@@ -144,6 +145,9 @@ pub struct GrafeoFileManager {
     last_checkpoint: Mutex<Option<CheckpointStats>>,
     /// Encrypts and decrypts the images (`None` for a plain file).
     cipher: Option<ChunkCipher>,
+    /// Registers the file as open in this process while the manager lives,
+    /// so a second open of it can say so (see [`holder`](super::holder)).
+    _open_here: OpenHere,
 }
 
 impl GrafeoFileManager {
@@ -238,6 +242,7 @@ impl GrafeoFileManager {
         fs::rename(&creating, &path)?;
         sync_parent_dir(&path)?;
 
+        let open_here = OpenHere::register(&path);
         Ok(Self {
             path,
             file: Mutex::new(file),
@@ -251,6 +256,7 @@ impl GrafeoFileManager {
             checkpoint_lock: Mutex::new(()),
             last_checkpoint: Mutex::new(None),
             cipher,
+            _open_here: open_here,
         })
     }
 
@@ -340,6 +346,7 @@ impl GrafeoFileManager {
             file
         };
         let (file_header, active, cipher) = read_active_image(&mut file, &path, cipher_for)?;
+        let open_here = OpenHere::register(&path);
         Ok(Self {
             path,
             file: Mutex::new(file),
@@ -349,6 +356,7 @@ impl GrafeoFileManager {
             checkpoint_lock: Mutex::new(()),
             last_checkpoint: Mutex::new(None),
             cipher,
+            _open_here: open_here,
         })
     }
 
@@ -806,28 +814,32 @@ impl Drop for GrafeoFileManager {
     }
 }
 
-/// Takes the exclusive lock of a read-write manager.
+/// Takes the exclusive lock of a read-write manager. A lock another handle
+/// holds is a [`StorageError::Locked`] that says whether this process holds
+/// it.
+///
+/// [`StorageError::Locked`]: grafeo_common::utils::error::StorageError::Locked
 fn lock_exclusive(file: &File, path: &Path) -> Result<()> {
-    child_process::take_lock(|| file.try_lock_exclusive(), is_lock_contended).map_err(|_| {
-        Error::Internal(format!(
-            "database file is locked by another process: {}",
-            path.display()
-        ))
+    child_process::take_lock(|| file.try_lock_exclusive(), is_lock_contended).map_err(|error| {
+        if is_lock_contended(&error) {
+            holder::locked_error(path)
+        } else {
+            Error::Io(error)
+        }
     })
 }
 
 /// Takes the shared lock of a read-only manager. It coexists with other
-/// shared locks and fails while a read-write manager holds the exclusive one.
+/// shared locks and fails while a read-write manager holds the exclusive
+/// one, with the error of [`lock_exclusive`].
 fn lock_shared(file: &File, path: &Path) -> Result<()> {
     child_process::take_lock(
         || file.try_lock_shared(),
         |e| matches!(e, std::fs::TryLockError::WouldBlock),
     )
-    .map_err(|_| {
-        Error::Internal(format!(
-            "database file cannot be locked for reading: {}",
-            path.display()
-        ))
+    .map_err(|error| match error {
+        std::fs::TryLockError::WouldBlock => holder::locked_error(path),
+        std::fs::TryLockError::Error(error) => Error::Io(error),
     })
 }
 

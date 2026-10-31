@@ -484,37 +484,22 @@ fn open_nonexistent_creates_new() {
     db.close().unwrap();
 }
 
-/// The names `CALL db.labels()` and `CALL db.relationshipTypes()` list in
-/// the default graph and in graph "trips", sorted.
+/// The names the label and edge type dictionaries hold in the default graph
+/// and in graph "trips", sorted: every name a node or edge of that graph had,
+/// also those none has any more (`CALL db.labels()` lists only those in use).
 fn catalog_names(db: &GrafeoDB) -> Vec<Vec<String>> {
-    let names = |rows: Vec<Vec<grafeo_common::types::Value>>| {
-        let mut names: Vec<String> = rows
-            .iter()
-            .map(|row| match &row[0] {
-                grafeo_common::types::Value::String(name) => name.to_string(),
-                other => panic!("a name: {other:?}"),
-            })
-            .collect();
+    use grafeo_core::graph::GraphStore;
+    let sorted = |mut names: Vec<String>| {
         names.sort();
         names
     };
-    let trips = db.graph("trips").unwrap();
+    let default = db.store().unwrap();
+    let trips = default.graph("trips").expect("graph trips");
     vec![
-        names(db.execute("CALL db.labels()").unwrap().rows().to_vec()),
-        names(
-            db.execute("CALL db.relationshipTypes()")
-                .unwrap()
-                .rows()
-                .to_vec(),
-        ),
-        names(trips.execute("CALL db.labels()").unwrap().rows().to_vec()),
-        names(
-            trips
-                .execute("CALL db.relationshipTypes()")
-                .unwrap()
-                .rows()
-                .to_vec(),
-        ),
+        sorted(default.all_labels().unwrap()),
+        sorted(default.all_edge_types().unwrap()),
+        sorted(trips.all_labels().unwrap()),
+        sorted(trips.all_edge_types().unwrap()),
     ]
 }
 

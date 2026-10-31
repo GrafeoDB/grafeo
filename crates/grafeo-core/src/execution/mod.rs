@@ -15,6 +15,7 @@
 //! | [`parallel`] | Morsel-driven parallelism |
 //! | [`spill`] | Disk spilling when memory is tight |
 //! | [`collector`] | Generic collector pattern for parallel aggregation |
+//! | [`deadline`] | The query deadline the long loops of the operators check |
 //!
 //! The execution model is push-based: sources push data through a pipeline of
 //! operators until it reaches a sink.
@@ -22,6 +23,7 @@
 pub mod chunk;
 pub mod chunk_state;
 pub mod collector;
+pub mod deadline;
 pub mod factorized_chunk;
 pub mod factorized_iter;
 pub mod factorized_vector;

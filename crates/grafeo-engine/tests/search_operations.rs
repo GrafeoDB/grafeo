@@ -807,8 +807,9 @@ mod hybrid {
         db.set_node_property(n1, "emb", vec3(1.0, 0.0, 0.0))
             .unwrap();
 
-        // No indexes at all
-        let results = db
+        // No indexes at all: an error naming both, as vector and text
+        // searches fail without their index, not an empty result
+        let error = db
             .hybrid_search(
                 "Doc",
                 "content",
@@ -819,11 +820,11 @@ mod hybrid {
                 None,
                 None,
             )
-            .expect("hybrid without any index should not error");
-
-        assert!(
-            results.is_empty(),
-            "should return empty when no indexes exist"
+            .expect_err("hybrid without any index fails");
+        assert_eq!(
+            error.to_string(),
+            "GRAFEO-V001: Invalid value: there is no text index on :Doc(content) and no \
+             vector index on :Doc(emb); create one first"
         );
     }
 

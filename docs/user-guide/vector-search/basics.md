@@ -44,6 +44,21 @@ db.execute(
 )
 ```
 
+### Lists and Vectors
+
+A vector index works on vectors: values of 32-bit floats, as `vector([...])` makes them. A list of
+numbers written to a property that has a vector index is stored as a vector, whichever way it is
+written: a list literal like the ones above, a parameter (a JavaScript array, a Python list, a
+`Float32Array` or `Float64Array`), a direct call or an import. Integers are taken as floats.
+
+- A list of another size than the index's is refused, as a vector of that size is.
+- A list with an element that is not a number (a string, a null, a boolean, a nested list) is
+  refused with an error naming the index.
+- Adding the label later converts the list too, and so does creating the index: the lists already
+  on its label and property become vectors first. Create such an index outside a transaction.
+- A list on a property without a vector index stays a list. The Python binding is the exception: it
+  stores any list of floats as a vector.
+
 ## Distance Functions
 
 Grafeo supports four distance metrics for vector similarity:

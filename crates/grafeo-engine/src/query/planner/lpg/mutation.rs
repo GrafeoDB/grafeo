@@ -15,10 +15,10 @@ use super::{CallProcedureOp, StaticResultOperator};
 use crate::query::plan::{Callee, PathMode, PathSelection};
 use grafeo_common::utils::error::{QueryError, QueryErrorKind};
 use grafeo_core::execution::DataChunk;
+use grafeo_core::execution::operators::{BuiltinFunction, FilterExpression, Volatility};
 use grafeo_core::execution::operators::{
     ExecutionPathMode, ExecutionPathSelection, JoinCondition, JoinedRowCondition,
 };
-use grafeo_core::execution::operators::{FilterExpression, Volatility};
 
 impl super::Planner {
     /// Plans a CREATE NODE operator (Gremlin `addV`, a GraphQL mutation): a
@@ -69,7 +69,7 @@ impl super::Planner {
         elements: &[CreateElement],
     ) -> Result<(Box<dyn Operator>, Vec<String>)> {
         let input = match input {
-            Some(input) => Some(self.plan_operator(input)?),
+            Some(input) => Some(self.plan_write_input(input)?),
             None => None,
         };
         self.build_creation(input, elements)
@@ -165,7 +165,7 @@ impl super::Planner {
         &self,
         delete: &DeleteNodeOp,
     ) -> Result<(Box<dyn Operator>, Vec<String>)> {
-        let (input_op, columns) = self.plan_operator(&delete.input)?;
+        let (input_op, columns) = self.plan_write_input(&delete.input)?;
 
         let col_idx = columns
             .iter()
@@ -201,7 +201,7 @@ impl super::Planner {
         &self,
         delete: &DeleteEdgeOp,
     ) -> Result<(Box<dyn Operator>, Vec<String>)> {
-        let (input_op, columns) = self.plan_operator(&delete.input)?;
+        let (input_op, columns) = self.plan_write_input(&delete.input)?;
 
         let edge_column = columns
             .iter()
@@ -233,6 +233,31 @@ impl super::Planner {
         let (left_op, left_columns) = self.plan_input(&left_join.left)?;
         // After a write the right side reads the store as the write left it.
         let left_writes = super::after_write::right_side_runs_after_a_write(&left_join.left);
+        #[cfg(any(feature = "gql", feature = "cypher"))]
+        {
+            use crate::query::translators::common;
+
+            let left_vars = left_columns.iter().cloned().collect();
+            let right_vars = left_join.right.bound_variables(None).unwrap_or_default();
+            // A shortest edge condition must read the earlier row during
+            // search. A subquery condition likewise runs before deciding
+            // whether that row has an optional match, not above the join.
+            let reads_earlier = common::comma_part_reads_earlier_rows(
+                &left_join.right,
+                &right_vars,
+                &left_vars,
+                &std::collections::HashSet::new(),
+            );
+            if reads_earlier
+                || left_join
+                    .condition
+                    .as_ref()
+                    .is_some_and(common::has_subquery)
+                || starts_from_the_left_row(&left_join.right, &left_vars)
+            {
+                return self.plan_optional_per_row(left_join, left_op, left_columns, left_writes);
+            }
+        }
         let (right_op, right_columns) = self.plan_after_a_write(left_writes, &left_join.right)?;
         let left_types = self.derive_schema_from_columns(&left_columns);
         let right_types = self.derive_schema_from_columns(&right_columns);
@@ -286,6 +311,124 @@ impl super::Planner {
         Ok((join_op, join_columns))
     }
 
+    /// The optional pattern once per left row, with its values available
+    /// during shortest-path search and while evaluating subquery predicates.
+    #[cfg(any(feature = "gql", feature = "cypher"))]
+    fn plan_optional_per_row(
+        &self,
+        left_join: &LeftJoinOp,
+        left_op: Box<dyn Operator>,
+        left_columns: Vec<String>,
+        left_writes: bool,
+    ) -> Result<(Box<dyn Operator>, Vec<String>)> {
+        use crate::query::plan::FilterOp;
+        use grafeo_core::execution::operators::{ApplyOperator, ParameterState};
+
+        // The ordinary filter planner can run both the one-edge EXISTS
+        // check and lifted subqueries before Apply emits nulls. Include the
+        // condition before seeding: it can read an earlier value that the
+        // right pattern itself does not name.
+        let inner = match &left_join.condition {
+            Some(condition) => LogicalOperator::Filter(FilterOp {
+                predicate: condition.clone(),
+                input: left_join.right.clone(),
+                pushdown_hint: None,
+            }),
+            None => left_join.right.as_ref().clone(),
+        };
+        let (inner, shared) = super::subquery::seed_with_row(&left_columns, inner)?;
+        let state = if shared.is_empty() {
+            None
+        } else {
+            Some(Arc::new(ParameterState::new(shared.clone())))
+        };
+        let indices = shared
+            .iter()
+            .map(|name| {
+                left_columns
+                    .iter()
+                    .position(|column| column == name)
+                    .ok_or_else(|| {
+                        Error::Internal(format!(
+                            "optional pattern imports '{name}', which is not a column of its left row"
+                        ))
+                    })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        // Seeding adds parameter scans and may add cycle filters. Their
+        // profile entries do not correspond to the original logical RHS.
+        // Measure this whole correlated subplan instead, retaining the
+        // original left/join/RETURN entries and their distinct row counts.
+        let profiling = self.profiling.replace(false);
+        let planned = match &state {
+            Some(state) => {
+                let previous = self.correlated_param_state.replace(Some(Arc::clone(state)));
+                let planned = self.plan_after_a_write(left_writes, &inner);
+                *self.correlated_param_state.borrow_mut() = previous;
+                planned
+            }
+            None => self.plan_after_a_write(left_writes, &inner),
+        };
+        self.profiling.set(profiling);
+        let (mut right_op, right_columns) = planned?;
+        if profiling {
+            use crate::query::profile::ProfileEntry;
+
+            // Preserve one entry per original logical node in postorder.
+            // Descendants are explicitly absorbed, with their work measured
+            // by the real wrapper around the complete physical subplan.
+            fn absorb_descendants(plan: &LogicalOperator, entries: &mut Vec<ProfileEntry>) {
+                for child in plan.children() {
+                    absorb_descendants(child, entries);
+                    entries.push(ProfileEntry::absorbed("Pattern", child.display_label()));
+                }
+            }
+
+            let mut entries = self.profile_entries.borrow_mut();
+            absorb_descendants(&left_join.right, &mut entries);
+            let (entry, stats) =
+                ProfileEntry::new("CorrelatedSubplan", left_join.right.display_label());
+            entries.push(entry);
+            right_op = Box::new(grafeo_core::execution::ProfiledOperator::new(
+                right_op, stats,
+            ));
+        }
+        let mut apply = match state {
+            Some(state) => ApplyOperator::new_correlated(left_op, right_op, state, indices),
+            None => ApplyOperator::new(left_op, right_op),
+        }
+        .with_optional(right_columns.len());
+        if left_writes {
+            apply = apply.with_outer_first();
+        }
+
+        // As for the hash left join, keep left columns, then only right
+        // columns not already on the left. Use the planned columns, including
+        // hidden path lengths and edge/node lists; do not materialize node
+        // and edge references or register the subplan's outputs as scalars.
+        let mut columns = left_columns.clone();
+        let mut keep: Vec<usize> = (0..left_columns.len()).collect();
+        let mut types = self.derive_schema_from_columns(&left_columns);
+        let right_types = self.derive_schema_from_columns(&right_columns);
+        for (index, name) in right_columns.iter().enumerate() {
+            if !left_columns.contains(name) {
+                keep.push(left_columns.len() + index);
+                columns.push(name.clone());
+                types.push(right_types[index].clone());
+            }
+        }
+        let operator: Box<dyn Operator> = Box::new(apply);
+        if keep.len() == left_columns.len() + right_columns.len() {
+            Ok((operator, columns))
+        } else {
+            let projections = keep.into_iter().map(ProjectExpr::Column).collect();
+            Ok((
+                Box::new(ProjectOperator::new(operator, projections, types)),
+                columns,
+            ))
+        }
+    }
+
     /// Plans an ANTI JOIN operator (for WHERE NOT EXISTS patterns).
     pub(super) fn plan_anti_join(
         &self,
@@ -308,11 +451,25 @@ impl super::Planner {
         &self,
         unwind: &UnwindOp,
     ) -> Result<(Box<dyn Operator>, Vec<String>)> {
+        // An UNWIND of `range(start, stop[, step])` computes only the bounds,
+        // as a list, and the operator makes the integers as it unwinds them
+        // (see `UnwindOperator::range_bounds`): the range can be far longer
+        // than a list in memory.
+        let range_bounds = match &unwind.expression {
+            LogicalExpression::FunctionCall {
+                callee: Callee::Builtin(BuiltinFunction::Range),
+                args,
+                ..
+            } if (2..=3).contains(&args.len()) => Some(LogicalExpression::List(args.clone())),
+            _ => None,
+        };
+        let list_expression = range_bounds.as_ref().unwrap_or(&unwind.expression);
+
         // An UNWIND that comes first unwinds a list it computes once, in a
         // column of its own on the one empty row (see `plan_input`).
         let unwinds_a_constant = matches!(&*unwind.input, LogicalOperator::Empty);
         let (input_op, input_columns): (Box<dyn Operator>, Vec<String>) = if unwinds_a_constant {
-            let literal_list = self.convert_expression(&unwind.expression)?;
+            let literal_list = self.convert_expression(list_expression)?;
             let (single_row_op, _) = self.plan_input(&unwind.input)?;
             let project_op: Box<dyn Operator> = Box::new(
                 ProjectOperator::with_store(
@@ -355,7 +512,7 @@ impl super::Planner {
             (input_op, input_columns, idx)
         } else {
             // Wrap input in a ProjectOperator that adds the list as an extra column
-            let literal_list = self.convert_expression(&unwind.expression)?;
+            let literal_list = self.convert_expression(list_expression)?;
             let mut proj_exprs: Vec<ProjectExpr> =
                 (0..input_columns.len()).map(ProjectExpr::Column).collect();
             let var_cols: HashMap<String, usize> = input_columns
@@ -440,10 +597,19 @@ impl super::Planner {
         } else {
             unwind_op.without_the_list()
         };
-        // In a statement that writes, a row sees the writes of the rows before
-        // it, so the rows go one at a time; a read gets them in full chunks.
+        let unwind_op = if range_bounds.is_some() {
+            unwind_op.range_bounds()
+        } else {
+            unwind_op
+        };
+        // Under a write that sees what its own earlier rows wrote (a MERGE,
+        // a CALL or FOREACH that writes), a row is read after the rows before
+        // it wrote, so the rows go one at a time. Every other statement gets
+        // them in full chunks: a CREATE, SET, REMOVE or DELETE reads its
+        // whole input first and takes its rows one at a time just below
+        // itself (see `plan_write_input`).
         let operator: Box<dyn Operator> =
-            Box::new(if self.statement_writes.get().unwrap_or(true) {
+            Box::new(if self.statement_writes.get().is_none_or(|w| w.per_row) {
                 unwind_op.row_at_a_time()
             } else {
                 unwind_op
@@ -948,7 +1114,13 @@ impl super::Planner {
         .with_session_context(self.session_context.clone());
         evaluator
             .eval_at(&grafeo_core::execution::DataChunk::empty(), 0)
-            .map_err(crate::query::executor::convert_operator_error)?
+            .map_err(|error| {
+                naming_the_argument(
+                    crate::query::executor::convert_operator_error(error),
+                    argument,
+                    procedure,
+                )
+            })?
             .ok_or_else(|| {
                 semantic(format!(
                     "Argument '{argument}' of {procedure} cannot be evaluated"
@@ -1117,7 +1289,7 @@ impl super::Planner {
         &self,
         add_label: &AddLabelOp,
     ) -> Result<(Box<dyn Operator>, Vec<String>)> {
-        let (input_op, columns) = self.plan_operator(&add_label.input)?;
+        let (input_op, columns) = self.plan_write_input(&add_label.input)?;
 
         // Find the node column
         let node_column = columns
@@ -1152,7 +1324,7 @@ impl super::Planner {
         &self,
         remove_label: &RemoveLabelOp,
     ) -> Result<(Box<dyn Operator>, Vec<String>)> {
-        let (input_op, columns) = self.plan_operator(&remove_label.input)?;
+        let (input_op, columns) = self.plan_write_input(&remove_label.input)?;
 
         // Find the node column
         let node_column = columns
@@ -1187,7 +1359,7 @@ impl super::Planner {
         &self,
         set_prop: &SetPropertyOp,
     ) -> Result<(Box<dyn Operator>, Vec<String>)> {
-        let (input_op, columns) = self.plan_operator(&set_prop.input)?;
+        let (input_op, columns) = self.plan_write_input(&set_prop.input)?;
 
         // Find the entity column (node or edge variable)
         let entity_column = columns
@@ -1575,6 +1747,64 @@ pub(super) fn read_first_after_a_write(
     }
 }
 
+impl super::Planner {
+    /// Plans `input`, the input of a write (a `CREATE`, `SET`, `REMOVE`,
+    /// `DELETE` or label change), read whole before the write's first row
+    /// when it is not one pass (see [`read_before_writing`]), then given to
+    /// the write one row at a time: the rows of a statement apply one after
+    /// the other, so each row's values (`SET p.n = coalesce(p.n, 0) + x`,
+    /// computed in a projection above this input) and each write of a chain
+    /// (`SET n.b = n.a, n.a = x` plans two) see what the rows before it
+    /// wrote. Everything below runs in full chunks. The input of a write
+    /// that is itself a write already comes one row at a time.
+    fn plan_write_input(
+        &self,
+        input: &LogicalOperator,
+    ) -> Result<(Box<dyn Operator>, Vec<String>)> {
+        let (op, columns) = self.plan_operator(input)?;
+        let op = read_before_writing(op, input);
+        Ok(if writes_row_by_row(input) {
+            (op, columns)
+        } else {
+            (
+                Box::new(grafeo_core::execution::operators::OneRowAtATimeOperator::new(op)),
+                columns,
+            )
+        })
+    }
+}
+
+/// Whether `op` is a write that resolves and writes its rows one at a time
+/// from a whole input: the ones [`Planner::plan_write_input`] plans.
+fn writes_row_by_row(op: &LogicalOperator) -> bool {
+    matches!(
+        op,
+        LogicalOperator::CreateNode(_)
+            | LogicalOperator::CreateEdge(_)
+            | LogicalOperator::Create(_)
+            | LogicalOperator::DeleteNode(_)
+            | LogicalOperator::DeleteEdge(_)
+            | LogicalOperator::SetProperty(_)
+            | LogicalOperator::AddLabel(_)
+            | LogicalOperator::RemoveLabel(_)
+    )
+}
+
+/// The planned input `op` of a write (a `CREATE`, `SET`, `REMOVE` or
+/// `DELETE`), read whole before the write's first row unless its plan
+/// `input` reads the store in one pass (see
+/// [`read_in_one_pass`](super::after_write::read_in_one_pass)): a join, an
+/// expand or a lookup per row would otherwise see the rows the write
+/// already changed, created or deleted, and match them again or not at all
+/// (#677).
+fn read_before_writing(op: Box<dyn Operator>, input: &LogicalOperator) -> Box<dyn Operator> {
+    if super::after_write::read_in_one_pass(input) {
+        op
+    } else {
+        Box::new(EagerOperator::new(op))
+    }
+}
+
 /// What keeps an expression from being a constant.
 #[cfg(feature = "algos")]
 enum NonConstant {
@@ -1695,5 +1925,63 @@ fn first_non_constant(
                 local.truncate(local.len() - 2);
                 found
             }),
+    }
+}
+
+/// Whether the optional side `right` of a left join only looks out from
+/// nodes its left rows bind: a shortest path with an end there (a search per
+/// pair of ends, which a hash join would run for every pair in the graph, as
+/// LDBC's IC13 does), or a pattern whose every node is bound on the left
+/// (`(a)-[k:KNOWS]-(p)` with both bound: a look at `a`'s edges, which a hash
+/// join would answer by expanding every edge of the type). Planned per left
+/// row, it reads only what those rows reach. A pattern that binds a node of
+/// its own keeps the hash join, which reads the graph once for any number of
+/// rows.
+#[cfg(any(feature = "gql", feature = "cypher"))]
+fn starts_from_the_left_row(
+    right: &LogicalOperator,
+    left_vars: &std::collections::HashSet<String>,
+) -> bool {
+    fn walk(
+        op: &LogicalOperator,
+        left_vars: &std::collections::HashSet<String>,
+        found: &mut (bool, bool, bool),
+    ) -> bool {
+        let (shortest, expands, all_bound) = found;
+        match op {
+            LogicalOperator::ShortestPath(path) => {
+                *shortest |=
+                    left_vars.contains(&path.source_var) || left_vars.contains(&path.target_var);
+            }
+            LogicalOperator::Expand(expand) => {
+                *expands = true;
+                *all_bound &= left_vars.contains(&expand.from_variable)
+                    && left_vars.contains(&expand.to_variable);
+            }
+            LogicalOperator::NodeScan(scan) => *all_bound &= left_vars.contains(&scan.variable),
+            LogicalOperator::Filter(_) => {}
+            _ => return false,
+        }
+        op.children()
+            .into_iter()
+            .all(|child| walk(child, left_vars, found))
+    }
+    let mut found = (false, false, true);
+    walk(right, left_vars, &mut found) && (found.0 || (found.1 && found.2))
+}
+
+/// `error`, an argument's evaluation error, with the argument and the
+/// procedure named after its message; its kind, and so its GQLSTATUS,
+/// stays as it was.
+#[cfg(feature = "algos")]
+fn naming_the_argument(error: Error, argument: &str, procedure: &str) -> Error {
+    let prefix = |message: &str| format!("{message} (argument '{argument}' of {procedure})");
+    match error {
+        Error::Query(mut query) => {
+            query.message = prefix(&query.message);
+            Error::Query(query)
+        }
+        Error::InvalidValue(message) => Error::InvalidValue(prefix(&message)),
+        other => other,
     }
 }

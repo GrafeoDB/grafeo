@@ -35,9 +35,17 @@ impl PyNode {
         self.labels.clone()
     }
 
-    /// Get a property value.
-    fn get(&self, key: &str) -> Option<PyValue> {
-        self.properties.get(key).map(|v| PyValue::from(v.clone()))
+    /// Get a property value as a native Python value, as `properties()`
+    /// gives it, or None when it has no such property.
+    ///
+    /// # Errors
+    ///
+    /// The error of a value that does not convert (see `PyValue::to_py`).
+    fn get(&self, key: &str, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
+        self.properties
+            .get(key)
+            .map(|v| PyValue::to_py(v, py))
+            .transpose()
     }
 
     /// Get all properties as a dictionary.
@@ -86,13 +94,13 @@ impl PyNode {
         format!("(:{} {{id: {}}})", self.labels.join(":"), self.id.0)
     }
 
-    fn __getitem__(&self, key: &str) -> PyResult<PyValue> {
-        self.properties
-            .get(key)
-            .map(|v| PyValue::from(v.clone()))
-            .ok_or_else(|| {
-                pyo3::exceptions::PyKeyError::new_err(format!("Property '{}' not found", key))
-            })
+    /// A property value as a native Python value, as `properties()` gives
+    /// it; a KeyError when it has no such property.
+    fn __getitem__(&self, key: &str, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let value = self.properties.get(key).ok_or_else(|| {
+            pyo3::exceptions::PyKeyError::new_err(format!("Property '{}' not found", key))
+        })?;
+        PyValue::to_py(value, py)
     }
 
     fn __contains__(&self, key: &str) -> bool {
@@ -152,9 +160,17 @@ impl PyEdge {
         self.target_id.0
     }
 
-    /// Get a property value.
-    fn get(&self, key: &str) -> Option<PyValue> {
-        self.properties.get(key).map(|v| PyValue::from(v.clone()))
+    /// Get a property value as a native Python value, as `properties()`
+    /// gives it, or None when it has no such property.
+    ///
+    /// # Errors
+    ///
+    /// The error of a value that does not convert (see `PyValue::to_py`).
+    fn get(&self, key: &str, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
+        self.properties
+            .get(key)
+            .map(|v| PyValue::to_py(v, py))
+            .transpose()
     }
 
     /// Get all properties as a dictionary.
@@ -198,13 +214,13 @@ impl PyEdge {
         format!("()-[:{}]->() (id={})", self.edge_type, self.id.0)
     }
 
-    fn __getitem__(&self, key: &str) -> PyResult<PyValue> {
-        self.properties
-            .get(key)
-            .map(|v| PyValue::from(v.clone()))
-            .ok_or_else(|| {
-                pyo3::exceptions::PyKeyError::new_err(format!("Property '{}' not found", key))
-            })
+    /// A property value as a native Python value, as `properties()` gives
+    /// it; a KeyError when it has no such property.
+    fn __getitem__(&self, key: &str, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let value = self.properties.get(key).ok_or_else(|| {
+            pyo3::exceptions::PyKeyError::new_err(format!("Property '{}' not found", key))
+        })?;
+        PyValue::to_py(value, py)
     }
 
     fn __contains__(&self, key: &str) -> bool {

@@ -16,7 +16,9 @@ use grafeo_common::types::rdf::Term;
 use grafeo_common::types::{Decimal, HashableValue, LogicalType, TemporalComparison, Value};
 
 use super::{Operator, OperatorError, OperatorResult};
-use crate::execution::chunk::{ColumnTypes, DataChunkBuilder, copied_column_types};
+use crate::execution::chunk::{
+    ColumnTypes, DEFAULT_CHUNK_SIZE, DataChunkBuilder, copied_column_types,
+};
 use crate::execution::{DataChunk, ValueVector};
 
 /// The type of join to perform.
@@ -37,6 +39,10 @@ pub enum JoinType {
     Semi,
     /// Anti join: rows from left that have no match in right.
     Anti,
+    /// Mark join: every row from left once, with a boolean column after its
+    /// own that says whether it has a match in right (a row with a null key
+    /// has none). An `EXISTS` inside an `OR` reads the column.
+    Mark,
 }
 
 /// A hash key that can be hashed and compared for join operations.
@@ -475,6 +481,7 @@ impl HashJoinOperator {
     /// Builds the hash table from the build side.
     fn build_hash_table(&mut self) -> Result<(), OperatorError> {
         while let Some(chunk) = self.build_side.next()? {
+            crate::execution::deadline::check()?;
             let chunk_idx = self.build_chunks.len();
 
             // Initialize match tracking for outer joins
@@ -517,6 +524,10 @@ impl HashJoinOperator {
     fn output_types(&self, probe_chunk: &DataChunk) -> Vec<LogicalType> {
         let mut types = probe_chunk.column_types();
         if matches!(self.join_type, JoinType::Semi | JoinType::Anti) {
+            return copied_column_types(&types, &self.output_schema);
+        }
+        if self.join_type == JoinType::Mark {
+            types.push(LogicalType::Bool);
             return copied_column_types(&types, &self.output_schema);
         }
         if self.build_chunks.is_empty() {
@@ -676,6 +687,8 @@ impl HashJoinOperator {
     /// Gets the next probe chunk, from the buffer when the probe side was read
     /// first.
     fn get_next_probe_chunk(&mut self) -> Result<bool, OperatorError> {
+        // A probe that matches nothing reads chunk after chunk here.
+        crate::execution::deadline::check()?;
         let chunk = match &mut self.probe_input {
             ProbeInput::ReadFirst(Some(chunks)) => chunks.pop_front(),
             ProbeInput::ReadFirst(None) | ProbeInput::Streamed => self.probe_side.next()?,
@@ -765,6 +778,7 @@ impl Operator for HashJoinOperator {
         if let ProbeInput::ReadFirst(read @ None) = &mut self.probe_input {
             let mut chunks = VecDeque::new();
             while let Some(chunk) = self.probe_side.next()? {
+                crate::execution::deadline::check()?;
                 chunks.push_back(chunk);
             }
             *read = Some(chunks);
@@ -881,6 +895,27 @@ impl Operator for HashJoinOperator {
                                 builder.advance_row();
                             }
                             self.current_probe_row += 1;
+                            continue;
+                        }
+                        JoinType::Mark => {
+                            let matched = has_match()?;
+                            let width = probe_chunk.column_count();
+                            for col_idx in 0..width {
+                                if let (Some(src_col), Some(dst_col)) =
+                                    (probe_chunk.column(col_idx), builder.column_mut(col_idx))
+                                    && let Some(value) = src_col.get_value(probe_row)
+                                {
+                                    dst_col.push_value(value);
+                                }
+                            }
+                            if let Some(mark) = builder.column_mut(width) {
+                                mark.push_value(Value::Bool(matched));
+                            }
+                            builder.advance_row();
+                            self.current_probe_row += 1;
+                            if builder.is_full() {
+                                return Ok(chunk_builder.take().map(DataChunkBuilder::finish));
+                            }
                             continue;
                         }
                         _ => {
@@ -1162,6 +1197,54 @@ impl JoinCondition for EqualityCondition {
     }
 }
 
+/// A condition that holds when, for each pair of columns, the two values are
+/// equal or one of them is null: compatible SPARQL solutions (SPARQL 1.1
+/// sec 18.3), where a variable one side leaves unbound agrees with any
+/// value. `then`, when given, must hold for the pair as well.
+pub struct CompatibleCondition {
+    /// The (left column, right column) pairs of the shared variables.
+    pairs: Vec<(usize, usize)>,
+    /// A further condition on the pair.
+    then: Option<Box<dyn JoinCondition>>,
+}
+
+impl CompatibleCondition {
+    /// Creates the condition over the column pairs, with a further one.
+    pub fn new(pairs: Vec<(usize, usize)>, then: Option<Box<dyn JoinCondition>>) -> Self {
+        Self { pairs, then }
+    }
+}
+
+impl JoinCondition for CompatibleCondition {
+    fn evaluate(
+        &self,
+        left_chunk: &DataChunk,
+        left_row: usize,
+        right_chunk: &DataChunk,
+        right_row: usize,
+    ) -> Result<bool, OperatorError> {
+        let value = |chunk: &DataChunk, column: usize, row: usize| {
+            chunk
+                .column(column)
+                .and_then(|c| c.get_value(row))
+                .filter(|value| !value.is_null())
+        };
+        for &(left_column, right_column) in &self.pairs {
+            if let (Some(l), Some(r)) = (
+                value(left_chunk, left_column, left_row),
+                value(right_chunk, right_column, right_row),
+            ) && l != r
+            {
+                return Ok(false);
+            }
+        }
+        match &self.then {
+            Some(then) => then.evaluate(left_chunk, left_row, right_chunk, right_row),
+            None => Ok(true),
+        }
+    }
+}
+
 impl NestedLoopJoinOperator {
     /// Creates a new nested loop join operator.
     pub fn new(
@@ -1210,6 +1293,7 @@ impl NestedLoopJoinOperator {
     /// Materializes the right side.
     fn materialize_right(&mut self) -> Result<(), OperatorError> {
         while let Some(chunk) = self.right.next()? {
+            crate::execution::deadline::check()?;
             self.right_types.add(&chunk);
             self.right_chunks.push(chunk);
         }
@@ -1314,6 +1398,7 @@ impl Operator for NestedLoopJoinOperator {
         if self.left_first && self.left_chunks.is_none() {
             let mut chunks = VecDeque::new();
             while let Some(chunk) = self.left.next()? {
+                crate::execution::deadline::check()?;
                 chunks.push_back(chunk);
             }
             self.left_chunks = Some(chunks);
@@ -1332,6 +1417,7 @@ impl Operator for NestedLoopJoinOperator {
         loop {
             // Get current left chunk
             if self.current_left_chunk.is_none() {
+                crate::execution::deadline::check()?;
                 self.current_left_chunk = self.next_left()?;
                 self.current_left_row = 0;
                 self.current_right_chunk = 0;
@@ -1362,6 +1448,10 @@ impl Operator for NestedLoopJoinOperator {
                     .saturating_sub(left_chunk.column_count())
             };
 
+            // The pairs compared since the deadline was last checked: a
+            // condition few pairs pass makes no output for a long time.
+            let mut pairs = 0;
+
             // Process current left row against all right rows
             while self.current_left_row < left_rows.len() {
                 let left_row = left_rows[self.current_left_row];
@@ -1375,6 +1465,11 @@ impl Operator for NestedLoopJoinOperator {
                 while self.current_right_chunk < self.right_chunks.len() {
                     let right_chunk = &self.right_chunks[self.current_right_chunk];
                     let right_rows: Vec<usize> = right_chunk.selected_indices().collect();
+                    pairs += right_rows.len();
+                    if pairs >= DEFAULT_CHUNK_SIZE {
+                        pairs = 0;
+                        crate::execution::deadline::check()?;
+                    }
 
                     while self.current_right_row < right_rows.len() {
                         let right_row = right_rows[self.current_right_row];

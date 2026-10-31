@@ -115,8 +115,9 @@ tests:
       ordered: true
       count: 5
 
+  # Delivered orders: ORD-001, -002, -003 and -005 hold Electronics, ORD-003
+  # and -007 Books; the only Clothing order (ORD-006) is pending.
   - name: revenue_by_category
-    skip: "count(DISTINCT) through multi-hop"
     query: |
       MATCH (o:Order)-[:CONTAINS]->(p:Product)-[:IN_CATEGORY]->(cat:Category)
       WHERE o.status = 'delivered'
@@ -124,7 +125,9 @@ tests:
       ORDER BY order_count DESC
     expect:
       ordered: true
-      count: 3
+      rows:
+        - [Electronics, 4]
+        - [Books, 2]
 
   # ---------------------------------------------------------------------------
   # Recommendation: customers who bought X also bought Y
@@ -141,8 +144,9 @@ tests:
       rows:
         - [Wireless Headphones]
 
+  # Gus (ORD-007 holds both) and Vincent (Graph Databases in ORD-003, Rust
+  # Programming in ORD-008).
   - name: customers_who_bought_both_books
-    skip: "multi-pattern MATCH with different orders"
     query: |
       MATCH (c:Customer)-[:PLACED]->(o1:Order)-[:CONTAINS]->(p1:Product {name: 'Graph Databases'}),
             (c)-[:PLACED]->(o2:Order)-[:CONTAINS]->(p2:Product {name: 'Rust Programming'})
@@ -151,6 +155,7 @@ tests:
       ordered: true
       rows:
         - [Gus]
+        - [Vincent]
 
   # ---------------------------------------------------------------------------
   # Order status analytics
@@ -174,8 +179,9 @@ tests:
   # Customer-product affinity
   # ---------------------------------------------------------------------------
 
+  # One row per match: Alix ordered Laptop Pro twice (ORD-001 and ORD-005),
+  # so it appears twice.
   - name: customer_reviewed_what_they_ordered
-    skip: "multi-pattern MATCH produces duplicate rows from path multiplicity"
     query: |
       MATCH (c:Customer)-[:PLACED]->(o:Order)-[:CONTAINS]->(p:Product),
             (c)-[r:REVIEWED]->(p)
@@ -184,19 +190,25 @@ tests:
       ordered: true
       rows:
         - [Alix, Laptop Pro, 5]
+        - [Alix, Laptop Pro, 5]
         - [Alix, Wireless Headphones, 4]
+        - [Gus, Wireless Headphones, 3]
+        - [Jules, Graph Databases, 5]
         - [Vincent, Graph Databases, 5]
         - [Vincent, Tablet Mini, 4]
 
   - name: ordered_but_not_reviewed
-    skip: "NOT EXISTS with multi-hop pattern"
     query: |
       MATCH (c:Customer)-[:PLACED]->(o:Order)-[:CONTAINS]->(p:Product)
       WHERE NOT EXISTS { MATCH (c)-[:REVIEWED]->(p) }
       RETURN DISTINCT c.name, p.name ORDER BY c.name, p.name
     expect:
       ordered: true
-      count: 7
+      rows:
+        - [Gus, Graph Databases]
+        - [Gus, Rust Programming]
+        - [Mia, Winter Jacket]
+        - [Vincent, Rust Programming]
 
   # ---------------------------------------------------------------------------
   # Price range queries

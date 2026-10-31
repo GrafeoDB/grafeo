@@ -4,9 +4,9 @@
 //! each worker produces partial results that must be merged into final output.
 
 use crate::execution::chunk::DataChunk;
-use crate::execution::operators::value_utils::order_by;
+use crate::execution::operators::value_utils::{compare_values_total, order_by_under};
 use crate::execution::vector::ValueVector;
-use grafeo_common::types::Value;
+use grafeo_common::types::{TemporalComparison, Value};
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 
@@ -42,6 +42,10 @@ pub struct MergeableAccumulator {
     pub first: Option<Value>,
     /// For AVG: sum of squared values (for variance if needed).
     pub sum_squared: f64,
+    /// How MIN and MAX read a local datetime against a zoned one (see
+    /// [`TemporalComparison::normalize`]); `TypesApart` reads every value
+    /// as itself.
+    temporal: TemporalComparison,
 }
 
 impl MergeableAccumulator {
@@ -55,7 +59,17 @@ impl MergeableAccumulator {
             max: None,
             first: None,
             sum_squared: 0.0,
+            temporal: TemporalComparison::TypesApart,
         }
+    }
+
+    /// The accumulator with `temporal` as the reading of MIN and MAX (the
+    /// statement's `<`), as the serial aggregate reads them. The minimum and
+    /// the maximum keep their values.
+    #[must_use]
+    pub fn with_temporal(mut self, temporal: TemporalComparison) -> Self {
+        self.temporal = temporal;
+        self
     }
 
     /// Adds a value to the accumulator.
@@ -72,12 +86,12 @@ impl MergeableAccumulator {
         }
 
         // Min
-        if self.min.is_none() || compare_for_min(&self.min, value) {
+        if compare_for_min(&self.min, value, self.temporal) {
             self.min = Some(value.clone());
         }
 
         // Max
-        if self.max.is_none() || compare_for_max(&self.max, value) {
+        if compare_for_max(&self.max, value, self.temporal) {
             self.max = Some(value.clone());
         }
 
@@ -95,14 +109,14 @@ impl MergeableAccumulator {
 
         // Merge min
         if let Some(ref other_min) = other.min
-            && compare_for_min(&self.min, other_min)
+            && compare_for_min(&self.min, other_min, self.temporal)
         {
             self.min = Some(other_min.clone());
         }
 
         // Merge max
         if let Some(ref other_max) = other.max
-            && compare_for_max(&self.max, other_max)
+            && compare_for_max(&self.max, other_max, self.temporal)
         {
             self.max = Some(other_max.clone());
         }
@@ -173,24 +187,22 @@ fn value_to_f64(value: &Value) -> Option<f64> {
     }
 }
 
-fn compare_for_min(current: &Option<Value>, new: &Value) -> bool {
-    match (current, new) {
-        (None, _) => true,
-        (Some(Value::Int64(a)), Value::Int64(b)) => b < a,
-        (Some(Value::Float64(a)), Value::Float64(b)) => b < a,
-        (Some(Value::String(a)), Value::String(b)) => b < a,
-        _ => false,
-    }
+/// Whether `new` is a new minimum: less than `current` in the order of ORDER
+/// BY, both read as `temporal` reads them, as the serial MIN compares values
+/// of every type. `true` when there is no minimum yet.
+fn compare_for_min(current: &Option<Value>, new: &Value, temporal: TemporalComparison) -> bool {
+    current.as_ref().is_none_or(|current| {
+        compare_values_total(&temporal.normalize(new), &temporal.normalize(current)).is_lt()
+    })
 }
 
-fn compare_for_max(current: &Option<Value>, new: &Value) -> bool {
-    match (current, new) {
-        (None, _) => true,
-        (Some(Value::Int64(a)), Value::Int64(b)) => b > a,
-        (Some(Value::Float64(a)), Value::Float64(b)) => b > a,
-        (Some(Value::String(a)), Value::String(b)) => b > a,
-        _ => false,
-    }
+/// Whether `new` is a new maximum: greater than `current` in the order of
+/// ORDER BY, both read as `temporal` reads them, as the serial MAX compares
+/// values of every type. `true` when there is no maximum yet.
+fn compare_for_max(current: &Option<Value>, new: &Value, temporal: TemporalComparison) -> bool {
+    current.as_ref().is_none_or(|current| {
+        compare_values_total(&temporal.normalize(new), &temporal.normalize(current)).is_gt()
+    })
 }
 
 /// Sort key for k-way merge.
@@ -234,16 +246,19 @@ struct MergeEntry {
     run_index: usize,
     /// Sort keys for comparison.
     keys: Vec<SortKey>,
+    /// How the sort keys read a local datetime against a zoned one.
+    temporal: TemporalComparison,
 }
 
 impl MergeEntry {
     fn compare_to(&self, other: &Self) -> Ordering {
         for key in &self.keys {
-            let ordering = order_by(
+            let ordering = order_by_under(
                 self.row.get(key.column),
                 other.row.get(key.column),
                 !key.ascending,
                 key.nulls_first,
+                self.temporal,
             );
             if ordering != Ordering::Equal {
                 return ordering;
@@ -276,8 +291,20 @@ impl Ord for MergeEntry {
 
 /// Merges multiple sorted runs into a single sorted output.
 ///
-/// Uses a min-heap for efficient k-way merge.
+/// Uses a min-heap for efficient k-way merge. Every value is read as itself:
+/// see [`merge_sorted_runs_under`] for the reading of GQL and SQL/PGQ.
 pub fn merge_sorted_runs(runs: Vec<Vec<Vec<Value>>>, keys: &[SortKey]) -> Vec<Vec<Value>> {
+    merge_sorted_runs_under(runs, keys, TemporalComparison::TypesApart)
+}
+
+/// Merges multiple sorted runs into a single sorted output, the sort keys
+/// read as `temporal` reads them (see [`TemporalComparison::normalize`]): the
+/// runs must be sorted under the same reading.
+pub fn merge_sorted_runs_under(
+    runs: Vec<Vec<Vec<Value>>>,
+    keys: &[SortKey],
+    temporal: TemporalComparison,
+) -> Vec<Vec<Value>> {
     if runs.is_empty() {
         return Vec::new();
     }
@@ -301,6 +328,7 @@ pub fn merge_sorted_runs(runs: Vec<Vec<Vec<Value>>>, keys: &[SortKey]) -> Vec<Ve
                 row: run[0].clone(),
                 run_index,
                 keys: keys.to_vec(),
+                temporal,
             });
             positions[run_index] = 1;
         }
@@ -317,6 +345,7 @@ pub fn merge_sorted_runs(runs: Vec<Vec<Vec<Value>>>, keys: &[SortKey]) -> Vec<Ve
                 row: runs[entry.run_index][pos].clone(),
                 run_index: entry.run_index,
                 keys: keys.to_vec(),
+                temporal,
             });
             positions[entry.run_index] += 1;
         }
@@ -352,15 +381,29 @@ pub fn rows_to_chunks(rows: Vec<Vec<Value>>, chunk_size: usize) -> Vec<DataChunk
 }
 
 /// Merges multiple sorted `DataChunk` streams into a single sorted stream.
+/// Every value is read as itself: see [`merge_sorted_chunks_under`] for the
+/// reading of GQL and SQL/PGQ.
 pub fn merge_sorted_chunks(
     runs: Vec<Vec<DataChunk>>,
     keys: &[SortKey],
     chunk_size: usize,
 ) -> Vec<DataChunk> {
+    merge_sorted_chunks_under(runs, keys, chunk_size, TemporalComparison::TypesApart)
+}
+
+/// Merges multiple sorted `DataChunk` streams into a single sorted stream,
+/// the sort keys read as `temporal` reads them (see
+/// [`merge_sorted_runs_under`]).
+pub fn merge_sorted_chunks_under(
+    runs: Vec<Vec<DataChunk>>,
+    keys: &[SortKey],
+    chunk_size: usize,
+    temporal: TemporalComparison,
+) -> Vec<DataChunk> {
     // Convert chunks to row format for merging
     let row_runs: Vec<Vec<Vec<Value>>> = runs.into_iter().map(chunks_to_rows).collect();
 
-    let merged_rows = merge_sorted_runs(row_runs, keys);
+    let merged_rows = merge_sorted_runs_under(row_runs, keys, temporal);
     rows_to_chunks(merged_rows, chunk_size)
 }
 
@@ -389,56 +432,6 @@ fn chunks_to_rows(chunks: Vec<DataChunk>) -> Vec<Vec<Value>> {
 /// Concatenates multiple DataChunk results (for non-sorted parallel results).
 pub fn concat_parallel_results(results: Vec<Vec<DataChunk>>) -> Vec<DataChunk> {
     results.into_iter().flatten().collect()
-}
-
-/// Merges parallel DISTINCT results by deduplication.
-pub fn merge_distinct_results(results: Vec<Vec<DataChunk>>) -> Vec<DataChunk> {
-    use std::collections::HashSet;
-
-    // Simple row-based deduplication using hash
-    let mut seen: HashSet<u64> = HashSet::new();
-    let mut unique_rows: Vec<Vec<Value>> = Vec::new();
-
-    for chunks in results {
-        for chunk in chunks {
-            let num_columns = chunk.num_columns();
-            for i in 0..chunk.len() {
-                let mut row = Vec::with_capacity(num_columns);
-                for col_idx in 0..num_columns {
-                    let val = chunk
-                        .column(col_idx)
-                        .and_then(|c| c.get(i))
-                        .unwrap_or(Value::Null);
-                    row.push(val);
-                }
-
-                let hash = hash_row(&row);
-                if seen.insert(hash) {
-                    unique_rows.push(row);
-                }
-            }
-        }
-    }
-
-    rows_to_chunks(unique_rows, 2048)
-}
-
-fn hash_row(row: &[Value]) -> u64 {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-
-    let mut hasher = DefaultHasher::new();
-    for value in row {
-        match value {
-            Value::Null => 0u8.hash(&mut hasher),
-            Value::Bool(b) => b.hash(&mut hasher),
-            Value::Int64(i) => i.hash(&mut hasher),
-            Value::Float64(f) => f.to_bits().hash(&mut hasher),
-            Value::String(s) => s.hash(&mut hasher),
-            _ => 0u8.hash(&mut hasher),
-        }
-    }
-    hasher.finish()
 }
 
 #[cfg(test)]
@@ -593,44 +586,6 @@ mod tests {
         assert_eq!(chunks[1].len(), 3);
         assert_eq!(chunks[2].len(), 3);
         assert_eq!(chunks[3].len(), 1);
-    }
-
-    #[test]
-    fn test_merge_distinct_results() {
-        let chunk1 = DataChunk::new(vec![ValueVector::from_values(&[
-            Value::Int64(1),
-            Value::Int64(2),
-            Value::Int64(3),
-        ])]);
-
-        let chunk2 = DataChunk::new(vec![ValueVector::from_values(&[
-            Value::Int64(2),
-            Value::Int64(3),
-            Value::Int64(4),
-        ])]);
-
-        let results = vec![vec![chunk1], vec![chunk2]];
-        let merged = merge_distinct_results(results);
-
-        let total_rows: usize = merged.iter().map(DataChunk::len).sum();
-        assert_eq!(total_rows, 4); // 1, 2, 3, 4 (no duplicates)
-    }
-
-    #[test]
-    fn test_hash_row_with_non_primitive_values() {
-        // Exercises the catch-all branch in hash_row for non-primitive Value types
-        let row1 = vec![Value::List(vec![Value::Int64(1)].into())];
-        let row2 = vec![Value::List(vec![Value::Int64(2)].into())];
-        let row3 = vec![Value::Bytes(vec![1, 2, 3].into())];
-
-        // The catch-all hashes all non-primitive types to the same bucket (0u8)
-        let h1 = hash_row(&row1);
-        let h2 = hash_row(&row2);
-        let h3 = hash_row(&row3);
-
-        // All non-primitive types hash identically via the catch-all
-        assert_eq!(h1, h2);
-        assert_eq!(h2, h3);
     }
 
     #[test]

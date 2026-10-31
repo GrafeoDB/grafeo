@@ -79,10 +79,14 @@ mod tests {
     use super::*;
     use std::collections::HashSet;
 
+    // Miri checks memory safety; these draws test the generator, so a few do there.
+    const DRAWS: usize = if cfg!(miri) { 1_000 } else { 100_000 };
+    const PER_THREAD: usize = if cfg!(miri) { 250 } else { 10_000 };
+
     #[test]
     fn every_call_draws_a_new_value() {
-        let values: HashSet<u64> = (0..100_000).map(|_| next_u64()).collect();
-        assert_eq!(values.len(), 100_000);
+        let values: HashSet<u64> = (0..DRAWS).map(|_| next_u64()).collect();
+        assert_eq!(values.len(), DRAWS);
     }
 
     #[test]
@@ -100,12 +104,12 @@ mod tests {
     fn threads_never_draw_the_same_value() {
         let drawn: Vec<Vec<u64>> = std::thread::scope(|scope| {
             let handles: Vec<_> = (0..4)
-                .map(|_| scope.spawn(|| (0..10_000).map(|_| next_u64()).collect::<Vec<_>>()))
+                .map(|_| scope.spawn(|| (0..PER_THREAD).map(|_| next_u64()).collect::<Vec<_>>()))
                 .collect();
             handles.into_iter().map(|h| h.join().unwrap()).collect()
         });
         let all: HashSet<u64> = drawn.iter().flatten().copied().collect();
-        assert_eq!(all.len(), 40_000);
+        assert_eq!(all.len(), 4 * PER_THREAD);
     }
 
     /// The seed gives a value, and with the system's entropy two seeds differ.
@@ -130,7 +134,7 @@ mod tests {
 
     #[test]
     fn the_mix_is_a_bijection_on_a_sample() {
-        let mixed: HashSet<u64> = (0..100_000u64).map(mix).collect();
-        assert_eq!(mixed.len(), 100_000);
+        let mixed: HashSet<u64> = (0..u64::try_from(DRAWS).unwrap()).map(mix).collect();
+        assert_eq!(mixed.len(), DRAWS);
     }
 }

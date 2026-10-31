@@ -1,0 +1,186 @@
+# SPARQL prefixes: the standard ones are predefined, any other must be declared
+#
+# rdf, rdfs, xsd, owl and fn (the XPath functions namespace) work without a
+# PREFIX line, and a query's own PREFIX redefines one. Any other prefix used
+# without a PREFIX is a syntax error naming it, in every position and in
+# updates too. An undeclared prefix was kept as text: `xsd:integer("5")`
+# gave no value and `?s ex:p ?o` matched nothing, without an error.
+
+meta:
+  language: sparql
+  model: rdf
+  section: prefixes
+  title: Predefined and undeclared prefixes
+  dataset: empty
+  requires: [sparql, rdf]
+
+tests:
+
+  # ---------------------------------------------------------------------------
+  # The predefined prefixes
+  # ---------------------------------------------------------------------------
+
+  - name: xsd_is_predefined_for_a_cast
+    query: "SELECT (xsd:integer(\"5\") AS ?x) (DATATYPE(xsd:integer(\"5\")) AS ?d) WHERE {}"
+    expect:
+      rows:
+        - [5, http://www.w3.org/2001/XMLSchema#integer]
+
+  - name: xsd_is_predefined_for_a_datatype
+    setup:
+      - "INSERT DATA { <http://ex.org/alix> <http://ex.org/age> \"30\"^^<http://www.w3.org/2001/XMLSchema#integer> . }"
+    query: "SELECT ?s WHERE { ?s <http://ex.org/age> \"30\"^^xsd:integer }"
+    expect:
+      rows:
+        - [http://ex.org/alix]
+
+  - name: rdf_rdfs_and_owl_are_predefined
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/alix> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://ex.org/Person> .
+          <http://ex.org/alix> <http://www.w3.org/2000/01/rdf-schema#label> "Alix" .
+          <http://ex.org/Person> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/2002/07/owl#Class> .
+        }
+    query: "SELECT ?s ?l ?c WHERE { ?s rdf:type ?c . ?s rdfs:label ?l . ?c a owl:Class }"
+    expect:
+      rows:
+        - [http://ex.org/alix, Alix, http://ex.org/Person]
+
+  - name: fn_is_the_xpath_functions_namespace
+    query: "SELECT (STR(fn:abs) AS ?i) WHERE {}"
+    expect:
+      rows:
+        - [http://www.w3.org/2005/xpath-functions#abs]
+
+  - name: a_query_prefix_redefines_a_predefined_one
+    query: "PREFIX xsd: <http://ex.org/my#> SELECT (STR(xsd:integer) AS ?i) WHERE {}"
+    expect:
+      rows:
+        - [http://ex.org/my#integer]
+
+  - name: predefined_prefixes_work_in_an_update
+    statements:
+      - "INSERT DATA { <http://ex.org/alix> rdfs:label \"Alix\" ; <http://ex.org/age> \"30\"^^xsd:integer . }"
+      - "SELECT ?l ?a WHERE { <http://ex.org/alix> <http://www.w3.org/2000/01/rdf-schema#label> ?l ; <http://ex.org/age> ?a }"
+    expect:
+      rows:
+        - [Alix, 30]
+
+  - name: a_full_iri_is_not_a_prefixed_name
+    # Control: <http://ex.org/a> holds a colon but is no prefix "http".
+    setup:
+      - "INSERT DATA { <http://ex.org/a> <http://ex.org/p> <urn:x:y> . }"
+    query: "SELECT ?o WHERE { <http://ex.org/a> <http://ex.org/p> ?o }"
+    expect:
+      rows:
+        - [urn:x:y]
+
+  - name: a_declared_prefix_works_in_every_position
+    # Control.
+    setup:
+      - "INSERT DATA { GRAPH <http://ex.org/g> { <http://ex.org/a> <http://ex.org/p> <http://ex.org/b> . } }"
+    query: "PREFIX ex: <http://ex.org/> SELECT ?o FROM NAMED ex:g WHERE { GRAPH ex:g { ex:a ex:p ?o } }"
+    expect:
+      rows:
+        - [http://ex.org/b]
+
+  # ---------------------------------------------------------------------------
+  # An undeclared prefix is a syntax error naming it
+  # ---------------------------------------------------------------------------
+
+  - name: an_undeclared_prefix_as_a_subject_fails
+    query: "SELECT ?o WHERE { ex:a ?p ?o }"
+    expect:
+      error: "ex"
+      gql_status: "42001"
+
+  - name: an_undeclared_prefix_as_a_predicate_fails
+    query: "SELECT ?s WHERE { ?s ex:p ?o }"
+    expect:
+      error: "ex"
+      gql_status: "42001"
+
+  - name: an_undeclared_prefix_as_an_object_fails
+    query: "SELECT ?s WHERE { ?s ?p ex:T }"
+    expect:
+      error: "ex"
+      gql_status: "42001"
+
+  - name: an_undeclared_prefix_as_a_datatype_fails
+    query: "SELECT ?s WHERE { ?s ?p \"5\"^^ex:int }"
+    expect:
+      error: "ex"
+      gql_status: "42001"
+
+  - name: an_undeclared_prefix_as_a_function_fails
+    query: "SELECT (ex:double(\"5\") AS ?x) WHERE {}"
+    expect:
+      error: "ex"
+      gql_status: "42001"
+
+  - name: an_undeclared_prefix_as_a_graph_name_fails
+    query: "SELECT ?s WHERE { GRAPH ex:g { ?s ?p ?o } }"
+    expect:
+      error: "ex"
+      gql_status: "42001"
+
+  - name: an_undeclared_prefix_in_from_fails
+    query: "SELECT ?s FROM ex:g WHERE { ?s ?p ?o }"
+    expect:
+      error: "ex"
+      gql_status: "42001"
+
+  - name: an_undeclared_prefix_in_from_named_fails
+    query: "SELECT ?s FROM NAMED ex:g WHERE { ?s ?p ?o }"
+    expect:
+      error: "ex"
+      gql_status: "42001"
+
+  - name: an_undeclared_prefix_in_a_property_path_fails
+    query: "SELECT ?s WHERE { ?s <http://ex.org/knows>/ex:name ?o }"
+    expect:
+      error: "ex"
+      gql_status: "42001"
+
+  - name: an_undeclared_prefix_in_a_filter_fails
+    query: "SELECT ?s WHERE { ?s ?p ?o FILTER(?o = ex:T) }"
+    expect:
+      error: "ex"
+      gql_status: "42001"
+
+  - name: an_undeclared_prefix_in_values_fails
+    query: "SELECT ?s WHERE { VALUES ?s { ex:a } }"
+    expect:
+      error: "ex"
+      gql_status: "42001"
+
+  - name: an_undeclared_prefix_in_insert_data_fails
+    query: "INSERT DATA { ex:b ex:p 1 }"
+    expect:
+      error: "ex"
+      gql_status: "42001"
+
+  - name: an_undeclared_prefix_in_an_insert_template_fails
+    query: "INSERT { ?s ex:seen true } WHERE { ?s ?p ?o }"
+    expect:
+      error: "ex"
+      gql_status: "42001"
+
+  - name: an_undeclared_prefix_in_a_delete_where_fails
+    query: "DELETE WHERE { ?s ex:p ?o }"
+    expect:
+      error: "ex"
+      gql_status: "42001"
+
+  - name: an_undeclared_prefix_after_a_declared_one_fails
+    query: "PREFIX ex: <http://ex.org/> SELECT ?s WHERE { ?s ex:p foaf:Person }"
+    expect:
+      error: "foaf"
+      gql_status: "42001"
+
+  - name: an_undeclared_empty_prefix_fails
+    query: "SELECT ?s WHERE { ?s :p ?o }"
+    expect:
+      error: ":"
+      gql_status: "42001"

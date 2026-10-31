@@ -22,6 +22,7 @@
 pub mod accumulator;
 mod aggregate;
 mod apply;
+mod delim;
 mod distinct;
 mod eager;
 mod expand;
@@ -32,6 +33,7 @@ mod filter;
 mod functions;
 mod horizontal_aggregate;
 mod join;
+mod label_count;
 mod leapfrog_join;
 mod limit;
 mod load_data;
@@ -66,8 +68,9 @@ mod writer;
 pub use accumulator::{AggregateExpr, AggregateFunction, HashableValue};
 pub use aggregate::{HashAggregateOperator, SimpleAggregateOperator};
 pub use apply::ApplyOperator;
+pub use delim::{DelimBuffer, DelimReplayOperator, DelimValuesOperator};
 pub use distinct::DistinctOperator;
-pub use eager::EagerOperator;
+pub use eager::{EagerOperator, OneRowAtATimeOperator};
 pub use expand::ExpandOperator;
 pub use factorized_aggregate::{
     FactorizedAggregate, FactorizedAggregateOperator, FactorizedOperator,
@@ -90,9 +93,10 @@ pub use functions::{
 };
 pub use horizontal_aggregate::{EntityKind, HorizontalAggregateOperator};
 pub use join::{
-    EqualityCondition, HashJoinOperator, HashKey, JoinCondition, JoinType, JoinedRowCondition,
-    NestedLoopJoinOperator,
+    CompatibleCondition, EqualityCondition, HashJoinOperator, HashKey, JoinCondition, JoinType,
+    JoinedRowCondition, NestedLoopJoinOperator,
 };
+pub use label_count::LabelCountOperator;
 pub use leapfrog_join::LeapfrogJoinOperator;
 pub use limit::{LimitOperator, LimitSkipOperator, SkipOperator};
 pub use load_data::{LoadDataFormat, LoadDataOperator};
@@ -137,11 +141,11 @@ pub use variable_length_expand::{
     DEFAULT_PATH_SEARCH_BUDGET, PathMode as ExecutionPathMode, VariableLengthExpandOperator,
 };
 pub use vector_join::VectorJoinOperator;
-pub use writer::{GraphWriter, NewEdge, Recording, WriteCounter, WriteCounters};
+pub use writer::{GraphWriter, MAP_ASSIGNMENT, NewEdge, Recording, WriteCounter, WriteCounters};
 
 use std::ops::Range;
 
-use grafeo_common::change::{Before, DataOp, PendingVersion, Table};
+use grafeo_common::change::{Before, ChangeMark, DataOp, PendingVersion, Table};
 use grafeo_common::types::{EdgeId, NodeId};
 use thiserror::Error;
 
@@ -273,6 +277,25 @@ pub trait ChangeRecorder: WriteClaims {
         Err(OperatorError::Execution(
             "this change recorder takes no bulk writes".to_string(),
         ))
+    }
+
+    /// The position after the transaction's last change, from which
+    /// [`nodes_written_after`](Self::nodes_written_after) reads. `None`, the
+    /// default, for a recorder that keeps no changes to read back: a reader
+    /// that keeps nodes by their values then reads the store each time.
+    fn change_mark(&self) -> Option<ChangeMark> {
+        None
+    }
+
+    /// Adds to `nodes` each node of the recorder's graph that a change
+    /// recorded after `mark` writes (creates, deletes, relabels or changes a
+    /// property of), and returns the mark after the last change: what the
+    /// transaction's writes changed since a reader last looked, in
+    /// O(changes since). `None`, the default, as for
+    /// [`change_mark`](Self::change_mark).
+    fn nodes_written_after(&self, mark: ChangeMark, nodes: &mut Vec<NodeId>) -> Option<ChangeMark> {
+        let _ = (mark, nodes);
+        None
     }
 }
 
@@ -488,6 +511,16 @@ impl OperatorError {
     pub fn numeric_out_of_range(operation: impl Into<String>) -> Self {
         Self::query_data(
             grafeo_common::utils::error::QueryErrorKind::NumericOutOfRange,
+            operation,
+        )
+    }
+
+    /// Text a cast cannot read as a value of its target type (GQLSTATUS
+    /// 22018); `operation` says which, such as `CAST('Alix' AS INT64)`.
+    #[must_use]
+    pub fn invalid_cast_text(operation: impl Into<String>) -> Self {
+        Self::query_data(
+            grafeo_common::utils::error::QueryErrorKind::InvalidCharacterValueForCast,
             operation,
         )
     }

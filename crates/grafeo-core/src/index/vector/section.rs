@@ -52,12 +52,14 @@
 //!   at offset 0.
 //!
 //! The next checkpoint after reading either writes version 3. The 0.5.x
-//! readers do not check the stream rules of version 3: a 0.5.x topology
-//! that breaks them (a top level its entry point does not reach, say) loads
-//! as it is, and once its first 0.6 checkpoint has written it as version 3,
-//! the next open refuses that stream with a warning and builds the index
-//! from the data, once: the checkpoint after that writes a topology that
-//! keeps the rules.
+//! readers check the links of a topology as version 3 does (a neighbor that
+//! is no node of the index, a node that lists itself, a level the neighbor
+//! does not have) and refuse one that breaks them; they do not check the
+//! other stream rules of version 3: a 0.5.x topology that breaks those (a
+//! top level its entry point does not reach, say) loads as it is, and once
+//! its first 0.6 checkpoint has written it as version 3, the next open
+//! refuses that stream with a warning and builds the index from the data,
+//! once: the checkpoint after that writes a topology that keeps the rules.
 
 use std::io::{self, Read, Write};
 use std::sync::Arc;
@@ -390,6 +392,9 @@ fn deserialize_v2(data: &[u8], indexes: &mut [(String, Arc<VectorIndexKind>)]) -
                     ))
                 })?;
             index.restore_topology(entry_point, max_level, nodes);
+            // A 0.5.x topology is held to the rules of version 3 too: a
+            // neighbor outside the index would be a search result.
+            check_legacy_links(&meta.key, index)?;
         }
     }
 
@@ -405,6 +410,7 @@ fn deserialize_v1(data: &[u8], indexes: &mut [(String, Arc<VectorIndexKind>)]) -
     for idx_snap in snapshot.indexes {
         if let Some((_, index)) = indexes.iter().find(|(k, _)| *k == idx_snap.key) {
             index.restore_topology(idx_snap.entry_point, idx_snap.max_level, idx_snap.nodes);
+            check_legacy_links(&idx_snap.key, index)?;
         }
     }
     Ok(())
@@ -831,6 +837,25 @@ fn check_links(index: &VectorIndexKind) -> Result<()> {
         }
     };
     Err(Error::corruption(format!("section VectorStore: {what}")))
+}
+
+/// [`check_links`] for the topology a 0.5.x reader restored into `index`,
+/// the index of `key`: one that breaks them leaves the index empty, as a
+/// version 3 stream does (see [`read_topology`]).
+fn check_legacy_links(key: &str, index: &VectorIndexKind) -> Result<()> {
+    check_links(index).map_err(|error| {
+        // No broken topology stays behind for a search to start from.
+        index.begin_restore(None, 0, 0);
+        Error::corruption(format!("vector index '{key}': {}", corruption_text(&error)))
+    })
+}
+
+/// The text of a corruption error, without the prefix its display adds.
+fn corruption_text(error: &Error) -> String {
+    match error {
+        Error::Corruption(corruption) => corruption.what.clone(),
+        other => other.to_string(),
+    }
 }
 
 /// Restores `index` from stream `stream`; on an error, leaves it empty.
@@ -2037,5 +2062,213 @@ mod tests {
                 "{message}"
             );
         });
+    }
+
+    // ── 0.5.x topologies with a link outside the index ───────────────
+
+    /// The key of the index the 0.5.x topologies below belong to.
+    const LEGACY_KEY: &str = "Doc:emb";
+
+    /// Node 7 is not in the index, but has a vector in the store (a node of
+    /// another label, or one the index never took): the query vector itself.
+    const OUTSIDE: u64 = 7;
+
+    /// The vectors of the store: the three indexed nodes, far from the
+    /// query, and the outside node, on it.
+    fn store_vector(id: NodeId) -> Option<Arc<[f32]>> {
+        match id.as_u64() {
+            1 => Some(Arc::from(vec![19.0_f32, 0.0, 0.0])),
+            2 => Some(Arc::from(vec![0.0_f32, 19.0, 0.0])),
+            3 => Some(Arc::from(vec![0.0_f32, 0.0, 19.0])),
+            OUTSIDE => Some(Arc::from(vec![3.0_f32, 3.0, 3.0])),
+            _ => None,
+        }
+    }
+
+    /// The query: the outside node's vector.
+    const QUERY: [f32; 3] = [3.0, 3.0, 3.0];
+
+    /// A topology of nodes 1, 2 and 3, entry point 1, on level 0; with
+    /// `outside_link`, node 1 also lists node 7, which is not a node of the
+    /// topology.
+    fn legacy_topology(
+        outside_link: bool,
+    ) -> (Option<NodeId>, usize, Vec<(NodeId, Vec<Vec<NodeId>>)>) {
+        let ids = |list: &[u64]| list.iter().map(|id| NodeId::new(*id)).collect::<Vec<_>>();
+        let first: &[u64] = if outside_link {
+            &[2, 3, OUTSIDE]
+        } else {
+            &[2, 3]
+        };
+        (
+            Some(NodeId::new(1)),
+            0,
+            vec![
+                (NodeId::new(1), vec![ids(first)]),
+                (NodeId::new(2), vec![ids(&[1, 3])]),
+                (NodeId::new(3), vec![ids(&[1, 2])]),
+            ],
+        )
+    }
+
+    /// The config of the index the topologies belong to.
+    fn legacy_config() -> HnswConfig {
+        HnswConfig::new(3, DistanceMetric::Euclidean)
+    }
+
+    /// The v1 bytes (bincode, 0.5.x before the paged envelope) of
+    /// [`legacy_topology`].
+    fn legacy_v1_bytes(outside_link: bool) -> Vec<u8> {
+        let (entry_point, max_level, nodes) = legacy_topology(outside_link);
+        let config = legacy_config();
+        let snapshot = VectorStoreSnapshotV1 {
+            version: 1,
+            indexes: vec![IndexSnapshotV1 {
+                key: LEGACY_KEY.to_string(),
+                dimensions: config.dimensions,
+                metric: config.metric,
+                m: config.m,
+                ef_construction: config.ef_construction,
+                entry_point,
+                max_level,
+                nodes,
+            }],
+        };
+        bincode::serde::encode_to_vec(&snapshot, bincode::config::standard()).unwrap()
+    }
+
+    /// The v2 bytes (the paged `GVST` envelope 0.5.x wrote last) of
+    /// [`legacy_topology`].
+    fn legacy_v2_bytes(outside_link: bool) -> Vec<u8> {
+        let (entry_point, max_level, nodes) = legacy_topology(outside_link);
+        let index = Arc::new(VectorIndexKind::Hnsw(HnswIndex::new(legacy_config())));
+        index.restore_topology(entry_point, max_level, nodes);
+        let bytes = VectorStoreSection::new(vec![(LEGACY_KEY.to_string(), index)])
+            .serialize()
+            .unwrap();
+        assert_eq!(&bytes[0..4], V2_MAGIC, "the paged envelope");
+        bytes
+    }
+
+    /// The section of a 0.5.x file holding `bytes`: one raw chunk, as a
+    /// 0.5.x container v2 file stores a section.
+    fn legacy_source(bytes: &[u8]) -> Written {
+        let mut written = Written {
+            version: 1,
+            metas: Vec::new(),
+            chunks: Vec::new(),
+        };
+        written.push(ChunkMeta::raw(), bytes);
+        written
+    }
+
+    /// The 0.5.x topologies, v1 and v2, by name.
+    fn legacy_cases(outside_link: bool) -> [(&'static str, Vec<u8>); 2] {
+        [
+            ("v1 bincode", legacy_v1_bytes(outside_link)),
+            ("v2 paged", legacy_v2_bytes(outside_link)),
+        ]
+    }
+
+    /// Control: a 0.5.x topology (v1 or v2) that keeps the rules loads as
+    /// it is and is served, through the read of a 0.5.x file (one raw chunk)
+    /// and through `deserialize`.
+    #[test]
+    fn a_sound_0_5_topology_is_served() {
+        for (case, bytes) in legacy_cases(false) {
+            let target = vec![(
+                LEGACY_KEY.to_string(),
+                Arc::new(VectorIndexKind::Hnsw(HnswIndex::new(legacy_config()))),
+            )];
+            read_into(&target, &legacy_source(&bytes))
+                .unwrap_or_else(|error| panic!("{case}: {error}"));
+            let index = &target[0].1;
+            assert_eq!(index.len(), 3, "{case}: the three nodes");
+            assert_eq!(index.first_broken_link(), None, "{case}");
+            let found: Vec<u64> = index
+                .search(&QUERY, 3, &store_vector)
+                .into_iter()
+                .map(|(id, _)| id.as_u64())
+                .collect();
+            let mut sorted = found.clone();
+            sorted.sort_unstable();
+            assert_eq!(sorted, [1, 2, 3], "{case}: the indexed nodes: {found:?}");
+
+            let shell = Arc::new(VectorIndexKind::Hnsw(HnswIndex::new(legacy_config())));
+            VectorStoreSection::new(vec![(LEGACY_KEY.to_string(), Arc::clone(&shell))])
+                .deserialize(&bytes)
+                .unwrap_or_else(|error| panic!("{case}: deserialize: {error}"));
+            assert_eq!(shell.len(), 3, "{case}: deserialize");
+        }
+    }
+
+    /// A 0.5.x topology (v1 or v2) in which node 1 lists node 7, which is not
+    /// in the index but has a vector in the store, is checked on load as a
+    /// version 3 stream is (`check_links`): refused, naming the index and the
+    /// link, the index left empty, so a search never returns node 7, in a
+    /// plain or a filtered search. Today the 0.5.x readers load it as it is,
+    /// and a search returns node 7. Every case runs before the test fails, so
+    /// its message lists each one that went wrong.
+    #[test]
+    fn a_0_5_topology_with_a_link_outside_the_index_is_never_served() {
+        let allowlist: std::collections::HashSet<NodeId> =
+            [NodeId::new(2), NodeId::new(OUTSIDE)].into_iter().collect();
+        let mut problems = Vec::new();
+        for (case, bytes) in legacy_cases(true) {
+            for path in ["the read of a 0.5.x file", "deserialize"] {
+                let index = Arc::new(VectorIndexKind::Hnsw(HnswIndex::new(legacy_config())));
+                let target = vec![(LEGACY_KEY.to_string(), Arc::clone(&index))];
+                let loaded = if path == "deserialize" {
+                    VectorStoreSection::new(target.clone()).deserialize(&bytes)
+                } else {
+                    read_into(&target, &legacy_source(&bytes))
+                };
+
+                let plain: Vec<u64> = index
+                    .search(&QUERY, 4, &store_vector)
+                    .into_iter()
+                    .map(|(id, _)| id.as_u64())
+                    .collect();
+                if plain.contains(&OUTSIDE) {
+                    problems.push(format!(
+                        "{case}, {path}: a search returned node {OUTSIDE}, which is not in the \
+                         index: {plain:?}"
+                    ));
+                }
+                let filtered: Vec<u64> = index
+                    .search_with_filter(&QUERY, 4, &allowlist, &store_vector)
+                    .into_iter()
+                    .map(|(id, _)| id.as_u64())
+                    .collect();
+                if filtered.contains(&OUTSIDE) {
+                    problems.push(format!(
+                        "{case}, {path}: a filtered search returned node {OUTSIDE}, which is not \
+                         in the index: {filtered:?}"
+                    ));
+                }
+
+                match loaded {
+                    Ok(()) => problems.push(format!(
+                        "{case}, {path}: the topology with a link outside the index loaded"
+                    )),
+                    Err(error) => {
+                        let message = error.to_string();
+                        if !matches!(error, Error::Corruption(_))
+                            || !message.contains(&format!("'{LEGACY_KEY}'"))
+                            || !message.contains(&format!("node 1 lists node {OUTSIDE} at level 0"))
+                        {
+                            problems.push(format!(
+                                "{case}, {path}: the refusal is a corruption error that names \
+                                 the index and the link: {error:?}"
+                            ));
+                        }
+                    }
+                }
+                if index.snapshot_topology() != (None, 0, Vec::new()) {
+                    problems.push(format!("{case}, {path}: the index is not left empty"));
+                }
+            }
+        }
+        assert!(problems.is_empty(), "{}", problems.join("\n"));
     }
 }

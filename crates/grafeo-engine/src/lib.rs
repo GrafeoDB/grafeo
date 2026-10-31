@@ -18,6 +18,17 @@
 
 #![deny(unsafe_code)]
 
+// SPARQL's REGEX runs on the regex backend the build chose: `regex` for
+// native builds, `regex-lite` for WASM. The triple store picks neither, so a
+// build may choose the small one.
+#[cfg(all(
+    feature = "triple-store",
+    not(any(feature = "regex", feature = "regex-lite"))
+))]
+compile_error!(
+    "the `triple-store` feature needs a regex backend: enable `regex` (native) or `regex-lite` (WASM)"
+);
+
 /// The version of the grafeo-engine crate (from Cargo.toml).
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -34,6 +45,7 @@ pub mod execution;
 pub mod export;
 #[cfg(feature = "gql")]
 pub mod import;
+pub mod loader;
 pub mod memory_usage;
 #[cfg(feature = "metrics")]
 pub mod metrics;
@@ -56,6 +68,9 @@ pub use catalog::{Catalog, CatalogError, IndexDefinition, IndexType};
 pub use config::{AccessMode, Config, ConfigError, DurabilityMode, GraphModel, HistoryRetention};
 pub use database::GrafeoDB;
 pub use database::GraphHandle;
+/// The syntax `GrafeoDB::load_rdf` reads.
+#[cfg(feature = "triple-store")]
+pub use database::RdfFormat;
 pub use database::{AsOfView, TimePoint};
 pub use grafeo_core::graph::{Direction, GraphStore, ProjectionSpec};
 /// The options `GrafeoDB::create_text_index_with` takes.

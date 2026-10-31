@@ -490,6 +490,9 @@ pub struct SolutionModifiers {
     pub limit: Option<u64>,
     /// OFFSET clause.
     pub offset: Option<u64>,
+    /// The VALUES clause after the modifiers (SPARQL 1.1 sec 10.2.2): joined
+    /// with the solutions after GROUP BY and HAVING (sec 18.2.4.3).
+    pub values: Option<InlineDataClause>,
 }
 
 /// A GROUP BY condition.

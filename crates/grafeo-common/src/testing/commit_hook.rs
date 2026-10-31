@@ -13,7 +13,9 @@
 //! inside a change outside any commit (a schema statement, a graph command, an
 //! RDF update, a direct write, a direct graph or index call, an import or an
 //! RDF batch insert) once it holds commits off and before it changes anything
-//! ([`during_next_held_change`]).
+//! ([`during_next_held_change`]), or after a backend write has been applied
+//! and recorded ([`after_next_data_write`]). [`fail_next_change_record`]
+//! makes the recording of a direct write's change fail.
 //! [`checkpoints_started`] counts the checkpoints started on a database
 //! file, from any thread (the engine calls [`count_checkpoint`]).
 //!
@@ -29,15 +31,59 @@ mod inner {
     use std::sync::Mutex;
 
     type Hook = Box<dyn FnOnce()>;
+    type WriteHook =
+        Box<dyn FnOnce() -> Result<(), crate::testing::statement_failure::InjectedFailure>>;
 
     thread_local! {
         static AFTER_EPOCH: RefCell<Option<Hook>> = const { RefCell::new(None) };
+        static AFTER_DATA_WRITE: RefCell<Option<WriteHook>> = const { RefCell::new(None) };
+        static FAIL_RECORD: RefCell<bool> = const { RefCell::new(false) };
         static AFTER_WRITTEN: RefCell<Option<Hook>> = const { RefCell::new(None) };
         static AFTER_STAMPED: RefCell<Option<Hook>> = const { RefCell::new(None) };
         static AFTER_LOGGED: RefCell<Option<Hook>> = const { RefCell::new(None) };
+        static AFTER_BACKUP_STATE_READ: RefCell<Option<Hook>> = const { RefCell::new(None) };
+        static BEFORE_BACKUP_WAIT: RefCell<Option<Hook>> = const { RefCell::new(None) };
         static DURING_CHECKPOINT: RefCell<Option<Hook>> = const { RefCell::new(None) };
         static DURING_CHECKPOINT_WRITE: RefCell<Option<Hook>> = const { RefCell::new(None) };
         static DURING_HELD_CHANGE: RefCell<Option<Hook>> = const { RefCell::new(None) };
+    }
+
+    /// Arms a one-shot hook after the next changed backend write is recorded
+    /// on this thread. Returning an error or panicking exercises the caller's
+    /// cleanup after a completed write, before the rest of its operation.
+    pub fn after_next_data_write(
+        hook: impl FnOnce() -> Result<(), crate::testing::statement_failure::InjectedFailure> + 'static,
+    ) {
+        AFTER_DATA_WRITE.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+    }
+
+    /// Runs the data-write hook armed on this thread, if any.
+    ///
+    /// # Errors
+    ///
+    /// Returns the armed hook's injected failure.
+    #[inline]
+    pub fn run_after_data_write() -> Result<(), crate::testing::statement_failure::InjectedFailure>
+    {
+        match AFTER_DATA_WRITE.with(|slot| slot.borrow_mut().take()) {
+            Some(hook) => hook(),
+            None => Ok(()),
+        }
+    }
+
+    /// Makes the next change a direct write records on this thread fail to
+    /// be recorded, after the write is applied: the failure that poisons the
+    /// database, since the log would miss the write.
+    pub fn fail_next_change_record() {
+        FAIL_RECORD.with(|slot| *slot.borrow_mut() = true);
+    }
+
+    /// Whether a recording of a change on this thread was armed to fail
+    /// ([`fail_next_change_record`]), once.
+    #[inline]
+    #[must_use]
+    pub fn run_change_record() -> bool {
+        FAIL_RECORD.with(|slot| std::mem::take(&mut *slot.borrow_mut()))
     }
 
     /// The checkpoints started on each database file.
@@ -76,6 +122,34 @@ mod inner {
     /// complete.
     pub fn after_next_commit_logged(hook: impl FnOnce() + 'static) {
         AFTER_LOGGED.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+    }
+
+    /// Arms `hook` to run once after the next backup on this thread reads
+    /// the state and selects the file it will write, before that write.
+    pub fn after_next_backup_state_read(hook: impl FnOnce() + 'static) {
+        AFTER_BACKUP_STATE_READ.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+    }
+
+    /// Runs the backup state-read hook armed on this thread, if any.
+    #[inline]
+    pub fn run_after_backup_state_read() {
+        if let Some(hook) = AFTER_BACKUP_STATE_READ.with(|slot| slot.borrow_mut().take()) {
+            hook();
+        }
+    }
+
+    /// Arms `hook` to run once before the next backup on this thread waits
+    /// for another backup on the same database to finish.
+    pub fn before_next_backup_wait(hook: impl FnOnce() + 'static) {
+        BEFORE_BACKUP_WAIT.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+    }
+
+    /// Runs the backup wait hook after contention, before waiting.
+    #[inline]
+    pub fn run_before_backup_wait() {
+        if let Some(hook) = BEFORE_BACKUP_WAIT.with(|slot| slot.borrow_mut().take()) {
+            hook();
+        }
     }
 
     /// Arms `hook` to run once, inside the next checkpoint on this thread,
@@ -182,6 +256,33 @@ mod inner {
     use std::path::Path;
 
     /// No-op when injection is disabled.
+    pub fn after_next_data_write(
+        _hook: impl FnOnce() -> Result<(), crate::testing::statement_failure::InjectedFailure> + 'static,
+    ) {
+    }
+
+    /// No-op when injection is disabled.
+    ///
+    /// # Errors
+    ///
+    /// Always succeeds without the test feature.
+    #[inline]
+    pub fn run_after_data_write() -> Result<(), crate::testing::statement_failure::InjectedFailure>
+    {
+        Ok(())
+    }
+
+    /// No-op when injection is disabled.
+    pub fn fail_next_change_record() {}
+
+    /// Always `false` when injection is disabled.
+    #[inline]
+    #[must_use]
+    pub fn run_change_record() -> bool {
+        false
+    }
+
+    /// No-op when injection is disabled.
     pub fn after_next_commit_epoch(_hook: impl FnOnce() + 'static) {}
 
     /// No-op when injection is disabled.
@@ -208,6 +309,20 @@ mod inner {
     /// No-op when injection is disabled.
     #[inline]
     pub fn run_after_commit_logged() {}
+
+    /// No-op when injection is disabled.
+    pub fn after_next_backup_state_read(_hook: impl FnOnce() + 'static) {}
+
+    /// No-op when injection is disabled.
+    #[inline]
+    pub fn run_after_backup_state_read() {}
+
+    /// No-op when injection is disabled.
+    pub fn before_next_backup_wait(_hook: impl FnOnce() + 'static) {}
+
+    /// No-op when injection is disabled.
+    #[inline]
+    pub fn run_before_backup_wait() {}
 
     /// No-op when injection is disabled.
     pub fn during_next_checkpoint(_hook: impl FnOnce() + 'static) {}

@@ -1,0 +1,75 @@
+# Reviewed differences between 0.6.0 and 0.6.1: case key, fingerprint of the reviewed result, why it changed.
+# A `~` before the fingerprint: the case's result in 0.6.0 varies from run to run, so it may also not differ.
+BW2|cypher 7b077158c6 toDecimal of a value that does not fit the precision fails with 22003, as a CAST does; 0.6.0 gave null.
+BW2|gql 7b077158c6 toDecimal of a value that does not fit the precision fails with 22003, as a CAST does; 0.6.0 gave null.
+BW4|gql 86740c1269 A CAST to DECIMAL(p, s) of a value that does not fit fails with 22003, as SQL; 0.6.0 gave null.
+CX3|cypher 9e9e9e76a9 toInteger trims the text first; 0.6.0 gave null for text with surrounding spaces.
+DE1|gql 5103ef079d Shortest paths read a decimal edge weight; 0.6.0 read it as 1.0 (#678).
+DE2|gql 003bcbe071 Spanning trees read a decimal edge weight; 0.6.0 read it as 1.0, so it kept the wrong edges (#678).
+DE3|gql 57bb8d0e4e Max flow reads a decimal capacity; 0.6.0 read it as 1.0 (#678).
+DE4|gql 3369869dd8 Min-cost flow reads decimal capacities and costs; 0.6.0 read them as 1.0 and 0.0 (#678).
+DF1|cypher 41c2268601 A key read of an aggregate (head(collect(p)).name) aggregates; 0.6.0 refused it (#539).
+DF1|gql 41c2268601 A key read of an aggregate (head(collect(p)).name) aggregates; 0.6.0 refused it (#539).
+DF2|cypher acc98a6eac An index of and a map of an aggregate aggregate; 0.6.0 refused them (#539).
+DF2|gql acc98a6eac An index of and a map of an aggregate aggregate; 0.6.0 refused them (#539).
+DF3|gql 9d0b9d9057 An aggregate over a LET variable aggregates; 0.6.0 refused it (#539).
+DF4|gql 236cddc851 A LET variable inside a list, a map and CASE reads its value; 0.6.0 failed with an undefined variable (#539).
+DG1|cypher bb358ef914 A doubled backtick in a Cypher delimited name is one backtick; 0.6.0 failed with a syntax error (#579).
+DG2|cypher 1f8ab4f00d size() of a vector is its dimension; 0.6.0 returned null (#585).
+DG2|gql 1f8ab4f00d size() of a vector is its dimension; 0.6.0 returned null (#585).
+DG3|cypher 4b4e4c2b02 toList() of a vector is the list of its elements; 0.6.0 wrapped the vector in a list (#585).
+DG3|gql 4b4e4c2b02 toList() of a vector is the list of its elements; 0.6.0 wrapped the vector in a list (#585).
+DH4|gql 2803989dcf A list of another size on a vector-indexed property is refused, as a vector of that size is; 0.6.0 stored it as a list the index left out (#587).
+DH6|gql 87c971e8bd A numeric list written to a vector-indexed property is stored as a vector, and a list elsewhere stays a list; 0.6.0 stored every list as a list (#587).
+DH7|cypher cb0cf24801 The vector index finds embeddings written as lists; 0.6.0 left them out (#587).
+DH7|gql cb0cf24801 The vector index finds embeddings written as lists; 0.6.0 left them out (#587).
+DI1|sql 09328f6996 SQL/PGQ NODES(p) and EDGES(p) return each node and edge with its ID, labels or type, endpoints and properties; 0.6.0 returned only their IDs (#705).
+DI2|sql 3dc931f998 SQL/PGQ NODES(p) and EDGES(p) return each node and edge with its ID, labels or type, endpoints and properties; 0.6.0 returned only their IDs (#705).
+DI3|sql 6dee46b96c SQL/PGQ NODES(p) and EDGES(p) return each node and edge with its ID, labels or type, endpoints and properties; 0.6.0 returned only their IDs (#705).
+DJ1|gql 97aadb50f3 A decimal sum is exact in any row order and fails only when the final value does not fit; 0.6.0 failed when a running total passed 38 digits, so [a, a, -a] failed where [a, -a, a] did not (#669).
+DJ4|cypher 97aadb50f3 A decimal sum is exact in any row order and fails only when the final value does not fit; 0.6.0 failed when a running total passed 38 digits, so [a, a, -a] failed where [a, -a, a] did not (#669).
+DJ7|gql 0ca43c524b An average of decimals is never beyond its largest row, so it never fails; 0.6.0 failed when the sum of the rows passed 38 digits (#669).
+DJ8|cypher 0ca43c524b An average of decimals is never beyond its largest row, so it never fails; 0.6.0 failed when the sum of the rows passed 38 digits (#669).
+DK1|gql 2198066ef4 A WHERE inside a GQL quantified pattern holds for each step; 0.6.0 checked it once over the edge list and found no path (#678).
+DK2|gql abdee0974a A node condition inside a GQL quantified pattern reads the step's nodes; 0.6.0 refused it as an undefined variable (#678).
+DK3|gql ab0bd9ec5c A GQL quantified pattern of two edges repeats within its bounds; 0.6.0 took the segment once and ignored them (#678).
+DK4|gql 2aba91d6f9 A GQL quantified pattern of two edges repeats within its bounds; 0.6.0 took the segment once and ignored them (#678).
+DK5|gql 6354c87d40 An unbounded GQL walk has no hop cap; 0.6.0 stopped after min + 100 hops (#678).
+DK6|gql 1dc1b27e0f An unbounded GQL walk has no hop cap; 0.6.0 stopped after min + 100 hops (#678).
+N12|cypher 603b79d5f3 A subquery that returns an edge in one part and a node in another returns each as what it is; 0.6.0 read the node as the edge with its ID (#668).
+N12|gql 603b79d5f3 A subquery that returns an edge in one part and a node in another returns each as what it is; 0.6.0 read the node as the edge with its ID (#668).
+DL1|sparql 6527675bc9 A FILTER inside OPTIONAL reads the joined solution, so !BOUND of an outer variable keeps the OPTIONAL from extending; 0.6.0 read the optional pattern alone (#701).
+DL2|sparql cc3ebc43e3 A FILTER inside OPTIONAL reads the outer pattern's variables; 0.6.0 found them unbound and dropped the extension (#701).
+DL3|sparql 317dd143a9 A FILTER inside OPTIONAL reads the joined solution, so a count over the optional variable sees no extension; 0.6.0 counted 2 (#701).
+DL4|sparql cd2c972924 A group that opens with MINUS is one empty solution; 0.6.0 gave the MINUS pattern's solutions (#702).
+DL5|sparql cd2c972924 A group that opens with an OPTIONAL without a match is one empty solution; 0.6.0 gave none (#702).
+DL6|sparql 1b34b3884d A variable a leading OPTIONAL without a match leaves unbound joins with every value of a later pattern; 0.6.0 joined the OPTIONAL's pattern and found no row (#702).
+DL7|sparql 209042b955 A BIND to a variable already in scope is a syntax error; 0.6.0 overwrote the variable (#703).
+DL8|sparql fe72c08082 FILTER EXISTS keeps a solution once and binds none of its pattern's variables; 0.6.0 gave one row per match with the pattern's variables.
+DL9|sparql 97f0e95745 FILTER NOT EXISTS without a shared variable removes every solution when its pattern matches; 0.6.0 kept them.
+DL10|sparql 1a5ada6bbb A group of only FILTER NOT EXISTS is false when its pattern matches; 0.6.0 gave true.
+DL11|sparql 77f2a18238 A variable an OPTIONAL leaves unbound joins with every value of a later pattern; 0.6.0 dropped the rows without the OPTIONAL's match.
+DM1|cypher 50e0e87aef The Cypher sum of no values is 0, as openCypher gives it; 0.6.0 gave null.
+DM2|cypher fec3a71c3b The Cypher sum of a group of only nulls is 0, as openCypher gives it; 0.6.0 gave null.
+DM4|gql 4fbceb9a5a A float remainder by zero is NaN, as IEEE fmod gives it; 0.6.0 gave null.
+DM5|cypher 4fbceb9a5a A float remainder by zero is NaN, as IEEE fmod gives it; 0.6.0 gave null.
+DM6|cypher bd5b5b2c26 toString spells the infinities Infinity and -Infinity, as openCypher does; 0.6.0 gave inf and -inf.
+DM6|gql bd5b5b2c26 toString spells the infinities Infinity and -Infinity, as openCypher does; 0.6.0 gave inf and -inf.
+DM7|cypher 0d27618820 toInteger and toFloat trim the text, and toInteger truncates decimal text; 0.6.0 gave null for both.
+DM7|gql 0d27618820 toInteger and toFloat trim the text, and toInteger truncates decimal text; 0.6.0 gave null for both.
+DM8|cypher aec59ef631 toInteger of NaN is null; 0.6.0 gave 0.
+DM8|gql aec59ef631 toInteger of NaN is null; 0.6.0 gave 0.
+DN8|cypher 81f980f851 A top-level EXISTS runs once over the outer rows' distinct values (delim join), never for a node no outer row holds; 0.6.0 ran it for every Method and failed with division by zero.
+DN8|gql 81f980f851 A top-level EXISTS runs once over the outer rows' distinct values (delim join), never for a node no outer row holds; 0.6.0 ran it for every Method and failed with division by zero.
+DN10|cypher 81f980f851 An EXISTS inside an OR waits for its sibling conjuncts (n.active, the label), so it does not run where they are false; 0.6.0 ran it and failed with division by zero.
+DN10|gql 81f980f851 An EXISTS inside an OR waits for its sibling conjuncts (n.active, the label), so it does not run where they are false; 0.6.0 ran it and failed with division by zero.
+DN11|cypher 81f980f851 An EXISTS inside an OR waits for its sibling conjuncts also when it is written first; 0.6.0 ran it and failed with division by zero.
+DN11|gql 81f980f851 An EXISTS inside an OR waits for its sibling conjuncts also when it is written first; 0.6.0 ran it and failed with division by zero.
+DN16|cypher 9f11c8c76a A negative slice bound counts from the end, as openCypher: [-2..] is the last two elements; 0.6.0 gave an empty list or the whole list.
+DN16|gql 9f11c8c76a A negative slice bound counts from the end, as openCypher: [-2..] is the last two elements; 0.6.0 gave an empty list or the whole list.
+DN17|cypher 4151b9b220 A negative slice bound counts from the end also on a collected list; 0.6.0 gave an empty list or the whole list.
+DN17|gql 4151b9b220 A negative slice bound counts from the end also on a collected list; 0.6.0 gave an empty list or the whole list.
+DN25|cypher b49653534b An EXISTS beside a condition that is false for a row does not run for that row, also as a mark join, so a subquery that would divide by zero for it no longer fails; 0.6.0 failed with division by zero.
+DN25|gql b49653534b An EXISTS beside a condition that is false for a row does not run for that row, also as a mark join, so a subquery that would divide by zero for it no longer fails; 0.6.0 failed with division by zero.
+DN27|cypher a99961e4b7 The WHERE of an OPTIONAL MATCH holding a subquery over the outer rows filters the optional part, so every outer row stays, with nulls where it does not hold; 0.6.0 dropped those rows.
+DN27|gql a99961e4b7 The WHERE of an OPTIONAL MATCH holding a subquery over the outer rows filters the optional part, so every outer row stays, with nulls where it does not hold; 0.6.0 dropped those rows.

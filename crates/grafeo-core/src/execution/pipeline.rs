@@ -178,16 +178,6 @@ impl Pipeline {
         self.deadline = deadline;
     }
 
-    /// Checks whether the deadline has been exceeded.
-    fn check_deadline(&self) -> Result<(), OperatorError> {
-        if let Some(deadline) = self.deadline
-            && Instant::now() >= deadline
-        {
-            return Err(OperatorError::Timeout);
-        }
-        Ok(())
-    }
-
     /// Consumes the pipeline and returns the sink.
     ///
     /// Call this after [`execute()`](Self::execute) to retrieve collected results
@@ -201,22 +191,23 @@ impl Pipeline {
     ///
     /// # Deadline behavior
     ///
-    /// The deadline is checked **between** chunk iterations, not during source reads.
-    /// A slow source read (e.g., a complex scan or join) can exceed the deadline
-    /// before cancellation is evaluated. This matches the pull-based executor's
-    /// behavior and is an accepted trade-off: cooperative cancellation between
-    /// chunks avoids the complexity of interrupt-based cancellation within operators.
+    /// The deadline is checked between the source's chunks, and it is the
+    /// running query's [`deadline`](super::deadline) while the pipeline runs,
+    /// so the operators under the source check it in their own loops too (an
+    /// aggregate or a join that reads its whole input inside one source
+    /// read). A query stops within about one chunk of work past it.
     ///
     /// # Errors
     ///
     /// Returns `Err` if any source, operator, or sink fails during execution,
-    /// or if the configured deadline is exceeded between chunks.
+    /// or [`OperatorError::Timeout`] once the deadline has passed.
     pub fn execute(&mut self) -> Result<(), OperatorError> {
+        let _deadline = super::deadline::enter(self.deadline);
         let chunk_size = self.compute_chunk_size();
 
         // Process all chunks from source
         while let Some(chunk) = self.source.next_chunk(chunk_size)? {
-            self.check_deadline()?;
+            super::deadline::check()?;
 
             if !self.push_through(chunk)? {
                 // Early termination requested

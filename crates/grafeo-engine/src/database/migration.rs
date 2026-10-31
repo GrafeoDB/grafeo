@@ -292,6 +292,15 @@ pub(super) fn migrate(path: &Path, config: &Config) -> Result<()> {
     }
     let old = GrafeoDB::with_config_and_spill(old_config, !keys.is_encrypted()).map_err(failed)?;
     old.write_image_with(&migrating, &keys).map_err(failed)?;
+    // Tests change the written image here, before it is checked.
+    maybe_pause("migrate:image_written");
+    let expected = match Contents::of(&old) {
+        Ok(contents) => contents,
+        Err(error) => {
+            remove_after_failure(&migrating);
+            return Err(failed(error));
+        }
+    };
     let (nodes, edges) = (
         old.node_count().map_err(failed)?,
         old.edge_count().map_err(failed)?,
@@ -317,6 +326,13 @@ pub(super) fn migrate(path: &Path, config: &Config) -> Result<()> {
             return Err(failed(error));
         }
     };
+    // The image opened as a database, as the next open reads it, holds what
+    // the old database held: a section writer that lost rows, a graph or a
+    // definition is never installed (the old database is still in place).
+    if let Err(error) = check_image(&migrating, config, &expected) {
+        remove_after_failure(&migrating);
+        return Err(failed(error));
+    }
     maybe_crash("migrate:after_image");
 
     // The old database stays locked until it has moved. A directory's lock
@@ -417,6 +433,70 @@ fn refuse_kept_copy(path: &Path) -> Result<()> {
          and is not migrated itself: open it read-only to read it, or move it back to {original} \
          first to migrate it (see Going Back to 0.5.x)",
         path.display()
+    )))
+}
+
+/// What a migration checks the image holds, as the old database held it:
+/// the nodes and edges of the default graph and of each named graph, the
+/// named graphs, the indexes and the constraints.
+#[derive(Debug, PartialEq, Eq)]
+struct Contents {
+    nodes: usize,
+    edges: usize,
+    /// Each named graph's name, nodes and edges, in name order.
+    graphs: Vec<(String, usize, usize)>,
+    indexes: usize,
+    constraints: usize,
+}
+
+impl Contents {
+    fn of(db: &GrafeoDB) -> Result<Self> {
+        use grafeo_common::types::ReadView;
+        use grafeo_core::graph::GraphStore;
+
+        let root = db.lpg_store()?;
+        let view = ReadView::latest();
+        let mut names = db.list_graphs();
+        names.sort();
+        let mut graphs = Vec::with_capacity(names.len());
+        for name in names {
+            if let Some(graph) = root.graph(&name) {
+                let (nodes, edges) = (graph.node_count(view)?, graph.edge_count(view)?);
+                graphs.push((name, nodes, edges));
+            }
+        }
+        Ok(Self {
+            nodes: db.node_count()?,
+            edges: db.edge_count()?,
+            graphs,
+            indexes: db.catalog.index_count(),
+            constraints: db.catalog.constraints().len(),
+        })
+    }
+}
+
+/// Opens the image at `image` read-only, with the keys and memory settings
+/// of `config`, and checks it holds `expected`.
+///
+/// # Errors
+///
+/// The image's open error, or a corruption error naming what differs.
+fn check_image(image: &Path, config: &Config, expected: &Contents) -> Result<()> {
+    let mut image_config = Config::read_only(image);
+    #[cfg(feature = "encryption")]
+    if let Some(encryption) = config.encryption() {
+        image_config = image_config.with_encryption(encryption.clone());
+    }
+    if let Some(limit) = config.memory_limit() {
+        image_config = image_config.with_memory_limit(limit);
+    }
+    let found = Contents::of(&GrafeoDB::with_config(image_config)?)?;
+    if found == *expected {
+        return Ok(());
+    }
+    Err(Error::corruption(format!(
+        "the 0.6 image holds {found:?}, where the 0.5.x database holds {expected:?}; the \
+         database stays as it was"
     )))
 }
 
@@ -951,10 +1031,10 @@ fn lock_shared(path: &Path) -> Result<SharedLock> {
         |error| matches!(error, std::fs::TryLockError::WouldBlock),
     )
     .map_err(|error| match error {
-        std::fs::TryLockError::WouldBlock => Error::Internal(format!(
-            "cannot migrate {}: the database file is locked by another process",
+        std::fs::TryLockError::WouldBlock => Error::from(StorageError::Locked(format!(
+            "cannot migrate {}: the database file is held by another process, close it there first",
             path.display()
-        )),
+        ))),
         std::fs::TryLockError::Error(error) => {
             Error::Internal(format!("cannot lock {}: {error}", path.display()))
         }

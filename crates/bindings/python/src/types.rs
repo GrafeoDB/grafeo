@@ -231,6 +231,20 @@ impl PyValue {
 
     /// Converts a Python object to a Grafeo Value.
     pub fn from_py(obj: &Bound<'_, PyAny>) -> PyGrafeoResult<Value> {
+        Self::from_py_at(obj, 0)
+    }
+
+    /// [`from_py`](Self::from_py) for a value inside `depth` lists and
+    /// dicts: one nested deeper than a stored value is refused before its
+    /// conversion recurses further (a deep one would overflow the stack).
+    fn from_py_at(obj: &Bound<'_, PyAny>, depth: usize) -> PyGrafeoResult<Value> {
+        use grafeo_common::storage::MAX_PROPERTY_VALUE_DEPTH;
+
+        let too_deep = || {
+            PyGrafeoError::InvalidArgument(format!(
+                "the value nests lists and dicts more than {MAX_PROPERTY_VALUE_DEPTH} levels deep"
+            ))
+        };
         if obj.is_none() {
             return Ok(Value::Null);
         }
@@ -306,9 +320,12 @@ impl PyValue {
                 }
             }
 
+            if depth >= MAX_PROPERTY_VALUE_DEPTH {
+                return Err(too_deep());
+            }
             let mut items = Vec::new();
             for item in v {
-                items.push(Self::from_py(&item)?);
+                items.push(Self::from_py_at(&item, depth + 1)?);
             }
             return Ok(Value::List(items.into()));
         }
@@ -318,12 +335,18 @@ impl PyValue {
             let dict: &Bound<'_, PyDict> = obj
                 .cast()
                 .map_err(|e| PyGrafeoError::Type(format!("Cannot cast to dict: {}", e)))?;
+            if depth >= MAX_PROPERTY_VALUE_DEPTH {
+                return Err(too_deep());
+            }
             let mut map = BTreeMap::new();
             for (key, value) in dict.iter() {
                 let key_str: String = key
                     .extract()
                     .map_err(|e| PyGrafeoError::Type(format!("Dict key must be string: {}", e)))?;
-                map.insert(PropertyKey::new(key_str), Self::from_py(&value)?);
+                map.insert(
+                    PropertyKey::new(key_str),
+                    Self::from_py_at(&value, depth + 1)?,
+                );
             }
             return Ok(Value::Map(Arc::new(map)));
         }

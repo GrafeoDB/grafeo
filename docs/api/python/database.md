@@ -134,7 +134,7 @@ def explain_sparql(self, query: str) -> QueryResult
 
 ```python
 # View the query plan without executing
-result = db.explain_sparql("EXPLAIN SELECT ?name WHERE { ?p a :Person ; :name ?name }")
+result = db.explain_sparql("EXPLAIN SELECT ?name WHERE { ?p a <http://example.org/Person> ; <http://example.org/name> ?name }")
 for row in result:
     print(row)
 
@@ -335,6 +335,23 @@ for node_id, age in zip([1, 2, 3, 4, 5], ages):
         print(f"Node {node_id} is {age} years old")
 ```
 
+### get_properties_batch()
+
+Get several properties for multiple nodes in one call. Returns a dict with one list per key, in the order of
+`node_ids`: `None` where a node lacks the property or no node has the ID. IDs may repeat. No IDs gives an
+empty list per key, no keys gives an empty dict. It needs no pyarrow.
+
+```python
+def get_properties_batch(self, node_ids: List[int], keys: List[str]) -> Dict[str, List[Optional[Any]]]
+```
+
+```python
+alix = db.create_node(["Person"], {"name": "Alix", "city": "Amsterdam"})
+gus = db.create_node(["Person"], {"name": "Gus"})
+columns = db.get_properties_batch([alix.id, gus.id], ["name", "city"])
+# {'name': ['Alix', 'Gus'], 'city': ['Amsterdam', None]}
+```
+
 ## Edge Operations
 
 ### create_edge()
@@ -406,11 +423,12 @@ def remove_edge_property(self, edge_id: int, key: str) -> bool
 
 ## Upserts
 
-Create or update nodes and edges by a key property, many rows in one statement. The rows are checked like
-a query (constraints, schema), and a call writes all of its rows or none. Rows apply in order: a key
-repeated within one call creates one node or edge, which the later rows update. Both return a dict with
-`created`, `updated`, `skipped` and `skipped_rows` (the indices of the skipped rows, at most 1,000); the dict
-gains keys only, as the admin dicts do. Graph handles (`db.graph(name)`) have the same methods.
+Create or update nodes and edges by a key property, many rows in one statement, or update existing nodes
+only. The rows are checked like a query (constraints, schema), and a call writes all of its rows or none.
+In an upsert rows apply in order: a key repeated within one call creates one node or edge, which the later
+rows update. The upserts return a dict with `created`, `updated`, `skipped` and `skipped_rows` (the indices
+of the skipped rows, at most 1,000), `update_nodes` the same without `created`; the dicts gain keys only,
+as the admin dicts do. Graph handles (`db.graph(name)`) have the same methods.
 
 ### upsert_nodes()
 
@@ -425,6 +443,28 @@ def upsert_nodes(self, labels: list[str], rows: list[dict], key: str = "id", rep
 ```python
 db.upsert_nodes(["Graph", "File"], [{"id": "f1", "size": 3}, {"id": "f2", "size": 5}])
 # {'created': 2, 'updated': 0, 'skipped': 0, 'skipped_rows': []}
+```
+
+### update_nodes()
+
+Updates the nodes that already exist, one per row, matched by `key` and all of `labels`; it never creates
+a node. A row's properties are merged into the node's and the others stay, as
+`UNWIND $rows AS r MATCH (n:Labels {key: r.key}) SET n += r` does. A row whose key matches no node with
+every label, or that lacks the key, is skipped. No rows is a no-op. The time it takes grows with the number
+of rows and nodes, also without a property index on `key`, so it is much faster than that query on large
+batches.
+
+```python
+def update_nodes(self, labels: list[str], rows: list[dict], key: str = "id") -> dict
+```
+
+```python
+db.upsert_nodes(["Person"], [{"id": "p1", "name": "Alix"}, {"id": "p2", "name": "Gus"}])
+db.update_nodes(
+    ["Person"],
+    [{"id": "p1", "city": "Amsterdam"}, {"id": "p2", "city": "Berlin"}, {"id": "p3", "city": "Berlin"}],
+)
+# {'updated': 2, 'skipped': 1, 'skipped_rows': [2]}
 ```
 
 ### upsert_edges()
@@ -792,7 +832,7 @@ for node_id, score in results:
 
 ### hybrid_search()
 
-Combined text and vector search using Reciprocal Rank Fusion (RRF) or weighted fusion. Requires the `hybrid-search` feature. For best results, create both a text index (`create_text_index()`) and a vector index (`create_vector_index()`). If either index is missing, that source is silently omitted from fusion.
+Combined text and vector search using Reciprocal Rank Fusion (RRF) or weighted fusion. Requires the `hybrid-search` feature. For best results, create both a text index (`create_text_index()`) and a vector index (`create_vector_index()`). If either index is missing, that source is silently omitted from fusion. With neither (no text index, and no vector index or no `query_vector`), it raises an error naming the indexes.
 
 ```python
 def hybrid_search(
@@ -957,7 +997,7 @@ def rebuild_text_index(self, label: str, property: str) -> None
 
 ### begin_transaction()
 
-Start a new transaction. Returns a `Transaction` object that can be used as a context manager. The `isolation_level` parameter accepts a string (e.g., `"snapshot"`, `"serializable"`).
+Start a new transaction. Returns a `Transaction` object that can be used as a context manager. The `isolation_level` parameter accepts a string: `"read_committed"` or `"snapshot"` (the default); `"serializable"` is refused for now: snapshot isolation is the strongest level until queries record their reads.
 
 ```python
 def begin_transaction(self, isolation_level: Optional[str] = None) -> Transaction
@@ -970,7 +1010,7 @@ with db.begin_transaction() as tx:
     tx.commit()  # both nodes created atomically
 
 # With explicit isolation level
-with db.begin_transaction("serializable") as tx:
+with db.begin_transaction("read_committed") as tx:
     tx.execute("MATCH (n:Counter) SET n.val = n.val + 1")
     tx.commit()
 ```
@@ -1117,10 +1157,25 @@ print(f"Store: {usage['store']['total_bytes']} bytes")
 
 ### schema()
 
-Get schema information. Returns a dict with keys: `labels` (list of dicts with `name` and `count`), `edge_types` (list of dicts), `property_keys` (list of strings).
+Get schema information: the labels, edge types and property keys the data holds, each sorted by name. A label no node has any more, an edge type with no edge left and a property key nothing holds are left out. Returns a dict with keys:
+
+- `labels`: dicts with `name`, `count` and `properties`
+- `edge_types`: dicts with `name`, `count`, `properties` and `endpoints`
+- `property_keys`: strings
+
+Each property is a dict with its `name` and the `types` of its values (`["STRING"]`, `["INT64", "FLOAT64"]`). Each endpoint is a dict with a `source` label, a `target` label and the `count` of edges between nodes with them. It reads the whole graph, so call it once and keep the result rather than per query.
 
 ```python
 def schema(self) -> Dict[str, Any]
+```
+
+```python
+db.execute("INSERT (:Person {name: 'Alix'})-[:LIVES_IN {since: 2020}]->(:City {name: 'Amsterdam'})")
+schema = db.schema()
+schema["labels"][1]
+# {'name': 'Person', 'count': 1, 'properties': [{'name': 'name', 'types': ['STRING']}]}
+schema["edge_types"][0]["endpoints"]
+# [{'source': 'Person', 'target': 'City', 'count': 1}]
 ```
 
 ### validate()

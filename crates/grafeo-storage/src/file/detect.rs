@@ -38,15 +38,12 @@ pub enum OnDisk {
 ///
 /// Returns an error for I/O failures other than "not found". On Windows a
 /// file another process holds open as a database cannot be read (its lock
-/// covers the bytes): that error says the database file is locked by another
-/// process, as the file manager's does.
+/// covers the bytes): that error is the file manager's, a database that is
+/// locked, by this process or another one.
 pub fn detect(path: &Path) -> Result<OnDisk> {
     let io_error = |source: std::io::Error| {
         if is_lock_violation(&source) {
-            return Error::Internal(format!(
-                "database file is locked by another process: {}",
-                path.display()
-            ));
+            return super::holder::locked_error(path);
         }
         Error::Internal(format!(
             "cannot inspect database path {}: {source}",
@@ -231,7 +228,8 @@ mod tests {
                 .expect_err("Windows refuses to read the locked bytes")
                 .to_string();
             assert!(
-                error.contains("database file is locked by another process")
+                error.contains("Database locked")
+                    && error.contains("already open in this process")
                     && error.contains("berlin.grafeo"),
                 "the error says the database is locked, and which: {error}"
             );

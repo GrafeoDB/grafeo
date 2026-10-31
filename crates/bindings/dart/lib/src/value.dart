@@ -71,6 +71,9 @@ dynamic _encodeValue(dynamic value) {
     bool b => b,
     int i => i,
     BigInt b => _IntegerDigits(b.toString()),
+    // JSON has no NaN or infinities: they go as the `$float` tag
+    double d when d.isNaN => {r'$float': 'NaN'},
+    double d when d.isInfinite => {r'$float': d > 0 ? 'Infinity' : '-Infinity'},
     double d => d,
     String s => s,
     GrafeoDecimal d => {r'$decimal': d.text},
@@ -211,6 +214,17 @@ dynamic _decodeMap(Map m) {
   // An RDF term: the `$term` tag as the map's only key
   final term = RdfTerm.fromJson(m);
   if (term != null) return term;
+  // A float JSON cannot write: the `$float` tag as the map's only key
+  if (m.length == 1 && m[r'$float'] is String) {
+    switch (m[r'$float'] as String) {
+      case 'NaN':
+        return double.nan;
+      case 'Infinity':
+        return double.infinity;
+      case '-Infinity':
+        return double.negativeInfinity;
+    }
+  }
   // An exact decimal: the `$decimal` tag as the map's only key
   if (m.length == 1 && m[r'$decimal'] is String) {
     return GrafeoDecimal(m[r'$decimal'] as String);

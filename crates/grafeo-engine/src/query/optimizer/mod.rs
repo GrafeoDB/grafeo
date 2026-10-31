@@ -14,6 +14,10 @@
 pub mod cardinality;
 pub mod cost;
 mod cycles;
+mod delim;
+#[cfg(feature = "triple-store")]
+mod rdf_order;
+mod scanned_labels;
 pub(crate) use cycles::{close_cycles, plan_names};
 pub mod join_order;
 
@@ -74,6 +78,10 @@ pub struct Optimizer {
     indexed_properties: HashSet<String>,
     /// Whether the store keeps the incoming edges of each node.
     incoming_edges: IncomingEdges,
+    /// The order of SPARQL groups' patterns, for an optimizer made from RDF
+    /// statistics (see `rdf_order`).
+    #[cfg(feature = "triple-store")]
+    rdf_order: Option<rdf_order::RdfOrder>,
 }
 
 /// Whether a store keeps the incoming edges of each node (its backward
@@ -120,6 +128,8 @@ impl Optimizer {
             cyclic_joins: CyclicJoins::Binary,
             indexed_properties: HashSet::new(),
             incoming_edges: IncomingEdges::Kept,
+            #[cfg(feature = "triple-store")]
+            rdf_order: None,
         }
     }
 
@@ -153,8 +163,11 @@ impl Optimizer {
     /// of SPARQL queries. Maps total triples to graph totals for the cost model.
     #[cfg(feature = "triple-store")]
     #[must_use]
-    pub fn from_rdf_statistics(rdf_stats: grafeo_core::statistics::RdfStatistics) -> Self {
+    pub fn from_rdf_statistics(
+        rdf_stats: std::sync::Arc<grafeo_core::statistics::RdfStatistics>,
+    ) -> Self {
         let total = rdf_stats.total_triples;
+        let rdf_order = rdf_order::RdfOrder::new(std::sync::Arc::clone(&rdf_stats));
         let estimator = CardinalityEstimator::from_rdf_statistics(rdf_stats);
         Self {
             enable_filter_pushdown: true,
@@ -165,7 +178,29 @@ impl Optimizer {
             cyclic_joins: CyclicJoins::MultiWay,
             indexed_properties: HashSet::new(),
             incoming_edges: IncomingEdges::NotKept,
+            rdf_order: Some(rdf_order),
         }
+    }
+
+    /// Creates the optimizer of the SPARQL or GraphQL-on-RDF plan `plan` over
+    /// `store`: from the store's statistics, collected first when the plan
+    /// joins inputs (their order is chosen by them, see `rdf_order`), and
+    /// from the ones collected last, or none, when it does not: an `INSERT
+    /// DATA` or a single pattern has no order to choose, so a load through
+    /// statements does not read the whole store again every tenth of its
+    /// growth.
+    #[cfg(feature = "triple-store")]
+    #[must_use]
+    pub fn for_rdf_plan(
+        store: &grafeo_core::graph::rdf::RdfStore,
+        plan: &crate::query::plan::LogicalPlan,
+    ) -> Self {
+        let statistics = if joins_inputs(&plan.root) {
+            store.get_or_collect_statistics()
+        } else {
+            store.cached_statistics().unwrap_or_default()
+        };
+        Self::from_rdf_statistics(statistics)
     }
 
     /// Creates an optimizer from a Statistics snapshot.
@@ -207,6 +242,8 @@ impl Optimizer {
             cyclic_joins: CyclicJoins::Binary,
             indexed_properties: HashSet::new(),
             incoming_edges: IncomingEdges::Kept,
+            #[cfg(feature = "triple-store")]
+            rdf_order: None,
         }
     }
 
@@ -278,9 +315,12 @@ impl Optimizer {
     /// Returns an error if optimization fails.
     pub fn optimize(&self, plan: LogicalPlan) -> Result<LogicalPlan> {
         let _span = grafeo_debug_span!("grafeo::query::optimize");
+        // An EXISTS over the rows' variables runs once over their distinct
+        // values (before the cycles: an expand into a shared variable is one).
+        let root = delim::decorrelate_exists(plan.root);
         // Correctness first: a pattern through a node or edge that was bound
         // before must be checked.
-        let mut root = cycles::close_cycles(plan.root);
+        let mut root = cycles::close_cycles(root);
 
         // Apply optimization rules
         if self.enable_filter_pushdown {
@@ -295,9 +335,17 @@ impl Optimizer {
             // target a filter pins starts there.
             root = self.start_at_the_sought_end(root, false);
         }
+        // A label check the node scan below makes true is no filter.
+        root = scanned_labels::drop_scanned_label_checks(root);
 
         if self.enable_join_reorder {
             root = self.reorder_joins(root);
+            // A SPARQL group's patterns, which the join graph above cannot
+            // tell apart, by their selectivity.
+            #[cfg(feature = "triple-store")]
+            if let Some(order) = &self.rdf_order {
+                root = order.order(root);
+            }
         }
 
         if self.enable_projection_pushdown {
@@ -1044,6 +1092,11 @@ impl Optimizer {
                 anti_join.left = Box::new(self.push_filters_down(*anti_join.left));
                 anti_join.right = Box::new(self.push_filters_down(*anti_join.right));
                 LogicalOperator::AntiJoin(anti_join)
+            }
+            LogicalOperator::MarkJoin(mut mark) => {
+                mark.left = Box::new(self.push_filters_down(*mark.left));
+                mark.right = Box::new(self.push_filters_down(*mark.right));
+                LogicalOperator::MarkJoin(mark)
             }
             LogicalOperator::Apply(mut apply) => {
                 apply.input = Box::new(self.push_filters_down(*apply.input));
@@ -2081,6 +2134,18 @@ fn conjunction(conjuncts: Vec<LogicalExpression>) -> Option<LogicalExpression> {
     LogicalExpression::conjunction(conjuncts)
 }
 
+/// Whether `op` joins two or more inputs anywhere in it.
+#[cfg(feature = "triple-store")]
+fn joins_inputs(op: &LogicalOperator) -> bool {
+    matches!(
+        op,
+        LogicalOperator::Join(_)
+            | LogicalOperator::LeftJoin(_)
+            | LogicalOperator::AntiJoin(_)
+            | LogicalOperator::MultiWayJoin(_)
+    ) || op.children().into_iter().any(joins_inputs)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3046,8 +3111,7 @@ mod tests {
     #[cfg(feature = "triple-store")]
     #[test]
     fn test_rdf_cyclic_join_produces_multi_way_join() {
-        let optimizer =
-            Optimizer::from_rdf_statistics(grafeo_core::statistics::RdfStatistics::default());
+        let optimizer = Optimizer::from_rdf_statistics(std::sync::Arc::default());
         let optimized = optimizer.optimize(triangle_join_plan()).unwrap();
         assert!(has_multi_way_join(&optimized.root));
     }
@@ -3363,9 +3427,12 @@ mod tests {
             assert_eq!(optimized(written), expected.explain_tree());
         }
 
-        /// Subquery and volatile conjuncts stay where they are written, also
-        /// when they read only the input: they would run a different number
-        /// of times below the scan.
+        /// Subquery and volatile conjuncts stay above the scans, also when
+        /// they read only the input: they would run a different number of
+        /// times below a scan. The EXISTS, correlated in its WHERE only, is a
+        /// delim join: the subquery runs once over the distinct `f` of the
+        /// scans' rows, and the volatile conjunct filters those rows below the
+        /// join, above both scans; the plain conjunct still goes onto `f`.
         #[test]
         fn subqueries_and_volatile_conjuncts_stay_above_the_scan() {
             let input_only = compare(
@@ -3388,21 +3455,40 @@ mod tests {
                 scan("m", Some("Model"), None),
             )));
             let written = filter(
-                and(vec![random.clone(), input_only.clone(), exists.clone()]),
+                and(vec![random.clone(), input_only.clone(), exists]),
                 scan(
                     "t",
                     Some("TypeDefinition"),
                     Some(scan("f", Some("File"), None)),
                 ),
             );
-            let expected = filter(
-                and(vec![random, exists]),
+            let rows = filter(
+                random,
                 scan(
                     "t",
                     Some("TypeDefinition"),
                     Some(filter(input_only, scan("f", Some("File"), None))),
                 ),
             );
+            let subquery = filter(
+                equals(property("m", "path"), property("f", "path")),
+                LogicalOperator::Join(JoinOp {
+                    left: Box::new(LogicalOperator::DelimScan(
+                        crate::query::plan::DelimScanOp {
+                            columns: vec!["f".to_string()],
+                        },
+                    )),
+                    right: Box::new(scan("m", Some("Model"), None)),
+                    join_type: JoinType::Cross,
+                    conditions: Vec::new(),
+                }),
+            );
+            let expected = LogicalOperator::Join(JoinOp {
+                left: Box::new(rows),
+                right: Box::new(subquery),
+                join_type: JoinType::Semi,
+                conditions: Vec::new(),
+            });
             assert_eq!(optimized(written), expected.explain_tree());
         }
 

@@ -1,0 +1,411 @@
+# GQL schema DDL: index names, DROP INDEX, graph type bindings, SHOW output
+#
+# An index name names one index: a second CREATE INDEX of the name fails,
+# and IF NOT EXISTS leaves the existing one. DROP INDEX of a text or vector
+# index name drops that index and no other. DROP GRAPH forgets the graph's
+# type, so a graph created later under the name is untyped. A graph typed by
+# another schema's graph type is checked against that type. SHOW INDEXES
+# lists by name, and SHOW NODE TYPES writes constraints as DDL. A procedure's
+# errors name a procedure. A list of nodes or edges IS TYPED as such.
+
+meta:
+  language: gql
+  model: lpg
+  section: "18"
+  title: Index and graph type DDL
+  dataset: empty
+
+tests:
+
+  # ---------------------------------------------------------------------------
+  # Index names
+  # ---------------------------------------------------------------------------
+
+  - name: a_second_index_of_one_name_fails
+    setup:
+      - "CREATE INDEX person_idx FOR (p:Person) ON (p.name)"
+    query: "CREATE INDEX person_idx FOR (p:Person) ON (p.age)"
+    expect:
+      error: "person_idx"
+
+  - name: create_index_if_not_exists_keeps_the_existing_index
+    setup:
+      - "CREATE INDEX person_idx FOR (p:Person) ON (p.name)"
+      - "CREATE INDEX IF NOT EXISTS person_idx FOR (p:Person) ON (p.city)"
+    query: "SHOW INDEXES"
+    expect:
+      rows:
+        - [person_idx, Hash, Person, name]
+
+  - name: create_index_if_not_exists_creates_a_new_one
+    # Control.
+    setup:
+      - "CREATE INDEX IF NOT EXISTS person_idx FOR (p:Person) ON (p.city)"
+    query: "SHOW INDEXES"
+    expect:
+      rows:
+        - [person_idx, Hash, Person, city]
+
+  - name: drop_index_drops_the_one_index_of_its_name
+    setup:
+      - "CREATE INDEX person_idx FOR (p:Person) ON (p.name)"
+      - "CREATE INDEX IF NOT EXISTS person_idx FOR (p:Person) ON (p.city)"
+      - "DROP INDEX person_idx"
+    query: "SHOW INDEXES"
+    expect:
+      empty: true
+
+  # ---------------------------------------------------------------------------
+  # DROP INDEX of a text or vector index name
+  # ---------------------------------------------------------------------------
+
+  - name: dropping_a_text_index_keeps_the_property_index_on_its_property
+    requires: [text-index]
+    setup:
+      - "INSERT (:Doc {body: 'canals of Amsterdam'})"
+      - "CREATE INDEX body_eq FOR (d:Doc) ON (d.body)"
+      - "CREATE INDEX body_text FOR (d:Doc) ON (d.body) USING TEXT"
+      - "DROP INDEX body_text"
+    query: "SHOW INDEXES"
+    expect:
+      rows:
+        - [body_eq, Hash, Doc, body]
+
+  - name: a_dropped_text_index_no_longer_searches
+    requires: [text-index, algos]
+    setup:
+      - "INSERT (:Doc {body: 'canals of Amsterdam'})"
+      - "CREATE INDEX body_eq FOR (d:Doc) ON (d.body)"
+      - "CREATE INDEX body_text FOR (d:Doc) ON (d.body) USING TEXT"
+      - "DROP INDEX body_text"
+    query: "CALL grafeo.search.text('Doc', 'body', 'canals', 5) YIELD node_id RETURN count(*) AS n"
+    expect:
+      error: ""
+
+  - name: dropping_the_property_index_keeps_the_text_index
+    requires: [text-index, algos]
+    setup:
+      - "INSERT (:Doc {body: 'canals of Amsterdam'})"
+      - "CREATE INDEX body_eq FOR (d:Doc) ON (d.body)"
+      - "CREATE INDEX body_text FOR (d:Doc) ON (d.body) USING TEXT"
+      - "DROP INDEX body_eq"
+    query: "CALL grafeo.search.text('Doc', 'body', 'canals', 5) YIELD node_id RETURN count(*) AS n"
+    expect:
+      rows:
+        - [1]
+
+  - name: drop_index_of_a_vector_index_name_drops_it
+    requires: [vector-index]
+    setup:
+      - "INSERT (:Doc {emb: vector([1.0, 0.0])})"
+      - "CREATE INDEX emb_eq FOR (d:Doc) ON (d.emb)"
+      - "CREATE VECTOR INDEX emb_vec ON :Doc(emb) DIMENSION 2 METRIC 'cosine'"
+    query: "DROP INDEX emb_vec"
+    expect:
+      empty: true
+
+  - name: a_dropped_vector_index_no_longer_searches
+    requires: [vector-index, algos]
+    setup:
+      - "INSERT (:Doc {emb: vector([1.0, 0.0])})"
+      - "CREATE INDEX emb_eq FOR (d:Doc) ON (d.emb)"
+      - "CREATE VECTOR INDEX emb_vec ON :Doc(emb) DIMENSION 2 METRIC 'cosine'"
+      - "DROP INDEX emb_vec"
+    query: "CALL grafeo.search.vector('Doc', 'emb', [1.0, 0.0], 1) YIELD node_id RETURN count(*) AS n"
+    expect:
+      error: ""
+
+  - name: dropping_a_vector_index_keeps_the_property_index_on_its_property
+    requires: [vector-index]
+    setup:
+      - "INSERT (:Doc {emb: vector([1.0, 0.0])})"
+      - "CREATE INDEX emb_eq FOR (d:Doc) ON (d.emb)"
+      - "CREATE VECTOR INDEX emb_vec ON :Doc(emb) DIMENSION 2 METRIC 'cosine'"
+      - "DROP INDEX emb_vec"
+    query: "SHOW INDEXES"
+    expect:
+      rows:
+        - [emb_eq, Hash, Doc, emb]
+
+  - name: show_indexes_lists_a_vector_index
+    requires: [vector-index]
+    setup:
+      - "CREATE VECTOR INDEX emb_vec ON :Doc(emb) DIMENSION 2 METRIC 'cosine'"
+    query: "SHOW INDEXES"
+    expect:
+      rows:
+        - [emb_vec, Vector, Doc, emb]
+
+  # ---------------------------------------------------------------------------
+  # A node type repeated in a graph type pattern merges its properties
+  # ---------------------------------------------------------------------------
+
+  - name: a_repeated_node_type_takes_the_properties_of_every_occurrence
+    setup:
+      - "CREATE GRAPH TYPE t ((:Pa {a STRING})-[:R]->(:Pa {b INT64}))"
+    query: "SHOW NODE TYPES"
+    expect:
+      rows:
+        - [Pa, "a STRING, b INT64", "", ""]
+
+  - name: a_property_of_a_later_occurrence_is_checked
+    # City is declared bare first, then with name NOT NULL.
+    setup:
+      - "CREATE GRAPH TYPE t ((:City)-[:R]->(:City {name STRING NOT NULL}))"
+      - "CREATE GRAPH g TYPED t"
+      - "USE GRAPH g"
+    query: "INSERT (:City)"
+    expect:
+      error: "name"
+
+  - name: a_later_occurrence_with_its_property_is_written
+    # Control.
+    setup:
+      - "CREATE GRAPH TYPE t ((:City)-[:R]->(:City {name STRING NOT NULL}))"
+      - "CREATE GRAPH g TYPED t"
+      - "USE GRAPH g"
+    statements:
+      - "INSERT (:City {name: 'Prague'})"
+      - "MATCH (c:City) RETURN c.name AS n"
+    expect:
+      rows:
+        - [Prague]
+
+  - name: one_property_declared_with_two_types_fails_naming_both
+    query: "CREATE GRAPH TYPE t2 ((:Town {name STRING})-[:R]->(:Town {name INT64}))"
+    expect:
+      error: "INT64"
+
+  - name: one_property_declared_with_two_types_names_the_first_type_too
+    query: "CREATE GRAPH TYPE t2 ((:Town {name STRING})-[:R]->(:Town {name INT64}))"
+    expect:
+      error: "STRING"
+
+  # ---------------------------------------------------------------------------
+  # CREATE GRAPH TYPE x LIKE an untyped graph: an empty open type
+  # ---------------------------------------------------------------------------
+
+  - name: a_graph_type_like_an_untyped_graph_is_empty_and_open
+    # The catalog holds the node type Extra; the untyped graph's type is the
+    # open graph type, which declares nothing.
+    setup:
+      - "CREATE NODE TYPE Extra"
+      - "CREATE GRAPH u"
+      - "USE GRAPH u"
+      - "INSERT (:Person {name: 'Alix'})"
+      - "CREATE GRAPH TYPE y LIKE u"
+    query: "SHOW GRAPH TYPES"
+    expect:
+      rows:
+        - [y, true, "", ""]
+
+  - name: a_graph_typed_like_an_untyped_graph_takes_any_label
+    setup:
+      - "CREATE NODE TYPE Extra"
+      - "CREATE GRAPH u"
+      - "CREATE GRAPH TYPE y LIKE u"
+      - "CREATE GRAPH v TYPED y"
+      - "USE GRAPH v"
+    statements:
+      - "INSERT (:Person {name: 'Alix'})"
+      - "MATCH (p:Person) RETURN p.name AS n"
+    expect:
+      rows:
+        - [Alix]
+
+  # ---------------------------------------------------------------------------
+  # The label, edge type and property key lists hold only those in use
+  # ---------------------------------------------------------------------------
+
+  - name: db_labels_leaves_out_a_label_with_no_node_left
+    requires: [algos]
+    setup:
+      - "INSERT (:Gone {nick: 'x'})-[:WENT]->(:Stay {name: 'Gus'})"
+      - "MATCH (n:Gone) DETACH DELETE n"
+    query: "CALL db.labels() YIELD label RETURN label"
+    expect:
+      rows:
+        - [Stay]
+
+  - name: db_relationship_types_leaves_out_a_type_with_no_edge_left
+    requires: [algos]
+    setup:
+      - "INSERT (:Gone {nick: 'x'})-[:WENT]->(:Stay {name: 'Gus'})"
+      - "MATCH (n:Gone) DETACH DELETE n"
+    query: "CALL db.relationshipTypes() YIELD relationshipType RETURN relationshipType"
+    expect:
+      empty: true
+
+  - name: db_property_keys_leaves_out_keys_no_element_holds
+    requires: [algos]
+    # nick went with its node; name was removed from Gus.
+    setup:
+      - "INSERT (:Gone {nick: 'x'})-[:WENT]->(:Stay {name: 'Gus'})"
+      - "MATCH (n:Gone) DETACH DELETE n"
+      - "MATCH (s:Stay) REMOVE s.name SET s.city = 'Paris'"
+    query: "CALL db.propertyKeys() YIELD propertyKey RETURN propertyKey"
+    expect:
+      rows:
+        - [city]
+
+  - name: db_labels_leaves_out_a_label_its_nodes_lost
+    requires: [algos]
+    setup:
+      - "INSERT (:Draft {title: 'Canals'})"
+      - "MATCH (d:Draft) REMOVE d:Draft SET d:Published"
+    query: "CALL db.labels() YIELD label RETURN label"
+    expect:
+      rows:
+        - [Published]
+
+  # ---------------------------------------------------------------------------
+  # DROP GRAPH forgets the graph's type
+  # ---------------------------------------------------------------------------
+
+  - name: a_graph_created_again_under_a_dropped_name_is_untyped
+    setup:
+      - "CREATE NODE TYPE City (name STRING NOT NULL)"
+      - "CREATE GRAPH TYPE gt (NODE TYPE City)"
+      - "CREATE GRAPH g TYPED gt"
+      - "DROP GRAPH g"
+      - "CREATE GRAPH g"
+      - "USE GRAPH g"
+    # Person is no type of gt: the new g takes it, as an untyped graph does.
+    # City is a catalog node type, which checks its label in every graph
+    # (20.1_schema_ddl.gtest), so its node carries the NOT NULL name.
+    statements:
+      - "INSERT (:Person {name: 'Alix'}), (:City {name: 'Prague'})"
+      - "MATCH (n) RETURN labels(n) AS l"
+    expect:
+      rows:
+        - [[Person]]
+        - [[City]]
+
+  # ---------------------------------------------------------------------------
+  # A graph typed by another schema's graph type
+  # ---------------------------------------------------------------------------
+
+  - name: a_graph_typed_by_another_schemas_type_checks_property_types
+    # s2 has its own Item with a text price; the graph is bound to s1.shop,
+    # whose Item price is INT64 NOT NULL.
+    setup:
+      - "CREATE SCHEMA s1"
+      - "SESSION SET SCHEMA s1"
+      - "CREATE NODE TYPE Item (price INT64 NOT NULL)"
+      - "CREATE GRAPH TYPE shop (NODE TYPE Item)"
+      - "CREATE SCHEMA s2"
+      - "SESSION SET SCHEMA s2"
+      - "CREATE NODE TYPE Item (price STRING)"
+      - "CREATE GRAPH g TYPED s1.shop"
+      - "USE GRAPH g"
+    query: "INSERT (:Item {price: 'cheap'})"
+    expect:
+      error: "price"
+
+  - name: a_graph_typed_by_another_schemas_type_checks_not_null
+    setup:
+      - "CREATE SCHEMA s1"
+      - "SESSION SET SCHEMA s1"
+      - "CREATE NODE TYPE Item (price INT64 NOT NULL)"
+      - "CREATE GRAPH TYPE shop (NODE TYPE Item)"
+      - "CREATE SCHEMA s2"
+      - "SESSION SET SCHEMA s2"
+      - "CREATE NODE TYPE Item (price STRING)"
+      - "CREATE GRAPH g TYPED s1.shop"
+      - "USE GRAPH g"
+    query: "INSERT (:Item)"
+    expect:
+      error: "price"
+
+  - name: a_graph_typed_by_another_schemas_type_takes_a_valid_node
+    # Control.
+    setup:
+      - "CREATE SCHEMA s1"
+      - "SESSION SET SCHEMA s1"
+      - "CREATE NODE TYPE Item (price INT64 NOT NULL)"
+      - "CREATE GRAPH TYPE shop (NODE TYPE Item)"
+      - "CREATE SCHEMA s2"
+      - "SESSION SET SCHEMA s2"
+      - "CREATE GRAPH g TYPED s1.shop"
+      - "USE GRAPH g"
+    statements:
+      - "INSERT (:Item {price: 5})"
+      - "MATCH (i:Item) RETURN i.price AS p"
+    expect:
+      rows:
+        - [5]
+
+  # ---------------------------------------------------------------------------
+  # SHOW output
+  # ---------------------------------------------------------------------------
+
+  - name: show_indexes_lists_by_name
+    setup:
+      - "CREATE INDEX zeta FOR (p:P) ON (p.a)"
+      - "CREATE INDEX alpha FOR (p:P) ON (p.b)"
+      - "CREATE INDEX mid FOR (p:P) ON (p.c)"
+      - "CREATE INDEX beta FOR (p:P) ON (p.d)"
+      - "CREATE INDEX omega FOR (p:P) ON (p.e)"
+    query: "SHOW INDEXES"
+    expect:
+      ordered: true
+      rows:
+        - [alpha, Hash, P, b]
+        - [beta, Hash, P, d]
+        - [mid, Hash, P, c]
+        - [omega, Hash, P, e]
+        - [zeta, Hash, P, a]
+
+  - name: show_node_types_writes_a_unique_constraint_as_ddl
+    setup:
+      - "CREATE NODE TYPE Person (name STRING NOT NULL, email STRING)"
+      - "CREATE CONSTRAINT FOR (p:Person) ON (p.email) UNIQUE"
+    query: "SHOW NODE TYPES"
+    expect:
+      rows:
+        - [Person, "name STRING NOT NULL, email STRING", "UNIQUE (email)", ""]
+
+  - name: show_node_types_writes_a_not_null_constraint_as_ddl
+    setup:
+      - "CREATE NODE TYPE Pet (name STRING)"
+      - "CREATE CONSTRAINT FOR (p:Pet) ON (p.name) NOT NULL"
+    query: "SHOW NODE TYPES"
+    expect:
+      rows:
+        - [Pet, "name STRING", "NOT NULL name", ""]
+
+  # ---------------------------------------------------------------------------
+  # Procedure errors name a procedure
+  # ---------------------------------------------------------------------------
+
+  - name: creating_a_procedure_twice_says_procedure
+    setup:
+      - "CREATE PROCEDURE p() RETURNS (x INT64) AS { RETURN 1 AS x }"
+    query: "CREATE PROCEDURE p() RETURNS (x INT64) AS { RETURN 1 AS x }"
+    expect:
+      error: "Procedure already exists: p"
+
+  - name: dropping_a_missing_procedure_says_procedure
+    query: "DROP PROCEDURE nothere"
+    expect:
+      error: "Procedure not found: nothere"
+
+  # ---------------------------------------------------------------------------
+  # IS TYPED of a list of nodes or edges
+  # ---------------------------------------------------------------------------
+
+  - name: a_list_of_nodes_and_edges_is_typed_as_such
+    setup:
+      - "INSERT (:P {name: 'Alix'})-[:R]->(:P {name: 'Gus'})"
+    query: "MATCH (n:P {name: 'Alix'})-[r:R]->(m) RETURN [n, m] IS TYPED LIST<NODE> AS nodes, [r] IS TYPED LIST<EDGE> AS edges, [n] IS TYPED LIST<INT64> AS ints, [[n]] IS TYPED LIST<LIST<NODE>> AS nested"
+    expect:
+      rows:
+        - [true, true, false, true]
+
+  - name: a_collected_list_of_nodes_is_typed_as_such
+    setup:
+      - "INSERT (:P {name: 'Alix'}), (:P {name: 'Gus'})"
+    query: "MATCH (n:P) RETURN collect(n) IS TYPED LIST<NODE> AS nodes, collect(n) IS TYPED LIST<INT64> AS ints"
+    expect:
+      rows:
+        - [true, false]

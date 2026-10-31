@@ -161,13 +161,14 @@ impl Database {
         let mut image = MemoryImage::new();
         let commits = self.transaction_manager.hold_commits().unwrap();
         let sources = self.sources();
-        for section in sources.sections(&commits) {
+        let epoch = sources.epoch(&commits);
+        for section in sources.sections_at(&commits, epoch) {
             image
                 .begin_section(section.section_type(), section.version())
                 .unwrap();
             section.write_to(&mut image).unwrap();
         }
-        (image, EpochId::new(sources.epoch()))
+        (image, epoch)
     }
 
     /// A database loaded from `image` (of the database file `file`), with

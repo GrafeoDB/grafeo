@@ -8,10 +8,12 @@
 //! |-------|---------------------|----------|
 //! | [`ReadCommitted`](IsolationLevel::ReadCommitted) | Dirty reads | High throughput, relaxed consistency |
 //! | [`SnapshotIsolation`](IsolationLevel::SnapshotIsolation) | + Non-repeatable reads, phantom reads | Default - good balance |
-//! | [`Serializable`](IsolationLevel::Serializable) | + Write skew | Full ACID, financial/critical workloads |
+//! | [`Serializable`](IsolationLevel::Serializable) | Refused for now | Needs the reads of queries recorded (#400) |
 //!
 //! The default is **Snapshot Isolation (SI)**, which offers strong consistency
-//! guarantees while maintaining high concurrency. Each transaction sees a consistent
+//! guarantees while maintaining high concurrency. It is the strongest level
+//! available: asking for `Serializable` fails with `GRAFEO-Q004` until queries
+//! record their reads, as preventing write skew needs (#400). Each transaction sees a consistent
 //! snapshot of the database as of its start time.
 //!
 //! ## Guarantees
@@ -91,16 +93,14 @@
 //! The two functions share the epoch check to keep the semantics in
 //! sync; when you need to change one, inspect both.
 //!
-//! ## Uncommitted writes and `EpochId::PENDING`
+//! ## Uncommitted writes
 //!
-//! An active transaction stamps its own versions with
-//! [`grafeo_common::types::EpochId::PENDING`] (`= u64::MAX`) as their
-//! `created_epoch`. This is the dirty-read
-//! guard: any external reader (different transaction, or a snapshot at
-//! a real epoch) performs `created_epoch <= viewing_epoch`, and since
-//! `u64::MAX` is always greater than any real epoch, the version is
-//! filtered out. The owning transaction still sees it because
-//! `is_visible_to` short-circuits on `created_by == viewing_tx`.
+//! An active transaction stamps the rows it creates or deletes with a
+//! pending stamp: its transaction id with the pending bit set, which no
+//! commit epoch has. This is the dirty-read guard: a reader sees a stamp
+//! only when it is a commit epoch at or before its snapshot, or its own
+//! transaction's pending stamp, so no other transaction and no committed
+//! reader sees an open transaction's writes.
 //!
 //! Every write of a transaction is recorded in its change set (see
 //! `TransactionChanges`): the op with its after-image, what it replaced,
@@ -128,8 +128,9 @@
 //! This is a commit-time contract, not a best-effort check: the
 //! mutation is refused synchronously, so the overlay store never
 //! contains state from a doomed transaction. Snapshot isolation
-//! (the default) validates only the write-set; `Serializable` also
-//! validates the read-set at commit via the same machinery.
+//! (the default) validates only the write-set. The read-set check that
+//! `Serializable` would add has no reads to check yet (no query records
+//! them, #400), so a session refuses that level.
 //!
 //! ## Epoch lifecycle
 //!
@@ -140,8 +141,8 @@
 //! 1. **Allocation**: `begin()` stamps the new transaction with the
 //!    current epoch as its `start_epoch`. Reads during the transaction
 //!    use this epoch for `is_visible_at`.
-//! 2. **Write**: new versions get `EpochId::PENDING`. Writes are
-//!    recorded via `record_write` for conflict detection.
+//! 2. **Write**: new rows and deletes get the transaction's pending stamp.
+//!    Writes are recorded via `record_write` for conflict detection.
 //! 3. **Commit**: a successful commit fetches a new epoch via
 //!    `fetch_add(1)`, finalises every pending version to that epoch,
 //!    and records `(transaction_id -> commit_epoch)` for post-hoc
@@ -161,8 +162,11 @@
 //!    retention (see [`crate::cdc`]) so both subsystems agree on
 //!    "how old is safely-forgotten."
 //!
-//! Every epoch the manager advances is visible to every reader once
-//! the atomic store retires; there is no separate publication step.
+//! A commit stamps its writes with its epoch, then publishes it: the
+//! published epoch advances in epoch order, once every commit up to it is
+//! complete, and readers read at the published epoch (a later one asked for
+//! reads there too, see `TransactionManager::readable_epoch`), so no reader
+//! sees part of a commit.
 //!
 //! ## Where to look next
 //!
@@ -214,8 +218,8 @@ pub(crate) use changes::{StreamingChanges, TransactionChanges};
 pub(crate) use history::HistoryImage;
 #[cfg(feature = "wal")]
 pub(crate) use manager::CommitGuard;
-pub(crate) use manager::CommitsHeld;
 pub(crate) use manager::ReadPin;
+pub(crate) use manager::{ClaimMark, CommitsHeld};
 pub use manager::{
     EntityId, GraphEntity, IsolationLevel, KeyClaim, TransactionInfo, TransactionManager,
     TransactionState,
@@ -223,7 +227,9 @@ pub use manager::{
 #[doc(hidden)]
 pub use mvcc::{VersionChain, VersionInfo};
 pub use prepared::{CommitInfo, PreparedCommit};
+#[cfg(feature = "triple-store")]
+pub(crate) use rdf::RdfWriter;
 #[cfg(all(feature = "triple-store", feature = "cdc"))]
 pub(crate) use rdf::ntriples_terms;
-#[cfg(feature = "triple-store")]
-pub(crate) use rdf::{RdfWriter, update_privately};
+#[cfg(any(rdf_language, test))]
+pub(crate) use rdf::update_privately;

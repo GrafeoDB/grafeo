@@ -1,0 +1,188 @@
+# SPARQL xsd:float keeps its datatype
+#
+# The cast xsd:float("1.5") is an xsd:float (SPARQL 1.1 Query 17.5, XPath
+# casts); it gave an xsd:double. Arithmetic promotes by XPath numeric type
+# promotion (SPARQL 1.1 Query 17.3, XPath 1.0 and 2.0 op:numeric-add):
+# float with float, integer or decimal is a float, float with double is a
+# double. A stored "1.5"^^xsd:float keeps its datatype, and so does its
+# arithmetic.
+
+meta:
+  language: sparql
+  model: rdf
+  section: casts
+  title: xsd:float keeps its datatype
+  dataset: empty
+  requires: [sparql, rdf]
+
+tests:
+
+  # ---------------------------------------------------------------------------
+  # The cast
+  # ---------------------------------------------------------------------------
+
+  - name: a_cast_to_xsd_float_is_a_float
+    query: |
+      PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+      SELECT (DATATYPE(xsd:float("1.5")) AS ?d) WHERE {}
+    expect:
+      rows:
+        - [http://www.w3.org/2001/XMLSchema#float]
+
+  - name: a_cast_to_xsd_float_of_a_number_is_a_float
+    query: |
+      PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+      SELECT (DATATYPE(xsd:float(2)) AS ?i) (DATATYPE(xsd:float(1.5)) AS ?dec) (DATATYPE(xsd:float(1.5e0)) AS ?dbl) WHERE {}
+    expect:
+      rows:
+        - [http://www.w3.org/2001/XMLSchema#float, http://www.w3.org/2001/XMLSchema#float, http://www.w3.org/2001/XMLSchema#float]
+
+  - name: a_cast_to_xsd_double_is_a_double
+    # Control.
+    query: |
+      PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+      SELECT (DATATYPE(xsd:double("1.5")) AS ?d) WHERE {}
+    expect:
+      rows:
+        - [http://www.w3.org/2001/XMLSchema#double]
+
+  - name: a_cast_to_xsd_float_keeps_the_value
+    query: |
+      PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+      SELECT ?ok WHERE { BIND(xsd:float("1.5") = 1.5 AS ?ok) }
+    expect:
+      rows:
+        - [true]
+
+  # ---------------------------------------------------------------------------
+  # Promotion in arithmetic
+  # ---------------------------------------------------------------------------
+
+  - name: float_with_float_is_a_float
+    query: |
+      PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+      SELECT (DATATYPE(xsd:float("1.5") + xsd:float("1")) AS ?add) (DATATYPE(xsd:float("1.5") * xsd:float("2")) AS ?mul) WHERE {}
+    expect:
+      rows:
+        - [http://www.w3.org/2001/XMLSchema#float, http://www.w3.org/2001/XMLSchema#float]
+
+  - name: float_with_integer_or_decimal_is_a_float
+    query: |
+      PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+      SELECT (DATATYPE(xsd:float("1.5") + 1) AS ?int) (DATATYPE(xsd:float("1.5") - 1.0) AS ?dec) (DATATYPE(2 * xsd:float("1.5")) AS ?left) WHERE {}
+    expect:
+      rows:
+        - [http://www.w3.org/2001/XMLSchema#float, http://www.w3.org/2001/XMLSchema#float, http://www.w3.org/2001/XMLSchema#float]
+
+  - name: float_with_double_is_a_double
+    query: |
+      PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+      SELECT (DATATYPE(xsd:float("1.5") + xsd:double("1")) AS ?add) (DATATYPE(1.0e0 * xsd:float("2")) AS ?mul) WHERE {}
+    expect:
+      rows:
+        - [http://www.w3.org/2001/XMLSchema#double, http://www.w3.org/2001/XMLSchema#double]
+
+  - name: float_arithmetic_has_the_value
+    query: |
+      PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+      SELECT (xsd:float("1.5") + 1 = 2.5 AS ?add) (xsd:float("1.5") * 2 = 3 AS ?mul) WHERE {}
+    expect:
+      rows:
+        - [true, true]
+
+  # ---------------------------------------------------------------------------
+  # A stored float
+  # ---------------------------------------------------------------------------
+
+  - name: a_stored_float_keeps_its_datatype
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/alix> <http://ex.org/score> "1.5"^^<http://www.w3.org/2001/XMLSchema#float> .
+        }
+    query: "SELECT (DATATYPE(?v) AS ?d) WHERE { <http://ex.org/alix> <http://ex.org/score> ?v }"
+    expect:
+      rows:
+        - [http://www.w3.org/2001/XMLSchema#float]
+
+  - name: arithmetic_over_a_stored_float_is_a_float
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/alix> <http://ex.org/score> "1.5"^^<http://www.w3.org/2001/XMLSchema#float> .
+        }
+    query: |
+      SELECT (DATATYPE(?v + 1) AS ?int) (DATATYPE(?v + ?v) AS ?self) WHERE {
+        <http://ex.org/alix> <http://ex.org/score> ?v
+      }
+    expect:
+      rows:
+        - [http://www.w3.org/2001/XMLSchema#float, http://www.w3.org/2001/XMLSchema#float]
+
+  - name: a_stored_float_term_is_kept_exactly
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/alix> <http://ex.org/score> "1.5"^^<http://www.w3.org/2001/XMLSchema#float> .
+        }
+    query: "SELECT ?v WHERE { <http://ex.org/alix> <http://ex.org/score> ?v }"
+    expect:
+      terms:
+        - ['"1.5"^^<http://www.w3.org/2001/XMLSchema#float>']
+
+  # ---------------------------------------------------------------------------
+  # A computed float is written in the canonical form, as a double is: the
+  # shortest digits of the f32 value with an exponent, INF, -INF and NaN
+  # (XSD 1.1 canonical representation of float)
+  # ---------------------------------------------------------------------------
+
+  - name: a_computed_fraction_is_written_canonically
+    query: |
+      PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+      SELECT ?x WHERE { BIND(xsd:float("0.25") * 2 AS ?x) }
+    expect:
+      terms:
+        - ['"5.0E-1"^^<http://www.w3.org/2001/XMLSchema#float>']
+
+  - name: a_computed_whole_number_is_written_canonically
+    query: |
+      PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+      SELECT ?x WHERE { BIND(xsd:float("2") + 1 AS ?x) }
+    expect:
+      terms:
+        - ['"3.0E0"^^<http://www.w3.org/2001/XMLSchema#float>']
+
+  - name: a_computed_large_float_is_written_with_the_shortest_f32_digits
+    # 0.1 as an f32 is 0.100000001490116...; its shortest digits are 1.0E-1,
+    # so 3 times it is written from the f32 result, not the f64 one.
+    query: |
+      PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+      SELECT ?big ?small WHERE {
+        BIND(xsd:float("1.5E20") * 2 AS ?big)
+        BIND(xsd:float("0.1") * 3 AS ?small)
+      }
+    expect:
+      terms:
+        - ['"3.0E20"^^<http://www.w3.org/2001/XMLSchema#float>', '"3.0E-1"^^<http://www.w3.org/2001/XMLSchema#float>']
+
+  - name: a_float_division_by_zero_is_an_infinity
+    # A float division by zero is INF or -INF, and 0 / 0 NaN (XPath
+    # op:numeric-divide); an integer or decimal one is an error.
+    query: |
+      PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+      SELECT ?pos ?neg ?nan WHERE {
+        BIND(xsd:float("1") / 0 AS ?pos)
+        BIND(xsd:float("-1") / 0 AS ?neg)
+        BIND(xsd:float("0") / 0 AS ?nan)
+      }
+    expect:
+      terms:
+        - ['"INF"^^<http://www.w3.org/2001/XMLSchema#float>', '"-INF"^^<http://www.w3.org/2001/XMLSchema#float>', '"NaN"^^<http://www.w3.org/2001/XMLSchema#float>']
+
+  - name: a_float_overflow_is_an_infinity
+    query: |
+      PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+      SELECT ?x WHERE { BIND(xsd:float("3.0E38") * 10 AS ?x) }
+    expect:
+      terms:
+        - ['"INF"^^<http://www.w3.org/2001/XMLSchema#float>']

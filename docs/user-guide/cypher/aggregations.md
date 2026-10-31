@@ -28,15 +28,15 @@ Cypher provides aggregation functions for computing summaries over query results
 ## Count
 
 ```cypher
--- Count all nodes
+// Count all nodes
 MATCH (n)
 RETURN count(n)
 
--- Count with label
+// Count with label
 MATCH (p:Person)
 RETURN count(p)
 
--- Count distinct
+// Count distinct
 MATCH (p:Person)-[:LIVES_IN]->(c:City)
 RETURN count(DISTINCT c)
 ```
@@ -44,27 +44,30 @@ RETURN count(DISTINCT c)
 ## Sum, Avg, Min, Max
 
 ```cypher
--- Sum
+// Sum
 MATCH (o:Order)
 RETURN sum(o.total)
 
--- Average
+// Average
 MATCH (p:Person)
 RETURN avg(p.age)
 
--- Min and Max
+// Min and Max
 MATCH (p:Product)
 RETURN min(p.price), max(p.price)
 ```
 
+`sum()` over no rows, or over only nulls, is 0, as openCypher defines it; `avg()`, `min()` and `max()` of no values
+are null.
+
 ## Collect
 
 ```cypher
--- Collect into list
+// Collect into list
 MATCH (p:Person)
 RETURN collect(p.name)
 
--- Collect with limit
+// Collect with limit
 MATCH (p:Person)
 RETURN collect(p.name)[0..5]
 ```
@@ -72,16 +75,16 @@ RETURN collect(p.name)[0..5]
 ## Grouping
 
 ```cypher
--- Group by property
+// Group by property
 MATCH (p:Person)
 RETURN p.city, count(p) AS population
 ORDER BY population DESC
 
--- Group by relationship target
+// Group by relationship target
 MATCH (p:Person)-[:WORKS_AT]->(c:Company)
 RETURN c.name, count(p) AS employees
 
--- Multiple aggregations
+// Multiple aggregations
 MATCH (o:Order)
 RETURN
     o.status,
@@ -95,7 +98,7 @@ RETURN
 The `WITH` clause allows intermediate aggregations:
 
 ```cypher
--- Find people with more than 5 friends
+// Find people with more than 5 friends
 MATCH (p:Person)-[:KNOWS]->(friend)
 WITH p, count(friend) AS friend_count
 WHERE friend_count > 5
@@ -110,11 +113,11 @@ out is not visible after it.
 The `UNWIND` clause expands a list into rows:
 
 ```cypher
--- Iterate over a list
+// Iterate over a list
 UNWIND [1, 2, 3] AS x
 RETURN x
 
--- Create nodes from list
+// Create nodes from list
 UNWIND ['Alix', 'Gus', 'Harm'] AS name
 CREATE (p:Person {name: name})
 RETURN p

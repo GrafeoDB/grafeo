@@ -162,9 +162,22 @@ fn after_a_commit_that_does_not_complete_no_commit_publishes_part_of_it() {
         db.create_node(&["Person"]).is_err(),
         "a direct write commits too, and fails the same way"
     );
+    // A write in an explicit transaction is refused before it runs, so the
+    // transaction has nothing of its own to commit or undo.
     let mut explicit = db.session();
     explicit.begin_transaction().unwrap();
-    explicit.execute("INSERT (:Person {name: 'Mia'})").unwrap();
+    let error = explicit
+        .execute("INSERT (:Person {name: 'Mia'})")
+        .expect_err("a write in an explicit transaction is refused too");
+    assert!(
+        matches!(
+            error,
+            grafeo_common::utils::error::Error::Transaction(
+                grafeo_common::utils::error::TransactionError::IncompleteCommit
+            )
+        ),
+        "{error}"
+    );
     assert!(
         explicit.commit().is_err(),
         "an explicit transaction cannot commit either"

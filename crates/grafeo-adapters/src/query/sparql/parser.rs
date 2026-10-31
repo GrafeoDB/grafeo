@@ -21,7 +21,31 @@ pub struct Parser<'a> {
     /// How deep the query parsed so far nests (see
     /// [`MAX_NESTING_DEPTH`](crate::query::limits::MAX_NESTING_DEPTH)).
     nesting: Nesting,
+    /// The prefixes in scope: the predefined ones ([`PREDEFINED_PREFIXES`])
+    /// and those the query declared so far.
+    prefixes: std::collections::HashSet<String>,
+    /// Whether the parser is reading a `PREFIX` declaration, whose name is
+    /// not a use of the prefix.
+    declaring_prefix: bool,
+    /// The first prefixed name whose prefix is not in scope, with its token:
+    /// the query is refused with it once parsed.
+    undeclared: Option<Token>,
 }
+
+/// The error for a quoted triple (`<< s p o >>`, RDF-star), wherever a
+/// term or a pattern may stand: it is SPARQL 1.2.
+const QUOTED_TRIPLES_UNSUPPORTED: &str =
+    "quoted triples (<< ... >>) are SPARQL 1.2, which this version does not support";
+
+/// The prefixes a query can use without declaring them, as Jena and GraphDB
+/// predefine them; a query's own `PREFIX` redefines one.
+pub const PREDEFINED_PREFIXES: [(&str, &str); 5] = [
+    ("rdf", "http://www.w3.org/1999/02/22-rdf-syntax-ns#"),
+    ("rdfs", "http://www.w3.org/2000/01/rdf-schema#"),
+    ("xsd", "http://www.w3.org/2001/XMLSchema#"),
+    ("owl", "http://www.w3.org/2002/07/owl#"),
+    ("fn", "http://www.w3.org/2005/xpath-functions#"),
+];
 
 impl<'a> Parser<'a> {
     /// Creates a new parser for the given query string.
@@ -35,6 +59,12 @@ impl<'a> Parser<'a> {
             collection_counter: 0,
             anon_blank_counter: 0,
             nesting: Nesting::default(),
+            prefixes: PREDEFINED_PREFIXES
+                .iter()
+                .map(|(prefix, _)| (*prefix).to_string())
+                .collect(),
+            declaring_prefix: false,
+            undeclared: None,
         }
     }
 
@@ -68,6 +98,15 @@ impl<'a> Parser<'a> {
                 self.current.text
             )));
         }
+        // A prefix must be declared (SPARQL 1.1, 4.1.1), or be one of the
+        // predefined ones.
+        if let Some(token) = self.undeclared.take() {
+            let prefix = token.text.split(':').next().unwrap_or_default().to_string();
+            self.current = token;
+            return Err(self.error(&format!(
+                "the prefix '{prefix}:' is not declared (add PREFIX {prefix}: <...>)"
+            )));
+        }
 
         Ok(Query {
             base,
@@ -91,16 +130,21 @@ impl<'a> Parser<'a> {
     fn parse_prefixes(&mut self) -> Result<Vec<PrefixDeclaration>> {
         let mut prefixes = Vec::new();
         while self.current.kind == TokenKind::Prefix {
+            self.declaring_prefix = true;
             self.advance();
+            self.declaring_prefix = false;
 
             // Parse prefix name (can be empty for default prefix)
             let prefix = if self.current.kind == TokenKind::PrefixedName {
                 let text = self.current.text.clone();
                 self.advance();
                 // Remove trailing colon if present
-                text.trim_end_matches(':').to_string()
+                let prefix = text.trim_end_matches(':').to_string();
+                self.prefixes.insert(prefix.clone());
+                prefix
             } else if self.current.kind == TokenKind::Colon {
                 self.advance();
+                self.prefixes.insert(String::new());
                 String::new() // Default prefix
             } else {
                 return Err(self.error("expected prefix name or ':'"));
@@ -176,7 +220,8 @@ impl<'a> Parser<'a> {
         let template = self.parse_construct_template()?;
         let dataset = self.parse_dataset_clause()?;
         let where_clause = self.parse_where_clause()?;
-        let solution_modifiers = self.parse_solution_modifiers()?;
+        let mut solution_modifiers = self.parse_solution_modifiers()?;
+        let where_clause = Self::with_values(where_clause, solution_modifiers.values.take());
 
         Ok(ConstructQuery {
             template,
@@ -191,6 +236,8 @@ impl<'a> Parser<'a> {
 
         let dataset = self.parse_dataset_clause()?;
         let where_clause = self.parse_where_clause()?;
+        let values = self.parse_trailing_values()?;
+        let where_clause = Self::with_values(where_clause, values);
 
         Ok(AskQuery {
             dataset,
@@ -210,6 +257,10 @@ impl<'a> Parser<'a> {
             } else {
                 None
             };
+        let where_clause = match (where_clause, self.parse_trailing_values()?) {
+            (Some(pattern), values) => Some(Self::with_values(pattern, values)),
+            (None, values) => values.map(GraphPattern::InlineData),
+        };
 
         Ok(DescribeQuery {
             resources,
@@ -353,9 +404,34 @@ impl<'a> Parser<'a> {
         })
     }
 
+    /// The quads of `INSERT DATA` or `DELETE DATA`, which hold no variables
+    /// (SPARQL 1.1 Update, QuadData): a variable is a syntax error naming it.
     fn parse_quad_data(&mut self) -> Result<Vec<QuadPattern>> {
         self.expect(TokenKind::LeftBrace)?;
         let quads = self.parse_quads()?;
+        let variable = quads.iter().find_map(|quad| {
+            let term = |term: &TripleTerm| match term {
+                TripleTerm::Variable(name) => Some(name.clone()),
+                _ => None,
+            };
+            let graph = match &quad.graph {
+                Some(VariableOrIri::Variable(name)) => Some(name.clone()),
+                _ => None,
+            };
+            let predicate = match &quad.triple.predicate {
+                PropertyPath::Variable(name) => Some(name.clone()),
+                _ => None,
+            };
+            graph
+                .or_else(|| term(&quad.triple.subject))
+                .or(predicate)
+                .or_else(|| term(&quad.triple.object))
+        });
+        if let Some(name) = variable {
+            return Err(self.error(&format!(
+                "INSERT DATA and DELETE DATA hold no variables, but '?{name}' is one: use INSERT                  or DELETE with a WHERE clause"
+            )));
+        }
         self.expect(TokenKind::RightBrace)?;
         Ok(quads)
     }
@@ -408,6 +484,8 @@ impl<'a> Parser<'a> {
                 if self.current.kind == TokenKind::Dot {
                     self.advance();
                 }
+            } else if self.current.kind == TokenKind::LessThan {
+                return Err(self.error(QUOTED_TRIPLES_UNSUPPORTED));
             } else {
                 break;
             }
@@ -683,28 +761,42 @@ impl<'a> Parser<'a> {
     fn parse_group_graph_pattern(&mut self) -> Result<GraphPattern> {
         self.expect(TokenKind::LeftBrace)?;
 
-        let mut patterns = Vec::new();
-
         self.enter_group()?;
+        let patterns = self.parse_group_elements()?;
+        self.exit_group();
+
+        self.expect(TokenKind::RightBrace)?;
+        Ok(group_of(patterns))
+    }
+
+    /// Parses the elements of a group up to its closing brace. The target of
+    /// a `BIND` must not be in scope from the elements before it in the group
+    /// (SPARQL 1.1 sec 10.1 and 18.2.1): `{ ?s :p ?o BIND(1 AS ?o) }` is an
+    /// error, not a rebinding of ?o.
+    fn parse_group_elements(&mut self) -> Result<Vec<GraphPattern>> {
+        let mut patterns = Vec::new();
+        let mut in_scope = std::collections::HashSet::new();
         while self.current.kind != TokenKind::RightBrace {
             if self.current.kind == TokenKind::Eof {
                 return Err(self.error("unexpected end of input in graph pattern"));
             }
-
-            patterns.push(self.parse_graph_pattern_element()?);
+            // A nested `{ BIND(...) }` of one element comes back as a bare
+            // BIND too, but its group starts with nothing in scope.
+            let written_here = self.current.kind == TokenKind::Bind;
+            let element = self.parse_graph_pattern_element()?;
+            if written_here
+                && let GraphPattern::Bind { variable, .. } = &element
+                && in_scope.contains(variable)
+            {
+                return Err(self.error(&format!(
+                    "the target of BIND must be a fresh variable, but '?{variable}' is already \
+                     in scope in its group (SPARQL 1.1 sec 18.2.1)"
+                )));
+            }
+            collect_in_scope_variables(&element, &mut in_scope);
+            patterns.push(element);
         }
-        self.exit_group();
-
-        self.expect(TokenKind::RightBrace)?;
-
-        if patterns.len() == 1 {
-            Ok(patterns
-                .into_iter()
-                .next()
-                .expect("len == 1 guarantees at least one element"))
-        } else {
-            Ok(GraphPattern::Group(patterns))
-        }
+        Ok(patterns)
     }
 
     fn parse_graph_pattern_element(&mut self) -> Result<GraphPattern> {
@@ -775,9 +867,19 @@ impl<'a> Parser<'a> {
                 let subquery = self.parse_select_query()?;
                 Ok(GraphPattern::SubSelect(Box::new(subquery)))
             }
+            // A quoted triple (`<< s p o >>`) is SPARQL 1.2 (RDF-star).
+            TokenKind::LessThan => Err(self.error(QUOTED_TRIPLES_UNSUPPORTED)),
             _ => {
-                // Triple patterns
+                // Triple patterns. A token that starts none is an error: an
+                // element that consumed nothing would be parsed again and
+                // again by its group.
                 let triples = self.parse_triples_block()?;
+                if triples.is_empty() {
+                    return Err(self.error(&format!(
+                        "unexpected '{}' in a graph pattern",
+                        self.current.text
+                    )));
+                }
                 Ok(GraphPattern::Basic(triples))
             }
         }
@@ -798,23 +900,9 @@ impl<'a> Parser<'a> {
             }
 
             // Regular group pattern - parse contents
-            let mut patterns = Vec::new();
-            while self.current.kind != TokenKind::RightBrace {
-                if self.current.kind == TokenKind::Eof {
-                    return Err(self.error("unexpected end of input in graph pattern"));
-                }
-                patterns.push(self.parse_graph_pattern_element()?);
-            }
+            let patterns = self.parse_group_elements()?;
             self.expect(TokenKind::RightBrace)?;
-
-            if patterns.len() == 1 {
-                Ok(patterns
-                    .into_iter()
-                    .next()
-                    .expect("len == 1 guarantees at least one element"))
-            } else {
-                Ok(GraphPattern::Group(patterns))
-            }
+            Ok(group_of(patterns))
         } else {
             Err(self.error("expected '{'"))
         }
@@ -850,8 +938,10 @@ impl<'a> Parser<'a> {
 
         let mut variables = Vec::new();
 
-        // Parse variable list
-        if self.current.kind == TokenKind::LeftParen {
+        // Parse variable list: `?x` takes its values bare, `(?x ...)` in
+        // parenthesized rows, also for one variable (SPARQL 1.1 rule [62]).
+        let rows_in_parens = self.current.kind == TokenKind::LeftParen;
+        if rows_in_parens {
             self.advance();
             while self.current.kind == TokenKind::Variable {
                 variables.push(self.expect_variable_name()?);
@@ -866,7 +956,7 @@ impl<'a> Parser<'a> {
         let mut values = Vec::new();
 
         while self.current.kind != TokenKind::RightBrace {
-            if variables.len() == 1 {
+            if !rows_in_parens {
                 // Single variable - values listed directly
                 let value = self.parse_data_value()?;
                 values.push(vec![value]);
@@ -952,6 +1042,7 @@ impl<'a> Parser<'a> {
                 | TokenKind::Iri
                 | TokenKind::PrefixedName
                 | TokenKind::BlankNodeLabel
+                | TokenKind::AnonymousBlank
                 | TokenKind::LeftBracket
                 | TokenKind::LeftParen
                 | TokenKind::String
@@ -1184,6 +1275,11 @@ impl<'a> Parser<'a> {
                 self.advance();
                 Ok(TripleTerm::BlankNode(BlankNode::Labeled(label)))
             }
+            // `[]` with no space inside is one token (ANON).
+            TokenKind::AnonymousBlank => {
+                self.advance();
+                Ok(TripleTerm::BlankNode(BlankNode::Anonymous(vec![])))
+            }
             TokenKind::LeftBracket => {
                 self.advance();
                 if self.current.kind == TokenKind::RightBracket {
@@ -1222,6 +1318,7 @@ impl<'a> Parser<'a> {
                 let literal = self.parse_boolean_literal()?;
                 Ok(TripleTerm::Literal(literal))
             }
+            TokenKind::LessThan => Err(self.error(QUOTED_TRIPLES_UNSUPPORTED)),
             _ => Err(self.error("expected variable, IRI, blank node, or literal")),
         }
     }
@@ -1385,6 +1482,7 @@ impl<'a> Parser<'a> {
         let having = self.parse_having()?;
         let order_by = self.parse_order_by()?;
         let (limit, offset) = self.parse_limit_offset()?;
+        let values = self.parse_trailing_values()?;
 
         Ok(SolutionModifiers {
             group_by,
@@ -1392,7 +1490,30 @@ impl<'a> Parser<'a> {
             order_by,
             limit,
             offset,
+            values,
         })
+    }
+
+    /// The VALUES clause after a query's pattern and modifiers (SPARQL 1.1
+    /// sec 10.2.2), if there is one.
+    fn parse_trailing_values(&mut self) -> Result<Option<InlineDataClause>> {
+        if self.current.kind != TokenKind::Values {
+            return Ok(None);
+        }
+        match self.parse_inline_data()? {
+            GraphPattern::InlineData(data) => Ok(Some(data)),
+            _ => Err(self.error("expected a VALUES data block")),
+        }
+    }
+
+    /// `pattern` joined with a trailing VALUES clause: for a query form
+    /// without grouping (ASK, CONSTRUCT, DESCRIBE), the same as a VALUES at
+    /// the end of its WHERE clause.
+    fn with_values(pattern: GraphPattern, values: Option<InlineDataClause>) -> GraphPattern {
+        match values {
+            Some(data) => GraphPattern::Group(vec![pattern, GraphPattern::InlineData(data)]),
+            None => pattern,
+        }
     }
 
     fn parse_group_by(&mut self) -> Result<Option<Vec<GroupCondition>>> {
@@ -1475,6 +1596,18 @@ impl<'a> Parser<'a> {
                 let expr = self.parse_expression()?;
                 self.expect(TokenKind::RightParen)?;
                 (expr, SortDirection::Ascending)
+            } else if self.starts_call() {
+                // A Constraint (SPARQL 1.1 rule [24]): a built-in call
+                // (`STR(?x)`) or a function call (`xsd:double(?price)`).
+                match self.parse_primary_expression()? {
+                    Expression::Iri(_) => {
+                        return Err(self.error(
+                            "an ORDER BY condition is a variable, a bracketed expression or a \
+                             function call, not an IRI",
+                        ));
+                    }
+                    call => (call, SortDirection::Ascending),
+                }
             } else {
                 break;
             };
@@ -1792,6 +1925,25 @@ impl<'a> Parser<'a> {
 
             _ => Err(self.error("expected expression")),
         }
+    }
+
+    /// Whether the current token starts a built-in call (an aggregate,
+    /// EXISTS, NOT EXISTS or a function name) or an IRI function call.
+    fn starts_call(&self) -> bool {
+        matches!(
+            self.current.kind,
+            TokenKind::Iri
+                | TokenKind::PrefixedName
+                | TokenKind::Count
+                | TokenKind::Sum
+                | TokenKind::Avg
+                | TokenKind::Min
+                | TokenKind::Max
+                | TokenKind::Sample
+                | TokenKind::GroupConcat
+                | TokenKind::Exists
+                | TokenKind::Not
+        ) || self.is_built_in_function()
     }
 
     fn is_built_in_function(&self) -> bool {
@@ -2288,6 +2440,19 @@ impl<'a> Parser<'a> {
 
     fn advance(&mut self) {
         self.current = self.lexer.next_token();
+        // Notes the first use of a prefix not in scope (see `parse`).
+        if self.current.kind == TokenKind::PrefixedName
+            && !self.declaring_prefix
+            && self.undeclared.is_none()
+        {
+            // The lexer reads a bare name (a function such as `STRLEN`) as a
+            // prefixed name too: only one with a colon uses a prefix.
+            if let Some((prefix, _)) = self.current.text.split_once(':')
+                && !self.prefixes.contains(prefix)
+            {
+                self.undeclared = Some(self.current.clone());
+            }
+        }
     }
 
     fn expect(&mut self, kind: TokenKind) -> Result<()> {
@@ -2393,6 +2558,18 @@ impl<'a> Parser<'a> {
                 .with_span(self.current.span)
                 .with_source(self.source.to_string()),
         )
+    }
+}
+
+/// The pattern of a group of `patterns`. A group of one element is that
+/// element, except a group: `{ { P FILTER(F) } }` keeps its inner group,
+/// whose FILTER scopes over P alone, so an OPTIONAL of it is
+/// LeftJoin(G, Filter(F, P)), not LeftJoin(G, P, F) (SPARQL 1.1 sec 18.2.2.6).
+fn group_of(patterns: Vec<GraphPattern>) -> GraphPattern {
+    match <[GraphPattern; 1]>::try_from(patterns) {
+        Ok([GraphPattern::Group(inner)]) => GraphPattern::Group(vec![GraphPattern::Group(inner)]),
+        Ok([only]) => only,
+        Err(patterns) => GraphPattern::Group(patterns),
     }
 }
 
@@ -2569,7 +2746,10 @@ mod tests {
 
     #[test]
     fn test_property_path() {
-        let query = parse("SELECT ?x WHERE { ?x foaf:knows+ ?y }").unwrap();
+        let query = parse(
+            "PREFIX foaf: <http://xmlns.com/foaf/0.1/> SELECT ?x WHERE { ?x foaf:knows+ ?y }",
+        )
+        .unwrap();
         assert!(matches!(query.query_form, QueryForm::Select(_)));
     }
 

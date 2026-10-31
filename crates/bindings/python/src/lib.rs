@@ -169,6 +169,10 @@ fn grafeo(m: &Bound<'_, PyModule>) -> PyResult<()> {
         "GrafeoCorruptionError",
         m.py().get_type::<crate::error::GrafeoCorruptionError>(),
     )?;
+    m.add(
+        "GrafeoLockedError",
+        m.py().get_type::<crate::error::GrafeoLockedError>(),
+    )?;
     m.add_class::<PyGrafeoDB>()?;
     m.add_class::<graph_handle::PyGraphHandle>()?;
     m.add_class::<PyNode>()?;

@@ -984,3 +984,124 @@ fn a_long_flat_list_is_not_deep() {
     #[cfg(feature = "cypher")]
     assert_eq!(run(Language::Cypher, flat(HUGE)), Ok(1));
 }
+
+// ---------------------------------------------------------------------------
+// The statements of #668
+// ---------------------------------------------------------------------------
+
+/// A path of three nodes: `v` 1 to 2 over an edge of weight 3, then 2 to 3
+/// over an edge of weight 105.
+const PATH: &str = "INSERT (:N {v: 1})-[:E {w: 3}]->(:N {v: 2})-[:E {w: 105}]->(:N {v: 3})";
+
+/// `size` conditions on every edge of a variable-length path, which the
+/// planner pushes into the expand: `e.w <> 100`, `e.w <> 101`, ... A path
+/// over the edge of weight 105 fails the sixth, so only the path from 1 to 2
+/// passes.
+fn expand_conditions(size: usize) -> String {
+    let terms = joined(size, " AND ", |i| {
+        format!("all(e IN edges(p) WHERE e.w <> {})", 100 + i)
+    });
+    format!("MATCH p = (a:N)-[:E*1..3]->(b) WHERE {terms} RETURN count(b)")
+}
+
+#[test]
+fn conditions_of_any_number_on_a_variable_length_edge_run_on_a_small_stack() {
+    let mut languages = vec![Language::Gql];
+    #[cfg(feature = "cypher")]
+    languages.push(Language::Cypher);
+    for language in languages {
+        assert_eq!(
+            selected(Some(PATH), language, expand_conditions(HUGE)),
+            Ok(vec![1]),
+            "{language:?}"
+        );
+    }
+}
+
+/// `coalesce()` of `size` branches that each follow an `E` edge.
+#[cfg(feature = "gremlin")]
+fn coalesce_branches(size: usize) -> String {
+    format!(
+        "g.V().coalesce({})",
+        joined(size, ", ", |_| "out('E')".to_string())
+    )
+}
+
+#[cfg(feature = "gremlin")]
+#[test]
+fn a_gremlin_coalesce_of_any_number_of_branches_runs_on_a_small_stack() {
+    let statement = format!("{}.values('v')", coalesce_branches(HUGE));
+    assert_eq!(
+        selected(Some(PATH), Language::Gremlin, statement),
+        Ok(vec![2, 3])
+    );
+}
+
+#[cfg(feature = "gremlin")]
+#[test]
+fn a_long_gremlin_traversal_that_fails_to_translate_fails_with_an_error() {
+    // The step after the long part is refused, so the plan built so far is
+    // dropped on the error path.
+    let failing = ".where(order())";
+    let coalesce = run(
+        Language::Gremlin,
+        format!("{}{failing}", coalesce_branches(100_000)),
+    )
+    .expect_err("order() inside where() is refused");
+    assert!(coalesce.contains("not supported"), "{coalesce}");
+    let chain = run(
+        Language::Gremlin,
+        format!("g.V(){}{failing}", ".out()".repeat(HUGE)),
+    )
+    .expect_err("a chain of 10,000 steps is beyond the plan depth limit");
+    assert!(names_limit(&chain, MAX_PLAN_DEPTH), "{chain}");
+}
+
+/// The length of the plan tree the Gremlin `statement` translates to.
+#[cfg(feature = "gremlin")]
+fn plan_length(statement: &str) -> usize {
+    grafeo_engine::query::translate_gremlin(statement)
+        .unwrap_or_else(|e| panic!("{statement}: {e}"))
+        .root
+        .explain_tree()
+        .len()
+}
+
+#[cfg(feature = "gremlin")]
+#[test]
+fn gremlin_branching_steps_grow_the_plan_by_one_step_at_a_time() {
+    let steps = [
+        ".union(out('E'), out('E'))",
+        ".coalesce(out('E'), out('E'))",
+        ".optional(out('E'))",
+        ".choose(has('v', 1), out('E'), out('E'))",
+        ".outE('E').bothV()",
+    ];
+    for step in steps {
+        let plan = |count: usize| plan_length(&format!("g.V(){}", step.repeat(count)));
+        let (one, twelve) = (plan(1), plan(12));
+        assert!(
+            twelve < 24 * one,
+            "{step}: twelve steps plan in {twelve} bytes, one in {one}"
+        );
+    }
+}
+
+#[cfg(feature = "gremlin")]
+#[test]
+fn twenty_gremlin_branching_steps_run() {
+    // Every vertex moves along the path as long as it can, and stays at 3.
+    let optional = format!("g.V(){}.values('v')", ".optional(out('E'))".repeat(20));
+    assert_eq!(
+        selected(Some(PATH), Language::Gremlin, optional),
+        Ok(vec![3, 3, 3])
+    );
+    let coalesce = format!(
+        "g.V(){}.values('v')",
+        ".coalesce(out('E'), has('v', 3))".repeat(20)
+    );
+    assert_eq!(
+        selected(Some(PATH), Language::Gremlin, coalesce),
+        Ok(vec![3, 3, 3])
+    );
+}

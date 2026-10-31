@@ -494,6 +494,23 @@ impl GraphBackend for RowGroupStore {
     fn apply(&self, op: &DataOp, writer: Writer) -> Result<Applied, ApplyError> {
         let mode = Mode::of(writer, self.keeps_history())?;
         self.refuse_if_dropped()?;
+        // The next id is one past the largest: the last id has none, so it
+        // is refused before anything of it is stored.
+        match op {
+            DataOp::CreateNode { id, .. } if id.as_u64() == u64::MAX => {
+                return Err(ApplyError::Refused(format!(
+                    "node id {}: the largest id leaves no next one",
+                    id.as_u64()
+                )));
+            }
+            DataOp::CreateEdge { id, .. } if id.as_u64() == u64::MAX => {
+                return Err(ApplyError::Refused(format!(
+                    "edge id {}: the largest id leaves no next one",
+                    id.as_u64()
+                )));
+            }
+            _ => {}
+        }
         let applied = {
             let mut inner = self.inner.write();
             let applied = inner.apply_op(op, mode);

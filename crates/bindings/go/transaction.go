@@ -106,7 +106,8 @@ func (tx *Transaction) ExecuteLanguage(language, query, paramsJSON string) (*Que
 	return parseResult(r)
 }
 
-// Commit commits the transaction.
+// Commit commits the transaction. A commit that fails (a write conflict,
+// GQLSTATUS 40000) ends the transaction all the same.
 func (tx *Transaction) Commit() error {
 	runtime.LockOSThread()
 	err := statusToError(C.grafeo_commit(tx.handle))
@@ -118,7 +119,9 @@ func (tx *Transaction) Commit() error {
 	return err
 }
 
-// Rollback aborts the transaction.
+// Rollback aborts the transaction. After a Commit that failed it does
+// nothing and returns nil: a commit that fails ends the transaction, so a
+// deferred or error-path Rollback does not hide the commit's error.
 func (tx *Transaction) Rollback() error {
 	runtime.LockOSThread()
 	err := statusToError(C.grafeo_rollback(tx.handle))

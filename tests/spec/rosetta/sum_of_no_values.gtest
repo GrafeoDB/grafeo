@@ -1,0 +1,101 @@
+# Rosetta: sum() of no values
+#
+# In Cypher the sum of no values is the integer 0, as openCypher and Neo4j
+# give it (sum(null) is 0): no rows, only nulls, or a group whose values are
+# all null. The openCypher TCK has no scenario for it (Aggregation3 sums only
+# non-null values). In GQL it stays null, as in SQL. In both, count of no
+# values is 0, collect is [], and avg, min and max are null.
+
+meta:
+  model: lpg
+  section: rosetta
+  title: sum of no values
+  dataset: empty
+  requires: [cypher]
+
+tests:
+
+  # ---------------------------------------------------------------------------
+  # Cypher: 0
+  # ---------------------------------------------------------------------------
+
+  - name: the_sum_of_no_rows_is_zero_in_cypher
+    variants:
+      cypher: "UNWIND [] AS x RETURN sum(x) AS s"
+    expect:
+      rows:
+        - [0]
+
+  - name: the_sum_of_only_nulls_is_zero_in_cypher
+    variants:
+      cypher: "UNWIND [null, null] AS x RETURN sum(x) AS s"
+    expect:
+      rows:
+        - [0]
+
+  - name: the_sum_of_no_matched_nodes_is_zero_in_cypher
+    variants:
+      cypher: "MATCH (n:Nobody) RETURN sum(n.v) AS s"
+    expect:
+      rows:
+        - [0]
+
+  - name: the_sum_of_a_group_of_only_nulls_is_zero_in_cypher
+    variants:
+      cypher: "UNWIND [[1, null], [2, 5], [2, null]] AS r RETURN r[0] AS g, sum(r[1]) AS s ORDER BY g"
+    expect:
+      ordered: true
+      rows:
+        - [1, 0]
+        - [2, 5]
+
+  - name: the_sum_of_no_values_is_the_integer_zero_whatever_the_input_type
+    # With no value there is no type to keep: the integer 0, also over a
+    # float or decimal expression.
+    variants:
+      cypher: "UNWIND [] AS x RETURN toString(sum(x)) AS i, toString(sum(toFloat(x))) AS f, toString(sum(toDecimal(x))) AS d"
+    expect:
+      rows:
+        - ['0', '0', '0']
+
+  - name: the_sum_of_values_keeps_their_type_in_cypher
+    # Control: with values, a float sum stays a float.
+    variants:
+      cypher: "UNWIND [1.5, null] AS x RETURN sum(x) AS s, toString(sum(x)) AS t"
+    expect:
+      rows:
+        - [1.5, '1.5']
+
+  - name: the_other_aggregates_of_no_values_in_cypher
+    variants:
+      cypher: "UNWIND [] AS x RETURN count(x) AS c, collect(x) AS l, avg(x) AS a, min(x) AS mn, max(x) AS mx"
+    expect:
+      rows:
+        - [0, [], null, null, null]
+
+  # ---------------------------------------------------------------------------
+  # GQL: null, as SQL
+  # ---------------------------------------------------------------------------
+
+  - name: the_sum_of_no_values_is_null_in_gql
+    variants:
+      gql: "UNWIND [] AS x RETURN sum(x) AS a, count(x) AS c, collect(x) AS l, avg(x) AS av, min(x) AS mn, max(x) AS mx"
+    expect:
+      rows:
+        - [null, 0, [], null, null, null]
+
+  - name: the_sum_of_only_nulls_is_null_in_gql
+    variants:
+      gql: "UNWIND [null, null] AS x RETURN sum(x) AS s"
+    expect:
+      rows:
+        - [null]
+
+  - name: the_sum_of_a_group_of_only_nulls_is_null_in_gql
+    variants:
+      gql: "UNWIND [[1, null], [2, 5], [2, null]] AS r RETURN r[0] AS g, sum(r[1]) AS s ORDER BY g"
+    expect:
+      ordered: true
+      rows:
+        - [1, null]
+        - [2, 5]

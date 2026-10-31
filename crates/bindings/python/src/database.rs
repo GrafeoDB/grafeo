@@ -406,6 +406,33 @@ impl PyGrafeoDB {
     }
 }
 
+/// The query timeout of a database the constructor gets without one, in
+/// seconds: the engine's default.
+fn default_query_timeout() -> Option<f64> {
+    Config::in_memory()
+        .query_timeout()
+        .map(|timeout| timeout.as_secs_f64())
+}
+
+/// A timeout of `seconds` (the argument `what`): None for `math.inf`, which
+/// sets no limit, and a ValueError for a number of seconds that is not
+/// positive.
+fn timeout_seconds(seconds: f64, what: &str) -> Option<PyResult<std::time::Duration>> {
+    if seconds == f64::INFINITY {
+        return None;
+    }
+    Some(
+        std::time::Duration::try_from_secs_f64(seconds)
+            .ok()
+            .filter(|timeout| !timeout.is_zero())
+            .ok_or_else(|| {
+                pyo3::exceptions::PyValueError::new_err(format!(
+                    "{what} must be a positive number of seconds, None or math.inf: {seconds}"
+                ))
+            }),
+    )
+}
+
 #[pymethods]
 impl PyGrafeoDB {
     /// Creates a database. Pass a path for persistence, or omit for in-memory.
@@ -436,6 +463,9 @@ impl PyGrafeoDB {
     /// (`as_of`, `execute_as_of`): "off" (the default for a new database),
     /// "forever", or a timedelta, how far back it reaches. A database file
     /// stores it; None keeps the stored one.
+    ///
+    /// query_timeout is how many seconds a query may run before it fails
+    /// (30 by default); None or math.inf runs queries without a limit.
     #[new]
     #[pyo3(signature = (
         path=None,
@@ -444,8 +474,13 @@ impl PyGrafeoDB {
         section_tiers=None,
         shuffle_unordered=false,
         wal_salvage=false,
-        history_retention=None
+        history_retention=None,
+        query_timeout=default_query_timeout()
     ))]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "each argument is one keyword option of the Python constructor"
+    )]
     fn new(
         path: Option<String>,
         cdc: bool,
@@ -453,6 +488,7 @@ impl PyGrafeoDB {
         shuffle_unordered: bool,
         wal_salvage: bool,
         history_retention: Option<&Bound<'_, PyAny>>,
+        query_timeout: Option<f64>,
         py: Python<'_>,
     ) -> PyResult<Self> {
         let mut config = if let Some(p) = path {
@@ -471,6 +507,10 @@ impl PyGrafeoDB {
             config =
                 config.with_history_retention(crate::time_travel::history_retention(retention)?);
         }
+        config = match query_timeout.map(|seconds| timeout_seconds(seconds, "query_timeout")) {
+            Some(Some(timeout)) => config.with_query_timeout(timeout?),
+            Some(None) | None => config.without_query_timeout(),
+        };
         if let Some(tiers) = section_tiers {
             for (section_name, tier_name) in tiers {
                 let section_type = parse_section_type(&section_name)?;
@@ -560,14 +600,30 @@ impl PyGrafeoDB {
     ///
     /// Query performance metrics are available via `result.execution_time_ms`
     /// and `result.rows_scanned` properties.
-    #[pyo3(signature = (query, params=None))]
+    ///
+    /// timeout is how many seconds this query may run, in place of the
+    /// database's query_timeout; math.inf runs it without a limit, and None
+    /// (the default) keeps the database's.
+    #[pyo3(signature = (query, params=None, *, timeout=None))]
     fn execute(
         &self,
         query: &str,
         params: Option<&Bound<'_, pyo3::types::PyDict>>,
+        timeout: Option<f64>,
         py: Python<'_>,
     ) -> PyResult<PyQueryResult> {
-        self.execute_language_impl(py, "gql", query, params)
+        let Some(seconds) = timeout else {
+            return self.execute_language_impl(py, "gql", query, params);
+        };
+        let timeout = timeout_seconds(seconds, "timeout").transpose()?;
+        let params = crate::direct::params(params)?;
+        without_gil(py, || {
+            let result = self
+                .inner
+                .read()
+                .execute_language_with_timeout(query, "gql", params, timeout)?;
+            Ok(crate::direct::query_result(result))
+        })
     }
 
     /// Runs a read-only GQL query and returns a lazy iterator.
@@ -1320,6 +1376,58 @@ impl PyGrafeoDB {
             .collect()
     }
 
+    /// Get several properties for multiple nodes at once.
+    ///
+    /// One read of the database for all `keys`, so the lists hold the values
+    /// of one committed state. Returns one list per key, aligned
+    /// with `node_ids`: None where the node lacks the property or no node has
+    /// the ID. IDs may repeat and keep their order.
+    ///
+    /// Example:
+    /// ```python
+    /// columns = db.get_properties_batch(node_ids, ["name", "city"])
+    /// for node_id, name, city in zip(node_ids, columns["name"], columns["city"]):
+    ///     print(node_id, name, city)
+    /// ```
+    fn get_properties_batch<'py>(
+        &self,
+        py: Python<'py>,
+        node_ids: Vec<u64>,
+        keys: Vec<String>,
+    ) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+        let ids: Vec<NodeId> = node_ids.into_iter().map(NodeId).collect();
+        // Each key once: a repeated key is one entry of the dict.
+        let mut seen = std::collections::HashSet::with_capacity(keys.len());
+        let keys: Vec<grafeo_common::types::PropertyKey> = keys
+            .into_iter()
+            .filter(|key| seen.insert(key.clone()))
+            .map(grafeo_common::types::PropertyKey::new)
+            .collect();
+        // One pinned read for every key: the values of one committed state.
+        // The store keeps a property's values together, so a column per key
+        // reads them without building a map per node.
+        let values_per_key = self.released(py, |db| {
+            let snapshot = db.snapshot()?;
+            let (store, view) = (snapshot.store(), snapshot.view());
+            Ok(keys
+                .iter()
+                .map(|key| store.node_property_batch(&ids, key, view))
+                .collect::<grafeo_common::utils::error::Result<Vec<_>>>()?)
+        })?;
+        let columns = pyo3::types::PyDict::new(py);
+        for (key, values) in keys.iter().zip(values_per_key) {
+            let list = pyo3::types::PyList::empty(py);
+            for value in values {
+                match value {
+                    Some(value) => list.append(PyValue::to_py(&value, py)?)?,
+                    None => list.append(py.None())?,
+                }
+            }
+            columns.set_item(key.as_str(), list)?;
+        }
+        Ok(columns)
+    }
+
     /// Delete a node by ID.
     ///
     /// Returns False if the node does not exist. Raises if the node still
@@ -1497,6 +1605,11 @@ impl PyGrafeoDB {
     /// Create a vector similarity index on a node property.
     ///
     /// Enables efficient similarity search on vector embeddings.
+    ///
+    /// A list of numbers in the property is stored as a vector of 32-bit
+    /// floats once the index exists: the lists already there are converted
+    /// when it is created, and a list written later is stored as one. The
+    /// property then reads back as those floats (0.0070 as 0.007000000216...).
     ///
     /// Args:
     ///     label: Node label to index (e.g., "Doc")
@@ -1692,6 +1805,40 @@ impl PyGrafeoDB {
         crate::direct::upsert_summary(py, &summary)
     }
 
+    /// Updates existing nodes, one per row, matched by `key` and all of
+    /// `labels`; creates nothing.
+    ///
+    /// Each row is a dict of properties holding `key`. Its properties are
+    /// merged into the node's and the others stay, as
+    /// `UNWIND $rows AS r MATCH (n:Labels {key: r.key}) SET n += r` does. A
+    /// row whose key matches no node with every label, or without the key,
+    /// is skipped. The call writes all rows or none, and its time grows with
+    /// the rows and the nodes, also without a property index on `key`.
+    ///
+    /// Returns:
+    ///     dict with `updated`, `skipped` and `skipped_rows` (the indices of
+    ///     the skipped rows, at most 1,000).
+    ///
+    /// Example:
+    ///     db.update_nodes(["Graph", "File"], [{"id": "f1", "size": 4}])
+    #[pyo3(signature = (labels, rows, key="id"))]
+    fn update_nodes<'py>(
+        &self,
+        py: Python<'py>,
+        labels: Vec<String>,
+        rows: &Bound<'_, pyo3::types::PyList>,
+        key: &str,
+    ) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+        let labels: Vec<&str> = labels.iter().map(String::as_str).collect();
+        let rows = crate::direct::properties_list(rows)?;
+        let summary = self.released(py, |db| {
+            Ok(crate::direct::DirectTarget::update_nodes(
+                db, &labels, key, rows,
+            )?)
+        })?;
+        crate::direct::update_summary(py, &summary)
+    }
+
     /// Creates or updates one edge of `edge_type` per row between existing
     /// nodes, in one statement.
     ///
@@ -1816,6 +1963,162 @@ impl PyGrafeoDB {
         let edges = crate::direct::batch_edges(edges)?;
         let ids = self.released(py, |db| Ok(db.batch_create_edges(edges)?))?;
         Ok(ids.into_iter().map(|id| id.as_u64()).collect())
+    }
+
+    /// Load a CSV file as nodes, parsed and typed in Rust and written in
+    /// bulk, in one transaction: if one record cannot be loaded, nothing is.
+    ///
+    /// Args:
+    ///     path: The file, as a string or a path.
+    ///     labels: The label of every node, or a list of labels.
+    ///     key: A column every record has, unique in the file (and among the
+    ///         nodes, with a UNIQUE constraint on it).
+    ///     types: Column name to type: "string", "int64", "float64", "bool",
+    ///         "date", "timestamp" or "skip" (not stored), in any case. A
+    ///         column not named is a string. Without a header, the columns in
+    ///         file order.
+    ///     delimiter: The field separator.
+    ///     header: Whether the first record names the columns.
+    ///     nulls: Fields that stand for no value, besides an empty one.
+    ///
+    /// Returns:
+    ///     A dict: rows (records read), created, skipped.
+    ///
+    /// Example:
+    ///     db.load_nodes_csv("people.csv", "Person", key="id",
+    ///                       types={"id": "int64", "born": "date"})
+    #[pyo3(signature = (path, labels, key=None, types=None, delimiter=",", header=true, nulls=None))]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "each argument is one keyword option of the Python method"
+    )]
+    fn load_nodes_csv(
+        &self,
+        path: std::path::PathBuf,
+        labels: &Bound<'_, PyAny>,
+        key: Option<String>,
+        types: Option<&Bound<'_, pyo3::types::PyDict>>,
+        delimiter: &str,
+        header: bool,
+        nulls: Option<Vec<String>>,
+        py: Python<'_>,
+    ) -> PyResult<Py<PyAny>> {
+        let spec = grafeo_engine::loader::NodeLoad {
+            labels: crate::direct::labels(labels)?,
+            key,
+            columns: crate::direct::load_columns(types)?,
+            delimiter: crate::direct::load_delimiter(delimiter)?,
+            header,
+            nulls: nulls.unwrap_or_default(),
+        };
+        let report = self.released(py, |db| Ok(db.load_nodes_csv(&path, &spec)?))?;
+        crate::direct::load_report(py, report)
+    }
+
+    /// Load a CSV file as edges, each end found by its key among the nodes
+    /// of a label, in one transaction.
+    ///
+    /// Args:
+    ///     path: The file, as a string or a path.
+    ///     edge_type: The type of every edge.
+    ///     source: (label, property, column): the source is the node of
+    ///         label whose property equals the record's value in column.
+    ///     target: (label, property, column), as source.
+    ///     types: As in load_nodes_csv; the key columns' types too (a key
+    ///         read as text finds only text keys). The key columns are not
+    ///         stored on the edge.
+    ///     missing: "error" (the default: a key no node has fails the load)
+    ///         or "skip" (no edge for that record).
+    ///     delimiter: The field separator.
+    ///     header: Whether the first record names the columns.
+    ///     nulls: Fields that stand for no value, besides an empty one.
+    ///
+    /// Returns:
+    ///     A dict: rows, created, skipped.
+    ///
+    /// Example:
+    ///     db.load_edges_csv("knows.csv", "KNOWS",
+    ///                       source=("Person", "id", "src"),
+    ///                       target=("Person", "id", "dst"),
+    ///                       types={"src": "int64", "dst": "int64"})
+    #[pyo3(signature = (path, edge_type, source, target, types=None, missing="error", delimiter=",", header=true, nulls=None))]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "each argument is one keyword option of the Python method"
+    )]
+    fn load_edges_csv(
+        &self,
+        path: std::path::PathBuf,
+        edge_type: String,
+        source: (String, String, String),
+        target: (String, String, String),
+        types: Option<&Bound<'_, pyo3::types::PyDict>>,
+        missing: &str,
+        delimiter: &str,
+        header: bool,
+        nulls: Option<Vec<String>>,
+        py: Python<'_>,
+    ) -> PyResult<Py<PyAny>> {
+        let end =
+            |(label, property, column): (String, String, String)| grafeo_engine::loader::EndKey {
+                label,
+                property,
+                column,
+            };
+        let missing = match missing {
+            "error" => grafeo_engine::loader::MissingEnd::Error,
+            "skip" => grafeo_engine::loader::MissingEnd::Skip,
+            other => {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "missing must be 'error' or 'skip', not '{other}'"
+                )));
+            }
+        };
+        let spec = grafeo_engine::loader::EdgeLoad {
+            edge_type,
+            source: end(source),
+            target: end(target),
+            columns: crate::direct::load_columns(types)?,
+            delimiter: crate::direct::load_delimiter(delimiter)?,
+            header,
+            nulls: nulls.unwrap_or_default(),
+            missing,
+        };
+        let report = self.released(py, |db| Ok(db.load_edges_csv(&path, &spec)?))?;
+        crate::direct::load_report(py, report)
+    }
+
+    /// Load an RDF file into the default graph, in one bulk write: nothing
+    /// is inserted when a line does not parse.
+    ///
+    /// Args:
+    ///     path: The file, as a string or a path.
+    ///     format: "turtle" or "ntriples" (also "ttl", "nt"); by default the
+    ///         one the file's extension names (.ttl, .nt).
+    ///
+    /// Returns:
+    ///     How many triples were new.
+    ///
+    /// Example:
+    ///     db.load_rdf("people.ttl")
+    #[cfg(feature = "triple-store")]
+    #[pyo3(signature = (path, format=None))]
+    fn load_rdf(
+        &self,
+        path: std::path::PathBuf,
+        format: Option<&str>,
+        py: Python<'_>,
+    ) -> PyResult<usize> {
+        let format = format
+            .map(|name| {
+                grafeo_engine::RdfFormat::from_name(name).ok_or_else(|| {
+                    pyo3::exceptions::PyValueError::new_err(format!(
+                        "format must be 'turtle' or 'ntriples', not '{name}'"
+                    ))
+                })
+            })
+            .transpose()?;
+        self.released(py, |db| Ok(db.load_rdf(&path, format)?))
     }
 
     /// Batch search for nearest neighbors of multiple query vectors.
@@ -2313,7 +2616,7 @@ impl PyGrafeoDB {
     ///     tx.commit()  # Both nodes created atomically
     ///
     /// # With explicit isolation level
-    /// with db.begin_transaction("serializable") as tx:
+    /// with db.begin_transaction("read_committed") as tx:
     ///     tx.execute("MATCH (n:Counter) SET n.val = n.val + 1")
     ///     tx.commit()
     /// ```
@@ -2624,11 +2927,16 @@ impl PyGrafeoDB {
         db.reset_metrics();
     }
 
-    /// Returns schema information (labels, edge types, property keys).
+    /// Returns schema information: the labels, edge types and property keys
+    /// in use, sorted by name.
     ///
     /// Returns:
-    ///     dict with keys: labels (list of dicts), edge_types (list of dicts),
-    ///     property_keys (list of strings)
+    ///     dict with keys: labels (list of dicts with name, count and
+    ///     properties), edge_types (list of dicts with name, count, properties
+    ///     and endpoints), property_keys (list of strings). Each property is a
+    ///     dict with its name and the types of its values (``["STRING"]``);
+    ///     each endpoint a dict with a source label, a target label and the
+    ///     count of edges between them.
     ///
     /// Example:
     ///     schema = db.schema()
@@ -2640,6 +2948,17 @@ impl PyGrafeoDB {
 
         let dict = pyo3::types::PyDict::new(py);
 
+        let properties = |infos: Vec<grafeo_engine::admin::PropertyInfo>| -> PyResult<_> {
+            let list = pyo3::types::PyList::empty(py);
+            for info in infos {
+                let property = pyo3::types::PyDict::new(py);
+                property.set_item("name", info.name)?;
+                property.set_item("types", info.types)?;
+                list.append(property)?;
+            }
+            Ok(list)
+        };
+
         match schema {
             grafeo_engine::SchemaInfo::Lpg(lpg) => {
                 dict.set_item("mode", "lpg")?;
@@ -2649,6 +2968,7 @@ impl PyGrafeoDB {
                     let label_dict = pyo3::types::PyDict::new(py);
                     label_dict.set_item("name", label.name)?;
                     label_dict.set_item("count", label.count)?;
+                    label_dict.set_item("properties", properties(label.properties)?)?;
                     labels.append(label_dict)?;
                 }
                 dict.set_item("labels", labels)?;
@@ -2658,6 +2978,16 @@ impl PyGrafeoDB {
                     let et_dict = pyo3::types::PyDict::new(py);
                     et_dict.set_item("name", et.name)?;
                     et_dict.set_item("count", et.count)?;
+                    et_dict.set_item("properties", properties(et.properties)?)?;
+                    let endpoints = pyo3::types::PyList::empty(py);
+                    for endpoint in et.endpoints {
+                        let endpoint_dict = pyo3::types::PyDict::new(py);
+                        endpoint_dict.set_item("source", endpoint.source)?;
+                        endpoint_dict.set_item("target", endpoint.target)?;
+                        endpoint_dict.set_item("count", endpoint.count)?;
+                        endpoints.append(endpoint_dict)?;
+                    }
+                    et_dict.set_item("endpoints", endpoints)?;
                     edge_types.append(et_dict)?;
                 }
                 dict.set_item("edge_types", edge_types)?;
@@ -2859,6 +3189,9 @@ impl PyGrafeoDB {
     }
 
     /// Restores a database to a specific epoch from a backup chain.
+    ///
+    /// An epoch past the end of the chain restores the latest state the
+    /// chain holds.
     ///
     /// Example:
     ///     GrafeoDB.restore_to_epoch("./backups/mydb", 500, "./restored.grafeo")
@@ -3886,10 +4219,12 @@ fn extract_isolation_level(value: Option<&Bound<'_, PyAny>>) -> PyResult<Option<
 ///
 /// ```python
 /// from grafeo import IsolationLevel
-/// tx = db.begin_transaction(IsolationLevel.SERIALIZABLE)
+/// tx = db.begin_transaction(IsolationLevel.SNAPSHOT)
 /// ```
 ///
 /// String values ``"read_committed"``, ``"snapshot"``, ``"serializable"`` are also accepted.
+/// ``SERIALIZABLE`` is not available yet: it raises an error naming snapshot isolation, the
+/// strongest level, until queries record their reads.
 #[pyclass(
     name = "IsolationLevel",
     eq,
@@ -3903,7 +4238,7 @@ pub enum PyIsolationLevel {
     ReadCommitted = 0,
     /// The transaction sees a consistent snapshot taken at begin time.
     Snapshot = 1,
-    /// Full serializability with conflict detection.
+    /// Not available yet: refused until queries record their reads.
     Serializable = 2,
 }
 
@@ -3956,10 +4291,19 @@ pub struct PyTransaction {
     session: parking_lot::Mutex<Option<grafeo_engine::session::Session>>,
     committed: bool,
     rolled_back: bool,
+    /// A commit was tried and failed: the transaction ended without its
+    /// changes (a conflict, for example), and a rollback has nothing to do.
+    commit_failed: bool,
     isolation_level_name: String,
 }
 
 impl PyTransaction {
+    /// Whether the transaction ended: committed, rolled back, or a commit
+    /// that failed.
+    fn ended(&self) -> bool {
+        self.committed || self.rolled_back || self.commit_failed
+    }
+
     /// Executes a query in the given language within this transaction.
     fn execute_language_impl(
         &self,
@@ -3968,7 +4312,7 @@ impl PyTransaction {
         query: &str,
         params: Option<&Bound<'_, pyo3::types::PyDict>>,
     ) -> PyResult<PyQueryResult> {
-        if self.committed || self.rolled_back {
+        if self.ended() {
             return Err(pyo3::exceptions::PyRuntimeError::new_err(
                 "Cannot execute on completed transaction",
             ));
@@ -4021,12 +4365,15 @@ impl PyTransaction {
         } else {
             session.begin_transaction().map_err(PyGrafeoError::from)?;
         }
+        // It ends with commit() or rollback(), never with a statement.
+        session.refuse_transaction_statements();
 
         Ok(Self {
             _db: db,
             session: parking_lot::Mutex::new(Some(session)),
             committed: false,
             rolled_back: false,
+            commit_failed: false,
             isolation_level_name: level_name.to_string(),
         })
     }
@@ -4046,31 +4393,52 @@ impl PyTransaction {
     ///
     /// Makes all changes permanent. Raises an error if the transaction is
     /// already completed or if there's a write-write conflict.
+    ///
+    /// A commit that fails ends the transaction all the same: its changes are
+    /// gone, `is_active` is False, and a `rollback()` after it does nothing,
+    /// so the caller's except block sees the commit's error.
     fn commit(&mut self, py: Python<'_>) -> PyResult<()> {
-        if self.committed || self.rolled_back {
+        if self.ended() {
             return Err(pyo3::exceptions::PyRuntimeError::new_err(
                 "Transaction already completed",
             ));
         }
 
         let session = &self.session;
-        without_gil(py, || {
+        let outcome = without_gil(py, || {
             let mut session_guard = session.lock();
-            if let Some(ref mut session) = *session_guard {
-                session.commit()?;
-            }
+            let outcome = match session_guard.as_mut() {
+                Some(session) => {
+                    let outcome = session.commit();
+                    // A commit refused before it began (a query still
+                    // streaming) leaves the transaction open: end it.
+                    if outcome.is_err() && session.in_transaction() {
+                        let _ = session.rollback();
+                    }
+                    outcome
+                }
+                None => Ok(()),
+            };
             *session_guard = None; // Drop the session
-            Ok(())
-        })?;
-        self.committed = true;
-        Ok(())
+            Ok(outcome?)
+        });
+        if outcome.is_ok() {
+            self.committed = true;
+        } else {
+            self.commit_failed = true;
+        }
+        outcome
     }
 
     /// Rollback the transaction.
     ///
-    /// Discards all changes made within this transaction.
+    /// Discards all changes made within this transaction. After a commit
+    /// that failed it does nothing: that commit ended the transaction.
     fn rollback(&mut self, py: Python<'_>) -> PyResult<()> {
-        if self.committed || self.rolled_back {
+        if self.commit_failed {
+            return Ok(());
+        }
+        if self.ended() {
             return Err(pyo3::exceptions::PyRuntimeError::new_err(
                 "Transaction already completed",
             ));
@@ -4102,7 +4470,7 @@ impl PyTransaction {
     /// tx.commit()  # commits without the Temp node
     /// ```
     fn savepoint(&self, name: &str) -> PyResult<()> {
-        if self.committed || self.rolled_back {
+        if self.ended() {
             return Err(pyo3::exceptions::PyRuntimeError::new_err(
                 "Transaction already completed",
             ));
@@ -4120,7 +4488,7 @@ impl PyTransaction {
     /// Undoes all writes made after the savepoint was created.
     /// The savepoint remains active and can be rolled back to again.
     fn rollback_to_savepoint(&self, name: &str) -> PyResult<()> {
-        if self.committed || self.rolled_back {
+        if self.ended() {
             return Err(pyo3::exceptions::PyRuntimeError::new_err(
                 "Transaction already completed",
             ));
@@ -4140,7 +4508,7 @@ impl PyTransaction {
     /// Frees resources associated with the savepoint. Changes made after the
     /// savepoint become permanent within the transaction scope.
     fn release_savepoint(&self, name: &str) -> PyResult<()> {
-        if self.committed || self.rolled_back {
+        if self.ended() {
             return Err(pyo3::exceptions::PyRuntimeError::new_err(
                 "Transaction already completed",
             ));
@@ -4260,7 +4628,7 @@ impl PyTransaction {
     /// Check if transaction is active.
     #[getter]
     fn is_active(&self) -> bool {
-        !self.committed && !self.rolled_back
+        !self.ended()
     }
 
     fn __enter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
@@ -4274,7 +4642,7 @@ impl PyTransaction {
         _exc_tb: Option<&Bound<'_, PyAny>>,
         py: Python<'_>,
     ) -> PyResult<bool> {
-        if !self.committed && !self.rolled_back {
+        if !self.ended() {
             if exc_type.is_some() {
                 self.rollback(py)?;
             } else {
@@ -4290,6 +4658,8 @@ impl PyTransaction {
             "committed"
         } else if self.rolled_back {
             "rolled_back"
+        } else if self.commit_failed {
+            "commit_failed"
         } else {
             "active"
         };

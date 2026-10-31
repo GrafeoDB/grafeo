@@ -125,6 +125,7 @@ impl LeapfrogJoinOperator {
             let mut chunks = Vec::new();
             let mut types = ColumnTypes::default();
             while let Some(chunk) = input.next()? {
+                crate::execution::deadline::check()?;
                 types.add(&chunk);
                 chunks.push(chunk);
             }

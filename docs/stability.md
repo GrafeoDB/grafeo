@@ -47,6 +47,8 @@ The implementation crates (`grafeo-common`, `grafeo-core`, `grafeo-storage`, `gr
 | The numbers `memory_usage()` reports: the fields of `MemoryUsage` and its parts (the `grafeo::memory_usage` module), and what each one counts | Memory accounting follows the storage engine, which changes within 0.6. The types are `#[non_exhaustive]`, so a field can be added; what a field counts can change too. The call `memory_usage()` itself is stable |
 | `Session::statement_writes`: whether a statement writes, without running it | New in 0.6.0; which statements count as writes may be refined |
 | File import from Rust: `import::import_nodes` and `ImportFormat` (the Python `import_csv` and `import_jsonl`, the Node.js `importCsv` and `importJsonl` and the CLI `grafeo import csv` and `grafeo import jsonl` that run it are stable) | New in 0.6.0; formats and options may be added |
+| The RDF file loader: `GrafeoDB::load_rdf`, `grafeo::database::RdfFormat` and the Python `load_rdf` | New in 0.6.1; formats (N-Quads, RDF/XML), named graphs and options may be added |
+| The native loader: the module `grafeo::loader` (its load descriptions and report), `GrafeoDB::load_nodes_csv`, `GrafeoDB::load_edges_csv`, `Session::load_nodes_csv` and `Session::load_edges_csv`, the Python `load_nodes_csv` and `load_edges_csv`, and the `grafeo.load_nodes_csv` and `grafeo.load_edges_csv` procedures | New in 0.6.1; formats (Parquet, JSON Lines), sources (bytes) and options may be added |
 | The operator tree of a `PROFILE` statement: `QueryResult::profile`, `QueryProfile` and `OperatorProfile`, the Python and Node.js `profile` and the WASM `profile` key | New in 0.6.0; its operators and fields may still change |
 | A store of one's own: `GrafeoDB::with_store` and `GrafeoDB::with_read_store`, implementing `GraphStore` or `GraphBackend`, and the `store::conformance` suite that checks an implementation | The write contract is new in 0.6.0, and no backend outside Grafeo has run it yet: a required method may be added within 0.6.x. Calling the traits is stable |
 | `GrafeoDB::store()`: the built-in row-group store itself | For admin work; the row-group store's own methods follow the storage engine |
@@ -71,7 +73,9 @@ Everything else on the public surface is stable, among others:
 
 **0.7** is the next release that may break stable APIs. It removes what 0.6.x deprecated (each deprecation names its
 replacement and says "removed in 0.7.0"), and it no longer opens 0.5.x databases: open each one for writing with
-0.6 first, which migrates it. Its upgrade guide lists every breaking change with the code to change.
+0.6 first, which migrates it. It also changes the database file format once: a 0.6 database is migrated the first
+time 0.7 opens it for writing, with a copy of the old file kept. Its upgrade guide lists every breaking change with
+the code to change.
 
 **1.0** keeps these two levels and moves the rules up one level: stable APIs then break only in a major release
 (`1.x` to `2.0`), and a minor release (`1.1`) only adds and deprecates. Experimental APIs stay exempt until they are

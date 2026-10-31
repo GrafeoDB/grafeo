@@ -76,25 +76,33 @@ impl super::Planner {
         // Not below a write: the join reads the subquery before its input, so
         // the subquery would miss what the input writes; per row (below), it
         // runs after the whole input.
+        // A predicate without a subquery (most) skips both checks, which list
+        // the input's variables: every filter is planned on every execution.
         let input_writes = filter.input.has_mutations();
-        let outer = filter.input.bound_variables(None);
-        if !input_writes
-            && let Some((subquery, is_negated, remaining)) =
-                self.extract_complex_exists(&filter.predicate, outer.as_ref())
-        {
-            return self.plan_exists_as_semi_join(&filter.input, subquery, is_negated, remaining);
-        }
+        if crate::query::plan::has_subquery(&filter.predicate) {
+            let outer = filter.input.bound_variables(None);
+            if !input_writes
+                && let Some((subquery, is_negated, remaining)) =
+                    self.extract_complex_exists(&filter.predicate, outer.as_ref())
+            {
+                return self.plan_exists_as_semi_join(
+                    &filter.input,
+                    subquery,
+                    is_negated,
+                    remaining,
+                );
+            }
 
-        // EXISTS and COUNT subqueries the edge check cannot answer run per row
-        // of the input (see `subquery.rs`), and below a write all of them.
-        // With the variables the input's rows hold, a subquery that shares
-        // none of them is lifted too (counted once instead of per row).
-        let input_columns: Option<Vec<String>> = filter
-            .input
-            .bound_variables(None)
-            .map(|names| names.into_iter().collect());
-        if self.has_subquery_to_lift(&filter.predicate, input_columns.as_deref(), input_writes) {
-            return self.plan_filter_with_subqueries(filter);
+            // EXISTS and COUNT subqueries the edge check cannot answer run per
+            // row of the input (see `subquery.rs`), and below a write all of
+            // them. With the variables the input's rows hold, a subquery that
+            // shares none of them is lifted too (counted once instead of per
+            // row).
+            let input_columns: Option<Vec<String>> = outer.map(|names| names.into_iter().collect());
+            if self.has_subquery_to_lift(&filter.predicate, input_columns.as_deref(), input_writes)
+            {
+                return self.plan_filter_with_subqueries(filter);
+            }
         }
 
         // Check zone maps for simple property predicates before scanning
@@ -102,7 +110,7 @@ impl super::Planner {
         // Not below a mutation, nor after one (see `after_write`): zone maps
         // describe the store as it is before this query runs, not values the
         // query writes first.
-        if !filter.input.has_mutations()
+        if !input_writes
             && self.reads_the_store_as_planned()
             && let Some(false) = self.check_zone_map_for_predicate(&filter.predicate, &filter.input)
         {
@@ -286,6 +294,18 @@ impl super::Planner {
                 pending
                     || self.has_subquery_to_lift(conjunct, input_columns.as_deref(), input_writes)
             });
+        // The labels a conjunct with subqueries requires (`(n:A AND EXISTS
+        // {...}) OR (n:B AND ...)`) filter first too, so a scan of every node
+        // reads only those labels' nodes and the subqueries run for them
+        // alone; the check is implied, the rows are the same.
+        let mut plain = plain;
+        if !pending && let LogicalOperator::NodeScan(scan) = filter.input.as_ref() {
+            plain.extend(
+                with_subqueries.iter().filter_map(|conjunct| {
+                    super::scan::implied_label_check(conjunct, &scan.variable)
+                }),
+            );
+        }
         let (input_op, columns) = match join_conjuncts(plain) {
             Some(predicate) => self.plan_filter(&FilterOp {
                 predicate,
@@ -496,7 +516,7 @@ impl super::Planner {
     ) -> Result<(Box<dyn Operator>, Vec<String>)> {
         let input_writes = outer_input.has_mutations();
         let (left_op, left_columns) = self.plan_operator(outer_input)?;
-        let (right_op, right_columns) = self.plan_operator(subquery)?;
+        let (right_op, right_columns) = self.without_profiling(|| self.plan_operator(subquery))?;
 
         // Semi/anti join only outputs left (outer) columns
         let output_columns = left_columns.clone();
@@ -565,7 +585,7 @@ impl super::Planner {
         remaining_predicate: Option<LogicalExpression>,
         input_writes: bool,
     ) -> Result<(Box<dyn Operator>, Vec<String>)> {
-        let (right_op, right_columns) = self.plan_operator(subquery)?;
+        let (right_op, right_columns) = self.without_profiling(|| self.plan_operator(subquery))?;
 
         let output_columns = left_columns.to_vec();
 
@@ -745,15 +765,18 @@ impl super::Planner {
         &self,
         filter: &FilterOp,
     ) -> Result<Option<(Box<dyn Operator>, Vec<String>)>> {
-        // Only optimize if input is a simple NodeScan (not nested)
-        let (scan_variable, scan_label) = match filter.input.as_ref() {
-            LogicalOperator::NodeScan(scan)
-                if scan.input.is_none() && self.reads_the_store_as_planned() =>
-            {
-                (scan.variable.clone(), scan.label.clone())
-            }
-            _ => return Ok(None),
+        // A scan without input, directly below or below filters that check
+        // the scanned node alone (`MATCH (m {id: $id}) WHERE m:Post OR
+        // m:Comment`): the lookup takes their place, and the nodes it finds
+        // are checked against them too.
+        let Some(checked) = super::seek::checked_scan(filter) else {
+            return Ok(None);
         };
+        if checked.scan.input.is_some() || !self.reads_the_store_as_planned() {
+            return Ok(None);
+        }
+        let (scan_variable, scan_label) =
+            (checked.scan.variable.clone(), checked.scan.label.clone());
 
         // Extract property equality conditions from the predicate
         // Handles both simple (n.prop = val) and compound (n.a = 1 AND n.b = 2)
@@ -799,12 +822,28 @@ impl super::Planner {
 
         let columns = vec![scan_variable];
 
-        // Absorbed-scan PROFILE entry: see `record_absorbed_scan_entry`.
-        self.record_absorbed_scan_entry("NodeScan", &filter.input);
+        // Absorbed-scan PROFILE entries (see `record_absorbed_scan_entry`):
+        // the scan, then the checks, as the plan's tree lists them.
+        self.record_absorbed_scan_entry("NodeScan", checked.operator);
+        for (check, _) in &checked.checks {
+            self.record_absorbed_scan_entry("Filter", check);
+        }
 
-        // The index finds candidates: the whole predicate decides each, with
-        // the same `=` as a scan.
-        let found = self.found_nodes(matching_nodes, &columns, &filter.predicate)?;
+        // The index finds candidates: the checks and the whole predicate
+        // decide each, in the order the chain of filters runs them, with the
+        // same `=` as a scan.
+        let predicate = checked
+            .checks
+            .iter()
+            .map(|(_, check)| (*check).clone())
+            .chain(std::iter::once(filter.predicate.clone()))
+            .reduce(|left, right| LogicalExpression::Binary {
+                left: Box::new(left),
+                op: BinaryOp::And,
+                right: Box::new(right),
+            })
+            .expect("the filter's own predicate");
+        let found = self.found_nodes(matching_nodes, &columns, &predicate)?;
         Ok(Some((found, columns)))
     }
 
@@ -1442,13 +1481,13 @@ pub(crate) fn scan_hint(
 
 /// Extracted vector predicate from a filter expression.
 ///
-/// `remaining` carries the residual predicate that must run in a
-/// `FilterOperator` above the `VectorScanOperator`. It is required for
-/// strict operators (`>` / `<`): the scan compares inclusively
-/// (`>=` / `<=`) when applying `min_similarity` / `max_distance`, so without
-/// the residual the boundary row at exactly `threshold` leaks through.
-/// Construct via [`Self::inclusive`] or [`Self::strict`] to make that
-/// invariant explicit at every call site.
+/// `remaining` carries the predicate that runs in a `FilterOperator` above
+/// the `VectorScanOperator`: the comparison itself, which decides each row
+/// as the per-row path does. The scan's `min_similarity` and `max_distance`
+/// only narrow the candidates, by the index's own arithmetic (`1 - distance`
+/// is not the similarity bit for bit, so a row exactly at the threshold
+/// could fall on either side), with a margin that keeps every row the
+/// comparison keeps.
 #[cfg(feature = "vector-index")]
 pub(super) struct ExtractedVectorPredicate {
     pub(super) property: String,
@@ -1459,24 +1498,23 @@ pub(super) struct ExtractedVectorPredicate {
     pub(super) metric: super::VectorMetric,
     pub(super) min_similarity: Option<f32>,
     pub(super) max_distance: Option<f32>,
-    /// Residual predicate to apply above the scan. `Some` for strict
-    /// operators; `None` for inclusive operators (the scan's own
-    /// comparison is sufficient).
+    /// Predicate to apply above the scan: the comparison, and the
+    /// conditions the vector predicate was found next to.
     pub(super) remaining: Option<LogicalExpression>,
 }
 
 #[cfg(feature = "vector-index")]
 impl ExtractedVectorPredicate {
-    /// Builds a predicate for an inclusive operator (`>=` / `<=`). No
-    /// residual is needed because the scan's internal comparison uses the
-    /// same inclusive bound.
-    fn inclusive(
+    /// Builds the predicate of a comparison: `comparison` runs above the
+    /// scan and decides every row.
+    fn new(
         property: String,
         variable: String,
         query_vector: LogicalExpression,
         metric: super::VectorMetric,
         min_similarity: Option<f32>,
         max_distance: Option<f32>,
+        comparison: LogicalExpression,
     ) -> Self {
         Self {
             property,
@@ -1485,31 +1523,7 @@ impl ExtractedVectorPredicate {
             metric,
             min_similarity,
             max_distance,
-            remaining: None,
-        }
-    }
-
-    /// Builds a predicate for a strict operator (`>` / `<`). The caller
-    /// must supply the residual predicate; the planner threads it into a
-    /// `FilterOperator` above the `VectorScanOperator` so rows exactly at
-    /// the threshold are rejected.
-    fn strict(
-        property: String,
-        variable: String,
-        query_vector: LogicalExpression,
-        metric: super::VectorMetric,
-        min_similarity: Option<f32>,
-        max_distance: Option<f32>,
-        residual: LogicalExpression,
-    ) -> Self {
-        Self {
-            property,
-            variable,
-            query_vector,
-            metric,
-            min_similarity,
-            max_distance,
-            remaining: Some(residual),
+            remaining: Some(comparison),
         }
     }
 }
@@ -1686,23 +1700,13 @@ impl super::Planner {
             _ => return None,
         };
 
-        // Both strict (>, <) and inclusive (>=, <=) operators push down. The
-        // index-level threshold is applied inclusively (apply_filters uses
-        // >= / <=), so for strict operators we attach a residual filter that
-        // re-applies the strict comparison to exclude boundary rows (scores
-        // exactly at the threshold).
-        let (valid_op, is_strict) = if is_similarity {
-            match op {
-                BinaryOp::Gt => (true, true),
-                BinaryOp::Ge => (true, false),
-                _ => (false, false),
-            }
+        // Strict (>, <) and inclusive (>=, <=) comparisons push down; the
+        // comparison itself runs above the scan (see
+        // `ExtractedVectorPredicate`).
+        let valid_op = if is_similarity {
+            matches!(op, BinaryOp::Gt | BinaryOp::Ge)
         } else {
-            match op {
-                BinaryOp::Lt => (true, true),
-                BinaryOp::Le => (true, false),
-                _ => (false, false),
-            }
+            matches!(op, BinaryOp::Lt | BinaryOp::Le)
         };
         if !valid_op {
             return None;
@@ -1730,40 +1734,25 @@ impl super::Planner {
             (None, Some(threshold_val))
         };
 
-        // For strict ops, reconstruct the original predicate as the residual
-        // filter. The planner threads it into a FilterOperator above the
-        // VectorScan (see `plan_filter_with_vector_pushdown`) to strip
-        // boundary rows that the scan's inclusive comparison would let through.
-        if is_strict {
-            let residual = LogicalExpression::Binary {
-                left: Box::new(LogicalExpression::FunctionCall {
-                    callee,
-                    name: name.to_string(),
-                    args: args.to_vec(),
-                    distinct: false,
-                }),
-                op,
-                right: Box::new(threshold.clone()),
-            };
-            Some(ExtractedVectorPredicate::strict(
-                property,
-                variable,
-                query_vector,
-                metric,
-                min_similarity,
-                max_distance,
-                residual,
-            ))
-        } else {
-            Some(ExtractedVectorPredicate::inclusive(
-                property,
-                variable,
-                query_vector,
-                metric,
-                min_similarity,
-                max_distance,
-            ))
-        }
+        let comparison = LogicalExpression::Binary {
+            left: Box::new(LogicalExpression::FunctionCall {
+                callee,
+                name: name.to_string(),
+                args: args.to_vec(),
+                distinct: false,
+            }),
+            op,
+            right: Box::new(threshold.clone()),
+        };
+        Some(ExtractedVectorPredicate::new(
+            property,
+            variable,
+            query_vector,
+            metric,
+            min_similarity,
+            max_distance,
+            comparison,
+        ))
     }
 }
 

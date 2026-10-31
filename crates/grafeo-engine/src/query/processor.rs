@@ -305,11 +305,11 @@ impl QueryProcessor {
         if language.is_lpg() {
             self.process_lpg(query, language, params)
         } else {
-            #[cfg(feature = "triple-store")]
+            #[cfg(rdf_language)]
             {
                 self.process_rdf(query, language, params)
             }
-            #[cfg(not(feature = "triple-store"))]
+            #[cfg(not(rdf_language))]
             {
                 Err(grafeo_common::utils::error::Error::from(
                     grafeo_common::utils::error::QueryError::unsupported(
@@ -577,7 +577,11 @@ impl QueryProcessor {
     pub fn rdf_store(&self) -> Option<&Arc<grafeo_core::graph::rdf::RdfStore>> {
         self.rdf_store.as_ref()
     }
+}
 
+// The RDF query languages add the processing of their queries.
+#[cfg(rdf_language)]
+impl QueryProcessor {
     /// Processes an RDF query (SPARQL, GraphQL-RDF).
     fn process_rdf(
         &self,
@@ -603,10 +607,7 @@ impl QueryProcessor {
         let _binding_context = binder.bind(&logical_plan)?;
 
         // 3. Optimize the plan (use RDF statistics for cost-based optimization)
-        let rdf_optimizer = {
-            let stats = rdf_store.get_or_collect_statistics();
-            Optimizer::from_rdf_statistics((*stats).clone())
-        };
+        let rdf_optimizer = Optimizer::for_rdf_plan(rdf_store, &logical_plan);
         let optimized_plan = rdf_optimizer.optimize(logical_plan)?;
 
         // 3a. EXPLAIN: return the plan tree without executing.
@@ -683,6 +684,8 @@ impl QueryProcessor {
                 // Default namespace for GraphQL-RDF queries
                 graphql_rdf::translate(query, "http://example.org/")
             }
+            // Only a build with a property graph language has other ones.
+            #[cfg(lpg_language)]
             _ => Err(Error::Internal(format!(
                 "Language {:?} is not an RDF language",
                 language
@@ -701,13 +704,14 @@ impl QueryProcessor {
 /// the planner scans, below any operator, as the planner chooses it for every
 /// filter it plans (see
 /// [`with_smallest_scan_label`](crate::query::planner::lpg::scan::with_smallest_scan_label)).
-/// `op` is the statement's root: a statement that writes plans no hash join
-/// on values.
+/// `op` is the statement's root: a statement with a write that sees what
+/// its own earlier rows wrote plans no hash join on values (see
+/// [`writes_per_row`](crate::query::planner::lpg::value_join::writes_per_row)).
 pub(crate) fn annotate_pushdown_hints(
     op: &mut LogicalOperator,
     store: &dyn grafeo_core::graph::GraphStore,
 ) {
-    let writes = op.has_mutations();
+    let writes = crate::query::planner::lpg::value_join::writes_per_row(op);
     annotate_hints(op, store, writes, false);
 }
 
@@ -745,18 +749,54 @@ fn annotate_hints(
     }
     if let LogicalOperator::Filter(filter) = op {
         // The label the planner scans, chosen at the top of a chain of filters
-        if let Some(reordered) =
-            crate::query::planner::lpg::scan::with_smallest_scan_label(filter, store)
-        {
+        if let Some(reordered) = crate::query::planner::lpg::scan::with_scan_labels(filter, store) {
             *filter = reordered;
         }
         // Recurse into children first
         annotate_hints(&mut filter.input, store, writes, after_a_write);
+        // A subquery of the predicate is planned like any plan, with the
+        // labels it scans chosen the same way.
+        let _ = crate::query::planner::lpg::subquery::visit_subqueries(
+            &mut filter.predicate,
+            &mut |subquery| {
+                if let crate::query::plan::LogicalExpression::ExistsSubquery(plan)
+                | crate::query::plan::LogicalExpression::CountSubquery(plan)
+                | crate::query::plan::LogicalExpression::ValueSubquery(plan) = subquery
+                {
+                    annotate_hints(plan, store, writes, after_a_write);
+                }
+                Ok(())
+            },
+        );
 
         // A seek or a hash join replaces the scan below the filter
         let replaced = crate::query::planner::lpg::seek::checked_scan(filter).and_then(|below| {
             seek_hint(&filter.predicate, below.scan, store, after_a_write)
+                // Many rows against a small label join faster than they seek
+                // (see `beats_a_seek`), as the planner chooses.
+                .filter(|hint| {
+                    !matches!(hint, crate::query::plan::PushdownHint::IndexLookup { .. })
+                        || !crate::query::planner::lpg::value_join::beats_a_seek(
+                            filter, writes, store,
+                        )
+                })
                 .or_else(|| value_join_hint(filter, writes))
+                // The index lookup made while planning takes over checks of
+                // the scanned node between the filter and the scan too.
+                .or_else(|| {
+                    (!below.checks.is_empty() && below.scan.input.is_none() && !after_a_write)
+                        .then(|| {
+                            crate::query::planner::lpg::filter::scan_hint(
+                                &filter.predicate,
+                                below.scan,
+                                store,
+                            )
+                        })
+                        .flatten()
+                        .filter(|hint| {
+                            matches!(hint, crate::query::plan::PushdownHint::IndexLookup { .. })
+                        })
+                })
         });
         if let Some(hint) = replaced {
             // It takes over the checks between it and the scan: they run in
@@ -872,7 +912,7 @@ pub(crate) fn explain_result(plan: &LogicalPlan) -> QueryResult {
 
 /// Formats a physical EXPLAIN result showing both the logical plan and the
 /// physical operator names mapped to each logical operator.
-#[cfg(feature = "triple-store")]
+#[cfg(rdf_language)]
 pub(crate) fn physical_explain_result(
     plan: &LogicalPlan,
     entries: Vec<crate::query::profile::ProfileEntry>,
@@ -897,7 +937,7 @@ pub(crate) fn physical_explain_result(
 }
 
 /// Recursively formats a physical plan node showing operator name and label.
-#[cfg(feature = "triple-store")]
+#[cfg(rdf_language)]
 fn format_physical_node(out: &mut String, node: &crate::query::profile::ProfileNode, depth: usize) {
     use std::fmt::Write;
     let indent = "  ".repeat(depth);
@@ -915,7 +955,7 @@ fn format_physical_node(out: &mut String, node: &crate::query::profile::ProfileN
 /// # Errors
 ///
 /// As [`substitute_params`].
-#[cfg(feature = "triple-store")]
+#[cfg(rdf_language)]
 pub(crate) fn substitute_with_defaults(
     plan: &mut LogicalPlan,
     params: Option<&QueryParams>,
@@ -936,12 +976,60 @@ pub(crate) fn substitute_with_defaults(
     substitute_params(plan, &merged)
 }
 
+/// `params`, or an error when a value nests lists, maps and paths deeper
+/// than a stored value may: a query would clone, compare and drop it with a
+/// call per level, and a deep enough one overflows the stack. The refused
+/// parameters are dropped without recursion
+/// ([`Value::drop_without_recursion`]), as their drop alone would overflow
+/// it too.
+///
+/// # Errors
+///
+/// An invalid-value error naming the parameter.
+#[cfg(any(
+    feature = "gql",
+    feature = "cypher",
+    feature = "gremlin",
+    feature = "graphql",
+    feature = "sql-pgq"
+))]
+pub(crate) fn refuse_deep_params(
+    params: std::collections::HashMap<String, Value>,
+) -> Result<std::collections::HashMap<String, Value>> {
+    let Some(name) = params
+        .iter()
+        .find(|(_, value)| grafeo_common::storage::value_codec::nests_too_deep(value))
+        .map(|(name, _)| name.clone())
+    else {
+        return Ok(params);
+    };
+    for value in params.into_values() {
+        value.drop_without_recursion();
+    }
+    Err(Error::InvalidValue(format!(
+        "parameter ${name}: the value nests lists, maps and paths more than {} levels deep",
+        grafeo_common::storage::MAX_PROPERTY_VALUE_DEPTH
+    )))
+}
+
 /// Substitutes parameters in a logical plan with their values.
 ///
 /// # Errors
 ///
 /// Returns an error if a referenced parameter is not found in `params`.
 pub fn substitute_params(plan: &mut LogicalPlan, params: &QueryParams) -> Result<()> {
+    // A value nested deeper than a stored one is refused before a query
+    // clones, compares or drops it, which recurse once per level: a deep
+    // enough one would overflow the stack (and trap a WASM module).
+    if let Some((name, _)) = params
+        .iter()
+        .find(|(_, value)| grafeo_common::storage::value_codec::nests_too_deep(value))
+    {
+        return Err(Error::InvalidValue(format!(
+            "parameter ${name}: the value nests lists, maps and paths more than {} levels deep",
+            grafeo_common::storage::MAX_PROPERTY_VALUE_DEPTH
+        )));
+    }
     substitute_in_operator(&mut plan.root, params)
 }
 
@@ -1083,11 +1171,15 @@ fn substitute_in_operator(op: &mut LogicalOperator, params: &QueryParams) -> Res
             substitute_in_operator(&mut anti.left, params)?;
             substitute_in_operator(&mut anti.right, params)?;
         }
+        LogicalOperator::MarkJoin(mark) => {
+            substitute_in_operator(&mut mark.left, params)?;
+            substitute_in_operator(&mut mark.right, params)?;
+        }
         LogicalOperator::Bind(bind) => {
             substitute_in_expression(&mut bind.expression, params)?;
             substitute_in_operator(&mut bind.input, params)?;
         }
-        LogicalOperator::PropertyPath(_) => {}
+        LogicalOperator::PropertyPath(_) | LogicalOperator::NamedGraphs(_) => {}
         LogicalOperator::TripleScan(scan) => {
             if let Some(input) = &mut scan.input {
                 substitute_in_operator(input, params)?;
@@ -1190,8 +1282,8 @@ fn substitute_in_operator(op: &mut LogicalOperator, params: &QueryParams) -> Res
             substitute_in_operator(&mut apply.input, params)?;
             substitute_in_operator(&mut apply.subplan, params)?;
         }
-        // ParameterScan has no expressions to substitute
-        LogicalOperator::ParameterScan(_) => {}
+        // ParameterScan and DelimScan have no expressions to substitute
+        LogicalOperator::ParameterScan(_) | LogicalOperator::DelimScan(_) => {}
         LogicalOperator::MultiWayJoin(mwj) => {
             for input in &mut mwj.inputs {
                 substitute_in_operator(input, params)?;

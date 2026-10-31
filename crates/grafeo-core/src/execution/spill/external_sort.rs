@@ -7,8 +7,8 @@
 use super::file::{SpillFile, SpillFileReader};
 use super::manager::SpillManager;
 use super::serializer::{deserialize_row, serialize_row};
-use crate::execution::operators::value_utils::order_by;
-use grafeo_common::types::Value;
+use crate::execution::operators::value_utils::order_by_under;
+use grafeo_common::types::{TemporalComparison, Value};
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 use std::sync::Arc;
@@ -80,6 +80,10 @@ pub struct ExternalSort {
     num_columns: usize,
     /// Sort keys.
     sort_keys: Vec<SortKey>,
+    /// How the sort keys read a local datetime against a zoned one (see
+    /// [`TemporalComparison::normalize`]); `TypesApart` reads every value
+    /// as itself.
+    temporal: TemporalComparison,
 }
 
 impl ExternalSort {
@@ -92,7 +96,16 @@ impl ExternalSort {
             run_row_counts: Vec::new(),
             num_columns,
             sort_keys,
+            temporal: TemporalComparison::TypesApart,
         }
+    }
+
+    /// The sort with `temporal` as the reading of its sort keys (the
+    /// statement's `<`). The rows keep their values.
+    #[must_use]
+    pub fn with_temporal(mut self, temporal: TemporalComparison) -> Self {
+        self.temporal = temporal;
+        self
     }
 
     /// Returns the number of runs on disk.
@@ -163,7 +176,8 @@ impl ExternalSort {
         if num_runs == 0 {
             let mut sorted_buffer = in_memory_buffer;
             let keys = self.sort_keys.clone();
-            sorted_buffer.sort_by(|a, b| compare_rows(a, b, &keys));
+            let temporal = self.temporal;
+            sorted_buffer.sort_by(|a, b| compare_rows(a, b, &keys, temporal));
             return Ok(sorted_buffer);
         }
 
@@ -205,7 +219,8 @@ impl ExternalSort {
         // Sort the in-memory buffer first
         if !in_memory_buffer.is_empty() {
             let keys = self.sort_keys.clone();
-            in_memory_buffer.sort_by(|a, b| compare_rows(a, b, &keys));
+            let temporal = self.temporal;
+            in_memory_buffer.sort_by(|a, b| compare_rows(a, b, &keys, temporal));
         }
 
         // Create readers for all runs
@@ -243,6 +258,7 @@ impl ExternalSort {
                     row: row.clone(),
                     run_index: run_reader.run_index,
                     sort_keys: self.sort_keys.clone(),
+                    temporal: self.temporal,
                 });
             }
         }
@@ -253,6 +269,7 @@ impl ExternalSort {
                 row: row.clone(),
                 run_index: memory_run_index,
                 sort_keys: self.sort_keys.clone(),
+                temporal: self.temporal,
             });
         }
 
@@ -268,6 +285,7 @@ impl ExternalSort {
                         row: row.clone(),
                         run_index: memory_run_index,
                         sort_keys: self.sort_keys.clone(),
+                        temporal: self.temporal,
                     });
                 }
             } else {
@@ -278,6 +296,7 @@ impl ExternalSort {
                         row: next_row,
                         run_index: entry.run_index,
                         sort_keys: self.sort_keys.clone(),
+                        temporal: self.temporal,
                     });
                 }
             }
@@ -334,6 +353,8 @@ struct HeapEntry {
     row: Vec<Value>,
     run_index: usize,
     sort_keys: Vec<SortKey>,
+    /// The reading of the sort keys, the sort's own.
+    temporal: TemporalComparison,
 }
 
 impl Eq for HeapEntry {}
@@ -347,7 +368,7 @@ impl PartialEq for HeapEntry {
 impl Ord for HeapEntry {
     fn cmp(&self, other: &Self) -> Ordering {
         // Reverse comparison because BinaryHeap is a max-heap but we want min
-        compare_rows(&other.row, &self.row, &self.sort_keys)
+        compare_rows(&other.row, &self.row, &self.sort_keys, self.temporal)
     }
 }
 
@@ -357,14 +378,21 @@ impl PartialOrd for HeapEntry {
     }
 }
 
-/// Compares two rows by sort keys.
-fn compare_rows(a: &[Value], b: &[Value], keys: &[SortKey]) -> Ordering {
+/// Compares two rows by sort keys, their values read as `temporal` reads
+/// them.
+fn compare_rows(
+    a: &[Value],
+    b: &[Value],
+    keys: &[SortKey],
+    temporal: TemporalComparison,
+) -> Ordering {
     for key in keys {
-        let ordering = order_by(
+        let ordering = order_by_under(
             a.get(key.column),
             b.get(key.column),
             key.direction == SortDirection::Descending,
             key.null_order == NullOrder::First,
+            temporal,
         );
         if ordering != Ordering::Equal {
             return ordering;

@@ -200,6 +200,50 @@ fn sorted_counts<S: serde::Serializer>(
 }
 
 impl Value {
+    /// Drops the value without recursion: the drop of a list, map or path
+    /// drops each value it holds, one call deeper per level, so a value
+    /// nested deep enough would overflow the stack (100,000 levels do). Each
+    /// list, map or path this is the only owner of gives its values to a
+    /// stack on the heap first, so every drop is shallow; one shared with
+    /// another owner only loses a reference. For a value that may be nested
+    /// deeper than [`MAX_PROPERTY_VALUE_DEPTH`](crate::storage::MAX_PROPERTY_VALUE_DEPTH),
+    /// such as a parameter a query refuses.
+    pub fn drop_without_recursion(self) {
+        let mut pending = vec![self];
+        while let Some(mut value) = pending.pop() {
+            match &mut value {
+                Value::List(items) => {
+                    if let Some(items) = Arc::get_mut(items) {
+                        pending.extend(
+                            items
+                                .iter_mut()
+                                .map(|item| std::mem::replace(item, Value::Null)),
+                        );
+                    }
+                }
+                Value::Map(map) => {
+                    if let Some(map) = Arc::get_mut(map) {
+                        pending.extend(std::mem::take(map).into_values());
+                    }
+                }
+                Value::Path { nodes, edges } => {
+                    for items in [nodes, edges] {
+                        if let Some(items) = Arc::get_mut(items) {
+                            pending.extend(
+                                items
+                                    .iter_mut()
+                                    .map(|item| std::mem::replace(item, Value::Null)),
+                            );
+                        }
+                    }
+                }
+                _ => {}
+            }
+            // Shallow now: what it held is on the stack.
+            drop(value);
+        }
+    }
+
     /// Returns `true` if this value is null.
     #[inline]
     #[must_use]

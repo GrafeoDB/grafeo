@@ -86,7 +86,8 @@ Comparing the ISO standard GQL with W3C standard SPARQL.
 
     ```sparql
     PREFIX : <http://example.org/>
-    SELECT ?path
+    # A property path gives the nodes it reaches, not the path itself
+    SELECT ?b
     WHERE {
         :Alix :knows+ ?b .
         ?b a :Person .
@@ -145,15 +146,21 @@ GQL uses ASCII-art patterns that visually represent the graph:
 
 ```sql
 -- GQL: Visual pattern
-(a)-[:KNOWS]->(b)-[:WORKS_AT]->(c)
+MATCH (a)-[:KNOWS]->(b)-[:WORKS_AT]->(c)
+RETURN a, c
 ```
 
 SPARQL uses triple patterns:
 
 ```sparql
--- SPARQL: Triple patterns
-?a :knows ?b .
-?b :worksAt ?c .
+PREFIX : <http://example.org/>
+
+# SPARQL: Triple patterns
+SELECT ?a ?c
+WHERE {
+    ?a :knows ?b .
+    ?b :worksAt ?c .
+}
 ```
 
 ### 2. Properties on Relationships
@@ -166,13 +173,24 @@ MATCH (a)-[r:KNOWS {since: 2020}]->(b)
 RETURN r.strength
 ```
 
-SPARQL requires reification:
+SPARQL 1.1 needs reification: the relationship becomes a node of its own:
 
 ```sparql
--- SPARQL (RDF-star)
-<< ?a :knows ?b >> :since 2020 ;
-                   :strength ?strength .
+PREFIX : <http://example.org/>
+
+# SPARQL: a reified relationship
+SELECT ?strength
+WHERE {
+    ?k a :Knows ;
+       :from ?a ;
+       :to ?b ;
+       :since 2020 ;
+       :strength ?strength .
+}
 ```
+
+Quoted triples (`<< ?a :knows ?b >> :since 2020`, RDF-star) come with SPARQL 1.2 support; until then a query that
+uses them fails with a syntax error.
 
 ### 3. Schema
 

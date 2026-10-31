@@ -47,7 +47,22 @@ pub(crate) enum Applying<'a> {
     /// entry there (or gone, for a drop) changes nothing. The vector and
     /// text indexes it puts are kept in `unbuilt`, built from the data once
     /// the whole WAL is replayed. A snapshot's catalog applies the same way.
+    #[cfg_attr(
+        not(feature = "wal"),
+        expect(
+            dead_code,
+            reason = "only a WAL is replayed, and a build without it has none"
+        )
+    )]
     Replay {
+        /// The indexes left to build once the database is built.
+        unbuilt: &'a mut Vec<GraphIndexes>,
+    },
+    /// The catalog of a snapshot, one whole set applied to an empty catalog
+    /// (an import, a restore): no record repeats or misses another, so one
+    /// that does not apply is damage, as for a live op. Its vector and text
+    /// indexes are kept in `unbuilt`, as on replay.
+    Snapshot {
         /// The indexes left to build once the database is built.
         unbuilt: &'a mut Vec<GraphIndexes>,
     },
@@ -78,6 +93,8 @@ impl Applying<'_> {
                 error,
                 CatalogError::TypeAlreadyExists(_)
                     | CatalogError::TypeNotFound(_)
+                    | CatalogError::ProcedureAlreadyExists(_)
+                    | CatalogError::ProcedureNotFound(_)
                     | CatalogError::SchemaAlreadyExists(_)
                     | CatalogError::SchemaNotFound(_)
                     | CatalogError::ConstraintAlreadyExists
@@ -85,15 +102,24 @@ impl Applying<'_> {
             )
     }
 
-    /// Fails a live op that found nothing to change (`what` says what it
-    /// missed); replay goes on.
+    /// Fails a live op or a snapshot's that found nothing to change (`what`
+    /// says what it missed); replay goes on.
     fn missing(&self, op: &StandaloneOp, what: &str) -> Result<()> {
         match self {
-            Self::Live => Err(not_applied(op, what)),
+            Self::Live | Self::Snapshot { .. } => Err(not_applied(op, what)),
             Self::Replay { .. } => {
                 grafeo_common::grafeo_debug!("WAL replay skipped {}: {what}", describe(op));
                 Ok(())
             }
+        }
+    }
+
+    /// The indexes left to build once the database is built: none live,
+    /// where every index is built as it is put.
+    fn unbuilt(&mut self) -> Option<&mut Vec<GraphIndexes>> {
+        match self {
+            Self::Live => None,
+            Self::Replay { unbuilt } | Self::Snapshot { unbuilt } => Some(unbuilt),
         }
     }
 }
@@ -258,7 +284,7 @@ fn built_in<'s, S: RootStore>(store: Option<&'s Arc<S>>, op: &StandaloneOp) -> R
 ///
 /// As [`commit`]; a copied entity that does not apply poisons the database
 /// (the graph is new and empty, so it cannot conflict).
-#[cfg(query_language)]
+#[cfg(feature = "gql")]
 pub(crate) fn commit_copy<S: RootStore>(
     change: StandaloneChange,
     _held: &CommitsHeld<'_>,
@@ -304,7 +330,7 @@ pub(crate) fn commit_copy<S: RootStore>(
 ///
 /// As [`log`].
 #[cfg(feature = "wal")]
-#[cfg(query_language)]
+#[cfg(feature = "gql")]
 fn log_copy<S: RootStore>(
     wal: &grafeo_storage::wal::Wal,
     change: &StandaloneChange,
@@ -407,10 +433,12 @@ pub(crate) fn apply<S: RootStore>(
             }
         }
         StandaloneOp::DropGraph { name } => {
-            if let Applying::Replay { unbuilt } = applying {
+            if let Some(unbuilt) = applying.unbuilt() {
                 unbuilt.retain(|graph| graph.graph.as_deref() != Some(name.as_str()));
             }
             if built_in(store, op)?.drop_graph(name) {
+                // The graph's type goes with it.
+                catalog.unbind_graph(name);
                 Ok(())
             } else {
                 applying.missing(op, "the graph does not exist")
@@ -507,7 +535,7 @@ fn put<S: RootStore>(
             applying.catalog(op, outcome)
         }
         CatalogRecord::NodeType(record) => {
-            catalog.register_or_replace_node_type(node_type_definition(record.clone()));
+            catalog.register_or_replace_node_type(node_type_definition(record.clone())?);
             Ok(())
         }
         CatalogRecord::EdgeType(record) => {
@@ -606,7 +634,7 @@ fn put_index<S: RootStore>(
         return Ok(());
     }
     match (applying, built) {
-        (Applying::Replay { unbuilt }, _) => {
+        (Applying::Replay { unbuilt } | Applying::Snapshot { unbuilt }, _) => {
             let key = index_key(&record.index);
             remove_index(&*target, &key);
             forget_unbuilt(unbuilt, record.graph.as_deref(), &key);
@@ -763,7 +791,7 @@ fn drop_entry<S: RootStore>(
             applying.catalog(op, outcome)
         }
         CatalogKey::Index { graph, index } => {
-            if let Applying::Replay { unbuilt } = applying {
+            if let Some(unbuilt) = applying.unbuilt() {
                 forget_unbuilt(unbuilt, graph.as_deref(), index);
             }
             match graph_store(built_in(store, op)?, graph.as_deref()) {
@@ -772,12 +800,11 @@ fn drop_entry<S: RootStore>(
                 None => applying.missing(op, "the graph does not exist"),
             }
         }
-        CatalogKey::IndexName(name) => match catalog.find_index_by_name(name) {
-            Some(id) => {
-                catalog.drop_index(id);
-                Ok(())
-            }
-            None => applying.missing(op, "there is no index of that name"),
+        // Every property of the name: an index over several has one
+        // definition per property.
+        CatalogKey::IndexName(name) => match catalog.drop_indexes_named(name) {
+            0 => applying.missing(op, "there is no index of that name"),
+            _ => Ok(()),
         },
         // No statement drops a binding on its own: dropping a graph leaves
         // its binding, which binds nothing until a graph of its name exists.

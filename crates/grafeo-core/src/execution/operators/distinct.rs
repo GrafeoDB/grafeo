@@ -3,6 +3,7 @@
 //! This module provides:
 //! - `DistinctOperator`: Removes duplicate rows based on all or specified columns
 
+use grafeo_common::types::TemporalComparison;
 use grafeo_common::utils::hash::FxHashSet as HashSet;
 
 use grafeo_common::types::Value;
@@ -22,6 +23,10 @@ pub struct DistinctOperator {
     distinct_columns: Option<Vec<usize>>,
     /// Set of seen row keys.
     seen: HashSet<RowKey>,
+    /// How the keys read a local datetime against a zoned one (see
+    /// [`TemporalComparison::normalize`]); `TypesApart` reads every value
+    /// as itself.
+    temporal: TemporalComparison,
 }
 
 impl DistinctOperator {
@@ -31,7 +36,22 @@ impl DistinctOperator {
             child,
             distinct_columns: None,
             seen: HashSet::default(),
+            temporal: TemporalComparison::TypesApart,
         }
+    }
+
+    /// The operator with `temporal` as the reading of its keys (the
+    /// statement's `=`).
+    #[must_use]
+    pub fn with_temporal(mut self, temporal: TemporalComparison) -> Self {
+        self.temporal = temporal;
+        self
+    }
+
+    /// How the keys read temporal values (see [`Self::with_temporal`]).
+    #[must_use]
+    pub fn temporal(&self) -> TemporalComparison {
+        self.temporal
     }
 
     /// Decomposes this operator for push-based conversion.
@@ -45,6 +65,7 @@ impl DistinctOperator {
             child,
             distinct_columns: Some(columns),
             seen: HashSet::default(),
+            temporal: TemporalComparison::TypesApart,
         }
     }
 }
@@ -52,6 +73,7 @@ impl DistinctOperator {
 impl Operator for DistinctOperator {
     fn next(&mut self) -> OperatorResult {
         loop {
+            crate::execution::deadline::check()?;
             let Some(chunk) = self.child.next()? else {
                 return Ok(None);
             };
@@ -62,8 +84,8 @@ impl Operator for DistinctOperator {
                 // Rows whose values are the same values (`3` and `3.0`, two
                 // NaN, paths with the same nodes and edges) are duplicates.
                 let key = match &self.distinct_columns {
-                    Some(cols) => RowKey::from_row(&chunk, row, cols),
-                    None => RowKey::from_all_columns(&chunk, row),
+                    Some(cols) => RowKey::from_row(&chunk, row, cols, self.temporal),
+                    None => RowKey::from_all_columns(&chunk, row, self.temporal),
                 };
 
                 if self.seen.insert(key) {

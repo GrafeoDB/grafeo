@@ -44,7 +44,12 @@ impl super::Planner {
 
         // Apply DISTINCT if requested
         if ret.distinct {
-            Ok(common::build_distinct(operator, columns, None))
+            Ok(common::build_distinct(
+                operator,
+                columns,
+                None,
+                self.session_context.temporal_comparison,
+            ))
         } else {
             Ok((operator, columns))
         }
@@ -617,7 +622,7 @@ impl super::Planner {
                 // pattern (see `translators::common::whole_path`).
                 (BuiltinFunction::Path, [_, _]) => Some(EntityValue::Nested(LogicalType::Path)),
                 (BuiltinFunction::Reverse, [inner]) => self.entity_value(inner)?.reversed(),
-                (BuiltinFunction::Tail, [inner]) => self.entity_value(inner)?.slice(1, None),
+                (BuiltinFunction::Tail, [inner]) => self.entity_value(inner)?.slice(Some(1), None),
                 (BuiltinFunction::Head, [inner]) => self.entity_value(inner)?.item_at(0),
                 (BuiltinFunction::Last, [inner]) => self.entity_value(inner)?.item_at(-1),
                 _ => None,
@@ -635,15 +640,13 @@ impl super::Planner {
                 // leaves out (`Some(None)`); `None` when it is not known
                 // before the query runs.
                 let bound = |bound: &Option<Box<LogicalExpression>>| match bound.as_deref() {
-                    Some(LogicalExpression::Literal(Value::Int64(i))) => {
-                        usize::try_from(*i).ok().map(Some)
-                    }
+                    Some(LogicalExpression::Literal(Value::Int64(i))) => Some(Some(*i)),
                     None => Some(None),
                     _ => None,
                 };
                 let base = self.entity_value(base)?;
                 match (bound(start), bound(end)) {
-                    (Some(start), Some(end)) => base.slice(start.unwrap_or(0), end),
+                    (Some(start), Some(end)) => base.slice(start, end),
                     // Bounds known only when the query runs: the items'
                     // common kind, if they share one.
                     _ => base.item().map(|item| item.list()),
@@ -1071,7 +1074,8 @@ impl super::Planner {
             })
             .collect::<Result<Vec<_>>>()?;
 
-        let mut sort = SortOperator::new(input_op, physical_keys);
+        let mut sort = SortOperator::new(input_op, physical_keys)
+            .with_temporal(self.session_context.temporal_comparison);
 
         // The sort drops the columns added for ORDER BY, which come last: the
         // pre-Return projections (sort_extra_count) and every projection added
@@ -1340,10 +1344,15 @@ impl super::Planner {
 
     /// Checks if a logical expression matches a projected score column.
     ///
-    /// When `VectorScan` or `TextScan` already computed a score and projected it
-    /// as `_vscore_{var}` / `_tscore_{var}`, downstream expressions that call the
-    /// same function can reference the projected column instead of recomputing the
-    /// distance or BM25 score.
+    /// When `TextScan` already computed a BM25 score and projected it as
+    /// `_tscore_{var}`, a `text_score` call with the same arguments can
+    /// reference the projected column instead of recomputing the score.
+    ///
+    /// A vector function never reuses the `VectorScan`'s column: it holds the
+    /// index's distance (for cosine `1 - similarity`, for a dot product its
+    /// negation), not the function's value, so `RETURN` and `ORDER BY` of
+    /// `cosine_similarity(...)` evaluate the function per row, as without an
+    /// index, and give the same values and order on every path.
     ///
     /// Returns the column name to reference, or `None` if no reuse is possible.
     pub(super) fn find_projected_score(
@@ -1351,84 +1360,29 @@ impl super::Planner {
         expr: &LogicalExpression,
         columns: &[String],
     ) -> Option<String> {
-        #[cfg(not(any(feature = "vector-index", feature = "text-index")))]
+        #[cfg(not(feature = "text-index"))]
         {
             let _ = (expr, columns);
             None
         }
 
-        #[cfg(any(feature = "vector-index", feature = "text-index"))]
+        #[cfg(feature = "text-index")]
         {
             let LogicalExpression::FunctionCall {
-                callee: Callee::Builtin(function),
+                callee: Callee::Builtin(BuiltinFunction::TextScore),
                 args,
                 ..
             } = expr
             else {
                 return None;
             };
-
-            #[cfg(feature = "vector-index")]
-            let is_vector_fn = matches!(
-                function,
-                BuiltinFunction::CosineSimilarity
-                    | BuiltinFunction::EuclideanDistance
-                    | BuiltinFunction::DotProduct
-                    | BuiltinFunction::ManhattanDistance
-            );
-            #[cfg(not(feature = "vector-index"))]
-            let is_vector_fn = false;
-
-            #[cfg(feature = "text-index")]
-            let is_text_fn = *function == BuiltinFunction::TextScore;
-            #[cfg(not(feature = "text-index"))]
-            let is_text_fn = false;
-
-            if !(is_vector_fn || is_text_fn) {
+            let ([LogicalExpression::Property { variable, property }, query]
+            | [query, LogicalExpression::Property { variable, property }]) = args.as_slice()
+            else {
                 return None;
-            }
-
-            // Either arg may hold the property access (the producer
-            // `try_vector_topk` accepts both orderings). Identify the
-            // property and treat the *other* arg as the query expression,
-            // which is embedded in the column name so different queries
-            // against the same property never reuse each other's score.
-            if args.len() != 2 {
-                return None;
-            }
-            let (variable, property, query) = match (&args[0], &args[1]) {
-                (LogicalExpression::Property { variable, property }, query) => {
-                    (variable, property, query)
-                }
-                (query, LogicalExpression::Property { variable, property }) => {
-                    (variable, property, query)
-                }
-                _ => return None,
             };
-
-            #[cfg(feature = "vector-index")]
-            if is_vector_fn {
-                let metric_tag = match function {
-                    BuiltinFunction::EuclideanDistance => "euc",
-                    BuiltinFunction::DotProduct => "dot",
-                    BuiltinFunction::ManhattanDistance => "man",
-                    _ => "cos",
-                };
-                let score_col = vector_score_column_name(metric_tag, property, variable, query);
-                if columns.contains(&score_col) {
-                    return Some(score_col);
-                }
-            }
-
-            #[cfg(feature = "text-index")]
-            if is_text_fn {
-                let score_col = text_score_column_name(variable, property, query);
-                if columns.contains(&score_col) {
-                    return Some(score_col);
-                }
-            }
-
-            None
+            let score_col = text_score_column_name(variable, property, query);
+            columns.contains(&score_col).then_some(score_col)
         }
     }
 
@@ -1515,11 +1469,10 @@ impl super::Planner {
             physical_keys = resolve_logical_to_physical_keys(&sort.keys, &actual_columns)?;
         }
 
-        let op: Box<dyn Operator> = Box::new(grafeo_core::execution::operators::TopKOperator::new(
-            input_op,
-            physical_keys,
-            k,
-        ));
+        let op: Box<dyn Operator> = Box::new(
+            grafeo_core::execution::operators::TopKOperator::new(input_op, physical_keys, k)
+                .with_temporal(self.session_context.temporal_comparison),
+        );
         Ok(Some((op, columns)))
     }
 }
@@ -1870,15 +1823,19 @@ mod tests {
     use crate::query::plan::Callee;
     use grafeo_core::graph::rowgroup::RowGroupStore;
 
-    /// The top-k rewrite takes a vector function in any spelling (it matches
-    /// the resolved function), so the score column it projects must be found
-    /// in any spelling too, or the score is computed a second time per row.
-    #[test]
-    fn a_projected_score_is_found_in_any_spelling() {
-        let planner = Planner::new(
+    fn planner() -> Planner {
+        Planner::new(
             Arc::new(RowGroupStore::new()) as Arc<dyn GraphStore>,
             grafeo_common::types::EpochId::LATEST,
-        );
+        )
+    }
+
+    /// A vector function never reuses the `VectorScan`'s score column, in
+    /// any spelling: the column holds the index's distance (1 - similarity
+    /// for cosine, the negated dot product), not the function's value.
+    #[test]
+    fn a_vector_function_never_reuses_the_scan_column() {
+        let planner = planner();
         let query = LogicalExpression::List(vec![
             LogicalExpression::Literal(Value::Float64(1.0)),
             LogicalExpression::Literal(Value::Float64(0.0)),
@@ -1905,9 +1862,39 @@ mod tests {
             let column = super::vector_score_column_name(tag, "embedding", "d", &query);
             assert_eq!(
                 planner.find_projected_score(&call, std::slice::from_ref(&column)),
-                Some(column),
+                None,
                 "{spelling}"
             );
+        }
+    }
+
+    /// `text_score` still reuses the column the text scan projects, with its
+    /// arguments in either order, and only when the column is there.
+    #[cfg(feature = "text-index")]
+    #[test]
+    fn a_text_score_reuses_its_projected_column() {
+        let planner = planner();
+        let query = LogicalExpression::Literal(Value::from("canals"));
+        let property = LogicalExpression::Property {
+            variable: "d".to_string(),
+            property: "body".to_string(),
+        };
+        let column = super::text_score_column_name("d", "body", &query);
+        for args in [
+            vec![property.clone(), query.clone()],
+            vec![query.clone(), property.clone()],
+        ] {
+            let call = LogicalExpression::FunctionCall {
+                callee: Callee::named("text_score"),
+                name: "text_score".to_string(),
+                args,
+                distinct: false,
+            };
+            assert_eq!(
+                planner.find_projected_score(&call, std::slice::from_ref(&column)),
+                Some(column.clone())
+            );
+            assert_eq!(planner.find_projected_score(&call, &[]), None);
         }
     }
 }

@@ -3,8 +3,9 @@
 # CAST(x AS type) takes the SQL type names: BIGINT, INT and INTEGER, VARCHAR(n),
 # BOOLEAN and BOOL, FLOAT and REAL, DOUBLE PRECISION, DECIMAL, DEC and
 # NUMERIC (with a precision and scale), DATE, TIME and TIMESTAMP. A value
-# that does not convert is null, as in GQL's CAST; a type name SQL/PGQ does
-# not know is a syntax error.
+# that does not convert is null, as in GQL's CAST, except text that spells no
+# number (22018) and a float outside the integer range (22003); a type name
+# SQL/PGQ does not know is a syntax error.
 
 meta:
   language: sql-pgq
@@ -29,15 +30,76 @@ tests:
       rows:
         - [9000000000, 42, 30]
 
-  - name: an_integer_cast_of_text_that_is_no_number_is_null
+  - name: an_integer_cast_of_spaced_or_decimal_text_trims_and_truncates
     query: |
       SELECT * FROM GRAPH_TABLE (
         MATCH (n:Person {name: 'Alix'})
-        COLUMNS (CAST('Alix' AS INTEGER) AS i, CAST(n.name AS BIGINT) AS b)
+        COLUMNS (CAST(' 42 ' AS INTEGER) AS i, CAST('4.2' AS BIGINT) AS b, CAST('-4.7' AS INT) AS c)
       )
     expect:
       rows:
-        - [null, null]
+        - [42, 4, -4]
+
+  # Text that spells no number fails with 22018, as SQL and GQL's CAST.
+  - name: an_integer_cast_of_text_that_is_no_number_fails
+    query: |
+      SELECT * FROM GRAPH_TABLE (
+        MATCH (n:Person {name: 'Alix'})
+        COLUMNS (CAST('Alix' AS INTEGER) AS i)
+      )
+    expect:
+      error: ""
+      gql_status: "22018"
+
+  - name: an_integer_cast_of_a_name_property_fails
+    query: |
+      SELECT * FROM GRAPH_TABLE (
+        MATCH (n:Person {name: 'Alix'})
+        COLUMNS (CAST(n.name AS BIGINT) AS b)
+      )
+    expect:
+      error: ""
+      gql_status: "22018"
+
+  - name: a_decimal_cast_of_text_reads_it_as_a_number
+    query: |
+      SELECT * FROM GRAPH_TABLE (
+        MATCH (n:Person {name: 'Alix'})
+        COLUMNS (CAST(' 1e3 ' AS DECIMAL) AS a, CAST('-2.50' AS NUMERIC) AS b)
+      )
+    expect:
+      rows:
+        - [1000, -2.50]
+
+  - name: a_decimal_cast_of_text_that_is_no_number_fails
+    query: |
+      SELECT * FROM GRAPH_TABLE (
+        MATCH (n:Person {name: 'Alix'})
+        COLUMNS (CAST(n.name AS DECIMAL) AS d)
+      )
+    expect:
+      error: ""
+      gql_status: "22018"
+
+  - name: a_decimal_cast_of_text_past_38_digits_fails
+    query: |
+      SELECT * FROM GRAPH_TABLE (
+        MATCH (n:Person {name: 'Alix'})
+        COLUMNS (CAST('123456789012345678901234567890123456789' AS DECIMAL) AS d)
+      )
+    expect:
+      error: ""
+      gql_status: "22003"
+
+  - name: an_integer_cast_of_a_float_out_of_range_fails
+    query: |
+      SELECT * FROM GRAPH_TABLE (
+        MATCH (n:Person {name: 'Alix'})
+        COLUMNS (CAST(1.0e19 AS BIGINT) AS b)
+      )
+    expect:
+      error: ""
+      gql_status: "22003"
 
   # ---------------------------------------------------------------------------
   # Floats and booleans
@@ -77,15 +139,37 @@ tests:
       rows:
         - [2.35]
 
-  - name: a_decimal_with_too_many_integer_digits_is_null
+  # A value that does not fit the declared precision fails with 22003, as SQL.
+  - name: a_decimal_with_too_many_integer_digits_fails
     query: |
       SELECT * FROM GRAPH_TABLE (
         MATCH (n:Person {name: 'Alix'})
-        COLUMNS (CAST(12345.6 AS DECIMAL(6, 2)) AS d, CAST(1234.5 AS DECIMAL(6, 2)) AS fits)
+        COLUMNS (CAST(12345.6 AS DECIMAL(6, 2)) AS d)
+      )
+    expect:
+      error: ""
+      gql_status: "22003"
+
+  - name: a_decimal_that_fits_its_precision
+    query: |
+      SELECT * FROM GRAPH_TABLE (
+        MATCH (n:Person {name: 'Alix'})
+        COLUMNS (CAST(1234.5 AS DECIMAL(6, 2)) AS fits, CAST(99.94 AS DECIMAL(3, 1)) AS rounds_down)
       )
     expect:
       rows:
-        - [null, 1234.50]
+        - [1234.50, 99.9]
+
+  - name: a_decimal_that_rounds_up_past_its_precision_fails
+    # 99.96 rounds to 100.0, four digits for DECIMAL(3, 1).
+    query: |
+      SELECT * FROM GRAPH_TABLE (
+        MATCH (n:Person {name: 'Alix'})
+        COLUMNS (CAST(99.96 AS DECIMAL(3, 1)) AS d)
+      )
+    expect:
+      error: ""
+      gql_status: "22003"
 
   # ---------------------------------------------------------------------------
   # Temporal types

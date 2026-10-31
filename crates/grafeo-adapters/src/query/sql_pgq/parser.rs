@@ -175,7 +175,7 @@ impl<'a> Parser<'a> {
         // Optional LIMIT
         let limit = if self.current.kind == TokenKind::Limit {
             self.advance();
-            Some(self.parse_integer_literal()?)
+            Some(self.parse_row_count()?)
         } else {
             None
         };
@@ -183,7 +183,7 @@ impl<'a> Parser<'a> {
         // Optional OFFSET
         let offset = if self.current.kind == TokenKind::Offset {
             self.advance();
-            Some(self.parse_integer_literal()?)
+            Some(self.parse_row_count()?)
         } else {
             None
         };
@@ -450,19 +450,19 @@ impl<'a> Parser<'a> {
         })
     }
 
+    /// The `MATCH` clause of a `GRAPH_TABLE`, as GQL parses it (SQL/PGQ's
+    /// graph pattern is GQL's, ISO/IEC 9075-16): the GQL parser reads it
+    /// from the current token, and this parser goes on after it.
     fn parse_match_clause(&mut self) -> Result<MatchClause> {
-        self.expect(TokenKind::Match)?;
-
-        let patterns = self.parse_pattern_list()?;
-
-        Ok(MatchClause {
-            optional: false,
-            path_mode: None,
-            search_prefix: None,
-            match_mode: None,
-            patterns,
-            span: None,
-        })
+        if self.current.kind != TokenKind::Match {
+            return Err(self.error(&format!("Expected Match, found {:?}", self.current.kind)));
+        }
+        let (clause, next) =
+            crate::query::gql::Parser::parse_match_clause_at(self.source, self.current.span)
+                .map_err(as_sql_pgq_error)?;
+        self.lexer.seek(next);
+        self.advance();
+        Ok(clause)
     }
 
     fn parse_columns_clause(&mut self) -> Result<ColumnsClause> {
@@ -490,273 +490,6 @@ impl<'a> Parser<'a> {
             alias,
             span: None,
         })
-    }
-
-    // ==================== Pattern Parsing ====================
-
-    fn parse_pattern_list(&mut self) -> Result<Vec<AliasedPattern>> {
-        let mut patterns = vec![self.parse_aliased_pattern()?];
-        while self.current.kind == TokenKind::Comma {
-            self.advance();
-            patterns.push(self.parse_aliased_pattern()?);
-        }
-        Ok(patterns)
-    }
-
-    fn parse_aliased_pattern(&mut self) -> Result<AliasedPattern> {
-        let pattern = self.parse_pattern()?;
-        Ok(AliasedPattern {
-            alias: None,
-            path_function: None,
-            search_prefix: None,
-            path_mode: None,
-            keep: None,
-            pattern,
-        })
-    }
-
-    fn parse_pattern(&mut self) -> Result<Pattern> {
-        let start = self.parse_node_pattern()?;
-
-        // Check for edge continuation
-        if self.is_edge_start() {
-            let mut edges = Vec::new();
-            while self.is_edge_start() {
-                edges.push(self.parse_edge_pattern()?);
-            }
-            Ok(Pattern::Path(PathPattern {
-                source: start,
-                edges,
-                span: None,
-            }))
-        } else {
-            Ok(Pattern::Node(start))
-        }
-    }
-
-    fn parse_node_pattern(&mut self) -> Result<NodePattern> {
-        self.expect(TokenKind::LParen)?;
-
-        // Optional variable name
-        let variable = if self.can_be_identifier() && self.current.kind != TokenKind::Colon {
-            let name = self.get_identifier_text();
-            self.advance();
-            Some(name)
-        } else {
-            None
-        };
-
-        // Optional labels
-        let mut labels = Vec::new();
-        while self.current.kind == TokenKind::Colon {
-            self.advance();
-            labels.push(self.expect_identifier()?);
-        }
-
-        // Optional property map
-        let properties = if self.current.kind == TokenKind::LBrace {
-            self.parse_property_map()?
-        } else {
-            Vec::new()
-        };
-
-        self.expect(TokenKind::RParen)?;
-
-        Ok(NodePattern {
-            variable,
-            labels,
-            label_expression: None,
-            properties,
-            where_clause: None,
-            span: None,
-        })
-    }
-
-    fn parse_edge_pattern(&mut self) -> Result<EdgePattern> {
-        // Determine direction and whether there's a bracket
-        let (leading_direction, has_bracket) = match self.current.kind {
-            TokenKind::Arrow => {
-                // ->
-                self.advance();
-                if self.current.kind == TokenKind::LBracket {
-                    // Unusual but handle: ->[...]->
-                    (Some(EdgeDirection::Outgoing), true)
-                } else {
-                    (Some(EdgeDirection::Outgoing), false)
-                }
-            }
-            TokenKind::LeftArrow => {
-                // <-  which may be followed by [...]-
-                self.advance();
-                if self.current.kind == TokenKind::LBracket {
-                    // <-[...]-  incoming edge with details
-                    (Some(EdgeDirection::Incoming), true)
-                } else {
-                    (Some(EdgeDirection::Incoming), false)
-                }
-            }
-            TokenKind::DoubleDash => {
-                // --
-                self.advance();
-                (Some(EdgeDirection::Undirected), false)
-            }
-            TokenKind::Minus => {
-                // - followed by [ or other
-                self.advance();
-                if self.current.kind == TokenKind::LBracket {
-                    (None, true) // Direction determined by trailing symbol
-                } else {
-                    return Err(self.error("Expected '[' or arrow after '-'"));
-                }
-            }
-            _ => return Err(self.error("Expected edge pattern")),
-        };
-
-        // Parse edge details if there's a bracket
-        let (variable, types, min_hops, max_hops, properties, direction) = if has_bracket {
-            self.advance(); // consume [
-
-            // Optional variable
-            let var = if self.can_be_identifier() && self.peek_kind() != TokenKind::LParen {
-                let is_var = matches!(
-                    self.peek_kind(),
-                    TokenKind::Colon | TokenKind::RBracket | TokenKind::Star
-                );
-                if is_var {
-                    let name = self.get_identifier_text();
-                    self.advance();
-                    Some(name)
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
-
-            // Optional :Type, or alternatives :Type1|Type2. An edge has one
-            // type, so a second `:` is an error naming both ways to write
-            // what was meant.
-            let mut edge_types = Vec::new();
-            if self.current.kind == TokenKind::Colon {
-                self.advance();
-                edge_types.push(self.expect_identifier()?);
-                while self.current.kind == TokenKind::Pipe {
-                    self.advance();
-                    edge_types.push(self.expect_identifier()?);
-                }
-                if self.current.kind == TokenKind::Colon {
-                    let colon = self.current.span;
-                    self.advance();
-                    let first = edge_types.last().map_or("A", String::as_str);
-                    let second = if self.can_be_identifier() {
-                        self.get_identifier_text()
-                    } else {
-                        "B".to_string()
-                    };
-                    return Err(QueryError::new(
-                        QueryErrorKind::Syntax,
-                        format!(
-                            "[SQL/PGQ] An edge has one type: write :\"{first}:{second}\" for the \
-                             type named {first}:{second}, or :{first}|{second} to match either type"
-                        ),
-                    )
-                    .with_span(colon)
-                    .with_source(self.source.to_string())
-                    .into());
-                }
-            }
-
-            // Optional *min..max for variable-length
-            let (min, max) = if self.current.kind == TokenKind::Star {
-                self.advance();
-                self.parse_hop_range()?
-            } else {
-                (None, None)
-            };
-
-            // Optional properties
-            let props = if self.current.kind == TokenKind::LBrace {
-                self.parse_property_map()?
-            } else {
-                Vec::new()
-            };
-
-            self.expect(TokenKind::RBracket)?;
-
-            // Determine direction from trailing symbol + leading context
-            let dir = if self.current.kind == TokenKind::Arrow {
-                self.advance();
-                EdgeDirection::Outgoing
-            } else if self.current.kind == TokenKind::Minus {
-                self.advance();
-                // If we had a leading <-, this is <-[...]-  → Incoming
-                if leading_direction == Some(EdgeDirection::Incoming) {
-                    EdgeDirection::Incoming
-                } else {
-                    EdgeDirection::Undirected
-                }
-            } else {
-                leading_direction.unwrap_or(EdgeDirection::Undirected)
-            };
-
-            (var, edge_types, min, max, props, dir)
-        } else {
-            // No bracket - simple arrow connection
-            let dir = leading_direction.unwrap_or(EdgeDirection::Undirected);
-            (None, Vec::new(), None, None, Vec::new(), dir)
-        };
-
-        // Parse the target node
-        let target = self.parse_node_pattern()?;
-
-        Ok(EdgePattern {
-            variable,
-            types,
-            direction,
-            target,
-            min_hops,
-            max_hops,
-            properties,
-            where_clause: None,
-            questioned: false,
-            span: None,
-        })
-    }
-
-    /// The bounds after a `*`: `*n` exactly n hops, `*n..m`, `*n..`, `*..m`,
-    /// and `*` alone one or more hops, as in GQL and Cypher (it read as one
-    /// hop).
-    fn parse_hop_range(&mut self) -> Result<(Option<u32>, Option<u32>)> {
-        if !matches!(self.current.kind, TokenKind::Integer | TokenKind::Dot) {
-            return Ok((Some(1), None));
-        }
-        let min = if self.current.kind == TokenKind::Integer {
-            let val = self.current.text.parse().unwrap_or(1);
-            self.advance();
-            Some(val)
-        } else {
-            None
-        };
-
-        let max = if self.current.kind == TokenKind::Dot {
-            self.advance();
-            // Expect second dot
-            if self.current.kind != TokenKind::Dot {
-                return Err(self.error("Expected '..' in hop range"));
-            }
-            self.advance();
-            if self.current.kind == TokenKind::Integer {
-                let val = self.current.text.parse().unwrap_or(u32::MAX);
-                self.advance();
-                Some(val)
-            } else {
-                None // Unbounded
-            }
-        } else {
-            min // If no .., max = min (exact length)
-        };
-
-        Ok((min, max))
     }
 
     fn parse_property_map(&mut self) -> Result<Vec<(String, Expression)>> {
@@ -1071,7 +804,7 @@ impl<'a> Parser<'a> {
             }
             TokenKind::Dollar => {
                 self.advance();
-                let name = self.expect_identifier()?;
+                let name = self.expect_parameter_name()?;
                 Ok(Expression::Parameter(name))
             }
             _ if self.can_be_identifier() => {
@@ -1240,6 +973,15 @@ impl<'a> Parser<'a> {
         })
     }
 
+    /// The count of a LIMIT or OFFSET: an integer or a parameter (`$limit`).
+    fn parse_row_count(&mut self) -> Result<RowCount> {
+        if self.current.kind == TokenKind::Dollar {
+            self.advance();
+            return Ok(RowCount::Parameter(self.expect_parameter_name()?));
+        }
+        Ok(RowCount::Literal(self.parse_integer_literal()?))
+    }
+
     fn parse_integer_literal(&mut self) -> Result<u64> {
         if self.current.kind == TokenKind::Integer {
             let text = &self.current.text;
@@ -1291,6 +1033,28 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// The name after `$`: an identifier or any keyword (`$from`,
+    /// `$order`), as GQL and Cypher take them, since a parameter name
+    /// cannot be read as the keyword there.
+    fn expect_parameter_name(&mut self) -> Result<String> {
+        if self.can_be_identifier() {
+            return self.expect_identifier();
+        }
+        let text = &self.current.text;
+        let is_word = text
+            .chars()
+            .next()
+            .is_some_and(|first| first.is_alphabetic() || first == '_')
+            && text.chars().all(|c| c.is_alphanumeric() || c == '_');
+        if is_word {
+            let name = text.clone();
+            self.advance();
+            Ok(name)
+        } else {
+            Err(self.error("Expected parameter name"))
+        }
+    }
+
     fn can_be_identifier(&self) -> bool {
         matches!(
             self.current.kind,
@@ -1332,13 +1096,6 @@ impl<'a> Parser<'a> {
         let kind = token.kind;
         self.lexer = saved;
         kind
-    }
-
-    fn is_edge_start(&self) -> bool {
-        matches!(
-            self.current.kind,
-            TokenKind::Arrow | TokenKind::LeftArrow | TokenKind::DoubleDash | TokenKind::Minus
-        )
     }
 
     /// Enters one level of nesting, or fails past the nesting limit.
@@ -1725,6 +1482,20 @@ impl<'a> Parser<'a> {
     }
 }
 
+/// An error of the GQL parser inside a SQL/PGQ statement, named as SQL/PGQ's.
+fn as_sql_pgq_error(
+    error: grafeo_common::utils::error::Error,
+) -> grafeo_common::utils::error::Error {
+    match error {
+        grafeo_common::utils::error::Error::Query(mut query) => {
+            if let Some(rest) = query.message.strip_prefix("[GQL] ") {
+                query.message = format!("[SQL/PGQ] {rest}");
+            }
+            grafeo_common::utils::error::Error::Query(query)
+        }
+        other => other,
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2116,7 +1887,7 @@ mod tests {
                 COLUMNS (n.name AS name)
             ) LIMIT 10",
         ));
-        assert_eq!(s.limit, Some(10));
+        assert_eq!(s.limit, Some(RowCount::Literal(10)));
     }
 
     #[test]
@@ -2127,7 +1898,7 @@ mod tests {
                 COLUMNS (n.name AS name)
             ) OFFSET 5",
         ));
-        assert_eq!(s.offset, Some(5));
+        assert_eq!(s.offset, Some(RowCount::Literal(5)));
     }
 
     #[test]
@@ -2138,8 +1909,8 @@ mod tests {
                 COLUMNS (n.name AS name)
             ) LIMIT 10 OFFSET 5",
         ));
-        assert_eq!(s.limit, Some(10));
-        assert_eq!(s.offset, Some(5));
+        assert_eq!(s.limit, Some(RowCount::Literal(10)));
+        assert_eq!(s.offset, Some(RowCount::Literal(5)));
     }
 
     // ==================== Full Query Tests ====================
@@ -2163,8 +1934,8 @@ mod tests {
         assert_eq!(s.table_alias, Some("g".to_string()));
         assert!(s.where_clause.is_some());
         assert!(s.order_by.is_some());
-        assert_eq!(s.limit, Some(10));
-        assert_eq!(s.offset, Some(5));
+        assert_eq!(s.limit, Some(RowCount::Literal(10)));
+        assert_eq!(s.offset, Some(RowCount::Literal(5)));
     }
 
     #[test]
@@ -2663,7 +2434,7 @@ mod tests {
         assert_eq!(s.table_alias, Some("g".to_string()));
         assert!(s.where_clause.is_some());
         assert!(s.order_by.is_some());
-        assert_eq!(s.limit, Some(10));
+        assert_eq!(s.limit, Some(RowCount::Literal(10)));
 
         // Verify the CASE expression in COLUMNS
         let case_expr = &s.graph_table.columns.items[1].expression;

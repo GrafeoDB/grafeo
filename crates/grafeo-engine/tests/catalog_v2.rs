@@ -198,8 +198,8 @@ fn the_schema_survives_a_reopen_after_a_checkpoint_in_small_chunks() {
     );
     assert_eq!(
         names("SHOW INDEXES"),
-        ["doc_content", "person_name"].map(Value::from),
-        "SHOW INDEXES leaves out vector indexes"
+        ["doc_content", "doc_embedding", "person_name"].map(Value::from),
+        "SHOW INDEXES lists the named vector index too"
     );
     assert_eq!(names("SHOW GRAPHS"), [Value::from("trips")]);
     assert_eq!(names("SHOW SCHEMAS"), [Value::from("archive")]);

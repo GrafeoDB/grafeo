@@ -12,7 +12,9 @@ typedef GrafeoResultPtr = Pointer<Void>;
 /// Opaque pointer to a Grafeo transaction.
 typedef GrafeoTransactionPtr = Pointer<Void>;
 
-/// Transaction isolation levels.
+/// Transaction isolation levels. [serializable] is not available yet: beginning
+/// a transaction at that level fails with an error naming snapshot isolation,
+/// the strongest level, until queries record their reads.
 enum IsolationLevel {
   readCommitted(0),
   snapshotIsolation(1),

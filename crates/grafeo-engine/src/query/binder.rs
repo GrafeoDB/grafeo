@@ -465,6 +465,20 @@ impl Binder {
 
             // RDF/SPARQL operators
             LogicalOperator::TripleScan(scan) => self.bind_triple_scan(scan),
+            LogicalOperator::NamedGraphs(graphs) => {
+                if !self.context.contains(&graphs.variable) {
+                    self.context.add_variable(
+                        graphs.variable.clone(),
+                        VariableInfo {
+                            name: graphs.variable.clone(),
+                            data_type: LogicalType::Any,
+                            is_node: false,
+                            is_edge: false,
+                        },
+                    );
+                }
+                Ok(())
+            }
             LogicalOperator::PropertyPath(path) => {
                 for component in [Some(&path.subject), Some(&path.object), path.graph.as_ref()]
                     .into_iter()
@@ -495,6 +509,19 @@ impl Binder {
                 Ok(())
             }
             LogicalOperator::AntiJoin(aj) => self.bind_join_inputs(&aj.left, &aj.right),
+            LogicalOperator::MarkJoin(mark) => {
+                self.bind_join_inputs(&mark.left, &mark.right)?;
+                self.context.add_variable(
+                    mark.column.clone(),
+                    VariableInfo {
+                        name: mark.column.clone(),
+                        data_type: LogicalType::Bool,
+                        is_node: false,
+                        is_edge: false,
+                    },
+                );
+                Ok(())
+            }
             LogicalOperator::Bind(bind) => {
                 self.bind_operator(&bind.input)?;
                 self.validate_expression(&bind.expression)?;
@@ -843,23 +870,25 @@ impl Binder {
                 // internal variables nor a `WITH` in it that drops outer ones
                 // change the outer scope.
                 let imports_all = apply.shared_variables.iter().any(|name| name == "*");
-                let bound = match union_parts(&apply.subplan) {
+                let bound: Vec<BindingContext> = match union_parts(&apply.subplan) {
                     // Each part of a UNION imports its own outer variables (the
                     // Apply imports all of them): the ones its scan starts from.
-                    Some(parts) if !imports_all => parts.iter().try_for_each(|part| {
-                        let part_context = self.imported(&leading_imports(part));
-                        self.bind_subquery_part(part, part_context)
-                    }),
+                    Some(parts) if !imports_all => parts
+                        .iter()
+                        .map(|part| {
+                            let part_context = self.imported(&leading_imports(part));
+                            self.bind_subquery_part(part, part_context)
+                        })
+                        .collect::<Result<_>>()?,
                     _ => {
                         let subplan_context = if imports_all {
                             self.context.clone()
                         } else {
                             self.imported(&apply.shared_variables)
                         };
-                        self.bind_subquery_part(&apply.subplan, subplan_context)
+                        vec![self.bind_subquery_part(&apply.subplan, subplan_context)?]
                     }
                 };
-                bound?;
 
                 // A subquery returns new variables only, as in openCypher: an
                 // outer one, imported or not, would be bound twice.
@@ -876,8 +905,16 @@ impl Binder {
                     ));
                 }
 
-                // Register output columns so downstream operators can reference them.
-                Self::register_subplan_columns(&apply.subplan, &mut self.context);
+                // Register output columns so downstream operators can reference
+                // them. A column is a node or an edge when every part of the
+                // subquery returns one under its name.
+                for (name, mut info) in subplan_output_ctx.variables {
+                    let kinds: Vec<&VariableInfo> =
+                        bound.iter().filter_map(|part| part.get(&name)).collect();
+                    info.is_node = !kinds.is_empty() && kinds.iter().all(|kind| kind.is_node);
+                    info.is_edge = !kinds.is_empty() && kinds.iter().all(|kind| kind.is_edge);
+                    self.context.add_variable(name, info);
+                }
                 Ok(())
             }
             LogicalOperator::MultiWayJoin(mwj) => {
@@ -892,6 +929,9 @@ impl Binder {
                 }
                 Ok(())
             }
+            // The optimizer makes these after binding: its columns are the
+            // left input's, bound there.
+            LogicalOperator::DelimScan(_) => Ok(()),
             LogicalOperator::ParameterScan(param_scan) => {
                 // Register parameter columns as variables (injected by outer
                 // Apply). A variable of the outer query keeps what it is, so a
@@ -1314,13 +1354,16 @@ impl Binder {
             self.validate_return_item(item)?;
             if let Some(ref alias) = item.alias {
                 let data_type = self.infer_expression_type(&item.expression);
+                // A node or edge returned under an alias stays one, for a
+                // subquery's caller (see the `Apply` arm of `bind_operator`).
+                let (is_node, is_edge) = self.infer_entity_status(&item.expression);
                 self.context.add_variable(
                     alias.clone(),
                     VariableInfo {
                         name: alias.clone(),
                         data_type,
-                        is_node: false,
-                        is_edge: false,
+                        is_node,
+                        is_edge,
                     },
                 );
             }
@@ -1684,13 +1727,13 @@ impl Binder {
         &mut self,
         part: &LogicalOperator,
         imported: BindingContext,
-    ) -> Result<()> {
+    ) -> Result<BindingContext> {
         let enclosing_imports = std::mem::replace(&mut self.imports, imported.clone());
         let outer_context = std::mem::replace(&mut self.context, imported);
         let bound = self.bind_operator(part);
-        self.context = outer_context;
+        let part_context = std::mem::replace(&mut self.context, outer_context);
         self.imports = enclosing_imports;
-        bound
+        bound.map(|()| part_context)
     }
 
     /// The outer variables named in `names`, with what they are in the

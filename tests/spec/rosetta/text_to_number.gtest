@@ -1,0 +1,157 @@
+# Rosetta: toInteger and toFloat of text
+#
+# The text loses its leading and trailing spaces first. toInteger of a
+# decimal text truncates toward zero, as of the float it spells (openCypher
+# TCK TypeConversion2 [4] and [5]: toInteger('1.7') is 1, toInteger('2.9')
+# is 2). Text that spells no number is null (TypeConversion2 [2] and [5],
+# TypeConversion3 [2] and [4]). CAST of such text fails instead
+# (lpg/gql/cast_conversions.gtest).
+
+meta:
+  model: lpg
+  section: rosetta
+  title: toInteger and toFloat of text
+  dataset: empty
+  requires: [cypher]
+
+tests:
+
+  # ---------------------------------------------------------------------------
+  # Surrounding spaces
+  # ---------------------------------------------------------------------------
+
+  - name: to_integer_of_text_with_surrounding_spaces
+    variants:
+      gql: "RETURN toInteger(' 42 ') AS a, toInteger(' -42') AS b, toInteger('42  ') AS c"
+      cypher: "RETURN toInteger(' 42 ') AS a, toInteger(' -42') AS b, toInteger('42  ') AS c"
+    expect:
+      rows:
+        - [42, -42, 42]
+
+  - name: to_float_of_text_with_surrounding_spaces
+    variants:
+      gql: "RETURN toFloat(' 1.5 ') AS a, toFloat(' -2.5 ') AS b"
+      cypher: "RETURN toFloat(' 1.5 ') AS a, toFloat(' -2.5 ') AS b"
+    expect:
+      rows:
+        - [1.5, -2.5]
+
+  # ---------------------------------------------------------------------------
+  # Decimal text truncates toward zero
+  # ---------------------------------------------------------------------------
+
+  - name: to_integer_of_decimal_text_truncates_toward_zero
+    variants:
+      gql: "RETURN toInteger('4.2') AS a, toInteger('-4.7') AS b, toInteger('2.9') AS c, toInteger(' 0.5 ') AS d"
+      cypher: "RETURN toInteger('4.2') AS a, toInteger('-4.7') AS b, toInteger('2.9') AS c, toInteger(' 0.5 ') AS d"
+    expect:
+      rows:
+        - [4, -4, 2, 0]
+
+  - name: to_integer_of_mixed_values_as_the_tck_lists_them
+    # TypeConversion2 [4] and [5].
+    variants:
+      gql: "RETURN [n IN [2, 2.9e0, '1.7'] | toInteger(n)] AS any, [n IN ['2', '2.9', 'foo'] | toInteger(n)] AS strings"
+      cypher: "RETURN [n IN [2, 2.9, '1.7'] | toInteger(n)] AS any, [n IN ['2', '2.9', 'foo'] | toInteger(n)] AS strings"
+    expect:
+      rows:
+        - [[2, 2, 1], [2, 2, null]]
+
+  # ---------------------------------------------------------------------------
+  # Any number text truncates, exponents included
+  # ---------------------------------------------------------------------------
+
+  - name: to_integer_of_exponent_text_truncates_toward_zero
+    variants:
+      gql: "RETURN toInteger('1e3') AS a, toInteger('1.5e1') AS b, toInteger('-2.5e0') AS c, toInteger(' 9.99E-1 ') AS d"
+      cypher: "RETURN toInteger('1e3') AS a, toInteger('1.5e1') AS b, toInteger('-2.5e0') AS c, toInteger(' 9.99E-1 ') AS d"
+    expect:
+      rows:
+        - [1000, 15, -2, 0]
+
+  - name: a_cast_of_exponent_text_to_int64_truncates_in_gql
+    variants:
+      gql: "RETURN CAST('1e3' AS INT64) AS a, CAST(' -2.5e0 ' AS INT64) AS b"
+    expect:
+      rows:
+        - [1000, -2]
+
+  # ---------------------------------------------------------------------------
+  # Number text out of the integer range: 22003, as an out-of-range float
+  # ---------------------------------------------------------------------------
+
+  - name: to_integer_of_integer_text_out_of_range_fails
+    variants:
+      gql: "RETURN toInteger('99999999999999999999') AS v"
+      cypher: "RETURN toInteger('99999999999999999999') AS v"
+    expect:
+      error: ""
+      gql_status: "22003"
+
+  - name: to_integer_of_negative_integer_text_out_of_range_fails
+    variants:
+      gql: "RETURN toInteger('-9223372036854775809') AS v"
+      cypher: "RETURN toInteger('-9223372036854775809') AS v"
+    expect:
+      error: ""
+      gql_status: "22003"
+
+  - name: to_integer_of_exponent_text_out_of_range_fails
+    variants:
+      gql: "RETURN toInteger('1e19') AS v"
+      cypher: "RETURN toInteger('1e19') AS v"
+    expect:
+      error: ""
+      gql_status: "22003"
+
+  - name: to_integer_of_decimal_text_out_of_range_fails
+    variants:
+      gql: "RETURN toInteger('99999999999999999999.5') AS v"
+      cypher: "RETURN toInteger('99999999999999999999.5') AS v"
+    expect:
+      error: ""
+      gql_status: "22003"
+
+  - name: to_integer_of_infinity_text_fails
+    # Text that reads as an infinite float is out of range, as the float is.
+    variants:
+      gql: "RETURN toInteger('Infinity') AS v"
+      cypher: "RETURN toInteger('Infinity') AS v"
+    expect:
+      error: ""
+      gql_status: "22003"
+
+  - name: to_integer_of_the_integer_text_at_the_range_ends
+    variants:
+      gql: "RETURN toInteger('9223372036854775807') AS hi, toInteger(' -9223372036854775808 ') AS lo"
+      cypher: "RETURN toInteger('9223372036854775807') AS hi, toInteger(' -9223372036854775808 ') AS lo"
+    expect:
+      rows:
+        - [9223372036854775807, -9223372036854775808]
+
+  - name: a_cast_of_integer_text_out_of_range_fails_in_gql
+    variants:
+      gql: "RETURN CAST('99999999999999999999' AS INT64) AS v"
+    expect:
+      error: ""
+      gql_status: "22003"
+
+  # ---------------------------------------------------------------------------
+  # Text that spells no number: null
+  # ---------------------------------------------------------------------------
+
+  - name: to_integer_of_text_that_is_no_number_is_null
+    variants:
+      gql: "RETURN toInteger('x') AS a, toInteger('') AS b, toInteger('  ') AS c, toInteger('4,2') AS d"
+      cypher: "RETURN toInteger('x') AS a, toInteger('') AS b, toInteger('  ') AS c, toInteger('4,2') AS d"
+    expect:
+      rows:
+        - [null, null, null, null]
+
+  - name: to_float_of_text_that_is_no_number_is_null
+    variants:
+      gql: "RETURN toFloat('x') AS a, toFloat('') AS b, toFloat('  ') AS c"
+      cypher: "RETURN toFloat('x') AS a, toFloat('') AS b, toFloat('  ') AS c"
+    expect:
+      rows:
+        - [null, null, null]

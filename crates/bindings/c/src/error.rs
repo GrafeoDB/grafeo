@@ -164,7 +164,7 @@ mod tests {
     }
 
     /// The GQLSTATUS of the last error: the status of a database error
-    /// (22012, 22003, 42001, 42002, 42000), 22000 for one the binding raises
+    /// (22012, 22003, 22018, 42001, 42002, 42000), 22000 for one the binding raises
     /// itself (a null pointer), and none once the error is cleared (#639).
     #[test]
     fn the_last_error_carries_its_gql_status() {
@@ -195,6 +195,11 @@ mod tests {
                 "RETURN 9223372036854775807 + 1 AS x",
                 "22003",
                 "numeric value out of range",
+            ),
+            (
+                "RETURN CAST('Alix' AS INT64) AS x",
+                "22018",
+                "invalid character value for cast",
             ),
             ("MATCH (n RETURN n", "42001", "GRAFEO-Q001"),
             ("MATCH (n) RETURN m", "42002", "Undefined variable 'm'"),

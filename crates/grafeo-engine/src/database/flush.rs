@@ -14,6 +14,7 @@
 //! which holds the committed state at E.
 
 use grafeo_common::storage::Section;
+use grafeo_common::types::EpochId;
 use grafeo_common::utils::error::Result;
 
 #[cfg(feature = "grafeo-file")]
@@ -119,6 +120,23 @@ pub(super) fn flush_covering(
     // delete WAL files this one relies on.
     let _checkpoint = fm.checkpoint_guard();
     let commits = sources.transaction_manager.hold_commits()?;
+    flush_held(fm, sources, covered_lsn, commits)
+}
+
+/// [`flush_covering`] for a caller that holds the file's checkpoint guard
+/// and `commits` already, as a restore does to make what it replaced
+/// durable before any commit or checkpoint comes between.
+///
+/// # Errors
+///
+/// As [`flush`].
+#[cfg(feature = "grafeo-file")]
+pub(super) fn flush_held(
+    fm: &GrafeoFileManager,
+    sources: &CheckpointSources,
+    covered_lsn: Option<u64>,
+    commits: CommitsHeld<'_>,
+) -> Result<FlushResult> {
     let image = sources.snapshot(&commits)?;
     let section_refs: Vec<&dyn Section> = image.sections.iter().map(AsRef::as_ref).collect();
     let held = image.held;
@@ -390,7 +408,7 @@ fn write_copy_into(
 /// Makes a rename in the directory holding `path` durable. Windows has no
 /// directory handles to sync; its directory changes are metadata-journaled.
 #[cfg(feature = "grafeo-file")]
-fn sync_parent_dir(path: &std::path::Path) -> Result<()> {
+pub(super) fn sync_parent_dir(path: &std::path::Path) -> Result<()> {
     #[cfg(unix)]
     if let Some(parent) = path.parent() {
         let parent = if parent.as_os_str().is_empty() {
@@ -406,15 +424,15 @@ fn sync_parent_dir(path: &std::path::Path) -> Result<()> {
 }
 
 impl CheckpointSources {
-    /// The header values of the checkpoint.
-    pub fn context(&self) -> FlushContext {
+    /// The header values of the checkpoint taken at `epoch`.
+    pub fn context(&self, epoch: EpochId) -> FlushContext {
         let transaction_id = self
             .transaction_manager
             .last_assigned_transaction_id()
             .map_or(0, |t| t.0);
         let (nodes, edges) = self.counts();
         FlushContext {
-            epoch: self.epoch(),
+            epoch: epoch.as_u64(),
             transaction_id,
             node_count: nodes as u64,
             edge_count: edges as u64,

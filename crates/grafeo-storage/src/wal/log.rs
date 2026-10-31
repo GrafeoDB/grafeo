@@ -140,8 +140,9 @@ pub type WalCipher = grafeo_common::encryption::PageEncryptor;
 #[derive(Debug)]
 pub enum WalCipher {}
 
-/// The length prefix of a frame whose payload is `length` bytes.
-fn frame_length(length: usize) -> Result<u32> {
+/// The length prefix of a frame whose payload is `length` bytes, for the
+/// synchronous and the async WAL.
+pub(super) fn frame_length(length: usize) -> Result<u32> {
     u32::try_from(length).map_err(|_| {
         Error::Internal(format!(
             "a WAL record of {length} bytes does not fit a frame, whose length prefix \

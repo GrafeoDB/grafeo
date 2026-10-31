@@ -21,26 +21,27 @@ db.execute("CREATE (n:Person {name: 'Vincent'})")  # Commits immediately
 
 ## Isolation Levels
 
-Grafeo supports three isolation levels, configurable per transaction:
+Grafeo supports two isolation levels, configurable per transaction:
 
 | Level | Description |
 |-------|-------------|
 | `read_committed` | See committed data; non-repeatable reads possible |
-| `snapshot` | Default: consistent snapshot at transaction start |
-| `serializable` | Full SSI with read-write conflict detection |
+| `snapshot` | Default: consistent snapshot at transaction start; the strongest level |
+
+`serializable` is not available yet. Preventing write skew (two transactions that each read the same data and then each change something different based on it) needs the reads of queries recorded, and they are not yet, so asking for `serializable` fails with `GRAFEO-Q004` instead of running snapshot isolation under its name. Until then, a `UNIQUE` constraint keeps concurrent duplicates out, and a transaction that writes the data it decided on conflicts with one that writes it too.
 
 ```python
 # Default (snapshot isolation)
 tx = db.begin_transaction()
 
 # Explicit isolation level
-tx = db.begin_transaction(isolation_level="serializable")
+tx = db.begin_transaction(isolation_level="read_committed")
 ```
 
 ```rust
 use grafeo::IsolationLevel;
 
-let tx = session.begin_transaction_with_isolation(IsolationLevel::Serializable)?;
+let tx = session.begin_transaction_with_isolation(IsolationLevel::ReadCommitted)?;
 ```
 
 ## Read-Only Transactions
@@ -265,6 +266,7 @@ tx.commit()  # balance = 1000, no bonus property
 1. Names must be unique within a transaction
 2. Rolling back to a savepoint also releases all savepoints created after it
 3. A full `ROLLBACK` undoes everything, including changes before any savepoints
+4. What a rollback to a savepoint undid, or what a failed statement wrote, no longer blocks other transactions: they can write it. What earlier statements of the transaction wrote stays protected
 
 ## Transaction Lifecycle
 
@@ -363,7 +365,7 @@ RELEASE SAVEPOINT my_save
 tx = db.begin_transaction()
 
 # With isolation level
-tx = db.begin_transaction(isolation_level="serializable")
+tx = db.begin_transaction(isolation_level="read_committed")
 
 # Execute within transaction
 result = tx.execute("MATCH (n) RETURN n")
@@ -393,7 +395,7 @@ tx.execute("RELEASE SAVEPOINT sp1")
 session.begin_transaction()?;
 
 // With isolation level
-session.begin_transaction_with_isolation(IsolationLevel::Serializable)?;
+session.begin_transaction_with_isolation(IsolationLevel::ReadCommitted)?;
 
 // Execute queries
 let result = session.execute("MATCH (n) RETURN n")?;
@@ -432,9 +434,12 @@ Transaction errors use standardized `GRAFEO-TXXX` codes:
 | `GRAFEO-T002` | Transaction timeout | Yes |
 | `GRAFEO-T003` | Read-only transaction attempted mutation | No |
 | `GRAFEO-T004` | Invalid transaction state (e.g., already committed or rolled back) | No |
-| `GRAFEO-T005` | Serialization failure (SSI violation) | No |
+| `GRAFEO-T005` | Reserved for Serializable isolation, which is refused for now (`GRAFEO-Q004`) | Yes |
 | `GRAFEO-T006` | Deadlock detected | Yes |
 | `GRAFEO-T007` | Database closed: a write after `close()` of a persistent database | No |
 | `GRAFEO-T008` | Incomplete commit: an earlier commit did not complete, reopen the database | No |
+| `GRAFEO-T009` | The commit could not be written to the write-ahead log and was rolled back | Yes |
+| `GRAFEO-T010` | Commit outcome unknown: the log could not be made durable, reopen the database before retrying | No |
+| `GRAFEO-T011` | The write-ahead log takes no more writes after an earlier failure, reopen the database | No |
 
 In Rust, error codes expose an `is_retryable()` method to indicate whether the operation can be safely retried. This method is not currently exposed in the Python bindings.

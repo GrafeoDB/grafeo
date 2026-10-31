@@ -219,7 +219,7 @@ Works the same way across all three languages:
 | `grafeo.min_cost_max_flow(source, sink)` | Flow | source, target, flow, cost, max_flow |
 | `grafeo.articulation_points()` | Structure | node_id |
 | `grafeo.bridges()` | Structure | source, target |
-| `grafeo.k_core()` | Structure | node_id, core_number, max_core |
+| `grafeo.kcore()` | Structure | node_id, core_number, max_core |
 | `grafeo.ktruss()` | Structure | source, target, truss_number |
 | `grafeo.total_triangles()` | Clustering | total_triangles |
 | `grafeo.stochastic_block_partition()` | Community | node_id, block_id, description_length |

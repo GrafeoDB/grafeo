@@ -218,8 +218,12 @@ impl super::GrafeoDB {
         })?;
 
         let held = self.hold_commits_for_import()?;
-        let store: Arc<dyn GraphBackend> = self.lpg_store()?;
-        let mut changes = self.streaming_changes(&held, true);
+        // Into the current graph, as the other direct calls (#677).
+        let graph = self.current_graph_key();
+        let store: Arc<dyn GraphBackend> = self.current_lpg_store()?;
+        let mut changes = self
+            .streaming_changes(&held, true)
+            .in_graph(graph.as_deref());
         let nodes = changes.reserve(&store, Table::Nodes, rows.len())?;
         let labels: Labels = std::iter::once(ArcStr::from("_Imported")).collect();
         for raw in nodes.clone() {

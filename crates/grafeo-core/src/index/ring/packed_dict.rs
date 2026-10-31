@@ -475,7 +475,7 @@ mod tests {
     fn build_dict_with(terms: &[Term]) -> TermDictionary {
         let mut dict = TermDictionary::new();
         for t in terms {
-            dict.get_or_insert(t.clone());
+            dict.get_or_insert(t.clone()).unwrap();
         }
         dict
     }

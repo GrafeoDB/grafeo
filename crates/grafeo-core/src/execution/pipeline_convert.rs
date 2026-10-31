@@ -127,10 +127,12 @@ fn decompose_recursive_memory(
             let sort = any
                 .downcast::<SortOperator>()
                 .expect("name() returned 'Sort' but downcast failed");
+            let temporal = sort.temporal();
             let (child, sort_keys, output_width) = sort.into_parts();
             let push_keys: Vec<_> = sort_keys.iter().map(convert_sort_key).collect();
             let mut push_sort =
-                SpillableSortPushOperator::with_memory_context(push_keys, ctx.clone());
+                SpillableSortPushOperator::with_memory_context(push_keys, ctx.clone())
+                    .with_temporal(temporal);
             if let Some(width) = output_width {
                 push_sort = push_sort.with_output_width(width);
             }
@@ -142,13 +144,15 @@ fn decompose_recursive_memory(
             let agg = any
                 .downcast::<HashAggregateOperator>()
                 .expect("name() returned 'HashAggregate' but downcast failed");
+            let temporal = agg.temporal();
             let (child, group_columns, aggregates) = agg.into_parts();
             push_ops.push(Box::new(
                 SpillableAggregatePushOperator::with_memory_context(
                     group_columns,
                     aggregates,
                     ctx.clone(),
-                ),
+                )
+                .with_temporal(temporal),
             ));
             decompose_recursive_memory(child, push_ops, ctx)
         }
@@ -170,12 +174,14 @@ fn decompose_recursive_memory(
             let distinct = any
                 .downcast::<DistinctOperator>()
                 .expect("name() returned 'Distinct' but downcast failed");
+            let temporal = distinct.temporal();
             let (child, columns) = distinct.into_parts();
             let push_distinct = if let Some(cols) = columns {
                 DistinctPushOperator::on_columns(cols)
             } else {
                 DistinctPushOperator::new()
-            };
+            }
+            .with_temporal(temporal);
             push_ops.push(Box::new(push_distinct));
             decompose_recursive_memory(child, push_ops, ctx)
         }
@@ -214,9 +220,10 @@ fn decompose_recursive(
             let sort = any
                 .downcast::<SortOperator>()
                 .expect("name() returned 'Sort' but downcast failed");
+            let temporal = sort.temporal();
             let (child, sort_keys, output_width) = sort.into_parts();
             let push_keys: Vec<_> = sort_keys.iter().map(convert_sort_key).collect();
-            let mut push_sort = SortPushOperator::new(push_keys);
+            let mut push_sort = SortPushOperator::new(push_keys).with_temporal(temporal);
             if let Some(width) = output_width {
                 push_sort = push_sort.with_output_width(width);
             }
@@ -228,11 +235,11 @@ fn decompose_recursive(
             let agg = any
                 .downcast::<HashAggregateOperator>()
                 .expect("name() returned 'HashAggregate' but downcast failed");
+            let temporal = agg.temporal();
             let (child, group_columns, aggregates) = agg.into_parts();
-            push_ops.push(Box::new(AggregatePushOperator::new(
-                group_columns,
-                aggregates,
-            )));
+            push_ops.push(Box::new(
+                AggregatePushOperator::new(group_columns, aggregates).with_temporal(temporal),
+            ));
             decompose_recursive(child, push_ops)
         }
         "Limit" => {
@@ -255,12 +262,14 @@ fn decompose_recursive(
             let distinct = any
                 .downcast::<DistinctOperator>()
                 .expect("name() returned 'Distinct' but downcast failed");
+            let temporal = distinct.temporal();
             let (child, columns) = distinct.into_parts();
             let push_distinct = if let Some(cols) = columns {
                 DistinctPushOperator::on_columns(cols)
             } else {
                 DistinctPushOperator::new()
-            };
+            }
+            .with_temporal(temporal);
             push_ops.push(Box::new(push_distinct));
             decompose_recursive(child, push_ops)
         }
@@ -516,6 +525,7 @@ mod tests {
             percentile: None,
             separator: None,
             rdf_literals: false,
+            temporal: grafeo_common::types::TemporalComparison::TypesApart,
         }];
         let agg: Box<dyn Operator> = Box::new(HashAggregateOperator::new(
             scan,

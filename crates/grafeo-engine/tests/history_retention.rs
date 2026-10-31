@@ -215,6 +215,405 @@ fn a_read_before_the_floor_is_refused_never_answered() {
     assert_eq!(names(&db.execute_at_epoch(PEOPLE, alix).unwrap()), ["Alix"]);
 }
 
+fn transaction_history_fixture(
+    retention: HistoryRetention,
+) -> (GrafeoDB, grafeo_common::types::NodeId, EpochId) {
+    let db = keeping(retention);
+    let result = db
+        .execute("INSERT (p:Person {age: 1}) RETURN id(p)")
+        .unwrap();
+    let Value::Int64(id) = result.rows()[0][0] else {
+        panic!("expected a node ID");
+    };
+    let id = grafeo_common::types::NodeId::new(u64::try_from(id).unwrap());
+    let earlier = db.current_epoch();
+    db.execute("MATCH (p:Person) SET p.age = 5").unwrap();
+    assert!(db.current_epoch() > earlier);
+    (db, id, earlier)
+}
+
+#[test]
+fn transaction_history_query_refuses_an_expired_epoch() {
+    let (db, _, earlier) = transaction_history_fixture(HistoryRetention::Off);
+    db.gc();
+    let mut session = db.session();
+    session.begin_transaction().unwrap();
+    session.set_viewing_epoch(earlier);
+    for query in [
+        "MATCH (p:Person) RETURN p.age",
+        "PROFILE MATCH (p:Person) RETURN p.age",
+    ] {
+        not_retained(session.execute(query).expect_err("expired history"));
+    }
+    session
+        .execute("EXPLAIN MATCH (p:Person) RETURN p.age")
+        .unwrap();
+    session.clear_viewing_epoch();
+    assert_eq!(
+        session
+            .execute("MATCH (p:Person) RETURN p.age")
+            .unwrap()
+            .rows(),
+        &[vec![Value::Int64(5)]]
+    );
+    session.rollback().unwrap();
+}
+
+#[test]
+fn transaction_history_direct_read_refuses_an_expired_epoch() {
+    let (db, id, earlier) = transaction_history_fixture(HistoryRetention::Off);
+    db.gc();
+    let mut session = db.session();
+    session.begin_transaction().unwrap();
+    session.set_viewing_epoch(earlier);
+    not_retained(
+        session
+            .get_node_property(id, "age")
+            .expect_err("expired history"),
+    );
+    session.clear_viewing_epoch();
+    assert_eq!(
+        session.get_node_property(id, "age").unwrap(),
+        Some(Value::Int64(5))
+    );
+    session.rollback().unwrap();
+}
+
+#[test]
+fn transaction_history_stream_refuses_an_expired_epoch() {
+    let (db, _, earlier) = transaction_history_fixture(HistoryRetention::Off);
+    db.gc();
+    let mut session = db.session();
+    session.begin_transaction().unwrap();
+    session.set_viewing_epoch(earlier);
+    not_retained(
+        session
+            .execute_streaming("MATCH (p:Person) RETURN p.age")
+            .err()
+            .expect("expired history"),
+    );
+    session.clear_viewing_epoch();
+    session.rollback().unwrap();
+}
+
+#[test]
+fn transaction_history_retained_reads_keep_pending_writes_separate() {
+    let (db, id, earlier) = transaction_history_fixture(HistoryRetention::Forever);
+    let mut session = db.session();
+    session.begin_transaction().unwrap();
+    session.execute("MATCH (p:Person) SET p.age = 99").unwrap();
+    let pending = session.create_node(&["Pending"]).unwrap();
+    session.set_viewing_epoch(earlier);
+    assert_eq!(
+        session
+            .execute("MATCH (p:Person) RETURN p.age")
+            .unwrap()
+            .rows(),
+        &[vec![Value::Int64(1)]]
+    );
+    assert_eq!(
+        session.get_node_property(id, "age").unwrap(),
+        Some(Value::Int64(1))
+    );
+    assert!(!session.node_exists(pending).unwrap());
+    session.clear_viewing_epoch();
+    assert_eq!(
+        session.get_node_property(id, "age").unwrap(),
+        Some(Value::Int64(99))
+    );
+    assert!(session.node_exists(pending).unwrap());
+    session.rollback().unwrap();
+    assert_eq!(
+        db.session().get_node_property(id, "age").unwrap(),
+        Some(Value::Int64(5))
+    );
+}
+
+#[test]
+fn transaction_history_all_direct_readers_refuse_expired_epochs() {
+    use grafeo_common::types::{EdgeId, NodeId};
+    use grafeo_core::graph::Direction;
+
+    let (db, id, earlier) = transaction_history_fixture(HistoryRetention::Off);
+    db.gc();
+    let floor = db.current_epoch();
+    assert!(floor > earlier);
+    let mut session = db.session();
+    session.begin_transaction().unwrap();
+    session.set_viewing_epoch(earlier);
+    let missing_node = NodeId::new(1_000_000);
+    let missing_edge = EdgeId::new(1_000_000);
+    let checks = [
+        (
+            "property lookup with no matches",
+            session
+                .find_nodes_by_property("age", &Value::Int64(-1))
+                .map(drop),
+        ),
+        ("existing node", session.get_node(id).map(drop)),
+        ("missing node", session.get_node(missing_node).map(drop)),
+        (
+            "existing property",
+            session.get_node_property(id, "age").map(drop),
+        ),
+        (
+            "missing property",
+            session.get_node_property(id, "missing").map(drop),
+        ),
+        ("missing edge", session.get_edge(missing_edge).map(drop)),
+        (
+            "missing node adjacency",
+            session
+                .get_node_edges(missing_node, Direction::Both, &[])
+                .map(drop),
+        ),
+        (
+            "missing node visibility",
+            session.node_exists(missing_node).map(drop),
+        ),
+        (
+            "missing edge visibility",
+            session.edge_exists(missing_edge).map(drop),
+        ),
+        (
+            "missing node degree",
+            session.get_degree(missing_node).map(drop),
+        ),
+        ("empty batch", session.get_nodes_batch(&[]).map(drop)),
+        (
+            "batch with missing node",
+            session.get_nodes_batch(&[id, missing_node]).map(drop),
+        ),
+    ];
+    for (caller, result) in checks {
+        let error = result.expect_err(caller);
+        let error = not_retained(error);
+        assert!(
+            error.contains(&format!(
+                "history before epoch {} is not retained",
+                floor.as_u64()
+            )),
+            "{caller}: {error}"
+        );
+    }
+    session.clear_viewing_epoch();
+    assert_eq!(
+        session.get_node_property(id, "age").unwrap(),
+        Some(Value::Int64(5))
+    );
+    let empty = session.get_nodes_batch(&[]).unwrap();
+    assert!(empty.is_empty(), "{empty:?}");
+    session.rollback().unwrap();
+}
+
+#[test]
+fn transaction_history_retained_direct_and_epoch_reads_exclude_pending_state() {
+    use grafeo_common::types::NodeId;
+    use grafeo_core::graph::Direction;
+    use std::collections::HashMap;
+
+    let (db, id, _) = transaction_history_fixture(HistoryRetention::Forever);
+    let other = db.create_node(&["Other"]).unwrap();
+    let edge = db
+        .create_edge_with_props(id, other, "LINK", [("weight", Value::Int64(1))])
+        .unwrap();
+    let earlier = db.current_epoch();
+    db.set_node_property(id, "age", Value::Int64(9)).unwrap();
+    let mut session = db.session();
+    session.begin_transaction().unwrap();
+    session
+        .set_node_property(id, "age", Value::Int64(99))
+        .unwrap();
+    let pending = session
+        .create_node_with_props(&["Person"], [("age", Value::Int64(77))])
+        .unwrap();
+    let pending_edge = session.create_edge(id, pending, "PENDING").unwrap();
+    session.set_viewing_epoch(earlier);
+
+    let historical = session.get_node(id).unwrap().unwrap();
+    assert_eq!(historical.id, id);
+    assert!(historical.has_label("Person"));
+    assert_eq!(historical.get_property("age"), Some(&Value::Int64(5)));
+    assert_eq!(
+        session.get_node_property(id, "age").unwrap(),
+        Some(Value::Int64(5))
+    );
+    assert_eq!(
+        session
+            .find_nodes_by_property("age", &Value::Int64(5))
+            .unwrap(),
+        [id]
+    );
+    let pending_matches = session
+        .find_nodes_by_property("age", &Value::Int64(99))
+        .unwrap();
+    assert!(pending_matches.is_empty(), "{pending_matches:?}");
+    let historical_edge = session.get_edge(edge).unwrap().unwrap();
+    assert_eq!(
+        (historical_edge.id, historical_edge.src, historical_edge.dst),
+        (edge, id, other)
+    );
+    assert_eq!(historical_edge.edge_type.as_str(), "LINK");
+    assert_eq!(
+        historical_edge.get_property("weight"),
+        Some(&Value::Int64(1))
+    );
+    assert_eq!(
+        session
+            .get_node_edges(id, Direction::Outgoing, &[])
+            .unwrap(),
+        [(other, edge)]
+    );
+    assert!(session.node_exists(id).unwrap());
+    assert!(session.edge_exists(edge).unwrap());
+    assert!(!session.node_exists(pending).unwrap());
+    assert!(!session.edge_exists(pending_edge).unwrap());
+    assert!(session.get_node(pending).unwrap().is_none());
+    assert!(session.get_edge(pending_edge).unwrap().is_none());
+    assert_eq!(session.get_degree(id).unwrap(), (1, 0));
+    let batch: Vec<_> = session
+        .get_nodes_batch(&[id, other, pending, NodeId::new(1_000_000)])
+        .unwrap()
+        .into_iter()
+        .map(|node| node.map(|node| (node.id, node.get_property("age").cloned())))
+        .collect();
+    assert_eq!(
+        batch,
+        [
+            Some((id, Some(Value::Int64(5)))),
+            Some((other, None)),
+            None,
+            None
+        ]
+    );
+
+    let query = "MATCH (p:Person) RETURN p.age ORDER BY p.age";
+    let parameter_query = "MATCH (p:Person) WHERE p.age >= $minimum RETURN p.age ORDER BY p.age";
+    for _ in 0..2 {
+        assert_eq!(
+            session.execute(query).unwrap().rows(),
+            &[vec![Value::Int64(5)]]
+        );
+        assert_eq!(
+            session
+                .execute_with_params(
+                    parameter_query,
+                    HashMap::from([("minimum".to_string(), Value::Int64(0))])
+                )
+                .unwrap()
+                .rows(),
+            &[vec![Value::Int64(5)]]
+        );
+    }
+    let profile = session
+        .execute("PROFILE MATCH (p:Person) RETURN p.age")
+        .unwrap();
+    assert_eq!(profile.profile.unwrap().root.rows, 1);
+    session.clear_viewing_epoch();
+    for _ in 0..2 {
+        assert_eq!(
+            session.execute_at_epoch(query, earlier).unwrap().rows(),
+            &[vec![Value::Int64(5)]]
+        );
+        assert_eq!(session.viewing_epoch(), None);
+        assert_eq!(
+            session
+                .execute_at_epoch_with_params(
+                    parameter_query,
+                    earlier,
+                    Some(HashMap::from([("minimum".to_string(), Value::Int64(0))])),
+                )
+                .unwrap()
+                .rows(),
+            &[vec![Value::Int64(5)]]
+        );
+        assert_eq!(session.viewing_epoch(), None);
+        assert_eq!(
+            session.execute(query).unwrap().rows(),
+            &[vec![Value::Int64(77)], vec![Value::Int64(99)]]
+        );
+    }
+    assert_eq!(
+        session.get_node_property(id, "age").unwrap(),
+        Some(Value::Int64(99))
+    );
+    assert!(session.node_exists(pending).unwrap());
+    assert!(session.edge_exists(pending_edge).unwrap());
+    assert_eq!(session.get_degree(id).unwrap(), (2, 0));
+    session.rollback().unwrap();
+    let reader = db.session();
+    assert_eq!(
+        reader.get_node_property(id, "age").unwrap(),
+        Some(Value::Int64(9))
+    );
+    assert!(!reader.node_exists(pending).unwrap());
+    assert!(!reader.edge_exists(pending_edge).unwrap());
+}
+
+#[test]
+fn transaction_history_stream_pin_lives_until_collection_or_drop() {
+    for collect in [false, true] {
+        let db = keeping(HistoryRetention::Off);
+        let result = db
+            .execute("INSERT (p:Person {age: 1}) RETURN id(p)")
+            .unwrap();
+        let Value::Int64(id) = result.rows()[0][0] else {
+            panic!("expected a node ID");
+        };
+        let id = grafeo_common::types::NodeId::new(u64::try_from(id).unwrap());
+        let earlier = db.current_epoch();
+        let bootstrap = db.as_of(earlier).unwrap();
+        db.execute("MATCH (p:Person) SET p.age = 5").unwrap();
+        let transaction_epoch = db.current_epoch();
+        let mut session = db.session();
+        session.begin_transaction().unwrap();
+        session.set_viewing_epoch(earlier);
+        let query = "MATCH (p:Person) RETURN p.age";
+        let stream = session.execute_streaming(query).unwrap();
+        drop(bootstrap);
+        session.clear_viewing_epoch();
+        db.set_node_property(id, "age", Value::Int64(9)).unwrap();
+        db.gc();
+        assert_eq!(
+            db.execute_at_epoch(query, earlier).unwrap().rows(),
+            &[vec![Value::Int64(1)]],
+            "the live stream pins its captured historical epoch"
+        );
+        assert_eq!(
+            session.get_node_property(id, "age").unwrap(),
+            Some(Value::Int64(5))
+        );
+        if collect {
+            assert_eq!(stream.collect().unwrap().rows(), &[vec![Value::Int64(1)]]);
+        } else {
+            drop(stream);
+        }
+        db.gc();
+        not_retained(
+            db.execute_at_epoch(query, earlier)
+                .expect_err("stream pin was released"),
+        );
+        assert_eq!(
+            session.execute(query).unwrap().rows(),
+            &[vec![Value::Int64(5)]],
+            "the transaction retains its newer start snapshot"
+        );
+        assert_eq!(
+            db.execute_at_epoch(query, transaction_epoch)
+                .unwrap()
+                .rows(),
+            &[vec![Value::Int64(5)]]
+        );
+        session.rollback().unwrap();
+        db.gc();
+        not_retained(
+            db.execute_at_epoch(query, transaction_epoch)
+                .expect_err("transaction snapshot pin was released"),
+        );
+        assert_eq!(db.execute(query).unwrap().rows(), &[vec![Value::Int64(9)]]);
+    }
+}
+
 /// A view pins its epoch: garbage collection keeps it while it lives, so a
 /// view outlives a window that moved past it, and a new view at that epoch
 /// is refused once it is gone.
@@ -452,4 +851,33 @@ mod crash {
         }
         assert!(completed, "a checkpoint has fewer than 16 crash points");
     }
+}
+
+/// A viewing epoch inside an open transaction reads no later than the
+/// transaction's own snapshot: a commit made after the transaction began
+/// stays out of sight, as it does without the viewing epoch.
+#[test]
+fn transaction_history_never_reads_past_the_transaction_snapshot() {
+    let (db, id, _) = transaction_history_fixture(HistoryRetention::Forever);
+    let mut session = db.session();
+    session.begin_transaction().unwrap();
+    db.execute("MATCH (p:Person) SET p.age = 9").unwrap();
+    for epoch in [db.current_epoch(), EpochId::new(u64::MAX)] {
+        session.set_viewing_epoch(epoch);
+        assert_eq!(
+            session
+                .execute("MATCH (p:Person) RETURN p.age")
+                .unwrap()
+                .rows(),
+            &[vec![Value::Int64(5)]],
+            "a query at {epoch:?}"
+        );
+        assert_eq!(
+            session.get_node_property(id, "age").unwrap(),
+            Some(Value::Int64(5)),
+            "a direct read at {epoch:?}"
+        );
+    }
+    session.clear_viewing_epoch();
+    session.rollback().unwrap();
 }

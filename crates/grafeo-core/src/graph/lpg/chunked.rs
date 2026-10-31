@@ -2759,4 +2759,44 @@ mod tests {
         good.push(Meta);
         load_crafted(good).unwrap();
     }
+
+    /// An edge whose source or target is not in the node table does not fail
+    /// the load: a replay of a 0.5.43 WAL directory wrote such edges into
+    /// real 0.5.x and 0.6 beta files, so the reader leaves the edge out and
+    /// loads the rest (`rowgroup::load`'s `an_edge_without_its_end_is_left_out`
+    /// checks the migrated store on such a file).
+    #[test]
+    fn an_edge_with_an_end_outside_the_node_table_is_left_out() {
+        use Crafted::{Labels, Meta};
+
+        // Nodes 0 and 1 (the metadata's next node id is 4, so 2 and 3 are
+        // ids without a node).
+        let two_nodes = || Labels {
+            row_start: 0,
+            row_count: 2,
+            rows: vec![(0, "0"), (1, "0")],
+        };
+        let section = |edge: (u32, i64, i64, i64)| -> Vec<Crafted> {
+            [vec![two_nodes()], edge_columns(vec![edge], 1), vec![Meta]]
+                .into_iter()
+                .flatten()
+                .collect()
+        };
+        let failures: Vec<String> = [
+            ("a source past the node table", (0, 7, 1, 0)),
+            ("a target past the node table", (0, 0, 7, 0)),
+            ("a source without a node below the next id", (0, 3, 1, 0)),
+            ("a target without a node below the next id", (0, 0, 2, 0)),
+            ("both ends in the node table", (0, 0, 1, 0)),
+            ("a self-loop", (0, 1, 1, 0)),
+        ]
+        .into_iter()
+        .filter_map(|(name, edge)| {
+            load_crafted(section(edge))
+                .err()
+                .map(|error| format!("{name}: {error}"))
+        })
+        .collect();
+        assert!(failures.is_empty(), "\n{}", failures.join("\n"));
+    }
 }

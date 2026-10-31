@@ -82,11 +82,11 @@ RETURN a.name, b.name
 
 ```sql
 -- Match any of multiple types
-MATCH (a)-[:KNOWS|:WORKS_WITH]->(b)
+MATCH (a)-[:KNOWS|WORKS_WITH]->(b)
 RETURN a.name, b.name
 
 -- Match with type variable
-MATCH (a)-[r:KNOWS|:WORKS_WITH]->(b)
+MATCH (a)-[r:KNOWS|WORKS_WITH]->(b)
 RETURN a.name, type(r), b.name
 ```
 
@@ -190,11 +190,11 @@ The ISO standard uses curly-brace syntax `{m,n}` for path quantifiers, as an alt
 
 ```sql
 -- ISO: exactly 2 hops
-MATCH (a:Person)-[:KNOWS]{2}(b:Person)
+MATCH (a:Person)-[:KNOWS]->{2}(b:Person)
 RETURN a.name, b.name
 
 -- ISO: 1 to 3 hops
-MATCH (a:Person)-[:KNOWS]{1,3}(b:Person)
+MATCH (a:Person)-[:KNOWS]->{1,3}(b:Person)
 RETURN a.name, b.name
 
 -- Cypher equivalent: 1 to 3 hops

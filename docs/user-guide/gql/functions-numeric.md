@@ -142,3 +142,6 @@ RETURN p.name,
     p.salary * 12 * 0.7 AS after_tax,
     p.bonus % 1000 AS remainder
 ```
+
+An integer or decimal `/` or `%` by zero fails with `22012`. A float one keeps its IEEE result: `1.0e0 / 0.0e0` is
+`Infinity` and `1.5e0 % 0` is NaN.

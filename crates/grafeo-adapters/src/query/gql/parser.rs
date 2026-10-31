@@ -6,7 +6,6 @@ use super::lexer::{Lexer, Token, TokenKind};
 use crate::query::keywords::unescape_string;
 use crate::query::limits::{Chain, Nesting, nesting_error_message};
 use crate::query::schema::IndexOptionValue;
-use grafeo_common::storage::value_codec::MAX_PROPERTY_VALUE_DEPTH;
 use grafeo_common::types::{Decimal, DecimalError, DecimalType, MAX_DECIMAL_DIGITS};
 use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind, Result, SourceSpan};
 
@@ -41,14 +40,17 @@ fn string_literal_value(text: &str) -> String {
 type GraphTypeBody = (Vec<String>, Vec<String>, Vec<InlineElementType>, bool);
 
 /// The names of the node types and of the edge types among `elements`, in
-/// order.
+/// order of their first occurrence, each once.
 fn element_type_names(elements: &[InlineElementType]) -> (Vec<String>, Vec<String>) {
-    let mut node_types = Vec::new();
-    let mut edge_types = Vec::new();
+    let mut node_types: Vec<String> = Vec::new();
+    let mut edge_types: Vec<String> = Vec::new();
     for element in elements {
-        match element {
-            InlineElementType::Node { name, .. } => node_types.push(name.clone()),
-            InlineElementType::Edge { name, .. } => edge_types.push(name.clone()),
+        let (names, name) = match element {
+            InlineElementType::Node { name, .. } => (&mut node_types, name),
+            InlineElementType::Edge { name, .. } => (&mut edge_types, name),
+        };
+        if !names.contains(name) {
+            names.push(name.clone());
         }
     }
     (node_types, edge_types)
@@ -64,6 +66,9 @@ pub struct Parser<'a> {
     /// How deep the statement parsed so far nests (see
     /// [`MAX_NESTING_DEPTH`](crate::query::limits::MAX_NESTING_DEPTH)).
     nesting: Nesting,
+    /// The quote its advice writes a delimited name in: a backtick in GQL, a
+    /// double quote in a SQL/PGQ `GRAPH_TABLE` (SQL has no backtick).
+    name_quote: char,
 }
 
 impl<'a> Parser<'a> {
@@ -78,7 +83,35 @@ impl<'a> Parser<'a> {
             peeked_second: None,
             source: input,
             nesting: Nesting::default(),
+            name_quote: '`',
         }
+    }
+
+    /// Parses the `[OPTIONAL] MATCH` clause whose first token starts at `at`
+    /// in `source`, as a SQL/PGQ `GRAPH_TABLE` holds one, and returns it
+    /// with the span of the token after it, where the caller's own parser
+    /// goes on. Its positions are `source`'s.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the clause is not GQL's `MATCH` clause syntax.
+    pub fn parse_match_clause_at(
+        source: &'a str,
+        at: SourceSpan,
+    ) -> Result<(MatchClause, SourceSpan)> {
+        let mut lexer = Lexer::starting_at(source, at);
+        let current = lexer.next_token();
+        let mut parser = Self {
+            lexer,
+            current,
+            peeked: None,
+            peeked_second: None,
+            source,
+            nesting: Nesting::default(),
+            name_quote: '"',
+        };
+        let clause = parser.parse_match_clause()?;
+        Ok((clause, parser.current.span))
     }
 
     /// Enters one level of nesting, or fails past the nesting limit.
@@ -132,6 +165,7 @@ impl<'a> Parser<'a> {
     /// keywords that are commonly used as labels or properties.
     fn is_label_or_type_name(&self) -> bool {
         self.is_contextual_keyword()
+            || self.is_double_quoted_name()
             || matches!(
                 self.current.kind,
                 TokenKind::Identifier
@@ -234,6 +268,15 @@ impl<'a> Parser<'a> {
                 | TokenKind::By
                 | TokenKind::Skip
                 | TokenKind::Limit
+                // ISO GQL non-reserved words (<non-reserved word>): path
+                // modes and the rest, names wherever a name may stand
+                | TokenKind::Acyclic
+                | TokenKind::Groups
+                | TokenKind::Ordinality
+                | TokenKind::Shortest
+                | TokenKind::Simple
+                | TokenKind::Trail
+                | TokenKind::Walk
         )
     }
 
@@ -244,9 +287,18 @@ impl<'a> Parser<'a> {
         let text = &self.current.text;
         if self.current.kind == TokenKind::QuotedIdentifier {
             text[1..text.len() - 1].replace("``", "`")
+        } else if self.is_double_quoted_name() {
+            string_literal_value(text)
         } else {
             text.clone()
         }
+    }
+
+    /// Whether the current token is a double-quoted name (ISO GQL's
+    /// delimited identifier, `"Graph:CONTAINS"`), which stands where a
+    /// string literal cannot, as a label or an edge type.
+    fn is_double_quoted_name(&self) -> bool {
+        self.current.kind == TokenKind::String && self.current.text.starts_with('"')
     }
 
     /// Returns `true` if the current token is either the dedicated `kind`
@@ -1094,11 +1146,7 @@ impl<'a> Parser<'a> {
         self.expect(TokenKind::For)?;
 
         // Parse variable name
-        if !self.is_identifier() {
-            return Err(self.error("Expected variable name after FOR"));
-        }
-        let alias = self.get_identifier_name();
-        self.advance();
+        let alias = self.parse_binding_name("variable name after FOR")?;
 
         // Expect IN keyword
         self.expect(TokenKind::In)?;
@@ -1319,11 +1367,7 @@ impl<'a> Parser<'a> {
         self.advance(); // consume LET
         let mut bindings = Vec::new();
         loop {
-            if !self.is_identifier() {
-                return Err(self.error("Expected variable name in LET clause"));
-            }
-            let var = self.get_identifier_name();
-            self.advance();
+            let var = self.parse_binding_name("variable name in LET clause")?;
             self.expect(TokenKind::Eq)?;
             let expr = self.parse_expression()?;
             bindings.push((var, expr));
@@ -1966,17 +2010,19 @@ impl<'a> Parser<'a> {
         // and G050 WHERE inside `((a)-[e]->(b) WHERE e.w > 5){2,5}`.
         if self.current.kind == TokenKind::LParen {
             let peek = self.peek_kind();
-            if matches!(
+            // A path mode word is the mode of a parenthesized path pattern
+            // only when a path pattern follows it (`(TRAIL (a)-->(b))`);
+            // otherwise it names the node (`(trail:P)`), a non-reserved word.
+            let mode_starts_a_pattern = matches!(
                 peek,
-                TokenKind::LParen
-                    | TokenKind::Walk
-                    | TokenKind::Trail
-                    | TokenKind::Simple
-                    | TokenKind::Acyclic
-                    | TokenKind::Minus
-                    | TokenKind::LeftArrow
-                    | TokenKind::Tilde
-            ) {
+                TokenKind::Walk | TokenKind::Trail | TokenKind::Simple | TokenKind::Acyclic
+            ) && self.second_starts_a_path_pattern();
+            if mode_starts_a_pattern
+                || matches!(
+                    peek,
+                    TokenKind::LParen | TokenKind::Minus | TokenKind::LeftArrow | TokenKind::Tilde
+                )
+            {
                 return self.parse_parenthesized_pattern();
             }
             // G048: `(identifier = ...)` is a subpath variable declaration
@@ -2050,6 +2096,7 @@ impl<'a> Parser<'a> {
                 subpath_var,
                 path_mode,
                 where_clause,
+                ..
             } = sub
             {
                 // Parse optional trailing target node: ...{2,5}(b)
@@ -2059,6 +2106,23 @@ impl<'a> Parser<'a> {
                     None
                 };
 
+                // A path pattern repeats as a whole: its anchors are the
+                // first and the last node only, and its own end nodes stay
+                // the ends of each repetition.
+                if matches!(inner.as_ref(), Pattern::Path(_)) {
+                    return Ok(Pattern::Quantified {
+                        pattern: inner,
+                        min,
+                        max,
+                        subpath_var,
+                        path_mode,
+                        where_clause,
+                        anchors: QuantifiedAnchors {
+                            source: Some(node),
+                            target: trailing_target,
+                        },
+                    });
+                }
                 // Merge outer anchors into the inner pattern:
                 // Replace inner source with `node`, replace inner last target with trailing_target.
                 let merged = self.merge_quantified_anchors(node, *inner, trailing_target);
@@ -2070,6 +2134,7 @@ impl<'a> Parser<'a> {
                     subpath_var,
                     path_mode,
                     where_clause,
+                    anchors: QuantifiedAnchors::default(),
                 })
             } else {
                 // Non-quantified parenthesized pattern after a node: treat the
@@ -2191,8 +2256,25 @@ impl<'a> Parser<'a> {
             Pattern::Union(patterns)
         };
 
-        // Check for quantifier: {min,max} or {n}
-        if self.current.kind == TokenKind::LBrace {
+        // Check for quantifier: {min,max}, {n}, or the abbreviations `*`
+        // ({0,}) and `+` ({1,}) of ISO/IEC 39075:2024 16.11.
+        let abbreviated = match self.current.kind {
+            TokenKind::Star => Some(0),
+            TokenKind::Plus => Some(1),
+            _ => None,
+        };
+        if let Some(min) = abbreviated {
+            self.advance();
+            Ok(Pattern::Quantified {
+                pattern: Box::new(inner),
+                min,
+                max: None,
+                subpath_var,
+                path_mode,
+                where_clause,
+                anchors: QuantifiedAnchors::default(),
+            })
+        } else if self.current.kind == TokenKind::LBrace {
             let (min, max) = self.parse_path_quantifier()?;
             Ok(Pattern::Quantified {
                 pattern: Box::new(inner),
@@ -2201,6 +2283,7 @@ impl<'a> Parser<'a> {
                 subpath_var,
                 path_mode,
                 where_clause,
+                anchors: QuantifiedAnchors::default(),
             })
         } else if subpath_var.is_some() || path_mode.is_some() || where_clause.is_some() {
             // Has parenthesized-pattern features but no quantifier: treat as {1,1}
@@ -2211,6 +2294,7 @@ impl<'a> Parser<'a> {
                 subpath_var,
                 path_mode,
                 where_clause,
+                anchors: QuantifiedAnchors::default(),
             })
         } else {
             // No quantifier, no extra features: just a grouped pattern (or union)
@@ -2221,10 +2305,19 @@ impl<'a> Parser<'a> {
     fn parse_node_pattern(&mut self) -> Result<NodePattern> {
         self.expect(TokenKind::LParen)?;
 
-        let variable = if self.is_identifier() {
+        // `(IS Label ...)` is an anonymous node with a label expression: IS
+        // names the node only when what follows cannot start one.
+        let is_starts_labels = self.current.kind == TokenKind::Is
+            && !matches!(
+                self.peek_kind(),
+                TokenKind::Colon | TokenKind::RParen | TokenKind::LBrace | TokenKind::Where
+            );
+        let variable = if self.is_identifier() && !is_starts_labels {
             let name = self.get_identifier_name();
             self.advance();
             Some(name)
+        } else if self.is_reserved_word_name() {
+            return Err(self.not_a_name_error("node variable"));
         } else {
             None
         };
@@ -2232,7 +2325,11 @@ impl<'a> Parser<'a> {
         let mut labels = Vec::new();
         let mut label_expression = None;
 
-        if self.current.kind == TokenKind::Is {
+        // A colon takes a label expression as IS does (ISO GQL): `(n:A & B)`,
+        // `(n:A | B)`; `(n:A:B)` stays the list of labels.
+        let colon_expression =
+            self.current.kind == TokenKind::Colon && self.is_label_expression_after_colon();
+        if self.current.kind == TokenKind::Is || colon_expression {
             // GQL IS syntax: (n IS Person | Employee)
             self.advance();
             label_expression = Some(self.parse_label_expression()?);
@@ -2387,8 +2484,9 @@ impl<'a> Parser<'a> {
             QueryError::new(
                 QueryErrorKind::Syntax,
                 format!(
-                    "[GQL] {what}: write :`{first}{joint}{second}` for the type named \
-                     {first}{joint}{second}, or :{first}|{second} to match either type"
+                    "[GQL] {what}: write :{quote}{first}{joint}{second}{quote} for the type \
+                     named {first}{joint}{second}, or :{first}|{second} to match either type",
+                    quote = self.name_quote
                 ),
             )
             .with_span(at)
@@ -2417,6 +2515,9 @@ impl<'a> Parser<'a> {
                     if self.current.kind == TokenKind::LBracket {
                         self.advance();
 
+                        if self.is_reserved_word_name() {
+                            return Err(self.not_a_name_error("edge variable"));
+                        }
                         // Parse variable name if present
                         // Variable is followed by : (type), * (quantifier), { (properties),
                         // WHERE (element filter), or ] (end)
@@ -2489,6 +2590,9 @@ impl<'a> Parser<'a> {
                     if self.current.kind == TokenKind::LBracket {
                         self.advance();
 
+                        if self.is_reserved_word_name() {
+                            return Err(self.not_a_name_error("edge variable"));
+                        }
                         // Parse variable name if present
                         // Variable is followed by : (type), * (quantifier), { (properties),
                         // WHERE (element filter), or ] (end)
@@ -2682,6 +2786,14 @@ impl<'a> Parser<'a> {
                     max_hops = qmax;
                 }
             }
+        } else if matches!(
+            self.current.kind,
+            TokenKind::Plus | TokenKind::Star | TokenKind::LBrace
+        ) {
+            return Err(self.error(
+                "An edge pattern takes one quantifier: write it inside the brackets or after \
+                 the edge, not both",
+            ));
         }
 
         let target = self.parse_node_pattern()?;
@@ -2829,7 +2941,8 @@ impl<'a> Parser<'a> {
             }
             self.advance(); // consume {
             if self.current.kind == TokenKind::Comma {
-                // {,n}
+                // {,n}: from zero, as the omitted lower bound of a general
+                // quantifier is (ISO/IEC 39075:2024 16.11)
                 self.advance();
                 let max_text = self.current.text.clone();
                 let max: u32 = max_text
@@ -2837,7 +2950,7 @@ impl<'a> Parser<'a> {
                     .map_err(|_| self.error("Invalid path length"))?;
                 self.advance();
                 self.expect(TokenKind::RBrace)?;
-                return Ok((Some(1), Some(max)));
+                return Ok((Some(0), Some(max)));
             }
             let min_text = self.current.text.clone();
             let min: u32 = min_text
@@ -2859,6 +2972,11 @@ impl<'a> Parser<'a> {
             let max: u32 = max_text
                 .parse()
                 .map_err(|_| self.error("Invalid path length"))?;
+            if max < min {
+                return Err(self.error(&format!(
+                    "The quantifier {{{min},{max}}}'s upper bound is below its lower bound"
+                )));
+            }
             self.advance();
             self.expect(TokenKind::RBrace)?;
             return Ok((Some(min), Some(max)));
@@ -3266,12 +3384,7 @@ impl<'a> Parser<'a> {
 
         let alias = if self.current.kind == TokenKind::As {
             self.advance();
-            if !self.is_identifier() {
-                return Err(self.error("Expected alias name"));
-            }
-            let name = self.get_identifier_name();
-            self.advance();
-            Some(name)
+            Some(self.parse_binding_name("alias name")?)
         } else {
             None
         };
@@ -3281,6 +3394,73 @@ impl<'a> Parser<'a> {
             alias,
             span: None,
         })
+    }
+
+    /// Whether the current token is a reserved word written where a name
+    /// stands, that is followed by what follows a name in a pattern (`:`,
+    /// `)`, `]`, `{` or WHERE): `(like:Person)`, `-[like:LIKES]-`.
+    fn is_reserved_word_name(&mut self) -> bool {
+        let text = &self.current.text;
+        if self.is_identifier()
+            || text.is_empty()
+            || !text.chars().all(|c| c.is_ascii_alphabetic() || c == '_')
+        {
+            return false;
+        }
+        matches!(
+            self.peek_kind(),
+            TokenKind::Colon
+                | TokenKind::RParen
+                | TokenKind::RBracket
+                | TokenKind::LBrace
+                | TokenKind::Where
+        )
+    }
+
+    /// Whether the current `:` starts a label expression: one that opens with
+    /// `!`, `(` or `%`, or a label followed by `&` or `|`.
+    fn is_label_expression_after_colon(&mut self) -> bool {
+        matches!(
+            self.peek_kind(),
+            TokenKind::Exclamation | TokenKind::LParen | TokenKind::Percent
+        ) || matches!(
+            self.peek_second_kind(),
+            TokenKind::Ampersand | TokenKind::Pipe
+        )
+    }
+
+    /// A name a clause binds (an alias after `AS`, a `LET` or `FOR`
+    /// variable): an identifier, a backquoted name, or a double-quoted one
+    /// (ISO GQL's delimited identifier, which stands where a string literal
+    /// cannot). A reserved word is an error that says to quote it; anything
+    /// else is "Expected {what}".
+    fn parse_binding_name(&mut self, what: &str) -> Result<String> {
+        if self.is_identifier() {
+            let name = self.get_identifier_name();
+            self.advance();
+            return Ok(name);
+        }
+        if self.current.kind == TokenKind::String && self.current.text.starts_with('"') {
+            let name = string_literal_value(&self.current.text);
+            self.advance();
+            return Ok(name);
+        }
+        Err(self.not_a_name_error(what))
+    }
+
+    /// The error for a token where a name stands: a reserved word (a keyword
+    /// spelled as letters) is named with how to quote it, anything else is
+    /// "Expected {what}".
+    fn not_a_name_error(&self, what: &str) -> Error {
+        let text = &self.current.text;
+        if !text.is_empty() && text.chars().all(|c| c.is_ascii_alphabetic() || c == '_') {
+            let word = text.to_lowercase();
+            self.error(&format!(
+                "'{word}' is a reserved word in GQL: quote it as `{word}` to use it as a name"
+            ))
+        } else {
+            self.error(&format!("Expected {what}"))
+        }
     }
 
     /// Parses `FETCH FIRST|NEXT n ROWS|ROW ONLY` as a LIMIT expression.
@@ -4266,11 +4446,14 @@ impl<'a> Parser<'a> {
             }
             // Handle type() function - must be checked BEFORE is_identifier() since TYPE is a contextual keyword
             TokenKind::Type => {
+                // A variable keeps its spelling (`LET TYPE = 2 RETURN TYPE`);
+                // the function is `type`.
+                let written = self.current.text.clone();
                 let name = "type".to_string();
                 self.advance();
                 if self.current.kind != TokenKind::LParen {
                     // If not followed by (, treat as identifier/variable
-                    return Ok(Expression::Variable(name));
+                    return Ok(Expression::Variable(written));
                 }
                 self.advance();
                 let mut args = Vec::new();
@@ -5264,6 +5447,9 @@ impl<'a> Parser<'a> {
                 self.advance();
                 self.expect(TokenKind::Index)?;
 
+                // Optional IF NOT EXISTS, as for CREATE INDEX
+                let if_not_exists = self.try_parse_if_not_exists();
+
                 // Parse index name
                 if !self.is_identifier() {
                     return Err(self.error("Expected index name"));
@@ -5336,6 +5522,7 @@ impl<'a> Parser<'a> {
                         property,
                         dimensions,
                         metric,
+                        if_not_exists,
                         span: None,
                     },
                 ))
@@ -5976,7 +6163,6 @@ impl<'a> Parser<'a> {
     ) -> Result<Vec<InlineElementType>> {
         let mut types = Vec::new();
         // Track which node type names we've already emitted so we don't duplicate them.
-        let mut seen_node_types = std::collections::HashSet::new();
 
         while self.current.kind != close && self.current.kind != TokenKind::Eof {
             // Parse the first node pattern: (:Label {props})
@@ -6048,23 +6234,20 @@ impl<'a> Parser<'a> {
                     (vec![effective_src], vec![effective_tgt])
                 };
 
-                // Add node types (deduplicated)
-                if seen_node_types.insert(src_label.clone()) {
-                    types.push(InlineElementType::Node {
-                        name: src_label,
-                        properties: src_props,
-                        key_labels: Vec::new(),
-                        is_reference: false,
-                    });
-                }
-                if seen_node_types.insert(tgt_label.clone()) {
-                    types.push(InlineElementType::Node {
-                        name: tgt_label,
-                        properties: tgt_props,
-                        key_labels: Vec::new(),
-                        is_reference: false,
-                    });
-                }
+                // Each occurrence of a node type, with its properties: the
+                // engine merges the occurrences of one type.
+                types.push(InlineElementType::Node {
+                    name: src_label,
+                    properties: src_props,
+                    key_labels: Vec::new(),
+                    is_reference: false,
+                });
+                types.push(InlineElementType::Node {
+                    name: tgt_label,
+                    properties: tgt_props,
+                    key_labels: Vec::new(),
+                    is_reference: false,
+                });
 
                 // Add edge type
                 types.push(InlineElementType::Edge {
@@ -6077,14 +6260,12 @@ impl<'a> Parser<'a> {
                 });
             } else {
                 // Standalone node pattern
-                if seen_node_types.insert(src_label.clone()) {
-                    types.push(InlineElementType::Node {
-                        name: src_label,
-                        properties: src_props,
-                        key_labels: Vec::new(),
-                        is_reference: false,
-                    });
-                }
+                types.push(InlineElementType::Node {
+                    name: src_label,
+                    properties: src_props,
+                    key_labels: Vec::new(),
+                    is_reference: false,
+                });
             }
 
             // Optional comma separator
@@ -6509,7 +6690,8 @@ impl<'a> Parser<'a> {
     /// (#569).
     ///
     /// The `LIST<` levels are counted, not recursed into, and at most
-    /// [`MAX_PROPERTY_VALUE_DEPTH`] are accepted, as deep as a property value
+    /// [`MAX_PROPERTY_VALUE_DEPTH`](grafeo_common::storage::value_codec::MAX_PROPERTY_VALUE_DEPTH)
+    /// are accepted (see `query::schema::list_type_depth_error`), as deep as a property value
     /// may be: a type of any depth is refused without a stack overflow.
     ///
     /// A name that is not a property type Grafeo supports is refused
@@ -6517,7 +6699,9 @@ impl<'a> Parser<'a> {
     /// used to declare an `ANY` property. Returns the type's spelling and
     /// what it takes as a `DEFAULT`.
     fn parse_property_type_name(&mut self) -> Result<(String, PropertyTypeKind)> {
-        use crate::query::schema::{property_type_kind, unknown_property_type};
+        use crate::query::schema::{
+            datetime_type_prefix, list_type_depth_error, property_type_kind, unknown_property_type,
+        };
 
         let mut levels = 0;
         let (mut element, kind) = loop {
@@ -6528,18 +6712,15 @@ impl<'a> Parser<'a> {
 
             if name.eq_ignore_ascii_case("LIST") && self.peek_kind() == TokenKind::Lt {
                 levels += 1;
-                if levels > MAX_PROPERTY_VALUE_DEPTH {
-                    return Err(self.error(&format!(
-                        "A property type nests at most {MAX_PROPERTY_VALUE_DEPTH} LIST<...> levels"
-                    )));
+                if let Some(message) = list_type_depth_error(levels) {
+                    return Err(self.error(&message));
                 }
                 self.advance(); // LIST
                 self.advance(); // <
                 continue;
             }
-            if name.eq_ignore_ascii_case("ZONED") || name.eq_ignore_ascii_case("LOCAL") {
+            if let Some(prefix) = datetime_type_prefix(&name) {
                 self.advance();
-                let prefix = name.to_ascii_uppercase();
                 if !self.try_accept_identifier_keyword("DATETIME") {
                     return Err(self.error(&format!("Expected DATETIME after {prefix}")));
                 }
@@ -7004,6 +7185,18 @@ impl<'a> Parser<'a> {
             .as_ref()
             .expect("peeked_second token was just populated")
             .kind
+    }
+
+    /// Whether the token after the next one starts a path pattern after a
+    /// path mode: `(`, or the `PATH` or `PATHS` the mode may be followed by.
+    fn second_starts_a_path_pattern(&mut self) -> bool {
+        if self.peek_second_kind() == TokenKind::LParen {
+            return true;
+        }
+        self.peeked_second.as_ref().is_some_and(|token| {
+            token.kind == TokenKind::Identifier
+                && matches!(token.text.to_uppercase().as_str(), "PATH" | "PATHS")
+        })
     }
 
     /// Returns the uppercased text of the peeked token.
@@ -11432,7 +11625,10 @@ mod tests {
             assert_eq!(stmt.name, "social");
             assert!(stmt.node_types.contains(&"Person".to_string()));
             assert!(stmt.edge_types.contains(&"KNOWS".to_string()));
-            // Should have Person node type and KNOWS edge type
+            // `inline_types` holds every occurrence (the session merges a
+            // repeated type): Person as the source and as the target, then
+            // the KNOWS edge. `node_types` names Person once.
+            assert_eq!(stmt.node_types, ["Person"]);
             let node_count = stmt
                 .inline_types
                 .iter()
@@ -11443,10 +11639,7 @@ mod tests {
                 .iter()
                 .filter(|t| matches!(t, InlineElementType::Edge { .. }))
                 .count();
-            assert_eq!(
-                node_count, 1,
-                "Should have 1 node type (Person, deduplicated)"
-            );
+            assert_eq!(node_count, 2, "Person, once per occurrence");
             assert_eq!(edge_count, 1, "Should have 1 edge type (KNOWS)");
             // Check KNOWS edge has source/target
             for t in &stmt.inline_types {
@@ -11486,13 +11679,21 @@ mod tests {
             assert!(stmt.node_types.contains(&"City".to_string()));
             assert!(stmt.edge_types.contains(&"KNOWS".to_string()));
             assert!(stmt.edge_types.contains(&"LIVES_IN".to_string()));
-            // Person should appear only once despite being in two patterns
-            let node_count = stmt
-                .inline_types
-                .iter()
-                .filter(|t| matches!(t, InlineElementType::Node { .. }))
-                .count();
-            assert_eq!(node_count, 2, "Should have 2 node types (Person, City)");
+            // `inline_types` holds every occurrence, in pattern order (the
+            // session merges a repeated type); `node_types` names each once.
+            assert_eq!(stmt.node_types, ["Person", "City"]);
+            let names: Vec<&str> =
+                stmt.inline_types
+                    .iter()
+                    .map(|t| match t {
+                        InlineElementType::Node { name, .. }
+                        | InlineElementType::Edge { name, .. } => name.as_str(),
+                    })
+                    .collect();
+            assert_eq!(
+                names,
+                ["Person", "Person", "KNOWS", "Person", "City", "LIVES_IN"]
+            );
         } else {
             panic!("Expected CreateGraphType");
         }
@@ -11616,24 +11817,28 @@ mod tests {
                 } => format!("{source_node_types:?}-{name}->{target_node_types:?} {properties:?}"),
             })
             .collect();
-        assert_eq!(declared.len(), 4, "{declared:#?}");
+        // Every occurrence, in pattern order: each pattern's nodes, then its
+        // edge. The session merges the repeated City and Country.
+        assert_eq!(declared.len(), 7, "{declared:#?}");
         assert!(
             declared[0].starts_with("City ")
                 && declared[0].contains("name: \"name\"")
                 && declared[0].contains("default_value: Some(\"'NL'\")"),
             "{declared:#?}"
         );
+        assert_eq!(declared[1], "City []", "{declared:#?}");
         assert!(
-            declared[1].starts_with("[\"City\"]-ROUTE->[\"City\"]")
-                && declared[1].contains("name: \"km\""),
+            declared[2].starts_with("[\"City\"]-ROUTE->[\"City\"]")
+                && declared[2].contains("name: \"km\""),
             "{declared:#?}"
         );
         assert!(
-            declared[2].starts_with("Country ") && declared[2].contains("name: \"code\""),
+            declared[3].starts_with("Country ") && declared[3].contains("name: \"code\""),
             "{declared:#?}"
         );
-        assert!(
-            declared[3].starts_with("[\"Country\"]-CAPITAL->[\"City\"]"),
+        assert_eq!(declared[4..6], ["City []", "Country []"], "{declared:#?}");
+        assert_eq!(
+            declared[6], "[\"Country\"]-CAPITAL->[\"City\"] []",
             "{declared:#?}"
         );
     }

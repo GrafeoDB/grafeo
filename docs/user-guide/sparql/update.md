@@ -35,6 +35,10 @@ INSERT DATA {
 }
 ```
 
+A triple whose subject is a literal, or whose predicate is not an IRI, fails `INSERT DATA` with an error naming the
+triple, and so it does in N-Triples loading and `batch_insert_rdf`. An `INSERT` template (`INSERT { ... } WHERE`)
+skips such a triple instead, as SPARQL 1.1 Update says.
+
 Duplicate triples are silently skipped.
 
 ## DELETE DATA

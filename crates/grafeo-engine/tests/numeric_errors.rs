@@ -405,9 +405,9 @@ fn a_sum_that_does_not_fit_is_out_of_range() {
             "UNWIND [$min, -1] AS x RETURN sum(x) AS s",
             "UNWIND [$max, 1, 1] AS x RETURN sum(DISTINCT x) AS s",
             "UNWIND [[1, $max], [1, 1], [2, 5]] AS r RETURN r[0] AS g, sum(r[1]) AS s",
-            // Decimals past 38 digits, in a sum and in an average.
+            // A decimal sum past 38 digits (an average of the same rows
+            // fits: see `a_sum_that_fits_keeps_its_running_total`).
             "UNWIND [$big, $big] AS x RETURN sum(x) AS s",
-            "UNWIND [$big, $big] AS x RETURN avg(x) AS s",
             "UNWIND [1, $big, $big] AS x RETURN sum(x) AS s",
         ] {
             out_of_range(&db, language, query, "numeric value out of range: sum");
@@ -441,6 +441,15 @@ fn a_sum_that_fits_keeps_its_running_total() {
             (
                 "UNWIND [$max, $max, $one] AS x RETURN sum(x) AS s",
                 d("18446744073709551615.5"),
+            ),
+            // An average is never beyond its largest row (#669).
+            (
+                "UNWIND [$big, $big] AS x RETURN avg(x) AS s",
+                d("90000000000000000000000000000000000000"),
+            ),
+            (
+                "UNWIND [$big, $big, -$big] AS x RETURN sum(x) AS s",
+                d("90000000000000000000000000000000000000"),
             ),
         ] {
             assert_eq!(

@@ -35,11 +35,11 @@ fn scanned(result: &QueryResult) -> u64 {
 #[test]
 fn a_count_reports_the_rows_it_read_not_the_one_it_returns() {
     let db = graph();
-    let result = db.execute("MATCH (n:Person) RETURN count(n)").unwrap();
+    let result = db.execute("MATCH (n:Person) RETURN count(n.id)").unwrap();
     assert_eq!(result.row_count(), 1);
     assert_eq!(scanned(&result), 1_000, "the label scan reads every Person");
 
-    let result = db.execute("MATCH (n) RETURN count(n)").unwrap();
+    let result = db.execute("MATCH (n) RETURN count(n.id)").unwrap();
     assert_eq!(
         scanned(&result),
         1_010,
@@ -128,8 +128,35 @@ fn a_transaction_reports_its_reads_too() {
     let mut session = db.session();
     session.begin_transaction().unwrap();
     session.execute("INSERT (:Person {id: 1000})").unwrap();
-    let result = session.execute("MATCH (n:Person) RETURN count(n)").unwrap();
+    let result = session
+        .execute("MATCH (n:Person) RETURN count(n.id)")
+        .unwrap();
     assert_eq!(scanned(&result), 1_001, "its own pending node included");
+    session.rollback().unwrap();
+}
+
+/// A bare count of a label is answered from the kept counts: it reads no
+/// node. In a transaction with its own writes the counts do not hold, the
+/// count scans the label, and reports that scan.
+#[test]
+fn a_bare_label_count_reports_what_it_read() {
+    let db = graph();
+    let result = db.execute("MATCH (n:Person) RETURN count(n)").unwrap();
+    assert_eq!(
+        result.rows()[0][0],
+        grafeo_common::types::Value::Int64(1_000)
+    );
+    assert_eq!(scanned(&result), 0, "from the kept counts");
+
+    let mut session = db.session();
+    session.begin_transaction().unwrap();
+    session.execute("INSERT (:Person {id: 1000})").unwrap();
+    let result = session.execute("MATCH (n:Person) RETURN count(n)").unwrap();
+    assert_eq!(
+        result.rows()[0][0],
+        grafeo_common::types::Value::Int64(1_001)
+    );
+    assert_eq!(scanned(&result), 1_001, "the scan it fell back to");
     session.rollback().unwrap();
 }
 
@@ -138,9 +165,11 @@ fn a_transaction_reports_its_reads_too() {
 fn cypher_counts_the_same_reads() {
     let db = graph();
     let session = db.session();
-    let gql = session.execute("MATCH (n:Person) RETURN count(n)").unwrap();
+    let gql = session
+        .execute("MATCH (n:Person) RETURN count(n.id)")
+        .unwrap();
     let cypher = session
-        .execute_cypher("MATCH (n:Person) RETURN count(n)")
+        .execute_cypher("MATCH (n:Person) RETURN count(n.id)")
         .unwrap();
     assert_eq!(scanned(&cypher), scanned(&gql));
     assert_eq!(scanned(&cypher), 1_000);

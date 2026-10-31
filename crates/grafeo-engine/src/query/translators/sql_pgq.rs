@@ -1,23 +1,24 @@
 //! SQL/PGQ AST to Logical Plan translator.
 //!
 //! Translates parsed SQL/PGQ `GRAPH_TABLE` queries into the common logical plan
-//! representation. The inner MATCH clause reuses GQL AST types, so pattern
-//! translation follows the GQL translator pattern.
+//! representation. The `GRAPH_TABLE`'s `MATCH` and `OPTIONAL MATCH` and the
+//! expressions over their variables are translated as GQL translates them
+//! (see `GraphPatternTranslator` in the GQL translator): SQL/PGQ takes its
+//! graph patterns from GQL.
 
 use std::collections::HashSet;
 
 use super::common::{
-    HavingScope, VarGen, check_branch_columns, collect_expression_variables, combine_with_and,
-    has_all_labels, is_aggregate_function, is_binary_set_function, wrap_filter, wrap_limit,
-    wrap_return, wrap_skip, wrap_sort,
+    HavingScope, check_branch_columns, collect_expression_variables, is_aggregate_function,
+    is_binary_set_function, wrap_filter, wrap_limit, wrap_return, wrap_skip, wrap_sort,
 };
 use crate::query::functions::resolve_call;
 use crate::query::plan::{
-    AggregateExpr, AggregateFunction, AggregateOp, BinaryOp, BuiltinFunction, CallProcedureOp,
-    CreatePropertyGraphOp, DistinctOp, DropPropertyGraphOp, ExceptOp, ExpandDirection, ExpandOp,
-    IntersectOp, LeftJoinOp, ListPredicateKind, LogicalExpression, LogicalOperator, LogicalPlan,
-    NodeScanOp, PathMode, ProcedureYield, PropertyGraphColumn, PropertyGraphEdgeTable,
-    PropertyGraphNodeTable, ReturnItem, SortKey, SortOrder, UnaryOp, UnionOp,
+    AggregateExpr, AggregateFunction, AggregateOp, BinaryOp, CallProcedureOp, CountExpr,
+    CreatePropertyGraphOp, DistinctOp, DropPropertyGraphOp, ExceptOp, IntersectOp,
+    LogicalExpression, LogicalOperator, LogicalPlan, ProcedureYield, PropertyGraphColumn,
+    PropertyGraphEdgeTable, PropertyGraphNodeTable, ReturnItem, SortKey, SortOrder, UnaryOp,
+    UnionOp,
 };
 use grafeo_adapters::query::sql_pgq::{self, ast};
 use grafeo_common::types::Value;
@@ -56,7 +57,7 @@ pub fn translate(query: &str) -> Result<LogicalPlan> {
     };
 
     let statement = sql_pgq::parse(actual_query)?;
-    let translator = SqlPgqTranslator::new(&statement);
+    let translator = SqlPgqTranslator::new(actual_query);
     let plan = translator.translate_statement(&statement)?;
     let mut plan = crate::query::limits::check_plan_depth(plan)?;
     plan.explain = explain;
@@ -93,39 +94,16 @@ fn statement_graph(statement: &ast::Statement) -> Result<Option<String>> {
 
 /// SQL/PGQ AST to logical plan translator.
 struct SqlPgqTranslator {
-    /// Names for anonymous nodes: each is a variable of its own, so two of
-    /// them in one pattern are not taken for the same node.
-    anonymous: VarGen,
-    /// The names the statement itself uses, which no anonymous node gets.
-    named: HashSet<String>,
+    /// The `GRAPH_TABLE`'s graph pattern, translated as GQL translates it.
+    graph: super::gql::GraphPatternTranslator,
 }
 
 impl SqlPgqTranslator {
-    fn new(statement: &ast::Statement) -> Self {
-        let mut named = HashSet::new();
-        match statement {
-            ast::Statement::Select(select) => select_names(select, &mut named),
-            ast::Statement::SetOperation(set_op) => {
-                select_names(&set_op.left, &mut named);
-                select_names(&set_op.right, &mut named);
-            }
-            ast::Statement::CreatePropertyGraph(_)
-            | ast::Statement::DropPropertyGraph(_)
-            | ast::Statement::Call(_) => {}
-        }
+    /// A translator for the statement `query`, whose text the generated
+    /// names skip.
+    fn new(query: &str) -> Self {
         Self {
-            anonymous: VarGen::new(),
-            named,
-        }
-    }
-
-    /// A name for an anonymous node that no variable of the statement has.
-    fn anonymous_variable(&self) -> String {
-        loop {
-            let name = self.anonymous.next();
-            if !self.named.contains(&name) {
-                return name;
-            }
+            graph: super::gql::GraphPatternTranslator::new(query),
         }
     }
 
@@ -222,22 +200,17 @@ impl SqlPgqTranslator {
             ast::SelectList::All => select.group_by.is_some(),
         };
 
-        // 1. Translate MATCH patterns → NodeScan + Expand
-        let mut plan = self.translate_match(&select.graph_table.match_clause)?;
-
-        // 1b. Translate optional matches → LeftJoin
-        for opt_match in &select.graph_table.optional_matches {
-            let right = self.translate_match(opt_match)?;
-            plan = LogicalOperator::LeftJoin(LeftJoinOp {
-                left: Box::new(plan),
-                right: Box::new(right),
-                condition: None,
-            });
-        }
+        // 1. Translate the MATCH
+        // and each OPTIONAL MATCH, as GQL translates them (SQL/PGQ's graph
+        // pattern is GQL's).
+        let mut plan = self.graph.translate_matches(
+            &select.graph_table.match_clause,
+            &select.graph_table.optional_matches,
+        )?;
 
         // 1c. Translate WHERE inside GRAPH_TABLE (operates on graph-level variables)
         if let Some(inner_where) = &select.graph_table.where_clause {
-            let predicate = self.translate_expression(inner_where, None)?;
+            let predicate = self.graph.translate_expression(inner_where)?;
             plan = wrap_filter(plan, predicate);
         }
 
@@ -251,12 +224,23 @@ impl SqlPgqTranslator {
         // For aggregate queries, ORDER BY is deferred to step 7b so that
         // aggregate output aliases are available for resolution.
         if !is_aggregate_query && let Some(order_by) = &select.order_by {
+            // A key that names an output column of the select list is that
+            // column's expression: ORDER BY resolves against the select list
+            // first (ISO/IEC 9075-2 <sort specification list>), so the alias
+            // wins over a COLUMNS column of the same name.
+            let output_column = |key: &ast::Expression| match (key, &select.select_list) {
+                (ast::Expression::Variable(name), ast::SelectList::Columns(items)) => items
+                    .iter()
+                    .find(|item| item.alias.as_deref() == Some(name.as_str()))
+                    .map(|item| &item.expression),
+                _ => None,
+            };
             let keys: Vec<SortKey> = order_by
                 .iter()
                 .map(|item| {
                     Ok(SortKey {
                         expression: self.translate_sql_expression(
-                            &item.expression,
+                            output_column(&item.expression).unwrap_or(&item.expression),
                             table_alias,
                             &column_map,
                         )?,
@@ -635,177 +619,6 @@ impl SqlPgqTranslator {
 
     // ==================== MATCH Translation ====================
 
-    fn translate_match(&self, match_clause: &ast::MatchClause) -> Result<LogicalOperator> {
-        let mut plan: Option<LogicalOperator> = None;
-
-        for aliased in &match_clause.patterns {
-            plan = Some(self.translate_pattern(&aliased.pattern, plan)?);
-        }
-
-        plan.ok_or_else(|| {
-            Error::from(QueryError::new(
-                QueryErrorKind::Semantic,
-                "Empty MATCH pattern",
-            ))
-        })
-    }
-
-    fn translate_pattern(
-        &self,
-        pattern: &ast::Pattern,
-        input: Option<LogicalOperator>,
-    ) -> Result<LogicalOperator> {
-        match pattern {
-            ast::Pattern::Node(node) => self.translate_node_pattern(node, input),
-            ast::Pattern::Path(path) => self.translate_path_pattern(path, input),
-            ast::Pattern::Quantified { .. }
-            | ast::Pattern::Union(_)
-            | ast::Pattern::MultisetUnion(_) => Err(Error::from(QueryError::new(
-                QueryErrorKind::Semantic,
-                "SQL/PGQ does not support quantified or union patterns",
-            ))),
-        }
-    }
-
-    fn translate_node_pattern(
-        &self,
-        node: &ast::NodePattern,
-        input: Option<LogicalOperator>,
-    ) -> Result<LogicalOperator> {
-        let variable = node
-            .variable
-            .clone()
-            .unwrap_or_else(|| self.anonymous_variable());
-        let label = node.labels.first().cloned();
-
-        let mut plan = LogicalOperator::NodeScan(NodeScanOp {
-            variable: variable.clone(),
-            label,
-            input: input.map(Box::new),
-        });
-
-        // The scan checks the first label; the others must hold too.
-        if let Some(predicate) = has_all_labels(&variable, node.labels.get(1..).unwrap_or_default())
-        {
-            plan = wrap_filter(plan, predicate);
-        }
-
-        // Add filters for inline properties (e.g., {city: 'NYC'})
-        if !node.properties.is_empty() {
-            let predicate = self.build_property_predicate(&variable, &node.properties)?;
-            plan = wrap_filter(plan, predicate);
-        }
-
-        Ok(plan)
-    }
-
-    fn translate_path_pattern(
-        &self,
-        path: &ast::PathPattern,
-        input: Option<LogicalOperator>,
-    ) -> Result<LogicalOperator> {
-        let mut plan = self.translate_node_pattern(&path.source, input)?;
-
-        for edge in &path.edges {
-            plan = self.translate_edge_pattern(edge, plan)?;
-        }
-
-        Ok(plan)
-    }
-
-    fn translate_edge_pattern(
-        &self,
-        edge: &ast::EdgePattern,
-        input: LogicalOperator,
-    ) -> Result<LogicalOperator> {
-        let from_variable = Self::get_last_variable(&input)?;
-        // An edge with a property map needs a variable to filter on, even
-        // when the pattern leaves it anonymous: `-[:KNOWS {since: 3}]->`.
-        let edge_variable = edge
-            .variable
-            .clone()
-            .or_else(|| (!edge.properties.is_empty()).then(|| self.anonymous_variable()));
-        let edge_types = edge.types.clone();
-        let to_variable = edge
-            .target
-            .variable
-            .clone()
-            .unwrap_or_else(|| self.anonymous_variable());
-
-        let direction = match edge.direction {
-            ast::EdgeDirection::Outgoing => ExpandDirection::Outgoing,
-            ast::EdgeDirection::Incoming => ExpandDirection::Incoming,
-            ast::EdgeDirection::Undirected => ExpandDirection::Both,
-        };
-
-        // A quantified edge (`*1..1` too) binds the list of the path's edges.
-        let quantified = edge.min_hops.is_some() || edge.max_hops.is_some();
-        let (min_hops, max_hops) = if quantified {
-            (edge.min_hops.unwrap_or(1), edge.max_hops)
-        } else {
-            (1, Some(1))
-        };
-
-        // Set path_alias for variable-length patterns so path functions work:
-        // the quantified ones (an edge without a quantifier is a single hop).
-        let path_alias = if quantified {
-            edge_variable.clone()
-        } else {
-            None
-        };
-
-        let mut plan = LogicalOperator::Expand(ExpandOp {
-            quantified,
-            from_variable,
-            to_variable: to_variable.clone(),
-            edge_variable: edge_variable.clone(),
-            direction,
-            edge_types,
-            min_hops,
-            max_hops,
-            input: Box::new(input),
-            path_alias: path_alias.clone(),
-            path_mode: PathMode::Walk,
-        });
-
-        // Every label of the target node must hold
-        if let Some(predicate) = has_all_labels(&to_variable, &edge.target.labels) {
-            plan = wrap_filter(plan, predicate);
-        }
-
-        // The property map of the edge (ISO/IEC 39075:2024 16.7, which
-        // SQL/PGQ takes its element patterns from): on a quantified edge it
-        // holds for every edge of the walk, read from the path's edge list.
-        if !edge.properties.is_empty()
-            && let Some(variable) = &edge_variable
-        {
-            let predicate = match &path_alias {
-                Some(path) => {
-                    let hop = self.anonymous_variable();
-                    LogicalExpression::ListPredicate {
-                        kind: ListPredicateKind::All,
-                        variable: hop.clone(),
-                        list_expr: Box::new(LogicalExpression::Variable(format!(
-                            "_path_edges_{path}"
-                        ))),
-                        predicate: Box::new(self.build_property_predicate(&hop, &edge.properties)?),
-                    }
-                }
-                None => self.build_property_predicate(variable, &edge.properties)?,
-            };
-            plan = wrap_filter(plan, predicate);
-        }
-
-        // The property map of the target node, like the one of the first
-        // node of the pattern (see `translate_node_pattern`)
-        if !edge.target.properties.is_empty() {
-            let predicate = self.build_property_predicate(&to_variable, &edge.target.properties)?;
-            plan = wrap_filter(plan, predicate);
-        }
-
-        Ok(plan)
-    }
-
     // ==================== COLUMNS Translation ====================
 
     /// Refuses an aggregate in a column of COLUMNS: COLUMNS gives a row per
@@ -1137,21 +950,8 @@ impl SqlPgqTranslator {
                 args,
                 distinct,
             } => {
-                // Special handling for path functions in SQL context
-                if args.len() == 1
-                    && let ast::Expression::Variable(var_name) = &args[0]
-                {
-                    let column = match BuiltinFunction::from_name(name) {
-                        Some(BuiltinFunction::Size) => Some("length"),
-                        Some(BuiltinFunction::Nodes) => Some("nodes"),
-                        Some(BuiltinFunction::Edges) => Some("edges"),
-                        _ => None,
-                    };
-                    if let Some(column) = column {
-                        return Ok(LogicalExpression::Variable(format!(
-                            "_path_{column}_{var_name}"
-                        )));
-                    }
+                if let Some(call) = self.graph.group_path_call(name, args, *distinct) {
+                    return call;
                 }
 
                 let translated_args: Vec<LogicalExpression> = args
@@ -1247,22 +1047,8 @@ impl SqlPgqTranslator {
                 args,
                 distinct,
             } => {
-                // Special handling for path functions: LENGTH(p), NODES(p), EDGES(p)
-                // These reference path variables and are translated to internal column names
-                if args.len() == 1
-                    && let ast::Expression::Variable(var_name) = &args[0]
-                {
-                    let column = match BuiltinFunction::from_name(name) {
-                        Some(BuiltinFunction::Size) => Some("length"),
-                        Some(BuiltinFunction::Nodes) => Some("nodes"),
-                        Some(BuiltinFunction::Edges) => Some("edges"),
-                        _ => None,
-                    };
-                    if let Some(column) = column {
-                        return Ok(LogicalExpression::Variable(format!(
-                            "_path_{column}_{var_name}"
-                        )));
-                    }
+                if let Some(call) = self.graph.group_path_call(name, args, *distinct) {
+                    return call;
                 }
 
                 let translated_args: Vec<LogicalExpression> = args
@@ -1570,44 +1356,6 @@ impl SqlPgqTranslator {
             },
         )))
     }
-
-    // ==================== Helpers ====================
-
-    fn build_property_predicate(
-        &self,
-        variable: &str,
-        properties: &[(String, ast::Expression)],
-    ) -> Result<LogicalExpression> {
-        let predicates = properties
-            .iter()
-            .map(|(key, value)| {
-                let left = LogicalExpression::Property {
-                    variable: variable.to_string(),
-                    property: key.clone(),
-                };
-                let right = self.translate_expression(value, None)?;
-                Ok(LogicalExpression::Binary {
-                    left: Box::new(left),
-                    op: BinaryOp::Eq,
-                    right: Box::new(right),
-                })
-            })
-            .collect::<Result<Vec<_>>>()?;
-
-        combine_with_and(predicates)
-    }
-
-    fn get_last_variable(plan: &LogicalOperator) -> Result<String> {
-        match plan {
-            LogicalOperator::NodeScan(scan) => Ok(scan.variable.clone()),
-            LogicalOperator::Expand(expand) => Ok(expand.to_variable.clone()),
-            LogicalOperator::Filter(filter) => Self::get_last_variable(&filter.input),
-            LogicalOperator::Project(project) => Self::get_last_variable(&project.input),
-            _ => Err(Error::Internal(
-                "Cannot get variable from operator".to_string(),
-            )),
-        }
-    }
 }
 
 /// The property type of a column of SQL type `data_type`. Grafeo has one
@@ -1628,27 +1376,6 @@ fn property_type(data_type: &ast::SqlDataType) -> crate::catalog::PropertyDataTy
     }
 }
 
-/// Adds the names a SELECT gives its pattern variables, paths and columns.
-fn select_names(select: &ast::SelectStatement, names: &mut HashSet<String>) {
-    let graph_table = &select.graph_table;
-    for clause in std::iter::once(&graph_table.match_clause).chain(&graph_table.optional_matches) {
-        for aliased in &clause.patterns {
-            names.extend(aliased.alias.iter().cloned());
-            pattern_names(&aliased.pattern, names);
-        }
-    }
-    names.extend(
-        graph_table
-            .columns
-            .items
-            .iter()
-            .map(|item| item.alias.clone()),
-    );
-    if let ast::SelectList::Columns(items) = &select.select_list {
-        names.extend(items.iter().filter_map(|item| item.alias.clone()));
-    }
-}
-
 /// Wraps `plan` in the OFFSET (a Skip) and then the LIMIT of `select`.
 ///
 /// # Errors
@@ -1658,18 +1385,22 @@ fn wrap_offset_and_limit(
     mut plan: LogicalOperator,
     select: &ast::SelectStatement,
 ) -> Result<LogicalOperator> {
-    let count = |value: u64, clause: &str| {
-        usize::try_from(value).map_err(|_| {
-            Error::from(QueryError::new(
-                QueryErrorKind::Semantic,
-                format!("{clause} {value} is larger than this platform can count"),
-            ))
-        })
-    };
-    if let Some(offset) = select.offset {
+    let count =
+        |value: &ast::RowCount, clause: &str| match value {
+            ast::RowCount::Literal(value) => usize::try_from(*value)
+                .map(CountExpr::Literal)
+                .map_err(|_| {
+                    Error::from(QueryError::new(
+                        QueryErrorKind::Semantic,
+                        format!("{clause} {value} is larger than this platform can count"),
+                    ))
+                }),
+            ast::RowCount::Parameter(name) => Ok(CountExpr::Parameter(name.clone())),
+        };
+    if let Some(offset) = &select.offset {
         plan = wrap_skip(plan, count(offset, "OFFSET")?);
     }
-    if let Some(limit) = select.limit {
+    if let Some(limit) = &select.limit {
         plan = wrap_limit(plan, count(limit, "LIMIT")?);
     }
     Ok(plan)
@@ -1707,29 +1438,10 @@ fn first_aggregate(expr: &ast::Expression) -> Option<&str> {
     }
 }
 
-/// Adds the variables a pattern names.
-fn pattern_names(pattern: &ast::Pattern, names: &mut HashSet<String>) {
-    match pattern {
-        ast::Pattern::Node(node) => names.extend(node.variable.iter().cloned()),
-        ast::Pattern::Path(path) => {
-            names.extend(path.source.variable.iter().cloned());
-            for edge in &path.edges {
-                names.extend(edge.variable.iter().cloned());
-                names.extend(edge.target.variable.iter().cloned());
-            }
-        }
-        ast::Pattern::Quantified { pattern, .. } => pattern_names(pattern, names),
-        ast::Pattern::Union(patterns) | ast::Pattern::MultisetUnion(patterns) => {
-            for pattern in patterns {
-                pattern_names(pattern, names);
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::query::plan::{BuiltinFunction, ExpandDirection, ExpandOp};
 
     #[test]
     fn test_translate_basic_node_query() {
@@ -1888,6 +1600,14 @@ mod tests {
         assert!(result.is_err());
     }
 
+    /// The first Expand in `op`, depth first.
+    fn find_expand(op: &LogicalOperator) -> Option<&ExpandOp> {
+        if let LogicalOperator::Expand(expand) = op {
+            return Some(expand);
+        }
+        op.children().into_iter().find_map(find_expand)
+    }
+
     #[test]
     fn test_translate_variable_length_with_path_alias() {
         let plan = translate(
@@ -1898,7 +1618,6 @@ mod tests {
         )
         .unwrap();
 
-        // Return → hasLabel Filter → Expand → NodeScan
         let LogicalOperator::Return(ret) = &plan.root else {
             panic!("Expected Return at top");
         };
@@ -1907,24 +1626,22 @@ mod tests {
         assert_eq!(ret.items[1].alias.as_deref(), Some("distance"));
         assert_eq!(ret.items[2].alias.as_deref(), Some("target"));
 
-        // The LENGTH(p) column should be translated to _path_length_p variable
-        assert!(
-            matches!(&ret.items[1].expression, LogicalExpression::Variable(v) if v == "_path_length_p")
-        );
-
-        // Find the Expand operator and verify path_alias is set
-        fn find_expand(op: &LogicalOperator) -> Option<&ExpandOp> {
-            match op {
-                LogicalOperator::Expand(e) => Some(e),
-                LogicalOperator::Filter(f) => find_expand(&f.input),
-                LogicalOperator::Return(r) => find_expand(&r.input),
-                _ => None,
-            }
-        }
-        let expand = find_expand(ret.input.as_ref()).expect("Expected Expand");
-        assert_eq!(expand.path_alias, Some("p".to_string()));
+        // The expand keeps its path under a name of its own, and LENGTH(p)
+        // reads that path: p is the edge's group variable, not a path.
+        let expand = find_expand(&plan.root).expect("Expected Expand");
         assert_eq!(expand.min_hops, 1);
         assert_eq!(expand.max_hops, Some(5));
+        let path = expand
+            .path_alias
+            .clone()
+            .expect("the expand keeps its path");
+        let LogicalExpression::FunctionCall { args, .. } = &ret.items[1].expression else {
+            panic!("LENGTH(p) is a call: {:?}", ret.items[1].expression);
+        };
+        assert!(
+            matches!(args.as_slice(), [LogicalExpression::Variable(v)] if *v == path),
+            "LENGTH(p) reads {path}: {args:?}"
+        );
     }
 
     #[test]
@@ -1941,15 +1658,26 @@ mod tests {
             panic!("Expected Return");
         };
         assert_eq!(ret.items.len(), 2);
+        let path = find_expand(&plan.root)
+            .and_then(|expand| expand.path_alias.clone())
+            .expect("the expand keeps its path");
 
-        // NODES(p) → _path_nodes_p
-        assert!(
-            matches!(&ret.items[0].expression, LogicalExpression::Variable(v) if v == "_path_nodes_p")
-        );
-        // EDGES(p) → _path_edges_p
-        assert!(
-            matches!(&ret.items[1].expression, LogicalExpression::Variable(v) if v == "_path_edges_p")
-        );
+        use crate::query::plan::Callee;
+
+        for (item, function) in ret
+            .items
+            .iter()
+            .zip([BuiltinFunction::Nodes, BuiltinFunction::Edges])
+        {
+            let LogicalExpression::FunctionCall { callee, args, .. } = &item.expression else {
+                panic!("path components keep their typed calls");
+            };
+            assert_eq!(*callee, Callee::Builtin(function));
+            assert!(
+                matches!(args.as_slice(), [LogicalExpression::Variable(v)] if *v == path),
+                "{function:?} reads {path}: {args:?}"
+            );
+        }
     }
 
     // === Outer Aggregate Tests ===

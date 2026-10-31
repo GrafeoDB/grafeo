@@ -38,7 +38,7 @@
 //!
 //! ## WAL v2
 //!
-//! The 0.6 log, not yet used by the engine: segment files named after the
+//! The 0.6 log, the sidecar WAL the engine writes: segment files named after the
 //! log position (LSN) of their first frame, each with a 128-byte header that
 //! names its database ([`SegmentHeader`]), holding frames with a 25-byte
 //! header ([`FrameHeader`]). A transaction is one contiguous group of frames,
@@ -53,6 +53,10 @@
 //! - Encrypted segments derive their key from a per-segment salt
 //!   ([`CipherForSalt`]); each frame's associated data binds its position
 //!   ([`frame_aad`]), and its checksum covers the ciphertext.
+
+/// The file in a WAL directory where the engine keeps its backup cursor:
+/// the log position up to which backups hold the WAL.
+pub const BACKUP_CURSOR_FILE: &str = "backup_cursor.meta";
 
 mod async_log;
 #[cfg(feature = "async-storage")]

@@ -16,10 +16,11 @@
 //! To restore to epoch 750: load full snapshot (epoch 100), replay
 //! incrementals 1-7, stop at epoch 750.
 
+use std::io::Write;
 use std::path::Path;
 
 use grafeo_common::types::EpochId;
-use grafeo_common::utils::error::{Error, Result};
+use grafeo_common::utils::error::{Error, Result, StorageError};
 use serde::{Deserialize, Serialize};
 
 // ── Backup types ───────────────────────────────────────────────────
@@ -72,6 +73,11 @@ pub struct BackupSegment {
     pub size_bytes: u64,
     /// Timestamp when this backup was created (ms since UNIX epoch).
     pub created_at_ms: u64,
+    /// The log position the segment ends at: every WAL group before it is in
+    /// the chain up to this segment, and the next incremental backup starts
+    /// there. `None` in a manifest written before 0.6.1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_wal_lsn: Option<u64>,
 }
 
 /// Tracks the full backup chain for a database.
@@ -165,7 +171,7 @@ pub struct BackupCursor {
 // ── Manifest I/O ───────────────────────────────────────────────────
 
 const MANIFEST_FILENAME: &str = "backup_manifest.json";
-const BACKUP_CURSOR_FILENAME: &str = "backup_cursor.meta";
+const BACKUP_CURSOR_FILENAME: &str = grafeo_storage::wal::BACKUP_CURSOR_FILE;
 
 /// The format version of the JSON manifest (0.5.x wrote version 1, in
 /// bincode).
@@ -239,21 +245,23 @@ fn decode_manifest(data: &[u8]) -> std::result::Result<BackupManifest, ManifestD
 ///
 /// Returns an error if the manifest cannot be written.
 pub fn write_manifest(backup_dir: &Path, manifest: &BackupManifest) -> Result<()> {
-    std::fs::create_dir_all(backup_dir)
-        .map_err(|e| Error::Internal(format!("failed to create backup directory: {e}")))?;
+    prepare_backup_directory(backup_dir)?;
+    write_prepared_manifest(backup_dir, manifest)
+}
 
+/// Writes a manifest after this operation has prepared the backup directory.
+fn write_prepared_manifest(backup_dir: &Path, manifest: &BackupManifest) -> Result<()> {
     let path = backup_dir.join(MANIFEST_FILENAME);
-    let temp_path = backup_dir.join(format!("{MANIFEST_FILENAME}.tmp"));
-
     let data = serde_json::to_vec_pretty(manifest)
         .map_err(|e| Error::Internal(format!("failed to serialize backup manifest: {e}")))?;
 
-    std::fs::write(&temp_path, data)
-        .map_err(|e| Error::Internal(format!("failed to write backup manifest: {e}")))?;
-    std::fs::rename(&temp_path, &path)
-        .map_err(|e| Error::Internal(format!("failed to finalize backup manifest: {e}")))?;
-
-    Ok(())
+    write_metadata(
+        &path,
+        &data,
+        "manifest",
+        "backup:manifest_sync",
+        "backup:manifest_directory_sync",
+    )
 }
 
 // ── Backup cursor I/O ──────────────────────────────────────────────
@@ -299,17 +307,141 @@ fn decode_cursor(data: &[u8]) -> std::result::Result<BackupCursor, String> {
 /// Returns an error if the cursor cannot be written.
 pub fn write_backup_cursor(wal_dir: &Path, cursor: &BackupCursor) -> Result<()> {
     let path = wal_dir.join(BACKUP_CURSOR_FILENAME);
-    let temp_path = wal_dir.join(format!("{BACKUP_CURSOR_FILENAME}.tmp"));
-
     let data = serde_json::to_vec_pretty(cursor)
         .map_err(|e| Error::Internal(format!("failed to serialize backup cursor: {e}")))?;
 
-    std::fs::write(&temp_path, &data)
-        .map_err(|e| Error::Internal(format!("failed to write backup cursor: {e}")))?;
-    std::fs::rename(&temp_path, &path)
-        .map_err(|e| Error::Internal(format!("failed to finalize backup cursor: {e}")))?;
+    write_metadata(
+        &path,
+        &data,
+        "cursor",
+        "backup:cursor_sync",
+        "backup:cursor_directory_sync",
+    )
+}
 
+/// Publishes synced metadata, then makes its renamed directory entry durable.
+fn write_metadata(
+    path: &Path,
+    data: &[u8],
+    kind: &str,
+    sync_point: &str,
+    directory_sync_point: &str,
+) -> Result<()> {
+    let mut temp_path = path.as_os_str().to_owned();
+    temp_path.push(".tmp");
+    let temp_path = std::path::PathBuf::from(temp_path);
+    let mut file = std::fs::File::create(&temp_path).map_err(|e| {
+        Error::Internal(format!(
+            "failed to create backup {kind} {}: {e}",
+            temp_path.display()
+        ))
+    })?;
+    file.write_all(data).map_err(|e| {
+        Error::Internal(format!(
+            "failed to write backup {kind} {}: {e}",
+            temp_path.display()
+        ))
+    })?;
+    grafeo_common::testing::crash::maybe_fail(sync_point)?;
+    file.sync_all().map_err(|e| {
+        Error::Internal(format!(
+            "failed to sync backup {kind} {}: {e}",
+            temp_path.display()
+        ))
+    })?;
+    drop(file);
+    std::fs::rename(&temp_path, path).map_err(|e| {
+        Error::Internal(format!(
+            "failed to finalize backup {kind} {}: {e}",
+            path.display()
+        ))
+    })?;
+    sync_backup_entry(path, directory_sync_point)
+}
+
+/// Persists the directory entry of a backup or restore file or directory. This retains
+/// the platform floor of `flush::sync_parent_dir`: no directory fsync off Unix.
+fn sync_backup_entry(path: &Path, sync_point: &str) -> Result<()> {
+    #[cfg(unix)]
+    grafeo_common::testing::crash::maybe_fail(sync_point)?;
+    #[cfg(not(unix))]
+    let _ = sync_point;
+    super::flush::sync_parent_dir(path).map_err(|e| {
+        Error::Internal(format!(
+            "failed to sync the directory containing {}: {e}",
+            path.display()
+        ))
+    })
+}
+
+/// Prepares the directory once per backup. Sync the existing directory's
+/// parent once, also repairing an entry left by a failed earlier attempt;
+/// then persist each new directory entry before creating its children.
+/// Keep lexical paths so symlinks and `..` resolve as they do in create_dir_all.
+fn prepare_backup_directory(directory: &Path) -> Result<()> {
+    let mut existing = if directory.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        directory
+    };
+    let mut missing = Vec::new();
+    loop {
+        match std::fs::metadata(existing) {
+            Ok(metadata) if metadata.is_dir() => break,
+            Ok(_) => {
+                return Err(Error::Internal(format!(
+                    "backup directory {} is not a directory",
+                    existing.display()
+                )));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                missing.push(existing);
+                existing = existing
+                    .parent()
+                    .filter(|parent| !parent.as_os_str().is_empty())
+                    .unwrap_or_else(|| Path::new("."));
+            }
+            Err(e) => {
+                return Err(Error::Internal(format!(
+                    "failed to inspect backup directory {}: {e}",
+                    existing.display()
+                )));
+            }
+        }
+    }
+    sync_backup_entry(existing, "backup:directory_sync")?;
+    for directory in missing.into_iter().rev() {
+        match std::fs::create_dir(directory) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && directory.is_dir() => {}
+            Err(e) => {
+                return Err(Error::Internal(format!(
+                    "failed to create backup directory {}: {e}",
+                    directory.display()
+                )));
+            }
+        }
+        sync_backup_entry(directory, "backup:new_directory_sync")?;
+    }
     Ok(())
+}
+
+/// Holds a destination for one complete backup. The empty lock file stays
+/// in place: unlinking or replacing it would let writers lock different files.
+/// Incremental calls never create the destination directory.
+pub(super) fn lock_backup_directory(backup_dir: &Path, create: bool) -> Result<std::fs::File> {
+    if create {
+        prepare_backup_directory(backup_dir)?;
+    }
+    grafeo_storage::lock::try_lock_file(&backup_dir.join("backup.lock"), || {
+        format!("backup directory is busy: {}", backup_dir.display())
+    })
+    .map_err(|error| match error {
+        Error::Io(error) if !create && error.kind() == std::io::ErrorKind::NotFound => {
+            Error::InvalidValue("no backup manifest found; run a full backup first".to_string())
+        }
+        other => other,
+    })
 }
 
 /// The manifest and cursor as 0.5.x wrote them: bincode 2 with the standard
@@ -401,6 +533,7 @@ mod bincode_0_5 {
                     checksum: segment.checksum,
                     size_bytes: segment.size_bytes,
                     created_at_ms: segment.created_at_ms,
+                    end_wal_lsn: None,
                 })
                 .collect(),
         })
@@ -581,14 +714,14 @@ pub(super) fn do_backup_full(
     wal: Option<&Wal>,
     log_end: impl FnOnce() -> Result<u64>,
 ) -> Result<BackupSegment> {
-    std::fs::create_dir_all(backup_dir)
-        .map_err(|e| Error::Internal(format!("failed to create backup directory: {e}")))?;
+    grafeo_common::testing::pause::maybe_pause("backup:before_manifest");
 
     // Determine backup filename
     let mut manifest = read_manifest(backup_dir)?.unwrap_or_default();
     let segment_idx = manifest.segments.len();
     let filename = format!("backup_full_{segment_idx:04}.grafeo");
     let dest_path = backup_dir.join(&filename);
+    grafeo_common::testing::commit_hook::run_after_backup_state_read();
     // The name follows the manifest's segments, so a file under it is none
     // the manifest lists: the image of a backup a crash or an error cut off
     // before its manifest entry, which no restore reads.
@@ -624,10 +757,11 @@ pub(super) fn do_backup_full(
         checksum,
         size_bytes: file_size,
         created_at_ms: now_ms(),
+        end_wal_lsn: Some(wal_lsn),
     };
 
     manifest.segments.push(segment.clone());
-    write_manifest(backup_dir, &manifest)?;
+    write_prepared_manifest(backup_dir, &manifest)?;
     grafeo_common::testing::crash::maybe_crash("backup:after_manifest");
 
     // Every WAL group before the image's log position is in the image, and
@@ -701,32 +835,90 @@ fn copied_header(file_data: &[u8], path: &Path) -> Result<DbHeaderV3> {
 /// # Errors
 ///
 /// Returns an error if no full backup exists, the cursor is of the earlier
-/// WAL format, nothing was logged since the last backup, or the segments
-/// after the cursor were removed.
+/// WAL format, the cursor is ahead of the chain's end epoch, nothing was
+/// logged since the last backup, or the segments after the cursor were removed.
 pub(super) fn do_backup_incremental(
     backup_dir: &Path,
     wal: &Wal,
     current_epoch: EpochId,
 ) -> Result<BackupSegment> {
     let manifest = read_manifest(backup_dir)?.ok_or_else(|| {
-        Error::Internal("no backup manifest found; run a full backup first".to_string())
+        Error::InvalidValue("no backup manifest found; run a full backup first".to_string())
     })?;
 
     if manifest.latest_full().is_none() {
-        return Err(Error::Internal(
+        return Err(Error::InvalidValue(
             "no full backup in manifest; run a full backup first".to_string(),
         ));
     }
 
     let cursor = read_backup_cursor(wal.dir())?.ok_or_else(|| {
-        Error::Internal("no backup cursor found; run a full backup first".to_string())
+        Error::InvalidValue("no backup cursor found; run a full backup first".to_string())
     })?;
     let from = cursor.wal_lsn.ok_or_else(|| {
-        Error::Internal(
+        Error::InvalidValue(
             "the backup cursor is of the WAL format before 0.6.0; run a full backup first"
                 .to_string(),
         )
     })?;
+
+    // An incremental backup copies the log from the cursor on, so the chain
+    // must reach the cursor: one that ends before it would miss what lies
+    // between. A read-only full backup can lead the writer's cursor:
+    // overlapping WAL groups are valid. The log position decides; the epoch
+    // alone misses a change logged without an epoch of its own (a graph
+    // command, a schema statement, the index API), and is all a manifest
+    // written before 0.6.1 has.
+    if let Some(last) = manifest.segments.last() {
+        let behind = match last.end_wal_lsn {
+            Some(chain_end) => chain_end < from,
+            None => last.end_epoch < cursor.backed_up_epoch,
+        };
+        if behind {
+            return Err(Error::InvalidValue(format!(
+                "backup chain {} ends at epoch {}, but the database backup cursor is at epoch {} \
+                 and further along the log; run a full backup in this directory before taking \
+                 an incremental backup",
+                backup_dir.display(),
+                last.end_epoch.as_u64(),
+                cursor.backed_up_epoch.as_u64(),
+            )));
+        }
+    }
+
+    // The chain continues from the segment the last backup ended at: a log
+    // that lacks it lost what lies between (removed from outside, or a
+    // cursor and a log that disagree), which no retry recovers. Listing such
+    // a log finds the gap too.
+    let chain_broken = |what: String| {
+        Error::from(StorageError::BackupChainBroken(format!(
+            "{what}, so the backup chain in {} cannot continue; take a new full backup to \
+             start a new chain",
+            backup_dir.display()
+        )))
+    };
+    let listing = match list_wal_directory(wal.dir()) {
+        Ok(listing) => listing,
+        Err(grafeo_storage::wal::WalError::Gap { reason }) => {
+            return Err(chain_broken(format!("the WAL has a gap ({reason})")));
+        }
+        Err(other) => return Err(Error::from(other)),
+    };
+    if listing
+        .segments
+        .iter()
+        .any(|(first_lsn, _)| *first_lsn > from)
+        && listing
+            .segments
+            .iter()
+            .all(|(first_lsn, _)| *first_lsn != from)
+    {
+        return Err(chain_broken(format!(
+            "the WAL segment at log position {from}, where the last backup ended, was removed"
+        )));
+    }
+
+    sync_backup_entry(backup_dir, "backup:directory_sync")?;
 
     // Seal the active segment first: every group logged so far is then in a
     // segment before `sealed`, and groups logged from now on go to later
@@ -737,11 +929,20 @@ pub(super) fn do_backup_incremental(
     let sealed = wal.rotate().map_err(|e| {
         Error::Internal(format!("failed to rotate WAL for incremental backup: {e}"))
     })?;
-    let groups = groups_between(wal, from, sealed)?;
+    let groups = match groups_between(wal, from, sealed) {
+        Ok(groups) => groups,
+        Err(grafeo_storage::wal::WalError::Gap { reason }) => {
+            return Err(chain_broken(format!("the WAL has a gap ({reason})")));
+        }
+        Err(other) => return Err(Error::from(other)),
+    };
     if groups == 0 {
-        return Err(Error::Internal(
-            "no new WAL records since last backup".to_string(),
-        ));
+        // Nothing new: the chain already holds everything; nothing is written.
+        return Ok(manifest
+            .segments
+            .last()
+            .cloned()
+            .expect("the manifest holds a full backup, checked above"));
     }
 
     let listing = list_wal_directory(wal.dir()).map_err(Error::from)?;
@@ -751,15 +952,6 @@ pub(super) fn do_backup_incremental(
         .filter(|(first_lsn, _)| (from..sealed).contains(first_lsn))
         .map(|(_, path)| path)
         .collect();
-    if listing
-        .segments
-        .iter()
-        .all(|(first_lsn, _)| *first_lsn != from)
-    {
-        return Err(Error::Internal(format!(
-            "the WAL segment at log position {from}, where the last backup ended, was removed"
-        )));
-    }
 
     let start_epoch = EpochId::new(cursor.backed_up_epoch.as_u64() + 1);
     let end_epoch = current_epoch;
@@ -779,8 +971,30 @@ pub(super) fn do_backup_incremental(
 
     let segment_idx = manifest.segments.len();
     let filename = format!("backup_incr_{segment_idx:04}.wal");
-    std::fs::write(backup_dir.join(&filename), &output)
-        .map_err(|e| Error::Internal(format!("failed to write incremental backup: {e}")))?;
+    let path = backup_dir.join(&filename);
+    grafeo_common::testing::commit_hook::run_after_backup_state_read();
+    let mut file = std::fs::File::create(&path).map_err(|e| {
+        Error::Internal(format!(
+            "failed to create incremental backup {}: {e}",
+            path.display()
+        ))
+    })?;
+    file.write_all(&output).map_err(|e| {
+        Error::Internal(format!(
+            "failed to write incremental backup {}: {e}",
+            path.display()
+        ))
+    })?;
+    grafeo_common::testing::crash::maybe_fail("backup:incremental_sync")?;
+    file.sync_all().map_err(|e| {
+        Error::Internal(format!(
+            "failed to sync incremental backup {}: {e}",
+            path.display()
+        ))
+    })?;
+    drop(file);
+    sync_backup_entry(&path, "backup:incremental_directory_sync")?;
+    grafeo_common::testing::crash::maybe_crash("backup:after_incremental_file");
 
     let segment = BackupSegment {
         kind: BackupKind::Incremental,
@@ -790,11 +1004,13 @@ pub(super) fn do_backup_incremental(
         checksum: crc32fast::hash(&output),
         size_bytes: output.len() as u64,
         created_at_ms: now_ms(),
+        end_wal_lsn: Some(sealed),
     };
 
     let mut manifest = manifest;
     manifest.segments.push(segment.clone());
-    write_manifest(backup_dir, &manifest)?;
+    write_prepared_manifest(backup_dir, &manifest)?;
+    grafeo_common::testing::crash::maybe_crash("backup:after_incremental_manifest");
 
     write_backup_cursor(
         wal.dir(),
@@ -805,16 +1021,21 @@ pub(super) fn do_backup_incremental(
             timestamp_ms: now_ms(),
         },
     )?;
+    grafeo_common::testing::crash::maybe_crash("backup:after_incremental_cursor");
 
     Ok(segment)
 }
 
 /// How many complete groups `wal` holds from `from` up to `until`, both
 /// segment boundaries.
-fn groups_between(wal: &Wal, from: u64, until: u64) -> Result<u64> {
-    let mut scan = WalScan::open(wal.dir(), wal.scan_options(from)).map_err(Error::from)?;
+fn groups_between(
+    wal: &Wal,
+    from: u64,
+    until: u64,
+) -> std::result::Result<u64, grafeo_storage::wal::WalError> {
+    let mut scan = WalScan::open(wal.dir(), wal.scan_options(from))?;
     let mut groups = 0;
-    while let Some(group) = scan.next_group().map_err(Error::from)? {
+    while let Some(group) = scan.next_group()? {
         if group.start_lsn() >= until {
             break;
         }
@@ -830,13 +1051,15 @@ fn groups_between(wal: &Wal, from: u64, until: u64) -> Result<u64> {
 /// 1. Finds the most recent full backup with `end_epoch <= target_epoch`
 ///    and the incremental segments after it, and checks `keys` against the
 ///    full backup ([`restore_ciphers`]).
-/// 2. Copies the full backup to `output_path`.
+/// 2. Copies the full backup into a writable file in a temporary sibling directory.
 /// 3. Writes the WAL groups of the incremental segments up to `target_epoch`
 ///    as the sidecar WAL of the restored file, which its next open replays.
 ///    For an encrypted backup the segments are read, and that WAL written,
 ///    with the WAL key of the backup's database. A chain of the earlier WAL
 ///    format (0.5.x, 0.6.0-beta.1) is restored as that format, which the
 ///    open replays once and retires.
+/// 4. Syncs the image and WAL, publishes the sidecar before the image, and
+///    syncs their parent. On error, removes the artifacts this attempt owns.
 ///
 /// # Errors
 ///
@@ -849,20 +1072,10 @@ pub(super) fn do_restore_to_epoch(
     output_path: &Path,
     keys: &DatabaseKeys,
 ) -> Result<()> {
-    // Restore must target a fresh path: the copy below overwrites
-    // `output_path` and the sidecar handling deletes `<output_path>.wal/`,
-    // which would destroy a live database and its unflushed WAL.
-    let sidecar_dir = format!("{}.wal", output_path.display());
-    if output_path.exists() || Path::new(&sidecar_dir).exists() {
-        return Err(Error::InvalidValue(format!(
-            "restore output path already exists: {} (restore must target a fresh path; \
-             move or remove the existing database and its {sidecar_dir} sidecar first)",
-            output_path.display(),
-        )));
-    }
+    ensure_restore_fresh(output_path)?;
 
     let manifest = read_manifest(backup_dir)?
-        .ok_or_else(|| Error::Internal("no backup manifest found".to_string()))?;
+        .ok_or_else(|| Error::InvalidValue("no backup manifest found".to_string()))?;
 
     // Find the best full backup (latest one that doesn't exceed target)
     let full_index = manifest
@@ -870,7 +1083,7 @@ pub(super) fn do_restore_to_epoch(
         .iter()
         .rposition(|s| s.kind == BackupKind::Full && s.end_epoch <= target_epoch)
         .ok_or_else(|| {
-            Error::Internal(format!(
+            Error::InvalidValue(format!(
                 "no full backup covers epoch {}",
                 target_epoch.as_u64()
             ))
@@ -894,64 +1107,236 @@ pub(super) fn do_restore_to_epoch(
     let full_path = backup_dir.join(&full.filename);
     let ciphers = restore_ciphers(&full_path, keys, !incrementals.is_empty())?;
 
-    // Copy full backup to output path
-    std::fs::copy(&full_path, output_path)
-        .map_err(|e| Error::Internal(format!("failed to copy full backup to output: {e}")))?;
+    // Keep every intermediate artifact under one owned directory beside the
+    // destination, so publication stays on the same filesystem.
+    let mut output = RestoreOutput::new(output_path)?;
+    let image_path = output.staging.join("image.grafeo");
+    let result = (|| {
+        let mut image = std::fs::File::create_new(&image_path)?;
+        std::io::copy(&mut std::fs::File::open(&full_path)?, &mut image)
+            .map_err(|e| Error::Internal(format!("failed to copy full backup to output: {e}")))?;
 
-    if incrementals.is_empty() {
-        // Full backup already covers the target epoch
-        return Ok(());
+        if !incrementals.is_empty() {
+            let mut segments = Vec::with_capacity(incrementals.len());
+            for incr in &incrementals {
+                let incr_data = std::fs::read(backup_dir.join(&incr.filename)).map_err(|e| {
+                    Error::Internal(format!(
+                        "failed to read incremental backup {}: {e}",
+                        incr.filename
+                    ))
+                })?;
+                let actual_crc = crc32fast::hash(&incr_data);
+                if actual_crc != incr.checksum {
+                    return Err(Error::corruption(format!(
+                        "incremental backup {} CRC mismatch: expected {:08x}, got {actual_crc:08x}",
+                        incr.filename, incr.checksum,
+                    )));
+                }
+                let version = backup_version(&incr_data)?;
+                segments.push((incr.filename.as_str(), version, incr_data));
+            }
+
+            match segments.iter().map(|(_, version, _)| *version).max() {
+                Some(FIRST_FORMAT_VERSION)
+                    if incrementals
+                        .iter()
+                        .any(|incremental| incremental.start_epoch <= full.end_epoch) =>
+                {
+                    Err(Error::Internal(format!(
+                        "the incremental backups after the full backup {} start before its epoch {} in \
+                         the WAL format before 0.6.0, which cannot replay from it",
+                        full.filename,
+                        full.end_epoch.as_u64()
+                    )))
+                }
+                Some(FIRST_FORMAT_VERSION) => {
+                    restore_first_format(&segments, target_epoch, &image_path, ciphers)
+                }
+                _ if segments
+                    .iter()
+                    .any(|(_, version, _)| *version == FIRST_FORMAT_VERSION) =>
+                {
+                    Err(Error::Internal(
+                        "the incremental backups after the full backup mix two WAL formats"
+                            .to_string(),
+                    ))
+                }
+                _ => restore_segments(&segments, target_epoch, &image_path, ciphers.segments),
+            }?;
+        }
+
+        grafeo_common::testing::crash::maybe_fail("restore:image_sync")?;
+        image.sync_all()?;
+        // Windows needs writable handles for sync and closed handles for rename.
+        // The copy owns this handle and never inherits the source's READONLY bit.
+        drop(image);
+        output.publish(&image_path)
+    })();
+    if let Err(error) = result {
+        return match output.cleanup() {
+            Ok(()) => Err(error),
+            Err(cleanup) => Err(Error::Internal(format!("{error}; {cleanup}"))),
+        };
+    }
+    Ok(())
+}
+
+fn restore_sidecar(path: &Path) -> std::path::PathBuf {
+    let mut sidecar = path.as_os_str().to_owned();
+    sidecar.push(".wal");
+    sidecar.into()
+}
+
+/// Refuse existing entries, including dangling symlinks. The destination must
+/// remain unused by other writers until restore finishes.
+fn ensure_restore_fresh(output: &Path) -> Result<()> {
+    let sidecar = restore_sidecar(output);
+    for path in [output, sidecar.as_path()] {
+        match std::fs::symlink_metadata(path) {
+            Ok(_) => {
+                return Err(Error::InvalidValue(format!(
+                    "restore output path already exists: {} (restore must target a fresh path; \
+                     move or remove the existing database and its {} sidecar first)",
+                    output.display(),
+                    sidecar.display(),
+                )));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(())
+}
+
+/// Owns only this attempt's temporary directory and successfully published names.
+/// Ordinary failures clean them; an OS failure during cleanup reports the path.
+struct RestoreOutput {
+    staging: std::path::PathBuf,
+    image: std::path::PathBuf,
+    sidecar: std::path::PathBuf,
+    owns_staging: bool,
+    owns_image: bool,
+    owns_sidecar: bool,
+}
+
+impl RestoreOutput {
+    fn new(image: &Path) -> Result<Self> {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let parent = image
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        for _ in 0..64 {
+            let staging = parent.join(format!(
+                ".grafeo-restore-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            #[cfg(unix)]
+            let created = {
+                use std::os::unix::fs::DirBuilderExt;
+                std::fs::DirBuilder::new().mode(0o700).create(&staging)
+            };
+            #[cfg(not(unix))]
+            let created = std::fs::create_dir(&staging);
+            match created {
+                Ok(()) => {
+                    return Ok(Self {
+                        staging,
+                        image: image.to_path_buf(),
+                        sidecar: restore_sidecar(image),
+                        owns_staging: true,
+                        owns_image: false,
+                        owns_sidecar: false,
+                    });
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Err(Error::Internal(
+            "no unused restore staging directory".to_string(),
+        ))
     }
 
-    let mut segments = Vec::with_capacity(incrementals.len());
-    for incr in &incrementals {
-        let incr_path = backup_dir.join(&incr.filename);
-        let incr_data = std::fs::read(&incr_path).map_err(|e| {
-            Error::Internal(format!(
-                "failed to read incremental backup {}: {e}",
-                incr.filename
-            ))
-        })?;
-
-        // Validate checksum
-        let actual_crc = crc32fast::hash(&incr_data);
-        if actual_crc != incr.checksum {
-            return Err(Error::Internal(format!(
-                "incremental backup {} CRC mismatch: expected {:08x}, got {actual_crc:08x}",
-                incr.filename, incr.checksum,
-            )));
+    fn publish(&mut self, image: &Path) -> Result<()> {
+        let sidecar = restore_sidecar(image);
+        let has_wal = sidecar.try_exists()?;
+        if has_wal {
+            for entry in std::fs::read_dir(&sidecar)? {
+                let entry = entry?;
+                if entry.file_type()?.is_file() {
+                    let file = std::fs::OpenOptions::new().write(true).open(entry.path())?;
+                    grafeo_common::testing::crash::maybe_fail("restore:wal_sync")?;
+                    file.sync_all()?;
+                }
+            }
+            #[cfg(unix)]
+            {
+                grafeo_common::testing::crash::maybe_fail("restore:wal_directory_sync")?;
+                std::fs::File::open(&sidecar)?.sync_all()?;
+            }
         }
-        let version = backup_version(&incr_data)?;
-        segments.push((incr.filename.as_str(), version, incr_data));
+        ensure_restore_fresh(&self.image)?;
+        if has_wal {
+            grafeo_common::testing::crash::maybe_fail("restore:sidecar_rename")?;
+            std::fs::rename(&sidecar, &self.sidecar)?;
+            self.owns_sidecar = true;
+            sync_backup_entry(&self.sidecar, "restore:output_directory_sync")?;
+        }
+        grafeo_common::testing::crash::maybe_fail("restore:image_rename")?;
+        std::fs::rename(image, &self.image)?;
+        self.owns_image = true;
+        sync_backup_entry(&self.image, "restore:output_directory_sync")?;
+        // The caller owns the complete result after all publication barriers.
+        self.owns_image = false;
+        self.owns_sidecar = false;
+        // Staging cleanup cannot undo a durable published restore. Drop retries
+        // only the staging directory if this best-effort removal fails.
+        if grafeo_common::testing::crash::maybe_fail("restore:staging_removal").is_ok()
+            && std::fs::remove_dir_all(&self.staging).is_ok()
+        {
+            self.owns_staging = false;
+        }
+        Ok(())
     }
 
-    match segments.iter().map(|(_, version, _)| *version).max() {
-        // That format's records replay by epoch, from the first: they would
-        // apply again what the image holds.
-        Some(FIRST_FORMAT_VERSION)
-            if incrementals
-                .iter()
-                .any(|incremental| incremental.start_epoch <= full.end_epoch) =>
-        {
-            Err(Error::Internal(format!(
-                "the incremental backups after the full backup {} start before its epoch {} in \
-                 the WAL format before 0.6.0, which cannot replay from it",
-                full.filename,
-                full.end_epoch.as_u64()
-            )))
+    fn cleanup(&mut self) -> Result<()> {
+        let mut errors = Vec::new();
+        for (path, directory, owned) in [
+            (&self.image, false, &mut self.owns_image),
+            (&self.sidecar, true, &mut self.owns_sidecar),
+            (&self.staging, true, &mut self.owns_staging),
+        ] {
+            if !*owned {
+                continue;
+            }
+            let result = if directory {
+                std::fs::remove_dir_all(path)
+            } else {
+                std::fs::remove_file(path)
+            };
+            match result {
+                Ok(()) => *owned = false,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => *owned = false,
+                Err(error) => errors.push(format!(
+                    "failed to remove restore output {}: {error}",
+                    path.display()
+                )),
+            }
         }
-        Some(FIRST_FORMAT_VERSION) => {
-            restore_first_format(&segments, target_epoch, output_path, ciphers)
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(Error::Internal(errors.join("; ")))
         }
-        _ if segments
-            .iter()
-            .any(|(_, version, _)| *version == FIRST_FORMAT_VERSION) =>
-        {
-            Err(Error::Internal(
-                "the incremental backups after the full backup mix two WAL formats".to_string(),
-            ))
-        }
-        _ => restore_segments(&segments, target_epoch, output_path, ciphers.segments),
+    }
+}
+
+impl Drop for RestoreOutput {
+    fn drop(&mut self) {
+        let _ = self.cleanup();
     }
 }
 
@@ -984,7 +1369,7 @@ fn restore_segments(
         }
     }
 
-    let sidecar = std::path::PathBuf::from(format!("{}.wal", output_path.display()));
+    let sidecar = restore_sidecar(output_path);
     copy_groups_until(
         &staging,
         &sidecar,
@@ -1167,8 +1552,8 @@ fn restore_first_format(
         .map_err(|e| Error::Internal(format!("failed to remove restore WAL directory: {e}")))?;
 
     // Move the trimmed WAL to the sidecar location
-    let sidecar_dir = format!("{}.wal", output_path.display());
-    let sidecar_path = std::path::Path::new(&sidecar_dir);
+    let sidecar_dir = restore_sidecar(output_path);
+    let sidecar_path = sidecar_dir.as_path();
     if sidecar_path.exists() {
         std::fs::remove_dir_all(sidecar_path)
             .map_err(|e| Error::Internal(format!("failed to remove existing sidecar WAL: {e}")))?;
@@ -1282,6 +1667,7 @@ mod tests {
             checksum: 12345,
             size_bytes: 1024,
             created_at_ms: 1000,
+            end_wal_lsn: None,
         });
         manifest.segments.push(BackupSegment {
             kind: BackupKind::Incremental,
@@ -1291,6 +1677,7 @@ mod tests {
             checksum: 67890,
             size_bytes: 256,
             created_at_ms: 2000,
+            end_wal_lsn: None,
         });
 
         let full = manifest.latest_full().unwrap();
@@ -1317,6 +1704,7 @@ mod tests {
             checksum: 88,
             size_bytes: 4096,
             created_at_ms: 1_791_331_200_000,
+            end_wal_lsn: None,
         });
         manifest.segments.push(BackupSegment {
             kind: BackupKind::Incremental,
@@ -1326,6 +1714,7 @@ mod tests {
             checksum: 3,
             size_bytes: 319,
             created_at_ms: 1_791_331_288_000,
+            end_wal_lsn: None,
         });
         manifest
     }

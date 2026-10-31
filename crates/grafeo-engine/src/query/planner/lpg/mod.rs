@@ -25,16 +25,12 @@
 //! legal, not just which is faster. Each rewrite lives in the submodule
 //! that owns the corresponding logical operator.
 //!
-//! 1. **Factorized expand chains** (`expand::plan_expand_chain`):
-//!    two or more consecutive `Expand`s are collapsed into a single
-//!    `LazyFactorizedChainOperator`. A hand-rolled tree of `Expand`
-//!    operators would materialise the Cartesian product between hops
-//!    (O(d^k) rows for a k-hop query with average degree d); factorisation
-//!    represents each hop as a set per row and evaluates upward filters
-//!    lazily, which is asymptotically better *and* preserves filter
-//!    semantics (filters apply to the flattened view). Disabled when
-//!    `factorized_execution` is false on the planner, used as an escape
-//!    hatch for operators that need materialised intermediate state.
+//! 1. **Factorized counts** (`aggregate::plan_factorized_aggregate`): a bare
+//!    `COUNT` over two or more consecutive `Expand`s counts the paths level
+//!    by level, without flattening them. Any other chain of expands streams
+//!    hop by hop, which stops early under a LIMIT and holds one chunk (a
+//!    flattened factorized chain built the whole product first). Disabled
+//!    when `factorized_execution` is false on the planner.
 //!
 //! 2. **EXISTS / NOT EXISTS as semi/anti joins** (`filter::extract_complex_exists`):
 //!    anything more than a trivial single-hop EXISTS is rewritten to a
@@ -995,32 +991,11 @@ impl Planner {
         let op = reordered.as_deref().unwrap_or(op);
         let result = match op {
             LogicalOperator::NodeScan(scan) => self.plan_node_scan(scan),
-            LogicalOperator::Expand(expand) => {
-                // Factorized chain fuses N Expand logical operators into a
-                // single LazyFactorizedChainOperator. It kicks in only when
-                // it actually helps: chain_len >= 2 means at least two
-                // consecutive Expands, where separate plans would
-                // Cartesian-product per hop. For a single hop, the plain
-                // `plan_expand` path is cheaper and integrates more naturally
-                // with adjacent operators.
-                //
-                // Disable under PROFILE for the same reason as
-                // `try_topk_rewrite` in plan_limit: PROFILE's
-                // `build_profile_tree` walks the logical plan expecting one
-                // ProfileEntry per logical operator, and a fused chain only
-                // emits one entry for the whole chain. The result is a count
-                // mismatch and a panic at
-                // `crates/grafeo-engine/src/query/profile.rs:75`. Run the
-                // unfused per-Expand path under PROFILE so each Expand gets
-                // its own entry.
-                if self.factorized_execution && !self.profiling.get() {
-                    let (chain_len, _base) = Self::count_expand_chain(op);
-                    if chain_len >= 2 {
-                        return self.maybe_profile(self.plan_expand_chain(op), op);
-                    }
-                }
-                self.plan_expand(expand)
-            }
+            // A chain of expands streams, one hop after another, so a LIMIT
+            // or a filter above it stops early and holds one chunk; only a
+            // bare count over a chain is factorized (see `plan_aggregate`),
+            // which flattens nothing.
+            LogicalOperator::Expand(expand) => self.plan_expand(expand),
             LogicalOperator::Return(ret) => self.plan_return(ret),
             LogicalOperator::Filter(filter) => self.plan_filter(filter),
             LogicalOperator::Project(project) => self.plan_project(project),

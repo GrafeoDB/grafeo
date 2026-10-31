@@ -59,7 +59,7 @@ analytics = ["algos", "vector-index", "text-index", "hybrid-search", "jsonl-impo
 edge = ["gql", "grafeo-engine/regex-lite"]
 # Deployment-based profiles (deprecated)
 embedded = ["gql", "ai", "algos", "arrow-export", "jsonl-import", "grafeo-engine/parallel", "grafeo-engine/regex", "grafeo-engine/grafeo-file"]
-full = ["languages", "ai", "algos", "triple-store", "jsonl-import"]
+full = ["languages", "ai", "algos", "triple-store", "jsonl-import", "parquet-import"]
 
 [lints]
 workspace = true

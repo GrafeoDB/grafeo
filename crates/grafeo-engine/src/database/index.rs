@@ -543,8 +543,14 @@ impl super::GrafeoDB {
     /// Creates a vector similarity index on a node property.
     ///
     /// This enables efficient approximate nearest-neighbor search on vector
-    /// properties. Currently validates the index parameters and scans existing
-    /// nodes to verify the property contains vectors of the expected dimensions.
+    /// properties: it builds an HNSW index over the nodes with `label` whose
+    /// `property` holds a vector of the expected dimensions.
+    ///
+    /// A list of numbers in the property is stored as a vector of 32-bit
+    /// floats once the index exists: the lists already there are converted
+    /// when it is created, and a list written later is stored as one. The
+    /// property then reads back as those floats (a decimal `0.0070` as
+    /// `0.007000000216...`).
     ///
     /// # Arguments
     ///

@@ -1606,6 +1606,11 @@ impl PyGrafeoDB {
     ///
     /// Enables efficient similarity search on vector embeddings.
     ///
+    /// A list of numbers in the property is stored as a vector of 32-bit
+    /// floats once the index exists: the lists already there are converted
+    /// when it is created, and a list written later is stored as one. The
+    /// property then reads back as those floats (0.0070 as 0.007000000216...).
+    ///
     /// Args:
     ///     label: Node label to index (e.g., "Doc")
     ///     property: Property containing vectors (e.g., "embedding")

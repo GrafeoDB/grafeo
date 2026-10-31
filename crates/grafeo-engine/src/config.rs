@@ -341,6 +341,32 @@ pub enum ConfigError {
     /// an encrypted database spills nothing to disk, so the override could
     /// not be honored.
     EncryptionWithForceDisk(grafeo_common::storage::SectionType),
+    /// A section is pinned to
+    /// [`TierOverride::ForceDisk`](grafeo_common::storage::TierOverride::ForceDisk)
+    /// that cannot be moved to disk: the override would have no effect.
+    ForceDiskOnUnspillableSection(grafeo_common::storage::SectionType),
+}
+
+/// Whether a section of `section_type` can be moved to disk: only a section
+/// whose data can be mapped from a file can (the `mmap_able` flag of its
+/// directory entry).
+pub(crate) fn can_spill(section_type: grafeo_common::storage::SectionType) -> bool {
+    section_type.default_flags().mmap_able
+}
+
+/// The section types that can be moved to disk, in section type order, as
+/// a list for an error message: `A, B and C`.
+fn spillable_sections() -> String {
+    let names: Vec<String> = (0..=u8::MAX)
+        .filter_map(grafeo_common::storage::SectionType::from_u8)
+        .filter(|section_type| can_spill(*section_type))
+        .map(|section_type| format!("{section_type:?}"))
+        .collect();
+    match names.split_last() {
+        Some((last, [])) => last.clone(),
+        Some((last, rest)) => format!("{} and {last}", rest.join(", ")),
+        None => String::new(),
+    }
 }
 
 impl fmt::Display for ConfigError {
@@ -372,6 +398,12 @@ impl fmt::Display for ConfigError {
                 f,
                 "encryption at rest cannot be combined with a disk tier override for the \
                  {section_type:?} section: an encrypted database spills nothing to disk"
+            ),
+            Self::ForceDiskOnUnspillableSection(section_type) => write!(
+                f,
+                "the {section_type:?} section cannot be moved to disk, so it takes no disk \
+                 tier override; the sections that can are {}",
+                spillable_sections()
             ),
         }
     }
@@ -1270,7 +1302,10 @@ impl Config {
     /// tier, max_ram: None })`. Pass [`TierOverride::ForceDisk`] to spill the
     /// section at database open, [`TierOverride::ForceRam`] to declare it
     /// must stay in RAM (declarative only until Phase 8g), or
-    /// [`TierOverride::Auto`] (the default).
+    /// [`TierOverride::Auto`] (the default). Only `CompactStore`,
+    /// `VectorStore`, `TextIndex`, `RdfRing` and `PropertyIndex` can be
+    /// moved to disk: [`validate`](Self::validate) refuses `ForceDisk` for
+    /// any other section.
     ///
     /// # Examples
     ///
@@ -1592,6 +1627,8 @@ impl Config {
             return Err(ConfigError::RdfFeatureRequired);
         }
 
+        self.check_section_tiers()?;
+
         #[cfg(feature = "encryption")]
         if self.encryption.is_some() {
             if self.path.is_none() {
@@ -1616,6 +1653,31 @@ impl Config {
         }
 
         Ok(())
+    }
+
+    /// Refuses a disk tier override on a section that cannot be moved to
+    /// disk: the open would keep it in memory without a word. Also checked
+    /// for a change of the stored configuration, which a later open applies.
+    ///
+    /// # Errors
+    ///
+    /// [`ConfigError::ForceDiskOnUnspillableSection`] for the first such
+    /// section in section type order, so the error does not depend on the
+    /// map's iteration order.
+    pub(crate) fn check_section_tiers(&self) -> std::result::Result<(), ConfigError> {
+        let unspillable = self
+            .section_configs
+            .iter()
+            .filter(|(section_type, section)| {
+                section.tier == grafeo_common::storage::TierOverride::ForceDisk
+                    && !can_spill(**section_type)
+            })
+            .map(|(section_type, _)| *section_type)
+            .min_by_key(|section_type| section_type.to_u8());
+        match unspillable {
+            Some(section_type) => Err(ConfigError::ForceDiskOnUnspillableSection(section_type)),
+            None => Ok(()),
+        }
     }
 }
 
@@ -2046,6 +2108,55 @@ mod tests {
         );
         config.encryption = None;
         assert_eq!(config.validate(), Ok(()), "ForceDisk alone is fine");
+    }
+
+    /// Only some sections can move to disk; a disk override on any other
+    /// section would have no effect, so it is refused with the section and
+    /// the ones that can spill.
+    #[test]
+    fn force_disk_on_a_section_that_cannot_spill_is_invalid() {
+        use grafeo_common::storage::{SectionType, TierOverride};
+
+        for section_type in [
+            SectionType::Catalog,
+            SectionType::LpgStore,
+            SectionType::RdfStore,
+            SectionType::OverlayDeletions,
+            SectionType::TimeIndex,
+        ] {
+            let config = Config::persistent("berlin.grafeo")
+                .with_section_tier(section_type, TierOverride::ForceDisk);
+            assert_eq!(
+                config.validate(),
+                Err(ConfigError::ForceDiskOnUnspillableSection(section_type)),
+                "{section_type:?} cannot spill"
+            );
+            assert_eq!(
+                ConfigError::ForceDiskOnUnspillableSection(section_type).to_string(),
+                format!(
+                    "the {section_type:?} section cannot be moved to disk, so it takes no disk \
+                     tier override; the sections that can are CompactStore, VectorStore, \
+                     TextIndex, RdfRing and PropertyIndex"
+                )
+            );
+            for tier in [TierOverride::Auto, TierOverride::ForceRam] {
+                let config =
+                    Config::persistent("berlin.grafeo").with_section_tier(section_type, tier);
+                assert_eq!(config.validate(), Ok(()), "{section_type:?} with {tier:?}");
+            }
+        }
+
+        for section_type in [
+            SectionType::CompactStore,
+            SectionType::VectorStore,
+            SectionType::TextIndex,
+            SectionType::RdfRing,
+            SectionType::PropertyIndex,
+        ] {
+            let config = Config::persistent("berlin.grafeo")
+                .with_section_tier(section_type, TierOverride::ForceDisk);
+            assert_eq!(config.validate(), Ok(()), "{section_type:?} can spill");
+        }
     }
 
     // --- Builder chaining with new fields ---

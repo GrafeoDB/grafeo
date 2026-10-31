@@ -3343,6 +3343,8 @@ impl GrafeoDB {
     /// An unsupported-query error for an in-memory or read-only database,
     /// [`Error::InvalidValue`] when `changes` sets the graph model or the
     /// backward edges to another value than the database was created with,
+    /// or pins a section that cannot be moved to disk to
+    /// [`TierOverride::ForceDisk`](grafeo_common::storage::TierOverride::ForceDisk),
     /// the database-closed error after `close()`, and the errors of the
     /// checkpoint.
     #[cfg(feature = "grafeo-file")]
@@ -3360,6 +3362,8 @@ impl GrafeoDB {
                 "a database opened read-only cannot change its stored configuration",
             ));
         }
+        // A disk override the next open would refuse is refused now.
+        changes.check_section_tiers().map_err(config_error)?;
         let path = normalize_path(path)?;
         let stored = self
             .catalog

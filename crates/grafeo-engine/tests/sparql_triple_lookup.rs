@@ -354,6 +354,17 @@ fn an_optional_left_side_holding_the_free_variable() {
         "{PREFIX} INSERT DATA {{ e:p7 e:nick \"n7\" . e:p57 e:nick \"x\" . }}"
     ))
     .unwrap();
+    // Nicks of the people of other ages, so the OPTIONAL is the larger side
+    // (a side of two triples is a hash join's build side instead).
+    let others = (0..2_000)
+        .filter(|i| i % 50 != 7)
+        .fold(String::new(), |mut out, i| {
+            use std::fmt::Write;
+            write!(out, "e:p{i} e:nick \"m{i}\" . ").unwrap();
+            out
+        });
+    db.execute_sparql(&format!("{PREFIX} INSERT DATA {{ {others} }}"))
+        .unwrap();
     let rows = agree(
         &db,
         "?p ?n",

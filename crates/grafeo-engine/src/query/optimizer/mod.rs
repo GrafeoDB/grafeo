@@ -182,6 +182,27 @@ impl Optimizer {
         }
     }
 
+    /// Creates the optimizer of the SPARQL or GraphQL-on-RDF plan `plan` over
+    /// `store`: from the store's statistics, collected first when the plan
+    /// joins inputs (their order is chosen by them, see `rdf_order`), and
+    /// from the ones collected last, or none, when it does not: an `INSERT
+    /// DATA` or a single pattern has no order to choose, so a load through
+    /// statements does not read the whole store again every tenth of its
+    /// growth.
+    #[cfg(feature = "triple-store")]
+    #[must_use]
+    pub fn for_rdf_plan(
+        store: &grafeo_core::graph::rdf::RdfStore,
+        plan: &crate::query::plan::LogicalPlan,
+    ) -> Self {
+        let statistics = if joins_inputs(&plan.root) {
+            store.get_or_collect_statistics()
+        } else {
+            store.cached_statistics().unwrap_or_default()
+        };
+        Self::from_rdf_statistics(statistics)
+    }
+
     /// Creates an optimizer from a Statistics snapshot.
     ///
     /// Extracts label cardinalities, edge type degrees, and graph totals
@@ -2111,6 +2132,18 @@ fn wrap_filters(filters: Vec<FilterOp>, op: LogicalOperator) -> LogicalOperator 
 /// The `AND` of the conjuncts, or `None` when there are none.
 fn conjunction(conjuncts: Vec<LogicalExpression>) -> Option<LogicalExpression> {
     LogicalExpression::conjunction(conjuncts)
+}
+
+/// Whether `op` joins two or more inputs anywhere in it.
+#[cfg(feature = "triple-store")]
+fn joins_inputs(op: &LogicalOperator) -> bool {
+    matches!(
+        op,
+        LogicalOperator::Join(_)
+            | LogicalOperator::LeftJoin(_)
+            | LogicalOperator::AntiJoin(_)
+            | LogicalOperator::MultiWayJoin(_)
+    ) || op.children().into_iter().any(joins_inputs)
 }
 
 #[cfg(test)]

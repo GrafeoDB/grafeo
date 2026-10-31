@@ -62,6 +62,7 @@ pub use section::RdfStoreSection;
 pub use sink::{BatchInsertSink, CountSink, TripleSink, VecSink};
 pub use store::{
     BulkLoadResult, NTriplesError, RdfStore, RdfStoreConfig, STATISTICS_MIN_DRIFT, parse_ntriples,
+    parse_ntriples_text,
 };
 pub use term::{BlankNode, Iri, Literal, Term, TermParseError};
 pub use triple::{Triple, TriplePattern};

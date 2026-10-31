@@ -202,6 +202,11 @@ fn queries_are_right_with_stale_statistics() {
         .unwrap();
     let count = |query: &str| db.execute_sparql(query).unwrap().row_count();
     assert_eq!(count("SELECT ?s WHERE { ?s <http://ex.org/p> ?o }"), 1_000);
+    // A single pattern plans without them: collect them here.
+    assert_eq!(
+        db.rdf_store().get_or_collect_statistics().total_triples,
+        1_000
+    );
 
     // Ten new triples of a new predicate, on subjects 0 to 9.
     let triples = data(0..10, "q", "w");

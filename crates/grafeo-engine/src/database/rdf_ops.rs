@@ -84,8 +84,7 @@ impl GrafeoDB {
         let logical_plan = sparql::translate(query)?;
 
         // Optimize the plan using RDF-specific statistics
-        let rdf_stats = self.rdf_store.get_or_collect_statistics();
-        let optimizer = Optimizer::from_rdf_statistics(rdf_stats);
+        let optimizer = Optimizer::for_rdf_plan(&self.rdf_store, &logical_plan);
         let optimized_plan = optimizer.optimize(logical_plan)?;
 
         // An update on a read-only database fails, as in a session.
@@ -215,10 +214,11 @@ impl GrafeoDB {
                 .map_err(|error| {
                     Error::InvalidValue(format!("'{}' is no Turtle: {error}", path.display()))
                 })?,
-            RdfFormat::NTriples => grafeo_core::graph::rdf::parse_ntriples(text.as_bytes())
-                .map_err(|error| {
+            RdfFormat::NTriples => {
+                grafeo_core::graph::rdf::parse_ntriples_text(&text).map_err(|error| {
                     Error::InvalidValue(format!("'{}' is no N-Triples: {error}", path.display()))
-                })?,
+                })?
+            }
         };
         self.batch_insert_rdf(triples)
     }
@@ -246,7 +246,14 @@ impl GrafeoDB {
             use grafeo_common::storage::log_record::TripleRecord;
 
             let mut changes = changes;
-            for triple in &triples {
+            // Without a WAL there is nothing to log: the records are not
+            // built (each copies its triple's terms).
+            let logged = if changes.is_logged() {
+                &triples[..]
+            } else {
+                &[]
+            };
+            for triple in logged {
                 changes.log_triple(
                     None,
                     &grafeo_common::change::DataOp::InsertTriple {

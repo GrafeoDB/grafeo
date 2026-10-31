@@ -1370,12 +1370,11 @@ impl RdfPlanner {
         // Predicate-bound: ?s <pred> ?o
         if s_var && !p_var && o_var {
             if let TripleComponent::Iri(pred_iri) = &scan.predicate {
-                let stats = self.store.get_or_collect_statistics();
-                if let Some(pred_stats) = stats.get_predicate(pred_iri) {
-                    // reason: predicate triple count will not exceed i64::MAX
-                    #[allow(clippy::cast_possible_wrap)]
-                    return Some(pred_stats.triple_count as i64);
-                }
+                // From the index, not the statistics: they may be stale.
+                let count = self
+                    .store
+                    .count_with_predicate(&Term::iri(pred_iri.clone()));
+                return i64::try_from(count).ok();
             }
             return None;
         }

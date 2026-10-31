@@ -828,6 +828,12 @@ impl<'wal> StreamingChanges<'wal> {
         });
         self
     }
+
+    /// Whether it writes a WAL: without one, a caller need not build the
+    /// records it would log.
+    pub(crate) fn is_logged(&self) -> bool {
+        self.log.is_some()
+    }
 }
 
 impl StreamingChanges<'_> {

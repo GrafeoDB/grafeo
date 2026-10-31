@@ -473,9 +473,10 @@ impl RdfStore {
     /// Inserts stored triples (with their ids) in one pass per index.
     fn insert_stored(&self, triples: impl Iterator<Item = Arc<Triple>>) -> usize {
         // Phase 1: deduplicate against primary storage (single lock)
-        let mut new_triples = Vec::new();
+        let mut new_triples = Vec::with_capacity(triples.size_hint().0);
         {
             let mut primary = self.triples.write();
+            primary.reserve(triples.size_hint().0);
             for arc in triples {
                 if primary.insert(Arc::clone(&arc)) {
                     new_triples.push(arc);
@@ -487,77 +488,66 @@ impl RdfStore {
             return 0;
         }
 
-        let count = new_triples.len();
+        self.index_new(&new_triples);
+        self.note_changes(new_triples.len());
+        new_triples.len()
+    }
 
-        // Phase 2: update subject index (single lock)
-        {
-            let mut subject_index = self.subject_index.write();
-            for triple in &new_triples {
-                subject_index
-                    .entry(triple.subject().clone())
-                    .or_default()
-                    .push(Arc::clone(triple));
+    /// Adds `triples`, new to the store, to its six indexes. A batch of
+    /// [`PARALLEL_INDEX_MIN`] or more builds them in parallel, one task per
+    /// index (each has its own lock); a smaller one, as an `INSERT DATA`
+    /// of a few triples, builds them in turn.
+    fn index_new(&self, triples: &[Arc<Triple>]) {
+        let subjects = || {
+            index_by(&mut self.subject_index.write(), triples, |triple| {
+                triple.subject().clone()
+            });
+        };
+        let predicates = || {
+            index_by(&mut self.predicate_index.write(), triples, |triple| {
+                triple.predicate().clone()
+            });
+        };
+        let objects = || {
+            if self.config.index_objects
+                && let Some(index) = self.object_index.write().as_mut()
+            {
+                index_by(index, triples, |triple| triple.object().clone());
             }
+        };
+        let subject_predicates = || {
+            index_by(&mut self.sp_index.write(), triples, |triple| {
+                (triple.subject().clone(), triple.predicate().clone())
+            });
+        };
+        let predicate_objects = || {
+            index_by(&mut self.po_index.write(), triples, |triple| {
+                (triple.predicate().clone(), triple.object().clone())
+            });
+        };
+        let object_subjects = || {
+            index_by(&mut self.os_index.write(), triples, |triple| {
+                (triple.object().clone(), triple.subject().clone())
+            });
+        };
+        #[cfg(feature = "parallel")]
+        if triples.len() >= PARALLEL_INDEX_MIN {
+            rayon::scope(|scope| {
+                scope.spawn(|_| subject_predicates());
+                scope.spawn(|_| predicate_objects());
+                scope.spawn(|_| object_subjects());
+                scope.spawn(|_| subjects());
+                scope.spawn(|_| predicates());
+                objects();
+            });
+            return;
         }
-
-        // Phase 3: update predicate index (single lock)
-        {
-            let mut predicate_index = self.predicate_index.write();
-            for triple in &new_triples {
-                predicate_index
-                    .entry(triple.predicate().clone())
-                    .or_default()
-                    .push(Arc::clone(triple));
-            }
-        }
-
-        // Phase 4: update object index if enabled (single lock)
-        if self.config.index_objects {
-            let mut object_index = self.object_index.write();
-            if let Some(ref mut index) = *object_index {
-                for triple in &new_triples {
-                    index
-                        .entry(triple.object().clone())
-                        .or_default()
-                        .push(Arc::clone(triple));
-                }
-            }
-        }
-
-        // Phase 5: update SP composite index (single lock)
-        {
-            let mut sp = self.sp_index.write();
-            for triple in &new_triples {
-                sp.entry((triple.subject().clone(), triple.predicate().clone()))
-                    .or_default()
-                    .push(Arc::clone(triple));
-            }
-        }
-
-        // Phase 6: update PO composite index (single lock)
-        {
-            let mut po = self.po_index.write();
-            for triple in &new_triples {
-                po.entry((triple.predicate().clone(), triple.object().clone()))
-                    .or_default()
-                    .push(Arc::clone(triple));
-            }
-        }
-
-        // Phase 7: update OS composite index (single lock)
-        {
-            let mut os = self.os_index.write();
-            for triple in new_triples {
-                os.entry((triple.object().clone(), triple.subject().clone()))
-                    .or_default()
-                    .push(triple);
-            }
-        }
-
-        if count > 0 {
-            self.note_changes(count);
-        }
-        count
+        subjects();
+        predicates();
+        objects();
+        subject_predicates();
+        predicate_objects();
+        object_subjects();
     }
 
     /// Removes a triple from the store.
@@ -1115,6 +1105,15 @@ impl RdfStore {
         index.get(predicate).cloned().unwrap_or_default()
     }
 
+    /// How many triples have `predicate`: exact, from the predicate index.
+    #[must_use]
+    pub fn count_with_predicate(&self, predicate: &Term) -> usize {
+        self.predicate_index
+            .read()
+            .get(predicate)
+            .map_or(0, Vec::len)
+    }
+
     /// Returns triples with the given object.
     pub fn triples_with_object(&self, object: &Term) -> Vec<Arc<Triple>> {
         let index = self.object_index.read();
@@ -1194,16 +1193,7 @@ impl RdfStore {
     /// distinct subject/object counts, and index access pattern costs.
     #[must_use]
     pub fn collect_statistics(&self) -> crate::statistics::RdfStatistics {
-        let mut collector = crate::statistics::RdfStatisticsCollector::new();
-        let triples = self.triples.read();
-        for triple in triples.iter() {
-            collector.record_triple(
-                &triple.subject().to_string(),
-                &triple.predicate().to_string(),
-                &triple.object().to_string(),
-            );
-        }
-        collector.build()
+        statistics_of(self.triples.read().iter().map(AsRef::as_ref))
     }
 
     /// Returns the RDF statistics the optimizer estimates with, collected on
@@ -1229,6 +1219,14 @@ impl RdfStore {
         let stats = Arc::new(self.collect_statistics());
         *self.statistics_cache.write() = Some(Arc::clone(&stats));
         stats
+    }
+
+    /// The statistics collected last, as they are: `None` before the first
+    /// collection. A plan with no join to order plans with these (or none)
+    /// instead of collecting them.
+    #[must_use]
+    pub fn cached_statistics(&self) -> Option<Arc<crate::statistics::RdfStatistics>> {
+        self.statistics_cache.read().clone()
     }
 
     /// Notes that `changed` triples were inserted or removed: the statistics
@@ -1326,8 +1324,6 @@ impl RdfStore {
         let mut po_idx = hashbrown::HashMap::with_capacity_and_hasher(count / 2, hasher());
         let mut os_idx = hashbrown::HashMap::with_capacity_and_hasher(count / 2, hasher());
 
-        let mut stats_collector = crate::statistics::RdfStatisticsCollector::new();
-
         for triple in &arcs {
             // Single-term indexes
             subject_idx
@@ -1358,14 +1354,8 @@ impl RdfStore {
                 .entry((triple.object().clone(), triple.subject().clone()))
                 .or_insert_with(Vec::new)
                 .push(Arc::clone(triple));
-
-            // Collect statistics in the same pass
-            stats_collector.record_triple(
-                &triple.subject().to_string(),
-                &triple.predicate().to_string(),
-                &triple.object().to_string(),
-            );
         }
+        let stats = statistics_of(arcs.iter().map(AsRef::as_ref));
 
         // Swap indexes into the store (one lock acquisition per index)
         let primary: FxHashSet<Arc<Triple>> = arcs.into_iter().collect();
@@ -1381,7 +1371,6 @@ impl RdfStore {
         *self.po_index.write() = po_idx;
         *self.os_index.write() = os_idx;
 
-        let stats = stats_collector.build();
         // Cache the freshly-computed statistics from the bulk load pass.
         *self.statistics_cache.write() = Some(Arc::new(stats.clone()));
         // The statistics count what the load left: no change since.
@@ -2172,6 +2161,74 @@ fn next_ntriples_term(s: &str) -> Option<(&str, &str)> {
     }
 }
 
+/// The fewest new triples a batch insert indexes in parallel: below it, the
+/// tasks would cost more than they save.
+#[cfg(feature = "parallel")]
+const PARALLEL_INDEX_MIN: usize = 4_096;
+
+/// Appends each of `triples` to the entry of `index` that `key` names.
+fn index_by<K: Eq + std::hash::Hash>(
+    index: &mut HashMap<K, Vec<Arc<Triple>>, grafeo_common::utils::hash::FxBuildHasher>,
+    triples: &[Arc<Triple>],
+    key: impl Fn(&Triple) -> K,
+) {
+    for triple in triples {
+        index
+            .entry(key(triple))
+            .or_default()
+            .push(Arc::clone(triple));
+    }
+}
+
+/// The statistics of `triples`: per predicate its triples and distinct
+/// subjects and objects, and the totals. The terms are counted as they are,
+/// by reference, and each predicate is named once (as `to_string` writes
+/// it, the key the statistics are read by): a term is no string of its own
+/// per triple.
+fn statistics_of<'a>(
+    triples: impl Iterator<Item = &'a Triple>,
+) -> crate::statistics::RdfStatistics {
+    use crate::statistics::{IndexStatistics, PredicateStatistics, RdfStatistics};
+
+    #[derive(Default)]
+    struct Counted<'a> {
+        triples: u64,
+        subjects: FxHashSet<&'a Term>,
+        objects: FxHashSet<&'a Term>,
+    }
+    let mut total = 0_u64;
+    let mut subjects: FxHashSet<&Term> = FxHashSet::default();
+    let mut objects: FxHashSet<&Term> = FxHashSet::default();
+    let mut predicates: grafeo_common::utils::hash::FxHashMap<&Term, Counted<'_>> =
+        grafeo_common::utils::hash::FxHashMap::default();
+    for triple in triples {
+        total += 1;
+        subjects.insert(triple.subject());
+        objects.insert(triple.object());
+        let counted = predicates.entry(triple.predicate()).or_default();
+        counted.triples += 1;
+        counted.subjects.insert(triple.subject());
+        counted.objects.insert(triple.object());
+    }
+    let mut statistics = RdfStatistics::new();
+    statistics.total_triples = total;
+    statistics.subject_count = subjects.len() as u64;
+    statistics.object_count = objects.len() as u64;
+    statistics.predicate_count = predicates.len() as u64;
+    for (predicate, counted) in predicates {
+        statistics.predicates.insert(
+            predicate.to_string(),
+            PredicateStatistics::new(
+                counted.triples,
+                counted.subjects.len() as u64,
+                counted.objects.len() as u64,
+            ),
+        );
+    }
+    statistics.index_stats = IndexStatistics::new();
+    statistics
+}
+
 /// The triples of an N-Triples document, in document order, without
 /// loading them: empty lines and comment lines (starting with `#`) are
 /// skipped.
@@ -2180,10 +2237,84 @@ fn next_ntriples_term(s: &str) -> Option<(&str, &str)> {
 ///
 /// Returns an error on I/O failure or if a line cannot be parsed, naming the
 /// line.
-pub fn parse_ntriples(reader: impl std::io::BufRead) -> Result<Vec<Triple>, NTriplesError> {
+pub fn parse_ntriples(mut reader: impl std::io::BufRead) -> Result<Vec<Triple>, NTriplesError> {
+    let mut text = String::new();
+    reader
+        .read_to_string(&mut text)
+        .map_err(NTriplesError::Io)?;
+    parse_ntriples_text(&text)
+}
+
+/// Parses the N-Triples document `text`, as [`parse_ntriples`] parses a
+/// reader. A large one is parsed in parallel, in runs of whole lines; the
+/// error is still the one of its first line that does not parse.
+///
+/// # Errors
+///
+/// Returns an error if a line cannot be parsed, naming the line.
+pub fn parse_ntriples_text(text: &str) -> Result<Vec<Triple>, NTriplesError> {
+    #[cfg(feature = "parallel")]
+    if text.len() >= PARALLEL_PARSE_MIN_BYTES {
+        use rayon::prelude::*;
+
+        let runs = runs_of_lines(text, rayon::current_num_threads() * 4);
+        let parsed: Vec<_> = runs.par_iter().map(|run| parse_lines(run)).collect();
+        let mut triples = Vec::with_capacity(
+            parsed
+                .iter()
+                .map(|run| run.as_ref().map_or(0, Vec::len))
+                .sum(),
+        );
+        let mut lines_before = 0;
+        for (run, result) in runs.iter().zip(parsed) {
+            match result {
+                Ok(run_triples) => triples.extend(run_triples),
+                Err(NTriplesError::Parse { line, content }) => {
+                    return Err(NTriplesError::Parse {
+                        line: lines_before + line,
+                        content,
+                    });
+                }
+                Err(error) => return Err(error),
+            }
+            lines_before += run.lines().count();
+        }
+        return Ok(triples);
+    }
+    parse_lines(text)
+}
+
+/// The fewest bytes of N-Triples text [`parse_ntriples_text`] parses in
+/// parallel.
+#[cfg(feature = "parallel")]
+const PARALLEL_PARSE_MIN_BYTES: usize = 1 << 20;
+
+/// `text` cut into about `count` runs of whole lines, in order.
+#[cfg(feature = "parallel")]
+fn runs_of_lines(text: &str, count: usize) -> Vec<&str> {
+    let size = text.len().div_ceil(count.max(1));
+    let mut runs = Vec::with_capacity(count);
+    let mut rest = text;
+    while !rest.is_empty() {
+        let end = if rest.len() <= size {
+            rest.len()
+        } else {
+            rest.as_bytes()[size..]
+                .iter()
+                .position(|&byte| byte == b'\n')
+                .map_or(rest.len(), |at| size + at + 1)
+        };
+        let (run, after) = rest.split_at(end);
+        runs.push(run);
+        rest = after;
+    }
+    runs
+}
+
+/// The triples of the N-Triples lines of `text`, numbering its lines from 1.
+fn parse_lines(text: &str) -> Result<Vec<Triple>, NTriplesError> {
     let mut triples = Vec::new();
-    for (line_no, line) in reader.lines().enumerate() {
-        let line = line.map_err(NTriplesError::Io)?;
+    for (line_no, line) in text.lines().enumerate() {
         let trimmed = line.trim();
         if trimmed.is_empty() || trimmed.starts_with('#') {
             continue;

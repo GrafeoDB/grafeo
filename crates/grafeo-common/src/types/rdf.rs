@@ -317,6 +317,45 @@ fn read_unicode_escape(
     })
 }
 
+/// The IRI that `text`, the text between an IRI's `<` and `>` in an
+/// N-Triples or Turtle document (their `IRIREF`), spells: a backslash before
+/// `u` with 4 or `U` with 8 hexadecimal digits stands for the Unicode scalar
+/// value they spell, the only escapes an IRI has there. Text without a
+/// backslash is returned as it is.
+///
+/// [`Term::from_ntriples`] does not decode these, as a term's own string
+/// form writes none: a document parser calls this for each IRI it reads.
+///
+/// # Errors
+///
+/// Returns a [`TermParseError`] naming the escape and its byte offset: one
+/// other than `\u` and `\U`, an unfinished one, or one that spells no
+/// Unicode scalar value.
+pub fn unescape_iri(text: &str) -> Result<std::borrow::Cow<'_, str>, TermParseError> {
+    if !text.contains('\\') {
+        return Ok(std::borrow::Cow::Borrowed(text));
+    }
+    let mut iri = String::with_capacity(text.len());
+    let mut chars = text.char_indices();
+    while let Some((offset, ch)) = chars.next() {
+        if ch != '\\' {
+            iri.push(ch);
+            continue;
+        }
+        let decoded = match chars.next() {
+            Some((_, 'u')) => read_unicode_escape(&mut chars, 4, offset),
+            Some((_, 'U')) => read_unicode_escape(&mut chars, 8, offset),
+            Some((_, other)) => Err(format!(
+                "an escape '\\{other}' at byte {offset}, where an IRI has only '\\u' and '\\U'"
+            )),
+            None => Err(format!("an escape without its character at byte {offset}")),
+        }
+        .map_err(|reason| TermParseError::new(text, reason))?;
+        iri.push(decoded);
+    }
+    Ok(std::borrow::Cow::Owned(iri))
+}
+
 /// How many characters of a refused string a [`TermParseError`] shows.
 const EXCERPT_CHARS: usize = 64;
 
@@ -1071,6 +1110,38 @@ mod tests {
         ];
         for (text, term) in cases {
             assert_eq!(Term::from_ntriples(&escaped(text)), Ok(term), "{text}");
+        }
+    }
+
+    #[test]
+    fn iri_escapes_decode_to_their_characters_and_refuse_the_rest() {
+        assert!(matches!(
+            unescape_iri("http://example.org/Kraków"),
+            Ok(std::borrow::Cow::Borrowed("http://example.org/Kraków"))
+        ));
+        assert_eq!(
+            unescape_iri(&escaped("http://example.org/Krak~u00F3w/~U0001F6B2")).unwrap(),
+            "http://example.org/Kraków/🚲"
+        );
+        for (text, reason) in [
+            (
+                "a~nb",
+                "an escape '~n' at byte 1, where an IRI has only '~u' and '~U'",
+            ),
+            ("ab~", "an escape without its character at byte 2"),
+            ("~u00F", "the escape at byte 0 needs 4 hexadecimal digits"),
+            ("~u+0F3", "the escape at byte 0 needs 4 hexadecimal digits"),
+            (
+                "~uDFFF",
+                "the escape at byte 0 spells U+DFFF, which is not a Unicode scalar value",
+            ),
+        ] {
+            let text = escaped(text);
+            assert_eq!(
+                unescape_iri(&text).unwrap_err().to_string(),
+                format!("not an N-Triples term ({}): {text:?}", escaped(reason)),
+                "{text}"
+            );
         }
     }
 

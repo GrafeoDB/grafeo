@@ -4,7 +4,7 @@
 //! subject, predicate, and object queries.
 
 use super::sink::TripleSink;
-use super::term::Term;
+use super::term::{Term, unescape_iri};
 use super::triple::{Triple, TriplePattern};
 use grafeo_common::change::RdfGraphOp;
 use grafeo_common::storage::log_record::RdfGraphTarget;
@@ -2065,8 +2065,12 @@ fn next_ntriples_term(s: &str) -> Option<(&str, &str)> {
         let end = rest.find('>')?;
         Some((&s[..end + 2], &rest[end + 1..]))
     } else if s.starts_with("_:") {
-        // Blank node: until whitespace or end
-        let end = s.find(|c: char| c.is_whitespace()).unwrap_or(s.len());
+        // Blank node: until whitespace or the next term. A label cannot end
+        // in '.', so a dot right after it ends the statement (`_:b0.`).
+        let end = s
+            .find(|c: char| c.is_whitespace() || c == '<' || c == '"')
+            .unwrap_or(s.len());
+        let end = s[..end].trim_end_matches('.').len();
         Some((&s[..end], &s[end..]))
     } else if s.starts_with('"') {
         // Literal: find closing quote (handling escapes), then optional suffix
@@ -2085,10 +2089,12 @@ fn next_ntriples_term(s: &str) -> Option<(&str, &str)> {
                         pos += end + 1;
                     }
                 } else if s[pos..].starts_with('@') {
-                    let lang_end = s[pos..]
-                        .find(|c: char| c.is_whitespace())
-                        .unwrap_or(s.len() - pos);
-                    pos += lang_end;
+                    // A tag is letters, digits and '-' (LANGTAG), so a dot
+                    // right after it ends the statement (`"x"@en.`).
+                    let tag = &s[pos + 1..];
+                    pos += 1 + tag
+                        .find(|c: char| !(c.is_ascii_alphanumeric() || c == '-'))
+                        .unwrap_or(tag.len());
                 }
                 break;
             } else {
@@ -2300,9 +2306,8 @@ fn parse_ntriples_line(line: &str) -> Result<Triple, String> {
     let (pred_str, rest) = next_ntriples_term(rest).ok_or_else(shape)?;
     let (obj_str, rest) = next_ntriples_term(rest).ok_or_else(shape)?;
 
-    let term = |text: &str, role: &str| {
-        Term::from_ntriples(text).map_err(|error| format!("{role}: {error}"))
-    };
+    let term =
+        |text: &str, role: &str| ntriples_term(text).map_err(|error| format!("{role}: {error}"));
     let subject = term(subj_str, "subject")?;
     let predicate = term(pred_str, "predicate")?;
     let object = term(obj_str, "object")?;
@@ -2319,6 +2324,23 @@ fn parse_ntriples_line(line: &str) -> Result<Triple, String> {
         return Err(shape());
     }
     Ok(Triple::new(subject, predicate, object))
+}
+
+/// The term an N-Triples document writes as `text`: the term
+/// [`Term::from_ntriples`] reads, with the unicode escapes of an IRI term
+/// or a literal's datatype decoded, which a term's own string form never
+/// writes.
+fn ntriples_term(text: &str) -> Result<Term, super::TermParseError> {
+    Ok(match Term::from_ntriples(text)? {
+        Term::Iri(iri) if iri.as_str().contains('\\') => {
+            Term::iri(unescape_iri(iri.as_str())?.into_owned())
+        }
+        Term::Literal(literal) if literal.datatype().contains('\\') => Term::typed_literal(
+            literal.value(),
+            unescape_iri(literal.datatype())?.into_owned(),
+        ),
+        term => term,
+    })
 }
 
 #[cfg(test)]
@@ -2426,6 +2448,87 @@ mod tests {
             RdfStore::new().load_ntriples(bad.as_bytes()),
             Err(NTriplesError::Parse { line: 1, .. })
         ));
+    }
+
+    /// N-Triples needs no whitespace before the final dot: a blank node label
+    /// and a language tag cannot end in one, so the dot ends the statement.
+    #[test]
+    fn a_dot_right_after_a_blank_node_or_a_language_tag_ends_the_statement() {
+        let input = concat!(
+            "<http://example.org/alix> <http://example.org/knows> _:b0.\n",
+            "<http://example.org/alix> <http://example.org/name> \"Alix\"@en.\n",
+            "<http://example.org/gus> <http://example.org/knows> _:b1.x .\n",
+            "_:b0<http://example.org/name>\"Gus\"@nl-BE.\n",
+        );
+        let name = Term::iri("http://example.org/name");
+        let knows = Term::iri("http://example.org/knows");
+        assert_eq!(
+            parse_ntriples_text(input).unwrap(),
+            vec![
+                Triple::new(
+                    Term::iri("http://example.org/alix"),
+                    knows.clone(),
+                    Term::blank("b0")
+                ),
+                Triple::new(
+                    Term::iri("http://example.org/alix"),
+                    name.clone(),
+                    Term::lang_literal("Alix", "en"),
+                ),
+                Triple::new(
+                    Term::iri("http://example.org/gus"),
+                    knows,
+                    Term::blank("b1.x")
+                ),
+                Triple::new(Term::blank("b0"), name, Term::lang_literal("Gus", "nl-be")),
+            ]
+        );
+        // A tag is letters, digits and '-', so anything else after it is no
+        // statement end.
+        let bad = "<http://example.org/alix> <http://example.org/name> \"Alix\"@en_GB .\n";
+        assert!(
+            matches!(
+                parse_ntriples_text(bad),
+                Err(NTriplesError::Parse { line: 1, .. })
+            ),
+            "{bad}"
+        );
+    }
+
+    /// An IRI's `\u` and `\U` escapes (UCHAR in the N-Triples grammar) stand
+    /// for their characters, in an IRI term and in a literal's datatype; no
+    /// other escape is allowed in an IRI.
+    #[test]
+    fn ntriples_iris_decode_their_unicode_escapes() {
+        // `~` stands for a backslash.
+        let input = concat!(
+            "<http://example.org/Krak~u00F3w> <http://example.org/~U0001F6B2> ",
+            "\"7\"^^<http://example.org/~u0041ge> .\n",
+        )
+        .replace('~', "\\");
+        assert_eq!(
+            parse_ntriples_text(&input).unwrap(),
+            vec![Triple::new(
+                Term::iri("http://example.org/Kraków"),
+                Term::iri("http://example.org/🚲"),
+                Term::typed_literal("7", "http://example.org/Age"),
+            )]
+        );
+        for (iri, reason) in [
+            ("<http://example.org/~n>", "an IRI has only"),
+            ("<http://example.org/~u00F>", "needs 4 hexadecimal digits"),
+            ("<http://example.org/~u+0F3>", "needs 4 hexadecimal digits"),
+            ("<http://example.org/~uD800>", "not a Unicode scalar value"),
+        ] {
+            let line = format!("{iri} <http://example.org/p> \"Gus\" .\n").replace('~', "\\");
+            match parse_ntriples_text(&line) {
+                Err(NTriplesError::Parse { line: 1, content }) => assert!(
+                    content.contains("subject: ") && content.contains(reason),
+                    "{line}: {content}"
+                ),
+                other => panic!("{line}: {other:?}"),
+            }
+        }
     }
 
     /// A literal that ends in a backslash ran the N-Triples term scanner past

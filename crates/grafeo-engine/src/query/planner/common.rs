@@ -1036,4 +1036,100 @@ mod tests {
             vec![LogicalType::String, LogicalType::String, LogicalType::Int64]
         );
     }
+
+    /// An input of `chunks` chunks of two rows that counts its pulls.
+    struct Counted {
+        chunks: usize,
+        types: Vec<LogicalType>,
+        pulls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl Operator for Counted {
+        fn next(&mut self) -> OperatorResult {
+            self.pulls
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if self.chunks == 0 {
+                return Ok(None);
+            }
+            self.chunks -= 1;
+            Ok(Some(make_chunk(&self.types)))
+        }
+
+        fn reset(&mut self) {}
+
+        fn name(&self) -> &'static str {
+            "Counted"
+        }
+
+        fn into_any(self: Box<Self>) -> Box<dyn std::any::Any + Send> {
+            self
+        }
+    }
+
+    /// The pulls of the left and the right input of an equi-join on `s`, three
+    /// chunks each, when the join gives its first chunk: the input it hashes
+    /// is read to its end (four pulls) before the other gives its first chunk.
+    fn pulls_after_the_first_chunk(cardinalities: Option<(f64, f64)>) -> (usize, usize) {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let left_cols = vec!["s".to_string(), "name".to_string()];
+        let right_cols = vec!["s".to_string(), "age".to_string()];
+        let left_types = vec![LogicalType::String, LogicalType::String];
+        let right_types = vec![LogicalType::String, LogicalType::Int64];
+        let left_pulls = Arc::new(AtomicUsize::new(0));
+        let right_pulls = Arc::new(AtomicUsize::new(0));
+        let left: Box<dyn Operator> = Box::new(Counted {
+            chunks: 3,
+            types: left_types.clone(),
+            pulls: Arc::clone(&left_pulls),
+        });
+        let right: Box<dyn Operator> = Box::new(Counted {
+            chunks: 3,
+            types: right_types.clone(),
+            pulls: Arc::clone(&right_pulls),
+        });
+        let (mut join, _, _) = build_inner_join(
+            left,
+            right,
+            &left_cols,
+            &right_cols,
+            &left_types,
+            &right_types,
+            cardinalities,
+        );
+        let first = join.next().unwrap();
+        assert!(first.is_some_and(|chunk| chunk.row_count() > 0));
+        (
+            left_pulls.load(Ordering::Relaxed),
+            right_pulls.load(Ordering::Relaxed),
+        )
+    }
+
+    /// The join hashes the smaller input: the left one when it is clearly
+    /// smaller (below 0.8 of the right), otherwise the right one, and the
+    /// right one without estimates.
+    #[test]
+    fn the_join_hashes_the_smaller_input() {
+        assert_eq!(
+            pulls_after_the_first_chunk(Some((100.0, 1000.0))),
+            (4, 1),
+            "the left is smaller: it is hashed"
+        );
+        assert_eq!(
+            pulls_after_the_first_chunk(Some((1000.0, 100.0))),
+            (1, 4),
+            "the right is smaller: it is hashed"
+        );
+        assert_eq!(
+            pulls_after_the_first_chunk(Some((900.0, 1000.0))),
+            (1, 4),
+            "the left is not clearly smaller: the right is hashed"
+        );
+        assert_eq!(
+            pulls_after_the_first_chunk(None),
+            (1, 4),
+            "no estimates: the right is hashed"
+        );
+    }
 }

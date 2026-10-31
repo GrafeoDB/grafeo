@@ -9,7 +9,11 @@ use crate::execution::spill::{PartitionedState, SpillManager};
 use crate::execution::vector::ValueVector;
 use grafeo_common::types::TemporalComparison;
 use grafeo_common::types::Value;
-use grafeo_common::utils::hash::FxHashMap as HashMap;
+/// The groups of an aggregate, in the order their first rows came: a
+/// `GROUP BY` without `ORDER BY` gives the same order on every run (a hash
+/// map's order changes with its random seed). After a spill they come in
+/// partition order.
+type Groups = indexmap::IndexMap<RowKey, GroupState, grafeo_common::utils::hash::FxBuildHasher>;
 #[cfg(feature = "spill")]
 use spill_codec::{deserialize_group_state, serialize_group_state};
 #[cfg(feature = "spill")]
@@ -80,7 +84,7 @@ pub struct AggregatePushOperator {
     aggregates: Vec<AggregateExpr>,
     /// Group states by their key: keys whose values are the same values
     /// (`3` and `3.0`) are one key, see [`RowKey`].
-    groups: HashMap<RowKey, GroupState>,
+    groups: Groups,
     /// Global accumulator (for no GROUP BY).
     global_state: Option<Vec<AggregateState>>,
     /// The column types of the input chunks.
@@ -114,7 +118,7 @@ impl AggregatePushOperator {
         Self {
             group_by,
             aggregates,
-            groups: HashMap::default(),
+            groups: Groups::default(),
             global_state,
             input_types: ColumnTypes::default(),
             temporal: TemporalComparison::TypesApart,
@@ -244,7 +248,7 @@ pub struct SpillableAggregatePushOperator {
     /// Partitioned groups (used when spilling is enabled).
     partitioned_groups: Option<PartitionedState<GroupState>>,
     /// Non-partitioned groups (used when spilling is disabled).
-    groups: HashMap<RowKey, GroupState>,
+    groups: Groups,
     /// Global accumulator (for no GROUP BY).
     global_state: Option<Vec<AggregateState>>,
     /// Spill threshold (number of groups, used by fallback mode).
@@ -291,7 +295,7 @@ impl SpillableAggregatePushOperator {
             aggregates,
             spill_manager: None,
             partitioned_groups: None,
-            groups: HashMap::default(),
+            groups: Groups::default(),
             global_state,
             spill_threshold: DEFAULT_AGGREGATE_SPILL_THRESHOLD,
             using_partitioned: false,
@@ -328,7 +332,7 @@ impl SpillableAggregatePushOperator {
             aggregates,
             spill_manager: Some(manager),
             partitioned_groups: Some(partitioned),
-            groups: HashMap::default(),
+            groups: Groups::default(),
             global_state,
             spill_threshold: threshold,
             using_partitioned: true,
@@ -377,7 +381,7 @@ impl SpillableAggregatePushOperator {
             aggregates,
             spill_manager: None,
             partitioned_groups: Some(partitioned),
-            groups: HashMap::default(),
+            groups: Groups::default(),
             global_state,
             spill_threshold: DEFAULT_AGGREGATE_SPILL_THRESHOLD,
             using_partitioned: true,
@@ -466,7 +470,7 @@ impl SpillableAggregatePushOperator {
 
                 // Move existing groups to partitioned state, filed under
                 // their keys' representatives (see `push`)
-                for (key, state) in self.groups.drain() {
+                for (key, state) in self.groups.drain(..) {
                     partitioned
                         .insert(key.representatives(), state)
                         .map_err(|e| {

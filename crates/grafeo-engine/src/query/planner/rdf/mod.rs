@@ -1634,12 +1634,22 @@ impl RdfPlanner {
                 for (i, name) in left_columns.iter().chain(&right_columns).enumerate() {
                     variable_columns.entry(name.clone()).or_insert(i);
                 }
+                // A variable both sides have reads the right side's value
+                // where the left leaves it unbound: the condition reads the
+                // merged solution (SPARQL 1.1 sec 18.5, LeftJoin).
+                let fallback_columns: HashMap<String, usize> = right_columns
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, name)| left_columns.contains(name))
+                    .map(|(i, name)| (name.clone(), left_columns.len() + i))
+                    .collect();
                 let predicate = RdfExpressionPredicate::new(
                     convert_filter_expression(condition)?,
                     variable_columns,
                     Arc::clone(&self.terms),
                     self.clock,
-                );
+                )
+                .with_fallback_columns(fallback_columns);
                 let condition: Box<dyn JoinCondition> =
                     Box::new(JoinedRowCondition::new(Box::new(predicate)));
                 Some(condition)

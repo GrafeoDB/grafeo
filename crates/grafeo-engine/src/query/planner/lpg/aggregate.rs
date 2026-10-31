@@ -481,30 +481,23 @@ impl super::Planner {
         Ok((operator, output_columns))
     }
 
-    /// Checks if an aggregate is simple enough for factorized execution.
-    ///
-    /// Simple aggregates:
-    /// - COUNT(*) or COUNT(variable)
-    /// - SUM, AVG, MIN, MAX on variables (not properties for now)
+    /// Whether every aggregate of `agg` gives on the factorized chain what it
+    /// gives on the flat rows: a `COUNT(*)` or a `COUNT(variable)` without
+    /// `DISTINCT`. The factorized aggregate reads the chain's last column, and
+    /// a variable of a chain of expands is never null, so a count of one
+    /// counts the paths; any other aggregate (or `DISTINCT`) reads that
+    /// column whatever it names, and runs on the flat rows.
     pub(super) fn is_simple_aggregate(&self, agg: &AggregateOp) -> bool {
         agg.aggregates.iter().all(|agg_expr| {
-            match agg_expr.function {
-                LogicalAggregateFunction::Count | LogicalAggregateFunction::CountNonNull => {
-                    // COUNT(*) is always OK, COUNT(var) is OK
-                    agg_expr.expression.is_none()
-                        || matches!(&agg_expr.expression, Some(LogicalExpression::Variable(_)))
-                }
-                LogicalAggregateFunction::Sum
-                | LogicalAggregateFunction::Avg
-                | LogicalAggregateFunction::Min
-                | LogicalAggregateFunction::Max => {
-                    // For now, only support when expression is a variable
-                    // (property access would require flattening first)
-                    matches!(&agg_expr.expression, Some(LogicalExpression::Variable(_)))
-                }
-                // Other aggregates (Collect, StdDev, Percentile) not supported in factorized form
-                _ => false,
-            }
+            !agg_expr.distinct
+                && matches!(
+                    agg_expr.function,
+                    LogicalAggregateFunction::Count | LogicalAggregateFunction::CountNonNull
+                )
+                && matches!(
+                    &agg_expr.expression,
+                    None | Some(LogicalExpression::Variable(_))
+                )
         })
     }
 
@@ -591,17 +584,8 @@ impl super::Planner {
                             FactorizedAggregate::count_column(1) // Target is at index 1 in deepest level
                         }
                     }
-                    LogicalAggregateFunction::Sum => {
-                        // SUM on deepest level target
-                        FactorizedAggregate::sum(1)
-                    }
-                    LogicalAggregateFunction::Avg => FactorizedAggregate::avg(1),
-                    LogicalAggregateFunction::Min => FactorizedAggregate::min(1),
-                    LogicalAggregateFunction::Max => FactorizedAggregate::max(1),
-                    _ => {
-                        // Shouldn't reach here due to is_simple_aggregate check
-                        FactorizedAggregate::count()
-                    }
+                    // Only counts are planned here (see `is_simple_aggregate`)
+                    _ => FactorizedAggregate::count(),
                 }
             })
             .collect();

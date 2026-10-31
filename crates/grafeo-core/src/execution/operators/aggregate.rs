@@ -1251,23 +1251,6 @@ impl Operator for HashAggregateOperator {
             self.aggregate()?;
         }
 
-        // Special case: no groups (global aggregation with no data)
-        if self.groups.is_empty() && self.results.is_none() && self.group_columns.is_empty() {
-            // For global aggregation (no GROUP BY), return one row with initial values
-            let mut builder = DataChunkBuilder::with_capacity(&self.output_schema, 1);
-
-            for agg in &self.aggregates {
-                let value = AggregateState::for_expr(agg).finalize_for(agg)?;
-                if let Some(col) = builder.column_mut(self.group_columns.len()) {
-                    col.push_value(value);
-                }
-            }
-            builder.advance_row();
-
-            self.results = Some(Vec::new().into_iter()); // Mark as done
-            return Ok(Some(builder.finish()));
-        }
-
         let types = self.output_types();
         let Some(results) = &mut self.results else {
             return Ok(None);

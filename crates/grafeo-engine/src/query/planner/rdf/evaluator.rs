@@ -34,6 +34,10 @@ const XSD: &str = "http://www.w3.org/2001/XMLSchema#";
 pub(super) struct RdfExpressionPredicate {
     expression: FilterExpression,
     variable_columns: HashMap<String, usize>,
+    /// The column a variable is read from when its own column is unbound at
+    /// the row: in a join condition, the right side's column of a variable
+    /// both sides have, so the condition reads the merged solution.
+    fallback_columns: HashMap<String, usize>,
     terms: Arc<QueryTermIds>,
     /// The instant the query started, which `NOW()` gives.
     clock: StatementClock,
@@ -127,9 +131,32 @@ impl RdfExpressionPredicate {
         Self {
             expression: fold_compared_constants(expression),
             variable_columns,
+            fallback_columns: HashMap::new(),
             terms,
             clock,
         }
+    }
+
+    /// The same predicate, reading each variable of `fallback_columns` from
+    /// that column where its own column is unbound.
+    pub(super) fn with_fallback_columns(
+        mut self,
+        fallback_columns: HashMap<String, usize>,
+    ) -> Self {
+        self.fallback_columns = fallback_columns;
+        self
+    }
+
+    /// A variable's value at `row`, from its column or, unbound there, from
+    /// its fallback column; `None` when it is unbound.
+    fn bound_value(&self, name: &str, chunk: &DataChunk, row: usize) -> Option<Value> {
+        let read = |column: usize| {
+            chunk
+                .column(column)?
+                .get_value(row)
+                .filter(|value| !value.is_null())
+        };
+        read(*self.variable_columns.get(name)?).or_else(|| read(*self.fallback_columns.get(name)?))
     }
 
     /// The expression's value at `row`; `None` for an error or an unbound
@@ -141,15 +168,13 @@ impl RdfExpressionPredicate {
     /// The dictionary entry of a variable at `row`; `None` when it is
     /// unbound.
     fn entry(&self, name: &str, chunk: &DataChunk, row: usize) -> Option<TermEntry<'_>> {
-        let column = chunk.column(*self.variable_columns.get(name)?)?;
-        self.terms.entry_of(&column.get_value(row)?)
+        self.terms.entry_of(&self.bound_value(name, chunk, row)?)
     }
 
     /// A variable as an operand: an inlined literal as its value, without
     /// building its term; any other term as its entry.
     fn variable_arg(&self, name: &str, chunk: &DataChunk, row: usize) -> Option<Arg<'_>> {
-        let column = chunk.column(*self.variable_columns.get(name)?)?;
-        let value = column.get_value(row)?;
+        let value = self.bound_value(name, chunk, row)?;
         match id_of(&value)?.inline_value() {
             Some(native) => Some(Arg::Value(native)),
             None => self.terms.entry_of(&value).map(Arg::Entry),
@@ -332,8 +357,7 @@ impl RdfExpressionPredicate {
     ) -> Option<StringView<'s>> {
         match expr? {
             FilterExpression::Variable(name) => {
-                let column = chunk.column(*self.variable_columns.get(name)?)?;
-                let id = id_of(&column.get_value(row)?)?;
+                let id = id_of(&self.bound_value(name, chunk, row)?)?;
                 let mut bytes = [0u8; 8];
                 if let Some(text) = id.short_string_text(&mut bytes) {
                     let len = text.len();

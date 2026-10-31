@@ -43,8 +43,10 @@ impl super::GrafeoDB {
         Ok(snapshot.store().labels_in_use(snapshot.view())?.len())
     }
 
-    /// Returns the number of distinct property keys in the database, of
-    /// nodes and edges together.
+    /// Returns the number of distinct property keys ever written to the
+    /// database, of nodes and edges together: not the keys in use now. A key
+    /// stays counted after every value of it is removed or deleted, and
+    /// after the transaction that wrote it rolled back.
     ///
     /// # Errors
     ///

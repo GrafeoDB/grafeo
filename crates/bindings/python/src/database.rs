@@ -2666,7 +2666,9 @@ impl PyGrafeoDB {
         })
     }
 
-    /// Get database statistics.
+    /// Get database statistics. `property_count` is the number of distinct
+    /// property keys ever written, not the keys in use now: a key stays
+    /// counted once no node or edge holds it.
     fn stats(&self) -> PyResult<PyDatabaseStats> {
         let db = self.inner.read();
         Ok(PyDatabaseStats {
@@ -2711,7 +2713,9 @@ impl PyGrafeoDB {
     ///
     /// Returns:
     ///     dict with keys: node_count, edge_count, label_count, edge_type_count,
-    ///     property_key_count, index_count, memory_bytes, disk_bytes
+    ///     property_key_count, index_count, memory_bytes, disk_bytes.
+    ///     property_key_count is the number of distinct property keys ever
+    ///     written, not the keys in use now.
     ///
     /// Example:
     ///     stats = db.detailed_stats()
@@ -4676,6 +4680,8 @@ pub struct PyDatabaseStats {
     edge_count: u64,
     #[pyo3(get)]
     label_count: u64,
+    /// The number of distinct property keys ever written, not the keys in
+    /// use now.
     #[pyo3(get)]
     property_count: u64,
 }

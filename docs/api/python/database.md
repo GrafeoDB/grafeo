@@ -1133,7 +1133,7 @@ def info(self) -> Dict[str, Any]
 
 ### detailed_stats()
 
-Get detailed statistics. Returns a dict with keys: `node_count`, `edge_count`, `label_count`, `edge_type_count`, `property_key_count`, `index_count`, `memory_bytes`, `disk_bytes`.
+Get detailed statistics. Returns a dict with keys: `node_count`, `edge_count`, `label_count`, `edge_type_count`, `property_key_count`, `index_count`, `memory_bytes`, `disk_bytes`. `property_key_count` counts the distinct property keys ever written, not the keys in use now: a key stays counted after every value of it is removed and after the transaction that wrote it rolled back.
 
 ```python
 def detailed_stats(self) -> Dict[str, Any]

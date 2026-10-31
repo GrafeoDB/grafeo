@@ -75,7 +75,8 @@ pub struct DatabaseStats {
     pub label_count: usize,
     /// Number of distinct edge types (LPG) or predicates (RDF).
     pub edge_type_count: usize,
-    /// Number of distinct property keys.
+    /// Number of distinct property keys ever written, not the keys in use
+    /// now (see [`GrafeoDB::property_key_count`](crate::GrafeoDB::property_key_count)).
     pub property_key_count: usize,
     /// Number of indexes.
     pub index_count: usize,

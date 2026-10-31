@@ -97,6 +97,10 @@ When a conflict is detected, the application should:
 2. Optionally retry the transaction
 3. Or report the conflict
 
+## Important Limitation: RDF Reads Are Not Isolated Yet
+
+The guarantees above hold for property graph queries (GQL, Cypher, SQL/PGQ and the others). A SPARQL query in a transaction does not read a snapshot yet: it sees the triples that other transactions commit after it started, and two transactions that delete the same triple both commit. A transaction's own uncommitted triples stay private to it, and a rollback still leaves nothing behind. Snapshot isolation for RDF is planned for 0.6.2 ([#718](https://github.com/GrafeoDB/grafeo/issues/718)).
+
 ## Important Limitation: Write Skew
 
 Snapshot Isolation does **not** prevent all anomalies. The **write skew** anomaly can occur when transactions read overlapping data but write to different entities.

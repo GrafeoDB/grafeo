@@ -23,8 +23,7 @@ let db = GrafeoDB::open("path/to/db")?;
 
 // With config
 let config = Config::in_memory()
-    .with_memory_limit(4 * 1024 * 1024 * 1024)
-    .with_threads(8);
+    .with_memory_limit(4 * 1024 * 1024 * 1024);
 let db = GrafeoDB::with_config(config)?;
 ```
 

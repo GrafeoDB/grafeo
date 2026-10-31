@@ -51,7 +51,7 @@ The implementation crates (`grafeo-common`, `grafeo-core`, `grafeo-storage`, `gr
 | The native loader: the module `grafeo::loader` (its load descriptions and report), `GrafeoDB::load_nodes_csv`, `GrafeoDB::load_edges_csv`, `Session::load_nodes_csv` and `Session::load_edges_csv`, the Python `load_nodes_csv` and `load_edges_csv`, and the `grafeo.load_nodes_csv` and `grafeo.load_edges_csv` procedures | New in 0.6.1; formats (Parquet, JSON Lines), sources (bytes) and options may be added |
 | The operator tree of a `PROFILE` statement: `QueryResult::profile`, `QueryProfile` and `OperatorProfile`, the Python and Node.js `profile` and the WASM `profile` key | New in 0.6.0; its operators and fields may still change |
 | A store of one's own: `GrafeoDB::with_store` and `GrafeoDB::with_read_store`, implementing `GraphStore` or `GraphBackend`, and the `store::conformance` suite that checks an implementation | The write contract is new in 0.6.0, and no backend outside Grafeo has run it yet: a required method may be added within 0.6.x. Calling the traits is stable |
-| `GrafeoDB::store()`: the built-in row-group store itself | For admin work; the row-group store's own methods follow the storage engine |
+| `GrafeoDB::store()`: the built-in row-group store itself | For admin work; the row-group store's own methods follow the storage engine. Deprecated since 0.6.1 and removed in 0.7.0: write through a session or the direct API, read through `snapshot()` |
 
 ## Stable APIs
 

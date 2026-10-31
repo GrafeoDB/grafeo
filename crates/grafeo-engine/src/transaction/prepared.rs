@@ -128,7 +128,10 @@ impl<'a> PreparedCommit<'a> {
     pub fn commit(mut self) -> Result<EpochId> {
         self.finalized = true;
         self.session.commit()?;
-        Ok(self.session.transaction_manager().current_epoch())
+        Ok(self
+            .session
+            .last_commit_epoch()
+            .unwrap_or_else(|| self.session.transaction_manager().current_epoch()))
     }
 
     /// Explicitly aborts the transaction, discarding all changes.

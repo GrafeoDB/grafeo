@@ -380,6 +380,9 @@ pub struct Session {
     /// Nested `START TRANSACTION` creates an auto-savepoint; nested `COMMIT`
     /// releases it, nested `ROLLBACK` rolls back to it.
     transaction_nesting_depth: parking_lot::Mutex<u32>,
+    /// The epoch the last commit of this session published its changes
+    /// at: `None` before one, and for a commit that wrote nothing.
+    last_commit_epoch: parking_lot::Mutex<Option<EpochId>>,
     /// Whether the statements that start or end a transaction (`START
     /// TRANSACTION`, `COMMIT`, `ROLLBACK`) are refused, as they are in the
     /// session of a binding's transaction object, which ends with its own
@@ -472,6 +475,7 @@ impl Session {
             viewing_epoch_override: parking_lot::Mutex::new(None),
             savepoints: parking_lot::Mutex::new(Vec::new()),
             transaction_nesting_depth: parking_lot::Mutex::new(0),
+            last_commit_epoch: parking_lot::Mutex::new(None),
             transaction_statements: TransactionStatements::Allowed,
             changes: parking_lot::Mutex::new(None),
             active_streams: AtomicUsize::new(0),
@@ -649,6 +653,7 @@ impl Session {
             viewing_epoch_override: parking_lot::Mutex::new(None),
             savepoints: parking_lot::Mutex::new(Vec::new()),
             transaction_nesting_depth: parking_lot::Mutex::new(0),
+            last_commit_epoch: parking_lot::Mutex::new(None),
             transaction_statements: TransactionStatements::Allowed,
             changes: parking_lot::Mutex::new(None),
             active_streams: AtomicUsize::new(0),
@@ -4765,9 +4770,16 @@ impl Session {
         self.commit_inner()
     }
 
+    /// The epoch the last commit of this session published its changes at:
+    /// `None` before one, and after a commit that wrote nothing.
+    pub(crate) fn last_commit_epoch(&self) -> Option<EpochId> {
+        *self.last_commit_epoch.lock()
+    }
+
     /// Core commit logic, usable from both `&mut self` and `&self` paths.
     fn commit_inner(&self) -> Result<()> {
         let _span = grafeo_debug_span!("grafeo::tx::commit");
+        *self.last_commit_epoch.lock() = None;
 
         #[cfg(feature = "testing-statement-injection")]
         if let Err(e) = grafeo_common::testing::statement_failure::maybe_fail_commit() {
@@ -4936,6 +4948,7 @@ impl Session {
         let published = published
             .map_err(|error| crate::database::wal_log::publish_error(error, logged.is_some()));
         published?;
+        *self.last_commit_epoch.lock() = Some(commit_epoch);
         let written = changes
             .as_ref()
             .map(|changes| changes.written_graphs())

@@ -6,7 +6,6 @@ package grafeo
 */
 import "C"
 import (
-	"encoding/json"
 	"runtime"
 	"unsafe"
 )
@@ -50,7 +49,7 @@ func (db *Database) FindNodesByProperty(property string, value any) ([]uint64, e
 	cProp := C.CString(property)
 	defer C.free(unsafe.Pointer(cProp))
 
-	valueJSON, err := json.Marshal(value)
+	valueJSON, err := marshalJSON(value)
 	if err != nil {
 		return nil, err
 	}

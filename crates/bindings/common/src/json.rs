@@ -68,6 +68,11 @@ pub fn tagged_value(map: &BTreeMap<PropertyKey, Value>) -> Option<Value> {
     {
         return Some(Value::RdfTerm(Arc::new(term)));
     }
+    // A tag is the value only as the map's one key, as `$decimal` and
+    // `$term` are: with other keys the map is a map.
+    if map.len() != 1 {
+        return None;
+    }
     if let Some(Value::Int64(micros)) = map.get(&PropertyKey::new("$timestamp_us")) {
         return Some(Value::Timestamp(
             grafeo_common::types::Timestamp::from_micros(*micros),
@@ -82,9 +87,7 @@ pub fn tagged_value(map: &BTreeMap<PropertyKey, Value>) -> Option<Value> {
     if let Some(d) = text("$duration").and_then(grafeo_common::types::Duration::parse) {
         return Some(Value::Duration(d));
     }
-    if map.len() == 1
-        && let Some(Ok(d)) = text("$decimal").map(grafeo_common::types::Decimal::parse)
-    {
+    if let Some(Ok(d)) = text("$decimal").map(grafeo_common::types::Decimal::parse) {
         return Some(Value::Decimal(d));
     }
     if let Some(zdt) = text("$zoned_datetime").and_then(grafeo_common::types::ZonedDatetime::parse)

@@ -2516,12 +2516,16 @@ impl GrafeoDB {
         Ok(true)
     }
 
-    /// Returns all named graph names (none on an external store).
+    /// Returns all named graph names, sorted, so every run gives the same
+    /// order (none on an external store).
     #[must_use]
     pub fn list_graphs(&self) -> Vec<String> {
-        self.root_store()
+        let mut names = self
+            .root_store()
             .map(|store| store.graph_names())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        names.sort_unstable();
+        names
     }
 
     // === Graph Projections ===

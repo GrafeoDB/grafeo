@@ -53,11 +53,16 @@ func jsonFloats(v any) any {
 	}
 }
 
-// floatNumber is f as a JSON number that reads back as a float. NaN and the
-// infinities stay as they are, which encoding/json refuses.
+// floatNumber is f as a JSON number that reads back as a float; NaN and the
+// infinities, which JSON cannot write, as the {"$float": "NaN"} tag.
 func floatNumber(f float64) any {
-	if math.IsNaN(f) || math.IsInf(f, 0) {
-		return f
+	switch {
+	case math.IsNaN(f):
+		return map[string]string{"$float": "NaN"}
+	case math.IsInf(f, 1):
+		return map[string]string{"$float": "Infinity"}
+	case math.IsInf(f, -1):
+		return map[string]string{"$float": "-Infinity"}
 	}
 	text := strconv.FormatFloat(f, 'g', -1, 64)
 	if !strings.ContainsAny(text, ".eE") {

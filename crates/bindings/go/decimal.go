@@ -3,6 +3,7 @@ package grafeo
 import (
 	"encoding/json"
 	"errors"
+	"math"
 	"math/big"
 	"regexp"
 )
@@ -53,7 +54,8 @@ func (d Decimal) MarshalJSON() ([]byte, error) {
 }
 
 // decodeTags turns every {"$decimal": "..."} map (the tag as its only key)
-// inside value into a Decimal, and every {"$term": {...}} map into an
+// inside value into a Decimal, every {"$float": "NaN"} (or "Infinity",
+// "-Infinity") map into that float64, and every {"$term": {...}} map into an
 // RdfTerm, through lists and maps.
 func decodeTags(value any) any {
 	switch v := value.(type) {
@@ -61,6 +63,16 @@ func decodeTags(value any) any {
 		if text, ok := v["$decimal"].(string); ok && len(v) == 1 {
 			if d, err := ParseDecimal(text); err == nil {
 				return d
+			}
+		}
+		if text, ok := v["$float"].(string); ok && len(v) == 1 {
+			switch text {
+			case "NaN":
+				return math.NaN()
+			case "Infinity":
+				return math.Inf(1)
+			case "-Infinity":
+				return math.Inf(-1)
 			}
 		}
 		if term, ok := rdfTermOf(v); ok {

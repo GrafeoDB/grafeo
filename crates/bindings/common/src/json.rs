@@ -28,12 +28,9 @@ pub fn json_to_value(v: &serde_json::Value) -> Result<Value, String> {
         serde_json::Value::Number(n) => {
             Value::from_number_text(n.as_str()).map_err(|error| error.to_string())?
         }
-        serde_json::Value::String(s) => match s.as_str() {
-            "Infinity" => Value::Float64(f64::INFINITY),
-            "-Infinity" => Value::Float64(f64::NEG_INFINITY),
-            "NaN" => Value::Float64(f64::NAN),
-            _ => Value::String(s.as_str().into()),
-        },
+        // A string is a string, "NaN" too: a float that JSON cannot write
+        // comes as the `$float` tag (see `tagged_value`).
+        serde_json::Value::String(s) => Value::String(s.as_str().into()),
         serde_json::Value::Array(arr) => {
             let items = arr
                 .iter()
@@ -73,6 +70,9 @@ pub fn tagged_value(map: &BTreeMap<PropertyKey, Value>) -> Option<Value> {
     if map.len() != 1 {
         return None;
     }
+    if let Some(float) = map.get(&PropertyKey::new(FLOAT_TAG)).and_then(tagged_float) {
+        return Some(Value::Float64(float));
+    }
     if let Some(Value::Int64(micros)) = map.get(&PropertyKey::new("$timestamp_us")) {
         return Some(Value::Timestamp(
             grafeo_common::types::Timestamp::from_micros(*micros),
@@ -95,6 +95,33 @@ pub fn tagged_value(map: &BTreeMap<PropertyKey, Value>) -> Option<Value> {
         return Some(Value::ZonedDatetime(zdt));
     }
     None
+}
+
+/// The key of the tag a float travels in as JSON when JSON cannot write it
+/// (`NaN`, `Infinity`, `-Infinity`) or the sender's JSON would write it as an
+/// integer: `{"$float": "NaN"}`, `{"$float": 3}`.
+pub const FLOAT_TAG: &str = "$float";
+
+/// The float a `$float` tag's value stands for: the text `NaN`, `Infinity`
+/// or `-Infinity`, or a number, as a number or as its text; `None` for any
+/// other value, so the map stays a map.
+fn tagged_float(value: &Value) -> Option<f64> {
+    match value {
+        Value::Float64(float) => Some(*float),
+        #[allow(
+            clippy::cast_precision_loss,
+            reason = "a tagged integer asks for that float (`3` for 3.0): past 2^53 the nearest f64 is the float asked for"
+        )]
+        Value::Int64(int) => Some(*int as f64),
+        Value::Decimal(decimal) => decimal.to_string().parse().ok(),
+        Value::String(text) => match text.as_str() {
+            "NaN" => Some(f64::NAN),
+            "Infinity" => Some(f64::INFINITY),
+            "-Infinity" => Some(f64::NEG_INFINITY),
+            other => other.parse::<f64>().ok().filter(|float| float.is_finite()),
+        },
+        _ => None,
+    }
 }
 
 /// The key of the tag an RDF term travels in as JSON (see [`term_to_json`]).
@@ -209,15 +236,11 @@ pub fn value_to_json(v: &Value) -> Result<serde_json::Value, UnsupportedTermKind
         Value::Bool(b) => serde_json::Value::Bool(*b),
         Value::Int64(i) => serde_json::json!(*i),
         Value::Float64(f) => {
-            // JSON does not support Infinity/NaN, encode as strings
-            if f.is_infinite() {
-                serde_json::Value::String(if f.is_sign_positive() {
-                    "Infinity".to_string()
-                } else {
-                    "-Infinity".to_string()
-                })
-            } else if f.is_nan() {
-                serde_json::Value::String("NaN".to_string())
+            // JSON has no NaN or infinities: they go as the `$float` tag
+            if f.is_nan() {
+                serde_json::json!({ FLOAT_TAG: "NaN" })
+            } else if f.is_infinite() {
+                serde_json::json!({ FLOAT_TAG: if f.is_sign_positive() { "Infinity" } else { "-Infinity" } })
             } else {
                 serde_json::json!(*f)
             }

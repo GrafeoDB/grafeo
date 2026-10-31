@@ -50,8 +50,8 @@ internal static class ValueConverter
             Int128 i => IntegerNumber(i.ToString(System.Globalization.CultureInfo.InvariantCulture)),
             UInt128 u => IntegerNumber(u.ToString(System.Globalization.CultureInfo.InvariantCulture)),
             System.Numerics.BigInteger b => IntegerNumber(b.ToString(System.Globalization.CultureInfo.InvariantCulture)),
-            float f => JsonValue.Create((double)f),
-            double d => JsonValue.Create(d),
+            float f => FloatNode(f),
+            double d => FloatNode(d),
             string s => JsonValue.Create(s),
             GrafeoDecimal g => new JsonObject { ["$decimal"] = g.Text },
             RdfTerm term => term.ToJson(),
@@ -88,6 +88,24 @@ internal static class ValueConverter
             _ => JsonValue.Create(value.ToString()),
         };
 
+    /// <summary>
+    /// A double as JSON: a number that reads back as a float (a whole one keeps
+    /// a fraction, as System.Text.Json writes 3.0 as 3, which reads as an
+    /// integer), and NaN or an infinity, which JSON cannot write, as the
+    /// {"$float": "NaN"} tag.
+    /// </summary>
+    private static JsonNode FloatNode(double d)
+    {
+        if (double.IsNaN(d))
+            return new JsonObject { ["$float"] = "NaN" };
+        if (double.IsInfinity(d))
+            return new JsonObject { ["$float"] = d > 0 ? "Infinity" : "-Infinity" };
+        var text = d.ToString("R", System.Globalization.CultureInfo.InvariantCulture);
+        if (text.IndexOfAny(['.', 'E', 'e']) < 0)
+            text += ".0";
+        return JsonNode.Parse(text)!;
+    }
+
     /// <summary>A JSON number of an integer's decimal digits, written as they are.</summary>
     private static JsonNode IntegerNumber(string digits) => JsonNode.Parse(digits)!;
 
@@ -95,7 +113,7 @@ internal static class ValueConverter
     {
         var arr = new JsonArray();
         foreach (var f in vector)
-            arr.Add(JsonValue.Create((double)f));
+            arr.Add(FloatNode(f));
         return arr;
     }
 
@@ -214,6 +232,19 @@ internal static class ValueConverter
         // An RDF term: the "$term" tag as the object's only key
         if (RdfTerm.FromJson(element) is { } term)
             return term;
+
+        // A float JSON cannot write: the "$float" tag as the object's only key
+        if (element.TryGetProperty("$float", out var floatElement)
+            && element.EnumerateObject().Count() == 1
+            && floatElement.ValueKind == JsonValueKind.String)
+        {
+            switch (floatElement.GetString())
+            {
+                case "NaN": return double.NaN;
+                case "Infinity": return double.PositiveInfinity;
+                case "-Infinity": return double.NegativeInfinity;
+            }
+        }
 
         // An exact decimal: the "$decimal" tag as the object's only key
         if (element.TryGetProperty("$decimal", out var decimalElement)

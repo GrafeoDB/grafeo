@@ -66,6 +66,7 @@ Categories:
 | `GRAFEO-S002` | StorageCorrupted      | no        | A file Grafeo wrote is damaged: a checksum, a header, a section or a WAL record that does not read back as written. The message names the file and, when known, the byte. Python raises `GrafeoCorruptionError`, a subclass of `GrafeoError`; the C API returns `GRAFEO_ERROR_STORAGE`. The database may need a restore from a backup. |
 | `GRAFEO-S003` | StorageRecoveryFailed | no        | WAL replay failed during `GrafeoDB::open`. Inspect the logs. |
 | `GRAFEO-S004` | DatabaseLocked        | no        | The database file is open elsewhere: in this process (close the other handle first) or in another process (close it there). Python raises `GrafeoLockedError`, a subclass of `GrafeoError`. For several processes on one database, run grafeo-server. |
+| `GRAFEO-S005` | BackupChainBroken     | no        | An incremental backup cannot continue its chain: the WAL segment where the last backup ended was removed, or the log has a gap. Nothing is written; take a new full backup to start a new chain. |
 
 ## Validation (V)
 

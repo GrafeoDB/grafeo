@@ -1973,6 +1973,7 @@ fn starts_from_the_left_row(
 /// `error`, an argument's evaluation error, with the argument and the
 /// procedure named after its message; its kind, and so its GQLSTATUS,
 /// stays as it was.
+#[cfg(feature = "algos")]
 fn naming_the_argument(error: Error, argument: &str, procedure: &str) -> Error {
     let prefix = |message: &str| format!("{message} (argument '{argument}' of {procedure})");
     match error {

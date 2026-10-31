@@ -71,8 +71,8 @@ tests:
         - [C]
         - [D]
 
-  # Sec 16.11: {,n} maximum hops (lower bound defaults to 1 in Grafeo)
-  # {,2} matches paths of 1 to 2 hops.
+  # Sec 16.11: {,n} maximum hops: the lower bound is 0, so {,2} matches paths of
+  # 0 to 2 hops, the start node itself included (it was 1 before 0.6.1).
   - name: iso_16_11_general_quantifier_max_only
     setup:
       - "INSERT (:Node {name: 'A'})"
@@ -86,8 +86,50 @@ tests:
     expect:
       ordered: true
       rows:
+        - [A]
         - [B]
         - [C]
+
+  # Sec 16.11: {,n} is {0,n}
+  - name: iso_16_11_max_only_equals_zero_to_max
+    setup:
+      - "INSERT (:Node {name: 'A'})"
+      - "INSERT (:Node {name: 'B'})"
+      - "INSERT (:Node {name: 'C'})"
+      - "INSERT (:Node {name: 'D'})"
+      - "MATCH (a:Node {name: 'A'}), (b:Node {name: 'B'}) INSERT (a)-[:LINK]->(b)"
+      - "MATCH (b:Node {name: 'B'}), (c:Node {name: 'C'}) INSERT (b)-[:LINK]->(c)"
+      - "MATCH (c:Node {name: 'C'}), (d:Node {name: 'D'}) INSERT (c)-[:LINK]->(d)"
+    query: "MATCH (a:Node {name: 'A'})-[:LINK]->{0,2}(b:Node) RETURN b.name AS name ORDER BY name"
+    expect:
+      ordered: true
+      rows:
+        - [A]
+        - [B]
+        - [C]
+
+  # Sec 16.11: an upper bound below the lower bound is an error
+  - name: iso_16_11_upper_bound_below_lower_bound_is_an_error
+    setup:
+      - "INSERT (:Node {name: 'A'})"
+    query: "MATCH (a:Node)-[:LINK]->{3,1}(b:Node) RETURN b.name"
+    expect:
+      error: "upper bound is below its lower bound"
+
+  # Sec 16.11: a quantifier inside the edge and one after it is an error
+  - name: iso_16_11_two_quantifiers_on_an_edge_is_an_error
+    setup:
+      - "INSERT (:Node {name: 'A'})"
+    query: "MATCH (a:Node)-[:LINK*1..2]->{2}(b:Node) RETURN b.name"
+    expect:
+      error: "one quantifier"
+
+  - name: iso_16_11_bracket_quantifier_then_plus_is_an_error
+    setup:
+      - "INSERT (:Node {name: 'A'})"
+    query: "MATCH (a:Node)-[:LINK*1..2]->+(b:Node) RETURN b.name"
+    expect:
+      error: "one quantifier"
 
   # Sec 16.11: {n} fixed quantifier (exact count)
   # {2} is equivalent to {2,2}, matches exactly 2 hops.

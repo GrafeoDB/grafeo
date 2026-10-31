@@ -1,13 +1,14 @@
 //! SQL/PGQ label expressions, element WHERE and quantifiers after an edge
 //! (0.6.1, ISO/IEC 9075-16). Each SQL/PGQ form is checked against the same
-//! pattern in GQL (a label expression GQL does not parse yet, a leading `!`,
-//! parentheses or `%`, as WHERE predicates), on the LDBC SNB mini
-//! dataset of the spec tests:
+//! pattern in GQL, with a leading `!`, parentheses and `%` written as WHERE
+//! predicates (an oracle that does not share the label expression code), on
+//! the LDBC SNB mini dataset of the spec tests:
 //!
 //! - `|`, `&`, `!`, `%` and parentheses in a label expression, on the first
-//!   node and on a node an edge reaches;
-//! - an element WHERE on a node and on an edge; a WHERE inside a quantified
-//!   edge is refused (Unsupported);
+//!   node and on a node an edge reaches; `%` and `!%` with a node without a
+//!   label added (`%` is "has a label");
+//! - an element WHERE on a node and on an edge, and inside a quantified edge,
+//!   where it holds for each edge of the path;
 //! - `*` (with its zero hops: the start node itself), `+`, `{2}`, `{1,3}`,
 //!   `{,2}` and `{2,}` after an edge; `{3,1}` and a quantifier both inside
 //!   the brackets and after the edge are refused;
@@ -127,6 +128,36 @@ fn label_expressions_on_the_first_node() {
 }
 
 #[test]
+fn the_wildcard_leaves_out_a_node_without_a_label() {
+    let db = database();
+    db.execute("INSERT ({id: 999999999})").unwrap();
+    let any = agree(
+        &db,
+        "(n:%)",
+        "n.id AS id",
+        "(n) WHERE size(labels(n)) > 0",
+        "n.id",
+    );
+    let none = agree(
+        &db,
+        "(n:!%)",
+        "n.id AS id",
+        "(n) WHERE size(labels(n)) = 0",
+        "n.id",
+    );
+    let all = agree(&db, "(n)", "n.id AS id", "(n)", "n.id");
+    assert_eq!(none, 1, "the node without a label");
+    assert_eq!(any, all - 1);
+    agree(
+        &db,
+        "(n IS %)",
+        "n.id AS id",
+        "(n) WHERE size(labels(n)) > 0",
+        "n.id",
+    );
+}
+
+#[test]
 fn label_expressions_on_a_node_an_edge_reaches() {
     let db = database();
     agree(
@@ -176,10 +207,35 @@ fn element_where_on_a_node_and_an_edge() {
         "(a:Person WHERE a.gender = 'female')-[k:KNOWS]->(b:Person WHERE b.gender = 'male')",
         "a.id, b.id",
     );
-    refused(
+    // A WHERE inside a quantified edge holds for every edge of the path: no
+    // REPLY_OF edge has `x`, so only the zero-hop rows (each comment itself)
+    // are left; KNOWS edges after a date, over one or two hops.
+    let comments = rows(&db, "gql", "MATCH (c:Comment) RETURN c.id").len();
+    let zero_hops = agree(
         &db,
         "(c:Comment)-[r:REPLY_OF WHERE r.x = 1]->*(m:Message)",
-        "quantified edge pattern",
+        "c.id AS comment, m.id AS message",
+        "(c:Comment)-[r:REPLY_OF WHERE r.x = 1]->*(m:Message)",
+        "c.id, m.id",
+    );
+    assert_eq!(zero_hops, comments, "each comment, zero hops from itself");
+    let dated = agree(
+        &db,
+        "(a:Person)-[k:KNOWS WHERE k.creationDate > 1267000000000]->{1,2}(b:Person)",
+        "a.id AS a, b.id AS b",
+        "(a:Person)-[k:KNOWS WHERE k.creationDate > 1267000000000]->{1,2}(b:Person)",
+        "a.id, b.id",
+    );
+    let any_date = agree(
+        &db,
+        "(a:Person)-[k:KNOWS]->{1,2}(b:Person)",
+        "a.id AS a, b.id AS b",
+        "(a:Person)-[k:KNOWS]->{1,2}(b:Person)",
+        "a.id, b.id",
+    );
+    assert!(
+        dated < any_date,
+        "{dated} of {any_date} paths after the date"
     );
 }
 

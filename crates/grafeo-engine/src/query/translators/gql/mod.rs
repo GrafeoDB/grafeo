@@ -112,6 +112,10 @@ struct GqlTranslator {
     /// What the WITH just translated projects, for an ORDER BY statement
     /// right after it (see `sort`); `None` after any other clause.
     sort_scope: std::cell::RefCell<Option<sort::SortScope>>,
+    /// Whether a path function of a quantified edge's variable reads the
+    /// path that edge walks (`nodes(k)` of `-[k]->{1,3}`), as SQL/PGQ reads
+    /// it (see [`GqlTranslator::group_path_call`]).
+    group_variables_as_paths: bool,
 }
 
 /// The rows a query passes to the one after `NEXT`: its final `RETURN` as a
@@ -554,6 +558,57 @@ fn unfocused(statement: &ast::Statement) -> &ast::Statement {
     }
 }
 
+/// The graph pattern of a SQL/PGQ `GRAPH_TABLE`, translated as GQL
+/// translates it: SQL/PGQ takes its graph patterns from GQL (ISO/IEC
+/// 9075-16), so its `MATCH`, `OPTIONAL MATCH` and the expressions over their
+/// variables have GQL's semantics, search prefixes, path variables and
+/// quantified paths included.
+#[cfg(feature = "sql-pgq")]
+pub(crate) struct GraphPatternTranslator(GqlTranslator);
+
+#[cfg(feature = "sql-pgq")]
+impl GraphPatternTranslator {
+    /// A translator for the statement `query`, whose text the generated
+    /// names skip.
+    pub(crate) fn new(query: &str) -> Self {
+        Self(GqlTranslator {
+            group_variables_as_paths: true,
+            ..GqlTranslator::new(query)
+        })
+    }
+
+    /// The plan of `first`, then of each of `optional`, joined to the rows
+    /// before it as GQL joins an `OPTIONAL MATCH`.
+    pub(crate) fn translate_matches(
+        &self,
+        first: &ast::MatchClause,
+        optional: &[ast::MatchClause],
+    ) -> Result<LogicalOperator> {
+        let mut plan = self.0.translate_match(first)?;
+        for clause in optional {
+            let right = self.0.translate_match(clause)?;
+            plan = optional_join(plan, right, None);
+        }
+        Ok(plan)
+    }
+
+    /// `expr`, over the variables of the graph pattern.
+    pub(crate) fn translate_expression(&self, expr: &ast::Expression) -> Result<LogicalExpression> {
+        self.0.translate_expression(expr)
+    }
+
+    /// The call `name(args)` when it is a path function of a quantified
+    /// edge's variable (see [`GqlTranslator::group_path_call`]).
+    pub(crate) fn group_path_call(
+        &self,
+        name: &str,
+        args: &[ast::Expression],
+        distinct: bool,
+    ) -> Option<Result<LogicalExpression>> {
+        self.0.group_path_call(name, args, distinct)
+    }
+}
+
 impl GqlTranslator {
     /// A translator for the statement `query`, whose text the generated
     /// names skip.
@@ -565,6 +620,7 @@ impl GqlTranslator {
             names: GeneratedNames::new(query),
             call_imports: CallImports::default(),
             sort_scope: std::cell::RefCell::new(None),
+            group_variables_as_paths: false,
         }
     }
 

@@ -284,6 +284,17 @@ impl<'a> Lexer<'a> {
         }
     }
 
+    /// A lexer over `input` from the start of `at`, on its line and column:
+    /// for a clause of GQL inside another language's statement.
+    pub(crate) fn starting_at(input: &'a str, at: SourceSpan) -> Self {
+        Self {
+            input,
+            position: at.start,
+            line: at.line,
+            column: at.column,
+        }
+    }
+
     /// Returns the next token.
     pub fn next_token(&mut self) -> Token {
         self.skip_whitespace();

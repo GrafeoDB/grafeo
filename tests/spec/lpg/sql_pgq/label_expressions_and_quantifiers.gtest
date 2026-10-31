@@ -109,14 +109,26 @@ tests:
     expect:
       count: 28
 
-  - name: element_where_inside_a_quantified_edge_is_refused
+  # A WHERE inside a quantified edge holds for each edge of the path: no
+  # REPLY_OF edge has x, so only the zero-hop rows are left, one per comment.
+  - name: element_where_inside_a_quantified_edge_leaves_the_zero_hop_rows
     query: |
       SELECT * FROM GRAPH_TABLE (
         MATCH (c:Comment)-[r:REPLY_OF WHERE r.x = 1]->*(m:Message)
         COLUMNS (c.id AS id)
       )
     expect:
-      error: "quantified edge pattern"
+      count: 48
+
+  # KNOWS edges after a date, over one or two hops: 64 of the 70 paths.
+  - name: element_where_inside_a_quantified_edge_holds_for_each_edge
+    query: |
+      SELECT * FROM GRAPH_TABLE (
+        MATCH (a:Person)-[k:KNOWS WHERE k.creationDate > 1267000000000]->{1,2}(b:Person)
+        COLUMNS (a.id AS a, b.id AS b)
+      )
+    expect:
+      count: 64
 
   # ---------------------------------------------------------------------------
   # Quantifiers after an edge

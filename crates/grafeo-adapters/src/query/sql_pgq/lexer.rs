@@ -253,6 +253,15 @@ impl<'a> Lexer<'a> {
         }
     }
 
+    /// Goes on from the start of `at`, on its line and column: after a
+    /// clause another parser read (the GQL `MATCH` of a `GRAPH_TABLE`).
+    pub(crate) fn seek(&mut self, at: SourceSpan) {
+        self.pos = at.start;
+        self.start = at.start;
+        self.line = at.line as usize;
+        self.column = at.column as usize;
+    }
+
     /// Returns the next token.
     pub fn next_token(&mut self) -> Token {
         // A loop, not a recursion: a query may hold any number of comments.

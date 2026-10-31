@@ -13,7 +13,7 @@ use std::cell::RefCell;
     test
 ))]
 use std::collections::HashSet;
-#[cfg(any(feature = "graphql", feature = "gremlin", feature = "sql-pgq", test))]
+#[cfg(any(feature = "graphql", feature = "gremlin", test))]
 use std::sync::atomic::{AtomicU32, Ordering};
 
 #[cfg(any(feature = "gql", feature = "cypher", feature = "sql-pgq", test))]
@@ -617,12 +617,12 @@ pub(crate) fn capitalize_first(s: &str) -> String {
 ///
 /// Replaces the duplicated `var_counter: AtomicU32` + `next_var()` pattern
 /// used across multiple translators.
-#[cfg(any(feature = "graphql", feature = "gremlin", feature = "sql-pgq", test))]
+#[cfg(any(feature = "graphql", feature = "gremlin", test))]
 pub(crate) struct VarGen {
     counter: AtomicU32,
 }
 
-#[cfg(any(feature = "graphql", feature = "gremlin", feature = "sql-pgq", test))]
+#[cfg(any(feature = "graphql", feature = "gremlin", test))]
 impl VarGen {
     /// Creates a new variable generator starting from 0.
     pub fn new() -> Self {
@@ -2240,9 +2240,21 @@ pub(crate) fn label_expression_predicate(
             op: crate::query::plan::UnaryOp::Not,
             operand: Box::new(label_expression_predicate(variable, inner)),
         },
-        LabelExpression::Wildcard => {
-            LogicalExpression::Literal(grafeo_common::types::Value::Bool(true))
-        }
+        // Any label: true for an element with at least one, so an unlabeled
+        // node does not match `(n:%)`.
+        LabelExpression::Wildcard => LogicalExpression::Binary {
+            left: Box::new(LogicalExpression::builtin(
+                crate::query::plan::BuiltinFunction::Size,
+                vec![LogicalExpression::builtin(
+                    crate::query::plan::BuiltinFunction::Labels,
+                    vec![LogicalExpression::Variable(variable.to_string())],
+                )],
+            )),
+            op: crate::query::plan::BinaryOp::Gt,
+            right: Box::new(LogicalExpression::Literal(
+                grafeo_common::types::Value::Int64(0),
+            )),
+        },
     }
 }
 

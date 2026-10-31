@@ -66,6 +66,9 @@ pub struct Parser<'a> {
     /// How deep the statement parsed so far nests (see
     /// [`MAX_NESTING_DEPTH`](crate::query::limits::MAX_NESTING_DEPTH)).
     nesting: Nesting,
+    /// The quote its advice writes a delimited name in: a backtick in GQL, a
+    /// double quote in a SQL/PGQ `GRAPH_TABLE` (SQL has no backtick).
+    name_quote: char,
 }
 
 impl<'a> Parser<'a> {
@@ -80,7 +83,35 @@ impl<'a> Parser<'a> {
             peeked_second: None,
             source: input,
             nesting: Nesting::default(),
+            name_quote: '`',
         }
+    }
+
+    /// Parses the `[OPTIONAL] MATCH` clause whose first token starts at `at`
+    /// in `source`, as a SQL/PGQ `GRAPH_TABLE` holds one, and returns it
+    /// with the span of the token after it, where the caller's own parser
+    /// goes on. Its positions are `source`'s.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the clause is not GQL's `MATCH` clause syntax.
+    pub fn parse_match_clause_at(
+        source: &'a str,
+        at: SourceSpan,
+    ) -> Result<(MatchClause, SourceSpan)> {
+        let mut lexer = Lexer::starting_at(source, at);
+        let current = lexer.next_token();
+        let mut parser = Self {
+            lexer,
+            current,
+            peeked: None,
+            peeked_second: None,
+            source,
+            nesting: Nesting::default(),
+            name_quote: '"',
+        };
+        let clause = parser.parse_match_clause()?;
+        Ok((clause, parser.current.span))
     }
 
     /// Enters one level of nesting, or fails past the nesting limit.
@@ -134,6 +165,7 @@ impl<'a> Parser<'a> {
     /// keywords that are commonly used as labels or properties.
     fn is_label_or_type_name(&self) -> bool {
         self.is_contextual_keyword()
+            || self.is_double_quoted_name()
             || matches!(
                 self.current.kind,
                 TokenKind::Identifier
@@ -255,9 +287,18 @@ impl<'a> Parser<'a> {
         let text = &self.current.text;
         if self.current.kind == TokenKind::QuotedIdentifier {
             text[1..text.len() - 1].replace("``", "`")
+        } else if self.is_double_quoted_name() {
+            string_literal_value(text)
         } else {
             text.clone()
         }
+    }
+
+    /// Whether the current token is a double-quoted name (ISO GQL's
+    /// delimited identifier, `"Graph:CONTAINS"`), which stands where a
+    /// string literal cannot, as a label or an edge type.
+    fn is_double_quoted_name(&self) -> bool {
+        self.current.kind == TokenKind::String && self.current.text.starts_with('"')
     }
 
     /// Returns `true` if the current token is either the dedicated `kind`
@@ -2443,8 +2484,9 @@ impl<'a> Parser<'a> {
             QueryError::new(
                 QueryErrorKind::Syntax,
                 format!(
-                    "[GQL] {what}: write :`{first}{joint}{second}` for the type named \
-                     {first}{joint}{second}, or :{first}|{second} to match either type"
+                    "[GQL] {what}: write :{quote}{first}{joint}{second}{quote} for the type \
+                     named {first}{joint}{second}, or :{first}|{second} to match either type",
+                    quote = self.name_quote
                 ),
             )
             .with_span(at)
@@ -2744,6 +2786,14 @@ impl<'a> Parser<'a> {
                     max_hops = qmax;
                 }
             }
+        } else if matches!(
+            self.current.kind,
+            TokenKind::Plus | TokenKind::Star | TokenKind::LBrace
+        ) {
+            return Err(self.error(
+                "An edge pattern takes one quantifier: write it inside the brackets or after \
+                 the edge, not both",
+            ));
         }
 
         let target = self.parse_node_pattern()?;
@@ -2891,7 +2941,8 @@ impl<'a> Parser<'a> {
             }
             self.advance(); // consume {
             if self.current.kind == TokenKind::Comma {
-                // {,n}
+                // {,n}: from zero, as the omitted lower bound of a general
+                // quantifier is (ISO/IEC 39075:2024 16.11)
                 self.advance();
                 let max_text = self.current.text.clone();
                 let max: u32 = max_text
@@ -2899,7 +2950,7 @@ impl<'a> Parser<'a> {
                     .map_err(|_| self.error("Invalid path length"))?;
                 self.advance();
                 self.expect(TokenKind::RBrace)?;
-                return Ok((Some(1), Some(max)));
+                return Ok((Some(0), Some(max)));
             }
             let min_text = self.current.text.clone();
             let min: u32 = min_text
@@ -2921,6 +2972,11 @@ impl<'a> Parser<'a> {
             let max: u32 = max_text
                 .parse()
                 .map_err(|_| self.error("Invalid path length"))?;
+            if max < min {
+                return Err(self.error(&format!(
+                    "The quantifier {{{min},{max}}}'s upper bound is below its lower bound"
+                )));
+            }
             self.advance();
             self.expect(TokenKind::RBrace)?;
             return Ok((Some(min), Some(max)));
@@ -3361,10 +3417,13 @@ impl<'a> Parser<'a> {
         )
     }
 
-    /// Whether the label after the current `:` is followed by `&` or `|`, so
-    /// the colon starts a label expression.
+    /// Whether the current `:` starts a label expression: one that opens with
+    /// `!`, `(` or `%`, or a label followed by `&` or `|`.
     fn is_label_expression_after_colon(&mut self) -> bool {
         matches!(
+            self.peek_kind(),
+            TokenKind::Exclamation | TokenKind::LParen | TokenKind::Percent
+        ) || matches!(
             self.peek_second_kind(),
             TokenKind::Ampersand | TokenKind::Pipe
         )

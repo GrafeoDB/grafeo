@@ -450,19 +450,19 @@ impl<'a> Parser<'a> {
         })
     }
 
+    /// The `MATCH` clause of a `GRAPH_TABLE`, as GQL parses it (SQL/PGQ's
+    /// graph pattern is GQL's, ISO/IEC 9075-16): the GQL parser reads it
+    /// from the current token, and this parser goes on after it.
     fn parse_match_clause(&mut self) -> Result<MatchClause> {
-        self.expect(TokenKind::Match)?;
-
-        let patterns = self.parse_pattern_list()?;
-
-        Ok(MatchClause {
-            optional: false,
-            path_mode: None,
-            search_prefix: None,
-            match_mode: None,
-            patterns,
-            span: None,
-        })
+        if self.current.kind != TokenKind::Match {
+            return Err(self.error(&format!("Expected Match, found {:?}", self.current.kind)));
+        }
+        let (clause, next) =
+            crate::query::gql::Parser::parse_match_clause_at(self.source, self.current.span)
+                .map_err(as_sql_pgq_error)?;
+        self.lexer.seek(next);
+        self.advance();
+        Ok(clause)
     }
 
     fn parse_columns_clause(&mut self) -> Result<ColumnsClause> {
@@ -490,407 +490,6 @@ impl<'a> Parser<'a> {
             alias,
             span: None,
         })
-    }
-
-    // ==================== Pattern Parsing ====================
-
-    fn parse_pattern_list(&mut self) -> Result<Vec<AliasedPattern>> {
-        let mut patterns = vec![self.parse_aliased_pattern()?];
-        while self.current.kind == TokenKind::Comma {
-            self.advance();
-            patterns.push(self.parse_aliased_pattern()?);
-        }
-        Ok(patterns)
-    }
-
-    fn parse_aliased_pattern(&mut self) -> Result<AliasedPattern> {
-        let pattern = self.parse_pattern()?;
-        Ok(AliasedPattern {
-            alias: None,
-            path_function: None,
-            search_prefix: None,
-            path_mode: None,
-            keep: None,
-            pattern,
-        })
-    }
-
-    fn parse_pattern(&mut self) -> Result<Pattern> {
-        let start = self.parse_node_pattern()?;
-
-        // Check for edge continuation
-        if self.is_edge_start() {
-            let mut edges = Vec::new();
-            while self.is_edge_start() {
-                edges.push(self.parse_edge_pattern()?);
-            }
-            Ok(Pattern::Path(PathPattern {
-                source: start,
-                edges,
-                span: None,
-            }))
-        } else {
-            Ok(Pattern::Node(start))
-        }
-    }
-
-    fn parse_node_pattern(&mut self) -> Result<NodePattern> {
-        self.expect(TokenKind::LParen)?;
-
-        // Optional variable name
-        let variable = if self.can_be_identifier() && self.current.kind != TokenKind::Colon {
-            let name = self.get_identifier_text();
-            self.advance();
-            Some(name)
-        } else {
-            None
-        };
-
-        // Optional labels: `:A:B` (each of them), or a label expression
-        // after the colon (`:Post|Comment`, `:!Draft`, `:(A|B)&C`, `:%`,
-        // ISO/IEC 9075-16 label expressions).
-        let mut labels = Vec::new();
-        let mut label_expression = None;
-        if self.current.kind == TokenKind::Colon {
-            self.advance();
-            match self.parse_label_expression()? {
-                LabelExpression::Label(name) => {
-                    labels.push(name);
-                    while self.current.kind == TokenKind::Colon {
-                        self.advance();
-                        labels.push(self.expect_identifier()?);
-                    }
-                }
-                expression => label_expression = Some(expression),
-            }
-        }
-
-        // Optional property map
-        let properties = if self.current.kind == TokenKind::LBrace {
-            self.parse_property_map()?
-        } else {
-            Vec::new()
-        };
-
-        // Optional element pattern WHERE: `(m:Post WHERE m.id = $id)`
-        let where_clause = self.parse_element_where()?;
-
-        self.expect(TokenKind::RParen)?;
-
-        Ok(NodePattern {
-            variable,
-            labels,
-            label_expression,
-            properties,
-            where_clause,
-            span: None,
-        })
-    }
-
-    fn parse_edge_pattern(&mut self) -> Result<EdgePattern> {
-        // Determine direction and whether there's a bracket
-        let (leading_direction, has_bracket) = match self.current.kind {
-            TokenKind::Arrow => {
-                // ->
-                self.advance();
-                if self.current.kind == TokenKind::LBracket {
-                    // Unusual but handle: ->[...]->
-                    (Some(EdgeDirection::Outgoing), true)
-                } else {
-                    (Some(EdgeDirection::Outgoing), false)
-                }
-            }
-            TokenKind::LeftArrow => {
-                // <-  which may be followed by [...]-
-                self.advance();
-                if self.current.kind == TokenKind::LBracket {
-                    // <-[...]-  incoming edge with details
-                    (Some(EdgeDirection::Incoming), true)
-                } else {
-                    (Some(EdgeDirection::Incoming), false)
-                }
-            }
-            TokenKind::DoubleDash => {
-                // --
-                self.advance();
-                (Some(EdgeDirection::Undirected), false)
-            }
-            TokenKind::Minus => {
-                // - followed by [ or other
-                self.advance();
-                if self.current.kind == TokenKind::LBracket {
-                    (None, true) // Direction determined by trailing symbol
-                } else {
-                    return Err(self.error("Expected '[' or arrow after '-'"));
-                }
-            }
-            _ => return Err(self.error("Expected edge pattern")),
-        };
-
-        // Parse edge details if there's a bracket
-        let (variable, types, min_hops, max_hops, properties, direction, where_clause) =
-            if has_bracket {
-                self.advance(); // consume [
-
-                // Optional variable
-                let var = if self.can_be_identifier() && self.peek_kind() != TokenKind::LParen {
-                    let is_var = matches!(
-                        self.peek_kind(),
-                        TokenKind::Colon | TokenKind::RBracket | TokenKind::Star
-                    );
-                    if is_var {
-                        let name = self.get_identifier_text();
-                        self.advance();
-                        Some(name)
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                };
-
-                // Optional :Type, or alternatives :Type1|Type2. An edge has one
-                // type, so a second `:` is an error naming both ways to write
-                // what was meant.
-                let mut edge_types = Vec::new();
-                if self.current.kind == TokenKind::Colon {
-                    self.advance();
-                    edge_types.push(self.expect_identifier()?);
-                    while self.current.kind == TokenKind::Pipe {
-                        self.advance();
-                        edge_types.push(self.expect_identifier()?);
-                    }
-                    if self.current.kind == TokenKind::Colon {
-                        let colon = self.current.span;
-                        self.advance();
-                        let first = edge_types.last().map_or("A", String::as_str);
-                        let second = if self.can_be_identifier() {
-                            self.get_identifier_text()
-                        } else {
-                            "B".to_string()
-                        };
-                        return Err(QueryError::new(
-                        QueryErrorKind::Syntax,
-                        format!(
-                            "[SQL/PGQ] An edge has one type: write :\"{first}:{second}\" for the \
-                             type named {first}:{second}, or :{first}|{second} to match either type"
-                        ),
-                    )
-                    .with_span(colon)
-                    .with_source(self.source.to_string())
-                    .into());
-                    }
-                }
-
-                // Optional *min..max for variable-length
-                let (min, max) = if self.current.kind == TokenKind::Star {
-                    self.advance();
-                    self.parse_hop_range()?
-                } else {
-                    (None, None)
-                };
-
-                // Optional properties
-                let props = if self.current.kind == TokenKind::LBrace {
-                    self.parse_property_map()?
-                } else {
-                    Vec::new()
-                };
-
-                // Optional element pattern WHERE: `-[e:KNOWS WHERE e.since > 3]->`
-                let where_clause = self.parse_element_where()?;
-
-                self.expect(TokenKind::RBracket)?;
-
-                // Determine direction from trailing symbol + leading context
-                let dir = if self.current.kind == TokenKind::Arrow {
-                    self.advance();
-                    EdgeDirection::Outgoing
-                } else if self.current.kind == TokenKind::Minus {
-                    self.advance();
-                    // If we had a leading <-, this is <-[...]-  → Incoming
-                    if leading_direction == Some(EdgeDirection::Incoming) {
-                        EdgeDirection::Incoming
-                    } else {
-                        EdgeDirection::Undirected
-                    }
-                } else {
-                    leading_direction.unwrap_or(EdgeDirection::Undirected)
-                };
-
-                (var, edge_types, min, max, props, dir, where_clause)
-            } else {
-                // No bracket - simple arrow connection
-                let dir = leading_direction.unwrap_or(EdgeDirection::Undirected);
-                (None, Vec::new(), None, None, Vec::new(), dir, None)
-            };
-
-        // A quantifier after the edge (ISO/IEC 9075-16): `*` zero or more
-        // hops, `+` one or more, `{m,n}`, `{m,}`, `{,n}` and `{m}`.
-        let (min_hops, max_hops) = match self.parse_postfix_quantifier()? {
-            Some(_) if min_hops.is_some() || max_hops.is_some() => {
-                return Err(self.error(
-                    "an edge has one quantifier: inside the brackets (*1..3) or after the edge \
-                     ({1,3}), not both",
-                ));
-            }
-            Some((min, max)) => (Some(min), max),
-            None => (min_hops, max_hops),
-        };
-
-        // Parse the target node
-        let target = self.parse_node_pattern()?;
-
-        Ok(EdgePattern {
-            variable,
-            types,
-            direction,
-            target,
-            min_hops,
-            max_hops,
-            properties,
-            where_clause,
-            questioned: false,
-            span: None,
-        })
-    }
-
-    /// An element pattern's `WHERE` condition, if one comes next.
-    fn parse_element_where(&mut self) -> Result<Option<Expression>> {
-        if self.current.kind != TokenKind::Where {
-            return Ok(None);
-        }
-        self.advance();
-        Ok(Some(self.parse_expression()?))
-    }
-
-    /// The bounds of a quantifier after an edge pattern, if one comes next:
-    /// `*` is `{0,}`, `+` is `{1,}`.
-    fn parse_postfix_quantifier(&mut self) -> Result<Option<(u32, Option<u32>)>> {
-        match self.current.kind {
-            TokenKind::Star => {
-                self.advance();
-                Ok(Some((0, None)))
-            }
-            TokenKind::Plus => {
-                self.advance();
-                Ok(Some((1, None)))
-            }
-            TokenKind::LBrace => {
-                self.advance();
-                let bound = |parser: &mut Self| -> Result<Option<u32>> {
-                    if parser.current.kind != TokenKind::Integer {
-                        return Ok(None);
-                    }
-                    let value = parser.current.text.parse::<u32>().map_err(|_| {
-                        parser.error("a quantifier bound is a whole number below 2^32")
-                    })?;
-                    parser.advance();
-                    Ok(Some(value))
-                };
-                let min = bound(self)?;
-                let max = if self.current.kind == TokenKind::Comma {
-                    self.advance();
-                    bound(self)?
-                } else {
-                    // `{m}`: exactly m hops.
-                    Some(min.ok_or_else(|| self.error("expected a number in the quantifier"))?)
-                };
-                self.expect(TokenKind::RBrace)?;
-                let min = min.unwrap_or(0);
-                if max.is_some_and(|max| max < min) {
-                    return Err(self.error("a quantifier's upper bound is below its lower bound"));
-                }
-                Ok(Some((min, max)))
-            }
-            _ => Ok(None),
-        }
-    }
-
-    /// A label expression (ISO/IEC 9075-16): `|` of `&` of `!`, `%`, a
-    /// label or a parenthesized expression, `&` binding tighter than `|`.
-    fn parse_label_expression(&mut self) -> Result<LabelExpression> {
-        let mut terms = vec![self.parse_label_conjunction()?];
-        while self.current.kind == TokenKind::Pipe {
-            self.advance();
-            terms.push(self.parse_label_conjunction()?);
-        }
-        Ok(if terms.len() == 1 {
-            terms.pop().expect("one term")
-        } else {
-            LabelExpression::Disjunction(terms)
-        })
-    }
-
-    fn parse_label_conjunction(&mut self) -> Result<LabelExpression> {
-        let mut factors = vec![self.parse_label_factor()?];
-        while self.current.kind == TokenKind::Ampersand {
-            self.advance();
-            factors.push(self.parse_label_factor()?);
-        }
-        Ok(if factors.len() == 1 {
-            factors.pop().expect("one factor")
-        } else {
-            LabelExpression::Conjunction(factors)
-        })
-    }
-
-    fn parse_label_factor(&mut self) -> Result<LabelExpression> {
-        match self.current.kind {
-            TokenKind::Bang => {
-                self.advance();
-                Ok(LabelExpression::Negation(Box::new(
-                    self.parse_label_factor()?,
-                )))
-            }
-            TokenKind::Percent => {
-                self.advance();
-                Ok(LabelExpression::Wildcard)
-            }
-            TokenKind::LParen => {
-                self.advance();
-                let inner = self.parse_label_expression()?;
-                self.expect(TokenKind::RParen)?;
-                Ok(inner)
-            }
-            _ => Ok(LabelExpression::Label(self.expect_identifier()?)),
-        }
-    }
-
-    /// The bounds after a `*`: `*n` exactly n hops, `*n..m`, `*n..`, `*..m`,
-    /// and `*` alone one or more hops, as in GQL and Cypher (it read as one
-    /// hop).
-    fn parse_hop_range(&mut self) -> Result<(Option<u32>, Option<u32>)> {
-        if !matches!(self.current.kind, TokenKind::Integer | TokenKind::Dot) {
-            return Ok((Some(1), None));
-        }
-        let min = if self.current.kind == TokenKind::Integer {
-            let val = self.current.text.parse().unwrap_or(1);
-            self.advance();
-            Some(val)
-        } else {
-            None
-        };
-
-        let max = if self.current.kind == TokenKind::Dot {
-            self.advance();
-            // Expect second dot
-            if self.current.kind != TokenKind::Dot {
-                return Err(self.error("Expected '..' in hop range"));
-            }
-            self.advance();
-            if self.current.kind == TokenKind::Integer {
-                let val = self.current.text.parse().unwrap_or(u32::MAX);
-                self.advance();
-                Some(val)
-            } else {
-                None // Unbounded
-            }
-        } else {
-            min // If no .., max = min (exact length)
-        };
-
-        Ok((min, max))
     }
 
     fn parse_property_map(&mut self) -> Result<Vec<(String, Expression)>> {
@@ -1468,13 +1067,6 @@ impl<'a> Parser<'a> {
         kind
     }
 
-    fn is_edge_start(&self) -> bool {
-        matches!(
-            self.current.kind,
-            TokenKind::Arrow | TokenKind::LeftArrow | TokenKind::DoubleDash | TokenKind::Minus
-        )
-    }
-
     /// Enters one level of nesting, or fails past the nesting limit.
     fn enter_nesting(&mut self) -> Result<()> {
         if self.nesting.enter() {
@@ -1859,6 +1451,20 @@ impl<'a> Parser<'a> {
     }
 }
 
+/// An error of the GQL parser inside a SQL/PGQ statement, named as SQL/PGQ's.
+fn as_sql_pgq_error(
+    error: grafeo_common::utils::error::Error,
+) -> grafeo_common::utils::error::Error {
+    match error {
+        grafeo_common::utils::error::Error::Query(mut query) => {
+            if let Some(rest) = query.message.strip_prefix("[GQL] ") {
+                query.message = format!("[SQL/PGQ] {rest}");
+            }
+            grafeo_common::utils::error::Error::Query(query)
+        }
+        other => other,
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;

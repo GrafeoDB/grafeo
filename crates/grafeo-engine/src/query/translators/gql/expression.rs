@@ -6,6 +6,32 @@ use crate::query::functions::resolve_call;
 use crate::query::plan::BuiltinFunction;
 
 impl GqlTranslator {
+    /// A path function of a quantified edge's variable (`nodes(k)` of
+    /// `-[k]->{1,3}`, `length(k)`, `path_length(k)`, `edges(k)`): of the path
+    /// that edge walks, whose edges the variable lists, as SQL/PGQ reads it.
+    /// `None` for any other call.
+    pub(super) fn group_path_call(
+        &self,
+        name: &str,
+        args: &[ast::Expression],
+        distinct: bool,
+    ) -> Option<Result<LogicalExpression>> {
+        let [ast::Expression::Variable(variable)] = args else {
+            return None;
+        };
+        let call = match BuiltinFunction::from_name(name)? {
+            BuiltinFunction::Size | BuiltinFunction::PathLength => "path_length",
+            BuiltinFunction::Nodes | BuiltinFunction::Edges => name,
+            _ => return None,
+        };
+        let path = self.group_list_variables.borrow().get(variable).cloned()?;
+        Some(resolve_call(
+            call,
+            vec![LogicalExpression::Variable(path)],
+            distinct,
+        ))
+    }
+
     pub(super) fn translate_expression(&self, expr: &ast::Expression) -> Result<LogicalExpression> {
         match expr {
             ast::Expression::Literal(lit) => Ok(self.translate_literal(lit)),
@@ -44,6 +70,12 @@ impl GqlTranslator {
                 // reads the length column of a path the pattern binds, and
                 // computes it from the value of any other path (one passed on
                 // by a WITH, unwound from a list).
+
+                if self.group_variables_as_paths
+                    && let Some(call) = self.group_path_call(name, args, *distinct)
+                {
+                    return call;
+                }
 
                 // NULLIF(a, b) desugars to CASE WHEN a = b THEN NULL ELSE a END
                 if BuiltinFunction::from_name(name) == Some(BuiltinFunction::Nullif) {

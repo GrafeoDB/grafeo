@@ -1470,13 +1470,26 @@ impl SparqlTranslator {
 
             let mut branches = Vec::new();
             for alt_path in alternatives {
-                let pred = self.translate_property_path(alt_path)?;
-                branches.push(self.make_triple_scan(
-                    subject.clone(),
-                    pred,
-                    object.clone(),
-                    graph.clone(),
-                ));
+                if self.is_simple_path(alt_path) {
+                    let pred = self.translate_property_path(alt_path)?;
+                    branches.push(self.make_triple_scan(
+                        subject.clone(),
+                        pred,
+                        object.clone(),
+                        graph.clone(),
+                    ));
+                } else {
+                    // An inverse, sequence or repeated branch (`^p`, `p/q`,
+                    // `p+`): recurse, as a sequence step does, and keep the
+                    // two endpoints, so every branch has the same columns.
+                    let sub_triple = ast::TriplePattern {
+                        subject: triple.subject.clone(),
+                        predicate: alt_path.clone(),
+                        object: triple.object.clone(),
+                    };
+                    let branch = self.translate_triple_pattern(&sub_triple)?;
+                    branches.push(self.project_path_endpoints(&subject, &object, branch));
+                }
             }
 
             return Ok(LogicalOperator::Union(UnionOp { inputs: branches }));
@@ -2488,6 +2501,18 @@ impl SparqlTranslator {
             projections.push(Projection {
                 expression: LogicalExpression::Variable(o.clone()),
                 alias: Some(o.clone()),
+            });
+        }
+        // Under `GRAPH ?g` the path's graph is an endpoint too: the scans
+        // below bind it, and a branch without it would give ?g as null.
+        if let Some(TripleComponent::Variable(g)) = self.graph_context_stack.last()
+            && !projections
+                .iter()
+                .any(|p| p.alias.as_deref() == Some(g.as_str()))
+        {
+            projections.push(Projection {
+                expression: LogicalExpression::Variable(g.clone()),
+                alias: Some(g.clone()),
             });
         }
         if projections.is_empty() {

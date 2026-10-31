@@ -185,6 +185,11 @@ impl Default for RdfStoreConfig {
     }
 }
 
+/// The fewest triples inserted or removed after which the RDF statistics
+/// are collected again (see [`RdfStore::get_or_collect_statistics`]), so a
+/// small store does not read itself after every write.
+pub const STATISTICS_MIN_DRIFT: usize = 64;
+
 /// An in-memory RDF triple store.
 ///
 /// The store maintains multiple indexes for efficient querying:
@@ -243,8 +248,13 @@ pub struct RdfStore {
     tx_buffer: RwLock<TransactionBuffer>,
     /// Named graphs, each a separate `RdfStore` partition.
     named_graphs: RwLock<HashMap<String, Arc<RdfStore>>>,
-    /// Cached RDF statistics for query optimization. Invalidated on any mutation.
+    /// Cached RDF statistics for query optimization: estimates, collected
+    /// again once the triples changed since exceed a tenth of the ones they
+    /// counted (see [`get_or_collect_statistics`](Self::get_or_collect_statistics)).
     statistics_cache: RwLock<Option<Arc<crate::statistics::RdfStatistics>>>,
+    /// How many triples were inserted or removed since the statistics were
+    /// collected.
+    statistics_drift: std::sync::atomic::AtomicUsize,
     /// The term dictionary of the dataset: the default graph and its named
     /// graphs share one, so a term has one id in all of them.
     dictionary: Arc<super::dictionary::TermDictionary>,
@@ -306,6 +316,7 @@ impl RdfStore {
             tx_buffer: RwLock::new(TransactionBuffer::default()),
             named_graphs: RwLock::new(HashMap::new()),
             statistics_cache: RwLock::new(None),
+            statistics_drift: std::sync::atomic::AtomicUsize::new(0),
             dictionary: Arc::new(super::dictionary::TermDictionary::new()),
             #[cfg(feature = "ring-index")]
             loaded_ids: parking_lot::Mutex::new(None),
@@ -435,7 +446,7 @@ impl RdfStore {
                 .push(triple);
         }
 
-        self.invalidate_statistics_cache();
+        self.note_changes(1);
         true
     }
 
@@ -544,7 +555,7 @@ impl RdfStore {
         }
 
         if count > 0 {
-            self.invalidate_statistics_cache();
+            self.note_changes(count);
         }
         count
     }
@@ -630,7 +641,7 @@ impl RdfStore {
             }
         }
 
-        self.invalidate_statistics_cache();
+        self.note_changes(1);
         true
     }
 
@@ -1158,7 +1169,7 @@ impl RdfStore {
         self.sp_index.write().clear();
         self.po_index.write().clear();
         self.os_index.write().clear();
-        self.invalidate_statistics_cache();
+        self.note_changes(usize::MAX);
     }
 
     /// Returns store statistics.
@@ -1195,27 +1206,42 @@ impl RdfStore {
         collector.build()
     }
 
-    /// Returns cached RDF statistics, computing them on first call.
-    ///
-    /// The cache is invalidated by any mutation (insert, delete, bulk load).
-    /// This avoids the full-table-scan overhead of `collect_statistics()` on
-    /// every query, which was a measurable regression for larger datasets.
+    /// Returns the RDF statistics the optimizer estimates with, collected on
+    /// the first call and again once the triples inserted or removed since
+    /// exceed a tenth of the ones they counted (at least
+    /// [`STATISTICS_MIN_DRIFT`]): collecting them reads every triple, which a
+    /// query after each small write should not pay for. Estimates, not
+    /// answers: a plan is right with stale ones.
     #[must_use]
     pub fn get_or_collect_statistics(&self) -> Arc<crate::statistics::RdfStatistics> {
-        // Fast path: return cached statistics if available.
-        if let Some(cached) = self.statistics_cache.read().as_ref() {
-            return Arc::clone(cached);
-        }
+        use std::sync::atomic::Ordering;
 
-        // Slow path: compute and cache.
+        if let Some(cached) = self.statistics_cache.read().as_ref() {
+            let counted = usize::try_from(cached.total_triples).unwrap_or(usize::MAX);
+            if self.statistics_drift.load(Ordering::Relaxed)
+                <= (counted / 10).max(STATISTICS_MIN_DRIFT)
+            {
+                return Arc::clone(cached);
+            }
+        }
+        // The changes from here on count against the new statistics.
+        self.statistics_drift.store(0, Ordering::Relaxed);
         let stats = Arc::new(self.collect_statistics());
         *self.statistics_cache.write() = Some(Arc::clone(&stats));
         stats
     }
 
-    /// Invalidates the cached RDF statistics and term dictionary. Called after any mutation.
-    fn invalidate_statistics_cache(&self) {
-        *self.statistics_cache.write() = None;
+    /// Notes that `changed` triples were inserted or removed: the statistics
+    /// are collected again once enough changed (see
+    /// [`get_or_collect_statistics`](Self::get_or_collect_statistics)), and the
+    /// ring index, which answers queries, goes at once.
+    fn note_changes(&self, changed: usize) {
+        // The update always gives a value, so it never fails.
+        let _ = self.statistics_drift.try_update(
+            std::sync::atomic::Ordering::Relaxed,
+            std::sync::atomic::Ordering::Relaxed,
+            |drift| Some(drift.saturating_add(changed)),
+        );
         #[cfg(feature = "ring-index")]
         {
             self.ring_stale
@@ -3818,6 +3844,21 @@ this is not valid ntriples
             Term::iri("http://ex.org/q"),
             Term::literal("w"),
         ));
+        // One more triple keeps the estimates: they are collected again
+        // once more triples changed than the drift allows.
+        assert!(
+            store
+                .get_or_collect_statistics()
+                .get_predicate("<http://ex.org/q>")
+                .is_none()
+        );
+        for i in 0..STATISTICS_MIN_DRIFT {
+            store.insert(Triple::new(
+                Term::iri(format!("http://ex.org/c{i}")),
+                Term::iri("http://ex.org/q"),
+                Term::literal("w"),
+            ));
+        }
         let stats2 = store.get_or_collect_statistics();
         assert!(stats2.get_predicate("<http://ex.org/q>").is_some());
     }

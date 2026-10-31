@@ -85,7 +85,6 @@ Grafeo supports both **Labeled Property Graph (LPG)** and **Resource Description
 - **Incremental backup and point-in-time recovery**: `backup_full`, `backup_incremental`, `restore_to_epoch`
 - **Prometheus metrics** (`metrics` feature): query, transaction, session, cache, and GC counters with text export
 - **Change data capture**: before/after property snapshots with epoch-bounded retention
-- **Async storage** (`async-storage` feature): non-blocking WAL and snapshot I/O via tokio
 - **Tracing** (`tracing` feature): opt-in observability spans and events
 - **Bulk export**: Arrow IPC, Polars, pandas, GEXF (Gephi), GraphML (Cytoscape, yEd, NetworkX)
 - **Bulk import**: CSV, JSONL, TSV, Matrix Market (MMIO), Turtle, N-Triples with streaming loaders

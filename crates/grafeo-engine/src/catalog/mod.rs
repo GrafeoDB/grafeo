@@ -2445,6 +2445,11 @@ impl CatalogConstraintValidator {
                 error @ grafeo_common::utils::error::Error::Transaction(
                     grafeo_common::utils::error::TransactionError::IncompleteCommit,
                 ) => OperatorError::Wrapped(Box::new(error)),
+                // Already the conflict: passed on as it is, not wrapped in a
+                // second one.
+                error @ grafeo_common::utils::error::Error::Transaction(
+                    grafeo_common::utils::error::TransactionError::WriteConflict(_),
+                ) => OperatorError::Wrapped(Box::new(error)),
                 error => OperatorError::WriteConflict(error.to_string()),
             })
     }

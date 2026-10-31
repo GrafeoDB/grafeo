@@ -3421,12 +3421,16 @@ impl GrafeoDB {
     ///
     /// Requires a prior full backup in the backup directory. Backups on
     /// this database wait for one another; a destination in use by another
-    /// database or process fails with a busy error.
+    /// database or process fails with a busy error. With nothing new since
+    /// the last backup it writes nothing and returns the chain's newest
+    /// segment (0.7.0 returns `None` instead).
     ///
     /// # Errors
     ///
-    /// Returns an error if no full backup exists, or if the WAL has no new
-    /// records, and the database-closed error after `close()`; the
+    /// Returns an error if no full backup exists; `GRAFEO-S005`
+    /// ([`ErrorCode::BackupChainBroken`](grafeo_common::utils::error::ErrorCode::BackupChainBroken))
+    /// when the log the chain continues from was removed, which a new full
+    /// backup fixes; the database-closed error after `close()`; the
     /// unsupported error on a database on a backend of its own
     /// ([`with_store`](Self::with_store)), which has no full backup to
     /// follow.

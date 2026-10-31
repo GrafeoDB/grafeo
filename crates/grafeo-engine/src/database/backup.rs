@@ -20,7 +20,7 @@ use std::io::Write;
 use std::path::Path;
 
 use grafeo_common::types::EpochId;
-use grafeo_common::utils::error::{Error, Result};
+use grafeo_common::utils::error::{Error, Result, StorageError};
 use serde::{Deserialize, Serialize};
 
 // ── Backup types ───────────────────────────────────────────────────
@@ -886,6 +886,38 @@ pub(super) fn do_backup_incremental(
         }
     }
 
+    // The chain continues from the segment the last backup ended at: a log
+    // that lacks it lost what lies between (removed from outside, or a
+    // cursor and a log that disagree), which no retry recovers. Listing such
+    // a log finds the gap too.
+    let chain_broken = |what: String| {
+        Error::from(StorageError::BackupChainBroken(format!(
+            "{what}, so the backup chain in {} cannot continue; take a new full backup to \
+             start a new chain",
+            backup_dir.display()
+        )))
+    };
+    let listing = match list_wal_directory(wal.dir()) {
+        Ok(listing) => listing,
+        Err(grafeo_storage::wal::WalError::Gap { reason }) => {
+            return Err(chain_broken(format!("the WAL has a gap ({reason})")));
+        }
+        Err(other) => return Err(Error::from(other)),
+    };
+    if listing
+        .segments
+        .iter()
+        .any(|(first_lsn, _)| *first_lsn > from)
+        && listing
+            .segments
+            .iter()
+            .all(|(first_lsn, _)| *first_lsn != from)
+    {
+        return Err(chain_broken(format!(
+            "the WAL segment at log position {from}, where the last backup ended, was removed"
+        )));
+    }
+
     sync_backup_entry(backup_dir, "backup:directory_sync")?;
 
     // Seal the active segment first: every group logged so far is then in a
@@ -897,11 +929,20 @@ pub(super) fn do_backup_incremental(
     let sealed = wal.rotate().map_err(|e| {
         Error::Internal(format!("failed to rotate WAL for incremental backup: {e}"))
     })?;
-    let groups = groups_between(wal, from, sealed)?;
+    let groups = match groups_between(wal, from, sealed) {
+        Ok(groups) => groups,
+        Err(grafeo_storage::wal::WalError::Gap { reason }) => {
+            return Err(chain_broken(format!("the WAL has a gap ({reason})")));
+        }
+        Err(other) => return Err(Error::from(other)),
+    };
     if groups == 0 {
-        return Err(Error::Internal(
-            "no new WAL records since last backup".to_string(),
-        ));
+        // Nothing new: the chain already holds everything; nothing is written.
+        return Ok(manifest
+            .segments
+            .last()
+            .cloned()
+            .expect("the manifest holds a full backup, checked above"));
     }
 
     let listing = list_wal_directory(wal.dir()).map_err(Error::from)?;
@@ -911,15 +952,6 @@ pub(super) fn do_backup_incremental(
         .filter(|(first_lsn, _)| (from..sealed).contains(first_lsn))
         .map(|(_, path)| path)
         .collect();
-    if listing
-        .segments
-        .iter()
-        .all(|(first_lsn, _)| *first_lsn != from)
-    {
-        return Err(Error::Internal(format!(
-            "the WAL segment at log position {from}, where the last backup ended, was removed"
-        )));
-    }
 
     let start_epoch = EpochId::new(cursor.backed_up_epoch.as_u64() + 1);
     let end_epoch = current_epoch;
@@ -996,10 +1028,14 @@ pub(super) fn do_backup_incremental(
 
 /// How many complete groups `wal` holds from `from` up to `until`, both
 /// segment boundaries.
-fn groups_between(wal: &Wal, from: u64, until: u64) -> Result<u64> {
-    let mut scan = WalScan::open(wal.dir(), wal.scan_options(from)).map_err(Error::from)?;
+fn groups_between(
+    wal: &Wal,
+    from: u64,
+    until: u64,
+) -> std::result::Result<u64, grafeo_storage::wal::WalError> {
+    let mut scan = WalScan::open(wal.dir(), wal.scan_options(from))?;
     let mut groups = 0;
-    while let Some(group) = scan.next_group().map_err(Error::from)? {
+    while let Some(group) = scan.next_group()? {
         if group.start_lsn() >= until {
             break;
         }
@@ -1091,7 +1127,7 @@ pub(super) fn do_restore_to_epoch(
                 })?;
                 let actual_crc = crc32fast::hash(&incr_data);
                 if actual_crc != incr.checksum {
-                    return Err(Error::Internal(format!(
+                    return Err(Error::corruption(format!(
                         "incremental backup {} CRC mismatch: expected {:08x}, got {actual_crc:08x}",
                         incr.filename, incr.checksum,
                     )));

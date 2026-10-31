@@ -1114,7 +1114,13 @@ impl super::Planner {
         .with_session_context(self.session_context.clone());
         evaluator
             .eval_at(&grafeo_core::execution::DataChunk::empty(), 0)
-            .map_err(crate::query::executor::convert_operator_error)?
+            .map_err(|error| {
+                naming_the_argument(
+                    crate::query::executor::convert_operator_error(error),
+                    argument,
+                    procedure,
+                )
+            })?
             .ok_or_else(|| {
                 semantic(format!(
                     "Argument '{argument}' of {procedure} cannot be evaluated"
@@ -1962,4 +1968,19 @@ fn starts_from_the_left_row(
     }
     let mut found = (false, false, true);
     walk(right, left_vars, &mut found) && (found.0 || (found.1 && found.2))
+}
+
+/// `error`, an argument's evaluation error, with the argument and the
+/// procedure named after its message; its kind, and so its GQLSTATUS,
+/// stays as it was.
+fn naming_the_argument(error: Error, argument: &str, procedure: &str) -> Error {
+    let prefix = |message: &str| format!("{message} (argument '{argument}' of {procedure})");
+    match error {
+        Error::Query(mut query) => {
+            query.message = prefix(&query.message);
+            Error::Query(query)
+        }
+        Error::InvalidValue(message) => Error::InvalidValue(prefix(&message)),
+        other => other,
+    }
 }

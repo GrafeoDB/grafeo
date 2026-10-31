@@ -83,6 +83,9 @@ pub enum ErrorCode {
     /// The database file is open elsewhere: in another handle of this
     /// process, or in another process.
     DatabaseLocked,
+    /// An incremental backup cannot continue its chain: the log it starts
+    /// from was removed. A new full backup starts a new chain.
+    BackupChainBroken,
 
     // Validation errors (V)
     /// Request validation failed.
@@ -135,6 +138,7 @@ impl ErrorCode {
             Self::StorageCorrupted => "GRAFEO-S002",
             Self::StorageRecoveryFailed => "GRAFEO-S003",
             Self::DatabaseLocked => "GRAFEO-S004",
+            Self::BackupChainBroken => "GRAFEO-S005",
 
             Self::InvalidInput => "GRAFEO-V001",
             Self::NodeNotFound => "GRAFEO-V002",
@@ -617,6 +621,10 @@ pub enum StorageError {
     /// (what holds it follows): another handle of this process, or another
     /// process.
     Locked(String),
+
+    /// An incremental backup cannot continue its chain (what is missing
+    /// follows): only a new full backup helps, not a retry.
+    BackupChainBroken(String),
 }
 
 impl StorageError {
@@ -628,6 +636,7 @@ impl StorageError {
             Self::InvalidWalEntry(_) | Self::CheckpointFailed(_) => ErrorCode::StorageCorrupted,
             Self::RecoveryFailed(_) => ErrorCode::StorageRecoveryFailed,
             Self::Locked(_) => ErrorCode::DatabaseLocked,
+            Self::BackupChainBroken(_) => ErrorCode::BackupChainBroken,
         }
     }
 }
@@ -640,6 +649,7 @@ impl fmt::Display for StorageError {
             StorageError::RecoveryFailed(msg) => write!(f, "Recovery failed: {msg}"),
             StorageError::CheckpointFailed(msg) => write!(f, "Checkpoint failed: {msg}"),
             StorageError::Locked(msg) => write!(f, "Database locked: {msg}"),
+            StorageError::BackupChainBroken(msg) => write!(f, "Backup chain broken: {msg}"),
         }
     }
 }

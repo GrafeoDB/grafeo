@@ -1170,7 +1170,7 @@ impl TransactionManager {
                 {
                     return Err(Error::Transaction(TransactionError::WriteConflict(
                         format!(
-                            "Write conflict on key {key}: another open transaction writes the same \
+                            "on key {key}: another open transaction writes the same \
                          value of the key"
                         ),
                     )));
@@ -1377,7 +1377,7 @@ impl TransactionManager {
                 {
                     return Err(Error::Transaction(TransactionError::WriteConflict(
                         format!(
-                            "Write conflict on key {key}: a transaction that committed after this \
+                            "on key {key}: a transaction that committed after this \
                          one began wrote the same value of the key"
                         ),
                     )));

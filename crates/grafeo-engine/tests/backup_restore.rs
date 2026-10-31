@@ -483,11 +483,13 @@ fn incremental_backup_without_new_records_leaves_the_wal_alone() {
     db.backup_full(&backup_dir).expect("full backup");
     let before = log_files();
 
+    // Nothing to back up: each call succeeds, writes nothing and returns the
+    // chain's newest segment, the full backup.
     for _ in 0..3 {
-        let err = db
+        let newest = db
             .backup_incremental(&backup_dir)
-            .expect_err("nothing to back up");
-        assert!(err.to_string().contains("no new WAL records"), "{err}");
+            .expect("nothing to back up is a no-op");
+        assert_eq!(newest.kind, BackupKind::Full);
     }
     assert_eq!(log_files(), before);
 
@@ -602,8 +604,9 @@ fn backups_during_writes_lose_nothing() {
     db.backup_full(&backup_dir).expect("full backup");
     // Until the writer is done, or has panicked: `join()` below reports that.
     while !writer.is_finished() {
-        // "no new WAL records" is fine while the writer is between inserts
-        let _ = db.backup_incremental(&backup_dir);
+        // Nothing new while the writer is between inserts is a no-op
+        db.backup_incremental(&backup_dir)
+            .expect("an incremental backup succeeds while the writer runs");
     }
     writer.join().expect("writer thread");
     // One more write, so the final incremental has content and its epoch is

@@ -3429,4 +3429,113 @@ mod tests {
         grafeo_close(db);
         grafeo_free_database(db);
     }
+
+    /// Standard base64 with padding (RFC 4648 section 4), written out here
+    /// so the test does not read the encoding through the code it tests.
+    fn standard_base64(bytes: &[u8]) -> String {
+        const ALPHABET: &[u8; 64] =
+            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let mut text = String::new();
+        for chunk in bytes.chunks(3) {
+            let group = chunk.iter().enumerate().fold(0u32, |group, (i, &byte)| {
+                group | (u32::from(byte) << (16 - 8 * i))
+            });
+            for i in 0..4 {
+                if i <= chunk.len() {
+                    text.push(char::from(
+                        ALPHABET[((group >> (18 - 6 * i)) & 63) as usize],
+                    ));
+                } else {
+                    text.push('=');
+                }
+            }
+        }
+        text
+    }
+
+    /// Bytes travel in the `$bytes` tag, standard base64 with padding, both
+    /// ways (0.6.1; an array of integers before, which came back as a LIST):
+    /// a parameter in the tag is BYTES, a stored one comes back in the tag,
+    /// the empty array and all 256 byte values too. A string that looks like
+    /// base64 stays a STRING, and a tag that is not base64, or not the map's
+    /// only key, leaves the map a map.
+    #[test]
+    fn bytes_travel_in_the_bytes_tag() {
+        let db = grafeo_open_memory();
+        let all: Vec<u8> = (0..=255).collect();
+        let all_base64 = standard_base64(&all);
+        for (bytes, text) in [
+            (vec![0u8, 1, 2, 255], "AAEC/w==".to_string()),
+            (vec![], String::new()),
+            (all.clone(), all_base64),
+        ] {
+            let tag = serde_json::json!({ "$bytes": text });
+            let rows = result_json(
+                db,
+                "RETURN $b AS b, $b IS TYPED BYTES AS bytes",
+                &serde_json::json!({ "b": tag }).to_string(),
+            );
+            assert_eq!(
+                rows,
+                serde_json::json!([{ "b": tag, "bytes": true }]),
+                "{bytes:?}"
+            );
+        }
+        // Stored and read back: in the tag, every byte equal.
+        let tag = serde_json::json!({ "$bytes": "AAEC/w==" });
+        result_json(
+            db,
+            "INSERT (:Blob {name: 'Mia', data: $b})",
+            &serde_json::json!({ "b": tag }).to_string(),
+        );
+        let rows = result_json(db, "MATCH (n:Blob) RETURN n.data AS data", "{}");
+        assert_eq!(rows, serde_json::json!([{ "data": tag }]));
+        // Inside a list and a map, and in a result's list.
+        let rows = result_json(
+            db,
+            "RETURN $l[0] IS TYPED BYTES AS first, $m.k IS TYPED BYTES AS inner, $l AS l",
+            &serde_json::json!({ "l": [tag], "m": { "k": tag } }).to_string(),
+        );
+        assert_eq!(
+            rows,
+            serde_json::json!([{ "first": true, "inner": true, "l": [tag] }])
+        );
+        // A string that looks like base64 is a string.
+        let rows = result_json(
+            db,
+            "RETURN $s AS s, $s IS TYPED STRING AS string",
+            r#"{"s": "AAEC/w=="}"#,
+        );
+        assert_eq!(
+            rows,
+            serde_json::json!([{ "s": "AAEC/w==", "string": true }])
+        );
+        // Not base64 as the standard alphabet with padding writes it (a stray
+        // character, no padding, the URL-safe alphabet, trailing bits that
+        // are not zero, a space or a line break inside), or a second key:
+        // the map stays a map.
+        for map in [
+            serde_json::json!({ "$bytes": "not base64!" }),
+            serde_json::json!({ "$bytes": "AAEC/w" }),
+            serde_json::json!({ "$bytes": "AAEC_w==" }),
+            serde_json::json!({ "$bytes": "AAEC/x==" }),
+            serde_json::json!({ "$bytes": "AAEC /w==" }),
+            serde_json::json!({ "$bytes": "AAEC\n/w==" }),
+            serde_json::json!({ "$bytes": 7 }),
+            serde_json::json!({ "$bytes": "AAEC/w==", "name": "Gus" }),
+        ] {
+            let rows = result_json(
+                db,
+                "RETURN $m AS m, $m IS TYPED BYTES AS bytes",
+                &serde_json::json!({ "m": map }).to_string(),
+            );
+            assert_eq!(
+                rows,
+                serde_json::json!([{ "m": map, "bytes": false }]),
+                "{map}"
+            );
+        }
+        grafeo_close(db);
+        grafeo_free_database(db);
+    }
 }

@@ -796,10 +796,10 @@ impl super::GrafeoDB {
         let Some(store) = self.root_store() else {
             return;
         };
-        let still_indexed = store.vector_index_entries().iter().any(|(key, _)| {
-            key.split_once(':')
-                .is_some_and(|(_, indexed)| indexed == property)
-        });
+        let still_indexed = store
+            .vector_index_entries()
+            .iter()
+            .any(|(_, indexed, _)| indexed == property);
         if still_indexed {
             return;
         }

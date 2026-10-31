@@ -703,10 +703,7 @@ fn every_vector_index<S: RootStore>(store: &S) -> BTreeSet<(String, String)> {
     store
         .vector_index_entries()
         .into_iter()
-        .filter_map(|(key, _)| {
-            let (label, property) = key.split_once(':')?;
-            Some((label.to_string(), property.to_string()))
-        })
+        .map(|(label, property, _)| (label, property))
         .collect()
 }
 

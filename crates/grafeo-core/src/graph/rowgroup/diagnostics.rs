@@ -326,30 +326,30 @@ impl RowGroupStore {
     /// `graph/Label:property` for a named graph.
     #[cfg(any(feature = "vector-index", feature = "text-index"))]
     fn add_search_index_memory(&self, graph: &str, indexes: &mut IndexMemory) {
-        let named = |key: String| {
+        let named = |label: String, property: String| {
             if graph.is_empty() {
-                key
+                format!("{label}:{property}")
             } else {
-                format!("{graph}/{key}")
+                format!("{graph}/{label}:{property}")
             }
         };
         #[cfg(feature = "vector-index")]
-        for (key, index) in self.vector_index_entries() {
+        for (label, property, index) in self.vector_index_entries() {
             indexes
                 .vector_indexes
                 .push(grafeo_common::memory::NamedMemory {
-                    name: named(key),
+                    name: named(label, property),
                     bytes: index.heap_memory_bytes(),
                     item_count: index.len(),
                 });
         }
         #[cfg(feature = "text-index")]
-        for (key, index) in self.text_index_entries() {
+        for (label, property, index) in self.text_index_entries() {
             let index = index.read();
             indexes
                 .text_indexes
                 .push(grafeo_common::memory::NamedMemory {
-                    name: named(key),
+                    name: named(label, property),
                     bytes: index.heap_memory_bytes(),
                     item_count: index.len(),
                 });

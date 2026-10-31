@@ -997,8 +997,9 @@ impl super::Planner {
         let params =
             procedures::evaluate_arguments(&resolved_name, &values, procedure.parameters())?;
 
-        // Canonical column names for this procedure (user-facing names)
-        let canonical_columns = procedure.output_columns();
+        // Canonical column names for this call (user-facing names, for the
+        // shape these arguments give)
+        let canonical_columns = procedure.output_columns_for(&params);
 
         // Determine output columns from YIELD or procedure defaults
         let yield_columns = call.yield_items.as_ref().map(|items| {

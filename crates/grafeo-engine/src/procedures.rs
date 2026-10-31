@@ -53,8 +53,18 @@ pub trait Procedure: Send + Sync {
     /// Returns parameter definitions (name, type, required, default).
     fn parameters(&self) -> &[ParameterDef];
 
-    /// Returns the canonical output column names in order.
+    /// Returns the canonical output column names in order, for a call with
+    /// the parameters' defaults (as `grafeo.procedures()` lists them).
     fn output_columns(&self) -> Vec<String>;
+
+    /// The output column names of a call with `params`, in order: a
+    /// procedure whose rows take another shape for some arguments (a
+    /// shortest path to one target, the members of one k-core) names that
+    /// shape's columns.
+    fn output_columns_for(&self, params: &Parameters) -> Vec<String> {
+        let _ = params;
+        self.output_columns()
+    }
 
     /// Executes the procedure against the supplied context and parameters.
     ///
@@ -127,23 +137,17 @@ impl<'a> ProcedureContext<'a> {
     }
 }
 
-/// Adapter that presents a [`GraphAlgorithm`] as a [`Procedure`].
-///
-/// Canonical output column names (e.g., `score` instead of `pagerank`) are
-/// captured at construction time via [`canonical_output_columns`].
+/// Adapter that presents a [`GraphAlgorithm`] as a [`Procedure`], with
+/// canonical output column names (e.g., `score` instead of `pagerank`, see
+/// [`canonical_output_columns`]).
 pub struct GraphAlgorithmProcedure {
     inner: Arc<dyn GraphAlgorithm>,
-    output_columns: Vec<String>,
 }
 
 impl GraphAlgorithmProcedure {
     /// Wraps a graph algorithm as a procedure.
     pub fn new(algorithm: Arc<dyn GraphAlgorithm>) -> Self {
-        let output_columns = canonical_output_columns(algorithm.as_ref());
-        Self {
-            inner: algorithm,
-            output_columns,
-        }
+        Self { inner: algorithm }
     }
 }
 
@@ -161,7 +165,11 @@ impl Procedure for GraphAlgorithmProcedure {
     }
 
     fn output_columns(&self) -> Vec<String> {
-        self.output_columns.clone()
+        canonical_output_columns(self.inner.as_ref(), &Parameters::new())
+    }
+
+    fn output_columns_for(&self, params: &Parameters) -> Vec<String> {
+        canonical_output_columns(self.inner.as_ref(), params)
     }
 
     fn execute(&self, ctx: &ProcedureContext<'_>, params: &Parameters) -> Result<AlgorithmResult> {
@@ -833,13 +841,26 @@ fn resolve_name(parts: &[String]) -> String {
     slice.join(".")
 }
 
-/// Returns canonical output column names for the given graph algorithm.
+/// Returns canonical output column names for the given graph algorithm,
+/// called with `params`.
 ///
-/// These user-facing names (e.g., `"score"` instead of `"pagerank"`) must
-/// match the column count produced by each algorithm's `execute()`.
+/// These user-facing names (e.g., `"score"` instead of `"pagerank"`) name
+/// the columns each algorithm's `execute()` gives for those parameters, in
+/// order: `dijkstra` to a `target` gives the one path, `kcore` with a `k`
+/// the members of that core, a normalized `degree_centrality` one score.
 #[must_use]
-pub fn canonical_output_columns(algo: &dyn GraphAlgorithm) -> Vec<String> {
+pub fn canonical_output_columns(algo: &dyn GraphAlgorithm, params: &Parameters) -> Vec<String> {
     match algo.name() {
+        "dijkstra" if params.get_int("target").is_some() => vec![
+            "source".into(),
+            "target".into(),
+            "distance".into(),
+            "path".into(),
+        ],
+        "kcore" if params.get_int("k").is_some() => vec!["node_id".into(), "in_k_core".into()],
+        "degree_centrality" if params.get_bool("normalized") == Some(true) => {
+            vec!["node_id".into(), "centrality".into()]
+        }
         "pagerank" => vec!["node_id".into(), "score".into()],
         "betweenness_centrality" | "closeness_centrality" => {
             vec!["node_id".into(), "centrality".into()]
@@ -875,7 +896,12 @@ pub fn canonical_output_columns(algo: &dyn GraphAlgorithm) -> Vec<String> {
         ],
         "label_propagation" => vec!["node_id".into(), "community_id".into()],
         "louvain" => vec!["node_id".into(), "community_id".into(), "modularity".into()],
-        "kruskal" | "prim" => vec!["source".into(), "target".into(), "weight".into()],
+        "kruskal" | "prim" => vec![
+            "source".into(),
+            "target".into(),
+            "weight".into(),
+            "total_weight".into(),
+        ],
         "max_flow" => vec![
             "source".into(),
             "target".into(),
@@ -888,6 +914,7 @@ pub fn canonical_output_columns(algo: &dyn GraphAlgorithm) -> Vec<String> {
             "flow".into(),
             "cost".into(),
             "max_flow".into(),
+            "total_cost".into(),
         ],
         "articulation_points" => vec!["node_id".into()],
         "bridges" => vec!["source".into(), "target".into()],
@@ -905,25 +932,34 @@ pub fn argument_name(param_defs: &[ParameterDef], index: usize) -> String {
         .map_or_else(|| format!("#{}", index + 1), |def| def.name.clone())
 }
 
+/// The map keys every procedure call takes besides its parameters:
+/// `projection` names the graph projection the procedure reads (see the
+/// planner's `procedure_store`).
+const PASS_THROUGH_KEYS: &[&str] = &["projection"];
+
 /// Converts the values of a procedure call's arguments into [`Parameters`].
 ///
 /// Two forms:
 /// 1. One map, `{damping: 0.85, max_iterations: 20}` (a map literal or a map
 ///    parameter), names the parameters.
 /// 2. Positional values, `(42, 'weight')`, fill the parameters in the order
-///    of `param_defs`; values past the last parameter are ignored.
+///    of `param_defs`.
 ///
 /// Each value must suit its parameter's type: an integer passes for a float
 /// and a vector for a list. A null leaves the parameter out, so an optional
 /// one keeps its default and a required one fails as missing when the
-/// procedure runs. A map key that names no parameter (such as `projection`)
-/// passes through with the type of its value.
+/// procedure runs. A map key that names no parameter passes through only as
+/// one of the keys every call takes (`projection`), with the type of its
+/// value.
 ///
 /// # Errors
 ///
 /// Returns a semantic error naming the argument and `procedure` when a value
 /// does not suit its parameter: such a value never falls back to the
-/// parameter's default.
+/// parameter's default. Returns an invalid reference naming the parameters
+/// for a map key that names none of them (`{dampingg: 0.5}`), and for more
+/// positional values than the procedure has parameters: a mistyped or
+/// misplaced argument fails instead of being left out.
 pub fn evaluate_arguments(
     procedure: &str,
     args: &[Value],
@@ -934,6 +970,12 @@ pub fn evaluate_arguments(
     if let [Value::Map(entries)] = args {
         for (key, value) in entries.iter() {
             let def = param_defs.iter().find(|def| def.name == key.as_str());
+            if def.is_none() && !PASS_THROUGH_KEYS.contains(&key.as_str()) {
+                return Err(Error::from(QueryError::invalid_reference(format!(
+                    "Argument '{key}' is no parameter of {procedure} (it has: {})",
+                    parameter_names(param_defs)
+                ))));
+            }
             set_parameter(
                 &mut params,
                 procedure,
@@ -945,6 +987,14 @@ pub fn evaluate_arguments(
         return Ok(params);
     }
 
+    if args.len() > param_defs.len() {
+        return Err(Error::from(QueryError::invalid_reference(format!(
+            "{procedure} takes at most {} arguments, got {} (its parameters: {})",
+            param_defs.len(),
+            args.len(),
+            parameter_names(param_defs)
+        ))));
+    }
     for (def, value) in param_defs.iter().zip(args) {
         set_parameter(
             &mut params,
@@ -956,6 +1006,19 @@ pub fn evaluate_arguments(
     }
 
     Ok(params)
+}
+
+/// The names of `param_defs`, for an error: `none` for a procedure without
+/// parameters.
+fn parameter_names(param_defs: &[ParameterDef]) -> String {
+    if param_defs.is_empty() {
+        return "none".to_string();
+    }
+    param_defs
+        .iter()
+        .map(|def| def.name.as_str())
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// Sets parameter `name` to `value`, which must suit `expected` (any value a
@@ -1105,7 +1168,11 @@ mod tests {
             ("damping", Value::Float64(0.85)),
             ("max_iterations", Value::Int64(20)),
         ])];
-        let params = evaluate_arguments("pagerank", &args, &[]).unwrap();
+        let defs = [
+            def("damping", ParameterType::Float, false),
+            def("max_iterations", ParameterType::Integer, false),
+        ];
+        let params = evaluate_arguments("pagerank", &args, &defs).unwrap();
         assert_eq!(params.get_float("damping"), Some(0.85));
         assert_eq!(params.get_int("max_iterations"), Some(20));
     }
@@ -1262,19 +1329,19 @@ mod tests {
     fn canonical_output_columns_for_shortest_path_algorithms() {
         let dijkstra: Arc<dyn GraphAlgorithm> = Arc::new(DijkstraAlgorithm);
         assert_eq!(
-            canonical_output_columns(dijkstra.as_ref()),
+            canonical_output_columns(dijkstra.as_ref(), &Parameters::new()),
             vec!["node_id", "distance"]
         );
 
         let sssp: Arc<dyn GraphAlgorithm> = Arc::new(SsspAlgorithm);
         assert_eq!(
-            canonical_output_columns(sssp.as_ref()),
+            canonical_output_columns(sssp.as_ref(), &Parameters::new()),
             vec!["node_id", "distance"]
         );
 
         let bellman: Arc<dyn GraphAlgorithm> = Arc::new(BellmanFordAlgorithm);
         assert_eq!(
-            canonical_output_columns(bellman.as_ref()),
+            canonical_output_columns(bellman.as_ref(), &Parameters::new()),
             vec!["node_id", "distance", "has_negative_cycle"]
         );
     }
@@ -1283,13 +1350,13 @@ mod tests {
     fn canonical_output_columns_for_community_algorithms() {
         let louvain: Arc<dyn GraphAlgorithm> = Arc::new(LouvainAlgorithm);
         assert_eq!(
-            canonical_output_columns(louvain.as_ref()),
+            canonical_output_columns(louvain.as_ref(), &Parameters::new()),
             vec!["node_id", "community_id", "modularity"]
         );
 
         let lpa: Arc<dyn GraphAlgorithm> = Arc::new(LabelPropagationAlgorithm);
         assert_eq!(
-            canonical_output_columns(lpa.as_ref()),
+            canonical_output_columns(lpa.as_ref(), &Parameters::new()),
             vec!["node_id", "community_id"]
         );
     }
@@ -1298,30 +1365,33 @@ mod tests {
     fn canonical_output_columns_for_mst_algorithms() {
         let kruskal: Arc<dyn GraphAlgorithm> = Arc::new(KruskalAlgorithm);
         assert_eq!(
-            canonical_output_columns(kruskal.as_ref()),
-            vec!["source", "target", "weight"]
+            canonical_output_columns(kruskal.as_ref(), &Parameters::new()),
+            vec!["source", "target", "weight", "total_weight"]
         );
         let prim: Arc<dyn GraphAlgorithm> = Arc::new(PrimAlgorithm);
         assert_eq!(
-            canonical_output_columns(prim.as_ref()),
-            vec!["source", "target", "weight"]
+            canonical_output_columns(prim.as_ref(), &Parameters::new()),
+            vec!["source", "target", "weight", "total_weight"]
         );
     }
 
     #[test]
     fn canonical_output_columns_for_structural_algorithms() {
         let ap: Arc<dyn GraphAlgorithm> = Arc::new(ArticulationPointsAlgorithm);
-        assert_eq!(canonical_output_columns(ap.as_ref()), vec!["node_id"]);
+        assert_eq!(
+            canonical_output_columns(ap.as_ref(), &Parameters::new()),
+            vec!["node_id"]
+        );
 
         let bridges: Arc<dyn GraphAlgorithm> = Arc::new(BridgesAlgorithm);
         assert_eq!(
-            canonical_output_columns(bridges.as_ref()),
+            canonical_output_columns(bridges.as_ref(), &Parameters::new()),
             vec!["source", "target"]
         );
 
         let kcore: Arc<dyn GraphAlgorithm> = Arc::new(KCoreAlgorithm);
         assert_eq!(
-            canonical_output_columns(kcore.as_ref()),
+            canonical_output_columns(kcore.as_ref(), &Parameters::new()),
             vec!["node_id", "core_number", "max_core"]
         );
     }
@@ -1353,7 +1423,7 @@ mod tests {
     fn canonical_output_columns_falls_back_to_node_id_value() {
         let unknown: Arc<dyn GraphAlgorithm> = Arc::new(UnknownAlgo);
         assert_eq!(
-            canonical_output_columns(unknown.as_ref()),
+            canonical_output_columns(unknown.as_ref(), &Parameters::new()),
             vec!["node_id", "value"],
             "unknown algorithms must fall back to (node_id, value); otherwise the \
              planner would emit an empty header row"
@@ -1377,13 +1447,18 @@ mod tests {
     }
 
     #[test]
-    fn evaluate_arguments_drops_positional_past_last_param_def() {
-        // An extra positional value past the end of `param_defs` is ignored
-        // (no panic), the "extra args ignored" contract of procedure calls.
+    fn evaluate_arguments_refuses_positional_past_last_param_def() {
+        // A positional value past the end of `param_defs` is a mistake in
+        // the call, which fails instead of being left out
         let defs = [def("only", ParameterType::Integer, true)];
         let args = [Value::Int64(1), Value::Int64(2)];
-        let params = evaluate_arguments("only", &args, &defs).unwrap();
-        assert_eq!(params.get_int("only"), Some(1));
+        let Err(error) = evaluate_arguments("only", &args, &defs) else {
+            panic!("an extra positional argument is refused");
+        };
+        assert!(
+            error.to_string().contains("at most 1 arguments, got 2"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -1668,5 +1743,145 @@ mod tests {
         let mut params = Parameters::new();
         params.set_int("k", 25);
         assert_eq!(k_limit(&params, 10), 25);
+    }
+
+    /// Every graph algorithm, called in each shape its arguments give, names
+    /// as many columns as its rows hold, so a `YIELD` of a listed column
+    /// reads that column and a call without `YIELD` names every value.
+    #[test]
+    fn declared_columns_match_the_rows_of_every_argument_shape() {
+        // A small DAG with weights, capacities and costs: a -> b -> c, a -> c
+        let store = Arc::new(RowGroupStore::new());
+        let a = store.create_node(&["N"]);
+        let b = store.create_node(&["N"]);
+        let c = store.create_node(&["N"]);
+        for (from, to, w) in [(a, b, 1.0), (b, c, 2.0), (a, c, 4.0)] {
+            let edge = store.create_edge(from, to, "E");
+            store.set_edge_property(edge, "w", Value::Float64(w));
+            store.set_edge_property(edge, "capacity", Value::Int64(3));
+            store.set_edge_property(edge, "cost", Value::Int64(1));
+        }
+        let snapshot = Snapshot::of_query(
+            Arc::clone(&store) as Arc<dyn GraphStore>,
+            ReadView::latest(),
+        );
+        let ctx = ProcedureContext::with_lpg_store(&snapshot, &store);
+        let id = |node: grafeo_common::types::NodeId| i64::try_from(node.0).unwrap();
+        let ints = |pairs: &[(&str, i64)]| {
+            let mut params = Parameters::new();
+            for (name, value) in pairs {
+                params.set_int(*name, *value);
+            }
+            params
+        };
+        let mut normalized = Parameters::new();
+        normalized.set_bool("normalized", true);
+        let shapes: Vec<(&str, Parameters, Option<&[&str]>)> = vec![
+            ("pagerank", Parameters::new(), None),
+            ("betweenness_centrality", Parameters::new(), None),
+            ("closeness_centrality", Parameters::new(), None),
+            ("degree_centrality", Parameters::new(), None),
+            (
+                "degree_centrality",
+                normalized,
+                Some(&["node_id", "centrality"]),
+            ),
+            ("bfs", ints(&[("start", id(a))]), None),
+            ("dfs", ints(&[("start", id(a))]), None),
+            ("connected_components", Parameters::new(), None),
+            ("strongly_connected_components", Parameters::new(), None),
+            ("topological_sort", Parameters::new(), None),
+            ("dijkstra", ints(&[("source", id(a))]), None),
+            (
+                "dijkstra",
+                ints(&[("source", id(a)), ("target", id(c))]),
+                Some(&["source", "target", "distance", "path"]),
+            ),
+            ("bellman_ford", ints(&[("source", id(a))]), None),
+            ("floyd_warshall", Parameters::new(), None),
+            ("clustering_coefficient", Parameters::new(), None),
+            ("label_propagation", Parameters::new(), None),
+            ("louvain", Parameters::new(), None),
+            ("kruskal", Parameters::new(), None),
+            ("prim", Parameters::new(), None),
+            (
+                "max_flow",
+                ints(&[("source", id(a)), ("sink", id(c))]),
+                None,
+            ),
+            (
+                "min_cost_max_flow",
+                ints(&[("source", id(a)), ("sink", id(c))]),
+                None,
+            ),
+            ("articulation_points", Parameters::new(), None),
+            ("bridges", Parameters::new(), None),
+            ("kcore", Parameters::new(), None),
+            ("kcore", ints(&[("k", 1)]), Some(&["node_id", "in_k_core"])),
+        ];
+        let registry = BuiltinProcedures::new();
+        let mut mismatches = Vec::new();
+        for (name, params, expected) in &shapes {
+            let procedure = registry
+                .get(&[(*name).to_string()])
+                .unwrap_or_else(|| panic!("no procedure {name}"));
+            let result = procedure
+                .execute(&ctx, params)
+                .unwrap_or_else(|error| panic!("{name}: {error}"));
+            let declared = procedure.output_columns_for(params);
+            if declared.len() != result.columns.len() {
+                mismatches.push(format!(
+                    "{name}: declares {declared:?}, its rows hold {:?}",
+                    result.columns
+                ));
+            }
+            if let Some(expected) = expected {
+                assert_eq!(declared, *expected, "{name}");
+            }
+        }
+        assert!(
+            mismatches.is_empty(),
+            "{}",
+            mismatches.join(
+                "
+"
+            )
+        );
+    }
+
+    #[test]
+    fn an_unknown_argument_name_or_an_extra_argument_is_refused() {
+        let defs = [
+            def("damping", ParameterType::Float, false),
+            def("max_iterations", ParameterType::Integer, false),
+        ];
+        let Err(error) = evaluate_arguments(
+            "grafeo.pagerank",
+            &[map(&[("dampingg", Value::Float64(0.5))])],
+            &defs,
+        ) else {
+            panic!("a misspelled argument name is refused");
+        };
+        let message = error.to_string();
+        assert!(message.contains("'dampingg'"), "{message}");
+        assert!(message.contains("damping, max_iterations"), "{message}");
+        let Err(error) = evaluate_arguments(
+            "grafeo.pagerank",
+            &[Value::Float64(0.85), Value::Int64(20), Value::Int64(7)],
+            &defs,
+        ) else {
+            panic!("a third positional argument is refused");
+        };
+        let message = error.to_string();
+        assert!(message.contains("at most 2 arguments, got 3"), "{message}");
+        // The keys every call takes still pass
+        assert!(
+            evaluate_arguments(
+                "grafeo.pagerank",
+                &[map(&[("projection", Value::from("p"))])],
+                &defs
+            )
+            .is_ok()
+        );
     }
 }

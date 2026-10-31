@@ -248,6 +248,8 @@ pub struct CreateVectorIndexStatement {
     pub dimensions: Option<usize>,
     /// Distance metric (default: cosine).
     pub metric: Option<String>,
+    /// `IF NOT EXISTS`: an index of the name keeps it, with no error.
+    pub if_not_exists: bool,
     /// Source span.
     pub span: Option<SourceSpan>,
 }

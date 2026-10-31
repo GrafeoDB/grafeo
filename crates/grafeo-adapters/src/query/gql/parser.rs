@@ -5447,6 +5447,9 @@ impl<'a> Parser<'a> {
                 self.advance();
                 self.expect(TokenKind::Index)?;
 
+                // Optional IF NOT EXISTS, as for CREATE INDEX
+                let if_not_exists = self.try_parse_if_not_exists();
+
                 // Parse index name
                 if !self.is_identifier() {
                     return Err(self.error("Expected index name"));
@@ -5519,6 +5522,7 @@ impl<'a> Parser<'a> {
                         property,
                         dimensions,
                         metric,
+                        if_not_exists,
                         span: None,
                     },
                 ))

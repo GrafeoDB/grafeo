@@ -192,10 +192,24 @@ impl Catalog {
         self.indexes.drop(id)
     }
 
-    /// Finds an index by its user-defined name.
+    /// Finds an index by its user-defined name: the first of its
+    /// properties for an index over several.
     #[must_use]
     pub fn find_index_by_name(&self, name: &str) -> Option<IndexId> {
         self.indexes.find_by_name(name)
+    }
+
+    /// The definitions a user-defined index name stands for, one per
+    /// property, in the order they were created; empty for an unknown name.
+    #[must_use]
+    pub fn indexes_named(&self, name: &str) -> Vec<IndexDefinition> {
+        self.indexes.named(name)
+    }
+
+    /// Drops every definition a user-defined index name stands for,
+    /// returning how many there were.
+    pub fn drop_indexes_named(&self, name: &str) -> usize {
+        self.indexes.drop_named(name)
     }
 
     /// Gets the index definition for an index ID.
@@ -1135,7 +1149,8 @@ struct IndexCatalog {
     indexes: RwLock<HashMap<IndexId, IndexDefinition>>,
     label_indexes: RwLock<HashMap<LabelId, Vec<IndexId>>>,
     label_property_indexes: RwLock<HashMap<(LabelId, PropertyKeyId), Vec<IndexId>>>,
-    name_index: RwLock<HashMap<String, IndexId>>,
+    /// The definitions of each name, one per property of the index.
+    name_index: RwLock<HashMap<String, Vec<IndexId>>>,
     next_id: AtomicU32,
 }
 
@@ -1185,7 +1200,11 @@ impl IndexCatalog {
             .entry((label, property_key))
             .or_default()
             .push(id);
-        self.name_index.write().insert(name.to_string(), id);
+        self.name_index
+            .write()
+            .entry(name.to_string())
+            .or_default()
+            .push(id);
 
         id
     }
@@ -1207,7 +1226,13 @@ impl IndexCatalog {
                 ids.retain(|&i| i != id);
             }
             // Remove from name index
-            self.name_index.write().remove(&definition.name);
+            let mut names = self.name_index.write();
+            if let Some(ids) = names.get_mut(&definition.name) {
+                ids.retain(|&i| i != id);
+                if ids.is_empty() {
+                    names.remove(&definition.name);
+                }
+            }
             true
         } else {
             false
@@ -1215,7 +1240,33 @@ impl IndexCatalog {
     }
 
     fn find_by_name(&self, name: &str) -> Option<IndexId> {
-        self.name_index.read().get(name).copied()
+        self.name_index
+            .read()
+            .get(name)
+            .and_then(|ids| ids.first().copied())
+    }
+
+    fn named(&self, name: &str) -> Vec<IndexDefinition> {
+        let ids = self
+            .name_index
+            .read()
+            .get(name)
+            .cloned()
+            .unwrap_or_default();
+        let indexes = self.indexes.read();
+        ids.iter()
+            .filter_map(|id| indexes.get(id).cloned())
+            .collect()
+    }
+
+    fn drop_named(&self, name: &str) -> usize {
+        let ids = self
+            .name_index
+            .read()
+            .get(name)
+            .cloned()
+            .unwrap_or_default();
+        ids.into_iter().filter(|&id| self.drop(id)).count()
     }
 
     fn get(&self, id: IndexId) -> Option<IndexDefinition> {

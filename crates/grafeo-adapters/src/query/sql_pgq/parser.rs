@@ -175,7 +175,7 @@ impl<'a> Parser<'a> {
         // Optional LIMIT
         let limit = if self.current.kind == TokenKind::Limit {
             self.advance();
-            Some(self.parse_integer_literal()?)
+            Some(self.parse_row_count()?)
         } else {
             None
         };
@@ -183,7 +183,7 @@ impl<'a> Parser<'a> {
         // Optional OFFSET
         let offset = if self.current.kind == TokenKind::Offset {
             self.advance();
-            Some(self.parse_integer_literal()?)
+            Some(self.parse_row_count()?)
         } else {
             None
         };
@@ -804,7 +804,7 @@ impl<'a> Parser<'a> {
             }
             TokenKind::Dollar => {
                 self.advance();
-                let name = self.expect_identifier()?;
+                let name = self.expect_parameter_name()?;
                 Ok(Expression::Parameter(name))
             }
             _ if self.can_be_identifier() => {
@@ -973,6 +973,15 @@ impl<'a> Parser<'a> {
         })
     }
 
+    /// The count of a LIMIT or OFFSET: an integer or a parameter (`$limit`).
+    fn parse_row_count(&mut self) -> Result<RowCount> {
+        if self.current.kind == TokenKind::Dollar {
+            self.advance();
+            return Ok(RowCount::Parameter(self.expect_parameter_name()?));
+        }
+        Ok(RowCount::Literal(self.parse_integer_literal()?))
+    }
+
     fn parse_integer_literal(&mut self) -> Result<u64> {
         if self.current.kind == TokenKind::Integer {
             let text = &self.current.text;
@@ -1021,6 +1030,28 @@ impl<'a> Parser<'a> {
             Ok(text)
         } else {
             Err(self.error("Expected identifier"))
+        }
+    }
+
+    /// The name after `$`: an identifier or any keyword (`$from`,
+    /// `$order`), as GQL and Cypher take them, since a parameter name
+    /// cannot be read as the keyword there.
+    fn expect_parameter_name(&mut self) -> Result<String> {
+        if self.can_be_identifier() {
+            return self.expect_identifier();
+        }
+        let text = &self.current.text;
+        let is_word = text
+            .chars()
+            .next()
+            .is_some_and(|first| first.is_alphabetic() || first == '_')
+            && text.chars().all(|c| c.is_alphanumeric() || c == '_');
+        if is_word {
+            let name = text.clone();
+            self.advance();
+            Ok(name)
+        } else {
+            Err(self.error("Expected parameter name"))
         }
     }
 
@@ -1856,7 +1887,7 @@ mod tests {
                 COLUMNS (n.name AS name)
             ) LIMIT 10",
         ));
-        assert_eq!(s.limit, Some(10));
+        assert_eq!(s.limit, Some(RowCount::Literal(10)));
     }
 
     #[test]
@@ -1867,7 +1898,7 @@ mod tests {
                 COLUMNS (n.name AS name)
             ) OFFSET 5",
         ));
-        assert_eq!(s.offset, Some(5));
+        assert_eq!(s.offset, Some(RowCount::Literal(5)));
     }
 
     #[test]
@@ -1878,8 +1909,8 @@ mod tests {
                 COLUMNS (n.name AS name)
             ) LIMIT 10 OFFSET 5",
         ));
-        assert_eq!(s.limit, Some(10));
-        assert_eq!(s.offset, Some(5));
+        assert_eq!(s.limit, Some(RowCount::Literal(10)));
+        assert_eq!(s.offset, Some(RowCount::Literal(5)));
     }
 
     // ==================== Full Query Tests ====================
@@ -1903,8 +1934,8 @@ mod tests {
         assert_eq!(s.table_alias, Some("g".to_string()));
         assert!(s.where_clause.is_some());
         assert!(s.order_by.is_some());
-        assert_eq!(s.limit, Some(10));
-        assert_eq!(s.offset, Some(5));
+        assert_eq!(s.limit, Some(RowCount::Literal(10)));
+        assert_eq!(s.offset, Some(RowCount::Literal(5)));
     }
 
     #[test]
@@ -2403,7 +2434,7 @@ mod tests {
         assert_eq!(s.table_alias, Some("g".to_string()));
         assert!(s.where_clause.is_some());
         assert!(s.order_by.is_some());
-        assert_eq!(s.limit, Some(10));
+        assert_eq!(s.limit, Some(RowCount::Literal(10)));
 
         // Verify the CASE expression in COLUMNS
         let case_expr = &s.graph_table.columns.items[1].expression;

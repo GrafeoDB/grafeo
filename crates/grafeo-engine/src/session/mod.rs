@@ -2087,6 +2087,9 @@ impl Session {
                     &properties,
                     IndexKind::Vector,
                 ) {
+                    if stmt.if_not_exists {
+                        return done(QueryResult::status("No change".to_string()));
+                    }
                     return Err(semantic(format!("Index '{}' already exists", stmt.name)));
                 }
                 self.vector_index_change(
@@ -2200,19 +2203,20 @@ impl Session {
                 )))
             }
             SchemaStatement::DropIndex { name, if_exists } => {
-                // The index the name stands for, and the property index of
-                // its property in the active graph.
-                let Some(index_id) = self.catalog.find_index_by_name(&name) else {
+                // The indexes the name stands for, one per property, and
+                // the property index of each property in the active graph.
+                let named = self.catalog.indexes_named(&name);
+                if named.is_empty() {
                     if if_exists {
                         return done(QueryResult::status("No change".to_string()));
                     }
                     return Err(invalid_reference(format!("Index '{name}' does not exist")));
-                };
+                }
                 change.push(StandaloneOp::DropCatalog(CatalogKey::IndexName(
                     name.clone(),
                 )));
-                if let Some(def) = self.catalog.get_index(index_id) {
-                    self.drop_named_index(change, &def);
+                for def in &named {
+                    self.drop_named_index(change, def);
                 }
                 done(QueryResult::status(format!("Dropped index '{name}'")))
             }
@@ -2320,8 +2324,11 @@ impl Session {
                 // GG04: LIKE clause copies type from existing graph
                 let (mut node_types, mut edge_types, open) =
                     if let Some(ref like_graph) = stmt.like_graph {
-                        // Infer types from the graph's bound type, or use its existing types
-                        if let Some(type_name) = self.catalog.get_graph_type_binding(like_graph) {
+                        // Infer types from the graph's bound type, or use its
+                        // existing types: the graph's key in the current
+                        // schema, as CREATE GRAPH ... LIKE resolves it
+                        let like_key = self.effective_graph_key(like_graph);
+                        if let Some(type_name) = self.catalog.get_graph_type_binding(&like_key) {
                             if let Some(existing) = self
                                 .catalog
                                 .schema()
@@ -2798,6 +2805,19 @@ impl Session {
             use grafeo_adapters::query::gql::ast::{IndexKind, SchemaStatement};
 
             let targets: Vec<(&str, &str, Option<usize>)> = match cmd {
+                // IF NOT EXISTS of a name in use keeps that index and
+                // converts nothing.
+                SchemaStatement::CreateVectorIndex(stmt)
+                    if stmt.if_not_exists
+                        && self.index_name_in_use(
+                            &stmt.name,
+                            &stmt.node_label,
+                            std::slice::from_ref(&stmt.property),
+                            IndexKind::Vector,
+                        ) =>
+                {
+                    return Ok(());
+                }
                 SchemaStatement::CreateVectorIndex(stmt) => {
                     vec![(&stmt.node_label, &stmt.property, stmt.dimensions)]
                 }

@@ -14,7 +14,7 @@ use super::common::{
 };
 use crate::query::functions::resolve_call;
 use crate::query::plan::{
-    AggregateExpr, AggregateFunction, AggregateOp, BinaryOp, CallProcedureOp,
+    AggregateExpr, AggregateFunction, AggregateOp, BinaryOp, CallProcedureOp, CountExpr,
     CreatePropertyGraphOp, DistinctOp, DropPropertyGraphOp, ExceptOp, IntersectOp,
     LogicalExpression, LogicalOperator, LogicalPlan, ProcedureYield, PropertyGraphColumn,
     PropertyGraphEdgeTable, PropertyGraphNodeTable, ReturnItem, SortKey, SortOrder, UnaryOp,
@@ -224,12 +224,23 @@ impl SqlPgqTranslator {
         // For aggregate queries, ORDER BY is deferred to step 7b so that
         // aggregate output aliases are available for resolution.
         if !is_aggregate_query && let Some(order_by) = &select.order_by {
+            // A key that names an output column of the select list is that
+            // column's expression: ORDER BY resolves against the select list
+            // first (ISO/IEC 9075-2 <sort specification list>), so the alias
+            // wins over a COLUMNS column of the same name.
+            let output_column = |key: &ast::Expression| match (key, &select.select_list) {
+                (ast::Expression::Variable(name), ast::SelectList::Columns(items)) => items
+                    .iter()
+                    .find(|item| item.alias.as_deref() == Some(name.as_str()))
+                    .map(|item| &item.expression),
+                _ => None,
+            };
             let keys: Vec<SortKey> = order_by
                 .iter()
                 .map(|item| {
                     Ok(SortKey {
                         expression: self.translate_sql_expression(
-                            &item.expression,
+                            output_column(&item.expression).unwrap_or(&item.expression),
                             table_alias,
                             &column_map,
                         )?,
@@ -1374,18 +1385,22 @@ fn wrap_offset_and_limit(
     mut plan: LogicalOperator,
     select: &ast::SelectStatement,
 ) -> Result<LogicalOperator> {
-    let count = |value: u64, clause: &str| {
-        usize::try_from(value).map_err(|_| {
-            Error::from(QueryError::new(
-                QueryErrorKind::Semantic,
-                format!("{clause} {value} is larger than this platform can count"),
-            ))
-        })
-    };
-    if let Some(offset) = select.offset {
+    let count =
+        |value: &ast::RowCount, clause: &str| match value {
+            ast::RowCount::Literal(value) => usize::try_from(*value)
+                .map(CountExpr::Literal)
+                .map_err(|_| {
+                    Error::from(QueryError::new(
+                        QueryErrorKind::Semantic,
+                        format!("{clause} {value} is larger than this platform can count"),
+                    ))
+                }),
+            ast::RowCount::Parameter(name) => Ok(CountExpr::Parameter(name.clone())),
+        };
+    if let Some(offset) = &select.offset {
         plan = wrap_skip(plan, count(offset, "OFFSET")?);
     }
-    if let Some(limit) = select.limit {
+    if let Some(limit) = &select.limit {
         plan = wrap_limit(plan, count(limit, "LIMIT")?);
     }
     Ok(plan)

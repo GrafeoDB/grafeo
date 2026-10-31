@@ -800,12 +800,11 @@ fn drop_entry<S: RootStore>(
                 None => applying.missing(op, "the graph does not exist"),
             }
         }
-        CatalogKey::IndexName(name) => match catalog.find_index_by_name(name) {
-            Some(id) => {
-                catalog.drop_index(id);
-                Ok(())
-            }
-            None => applying.missing(op, "there is no index of that name"),
+        // Every property of the name: an index over several has one
+        // definition per property.
+        CatalogKey::IndexName(name) => match catalog.drop_indexes_named(name) {
+            0 => applying.missing(op, "there is no index of that name"),
+            _ => Ok(()),
         },
         // No statement drops a binding on its own: dropping a graph leaves
         // its binding, which binds nothing until a graph of its name exists.

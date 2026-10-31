@@ -620,3 +620,140 @@ tests:
     expect:
       rows:
         - [http://ex.org/alix, http://ex.org/allowed, 35]
+
+  # ---------------------------------------------------------------------------
+  # EXISTS in the condition of an OPTIONAL reads the merged solution too
+  # (18.2.2.6 and 18.6: the EXISTS pattern is evaluated with the merged
+  # solution's bindings substituted, the outer ones included)
+  # ---------------------------------------------------------------------------
+
+  - name: exists_inside_an_optional_reads_an_outer_variable
+    # ?x is bound before the OPTIONAL: Mia likes Gus, Jules likes Vincent,
+    # Butch likes no one. Each fan keeps only the friends they like.
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/alix> <http://ex.org/role> <http://ex.org/member> .
+          <http://ex.org/mia> <http://ex.org/role> <http://ex.org/fan> .
+          <http://ex.org/jules> <http://ex.org/role> <http://ex.org/fan> .
+          <http://ex.org/butch> <http://ex.org/role> <http://ex.org/fan> .
+          <http://ex.org/alix> <http://ex.org/knows> <http://ex.org/gus> .
+          <http://ex.org/alix> <http://ex.org/knows> <http://ex.org/vincent> .
+          <http://ex.org/mia> <http://ex.org/likes> <http://ex.org/gus> .
+          <http://ex.org/jules> <http://ex.org/likes> <http://ex.org/vincent> .
+        }
+    query: |
+      SELECT ?x ?f WHERE {
+        ?p <http://ex.org/role> <http://ex.org/member> .
+        ?x <http://ex.org/role> <http://ex.org/fan> .
+        OPTIONAL { ?p <http://ex.org/knows> ?f FILTER EXISTS { ?x <http://ex.org/likes> ?f } }
+      }
+    expect:
+      rows:
+        - [http://ex.org/mia, http://ex.org/gus]
+        - [http://ex.org/jules, http://ex.org/vincent]
+        - [http://ex.org/butch, null]
+
+  - name: not_exists_inside_an_optional_reads_an_outer_variable
+    # The complement: each fan keeps the friends they do not like; Butch
+    # likes no one and keeps both.
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/alix> <http://ex.org/role> <http://ex.org/member> .
+          <http://ex.org/mia> <http://ex.org/role> <http://ex.org/fan> .
+          <http://ex.org/jules> <http://ex.org/role> <http://ex.org/fan> .
+          <http://ex.org/butch> <http://ex.org/role> <http://ex.org/fan> .
+          <http://ex.org/alix> <http://ex.org/knows> <http://ex.org/gus> .
+          <http://ex.org/alix> <http://ex.org/knows> <http://ex.org/vincent> .
+          <http://ex.org/mia> <http://ex.org/likes> <http://ex.org/gus> .
+          <http://ex.org/jules> <http://ex.org/likes> <http://ex.org/vincent> .
+        }
+    query: |
+      SELECT ?x ?f WHERE {
+        ?p <http://ex.org/role> <http://ex.org/member> .
+        ?x <http://ex.org/role> <http://ex.org/fan> .
+        OPTIONAL { ?p <http://ex.org/knows> ?f FILTER NOT EXISTS { ?x <http://ex.org/likes> ?f } }
+      }
+    expect:
+      rows:
+        - [http://ex.org/mia, http://ex.org/vincent]
+        - [http://ex.org/jules, http://ex.org/gus]
+        - [http://ex.org/butch, http://ex.org/gus]
+        - [http://ex.org/butch, http://ex.org/vincent]
+
+  - name: not_exists_inside_an_optional_compares_with_an_outer_variable
+    # ?o is bound before the OPTIONAL. Alix's r equals her o, so NOT EXISTS
+    # fails and she keeps no ?z; Gus's r differs, so he gets his ?z.
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/alix> <http://ex.org/o> "1" .
+          <http://ex.org/alix> <http://ex.org/r> "1" .
+          <http://ex.org/alix> <http://ex.org/q> "za" .
+          <http://ex.org/gus> <http://ex.org/o> "1" .
+          <http://ex.org/gus> <http://ex.org/r> "2" .
+          <http://ex.org/gus> <http://ex.org/q> "zg" .
+        }
+    query: |
+      SELECT ?s ?z WHERE {
+        ?s <http://ex.org/o> ?o
+        OPTIONAL { ?s <http://ex.org/q> ?z FILTER NOT EXISTS { ?s <http://ex.org/r> ?o } }
+      }
+    expect:
+      rows:
+        - [http://ex.org/alix, null]
+        - [http://ex.org/gus, zg]
+
+  # ---------------------------------------------------------------------------
+  # A variable both sides have, which the left side leaves unbound
+  # ---------------------------------------------------------------------------
+
+  - name: a_filter_reads_a_variable_only_the_right_side_binds
+    # ?z comes from a first OPTIONAL: Gus has a nick, Alix and Vincent do
+    # not. In the second OPTIONAL the merged solution takes ?z from the
+    # alias, so the FILTER reads the alias where the nick is unbound: Alix's
+    # "A" passes, Vincent's "B" does not; Gus's alias is incompatible with
+    # his nick, so he keeps "G".
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/alix> <http://ex.org/role> <http://ex.org/member> .
+          <http://ex.org/gus> <http://ex.org/role> <http://ex.org/member> .
+          <http://ex.org/vincent> <http://ex.org/role> <http://ex.org/member> .
+          <http://ex.org/gus> <http://ex.org/nick> "G" .
+          <http://ex.org/alix> <http://ex.org/alias> "A" .
+          <http://ex.org/gus> <http://ex.org/alias> "A" .
+          <http://ex.org/vincent> <http://ex.org/alias> "B" .
+        }
+    query: |
+      SELECT ?p ?z WHERE {
+        ?p <http://ex.org/role> <http://ex.org/member>
+        OPTIONAL { ?p <http://ex.org/nick> ?z }
+        OPTIONAL { ?p <http://ex.org/alias> ?z FILTER(?z = "A") }
+      }
+    expect:
+      rows:
+        - [http://ex.org/alix, A]
+        - [http://ex.org/gus, G]
+        - [http://ex.org/vincent, null]
+
+  - name: bound_in_the_condition_sees_a_variable_only_the_right_side_binds
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/alix> <http://ex.org/role> <http://ex.org/member> .
+          <http://ex.org/gus> <http://ex.org/role> <http://ex.org/member> .
+          <http://ex.org/gus> <http://ex.org/nick> "G" .
+          <http://ex.org/alix> <http://ex.org/alias> "A" .
+        }
+    query: |
+      SELECT ?p ?z WHERE {
+        ?p <http://ex.org/role> <http://ex.org/member>
+        OPTIONAL { ?p <http://ex.org/nick> ?z }
+        OPTIONAL { ?p <http://ex.org/alias> ?z FILTER(BOUND(?z)) }
+      }
+    expect:
+      rows:
+        - [http://ex.org/alix, A]
+        - [http://ex.org/gus, G]

@@ -55,7 +55,7 @@ let db = GrafeoDB::with_config(config)?;
 | `ForceDisk` | At database open, the matching section is spilled immediately. Subsequent reads serve from mmap. |
 | `ForceRam` | This section is pinned in RAM. The buffer manager skips it in every spill path (pressure-driven, explicit `spill_all`, targeted `spill_consumer_by_name`). When pressure exceeds the budget and no other spillable consumers exist, allocations fail rather than spilling a ForceRam consumer. |
 
-`ForceDisk` is targeted: only the matching section is spilled, other sections are unaffected. Configure each section type that should start on disk; the rest follow the `Auto` policy.
+`ForceDisk` is targeted: only the matching section is spilled, other sections are unaffected. Configure each section type that should start on disk; the rest follow the `Auto` policy. Only `CompactStore`, `VectorStore`, `TextIndex`, `RdfRing` and `PropertyIndex` can be moved to disk: `Config::validate` (and so the open) refuses `ForceDisk` for `Catalog`, `LpgStore`, `RdfStore`, `OverlayDeletions` and `TimeIndex`, and `set_stored_config` refuses to store it.
 
 You can also pair the tier with a hard `max_ram` cap:
 

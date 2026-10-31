@@ -43,6 +43,15 @@ pub(crate) fn reaches_as_walks(expand: &ExpandOp) -> bool {
     }
 }
 
+/// Whether the reachability search can stand for the paths of `expand`: it
+/// follows walks where they reach what the paths reach (see
+/// [`reaches_as_walks`]), and for an undirected TRAIL of at most one hop
+/// minimum it reaches every other node as the walks do and its source only
+/// over a closed trail (see `VariableLengthExpandOperator::reachable_targets`).
+pub(crate) fn reaches_by_search(expand: &ExpandOp) -> bool {
+    reaches_as_walks(expand) || (expand.path_mode == PathMode::Trail && expand.min_hops <= 1)
+}
+
 /// How a variable-length expand runs its reachability search.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ReachabilityMode {
@@ -179,7 +188,7 @@ fn consumed_expand<'a>(
         below = next;
     };
     let searchable = expand.is_variable_length()
-        && reaches_as_walks(expand)
+        && reaches_by_search(expand)
         && !all_columns
         && expand
             .edge_variable
@@ -688,10 +697,13 @@ mod tests {
             ] {
                 for edge_type in ["", ":KNOWS"] {
                     for (left, right) in [("-[", "]->"), ("<-[", "]-"), ("-[", "]-")] {
-                        // Cypher's trails reach what walks reach for at most
-                        // one hop, or directed from at most one hop
-                        let undirected = left == "-[" && right == "]-";
-                        let searched = language == "gql" || max <= 1 || (min <= 1 && !undirected);
+                        // Cypher's trails are searched from at most one hop:
+                        // directed they reach what walks reach, undirected
+                        // the search checks the source for a closed trail.
+                        // Here the source comes back over parallel edges, in
+                        // the order of the paths; a source closed only by a
+                        // longer trail can come later in its layer
+                        let searched = language == "gql" || max <= 1 || min <= 1;
                         for filter in ["", " WHERE m.active = true"] {
                             for (ret, mode) in [
                                 ("DISTINCT m.id", AcrossInputRows),
@@ -948,7 +960,7 @@ mod tests {
         .collect();
         let gql = sources("gql");
         for tail in [
-            "MATCH TRAIL (n)-[*1..2]-(m) RETURN DISTINCT m.id",
+            "MATCH TRAIL (n)-[*2..3]-(m) RETURN DISTINCT m.id",
             "MATCH (n)-[*1..2]-(m) RETURN m.active AS a, count(DISTINCT m) AS c HAVING c > n.id",
         ] {
             queries.push(("gql", format!("{gql} {tail}")));

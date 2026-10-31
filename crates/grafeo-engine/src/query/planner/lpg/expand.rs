@@ -74,9 +74,13 @@ impl super::Planner {
             };
             let reachability = self.reachability_mode(expand);
             let exec_path_mode = match expand.path_mode {
-                // A reachability search follows walks: it runs only where the
-                // paths reach what the walks reach (see `reaches_as_walks`)
-                _ if reachability.is_some() => ExecutionPathMode::Walk,
+                // A reachability search follows walks where the paths reach
+                // what the walks reach (see `reaches_as_walks`); an undirected
+                // TRAIL keeps its mode, which checks its source for a closed
+                // trail (see `reaches_by_search`)
+                _ if reachability.is_some() && super::reachability::reaches_as_walks(expand) => {
+                    ExecutionPathMode::Walk
+                }
                 PathMode::Walk => ExecutionPathMode::Walk,
                 PathMode::Trail => ExecutionPathMode::Trail,
                 PathMode::Simple => ExecutionPathMode::Simple,

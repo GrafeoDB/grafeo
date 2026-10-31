@@ -1384,6 +1384,9 @@ impl RdfStore {
         let stats = stats_collector.build();
         // Cache the freshly-computed statistics from the bulk load pass.
         *self.statistics_cache.write() = Some(Arc::new(stats.clone()));
+        // The statistics count what the load left: no change since.
+        self.statistics_drift
+            .store(0, std::sync::atomic::Ordering::Relaxed);
 
         // Build Ring Index automatically during bulk load (when feature is enabled).
         #[cfg(feature = "ring-index")]

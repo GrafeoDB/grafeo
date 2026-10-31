@@ -17,7 +17,8 @@ use std::sync::Arc;
 use super::expand::{EdgeWalk, stored_types, visible_edges_from};
 use super::{FactorizedOperator, Operator, OperatorError, OperatorResult, ReadCounter};
 use crate::execution::DataChunk;
-use crate::execution::factorized_chunk::FactorizedChunk;
+use crate::execution::chunk::DEFAULT_CHUNK_SIZE;
+use crate::execution::factorized_chunk::{FactorizedChunk, FlattenCursor};
 use crate::execution::vector::ValueVector;
 use crate::graph::Direction;
 use crate::graph::GraphStore;
@@ -65,6 +66,8 @@ pub struct FactorizedExpandOperator {
     reads: Option<Arc<ReadCounter>>,
     /// Whether the operator is exhausted.
     exhausted: bool,
+    /// The factorized chunk being given flat, and where it stands.
+    flattening: Option<(FactorizedChunk, FlattenCursor)>,
     /// Column names for the input (for tracking).
     input_column_names: Vec<String>,
 }
@@ -89,6 +92,7 @@ impl FactorizedExpandOperator {
             view,
             reads: None,
             exhausted: false,
+            flattening: None,
             input_column_names: Vec::new(),
         }
     }
@@ -212,17 +216,28 @@ impl FactorizedExpandOperator {
 
 impl Operator for FactorizedExpandOperator {
     fn next(&mut self) -> OperatorResult {
-        // For compatibility, flatten the factorized result
-        match self.next_factorized() {
-            Ok(Some(factorized)) => Ok(Some(factorized.flatten())),
-            Ok(None) => Ok(None),
-            Err(e) => Err(e),
+        // The flat form, a chunk at a time: one input chunk's product can
+        // hold more rows than a chunk does.
+        loop {
+            if let Some((factorized, cursor)) = &mut self.flattening {
+                if let Some(chunk) = factorized.flatten_next(cursor, DEFAULT_CHUNK_SIZE) {
+                    return Ok(Some(chunk));
+                }
+                self.flattening = None;
+            }
+            match self.next_factorized()? {
+                Some(factorized) => {
+                    self.flattening = Some((factorized, FlattenCursor::default()));
+                }
+                None => return Ok(None),
+            }
         }
     }
 
     fn reset(&mut self) {
         self.input.reset();
         self.exhausted = false;
+        self.flattening = None;
     }
 
     fn name(&self) -> &'static str {
@@ -545,12 +560,12 @@ pub struct LazyFactorizedChainOperator {
     view: ReadView,
     /// Counts the edges the expansion reads.
     reads: Option<Arc<ReadCounter>>,
-    /// Cached flat result after execution.
-    result: Option<DataChunk>,
     /// Cached factorized result after execution.
     factorized_result: Option<FactorizedChunk>,
     /// Whether execution has completed.
     executed: bool,
+    /// The chain's factorized result being given flat, and where it stands.
+    flattening: Option<(FactorizedChunk, FlattenCursor)>,
 }
 
 impl LazyFactorizedChainOperator {
@@ -567,9 +582,9 @@ impl LazyFactorizedChainOperator {
             steps,
             view,
             reads: None,
-            result: None,
             factorized_result: None,
             executed: false,
+            flattening: None,
         }
     }
 
@@ -634,29 +649,31 @@ impl LazyFactorizedChainOperator {
         self.factorized_result = self.execute_factorized()?;
         Ok(self.factorized_result.clone())
     }
-
-    /// Executes the chain and returns the flattened result.
-    fn execute(&mut self) -> Result<Option<DataChunk>, OperatorError> {
-        // Use the factorized execution and then flatten
-        let factorized = self.execute_factorized()?;
-        Ok(factorized.map(|c| c.flatten()))
-    }
 }
 
 impl Operator for LazyFactorizedChainOperator {
     fn next(&mut self) -> OperatorResult {
-        if self.executed {
-            return Ok(self.result.take());
+        // The flat form, a chunk at a time: a chain's product can hold more
+        // rows than a chunk does.
+        if !self.executed {
+            self.executed = true;
+            self.flattening = self
+                .execute_factorized()?
+                .map(|factorized| (factorized, FlattenCursor::default()));
         }
-
-        self.executed = true;
-        self.result = self.execute()?;
-        Ok(self.result.take())
+        let Some((factorized, cursor)) = &mut self.flattening else {
+            return Ok(None);
+        };
+        let chunk = factorized.flatten_next(cursor, DEFAULT_CHUNK_SIZE);
+        if chunk.is_none() {
+            self.flattening = None;
+        }
+        Ok(chunk)
     }
 
     fn reset(&mut self) {
         self.source.reset();
-        self.result = None;
+        self.flattening = None;
         self.factorized_result = None;
         self.executed = false;
     }

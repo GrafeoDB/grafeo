@@ -421,6 +421,68 @@ impl FactorizedChunk {
         FactorizedRowIterator::new(self)
     }
 
+    /// The next rows of the flat form from where `cursor` stands, at most
+    /// `max_rows` of them, as one chunk; `None` once every row was given. A
+    /// chunk's selection holds at most [`SelectionVector::MAX_CAPACITY`]
+    /// rows, and the product of a node with many neighbors can hold more,
+    /// so an operator gives its flat rows a chunk at a time rather than as
+    /// one [`flatten`](Self::flatten).
+    ///
+    /// [`SelectionVector::MAX_CAPACITY`]: crate::execution::SelectionVector::MAX_CAPACITY
+    pub fn flatten_next(&self, cursor: &mut FlattenCursor, max_rows: usize) -> Option<DataChunk> {
+        let max_rows = max_rows.max(1);
+        let mut rows = match cursor.position.take() {
+            // The first call: a product that fits is flattened at once.
+            None if !cursor.started => {
+                cursor.started = true;
+                if self.logical_row_count <= max_rows {
+                    cursor.done = true;
+                    return Some(self.flatten());
+                }
+                self.logical_row_iter()
+            }
+            None => return None,
+            Some((indices, exhausted)) => FactorizedRowIterator {
+                chunk: self,
+                indices,
+                exhausted,
+            },
+        };
+        if cursor.done || rows.exhausted {
+            cursor.done = true;
+            return None;
+        }
+        let mut columns: Vec<ValueVector> = self
+            .levels
+            .iter()
+            .flat_map(|level| level.columns.iter())
+            .map(|column| ValueVector::with_capacity(column.data_type(), max_rows))
+            .collect();
+        let mut taken = 0;
+        while taken < max_rows {
+            let Some(indices) = rows.next() else {
+                break;
+            };
+            let mut offset = 0;
+            for (level_idx, level) in self.levels.iter().enumerate() {
+                let physical = indices.get(level_idx).copied().unwrap_or(0);
+                for (col_idx, column) in level.columns.iter().enumerate() {
+                    if let Some(value) = column.get_physical(physical) {
+                        columns[offset + col_idx].push_value(value);
+                    }
+                }
+                offset += level.column_count();
+            }
+            taken += 1;
+        }
+        if rows.exhausted {
+            cursor.done = true;
+        } else {
+            cursor.position = Some((rows.indices, rows.exhausted));
+        }
+        (taken > 0).then(|| DataChunk::new(columns))
+    }
+
     /// Gets the total number of columns across all levels.
     #[must_use]
     pub fn total_column_count(&self) -> usize {
@@ -972,6 +1034,18 @@ impl FactorizedChunk {
         result.update_state();
         result
     }
+}
+
+/// Where [`FactorizedChunk::flatten_next`] stands in a chunk's flat rows.
+#[derive(Debug, Clone, Default)]
+pub struct FlattenCursor {
+    /// Whether a first chunk was given.
+    started: bool,
+    /// Whether every row was given.
+    done: bool,
+    /// The next row's physical indices, one per level, and whether the rows
+    /// ran out (the state of a [`FactorizedRowIterator`]).
+    position: Option<(Vec<usize>, bool)>,
 }
 
 /// Iterator over logical rows in a factorized chunk.

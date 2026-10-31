@@ -434,56 +434,6 @@ pub fn concat_parallel_results(results: Vec<Vec<DataChunk>>) -> Vec<DataChunk> {
     results.into_iter().flatten().collect()
 }
 
-/// Merges parallel DISTINCT results by deduplication.
-pub fn merge_distinct_results(results: Vec<Vec<DataChunk>>) -> Vec<DataChunk> {
-    use std::collections::HashSet;
-
-    // Simple row-based deduplication using hash
-    let mut seen: HashSet<u64> = HashSet::new();
-    let mut unique_rows: Vec<Vec<Value>> = Vec::new();
-
-    for chunks in results {
-        for chunk in chunks {
-            let num_columns = chunk.num_columns();
-            for i in 0..chunk.len() {
-                let mut row = Vec::with_capacity(num_columns);
-                for col_idx in 0..num_columns {
-                    let val = chunk
-                        .column(col_idx)
-                        .and_then(|c| c.get(i))
-                        .unwrap_or(Value::Null);
-                    row.push(val);
-                }
-
-                let hash = hash_row(&row);
-                if seen.insert(hash) {
-                    unique_rows.push(row);
-                }
-            }
-        }
-    }
-
-    rows_to_chunks(unique_rows, 2048)
-}
-
-fn hash_row(row: &[Value]) -> u64 {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-
-    let mut hasher = DefaultHasher::new();
-    for value in row {
-        match value {
-            Value::Null => 0u8.hash(&mut hasher),
-            Value::Bool(b) => b.hash(&mut hasher),
-            Value::Int64(i) => i.hash(&mut hasher),
-            Value::Float64(f) => f.to_bits().hash(&mut hasher),
-            Value::String(s) => s.hash(&mut hasher),
-            _ => 0u8.hash(&mut hasher),
-        }
-    }
-    hasher.finish()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -636,44 +586,6 @@ mod tests {
         assert_eq!(chunks[1].len(), 3);
         assert_eq!(chunks[2].len(), 3);
         assert_eq!(chunks[3].len(), 1);
-    }
-
-    #[test]
-    fn test_merge_distinct_results() {
-        let chunk1 = DataChunk::new(vec![ValueVector::from_values(&[
-            Value::Int64(1),
-            Value::Int64(2),
-            Value::Int64(3),
-        ])]);
-
-        let chunk2 = DataChunk::new(vec![ValueVector::from_values(&[
-            Value::Int64(2),
-            Value::Int64(3),
-            Value::Int64(4),
-        ])]);
-
-        let results = vec![vec![chunk1], vec![chunk2]];
-        let merged = merge_distinct_results(results);
-
-        let total_rows: usize = merged.iter().map(DataChunk::len).sum();
-        assert_eq!(total_rows, 4); // 1, 2, 3, 4 (no duplicates)
-    }
-
-    #[test]
-    fn test_hash_row_with_non_primitive_values() {
-        // Exercises the catch-all branch in hash_row for non-primitive Value types
-        let row1 = vec![Value::List(vec![Value::Int64(1)].into())];
-        let row2 = vec![Value::List(vec![Value::Int64(2)].into())];
-        let row3 = vec![Value::Bytes(vec![1, 2, 3].into())];
-
-        // The catch-all hashes all non-primitive types to the same bucket (0u8)
-        let h1 = hash_row(&row1);
-        let h2 = hash_row(&row2);
-        let h3 = hash_row(&row3);
-
-        // All non-primitive types hash identically via the catch-all
-        assert_eq!(h1, h2);
-        assert_eq!(h2, h3);
     }
 
     #[test]

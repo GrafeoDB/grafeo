@@ -36,6 +36,10 @@ fn created(dir: &Path) -> Config {
 }
 
 /// [`created`] for the database file `path`.
+#[expect(
+    deprecated,
+    reason = "the file still stores the deprecated schema-constraints flag, which this checks, until 0.7.0 drops it"
+)]
 fn created_at(path: &Path) -> Config {
     let dir = path.parent().unwrap();
     Config::persistent(path)
@@ -48,6 +52,10 @@ fn created_at(path: &Path) -> Config {
 }
 
 /// The stored settings of `config`, comparable.
+#[expect(
+    deprecated,
+    reason = "the file still stores the deprecated schema-constraints flag, which this checks, until 0.7.0 drops it"
+)]
 fn stored(
     config: &Config,
 ) -> (
@@ -171,6 +179,10 @@ fn a_reopen_after_a_crash_applies_the_stored_configuration() {
 /// A value set for an open wins for that open only: the next open without
 /// it gets the stored value again.
 #[test]
+#[expect(
+    deprecated,
+    reason = "the file still stores the deprecated schema-constraints flag, which this checks, until 0.7.0 drops it"
+)]
 fn a_value_set_on_open_wins_for_that_open_only() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("amsterdam.grafeo");
@@ -207,6 +219,10 @@ fn a_value_set_on_open_wins_for_that_open_only() {
 /// `set_stored_config` changes what the file stores for the next open; the
 /// running database keeps its configuration.
 #[test]
+#[expect(
+    deprecated,
+    reason = "the file still stores the deprecated schema-constraints flag, which this checks, until 0.7.0 drops it"
+)]
 fn set_stored_config_changes_the_next_open() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("amsterdam.grafeo");

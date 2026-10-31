@@ -7,6 +7,9 @@
 //! All methods take `self: &Arc<Self>` so the `GrafeoDB` can be cheaply cloned
 //! into the blocking closure. This matches how `grafeo-server` already holds
 //! databases in `Arc<GrafeoDB>`.
+//!
+//! Deprecated since 0.6.1 with the `async-storage` feature, and removed in
+//! 0.7.0: a blocking task of the runtime calls the sync operation itself.
 
 use std::sync::Arc;
 
@@ -39,6 +42,17 @@ impl GrafeoDB {
     /// # Ok(())
     /// # }
     /// ```
+    ///
+    /// Code that denies deprecated items no longer builds with it:
+    ///
+    /// ```compile_fail
+    /// #![deny(deprecated)]
+    /// let _checkpoint = grafeo_engine::GrafeoDB::async_wal_checkpoint;
+    /// ```
+    #[deprecated(
+        since = "0.6.1",
+        note = "call `wal_checkpoint()` from `tokio::task::spawn_blocking`; removed in 0.7.0 with the `async-storage` feature"
+    )]
     pub async fn async_wal_checkpoint(self: &Arc<Self>) -> Result<()> {
         let db = Arc::clone(self);
         tokio::task::spawn_blocking(move || db.wal_checkpoint())
@@ -71,7 +85,18 @@ impl GrafeoDB {
     /// # Ok(())
     /// # }
     /// ```
+    ///
+    /// Code that denies deprecated items no longer builds with it:
+    ///
+    /// ```compile_fail
+    /// #![deny(deprecated)]
+    /// let _write = grafeo_engine::GrafeoDB::async_write_snapshot;
+    /// ```
     #[cfg(feature = "grafeo-file")]
+    #[deprecated(
+        since = "0.6.1",
+        note = "`wal_checkpoint()` writes the same file, and refuses one with an incomplete commit: call it from `tokio::task::spawn_blocking`; removed in 0.7.0 with the `async-storage` feature"
+    )]
     pub async fn async_write_snapshot(self: &Arc<Self>) -> Result<()> {
         let db = Arc::clone(self);
         tokio::task::spawn_blocking(move || {
@@ -96,6 +121,10 @@ impl GrafeoDB {
 }
 
 #[cfg(test)]
+#[allow(
+    deprecated,
+    reason = "the tests check the deprecated async operations until 0.7.0 removes them"
+)]
 mod tests {
     use super::*;
 

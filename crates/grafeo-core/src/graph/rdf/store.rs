@@ -1541,7 +1541,25 @@ impl RdfStore {
     /// a graph onto itself does nothing (SPARQL 1.1 Update, section 3.2.3).
     ///
     /// `None` = default graph, `Some(iri)` = named graph.
+    ///
+    /// Code that denies deprecated items no longer builds with it:
+    ///
+    /// ```compile_fail
+    /// #![deny(deprecated)]
+    /// let store = grafeo_core::graph::rdf::RdfStore::new();
+    /// store.copy_graph(None, Some("http://example.org/amsterdam"));
+    /// ```
+    #[deprecated(
+        since = "0.6.1",
+        note = "run a SPARQL `COPY` in a session, which logs it, or apply `RdfGraphOp::Copy` with `apply_graph_op`; removed in 0.7.0"
+    )]
     pub fn copy_graph(&self, source: Option<&str>, dest: Option<&str>) {
+        self.copy_into(source, dest);
+    }
+
+    /// What [`apply_graph_op`](Self::apply_graph_op) does for a `COPY`: the
+    /// triples of `source` replace those of `dest`.
+    fn copy_into(&self, source: Option<&str>, dest: Option<&str>) {
         if source == dest {
             return;
         }
@@ -1576,7 +1594,7 @@ impl RdfStore {
         if source == dest {
             return;
         }
-        self.copy_graph(source, dest);
+        self.copy_into(source, dest);
         match source {
             None => self.clear(),
             Some(n) => {
@@ -1641,7 +1659,7 @@ impl RdfStore {
                 true
             }
             RdfGraphOp::Copy { source, target } => {
-                self.copy_graph(source.as_deref(), target.as_deref());
+                self.copy_into(source.as_deref(), target.as_deref());
                 true
             }
             RdfGraphOp::Move { source, target } => {
@@ -3145,7 +3163,10 @@ mod tests {
         store.insert_into(None, triple.clone());
         store.insert_into(Some(paris), triple);
         for graph in [None, Some(paris)] {
-            store.copy_graph(graph, graph);
+            assert!(store.apply_graph_op(&RdfGraphOp::Copy {
+                source: graph.map(str::to_string),
+                target: graph.map(str::to_string),
+            }));
             store.move_graph(graph, graph);
             store.add_graph(graph, graph);
         }
@@ -3193,7 +3214,10 @@ mod tests {
         store.insert(triple.clone());
 
         // Copy default -> named
-        store.copy_graph(None, Some("http://example.org/copy"));
+        assert!(store.apply_graph_op(&RdfGraphOp::Copy {
+            source: None,
+            target: Some("http://example.org/copy".to_string()),
+        }));
         assert_eq!(store.len(), 1); // default still has it
         let copy = store.graph("http://example.org/copy").unwrap();
         assert_eq!(copy.len(), 1);

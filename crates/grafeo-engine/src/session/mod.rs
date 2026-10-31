@@ -7187,7 +7187,7 @@ mod tests {
             db.gc();
             assert_eq!(db.transaction_manager.history_floor(), earlier);
             assert_eq!(
-                db.store()
+                db.lpg_store()
                     .unwrap()
                     .node_property(id, "age", ReadView::new(epoch, transaction))
                     .unwrap(),
@@ -7267,9 +7267,9 @@ mod tests {
             1,
             "PENDING nodes should be invisible to non-versioned node_count()"
         );
-        let epoch = db.store().unwrap().current_epoch();
+        let epoch = db.lpg_store().unwrap().current_epoch();
         assert!(
-            db.store()
+            db.lpg_store()
                 .unwrap()
                 .node(node_in_tx, ReadView::transaction(transaction_id, epoch))
                 .unwrap()
@@ -7320,9 +7320,9 @@ mod tests {
             1,
             "PENDING nodes should be invisible to non-versioned node_count()"
         );
-        let epoch = db.store().unwrap().current_epoch();
+        let epoch = db.lpg_store().unwrap().current_epoch();
         assert!(
-            db.store()
+            db.lpg_store()
                 .unwrap()
                 .node(node_in_tx, ReadView::transaction(transaction_id, epoch))
                 .unwrap()

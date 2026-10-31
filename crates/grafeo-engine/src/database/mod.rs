@@ -259,7 +259,7 @@ impl GrafeoDB {
     /// The unsupported error on a database built on a store of one's own
     /// ([`with_store()`](Self::with_store),
     /// [`with_read_store()`](Self::with_read_store)), which has none of them.
-    fn lpg_store(&self) -> Result<Arc<RowGroupStore>> {
+    pub(crate) fn lpg_store(&self) -> Result<Arc<RowGroupStore>> {
         self.root_store().ok_or_else(|| {
             Error::from(QueryError::unsupported(concat!(
                 "this needs the built-in store: a database on a backend of its own has none ",
@@ -2432,6 +2432,22 @@ impl GrafeoDB {
     ///
     /// The unsupported error on a database on a store of its own
     /// ([`with_store`](Self::with_store), [`with_read_store`](Self::with_read_store)).
+    ///
+    /// # Deprecated
+    ///
+    /// Its writes skip the WAL, transactions and change capture, so a crash
+    /// or a rollback loses them unnoticed. Write through a session or the
+    /// direct API and read through [`snapshot`](Self::snapshot). Code that
+    /// denies deprecated items no longer builds with it:
+    ///
+    /// ```compile_fail
+    /// #![deny(deprecated)]
+    /// let _store = grafeo_engine::GrafeoDB::new_in_memory().store();
+    /// ```
+    #[deprecated(
+        since = "0.6.1",
+        note = "its writes skip the WAL and transactions: write through a session or the direct API (`batch_create_nodes`, `batch_create_edges`, the `import_*` calls for bulk loads) and read through `snapshot()` instead; removed in 0.7.0"
+    )]
     pub fn store(&self) -> Result<Arc<RowGroupStore>> {
         self.lpg_store()
     }
@@ -4365,6 +4381,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        deprecated,
+        reason = "the deprecated no-op settings still read back what their builders set, until 0.7.0 removes them"
+    )]
     fn test_database_config() {
         let config = Config::in_memory().with_threads(4).with_query_logging();
 
@@ -5321,6 +5341,10 @@ mod tests {
     // =========================================================================
 
     #[test]
+    #[expect(
+        deprecated,
+        reason = "validation still refuses zero threads, a no-op setting, until 0.7.0 removes it"
+    )]
     fn test_with_config_invalid_config_zero_threads() {
         let config = Config::in_memory().with_threads(0);
         let result = GrafeoDB::with_config(config);

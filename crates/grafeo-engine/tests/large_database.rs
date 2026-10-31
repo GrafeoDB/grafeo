@@ -34,6 +34,10 @@
 //! image lies.
 
 #![cfg(all(feature = "grafeo-file", feature = "wal"))]
+#![allow(
+    deprecated,
+    reason = "the test reaches the row-group store itself, which only the deprecated GrafeoDB::store() gives, until 0.7.0 removes it"
+)]
 
 use std::collections::BTreeMap;
 use std::fs::File;

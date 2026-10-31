@@ -6,6 +6,10 @@
 //! **When to regenerate:** only after an intentional snapshot format change
 //! (i.e. bumping `SNAPSHOT_VERSION`). If the golden test in `golden_format.rs`
 //! fails without a version bump, fix the regression instead of regenerating.
+#![allow(
+    deprecated,
+    reason = "the test reaches the row-group store itself, which only the deprecated GrafeoDB::store() gives, until 0.7.0 removes it"
+)]
 
 use grafeo_common::types::Value;
 use grafeo_engine::GrafeoDB;

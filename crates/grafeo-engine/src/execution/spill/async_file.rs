@@ -11,6 +11,10 @@ const BUFFER_SIZE: usize = 64 * 1024;
 ///
 /// AsyncSpillFile manages a temporary file used for spilling operator state to disk
 /// using tokio's async I/O primitives for non-blocking operations.
+#[deprecated(
+    since = "0.6.1",
+    note = "the engine spills through `grafeo_core::execution::spill::SpillFile`, use it instead; removed in 0.7.0 with the `async-storage` feature"
+)]
 pub struct AsyncSpillFile {
     /// Path to the spill file.
     path: PathBuf,
@@ -155,6 +159,10 @@ impl std::fmt::Debug for AsyncSpillFile {
 /// Async reader for a spill file.
 ///
 /// Provides buffered async reading of spill file contents.
+#[deprecated(
+    since = "0.6.1",
+    note = "the engine spills through `grafeo_core::execution::spill::SpillFileReader`, use it instead; removed in 0.7.0 with the `async-storage` feature"
+)]
 pub struct AsyncSpillFileReader {
     /// Buffered reader.
     reader: BufReader<File>,

@@ -396,14 +396,14 @@ fn sparql_graph_mistakes_are_reported_by_kind() {
 
 #[test]
 fn an_invalid_configuration_is_invalid_input() {
-    let error = GrafeoDB::with_config(grafeo_engine::Config::in_memory().with_threads(0))
+    let error = GrafeoDB::with_config(grafeo_engine::Config::in_memory().with_memory_limit(0))
         .map(|_| ())
-        .expect_err("zero threads");
+        .expect_err("a zero memory limit");
     assert_user_mistake(
         &error,
         ErrorCode::InvalidInput,
-        "threads",
-        "with_threads(0)",
+        "memory_limit",
+        "with_memory_limit(0)",
     );
 }
 

@@ -1,6 +1,10 @@
 //! A direct call must undo completed writes if a later step fails or panics.
 
 #![cfg(all(feature = "gql", feature = "testing-statement-injection"))]
+#![allow(
+    deprecated,
+    reason = "the test reaches the row-group store itself, which only the deprecated GrafeoDB::store() gives, until 0.7.0 removes it"
+)]
 
 use grafeo_common::testing::commit_hook::after_next_data_write;
 use grafeo_common::testing::statement_failure::InjectedFailure;

@@ -18,6 +18,10 @@
 //! ```
 
 #![cfg(all(feature = "gql", feature = "cypher"))]
+#![allow(
+    deprecated,
+    reason = "the test reaches the row-group store itself, which only the deprecated GrafeoDB::store() gives, until 0.7.0 removes it"
+)]
 
 use grafeo_common::types::Value;
 use grafeo_engine::admin::SchemaInfo;

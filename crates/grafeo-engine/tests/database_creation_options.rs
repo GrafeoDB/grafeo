@@ -87,6 +87,10 @@ fn validate_rejects_zero_memory_limit() {
 }
 
 #[test]
+#[expect(
+    deprecated,
+    reason = "validation still refuses zero threads, a no-op setting, until 0.7.0 removes it"
+)]
 fn validate_rejects_zero_threads() {
     let config = Config::in_memory().with_threads(0);
     assert_eq!(config.validate(), Err(ConfigError::ZeroThreads));
@@ -100,6 +104,10 @@ fn validate_rejects_rdf_without_feature() {
 }
 
 #[test]
+#[expect(
+    deprecated,
+    reason = "validation still refuses zero threads, a no-op setting, until 0.7.0 removes it"
+)]
 fn with_config_rejects_invalid_config() {
     let config = Config::in_memory().with_threads(0);
     let result = GrafeoDB::with_config(config);
@@ -161,12 +169,20 @@ fn config_with_nosync_durability() {
 // --- schema_constraints tests ---
 
 #[test]
+#[expect(
+    deprecated,
+    reason = "the deprecated no-op settings still read back what their builders set, until 0.7.0 removes them"
+)]
 fn schema_constraints_default_is_false() {
     let config = Config::default();
     assert!(!config.schema_constraints());
 }
 
 #[test]
+#[expect(
+    deprecated,
+    reason = "the deprecated no-op settings still read back what their builders set, until 0.7.0 removes them"
+)]
 fn schema_constraints_can_be_enabled() {
     let config = Config::in_memory().with_schema_constraints();
     assert!(config.schema_constraints());

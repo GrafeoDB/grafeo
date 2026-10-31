@@ -48,7 +48,7 @@ pub(super) fn record_of(config: &Config, path: &Path) -> StoredConfigRecord {
             GraphModel::Rdf => GraphModelRecord::Rdf,
         },
         backward_edges: config.backward_edges(),
-        schema_constraints: config.schema_constraints(),
+        schema_constraints: config.stored_schema_constraints(),
         wal_enabled: config.wal_enabled(),
         wal_durability: durability_record(config.wal_durability()),
         memory_limit: config
@@ -139,11 +139,7 @@ pub(super) fn applied(config: Config, stored: &StoredConfigRecord, path: &Path) 
         config = config.without_backward_edges();
     }
     if !set(&config, SetFields::SCHEMA_CONSTRAINTS) {
-        config = if stored.schema_constraints {
-            config.with_schema_constraints()
-        } else {
-            config.without_schema_constraints()
-        };
+        config = config.with_stored_schema_constraints(stored.schema_constraints);
     }
     if !set(&config, SetFields::WAL_ENABLED) {
         config = if stored.wal_enabled {

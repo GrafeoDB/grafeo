@@ -1,4 +1,8 @@
 //! Captures include successful writes through the documented raw store handle.
+#![allow(
+    deprecated,
+    reason = "the test reaches the row-group store itself, which only the deprecated GrafeoDB::store() gives, until 0.7.0 removes it"
+)]
 
 use grafeo_common::types::{EdgeId, EpochId, NodeId, ReadView, Value};
 use grafeo_core::graph::rowgroup::RowGroupStore;

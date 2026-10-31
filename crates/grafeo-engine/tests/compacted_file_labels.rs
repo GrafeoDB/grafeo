@@ -30,6 +30,10 @@
     feature = "gql",
     feature = "cypher"
 ))]
+#![allow(
+    deprecated,
+    reason = "the test reaches the row-group store itself, which only the deprecated GrafeoDB::store() gives, until 0.7.0 removes it"
+)]
 
 use grafeo_common::types::ReadView;
 use std::path::{Path, PathBuf};

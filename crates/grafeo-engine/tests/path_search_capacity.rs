@@ -203,10 +203,9 @@ fn an_unbounded_walk_around_a_cycle_fails_at_the_budget() {
     let db = cycle();
     let query = "MATCH (a:Spot {name: 'a'})-[*]->(b) RETURN count(b) AS c";
     let error = run(&db, "gql", query).expect_err(query);
-    // The one open walk is out of the queue while it takes its next edge,
-    // so the count the error names says little here; the budget is the
-    // point.
-    paths_held(&error);
+    // A 3-cycle has one walk of each length: the search holds that walk
+    // alone when its next edge goes over the budget.
+    assert_eq!(paths_held(&error), 1, "{query}: {error}");
     assert!(error.to_string().contains("8 MiB"), "{query}: {error}");
 }
 

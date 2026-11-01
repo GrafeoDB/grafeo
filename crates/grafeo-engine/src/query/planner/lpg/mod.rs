@@ -27,7 +27,9 @@
 //!
 //! 1. **Factorized counts** (`aggregate::plan_factorized_aggregate`): a bare
 //!    `COUNT` over two or more consecutive `Expand`s counts the paths level
-//!    by level, without flattening them. Any other chain of expands streams
+//!    by level, without flattening them, unless the degree count
+//!    (`aggregate::plan_edge_count`) counts the last hop's edges of each row
+//!    from the adjacency, which is faster. Any other chain of expands streams
 //!    hop by hop, which stops early under a LIMIT and holds one chunk (a
 //!    flattened factorized chain built the whole product first). Disabled
 //!    when `factorized_execution` is false on the planner.

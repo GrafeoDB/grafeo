@@ -46,6 +46,15 @@ impl super::Planner {
         &self,
         agg: &AggregateOp,
     ) -> Result<(Box<dyn Operator>, Vec<String>)> {
+        // A count of the last hop's edges, also over a chain of expands
+        // that the factorized aggregate below would count too: counting
+        // each row's edges from the adjacency, without listing them, takes
+        // about half the time of the factorized chain, which lists the
+        // edges of its last level.
+        if let Some(counted) = self.plan_edge_count(agg)? {
+            return Ok(counted);
+        }
+
         // Check if we can use factorized aggregation for speedup
         // Conditions:
         // 1. Factorized execution is enabled
@@ -75,10 +84,6 @@ impl super::Planner {
             return Ok(counted);
         }
 
-        if let Some(counted) = self.plan_edge_count(agg)? {
-            return Ok(counted);
-        }
-
         // An aggregate that comes first (`RETURN count(*)`) aggregates the
         // one empty row.
         let (mut input_op, input_columns) = self.plan_input(&agg.input)?;
@@ -90,13 +95,15 @@ impl super::Planner {
         self.aggregate_over(agg, input_op, input_columns)
     }
 
-    /// A grouped count over one expand that reads neither the edge nor its
-    /// far end (`MATCH (a:V)-[:E]->(:V) RETURN a.id, count(*)`): the count
-    /// of each input row's edges, read from the adjacency (see
-    /// `EdgeCountOperator`), summed per group, where the expand would make a
-    /// row of every edge for the aggregate to count. Labels on the far end
-    /// stay a check of each counted edge, as the store keeps no count of the
-    /// edges to a label. `None` for any other aggregate (see
+    /// A count over one expand that reads neither the edge nor its far end
+    /// (`MATCH (a:V)-[:E]->(:V) RETURN a.id, count(*)`): the count of each
+    /// input row's edges, read from the adjacency (see `EdgeCountOperator`),
+    /// summed per group, or totalled in one row without groups (`MATCH
+    /// (a)-[:E]->() RETURN count(*)`), where the expand would make a row of
+    /// every edge for the aggregate to count. Labels on the far end stay a
+    /// check of each counted edge, as the store keeps no count of the edges
+    /// to a label. Over a chain of expands the last one is counted, for
+    /// each row of the others. `None` for any other aggregate (see
     /// [`EdgeCountShape::of`]).
     fn plan_edge_count(
         &self,
@@ -134,14 +141,36 @@ impl super::Planner {
             self.read_view(),
         )
         .with_read_counter(self.read_counter());
+        // Without groups the count totals itself in one row, which holds 0
+        // when no edge matches (a sum of the counts over no rows is null),
+        // and stands in for the aggregate too.
+        let ungrouped = agg.group_by.is_empty();
+        let counts: Box<dyn Operator> = if ungrouped {
+            Box::new(counts.totalled(agg.aggregates.len()))
+        } else {
+            Box::new(counts)
+        };
         // PROFILE shows the count in the expand's place, with the label
         // checks of the far end it does.
-        let (counts, mut columns) = self.maybe_profile(
-            Ok((Box::new(counts) as Box<dyn Operator>, columns)),
-            shape.node,
-        )?;
+        let (counts, mut columns) = self.maybe_profile(Ok((counts, columns)), shape.node)?;
         for check in shape.checks.iter().rev() {
             self.record_absorbed_scan_entry("Filter", check);
+        }
+        if ungrouped {
+            let totals: Vec<String> = agg
+                .aggregates
+                .iter()
+                .map(|aggregate| {
+                    aggregate.alias.clone().unwrap_or_else(|| {
+                        crate::query::planner::common::aggregate_column_name(aggregate)
+                    })
+                })
+                .collect();
+            for total in &totals {
+                self.set_column_entity(total, None);
+            }
+            let operator = self.filter_having(counts, &totals, agg.having.as_ref())?;
+            return Ok(Some((operator, totals)));
         }
         // A name no variable has: the count column of this aggregate.
         let mut count_column = String::from("_edge_count");
@@ -558,27 +587,34 @@ impl super::Planner {
             );
         }
 
-        // Apply HAVING clause filter if present
-        if let Some(having_expr) = &agg.having {
-            // Build variable to column mapping for the aggregate output
-            let having_var_columns: HashMap<String, usize> = output_columns
-                .iter()
-                .enumerate()
-                .map(|(i, name)| (name.clone(), i))
-                .collect();
-
-            let filter_expr = self.convert_expression(having_expr)?;
-            let predicate = ExpressionPredicate::new(
-                filter_expr,
-                having_var_columns,
-                Arc::clone(&self.store) as Arc<dyn GraphStore>,
-                self.read_view(),
-            )
-            .with_session_context(self.session_context.clone());
-            operator = Box::new(FilterOperator::new(operator, Box::new(predicate)));
-        }
-
+        let operator = self.filter_having(operator, &output_columns, agg.having.as_ref())?;
         Ok((operator, output_columns))
+    }
+
+    /// The rows of `operator`, an aggregate's, whose columns are
+    /// `output_columns`, that `having` keeps: all of them without one.
+    fn filter_having(
+        &self,
+        operator: Box<dyn Operator>,
+        output_columns: &[String],
+        having: Option<&LogicalExpression>,
+    ) -> Result<Box<dyn Operator>> {
+        let Some(having) = having else {
+            return Ok(operator);
+        };
+        let having_columns: HashMap<String, usize> = output_columns
+            .iter()
+            .enumerate()
+            .map(|(i, name)| (name.clone(), i))
+            .collect();
+        let predicate = ExpressionPredicate::new(
+            self.convert_expression(having)?,
+            having_columns,
+            Arc::clone(&self.store) as Arc<dyn GraphStore>,
+            self.read_view(),
+        )
+        .with_session_context(self.session_context.clone());
+        Ok(Box::new(FilterOperator::new(operator, Box::new(predicate))))
     }
 
     /// Whether every aggregate of `agg` gives on the factorized chain what it
@@ -742,10 +778,10 @@ struct EdgeCountShape<'a> {
 }
 
 impl<'a> EdgeCountShape<'a> {
-    /// The shape of `agg` when it counts the edges of one expand per group:
+    /// The shape of `agg` when it counts the edges of one expand per group,
+    /// or in all without groups:
     ///
-    /// - grouped (a count without groups is 0 over no rows, where a sum is
-    ///   null), with every aggregate a `count(*)` or a `count(x)` without
+    /// - with every aggregate a `count(*)` or a `count(x)` without
     ///   `DISTINCT` of the expand's start, edge or far end, which are never
     ///   null on its rows, so each counts the rows;
     /// - over one expand of one edge as a walk or a trail (a one-edge path
@@ -757,7 +793,7 @@ impl<'a> EdgeCountShape<'a> {
     ///   the same for each edge of a row (no subquery, no volatile call);
     /// - and reads no write (the input writes nothing).
     fn of(agg: &'a AggregateOp) -> Option<Self> {
-        if agg.group_by.is_empty() || agg.input.has_mutations() {
+        if agg.input.has_mutations() {
             return None;
         }
         let mut checks = Vec::new();

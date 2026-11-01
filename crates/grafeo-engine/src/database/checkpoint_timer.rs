@@ -136,6 +136,7 @@ impl CheckpointTimer {
     pub(super) fn stop(&mut self) {
         self.shutdown.store(true, Ordering::Release);
         if let Some(handle) = self.handle.take() {
+            // A thread that panicked has stopped as well.
             let _ = handle.join();
         }
     }

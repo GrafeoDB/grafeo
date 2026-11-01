@@ -1,5 +1,7 @@
 //! Persistence, snapshots, and data export for GrafeoDB.
 
+#![deny(clippy::let_underscore_must_use)]
+
 use grafeo_common::types::ReadView;
 #[cfg(any(feature = "wal", feature = "grafeo-file"))]
 use std::path::Path;

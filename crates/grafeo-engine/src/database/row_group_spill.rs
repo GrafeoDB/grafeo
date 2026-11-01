@@ -115,6 +115,7 @@ impl ColumnSpill for ColumnSpillFiles {
 fn remove_written(path: &Path) {
     for leftover in [path.to_path_buf(), path.with_extension("spill.tmp")] {
         if leftover.exists() {
+            // Best effort: the caller reports the write's own error.
             let _ = std::fs::remove_file(&leftover);
         }
     }

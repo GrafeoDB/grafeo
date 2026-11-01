@@ -179,7 +179,8 @@ impl AdaptiveFlusher {
                     if let Err(e) = sync() {
                         grafeo_warn!("Final WAL flush failed: {e}");
                     }
-                    // Send stats back to acknowledge shutdown
+                    // Send stats back to acknowledge shutdown. Fails only
+                    // when the caller of `shutdown` is gone, so none waits.
                     let _ = ack_tx.send(stats);
                     return;
                 }

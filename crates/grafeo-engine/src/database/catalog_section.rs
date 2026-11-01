@@ -30,6 +30,8 @@
 //! [`serialize`](Section::serialize)). It is read through
 //! [`deserialize`](Section::deserialize), which stays as it is.
 
+#![deny(clippy::let_underscore_must_use)]
+
 use std::collections::HashSet;
 use std::fmt;
 use std::sync::Arc;

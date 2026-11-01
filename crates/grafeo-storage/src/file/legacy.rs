@@ -131,6 +131,7 @@ impl<'cipher> LegacyFile<'cipher> {
 
 impl Drop for LegacyFile<'_> {
     fn drop(&mut self) {
+        // Best effort: closing the file, right after, releases the lock too.
         let _ = self.lock_holder.as_ref().unwrap_or(&self.file).unlock();
     }
 }

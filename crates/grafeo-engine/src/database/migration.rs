@@ -1018,6 +1018,7 @@ struct SharedLock(File);
 
 impl Drop for SharedLock {
     fn drop(&mut self) {
+        // Best effort: closing the file, right after, releases the lock too.
         let _ = self.0.unlock();
     }
 }

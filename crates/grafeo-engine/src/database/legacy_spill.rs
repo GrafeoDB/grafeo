@@ -820,6 +820,8 @@ impl super::GrafeoDB {
             }
         }
         for directory in directories.iter().filter(|directory| directory.derived) {
+            // Best effort, and non-recursive: a directory something is left
+            // in (a kept file, another one's) stays.
             let _ = std::fs::remove_dir(&directory.path);
         }
         Ok(())

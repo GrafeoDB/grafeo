@@ -338,9 +338,11 @@ impl AsyncWalManager {
     /// Stops the background sync task if running.
     pub async fn stop_background_sync(&self) {
         if let Some(tx) = self.shutdown_tx.lock().await.take() {
+            // Fails only when the task has ended already: nothing to stop.
             let _ = tx.send(());
         }
         if let Some(handle) = self.background_sync_handle.lock().await.take() {
+            // A task that panicked or was cancelled has stopped as well.
             let _ = handle.await;
         }
     }
@@ -452,6 +454,8 @@ impl AsyncWalManager {
             if let Some(seq) = Self::sequence_from_path(&file) {
                 // Keep the last 2 log files before current
                 if seq + 2 < current_seq && checkpoint.as_u64() > seq {
+                    // Best effort: the checkpoint covers the log, and a log
+                    // that stays is removed by the next truncation.
                     let _ = fs::remove_file(&file).await;
                 }
             }

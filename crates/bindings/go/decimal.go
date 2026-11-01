@@ -1,6 +1,7 @@
 package grafeo
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"math"
@@ -53,16 +54,36 @@ func (d Decimal) MarshalJSON() ([]byte, error) {
 	return json.Marshal(map[string]string{"$decimal": d.String()})
 }
 
+// decodeFields decodes the tags in each value of fields, a map of named
+// values (a row, a node's or an edge's properties), never the map itself: a
+// one-column row named "$bytes" stays a row.
+func decodeFields(fields map[string]any) map[string]any {
+	for key, value := range fields {
+		fields[key] = decodeTags(value)
+	}
+	return fields
+}
+
 // decodeTags turns every {"$decimal": "..."} map (the tag as its only key)
-// inside value into a Decimal, every {"$float": "NaN"} (or "Infinity",
-// "-Infinity") map into that float64, and every {"$term": {...}} map into an
-// RdfTerm, through lists and maps.
+// inside value into a Decimal, every {"$bytes": "..."} map into its
+// []byte, every {"$float": "NaN"} (or "Infinity",
+// "-Infinity") map into that float64, every {"$term": {...}} map into an
+// RdfTerm, and every temporal tag into its value (see temporalOf): a
+// time.Time, Date, Time or Duration, through lists and maps.
 func decodeTags(value any) any {
 	switch v := value.(type) {
 	case map[string]any:
 		if text, ok := v["$decimal"].(string); ok && len(v) == 1 {
 			if d, err := ParseDecimal(text); err == nil {
 				return d
+			}
+		}
+		if text, ok := v["$bytes"].(string); ok && len(v) == 1 {
+			// Canonical standard base64 only, as the engine reads it: a text
+			// it kept as a map (whitespace, unused bits set) stays a map
+			if b, err := base64.StdEncoding.DecodeString(text); err == nil &&
+				base64.StdEncoding.EncodeToString(b) == text {
+				return b
 			}
 		}
 		if text, ok := v["$float"].(string); ok && len(v) == 1 {
@@ -77,6 +98,9 @@ func decodeTags(value any) any {
 		}
 		if term, ok := rdfTermOf(v); ok {
 			return term
+		}
+		if temporal, ok := temporalOf(v); ok {
+			return temporal
 		}
 		for key, item := range v {
 			v[key] = decodeTags(item)

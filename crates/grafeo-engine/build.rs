@@ -3,12 +3,15 @@
 //! `lpg_language` cfg when it has one that queries the property graph (all
 //! but SPARQL), for the code only those use (the LPG planner), and the
 //! `rdf_language` cfg when it has the triple store and a language that
-//! queries it (SPARQL, GraphQL), for the code that processes those queries.
+//! queries it (SPARQL, GraphQL), for the code that processes those queries,
+//! and the `stored_procedures` cfg when it has GQL and the procedures
+//! (`algos`), for the code that runs a stored procedure's GQL body.
 
 fn main() {
     println!("cargo::rustc-check-cfg=cfg(query_language)");
     println!("cargo::rustc-check-cfg=cfg(lpg_language)");
     println!("cargo::rustc-check-cfg=cfg(rdf_language)");
+    println!("cargo::rustc-check-cfg=cfg(stored_procedures)");
     let enabled = |language: &str| std::env::var_os(format!("CARGO_FEATURE_{language}")).is_some();
     let lpg_languages = ["GQL", "CYPHER", "GREMLIN", "GRAPHQL", "SQL_PGQ"];
     if lpg_languages.iter().any(|language| enabled(language)) {
@@ -19,5 +22,8 @@ fn main() {
     }
     if enabled("TRIPLE_STORE") && (enabled("SPARQL") || enabled("GRAPHQL")) {
         println!("cargo::rustc-cfg=rdf_language");
+    }
+    if enabled("GQL") && enabled("ALGOS") {
+        println!("cargo::rustc-cfg=stored_procedures");
     }
 }

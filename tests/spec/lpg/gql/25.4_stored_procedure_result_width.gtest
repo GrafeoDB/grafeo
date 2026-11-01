@@ -1,0 +1,160 @@
+# A stored procedure's result has exactly its declared (or yielded) columns.
+# The body's columns are matched by name first; when no name matches, a body
+# of the same width gives its columns by position. A body that gives more or
+# fewer columns than declared is a semantic error, also when it returns no
+# rows, so a value never appears without a column or a column without a value.
+
+meta:
+  language: gql
+  model: lpg
+  title: Stored procedure result width
+  dataset: empty
+  requires: [algos]
+
+tests:
+
+  # ---------------------------------------------------------------------------
+  # Widths that do not fit
+  # ---------------------------------------------------------------------------
+
+  - name: a_body_wider_than_its_declared_columns_is_an_error
+    setup:
+      - "CREATE PROCEDURE wide() RETURNS (city STRING) AS { RETURN 'Amsterdam' AS first, 'Berlin' AS second }"
+    query: "CALL wide()"
+    expect:
+      error: "stored procedure body gives 2 of its columns, but it declares 1"
+
+  - name: a_wide_body_is_an_error_after_yield_too
+    setup:
+      - "CREATE PROCEDURE wide() RETURNS (city STRING) AS { RETURN 'Amsterdam' AS first, 'Berlin' AS second }"
+    query: "CALL wide() YIELD city RETURN city"
+    expect:
+      error: "stored procedure body gives 2 of its columns"
+
+  - name: a_body_narrower_than_its_declared_columns_is_an_error
+    setup:
+      - "CREATE PROCEDURE narrow() RETURNS (name STRING, city STRING) AS { RETURN 'Alix' AS who }"
+    query: "CALL narrow()"
+    expect:
+      error: "stored procedure body gives 1 of its columns, but it declares 2"
+
+  # One declared name is found, the other is not: one column found for two
+  # declared.
+  - name: a_body_missing_one_declared_name_is_an_error
+    setup:
+      - "CREATE PROCEDURE partial() RETURNS (name STRING, city STRING) AS { RETURN 'Alix' AS name, 'Paris' AS town }"
+    query: "CALL partial()"
+    expect:
+      error: "stored procedure body gives 1 of its columns, but it declares 2"
+
+  # No row shows the mismatch, but the body's columns still do not fit.
+  - name: an_empty_wide_body_is_still_an_error
+    setup:
+      - "CREATE PROCEDURE wide_empty() RETURNS (city STRING) AS { MATCH (c:Absent) RETURN c.name AS first, c.name AS second }"
+    query: "CALL wide_empty()"
+    expect:
+      error: "stored procedure body gives 2 of its columns, but it declares 1"
+
+  # A body that writes fails the same way. (That its INSERT leaves nothing is
+  # checked in the Rust tests: a gtest cannot run a statement after one that
+  # fails.)
+  - name: a_writing_wide_body_is_an_error
+    setup:
+      - "CREATE PROCEDURE wide_write() RETURNS (city STRING) AS { INSERT (:Visited {city: 'Prague'}) RETURN 'Prague' AS first, 'Rome' AS second }"
+    query: "CALL wide_write()"
+    expect:
+      error: "stored procedure body gives 2 of its columns, but it declares 1"
+
+  # ---------------------------------------------------------------------------
+  # Widths that fit
+  # ---------------------------------------------------------------------------
+
+  # No body name matches a declared one, and the widths agree: the values
+  # come by position under the declared names.
+  - name: a_same_width_body_under_other_names_keeps_its_values
+    setup:
+      - "CREATE PROCEDURE renamed() RETURNS (name STRING, city STRING) AS { RETURN 'Gus' AS who, 'Berlin' AS place }"
+    query: "CALL renamed()"
+    expect:
+      columns: [name, city]
+      rows:
+        - [Gus, Berlin]
+
+  - name: a_same_width_body_under_other_names_through_yield
+    setup:
+      - "CREATE PROCEDURE renamed() RETURNS (name STRING, city STRING) AS { RETURN 'Gus' AS who, 'Berlin' AS place }"
+    query: "CALL renamed() YIELD city, name RETURN city, name"
+    expect:
+      columns: [city, name]
+      rows:
+        - [Berlin, Gus]
+
+  # A positional body gives its values to the declared columns in declared
+  # order; a YIELD then picks them by name, also in another order.
+  - name: a_reordered_yield_over_a_positional_body_picks_by_declared_name
+    setup:
+      - "CREATE PROCEDURE trip() RETURNS (name STRING, city STRING, year INTEGER) AS { RETURN 'Vincent' AS a, 'Lisbon' AS b, 1994 AS c }"
+    query: "CALL trip() YIELD year, name, city RETURN year, name, city"
+    expect:
+      columns: [year, name, city]
+      rows:
+        - [1994, Vincent, Lisbon]
+
+  - name: a_yield_of_some_declared_columns_over_a_positional_body
+    setup:
+      - "CREATE PROCEDURE trip() RETURNS (name STRING, city STRING, year INTEGER) AS { RETURN 'Vincent' AS a, 'Lisbon' AS b, 1994 AS c }"
+    query: "CALL trip() YIELD city RETURN city"
+    expect:
+      rows:
+        - [Lisbon]
+
+  - name: a_yield_name_the_procedure_does_not_declare_is_an_error
+    setup:
+      - "CREATE PROCEDURE renamed() RETURNS (name STRING, city STRING) AS { RETURN 'Gus' AS who, 'Berlin' AS place }"
+    query: "CALL renamed() YIELD town RETURN town"
+    expect:
+      error: "YIELD names 'town', which the stored procedure does not declare"
+
+  # Declared names pick their columns from a wider body, in declared order;
+  # the extra body column is left out and duplicate rows stay.
+  - name: declared_names_pick_their_columns_in_declared_order
+    setup:
+      - "CREATE PROCEDURE picked() RETURNS (city STRING, name STRING) AS { UNWIND ['Mia', 'Mia', 'Jules'] AS n RETURN n AS name, 99 AS unrelated, 'Paris' AS city ORDER BY name }"
+    query: "CALL picked()"
+    expect:
+      ordered: true
+      columns: [city, name]
+      rows:
+        - [Paris, Jules]
+        - [Paris, Mia]
+        - [Paris, Mia]
+
+  - name: yield_aliases_keep_the_picked_values
+    setup:
+      - "CREATE PROCEDURE picked() RETURNS (city STRING, name STRING) AS { UNWIND ['Mia', 'Jules'] AS n RETURN n AS name, 99 AS unrelated, 'Paris' AS city ORDER BY name }"
+    query: "CALL picked() YIELD name AS who, city AS place RETURN who, place"
+    expect:
+      ordered: true
+      columns: [who, place]
+      rows:
+        - [Jules, Paris]
+        - [Mia, Paris]
+
+  # (Go, C# and Dart report no columns for an empty result, so this pins
+  # only that it is empty, not an error.)
+  - name: an_empty_body_that_fits_is_empty
+    setup:
+      - "CREATE PROCEDURE nobody() RETURNS (name STRING) AS { MATCH (p:Absent) RETURN p.name AS name }"
+    query: "CALL nobody()"
+    expect:
+      empty: true
+
+  - name: a_writing_body_that_fits_writes
+    setup:
+      - "CREATE PROCEDURE visit() RETURNS (city STRING) AS { INSERT (v:Visited {city: 'Prague'}) RETURN v.city AS city }"
+    statements:
+      - "CALL visit()"
+      - "MATCH (v:Visited) RETURN v.city AS city"
+    expect:
+      rows:
+        - [Prague]

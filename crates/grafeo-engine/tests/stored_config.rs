@@ -284,6 +284,59 @@ fn the_backward_edges_are_fixed_at_creation() {
     db.close().unwrap();
 }
 
+/// A disk tier override on a section that cannot spill is refused, at an
+/// open and as a stored change, so the file never stores one that the next
+/// open would refuse; a section that can spill still takes it.
+#[test]
+fn force_disk_on_a_section_that_cannot_spill_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("paris.grafeo");
+    let error = GrafeoDB::with_config(
+        Config::persistent(&path).with_section_tier(SectionType::LpgStore, TierOverride::ForceDisk),
+    )
+    .err()
+    .expect("an open with LpgStore forced to disk is refused");
+    assert!(
+        error
+            .to_string()
+            .contains("the LpgStore section cannot be moved to disk"),
+        "{error}"
+    );
+    assert!(!path.exists(), "a refused open creates no file");
+
+    let db = GrafeoDB::with_config(
+        Config::persistent(&path)
+            .with_section_tier(SectionType::TextIndex, TierOverride::ForceDisk),
+    )
+    .unwrap();
+    let error = db
+        .set_stored_config(
+            &Config::in_memory().with_section_tier(SectionType::Catalog, TierOverride::ForceDisk),
+        )
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("the Catalog section cannot be moved to disk"),
+        "{error}"
+    );
+    db.close().unwrap();
+
+    let db = GrafeoDB::open(&path).unwrap();
+    let tiers: Vec<_> = db
+        .config()
+        .section_configs()
+        .iter()
+        .map(|(section, memory)| (*section, memory.tier))
+        .collect();
+    assert_eq!(
+        tiers,
+        vec![(SectionType::TextIndex, TierOverride::ForceDisk)],
+        "the refused change stored nothing"
+    );
+    db.close().unwrap();
+}
+
 /// An in-memory database stores no configuration.
 #[test]
 fn an_in_memory_database_stores_no_configuration() {

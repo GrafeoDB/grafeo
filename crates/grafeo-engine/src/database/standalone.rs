@@ -16,6 +16,8 @@
 //! is one too: [`commit_rdf`] logs it as a group of its own and applies it
 //! to the RDF store through [`apply_rdf`], which replay applies it with.
 
+#![deny(clippy::let_underscore_must_use)]
+
 use std::sync::Arc;
 
 use grafeo_common::change::StandaloneOp;

@@ -257,6 +257,13 @@ Access list elements by index (0-based):
 ```sql
 RETURN [10, 20, 30, 40][0]   -- 10
 RETURN [10, 20, 30, 40][2]   -- 30
+RETURN [10, 20, 30, 40][-1]  -- 40, a negative index counts from the end
+
+-- Slices: from the first bound up to, not including, the second
+RETURN [10, 20, 30, 40][1..3]  -- [20, 30]
+RETURN [10, 20, 30, 40][-2..]  -- [30, 40]
+RETURN [10, 20, 30, 40][..-2]  -- [10, 20]
+RETURN 'Grafeo'[-3..]          -- 'feo', strings slice the same way
 
 -- With graph data
 MATCH (p:Person)

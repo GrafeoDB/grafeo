@@ -709,6 +709,7 @@ impl CypherTranslator {
                 variable: rel.variable.clone().unwrap_or_default(),
                 group: rel.length.is_some(),
                 types: rel.types.clone(),
+                may_be_null: false,
             })
             .collect();
         let groups = edges_to_compare(&edges, false);
@@ -1227,6 +1228,15 @@ impl CypherTranslator {
         };
 
         let (min_hops, max_hops) = hop_bounds(rel);
+        // An empty range (`*3..1`, `*..0`) matches no path, as openCypher
+        // defines it (TCK Match5, "empty interval"). The expand would read
+        // its upper bound as its lower one, so it gets no rows to start
+        // from and never walks.
+        let input = if max_hops.is_some_and(|max| max < min_hops) {
+            wrap_filter(input, LogicalExpression::Literal(Value::Bool(false)))
+        } else {
+            input
+        };
 
         // A property map or an inline WHERE on a variable-length edge must
         // hold for every hop, so it is checked over the path's edges; that

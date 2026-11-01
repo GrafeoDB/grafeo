@@ -323,33 +323,43 @@ impl RowGroupStore {
 
     /// Adds the vector and text indexes of this store, the graph `graph` of
     /// its root (empty for the root itself), to `indexes`, named
-    /// `graph/Label:property` for a named graph.
+    /// `graph/Label:property` for a named graph. A label or property that
+    /// holds `:`, `/` or a backquote is written in backquotes, as GQL writes
+    /// such a name, so two indexes never show the same name.
     #[cfg(any(feature = "vector-index", feature = "text-index"))]
     fn add_search_index_memory(&self, graph: &str, indexes: &mut IndexMemory) {
-        let named = |key: String| {
-            if graph.is_empty() {
-                key
+        let part = |name: &str| {
+            if name.contains([':', '/', '`']) {
+                format!("`{}`", name.replace('`', "``"))
             } else {
-                format!("{graph}/{key}")
+                name.to_string()
+            }
+        };
+        let named = |label: String, property: String| {
+            let (label, property) = (part(&label), part(&property));
+            if graph.is_empty() {
+                format!("{label}:{property}")
+            } else {
+                format!("{graph}/{label}:{property}")
             }
         };
         #[cfg(feature = "vector-index")]
-        for (key, index) in self.vector_index_entries() {
+        for (label, property, index) in self.vector_index_entries() {
             indexes
                 .vector_indexes
                 .push(grafeo_common::memory::NamedMemory {
-                    name: named(key),
+                    name: named(label, property),
                     bytes: index.heap_memory_bytes(),
                     item_count: index.len(),
                 });
         }
         #[cfg(feature = "text-index")]
-        for (key, index) in self.text_index_entries() {
+        for (label, property, index) in self.text_index_entries() {
             let index = index.read();
             indexes
                 .text_indexes
                 .push(grafeo_common::memory::NamedMemory {
-                    name: named(key),
+                    name: named(label, property),
                     bytes: index.heap_memory_bytes(),
                     item_count: index.len(),
                 });

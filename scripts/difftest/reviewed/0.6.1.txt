@@ -1,11 +1,14 @@
 # Reviewed differences between 0.6.0 and 0.6.1: case key, fingerprint of the reviewed result, why it changed.
 # A `~` before the fingerprint: the case's result in 0.6.0 varies from run to run, so it may also not differ.
+BI11|gql 275e163c7a A range whose upper bound is below its lower bound (*3..1) is a syntax error, as {3,1} is; 0.6.0 read it as exactly three hops.
+BI12|cypher 8206efc14d A range whose upper bound is below its lower bound (*3..1) matches nothing, as openCypher defines it; 0.6.0 read it as exactly three hops.
 BK5|cypher 572542923e A failed argument of a procedure names the argument and the procedure; 0.6.0 gave the bare division-by-zero message.
 BK5|gql 572542923e A failed argument of a procedure names the argument and the procedure; 0.6.0 gave the bare division-by-zero message.
 BW2|cypher 7b077158c6 toDecimal of a value that does not fit the precision fails with 22003, as a CAST does; 0.6.0 gave null.
 BW2|gql 7b077158c6 toDecimal of a value that does not fit the precision fails with 22003, as a CAST does; 0.6.0 gave null.
 BW4|gql 86740c1269 A CAST to DECIMAL(p, s) of a value that does not fit fails with 22003, as SQL; 0.6.0 gave null.
 CX3|cypher 9e9e9e76a9 toInteger trims the text first; 0.6.0 gave null for text with surrounding spaces.
+DD9|sparql 55ca594857 A DELETE WHERE whose pattern has no solution deletes nothing, so ex:alix ex:nick "Al" stays; 0.6.0 deleted the triples of the pattern without variables and gave no row.
 DE1|gql 5103ef079d Shortest paths read a decimal edge weight; 0.6.0 read it as 1.0 (#678).
 DE2|gql 003bcbe071 Spanning trees read a decimal edge weight; 0.6.0 read it as 1.0, so it kept the wrong edges (#678).
 DE3|gql 57bb8d0e4e Max flow reads a decimal capacity; 0.6.0 read it as 1.0 (#678).
@@ -86,6 +89,7 @@ DM7|cypher 0d27618820 toInteger and toFloat trim the text, and toInteger truncat
 DM7|gql 0d27618820 toInteger and toFloat trim the text, and toInteger truncates decimal text; 0.6.0 gave null for both.
 DM8|cypher aec59ef631 toInteger of NaN is null; 0.6.0 gave 0.
 DM8|gql aec59ef631 toInteger of NaN is null; 0.6.0 gave 0.
+DM9|gql d6f58a8e34 A fraction of a second takes the sign of its seconds and a duration of mixed signs writes the sign once: PT-1.5S is -1.5 s and P1MT-1.5S writes as itself; 0.6.0 read PT-1.5S as -0.5 s (so its text of P1MT-1.5S was P1MT0.-5S) and its own P1MT-1.-5S as -1.05 s.
 DN8|cypher 81f980f851 A top-level EXISTS runs once over the outer rows' distinct values (delim join), never for a node no outer row holds; 0.6.0 ran it for every Method and failed with division by zero.
 DN8|gql 81f980f851 A top-level EXISTS runs once over the outer rows' distinct values (delim join), never for a node no outer row holds; 0.6.0 ran it for every Method and failed with division by zero.
 DN10|cypher 81f980f851 An EXISTS inside an OR waits for its sibling conjuncts (n.active, the label), so it does not run where they are false; 0.6.0 ran it and failed with division by zero.
@@ -100,3 +104,5 @@ DN25|cypher b49653534b An EXISTS beside a condition that is false for a row does
 DN25|gql b49653534b An EXISTS beside a condition that is false for a row does not run for that row, also as a mark join, so a subquery that would divide by zero for it no longer fails; 0.6.0 failed with division by zero.
 DN27|cypher a99961e4b7 The WHERE of an OPTIONAL MATCH holding a subquery over the outer rows filters the optional part, so every outer row stays, with nulls where it does not hold; 0.6.0 dropped those rows.
 DN27|gql a99961e4b7 The WHERE of an OPTIONAL MATCH holding a subquery over the outer rows filters the optional part, so every outer row stays, with nulls where it does not hold; 0.6.0 dropped those rows.
+DQ1|gql 5d446249e1 OPTIONAL CALL of a named procedure keeps each incoming row with null when the procedure gives it no rows; 0.6.0 dropped the row as a plain CALL does (#699).
+DQ2|gql b17e0ac727 OPTIONAL CALL of a named procedure with no rows gives one row of nulls; 0.6.0 gave no row (#699).

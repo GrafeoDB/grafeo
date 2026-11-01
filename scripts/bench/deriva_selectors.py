@@ -66,7 +66,9 @@ COUNT_FROM_STATS_FACTOR = 0.1  # count(*) of a label against reading its ids
 TYPED_EXISTS_FACTOR = (
     2.0  # an edge check on hubs with 2000 other edges against reading them
 )
-MULTI_LABEL_SEEK_FACTOR = 1.3  # (n:Graph:Method {id}) against (n:Graph {id}), id index
+# (n:Graph:Method {id}) against (n:Graph {id}), id index: the second label costs a
+# longer predicate planned on every call; the plan check below catches a lost route.
+MULTI_LABEL_SEEK_FACTOR = 1.4
 # With --compare: what Grafeo already does well must not get slower.
 GUARD_RAILS = [
     "point_lookups_by_id",
@@ -215,6 +217,13 @@ SELECTORS = [
         "MATCH (n:Method) WHERE EXISTS { MATCH (n)-[:USES]->(m:Method) } RETURN n.id AS id",
     ),
 ]
+
+
+def _operator_names(node):
+    """The operator names of a PROFILE tree, root first."""
+    yield node["operator"]
+    for child in node["children"]:
+        yield from _operator_names(child)
 
 
 def median_ms(func, runs=RUNS):
@@ -459,6 +468,17 @@ def run(ic13=True):
             each_id("MATCH (n:Graph:Method {id: $id}) RETURN n.name AS name")
         )
     }
+    # The two-label lookup is one index lookup that checks both labels, with
+    # no Filter step of its own above it.
+    profile = db.execute(
+        "PROFILE MATCH (n:Graph:Method {id: $id}) RETURN n.name AS name",
+        {"id": lookup_ids[0]},
+    ).profile
+    operators = list(_operator_names(profile["root"]))
+    if operators.count("NodeList") != 1 or "Filter" in operators:
+        failures.append(
+            f"multi_label_point_lookups: the plan is not one index lookup: {operators}"
+        )
     results["expand_one_hop"] = {
         "ms": median_ms(
             each_id("MATCH (n:Method {id: $id})-[:USES]->(m) RETURN m.id AS id")
@@ -466,6 +486,10 @@ def run(ic13=True):
     }
     two_hops = "MATCH (a:File)-[:CONTAINS]->(:Method)-[:USES]->(m) RETURN count(m) AS c"
     results["two_hops"] = {"ms": median_ms(lambda: list(db.execute(two_hops)))}
+
+    # The social and hub cases first: the targets below compare their results.
+    run_social(results, failures, ic13)
+    run_hubs(results, failures)
 
     # Deriva's targets: a dedicated bulk call is at least as fast as the query
     # it replaces, and whole nodes through the query path cost about what the
@@ -492,8 +516,6 @@ def run(ic13=True):
         failures.append(
             f"EXISTS short-circuit guard: {guard:.1f}x the query without the EXISTS (limit {GUARD_FACTOR}x)"
         )
-    run_social(results, failures, ic13)
-    run_hubs(results, failures)
     return results, failures
 
 

@@ -840,6 +840,8 @@ impl WalManager {
                 if seq + 2 < current_seq {
                     // Only delete if we have a checkpoint after this log
                     if checkpoint.as_u64() > seq {
+                        // Best effort: the checkpoint covers the log, and a
+                        // log that stays is removed by the next truncation.
                         let _ = fs::remove_file(&file);
                     }
                 }

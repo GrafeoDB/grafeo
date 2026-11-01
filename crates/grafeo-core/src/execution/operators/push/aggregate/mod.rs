@@ -11,8 +11,8 @@ use grafeo_common::types::TemporalComparison;
 use grafeo_common::types::Value;
 /// The groups of an aggregate, in the order their first rows came: a
 /// `GROUP BY` without `ORDER BY` gives the same order on every run (a hash
-/// map's order changes with its random seed). After a spill they come in
-/// partition order.
+/// map's order changes with its random seed). Partitioned groups, which can
+/// spill, keep this order too (see `PartitionedState::drain_all`).
 type Groups = indexmap::IndexMap<RowKey, GroupState, grafeo_common::utils::hash::FxBuildHasher>;
 #[cfg(feature = "spill")]
 use spill_codec::{deserialize_group_state, serialize_group_state};
@@ -1003,6 +1003,92 @@ mod tests {
             if let Some(Value::Int64(count)) = chunks[0].column(1).unwrap().get_value(i) {
                 assert_eq!(count, 1);
             }
+        }
+    }
+
+    /// Spillable groups keep the order of their first rows.
+    #[cfg(feature = "spill")]
+    mod first_row_order {
+        use super::*;
+
+        /// The keys `(i * 37) % 500` for `i` in `0..rows`: each of the 500 keys
+        /// first at `i < 500`, in an order that is not sorted.
+        fn first_seen_keys(rows: i64) -> Vec<i64> {
+            (0..rows).map(|i| (i * 37) % 500).collect()
+        }
+
+        /// Pushes `keys` in chunks of 50 rows.
+        fn push_keys(agg: &mut SpillableAggregatePushOperator, keys: &[i64]) {
+            let mut sink = CollectorSink::new();
+            for chunk in keys.chunks(50) {
+                agg.push(create_test_chunk(chunk), &mut sink).unwrap();
+            }
+        }
+
+        /// Finalizes `agg` and returns its groups with their counts, in output
+        /// order.
+        fn grouped_counts(agg: &mut SpillableAggregatePushOperator) -> Vec<(i64, i64)> {
+            let mut sink = CollectorSink::new();
+            agg.finalize(&mut sink).unwrap();
+            let chunks = sink.into_chunks();
+            assert_eq!(chunks.len(), 1);
+            let chunk = &chunks[0];
+            (0..chunk.len())
+                .map(|row| {
+                    let value = |column| chunk.column(column).unwrap().get_value(row);
+                    match (value(0), value(1)) {
+                        (Some(Value::Int64(key)), Some(Value::Int64(count))) => (key, count),
+                        other => panic!("row {row}: {other:?}"),
+                    }
+                })
+                .collect()
+        }
+
+        /// Partitioned groups come out in the order their first rows came,
+        /// whether a partition stayed in memory, went to disk and came back, or
+        /// was still on disk at the end.
+        #[test]
+        fn partitioned_groups_come_out_in_first_row_order() {
+            use tempfile::TempDir;
+
+            let keys = first_seen_keys(2000);
+            let want: Vec<(i64, i64)> = keys[..500].iter().map(|&key| (key, 4)).collect();
+            for threshold in [usize::MAX, 100] {
+                let temp_dir = TempDir::new().unwrap();
+                let manager = Arc::new(SpillManager::new(temp_dir.path()).unwrap());
+                let mut agg = SpillableAggregatePushOperator::with_spilling(
+                    vec![0],
+                    vec![AggregateExpr::count_star()],
+                    Arc::clone(&manager),
+                    threshold,
+                );
+                push_keys(&mut agg, &keys);
+                assert_eq!(
+                    manager.active_file_count() > 0,
+                    threshold == 100,
+                    "threshold {threshold}: partitions on disk at the end"
+                );
+                assert_eq!(grouped_counts(&mut agg), want, "threshold {threshold}");
+            }
+        }
+
+        /// Groups that move from the map to partitions at the row-count
+        /// threshold keep their first-row order.
+        #[test]
+        fn groups_moved_to_partitions_keep_first_row_order() {
+            use tempfile::TempDir;
+
+            let temp_dir = TempDir::new().unwrap();
+            let manager = Arc::new(SpillManager::new(temp_dir.path()).unwrap());
+            let mut agg =
+                SpillableAggregatePushOperator::new(vec![0], vec![AggregateExpr::count_star()])
+                    .with_threshold(120);
+            agg.spill_manager = Some(manager);
+            let keys = first_seen_keys(1500);
+            let want: Vec<(i64, i64)> = keys[..500].iter().map(|&key| (key, 3)).collect();
+            push_keys(&mut agg, &keys);
+            assert!(agg.using_partitioned);
+            assert_eq!(grouped_counts(&mut agg), want);
         }
     }
 

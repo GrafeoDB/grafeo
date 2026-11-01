@@ -267,7 +267,7 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
       - uses: cargo-bins/cargo-binstall@main
-      - run: cargo binstall wasm-bindgen-cli@0.2.118 --no-confirm
+      - run: cargo binstall wasm-bindgen-cli@0.2.130 --no-confirm
       - uses: actions/cache@v6
         with:
           path: |
@@ -301,7 +301,7 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
       - uses: cargo-bins/cargo-binstall@main
-      - run: cargo binstall wasm-bindgen-cli@0.2.118 --no-confirm
+      - run: cargo binstall wasm-bindgen-cli@0.2.130 --no-confirm
       - uses: actions/cache@v6
         with:
           path: |
@@ -331,13 +331,17 @@ jobs:
         os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
       # Every test binary of the debug build links the whole engine, which
-      # nearly fills an ubuntu runner's disk: remove preinstalled SDKs that
-      # this job does not use.
+      # fills an ubuntu runner's disk: remove preinstalled SDKs, browsers,
+      # tool caches and images that this job does not use.
       - name: Free disk space
         if: runner.os == 'Linux'
         run: |
           df -h /
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          sudo rm -rf /usr/share/swift /usr/local/.ghcup /usr/local/share/powershell /usr/local/share/chromium \
+            /opt/microsoft /opt/google /opt/az /usr/local/julia* /usr/local/share/boost \
+            /opt/hostedtoolcache/PyPy /opt/hostedtoolcache/Ruby /opt/hostedtoolcache/go
+          sudo docker image prune --all --force > /dev/null || true
           df -h /
 
       - uses: actions/checkout@v7
@@ -1100,7 +1104,7 @@ jobs:
 
       - name: Install wasm-bindgen-cli
         uses: cargo-bins/cargo-binstall@main
-      - run: cargo binstall wasm-bindgen-cli@0.2.118 --no-confirm
+      - run: cargo binstall wasm-bindgen-cli@0.2.130 --no-confirm
 
       - name: Cache cargo registry
         uses: actions/cache@v6

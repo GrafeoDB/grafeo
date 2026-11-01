@@ -703,10 +703,7 @@ fn every_vector_index<S: RootStore>(store: &S) -> BTreeSet<(String, String)> {
     store
         .vector_index_entries()
         .into_iter()
-        .filter_map(|(key, _)| {
-            let (label, property) = key.split_once(':')?;
-            Some((label.to_string(), property.to_string()))
-        })
+        .map(|(label, property, _)| (label, property))
         .collect()
 }
 
@@ -823,6 +820,8 @@ impl super::GrafeoDB {
             }
         }
         for directory in directories.iter().filter(|directory| directory.derived) {
+            // Best effort, and non-recursive: a directory something is left
+            // in (a kept file, another one's) stays.
             let _ = std::fs::remove_dir(&directory.path);
         }
         Ok(())

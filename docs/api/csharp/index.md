@@ -354,7 +354,7 @@ tx.Commit(); // if this line is not reached, the transaction auto-rolls back
 | `ExecuteWithParams(string query, Dictionary<string, object?> parameters)` | `QueryResult` | Execute GQL with params within the transaction |
 | `ExecuteWithParamsAsync(string query, Dictionary<string, object?> parameters, CancellationToken ct = default)` | `Task<QueryResult>` | Execute GQL with params on the thread pool |
 | `Commit()` | `void` | Commit the transaction, making all changes permanent |
-| `Rollback()` | `void` | Roll back the transaction, discarding all changes |
+| `Rollback()` | `void` | Roll back the transaction, discarding all changes. Throws `TransactionException` after a commit that succeeded; does nothing after one that failed, which ended the transaction |
 | `Dispose()` | `void` | Dispose the handle; auto-rolls back if not committed |
 | `DisposeAsync()` | `ValueTask` | Async disposal (calls `Dispose` synchronously) |
 
@@ -376,6 +376,28 @@ var result = db.Execute("RETURN 19.99 AS price");
 var price = (GrafeoDecimal)result.Rows[0]["price"];
 Console.WriteLine(price.Text);         // 19.99
 decimal exact = price.ToDecimal();     // 19.99m
+```
+
+### GrafeoTime and GrafeoDuration
+
+A GQL `TIME` with a UTC offset (`12:30:00+02:00`), or one finer than 100 ns,
+comes back as a `GrafeoTime`: `Hour`, `Minute`, `Second`, `Nanosecond`,
+`Offset` (null for a local time), `Text`, and `ToTimeOnly()` for the clock
+reading. Any other `TIME` comes back as a `TimeOnly`. A GQL `DURATION` comes
+back as a `GrafeoDuration` of `Months`, `Days` and `Nanoseconds`, kept apart
+because a month and a day have no fixed length (`P1M` is not `P30D`, `P1D` is
+not `PT24H`); `TryToTimeSpan` and `ToTimeSpan()` give a `TimeSpan` when there
+are no months, the nanoseconds are whole 100 ns ticks and the value fits in a
+`TimeSpan` (otherwise `TryToTimeSpan` returns false and `ToTimeSpan()` throws).
+Make one with `new GrafeoTime(12, 30, 0, offset:
+TimeSpan.FromHours(2))`, `new GrafeoTime("12:30:00+02:00")`,
+`new GrafeoDuration(14, 3, 0)` or `new GrafeoDuration("P1Y2M3D")`; passed as a
+parameter, each is that `TIME` or `DURATION`.
+
+```csharp
+var row = db.Execute("RETURN TIME '12:30:00+02:00' AS opens, DURATION 'P1M' AS term").Rows[0];
+var opens = (GrafeoTime)row["opens"]!;  // 12:30:00+02:00, Offset 02:00:00
+var term = (GrafeoDuration)row["term"]!; // Months 1
 ```
 
 ### RdfTerm
@@ -509,16 +531,19 @@ catch (GrafeoException ex)
 | `float` | Float64 | Widened to `double` |
 | `double` | Float64 | |
 | `string` | String | |
-| `DateTime` | Timestamp | Converted to UTC microseconds |
-| `DateTimeOffset` | Timestamp | Converted to UTC microseconds |
-| `DateOnly` | Date | ISO 8601 date string |
-| `TimeOnly` | Time | ISO 8601 time string |
-| `TimeSpan` | Duration | ISO 8601 duration string |
+| `DateTime` | Timestamp (`LOCAL DATETIME`) | To the microsecond, in UTC (an unspecified kind is read as local); comes back as a UTC `DateTime` |
+| `DateTimeOffset` | Zoned datetime | To the microsecond, with its offset; comes back as a `DateTimeOffset` |
+| `DateOnly` | Date | Comes back as a `DateOnly` |
+| `TimeOnly` | Time | A local time, to 100 ns; comes back as a `TimeOnly` |
+| `GrafeoTime` | Time | With an offset, or finer than 100 ns: comes back as a `GrafeoTime` |
+| `TimeSpan`, `GrafeoDuration` | Duration | A `TimeSpan` is a duration of its days and the rest; every duration comes back as a `GrafeoDuration` |
 | `byte[]` | Bytes | Base64-encoded for transport |
 | `float[]` | Vector | For embeddings and similarity search |
 | `ReadOnlyMemory<float>` | Vector | Zero-copy span-based vector input |
 | `IList<object?>` | List | Elements converted recursively |
 | `IDictionary<string, object?>` | Map | Keys must be strings |
+
+A value read back goes in again as the type it came as.
 
 ## Links
 

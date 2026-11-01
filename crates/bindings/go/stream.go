@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"runtime"
+	"strings"
 	"unsafe"
 )
 
@@ -84,12 +85,15 @@ func (s *ResultStream) Next() (map[string]any, error) {
 	}
 	defer C.grafeo_free_string(outPtr)
 
-	jsonStr := C.GoString(outPtr)
+	// Numbers as json.Number, as Execute gives them: a float64 loses
+	// integers above 2^53
 	var row map[string]any
-	if err := json.Unmarshal([]byte(jsonStr), &row); err != nil {
+	dec := json.NewDecoder(strings.NewReader(C.GoString(outPtr)))
+	dec.UseNumber()
+	if err := dec.Decode(&row); err != nil {
 		return nil, err
 	}
-	return row, nil
+	return decodeFields(row), nil
 }
 
 // Rows returns a channel-free iterator for a classic Go for-loop:

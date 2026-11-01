@@ -7,7 +7,8 @@ use std::sync::Arc;
 use grafeo_common::types::{ArcStr, NodeId, PropertyKey, ReadView, Value};
 
 use super::super::{Inner, ROWS_PER_GROUP, Read, RowGroupStore};
-use super::{IndexSearch, search_key};
+use super::IndexSearch;
+use super::key::{SearchKey, search_key};
 use crate::index::ranking::by_ascending_distance;
 use crate::index::vector::{
     DistanceMetric, HnswConfig, VectorAccessor, VectorIndexKind, brute_force_knn, compute_distance,
@@ -355,7 +356,7 @@ impl RowGroupStore {
         inner
             .indexes
             .vector
-            .insert(search_key(label, property), entry);
+            .insert(SearchKey::new(label, property), entry);
     }
 
     /// The nodes `view` sees nearest to `query`, nearest first, through the
@@ -414,17 +415,11 @@ impl RowGroupStore {
     /// Retrieves the vector index for a label and a property.
     #[must_use]
     pub fn get_vector_index(&self, label: &str, property: &str) -> Option<Arc<VectorIndexKind>> {
-        self.get_vector_index_by_key(&search_key(label, property))
-    }
-
-    /// Looks up a vector index by its `"label:property"` key.
-    #[must_use]
-    pub fn get_vector_index_by_key(&self, key: &str) -> Option<Arc<VectorIndexKind>> {
         self.inner
             .read()
             .indexes
             .vector
-            .get(key)
+            .get(&search_key(label, property))
             .map(|entry| Arc::clone(&entry.index))
     }
 
@@ -439,16 +434,21 @@ impl RowGroupStore {
             .is_some()
     }
 
-    /// Returns all vector index entries as `(key, index)` pairs, keys in
-    /// `"label:property"` format.
+    /// Returns all vector indexes as `(label, property, index)`.
     #[must_use]
-    pub fn vector_index_entries(&self) -> Vec<(String, Arc<VectorIndexKind>)> {
+    pub fn vector_index_entries(&self) -> Vec<(String, String, Arc<VectorIndexKind>)> {
         self.inner
             .read()
             .indexes
             .vector
             .iter()
-            .map(|(key, entry)| (key.clone(), Arc::clone(&entry.index)))
+            .map(|(key, entry)| {
+                (
+                    key.label.clone(),
+                    key.property.clone(),
+                    Arc::clone(&entry.index),
+                )
+            })
             .collect()
     }
 }

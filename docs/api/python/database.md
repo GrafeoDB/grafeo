@@ -449,10 +449,21 @@ db.upsert_nodes(["Graph", "File"], [{"id": "f1", "size": 3}, {"id": "f2", "size"
 
 Updates the nodes that already exist, one per row, matched by `key` and all of `labels`; it never creates
 a node. A row's properties are merged into the node's and the others stay, as
-`UNWIND $rows AS r MATCH (n:Labels {key: r.key}) SET n += r` does. A row whose key matches no node with
-every label, or that lacks the key, is skipped. No rows is a no-op. The time it takes grows with the number
-of rows and nodes, also without a property index on `key`, so it is much faster than that query on large
-batches.
+`UNWIND $rows AS r MATCH (n:Labels {key: r.key}) SET n += r` does:
+
+- a `None` value removes the property;
+- a key that several nodes have updates all of them (the row counts once in `updated`);
+- a row whose key matches no node with every label, or that lacks the key, is skipped and creates nothing;
+- keys compare as `=` does, which also takes a string of digits as equal to that number: `2.0` and `"2"` find
+  the node whose key is `2`, and `3` the one whose key is `"3"`;
+- a row with only the key counts as updated and changes nothing;
+- with no labels (`[]`), every node counts.
+
+The call is one write, as that query is: all rows or none, logged to the WAL (a persistent database keeps
+it after a crash) and to change data capture, and inside the open transaction when there is one. No rows
+is a no-op. Without a property index on `key` it reads the nodes of the first label once, so its time grows
+with the rows and those nodes; with one, rows up to a third of those nodes look their nodes up through the
+index, as the query does.
 
 ```python
 def update_nodes(self, labels: list[str], rows: list[dict], key: str = "id") -> dict
@@ -564,6 +575,12 @@ db.import_df(edges, mode="edges", edge_type="KNOWS")
 
 Zero-copy bulk export using Apache Arrow. These methods are faster than `nodes_df()`/`edges_df()` for large graphs because they build Arrow record batches directly in Rust, avoiding row-by-row Python object creation.
 
+`nodes_to_arrow()`, `edges_to_arrow()`, `nodes_to_pandas()`, `edges_to_pandas()` and `QueryResult.to_arrow()` need pyarrow 14 or later. The `arrow` extra installs it, and a package that calls them can declare `grafeo[arrow]` as its dependency:
+
+```bash
+uv add "grafeo[arrow]"
+```
+
 !!! note
     `nodes_df()` and `edges_df()` now auto-detect pyarrow at runtime. When pyarrow is available, they use the Arrow fast path internally, so you get the same speed as `nodes_to_pandas()` without changing existing code.
 
@@ -586,7 +603,7 @@ A null is null at every level. Values of different types in one column, or in on
 
 ### nodes_to_arrow()
 
-Export all nodes as a `pyarrow.Table`. Requires pyarrow (`uv add pyarrow`).
+Export all nodes as a `pyarrow.Table`. Requires pyarrow (`uv add "grafeo[arrow]"`).
 
 ```python
 def nodes_to_arrow(self) -> pyarrow.Table
@@ -600,7 +617,7 @@ print(table.to_pandas())
 
 ### edges_to_arrow()
 
-Export all edges as a `pyarrow.Table`. Requires pyarrow (`uv add pyarrow`).
+Export all edges as a `pyarrow.Table`. Requires pyarrow (`uv add "grafeo[arrow]"`).
 
 ```python
 def edges_to_arrow(self) -> pyarrow.Table
@@ -639,7 +656,7 @@ print(df.filter(pl.col("_type") == "KNOWS"))
 
 ### nodes_to_pandas()
 
-Export all nodes as a `pandas.DataFrame` via the Arrow fast path. Requires both pandas and pyarrow (`uv add pandas pyarrow`). It keeps pyarrow's own conversion (a list is a numpy array); `nodes_df()` takes the same path when pyarrow is installed and returns lists and dicts.
+Export all nodes as a `pandas.DataFrame` via the Arrow fast path. Requires both pandas and pyarrow (`uv add pandas "grafeo[arrow]"`). It keeps pyarrow's own conversion (a list is a numpy array); `nodes_df()` takes the same path when pyarrow is installed and returns lists and dicts.
 
 ```python
 def nodes_to_pandas(self) -> pandas.DataFrame
@@ -652,7 +669,7 @@ print(df[df["_labels"].apply(lambda l: "Person" in l)])
 
 ### edges_to_pandas()
 
-Export all edges as a `pandas.DataFrame` via the Arrow fast path. Requires both pandas and pyarrow (`uv add pandas pyarrow`).
+Export all edges as a `pandas.DataFrame` via the Arrow fast path. Requires both pandas and pyarrow (`uv add pandas "grafeo[arrow]"`).
 
 ```python
 def edges_to_pandas(self) -> pandas.DataFrame
@@ -1064,6 +1081,53 @@ Returns the current schema name, or `None` if no schema is set.
 ```python
 def current_schema(self) -> Optional[str]
 ```
+
+## RDF Loading
+
+Load Turtle or N-Triples into the RDF store, from a file or from text, into the default graph or a named
+graph. Each call is one bulk write: the input is parsed first, nothing is inserted when a line does not
+parse (the error names the line), and the triples go to the WAL as one group, so a persistent database
+keeps all of them or none after a crash. A load reports no change data capture events. Each returns how
+many triples were new in its graph: a triple the graph holds already counts as nothing new, and the
+blank nodes of a document are new ones on each load. Requires the `triple-store` feature (in the default
+wheel).
+
+A named graph is given by its IRI, without angle brackets. It is created when it does not exist, and holds
+the triples where `INSERT DATA { GRAPH <iri> { ... } }` puts them, so `GRAPH <iri> { ... }` in a query
+reads them.
+
+### load_rdf()
+
+Load an RDF file. `format` is `"turtle"` or `"ntriples"` (also `"ttl"` and `"nt"`); by default the file's
+extension decides (`.ttl`, `.nt`).
+
+```python
+def load_rdf(self, path: str | os.PathLike, format: str | None = None, graph: str | None = None) -> int
+```
+
+```python
+db.load_rdf("people.ttl")
+db.load_rdf("cities.nt", graph="http://example.org/cities")
+```
+
+### load_rdf_text()
+
+Load RDF text in `format` (`"turtle"` or `"ntriples"`).
+
+```python
+def load_rdf_text(self, text: str, format: str, graph: str | None = None) -> int
+```
+
+```python
+turtle = """
+@prefix ex: <http://example.org/> .
+ex:alix ex:knows ex:gus ; ex:city "Amsterdam" .
+"""
+db.load_rdf_text(turtle, "turtle")  # 2
+db.execute_sparql("SELECT ?who WHERE { <http://example.org/alix> <http://example.org/knows> ?who }")
+```
+
+SPARQL `LOAD` is not supported yet; use these calls instead.
 
 ## SHACL Validation
 

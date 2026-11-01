@@ -12,6 +12,10 @@ namespace Grafeo;
 /// </summary>
 internal static class ValueConverter
 {
+    /// <summary>The Unix microseconds of DateTime.MinValue and DateTime.MaxValue.</summary>
+    private const long MinUnixMicroseconds = -62_135_596_800_000_000;
+    private const long MaxUnixMicroseconds = 253_402_300_799_999_999;
+
     /// <summary>Encode a parameter dictionary as a JSON string for grafeo-c.</summary>
     internal static string EncodeParams(Dictionary<string, object?> parameters)
     {
@@ -59,34 +63,37 @@ internal static class ValueConverter
             {
                 ["$decimal"] = m.ToString(System.Globalization.CultureInfo.InvariantCulture)
             },
-            DateTime dt => new JsonObject
-            {
-                ["$timestamp_us"] = new DateTimeOffset(dt.ToUniversalTime())
-                    .ToUnixTimeMilliseconds() * 1000
-            },
-            DateTimeOffset dto => new JsonObject
-            {
-                ["$timestamp_us"] = dto.ToUnixTimeMilliseconds() * 1000
-            },
+            // A TIMESTAMP, to the microsecond (a finer part dropped)
+            DateTime dt => new JsonObject { ["$timestamp_us"] = UnixMicroseconds(dt.ToUniversalTime()) },
+            // A ZONED DATETIME: the offset is kept
+            DateTimeOffset dto => new JsonObject { ["$zoned_datetime"] = ZonedText(dto) },
             DateOnly date => new JsonObject
             {
-                ["$date"] = date.ToString("yyyy-MM-dd")
+                ["$date"] = date.ToString("yyyy'-'MM'-'dd", System.Globalization.CultureInfo.InvariantCulture)
             },
-            TimeOnly time => new JsonObject
-            {
-                ["$time"] = time.ToString("HH:mm:ss")
-            },
-            TimeSpan duration => new JsonObject
-            {
-                ["$duration"] = System.Xml.XmlConvert.ToString(duration)
-            },
-            byte[] bytes => JsonValue.Create(Convert.ToBase64String(bytes)),
+            TimeOnly time => new JsonObject { ["$time"] = GrafeoTime.FromTimeOnly(time).Text },
+            GrafeoTime time => new JsonObject { ["$time"] = time.Text },
+            TimeSpan duration => new JsonObject { ["$duration"] = GrafeoDuration.FromTimeSpan(duration).Text },
+            GrafeoDuration duration => new JsonObject { ["$duration"] = duration.Text },
+            byte[] bytes => new JsonObject { ["$bytes"] = Convert.ToBase64String(bytes) },
             float[] vector => VectorToJsonArray(vector),
             ReadOnlyMemory<float> mem => VectorToJsonArray(mem.Span),
             IList<object?> list => ListToJsonArray(list),
             IDictionary<string, object?> dict => DictToJsonObject(dict),
             _ => JsonValue.Create(value.ToString()),
         };
+
+    /// <summary>The microseconds of a UTC <paramref name="utc"/> since the Unix epoch, rounded down.</summary>
+    private static long UnixMicroseconds(DateTime utc)
+    {
+        var ticks = utc.Ticks - DateTime.UnixEpoch.Ticks;
+        return ticks / 10 - (ticks % 10 < 0 ? 1 : 0);
+    }
+
+    /// <summary>A ZONED DATETIME's text: the clock reading to the microsecond, and the offset.</summary>
+    private static string ZonedText(DateTimeOffset dto) =>
+        dto.ToString("yyyy'-'MM'-'dd'T'HH':'mm':'ss.FFFFFF", System.Globalization.CultureInfo.InvariantCulture)
+        + dto.ToString("zzz", System.Globalization.CultureInfo.InvariantCulture);
 
     /// <summary>
     /// A double as JSON: a number that reads back as a float (a whole one keeps
@@ -233,6 +240,20 @@ internal static class ValueConverter
         if (RdfTerm.FromJson(element) is { } term)
             return term;
 
+        // Bytes: the "$bytes" tag, standard base64, as the object's only key
+        if (element.TryGetProperty("$bytes", out var bytesElement)
+            && element.EnumerateObject().Count() == 1
+            && bytesElement.ValueKind == JsonValueKind.String)
+        {
+            // Canonical standard base64 only, as the engine reads it: a text it
+            // kept as a map (whitespace, unused bits set) stays a map
+            var text = bytesElement.GetString()!;
+            var buffer = new byte[text.Length];
+            if (Convert.TryFromBase64String(text, buffer, out var written)
+                && Convert.ToBase64String(buffer, 0, written) == text)
+                return buffer[..written];
+        }
+
         // A float JSON cannot write: the "$float" tag as the object's only key
         if (element.TryGetProperty("$float", out var floatElement)
             && element.EnumerateObject().Count() == 1
@@ -254,29 +275,14 @@ internal static class ValueConverter
             return new GrafeoDecimal(decimalElement.GetString()!);
         }
 
-        // Check for temporal markers from grafeo-bindings-common
-        if (element.TryGetProperty("$timestamp_us", out var tsElement))
-        {
-            var microseconds = tsElement.GetInt64();
-            var milliseconds = microseconds / 1000;
-            return DateTimeOffset.FromUnixTimeMilliseconds(milliseconds).UtcDateTime;
-        }
-        if (element.TryGetProperty("$date", out var dateElement))
-        {
-            return dateElement.GetString() ?? "";
-        }
-        if (element.TryGetProperty("$time", out var timeElement))
-        {
-            return timeElement.GetString() ?? "";
-        }
-        if (element.TryGetProperty("$duration", out var durElement))
-        {
-            return durElement.GetString() ?? "";
-        }
-        if (element.TryGetProperty("$zoned_datetime", out var zdtElement))
-        {
-            return zdtElement.GetString() ?? "";
-        }
+        // Temporal tags from grafeo-bindings-common, each as the object's only
+        // key and with a value of its type: an object with another key, or a
+        // value of another type, stays a map, and so does a value the type it
+        // comes back as cannot hold (a timestamp before year 1 or after 9999),
+        // where it would fail the whole result. As a parameter, such a map is
+        // the tagged value again.
+        if (element.EnumerateObject().Count() == 1 && TemporalOf(element) is { } temporal)
+            return temporal;
 
         // Regular object
         var dict = new Dictionary<string, object?>();
@@ -286,6 +292,58 @@ internal static class ValueConverter
         }
         return dict;
     }
+
+    /// <summary>
+    /// The value of a temporal tag: a TIMESTAMP as a UTC <see cref="DateTime"/>,
+    /// a ZONED DATETIME as a <see cref="DateTimeOffset"/>, a DATE as a
+    /// <see cref="DateOnly"/>, a TIME as a <see cref="TimeOnly"/> (local, in
+    /// whole 100 ns) or else a <see cref="GrafeoTime"/>, a DURATION as a
+    /// <see cref="GrafeoDuration"/>; null for another tag or a value these
+    /// cannot hold.
+    /// </summary>
+    private static object? TemporalOf(JsonElement element)
+    {
+        if (element.TryGetProperty("$timestamp_us", out var tsElement))
+        {
+            return tsElement.ValueKind == JsonValueKind.Number
+                && tsElement.TryGetInt64(out var microseconds)
+                && microseconds is >= MinUnixMicroseconds and <= MaxUnixMicroseconds
+                ? DateTime.UnixEpoch.AddTicks(microseconds * 10)
+                : null;
+        }
+        var property = element.EnumerateObject().First();
+        if (property.Value.ValueKind != JsonValueKind.String)
+            return null;
+        var text = property.Value.GetString()!;
+        var invariant = System.Globalization.CultureInfo.InvariantCulture;
+        var styles = System.Globalization.DateTimeStyles.None;
+        switch (property.Name)
+        {
+            case "$zoned_datetime":
+                return DateTimeOffset.TryParseExact(text, ZonedFormats, invariant, styles, out var zoned)
+                    ? zoned
+                    : null;
+            case "$date":
+                return DateOnly.TryParseExact(text, "yyyy'-'MM'-'dd", invariant, styles, out var date)
+                    ? date
+                    : null;
+            case "$time":
+                if (!GrafeoTime.TryParse(text, out var time))
+                    return null;
+                return time.Offset is null && time.Nanosecond % 100 == 0 ? time.ToTimeOnly() : time;
+            case "$duration":
+                return GrafeoDuration.TryParse(text, out var duration) ? duration : null;
+            default:
+                return null;
+        }
+    }
+
+    /// <summary>The texts of a ZONED DATETIME: a fraction of up to six digits or none, then Z or an offset.</summary>
+    private static readonly string[] ZonedFormats =
+    [
+        "yyyy'-'MM'-'dd'T'HH':'mm':'ss.FFFFFFK",
+        "yyyy'-'MM'-'dd'T'HH':'mm':'ssK",
+    ];
 
     // =========================================================================
     // Entity extraction

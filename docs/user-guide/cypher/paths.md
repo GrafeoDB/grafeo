@@ -34,6 +34,9 @@ MATCH (a:Person)-[:KNOWS*2..]->(b:Person)
 RETURN a.name, b.name
 ```
 
+A range whose upper bound is below its lower bound (`*3..1`, or `*..0`, whose lower bound is 1) is empty and
+matches no path, as openCypher defines it: `MATCH` gives no rows and `OPTIONAL MATCH` a row of nulls.
+
 ## Path Variables
 
 ```cypher
@@ -64,6 +67,11 @@ RETURN path
 ```
 
 The path must fit the relationship's length: `[*]` is one or more hops, `[*..3]` at most three, `[*0..]` also pairs a node with itself (length 0), and a relationship without `*` is a single hop. A pair of nodes without such a path has no row; use `OPTIONAL MATCH` to keep it with a null path.
+
+A shortest path from a node to itself (`shortestPath((a)-[:KNOWS*]-(a))`) has no row, or a null path under
+`OPTIONAL MATCH`: a shortest path joins two different nodes, so the search does not look for a way back to the start,
+neither out and back over one relationship nor around a cycle such as Alix, Gus, Mia, Alix. With `*0..` it is the
+path of length 0.
 
 ## Path Filtering
 

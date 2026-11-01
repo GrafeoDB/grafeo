@@ -211,6 +211,13 @@ pub(crate) fn beats_a_seek(
         Some(label) => store.label_node_estimate(label),
         None => store.node_estimate(),
     };
+    rows_beat_a_seek(rows, nodes)
+}
+
+/// Whether `rows` keys are found faster by one pass over `nodes` nodes than
+/// by a seek per key through the key's index: when the rows are more than
+/// a third of the nodes (see [`beats_a_seek`]).
+pub(crate) fn rows_beat_a_seek(rows: usize, nodes: u64) -> bool {
     u64::try_from(rows).unwrap_or(u64::MAX).saturating_mul(3) > nodes
 }
 

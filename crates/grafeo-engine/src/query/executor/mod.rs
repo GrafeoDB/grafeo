@@ -6,8 +6,8 @@
 pub mod procedure_call;
 #[cfg(feature = "gql")]
 pub mod stream;
-#[cfg(all(feature = "algos", feature = "gql"))]
-pub mod user_procedure;
+#[cfg(stored_procedures)]
+pub(crate) mod user_procedure;
 
 use std::sync::Arc;
 use std::time::Duration;

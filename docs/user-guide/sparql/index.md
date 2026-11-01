@@ -44,7 +44,7 @@ Example triples:
 
 ## Enabling SPARQL
 
-SPARQL requires the `sparql` feature flag. The default Grafeo features (`lpg`, `gql`, `parallel`) do not include SPARQL.
+SPARQL requires the `sparql` feature flag. The default features of the `grafeo` crate do not include it; the `rdf` profile adds it with the RDF store, GraphQL and SHACL validation.
 
 === "Rust"
 
@@ -62,10 +62,10 @@ SPARQL requires the `sparql` feature flag. The default Grafeo features (`lpg`, `
 
 === "Node.js"
 
-    The published `@grafeo-db/node` package includes SPARQL support by default:
+    The published `@grafeo-db/js` package includes SPARQL support by default:
 
     ```bash
-    npm install @grafeo-db/node
+    npm install @grafeo-db/js
     ```
 
 ## Using SPARQL

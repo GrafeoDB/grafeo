@@ -195,10 +195,16 @@ impl Inner {
         max_inclusive: bool,
         read: Read,
     ) -> Vec<NodeId> {
+        // The key's id once, not per row: no node has a key the store has
+        // no id for.
+        let Some(key) = self.keys.get_id(property) else {
+            return Vec::new();
+        };
         self.node_rows(|_, group, row| {
             group.version(row).visible(read)
-                && self
-                    .value_at(&group.columns, row, property, read)
+                && group
+                    .columns
+                    .get_at(key, row, read)
                     .is_some_and(|value| in_range(&value, min, max, min_inclusive, max_inclusive))
         })
     }
@@ -439,6 +445,35 @@ impl Inner {
         }
         let mut count = 0;
         self.each_seen(node, direction, None, read, |_, _| count += 1);
+        count
+    }
+
+    /// How many edges [`each_seen`](Self::each_seen) gives for `node` in
+    /// `direction` of the edge type ids (all for `None`) whose other end has
+    /// every label id of `end_labels` as `read` sees it, counted without the
+    /// list.
+    fn count_seen(
+        &self,
+        node: NodeId,
+        direction: Direction,
+        edge_types: Option<&[u32]>,
+        end_labels: &[u32],
+        read: Read,
+    ) -> usize {
+        if edge_types.is_none() && end_labels.is_empty() {
+            return self.degree_seen(node, direction, read);
+        }
+        let mut count = 0;
+        self.each_seen(node, direction, edge_types, read, |other, _| {
+            let labelled = end_labels.is_empty()
+                || self.node(other.as_u64()).is_some_and(|(group, row)| {
+                    group.version(row).visible(read)
+                        && end_labels
+                            .iter()
+                            .all(|&label| group.has_label_at(row, label, read))
+                });
+            count += usize::from(labelled);
+        });
         count
     }
 
@@ -703,9 +738,17 @@ impl GraphStore for RowGroupStore {
         view: ReadView,
     ) -> Result<Vec<Option<Value>>> {
         let (inner, read) = (self.inner.read(), Read::view(view));
+        // The key's id once for the batch: no node has a key the store has
+        // no id for.
+        let Some(key) = inner.keys.get_id(key.as_str()) else {
+            return Ok(vec![None; ids.len()]);
+        };
         Ok(ids
             .iter()
-            .map(|id| inner.node_value_at(id.as_u64(), key.as_str(), read))
+            .map(|id| {
+                let (group, row) = inner.node_seen(id.as_u64(), read)?;
+                group.columns.get_at(key, row, read)
+            })
             .collect())
     }
 
@@ -773,6 +816,30 @@ impl GraphStore for RowGroupStore {
             return Ok(false);
         }
         Ok(inner.any_seen(node, direction, ids.as_deref(), Read::view(view)))
+    }
+
+    fn count_edges(
+        &self,
+        node: NodeId,
+        direction: Direction,
+        types: &[ArcStr],
+        end_labels: &[ArcStr],
+        view: ReadView,
+    ) -> Result<usize> {
+        let inner = self.inner.read();
+        let ids = inner.type_ids(types);
+        if ids.as_ref().is_some_and(SmallVec::is_empty) {
+            return Ok(0);
+        }
+        // A label the store has no id for is a label no node has.
+        let mut labels: SmallVec<[u32; 2]> = SmallVec::with_capacity(end_labels.len());
+        for label in end_labels {
+            match inner.label_id(label) {
+                Some(id) => labels.push(id),
+                None => return Ok(0),
+            }
+        }
+        Ok(inner.count_seen(node, direction, ids.as_deref(), &labels, Read::view(view)))
     }
 
     fn degree(&self, node: NodeId, direction: Direction, view: ReadView) -> Result<usize> {

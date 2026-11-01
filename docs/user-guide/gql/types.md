@@ -151,7 +151,7 @@ RETURN person.name, person.age
 
 ### IS TYPED / IS NOT TYPED
 
-Check the runtime type of a value in `WHERE` clauses:
+Check the runtime type of a value in `WHERE` or `RETURN` clauses:
 
 ```sql
 -- Check type
@@ -168,6 +168,10 @@ RETURN p.name
 MATCH (i:Item)
 WHERE i.price IS TYPED DECIMAL
 RETURN i.name
+
+-- Lists, by the type of their elements (LIST<EDGE> for edges)
+MATCH (p:Person)
+RETURN collect(p) IS TYPED LIST<NODE>   -- true
 ```
 
 ### CAST

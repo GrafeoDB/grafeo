@@ -753,6 +753,45 @@ impl<'a> Parser<'a> {
         })
     }
 
+    /// A named optional call uses the same null extension as an optional
+    /// inline call. Its empty import scope preserves named calls' constant
+    /// arguments; the enclosing Apply keeps the outer columns itself.
+    /// The wildcard returns the procedure's actual output columns, including
+    /// defaults when no YIELD was given, in their declared order.
+    fn optional_procedure_call(call: CallStatement) -> QueryClause {
+        let span = call.span;
+        QueryClause::InlineCall {
+            subquery: QueryStatement {
+                match_clauses: Vec::new(),
+                where_clause: None,
+                set_clauses: Vec::new(),
+                remove_clauses: Vec::new(),
+                with_clauses: Vec::new(),
+                unwind_clauses: Vec::new(),
+                merge_clauses: Vec::new(),
+                create_clauses: Vec::new(),
+                delete_clauses: Vec::new(),
+                return_clause: ReturnClause {
+                    distinct: false,
+                    items: Vec::new(),
+                    is_wildcard: true,
+                    group_by: Vec::new(),
+                    order_by: None,
+                    skip: None,
+                    limit: None,
+                    is_finish: false,
+                    span: None,
+                },
+                having_clause: None,
+                ordered_clauses: vec![QueryClause::CallProcedure(call)],
+                span,
+            },
+            combined: Vec::new(),
+            optional: true,
+            scope: Some(Vec::new()),
+        }
+    }
+
     /// Parses a YIELD item list: `field [AS alias] { , field [AS alias] }`.
     fn parse_yield_list(&mut self) -> Result<Vec<YieldItem>> {
         let mut items = vec![self.parse_yield_item()?];
@@ -913,7 +952,7 @@ impl<'a> Parser<'a> {
                         } else {
                             // OPTIONAL CALL procedure(...)
                             let call = self.parse_procedure_call(false)?;
-                            ordered_clauses.push(QueryClause::CallProcedure(call));
+                            ordered_clauses.push(Self::optional_procedure_call(call));
                         }
                     } else {
                         let clause = self.parse_match_clause()?;
@@ -3003,6 +3042,12 @@ impl<'a> Parser<'a> {
                     let max: u32 = max_text
                         .parse()
                         .map_err(|_| self.error("Invalid path length"))?;
+                    // An empty range, an error as `{3,1}` is
+                    if max < min {
+                        return Err(self.error(&format!(
+                            "The quantifier *{min}..{max}'s upper bound is below its lower bound"
+                        )));
+                    }
                     self.advance();
                     Ok((Some(min), Some(max))) // *min..max
                 } else {
@@ -3019,6 +3064,12 @@ impl<'a> Parser<'a> {
                 let max: u32 = max_text
                     .parse()
                     .map_err(|_| self.error("Invalid path length"))?;
+                // `*..0`: an empty range, as the lower bound is 1
+                if max == 0 {
+                    return Err(
+                        self.error("The quantifier *..0's upper bound is below its lower bound")
+                    );
+                }
                 self.advance();
                 Ok((Some(1), Some(max))) // *..max (min defaults to 1)
             } else {
@@ -8402,6 +8453,45 @@ mod tests {
             }
         } else {
             panic!("Expected Query statement");
+        }
+    }
+
+    /// `*3..1` has an upper bound below its lower bound, as `{3,1}` has: a
+    /// syntax error, in every direction; `*..0` too, its lower bound being
+    /// 1. `*1..1`, `*0..0` and `*0` are fine.
+    #[test]
+    fn a_reversed_star_quantifier_is_a_syntax_error() {
+        for (pattern, quantifier) in [
+            ("(a)-[:KNOWS*3..1]->(b)", "*3..1"),
+            ("(a)<-[*2..0]-(b)", "*2..0"),
+            ("(a)-[:KNOWS*..0]-(b)", "*..0"),
+        ] {
+            let query = format!("MATCH {pattern} RETURN b");
+            let error = Parser::new(&query).parse().unwrap_err().to_string();
+            assert!(
+                error.contains(&format!(
+                    "The quantifier {quantifier}'s upper bound is below its lower bound"
+                )),
+                "{query}: {error}"
+            );
+        }
+        for (pattern, min, max) in [
+            ("(a)-[*1..1]->(b)", 1, 1),
+            ("(a)-[*0..0]->(b)", 0, 0),
+            ("(a)-[*0]->(b)", 0, 0),
+        ] {
+            let query = format!("MATCH {pattern} RETURN b");
+            let Ok(Statement::Query(parsed)) = Parser::new(&query).parse() else {
+                panic!("{query} should parse");
+            };
+            let Pattern::Path(path) = &parsed.match_clauses[0].patterns[0].pattern else {
+                panic!("{query}: expected a path pattern");
+            };
+            assert_eq!(
+                (path.edges[0].min_hops, path.edges[0].max_hops),
+                (Some(min), Some(max)),
+                "{query}"
+            );
         }
     }
 

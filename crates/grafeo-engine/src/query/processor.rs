@@ -615,7 +615,7 @@ impl QueryProcessor {
         if optimized_plan.explain {
             let planner = RdfPlanner::new(Arc::clone(rdf_store));
             let (_, entries) = planner.plan_profiled(&optimized_plan)?;
-            return Ok(physical_explain_result(&optimized_plan, entries));
+            return physical_explain_result(&optimized_plan, entries);
         }
 
         // 4. Plan and execute. An update runs in a private transaction of
@@ -639,10 +639,8 @@ impl QueryProcessor {
                 let _result = executor.execute(physical_plan.operator.as_mut())?;
                 let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
 
-                let tree = crate::query::profile::build_profile_tree(
-                    &optimized_plan.root,
-                    &mut entries.into_iter(),
-                );
+                let tree =
+                    crate::query::profile::build_profile_tree(&optimized_plan.root, entries)?;
                 return Ok(crate::query::profile::profile_result(&tree, elapsed_ms));
             }
 
@@ -916,13 +914,13 @@ pub(crate) fn explain_result(plan: &LogicalPlan) -> QueryResult {
 pub(crate) fn physical_explain_result(
     plan: &LogicalPlan,
     entries: Vec<crate::query::profile::ProfileEntry>,
-) -> QueryResult {
-    let tree = crate::query::profile::build_profile_tree(&plan.root, &mut entries.into_iter());
+) -> Result<QueryResult> {
+    let tree = crate::query::profile::build_profile_tree(&plan.root, entries)?;
 
     let mut output = String::new();
     format_physical_node(&mut output, &tree, 0);
 
-    QueryResult {
+    Ok(QueryResult {
         columns: vec!["plan".to_string()],
         column_types: vec![grafeo_common::types::LogicalType::String],
         rows: vec![vec![Value::String(output.into())]],
@@ -933,7 +931,7 @@ pub(crate) fn physical_explain_result(
         counters: Default::default(),
         profile: None,
         kind: crate::database::ResultKind::Rows,
-    }
+    })
 }
 
 /// Recursively formats a physical plan node showing operator name and label.

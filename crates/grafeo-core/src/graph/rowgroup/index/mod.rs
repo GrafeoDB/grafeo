@@ -23,6 +23,8 @@
 //! is exact, and a BM25 score is computed with the statistics of now
 //! (decision Q5 A).
 
+#[cfg(any(feature = "text-index", feature = "vector-index"))]
+mod key;
 mod property;
 #[cfg(feature = "text-index")]
 mod text;
@@ -45,12 +47,12 @@ use super::{Inner, NodeGroup, PENDING, ROWS_PER_GROUP, Read, RowGroupStore};
 pub(super) struct Indexes {
     /// The property indexes, by key.
     property: FxHashMap<PropertyKey, PropertyIndex>,
-    /// The text indexes, by `label:property`.
+    /// The text indexes, by label and property.
     #[cfg(feature = "text-index")]
-    text: FxHashMap<String, text::TextEntry>,
-    /// The vector indexes, by `label:property`.
+    text: FxHashMap<key::SearchKey, text::TextEntry>,
+    /// The vector indexes, by label and property.
     #[cfg(feature = "vector-index")]
-    vector: FxHashMap<String, vector::VectorEntry>,
+    vector: FxHashMap<key::SearchKey, vector::VectorEntry>,
 }
 
 impl fmt::Debug for Indexes {
@@ -99,13 +101,6 @@ pub struct IndexSearch<'a> {
     pub ef: Option<usize>,
     /// The nodes to search among; `None` searches every node.
     pub allowed: Option<&'a std::collections::HashSet<NodeId>>,
-}
-
-/// The key of a text or vector index, `label:property`, as `LpgStore` keys
-/// them (a label holding a ':' may give two indexes one key there too).
-#[cfg(any(feature = "text-index", feature = "vector-index"))]
-fn search_key(label: &str, property: &str) -> String {
-    format!("{label}:{property}")
 }
 
 /// Whether `value` is the value `wanted` holds, as the property index tells

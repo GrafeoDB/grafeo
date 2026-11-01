@@ -224,3 +224,42 @@ func TestTheFileStoresTheRetention(t *testing.T) {
 		t.Errorf("after reopen: %q", got)
 	}
 }
+
+// A vector search inside an AsOf view searches the index as it was at the
+// view's epoch: a node deleted since is found there, and not now.
+func TestVectorSearchAtAPastEpoch(t *testing.T) {
+	db := mustOpenWithHistory(t)
+	docs, err := db.Execute("INSERT (m:Doc {name: 'Mia', emb: vector([1.0, 0.0])}), " +
+		"(g:Doc {name: 'Gus', emb: vector([0.0, 1.0])}) RETURN id(m) AS mia, id(g) AS gus")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mia, gus := fmt.Sprint(docs.Rows[0]["mia"]), fmt.Sprint(docs.Rows[0]["gus"])
+	if err := db.CreateVectorIndex("Doc", "emb", WithDimensions(2)); err != nil {
+		t.Fatal(err)
+	}
+	before := db.CurrentEpoch()
+	if _, err := db.Execute("MATCH (d:Doc {name: 'Mia'}) DETACH DELETE d"); err != nil {
+		t.Fatal(err)
+	}
+	view, err := db.AsOf(AtEpoch(before))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer view.Close()
+	const nearest = "CALL grafeo.search.vector('Doc', 'emb', [1.0, 0.0], 1) YIELD node_id RETURN node_id"
+	past, err := view.Execute(nearest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now, err := db.Execute(nearest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(past.Rows) != 1 || fmt.Sprint(past.Rows[0]["node_id"]) != mia {
+		t.Errorf("before the delete: %v, want node %s (Mia)", past.Rows, mia)
+	}
+	if len(now.Rows) != 1 || fmt.Sprint(now.Rows[0]["node_id"]) != gus {
+		t.Errorf("now: %v, want node %s (Gus)", now.Rows, gus)
+	}
+}

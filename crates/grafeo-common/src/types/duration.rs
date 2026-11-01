@@ -210,6 +210,10 @@ impl Duration {
     /// Parses a duration from ISO 8601 format "OnYnMnDTnHnMnS".
     ///
     /// Examples: "P1Y", "P2M3D", "PT4H5M6S", "P1Y2M3DT4H5M6S", "PT0.5S"
+    ///
+    /// A fraction of a second takes the sign of its seconds: `PT-1.5S` is
+    /// minus one and a half seconds. `None` when the text is not a duration
+    /// or a component does not fit 64 bits.
     #[must_use]
     pub fn parse(s: &str) -> Option<Self> {
         let (negative, s) = if let Some(rest) = s.strip_prefix('-') {
@@ -229,89 +233,97 @@ impl Duration {
         let bytes = s.as_bytes();
         let mut i = 0;
         while i < bytes.len() {
-            match bytes[i] {
+            // The component a designator adds to, and its unit there
+            let (total, unit) = match bytes[i] {
                 b'T' => {
                     in_time = true;
                     i += 1;
                     num_start = i;
+                    continue;
                 }
-                b'Y' if !in_time => {
-                    let n: i64 = s[num_start..i].parse().ok()?;
-                    months += n * 12;
-                    has_content = true;
-                    i += 1;
-                    num_start = i;
-                }
-                b'M' if !in_time => {
-                    let n: i64 = s[num_start..i].parse().ok()?;
-                    months += n;
-                    has_content = true;
-                    i += 1;
-                    num_start = i;
-                }
-                b'W' if !in_time => {
-                    let n: i64 = s[num_start..i].parse().ok()?;
-                    days += n * 7;
-                    has_content = true;
-                    i += 1;
-                    num_start = i;
-                }
-                b'D' if !in_time => {
-                    let n: i64 = s[num_start..i].parse().ok()?;
-                    days += n;
-                    has_content = true;
-                    i += 1;
-                    num_start = i;
-                }
-                b'H' if in_time => {
-                    let n: i64 = s[num_start..i].parse().ok()?;
-                    nanos += n * NANOS_PER_HOUR;
-                    has_content = true;
-                    i += 1;
-                    num_start = i;
-                }
-                b'M' if in_time => {
-                    let n: i64 = s[num_start..i].parse().ok()?;
-                    nanos += n * NANOS_PER_MINUTE;
-                    has_content = true;
-                    i += 1;
-                    num_start = i;
-                }
-                b'S' if in_time => {
-                    let text = &s[num_start..i];
-                    if let Some(dot_pos) = text.find('.') {
-                        let int_part: i64 = text[..dot_pos].parse().ok()?;
-                        let frac_str = &text[dot_pos + 1..];
-                        let frac_len = frac_str.len().min(9);
-                        let frac: i64 = frac_str[..frac_len].parse().ok()?;
-                        // reason: frac_len is clamped to .min(9) above, so 9 - frac_len fits u32
-                        #[allow(clippy::cast_possible_truncation)]
-                        let scale = 10i64.pow(9 - frac_len as u32);
-                        nanos += int_part * NANOS_PER_SECOND + frac * scale;
-                    } else {
-                        let n: i64 = text.parse().ok()?;
-                        nanos += n * NANOS_PER_SECOND;
-                    }
-                    has_content = true;
-                    i += 1;
-                    num_start = i;
-                }
+                b'Y' if !in_time => (&mut months, 12),
+                b'M' if !in_time => (&mut months, 1),
+                b'W' if !in_time => (&mut days, 7),
+                b'D' if !in_time => (&mut days, 1),
+                b'H' if in_time => (&mut nanos, NANOS_PER_HOUR),
+                b'M' if in_time => (&mut nanos, NANOS_PER_MINUTE),
+                b'S' if in_time => (&mut nanos, 0),
                 _ => {
                     i += 1;
+                    continue;
                 }
-            }
+            };
+            let text = &s[num_start..i];
+            let part = if unit == 0 {
+                seconds_nanos(text)?
+            } else {
+                text.parse::<i64>().ok()?.checked_mul(unit)?
+            };
+            *total = total.checked_add(part)?;
+            has_content = true;
+            i += 1;
+            num_start = i;
         }
 
         if !has_content {
             return None;
         }
 
-        let dur = Self {
-            months,
-            days,
-            nanos,
-        };
-        Some(if negative { dur.neg() } else { dur })
+        if negative {
+            Some(Self {
+                months: months.checked_neg()?,
+                days: days.checked_neg()?,
+                nanos: nanos.checked_neg()?,
+            })
+        } else {
+            Some(Self {
+                months,
+                days,
+                nanos,
+            })
+        }
+    }
+}
+
+/// The nanoseconds of a duration's seconds, `n` or `n.fraction`, the
+/// fraction's first nine digits counted: the fraction takes the sign of the
+/// whole seconds, `-0` included, so `-1.5` and `-0.5` are negative. `None`
+/// when a part is not a number or the sum does not fit 64 bits.
+///
+/// It also reads what 0.6.0 wrote for a negative fraction in a duration of
+/// mixed signs, the sign inside the fraction (`-1.-5` for -1.5 s): nine
+/// characters with that sign, zero padded, before the trailing zeros were
+/// cut. Digits that start with a zero are that eight digit field (`0.-05` is
+/// -0.005 s), other digits the plain fraction: 0.6.0 wrote a fraction from
+/// -0.01 to -0.1 s as it wrote ten times it (`-5` for both -0.05 and -0.5),
+/// and this reads the larger.
+fn seconds_nanos(text: &str) -> Option<i64> {
+    let (whole_text, fraction) = match text.split_once('.') {
+        Some((whole, fraction)) => (whole, Some(fraction)),
+        None => (text, None),
+    };
+    let whole: i64 = whole_text.parse().ok()?;
+    let nanos = whole.checked_mul(NANOS_PER_SECOND)?;
+    let Some(fraction) = fraction else {
+        return Some(nanos);
+    };
+    let (negative, digits, width) = match fraction.strip_prefix('-') {
+        // 0.6.0 wrote it after seconds of 0 or less only
+        Some(_) if whole > 0 => return None,
+        Some(digits) if digits.starts_with('0') && digits.len() <= 8 => (true, digits, 8),
+        Some(digits) => (true, digits, 9),
+        None => (whole_text.starts_with('-'), fraction, 9),
+    };
+    let digits = digits.get(..digits.len().min(width))?;
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let scale = 10i64.pow(u32::try_from(width - digits.len()).ok()?);
+    let fraction_nanos = digits.parse::<i64>().ok()? * scale;
+    if negative {
+        nanos.checked_sub(fraction_nanos)
+    } else {
+        nanos.checked_add(fraction_nanos)
     }
 }
 
@@ -400,13 +412,16 @@ impl fmt::Display for Duration {
                 write!(f, "{minutes}M")?;
             }
             if secs != 0 || sub_nanos != 0 {
+                // The sign once, before the whole seconds (negative only in
+                // a duration of mixed signs), the fraction as a magnitude:
+                // `T-1.5S`, `T-0.5S`
+                let sign = if remaining < 0 { "-" } else { "" };
+                write!(f, "{sign}{}", secs.unsigned_abs())?;
                 if sub_nanos != 0 {
-                    let frac = format!("{:09}", sub_nanos);
-                    let trimmed = frac.trim_end_matches('0');
-                    write!(f, "{secs}.{trimmed}S")?;
-                } else {
-                    write!(f, "{secs}S")?;
+                    let frac = format!("{:09}", sub_nanos.unsigned_abs());
+                    write!(f, ".{}", frac.trim_end_matches('0'))?;
                 }
+                write!(f, "S")?;
             }
         }
 
@@ -564,5 +579,157 @@ mod tests {
         let z = Duration::default();
         assert!(z.is_zero());
         assert_eq!(z.to_string(), "PT0S");
+    }
+
+    #[test]
+    fn negative_seconds_carry_their_sign_into_the_fraction() {
+        assert_eq!(
+            Duration::parse("PT-1.5S"),
+            Some(Duration::from_nanos(-1_500_000_000))
+        );
+        assert_eq!(
+            Duration::parse("PT-0.5S"),
+            Some(Duration::from_nanos(-500_000_000))
+        );
+        assert_eq!(
+            Duration::parse("PT-0.000000001S"),
+            Some(Duration::from_nanos(-1))
+        );
+        assert_eq!(
+            Duration::parse("-PT-1.5S"),
+            Some(Duration::from_nanos(1_500_000_000))
+        );
+        assert_eq!(Duration::parse("PT-0S"), Some(Duration::from_nanos(0)));
+        assert_eq!(
+            Duration::parse("PT1.5S"),
+            Some(Duration::from_nanos(1_500_000_000))
+        );
+    }
+
+    #[test]
+    fn mixed_signs_write_the_sign_once_on_the_seconds() {
+        assert_eq!(Duration::new(1, 0, -1_500_000_000).to_string(), "P1MT-1.5S");
+        assert_eq!(Duration::new(1, 0, -500_000_000).to_string(), "P1MT-0.5S");
+        assert_eq!(Duration::new(1, 0, -1_000_000_000).to_string(), "P1MT-1S");
+        assert_eq!(Duration::new(0, 2, -5_000_000).to_string(), "P2DT-0.005S");
+        assert_eq!(Duration::new(0, 2, -1).to_string(), "P2DT-0.000000001S");
+        assert_eq!(
+            Duration::new(
+                1,
+                0,
+                -(NANOS_PER_HOUR + 30 * NANOS_PER_MINUTE + 1_250_000_000)
+            )
+            .to_string(),
+            "P1MT-1H-30M-1.25S"
+        );
+        // Whole negative and positive durations are written as before
+        assert_eq!(Duration::new(0, -1, -500_000_000).to_string(), "-P1DT0.5S");
+        assert_eq!(Duration::from_nanos(-1_500_000_000).to_string(), "-PT1.5S");
+        assert_eq!(Duration::new(-1, 0, 1_500_000_000).to_string(), "P-1MT1.5S");
+        for (text, nanos) in [
+            ("P1MT-1.5S", -1_500_000_000),
+            ("P1MT-0.5S", -500_000_000),
+            ("P1MT-1S", -1_000_000_000),
+        ] {
+            assert_eq!(
+                Duration::parse(text),
+                Some(Duration::new(1, 0, nanos)),
+                "{text}"
+            );
+        }
+        assert_eq!(
+            Duration::parse("-P1DT0.5S"),
+            Some(Duration::new(0, -1, -500_000_000))
+        );
+    }
+
+    #[test]
+    fn the_mixed_sign_text_of_0_6_0_reads_as_it_was_meant() {
+        // 0.6.0 wrote a negative fraction with its own sign, nine digits wide
+        // with that sign: `-0.05` as `-05`, `-0.5` as `-5`
+        for (text, nanos) in [
+            ("P1MT-1.-5S", -1_500_000_000),
+            ("P1MT0.-5S", -500_000_000),
+            ("P1MT0.-05S", -5_000_000),
+            ("P1MT-2.-25S", -2_250_000_000),
+            ("P1MT0.-0000001S", -10),
+            ("P1MT0.-00000005S", -5),
+            ("P1MT0.-123456789S", -123_456_789),
+        ] {
+            assert_eq!(
+                Duration::parse(text),
+                Some(Duration::new(1, 0, nanos)),
+                "{text}"
+            );
+        }
+        // 0.6.0 never wrote a negative fraction after positive seconds
+        assert_eq!(Duration::parse("P1MT1.-5S"), None);
+    }
+
+    #[test]
+    fn components_past_64_bits_are_refused() {
+        for text in [
+            "P768614336404564651Y",
+            "P1317624576693539402W",
+            "P9223372036854775808D",
+            "PT2562048H",
+            "PT153722867M281S",
+            "PT9223372037S",
+            "PT-9223372037S",
+            "PT9223372036.854775808S",
+            "P9223372036854775807M1Y",
+            "-P-9223372036854775808D",
+        ] {
+            assert_eq!(Duration::parse(text), None, "{text}");
+        }
+        assert_eq!(
+            Duration::parse("P9223372036854775807M"),
+            Some(Duration::from_months(i64::MAX))
+        );
+        assert_eq!(
+            Duration::parse("P-9223372036854775808D"),
+            Some(Duration::from_days(i64::MIN))
+        );
+        assert_eq!(
+            Duration::parse("PT9223372036.854775807S"),
+            Some(Duration::from_nanos(i64::MAX))
+        );
+        assert_eq!(
+            Duration::parse("PT-9223372036.854775808S"),
+            Some(Duration::from_nanos(i64::MIN))
+        );
+    }
+
+    mod round_trip {
+        use super::*;
+        use proptest::prelude::*;
+        use proptest::test_runner::{Config, RngSeed};
+
+        // Each component of either sign, and nanoseconds both under a
+        // second and over many days
+        fn component(limit: i64) -> impl Strategy<Value = i64> {
+            prop_oneof![Just(0), -limit..=limit]
+        }
+
+        proptest! {
+            #![proptest_config(Config {
+                cases: if cfg!(miri) { 8 } else { 1024 },
+                failure_persistence: None,
+                rng_seed: RngSeed::Fixed(0x6610_0000_0000_0001),
+                ..Config::default()
+            })]
+
+            #[test]
+            fn a_written_duration_reads_back_as_itself(
+                months in component(1_000_000),
+                days in component(1_000_000),
+                nanos in prop_oneof![component(NANOS_PER_SECOND), component(100_000 * NANOS_PER_DAY)],
+            ) {
+                let duration = Duration::new(months, days, nanos);
+                let text = duration.to_string();
+                prop_assert_eq!(Duration::parse(&text), Some(duration), "{}", text);
+                prop_assert_eq!(text.contains(".-"), false, "{}", text);
+            }
+        }
     }
 }

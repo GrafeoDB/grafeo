@@ -19,12 +19,107 @@ use grafeo_common::storage::catalog_record::{
 use grafeo_common::utils::error::{Error, Result};
 #[cfg(any(feature = "vector-index", feature = "text-index"))]
 use grafeo_core::graph::GraphStore;
-#[cfg(any(feature = "vector-index", feature = "text-index"))]
 use grafeo_core::graph::rowgroup::RowGroupStore;
 
+use crate::catalog::{Catalog, IndexType};
 #[cfg(any(feature = "vector-index", feature = "text-index"))]
 use crate::transaction::BuiltIndex;
 use crate::transaction::StandaloneChange;
+
+/// An index as `SHOW INDEXES` and `list_indexes` list it.
+pub(crate) struct ListedIndex {
+    /// The name `CREATE INDEX` gave it, `None` for one made through the API.
+    pub(crate) name: Option<String>,
+    pub(crate) kind: IndexType,
+    /// `None` for a property index made through the API, which covers
+    /// every label.
+    pub(crate) label: Option<String>,
+    pub(crate) property: String,
+}
+
+/// The indexes `CREATE INDEX` made, by their catalog definitions, and the
+/// indexes of `store` (the current graph's) that no definition covers: the
+/// ones made through the API (`create_property_index`, `create_vector_index`,
+/// `create_text_index`), which have no name: the named ones first, by name
+/// as the catalog lists them, then the unnamed ones by label and property.
+pub(crate) fn listed_indexes(catalog: &Catalog, store: Option<&RowGroupStore>) -> Vec<ListedIndex> {
+    let defined = catalog.all_indexes();
+    let mut listed: Vec<ListedIndex> = defined
+        .iter()
+        .map(|def| ListedIndex {
+            name: Some(def.name.clone()),
+            kind: def.index_type,
+            label: Some(
+                catalog
+                    .get_label_name(def.label)
+                    .map_or_else(|| "?".to_string(), |name| name.to_string()),
+            ),
+            property: catalog
+                .get_property_key_name(def.property_key)
+                .map_or_else(|| "?".to_string(), |name| name.to_string()),
+        })
+        .collect();
+    // Whether a definition of one of `kinds` covers `property` (on `label`,
+    // when given): a property index is on a property of every label, so a
+    // definition on any label covers it.
+    let covered = |kinds: &[IndexType], label: Option<&str>, property: &str| {
+        listed.iter().any(|index| {
+            kinds.contains(&index.kind)
+                && index.property == property
+                && label.is_none_or(|label| index.label.as_deref() == Some(label))
+        })
+    };
+    let mut unnamed = Vec::new();
+    if let Some(store) = store {
+        for property in store.property_index_keys() {
+            if !covered(&[IndexType::Hash, IndexType::BTree], None, &property) {
+                unnamed.push(ListedIndex {
+                    name: None,
+                    kind: IndexType::Hash,
+                    label: None,
+                    property,
+                });
+            }
+        }
+        #[cfg(feature = "vector-index")]
+        for (label, property, _) in store.vector_index_entries() {
+            if !covered(&[IndexType::Vector], Some(&label), &property) {
+                unnamed.push(ListedIndex {
+                    name: None,
+                    kind: IndexType::Vector,
+                    label: Some(label),
+                    property,
+                });
+            }
+        }
+        #[cfg(feature = "text-index")]
+        for (label, property, _) in store.text_index_entries() {
+            if !covered(&[IndexType::FullText], Some(&label), &property) {
+                unnamed.push(ListedIndex {
+                    name: None,
+                    kind: IndexType::FullText,
+                    label: Some(label),
+                    property,
+                });
+            }
+        }
+    }
+    unnamed.sort_by(|a, b| {
+        (&a.label, &a.property, kind_rank(a.kind)).cmp(&(&b.label, &b.property, kind_rank(b.kind)))
+    });
+    listed.append(&mut unnamed);
+    listed
+}
+
+/// The order of the unnamed indexes of one label and property.
+fn kind_rank(kind: IndexType) -> u8 {
+    match kind {
+        IndexType::Hash => 0,
+        IndexType::BTree => 1,
+        IndexType::FullText => 2,
+        IndexType::Vector => 3,
+    }
+}
 
 /// The distance metric `name` names for a new vector index (cosine when
 /// `None`).
@@ -796,10 +891,10 @@ impl super::GrafeoDB {
         let Some(store) = self.root_store() else {
             return;
         };
-        let still_indexed = store.vector_index_entries().iter().any(|(key, _)| {
-            key.split_once(':')
-                .is_some_and(|(_, indexed)| indexed == property)
-        });
+        let still_indexed = store
+            .vector_index_entries()
+            .iter()
+            .any(|(_, indexed, _)| indexed == property);
         if still_indexed {
             return;
         }

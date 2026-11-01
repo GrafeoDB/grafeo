@@ -9,7 +9,8 @@ use grafeo_common::types::{ArcStr, NodeId, PropertyKey, ReadView, Value};
 use parking_lot::RwLock;
 
 use super::super::{Inner, ROWS_PER_GROUP, Read, RowGroupStore};
-use super::{IndexSearch, search_key};
+use super::IndexSearch;
+use super::key::{SearchKey, search_key};
 use crate::index::text::InvertedIndex;
 
 /// A text index of the store, with the label and key it indexes.
@@ -239,7 +240,7 @@ impl RowGroupStore {
         inner
             .indexes
             .text
-            .insert(search_key(label, property), entry);
+            .insert(SearchKey::new(label, property), entry);
     }
 
     /// The best `search.k` documents of the text index on `label` and
@@ -299,16 +300,21 @@ impl RowGroupStore {
             .is_some()
     }
 
-    /// Returns all text index entries as `(key, index)` pairs, keys in
-    /// `"label:property"` format.
+    /// Returns all text indexes as `(label, property, index)`.
     #[must_use]
-    pub fn text_index_entries(&self) -> Vec<(String, Arc<RwLock<InvertedIndex>>)> {
+    pub fn text_index_entries(&self) -> Vec<(String, String, Arc<RwLock<InvertedIndex>>)> {
         self.inner
             .read()
             .indexes
             .text
             .iter()
-            .map(|(key, entry)| (key.clone(), Arc::clone(&entry.index)))
+            .map(|(key, entry)| {
+                (
+                    key.label.clone(),
+                    key.property.clone(),
+                    Arc::clone(&entry.index),
+                )
+            })
             .collect()
     }
 }

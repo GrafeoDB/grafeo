@@ -23,6 +23,10 @@ Each component can be:
 - A **variable** (starts with `?` or `$`)
 - An **IRI** (in angle brackets or prefixed)
 - A **literal** (for objects only)
+- A **blank node**: `[]` as a subject or an object matches anything, as an unnamed variable does
+
+Quoted triples (`<< ... >>`, RDF-star) belong to SPARQL 1.2, which Grafeo does not support yet: a quoted triple is a
+syntax error that names SPARQL 1.2.
 
 ## Variables
 
@@ -213,6 +217,10 @@ WHERE {
     OPTIONAL { ?person foaf:mbox ?email }
 }
 ```
+
+A `VALUES` block can also follow the query, after its modifiers (`SELECT ... WHERE { ... } VALUES ?x { ... }`, also
+in ASK, CONSTRUCT, DESCRIBE and subqueries): it joins the solutions after `GROUP BY`, as SPARQL 1.1 defines it. One
+variable may be written in parentheses, `VALUES (?x) { (1) (2) }`.
 
 ## Subqueries
 

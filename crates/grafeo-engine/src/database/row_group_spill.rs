@@ -115,6 +115,7 @@ impl ColumnSpill for ColumnSpillFiles {
 fn remove_written(path: &Path) {
     for leftover in [path.to_path_buf(), path.with_extension("spill.tmp")] {
         if leftover.exists() {
+            // Best effort: the caller reports the write's own error.
             let _ = std::fs::remove_file(&leftover);
         }
     }
@@ -218,10 +219,7 @@ impl RowGroupVectorConsumer {
         let mut properties: Vec<PropertyKey> = store
             .vector_index_entries()
             .iter()
-            .filter_map(|(key, _)| {
-                key.split_once(':')
-                    .map(|(_, property)| PropertyKey::new(property))
-            })
+            .map(|(_, property, _)| PropertyKey::new(property))
             .collect();
         properties.sort_unstable();
         properties.dedup();
@@ -246,7 +244,7 @@ impl MemoryConsumer for RowGroupVectorConsumer {
             graphs(&root)
                 .iter()
                 .flat_map(|graph| graph.vector_index_entries())
-                .map(|(_, index)| index.heap_memory_bytes())
+                .map(|(_, _, index)| index.heap_memory_bytes())
                 .sum()
         })
     }
@@ -362,7 +360,7 @@ impl MemoryConsumer for RowGroupTextConsumer {
             graphs(&root)
                 .iter()
                 .flat_map(|graph| graph.text_index_entries())
-                .map(|(_, index)| index.read().heap_memory_bytes())
+                .map(|(_, _, index)| index.read().heap_memory_bytes())
                 .sum()
         })
     }

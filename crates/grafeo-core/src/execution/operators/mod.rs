@@ -25,6 +25,7 @@ mod apply;
 mod delim;
 mod distinct;
 mod eager;
+mod edge_count;
 mod expand;
 mod factorized_aggregate;
 mod factorized_expand;
@@ -71,6 +72,7 @@ pub use apply::ApplyOperator;
 pub use delim::{DelimBuffer, DelimReplayOperator, DelimValuesOperator};
 pub use distinct::DistinctOperator;
 pub use eager::{EagerOperator, OneRowAtATimeOperator};
+pub use edge_count::EdgeCountOperator;
 pub use expand::ExpandOperator;
 pub use factorized_aggregate::{
     FactorizedAggregate, FactorizedAggregateOperator, FactorizedOperator,

@@ -321,8 +321,54 @@ fn section_config(record: &SectionMemoryRecord) -> Option<(SectionType, SectionM
             tier: match record.tier {
                 TierRecord::Auto => TierOverride::Auto,
                 TierRecord::ForceRam => TierOverride::ForceRam,
+                // 0.6.0 stored a disk override on a section that cannot be
+                // moved to disk, where it had no effect; the open refuses
+                // one now, so it applies as what it did.
+                TierRecord::ForceDisk if !crate::config::can_spill(section) => TierOverride::Auto,
                 TierRecord::ForceDisk => TierOverride::ForceDisk,
             },
         },
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 0.6.0 stored a disk override on a section that cannot be moved to
+    /// disk, which had no effect; the open now refuses one, so a stored one
+    /// applies as `Auto` and the file still opens, its RAM cap kept.
+    #[test]
+    fn a_stored_disk_override_on_a_section_that_cannot_spill_applies_as_auto() {
+        let path = Path::new("utrecht.grafeo");
+        let mut stored = record_of(&Config::persistent(path), path);
+        stored.sections.push(SectionMemoryRecord {
+            section: SectionType::LpgStore.to_u8(),
+            max_ram: Some(4096),
+            tier: TierRecord::ForceDisk,
+        });
+        stored.sections.push(SectionMemoryRecord {
+            section: SectionType::TextIndex.to_u8(),
+            max_ram: None,
+            tier: TierRecord::ForceDisk,
+        });
+
+        let config = applied(Config::persistent(path), &stored, path).unwrap();
+        assert_eq!(config.validate(), Ok(()));
+        let tier = |section_type| {
+            config
+                .section_configs()
+                .get(&section_type)
+                .map(|memory| (memory.tier, memory.max_ram))
+        };
+        assert_eq!(
+            tier(SectionType::LpgStore),
+            Some((TierOverride::Auto, Some(4096)))
+        );
+        assert_eq!(
+            tier(SectionType::TextIndex),
+            Some((TierOverride::ForceDisk, None)),
+            "a section that can spill keeps its override"
+        );
+    }
 }

@@ -102,7 +102,7 @@ impl GrafeoDB {
                 .with_path_search_budget(path_budget);
             let (_, entries) = planner.plan_profiled(&optimized_plan)?;
             use crate::query::processor::physical_explain_result;
-            return Ok(physical_explain_result(&optimized_plan, entries));
+            return physical_explain_result(&optimized_plan, entries);
         }
 
         // Everything else runs as in a session: an update in a transaction
@@ -157,7 +157,16 @@ impl GrafeoDB {
         // triples, which a refused call should not wait for.
         self.check_import_allowed()?;
         // Collected before commits are held off, for the same reason.
-        let triples: Vec<_> = triples.into_iter().collect();
+        self.insert_rdf_into(triples.into_iter().collect(), None)
+    }
+
+    /// Inserts `triples` into `graph` (`None` for the default graph) as
+    /// [`batch_insert_rdf`](Self::batch_insert_rdf) does, once checked.
+    fn insert_rdf_into(
+        &self,
+        triples: Vec<grafeo_core::graph::rdf::Triple>,
+        graph: Option<&str>,
+    ) -> Result<usize> {
         if let Some(triple) = triples.iter().find(|triple| !triple.is_valid()) {
             return Err(grafeo_common::utils::error::Error::InvalidValue(format!(
                 "{triple} is no RDF triple: a subject is an IRI or a blank node, a predicate \
@@ -165,7 +174,7 @@ impl GrafeoDB {
             )));
         }
         let held = self.hold_commits_for_import()?;
-        self.insert_triples_streamed(&held, triples)
+        self.insert_triples_streamed(&held, triples, graph)
     }
 
     /// Loads the RDF file at `path` into the default graph as one bulk write,
@@ -174,6 +183,9 @@ impl GrafeoDB {
     /// inserted when a line does not parse. `format` names the syntax, or
     /// `None` for the one the file's extension names (`.ttl`, `.nt`). Returns
     /// how many triples were new.
+    ///
+    /// [`load_rdf_into`](Self::load_rdf_into) loads into a named graph, and
+    /// [`load_rdf_text`](Self::load_rdf_text) loads text.
     ///
     /// # Stability: Experimental
     ///
@@ -190,10 +202,35 @@ impl GrafeoDB {
         path: impl AsRef<std::path::Path>,
         format: Option<RdfFormat>,
     ) -> Result<usize> {
+        self.load_rdf_into(path, format, None)
+    }
+
+    /// Loads the RDF file at `path` into `graph`, the named graph with that
+    /// IRI (created when it does not exist), or the default graph for
+    /// `None`, as [`load_rdf`](Self::load_rdf) loads it: one bulk write, in
+    /// the WAL as one group, nothing inserted when a line does not parse.
+    /// The triples are where `INSERT DATA { GRAPH <graph> { ... } }` puts
+    /// them. Returns how many triples were new in that graph.
+    ///
+    /// # Stability: Experimental
+    ///
+    /// New in 0.6.1: formats and options may be added. See
+    /// <https://grafeo.dev/stability/>.
+    ///
+    /// # Errors
+    ///
+    /// The errors of [`load_rdf`](Self::load_rdf), and an empty graph name.
+    pub fn load_rdf_into(
+        &self,
+        path: impl AsRef<std::path::Path>,
+        format: Option<RdfFormat>,
+        graph: Option<&str>,
+    ) -> Result<usize> {
         use grafeo_common::utils::error::Error;
 
         // Refused before the file is read, as every import is.
         self.check_import_allowed()?;
+        check_graph_name(graph)?;
         let path = path.as_ref();
         let format = match format {
             Some(format) => format,
@@ -208,25 +245,60 @@ impl GrafeoDB {
         let text = std::fs::read_to_string(path).map_err(|error| {
             Error::InvalidValue(format!("cannot read '{}': {error}", path.display()))
         })?;
-        let triples = match format {
-            RdfFormat::Turtle => grafeo_core::graph::rdf::turtle::TurtleParser::new()
-                .parse(&text)
-                .map_err(|error| {
-                    Error::InvalidValue(format!("'{}' is no Turtle: {error}", path.display()))
-                })?,
-            RdfFormat::NTriples => {
-                grafeo_core::graph::rdf::parse_ntriples_text(&text).map_err(|error| {
-                    Error::InvalidValue(format!("'{}' is no N-Triples: {error}", path.display()))
-                })?
-            }
-        };
-        self.batch_insert_rdf(triples)
+        let triples = parse_rdf(&text, format, &format!("'{}'", path.display()))?;
+        self.insert_rdf_into(triples, graph)
     }
 
-    /// Inserts `triples` into the default RDF graph as one bulk write, while
-    /// the caller holds commits off (`held`): their WAL records are written
-    /// as a group that one commit marker closes, then the triples are
-    /// inserted. Returns how many were new.
+    /// Loads `text`, RDF in `format`, into `graph` (the named graph with
+    /// that IRI, created when it does not exist, or the default graph for
+    /// `None`) as [`load_rdf_into`](Self::load_rdf_into) loads a file: one
+    /// bulk write, nothing inserted when a line does not parse. Returns how
+    /// many triples were new in that graph.
+    ///
+    /// # Stability: Experimental
+    ///
+    /// New in 0.6.1: formats and options may be added. See
+    /// <https://grafeo.dev/stability/>.
+    ///
+    /// # Errors
+    ///
+    /// The line and reason of a parse error, an empty graph name, and the
+    /// errors of [`batch_insert_rdf`](Self::batch_insert_rdf).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use grafeo_engine::{GrafeoDB, RdfFormat};
+    ///
+    /// let db = GrafeoDB::new_in_memory();
+    /// let turtle = "@prefix ex: <http://example.org/> .\n\
+    ///               ex:alix ex:knows ex:gus ; ex:city \"Amsterdam\" .";
+    /// assert_eq!(db.load_rdf_text(turtle, RdfFormat::Turtle, None)?, 2);
+    /// let people = Some("http://example.org/people");
+    /// assert_eq!(db.load_rdf_text(turtle, RdfFormat::Turtle, people)?, 2);
+    /// # Ok::<(), grafeo_common::utils::error::Error>(())
+    /// ```
+    pub fn load_rdf_text(
+        &self,
+        text: &str,
+        format: RdfFormat,
+        graph: Option<&str>,
+    ) -> Result<usize> {
+        // Refused before the text is parsed, as every import is.
+        self.check_import_allowed()?;
+        check_graph_name(graph)?;
+        let triples = parse_rdf(text, format, "the text")?;
+        self.insert_rdf_into(triples, graph)
+    }
+
+    /// Inserts `triples` into `graph` (`None` for the default RDF graph) as
+    /// one bulk write, while the caller holds commits off (`held`): their WAL
+    /// records are written as a group that one commit marker closes, then
+    /// the triples are inserted, a named graph created when it does not
+    /// exist (as replay creates it). Without triples a named graph that does
+    /// not exist is created, empty, as `CREATE GRAPH` creates it: logged as
+    /// a WAL group of its own, so it is there after a reopen. Returns how
+    /// many were new.
     ///
     /// # Errors
     ///
@@ -236,8 +308,23 @@ impl GrafeoDB {
         &self,
         held: &crate::transaction::CommitsHeld<'_>,
         triples: Vec<grafeo_core::graph::rdf::Triple>,
+        graph: Option<&str>,
     ) -> Result<usize> {
         if triples.is_empty() {
+            if let Some(name) = graph
+                && self.rdf_store.graph(name).is_none()
+            {
+                crate::database::standalone::commit_rdf(
+                    grafeo_common::change::RdfGraphOp::Create {
+                        name: name.to_string(),
+                    },
+                    held,
+                    #[cfg(feature = "wal")]
+                    self.wal.as_deref(),
+                    &self.rdf_store,
+                    &self.transaction_manager,
+                )?;
+            }
             return Ok(0);
         }
         let changes = self.streaming_changes(held, false);
@@ -255,7 +342,7 @@ impl GrafeoDB {
             };
             for triple in logged {
                 changes.log_triple(
-                    None,
+                    graph,
                     &grafeo_common::change::DataOp::InsertTriple {
                         triple: Box::new(TripleRecord::from(triple)),
                     },
@@ -266,8 +353,41 @@ impl GrafeoDB {
         // No epoch: the RDF store has none, and the triples apply once the
         // group is written.
         changes.commit(None)?;
-        Ok(self.rdf_store.batch_insert(triples))
+        Ok(match graph {
+            None => self.rdf_store.batch_insert(triples),
+            Some(name) => self.rdf_store.graph_or_create(name).batch_insert(triples),
+        })
     }
+}
+
+/// The triples of `text`, RDF in `format`; `source` names it in an error
+/// (`'people.ttl'`, `the text`).
+fn parse_rdf(
+    text: &str,
+    format: RdfFormat,
+    source: &str,
+) -> Result<Vec<grafeo_core::graph::rdf::Triple>> {
+    use grafeo_common::utils::error::Error;
+
+    match format {
+        RdfFormat::Turtle => grafeo_core::graph::rdf::turtle::TurtleParser::new()
+            .parse(text)
+            .map_err(|error| Error::InvalidValue(format!("{source} is no Turtle: {error}"))),
+        RdfFormat::NTriples => grafeo_core::graph::rdf::parse_ntriples_text(text)
+            .map_err(|error| Error::InvalidValue(format!("{source} is no N-Triples: {error}"))),
+    }
+}
+
+/// Fails for an empty named graph: a graph IRI has text.
+fn check_graph_name(graph: Option<&str>) -> Result<()> {
+    if graph.is_some_and(str::is_empty) {
+        return Err(grafeo_common::utils::error::Error::InvalidValue(
+            "the named graph to load into has an empty name: pass its IRI, or none for the \
+             default graph"
+                .to_string(),
+        ));
+    }
+    Ok(())
 }
 
 // =========================================================================

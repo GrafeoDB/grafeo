@@ -1,0 +1,111 @@
+# SHOW INDEXES lists every index once. A CREATE INDEX definition covers the
+# live index it builds, so an index made by DDL is listed by its name and
+# never again as an unnamed one. (Indexes made through the API, listed with a
+# null name, cannot be made from a query; the Rust tests cover them.)
+
+meta:
+  language: gql
+  model: lpg
+  title: Index inventory
+  dataset: empty
+
+tests:
+
+  # One property, two labels: two definitions, and no unnamed row for the
+  # property index the two share.
+  - name: two_labels_on_one_property_list_two_named_indexes
+    setup:
+      - "INSERT (:Person {name: 'Alix'}), (:City {name: 'Amsterdam'})"
+      - "CREATE INDEX person_name FOR (p:Person) ON (p.name)"
+      - "CREATE INDEX city_name FOR (c:City) ON (c.name)"
+    query: "SHOW INDEXES"
+    expect:
+      ordered: true
+      rows:
+        - [city_name, Hash, City, name]
+        - [person_name, Hash, Person, name]
+
+  - name: dropping_one_of_two_indexes_on_a_property_lists_the_other
+    setup:
+      - "INSERT (:Person {name: 'Alix'}), (:City {name: 'Amsterdam'})"
+      - "CREATE INDEX person_name FOR (p:Person) ON (p.name)"
+      - "CREATE INDEX city_name FOR (c:City) ON (c.name)"
+      - "DROP INDEX person_name"
+    query: "SHOW INDEXES"
+    expect:
+      rows:
+        - [city_name, Hash, City, name]
+
+  # Nothing is left behind as an unnamed index.
+  - name: dropping_both_indexes_on_a_property_lists_nothing
+    setup:
+      - "INSERT (:Person {name: 'Alix'}), (:City {name: 'Amsterdam'})"
+      - "CREATE INDEX person_name FOR (p:Person) ON (p.name)"
+      - "CREATE INDEX city_name FOR (c:City) ON (c.name)"
+      - "DROP INDEX person_name"
+      - "DROP INDEX city_name"
+    query: "SHOW INDEXES"
+    expect:
+      empty: true
+
+  - name: a_hash_and_a_btree_index_on_one_property_list_once_each
+    setup:
+      - "INSERT (:Person {age: 30}), (:City {age: 800})"
+      - "CREATE INDEX person_age FOR (p:Person) ON (p.age)"
+      - "CREATE INDEX city_age FOR (c:City) ON (c.age) USING BTREE"
+    query: "SHOW INDEXES"
+    expect:
+      ordered: true
+      rows:
+        - [city_age, BTree, City, age]
+        - [person_age, Hash, Person, age]
+
+  - name: a_text_index_lists_once
+    requires: [text-index]
+    setup:
+      - "INSERT (:Doc {body: 'canals of Amsterdam'})"
+      - "CREATE INDEX body_text FOR (d:Doc) ON (d.body) USING TEXT"
+    query: "SHOW INDEXES"
+    expect:
+      rows:
+        - [body_text, FullText, Doc, body]
+
+  - name: a_text_and_a_property_index_on_one_property_list_once_each
+    requires: [text-index]
+    setup:
+      - "INSERT (:Doc {body: 'canals of Amsterdam'})"
+      - "CREATE INDEX body_eq FOR (d:Doc) ON (d.body)"
+      - "CREATE INDEX body_text FOR (d:Doc) ON (d.body) USING TEXT"
+    query: "SHOW INDEXES"
+    expect:
+      ordered: true
+      rows:
+        - [body_eq, Hash, Doc, body]
+        - [body_text, FullText, Doc, body]
+
+  - name: a_vector_and_a_property_index_on_one_property_list_once_each
+    requires: [vector-index]
+    setup:
+      - "INSERT (:Doc {emb: vector([1.0, 0.0])})"
+      - "CREATE INDEX emb_eq FOR (d:Doc) ON (d.emb)"
+      - "CREATE VECTOR INDEX emb_vec ON :Doc(emb) DIMENSION 2 METRIC 'cosine'"
+    query: "SHOW INDEXES"
+    expect:
+      ordered: true
+      rows:
+        - [emb_eq, Hash, Doc, emb]
+        - [emb_vec, Vector, Doc, emb]
+
+  # SHOW INDEXES lists by name, also across labels and properties.
+  - name: show_indexes_lists_by_name_across_labels
+    setup:
+      - "CREATE INDEX b_index FOR (z:Zone) ON (z.a)"
+      - "CREATE INDEX a_index FOR (p:Person) ON (p.z)"
+      - "CREATE INDEX c_index FOR (c:City) ON (c.m)"
+    query: "SHOW INDEXES"
+    expect:
+      ordered: true
+      rows:
+        - [a_index, Hash, Person, z]
+        - [b_index, Hash, Zone, a]
+        - [c_index, Hash, City, m]

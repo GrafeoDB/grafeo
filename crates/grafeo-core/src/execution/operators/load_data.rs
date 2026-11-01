@@ -213,6 +213,7 @@ impl LoadDataOperator {
     /// Opens and reads all rows from a Parquet file into a buffer.
     #[cfg(feature = "parquet-import")]
     fn open_parquet(&mut self) -> Result<(), OperatorError> {
+        use parquet::basic::CompressionCodec;
         use parquet::file::reader::FileReader;
 
         let file_path = strip_file_prefix(&self.path);
@@ -230,6 +231,37 @@ impl LoadDataOperator {
             ))
         })?;
 
+        // The parquet crate is built with Snappy only (the default of pyarrow,
+        // pandas and Spark). Its own error for another codec names a cargo
+        // feature, so name the file's codec before a page is read.
+        for row_group in reader.metadata().row_groups() {
+            for column in row_group.columns() {
+                let codec = column.compression_codec();
+                if !matches!(
+                    codec,
+                    CompressionCodec::UNCOMPRESSED | CompressionCodec::SNAPPY
+                ) {
+                    return Err(OperatorError::from(
+                        grafeo_common::utils::error::Error::from(
+                            grafeo_common::utils::error::QueryError::new(
+                                grafeo_common::utils::error::QueryErrorKind::Unsupported,
+                                format!(
+                                    "the Parquet file '{}' is compressed with {codec}; this \
+                                     build reads uncompressed and Snappy Parquet files",
+                                    self.path
+                                ),
+                            ),
+                        ),
+                    ));
+                }
+            }
+        }
+
+        let schema = reader
+            .metadata()
+            .file_metadata()
+            .schema_descr()
+            .root_schema_ptr();
         let row_iter = reader.get_row_iter(None).map_err(|e| {
             OperatorError::Execution(format!("Failed to create Parquet row iterator: {e}"))
         })?;
@@ -239,7 +271,7 @@ impl LoadDataOperator {
             let row = row_result.map_err(|e| {
                 OperatorError::Execution(format!("Failed to read Parquet row: {e}"))
             })?;
-            rows.push(parquet_row_to_value(&row));
+            rows.push(parquet_values::parquet_row_to_value(&row, Some(&schema)));
         }
 
         self.parquet_rows = Some(rows.into_iter());
@@ -508,25 +540,68 @@ fn json_to_value(json: &serde_json::Value) -> Result<Value, NumberTextError> {
 // Parquet helpers
 // ============================================================================
 
-/// Converts a Parquet `Row` to a `Value::Map`.
+/// Parquet rows as Grafeo values.
 #[cfg(feature = "parquet-import")]
-fn parquet_row_to_value(row: &parquet::record::Row) -> Value {
-    use parquet::record::Field;
+mod parquet_values {
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
 
-    let mut map = BTreeMap::new();
-    for (name, field) in row.get_column_iter() {
-        let value = match field {
+    use grafeo_common::types::{
+        ArcStr, Date, Decimal, MAX_DECIMAL_DIGITS, PropertyKey, Time, Timestamp, Value,
+    };
+    use parquet::schema::types::Type as ParquetType;
+
+    /// Converts a Parquet `Row` to a `Value::Map`, each column read by its type
+    /// in `schema` (the file's message type, or the group the row is).
+    pub(super) fn parquet_row_to_value(
+        row: &parquet::record::Row,
+        schema: Option<&ParquetType>,
+    ) -> Value {
+        // The reader yields a group's columns in the order of its fields.
+        let fields = schema.filter(|ty| ty.is_group()).map(|ty| ty.get_fields());
+        let mut map = BTreeMap::new();
+        for (index, (name, field)) in row.get_column_iter().enumerate() {
+            let ty = fields
+                .and_then(|fields| fields.get(index))
+                .map(AsRef::as_ref);
+            map.insert(
+                PropertyKey::from(name.as_str()),
+                parquet_field_to_value(field, ty),
+            );
+        }
+        Value::Map(Arc::new(map))
+    }
+
+    /// Converts a single Parquet field to a Value. `ty` is the field's type in
+    /// the file's schema: the record reader marks dates, times, timestamps and
+    /// decimals by their converted type, which a nanosecond time or timestamp
+    /// does not have, so those come as plain integers and only the logical type
+    /// in the schema tells them apart.
+    fn parquet_field_to_value(field: &parquet::record::Field, ty: Option<&ParquetType>) -> Value {
+        use parquet::basic::{LogicalType as ParquetLogicalType, TimeUnit};
+        use parquet::record::Field;
+
+        match field {
             Field::Null => Value::Null,
             Field::Bool(b) => Value::Bool(*b),
             Field::Byte(b) => Value::Int64(i64::from(*b)),
             Field::Short(s) => Value::Int64(i64::from(*s)),
             Field::Int(i) => Value::Int64(i64::from(*i)),
-            Field::Long(l) => Value::Int64(*l),
+            Field::Long(l) => match ty.and_then(|ty| ty.get_basic_info().logical_type_ref()) {
+                Some(ParquetLogicalType::Timestamp(t)) if t.unit == TimeUnit::NANOS => {
+                    // Grafeo keeps microseconds; the rest is dropped toward the
+                    // past, so an instant before the epoch stays before it.
+                    Value::Timestamp(Timestamp::from_micros(l.div_euclid(1_000)))
+                }
+                Some(ParquetLogicalType::Time(t)) if t.unit == TimeUnit::NANOS => {
+                    time_of_day(*l, 1)
+                }
+                _ => Value::Int64(*l),
+            },
             Field::UByte(b) => Value::Int64(i64::from(*b)),
             Field::UShort(s) => Value::Int64(i64::from(*s)),
             Field::UInt(i) => Value::Int64(i64::from(*i)),
             Field::ULong(l) => {
-                // u64 may overflow i64, store as string if too large
                 if let Ok(i) = i64::try_from(*l) {
                     Value::Int64(i)
                 } else {
@@ -537,18 +612,26 @@ fn parquet_row_to_value(row: &parquet::record::Row) -> Value {
             Field::Double(d) => Value::Float64(*d),
             Field::Str(s) => Value::String(ArcStr::from(s.as_str())),
             Field::Bytes(b) => Value::Bytes(Arc::from(b.data().to_vec())),
-            Field::Decimal(d) => {
-                // Convert decimal to f64 for simplicity
-                Value::Float64(decimal_to_f64(d))
-            }
+            Field::Decimal(d) => parquet_decimal(field, d),
             Field::Float16(f) => Value::Float64(f64::from(*f)),
-            Field::Group(row) => parquet_row_to_value(row),
+            Field::Group(row) => parquet_row_to_value(row, ty),
             Field::ListInternal(list) => {
-                let items: Vec<Value> =
-                    list.elements().iter().map(parquet_field_to_value).collect();
+                let element = ty.and_then(list_element_type);
+                let items: Vec<Value> = list
+                    .elements()
+                    .iter()
+                    .map(|item| parquet_field_to_value(item, element))
+                    .collect();
                 Value::List(Arc::from(items))
             }
             Field::MapInternal(map_internal) => {
+                // A map is a group of one repeated `key_value` group: key, value.
+                let value_type = ty
+                    .filter(|ty| ty.is_group())
+                    .and_then(|ty| ty.get_fields().first())
+                    .filter(|key_value| key_value.is_group())
+                    .and_then(|key_value| key_value.get_fields().get(1))
+                    .map(AsRef::as_ref);
                 let mut inner_map = BTreeMap::new();
                 for (key_field, val_field) in map_internal.entries() {
                     let key_str = match key_field {
@@ -557,92 +640,96 @@ fn parquet_row_to_value(row: &parquet::record::Row) -> Value {
                     };
                     inner_map.insert(
                         PropertyKey::from(key_str.as_str()),
-                        parquet_field_to_value(val_field),
+                        parquet_field_to_value(val_field, value_type),
                     );
                 }
                 Value::Map(Arc::new(inner_map))
             }
-            Field::TimestampMillis(ms) => Value::Int64(*ms),
-            Field::TimestampMicros(us) => Value::Int64(*us),
-            Field::TimeMillis(ms) => Value::Int64(i64::from(*ms)),
-            Field::TimeMicros(us) => Value::Int64(*us),
-            Field::Date(days) => Value::Int64(i64::from(*days)),
+            Field::TimestampMillis(ms) => match ms.checked_mul(1_000) {
+                Some(micros) => Value::Timestamp(Timestamp::from_micros(micros)),
+                // Past the range Grafeo's microseconds hold: kept as written.
+                None => Value::Int64(*ms),
+            },
+            Field::TimestampMicros(us) => Value::Timestamp(Timestamp::from_micros(*us)),
+            Field::TimeMillis(ms) => time_of_day(i64::from(*ms), 1_000_000),
+            Field::TimeMicros(us) => time_of_day(*us, 1_000),
+            Field::Date(days) => Value::Date(Date::from_days(*days)),
+        }
+    }
+
+    /// The type of a list's elements, by the rules the record reader follows:
+    /// a `LIST` group holds one repeated field, which is the element itself in
+    /// the legacy two-level form and wraps it in the three-level one. A repeated
+    /// field outside a `LIST` group reads as a list of itself.
+    fn list_element_type(ty: &ParquetType) -> Option<&ParquetType> {
+        use parquet::basic::{ConvertedType, LogicalType as ParquetLogicalType, Repetition};
+
+        let is_repeated = |ty: &ParquetType| {
+            let info = ty.get_basic_info();
+            info.has_repetition() && info.repetition() == Repetition::REPEATED
         };
-        map.insert(PropertyKey::from(name.as_str()), value);
-    }
-    Value::Map(Arc::new(map))
-}
-
-/// Converts a single Parquet field to a Value.
-#[cfg(feature = "parquet-import")]
-fn parquet_field_to_value(field: &parquet::record::Field) -> Value {
-    use parquet::record::Field;
-
-    match field {
-        Field::Null => Value::Null,
-        Field::Bool(b) => Value::Bool(*b),
-        Field::Byte(b) => Value::Int64(i64::from(*b)),
-        Field::Short(s) => Value::Int64(i64::from(*s)),
-        Field::Int(i) => Value::Int64(i64::from(*i)),
-        Field::Long(l) => Value::Int64(*l),
-        Field::UByte(b) => Value::Int64(i64::from(*b)),
-        Field::UShort(s) => Value::Int64(i64::from(*s)),
-        Field::UInt(i) => Value::Int64(i64::from(*i)),
-        Field::ULong(l) => {
-            if let Ok(i) = i64::try_from(*l) {
-                Value::Int64(i)
-            } else {
-                Value::String(ArcStr::from(l.to_string().as_str()))
-            }
+        let is_list = |ty: &ParquetType| {
+            ty.is_group()
+                && match ty.get_basic_info().logical_type_ref() {
+                    Some(logical) => logical == &ParquetLogicalType::List,
+                    None => ty.get_basic_info().converted_type() == ConvertedType::LIST,
+                }
+        };
+        if !is_list(ty) {
+            return is_repeated(ty).then_some(ty);
         }
-        Field::Float(f) => Value::Float64(f64::from(*f)),
-        Field::Double(d) => Value::Float64(*d),
-        Field::Str(s) => Value::String(ArcStr::from(s.as_str())),
-        Field::Bytes(b) => Value::Bytes(Arc::from(b.data().to_vec())),
-        Field::Decimal(d) => Value::Float64(decimal_to_f64(d)),
-        Field::Float16(f) => Value::Float64(f64::from(*f)),
-        Field::Group(row) => parquet_row_to_value(row),
-        Field::ListInternal(list) => {
-            let items: Vec<Value> = list.elements().iter().map(parquet_field_to_value).collect();
-            Value::List(Arc::from(items))
+        let repeated = ty.get_fields().first()?.as_ref();
+        let single_repeated_child = repeated.is_group()
+            && repeated.get_fields().len() == 1
+            && is_repeated(&repeated.get_fields()[0]);
+        let is_element = !(is_list(repeated) || single_repeated_child)
+            && (repeated.is_primitive()
+                || repeated.get_fields().len() > 1
+                || repeated.name() == "array"
+                || repeated.name().ends_with("_tuple"));
+        if is_element {
+            Some(repeated)
+        } else {
+            repeated.get_fields().first().map(AsRef::as_ref)
         }
-        Field::MapInternal(map_internal) => {
-            let mut inner_map = BTreeMap::new();
-            for (key_field, val_field) in map_internal.entries() {
-                let key_str = match key_field {
-                    Field::Str(s) => s.clone(),
-                    other => format!("{other}"),
-                };
-                inner_map.insert(
-                    PropertyKey::from(key_str.as_str()),
-                    parquet_field_to_value(val_field),
-                );
-            }
-            Value::Map(Arc::new(inner_map))
-        }
-        Field::TimestampMillis(ms) => Value::Int64(*ms),
-        Field::TimestampMicros(us) => Value::Int64(*us),
-        Field::TimeMillis(ms) => Value::Int64(i64::from(*ms)),
-        Field::TimeMicros(us) => Value::Int64(*us),
-        Field::Date(days) => Value::Int64(i64::from(*days)),
     }
-}
 
-/// Converts a Parquet Decimal to f64.
-#[cfg(feature = "parquet-import")]
-fn decimal_to_f64(d: &parquet::data_type::Decimal) -> f64 {
-    let bytes = d.data();
-    let scale = d.scale();
-    // Interpret bytes as big-endian signed integer
-    let mut value: i128 = if !bytes.is_empty() && bytes[0] & 0x80 != 0 {
-        -1 // sign-extend for negative
-    } else {
-        0
-    };
-    for &b in bytes {
-        value = (value << 8) | i128::from(b);
+    /// A time of day of `count` units of `nanos_per_unit` nanoseconds since
+    /// midnight, or the count as written when it is not within a day.
+    fn time_of_day(count: i64, nanos_per_unit: u64) -> Value {
+        u64::try_from(count)
+            .ok()
+            .and_then(|count| count.checked_mul(nanos_per_unit))
+            .and_then(Time::from_nanos)
+            .map_or(Value::Int64(count), Value::Time)
     }
-    value as f64 / 10f64.powi(scale)
+
+    /// A Parquet decimal as an exact DECIMAL at the column's scale. A column
+    /// declared wider than Grafeo's 38 digits is its exact text, every value of
+    /// it, as the Arrow export writes such a column.
+    fn parquet_decimal(field: &parquet::record::Field, d: &parquet::data_type::Decimal) -> Value {
+        let exact = u8::try_from(d.scale())
+            .ok()
+            .filter(|_| d.precision() <= i32::from(MAX_DECIMAL_DIGITS))
+            .zip(decimal_mantissa(d.data()))
+            .and_then(|(scale, mantissa)| Decimal::new(mantissa, scale).ok());
+        match exact {
+            Some(decimal) => Value::Decimal(decimal),
+            // The record API writes a decimal's digits exactly.
+            None => Value::String(ArcStr::from(field.to_string().as_str())),
+        }
+    }
+
+    /// The big-endian two's complement integer of `bytes`, when it fits 128
+    /// bits.
+    fn decimal_mantissa(bytes: &[u8]) -> Option<i128> {
+        let negative = bytes.first().is_some_and(|first| first & 0x80 != 0);
+        bytes
+            .iter()
+            .try_fold(if negative { -1 } else { 0 }, |value: i128, &byte| {
+                value.checked_mul(256)?.checked_add(i128::from(byte))
+            })
+    }
 }
 
 #[cfg(test)]
@@ -939,11 +1026,16 @@ mod tests {
     #[cfg(feature = "parquet-import")]
     mod parquet_records {
         use super::*;
+        use grafeo_common::types::{Date, Time, Timestamp};
         use parquet::basic::Compression;
-        use parquet::data_type::{ByteArray, ByteArrayType, Int64Type};
+        use parquet::data_type::{
+            ByteArray, ByteArrayType, DataType, FixedLenByteArray, FixedLenByteArrayType,
+            Int32Type, Int64Type,
+        };
+        use parquet::file::metadata::ParquetMetaDataWriter;
         use parquet::file::properties::WriterProperties;
         use parquet::file::reader::{FileReader, SerializedFileReader};
-        use parquet::file::writer::SerializedFileWriter;
+        use parquet::file::writer::{SerializedColumnWriter, SerializedFileWriter};
         use parquet::schema::parser::parse_message_type;
 
         /// Alix (31) and Gus (no age), in one row group, with `compression`.
@@ -1020,6 +1112,354 @@ mod tests {
                 }
                 assert_eq!(load(&file), want, "{compression:?}");
             }
+        }
+
+        /// A copy of `file` whose column chunks say they are compressed with
+        /// `codec`, the pages left as they are. This build cannot write those
+        /// codecs, and the loader refuses the file before it reads a page.
+        fn marked_compressed_with(
+            file: &tempfile::NamedTempFile,
+            codec: Compression,
+        ) -> tempfile::NamedTempFile {
+            let bytes = std::fs::read(file.path()).unwrap();
+            // The file ends with its metadata, the metadata's length (four
+            // bytes, little-endian) and `PAR1`.
+            let length_at = bytes.len() - 8;
+            let length = u32::from_le_bytes(bytes[length_at..length_at + 4].try_into().unwrap());
+            let metadata_at = length_at - usize::try_from(length).unwrap();
+            let reader = SerializedFileReader::new(file.reopen().unwrap()).unwrap();
+            let mut builder = reader.metadata().clone().into_builder();
+            let row_groups = builder
+                .take_row_groups()
+                .into_iter()
+                .map(|row_group| {
+                    let columns = row_group
+                        .columns()
+                        .iter()
+                        .map(|column| {
+                            column
+                                .clone()
+                                .into_builder()
+                                .set_compression(codec)
+                                .build()
+                                .unwrap()
+                        })
+                        .collect();
+                    row_group
+                        .into_builder()
+                        .set_column_metadata(columns)
+                        .build()
+                        .unwrap()
+                })
+                .collect();
+            let metadata = builder.set_row_groups(row_groups).build();
+            let mut marked = bytes[..metadata_at].to_vec();
+            ParquetMetaDataWriter::new(&mut marked, &metadata)
+                .finish()
+                .unwrap();
+            let copy = tempfile::NamedTempFile::new().unwrap();
+            std::fs::write(copy.path(), marked).unwrap();
+            copy
+        }
+
+        /// A file in a codec this build lacks fails with the codec's name
+        /// and the codecs it reads, not the parquet crate's compile-time
+        /// feature (`zstd`, `flate2` for gzip).
+        #[test]
+        fn another_codec_is_refused_naming_it() {
+            let snappy = write_people(Compression::SNAPPY);
+            for (codec, name) in [
+                (Compression::ZSTD(Default::default()), "ZSTD"),
+                (Compression::GZIP(Default::default()), "GZIP"),
+                (Compression::LZ4_RAW, "LZ4_RAW"),
+                (Compression::BROTLI(Default::default()), "BROTLI"),
+            ] {
+                let file = marked_compressed_with(&snappy, codec);
+                let mut op = LoadDataOperator::new(
+                    file.path().to_str().unwrap().to_string(),
+                    LoadDataFormat::Parquet,
+                    true,
+                    None,
+                    "row".to_string(),
+                );
+                let message = op.next().unwrap_err().to_string();
+                let path = file.path().display();
+                assert!(
+                    message.ends_with(&format!(
+                        "the Parquet file '{path}' is compressed with {name}; this build \
+                         reads uncompressed and Snappy Parquet files"
+                    )),
+                    "{message}"
+                );
+            }
+        }
+
+        /// Writes one row group of `schema`, uncompressed, each column filled
+        /// by the next writer in `columns`.
+        fn write_columns(
+            schema: &str,
+            columns: Vec<Box<dyn FnOnce(&mut SerializedColumnWriter<'_>)>>,
+        ) -> tempfile::NamedTempFile {
+            let schema = parse_message_type(schema).unwrap();
+            let file = tempfile::NamedTempFile::new().unwrap();
+            let mut writer = SerializedFileWriter::new(
+                file.reopen().unwrap(),
+                Arc::new(schema),
+                Arc::new(WriterProperties::builder().build()),
+            )
+            .unwrap();
+            let mut row_group = writer.next_row_group().unwrap();
+            for write in columns {
+                let mut column = row_group.next_column().unwrap().unwrap();
+                write(&mut column);
+                column.close().unwrap();
+            }
+            row_group.close().unwrap();
+            writer.close().unwrap();
+            file
+        }
+
+        /// A column writer that writes `values` of type `T` with the given
+        /// definition and repetition levels.
+        fn column<T: DataType>(
+            values: Vec<T::T>,
+            definitions: Option<Vec<i16>>,
+            repetitions: Option<Vec<i16>>,
+        ) -> Box<dyn FnOnce(&mut SerializedColumnWriter<'_>)>
+        where
+            T::T: 'static,
+        {
+            Box::new(move |writer| {
+                writer
+                    .typed::<T>()
+                    .write_batch(&values, definitions.as_deref(), repetitions.as_deref())
+                    .unwrap();
+            })
+        }
+
+        /// The rows of a Parquet file, each a map from column to value.
+        fn load_rows(file: &tempfile::NamedTempFile) -> Vec<BTreeMap<PropertyKey, Value>> {
+            let mut op = LoadDataOperator::new(
+                file.path().to_str().unwrap().to_string(),
+                LoadDataFormat::Parquet,
+                true,
+                None,
+                "row".to_string(),
+            );
+            let mut rows = Vec::new();
+            while let Some(chunk) = op.next().unwrap() {
+                match chunk.column(0).unwrap().get_value(0).unwrap() {
+                    Value::Map(map) => rows.push((*map).clone()),
+                    other => panic!("expected Map, got {other:?}"),
+                }
+            }
+            rows
+        }
+
+        fn timestamp(micros: i64) -> Value {
+            Value::Timestamp(Timestamp::from_micros(micros))
+        }
+
+        fn time(nanos: u64) -> Value {
+            Value::Time(Time::from_nanos(nanos).unwrap())
+        }
+
+        /// The decimal `mantissa / 10^scale`, checked to keep its scale.
+        fn decimal(value: &Value, mantissa: i128, scale: u8) {
+            match value {
+                Value::Decimal(d) => {
+                    assert_eq!((d.mantissa(), d.scale()), (mantissa, scale), "{d}");
+                }
+                other => panic!("expected the decimal {mantissa}e-{scale}, got {other:?}"),
+            }
+        }
+
+        /// 2026-10-31T10:00:00Z in milliseconds since the epoch.
+        const HALLOWEEN_MILLIS: i64 = 1_793_440_800_000;
+
+        /// Each temporal and decimal type pyarrow, pandas, polars and Spark
+        /// write loads as the Grafeo value of that type: DATE as a date,
+        /// TIMESTAMP in every unit, with or without UTC adjustment, as a
+        /// datetime (as a Python datetime and the Arrow export's
+        /// `Timestamp(us, UTC)` are), TIME as a time of day and DECIMAL as an
+        /// exact decimal at the column's scale.
+        #[test]
+        fn temporal_and_decimal_columns_load_as_their_types() {
+            let file = write_columns(
+                "message typed {
+                    REQUIRED INT32 day (DATE);
+                    REQUIRED INT64 local_millis (TIMESTAMP(MILLIS,false));
+                    REQUIRED INT64 utc_micros (TIMESTAMP(MICROS,true));
+                    REQUIRED INT64 utc_nanos (TIMESTAMP(NANOS,true));
+                    REQUIRED INT64 before_epoch_nanos (TIMESTAMP(NANOS,false));
+                    REQUIRED INT32 time_millis (TIME(MILLIS,false));
+                    REQUIRED INT64 time_micros (TIME(MICROS,true));
+                    REQUIRED INT64 time_nanos (TIME(NANOS,false));
+                    REQUIRED INT32 price (DECIMAL(9,2));
+                    REQUIRED INT64 balance (DECIMAL(18,4));
+                    REQUIRED FIXED_LEN_BYTE_ARRAY (16) widest (DECIMAL(38,0));
+                    REQUIRED BYTE_ARRAY cents (DECIMAL(20,2));
+                }",
+                vec![
+                    column::<Int32Type>(vec![20_757], None, None),
+                    column::<Int64Type>(vec![HALLOWEEN_MILLIS], None, None),
+                    column::<Int64Type>(vec![HALLOWEEN_MILLIS * 1_000 + 250_000], None, None),
+                    column::<Int64Type>(
+                        vec![HALLOWEEN_MILLIS * 1_000_000 + 123_456_789],
+                        None,
+                        None,
+                    ),
+                    column::<Int64Type>(vec![-1], None, None),
+                    column::<Int32Type>(vec![37_800_500], None, None),
+                    column::<Int64Type>(vec![37_800_000_250], None, None),
+                    column::<Int64Type>(vec![37_800_000_000_001], None, None),
+                    column::<Int32Type>(vec![12_345], None, None),
+                    column::<Int64Type>(vec![-98_765_432_100], None, None),
+                    column::<FixedLenByteArrayType>(
+                        vec![FixedLenByteArray::from(
+                            (10_i128.pow(38) - 1).to_be_bytes().to_vec(),
+                        )],
+                        None,
+                        None,
+                    ),
+                    column::<ByteArrayType>(vec![ByteArray::from(vec![0xFF_u8])], None, None),
+                ],
+            );
+            let rows = load_rows(&file);
+            assert_eq!(rows.len(), 1);
+            let row = &rows[0];
+            let get = |name: &str| row.get(&PropertyKey::from(name)).unwrap();
+
+            assert_eq!(
+                get("day"),
+                &Value::Date(Date::from_ymd(2026, 10, 31).unwrap())
+            );
+            assert_eq!(get("local_millis"), &timestamp(HALLOWEEN_MILLIS * 1_000));
+            assert_eq!(
+                get("utc_micros"),
+                &timestamp(HALLOWEEN_MILLIS * 1_000 + 250_000)
+            );
+            // Grafeo keeps microseconds: the nanoseconds below one are dropped,
+            // toward the past, so one before the epoch stays before it.
+            assert_eq!(
+                get("utc_nanos"),
+                &timestamp(HALLOWEEN_MILLIS * 1_000 + 123_456)
+            );
+            assert_eq!(get("before_epoch_nanos"), &timestamp(-1));
+            // 10:30:00.5, 10:30:00.00025 and 10:30:00.000000001.
+            assert_eq!(get("time_millis"), &time(37_800_500_000_000));
+            assert_eq!(get("time_micros"), &time(37_800_000_250_000));
+            assert_eq!(get("time_nanos"), &time(37_800_000_000_001));
+            decimal(get("price"), 12_345, 2);
+            decimal(get("balance"), -98_765_432_100, 4);
+            decimal(get("widest"), 10_i128.pow(38) - 1, 0);
+            decimal(get("cents"), -1, 2);
+        }
+
+        /// A decimal column wider than Grafeo's 38 digits loads as its exact
+        /// text, as the Arrow export writes such a column.
+        #[test]
+        fn a_decimal_column_past_38_digits_loads_as_its_text() {
+            let mut widest = vec![0_u8];
+            widest.extend_from_slice(&u128::MAX.to_be_bytes());
+            let file = write_columns(
+                "message wide {
+                    REQUIRED FIXED_LEN_BYTE_ARRAY (17) huge (DECIMAL(40,2));
+                    REQUIRED FIXED_LEN_BYTE_ARRAY (17) small (DECIMAL(40,2));
+                }",
+                vec![
+                    column::<FixedLenByteArrayType>(
+                        vec![FixedLenByteArray::from(widest)],
+                        None,
+                        None,
+                    ),
+                    column::<FixedLenByteArrayType>(
+                        vec![FixedLenByteArray::from({
+                            let mut small = vec![0xFF_u8; 17];
+                            small[16] = 0xFE;
+                            small
+                        })],
+                        None,
+                        None,
+                    ),
+                ],
+            );
+            let rows = load_rows(&file);
+            assert_eq!(
+                rows[0].get(&PropertyKey::from("huge")),
+                Some(&Value::from("3402823669209384634633746074317682114.55"))
+            );
+            // Every value of the column is text, also one that would fit.
+            assert_eq!(
+                rows[0].get(&PropertyKey::from("small")),
+                Some(&Value::from("-0.02"))
+            );
+        }
+
+        /// Nested columns read by their own types too: a timestamp in a list,
+        /// in a legacy two-level list, in a struct and as a map's value.
+        #[test]
+        fn nested_temporal_values_load_as_their_types() {
+            let file = write_columns(
+                "message nested {
+                    OPTIONAL group stamps (LIST) {
+                        REPEATED group list {
+                            OPTIONAL INT64 element (TIMESTAMP(NANOS,true));
+                        }
+                    }
+                    OPTIONAL group legacy (LIST) {
+                        REPEATED INT64 at (TIMESTAMP(NANOS,false));
+                    }
+                    OPTIONAL group visit {
+                        REQUIRED BYTE_ARRAY city (UTF8);
+                        REQUIRED INT64 at (TIME(NANOS,false));
+                    }
+                    OPTIONAL group arrivals (MAP) {
+                        REPEATED group key_value {
+                            REQUIRED BYTE_ARRAY key (UTF8);
+                            OPTIONAL INT64 value (TIMESTAMP(NANOS,true));
+                        }
+                    }
+                }",
+                vec![
+                    column::<Int64Type>(vec![1_000, 2_000], Some(vec![3, 3]), Some(vec![0, 1])),
+                    column::<Int64Type>(vec![3_000, 4_000], Some(vec![2, 2]), Some(vec![0, 1])),
+                    column::<ByteArrayType>(
+                        vec![ByteArray::from("Amsterdam")],
+                        Some(vec![1]),
+                        None,
+                    ),
+                    column::<Int64Type>(vec![37_800_000_000_001], Some(vec![1]), None),
+                    column::<ByteArrayType>(
+                        vec![ByteArray::from("Berlin")],
+                        Some(vec![2]),
+                        Some(vec![0]),
+                    ),
+                    column::<Int64Type>(vec![5_000], Some(vec![3]), Some(vec![0])),
+                ],
+            );
+            let rows = load_rows(&file);
+            let get = |name: &str| rows[0].get(&PropertyKey::from(name)).unwrap().clone();
+            assert_eq!(
+                get("stamps"),
+                Value::List(Arc::from(vec![timestamp(1), timestamp(2)]))
+            );
+            // The record reader nests a legacy list of a repeated primitive
+            // one level deeper; its elements still read by their type.
+            assert_eq!(
+                get("legacy"),
+                Value::List(Arc::from(vec![Value::List(Arc::from(vec![
+                    timestamp(3),
+                    timestamp(4)
+                ]))]))
+            );
+            let mut visit = BTreeMap::new();
+            visit.insert(PropertyKey::from("city"), Value::from("Amsterdam"));
+            visit.insert(PropertyKey::from("at"), time(37_800_000_000_001));
+            assert_eq!(get("visit"), Value::Map(Arc::new(visit)));
+            let mut arrivals = BTreeMap::new();
+            arrivals.insert(PropertyKey::from("Berlin"), timestamp(5));
+            assert_eq!(get("arrivals"), Value::Map(Arc::new(arrivals)));
         }
     }
 }

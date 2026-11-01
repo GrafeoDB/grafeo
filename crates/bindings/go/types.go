@@ -141,10 +141,7 @@ func parseResult(r *C.GrafeoResult) (*QueryResult, error) {
 
 	rows := make([]Row, len(rawRows))
 	for i, raw := range rawRows {
-		for key, value := range raw {
-			raw[key] = decodeTags(value)
-		}
-		rows[i] = Row(raw)
+		rows[i] = Row(decodeFields(raw))
 	}
 
 	return &QueryResult{

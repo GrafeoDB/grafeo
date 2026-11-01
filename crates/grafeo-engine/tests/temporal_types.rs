@@ -160,6 +160,30 @@ fn gql_duration_typed_literal() {
 
 #[test]
 #[cfg(feature = "gql")]
+fn gql_negative_fractional_seconds_keep_their_sign() {
+    let db = GrafeoDB::new_in_memory();
+    let result = db
+        .execute(
+            "RETURN DURATION 'PT-1.5S' AS whole, DURATION 'PT-0.5S' AS part, \
+             DURATION 'PT-1.5S' = -DURATION 'PT1.5S' AS same, \
+             toString(DURATION 'PT-1.5S') AS text, toString(DURATION 'P1MT-1.5S') AS mixed",
+        )
+        .unwrap();
+    let row = &result.rows()[0];
+    let whole = row[0].as_duration().expect("expected a Duration value");
+    assert_eq!(
+        (whole.months(), whole.days(), whole.nanos()),
+        (0, 0, -1_500_000_000)
+    );
+    let part = row[1].as_duration().expect("expected a Duration value");
+    assert_eq!(part.nanos(), -500_000_000);
+    assert_eq!(row[2], Value::Bool(true));
+    assert_eq!(row[3], Value::String("-PT1.5S".into()));
+    assert_eq!(row[4], Value::String("P1MT-1.5S".into()));
+}
+
+#[test]
+#[cfg(feature = "gql")]
 fn gql_datetime_typed_literal() {
     let db = create_test_db();
     let result = db

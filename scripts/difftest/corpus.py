@@ -1460,7 +1460,9 @@ for case_id, query, languages in [
 #     or an undefined variable); a SIMPLE path ends once back at its start (BI6; it went
 #     on); `length` reads a path a WITH passed on or an UNWIND gave, and a string (BI7 to
 #     BI9; an undefined `_path_length_` column), and an unaliased `length(p)` is named so
-#     (BI10; it was `_path_length_p`)
+#     (BI10; it was `_path_length_p`); a range whose upper bound is below its lower bound
+#     is a syntax error in GQL, as `{3,1}` is (BI11), and matches nothing in Cypher, as
+#     openCypher defines it (BI12; 0.6.0 read `*3..1` as `*3` in both)
 for case_id, query, languages in [
     ("BI1", "MATCH (a:Person)-[e:KNOWS WHERE e.w > 1]->{1,3}(b) RETURN a.name AS a, b.name AS b, [x IN e | x.w] AS ws", GQL),
     ("BI2", "UNWIND [1, 3] AS lim MATCH (a:Person {name: 'Alix'})-[e:KNOWS WHERE e.w > lim]->{1,3}(b) RETURN lim, b.name AS b, [x IN e | x.w] AS ws", GQL),
@@ -1472,6 +1474,8 @@ for case_id, query, languages in [
     ("BI8", "MATCH p = (a:Person {name: 'Alix'})-[:KNOWS*1..2]->(b) WITH collect(p) AS ps UNWIND ps AS u RETURN length(u) AS len, [n IN nodes(u) | n.name] AS names", BOTH),
     ("BI9", "UNWIND ['Amsterdam', 'Paris'] AS s RETURN s, length(s) AS len", BOTH),
     ("BI10", "MATCH p = (a:Person {name: 'Jules'})-[:KNOWS]->(b) RETURN length(p)", BOTH),
+    ("BI11", "MATCH (a:Person {name: 'Vincent'})-[:KNOWS*3..1]->(b) RETURN b.name AS b", GQL),
+    ("BI12", "MATCH (a:Person {name: 'Vincent'})-[:KNOWS*3..1]->(b) RETURN b.name AS b", CYPHER),
 ]:
     case(case_id, query, languages)
 # BJ: Cypher binds a relationship once per MATCH (openCypher 9, relationship uniqueness),
@@ -2182,7 +2186,9 @@ ordered("DC25", RDF_PREFIXES + "SELECT ?n WHERE { ?s ex:name ?n } ORDER BY DESC(
 
 # DD: SPARQL writes keep and remove exact terms (#464): a typed literal is removed only by
 #     itself (01 and 1 are two terms), a tagged one only with its tag (the reads are
-#     unordered: an ORDER BY of mixed literals is what DC tests)
+#     unordered: an ORDER BY of mixed literals is what DC tests); a DELETE WHERE whose
+#     pattern has no solution deletes nothing, its triples without variables included
+#     (DD7 to DD9; 0.6.0 deleted those)
 for case_id, query in [
     ("DD1", "INSERT DATA { ex:a ex:v \"01\"^^xsd:integer, \"1\"^^xsd:integer, \"x\"@en, \"x\" }"),
     ("DD2", "SELECT ?v (DATATYPE(?v) AS ?d) WHERE { ex:a ex:v ?v }"),
@@ -2190,6 +2196,9 @@ for case_id, query in [
     ("DD4", "SELECT ?v WHERE { ex:a ex:v ?v }"),
     ("DD5", "DELETE WHERE { ex:a ex:v \"x\"@en }"),
     ("DD6", "SELECT ?v (LANG(?v) AS ?l) WHERE { ex:a ex:v ?v }"),
+    ("DD7", "INSERT DATA { ex:alix ex:nick \"Al\" }"),
+    ("DD8", "DELETE WHERE { ex:alix ex:nick \"Al\" . ex:alix ex:age ?a }"),
+    ("DD9", "SELECT ?k WHERE { ex:alix ex:nick ?k }"),
 ]:
     case(case_id, RDF_PREFIXES + query, SPARQL, "rdf_writes")
 
@@ -2310,7 +2319,8 @@ for case_id, query in [
 # DM: expression results. Cypher sums no values to 0, GQL keeps null (DM1 to DM3); a float
 #     remainder by zero is NaN (DM4, DM5); toString spells the infinities Infinity and
 #     -Infinity (DM6); toInteger trims text and truncates decimal text (DM7); toInteger of
-#     NaN is null (DM8)
+#     NaN is null (DM8); a fraction of a second takes the sign of its seconds, and a duration
+#     of mixed signs writes the sign once (DM9; 0.6.0 read PT-1.5S as -0.5 s)
 for case_id, query, languages in [
     ("DM1", "UNWIND [] AS x RETURN sum(x) AS s, count(x) AS c, avg(x) AS a", CYPHER),
     ("DM2", "UNWIND [[1, null], [2, 5], [2, null]] AS r RETURN r[0] AS g, sum(r[1]) AS s ORDER BY g", CYPHER),
@@ -2320,6 +2330,7 @@ for case_id, query, languages in [
     ("DM6", "RETURN toString(Infinity) AS a, toString(-Infinity) AS b, toString(NaN) AS c", BOTH),
     ("DM7", "RETURN toInteger(' 42 ') AS a, toInteger('4.2') AS b, toInteger('-4.7') AS c, toFloat(' 1.5 ') AS d, toInteger('x') AS e", BOTH),
     ("DM8", "RETURN toInteger(NaN) AS a", BOTH),
+    ("DM9", "RETURN DURATION 'PT-1.5S' AS d, toString(DURATION 'P1MT-1.5S') AS text, DURATION 'P1MT-1.-5S' AS old", GQL),
 ]:
     case(case_id, query, languages, "empty")
 
@@ -2423,5 +2434,21 @@ ordered("DP10", "SELECT n FROM GRAPH_TABLE (MATCH (a:Person) COLUMNS (a.name AS 
 case("DP11", "SELECT n FROM GRAPH_TABLE (MATCH (a:Person) COLUMNS (a.name AS n)) LIMIT $limit", SQL, params={"limit": -1})
 case("DP12", "SELECT n FROM GRAPH_TABLE (MATCH (a:Person) COLUMNS (a.name AS n)) LIMIT $limit", SQL, params={"limit": 1.5})
 case("DP13", "SELECT n FROM GRAPH_TABLE (MATCH (a:Person) COLUMNS (a.name AS n)) OFFSET $offset", SQL, params={"offset": "two"})
+
+# DQ: OPTIONAL CALL of a named procedure keeps the incoming row, with null in each yielded
+#     column, when the procedure gives it no rows (0.6.0 dropped the row like a plain CALL):
+#     YIELD WHERE removes every row, per incoming row (DQ1) and as the first clause (DQ2);
+#     a procedure with rows gives the same rows as CALL (DQ3); RETURN * lists the declared
+#     columns, standalone (DQ4) and after an incoming row (DQ5); an argument from the row is
+#     refused, as in CALL (DQ6)
+for case_id, query in [
+    ("DQ1", "UNWIND [3, 19] AS x OPTIONAL CALL db.labels() YIELD label WHERE label = 'City' RETURN x, label"),
+    ("DQ2", "OPTIONAL CALL db.labels() YIELD label WHERE label = 'City' RETURN label"),
+    ("DQ3", "UNWIND [3, 19] AS x OPTIONAL CALL db.labels() YIELD label RETURN x, label"),
+    ("DQ4", "OPTIONAL CALL same('Alix') RETURN *"),
+    ("DQ5", "UNWIND ['Mia'] AS name OPTIONAL CALL pair('Alix', 'Gus', 'Vincent') RETURN *"),
+    ("DQ6", "UNWIND ['Alix', 'Gus'] AS name OPTIONAL CALL same(name) YIELD v RETURN name, v"),
+]:
+    case(case_id, query, GQL, "procedures")
 
 # fmt: on

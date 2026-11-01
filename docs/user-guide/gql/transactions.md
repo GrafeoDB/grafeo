@@ -31,10 +31,10 @@ START TRANSACTION READ ONLY
 Specify the isolation level when starting a transaction:
 
 ```sql
--- Read committed (default)
+-- Read committed
 START TRANSACTION ISOLATION LEVEL READ COMMITTED
 
--- Snapshot isolation (repeatable reads)
+-- Snapshot isolation (repeatable reads, the default)
 START TRANSACTION ISOLATION LEVEL SNAPSHOT ISOLATION
 
 -- Combine with access mode
@@ -52,6 +52,12 @@ COMMIT
 -- Roll back the current transaction
 ROLLBACK
 ```
+
+Through a binding's transaction object (`db.begin_transaction()` and the like), end the transaction with its
+`commit()` or `rollback()` call: `START TRANSACTION`, `COMMIT` and `ROLLBACK` run through the object's `execute` fail
+with `GRAFEO-T004` (GQLSTATUS `25000`), as they would end or nest the transaction behind the object's back. A commit
+that fails ends the transaction too: it is no longer active, a `rollback()` after it does nothing and another
+`commit()` fails.
 
 Schema statements (creating, altering and dropping types, constraints, indexes and procedures) and graph commands (`CREATE GRAPH`, `DROP GRAPH`) take effect immediately, also inside a transaction, and a rollback does not undo them.
 

@@ -67,8 +67,13 @@ public sealed class ResultStream : IDisposable, IAsyncDisposable
         {
             var json = Marshal.PtrToStringUTF8(rowPtr)
                 ?? throw new GrafeoException("Failed to decode row JSON", GrafeoStatus.Serialization);
-            var dict = JsonSerializer.Deserialize<Dictionary<string, object?>>(json)
-                ?? throw new GrafeoException("Row JSON is not an object", GrafeoStatus.Serialization);
+            // Each value decoded as a query row's is ($bytes, $decimal, dates, ...)
+            using var doc = JsonDocument.Parse(json);
+            if (doc.RootElement.ValueKind != JsonValueKind.Object)
+                throw new GrafeoException("Row JSON is not an object", GrafeoStatus.Serialization);
+            var dict = new Dictionary<string, object?>();
+            foreach (var prop in doc.RootElement.EnumerateObject())
+                dict[prop.Name] = ValueConverter.FromJsonElement(prop.Value);
             return dict;
         }
         finally

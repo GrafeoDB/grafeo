@@ -3278,6 +3278,28 @@ mod tests {
         }
     }
 
+    /// `*3..1` parses, keeping both bounds: openCypher reads it as an empty
+    /// range, which matches no path (the translator plans no rows for it).
+    #[test]
+    fn a_reversed_length_range_keeps_both_bounds() {
+        for (query, min, max) in [
+            ("MATCH (a)-[:KNOWS*3..1]->(b) RETURN b", Some(3), Some(1)),
+            ("MATCH (a)-[*..0]->(b) RETURN b", None, Some(0)),
+        ] {
+            let Statement::Query(Query { clauses, .. }) = parse_ok(query) else {
+                panic!("{query}: expected a query");
+            };
+            let Clause::Match(MatchClause { patterns, .. }) = &clauses[0] else {
+                panic!("{query}: expected a MATCH");
+            };
+            let Pattern::Path(path) = &patterns[0] else {
+                panic!("{query}: expected a path pattern");
+            };
+            let length = path.chain[0].length.as_ref().unwrap();
+            assert_eq!((length.min, length.max), (min, max), "{query}");
+        }
+    }
+
     #[test]
     fn test_parse_variable_length_unbounded() {
         let stmt = parse_ok("MATCH (a)-[:KNOWS*]->(b) RETURN a, b");

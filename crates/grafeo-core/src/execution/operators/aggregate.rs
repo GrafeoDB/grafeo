@@ -8,7 +8,7 @@
 //! the [`super::accumulator`] module.
 
 use grafeo_common::types::TemporalComparison;
-use grafeo_common::utils::hash::FxHashSet as HashSet;
+use grafeo_common::utils::hash::{FxBuildHasher, FxHashSet as HashSet};
 use indexmap::IndexMap;
 
 use grafeo_common::types::{Decimal, DecimalSum, Duration, LogicalType, Value};
@@ -1086,10 +1086,11 @@ pub struct HashAggregateOperator {
     output_schema: Vec<LogicalType>,
     /// The column types of the input chunks.
     input_types: ColumnTypes,
-    /// The groups by their key (IndexMap for deterministic iteration order).
+    /// The groups by their key (IndexMap for deterministic iteration order,
+    /// hashed as the push-based aggregate hashes them).
     /// Keys whose values are the same values (`3` and `3.0`) are one key,
     /// see [`RowKey`].
-    groups: IndexMap<RowKey, Group>,
+    groups: IndexMap<RowKey, Group, FxBuildHasher>,
     /// Whether aggregation is complete.
     aggregation_complete: bool,
     /// Results iterator.
@@ -1120,7 +1121,7 @@ impl HashAggregateOperator {
             aggregates,
             output_schema,
             input_types: ColumnTypes::default(),
-            groups: IndexMap::new(),
+            groups: IndexMap::default(),
             aggregation_complete: false,
             results: None,
             temporal: TemporalComparison::TypesApart,

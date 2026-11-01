@@ -123,3 +123,80 @@ fn a_key_reached_through_an_expand() {
         &want,
     );
 }
+
+/// The groups of `UNWIND range(0, rows - 1) AS i RETURN (i * 7919) % 3000`,
+/// in the order their first rows come: 7919 is prime to 3000, so the first
+/// 3000 rows give each of the 3000 groups once, in an order that is not
+/// sorted.
+fn three_thousand_groups(rows: i64) -> (String, Vec<String>) {
+    let query = format!(
+        "UNWIND range(0, {}) AS i RETURN (i * 7919) % 3000 AS g, count(*) AS n",
+        rows - 1
+    );
+    let want = (0..3000_i64)
+        .map(|i| format!("[Int64({}), Int64({})]", (i * 7919) % 3000, rows / 3000))
+        .collect();
+    (query, want)
+}
+
+/// A database in a file has a spill path, so its aggregates keep their
+/// groups in partitions that can go to disk; they come out in the order
+/// their first rows came too, the same order as in memory, on every run.
+#[cfg(feature = "spill")]
+#[test]
+fn a_file_database_gives_the_first_row_order_of_an_in_memory_one() {
+    use grafeo_engine::Config;
+
+    let (query, want) = three_thousand_groups(9000);
+    let dir = tempfile::tempdir().unwrap();
+    let file = GrafeoDB::with_config(Config::persistent(dir.path().join("lisbon.grafeo"))).unwrap();
+    assert!(file.buffer_manager().config().spill_path.is_some());
+    let memory = GrafeoDB::new_in_memory();
+    for run in 0..5 {
+        for language in ["gql", "cypher"] {
+            assert_eq!(
+                rows(&memory, language, &query),
+                want,
+                "{language} in memory, run {run}"
+            );
+            assert_eq!(
+                rows(&file, language, &query),
+                want,
+                "{language} in a file, run {run}"
+            );
+        }
+    }
+}
+
+/// Groups that go to disk and come back keep the order their first rows
+/// came: the buffer manager is under pressure, so the aggregate spills its
+/// largest partition after each chunk.
+#[cfg(feature = "spill")]
+#[test]
+fn spilled_groups_keep_the_first_row_order() {
+    use grafeo_common::memory::buffer::{MemoryRegion, PressureLevel};
+    use grafeo_engine::Config;
+
+    let (query, want) = three_thousand_groups(30_000);
+    let dir = tempfile::tempdir().unwrap();
+    let db = GrafeoDB::with_config(
+        Config::persistent(dir.path().join("vienna.grafeo"))
+            .with_memory_limit(64 * 1024 * 1024)
+            .without_query_timeout(),
+    )
+    .unwrap();
+    let manager = db.buffer_manager();
+    let pressure = manager
+        .try_allocate(
+            manager.config().budget * 9 / 10,
+            MemoryRegion::ExecutionBuffers,
+        )
+        .unwrap();
+    assert_eq!(manager.pressure_level(), PressureLevel::High);
+    for run in 0..3 {
+        for language in ["gql", "cypher"] {
+            assert_eq!(rows(&db, language, &query), want, "{language} run {run}");
+        }
+    }
+    drop(pressure);
+}

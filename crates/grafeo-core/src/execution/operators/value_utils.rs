@@ -240,6 +240,78 @@ pub fn text_equals_float(text: &str, float: f64) -> bool {
     }
 }
 
+/// Whether the query's `=` finds two values equal, with `temporal` as the
+/// statement reads a zoned against a local datetime or time. `=` gives
+/// UNKNOWN for a null operand before it gets here; here NULL equals NULL,
+/// as inside a list or map and for DISTINCT and GROUP BY.
+///
+/// Numbers compare by value (`5 = 5.0`, a decimal too). A string meets a
+/// number as the number it reads as, as RDF stores numeric literals as
+/// strings: against an integer only integer text (`'05' = 5` and
+/// `'+5' = 5`, but `'5.0' = 5` is false), against a float any number text
+/// (`'5.0' = 5.0`). Two strings, and the other values, compare as
+/// themselves; lists, maps and paths element by element.
+#[must_use]
+pub fn values_equal(left: &Value, right: &Value, temporal: TemporalComparison) -> bool {
+    let equal = |left: &Value, right: &Value| values_equal(left, right, temporal);
+    match (left, right) {
+        (Value::Null, Value::Null) => true,
+        (Value::Decimal(_), _) | (_, Value::Decimal(_)) => {
+            compare_with_decimal(left, right) == Some(Ordering::Equal)
+        }
+        (Value::Bool(a), Value::Bool(b)) => a == b,
+        (Value::Int64(a), Value::Int64(b)) => a == b,
+        // IEEE: NaN equals nothing, -0.0 equals 0.0.
+        (Value::Float64(a), Value::Float64(b)) => a == b,
+        (Value::String(a), Value::String(b)) => a == b,
+        (Value::Int64(a), Value::Float64(b)) | (Value::Float64(b), Value::Int64(a)) => {
+            int_equals_float(*a, *b)
+        }
+        // RDF stores numeric literals as strings; allow cross-type equality
+        (Value::String(s), Value::Int64(i)) | (Value::Int64(i), Value::String(s)) => {
+            s.parse::<i64>().is_ok_and(|n| n == *i)
+        }
+        (Value::String(s), Value::Float64(f)) | (Value::Float64(f), Value::String(s)) => {
+            text_equals_float(s, *f)
+        }
+        (Value::List(a), Value::List(b)) => {
+            a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| equal(x, y))
+        }
+        (Value::Map(a), Value::Map(b)) => {
+            a.len() == b.len()
+                && a.iter()
+                    .zip(b.iter())
+                    .all(|((k1, v1), (k2, v2))| k1 == k2 && equal(v1, v2))
+        }
+        (
+            Value::Path {
+                nodes: n1,
+                edges: e1,
+            },
+            Value::Path {
+                nodes: n2,
+                edges: e2,
+            },
+        ) => {
+            n1.len() == n2.len()
+                && e1.len() == e2.len()
+                && n1.iter().zip(n2.iter()).all(|(a, b)| equal(a, b))
+                && e1.iter().zip(e2.iter()).all(|(a, b)| equal(a, b))
+        }
+        // A zoned and a local datetime or time: as the query's language
+        // reads them, as `<` and `>` compare them (see
+        // `TemporalComparison`).
+        _ if TemporalComparison::is_mixed_pair(left, right) => temporal
+            .compare_mixed(left, right)
+            .is_some_and(Ordering::is_eq),
+        // Temporal values, bytes, vectors and the rest: the same variant
+        // with the same value (zoned datetimes compare by instant). This
+        // used to be `false`, so `date('2024-01-01') = date('2024-01-01')`
+        // was false.
+        _ => left == right,
+    }
+}
+
 /// The order of an integer and a float for `<`, `<=`, `>` and `>=`: exact, as
 /// `compare_int_float` orders them (`2^53 + 1` is above the float `2^53`),
 /// and `None` for NaN, which is neither less nor greater.

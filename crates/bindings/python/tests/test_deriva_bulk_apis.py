@@ -5,7 +5,10 @@
   merged into the node's (the others stay), a row whose key matches no node
   is skipped and creates nothing, a row without the key is skipped. It
   returns `{"updated", "skipped", "skipped_rows"}`, as `upsert_nodes` does,
-  and gives the same nodes as `UNWIND $rows ... MATCH ... SET`.
+  and gives the same nodes as `UNWIND $rows ... MATCH ... SET n += r`, with
+  and without a property index on the key, for a few rows and for many: a
+  None value removes the property, a key several nodes share updates them
+  all, no labels match every node, and a persistent database keeps it.
 - `get_properties_batch(ids, keys)` reads several properties of many nodes
   in one call, without pyarrow, as `get_property_batch(ids, key)` reads one:
   a dict of one list per key, aligned with `ids`, None where a node lacks
@@ -131,6 +134,77 @@ def test_update_nodes_gives_what_the_unwind_query_gives(db):
 
 def test_update_nodes_of_no_rows_is_a_no_op(db):
     assert db.update_nodes(["Method"], [])["updated"] == 0
+
+
+def test_update_nodes_with_none_removes_the_property(db):
+    # As SET n += {lines: null} does in a query.
+    summary = db.update_nodes(["Method"], [{"id": "m2", "lines": None, "owner": "Gus"}])
+    assert summary["updated"] == 1
+    assert node_props(db, "m2") == {"id": "m2", "name": "Method2", "active": True, "owner": "Gus"}
+
+
+def test_update_nodes_updates_every_node_a_key_matches(db):
+    db.batch_create_nodes_with_props(["Graph", "Method"], [{"id": "m1", "name": "Twin"}])
+    summary = db.update_nodes(["Method"], [{"id": "m1", "lines": 7}])
+    assert (summary["updated"], summary["skipped"]) == (1, 0)
+    lines = db.execute("MATCH (n:Method {id: 'm1'}) RETURN n.lines AS l").to_list()
+    assert [row["l"] for row in lines] == [7, 7]
+
+
+def test_update_nodes_without_labels_matches_every_node(db):
+    summary = db.update_nodes([], [{"id": "f0", "size": 4}, {"id": "m4", "size": 5}])
+    assert summary["updated"] == 2
+    assert node_props(db, "f0")["size"] == 4
+    assert node_props(db, "m4")["size"] == 5
+
+
+@pytest.mark.parametrize("index", [False, True])
+@pytest.mark.parametrize("shape", ["few", "many"])
+def test_update_nodes_gives_what_set_merge_gives_on_a_larger_label(index, shape):
+    # 300 Methods: with an index a few rows look their nodes up through it,
+    # many rows read the label once; both give what SET n += r gives.
+    def build():
+        db = grafeo.GrafeoDB()
+        if index:
+            db.create_property_index("id")
+        db.batch_create_nodes_with_props(
+            ["Graph", "Method"],
+            [{"id": i, "name": f"m{i}", "tier": 0} for i in range(300)],
+        )
+        db.batch_create_nodes_with_props(["Graph"], [{"id": 1000, "name": "g1000", "tier": 0}])
+        return db
+
+    if shape == "few":
+        rows = [
+            {"id": 2.0, "tier": 1},
+            {"id": 1000, "tier": 1},
+            {"id": 5, "tier": None, "owner": "Vincent"},
+            {"id": 99_999, "tier": 1},
+        ]
+        expected = (2, [1, 3])
+    else:
+        rows = [{"id": i, "tier": i % 7} for i in range(301)]
+        expected = (300, [300])
+    by_call, by_query = build(), build()
+    summary = by_call.update_nodes(["Graph", "Method"], rows)
+    by_query.execute(
+        "UNWIND $rows AS r MATCH (n:Graph:Method {id: r.id}) SET n += r", {"rows": rows}
+    )
+    assert (summary["updated"], summary["skipped_rows"]) == expected
+    query = "MATCH (n:Graph) RETURN n.name AS name, properties(n) AS p ORDER BY name"
+    assert by_call.execute(query).to_list() == by_query.execute(query).to_list()
+
+
+def test_update_nodes_is_kept_by_a_persistent_database(tmp_path):
+    path = str(tmp_path / "methods.grafeo")
+    db = grafeo.GrafeoDB.open(path)
+    db.batch_create_nodes_with_props(["Method"], [{"id": f"m{i}", "lines": 0} for i in range(3)])
+    assert db.update_nodes(["Method"], [{"id": "m1", "lines": 12}])["updated"] == 1
+    db.close()
+    db = grafeo.GrafeoDB.open(path)
+    rows = db.execute("MATCH (n:Method) RETURN n.id AS id, n.lines AS l ORDER BY id").to_list()
+    assert [(row["id"], row["l"]) for row in rows] == [("m0", 0), ("m1", 12), ("m2", 0)]
+    db.close()
 
 
 # ---------------------------------------------------------------------------

@@ -334,8 +334,14 @@ impl super::Planner {
             )),
         });
 
-        let (left_op, left_cols) = self.plan_operator(&vector_scan_op)?;
-        let (right_op, right_cols) = self.plan_operator(&text_scan_op)?;
+        // Two index scans and their join stand in for the one label scan of
+        // the plan: under PROFILE they are planned without entries of their
+        // own, and the join takes the scan's line (below), so each logical
+        // operator keeps one entry.
+        let (left_op, left_cols) =
+            self.without_profiling(|| self.plan_operator(&vector_scan_op))?;
+        let (right_op, right_cols) =
+            self.without_profiling(|| self.plan_operator(&text_scan_op))?;
 
         // For OR with scalar remainders on either branch, wrap that branch
         // in a filter before the join. E.g., for
@@ -407,12 +413,29 @@ impl super::Planner {
             output_cols.push(col.clone());
         }
 
+        let join_name = join_op.name();
         let proj_schema = self.derive_schema_from_columns(&output_cols);
-        let proj_op: Box<dyn Operator> = Box::new(super::ProjectOperator::new(
+        let mut proj_op: Box<dyn Operator> = Box::new(super::ProjectOperator::new(
             join_op,
             proj_exprs,
             proj_schema,
         ));
+        // PROFILE: the join of the two scans in the label scan's line, which
+        // names them.
+        if self.profiling.get() {
+            let (entry, stats) = crate::query::profile::ProfileEntry::new(
+                join_name,
+                format!(
+                    "VectorScan {}, TextScan {}",
+                    vector_scan_op.display_label(),
+                    text_scan_op.display_label()
+                ),
+            );
+            proj_op = Box::new(grafeo_core::execution::ProfiledOperator::new(
+                proj_op, stats,
+            ));
+            self.profile_entries.borrow_mut().push(entry);
+        }
 
         // Apply any remaining scalar predicates (parts of the expression that are
         // neither vector nor text, e.g. an extra AND condition)

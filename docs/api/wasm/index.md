@@ -57,6 +57,10 @@ db.executeRawWithLanguageAndParams(query, language, params);  // raw result, lan
 A raw result's `counters` tell what a write changed: `nodesCreated`, `nodesDeleted`, `edgesCreated`,
 `edgesDeleted`, `propertiesSet`, `labelsAdded` and `labelsRemoved` (all zero for a read).
 
+A query that fails throws an `Error` whose message starts with its Grafeo code and whose `gqlStatus` holds its ISO
+GQL status (`22012` for a division by zero, `42001` for a syntax error; see
+[Error Codes](../../user-guide/error-codes.md)).
+
 ## Time Travel
 
 A point in time is a `bigint` (an epoch), a `Date` (the last commit at or before it) or `{ ago: milliseconds }`. A

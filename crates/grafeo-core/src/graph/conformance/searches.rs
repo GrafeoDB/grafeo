@@ -133,7 +133,7 @@ mod text {
     pub(crate) trait TextIndexed: Store {
         fn add_text_index(&self, label: &str, property: &str, index: Arc<RwLock<InvertedIndex>>);
         fn remove_text_index(&self, label: &str, property: &str) -> bool;
-        fn text_index_entries(&self) -> Vec<(String, Arc<RwLock<InvertedIndex>>)>;
+        fn text_index_entries(&self) -> Vec<(String, String, Arc<RwLock<InvertedIndex>>)>;
     }
 
     /// Implements [`TextIndexed`] for a store by its own methods.
@@ -151,7 +151,7 @@ mod text {
                 fn remove_text_index(&self, label: &str, property: &str) -> bool {
                     <$store>::remove_text_index(self, label, property)
                 }
-                fn text_index_entries(&self) -> Vec<(String, Arc<RwLock<InvertedIndex>>)> {
+                fn text_index_entries(&self) -> Vec<(String, String, Arc<RwLock<InvertedIndex>>)> {
                     <$store>::text_index_entries(self)
                 }
             }
@@ -322,12 +322,16 @@ mod text {
         let store = make();
         people(&store)?;
         store.add_text_index("Person", "name", text_index());
-        let keys: Vec<String> = store
+        let keys: Vec<(String, String)> = store
             .text_index_entries()
             .into_iter()
-            .map(|(key, _)| key)
+            .map(|(label, property, _)| (label, property))
             .collect();
-        same(&keys, &vec!["Person:name".to_string()], "the text indexes")?;
+        same(
+            &keys,
+            &vec![("Person".to_string(), "name".to_string())],
+            "the text indexes",
+        )?;
         ensure(store.has_text_index("Person", "name"), || {
             "has_text_index".to_string()
         })?;
@@ -362,7 +366,7 @@ mod vector {
     pub(crate) trait VectorIndexed: Store {
         fn add_vector_index(&self, label: &str, property: &str, index: Arc<VectorIndexKind>);
         fn remove_vector_index(&self, label: &str, property: &str) -> bool;
-        fn vector_index_entries(&self) -> Vec<(String, Arc<VectorIndexKind>)>;
+        fn vector_index_entries(&self) -> Vec<(String, String, Arc<VectorIndexKind>)>;
     }
 
     /// Implements [`VectorIndexed`] for a store by its own methods.
@@ -380,7 +384,7 @@ mod vector {
                 fn remove_vector_index(&self, label: &str, property: &str) -> bool {
                     <$store>::remove_vector_index(self, label, property)
                 }
-                fn vector_index_entries(&self) -> Vec<(String, Arc<VectorIndexKind>)> {
+                fn vector_index_entries(&self) -> Vec<(String, String, Arc<VectorIndexKind>)> {
                     <$store>::vector_index_entries(self)
                 }
             }
@@ -562,14 +566,14 @@ mod vector {
         let store = make();
         people(&store)?;
         store.add_vector_index("Person", "embedding", vector_index());
-        let keys: Vec<String> = store
+        let keys: Vec<(String, String)> = store
             .vector_index_entries()
             .into_iter()
-            .map(|(key, _)| key)
+            .map(|(label, property, _)| (label, property))
             .collect();
         same(
             &keys,
-            &vec!["Person:embedding".to_string()],
+            &vec![("Person".to_string(), "embedding".to_string())],
             "the vector indexes",
         )?;
         ensure(

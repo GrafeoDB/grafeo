@@ -338,3 +338,171 @@ fn a_graph_variable_lists_the_graphs_a_transaction_wrote() {
     writer.commit().unwrap();
     assert_eq!(graphs(&other), both, "after the commit everyone sees it");
 }
+
+// =========================================================================
+// DELETE WHERE: the pattern is the WHERE and the template
+// =========================================================================
+
+/// An IRI of `http://ex.org/` from its debug form, as its local name.
+fn local_name(debug: &str) -> String {
+    debug
+        .trim_start_matches("RdfTerm(<http://ex.org/")
+        .trim_end_matches(">)")
+        .to_string()
+}
+
+/// A literal's text from its debug form, or an IRI's local name.
+fn term_text(debug: &str) -> String {
+    match debug
+        .strip_prefix("RdfTerm(\"")
+        .and_then(|rest| rest.strip_suffix("\")"))
+    {
+        Some(text) => text.to_string(),
+        None => local_name(debug),
+    }
+}
+
+/// Each triple `update` removes from [`DATA`], as `"s p o"` (local names and
+/// literal text), sorted, so a wrong object binding shows. The update adds
+/// nothing.
+fn removed(update: &str) -> Vec<String> {
+    let (added, removed) = change(update).unwrap_or_else(|error| panic!("{update}: {error}"));
+    assert!(added.is_empty(), "{update} added {added:?}");
+    let mut triples: Vec<String> = removed
+        .iter()
+        .map(|row| {
+            format!(
+                "{} {} {}",
+                local_name(&row[0]),
+                local_name(&row[1]),
+                term_text(&row[2])
+            )
+        })
+        .collect();
+    triples.sort();
+    triples
+}
+
+/// A `DELETE WHERE` whose pattern has no solution deletes nothing, its
+/// triples without variables included (SPARQL 1.1 Update 3.1.3.3).
+#[test]
+fn a_delete_where_without_a_solution_deletes_nothing() {
+    for update in [
+        r#"DELETE WHERE { <http://ex.org/alix> <http://ex.org/name> "Alix" .
+                          <http://ex.org/alix> <http://ex.org/age> ?a }"#,
+        r#"DELETE WHERE { <http://ex.org/alix> <http://ex.org/name> "Alix" .
+                          <http://ex.org/alix> <http://ex.org/city> "Paris" }"#,
+        r#"DELETE WHERE { <http://ex.org/gus> <http://ex.org/name> ?n .
+                          <http://ex.org/alix> <http://ex.org/city> "Paris" }"#,
+    ] {
+        assert_eq!(removed(update), Vec::<String>::new(), "{update}");
+    }
+}
+
+/// A `DELETE WHERE` with a solution deletes its triples without variables
+/// and the instantiated ones.
+#[test]
+fn a_delete_where_with_a_solution_deletes_every_triple_of_the_pattern() {
+    let alix = ["alix city Amsterdam", "alix name Alix"];
+    assert_eq!(
+        removed(
+            r#"DELETE WHERE { <http://ex.org/alix> <http://ex.org/name> "Alix" .
+                              <http://ex.org/alix> <http://ex.org/city> ?c }"#
+        ),
+        alix
+    );
+    assert_eq!(
+        removed(
+            r#"DELETE WHERE { <http://ex.org/alix> <http://ex.org/name> "Alix" .
+                              <http://ex.org/alix> <http://ex.org/city> "Amsterdam" }"#
+        ),
+        alix
+    );
+    // A join on ?s: both triples of its one solution go, the second one
+    // too after the first is deleted.
+    assert_eq!(
+        removed("DELETE WHERE { ?s <http://ex.org/name> ?n . ?s <http://ex.org/city> ?c }"),
+        alix
+    );
+}
+
+/// With several solutions every instantiated triple goes, and a triple
+/// without variables goes once.
+#[test]
+fn a_delete_where_with_several_solutions_deletes_each_triple() {
+    assert_eq!(
+        removed("DELETE WHERE { ?s <http://ex.org/name> ?n }"),
+        ["alix name Alix", "gus name Gus", "vincent name Vincent"]
+    );
+    assert_eq!(
+        removed(
+            r#"DELETE WHERE { <http://ex.org/alix> <http://ex.org/city> "Amsterdam" .
+                              ?s <http://ex.org/name> ?n }"#
+        ),
+        [
+            "alix city Amsterdam",
+            "alix name Alix",
+            "gus name Gus",
+            "vincent name Vincent"
+        ]
+    );
+}
+
+/// The triples of graph `<http://ex.org/{graph}>` as `"s p o"` (local names
+/// and literal text), sorted.
+fn graph_pairs(db: &GrafeoDB, graph: &str) -> Vec<String> {
+    let mut pairs: Vec<String> = db
+        .execute_sparql(&format!(
+            "SELECT ?s ?p ?o WHERE {{ GRAPH <http://ex.org/{graph}> {{ ?s ?p ?o }} }}"
+        ))
+        .unwrap()
+        .rows()
+        .iter()
+        .map(|row| {
+            format!(
+                "{} {} {}",
+                local_name(&format!("{:?}", row[0])),
+                local_name(&format!("{:?}", row[1])),
+                term_text(&format!("{:?}", row[2]))
+            )
+        })
+        .collect();
+    pairs.sort();
+    pairs
+}
+
+/// In a named graph the same holds: no solution deletes nothing, a
+/// solution deletes the pattern's triples from that graph only.
+#[test]
+fn a_delete_where_in_a_named_graph_deletes_only_on_a_solution() {
+    let db = with_data();
+    db.execute_sparql(
+        r#"INSERT DATA { GRAPH <http://ex.org/people> {
+            <http://ex.org/alix> <http://ex.org/name> "Alix" .
+            <http://ex.org/alix> <http://ex.org/city> "Amsterdam" .
+            <http://ex.org/gus> <http://ex.org/name> "Gus" } }"#,
+    )
+    .unwrap();
+    let default_before = triples(&db);
+
+    db.execute_sparql(
+        r#"DELETE WHERE { GRAPH <http://ex.org/people> {
+            <http://ex.org/alix> <http://ex.org/name> "Alix" .
+            <http://ex.org/alix> <http://ex.org/age> ?a } }"#,
+    )
+    .unwrap();
+    assert_eq!(
+        graph_pairs(&db, "people"),
+        ["alix city Amsterdam", "alix name Alix", "gus name Gus"],
+        "no solution deletes nothing"
+    );
+
+    db.execute_sparql(
+        r#"DELETE WHERE { GRAPH <http://ex.org/people> {
+            <http://ex.org/alix> <http://ex.org/name> "Alix" .
+            <http://ex.org/alix> <http://ex.org/city> ?c } }"#,
+    )
+    .unwrap();
+    assert_eq!(graph_pairs(&db, "people"), ["gus name Gus"]);
+    assert_eq!(triples(&db), default_before, "the default graph stays");
+}

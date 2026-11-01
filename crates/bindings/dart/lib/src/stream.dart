@@ -19,6 +19,7 @@ import 'package:ffi/ffi.dart';
 
 import 'error.dart';
 import 'ffi/bindings.dart';
+import 'value.dart';
 
 /// Async cursor over the rows of a read-only GQL query.
 ///
@@ -108,7 +109,8 @@ class ResultStream implements Finalizable {
       try {
         final decoded = jsonDecode(rowPtr.toDartString());
         if (decoded is Map) {
-          return Map<String, dynamic>.from(decoded);
+          // Each value decoded as a query row's is ($bytes, $decimal, ...)
+          return decodeObject(decoded);
         }
         throw DatabaseException(
           'Streaming row is not a JSON object: ${rowPtr.toDartString()}',

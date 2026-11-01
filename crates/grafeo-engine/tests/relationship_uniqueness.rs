@@ -187,6 +187,175 @@ fn a_bound_relationship_is_unique_in_the_match_that_names_it() {
     );
 }
 
+/// Alix, Gus and Vincent with KNOWS relationships 1 to 6: two parallel ones
+/// Alix->Gus (1, 2), Gus->Vincent (3), a loop on Vincent (4), a loop on Gus
+/// (5) and Vincent->Gus (6), which closes a cycle of two with 3.
+fn loops() -> GrafeoDB {
+    let db = GrafeoDB::new_in_memory();
+    db.execute(
+        "INSERT (alix:Person {name: 'Alix'}), (gus:Person {name: 'Gus'}), \
+         (vincent:Person {name: 'Vincent'}), \
+         (alix)-[:KNOWS {w: 1}]->(gus), (alix)-[:KNOWS {w: 2}]->(gus), \
+         (gus)-[:KNOWS {w: 3}]->(vincent), (vincent)-[:KNOWS {w: 4}]->(vincent), \
+         (gus)-[:KNOWS {w: 5}]->(gus), (vincent)-[:KNOWS {w: 6}]->(gus)",
+    )
+    .unwrap();
+    db
+}
+
+/// The one cell of a count.
+fn count(rows: &[Vec<String>]) -> i64 {
+    match rows {
+        [row] => row[0].parse().unwrap(),
+        other => panic!("not one count: {other:?}"),
+    }
+}
+
+/// The text of the plan `EXPLAIN` gives for a Cypher query.
+fn explain(db: &GrafeoDB, query: &str) -> String {
+    cypher(db, &format!("EXPLAIN {query}")).concat().concat()
+}
+
+/// Of the 12 directed two-hop walks over KNOWS, two take a loop twice (4, 4
+/// and 5, 5); of the 24 three-hop walks, 14 repeat no relationship, among
+/// them none of the walks round the cycle of two that take relationship 3 or
+/// 6 first and last (3, 6, 3 and 6, 3, 6). Each count is the one of GQL's
+/// lists of ids, with the parallel relationships Alix->Gus told apart.
+#[test]
+fn chains_of_single_relationships_skip_loops_taken_twice_and_keep_parallel_ones() {
+    let db = loops();
+    let two = "(a)-[e1:KNOWS]->(b)-[e2:KNOWS]->(c)";
+    let three = "(a)-[e1:KNOWS]->(b)-[e2:KNOWS]->(c)-[e3:KNOWS]->(d)";
+    assert_eq!(
+        count(&cypher(&db, &format!("MATCH {two} RETURN count(*)"))),
+        10
+    );
+    assert_eq!(
+        count(&rows(db.execute(&format!("MATCH {two} RETURN count(*)")))),
+        12
+    );
+    assert_eq!(
+        count(&cypher(&db, &format!("MATCH {three} RETURN count(*)"))),
+        14
+    );
+    assert_eq!(
+        count(&rows(db.execute(&format!("MATCH {three} RETURN count(*)")))),
+        24
+    );
+    assert_eq!(
+        count(&rows(db.execute(&format!(
+            "MATCH {three} WHERE all_different([e1, e2, e3]) RETURN count(*)"
+        )))),
+        14,
+        "the list form agrees"
+    );
+    assert_eq!(
+        cypher(
+            &db,
+            &format!(
+                "MATCH {three} WHERE e1.w = e2.w OR e1.w = e3.w OR e2.w = e3.w RETURN count(*)"
+            )
+        ),
+        expected(&[&["0"]]),
+        "no row takes one relationship twice"
+    );
+    assert_eq!(
+        cypher(
+            &db,
+            "MATCH (a:Person {name: 'Alix'})-[e1:KNOWS]->(b)<-[e2:KNOWS]-(c:Person {name: 'Alix'}) \
+             RETURN e1.w, e2.w"
+        ),
+        expected(&[&["1", "2"], &["2", "1"]]),
+        "the parallel relationships pair with each other, never with themselves"
+    );
+}
+
+/// Undirected, a loop and a relationship between two people can each come
+/// back on themselves; Cypher's counts are those of GQL with every
+/// relationship once, in a list or as DIFFERENT EDGES.
+#[test]
+fn undirected_chains_with_loops_and_parallel_relationships_take_each_once() {
+    let db = loops();
+    for pattern in [
+        "(a)-[e1:KNOWS]-(b)-[e2:KNOWS]-(c)",
+        "(a)-[e1:KNOWS]-(b)-[e2:KNOWS]-(c)-[e3:KNOWS]-(d)",
+    ] {
+        let edges = if pattern.contains("e3") {
+            "[e1, e2, e3]"
+        } else {
+            "[e1, e2]"
+        };
+        let listed = count(&rows(db.execute(&format!(
+            "MATCH {pattern} WHERE all_different({edges}) RETURN count(*)"
+        ))));
+        let walks = count(&rows(
+            db.execute(&format!("MATCH {pattern} RETURN count(*)")),
+        ));
+        assert!(
+            listed > 0 && listed < walks,
+            "{pattern}: {listed} of {walks}"
+        );
+        assert_eq!(
+            count(&cypher(&db, &format!("MATCH {pattern} RETURN count(*)"))),
+            listed,
+            "{pattern}"
+        );
+        assert_eq!(
+            count(&rows(db.execute(&format!(
+                "MATCH DIFFERENT EDGES {pattern} RETURN count(*)"
+            )))),
+            listed,
+            "{pattern}"
+        );
+    }
+}
+
+/// Single relationships are told apart by comparing their ids pairwise, with
+/// no list per row; a pair whose types share none needs no comparison. A
+/// variable-length relationship still compares the list of its
+/// relationships.
+#[test]
+fn explain_shows_pairwise_comparisons_for_single_relationships() {
+    let db = loops();
+    let plan = explain(
+        &db,
+        "MATCH (a)-[e1:KNOWS]->(b)-[e2:KNOWS]->(c) RETURN count(*)",
+    );
+    assert!(
+        plan.contains("Filter (Id(\"e1\") Ne Id(\"e2\"))") && !plan.contains("all_different"),
+        "{plan}"
+    );
+    let plan = explain(
+        &db,
+        "MATCH (a)-[e1]->(b)-[e2]->(c)-[e3]->(d) RETURN count(*)",
+    );
+    assert!(
+        plan.contains("Id(\"e1\") Ne Id(\"e2\")")
+            && plan.contains("Id(\"e1\") Ne Id(\"e3\")")
+            && plan.contains("Id(\"e2\") Ne Id(\"e3\")")
+            && !plan.contains("all_different"),
+        "{plan}"
+    );
+    let plan = explain(
+        &db,
+        "MATCH (a)-[e1:KNOWS]->(b)-[e2:KNOWS|LIKES]->(c)-[e3:LIKES]->(d) RETURN count(*)",
+    );
+    assert!(
+        plan.contains("Id(\"e1\") Ne Id(\"e2\")")
+            && plan.contains("Id(\"e2\") Ne Id(\"e3\")")
+            && !plan.contains("Id(\"e1\") Ne Id(\"e3\")"),
+        "a KNOWS and a LIKES relationship are never one: {plan}"
+    );
+    let plan = explain(
+        &db,
+        "MATCH (a)-[e1:KNOWS]->(b)-[e2:KNOWS*1..3]->(c) RETURN count(*)",
+    );
+    assert!(
+        plan.contains("all_different") && !plan.contains(" Ne Id("),
+        "{plan}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Variable-length patterns
 // ---------------------------------------------------------------------------

@@ -1,7 +1,7 @@
 {
   "name": "@grafeo-db/wasm",
   "type": "module",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "description": "WebAssembly bindings for Grafeo - a high-performance embeddable graph database",
   "keywords": [
     "graph",

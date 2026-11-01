@@ -30,6 +30,8 @@
 //! [`serialize`](Section::serialize)). It is read through
 //! [`deserialize`](Section::deserialize), which stays as it is.
 
+#![deny(clippy::let_underscore_must_use)]
+
 use std::collections::HashSet;
 use std::fmt;
 use std::sync::Arc;
@@ -174,17 +176,22 @@ pub(crate) trait CatalogStore: Send + Sync + 'static {
     /// The keys of the property indexes.
     fn property_index_keys(&self) -> Vec<String>;
 
-    /// The vector indexes, keyed `label:property`.
+    /// The vector indexes, as `(label, property, index)`.
     #[cfg(feature = "vector-index")]
     fn vector_index_entries(
         &self,
-    ) -> Vec<(String, Arc<grafeo_core::index::vector::VectorIndexKind>)>;
+    ) -> Vec<(
+        String,
+        String,
+        Arc<grafeo_core::index::vector::VectorIndexKind>,
+    )>;
 
-    /// The text indexes, keyed `label:property`.
+    /// The text indexes, as `(label, property, index)`.
     #[cfg(feature = "text-index")]
     fn text_index_entries(
         &self,
     ) -> Vec<(
+        String,
         String,
         Arc<parking_lot::RwLock<grafeo_core::index::text::InvertedIndex>>,
     )>;
@@ -214,7 +221,11 @@ macro_rules! catalog_store {
             #[cfg(feature = "vector-index")]
             fn vector_index_entries(
                 &self,
-            ) -> Vec<(String, Arc<grafeo_core::index::vector::VectorIndexKind>)> {
+            ) -> Vec<(
+                String,
+                String,
+                Arc<grafeo_core::index::vector::VectorIndexKind>,
+            )> {
                 <$store>::vector_index_entries(self)
             }
 
@@ -222,6 +233,7 @@ macro_rules! catalog_store {
             fn text_index_entries(
                 &self,
             ) -> Vec<(
+                String,
                 String,
                 Arc<parking_lot::RwLock<grafeo_core::index::text::InvertedIndex>>,
             )> {
@@ -258,18 +270,17 @@ impl GraphIndexes {
         let mut vector: Vec<VectorIndexDefinition> = store
             .vector_index_entries()
             .into_iter()
-            .filter_map(|(key, index)| {
-                let (label, property) = key.split_once(':')?;
+            .map(|(label, property, index)| {
                 let config = index.config();
-                Some(VectorIndexDefinition {
-                    label: label.to_string(),
-                    property: property.to_string(),
+                VectorIndexDefinition {
+                    label,
+                    property,
                     dimensions: config.dimensions,
                     metric: config.metric,
                     m: config.m,
                     ef_construction: config.ef_construction,
                     quantization: index.quantization_type(),
-                })
+                }
             })
             .collect();
         #[cfg(not(feature = "vector-index"))]
@@ -280,13 +291,10 @@ impl GraphIndexes {
         let mut text: Vec<TextIndexDefinition> = store
             .text_index_entries()
             .into_iter()
-            .filter_map(|(key, index)| {
-                let (label, property) = key.split_once(':')?;
-                Some(TextIndexDefinition {
-                    label: label.to_string(),
-                    property: property.to_string(),
-                    options: index.read().options().clone(),
-                })
+            .map(|(label, property, index)| TextIndexDefinition {
+                label,
+                property,
+                options: index.read().options().clone(),
             })
             .collect();
         #[cfg(not(feature = "text-index"))]

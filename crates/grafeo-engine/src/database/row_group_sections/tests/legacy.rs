@@ -147,7 +147,8 @@ fn indexes_of<S: CatalogStore>(store: &S) -> [Vec<String>; 3] {
     let mut vector: Vec<String> = store
         .vector_index_entries()
         .into_iter()
-        .map(|(key, _)| key)
+        // Each name quoted, so (a, b:emb) and (a:b, emb) stay apart
+        .map(|(label, property, _)| format!("{label:?}:{property:?}"))
         .collect();
     #[cfg(not(feature = "vector-index"))]
     let mut vector: Vec<String> = Vec::new();
@@ -155,7 +156,8 @@ fn indexes_of<S: CatalogStore>(store: &S) -> [Vec<String>; 3] {
     let mut text: Vec<String> = store
         .text_index_entries()
         .into_iter()
-        .map(|(key, _)| key)
+        // Each name quoted, so (a, b:emb) and (a:b, emb) stay apart
+        .map(|(label, property, _)| format!("{label:?}:{property:?}"))
         .collect();
     #[cfg(not(feature = "text-index"))]
     let mut text: Vec<String> = Vec::new();

@@ -16,7 +16,15 @@
 //! - a constant GRAPH, FROM over two graphs that share a triple (its
 //!   duplicates as before), GRAPH ?g (the plain join);
 //! - a transaction's pending inserts and deletes, in both modes;
-//! - PROFILE: the lookup operator and its rows.
+//! - PROFILE: the lookup operator and its rows;
+//! - a UNION of patterns (an alternative path `?p (e:knows|^e:knows) ?f`,
+//!   or written out), looked up in each branch: the rows of the two
+//!   single-direction queries together, duplicates kept, a variable of one
+//!   branch unbound in the other's rows, three branches, the UNION before
+//!   the pattern that binds; past the limit; an OPTIONAL of one; a blank
+//!   node as the looked-up term; and the UNION shapes left to the plain join
+//!   (a branch without the bound variable, with a FILTER or an OPTIONAL, a
+//!   repeated variable, GRAPH ?g).
 //!
 //! ```bash
 //! cargo test -p grafeo-engine --all-features --test sparql_triple_lookup
@@ -498,4 +506,238 @@ fn profile_shows_the_lookup() {
         "SELECT ?p ?n WHERE { VALUES ?p { e:p1 e:p7 e:p8 } { SELECT ?p ?n WHERE { ?p e:name ?n } } }",
     );
     assert!(!joined.contains("RdfTripleLookup"), "{joined}");
+}
+
+/// The rows of `forward` and of `inverse`, together and sorted: what their
+/// UNION gives (a bag: a row both give is there twice).
+fn both(db: &GrafeoDB, forward: &str, inverse: &str) -> Vec<String> {
+    let execute = |q: &str| db.execute_sparql(q);
+    let mut rows = run(&execute, forward).unwrap();
+    rows.extend(run(&execute, inverse).unwrap());
+    rows.sort();
+    rows
+}
+
+/// A join into a UNION of triple patterns that each hold a variable the
+/// other side binds (an alternative path `?p (e:knows|^e:knows) ?f` is one):
+/// each row looks its triples up in every branch. Its rows are those of the
+/// plain join and of the two single-direction queries together.
+#[test]
+fn a_union_of_patterns_looks_up_each_branch() {
+    let db = database();
+    let left = "VALUES ?p { e:p0 e:p5 e:p1999 e:nobody }";
+    let expected = both(
+        &db,
+        &format!("SELECT ?p ?f WHERE {{ {left} ?p e:knows ?f }}"),
+        &format!("SELECT ?p ?f WHERE {{ {left} ?f e:knows ?p }}"),
+    );
+    assert_eq!(
+        expected,
+        ["p0 p1", "p1999 p1998", "p5 p4", "p5 p6"],
+        "p0 knows only p1, p1999 is only known"
+    );
+    for pattern in [
+        "?p (e:knows|^e:knows) ?f .",
+        "{ ?p e:knows ?f } UNION { ?f e:knows ?p }",
+        "{ ?f e:knows ?p } UNION { ?p e:knows ?f }",
+    ] {
+        assert_eq!(
+            agree(&db, "?p ?f", left, pattern, "?p ?f"),
+            expected,
+            "{pattern}"
+        );
+    }
+    // The UNION before the pattern that binds ?p.
+    let execute = |q: &str| db.execute_sparql(q);
+    let union_first =
+        "SELECT ?p ?f WHERE { { ?p e:knows ?f } UNION { ?f e:knows ?p } ?p e:age 7 . }";
+    let union_first_joined = "SELECT ?p ?f WHERE { \
+         { SELECT ?p ?f WHERE { { ?p e:knows ?f } UNION { ?f e:knows ?p } } } ?p e:age 7 . }";
+    let rows = run(&execute, union_first).unwrap();
+    assert_eq!(rows, run(&execute, union_first_joined).unwrap());
+    assert_eq!(rows.len(), 80, "40 people of age 7, two friends each");
+}
+
+/// Bag semantics: a branch twice gives its rows twice, a triple both branches
+/// match (a self loop) twice; a variable of one branch only is unbound in the
+/// other's rows; three branches.
+#[test]
+fn a_union_lookup_keeps_duplicates_and_unbound_variables() {
+    let db = database();
+    db.execute_sparql(&format!("{PREFIX} INSERT DATA {{ e:p5 e:knows e:p5 . }}"))
+        .unwrap();
+    let left = "VALUES ?p { e:p5 e:p7 }";
+    assert_eq!(
+        agree(
+            &db,
+            "?p ?f",
+            left,
+            "{ ?p e:knows ?f } UNION { ?p e:knows ?f }",
+            "?p ?f"
+        ),
+        ["p5 p5", "p5 p5", "p5 p6", "p5 p6", "p7 p8", "p7 p8"],
+        "the same branch twice"
+    );
+    assert_eq!(
+        agree(&db, "?p ?f", left, "?p (e:knows|^e:knows) ?f .", "?p ?f"),
+        ["p5 p4", "p5 p5", "p5 p5", "p5 p6", "p7 p6", "p7 p8"],
+        "the self loop matches both directions"
+    );
+    assert_eq!(
+        agree(
+            &db,
+            "?p ?f ?n",
+            left,
+            "{ ?p e:knows ?f } UNION { ?p e:name ?n }",
+            "?p ?f ?n"
+        ),
+        ["p5 - n5", "p5 p5 -", "p5 p6 -", "p7 - n7", "p7 p8 -"],
+        "each branch leaves the other's variable unbound"
+    );
+    assert_eq!(
+        agree(
+            &db,
+            "?p ?o",
+            "VALUES ?p { e:p3 }",
+            "?p (e:knows|^e:knows|e:age) ?o .",
+            "?p ?o"
+        ),
+        ["p3 3", "p3 p2", "p3 p4"],
+        "three branches"
+    );
+}
+
+/// UNION shapes the lookup leaves to the plain join, which must still agree:
+/// a branch without the bound variable, a branch with a FILTER or an
+/// OPTIONAL, a repeated variable, a GRAPH ?g branch; and rows past the limit.
+#[test]
+fn union_shapes_the_lookup_leaves_alone() {
+    let db = database();
+    let left = "VALUES ?p { e:p5 e:p7 }";
+    for (pattern, variables) in [
+        ("{ ?p e:knows ?f } UNION { ?f e:age 49 }", "?p ?f"),
+        (
+            "{ ?p e:knows ?f OPTIONAL { ?f e:nick ?n } } UNION { ?f e:knows ?p }",
+            "?p ?f ?n",
+        ),
+        ("{ ?p e:knows ?p } UNION { ?f e:knows ?p }", "?p ?f"),
+        (
+            "{ GRAPH ?g { ?p e:knows ?f } } UNION { ?f e:knows ?p }",
+            "?p ?f ?g",
+        ),
+    ] {
+        agree(&db, variables, left, pattern, variables);
+    }
+    assert_eq!(
+        agree(
+            &db,
+            "?p ?f",
+            left,
+            "{ ?p e:knows ?f FILTER(?f != e:p6) } UNION { ?f e:knows ?p }",
+            "?p ?f"
+        ),
+        ["p5 p4", "p7 p6", "p7 p8"],
+        "the FILTER holds in its branch only"
+    );
+    for count in [1_024, 1_025, 5_000] {
+        let rows = agree(
+            &db,
+            "?p ?f",
+            &values_of_people(count),
+            "?p (e:knows|^e:knows) ?f .",
+            "?p ?f",
+        );
+        // p0 and p1999 have one friend each, the others two.
+        let ends = (0..count)
+            .filter(|i| matches!(i % 2_000, 0 | 1_999))
+            .count();
+        assert_eq!(rows.len(), 2 * count - ends, "{count} rows");
+    }
+}
+
+/// An OPTIONAL of a UNION of patterns looks each branch up and keeps a row
+/// none of them matches; a blank node as a looked-up term.
+#[test]
+fn an_optional_union_and_blank_nodes() {
+    let db = database();
+    db.execute_sparql(&format!(
+        "{PREFIX} INSERT DATA {{ _:b e:knows e:p5 . _:b e:knows e:p9 . }}"
+    ))
+    .unwrap();
+    let execute = |q: &str| db.execute_sparql(q);
+    let optional = "SELECT ?p ?f WHERE { VALUES ?p { e:p0 e:nobody } \
+                    OPTIONAL { ?p (e:knows|^e:knows) ?f } }";
+    let optional_joined = "SELECT ?p ?f WHERE { VALUES ?p { e:p0 e:nobody } \
+                           OPTIONAL { { SELECT ?p ?f WHERE { ?p (e:knows|^e:knows) ?f } } } }";
+    assert_eq!(run(&execute, optional), run(&execute, optional_joined));
+    assert_eq!(run(&execute, optional).unwrap(), ["nobody -", "p0 p1"]);
+    // ?b is the blank node the rows bind: its friends are looked up from it.
+    let through_blank = "SELECT ?g WHERE { VALUES ?p { e:p5 } ?b e:knows ?p . \
+                         FILTER(isBlank(?b)) ?b (e:knows|^e:knows) ?g . }";
+    let through_blank_joined = "SELECT ?g WHERE { VALUES ?p { e:p5 } ?b e:knows ?p . \
+                                FILTER(isBlank(?b)) \
+                                { SELECT ?b ?g WHERE { ?b (e:knows|^e:knows) ?g } } }";
+    assert_eq!(
+        run(&execute, through_blank),
+        run(&execute, through_blank_joined)
+    );
+    assert_eq!(run(&execute, through_blank).unwrap(), ["p5", "p9"]);
+}
+
+/// PROFILE shows one lookup for a join into a UNION, with its rows and the
+/// UNION's branches in its line, and no operator with more rows (a UNION
+/// that read every `e:knows` triple); an OPTIONAL of one the same. A pattern
+/// that binds ?p (one triple) is not looked up per UNION row instead.
+#[test]
+fn profile_shows_the_union_lookup() {
+    let db = database();
+    for (query, rows) in [
+        (
+            "SELECT ?p ?f WHERE { VALUES ?p { e:p5 e:p7 } ?p (e:knows|^e:knows) ?f . }",
+            4,
+        ),
+        (
+            "SELECT ?p ?f WHERE { VALUES ?p { e:p5 e:p7 } { ?p e:knows ?f } UNION { ?f e:knows ?p } }",
+            4,
+        ),
+        (
+            "SELECT ?p ?f WHERE { ?p (e:knows|^e:knows) ?f . VALUES ?p { e:p5 e:p7 } }",
+            4,
+        ),
+        (
+            "SELECT ?p ?f WHERE { VALUES ?p { e:p5 e:p7 } OPTIONAL { ?p (e:knows|^e:knows) ?f } }",
+            4,
+        ),
+        (
+            "SELECT ?p ?f WHERE { ?p e:name \"n5\" . ?p (e:knows|^e:knows) ?f . }",
+            2,
+        ),
+        (
+            "SELECT ?p ?f WHERE { ?p (e:knows|^e:knows) ?f . ?p e:name \"n5\" . }",
+            2,
+        ),
+    ] {
+        let text = profile(&db, query);
+        let lookups: Vec<&str> = text
+            .lines()
+            .map(str::trim_start)
+            .filter(|line| line.starts_with("RdfTripleLookup"))
+            .collect();
+        assert_eq!(lookups.len(), 1, "{query}: {text}");
+        assert!(
+            lookups[0].contains("RdfUnion 2 branches"),
+            "{query}: {text}"
+        );
+        assert!(
+            lookups[0].contains(&format!("rows={rows}")),
+            "{query}: {text}"
+        );
+        // No operator reads the 1,999 `e:knows` triples.
+        let most = text
+            .split("rows=")
+            .skip(1)
+            .filter_map(|rest| rest.split_whitespace().next()?.parse::<usize>().ok())
+            .max();
+        assert_eq!(most, Some(rows), "{query}: {text}");
+    }
 }

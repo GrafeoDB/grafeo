@@ -39,6 +39,10 @@ A triple whose subject is a literal, or whose predicate is not an IRI, fails `IN
 triple, and so it does in N-Triples loading and `batch_insert_rdf`. An `INSERT` template (`INSERT { ... } WHERE`)
 skips such a triple instead, as SPARQL 1.1 Update says.
 
+`INSERT DATA` and `DELETE DATA` hold ground triples only: a variable there is a syntax error that names it and says to
+use `INSERT` or `DELETE` with a `WHERE` clause, and so is a quoted triple (`<< ... >>`, SPARQL 1.2). A `[]` in
+`INSERT DATA` is a fresh blank node.
+
 Duplicate triples are silently skipped.
 
 ## DELETE DATA

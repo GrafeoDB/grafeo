@@ -38,8 +38,9 @@ pub(super) fn path_budget_error(
     } else {
         format!("{budget} bytes")
     };
+    let noun = if paths == 1 { "path" } else { "paths" };
     OperatorError::LimitExceeded(format!(
-        "{what} would hold more than {paths} paths at once, more than the {budget} of memory \
+        "{what} would hold more than {paths} {noun} at once, more than the {budget} of memory \
          a path search may use: {advice}"
     ))
 }
@@ -235,11 +236,15 @@ impl RowSearch {
     /// charged at most the budget, and grows only by memory the system
     /// grants.
     fn push(&mut self, path: OpenPath) -> Result<(), OperatorError> {
+        // A path is pushed as an extension of the one being extended, which
+        // is out of `open` by then (popped, or at the start the source's
+        // path of no edges): the search holds that one too.
+        let paths = self.open.len() + 1;
         let cost = self.cost(&path);
         if self.held.saturating_add(cost) > self.budget {
             return Err(path_budget_error(
                 "A variable-length pattern",
-                self.open.len(),
+                paths,
                 self.budget,
                 VARIABLE_LENGTH_ADVICE,
             ));
@@ -247,8 +252,9 @@ impl RowSearch {
         let held = self.open.len();
         if held == self.open.capacity() {
             self.open.try_reserve(held.max(16)).map_err(|_| {
+                let noun = if paths == 1 { "path" } else { "paths" };
                 OperatorError::LimitExceeded(format!(
-                    "A variable-length pattern holds {held} paths and the system has no memory \
+                    "A variable-length pattern holds {paths} {noun} and the system has no memory \
                      for more: {VARIABLE_LENGTH_ADVICE}"
                 ))
             })?;

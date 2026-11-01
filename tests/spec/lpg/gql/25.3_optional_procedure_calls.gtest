@@ -1,0 +1,199 @@
+# OPTIONAL CALL of a named procedure: ISO/IEC 39075:2024 sec 15.3
+#
+# An OPTIONAL CALL keeps every incoming row. When the procedure returns no
+# rows for it (or its YIELD WHERE removes them all), the row stays once, with
+# null in each yielded column. When it returns rows, the result is the same
+# as a plain CALL. A plain CALL of an empty procedure drops the row.
+
+meta:
+  language: gql
+  model: lpg
+  section: "15.3"
+  title: Optional procedure calls
+  dataset: empty
+  requires: [algos]
+
+tests:
+
+  # ---------------------------------------------------------------------------
+  # A procedure that returns no rows
+  # ---------------------------------------------------------------------------
+
+  - name: optional_call_without_rows_keeps_each_row_with_nulls
+    query: "UNWIND ['Alix', 'Gus', 'Alix'] AS name OPTIONAL CALL db.labels() YIELD label RETURN name, label ORDER BY name"
+    expect:
+      ordered: true
+      columns: [name, label]
+      rows:
+        - [Alix, null]
+        - [Alix, null]
+        - [Gus, null]
+
+  - name: optional_call_without_rows_as_the_first_clause
+    query: "OPTIONAL CALL db.labels() YIELD label RETURN label"
+    expect:
+      columns: [label]
+      rows:
+        - [null]
+
+  - name: optional_call_without_rows_keeps_an_alias
+    query: "OPTIONAL CALL db.labels() YIELD label AS kind RETURN kind"
+    expect:
+      columns: [kind]
+      rows:
+        - [null]
+
+  # The control: a plain CALL of the same empty procedure drops every row.
+  - name: plain_call_without_rows_drops_the_row
+    query: "UNWIND ['Alix', 'Gus'] AS name CALL db.labels() YIELD label RETURN name, label"
+    expect:
+      empty: true
+
+  # No incoming row, nothing to keep.
+  - name: optional_call_without_incoming_rows_returns_nothing
+    query: "UNWIND [] AS name OPTIONAL CALL db.labels() YIELD label RETURN name, label"
+    expect:
+      empty: true
+
+  # YIELD WHERE filters before the null extension: a row whose procedure rows
+  # are all filtered away stays with nulls.
+  - name: optional_call_whose_yield_where_removes_every_row
+    setup:
+      - "INSERT (:Person {name: 'Alix'})"
+      - "INSERT (:City {name: 'Amsterdam'})"
+    query: "UNWIND ['Vincent', 'Jules'] AS name OPTIONAL CALL db.labels() YIELD label WHERE label = 'Planet' RETURN name, label ORDER BY name"
+    expect:
+      ordered: true
+      rows:
+        - [Jules, null]
+        - [Vincent, null]
+
+  - name: optional_call_of_an_empty_stored_procedure
+    setup:
+      - "CREATE PROCEDURE nobody() RETURNS (who STRING, rank INTEGER) AS { MATCH (p:Absent) RETURN p.name AS who, 1 AS rank }"
+    query: "UNWIND ['Mia', 'Butch'] AS name OPTIONAL CALL nobody() YIELD who, rank RETURN name, who, rank ORDER BY name"
+    expect:
+      ordered: true
+      columns: [name, who, rank]
+      rows:
+        - [Butch, null, null]
+        - [Mia, null, null]
+
+  # Without YIELD, RETURN * lists the procedure's declared columns in order.
+  - name: optional_call_of_an_empty_stored_procedure_return_star
+    setup:
+      - "CREATE PROCEDURE nobody() RETURNS (who STRING, rank INTEGER) AS { MATCH (p:Absent) RETURN p.name AS who, 1 AS rank }"
+    query: "OPTIONAL CALL nobody() RETURN *"
+    expect:
+      columns: [who, rank]
+      rows:
+        - [null, null]
+
+  # ---------------------------------------------------------------------------
+  # A procedure that returns rows
+  # ---------------------------------------------------------------------------
+
+  - name: optional_call_with_rows_matches_a_plain_call
+    setup:
+      - "INSERT (:Person {name: 'Alix'})"
+      - "INSERT (:City {name: 'Amsterdam'})"
+    query: "UNWIND ['Gus', 'Alix'] AS name OPTIONAL CALL db.labels() YIELD label RETURN name, label ORDER BY name, label"
+    expect:
+      ordered: true
+      columns: [name, label]
+      rows:
+        - [Alix, City]
+        - [Alix, Person]
+        - [Gus, City]
+        - [Gus, Person]
+
+  - name: optional_call_with_rows_as_the_first_clause
+    setup:
+      - "INSERT (:Person {name: 'Alix'})"
+      - "INSERT (:City {name: 'Amsterdam'})"
+    query: "OPTIONAL CALL db.labels() YIELD label RETURN label ORDER BY label"
+    expect:
+      ordered: true
+      rows:
+        - [City]
+        - [Person]
+
+  # Duplicate procedure rows stay duplicates; nothing is null-extended.
+  - name: optional_call_of_a_stored_procedure_with_rows
+    setup:
+      - "CREATE PROCEDURE ranks() RETURNS (who STRING, rank INTEGER) AS { UNWIND [['Django', 2], ['Hans', 1], ['Hans', 1]] AS r RETURN r[0] AS who, r[1] AS rank }"
+    query: "UNWIND ['Shosanna'] AS name OPTIONAL CALL ranks() YIELD who, rank RETURN name, who, rank ORDER BY rank, who"
+    expect:
+      ordered: true
+      rows:
+        - [Shosanna, Hans, 1]
+        - [Shosanna, Hans, 1]
+        - [Shosanna, Django, 2]
+
+  - name: optional_call_of_a_stored_procedure_with_rows_return_star
+    setup:
+      - "CREATE PROCEDURE ranks() RETURNS (who STRING, rank INTEGER) AS { UNWIND [['Django', 2], ['Hans', 1]] AS r RETURN r[0] AS who, r[1] AS rank }"
+    query: "UNWIND ['Shosanna'] AS name OPTIONAL CALL ranks() RETURN *"
+    expect:
+      columns: [name, who, rank]
+      rows:
+        - [Shosanna, Django, 2]
+        - [Shosanna, Hans, 1]
+
+  # ---------------------------------------------------------------------------
+  # Row variables inside the call
+  # ---------------------------------------------------------------------------
+
+  # A procedure call does not read the incoming row yet: an argument or a
+  # YIELD WHERE that names a row variable is refused, by CALL and OPTIONAL
+  # CALL alike. (openCypher allows both; these cases change when Grafeo does.)
+  - name: plain_call_with_an_argument_from_the_row_is_refused
+    setup:
+      - "CREATE PROCEDURE person(who STRING) RETURNS (found STRING) AS { MATCH (p:Person {name: $who}) RETURN p.name AS found }"
+    query: "UNWIND ['Alix', 'Gus'] AS name CALL person(name) YIELD found RETURN name, found"
+    expect:
+      error: "a procedure argument must be a constant"
+
+  - name: optional_call_with_an_argument_from_the_row_is_refused
+    setup:
+      - "CREATE PROCEDURE person(who STRING) RETURNS (found STRING) AS { MATCH (p:Person {name: $who}) RETURN p.name AS found }"
+    query: "UNWIND ['Alix', 'Gus'] AS name OPTIONAL CALL person(name) YIELD found RETURN name, found"
+    expect:
+      error: "a procedure argument must be a constant"
+
+  - name: plain_call_yield_where_on_a_row_variable_is_refused
+    query: "UNWIND ['Person', 'Planet'] AS wanted CALL db.labels() YIELD label WHERE label = wanted RETURN wanted, label"
+    expect:
+      error: "Undefined variable 'wanted'"
+
+  - name: optional_call_yield_where_on_a_row_variable_is_refused
+    query: "UNWIND ['Person', 'Planet'] AS wanted OPTIONAL CALL db.labels() YIELD label WHERE label = wanted RETURN wanted, label"
+    expect:
+      error: "Undefined variable 'wanted'"
+
+  # A constant argument is fine, also with a parameter.
+  - name: optional_call_with_a_parameter_argument
+    setup:
+      - "INSERT (:Person {name: 'Alix'})"
+      - "CREATE PROCEDURE person(who STRING) RETURNS (found STRING) AS { MATCH (p:Person {name: $who}) RETURN p.name AS found }"
+    query: "UNWIND [1, 2] AS n OPTIONAL CALL person($who) YIELD found RETURN n, found ORDER BY n"
+    params:
+      who: Gus
+    expect:
+      ordered: true
+      rows:
+        - [1, null]
+        - [2, null]
+
+  - name: optional_call_with_a_parameter_argument_that_finds_a_row
+    setup:
+      - "INSERT (:Person {name: 'Alix'})"
+      - "CREATE PROCEDURE person(who STRING) RETURNS (found STRING) AS { MATCH (p:Person {name: $who}) RETURN p.name AS found }"
+    query: "UNWIND [1, 2] AS n OPTIONAL CALL person($who) YIELD found RETURN n, found ORDER BY n"
+    params:
+      who: Alix
+    expect:
+      ordered: true
+      rows:
+        - [1, Alix]
+        - [2, Alix]

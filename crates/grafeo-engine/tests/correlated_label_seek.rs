@@ -567,6 +567,75 @@ fn profile_shows_the_seek_and_its_checks() {
     }
 }
 
+/// The queries whose second label and key are constants: the key a parameter,
+/// in the pattern or in the `WHERE`.
+fn constant_keyed(labels: &str) -> Vec<(Language, String)> {
+    [Language::Gql, Language::Cypher]
+        .into_iter()
+        .flat_map(|language| {
+            [
+                format!("MATCH ({labels} {{filePath: $path}}) RETURN t.name"),
+                format!("MATCH ({labels}) WHERE t.filePath = $path RETURN t.name"),
+            ]
+            .map(|query| (language, query))
+        })
+        .collect()
+}
+
+/// A constant key is looked up in the index while planning, and the lookup
+/// takes over the check of the other label wherever the optimizer leaves it,
+/// above the key filter or below it: `PROFILE` shows one node list that
+/// checks the label and the key of each node it found, and no filter after
+/// it. The rows are those without the index.
+#[test]
+fn a_constant_key_is_looked_up_with_the_label_checks() {
+    let path = [("path", Value::from("amsterdam.rs"))];
+    let expected = table(&[&["Alix"], &["Mia"]]);
+    for more in SIZES {
+        let (sought, scanned_db) = (files(true, more), files(false, more));
+        let (with_index, without_index) = (sought.session(), scanned_db.session());
+        for labels in PATTERNS {
+            let scan = scanned(labels, more);
+            let other = if scan.ends_with("(t:Graph)") {
+                "TypeDefinition"
+            } else {
+                "Graph"
+            };
+            let scanned_label = scan.trim_start_matches("NodeScan (").trim_end_matches(')');
+            for (language, query) in constant_keyed(labels) {
+                let context = format!("{language:?} `{query}` (more {more:?})");
+                let profile = plan_text(&with_index, language, &format!("PROFILE {query}"), &path);
+                let operators = lines(&profile);
+                let lists: Vec<&&str> = operators
+                    .iter()
+                    .filter(|line| line.starts_with("NodeList ("))
+                    .collect();
+                assert_eq!(lists.len(), 1, "{context}:\n{profile}");
+                assert!(
+                    lists[0].contains(&format!("hasLabel(t, \"{other}\")"))
+                        && lists[0].contains("t.filePath Eq \"amsterdam.rs\"")
+                        && lists[0].contains(&format!("NodeScan {scanned_label}")),
+                    "{context}:\n{profile}"
+                );
+                assert!(
+                    !operators.iter().any(|line| line.starts_with("Filter (")),
+                    "{context}: the label check runs in the lookup\n{profile}"
+                );
+                assert_eq!(
+                    sorted(&with_index, language, &query, &path),
+                    expected,
+                    "{context}, with the index"
+                );
+                assert_eq!(
+                    sorted(&without_index, language, &query, &path),
+                    expected,
+                    "{context}, without the index"
+                );
+            }
+        }
+    }
+}
+
 /// A seek looks a key up when its input row arrives, so after a write in its
 /// input it would miss what the input writes for later rows: here the nodes
 /// for the first rows' keys are written by rows of the input's second chunk

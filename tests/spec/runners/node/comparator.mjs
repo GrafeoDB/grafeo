@@ -68,6 +68,10 @@ export function valueToString(val) {
     const keys = Object.keys(val)
     // Decimal: {$decimal: '1.50'} -> its text, as Rust prints it
     if (keys.length === 1 && typeof val.$decimal === 'string') return val.$decimal
+    // A date, time, duration or zoned datetime: {$date: '2024-01-15'} -> its text
+    for (const tag of ['$date', '$time', '$duration', '$zoned_datetime']) {
+      if (keys.length === 1 && typeof val[tag] === 'string') return val[tag]
+    }
     // RDF/JS term: its lexical form, a blank node as `_:` and its label
     if (typeof val.termType === 'string' && typeof val.value === 'string') {
       return val.termType === 'BlankNode' ? `_:${val.value}` : val.value

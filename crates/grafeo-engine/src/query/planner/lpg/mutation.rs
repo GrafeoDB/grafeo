@@ -1205,7 +1205,7 @@ impl super::Planner {
     }
 
     /// Plans a user-defined procedure call.
-    #[cfg(all(feature = "algos", feature = "gql"))]
+    #[cfg(stored_procedures)]
     fn plan_user_procedure(
         &self,
         call: &CallProcedureOp,
@@ -1258,22 +1258,34 @@ impl super::Planner {
         });
 
         let plan = bind_body(&proc_def.name, &proc_def.body, &param_map)?;
+        // The body runs as the same statement run directly: on the graph its
+        // `USE` names, checked here before anything runs, else on the
+        // calling statement's, in its transaction.
+        let planning = self
+            .session_planning
+            .as_ref()
+            .ok_or_else(|| {
+                Error::from(grafeo_common::utils::error::QueryError::unsupported(
+                    format!(
+                        "a stored procedure call needs a session (procedure '{}')",
+                        proc_def.name
+                    ),
+                ))
+            })?
+            .for_body(
+                &proc_def.name,
+                &self.session_context,
+                plan.graph.as_deref(),
+                plan.root.has_mutations(),
+            )?;
         let operator = Box::new(UserProcedureOperator::new(
             plan,
             return_columns,
             yield_columns,
             ProcedureContext {
-                store: Arc::clone(&self.store),
-                store_mut: self.write_store.as_ref().map(Arc::clone),
-                transaction_manager: self.transaction_manager.clone(),
-                transaction_id: self.transaction_id,
-                viewing_epoch: self.viewing_epoch,
-                catalog: self.catalog.clone(),
+                planning,
                 write_counter: self.write_counter(),
                 read_counter: self.read_counter(),
-                recording: self.recording.clone(),
-                projections: self.projections.clone(),
-                statement_clock: self.session_context.statement_clock,
             },
         ));
 

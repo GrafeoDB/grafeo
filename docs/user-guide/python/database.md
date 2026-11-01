@@ -34,6 +34,22 @@ for row in result:
     print(row)
 ```
 
+## Query Timeouts
+
+A query may run for 30 seconds by default; past its timeout it fails with `GRAFEO-Q003`, which can be retried. Set
+the database's timeout in seconds when you create it, or set `timeout` for one query:
+
+```python
+import math
+
+db = grafeo.GrafeoDB(query_timeout=5)       # every query: at most 5 seconds
+db.execute("MATCH (n) RETURN count(n)", timeout=60)        # this query: at most a minute
+db.execute("MATCH (n) RETURN count(n)", timeout=math.inf)  # this query: no limit
+```
+
+`query_timeout=None` or `math.inf` runs queries without a limit. A `timeout` of `None` (the default) keeps the
+database's, and a timeout that is not a positive number raises `ValueError`.
+
 ## Threads
 
 Long-running calls release the GIL while Rust works: queries, commits,

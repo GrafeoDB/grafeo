@@ -332,7 +332,7 @@ impl super::GrafeoDB {
             .collect();
 
         let held = self.hold_commits_for_import()?;
-        let edge_count = self.insert_triples_streamed(&held, triples)?;
+        let edge_count = self.insert_triples_streamed(&held, triples, None)?;
 
         Ok((unique_nodes.len(), edge_count))
     }

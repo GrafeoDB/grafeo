@@ -7,6 +7,8 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use base64::Engine as _;
+
 use grafeo_common::types::rdf::{Literal, Term, UnsupportedTermKind};
 use grafeo_common::types::{PropertyKey, Value};
 
@@ -73,6 +75,11 @@ pub fn tagged_value(map: &BTreeMap<PropertyKey, Value>) -> Option<Value> {
     if let Some(float) = map.get(&PropertyKey::new(FLOAT_TAG)).and_then(tagged_float) {
         return Some(Value::Float64(float));
     }
+    if let Some(Value::String(text)) = map.get(&PropertyKey::new(BYTES_TAG))
+        && let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(text.as_str())
+    {
+        return Some(Value::Bytes(bytes.into()));
+    }
     if let Some(Value::Int64(micros)) = map.get(&PropertyKey::new("$timestamp_us")) {
         return Some(Value::Timestamp(
             grafeo_common::types::Timestamp::from_micros(*micros),
@@ -96,6 +103,10 @@ pub fn tagged_value(map: &BTreeMap<PropertyKey, Value>) -> Option<Value> {
     }
     None
 }
+
+/// The key of the tag bytes travel in as JSON: `{"$bytes": "AQL/"}`, their
+/// standard base64 with padding. Text that is no base64 leaves the map a map.
+pub const BYTES_TAG: &str = "$bytes";
 
 /// The key of the tag a float travels in as JSON when JSON cannot write it
 /// (`NaN`, `Infinity`, `-Infinity`) or the sender's JSON would write it as an
@@ -223,7 +234,8 @@ pub fn rdfjs_term(
 /// Timestamps are encoded as `{ "$timestamp_us": <micros> }`, decimals as
 /// `{ "$decimal": "1.50" }` (the text with its scale), RDF terms as
 /// `{ "$term": { "type": ..., "value": ... } }` (see [`term_to_json`]).
-/// Bytes are encoded as a JSON array of integers for lossless roundtrip.
+/// Bytes are encoded as the `$bytes` tag, their standard base64 (see
+/// [`BYTES_TAG`]), which [`json_to_value`] reads back as bytes.
 /// Vectors are encoded as a JSON array of floats.
 ///
 /// # Errors
@@ -247,9 +259,7 @@ pub fn value_to_json(v: &Value) -> Result<serde_json::Value, UnsupportedTermKind
         }
         Value::String(s) => serde_json::Value::String(s.to_string()),
         Value::Bytes(b) => {
-            let arr: Vec<serde_json::Value> =
-                b.iter().map(|&byte| serde_json::json!(byte)).collect();
-            serde_json::Value::Array(arr)
+            serde_json::json!({ BYTES_TAG: base64::engine::general_purpose::STANDARD.encode(b) })
         }
         Value::Timestamp(ts) => serde_json::json!({ "$timestamp_us": ts.as_micros() }),
         Value::Date(d) => serde_json::json!({ "$date": d.to_string() }),
@@ -600,10 +610,12 @@ mod tests {
     fn roundtrip_bytes() {
         let v = Value::Bytes(Arc::new([1u8, 2, 3, 255]));
         let json = value_to_json(&v);
-        // Bytes encode as array of integers
-        assert!(json.is_array());
-        assert_eq!(json[0], serde_json::json!(1u8));
-        assert_eq!(json[3], serde_json::json!(255u8));
+        // Bytes travel as the `$bytes` tag, standard base64, and back
+        assert_eq!(json, serde_json::json!({ "$bytes": "AQID/w==" }));
+        assert_eq!(json_to_value(&json), v);
+        // Text that is no base64 leaves the map a map
+        let not_bytes = json_to_value(&serde_json::json!({ "$bytes": "not base64!" }));
+        assert!(matches!(not_bytes, Value::Map(_)), "{not_bytes:?}");
     }
 
     #[test]
@@ -649,6 +661,21 @@ mod tests {
         let json = value_to_json(&v);
         let back = json_to_value(&json);
         assert_eq!(v, back);
+    }
+
+    #[test]
+    fn roundtrip_duration_of_mixed_signs() {
+        use grafeo_common::types::Duration;
+        for (duration, text) in [
+            (Duration::new(1, 0, -1_500_000_000), "P1MT-1.5S"),
+            (Duration::new(1, 0, -500_000_000), "P1MT-0.5S"),
+            (Duration::new(0, -1, 1_500_000_000), "P-1DT1.5S"),
+            (Duration::new(0, -1, -500_000_000), "-P1DT0.5S"),
+        ] {
+            let json = value_to_json(&Value::Duration(duration));
+            assert_eq!(json, serde_json::json!({ "$duration": text }));
+            assert_eq!(json_to_value(&json), Value::Duration(duration), "{text}");
+        }
     }
 
     #[test]

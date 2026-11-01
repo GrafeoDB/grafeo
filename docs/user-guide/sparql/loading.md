@@ -12,6 +12,52 @@ Grafeo includes zero-dependency parsers for W3C RDF serialization formats.
 Turtle and N-Triples support both batch (replace-all) and streaming
 (incremental, memory-bounded) loading. N-Quads is supported for export.
 
+## Loading a file or text into a database
+
+The database loads a Turtle or N-Triples file, or text, into the default graph
+or a named graph in one bulk write: the input is parsed first, nothing is
+inserted when a line does not parse (the error names the line), and the
+triples go to the WAL as one group, so a persistent database keeps all of them
+or none after a crash. A load reports no change data capture events. Each call
+returns how many triples were new in its graph.
+
+A named graph is given by its IRI, without angle brackets, and is created when
+it does not exist: its triples are where `INSERT DATA { GRAPH <iri> { ... } }`
+puts them.
+
+=== "Python"
+
+    ```python
+    import grafeo
+
+    db = grafeo.GrafeoDB("people.grafeo")
+    db.load_rdf("people.ttl")                     # the format from the extension
+    db.load_rdf("data.txt", format="ntriples")
+    db.load_rdf("cities.nt", graph="http://example.org/cities")
+    db.load_rdf_text(
+        '<http://example.org/alix> <http://example.org/city> "Amsterdam" .',
+        "ntriples",
+        graph="http://example.org/cities",
+    )
+    ```
+
+=== "Rust"
+
+    ```rust
+    use grafeo::{GrafeoDB, RdfFormat};
+
+    let db = GrafeoDB::open("people.grafeo")?;
+    db.load_rdf("people.ttl", None)?;
+    db.load_rdf_into("cities.nt", None, Some("http://example.org/cities"))?;
+    db.load_rdf_text(
+        "<http://example.org/alix> <http://example.org/city> \"Amsterdam\" .",
+        RdfFormat::NTriples,
+        Some("http://example.org/cities"),
+    )?;
+    ```
+
+The store-level parsers below load an `RdfStore` directly, without the WAL.
+
 ## Turtle
 
 Turtle is the most common human-readable RDF format, supporting prefix
@@ -50,8 +96,9 @@ large enough to amortize lock overhead.
 
 ### Loading via SPARQL
 
-The language bindings have no Turtle or N-Triples file loader. From any binding, send the triples as a SPARQL
-`INSERT DATA` statement instead. N-Triples lines can go into `INSERT DATA { ... }` as they are. Turtle's
+Python loads a file or text with `load_rdf` and `load_rdf_text` (see
+[Loading a file or text into a database](#loading-a-file-or-text-into-a-database)). The other bindings have no
+Turtle or N-Triples loader yet: from those, send the triples as a SPARQL `INSERT DATA` statement instead. N-Triples lines can go into `INSERT DATA { ... }` as they are. Turtle's
 `@prefix ex: <...> .` lines are not SPARQL: write each one as `PREFIX ex: <...>` (no `@`, no final dot) before
 `INSERT DATA`, and put the rest of the Turtle inside the braces:
 
@@ -136,5 +183,5 @@ destinations (logging, deduplication, remote stores).
 ## SPARQL LOAD Statement
 
 The SPARQL Update `LOAD` statement is not supported yet: `LOAD <file:///path/to/data.ttl>` fails with an
-unsupported error, also with `SILENT`. Load a file with the Rust loaders above, or send its
+unsupported error, also with `SILENT`. Load a file with `load_rdf` (Rust or Python) instead, or send its
 triples as `INSERT DATA` (see [Loading via SPARQL](#loading-via-sparql)).

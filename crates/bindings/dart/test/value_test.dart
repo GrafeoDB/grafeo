@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'package:grafeo/src/temporal.dart';
 import 'package:grafeo/src/types.dart';
 import 'package:grafeo/src/value.dart';
 import 'package:test/test.dart';
@@ -46,63 +47,35 @@ void main() {
   });
 
   group('Duration decoding', () {
-    // Durations are returned as ISO 8601 strings because Dart's Duration type
-    // cannot represent calendar components (years, months, days).
-    test('decodes PT1H30M10S to ISO string', () {
-      final json = jsonEncode([
-        {r'$duration': 'PT1H30M10S'}
-      ]);
-      final rows = parseRows(json);
-      expect(rows, hasLength(1));
-      final val = rows[0].values.first;
-      expect(val, isA<String>());
-      expect(val, equals('PT1H30M10S'));
-    });
-
-    test('decodes PT0S to string', () {
-      final json = jsonEncode([
-        {r'$duration': 'PT0S'}
-      ]);
-      final rows = parseRows(json);
-      final val = rows[0].values.first;
-      expect(val, isA<String>());
-      expect(val, equals('PT0S'));
-    });
-
-    test('decodes hours-only duration PT2H', () {
-      final json = jsonEncode([
-        {r'$duration': 'PT2H'}
-      ]);
-      final rows = parseRows(json);
-      final val = rows[0].values.first;
-      expect(val, isA<String>());
-      expect(val, equals('PT2H'));
-    });
-
-    test('decodes calendar duration P1Y2M3D', () {
-      final json = jsonEncode([
-        {r'$duration': 'P1Y2M3D'}
-      ]);
-      final rows = parseRows(json);
-      final val = rows[0].values.first;
-      expect(val, isA<String>());
-      expect(val, equals('P1Y2M3D'));
-    });
-
-    test('decodes seconds-only PT45S', () {
-      final json = jsonEncode([
-        {r'$duration': 'PT45S'}
-      ]);
-      final rows = parseRows(json);
-      final val = rows[0].values.first;
-      expect(val, isA<String>());
-      expect(val, equals('PT45S'));
-    });
+    // A Dart Duration cannot hold months, and P1D is not PT24H: a duration
+    // comes back as a GrafeoDuration of its three parts.
+    for (final (text, months, days, nanoseconds) in [
+      ('PT1H30M10S', 0, 0, 5410000000000),
+      ('PT0S', 0, 0, 0),
+      ('PT2H', 0, 0, 7200000000000),
+      ('P1Y2M3D', 14, 3, 0),
+      ('PT45S', 0, 0, 45000000000),
+    ]) {
+      test('decodes $text to a GrafeoDuration', () {
+        final rows = parseRows(jsonEncode([
+          {
+            'd': {r'$duration': text}
+          }
+        ]));
+        final val = rows[0]['d'];
+        expect(
+            val,
+            equals(GrafeoDuration(
+                months: months, days: days, nanoseconds: nanoseconds)));
+        expect(val.toString(), equals(text));
+      });
+    }
   });
 
   group('Duration encoding', () {
     test('encodes Duration to ISO format', () {
-      final encoded = encodeParams({'dur': const Duration(hours: 1, minutes: 30)});
+      final encoded =
+          encodeParams({'dur': const Duration(hours: 1, minutes: 30)});
       final decoded = jsonDecode(encoded) as Map<String, dynamic>;
       expect(decoded['dur'], isA<Map>());
       expect((decoded['dur'] as Map)[r'$duration'], equals('PT1H30M'));
@@ -119,11 +92,14 @@ void main() {
     test('decodes timestamp_us marker to DateTime', () {
       final us = DateTime(2024, 1, 15, 12, 0, 0).toUtc().microsecondsSinceEpoch;
       final json = jsonEncode([
-        {r'$timestamp_us': us}
+        {
+          'ts': {r'$timestamp_us': us}
+        }
       ]);
       final rows = parseRows(json);
-      final val = rows[0].values.first;
+      final val = rows[0]['ts'];
       expect(val, isA<DateTime>());
+      expect(val, equals(DateTime.fromMicrosecondsSinceEpoch(us, isUtc: true)));
     });
   });
 

@@ -235,8 +235,9 @@ dynamic _decodeMap(Map m) {
     return GrafeoDecimal(m[r'$decimal'] as String);
   }
   // Temporal tags from grafeo-bindings-common, each as the map's only key and
-  // with a value of its type, as the engine reads them: a map with another
-  // key, or a value of another type, stays a map
+  // with a value of its type: a map with another key, or a value of another
+  // type, stays a map. The text of a date, time, duration or zoned datetime
+  // is returned as it is, unchecked
   if (m.length == 1) {
     final us = m[r'$timestamp_us'];
     if (us is int) {

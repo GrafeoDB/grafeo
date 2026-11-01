@@ -12,6 +12,10 @@ namespace Grafeo;
 /// </summary>
 internal static class ValueConverter
 {
+    /// <summary>The Unix milliseconds of DateTime.MinValue and DateTime.MaxValue.</summary>
+    private const long MinUnixMilliseconds = -62_135_596_800_000;
+    private const long MaxUnixMilliseconds = 253_402_300_799_999;
+
     /// <summary>Encode a parameter dictionary as a JSON string for grafeo-c.</summary>
     internal static string EncodeParams(Dictionary<string, object?> parameters)
     {
@@ -269,13 +273,18 @@ internal static class ValueConverter
         }
 
         // Temporal tags from grafeo-bindings-common, each as the object's only
-        // key and with a value of its type, as the engine reads them: an object
-        // with another key, or a value of another type, stays a map
+        // key and with a value of its type: an object with another key, or a
+        // value of another type, stays a map. The text of a date, time,
+        // duration or zoned datetime is returned as it is, unchecked.
         if (element.EnumerateObject().Count() == 1)
         {
+            // A timestamp a DateTime cannot hold (before year 1 or after 9999)
+            // stays a map, where it would fail the whole result
             if (element.TryGetProperty("$timestamp_us", out var tsElement)
                 && tsElement.ValueKind == JsonValueKind.Number
-                && tsElement.TryGetInt64(out var microseconds))
+                && tsElement.TryGetInt64(out var microseconds)
+                && microseconds / 1000 >= MinUnixMilliseconds
+                && microseconds / 1000 <= MaxUnixMilliseconds)
             {
                 return DateTimeOffset.FromUnixTimeMilliseconds(microseconds / 1000).UtcDateTime;
             }

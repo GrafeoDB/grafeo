@@ -1,6 +1,7 @@
 package grafeo
 
 import (
+	"encoding"
 	"encoding/base64"
 	"encoding/json"
 	"math"
@@ -60,6 +61,10 @@ func jsonFloats(v any) any {
 		return map[string]string{"$bytes": base64.StdEncoding.EncodeToString(x)}
 	case json.Marshaler:
 		// A value that writes its own JSON (Decimal, json.RawMessage)
+		return v
+	case encoding.TextMarshaler:
+		// A value encoding/json writes as its text (uuid.UUID, net.IP), which
+		// the typed containers below would take apart into numbers or bytes
 		return v
 	default:
 		return typedContainer(v)

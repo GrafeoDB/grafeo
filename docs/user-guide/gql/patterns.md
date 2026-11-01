@@ -189,9 +189,10 @@ The ISO standard uses curly-brace syntax `{m,n}` for path quantifiers, as an alt
 | `{,5}` | `*0..5` | 0 to 5 hops |
 
 An omitted lower bound is 0 in the ISO syntax (`{,5}` also matches the start node itself, with no edge), and 1 in the
-Cypher syntax (`*..5` is 1 to 5 hops), as each standard defines it. An ISO quantifier whose upper bound is below its
-lower bound (`{3,1}`) is a syntax error, and so is an edge with a quantifier both inside and after its brackets
-(`-[:KNOWS*1..2]->{2}`).
+Cypher syntax (`*..5` is 1 to 5 hops), as each standard defines it. A quantifier whose upper bound is below its
+lower bound (`{3,1}`, `*3..1` or `*..0`) is a syntax error in GQL, and so is an edge with a quantifier both inside and
+after its brackets (`-[:KNOWS*1..2]->{2}`). In Cypher, `*3..1` is an empty range, which matches no path, as
+openCypher defines it.
 
 ```sql
 -- ISO: exactly 2 hops

@@ -34,6 +34,9 @@ MATCH (a:Person)-[:KNOWS*2..]->(b:Person)
 RETURN a.name, b.name
 ```
 
+A range whose upper bound is below its lower bound (`*3..1`, or `*..0`, whose lower bound is 1) is empty and
+matches no path, as openCypher defines it: `MATCH` gives no rows and `OPTIONAL MATCH` a row of nulls.
+
 ## Path Variables
 
 ```cypher

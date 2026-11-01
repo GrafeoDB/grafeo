@@ -100,10 +100,9 @@ RETURN
     avg(o.total) AS avg_order_value
 ```
 
-Without an `ORDER BY`, a database that cannot spill to disk (in memory without a spill path, or encrypted) gives the
-groups in the order of their first rows, the same on every run. A database that can spill (a file database without
-encryption, or one opened with a spill path) groups in partitions, and there the groups come in no fixed order, also
-when nothing spills. Add `ORDER BY` for an order you can rely on.
+Without an `ORDER BY`, the groups come in the order of their first rows, the same on every run, on every database:
+in memory or in a file, and also when the groups of a large query spill to disk. The order of the first rows follows
+the data and the plan, so new data or another plan can change it: add `ORDER BY` for an order you can rely on.
 
 ## WITH Clause
 

@@ -448,6 +448,73 @@ fn a_named_graph_holds_what_insert_data_into_it_holds() {
     assert_eq!(triples_in(&db, PEOPLE_GRAPH), expected);
 }
 
+/// A load without triples (empty text, only prefixes and comments, an empty
+/// file) into a named graph that does not exist creates the graph, empty,
+/// as `CREATE GRAPH` does; into one that exists or the default graph it
+/// changes nothing.
+#[test]
+fn a_load_without_triples_creates_its_named_graph() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = GrafeoDB::new_in_memory();
+    let empty_file = write(dir.path(), "empty.nt", "");
+    let only_prefixes = "@prefix ex: <http://ex.org/> .\n# no triples\n";
+    assert_eq!(
+        db.load_rdf_text("", RdfFormat::NTriples, Some("http://ex.org/a"))
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        db.load_rdf_text(only_prefixes, RdfFormat::Turtle, Some("http://ex.org/b"))
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        db.load_rdf_into(&empty_file, None, Some("http://ex.org/c"))
+            .unwrap(),
+        0
+    );
+    let mut names = db.rdf_store().graph_names();
+    names.sort();
+    assert_eq!(
+        names,
+        ["http://ex.org/a", "http://ex.org/b", "http://ex.org/c"]
+    );
+    // SPARQL sees each graph, without a triple in it.
+    let graphs = db
+        .execute_sparql("SELECT ?g WHERE { GRAPH ?g { } } ORDER BY ?g")
+        .unwrap();
+    assert_eq!(graphs.row_count(), 3);
+    assert_eq!(triples_in(&db, "http://ex.org/a"), Vec::<String>::new());
+
+    // Again, into a graph that exists, and into the default graph: nothing.
+    assert_eq!(
+        db.load_rdf_text("", RdfFormat::NTriples, Some("http://ex.org/a"))
+            .unwrap(),
+        0
+    );
+    assert_eq!(db.load_rdf_text("", RdfFormat::NTriples, None).unwrap(), 0);
+    assert_eq!(db.rdf_store().graph_names().len(), 3);
+    assert_eq!(db.rdf_store().len(), 0);
+}
+
+/// The named graph an empty load creates is still there after a close and
+/// a reopen.
+#[cfg(feature = "grafeo-file")]
+#[test]
+fn a_persistent_database_keeps_the_graph_an_empty_load_creates() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("people.grafeo");
+    {
+        let db = GrafeoDB::open(&path).unwrap();
+        db.load_rdf_text("", RdfFormat::NTriples, Some(PEOPLE_GRAPH))
+            .unwrap();
+        db.close().unwrap();
+    }
+    let db = GrafeoDB::open(&path).unwrap();
+    assert_eq!(db.rdf_store().graph_names(), [PEOPLE_GRAPH]);
+    db.close().unwrap();
+}
+
 /// A named graph needs a name: an empty one is refused before anything is
 /// read.
 #[test]
@@ -554,6 +621,12 @@ mod crash {
                     .unwrap(),
                 4
             );
+            // A load without triples creates its graph, empty.
+            assert_eq!(
+                db.load_rdf_text("", RdfFormat::NTriples, Some(EMPTY_GRAPH))
+                    .unwrap(),
+                0
+            );
             // Crash: no close(), no checkpoint, no destructors.
             std::process::exit(0);
         }
@@ -585,6 +658,12 @@ mod crash {
             super::triples(&db),
             super::triples(&super::inserted(super::NTRIPLES))
         );
+        let mut names = db.rdf_store().graph_names();
+        names.sort();
+        assert_eq!(names, [EMPTY_GRAPH, super::PEOPLE_GRAPH]);
         db.close().unwrap();
     }
+
+    /// The named graph the crashed child loads no triples into.
+    const EMPTY_GRAPH: &str = "http://ex.org/graphs/empty";
 }

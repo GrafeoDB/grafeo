@@ -908,7 +908,8 @@ fn an_index_search_shows_no_label_first() {
         (
             "MATCH (d:Doc) WHERE cosine_similarity(d.emb, [1.0, 0.0]) > 0.5 \
              AND text_score(d.body, 'graph') > 0.0 RETURN d.name",
-            "VectorScan",
+            // Both searches, joined, in the label scan's line.
+            "HashJoin (VectorScan d, TextScan d:Doc)",
         ),
     ];
     for indexed in [true, false] {

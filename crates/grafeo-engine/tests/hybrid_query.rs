@@ -652,6 +652,78 @@ fn test_profile_topk_order_by_text_score() {
     assert_eq!(result.row_count(), 1, "PROFILE returns a single-row report");
 }
 
+/// The operator lines of the profile of `query`, trimmed, without their
+/// times.
+fn profile_lines(db: &GrafeoDB, query: &str) -> Vec<String> {
+    let result = db
+        .execute(&format!("PROFILE {query}"))
+        .unwrap_or_else(|error| panic!("PROFILE {query}: {error}"));
+    let Value::String(text) = &result.rows()[0][0] else {
+        panic!("no profile text");
+    };
+    text.lines()
+        .filter(|line| line.contains("rows="))
+        .map(|line| {
+            line.trim()
+                .split("  time=")
+                .next()
+                .unwrap_or("")
+                .to_string()
+        })
+        .collect()
+}
+
+/// PROFILE of a filter that the vector and text indexes answer: the index
+/// scan takes the label scan's line under the filter, or for both indexes
+/// the join of their scans, which names them; the rows are those of the
+/// query without PROFILE.
+#[test]
+fn test_profile_of_index_pushdowns() {
+    let db = setup_article_db();
+    let both = "HashJoin (VectorScan doc, TextScan doc:Article)";
+    for (query, scan) in [
+        (
+            "MATCH (doc:Article) \
+             WHERE cosine_similarity(doc.embedding, [0.85, 0.15, 0.05]) > 0.3 \
+             RETURN doc.title",
+            "VectorScan (doc)",
+        ),
+        (
+            "MATCH (doc:Article) WHERE text_match(doc.body, 'attention mechanisms') \
+             RETURN doc.title",
+            "TextScan(BM25) (doc:Article)",
+        ),
+        (
+            "MATCH (doc:Article) \
+             WHERE cosine_similarity(doc.embedding, [0.85, 0.15, 0.05]) > 0.3 \
+               AND text_match(doc.body, 'attention mechanisms') \
+             RETURN doc.title",
+            both,
+        ),
+        (
+            "MATCH (doc:Article) \
+             WHERE cosine_similarity(doc.embedding, [0.1, 0.9, 0.0]) > 0.9 \
+                OR text_match(doc.body, 'attention mechanisms') \
+             RETURN doc.title",
+            both,
+        ),
+    ] {
+        let lines = profile_lines(&db, query);
+        let rows = db.execute(query).unwrap().row_count();
+        assert_eq!(lines.len(), 3, "{query}\n{lines:#?}");
+        assert_eq!(
+            lines[0],
+            format!("Project (doc.title)  rows={rows}"),
+            "{query}\n{lines:#?}"
+        );
+        assert!(
+            lines[1].ends_with(&format!("rows={rows}")),
+            "{query}\n{lines:#?}"
+        );
+        assert!(lines[2].starts_with(scan), "{query}\n{lines:#?}");
+    }
+}
+
 // ============================================================================
 // Test 17: dot_product pushdown
 // ============================================================================

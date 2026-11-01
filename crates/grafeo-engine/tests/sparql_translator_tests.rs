@@ -166,6 +166,44 @@ mod tests {
         let plan = translate(query).unwrap();
         assert!(!plan.explain);
     }
+
+    /// Each form SPARQL takes before the prologue (`EXPLAIN`, `EXPLAIN
+    /// ANALYZE`, `PROFILE`, any case) sets the same flags written after the
+    /// `BASE` and `PREFIX` lines, and the query reads the prefixes.
+    #[test]
+    fn each_explain_form_reads_the_same_after_the_prologue() {
+        let body = "SELECT ?n WHERE { ?s ex:name ?n }";
+        for (keyword, explain, profile) in [
+            ("EXPLAIN", true, false),
+            ("explain", true, false),
+            ("EXPLAIN ANALYZE", false, true),
+            ("Explain  analyze", false, true),
+            ("EXPLAIN\nANALYZE", false, true),
+            ("PROFILE", false, true),
+            ("profile", false, true),
+        ] {
+            for prologue in [
+                "PREFIX ex: <http://example.org/>",
+                "BASE <http://example.org/> PREFIX ex: <http://example.org/>",
+                "PREFIX ex: <http://example.org/>\nPREFIX foaf: <http://xmlns.com/foaf/0.1/>\n",
+            ] {
+                for query in [
+                    format!("{keyword} {prologue} {body}"),
+                    format!("{prologue} {keyword} {body}"),
+                ] {
+                    let plan = translate(&query).unwrap_or_else(|e| panic!("{query}: {e}"));
+                    assert_eq!((plan.explain, plan.profile), (explain, profile), "{query}");
+                }
+            }
+        }
+        // A query after the prologue that only starts with the keyword's
+        // letters is no EXPLAIN.
+        let plan = translate(
+            "PREFIX ex: <http://example.org/> SELECT ?explain WHERE { ?s ex:name ?explain }",
+        )
+        .unwrap();
+        assert_eq!((plan.explain, plan.profile), (false, false));
+    }
 }
 
 #[cfg(all(feature = "sparql", feature = "triple-store"))]
@@ -193,5 +231,135 @@ mod explain_integration {
             plan_text.contains("TripleScan"),
             "Plan should contain TripleScan, got: {plan_text}"
         );
+    }
+
+    /// After the PREFIX lines, `EXPLAIN` shows the plan without running the
+    /// query, and `EXPLAIN ANALYZE` and `PROFILE` run it and show the rows
+    /// each operator produced.
+    #[test]
+    fn each_explain_form_runs_after_the_prefix_lines() {
+        let db = GrafeoDB::new_in_memory();
+        db.execute_sparql(
+            r#"INSERT DATA { <http://example.org/alix> <http://xmlns.com/foaf/0.1/name> "Alix" .
+                <http://example.org/gus> <http://xmlns.com/foaf/0.1/name> "Gus" }"#,
+        )
+        .unwrap();
+        let body = "SELECT ?name WHERE { ?s foaf:name ?name }";
+        let prefix = "PREFIX foaf: <http://xmlns.com/foaf/0.1/>";
+        let plan = db
+            .execute_sparql(&format!("{prefix} EXPLAIN {body}"))
+            .unwrap();
+        assert_eq!(plan.columns, vec!["plan"]);
+        assert!(plan.rows()[0][0].to_string().contains("TripleScan"));
+        for keyword in ["EXPLAIN ANALYZE", "PROFILE"] {
+            let query = format!("{prefix} {keyword} {body}");
+            let profile = db
+                .execute_sparql(&query)
+                .unwrap_or_else(|e| panic!("{query}: {e}"));
+            assert_eq!(profile.columns, vec!["profile"], "{query}");
+            let text = profile.rows()[0][0].to_string();
+            assert!(
+                text.contains("TripleScan") && text.contains("rows=2"),
+                "{query}: {text}"
+            );
+        }
+    }
+
+    /// The operator lines of a profile: each line's operator name and its
+    /// rows, indented by depth.
+    fn profile_lines(text: &str) -> Vec<String> {
+        text.lines()
+            .filter(|line| line.contains("rows="))
+            .map(|line| {
+                let depth = line.len() - line.trim_start().len();
+                let name = line.split_whitespace().next().unwrap_or("");
+                let rows = line
+                    .split_whitespace()
+                    .find(|word| word.starts_with("rows="))
+                    .unwrap_or("");
+                format!("{}{name} {rows}", " ".repeat(depth))
+            })
+            .collect()
+    }
+
+    /// PROFILE of a pattern whose planner leaves operators out of the
+    /// physical plan gives the profile, each operator's numbers on its own
+    /// line: the pattern of a `FILTER EXISTS` or `NOT EXISTS` runs inside
+    /// the join that filters (and is named in its detail), and a `DELETE
+    /// WHERE` of a triple without variables deletes it without reading the
+    /// pattern.
+    #[test]
+    fn profile_of_patterns_the_planner_folds_in() {
+        let db = GrafeoDB::new_in_memory();
+        db.execute_sparql(
+            r#"PREFIX ex: <http://example.org/> INSERT DATA {
+                ex:alix ex:name "Alix" . ex:alix ex:nick "Al" .
+                ex:gus ex:name "Gus" . ex:vincent ex:name "Vincent" }"#,
+        )
+        .unwrap();
+        let prefix = "PREFIX ex: <http://example.org/>";
+        for (body, lines, detail) in [
+            (
+                "SELECT ?n WHERE { ?s ex:name ?n FILTER EXISTS { ?s ex:nick ?k } }",
+                &[
+                    "RdfProject rows=1",
+                    "  HashJoin rows=1",
+                    "    RdfTripleScan rows=3",
+                ][..],
+                "(EXISTS {",
+            ),
+            (
+                "SELECT ?n WHERE { ?s ex:name ?n FILTER NOT EXISTS { ?s ex:nick ?k } }",
+                &[
+                    "RdfProject rows=2",
+                    "  HashJoin rows=2",
+                    "    RdfTripleScan rows=3",
+                ][..],
+                "(Not EXISTS {",
+            ),
+            (
+                "SELECT ?n WHERE { ?s ex:name ?n \
+                 OPTIONAL { ?s ex:nick ?k FILTER NOT EXISTS { ?s ex:age ?a } } }",
+                &[
+                    "RdfProject rows=3",
+                    "  Project rows=3",
+                    "    RdfTripleScan rows=3",
+                    "    RdfTripleScan rows=1",
+                ][..],
+                "",
+            ),
+            (
+                "ASK { FILTER NOT EXISTS { ?s ex:age ?a } }",
+                &[
+                    "RdfProject rows=1",
+                    "  SimpleAggregate rows=1",
+                    "    Limit rows=1",
+                    "      HashJoin rows=1",
+                    "        SingleRow rows=1",
+                ][..],
+                "(Not EXISTS {",
+            ),
+        ] {
+            let query = format!("PROFILE {prefix} {body}");
+            let profile = db
+                .execute_sparql(&query)
+                .unwrap_or_else(|e| panic!("{query}: {e}"));
+            let text = profile.rows()[0][0].as_str().expect("the profile text");
+            assert_eq!(profile_lines(text), lines, "{query}\n{text}");
+            assert!(text.contains(detail), "{query}\n{text}");
+        }
+
+        // The triple goes, and the profile names the pattern it matched.
+        let query = format!("PROFILE {prefix} DELETE WHERE {{ ex:alix ex:nick \"Al\" }}");
+        let profile = db
+            .execute_sparql(&query)
+            .unwrap_or_else(|e| panic!("{query}: {e}"));
+        let text = profile.rows()[0][0].as_str().expect("the profile text");
+        assert_eq!(profile_lines(text), ["RdfDeleteTriple rows=0"], "{text}");
+        assert!(text.contains("(Pattern"), "{text}");
+        let left = db
+            .execute_sparql(&format!("{prefix} ASK {{ ex:alix ex:nick ?k }}"))
+            .unwrap();
+        assert_eq!(left.rows()[0][0], grafeo_common::types::Value::Bool(false));
     }
 }

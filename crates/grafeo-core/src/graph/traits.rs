@@ -1233,6 +1233,46 @@ mod tests {
         assert_eq!(store.node_count(NOW).unwrap(), 4);
         assert_eq!(store.edge_count(NOW).unwrap(), 4, "the self-loop once");
         assert_eq!(store.degree(mia, Direction::Both, NOW).unwrap(), 2);
+        // The edge counts: Mia's self-loop once both ways (and once each
+        // way on its own), a label the far end must have, a type the edge
+        // must have.
+        let types = |names: &[&str]| -> Vec<ArcStr> {
+            names.iter().map(|name| ArcStr::from(*name)).collect()
+        };
+        let count = |node, direction, edge_types: &[&str], end_labels: &[&str]| {
+            store
+                .count_edges(node, direction, &types(edge_types), &types(end_labels), NOW)
+                .unwrap()
+        };
+        assert_eq!(count(mia, Direction::Both, &[], &[]), 2, "Gus, the loop");
+        assert_eq!(count(mia, Direction::Outgoing, &[], &[]), 1, "the loop");
+        assert_eq!(
+            count(mia, Direction::Incoming, &[], &[]),
+            2,
+            "Gus, the loop"
+        );
+        assert_eq!(count(mia, Direction::Both, &[], &["Person"]), 2);
+        assert_eq!(count(mia, Direction::Both, &[], &["City"]), 0);
+        assert_eq!(count(alix, Direction::Outgoing, &[], &["City"]), 1);
+        assert_eq!(count(alix, Direction::Outgoing, &[], &["Person"]), 1);
+        assert_eq!(
+            count(alix, Direction::Outgoing, &[], &["Person", "City"]),
+            0,
+            "every end label"
+        );
+        assert_eq!(count(alix, Direction::Outgoing, &["KNOWS"], &[]), 1);
+        assert_eq!(count(alix, Direction::Outgoing, &["LIVES_IN"], &[]), 1);
+        assert_eq!(
+            count(alix, Direction::Outgoing, &["KNOWS", "LIVES_IN"], &[]),
+            2,
+            "any of the types"
+        );
+        assert_eq!(
+            count(alix, Direction::Outgoing, &["LIVES_IN"], &["Person"]),
+            0
+        );
+        assert_eq!(count(mia, Direction::Both, &["LIVES_IN"], &[]), 0);
+        assert_eq!(count(alix, Direction::Incoming, &[], &[]), 0);
         assert_eq!(
             store.neighbors(alix, Direction::Outgoing, NOW).unwrap(),
             [gus, amsterdam]

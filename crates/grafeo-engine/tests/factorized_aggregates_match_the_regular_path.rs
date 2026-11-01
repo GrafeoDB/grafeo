@@ -655,3 +655,97 @@ fn a_degree_count_reads_what_its_transaction_and_its_snapshot_see() {
         [[Value::Int64(from_three_before)]]
     );
 }
+
+/// The lines of the profile of `query` that show an operator: its name and
+/// the whole line.
+fn profile_lines(db: &GrafeoDB, query: &str) -> Vec<(String, String)> {
+    let result = db
+        .execute(&format!("PROFILE {query}"))
+        .unwrap_or_else(|error| panic!("PROFILE {query}: {error}"));
+    let text = result.rows()[0][0].as_str().expect("the profile text");
+    text.lines()
+        .filter(|line| line.contains("rows="))
+        .map(|line| {
+            let name = line.split_whitespace().next().unwrap_or("").to_string();
+            (name, line.to_string())
+        })
+        .collect()
+}
+
+#[test]
+fn profile_of_a_factorized_count_names_the_expands_it_absorbs() {
+    let db = database(Config::in_memory());
+    // Mia reaches Butch: two paths of three hops from Alix.
+    db.execute("MATCH (m:P {name: 'Mia'}), (b:P {name: 'Butch'}) INSERT (m)-[:R {w: 7}]->(b)")
+        .unwrap();
+    // Counts of a variable before the last hop run factorized over the
+    // chain (the edge count answers only counts of the last hop's rows):
+    // over two hops and over three, of the start, a middle node and the
+    // first edge, alone and next to a count of the rows.
+    for (query, count) in [
+        ("MATCH (a)-[:R]->(b)-[:R]->(c) RETURN count(a)", 6),
+        ("MATCH (a)-[:R]->(b)-[:R]->(c)-[:R]->(d) RETURN count(a)", 2),
+        (
+            "MATCH (a:P {name: 'Alix'})-[e1:R]->(b)-[e2:R]->(c)-[e3:R]->(d) RETURN count(b) AS n",
+            2,
+        ),
+        (
+            "MATCH (a:P {name: 'Alix'})-[e1:R]->(b)-[e2:R]->(c) RETURN count(e1) AS n",
+            4,
+        ),
+        (
+            "MATCH (a:P {name: 'Alix'})-[e1:R]->(b)-[e2:R]->(c) \
+             RETURN count(a) AS n, count(*) AS m",
+            4,
+        ),
+    ] {
+        let lines = profile_lines(&db, query);
+        let names: Vec<&str> = lines.iter().map(|(name, _)| name.as_str()).collect();
+        let text = lines
+            .iter()
+            .map(|(_, line)| line.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        // The factorized aggregate shows in the aggregate's place, with the
+        // expands it runs as part of it named in its detail (one per hop),
+        // over the scan of the start: no expand has a line of its own. (The
+        // RETURN above it can show the aggregate's name too: the last line
+        // with it is the aggregate's.)
+        let aggregate = names
+            .iter()
+            .rposition(|name| *name == "FactorizedAggregate")
+            .unwrap_or_else(|| panic!("{query}: no factorized aggregate\n{text}"));
+        let hops = query.matches("-[").count();
+        assert_eq!(
+            lines[aggregate].1.matches("Expand").count(),
+            hops,
+            "{query}\n{text}"
+        );
+        assert!(
+            names.iter().all(|name| !name.contains("Expand")),
+            "{query}\n{text}"
+        );
+        assert!(
+            names[aggregate + 1..]
+                .iter()
+                .all(|name| name.contains("Scan") || name.contains("Filter")),
+            "{query}\n{text}"
+        );
+        assert!(lines[aggregate].1.contains("rows=1 "), "{query}\n{text}");
+        if hops == 2 && query.starts_with("MATCH (a)-") {
+            // From the top down, as the plan reads.
+            assert!(
+                lines[aggregate]
+                    .1
+                    .contains("Expand (b)->[:R]->(c), Expand (a)->[:R]->(b))"),
+                "{query}\n{text}"
+            );
+        }
+        // And it counts what the query counts without PROFILE.
+        assert_eq!(
+            db.execute(query).unwrap().rows()[0][0],
+            Value::Int64(count),
+            "{query}"
+        );
+    }
+}

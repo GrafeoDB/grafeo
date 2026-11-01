@@ -99,7 +99,8 @@ public sealed class TagReadsTests : IDisposable
         using var stream = _db.ExecuteStream(query);
         var streamed = Assert.Single(stream.ToList());
         Assert.Single(streamed);
-        Assert.Equal(value.ToString(), streamed[column]?.ToString());
+        // The value and its type: a `$timestamp_us` row stays a long
+        Assert.Equal(value, streamed[column]);
     }
 
     public static TheoryData<string> TagKeys() => new()
@@ -129,5 +130,33 @@ public sealed class TagReadsTests : IDisposable
         var row = _db.ExecuteWithParams("RETURN $m AS m", new Dictionary<string, object?> { ["m"] = map }).Rows[0];
         var back = Assert.IsAssignableFrom<IReadOnlyDictionary<string, object?>>(row["m"]);
         Assert.Equal("soon", back["$timestamp_us"]);
+    }
+
+    /// <summary>A timestamp a DateTime cannot hold stays a map, and the rest of the result reads.</summary>
+    [Theory]
+    [InlineData(9_000_000_000_000_000_000L)]
+    [InlineData(-9_000_000_000_000_000_000L)]
+    public void ATimestampOutsideTheDateTimeRangeStaysAMap(long microseconds)
+    {
+        var map = new Dictionary<string, object?> { ["$timestamp_us"] = microseconds };
+        var row = _db.ExecuteWithParams(
+            "RETURN $m AS m, 'Gus' AS name",
+            new Dictionary<string, object?> { ["m"] = map }).Rows[0];
+        var back = Assert.IsAssignableFrom<IReadOnlyDictionary<string, object?>>(row["m"]);
+        Assert.Equal(microseconds, back["$timestamp_us"]);
+        Assert.Equal("Gus", row["name"]);
+    }
+
+    /// <summary>A timestamp a DateTime can hold, at both ends of its range, is a DateTime.</summary>
+    [Fact]
+    public void TimestampsAtTheEndsOfTheDateTimeRangeAreDateTimes()
+    {
+        foreach (var at in new[] { DateTime.MinValue, DateTime.MaxValue.AddTicks(-9_999) })
+        {
+            var microseconds = new DateTimeOffset(DateTime.SpecifyKind(at, DateTimeKind.Utc)).ToUnixTimeMilliseconds() * 1000;
+            var map = new Dictionary<string, object?> { ["$timestamp_us"] = microseconds };
+            var row = _db.ExecuteWithParams("RETURN $m AS m", new Dictionary<string, object?> { ["m"] = map }).Rows[0];
+            Assert.Equal(DateTimeOffset.FromUnixTimeMilliseconds(microseconds / 1000).UtcDateTime, row["m"]);
+        }
     }
 }

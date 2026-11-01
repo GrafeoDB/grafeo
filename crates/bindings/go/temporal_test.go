@@ -314,3 +314,105 @@ func TestOffsetWithSecondsKeepsTheInstant(t *testing.T) {
 		t.Errorf("came back typed %v as %#v", typed, back)
 	}
 }
+
+// A pointer parameter arrives as the type of the value it points to, and a
+// nil pointer as null: *time.Time is a TIMESTAMP or ZONED DATETIME, not the
+// STRING encoding/json writes, and *time.Duration a DURATION, not an INT64.
+func TestPointerParametersArriveAsTheirValues(t *testing.T) {
+	db, err := OpenInMemory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	at := time.Date(2024, 3, 5, 10, 30, 0, 123456000, time.UTC)
+	zoned := time.Date(2024, 3, 5, 10, 30, 0, 0, time.FixedZone("CET", 3600))
+	took := 90 * time.Second
+	whole := 3.0
+	pointed := &took
+	cases := []struct {
+		gqlType string
+		value   any
+		want    any
+	}{
+		{"TIMESTAMP", &at, at},
+		{"ZONED DATETIME", &zoned, zoned},
+		{"DURATION", &took, Duration{Nanos: int64(took)}},
+		{"DURATION", &pointed, Duration{Nanos: int64(took)}},
+		{"FLOAT64", &whole, nil},
+	}
+	for _, c := range cases {
+		typed, back := typedBack(t, db, c.gqlType, c.value)
+		if !typed {
+			t.Errorf("%T arrived as %#v, not as a %s", c.value, back, c.gqlType)
+		}
+		if c.want != nil && !sameTemporal(c.want, back) {
+			t.Errorf("%T came back as %#v", c.value, back)
+		}
+	}
+	for _, value := range []any{(*time.Time)(nil), (*time.Duration)(nil), (*float64)(nil)} {
+		result, err := db.ExecuteParams("RETURN $v IS NULL AS null", map[string]any{"v": value})
+		if err != nil || result.Rows[0]["null"] != true {
+			t.Errorf("a nil %T did not arrive as null: %v %v", value, result, err)
+		}
+	}
+	// Inside a list and a map too
+	result, err := db.ExecuteParams(
+		"RETURN $xs[0] IS TYPED TIMESTAMP AND $m.took IS TYPED DURATION AS typed",
+		map[string]any{"xs": []any{&at}, "m": map[string]any{"took": &took}})
+	if err != nil || result.Rows[0]["typed"] != true {
+		t.Errorf("nested pointers: %v %v", result, err)
+	}
+}
+
+// TimeOf of a time.Time whose offset has seconds keeps the instant, as a
+// ZONED DATETIME does: the clock reading at the offset's whole minutes.
+func TestTimeOfAnOffsetWithSecondsKeepsTheInstant(t *testing.T) {
+	amsterdam1900 := time.Date(1900, 6, 1, 12, 0, 0, 0, time.FixedZone("AMT", 1172))
+	want := must(NewZonedTime(11, 59, 28, 0, 1140))
+	if got := TimeOf(amsterdam1900); got != want {
+		t.Errorf("TimeOf gave %v, want %v", got, want)
+	}
+	behind := time.Date(1900, 6, 1, 12, 0, 0, 0, time.FixedZone("", -(3600+30)))
+	want = must(NewZonedTime(12, 0, 30, 0, -3600))
+	if got := TimeOf(behind); got != want {
+		t.Errorf("TimeOf gave %v, want %v", got, want)
+	}
+}
+
+// An offset whose hour or minute field carries a sign is not a time, as a
+// sign in any other field is not.
+func TestSignedOffsetFieldsAreRefused(t *testing.T) {
+	for _, text := range []string{"12:30:00+-1:00", "12:30:00++1:00", "12:30:00--1:00", "12:30:00+01:-1", "12:30:00+01:+1"} {
+		if v, err := ParseTime(text); err == nil {
+			t.Errorf("time %q was read as %v", text, v)
+		}
+	}
+}
+
+// A duration whose components do not fit 64 bits is refused, not wrapped
+// around to another duration.
+func TestDurationOverflowIsRefused(t *testing.T) {
+	for _, text := range []string{
+		"P768614336404564651Y",    // 12 times this passes 2^63 months
+		"P1317624576693539402W",   // 7 times this passes 2^63 days
+		"PT2562048H",              // past 2^63 nanoseconds
+		"PT153722867M281S",        // the sum passes 2^63 nanoseconds
+		"PT9223372037S",           // the seconds alone pass it
+		"P9223372036854775807M1Y", // the months' sum passes it
+		"-P-9223372036854775808D", // the negation passes it
+	} {
+		if v, err := ParseDuration(text); err == nil {
+			t.Errorf("duration %q was read as %#v", text, v)
+		}
+	}
+	for text, want := range map[string]Duration{
+		"P9223372036854775807M":   {Months: 9223372036854775807},
+		"P-9223372036854775808D":  {Days: -9223372036854775808},
+		"PT2562047H":              {Nanos: 2562047 * nanosPerHour},
+		"PT9223372036.854775807S": {Nanos: 9223372036854775807},
+	} {
+		if v, err := ParseDuration(text); err != nil || v != want {
+			t.Errorf("duration %q: %#v %v", text, v, err)
+		}
+	}
+}

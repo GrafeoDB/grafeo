@@ -27,6 +27,7 @@ public sealed class TemporalTests : IDisposable
         { "TIMESTAMP", new DateTime(1969, 7, 20, 20, 17, 40, DateTimeKind.Utc).AddTicks(6_543_210) },
         { "ZONED DATETIME", new DateTimeOffset(2024, 3, 5, 10, 30, 0, 250, TimeSpan.FromHours(1)) },
         { "ZONED DATETIME", new DateTimeOffset(2024, 3, 5, 10, 30, 0, TimeSpan.Zero) },
+        { "ZONED DATETIME", new DateTimeOffset(2026, 10, 18, 14, 30, 0, TimeSpan.FromHours(2)) },
         { "ZONED DATETIME", new DateTimeOffset(1969, 7, 20, 20, 17, 40, TimeSpan.FromMinutes(-330)).AddTicks(10) },
         { "DATE", new DateOnly(2024, 2, 29) },
         { "TIME", new TimeOnly(14, 30, 15).Add(TimeSpan.FromTicks(1_234_567)) },
@@ -178,6 +179,9 @@ public sealed class TemporalTests : IDisposable
     [InlineData("12:30:00.")]
     [InlineData("12")]
     [InlineData("12:30:00+02:60")]
+    [InlineData("12:30:00+24:00")]
+    [InlineData("12:30:00+99:59")]
+    [InlineData("12:30:00+-1:00")]
     [InlineData("noon")]
     public void TextThatIsNotATimeIsRefused(string text)
     {
@@ -200,10 +204,40 @@ public sealed class TemporalTests : IDisposable
     [InlineData("P1X")]
     [InlineData("PT1D")]
     [InlineData("P+1D")]
+    // Components past 64 bits: refused, not wrapped around to another duration
+    [InlineData("P768614336404564651Y")]
+    [InlineData("P1317624576693539402W")]
+    [InlineData("PT2562048H")]
+    [InlineData("PT153722867M281S")]
+    [InlineData("PT9223372037S")]
+    [InlineData("P9223372036854775807M1Y")]
+    [InlineData("-P-9223372036854775808D")]
     public void TextThatIsNotADurationIsRefused(string text)
     {
         Assert.False(GrafeoDuration.TryParse(text, out _));
         Assert.Throws<ArgumentException>(() => new GrafeoDuration(text));
+    }
+
+    /// <summary>Components at the edge of 64 bits still read.</summary>
+    [Fact]
+    public void DurationsAtTheEdgeOf64BitsRead()
+    {
+        Assert.Equal(new GrafeoDuration(long.MaxValue, 0, 0), new GrafeoDuration("P9223372036854775807M"));
+        Assert.Equal(new GrafeoDuration(0, long.MinValue, 0), new GrafeoDuration("P-9223372036854775808D"));
+        Assert.Equal(new GrafeoDuration(0, 0, 2_562_047 * 3_600_000_000_000), new GrafeoDuration("PT2562047H"));
+        Assert.Equal(new GrafeoDuration(0, 0, long.MaxValue), new GrafeoDuration("PT9223372036.854775807S"));
+    }
+
+    /// <summary>A part out of its range is named in the exception.</summary>
+    [Theory]
+    [InlineData(24, 0, 0, 0, "hour")]
+    [InlineData(12, 60, 0, 0, "minute")]
+    [InlineData(12, 0, -1, 0, "second")]
+    [InlineData(12, 0, 0, 1_000_000_000, "nanosecond")]
+    public void AnOutOfRangePartIsNamed(int hour, int minute, int second, int nanosecond, string name)
+    {
+        var error = Assert.Throws<ArgumentOutOfRangeException>(() => new GrafeoTime(hour, minute, second, nanosecond));
+        Assert.Equal(name, error.ParamName);
     }
 
     [Fact]

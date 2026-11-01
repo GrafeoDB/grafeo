@@ -238,6 +238,30 @@ void main() {
       test('not a duration: "$text"',
           () => expect(GrafeoDuration.tryParse(text), isNull));
     }
+    // Components past 64 bits: refused, not wrapped around to another
+    // duration
+    for (final text in [
+      'P768614336404564651Y',
+      'P1317624576693539402W',
+      'PT2562048H',
+      'PT153722867M281S',
+      'PT9223372037S',
+      'P9223372036854775807M1Y',
+      '-P-9223372036854775808D',
+    ]) {
+      test('a duration past 64 bits: "$text"',
+          () => expect(GrafeoDuration.tryParse(text), isNull));
+    }
+    test('durations at the edge of 64 bits read', () {
+      expect(GrafeoDuration.parse('P9223372036854775807M'),
+          equals(const GrafeoDuration(months: 9223372036854775807)));
+      expect(GrafeoDuration.parse('P-9223372036854775808D'),
+          equals(const GrafeoDuration(days: -9223372036854775808)));
+      expect(GrafeoDuration.parse('PT2562047H'),
+          equals(const GrafeoDuration(nanoseconds: 2562047 * 3600000000000)));
+      expect(GrafeoDuration.parse('PT9223372036.854775807S'),
+          equals(const GrafeoDuration(nanoseconds: 9223372036854775807)));
+    });
     for (final text in [
       '2024-03-05T10:30:00.5+05:30',
       '2024-03-05T10:30:00Z',

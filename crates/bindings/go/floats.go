@@ -25,8 +25,22 @@ func marshalJSON(v any) ([]byte, error) {
 	return json.Marshal(jsonFloats(v))
 }
 
+// maxValueDepth is how deep jsonFloats walks into a value: past it the rest
+// goes to encoding/json as it is, which reports a value that holds itself
+// (var v any; v = &v) as a cycle instead of the walk overflowing the stack.
+// Grafeo refuses values nested deeper than 128 levels anyway.
+const maxValueDepth = 256
+
 // jsonFloats is v with each float replaced by its JSON float text.
 func jsonFloats(v any) any {
+	return jsonFloatsAt(v, 0)
+}
+
+// jsonFloatsAt is jsonFloats for v at depth levels down.
+func jsonFloatsAt(v any, depth int) any {
+	if depth > maxValueDepth {
+		return v
+	}
 	switch x := v.(type) {
 	case float64:
 		return floatNumber(x)
@@ -35,13 +49,13 @@ func jsonFloats(v any) any {
 	case map[string]any:
 		m := make(map[string]any, len(x))
 		for k, e := range x {
-			m[k] = jsonFloats(e)
+			m[k] = jsonFloatsAt(e, depth+1)
 		}
 		return m
 	case []any:
 		s := make([]any, len(x))
 		for i, e := range x {
-			s[i] = jsonFloats(e)
+			s[i] = jsonFloatsAt(e, depth+1)
 		}
 		return s
 	case []float64:
@@ -83,7 +97,7 @@ func jsonFloats(v any) any {
 		// the typed containers below would take apart into numbers or bytes
 		return v
 	default:
-		return typedContainer(v)
+		return typedContainer(v, depth)
 	}
 }
 
@@ -92,27 +106,27 @@ func jsonFloats(v any) any {
 // []float64 inside a struct-free container), which the cases above do not
 // name, and the value a pointer points to (*time.Duration, *float64), so that
 // it arrives as the type the value would; any other value is v.
-func typedContainer(v any) any {
+func typedContainer(v any, depth int) any {
 	rv := reflect.ValueOf(v)
 	switch rv.Kind() {
 	case reflect.Pointer:
 		if rv.IsNil() {
 			return nil
 		}
-		return jsonFloats(rv.Elem().Interface())
+		return jsonFloatsAt(rv.Elem().Interface(), depth+1)
 	case reflect.Slice:
 		if rv.IsNil() {
 			return nil
 		}
 		if rv.Type().Elem().Kind() == reflect.Uint8 {
 			// A named byte slice type: bytes, as []byte is
-			return jsonFloats(rv.Bytes())
+			return jsonFloatsAt(rv.Bytes(), depth+1)
 		}
 		fallthrough
 	case reflect.Array:
 		s := make([]any, rv.Len())
 		for i := range s {
-			s[i] = jsonFloats(rv.Index(i).Interface())
+			s[i] = jsonFloatsAt(rv.Index(i).Interface(), depth+1)
 		}
 		return s
 	case reflect.Map:
@@ -125,7 +139,7 @@ func typedContainer(v any) any {
 		m := make(map[string]any, rv.Len())
 		iter := rv.MapRange()
 		for iter.Next() {
-			m[iter.Key().String()] = jsonFloats(iter.Value().Interface())
+			m[iter.Key().String()] = jsonFloatsAt(iter.Value().Interface(), depth+1)
 		}
 		return m
 	default:

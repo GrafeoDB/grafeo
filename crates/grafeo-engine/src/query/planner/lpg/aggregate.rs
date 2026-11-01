@@ -646,7 +646,7 @@ impl super::Planner {
 
     /// Plans a factorized aggregate that operates directly on factorized data.
     ///
-    /// This avoids the O(nÂ²) cost of flattening before aggregation.
+    /// This avoids the quadratic cost of flattening before aggregation.
     pub(super) fn plan_factorized_aggregate(
         &self,
         agg: &AggregateOp,

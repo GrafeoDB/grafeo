@@ -664,6 +664,21 @@ mod tests {
     }
 
     #[test]
+    fn roundtrip_duration_of_mixed_signs() {
+        use grafeo_common::types::Duration;
+        for (duration, text) in [
+            (Duration::new(1, 0, -1_500_000_000), "P1MT-1.5S"),
+            (Duration::new(1, 0, -500_000_000), "P1MT-0.5S"),
+            (Duration::new(0, -1, 1_500_000_000), "P-1DT1.5S"),
+            (Duration::new(0, -1, -500_000_000), "-P1DT0.5S"),
+        ] {
+            let json = value_to_json(&Value::Duration(duration));
+            assert_eq!(json, serde_json::json!({ "$duration": text }));
+            assert_eq!(json_to_value(&json), Value::Duration(duration), "{text}");
+        }
+    }
+
+    #[test]
     fn roundtrip_zoned_datetime() {
         let zdt = grafeo_common::types::ZonedDatetime::parse("2024-01-15T14:30:00+01:00").unwrap();
         let v = Value::ZonedDatetime(zdt);

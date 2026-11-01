@@ -196,7 +196,38 @@ public sealed class TemporalTests : IDisposable
     [InlineData("P1D")]
     [InlineData("PT24H")]
     [InlineData("P1M-2D")]
+    [InlineData("P1MT-1.5S")]
+    [InlineData("P1MT-0.5S")]
+    [InlineData("P1MT-1S")]
+    [InlineData("P2DT-0.005S")]
+    [InlineData("P1MT-1H-30M-1.25S")]
+    [InlineData("-P1DT0.5S")]
+    [InlineData("P-1MT1.5S")]
     public void DurationTextsRoundTrip(string text) => Assert.Equal(text, new GrafeoDuration(text).Text);
+
+    /// <summary>A fraction of a second takes the sign of its seconds, as the engine reads it.</summary>
+    [Theory]
+    [InlineData("PT-1.5S", 0, -1_500_000_000)]
+    [InlineData("PT-0.5S", 0, -500_000_000)]
+    [InlineData("-PT-1.5S", 0, 1_500_000_000)]
+    [InlineData("P1MT-1.5S", 1, -1_500_000_000)]
+    // The text 0.6.0 wrote for a negative fraction in a duration of mixed signs
+    [InlineData("P1MT-1.-5S", 1, -1_500_000_000)]
+    [InlineData("P1MT0.-5S", 1, -500_000_000)]
+    [InlineData("P1MT0.-05S", 1, -5_000_000)]
+    [InlineData("P1MT0.-0000001S", 1, -10)]
+    [InlineData("P1MT0.-123456789S", 1, -123_456_789)]
+    public void NegativeSecondsCarryTheirSignIntoTheFraction(string text, long months, long nanoseconds) =>
+        Assert.Equal(new GrafeoDuration(months, 0, nanoseconds), new GrafeoDuration(text));
+
+    /// <summary>The engine writes a negative fraction of a duration of mixed signs after the sign of its seconds.</summary>
+    [Fact]
+    public void MixedSignsWriteTheSignOnceOnTheSeconds()
+    {
+        Assert.Equal("P1MT-1.5S", new GrafeoDuration(1, 0, -1_500_000_000).Text);
+        Assert.Equal("P1MT-0.5S", new GrafeoDuration(1, 0, -500_000_000).Text);
+        Assert.Equal("P2DT-0.000000001S", new GrafeoDuration(0, 2, -1).Text);
+    }
 
     [Theory]
     [InlineData("P")]
@@ -212,6 +243,9 @@ public sealed class TemporalTests : IDisposable
     [InlineData("PT9223372037S")]
     [InlineData("P9223372036854775807M1Y")]
     [InlineData("-P-9223372036854775808D")]
+    [InlineData("PT-9223372037S")]
+    // 0.6.0 never wrote a negative fraction after positive seconds
+    [InlineData("P1MT1.-5S")]
     public void TextThatIsNotADurationIsRefused(string text)
     {
         Assert.False(GrafeoDuration.TryParse(text, out _));
@@ -226,6 +260,7 @@ public sealed class TemporalTests : IDisposable
         Assert.Equal(new GrafeoDuration(0, long.MinValue, 0), new GrafeoDuration("P-9223372036854775808D"));
         Assert.Equal(new GrafeoDuration(0, 0, 2_562_047 * 3_600_000_000_000), new GrafeoDuration("PT2562047H"));
         Assert.Equal(new GrafeoDuration(0, 0, long.MaxValue), new GrafeoDuration("PT9223372036.854775807S"));
+        Assert.Equal(new GrafeoDuration(0, 0, long.MinValue), new GrafeoDuration("PT-9223372036.854775808S"));
     }
 
     /// <summary>A part out of its range is named in the exception.</summary>

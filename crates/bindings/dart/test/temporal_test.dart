@@ -226,6 +226,13 @@ void main() {
       'P1D',
       'PT24H',
       'P1M-2D',
+      'P1MT-1.5S',
+      'P1MT-0.5S',
+      'P1MT-1S',
+      'P2DT-0.005S',
+      'P1MT-1H-30M-1.25S',
+      '-P1DT0.5S',
+      'P-1MT1.5S',
     ]) {
       test('duration $text',
           () => expect(GrafeoDuration.parse(text).text, equals(text)));
@@ -234,7 +241,35 @@ void main() {
         'duration P2W',
         () => expect(GrafeoDuration.parse('P2W'),
             equals(const GrafeoDuration(days: 14))));
-    for (final text in ['P', '1D', 'P1X', 'PT1D', 'P+1D']) {
+    // A fraction of a second takes the sign of its seconds, and the text
+    // 0.6.0 wrote for a negative fraction in a duration of mixed signs reads
+    // as the duration it was written for
+    for (final (text, months, nanoseconds) in [
+      ('PT-1.5S', 0, -1500000000),
+      ('PT-0.5S', 0, -500000000),
+      ('-PT-1.5S', 0, 1500000000),
+      ('P1MT-1.5S', 1, -1500000000),
+      ('P1MT-1.-5S', 1, -1500000000),
+      ('P1MT0.-5S', 1, -500000000),
+      ('P1MT0.-05S', 1, -5000000),
+      ('P1MT0.-0000001S', 1, -10),
+      ('P1MT0.-123456789S', 1, -123456789),
+    ]) {
+      test(
+          'duration $text reads',
+          () => expect(GrafeoDuration.parse(text),
+              equals(GrafeoDuration(months: months, nanoseconds: nanoseconds))));
+    }
+    test('mixed signs write the sign once on the seconds', () {
+      expect(const GrafeoDuration(months: 1, nanoseconds: -1500000000).text,
+          equals('P1MT-1.5S'));
+      expect(const GrafeoDuration(months: 1, nanoseconds: -500000000).text,
+          equals('P1MT-0.5S'));
+      expect(const GrafeoDuration(days: 2, nanoseconds: -1).text,
+          equals('P2DT-0.000000001S'));
+    });
+    // 0.6.0 never wrote a negative fraction after positive seconds
+    for (final text in ['P', '1D', 'P1X', 'PT1D', 'P+1D', 'P1MT1.-5S']) {
       test('not a duration: "$text"',
           () => expect(GrafeoDuration.tryParse(text), isNull));
     }
@@ -248,6 +283,7 @@ void main() {
       'PT9223372037S',
       'P9223372036854775807M1Y',
       '-P-9223372036854775808D',
+      'PT-9223372037S',
     ]) {
       test('a duration past 64 bits: "$text"',
           () => expect(GrafeoDuration.tryParse(text), isNull));
@@ -261,6 +297,8 @@ void main() {
           equals(const GrafeoDuration(nanoseconds: 2562047 * 3600000000000)));
       expect(GrafeoDuration.parse('PT9223372036.854775807S'),
           equals(const GrafeoDuration(nanoseconds: 9223372036854775807)));
+      expect(GrafeoDuration.parse('PT-9223372036.854775808S'),
+          equals(const GrafeoDuration(nanoseconds: -9223372036854775808)));
     });
     for (final text in [
       '2024-03-05T10:30:00.5+05:30',

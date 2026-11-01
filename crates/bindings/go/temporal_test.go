@@ -277,7 +277,10 @@ func TestTemporalTexts(t *testing.T) {
 			t.Errorf("time %q was read", text)
 		}
 	}
-	for _, text := range []string{"P1Y2M3DT4H5M6.5S", "PT0S", "-P1M2DT0.000000003S", "P1D", "PT24H", "P1M-2D"} {
+	for _, text := range []string{
+		"P1Y2M3DT4H5M6.5S", "PT0S", "-P1M2DT0.000000003S", "P1D", "PT24H", "P1M-2D",
+		"P1MT-1.5S", "P1MT-0.5S", "P1MT-1S", "P2DT-0.005S", "P1MT-1H-30M-1.25S", "-P1DT0.5S", "P-1MT1.5S",
+	} {
 		v, err := ParseDuration(text)
 		if err != nil || v.String() != text {
 			t.Errorf("duration %q: %#v %v", text, v, err)
@@ -290,6 +293,37 @@ func TestTemporalTexts(t *testing.T) {
 		if _, err := ParseDuration(text); err == nil {
 			t.Errorf("duration %q was read", text)
 		}
+	}
+	// A fraction of a second takes the sign of its seconds, and the text
+	// 0.6.0 wrote for a negative fraction in a duration of mixed signs reads
+	// as the duration it was written for
+	for text, want := range map[string]Duration{
+		"PT-1.5S":           {Nanos: -1_500_000_000},
+		"PT-0.5S":           {Nanos: -500_000_000},
+		"-PT-1.5S":          {Nanos: 1_500_000_000},
+		"P1MT-1.5S":         {Months: 1, Nanos: -1_500_000_000},
+		"P1MT-1.-5S":        {Months: 1, Nanos: -1_500_000_000},
+		"P1MT0.-5S":         {Months: 1, Nanos: -500_000_000},
+		"P1MT0.-05S":        {Months: 1, Nanos: -5_000_000},
+		"P1MT0.-0000001S":   {Months: 1, Nanos: -10},
+		"P1MT0.-123456789S": {Months: 1, Nanos: -123_456_789},
+	} {
+		if v, err := ParseDuration(text); err != nil || v != want {
+			t.Errorf("duration %q: %#v %v", text, v, err)
+		}
+	}
+	for d, want := range map[Duration]string{
+		{Months: 1, Nanos: -1_500_000_000}: "P1MT-1.5S",
+		{Months: 1, Nanos: -500_000_000}:   "P1MT-0.5S",
+		{Days: 2, Nanos: -1}:               "P2DT-0.000000001S",
+	} {
+		if got := d.String(); got != want {
+			t.Errorf("duration %#v: %q, want %q", d, got, want)
+		}
+	}
+	// 0.6.0 never wrote a negative fraction after positive seconds
+	if v, err := ParseDuration("P1MT1.-5S"); err == nil {
+		t.Errorf("duration P1MT1.-5S was read as %#v", v)
 	}
 	if _, err := NewZonedTime(12, 0, 0, 0, 90); err == nil {
 		t.Errorf("an offset of 90 seconds was taken")
@@ -400,16 +434,18 @@ func TestDurationOverflowIsRefused(t *testing.T) {
 		"PT9223372037S",           // the seconds alone pass it
 		"P9223372036854775807M1Y", // the months' sum passes it
 		"-P-9223372036854775808D", // the negation passes it
+		"PT-9223372037S",          // the negative seconds pass it
 	} {
 		if v, err := ParseDuration(text); err == nil {
 			t.Errorf("duration %q was read as %#v", text, v)
 		}
 	}
 	for text, want := range map[string]Duration{
-		"P9223372036854775807M":   {Months: 9223372036854775807},
-		"P-9223372036854775808D":  {Days: -9223372036854775808},
-		"PT2562047H":              {Nanos: 2562047 * nanosPerHour},
-		"PT9223372036.854775807S": {Nanos: 9223372036854775807},
+		"P9223372036854775807M":    {Months: 9223372036854775807},
+		"P-9223372036854775808D":   {Days: -9223372036854775808},
+		"PT2562047H":               {Nanos: 2562047 * nanosPerHour},
+		"PT9223372036.854775807S":  {Nanos: 9223372036854775807},
+		"PT-9223372036.854775808S": {Nanos: -9223372036854775808},
 	} {
 		if v, err := ParseDuration(text); err != nil || v != want {
 			t.Errorf("duration %q: %#v %v", text, v, err)

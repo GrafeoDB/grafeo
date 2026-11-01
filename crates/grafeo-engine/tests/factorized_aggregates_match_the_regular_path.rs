@@ -10,7 +10,11 @@
 //! instead of making a row of each edge: checked the same way on random
 //! graphs with self-loops, multi-edges, isolated nodes, several labels and
 //! edge types, each direction, labels and filters on either end, and the
-//! rows a transaction or an older snapshot sees.
+//! rows a transaction or an older snapshot sees. A count over one such
+//! expand without GROUP BY (`MATCH (a)-[:E]->() RETURN count(*)`) totals the
+//! same counts in one row, 0 when no edge matches; over a chain the last
+//! hop's edges are counted for each row of the others, in place of the
+//! factorized count, which keeps the counts of earlier variables.
 //!
 //! ```bash
 //! cargo test -p grafeo-engine --all-features --test factorized_aggregates_match_the_regular_path
@@ -308,6 +312,186 @@ fn a_degree_count_counts_each_edge_once_from_each_end() {
     assert!(count >= 3, "the loop and both parallel edges: {count}");
 }
 
+/// The counts of [`degree_queries`] without groups, and a few more starts:
+/// one with a filter, one anonymous, one bound by a property.
+fn ungrouped_count_queries() -> Vec<String> {
+    let mut queries = Vec::new();
+    for start in ["(a)", "(a:A)", "(a:B)"] {
+        for types in ["", ":R", ":S", ":R|S"] {
+            for (left, right) in [("-", "->"), ("<-", "-"), ("-", "-")] {
+                for far in ["()", "(:A)", "(:A:B)", "(b:B)", "(b)"] {
+                    let pattern = format!("MATCH {start}{left}[e{types}]{right}{far}");
+                    queries.push(format!("{pattern} RETURN count(*) AS n"));
+                    if far.starts_with("(b") {
+                        queries.push(format!(
+                            "{pattern} RETURN count(b) AS nb, count(e) AS ne, count(a) AS na, \
+                             count(*)"
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    queries.extend(
+        [
+            "MATCH (a)-[:R]->(:A) WHERE a.id > 10 AND a.grp <> 1 RETURN count(*) AS n",
+            "MATCH ()-[:S]->() RETURN count(*) AS n",
+            "MATCH (a {id: 3})-[:R]-() RETURN count(*) AS n",
+            // Over a chain the last hop is counted, also where the
+            // factorized count would count the chain.
+            "MATCH (a)-[:R]->()-[:R]->(:B) RETURN count(*) AS n",
+            "MATCH (a)-[:R]->()-[:S]->() RETURN count(*) AS n",
+            "MATCH (a)-[:R]->(b)-[e:R]-(c) RETURN count(c) AS nc, count(e) AS ne, count(b) AS nb",
+            "MATCH (a:A)-[:R]->()-[:R]->()<-[:S]-() RETURN count(*) AS n",
+            // A condition on the count keeps the row or drops it.
+            "MATCH (a)-[:R]->() RETURN count(*) AS n HAVING n > 10",
+            "MATCH (a)-[:R]->() RETURN count(*) AS n HAVING n > 100000",
+        ]
+        .map(String::from),
+    );
+    queries
+}
+
+#[test]
+fn an_ungrouped_degree_count_matches_the_regular_path_on_random_graphs() {
+    for seed in 1..=4 {
+        let counted = random_database(Config::in_memory(), seed);
+        let regular = random_database(Config::in_memory().without_factorized_execution(), seed);
+        let mut differ = Vec::new();
+        for query in ungrouped_count_queries() {
+            assert!(counts_edges(&counted, &query), "not counted: {query}");
+            assert!(!counts_edges(&regular, &query), "counted: {query}");
+            let (got, want) = (rows(&counted, &query), rows(&regular, &query));
+            if got != want {
+                differ.push(format!("{query}\n    counted {got}\n    regular {want}"));
+            }
+        }
+        assert!(
+            differ.is_empty(),
+            "seed {seed}: {} queries differ:\n{}",
+            differ.len(),
+            differ.join("\n")
+        );
+    }
+}
+
+#[test]
+fn an_ungrouped_degree_count_totals_the_degrees() {
+    for seed in 1..=4 {
+        let db = random_database(Config::in_memory(), seed);
+        for (query, edge_type, label) in [
+            ("MATCH (a)-[:R]-(:A) RETURN count(*) AS n", "R", Some('A')),
+            ("MATCH (a)-[e:S]-() RETURN count(e) AS n", "S", None),
+        ] {
+            assert!(counts_edges(&db, query), "{query}");
+            let total: i64 = undirected_counts(seed, edge_type, label)
+                .iter()
+                .map(|row| match row[1] {
+                    Value::Int64(count) => count,
+                    ref other => panic!("a count, not {other:?}"),
+                })
+                .sum();
+            assert!(total > 0, "seed {seed}: {query} counts some edges");
+            assert_eq!(
+                db.execute(query).unwrap().rows(),
+                [[Value::Int64(total)]],
+                "seed {seed}: {query}"
+            );
+        }
+        // Directed: each edge of the type once.
+        let edges = random_edges(seed)
+            .iter()
+            .filter(|(_, _, of_type)| *of_type == "R")
+            .count();
+        let query = "MATCH (a)-[:R]->() RETURN count(*)";
+        assert!(counts_edges(&db, query), "{query}");
+        assert_eq!(
+            db.execute(query).unwrap().rows(),
+            [[Value::Int64(i64::try_from(edges).unwrap())]],
+            "seed {seed}"
+        );
+    }
+}
+
+#[test]
+fn profile_shows_an_ungrouped_degree_count_in_place_of_the_expand_and_the_aggregate() {
+    let db = random_database(Config::in_memory(), 1);
+    let result = db
+        .execute("PROFILE MATCH (a:A)-[:R]->(:B) RETURN count(*) AS n")
+        .unwrap();
+    let text = result.rows()[0][0].as_str().expect("the profile text");
+    let lines: Vec<&str> = text.lines().filter(|line| line.contains("rows=")).collect();
+    let names: Vec<&str> = lines
+        .iter()
+        .filter_map(|line| line.split_whitespace().next())
+        .collect();
+    // The RETURN and the aggregate (with the label check the count does)
+    // show the count they pass on, and the expand the count in its place,
+    // over the scan of the start: one row, no row of each edge.
+    assert_eq!(
+        names,
+        ["EdgeCount", "EdgeCount", "EdgeCount", "Scan"],
+        "{text}"
+    );
+    for line in &lines[..3] {
+        assert!(line.contains("rows=1 "), "{text}");
+    }
+    assert!(lines[1].contains("group: []"), "{text}");
+    assert!(lines[1].contains("hasLabel"), "{text}");
+    assert!(lines[2].contains("(a)->[:R]->"), "{text}");
+}
+
+#[test]
+fn an_ungrouped_degree_count_of_no_edges_is_one_row_of_zero() {
+    let empty = GrafeoDB::with_config(Config::in_memory()).unwrap();
+    let empty_regular =
+        GrafeoDB::with_config(Config::in_memory().without_factorized_execution()).unwrap();
+    let counted = random_database(Config::in_memory(), 1);
+    let regular = random_database(Config::in_memory().without_factorized_execution(), 1);
+    for (db, reference, query) in [
+        (
+            &empty,
+            &empty_regular,
+            "MATCH (a)-[:R]->() RETURN count(*) AS n",
+        ),
+        (
+            &empty,
+            &empty_regular,
+            "MATCH (a:A)-[e]-(b:B) RETURN count(e) AS n, count(*)",
+        ),
+        (
+            &counted,
+            &regular,
+            "MATCH (a)-[:NONE]->() RETURN count(*) AS n",
+        ),
+        (
+            &counted,
+            &regular,
+            "MATCH (a)-[:R]->(:Nobody) RETURN count(*) AS n",
+        ),
+        (
+            &counted,
+            &regular,
+            "MATCH (a:Nobody)-[:R]->() RETURN count(*) AS n",
+        ),
+        // Nodes 40 to 44 have no edge.
+        (
+            &counted,
+            &regular,
+            "MATCH (a)-[]-() WHERE a.id >= 40 RETURN count(*) AS n",
+        ),
+    ] {
+        assert!(counts_edges(db, query), "not counted: {query}");
+        let zeros = if query.ends_with("count(*)") {
+            "[[Int64(0), Int64(0)]]"
+        } else {
+            "[[Int64(0)]]"
+        };
+        assert_eq!(rows(db, query), zeros, "{query}");
+        assert_eq!(rows(reference, query), zeros, "regular: {query}");
+    }
+}
+
 #[test]
 fn a_count_that_reads_the_far_end_or_the_edge_is_not_a_degree_count() {
     let counted = random_database(Config::in_memory(), 2);
@@ -322,10 +506,18 @@ fn a_count_that_reads_the_far_end_or_the_edge_is_not_a_degree_count() {
         "MATCH (a)-[:R]->(b) RETURN a.id AS id, count(DISTINCT b) AS n ORDER BY id",
         "MATCH (a)-[:R]->(b) RETURN a.id AS id, count(b.id) AS n ORDER BY id",
         "MATCH (a)-[:R]->(b) RETURN a.id AS id, count(*) AS n, sum(b.id) AS s ORDER BY id",
-        // No groups: a count of no rows is 0, where a sum is null.
-        "MATCH (a:A)-[:R]->(:B) RETURN count(*) AS n",
         // A far end that is the start.
         "MATCH (a)-[:R]->(a) RETURN a.id AS id, count(*) AS n ORDER BY id",
+        // The same without groups.
+        "MATCH (a)-[:R]->(b) WHERE b.id > 20 RETURN count(*) AS n",
+        "MATCH (a)-[e:R]->(b) WHERE e.w IS NULL RETURN count(*) AS n",
+        "MATCH (a)-[:R]->(b) RETURN count(DISTINCT b) AS n",
+        "MATCH (a)-[:R]->(b) RETURN count(b.id) AS n",
+        "MATCH (a)-[:R]->(b) RETURN count(*) AS n, sum(b.id) AS s",
+        "MATCH (a)-[:R]->(a) RETURN count(*) AS n",
+        "MATCH (a {id: 3})-[:R]->({id: 7}) RETURN count(*) AS n",
+        // A trail of two edges, whose last edge must differ from the first.
+        "MATCH TRAIL (a)-[:R]->()-[:R]->() RETURN count(*) AS n",
     ] {
         assert!(!counts_edges(&counted, query), "counted: {query}");
         assert_eq!(rows(&counted, query), rows(&regular, query), "{query}");
@@ -356,6 +548,19 @@ fn a_degree_count_keeps_filters_on_the_start_and_conditions_on_the_count() {
 
 const DEGREES: &str = "MATCH (a)-[:R]-(:A) RETURN a.id AS id, count(*) AS n ORDER BY id";
 const NODE_ZERO: &str = "MATCH (a {id: 0})-[:R]-(:A) RETURN a.id AS id, count(*) AS n";
+const TOTAL: &str = "MATCH (a)-[:R]-(:A) RETURN count(*) AS n";
+const FROM_THREE: &str = "MATCH (a {id: 3})-[:R]->() RETURN count(*) AS n";
+
+/// The one count of `query`'s one row.
+fn count_in(session: &Session, query: &str) -> i64 {
+    match session.execute(query).unwrap().rows() {
+        [row] => match row.as_slice() {
+            [Value::Int64(count)] => *count,
+            other => panic!("{query}: one count, not {other:?}"),
+        },
+        other => panic!("{query}: one row, not {other:?}"),
+    }
+}
 
 fn rows_in(session: &Session, query: &str) -> String {
     format!("{:?}", session.execute(query).unwrap().rows())
@@ -368,6 +573,11 @@ fn a_degree_count_reads_what_its_transaction_and_its_snapshot_see() {
     let regular = random_database(config().without_factorized_execution(), 4);
     let before = rows(&counted, DEGREES);
     assert_eq!(before, rows(&regular, DEGREES));
+    let (total_before, from_three_before) = (
+        count_in(&counted.session(), TOTAL),
+        count_in(&counted.session(), FROM_THREE),
+    );
+    assert_eq!(total_before, count_in(&regular.session(), TOTAL));
     let Value::Int64(node_zero_before) = counted
         .execute(NODE_ZERO)
         .unwrap()
@@ -408,8 +618,18 @@ fn a_degree_count_reads_what_its_transaction_and_its_snapshot_see() {
         ),
         "[[Int64(0)]]"
     );
+    // Without groups: the new edge counts from both of its ends (both
+    // `:A`), the deleted ones (between nodes without a label) only from
+    // node 3.
+    assert!(counts_edges(&counted, TOTAL) && counts_edges(&counted, FROM_THREE));
+    for session in &sessions {
+        assert_eq!(count_in(session, TOTAL), total_before + 2);
+        assert_eq!(count_in(session, FROM_THREE), from_three_before - 2);
+    }
     // Another session sees neither change before the commit.
     assert_eq!(rows(&counted, DEGREES), before);
+    assert_eq!(count_in(&counted.session(), TOTAL), total_before);
+    assert_eq!(count_in(&counted.session(), FROM_THREE), from_three_before);
 
     let epoch = counted.current_epoch();
     for session in &mut sessions {
@@ -424,5 +644,14 @@ fn a_degree_count_reads_what_its_transaction_and_its_snapshot_see() {
             counted.execute_at_epoch(DEGREES, epoch).unwrap().rows()
         ),
         before
+    );
+    assert_eq!(count_in(&counted.session(), TOTAL), total_before + 2);
+    assert_eq!(
+        counted.execute_at_epoch(TOTAL, epoch).unwrap().rows(),
+        [[Value::Int64(total_before)]]
+    );
+    assert_eq!(
+        counted.execute_at_epoch(FROM_THREE, epoch).unwrap().rows(),
+        [[Value::Int64(from_three_before)]]
     );
 }

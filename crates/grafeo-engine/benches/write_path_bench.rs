@@ -9,8 +9,9 @@
 //! iteration.
 //!
 //! The scale defaults to 10,000 statements (100,000 rows for the large batch
-//! calls and 100,000 nodes for the reads); `GRAFEO_BENCH_SCALE` divides it,
-//! for example `GRAFEO_BENCH_SCALE=10` for a quick run or under CodSpeed.
+//! calls, 4,000 and 32,000 rows for the bulk `SET` and 100,000 nodes for the
+//! reads); `GRAFEO_BENCH_SCALE` divides it, for example
+//! `GRAFEO_BENCH_SCALE=10` for a quick run or under CodSpeed.
 //!
 //! `GRAFEO_BENCH_STORAGE` picks the databases: `mem` runs the in-memory
 //! cases, the reads and the transaction manager, whose cost is CPU work;
@@ -48,10 +49,19 @@ const READ_NODES: usize = 100_000;
 const DELETES: usize = 1_000;
 /// Index lookups per iteration of the lookup read.
 const LOOKUPS: usize = 1_000;
+/// Rows of the smaller bulk `SET` statement; the larger one has eight times
+/// as many.
+const BULK_SET_ROWS: usize = 4_000;
 
 const NAMES: [&str; 8] = [
     "Alix", "Gus", "Vincent", "Mia", "Jules", "Butch", "Django", "Beatrix",
 ];
+const CITIES: [&str; 4] = ["Amsterdam", "Utrecht", "Lyon", "Ghent"];
+
+/// The city of person `index`.
+fn city(index: usize) -> &'static str {
+    CITIES[index % CITIES.len()]
+}
 
 /// `count` divided by `GRAFEO_BENCH_SCALE` (at least 1).
 fn scaled(count: usize) -> usize {
@@ -268,6 +278,36 @@ fn slow_group<'a>(c: &'a mut Criterion, name: &str) -> BenchmarkGroup<'a, WallTi
 
 const GQL_INSERT: &str = "INSERT (:Person {name: $n, age: $a})";
 const GQL_SET: &str = "MATCH (p:Person {name: $n}) SET p.age = $a";
+const GQL_BULK_SET: &str =
+    "UNWIND $rows AS item MATCH (n) WHERE id(n) = item.node SET n += item.row";
+
+/// `$rows` of [`GQL_BULK_SET`] for `people`: each row the node's id and a
+/// map of three properties, two new ones and a new age.
+fn bulk_set_rows(people: &[NodeId]) -> Value {
+    let rows: Vec<Value> = people
+        .iter()
+        .enumerate()
+        .map(|(index, node)| {
+            let node = i64::try_from(node.as_u64()).expect("node ids fit in i64");
+            let row = [
+                (PropertyKey::from("age"), Value::Int64(age(index + 7))),
+                (PropertyKey::from("city"), Value::from(city(index))),
+                (PropertyKey::from("score"), idx(index * 3)),
+            ];
+            Value::Map(std::sync::Arc::new(
+                [
+                    (PropertyKey::from("node"), Value::Int64(node)),
+                    (
+                        PropertyKey::from("row"),
+                        Value::Map(std::sync::Arc::new(row.into())),
+                    ),
+                ]
+                .into(),
+            ))
+        })
+        .collect();
+    Value::List(rows.into())
+}
 
 fn bench_query_writes(c: &mut Criterion) {
     let statements = scaled(STATEMENTS);
@@ -421,6 +461,25 @@ fn bench_query_writes(c: &mut Criterion) {
                     },
                 );
         });
+
+        // One statement setting three properties on each of `rows` people,
+        // found by id: eight times the rows must take about eight times as
+        // long (the time once grew faster than the rows).
+        for rows in [scaled(BULK_SET_ROWS), scaled(BULK_SET_ROWS * 8)] {
+            group.bench_function(format!("gql_unwind_set_by_id/{rows}/{tag}"), |b| {
+                per_iteration(
+                    b,
+                    || {
+                        let (fixture, people) = Fixture::with_people(storage, rows);
+                        (fixture, Some(bulk_set_rows(&people)))
+                    },
+                    |(fixture, rows)| {
+                        let rows = rows.take().expect("rows");
+                        gql(&fixture.session, GQL_BULK_SET, params(&[("rows", rows)]));
+                    },
+                );
+            });
+        }
 
         // One statement deleting `deletes` people, each with about ten edges.
         group.bench_function(format!("gql_detach_delete_one_stmt/{tag}"), |b| {

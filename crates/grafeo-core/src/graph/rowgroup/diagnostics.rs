@@ -323,10 +323,20 @@ impl RowGroupStore {
 
     /// Adds the vector and text indexes of this store, the graph `graph` of
     /// its root (empty for the root itself), to `indexes`, named
-    /// `graph/Label:property` for a named graph.
+    /// `graph/Label:property` for a named graph. A label or property that
+    /// holds `:`, `/` or a backquote is written in backquotes, as GQL writes
+    /// such a name, so two indexes never show the same name.
     #[cfg(any(feature = "vector-index", feature = "text-index"))]
     fn add_search_index_memory(&self, graph: &str, indexes: &mut IndexMemory) {
+        let part = |name: &str| {
+            if name.contains([':', '/', '`']) {
+                format!("`{}`", name.replace('`', "``"))
+            } else {
+                name.to_string()
+            }
+        };
         let named = |label: String, property: String| {
+            let (label, property) = (part(&label), part(&property));
             if graph.is_empty() {
                 format!("{label}:{property}")
             } else {

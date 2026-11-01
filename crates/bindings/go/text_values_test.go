@@ -79,3 +79,22 @@ func TestStreamedNumbersKeepEveryDigit(t *testing.T) {
 		}
 	}
 }
+
+// A parameter that holds itself is an error, not a stack overflow: the walk
+// stops at a depth limit and encoding/json reports the cycle.
+func TestASelfReferencingParameterIsAnError(t *testing.T) {
+	db, err := OpenInMemory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var v any
+	v = &v
+	loop := []any{nil}
+	loop[0] = loop
+	for name, value := range map[string]any{"pointer": v, "list": loop} {
+		if _, err := db.ExecuteParams("RETURN $v AS v", map[string]any{"v": value}); err == nil {
+			t.Errorf("%s: a value that holds itself was accepted", name)
+		}
+	}
+}

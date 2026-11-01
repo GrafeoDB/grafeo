@@ -351,17 +351,36 @@ fn local_name(debug: &str) -> String {
         .to_string()
 }
 
-/// The subject and predicate of each triple `update` removes from [`DATA`],
-/// as `"s p"` local names, sorted. The update adds nothing.
+/// A literal's text from its debug form, or an IRI's local name.
+fn term_text(debug: &str) -> String {
+    match debug
+        .strip_prefix("RdfTerm(\"")
+        .and_then(|rest| rest.strip_suffix("\")"))
+    {
+        Some(text) => text.to_string(),
+        None => local_name(debug),
+    }
+}
+
+/// Each triple `update` removes from [`DATA`], as `"s p o"` (local names and
+/// literal text), sorted, so a wrong object binding shows. The update adds
+/// nothing.
 fn removed(update: &str) -> Vec<String> {
     let (added, removed) = change(update).unwrap_or_else(|error| panic!("{update}: {error}"));
     assert!(added.is_empty(), "{update} added {added:?}");
-    let mut pairs: Vec<String> = removed
+    let mut triples: Vec<String> = removed
         .iter()
-        .map(|row| format!("{} {}", local_name(&row[0]), local_name(&row[1])))
+        .map(|row| {
+            format!(
+                "{} {} {}",
+                local_name(&row[0]),
+                local_name(&row[1]),
+                term_text(&row[2])
+            )
+        })
         .collect();
-    pairs.sort();
-    pairs
+    triples.sort();
+    triples
 }
 
 /// A `DELETE WHERE` whose pattern has no solution deletes nothing, its
@@ -384,7 +403,7 @@ fn a_delete_where_without_a_solution_deletes_nothing() {
 /// and the instantiated ones.
 #[test]
 fn a_delete_where_with_a_solution_deletes_every_triple_of_the_pattern() {
-    let alix = ["alix city", "alix name"];
+    let alix = ["alix city Amsterdam", "alix name Alix"];
     assert_eq!(
         removed(
             r#"DELETE WHERE { <http://ex.org/alix> <http://ex.org/name> "Alix" .
@@ -413,32 +432,38 @@ fn a_delete_where_with_a_solution_deletes_every_triple_of_the_pattern() {
 fn a_delete_where_with_several_solutions_deletes_each_triple() {
     assert_eq!(
         removed("DELETE WHERE { ?s <http://ex.org/name> ?n }"),
-        ["alix name", "gus name", "vincent name"]
+        ["alix name Alix", "gus name Gus", "vincent name Vincent"]
     );
     assert_eq!(
         removed(
             r#"DELETE WHERE { <http://ex.org/alix> <http://ex.org/city> "Amsterdam" .
                               ?s <http://ex.org/name> ?n }"#
         ),
-        ["alix city", "alix name", "gus name", "vincent name"]
+        [
+            "alix city Amsterdam",
+            "alix name Alix",
+            "gus name Gus",
+            "vincent name Vincent"
+        ]
     );
 }
 
-/// The triples of graph `<http://ex.org/{graph}>` as `"s p"` local names,
-/// sorted.
+/// The triples of graph `<http://ex.org/{graph}>` as `"s p o"` (local names
+/// and literal text), sorted.
 fn graph_pairs(db: &GrafeoDB, graph: &str) -> Vec<String> {
     let mut pairs: Vec<String> = db
         .execute_sparql(&format!(
-            "SELECT ?s ?p WHERE {{ GRAPH <http://ex.org/{graph}> {{ ?s ?p ?o }} }}"
+            "SELECT ?s ?p ?o WHERE {{ GRAPH <http://ex.org/{graph}> {{ ?s ?p ?o }} }}"
         ))
         .unwrap()
         .rows()
         .iter()
         .map(|row| {
             format!(
-                "{} {}",
+                "{} {} {}",
                 local_name(&format!("{:?}", row[0])),
-                local_name(&format!("{:?}", row[1]))
+                local_name(&format!("{:?}", row[1])),
+                term_text(&format!("{:?}", row[2]))
             )
         })
         .collect();
@@ -468,7 +493,7 @@ fn a_delete_where_in_a_named_graph_deletes_only_on_a_solution() {
     .unwrap();
     assert_eq!(
         graph_pairs(&db, "people"),
-        ["alix city", "alix name", "gus name"],
+        ["alix city Amsterdam", "alix name Alix", "gus name Gus"],
         "no solution deletes nothing"
     );
 
@@ -478,6 +503,6 @@ fn a_delete_where_in_a_named_graph_deletes_only_on_a_solution() {
             <http://ex.org/alix> <http://ex.org/city> ?c } }"#,
     )
     .unwrap();
-    assert_eq!(graph_pairs(&db, "people"), ["gus name"]);
+    assert_eq!(graph_pairs(&db, "people"), ["gus name Gus"]);
     assert_eq!(triples(&db), default_before, "the default graph stays");
 }

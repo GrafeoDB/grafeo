@@ -465,7 +465,8 @@ fn bench_query_writes(c: &mut Criterion) {
         // One statement setting three properties on each of `rows` people,
         // found by id: eight times the rows must take about eight times as
         // long (the time once grew faster than the rows).
-        for rows in [scaled(BULK_SET_ROWS), scaled(BULK_SET_ROWS * 8)] {
+        let small = scaled(BULK_SET_ROWS);
+        for rows in [small, small * 8] {
             group.bench_function(format!("gql_unwind_set_by_id/{rows}/{tag}"), |b| {
                 per_iteration(
                     b,

@@ -49,7 +49,13 @@ MATCH (a:Person)-[:KNOWS]->(b:Person)
 
 -- Multi-hop
 MATCH (a:Person)-[:KNOWS]->(b)-[:KNOWS]->(c)
+
+-- One to three hops
+MATCH (a:Person)-[:KNOWS]->{1,3}(b:Person)
 ```
+
+`{m,n}` is the standard quantifier. Grafeo also accepts the Cypher-style
+`-[:KNOWS*1..3]->` here, as GQL does, as an extension.
 
 ### COLUMNS Clause
 
@@ -110,7 +116,7 @@ WHERE result.fof_name <> 'Alix';
 ```sql
 SELECT *
 FROM GRAPH_TABLE (
-    MATCH path = (a:Person)-[:KNOWS*1..3]->(b:Person)
+    MATCH path = (a:Person)-[:KNOWS]->{1,3}(b:Person)
     COLUMNS (
         a.name AS source,
         b.name AS target,

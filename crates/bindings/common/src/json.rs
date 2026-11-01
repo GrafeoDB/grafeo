@@ -234,7 +234,8 @@ pub fn rdfjs_term(
 /// Timestamps are encoded as `{ "$timestamp_us": <micros> }`, decimals as
 /// `{ "$decimal": "1.50" }` (the text with its scale), RDF terms as
 /// `{ "$term": { "type": ..., "value": ... } }` (see [`term_to_json`]).
-/// Bytes are encoded as a JSON array of integers for lossless roundtrip.
+/// Bytes are encoded as the `$bytes` tag, their standard base64 (see
+/// [`BYTES_TAG`]), which [`json_to_value`] reads back as bytes.
 /// Vectors are encoded as a JSON array of floats.
 ///
 /// # Errors

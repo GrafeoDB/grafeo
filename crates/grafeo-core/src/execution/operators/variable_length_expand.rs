@@ -252,8 +252,9 @@ impl RowSearch {
         let held = self.open.len();
         if held == self.open.capacity() {
             self.open.try_reserve(held.max(16)).map_err(|_| {
+                let noun = if paths == 1 { "path" } else { "paths" };
                 OperatorError::LimitExceeded(format!(
-                    "A variable-length pattern holds {paths} paths and the system has no memory \
+                    "A variable-length pattern holds {paths} {noun} and the system has no memory \
                      for more: {VARIABLE_LENGTH_ADVICE}"
                 ))
             })?;

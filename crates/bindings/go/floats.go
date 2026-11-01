@@ -4,6 +4,7 @@ import (
 	"encoding"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"math"
 	"reflect"
 	"strconv"
@@ -25,37 +26,85 @@ func marshalJSON(v any) ([]byte, error) {
 	return json.Marshal(jsonFloats(v))
 }
 
-// maxValueDepth is how deep jsonFloats walks into a value: past it the rest
-// goes to encoding/json as it is, which reports a value that holds itself
-// (var v any; v = &v) as a cycle instead of the walk overflowing the stack.
-// Grafeo refuses values nested deeper than 128 levels anyway.
-const maxValueDepth = 256
-
 // jsonFloats is v with each float replaced by its JSON float text.
 func jsonFloats(v any) any {
-	return jsonFloatsAt(v, 0)
+	w := walker{path: map[container]struct{}{}}
+	return w.value(v)
 }
 
-// jsonFloatsAt is jsonFloats for v at depth levels down.
-func jsonFloatsAt(v any, depth int) any {
-	if depth > maxValueDepth {
-		return v
+// container identifies a map, slice or pointer by what it holds: a value
+// that holds itself meets the same container again on its own path.
+type container struct {
+	kind reflect.Kind
+	ptr  uintptr
+	len  int
+}
+
+// walker tracks the containers on the path from the root to the value it
+// is at, so a value that holds itself stops at its first repeat instead of
+// being walked without end (and branching at every level when it holds
+// itself twice). Pointers are followed as encoding/json follows them, with
+// no limit on how many there are.
+type walker struct {
+	path map[container]struct{}
+}
+
+// cycle stands in for a value that holds itself: json.Marshal fails on it,
+// as it fails on such a value itself.
+type cycle struct{}
+
+func (cycle) MarshalJSON() ([]byte, error) {
+	return nil, errors.New("grafeo: a parameter value holds itself")
+}
+
+// enter marks rv as on the path, or reports that it already is. An empty
+// map or slice holds nothing, so it is not tracked.
+func (w *walker) enter(rv reflect.Value) (container, bool) {
+	key := container{kind: rv.Kind(), ptr: rv.Pointer()}
+	if rv.Kind() != reflect.Pointer {
+		key.len = rv.Len()
+		if key.len == 0 {
+			return key, true
+		}
 	}
+	if _, seen := w.path[key]; seen {
+		return key, false
+	}
+	w.path[key] = struct{}{}
+	return key, true
+}
+
+func (w *walker) leave(key container) {
+	delete(w.path, key)
+}
+
+// value is v with each float replaced by its JSON float text.
+func (w *walker) value(v any) any {
 	switch x := v.(type) {
 	case float64:
 		return floatNumber(x)
 	case float32:
 		return floatNumber(float64(x))
 	case map[string]any:
+		key, ok := w.enter(reflect.ValueOf(x))
+		if !ok {
+			return cycle{}
+		}
+		defer w.leave(key)
 		m := make(map[string]any, len(x))
 		for k, e := range x {
-			m[k] = jsonFloatsAt(e, depth+1)
+			m[k] = w.value(e)
 		}
 		return m
 	case []any:
+		key, ok := w.enter(reflect.ValueOf(x))
+		if !ok {
+			return cycle{}
+		}
+		defer w.leave(key)
 		s := make([]any, len(x))
 		for i, e := range x {
-			s[i] = jsonFloatsAt(e, depth+1)
+			s[i] = w.value(e)
 		}
 		return s
 	case []float64:
@@ -97,7 +146,7 @@ func jsonFloatsAt(v any, depth int) any {
 		// the typed containers below would take apart into numbers or bytes
 		return v
 	default:
-		return typedContainer(v, depth)
+		return w.typedContainer(v)
 	}
 }
 
@@ -106,29 +155,35 @@ func jsonFloatsAt(v any, depth int) any {
 // []float64 inside a struct-free container), which the cases above do not
 // name, and the value a pointer points to (*time.Duration, *float64), so that
 // it arrives as the type the value would; any other value is v.
-func typedContainer(v any, depth int) any {
+func (w *walker) typedContainer(v any) any {
 	rv := reflect.ValueOf(v)
 	switch rv.Kind() {
 	case reflect.Pointer:
 		if rv.IsNil() {
 			return nil
 		}
-		return jsonFloatsAt(rv.Elem().Interface(), depth+1)
+		key, ok := w.enter(rv)
+		if !ok {
+			return cycle{}
+		}
+		defer w.leave(key)
+		return w.value(rv.Elem().Interface())
 	case reflect.Slice:
 		if rv.IsNil() {
 			return nil
 		}
 		if rv.Type().Elem().Kind() == reflect.Uint8 {
 			// A named byte slice type: bytes, as []byte is
-			return jsonFloatsAt(rv.Bytes(), depth+1)
+			return w.value(rv.Bytes())
 		}
-		fallthrough
+		key, ok := w.enter(rv)
+		if !ok {
+			return cycle{}
+		}
+		defer w.leave(key)
+		return w.elements(rv)
 	case reflect.Array:
-		s := make([]any, rv.Len())
-		for i := range s {
-			s[i] = jsonFloatsAt(rv.Index(i).Interface(), depth+1)
-		}
-		return s
+		return w.elements(rv)
 	case reflect.Map:
 		if rv.Type().Key().Kind() != reflect.String {
 			return v
@@ -136,15 +191,29 @@ func typedContainer(v any, depth int) any {
 		if rv.IsNil() {
 			return nil
 		}
+		key, ok := w.enter(rv)
+		if !ok {
+			return cycle{}
+		}
+		defer w.leave(key)
 		m := make(map[string]any, rv.Len())
 		iter := rv.MapRange()
 		for iter.Next() {
-			m[iter.Key().String()] = jsonFloatsAt(iter.Value().Interface(), depth+1)
+			m[iter.Key().String()] = w.value(iter.Value().Interface())
 		}
 		return m
 	default:
 		return v
 	}
+}
+
+// elements is the walked elements of the slice or array rv.
+func (w *walker) elements(rv reflect.Value) []any {
+	s := make([]any, rv.Len())
+	for i := range s {
+		s[i] = w.value(rv.Index(i).Interface())
+	}
+	return s
 }
 
 // floatNumber is f as a JSON number that reads back as a float; NaN and the

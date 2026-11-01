@@ -12,6 +12,52 @@ Grafeo includes zero-dependency parsers for W3C RDF serialization formats.
 Turtle and N-Triples support both batch (replace-all) and streaming
 (incremental, memory-bounded) loading. N-Quads is supported for export.
 
+## Loading a file or text into a database
+
+The database loads a Turtle or N-Triples file, or text, into the default graph
+or a named graph in one bulk write: the input is parsed first, nothing is
+inserted when a line does not parse (the error names the line), and the
+triples go to the WAL as one group, so a persistent database keeps all of them
+or none after a crash. A load reports no change data capture events. Each call
+returns how many triples were new in its graph.
+
+A named graph is given by its IRI, without angle brackets, and is created when
+it does not exist: its triples are where `INSERT DATA { GRAPH <iri> { ... } }`
+puts them.
+
+=== "Python"
+
+    ```python
+    import grafeo
+
+    db = grafeo.GrafeoDB("people.grafeo")
+    db.load_rdf("people.ttl")                     # the format from the extension
+    db.load_rdf("data.txt", format="ntriples")
+    db.load_rdf("cities.nt", graph="http://example.org/cities")
+    db.load_rdf_text(
+        '<http://example.org/alix> <http://example.org/city> "Amsterdam" .',
+        "ntriples",
+        graph="http://example.org/cities",
+    )
+    ```
+
+=== "Rust"
+
+    ```rust
+    use grafeo::{GrafeoDB, RdfFormat};
+
+    let db = GrafeoDB::open("people.grafeo")?;
+    db.load_rdf("people.ttl", None)?;
+    db.load_rdf_into("cities.nt", None, Some("http://example.org/cities"))?;
+    db.load_rdf_text(
+        "<http://example.org/alix> <http://example.org/city> \"Amsterdam\" .",
+        RdfFormat::NTriples,
+        Some("http://example.org/cities"),
+    )?;
+    ```
+
+The store-level parsers below load an `RdfStore` directly, without the WAL.
+
 ## Turtle
 
 Turtle is the most common human-readable RDF format, supporting prefix

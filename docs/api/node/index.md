@@ -113,10 +113,10 @@ await db.executeSql(query, params?);      // SQL/PGQ
 | `Object` | Map | Keys must be strings |
 | `Buffer`, `Uint8Array` | Bytes | |
 | `Date` | Timestamp | Millisecond precision; a finer timestamp comes back as the millisecond at or before it |
-| `{ $date: '2024-01-15' }` | Date | Both ways, as a decimal: a date comes back as this object, which goes in again as a date |
-| `{ $time: '12:30:00+02:00' }` | Time | With an offset (`Z`, `+02:00`) or without one (`12:30:00`), to the nanosecond |
-| `{ $duration: 'P1Y2M3DT4H' }` | Duration | ISO 8601; months, days and the rest are kept apart |
-| `{ $zoned_datetime: '2024-01-15T12:30:00+02:00' }` | Zoned datetime | An instant with its offset |
+| `{ $date: '2024-01-15' }` | Date | Both ways, as with `{ $decimal }`: a date comes back as this object, which goes in again as a date. Only as an object's only key; with other keys it is a map |
+| `{ $time: '12:30:00+02:00' }` | Time | With an offset (`Z`, `+02:00`) or without one (`12:30:00`), to the nanosecond. Only as an object's only key |
+| `{ $duration: 'P1Y2M3DT4H' }` | Duration | ISO 8601; months, days and the rest are kept apart. Only as an object's only key |
+| `{ $zoned_datetime: '2024-01-15T12:30:00+02:00' }` | Zoned datetime | An instant with its offset. Only as an object's only key |
 | `Float32Array` | Vector | For embeddings and similarity search: it can be indexed and found by `vectorSearch` |
 | `Float64Array` | Vector | Each element stored as the nearest 32-bit float |
 

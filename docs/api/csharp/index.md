@@ -387,7 +387,9 @@ reading. Any other `TIME` comes back as a `TimeOnly`. A GQL `DURATION` comes
 back as a `GrafeoDuration` of `Months`, `Days` and `Nanoseconds`, kept apart
 because a month and a day have no fixed length (`P1M` is not `P30D`, `P1D` is
 not `PT24H`); `TryToTimeSpan` and `ToTimeSpan()` give a `TimeSpan` when there
-are no months. Make one with `new GrafeoTime(12, 30, 0, offset:
+are no months, the nanoseconds are whole 100 ns ticks and the value fits in a
+`TimeSpan` (otherwise `TryToTimeSpan` returns false and `ToTimeSpan()` throws).
+Make one with `new GrafeoTime(12, 30, 0, offset:
 TimeSpan.FromHours(2))`, `new GrafeoTime("12:30:00+02:00")`,
 `new GrafeoDuration(14, 3, 0)` or `new GrafeoDuration("P1Y2M3D")`; passed as a
 parameter, each is that `TIME` or `DURATION`.
@@ -535,13 +537,13 @@ catch (GrafeoException ex)
 | `TimeOnly` | Time | A local time, to 100 ns; comes back as a `TimeOnly` |
 | `GrafeoTime` | Time | With an offset, or finer than 100 ns: comes back as a `GrafeoTime` |
 | `TimeSpan`, `GrafeoDuration` | Duration | A `TimeSpan` is a duration of its days and the rest; every duration comes back as a `GrafeoDuration` |
-
-A value read back goes in again as the type it came as.
 | `byte[]` | Bytes | Base64-encoded for transport |
 | `float[]` | Vector | For embeddings and similarity search |
 | `ReadOnlyMemory<float>` | Vector | Zero-copy span-based vector input |
 | `IList<object?>` | List | Elements converted recursively |
 | `IDictionary<string, object?>` | Map | Keys must be strings |
+
+A value read back goes in again as the type it came as.
 
 ## Links
 

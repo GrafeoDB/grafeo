@@ -100,8 +100,8 @@ RETURN doc.title
 
 With a vector index, this pushes down into a `VectorScanOperator`. Without one,
 the planner falls back to brute-force per-row evaluation so the query still
-returns the correct rows. Both give the same rows, a node exactly at the
-threshold included, and `ORDER BY cosine_similarity(...) DESC` with a threshold
+returns the correct rows. Both give the same rows, also for a node exactly at
+the threshold: `>` and `<` leave it out, `>=` and `<=` keep it. `ORDER BY cosine_similarity(...) DESC` with a threshold
 puts the most similar rows first on either path.
 
 Use `euclidean_distance(...) < threshold` for the distance formulation:

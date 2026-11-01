@@ -96,8 +96,9 @@ large enough to amortize lock overhead.
 
 ### Loading via SPARQL
 
-The language bindings have no Turtle or N-Triples file loader. From any binding, send the triples as a SPARQL
-`INSERT DATA` statement instead. N-Triples lines can go into `INSERT DATA { ... }` as they are. Turtle's
+Python loads a file or text with `load_rdf` and `load_rdf_text` (see
+[Loading a file or text into a database](#loading-a-file-or-text-into-a-database)). The other bindings have no
+Turtle or N-Triples loader yet: from those, send the triples as a SPARQL `INSERT DATA` statement instead. N-Triples lines can go into `INSERT DATA { ... }` as they are. Turtle's
 `@prefix ex: <...> .` lines are not SPARQL: write each one as `PREFIX ex: <...>` (no `@`, no final dot) before
 `INSERT DATA`, and put the rest of the Turtle inside the braces:
 
@@ -182,5 +183,5 @@ destinations (logging, deduplication, remote stores).
 ## SPARQL LOAD Statement
 
 The SPARQL Update `LOAD` statement is not supported yet: `LOAD <file:///path/to/data.ttl>` fails with an
-unsupported error, also with `SILENT`. Load a file with the Rust loaders above, or send its
+unsupported error, also with `SILENT`. Load a file with `load_rdf` (Rust or Python) instead, or send its
 triples as `INSERT DATA` (see [Loading via SPARQL](#loading-via-sparql)).

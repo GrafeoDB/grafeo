@@ -50,7 +50,7 @@ A name (an alias, a variable, a `LET` or `FOR` variable) can be any of ISO GQL's
 `graph` or `trail`, and a quoted name holds any text: `RETURN 1 AS "two words"` or `` RETURN 1 AS `two words` ``. A
 reserved word as a name (`RETURN 1 AS match`) fails with a message that names the word and says to quote it.
 
-`//` starts a comment that runs to the end of the line, and so does `--` followed by a space; `/* ... */` is a block
+`//` starts a comment that runs to the end of the line, and so does `--` followed by a space, a tab or a line break; `/* ... */` is a block
 comment. Inside a string, they are text.
 
 ## Combining MATCH and RETURN

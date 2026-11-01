@@ -151,7 +151,7 @@ RETURN person.name, person.age
 
 ### IS TYPED / IS NOT TYPED
 
-Check the runtime type of a value in `WHERE` clauses:
+Check the runtime type of a value in `WHERE` or `RETURN` clauses:
 
 ```sql
 -- Check type

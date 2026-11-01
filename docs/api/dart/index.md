@@ -915,7 +915,7 @@ as the same GQL type:
 - `GrafeoDuration` (`DURATION`): `months`, `days` and `nanoseconds`, kept
   apart because a month and a day have no fixed length (`P1M` is not `P30D`,
   `P1D` is not `PT24H`); `toDuration()` gives a Dart `Duration` when there
-  are no months, and `GrafeoDuration.fromDuration` makes one of a `Duration`.
+  are no months and no part finer than a microsecond (otherwise null), and `GrafeoDuration.fromDuration` makes one of a `Duration`.
 - `GrafeoZonedDateTime` (`ZONED DATETIME`): the `instant` (a UTC `DateTime`)
   and the `offset` it was written at.
 

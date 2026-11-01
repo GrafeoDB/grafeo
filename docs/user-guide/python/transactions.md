@@ -32,6 +32,10 @@ with db.begin_transaction() as tx:
     tx.commit()  # Both inserts committed atomically
 ```
 
+A transaction ends with its `commit()` or `rollback()` call. `COMMIT`, `ROLLBACK` and `START TRANSACTION` sent
+through `tx.execute` raise `GrafeoError` (`GRAFEO-T004`), as they would end or nest the transaction behind the
+object's back.
+
 ## Transaction Context Manager
 
 The transaction context manager provides automatic commit on success:
@@ -131,10 +135,6 @@ for attempt in range(3):
         if not e.is_retryable or attempt == 2:
             raise
 ```
-
-End a transaction with `commit()` or `rollback()`: `tx.execute("COMMIT")`, and `ROLLBACK` or `START TRANSACTION`
-through `tx.execute`, raise `GrafeoError` (`GRAFEO-T004`), as they would end or nest the transaction behind the
-object's back.
 
 ## Threads
 

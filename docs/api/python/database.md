@@ -454,7 +454,9 @@ a node. A row's properties are merged into the node's and the others stay, as
 - a `None` value removes the property;
 - a key that several nodes have updates all of them (the row counts once in `updated`);
 - a row whose key matches no node with every label, or that lacks the key, is skipped and creates nothing;
-- keys compare as `=` compares them, so `2.0` finds the node whose key is `2`, and the string `"2"` does not;
+- keys compare as `=` does, which also takes a string of digits as equal to that number: `2.0` and `"2"` find
+  the node whose key is `2`, and `3` the one whose key is `"3"`. Against a key that is an integer, other number
+  text counts as its number too (`"2.0"` and `"2e0"` find `2`), where `=` does not;
 - a row with only the key counts as updated and changes nothing;
 - with no labels (`[]`), every node counts.
 

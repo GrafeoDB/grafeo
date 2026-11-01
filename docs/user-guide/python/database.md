@@ -37,7 +37,7 @@ for row in result:
 ## Query Timeouts
 
 A query may run for 30 seconds by default; past its timeout it fails with `GRAFEO-Q003`, which can be retried. Set
-the database's timeout in seconds when you create it, or one query's with `timeout`:
+the database's timeout in seconds when you create it, or set `timeout` for one query:
 
 ```python
 import math

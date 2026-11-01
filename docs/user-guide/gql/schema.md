@@ -278,8 +278,9 @@ DROP INDEX index_name
 DROP INDEX IF EXISTS index_name
 ```
 
-A name stands for one index in its graph. `CREATE INDEX` with a name that already stands for another label, property
-or kind of index fails naming it, and `IF NOT EXISTS` (also on `CREATE VECTOR INDEX`) keeps the existing index.
+Index names belong to the database, not to one graph: a name stands for one index definition in all of its graphs.
+`CREATE INDEX` with a name that already stands for another label, property or kind of index, in any graph, fails
+naming it, and `IF NOT EXISTS` (also on `CREATE VECTOR INDEX`) keeps the existing index.
 `DROP INDEX` drops the index the name stands for, whatever its kind, and every property of an index over several.
 `SHOW INDEXES` lists each index by name, with its type, label and property (one row per property), also the indexes
 made through the API (`create_property_index`, `create_vector_index`, `create_text_index`): those have a null name,

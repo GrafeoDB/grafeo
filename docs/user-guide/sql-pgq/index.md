@@ -58,7 +58,7 @@ MATCH (a:Person)-[:KNOWS]->{1,3}(b:Person)
 `-[:KNOWS*1..3]->` here, as its GQL does: an extension of Grafeo's, not part
 of SQL/PGQ or GQL.
 
-The `MATCH` takes every GQL pattern, as ISO/IEC 9075-16 defines it:
+The `MATCH` takes these GQL pattern forms, as ISO/IEC 9075-16 defines them:
 
 ```sql
 -- Label expressions
@@ -76,8 +76,10 @@ MATCH p = ANY SHORTEST (a:Person)-[:KNOWS]->+(b:Person)
 MATCH TRAIL (a:Person)-[:KNOWS]->{1,3}(b:Person)
 ```
 
-A path variable gives `PATH_LENGTH(p)` (or `LENGTH(p)`), `NODES(p)` and `EDGES(p)` in `COLUMNS`. A shortest path
-over more than one edge pattern is not supported yet.
+A path variable gives `PATH_LENGTH(p)` (or `LENGTH(p)`), `NODES(p)` and `EDGES(p)` in `COLUMNS`. Some patterns are
+refused with an error for now: a quantified pattern of more than one edge (`((a)-[:KNOWS]->(m)-[:KNOWS]->(b)){1,3}`)
+without an upper bound or with more than 16 repetitions, such a pattern with a path variable and no required
+repetition (`{0,2}`), and a shortest path over more than one edge pattern.
 
 ### COLUMNS Clause
 

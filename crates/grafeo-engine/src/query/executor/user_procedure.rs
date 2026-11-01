@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use grafeo_common::types::Value;
-use grafeo_common::utils::error::{Error, Result};
+use grafeo_common::utils::error::{Error, QueryError, Result};
 use grafeo_core::execution::DataChunk;
 use grafeo_core::execution::operators::{
     Operator, OperatorError, OperatorResult, ReadCounter, WriteCounter,
@@ -148,6 +148,9 @@ impl UserProcedureOperator {
             .with_read_counter(Arc::clone(&self.read_counter));
 
         let physical = planner.plan(logical_plan).map_err(OperatorError::from)?;
+        // Checked before the body runs, so a body that does not fit writes
+        // nothing.
+        let column_indices = self.projection(physical.columns())?;
 
         // Execute
         let executor = crate::query::executor::Executor::with_columns(physical.columns().to_vec());
@@ -156,34 +159,85 @@ impl UserProcedureOperator {
             .execute(root_op.as_mut())
             .map_err(OperatorError::from)?;
 
-        // Map result columns to expected return columns, handling YIELD filtering
-        let column_indices = if let Some(ref yields) = self.yield_columns {
-            yields
-                .iter()
-                .filter_map(|y| result.columns.iter().position(|c| c == y))
-                .collect::<Vec<_>>()
-        } else {
-            // Map return columns to result columns
-            self.return_columns
-                .iter()
-                .filter_map(|r| result.columns.iter().position(|c| c == r))
-                .collect::<Vec<_>>()
-        };
+        let body_width = result.columns.len();
+        if let Some(row) = result.rows.iter().find(|row| row.len() != body_width) {
+            return Err(semantic(format!(
+                "stored procedure body has {body_width} columns, but a row has {} values",
+                row.len()
+            )));
+        }
 
-        // If no columns matched, return all result columns
-        let rows = if column_indices.is_empty() {
-            result.rows
-        } else {
-            result
+        let rows = match column_indices {
+            None => result.rows,
+            Some(indices) => result
                 .rows
                 .into_iter()
-                .map(|row| column_indices.iter().map(|&i| row[i].clone()).collect())
-                .collect()
+                .map(|row| indices.iter().map(|&i| row[i].clone()).collect())
+                .collect(),
         };
 
         self.result_rows = Some(rows);
         Ok(())
     }
+
+    /// Which body columns give the output columns, in output order, or
+    /// `None` when the body's columns are the output columns as they are.
+    /// The body gives the declared columns by name, or by position when no
+    /// name matches; a YIELD then picks the declared columns it names.
+    ///
+    /// # Errors
+    ///
+    /// A semantic error when the columns found by name, or the body's
+    /// columns by position, are not as many as the declared ones, so a body
+    /// never returns a value without a column or a column without a value,
+    /// and when a YIELD names a column the procedure does not declare.
+    fn projection(
+        &self,
+        body_columns: &[String],
+    ) -> std::result::Result<Option<Vec<usize>>, OperatorError> {
+        let by_name: Vec<usize> = self
+            .return_columns
+            .iter()
+            .filter_map(|r| body_columns.iter().position(|c| c == r))
+            .collect();
+        let declared: Vec<usize> = if by_name.is_empty() {
+            (0..body_columns.len()).collect()
+        } else {
+            by_name
+        };
+        if declared.len() != self.return_columns.len() {
+            return Err(semantic(format!(
+                "stored procedure body gives {} of its columns, but it declares {}",
+                declared.len(),
+                self.return_columns.len()
+            )));
+        }
+        let indices =
+            match &self.yield_columns {
+                None => declared,
+                Some(yields) => {
+                    yields
+                        .iter()
+                        .map(|y| {
+                            let at = self.return_columns.iter().position(|r| r == y).ok_or_else(|| {
+                        semantic(format!(
+                            "YIELD names '{y}', which the stored procedure does not declare"
+                        ))
+                    })?;
+                            Ok(declared[at])
+                        })
+                        .collect::<std::result::Result<Vec<usize>, OperatorError>>()?
+                }
+            };
+        let as_they_are = indices.len() == body_columns.len()
+            && indices.iter().enumerate().all(|(i, &at)| i == at);
+        Ok((!as_they_are).then_some(indices))
+    }
+}
+
+/// A semantic error from the operator.
+fn semantic(message: String) -> OperatorError {
+    Error::from(QueryError::semantic(message)).into()
 }
 
 impl Operator for UserProcedureOperator {
@@ -206,10 +260,7 @@ impl Operator for UserProcedureOperator {
         let end = (self.row_index + CHUNK_SIZE).min(rows.len());
         let chunk_rows = end - self.row_index;
 
-        let col_count = self
-            .output_columns
-            .len()
-            .max(rows.first().map_or(self.output_columns.len(), |r| r.len()));
+        let col_count = self.output_columns.len();
 
         let types: Vec<grafeo_common::types::LogicalType> =
             vec![grafeo_common::types::LogicalType::Any; col_count];

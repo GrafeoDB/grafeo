@@ -80,6 +80,7 @@ func nodeFromC(cNode *C.GrafeoNode) *Node {
 	if props == nil {
 		props = make(map[string]any)
 	}
+	props = decodeFields(props)
 
 	return &Node{ID: nodeID, Labels: labels, Properties: props}
 }

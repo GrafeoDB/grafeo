@@ -54,6 +54,16 @@ func (d Decimal) MarshalJSON() ([]byte, error) {
 	return json.Marshal(map[string]string{"$decimal": d.String()})
 }
 
+// decodeFields decodes the tags in each value of fields, a map of named
+// values (a row, a node's or an edge's properties), never the map itself: a
+// one-column row named "$bytes" stays a row.
+func decodeFields(fields map[string]any) map[string]any {
+	for key, value := range fields {
+		fields[key] = decodeTags(value)
+	}
+	return fields
+}
+
 // decodeTags turns every {"$decimal": "..."} map (the tag as its only key)
 // inside value into a Decimal, every {"$bytes": "..."} map into its
 // []byte, every {"$float": "NaN"} (or "Infinity",

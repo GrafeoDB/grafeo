@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"math"
+	"reflect"
 	"strconv"
 	"strings"
 )
@@ -57,6 +58,49 @@ func jsonFloats(v any) any {
 			return nil
 		}
 		return map[string]string{"$bytes": base64.StdEncoding.EncodeToString(x)}
+	case json.Marshaler:
+		// A value that writes its own JSON (Decimal, json.RawMessage)
+		return v
+	default:
+		return typedContainer(v)
+	}
+}
+
+// typedContainer is v with its elements' floats and byte slices tagged when
+// v is a typed slice, array or string-keyed map ([][]byte, map[string][]byte,
+// []float64 inside a struct-free container), which the cases above do not
+// name; any other value is v.
+func typedContainer(v any) any {
+	rv := reflect.ValueOf(v)
+	switch rv.Kind() {
+	case reflect.Slice:
+		if rv.IsNil() {
+			return nil
+		}
+		if rv.Type().Elem().Kind() == reflect.Uint8 {
+			// A named byte slice type: bytes, as []byte is
+			return jsonFloats(rv.Bytes())
+		}
+		fallthrough
+	case reflect.Array:
+		s := make([]any, rv.Len())
+		for i := range s {
+			s[i] = jsonFloats(rv.Index(i).Interface())
+		}
+		return s
+	case reflect.Map:
+		if rv.Type().Key().Kind() != reflect.String {
+			return v
+		}
+		if rv.IsNil() {
+			return nil
+		}
+		m := make(map[string]any, rv.Len())
+		iter := rv.MapRange()
+		for iter.Next() {
+			m[iter.Key().String()] = jsonFloats(iter.Value().Interface())
+		}
+		return m
 	default:
 		return v
 	}

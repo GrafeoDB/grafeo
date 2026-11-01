@@ -79,6 +79,7 @@ func edgeFromC(cEdge *C.GrafeoEdge) *Edge {
 	if props == nil {
 		props = make(map[string]any)
 	}
+	props = decodeFields(props)
 
 	return &Edge{
 		ID:         edgeID,

@@ -89,7 +89,7 @@ func (s *ResultStream) Next() (map[string]any, error) {
 	if err := json.Unmarshal([]byte(jsonStr), &row); err != nil {
 		return nil, err
 	}
-	return row, nil
+	return decodeFields(row), nil
 }
 
 // Rows returns a channel-free iterator for a classic Go for-loop:

@@ -232,7 +232,7 @@ func (v *AsOfView) GetNodeProperty(id uint64, key string) (any, error) {
 	if err := json.Unmarshal([]byte(C.GoString(ptr)), &value); err != nil {
 		return nil, err
 	}
-	return value, nil
+	return decodeTags(value), nil
 }
 
 var errViewClosed = &Error{Message: "the AsOfView is closed: open another with Database.AsOf"}

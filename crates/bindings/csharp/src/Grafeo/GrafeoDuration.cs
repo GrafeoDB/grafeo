@@ -45,12 +45,30 @@ public readonly struct GrafeoDuration : IEquatable<GrafeoDuration>
     public static GrafeoDuration FromTimeSpan(TimeSpan span) =>
         new(0, span.Days, (span.Ticks - span.Days * TimeSpan.TicksPerDay) * 100);
 
-    /// <summary>Reads a duration as <see cref="GrafeoDuration(string)"/> does; false when the text is not one.</summary>
+    /// <summary>
+    /// Reads a duration as <see cref="GrafeoDuration(string)"/> does; false when the
+    /// text is not one, or has a part that does not fit 64 bits.
+    /// </summary>
     public static bool TryParse(string? text, out GrafeoDuration duration)
     {
         duration = default;
         if (string.IsNullOrEmpty(text))
             return false;
+        try
+        {
+            return TryParseChecked(text, out duration);
+        }
+        catch (OverflowException)
+        {
+            // A part past 64 bits: refused, not wrapped around
+            return false;
+        }
+    }
+
+    /// <summary>The body of <see cref="TryParse"/>, its arithmetic checked: an overflow throws.</summary>
+    private static bool TryParseChecked(string text, out GrafeoDuration duration)
+    {
+        duration = default;
         var negative = text.StartsWith('-');
         var body = negative ? text[1..] : text;
         if (!body.StartsWith('P'))
@@ -76,20 +94,23 @@ public readonly struct GrafeoDuration : IEquatable<GrafeoDuration>
             {
                 if (!SecondsNanos(number, out var secondsNanos))
                     return false;
-                nanos += secondsNanos;
+                nanos = checked(nanos + secondsNanos);
             }
             else
             {
                 if (!Integer(number, out var n))
                     return false;
-                switch (c)
+                checked
                 {
-                    case 'Y': months += 12 * n; break;
-                    case 'M' when !inTime: months += n; break;
-                    case 'W': days += 7 * n; break;
-                    case 'D': days += n; break;
-                    case 'H': nanos += n * NanosPerHour; break;
-                    default: nanos += n * NanosPerMinute; break;
+                    switch (c)
+                    {
+                        case 'Y': months += 12 * n; break;
+                        case 'M' when !inTime: months += n; break;
+                        case 'W': days += 7 * n; break;
+                        case 'D': days += n; break;
+                        case 'H': nanos += n * NanosPerHour; break;
+                        default: nanos += n * NanosPerMinute; break;
+                    }
                 }
             }
             start = i + 1;
@@ -97,7 +118,7 @@ public readonly struct GrafeoDuration : IEquatable<GrafeoDuration>
         }
         if (!content || start != body.Length)
             return false;
-        duration = negative ? new(-months, -days, -nanos) : new(months, days, nanos);
+        duration = negative ? new(checked(-months), checked(-days), checked(-nanos)) : new(months, days, nanos);
         return true;
     }
 
@@ -224,7 +245,7 @@ public readonly struct GrafeoDuration : IEquatable<GrafeoDuration>
         var point = text.IndexOf('.');
         if (!Integer(point < 0 ? text : text[..point], out var whole))
             return false;
-        nanos = whole * NanosPerSecond;
+        nanos = checked(whole * NanosPerSecond);
         if (point < 0)
             return true;
         var fraction = text[(point + 1)..];
@@ -232,7 +253,7 @@ public readonly struct GrafeoDuration : IEquatable<GrafeoDuration>
             fraction = fraction[..9];
         if (!Integer(fraction, out var digits))
             return false;
-        nanos += digits * (long)Math.Pow(10, 9 - fraction.Length);
+        nanos = checked(nanos + digits * (long)Math.Pow(10, 9 - fraction.Length));
         return true;
     }
 }

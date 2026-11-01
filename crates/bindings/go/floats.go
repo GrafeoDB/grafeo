@@ -19,7 +19,8 @@ import (
 // Grafeo reads as an INT64, and float64(1<<63) as "9223372036854775808", a
 // DECIMAL. A whole float keeps a fraction or an exponent ("3.0",
 // "9.223372036854776e+18") and arrives as a FLOAT64, alone and inside lists
-// and maps.
+// and maps. A pointer to any of these arrives as its value would, and a nil
+// one as null.
 func marshalJSON(v any) ([]byte, error) {
 	return json.Marshal(jsonFloats(v))
 }
@@ -65,6 +66,13 @@ func jsonFloats(v any) any {
 		return map[string]string{"$bytes": base64.StdEncoding.EncodeToString(x)}
 	case time.Time:
 		return timestampTag(x)
+	case *time.Time:
+		// Before json.Marshaler, which *time.Time is: the value's tag, as
+		// for a time.Time
+		if x == nil {
+			return nil
+		}
+		return timestampTag(*x)
 	case time.Duration:
 		return DurationOf(x)
 	case json.Marshaler:
@@ -82,10 +90,16 @@ func jsonFloats(v any) any {
 // typedContainer is v with its elements' floats and byte slices tagged when
 // v is a typed slice, array or string-keyed map ([][]byte, map[string][]byte,
 // []float64 inside a struct-free container), which the cases above do not
-// name; any other value is v.
+// name, and the value a pointer points to (*time.Duration, *float64), so that
+// it arrives as the type the value would; any other value is v.
 func typedContainer(v any) any {
 	rv := reflect.ValueOf(v)
 	switch rv.Kind() {
+	case reflect.Pointer:
+		if rv.IsNil() {
+			return nil
+		}
+		return jsonFloats(rv.Elem().Interface())
 	case reflect.Slice:
 		if rv.IsNil() {
 			return nil

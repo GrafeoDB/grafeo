@@ -77,8 +77,6 @@ fn tier_to_str(tier: grafeo_common::memory::buffer::StorageTier) -> &'static str
     }
 }
 
-/// Converts the PyArrow `table` of `nodes_df()` or `edges_df()` to a pandas
-/// DataFrame (with `pd`, the pandas module) whose nested columns hold the
 /// The RDF syntax a `format` argument names; a `ValueError` for another
 /// name.
 #[cfg(feature = "triple-store")]
@@ -90,6 +88,8 @@ fn rdf_format(name: &str) -> PyResult<grafeo_engine::RdfFormat> {
     })
 }
 
+/// Converts the PyArrow `table` of `nodes_df()` or `edges_df()` to a pandas
+/// DataFrame (with `pd`, the pandas module) whose nested columns hold the
 /// Python values the fallback without pyarrow builds: lists (the `_labels`
 /// of nodes, list and vector properties) and dicts (map and duration
 /// properties). pyarrow's `to_pandas()` makes a list a numpy array, so the

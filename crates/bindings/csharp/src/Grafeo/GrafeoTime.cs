@@ -30,10 +30,15 @@ public readonly struct GrafeoTime : IEquatable<GrafeoTime>
     /// <exception cref="ArgumentOutOfRangeException">A part is out of its range.</exception>
     public GrafeoTime(int hour, int minute, int second, int nanosecond = 0, TimeSpan? offset = null)
     {
-        if (hour is < 0 or > 23 || minute is < 0 or > 59 || second is < 0 or > 59
-            || nanosecond is < 0 or >= (int)NanosPerSecond)
-            throw new ArgumentOutOfRangeException(nameof(hour),
-                $"{hour:00}:{minute:00}:{second:00}.{nanosecond:000000000} is not a time of day");
+        // Each part on its own, so that the exception names the one out of range
+        if (hour is < 0 or > 23)
+            throw NotATimeOfDay(nameof(hour), hour, minute, second, nanosecond);
+        if (minute is < 0 or > 59)
+            throw NotATimeOfDay(nameof(minute), hour, minute, second, nanosecond);
+        if (second is < 0 or > 59)
+            throw NotATimeOfDay(nameof(second), hour, minute, second, nanosecond);
+        if (nanosecond is < 0 or >= (int)NanosPerSecond)
+            throw NotATimeOfDay(nameof(nanosecond), hour, minute, second, nanosecond);
         if (offset is { } span && (span.Ticks % TimeSpan.TicksPerMinute != 0 || span.Duration() >= TimeSpan.FromDays(1)))
             throw new ArgumentOutOfRangeException(nameof(offset),
                 $"an offset of {span} is not whole minutes within a day");
@@ -159,6 +164,11 @@ public readonly struct GrafeoTime : IEquatable<GrafeoTime>
 
     /// <summary>Whether two times differ in clock reading or offset.</summary>
     public static bool operator !=(GrafeoTime left, GrafeoTime right) => !left.Equals(right);
+
+    /// <summary>The exception for a clock reading whose part <paramref name="name"/> is out of its range.</summary>
+    private static ArgumentOutOfRangeException NotATimeOfDay(
+        string name, int hour, int minute, int second, int nanosecond) =>
+        new(name, $"{hour:00}:{minute:00}:{second:00}.{nanosecond:000000000} is not a time of day");
 
     /// <summary>A text of ASCII digits only, as a number.</summary>
     private static bool Digits(string text, out int value)

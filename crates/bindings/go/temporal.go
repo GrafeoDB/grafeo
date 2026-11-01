@@ -104,8 +104,8 @@ func ParseDate(text string) (Date, error) {
 	}
 	var numbers [3]int
 	for i, part := range parts {
-		n, err := strconv.Atoi(part)
-		if err != nil || part == "" || part[0] == '+' || part[0] == '-' {
+		n, ok := digits(part)
+		if !ok {
 			return Date{}, invalid
 		}
 		numbers[i] = n
@@ -118,6 +118,16 @@ func ParseDate(text string) (Date, error) {
 		return Date{}, invalid
 	}
 	return d, nil
+}
+
+// digits is the number a text of ASCII digits names, and false for any other
+// text: an empty one, or one with a sign or a space.
+func digits(text string) (int, bool) {
+	if text == "" || strings.Trim(text, "0123456789") != "" {
+		return 0, false
+	}
+	n, err := strconv.Atoi(text)
+	return n, err == nil
 }
 
 // valid reports whether d names a day of the calendar.
@@ -187,11 +197,16 @@ func NewZonedTime(hour, minute, second, nanosecond, offsetSeconds int) (Time, er
 	return t, nil
 }
 
-// TimeOf returns the clock reading of t with its offset.
+// TimeOf returns the clock reading of t with its offset. GQL offsets are
+// whole minutes: for an offset with seconds (a historic local mean time) it
+// is the clock reading at the offset's whole minutes, at the same instant.
 func TimeOf(t time.Time) Time {
+	if _, offset := t.Zone(); offset%60 != 0 {
+		t = t.In(time.FixedZone("", offset-offset%60))
+	}
 	_, offset := t.Zone()
 	hour, minute, second := t.Clock()
-	zoned, err := NewZonedTime(hour, minute, second, t.Nanosecond(), offset-offset%60)
+	zoned, err := NewZonedTime(hour, minute, second, t.Nanosecond(), offset)
 	if err != nil {
 		// An offset of a day or more: the clock reading in UTC
 		return TimeOf(t.UTC())
@@ -207,9 +222,9 @@ func ParseTime(text string) (Time, error) {
 	if rest, ok := strings.CutSuffix(text, "Z"); ok {
 		body, zoned = rest, true
 	} else if n := len(text); n >= 6 && (text[n-6] == '+' || text[n-6] == '-') && text[n-3] == ':' {
-		hours, errHours := strconv.Atoi(text[n-5 : n-3])
-		minutes, errMinutes := strconv.Atoi(text[n-2:])
-		if errHours != nil || errMinutes != nil || minutes > 59 {
+		hours, okHours := digits(text[n-5 : n-3])
+		minutes, okMinutes := digits(text[n-2:])
+		if !okHours || !okMinutes || minutes > 59 {
 			return Time{}, invalid
 		}
 		offset = hours*3600 + minutes*60
@@ -225,8 +240,8 @@ func ParseTime(text string) (Time, error) {
 	}
 	var hms [3]int
 	for i, field := range fields {
-		n, err := strconv.Atoi(field)
-		if err != nil || field == "" || field[0] == '+' || field[0] == '-' {
+		n, ok := digits(field)
+		if !ok {
 			return Time{}, invalid
 		}
 		hms[i] = n
@@ -345,12 +360,13 @@ func ParseDuration(text string) (Duration, error) {
 			continue
 		}
 		number := body[start:i]
+		var fits bool
 		if c == 'S' {
 			nanos, err := secondsNanos(number)
 			if err != nil {
 				return Duration{}, invalid
 			}
-			d.Nanos += nanos
+			d.Nanos, fits = checkedAdd(d.Nanos, nanos)
 		} else {
 			n, err := strconv.ParseInt(number, 10, 64)
 			if err != nil || number[0] == '+' {
@@ -358,18 +374,22 @@ func ParseDuration(text string) (Duration, error) {
 			}
 			switch {
 			case c == 'Y':
-				d.Months += 12 * n
+				fits = addProduct(&d.Months, n, 12)
 			case c == 'M' && !inTime:
-				d.Months += n
+				d.Months, fits = checkedAdd(d.Months, n)
 			case c == 'W':
-				d.Days += 7 * n
+				fits = addProduct(&d.Days, n, 7)
 			case c == 'D':
-				d.Days += n
+				d.Days, fits = checkedAdd(d.Days, n)
 			case c == 'H':
-				d.Nanos += n * nanosPerHour
+				fits = addProduct(&d.Nanos, n, nanosPerHour)
 			default:
-				d.Nanos += n * nanosPerMinute
+				fits = addProduct(&d.Nanos, n, nanosPerMinute)
 			}
+		}
+		if !fits {
+			// A component past 64 bits: refused, not wrapped around
+			return Duration{}, invalid
 		}
 		start, content = i+1, true
 	}
@@ -377,9 +397,39 @@ func ParseDuration(text string) (Duration, error) {
 		return Duration{}, invalid
 	}
 	if negative {
+		if d.Months == math.MinInt64 || d.Days == math.MinInt64 || d.Nanos == math.MinInt64 {
+			return Duration{}, invalid
+		}
 		d = Duration{Months: -d.Months, Days: -d.Days, Nanos: -d.Nanos}
 	}
 	return d, nil
+}
+
+// checkedAdd is a + b, and false when the sum does not fit 64 bits.
+func checkedAdd(a, b int64) (int64, bool) {
+	sum := a + b
+	return sum, (b >= 0) == (sum >= a)
+}
+
+// checkedMul is a * b, and false when the product does not fit 64 bits.
+func checkedMul(a, b int64) (int64, bool) {
+	if a == 0 || b == 0 {
+		return 0, true
+	}
+	product := a * b
+	fits := product/b == a && !(a == -1 && b == math.MinInt64) && !(b == -1 && a == math.MinInt64)
+	return product, fits
+}
+
+// addProduct adds n * unit to *total, and is false when the product or the
+// sum does not fit 64 bits.
+func addProduct(total *int64, n, unit int64) bool {
+	product, fits := checkedMul(n, unit)
+	if !fits {
+		return false
+	}
+	*total, fits = checkedAdd(*total, product)
+	return fits
 }
 
 // secondsNanos reads the seconds of a duration, n or n.fraction, as the
@@ -391,7 +441,7 @@ func secondsNanos(number string) (int64, error) {
 	if err != nil || whole[0] == '+' {
 		return 0, errors.New("not a number")
 	}
-	nanos := n * nanosPerSecond
+	nanos, fits := checkedMul(n, nanosPerSecond)
 	if hasFraction {
 		if len(fraction) > 9 {
 			fraction = fraction[:9]
@@ -400,7 +450,12 @@ func secondsNanos(number string) (int64, error) {
 		if err != nil || fraction[0] == '+' {
 			return 0, errors.New("not a number")
 		}
-		nanos += f * int64(math.Pow10(9-len(fraction)))
+		var sumFits bool
+		nanos, sumFits = checkedAdd(nanos, f*int64(math.Pow10(9-len(fraction))))
+		fits = fits && sumFits
+	}
+	if !fits {
+		return 0, errors.New("seconds past 64 bits of nanoseconds")
 	}
 	return nanos, nil
 }

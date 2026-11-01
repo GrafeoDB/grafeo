@@ -9,6 +9,10 @@ const _nanosPerMinute = 60 * _nanosPerSecond;
 const _nanosPerHour = 60 * _nanosPerMinute;
 const _secondsPerDay = 86400;
 
+/// The smallest and the largest 64-bit integers.
+const _minInt = -1 << 63;
+const _maxInt = ~_minInt;
+
 /// Two digits of [n], or more.
 String _two(int n) => n.toString().padLeft(2, '0');
 
@@ -247,7 +251,7 @@ final class GrafeoDuration {
     var body = negative ? text.substring(1) : text;
     if (!body.startsWith('P')) return null;
     body = body.substring(1);
-    var months = 0, days = 0, nanos = 0;
+    final parts = [0, 0, 0];
     var inTime = false, start = 0, content = false;
     for (var i = 0; i < body.length; i++) {
       final c = body[i];
@@ -258,35 +262,31 @@ final class GrafeoDuration {
       }
       if (!(inTime ? 'HMS' : 'YMWD').contains(c)) continue;
       final number = body.substring(start, i);
-      if (c == 'S') {
-        final seconds = _secondsNanos(number);
-        if (seconds == null) return null;
-        nanos += seconds;
-      } else {
-        final n = _integer(number);
-        if (n == null) return null;
-        switch (c) {
-          case 'Y':
-            months += 12 * n;
-          case 'M' when !inTime:
-            months += n;
-          case 'W':
-            days += 7 * n;
-          case 'D':
-            days += n;
-          case 'H':
-            nanos += n * _nanosPerHour;
-          default:
-            nanos += n * _nanosPerMinute;
-        }
-      }
+      // The part a designator adds to (months, days, nanoseconds) and the
+      // number of it in one unit
+      final (part, unit) = switch (c) {
+        'Y' => (0, 12),
+        'M' when !inTime => (0, 1),
+        'W' => (1, 7),
+        'D' => (1, 1),
+        'H' => (2, _nanosPerHour),
+        'M' => (2, _nanosPerMinute),
+        _ => (2, 1),
+      };
+      final n = c == 'S' ? _secondsNanos(number) : _integer(number);
+      if (n == null) return null;
+      // A part past 64 bits: refused, not wrapped around
+      final sum = _addProduct(parts[part], n, unit);
+      if (sum == null) return null;
+      parts[part] = sum;
       start = i + 1;
       content = true;
     }
     if (!content || start != body.length) return null;
-    return negative
-        ? GrafeoDuration(months: -months, days: -days, nanoseconds: -nanos)
-        : GrafeoDuration(months: months, days: days, nanoseconds: nanos);
+    if (negative && parts.contains(_minInt)) return null;
+    final [months, days, nanos] =
+        negative ? [for (final p in parts) -p] : parts;
+    return GrafeoDuration(months: months, days: days, nanoseconds: nanos);
   }
 
   /// The months (a year is 12).
@@ -365,8 +365,8 @@ final class GrafeoDuration {
     final point = text.indexOf('.');
     final whole = _integer(point < 0 ? text : text.substring(0, point));
     if (whole == null) return null;
-    var nanos = whole * _nanosPerSecond;
-    if (point < 0) return nanos;
+    final nanos = _addProduct(0, whole, _nanosPerSecond);
+    if (nanos == null || point < 0) return nanos;
     var fraction = text.substring(point + 1);
     if (fraction.length > 9) fraction = fraction.substring(0, 9);
     final digits = _integer(fraction);
@@ -375,7 +375,22 @@ final class GrafeoDuration {
     for (var i = fraction.length; i < 9; i++) {
       scale *= 10;
     }
-    return nanos + digits * scale;
+    return _checkedAdd(nanos, digits * scale);
+  }
+
+  /// [a] + [b], or null when the sum does not fit 64 bits.
+  static int? _checkedAdd(int a, int b) {
+    final sum = a + b;
+    return (b >= 0) == (sum >= a) ? sum : null;
+  }
+
+  /// [total] + [n] * [unit] for a positive [unit], or null when the product
+  /// or the sum does not fit 64 bits.
+  static int? _addProduct(int total, int n, int unit) {
+    // `~/` truncates toward zero: n * unit fits exactly when n lies between
+    // these bounds
+    if (n > _maxInt ~/ unit || n < _minInt ~/ unit) return null;
+    return _checkedAdd(total, n * unit);
   }
 }
 

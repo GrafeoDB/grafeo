@@ -454,7 +454,8 @@ a node. A row's properties are merged into the node's and the others stay, as
 - a `None` value removes the property;
 - a key that several nodes have updates all of them (the row counts once in `updated`);
 - a row whose key matches no node with every label, or that lacks the key, is skipped and creates nothing;
-- keys compare as `=` compares them, so `2.0` finds the node whose key is `2`;
+- keys compare as `=` compares them, so `2.0` finds the node whose key is `2`, and the string `"2"` does not;
+- a row with only the key counts as updated and changes nothing;
 - with no labels (`[]`), every node counts.
 
 The call is one write, as that query is: all rows or none, logged to the WAL (a persistent database keeps

@@ -753,6 +753,45 @@ impl<'a> Parser<'a> {
         })
     }
 
+    /// A named optional call uses the same null extension as an optional
+    /// inline call. Its empty import scope preserves named calls' constant
+    /// arguments; the enclosing Apply keeps the outer columns itself.
+    /// The wildcard returns the procedure's actual output columns, including
+    /// defaults when no YIELD was given, in their declared order.
+    fn optional_procedure_call(call: CallStatement) -> QueryClause {
+        let span = call.span;
+        QueryClause::InlineCall {
+            subquery: QueryStatement {
+                match_clauses: Vec::new(),
+                where_clause: None,
+                set_clauses: Vec::new(),
+                remove_clauses: Vec::new(),
+                with_clauses: Vec::new(),
+                unwind_clauses: Vec::new(),
+                merge_clauses: Vec::new(),
+                create_clauses: Vec::new(),
+                delete_clauses: Vec::new(),
+                return_clause: ReturnClause {
+                    distinct: false,
+                    items: Vec::new(),
+                    is_wildcard: true,
+                    group_by: Vec::new(),
+                    order_by: None,
+                    skip: None,
+                    limit: None,
+                    is_finish: false,
+                    span: None,
+                },
+                having_clause: None,
+                ordered_clauses: vec![QueryClause::CallProcedure(call)],
+                span,
+            },
+            combined: Vec::new(),
+            optional: true,
+            scope: Some(Vec::new()),
+        }
+    }
+
     /// Parses a YIELD item list: `field [AS alias] { , field [AS alias] }`.
     fn parse_yield_list(&mut self) -> Result<Vec<YieldItem>> {
         let mut items = vec![self.parse_yield_item()?];
@@ -913,7 +952,7 @@ impl<'a> Parser<'a> {
                         } else {
                             // OPTIONAL CALL procedure(...)
                             let call = self.parse_procedure_call(false)?;
-                            ordered_clauses.push(QueryClause::CallProcedure(call));
+                            ordered_clauses.push(Self::optional_procedure_call(call));
                         }
                     } else {
                         let clause = self.parse_match_clause()?;

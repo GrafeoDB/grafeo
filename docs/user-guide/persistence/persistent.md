@@ -131,7 +131,7 @@ Read-only mode uses a shared file lock instead of an exclusive lock, so multiple
 
 ## One Writer at a Time
 
-A persistent database can be open for writing by one `GrafeoDB` instance at a time, in one process. Opening it again, from the same process or another one, fails with `database file is locked by another process` until the first instance calls `close()` or is dropped.
+A persistent database can be open for writing by one `GrafeoDB` instance at a time, in one process. Opening it again, from the same process or another one, fails with `GRAFEO-S004` (GQLSTATUS `08000`, Python `GrafeoLockedError`) until the first instance calls `close()` or is dropped. The message says whether a handle of this process holds the file ("already open in this process") or another process does ("held by another process").
 
 To share a database between processes, run it behind [Grafeo Server](https://github.com/GrafeoDB/grafeo-server), or open it in [read-only mode](#read-only-mode) from the readers.
 
@@ -183,29 +183,34 @@ A database written before 0.6.0 stores no configuration and opens with the defau
 
 ## Snapshots
 
-Save and restore database snapshots for backup or migration:
-
-=== "Python"
-
-    ```python
-    # Export snapshot
-    data = db.snapshot()
-
-    # Import snapshot (atomic, with pre-validation)
-    db.restore_snapshot(data)
-
-    # Save to file
-    db.save("backup.grafeo")
-    ```
+Export a database to snapshot bytes and restore them, for backup or migration:
 
 === "Rust"
 
     ```rust
     // Export
-    let data = db.snapshot()?;
+    let data = db.export_snapshot()?;
 
-    // Restore (validates before applying)
+    // Restore into this database (validates before applying)
     db.restore_snapshot(&data)?;
+
+    // Or open the snapshot as a new in-memory database
+    let copy = GrafeoDB::import_snapshot(&data)?;
+    ```
+
+=== "Python"
+
+    ```python
+    # Python has no snapshot bytes: save a copy to a file, or make an in-memory one
+    db.save("backup.grafeo")
+    memory_db = db.to_memory()
+    ```
+
+=== "WebAssembly"
+
+    ```js
+    const bytes = db.exportSnapshot();
+    const copy = Database.importSnapshot(bytes);
     ```
 
 Snapshots include all nodes, edges, properties, labels, schema definitions, index metadata and named graph data. The current format is v5, which also keeps the whole catalog and temporal version history.

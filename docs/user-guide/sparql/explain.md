@@ -47,6 +47,9 @@ EXPLAIN ANALYZE SELECT ?name WHERE {
 
 The result includes both the plan structure and actual runtime statistics: wall-clock time per operator, rows produced, and total execution time.
 
+`PROFILE SELECT ...` runs the query with profiling, as `EXPLAIN ANALYZE` does. `EXPLAIN`, `EXPLAIN ANALYZE` and
+`PROFILE` can come before the `PREFIX` lines or after them (`PREFIX ex: <...> EXPLAIN SELECT ...`).
+
 ### When to Use EXPLAIN ANALYZE
 
 - Profile slow queries to find the bottleneck operator

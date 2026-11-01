@@ -49,8 +49,8 @@ Categories:
 | `GRAFEO-T001` | TransactionConflict      | **yes**   | Write-write conflict with another transaction. Retry the whole transaction. |
 | `GRAFEO-T002` | TransactionTimeout       | **yes**   | Transaction exceeded its TTL. |
 | `GRAFEO-T003` | TransactionReadOnly      | no        | Attempted a write inside `START TRANSACTION READ ONLY`. |
-| `GRAFEO-T004` | TransactionInvalidState  | no        | `COMMIT` / `ROLLBACK` without an active transaction, or a transaction command outside GQL. |
-| `GRAFEO-T005` | TransactionSerialization | **yes**   | Reserved for Serializable isolation, which is refused for now (`GRAFEO-Q004`): no commit fails with this code until it returns. |
+| `GRAFEO-T004` | TransactionInvalidState  | no        | `COMMIT` / `ROLLBACK` without an active transaction, a transaction command outside GQL, or `START TRANSACTION`, `COMMIT` or `ROLLBACK` run through a transaction object's `execute` (end it with its `commit()` or `rollback()` call). |
+| `GRAFEO-T005` | TransactionSerialization | no        | Reserved for Serializable isolation, which is refused for now (`GRAFEO-Q004`): no commit fails with this code until it returns. |
 | `GRAFEO-T006` | TransactionDeadlock      | **yes**   | Lock manager detected a cycle. Retry. |
 | `GRAFEO-T007` | DatabaseClosed           | no        | A write to a database whose `close()` started (persistent databases), or a checkpoint, backup or save after it. Open it again to write. Python raises `DatabaseClosedError`, a subclass of `GrafeoError`; the C API returns `GRAFEO_ERROR_DATABASE`. |
 | `GRAFEO-T008` | IncompleteCommit         | no        | An earlier commit did not complete, so nothing commits, checkpoints, saves or copies the database (`to_memory()`, snapshots) until it is reopened (reads still work). Python raises `GrafeoError`; the C API returns `GRAFEO_ERROR_DATABASE`. |
@@ -72,7 +72,7 @@ Categories:
 
 | Code          | Name             | Retryable | Meaning                                                    |
 | ------------- | ---------------- | --------- | ---------------------------------------------------------- |
-| `GRAFEO-V001` | InvalidInput     | no        | A value or name a call gives does not fit: wrong vector dimensionality, oversized property, a missing or ill-typed procedure argument, an index, named graph or embedding model that does not exist, an invalid setting, an import line or snapshot that is not valid. |
+| `GRAFEO-V001` | InvalidInput     | no        | A value or name a call gives does not fit: wrong vector dimensionality, oversized property, a missing or ill-typed procedure argument, an index, named graph or embedding model that does not exist, an invalid setting, an import line or snapshot that is not valid, the manifest, cursor or full backup a restore needs that is missing, a write the graph's schema or a constraint refuses (GQLSTATUS `G2000`), and a `DELETE` of a node that still has edges (`G1001`). |
 | `GRAFEO-V002` | NodeNotFound     | no        | `NodeId` does not exist in the current graph (a direct write to it, or an edge to it). |
 | `GRAFEO-V003` | EdgeNotFound     | no        | `EdgeId` does not exist in the current graph (a direct write to it). |
 | `GRAFEO-V004` | PropertyNotFound | no        | Referenced property key is not declared for this label/type. |
@@ -106,10 +106,11 @@ GQLSTATUS says what kind of condition it is, as SQL's SQLSTATE does:
 | `G2000`   | graph type violation           | a write the graph's schema refuses: a property of another type than its node or edge type declares, a missing `NOT NULL` property, a label, edge type or property a closed graph type does not declare, a `UNIQUE`, `NOT NULL` or key constraint |
 | `G1001`   | dependent object error: edges still exist | `DELETE` of a node that still has edges (use `DETACH DELETE`) |
 | `02000`   | no data                        | a node or edge that does not exist               |
-| `25000`   | invalid transaction state      | a write to a closed database, `COMMIT` inside a transaction object (end it with its `commit()` call), a commit or rollback of a transaction that already ended |
+| `25000`   | invalid transaction state      | a write to a closed database, `START TRANSACTION`, `COMMIT` or `ROLLBACK` inside a transaction object (end it with its `commit()` or `rollback()` call), a commit or rollback of a transaction that already ended, a transaction past its timeout |
 | `08000`   | connection exception           | a database file another handle or process holds open (`GRAFEO-S004`) |
 | `25G03`   | read-only transaction          | a write or DDL in a read-only transaction or database |
-| `40000`   | transaction rollback           | a write conflict                                 |
+| `40000`   | transaction rollback           | a write conflict, a deadlock, a commit the write-ahead log could not take (`GRAFEO-T009`, `GRAFEO-T011`) |
+| `40003`   | transaction completion unknown | a commit written to the log but not made durable (`GRAFEO-T010`), and every commit after an earlier one that did not complete (`GRAFEO-T008`) |
 | `42001`   | syntax error                   | `MATCH (n RETURN n`                              |
 | `42002`   | invalid reference              | a name that resolves to nothing: an undefined variable, an unknown function, procedure, parameter, graph or type |
 | `42000`   | syntax error or access rule violation | any other rule a statement breaks beyond the grammar (an aggregate in a `WHERE`, a wrong number of arguments, a pattern `MERGE` cannot take), a feature Grafeo lacks, and a permission the user does not have |
@@ -117,7 +118,8 @@ GQLSTATUS says what kind of condition it is, as SQL's SQLSTATE does:
 `42000` is the code ISO GQL gives a violated syntax or access rule that names no condition of its own; the
 message says which rule it is.
 
-Python has it as `GrafeoError.gql_status`, Node.js and WASM as the `gqlStatus` property of the thrown `Error`, C as
+Python has it as `GrafeoError.gql_status`, Node.js and WASM as the `gqlStatus` property of the thrown `Error` (in
+Node.js next to `errorCode`, the Grafeo code, and `isRetryable`), C as
 `grafeo_last_error_gql_status()` (next to `grafeo_last_error()`), Go as the `GQLStatus` field of `*grafeo.Error`
 (get it with `errors.As`), C# as `GrafeoException.GqlStatus` and Dart as `GrafeoException.gqlStatus`. A
 float operation keeps its IEEE result (`toFloat(1) / 0` is `Infinity`, `1.5e0 % 0` is NaN), and SPARQL leaves a variable unbound

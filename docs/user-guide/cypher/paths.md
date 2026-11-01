@@ -65,6 +65,10 @@ RETURN path
 
 The path must fit the relationship's length: `[*]` is one or more hops, `[*..3]` at most three, `[*0..]` also pairs a node with itself (length 0), and a relationship without `*` is a single hop. A pair of nodes without such a path has no row; use `OPTIONAL MATCH` to keep it with a null path.
 
+A shortest path from a node to itself (`shortestPath((a)-[:KNOWS*]-(a))`) has no row, or a null path under
+`OPTIONAL MATCH`: a path may not use a relationship twice, so going out and back over one does not count. With `*0..`
+it is the path of length 0.
+
 ## Path Filtering
 
 ```cypher

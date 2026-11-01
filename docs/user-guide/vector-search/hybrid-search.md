@@ -21,7 +21,7 @@ Hybrid search combines BM25 text relevance with HNSW vector similarity, then fus
 
 ## Prerequisites
 
-Hybrid search requires the `hybrid-search` feature flag, which is included in the `embedded`, `server`, and `full` profiles. It also depends on `text-index` and `vector-index`.
+Hybrid search requires the `hybrid-search` feature flag, which the `ai` and `analytics` profiles and the default features include. It also depends on `text-index` and `vector-index`. The Python, Node.js and C packages have it.
 
 ## Setup
 

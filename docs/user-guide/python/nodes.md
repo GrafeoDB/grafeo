@@ -43,7 +43,15 @@ db.add_node_label(node.id, "Employee")
 # Get labels
 labels = db.get_node_labels(node.id)
 print(labels)  # ['Person', 'Employee']
+
+# Read properties: native Python values (int, str, datetime.date, ...)
+node = db.get_node(node.id)
+print(node["name"])          # 'Alix'
+print(node.get("age"))       # 30
+print(node.get("missing"))   # None
 ```
+
+Edges read the same way: `edge["since"]` and `edge.get("since")`.
 
 ## Reading Nodes
 

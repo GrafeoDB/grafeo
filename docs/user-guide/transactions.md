@@ -41,7 +41,7 @@ tx = db.begin_transaction(isolation_level="read_committed")
 ```rust
 use grafeo::IsolationLevel;
 
-let tx = session.begin_transaction_with_isolation(IsolationLevel::ReadCommitted)?;
+session.begin_transaction_with_isolation(IsolationLevel::ReadCommitted)?;
 ```
 
 ## Read-Only Transactions

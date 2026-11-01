@@ -354,7 +354,7 @@ tx.Commit(); // if this line is not reached, the transaction auto-rolls back
 | `ExecuteWithParams(string query, Dictionary<string, object?> parameters)` | `QueryResult` | Execute GQL with params within the transaction |
 | `ExecuteWithParamsAsync(string query, Dictionary<string, object?> parameters, CancellationToken ct = default)` | `Task<QueryResult>` | Execute GQL with params on the thread pool |
 | `Commit()` | `void` | Commit the transaction, making all changes permanent |
-| `Rollback()` | `void` | Roll back the transaction, discarding all changes |
+| `Rollback()` | `void` | Roll back the transaction, discarding all changes. Throws `TransactionException` after a commit that succeeded; does nothing after one that failed, which ended the transaction |
 | `Dispose()` | `void` | Dispose the handle; auto-rolls back if not committed |
 | `DisposeAsync()` | `ValueTask` | Async disposal (calls `Dispose` synchronously) |
 

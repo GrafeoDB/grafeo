@@ -28,6 +28,13 @@ const db = GrafeoDB.openReadOnly('./my-graph');
 
 `GrafeoDB.create()` is synchronous and returns immediately. All factory methods throw on failure.
 
+A query may run for 30 seconds by default; past its timeout it fails with `GRAFEO-Q003`, which can be retried. Set
+the database's timeout in milliseconds with `queryTimeout`, or `null` (or `Infinity`) for no limit:
+
+```typescript
+const db = GrafeoDB.create('./my-graph', { queryTimeout: 5000 });
+```
+
 ## Closing
 
 Always close the database when done to flush pending writes:

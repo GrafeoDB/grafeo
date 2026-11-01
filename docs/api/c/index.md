@@ -223,7 +223,11 @@ The `grafeo_result_nodes_json` and `grafeo_result_edges_json` functions return d
 
 Values JSON has no literal for travel as tagged objects, the tag as the object's only key, in results and in params
 and properties JSON alike: `{"$timestamp_us": 1700000000000000}`, `{"$date": "2024-01-15"}`, `{"$time": ...}`,
-`{"$duration": ...}`, `{"$zoned_datetime": ...}`, `{"$decimal": "1.50"}`, and an RDF term as `{"$term": {...}}`.
+`{"$duration": ...}`, `{"$zoned_datetime": ...}`, `{"$decimal": "1.50"}`, bytes as `{"$bytes": "AQID/w=="}` (standard
+base64 with padding), and an RDF term as `{"$term": {...}}`. JSON has no NaN or infinities either, so they travel as
+`{"$float": "NaN"}`, `{"$float": "Infinity"}` and `{"$float": "-Infinity"}`; the strings `"NaN"` and `"Infinity"` stay
+strings. `{"$float": 3}` in params makes a float of a number the sender's JSON writes as an integer. The Go, C# and
+Dart wrappers turn these tags into native byte arrays and floats.
 
 A SPARQL result's JSON holds each IRI, blank node and literal in the `$term` tag, around the term form of the SPARQL
 1.1 Query Results JSON format: `{"$term": {"type": "uri", "value": "http://ex.org/apple"}}`, `{"$term": {"type":
@@ -367,6 +371,9 @@ GrafeoStatus grafeo_commit(GrafeoTransaction* tx);
 GrafeoStatus grafeo_rollback(GrafeoTransaction* tx);
 void         grafeo_free_transaction(GrafeoTransaction* tx);
 ```
+
+A commit that fails ends the transaction: `grafeo_rollback` after it does nothing and returns `GRAFEO_OK`, and another
+`grafeo_commit` fails. After a commit that succeeded, `grafeo_rollback` returns `GRAFEO_ERROR_TRANSACTION`.
 
 ### Transaction Example
 

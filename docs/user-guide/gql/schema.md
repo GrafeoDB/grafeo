@@ -278,6 +278,13 @@ DROP INDEX index_name
 DROP INDEX IF EXISTS index_name
 ```
 
+A name stands for one index in its graph. `CREATE INDEX` with a name that already stands for another label, property
+or kind of index fails naming it, and `IF NOT EXISTS` (also on `CREATE VECTOR INDEX`) keeps the existing index.
+`DROP INDEX` drops the index the name stands for, whatever its kind, and every property of an index over several.
+`SHOW INDEXES` lists each index by name, with its type, label and property (one row per property), also the indexes
+made through the API (`create_property_index`, `create_vector_index`, `create_text_index`): those have a null name,
+and a property index made that way covers every label, so its label is null too.
+
 When the pattern follows an earlier clause (`UNWIND`, another `MATCH`), an index lookup can miss values that `=` treats as equal without one: a number stored as a string in another spelling (`'42.0'` or `'042'` for `42`), and floats that differ only in the last digit (`0.1 + 0.2` for `0.3`). This holds whether the key comes from the rows, is written in the query or is passed as a parameter. On properties that mix strings and numbers, or that hold computed floats, such a query can return fewer rows once an index exists. Keep a property's values of one type to get the same rows either way.
 
 ### Text Indexes

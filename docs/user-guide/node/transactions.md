@@ -99,4 +99,23 @@ Errors from the Grafeo engine are thrown as standard JavaScript `Error` objects.
 
 - `"Query error: ..."` for syntax or execution errors
 - `"Transaction error: ..."` for conflicts or state errors
+- `"Database closed: ..."` for a write after `close()`
 - `"Database error: ..."` for storage or configuration errors
+
+An error from the database also carries `errorCode` (the Grafeo code, such as `GRAFEO-T001` for a write conflict),
+`gqlStatus` (its ISO GQL status, such as `40000`) and `isRetryable`, whether running the transaction again can
+succeed (see [Error Codes](../error-codes.md)):
+
+```typescript
+try {
+  tx.commit();
+} catch (err) {
+  if (err.isRetryable) {
+    // run the whole transaction again
+  }
+}
+```
+
+A commit that fails ends the transaction: `isActive` is `false` afterwards, `rollback()` does nothing and another
+`commit()` throws. `START TRANSACTION`, `COMMIT` and `ROLLBACK` through `tx.execute` throw with `GRAFEO-T004`: end the
+transaction with `commit()` or `rollback()`.

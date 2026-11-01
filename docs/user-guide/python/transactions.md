@@ -115,6 +115,27 @@ result = tx1.execute("MATCH (p:Person) RETURN count(p)")
 tx1.commit()
 ```
 
+## Failed Commits and Retries
+
+A commit that fails ends the transaction: `tx.is_active` is `False` afterwards, `rollback()` does nothing and
+another `commit()` raises. A write conflict with another transaction (`GRAFEO-T001`) can be retried: run the whole
+transaction again when the error's `is_retryable` is set.
+
+```python
+for attempt in range(3):
+    try:
+        with db.begin_transaction() as tx:
+            tx.execute("MATCH (p:Person {name: 'Alix'}) SET p.visits = coalesce(p.visits, 0) + 1")
+        break
+    except grafeo.GrafeoError as e:
+        if not e.is_retryable or attempt == 2:
+            raise
+```
+
+End a transaction with `commit()` or `rollback()`: `tx.execute("COMMIT")`, and `ROLLBACK` or `START TRANSACTION`
+through `tx.execute`, raise `GrafeoError` (`GRAFEO-T004`), as they would end or nest the transaction behind the
+object's back.
+
 ## Threads
 
 A transaction is used from one thread at a time. Its queries, `commit()` and

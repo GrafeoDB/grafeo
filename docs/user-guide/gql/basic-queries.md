@@ -46,6 +46,13 @@ MATCH (p:Person)
 RETURN p.name AS name, p.age AS age
 ```
 
+A name (an alias, a variable, a `LET` or `FOR` variable) can be any of ISO GQL's non-reserved words, such as `type`,
+`graph` or `trail`, and a quoted name holds any text: `RETURN 1 AS "two words"` or `` RETURN 1 AS `two words` ``. A
+reserved word as a name (`RETURN 1 AS match`) fails with a message that names the word and says to quote it.
+
+`//` starts a comment that runs to the end of the line, and so does `--` followed by a space; `/* ... */` is a block
+comment. Inside a string, they are text.
+
 ## Combining MATCH and RETURN
 
 ```sql
@@ -258,6 +265,9 @@ LET age_group = CASE WHEN p.age < 30 THEN 'young' ELSE 'senior' END,
     display = toUpper(p.name)
 RETURN display, age_group
 ```
+
+The definitions of one `LET` are read in order, so a later one reads the earlier ones: in `LET a = 1, b = a + 1`,
+`b` is 2.
 
 ## Calling Procedures
 

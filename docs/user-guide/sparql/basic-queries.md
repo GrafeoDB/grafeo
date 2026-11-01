@@ -116,6 +116,9 @@ WHERE {
 ORDER BY DESC(?age) ?name
 ```
 
+A sort key can also be an expression or a function call, such as `ORDER BY STR(?name)` or
+`ORDER BY xsd:double(?price)`.
+
 ## Limiting Results
 
 ```sparql

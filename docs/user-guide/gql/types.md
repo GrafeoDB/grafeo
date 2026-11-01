@@ -168,6 +168,10 @@ RETURN p.name
 MATCH (i:Item)
 WHERE i.price IS TYPED DECIMAL
 RETURN i.name
+
+-- Lists, by the type of their elements (LIST<EDGE> for edges)
+MATCH (p:Person)
+RETURN collect(p) IS TYPED LIST<NODE>   -- true
 ```
 
 ### CAST

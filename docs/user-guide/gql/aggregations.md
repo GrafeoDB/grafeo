@@ -75,6 +75,10 @@ MATCH (p:Person)
 RETURN collect(p.name)[0..5]
 ```
 
+An aggregate can sit inside another expression, as in `collect(p.name)[0]`, `{names: collect(p.name)}` or
+`head(collect(p)).name`, also in a `LET ... IN ... END` expression: the aggregate runs over the group and the
+expression reads its result.
+
 ## Grouping
 
 ```sql
@@ -95,6 +99,9 @@ RETURN
     sum(o.total) AS total_revenue,
     avg(o.total) AS avg_order_value
 ```
+
+Without an `ORDER BY`, the groups come in the order of their first rows, the same on every run. Add `ORDER BY` for
+any other order.
 
 ## WITH Clause
 

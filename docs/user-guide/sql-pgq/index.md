@@ -58,6 +58,27 @@ MATCH (a:Person)-[:KNOWS]->{1,3}(b:Person)
 `-[:KNOWS*1..3]->` here, as its GQL does: an extension of Grafeo's, not part
 of SQL/PGQ or GQL.
 
+The `MATCH` takes every GQL pattern, as ISO/IEC 9075-16 defines it:
+
+```sql
+-- Label expressions
+MATCH (m:Post|Comment)
+MATCH (m:Message&!Post)
+
+-- A node or edge pattern's own WHERE
+MATCH (p:Person WHERE p.age > 30)-[e:KNOWS WHERE e.since > 2020]->(f)
+
+-- Quantifiers after an edge: ->*, -+, {2}, {1,3}, {,2} (0 to 2), {2,}
+MATCH (a:Person)-[:KNOWS]->+(b:Person)
+
+-- Path search prefixes, path modes and path variables
+MATCH p = ANY SHORTEST (a:Person)-[:KNOWS]->+(b:Person)
+MATCH TRAIL (a:Person)-[:KNOWS]->{1,3}(b:Person)
+```
+
+A path variable gives `PATH_LENGTH(p)` (or `LENGTH(p)`), `NODES(p)` and `EDGES(p)` in `COLUMNS`. A shortest path
+over more than one edge pattern is not supported yet.
+
 ### COLUMNS Clause
 
 Map graph properties to SQL columns:
@@ -111,6 +132,22 @@ FROM GRAPH_TABLE (
 ) result
 WHERE result.fof_name <> 'Alix';
 ```
+
+### Ordering and paging
+
+```sql
+SELECT r.age + 1 AS older, r.name
+FROM GRAPH_TABLE (
+    MATCH (p:Person)
+    COLUMNS (p.name AS name, p.age AS age)
+) r
+ORDER BY older
+LIMIT $n OFFSET $from;
+```
+
+`ORDER BY` can name an alias of the outer `SELECT`, which wins over a `COLUMNS` column of the same name. `LIMIT` and
+`OFFSET` take a parameter, and a parameter may be named after a keyword (`$from`, `$order`). A negative, fractional
+or text count fails with an error that names `LIMIT` or `OFFSET`.
 
 ### Path functions
 

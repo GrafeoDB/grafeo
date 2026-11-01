@@ -49,7 +49,7 @@ print(db.cdc_enabled)  # True / False
 ### Node.js / TypeScript
 
 ```typescript
-import { GrafeoDB } from '@grafeo-db/node';
+import { GrafeoDB } from '@grafeo-db/js';
 
 const db = GrafeoDB.create();
 db.enableCdc();

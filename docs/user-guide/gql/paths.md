@@ -13,7 +13,7 @@ GQL supports variable-length paths for traversing the graph.
 ## Variable-Length Patterns
 
 ```sql
--- Any number of hops
+-- One or more hops
 MATCH (a:Person)-[:KNOWS*]->(b:Person)
 RETURN a.name, b.name
 
@@ -25,7 +25,7 @@ RETURN a.name, b.name
 MATCH (a:Person)-[:KNOWS*1..3]->(b:Person)
 RETURN a.name, b.name
 
--- Up to 5 hops
+-- 1 to 5 hops
 MATCH (a:Person)-[:KNOWS*..5]->(b:Person)
 RETURN a.name, b.name
 

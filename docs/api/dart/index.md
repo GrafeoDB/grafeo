@@ -840,7 +840,8 @@ void commit()
 
 ### rollback()
 
-Roll back the transaction, discarding all changes.
+Roll back the transaction, discarding all changes. After a commit that failed it does nothing: that commit ended
+the transaction, and another `commit()` throws.
 
 ```dart
 void rollback()

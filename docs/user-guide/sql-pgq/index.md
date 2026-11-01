@@ -55,7 +55,8 @@ MATCH (a:Person)-[:KNOWS]->{1,3}(b:Person)
 ```
 
 `{m,n}` is the standard quantifier. Grafeo also accepts the Cypher-style
-`-[:KNOWS*1..3]->` here, as GQL does, as an extension.
+`-[:KNOWS*1..3]->` here, as its GQL does: an extension of Grafeo's, not part
+of SQL/PGQ or GQL.
 
 ### COLUMNS Clause
 

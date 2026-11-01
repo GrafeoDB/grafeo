@@ -8,7 +8,7 @@ Correctness and speed release. Backups and restores survive a crash, stored proc
 
 ### Changed
 
-Queries and calls that ran in 0.6.0 and now fail or return another type (each fix is under Fixed):
+Queries and calls that ran in 0.6.0 and now fail or return another type (each fix is under Fixed). Results that change because a wrong answer was fixed are under Fixed only; every one in the differential test corpus is listed, with its reason, in `scripts/difftest/reviewed/0.6.1.txt`.
 
 - **Casts**: `CAST` of text that is no number fails with `22018`, to a `DECIMAL(p, s)` that is too small with `22003`, and a float outside the integer range, an infinity or NaN to an integer with `22003`; they gave null, the largest integer or 0. `toInteger` and `toFloat` of text that is no number still give null.
 - **GQL patterns**: a quantified pattern of more than one edge without an upper bound or over 16 repetitions fails, an unbounded walk around a cycle fails at the path budget instead of stopping at 100 hops, and `{3,1}`, `*3..1` or a quantifier both inside and after an edge's brackets is a syntax error.

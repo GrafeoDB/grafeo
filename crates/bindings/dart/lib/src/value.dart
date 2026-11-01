@@ -1,12 +1,15 @@
 /// Bidirectional conversion between Dart types and Grafeo's JSON wire format.
 ///
-/// Follows the `grafeo-bindings-common` markers: `$timestamp_us`, `$date`,
-/// `$time`, `$duration`, `$decimal` ([GrafeoDecimal]) and `$term` ([RdfTerm]).
+/// Follows the `grafeo-bindings-common` markers: `$timestamp_us` (a UTC
+/// [DateTime]), `$zoned_datetime` ([GrafeoZonedDateTime]), `$date`
+/// ([GrafeoDate]), `$time` ([GrafeoTime]), `$duration` ([GrafeoDuration]),
+/// `$decimal` ([GrafeoDecimal]) and `$term` ([RdfTerm]).
 library;
 
 import 'dart:convert';
 import 'dart:typed_data';
 
+import 'temporal.dart';
 import 'types.dart';
 
 // =============================================================================
@@ -79,7 +82,11 @@ dynamic _encodeValue(dynamic value) {
     GrafeoDecimal d => {r'$decimal': d.text},
     RdfTerm t => t.toJson(),
     DateTime dt => {r'$timestamp_us': dt.toUtc().microsecondsSinceEpoch},
-    Duration dur => {r'$duration': _formatIsoDuration(dur)},
+    GrafeoZonedDateTime z => {r'$zoned_datetime': z.text},
+    GrafeoDate d => {r'$date': d.text},
+    GrafeoTime t => {r'$time': t.text},
+    GrafeoDuration d => {r'$duration': d.text},
+    Duration dur => {r'$duration': GrafeoDuration.fromDuration(dur).text},
     Float32List vec => vec.toList(),
     Float64List vec => vec.toList(),
     Uint8List bytes => {r'$bytes': base64Encode(bytes)},
@@ -89,17 +96,6 @@ dynamic _encodeValue(dynamic value) {
       },
     _ => value.toString(),
   };
-}
-
-String _formatIsoDuration(Duration d) {
-  final hours = d.inHours;
-  final minutes = d.inMinutes.remainder(60);
-  final seconds = d.inSeconds.remainder(60);
-  final buf = StringBuffer('PT');
-  if (hours > 0) buf.write('${hours}H');
-  if (minutes > 0) buf.write('${minutes}M');
-  if (seconds > 0 || (hours == 0 && minutes == 0)) buf.write('${seconds}S');
-  return buf.toString();
 }
 
 // =============================================================================
@@ -235,22 +231,25 @@ dynamic _decodeMap(Map m) {
     return GrafeoDecimal(m[r'$decimal'] as String);
   }
   // Temporal tags from grafeo-bindings-common, each as the map's only key and
-  // with a value of its type: a map with another key, or a value of another
-  // type, stays a map. The text of a date, time, duration or zoned datetime
-  // is returned as it is, unchecked
+  // with a value of its type: a map with another key, a value of another
+  // type, or a text that is no value of the type, stays a map
   if (m.length == 1) {
     final us = m[r'$timestamp_us'];
     if (us is int) {
       return DateTime.fromMicrosecondsSinceEpoch(us, isUtc: true);
     }
-    for (final tag in [r'$date', r'$time', r'$zoned_datetime']) {
-      final text = m[tag];
-      if (text is String) return text;
+    final MapEntry(:key, :value) = m.entries.single;
+    if (value is String) {
+      final temporal = switch (key) {
+        r'$zoned_datetime' => GrafeoZonedDateTime.tryParse(value),
+        r'$date' => GrafeoDate.tryParse(value),
+        r'$time' => GrafeoTime.tryParse(value),
+        // A Dart Duration cannot hold months, and P1D is not PT24H
+        r'$duration' => GrafeoDuration.tryParse(value),
+        _ => null,
+      };
+      if (temporal != null) return temporal;
     }
-    // A duration stays its ISO text: Dart's Duration cannot hold calendar
-    // components (years, months, days), only time-based durations
-    final duration = m[r'$duration'];
-    if (duration is String) return duration;
   }
 
   // Regular map

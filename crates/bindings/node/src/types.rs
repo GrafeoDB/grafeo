@@ -10,6 +10,7 @@
 //! | `Object`         | `Map`         | Keys must be strings           |
 //! | `Buffer`         | `Bytes`       |                                |
 //! | `Date`           | `Timestamp`   | Millisecond precision          |
+//! | `{ $date }`, `{ $time }`, `{ $duration }`, `{ $zoned_datetime }` | `Date`, `Time`, `Duration`, `ZonedDatetime` | The ISO text as the tag's only key, both ways |
 //! | `BigInt`         | `Int64/Decimal` | Past 64 bits an exact `Decimal`, past 38 digits an error |
 //! | `Float32Array`   | `Vector`      |                                |
 //! | `Float64Array`   | `Vector`      | Each element the nearest 32-bit float |
@@ -593,30 +594,19 @@ pub fn value_to_napi(env: sys::napi_env, value: &Value) -> Result<sys::napi_valu
             <Buffer as ToNapiValue>::to_napi_value(env, Buffer::from(bytes.to_vec()))
         },
         Value::Timestamp(ts) => {
-            let ms = ts.as_micros() as f64 / 1000.0;
+            // A Date holds milliseconds: the one at or before the instant,
+            // also before 1970 (a Date rounds a fraction toward zero)
+            let ms = ts.as_micros().div_euclid(1000) as f64;
             let env_wrapper = Env::from_raw(env);
             Ok(env_wrapper.create_date(ms)?.raw())
         }
-        Value::Date(d) => {
-            let s = d.to_string();
-            // SAFETY: env is a valid napi_env passed by the caller
-            unsafe { <&str as ToNapiValue>::to_napi_value(env, &s) }
-        }
-        Value::Time(t) => {
-            let s = t.to_string();
-            // SAFETY: env is a valid napi_env passed by the caller
-            unsafe { <&str as ToNapiValue>::to_napi_value(env, &s) }
-        }
-        Value::Duration(d) => {
-            let s = d.to_string();
-            // SAFETY: env is a valid napi_env passed by the caller
-            unsafe { <&str as ToNapiValue>::to_napi_value(env, &s) }
-        }
-        Value::ZonedDatetime(zdt) => {
-            let s = zdt.to_string();
-            // SAFETY: env is a valid napi_env passed by the caller
-            unsafe { <&str as ToNapiValue>::to_napi_value(env, &s) }
-        }
+        // A type JavaScript has no value for comes back as the tag it goes
+        // in as, `{ $time: "12:30:00+02:00" }`, as a decimal does: passed
+        // back, it is the same type again.
+        Value::Date(d) => string_object(env, &[("$date", &d.to_string())]),
+        Value::Time(t) => string_object(env, &[("$time", &t.to_string())]),
+        Value::Duration(d) => string_object(env, &[("$duration", &d.to_string())]),
+        Value::ZonedDatetime(zdt) => string_object(env, &[("$zoned_datetime", &zdt.to_string())]),
         // SAFETY: env is a valid napi_env passed by the caller
         Value::Vector(v) => unsafe {
             <Float32Array as ToNapiValue>::to_napi_value(env, Float32Array::new(v.to_vec()))

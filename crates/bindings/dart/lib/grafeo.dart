@@ -26,6 +26,7 @@ export 'src/database.dart';
 export 'src/error.dart';
 export 'src/graph.dart';
 export 'src/stream.dart';
+export 'src/temporal.dart';
 export 'src/time_travel.dart';
 export 'src/transaction.dart';
 export 'src/types.dart';

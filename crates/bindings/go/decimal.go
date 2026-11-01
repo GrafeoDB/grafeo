@@ -67,8 +67,9 @@ func decodeFields(fields map[string]any) map[string]any {
 // decodeTags turns every {"$decimal": "..."} map (the tag as its only key)
 // inside value into a Decimal, every {"$bytes": "..."} map into its
 // []byte, every {"$float": "NaN"} (or "Infinity",
-// "-Infinity") map into that float64, and every {"$term": {...}} map into an
-// RdfTerm, through lists and maps.
+// "-Infinity") map into that float64, every {"$term": {...}} map into an
+// RdfTerm, and every temporal tag into its value (see temporalOf): a
+// time.Time, Date, Time or Duration, through lists and maps.
 func decodeTags(value any) any {
 	switch v := value.(type) {
 	case map[string]any:
@@ -97,6 +98,9 @@ func decodeTags(value any) any {
 		}
 		if term, ok := rdfTermOf(v); ok {
 			return term
+		}
+		if temporal, ok := temporalOf(v); ok {
+			return temporal
 		}
 		for key, item := range v {
 			v[key] = decodeTags(item)

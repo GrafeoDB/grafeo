@@ -115,16 +115,9 @@ List<Map<String, dynamic>> parseRows(String json) {
   if (decoded is! List) return [];
   return decoded.map<Map<String, dynamic>>((row) {
     if (row is! Map) return <String, dynamic>{};
-    // First, check if the row itself is a temporal marker map.
-    // _decodeMap returns a scalar (Duration, DateTime, etc.) for markers.
-    final asDecoded = _decodeMap(row);
-    if (asDecoded is! Map) {
-      // Wrap the decoded scalar so the row stays Map<String, dynamic>.
-      return <String, dynamic>{row.keys.first.toString(): asDecoded};
-    }
-    return asDecoded.map<String, dynamic>(
-      (key, value) => MapEntry(key.toString(), value),
-    );
+    // A row is a map of columns, never a tagged value: a one-column row
+    // named `$bytes` or `$date` stays a row, and each value is decoded
+    return decodeObject(row);
   }).toList();
 }
 
@@ -241,26 +234,22 @@ dynamic _decodeMap(Map m) {
   if (m.length == 1 && m[r'$decimal'] is String) {
     return GrafeoDecimal(m[r'$decimal'] as String);
   }
-  // Check for temporal markers from grafeo-bindings-common
-  if (m.containsKey(r'$timestamp_us')) {
+  // Temporal tags from grafeo-bindings-common, each as the map's only key and
+  // with a value of its type, as the engine reads them: a map with another
+  // key, or a value of another type, stays a map
+  if (m.length == 1) {
     final us = m[r'$timestamp_us'];
     if (us is int) {
       return DateTime.fromMicrosecondsSinceEpoch(us, isUtc: true);
     }
-  }
-  if (m.containsKey(r'$date')) {
-    return m[r'$date'] as String? ?? '';
-  }
-  if (m.containsKey(r'$time')) {
-    return m[r'$time'] as String? ?? '';
-  }
-  if (m.containsKey(r'$duration')) {
-    // Return the ISO string directly. Dart's Duration type cannot represent
-    // calendar components (years, months, days), only time-based durations.
-    return m[r'$duration'] as String? ?? 'PT0S';
-  }
-  if (m.containsKey(r'$zoned_datetime')) {
-    return m[r'$zoned_datetime'] as String? ?? '';
+    for (final tag in [r'$date', r'$time', r'$zoned_datetime']) {
+      final text = m[tag];
+      if (text is String) return text;
+    }
+    // A duration stays its ISO text: Dart's Duration cannot hold calendar
+    // components (years, months, days), only time-based durations
+    final duration = m[r'$duration'];
+    if (duration is String) return duration;
   }
 
   // Regular map

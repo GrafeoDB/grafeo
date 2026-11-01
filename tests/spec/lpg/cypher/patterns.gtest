@@ -194,6 +194,15 @@ tests:
       rows:
         - [3]
 
+  # openCypher: a lower bound above the upper bound is an empty range, which
+  # matches no path (TCK Match5, "empty interval")
+  - name: variable_length_empty_range_matches_nothing
+    setup:
+      - "CREATE (:N {v: 1})-[:NEXT]->(:N {v: 2})-[:NEXT]->(:N {v: 3})-[:NEXT]->(:N {v: 4})"
+    query: "MATCH (a:N {v: 1})-[:NEXT*3..1]->(b) RETURN b.v"
+    expect:
+      empty: true
+
   # ---------------------------------------------------------------------------
   # Named Paths
   # ---------------------------------------------------------------------------

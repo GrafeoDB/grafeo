@@ -1460,7 +1460,9 @@ for case_id, query, languages in [
 #     or an undefined variable); a SIMPLE path ends once back at its start (BI6; it went
 #     on); `length` reads a path a WITH passed on or an UNWIND gave, and a string (BI7 to
 #     BI9; an undefined `_path_length_` column), and an unaliased `length(p)` is named so
-#     (BI10; it was `_path_length_p`)
+#     (BI10; it was `_path_length_p`); a range whose upper bound is below its lower bound
+#     is a syntax error in GQL, as `{3,1}` is (BI11), and matches nothing in Cypher, as
+#     openCypher defines it (BI12; 0.6.0 read `*3..1` as `*3` in both)
 for case_id, query, languages in [
     ("BI1", "MATCH (a:Person)-[e:KNOWS WHERE e.w > 1]->{1,3}(b) RETURN a.name AS a, b.name AS b, [x IN e | x.w] AS ws", GQL),
     ("BI2", "UNWIND [1, 3] AS lim MATCH (a:Person {name: 'Alix'})-[e:KNOWS WHERE e.w > lim]->{1,3}(b) RETURN lim, b.name AS b, [x IN e | x.w] AS ws", GQL),
@@ -1472,6 +1474,8 @@ for case_id, query, languages in [
     ("BI8", "MATCH p = (a:Person {name: 'Alix'})-[:KNOWS*1..2]->(b) WITH collect(p) AS ps UNWIND ps AS u RETURN length(u) AS len, [n IN nodes(u) | n.name] AS names", BOTH),
     ("BI9", "UNWIND ['Amsterdam', 'Paris'] AS s RETURN s, length(s) AS len", BOTH),
     ("BI10", "MATCH p = (a:Person {name: 'Jules'})-[:KNOWS]->(b) RETURN length(p)", BOTH),
+    ("BI11", "MATCH (a:Person {name: 'Vincent'})-[:KNOWS*3..1]->(b) RETURN b.name AS b", GQL),
+    ("BI12", "MATCH (a:Person {name: 'Vincent'})-[:KNOWS*3..1]->(b) RETURN b.name AS b", CYPHER),
 ]:
     case(case_id, query, languages)
 # BJ: Cypher binds a relationship once per MATCH (openCypher 9, relationship uniqueness),

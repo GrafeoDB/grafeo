@@ -832,3 +832,73 @@ fn a_bound_parallel_edge_is_the_edge_of_the_shortest_path() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// A variable-length relationship whose upper bound is below its lower bound
+// ---------------------------------------------------------------------------
+
+/// In GQL `*3..1` is a syntax error, as `{3,1}` is (ISO/IEC 39075:2024
+/// 16.11); it used to match exactly three hops.
+#[test]
+fn a_reversed_range_is_a_syntax_error_in_gql() {
+    let db = people();
+    for quantifier in ["*3..1", "*2..1", "*..0"] {
+        let query = format!("MATCH (a:Person)-[:KNOWS{quantifier}]->(b) RETURN b.name");
+        let error = db.execute(&query).unwrap_err().to_string();
+        assert!(
+            error.contains("upper bound is below its lower bound"),
+            "{query}: {error}"
+        );
+    }
+}
+
+/// In Cypher `*3..1` is an empty range, which openCypher matches no path
+/// with (TCK Match5, "empty interval"): no rows, for an optional match a
+/// row of nulls, and a pattern predicate is false. It used to match exactly
+/// three hops (Alix to Mia).
+#[cfg(feature = "cypher")]
+#[test]
+fn a_reversed_range_matches_nothing_in_cypher() {
+    let db = people();
+    for quantifier in ["*3..1", "*2..1", "*..0", "*1..0"] {
+        assert_cypher(
+            &db,
+            &format!("MATCH (a:Person)-[:KNOWS{quantifier}]->(b) RETURN a.name, b.name"),
+            &[],
+        );
+        assert_cypher(
+            &db,
+            &format!(
+                "MATCH (a:Person {{name: 'Alix'}}) OPTIONAL MATCH (a)-[r:KNOWS{quantifier}]->(b) \
+                 RETURN a.name, b.name"
+            ),
+            &[&["Alix", "null"]],
+        );
+        assert_cypher(
+            &db,
+            &format!(
+                "MATCH (a:Person {{name: 'Alix'}}) \
+                 RETURN a.name, exists((a)-[:KNOWS{quantifier}]->())"
+            ),
+            &[&["Alix", "false"]],
+        );
+        assert_cypher(
+            &db,
+            &format!(
+                "MATCH p = (a:Person {{name: 'Alix'}})-[:KNOWS{quantifier}]->(b) RETURN length(p)"
+            ),
+            &[],
+        );
+    }
+    // The bounds of a range that is not empty still hold.
+    assert_cypher(
+        &db,
+        "MATCH (a:Person {name: 'Alix'})-[:KNOWS*1..1]->(b) RETURN b.name",
+        &[&["Gus"], &["Vincent"]],
+    );
+    assert_cypher(
+        &db,
+        "MATCH (a:Person {name: 'Alix'})-[:KNOWS*3]->(b) RETURN b.name",
+        &[&["Mia"]],
+    );
+}

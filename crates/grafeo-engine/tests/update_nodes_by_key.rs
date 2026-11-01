@@ -9,8 +9,9 @@
 //! - the properties merge: the others stay;
 //! - one write: a row that breaks a UNIQUE constraint writes nothing;
 //! - in a session's transaction, a rollback undoes it;
-//! - the text "1" matches the integer 1, as `=` does today (the 0.6.1
-//!   string-against-number decision changes this; update the test then);
+//! - a key compares as `=` does: the text "5", "05" or "+5" matches the
+//!   integer 5, the text "5.0" or "5e0" does not, as `MATCH (n {id: $k})`
+//!   finds them;
 //! - a null value removes the property, as `SET n += r` does;
 //! - it gives the nodes `UNWIND $rows AS r MATCH ... SET n += r` gives, with
 //!   a few rows (which look their nodes up through an index on the key) and
@@ -178,21 +179,79 @@ fn a_rollback_undoes_it() {
     assert_eq!(tiers(&db)["m4"], 0);
 }
 
-/// Today the text "1" matches the integer 1, as `=` does. The 0.6.1
-/// decision on comparing text with numbers changes this: update the test
-/// with that change.
-#[test]
-fn text_one_matches_integer_one_until_the_comparison_change() {
-    let db = database(false);
+/// Whether `update_nodes` updates the node with `id: stored` for a row with
+/// key `key`, and whether `MATCH (n:Key {id: $k})` matches it, with a
+/// property index on `id` or without. Five other nodes make a single row
+/// look its node up through the index (see `rows_beat_a_seek`).
+fn updates_and_matches(stored: &Value, key: &Value, index: bool) -> (bool, bool) {
+    let db = GrafeoDB::new_in_memory();
+    if index {
+        db.create_property_index("id").unwrap();
+    }
+    db.execute_with_params(
+        "INSERT (:Key {id: $id, tier: 0})",
+        HashMap::from([("id".to_string(), stored.clone())]),
+    )
+    .unwrap();
+    db.execute("UNWIND range(100, 104) AS i INSERT (:Key {id: i, tier: 0})")
+        .unwrap();
+    let matches = db
+        .execute_with_params(
+            "MATCH (n:Key {id: $k}) RETURN count(n)",
+            HashMap::from([("k".to_string(), key.clone())]),
+        )
+        .unwrap()
+        .scalar::<i64>()
+        .unwrap();
     let summary = db
         .update_nodes(
-            &["Graph", "Method"],
+            &["Key"],
             "id",
-            vec![row(&[("id", Value::from("1")), ("tier", Value::Int64(2))])],
+            vec![row(&[("id", key.clone()), ("tier", Value::Int64(1))])],
         )
         .unwrap();
-    assert_eq!(summary.updated, 1);
-    assert_eq!(tiers(&db)["m1"], 2);
+    let updated = db
+        .execute("MATCH (n:Key) WHERE n.tier = 1 RETURN count(n)")
+        .unwrap()
+        .scalar::<i64>()
+        .unwrap();
+    assert_eq!(summary.updated, usize::try_from(updated).unwrap());
+    (updated == 1, matches == 1)
+}
+
+/// A key compares with the stored key as `=` does: a string of digits
+/// equals that integer ("5", "05" and "+5" equal 5), other number text
+/// ("5.0", "5e0") does not; an integer equals a float of its value; and the
+/// other way round, a stored string "5" equals the integer and the float 5.
+/// `update_nodes` updates exactly the nodes `MATCH (n {id: $k})` matches,
+/// with an index on the key and without.
+#[test]
+fn a_key_matches_as_equals_in_a_query_does() {
+    let cases = [
+        (Value::Int64(5), Value::from("5"), true),
+        (Value::Int64(5), Value::from("05"), true),
+        (Value::Int64(5), Value::from("+5"), true),
+        (Value::Int64(5), Value::from("5.0"), false),
+        (Value::Int64(5), Value::from("5e0"), false),
+        (Value::Int64(5), Value::Float64(5.0), true),
+        (Value::Int64(5), Value::Int64(5), true),
+        (Value::Int64(5), Value::from("6"), false),
+        (Value::from("5"), Value::Int64(5), true),
+        (Value::from("5"), Value::Float64(5.0), true),
+        (Value::from("5"), Value::from("5"), true),
+        (Value::from("5"), Value::from("05"), false),
+        (Value::from("5"), Value::Int64(6), false),
+    ];
+    for index in [false, true] {
+        for (stored, key, equal) in &cases {
+            let (updated, matched) = updates_and_matches(stored, key, index);
+            assert_eq!(
+                (updated, matched),
+                (*equal, *equal),
+                "stored {stored:?}, key {key:?}, index {index}: (updated, matched)"
+            );
+        }
+    }
 }
 
 /// The property names of the Method with id `id`, sorted.

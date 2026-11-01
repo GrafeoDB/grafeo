@@ -1,5 +1,7 @@
 # Reviewed differences between 0.6.0 and 0.6.1: case key, fingerprint of the reviewed result, why it changed.
 # A `~` before the fingerprint: the case's result in 0.6.0 varies from run to run, so it may also not differ.
+BI11|gql 275e163c7a A range whose upper bound is below its lower bound (*3..1) is a syntax error, as {3,1} is; 0.6.0 read it as exactly three hops.
+BI12|cypher 8206efc14d A range whose upper bound is below its lower bound (*3..1) matches nothing, as openCypher defines it; 0.6.0 read it as exactly three hops.
 BK5|cypher 572542923e A failed argument of a procedure names the argument and the procedure; 0.6.0 gave the bare division-by-zero message.
 BK5|gql 572542923e A failed argument of a procedure names the argument and the procedure; 0.6.0 gave the bare division-by-zero message.
 BW2|cypher 7b077158c6 toDecimal of a value that does not fit the precision fails with 22003, as a CAST does; 0.6.0 gave null.

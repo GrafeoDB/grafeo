@@ -116,6 +116,14 @@ tests:
     expect:
       error: "upper bound is below its lower bound"
 
+  # The in-bracket form likewise: *3..1 is an error, as {3,1} is
+  - name: iso_16_11_star_upper_bound_below_lower_bound_is_an_error
+    setup:
+      - "INSERT (:Node {name: 'A'})"
+    query: "MATCH (a:Node)-[:LINK*3..1]->(b:Node) RETURN b.name"
+    expect:
+      error: "upper bound is below its lower bound"
+
   # Sec 16.11: a quantifier inside the edge and one after it is an error
   - name: iso_16_11_two_quantifiers_on_an_edge_is_an_error
     setup:

@@ -584,7 +584,17 @@ public class SpecTests : IDisposable
         if (value is DateTime dt)
             return dt.ToString("yyyy-MM-dd");
         if (value is DateTimeOffset dto)
-            return dto.ToString("yyyy-MM-ddTHH:mm:ssK");
+        {
+            // As the engine writes a ZONED DATETIME: the fraction without
+            // trailing zeros, Z for a zero offset
+            var invariant = System.Globalization.CultureInfo.InvariantCulture;
+            var clock = dto.ToString("yyyy'-'MM'-'dd'T'HH':'mm':'ss.FFFFFF", invariant);
+            return clock + (dto.Offset == TimeSpan.Zero ? "Z" : dto.ToString("zzz", invariant));
+        }
+        if (value is DateOnly date)
+            return date.ToString("yyyy'-'MM'-'dd", System.Globalization.CultureInfo.InvariantCulture);
+        if (value is TimeOnly time)
+            return GrafeoTime.FromTimeOnly(time).Text;
         return value.ToString() ?? "null";
     }
 

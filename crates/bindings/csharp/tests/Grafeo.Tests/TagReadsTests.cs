@@ -147,16 +147,16 @@ public sealed class TagReadsTests : IDisposable
         Assert.Equal("Gus", row["name"]);
     }
 
-    /// <summary>A timestamp a DateTime can hold, at both ends of its range, is a DateTime.</summary>
+    /// <summary>A timestamp a DateTime can hold, at both ends of its range, is a DateTime, to the microsecond.</summary>
     [Fact]
     public void TimestampsAtTheEndsOfTheDateTimeRangeAreDateTimes()
     {
-        foreach (var at in new[] { DateTime.MinValue, DateTime.MaxValue.AddTicks(-9_999) })
+        foreach (var at in new[] { DateTime.MinValue, DateTime.MaxValue.AddTicks(-9) })
         {
-            var microseconds = new DateTimeOffset(DateTime.SpecifyKind(at, DateTimeKind.Utc)).ToUnixTimeMilliseconds() * 1000;
+            var microseconds = (at.Ticks - DateTime.UnixEpoch.Ticks) / 10;
             var map = new Dictionary<string, object?> { ["$timestamp_us"] = microseconds };
             var row = _db.ExecuteWithParams("RETURN $m AS m", new Dictionary<string, object?> { ["m"] = map }).Rows[0];
-            Assert.Equal(DateTimeOffset.FromUnixTimeMilliseconds(microseconds / 1000).UtcDateTime, row["m"]);
+            Assert.Equal(DateTime.SpecifyKind(at, DateTimeKind.Utc), row["m"]);
         }
     }
 }

@@ -98,3 +98,39 @@ func TestASelfReferencingParameterIsAnError(t *testing.T) {
 		}
 	}
 }
+
+// A value that holds itself twice stops at its first repeat (the walk does
+// not branch at every level), and a long chain of pointers to a float, with
+// no cycle, still arrives as a FLOAT64.
+func TestCyclesStopAtOnceAndPointerChainsKeepTheirValue(t *testing.T) {
+	db, err := OpenInMemory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	twice := map[string]any{}
+	twice["a"] = twice
+	twice["b"] = twice
+	if _, err := db.ExecuteParams("RETURN $v AS v", map[string]any{"v": twice}); err == nil {
+		t.Error("a map that holds itself twice was accepted")
+	}
+
+	var chain any = 3.0
+	for i := 0; i < 300; i++ {
+		link := chain
+		chain = &link
+	}
+	result, err := db.ExecuteParams("RETURN $v IS TYPED FLOAT64 AS float", map[string]any{"v": chain})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Rows[0]["float"] != true {
+		t.Errorf("300 pointers to 3.0 arrived as %#v", result.Rows[0]["float"])
+	}
+
+	// Two siblings that share one map are not a cycle.
+	shared := map[string]any{"x": 1.5}
+	if _, err := db.ExecuteParams("RETURN $v AS v", map[string]any{"v": []any{shared, shared}}); err != nil {
+		t.Errorf("a map used twice side by side was refused: %v", err)
+	}
+}

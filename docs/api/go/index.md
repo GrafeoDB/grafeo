@@ -75,6 +75,32 @@ price := result.Rows[0]["price"].(grafeo.Decimal)
 fmt.Println(price.String()) // 19.99
 ```
 
+## Dates and Times
+
+Temporal values keep their GQL type both ways, and a value read back goes in
+again as the type it came as.
+
+| Go | GQL type | Notes |
+|----|----------|-------|
+| `time.Time` in UTC or `time.Local` | `TIMESTAMP` (`LOCAL DATETIME`) | To the microsecond; comes back in UTC |
+| `time.Time` in any other location | `ZONED DATETIME` | Keeps its offset (whole minutes); comes back in a fixed zone of that offset |
+| `grafeo.Date` | `DATE` | `Year`, `Month`, `Day`; `DateOf(t)`, `ParseDate("2024-01-15")`, `In(loc)` |
+| `grafeo.Time` | `TIME` | A time of day to the nanosecond, with an offset or without one: `NewLocalTime`, `NewZonedTime`, `TimeOf(t)`, `ParseTime("12:30:00+02:00")`; `Hour()`, `Minute()`, `Second()`, `Nanosecond()`, `Offset()` |
+| `grafeo.Duration`, `time.Duration` | `DURATION` | `Months`, `Days` and `Nanos`, kept apart (`P1M` is not `P30D`, `P1D` is not `PT24H`); a `time.Duration` is one of nanoseconds; `TimeDuration()` gives one back when there are no months or days |
+
+```go
+opens, _ := grafeo.NewZonedTime(9, 0, 0, 0, 3600)
+result, _ := db.ExecuteParams(
+    "RETURN $at AS at, $day AS day, $opens AS opens",
+    map[string]any{
+        "at":    time.Date(2024, 3, 5, 10, 30, 0, 0, time.FixedZone("CET", 3600)),
+        "day":   grafeo.Date{Year: 2024, Month: time.March, Day: 5},
+        "opens": opens,
+    })
+at := result.Rows[0]["at"].(time.Time)       // 10:30 at +01:00, a ZONED DATETIME
+back := result.Rows[0]["opens"].(grafeo.Time) // 09:00:00+01:00
+```
+
 ## RDF Terms
 
 A SPARQL result holds each IRI, blank node and literal as a `grafeo.RdfTerm`:

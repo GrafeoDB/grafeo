@@ -902,6 +902,33 @@ final price = result.rows.first['price'] as GrafeoDecimal;
 print(price.text);  // 19.99
 ```
 
+### Dates, times and durations
+
+A GQL `TIMESTAMP` is a UTC `DateTime`. The temporal values Dart has no type
+for without loss come back as small immutable types, and each goes in again
+as the same GQL type:
+
+- `GrafeoDate` (`DATE`): `year`, `month`, `day`; `GrafeoDate.fromDateTime`,
+  `toDateTime()`.
+- `GrafeoTime` (`TIME`): `hour`, `minute`, `second`, `nanosecond` and
+  `offset` (null for a local time).
+- `GrafeoDuration` (`DURATION`): `months`, `days` and `nanoseconds`, kept
+  apart because a month and a day have no fixed length (`P1M` is not `P30D`,
+  `P1D` is not `PT24H`); `toDuration()` gives a Dart `Duration` when there
+  are no months, and `GrafeoDuration.fromDuration` makes one of a `Duration`.
+- `GrafeoZonedDateTime` (`ZONED DATETIME`): the `instant` (a UTC `DateTime`)
+  and the `offset` it was written at.
+
+Each has `text` (the ISO text GQL writes), `parse` and `tryParse`.
+
+```dart
+final row = db.execute(
+    "RETURN DATE '2024-03-05' AS day, TIME '12:30:00+02:00' AS opens").rows.first;
+final day = row['day'] as GrafeoDate;     // 2024-03-05
+final opens = row['opens'] as GrafeoTime; // 12:30:00+02:00, offset 2:00:00
+db.executeWithParams(r'RETURN $t IS TYPED TIME AS typed', {'t': opens}); // true
+```
+
 ### RdfTerm
 
 An RDF term from a SPARQL result: its `type` (`RdfTermType.iri`, `blankNode`
@@ -1049,8 +1076,11 @@ enum GrafeoStatus {
 | `BigInt` | Int64, or Decimal past 64 bits | Exact up to 38 digits (scale 0); past that an error naming the parameter |
 | `double` | Float64 | |
 | `String` | String | |
-| `DateTime` | Timestamp | Encoded as `$timestamp_us` (microseconds, UTC) |
-| `Duration` | Duration | Encoded as ISO 8601 duration string |
+| `DateTime` | Timestamp (`LOCAL DATETIME`) | To the microsecond, in UTC; comes back as a UTC `DateTime` |
+| `GrafeoZonedDateTime` | Zoned datetime | An instant with its offset |
+| `GrafeoDate` | Date | |
+| `GrafeoTime` | Time | With an offset or without one |
+| `Duration`, `GrafeoDuration` | Duration | A `Duration` is one of its microseconds; every duration comes back as a `GrafeoDuration` |
 | `List` | List | Elements converted recursively |
 | `Map<String, dynamic>` | Map | Keys must be strings |
 | `Uint8List` | Bytes | Encoded as base64 |

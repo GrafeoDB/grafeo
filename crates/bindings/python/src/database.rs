@@ -79,6 +79,17 @@ fn tier_to_str(tier: grafeo_common::memory::buffer::StorageTier) -> &'static str
 
 /// Converts the PyArrow `table` of `nodes_df()` or `edges_df()` to a pandas
 /// DataFrame (with `pd`, the pandas module) whose nested columns hold the
+/// The RDF syntax a `format` argument names; a `ValueError` for another
+/// name.
+#[cfg(feature = "triple-store")]
+fn rdf_format(name: &str) -> PyResult<grafeo_engine::RdfFormat> {
+    grafeo_engine::RdfFormat::from_name(name).ok_or_else(|| {
+        pyo3::exceptions::PyValueError::new_err(format!(
+            "format must be 'turtle' or 'ntriples', not '{name}'"
+        ))
+    })
+}
+
 /// Python values the fallback without pyarrow builds: lists (the `_labels`
 /// of nodes, list and vector properties) and dicts (map and duration
 /// properties). pyarrow's `to_pandas()` makes a list a numpy array, so the
@@ -1810,10 +1821,14 @@ impl PyGrafeoDB {
     ///
     /// Each row is a dict of properties holding `key`. Its properties are
     /// merged into the node's and the others stay, as
-    /// `UNWIND $rows AS r MATCH (n:Labels {key: r.key}) SET n += r` does. A
-    /// row whose key matches no node with every label, or without the key,
-    /// is skipped. The call writes all rows or none, and its time grows with
-    /// the rows and the nodes, also without a property index on `key`.
+    /// `UNWIND $rows AS r MATCH (n:Labels {key: r.key}) SET n += r` does: a
+    /// None value removes the property, and a key that several nodes have
+    /// updates all of them. A row whose key matches no node with every
+    /// label, or without the key, is skipped. With no labels, every node
+    /// counts. The call writes all rows or none, logged (WAL, change data
+    /// capture) as that query is. Its time grows with the rows and the
+    /// nodes of the first label, also without a property index on `key`;
+    /// with one, a few rows look their nodes up through it.
     ///
     /// Returns:
     ///     dict with `updated`, `skipped` and `skipped_rows` (the indices of
@@ -2088,37 +2103,75 @@ impl PyGrafeoDB {
         crate::direct::load_report(py, report)
     }
 
-    /// Load an RDF file into the default graph, in one bulk write: nothing
-    /// is inserted when a line does not parse.
+    /// Load an RDF file into the default graph or a named graph, in one
+    /// bulk write: nothing is inserted when a line does not parse.
+    ///
+    /// The load is written to the WAL as one group, so a persistent database
+    /// keeps all of it or none after a crash; it reports no change data
+    /// capture events.
     ///
     /// Args:
     ///     path: The file, as a string or a path.
     ///     format: "turtle" or "ntriples" (also "ttl", "nt"); by default the
     ///         one the file's extension names (.ttl, .nt).
+    ///     graph: The IRI of the named graph to load into (created when it
+    ///         does not exist), where `INSERT DATA { GRAPH <iri> { ... } }`
+    ///         puts triples; None for the default graph.
     ///
     /// Returns:
-    ///     How many triples were new.
+    ///     How many triples were new in that graph.
     ///
     /// Example:
     ///     db.load_rdf("people.ttl")
+    ///     db.load_rdf("people.nt", graph="http://example.org/people")
     #[cfg(feature = "triple-store")]
-    #[pyo3(signature = (path, format=None))]
+    #[pyo3(signature = (path, format=None, graph=None))]
     fn load_rdf(
         &self,
         path: std::path::PathBuf,
         format: Option<&str>,
+        graph: Option<String>,
         py: Python<'_>,
     ) -> PyResult<usize> {
-        let format = format
-            .map(|name| {
-                grafeo_engine::RdfFormat::from_name(name).ok_or_else(|| {
-                    pyo3::exceptions::PyValueError::new_err(format!(
-                        "format must be 'turtle' or 'ntriples', not '{name}'"
-                    ))
-                })
-            })
-            .transpose()?;
-        self.released(py, |db| Ok(db.load_rdf(&path, format)?))
+        let format = format.map(rdf_format).transpose()?;
+        self.released(py, |db| {
+            Ok(db.load_rdf_into(&path, format, graph.as_deref())?)
+        })
+    }
+
+    /// Load RDF text into the default graph or a named graph, in one bulk
+    /// write, as `load_rdf` loads a file: nothing is inserted when a line
+    /// does not parse.
+    ///
+    /// Args:
+    ///     text: The RDF document.
+    ///     format: "turtle" or "ntriples" (also "ttl", "nt").
+    ///     graph: The IRI of the named graph to load into (created when it
+    ///         does not exist); None for the default graph.
+    ///
+    /// Returns:
+    ///     How many triples were new in that graph.
+    ///
+    /// Example:
+    ///     db.load_rdf_text(
+    ///         '<http://example.org/alix> <http://example.org/city> "Amsterdam" .',
+    ///         "ntriples",
+    ///     )
+    #[cfg(feature = "triple-store")]
+    #[pyo3(signature = (text, format, graph=None))]
+    fn load_rdf_text(
+        &self,
+        text: &str,
+        format: &str,
+        graph: Option<String>,
+        py: Python<'_>,
+    ) -> PyResult<usize> {
+        let format = rdf_format(format)?;
+        // Copied once, so the parse runs without the GIL.
+        let text = text.to_string();
+        self.released(py, |db| {
+            Ok(db.load_rdf_text(&text, format, graph.as_deref())?)
+        })
     }
 
     /// Batch search for nearest neighbors of multiple query vectors.
@@ -3392,7 +3445,7 @@ impl PyGrafeoDB {
     /// unique property key. Returns an Arrow Table directly, no per-element
     /// PyO3 crossings.
     ///
-    /// Requires pyarrow (`uv add pyarrow`).
+    /// Requires pyarrow: the `arrow` extra installs it (`uv add "grafeo[arrow]"`).
     ///
     /// Example:
     /// ```python
@@ -3404,7 +3457,7 @@ impl PyGrafeoDB {
     fn nodes_to_arrow(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let pa = py.import("pyarrow").map_err(|_| {
             pyo3::exceptions::PyModuleNotFoundError::new_err(
-                "pyarrow is required for nodes_to_arrow(). Install it with: uv add pyarrow",
+                "pyarrow is required for nodes_to_arrow(). Install it with: uv add \"grafeo[arrow]\"",
             )
         })?;
         let ipc_mod = pa.getattr("ipc")?;
@@ -3442,7 +3495,7 @@ impl PyGrafeoDB {
 
     /// Export all nodes as a pandas DataFrame (via Arrow).
     ///
-    /// Requires pandas and pyarrow (`uv add pandas pyarrow`).
+    /// Requires pandas and pyarrow (`uv add pandas "grafeo[arrow]"`).
     /// This is the fast path: builds an Arrow RecordBatch in Rust, serializes
     /// to IPC, then converts to pandas via pyarrow. ~10-100x faster than the
     /// element-by-element `nodes_df()` fallback at scale.
@@ -3557,7 +3610,7 @@ impl PyGrafeoDB {
     /// Schema: `id` (uint64), `type` (utf8), `source` (uint64), `target` (uint64),
     /// plus one column per unique property key.
     ///
-    /// Requires pyarrow (`uv add pyarrow`).
+    /// Requires pyarrow: the `arrow` extra installs it (`uv add "grafeo[arrow]"`).
     ///
     /// Example:
     /// ```python
@@ -3569,7 +3622,7 @@ impl PyGrafeoDB {
     fn edges_to_arrow(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let pa = py.import("pyarrow").map_err(|_| {
             pyo3::exceptions::PyModuleNotFoundError::new_err(
-                "pyarrow is required for edges_to_arrow(). Install it with: uv add pyarrow",
+                "pyarrow is required for edges_to_arrow(). Install it with: uv add \"grafeo[arrow]\"",
             )
         })?;
         let ipc_mod = pa.getattr("ipc")?;
@@ -3607,7 +3660,7 @@ impl PyGrafeoDB {
 
     /// Export all edges as a pandas DataFrame (via Arrow).
     ///
-    /// Requires pandas and pyarrow (`uv add pandas pyarrow`).
+    /// Requires pandas and pyarrow (`uv add pandas "grafeo[arrow]"`).
     #[cfg(feature = "arrow-export")]
     #[pyo3(signature = ())]
     fn edges_to_pandas(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {

@@ -391,7 +391,9 @@ impl RdfPlanner {
             // files, also with SILENT.
             LogicalOperator::LoadGraph(_) => Err(Error::from(QueryError::new(
                 QueryErrorKind::Unsupported,
-                "SPARQL LOAD is not supported yet: insert the data with INSERT DATA, or load                  files with the Rust API's load_turtle and load_ntriples",
+                "SPARQL LOAD is not supported yet: load a Turtle or N-Triples file or text \
+                 with load_rdf and load_rdf_text (Python), or load_rdf, load_rdf_into and \
+                 load_rdf_text (Rust), or insert the data with INSERT DATA",
             ))),
             _ => Err(Error::Internal(format!(
                 "Unsupported RDF operator: {:?}",

@@ -327,9 +327,10 @@ impl PyQueryResult {
 
     /// Convert to a PyArrow Table.
     ///
-    /// Requires pyarrow to be installed (`uv add pyarrow`). Returns an Arrow
-    /// Table that can be used directly with DuckDB, Polars, pandas, or any
-    /// other Arrow-compatible tool.
+    /// Requires pyarrow: the `arrow` extra installs it
+    /// (`uv add "grafeo[arrow]"`). Returns an Arrow Table that can be used
+    /// directly with DuckDB, Polars, pandas, or any other Arrow-compatible
+    /// tool.
     ///
     /// An RDF term (a SPARQL result) is the native value of a literal of a
     /// known XSD type (`xsd:integer` an integer, `xsd:decimal` a decimal,
@@ -350,7 +351,7 @@ impl PyQueryResult {
     fn to_arrow(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let pa = py.import("pyarrow").map_err(|_| {
             pyo3::exceptions::PyModuleNotFoundError::new_err(
-                "pyarrow is required for to_arrow(). Install it with: uv add pyarrow",
+                "pyarrow is required for to_arrow(). Install it with: uv add \"grafeo[arrow]\"",
             )
         })?;
         let ipc_mod = pa.getattr("ipc")?;

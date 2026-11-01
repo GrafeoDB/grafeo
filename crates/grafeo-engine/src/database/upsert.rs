@@ -11,11 +11,15 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use grafeo_common::types::{PropertyKey, Value};
+use grafeo_common::types::{NodeId, PropertyKey, ReadView, Value};
 use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind, Result};
+use grafeo_core::execution::operators::value_utils::compare_values;
+use grafeo_core::execution::operators::{HashKey, OperatorError};
+use grafeo_core::graph::GraphStore;
 
 use super::graph_handle::GraphHandle;
 use super::{GrafeoDB, QueryResult};
+use crate::query::planner::lpg::value_join::rows_beat_a_seek;
 use crate::session::Session;
 
 /// At most this many skipped row indices are reported.
@@ -194,21 +198,20 @@ fn upsert_nodes(
 /// matches, as `UNWIND $rows AS r MATCH (n:Labels {key: r.key}) SET n += r`
 /// does. A row whose key matches no node, or without the key, is skipped.
 ///
-/// One write through the session's writer: the nodes of `labels` are read
-/// once into a map by their value of `key` (at the write's view, so a
-/// transaction's own nodes count), and each row is set on the nodes its key
-/// equals, as `=` finds them equal (`5` and `5.0` are). A row
-/// writes its own key value only, so no row changes which nodes another row
-/// matches, and finding them all first gives what the rows one by one would.
+/// One write through the session's writer, so it is checked, logged to the
+/// WAL and reported to change data capture as that statement is: each row
+/// is set on the nodes (at the write's view, so a transaction's own nodes
+/// count) whose `key` its key equals, as `=` finds them equal (`5` and
+/// `5.0` are), as the statement plans it (see [`KeyFinder`]). A row writes
+/// its own key value only, so no row changes which nodes another row
+/// matches, and finding them all first gives what the rows one by one
+/// would.
 fn update_nodes(
     session: &Session,
     labels: &[&str],
     key: &str,
     rows: Vec<HashMap<PropertyKey, Value>>,
 ) -> Result<UpsertSummary> {
-    use grafeo_core::execution::operators::HashKey;
-    use grafeo_core::execution::operators::value_utils::compare_values;
-
     check_name("key", key)?;
     for label in labels {
         check_name("label", label)?;
@@ -219,42 +222,13 @@ fn update_nodes(
     session.write(|writer| {
         let store = writer.store();
         let view = writer.view();
-        let candidates = match labels.first() {
-            Some(first) => store.nodes_by_label(first, view)?,
-            None => store.node_ids(view)?,
-        };
-        let mut by_key: HashMap<HashKey, Vec<(grafeo_common::types::NodeId, Value)>> =
-            HashMap::new();
-        for node in candidates {
-            let mut has_labels = true;
-            for label in labels.iter().skip(1) {
-                has_labels &= store.node_has_label(node, label, view)?.unwrap_or(false);
-            }
-            if !has_labels {
-                continue;
-            }
-            if let Some(value) = store.node_property(node, key, view)?
-                && let Some(hash) = HashKey::for_equality(&value)
-            {
-                by_key.entry(hash).or_default().push((node, value));
-            }
-        }
+        let mut finder = KeyFinder::new(&**store, &labels, key, total);
         let mut written = BTreeSet::new();
         for (index, row) in rows.into_iter().enumerate() {
             let Some(value) = row.get(&key_property).filter(|value| !value.is_null()) else {
                 continue;
             };
-            let Some(nodes) = HashKey::for_equality(value).and_then(|hash| by_key.get(&hash))
-            else {
-                continue;
-            };
-            let matched: Vec<_> = nodes
-                .iter()
-                .filter(|(_, stored)| {
-                    compare_values(stored, value) == Some(std::cmp::Ordering::Equal)
-                })
-                .map(|(node, _)| *node)
-                .collect();
+            let matched = finder.find(&**store, view, &labels, key, value)?;
             if matched.is_empty() {
                 continue;
             }
@@ -269,6 +243,130 @@ fn update_nodes(
         }
         Ok(summary(total, &written, 0))
     })
+}
+
+/// The nodes of each label of a list, by their value of a key property.
+type NodesByKey = HashMap<HashKey, Vec<(NodeId, Value)>>;
+
+/// How [`update_nodes`] finds the nodes a row's key matches, chosen as the
+/// planner chooses for `UNWIND $rows AS r MATCH (n:Labels {key: r.key})`
+/// (see [`rows_beat_a_seek`]): with a property index on the key and rows at
+/// most a third of the first label's nodes, a lookup per row through the
+/// index; otherwise one pass over the label's nodes into a map by key.
+enum KeyFinder {
+    /// A lookup through the key's index per row.
+    Seek,
+    /// The map, built on the first row that needs it.
+    Map(Option<NodesByKey>),
+}
+
+impl KeyFinder {
+    fn new(store: &dyn GraphStore, labels: &[String], key: &str, rows: usize) -> Self {
+        if !store.has_property_index(key) {
+            return Self::Map(None);
+        }
+        let nodes = match labels.first() {
+            Some(label) => store.label_node_estimate(label),
+            None => store.node_estimate(),
+        };
+        if rows_beat_a_seek(rows, nodes) {
+            Self::Map(None)
+        } else {
+            Self::Seek
+        }
+    }
+
+    /// The nodes `view` sees that have all of `labels` and whose `key`
+    /// equals `value` under `=`, by ascending id.
+    fn find(
+        &mut self,
+        store: &dyn GraphStore,
+        view: ReadView,
+        labels: &[String],
+        key: &str,
+        value: &Value,
+    ) -> std::result::Result<Vec<NodeId>, OperatorError> {
+        let Some(hash) = HashKey::for_equality(value) else {
+            return Ok(Vec::new());
+        };
+        if matches!(self, Self::Seek) {
+            if let Some(candidates) = store.find_nodes_maybe_equal(key, value, view)? {
+                let mut matched = Vec::new();
+                for node in candidates {
+                    if has_labels(store, node, labels, view)?
+                        && store
+                            .node_property(node, key, view)?
+                            .is_some_and(|stored| equal(&stored, value))
+                    {
+                        matched.push(node);
+                    }
+                }
+                return Ok(matched);
+            }
+            // The index is gone: the map finds the same nodes.
+            *self = Self::Map(None);
+        }
+        let Self::Map(map) = self else {
+            unreachable!("a seek returned above");
+        };
+        if map.is_none() {
+            *map = Some(nodes_by_key(store, view, labels, key)?);
+        }
+        let Some(nodes) = map.as_ref().and_then(|map| map.get(&hash)) else {
+            return Ok(Vec::new());
+        };
+        Ok(nodes
+            .iter()
+            .filter(|(_, stored)| equal(stored, value))
+            .map(|(node, _)| *node)
+            .collect())
+    }
+}
+
+/// The nodes `view` sees with all of `labels` (every node without labels),
+/// by their value of `key` under `=`: one pass over the first label's nodes.
+fn nodes_by_key(
+    store: &dyn GraphStore,
+    view: ReadView,
+    labels: &[String],
+    key: &str,
+) -> std::result::Result<NodesByKey, OperatorError> {
+    let candidates = match labels.first() {
+        Some(first) => store.nodes_by_label(first, view)?,
+        None => store.node_ids(view)?,
+    };
+    let mut by_key = NodesByKey::new();
+    for node in candidates {
+        if !has_labels(store, node, labels.get(1..).unwrap_or(&[]), view)? {
+            continue;
+        }
+        if let Some(value) = store.node_property(node, key, view)?
+            && let Some(hash) = HashKey::for_equality(&value)
+        {
+            by_key.entry(hash).or_default().push((node, value));
+        }
+    }
+    Ok(by_key)
+}
+
+/// Whether `node` has every one of `labels` as `view` sees it.
+fn has_labels(
+    store: &dyn GraphStore,
+    node: NodeId,
+    labels: &[String],
+    view: ReadView,
+) -> std::result::Result<bool, OperatorError> {
+    for label in labels {
+        if !store.node_has_label(node, label, view)?.unwrap_or(false) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// Whether `=` finds the stored value equal to the row's key.
+fn equal(stored: &Value, value: &Value) -> bool {
+    compare_values(stored, value) == Some(std::cmp::Ordering::Equal)
 }
 
 /// Creates or updates one edge per row between the nodes whose
@@ -542,10 +640,15 @@ impl GrafeoDB {
     ///
     /// A row's properties are merged into each node its key matches (the
     /// others stay), as `UNWIND $rows AS r MATCH (n:Labels {key: r.key}) SET
-    /// n += r` does. A row whose key matches no such node, or without the
-    /// key, is skipped. The call is one write. It takes time linear in the
-    /// rows and the nodes of `labels`: a property index on `key` is used
-    /// when there is one, and is not needed.
+    /// n += r` does: a null value removes the property, and a key that
+    /// several nodes have updates all of them. A row whose key matches no
+    /// such node, or without the key, is skipped. The call is one write,
+    /// logged and reported to change data capture as that statement is.
+    ///
+    /// Without a property index on `key`, it reads the nodes of the first
+    /// label once, so it takes time linear in the rows and those nodes. With
+    /// one, rows up to a third of those nodes look their nodes up through
+    /// the index instead, as the statement does.
     ///
     /// The summary counts the updated and the skipped rows; `created` is 0.
     ///

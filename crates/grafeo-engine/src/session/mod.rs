@@ -3061,10 +3061,13 @@ impl Session {
         }
     }
 
-    /// Returns a table of all indexes from the catalog.
+    /// Returns a table of all indexes: the ones `CREATE INDEX` made, and the
+    /// active graph's indexes made through the API, whose name is null (and
+    /// whose label is null for a property index, which covers every label).
     #[cfg(feature = "gql")]
     fn execute_show_indexes(&self) -> Result<QueryResult> {
-        let indexes = self.catalog.all_indexes();
+        let store = self.active_lpg_store();
+        let indexes = crate::database::index::listed_indexes(&self.catalog, store.as_deref());
         let columns = vec![
             "name".to_string(),
             "type".to_string(),
@@ -3073,20 +3076,12 @@ impl Session {
         ];
         let rows: Vec<Vec<Value>> = indexes
             .into_iter()
-            .map(|def| {
-                let label_name = self
-                    .catalog
-                    .get_label_name(def.label)
-                    .unwrap_or_else(|| "?".into());
-                let prop_name = self
-                    .catalog
-                    .get_property_key_name(def.property_key)
-                    .unwrap_or_else(|| "?".into());
+            .map(|index| {
                 vec![
-                    Value::from(def.name),
-                    Value::from(format!("{:?}", def.index_type)),
-                    Value::from(&*label_name),
-                    Value::from(&*prop_name),
+                    index.name.map_or(Value::Null, Value::from),
+                    Value::from(format!("{:?}", index.kind)),
+                    index.label.map_or(Value::Null, Value::from),
+                    Value::from(index.property),
                 ]
             })
             .collect();

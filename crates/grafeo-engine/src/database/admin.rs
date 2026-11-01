@@ -333,30 +333,23 @@ impl super::GrafeoDB {
         Ok(crate::admin::SchemaInfo::Lpg(summary))
     }
 
-    /// Returns detailed information about all indexes.
+    /// Returns detailed information about all indexes: the ones
+    /// `CREATE INDEX` made, by the name it gave them, as `SHOW INDEXES`
+    /// lists them, and the current graph's indexes made through the API,
+    /// whose `name` is empty. The target of a property index made through
+    /// the API, which covers every label, has an empty label (`:age`).
     #[must_use]
     pub fn list_indexes(&self) -> Vec<crate::admin::IndexInfo> {
-        self.catalog
-            .all_indexes()
+        let store = self.current_lpg_store().ok();
+        super::index::listed_indexes(&self.catalog, store.as_deref())
             .into_iter()
-            .map(|def| {
-                let label_name = self
-                    .catalog
-                    .get_label_name(def.label)
-                    .unwrap_or_else(|| "?".into());
-                let prop_name = self
-                    .catalog
-                    .get_property_key_name(def.property_key)
-                    .unwrap_or_else(|| "?".into());
-                crate::admin::IndexInfo {
-                    // The name `CREATE INDEX` gave it, as `SHOW INDEXES` lists it.
-                    name: def.name,
-                    index_type: format!("{:?}", def.index_type),
-                    target: format!("{}:{}", label_name, prop_name),
-                    unique: false,
-                    cardinality: None,
-                    size_bytes: None,
-                }
+            .map(|index| crate::admin::IndexInfo {
+                name: index.name.unwrap_or_default(),
+                index_type: format!("{:?}", index.kind),
+                target: format!("{}:{}", index.label.unwrap_or_default(), index.property),
+                unique: false,
+                cardinality: None,
+                size_bytes: None,
             })
             .collect()
     }

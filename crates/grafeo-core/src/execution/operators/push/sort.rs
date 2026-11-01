@@ -2,11 +2,11 @@
 
 use crate::execution::chunk::{ColumnTypes, DataChunk, DataChunkBuilder};
 use crate::execution::operators::OperatorError;
-use crate::execution::operators::value_utils::order_by;
+use crate::execution::operators::value_utils::order_by_under;
 use crate::execution::pipeline::{ChunkSizeHint, PushOperator, Sink};
 #[cfg(feature = "spill")]
 use crate::execution::spill::{ExternalSort, SpillManager};
-use grafeo_common::types::{LogicalType, Value};
+use grafeo_common::types::{LogicalType, TemporalComparison, Value};
 use std::cmp::Ordering;
 #[cfg(feature = "spill")]
 use std::sync::Arc;
@@ -77,6 +77,10 @@ pub struct SortPushOperator {
     output_width: Option<usize>,
     /// The input's column types: a node or edge column stays one.
     column_types: ColumnTypes,
+    /// How the sort keys read a local datetime against a zoned one (see
+    /// [`TemporalComparison::normalize`]); `TypesApart` reads every value
+    /// as itself.
+    temporal: TemporalComparison,
 }
 
 impl SortPushOperator {
@@ -88,6 +92,7 @@ impl SortPushOperator {
             num_columns: None,
             output_width: None,
             column_types: ColumnTypes::default(),
+            temporal: TemporalComparison::TypesApart,
         }
     }
 
@@ -109,16 +114,30 @@ impl SortPushOperator {
         self.output_width = Some(width);
         self
     }
+
+    /// The operator with `temporal` as the reading of its sort keys (the
+    /// statement's `<`). The rows keep their values.
+    #[must_use]
+    pub fn with_temporal(mut self, temporal: TemporalComparison) -> Self {
+        self.temporal = temporal;
+        self
+    }
 }
 
-/// Compare two rows by sort keys.
-fn compare_rows(a: &[Value], b: &[Value], keys: &[SortKey]) -> Ordering {
+/// Compare two rows by sort keys, their values read as `temporal` reads them.
+fn compare_rows(
+    a: &[Value],
+    b: &[Value],
+    keys: &[SortKey],
+    temporal: TemporalComparison,
+) -> Ordering {
     for key in keys {
-        let ordering = order_by(
+        let ordering = order_by_under(
             a.get(key.column),
             b.get(key.column),
             key.direction == SortDirection::Descending,
             key.null_order == NullOrder::First,
+            temporal,
         );
         if ordering != Ordering::Equal {
             return ordering;
@@ -195,7 +214,9 @@ impl PushOperator for SortPushOperator {
 
         // Sort the buffer - borrow keys separately to avoid borrow conflict
         let keys = &self.keys;
-        self.buffer.sort_by(|a, b| compare_rows(a, b, keys));
+        let temporal = self.temporal;
+        self.buffer
+            .sort_by(|a, b| compare_rows(a, b, keys, temporal));
 
         let num_cols = self.num_columns.unwrap_or(0);
         if num_cols == 0 {
@@ -258,6 +279,10 @@ pub struct SpillableSortPushOperator {
     output_width: Option<usize>,
     /// The input's column types: a node or edge column stays one.
     column_types: ColumnTypes,
+    /// How the sort keys read a local datetime against a zoned one (see
+    /// [`TemporalComparison::normalize`]); `TypesApart` reads every value
+    /// as itself.
+    temporal: TemporalComparison,
     /// Spill manager for file creation (used by row-count fallback mode).
     spill_manager: Option<Arc<SpillManager>>,
     /// External sort state (created when first spill occurs).
@@ -284,6 +309,7 @@ impl SpillableSortPushOperator {
             num_columns: None,
             output_width: None,
             column_types: ColumnTypes::default(),
+            temporal: TemporalComparison::TypesApart,
             spill_manager: None,
             external_sort: None,
             spill_threshold: DEFAULT_SPILL_THRESHOLD,
@@ -301,6 +327,7 @@ impl SpillableSortPushOperator {
             num_columns: None,
             output_width: None,
             column_types: ColumnTypes::default(),
+            temporal: TemporalComparison::TypesApart,
             spill_manager: Some(manager),
             external_sort: None,
             spill_threshold: threshold,
@@ -331,6 +358,7 @@ impl SpillableSortPushOperator {
             num_columns: None,
             output_width: None,
             column_types: ColumnTypes::default(),
+            temporal: TemporalComparison::TypesApart,
             spill_manager: None,
             external_sort: None,
             spill_threshold: DEFAULT_SPILL_THRESHOLD,
@@ -373,6 +401,14 @@ impl SpillableSortPushOperator {
         self
     }
 
+    /// The operator with `temporal` as the reading of its sort keys (the
+    /// statement's `<`). The rows keep their values.
+    #[must_use]
+    pub fn with_temporal(mut self, temporal: TemporalComparison) -> Self {
+        self.temporal = temporal;
+        self
+    }
+
     /// Checks whether spilling should occur and performs it if needed.
     fn maybe_spill(&mut self) -> Result<(), OperatorError> {
         let should_spill = if let Some(ref state) = self.spill_state {
@@ -404,7 +440,9 @@ impl SpillableSortPushOperator {
 
         // Sort current buffer
         let keys = &self.keys;
-        self.buffer.sort_by(|a, b| compare_rows(a, b, keys));
+        let temporal = self.temporal;
+        self.buffer
+            .sort_by(|a, b| compare_rows(a, b, keys, temporal));
 
         // Initialize external sort if needed
         if self.external_sort.is_none() {
@@ -429,7 +467,8 @@ impl SpillableSortPushOperator {
                 })
                 .collect();
 
-            self.external_sort = Some(ExternalSort::new(manager, num_cols, spill_keys));
+            self.external_sort =
+                Some(ExternalSort::new(manager, num_cols, spill_keys).with_temporal(self.temporal));
         }
 
         // Spill as sorted run
@@ -514,7 +553,9 @@ impl PushOperator for SpillableSortPushOperator {
         } else {
             // No spilling occurred: just sort in memory
             let keys = &self.keys;
-            self.buffer.sort_by(|a, b| compare_rows(a, b, keys));
+            let temporal = self.temporal;
+            self.buffer
+                .sort_by(|a, b| compare_rows(a, b, keys, temporal));
             std::mem::take(&mut self.buffer)
         };
 

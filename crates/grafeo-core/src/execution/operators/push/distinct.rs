@@ -6,6 +6,7 @@ use crate::execution::operators::accumulator::RowKey;
 use crate::execution::pipeline::{ChunkSizeHint, PushOperator, Sink};
 use crate::execution::selection::SelectionVector;
 use crate::execution::vector::ValueVector;
+use grafeo_common::types::TemporalComparison;
 use grafeo_common::types::Value;
 use grafeo_common::utils::hash::FxHashSet as HashSet;
 
@@ -19,14 +20,27 @@ pub struct DistinctPushOperator {
     columns: Option<Vec<usize>>,
     /// The keys of the rows seen (see `RowKey`).
     seen: HashSet<RowKey>,
+    /// How the keys read a local datetime against a zoned one (see
+    /// [`TemporalComparison::normalize`]); `TypesApart` reads every value
+    /// as itself.
+    temporal: TemporalComparison,
 }
 
 impl DistinctPushOperator {
+    /// The operator with `temporal` as the reading of its keys (the
+    /// statement's `=`).
+    #[must_use]
+    pub fn with_temporal(mut self, temporal: TemporalComparison) -> Self {
+        self.temporal = temporal;
+        self
+    }
+
     /// Create a distinct operator on all columns.
     pub fn new() -> Self {
         Self {
             columns: None,
             seen: HashSet::default(),
+            temporal: TemporalComparison::TypesApart,
         }
     }
 
@@ -35,6 +49,7 @@ impl DistinctPushOperator {
         Self {
             columns: Some(columns),
             seen: HashSet::default(),
+            temporal: TemporalComparison::TypesApart,
         }
     }
 
@@ -61,8 +76,8 @@ impl PushOperator for DistinctPushOperator {
 
         for row in chunk.selected_indices() {
             let key = match &self.columns {
-                Some(cols) => RowKey::from_row(&chunk, row, cols),
-                None => RowKey::from_all_columns(&chunk, row),
+                Some(cols) => RowKey::from_row(&chunk, row, cols, self.temporal),
+                None => RowKey::from_all_columns(&chunk, row, self.temporal),
             };
 
             if self.seen.insert(key) {
@@ -107,6 +122,10 @@ pub struct DistinctMaterializingOperator {
     rows: Vec<Vec<Value>>,
     /// The keys of the rows seen (see `RowKey`).
     seen: HashSet<RowKey>,
+    /// How the keys read a local datetime against a zoned one (see
+    /// [`TemporalComparison::normalize`]); `TypesApart` reads every value
+    /// as itself.
+    temporal: TemporalComparison,
     /// Number of columns.
     num_columns: Option<usize>,
 }
@@ -118,6 +137,7 @@ impl DistinctMaterializingOperator {
             columns: None,
             rows: Vec::new(),
             seen: HashSet::default(),
+            temporal: TemporalComparison::TypesApart,
             num_columns: None,
         }
     }
@@ -128,6 +148,7 @@ impl DistinctMaterializingOperator {
             columns: Some(columns),
             rows: Vec::new(),
             seen: HashSet::default(),
+            temporal: TemporalComparison::TypesApart,
             num_columns: None,
         }
     }
@@ -153,8 +174,8 @@ impl PushOperator for DistinctMaterializingOperator {
 
         for row in chunk.selected_indices() {
             let key = match &self.columns {
-                Some(cols) => RowKey::from_row(&chunk, row, cols),
-                None => RowKey::from_all_columns(&chunk, row),
+                Some(cols) => RowKey::from_row(&chunk, row, cols, self.temporal),
+                None => RowKey::from_all_columns(&chunk, row, self.temporal),
             };
 
             if self.seen.insert(key) {

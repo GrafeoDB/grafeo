@@ -28,14 +28,95 @@ pub struct UnwindOperator {
     /// How many rows a chunk takes (see
     /// [`row_at_a_time`](Self::row_at_a_time)).
     rows_per_chunk: RowsPerChunk,
+    /// What the list column holds.
+    list_column: ListColumn,
     /// The input chunk being unwound.
     current: Option<InputChunk>,
     /// Position in `current`'s rows.
     current_row: usize,
     /// Current index within the list being unwound.
-    current_list_idx: usize,
+    current_list_idx: u64,
     /// Current list being unwound.
-    current_list: Option<Vec<Value>>,
+    current_list: Option<Items>,
+}
+
+/// What an UNWIND's list column holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ListColumn {
+    /// The list.
+    List,
+    /// The bounds of a `range` call (see
+    /// [`range_bounds`](UnwindOperator::range_bounds)).
+    RangeBounds,
+}
+
+/// The items of the list being unwound.
+enum Items {
+    /// The items of a list.
+    List(Vec<Value>),
+    /// The `len` integers `start`, `start + step`, ... of a `range` call,
+    /// made as they are unwound (see [`UnwindOperator::range_bounds`]).
+    Range { start: i64, step: i64, len: u64 },
+}
+
+impl Items {
+    /// The integers of `range(start, stop, step)`: from `start` towards
+    /// `stop` in steps of `step` (not 0), with `stop` when a step lands on
+    /// it; none when `stop` lies the other way.
+    fn range(start: i64, stop: i64, step: i64) -> Self {
+        let span = i128::from(stop) - i128::from(start);
+        let len = if span != 0 && (span < 0) != (step < 0) {
+            0
+        } else {
+            // The span and the step have the same sign, so the quotient
+            // rounds down and every item lies between the bounds.
+            u64::try_from(span / i128::from(step) + 1).unwrap_or(u64::MAX)
+        };
+        Self::Range { start, step, len }
+    }
+
+    /// The items of the range whose bounds `value` holds, `[start, stop]` or
+    /// `[start, stop, step]`; none when a bound is no integer or the step is
+    /// 0, for which `range` gives null.
+    fn of_range_bounds(value: Option<Value>) -> Option<Self> {
+        let Some(Value::List(bounds)) = value else {
+            return None;
+        };
+        let bound = |index: usize| match bounds.get(index) {
+            Some(Value::Int64(bound)) => Some(*bound),
+            _ => None,
+        };
+        let step = match bounds.len() {
+            2 => 1,
+            3 => bound(2)?,
+            _ => return None,
+        };
+        if step == 0 {
+            return None;
+        }
+        Some(Self::range(bound(0)?, bound(1)?, step))
+    }
+
+    /// How many items there are.
+    fn len(&self) -> u64 {
+        match self {
+            Self::List(items) => u64::try_from(items.len()).unwrap_or(u64::MAX),
+            Self::Range { len, .. } => *len,
+        }
+    }
+
+    /// The item at `index`, which is below [`len`](Self::len).
+    fn item(&self, index: u64) -> Value {
+        match self {
+            Self::List(items) => {
+                items[usize::try_from(index).expect("below the length of a list")].clone()
+            }
+            Self::Range { start, step, .. } => {
+                let item = i128::from(*start) + i128::from(index) * i128::from(*step);
+                Value::Int64(i64::try_from(item).expect("an item lies between the bounds"))
+            }
+        }
+    }
 }
 
 /// How many rows an UNWIND's chunk takes.
@@ -87,6 +168,7 @@ impl UnwindOperator {
             emit_offset,
             passes_on_the_list: true,
             rows_per_chunk: RowsPerChunk::Full,
+            list_column: ListColumn::List,
             current: None,
             current_row: 0,
             current_list_idx: 0,
@@ -115,6 +197,19 @@ impl UnwindOperator {
     #[must_use]
     pub fn row_at_a_time(mut self) -> Self {
         self.rows_per_chunk = RowsPerChunk::One;
+        self
+    }
+
+    /// Reads the list column as the bounds of a `range` call, `[start, stop]`
+    /// or `[start, stop, step]`, and makes the range's integers as they are
+    /// unwound, never holding them as a list: `UNWIND range(1, 3000000000)
+    /// AS x` would first build a list of three billion values, and a second
+    /// `UNWIND range(1, n)` one list of `n` values per row of the first. A
+    /// bound that is no integer, or a step of 0, gives no rows, as the null
+    /// `range` gives for them does.
+    #[must_use]
+    pub fn range_bounds(mut self) -> Self {
+        self.list_column = ListColumn::RangeBounds;
         self
     }
 
@@ -149,20 +244,28 @@ impl UnwindOperator {
     }
 
     /// The list of the current row, when it holds one with elements: a
-    /// `Value::List` or a `Value::Vector`. Moves past rows without one.
-    fn next_list(&mut self) -> Option<Vec<Value>> {
+    /// `Value::List` or a `Value::Vector`, or the bounds of a range (see
+    /// [`range_bounds`](Self::range_bounds)). Moves past rows without one.
+    fn next_list(&mut self) -> Option<Items> {
         let input = self.current.as_ref()?;
         while let Some(&row) = input.rows.get(self.current_row) {
-            let list = match input.chunk.column(self.list_col_idx)?.get_value(row) {
-                Some(Value::List(list)) => list.iter().cloned().collect::<Vec<Value>>(),
-                Some(Value::Vector(vector)) => vector
-                    .iter()
-                    .map(|f| Value::Float64(f64::from(*f)))
-                    .collect(),
-                _ => Vec::new(),
+            let value = input.chunk.column(self.list_col_idx)?.get_value(row);
+            let items = if self.list_column == ListColumn::RangeBounds {
+                Items::of_range_bounds(value)
+            } else {
+                match value {
+                    Some(Value::List(list)) => Some(Items::List(list.iter().cloned().collect())),
+                    Some(Value::Vector(vector)) => Some(Items::List(
+                        vector
+                            .iter()
+                            .map(|f| Value::Float64(f64::from(*f)))
+                            .collect(),
+                    )),
+                    _ => None,
+                }
             };
-            if !list.is_empty() {
-                return Some(list);
+            if let Some(items) = items.filter(|items| items.len() > 0) {
+                return Some(items);
             }
             self.current_row += 1;
         }
@@ -197,7 +300,8 @@ impl UnwindOperator {
         if let Some(out_col) = builder.column_mut(element_col_idx) {
             out_col.push_value(element);
         }
-        // A list holds fewer than i64::MAX items, so its index fits.
+        // A list holds fewer than i64::MAX items, so its index fits; a range
+        // stops long before its index could reach it.
         let index = i64::try_from(self.current_list_idx).unwrap_or(i64::MAX);
         let mut next_col = element_col_idx + 1;
         if self.emit_ordinality {
@@ -217,7 +321,7 @@ impl UnwindOperator {
         if self
             .current_list
             .as_ref()
-            .is_some_and(|list| self.current_list_idx >= list.len())
+            .is_some_and(|items| self.current_list_idx >= items.len())
         {
             self.current_list = None;
             self.current_list_idx = 0;
@@ -252,6 +356,8 @@ impl Operator for UnwindOperator {
                     if let Some((builder, _)) = out.take() {
                         return Ok(Some(builder.finish()));
                     }
+                    // Rows without items read chunk after chunk here.
+                    crate::execution::deadline::check()?;
                     match self.child.next()? {
                         Some(chunk) => {
                             self.current = Some(self.input_chunk(chunk));
@@ -262,13 +368,13 @@ impl Operator for UnwindOperator {
                     }
                 }
             }
-            let list = self.current_list.as_ref().expect("a list: set above");
+            let items = self.current_list.as_ref().expect("a list: set above");
             // An item of a node or edge list is an ID (a returned node or
             // edge, a map with `_id`, stands for its ID) or null; any other
             // item goes into a column of any value, so it is never read as a
             // node or an edge.
             let element = entity_item(
-                list[self.current_list_idx].clone(),
+                items.item(self.current_list_idx),
                 &self.output_schema[element_col_idx],
             );
             let any = entity_items && !matches!(element, Value::Int64(_) | Value::Null);
@@ -922,5 +1028,171 @@ mod tests {
         );
         let any = Box::new(op).into_any();
         assert!(any.downcast::<UnwindOperator>().is_ok());
+    }
+
+    /// The rows an UNWIND of the range with bounds `bounds` gives: the
+    /// items, and the ordinality of each.
+    fn range_rows(bounds: Value) -> Vec<(Value, Value)> {
+        let mut builder = DataChunkBuilder::new(&[LogicalType::Any]);
+        builder.column_mut(0).unwrap().push_value(bounds);
+        builder.advance_row();
+        let child = MockOperator {
+            chunks: vec![builder.finish()],
+            position: 0,
+        };
+        let mut unwind = UnwindOperator::new(
+            Box::new(child),
+            0,
+            "x".to_string(),
+            vec![LogicalType::Any, LogicalType::Any, LogicalType::Int64],
+            true,
+            false,
+        )
+        .without_the_list()
+        .range_bounds();
+        rows_of(&mut unwind)
+            .iter()
+            .map(|row| {
+                assert_eq!(row.column(0).unwrap().get_value(0), Some(Value::Null));
+                (
+                    row.column(1).unwrap().get_value(0).unwrap(),
+                    row.column(2).unwrap().get_value(0).unwrap(),
+                )
+            })
+            .collect()
+    }
+
+    fn bounds(bounds: &[i64]) -> Value {
+        Value::List(
+            bounds
+                .iter()
+                .map(|&bound| Value::Int64(bound))
+                .collect::<Vec<_>>()
+                .into(),
+        )
+    }
+
+    /// The integers of `range(start, stop[, step])`, numbered from 1, as the
+    /// list `range` gives would unwind.
+    fn items(items: &[i64]) -> Vec<(Value, Value)> {
+        items
+            .iter()
+            .zip(1..)
+            .map(|(&item, ordinal)| (Value::Int64(item), Value::Int64(ordinal)))
+            .collect()
+    }
+
+    /// A range unwinds the integers `range` gives, in order, with the same
+    /// ends, steps and empty ranges, and stops before a step that overflows.
+    #[test]
+    fn a_range_unwinds_the_integers_range_gives() {
+        assert_eq!(range_rows(bounds(&[1, 5])), items(&[1, 2, 3, 4, 5]));
+        assert_eq!(range_rows(bounds(&[3, 3])), items(&[3]));
+        assert_eq!(range_rows(bounds(&[1, 10, 3])), items(&[1, 4, 7, 10]));
+        assert_eq!(range_rows(bounds(&[1, 9, 3])), items(&[1, 4, 7]));
+        assert_eq!(range_rows(bounds(&[10, 1, -4])), items(&[10, 6, 2]));
+        assert_eq!(range_rows(bounds(&[5, 1])), items(&[]));
+        assert_eq!(range_rows(bounds(&[1, 5, -1])), items(&[]));
+        assert_eq!(
+            range_rows(bounds(&[i64::MAX - 1, i64::MAX])),
+            items(&[i64::MAX - 1, i64::MAX])
+        );
+        assert_eq!(
+            range_rows(bounds(&[i64::MAX - 3, i64::MAX, 2])),
+            items(&[i64::MAX - 3, i64::MAX - 1])
+        );
+        assert_eq!(
+            range_rows(bounds(&[i64::MIN + 1, i64::MIN, -1])),
+            items(&[i64::MIN + 1, i64::MIN])
+        );
+        assert_eq!(
+            range_rows(bounds(&[i64::MIN, i64::MAX, i64::MAX])),
+            items(&[i64::MIN, -1, i64::MAX - 1])
+        );
+    }
+
+    /// Bounds `range` gives null for (a step of 0, a bound that is no
+    /// integer, a missing bound) give no rows, as null does.
+    #[test]
+    fn a_range_without_integers_unwinds_nothing() {
+        assert_eq!(range_rows(bounds(&[1, 5, 0])), items(&[]));
+        assert_eq!(range_rows(bounds(&[1])), items(&[]));
+        assert_eq!(
+            range_rows(Value::List(
+                vec![Value::Float64(1.0), Value::Int64(5)].into()
+            )),
+            items(&[])
+        );
+        assert_eq!(
+            range_rows(Value::List(vec![Value::Int64(1), Value::Null].into())),
+            items(&[])
+        );
+        assert_eq!(range_rows(Value::Null), items(&[]));
+    }
+
+    /// A range far longer than memory holds unwinds a chunk at a time.
+    #[test]
+    fn a_range_is_unwound_without_its_list() {
+        use crate::execution::chunk::DEFAULT_CHUNK_SIZE;
+
+        let mut builder = DataChunkBuilder::new(&[LogicalType::Any]);
+        builder
+            .column_mut(0)
+            .unwrap()
+            .push_value(bounds(&[1, i64::MAX]));
+        builder.advance_row();
+        let child = MockOperator {
+            chunks: vec![builder.finish()],
+            position: 0,
+        };
+        let mut unwind = UnwindOperator::new(
+            Box::new(child),
+            0,
+            "x".to_string(),
+            vec![LogicalType::Any, LogicalType::Any],
+            false,
+            false,
+        )
+        .range_bounds();
+        for first in [1, 1 + DEFAULT_CHUNK_SIZE] {
+            let chunk = unwind.next().unwrap().unwrap();
+            assert_eq!(chunk.row_count(), DEFAULT_CHUNK_SIZE);
+            assert_eq!(
+                chunk.column(1).unwrap().get_value(0),
+                Some(Value::Int64(i64::try_from(first).unwrap()))
+            );
+        }
+    }
+
+    /// Input rows without items are read under the query's deadline: an
+    /// UNWIND that finds no item fails with the timeout once it has passed.
+    #[test]
+    fn rows_without_items_are_read_under_the_deadline() {
+        let chunks = (0..3)
+            .map(|_| {
+                let mut builder = DataChunkBuilder::new(&[LogicalType::Any]);
+                builder.column_mut(0).unwrap().push_value(Value::Null);
+                builder.advance_row();
+                builder.finish()
+            })
+            .collect();
+        let child = MockOperator {
+            chunks,
+            position: 0,
+        };
+        let mut unwind = UnwindOperator::new(
+            Box::new(child),
+            0,
+            "x".to_string(),
+            vec![LogicalType::Any, LogicalType::Any],
+            false,
+            false,
+        );
+        let _deadline =
+            crate::execution::deadline::enter(Some(grafeo_common::clock::Instant::now()));
+        assert!(matches!(
+            unwind.next(),
+            Err(super::super::OperatorError::Timeout)
+        ));
     }
 }

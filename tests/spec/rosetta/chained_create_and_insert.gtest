@@ -1,0 +1,33 @@
+# Rosetta: a later INSERT or CREATE creates the nodes it does not find bound
+#
+# GQL's INSERT ... INSERT and Cypher's CREATE ... CREATE: a node variable an
+# earlier clause bound is that node, any other is a new node, also as the
+# end of an edge. GQL's later INSERT refused an unbound edge end as an
+# undefined variable; Cypher did it already.
+
+meta:
+  model: lpg
+  section: rosetta
+  title: Chained INSERT and CREATE
+  dataset: empty
+  requires: [cypher]
+
+tests:
+
+  - name: a_later_clause_creates_an_unbound_edge_end
+    variants:
+      gql: "INSERT (alix:Person {name: 'Alix'})-[:KNOWS]->(gus:Person {name: 'Gus'}) INSERT (alix)-[:WORKS_WITH]->(harm) RETURN 1 AS done"
+      cypher: "CREATE (alix:Person {name: 'Alix'})-[:KNOWS]->(gus:Person {name: 'Gus'}) CREATE (alix)-[:WORKS_WITH]->(harm) RETURN 1 AS done"
+    expect:
+      rows:
+        - [1]
+
+  - name: a_later_clause_chain_counts_its_nodes_and_edges
+    setup:
+      - "INSERT (a:P {n: 1}) INSERT (a)-[:R]->(b) INSERT (b)-[:R]->(c)"
+    variants:
+      gql: "RETURN COUNT { MATCH (n) } AS nodes, COUNT { MATCH ()-[r:R]->() } AS edges"
+      cypher: "RETURN COUNT { MATCH (n) } AS nodes, COUNT { MATCH ()-[r:R]->() } AS edges"
+    expect:
+      rows:
+        - [3, 2]

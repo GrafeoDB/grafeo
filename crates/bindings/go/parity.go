@@ -98,7 +98,7 @@ func cJSON(v any) (*C.char, error) {
 	if v == nil {
 		return nil, nil
 	}
-	data, err := json.Marshal(v)
+	data, err := marshalJSON(v)
 	if err != nil {
 		return nil, err
 	}

@@ -405,19 +405,31 @@ impl<'a> Lexer<'a> {
         TokenKind::Error // Unterminated string
     }
 
+    /// The rest of a backtick-delimited identifier, its opening backtick
+    /// read: up to the closing one, where two backticks in a row are one
+    /// backtick of the name (openCypher `EscapedSymbolicName`).
     fn scan_quoted_identifier(&mut self) -> TokenKind {
-        while !self.is_at_end() && self.current_char() != '`' {
-            if self.current_char() == '\n' {
-                self.line += 1;
-                self.column = 1;
+        while !self.is_at_end() {
+            match self.current_char() {
+                '`' if self.peek_char() == '`' => {
+                    self.advance();
+                    self.advance();
+                }
+                '`' => {
+                    self.advance(); // Closing backtick
+                    return TokenKind::QuotedIdentifier;
+                }
+                '\n' => {
+                    self.line += 1;
+                    self.column = 1;
+                    self.advance();
+                }
+                _ => {
+                    self.advance();
+                }
             }
-            self.advance();
         }
-        if self.is_at_end() {
-            return TokenKind::Error;
-        }
-        self.advance(); // Closing backtick
-        TokenKind::QuotedIdentifier
+        TokenKind::Error
     }
 
     fn scan_number(&mut self) -> TokenKind {

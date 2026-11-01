@@ -47,7 +47,7 @@ SESSION SET GRAPH quarterly;
 -- Typed graphs bind to graph types in the same schema, or to qualified ones
 CREATE GRAPH TYPE social_network (
   NODE TYPE Person (name STRING NOT NULL),
-  EDGE TYPE KNOWS
+  EDGE TYPE KNOWS ()
 );
 CREATE GRAPH friends TYPED social_network;           -- current schema
 CREATE GRAPH shared  TYPED social.social_network;     -- qualified reference
@@ -59,6 +59,10 @@ SHOW GRAPHS;  -- filtered to the current schema; hides the auto-default
 -- Drop (must be empty per Section 12.3)
 DROP SCHEMA reporting;
 ```
+
+Inside `CREATE GRAPH TYPE`, a `NODE TYPE` or `EDGE TYPE` with a property list, even an empty one
+(`EDGE TYPE KNOWS ()`), or with a `KEY` clause, defines the type there. A bare name (`EDGE TYPE KNOWS`) refers to a
+type that already exists in the catalog, as ISO GQL defines it.
 
 ## Isolation guarantees
 

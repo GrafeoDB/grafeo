@@ -31,7 +31,7 @@ use grafeo_core::graph::rowgroup::{IndexSearch, RowGroupStore};
 #[cfg(feature = "vector-index")]
 use grafeo_core::index::vector::check_query_vector;
 
-/// The error of a search through a vector index the default graph lacks.
+/// The error of a search through a vector index the current graph lacks.
 #[cfg(feature = "vector-index")]
 fn no_vector_index(label: &str, property: &str) -> Error {
     Error::InvalidValue(format!(
@@ -144,7 +144,7 @@ impl super::GrafeoDB {
         ef: Option<usize>,
         filters: Option<&std::collections::HashMap<String, Value>>,
     ) -> Result<Vec<(grafeo_common::types::NodeId, f32)>> {
-        let store = self.lpg_store()?;
+        let store = self.current_lpg_store()?;
         let config = store
             .vector_index_config(label, property)
             .ok_or_else(|| no_vector_index(label, property))?;
@@ -191,7 +191,7 @@ impl super::GrafeoDB {
         ef: Option<usize>,
         filters: Option<&std::collections::HashMap<String, Value>>,
     ) -> Result<Vec<Vec<(grafeo_common::types::NodeId, f32)>>> {
-        let store = self.lpg_store()?;
+        let store = self.current_lpg_store()?;
         let config = store
             .vector_index_config(label, property)
             .ok_or_else(|| no_vector_index(label, property))?;
@@ -254,7 +254,7 @@ impl super::GrafeoDB {
     ) -> Result<Vec<(grafeo_common::types::NodeId, f32)>> {
         use grafeo_core::index::vector::mmr_select;
 
-        let store = self.lpg_store()?;
+        let store = self.current_lpg_store()?;
         let config = store
             .vector_index_config(label, property)
             .ok_or_else(|| no_vector_index(label, property))?;
@@ -328,7 +328,7 @@ impl super::GrafeoDB {
         k: usize,
         filters: Option<&std::collections::HashMap<String, Value>>,
     ) -> Result<Vec<(NodeId, f64)>> {
-        let store = self.lpg_store()?;
+        let store = self.current_lpg_store()?;
         let (_pin, view) = self.search_view();
         let allowlist = Self::compute_filter_allowlist(&store, label, filters, view)?;
         let search = IndexSearch {
@@ -405,11 +405,25 @@ impl super::GrafeoDB {
 
         let fusion_method = fusion.unwrap_or_default();
         let mut sources: Vec<Vec<(NodeId, f64)>> = Vec::new();
-        let store = self.lpg_store()?;
+        let store = self.current_lpg_store()?;
         let fetch = k.saturating_mul(2);
         let vector_config = store.vector_index_config(label, vector_property);
         if let (Some(query_vec), Some(config)) = (query_vector, &vector_config) {
             check_query_vector(query_vec, config.dimensions, label, vector_property)?;
+        }
+        // A search with no index to read finds nothing because nothing is
+        // indexed, not because nothing matches: it fails, as vector and text
+        // searches do. One index is enough.
+        let vector_usable = query_vector.is_some() && vector_config.is_some();
+        if !vector_usable && store.get_text_index(label, text_property).is_none() {
+            return Err(Error::InvalidValue(format!(
+                "there is no text index on :{label}({text_property}){}; create one first",
+                if query_vector.is_some() {
+                    format!(" and no vector index on :{label}({vector_property})")
+                } else {
+                    String::new()
+                }
+            )));
         }
 
         // Both searches keep only the nodes that match the filters, before

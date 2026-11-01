@@ -8,8 +8,9 @@
 //! `GrafeoError` inherits from `RuntimeError`, so existing code that catches
 //! `RuntimeError` continues to work. New code can catch `GrafeoError`
 //! specifically and inspect `e.error_code` / `e.is_retryable`. A write to a
-//! closed database raises `DatabaseClosedError`, and a damaged database file
-//! `GrafeoCorruptionError`, both subclasses of `GrafeoError`.
+//! closed database raises `DatabaseClosedError`, a damaged database file
+//! `GrafeoCorruptionError`, and a database file another handle or process
+//! holds `GrafeoLockedError`, all subclasses of `GrafeoError`.
 
 use grafeo_common::utils::GqlStatus;
 use grafeo_common::utils::error::ErrorCode;
@@ -37,6 +38,13 @@ create_exception!(
     GrafeoCorruptionError,
     GrafeoError,
     "Raised when a file Grafeo wrote is damaged (error code GRAFEO-S002): a checksum, a header, a section or a WAL record that does not read back. The message names the file and, when known, the byte."
+);
+
+create_exception!(
+    grafeo,
+    GrafeoLockedError,
+    GrafeoError,
+    "Raised when a database file is open elsewhere (error code GRAFEO-S004, GQLSTATUS 08000): in another handle of this process, which must be closed first, or in another process. The message says which."
 );
 
 /// Grafeo errors that translate to Python exceptions.
@@ -71,6 +79,9 @@ pub enum PyGrafeoError {
 
     #[error("Corrupt file: {message}")]
     Corruption { message: String },
+
+    #[error("Database error: {message}")]
+    Locked { message: String },
 
     #[error("Invalid argument: {0}")]
     InvalidArgument(String),
@@ -149,6 +160,16 @@ impl From<PyGrafeoError> for PyErr {
                 );
                 err
             }),
+            PyGrafeoError::Locked { message } => Python::attach(|py| {
+                let err = GrafeoLockedError::new_err(message);
+                set_code(
+                    &err,
+                    py,
+                    ErrorCode::DatabaseLocked,
+                    GqlStatus::CONNECTION_EXCEPTION,
+                );
+                err
+            }),
         }
     }
 }
@@ -196,6 +217,9 @@ impl From<grafeo_common::utils::error::Error> for PyGrafeoError {
         let code = Some(err.error_code());
         let gql_status = Some(GqlStatus::from(&err));
         let message = err.to_string();
+        if err.error_code() == ErrorCode::DatabaseLocked {
+            return PyGrafeoError::Locked { message };
+        }
         match classify_error(&err) {
             ErrorCategory::Query => PyGrafeoError::Query {
                 message,

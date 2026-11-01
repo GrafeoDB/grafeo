@@ -2,29 +2,37 @@
 //! hold and when they go, the consumers the buffer manager asks, and a
 //! database that checkpoints, crashes and reopens with spill files present.
 
+#[cfg(feature = "vector-index")]
 use grafeo_common::types::ReadView;
+#[cfg(feature = "vector-index")]
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use grafeo_common::types::{EpochId, NodeId, PropertyKey, TransactionId, Value};
+use grafeo_common::types::PropertyKey;
+use grafeo_common::types::{EpochId, NodeId, TransactionId, Value};
 use grafeo_common::utils::error::Error;
 use grafeo_core::execution::operators::GraphWriter;
 use grafeo_core::graph::GraphStore;
 use grafeo_core::graph::apply::GraphBackend;
 use grafeo_core::graph::rowgroup::RowGroupStore;
 
+#[cfg(feature = "vector-index")]
 use super::ColumnSpillFiles;
+#[cfg(feature = "vector-index")]
 use crate::catalog::Catalog;
+#[cfg(feature = "vector-index")]
 use crate::database::row_group_sections::{continue_row_group_epochs, load_row_group_sections};
+#[cfg(feature = "vector-index")]
 use crate::database::sections::CheckpointSources;
 use crate::transaction::{TransactionChanges, TransactionManager};
 
 /// A database on a row-group root, as `GrafeoDB` holds its parts.
 struct Database {
     root: Arc<RowGroupStore>,
+    #[cfg(feature = "vector-index")]
     catalog: Arc<Catalog>,
     transaction_manager: Arc<TransactionManager>,
-    #[cfg(feature = "triple-store")]
+    #[cfg(all(feature = "triple-store", feature = "vector-index"))]
     rdf_store: Arc<grafeo_core::graph::rdf::RdfStore>,
 }
 
@@ -39,9 +47,10 @@ impl Database {
     fn new() -> Self {
         Self {
             root: Arc::new(RowGroupStore::new()),
+            #[cfg(feature = "vector-index")]
             catalog: Arc::new(Catalog::new()),
             transaction_manager: Arc::new(TransactionManager::new()),
-            #[cfg(feature = "triple-store")]
+            #[cfg(all(feature = "triple-store", feature = "vector-index"))]
             rdf_store: Arc::new(grafeo_core::graph::rdf::RdfStore::new()),
         }
     }
@@ -99,7 +108,7 @@ impl Database {
         self.commit(open)
     }
 
-    #[cfg(feature = "grafeo-file")]
+    #[cfg(all(feature = "grafeo-file", feature = "vector-index"))]
     fn sources(&self) -> CheckpointSources {
         CheckpointSources {
             store: Arc::clone(&self.root),
@@ -113,6 +122,7 @@ impl Database {
     }
 }
 
+#[cfg(feature = "vector-index")]
 fn embedding() -> PropertyKey {
     PropertyKey::new("embedding")
 }
@@ -148,6 +158,7 @@ fn items(database: &Database, graph: Option<&str>, count: u16) -> Vec<NodeId> {
 }
 
 /// Every item reads its embedding.
+#[cfg(feature = "vector-index")]
 fn assert_embeddings(store: &RowGroupStore, ids: &[NodeId], what: &str) {
     for (rank, id) in (0u16..).zip(ids) {
         assert_eq!(
@@ -161,6 +172,7 @@ fn assert_embeddings(store: &RowGroupStore, ids: &[NodeId], what: &str) {
 }
 
 /// The files in `directory`, none when it is missing.
+#[cfg(feature = "vector-index")]
 fn files_in(directory: &Path) -> Vec<PathBuf> {
     let Ok(entries) = std::fs::read_dir(directory) else {
         return Vec::new();
@@ -173,6 +185,7 @@ fn files_in(directory: &Path) -> Vec<PathBuf> {
 /// A spilled column's file holds its chunks while a chunk reads it: a
 /// write thaws the column and removes the file, so does a reload, and so
 /// does dropping the store.
+#[cfg(feature = "vector-index")]
 #[test]
 fn a_spill_file_lives_as_long_as_a_chunk_reads_it() {
     let dir = tempfile::tempdir().unwrap();
@@ -246,6 +259,7 @@ fn a_spill_file_lives_as_long_as_a_chunk_reads_it() {
 
 /// A spill file that cannot be written leaves nothing behind and the
 /// column in memory.
+#[cfg(feature = "vector-index")]
 #[test]
 fn a_failed_spill_file_leaves_nothing_behind() {
     let dir = tempfile::tempdir().unwrap();
@@ -292,7 +306,14 @@ fn the_registered_consumers_report_the_store_and_its_indexes() {
         )),
     );
     let manager = BufferManager::with_budget(1 << 30);
-    super::register_row_group_consumers(&manager, &database.root, None, None);
+    super::register_row_group_consumers(
+        &manager,
+        &database.root,
+        #[cfg(feature = "vector-index")]
+        None,
+        #[cfg(feature = "vector-index")]
+        None,
+    );
     let tiers = manager.snapshot_consumer_tiers();
     let tier = |name: &str| {
         tiers
@@ -484,7 +505,7 @@ mod consumers {
     }
 }
 
-#[cfg(feature = "grafeo-file")]
+#[cfg(all(feature = "grafeo-file", feature = "vector-index"))]
 mod file {
     use grafeo_common::types::ReadView;
     use std::path::{Path, PathBuf};
@@ -627,7 +648,11 @@ mod file {
 /// The crash points of a checkpoint without a WAL, as the row-group
 /// sections' crash test lists them; the new header is on disk from the
 /// sixth on.
-#[cfg(all(feature = "grafeo-file", feature = "testing-crash-injection"))]
+#[cfg(all(
+    feature = "grafeo-file",
+    feature = "vector-index",
+    feature = "testing-crash-injection"
+))]
 const CHECKPOINT_POINTS: [&str; 8] = [
     "flush:before_serialize",
     "flush:after_rotate",
@@ -645,7 +670,11 @@ const CHECKPOINT_POINTS: [&str; 8] = [
 /// checkpoint whose header reached the file, every embedding read from the
 /// database file. The database is built outside the crash, and nothing
 /// closes it: its spill files are left as a crash leaves them.
-#[cfg(all(feature = "grafeo-file", feature = "testing-crash-injection"))]
+#[cfg(all(
+    feature = "grafeo-file",
+    feature = "vector-index",
+    feature = "testing-crash-injection"
+))]
 #[test]
 fn a_crash_while_a_column_is_spilled_reopens_from_the_last_checkpoint() {
     use std::panic::AssertUnwindSafe;

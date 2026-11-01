@@ -208,15 +208,17 @@ Save and restore database snapshots for backup or migration:
     db.restore_snapshot(&data)?;
     ```
 
-Snapshots include all nodes, edges, properties, labels, schema definitions, index metadata and named graph data. The current format is v4, which also preserves temporal version history.
+Snapshots include all nodes, edges, properties, labels, schema definitions, index metadata and named graph data. The current format is v5, which also keeps the whole catalog and temporal version history.
+
+`restore_snapshot` replaces the catalog: afterwards the database has the snapshot's node and edge types, graph types, constraints, procedures, schemas and indexes only, not the ones it had before. A snapshot whose catalog does not apply (a graph type defined twice) fails the import or restore, and a restore that fails changes nothing. A restore is written to the database file before it returns, with commits held off meanwhile, so a crash afterwards keeps the restored data.
 
 `save()` writes a copy of the database to a new single file, whatever the extension of the path, and fails if the path already exists. The copy is a database of its own: open it like any other.
 
 ## Upgrading from 0.5
 
-Grafeo 0.6.0 writes databases in a new file format, and every database is a single file. A database written by 0.5.x is migrated the first time 0.6 opens it for writing: with `GrafeoDB(path=...)` in Python, `GrafeoDB::open` in Rust, a read-write open in another binding, or a command of the `grafeo` command line tool. Both kinds of 0.5.x database are migrated: a single file (usually `.grafeo`, at any extension), and a WAL directory (a directory holding `wal/`, which 0.5.x created by default for a path without the `.grafeo` extension).
+Grafeo 0.6.0 writes databases in a new file format, and every database is a single file. A database written by 0.5.x is migrated the first time 0.6 opens it for writing: with `GrafeoDB(path=...)` in Python, `GrafeoDB::open` in Rust, a read-write open in another binding, or a command of the `grafeo` command line tool. Both kinds of 0.5.x database are migrated: a single file (usually `.grafeo`, at any extension), and a WAL directory (a directory holding `wal/`, which 0.5.x created by default for a path without the `.grafeo` extension). Both keep their property, vector and text indexes. A 0.5.x single file that 0.6.0 migrated lost its indexes, and 0.6.1 does not repair such a file: create its indexes again.
 
-The migration reads the old database, including the changes in its WAL, and writes it to a new file (named `my_graph.grafeo.migrating` while it is written, so the migration needs free disk space for a copy of the database). It then renames the old files and gives the new file the database's name. The old files are kept, byte for byte:
+The migration reads the old database, including the changes in its WAL, and writes it to a new file (named `my_graph.grafeo.migrating` while it is written, so the migration needs free disk space for a copy of the database). Before it replaces anything, it opens the new file and compares its nodes, edges, named graphs, indexes and constraints with the old database: a difference fails the migration and keeps the old files. It then renames the old files and gives the new file the database's name. The old files are kept, byte for byte:
 
 | Written by 0.5.x | Kept as |
 |------------------|---------|

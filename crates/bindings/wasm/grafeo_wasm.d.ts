@@ -252,6 +252,13 @@ export class Database {
     options?: { direction?: "out" | "in" | "both"; edgeTypes?: string[] },
   ): [number, number][];
 
+  /**
+   * Deletes a node and all its incident edges in one operation. Uses the active
+   * transaction, if any; rollback restores the node and edges. Returns false if
+   * the node is absent. The ID must be a nonnegative safe integer.
+   */
+  detachDeleteNode(id: number): boolean;
+
   /** Returns the number of nodes in the database. */
   nodeCount(): number;
 
@@ -300,29 +307,44 @@ export class Database {
   static importSnapshot(data: Uint8Array): Database;
 
   /**
-   * Returns schema information about the database.
-   *
-   * @returns An object describing labels, edge types, and property keys.
+   * Returns schema information: the labels, edge types and property keys
+   * in use, each sorted by name, with each label's and edge type's
+   * properties (the types of their values) and the labels each edge type
+   * connects. It reads the whole graph.
    *
    * @example
    * ```js
    * const schema = db.schema();
-   * // { Lpg: { labels: [{name: "Person", count: 5}], edge_types: [...], property_keys: [...] } }
+   * // { mode: "lpg",
+   * //   labels: [{ name: "Person", count: 5, properties: [{ name: "name", types: ["STRING"] }] }],
+   * //   edge_types: [{ name: "KNOWS", count: 3, properties: [],
+   * //                  endpoints: [{ source: "Person", target: "Person", count: 3 }] }],
+   * //   property_keys: ["name"] }
    * ```
    */
-  schema(): {
-    Lpg?: {
-      labels: Array<{ name: string; count: number }>;
-      edge_types: Array<{ name: string; count: number }>;
-      property_keys: string[];
-    };
-    Rdf?: {
-      predicates: Array<{ iri: string; count: number }>;
-      named_graphs: string[];
-      subject_count: number;
-      object_count: number;
-    };
-  };
+  schema():
+    | {
+        mode: "lpg";
+        labels: Array<{
+          name: string;
+          count: number;
+          properties: Array<{ name: string; types: string[] }>;
+        }>;
+        edge_types: Array<{
+          name: string;
+          count: number;
+          properties: Array<{ name: string; types: string[] }>;
+          endpoints: Array<{ source: string; target: string; count: number }>;
+        }>;
+        property_keys: string[];
+      }
+    | {
+        mode: "rdf";
+        predicates: Array<{ iri: string; count: number }>;
+        named_graphs: string[];
+        subject_count: number;
+        object_count: number;
+      };
 
   /**
    * Batch-imports LPG (Labeled Property Graph) data from a structured object.

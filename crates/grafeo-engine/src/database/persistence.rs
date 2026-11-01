@@ -10,9 +10,7 @@ use hashbrown::HashSet;
 
 use crate::config::Config;
 
-use crate::catalog::{
-    EdgeTypeDefinition, GraphTypeDefinition, NodeTypeDefinition, ProcedureDefinition,
-};
+use crate::catalog::{GraphTypeDefinition, ProcedureDefinition};
 
 /// Current snapshot version: 5 holds the catalog as its records (the
 /// catalog section's own, see `catalog_record`); 4, which 0.5.x and
@@ -149,7 +147,7 @@ pub(super) fn apply_catalog_records<S: super::root_store::RootStore>(
             None,
             Some(store),
             catalog,
-            &mut Applying::Replay {
+            &mut Applying::Snapshot {
                 unbuilt: &mut unbuilt,
             },
         )?;
@@ -178,8 +176,8 @@ struct Snapshot {
 /// Schema metadata within a snapshot.
 #[derive(serde::Serialize, serde::Deserialize, Default)]
 struct SnapshotSchema {
-    node_types: Vec<NodeTypeDefinition>,
-    edge_types: Vec<EdgeTypeDefinition>,
+    node_types: Vec<super::catalog_records::LegacyNodeType>,
+    edge_types: Vec<super::catalog_records::LegacyEdgeType>,
     graph_types: Vec<GraphTypeDefinition>,
     procedures: Vec<ProcedureDefinition>,
     schemas: Vec<String>,
@@ -572,20 +570,13 @@ fn populate_rdf_store(store: &grafeo_core::graph::rdf::RdfStore, graphs: RdfSnap
 /// RDF triples or graphs, which the database would be loaded (and migrated)
 /// without.
 #[cfg(feature = "grafeo-file")]
-#[cfg_attr(
-    feature = "triple-store",
-    expect(
-        unused_variables,
-        reason = "only a build without `triple-store` refuses the snapshot, naming the file"
-    )
-)]
 pub(super) fn load_snapshot_into_store<S: super::root_store::RootStore>(
     path: &Path,
     store: &std::sync::Arc<S>,
     catalog: &std::sync::Arc<crate::catalog::Catalog>,
     #[cfg(feature = "triple-store")] rdf_store: &std::sync::Arc<grafeo_core::graph::rdf::RdfStore>,
     data: &[u8],
-) -> grafeo_common::utils::error::Result<()> {
+) -> grafeo_common::utils::error::Result<super::catalog_section::GraphIndexes> {
     use grafeo_common::utils::error::Error;
 
     let config = bincode::config::standard();
@@ -605,6 +596,26 @@ pub(super) fn load_snapshot_into_store<S: super::root_store::RootStore>(
             )],
         ));
     }
+    // Its indexes are built once its data is in, as a 0.6 file's are: a
+    // build that cannot build them does not open it, as with other data of
+    // a feature it lacks.
+    let missing: Vec<_> = [
+        (
+            cfg!(not(feature = "vector-index")) && !snapshot.indexes.vector_indexes.is_empty(),
+            &super::sections::VECTOR_INDEXES,
+        ),
+        (
+            cfg!(not(feature = "text-index")) && !snapshot.indexes.text_indexes.is_empty(),
+            &super::sections::TEXT_INDEXES,
+        ),
+    ]
+    .into_iter()
+    .filter(|(lacking, _)| *lacking)
+    .map(|(_, feature)| (feature, "the snapshot of a 0.5.x file".to_string()))
+    .collect();
+    if !missing.is_empty() {
+        return Err(super::sections::refusal(path, &missing));
+    }
 
     populate_store_from_snapshot(&**store, &snapshot.nodes, &snapshot.edges)?;
 
@@ -619,7 +630,7 @@ pub(super) fn load_snapshot_into_store<S: super::root_store::RootStore>(
         populate_store_from_snapshot(&*graph_store, &graph.nodes, &graph.edges)?;
         graph_store.load_section_epoch(EpochId::new(snapshot.epoch));
     }
-    restore_schema_from_snapshot(store, catalog, &snapshot.schema);
+    restore_schema_from_snapshot(store, catalog, &snapshot.schema)?;
 
     // Restore RDF triples
     #[cfg(feature = "triple-store")]
@@ -627,39 +638,77 @@ pub(super) fn load_snapshot_into_store<S: super::root_store::RootStore>(
         populate_rdf_store(rdf_store, rdf_graphs);
     }
 
-    Ok(())
+    // A property index is built at once, as replay builds one; the vector
+    // and text indexes once the data is in (see `LoadedSections::unbuilt_mut`).
+    for key in &snapshot.indexes.property_indexes {
+        store.create_property_index(key);
+    }
+    Ok(row_groups::indexes_of_v4(snapshot.indexes))
 }
 
 /// Restores schema definitions from a snapshot into the catalog.
 ///
 /// Also ensures each schema has its `__default__` graph partition, which
 /// may be missing in snapshots created before the schema hierarchy feature.
+///
+/// # Errors
+///
+/// A corruption error for a definition that does not apply: a graph type
+/// defined twice, a procedure or schema the catalog refuses, a default
+/// graph the store cannot make. A schema listed twice is no damage, and a
+/// binding to a graph type the snapshot lacks is left out (0.5.x left one
+/// behind when its graph type was dropped).
 fn restore_schema_from_snapshot<S: super::catalog_section::CatalogStore>(
     store: &std::sync::Arc<S>,
     catalog: &std::sync::Arc<crate::catalog::Catalog>,
     schema: &SnapshotSchema,
-) {
+) -> grafeo_common::utils::error::Result<()> {
+    use crate::catalog::CatalogError;
+    use grafeo_common::utils::error::Error;
+
+    let damaged = |what: String| Error::corruption(format!("the snapshot's schema: {what}"));
     for def in &schema.node_types {
-        catalog.register_or_replace_node_type(def.clone());
+        let def = def.definition()?;
+        catalog.register_or_replace_node_type(def);
     }
     for def in &schema.edge_types {
-        catalog.register_or_replace_edge_type_def(def.clone());
+        let def = def.definition()?;
+        catalog.register_or_replace_edge_type_def(def);
     }
     for def in &schema.graph_types {
-        let _ = catalog.register_graph_type(def.clone());
+        let name = def.name.clone();
+        catalog
+            .register_graph_type(def.clone())
+            .map_err(|error| damaged(format!("graph type '{name}': {error}")))?;
     }
     for def in &schema.procedures {
-        catalog.replace_procedure(def.clone()).ok();
+        let name = def.name.clone();
+        catalog
+            .replace_procedure(def.clone())
+            .map_err(|error| damaged(format!("procedure '{name}': {error}")))?;
     }
     for name in &schema.schemas {
-        let _ = catalog.register_schema_namespace(name.clone());
+        match catalog.register_schema_namespace(name.clone()) {
+            Ok(()) | Err(CatalogError::SchemaAlreadyExists(_)) => {}
+            Err(error) => return Err(damaged(format!("schema '{name}': {error}"))),
+        }
         // Ensure the schema's default graph partition exists
         let default_key = format!("{name}/__default__");
-        let _ = store.create_graph(&default_key);
+        store
+            .create_graph(&default_key)
+            .map_err(|error| damaged(format!("the default graph of schema '{name}': {error}")))?;
     }
     for (graph_name, type_name) in &schema.graph_type_bindings {
-        let _ = catalog.bind_graph_type(graph_name, type_name.clone());
+        match catalog.bind_graph_type(graph_name, type_name.clone()) {
+            Ok(()) | Err(CatalogError::TypeNotFound(_)) => {}
+            Err(error) => {
+                return Err(damaged(format!(
+                    "the binding of graph '{graph_name}' to '{type_name}': {error}"
+                )));
+            }
+        }
     }
+    Ok(())
 }
 
 impl super::GrafeoDB {
@@ -875,10 +924,9 @@ impl super::GrafeoDB {
         let mut image = grafeo_common::storage::MemoryImage::new();
         // The epoch of the commits the copy holds, for `to_memory` to
         // continue from once its stores are loaded.
-        target
-            .transaction_manager
-            .sync_epoch(EpochId::new(sources.epoch()));
-        for section in sources.sections(commits) {
+        let epoch = sources.epoch(commits);
+        target.transaction_manager.sync_epoch(epoch);
+        for section in sources.sections_at(commits, epoch) {
             image.begin_section(section.section_type(), section.version())?;
             section.write_to(&mut image)?;
         }
@@ -975,7 +1023,7 @@ impl super::GrafeoDB {
         let sources = self.checkpoint_sources()?;
         let commits = self.transaction_manager.hold_commits()?;
         let root = std::sync::Arc::clone(&sources.store);
-        let epoch = EpochId::new(sources.epoch());
+        let epoch = sources.epoch(&commits);
         // The graphs are read at the epoch with commits going on, while a
         // read pinned at it keeps their versions (#362); the rest is taken
         // under the hold.
@@ -1066,9 +1114,9 @@ impl super::GrafeoDB {
     /// on a read-only database, and the database-closed error after `close()`
     /// of a persistent database (read-only or not).
     pub fn restore_snapshot(&self, data: &[u8]) -> Result<()> {
-        // A restore writes no WAL record: after `close()` (which releases the
-        // file) nothing would persist it, so it fails then, and `close()`
-        // waits for one in progress.
+        // A restore writes no WAL record but a checkpoint: after `close()`
+        // (which releases the file) nothing would persist it, so it fails
+        // then, and `close()` waits for one in progress.
         let _open = self.hold_open()?;
         if self.read_only {
             return Err(Error::Transaction(
@@ -1077,13 +1125,19 @@ impl super::GrafeoDB {
         }
         // A checkpoint reads the stores while it writes its image, with
         // commits going on: a restore replaces them whole, so it waits for
-        // one in progress, and the next one waits for it.
+        // one in progress, and the next one waits for it. Commits wait for
+        // the restore too, from the first store it replaces to the
+        // checkpoint that makes it durable (#677).
         #[cfg(feature = "grafeo-file")]
         let _checkpoint = self.file_manager.as_ref().map(|fm| fm.checkpoint_guard());
-        self.transaction_manager.check_no_incomplete_commit()?;
+        let commits = self.transaction_manager.hold_commits()?;
         self.transaction_manager.check_open()?;
         // Validates the snapshot and refuses data this build cannot read
-        // before it changes anything (see `row_groups::restore`).
+        // before it changes anything (see `row_groups::restore`), and a
+        // snapshot that does not apply whole (a catalog record that fails) is
+        // refused before anything changes too: a restore into an emptied
+        // database that stopped halfway would be checkpointed so (#677).
+        row_groups::trial_restore(data)?;
         let root = self.lpg_store()?;
         row_groups::restore(&self.snapshot_parts(&root), data, "restore")?;
         // The database continues at the snapshot's epoch, or above it when
@@ -1092,6 +1146,15 @@ impl super::GrafeoDB {
         // Its graphs, indexes and types are the snapshot's now: no cached
         // plan was made for them.
         self.query_cache.clear();
+        // Durable before it returns: the file holds the restored state and
+        // the WAL starts after it, with no commit between, so a crash from
+        // here reopens what the restore put in place, not what it replaced.
+        #[cfg(feature = "grafeo-file")]
+        if let Some(fm) = &self.file_manager {
+            super::flush::flush_held(fm, &self.checkpoint_sources()?, None, commits)?;
+        }
+        #[cfg(not(feature = "grafeo-file"))]
+        drop(commits);
         Ok(())
     }
 
@@ -1323,8 +1386,9 @@ pub(super) mod row_groups {
             .map_err(|e| Error::Internal(format!("snapshot export failed: {e}")))
     }
 
-    /// The default graph's indexes a snapshot of version 4 defines.
-    fn indexes_of_v4(indexes: SnapshotIndexes) -> GraphIndexes {
+    /// The default graph's indexes a snapshot of version 4 (and a 0.5.x
+    /// container v1 file) defines.
+    pub(super) fn indexes_of_v4(indexes: SnapshotIndexes) -> GraphIndexes {
         GraphIndexes {
             graph: None,
             property: indexes.property_indexes,
@@ -1366,6 +1430,28 @@ pub(super) mod row_groups {
     /// As `import_snapshot` and `restore_snapshot`: a snapshot that does not
     /// decode or validate, data this build cannot read, a row or record the
     /// stores refuse.
+    /// Restores the snapshot `data` into a database of its own, which is
+    /// dropped: whether every row and record of it applies, so a restore that
+    /// would fail halfway is refused before it changes the database. It holds
+    /// the snapshot's data a second time while it runs.
+    ///
+    /// # Errors
+    ///
+    /// As [`restore`].
+    pub(in crate::database) fn trial_restore(data: &[u8]) -> Result<()> {
+        let root = Arc::new(RowGroupStore::new());
+        let catalog = Arc::new(Catalog::new());
+        #[cfg(feature = "triple-store")]
+        let rdf = Arc::new(grafeo_core::graph::rdf::RdfStore::new());
+        let parts = Parts {
+            root: &root,
+            catalog: &catalog,
+            #[cfg(feature = "triple-store")]
+            rdf: &rdf,
+        };
+        restore(&parts, data, "restore")
+    }
+
     pub(in crate::database) fn restore(parts: &Parts<'_>, data: &[u8], action: &str) -> Result<()> {
         let decoded = decode_snapshot(data, action)?;
         refuse_unreadable_snapshot(&decoded, action)?;
@@ -1411,7 +1497,10 @@ pub(super) mod row_groups {
             }
             super::populate_rdf_store(parts.rdf, rdf_graphs);
         }
-        restore_schema_from_snapshot(root, parts.catalog, &snapshot.schema);
+        // The snapshot's definitions in place of the database's, not merged
+        // into them: a restore gives the database the snapshot was taken of.
+        parts.catalog.clear_definitions();
+        restore_schema_from_snapshot(root, parts.catalog, &snapshot.schema)?;
         let mut indexes = vec![indexes_of_v4(snapshot.indexes)];
         indexes.extend(apply_catalog_records(root, parts.catalog, records)?);
         super::super::row_group_sections::restore_row_group_indexes(root, indexes);
@@ -1928,14 +2017,15 @@ mod tests {
             }
             value
         };
-        // A limit on input: an invalid value, never an internal error.
-        let invalid = |error: grafeo_common::utils::error::Error, what: &str| {
+        // A limit on input: an invalid value naming what it was given as
+        // (`named`), never an internal error.
+        let invalid = |error: grafeo_common::utils::error::Error, what: &str, named: &str| {
             assert!(
                 matches!(error, grafeo_common::utils::error::Error::InvalidValue(_)),
                 "{what}: {error:?}"
             );
             let message = error.to_string();
-            assert!(message.contains("\"trips\""), "{what}: {message}");
+            assert!(message.contains(named), "{what}: {message}");
             assert!(message.contains("GRAFEO-V"), "{what}: {message}");
         };
         let db = GrafeoDB::new_in_memory();
@@ -1945,17 +2035,21 @@ mod tests {
             db.set_node_property(alix, "trips", too_deep.clone())
                 .unwrap_err(),
             "set_node_property",
+            "\"trips\"",
         );
         invalid(
             db.create_node_with_props(&["Person"], [("trips", too_deep.clone())])
                 .unwrap_err(),
             "create_node_with_props",
+            "\"trips\"",
         );
+        // A statement refuses the parameter itself, before it runs.
         let params = [("trips".to_string(), too_deep)].into_iter().collect();
         invalid(
             db.execute_with_params("INSERT (:Person {trips: $trips})", params)
                 .unwrap_err(),
             "an INSERT parameter",
+            "parameter $trips",
         );
         assert_eq!(db.node_count().unwrap(), 1, "nothing was written");
 

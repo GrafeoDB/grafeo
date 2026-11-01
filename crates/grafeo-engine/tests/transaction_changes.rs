@@ -7,6 +7,10 @@
 //! results (a rollback leaves counts and planner statistics as they were, a
 //! savepoint undoes only its own transaction's later writes) and the cost (a
 //! write in a large database costs about what it costs in a small one).
+#![allow(
+    deprecated,
+    reason = "the test reaches the row-group store itself, which only the deprecated GrafeoDB::store() gives, until 0.7.0 removes it"
+)]
 
 use std::time::Instant;
 

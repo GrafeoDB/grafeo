@@ -50,7 +50,7 @@ required-features = ["wal"]
 [features]
 default = ["wal"]
 wal = ["memmap2", "tokio", "crossbeam"]
-async-storage = ["wal"]
+async-storage = ["wal"]  # Deprecated since 0.6.1 with the engine feature of the same name; removed in 0.7.0
 grafeo-file = ["wal", "fs2"]
 tracing = ["dep:tracing", "grafeo-common/tracing"]
 testing-crash-injection = ["grafeo-common/testing-crash-injection"]

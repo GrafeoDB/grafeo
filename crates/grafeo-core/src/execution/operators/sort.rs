@@ -5,9 +5,9 @@
 
 use std::cmp::Ordering;
 
-use grafeo_common::types::Value;
+use grafeo_common::types::{TemporalComparison, Value};
 
-use super::value_utils::compare_sort_values;
+use super::value_utils::compare_sort_values_under;
 use super::{Operator, OperatorError, OperatorResult};
 use crate::execution::DataChunk;
 use crate::execution::chunk::{ColumnTypes, DataChunkBuilder};
@@ -101,6 +101,10 @@ pub struct SortOperator {
     sort_complete: bool,
     /// Current position in output.
     output_position: usize,
+    /// How the sort keys read a local datetime against a zoned one (see
+    /// [`TemporalComparison::normalize`]); `TypesApart` reads every value
+    /// as itself.
+    temporal: TemporalComparison,
 }
 
 impl SortOperator {
@@ -115,7 +119,22 @@ impl SortOperator {
             sorted_rows: Vec::new(),
             sort_complete: false,
             output_position: 0,
+            temporal: TemporalComparison::TypesApart,
         }
+    }
+
+    /// The operator with `temporal` as the reading of its sort keys (the
+    /// statement's `<`). The rows keep their values.
+    #[must_use]
+    pub fn with_temporal(mut self, temporal: TemporalComparison) -> Self {
+        self.temporal = temporal;
+        self
+    }
+
+    /// How the sort keys read temporal values (see [`Self::with_temporal`]).
+    #[must_use]
+    pub fn temporal(&self) -> TemporalComparison {
+        self.temporal
     }
 
     /// Returns only the first `width` columns of each row: the columns after
@@ -144,6 +163,7 @@ impl SortOperator {
     fn sort(&mut self) -> Result<(), OperatorError> {
         // Materialize all input
         while let Some(chunk) = self.child.next()? {
+            crate::execution::deadline::check()?;
             let chunk_idx = self.chunks.len();
             for row_idx in chunk.selected_indices() {
                 self.sorted_rows.push(SortRow {
@@ -158,6 +178,7 @@ impl SortOperator {
         // Sort the row references
         let chunks = &self.chunks;
         let sort_keys = &self.sort_keys;
+        let temporal = self.temporal;
 
         self.sorted_rows.sort_by(|a, b| {
             for key in sort_keys {
@@ -171,11 +192,12 @@ impl SortOperator {
                     .column(key.column)
                     .and_then(|c| c.get_value(b.row_index));
 
-                let cmp = compare_sort_values(
+                let cmp = compare_sort_values_under(
                     val_a.as_ref(),
                     val_b.as_ref(),
                     key.direction,
                     key.null_order,
+                    temporal,
                 );
 
                 if cmp != Ordering::Equal {

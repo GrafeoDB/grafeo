@@ -38,6 +38,7 @@ WHERE {
 }
 
 # Equivalent to:
+PREFIX foaf: <http://xmlns.com/foaf/0.1/>
 SELECT ?name
 WHERE {
     <http://example.org/alix> foaf:knows ?friend .
@@ -59,6 +60,7 @@ WHERE {
 }
 
 # Multiple alternatives
+PREFIX foaf: <http://xmlns.com/foaf/0.1/>
 SELECT ?contact
 WHERE {
     ?person foaf:mbox|foaf:phone|foaf:homepage ?contact
@@ -93,6 +95,7 @@ WHERE {
 }
 
 # All descendants
+PREFIX ex: <http://example.org/>
 SELECT ?descendant
 WHERE {
     ?ancestor ex:parent+ ?descendant
@@ -127,6 +130,7 @@ WHERE {
 }
 
 # Equivalent to:
+PREFIX foaf: <http://xmlns.com/foaf/0.1/>
 SELECT ?person
 WHERE {
     ?person foaf:knows <http://example.org/alix>
@@ -139,16 +143,23 @@ Match any predicate except specified ones:
 
 ```sparql
 PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
 
-# All predicates except rdf:type
-SELECT ?p ?o
+# Every value of Alix except her types
+SELECT ?o
 WHERE {
     <http://example.org/alix> !rdf:type ?o
-    BIND(?p AS !rdf:type)
+}
+
+# The same with the predicate in the result: a FILTER on a variable
+SELECT ?p ?o
+WHERE {
+    <http://example.org/alix> ?p ?o
+    FILTER(?p != rdf:type)
 }
 
 # Multiple exclusions
-SELECT ?p ?o
+SELECT ?s ?o
 WHERE {
     ?s !(rdf:type|rdfs:label) ?o
 }
@@ -167,12 +178,14 @@ WHERE {
 }
 
 # All names in the friend network
+PREFIX foaf: <http://xmlns.com/foaf/0.1/>
 SELECT DISTINCT ?name
 WHERE {
     <http://example.org/alix> foaf:knows+/foaf:name ?name
 }
 
 # Bidirectional knows relationship
+PREFIX foaf: <http://xmlns.com/foaf/0.1/>
 SELECT ?person
 WHERE {
     <http://example.org/alix> (foaf:knows|^foaf:knows)+ ?person
@@ -221,6 +234,7 @@ WHERE {
 }
 
 # Equivalent to:
+PREFIX foaf: <http://xmlns.com/foaf/0.1/>
 SELECT ?person
 WHERE {
     ?person rdf:type foaf:Person
@@ -231,13 +245,20 @@ WHERE {
 
 ### Social Network Reachability
 
+SPARQL 1.1 has no `{m,n}` path quantifier, so write a bounded distance as a union of fixed-length paths (`+`
+reaches any distance):
+
 ```sparql
 PREFIX foaf: <http://xmlns.com/foaf/0.1/>
 
 # Find all people within 3 hops
 SELECT DISTINCT ?person ?name
 WHERE {
-    <http://example.org/alix> foaf:knows{1,3} ?person .
+    { <http://example.org/alix> foaf:knows ?person }
+    UNION
+    { <http://example.org/alix> foaf:knows/foaf:knows ?person }
+    UNION
+    { <http://example.org/alix> foaf:knows/foaf:knows/foaf:knows ?person }
     ?person foaf:name ?name
 }
 ```
@@ -254,6 +275,7 @@ WHERE {
 }
 
 # All narrower concepts
+PREFIX skos: <http://www.w3.org/2004/02/skos/core#>
 SELECT ?narrower
 WHERE {
     <http://example.org/concept123> skos:narrower+ ?narrower

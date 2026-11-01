@@ -136,7 +136,7 @@ pub(crate) fn write_standalone(
 /// # Errors
 ///
 /// As [`write_group`].
-#[cfg(query_language)]
+#[cfg(feature = "gql")]
 pub(crate) fn write_copy(
     group: &mut GroupWriter<'_>,
     change: &StandaloneChange,

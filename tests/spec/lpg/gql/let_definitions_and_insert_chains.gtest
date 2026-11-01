@@ -1,0 +1,149 @@
+# LET definitions are sequential; a later INSERT creates its new nodes
+#
+# ISO GQL: a LET with several definitions is the sequence of LETs with one
+# each, so a definition reads the ones before it, in the LET statement and in
+# the LET expression (LET ... IN ... END). A definition that read an earlier
+# one in its list was silently null. A definition that reads a later one
+# reads an undefined variable.
+#
+# An INSERT after another in one statement creates a node for each node
+# variable it does not find bound, as the first INSERT does; one bound by an
+# earlier INSERT is that node. An unbound edge end in a later INSERT was an
+# undefined variable. Cypher's CREATE ... CREATE did it already
+# (rosetta/chained_create_and_insert.gtest).
+
+meta:
+  language: gql
+  model: lpg
+  section: "14"
+  title: LET definitions and INSERT chains
+  dataset: empty
+
+tests:
+
+  # ---------------------------------------------------------------------------
+  # LET statement
+  # ---------------------------------------------------------------------------
+
+  - name: a_let_definition_reads_the_one_before_it
+    query: "LET a = 1, b = a + 1 RETURN a, b"
+    expect:
+      rows:
+        - [1, 2]
+
+  - name: three_chained_let_definitions
+    query: "LET a = 1, b = a * 2, c = a + b RETURN a, b, c"
+    expect:
+      rows:
+        - [1, 2, 3]
+
+  - name: a_let_definition_reads_a_match_variable_and_an_earlier_definition
+    setup:
+      - "INSERT (:Person {name: 'Alix', salary: 101}), (:Person {name: 'Gus', salary: 203})"
+    query: "MATCH (p:Person) LET base = p.salary, bonus = base * 0.5e0 RETURN p.name AS n, base + bonus AS total"
+    expect:
+      rows:
+        - [Alix, 151.5]
+        - [Gus, 304.5]
+
+  - name: let_definitions_inside_a_list_a_map_and_case
+    query: "LET a = 2, b = a * 3 RETURN [a, b] AS l, {a: a, b: b} AS m, CASE WHEN b > a THEN 'more' ELSE 'less' END AS c"
+    expect:
+      rows:
+        - [[2, 6], {a: 2, b: 6}, more]
+
+  - name: a_later_let_statement_rebinds_a_variable
+    # Control: today's behavior for two LET statements.
+    query: "LET a = 1 LET a = a + 10 RETURN a"
+    expect:
+      rows:
+        - [11]
+
+  - name: a_let_definition_that_redefines_an_earlier_one_reads_it
+    # As the two LET statements above.
+    query: "LET a = 1, a = a + 10 RETURN a"
+    expect:
+      rows:
+        - [11]
+
+  - name: a_let_definition_that_reads_a_later_one_fails
+    query: "LET a = b, b = 1 RETURN a"
+    expect:
+      error: "Undefined variable 'b'"
+
+  # ---------------------------------------------------------------------------
+  # LET expression
+  # ---------------------------------------------------------------------------
+
+  - name: a_let_expression_definition_reads_the_one_before_it
+    query: "RETURN LET a = 1, b = a + 1 IN a + b END AS x"
+    expect:
+      rows:
+        - [3]
+
+  - name: the_let_expression_of_the_docs_reads_its_definitions_in_order
+    # docs/user-guide/gql/expressions.md
+    setup:
+      - "INSERT (:Person {name: 'Alix', salary: 101})"
+    query: "MATCH (p:Person) RETURN p.name AS n, LET base = p.salary, bonus = base * 0.5e0 IN base + bonus END AS total"
+    expect:
+      rows:
+        - [Alix, 151.5]
+
+  - name: nested_let_expressions
+    # Control.
+    query: "RETURN LET a = 1 IN LET b = a + 1 IN a + b END END AS x"
+    expect:
+      rows:
+        - [3]
+
+  - name: a_let_expression_definition_that_reads_a_later_one_fails
+    query: "RETURN LET a = b, b = 1 IN a END AS x"
+    expect:
+      error: "Undefined variable 'b'"
+
+  # ---------------------------------------------------------------------------
+  # INSERT after INSERT
+  # ---------------------------------------------------------------------------
+
+  - name: a_later_insert_creates_an_unbound_edge_end
+    setup:
+      - "INSERT (alix:Person {name: 'Alix'})-[:KNOWS]->(gus:Person {name: 'Gus'}) INSERT (alix)-[:WORKS_WITH]->(harm)"
+    query: "MATCH (a:Person {name: 'Alix'})-[r]->(b) RETURN type(r) AS t, labels(b) AS l ORDER BY t"
+    expect:
+      ordered: true
+      rows:
+        - [KNOWS, [Person]]
+        - [WORKS_WITH, []]
+
+  - name: a_later_insert_creates_the_nodes_of_a_chain
+    setup:
+      - "INSERT (a:P {n: 1}) INSERT (a)-[:R]->(b) INSERT (b)-[:R]->(c)"
+    query: "MATCH (n) RETURN count(n) AS nodes"
+    expect:
+      rows:
+        - [3]
+
+  - name: a_later_insert_chain_links_the_new_nodes
+    setup:
+      - "INSERT (a:P {n: 1}) INSERT (a)-[:R]->(b) INSERT (b)-[:R]->(c)"
+    query: "MATCH (:P {n: 1})-[:R]->()-[:R]->(c) RETURN count(c) AS paths"
+    expect:
+      rows:
+        - [1]
+
+  - name: a_bound_variable_reused_by_a_later_insert_is_the_same_node
+    setup:
+      - "INSERT (a:P {n: 1}) INSERT (a)-[:R]->(b:P {n: 2}) INSERT (b)-[:R]->(a)"
+    query: "RETURN COUNT { MATCH (n) } AS nodes, COUNT { MATCH (:P {n: 2})-[:R]->(:P {n: 1}) } AS back"
+    expect:
+      rows:
+        - [2, 1]
+
+  - name: a_mix_of_bound_and_new_nodes_across_inserts
+    setup:
+      - "INSERT (alix:Person {name: 'Alix'}) INSERT (alix)-[:KNOWS]->(gus:Person {name: 'Gus'}), (alix)-[:KNOWS]->(vincent) INSERT (vincent)-[:KNOWS]->(gus)"
+    query: "RETURN COUNT { MATCH (n) } AS nodes, COUNT { MATCH ()-[r:KNOWS]->() } AS edges"
+    expect:
+      rows:
+        - [3, 3]

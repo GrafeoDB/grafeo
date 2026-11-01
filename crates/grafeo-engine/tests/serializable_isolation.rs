@@ -263,3 +263,36 @@ fn unique_constraint_rejects_a_concurrent_duplicate() {
     }
     assert_eq!(keys(&db), Value::Int64(1));
 }
+
+/// Until queries record their reads (#400), asking for Serializable fails
+/// with `GRAFEO-Q004` and names snapshot isolation, from the Rust API and
+/// from GQL, and begins nothing: snapshot isolation still begins (#671).
+#[test]
+fn serializable_is_refused_until_reads_are_recorded() {
+    use grafeo_common::utils::error::ErrorCode;
+
+    let db = GrafeoDB::new_in_memory();
+    let mut session = db.session();
+    let refused = |error: Error| {
+        assert_eq!(error.error_code(), ErrorCode::QueryUnsupported, "{error}");
+        assert!(error.to_string().contains("snapshot isolation"), "{error}");
+    };
+    refused(
+        session
+            .begin_transaction_with_isolation(IsolationLevel::Serializable)
+            .expect_err("Serializable is refused"),
+    );
+    assert!(!session.in_transaction());
+    refused(
+        session
+            .execute("START TRANSACTION ISOLATION LEVEL SERIALIZABLE")
+            .expect_err("Serializable is refused in GQL"),
+    );
+    assert!(!session.in_transaction());
+
+    session
+        .begin_transaction_with_isolation(IsolationLevel::SnapshotIsolation)
+        .unwrap();
+    assert!(session.in_transaction());
+    session.rollback().unwrap();
+}

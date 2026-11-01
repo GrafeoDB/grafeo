@@ -10,38 +10,41 @@ npm install @grafeo-db/js
 
 ## Quick Start
 
-```typescript
+An ES module (`index.mjs`, or a `.js` file in a package with `"type": "module"`), with top-level `await`:
+
+```js
 import { GrafeoDB } from '@grafeo-db/js';
 
 // In-memory database
 const db = GrafeoDB.create();
+// Or persistent: const db = GrafeoDB.create('./my-graph');
 
-// Or persistent
-// const db = GrafeoDB.create('./my-graph');
-
-// Create nodes
-db.createNode(['Person'], { name: 'Alix', age: 30 });
-db.createNode(['Person'], { name: 'Gus', age: 25 });
-db.createEdge(0, 1, 'KNOWS', { since: 2024 });
+// Create nodes and an edge
+const alix = db.createNode(['Person'], { name: 'Alix', age: 30 });
+const gus = db.createNode(['Person'], { name: 'Gus', age: 25 });
+db.createEdge(alix.id, gus.id, 'KNOWS', { since: 2024 });
 
 // Query with GQL
 const result = await db.execute('MATCH (p:Person) WHERE p.age > 20 RETURN p.name, p.age');
 for (const row of result.toArray()) {
-  console.log(row);
+  console.log(row); // { 'p.name': 'Alix', 'p.age': 30 }, then Gus
 }
 
 db.close();
 ```
+
+CommonJS works as well: `const { GrafeoDB } = require('@grafeo-db/js');`.
 
 ## API Reference
 
 ### Database
 
 ```typescript
-// Create / open
-const db = GrafeoDB.create();           // in-memory
-const db = GrafeoDB.create('./path');    // persistent
-const db = GrafeoDB.open('./path');      // open existing
+// Create or open: one of
+const db = GrafeoDB.create();              // in-memory
+// const db = GrafeoDB.create('./path');   // persistent: created, or opened if it exists
+// const db = GrafeoDB.open('./path');     // open existing
+// const db = GrafeoDB.create('./path', { queryTimeout: 5_000 }); // queries fail after 5 s (null: no limit)
 
 // Counts
 db.nodeCount();   // number of nodes
@@ -86,13 +89,27 @@ try {
   tx.commit();
 } catch (e) {
   tx.rollback();
+  throw e;
 }
-
-// Node.js 22+ with explicit resource management:
-using tx = db.beginTransaction();
-await tx.execute("INSERT (:Person {name: 'Harm'})");
-tx.commit(); // auto-rollback if not committed
 ```
+
+A commit that fails (a write conflict, `gqlStatus` `40000`) ends the transaction: `tx.isActive` is `false` after it and
+`tx.rollback()` does nothing, so the `catch` above sees the conflict. Such an error has `isRetryable` set: run the
+transaction again.
+
+With explicit resource management (`using`, in Node.js 24+ or TypeScript compiled to an older target), a transaction
+that is not committed rolls back at the end of its block:
+
+```typescript
+{
+  using tx = db.beginTransaction();
+  await tx.execute("INSERT (:Person {name: 'Harm'})");
+  tx.commit(); // auto-rollback if not committed
+}
+```
+
+Transaction control statements (`START TRANSACTION`, `COMMIT`, `ROLLBACK`) are refused inside `tx.execute()`
+(`gqlStatus` `25000`): end a transaction with `tx.commit()` or `tx.rollback()`.
 
 ### QueryResult
 
@@ -110,7 +127,10 @@ result.edges();          // extracted edges
 ### Errors
 
 A call that fails throws, or rejects its promise with, an `Error`. An error from the database also has `gqlStatus`,
-its ISO GQL status: `22012` for a division by zero, `22003` for a value out of range, `42001` for a syntax error.
+its ISO GQL status: `22012` for a division by zero, `22003` for a value out of range, `42001` for a syntax error,
+`25000` for a transaction that already ended, `08000` for a database file another handle or process holds. It also has
+`errorCode`, the Grafeo code (`GRAFEO-S004` for that held file), and `isRetryable`, whether running it again can
+succeed (a write conflict).
 
 ```typescript
 import type { GrafeoError } from '@grafeo-db/js';

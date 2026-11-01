@@ -1,0 +1,266 @@
+# Rosetta: grouping, DISTINCT, ORDER BY, min and max follow each language's =
+#
+# TIMESTAMP is Grafeo's one type for TIMESTAMP and LOCAL DATETIME. GQL and
+# SQL/PGQ read it at the session time zone (UTC without SESSION SET TIME
+# ZONE), so a timestamp and a zoned datetime of one instant are one value:
+# one group, one DISTINCT value, ordered by instant. Cypher keeps a local
+# datetime apart from a zoned one, as openCypher does: never equal, so two
+# groups, and ORDER BY puts the zoned values first (by instant), then the
+# local ones (by wall time). Each language's =, grouping and ordering agree.
+#
+# The events, written by GQL: Jules 09:00Z (zoned, 10:00+01:00), Gus 10:00
+# (timestamp), Alix 10:30Z (zoned, 11:30+01:00), Mia 10:30 (timestamp),
+# Vincent 11:00Z (zoned, 13:00+02:00).
+
+meta:
+  model: lpg
+  section: rosetta
+  title: Temporal identity per language
+  dataset: empty
+  requires: [cypher, sql-pgq]
+
+tests:
+
+  # ---------------------------------------------------------------------------
+  # DISTINCT
+  # ---------------------------------------------------------------------------
+
+  - name: distinct_counts_an_instant_once_in_gql_and_sql
+    setup:
+      - "INSERT (:Event {name: 'Alix', at: zoned_datetime('2024-03-15T11:30:00+01:00')})"
+      - "INSERT (:Event {name: 'Gus', at: datetime('2024-03-15T10:00:00Z')})"
+      - "INSERT (:Event {name: 'Mia', at: datetime('2024-03-15T10:30:00Z')})"
+      - "INSERT (:Event {name: 'Vincent', at: zoned_datetime('2024-03-15T13:00:00+02:00')})"
+      - "INSERT (:Event {name: 'Jules', at: zoned_datetime('2024-03-15T10:00:00+01:00')})"
+    variants:
+      gql: "MATCH (e:Event) RETURN count(DISTINCT e.at) AS d"
+      sql-pgq: "SELECT COUNT(DISTINCT t) AS d FROM GRAPH_TABLE (MATCH (e:Event) COLUMNS (e.at AS t))"
+    expect:
+      rows:
+        - [4]
+
+  - name: distinct_keeps_local_and_zoned_apart_in_cypher
+    setup:
+      - "INSERT (:Event {name: 'Alix', at: zoned_datetime('2024-03-15T11:30:00+01:00')})"
+      - "INSERT (:Event {name: 'Gus', at: datetime('2024-03-15T10:00:00Z')})"
+      - "INSERT (:Event {name: 'Mia', at: datetime('2024-03-15T10:30:00Z')})"
+      - "INSERT (:Event {name: 'Vincent', at: zoned_datetime('2024-03-15T13:00:00+02:00')})"
+      - "INSERT (:Event {name: 'Jules', at: zoned_datetime('2024-03-15T10:00:00+01:00')})"
+    variants:
+      cypher: "MATCH (e:Event) RETURN count(DISTINCT e.at) AS d"
+    expect:
+      rows:
+        - [5]
+
+  - name: one_wall_time_local_and_zoned_are_one_value_in_gql
+    variants:
+      gql: "UNWIND [local_datetime('2024-03-15T10:00:00'), zoned_datetime('2024-03-15T10:00:00Z')] AS d RETURN count(DISTINCT d) AS n"
+    expect:
+      rows:
+        - [1]
+
+  - name: one_wall_time_local_and_zoned_are_two_values_in_cypher
+    variants:
+      cypher: "UNWIND [localdatetime('2024-03-15T10:00:00'), datetime('2024-03-15T10:00:00Z')] AS d RETURN count(DISTINCT d) AS n"
+    expect:
+      rows:
+        - [2]
+
+  # ---------------------------------------------------------------------------
+  # GROUP BY
+  # ---------------------------------------------------------------------------
+
+  - name: group_by_puts_an_instant_in_one_group_in_gql
+    setup:
+      - "INSERT (:Event {name: 'Alix', at: zoned_datetime('2024-03-15T11:30:00+01:00')})"
+      - "INSERT (:Event {name: 'Gus', at: datetime('2024-03-15T10:00:00Z')})"
+      - "INSERT (:Event {name: 'Mia', at: datetime('2024-03-15T10:30:00Z')})"
+      - "INSERT (:Event {name: 'Vincent', at: zoned_datetime('2024-03-15T13:00:00+02:00')})"
+      - "INSERT (:Event {name: 'Jules', at: zoned_datetime('2024-03-15T10:00:00+01:00')})"
+    variants:
+      gql: "MATCH (e:Event) WITH e.at AS t, count(*) AS c RETURN count(*) AS k, max(c) AS biggest"
+    expect:
+      rows:
+        - [4, 2]
+
+  - name: group_by_puts_an_instant_in_one_group_in_sql
+    setup:
+      - "INSERT (:Event {name: 'Alix', at: zoned_datetime('2024-03-15T11:30:00+01:00')})"
+      - "INSERT (:Event {name: 'Gus', at: datetime('2024-03-15T10:00:00Z')})"
+      - "INSERT (:Event {name: 'Mia', at: datetime('2024-03-15T10:30:00Z')})"
+      - "INSERT (:Event {name: 'Vincent', at: zoned_datetime('2024-03-15T13:00:00+02:00')})"
+      - "INSERT (:Event {name: 'Jules', at: zoned_datetime('2024-03-15T10:00:00+01:00')})"
+    variants:
+      sql-pgq: "SELECT COUNT(*) AS c FROM GRAPH_TABLE (MATCH (e:Event) COLUMNS (e.at AS t)) GROUP BY t ORDER BY c DESC"
+    expect:
+      ordered: true
+      rows:
+        - [2]
+        - [1]
+        - [1]
+        - [1]
+
+  - name: group_by_keeps_local_and_zoned_apart_in_cypher
+    setup:
+      - "INSERT (:Event {name: 'Alix', at: zoned_datetime('2024-03-15T11:30:00+01:00')})"
+      - "INSERT (:Event {name: 'Gus', at: datetime('2024-03-15T10:00:00Z')})"
+      - "INSERT (:Event {name: 'Mia', at: datetime('2024-03-15T10:30:00Z')})"
+      - "INSERT (:Event {name: 'Vincent', at: zoned_datetime('2024-03-15T13:00:00+02:00')})"
+      - "INSERT (:Event {name: 'Jules', at: zoned_datetime('2024-03-15T10:00:00+01:00')})"
+    variants:
+      cypher: "MATCH (e:Event) WITH e.at AS t, count(*) AS c RETURN count(*) AS k, max(c) AS biggest"
+    expect:
+      rows:
+        - [5, 1]
+
+  # ---------------------------------------------------------------------------
+  # ORDER BY, min and max
+  # ---------------------------------------------------------------------------
+
+  - name: order_by_orders_by_instant_in_gql_and_sql
+    setup:
+      - "INSERT (:Event {name: 'Alix', at: zoned_datetime('2024-03-15T11:30:00+01:00')})"
+      - "INSERT (:Event {name: 'Gus', at: datetime('2024-03-15T10:00:00Z')})"
+      - "INSERT (:Event {name: 'Mia', at: datetime('2024-03-15T10:30:00Z')})"
+      - "INSERT (:Event {name: 'Vincent', at: zoned_datetime('2024-03-15T13:00:00+02:00')})"
+      - "INSERT (:Event {name: 'Jules', at: zoned_datetime('2024-03-15T10:00:00+01:00')})"
+    variants:
+      gql: "MATCH (e:Event) RETURN e.name AS n ORDER BY e.at, n"
+      sql-pgq: "SELECT n FROM GRAPH_TABLE (MATCH (e:Event) COLUMNS (e.name AS n, e.at AS t)) ORDER BY t, n"
+    expect:
+      ordered: true
+      rows:
+        - [Jules]
+        - [Gus]
+        - [Alix]
+        - [Mia]
+        - [Vincent]
+
+  - name: order_by_puts_zoned_before_local_in_cypher
+    # The zoned values by instant (Jules, Alix, Vincent), then the local
+    # ones by wall time (Gus, Mia).
+    setup:
+      - "INSERT (:Event {name: 'Alix', at: zoned_datetime('2024-03-15T11:30:00+01:00')})"
+      - "INSERT (:Event {name: 'Gus', at: datetime('2024-03-15T10:00:00Z')})"
+      - "INSERT (:Event {name: 'Mia', at: datetime('2024-03-15T10:30:00Z')})"
+      - "INSERT (:Event {name: 'Vincent', at: zoned_datetime('2024-03-15T13:00:00+02:00')})"
+      - "INSERT (:Event {name: 'Jules', at: zoned_datetime('2024-03-15T10:00:00+01:00')})"
+    variants:
+      cypher: "MATCH (e:Event) RETURN e.name AS n ORDER BY e.at, n"
+    expect:
+      ordered: true
+      rows:
+        - [Jules]
+        - [Alix]
+        - [Vincent]
+        - [Gus]
+        - [Mia]
+
+  - name: min_and_max_follow_the_cypher_order
+    setup:
+      - "INSERT (:Event {name: 'Alix', at: zoned_datetime('2024-03-15T11:30:00+01:00')})"
+      - "INSERT (:Event {name: 'Gus', at: datetime('2024-03-15T10:00:00Z')})"
+      - "INSERT (:Event {name: 'Mia', at: datetime('2024-03-15T10:30:00Z')})"
+      - "INSERT (:Event {name: 'Vincent', at: zoned_datetime('2024-03-15T13:00:00+02:00')})"
+      - "INSERT (:Event {name: 'Jules', at: zoned_datetime('2024-03-15T10:00:00+01:00')})"
+    variants:
+      cypher: "MATCH (e:Event) RETURN min(e.at) = datetime('2024-03-15T09:00:00Z') AS earliest, max(e.at) = localdatetime('2024-03-15T10:30:00') AS latest"
+    expect:
+      rows:
+        - [true, true]
+
+  - name: the_earliest_and_latest_instants_in_sql
+    setup:
+      - "INSERT (:Event {name: 'Alix', at: zoned_datetime('2024-03-15T11:30:00+01:00')})"
+      - "INSERT (:Event {name: 'Gus', at: datetime('2024-03-15T10:00:00Z')})"
+      - "INSERT (:Event {name: 'Mia', at: datetime('2024-03-15T10:30:00Z')})"
+      - "INSERT (:Event {name: 'Vincent', at: zoned_datetime('2024-03-15T13:00:00+02:00')})"
+      - "INSERT (:Event {name: 'Jules', at: zoned_datetime('2024-03-15T10:00:00+01:00')})"
+    variants:
+      sql-pgq: "SELECT n FROM GRAPH_TABLE (MATCH (e:Event) COLUMNS (e.name AS n, e.at AS t)) ORDER BY t DESC LIMIT 1"
+    expect:
+      rows:
+        - [Vincent]
+
+  # ---------------------------------------------------------------------------
+  # A GQL session at +02:00 reads a timestamp two hours earlier
+  # ---------------------------------------------------------------------------
+  # Alix 12:00 local and Mia 11:00 local; Gus 10:00Z and Vincent 12:00Z
+  # zoned. At +02:00 Alix is 10:00Z, Gus's instant; at UTC she is 12:00Z,
+  # Vincent's.
+
+  - name: at_a_session_zone_a_timestamp_groups_with_the_zoned_value_of_its_instant
+    setup:
+      - "SESSION SET TIME ZONE '+02:00'"
+      - "INSERT (:Event {name: 'Alix', at: local_datetime('2024-03-15T12:00:00')})"
+      - "INSERT (:Event {name: 'Mia', at: local_datetime('2024-03-15T11:00:00')})"
+      - "INSERT (:Event {name: 'Gus', at: zoned_datetime('2024-03-15T10:00:00Z')})"
+      - "INSERT (:Event {name: 'Vincent', at: zoned_datetime('2024-03-15T12:00:00Z')})"
+    variants:
+      gql: "MATCH (e:Event) WITH e.at AS t, count(*) AS c, min(e.name) AS first RETURN first, c ORDER BY first"
+    expect:
+      ordered: true
+      rows:
+        - [Alix, 2]
+        - [Mia, 1]
+        - [Vincent, 1]
+
+  - name: at_a_session_zone_distinct_counts_the_instants
+    setup:
+      - "SESSION SET TIME ZONE '+02:00'"
+      - "INSERT (:Event {name: 'Alix', at: local_datetime('2024-03-15T12:00:00')})"
+      - "INSERT (:Event {name: 'Mia', at: local_datetime('2024-03-15T11:00:00')})"
+      - "INSERT (:Event {name: 'Gus', at: zoned_datetime('2024-03-15T10:00:00Z')})"
+      - "INSERT (:Event {name: 'Vincent', at: zoned_datetime('2024-03-15T12:00:00Z')})"
+    variants:
+      gql: "MATCH (e:Event) RETURN count(DISTINCT e.at) AS d"
+    expect:
+      rows:
+        - [3]
+
+  - name: at_a_session_zone_order_by_reads_the_timestamps_there
+    # Mia 09:00Z, Alix and Gus 10:00Z, Vincent 12:00Z.
+    setup:
+      - "SESSION SET TIME ZONE '+02:00'"
+      - "INSERT (:Event {name: 'Alix', at: local_datetime('2024-03-15T12:00:00')})"
+      - "INSERT (:Event {name: 'Mia', at: local_datetime('2024-03-15T11:00:00')})"
+      - "INSERT (:Event {name: 'Gus', at: zoned_datetime('2024-03-15T10:00:00Z')})"
+      - "INSERT (:Event {name: 'Vincent', at: zoned_datetime('2024-03-15T12:00:00Z')})"
+    variants:
+      gql: "MATCH (e:Event) RETURN e.name AS n ORDER BY e.at, n"
+    expect:
+      ordered: true
+      rows:
+        - [Mia]
+        - [Alix]
+        - [Gus]
+        - [Vincent]
+
+  - name: at_a_session_zone_min_and_max_read_the_timestamps_there
+    setup:
+      - "SESSION SET TIME ZONE '+02:00'"
+      - "INSERT (:Event {name: 'Alix', at: local_datetime('2024-03-15T12:00:00')})"
+      - "INSERT (:Event {name: 'Mia', at: local_datetime('2024-03-15T11:00:00')})"
+      - "INSERT (:Event {name: 'Gus', at: zoned_datetime('2024-03-15T10:00:00Z')})"
+      - "INSERT (:Event {name: 'Vincent', at: zoned_datetime('2024-03-15T12:00:00Z')})"
+    variants:
+      gql: "MATCH (e:Event) RETURN min(e.at) = zoned_datetime('2024-03-15T09:00:00Z') AS earliest, max(e.at) = zoned_datetime('2024-03-15T12:00:00Z') AS latest"
+    expect:
+      rows:
+        - [true, true]
+
+  - name: at_utc_the_same_events_group_otherwise
+    # Control: without a session zone Alix is 12:00Z, Vincent's instant.
+    setup:
+      - "INSERT (:Event {name: 'Alix', at: local_datetime('2024-03-15T12:00:00')})"
+      - "INSERT (:Event {name: 'Mia', at: local_datetime('2024-03-15T11:00:00')})"
+      - "INSERT (:Event {name: 'Gus', at: zoned_datetime('2024-03-15T10:00:00Z')})"
+      - "INSERT (:Event {name: 'Vincent', at: zoned_datetime('2024-03-15T12:00:00Z')})"
+    variants:
+      gql: "MATCH (e:Event) WITH e.at AS t, count(*) AS c, min(e.name) AS first RETURN first, c ORDER BY first"
+    expect:
+      ordered: true
+      rows:
+        - [Alix, 2]
+        - [Gus, 1]
+        - [Mia, 1]

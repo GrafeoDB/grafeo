@@ -601,6 +601,10 @@ jobs:
           - profile: sparql-only
             features: "--features sparql,triple-store"
             engine_features: "--features sparql,triple-store"
+          # The triple store without a query language: the code that runs
+          # RDF queries comes with SPARQL or GraphQL, not with the store.
+          - profile: triple-store-only
+            features: "--features triple-store"
           - profile: graphql-only
             features: "--features graphql"
             engine_features: "--features lpg,graphql"
@@ -699,6 +703,11 @@ jobs:
   miri:
     name: Miri UB Check
     runs-on: ubuntu-latest
+    # Miri interprets every step: a test that generates many cases runs for
+    # hours under it (the decimal proptests did). They take a few cases under
+    # `cfg(miri)`, and the whole run took 47 minutes on a busy machine
+    # (2026-10-30); this stops any other test from holding the job up.
+    timeout-minutes: 90
     # Pinned nightly, so a Miri change cannot break CI unannounced. Cargo refuses a
     # toolchain older than `rust-version`, so the nightly's rustc must be at least
     # the MSRV: bump this pin together with `rust-version` in Cargo.toml.
@@ -1109,6 +1118,13 @@ jobs:
       # the native clippy job never lints it.
       - name: Clippy (wasm32)
         run: cargo clippy -p grafeo-wasm --target wasm32-unknown-unknown --all-targets -- -D warnings
+
+      # The WASM binding's own tests (tests/web.rs), run in Node by
+      # wasm-bindgen-test-runner, which wasm-bindgen-cli installs.
+      - name: Test the WASM binding (wasm32)
+        env:
+          CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER: wasm-bindgen-test-runner
+        run: cargo test -p grafeo-wasm --target wasm32-unknown-unknown --test web
 
       # The facade for wasm32 outside our binding, as an application builds it:
       # it has no getrandom wasm_js backend (our binding and .cargo/config.toml

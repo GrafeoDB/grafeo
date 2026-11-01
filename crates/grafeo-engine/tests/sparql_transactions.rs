@@ -245,7 +245,6 @@ mod tests {
         /// WAL, and auto-commit writes carry no commit marker, so the abort
         /// discards them too.
         #[test]
-        #[ignore = "WAL recovery groups records globally, not per transaction; fixed by the WAL commit-grouping work"]
         fn auto_committed_write_survives_later_rollback_and_reopen() {
             let (before, _) = seeded();
             let (_dir, db) = reopened_after_crash(

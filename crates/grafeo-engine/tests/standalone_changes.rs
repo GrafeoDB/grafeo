@@ -16,6 +16,10 @@
 //! ```
 
 #![cfg(feature = "gql")]
+#![allow(
+    deprecated,
+    reason = "the test reaches the row-group store itself, which only the deprecated GrafeoDB::store() gives, until 0.7.0 removes it"
+)]
 
 use grafeo_common::types::Value;
 use grafeo_engine::GrafeoDB;
@@ -551,9 +555,18 @@ mod replay {
             })
             .collect();
         names.sort();
+        // The DDL indexes carry names, vector ones included; those the API
+        // made (Doc.emb, Doc.body) have none, and the dropped ones are gone.
         assert_eq!(
             names,
-            ["part_serial", "person_bio", "person_city", "person_name"],
+            [
+                "note_emb",
+                "part_emb",
+                "part_serial",
+                "person_bio",
+                "person_city",
+                "person_name"
+            ],
             "the names, without the one dropped"
         );
 

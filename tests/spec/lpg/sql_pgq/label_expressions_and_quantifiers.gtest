@@ -1,0 +1,248 @@
+# SQL/PGQ label expressions, element WHERE and quantifiers after an edge
+# (ISO/IEC 9075-16, 0.6.1)
+#
+# A label expression combines labels with | (or), & (and), ! (not), % (any
+# label) and parentheses, on any node of a pattern. A WHERE inside an element
+# pattern filters that node or edge. A quantifier after an edge pattern
+# repeats it: * (zero or more, so the start node itself), +, {n}, {m,n},
+# {,n} and {m,}. Counts on the LDBC SNB mini dataset: 44 posts and 48
+# comments (each also a Message), 349 nodes in all.
+
+meta:
+  language: sql-pgq
+  model: lpg
+  section: "4.39"
+  title: Label expressions, element WHERE and quantifiers
+  dataset: ldbc_snb_mini
+
+tests:
+
+  # ---------------------------------------------------------------------------
+  # Label expressions
+  # ---------------------------------------------------------------------------
+
+  - name: label_disjunction
+    query: |
+      SELECT * FROM GRAPH_TABLE (
+        MATCH (m:Post|Comment)
+        COLUMNS (m.id AS id)
+      )
+    expect:
+      count: 92
+
+  - name: label_conjunction_with_a_negation
+    # The comments: messages that are not posts.
+    query: |
+      SELECT * FROM GRAPH_TABLE (
+        MATCH (m:Message&!Post)
+        COLUMNS (m.id AS id)
+      )
+    expect:
+      count: 48
+
+  - name: label_negation_alone
+    query: |
+      SELECT * FROM GRAPH_TABLE (
+        MATCH (n:!Message)
+        COLUMNS (n.id AS id)
+      )
+    expect:
+      count: 257
+
+  - name: label_expression_in_parentheses
+    query: |
+      SELECT * FROM GRAPH_TABLE (
+        MATCH (m:(Post|Comment)&Message)
+        COLUMNS (m.id AS id)
+      )
+    expect:
+      count: 92
+
+  - name: label_wildcard
+    # Every node of the dataset has a label.
+    query: |
+      SELECT * FROM GRAPH_TABLE (
+        MATCH (n:%)
+        COLUMNS (n.id AS id)
+      )
+    expect:
+      count: 349
+
+  - name: label_disjunction_on_a_node_an_edge_reaches
+    query: |
+      SELECT * FROM GRAPH_TABLE (
+        MATCH (p:Person)<-[c:HAS_CREATOR]-(m:Post|Comment)
+        COLUMNS (p.id AS person, m.id AS message)
+      )
+    expect:
+      count: 92
+
+  - name: label_negation_on_a_node_an_edge_reaches
+    # The comments that reply to a post.
+    query: |
+      SELECT * FROM GRAPH_TABLE (
+        MATCH (c:Comment)-[r:REPLY_OF]->(m:!Comment)
+        COLUMNS (c.id AS comment, m.id AS message)
+      )
+    expect:
+      count: 35
+
+  # ---------------------------------------------------------------------------
+  # Element WHERE
+  # ---------------------------------------------------------------------------
+
+  - name: element_where_on_a_node
+    query: |
+      SELECT * FROM GRAPH_TABLE (
+        MATCH (m:Post WHERE m.length > 100)
+        COLUMNS (m.id AS id)
+      )
+    expect:
+      count: 18
+
+  - name: element_where_on_an_edge
+    query: |
+      SELECT * FROM GRAPH_TABLE (
+        MATCH (a:Person)-[k:KNOWS WHERE k.creationDate > 1267000000000]->(b:Person)
+        COLUMNS (a.id AS a, b.id AS b)
+      )
+    expect:
+      count: 28
+
+  # A WHERE inside a quantified edge holds for each edge of the path: no
+  # REPLY_OF edge has x, so only the zero-hop rows are left, one per comment.
+  - name: element_where_inside_a_quantified_edge_leaves_the_zero_hop_rows
+    query: |
+      SELECT * FROM GRAPH_TABLE (
+        MATCH (c:Comment)-[r:REPLY_OF WHERE r.x = 1]->*(m:Message)
+        COLUMNS (c.id AS id)
+      )
+    expect:
+      count: 48
+
+  # KNOWS edges after a date, over one or two hops: 64 of the 70 paths.
+  - name: element_where_inside_a_quantified_edge_holds_for_each_edge
+    query: |
+      SELECT * FROM GRAPH_TABLE (
+        MATCH (a:Person)-[k:KNOWS WHERE k.creationDate > 1267000000000]->{1,2}(b:Person)
+        COLUMNS (a.id AS a, b.id AS b)
+      )
+    expect:
+      count: 64
+
+  # ---------------------------------------------------------------------------
+  # Quantifiers after an edge
+  # ---------------------------------------------------------------------------
+
+  - name: quantifier_zero_or_more
+    # 48 zero-hop matches (each comment itself) and 62 longer ones.
+    query: |
+      SELECT * FROM GRAPH_TABLE (
+        MATCH (c:Comment)-[r:REPLY_OF]->*(m:Message)
+        COLUMNS (c.id AS comment, m.id AS message)
+      )
+    expect:
+      count: 110
+
+  - name: quantifier_one_or_more
+    query: |
+      SELECT * FROM GRAPH_TABLE (
+        MATCH (c:Comment)-[r:REPLY_OF]->+(m:Message)
+        COLUMNS (c.id AS comment, m.id AS message)
+      )
+    expect:
+      count: 62
+
+  - name: quantifier_exactly_two
+    query: |
+      SELECT * FROM GRAPH_TABLE (
+        MATCH (c:Comment)-[r:REPLY_OF]->{2}(m:Message)
+        COLUMNS (c.id AS comment, m.id AS message)
+      )
+    expect:
+      count: 13
+
+  - name: quantifier_one_to_three
+    query: |
+      SELECT * FROM GRAPH_TABLE (
+        MATCH (c:Comment)-[r:REPLY_OF]->{1,3}(m:Message)
+        COLUMNS (c.id AS comment, m.id AS message)
+      )
+    expect:
+      count: 62
+
+  - name: quantifier_at_most_two
+    query: |
+      SELECT * FROM GRAPH_TABLE (
+        MATCH (c:Comment)-[r:REPLY_OF]->{,2}(m:Message)
+        COLUMNS (c.id AS comment, m.id AS message)
+      )
+    expect:
+      count: 109
+
+  - name: quantifier_at_least_two
+    query: |
+      SELECT * FROM GRAPH_TABLE (
+        MATCH (c:Comment)-[r:REPLY_OF]->{2,}(m:Message)
+        COLUMNS (c.id AS comment, m.id AS message)
+      )
+    expect:
+      count: 14
+
+  - name: zero_hops_reach_the_start_node
+    query: |
+      SELECT * FROM GRAPH_TABLE (
+        MATCH (c:Comment)-[r:REPLY_OF]->*(m:Message)
+        WHERE c.id = m.id
+        COLUMNS (c.id AS id)
+      )
+    expect:
+      count: 48
+
+  - name: a_quantifier_upper_bound_below_its_lower_bound_is_refused
+    query: |
+      SELECT * FROM GRAPH_TABLE (
+        MATCH (c:Comment)-[r:REPLY_OF]->{3,1}(m:Message)
+        COLUMNS (c.id AS id)
+      )
+    expect:
+      error: "upper bound is below its lower bound"
+
+  - name: a_quantifier_inside_and_after_the_edge_is_refused
+    query: |
+      SELECT * FROM GRAPH_TABLE (
+        MATCH (c:Comment)-[r:REPLY_OF*1..2]->{2}(m:Message)
+        COLUMNS (c.id AS id)
+      )
+    expect:
+      error: "one quantifier"
+
+  # ---------------------------------------------------------------------------
+  # LDBC IS4 (graph-bench's text, on the default graph)
+  # ---------------------------------------------------------------------------
+
+  - name: is4_message_content_of_a_post_with_an_image
+    query: |
+      SELECT messageCreationDate,
+             CASE WHEN content IS NULL OR content = '' THEN imageFile ELSE content END AS messageContent
+      FROM GRAPH_TABLE (
+        MATCH (m:Post|Comment)
+        WHERE m.id = 10169
+        COLUMNS (m.creationDate AS messageCreationDate, m.content AS content, m.imageFile AS imageFile)
+      )
+    expect:
+      columns: [messageCreationDate, messageContent]
+      rows:
+        - [1267290597839, photo10169.jpg]
+
+  - name: is4_message_content_of_a_comment
+    query: |
+      SELECT messageCreationDate,
+             CASE WHEN content IS NULL OR content = '' THEN imageFile ELSE content END AS messageContent
+      FROM GRAPH_TABLE (
+        MATCH (m:Post|Comment)
+        WHERE m.id = 68719478399
+        COLUMNS (m.creationDate AS messageCreationDate, m.content AS content, m.imageFile AS imageFile)
+      )
+    expect:
+      count: 1

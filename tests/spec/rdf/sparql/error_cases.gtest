@@ -56,11 +56,13 @@ tests:
   # Unknown prefix
   # ---------------------------------------------------------------------------
 
+  # A prefix other than rdf, rdfs, xsd, owl and fn must be declared
+  # (rdf/sparql/prefixes.gtest).
   - name: undefined_prefix
-    skip: "Parser expands prefixes lazily, unresolved prefix is not caught at parse time"
     query: "SELECT ?s WHERE { ?s foaf:name ?o }"
     expect:
-      error: ""
+      error: "foaf"
+      gql_status: "42001"
 
   # ---------------------------------------------------------------------------
   # Invalid expressions
@@ -77,8 +79,31 @@ tests:
       rows:
         - [null]
 
-  - name: invalid_aggregation_no_group
-    skip: "SPARQL allows bare aggregates without GROUP BY (aggregates over all solutions)"
+  # An aggregate without GROUP BY is one group of every solution (SPARQL 1.1
+  # section 11.4): valid.
+  - name: aggregate_without_group_by
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/a> <http://ex.org/val> 1 .
+          <http://ex.org/b> <http://ex.org/val> 2 .
+        }
+    query: "SELECT (COUNT(?o) AS ?c) WHERE { ?s ?p ?o }"
+    expect:
+      rows:
+        - [2]
+
+  # Beside an aggregate, a variable may be projected only when it is grouped
+  # (SPARQL 1.1 section 11.4, "Aggregate Projection Restrictions"): `?s` is
+  # not, so the query is an error.
+  - name: ungrouped_variable_beside_an_aggregate
+    skip: "the ungrouped ?s beside COUNT is accepted instead of rejected"
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/a> <http://ex.org/val> 1 .
+          <http://ex.org/b> <http://ex.org/val> 2 .
+        }
     query: "SELECT ?s (COUNT(?o) AS ?c) WHERE { ?s ?p ?o }"
     expect:
       error: ""

@@ -67,6 +67,74 @@ impl TemporalComparison {
         }
     }
 
+    /// `value` as this mode reads it against zoned values: under
+    /// [`LocalAt`](Self::LocalAt) a local datetime is the zoned datetime of
+    /// its instant at the mode's offset, and a time without an offset is that
+    /// time at the offset, inside lists, maps and paths too; under
+    /// [`TypesApart`](Self::TypesApart) every value is itself. Grouping,
+    /// DISTINCT and ORDER BY read a value so, which makes them agree with
+    /// `=` and `<` (see [`compare_mixed`](Self::compare_mixed)).
+    #[must_use]
+    pub fn normalize(self, value: &Value) -> std::borrow::Cow<'_, Value> {
+        use std::borrow::Cow;
+        let Self::LocalAt(offset) = self else {
+            return Cow::Borrowed(value);
+        };
+        match value {
+            Value::Timestamp(local) => Cow::Owned(Value::ZonedDatetime(
+                super::ZonedDatetime::from_timestamp_offset(
+                    Timestamp::from_micros(local.as_micros() - i64::from(offset) * 1_000_000),
+                    0,
+                ),
+            )),
+            Value::Time(time) if time.offset_seconds().is_none() => {
+                Cow::Owned(Value::Time(time.with_offset(offset)))
+            }
+            Value::List(items) => match self.normalize_all(items) {
+                Some(items) => Cow::Owned(Value::List(items.into())),
+                None => Cow::Borrowed(value),
+            },
+            Value::Map(map) => {
+                if map
+                    .values()
+                    .all(|item| matches!(self.normalize(item), Cow::Borrowed(_)))
+                {
+                    return Cow::Borrowed(value);
+                }
+                Cow::Owned(Value::Map(std::sync::Arc::new(
+                    map.iter()
+                        .map(|(key, item)| (key.clone(), self.normalize(item).into_owned()))
+                        .collect(),
+                )))
+            }
+            Value::Path { nodes, edges } => {
+                match (self.normalize_all(nodes), self.normalize_all(edges)) {
+                    (None, None) => Cow::Borrowed(value),
+                    (new_nodes, new_edges) => Cow::Owned(Value::Path {
+                        nodes: new_nodes.map_or_else(|| nodes.clone(), Into::into),
+                        edges: new_edges.map_or_else(|| edges.clone(), Into::into),
+                    }),
+                }
+            }
+            _ => Cow::Borrowed(value),
+        }
+    }
+
+    /// `items` normalized, or `None` when none of them changes.
+    fn normalize_all(self, items: &[Value]) -> Option<Vec<Value>> {
+        use std::borrow::Cow;
+        let first = items
+            .iter()
+            .position(|item| matches!(self.normalize(item), Cow::Owned(_)))?;
+        let mut normalized = items[..first].to_vec();
+        normalized.extend(
+            items[first..]
+                .iter()
+                .map(|item| self.normalize(item).into_owned()),
+        );
+        Some(normalized)
+    }
+
     /// Orders a zoned and a local value of one kind (see
     /// [`is_mixed_pair`](Self::is_mixed_pair)) as this mode reads them: the
     /// local one at the mode's offset, or `None` when the types stay apart.

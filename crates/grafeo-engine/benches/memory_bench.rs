@@ -196,10 +196,13 @@ fn bench_memory_vector_index(c: &mut Criterion) {
                 let db = GrafeoDB::new_in_memory();
                 let session = db.session();
 
-                // Create nodes with 128-dim vector embeddings
+                // Create nodes with 128-dim vector embeddings, as float
+                // literals (`0.0070e0`): a literal without an exponent is a
+                // decimal in GQL, which 0.6.0 did not index, so the build of
+                // the same index is compared across versions.
                 for i in 0..1_000 {
                     let dims: Vec<String> = (0..128)
-                        .map(|d| format!("{:.4}", (i * 128 + d) as f64 / 128_000.0))
+                        .map(|d| format!("{:.4}e0", (i * 128 + d) as f64 / 128_000.0))
                         .collect();
                     let vec_str = dims.join(", ");
                     let query = format!("INSERT (:Item {{id: {}, embedding: [{vec_str}]}})", i);
@@ -225,7 +228,7 @@ fn bench_memory_vector_index(c: &mut Criterion) {
     let session = db.session();
     for i in 0..1_000 {
         let dims: Vec<String> = (0..128)
-            .map(|d| format!("{:.4}", (i * 128 + d) as f64 / 128_000.0))
+            .map(|d| format!("{:.4}e0", (i * 128 + d) as f64 / 128_000.0))
             .collect();
         let vec_str = dims.join(", ");
         let query = format!("INSERT (:Item {{id: {}, embedding: [{vec_str}]}})", i);

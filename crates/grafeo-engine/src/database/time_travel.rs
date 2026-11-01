@@ -180,7 +180,7 @@ impl super::GrafeoDB {
     /// before what it keeps: "history before ... is not retained".
     pub fn epoch_as_of(&self, point: impl Into<TimePoint>) -> Result<EpochId> {
         match point.into() {
-            TimePoint::Epoch(epoch) => Ok(epoch.min(self.transaction_manager.current_epoch())),
+            TimePoint::Epoch(epoch) => Ok(self.transaction_manager.readable_epoch(epoch)),
             TimePoint::Timestamp(timestamp) => self.transaction_manager.epoch_at(timestamp),
             TimePoint::Ago(duration) => {
                 let back = u64::try_from(duration.as_millis()).unwrap_or(u64::MAX);

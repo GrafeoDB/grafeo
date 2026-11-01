@@ -107,7 +107,7 @@ The default isolation level where transactions see a consistent snapshot of the 
 When two transactions try to modify the same entity. The second transaction to commit will fail and must retry.
 
 ### SSI (Serializable Snapshot Isolation)
-The strongest isolation level, detecting potential anomalies like write skew. Enabled with `Serializable` isolation.
+An isolation level that also detects read-write conflicts, which prevents write skew. Not available yet: it needs the reads of queries recorded, so asking for `Serializable` fails with `GRAFEO-Q004`, and snapshot isolation is the strongest level.
 
 ---
 

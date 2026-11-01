@@ -1,0 +1,155 @@
+# Rosetta: counts of a label's nodes after writes
+#
+# `count(n)` and `count(*)` over a label are the number of nodes that have
+# the label now: after inserts, deletes, a label set or removed, a node with
+# several labels counted under each, and for a label no node has. The same
+# for an edge type, and for labels(n) grouped. These counts can come from
+# numbers the store keeps, so each case writes first and then counts.
+#
+# Setup (GQL): Alix, Gus and Vincent are Persons, Gus also an Engineer;
+# Amsterdam and Berlin are Cities. KNOWS Alix->Gus and Gus->Vincent. Each
+# case then writes as its title says.
+
+meta:
+  model: lpg
+  section: rosetta
+  title: Counts of a label's nodes after writes
+  dataset: empty
+  requires: [cypher]
+
+tests:
+
+  - name: count_of_a_label
+    setup:
+      - "INSERT (a:Person {name: 'Alix'}), (g:Person:Engineer {name: 'Gus'}), (v:Person {name: 'Vincent'}), (:City {name: 'Amsterdam'}), (:City {name: 'Berlin'}), (a)-[:KNOWS]->(g), (g)-[:KNOWS]->(v)"
+    variants:
+      gql: "MATCH (n:Person) RETURN count(n) AS a, count(*) AS b"
+      cypher: "MATCH (n:Person) RETURN count(n) AS a, count(*) AS b"
+    expect:
+      rows:
+        - [3, 3]
+
+  - name: count_of_a_label_no_node_has
+    setup:
+      - "INSERT (a:Person {name: 'Alix'}), (g:Person:Engineer {name: 'Gus'}), (v:Person {name: 'Vincent'}), (:City {name: 'Amsterdam'}), (:City {name: 'Berlin'}), (a)-[:KNOWS]->(g), (g)-[:KNOWS]->(v)"
+    variants:
+      gql: "MATCH (n:Planet) RETURN count(n) AS a, count(*) AS b"
+      cypher: "MATCH (n:Planet) RETURN count(n) AS a, count(*) AS b"
+    expect:
+      rows:
+        - [0, 0]
+
+  - name: count_of_a_label_after_inserts
+    setup:
+      - "INSERT (a:Person {name: 'Alix'}), (g:Person:Engineer {name: 'Gus'}), (v:Person {name: 'Vincent'}), (:City {name: 'Amsterdam'}), (:City {name: 'Berlin'}), (a)-[:KNOWS]->(g), (g)-[:KNOWS]->(v)"
+      - "INSERT (:Person {name: 'Mia'})"
+      - "UNWIND range(1, 10) AS i INSERT (:Person {name: 'Jules', i: i})"
+    variants:
+      gql: "MATCH (n:Person) RETURN count(*) AS c"
+      cypher: "MATCH (n:Person) RETURN count(*) AS c"
+    expect:
+      rows:
+        - [14]
+
+  - name: count_of_a_label_after_a_delete
+    setup:
+      - "INSERT (a:Person {name: 'Alix'}), (g:Person:Engineer {name: 'Gus'}), (v:Person {name: 'Vincent'}), (:City {name: 'Amsterdam'}), (:City {name: 'Berlin'}), (a)-[:KNOWS]->(g), (g)-[:KNOWS]->(v)"
+      - "MATCH (n:Person {name: 'Gus'}) DETACH DELETE n"
+    variants:
+      gql: "MATCH (n:Person) RETURN count(n) AS persons"
+      cypher: "MATCH (n:Person) RETURN count(n) AS persons"
+    expect:
+      rows:
+        - [2]
+
+  - name: count_of_the_second_label_after_a_delete
+    setup:
+      - "INSERT (a:Person {name: 'Alix'}), (g:Person:Engineer {name: 'Gus'}), (v:Person {name: 'Vincent'}), (:City {name: 'Amsterdam'}), (:City {name: 'Berlin'}), (a)-[:KNOWS]->(g), (g)-[:KNOWS]->(v)"
+      - "MATCH (n:Person {name: 'Gus'}) DETACH DELETE n"
+    variants:
+      gql: "MATCH (n:Engineer) RETURN count(*) AS engineers"
+      cypher: "MATCH (n:Engineer) RETURN count(*) AS engineers"
+    expect:
+      rows:
+        - [0]
+
+  - name: count_of_a_label_after_it_is_removed
+    setup:
+      - "INSERT (a:Person {name: 'Alix'}), (g:Person:Engineer {name: 'Gus'}), (v:Person {name: 'Vincent'}), (:City {name: 'Amsterdam'}), (:City {name: 'Berlin'}), (a)-[:KNOWS]->(g), (g)-[:KNOWS]->(v)"
+      - "MATCH (n:Person {name: 'Alix'}) REMOVE n:Person"
+    variants:
+      gql: "MATCH (n:Person) RETURN count(n) AS c"
+      cypher: "MATCH (n:Person) RETURN count(n) AS c"
+    expect:
+      rows:
+        - [2]
+
+  - name: count_of_a_label_after_it_is_set
+    setup:
+      - "INSERT (a:Person {name: 'Alix'}), (g:Person:Engineer {name: 'Gus'}), (v:Person {name: 'Vincent'}), (:City {name: 'Amsterdam'}), (:City {name: 'Berlin'}), (a)-[:KNOWS]->(g), (g)-[:KNOWS]->(v)"
+      - "MATCH (n:Person) WHERE n.name <> 'Gus' SET n:Engineer"
+      - "MATCH (n:Person {name: 'Gus'}) SET n:Engineer"
+    variants:
+      gql: "MATCH (n:Engineer) RETURN count(n) AS c"
+      cypher: "MATCH (n:Engineer) RETURN count(n) AS c"
+    expect:
+      rows:
+        - [3]
+
+  - name: count_of_every_node_after_a_delete
+    setup:
+      - "INSERT (a:Person {name: 'Alix'}), (g:Person:Engineer {name: 'Gus'}), (v:Person {name: 'Vincent'}), (:City {name: 'Amsterdam'}), (:City {name: 'Berlin'}), (a)-[:KNOWS]->(g), (g)-[:KNOWS]->(v)"
+      - "MATCH (n:City {name: 'Berlin'}) DELETE n"
+    variants:
+      gql: "MATCH (n) RETURN count(*) AS c"
+      cypher: "MATCH (n) RETURN count(*) AS c"
+    expect:
+      rows:
+        - [4]
+
+  - name: count_of_a_label_after_everything_is_deleted
+    setup:
+      - "INSERT (a:Person {name: 'Alix'}), (g:Person:Engineer {name: 'Gus'}), (v:Person {name: 'Vincent'}), (:City {name: 'Amsterdam'}), (:City {name: 'Berlin'}), (a)-[:KNOWS]->(g), (g)-[:KNOWS]->(v)"
+      - "MATCH (n) DETACH DELETE n"
+    variants:
+      gql: "MATCH (n:Person) RETURN count(n) AS a, count(*) AS b"
+      cypher: "MATCH (n:Person) RETURN count(n) AS a, count(*) AS b"
+    expect:
+      rows:
+        - [0, 0]
+
+  - name: count_of_an_edge_type_after_a_delete
+    setup:
+      - "INSERT (a:Person {name: 'Alix'}), (g:Person:Engineer {name: 'Gus'}), (v:Person {name: 'Vincent'}), (:City {name: 'Amsterdam'}), (:City {name: 'Berlin'}), (a)-[:KNOWS]->(g), (g)-[:KNOWS]->(v)"
+      - "MATCH (:Person {name: 'Alix'})-[r:KNOWS]->() DELETE r"
+    variants:
+      gql: "MATCH ()-[r:KNOWS]->() RETURN count(r) AS c"
+      cypher: "MATCH ()-[r:KNOWS]->() RETURN count(r) AS c"
+    expect:
+      rows:
+        - [1]
+
+  - name: labels_grouped_after_a_label_change
+    setup:
+      - "INSERT (a:Person {name: 'Alix'}), (g:Person:Engineer {name: 'Gus'}), (v:Person {name: 'Vincent'}), (:City {name: 'Amsterdam'}), (:City {name: 'Berlin'}), (a)-[:KNOWS]->(g), (g)-[:KNOWS]->(v)"
+      - "MATCH (n:Person {name: 'Vincent'}) SET n:Engineer"
+      - "MATCH (n:City {name: 'Berlin'}) REMOVE n:City"
+    variants:
+      gql: "MATCH (n) RETURN size(labels(n)) AS labels, count(*) AS c ORDER BY labels"
+      cypher: "MATCH (n) RETURN size(labels(n)) AS labels, count(*) AS c ORDER BY labels"
+    expect:
+      ordered: true
+      rows:
+        - [0, 1]
+        - [1, 2]
+        - [2, 2]
+
+  - name: count_of_a_label_with_a_filter_reads_the_nodes
+    setup:
+      - "INSERT (a:Person {name: 'Alix'}), (g:Person:Engineer {name: 'Gus'}), (v:Person {name: 'Vincent'}), (:City {name: 'Amsterdam'}), (:City {name: 'Berlin'}), (a)-[:KNOWS]->(g), (g)-[:KNOWS]->(v)"
+    variants:
+      gql: "MATCH (n:Person) WHERE n.name <> 'Gus' RETURN count(n) AS c"
+      cypher: "MATCH (n:Person) WHERE n.name <> 'Gus' RETURN count(n) AS c"
+    expect:
+      rows:
+        - [2]

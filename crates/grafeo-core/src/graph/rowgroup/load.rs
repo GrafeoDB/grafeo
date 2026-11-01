@@ -710,4 +710,100 @@ mod tests {
             .unwrap_err();
         assert!(error.starts_with("label:"), "{error}");
     }
+
+    /// Runs `f`, failing the test with `what` and the panic message when it
+    /// panics.
+    fn no_panic<T>(what: &str, f: impl FnOnce() -> T) -> T {
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
+            Ok(value) => value,
+            Err(payload) => {
+                let message = payload
+                    .downcast_ref::<&str>()
+                    .map(ToString::to_string)
+                    .or_else(|| payload.downcast_ref::<String>().cloned())
+                    .unwrap_or_default();
+                panic!("{what} panicked, where it fails with an error: {message}")
+            }
+        }
+    }
+
+    /// A node or edge with id `u64::MAX` has no next id: its create is
+    /// refused with an error and changes nothing, in debug builds (where
+    /// `id + 1` panicked after the row was in) and release builds (where it
+    /// wrapped to 0 and the row stayed, the next id unchanged).
+    #[test]
+    fn a_node_with_the_last_id_is_refused() {
+        let store = RowGroupStore::new();
+        let result = no_panic("load_node(u64::MAX)", || {
+            store.load_node(NodeId::new(u64::MAX), &["Person"])
+        });
+        assert!(
+            result.is_err(),
+            "node u64::MAX was created, where it is refused"
+        );
+        assert!(
+            store
+                .node(NodeId::new(u64::MAX), ReadView::latest())
+                .unwrap()
+                .is_none(),
+            "a refused node stays out"
+        );
+        assert_eq!(store.next_node_id(), 0);
+    }
+
+    /// As [`a_node_with_the_last_id_is_refused`], for an edge.
+    #[test]
+    fn an_edge_with_the_last_id_is_refused() {
+        let store = RowGroupStore::new();
+        store.load_node(NodeId::new(0), &[]).unwrap();
+        store.load_node(NodeId::new(1), &[]).unwrap();
+        let result = no_panic("load_edge(u64::MAX)", || {
+            store.load_edge(
+                EdgeId::new(u64::MAX),
+                NodeId::new(0),
+                NodeId::new(1),
+                "KNOWS",
+            )
+        });
+        assert!(
+            result.is_err(),
+            "edge u64::MAX was created ({result:?}), where it is refused"
+        );
+        assert!(
+            store
+                .edge(EdgeId::new(u64::MAX), ReadView::latest())
+                .unwrap()
+                .is_none(),
+            "a refused edge stays out"
+        );
+        assert_eq!(store.next_edge_id(), 0);
+    }
+
+    /// Control: a node and an edge with a large id below the last load, and
+    /// the next ids move past them.
+    #[test]
+    fn a_row_with_a_large_id_loads() {
+        const LARGE: u64 = 1 << 40;
+        let store = RowGroupStore::new();
+        store.load_node(NodeId::new(LARGE), &["Person"]).unwrap();
+        store.load_node(NodeId::new(0), &[]).unwrap();
+        assert!(
+            store
+                .load_edge(
+                    EdgeId::new(LARGE),
+                    NodeId::new(0),
+                    NodeId::new(LARGE),
+                    "KNOWS"
+                )
+                .unwrap()
+        );
+        assert_eq!(store.next_node_id(), LARGE + 1);
+        assert_eq!(store.next_edge_id(), LARGE + 1);
+        assert!(
+            store
+                .node(NodeId::new(LARGE), ReadView::latest())
+                .unwrap()
+                .is_some()
+        );
+    }
 }

@@ -542,6 +542,9 @@ pub enum Pattern {
         path_mode: Option<PathMode>,
         /// G050: WHERE clause inside parenthesized pattern, e.g. `((a)-[e]->(b) WHERE e.w > 5){2,5}`.
         where_clause: Option<Expression>,
+        /// G047: the node patterns written next to a quantified path
+        /// pattern (see [`QuantifiedAnchors`]).
+        anchors: QuantifiedAnchors,
     },
     /// A union of alternative path patterns: `(a)-[:T1]->(b) | (a)-[:T2]->(c)`.
     /// Set semantics: duplicates are removed.
@@ -549,6 +552,28 @@ pub enum Pattern {
     /// A multiset union of alternative path patterns: `(a)-[:T1]->(b) |+| (a)-[:T2]->(c)`.
     /// Bag semantics: duplicates are preserved (G030).
     MultisetUnion(Vec<Pattern>),
+}
+
+/// The node patterns written next to a quantified path pattern,
+/// `(s)((a)-[]->(m)-[]->(b)){1,3}(t)` (G047). Juxtaposed node patterns are
+/// one node: the first node is both `s` and `a`, the last both `b` and `t`,
+/// and each node between two repetitions both `b` and `a`.
+#[derive(Debug, Clone, Default)]
+pub struct QuantifiedAnchors {
+    /// The node pattern before the quantified pattern.
+    pub source: Option<NodePattern>,
+    /// The node pattern after it.
+    pub target: Option<NodePattern>,
+}
+
+impl QuantifiedAnchors {
+    /// The variables the anchors name.
+    pub fn variables(&self) -> impl Iterator<Item = &String> {
+        [&self.source, &self.target]
+            .into_iter()
+            .flatten()
+            .filter_map(|anchor| anchor.variable.as_ref())
+    }
 }
 
 /// A label expression for GQL IS syntax (e.g., `IS Person | Employee`, `IS Person & !Employee`).

@@ -105,6 +105,8 @@ For SPARQL queries with multiple triple patterns sharing variables (star joins),
 Consider a query like:
 
 ```sparql
+PREFIX : <http://example.org/>
+
 SELECT ?person ?name ?friend WHERE {
   ?person :name ?name .
   ?person :knows ?friend .

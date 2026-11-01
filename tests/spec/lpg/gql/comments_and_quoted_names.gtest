@@ -1,0 +1,198 @@
+# GQL comments and quoted names
+#
+# ISO GQL's simple comment starts with `//` or `--` and runs to the end of
+# the line; a bracketed comment is `/* ... */`. `//` failed at the start of
+# a statement, after one and between clauses. Inside a string `//` is text.
+#
+# A reserved word is no name: `RETURN 1 AS exists` fails with a message
+# that names the word and says to quote it. A delimited identifier (ISO GQL:
+# a double-quoted or backtick-quoted sequence) is a name, reserved word,
+# spaces and all, wherever a name stands: after AS, as a LET and a FOR
+# variable. In an expression a double-quoted sequence is a string, so a
+# name with spaces is read back with backticks.
+
+meta:
+  language: gql
+  model: lpg
+  section: "21.3"
+  title: Comments and quoted names
+  dataset: empty
+
+tests:
+
+  # ---------------------------------------------------------------------------
+  # // comments
+  # ---------------------------------------------------------------------------
+
+  - name: a_comment_at_the_start_of_a_statement
+    query: |
+      // the answer
+      RETURN 1 AS x
+    expect:
+      rows:
+        - [1]
+
+  - name: a_comment_after_a_statement
+    query: "RETURN 1 AS x // the answer"
+    expect:
+      rows:
+        - [1]
+
+  - name: a_comment_between_clauses
+    setup:
+      - "INSERT (:P {name: 'Alix'}), (:P {name: 'Gus'})"
+    query: |
+      MATCH (p:P) // every person
+      WHERE p.name <> 'Gus' // but Gus
+      RETURN p.name AS n
+    expect:
+      rows:
+        - [Alix]
+
+  - name: a_comment_at_the_end_of_input
+    query: "RETURN 1 AS x //"
+    expect:
+      rows:
+        - [1]
+
+  - name: a_comment_inside_a_multi_line_insert
+    statements:
+      - |
+        INSERT (:P {name: 'Alix'}) // first
+        // a line of its own
+        INSERT (:P {name: 'Gus'})
+      - "MATCH (p:P) RETURN count(p) AS c"
+    expect:
+      rows:
+        - [2]
+
+  - name: two_slashes_in_a_string_are_text
+    query: "RETURN 'a//b' AS s, 'http://ex.org/alix' AS u, \"x // y\" AS d"
+    expect:
+      rows:
+        - ["a//b", "http://ex.org/alix", "x // y"]
+
+  - name: a_comment_after_a_string_holding_slashes
+    query: "RETURN 'http://ex.org/a' AS u // the IRI"
+    expect:
+      rows:
+        - ["http://ex.org/a"]
+
+  - name: dash_and_bracketed_comments_still_work
+    # Control.
+    query: |
+      -- dashes
+      RETURN /* inline */ 1 AS x -- trailing
+    expect:
+      rows:
+        - [1]
+
+  # ---------------------------------------------------------------------------
+  # Reserved words and delimited identifiers
+  # ---------------------------------------------------------------------------
+
+  - name: a_reserved_word_as_an_alias_fails_naming_it
+    query: "RETURN 1 AS exists"
+    expect:
+      error: "exists"
+      gql_status: "42001"
+
+  - name: a_reserved_word_as_an_alias_fails_saying_to_quote_it
+    query: "RETURN 1 AS exists"
+    expect:
+      error: "'exists' is a reserved word in GQL: quote it"
+
+  - name: a_double_quoted_reserved_word_is_an_alias
+    query: "RETURN 1 AS \"exists\""
+    expect:
+      columns: [exists]
+      rows:
+        - [1]
+
+  - name: a_backtick_quoted_reserved_word_is_an_alias
+    query: "RETURN 1 AS `exists`"
+    expect:
+      columns: [exists]
+      rows:
+        - [1]
+
+  - name: a_double_quoted_alias_with_spaces
+    query: "RETURN 1 AS \"two words\""
+    expect:
+      columns: [two words]
+      rows:
+        - [1]
+
+  - name: a_backtick_quoted_alias_with_spaces
+    query: "RETURN 1 AS `two words`"
+    expect:
+      columns: [two words]
+      rows:
+        - [1]
+
+  - name: a_quoted_let_variable
+    query: "LET `match` = 1, \"two words\" = 2 RETURN `match` AS m, `two words` AS t"
+    expect:
+      rows:
+        - [1, 2]
+
+  - name: a_double_quoted_reserved_word_as_a_let_variable
+    query: "LET \"exists\" = 3 RETURN `exists` AS e"
+    expect:
+      rows:
+        - [3]
+
+  - name: a_quoted_for_variable
+    query: "FOR \"x y\" IN [4] RETURN `x y` AS v"
+    expect:
+      rows:
+        - [4]
+
+  - name: a_double_quoted_reserved_word_as_a_for_variable
+    query: "FOR \"match\" IN [5, 6] RETURN sum(`match`) AS s"
+    expect:
+      rows:
+        - [11]
+
+  - name: a_reserved_word_as_a_let_variable_fails_saying_to_quote_it
+    query: "LET exists = 1 RETURN 1 AS x"
+    expect:
+      error: "'exists' is a reserved word in GQL: quote it"
+      gql_status: "42001"
+
+  - name: a_reserved_word_as_a_for_variable_fails_saying_to_quote_it
+    query: "FOR match IN [1] RETURN 1 AS x"
+    expect:
+      error: "'match' is a reserved word in GQL: quote it"
+      gql_status: "42001"
+
+  - name: a_reserved_word_as_a_node_variable_fails_saying_to_quote_it
+    setup:
+      - "INSERT (:Person {name: 'Alix'})-[:LIKES]->(:Person {name: 'Gus'})"
+    query: "MATCH (like:Person) RETURN like.name AS n"
+    expect:
+      error: "'like' is a reserved word in GQL: quote it"
+      gql_status: "42001"
+
+  - name: a_reserved_word_as_an_edge_variable_fails_saying_to_quote_it
+    setup:
+      - "INSERT (:Person {name: 'Alix'})-[:LIKES]->(:Person {name: 'Gus'})"
+    query: "MATCH ()-[like:LIKES]->() RETURN count(like) AS c"
+    expect:
+      error: "'like' is a reserved word in GQL: quote it"
+      gql_status: "42001"
+
+  - name: a_quoted_reserved_word_is_a_node_and_an_edge_variable
+    setup:
+      - "INSERT (:Person {name: 'Alix'})-[:LIKES]->(:Person {name: 'Gus'})"
+    query: "MATCH (`like`:Person)-[`exists`:LIKES]->(b) RETURN `like`.name AS a, type(`exists`) AS t, b.name AS b"
+    expect:
+      rows:
+        - [Alix, LIKES, Gus]
+
+  - name: a_double_quoted_sequence_in_an_expression_is_a_string
+    # Control: outside a name position it is a string literal.
+    query: "LET `x y` = 7 RETURN \"x y\" AS s, `x y` AS v"
+    expect:
+      rows:
+        - ["x y", 7]

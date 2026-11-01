@@ -1,0 +1,144 @@
+# Rosetta: all_different over a list compares the values
+#
+# all_different(list) is true when no two items of the list are equal, by
+# the equality `=` uses: two paths, two vectors or two byte strings that
+# differ are different (it compared a short text of each, which shows only a
+# path's length and a vector's first element and size), and 1 and 1.0 are
+# the same value, as 1 = 1.0 says. same(list) is true when all items are
+# that one value, by the same equality. Byte strings come only as parameters:
+# crates/grafeo-engine/tests/all_different_values.rs covers them.
+
+meta:
+  model: lpg
+  section: rosetta
+  title: all_different compares list items as values
+  dataset: empty
+  requires: [cypher]
+
+tests:
+
+  # ---------------------------------------------------------------------------
+  # Values that differ beyond their length or first element: true
+  # ---------------------------------------------------------------------------
+
+  - name: two_different_paths_of_one_length_are_different
+    setup:
+      - "INSERT (:P {name: 'Alix'})-[:R]->(:P {name: 'Gus'})"
+      - "INSERT (:P {name: 'Vincent'})-[:R]->(:P {name: 'Jules'})"
+    variants:
+      gql: "MATCH p = (:P {name: 'Alix'})-[:R]->(), q = (:P {name: 'Vincent'})-[:R]->() RETURN all_different([p, q]) AS d"
+      cypher: "MATCH p = (:P {name: 'Alix'})-[:R]->(), q = (:P {name: 'Vincent'})-[:R]->() RETURN all_different([p, q]) AS d"
+    expect:
+      rows:
+        - [true]
+
+  - name: two_vectors_sharing_their_first_element_and_size_are_different
+    variants:
+      gql: "RETURN all_different([vector([1.0, 2.0]), vector([1.0, 3.0])]) AS d"
+      cypher: "RETURN all_different([vector([1.0, 2.0]), vector([1.0, 3.0])]) AS d"
+    expect:
+      rows:
+        - [true]
+
+  - name: different_items_of_several_kinds_are_different
+    variants:
+      gql: "RETURN all_different([1, 'Alix', [1, 2], {a: 1}, true]) AS d"
+      cypher: "RETURN all_different([1, 'Alix', [1, 2], {a: 1}, true]) AS d"
+    expect:
+      rows:
+        - [true]
+
+  # ---------------------------------------------------------------------------
+  # Equal values: false
+  # ---------------------------------------------------------------------------
+
+  - name: a_path_twice_is_not_different
+    setup:
+      - "INSERT (:P {name: 'Alix'})-[:R]->(:P {name: 'Gus'})"
+    variants:
+      gql: "MATCH p = (:P {name: 'Alix'})-[:R]->() RETURN all_different([p, p]) AS d"
+      cypher: "MATCH p = (:P {name: 'Alix'})-[:R]->() RETURN all_different([p, p]) AS d"
+    expect:
+      rows:
+        - [false]
+
+  - name: two_equal_vectors_are_not_different
+    variants:
+      gql: "RETURN all_different([vector([1.0, 2.0]), vector([1.0, 2.0])]) AS d"
+      cypher: "RETURN all_different([vector([1.0, 2.0]), vector([1.0, 2.0])]) AS d"
+    expect:
+      rows:
+        - [false]
+
+  - name: an_integer_and_the_equal_float_are_not_different
+    # 1 = 1.0 is true, so they are one value twice.
+    variants:
+      gql: "RETURN all_different([1, 1.0e0]) AS d, 1 = 1.0e0 AS eq"
+      cypher: "RETURN all_different([1, 1.0]) AS d, 1 = 1.0 AS eq"
+    expect:
+      rows:
+        - [false, true]
+
+  - name: lists_and_maps_of_equal_numbers_are_not_different
+    variants:
+      gql: "RETURN all_different([[1], [1.0e0]]) AS l, all_different([{a: 1}, {a: 1.0e0}]) AS m, [1] = [1.0e0] AS leq, {a: 1} = {a: 1.0e0} AS meq"
+      cypher: "RETURN all_different([[1], [1.0]]) AS l, all_different([{a: 1}, {a: 1.0}]) AS m, [1] = [1.0] AS leq, {a: 1} = {a: 1.0} AS meq"
+    expect:
+      rows:
+        - [false, false, true, true]
+
+  - name: a_repeated_string_is_not_different
+    variants:
+      gql: "RETURN all_different(['Alix', 'Gus', 'Alix']) AS d"
+      cypher: "RETURN all_different(['Alix', 'Gus', 'Alix']) AS d"
+    expect:
+      rows:
+        - [false]
+
+  # ---------------------------------------------------------------------------
+  # same(list): true when every item is equal to the first, by the same
+  # equality
+  # ---------------------------------------------------------------------------
+
+  - name: same_of_one_path_twice_is_true_and_of_two_paths_false
+    setup:
+      - "INSERT (:P {name: 'Alix'})-[:R]->(:P {name: 'Gus'})"
+      - "INSERT (:P {name: 'Vincent'})-[:R]->(:P {name: 'Jules'})"
+    variants:
+      gql: "MATCH p = (:P {name: 'Alix'})-[:R]->(), q = (:P {name: 'Vincent'})-[:R]->() RETURN same([p, p]) AS one, same([p, q]) AS two"
+      cypher: "MATCH p = (:P {name: 'Alix'})-[:R]->(), q = (:P {name: 'Vincent'})-[:R]->() RETURN same([p, p]) AS one, same([p, q]) AS two"
+    expect:
+      rows:
+        - [true, false]
+
+  - name: same_of_vectors
+    variants:
+      gql: "RETURN same([vector([1.0, 2.0]), vector([1.0, 2.0])]) AS equal, same([vector([1.0, 2.0]), vector([1.0, 3.0])]) AS different"
+      cypher: "RETURN same([vector([1.0, 2.0]), vector([1.0, 2.0])]) AS equal, same([vector([1.0, 2.0]), vector([1.0, 3.0])]) AS different"
+    expect:
+      rows:
+        - [true, false]
+
+  - name: same_of_an_integer_and_the_equal_float_is_true
+    variants:
+      gql: "RETURN same([3, 3.0e0]) AS n, same([[1], [1.0e0]]) AS l, same([{a: 1}, {a: 1.0e0}]) AS m"
+      cypher: "RETURN same([3, 3.0]) AS n, same([[1], [1.0]]) AS l, same([{a: 1}, {a: 1.0}]) AS m"
+    expect:
+      rows:
+        - [true, true, true]
+
+  - name: same_of_different_values_is_false
+    variants:
+      gql: "RETURN same(['Alix', 'Alix', 'Gus']) AS s, same([1, 2]) AS n, same([1, '1']) AS kinds"
+      cypher: "RETURN same(['Alix', 'Alix', 'Gus']) AS s, same([1, 2]) AS n, same([1, '1']) AS kinds"
+    expect:
+      rows:
+        - [false, false, false]
+
+  - name: same_and_all_different_of_no_item_and_one_item_are_true
+    variants:
+      gql: "RETURN same([]) AS s0, same(['Alix']) AS s1, all_different([]) AS d0, all_different(['Alix']) AS d1"
+      cypher: "RETURN same([]) AS s0, same(['Alix']) AS s1, all_different([]) AS d0, all_different(['Alix']) AS d1"
+    expect:
+      rows:
+        - [true, true, true, true]

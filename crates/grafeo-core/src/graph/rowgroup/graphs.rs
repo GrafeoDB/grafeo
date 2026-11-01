@@ -152,6 +152,19 @@ impl RowGroupStore {
         self.graphs.dropped.load(Ordering::Acquire)
     }
 
+    /// The latest epoch a write was stamped at in this store or any of its
+    /// named graphs: each graph keeps its own epoch, and a raw write to a
+    /// named graph moves only that graph's.
+    #[must_use]
+    pub fn latest_epoch(&self) -> EpochId {
+        self.graphs
+            .named
+            .read()
+            .values()
+            .map(|graph| graph.current_epoch())
+            .fold(self.current_epoch(), EpochId::max)
+    }
+
     /// Returns all named graph names, in no promised order (as `LpgStore`).
     #[must_use]
     pub fn graph_names(&self) -> Vec<String> {

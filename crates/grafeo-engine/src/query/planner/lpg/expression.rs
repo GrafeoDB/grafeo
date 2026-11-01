@@ -234,7 +234,7 @@ impl super::Planner {
                     end_var: check.end_var,
                     edge_var: check.edge_var,
                     direction: check.direction,
-                    edge_types: check.edge_types,
+                    edge_types: check.edge_types.into_iter().map(Into::into).collect(),
                     end_labels: check.end_labels,
                     min_hops: (!check.one_edge).then_some(1),
                     max_hops: check.max_hops,
@@ -253,7 +253,7 @@ impl super::Planner {
                     end_var: check.end_var,
                     edge_var: check.edge_var,
                     direction: check.direction,
-                    edge_types: check.edge_types,
+                    edge_types: check.edge_types.into_iter().map(Into::into).collect(),
                     end_labels: check.end_labels,
                 })
             }

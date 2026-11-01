@@ -1,0 +1,92 @@
+# Rosetta: list slices with negative bounds
+#
+# A slice `list[from..to]` takes the elements from `from` up to, not
+# including, `to`; a negative bound counts from the end (openCypher, as a
+# negative index does: `[10, 20, 30][-1]` is 30). `[-2..]` is the last two
+# elements, `[..-2]` all but the last two. `[-2..]` gave an empty list and
+# `[..-2]` the whole list, in GQL and Cypher, also on `collect(x)`.
+
+meta:
+  model: lpg
+  section: rosetta
+  title: List slices with negative bounds
+  dataset: empty
+  requires: [cypher]
+
+tests:
+
+  - name: the_last_two_elements
+    variants:
+      gql: "RETURN [1, 2, 3, 4, 5][-2..] AS s"
+      cypher: "RETURN [1, 2, 3, 4, 5][-2..] AS s"
+    expect:
+      rows:
+        - [[4, 5]]
+
+  - name: all_but_the_last_two
+    variants:
+      gql: "RETURN [1, 2, 3, 4, 5][..-2] AS s"
+      cypher: "RETURN [1, 2, 3, 4, 5][..-2] AS s"
+    expect:
+      rows:
+        - [[1, 2, 3]]
+
+  - name: between_two_negative_bounds
+    variants:
+      gql: "RETURN [1, 2, 3, 4, 5][-3..-1] AS s"
+      cypher: "RETURN [1, 2, 3, 4, 5][-3..-1] AS s"
+    expect:
+      rows:
+        - [[3, 4]]
+
+  - name: from_a_positive_to_a_negative_bound
+    variants:
+      gql: "RETURN [1, 2, 3, 4, 5][1..-1] AS s"
+      cypher: "RETURN [1, 2, 3, 4, 5][1..-1] AS s"
+    expect:
+      rows:
+        - [[2, 3, 4]]
+
+  - name: a_negative_bound_past_the_start_is_the_start
+    variants:
+      gql: "RETURN [1, 2, 3][-10..2] AS s"
+      cypher: "RETURN [1, 2, 3][-10..2] AS s"
+    expect:
+      rows:
+        - [[1, 2]]
+
+  - name: the_last_two_of_a_collect
+    variants:
+      gql: "UNWIND range(1, 5) AS x RETURN collect(x)[-2..] AS s"
+      cypher: "UNWIND range(1, 5) AS x RETURN collect(x)[-2..] AS s"
+    expect:
+      rows:
+        - [[4, 5]]
+
+  - name: a_collect_of_a_variable_sliced_from_the_end
+    variants:
+      gql: "UNWIND range(1, 5) AS x WITH collect(x) AS xs RETURN xs[..-3] AS s"
+      cypher: "UNWIND range(1, 5) AS x WITH collect(x) AS xs RETURN xs[..-3] AS s"
+    expect:
+      rows:
+        - [[1, 2]]
+
+  # ---------------------------------------------------------------------------
+  # Controls: positive bounds and empty slices
+  # ---------------------------------------------------------------------------
+
+  - name: positive_bounds
+    variants:
+      gql: "RETURN [1, 2, 3, 4, 5][1..3] AS s, [1, 2, 3][..2] AS t, [1, 2, 3][1..] AS u"
+      cypher: "RETURN [1, 2, 3, 4, 5][1..3] AS s, [1, 2, 3][..2] AS t, [1, 2, 3][1..] AS u"
+    expect:
+      rows:
+        - [[2, 3], [1, 2], [2, 3]]
+
+  - name: a_start_past_the_end_or_after_the_end_bound_is_empty
+    variants:
+      gql: "RETURN [1, 2, 3][5..] AS s, [1, 2, 3][2..1] AS t, [1, 2, 3][-1..-2] AS u"
+      cypher: "RETURN [1, 2, 3][5..] AS s, [1, 2, 3][2..1] AS t, [1, 2, 3][-1..-2] AS u"
+    expect:
+      rows:
+        - [[], [], []]

@@ -2069,7 +2069,7 @@ mod tests {
         assert!(error_of(&zeros, ChunkCodec::BitPacked, 2).contains("epochs"));
         let short = with_epochs(&BitPackedInts::pack(&[88]));
         assert!(error_of(&short, ChunkCodec::BitPacked, 2).contains("epochs"));
-        let no_bits = with_epochs(&BitPackedInts::pack_with_bits(&[0, 0], 0));
+        let no_bits = with_epochs(&BitPackedInts::pack_with_bits(&[0, 0], 0).unwrap());
         assert!(error_of(&no_bits, ChunkCodec::BitPacked, 2).contains("epochs"));
     }
 
@@ -2089,7 +2089,8 @@ mod tests {
         assert!(error.contains("18446744073709551615"), "{error}");
         // bit-packed bodies of 0 bits would decode values from no bytes
         let rest = body(&|out| {
-            write_bitpacked_body(&BitPackedInts::pack_with_bits(&[0; 19], 0), out).unwrap();
+            write_bitpacked_body(&BitPackedInts::pack_with_bits(&[0; 19], 0).unwrap(), out)
+                .unwrap();
         });
         let chunk = crafted(ChunkCodec::BitPacked, 0, 19, 19, &rest);
         assert!(error_of(&chunk, ChunkCodec::BitPacked, 19).contains("bits"));

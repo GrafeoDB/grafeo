@@ -7,8 +7,13 @@ use crate::execution::pipeline::{ChunkSizeHint, PushOperator, Sink};
 #[cfg(feature = "spill")]
 use crate::execution::spill::{PartitionedState, SpillManager};
 use crate::execution::vector::ValueVector;
+use grafeo_common::types::TemporalComparison;
 use grafeo_common::types::Value;
-use grafeo_common::utils::hash::FxHashMap as HashMap;
+/// The groups of an aggregate, in the order their first rows came: a
+/// `GROUP BY` without `ORDER BY` gives the same order on every run (a hash
+/// map's order changes with its random seed). After a spill they come in
+/// partition order.
+type Groups = indexmap::IndexMap<RowKey, GroupState, grafeo_common::utils::hash::FxBuildHasher>;
 #[cfg(feature = "spill")]
 use spill_codec::{deserialize_group_state, serialize_group_state};
 #[cfg(feature = "spill")]
@@ -37,10 +42,10 @@ fn update_accumulator(
     if let Some(col) = expr.column {
         // An operand: a missing value is a null too, not a row to count.
         let val = chunk.column(col).and_then(|c| c.get_value(row));
-        acc.update(Some(val.unwrap_or(Value::Null)));
+        acc.update_under(Some(val.unwrap_or(Value::Null)), expr.temporal);
     } else {
         // COUNT(*)
-        acc.update(None);
+        acc.update_under(None, expr.temporal);
     }
 }
 
@@ -79,14 +84,29 @@ pub struct AggregatePushOperator {
     aggregates: Vec<AggregateExpr>,
     /// Group states by their key: keys whose values are the same values
     /// (`3` and `3.0`) are one key, see [`RowKey`].
-    groups: HashMap<RowKey, GroupState>,
+    groups: Groups,
     /// Global accumulator (for no GROUP BY).
     global_state: Option<Vec<AggregateState>>,
     /// The column types of the input chunks.
     input_types: ColumnTypes,
+    /// How the keys read a local datetime against a zoned one (see
+    /// [`TemporalComparison::normalize`]); `TypesApart` reads every value
+    /// as itself.
+    temporal: TemporalComparison,
 }
 
 impl AggregatePushOperator {
+    /// The operator with `temporal` as the reading of its group keys and of
+    /// its aggregates' DISTINCT, MIN and MAX (the statement's `=`).
+    #[must_use]
+    pub fn with_temporal(mut self, temporal: TemporalComparison) -> Self {
+        self.temporal = temporal;
+        for aggregate in &mut self.aggregates {
+            aggregate.temporal = temporal;
+        }
+        self
+    }
+
     /// Create a new aggregate operator.
     pub fn new(group_by: Vec<usize>, aggregates: Vec<AggregateExpr>) -> Self {
         let global_state = if group_by.is_empty() {
@@ -98,9 +118,10 @@ impl AggregatePushOperator {
         Self {
             group_by,
             aggregates,
-            groups: HashMap::default(),
+            groups: Groups::default(),
             global_state,
             input_types: ColumnTypes::default(),
+            temporal: TemporalComparison::TypesApart,
         }
     }
 
@@ -132,7 +153,7 @@ impl PushOperator for AggregatePushOperator {
                 let aggregates = &self.aggregates;
                 let state = self
                     .groups
-                    .entry(RowKey::from_row(&chunk, row, group_by))
+                    .entry(RowKey::from_row(&chunk, row, group_by, self.temporal))
                     .or_insert_with(|| GroupState {
                         key_values: RowKey::values_of(&chunk, row, group_by),
                         accumulators: aggregates.iter().map(AggregateState::for_expr).collect(),
@@ -227,7 +248,7 @@ pub struct SpillableAggregatePushOperator {
     /// Partitioned groups (used when spilling is enabled).
     partitioned_groups: Option<PartitionedState<GroupState>>,
     /// Non-partitioned groups (used when spilling is disabled).
-    groups: HashMap<RowKey, GroupState>,
+    groups: Groups,
     /// Global accumulator (for no GROUP BY).
     global_state: Option<Vec<AggregateState>>,
     /// Spill threshold (number of groups, used by fallback mode).
@@ -242,10 +263,25 @@ pub struct SpillableAggregatePushOperator {
     estimated_bytes: usize,
     /// The column types of the input chunks.
     input_types: ColumnTypes,
+    /// How the keys read a local datetime against a zoned one (see
+    /// [`TemporalComparison::normalize`]); `TypesApart` reads every value
+    /// as itself.
+    temporal: TemporalComparison,
 }
 
 #[cfg(feature = "spill")]
 impl SpillableAggregatePushOperator {
+    /// The operator with `temporal` as the reading of its group keys and of
+    /// its aggregates' DISTINCT, MIN and MAX (the statement's `=`).
+    #[must_use]
+    pub fn with_temporal(mut self, temporal: TemporalComparison) -> Self {
+        self.temporal = temporal;
+        for aggregate in &mut self.aggregates {
+            aggregate.temporal = temporal;
+        }
+        self
+    }
+
     /// Create a new spillable aggregate operator (row-count fallback mode).
     pub fn new(group_by: Vec<usize>, aggregates: Vec<AggregateExpr>) -> Self {
         let global_state = if group_by.is_empty() {
@@ -259,7 +295,7 @@ impl SpillableAggregatePushOperator {
             aggregates,
             spill_manager: None,
             partitioned_groups: None,
-            groups: HashMap::default(),
+            groups: Groups::default(),
             global_state,
             spill_threshold: DEFAULT_AGGREGATE_SPILL_THRESHOLD,
             using_partitioned: false,
@@ -267,6 +303,7 @@ impl SpillableAggregatePushOperator {
             spill_state: None,
             estimated_bytes: 0,
             input_types: ColumnTypes::default(),
+            temporal: TemporalComparison::TypesApart,
         }
     }
 
@@ -295,7 +332,7 @@ impl SpillableAggregatePushOperator {
             aggregates,
             spill_manager: Some(manager),
             partitioned_groups: Some(partitioned),
-            groups: HashMap::default(),
+            groups: Groups::default(),
             global_state,
             spill_threshold: threshold,
             using_partitioned: true,
@@ -303,6 +340,7 @@ impl SpillableAggregatePushOperator {
             spill_state: None,
             estimated_bytes: 0,
             input_types: ColumnTypes::default(),
+            temporal: TemporalComparison::TypesApart,
         }
     }
 
@@ -343,7 +381,7 @@ impl SpillableAggregatePushOperator {
             aggregates,
             spill_manager: None,
             partitioned_groups: Some(partitioned),
-            groups: HashMap::default(),
+            groups: Groups::default(),
             global_state,
             spill_threshold: DEFAULT_AGGREGATE_SPILL_THRESHOLD,
             using_partitioned: true,
@@ -351,6 +389,7 @@ impl SpillableAggregatePushOperator {
             spill_state: Some(state),
             estimated_bytes: 0,
             input_types: ColumnTypes::default(),
+            temporal: TemporalComparison::TypesApart,
         }
     }
 
@@ -431,7 +470,7 @@ impl SpillableAggregatePushOperator {
 
                 // Move existing groups to partitioned state, filed under
                 // their keys' representatives (see `push`)
-                for (key, state) in self.groups.drain() {
+                for (key, state) in self.groups.drain(..) {
                     partitioned
                         .insert(key.representatives(), state)
                         .map_err(|e| {
@@ -480,7 +519,8 @@ impl PushOperator for SpillableAggregatePushOperator {
                     // group keeps the key values of its first row.
                     let group_by = &self.group_by;
                     let aggregates = &self.aggregates;
-                    let key = RowKey::from_row(&chunk, row, group_by).representatives();
+                    let key =
+                        RowKey::from_row(&chunk, row, group_by, self.temporal).representatives();
                     let state = partitioned
                         .get_or_insert_with(key, || GroupState {
                             key_values: RowKey::values_of(&chunk, row, group_by),
@@ -500,7 +540,7 @@ impl PushOperator for SpillableAggregatePushOperator {
                 let aggregates = &self.aggregates;
                 let state = self
                     .groups
-                    .entry(RowKey::from_row(&chunk, row, group_by))
+                    .entry(RowKey::from_row(&chunk, row, group_by, self.temporal))
                     .or_insert_with(|| GroupState {
                         key_values: RowKey::values_of(&chunk, row, group_by),
                         accumulators: aggregates.iter().map(AggregateState::for_expr).collect(),

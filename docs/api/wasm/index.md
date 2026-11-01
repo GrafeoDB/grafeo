@@ -78,11 +78,17 @@ A query that writes through a view throws.
 
 ```javascript
 db.getNodeEdges(id, { direction: "out", edgeTypes: ["KNOWS"] });  // [[neighborId, edgeId], ...]
+db.detachDeleteNode(id);  // deletes the node with its edges; false if it does not exist
 db.nodeCount();   // number of nodes
 db.edgeCount();   // number of edges
 db.schema();      // database schema as JSON
 Database.version(); // Grafeo version string
 ```
+
+`detachDeleteNode` runs in the open transaction when there is one, as in the other bindings.
+
+A `Float32Array` or `Float64Array` parameter or property is a vector (of 32-bit floats, as vectors are stored), so
+it can be indexed and found by `vectorSearch`. A `Uint8Array` is bytes.
 
 ## Decimals
 
@@ -167,7 +173,9 @@ const results = db.hybridSearch(
 With `filters`, the search keeps only the matching nodes before fusion, so up to `k` matching nodes come back.
 
 !!! tip "Vector Index Creation"
-    Both `createVectorIndex()` and GQL `CREATE VECTOR INDEX` queries via `db.execute()` are supported in WASM.
+    Vector indexes are in the full build (`@grafeo-db/wasm`): there both `createVectorIndex()` and GQL
+    `CREATE VECTOR INDEX` queries via `db.execute()` are supported. The edge build (`@grafeo-db/wasm-lite`) has no
+    vector index: compare embeddings in a query with `cosine_similarity()` instead.
 
 ## Batch Import
 

@@ -62,6 +62,19 @@ void main() {
       );
     });
 
+    // A commit that succeeded leaves nothing to roll back: as in every
+    // binding, a rollback after it is an error, and the commit stands.
+    test('rollback after commit throws', () {
+      final tx = db.beginTransaction();
+      tx.execute("INSERT (:Person {name: 'Vincent'})");
+      tx.commit();
+      expect(
+        () => tx.rollback(),
+        throwsA(isA<TransactionException>()),
+      );
+      expect(db.execute('MATCH (p:Person) RETURN p.name').rows, hasLength(1));
+    });
+
     test('throws after rollback', () {
       final tx = db.beginTransaction();
       tx.rollback();

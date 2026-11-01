@@ -1,0 +1,189 @@
+# SPARQL: anonymous blank nodes, data blocks, LOAD and EXPLAIN after the prologue
+#
+# `[]` is a blank node with no name (SPARQL 1.1, 19.8 ANON), in the subject
+# and in the object position; it was "unexpected '[]' in a graph pattern".
+# A quoted triple (SPARQL 1.2) in an object position or in an INSERT DATA or
+# DELETE DATA block fails with a message naming SPARQL 1.2. INSERT DATA and
+# DELETE DATA hold ground triples only (QuadData): a variable there is a
+# syntax error naming it. LOAD is not supported and says so, also with
+# SILENT, instead of an internal error. EXPLAIN and PROFILE come after the
+# prologue (BASE and PREFIX), where a query starts.
+
+meta:
+  language: sparql
+  model: rdf
+  section: syntax
+  title: Anonymous nodes, data blocks, LOAD and EXPLAIN
+  dataset: empty
+  requires: [sparql, rdf]
+
+tests:
+
+  # ---------------------------------------------------------------------------
+  # [] as an anonymous blank node
+  # ---------------------------------------------------------------------------
+
+  - name: an_anonymous_subject_matches_any_subject
+    setup:
+      - "INSERT DATA { <http://ex.org/alix> <http://ex.org/knows> <http://ex.org/gus> . <http://ex.org/mia> <http://ex.org/knows> <http://ex.org/jules> . }"
+    query: "SELECT ?o WHERE { [] <http://ex.org/knows> ?o } ORDER BY ?o"
+    expect:
+      rows:
+        - [http://ex.org/gus]
+        - [http://ex.org/jules]
+
+  - name: an_anonymous_object_matches_any_object
+    setup:
+      - "INSERT DATA { <http://ex.org/alix> <http://ex.org/knows> <http://ex.org/gus> . <http://ex.org/mia> <http://ex.org/name> \"Mia\" . }"
+    query: "SELECT ?s WHERE { ?s <http://ex.org/knows> [] }"
+    expect:
+      rows:
+        - [http://ex.org/alix]
+
+  - name: two_anonymous_nodes_are_two_blank_nodes
+    # Each [] is its own blank node: they need not match the same term.
+    setup:
+      - "INSERT DATA { <http://ex.org/alix> <http://ex.org/knows> <http://ex.org/gus> . }"
+    query: "SELECT (COUNT(*) AS ?c) WHERE { [] <http://ex.org/knows> [] }"
+    expect:
+      rows:
+        - [1]
+
+  - name: an_anonymous_node_with_no_match_gives_no_rows
+    setup:
+      - "INSERT DATA { <http://ex.org/alix> <http://ex.org/name> \"Alix\" . }"
+    query: "SELECT ?o WHERE { [] <http://ex.org/knows> ?o }"
+    expect:
+      empty: true
+
+  - name: an_anonymous_node_in_insert_data_is_a_fresh_blank_node
+    setup:
+      - "INSERT DATA { [] <http://ex.org/name> \"Alix\" . [] <http://ex.org/name> \"Gus\" . }"
+    query: "SELECT (COUNT(DISTINCT ?s) AS ?c) (SAMPLE(isBlank(?s)) AS ?b) WHERE { ?s <http://ex.org/name> ?n }"
+    expect:
+      rows:
+        - [2, true]
+
+  # ---------------------------------------------------------------------------
+  # Quoted triples (SPARQL 1.2) are not supported, and say so
+  # ---------------------------------------------------------------------------
+
+  - name: a_quoted_triple_as_an_object_names_sparql_1_2
+    query: "SELECT ?s WHERE { ?s <http://ex.org/says> << ?a ?b ?c >> }"
+    expect:
+      error: "SPARQL 1.2"
+      gql_status: "42001"
+
+  - name: a_quoted_triple_in_insert_data_names_sparql_1_2
+    query: "INSERT DATA { << <http://ex.org/alix> <http://ex.org/knows> <http://ex.org/gus> >> <http://ex.org/since> 2020 }"
+    expect:
+      error: "SPARQL 1.2"
+      gql_status: "42001"
+
+  - name: a_quoted_triple_as_an_object_in_insert_data_names_sparql_1_2
+    query: "INSERT DATA { <http://ex.org/mia> <http://ex.org/says> << <http://ex.org/alix> <http://ex.org/knows> <http://ex.org/gus> >> }"
+    expect:
+      error: "SPARQL 1.2"
+      gql_status: "42001"
+
+  - name: a_quoted_triple_in_delete_data_names_sparql_1_2
+    query: "DELETE DATA { << <http://ex.org/alix> <http://ex.org/knows> <http://ex.org/gus> >> <http://ex.org/since> 2020 }"
+    expect:
+      error: "SPARQL 1.2"
+      gql_status: "42001"
+
+  # ---------------------------------------------------------------------------
+  # INSERT DATA and DELETE DATA take no variables
+  # ---------------------------------------------------------------------------
+
+  - name: a_variable_in_insert_data_is_a_syntax_error_naming_it
+    query: "INSERT DATA { ?who <http://ex.org/name> \"Alix\" }"
+    expect:
+      error: "?who"
+      gql_status: "42001"
+
+  - name: a_variable_as_an_object_in_insert_data_is_a_syntax_error
+    query: "INSERT DATA { <http://ex.org/alix> <http://ex.org/knows> ?friend }"
+    expect:
+      error: "?friend"
+      gql_status: "42001"
+
+  - name: a_variable_in_a_graph_block_of_insert_data_is_a_syntax_error
+    query: "INSERT DATA { GRAPH <http://ex.org/g> { <http://ex.org/alix> ?p \"Alix\" } }"
+    expect:
+      error: "?p"
+      gql_status: "42001"
+
+  - name: a_variable_in_delete_data_is_a_syntax_error_naming_it
+    setup:
+      - "INSERT DATA { <http://ex.org/alix> <http://ex.org/name> \"Alix\" . }"
+    query: "DELETE DATA { ?who <http://ex.org/name> \"Alix\" }"
+    expect:
+      error: "?who"
+      gql_status: "42001"
+
+  # ---------------------------------------------------------------------------
+  # LOAD is not supported, and says so
+  # ---------------------------------------------------------------------------
+
+  - name: load_fails_naming_load
+    query: "LOAD <http://ex.org/data.ttl>"
+    expect:
+      error: "LOAD"
+      gql_status: "42000"
+
+  - name: load_silent_fails_naming_load
+    # SILENT hides a failed fetch, not a missing feature: no silent success.
+    query: "LOAD SILENT <http://ex.org/data.ttl>"
+    expect:
+      error: "LOAD"
+      gql_status: "42000"
+
+  - name: load_into_a_graph_fails_naming_load
+    query: "LOAD <http://ex.org/data.ttl> INTO GRAPH <http://ex.org/g>"
+    expect:
+      error: "LOAD"
+      gql_status: "42000"
+
+  # ---------------------------------------------------------------------------
+  # EXPLAIN and PROFILE after the prologue
+  # ---------------------------------------------------------------------------
+
+  - name: explain_after_a_prefix
+    setup:
+      - "INSERT DATA { <http://ex.org/alix> <http://ex.org/knows> <http://ex.org/gus> . }"
+    query: "PREFIX ex: <http://ex.org/> EXPLAIN SELECT ?o WHERE { ex:alix ex:knows ?o }"
+    expect:
+      count: 1
+
+  - name: explain_after_base_and_prefix
+    query: "BASE <http://ex.org/> PREFIX ex: <http://ex.org/> EXPLAIN SELECT ?o WHERE { <alix> ex:knows ?o }"
+    expect:
+      count: 1
+
+  - name: profile_runs_the_query
+    setup:
+      - "INSERT DATA { <http://ex.org/alix> <http://ex.org/knows> <http://ex.org/gus> . }"
+    query: "PROFILE SELECT ?o WHERE { <http://ex.org/alix> <http://ex.org/knows> ?o }"
+    expect:
+      count: 1
+
+  - name: profile_after_a_prefix
+    setup:
+      - "INSERT DATA { <http://ex.org/alix> <http://ex.org/knows> <http://ex.org/gus> . }"
+    query: "PREFIX ex: <http://ex.org/> PROFILE SELECT ?o WHERE { ex:alix ex:knows ?o }"
+    expect:
+      count: 1
+
+  - name: profile_after_base_and_prefix
+    setup:
+      - "INSERT DATA { <http://ex.org/alix> <http://ex.org/knows> <http://ex.org/gus> . }"
+    query: "BASE <http://ex.org/> PREFIX ex: <http://ex.org/> PROFILE SELECT ?o WHERE { <alix> ex:knows ?o }"
+    expect:
+      count: 1
+
+  - name: explain_before_the_prologue_still_works
+    # Control: the form that worked before.
+    query: "EXPLAIN PREFIX ex: <http://ex.org/> SELECT ?o WHERE { ex:alix ex:knows ?o }"
+    expect:
+      count: 1

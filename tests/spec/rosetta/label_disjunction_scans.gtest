@@ -1,0 +1,208 @@
+# Rosetta: an OR of label checks gives the rows a full scan gives
+#
+# The planner may read only the nodes of the labels an OR's branches need
+# (a union scan of A and B for `n:A OR n:B`, also when each branch is a
+# conjunction holding a label check). The rows must be the ones a full scan
+# with the filter gives, and the ones the hand-written UNION gives: a node
+# with both labels once, NOT and null in a branch, a branch without a label
+# (then every node is read). An EXISTS in an OR branch whose other conjunct
+# is false changes nothing in the result. A multi-label pattern gives the
+# nodes holding every label.
+#
+# The data: Alix is a Method and a File, Gus a Method, Vincent a File,
+# Jules a Test, Mia a Method without `active`.
+
+meta:
+  model: lpg
+  section: rosetta
+  title: Label disjunctions and multi-label scans
+  dataset: empty
+  requires: [cypher]
+
+tests:
+
+  - name: an_or_of_labels_gives_each_node_once
+    setup:
+      - "INSERT (:Graph:Method:File {name: 'Alix', active: true}), (:Graph:Method {name: 'Gus', active: true}), (:Graph:File {name: 'Vincent', active: false}), (:Graph:Test {name: 'Jules', active: true}), (:Graph:Method {name: 'Mia'})"
+    variants:
+      gql: "MATCH (n) WHERE n:Method OR n:File RETURN n.name AS n"
+      cypher: "MATCH (n) WHERE n:Method OR n:File RETURN n.name AS n"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]
+        - [Mia]
+
+  - name: an_or_of_labels_with_a_condition_equals_the_union
+    setup:
+      - "INSERT (:Graph:Method:File {name: 'Alix', active: true}), (:Graph:Method {name: 'Gus', active: true}), (:Graph:File {name: 'Vincent', active: false}), (:Graph:Test {name: 'Jules', active: true}), (:Graph:Method {name: 'Mia'})"
+    variants:
+      gql: "MATCH (n) WHERE n.active AND (n:Method OR n:File) RETURN n.name AS n"
+      cypher: "MATCH (n) WHERE n.active AND (n:Method OR n:File) RETURN n.name AS n"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+
+  - name: the_hand_written_union_gives_the_same_rows
+    # Control for the case above.
+    setup:
+      - "INSERT (:Graph:Method:File {name: 'Alix', active: true}), (:Graph:Method {name: 'Gus', active: true}), (:Graph:File {name: 'Vincent', active: false}), (:Graph:Test {name: 'Jules', active: true}), (:Graph:Method {name: 'Mia'})"
+    variants:
+      gql: "MATCH (n:Method) WHERE n.active RETURN n.name AS n UNION MATCH (n:File) WHERE n.active RETURN n.name AS n"
+      cypher: "MATCH (n:Method) WHERE n.active RETURN n.name AS n UNION MATCH (n:File) WHERE n.active RETURN n.name AS n"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+
+  - name: branches_that_are_conjunctions_each_with_a_label
+    setup:
+      - "INSERT (:Graph:Method:File {name: 'Alix', active: true}), (:Graph:Method {name: 'Gus', active: true}), (:Graph:File {name: 'Vincent', active: false}), (:Graph:Test {name: 'Jules', active: true}), (:Graph:Method {name: 'Mia'})"
+    variants:
+      gql: "MATCH (n) WHERE (n:Method AND n.active) OR (n:File AND NOT n.active) RETURN n.name AS n"
+      cypher: "MATCH (n) WHERE (n:Method AND n.active) OR (n:File AND NOT n.active) RETURN n.name AS n"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]
+
+  - name: a_branch_with_a_null_property
+    # Mia has no `active`: `n.active IS NULL` holds for her only.
+    setup:
+      - "INSERT (:Graph:Method:File {name: 'Alix', active: true}), (:Graph:Method {name: 'Gus', active: true}), (:Graph:File {name: 'Vincent', active: false}), (:Graph:Test {name: 'Jules', active: true}), (:Graph:Method {name: 'Mia'})"
+    variants:
+      gql: "MATCH (n) WHERE (n:Method AND n.active IS NULL) OR (n:Test AND n.active) RETURN n.name AS n"
+      cypher: "MATCH (n) WHERE (n:Method AND n.active IS NULL) OR (n:Test AND n.active) RETURN n.name AS n"
+    expect:
+      rows:
+        - [Jules]
+        - [Mia]
+
+  - name: a_negated_label_in_a_branch
+    setup:
+      - "INSERT (:Graph:Method:File {name: 'Alix', active: true}), (:Graph:Method {name: 'Gus', active: true}), (:Graph:File {name: 'Vincent', active: false}), (:Graph:Test {name: 'Jules', active: true}), (:Graph:Method {name: 'Mia'})"
+    variants:
+      gql: "MATCH (n) WHERE (n:Method AND NOT n:File) OR n:Test RETURN n.name AS n"
+      cypher: "MATCH (n) WHERE (n:Method AND NOT n:File) OR n:Test RETURN n.name AS n"
+    expect:
+      rows:
+        - [Gus]
+        - [Jules]
+        - [Mia]
+
+  - name: a_branch_without_a_label_reads_every_node
+    setup:
+      - "INSERT (:Graph:Method:File {name: 'Alix', active: true}), (:Graph:Method {name: 'Gus', active: true}), (:Graph:File {name: 'Vincent', active: false}), (:Graph:Test {name: 'Jules', active: true}), (:Graph:Method {name: 'Mia'})"
+    variants:
+      gql: "MATCH (n) WHERE n:File OR n.name = 'Jules' RETURN n.name AS n"
+      cypher: "MATCH (n) WHERE n:File OR n.name = 'Jules' RETURN n.name AS n"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+        - [Jules]
+
+  - name: distinct_over_an_or_of_labels
+    setup:
+      - "INSERT (:Graph:Method:File {name: 'Alix', active: true}), (:Graph:Method {name: 'Gus', active: true}), (:Graph:File {name: 'Vincent', active: false}), (:Graph:Test {name: 'Jules', active: true}), (:Graph:Method {name: 'Mia'})"
+    variants:
+      gql: "MATCH (n) WHERE n:Method OR n:File RETURN DISTINCT n.active AS a"
+      cypher: "MATCH (n) WHERE n:Method OR n:File RETURN DISTINCT n.active AS a"
+    expect:
+      rows:
+        - [true]
+        - [false]
+        - [null]
+
+  - name: a_count_over_an_or_of_labels_counts_a_node_with_both_once
+    setup:
+      - "INSERT (:Graph:Method:File {name: 'Alix', active: true}), (:Graph:Method {name: 'Gus', active: true}), (:Graph:File {name: 'Vincent', active: false}), (:Graph:Test {name: 'Jules', active: true}), (:Graph:Method {name: 'Mia'})"
+    variants:
+      gql: "MATCH (n) WHERE n:Method OR n:File RETURN count(n) AS c"
+      cypher: "MATCH (n) WHERE n:Method OR n:File RETURN count(n) AS c"
+    expect:
+      rows:
+        - [4]
+
+  # ---------------------------------------------------------------------------
+  # EXISTS in an OR branch whose other conjunct is false
+  # ---------------------------------------------------------------------------
+
+  - name: an_exists_in_a_false_branch_changes_nothing
+    setup:
+      - "INSERT (:Graph:Method:File {name: 'Alix', active: true})-[:USES]->(:Graph:Method {name: 'Gus', active: true}), (:Graph:File {name: 'Vincent', active: false}), (:Graph:Test {name: 'Jules', active: true})"
+    variants:
+      gql: "MATCH (n) WHERE (n.name = 'Nobody' AND EXISTS { MATCH (n)-[:USES]->() }) OR n:File RETURN n.name AS n"
+      cypher: "MATCH (n) WHERE (n.name = 'Nobody' AND EXISTS { MATCH (n)-[:USES]->() }) OR n:File RETURN n.name AS n"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: an_exists_in_a_true_branch_still_decides
+    setup:
+      - "INSERT (:Graph:Method:File {name: 'Alix', active: true})-[:USES]->(:Graph:Method {name: 'Gus', active: true}), (:Graph:File {name: 'Vincent', active: false}), (:Graph:Test {name: 'Jules', active: true})"
+    variants:
+      gql: "MATCH (n) WHERE (n.active AND EXISTS { MATCH (n)-[:USES]->() }) OR n:Test RETURN n.name AS n"
+      cypher: "MATCH (n) WHERE (n.active AND EXISTS { MATCH (n)-[:USES]->() }) OR n:Test RETURN n.name AS n"
+    expect:
+      rows:
+        - [Alix]
+        - [Jules]
+
+  # ---------------------------------------------------------------------------
+  # Multi-label patterns
+  # ---------------------------------------------------------------------------
+
+  - name: a_multi_label_pattern_gives_the_nodes_with_every_label
+    setup:
+      - "INSERT (:Graph:Method:File {name: 'Alix', active: true}), (:Graph:Method {name: 'Gus', active: true}), (:Graph:File {name: 'Vincent', active: false}), (:Graph:Test {name: 'Jules', active: true}), (:Graph:Method {name: 'Mia'})"
+    variants:
+      gql: "MATCH (n IS Method & File) RETURN n.name AS n"
+      cypher: "MATCH (n:Method:File) RETURN n.name AS n"
+    expect:
+      rows:
+        - [Alix]
+
+  - name: a_multi_label_exists_gives_the_same_rows_as_a_label_check
+    setup:
+      - "INSERT (:Graph:Method {name: 'Alix'})-[:USES]->(:Graph:Method {name: 'Gus'}), (:Graph:Method {name: 'Vincent'})-[:USES]->(:Graph:File {name: 'Mia'})"
+    variants:
+      gql: "MATCH (n IS Graph & Method) WHERE EXISTS { MATCH (n)-[:USES]->(m IS Graph & Method) } RETURN n.name AS n"
+      cypher: "MATCH (n:Graph:Method) WHERE EXISTS { MATCH (n)-[:USES]->(:Graph:Method) } RETURN n.name AS n"
+    expect:
+      rows:
+        - [Alix]
+
+  - name: a_colon_takes_a_label_expression_as_is_does
+    # ISO GQL: a label expression follows IS or a colon alike.
+    setup:
+      - "INSERT (:Graph:Method:File {name: 'Alix', active: true}), (:Graph:Method {name: 'Gus', active: true}), (:Graph:File {name: 'Vincent', active: false}), (:Graph:Test {name: 'Jules', active: true}), (:Graph:Method {name: 'Mia'})"
+    variants:
+      gql: "MATCH (n:Method & File) RETURN n.name AS n"
+    expect:
+      rows:
+        - [Alix]
+
+  - name: a_colon_takes_a_label_disjunction_on_a_node
+    setup:
+      - "INSERT (:Graph:Method:File {name: 'Alix', active: true}), (:Graph:Method {name: 'Gus', active: true}), (:Graph:File {name: 'Vincent', active: false}), (:Graph:Test {name: 'Jules', active: true}), (:Graph:Method {name: 'Mia'})"
+    variants:
+      gql: "MATCH (n:Test | File) RETURN n.name AS n"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+        - [Jules]
+
+  - name: an_anonymous_node_takes_is_and_a_label_expression
+    setup:
+      - "INSERT (:Graph:Method:File {name: 'Alix', active: true}), (:Graph:Method {name: 'Gus', active: true}), (:Graph:File {name: 'Vincent', active: false}), (:Graph:Test {name: 'Jules', active: true}), (:Graph:Method {name: 'Mia'})"
+    variants:
+      gql: "MATCH (IS Method & File) RETURN count(*) AS c"
+    expect:
+      rows:
+        - [1]

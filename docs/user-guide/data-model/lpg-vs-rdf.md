@@ -83,14 +83,20 @@ Subject-Predicate-Object Triples:
 === "RDF"
 
     ```sparql
-    # Requires reification or named graphs
-    # More complex to model
+    # A relationship with properties is a node of its own (reification)
+    PREFIX : <http://example.org/>
     SELECT ?since ?strength
     WHERE {
-        << :Alix :knows :Gus >> :since ?since ;
-                                 :strength ?strength .
+        ?k a :Knows ;
+           :from :Alix ;
+           :to :Gus ;
+           :since ?since ;
+           :strength ?strength .
     }
     ```
+
+    Quoted triples (`<< :Alix :knows :Gus >> :since ?since`, RDF-star) come with SPARQL 1.2 support; until then a
+    query that uses them fails with a syntax error.
 
 ### Multiple Labels
 
@@ -107,6 +113,8 @@ Subject-Predicate-Object Triples:
 === "RDF"
 
     ```sparql
+    PREFIX : <http://example.org/>
+
     # Multiple types are natural
     INSERT DATA {
         :Alix a :Person, :Employee, :Manager ;
@@ -126,6 +134,8 @@ Subject-Predicate-Object Triples:
 === "RDF"
 
     ```sparql
+    PREFIX : <http://example.org/>
+
     # Global URIs enable linking
     INSERT DATA {
         <http://example.org/user-123> a :Person ;

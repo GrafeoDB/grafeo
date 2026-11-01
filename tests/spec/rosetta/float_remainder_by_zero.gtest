@@ -1,0 +1,82 @@
+# Rosetta: the remainder of a float by zero is NaN
+#
+# A float % 0 is NaN, as IEEE 754 remainder (fmod) gives and as a float /
+# keeps its IEEE results (1.5e0 / 0 is Infinity); it was null. An integer
+# % 0 stays the division by zero error (22012), and so does a decimal % 0.
+#
+# GQL writes a float with an exponent (1.5e0; its 1.5 is a decimal);
+# Cypher's 1.5 is a float.
+
+meta:
+  model: lpg
+  section: rosetta
+  title: Float remainder by zero
+  dataset: empty
+  requires: [cypher]
+
+tests:
+
+  # ---------------------------------------------------------------------------
+  # A float operand: NaN
+  # ---------------------------------------------------------------------------
+
+  - name: a_float_remainder_by_an_integer_zero_is_nan
+    variants:
+      gql: "RETURN 1.5e0 % 0 AS a, -1.5e0 % 0 AS b, toFloat(1) % 0 AS c, 0.0e0 % 0 AS d"
+      cypher: "RETURN 1.5 % 0 AS a, -1.5 % 0 AS b, toFloat(1) % 0 AS c, 0.0 % 0 AS d"
+    expect:
+      rows:
+        - [NaN, NaN, NaN, NaN]
+
+  - name: a_float_remainder_by_a_float_zero_is_nan
+    variants:
+      gql: "RETURN 1.5e0 % 0.0e0 AS a, 7 % 0.0e0 AS b"
+      cypher: "RETURN 1.5 % 0.0 AS a, 7 % 0.0 AS b"
+    expect:
+      rows:
+        - [NaN, NaN]
+
+  - name: a_nan_remainder_is_nan_not_null
+    variants:
+      gql: "RETURN 1.5e0 % 0 IS NULL AS is_null, toString(1.5e0 % 0) AS text"
+      cypher: "RETURN 1.5 % 0 IS NULL AS is_null, toString(1.5 % 0) AS text"
+    expect:
+      rows:
+        - [false, NaN]
+
+  - name: a_float_remainder_by_a_number_is_unchanged
+    # Control: the sign follows the dividend.
+    variants:
+      gql: "RETURN 5.5e0 % 2 AS a, -5.5e0 % 2 AS b"
+      cypher: "RETURN 5.5 % 2 AS a, -5.5 % 2 AS b"
+    expect:
+      rows:
+        - [1.5, -1.5]
+
+  # ---------------------------------------------------------------------------
+  # Integer and decimal operands: the division by zero error stays
+  # ---------------------------------------------------------------------------
+
+  - name: an_integer_remainder_by_zero_fails
+    variants:
+      gql: "RETURN 5 % 0 AS v"
+      cypher: "RETURN 5 % 0 AS v"
+    expect:
+      error: "division by zero"
+      gql_status: "22012"
+
+  - name: a_decimal_remainder_by_zero_fails
+    variants:
+      gql: "RETURN toDecimal('1.5') % 0 AS v"
+      cypher: "RETURN toDecimal('1.5') % 0 AS v"
+    expect:
+      error: "division by zero"
+      gql_status: "22012"
+
+  - name: a_decimal_literal_remainder_by_a_float_zero_fails_in_gql
+    # GQL's 1.5 is a decimal and 0.0 too: a decimal remainder.
+    variants:
+      gql: "RETURN 1.5 % 0.0 AS v"
+    expect:
+      error: "division by zero"
+      gql_status: "22012"

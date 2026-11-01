@@ -245,6 +245,10 @@ LOAD DATA FROM 'data/records.parquet' FORMAT PARQUET AS rec
 INSERT (:Record {id: rec.id, value: rec.value})
 ```
 
+`CAST` of a field that spells no number fails the whole statement with `22018`; use `toInteger(row.age)` to store
+null for such rows instead. A quoted CSV field may hold line breaks, also in the header, and a quote that is never
+closed fails with the line it opens on.
+
 ## EXPLAIN and PROFILE
 
 Inspect query plans without or with execution:

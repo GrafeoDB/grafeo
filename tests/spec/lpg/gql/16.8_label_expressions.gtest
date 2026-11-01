@@ -147,7 +147,7 @@ tests:
 
   # ---------------------------------------------------------------------------
   # Wildcard label: IS % (sec 16.8, wildcard_label)
-  # Matches any node regardless of label.
+  # Matches any node with at least one label (a node without one: below).
   # Feature G074: "Label expression: wildcard label"
   # ---------------------------------------------------------------------------
 
@@ -263,3 +263,108 @@ tests:
     expect:
       rows:
         - [Alix]
+
+  # ---------------------------------------------------------------------------
+  # Label expressions after a colon (sec 16.7, is_or_colon): `:` takes the
+  # same label expression as IS, so a leading `!`, parentheses and `%` follow
+  # it too. The wildcard is "has at least one label": a node without a label
+  # matches `!%`, not `%` (0.6.0 matched every node with `IS %`).
+  # ---------------------------------------------------------------------------
+
+  # Sec 16.8: `%` leaves out a node without a label
+  - name: iso_16_8_wildcard_leaves_out_an_unlabeled_node
+    setup:
+      - "INSERT (:Person {name: 'Alix'})"
+      - "INSERT (:City {name: 'Amsterdam'})"
+      - "INSERT ({name: 'Nobody'})"
+    query: MATCH (n IS %) RETURN n.name
+    expect:
+      rows:
+        - [Alix]
+        - [Amsterdam]
+
+  # Sec 16.8: `!%` matches only a node without a label
+  - name: iso_16_8_negated_wildcard_matches_an_unlabeled_node
+    setup:
+      - "INSERT (:Person {name: 'Alix'})"
+      - "INSERT ({name: 'Nobody'})"
+    query: MATCH (n IS !%) RETURN n.name
+    expect:
+      rows:
+        - [Nobody]
+
+  # Sec 16.8: the wildcard count leaves out a node without a label
+  - name: iso_16_8_wildcard_count_with_an_unlabeled_node
+    setup:
+      - "INSERT (:A {v: 1})"
+      - "INSERT (:B {v: 2})"
+      - "INSERT ({v: 3})"
+    query: MATCH (n:%) RETURN count(n) AS cnt
+    expect:
+      rows:
+        - [2]
+
+  # Sec 16.7: `:!Label` after a colon
+  - name: iso_16_7_colon_negation
+    setup:
+      - "INSERT (:Message:Post {name: 'post'})"
+      - "INSERT (:Message:Comment {name: 'comment'})"
+      - "INSERT (:Person {name: 'Alix'})"
+      - "INSERT ({name: 'Nobody'})"
+    query: MATCH (n:!Comment) RETURN n.name
+    expect:
+      rows:
+        - [post]
+        - [Alix]
+        - [Nobody]
+
+  # Sec 16.7: a parenthesized disjunction in a conjunction after a colon
+  - name: iso_16_7_colon_parenthesized_conjunction
+    setup:
+      - "INSERT (:Message:Post {name: 'post'})"
+      - "INSERT (:Message:Comment {name: 'comment'})"
+      - "INSERT (:Post {name: 'draft'})"
+      - "INSERT ({name: 'Nobody'})"
+    query: MATCH (n:(Post|Comment)&Message) RETURN n.name
+    expect:
+      rows:
+        - [post]
+        - [comment]
+
+  # Sec 16.7: a negated parenthesized disjunction after a colon
+  - name: iso_16_7_colon_negated_disjunction
+    setup:
+      - "INSERT (:Message:Post {name: 'post'})"
+      - "INSERT (:Message:Comment {name: 'comment'})"
+      - "INSERT (:Person {name: 'Alix'})"
+      - "INSERT ({name: 'Nobody'})"
+    query: MATCH (n:!(Post|Comment)) RETURN n.name
+    expect:
+      rows:
+        - [Alix]
+        - [Nobody]
+
+  # Sec 16.7: `:%` and `:!%` on a node an edge reaches
+  - name: iso_16_7_colon_wildcard_on_a_reached_node
+    setup:
+      - "INSERT (:Person {name: 'Alix'})"
+      - "INSERT (:City {name: 'Amsterdam'})"
+      - "INSERT ({name: 'Nobody'})"
+      - "MATCH (a:Person), (c:City) INSERT (a)-[:LIVES_IN]->(c)"
+      - "MATCH (a:Person), (n {name: 'Nobody'}) INSERT (a)-[:KNOWS]->(n)"
+    query: "MATCH (:Person)-[]->(m:%) RETURN m.name"
+    expect:
+      rows:
+        - [Amsterdam]
+
+  - name: iso_16_7_colon_negated_wildcard_on_a_reached_node
+    setup:
+      - "INSERT (:Person {name: 'Alix'})"
+      - "INSERT (:City {name: 'Amsterdam'})"
+      - "INSERT ({name: 'Nobody'})"
+      - "MATCH (a:Person), (c:City) INSERT (a)-[:LIVES_IN]->(c)"
+      - "MATCH (a:Person), (n {name: 'Nobody'}) INSERT (a)-[:KNOWS]->(n)"
+    query: "MATCH (:Person)-[]->(m:!%) RETURN m.name"
+    expect:
+      rows:
+        - [Nobody]

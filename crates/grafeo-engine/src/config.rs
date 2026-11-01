@@ -396,9 +396,8 @@ impl std::error::Error for ConfigError {}
 ///
 /// let config = Config::persistent("amsterdam.grafeo")
 ///     .with_memory_limit(88 * 1024 * 1024)
-///     .with_threads(3)
 ///     .with_query_timeout(Duration::from_secs(19));
-/// assert_eq!(config.threads, 3);
+/// assert_eq!(config.memory_limit(), Some(88 * 1024 * 1024));
 /// ```
 ///
 /// A struct literal does not compile, as a later field would break it:
@@ -407,7 +406,7 @@ impl std::error::Error for ConfigError {}
 /// use grafeo_engine::Config;
 ///
 /// let config = Config {
-///     threads: 3,
+///     memory_limit: Some(88),
 ///     ..Config::in_memory()
 /// };
 /// ```
@@ -442,10 +441,11 @@ pub struct Config {
     )]
     pub spill_path: Option<PathBuf>,
 
-    /// Number of worker threads for query execution.
+    /// Number of worker threads for query execution. It has no effect:
+    /// nothing sizes a pool from it.
     #[deprecated(
         since = "0.6.0",
-        note = "read it with `Config::threads()` and set it with its builder; private in 0.7.0"
+        note = "nothing sizes a pool from the thread count, so it has no effect; removed in 0.7.0"
     )]
     pub threads: usize,
 
@@ -477,10 +477,11 @@ pub struct Config {
     )]
     pub backward_edges: bool,
 
-    /// Whether to enable query logging.
+    /// Whether to enable query logging. It has no effect: no query is
+    /// logged.
     #[deprecated(
         since = "0.6.0",
-        note = "read it with `Config::query_logging()` and set it with its builder; private in 0.7.0"
+        note = "no query is logged, so it has no effect; removed in 0.7.0"
     )]
     pub query_logging: bool,
 
@@ -541,22 +542,22 @@ pub struct Config {
     )]
     pub storage_format: StorageFormat,
 
-    /// Whether to enable catalog schema constraint enforcement.
-    ///
-    /// When true, the catalog enforces label, edge type, and property constraints
-    /// (e.g. required properties, uniqueness). The server sets this for JSON
-    /// Schema databases and populates constraints after creation.
+    /// Whether to enable catalog schema constraint enforcement. It has no
+    /// effect: the catalog enforces the constraints a graph type or `CREATE
+    /// CONSTRAINT` declares either way. A database file still stores it.
     #[deprecated(
         since = "0.6.0",
-        note = "read it with `Config::schema_constraints()` and set it with its builder; private in 0.7.0"
+        note = "the catalog enforces declared constraints either way, so it has no effect; removed in 0.7.0"
     )]
     pub schema_constraints: bool,
 
     /// Maximum time a single query may run before being cancelled.
     ///
-    /// When set, the executor checks the deadline between operator batches and
-    /// returns `QueryError::timeout()` if the wall-clock limit is exceeded.
-    /// `None` means no timeout (queries may run indefinitely).
+    /// When set, the deadline is checked between the chunks a query returns
+    /// and once per chunk inside the operators that read or make many rows
+    /// before they return one (aggregates, sorts, joins, filters, `UNWIND`),
+    /// so a query fails with a timeout error within about one chunk of work
+    /// past the limit. `None` means no timeout (queries may run indefinitely).
     ///
     /// Default: 30 seconds. Use `with_query_timeout()` to change or
     /// `without_query_timeout()` to disable.
@@ -922,8 +923,19 @@ impl Config {
         )
     }
 
-    /// Sets the number of worker threads.
+    /// Sets the number of worker threads, which has no effect: nothing sizes
+    /// a pool from it. Code that denies deprecated items no longer
+    /// builds with it:
+    ///
+    /// ```compile_fail
+    /// #![deny(deprecated)]
+    /// let _config = grafeo_engine::Config::in_memory().with_threads(3);
+    /// ```
     #[must_use]
+    #[deprecated(
+        since = "0.6.1",
+        note = "nothing sizes a pool from the thread count, so it has no effect; removed in 0.7.0"
+    )]
     pub fn with_threads(mut self, threads: usize) -> Self {
         self.threads = threads;
         self
@@ -978,8 +990,18 @@ impl Config {
         self
     }
 
-    /// Enables query logging.
+    /// Enables query logging, which has no effect: no query is logged. Code that denies deprecated items no longer
+    /// builds with it:
+    ///
+    /// ```compile_fail
+    /// #![deny(deprecated)]
+    /// let _config = grafeo_engine::Config::in_memory().with_query_logging();
+    /// ```
     #[must_use]
+    #[deprecated(
+        since = "0.6.1",
+        note = "no query is logged, so it has no effect; removed in 0.7.0"
+    )]
     pub fn with_query_logging(mut self) -> Self {
         self.query_logging = true;
         self
@@ -1081,20 +1103,42 @@ impl Config {
         self
     }
 
-    /// Enables catalog schema constraint enforcement.
+    /// Enables catalog schema constraint enforcement, which has no effect:
+    /// the catalog enforces the constraints a graph type or `CREATE
+    /// CONSTRAINT` declares either way. Code that denies deprecated items no longer
+    /// builds with it:
+    ///
+    /// ```compile_fail
+    /// #![deny(deprecated)]
+    /// let _config = grafeo_engine::Config::in_memory().with_schema_constraints();
+    /// ```
     #[must_use]
-    pub fn with_schema_constraints(mut self) -> Self {
-        self.schema_constraints = true;
-        self.set.insert(SetFields::SCHEMA_CONSTRAINTS);
-        self
+    #[deprecated(
+        since = "0.6.1",
+        note = "the catalog enforces declared constraints either way, so it has no effect; removed in 0.7.0"
+    )]
+    pub fn with_schema_constraints(self) -> Self {
+        self.with_stored_schema_constraints(true)
     }
 
-    /// Turns catalog schema constraint enforcement off, the default: set it
-    /// to override a database stored with it on (see
+    /// Turns catalog schema constraint enforcement off, the default, which
+    /// has no effect (see
     /// [`with_schema_constraints`](Self::with_schema_constraints)).
     #[must_use]
-    pub fn without_schema_constraints(mut self) -> Self {
-        self.schema_constraints = false;
+    #[deprecated(
+        since = "0.6.1",
+        note = "the catalog enforces declared constraints either way, so it has no effect; removed in 0.7.0"
+    )]
+    pub fn without_schema_constraints(self) -> Self {
+        self.with_stored_schema_constraints(false)
+    }
+
+    /// Sets the schema-constraints flag a database file stores, as its
+    /// deprecated builders do: the file format keeps the flag until 0.7.0,
+    /// so an open still carries a stored value over.
+    #[must_use]
+    pub(crate) fn with_stored_schema_constraints(mut self, on: bool) -> Self {
+        self.schema_constraints = on;
         self.set.insert(SetFields::SCHEMA_CONSTRAINTS);
         self
     }
@@ -1343,8 +1387,12 @@ impl Config {
         self.spill_path.as_deref()
     }
 
-    /// The number of worker threads.
+    /// The number of worker threads, which has no effect.
     #[must_use]
+    #[deprecated(
+        since = "0.6.1",
+        note = "nothing sizes a pool from the thread count, so it has no effect; removed in 0.7.0"
+    )]
     pub fn threads(&self) -> usize {
         self.threads
     }
@@ -1361,8 +1409,12 @@ impl Config {
         self.backward_edges
     }
 
-    /// Whether queries are logged.
+    /// Whether queries are logged, which has no effect.
     #[must_use]
+    #[deprecated(
+        since = "0.6.1",
+        note = "no query is logged, so it has no effect; removed in 0.7.0"
+    )]
     pub fn query_logging(&self) -> bool {
         self.query_logging
     }
@@ -1399,9 +1451,21 @@ impl Config {
         self.storage_format
     }
 
-    /// Whether the catalog enforces schema constraints.
+    /// Whether the catalog enforces schema constraints, which has no effect.
     #[must_use]
+    #[deprecated(
+        since = "0.6.1",
+        note = "the catalog enforces declared constraints either way, so it has no effect; removed in 0.7.0"
+    )]
     pub fn schema_constraints(&self) -> bool {
+        self.schema_constraints
+    }
+
+    /// The schema-constraints flag a database file stores (see
+    /// [`with_stored_schema_constraints`](Self::with_stored_schema_constraints)).
+    #[cfg(feature = "grafeo-file")]
+    #[must_use]
+    pub(crate) fn stored_schema_constraints(&self) -> bool {
         self.schema_constraints
     }
 
@@ -1579,13 +1643,10 @@ mod tests {
         assert!(config.path().is_none());
         assert!(config.memory_limit().is_none());
         assert!(config.spill_path().is_none());
-        assert!(config.threads() > 0);
         assert!(config.wal_enabled());
         assert!(config.backward_edges());
-        assert!(!config.query_logging());
         assert!(config.factorized_execution());
         assert_eq!(config.wal_durability(), DurabilityMode::default());
-        assert!(!config.schema_constraints());
         assert_eq!(config.query_timeout(), Some(Duration::from_secs(30)));
         assert_eq!(config.gc_interval(), 100);
     }
@@ -1611,22 +1672,40 @@ mod tests {
         assert_eq!(config.memory_limit(), Some(1024 * 1024));
     }
 
+    /// `threads`, `query_logging` and `schema_constraints` have no effect,
+    /// but grafeo-server forwards them, so until 0.7.0 removes them their
+    /// builders still set what their getters read, and validation still
+    /// refuses zero threads.
     #[test]
-    fn test_config_with_threads() {
-        let config = Config::in_memory().with_threads(8);
+    #[expect(
+        deprecated,
+        reason = "the deprecated no-op settings still read back what their builders set, until 0.7.0 removes them"
+    )]
+    fn deprecated_no_op_settings_read_back() {
+        let config = Config::in_memory();
+        assert_eq!(config.threads(), num_cpus::get());
+        assert!(!config.query_logging());
+        assert!(!config.schema_constraints());
+
+        let config = config
+            .with_threads(8)
+            .with_query_logging()
+            .with_schema_constraints();
         assert_eq!(config.threads(), 8);
+        assert!(config.query_logging());
+        assert!(config.schema_constraints());
+        assert!(!config.without_schema_constraints().schema_constraints());
+
+        assert_eq!(
+            Config::in_memory().with_threads(0).validate(),
+            Err(ConfigError::ZeroThreads)
+        );
     }
 
     #[test]
     fn test_config_without_backward_edges() {
         let config = Config::in_memory().without_backward_edges();
         assert!(!config.backward_edges());
-    }
-
-    #[test]
-    fn test_config_with_query_logging() {
-        let config = Config::in_memory().with_query_logging();
-        assert!(config.query_logging());
     }
 
     #[test]
@@ -1655,15 +1734,11 @@ mod tests {
     fn test_config_builder_chaining() {
         let config = Config::persistent("/tmp/db")
             .with_memory_limit(512 * 1024 * 1024)
-            .with_threads(4)
-            .with_query_logging()
             .without_backward_edges()
             .with_spill_path("/tmp/spill");
 
         assert!(config.path().is_some());
         assert_eq!(config.memory_limit(), Some(512 * 1024 * 1024));
-        assert_eq!(config.threads(), 4);
-        assert!(config.query_logging());
         assert!(!config.backward_edges());
         assert!(config.spill_path().is_some());
     }
@@ -1746,14 +1821,6 @@ mod tests {
         assert!(config.max_property_size().is_none());
     }
 
-    // --- schema_constraints tests ---
-
-    #[test]
-    fn test_config_with_schema_constraints() {
-        let config = Config::in_memory().with_schema_constraints();
-        assert!(config.schema_constraints());
-    }
-
     // --- query_timeout tests ---
 
     #[test]
@@ -1804,12 +1871,6 @@ mod tests {
     fn test_validate_rejects_zero_memory_limit() {
         let config = Config::in_memory().with_memory_limit(0);
         assert_eq!(config.validate(), Err(ConfigError::ZeroMemoryLimit));
-    }
-
-    #[test]
-    fn test_validate_rejects_zero_threads() {
-        let config = Config::in_memory().with_threads(0);
-        assert_eq!(config.validate(), Err(ConfigError::ZeroThreads));
     }
 
     /// A zero interval made the adaptive WAL flusher sync in a busy loop.
@@ -1994,10 +2055,7 @@ mod tests {
         let config = Config::persistent("/tmp/db")
             .with_graph_model(GraphModel::Lpg)
             .with_memory_limit(512 * 1024 * 1024)
-            .with_threads(4)
-            .with_query_logging()
             .with_wal_durability(DurabilityMode::Sync)
-            .with_schema_constraints()
             .without_backward_edges()
             .with_spill_path("/tmp/spill")
             .with_query_timeout(Duration::from_mins(1));
@@ -2005,10 +2063,7 @@ mod tests {
         assert_eq!(config.graph_model(), GraphModel::Lpg);
         assert!(config.path().is_some());
         assert_eq!(config.memory_limit(), Some(512 * 1024 * 1024));
-        assert_eq!(config.threads(), 4);
-        assert!(config.query_logging());
         assert_eq!(config.wal_durability(), DurabilityMode::Sync);
-        assert!(config.schema_constraints());
         assert!(!config.backward_edges());
         assert!(config.spill_path().is_some());
         assert_eq!(config.query_timeout(), Some(Duration::from_mins(1)));
@@ -2027,15 +2082,12 @@ mod tests {
             .with_graph_model(GraphModel::Rdf)
             .with_memory_limit(88 * 1024 * 1024)
             .with_spill_path("amsterdam.spill")
-            .with_threads(3)
             .without_wal()
             .without_backward_edges()
-            .with_query_logging()
             .without_factorized_execution()
             .with_shuffle_unordered(true)
             .with_wal_durability(DurabilityMode::batch(Duration::from_millis(19), 88))
             .with_storage_format(StorageFormat::Auto)
-            .with_schema_constraints()
             .with_query_timeout(Duration::from_secs(19))
             .with_max_property_size(88)
             .with_gc_interval(3)
@@ -2046,6 +2098,14 @@ mod tests {
             .with_checkpoint_wal_size(19 * 1024 * 1024)
             .with_history_retention(HistoryRetention::Duration(Duration::from_secs(88)))
             .with_wal_salvage();
+        #[expect(
+            deprecated,
+            reason = "the deprecated no-op settings still have their builders until 0.7.0 removes them"
+        )]
+        let config = config
+            .with_threads(3)
+            .with_query_logging()
+            .with_schema_constraints();
         #[cfg(feature = "cdc")]
         let config = config.with_cdc_retention(
             crate::cdc::CdcRetentionConfig::unlimited()

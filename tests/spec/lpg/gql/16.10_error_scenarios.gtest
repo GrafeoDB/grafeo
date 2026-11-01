@@ -126,12 +126,12 @@ tests:
   # ---------------------------------------------------------------------------
 
   - name: cast_string_to_int_invalid
-    skip: "invalid CAST returns NULL instead of erroring"
     setup:
       - "INSERT (:N {v: 'hello'})"
     query: "MATCH (n:N) RETURN CAST(n.v AS INT) AS result"
     expect:
       error: "cast"
+      gql_status: "22018"
 
   - name: cast_bool_to_int
     setup:

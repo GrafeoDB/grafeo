@@ -640,6 +640,49 @@ impl super::GrafeoDB {
     pub fn batch_create_edges(&self, edges: Vec<BatchEdge>) -> Result<Vec<EdgeId>> {
         self.direct(DirectTarget::Current).batch_create_edges(edges)
     }
+
+    /// Loads the CSV file at `path` as nodes, as `spec` describes (see
+    /// [`loader`](crate::loader)): the file parsed and typed in one pass and
+    /// written in bulk, in one transaction, all or nothing.
+    ///
+    /// # Errors
+    ///
+    /// A file it cannot read, a value its column's kind cannot read (with
+    /// its line and column), a missing or repeated key, or a constraint the
+    /// nodes break; nothing of the file is loaded then.
+    ///
+    /// # Stability: Experimental
+    ///
+    /// New in 0.6.1.
+    pub fn load_nodes_csv(
+        &self,
+        path: impl AsRef<std::path::Path>,
+        spec: &crate::loader::NodeLoad,
+    ) -> Result<crate::loader::LoadReport> {
+        self.direct(DirectTarget::Current)
+            .load_nodes_csv(path.as_ref(), spec)
+    }
+
+    /// Loads the CSV file at `path` as edges, as `spec` describes (see
+    /// [`loader`](crate::loader)): each end found by its key among the nodes
+    /// of its label, in one transaction, all or nothing.
+    ///
+    /// # Errors
+    ///
+    /// As [`load_nodes_csv`](Self::load_nodes_csv), and an end key no node
+    /// has unless `spec.missing` skips it.
+    ///
+    /// # Stability: Experimental
+    ///
+    /// New in 0.6.1.
+    pub fn load_edges_csv(
+        &self,
+        path: impl AsRef<std::path::Path>,
+        spec: &crate::loader::EdgeLoad,
+    ) -> Result<crate::loader::LoadReport> {
+        self.direct(DirectTarget::Current)
+            .load_edges_csv(path.as_ref(), spec)
+    }
 }
 
 /// A version of a history as a reader at `epoch` sees it: none when it was

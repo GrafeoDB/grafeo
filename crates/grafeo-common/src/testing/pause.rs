@@ -47,7 +47,12 @@ mod inner {
         if point != wanted {
             return;
         }
-        std::fs::write(with_suffix(flag, ".paused"), point)
+        // Written whole under another name and renamed into place: a test
+        // that waits for `<flag>.paused` and then reads the point never sees
+        // the file created but not yet written.
+        let written = with_suffix(flag, ".paused.tmp");
+        std::fs::write(&written, point)
+            .and_then(|()| std::fs::rename(&written, with_suffix(flag, ".paused")))
             .unwrap_or_else(|error| panic!("pause at {point}: cannot create the flag: {error}"));
         let resume = with_suffix(flag, ".resume");
         let deadline = Instant::now() + RESUME_WAIT;

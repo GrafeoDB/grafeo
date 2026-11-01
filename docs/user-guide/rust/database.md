@@ -28,8 +28,7 @@ let db = GrafeoDB::open("my_graph.db")?;
 use grafeo::{GrafeoDB, Config};
 
 let config = Config::in_memory()
-    .with_memory_limit(4 * 1024 * 1024 * 1024)  // 4 GB
-    .with_threads(8);
+    .with_memory_limit(4 * 1024 * 1024 * 1024);  // 4 GB
 
 let db = GrafeoDB::with_config(config)?;
 ```

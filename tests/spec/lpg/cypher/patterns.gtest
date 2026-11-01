@@ -524,3 +524,66 @@ tests:
     expect:
       rows:
         - ["[]"]
+
+  # ---------------------------------------------------------------------------
+  # Distinct targets of an undirected variable-length relationship (0.6.1): a
+  # relationship is used once per path, so the start is a target only over a
+  # closed trail (a self-loop, two parallel relationships or a cycle through
+  # it), never back over the relationship it left by.
+  # ---------------------------------------------------------------------------
+
+  - name: undirected_reach_leaves_out_the_start_on_a_path
+    setup:
+      - "CREATE (a:Spot {name: 'a'}), (b:Spot {name: 'b'}), (c:Spot {name: 'c'}), (a)-[:K]->(b), (c)-[:K]->(b)"
+    query: "MATCH (s:Spot {name: 'a'})-[:K*1..3]-(f:Spot) RETURN count(DISTINCT f) AS c"
+    expect:
+      rows:
+        - [2]
+
+  - name: undirected_reach_takes_the_start_back_over_a_triangle_of_three
+    setup:
+      - "CREATE (x:Spot {name: 'x'}), (y:Spot {name: 'y'}), (z:Spot {name: 'z'}), (x)-[:K]->(y), (z)-[:K]->(y), (x)-[:K]->(z)"
+    query: "MATCH (s:Spot {name: 'x'})-[:K*1..2]-(f:Spot) WITH count(DISTINCT f) AS two MATCH (s:Spot {name: 'x'})-[:K*1..3]-(f:Spot) RETURN two, count(DISTINCT f) AS three"
+    expect:
+      rows:
+        - [2, 3]
+
+  - name: undirected_reach_takes_the_start_back_over_parallel_relationships
+    setup:
+      - "CREATE (p:Spot {name: 'p'}), (q:Spot {name: 'q'}), (p)-[:K]->(q), (q)-[:K]->(p)"
+    query: "MATCH (s:Spot {name: 'p'})-[:K*1..2]-(f:Spot) RETURN DISTINCT f.name AS name ORDER BY name"
+    expect:
+      ordered: true
+      rows:
+        - [p]
+        - [q]
+
+  - name: undirected_reach_takes_the_start_back_over_a_self_loop
+    setup:
+      - "CREATE (l:Spot {name: 'l'}), (m:Spot {name: 'm'}), (l)-[:K]->(l), (l)-[:K]->(m)"
+    query: "MATCH (s:Spot {name: 'l'})-[:K*1..1]-(f:Spot) RETURN DISTINCT f.name AS name ORDER BY name"
+    expect:
+      ordered: true
+      rows:
+        - [l]
+        - [m]
+
+  - name: undirected_reach_leaves_out_the_start_of_a_lollipop
+    # s-a, then a cycle a-b-c-a: a closed trail through s would repeat s-a
+    setup:
+      - "CREATE (s:Spot {name: 's'}), (a:Spot {name: 'a'}), (b:Spot {name: 'b'}), (c:Spot {name: 'c'}), (s)-[:K]->(a), (a)-[:K]->(b), (c)-[:K]->(b), (c)-[:K]->(a)"
+    query: "MATCH (s:Spot {name: 's'})-[:K*1..4]-(f:Spot) RETURN DISTINCT f.name AS name ORDER BY name"
+    expect:
+      ordered: true
+      rows:
+        - [a]
+        - [b]
+        - [c]
+
+  - name: undirected_reach_from_zero_hops_has_the_start
+    setup:
+      - "CREATE (a:Spot {name: 'a'}), (b:Spot {name: 'b'}), (a)-[:K]->(b)"
+    query: "MATCH (s:Spot {name: 'a'})-[:K*0..3]-(f:Spot) RETURN count(DISTINCT f) AS c"
+    expect:
+      rows:
+        - [2]

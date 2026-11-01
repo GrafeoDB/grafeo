@@ -21,31 +21,6 @@ use super::super::{AlgorithmResult, ParameterDef, ParameterType, Parameters};
 use super::traits::{GraphAlgorithm, MinScored, impl_algorithm, int_value, node_id_from_param};
 
 // ============================================================================
-// Edge Weight Extraction
-// ============================================================================
-
-/// Extracts edge weight from a property value.
-///
-/// Supports Int64 and Float64 values, defaulting to 1.0 if no weight property.
-fn extract_weight(
-    store: &super::traits::GraphView<'_>,
-    edge_id: grafeo_common::types::EdgeId,
-    weight_prop: Option<&str>,
-) -> f64 {
-    if let Some(prop_name) = weight_prop
-        && let Some(edge) = store.edge(edge_id)
-        && let Some(value) = edge.get_property(prop_name)
-    {
-        return match value {
-            Value::Int64(i) => *i as f64,
-            Value::Float64(f) => *f,
-            _ => 1.0,
-        };
-    }
-    1.0
-}
-
-// ============================================================================
 // Dijkstra's Algorithm
 // ============================================================================
 
@@ -147,7 +122,7 @@ pub(crate) fn dijkstra_on(
 
         // Explore neighbors
         for (neighbor, edge_id) in store.edges(node, Direction::Outgoing) {
-            let weight = extract_weight(store, edge_id, weight_property);
+            let weight = store.edge_number(edge_id, weight_property, 1.0);
             let new_dist = dist + weight;
 
             let is_better = distances
@@ -230,7 +205,7 @@ pub(crate) fn dijkstra_path_on(
 
         // Explore neighbors
         for (neighbor, edge_id) in store.edges(node, Direction::Outgoing) {
-            let weight = extract_weight(store, edge_id, weight_property);
+            let weight = store.edge_number(edge_id, weight_property, 1.0);
             let new_dist = dist + weight;
 
             let is_better = distances
@@ -331,7 +306,7 @@ where
 
         // Explore neighbors
         for (neighbor, edge_id) in store.edges(node, Direction::Outgoing) {
-            let weight = extract_weight(store, edge_id, weight_property);
+            let weight = store.edge_number(edge_id, weight_property, 1.0);
             let tentative_g = current_g + weight;
 
             let is_better = g_score
@@ -462,7 +437,7 @@ pub(crate) fn bellman_ford_on(
         let mut changed = false;
         for &(u, v, edge_id) in &edges {
             if let Some(&dist_u) = distances.get(&u) {
-                let weight = extract_weight(store, edge_id, weight_property);
+                let weight = store.edge_number(edge_id, weight_property, 1.0);
                 let new_dist = dist_u + weight;
 
                 let is_better = distances
@@ -485,7 +460,7 @@ pub(crate) fn bellman_ford_on(
     let mut has_negative_cycle = false;
     for &(u, v, edge_id) in &edges {
         if let Some(&dist_u) = distances.get(&u) {
-            let weight = extract_weight(store, edge_id, weight_property);
+            let weight = store.edge_number(edge_id, weight_property, 1.0);
             if let Some(&dist_v) = distances.get(&v)
                 && dist_u + weight < dist_v
             {
@@ -624,7 +599,7 @@ pub(crate) fn floyd_warshall_on(
     for (idx, &node) in nodes.iter().enumerate() {
         for (neighbor, edge_id) in store.edges(node, Direction::Outgoing) {
             if let Some(&neighbor_idx) = node_to_index.get(&neighbor) {
-                let weight = extract_weight(store, edge_id, weight_property);
+                let weight = store.edge_number(edge_id, weight_property, 1.0);
                 if weight < distances[idx][neighbor_idx] {
                     distances[idx][neighbor_idx] = weight;
                     next[idx][neighbor_idx] = Some(neighbor_idx);
@@ -1056,6 +1031,65 @@ mod tests {
         );
 
         store
+    }
+
+    #[test]
+    fn decimal_weights_choose_the_astar_route() {
+        use grafeo_common::types::Decimal;
+
+        for (weight, distance) in [
+            (Decimal::new(2500, 4).unwrap(), 0.75),
+            (Decimal::new(0, 4).unwrap(), 0.5),
+        ] {
+            let store = RowGroupStore::new();
+            let source = store.create_node(&["Node"]);
+            let via = store.create_node(&["Node"]);
+            let target = store.create_node(&["Node"]);
+            for (from, to, value) in [
+                (source, via, Value::Decimal(weight)),
+                (via, target, Value::Float64(0.5)),
+                (source, target, Value::Int64(1)),
+            ] {
+                store.create_edge_with_props(from, to, "R", &[(PropertyKey::new("w"), value)]);
+            }
+            assert_eq!(
+                astar(
+                    &store,
+                    ReadView::latest(),
+                    source,
+                    target,
+                    Some("w"),
+                    |_| 0.0
+                )
+                .unwrap(),
+                Some((distance, vec![source, via, target]))
+            );
+        }
+    }
+
+    #[test]
+    fn decimal_weights_keep_zero_and_negative_distances() {
+        use grafeo_common::types::Decimal;
+
+        let store = RowGroupStore::new();
+        let source = store.create_node(&["Node"]);
+        let via = store.create_node(&["Node"]);
+        let target = store.create_node(&["Node"]);
+        for (from, to, value) in [
+            (source, via, Value::Decimal(Decimal::new(-25, 2).unwrap())),
+            (via, target, Value::Decimal(Decimal::new(0, 3).unwrap())),
+            (source, target, Value::Int64(1)),
+        ] {
+            store.create_edge_with_props(from, to, "R", &[(PropertyKey::new("w"), value)]);
+        }
+        let single = bellman_ford(&store, ReadView::latest(), source, Some("w")).unwrap();
+        assert!(!single.has_negative_cycle);
+        assert_eq!(single.distances.get(&target).copied(), Some(-0.25));
+        assert_eq!(single.path_to(target), Some(vec![source, via, target]));
+        let all = floyd_warshall(&store, ReadView::latest(), Some("w")).unwrap();
+        assert!(!all.has_negative_cycle());
+        assert_eq!(all.distance(source, target), Some(-0.25));
+        assert_eq!(all.path(source, target), Some(vec![source, via, target]));
     }
 
     #[test]

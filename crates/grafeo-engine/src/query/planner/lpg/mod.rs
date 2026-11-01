@@ -25,16 +25,12 @@
 //! legal, not just which is faster. Each rewrite lives in the submodule
 //! that owns the corresponding logical operator.
 //!
-//! 1. **Factorized expand chains** (`expand::plan_expand_chain`):
-//!    two or more consecutive `Expand`s are collapsed into a single
-//!    `LazyFactorizedChainOperator`. A hand-rolled tree of `Expand`
-//!    operators would materialise the Cartesian product between hops
-//!    (O(d^k) rows for a k-hop query with average degree d); factorisation
-//!    represents each hop as a set per row and evaluates upward filters
-//!    lazily, which is asymptotically better *and* preserves filter
-//!    semantics (filters apply to the flattened view). Disabled when
-//!    `factorized_execution` is false on the planner, used as an escape
-//!    hatch for operators that need materialised intermediate state.
+//! 1. **Factorized counts** (`aggregate::plan_factorized_aggregate`): a bare
+//!    `COUNT` over two or more consecutive `Expand`s counts the paths level
+//!    by level, without flattening them. Any other chain of expands streams
+//!    hop by hop, which stops early under a LIMIT and holds one chunk (a
+//!    flattened factorized chain built the whole product first). Disabled
+//!    when `factorized_execution` is false on the planner.
 //!
 //! 2. **EXISTS / NOT EXISTS as semi/anti joins** (`filter::extract_complex_exists`):
 //!    anything more than a trivial single-hop EXISTS is rewritten to a
@@ -101,12 +97,13 @@ mod expression;
 pub(crate) mod filter;
 mod filter_hybrid;
 mod join;
+mod load;
 mod mutation;
 mod project;
 pub(crate) mod reachability;
 pub(crate) mod scan;
 pub(crate) mod seek;
-mod subquery;
+pub(crate) mod subquery;
 pub(crate) mod value_join;
 
 #[cfg(feature = "algos")]
@@ -266,12 +263,17 @@ pub struct Planner {
     /// `plan_operator` when encountering `ParameterScan`.
     pub(super) correlated_param_state:
         std::cell::RefCell<Option<Arc<grafeo_core::execution::operators::ParameterState>>>,
+    /// The left inputs of the delim joins being planned, innermost last: a
+    /// `DelimScan` reads the distinct values of the innermost (see
+    /// `plan_delim_join`).
+    pub(super) delim_buffers:
+        std::cell::RefCell<Vec<Arc<grafeo_core::execution::operators::DelimBuffer>>>,
     /// Variables from variable-length expand patterns (group-list variables).
     /// Used by the aggregate planner to detect horizontal aggregation (GE09).
     pub(super) group_list_variables: std::cell::RefCell<std::collections::HashSet<String>>,
-    /// Whether the statement being planned writes, known while its root is
+    /// How the statement being planned writes, known while its root is
     /// planned (see [`value_join::StatementScope`]).
-    pub(super) statement_writes: std::cell::Cell<Option<bool>>,
+    pub(super) statement_writes: std::cell::Cell<Option<value_join::StatementWrites>>,
     /// Whether the operator being planned runs after a write of its
     /// statement that does not come to it through its input (the right side
     /// of a join whose left side writes, a subquery, see
@@ -350,6 +352,7 @@ impl Planner {
             store_kind: StoreKind::BuiltIn,
             projections: None,
             correlated_param_state: std::cell::RefCell::new(None),
+            delim_buffers: std::cell::RefCell::new(Vec::new()),
             group_list_variables: std::cell::RefCell::new(std::collections::HashSet::new()),
             statement_writes: std::cell::Cell::new(None),
             after_a_write: std::cell::Cell::new(false),
@@ -410,6 +413,7 @@ impl Planner {
             store_kind: StoreKind::BuiltIn,
             projections: None,
             correlated_param_state: std::cell::RefCell::new(None),
+            delim_buffers: std::cell::RefCell::new(Vec::new()),
             group_list_variables: std::cell::RefCell::new(std::collections::HashSet::new()),
             statement_writes: std::cell::Cell::new(None),
             after_a_write: std::cell::Cell::new(false),
@@ -604,7 +608,7 @@ impl Planner {
     /// [`reachability`] allows it (the default); off, every walk is
     /// enumerated, which tests compare with.
     #[must_use]
-    #[cfg(query_language)]
+    #[cfg(lpg_language)]
     pub(crate) fn with_reachability(mut self, enabled: bool) -> Self {
         self.reachability_expands = std::cell::RefCell::new(enabled.then(Vec::new));
         self
@@ -918,6 +922,19 @@ impl Planner {
             .map(|(_, mode)| *mode)
     }
 
+    /// Runs `plan` with profiling off. A subquery inside an expression
+    /// (`EXISTS`, `COUNT`, `VALUE`) has no node of its own in the logical
+    /// tree PROFILE walks: PROFILE shows it in the predicate of the operator
+    /// that holds it, as EXPLAIN does, and its rows and time count in that
+    /// operator's. Recording its entries would shift every later one onto
+    /// the wrong operator.
+    pub(super) fn without_profiling<T>(&self, plan: impl FnOnce() -> Result<T>) -> Result<T> {
+        let profiling = self.profiling.replace(false);
+        let planned = plan();
+        self.profiling.set(profiling);
+        planned
+    }
+
     /// If profiling is enabled, wraps a planned result in `ProfiledOperator`
     /// and records a [`ProfileEntry`](crate::query::profile::ProfileEntry).
     fn maybe_profile(
@@ -961,45 +978,24 @@ impl Planner {
     /// Plans a single logical operator.
     fn plan_operator(&self, op: &LogicalOperator) -> Result<(Box<dyn Operator>, Vec<String>)> {
         let _statement = value_join::StatementScope::enter(&self.statement_writes, op);
-        // A chain of filters over a node scan reads the label with the fewest
-        // nodes (see `scan.rs`); PROFILE then shows the plan that runs.
+        // A chain of filters over a node scan reads the labels with the
+        // fewest nodes (see `scan.rs`); PROFILE then shows the plan that runs.
         // Boxed: this frame is on the stack once per level of the plan (see
         // `crate::query::limits`), an operator in it would make it larger.
         let reordered = match op {
             LogicalOperator::Filter(filter) => self
-                .scan_smallest_label(filter)
+                .scan_fewest_nodes(filter)
                 .map(|filter| Box::new(LogicalOperator::Filter(filter))),
             _ => None,
         };
         let op = reordered.as_deref().unwrap_or(op);
         let result = match op {
             LogicalOperator::NodeScan(scan) => self.plan_node_scan(scan),
-            LogicalOperator::Expand(expand) => {
-                // Factorized chain fuses N Expand logical operators into a
-                // single LazyFactorizedChainOperator. It kicks in only when
-                // it actually helps: chain_len >= 2 means at least two
-                // consecutive Expands, where separate plans would
-                // Cartesian-product per hop. For a single hop, the plain
-                // `plan_expand` path is cheaper and integrates more naturally
-                // with adjacent operators.
-                //
-                // Disable under PROFILE for the same reason as
-                // `try_topk_rewrite` in plan_limit: PROFILE's
-                // `build_profile_tree` walks the logical plan expecting one
-                // ProfileEntry per logical operator, and a fused chain only
-                // emits one entry for the whole chain. The result is a count
-                // mismatch and a panic at
-                // `crates/grafeo-engine/src/query/profile.rs:75`. Run the
-                // unfused per-Expand path under PROFILE so each Expand gets
-                // its own entry.
-                if self.factorized_execution && !self.profiling.get() {
-                    let (chain_len, _base) = Self::count_expand_chain(op);
-                    if chain_len >= 2 {
-                        return self.maybe_profile(self.plan_expand_chain(op), op);
-                    }
-                }
-                self.plan_expand(expand)
-            }
+            // A chain of expands streams, one hop after another, so a LIMIT
+            // or a filter above it stops early and holds one chunk; only a
+            // bare count over a chain is factorized (see `plan_aggregate`),
+            // which flattens nothing.
+            LogicalOperator::Expand(expand) => self.plan_expand(expand),
             LogicalOperator::Return(ret) => self.plan_return(ret),
             LogicalOperator::Filter(filter) => self.plan_filter(filter),
             LogicalOperator::Project(project) => self.plan_project(project),
@@ -1021,6 +1017,7 @@ impl Planner {
             LogicalOperator::DeleteEdge(delete) => self.plan_delete_edge(delete),
             LogicalOperator::LeftJoin(left_join) => self.plan_left_join(left_join),
             LogicalOperator::AntiJoin(anti_join) => self.plan_anti_join(anti_join),
+            LogicalOperator::MarkJoin(mark) => self.plan_mark_join(mark),
             LogicalOperator::Unwind(unwind) => self.plan_unwind(unwind),
             LogicalOperator::Merge(merge) => self.plan_merge(merge),
             LogicalOperator::MergeRelationship(merge_rel) => {
@@ -1031,6 +1028,9 @@ impl Planner {
             LogicalOperator::SetProperty(set_prop) => self.plan_set_property(set_prop),
             LogicalOperator::ShortestPath(sp) => self.plan_shortest_path(sp),
             LogicalOperator::MapCollect(mc) => self.plan_map_collect(mc),
+            LogicalOperator::CallProcedure(call) if load::is_load(call) => {
+                self.plan_load_call(call)
+            }
             #[cfg(feature = "algos")]
             LogicalOperator::CallProcedure(call) => self.plan_call_procedure(call),
             #[cfg(not(feature = "algos"))]
@@ -1040,6 +1040,7 @@ impl Planner {
                 ),
             )),
             LogicalOperator::ParameterScan(param_scan) => self.plan_parameter_scan(param_scan),
+            LogicalOperator::DelimScan(scan) => self.plan_delim_scan(scan),
             LogicalOperator::MultiWayJoin(mwj) => self.plan_multi_way_join(mwj),
             LogicalOperator::HorizontalAggregate(ha) => self.plan_horizontal_aggregate(ha),
             LogicalOperator::LoadData(load) => self.plan_load_data(load),
@@ -1127,7 +1128,8 @@ impl Planner {
                 input_column_count,
                 self.read_view(),
             )
-            .with_aggregate_options(ha.distinct, ha.percentile, ha.separator.clone()),
+            .with_aggregate_options(ha.distinct, ha.percentile, ha.separator.clone())
+            .with_temporal(self.session_context.temporal_comparison),
         );
 
         let mut columns = child_columns;

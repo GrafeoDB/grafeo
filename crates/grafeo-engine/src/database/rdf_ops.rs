@@ -11,6 +11,45 @@ use grafeo_core::graph::rdf::RdfStore;
 
 use super::GrafeoDB;
 
+/// The syntax of an RDF file (see [`GrafeoDB::load_rdf`]).
+///
+/// # Stability: Experimental
+///
+/// New in 0.6.1: more formats may be added. See <https://grafeo.dev/stability/>.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum RdfFormat {
+    /// Turtle (`.ttl`).
+    Turtle,
+    /// N-Triples (`.nt`), one triple a line.
+    NTriples,
+}
+
+impl RdfFormat {
+    /// The format of a file by its extension: `.ttl` for Turtle, `.nt` for
+    /// N-Triples, in any case.
+    #[must_use]
+    pub fn of_path(path: &std::path::Path) -> Option<Self> {
+        let extension = path.extension()?.to_str()?.to_ascii_lowercase();
+        match extension.as_str() {
+            "ttl" => Some(Self::Turtle),
+            "nt" => Some(Self::NTriples),
+            _ => None,
+        }
+    }
+
+    /// The format a name gives (`turtle`, `ttl`, `ntriples`, `n-triples`,
+    /// `nt`), in any case.
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name.to_ascii_lowercase().as_str() {
+            "turtle" | "ttl" => Some(Self::Turtle),
+            "ntriples" | "n-triples" | "nt" => Some(Self::NTriples),
+            _ => None,
+        }
+    }
+}
+
 // =========================================================================
 // Query operations
 // =========================================================================
@@ -45,8 +84,7 @@ impl GrafeoDB {
         let logical_plan = sparql::translate(query)?;
 
         // Optimize the plan using RDF-specific statistics
-        let rdf_stats = self.rdf_store.get_or_collect_statistics();
-        let optimizer = Optimizer::from_rdf_statistics((*rdf_stats).clone());
+        let optimizer = Optimizer::for_rdf_plan(&self.rdf_store, &logical_plan);
         let optimized_plan = optimizer.optimize(logical_plan)?;
 
         // An update on a read-only database fails, as in a session.
@@ -120,8 +158,69 @@ impl GrafeoDB {
         self.check_import_allowed()?;
         // Collected before commits are held off, for the same reason.
         let triples: Vec<_> = triples.into_iter().collect();
+        if let Some(triple) = triples.iter().find(|triple| !triple.is_valid()) {
+            return Err(grafeo_common::utils::error::Error::InvalidValue(format!(
+                "{triple} is no RDF triple: a subject is an IRI or a blank node, a predicate \
+                 an IRI; nothing was inserted"
+            )));
+        }
         let held = self.hold_commits_for_import()?;
         self.insert_triples_streamed(&held, triples)
+    }
+
+    /// Loads the RDF file at `path` into the default graph as one bulk write,
+    /// as [`batch_insert_rdf`](Self::batch_insert_rdf) inserts its triples:
+    /// the file is parsed first, without blocking anything, and nothing is
+    /// inserted when a line does not parse. `format` names the syntax, or
+    /// `None` for the one the file's extension names (`.ttl`, `.nt`). Returns
+    /// how many triples were new.
+    ///
+    /// # Stability: Experimental
+    ///
+    /// New in 0.6.1: formats and options may be added. See
+    /// <https://grafeo.dev/stability/>.
+    ///
+    /// # Errors
+    ///
+    /// A file it cannot read or that is not UTF-8 text, a format it cannot
+    /// tell from the extension, the line and reason of a parse error, and
+    /// the errors of [`batch_insert_rdf`](Self::batch_insert_rdf).
+    pub fn load_rdf(
+        &self,
+        path: impl AsRef<std::path::Path>,
+        format: Option<RdfFormat>,
+    ) -> Result<usize> {
+        use grafeo_common::utils::error::Error;
+
+        // Refused before the file is read, as every import is.
+        self.check_import_allowed()?;
+        let path = path.as_ref();
+        let format = match format {
+            Some(format) => format,
+            None => RdfFormat::of_path(path).ok_or_else(|| {
+                Error::InvalidValue(format!(
+                    "cannot tell the RDF format of '{}' from its extension (.ttl, .nt): \
+                     name the format",
+                    path.display()
+                ))
+            })?,
+        };
+        let text = std::fs::read_to_string(path).map_err(|error| {
+            Error::InvalidValue(format!("cannot read '{}': {error}", path.display()))
+        })?;
+        let triples = match format {
+            RdfFormat::Turtle => grafeo_core::graph::rdf::turtle::TurtleParser::new()
+                .parse(&text)
+                .map_err(|error| {
+                    Error::InvalidValue(format!("'{}' is no Turtle: {error}", path.display()))
+                })?,
+            RdfFormat::NTriples => {
+                grafeo_core::graph::rdf::parse_ntriples_text(&text).map_err(|error| {
+                    Error::InvalidValue(format!("'{}' is no N-Triples: {error}", path.display()))
+                })?
+            }
+        };
+        self.batch_insert_rdf(triples)
     }
 
     /// Inserts `triples` into the default RDF graph as one bulk write, while
@@ -147,7 +246,14 @@ impl GrafeoDB {
             use grafeo_common::storage::log_record::TripleRecord;
 
             let mut changes = changes;
-            for triple in &triples {
+            // Without a WAL there is nothing to log: the records are not
+            // built (each copies its triple's terms).
+            let logged = if changes.is_logged() {
+                &triples[..]
+            } else {
+                &[]
+            };
+            for triple in logged {
                 changes.log_triple(
                     None,
                     &grafeo_common::change::DataOp::InsertTriple {

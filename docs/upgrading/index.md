@@ -9,7 +9,8 @@ tags:
 # Upgrading
 
 A minor release (`0.5` to `0.6`) may change stable APIs, query results and the database file format; a patch
-release (`0.6.1` to `0.6.2`) does not (see [Versioning](../versioning.md) and [API Stability](../stability.md)).
+release (`0.6.1` to `0.6.2`) does not change stable APIs or the file format, but a bug fix in it can change a query
+result or turn a wrong answer into an error (see [Versioning](../versioning.md) and [API Stability](../stability.md)).
 Each minor release has a guide here that lists what to change, grouped by where it affects you. The
 [CHANGELOG](../changelog.md) has every entry, including the fixes that change results.
 

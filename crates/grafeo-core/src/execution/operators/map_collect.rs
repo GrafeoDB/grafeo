@@ -39,6 +39,7 @@ impl Operator for MapCollectOperator {
 
         let mut map = BTreeMap::new();
         while let Some(chunk) = self.child.next()? {
+            crate::execution::deadline::check()?;
             for row in chunk.selected_indices() {
                 let key = chunk.column(self.key_col).and_then(|c| c.get_value(row));
                 let value = chunk.column(self.value_col).and_then(|c| c.get_value(row));

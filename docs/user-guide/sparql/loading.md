@@ -50,12 +50,18 @@ large enough to amortize lock overhead.
 
 ### Loading via SPARQL
 
-From any language binding you can load Turtle data through SPARQL INSERT DATA:
+The language bindings have no Turtle or N-Triples file loader. From any binding, send the triples as a SPARQL
+`INSERT DATA` statement instead. N-Triples lines can go into `INSERT DATA { ... }` as they are. Turtle's
+`@prefix ex: <...> .` lines are not SPARQL: write each one as `PREFIX ex: <...>` (no `@`, no final dot) before
+`INSERT DATA`, and put the rest of the Turtle inside the braces:
 
 ```sparql
+PREFIX ex: <http://example.org/>
+PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+
 INSERT DATA {
-  <http://example.org/alix> <http://xmlns.com/foaf/0.1/name> "Alix" .
-  <http://example.org/alix> <http://xmlns.com/foaf/0.1/knows> <http://example.org/gus> .
+  ex:alix foaf:name "Alix" ;
+          foaf:knows ex:gus .
 }
 ```
 
@@ -129,17 +135,6 @@ destinations (logging, deduplication, remote stores).
 
 ## SPARQL LOAD Statement
 
-Grafeo also supports the SPARQL Update `LOAD` statement for importing RDF data from a URI:
-
-```sparql
--- Load triples from a source URI into the default graph
-LOAD <file:///path/to/data.ttl>
-
--- Load into a specific named graph
-LOAD <file:///path/to/data.ttl> INTO GRAPH <http://example.org/my-graph>
-
--- Silent mode: suppress errors if the source is unavailable
-LOAD SILENT <file:///path/to/data.ttl>
-```
-
-The `LOAD` statement accepts an IRI as its source. The optional `SILENT` keyword suppresses errors when the source cannot be loaded. The optional `INTO GRAPH` clause directs triples into a named graph instead of the default graph.
+The SPARQL Update `LOAD` statement is not supported yet: `LOAD <file:///path/to/data.ttl>` fails with an
+unsupported error, also with `SILENT`. Load a file with the Rust loaders above, or send its
+triples as `INSERT DATA` (see [Loading via SPARQL](#loading-via-sparql)).

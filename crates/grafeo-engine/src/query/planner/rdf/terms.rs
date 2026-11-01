@@ -78,8 +78,26 @@ fn double_lexical(value: f64) -> String {
         return if value > 0.0 { "INF" } else { "-INF" }.to_string();
     }
     // `{:e}` writes the shortest round-trip digits: `1e3`, `2.5e-1`, `0e0`.
-    let shortest = format!("{value:e}");
-    let (mantissa, exponent) = shortest.split_once('e').unwrap_or((&shortest, "0"));
+    exponent_lexical(&format!("{value:e}"))
+}
+
+/// A computed float as the canonical lexical form of `xsd:float` (XML Schema
+/// 1.1, 3.3.4.2): as [`double_lexical`], with the fewest digits that read
+/// back as the same float (`0.5` is `5.0E-1`).
+pub(super) fn float_lexical(value: f32) -> String {
+    if value.is_nan() {
+        return "NaN".to_string();
+    }
+    if value.is_infinite() {
+        return if value > 0.0 { "INF" } else { "-INF" }.to_string();
+    }
+    exponent_lexical(&format!("{value:e}"))
+}
+
+/// Rust's shortest `{:e}` text (`1e3`, `2.5e-1`) in the XSD form: a point
+/// in the mantissa and a capital `E` (`1.0E3`, `2.5E-1`).
+fn exponent_lexical(shortest: &str) -> String {
+    let (mantissa, exponent) = shortest.split_once('e').unwrap_or((shortest, "0"));
     if mantissa.contains('.') {
         format!("{mantissa}E{exponent}")
     } else {

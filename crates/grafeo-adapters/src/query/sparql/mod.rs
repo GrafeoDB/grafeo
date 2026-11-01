@@ -22,6 +22,7 @@
 pub mod ast;
 mod lexer;
 mod parser;
+pub use parser::PREDEFINED_PREFIXES;
 
 pub use ast::*;
 pub use lexer::{Lexer, Token, TokenKind};

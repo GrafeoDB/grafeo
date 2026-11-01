@@ -150,6 +150,12 @@ mod physical {
         pub transaction_id: Option<TransactionId>,
         /// Maximum rows returned by one next call.
         pub chunk_capacity: usize,
+        /// Whether a zero-length solution needs its term in the graph
+        /// searched: a path between two variables has the graph's terms as
+        /// its zero-length solutions (SPARQL 1.1 sec 18.5), so when the rows
+        /// before it bind an end to a term outside the graph, that term is
+        /// none. A constant end is its own zero-length solution either way.
+        pub zero_length_in_graph: bool,
     }
 
     /// Resumable breadth-first search over exact Terms and finite automaton states.
@@ -873,12 +879,22 @@ mod physical {
                 let search = self.search.as_mut().expect("RDF origin initialized");
                 if search.zero_pending {
                     search.zero_pending = false;
-                    if row_matches(
-                        config,
-                        &search.origin,
-                        &search.origin,
-                        context.name.as_ref(),
-                    ) {
+                    let in_graph = !config.zero_length_in_graph
+                        || occurs_in(
+                            &context.sources,
+                            &search.origin,
+                            config.transaction_id,
+                            self.read_overlay.as_deref(),
+                            &mut self.budget,
+                        )?;
+                    if in_graph
+                        && row_matches(
+                            config,
+                            &search.origin,
+                            &search.origin,
+                            context.name.as_ref(),
+                        )
+                    {
                         return Ok(Some((
                             search.origin.clone(),
                             search.origin.clone(),
@@ -939,15 +955,50 @@ mod physical {
                         (&search.origin, &key.term)
                     };
                     if row_matches(config, subject, object, context.name.as_ref()) {
-                        return Ok(Some((
-                            subject.clone(),
-                            object.clone(),
-                            context.name.clone(),
-                        )));
+                        let row = (subject.clone(), object.clone(), context.name.clone());
+                        // With both ends bound, the one pair this graph can
+                        // give is found: the rest of the search is not read.
+                        if config.subject.is_some() && config.object.is_some() {
+                            self.release_search();
+                        }
+                        return Ok(Some(row));
                     }
                 }
             }
         }
+    }
+
+    /// Whether `term` is the subject or the object of a triple of `sources`.
+    fn occurs_in(
+        sources: &[GraphSource],
+        term: &Term,
+        transaction_id: Option<TransactionId>,
+        overlay: Option<&dyn RdfPathReadOverlay>,
+        budget: &mut PathBudget,
+    ) -> Result<bool, OperatorError> {
+        let as_subject = TriplePattern {
+            subject: Some(term.clone()),
+            predicate: None,
+            object: None,
+        };
+        let as_object = TriplePattern {
+            subject: None,
+            predicate: None,
+            object: Some(term.clone()),
+        };
+        let mut found = false;
+        for pattern in [as_subject, as_object] {
+            for source in sources {
+                if found {
+                    return Ok(true);
+                }
+                source.visit_matches(&pattern, transaction_id, overlay, budget, &mut |_, _| {
+                    found = true;
+                    Ok(())
+                })?;
+            }
+        }
+        Ok(found)
     }
 
     fn row_matches(
@@ -1059,6 +1110,7 @@ mod physical {
                 graph: RdfPathGraph::Default,
                 transaction_id: None,
                 chunk_capacity: 1,
+                zero_length_in_graph: false,
             }
         }
 

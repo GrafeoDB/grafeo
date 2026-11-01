@@ -30,18 +30,21 @@ repos:
   # Local Rust hooks
   - repo: local
     hooks:
+      # rustfmt on the staged Rust files only (prek splits a long list to fit
+      # the command line; `cargo fmt --all` passed every target's root at once
+      # and outgrew the Windows limit). CI checks the whole tree.
       - id: cargo-fmt
-        name: cargo fmt
-        entry: cargo fmt --all --
+        name: rustfmt
+        entry: rustfmt --edition 2024
         language: system
         types: [rust]
-        pass_filenames: false
 
+      # clippy on the packages the staged files change and their dependents
       - id: cargo-clippy
         name: cargo clippy
-        entry: cargo clippy --all-targets --all-features -- -D warnings
+        entry: python scripts/precommit_clippy.py
         language: system
-        types: [rust]
+        files: '(\.rs|Cargo\.(toml|lock))$'
         pass_filenames: false
 
       - id: cargo-deny

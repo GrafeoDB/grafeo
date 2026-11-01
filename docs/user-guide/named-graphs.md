@@ -27,7 +27,7 @@ CREATE GRAPH friends
 | `CREATE GRAPH g` | Create an open (schema-free) graph |
 | `CREATE GRAPH g ANY` | Explicitly open: any node/edge types allowed |
 | `CREATE GRAPH g OPEN` | Synonym for `ANY` |
-| `CREATE GRAPH g IF NOT EXISTS` | No-op if the graph already exists |
+| `CREATE GRAPH IF NOT EXISTS g` | No-op if the graph already exists |
 | `CREATE GRAPH g TYPED my_type` | Bind the graph to a declared graph type |
 | `CREATE GRAPH g2 LIKE g1` | Copy the schema (graph type) of `g1`, without data |
 | `CREATE GRAPH g3 AS COPY OF g1` | Copy both schema and data from `g1` |
@@ -39,7 +39,7 @@ CREATE GRAPH friends
 CREATE GRAPH friends
 
 -- Idempotent creation
-CREATE GRAPH friends IF NOT EXISTS
+CREATE GRAPH IF NOT EXISTS friends
 
 -- Copy structure only
 CREATE GRAPH friends_staging LIKE friends
@@ -88,7 +88,7 @@ SESSION SET GRAPH friends
 USE GRAPH DEFAULT
 ```
 
-After switching, all subsequent queries in that session read from and write to the selected graph.
+After switching, all subsequent queries in that session read from and write to the selected graph. The direct calls follow it too: creating and dropping vector and text indexes, `vector_search`, `text_search`, `hybrid_search`, `mmr_search` and `import_edge_list` act on the graph `set_graph()` selects (`set_current_graph` in Rust), and `CALL grafeo.search.*` after `USE GRAPH` finds that graph's indexes.
 
 ### One Statement on Another Graph
 

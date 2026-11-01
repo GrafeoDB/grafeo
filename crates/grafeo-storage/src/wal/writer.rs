@@ -1798,7 +1798,7 @@ mod tests {
         write_group(&wal, 2, &["Gus"]);
         let third = wal.rotate().unwrap();
         write_group(&wal, 3, &["Mia"]);
-        std::fs::write(dir.path().join("backup.cursor"), b"88").unwrap();
+        std::fs::write(dir.path().join(super::super::BACKUP_CURSOR_FILE), b"88").unwrap();
         assert_eq!(wal.remove_segments_before(second - 1).unwrap(), 0);
         assert_eq!(wal.remove_segments_before(second).unwrap(), 1);
         assert_eq!(

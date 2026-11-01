@@ -1,0 +1,177 @@
+# SPARQL joins on a variable one side may leave unbound
+#
+# SPARQL 1.1 Query 18.3: two solutions are compatible when every variable
+# both bind has the same value; a variable one of them leaves unbound joins
+# with every value of the other, and the merged solution takes that value.
+# An OPTIONAL, a UNION branch or a group's empty solution can leave a
+# variable unbound that a later pattern binds.
+
+meta:
+  language: sparql
+  model: rdf
+  section: join
+  title: Joins on a variable left unbound
+  dataset: empty
+  requires: [sparql, rdf]
+
+tests:
+
+  - name: an_unbound_variable_joins_with_every_value_and_a_bound_one_with_its_own
+    # Alix has no city: she joins with both labels. Gus's Berlin joins with
+    # the Berlin label only.
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/alix> <http://ex.org/name> "Alix" .
+          <http://ex.org/gus> <http://ex.org/name> "Gus" .
+          <http://ex.org/gus> <http://ex.org/city> "Berlin" .
+          <http://ex.org/berlin> <http://ex.org/label> "Berlin" .
+          <http://ex.org/paris> <http://ex.org/label> "Paris" .
+        }
+    query: |
+      SELECT ?n ?c ?b WHERE {
+        ?s <http://ex.org/name> ?n
+        OPTIONAL { ?s <http://ex.org/city> ?c }
+        ?b <http://ex.org/label> ?c
+      }
+    expect:
+      rows:
+        - [Alix, Berlin, http://ex.org/berlin]
+        - [Alix, Paris, http://ex.org/paris]
+        - [Gus, Berlin, http://ex.org/berlin]
+
+  - name: a_variable_bound_to_another_value_on_each_side_does_not_join
+    # Gus's Prague matches no label, so Gus has no row; Alix's unbound city
+    # joins.
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/alix> <http://ex.org/name> "Alix" .
+          <http://ex.org/gus> <http://ex.org/name> "Gus" .
+          <http://ex.org/gus> <http://ex.org/city> "Prague" .
+          <http://ex.org/berlin> <http://ex.org/label> "Berlin" .
+        }
+    query: |
+      SELECT ?n ?c WHERE {
+        ?s <http://ex.org/name> ?n
+        OPTIONAL { ?s <http://ex.org/city> ?c }
+        ?b <http://ex.org/label> ?c
+      }
+    expect:
+      rows:
+        - [Alix, Berlin]
+
+  - name: a_variable_either_side_may_leave_unbound
+    # Both sides are OPTIONAL patterns on ?c. A pair joins unless both bind ?c to
+    # different values; the merged ?c is whichever side bound it.
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/alix> <http://ex.org/name> "Alix" .
+          <http://ex.org/gus> <http://ex.org/name> "Gus" .
+          <http://ex.org/gus> <http://ex.org/city> "Berlin" .
+          <http://ex.org/berlin> <http://ex.org/label> "B" .
+          <http://ex.org/berlin> <http://ex.org/alias> "Berlin" .
+          <http://ex.org/paris> <http://ex.org/label> "P" .
+          <http://ex.org/prague> <http://ex.org/label> "Q" .
+          <http://ex.org/prague> <http://ex.org/alias> "Prague" .
+        }
+    query: |
+      SELECT ?n ?l ?c WHERE {
+        { ?s <http://ex.org/name> ?n OPTIONAL { ?s <http://ex.org/city> ?c } }
+        { ?b <http://ex.org/label> ?l OPTIONAL { ?b <http://ex.org/alias> ?c } }
+      }
+    expect:
+      rows:
+        - [Alix, B, Berlin]
+        - [Alix, P, null]
+        - [Alix, Q, Prague]
+        - [Gus, B, Berlin]
+        - [Gus, P, Berlin]
+
+  - name: a_union_branch_that_leaves_the_variable_unbound_joins_with_every_value
+    # The first branch binds ?c to Berlin; the second leaves it unbound, so
+    # each of its rows joins with both labels.
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/alix> <http://ex.org/name> "Alix" .
+          <http://ex.org/gus> <http://ex.org/name> "Gus" .
+          <http://ex.org/berlin> <http://ex.org/label> "Berlin" .
+          <http://ex.org/paris> <http://ex.org/label> "Paris" .
+        }
+    query: |
+      SELECT ?n ?c WHERE {
+        { BIND("Berlin" AS ?c) } UNION { ?x <http://ex.org/name> ?n }
+        ?b <http://ex.org/label> ?c
+      }
+    expect:
+      rows:
+        - [null, Berlin]
+        - [Alix, Berlin]
+        - [Alix, Paris]
+        - [Gus, Berlin]
+        - [Gus, Paris]
+
+  - name: a_chain_of_optionals_then_a_pattern_on_the_first_optional_variable
+    # Alix has no city (both labels join) and an age; Gus has Berlin and no
+    # age.
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/alix> <http://ex.org/name> "Alix" .
+          <http://ex.org/alix> <http://ex.org/age> 30 .
+          <http://ex.org/gus> <http://ex.org/name> "Gus" .
+          <http://ex.org/gus> <http://ex.org/city> "Berlin" .
+          <http://ex.org/berlin> <http://ex.org/label> "Berlin" .
+          <http://ex.org/paris> <http://ex.org/label> "Paris" .
+        }
+    query: |
+      SELECT ?n ?c ?a WHERE {
+        ?s <http://ex.org/name> ?n
+        OPTIONAL { ?s <http://ex.org/city> ?c }
+        OPTIONAL { ?s <http://ex.org/age> ?a }
+        ?b <http://ex.org/label> ?c
+      }
+    expect:
+      rows:
+        - [Alix, Berlin, 30]
+        - [Alix, Paris, 30]
+        - [Gus, Berlin, null]
+
+  - name: a_leading_optional_without_a_match_joins_on_its_variable
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/alix> <http://ex.org/age> 30 .
+          <http://ex.org/gus> <http://ex.org/age> 40 .
+        }
+    query: |
+      SELECT ?s ?o WHERE {
+        OPTIONAL { ?s <http://ex.org/none> ?o }
+        ?s <http://ex.org/age> ?a
+      }
+    expect:
+      rows:
+        - [http://ex.org/alix, null]
+        - [http://ex.org/gus, null]
+
+  - name: a_count_over_a_compatible_join
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/alix> <http://ex.org/name> "Alix" .
+          <http://ex.org/gus> <http://ex.org/name> "Gus" .
+          <http://ex.org/gus> <http://ex.org/city> "Berlin" .
+          <http://ex.org/berlin> <http://ex.org/label> "Berlin" .
+          <http://ex.org/paris> <http://ex.org/label> "Paris" .
+        }
+    query: |
+      SELECT (COUNT(*) AS ?k) WHERE {
+        ?s <http://ex.org/name> ?n
+        OPTIONAL { ?s <http://ex.org/city> ?c }
+        ?b <http://ex.org/label> ?c
+      }
+    expect:
+      rows:
+        - [3]

@@ -95,6 +95,110 @@ pub(crate) fn check_vector_for_index(
     Ok(())
 }
 
+/// A list of numbers a new vector index takes as a vector (#587): the node,
+/// the list it holds, and the vector of it.
+#[cfg(feature = "vector-index")]
+pub(crate) struct VectorIndexList {
+    node: grafeo_common::types::NodeId,
+    list: grafeo_common::types::Value,
+    vector: std::sync::Arc<[f32]>,
+}
+
+/// The lists of numbers that `property` holds on the nodes of `graph` with
+/// `label`, which a vector index of `dimensions` (from the first vector or
+/// list when `None`) about to be built takes as vectors (#587): a write of a
+/// list to an indexed property stores it as a vector, so a list written
+/// before the index becomes one too ([`convert_vector_lists`]). Every vector
+/// and list is checked as the index checks a vector, before anything is
+/// converted.
+///
+/// # Errors
+///
+/// An invalid-value error for a vector or list of another size or with a
+/// value the index cannot measure, and for a list with an element that is
+/// not a number, naming the node.
+#[cfg(feature = "vector-index")]
+pub(crate) fn vector_index_lists(
+    graph: &dyn GraphStore,
+    label: &str,
+    property: &str,
+    dimensions: Option<usize>,
+) -> Result<Vec<VectorIndexList>> {
+    use grafeo_common::types::Value;
+
+    let latest = ReadView::latest();
+    let mut expected = dimensions;
+    let mut lists = Vec::new();
+    for node in graph.nodes_by_label(label, latest)? {
+        let (vector, list) = match graph.node_property(node, property, latest)? {
+            Some(Value::Vector(vector)) => (vector, None),
+            Some(list @ Value::List(_)) => (list_vector(node, &list)?, Some(list)),
+            _ => continue,
+        };
+        check_vector_for_index(node, &vector, *expected.get_or_insert(vector.len()))?;
+        if let Some(list) = list {
+            lists.push(VectorIndexList { node, list, vector });
+        }
+    }
+    Ok(lists)
+}
+
+/// The vector a vector index takes `list` (the value of `node`) as: each
+/// element the nearest 32-bit float, as `vector()` makes it.
+#[cfg(feature = "vector-index")]
+fn list_vector(
+    node: grafeo_common::types::NodeId,
+    list: &grafeo_common::types::Value,
+) -> Result<std::sync::Arc<[f32]>> {
+    let grafeo_common::types::Value::List(items) = list else {
+        return Err(Error::Internal(format!("node {} holds no list", node.0)));
+    };
+    items
+        .iter()
+        .enumerate()
+        .map(|(position, item)| {
+            item.as_vector_component().ok_or_else(|| {
+                Error::InvalidValue(format!(
+                    "the list of node {} has {} at position {position}: a vector index takes a list \
+                     of numbers",
+                    node.0,
+                    item.type_name()
+                ))
+            })
+        })
+        .collect()
+}
+
+/// Writes each of `lists` (from [`vector_index_lists`]) to `property` as its
+/// vector through `writer`, in one transaction. A list that changed since it
+/// was checked is left as it is now: it was written as any value is.
+///
+/// # Errors
+///
+/// The error of a write, such as a conflict with an open transaction.
+#[cfg(feature = "vector-index")]
+pub(crate) fn convert_vector_lists(
+    writer: &grafeo_core::execution::operators::GraphWriter,
+    property: &str,
+    lists: Vec<VectorIndexList>,
+) -> std::result::Result<(), grafeo_core::execution::operators::OperatorError> {
+    for VectorIndexList { node, list, vector } in lists {
+        if writer
+            .store()
+            .node_property(node, property, writer.view())?
+            == Some(list)
+        {
+            super::direct::set_node_property(
+                writer,
+                node,
+                property,
+                grafeo_common::types::Value::Vector(vector),
+            )?;
+        }
+    }
+    Ok(())
+}
+
 /// The name [`create_vector_index`](super::GrafeoDB::create_vector_index)
 /// takes for a quantization.
 #[cfg(feature = "vector-index")]
@@ -303,7 +407,7 @@ impl super::GrafeoDB {
     /// The storage key of the current graph, where the property index calls
     /// work: `None` for the default graph, also when the graph selected no
     /// longer exists (as [`current_lpg_store`](Self::current_lpg_store)).
-    fn current_graph_key(&self) -> Option<String> {
+    pub(super) fn current_graph_key(&self) -> Option<String> {
         crate::session::graph_storage_key(
             self.current_schema.read().as_deref(),
             self.current_graph.read().as_deref(),
@@ -439,8 +543,14 @@ impl super::GrafeoDB {
     /// Creates a vector similarity index on a node property.
     ///
     /// This enables efficient approximate nearest-neighbor search on vector
-    /// properties. Currently validates the index parameters and scans existing
-    /// nodes to verify the property contains vectors of the expected dimensions.
+    /// properties: it builds an HNSW index over the nodes with `label` whose
+    /// `property` holds a vector of the expected dimensions.
+    ///
+    /// A list of numbers in the property is stored as a vector of 32-bit
+    /// floats once the index exists: the lists already there are converted
+    /// when it is created, and a list written later is stored as one. The
+    /// property then reads back as those floats (a decimal `0.0070` as
+    /// `0.007000000216...`).
     ///
     /// # Arguments
     ///
@@ -479,7 +589,10 @@ impl super::GrafeoDB {
         #[cfg(feature = "vector-index")]
         {
             self.check_index_change()?;
-            let (graph, _) = self.index_target(None)?;
+            // On the current graph, as the other direct calls (#677).
+            let key = self.current_graph_key();
+            let (graph, store) = self.index_target(key.as_deref())?;
+            self.convert_vector_lists(&store, key.as_deref(), label, property, dimensions)?;
             let index = vector_index_from_data(
                 &*graph,
                 label,
@@ -490,7 +603,7 @@ impl super::GrafeoDB {
                 ef_construction,
                 quantization,
             )?;
-            let record = vector_index_record(None, label, property, &index)?;
+            let record = vector_index_record(key.as_deref(), label, property, &index)?;
             let held = self.hold_for_standalone(false)?;
             let mut change = StandaloneChange::new();
             change.push_built(
@@ -652,7 +765,7 @@ impl super::GrafeoDB {
     pub fn drop_vector_index(&self, label: &str, property: &str) -> Result<bool> {
         let held = self.hold_for_standalone(false)?;
         if self
-            .lpg_store()?
+            .current_lpg_store()?
             .get_vector_index(label, property)
             .is_none()
         {
@@ -660,7 +773,7 @@ impl super::GrafeoDB {
         }
         let mut change = StandaloneChange::new();
         change.push(drop_index(
-            None,
+            self.current_graph_key().as_deref(),
             IndexKeyRecord::Vector {
                 label: label.to_string(),
                 property: property.to_string(),
@@ -725,7 +838,7 @@ impl super::GrafeoDB {
     #[cfg(feature = "vector-index")]
     pub fn rebuild_vector_index(&self, label: &str, property: &str) -> Result<()> {
         // Preserve config and quantization type from existing index if available
-        let existing = self.lpg_store()?.get_vector_index(label, property);
+        let existing = self.current_lpg_store()?.get_vector_index(label, property);
 
         let (config, quantization_name) = if let Some(ref idx) = existing {
             let qt = idx.quantization_type().and_then(quantization_name);
@@ -821,17 +934,19 @@ impl super::GrafeoDB {
     ) -> Result<()> {
         options.check()?;
         self.check_index_change()?;
-        let (graph, _) = self.index_target(None)?;
+        // On the current graph, as the other direct calls (#677).
+        let key = self.current_graph_key();
+        let (graph, _) = self.index_target(key.as_deref())?;
         let index = text_index_from_data(&*graph, label, property, &options)?;
         let kind = text_index_kind(label, property, &options)?;
         let held = self.hold_for_standalone(false)?;
         let mut change = StandaloneChange::new();
-        change.push_built(put_index(None, kind), BuiltIndex::Text(index));
+        change.push_built(put_index(key.as_deref(), kind), BuiltIndex::Text(index));
         self.commit_standalone(change, &held)
     }
 
     /// The options of the text index on `label` and `property` of the
-    /// default graph, or `None` when there is no such index.
+    /// current graph, or `None` when there is no such index.
     #[cfg(feature = "text-index")]
     #[must_use]
     pub fn text_index_options(
@@ -840,7 +955,9 @@ impl super::GrafeoDB {
         property: &str,
     ) -> Option<grafeo_core::index::text::TextIndexOptions> {
         // A backend of its own has no text index.
-        self.root_store()?
+        self.root_store()?;
+        self.current_lpg_store()
+            .ok()?
             .get_text_index(label, property)
             .map(|index| index.read().options().clone())
     }
@@ -886,12 +1003,16 @@ impl super::GrafeoDB {
     #[cfg(feature = "text-index")]
     pub fn drop_text_index(&self, label: &str, property: &str) -> Result<bool> {
         let held = self.hold_for_standalone(false)?;
-        if self.lpg_store()?.get_text_index(label, property).is_none() {
+        if self
+            .current_lpg_store()?
+            .get_text_index(label, property)
+            .is_none()
+        {
             return Ok(false);
         }
         let mut change = StandaloneChange::new();
         change.push(drop_index(
-            None,
+            self.current_graph_key().as_deref(),
             IndexKeyRecord::Text {
                 label: label.to_string(),
                 property: property.to_string(),

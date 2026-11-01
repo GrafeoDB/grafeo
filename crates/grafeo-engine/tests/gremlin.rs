@@ -855,6 +855,86 @@ fn test_optional() {
 }
 
 // ============================================================================
+// Branching steps run per traverser
+// ============================================================================
+
+/// The strings of the first column of the rows of `query`, sorted.
+fn sorted_strings(db: &GrafeoDB, query: &str) -> Vec<String> {
+    let result = db.execute_gremlin(query).unwrap();
+    let mut values: Vec<String> = result
+        .rows()
+        .iter()
+        .map(|row| match &row[0] {
+            Value::String(s) => s.to_string(),
+            other => panic!("{query}: a string, not {other:?}"),
+        })
+        .collect();
+    values.sort();
+    values
+}
+
+#[test]
+fn coalesce_falls_back_for_each_traverser() {
+    let db = create_social_network();
+    // Only Alix works somewhere: Gus and Vincent fall back to the constant.
+    assert_eq!(
+        sorted_strings(
+            &db,
+            "g.V().hasLabel('Person').coalesce(out('WORKS_AT').values('name'), constant('none'))"
+        ),
+        ["Acme", "none", "none"]
+    );
+    // Vincent knows nobody and falls back to his own name.
+    assert_eq!(
+        sorted_strings(
+            &db,
+            "g.V().hasLabel('Person').coalesce(out('KNOWS').values('name'), values('name'))"
+        ),
+        ["Gus", "Vincent", "Vincent", "Vincent"]
+    );
+}
+
+#[test]
+fn optional_keeps_each_traverser_its_inner_traversal_leaves_out() {
+    let db = create_social_network();
+    assert_eq!(
+        sorted_strings(
+            &db,
+            "g.V().hasLabel('Person').optional(out('WORKS_AT')).values('name')"
+        ),
+        ["Acme", "Gus", "Vincent"]
+    );
+    // A filter that Gus fails keeps Gus as he is.
+    assert_eq!(
+        sorted_strings(
+            &db,
+            "g.V().hasLabel('Person').optional(has('age', gt(28))).values('name')"
+        ),
+        ["Alix", "Gus", "Vincent"]
+    );
+}
+
+#[test]
+fn choose_and_union_run_for_each_traverser() {
+    let db = create_social_network();
+    assert_eq!(
+        sorted_strings(
+            &db,
+            "g.V().hasLabel('Person').choose(has('age', gt(28)), values('name'), constant('young'))"
+        ),
+        ["Alix", "Vincent", "young"]
+    );
+    // Alix knows Gus and Vincent and works at Acme; Gus knows Vincent.
+    assert_eq!(
+        sorted_strings(
+            &db,
+            "g.V().hasLabel('Person').union(out('KNOWS'), out('WORKS_AT')).values('name')"
+        ),
+        ["Acme", "Gus", "Vincent", "Vincent"]
+    );
+}
+
+// ============================================================================
 // Constant
 // ============================================================================
 
@@ -2126,4 +2206,38 @@ fn an_unsupported_step_in_a_predicate_is_an_error() {
         .unwrap_err()
         .to_string();
     assert!(error.contains("outE"), "{error}");
+}
+
+// ============================================================================
+// EXPLAIN and EXPLAIN ANALYZE
+// ============================================================================
+
+#[test]
+fn explain_returns_the_plan_without_running_the_traversal() {
+    let db = GrafeoDB::new_in_memory();
+    let params = std::collections::HashMap::from([("name".to_string(), Value::from("Alix"))]);
+    for result in [
+        db.execute_gremlin("EXPLAIN g.addV('Person').property('name', 'Alix')")
+            .unwrap(),
+        db.session()
+            .execute_gremlin_with_params("EXPLAIN g.addV('Person').property('name', $name)", params)
+            .unwrap(),
+    ] {
+        assert_eq!(result.columns, ["plan"]);
+        let Value::String(plan) = &result.rows()[0][0] else {
+            panic!("the plan as a string, not {:?}", result.rows());
+        };
+        assert!(plan.contains("CreateNode"), "{plan}");
+    }
+    assert_eq!(db.node_count().unwrap(), 0, "EXPLAIN writes nothing");
+}
+
+#[test]
+fn explain_analyze_returns_the_profile() {
+    let db = create_social_network();
+    let result = db
+        .execute_gremlin("EXPLAIN ANALYZE g.V().hasLabel('Person')")
+        .unwrap();
+    assert_eq!(result.columns, ["profile"]);
+    assert!(result.profile.is_some(), "the operator tree as data");
 }

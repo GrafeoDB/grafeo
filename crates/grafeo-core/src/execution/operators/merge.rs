@@ -11,7 +11,12 @@ use super::{
 };
 use crate::execution::chunk::{DataChunk, DataChunkBuilder, copied_column_types};
 use crate::graph::GraphStore;
+use crate::graph::lpg::Node;
+use arcstr::ArcStr;
+use grafeo_common::change::ChangeMark;
 use grafeo_common::types::{EdgeId, LogicalType, NodeId, PropertyKey, Value};
+use grafeo_common::utils::hash::FxHashMap;
+use smallvec::SmallVec;
 use std::sync::Arc;
 
 /// Configuration for a node merge operation.
@@ -87,6 +92,100 @@ pub struct MergeOperator {
     match_expressions: Option<super::mutation::PropertyExpressions>,
     /// Session context for expression evaluation (info, schema, etc.).
     session_context: SessionContext,
+    /// The pattern's nodes by their match values, built at the second row
+    /// that reads the store without an index (see [`NodeKeys`]).
+    keys: Option<NodeKeys>,
+    /// How many rows read the store without an index or keys.
+    scanned_rows: usize,
+}
+
+/// The nodes with the pattern's labels by their values of the match
+/// properties, kept current from the transaction's changes: a MERGE over
+/// many rows without a property index (`UNWIND $rows AS r MERGE (m:Method
+/// {id: r.id})`) looks each row's values up instead of reading the label's
+/// nodes again, O(rows + nodes + changes) instead of O(rows x nodes). Every
+/// write since the last row counts (the MERGE's own creates and its `ON
+/// CREATE` and `ON MATCH` sets; a `SET` after the MERGE runs once all its
+/// rows did): before each lookup the nodes the transaction wrote since the
+/// last one are read again and filed under their values now. A node filed
+/// under values it no longer has is checked like any candidate, so the
+/// matches are the ones a scan finds.
+struct NodeKeys {
+    /// The match properties, in the pattern's order.
+    names: Vec<String>,
+    /// The nodes, in no order, by their values.
+    by_key: FxHashMap<MatchKey, Vec<NodeId>>,
+    /// The position in the transaction's changes up to which they are filed.
+    mark: ChangeMark,
+}
+
+/// The match values of a node or a row.
+type MatchKey = SmallVec<[KeyPart; 1]>;
+
+/// A match value as a key: the kinds whose `==` compares their parts, so
+/// equal values have equal keys. A row with a value of another kind (a
+/// float, whose `-0.0` equals `0.0`, a temporal value, a list or map, a
+/// null) reads the store as before.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum KeyPart {
+    Bool(bool),
+    Int64(i64),
+    String(ArcStr),
+    Bytes(Arc<[u8]>),
+}
+
+impl KeyPart {
+    fn of(value: &Value) -> Option<Self> {
+        match value {
+            Value::Bool(value) => Some(Self::Bool(*value)),
+            Value::Int64(value) => Some(Self::Int64(*value)),
+            Value::String(value) => Some(Self::String(value.clone())),
+            Value::Bytes(value) => Some(Self::Bytes(Arc::clone(value))),
+            _ => None,
+        }
+    }
+}
+
+impl NodeKeys {
+    /// The key of a row's resolved match values, `None` when one has no key.
+    fn of_row(&self, resolved: &[(String, Value)]) -> Option<MatchKey> {
+        if resolved.len() != self.names.len()
+            || resolved
+                .iter()
+                .zip(&self.names)
+                .any(|((name, _), kept)| name != kept)
+        {
+            return None;
+        }
+        resolved
+            .iter()
+            .map(|(_, value)| KeyPart::of(value))
+            .collect()
+    }
+
+    /// Files `node` under its values when it has the pattern's labels and
+    /// each match property with a value that has a key: no other node can
+    /// match a row with a key.
+    fn file(&mut self, node: &Node, labels: &[String]) {
+        if !labels.iter().all(|label| node.has_label(label)) {
+            return;
+        }
+        let key: Option<MatchKey> = self
+            .names
+            .iter()
+            .map(|name| {
+                node.properties
+                    .get(&PropertyKey::new(name.as_str()))
+                    .and_then(KeyPart::of)
+            })
+            .collect();
+        if let Some(key) = key {
+            let nodes = self.by_key.entry(key).or_default();
+            if !nodes.contains(&node.id) {
+                nodes.push(node.id);
+            }
+        }
+    }
 }
 
 impl MergeOperator {
@@ -111,6 +210,8 @@ impl MergeOperator {
             search_store: None,
             match_expressions: None,
             session_context: SessionContext::default(),
+            keys: None,
+            scanned_rows: 0,
         }
     }
 
@@ -283,7 +384,7 @@ impl MergeOperator {
     /// The nodes that match the given resolved properties (every one, as in
     /// openCypher, where MERGE binds each match).
     fn find_matching_nodes(
-        &self,
+        &mut self,
         resolved_match_props: &[(String, Value)],
     ) -> Result<Vec<NodeId>, OperatorError> {
         // Use a property index when available to avoid a full label scan.
@@ -291,6 +392,18 @@ impl MergeOperator {
         let use_index = resolved_match_props
             .iter()
             .any(|(k, v)| !v.is_null() && self.writer.store().has_property_index(k));
+
+        // Without an index, the row's values looked up among the pattern's
+        // nodes, when they have a key (see `NodeKeys`).
+        if !use_index && let Some(candidates) = self.keyed_candidates(resolved_match_props)? {
+            let mut matches = Vec::with_capacity(candidates.len());
+            for node_id in candidates {
+                if self.node_matches(node_id, resolved_match_props)? {
+                    matches.push(node_id);
+                }
+            }
+            return Ok(matches);
+        }
 
         // The store answers at the writer's view, a transaction's own
         // creates included (UNWIND-driven MERGE relies on seeing the rows it
@@ -313,16 +426,27 @@ impl MergeOperator {
 
         let mut matches = Vec::new();
         for node_id in candidates {
-            let Some(node) = store.node(node_id, view)? else {
-                continue;
-            };
-
-            let has_all_labels = self.config.labels.iter().all(|label| node.has_label(label));
-            if !has_all_labels {
-                continue;
+            if self.node_matches(node_id, resolved_match_props)? {
+                matches.push(node_id);
             }
+        }
 
-            let has_all_props = resolved_match_props.iter().all(|(key, expected_value)| {
+        Ok(matches)
+    }
+
+    /// Whether node `node_id`, as the writer sees it, has the pattern's
+    /// labels and match values.
+    fn node_matches(
+        &self,
+        node_id: NodeId,
+        resolved_match_props: &[(String, Value)],
+    ) -> Result<bool, OperatorError> {
+        let Some(node) = self.writer.store().node(node_id, self.writer.view())? else {
+            return Ok(false);
+        };
+        let has_all_labels = self.config.labels.iter().all(|label| node.has_label(label));
+        Ok(has_all_labels
+            && resolved_match_props.iter().all(|(key, expected_value)| {
                 let prop = node.properties.get(&PropertyKey::new(key.as_str()));
                 if expected_value.is_null() {
                     // Null in a MERGE pattern matches both absent and explicitly null properties
@@ -330,14 +454,81 @@ impl MergeOperator {
                 } else {
                     prop.is_some_and(|v| v == expected_value)
                 }
-            });
+            }))
+    }
 
-            if has_all_props {
-                matches.push(node_id);
+    /// The candidates of a row from the pattern's nodes by their values
+    /// (see [`NodeKeys`]), in ID order as a scan reads them; `None` when the
+    /// row reads the store: its values have no key, the transaction keeps
+    /// no changes to follow, or it is the first row (one row reads the
+    /// label once either way).
+    fn keyed_candidates(
+        &mut self,
+        resolved_match_props: &[(String, Value)],
+    ) -> Result<Option<Vec<NodeId>>, OperatorError> {
+        if self.config.labels.is_empty() || resolved_match_props.is_empty() {
+            return Ok(None);
+        }
+        if self.keys.is_none() {
+            self.scanned_rows += 1;
+            if self.scanned_rows < 2 {
+                return Ok(None);
+            }
+            self.keys = self.build_keys(resolved_match_props)?;
+        }
+        let Some(keys) = self.keys.as_mut() else {
+            return Ok(None);
+        };
+        let Some(key) = keys.of_row(resolved_match_props) else {
+            return Ok(None);
+        };
+        // File again what the transaction wrote since the last row.
+        let mut written = Vec::new();
+        let Some(mark) = self.writer.nodes_written_after(keys.mark, &mut written) else {
+            return Ok(None);
+        };
+        keys.mark = mark;
+        written.sort_unstable();
+        written.dedup();
+        for node_id in written {
+            if let Some(node) = self.writer.store().node(node_id, self.writer.view())? {
+                keys.file(&node, &self.config.labels);
             }
         }
+        let mut candidates = keys.by_key.get(&key).cloned().unwrap_or_default();
+        candidates.sort_unstable();
+        Ok(Some(candidates))
+    }
 
-        Ok(matches)
+    /// The pattern's nodes by their values, read once from the label with
+    /// the fewest nodes; `None` when the transaction keeps no changes to
+    /// keep them current with.
+    fn build_keys(
+        &self,
+        resolved_match_props: &[(String, Value)],
+    ) -> Result<Option<NodeKeys>, OperatorError> {
+        let Some(mark) = self.writer.change_mark() else {
+            return Ok(None);
+        };
+        let Some(label) = self.scan_label()? else {
+            return Ok(None);
+        };
+        let mut keys = NodeKeys {
+            names: resolved_match_props
+                .iter()
+                .map(|(name, _)| name.clone())
+                .collect(),
+            by_key: FxHashMap::default(),
+            mark,
+        };
+        let store = self.writer.store();
+        let view = self.writer.view();
+        for node_id in store.nodes_by_label(label, view)? {
+            if let Some(node) = store.node(node_id, view)? {
+                keys.file(&node, &self.config.labels);
+            }
+        }
+        Ok(Some(keys))
     }
 
     /// Merges match and ON CREATE property lists, with ON CREATE values
@@ -519,6 +710,8 @@ impl Operator for MergeOperator {
 
     fn reset(&mut self) {
         self.executed = false;
+        self.keys = None;
+        self.scanned_rows = 0;
         if let Some(ref mut input) = self.input {
             input.reset();
         }

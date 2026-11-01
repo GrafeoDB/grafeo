@@ -44,7 +44,7 @@ use grafeo_common::change::{
     Before, BulkRange, Change, ChangeMark, ChangeSet, DataModel, DataOp, Entity, GraphRef,
     GraphSlot, PendingVersion, Table,
 };
-use grafeo_common::types::{ArcStr, EpochId, TransactionId};
+use grafeo_common::types::{ArcStr, EpochId, NodeId, TransactionId};
 use grafeo_common::utils::error::{Error, Result, TransactionError};
 use grafeo_core::execution::operators::{
     BulkRows, ChangeRecorder, OperatorError, Recording, WriteClaim, WriteClaims, WriteInProgress,
@@ -117,21 +117,26 @@ impl TransactionChanges {
         }
     }
 
-    /// Makes this set, emptied, the changes of transaction `id`, which
-    /// reads at `snapshot`, as [`new`](Self::new) makes them: the buffers
-    /// of the transaction that had it stay (see
-    /// [`TransactionManager::recycle`](super::TransactionManager::recycle)).
+    /// Empties this set in place for another transaction, as the one that
+    /// had it ends: no entry, graph or pending triple, with the buffers kept
+    /// (see [`TransactionManager::recycle`](super::TransactionManager::recycle)).
+    pub(crate) fn empty(&mut self) {
+        let state = self.state.get_mut();
+        state.set.clear();
+        state.targets.clear();
+        state.start = state.set.mark();
+        #[cfg(feature = "triple-store")]
+        {
+            state.triples = super::rdf::PendingTriples::default();
+        }
+    }
+
+    /// Makes this set, [emptied](Self::empty), the changes of transaction
+    /// `id`, which reads at `snapshot`, as [`new`](Self::new) makes them.
     pub(crate) fn reuse(&mut self, id: TransactionId, snapshot: EpochId) {
-        let state = self.state.get_mut();
-        let mut set = std::mem::take(&mut state.set);
-        let mut targets = std::mem::take(&mut state.targets);
-        set.clear();
-        targets.clear();
-        *self = Self::new(id, snapshot);
-        let state = self.state.get_mut();
-        state.start = set.mark();
-        state.set = set;
-        state.targets = targets;
+        self.id = id;
+        self.snapshot = snapshot;
+        *self.keeps_bulk_rows.get_mut() = true;
     }
 
     /// Whether the set's buffers are small enough to keep for another
@@ -478,23 +483,52 @@ impl TransactionChanges {
             return Ok(());
         }
         let mut unchanged = Vec::new();
+        // A run of inserts into one graph goes in as one batch (one pass per
+        // index); a delete or another graph ends it, so the order holds.
+        let mut run: Option<GraphSlot> = None;
+        let mut positions = Vec::new();
+        let mut triples = Vec::new();
+        let flush = |slot: Option<GraphSlot>,
+                     positions: &mut Vec<usize>,
+                     triples: &mut Vec<Triple>,
+                     unchanged: &mut Vec<usize>| {
+            let Some(slot) = slot else { return };
+            let key = state.set.graph(slot).and_then(|graph| graph.key.as_deref());
+            let new = store.insert_each_into(key, std::mem::take(triples));
+            unchanged.extend(
+                positions
+                    .drain(..)
+                    .zip(new)
+                    .filter_map(|(at, new)| (!new).then_some(at)),
+            );
+        };
         for (at, change) in state.set.entries().iter().enumerate() {
             let Change::Data { graph, op, .. } = change else {
                 continue;
             };
-            let key = state
-                .set
-                .graph(*graph)
-                .and_then(|graph| graph.key.as_deref());
-            let changed = match op {
-                DataOp::InsertTriple { triple } => store.insert_into(key, Triple::from(&**triple)),
-                DataOp::DeleteTriple { triple } => store.remove_from(key, &Triple::from(&**triple)),
-                _ => continue,
-            };
-            if !changed {
-                unchanged.push(at);
+            match op {
+                DataOp::InsertTriple { triple } => {
+                    if run != Some(*graph) {
+                        flush(run, &mut positions, &mut triples, &mut unchanged);
+                        run = Some(*graph);
+                    }
+                    positions.push(at);
+                    triples.push(Triple::from(&**triple));
+                }
+                DataOp::DeleteTriple { triple } => {
+                    flush(run.take(), &mut positions, &mut triples, &mut unchanged);
+                    let key = state
+                        .set
+                        .graph(*graph)
+                        .and_then(|graph| graph.key.as_deref());
+                    if !store.remove_from(key, &Triple::from(&**triple)) {
+                        unchanged.push(at);
+                    }
+                }
+                _ => {}
             }
         }
+        flush(run, &mut positions, &mut triples, &mut unchanged);
         if unchanged.is_empty() {
             return Ok(());
         }
@@ -644,10 +678,12 @@ impl WriteClaims for TransactionClaims {
         }
         .map_err(|error| match error {
             // Not a conflict: no write can commit until a reopen, which the
-            // caller must learn (a conflict reads as retryable).
-            error @ Error::Transaction(TransactionError::IncompleteCommit) => {
-                OperatorError::Wrapped(Box::new(error))
-            }
+            // caller must learn (a conflict reads as retryable). A conflict
+            // the manager found passes as it is, so its message is not
+            // wrapped in a second conflict.
+            error @ Error::Transaction(
+                TransactionError::IncompleteCommit | TransactionError::WriteConflict(_),
+            ) => OperatorError::Wrapped(Box::new(error)),
             error => OperatorError::WriteConflict(error.to_string()),
         })
     }
@@ -729,6 +765,20 @@ impl ChangeRecorder for GraphRecorder {
             .record_bulk_rows(self.slot, rows)
             .map_err(|error| self.refused("the rows of a bulk write", &error))
     }
+
+    fn change_mark(&self) -> Option<ChangeMark> {
+        Some(self.changes.mark())
+    }
+
+    fn nodes_written_after(&self, mark: ChangeMark, nodes: &mut Vec<NodeId>) -> Option<ChangeMark> {
+        Some(
+            self.changes
+                .state
+                .lock()
+                .set
+                .nodes_written_after(self.slot, mark, nodes),
+        )
+    }
 }
 
 /// The changes of a bulk write that holds commits off for its whole run (an
@@ -763,6 +813,9 @@ pub(crate) struct StreamingChanges<'wal> {
     /// The backend its ranges are in, with the graph's slot and the
     /// transaction opened there, once it reserved one.
     target: Option<Bound>,
+    /// The storage key of the graph that backend is (`None` for the
+    /// default graph), which its records name (see [`Self::in_graph`]).
+    graph: Option<ArcStr>,
     /// The WAL and the group it writes.
     #[cfg(feature = "wal")]
     log: Option<StreamedLog<'wal>>,
@@ -804,6 +857,13 @@ impl<'wal> StreamingChanges<'wal> {
         });
         self
     }
+
+    /// Whether it writes a WAL: without one, a caller need not build the
+    /// records it would log.
+    #[cfg(feature = "triple-store")]
+    pub(crate) fn is_logged(&self) -> bool {
+        self.log.is_some()
+    }
 }
 
 impl StreamingChanges<'_> {
@@ -820,6 +880,7 @@ impl StreamingChanges<'_> {
             snapshot,
             set: ChangeSet::new(),
             target: None,
+            graph: None,
             #[cfg(feature = "wal")]
             log: None,
             finished: false,
@@ -827,8 +888,17 @@ impl StreamingChanges<'_> {
         }
     }
 
-    /// Reserves `count` consecutive ids in `table` of `target`, the default
-    /// graph's store, and records them as one entry.
+    /// The same changes, in the graph with storage key `graph` (`None` for
+    /// the default graph), whose store [`reserve`](Self::reserve) is given:
+    /// its records name that graph, so a replay applies them there.
+    pub(crate) fn in_graph(mut self, graph: Option<&str>) -> Self {
+        self.graph = graph.map(ArcStr::from);
+        self
+    }
+
+    /// Reserves `count` consecutive ids in `table` of `target`, the store of
+    /// the changes' graph (see [`in_graph`](Self::in_graph)), and records
+    /// them as one entry.
     ///
     /// # Errors
     ///
@@ -850,7 +920,7 @@ impl StreamingChanges<'_> {
             None => {
                 let slot = self.set.slot(GraphRef {
                     model: DataModel::Lpg,
-                    key: None,
+                    key: self.graph.clone(),
                 })?;
                 let transaction = target
                     .begin(self.transaction, self.snapshot)
@@ -1258,6 +1328,7 @@ mod path_overlay_tests {
             graph: RdfPathGraph::Default,
             transaction_id: None,
             chunk_capacity: 16,
+            zero_length_in_graph: false,
         };
         (
             RdfPathOperator::new(store, config)

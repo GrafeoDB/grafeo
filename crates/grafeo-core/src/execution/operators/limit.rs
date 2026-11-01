@@ -65,7 +65,9 @@ impl LimitOperator {
     /// to its end.
     fn finish_input(&mut self) -> Result<(), super::OperatorError> {
         if self.runs_input_to_the_end && !self.input_done {
-            while self.child.next()?.is_some() {}
+            while self.child.next()?.is_some() {
+                crate::execution::deadline::check()?;
+            }
             self.input_done = true;
         }
         Ok(())
@@ -82,6 +84,7 @@ impl Operator for LimitOperator {
         let remaining = self.limit - self.returned;
 
         loop {
+            crate::execution::deadline::check()?;
             let Some(chunk) = self.child.next()? else {
                 self.input_done = true;
                 return Ok(None);
@@ -154,6 +157,7 @@ impl Operator for SkipOperator {
     fn next(&mut self) -> OperatorResult {
         // Skip rows until we've skipped enough
         while self.skipped < self.skip {
+            crate::execution::deadline::check()?;
             let Some(chunk) = self.child.next()? else {
                 return Ok(None);
             };
@@ -229,6 +233,7 @@ impl Operator for LimitSkipOperator {
         }
 
         loop {
+            crate::execution::deadline::check()?;
             let Some(chunk) = self.child.next()? else {
                 return Ok(None);
             };

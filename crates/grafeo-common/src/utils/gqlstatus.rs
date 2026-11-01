@@ -11,6 +11,7 @@ use std::fmt;
 /// - `00` successful completion
 /// - `01` warning
 /// - `02` no data
+/// - `08` connection exception
 /// - `22` data exception
 /// - `25` invalid transaction state
 /// - `40` transaction rollback
@@ -51,6 +52,13 @@ impl GqlStatus {
     /// `02000` - no data.
     pub const NO_DATA: Self = Self::from_bytes(*b"02000");
 
+    // ── Connection exception (class 08) ───────────────────────────────
+
+    /// `08000` - connection exception, no subclass: the database cannot be
+    /// opened for this client, such as a database file another handle or
+    /// process holds.
+    pub const CONNECTION_EXCEPTION: Self = Self::from_bytes(*b"08000");
+
     // ── Data exception (class 22) ─────────────────────────────────────
 
     /// `22000` - data exception, no subclass.
@@ -64,6 +72,9 @@ impl GqlStatus {
 
     /// `22004` - null value not allowed.
     pub const DATA_NULL_NOT_ALLOWED: Self = Self::from_bytes(*b"22004");
+
+    /// `22018` - invalid character value for cast.
+    pub const DATA_INVALID_CHARACTER_VALUE_FOR_CAST: Self = Self::from_bytes(*b"22018");
 
     /// `22009` - invalid time zone displacement value.
     pub const DATA_INVALID_TIME_ZONE_DISPLACEMENT: Self = Self::from_bytes(*b"22009");
@@ -206,7 +217,7 @@ impl fmt::Display for GqlStatus {
 /// Maps a Grafeo [`super::error::Error`] to a GQLSTATUS code.
 impl From<&super::error::Error> for GqlStatus {
     fn from(err: &super::error::Error) -> Self {
-        use super::error::{ConstraintKind, Error, QueryErrorKind, TransactionError};
+        use super::error::{ConstraintKind, Error, QueryErrorKind, StorageError, TransactionError};
 
         match err {
             Error::Query(q) => match q.kind {
@@ -219,6 +230,9 @@ impl From<&super::error::Error> for GqlStatus {
                 QueryErrorKind::Execution => GqlStatus::DATA_EXCEPTION,
                 QueryErrorKind::Timeout => GqlStatus::DATA_EXCEPTION,
                 QueryErrorKind::NumericOutOfRange => GqlStatus::DATA_NUMERIC_OUT_OF_RANGE,
+                QueryErrorKind::InvalidCharacterValueForCast => {
+                    GqlStatus::DATA_INVALID_CHARACTER_VALUE_FOR_CAST
+                }
                 QueryErrorKind::DivisionByZero => GqlStatus::DATA_DIVISION_BY_ZERO,
                 QueryErrorKind::NegativeLimit => GqlStatus::DATA_NEGATIVE_LIMIT,
                 QueryErrorKind::InvalidValueType => GqlStatus::DATA_INVALID_VALUE_TYPE,
@@ -261,6 +275,10 @@ impl From<&super::error::Error> for GqlStatus {
             Error::NodeNotFound(_) | Error::EdgeNotFound(_) => GqlStatus::NO_DATA,
             Error::PropertyNotFound(_) | Error::LabelNotFound(_) => {
                 GqlStatus::SYNTAX_INVALID_REFERENCE
+            }
+            // Opening a database is where the client connects to it.
+            Error::Storage(storage) if matches!(**storage, StorageError::Locked(_)) => {
+                GqlStatus::CONNECTION_EXCEPTION
             }
             Error::Storage(_) => GqlStatus::DATA_EXCEPTION,
             Error::Serialization(_) | Error::Corruption(_) => GqlStatus::DATA_EXCEPTION,

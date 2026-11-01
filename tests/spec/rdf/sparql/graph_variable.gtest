@@ -1,0 +1,151 @@
+# SPARQL GRAPH ?g over each named graph
+#
+# SPARQL 1.1 Query 18.6: GRAPH ?g { P } is the union, over each named graph
+# g of the dataset, of P evaluated in g joined with ?g = g. So P's empty
+# solution gives one row per named graph, VALUES gives its rows in each
+# graph, and an OPTIONAL is decided in each graph on its own. ?g is not a
+# variable of P: a MINUS inside shares ?g with nothing. The dataset's named
+# graphs are the FROM NAMED graphs when the query lists any, else the
+# store's named graphs (never the default graph).
+
+meta:
+  language: sparql
+  model: rdf
+  section: named-graphs
+  title: GRAPH ?g over each named graph
+  dataset: empty
+  requires: [sparql, rdf]
+
+tests:
+
+  # ---------------------------------------------------------------------------
+  # The empty pattern and VALUES: their rows in each named graph
+  # ---------------------------------------------------------------------------
+
+  - name: an_empty_group_gives_one_row_per_named_graph_and_none_for_the_default
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/vincent> <http://ex.org/name> "Vincent" .
+          GRAPH <http://ex.org/people> { <http://ex.org/alix> <http://ex.org/name> "Alix" . }
+          GRAPH <http://ex.org/staff> { <http://ex.org/gus> <http://ex.org/name> "Gus" . }
+        }
+    query: "SELECT ?g WHERE { GRAPH ?g { } }"
+    expect:
+      rows:
+        - [http://ex.org/people]
+        - [http://ex.org/staff]
+
+  - name: values_inside_a_graph_variable_gives_its_rows_in_each_graph
+    setup:
+      - |
+        INSERT DATA {
+          GRAPH <http://ex.org/people> { <http://ex.org/alix> <http://ex.org/name> "Alix" . }
+          GRAPH <http://ex.org/staff> { <http://ex.org/gus> <http://ex.org/name> "Gus" . }
+        }
+    query: "SELECT ?g ?x WHERE { GRAPH ?g { VALUES ?x { 1 2 } } }"
+    expect:
+      rows:
+        - [http://ex.org/people, 1]
+        - [http://ex.org/people, 2]
+        - [http://ex.org/staff, 1]
+        - [http://ex.org/staff, 2]
+
+  - name: an_optional_is_decided_in_each_graph_on_its_own
+    # The people graph has two names, the staff graph none: its empty
+    # solution gives one row with ?n unbound.
+    setup:
+      - |
+        INSERT DATA {
+          GRAPH <http://ex.org/people> {
+            <http://ex.org/alix> <http://ex.org/name> "Alix" .
+            <http://ex.org/gus> <http://ex.org/name> "Gus" .
+          }
+          GRAPH <http://ex.org/staff> { <http://ex.org/vincent> <http://ex.org/age> 50 . }
+        }
+    query: "SELECT ?g ?n WHERE { GRAPH ?g { OPTIONAL { ?s <http://ex.org/name> ?n } } }"
+    expect:
+      rows:
+        - [http://ex.org/people, Alix]
+        - [http://ex.org/people, Gus]
+        - [http://ex.org/staff, null]
+
+  # ---------------------------------------------------------------------------
+  # FROM NAMED chooses the named graphs
+  # ---------------------------------------------------------------------------
+
+  - name: from_named_with_one_of_two_graphs_gives_that_graph_only
+    setup:
+      - |
+        INSERT DATA {
+          GRAPH <http://ex.org/people> { <http://ex.org/alix> <http://ex.org/name> "Alix" . }
+          GRAPH <http://ex.org/staff> { <http://ex.org/gus> <http://ex.org/name> "Gus" . }
+        }
+    query: "SELECT ?g FROM NAMED <http://ex.org/people> WHERE { GRAPH ?g { } }"
+    expect:
+      rows:
+        - [http://ex.org/people]
+
+  - name: from_named_with_a_graph_that_does_not_exist_gives_a_row_for_it
+    # A named graph of the dataset with no triples is an empty graph, and
+    # the empty pattern has one solution in it.
+    setup:
+      - |
+        INSERT DATA {
+          GRAPH <http://ex.org/people> { <http://ex.org/alix> <http://ex.org/name> "Alix" . }
+        }
+    query: |
+      SELECT ?g
+      FROM NAMED <http://ex.org/people>
+      FROM NAMED <http://ex.org/nowhere>
+      WHERE { GRAPH ?g { } }
+    expect:
+      rows:
+        - [http://ex.org/nowhere]
+        - [http://ex.org/people]
+
+  # ---------------------------------------------------------------------------
+  # MINUS inside GRAPH ?g: ?g is not a variable of the pattern
+  # ---------------------------------------------------------------------------
+
+  - name: a_minus_sharing_only_the_graph_keeps_every_row
+    # The MINUS pattern shares no variable with ?s ?n: it removes nothing,
+    # though it matches in the people graph.
+    setup:
+      - |
+        INSERT DATA {
+          GRAPH <http://ex.org/people> {
+            <http://ex.org/alix> <http://ex.org/name> "Alix" .
+            <http://ex.org/alix> <http://ex.org/age> 30 .
+          }
+          GRAPH <http://ex.org/staff> { <http://ex.org/gus> <http://ex.org/name> "Gus" . }
+        }
+    query: |
+      SELECT ?g ?n WHERE {
+        GRAPH ?g { ?s <http://ex.org/name> ?n MINUS { ?x <http://ex.org/age> ?a } }
+      }
+    expect:
+      rows:
+        - [http://ex.org/people, Alix]
+        - [http://ex.org/staff, Gus]
+
+  - name: a_minus_sharing_a_pattern_variable_removes_within_its_graph
+    # Gus has an age in the people graph: removed there. Alix's age is in
+    # the staff graph only, so her people row stays.
+    setup:
+      - |
+        INSERT DATA {
+          GRAPH <http://ex.org/people> {
+            <http://ex.org/alix> <http://ex.org/name> "Alix" .
+            <http://ex.org/gus> <http://ex.org/name> "Gus" .
+            <http://ex.org/gus> <http://ex.org/age> 40 .
+          }
+          GRAPH <http://ex.org/staff> { <http://ex.org/alix> <http://ex.org/age> 30 . }
+        }
+    query: |
+      SELECT ?g ?n WHERE {
+        GRAPH ?g { ?s <http://ex.org/name> ?n MINUS { ?s <http://ex.org/age> ?a } }
+      }
+    expect:
+      rows:
+        - [http://ex.org/people, Alix]

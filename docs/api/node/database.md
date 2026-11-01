@@ -259,11 +259,11 @@ Start a new transaction with an optional isolation level.
 beginTransaction(isolationLevel?: string): Transaction
 ```
 
-Isolation levels: `"read_committed"`, `"snapshot"` (default), `"serializable"`.
+Isolation levels: `"read_committed"`, `"snapshot"` (default); `"serializable"` is refused for now: snapshot isolation is the strongest level until queries record their reads.
 
 ```typescript
 const tx = db.beginTransaction();
-const tx = db.beginTransaction('serializable');
+const tx = db.beginTransaction('read_committed');
 ```
 
 ## Named Graphs
@@ -531,7 +531,7 @@ With `filters`, only matching nodes are searched, so up to `k` of them come back
 
 ### hybridSearch()
 
-Combine text (BM25) and vector similarity search. For best results, create both a text index (`createTextIndex()`) and a vector index (`createVectorIndex()`). If either index is missing, that source is silently omitted from fusion.
+Combine text (BM25) and vector similarity search. For best results, create both a text index (`createTextIndex()`) and a vector index (`createVectorIndex()`). If either index is missing, that source is silently omitted from fusion. With neither (no text index, and no vector index or no `queryVector`), it rejects with an error naming the indexes.
 
 Returns `[[nodeId, score], ...]` sorted by fused score **descending** (higher = more relevant). These are fusion scores, **not** distances.
 
@@ -660,7 +660,7 @@ info(): object
 
 ### schema()
 
-Returns schema information (labels, edge types, property keys).
+Returns schema information: the labels, edge types and property keys the data holds, each sorted by name, as `{ mode: 'lpg', labels, edge_types, property_keys }`. A label is `{ name, count, properties }`, an edge type `{ name, count, properties, endpoints }`, a property `{ name, types }` (`types` such as `["STRING"]`) and an endpoint `{ source, target, count }`. A label, edge type or property key nothing holds any more is left out. It reads the whole graph.
 
 ```typescript
 schema(): object

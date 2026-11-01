@@ -28,7 +28,7 @@ tests:
       gql: "MATCH (a:Hub {name: 'Alix'})-[:KNOWS]->{1,}(b) RETURN count(b) AS walks"
       cypher: "MATCH (a:Hub {name: 'Alix'})-[:KNOWS*]->(b) RETURN count(b) AS walks"
     expect:
-      error: "give the pattern an upper bound"
+      error: "bound the quantifier"
 
   - name: the_distinct_targets_of_the_same_pattern_answer
     setup:

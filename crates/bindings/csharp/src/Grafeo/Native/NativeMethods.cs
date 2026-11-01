@@ -639,7 +639,7 @@ internal static partial class NativeMethods
     [LibraryImport(LibName)]
     internal static partial nint grafeo_begin_transaction(nint db);
 
-    /// <summary>Begin a transaction with a specific isolation level (0=ReadCommitted, 1=Snapshot, 2=Serializable).</summary>
+    /// <summary>Begin a transaction with a specific isolation level (0=ReadCommitted, 1=Snapshot, 2=Serializable, refused for now).</summary>
     [LibraryImport(LibName)]
     internal static partial nint grafeo_begin_transaction_with_isolation(nint db, int isolationLevel);
 

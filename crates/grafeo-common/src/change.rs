@@ -827,7 +827,12 @@ impl ChangeSet {
         self.slots.clear();
         self.entries.clear();
         self.bulk_rows.clear();
-        self.held = Held::default();
+        self.held.bytes = 0;
+        // Small changes never allocate the shared-payload table. Keep its
+        // empty hash state, but release every table that did allocate.
+        if self.held.shared.capacity() != 0 {
+            self.held.shared = GrafeoMap::default();
+        }
     }
 
     /// How many entries the set holds room for without growing.
@@ -848,6 +853,35 @@ impl ChangeSet {
     #[must_use]
     pub fn after(&self, mark: ChangeMark) -> &[Change] {
         self.entries.get(mark.0..).unwrap_or_default()
+    }
+
+    /// Adds to `nodes` each node of `graph` that an entry recorded after
+    /// `mark` writes (creates, deletes, relabels or changes a property of),
+    /// once per entry, a bulk range's nodes included, and returns the mark
+    /// after the last entry: what changed since a reader last looked, in
+    /// O(entries since).
+    pub fn nodes_written_after(
+        &self,
+        graph: GraphSlot,
+        mark: ChangeMark,
+        nodes: &mut Vec<NodeId>,
+    ) -> ChangeMark {
+        for change in self.after(mark) {
+            match change {
+                Change::Data {
+                    graph: written, op, ..
+                } if *written == graph => {
+                    if let Some(Entity::Node(id)) = op.entity() {
+                        nodes.push(id);
+                    }
+                }
+                Change::Bulk(range) if range.graph == graph && range.table == Table::Nodes => {
+                    nodes.extend(range.ids.clone().map(NodeId));
+                }
+                Change::Data { .. } | Change::Bulk(_) => {}
+            }
+        }
+        self.mark()
     }
 
     /// Removes the entries recorded after `mark` and returns them in
@@ -1642,36 +1676,70 @@ mod tests {
     /// before.
     #[test]
     fn a_cleared_set_is_as_a_new_one() {
-        let mut set = ChangeSet::new();
-        let new = set.approx_bytes();
-        let trips = set.slot(lpg(Some("trips"))).unwrap();
-        let notes = Value::from("Amsterdam ".repeat(100).as_str());
-        for id in [3, 19] {
+        let shared = Value::from("Amsterdam ".repeat(100).as_str());
+        for (notes, shared_payload, remove_before_clear) in [
+            (Value::Int64(88), false, false),
+            (shared.clone(), true, false),
+            (shared, true, true),
+        ] {
+            let mut set = ChangeSet::new();
+            let new = set.approx_bytes();
+            let trips = set.slot(lpg(Some("trips"))).unwrap();
+            let mark = set.mark();
+            for id in [3, 19] {
+                set.push(
+                    trips,
+                    set_node_property(id, "notes", notes.clone()),
+                    Before::Value(None),
+                    Created,
+                )
+                .unwrap();
+            }
+            assert!(set.approx_bytes() > new);
+            assert_eq!(set.held.shared.capacity() != 0, shared_payload);
+
+            if remove_before_clear {
+                drop(set.split_off(mark));
+                assert!(set.is_empty());
+                assert!(set.held.shared.is_empty());
+                assert!(
+                    set.held.shared.capacity() != 0,
+                    "the empty table still holds memory"
+                );
+            }
+
+            set.clear();
+            assert!(set.is_empty());
+            assert!(set.graphs().is_empty(), "no graph: {:?}", set.graphs());
+            assert_eq!(set.approx_bytes(), new, "nothing held");
+            assert_eq!(
+                set.held.shared.capacity(),
+                0,
+                "no shared table allocation held"
+            );
+            let default = set.slot(lpg(None)).unwrap();
+            assert_eq!(set.graphs(), [lpg(None)], "the first slot again");
+            assert_eq!(set.graph(default), Some(&lpg(None)));
             set.push(
-                trips,
-                set_node_property(id, "notes", notes.clone()),
+                default,
+                create_node(88, &["City"], Vec::new()),
+                Before::Absent,
+                Created,
+            )
+            .unwrap();
+            assert_eq!(set.entries().len(), 1);
+            set.push(
+                default,
+                set_node_property(88, "notes", notes),
                 Before::Value(None),
                 Created,
             )
             .unwrap();
+            assert_eq!(set.held.shared.capacity() != 0, shared_payload);
+            set.clear();
+            assert_eq!(set.approx_bytes(), new, "nothing held after reuse");
+            assert_eq!(set.held.shared.capacity(), 0);
         }
-        assert!(set.approx_bytes() > new);
-
-        set.clear();
-        assert!(set.is_empty());
-        assert!(set.graphs().is_empty(), "no graph: {:?}", set.graphs());
-        assert_eq!(set.approx_bytes(), new, "nothing held");
-        let default = set.slot(lpg(None)).unwrap();
-        assert_eq!(set.graphs(), [lpg(None)], "the first slot again");
-        assert_eq!(set.graph(default), Some(&lpg(None)));
-        set.push(
-            default,
-            create_node(88, &["City"], Vec::new()),
-            Before::Absent,
-            Created,
-        )
-        .unwrap();
-        assert_eq!(set.entries().len(), 1);
     }
 
     /// The estimate grows with what entries hold, counts a large payload

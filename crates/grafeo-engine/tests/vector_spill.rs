@@ -5,7 +5,10 @@
 //! durability tests: `spilled_embeddings.rs`).
 //!
 //! Run with: cargo test -p grafeo-engine --features "embedded,async-storage" --test vector_spill
-
+#![allow(
+    deprecated,
+    reason = "the test reaches the row-group store itself, which only the deprecated GrafeoDB::store() gives, until 0.7.0 removes it"
+)]
 // The spill needs the vector index and memory-mapped files.
 #![cfg(all(feature = "vector-index", feature = "mmap"))]
 

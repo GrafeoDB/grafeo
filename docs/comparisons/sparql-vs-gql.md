@@ -71,6 +71,8 @@ This guide compares SPARQL (W3C standard for RDF) with GQL (ISO standard for pro
 === "SPARQL"
 
     ```sparql
+    PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+
     SELECT ?name ?age
     WHERE {
         ?person foaf:name ?name .
@@ -92,6 +94,8 @@ This guide compares SPARQL (W3C standard for RDF) with GQL (ISO standard for pro
 === "SPARQL"
 
     ```sparql
+    PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+
     SELECT ?name ?email
     WHERE {
         ?person foaf:name ?name
@@ -112,6 +116,8 @@ This guide compares SPARQL (W3C standard for RDF) with GQL (ISO standard for pro
 === "SPARQL"
 
     ```sparql
+    PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+
     SELECT ?country (COUNT(?person) AS ?count)
     WHERE {
         ?person foaf:based_near ?country
@@ -136,6 +142,8 @@ This guide compares SPARQL (W3C standard for RDF) with GQL (ISO standard for pro
 === "SPARQL"
 
     ```sparql
+    PREFIX ex: <http://example.org/>
+
     # All ancestors (transitive closure)
     SELECT ?ancestor
     WHERE {
@@ -155,6 +163,8 @@ This guide compares SPARQL (W3C standard for RDF) with GQL (ISO standard for pro
 === "SPARQL"
 
     ```sparql
+    PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+
     SELECT ?contact
     WHERE {
         { ?person foaf:mbox ?contact }

@@ -61,6 +61,7 @@
 pub mod detect;
 pub mod format;
 pub mod header;
+pub(crate) mod holder;
 pub mod legacy;
 pub mod manager;
 pub mod v3;

@@ -36,25 +36,9 @@ impl DirectoryLock {
         let dir = dir.as_ref();
         fs::create_dir_all(dir)?;
         let path = dir.join(LOCK_FILE_NAME);
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&path)?;
-
-        child_process::take_lock(
-            || file.try_lock(),
-            |e| matches!(e, std::fs::TryLockError::WouldBlock),
-        )
-        .map_err(|e| match e {
-            std::fs::TryLockError::WouldBlock => Error::Internal(format!(
-                "database is locked by another process: {}",
-                dir.display()
-            )),
-            std::fs::TryLockError::Error(e) => Error::Io(e),
+        let file = try_lock_file(&path, || {
+            format!("database is locked by another process: {}", dir.display())
         })?;
-
         Ok(Self { _file: file, path })
     }
 
@@ -63,6 +47,34 @@ impl DirectoryLock {
     pub fn path(&self) -> &Path {
         &self.path
     }
+}
+
+/// Locks the file at `path` exclusively, without waiting, and creates it
+/// empty if it is not there. The lock lives on the returned handle and ends
+/// when it is dropped (or the process exits); the file itself stays, so the
+/// next caller locks the same file.
+///
+/// # Errors
+///
+/// [`Error::Internal`] with the message `busy` gives when another handle
+/// holds the lock, [`Error::Io`] when the file cannot be opened (a missing
+/// directory: [`std::io::ErrorKind::NotFound`]) or locked.
+pub fn try_lock_file(path: &Path, busy: impl FnOnce() -> String) -> Result<File> {
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)?;
+    child_process::take_lock(
+        || file.try_lock(),
+        |e| matches!(e, std::fs::TryLockError::WouldBlock),
+    )
+    .map_err(|e| match e {
+        std::fs::TryLockError::WouldBlock => Error::Internal(busy()),
+        std::fs::TryLockError::Error(e) => Error::Io(e),
+    })?;
+    Ok(file)
 }
 
 #[cfg(test)]
@@ -82,6 +94,30 @@ mod tests {
 
         drop(first);
         DirectoryLock::acquire(&db_dir).unwrap();
+    }
+
+    #[test]
+    fn a_locked_file_is_busy_until_its_handle_drops_and_stays() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("busy.lock");
+
+        let first = try_lock_file(&path, || "busy".to_string()).unwrap();
+        let err = try_lock_file(&path, || "busy".to_string()).unwrap_err();
+        assert!(
+            matches!(&err, Error::Internal(message) if message == "busy"),
+            "{err}"
+        );
+
+        drop(first);
+        assert!(path.exists(), "the lock file stays for the next caller");
+        try_lock_file(&path, || "busy".to_string()).unwrap();
+
+        let missing = dir.path().join("missing").join("busy.lock");
+        let err = try_lock_file(&missing, || "busy".to_string()).unwrap_err();
+        assert!(
+            matches!(&err, Error::Io(e) if e.kind() == std::io::ErrorKind::NotFound),
+            "{err}"
+        );
     }
 
     #[test]

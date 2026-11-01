@@ -5,7 +5,7 @@
 //! blank node syntax (`_:label`, `[]`), and the `a` shorthand for `rdf:type`.
 
 use crate::graph::rdf::sink::{TripleSink, VecSink};
-use crate::graph::rdf::term::{Literal, Term};
+use crate::graph::rdf::term::{Literal, Term, unescape_iri};
 use crate::graph::rdf::triple::Triple;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -303,14 +303,20 @@ impl TurtleParser {
         let start = self.pos;
         while self.pos < self.input.len() && self.input[self.pos] != b'>' {
             if self.input[self.pos] == b'\\' {
-                self.pos += 2;
+                // An escape at the end of the input ends the IRI, which then
+                // has no closing '>'.
+                self.pos = (self.pos + 2).min(self.input.len());
             } else {
                 self.advance_byte();
             }
         }
-        let iri_str = std::str::from_utf8(&self.input[start..self.pos])
-            .map_err(|_| self.error("invalid UTF-8 in IRI"))?
-            .to_string();
+        let written = std::str::from_utf8(&self.input[start..self.pos])
+            .map_err(|_| self.error("invalid UTF-8 in IRI"))?;
+        // Decoded before the closing '>' is checked, as an escape at the end
+        // says more than the missing '>'.
+        let iri_str = unescape_iri(written)
+            .map_err(|error| self.error(format!("IRI: {error}")))?
+            .into_owned();
         self.expect_byte(b'>')?;
         Ok(self.resolve_iri(iri_str))
     }
@@ -577,6 +583,8 @@ impl TurtleParser {
             b'n' => Ok('\n'),
             b'r' => Ok('\r'),
             b't' => Ok('\t'),
+            b'b' => Ok('\x08'),
+            b'f' => Ok('\x0c'),
             b'\\' => Ok('\\'),
             b'"' => Ok('"'),
             b'\'' => Ok('\''),
@@ -592,6 +600,10 @@ impl TurtleParser {
         }
         let hex = std::str::from_utf8(&self.input[self.pos..self.pos + digits])
             .map_err(|_| self.error("invalid UTF-8 in unicode escape"))?;
+        // Only hexadecimal digits: `from_str_radix` also takes a leading sign.
+        if !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(self.error(format!("invalid hex in unicode escape: {hex}")));
+        }
         let code_point = u32::from_str_radix(hex, 16)
             .map_err(|_| self.error(format!("invalid hex in unicode escape: {hex}")))?;
         self.pos += digits;
@@ -1036,20 +1048,71 @@ mod tests {
         assert!(err.column > 0);
     }
 
+    /// An IRI's `\u` and `\U` escapes (UCHAR in the Turtle grammar) stand for
+    /// their characters, as in N-Triples; no other escape is allowed in an
+    /// IRI.
     #[test]
-    fn test_parse_backslash_in_iri() {
-        // The IRI reader skips backslash-escaped pairs (covers the `\\` branch in read_iri_ref).
-        // The raw escape characters are preserved in the IRI string.
-        let input = r#"
-            <http://example.org/\u0041> <http://example.org/p> "value" .
-        "#;
-        let triples = TurtleParser::new().parse(input).unwrap();
-        assert_eq!(triples.len(), 1);
-        // The IRI reader passes through escape sequences without decoding.
+    fn iris_decode_their_unicode_escapes() {
+        // `~` stands for a backslash.
+        let input = concat!(
+            "<http://example.org/~u0041lix> <http://example.org/~U0001F6B2> ",
+            "\"7\"^^<http://example.org/Krak~u00F3w> .",
+        )
+        .replace('~', "\\");
+        let triples = TurtleParser::new().parse(&input).unwrap();
         assert_eq!(
-            triples[0].subject(),
-            &Term::iri("http://example.org/\\u0041")
+            triples,
+            vec![Triple::new(
+                Term::iri("http://example.org/Alix"),
+                Term::iri("http://example.org/🚲"),
+                Term::typed_literal("7", "http://example.org/Kraków"),
+            )]
         );
+        for (iri, reason) in [
+            ("<http://example.org/~n>", "an IRI has only"),
+            ("<http://example.org/~u00F>", "needs 4 hexadecimal digits"),
+            ("<http://example.org/~u+0F3>", "needs 4 hexadecimal digits"),
+        ] {
+            let text = format!("{iri} <http://example.org/p> \"Gus\" .").replace('~', "\\");
+            let error = TurtleParser::new().parse(&text).unwrap_err();
+            assert!(error.message.contains(reason), "{text}: {error}");
+        }
+        // An escape at the end of the input ran the IRI reader past it.
+        let error = TurtleParser::new()
+            .parse(&"<http://example.org/~".replace('~', "\\"))
+            .unwrap_err();
+        assert!(
+            error.message.contains("an escape without its character"),
+            "{error}"
+        );
+    }
+
+    /// Turtle's string escapes (ECHAR) are those of N-Triples: `\b` and `\f`
+    /// among them.
+    #[test]
+    fn strings_decode_the_backspace_and_form_feed_escapes() {
+        // `~` stands for a backslash.
+        let input = concat!(
+            "<http://example.org/s> <http://example.org/p> \"Gus~bMia~fVincent\" .\n",
+            "<http://example.org/s> <http://example.org/q> '''Jules~b~f''' .\n",
+        )
+        .replace('~', "\\");
+        let triples = TurtleParser::new().parse(&input).unwrap();
+        assert_eq!(triples[0].object(), &Term::literal("Gus\x08Mia\x0cVincent"));
+        assert_eq!(triples[1].object(), &Term::literal("Jules\x08\x0c"));
+    }
+
+    /// A unicode escape is exactly 4 or 8 hexadecimal digits: a sign, which
+    /// a radix parse would take, is no digit.
+    #[test]
+    fn a_unicode_escape_with_a_sign_is_refused() {
+        // `~` stands for a backslash.
+        for literal in ["\"~u+0F3\"", "\"~U+001F6B2\"", "\"~u-0F3\""] {
+            let text = format!("<http://example.org/s> <http://example.org/p> {literal} .")
+                .replace('~', "\\");
+            let error = TurtleParser::new().parse(&text).unwrap_err();
+            assert!(error.message.contains("hex"), "{text}: {error}");
+        }
     }
 
     #[test]

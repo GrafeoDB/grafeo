@@ -5,7 +5,7 @@ nodes (a CONTAINS tree with IMPORTS and CALLS edges in cycles),
 `MATCH (repo)-[*]->(f:File) ... RETURN count(f)` printed "memory allocation
 of 47244640256 bytes failed" and ended the Python process. A search that
 would hold more paths than its budget now raises an error that names what to
-do: an upper bound, DISTINCT, or a shortest path search. A path longer than
+do: bound the quantifier, DISTINCT, or a shortest path search. A path longer than
 the stack is deep no longer overflows it either.
 
 An edge pattern also names one type: `-[:Graph:CONTAINS]->` raises a syntax
@@ -76,7 +76,7 @@ def test_an_unbounded_pattern_over_cycles_raises(code_graph, cypher):
     with pytest.raises(grafeo.GrafeoError) as raised:
         run(code_graph, query, cypher)
     message = str(raised.value)
-    for advice in ("upper bound", "DISTINCT", "shortest"):
+    for advice in ("bound the quantifier", "DISTINCT", "shortest"):
         assert advice in message, message
     # The database still answers, and the distinct targets come at once
     distinct = query.replace("count(f)", "count(DISTINCT f)")

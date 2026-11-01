@@ -5,6 +5,7 @@ SESSION SET (GRAPH, TIME ZONE, SCHEMA, PARAMETER), SESSION RESET,
 SESSION CLOSE, transaction characteristics, savepoints, nested transactions.
 """
 
+import pytest
 
 # =============================================================================
 # Basic Transaction Control (sec 6)
@@ -88,33 +89,31 @@ class TestSavepoints:
 
 
 class TestNestedTransactions:
-    """Nested transaction behavior via context managers."""
+    """Transaction control inside a transaction object.
 
-    def test_nested_commit(self, db):
-        """Inner COMMIT releases auto-savepoint."""
+    A nested START TRANSACTION creates an implicit savepoint in a session
+    (covered by the Rust tests: Python has no session object). A transaction
+    object ends with its own commit() or rollback(), so it refuses START
+    TRANSACTION, COMMIT and ROLLBACK statements (GQLSTATUS 25000) and stays
+    usable after the refusal.
+    """
+
+    @pytest.mark.parametrize("statement", ["START TRANSACTION", "COMMIT", "ROLLBACK"])
+    def test_transaction_statements_are_refused(self, db, statement):
+        """The statement is refused and the transaction goes on."""
+        import grafeo
+
         with db.begin_transaction() as tx:
             tx.execute("INSERT (:Person {name: 'Alix'})")
-            tx.execute("START TRANSACTION")  # nested
+            with pytest.raises(grafeo.GrafeoError, match=r"commit\(\) or rollback\(\)") as caught:
+                tx.execute(statement)
+            assert caught.value.gql_status == "25000"
+            assert tx.is_active
             tx.execute("INSERT (:Person {name: 'Gus'})")
-            tx.execute("COMMIT")  # inner
-            tx.commit()  # outer
+            tx.commit()
         result = list(db.execute("MATCH (n:Person) RETURN n.name"))
         names = {r["n.name"] for r in result}
-        assert "Alix" in names
-        assert "Gus" in names
-
-    def test_nested_rollback(self, db):
-        """Inner ROLLBACK undoes only inner work."""
-        with db.begin_transaction() as tx:
-            tx.execute("INSERT (:Person {name: 'Alix'})")
-            tx.execute("START TRANSACTION")  # nested
-            tx.execute("INSERT (:Person {name: 'Gus'})")
-            tx.execute("ROLLBACK")  # inner
-            tx.commit()  # outer
-        result = list(db.execute("MATCH (n:Person) RETURN n.name"))
-        names = {r["n.name"] for r in result}
-        assert "Alix" in names
-        assert "Gus" not in names
+        assert names >= {"Alix", "Gus"}
 
 
 # =============================================================================

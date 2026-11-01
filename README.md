@@ -85,7 +85,6 @@ Grafeo supports both **Labeled Property Graph (LPG)** and **Resource Description
 - **Incremental backup and point-in-time recovery**: `backup_full`, `backup_incremental`, `restore_to_epoch`
 - **Prometheus metrics** (`metrics` feature): query, transaction, session, cache, and GC counters with text export
 - **Change data capture**: before/after property snapshots with epoch-bounded retention
-- **Async storage** (`async-storage` feature): non-blocking WAL and snapshot I/O via tokio
 - **Tracing** (`tracing` feature): opt-in observability spans and events
 - **Bulk export**: Arrow IPC, Polars, pandas, GEXF (Gephi), GraphML (Cytoscape, yEd, NetworkX)
 - **Bulk import**: CSV, JSONL, TSV, Matrix Market (MMIO), Turtle, N-Triples with streaming loaders
@@ -223,14 +222,16 @@ uv add grafeo[cli]
 
 ### Node.js / TypeScript
 
+As an ES module, with top-level `await` (CommonJS: `const { GrafeoDB } = require('@grafeo-db/js')`):
+
 ```js
-const { GrafeoDB } = require('@grafeo-db/js');
+import { GrafeoDB } from '@grafeo-db/js';
 
 // Create an in-memory database
-const db = await GrafeoDB.create();
+const db = GrafeoDB.create();
 
 // Or open a persistent database
-// const db = await GrafeoDB.create({ path: './my-graph.db' });
+// const db = GrafeoDB.create('./my-graph');
 
 // Create nodes and relationships
 await db.execute("INSERT (:Person {name: 'Alix', age: 30})");
@@ -245,9 +246,9 @@ const result = await db.execute(`
     MATCH (p:Person)-[:KNOWS]->(friend)
     RETURN p.name, friend.name
 `);
-console.log(result.toArray());
+console.log(result.toArray()); // [ { 'p.name': 'Alix', 'friend.name': 'Gus' } ]
 
-await db.close();
+db.close();
 ```
 
 ### Python

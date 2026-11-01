@@ -16,6 +16,17 @@ use tokio::sync::Mutex;
 /// owns it). Per-query callers that pass a unique throwaway directory should
 /// chain [`with_owned_dir`](Self::with_owned_dir) so `Drop` also removes the
 /// directory once its files are gone.
+///
+/// Code that denies deprecated items no longer builds with it:
+///
+/// ```compile_fail
+/// #![deny(deprecated)]
+/// let _size = size_of::<grafeo_engine::execution::spill::AsyncSpillManager>();
+/// ```
+#[deprecated(
+    since = "0.6.1",
+    note = "the engine spills through `grafeo_core::execution::spill::SpillManager`, use it instead; removed in 0.7.0 with the `async-storage` feature"
+)]
 pub struct AsyncSpillManager {
     /// Directory for spill files.
     spill_dir: PathBuf,

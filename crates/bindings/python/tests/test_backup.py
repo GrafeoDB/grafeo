@@ -5,10 +5,13 @@ on; the incremental backups after it hold the WAL after that epoch, so a restore
 is the image and those segments.
 """
 
+import json
+import os
 import shutil
 import threading
 
 import grafeo
+import pytest
 
 
 def people(db):
@@ -176,3 +179,71 @@ def test_a_read_only_database_takes_a_full_backup_of_what_it_shows(tmp_path):
         db = grafeo.GrafeoDB.open_read_only(restored)
         assert people(db) == expected
         db.close()
+
+
+def listing(directory):
+    """Every file of `directory` with its bytes, sorted by name."""
+    files = []
+    for name in sorted(os.listdir(directory)):
+        path = os.path.join(directory, name)
+        if os.path.isfile(path):
+            with open(path, "rb") as f:
+                files.append((name, f.read()))
+    return files
+
+
+def test_an_incremental_backup_with_nothing_new_is_a_no_op(tmp_path):
+    """Nothing written since the last backup: the call succeeds and writes nothing."""
+    path = str(tmp_path / "lisbon.grafeo")
+    backups = str(tmp_path / "backups")
+    db = grafeo.GrafeoDB(path)
+    db.execute("INSERT (:Person {name: 'Alix'})")
+    db.backup_full(backups)
+    before = listing(backups)
+    db.backup_incremental(backups)
+    db.backup_incremental(backups)
+    assert listing(backups) == before
+    db.execute("INSERT (:Person {name: 'Gus'})")
+    db.backup_incremental(backups)
+    latest = db.current_epoch()
+    db.close()
+    restored = str(tmp_path / "restored.grafeo")
+    grafeo.GrafeoDB.restore_to_epoch(backups, latest, restored)
+    db = grafeo.GrafeoDB(restored)
+    assert people(db) == ["Alix", "Gus"]
+    db.close()
+
+
+def test_a_removed_wal_segment_breaks_the_chain(tmp_path):
+    """The WAL segment the next incremental backup starts at is gone: the error has
+    its own code (GRAFEO-S005), is not retryable, says to take a new full backup,
+    and writes nothing; a new full backup starts a chain that works."""
+    path = str(tmp_path / "vienna.grafeo")
+    backups = str(tmp_path / "backups")
+    db = grafeo.GrafeoDB(path)
+    db.execute("INSERT (:Person {name: 'Alix'})")
+    db.backup_full(backups)
+    db.execute("INSERT (:Person {name: 'Gus'})")
+    wal = path + ".wal"
+    with open(os.path.join(wal, "backup_cursor.meta"), encoding="utf-8") as f:
+        start = json.load(f)["wal_lsn"]
+    os.remove(os.path.join(wal, f"wal_{start:020}.log"))
+    before = listing(backups)
+
+    with pytest.raises(grafeo.GrafeoError) as raised:
+        db.backup_incremental(backups)
+    assert raised.value.error_code == "GRAFEO-S005", str(raised.value)
+    assert raised.value.is_retryable is False
+    assert "full backup" in str(raised.value).lower()
+    assert listing(backups) == before
+
+    db.backup_full(backups)
+    db.execute("INSERT (:Person {name: 'Vincent'})")
+    db.backup_incremental(backups)
+    latest = db.current_epoch()
+    db.close()
+    restored = str(tmp_path / "restored.grafeo")
+    grafeo.GrafeoDB.restore_to_epoch(backups, latest, restored)
+    db = grafeo.GrafeoDB(restored)
+    assert people(db) == ["Alix", "Gus", "Vincent"]
+    db.close()

@@ -134,6 +134,8 @@ RETURN size([1, 2, 3])       -- 3
 RETURN length([1, 2, 3])     -- 3 (alias)
 ```
 
+`size()` of a vector, such as `size(d.embedding)`, is its dimension.
+
 ### Transformation
 
 ```sql
@@ -164,16 +166,18 @@ INSERT (:TestNode {index: i, value: rand()})
 
 | Function | Description |
 |----------|-------------|
-| `toInteger(expr)` / `toInt(expr)` | Convert to integer |
-| `toFloat(expr)` | Convert to float |
+| `toInteger(expr)` / `toInt(expr)` | Convert to integer: text is trimmed and read as a number, truncated toward zero; text that spells no number and NaN give `NULL`; a float outside the 64-bit range or an infinity fails with `22003` |
+| `toFloat(expr)` | Convert to float: text is trimmed and read as a number; text that spells no number gives `NULL` |
 | `toDecimal(expr)` | Convert to an exact decimal: an integer or decimal exactly, a float by its shortest text, a numeric string as written |
-| `toDecimal(expr, precision, scale)` | The same, rounded to `scale` digits after the point; `NULL` when it has more than `precision - scale` before it |
+| `toDecimal(expr, precision, scale)` | The same, rounded to `scale` digits after the point; fails with `22003` when it has more than `precision - scale` digits before it |
 | `toString(expr)` | Convert to string |
 | `toBoolean(expr)` | Convert to boolean |
-| `toList(expr)` | Wrap scalar in a list |
+| `toList(expr)` | Wrap scalar in a list; a vector gives the list of its elements |
 
 ```sql
 RETURN toInteger('42')      -- 42
+RETURN toInteger(' 4.7 ')   -- 4
+RETURN toInteger('Alix')    -- NULL (CAST('Alix' AS INT) fails with 22018)
 RETURN toFloat('3.14')      -- 3.14
 RETURN toDecimal('2.50')    -- 2.50
 RETURN toDecimal(1.005e0, 5, 2)  -- 1.01

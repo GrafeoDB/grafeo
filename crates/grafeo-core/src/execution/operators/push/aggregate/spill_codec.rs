@@ -9,7 +9,7 @@
 use grafeo_common::utils::hash::FxHashSet as HashSet;
 use std::io::{Read, Write};
 
-use grafeo_common::types::Value;
+use grafeo_common::types::{DECIMAL_SUM_BYTES, DecimalSum, Value};
 
 use super::GroupState;
 use crate::execution::operators::accumulator::{AggregateFunction, AggregateState, HashableValue};
@@ -248,12 +248,9 @@ fn write_accumulator(w: &mut dyn Write, accumulator: &AggregateState) -> std::io
             w.write_all(&sum.to_le_bytes())?;
             w.write_all(&count.to_le_bytes())?;
         }
-        // The sum (absent once past 38 digits), then the count.
+        // The exact sum (see `DecimalSum::to_le_bytes`), then the count.
         AggregateState::SumDecimal(total, count) | AggregateState::AvgDecimal(total, count) => {
-            w.write_all(&[u8::from(total.is_some())])?;
-            if let Some(total) = total {
-                serialize_value(&Value::Decimal(*total), w)?;
-            }
+            w.write_all(&total.to_le_bytes())?;
             w.write_all(&count.to_le_bytes())?;
         }
         AggregateState::Min(value)
@@ -406,14 +403,10 @@ fn read_tagged_accumulator(r: &mut dyn Read, tag: u8) -> std::io::Result<Aggrega
             }
         }
         tags::SUM_DECIMAL | tags::AVG_DECIMAL => {
-            let total = if read_flag(r)? {
-                match deserialize_value(r)? {
-                    Value::Decimal(total) => Some(total),
-                    _ => return Err(invalid("a decimal aggregate state holds another value")),
-                }
-            } else {
-                None
-            };
+            let mut bytes = [0; DECIMAL_SUM_BYTES];
+            r.read_exact(&mut bytes)?;
+            let total = DecimalSum::from_le_bytes(&bytes)
+                .ok_or_else(|| invalid("a decimal sum with a scale past 38"))?;
             let count = read_i64(r)?;
             if tag == tags::SUM_DECIMAL {
                 AggregateState::SumDecimal(total, count)
@@ -565,17 +558,23 @@ mod tests {
     }
 
     /// A decimal sum or average spills and comes back with its exact sum
-    /// (scale kept) or its overflow, and its count.
+    /// (scale kept, also one past 38 digits that later rows may take back),
+    /// and its count.
     #[test]
     fn decimal_states_round_trip() {
-        use grafeo_common::types::Decimal;
-        let total = Decimal::parse("-12.50").unwrap();
+        use grafeo_common::types::{Decimal, DecimalSum};
+        let mut total = DecimalSum::new();
+        total.add(&Decimal::parse("-12.50").unwrap());
+        let mut past = DecimalSum::new();
+        let large = Decimal::parse("99999999999999999999999999999999999999").unwrap();
+        past.add(&large);
+        past.add(&large);
         let group = GroupState {
             key_values: Vec::new(),
             accumulators: vec![
-                AggregateState::SumDecimal(Some(total), 3),
-                AggregateState::AvgDecimal(Some(total), 4),
-                AggregateState::SumDecimal(None, 7),
+                AggregateState::SumDecimal(total, 3),
+                AggregateState::AvgDecimal(total, 4),
+                AggregateState::SumDecimal(past, 7),
             ],
         };
         let mut bytes = Vec::new();
@@ -593,11 +592,94 @@ mod tests {
         assert_eq!(
             described,
             [
-                "sum Some(Decimal(-12.50)) 3",
-                "avg Some(Decimal(-12.50)) 4",
-                "sum None 7"
+                "sum DecimalSum(-12.50) 3",
+                "avg DecimalSum(-12.50) 4",
+                "sum DecimalSum(past 38 digits, scale 0) 7",
             ]
         );
+    }
+
+    /// The whole decimal sum crosses a spill, not only what Debug shows: an
+    /// empty sum, and one past 38 digits with positive and negative
+    /// magnitudes at scale 38, give the same total and average after the
+    /// round trip, and the next row added after it gives what it gives
+    /// without the spill (here, a total that fits again).
+    #[test]
+    fn decimal_sums_keep_their_exact_state_across_a_spill() {
+        use grafeo_common::types::{Decimal, DecimalSum};
+        let d = |text: &str| Decimal::parse(text).unwrap();
+        let mut mixed = DecimalSum::new();
+        let tiny = format!("-0.{}1", "0".repeat(37));
+        for value in [
+            "99999999999999999999999999999999999999",
+            "99999999999999999999999999999999999999",
+            tiny.as_str(),
+        ] {
+            mixed.add(&d(value));
+        }
+        assert!(mixed.total().is_err(), "past 38 digits before the spill");
+        let next = d("-99999999999999999999999999999999999999");
+        for (state, count) in [(DecimalSum::new(), 0_i64), (mixed, 3)] {
+            let group = GroupState {
+                key_values: Vec::new(),
+                accumulators: vec![
+                    AggregateState::SumDecimal(state, count),
+                    AggregateState::AvgDecimal(state, count),
+                ],
+            };
+            let mut bytes = Vec::new();
+            serialize_group_state(&group, &mut bytes).unwrap();
+            let back = deserialize_group_state(&mut bytes.as_slice()).unwrap();
+            for accumulator in &back.accumulators {
+                let (AggregateState::SumDecimal(back, back_count)
+                | AggregateState::AvgDecimal(back, back_count)) = accumulator
+                else {
+                    panic!("a decimal state comes back as {accumulator:?}");
+                };
+                assert_eq!(*back, state, "the exact state");
+                assert_eq!(*back_count, count);
+                assert_eq!(back.total(), state.total());
+                if count > 0 {
+                    let rows = u64::try_from(count).unwrap();
+                    assert_eq!(back.average(rows), state.average(rows));
+                }
+                let (mut before, mut after) = (state, *back);
+                before.add(&next);
+                after.add(&next);
+                assert_eq!(after, before, "the next row after the reload");
+                assert_eq!(after.total(), before.total());
+            }
+        }
+        // The mixed sum plus the next row fits again: 38 nines less 10^-38,
+        // whose fraction at scale 0 rounds up to 38 nines.
+        let mut fits = mixed;
+        fits.add(&next);
+        assert_eq!(
+            fits.total().unwrap(),
+            d("99999999999999999999999999999999999999")
+        );
+    }
+
+    /// A decimal sum record whose scale is past 38 is refused, not read as
+    /// some other value.
+    #[test]
+    fn a_decimal_sum_record_with_a_bad_scale_is_refused() {
+        use grafeo_common::types::{Decimal, DecimalSum};
+        let mut sum = DecimalSum::new();
+        sum.add(&Decimal::parse("1.5").unwrap());
+        let group = GroupState {
+            key_values: Vec::new(),
+            accumulators: vec![AggregateState::SumDecimal(sum, 1)],
+        };
+        let mut bytes = Vec::new();
+        serialize_group_state(&group, &mut bytes).unwrap();
+        let record = sum.to_le_bytes();
+        let at = bytes
+            .windows(record.len())
+            .position(|window| window == record)
+            .expect("the record is in the bytes");
+        bytes[at] = 39;
+        assert!(deserialize_group_state(&mut bytes.as_slice()).is_err());
     }
 
     /// A DISTINCT state wraps the state of the aggregate itself, never

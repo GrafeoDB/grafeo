@@ -598,7 +598,7 @@ tests:
 
   # IC10. Friend recommendation.
   - name: ic10_friend_recommendation
-    skip: "#543: EXISTS with a two-hop pattern in a list comprehension fails with Unsupported EXISTS subquery pattern"
+    skip: "an EXISTS subquery inside a list comprehension fails (Internal error: Unsupported EXISTS subquery pattern)"
     params:
       personId: 228
       month: 7

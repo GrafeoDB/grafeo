@@ -61,7 +61,7 @@ await db.execute(`MATCH (p:Person) RETURN p.name`);
 await db.execute(`MATCH (p:Person) RETURN p.name`, { language: 'cypher' });
 
 // SPARQL
-await db.execute(`SELECT ?name WHERE { ?p a :Person ; :name ?name }`, { language: 'sparql' });
+await db.execute(`PREFIX : <http://example.org/> SELECT ?name WHERE { ?p a :Person ; :name ?name }`, { language: 'sparql' });
 ```
 
 Supported values: `gql`, `cypher`, `sparql`, `gremlin`, `graphql`, `sql`.

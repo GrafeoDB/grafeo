@@ -360,7 +360,8 @@ fn read_bitpacked_blocks(
             );
         }
     }
-    Ok(BitPackedInts::pack_with_bits(&values, bits))
+    BitPackedInts::pack_with_bits(&values, bits)
+        .map_err(|_| "a BitPacked value does not fit the column's width")
 }
 
 /// Reads the Bitmap blocks of a column into one bit vector.

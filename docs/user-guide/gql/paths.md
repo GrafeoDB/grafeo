@@ -104,11 +104,11 @@ The ISO standard uses curly-brace syntax as an alternative to `*m..n`. See [Patt
 
 ```sql
 -- ISO: 2 to 4 hops
-MATCH (a:Person)-[:KNOWS]{2,4}(b:Person)
+MATCH (a:Person)-[:KNOWS]->{2,4}(b:Person)
 RETURN a.name, b.name
 
 -- ISO: exactly 3 hops
-MATCH (a:Person)-[:KNOWS]{3}(b:Person)
+MATCH (a:Person)-[:KNOWS]->{3}(b:Person)
 RETURN a.name, b.name
 ```
 
@@ -140,6 +140,8 @@ RETURN b.name, length(path)
 
 Use path modes to control traversal behavior in cyclic graphs. `ACYCLIC` prevents infinite loops, while `TRAIL` allows revisiting nodes but not edges.
 
+An unbounded `WALK` (`-[:KNOWS*]->`) returns every walk on a graph without a cycle, whatever its length. Around a cycle its walks never end: it fails once the path search reaches its memory budget, with an error that says to bound the quantifier or use `TRAIL`, `ACYCLIC` or `ANY SHORTEST`.
+
 ### Path Mode Inside Parenthesized Patterns (G049)
 
 Path modes can also be placed inside a parenthesized quantified pattern, overriding any outer mode:
@@ -167,6 +169,15 @@ RETURN DISTINCT b.name
 MATCH (TRAIL (a)-[e:KNOWS]->(b) WHERE e.since > 2020){1,4}
 RETURN a.name, b.name
 ```
+
+The `WHERE` holds for each step of the path, in every direction and path mode, also a condition on the step's
+nodes (`a.x < b.x`). The node patterns around the quantified pattern (`(s)(...){1,3}(t)`) and its own end nodes
+both hold, and `+` and `*` are accepted after a parenthesized pattern.
+
+A parenthesized pattern of more than one edge repeats as a whole within its bounds:
+`((a)-[e1]->(m)-[e2]->(b)){1,3}` matches 1 to 3 repetitions of the segment, its `WHERE` holds for each repetition,
+and outside the pattern `e1` and `e2` are the lists of their edges. Such a pattern needs an upper bound of at most
+16 repetitions; without one, or with a larger one, it fails with an error.
 
 ## Path Search Prefixes
 

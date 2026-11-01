@@ -4,6 +4,10 @@
 //! work correctly end-to-end through the GrafeoDB API.
 
 #![cfg(feature = "async-storage")]
+#![allow(
+    deprecated,
+    reason = "the tests check the deprecated async operations until 0.7.0 removes them"
+)]
 
 use std::sync::Arc;
 

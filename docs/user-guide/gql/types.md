@@ -63,9 +63,18 @@ while it equals `1.5`. A `FLOAT` is a 64-bit binary floating point number:
 | integer and integer | integer |
 
 `ceil`, `floor`, `round`, `abs` and `sign` keep a decimal; `sqrt`, `sin`, `log`
-and the other functions of floats return a float. A decimal division by zero,
-or a result past 38 digits, is `NULL`. A decimal equals the integer, the float
-and the numeric string of the same value, also through a property index.
+and the other functions of floats return a float. A decimal division or
+remainder by zero fails with `22012`, and a result whose integer part needs
+more than 38 digits fails with `22003`; a product with more digits after the
+point is rounded to 38 digits. A decimal `sum` is exact in any row order and
+fails only when its final value needs more than 38 digits. A decimal equals
+the integer, the float and the numeric string of the same value, also through
+a property index.
+
+`NaN`, `Infinity` and `-Infinity` are float literals. A float keeps its IEEE
+result: `1.0e0 / 0.0e0` is `Infinity` and `1.5e0 % 0` is NaN. `toString`, string
+concatenation and `CAST ... AS STRING` write the infinities as `Infinity` and
+`-Infinity`.
 
 ## Temporal Types
 
@@ -134,7 +143,7 @@ Key-value pairs. Keys are strings, values can be any type.
 RETURN {name: 'Alix', age: 30, active: true}
 
 -- Property access
-WITH {name: 'Alix', age: 30} AS person
+LET person = {name: 'Alix', age: 30}
 RETURN person.name, person.age
 ```
 
@@ -176,7 +185,8 @@ RETURN CAST('2024-01-15' AS DATE)
 RETURN CAST(42 AS LIST)            -- [42]
 ```
 
-See [Expressions](expressions.md#cast) for the complete list of supported CAST targets.
+See [Expressions](expressions.md#cast) for the complete list of supported CAST targets, and for the casts that
+fail: text that spells no number (`22018`) and a float outside the integer range (`22003`).
 
 ## Type Conversion Functions
 

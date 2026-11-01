@@ -336,8 +336,15 @@ fn back_up_child() {
 
 /// The files in `backups` that end in `.partial`.
 fn partial_files(backups: &Path) -> Vec<String> {
-    std::fs::read_dir(backups)
-        .unwrap()
+    let entries = match std::fs::read_dir(backups) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+        Err(error) => panic!(
+            "cannot inspect backup directory {}: {error}",
+            backups.display()
+        ),
+    };
+    entries
         .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
         .filter(|name| name.ends_with(".partial"))
         .collect()

@@ -74,15 +74,16 @@ tests:
       ordered: true
       count: 1
 
+  # One two-hop route: over Paris (500 km, then 1040 km).
   - name: two_hop_routes_amsterdam_barcelona
-    skip: "two-hop route count mismatch"
     query: |
       MATCH (a:City {name: 'Amsterdam'})-[r1:ROUTE]->(mid:City)-[r2:ROUTE]->(b:City {name: 'Barcelona'})
-      RETURN mid.name, r1.duration_h + r2.duration_h AS total_hours, r1.distance_km + r2.distance_km AS total_km
-      ORDER BY total_hours
+      RETURN mid.name, r1.distance_km + r2.distance_km AS total_km
+      ORDER BY total_km
     expect:
       ordered: true
-      count: 2
+      rows:
+        - [Paris, 1540]
 
   # ---------------------------------------------------------------------------
   # Network analysis
@@ -151,24 +152,39 @@ tests:
   # Variable-length paths
   # ---------------------------------------------------------------------------
 
+  # Amsterdam itself is reachable in two hops, out and back.
   - name: reachable_within_two_hops_train
-    skip: "variable-length path dedup count"
     query: |
       MATCH (a:City {name: 'Amsterdam'})-[:ROUTE]->{1,2}(b:City)
       RETURN DISTINCT b.name ORDER BY b.name
     expect:
       ordered: true
-      count: 5
+      rows:
+        - [Amsterdam]
+        - [Barcelona]
+        - [Berlin]
+        - [Brussels]
+        - [Paris]
+        - [Prague]
 
+  # The default path mode is WALK (edges may repeat): one path of one hop,
+  # one of two and six of three.
   - name: all_paths_amsterdam_to_barcelona
-    skip: "variable-length path enumeration"
     query: |
       MATCH p = (a:City {name: 'Amsterdam'})-[:ROUTE]->{1,3}(b:City {name: 'Barcelona'})
       RETURN length(p) AS hops
       ORDER BY hops
     expect:
       ordered: true
-      count: 3
+      rows:
+        - [1]
+        - [2]
+        - [3]
+        - [3]
+        - [3]
+        - [3]
+        - [3]
+        - [3]
 
   # ---------------------------------------------------------------------------
   # Population analysis

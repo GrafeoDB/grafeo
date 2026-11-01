@@ -40,7 +40,10 @@ pub enum TransactionState {
 /// |-------|-------------|----------------------|---------------|------------|
 /// | ReadCommitted | No | Yes | Yes | Yes |
 /// | SnapshotIsolation | No | No | No | Yes |
-/// | Serializable | No | No | No | No |
+/// | Serializable | No | No | No | No, once queries record their reads (#400) |
+///
+/// A session refuses `Serializable` until then (`GRAFEO-Q004`): with no reads
+/// recorded it could not prevent write skew.
 ///
 /// # Performance
 ///
@@ -65,11 +68,12 @@ pub enum IsolationLevel {
     #[default]
     SnapshotIsolation,
 
-    /// Serializable Snapshot Isolation (SSI): provides full serializability
-    /// by detecting read-write conflicts in addition to write-write conflicts.
+    /// Serializable Snapshot Isolation (SSI): serializability by detecting
+    /// read-write conflicts in addition to write-write conflicts.
     ///
-    /// Prevents all anomalies including write skew, but may abort more
-    /// transactions due to stricter conflict detection.
+    /// Not available yet: queries do not record their reads, so a session
+    /// refuses this level (`GRAFEO-Q004`) rather than run snapshot isolation
+    /// under its name (#400).
     Serializable,
 }
 
@@ -215,6 +219,21 @@ pub struct TransactionInfo {
     /// it leaves the manager as soon as no other transaction can conflict
     /// with it.
     private: bool,
+    /// Inverses of new claims since the first savepoint or statement mark.
+    /// Direct writes and auto-commit transactions never allocate this log.
+    claim_undo: Option<Vec<ClaimUndo>>,
+}
+
+/// A claim-log position inside one active transaction.
+#[derive(Clone, Copy)]
+pub(crate) struct ClaimMark(usize);
+
+/// One change to conflict claims, undone only after storage undo succeeds.
+enum ClaimUndo {
+    Write(GraphEntity),
+    Delete(GraphEntity),
+    Endpoint(GraphEntity),
+    Key(KeyClaim),
 }
 
 impl TransactionInfo {
@@ -236,6 +255,7 @@ impl TransactionInfo {
             key_set: FxHashSet::default(),
             changes: Some(changes),
             private,
+            claim_undo: None,
         }
     }
 
@@ -313,19 +333,18 @@ pub struct TransactionManager {
     /// [`begin`](Self::begin) and [`begin_private`](Self::begin_private), so
     /// no transaction starts while such a call runs.
     ///
-    /// Lock order: the idle gate before the commit lock (`begin` and such a
-    /// call take both, in that order).
+    /// Lock order: the idle gate before the commit lock (such a call takes
+    /// both, in that order; `begin` takes only the idle gate).
     idle_gate: Mutex<()>,
     /// Held by a commit from its epoch until it is complete (see
     /// [`CommitGuard`]), by a change outside a commit (a schema statement, a
     /// graph command, a direct call that commits at once) while it runs, by
     /// a checkpoint or a copy of the store
     /// while it builds its image (see [`hold_commits`](Self::hold_commits)),
-    /// and briefly by every [`begin`](Self::begin) and
-    /// [`begin_private`](Self::begin_private) and by
-    /// [`close_for_writes`](Self::close_for_writes): commits complete one at a
-    /// time, in epoch order, no transaction starts in the middle of one, and
-    /// no image holds part of one.
+    /// and by [`close_for_writes`](Self::close_for_writes): commits complete
+    /// one at a time, in epoch order, and no image holds part of one. A
+    /// [`begin`](Self::begin) does not take it: its snapshot is the published
+    /// epoch, which holds only complete commits.
     ///
     /// Lock order: a checkpoint takes the file's checkpoint guard before this
     /// lock, and the idle gate comes before it too; the write freeze comes
@@ -458,12 +477,11 @@ impl ReadPins {
     }
 }
 
-/// A read outside any transaction, pinned at the epoch it reads at from
-/// [`TransactionManager::pin_read`] until it is dropped (also by the unwind
-/// of a panic in the read): the read horizon stays at that epoch or before,
-/// so garbage collection keeps every version the read may still need (#412
-/// decision Q6: every read statement outside a transaction pins its epoch
-/// for its run).
+/// A committed read, including a historical override inside a transaction,
+/// pinned at its epoch until it is dropped (also by the unwind of a panic):
+/// the read horizon stays at that epoch or before, so garbage collection
+/// keeps every version the read may still need (every read statement
+/// outside a transaction pins its epoch for its run).
 #[must_use = "a read is pinned only while the pin lives"]
 pub(crate) struct ReadPin {
     pins: Arc<ReadPins>,
@@ -471,8 +489,8 @@ pub(crate) struct ReadPin {
 }
 
 impl ReadPin {
-    /// The epoch the read is pinned at: the published epoch when it was
-    /// pinned.
+    /// The epoch the read is pinned at: its selected historical epoch or
+    /// the published epoch when it was pinned.
     #[must_use]
     pub(crate) fn epoch(&self) -> EpochId {
         self.epoch
@@ -694,6 +712,7 @@ impl Publish<'_> {
             let mut transactions = manager.transactions.write();
             if let Some(info) = transactions.get_mut(&self.transaction_id) {
                 info.state = TransactionState::Committed;
+                info.claim_undo = None;
                 // Stamped: what it changed is committed state now.
                 info.changes = None;
                 // It reads no more: its snapshot holds the horizon no more.
@@ -895,8 +914,8 @@ impl TransactionManager {
             return;
         }
         // Emptied now, so the next transaction's begin pays nothing for
-        // what this one held.
-        set.reuse(TransactionId::INVALID, EpochId::INITIAL);
+        // what this one held: it only names itself (`change_set`).
+        set.empty();
         let mut spare = self.spare_changes.lock();
         if spare.len() < SPARE_CHANGE_SETS {
             spare.push(changes);
@@ -1090,14 +1109,35 @@ impl TransactionManager {
         for entity in entities {
             match claim {
                 Claim::Write => {
-                    info.write_set.insert(entity);
+                    if let Some(undo) = &mut info.claim_undo {
+                        if info.write_set.insert(entity.clone()) {
+                            undo.push(ClaimUndo::Write(entity));
+                        }
+                    } else {
+                        info.write_set.insert(entity);
+                    }
                 }
                 Claim::Delete => {
-                    info.write_set.insert(entity.clone());
-                    info.delete_set.insert(entity);
+                    if let Some(undo) = &mut info.claim_undo {
+                        if info.write_set.insert(entity.clone()) {
+                            undo.push(ClaimUndo::Write(entity.clone()));
+                        }
+                        if info.delete_set.insert(entity.clone()) {
+                            undo.push(ClaimUndo::Delete(entity));
+                        }
+                    } else {
+                        info.write_set.insert(entity.clone());
+                        info.delete_set.insert(entity);
+                    }
                 }
                 Claim::Endpoint => {
-                    info.endpoint_set.insert(entity);
+                    if let Some(undo) = &mut info.claim_undo {
+                        if info.endpoint_set.insert(entity.clone()) {
+                            undo.push(ClaimUndo::Endpoint(entity));
+                        }
+                    } else {
+                        info.endpoint_set.insert(entity);
+                    }
                 }
             }
         }
@@ -1130,7 +1170,7 @@ impl TransactionManager {
                 {
                     return Err(Error::Transaction(TransactionError::WriteConflict(
                         format!(
-                            "Write conflict on key {key}: another open transaction writes the same \
+                            "on key {key}: another open transaction writes the same \
                          value of the key"
                         ),
                     )));
@@ -1147,7 +1187,13 @@ impl TransactionManager {
                 "Transaction is not active".to_string(),
             )));
         }
-        info.key_set.insert(key);
+        if let Some(undo) = &mut info.claim_undo {
+            if info.key_set.insert(key.clone()) {
+                undo.push(ClaimUndo::Key(key));
+            }
+        } else {
+            info.key_set.insert(key);
+        }
         Ok(())
     }
 
@@ -1187,7 +1233,9 @@ impl TransactionManager {
     ///
     /// - **Serializable only**: Read-write conflicts (SSI validation) are additionally
     ///   checked. If transaction T1 read an entity that another transaction T2 wrote,
-    ///   and T2 committed after T1 started, T1 will abort. This prevents write skew.
+    ///   and T2 committed after T1 started, T1 will abort. This prevents write skew
+    ///   for the reads recorded with [`record_read`](Self::record_read); queries
+    ///   record none yet (#400), which is why a session refuses this level.
     ///
     /// # Errors
     ///
@@ -1329,7 +1377,7 @@ impl TransactionManager {
                 {
                     return Err(Error::Transaction(TransactionError::WriteConflict(
                         format!(
-                            "Write conflict on key {key}: a transaction that committed after this \
+                            "on key {key}: a transaction that committed after this \
                          one began wrote the same value of the key"
                         ),
                     )));
@@ -1569,6 +1617,7 @@ impl TransactionManager {
         }
 
         info.state = TransactionState::Aborted;
+        info.claim_undo = None;
         info.changes = None;
         self.reads.release(info.start_epoch);
         // An aborted transaction conflicts with nobody: a private one, whose
@@ -1577,6 +1626,71 @@ impl TransactionManager {
             txns.remove(&transaction_id);
         }
         self.active_count.fetch_sub(1, Ordering::Relaxed);
+        Ok(())
+    }
+
+    /// Captures conflict claims in O(1), enabling the inverse log lazily.
+    pub(crate) fn mark_claims(&self, transaction_id: TransactionId) -> Result<ClaimMark> {
+        let mut txns = self.transactions.write();
+        let info = txns.get_mut(&transaction_id).ok_or_else(|| {
+            Error::Transaction(TransactionError::InvalidState(
+                "Transaction not found".to_string(),
+            ))
+        })?;
+        if info.state != TransactionState::Active {
+            return Err(Error::Transaction(TransactionError::InvalidState(
+                "Transaction is not active".to_string(),
+            )));
+        }
+        Ok(ClaimMark(
+            info.claim_undo.get_or_insert_with(Vec::new).len(),
+        ))
+    }
+
+    /// Rewinds conflict claims after the caller has successfully undone the
+    /// corresponding storage changes. Never hold this lock during backend undo.
+    pub(crate) fn restore_claims(
+        &self,
+        transaction_id: TransactionId,
+        mark: ClaimMark,
+    ) -> Result<()> {
+        let mut txns = self.transactions.write();
+        let info = txns.get_mut(&transaction_id).ok_or_else(|| {
+            Error::Transaction(TransactionError::InvalidState(
+                "Transaction not found".to_string(),
+            ))
+        })?;
+        if info.state != TransactionState::Active {
+            return Err(Error::Transaction(TransactionError::InvalidState(
+                "Transaction is not active".to_string(),
+            )));
+        }
+        let undo = info
+            .claim_undo
+            .as_mut()
+            .filter(|undo| mark.0 <= undo.len())
+            .ok_or_else(|| {
+                Error::Transaction(TransactionError::InvalidState(
+                    "Invalid conflict-claim savepoint".to_string(),
+                ))
+            })?;
+        while undo.len() > mark.0 {
+            match undo.pop() {
+                Some(ClaimUndo::Write(entity)) => {
+                    info.write_set.remove(&entity);
+                }
+                Some(ClaimUndo::Delete(entity)) => {
+                    info.delete_set.remove(&entity);
+                }
+                Some(ClaimUndo::Endpoint(entity)) => {
+                    info.endpoint_set.remove(&entity);
+                }
+                Some(ClaimUndo::Key(key)) => {
+                    info.key_set.remove(&key);
+                }
+                None => break,
+            }
+        }
         Ok(())
     }
 
@@ -1598,26 +1712,6 @@ impl TransactionManager {
         Ok(info.write_set.clone())
     }
 
-    /// Replaces the write set of a transaction (used for savepoint rollback).
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the transaction is not found.
-    pub fn reset_write_set(
-        &self,
-        transaction_id: TransactionId,
-        write_set: FxHashSet<GraphEntity>,
-    ) -> Result<()> {
-        let mut txns = self.transactions.write();
-        let info = txns.get_mut(&transaction_id).ok_or_else(|| {
-            Error::Transaction(TransactionError::InvalidState(
-                "Transaction not found".to_string(),
-            ))
-        })?;
-        info.write_set = write_set;
-        Ok(())
-    }
-
     /// Aborts all active transactions.
     ///
     /// Used during database shutdown.
@@ -1626,6 +1720,7 @@ impl TransactionManager {
         for info in txns.values_mut() {
             if info.state == TransactionState::Active {
                 info.state = TransactionState::Aborted;
+                info.claim_undo = None;
                 info.changes = None;
                 self.reads.release(info.start_epoch);
                 self.active_count.fetch_sub(1, Ordering::Relaxed);
@@ -1654,6 +1749,15 @@ impl TransactionManager {
     #[must_use]
     pub fn current_epoch(&self) -> EpochId {
         EpochId::new(self.published_epoch.load(Ordering::Acquire))
+    }
+
+    /// The epoch a read asked for at `epoch` reads at: `epoch`, or the
+    /// [current epoch](Self::current_epoch) when that is earlier, so a read
+    /// never sees a commit that is not complete (one still in progress, or
+    /// one that failed partway). Every read at a chosen epoch goes through it.
+    #[must_use]
+    pub fn readable_epoch(&self, epoch: EpochId) -> EpochId {
+        epoch.min(self.current_epoch())
     }
 
     /// Synchronizes the epoch counter to at least the given value.
@@ -1727,7 +1831,7 @@ impl TransactionManager {
         if epoch < self.history.floor() {
             return Err(self.history.before_floor(epoch));
         }
-        let epoch = epoch.min(EpochId::new(self.published_epoch.load(Ordering::Acquire)));
+        let epoch = self.readable_epoch(epoch);
         ReadPins::hold_at(&mut epochs, epoch.as_u64());
         Ok(ReadPin {
             pins: Arc::clone(&self.reads),
@@ -1946,6 +2050,338 @@ impl Default for TransactionManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "gql")]
+    mod failed_storage_undo {
+        use super::*;
+        use crate::{Config, GrafeoDB};
+        use arcstr::ArcStr;
+        use grafeo_common::change::{Change, ChangeMark, DataOp};
+        use grafeo_common::types::ReadView;
+        use grafeo_core::graph::apply::{Applied, ApplyError, BackendTransaction, Writer};
+        use grafeo_core::graph::lpg::{Edge, Node};
+        use grafeo_core::graph::rowgroup::RowGroupStore;
+        use grafeo_core::graph::{Direction, GraphBackend, GraphStore};
+        use grafeo_core::statistics::Statistics;
+        use std::sync::atomic::AtomicBool;
+
+        #[derive(Default)]
+        struct RefusesUndo {
+            rows: RowGroupStore,
+            refuse: AtomicBool,
+        }
+
+        fn seed_claims(mgr: &TransactionManager, tx: TransactionId, offset: u64) {
+            mgr.record_write(tx, NodeId::new(offset)).unwrap();
+            mgr.record_delete(tx, NodeId::new(offset + 1)).unwrap();
+            let endpoint = GraphEntity::from(NodeId::new(offset + 2));
+            mgr.record_endpoints(tx, [endpoint.clone(), endpoint])
+                .unwrap();
+            mgr.record_key(tx, claim_key(i64::try_from(offset).unwrap()))
+                .unwrap();
+        }
+
+        #[test]
+        fn failed_savepoint_undo_retains_every_claim_and_poisons() {
+            let store = Arc::new(RefusesUndo::default());
+            let db = GrafeoDB::with_store(store.clone(), Config::in_memory()).unwrap();
+            let mut session = db.session();
+            session.begin_transaction().unwrap();
+            session.execute("INSERT (:Item {v: 0})").unwrap();
+            let tx = session.current_transaction_id().unwrap();
+            let mgr = session.transaction_manager();
+            seed_claims(mgr, tx, 100);
+            session.savepoint("before").unwrap();
+            session.execute("INSERT (:Item {v: 1})").unwrap();
+            seed_claims(mgr, tx, 200);
+            let before = {
+                let txns = mgr.transactions.read();
+                let info = &txns[&tx];
+                (
+                    info.write_set.clone(),
+                    info.delete_set.clone(),
+                    info.endpoint_set.clone(),
+                    info.key_set.clone(),
+                    info.claim_undo.as_ref().unwrap().len(),
+                )
+            };
+            store.refuse.store(true, Ordering::Relaxed);
+            let error = session.rollback_to_savepoint("before").unwrap_err();
+            assert!(
+                error.to_string().contains("injected undo failure"),
+                "{error}"
+            );
+            let txns = mgr.transactions.read();
+            let info = &txns[&tx];
+            assert_eq!(info.state, TransactionState::Active);
+            assert_eq!(info.write_set, before.0);
+            assert_eq!(info.delete_set, before.1);
+            assert_eq!(info.endpoint_set, before.2);
+            assert_eq!(info.key_set, before.3);
+            assert_eq!(info.claim_undo.as_ref().unwrap().len(), before.4);
+            assert!(mgr.has_incomplete_commit());
+            drop(txns);
+            assert!(
+                session.rollback_to_savepoint("before").is_err(),
+                "a retry after failed storage undo must not release its claims"
+            );
+            let txns = mgr.transactions.read();
+            let info = &txns[&tx];
+            assert_eq!(info.write_set, before.0);
+            assert_eq!(info.delete_set, before.1);
+            assert_eq!(info.endpoint_set, before.2);
+            assert_eq!(info.key_set, before.3);
+        }
+
+        #[test]
+        fn failed_statement_undo_retains_its_write_claim_and_poisons() {
+            let store = Arc::new(RefusesUndo::default());
+            let db = GrafeoDB::with_store(store.clone(), Config::in_memory()).unwrap();
+            let mut session = db.session();
+            session.execute("INSERT (:Item {v: 0})").unwrap();
+            session.begin_transaction().unwrap();
+            let tx = session.current_transaction_id().unwrap();
+            let mgr = session.transaction_manager();
+            seed_claims(mgr, tx, 100);
+            let earlier_writes = mgr.get_write_set(tx).unwrap();
+            store.refuse.store(true, Ordering::Relaxed);
+            let error = session
+                .execute("MATCH (n:Item) SET n.v = 1 RETURN 1 / (n.v - n.v)")
+                .unwrap_err();
+            assert!(
+                error.to_string().contains("injected undo failure"),
+                "{error}"
+            );
+            let txns = mgr.transactions.read();
+            let info = &txns[&tx];
+            assert_eq!(info.state, TransactionState::Active);
+            assert!(
+                !info.write_set.is_subset(&earlier_writes),
+                "the property update's undo failed, so its new write claim must remain"
+            );
+            assert!(
+                info.write_set
+                    .contains(&GraphEntity::from(NodeId::new(100)))
+            );
+            assert!(
+                info.delete_set
+                    .contains(&GraphEntity::from(NodeId::new(101)))
+            );
+            assert!(
+                info.endpoint_set
+                    .contains(&GraphEntity::from(NodeId::new(102)))
+            );
+            assert!(info.key_set.contains(&claim_key(100)));
+            assert!(mgr.has_incomplete_commit());
+        }
+        impl GraphStore for RefusesUndo {
+            fn node(&self, id: NodeId, view: ReadView) -> Result<Option<Node>> {
+                self.rows.node(id, view)
+            }
+            fn edge(&self, id: EdgeId, view: ReadView) -> Result<Option<Edge>> {
+                self.rows.edge(id, view)
+            }
+            fn edges(
+                &self,
+                node: NodeId,
+                direction: Direction,
+                types: &[ArcStr],
+                view: ReadView,
+            ) -> Result<Vec<(NodeId, EdgeId)>> {
+                self.rows.edges(node, direction, types, view)
+            }
+            fn has_backward_adjacency(&self) -> bool {
+                self.rows.has_backward_adjacency()
+            }
+            fn node_ids(&self, view: ReadView) -> Result<Vec<NodeId>> {
+                self.rows.node_ids(view)
+            }
+            fn all_labels(&self) -> Result<Vec<String>> {
+                self.rows.all_labels()
+            }
+            fn all_edge_types(&self) -> Result<Vec<String>> {
+                self.rows.all_edge_types()
+            }
+            fn all_property_keys(&self) -> Result<Vec<String>> {
+                self.rows.all_property_keys()
+            }
+            fn statistics(&self) -> Arc<Statistics> {
+                self.rows.statistics()
+            }
+            fn committed_epoch(&self) -> EpochId {
+                self.rows.committed_epoch()
+            }
+        }
+
+        impl GraphBackend for RefusesUndo {
+            fn reserve_node_ids(
+                &self,
+                count: u64,
+            ) -> std::result::Result<std::ops::Range<u64>, ApplyError> {
+                self.rows.reserve_node_ids(count)
+            }
+            fn reserve_edge_ids(
+                &self,
+                count: u64,
+            ) -> std::result::Result<std::ops::Range<u64>, ApplyError> {
+                self.rows.reserve_edge_ids(count)
+            }
+            fn begin(
+                &self,
+                transaction: TransactionId,
+                snapshot: EpochId,
+            ) -> std::result::Result<BackendTransaction, ApplyError> {
+                self.rows.begin(transaction, snapshot)
+            }
+            fn apply(
+                &self,
+                op: &DataOp,
+                writer: Writer,
+            ) -> std::result::Result<Applied, ApplyError> {
+                self.rows.apply(op, writer)
+            }
+            fn commit(
+                &self,
+                transaction: BackendTransaction,
+                changes: &mut dyn Iterator<Item = &Change>,
+                epoch: EpochId,
+            ) -> std::result::Result<(), ApplyError> {
+                let changes: Vec<&Change> = changes.collect();
+                self.rows
+                    .commit(transaction, &mut changes.into_iter(), epoch)
+            }
+            fn rollback(
+                &self,
+                transaction: BackendTransaction,
+                changes: &mut dyn DoubleEndedIterator<Item = &Change>,
+            ) -> std::result::Result<(), ApplyError> {
+                let changes: Vec<&Change> = changes.collect();
+                self.rows.rollback(transaction, &mut changes.into_iter())
+            }
+            fn rollback_to(
+                &self,
+                transaction: BackendTransaction,
+                savepoint: ChangeMark,
+                changes: &mut dyn DoubleEndedIterator<Item = &Change>,
+            ) -> std::result::Result<(), ApplyError> {
+                if self.refuse.load(Ordering::Relaxed) {
+                    return Err(ApplyError::Refused("injected undo failure".to_string()));
+                }
+                self.rows.rollback_to(transaction, savepoint, changes)
+            }
+            fn collect(&self, horizon: EpochId) {
+                GraphBackend::collect(&self.rows, horizon);
+            }
+            fn durable_epoch(&self) -> EpochId {
+                self.rows.durable_epoch()
+            }
+            fn flush(&self, epoch: EpochId) -> std::result::Result<(), ApplyError> {
+                self.rows.flush(epoch)
+            }
+        }
+    }
+
+    fn claim_key(value: i64) -> KeyClaim {
+        KeyClaim {
+            graph: None,
+            label: Arc::from("Item"),
+            properties: vec!["key".to_string()],
+            values: vec![HashableValue(grafeo_common::types::Value::Int64(value))],
+        }
+    }
+
+    #[test]
+    fn claim_marks_preserve_duplicate_roles_and_nested_boundaries() {
+        let mgr = TransactionManager::new();
+        let tx = mgr.begin();
+        let written = GraphEntity::from(NodeId::new(1));
+        let deleted = GraphEntity::from(NodeId::new(2));
+        let endpoint = GraphEntity::from(NodeId::new(3));
+        mgr.record_write(tx, written.clone()).unwrap();
+        mgr.record_delete(tx, deleted.clone()).unwrap();
+        mgr.record_endpoints(tx, [endpoint.clone(), endpoint.clone()])
+            .unwrap();
+        mgr.record_key(tx, claim_key(1)).unwrap();
+        assert!(mgr.transactions.read()[&tx].claim_undo.is_none());
+        let outer = mgr.mark_claims(tx).unwrap();
+        mgr.record_delete(tx, written.clone()).unwrap();
+        mgr.record_delete(tx, deleted.clone()).unwrap();
+        mgr.record_endpoints(tx, [endpoint.clone(), endpoint.clone()])
+            .unwrap();
+        mgr.record_key(tx, claim_key(1)).unwrap();
+        let inner = mgr.mark_claims(tx).unwrap();
+        mgr.record_key(tx, claim_key(2)).unwrap();
+        mgr.record_write(tx, NodeId::new(4)).unwrap();
+        mgr.restore_claims(tx, inner).unwrap();
+        {
+            let txns = mgr.transactions.read();
+            let info = &txns[&tx];
+            assert_eq!(
+                info.write_set,
+                FxHashSet::from_iter([written.clone(), deleted.clone()])
+            );
+            assert_eq!(
+                info.delete_set,
+                FxHashSet::from_iter([written.clone(), deleted.clone()])
+            );
+            assert_eq!(info.endpoint_set, FxHashSet::from_iter([endpoint.clone()]));
+            assert_eq!(info.key_set, FxHashSet::from_iter([claim_key(1)]));
+        }
+        mgr.restore_claims(tx, outer).unwrap();
+        let txns = mgr.transactions.read();
+        let info = &txns[&tx];
+        assert_eq!(
+            info.write_set,
+            FxHashSet::from_iter([written, deleted.clone()])
+        );
+        assert_eq!(info.delete_set, FxHashSet::from_iter([deleted]));
+        assert_eq!(info.endpoint_set, FxHashSet::from_iter([endpoint]));
+        assert_eq!(info.key_set, FxHashSet::from_iter([claim_key(1)]));
+    }
+
+    #[test]
+    fn claim_marks_reject_invalid_positions_without_releasing_claims() {
+        let mgr = TransactionManager::new();
+        let tx = mgr.begin();
+        mgr.mark_claims(tx).unwrap();
+        mgr.record_write(tx, NodeId::new(1)).unwrap();
+        assert!(mgr.restore_claims(tx, ClaimMark(2)).is_err());
+        assert_eq!(
+            mgr.get_write_set(tx).unwrap(),
+            FxHashSet::from_iter([GraphEntity::from(NodeId::new(1))])
+        );
+        mgr.abort(tx).unwrap();
+        assert!(mgr.mark_claims(tx).is_err());
+        assert!(mgr.restore_claims(tx, ClaimMark(0)).is_err());
+    }
+
+    #[test]
+    fn completed_transactions_drop_undo_history_but_keep_conflict_claims() {
+        for commit in [false, true] {
+            let mgr = TransactionManager::new();
+            let tx = mgr.begin();
+            mgr.mark_claims(tx).unwrap();
+            mgr.record_delete(tx, NodeId::new(1)).unwrap();
+            mgr.record_key(tx, claim_key(1)).unwrap();
+            if commit {
+                mgr.commit(tx).unwrap();
+            } else {
+                mgr.abort(tx).unwrap();
+            }
+            let txns = mgr.transactions.read();
+            let info = &txns[&tx];
+            assert!(info.claim_undo.is_none());
+            assert_eq!(info.write_set.len(), 1);
+            assert_eq!(info.delete_set.len(), 1);
+            assert_eq!(info.key_set.len(), 1);
+        }
+        let mgr = TransactionManager::new();
+        let tx = mgr.begin();
+        mgr.mark_claims(tx).unwrap();
+        mgr.record_write(tx, NodeId::new(1)).unwrap();
+        mgr.abort_all_active();
+        assert!(mgr.transactions.read()[&tx].claim_undo.is_none());
+    }
 
     #[test]
     fn test_begin_commit() {

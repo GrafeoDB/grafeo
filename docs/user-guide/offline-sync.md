@@ -379,14 +379,14 @@ This example uses `@grafeo-db/wasm` for an in-memory local graph in the browser 
 `fetch` API for sync calls. `localStorage` stores the last epoch.
 
 ```typescript
-import init, { GrafeoDB } from '@grafeo-db/wasm';
+import init, { Database } from '@grafeo-db/wasm';
 
 const SERVER_URL = 'http://your-server:7474';
 const DB_NAME    = 'default';
 const CLIENT_ID  = crypto.randomUUID(); // store in localStorage for persistence
 
 await init();
-const localDb = new GrafeoDB();
+const localDb = new Database();
 
 // --- Pull ---
 async function pull(): Promise<void> {

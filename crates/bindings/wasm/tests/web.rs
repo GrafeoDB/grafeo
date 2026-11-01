@@ -1647,3 +1647,39 @@ fn test_a_prepared_statement_takes_each_calls_values() {
         );
     }
 }
+
+/// A `Float32Array` or `Float64Array` parameter is a VECTOR (#586): it comes
+/// back as a `Float32Array`, not an array, with its elements.
+#[wasm_bindgen_test]
+fn test_typed_array_parameters_are_vectors() {
+    use wasm_bindgen::JsCast;
+
+    let db = Database::new().expect("create db");
+    // 0.1 is not exact in either width: a Float64Array element becomes the
+    // nearest 32-bit float, the same one a Float32Array holds.
+    let arrays: [(&str, wasm_bindgen::JsValue); 2] = [
+        (
+            "Float32Array",
+            js_sys::Float32Array::from(&[0.5_f32, 0.1, 2.0][..]).into(),
+        ),
+        (
+            "Float64Array",
+            js_sys::Float64Array::from(&[0.5_f64, 0.1, 2.0][..]).into(),
+        ),
+    ];
+    for (kind, array) in arrays {
+        let params = js_sys::Object::new();
+        js_sys::Reflect::set(&params, &"v".into(), &array).unwrap();
+        let rows = db
+            .execute_with_params("RETURN $v AS v, size($v) AS n", params.into())
+            .unwrap_or_else(|e| panic!("{kind}: query failed: {e:?}"));
+        let row = js_sys::Array::from(&rows).get(0);
+        let v = js_sys::Reflect::get(&row, &"v".into()).unwrap();
+        let vector = v
+            .dyn_ref::<js_sys::Float32Array>()
+            .unwrap_or_else(|| panic!("{kind}: the parameter comes back as a vector, got {v:?}"));
+        assert_eq!(vector.to_vec(), vec![0.5_f32, 0.1, 2.0], "{kind}");
+        let n = js_sys::Reflect::get(&row, &"n".into()).unwrap();
+        assert_eq!(n.as_f64(), Some(3.0), "{kind}");
+    }
+}

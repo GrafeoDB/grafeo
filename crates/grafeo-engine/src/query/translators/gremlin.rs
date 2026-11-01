@@ -5,11 +5,11 @@
 use super::common::{VarGen, wrap_filter, wrap_limit, wrap_return, wrap_skip, wrap_sort};
 use crate::query::plan::BuiltinFunction;
 use crate::query::plan::{
-    AggregateExpr, AggregateFunction, AggregateOp, BinaryOp, CreateEdgeOp, CreateNodeOp,
-    DeleteNodeOp, DistinctOp, ExpandDirection, ExpandOp, FilterOp, JoinOp, JoinType, LeftJoinOp,
+    AggregateExpr, AggregateFunction, AggregateOp, ApplyOp, BinaryOp, CreateEdgeOp, CreateNodeOp,
+    DeleteNodeOp, DistinctOp, ExpandDirection, ExpandOp, FilterOp, JoinOp, JoinType,
     LogicalExpression, LogicalOperator, LogicalPlan, MapCollectOp, NodeScanOp, OtherwiseOp,
-    PathMode, ProjectOp, Projection, ReturnItem, SetPropertyOp, SortKey, SortOrder, UnaryOp,
-    UnionOp, UnwindOp,
+    ParameterScanOp, PathMode, ProjectOp, Projection, ReturnItem, SetPropertyOp, SortKey,
+    SortOrder, UnaryOp, UnionOp, UnwindOp,
 };
 use grafeo_adapters::query::gremlin::{self, ast};
 use grafeo_common::types::Value;
@@ -102,6 +102,53 @@ fn negate_null_safe(pred: LogicalExpression) -> LogicalExpression {
             vec![pred, LogicalExpression::Literal(Value::Bool(false))],
         )),
     }
+}
+
+/// The first of `branches` that produces rows, as a balanced tree of
+/// `Otherwise` operators in their order, or `None` when there are none.
+///
+/// Grouping does not change the result (the first non-empty branch is
+/// used either way), and a balanced tree is as deep as the logarithm of the
+/// branch count, so a `coalesce()` of thousands of branches stays shallow.
+fn balanced_otherwise(branches: Vec<LogicalOperator>) -> Option<LogicalOperator> {
+    let mut layer = branches;
+    while layer.len() > 1 {
+        let mut joined = Vec::with_capacity(layer.len().div_ceil(2));
+        let mut branches = layer.into_iter();
+        while let Some(left) = branches.next() {
+            joined.push(match branches.next() {
+                Some(right) => LogicalOperator::Otherwise(OtherwiseOp {
+                    left: Box::new(left),
+                    right: Box::new(right),
+                }),
+                None => left,
+            });
+        }
+        layer = joined;
+    }
+    layer.pop()
+}
+
+/// Runs `branches` once for each row of `input`, which they start from with
+/// [`row_scan`]: a branching step then plans its input once, however many
+/// branches it has, and each traverser takes its own branches (the first
+/// non-empty one, for `coalesce()`). The rows that come out have the
+/// columns of `input` and the branches' own.
+fn per_row(input: LogicalOperator, branches: LogicalOperator) -> LogicalOperator {
+    LogicalOperator::Apply(ApplyOp {
+        input: Box::new(input),
+        subplan: Box::new(branches),
+        shared_variables: vec!["*".to_string()],
+        optional: false,
+        unit: false,
+    })
+}
+
+/// The current row of a branch run by [`per_row`], with all its columns.
+fn row_scan() -> LogicalOperator {
+    LogicalOperator::ParameterScan(ParameterScanOp {
+        columns: vec!["*".to_string()],
+    })
 }
 
 impl GremlinTranslator {
@@ -236,28 +283,14 @@ impl GremlinTranslator {
                 }
                 ast::Step::BothV => {
                     if let Some(ctx) = edge_ctx.take() {
-                        // bothV = emit both endpoints via Union
+                        // bothV = emit both endpoints of each edge
                         let alias = self.var_gen.next();
-                        plan = LogicalOperator::Union(UnionOp {
-                            inputs: vec![
-                                LogicalOperator::Project(ProjectOp {
-                                    projections: vec![Projection {
-                                        expression: LogicalExpression::Variable(ctx.source_var),
-                                        alias: Some(alias.clone()),
-                                    }],
-                                    input: Box::new(plan.clone()),
-                                    pass_through_input: false,
-                                }),
-                                LogicalOperator::Project(ProjectOp {
-                                    projections: vec![Projection {
-                                        expression: LogicalExpression::Variable(ctx.target_var),
-                                        alias: Some(alias.clone()),
-                                    }],
-                                    input: Box::new(plan),
-                                    pass_through_input: false,
-                                }),
-                            ],
+                        let endpoint =
+                            |var: String| self.translate_branch(&[], row_scan(), &var, &alias);
+                        let endpoints = LogicalOperator::Union(UnionOp {
+                            inputs: vec![endpoint(ctx.source_var)?, endpoint(ctx.target_var)?],
                         });
+                        plan = per_row(plan, endpoints);
                         current_var = alias;
                     }
                     continue;
@@ -670,6 +703,9 @@ impl GremlinTranslator {
         current_var: &str,
         is_edge: bool,
     ) -> Result<(LogicalOperator, Option<String>)> {
+        // A step may walk the plan below it: refuse one already too deep.
+        let mut input = input;
+        crate::query::limits::check_partial_plan_depth(&mut input)?;
         match step {
             // Navigation steps
             ast::Step::Out(labels) => {
@@ -1531,172 +1567,68 @@ impl GremlinTranslator {
                 };
 
                 if let Some(pred) = cond_pred {
-                    // True branch: filter by condition, then apply true steps
-                    let mut true_plan = wrap_filter(input.clone(), pred.clone());
-                    let mut true_var = current_var.to_string();
-                    for step in &clause.true_branch {
-                        let (new_plan, new_var) =
-                            self.translate_step(step, true_plan, &true_var, false)?;
-                        if let Some(v) = new_var {
-                            true_var = v;
-                        }
-                        true_plan = new_plan;
-                    }
-
-                    // False branch: filter by NOT condition, then apply false steps
+                    // Each row takes the branch its condition picks.
+                    let alias = self.var_gen.next();
+                    let true_branch = self.translate_branch(
+                        &clause.true_branch,
+                        wrap_filter(row_scan(), pred.clone()),
+                        current_var,
+                        &alias,
+                    )?;
                     let negated = LogicalExpression::Unary {
                         op: UnaryOp::Not,
                         operand: Box::new(pred),
                     };
-                    let mut false_plan = wrap_filter(input, negated);
-                    let mut false_var = current_var.to_string();
-                    if let Some(false_steps) = &clause.false_branch {
-                        for step in false_steps {
-                            let (new_plan, new_var) =
-                                self.translate_step(step, false_plan, &false_var, false)?;
-                            if let Some(v) = new_var {
-                                false_var = v;
-                            }
-                            false_plan = new_plan;
-                        }
-                    }
-
-                    let plan = LogicalOperator::Union(UnionOp {
-                        inputs: vec![true_plan, false_plan],
+                    let false_branch = self.translate_branch(
+                        clause.false_branch.as_deref().unwrap_or_default(),
+                        wrap_filter(row_scan(), negated),
+                        current_var,
+                        &alias,
+                    )?;
+                    let branches = LogicalOperator::Union(UnionOp {
+                        inputs: vec![true_branch, false_branch],
                     });
-                    Ok((plan, Some(true_var)))
+                    Ok((per_row(input, branches), Some(alias)))
                 } else {
                     Ok((input, None))
                 }
             }
 
-            // optional(): try inner traversal per traverser, fall back to
-            // identity when empty.
-            //
-            // In Gremlin, optional(T) evaluates T for each traverser.
-            // When T produces results, those replace the traverser. When
-            // T is empty for a given traverser, that traverser is kept
-            // unchanged. This requires per-row semantics, not batch-level.
-            //
-            // Translation:
-            //   LeftJoin(input, inner_traversal)
-            //     -> produces [current_var, ..., inner_var or NULL]
-            //   Project(CASE WHEN inner_var IS NOT NULL
-            //                THEN inner_var ELSE current_var END AS alias)
-            //     -> picks inner result when available, identity otherwise
+            // optional(): the inner traversal's results for each traverser,
+            // or the traverser itself when it has none: a coalesce() of the
+            // inner traversal and the identity.
             ast::Step::Optional(steps) => {
                 let alias = self.var_gen.next();
-
-                // Build the inner traversal starting from the same input
-                let mut inner_plan = input.clone();
-                let mut inner_var = current_var.to_string();
-                for step in steps {
-                    let (new_plan, new_var) =
-                        self.translate_step(step, inner_plan, &inner_var, false)?;
-                    if let Some(v) = new_var {
-                        inner_var = v;
-                    }
-                    inner_plan = new_plan;
-                }
-
-                // If the inner traversal produced a new variable (e.g.,
-                // out() creates a target node variable), use LeftJoin +
-                // CASE to select inner result or identity per row.
-                // If no new variable was introduced (inner_var ==
-                // current_var), the inner traversal is a filter, and we
-                // can use Otherwise with projected branches.
-                if inner_var == current_var {
-                    // Pure filter case: optional(has(...)) or similar.
-                    // Inner plan filters the same variable, so use
-                    // Otherwise: try filtered, fall back to unfiltered.
-                    let inner_projected = LogicalOperator::Project(ProjectOp {
-                        projections: vec![Projection {
-                            expression: LogicalExpression::Variable(current_var.to_string()),
-                            alias: Some(alias.clone()),
-                        }],
-                        input: Box::new(inner_plan),
-                        pass_through_input: false,
-                    });
-                    let identity_projected = LogicalOperator::Project(ProjectOp {
-                        projections: vec![Projection {
-                            expression: LogicalExpression::Variable(current_var.to_string()),
-                            alias: Some(alias.clone()),
-                        }],
-                        input: Box::new(input),
-                        pass_through_input: false,
-                    });
-                    let plan = LogicalOperator::Otherwise(OtherwiseOp {
-                        left: Box::new(inner_projected),
-                        right: Box::new(identity_projected),
-                    });
-                    Ok((plan, Some(alias)))
-                } else {
-                    // Navigation case: inner traversal introduces a new
-                    // variable (e.g., out() target). Use LeftJoin to
-                    // correlate per source row, then CASE to pick inner
-                    // result when present or identity when NULL.
-                    let left_join = LogicalOperator::LeftJoin(LeftJoinOp {
-                        left: Box::new(input),
-                        right: Box::new(inner_plan),
-                        condition: None,
-                    });
-
-                    // CASE WHEN inner_var IS NOT NULL
-                    //      THEN inner_var ELSE current_var END
-                    let case_expr = LogicalExpression::Case {
-                        operand: None,
-                        when_clauses: vec![(
-                            LogicalExpression::Unary {
-                                op: UnaryOp::IsNotNull,
-                                operand: Box::new(LogicalExpression::Variable(inner_var.clone())),
-                            },
-                            LogicalExpression::Variable(inner_var),
-                        )],
-                        else_clause: Some(Box::new(LogicalExpression::Variable(
-                            current_var.to_string(),
-                        ))),
-                    };
-
-                    let plan = LogicalOperator::Project(ProjectOp {
-                        projections: vec![Projection {
-                            expression: case_expr,
-                            alias: Some(alias.clone()),
-                        }],
-                        input: Box::new(left_join),
-                        pass_through_input: false,
-                    });
-                    Ok((plan, Some(alias)))
-                }
+                let inner = self.translate_branch(steps, row_scan(), current_var, &alias)?;
+                let identity = self.translate_branch(&[], row_scan(), current_var, &alias)?;
+                let branches = LogicalOperator::Otherwise(OtherwiseOp {
+                    left: Box::new(inner),
+                    right: Box::new(identity),
+                });
+                Ok((per_row(input, branches), Some(alias)))
             }
 
             // union(): merge results from multiple sub-traversals
             ast::Step::Union(traversals) => {
                 let alias = self.var_gen.next();
-                let branches = self.translate_branches(traversals, &input, current_var, &alias)?;
-                let plan = LogicalOperator::Union(UnionOp { inputs: branches });
-                Ok((plan, Some(alias)))
+                let branches = self.translate_branches(traversals, current_var, &alias)?;
+                let branches = LogicalOperator::Union(UnionOp { inputs: branches });
+                Ok((per_row(input, branches), Some(alias)))
             }
 
             // coalesce(): return first non-empty traversal
             ast::Step::Coalesce(traversals) => {
-                // Build a right-nested chain of OtherwiseOp so each branch is
-                // tried in order: use the first one that produces results.
+                // For each traverser the branches are tried in order: the
+                // first one that produces results is used.
                 let alias = self.var_gen.next();
-                let branches = self.translate_branches(traversals, &input, current_var, &alias)?;
-                let mut iter = branches.into_iter().rev();
-                let mut accumulator = iter.next().ok_or_else(|| {
+                let branches = self.translate_branches(traversals, current_var, &alias)?;
+                let branches = balanced_otherwise(branches).ok_or_else(|| {
                     Error::from(QueryError::new(
                         QueryErrorKind::Semantic,
                         "coalesce() requires at least one traversal",
                     ))
                 })?;
-                for branch in iter {
-                    accumulator = LogicalOperator::Otherwise(OtherwiseOp {
-                        left: Box::new(branch),
-                        right: Box::new(accumulator),
-                    });
-                }
-                Ok((accumulator, Some(alias)))
+                Ok((per_row(input, branches), Some(alias)))
             }
 
             // sideEffect(): perform inner traversal for side effects, pass
@@ -2142,39 +2074,50 @@ impl GremlinTranslator {
         }
     }
 
-    /// Translate multiple sub-traversal branches, aligning each to a common
-    /// output alias so Union rows share one column name.
+    /// Translates each of `traversals` as a branch that starts from the
+    /// current row (see [`Self::translate_branch`]).
     fn translate_branches(
         &self,
         traversals: &[Vec<ast::Step>],
-        input: &LogicalOperator,
         current_var: &str,
         alias: &str,
     ) -> Result<Vec<LogicalOperator>> {
-        let mut branches = Vec::new();
-        for steps in traversals {
-            let mut branch_plan = input.clone();
-            let mut branch_var = current_var.to_string();
-            for step in steps {
-                let (new_plan, new_var) =
-                    self.translate_step(step, branch_plan, &branch_var, false)?;
-                if let Some(v) = new_var {
-                    branch_var = v;
-                }
-                branch_plan = new_plan;
+        traversals
+            .iter()
+            .map(|steps| self.translate_branch(steps, row_scan(), current_var, alias))
+            .collect()
+    }
+
+    /// Translates `steps` from `start`, a plan over the current row, into a
+    /// branch whose one column `alias` is where the steps end up, so the
+    /// branches of one step share their column.
+    ///
+    /// The branch ends in a `RETURN`: as in a `CALL` subquery, the nodes and
+    /// edges it returns stay references for the steps after it.
+    fn translate_branch(
+        &self,
+        steps: &[ast::Step],
+        start: LogicalOperator,
+        current_var: &str,
+        alias: &str,
+    ) -> Result<LogicalOperator> {
+        let mut plan = start;
+        let mut var = current_var.to_string();
+        for step in steps {
+            let (new_plan, new_var) = self.translate_step(step, plan, &var, false)?;
+            if let Some(v) = new_var {
+                var = v;
             }
-            // Wrap in a Project to align the branch result to the common alias
-            branch_plan = LogicalOperator::Project(ProjectOp {
-                projections: vec![Projection {
-                    expression: LogicalExpression::Variable(branch_var),
-                    alias: Some(alias.to_string()),
-                }],
-                input: Box::new(branch_plan),
-                pass_through_input: false,
-            });
-            branches.push(branch_plan);
+            plan = new_plan;
         }
-        Ok(branches)
+        Ok(wrap_return(
+            plan,
+            vec![ReturnItem {
+                expression: LogicalExpression::Variable(var),
+                alias: Some(alias.to_string()),
+            }],
+            false,
+        ))
     }
 
     fn translate_by_modifier(&self, by: &ast::ByModifier, current_var: &str) -> LogicalExpression {
@@ -3182,6 +3125,8 @@ mod tests {
             LogicalOperator::Return(r) => find_union(&r.input),
             LogicalOperator::Filter(f) => find_union(&f.input),
             LogicalOperator::Project(p) => find_union(&p.input),
+            // A branching step runs its branches per row.
+            LogicalOperator::Apply(a) => find_union(&a.subplan),
             _ => None,
         }
     }
@@ -3405,20 +3350,21 @@ mod tests {
             "bothV() Union should have 2 branches (source and target)"
         );
 
-        // Each branch should be a Project referencing a variable
+        // Each branch should return one endpoint variable of the current row
         for (i, branch) in union.inputs.iter().enumerate() {
             match branch {
-                LogicalOperator::Project(proj) => {
-                    assert_eq!(proj.projections.len(), 1);
+                LogicalOperator::Return(ret) => {
+                    assert_eq!(ret.items.len(), 1);
                     assert!(
-                        matches!(
-                            &proj.projections[0].expression,
-                            LogicalExpression::Variable(_)
-                        ),
-                        "Branch {i} should project a Variable"
+                        matches!(&ret.items[0].expression, LogicalExpression::Variable(_)),
+                        "Branch {i} should return a Variable"
+                    );
+                    assert!(
+                        matches!(ret.input.as_ref(), LogicalOperator::ParameterScan(_)),
+                        "Branch {i} should start from the current row"
                     );
                 }
-                other => panic!("Expected Project in bothV() Union branch {i}, got: {other:?}"),
+                other => panic!("Expected Return in bothV() Union branch {i}, got: {other:?}"),
             }
         }
     }
@@ -3462,11 +3408,11 @@ mod tests {
         let union = find_union(&plan.root).expect("Expected Union for union()");
         assert_eq!(union.inputs.len(), 2, "union() should have 2 branches");
 
-        // Each branch should end with a Project (for alias alignment)
-        // wrapping an Expand
+        // Each branch should end with a Return (for alias alignment)
+        // over an Expand
         for (i, branch) in union.inputs.iter().enumerate() {
             match branch {
-                LogicalOperator::Project(proj) => {
+                LogicalOperator::Return(proj) => {
                     // The input should contain an Expand
                     fn has_expand(op: &LogicalOperator) -> bool {
                         match op {
@@ -3481,7 +3427,7 @@ mod tests {
                         "Branch {i} should contain an Expand"
                     );
                 }
-                other => panic!("Expected Project wrapping branch {i}, got: {other:?}"),
+                other => panic!("Expected Return wrapping branch {i}, got: {other:?}"),
             }
         }
     }

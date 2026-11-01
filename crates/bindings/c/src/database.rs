@@ -254,7 +254,9 @@ pub extern "C" fn grafeo_open_single_file(path: *const c_char) -> *mut GrafeoDat
     }
 }
 
-/// Close the database, flushing pending writes.
+/// Close the database, flushing pending writes and releasing its file. A
+/// second call does nothing and returns `Ok`; the handle stays valid until
+/// `grafeo_free_database`, and every other call on it fails.
 #[unsafe(no_mangle)]
 pub extern "C" fn grafeo_close(db: *mut GrafeoDatabase) -> GrafeoStatus {
     if db.is_null() {
@@ -268,7 +270,10 @@ pub extern "C" fn grafeo_close(db: *mut GrafeoDatabase) -> GrafeoStatus {
     }
 }
 
-/// Free a database handle. Must be called after `grafeo_close`.
+/// Free a database handle, closing the database first when it is still open
+/// (its error is not reported: call `grafeo_close` first to see it); a graph
+/// handle keeps the database open until it is freed too. Call it exactly
+/// once per handle: a second call is undefined behavior, as with `free()`.
 #[unsafe(no_mangle)]
 pub extern "C" fn grafeo_free_database(db: *mut GrafeoDatabase) {
     if !db.is_null() {
@@ -1888,6 +1893,19 @@ pub extern "C" fn grafeo_edge_count(
 // Transactions
 // =========================================================================
 
+/// The handle of the transaction `session` began. It ends with
+/// `grafeo_commit` or `grafeo_rollback`, never with a statement, so the
+/// session refuses `START TRANSACTION`, `COMMIT` and `ROLLBACK`.
+fn new_transaction(mut session: grafeo_engine::session::Session) -> GrafeoTransaction {
+    session.refuse_transaction_statements();
+    GrafeoTransaction {
+        session: parking_lot::Mutex::new(Some(session)),
+        committed: false,
+        rolled_back: false,
+        commit_failed: false,
+    }
+}
+
 /// Begin a transaction with default isolation (snapshot isolation).
 #[unsafe(no_mangle)]
 pub extern "C" fn grafeo_begin_transaction(db: *mut GrafeoDatabase) -> *mut GrafeoTransaction {
@@ -1899,11 +1917,7 @@ pub extern "C" fn grafeo_begin_transaction(db: *mut GrafeoDatabase) -> *mut Graf
     let db = unsafe { &*db };
     let mut session = db.inner.read().session();
     match session.begin_transaction() {
-        Ok(()) => Box::into_raw(Box::new(GrafeoTransaction {
-            session: parking_lot::Mutex::new(Some(session)),
-            committed: false,
-            rolled_back: false,
-        })),
+        Ok(()) => Box::into_raw(Box::new(new_transaction(session))),
         Err(e) => {
             set_error(&e);
             std::ptr::null_mut()
@@ -1912,7 +1926,8 @@ pub extern "C" fn grafeo_begin_transaction(db: *mut GrafeoDatabase) -> *mut Graf
 }
 
 /// Begin a transaction with a specific isolation level.
-/// Levels: 0 = ReadCommitted, 1 = SnapshotIsolation, 2 = Serializable.
+/// Levels: 0 = ReadCommitted, 1 = SnapshotIsolation, 2 = Serializable. Serializable is
+/// refused (NULL, with the error) until queries record their reads.
 #[unsafe(no_mangle)]
 pub extern "C" fn grafeo_begin_transaction_with_isolation(
     db: *mut GrafeoDatabase,
@@ -1937,11 +1952,7 @@ pub extern "C" fn grafeo_begin_transaction_with_isolation(
 
     let mut session = db.inner.read().session();
     match session.begin_transaction_with_isolation(level) {
-        Ok(()) => Box::into_raw(Box::new(GrafeoTransaction {
-            session: parking_lot::Mutex::new(Some(session)),
-            committed: false,
-            rolled_back: false,
-        })),
+        Ok(()) => Box::into_raw(Box::new(new_transaction(session))),
         Err(e) => {
             set_error(&e);
             std::ptr::null_mut()
@@ -2092,7 +2103,17 @@ pub extern "C" fn grafeo_commit(tx: *mut GrafeoTransaction) -> GrafeoStatus {
                 tx.committed = true;
                 GrafeoStatus::Ok
             }
-            Err(e) => set_error(&e),
+            Err(e) => {
+                // A commit that fails ends the transaction all the same
+                // (one refused before it began is rolled back here), so a
+                // rollback after it does nothing.
+                if session.in_transaction() {
+                    let _ = session.rollback();
+                }
+                *guard = None;
+                tx.commit_failed = true;
+                set_error(&e)
+            }
         }
     } else {
         set_last_error("Transaction is no longer active");
@@ -2100,7 +2121,8 @@ pub extern "C" fn grafeo_commit(tx: *mut GrafeoTransaction) -> GrafeoStatus {
     }
 }
 
-/// Rollback a transaction.
+/// Rollback a transaction. After a commit that failed it does nothing and
+/// returns `GRAFEO_OK`: that commit ended the transaction.
 #[unsafe(no_mangle)]
 pub extern "C" fn grafeo_rollback(tx: *mut GrafeoTransaction) -> GrafeoStatus {
     if tx.is_null() {
@@ -2109,6 +2131,9 @@ pub extern "C" fn grafeo_rollback(tx: *mut GrafeoTransaction) -> GrafeoStatus {
     }
     // SAFETY: Caller guarantees valid pointer.
     let tx = unsafe { &mut *tx };
+    if tx.commit_failed {
+        return GrafeoStatus::Ok;
+    }
     if tx.committed {
         set_last_error("Transaction already committed");
         return GrafeoStatus::ErrorTransaction;
@@ -2239,7 +2264,8 @@ pub extern "C" fn grafeo_backup_incremental(
     }
 }
 
-/// Restore a database to a specific epoch from a backup chain.
+/// Restore a database to a specific epoch from a backup chain. An epoch past
+/// the end of the chain restores the latest state the chain holds.
 #[unsafe(no_mangle)]
 pub extern "C" fn grafeo_restore_to_epoch(
     backup_dir: *const c_char,
@@ -2743,6 +2769,54 @@ mod tests {
         assert_eq!(grafeo_drop_projection(db, name.as_ptr()), 0);
         assert_eq!(grafeo_drop_projection(db, std::ptr::null()), -1);
         grafeo_close(db);
+        grafeo_free_database(db);
+    }
+
+    /// `grafeo_free_database` closes a database still open, so its writes
+    /// are kept without a `grafeo_close` first, and `grafeo_close` twice is
+    /// the same as once (#467).
+    #[test]
+    fn free_without_close_keeps_the_writes_and_a_second_close_is_harmless() {
+        let dir = std::env::temp_dir().join(format!("grafeo-c-free-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = CString::new(dir.join("amsterdam.grafeo").to_str().unwrap()).unwrap();
+        let labels = CString::new(r#"["Person"]"#).unwrap();
+        let props = CString::new(r#"{"name":"Alix"}"#).unwrap();
+
+        let db = grafeo_open(path.as_ptr());
+        assert!(!db.is_null());
+        assert_ne!(
+            grafeo_create_node(db, labels.as_ptr(), props.as_ptr()),
+            u64::MAX
+        );
+        grafeo_free_database(db);
+
+        let db = grafeo_open(path.as_ptr());
+        assert!(!db.is_null(), "the file was released by the free");
+        assert_eq!(crate::database::counted(grafeo_node_count, db), 1);
+        assert_eq!(grafeo_close(db), GrafeoStatus::Ok);
+        assert_eq!(grafeo_close(db), GrafeoStatus::Ok, "a second close");
+        grafeo_free_database(db);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Serializable (2) is refused until queries record their reads (#671):
+    /// NULL, with an error that names snapshot isolation; snapshot (1) begins.
+    #[test]
+    fn serializable_is_refused_with_an_error() {
+        let db = grafeo_open_memory();
+        let tx = grafeo_begin_transaction_with_isolation(db, 2);
+        assert!(tx.is_null(), "Serializable began");
+        // SAFETY: grafeo_last_error returns NULL or a NUL-terminated string.
+        let error = unsafe { std::ffi::CStr::from_ptr(crate::error::grafeo_last_error()) }
+            .to_string_lossy()
+            .into_owned();
+        assert!(error.contains("snapshot isolation"), "{error}");
+        let tx = grafeo_begin_transaction_with_isolation(db, 1);
+        assert!(!tx.is_null());
+        assert_eq!(grafeo_rollback(tx), GrafeoStatus::Ok);
+        grafeo_free_transaction(tx);
         grafeo_free_database(db);
     }
 

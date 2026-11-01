@@ -130,14 +130,14 @@ tx.Execute("INSERT (:Person {name: 'Gus'})");
 tx.Commit();
 
 // With isolation level
-using var tx = db.BeginTransaction("serializable");
+using var tx = db.BeginTransaction("read_committed");
 ```
 
 | Method | Returns | Description |
 |--------|---------|-------------|
 | `BeginTransaction()` | `Transaction` | Begin with default isolation (snapshot) |
-| `BeginTransaction(string)` | `Transaction` | Begin with isolation level: `"read_committed"`, `"snapshot"`, `"serializable"` |
-| `BeginTransaction(IsolationLevel)` | `Transaction` | Type-safe overload: `IsolationLevel.ReadCommitted`, `.Snapshot`, `.Serializable` |
+| `BeginTransaction(string)` | `Transaction` | Begin with isolation level: `"read_committed"`, `"snapshot"`; `"serializable"` is refused for now: snapshot isolation is the strongest level until queries record their reads |
+| `BeginTransaction(IsolationLevel)` | `Transaction` | Type-safe overload: `IsolationLevel.ReadCommitted`, `.Snapshot` (`.Serializable` is refused for now) |
 
 ### Node CRUD
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build WASM package with size-optimized profile.
+# Build a WASM package with the `wasm` profile (speed at a small size).
 #
 # Usage:
 #   ./scripts/build-wasm.sh                           # default: GQL only, web target
@@ -15,7 +15,7 @@ set -euo pipefail
 
 CRATE_DIR="crates/bindings/wasm"
 OUT_DIR=""
-PROFILE="minimal-size"
+PROFILE="wasm"
 TARGET="web"
 SCOPE=""
 FEATURES=""
@@ -65,11 +65,9 @@ if [[ "$CARGO_STATUS" -ne 0 ]]; then
 fi
 
 # Determine the output path (profile name maps to directory)
-PROFILE_DIR="${PROFILE}"
-if [[ "$PROFILE" == "release" ]]; then
-    PROFILE_DIR="release"
-fi
-WASM_FILE="target/wasm32-unknown-unknown/${PROFILE_DIR}/grafeo_wasm.wasm"
+# Cargo writes into CARGO_TARGET_DIR when set: read the build from there,
+# not from an older one left in target/.
+WASM_FILE="${CARGO_TARGET_DIR:-target}/wasm32-unknown-unknown/${PROFILE}/grafeo_wasm.wasm"
 
 if [[ ! -f "$WASM_FILE" ]]; then
     echo "Error: ${WASM_FILE} not found"
@@ -138,37 +136,21 @@ echo "Output: ${OUT_DIR}/"
 echo "  Raw:    $(( RAW_SIZE / 1024 )) KB"
 echo "  Gzip:   $(( GZ_SIZE / 1024 )) KB"
 
-# Size thresholds (gzipped bytes) depend on feature set.
-# Default (browser profile, GQL + regex-lite): competitive with sql.js (~600 KB).
-# Full profile (all languages + AI): larger binary, ~1.2 MB gzipped.
-# 0.6.0 brought it to 1591 KB gzipped (exact decimals, RDF terms with the
-# store's term dictionary, the row-group store), over the 1.4 MB limit, which
-# stopped its npm release: the limit is 1.75 MB from then on, and shrinking
-# the full build is open work.
+# Size thresholds (gzipped bytes) depend on the feature set. Since 0.6.1 the
+# packages are built for speed (the `wasm` profile, opt-level s: 1.55x faster
+# than the smallest build, 4.8x on inserts, for 18% more bytes), and every
+# WASM build uses regex-lite. Measured then: lite 1106 KB, full 1680 KB.
+# Before, at opt-level z: lite grew from 740 KB to 936 KB over 0.6.0 and 0.6.1
+# (exact decimals, the row-group store and its column encoders, RDF property
+# paths), full reached 1591 KB in 0.6.0. The generic code (sorts, hash maps,
+# serde) is most of what is left; it shrinks by sharing paths, not by gates.
 if [[ "$FEATURES" == *"full"* ]]; then
-    WARN_THRESHOLD=1677721   # 1.6 MB
-    FAIL_THRESHOLD=1835008   # 1.75 MB
+    WARN_THRESHOLD=1835008   # 1.75 MB
+    FAIL_THRESHOLD=1992294   # 1.9 MB
     LABEL="full profile"
 else
-    # Raised from 740 and 760 KB in 0.6.0, whose query fixes (clauses after a
-    # write, refusing data a build cannot read) brought the build to 760 KB.
-    # TODO(wasm): the 0.6.0 native property-path execution (RDF path store and
-    # budget) grew the browser bundle to ~801 KB gzipped, just over the old
-    # 800 KB limit. Re-baseline after the release, or shrink the bundle (strip
-    # unused RDF path code paths) to get back under 800 KB.
-    # Exact decimals (a core value type in every profile) brought it to 850.5 KB;
-    # the limit was 880 KB from then on. The engine's switch to the row-group
-    # store (the browser build reads and writes snapshots in its sections,
-    # column chunks included) left the raw size 3 KB smaller but brought the
-    # gzipped size from 875 to 884 KB: the limit is 900 KB from then on.
-    # One clock for wasm32 (web-time) and compact() compressing in memory (the
-    # column encoders, which an in-memory browser database needs to give memory
-    # back) brought it to 906 KB: the limit is 940 KB from then on, to be
-    # re-measured after the store contract trims the read and write traits.
-    # After it (927 KB, with exact JSON integers and RDF terms still to come)
-    # the limit is 1 MB: the browser bundle stays under it.
-    WARN_THRESHOLD=829440    # 810 KB
-    FAIL_THRESHOLD=1048576   # 1 MB
+    WARN_THRESHOLD=1205862   # 1.15 MB
+    FAIL_THRESHOLD=1310720   # 1.25 MB
     LABEL="browser profile"
 fi
 

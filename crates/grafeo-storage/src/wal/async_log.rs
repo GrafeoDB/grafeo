@@ -133,10 +133,9 @@ impl AsyncWalManager {
             .as_mut()
             .ok_or_else(|| Error::Internal("WAL writer not available".to_string()))?;
 
-        // Write length prefix
-        // reason: WAL wire format uses u32 length prefix; individual records are well under 4 GiB
-        #[allow(clippy::cast_possible_truncation)]
-        let len = data.len() as u32;
+        // Write length prefix: a record past what it holds is refused, not
+        // written with a wrapped length no reader could split.
+        let len = super::log::frame_length(data.len())?;
         log_file.writer.write_all(&len.to_le_bytes()).await?;
 
         // Write data
@@ -642,5 +641,48 @@ mod tests {
 
         // Stop background sync
         wal.stop_background_sync().await;
+    }
+
+    /// Control: a frame is its payload's length (u32, little-endian), the
+    /// payload and its CRC32, appended to the active log file.
+    #[tokio::test]
+    async fn a_frame_is_its_length_its_payload_and_its_checksum() {
+        let dir = tempdir().unwrap();
+        let wal = AsyncWalManager::open(dir.path()).await.unwrap();
+        let payload = b"Alix in Amsterdam";
+        wal.write_frame(payload, true).await.unwrap();
+        wal.flush().await.unwrap();
+
+        let files = wal.log_files().await.unwrap();
+        assert_eq!(files.len(), 1, "{files:?}");
+        let bytes = std::fs::read(&files[0]).unwrap();
+        let length = u32::try_from(payload.len()).unwrap();
+        let mut expected = length.to_le_bytes().to_vec();
+        expected.extend_from_slice(payload);
+        expected.extend_from_slice(&crc32fast::hash(payload).to_le_bytes());
+        assert_eq!(bytes, expected);
+    }
+
+    /// A frame whose payload is longer than `u32::MAX` bytes is refused with
+    /// an error: its length prefix cannot hold the length (the cast wrapped
+    /// it and wrote a frame no reader can split). Writing 4 GiB in a test is
+    /// out of the question, so this test reads the seam the fix extracts.
+    ///
+    /// Seam (proposed): `write_frame` takes its length prefix from the
+    /// checked `frame_length(length: usize) -> Result<u32>` that the
+    /// synchronous `WalManager` already has (`wal/log.rs`), made
+    /// `pub(super)` (or moved to `wal/frame.rs`) and called in place of
+    /// `data.len() as u32`.
+    #[test]
+    fn a_frame_longer_than_u32_max_bytes_is_refused() {
+        use super::super::log::frame_length;
+
+        let past = usize::try_from(u64::from(u32::MAX) + 1).unwrap();
+        let error = frame_length(past).unwrap_err().to_string();
+        assert!(error.contains(&past.to_string()), "{error}");
+        assert!(frame_length(usize::MAX).is_err());
+        let max = usize::try_from(u32::MAX).unwrap();
+        assert_eq!(frame_length(max).unwrap(), u32::MAX);
+        assert_eq!(frame_length(19).unwrap(), 19);
     }
 }

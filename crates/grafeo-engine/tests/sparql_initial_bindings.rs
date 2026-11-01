@@ -8,6 +8,10 @@
 //! ```
 
 #![cfg(all(feature = "sparql", feature = "triple-store"))]
+#![allow(
+    deprecated,
+    reason = "the test reaches the row-group store itself, which only the deprecated GrafeoDB::store() gives, until 0.7.0 removes it"
+)]
 
 use std::collections::HashMap;
 use std::sync::Arc;

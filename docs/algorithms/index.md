@@ -201,9 +201,11 @@ Works the same way across all three languages:
 | `grafeo.betweenness_centrality()` | Centrality | node_id, centrality |
 | `grafeo.closeness_centrality()` | Centrality | node_id, centrality |
 | `grafeo.degree_centrality()` | Centrality | node_id, in_degree, out_degree, total_degree |
+| `grafeo.degree_centrality({normalized: true})` | Centrality | node_id, centrality |
 | `grafeo.bfs(start)` | Traversal | node_id, depth |
 | `grafeo.dfs(start)` | Traversal | node_id, depth, discovery, finish |
 | `grafeo.dijkstra(source)` | Shortest Path | node_id, distance |
+| `grafeo.dijkstra(source, target)` | Shortest Path | source, target, distance, path |
 | `grafeo.bellman_ford(source)` | Shortest Path | node_id, distance, has_negative_cycle |
 | `grafeo.sssp(source, weight)` | Shortest Path | node_id, distance |
 | `grafeo.floyd_warshall()` | Shortest Path | source, target, distance |
@@ -213,13 +215,14 @@ Works the same way across all three languages:
 | `grafeo.louvain()` | Community | node_id, community_id, modularity |
 | `grafeo.label_propagation()` | Community | node_id, community_id |
 | `grafeo.clustering_coefficient()` | Clustering | node_id, coefficient, triangle_count |
-| `grafeo.kruskal()` | MST | source, target, weight |
-| `grafeo.prim()` | MST | source, target, weight |
+| `grafeo.kruskal()` | MST | source, target, weight, total_weight |
+| `grafeo.prim()` | MST | source, target, weight, total_weight |
 | `grafeo.max_flow(source, sink)` | Flow | source, target, flow, max_flow |
-| `grafeo.min_cost_max_flow(source, sink)` | Flow | source, target, flow, cost, max_flow |
+| `grafeo.min_cost_max_flow(source, sink)` | Flow | source, target, flow, cost, max_flow, total_cost |
 | `grafeo.articulation_points()` | Structure | node_id |
 | `grafeo.bridges()` | Structure | source, target |
-| `grafeo.k_core()` | Structure | node_id, core_number, max_core |
+| `grafeo.kcore()` | Structure | node_id, core_number, max_core |
+| `grafeo.kcore(k)` | Structure | node_id, in_k_core |
 | `grafeo.ktruss()` | Structure | source, target, truss_number |
 | `grafeo.total_triangles()` | Clustering | total_triangles |
 | `grafeo.stochastic_block_partition()` | Community | node_id, block_id, description_length |
@@ -232,7 +235,11 @@ more than the distance), and its positions in the order DFS reaches the nodes
 
 Arguments are constants: literals, parameters (`CALL grafeo.bfs($start)`) and
 expressions of them. An argument that reads a row variable, or a value of the
-wrong type for its parameter, is an error.
+wrong type for its parameter, is an error, and so is a map key that names no
+parameter (`{dampingg: 0.5}`; `projection` is taken by every procedure) or a
+positional argument past the last parameter. The columns follow the arguments:
+`dijkstra` with a `target` gives the one path, `kcore` with a `k` the members
+of that core.
 
 ## Determinism
 

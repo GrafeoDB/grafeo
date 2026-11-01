@@ -1,0 +1,417 @@
+# SPARQL FILTER EXISTS and FILTER NOT EXISTS
+#
+# SPARQL 1.1 Query 8.1 and 18.6: exists(P) holds for a solution when P, with
+# the solution's values substituted for its variables, has at least one
+# match. It filters: a solution is kept once however many matches P has, and
+# P's variables are not bound by it (a FILTER puts nothing in scope, 18.2.1).
+# Without a shared variable, NOT EXISTS { P } removes every solution when P
+# has a match and none when P has none (unlike MINUS). A group of only a
+# FILTER filters the group's one empty solution.
+
+meta:
+  language: sparql
+  model: rdf
+  section: negation
+  title: FILTER EXISTS and NOT EXISTS
+  dataset: empty
+  requires: [sparql, rdf]
+
+tests:
+
+  # ---------------------------------------------------------------------------
+  # EXISTS keeps a solution once and binds nothing
+  # ---------------------------------------------------------------------------
+
+  - name: exists_with_two_matches_keeps_the_row_once
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/alix> <http://ex.org/name> "Alix" .
+          <http://ex.org/alix> <http://ex.org/age> 30 .
+          <http://ex.org/alix> <http://ex.org/age> 31 .
+          <http://ex.org/gus> <http://ex.org/name> "Gus" .
+        }
+    query: |
+      SELECT ?n WHERE {
+        ?s <http://ex.org/name> ?n
+        FILTER EXISTS { ?s <http://ex.org/age> ?a }
+      }
+    expect:
+      rows:
+        - [Alix]
+
+  - name: exists_puts_no_variable_in_scope_under_select_star
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/alix> <http://ex.org/name> "Alix" .
+          <http://ex.org/alix> <http://ex.org/age> 30 .
+          <http://ex.org/alix> <http://ex.org/age> 31 .
+          <http://ex.org/gus> <http://ex.org/name> "Gus" .
+        }
+    query: |
+      SELECT * WHERE {
+        ?s <http://ex.org/name> ?n
+        FILTER EXISTS { ?s <http://ex.org/age> ?a }
+      }
+    expect:
+      columns: [s, n]
+      rows:
+        - [http://ex.org/alix, Alix]
+
+  - name: exists_with_two_matches_counts_one
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/alix> <http://ex.org/name> "Alix" .
+          <http://ex.org/alix> <http://ex.org/age> 30 .
+          <http://ex.org/alix> <http://ex.org/age> 31 .
+          <http://ex.org/gus> <http://ex.org/name> "Gus" .
+        }
+    query: |
+      SELECT (COUNT(*) AS ?c) WHERE {
+        ?s <http://ex.org/name> ?n
+        FILTER EXISTS { ?s <http://ex.org/age> ?a }
+      }
+    expect:
+      rows:
+        - [1]
+
+  - name: exists_reads_a_filter_inside_its_pattern
+    # Only Alix's 31 passes; she is kept once.
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/alix> <http://ex.org/name> "Alix" .
+          <http://ex.org/alix> <http://ex.org/age> 30 .
+          <http://ex.org/alix> <http://ex.org/age> 31 .
+          <http://ex.org/gus> <http://ex.org/name> "Gus" .
+          <http://ex.org/gus> <http://ex.org/age> 25 .
+        }
+    query: |
+      SELECT ?n WHERE {
+        ?s <http://ex.org/name> ?n
+        FILTER EXISTS { ?s <http://ex.org/age> ?a FILTER(?a > 30) }
+      }
+    expect:
+      rows:
+        - [Alix]
+
+  - name: not_exists_with_a_shared_variable_keeps_the_rows_without_a_match
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/alix> <http://ex.org/name> "Alix" .
+          <http://ex.org/alix> <http://ex.org/age> 30 .
+          <http://ex.org/alix> <http://ex.org/age> 31 .
+          <http://ex.org/gus> <http://ex.org/name> "Gus" .
+        }
+    query: |
+      SELECT * WHERE {
+        ?s <http://ex.org/name> ?n
+        FILTER NOT EXISTS { ?s <http://ex.org/age> ?a }
+      }
+    expect:
+      columns: [s, n]
+      rows:
+        - [http://ex.org/gus, Gus]
+
+  # ---------------------------------------------------------------------------
+  # No shared variable: the pattern's match decides for every row
+  # ---------------------------------------------------------------------------
+
+  - name: not_exists_without_a_shared_variable_and_a_match_removes_every_row
+    # Unlike MINUS, which keeps a row that shares no variable.
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/alix> <http://ex.org/name> "Alix" .
+          <http://ex.org/gus> <http://ex.org/name> "Gus" .
+          <http://ex.org/amsterdam> <http://ex.org/label> "Amsterdam" .
+        }
+    query: |
+      SELECT ?n WHERE {
+        ?s <http://ex.org/name> ?n
+        FILTER NOT EXISTS { ?c <http://ex.org/label> ?l }
+      }
+    expect:
+      empty: true
+
+  - name: minus_without_a_shared_variable_keeps_every_row
+    # The control for the case above.
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/alix> <http://ex.org/name> "Alix" .
+          <http://ex.org/gus> <http://ex.org/name> "Gus" .
+          <http://ex.org/amsterdam> <http://ex.org/label> "Amsterdam" .
+        }
+    query: |
+      SELECT ?n WHERE {
+        ?s <http://ex.org/name> ?n
+        MINUS { ?c <http://ex.org/label> ?l }
+      }
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+
+  - name: not_exists_without_a_shared_variable_and_no_match_keeps_every_row
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/alix> <http://ex.org/name> "Alix" .
+          <http://ex.org/gus> <http://ex.org/name> "Gus" .
+        }
+    query: |
+      SELECT ?n WHERE {
+        ?s <http://ex.org/name> ?n
+        FILTER NOT EXISTS { ?c <http://ex.org/label> ?l }
+      }
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+
+  - name: exists_without_a_shared_variable_and_a_match_keeps_every_row_once
+    # Two labels match; each row is kept once, not once per label.
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/alix> <http://ex.org/name> "Alix" .
+          <http://ex.org/gus> <http://ex.org/name> "Gus" .
+          <http://ex.org/amsterdam> <http://ex.org/label> "Amsterdam" .
+          <http://ex.org/berlin> <http://ex.org/label> "Berlin" .
+        }
+    query: |
+      SELECT ?n WHERE {
+        ?s <http://ex.org/name> ?n
+        FILTER EXISTS { ?c <http://ex.org/label> ?l }
+      }
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+
+  - name: exists_without_a_shared_variable_and_no_match_removes_every_row
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/alix> <http://ex.org/name> "Alix" .
+          <http://ex.org/gus> <http://ex.org/name> "Gus" .
+        }
+    query: |
+      SELECT ?n WHERE {
+        ?s <http://ex.org/name> ?n
+        FILTER EXISTS { ?c <http://ex.org/label> ?l }
+      }
+    expect:
+      empty: true
+
+  # ---------------------------------------------------------------------------
+  # A group of only the filter: the empty solution, kept or removed
+  # ---------------------------------------------------------------------------
+
+  - name: a_group_of_only_exists_with_a_match_is_one_empty_row
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/alix> <http://ex.org/name> "Alix" .
+          <http://ex.org/gus> <http://ex.org/name> "Gus" .
+        }
+    query: "SELECT (COUNT(*) AS ?c) WHERE { FILTER EXISTS { ?s <http://ex.org/name> ?n } }"
+    expect:
+      rows:
+        - [1]
+
+  - name: a_group_of_only_exists_without_a_match_is_no_row
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/alix> <http://ex.org/name> "Alix" .
+        }
+    query: "SELECT * WHERE { FILTER EXISTS { ?s <http://ex.org/none> ?n } }"
+    expect:
+      empty: true
+
+  - name: a_group_of_only_not_exists_with_a_match_is_no_row
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/alix> <http://ex.org/name> "Alix" .
+          <http://ex.org/gus> <http://ex.org/name> "Gus" .
+        }
+    query: "SELECT * WHERE { FILTER NOT EXISTS { ?s <http://ex.org/name> ?n } }"
+    expect:
+      empty: true
+
+  - name: a_group_of_only_not_exists_with_a_match_counts_zero
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/alix> <http://ex.org/name> "Alix" .
+        }
+    query: "SELECT (COUNT(*) AS ?c) WHERE { FILTER NOT EXISTS { ?s <http://ex.org/name> ?n } }"
+    expect:
+      rows:
+        - [0]
+
+  - name: a_group_of_only_not_exists_without_a_match_is_one_empty_row
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/alix> <http://ex.org/name> "Alix" .
+        }
+    query: "SELECT (COUNT(*) AS ?c) WHERE { FILTER NOT EXISTS { ?s <http://ex.org/none> ?n } }"
+    expect:
+      rows:
+        - [1]
+
+  - name: ask_of_only_not_exists_with_a_match_is_false
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/alix> <http://ex.org/name> "Alix" .
+        }
+    query: "ASK { FILTER NOT EXISTS { ?s <http://ex.org/name> ?n } }"
+    expect:
+      columns: [boolean]
+      rows:
+        - [false]
+
+  # ---------------------------------------------------------------------------
+  # After a BIND: the pattern reads the bound value
+  # ---------------------------------------------------------------------------
+
+  - name: exists_after_a_bind_reads_its_value
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/alix> <http://ex.org/name> "Alix" .
+        }
+    query: |
+      SELECT ?n WHERE {
+        VALUES ?who { "Alix" "Mia" }
+        BIND(?who AS ?n)
+        FILTER EXISTS { ?s <http://ex.org/name> ?n }
+      }
+    expect:
+      rows:
+        - [Alix]
+
+  - name: not_exists_after_a_bind_reads_its_value
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/alix> <http://ex.org/name> "Alix" .
+        }
+    query: |
+      SELECT ?n WHERE {
+        VALUES ?who { "Alix" "Mia" }
+        BIND(?who AS ?n)
+        FILTER NOT EXISTS { ?s <http://ex.org/name> ?n }
+      }
+    expect:
+      rows:
+        - [Mia]
+
+  # ---------------------------------------------------------------------------
+  # Two filters in one group: a conjunction
+  # ---------------------------------------------------------------------------
+
+  - name: two_exists_filters_both_hold
+    # Alix has an age and a city, Gus an age only, Vincent a city only.
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/alix> <http://ex.org/name> "Alix" .
+          <http://ex.org/alix> <http://ex.org/age> 30 .
+          <http://ex.org/alix> <http://ex.org/city> "Amsterdam" .
+          <http://ex.org/gus> <http://ex.org/name> "Gus" .
+          <http://ex.org/gus> <http://ex.org/age> 40 .
+          <http://ex.org/vincent> <http://ex.org/name> "Vincent" .
+          <http://ex.org/vincent> <http://ex.org/city> "Paris" .
+        }
+    query: |
+      SELECT ?n WHERE {
+        ?s <http://ex.org/name> ?n
+        FILTER EXISTS { ?s <http://ex.org/age> ?a }
+        FILTER EXISTS { ?s <http://ex.org/city> ?c }
+      }
+    expect:
+      rows:
+        - [Alix]
+
+  - name: an_exists_and_a_not_exists_filter_both_hold
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/alix> <http://ex.org/name> "Alix" .
+          <http://ex.org/alix> <http://ex.org/age> 30 .
+          <http://ex.org/alix> <http://ex.org/city> "Amsterdam" .
+          <http://ex.org/gus> <http://ex.org/name> "Gus" .
+          <http://ex.org/gus> <http://ex.org/age> 40 .
+          <http://ex.org/vincent> <http://ex.org/name> "Vincent" .
+          <http://ex.org/vincent> <http://ex.org/city> "Paris" .
+        }
+    query: |
+      SELECT ?n WHERE {
+        ?s <http://ex.org/name> ?n
+        FILTER EXISTS { ?s <http://ex.org/age> ?a }
+        FILTER NOT EXISTS { ?s <http://ex.org/city> ?c }
+      }
+    expect:
+      rows:
+        - [Gus]
+
+  # ---------------------------------------------------------------------------
+  # EXISTS inside OPTIONAL over the optional pattern's variables
+  # ---------------------------------------------------------------------------
+
+  - name: exists_inside_optional_filters_the_optional_pattern
+    # Alix knows Gus (two cities) and Vincent (none): she is extended by Gus
+    # once. Gus and Vincent know nobody and are kept alone.
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/alix> <http://ex.org/name> "Alix" .
+          <http://ex.org/alix> <http://ex.org/knows> <http://ex.org/gus> .
+          <http://ex.org/alix> <http://ex.org/knows> <http://ex.org/vincent> .
+          <http://ex.org/gus> <http://ex.org/name> "Gus" .
+          <http://ex.org/gus> <http://ex.org/city> "Berlin" .
+          <http://ex.org/gus> <http://ex.org/city> "Prague" .
+          <http://ex.org/vincent> <http://ex.org/name> "Vincent" .
+        }
+    query: |
+      SELECT ?n ?f WHERE {
+        ?s <http://ex.org/name> ?n
+        OPTIONAL { ?s <http://ex.org/knows> ?f FILTER EXISTS { ?f <http://ex.org/city> ?c } }
+      }
+    expect:
+      rows:
+        - [Alix, http://ex.org/gus]
+        - [Gus, null]
+        - [Vincent, null]
+
+  - name: not_exists_inside_optional_filters_the_optional_pattern
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/alix> <http://ex.org/name> "Alix" .
+          <http://ex.org/alix> <http://ex.org/knows> <http://ex.org/gus> .
+          <http://ex.org/alix> <http://ex.org/knows> <http://ex.org/vincent> .
+          <http://ex.org/gus> <http://ex.org/name> "Gus" .
+          <http://ex.org/gus> <http://ex.org/city> "Berlin" .
+          <http://ex.org/gus> <http://ex.org/city> "Prague" .
+          <http://ex.org/vincent> <http://ex.org/name> "Vincent" .
+        }
+    query: |
+      SELECT ?n ?f WHERE {
+        ?s <http://ex.org/name> ?n
+        OPTIONAL { ?s <http://ex.org/knows> ?f FILTER NOT EXISTS { ?f <http://ex.org/city> ?c } }
+      }
+    expect:
+      rows:
+        - [Alix, http://ex.org/vincent]
+        - [Gus, null]
+        - [Vincent, null]

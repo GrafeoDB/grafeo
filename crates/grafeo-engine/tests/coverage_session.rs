@@ -452,16 +452,18 @@ fn test_begin_transaction_with_read_committed() {
     session.commit().unwrap();
 }
 
+/// Serializable is refused until queries record their reads (#671); the
+/// refusal begins nothing (see `serializable_isolation.rs`).
 #[test]
-fn test_begin_transaction_with_serializable() {
+fn test_begin_transaction_with_serializable_is_refused() {
     let db = setup();
     let mut session = db.session();
     session
         .begin_transaction_with_isolation(grafeo_engine::transaction::IsolationLevel::Serializable)
-        .unwrap();
+        .expect_err("Serializable is refused");
+    assert!(!session.in_transaction());
     let r = session.execute("MATCH (p:Person) RETURN count(p)").unwrap();
     assert_eq!(r.rows()[0][0], Value::Int64(2));
-    session.commit().unwrap();
 }
 
 #[test]

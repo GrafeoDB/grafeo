@@ -80,6 +80,12 @@ pub enum ErrorCode {
     StorageCorrupted,
     /// Recovery from WAL failed.
     StorageRecoveryFailed,
+    /// The database file is open elsewhere: in another handle of this
+    /// process, or in another process.
+    DatabaseLocked,
+    /// An incremental backup cannot continue its chain: the log it starts
+    /// from was removed. A new full backup starts a new chain.
+    BackupChainBroken,
 
     // Validation errors (V)
     /// Request validation failed.
@@ -131,6 +137,8 @@ impl ErrorCode {
             Self::StorageFull => "GRAFEO-S001",
             Self::StorageCorrupted => "GRAFEO-S002",
             Self::StorageRecoveryFailed => "GRAFEO-S003",
+            Self::DatabaseLocked => "GRAFEO-S004",
+            Self::BackupChainBroken => "GRAFEO-S005",
 
             Self::InvalidInput => "GRAFEO-V001",
             Self::NodeNotFound => "GRAFEO-V002",
@@ -476,6 +484,8 @@ pub enum TransactionError {
     ///
     /// Occurs when running at Serializable isolation level and a read-write
     /// conflict is detected (we read data that another committed transaction wrote).
+    /// Not raised yet: a session refuses Serializable until queries record their
+    /// reads (#400).
     SerializationFailure(String),
 
     /// Deadlock detected.
@@ -606,6 +616,15 @@ pub enum StorageError {
 
     /// Checkpoint failed.
     CheckpointFailed(String),
+
+    /// The database file is open elsewhere, so it cannot be opened here
+    /// (what holds it follows): another handle of this process, or another
+    /// process.
+    Locked(String),
+
+    /// An incremental backup cannot continue its chain (what is missing
+    /// follows): only a new full backup helps, not a retry.
+    BackupChainBroken(String),
 }
 
 impl StorageError {
@@ -616,6 +635,8 @@ impl StorageError {
             Self::Full => ErrorCode::StorageFull,
             Self::InvalidWalEntry(_) | Self::CheckpointFailed(_) => ErrorCode::StorageCorrupted,
             Self::RecoveryFailed(_) => ErrorCode::StorageRecoveryFailed,
+            Self::Locked(_) => ErrorCode::DatabaseLocked,
+            Self::BackupChainBroken(_) => ErrorCode::BackupChainBroken,
         }
     }
 }
@@ -627,6 +648,8 @@ impl fmt::Display for StorageError {
             StorageError::InvalidWalEntry(msg) => write!(f, "Invalid WAL entry: {msg}"),
             StorageError::RecoveryFailed(msg) => write!(f, "Recovery failed: {msg}"),
             StorageError::CheckpointFailed(msg) => write!(f, "Checkpoint failed: {msg}"),
+            StorageError::Locked(msg) => write!(f, "Database locked: {msg}"),
+            StorageError::BackupChainBroken(msg) => write!(f, "Backup chain broken: {msg}"),
         }
     }
 }
@@ -727,6 +750,7 @@ impl QueryError {
             QueryErrorKind::Optimization => ErrorCode::QueryOptimization,
             QueryErrorKind::Execution
             | QueryErrorKind::NumericOutOfRange
+            | QueryErrorKind::InvalidCharacterValueForCast
             | QueryErrorKind::DivisionByZero
             | QueryErrorKind::NegativeLimit
             | QueryErrorKind::InvalidValueType
@@ -849,6 +873,9 @@ pub enum QueryErrorKind {
     /// A computation left the range of its type: an integer overflow, or a
     /// decimal of more than 38 digits (GQLSTATUS 22003).
     NumericOutOfRange,
+    /// Text a cast cannot read as a value of its target type, such as
+    /// `CAST('Alix' AS INT64)` (GQLSTATUS 22018).
+    InvalidCharacterValueForCast,
     /// An integer or decimal division or modulo by zero (GQLSTATUS 22012).
     DivisionByZero,
     /// A negative `SKIP`, `OFFSET` or `LIMIT` value (GQLSTATUS 22G02).
@@ -877,6 +904,9 @@ impl fmt::Display for QueryErrorKind {
             QueryErrorKind::Timeout => write!(f, "timeout error"),
             QueryErrorKind::Unsupported => write!(f, "unsupported"),
             QueryErrorKind::NumericOutOfRange => write!(f, "numeric value out of range"),
+            QueryErrorKind::InvalidCharacterValueForCast => {
+                write!(f, "invalid character value for cast")
+            }
             QueryErrorKind::DivisionByZero => write!(f, "division by zero"),
             QueryErrorKind::NegativeLimit => write!(f, "negative limit value"),
             QueryErrorKind::InvalidValueType => write!(f, "invalid value type"),

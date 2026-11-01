@@ -186,6 +186,34 @@ pub trait GraphStore: Send + Sync {
         Ok(self.node(id, view)?.map(|node| node.labels))
     }
 
+    /// The labels of node `id` as `view` sees the node, as a bit mask: bit
+    /// `i` for the label whose id is `i` in the store. `None` when the view
+    /// does not see the node, or the store has no such mask for it (a label
+    /// id of 64 or more, or a store without label ids): `labels(n)` then
+    /// reads the names. A grouping by `labels(n)` keys its groups by the
+    /// mask, one integer, and names each group's labels once (see
+    /// [`label_mask_names`](Self::label_mask_names)).
+    ///
+    /// # Errors
+    ///
+    /// Returns the error of a read the store cannot do.
+    fn node_label_mask(&self, _id: NodeId, _view: ReadView) -> Result<Option<u64>> {
+        Ok(None)
+    }
+
+    /// The names of the labels of a mask [`node_label_mask`](Self::node_label_mask)
+    /// gave, sorted by name as `labels(n)` lists them.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error of a read the store cannot do, and an internal
+    /// error from a store that gives no masks.
+    fn label_mask_names(&self, _mask: u64) -> Result<Labels> {
+        Err(grafeo_common::utils::error::Error::Internal(
+            "a label mask from a store that gives none".to_string(),
+        ))
+    }
+
     /// Whether node `id` has `label` as `view` sees the node, `None` when
     /// the view does not see it.
     ///
@@ -318,6 +346,23 @@ pub trait GraphStore: Send + Sync {
         view: ReadView,
     ) -> Result<Vec<(NodeId, EdgeId)>>;
 
+    /// Whether `view` sees an edge of `node` in `direction` of one of
+    /// `types` (any type when empty), as [`edges`](Self::edges) would list
+    /// one: an `EXISTS` of one edge needs no more than the first.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error of a read the store cannot do.
+    fn has_edge(
+        &self,
+        node: NodeId,
+        direction: Direction,
+        types: &[ArcStr],
+        view: ReadView,
+    ) -> Result<bool> {
+        Ok(!self.edges(node, direction, types, view)?.is_empty())
+    }
+
     /// How many edges [`edges`](Self::edges) lists for `node` in `direction`
     /// of every type.
     ///
@@ -396,6 +441,14 @@ pub trait GraphStore: Send + Sync {
         Ok(self.nodes_by_label(label, view)?.len())
     }
 
+    /// Whether [`nodes_by_label_count`](Self::nodes_by_label_count) of
+    /// `label` answers for `view` from a count the store keeps, without
+    /// reading the label's nodes: what a query that counts reports as read.
+    /// `false` unless the store keeps such counts.
+    fn label_count_is_kept(&self, _label: &str, _view: ReadView) -> bool {
+        false
+    }
+
     /// How many nodes `view` sees.
     ///
     /// # Errors
@@ -437,6 +490,40 @@ pub trait GraphStore: Send + Sync {
     ///
     /// Returns the error of a read the store cannot do.
     fn all_edge_types(&self) -> Result<Vec<String>>;
+
+    /// The labels of [`all_labels`](Self::all_labels) that a node `view`
+    /// sees has: a label whose last node went is no longer one.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error of a read the store cannot do.
+    fn labels_in_use(&self, view: ReadView) -> Result<Vec<String>> {
+        let mut in_use = Vec::new();
+        for label in self.all_labels()? {
+            if self.nodes_by_label_count(&label, view)? > 0 {
+                in_use.push(label);
+            }
+        }
+        Ok(in_use)
+    }
+
+    /// The edge types of [`all_edge_types`](Self::all_edge_types) that an
+    /// edge `view` sees has. The default reads every node's outgoing edges.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error of a read the store cannot do.
+    fn edge_types_in_use(&self, view: ReadView) -> Result<Vec<String>> {
+        let mut in_use = std::collections::BTreeSet::new();
+        for node in self.node_ids(view)? {
+            for (_, edge) in self.edges(node, Direction::Outgoing, &[], view)? {
+                if let Some(edge_type) = self.edge_type(edge, view)? {
+                    in_use.insert(edge_type.to_string());
+                }
+            }
+        }
+        Ok(in_use.into_iter().collect())
+    }
 
     /// Every property key the store holds, of nodes and edges (see
     /// [`all_labels`](Self::all_labels)).
@@ -565,9 +652,27 @@ pub trait GraphStore: Send + Sync {
 
     // --- Statistics ---
 
-    /// The statistics the cost-based optimizer plans with (a cheap `Arc`
-    /// clone): estimates, not answers.
+    /// The statistics the cost-based optimizer plans with: estimates, not
+    /// answers. A store may build them on each call (the row-group store
+    /// walks every label and edge type), so a plan of one statement reads
+    /// what it needs through [`label_node_estimate`](Self::label_node_estimate)
+    /// and [`node_estimate`](Self::node_estimate) instead.
     fn statistics(&self) -> Arc<Statistics>;
+
+    /// How many nodes have `label` by the [`statistics`](Self::statistics):
+    /// 0 for a label they do not list. The physical planner chooses scan
+    /// labels by it on every execution, so a store that keeps its counts
+    /// answers without building the statistics.
+    fn label_node_estimate(&self, label: &str) -> u64 {
+        self.statistics()
+            .get_label(label)
+            .map_or(0, |label| label.node_count)
+    }
+
+    /// How many nodes the store holds by the [`statistics`](Self::statistics).
+    fn node_estimate(&self) -> u64 {
+        self.statistics().total_nodes
+    }
 
     /// The latest epoch the store holds commits of. A database that adopts
     /// the store continues its epochs from it; the engine reads at the views
@@ -673,6 +778,16 @@ pub trait GraphStore: Send + Sync {
     #[cfg(feature = "vector-index")]
     fn has_vector_index(&self, label: &str, property: &str) -> bool {
         self.vector_index_config(label, property).is_some()
+    }
+
+    /// Whether the store keeps a vector index on `property` for any label: a
+    /// writer then reads the labels of a node it writes a list to, which the
+    /// index may take as a vector. A store that keeps vector indexes
+    /// implements it with [`vector_index_config`](Self::vector_index_config).
+    #[cfg(feature = "vector-index")]
+    fn has_vector_index_on(&self, property: &str) -> bool {
+        let _ = property;
+        false
     }
 
     /// The configuration of the vector index on `label` and `property`, if

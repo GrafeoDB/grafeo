@@ -284,6 +284,17 @@ impl<'a> Lexer<'a> {
         }
     }
 
+    /// A lexer over `input` from the start of `at`, on its line and column:
+    /// for a clause of GQL inside another language's statement.
+    pub(crate) fn starting_at(input: &'a str, at: SourceSpan) -> Self {
+        Self {
+            input,
+            position: at.start,
+            line: at.line,
+            column: at.column,
+        }
+    }
+
     /// Returns the next token.
     pub fn next_token(&mut self) -> Token {
         self.skip_whitespace();
@@ -501,9 +512,11 @@ impl<'a> Lexer<'a> {
                     self.position += c.len_utf8();
                 }
             } else {
-                // Line comment: "-- " (with space/tab) to disambiguate from undirected edge "--"
+                // Line comment: `//` or "-- " (with space/tab, to disambiguate
+                // from the undirected edge "--"), ISO GQL's simple comments
                 let rest = self.rest();
-                let is_line_comment = rest.starts_with("-- ")
+                let is_line_comment = rest.starts_with("//")
+                    || rest.starts_with("-- ")
                     || rest.starts_with("--\t")
                     || rest.starts_with("--\n")
                     || rest.starts_with("--\r");

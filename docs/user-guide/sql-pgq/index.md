@@ -77,6 +77,11 @@ COLUMNS (
 )
 ```
 
+As in GQL, a cast of text to an integer trims the spaces around it and truncates toward zero
+(`CAST(' 4.7 ' AS INT)` is 4), text that spells no number fails with `22018`, and a float outside
+the integer range fails with `22003`. Another value that does not convert, such as an invalid date,
+is `NULL`.
+
 ## Examples
 
 ### Find friends of a person
@@ -109,10 +114,15 @@ FROM GRAPH_TABLE (
     COLUMNS (
         a.name AS source,
         b.name AS target,
-        LENGTH(path) AS hops
+        LENGTH(path) AS hops,
+        NODES(path) AS stops,
+        EDGES(path) AS legs
     )
 );
 ```
+
+`NODES(path)` and `EDGES(path)` return the nodes and edges of the path in path order, with their properties, as
+GQL and Cypher return them.
 
 ## Using SQL/PGQ
 

@@ -16,11 +16,14 @@ This guide covers the fundamentals of querying RDF data with SPARQL.
 The `SELECT` clause specifies which variables to return:
 
 ```sparql
+PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+
 # Select all variables
 SELECT *
 WHERE { ?s ?p ?o }
 
 # Select specific variables
+PREFIX foaf: <http://xmlns.com/foaf/0.1/>
 SELECT ?name ?age
 WHERE { ?person foaf:name ?name . ?person foaf:age ?age }
 
@@ -62,6 +65,10 @@ WHERE {
 }
 ```
 
+Five prefixes are predefined and work without a `PREFIX` line: `rdf`, `rdfs`, `xsd`, `owl` and `fn` (the XPath
+functions). A query can redefine any of them with its own `PREFIX`, and any other prefix it uses without declaring it
+is a syntax error that names the prefix.
+
 ## Multiple Triple Patterns
 
 Chain triple patterns with `.` (period):
@@ -91,6 +98,7 @@ WHERE {
 ORDER BY ?age
 
 # Descending order
+PREFIX foaf: <http://xmlns.com/foaf/0.1/>
 SELECT ?name ?age
 WHERE {
     ?person foaf:name ?name .
@@ -99,6 +107,7 @@ WHERE {
 ORDER BY DESC(?age)
 
 # Multiple sort keys
+PREFIX foaf: <http://xmlns.com/foaf/0.1/>
 SELECT ?name ?age
 WHERE {
     ?person foaf:name ?name .
@@ -110,12 +119,15 @@ ORDER BY DESC(?age) ?name
 ## Limiting Results
 
 ```sparql
+PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+
 # Return first 10 results
 SELECT ?name
 WHERE { ?person foaf:name ?name }
 LIMIT 10
 
 # Skip and limit (pagination)
+PREFIX foaf: <http://xmlns.com/foaf/0.1/>
 SELECT ?name
 WHERE { ?person foaf:name ?name }
 ORDER BY ?name
@@ -186,17 +198,25 @@ WHERE {
 SPARQL supports operations on named graphs:
 
 ```sparql
--- Copy all triples from one graph to another (replaces destination)
+# The source graph must exist: give it a triple first
+INSERT DATA {
+    GRAPH <http://example.org/source> {
+        <http://example.org/alix> <http://xmlns.com/foaf/0.1/name> "Alix" .
+    }
+}
+
+# Copy all triples from one graph to another (replaces destination)
 COPY <http://example.org/source> TO <http://example.org/dest>
 
--- Move all triples (copy + delete source)
-MOVE <http://example.org/source> TO <http://example.org/dest>
-
--- Add triples from source to destination (merge, keeps existing)
+# Add triples from source to destination (merge, keeps existing)
 ADD <http://example.org/source> TO <http://example.org/dest>
+
+# Move all triples (copy + delete source)
+MOVE <http://example.org/source> TO <http://example.org/dest>
 ```
 
-Use `SILENT` to suppress errors when the source graph does not exist:
+A `COPY`, `MOVE` or `ADD` whose source graph does not exist fails ("Source graph <...> does not exist"), as SPARQL
+1.1 Update specifies. Use `SILENT` to skip such a statement without an error:
 
 ```sparql
 COPY SILENT <http://example.org/missing> TO <http://example.org/dest>

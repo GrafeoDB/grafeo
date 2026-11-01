@@ -182,11 +182,25 @@ tests:
       rows:
         - [2.35, -2.35]
 
-  - name: cast_to_decimal_with_too_many_integer_digits_is_null
+  # A value that does not fit the declared precision fails with 22003, as SQL.
+  - name: cast_to_decimal_with_too_many_integer_digits_fails
     query: "RETURN CAST(12345.6 AS DECIMAL(5, 2)) AS d"
     expect:
+      error: ""
+      gql_status: "22003"
+
+  - name: cast_to_decimal_that_rounds_up_past_its_precision_fails
+    # 99.96 rounds to 100.0, four digits for DECIMAL(3, 1); 99.94 fits.
+    query: "RETURN CAST(99.96 AS DECIMAL(3, 1)) AS d"
+    expect:
+      error: ""
+      gql_status: "22003"
+
+  - name: cast_to_decimal_that_rounds_within_its_precision
+    query: "RETURN CAST(99.94 AS DECIMAL(3, 1)) AS d, CAST(-99.94 AS DECIMAL(3, 1)) AS n"
+    expect:
       rows:
-        - [null]
+        - [99.9, -99.9]
 
   - name: cast_to_decimal_and_dec
     query: "RETURN CAST(3 AS DECIMAL) IS TYPED DECIMAL AS d, CAST('1.50' AS DEC) AS dec"

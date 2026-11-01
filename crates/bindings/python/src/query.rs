@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
+use std::sync::OnceLock;
 
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
@@ -23,8 +24,9 @@ use crate::types::PyValue;
 pub struct PyQueryResult {
     pub(crate) columns: Vec<String>,
     pub(crate) rows: Vec<Vec<Value>>,
-    pub(crate) nodes: Vec<PyNode>,
-    pub(crate) edges: Vec<PyEdge>,
+    /// The nodes and edges of the rows, found when first asked for: a result
+    /// read row by row never copies them out.
+    entities: OnceLock<(Vec<PyNode>, Vec<PyEdge>)>,
     current_row: usize,
     /// Query execution time in milliseconds.
     pub(crate) execution_time_ms: Option<f64>,
@@ -120,11 +122,9 @@ impl PyQueryResult {
         let idx = slf.current_row;
         slf.current_row += 1;
 
-        let row = slf.rows[idx].clone();
-        let columns = slf.columns.clone();
-
+        let this = &*slf;
         let dict = pyo3::types::PyDict::new(py);
-        for (col, val) in columns.iter().zip(row.iter()) {
+        for (col, val) in this.columns.iter().zip(this.rows[idx].iter()) {
             dict.set_item(col, PyValue::to_py(val, py)?)?;
         }
         Ok(Some(dict.unbind().into_any()))
@@ -132,12 +132,12 @@ impl PyQueryResult {
 
     /// Get all nodes from the result.
     fn nodes(&self) -> Vec<PyNode> {
-        self.nodes.clone()
+        self.entities().0.clone()
     }
 
     /// Get all edges from the result.
     fn edges(&self) -> Vec<PyEdge> {
-        self.edges.clone()
+        self.entities().1.clone()
     }
 
     /// Convert to list of dictionaries.
@@ -474,8 +474,7 @@ impl PyQueryResult {
         Self {
             columns,
             rows,
-            nodes,
-            edges,
+            entities: OnceLock::from((nodes, edges)),
             current_row: 0,
             execution_time_ms: None,
             rows_scanned: None,
@@ -485,20 +484,18 @@ impl PyQueryResult {
         }
     }
 
-    /// Creates a new query result with execution metrics (used internally).
+    /// Creates a new query result with execution metrics (used internally);
+    /// its nodes and edges are found in the rows when first asked for.
     pub fn with_metrics(
         columns: Vec<String>,
         rows: Vec<Vec<Value>>,
-        nodes: Vec<PyNode>,
-        edges: Vec<PyEdge>,
         execution_time_ms: Option<f64>,
         rows_scanned: Option<u64>,
     ) -> Self {
         Self {
             columns,
             rows,
-            nodes,
-            edges,
+            entities: OnceLock::new(),
             current_row: 0,
             execution_time_ms,
             rows_scanned,
@@ -544,13 +541,25 @@ impl PyQueryResult {
         })
     }
 
+    /// The nodes and edges of the rows, each once (see
+    /// [extract_entities_from_rows](grafeo_bindings_common::entity::extract_entities_from_rows)),
+    /// found on the first call.
+    fn entities(&self) -> &(Vec<PyNode>, Vec<PyEdge>) {
+        self.entities.get_or_init(|| {
+            grafeo_bindings_common::entity::extract_and_map_rows(
+                &self.rows,
+                |n| PyNode::new(n.id, n.labels, n.properties),
+                |e| PyEdge::new(e.id, e.edge_type, e.source_id, e.target_id, e.properties),
+            )
+        })
+    }
+
     /// Creates an empty result (used internally).
     pub fn empty() -> Self {
         Self {
             columns: Vec::new(),
             rows: Vec::new(),
-            nodes: Vec::new(),
-            edges: Vec::new(),
+            entities: OnceLock::from((Vec::new(), Vec::new())),
             current_row: 0,
             execution_time_ms: None,
             rows_scanned: None,

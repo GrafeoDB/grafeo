@@ -92,11 +92,11 @@ RETURN e.title, e.created_at
 Extract individual components from temporal values:
 
 ```sql
-WITH DATE '2024-06-15' AS d
+LET d = DATE '2024-06-15'
 RETURN year(d), month(d), day(d)
 -- 2024, 6, 15
 
-WITH TIME '14:30:45' AS t
+LET t = TIME '14:30:45'
 RETURN hour(t), minute(t), second(t)
 -- 14, 30, 45
 ```
@@ -265,6 +265,8 @@ For multiple queries against the same historical snapshot, set a viewing epoch o
     MATCH (p:Person)
     RETURN p.name, p.city
     ```
+
+Inside an open transaction, `execute_at_epoch` and `set_viewing_epoch` refuse an epoch before the retained history, as outside one, and read committed data at that epoch, never later than the transaction's own snapshot. The transaction's own writes show again once the viewing epoch is cleared. An epoch past the latest commit reads at the latest completed commit, also while a commit is running or after one failed partway.
 
 ---
 

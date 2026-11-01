@@ -140,13 +140,13 @@ results = db.hybrid_search(
 
 ## Graceful Degradation
 
-If either index is missing, `hybrid_search()` silently omits that source from fusion rather than raising an error:
+If one index is missing, `hybrid_search()` omits that source from fusion:
 
 - **No text index**: only vector results are returned
-- **No vector index**: only text results are returned
-- **Neither index exists**: returns an empty list
+- **No vector index, or no query vector**: only text results are returned
+- **Neither can be read** (no text index, and no vector index or no query vector): fails with an error that names the indexes, as `vector_search()` and `text_search()` do
 
-This makes it safe to call `hybrid_search()` in code paths where indexes may not yet be configured.
+One index is enough. A missing index or the wrong graph is an error, never an empty result.
 
 ## Text-Only Mode
 

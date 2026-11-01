@@ -446,6 +446,21 @@ fn an_edge_and_a_node_from_one_union_step_are_both_records() {
     }
 }
 
+/// A subquery whose parts return an edge and a node under one name returns
+/// each as what it is, for every outer row the subquery runs for.
+#[test]
+fn an_edge_and_a_node_from_one_subquery_are_both_records() {
+    let db = three_edges(Config::in_memory());
+    for language in LANGUAGES {
+        let query = "MATCH (a:A {n: 1})                      CALL (a) { MATCH (a)-[r:K]->() RETURN r AS x                      UNION ALL MATCH (a)-[:K]->(b) RETURN b AS x } RETURN x";
+        assert_eq!(
+            sorted(rows(&db, language, query)),
+            [["K w=Int64(1)"], ["n=Int64(2)"]],
+            "{language}"
+        );
+    }
+}
+
 /// A returned edge names its stored endpoints (#268: `RETURN a, r, b` gave
 /// `r` as an integer): `_source` is the id of the node it leaves and
 /// `_target` of the node it enters, also when the pattern reads it from its

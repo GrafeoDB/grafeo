@@ -1,0 +1,759 @@
+# SPARQL FILTER inside OPTIONAL reads the joined solution
+#
+# SPARQL 1.1 Query 18.2.2.6: for OPTIONAL { P FILTER(F) } the group becomes
+# LeftJoin(G, P, F), and 18.5 evaluates F over the merge of each left row
+# with each right row it is compatible with. So F reads the variables of the
+# pattern before the OPTIONAL. A left row is extended by every right row the
+# condition holds for, and kept alone when it holds for none (#701). A FILTER
+# in a group nested inside the OPTIONAL reads that group alone (the W3C test
+# dawg-optional-filter-005-not-simplified), and the condition of a nested
+# OPTIONAL reads its own group's left side, not the outer pattern (the
+# algebra is evaluated bottom up).
+
+meta:
+  language: sparql
+  model: rdf
+  section: optional
+  title: FILTER inside OPTIONAL reads the joined solution
+  dataset: empty
+  requires: [sparql, rdf]
+
+tests:
+
+  # ---------------------------------------------------------------------------
+  # A condition on a variable of the outer pattern
+  # ---------------------------------------------------------------------------
+
+  - name: a_filter_on_an_outer_variable_reads_its_binding
+    # ?n is bound in the merged solution, so !BOUND(?n) is false and the
+    # OPTIONAL does not extend Alix.
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/alix> <http://ex.org/name> "Alix" .
+          <http://ex.org/alix> <http://ex.org/city> "Amsterdam" .
+        }
+    query: |
+      SELECT ?n ?c WHERE {
+        ?s <http://ex.org/name> ?n
+        OPTIONAL { ?s <http://ex.org/city> ?c FILTER(!BOUND(?n)) }
+      }
+    expect:
+      rows:
+        - [Alix, null]
+
+  - name: a_count_over_the_optional_variable_sees_no_extension
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/alix> <http://ex.org/name> "Alix" .
+          <http://ex.org/alix> <http://ex.org/city> "Amsterdam" .
+        }
+    query: |
+      SELECT (COUNT(?c) AS ?k) WHERE {
+        ?s <http://ex.org/name> ?n
+        OPTIONAL { ?s <http://ex.org/city> ?c FILTER(!BOUND(?n)) }
+      }
+    expect:
+      rows:
+        - [0]
+
+  - name: a_comparison_of_an_outer_and_an_inner_variable_holds
+    # 35 > 30 in the merged solution; over the optional pattern alone ?a is
+    # unbound, the comparison an error, and the extension was dropped.
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/alix> <http://ex.org/age> 30 .
+          <http://ex.org/alix> <http://ex.org/limit> 35 .
+        }
+    query: |
+      SELECT ?a ?l WHERE {
+        ?s <http://ex.org/age> ?a
+        OPTIONAL { ?s <http://ex.org/limit> ?l FILTER(?l > ?a) }
+      }
+    expect:
+      rows:
+        - [30, 35]
+
+  # ---------------------------------------------------------------------------
+  # Controls: a condition on the optional pattern's own variables
+  # ---------------------------------------------------------------------------
+
+  - name: a_filter_on_an_inner_variable_that_holds_extends
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/alix> <http://ex.org/name> "Alix" .
+          <http://ex.org/alix> <http://ex.org/city> "Amsterdam" .
+        }
+    query: |
+      SELECT ?n ?c WHERE {
+        ?s <http://ex.org/name> ?n
+        OPTIONAL { ?s <http://ex.org/city> ?c FILTER(?c = "Amsterdam") }
+      }
+    expect:
+      rows:
+        - [Alix, Amsterdam]
+
+  - name: a_filter_on_an_inner_variable_that_fails_keeps_the_row_alone
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/alix> <http://ex.org/name> "Alix" .
+          <http://ex.org/alix> <http://ex.org/city> "Amsterdam" .
+        }
+    query: |
+      SELECT ?n ?c WHERE {
+        ?s <http://ex.org/name> ?n
+        OPTIONAL { ?s <http://ex.org/city> ?c FILTER(?c = "Berlin") }
+      }
+    expect:
+      rows:
+        - [Alix, null]
+
+  # ---------------------------------------------------------------------------
+  # Each left row is decided on its own pairs
+  # ---------------------------------------------------------------------------
+
+  - name: each_left_row_is_extended_by_the_pairs_its_condition_holds_for
+    # Alix (30) has limits 25 and 35: only 35 extends her, and she is not
+    # also kept alone. Gus (40) has 35 only: no pair holds, he is kept
+    # alone. Vincent (50) has 60: extended.
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/alix> <http://ex.org/age> 30 .
+          <http://ex.org/alix> <http://ex.org/limit> 25 .
+          <http://ex.org/alix> <http://ex.org/limit> 35 .
+          <http://ex.org/gus> <http://ex.org/age> 40 .
+          <http://ex.org/gus> <http://ex.org/limit> 35 .
+          <http://ex.org/vincent> <http://ex.org/age> 50 .
+          <http://ex.org/vincent> <http://ex.org/limit> 60 .
+        }
+    query: |
+      SELECT ?s ?l WHERE {
+        ?s <http://ex.org/age> ?a
+        OPTIONAL { ?s <http://ex.org/limit> ?l FILTER(?l > ?a) }
+      }
+    expect:
+      rows:
+        - [http://ex.org/alix, 35]
+        - [http://ex.org/gus, null]
+        - [http://ex.org/vincent, 60]
+
+  - name: two_filters_in_one_optional_are_a_conjunction
+    # FILTER(?l > ?a) and FILTER(?a < 45) both hold for Alix only: Vincent's
+    # 60 > 50 holds, but 50 < 45 does not.
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/alix> <http://ex.org/age> 30 .
+          <http://ex.org/alix> <http://ex.org/limit> 25 .
+          <http://ex.org/alix> <http://ex.org/limit> 35 .
+          <http://ex.org/gus> <http://ex.org/age> 40 .
+          <http://ex.org/gus> <http://ex.org/limit> 35 .
+          <http://ex.org/vincent> <http://ex.org/age> 50 .
+          <http://ex.org/vincent> <http://ex.org/limit> 60 .
+        }
+    query: |
+      SELECT ?s ?l WHERE {
+        ?s <http://ex.org/age> ?a
+        OPTIONAL { ?s <http://ex.org/limit> ?l FILTER(?l > ?a) FILTER(?a < 45) }
+      }
+    expect:
+      rows:
+        - [http://ex.org/alix, 35]
+        - [http://ex.org/gus, null]
+        - [http://ex.org/vincent, null]
+
+  # ---------------------------------------------------------------------------
+  # Nested groups and nested OPTIONAL patterns: the algebra is bottom up
+  # ---------------------------------------------------------------------------
+
+  - name: a_filter_in_a_group_inside_the_optional_reads_that_group_alone
+    # OPTIONAL { { P FILTER(F) } } is LeftJoin(G, Filter(F, P), true): F does
+    # not see ?n, so !BOUND(?n) holds and Amsterdam extends Alix (W3C
+    # dawg-optional-filter-005-not-simplified).
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/alix> <http://ex.org/name> "Alix" .
+          <http://ex.org/alix> <http://ex.org/city> "Amsterdam" .
+        }
+    query: |
+      SELECT ?n ?c WHERE {
+        ?s <http://ex.org/name> ?n
+        OPTIONAL { { ?s <http://ex.org/city> ?c FILTER(!BOUND(?n)) } }
+      }
+    expect:
+      rows:
+        - [Alix, Amsterdam]
+
+  - name: a_nested_optional_reads_the_variables_of_its_own_group
+    # The inner OPTIONAL is LeftJoin({ ?s knows ?f }, { ?f city ?c },
+    # !BOUND(?s)): ?s is bound on its left side, so Gus's city does not
+    # extend.
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/alix> <http://ex.org/age> 30 .
+          <http://ex.org/alix> <http://ex.org/knows> <http://ex.org/gus> .
+          <http://ex.org/gus> <http://ex.org/city> "Berlin" .
+        }
+    query: |
+      SELECT ?s ?f ?c WHERE {
+        ?s <http://ex.org/age> 30
+        OPTIONAL {
+          ?s <http://ex.org/knows> ?f
+          OPTIONAL { ?f <http://ex.org/city> ?c FILTER(!BOUND(?s)) }
+        }
+      }
+    expect:
+      rows:
+        - [http://ex.org/alix, http://ex.org/gus, null]
+
+  - name: a_nested_optional_does_not_see_the_outermost_pattern
+    # ?a is bound only by the outermost pattern; the middle group is
+    # evaluated before the join with it, so on the inner OPTIONAL's left
+    # side ?a is unbound, !BOUND(?a) holds and Berlin extends.
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/alix> <http://ex.org/age> 30 .
+          <http://ex.org/alix> <http://ex.org/knows> <http://ex.org/gus> .
+          <http://ex.org/gus> <http://ex.org/city> "Berlin" .
+        }
+    query: |
+      SELECT ?s ?f ?c WHERE {
+        ?s <http://ex.org/age> ?a
+        OPTIONAL {
+          ?s <http://ex.org/knows> ?f
+          OPTIONAL { ?f <http://ex.org/city> ?c FILTER(!BOUND(?a)) }
+        }
+      }
+    expect:
+      rows:
+        - [http://ex.org/alix, http://ex.org/gus, Berlin]
+
+  # ---------------------------------------------------------------------------
+  # No shared variable: the condition decides each pair of the cross product
+  # ---------------------------------------------------------------------------
+
+  - name: a_condition_without_a_shared_variable_decides_each_pair
+    # Alix is extended by every label but her own name, Gus by both.
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/alix> <http://ex.org/name> "Alix" .
+          <http://ex.org/gus> <http://ex.org/name> "Gus" .
+          <http://ex.org/a> <http://ex.org/label> "Alix" .
+          <http://ex.org/berlin> <http://ex.org/label> "Berlin" .
+        }
+    query: |
+      SELECT ?n ?l WHERE {
+        ?s <http://ex.org/name> ?n
+        OPTIONAL { ?c <http://ex.org/label> ?l FILTER(?l != ?n) }
+      }
+    expect:
+      rows:
+        - [Alix, Berlin]
+        - [Gus, Alix]
+        - [Gus, Berlin]
+
+  - name: a_condition_without_a_shared_variable_that_never_holds_keeps_each_row
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/alix> <http://ex.org/name> "Alix" .
+          <http://ex.org/gus> <http://ex.org/name> "Gus" .
+          <http://ex.org/berlin> <http://ex.org/label> "Berlin" .
+        }
+    query: |
+      SELECT ?n ?l WHERE {
+        ?s <http://ex.org/name> ?n
+        OPTIONAL { ?c <http://ex.org/label> ?l FILTER(?l = ?n) }
+      }
+    expect:
+      rows:
+        - [Alix, null]
+        - [Gus, null]
+
+  # ---------------------------------------------------------------------------
+  # The left side is a UNION, a VALUES or a sub-SELECT
+  # ---------------------------------------------------------------------------
+
+  - name: an_optional_after_a_union_reads_the_branch_variables
+    # The name row of Alix is extended; her nick row and Gus are not.
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/alix> <http://ex.org/name> "Alix" .
+          <http://ex.org/alix> <http://ex.org/nick> "Lix" .
+          <http://ex.org/alix> <http://ex.org/age> 30 .
+          <http://ex.org/gus> <http://ex.org/name> "Gus" .
+          <http://ex.org/gus> <http://ex.org/age> 40 .
+        }
+    query: |
+      SELECT ?n ?a WHERE {
+        { ?s <http://ex.org/name> ?n } UNION { ?s <http://ex.org/nick> ?n }
+        OPTIONAL { ?s <http://ex.org/age> ?a FILTER(?n = "Alix") }
+      }
+    expect:
+      rows:
+        - [Alix, 30]
+        - [Lix, null]
+        - [Gus, null]
+
+  - name: an_optional_after_values_reads_the_values
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/alix> <http://ex.org/limit> 35 .
+          <http://ex.org/gus> <http://ex.org/limit> 35 .
+        }
+    query: |
+      SELECT ?s ?l WHERE {
+        VALUES (?s ?min) { (<http://ex.org/alix> 32) (<http://ex.org/gus> 50) }
+        OPTIONAL { ?s <http://ex.org/limit> ?l FILTER(?l > ?min) }
+      }
+    expect:
+      rows:
+        - [http://ex.org/alix, 35]
+        - [http://ex.org/gus, null]
+
+  - name: an_optional_after_a_sub_select_reads_its_projection
+    # Alix's highest age is 31 (limit 35 extends, 25 does not); Gus's is 40.
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/alix> <http://ex.org/age> 30 .
+          <http://ex.org/alix> <http://ex.org/age> 31 .
+          <http://ex.org/alix> <http://ex.org/limit> 25 .
+          <http://ex.org/alix> <http://ex.org/limit> 35 .
+          <http://ex.org/gus> <http://ex.org/age> 40 .
+          <http://ex.org/gus> <http://ex.org/limit> 35 .
+        }
+    query: |
+      SELECT ?s ?top ?l WHERE {
+        { SELECT ?s (MAX(?a) AS ?top) WHERE { ?s <http://ex.org/age> ?a } GROUP BY ?s }
+        OPTIONAL { ?s <http://ex.org/limit> ?l FILTER(?l > ?top) }
+      }
+    expect:
+      rows:
+        - [http://ex.org/alix, 31, 35]
+        - [http://ex.org/gus, 40, null]
+
+  # ---------------------------------------------------------------------------
+  # A condition that is an error keeps the left row alone
+  # ---------------------------------------------------------------------------
+
+  - name: a_condition_on_an_unbound_variable_keeps_the_row_alone
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/alix> <http://ex.org/name> "Alix" .
+          <http://ex.org/alix> <http://ex.org/city> "Amsterdam" .
+        }
+    query: |
+      SELECT ?n ?c WHERE {
+        ?s <http://ex.org/name> ?n
+        OPTIONAL { ?s <http://ex.org/city> ?c FILTER(?c = ?nowhere) }
+      }
+    expect:
+      rows:
+        - [Alix, null]
+
+  - name: a_negated_error_is_still_an_error
+    # !(error) is an error, not true.
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/alix> <http://ex.org/name> "Alix" .
+          <http://ex.org/alix> <http://ex.org/city> "Amsterdam" .
+        }
+    query: |
+      SELECT ?n ?c WHERE {
+        ?s <http://ex.org/name> ?n
+        OPTIONAL { ?s <http://ex.org/city> ?c FILTER(!(?c = ?nowhere)) }
+      }
+    expect:
+      rows:
+        - [Alix, null]
+
+  - name: a_condition_comparing_a_string_to_a_number_keeps_the_row_alone
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/alix> <http://ex.org/name> "Alix" .
+          <http://ex.org/alix> <http://ex.org/age> 30 .
+          <http://ex.org/alix> <http://ex.org/city> "Amsterdam" .
+        }
+    query: |
+      SELECT ?n ?c WHERE {
+        ?s <http://ex.org/age> ?a .
+        ?s <http://ex.org/name> ?n
+        OPTIONAL { ?s <http://ex.org/city> ?c FILTER(?c > ?a) }
+      }
+    expect:
+      rows:
+        - [Alix, null]
+
+  # ---------------------------------------------------------------------------
+  # Functions over the outer pattern's terms
+  # ---------------------------------------------------------------------------
+
+  - name: a_condition_on_the_language_of_an_outer_literal
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/alix> <http://ex.org/nick> "Lix"@en .
+          <http://ex.org/alix> <http://ex.org/nick> "Lix"@fr .
+          <http://ex.org/alix> <http://ex.org/name> "Alix" .
+        }
+    query: |
+      SELECT (LANG(?k) AS ?t) ?n WHERE {
+        ?s <http://ex.org/nick> ?k
+        OPTIONAL { ?s <http://ex.org/name> ?n FILTER(LANG(?k) = "en") }
+      }
+    expect:
+      rows:
+        - [en, Alix]
+        - [fr, null]
+
+  - name: a_condition_on_the_datatype_of_an_outer_literal
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/alix> <http://ex.org/score> "1.5"^^<http://www.w3.org/2001/XMLSchema#decimal> .
+          <http://ex.org/alix> <http://ex.org/name> "Alix" .
+          <http://ex.org/gus> <http://ex.org/score> 2 .
+          <http://ex.org/gus> <http://ex.org/name> "Gus" .
+        }
+    query: |
+      SELECT ?s ?n WHERE {
+        ?s <http://ex.org/score> ?v
+        OPTIONAL {
+          ?s <http://ex.org/name> ?n
+          FILTER(DATATYPE(?v) = <http://www.w3.org/2001/XMLSchema#integer>)
+        }
+      }
+    expect:
+      rows:
+        - [http://ex.org/alix, null]
+        - [http://ex.org/gus, Gus]
+
+  - name: a_condition_on_the_string_of_an_outer_iri
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/alix> <http://ex.org/name> "Alix" .
+          <http://ex.org/alix> <http://ex.org/city> "Amsterdam" .
+          <http://ex.org/gus> <http://ex.org/name> "Gus" .
+          <http://ex.org/gus> <http://ex.org/city> "Berlin" .
+        }
+    query: |
+      SELECT ?n ?c WHERE {
+        ?s <http://ex.org/name> ?n
+        OPTIONAL { ?s <http://ex.org/city> ?c FILTER(STRENDS(STR(?s), "alix")) }
+      }
+    expect:
+      rows:
+        - [Alix, Amsterdam]
+        - [Gus, null]
+
+  # ---------------------------------------------------------------------------
+  # A condition on a GRAPH variable of the outer pattern
+  # ---------------------------------------------------------------------------
+
+  - name: a_condition_on_an_outer_graph_variable
+    # Alix is named in the people graph, Gus in the staff graph; the ages are
+    # in the default graph.
+    setup:
+      - |
+        INSERT DATA {
+          GRAPH <http://ex.org/people> { <http://ex.org/alix> <http://ex.org/name> "Alix" . }
+          GRAPH <http://ex.org/staff> { <http://ex.org/gus> <http://ex.org/name> "Gus" . }
+          <http://ex.org/alix> <http://ex.org/age> 30 .
+          <http://ex.org/gus> <http://ex.org/age> 40 .
+        }
+    query: |
+      SELECT ?n ?a WHERE {
+        GRAPH ?g { ?s <http://ex.org/name> ?n }
+        OPTIONAL { ?s <http://ex.org/age> ?a FILTER(?g = <http://ex.org/people>) }
+      }
+    expect:
+      rows:
+        - [Alix, 30]
+        - [Gus, null]
+
+  # ---------------------------------------------------------------------------
+  # A variable an OPTIONAL left unbound joins with every value after it
+  # ---------------------------------------------------------------------------
+
+  - name: an_optional_variable_left_unbound_joins_with_a_later_pattern
+    # Alix has no city: her unbound ?c is compatible with the label's
+    # "Berlin" (18.3), so she joins too, taking ?c from the label.
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/alix> <http://ex.org/name> "Alix" .
+          <http://ex.org/gus> <http://ex.org/name> "Gus" .
+          <http://ex.org/gus> <http://ex.org/city> "Berlin" .
+          <http://ex.org/berlin> <http://ex.org/label> "Berlin" .
+        }
+    query: |
+      SELECT ?n ?c ?b WHERE {
+        ?s <http://ex.org/name> ?n
+        OPTIONAL { ?s <http://ex.org/city> ?c }
+        ?b <http://ex.org/label> ?c
+      }
+    expect:
+      rows:
+        - [Alix, Berlin, http://ex.org/berlin]
+        - [Gus, Berlin, http://ex.org/berlin]
+
+  # ---------------------------------------------------------------------------
+  # A chain of OPTIONAL patterns, each reading the one before
+  # ---------------------------------------------------------------------------
+
+  - name: a_chain_of_optionals_each_reading_the_one_before
+    # The first OPTIONAL leaves Gus's age unbound (its condition fails for
+    # him), so the second one's ?l > ?a is an error for Gus despite his
+    # limit 45. Vincent's 40 is not above his 50.
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/alix> <http://ex.org/name> "Alix" .
+          <http://ex.org/alix> <http://ex.org/age> 30 .
+          <http://ex.org/alix> <http://ex.org/limit> 35 .
+          <http://ex.org/gus> <http://ex.org/name> "Gus" .
+          <http://ex.org/gus> <http://ex.org/age> 40 .
+          <http://ex.org/gus> <http://ex.org/limit> 45 .
+          <http://ex.org/vincent> <http://ex.org/name> "Vincent" .
+          <http://ex.org/vincent> <http://ex.org/age> 50 .
+          <http://ex.org/vincent> <http://ex.org/limit> 40 .
+        }
+    query: |
+      SELECT ?n ?a ?l WHERE {
+        ?s <http://ex.org/name> ?n
+        OPTIONAL { ?s <http://ex.org/age> ?a FILTER(?n != "Gus") }
+        OPTIONAL { ?s <http://ex.org/limit> ?l FILTER(?l > ?a) }
+      }
+    expect:
+      rows:
+        - [Alix, 30, 35]
+        - [Gus, null, null]
+        - [Vincent, 50, null]
+
+  # ---------------------------------------------------------------------------
+  # ASK and CONSTRUCT read the same solutions
+  # ---------------------------------------------------------------------------
+
+  - name: ask_sees_no_extension_when_the_outer_condition_fails
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/alix> <http://ex.org/name> "Alix" .
+          <http://ex.org/alix> <http://ex.org/city> "Amsterdam" .
+        }
+    query: |
+      ASK {
+        ?s <http://ex.org/name> ?n
+        OPTIONAL { ?s <http://ex.org/city> ?c FILTER(!BOUND(?n)) }
+        FILTER(BOUND(?c))
+      }
+    expect:
+      columns: [boolean]
+      rows:
+        - [false]
+
+  - name: ask_sees_the_extension_when_an_outer_and_inner_comparison_holds
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/alix> <http://ex.org/age> 30 .
+          <http://ex.org/alix> <http://ex.org/limit> 35 .
+        }
+    query: |
+      ASK {
+        ?s <http://ex.org/age> ?a
+        OPTIONAL { ?s <http://ex.org/limit> ?l FILTER(?l > ?a) }
+        FILTER(BOUND(?l))
+      }
+    expect:
+      columns: [boolean]
+      rows:
+        - [true]
+
+  - name: construct_from_an_optional_whose_outer_condition_fails_builds_nothing
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/alix> <http://ex.org/name> "Alix" .
+          <http://ex.org/alix> <http://ex.org/city> "Amsterdam" .
+        }
+    query: |
+      CONSTRUCT { ?s <http://ex.org/lives> ?c } WHERE {
+        ?s <http://ex.org/name> ?n
+        OPTIONAL { ?s <http://ex.org/city> ?c FILTER(!BOUND(?n)) }
+      }
+    expect:
+      count: 0
+
+  - name: construct_from_an_optional_whose_comparison_holds_builds_its_triple
+    # Only Alix's 35 is above her age; Gus's row has no ?l and builds no
+    # triple.
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/alix> <http://ex.org/age> 30 .
+          <http://ex.org/alix> <http://ex.org/limit> 35 .
+          <http://ex.org/gus> <http://ex.org/age> 40 .
+          <http://ex.org/gus> <http://ex.org/limit> 35 .
+        }
+    query: |
+      CONSTRUCT { ?s <http://ex.org/allowed> ?l } WHERE {
+        ?s <http://ex.org/age> ?a
+        OPTIONAL { ?s <http://ex.org/limit> ?l FILTER(?l > ?a) }
+      }
+    expect:
+      rows:
+        - [http://ex.org/alix, http://ex.org/allowed, 35]
+
+  # ---------------------------------------------------------------------------
+  # EXISTS in the condition of an OPTIONAL reads the merged solution too
+  # (18.2.2.6 and 18.6: the EXISTS pattern is evaluated with the merged
+  # solution's bindings substituted, the outer ones included)
+  # ---------------------------------------------------------------------------
+
+  - name: exists_inside_an_optional_reads_an_outer_variable
+    # ?x is bound before the OPTIONAL: Mia likes Gus, Jules likes Vincent,
+    # Butch likes no one. Each fan keeps only the friends they like.
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/alix> <http://ex.org/role> <http://ex.org/member> .
+          <http://ex.org/mia> <http://ex.org/role> <http://ex.org/fan> .
+          <http://ex.org/jules> <http://ex.org/role> <http://ex.org/fan> .
+          <http://ex.org/butch> <http://ex.org/role> <http://ex.org/fan> .
+          <http://ex.org/alix> <http://ex.org/knows> <http://ex.org/gus> .
+          <http://ex.org/alix> <http://ex.org/knows> <http://ex.org/vincent> .
+          <http://ex.org/mia> <http://ex.org/likes> <http://ex.org/gus> .
+          <http://ex.org/jules> <http://ex.org/likes> <http://ex.org/vincent> .
+        }
+    query: |
+      SELECT ?x ?f WHERE {
+        ?p <http://ex.org/role> <http://ex.org/member> .
+        ?x <http://ex.org/role> <http://ex.org/fan> .
+        OPTIONAL { ?p <http://ex.org/knows> ?f FILTER EXISTS { ?x <http://ex.org/likes> ?f } }
+      }
+    expect:
+      rows:
+        - [http://ex.org/mia, http://ex.org/gus]
+        - [http://ex.org/jules, http://ex.org/vincent]
+        - [http://ex.org/butch, null]
+
+  - name: not_exists_inside_an_optional_reads_an_outer_variable
+    # The complement: each fan keeps the friends they do not like; Butch
+    # likes no one and keeps both.
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/alix> <http://ex.org/role> <http://ex.org/member> .
+          <http://ex.org/mia> <http://ex.org/role> <http://ex.org/fan> .
+          <http://ex.org/jules> <http://ex.org/role> <http://ex.org/fan> .
+          <http://ex.org/butch> <http://ex.org/role> <http://ex.org/fan> .
+          <http://ex.org/alix> <http://ex.org/knows> <http://ex.org/gus> .
+          <http://ex.org/alix> <http://ex.org/knows> <http://ex.org/vincent> .
+          <http://ex.org/mia> <http://ex.org/likes> <http://ex.org/gus> .
+          <http://ex.org/jules> <http://ex.org/likes> <http://ex.org/vincent> .
+        }
+    query: |
+      SELECT ?x ?f WHERE {
+        ?p <http://ex.org/role> <http://ex.org/member> .
+        ?x <http://ex.org/role> <http://ex.org/fan> .
+        OPTIONAL { ?p <http://ex.org/knows> ?f FILTER NOT EXISTS { ?x <http://ex.org/likes> ?f } }
+      }
+    expect:
+      rows:
+        - [http://ex.org/mia, http://ex.org/vincent]
+        - [http://ex.org/jules, http://ex.org/gus]
+        - [http://ex.org/butch, http://ex.org/gus]
+        - [http://ex.org/butch, http://ex.org/vincent]
+
+  - name: not_exists_inside_an_optional_compares_with_an_outer_variable
+    # ?o is bound before the OPTIONAL. Alix's r equals her o, so NOT EXISTS
+    # fails and she keeps no ?z; Gus's r differs, so he gets his ?z.
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/alix> <http://ex.org/o> "1" .
+          <http://ex.org/alix> <http://ex.org/r> "1" .
+          <http://ex.org/alix> <http://ex.org/q> "za" .
+          <http://ex.org/gus> <http://ex.org/o> "1" .
+          <http://ex.org/gus> <http://ex.org/r> "2" .
+          <http://ex.org/gus> <http://ex.org/q> "zg" .
+        }
+    query: |
+      SELECT ?s ?z WHERE {
+        ?s <http://ex.org/o> ?o
+        OPTIONAL { ?s <http://ex.org/q> ?z FILTER NOT EXISTS { ?s <http://ex.org/r> ?o } }
+      }
+    expect:
+      rows:
+        - [http://ex.org/alix, null]
+        - [http://ex.org/gus, zg]
+
+  # ---------------------------------------------------------------------------
+  # A variable both sides have, which the left side leaves unbound
+  # ---------------------------------------------------------------------------
+
+  - name: a_filter_reads_a_variable_only_the_right_side_binds
+    # ?z comes from a first OPTIONAL: Gus has a nick, Alix and Vincent do
+    # not. In the second OPTIONAL the merged solution takes ?z from the
+    # alias, so the FILTER reads the alias where the nick is unbound: Alix's
+    # "A" passes, Vincent's "B" does not; Gus's alias is incompatible with
+    # his nick, so he keeps "G".
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/alix> <http://ex.org/role> <http://ex.org/member> .
+          <http://ex.org/gus> <http://ex.org/role> <http://ex.org/member> .
+          <http://ex.org/vincent> <http://ex.org/role> <http://ex.org/member> .
+          <http://ex.org/gus> <http://ex.org/nick> "G" .
+          <http://ex.org/alix> <http://ex.org/alias> "A" .
+          <http://ex.org/gus> <http://ex.org/alias> "A" .
+          <http://ex.org/vincent> <http://ex.org/alias> "B" .
+        }
+    query: |
+      SELECT ?p ?z WHERE {
+        ?p <http://ex.org/role> <http://ex.org/member>
+        OPTIONAL { ?p <http://ex.org/nick> ?z }
+        OPTIONAL { ?p <http://ex.org/alias> ?z FILTER(?z = "A") }
+      }
+    expect:
+      rows:
+        - [http://ex.org/alix, A]
+        - [http://ex.org/gus, G]
+        - [http://ex.org/vincent, null]
+
+  - name: bound_in_the_condition_sees_a_variable_only_the_right_side_binds
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/alix> <http://ex.org/role> <http://ex.org/member> .
+          <http://ex.org/gus> <http://ex.org/role> <http://ex.org/member> .
+          <http://ex.org/gus> <http://ex.org/nick> "G" .
+          <http://ex.org/alix> <http://ex.org/alias> "A" .
+        }
+    query: |
+      SELECT ?p ?z WHERE {
+        ?p <http://ex.org/role> <http://ex.org/member>
+        OPTIONAL { ?p <http://ex.org/nick> ?z }
+        OPTIONAL { ?p <http://ex.org/alias> ?z FILTER(BOUND(?z)) }
+      }
+    expect:
+      rows:
+        - [http://ex.org/alix, A]
+        - [http://ex.org/gus, G]

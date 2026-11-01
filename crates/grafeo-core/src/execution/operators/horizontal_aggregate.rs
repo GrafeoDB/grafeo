@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use grafeo_common::types::{EdgeId, LogicalType, NodeId, ReadView, Value};
+use grafeo_common::types::{EdgeId, LogicalType, NodeId, ReadView, TemporalComparison, Value};
 
 use super::accumulator::AggregateFunction;
 use super::aggregate::AggregateState;
@@ -58,6 +58,10 @@ pub struct HorizontalAggregateOperator {
     input_column_count: usize,
     /// Who reads: each entity is read as this view sees it.
     view: ReadView,
+    /// How DISTINCT, MIN and MAX read a local datetime against a zoned one
+    /// (see [`TemporalComparison::normalize`]); `TypesApart` reads every
+    /// value as itself.
+    temporal: TemporalComparison,
 }
 
 impl HorizontalAggregateOperator {
@@ -88,7 +92,16 @@ impl HorizontalAggregateOperator {
             store,
             input_column_count,
             view,
+            temporal: TemporalComparison::TypesApart,
         }
+    }
+
+    /// The operator with `temporal` as the reading of the aggregate's
+    /// DISTINCT, MIN and MAX (the statement's `=` and `<`).
+    #[must_use]
+    pub fn with_temporal(mut self, temporal: TemporalComparison) -> Self {
+        self.temporal = temporal;
+        self
     }
 
     /// Sets the options of the aggregate: `DISTINCT`, the percentile of the
@@ -173,7 +186,7 @@ impl Operator for HorizontalAggregateOperator {
                 for entity_val in list.iter() {
                     let prop_val = self.get_property_value(entity_val)?;
                     if prop_val.is_some() && !matches!(prop_val, Some(Value::Null)) {
-                        state.update(prop_val);
+                        state.update_under(prop_val, self.temporal);
                     }
                 }
                 state.finalize()?

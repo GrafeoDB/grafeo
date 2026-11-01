@@ -151,18 +151,29 @@ impl TermDictionary {
     }
 
     /// Gets or inserts a term, returning its ID.
-    pub fn get_or_insert(&mut self, term: Term) -> u32 {
+    ///
+    /// # Errors
+    ///
+    /// [`TripleRingInvariantError::DictionaryOverflow`] for a new term when
+    /// the dictionary already holds `u32::MAX` terms (ids are `u32`).
+    pub fn get_or_insert(&mut self, term: Term) -> Result<u32, TripleRingInvariantError> {
         let term = Arc::new(term);
         if let Some(&id) = self.term_to_id.get(&term) {
-            return id;
+            return Ok(id);
         }
-
-        // reason: term dictionary size fits u32
-        #[allow(clippy::cast_possible_truncation)]
-        let id = self.id_to_term.len() as u32;
+        let id = Self::next_id(self.id_to_term.len())?;
         self.id_to_term.push(Arc::clone(&term));
         self.term_to_id.insert(term, id);
-        id
+        Ok(id)
+    }
+
+    /// The id of the term a dictionary of `len` terms adds: `len`, while it
+    /// is below `u32::MAX`, the most terms the packed dictionary holds.
+    fn next_id(len: usize) -> Result<u32, TripleRingInvariantError> {
+        u32::try_from(len)
+            .ok()
+            .filter(|id| *id < u32::MAX)
+            .ok_or(TripleRingInvariantError::DictionaryOverflow { len })
     }
 
     /// Looks up a term by ID.
@@ -269,8 +280,25 @@ impl TripleRing {
     /// # Arguments
     ///
     /// * `triples` - Iterator over RDF triples
+    ///
+    /// # Panics
+    ///
+    /// For triples of `u32::MAX` distinct terms or more (see
+    /// [`try_from_triples`](Self::try_from_triples)).
     #[must_use]
     pub fn from_triples(triples: impl Iterator<Item = Triple>) -> Self {
+        Self::try_from_triples(triples).expect("fewer than u32::MAX distinct terms")
+    }
+
+    /// [`from_triples`](Self::from_triples), or an error for triples of
+    /// more distinct terms than a ring gives ids.
+    ///
+    /// # Errors
+    ///
+    /// [`TripleRingInvariantError::DictionaryOverflow`].
+    pub fn try_from_triples(
+        triples: impl Iterator<Item = Triple>,
+    ) -> Result<Self, TripleRingInvariantError> {
         // Collect all triples and build dictionary
         let mut dict = TermDictionary::new();
         let mut compact_triples: Vec<CompactTriple> = Vec::new();
@@ -281,24 +309,24 @@ impl TripleRing {
             let ids = triple.ids();
             let (s, p, o) = triple.into_parts();
             let mut ring_id = |term: Term, slot: usize| {
-                let id = dict.get_or_insert(term);
+                let id = dict.get_or_insert(term)?;
                 match (&mut store_ids, ids) {
                     (Some(known), Some(ids)) if id as usize == known.len() => known.push(ids[slot]),
                     (Some(_), Some(_)) | (None, Some(_)) => {}
                     (known, None) => *known = None,
                 }
-                id
+                Ok::<_, TripleRingInvariantError>(id)
             };
             let compact = CompactTriple {
-                subject: ring_id(s, 0),
-                predicate: ring_id(p, 1),
-                object: ring_id(o, 2),
+                subject: ring_id(s, 0)?,
+                predicate: ring_id(p, 1)?,
+                object: ring_id(o, 2)?,
             };
             compact_triples.push(compact);
         }
 
         if compact_triples.is_empty() {
-            return Self {
+            return Ok(Self {
                 dict,
                 num_triples: 0,
                 subjects: WaveletTree::new(&[]),
@@ -307,7 +335,7 @@ impl TripleRing {
                 spo_to_pos: SuccinctPermutation::default(),
                 spo_to_osp: SuccinctPermutation::default(),
                 store_ids: Vec::new(),
-            };
+            });
         }
 
         // Canonical ids: the terms in the byte order of their N-Triples
@@ -375,7 +403,7 @@ impl TripleRing {
             spo_to_osp_arr[spo_idx] = osp_idx;
         }
 
-        Self {
+        Ok(Self {
             dict,
             num_triples: n,
             subjects: subjects_wt,
@@ -384,7 +412,7 @@ impl TripleRing {
             spo_to_pos: SuccinctPermutation::new(&spo_to_pos_arr),
             spo_to_osp: SuccinctPermutation::new(&spo_to_osp_arr),
             store_ids,
-        }
+        })
     }
 
     /// The store's id of each ring term, by ring id; empty when the ring's
@@ -570,7 +598,7 @@ impl TripleRing {
         // comes twice.
         let mut dict = TermDictionary::with_capacity(dict_len);
         for (id, term) in (0u32..).zip(terms) {
-            let given = dict.get_or_insert(term);
+            let given = dict.get_or_insert(term)?;
             if given != id {
                 return Err(TripleRingInvariantError::DuplicateTerm { id, first: given });
             }
@@ -968,6 +996,43 @@ mod tests {
         Triple::new(Term::iri(s), Term::iri(p), Term::iri(o))
     }
 
+    /// Control: terms get the ids 0, 1, ... in insertion order, and a term
+    /// inserted again keeps its id.
+    #[test]
+    fn term_dictionary_gives_ids_in_insertion_order() {
+        let mut dict = TermDictionary::new();
+        let alix = Term::iri("http://ex.org/alix");
+        let gus = Term::iri("http://ex.org/gus");
+        assert_eq!(dict.get_or_insert(alix.clone()).unwrap(), 0);
+        assert_eq!(dict.get_or_insert(gus.clone()).unwrap(), 1);
+        assert_eq!(dict.get_or_insert(alix.clone()).unwrap(), 0);
+        assert_eq!(dict.len(), 2);
+        assert_eq!(dict.get_term(1), Some(&gus));
+        assert_eq!(dict.get_id(&alix), Some(0));
+    }
+
+    /// The id of a new term must fit `u32`: the dictionary refuses a term
+    /// past `u32::MAX` terms with an error (the cast wrapped it to id 0, the
+    /// first term's). Reaching the bound takes 2^32 terms, so this test reads
+    /// the seam the fix extracts, which gives the id of the term that a
+    /// dictionary of `len` terms adds, without allocating them.
+    ///
+    /// Seam (proposed): `TermDictionary::next_id(len: usize) -> Result<u32,
+    /// _>`, private, called by `get_or_insert` (which then returns a
+    /// `Result`).
+    #[test]
+    fn term_dictionary_refuses_a_term_past_u32_ids() {
+        let past = usize::try_from(u64::from(u32::MAX) + 1).unwrap();
+        assert!(TermDictionary::next_id(past).is_err());
+        assert!(TermDictionary::next_id(usize::MAX).is_err());
+        assert_eq!(TermDictionary::next_id(0).unwrap(), 0);
+        // The packed dictionary holds at most u32::MAX terms (ids up to
+        // u32::MAX - 1); whether id u32::MAX itself is given is the fix's
+        // call, so the test stops one below it.
+        let below = usize::try_from(u32::MAX - 1).unwrap();
+        assert_eq!(TermDictionary::next_id(below).unwrap(), u32::MAX - 1);
+    }
+
     #[test]
     fn test_empty() {
         let ring = TripleRing::from_triples(std::iter::empty());
@@ -1143,8 +1208,8 @@ mod tests {
         assert_eq!(dict.len(), 0);
 
         // Add some terms
-        let id1 = dict.get_or_insert(Term::iri("test1"));
-        let id2 = dict.get_or_insert(Term::iri("test2"));
+        let id1 = dict.get_or_insert(Term::iri("test1")).unwrap();
+        let id2 = dict.get_or_insert(Term::iri("test2")).unwrap();
 
         assert_eq!(id1, 0);
         assert_eq!(id2, 1);
@@ -1158,7 +1223,8 @@ mod tests {
         assert!(empty_size > 0);
 
         // Add terms and verify size increases
-        dict.get_or_insert(Term::iri("some_long_term_name"));
+        dict.get_or_insert(Term::iri("some_long_term_name"))
+            .unwrap();
         let size_with_term = dict.size_bytes();
         assert!(size_with_term > empty_size);
     }
@@ -1168,8 +1234,8 @@ mod tests {
         let mut dict = TermDictionary::new();
         let term = Term::iri("test");
 
-        let id1 = dict.get_or_insert(term.clone());
-        let id2 = dict.get_or_insert(term.clone());
+        let id1 = dict.get_or_insert(term.clone()).unwrap();
+        let id2 = dict.get_or_insert(term.clone()).unwrap();
 
         // Should return same ID for duplicate term
         assert_eq!(id1, id2);

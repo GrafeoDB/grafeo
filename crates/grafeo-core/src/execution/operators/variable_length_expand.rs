@@ -7,7 +7,7 @@ use crate::execution::DataChunk;
 use crate::graph::Direction;
 use crate::graph::GraphStore;
 use grafeo_common::types::{ArcStr, EdgeId, LogicalType, NodeId, ReadView};
-use grafeo_common::utils::hash::FxHashSet;
+use grafeo_common::utils::hash::{FxHashMap, FxHashSet};
 use std::collections::VecDeque;
 use std::sync::Arc;
 
@@ -44,10 +44,11 @@ pub(super) fn path_budget_error(
     ))
 }
 
-/// What to do about a variable-length pattern over its budget.
-const VARIABLE_LENGTH_ADVICE: &str = "give the pattern an upper bound (`*1..5` or `{1,5}`), \
-     return DISTINCT nodes (`RETURN DISTINCT f`, `count(DISTINCT f)`), or use a shortest path \
-     search (`shortestPath`, `ANY SHORTEST`)";
+/// What to do about a variable-length pattern over its budget: an unbounded
+/// walk around a cycle has no end, and reaches it.
+const VARIABLE_LENGTH_ADVICE: &str = "bound the quantifier, or use TRAIL, ACYCLIC or ANY \
+     SHORTEST (`{1,5}` or `*1..5`, `MATCH TRAIL ...`, `shortestPath`), or return DISTINCT nodes \
+     (`RETURN DISTINCT f`, `count(DISTINCT f)`)";
 
 /// Path traversal mode controlling which paths are allowed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -208,39 +209,60 @@ struct RowSearch {
     source: NodeId,
     /// The paths found and not yet emitted or extended, shortest first.
     open: VecDeque<OpenPath>,
-    /// The most paths `open` may hold: the budget over the bytes one holds.
-    max_open: usize,
-    /// The budget, in bytes, for the error message.
+    /// The bytes the paths in `open` are charged (see [`Self::cost`]).
+    held: usize,
+    /// The bytes `open` may be charged.
     budget: usize,
+    /// The bytes a path is charged, and charged more for each of its edges
+    /// (see [`VariableLengthExpandOperator::path_charges`]).
+    per_path: usize,
+    per_edge: usize,
     /// The row the edge condition reads (see
     /// [`VariableLengthExpandOperator::condition_row`]).
     condition_row: Option<DataChunk>,
 }
 
 impl RowSearch {
-    /// Adds a path to emit and extend later, within the budget: `open` grows
-    /// to at most `max_open` paths, and only by memory the system grants.
+    /// The bytes `path` is charged while it is open (see
+    /// [`VariableLengthExpandOperator::path_charges`]).
+    fn cost(&self, path: &OpenPath) -> usize {
+        let edges = usize::try_from(path.length).unwrap_or(usize::MAX);
+        self.per_path
+            .saturating_add(edges.saturating_mul(self.per_edge))
+    }
+
+    /// Adds a path to emit and extend later, within the budget: `open` is
+    /// charged at most the budget, and grows only by memory the system
+    /// grants.
     fn push(&mut self, path: OpenPath) -> Result<(), OperatorError> {
-        let held = self.open.len();
-        if held >= self.max_open {
+        let cost = self.cost(&path);
+        if self.held.saturating_add(cost) > self.budget {
             return Err(path_budget_error(
                 "A variable-length pattern",
-                held,
+                self.open.len(),
                 self.budget,
                 VARIABLE_LENGTH_ADVICE,
             ));
         }
+        let held = self.open.len();
         if held == self.open.capacity() {
-            let more = held.max(16).min(self.max_open - held);
-            self.open.try_reserve_exact(more).map_err(|_| {
+            self.open.try_reserve(held.max(16)).map_err(|_| {
                 OperatorError::LimitExceeded(format!(
                     "A variable-length pattern holds {held} paths and the system has no memory \
                      for more: {VARIABLE_LENGTH_ADVICE}"
                 ))
             })?;
         }
+        self.held += cost;
         self.open.push_back(path);
         Ok(())
+    }
+
+    /// The next path to emit and extend, its charge released.
+    fn pop(&mut self) -> Option<OpenPath> {
+        let path = self.open.pop_front()?;
+        self.held -= self.cost(&path);
+        Some(path)
     }
 }
 
@@ -462,7 +484,8 @@ impl VariableLengthExpandOperator {
     /// Whether this expand runs the reachability search of
     /// [`Self::with_reachability`].
     fn searches_reachability(&self) -> bool {
-        self.reachability != Reachability::Off && self.path_mode == PathMode::Walk
+        self.reachability != Reachability::Off
+            && matches!(self.path_mode, PathMode::Walk | PathMode::Trail)
     }
 
     /// Sets the chunk capacity.
@@ -631,18 +654,28 @@ impl VariableLengthExpandOperator {
         self.output_path_detail || self.output_edge_list || self.path_mode != PathMode::Walk
     }
 
-    /// The bytes one open path of the search holds: the entry in the
-    /// search's queue, and the segment of the path's last edge when the
-    /// search follows paths (its earlier segments are shared with other
-    /// paths).
-    fn bytes_per_open_path(&self) -> usize {
-        let segment = if self.follows_paths() {
-            // The segment and the two counts of its `Arc`
-            std::mem::size_of::<PathSegment>() + 2 * std::mem::size_of::<usize>()
+    /// The bytes one open path of the search is charged, and charged more
+    /// for each of its edges (see `RowSearch::cost`).
+    ///
+    /// A path is charged what it holds: its entry in the search's queue,
+    /// and, in a search that follows paths, the one segment it adds to the
+    /// path it extends (the segments of its prefix belong to that path and
+    /// the others that share them). An unbounded walk is charged a segment
+    /// per edge on top: a walk around a cycle never ends and can hold few
+    /// paths at once, so a charge that grows with its length is what makes
+    /// it reach the budget. A bounded search ends at its last hop, and a
+    /// path in TRAIL, SIMPLE or ACYCLIC mode ends on its own.
+    fn path_charges(&self) -> (usize, usize) {
+        // A segment and the two counts of its `Arc`
+        let segment = std::mem::size_of::<PathSegment>() + 2 * std::mem::size_of::<usize>();
+        let entry = std::mem::size_of::<OpenPath>();
+        let per_path = if self.follows_paths() {
+            entry + segment
         } else {
-            0
+            entry
         };
-        std::mem::size_of::<OpenPath>() + segment
+        let unbounded_walk = self.path_mode == PathMode::Walk && self.max_hops == u32::MAX;
+        (per_path, if unbounded_walk { segment } else { 0 })
     }
 
     /// The most node and edge ids the rows buffered for one chunk hold in
@@ -683,12 +716,15 @@ impl VariableLengthExpandOperator {
                 path_edges: (self.output_path_detail || self.output_edge_list).then(Vec::new),
             });
         }
+        let (per_path, per_edge) = self.path_charges();
         let mut search = RowSearch {
             input_idx,
             source,
             open: VecDeque::new(),
-            max_open: (self.budget / self.bytes_per_open_path()).max(1),
+            held: 0,
             budget: self.budget,
+            per_path,
+            per_edge,
             condition_row: self.condition_row(input_idx),
         };
         if self.max_hops > 0 {
@@ -745,7 +781,7 @@ impl VariableLengthExpandOperator {
     fn advance(&mut self, search: &mut RowSearch) -> Result<bool, OperatorError> {
         let with_edges = self.output_path_detail || self.output_edge_list;
         while !self.output_full() {
-            let Some(path) = search.open.pop_front() else {
+            let Some(path) = search.pop() else {
                 return Ok(false);
             };
             if (self.min_hops..=self.max_hops).contains(&path.length) {
@@ -789,6 +825,24 @@ impl VariableLengthExpandOperator {
     /// node is then expanded once from `min_hops` on (twice if it was in
     /// layer `min_hops - 1`), also for the hundred hops of an unbounded
     /// pattern.
+    ///
+    /// In TRAIL mode (an undirected pattern of `min_hops` at most 1, which
+    /// the planner sends here) every node but the source is first reached
+    /// over a shortest path, which repeats no edge, so it is reached as
+    /// above. The source is a target only over a closed trail, which a walk
+    /// back over the edge it left by is not. Each node keeps its depth and
+    /// the first edge of its path from the source: an edge that joins two
+    /// nodes of different first edges, or comes back to the source over
+    /// another edge than the one its node was reached over, closes a trail
+    /// through the source as long as both paths and itself (two paths from
+    /// the source that start with different edges share no edge, as both
+    /// are shortest). The shortest such trail is the shortest closed trail
+    /// through the source. The source is emitted where a trail of the
+    /// current layer comes back to it (a self-loop or a parallel edge),
+    /// which is where the paths first reach it; a longer closed trail is
+    /// found from both ends of its middle edge, and the source is emitted at
+    /// the end of the layer of that length, when it is at most `max_hops`:
+    /// the same rows as the paths give, the source perhaps later among them.
     fn reachable_targets(
         &self,
         input_idx: usize,
@@ -814,10 +868,52 @@ impl VariableLengthExpandOperator {
             emitted.insert(source_node);
             results.push(reached(source_node, 0));
         }
+        // TRAIL mode: whether the source still waits for a closed trail, each
+        // reached node's depth and first edge from the source, and the
+        // length of the shortest closed trail through the source found yet
+        let mut trail_source = self.path_mode == PathMode::Trail && self.min_hops != 0;
+        let mut first_edges: FxHashMap<NodeId, (u32, EdgeId)> = FxHashMap::default();
+        let mut closed_trail: Option<u32> = None;
         for depth in 1..=self.max_hops {
             let emitting = depth >= self.min_hops;
             for &node in &layer {
-                for (target, _) in self.get_edges(node, condition_row.as_mut())? {
+                let (node_depth, node_first) = if node == source_node {
+                    (0, None)
+                } else {
+                    first_edges
+                        .get(&node)
+                        .map_or((0, None), |&(depth, first)| (depth, Some(first)))
+                };
+                for (target, edge) in self.get_edges(node, condition_row.as_mut())? {
+                    if trail_source {
+                        let first = node_first.unwrap_or(edge);
+                        let closing = if target == source_node {
+                            // Back at the source: a self-loop of the source,
+                            // or another edge than the one `node` was
+                            // reached over from it
+                            (node == source_node || node_first != Some(edge))
+                                .then_some(node_depth + 1)
+                        } else if let Some(&(target_depth, target_first)) = first_edges.get(&target)
+                        {
+                            (target_first != first).then_some(node_depth + target_depth + 1)
+                        } else {
+                            first_edges.insert(target, (depth, first));
+                            None
+                        };
+                        if let Some(length) = closing {
+                            closed_trail = Some(closed_trail.map_or(length, |c| c.min(length)));
+                        }
+                        if target == source_node {
+                            // A trail that ends here, in this layer (a self-loop
+                            // or a parallel edge), reaches the source where the
+                            // paths of this layer first do
+                            if emitting && closing == Some(depth) && emitted.insert(source_node) {
+                                results.push(reached(source_node, depth));
+                                trail_source = false;
+                            }
+                            continue;
+                        }
+                    }
                     if emitting {
                         if emitted.insert(target) {
                             results.push(reached(target, depth));
@@ -828,12 +924,25 @@ impl VariableLengthExpandOperator {
                     }
                 }
             }
+            if trail_source && let Some(length) = closed_trail.filter(|&c| c <= depth) {
+                trail_source = false;
+                if emitted.insert(source_node) {
+                    results.push(reached(source_node, length));
+                }
+            }
             if next_layer.is_empty() {
                 break;
             }
             std::mem::swap(&mut layer, &mut next_layer);
             next_layer.clear();
             in_next_layer.clear();
+        }
+        // A closed trail found in the last layer expanded, longer than it
+        if trail_source
+            && let Some(length) = closed_trail.filter(|&c| c <= self.max_hops)
+            && emitted.insert(source_node)
+        {
+            results.push(reached(source_node, length));
         }
         Ok(results)
     }
@@ -2818,7 +2927,13 @@ mod tests {
             let OperatorError::LimitExceeded(message) = &error else {
                 panic!("{mode:?}: expected LimitExceeded, got {error:?}");
             };
-            for advice in ["upper bound", "DISTINCT", "shortest", "64 KiB"] {
+            for advice in [
+                "bound the quantifier",
+                "TRAIL",
+                "DISTINCT",
+                "SHORTEST",
+                "64 KiB",
+            ] {
                 assert!(
                     message.contains(advice),
                     "{mode:?}: the message names `{advice}`: {message}"
@@ -2832,9 +2947,11 @@ mod tests {
         // Three edges each way, up to six edges: 1,092 walks, 729 of them of
         // six edges, which the search holds at once after finding the last
         // of them. A budget of exactly 729 open paths suffices, and the rows
-        // stream out in chunks of 50; one path less does not.
+        // stream out in chunks of 50; one path less does not. A bounded walk
+        // is charged its entry alone, whatever its length.
         let store = parallel_edges(3);
-        let per_path = from_sources(&store, 1, 6).bytes_per_open_path();
+        let (per_path, per_edge) = from_sources(&store, 1, 6).path_charges();
+        assert_eq!(per_edge, 0, "a bounded walk is not charged per edge");
         let expand = |open_paths: usize| {
             from_sources(&store, 1, 6)
                 .with_path_length_output()

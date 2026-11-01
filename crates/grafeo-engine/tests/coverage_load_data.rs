@@ -95,6 +95,82 @@ fn test_csv_quoted_commas() {
     assert_eq!(r.rows()[0][0], Value::String("likes cats, dogs".into()));
 }
 
+#[test]
+fn csv_quoted_line_breaks_keep_exact_rows_and_values() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("multiline.csv");
+    std::fs::write(
+        &file,
+        "name,bio\r\nAlix,\"first\r\n\r\nsaid \"\"hi\"\"\"\r\nGus,quiet",
+    )
+    .unwrap();
+    let path = file.to_string_lossy().replace('\\', "/");
+    let db = GrafeoDB::new_in_memory();
+    let check = |language: &str, query: &str| {
+        for _ in 0..2 {
+            let result = db.execute_language(query, language, None).unwrap();
+            assert_eq!(
+                result.rows(),
+                &[
+                    vec![
+                        Value::String("Alix".into()),
+                        Value::String("first\r\n\r\nsaid \"hi\"".into())
+                    ],
+                    vec![Value::String("Gus".into()), Value::String("quiet".into())],
+                ],
+                "{language}"
+            );
+        }
+    };
+    check(
+        "gql",
+        &format!(
+            "LOAD DATA FROM '{path}' FORMAT CSV WITH HEADERS AS row \
+         RETURN row.name, row.bio ORDER BY row.name"
+        ),
+    );
+    #[cfg(feature = "cypher")]
+    check(
+        "cypher",
+        &format!(
+            "LOAD CSV WITH HEADERS FROM '{path}' AS row \
+         RETURN row.name, row.bio ORDER BY row.name"
+        ),
+    );
+}
+
+#[test]
+fn csv_unterminated_quotes_report_the_field_starting_line() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("unterminated.csv");
+    let path = file.to_string_lossy().replace('\\', "/");
+    let db = GrafeoDB::new_in_memory();
+    for (content, line) in [
+        ("\u{feff}\"unfinished\nheader", 1),
+        ("name,bio\r\nAlix,ok\r\n\r\nGus,\"unfinished\r\nlast", 4),
+    ] {
+        std::fs::write(&file, content).unwrap();
+        let check = |language: &str, query: &str| {
+            let error = db.execute_language(query, language, None).unwrap_err();
+            assert!(
+                error.to_string().contains(&format!(
+                    "unterminated quoted field starting at line {line}"
+                )),
+                "{language}: {error}"
+            );
+        };
+        check(
+            "gql",
+            &format!("LOAD DATA FROM '{path}' FORMAT CSV WITH HEADERS AS row RETURN row"),
+        );
+        #[cfg(feature = "cypher")]
+        check(
+            "cypher",
+            &format!("LOAD CSV WITH HEADERS FROM '{path}' AS row RETURN row"),
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // CSV with empty file (headers only, no data rows)
 // ---------------------------------------------------------------------------

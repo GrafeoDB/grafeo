@@ -573,7 +573,7 @@ pub struct CardinalityEstimator {
     /// Configurable selectivity defaults.
     selectivity_config: SelectivityConfig,
     /// RDF statistics for triple pattern cardinality estimation.
-    rdf_statistics: Option<grafeo_core::statistics::RdfStatistics>,
+    rdf_statistics: Option<std::sync::Arc<grafeo_core::statistics::RdfStatistics>>,
 }
 
 impl CardinalityEstimator {
@@ -665,7 +665,9 @@ impl CardinalityEstimator {
     /// Uses triple pattern cardinality estimates for `TripleScan` operators
     /// and join selectivity from per-predicate statistics.
     #[must_use]
-    pub fn from_rdf_statistics(rdf_stats: grafeo_core::statistics::RdfStatistics) -> Self {
+    pub fn from_rdf_statistics(
+        rdf_stats: std::sync::Arc<grafeo_core::statistics::RdfStatistics>,
+    ) -> Self {
         let mut estimator = Self::new();
         if rdf_stats.total_triples > 0 {
             estimator.default_row_count = rdf_stats.total_triples;

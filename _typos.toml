@@ -20,6 +20,8 @@ extend-exclude = [
 extend-ignore-re = ['(?m)^[A-Z]+[0-9]+\|[a-z]+ [0-9a-f]{10} ']
 
 [default.extend-words]
+# "flate" (flate2) = the gzip crate the parquet reader names in its error for gzip files
+flate = "flate"
 # "fof" = friend-of-friend (standard graph query pattern)
 fof = "fof"
 fofName = "fofName"

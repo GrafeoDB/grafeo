@@ -111,9 +111,10 @@ await db.executeSql(query, params?);      // SQL/PGQ
 | `BigInt` | Int64, or Decimal past 64 bits | Exact up to 38 digits (scale 0); past that an error naming the parameter or property |
 | `Array` | List | Elements converted recursively |
 | `Object` | Map | Keys must be strings |
-| `Buffer` | Bytes | |
+| `Buffer`, `Uint8Array` | Bytes | |
 | `Date` | Timestamp | Millisecond precision |
-| `Float32Array` | Vector | For embeddings and similarity search |
+| `Float32Array` | Vector | For embeddings and similarity search: it can be indexed and found by `vectorSearch` |
+| `Float64Array` | Vector | Each element stored as the nearest 32-bit float |
 
 ## RDF Terms
 

@@ -170,8 +170,9 @@ tests:
         - [Mia]
         - [Vincent]
 
+  # Alix acted in Midnight Code (2021); Jules, Mia and Vincent in The Heist
+  # (2020).
   - name: not_exists_subquery
-    skip: "NOT EXISTS subquery in Cypher"
     query: |
       MATCH (a:Actor)
       WHERE NOT EXISTS {
@@ -182,7 +183,8 @@ tests:
     expect:
       ordered: true
       rows:
-        - [Alix]
+        - [Beatrix]
+        - [Butch]
         - [Gus]
 
   # ---------------------------------------------------------------------------

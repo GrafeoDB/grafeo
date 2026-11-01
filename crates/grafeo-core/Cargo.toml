@@ -32,7 +32,7 @@ bytes.workspace = true
 bincode.workspace = true
 
 # Data import (optional)
-parquet = { version = "60", optional = true, default-features = false }
+parquet = { version = "60", optional = true, default-features = false, features = ["snap"] }  # Snappy: the default of pyarrow, pandas and Spark
 
 # Concurrency
 parking_lot.workspace = true

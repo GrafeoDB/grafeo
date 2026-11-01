@@ -230,6 +230,9 @@ WHERE SAME(b, c)
 RETURN a.name, b.name
 ```
 
+Both compare values as `=` and `DISTINCT` do: `1` and `1.0e0` are one value, and two paths, vectors or byte
+strings are equal only when every element is.
+
 ### PROPERTY_EXISTS
 
 Check whether a property key exists on an entity:

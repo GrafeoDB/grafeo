@@ -51,10 +51,7 @@ pub fn extract_and_map<N, E>(
     map_node: impl Fn(RawNode) -> N,
     map_edge: impl Fn(RawEdge) -> E,
 ) -> (Vec<N>, Vec<E>) {
-    let (raw_nodes, raw_edges) = extract_entities(result);
-    let nodes = raw_nodes.into_iter().map(map_node).collect();
-    let edges = raw_edges.into_iter().map(map_edge).collect();
-    (nodes, edges)
+    extract_and_map_rows(result.rows(), map_node, map_edge)
 }
 
 /// Scans all values in a [`QueryResult`] for maps that look like resolved nodes
@@ -70,13 +67,36 @@ pub fn extract_and_map<N, E>(
 /// and `_target` of an edge) are left out of the returned property maps; every
 /// other key is a property, one that starts with `_` too (#254).
 pub fn extract_entities(result: &QueryResult) -> (Vec<RawNode>, Vec<RawEdge>) {
+    extract_entities_from_rows(result.rows())
+}
+
+/// [`extract_entities`] of result rows a binding keeps.
+///
+/// Every node and edge of the rows is copied out of them, so a binding that
+/// also hands out the rows can call this when its caller first asks for the
+/// nodes or edges instead of with every result: a result read row by row
+/// then never pays for the copies.
+pub fn extract_entities_from_rows(rows: &[Vec<Value>]) -> (Vec<RawNode>, Vec<RawEdge>) {
     let mut found = Found::default();
-    for row in result.rows() {
+    for row in rows {
         for value in row {
             found.visit(value);
         }
     }
     (found.nodes, found.edges)
+}
+
+/// [`extract_and_map`] of result rows a binding keeps (see
+/// [`extract_entities_from_rows`]).
+pub fn extract_and_map_rows<N, E>(
+    rows: &[Vec<Value>],
+    map_node: impl Fn(RawNode) -> N,
+    map_edge: impl Fn(RawEdge) -> E,
+) -> (Vec<N>, Vec<E>) {
+    let (raw_nodes, raw_edges) = extract_entities_from_rows(rows);
+    let nodes = raw_nodes.into_iter().map(map_node).collect();
+    let edges = raw_edges.into_iter().map(map_edge).collect();
+    (nodes, edges)
 }
 
 /// The nodes and edges found so far, each once.
@@ -179,10 +199,13 @@ fn user_properties(
     map: &std::collections::BTreeMap<PropertyKey, Value>,
     structural: &[&str],
 ) -> HashMap<PropertyKey, Value> {
-    map.iter()
-        .filter(|(k, _)| !structural.contains(&k.as_str()))
-        .map(|(k, v)| (k.clone(), v.clone()))
-        .collect()
+    let mut properties = HashMap::with_capacity(map.len());
+    properties.extend(
+        map.iter()
+            .filter(|(k, _)| !structural.contains(&k.as_str()))
+            .map(|(k, v)| (k.clone(), v.clone())),
+    );
+    properties
 }
 
 #[cfg(test)]

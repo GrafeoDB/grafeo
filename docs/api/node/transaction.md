@@ -14,14 +14,14 @@ A database transaction with explicit commit/rollback. Transactions provide ACID 
 
 ```typescript
 const tx = db.beginTransaction();
-const tx = db.beginTransaction('serializable');
+const tx = db.beginTransaction('read_committed');
 ```
 
 | Isolation Level | Description |
 |----------------|-------------|
 | `"snapshot"` | Default. Reads see a consistent snapshot at transaction start |
 | `"read_committed"` | Reads see the latest committed data |
-| `"serializable"` | Full serialization of concurrent transactions |
+| `"serializable"` | Not available yet: refused for now: snapshot isolation is the strongest level until queries record their reads |
 
 ## Methods
 
@@ -72,7 +72,7 @@ Throws if already committed or rolled back.
 
 ## Auto-rollback
 
-If a transaction is dropped (garbage collected) without being committed or rolled back, it automatically rolls back. In Node.js 22+, you can use `using` for deterministic cleanup:
+If a transaction is dropped (garbage collected) without being committed or rolled back, it automatically rolls back. Where `using` is supported (Node.js 24+, or TypeScript compiled to an older target), it rolls back at the end of its block through `tx[Symbol.dispose]()`:
 
 ```typescript
 using tx = db.beginTransaction();
@@ -94,8 +94,8 @@ try {
   tx.rollback();  // Discard all changes on error
 }
 
-// Serializable transaction
-const tx = db.beginTransaction('serializable');
+// Read committed transaction
+const tx = db.beginTransaction('read_committed');
 await tx.execute("MATCH (p:Person) SET p.verified = true");
 tx.commit();
 

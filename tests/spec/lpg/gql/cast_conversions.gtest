@@ -3,8 +3,9 @@
 # Covers: CAST to INT64, FLOAT64, STRING, BOOLEAN, DATE, TIME, DATETIME,
 # ZONED DATETIME, DURATION and LIST<type> from each kind of value, the type
 # name synonyms (INTEGER, INT, BIGINT, DOUBLE, REAL, VARCHAR, TEXT, BOOL), a
-# value that does not convert (null), null itself, and a type name CAST does
-# not know (a syntax error, 42001). Casts to DECIMAL are in
+# value that does not convert (null), text that spells no number (22018), a
+# float outside the INT64 range (22003), null itself, and a type name CAST
+# does not know (a syntax error, 42001). Casts to DECIMAL are in
 # decimal_numbers.gtest.
 
 meta:
@@ -32,18 +33,79 @@ tests:
       rows:
         - [4, -4, -2, 1, 0]
 
-  - name: cast_to_int64_of_what_is_no_integer_is_null
-    query: "RETURN CAST('Alix' AS INT64) AS a, CAST('4.2' AS INT64) AS b, CAST('' AS INT64) AS c, CAST(DATE '2024-03-15' AS INT64) AS d"
+  # Decimal text converts as the number it spells, truncated toward zero
+  # (as toInteger does, and as a float does above).
+  - name: cast_decimal_text_to_int64_truncates_towards_zero
+    query: "RETURN CAST('4.2' AS INT64) AS a, CAST('-4.7' AS INT64) AS b, CAST(' 2.9 ' AS INT) AS c"
     expect:
       rows:
-        - [null, null, null, null]
+        - [4, -4, 2]
 
-  - name: cast_to_int64_of_a_float_out_of_range
-    skip: "CAST(9.9e18 AS INT64) gives the largest integer and CAST(NaN AS INT64) gives 0 (inbox value-kinds/numeric-error-followups-from-639.md)"
-    query: "RETURN CAST(9.9e18 AS INT64) AS big, CAST(NaN AS INT64) AS nan"
+  # Text that spells no number fails with 22018 (invalid character value for
+  # cast, as SQL); toInteger of it is null instead.
+  - name: cast_to_int64_of_a_name_fails
+    query: "RETURN CAST('Alix' AS INT64) AS a"
+    expect:
+      error: ""
+      gql_status: "22018"
+
+  - name: cast_to_int64_of_empty_text_fails
+    query: "RETURN CAST('' AS INT64) AS a"
+    expect:
+      error: ""
+      gql_status: "22018"
+
+  - name: cast_to_int64_of_only_spaces_fails
+    query: "RETURN CAST('   ' AS INT64) AS a"
+    expect:
+      error: ""
+      gql_status: "22018"
+
+  - name: cast_to_int64_of_a_date_is_null
+    # Control: a value of another kind does not convert (no text to read).
+    query: "RETURN CAST(DATE '2024-03-15' AS INT64) AS d"
     expect:
       rows:
-        - [null, null]
+        - [null]
+
+  # A float outside the INT64 range, an infinity and NaN fail with 22003, as
+  # the integer operators do; the largest float below 2^63 converts.
+  - name: cast_to_int64_of_a_float_above_the_range_fails
+    query: "RETURN CAST(9.9e18 AS INT64) AS big"
+    expect:
+      error: ""
+      gql_status: "22003"
+
+  - name: cast_to_int64_of_a_float_below_the_range_fails
+    query: "RETURN CAST(-1.0e19 AS INT64) AS small"
+    expect:
+      error: ""
+      gql_status: "22003"
+
+  - name: cast_to_int64_of_two_to_the_63_fails
+    query: "RETURN CAST(9223372036854775808.0e0 AS INT64) AS edge"
+    expect:
+      error: ""
+      gql_status: "22003"
+
+  - name: cast_to_int64_of_infinity_fails
+    query: "RETURN CAST(Infinity AS INT64) AS inf"
+    expect:
+      error: ""
+      gql_status: "22003"
+
+  - name: cast_to_int64_of_nan_fails
+    query: "RETURN CAST(NaN AS INT64) AS nan"
+    expect:
+      error: ""
+      gql_status: "22003"
+
+  - name: cast_to_int64_of_the_floats_at_the_range_ends
+    # 9223372036854774784 is the largest float below 2^63; -2^63 is a float.
+    query: "RETURN CAST(9223372036854774784.0e0 AS INT64) AS hi, CAST(-9223372036854775808.0e0 AS INT64) AS lo"
+    expect:
+      rows:
+        - [9223372036854774784, -9223372036854775808]
 
   # A text loses its leading and trailing spaces first, as SQL casts a
   # character string; a cast to STRING keeps them.
@@ -65,11 +127,17 @@ tests:
       rows:
         - [" 42 ", 4]
 
-  - name: only_spaces_are_trimmed
-    query: "RETURN CAST(' 4 2 ' AS INT64) AS inner_space, CAST('x42' AS INT64) AS letter"
+  - name: only_surrounding_spaces_are_trimmed
+    query: "RETURN CAST(' 4 2 ' AS INT64) AS inner_space"
     expect:
-      rows:
-        - [null, null]
+      error: ""
+      gql_status: "22018"
+
+  - name: cast_to_int64_of_a_letter_before_digits_fails
+    query: "RETURN CAST('x42' AS INT64) AS letter"
+    expect:
+      error: ""
+      gql_status: "22018"
 
   # ---------------------------------------------------------------------------
   # FLOAT64
@@ -87,11 +155,61 @@ tests:
       rows:
         - [true, true]
 
-  - name: cast_to_float64_of_what_is_no_number_is_null
-    query: "RETURN CAST('Gus' AS FLOAT64) AS a, CAST(DATE '2024-03-15' AS FLOAT64) AS b"
+  - name: cast_to_float64_of_text_that_is_no_number_fails
+    query: "RETURN CAST('Gus' AS FLOAT64) AS a"
+    expect:
+      error: ""
+      gql_status: "22018"
+
+  - name: cast_to_float64_of_a_date_is_null
+    query: "RETURN CAST(DATE '2024-03-15' AS FLOAT64) AS b"
     expect:
       rows:
-        - [null, null]
+        - [null]
+
+  # ---------------------------------------------------------------------------
+  # DECIMAL of text: trimmed and read as toDecimal reads it; text that is no
+  # number fails (22018), and a number past 38 digits too (22003)
+  # ---------------------------------------------------------------------------
+
+  - name: cast_text_to_decimal_reads_number_text
+    query: "RETURN CAST(' 1e3 ' AS DECIMAL) AS a, CAST('-2.50' AS DECIMAL) AS b, CAST(' 0.125 ' AS DECIMAL) AS c, CAST('7' AS DECIMAL) IS TYPED DECIMAL AS typed"
+    expect:
+      rows:
+        - [1000, -2.50, 0.125, true]
+
+  - name: cast_to_decimal_of_a_name_fails
+    query: "RETURN CAST('Alix' AS DECIMAL) AS d"
+    expect:
+      error: ""
+      gql_status: "22018"
+
+  - name: cast_to_decimal_of_empty_text_fails
+    query: "RETURN CAST('  ' AS DECIMAL) AS d"
+    expect:
+      error: ""
+      gql_status: "22018"
+
+  - name: cast_to_decimal_of_text_past_38_digits_fails
+    query: "RETURN CAST('123456789012345678901234567890123456789' AS DECIMAL) AS d"
+    expect:
+      error: ""
+      gql_status: "22003"
+
+  - name: cast_to_decimal_of_text_at_38_digits
+    # Control: 38 digits fit.
+    query: "RETURN CAST('12345678901234567890123456789012345678' AS DECIMAL) = toDecimal('12345678901234567890123456789012345678') AS same"
+    expect:
+      rows:
+        - [true]
+
+  - name: cast_to_decimal_of_a_property_that_is_no_number_fails
+    setup:
+      - "INSERT (:Item {price: '19.95'}), (:Item {price: 'free'})"
+    query: "MATCH (i:Item) RETURN CAST(i.price AS DECIMAL) AS p"
+    expect:
+      error: ""
+      gql_status: "22018"
 
   # Booleans and numbers convert into each other, 1 and 0, in every direction
   # (as DuckDB casts them; ISO GQL has no such cast).
@@ -211,13 +329,21 @@ tests:
 
   - name: cast_a_property_of_each_row
     setup:
-      - "INSERT (:Person {name: 'Alix', age: '30'}), (:Person {name: 'Gus', age: '25'}), (:Person {name: 'Mia', age: 'unknown'})"
+      - "INSERT (:Person {name: 'Alix', age: '30'}), (:Person {name: 'Gus', age: ' 25 '})"
     query: "MATCH (p:Person) RETURN p.name, CAST(p.age AS INT64) + 1 AS next"
     expect:
       rows:
         - [Alix, 31]
         - [Gus, 26]
-        - [Mia, null]
+
+  # One row whose text is no number fails the statement (22018), as SQL.
+  - name: cast_a_property_that_is_no_number_fails
+    setup:
+      - "INSERT (:Person {name: 'Alix', age: '30'}), (:Person {name: 'Mia', age: 'unknown'})"
+    query: "MATCH (p:Person) RETURN p.name, CAST(p.age AS INT64) + 1 AS next"
+    expect:
+      error: ""
+      gql_status: "22018"
 
   - name: cast_to_an_unknown_type_is_a_syntax_error
     query: "RETURN CAST('x' AS NOSUCHTYPE) AS a"

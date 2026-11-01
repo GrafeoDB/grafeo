@@ -6,7 +6,6 @@ package grafeo
 */
 import "C"
 import (
-	"encoding/json"
 	"runtime"
 	"unsafe"
 )
@@ -194,7 +193,7 @@ func (g *Graph) GetEdge(id uint64) (*Edge, error) {
 }
 
 func (g *Graph) setProperty(key string, value any, call func(cKey, cValue *C.char) C.GrafeoStatus) error {
-	data, err := json.Marshal(value)
+	data, err := marshalJSON(value)
 	if err != nil {
 		return err
 	}

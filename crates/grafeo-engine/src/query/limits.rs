@@ -52,7 +52,7 @@ pub fn check_plan_depth(plan: LogicalPlan) -> Result<LogicalPlan> {
 /// [`MAX_PLAN_DEPTH`] already, and then takes it apart (leaving
 /// [`LogicalOperator::Empty`]). A translator checks its plan before each
 /// clause, as translating a clause may walk the plan below it recursively.
-#[cfg(any(feature = "gql", feature = "sparql"))]
+#[cfg(any(feature = "gql", feature = "sparql", feature = "gremlin"))]
 pub(crate) fn check_partial_plan_depth(plan: &mut LogicalOperator) -> Result<()> {
     if plan_depth(plan, MAX_PLAN_DEPTH + 1) <= MAX_PLAN_DEPTH {
         return Ok(());
@@ -217,8 +217,10 @@ fn operator_expressions<'a>(
         | LogicalOperator::Empty
         | LogicalOperator::TripleScan(_)
         | LogicalOperator::PropertyPath(_)
+        | LogicalOperator::NamedGraphs(_)
         | LogicalOperator::Union(_)
         | LogicalOperator::AntiJoin(_)
+        | LogicalOperator::MarkJoin(_)
         | LogicalOperator::Construct(_)
         | LogicalOperator::MapCollect(_)
         | LogicalOperator::InsertTriple(_)
@@ -237,6 +239,7 @@ fn operator_expressions<'a>(
         | LogicalOperator::Otherwise(_)
         | LogicalOperator::Apply(_)
         | LogicalOperator::ParameterScan(_)
+        | LogicalOperator::DelimScan(_)
         | LogicalOperator::CreatePropertyGraph(_)
         | LogicalOperator::DropPropertyGraph(_)
         | LogicalOperator::LoadData(_) => {}
@@ -412,8 +415,10 @@ fn take_operator_expressions(op: &mut LogicalOperator, out: &mut Vec<LogicalExpr
         | LogicalOperator::Empty
         | LogicalOperator::TripleScan(_)
         | LogicalOperator::PropertyPath(_)
+        | LogicalOperator::NamedGraphs(_)
         | LogicalOperator::Union(_)
         | LogicalOperator::AntiJoin(_)
+        | LogicalOperator::MarkJoin(_)
         | LogicalOperator::Construct(_)
         | LogicalOperator::MapCollect(_)
         | LogicalOperator::InsertTriple(_)
@@ -432,6 +437,7 @@ fn take_operator_expressions(op: &mut LogicalOperator, out: &mut Vec<LogicalExpr
         | LogicalOperator::Otherwise(_)
         | LogicalOperator::Apply(_)
         | LogicalOperator::ParameterScan(_)
+        | LogicalOperator::DelimScan(_)
         | LogicalOperator::CreatePropertyGraph(_)
         | LogicalOperator::DropPropertyGraph(_)
         | LogicalOperator::LoadData(_) => {}

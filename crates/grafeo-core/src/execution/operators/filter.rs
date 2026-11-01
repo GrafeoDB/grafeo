@@ -5,6 +5,7 @@ use super::project::{
     field_type, holds_entities, item_type_at, list_type, reversed_type, slice_type, struct_type,
 };
 use super::{Operator, OperatorError, OperatorResult};
+use crate::execution::chunk::DEFAULT_CHUNK_SIZE;
 use crate::execution::{ChunkZoneHints, DataChunk, SelectionVector, ValueVector};
 use crate::graph::Direction;
 use crate::graph::GraphStore;
@@ -405,24 +406,41 @@ fn sign_of_a_non_number(sign: char, value: &Value) -> OperatorError {
     ))
 }
 
-/// The value CAST gives the conversion function of the `target` category
-/// (`INTEGER`, `FLOAT`, `DECIMAL`, `BOOLEAN` or a temporal type, as the
-/// parsers name it): a text without its leading and trailing spaces, as SQL
-/// casts a character string; a boolean is 1 or 0 to a number, and a number
-/// is true unless it is 0 to a boolean, in every direction, as DuckDB casts
-/// them. Every other value is the value itself.
-fn cast_operand(value: Value, target: &str) -> Value {
-    match (target, value) {
-        (_, Value::String(text)) => match text.trim_matches(' ') {
-            trimmed if trimmed.len() == text.len() => Value::String(text),
-            trimmed => Value::String(trimmed.into()),
-        },
-        ("INTEGER" | "FLOAT" | "DECIMAL", Value::Bool(b)) => Value::Int64(i64::from(b)),
-        ("BOOLEAN", Value::Int64(i)) => Value::Bool(i != 0),
-        ("BOOLEAN", Value::Float64(f)) => Value::Bool(f != 0.0),
-        ("BOOLEAN", Value::Decimal(d)) => Value::Bool(d.signum() != 0),
-        (_, value) => value,
+/// Whether a value of `shape`, which holds nodes or edges (see
+/// `ExpressionPredicate::shape`), is of `data_type`: a node of NODE, an edge
+/// of EDGE, a list of LIST and of `LIST<t>` when each item is of `t`, and
+/// anything of ANY.
+fn entity_shape_is_of(data_type: &PropertyDataType, shape: &LogicalType) -> bool {
+    match (data_type, shape) {
+        (PropertyDataType::Any, _)
+        | (PropertyDataType::Node, LogicalType::Node)
+        | (PropertyDataType::Edge, LogicalType::Edge)
+        | (PropertyDataType::List, LogicalType::List(_) | LogicalType::Tuple(_)) => true,
+        (PropertyDataType::ListTyped(item), LogicalType::List(inner)) => {
+            entity_shape_is_of(item, inner)
+        }
+        (PropertyDataType::ListTyped(item), LogicalType::Tuple(items)) => {
+            items.iter().all(|inner| entity_shape_is_of(item, inner))
+        }
+        _ => false,
     }
+}
+
+/// Text without the spaces around it, as SQL casts a character string.
+fn trim_spaces(text: &str) -> &str {
+    text.trim_matches(' ')
+}
+
+/// Text as a number: an integer, else a decimal, else a float (exponent
+/// text, `NaN`, `Infinity`); `None` for text that is no number.
+fn number_of_text(text: &str) -> Option<Value> {
+    if let Ok(integer) = text.parse::<i64>() {
+        return Some(Value::Int64(integer));
+    }
+    if let Ok(decimal) = Decimal::parse(text) {
+        return Some(Value::Decimal(decimal));
+    }
+    text.parse::<f64>().ok().map(Value::Float64)
 }
 
 /// What a comparison operand is, as far as the evaluator can tell (see
@@ -727,6 +745,15 @@ pub enum FilterExpression {
     Id(String),
     /// Node labels access.
     Labels(String),
+    /// The labels of a node variable as a group key: the store's label
+    /// mask of the node, one integer (see `GraphStore::node_label_mask`),
+    /// or its labels as [`Labels`](Self::Labels) gives them where the store
+    /// has no mask. A grouping by `labels(n)` groups by it.
+    LabelMask(String),
+    /// A group key [`LabelMask`](Self::LabelMask) made, read from the
+    /// column of a variable: the labels of an integer mask, sorted by name,
+    /// and any other value as it is.
+    LabelsOfMask(String),
     /// Edge type access.
     Type(String),
     /// List comprehension: [x IN list WHERE predicate | expression]
@@ -765,8 +792,9 @@ pub enum FilterExpression {
         edge_var: Option<String>,
         /// Direction of edge traversal, from the start.
         direction: Direction,
-        /// Edge type filter (empty = match all types, multiple = match any).
-        edge_types: Vec<String>,
+        /// Edge type filter (empty = match all types, multiple = match any),
+        /// as the store names the types.
+        edge_types: Vec<arcstr::ArcStr>,
         /// Labels the other end must have (single-edge patterns only).
         end_labels: Option<Vec<String>>,
         /// `Some(1)` for a variable-length pattern, `None` for one edge.
@@ -787,8 +815,9 @@ pub enum FilterExpression {
         edge_var: Option<String>,
         /// Direction of edge traversal, from the start.
         direction: Direction,
-        /// Edge type filter (empty = match all types, multiple = match any).
-        edge_types: Vec<String>,
+        /// Edge type filter (empty = match all types, multiple = match any),
+        /// as the store names the types.
+        edge_types: Vec<arcstr::ArcStr>,
         /// Labels the other end must have.
         end_labels: Option<Vec<String>>,
     },
@@ -970,6 +999,15 @@ impl ExpressionPredicate {
         self.seen(self.store.node_labels(id, self.view), None)
     }
 
+    /// `labels(n)` of node `id`: its labels as a list, sorted so that nodes
+    /// with the same labels give the same list, whatever order they were
+    /// written in.
+    fn labels_list(&self, id: NodeId) -> Option<Value> {
+        let mut labels = self.resolve_labels(id)?;
+        labels.sort();
+        Some(Value::List(labels.into_iter().map(Value::String).collect()))
+    }
+
     /// Whether node `id` has `label` as this query sees the node: a label
     /// check, `None` for a node the query does not see.
     fn resolve_has_label(&self, id: NodeId, label: &str) -> Option<bool> {
@@ -981,36 +1019,46 @@ impl ExpressionPredicate {
         self.seen(self.store.node(node_id, self.view), None)
     }
 
-    /// Returns true if an edge (and its other endpoint) matches the type and label filters.
-    ///
-    /// Used by both `ExistsSubquery` and `CountSubquery` fast-path evaluation.
-    fn edge_matches(
-        &self,
-        other_node_id: NodeId,
-        edge_id: EdgeId,
-        edge_types: &[String],
-        end_labels: &Option<Vec<String>>,
-    ) -> bool {
-        self.edge_type_matches(edge_id, edge_types) && self.has_labels(other_node_id, end_labels)
-    }
-
     /// Whether the edge has one of `edge_types` (any type when empty), as
     /// stored: the planner resolved the pattern's names to the stored ones.
     /// The type is read as this query sees the edge, so a transaction finds
     /// the type of an edge it created.
-    fn edge_type_matches(&self, edge_id: EdgeId, edge_types: &[String]) -> bool {
+    fn edge_type_matches(&self, edge_id: EdgeId, edge_types: &[arcstr::ArcStr]) -> bool {
         if edge_types.is_empty() {
             return true;
         }
         self.seen(self.store.edge_type(edge_id, self.view), None)
-            .is_some_and(|actual| edge_types.iter().any(|t| actual.as_str() == t.as_str()))
+            .is_some_and(|actual| edge_types.contains(&actual))
     }
 
-    /// The edges of `node` in `direction` that this query sees, with the
-    /// node at their other end (see [`GraphStore::edges`]).
-    fn visible_edges_from(&self, node: NodeId, direction: Direction) -> Vec<(NodeId, EdgeId)> {
+    /// Whether this query sees an edge of `node` in `direction` of one of
+    /// `edge_types` (any type when empty), stopping at the first (see
+    /// [`GraphStore::has_edge`]).
+    fn has_visible_edge(
+        &self,
+        node: NodeId,
+        direction: Direction,
+        edge_types: &[arcstr::ArcStr],
+    ) -> bool {
         self.seen(
-            self.store.edges(node, direction, &[], self.view),
+            self.store.has_edge(node, direction, edge_types, self.view),
+            false,
+        )
+    }
+
+    /// The edges of `node` in `direction` of one of `edge_types` (any type
+    /// when empty) that this query sees, with the node at their other end
+    /// (see [`GraphStore::edges`]): the store reads only those types' part
+    /// of the node's edges, where a check of each edge's type would read
+    /// all of them.
+    fn visible_edges_from(
+        &self,
+        node: NodeId,
+        direction: Direction,
+        edge_types: &[arcstr::ArcStr],
+    ) -> Vec<(NodeId, EdgeId)> {
+        self.seen(
+            self.store.edges(node, direction, edge_types, self.view),
             Vec::new(),
         )
     }
@@ -1091,12 +1139,16 @@ impl ExpressionPredicate {
             Bound::No => {}
         }
         match (start, end) {
+            // EXISTS of one edge from the row's node, to any node: the
+            // first edge the store finds answers it.
+            (Some(start), None) if limit == 1 && pattern.end_labels.is_none() => {
+                usize::from(self.has_visible_edge(start, pattern.direction, pattern.edge_types))
+            }
             (Some(start), end) => self
-                .visible_edges_from(start, pattern.direction)
+                .visible_edges_from(start, pattern.direction, pattern.edge_types)
                 .into_iter()
-                .filter(|&(other, id)| {
-                    end.is_none_or(|end| end == other)
-                        && self.edge_matches(other, id, pattern.edge_types, pattern.end_labels)
+                .filter(|&(other, _)| {
+                    end.is_none_or(|end| end == other) && self.has_labels(other, pattern.end_labels)
                 })
                 .take(limit)
                 .count(),
@@ -1104,9 +1156,15 @@ impl ExpressionPredicate {
                 if !self.has_labels(end, pattern.end_labels) {
                     return 0;
                 }
-                self.visible_edges_from(end, pattern.direction.reverse())
+                if limit == 1 {
+                    return usize::from(self.has_visible_edge(
+                        end,
+                        pattern.direction.reverse(),
+                        pattern.edge_types,
+                    ));
+                }
+                self.visible_edges_from(end, pattern.direction.reverse(), pattern.edge_types)
                     .into_iter()
-                    .filter(|&(_, id)| self.edge_type_matches(id, pattern.edge_types))
                     .take(limit)
                     .count()
             }
@@ -1114,11 +1172,9 @@ impl ExpressionPredicate {
                 let mut found = 0;
                 for start in self.visible_nodes() {
                     found += self
-                        .visible_edges_from(start, pattern.direction)
+                        .visible_edges_from(start, pattern.direction, pattern.edge_types)
                         .into_iter()
-                        .filter(|&(other, id)| {
-                            self.edge_matches(other, id, pattern.edge_types, pattern.end_labels)
-                        })
+                        .filter(|&(other, _)| self.has_labels(other, pattern.end_labels))
                         .take(limit - found)
                         .count();
                     if found == limit {
@@ -1187,9 +1243,7 @@ impl ExpressionPredicate {
             }
         }
         let has_edge = |node: NodeId, direction: Direction| {
-            self.visible_edges_from(node, direction)
-                .into_iter()
-                .any(|(_, id)| self.edge_type_matches(id, pattern.edge_types))
+            self.has_visible_edge(node, direction, pattern.edge_types)
         };
         match (start, end) {
             (Some(start), Some(end)) => self.reaches(start, end, pattern, max_hops),
@@ -1218,10 +1272,9 @@ impl ExpressionPredicate {
             hops += 1;
             let mut next = Vec::new();
             for node in frontier {
-                for (other, id) in self.visible_edges_from(node, pattern.direction) {
-                    if !self.edge_type_matches(id, pattern.edge_types) {
-                        continue;
-                    }
+                for (other, _) in
+                    self.visible_edges_from(node, pattern.direction, pattern.edge_types)
+                {
                     if other == to {
                         return true;
                     }
@@ -1287,25 +1340,39 @@ impl ExpressionPredicate {
     /// node taken from a list, a map or a function (`head(ns)`, `x.msg`,
     /// `startNode(r)`, see [`shape`](Self::shape)).
     fn node_of(&self, expr: &FilterExpression, chunk: &DataChunk, row: usize) -> Option<Node> {
-        let id = match expr {
+        self.resolve_node(self.node_id_of(expr, chunk, row)?)
+    }
+
+    /// The ID of the node [`node_of`](Self::node_of) finds, without
+    /// building the node.
+    fn node_id_of(&self, expr: &FilterExpression, chunk: &DataChunk, row: usize) -> Option<NodeId> {
+        match expr {
             FilterExpression::Variable(var) => chunk
                 .column(*self.variable_columns.get(var)?)?
-                .get_node_id(row)?,
-            _ => NodeId::new(self.entity_id(expr, &LogicalType::Node, chunk, row)?),
-        };
-        self.resolve_node(id)
+                .get_node_id(row),
+            _ => self
+                .entity_id(expr, &LogicalType::Node, chunk, row)
+                .map(NodeId::new),
+        }
     }
 
     /// The edge `expr` yields at `row`, as [`node_of`](Self::node_of) finds
     /// a node.
     fn edge_of(&self, expr: &FilterExpression, chunk: &DataChunk, row: usize) -> Option<Edge> {
-        let id = match expr {
+        self.resolve_edge(self.edge_id_of(expr, chunk, row)?)
+    }
+
+    /// The ID of the edge [`edge_of`](Self::edge_of) finds, without
+    /// building the edge.
+    fn edge_id_of(&self, expr: &FilterExpression, chunk: &DataChunk, row: usize) -> Option<EdgeId> {
+        match expr {
             FilterExpression::Variable(var) => chunk
                 .column(*self.variable_columns.get(var)?)?
-                .get_edge_id(row)?,
-            _ => EdgeId::new(self.entity_id(expr, &LogicalType::Edge, chunk, row)?),
-        };
-        self.resolve_edge(id)
+                .get_edge_id(row),
+            _ => self
+                .entity_id(expr, &LogicalType::Edge, chunk, row)
+                .map(EdgeId::new),
+        }
     }
 
     /// The ID `expr` yields at `row` when it yields a `kind` (a node or an
@@ -1543,68 +1610,25 @@ impl ExpressionPredicate {
             }
             FilterExpression::SliceAccess { base, start, end } => {
                 let base_val = self.eval_expr(base, chunk, row)?;
-                let start_idx = start
-                    .as_ref()
-                    .and_then(|s| self.eval_expr(s, chunk, row))
-                    .and_then(|v| {
-                        if let Value::Int64(i) = v {
-                            // reason: slice index from user query, non-negative for valid slices
-                            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-                            Some(i as usize)
-                        } else {
-                            None
-                        }
-                    })
-                    .unwrap_or(0);
-
+                let bound = |bound: &Option<Box<FilterExpression>>| match bound
+                    .as_deref()
+                    .and_then(|bound| self.eval_expr(bound, chunk, row))
+                {
+                    Some(Value::Int64(i)) => Some(i),
+                    _ => None,
+                };
+                let (start, end) = (bound(start), bound(end));
                 match &base_val {
                     Value::List(items) => {
-                        let end_idx = end
-                            .as_ref()
-                            .and_then(|e| self.eval_expr(e, chunk, row))
-                            .and_then(|v| {
-                                if let Value::Int64(i) = v {
-                                    // reason: slice end index from user query
-                                    #[allow(
-                                        clippy::cast_possible_truncation,
-                                        clippy::cast_sign_loss
-                                    )]
-                                    Some(i as usize)
-                                } else {
-                                    None
-                                }
-                            })
-                            .unwrap_or(items.len());
-                        let sliced: Vec<Value> = items
-                            .get(start_idx..end_idx.min(items.len()))
-                            .unwrap_or(&[])
-                            .to_vec();
-                        Some(Value::List(sliced.into()))
+                        let range = super::project::slice_range(items.len(), start, end);
+                        Some(Value::List(items[range].to_vec().into()))
                     }
                     Value::String(s) => {
                         let chars: Vec<char> = s.chars().collect();
-                        let end_idx = end
-                            .as_ref()
-                            .and_then(|e| self.eval_expr(e, chunk, row))
-                            .and_then(|v| {
-                                if let Value::Int64(i) = v {
-                                    // reason: slice end index from user query
-                                    #[allow(
-                                        clippy::cast_possible_truncation,
-                                        clippy::cast_sign_loss
-                                    )]
-                                    Some(i as usize)
-                                } else {
-                                    None
-                                }
-                            })
-                            .unwrap_or(chars.len());
-                        let sliced: String = chars
-                            .get(start_idx..end_idx.min(chars.len()))
-                            .unwrap_or(&[])
-                            .iter()
-                            .collect();
-                        Some(Value::String(sliced.into()))
+                        let range = super::project::slice_range(chars.len(), start, end);
+                        Some(Value::String(
+                            chars[range].iter().collect::<String>().into(),
+                        ))
                     }
                     _ => None,
                 }
@@ -1643,16 +1667,28 @@ impl ExpressionPredicate {
                 let col_idx = *self.variable_columns.get(variable)?;
                 let col = chunk.column(col_idx)?;
                 let node_id = col.get_node_id(row)?;
-                let labels = self.resolve_labels(node_id)?;
-                // Sort labels so sets with the same members always produce
-                // the same list, regardless of internal storage order.
-                let mut sorted: Vec<&arcstr::ArcStr> = labels.iter().collect();
-                sorted.sort();
-                let labels: Vec<Value> = sorted
-                    .into_iter()
-                    .map(|l| Value::String(l.clone()))
-                    .collect();
-                Some(Value::List(labels.into()))
+                self.labels_list(node_id)
+            }
+            FilterExpression::LabelMask(variable) => {
+                let col_idx = *self.variable_columns.get(variable)?;
+                let node_id = chunk.column(col_idx)?.get_node_id(row)?;
+                match self.seen(self.store.node_label_mask(node_id, self.view), None) {
+                    // The mask's 64 bits, kept as one integer key.
+                    Some(mask) => Some(Value::Int64(i64::from_ne_bytes(mask.to_ne_bytes()))),
+                    None => self.labels_list(node_id),
+                }
+            }
+            FilterExpression::LabelsOfMask(variable) => {
+                let col_idx = *self.variable_columns.get(variable)?;
+                match chunk.column(col_idx)?.get_value(row)? {
+                    Value::Int64(mask) => {
+                        let mask = u64::from_ne_bytes(mask.to_ne_bytes());
+                        let mut names = self.store.label_mask_names(mask).ok()?;
+                        names.sort();
+                        Some(Value::List(names.into_iter().map(Value::String).collect()))
+                    }
+                    other => Some(other),
+                }
             }
             FilterExpression::Type(variable) => {
                 let col_idx = *self.variable_columns.get(variable)?;
@@ -1851,10 +1887,10 @@ impl ExpressionPredicate {
                     .as_deref()
                     .and_then(|bound| self.eval_expr(bound, chunk, row))
                 {
-                    Some(Value::Int64(i)) => usize::try_from(i).ok(),
+                    Some(Value::Int64(i)) => Some(i),
                     _ => None,
                 };
-                slice_type(base, bound(start).unwrap_or(0), bound(end))
+                slice_type(base, bound(start), bound(end))
             }
             FilterExpression::FunctionCall { function, args } => {
                 let argument = || {
@@ -1867,7 +1903,7 @@ impl ExpressionPredicate {
                     BuiltinFunction::StartNode | BuiltinFunction::EndNode => LogicalType::Node,
                     BuiltinFunction::Head => item_type_at(&argument(), 0),
                     BuiltinFunction::Last => item_type_at(&argument(), -1),
-                    BuiltinFunction::Tail => slice_type(argument(), 1, None),
+                    BuiltinFunction::Tail => slice_type(argument(), Some(1), None),
                     BuiltinFunction::Reverse => reversed_type(argument()),
                     _ => LogicalType::Any,
                 }
@@ -1958,7 +1994,7 @@ impl ExpressionPredicate {
                     (Value::String(a), other) => {
                         let b = match other {
                             Value::Int64(i) => i.to_string(),
-                            Value::Float64(f) => f.to_string(),
+                            Value::Float64(f) => super::value_utils::float_text(*f),
                             Value::Decimal(d) => d.to_string(),
                             Value::Bool(b) => b.to_string(),
                             Value::Null => return Some(Value::Null),
@@ -2290,9 +2326,95 @@ impl ExpressionPredicate {
         }
     }
 
+    /// The value CAST gives the conversion function of the `target` category
+    /// (`INTEGER`, `FLOAT`, `DECIMAL`, `BOOLEAN` or a temporal type, as the
+    /// parsers name it): a text without its leading and trailing spaces, as
+    /// SQL casts a character string, read as a number for a number target;
+    /// a boolean is 1 or 0 to a number, and a number is true unless it is 0
+    /// to a boolean, in every direction, as DuckDB casts them. Every other
+    /// value is the value itself. Text that is no number fails a cast to an
+    /// integer, a float or a decimal (22018), and NaN one to an integer
+    /// (22003), as SQL and DuckDB refuse them.
+    fn cast_operand(&self, value: Value, target: &str) -> Option<Value> {
+        match (target, value) {
+            ("INTEGER" | "FLOAT" | "DECIMAL", Value::String(text)) => {
+                let trimmed = trim_spaces(&text);
+                let number = match target {
+                    "INTEGER" => number_of_text(trimmed),
+                    // A number past 38 digits is out of range, not text that
+                    // is no number.
+                    "DECIMAL" => match to_decimal(&Value::from(trimmed)) {
+                        Some(decimal) => Some(Value::Decimal(decimal)),
+                        None if trimmed.parse::<f64>().is_ok_and(f64::is_finite) => {
+                            return self.fail(OperatorError::numeric_out_of_range(format!(
+                                "CAST('{text}' AS DECIMAL)"
+                            )));
+                        }
+                        None => None,
+                    },
+                    _ => trimmed.parse::<f64>().ok().map(Value::Float64),
+                };
+                match number {
+                    Some(number) => self.cast_operand(number, target),
+                    None => self.fail(OperatorError::invalid_cast_text(format!(
+                        "CAST('{text}' AS {target})"
+                    ))),
+                }
+            }
+            (_, Value::String(text)) => match trim_spaces(&text) {
+                trimmed if trimmed.len() == text.len() => Some(Value::String(text)),
+                trimmed => Some(Value::String(trimmed.into())),
+            },
+            ("INTEGER", Value::Float64(f)) if f.is_nan() => {
+                self.fail(OperatorError::numeric_out_of_range("CAST(NaN AS INTEGER)"))
+            }
+            ("INTEGER" | "FLOAT" | "DECIMAL", Value::Bool(b)) => Some(Value::Int64(i64::from(b))),
+            ("BOOLEAN", Value::Int64(i)) => Some(Value::Bool(i != 0)),
+            ("BOOLEAN", Value::Float64(f)) => Some(Value::Bool(f != 0.0)),
+            ("BOOLEAN", Value::Decimal(d)) => Some(Value::Bool(d.signum() != 0)),
+            (_, value) => Some(value),
+        }
+    }
+
+    /// A number as an integer, truncated toward zero (toInteger): null for
+    /// NaN, and a failed query (22003) for an infinity or a value past the
+    /// range of an integer, as the integer operators fail. Null for a value
+    /// that is no number.
+    fn number_to_integer(&self, number: Value) -> Option<Value> {
+        let out_of_range = |shown: String| {
+            self.fail(OperatorError::numeric_out_of_range(format!(
+                "toInteger({shown})"
+            )))
+        };
+        match number {
+            Value::Int64(i) => Some(Value::Int64(i)),
+            Value::Decimal(d) => match d.trunc_to_i64() {
+                Some(i) => Some(Value::Int64(i)),
+                None => out_of_range(d.to_string()),
+            },
+            Value::Float64(f) if f.is_nan() => None,
+            Value::Float64(f) => {
+                // -2^63 is a float exactly; 2^63 is the first one past the range.
+                let truncated = f.trunc();
+                if (-9_223_372_036_854_775_808.0..9_223_372_036_854_775_808.0).contains(&truncated)
+                {
+                    #[allow(
+                        clippy::cast_possible_truncation,
+                        reason = "the range check above keeps the truncated float in i64"
+                    )]
+                    Some(Value::Int64(truncated as i64))
+                } else {
+                    out_of_range(super::value_utils::float_text(f))
+                }
+            }
+            _ => None,
+        }
+    }
+
     /// `%` on two numbers, typed as [`eval_arithmetic`](Self::eval_arithmetic)
     /// types its results. An integer or decimal remainder by zero fails the
-    /// query; a float one gives null.
+    /// query; a float one is NaN (IEEE `fmod`), as a float `/` by zero keeps
+    /// its IEEE result.
     fn eval_modulo(&self, left: &Value, right: &Value) -> Option<Value> {
         let op = BinaryFilterOp::Mod;
         let decimal = |a: &Decimal, b: &Decimal| match a.checked_rem(b) {
@@ -2309,17 +2431,11 @@ impl ExpressionPredicate {
             (Value::Decimal(a), Value::Decimal(b)) => decimal(a, b),
             (Value::Decimal(a), Value::Int64(b)) => decimal(a, &Decimal::from_i64(*b)),
             (Value::Int64(a), Value::Decimal(b)) => decimal(&Decimal::from_i64(*a), b),
-            (Value::Decimal(a), Value::Float64(b)) if *b != 0.0 => {
-                Some(Value::Float64(a.to_f64() % b))
-            }
-            (Value::Float64(a), Value::Decimal(b)) if b.signum() != 0 => {
-                Some(Value::Float64(a % b.to_f64()))
-            }
-            (Value::Float64(a), Value::Float64(b)) if *b != 0.0 => Some(Value::Float64(a % b)),
-            (Value::Int64(a), Value::Float64(b)) if *b != 0.0 => {
-                Some(Value::Float64(*a as f64 % b))
-            }
-            (Value::Float64(a), Value::Int64(b)) if *b != 0 => Some(Value::Float64(a % *b as f64)),
+            (Value::Decimal(a), Value::Float64(b)) => Some(Value::Float64(a.to_f64() % b)),
+            (Value::Float64(a), Value::Decimal(b)) => Some(Value::Float64(a % b.to_f64())),
+            (Value::Float64(a), Value::Float64(b)) => Some(Value::Float64(a % b)),
+            (Value::Int64(a), Value::Float64(b)) => Some(Value::Float64(*a as f64 % b)),
+            (Value::Float64(a), Value::Int64(b)) => Some(Value::Float64(a % *b as f64)),
             _ => None,
         }
     }
@@ -2480,21 +2596,15 @@ impl ExpressionPredicate {
                 if args.len() != 1 {
                     return None;
                 }
-                let node = self.node_of(&args[0], chunk, row)?;
-                let mut sorted: Vec<&arcstr::ArcStr> = node.labels.iter().collect();
-                sorted.sort();
-                let labels: Vec<Value> = sorted
-                    .into_iter()
-                    .map(|l| Value::String(l.clone()))
-                    .collect();
-                Some(Value::List(labels.into()))
+                self.labels_list(self.node_id_of(&args[0], chunk, row)?)
             }
             BuiltinFunction::Type => {
                 if args.len() != 1 {
                     return None;
                 }
-                let edge = self.edge_of(&args[0], chunk, row)?;
-                Some(Value::String(edge.edge_type.clone()))
+                let edge_id = self.edge_id_of(&args[0], chunk, row)?;
+                self.seen(self.store.edge_type(edge_id, self.view), None)
+                    .map(Value::String)
             }
             // startNode(edge) and endNode(edge): the edge's source and
             // destination node, as the node's ID in a node column (RETURN
@@ -2647,7 +2757,7 @@ impl ExpressionPredicate {
                 let s = match &val {
                     Value::String(s) => s.to_string(),
                     Value::Int64(i) => i.to_string(),
-                    Value::Float64(f) => f.to_string(),
+                    Value::Float64(f) => super::value_utils::float_text(*f),
                     Value::Bool(b) => b.to_string(),
                     Value::Null => return Some(Value::Null),
                     // A LOCAL DATETIME has no zone, so its text has none
@@ -2664,13 +2774,15 @@ impl ExpressionPredicate {
                 let val = self.eval_expr(&args[0], chunk, row)?;
                 match val {
                     Value::Int64(i) => Some(Value::Int64(i)),
-                    // reason: toInteger() intentionally truncates float to int per GQL spec
-                    #[allow(clippy::cast_possible_truncation)]
-                    Value::Float64(f) => Some(Value::Int64(f as i64)),
-                    Value::Decimal(d) => d.trunc_to_i64().map(Value::Int64),
                     Value::Bool(b) => Some(Value::Int64(i64::from(b))),
-                    Value::String(s) => s.parse::<i64>().ok().map(Value::Int64),
-                    _ => None,
+                    // Text is read as a number first: `' 42 '` is 42 and
+                    // `'4.2'` is 4, as openCypher's toInteger reads it; text
+                    // that is no number is null.
+                    Value::String(text) => match number_of_text(trim_spaces(&text)) {
+                        Some(number) => self.number_to_integer(number),
+                        None => None,
+                    },
+                    number => self.number_to_integer(number),
                 }
             }
             BuiltinFunction::ToFloat => {
@@ -2682,7 +2794,7 @@ impl ExpressionPredicate {
                     Value::Int64(i) => Some(Value::Float64(i as f64)),
                     Value::Float64(f) => Some(Value::Float64(f)),
                     Value::Decimal(d) => Some(Value::Float64(d.to_f64())),
-                    Value::String(s) => s.parse::<f64>().ok().map(Value::Float64),
+                    Value::String(s) => trim_spaces(&s).parse::<f64>().ok().map(Value::Float64),
                     _ => None,
                 }
             }
@@ -2701,10 +2813,15 @@ impl ExpressionPredicate {
                 };
                 let precision = digits(self.eval_expr(&args[1], chunk, row)?)?;
                 let scale = digits(self.eval_expr(&args[2], chunk, row)?)?;
-                decimal
-                    .with_precision(precision, scale)
-                    .ok()
-                    .map(Value::Decimal)
+                // A value with more integer digits than the type holds is out
+                // of range, as SQL refuses it (22003).
+                match decimal.with_precision(precision, scale) {
+                    Ok(fitted) => Some(Value::Decimal(fitted)),
+                    Err(DecimalError::Overflow) => self.fail(OperatorError::numeric_out_of_range(
+                        format!("{decimal} as DECIMAL({precision}, {scale})"),
+                    )),
+                    Err(_) => None,
+                }
             }
             BuiltinFunction::ToBoolean => {
                 if args.len() != 1 {
@@ -2731,7 +2848,7 @@ impl ExpressionPredicate {
                 let Value::String(target) = self.eval_expr(&args[1], chunk, row)? else {
                     return None;
                 };
-                Some(cast_operand(val, &target))
+                self.cast_operand(val, &target)
             }
             BuiltinFunction::ToList => {
                 // toList(value) - wraps a scalar in a single-element list, or returns list as-is
@@ -2742,6 +2859,14 @@ impl ExpressionPredicate {
                 match val {
                     Value::List(_) => Some(val),
                     Value::Null => Some(Value::Null),
+                    // A vector is the list of its elements.
+                    Value::Vector(elements) => Some(Value::List(
+                        elements
+                            .iter()
+                            .map(|element| Value::Float64(f64::from(*element)))
+                            .collect::<Vec<_>>()
+                            .into(),
+                    )),
                     other => Some(Value::List(vec![other].into())),
                 }
             }
@@ -2785,6 +2910,13 @@ impl ExpressionPredicate {
                 let matches = match (&value_type, &shape) {
                     (ValueType::Property(PropertyDataType::Node), _) => shape == LogicalType::Node,
                     (ValueType::Property(PropertyDataType::Edge), _) => shape == LogicalType::Edge,
+                    // A value that holds nodes or edges (a list of them) is
+                    // of a type by what its shape says it holds.
+                    (ValueType::Property(data_type), _)
+                        if super::project::holds_entities(&shape) =>
+                    {
+                        entity_shape_is_of(data_type, &shape)
+                    }
                     (_, LogicalType::Node | LogicalType::Edge) => {
                         value_type == ValueType::Property(PropertyDataType::Any)
                     }
@@ -2822,6 +2954,8 @@ impl ExpressionPredicate {
                     // reason: path lengths fit i64 for practical sizes
                     #[allow(clippy::cast_possible_wrap)]
                     Value::Path { edges, .. } => Some(Value::Int64(edges.len() as i64)),
+                    // A vector's size is its dimension.
+                    Value::Vector(elements) => i64::try_from(elements.len()).ok().map(Value::Int64),
                     _ => None,
                 }
             }
@@ -3011,11 +3145,12 @@ impl ExpressionPredicate {
                     // Single-argument: treat as list check
                     let val = self.eval_expr(&args[0], chunk, row)?;
                     return match val {
+                        // Items compare by their identity, as DISTINCT and
+                        // grouping do (`3` and `3.0` are one value).
                         Value::List(items) => {
                             let mut seen = std::collections::HashSet::new();
                             let all_diff = items.iter().all(|item| {
-                                let key = format!("{item:?}");
-                                seen.insert(key)
+                                seen.insert(super::accumulator::HashableValue::from(item))
                             });
                             Some(Value::Bool(all_diff))
                         }
@@ -3053,12 +3188,13 @@ impl ExpressionPredicate {
                     // Single-argument: treat as list check
                     let val = self.eval_expr(&args[0], chunk, row)?;
                     return match val {
+                        // Items compare by their identity, as in `all_different`.
                         Value::List(items) => {
-                            let all_same = if items.is_empty() {
-                                true
-                            } else {
-                                items.iter().all(|item| item == &items[0])
-                            };
+                            let mut identities =
+                                items.iter().map(super::accumulator::HashableValue::from);
+                            let all_same = identities
+                                .next()
+                                .is_none_or(|first| identities.all(|item| item == first));
                             Some(Value::Bool(all_same))
                         }
                         _ => Some(Value::Bool(true)),
@@ -3109,18 +3245,27 @@ impl ExpressionPredicate {
                 } else {
                     1
                 };
+                // The integers from the start towards the end, up to the last
+                // one before a step would overflow
+                // (`range(9223372036854775806, 9223372036854775807)` gives
+                // two). A long list checks the query deadline as it grows.
+                let in_range = |item: i64| {
+                    if step > 0 {
+                        item <= end_val
+                    } else {
+                        item >= end_val
+                    }
+                };
                 let mut result = Vec::new();
-                let mut current = start_val;
-                if step > 0 {
-                    while current <= end_val {
-                        result.push(Value::Int64(current));
-                        current += step;
+                let mut current = Some(start_val).filter(|&item| in_range(item));
+                while let Some(item) = current {
+                    result.push(Value::Int64(item));
+                    if result.len().is_multiple_of(DEFAULT_CHUNK_SIZE)
+                        && let Err(error) = crate::execution::deadline::check()
+                    {
+                        return self.fail(error);
                     }
-                } else {
-                    while current >= end_val {
-                        result.push(Value::Int64(current));
-                        current += step;
-                    }
+                    current = item.checked_add(step).filter(|&next| in_range(next));
                 }
                 Some(Value::List(result.into()))
             }
@@ -4650,6 +4795,7 @@ impl ExpressionPredicate {
             "STRING" => match val {
                 Value::String(_) => Some(val),
                 Value::Timestamp(ts) => Some(Value::String(ts.to_local_text().into())),
+                Value::Float64(f) => Some(Value::String(super::value_utils::float_text(f).into())),
                 other => Some(Value::String(other.to_string().into())),
             },
             "BOOLEAN" | "BOOL" => match val {
@@ -4728,7 +4874,7 @@ struct SubqueryPattern<'a> {
     end: &'a str,
     edge: Option<&'a str>,
     direction: Direction,
-    edge_types: &'a [String],
+    edge_types: &'a [arcstr::ArcStr],
     end_labels: &'a Option<Vec<String>>,
     hops: Hops,
 }
@@ -4934,6 +5080,7 @@ impl FilterOperator {
 impl Operator for FilterOperator {
     fn next(&mut self) -> OperatorResult {
         loop {
+            crate::execution::deadline::check()?;
             // Get next chunk from child
             let Some(mut chunk) = self.child.next()? else {
                 return Ok(None);
@@ -5001,7 +5148,7 @@ fn regex_escape_char(ch: char, out: &mut String) {
 fn value_to_string(val: &Value) -> Option<String> {
     match val {
         Value::Int64(i) => Some(i.to_string()),
-        Value::Float64(f) => Some(f.to_string()),
+        Value::Float64(f) => Some(super::value_utils::float_text(*f)),
         Value::Bool(b) => Some(b.to_string()),
         Value::String(s) => Some(s.to_string()),
         Value::Null => None,
@@ -7416,7 +7563,8 @@ mod tests {
             BinaryFilterOp::Mod,
             Value::Float64(0.0),
         ));
-        assert_eq!(result, None);
+        // A float remainder by zero is NaN, as IEEE fmod gives it.
+        assert!(matches!(result, Some(Value::Float64(f)) if f.is_nan()));
     }
 
     // === String addition with type coercion ===
@@ -7698,6 +7846,63 @@ mod tests {
         let op = FilterOperator::new(Box::new(mock), Box::new(predicate));
         let (mut child, _predicate) = op.into_parts();
         assert!(child.next().unwrap().is_none());
+    }
+
+    /// `range` stops at the last integer before a step that overflows, and
+    /// a long range fails with the timeout once the query's deadline has
+    /// passed.
+    #[test]
+    fn range_stops_before_an_overflow_and_at_the_deadline() {
+        let store: Arc<dyn GraphStore> = Arc::new(crate::graph::rowgroup::RowGroupStore::new());
+        let chunk = DataChunkBuilder::new(&[LogicalType::Int64]).finish();
+        let range = |bounds: &[i64]| {
+            ExpressionPredicate::new(
+                FilterExpression::FunctionCall {
+                    function: BuiltinFunction::Range,
+                    args: bounds
+                        .iter()
+                        .map(|&bound| FilterExpression::Literal(Value::Int64(bound)))
+                        .collect(),
+                },
+                HashMap::new(),
+                Arc::clone(&store),
+                ReadView::latest(),
+            )
+            .eval_at(&chunk, 0)
+        };
+        let ints = |items: &[i64]| {
+            Some(Value::List(
+                items
+                    .iter()
+                    .map(|&item| Value::Int64(item))
+                    .collect::<Vec<_>>()
+                    .into(),
+            ))
+        };
+        assert_eq!(
+            range(&[i64::MAX - 1, i64::MAX]).unwrap(),
+            ints(&[i64::MAX - 1, i64::MAX])
+        );
+        assert_eq!(
+            range(&[i64::MAX - 3, i64::MAX, 2]).unwrap(),
+            ints(&[i64::MAX - 3, i64::MAX - 1])
+        );
+        assert_eq!(
+            range(&[i64::MIN + 1, i64::MIN, -1]).unwrap(),
+            ints(&[i64::MIN + 1, i64::MIN])
+        );
+        assert_eq!(range(&[1, 10, 3]).unwrap(), ints(&[1, 4, 7, 10]));
+        assert_eq!(range(&[5, 1]).unwrap(), ints(&[]));
+        assert_eq!(range(&[1, 5, 0]).unwrap(), None);
+
+        let _deadline =
+            crate::execution::deadline::enter(Some(grafeo_common::clock::Instant::now()));
+        assert!(matches!(
+            range(&[1, 1_000_000]),
+            Err(OperatorError::Timeout)
+        ));
+        // A range shorter than a chunk is made before any check.
+        assert_eq!(range(&[1, 3]).unwrap(), ints(&[1, 2, 3]));
     }
 }
 

@@ -147,11 +147,9 @@ fn open_shared(path: &Path) -> Result<(File, Option<File>)> {
         || database_file.try_lock_shared(),
         |e| matches!(e, std::fs::TryLockError::WouldBlock),
     )
-    .map_err(|_| {
-        Error::Internal(format!(
-            "database file cannot be locked for reading: {}",
-            path.display()
-        ))
+    .map_err(|error| match error {
+        std::fs::TryLockError::WouldBlock => super::holder::locked_error(path),
+        std::fs::TryLockError::Error(error) => Error::Io(error),
     })?;
 
     let pending_image = checkpoint_image_path(path);

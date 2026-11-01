@@ -1,4 +1,5 @@
-// Moves the GQLSTATUS of a database error to `err.gqlStatus` (see grafeo.js).
+// Moves the GQLSTATUS, Grafeo code and retryability of a database error to
+// `err.gqlStatus`, `err.errorCode` and `err.isRetryable` (see grafeo.js).
 // Internal to @grafeo-db/js; not part of its API.
 
 'use strict'
@@ -10,7 +11,11 @@ function annotate(error) {
   if (error instanceof Error) {
     const cause = error.cause
     if (cause instanceof Error && typeof cause.message === 'string' && cause.message.startsWith(MARKER)) {
-      error.gqlStatus = cause.message.slice(MARKER.length)
+      // `<status>`, or `<status> <code> <1 or 0>`.
+      const [status, code, retryable] = cause.message.slice(MARKER.length).split(' ')
+      error.gqlStatus = status
+      if (code) error.errorCode = code
+      error.isRetryable = retryable === '1'
       delete error.cause
     }
   }

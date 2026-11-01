@@ -28,7 +28,7 @@ serde_json = { version = "1", features = ["arbitrary_precision"] }
 is-terminal = "0.4"
 
 # REPL
-rustyline = "18"
+rustyline = "19"
 
 # Progress bars
 indicatif = "0.18"
@@ -50,7 +50,7 @@ sparql = ["grafeo-engine/sparql"]
 gremlin = ["grafeo-engine/gremlin"]
 graphql = ["grafeo-engine/graphql"]
 sql-pgq = ["grafeo-engine/sql-pgq"]
-triple-store = ["grafeo-engine/triple-store"]
+triple-store = ["grafeo-engine/triple-store", "grafeo-engine/regex"]
 rdf = ["triple-store"]  # Deprecated: use triple-store
 algos = ["grafeo-engine/algos"]
 vector-index = ["grafeo-engine/vector-index"]

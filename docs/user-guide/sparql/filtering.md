@@ -36,6 +36,8 @@ WHERE {
 | `>=` | Greater than or equal |
 
 ```sparql
+PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+
 SELECT ?name ?age
 WHERE {
     ?person foaf:name ?name .
@@ -62,6 +64,7 @@ WHERE {
     FILTER(?age > 18 && ?age < 65)
 }
 
+PREFIX foaf: <http://xmlns.com/foaf/0.1/>
 SELECT ?name
 WHERE {
     ?person foaf:name ?name
@@ -74,6 +77,8 @@ WHERE {
 ### REGEX
 
 ```sparql
+PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+
 SELECT ?name
 WHERE {
     ?person foaf:name ?name
@@ -84,18 +89,22 @@ WHERE {
 ### CONTAINS, STRSTARTS, STRENDS
 
 ```sparql
+PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+
 SELECT ?name
 WHERE {
     ?person foaf:name ?name
     FILTER(CONTAINS(?name, "son"))
 }
 
+PREFIX foaf: <http://xmlns.com/foaf/0.1/>
 SELECT ?name
 WHERE {
     ?person foaf:name ?name
     FILTER(STRSTARTS(?name, "John"))
 }
 
+PREFIX foaf: <http://xmlns.com/foaf/0.1/>
 SELECT ?email
 WHERE {
     ?person foaf:mbox ?email
@@ -153,6 +162,7 @@ WHERE {
 }
 
 # Using numeric functions
+PREFIX ex: <http://example.org/>
 SELECT ?value
 WHERE {
     ?s ex:measurement ?value
@@ -173,6 +183,7 @@ WHERE {
 }
 
 # Filter by year
+PREFIX ex: <http://example.org/>
 SELECT ?event ?date
 WHERE {
     ?event ex:date ?date
@@ -212,6 +223,10 @@ WHERE {
 }
 ```
 
+`FILTER EXISTS` and `FILTER NOT EXISTS` only keep or drop each row, once: they add no rows for the matches of their
+pattern and no variables of it. A `NOT EXISTS` whose pattern shares no variable with the row drops the row when the
+pattern matches anywhere.
+
 ## IN and NOT IN
 
 ```sparql
@@ -225,6 +240,7 @@ WHERE {
 }
 
 # Exclude values
+PREFIX ex: <http://example.org/>
 SELECT ?person ?country
 WHERE {
     ?person ex:country ?country
@@ -257,6 +273,8 @@ WHERE {
 Filters are typically placed after the patterns they reference:
 
 ```sparql
+PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+
 # Good: Filter after relevant patterns
 SELECT ?name ?age
 WHERE {
@@ -266,6 +284,7 @@ WHERE {
 }
 
 # Also valid: Multiple filters
+PREFIX foaf: <http://xmlns.com/foaf/0.1/>
 SELECT ?name ?age
 WHERE {
     ?person foaf:name ?name

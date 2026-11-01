@@ -83,6 +83,58 @@ pub(crate) fn writes_pending(op: &LogicalOperator) -> bool {
     }
 }
 
+/// Whether the rows of `op`, the input of a write, come from one pass over
+/// the store, each row read before the write could change what it reads
+/// (#677): row-local operators (a filter, a projection, an `UNWIND`, `SKIP`,
+/// `LIMIT`) over one scan that starts the statement, a file or no input; an
+/// aggregate, a sort or a distinct, which read their whole input before
+/// their first row; and another write, whose own input is read whole first
+/// when it is not one pass. A join, an expand, a scan or a lookup per input
+/// row, a subquery in an expression, a `MERGE` and anything else read the
+/// store again after the write's first rows, and would see them: a
+/// statement reads the graph as it was when it started (ISO/IEC
+/// 39075:2024 and openCypher), so their rows are read whole first (see
+/// `Planner::read_before_writing`).
+pub(crate) fn read_in_one_pass(op: &LogicalOperator) -> bool {
+    use crate::query::plan::has_subquery;
+    match op {
+        LogicalOperator::Empty | LogicalOperator::LoadData(_) => true,
+        LogicalOperator::NodeScan(scan) => scan.input.is_none(),
+        LogicalOperator::EdgeScan(scan) => scan.input.is_none(),
+        LogicalOperator::Filter(filter) => {
+            !has_subquery(&filter.predicate) && read_in_one_pass(&filter.input)
+        }
+        LogicalOperator::Project(project) => {
+            !project
+                .projections
+                .iter()
+                .any(|projection| has_subquery(&projection.expression))
+                && read_in_one_pass(&project.input)
+        }
+        LogicalOperator::Return(ret) => {
+            !ret.items.iter().any(|item| has_subquery(&item.expression))
+                && read_in_one_pass(&ret.input)
+        }
+        LogicalOperator::Unwind(unwind) => {
+            !has_subquery(&unwind.expression) && read_in_one_pass(&unwind.input)
+        }
+        LogicalOperator::Skip(skip) => read_in_one_pass(&skip.input),
+        LogicalOperator::Limit(limit) => read_in_one_pass(&limit.input),
+        LogicalOperator::Aggregate(_)
+        | LogicalOperator::Sort(_)
+        | LogicalOperator::Distinct(_)
+        | LogicalOperator::CreateNode(_)
+        | LogicalOperator::CreateEdge(_)
+        | LogicalOperator::Create(_)
+        | LogicalOperator::DeleteNode(_)
+        | LogicalOperator::DeleteEdge(_)
+        | LogicalOperator::SetProperty(_)
+        | LogicalOperator::AddLabel(_)
+        | LogicalOperator::RemoveLabel(_) => true,
+        _ => false,
+    }
+}
+
 /// Whether the planner reads the whole input of the clause `op` before the
 /// clause runs, because the input still writes as its rows come out
 /// ([`writes_pending`]) and the clause reads the graph, cuts the rows short

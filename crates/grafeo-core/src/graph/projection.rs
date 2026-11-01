@@ -409,6 +409,10 @@ impl GraphStore for GraphProjection {
         Ok(self.nodes_by_label(label, view)?.len())
     }
 
+    fn label_count_is_kept(&self, label: &str, view: ReadView) -> bool {
+        self.label_is_projected(label) && self.inner.label_count_is_kept(label, view)
+    }
+
     fn node_count(&self, view: ReadView) -> Result<usize> {
         if !self.spec.filters_labels() {
             return self.inner.node_count(view);
@@ -435,6 +439,19 @@ impl GraphStore for GraphProjection {
         } else {
             self.inner.all_labels()
         }
+    }
+
+    /// The inner store's labels that a projected node has: the spec's, and
+    /// the other labels of the nodes it keeps (an `Admin` that is also a
+    /// `Person`, in a projection of `Person`), which `all_labels` leaves out.
+    fn labels_in_use(&self, view: ReadView) -> Result<Vec<String>> {
+        let mut in_use = Vec::new();
+        for label in self.inner.all_labels()? {
+            if self.nodes_by_label_count(&label, view)? > 0 {
+                in_use.push(label);
+            }
+        }
+        Ok(in_use)
     }
 
     fn all_edge_types(&self) -> Result<Vec<String>> {

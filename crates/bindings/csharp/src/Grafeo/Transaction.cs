@@ -142,9 +142,18 @@ public sealed class Transaction : ITransaction, IDisposable, IAsyncDisposable
         _handle.Committed = true;
     }
 
-    /// <summary>Roll back the transaction, discarding all changes.</summary>
+    /// <summary>
+    /// Roll back the transaction, discarding all changes. After a commit that
+    /// succeeded it throws a <see cref="TransactionException"/>, as in every
+    /// binding: there is nothing left to roll back. After a commit that failed
+    /// it does nothing, as that commit ended the transaction.
+    /// </summary>
     public void Rollback()
     {
+        // The message the native layer's rollback gives after a commit, as
+        // the Go binding reports it.
+        if (_handle.Committed)
+            throw new TransactionException("Transaction already committed");
         if (_finished) return;
         var h = Handle;
         _finished = true;

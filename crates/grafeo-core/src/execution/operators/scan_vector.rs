@@ -165,7 +165,16 @@ impl VectorScanOperator {
         Ok(())
     }
 
+    /// Keeps the results within the thresholds, with a margin: the distance
+    /// comes from the index's arithmetic, which rounds differently from
+    /// evaluating the similarity or distance function per row, so a result
+    /// exactly at a threshold could fall on either side. The thresholds only
+    /// narrow the candidates; the planner checks the comparison itself above
+    /// the scan, as the per-row path does.
     fn apply_filters(&mut self) {
+        /// Far more than the rounding of an f32 distance, far less than a
+        /// threshold anyone writes.
+        const MARGIN: f64 = 1e-4;
         if self.min_similarity.is_none() && self.max_distance.is_none() {
             return;
         }
@@ -174,14 +183,17 @@ impl VectorScanOperator {
             let passes_similarity = match self.min_similarity {
                 Some(threshold) if self.metric == DistanceMetric::Cosine => {
                     let similarity = 1.0 - distance;
-                    similarity >= f64::from(threshold)
+                    similarity >= f64::from(threshold) - MARGIN
                 }
                 Some(_) => true,
                 None => true,
             };
 
             let passes_distance = match self.max_distance {
-                Some(threshold) => *distance <= f64::from(threshold),
+                Some(threshold) => {
+                    let threshold = f64::from(threshold);
+                    *distance <= threshold + MARGIN * threshold.abs().max(1.0)
+                }
                 None => true,
             };
 

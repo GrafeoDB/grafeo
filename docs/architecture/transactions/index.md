@@ -64,7 +64,7 @@ Safe to remove: versions with deleted_txn < 100
 | Dirty Read | Yes |
 | Non-Repeatable Read | Yes |
 | Phantom Read | Yes |
-| Write Skew | Partially |
+| Write Skew | No: needs `Serializable`, which is refused until queries record their reads |
 
 ## Conflict Detection
 

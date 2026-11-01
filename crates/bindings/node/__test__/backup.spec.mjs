@@ -2,7 +2,7 @@
 // an image of the database at an epoch, written while commits go on; the
 // incremental backups after it hold the WAL after that epoch.
 
-import { copyFileSync, mkdtempSync } from 'node:fs'
+import { copyFileSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, it, expect } from 'vitest'
@@ -22,6 +22,14 @@ async function committed(db) {
 async function people(db) {
   const result = await db.execute('MATCH (p:Person) RETURN p.name AS name ORDER BY name')
   return result.toArray().map((row) => row.name)
+}
+
+// Every file of `directory` with its bytes, sorted by name.
+function listing(directory) {
+  return readdirSync(directory)
+    .sort()
+    .filter((name) => statSync(join(directory, name)).isFile())
+    .map((name) => [name, readFileSync(join(directory, name)).toString('base64')])
 }
 
 describe('backups', () => {
@@ -119,5 +127,67 @@ describe('backups', () => {
       expect(await committed(restored)).toEqual([range(301), range(301)])
       restored.close()
     }
+  })
+
+  // Nothing written since the last backup: the call succeeds and writes nothing.
+  it('an incremental backup with nothing new is a no-op', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'grafeo-backup-'))
+    const backups = join(dir, 'backups')
+    const db = GrafeoDB.create(join(dir, 'lisbon.grafeo'))
+    await db.execute("INSERT (:Person {name: 'Alix'})")
+    db.backupFull(backups)
+    const before = listing(backups)
+    db.backupIncremental(backups)
+    db.backupIncremental(backups)
+    expect(listing(backups)).toEqual(before)
+    await db.execute("INSERT (:Person {name: 'Gus'})")
+    db.backupIncremental(backups)
+    const latest = db.currentEpoch()
+    db.close()
+    const restoredPath = join(dir, 'restored.grafeo')
+    GrafeoDB.restoreToEpoch(backups, Number(latest), restoredPath)
+    const restored = GrafeoDB.open(restoredPath)
+    expect(await people(restored)).toEqual(['Alix', 'Gus'])
+    restored.close()
+  })
+
+  // The WAL segment the next incremental backup starts at is gone: its own
+  // code (GRAFEO-S005), not retryable, a message that says to take a new full
+  // backup, and nothing written.
+  it('a removed WAL segment breaks the chain with its own code', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'grafeo-backup-'))
+    const backups = join(dir, 'backups')
+    const path = join(dir, 'vienna.grafeo')
+    const db = GrafeoDB.create(path)
+    await db.execute("INSERT (:Person {name: 'Alix'})")
+    db.backupFull(backups)
+    await db.execute("INSERT (:Person {name: 'Gus'})")
+    const wal = `${path}.wal`
+    const start = JSON.parse(readFileSync(join(wal, 'backup_cursor.meta'), 'utf8')).wal_lsn
+    rmSync(join(wal, `wal_${String(start).padStart(20, '0')}.log`))
+    const before = listing(backups)
+
+    let error
+    try {
+      db.backupIncremental(backups)
+    } catch (thrown) {
+      error = thrown
+    }
+    expect(error, 'the chain cannot go on').toBeDefined()
+    expect(error.errorCode).toBe('GRAFEO-S005')
+    expect(error.isRetryable).toBe(false)
+    expect(error.message.toLowerCase()).toContain('full backup')
+    expect(listing(backups)).toEqual(before)
+
+    db.backupFull(backups)
+    await db.execute("INSERT (:Person {name: 'Vincent'})")
+    db.backupIncremental(backups)
+    const latest = db.currentEpoch()
+    db.close()
+    const restoredPath = join(dir, 'restored.grafeo')
+    GrafeoDB.restoreToEpoch(backups, Number(latest), restoredPath)
+    const restored = GrafeoDB.open(restoredPath)
+    expect(await people(restored)).toEqual(['Alix', 'Gus', 'Vincent'])
+    restored.close()
   })
 })

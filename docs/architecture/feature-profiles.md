@@ -101,7 +101,7 @@ Minimal profile for browsers, mobile and other constrained environments, with th
 enterprise = ["metrics", "tracing", "async-storage"]
 ```
 
-Production operations. In the engine this enables observability and the async storage backend. On **grafeo-server**, `enterprise` additionally enables authentication, TLS, sync, replication, the push changefeed and all transports (HTTP, GWP, Bolt, Studio), which exist only in the server workspace.
+Production operations. In the engine this enables observability and the async storage calls (`async-storage`, deprecated since 0.6.1 and removed in 0.7.0: from 0.7.0 `enterprise` is metrics and tracing, and async callers run `wal_checkpoint()` with `tokio::task::spawn_blocking`). On **grafeo-server**, `enterprise` additionally enables authentication, TLS, sync, replication, the push changefeed and all transports (HTTP, GWP, Bolt, Studio), which exist only in the server workspace.
 
 ## Deprecated Profile Names
 
@@ -210,7 +210,7 @@ The individual feature flags (Layer 2) that profiles are composed from. "(standa
 | `grafeo-file` | (storage) | Single-file .grafeo format | Implemented |
 | `spill` | (storage) | Out-of-core disk spilling | Implemented |
 | `mmap` | (storage) | Memory-mapped file storage | Implemented |
-| `async-storage` | Enterprise | Async WAL backend (tokio) | Implemented |
+| `async-storage` | Enterprise | Async checkpoint and snapshot calls (tokio) that wrap the sync ones, deprecated since 0.6.1: call `wal_checkpoint()` from `tokio::task::spawn_blocking`; removed in 0.7.0 | Deprecated |
 | `compact-store` | (standalone) | Enables nothing since 0.6.0: every build that opens files reads databases compacted by 0.5.44 or older; removed in 0.7.0 | Deprecated |
 
 ### Graph Model

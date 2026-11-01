@@ -480,7 +480,7 @@ impl CdcLog {
         let id = triple_hash(subject, predicate, object, graph);
         self.record(ChangeEvent {
             entity_id: EntityId::Triple(id),
-            graph: None,
+            graph: graph.map(ToString::to_string),
             kind: ChangeKind::Create,
             epoch,
             timestamp: self.clock.now(),
@@ -513,7 +513,7 @@ impl CdcLog {
         let id = triple_hash(subject, predicate, object, graph);
         self.record(ChangeEvent {
             entity_id: EntityId::Triple(id),
-            graph: None,
+            graph: graph.map(ToString::to_string),
             kind: ChangeKind::Delete,
             epoch,
             timestamp: self.clock.now(),
@@ -1052,7 +1052,7 @@ fn triple_event(
         .and_then(|graph| graph.key.as_ref().map(ToString::to_string));
     ChangeEvent {
         entity_id: EntityId::Triple(triple_hash(&subject, &predicate, &object, graph.as_deref())),
-        graph: None,
+        graph: graph.clone(),
         kind,
         epoch,
         timestamp: clock.now(),

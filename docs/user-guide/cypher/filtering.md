@@ -13,13 +13,13 @@ The `WHERE` clause filters results based on conditions.
 ## Comparison Operators
 
 ```cypher
--- Equality
+// Equality
 WHERE p.name = 'Alix'
 
--- Inequality
+// Inequality
 WHERE p.age <> 30
 
--- Greater/less than
+// Greater/less than
 WHERE p.age > 25
 WHERE p.age < 40
 WHERE p.age >= 25
@@ -29,62 +29,62 @@ WHERE p.age <= 40
 ## Boolean Logic
 
 ```cypher
--- AND
+// AND
 WHERE p.age > 25 AND p.active = true
 
--- OR
+// OR
 WHERE p.city = 'NYC' OR p.city = 'LA'
 
--- NOT
+// NOT
 WHERE NOT p.archived
 
--- Combined
+// Combined
 WHERE (p.age > 25 AND p.active) OR p.role = 'admin'
 ```
 
 ## String Operations
 
 ```cypher
--- Starts with
+// Starts with
 WHERE p.name STARTS WITH 'Al'
 
--- Ends with
+// Ends with
 WHERE p.email ENDS WITH '@company.com'
 
--- Contains
+// Contains
 WHERE p.bio CONTAINS 'engineer'
 
--- Regular expression
+// Regular expression
 WHERE p.email =~ '.*@gmail\\.com'
 ```
 
 ## List Operations
 
 ```cypher
--- IN list
+// IN list
 WHERE p.status IN ['active', 'pending']
 
--- Element in property list
+// Element in property list
 WHERE 'admin' IN p.roles
 ```
 
 ## Null Checks
 
 ```cypher
--- Is null
+// Is null
 WHERE p.email IS NULL
 
--- Is not null
+// Is not null
 WHERE p.email IS NOT NULL
 ```
 
 ## Property Existence
 
 ```cypher
--- Check if property exists
+// Check if property exists
 WHERE exists(p.email)
 
--- Combined with value check
+// Combined with value check
 WHERE p.age IS NOT NULL AND p.age > 18
 ```
 
@@ -93,11 +93,11 @@ WHERE p.age IS NOT NULL AND p.age > 18
 Inline predicates directly on relationship patterns:
 
 ```cypher
--- Inline predicate on relationship
+// Inline predicate on relationship
 MATCH (a)-[r:KNOWS WHERE r.since > 2020]->(b)
 RETURN a.name, b.name
 
--- Equivalent to separate WHERE
+// Equivalent to separate WHERE
 MATCH (a)-[r:KNOWS]->(b)
 WHERE r.since > 2020
 RETURN a.name, b.name
@@ -108,14 +108,14 @@ RETURN a.name, b.name
 Check for the existence of a pattern:
 
 ```cypher
--- People who manage at least one team
+// People who manage at least one team
 MATCH (p:Person)
 WHERE EXISTS {
     MATCH (p)-[:MANAGES]->(:Team)
 }
 RETURN p.name
 
--- NOT EXISTS
+// NOT EXISTS
 MATCH (p:Person)
 WHERE NOT EXISTS {
     MATCH (p)-[:ORDERED]->(:Order)
@@ -126,22 +126,22 @@ RETURN p.name AS no_orders
 ## List Predicate Functions
 
 ```cypher
--- any(): at least one element matches
+// any(): at least one element matches
 MATCH (p:Person)
 WHERE any(role IN p.roles WHERE role = 'admin')
 RETURN p.name
 
--- all(): every element matches
+// all(): every element matches
 MATCH path = (a)-[:KNOWS*]->(b)
 WHERE all(n IN nodes(path) WHERE n.active = true)
 RETURN path
 
--- none(): no element matches
+// none(): no element matches
 MATCH (p:Person)
 WHERE none(tag IN p.tags WHERE tag = 'inactive')
 RETURN p.name
 
--- single(): exactly one element matches
+// single(): exactly one element matches
 MATCH (p:Person)
 WHERE single(role IN p.roles WHERE role = 'lead')
 RETURN p.name
@@ -152,10 +152,10 @@ RETURN p.name
 Fold a list into a single value:
 
 ```cypher
--- Sum a list
+// Sum a list
 RETURN reduce(acc = 0, x IN [1, 2, 3, 4, 5] | acc + x) AS total
 
--- String concatenation
+// String concatenation
 MATCH (p:Person)-[:KNOWS]->(f:Person)
 WITH p, collect(f.name) AS friends
 RETURN p.name, reduce(s = '', name IN friends | s + name + ', ') AS friend_list
@@ -164,15 +164,15 @@ RETURN p.name, reduce(s = '', name IN friends | s + name + ', ') AS friend_list
 ## Element Functions
 
 ```cypher
--- Get internal element ID
+// Get internal element ID
 MATCH (p:Person)
 RETURN elementId(p), p.name
 
--- Get labels
+// Get labels
 MATCH (n)
 RETURN labels(n)
 
--- Get relationship type
+// Get relationship type
 MATCH ()-[r]->()
 RETURN type(r)
 ```

@@ -11,6 +11,36 @@ use super::{
 
 impl super::Planner {
     /// Plans an AGGREGATE operator.
+    /// `count(*)` and `count(n)` of a scan of one label and nothing else
+    /// (`MATCH (n:Graph) RETURN count(*)`): the store's count of the label's
+    /// nodes, read when the query runs (see `LabelCountOperator`), without
+    /// a scan. `None` for any other aggregate.
+    fn plan_label_count(&self, agg: &AggregateOp) -> Option<(Box<dyn Operator>, Vec<String>)> {
+        let label = agg.counted_label()?;
+        let columns: Vec<String> = agg
+            .aggregates
+            .iter()
+            .map(|aggregate| {
+                aggregate.alias.clone().unwrap_or_else(|| {
+                    crate::query::planner::common::aggregate_column_name(aggregate)
+                })
+            })
+            .collect();
+        for column in &columns {
+            self.scalar_columns.borrow_mut().insert(column.clone());
+        }
+        // PROFILE names the scan the count stands in for.
+        self.record_absorbed_scan_entry("NodeScan", &agg.input);
+        let operator = grafeo_core::execution::operators::LabelCountOperator::new(
+            Arc::clone(&self.store) as Arc<dyn GraphStore>,
+            label.to_string(),
+            self.read_view(),
+            columns.len(),
+        )
+        .with_read_counter(self.read_counter());
+        Some((Box::new(operator), columns))
+    }
+
     pub(super) fn plan_aggregate(
         &self,
         agg: &AggregateOp,
@@ -39,6 +69,10 @@ impl super::Planner {
             return Ok((op, cols));
         }
         // Fall through to regular aggregate if factorized planning fails
+
+        if let Some(counted) = self.plan_label_count(agg) {
+            return Ok(counted);
+        }
 
         // An aggregate that comes first (`RETURN count(*)`) aggregates the
         // one empty row.
@@ -108,6 +142,9 @@ impl super::Planner {
         }
         let mut extra_projections: Vec<ExtraProjection> = Vec::new();
         let mut next_col_idx = input_columns.len();
+        // The group keys that are `labels(n)` of a variable: grouped by the
+        // store's label mask, one integer, and named after the grouping.
+        let mut mask_keys: Vec<usize> = Vec::new();
 
         // Check group-by expressions for properties and complex expressions
         // (Labels, Type, FunctionCall, IndexAccess, etc.)
@@ -132,7 +169,18 @@ impl super::Planner {
                     // CASE, Binary, etc.): project as computed column
                     let col_name = resolved_column_name(expr);
                     if !variable_columns.contains_key(&col_name) {
-                        let filter_expr = self.convert_expression(expr)?;
+                        let filter_expr = match labels_of_variable(expr) {
+                            Some(variable) => {
+                                mask_keys.push(
+                                    agg.group_by
+                                        .iter()
+                                        .position(|key| std::ptr::eq(key, expr))
+                                        .expect("the key is one of the group keys"),
+                                );
+                                FilterExpression::LabelMask(variable.to_string())
+                            }
+                            None => self.convert_expression(expr)?,
+                        };
                         extra_projections.push(ExtraProjection::Expression { filter_expr });
                         variable_columns.insert(col_name, next_col_idx);
                         next_col_idx += 1;
@@ -272,6 +320,7 @@ impl super::Planner {
                     percentile: agg_expr.percentile,
                     separator: agg_expr.separator.clone(),
                     rdf_literals: false,
+                    temporal: self.session_context.temporal_comparison,
                 })
             })
             .collect::<Result<Vec<_>>>()?;
@@ -356,21 +405,58 @@ impl super::Planner {
             self.set_column_entity(column, entity.clone());
         }
 
+        let key_types = output_schema.clone();
         // Choose operator based on whether there are group-by columns
         let mut operator: Box<dyn Operator> = if group_columns.is_empty() {
-            Box::new(SimpleAggregateOperator::new(
-                input_op,
-                physical_aggregates,
-                output_schema,
-            ))
+            Box::new(
+                SimpleAggregateOperator::new(input_op, physical_aggregates, output_schema)
+                    .with_temporal(self.session_context.temporal_comparison),
+            )
         } else {
-            Box::new(HashAggregateOperator::new(
-                input_op,
-                group_columns,
-                physical_aggregates,
-                output_schema,
-            ))
+            Box::new(
+                HashAggregateOperator::new(
+                    input_op,
+                    group_columns,
+                    physical_aggregates,
+                    output_schema,
+                )
+                .with_temporal(self.session_context.temporal_comparison),
+            )
         };
+
+        // The groups keyed by a label mask get their labels back, once a
+        // group, before HAVING and what follows read them.
+        if !mask_keys.is_empty() {
+            let output_variables: HashMap<String, usize> = output_columns
+                .iter()
+                .enumerate()
+                .map(|(i, name)| (name.clone(), i))
+                .collect();
+            let mut projections = Vec::with_capacity(output_columns.len());
+            let mut types = Vec::with_capacity(output_columns.len());
+            for (i, name) in output_columns.iter().enumerate() {
+                if mask_keys.contains(&i) {
+                    projections.push(ProjectExpr::Expression {
+                        expr: FilterExpression::LabelsOfMask(name.clone()),
+                        variable_columns: output_variables.clone(),
+                    });
+                    types.push(LogicalType::Any);
+                } else {
+                    projections.push(ProjectExpr::Column(i));
+                    types.push(key_types[i].clone());
+                }
+            }
+            operator = Box::new(
+                ProjectOperator::with_store(
+                    operator,
+                    projections,
+                    types,
+                    Arc::clone(&self.store) as Arc<dyn GraphStore>,
+                    self.read_view(),
+                )
+                .with_session_context(self.session_context.clone()),
+            );
+        }
 
         // Apply HAVING clause filter if present
         if let Some(having_expr) = &agg.having {
@@ -395,30 +481,23 @@ impl super::Planner {
         Ok((operator, output_columns))
     }
 
-    /// Checks if an aggregate is simple enough for factorized execution.
-    ///
-    /// Simple aggregates:
-    /// - COUNT(*) or COUNT(variable)
-    /// - SUM, AVG, MIN, MAX on variables (not properties for now)
+    /// Whether every aggregate of `agg` gives on the factorized chain what it
+    /// gives on the flat rows: a `COUNT(*)` or a `COUNT(variable)` without
+    /// `DISTINCT`. The factorized aggregate reads the chain's last column, and
+    /// a variable of a chain of expands is never null, so a count of one
+    /// counts the paths; any other aggregate (or `DISTINCT`) reads that
+    /// column whatever it names, and runs on the flat rows.
     pub(super) fn is_simple_aggregate(&self, agg: &AggregateOp) -> bool {
         agg.aggregates.iter().all(|agg_expr| {
-            match agg_expr.function {
-                LogicalAggregateFunction::Count | LogicalAggregateFunction::CountNonNull => {
-                    // COUNT(*) is always OK, COUNT(var) is OK
-                    agg_expr.expression.is_none()
-                        || matches!(&agg_expr.expression, Some(LogicalExpression::Variable(_)))
-                }
-                LogicalAggregateFunction::Sum
-                | LogicalAggregateFunction::Avg
-                | LogicalAggregateFunction::Min
-                | LogicalAggregateFunction::Max => {
-                    // For now, only support when expression is a variable
-                    // (property access would require flattening first)
-                    matches!(&agg_expr.expression, Some(LogicalExpression::Variable(_)))
-                }
-                // Other aggregates (Collect, StdDev, Percentile) not supported in factorized form
-                _ => false,
-            }
+            !agg_expr.distinct
+                && matches!(
+                    agg_expr.function,
+                    LogicalAggregateFunction::Count | LogicalAggregateFunction::CountNonNull
+                )
+                && matches!(
+                    &agg_expr.expression,
+                    None | Some(LogicalExpression::Variable(_))
+                )
         })
     }
 
@@ -505,17 +584,8 @@ impl super::Planner {
                             FactorizedAggregate::count_column(1) // Target is at index 1 in deepest level
                         }
                     }
-                    LogicalAggregateFunction::Sum => {
-                        // SUM on deepest level target
-                        FactorizedAggregate::sum(1)
-                    }
-                    LogicalAggregateFunction::Avg => FactorizedAggregate::avg(1),
-                    LogicalAggregateFunction::Min => FactorizedAggregate::min(1),
-                    LogicalAggregateFunction::Max => FactorizedAggregate::max(1),
-                    _ => {
-                        // Shouldn't reach here due to is_simple_aggregate check
-                        FactorizedAggregate::count()
-                    }
+                    // Only counts are planned here (see `is_simple_aggregate`)
+                    _ => FactorizedAggregate::count(),
                 }
             })
             .collect();
@@ -561,6 +631,24 @@ impl super::Planner {
 /// of them, a value with them inside, or any value.
 fn entity_type(entity: Option<&EntityValue>) -> LogicalType {
     entity.map_or(LogicalType::Any, EntityValue::logical_type)
+}
+
+/// The variable of a `labels(n)` group key (the function or the `Labels`
+/// expression), which groups by the store's label mask (see
+/// `FilterExpression::LabelMask`).
+fn labels_of_variable(expression: &LogicalExpression) -> Option<&str> {
+    match expression {
+        LogicalExpression::Labels(variable) => Some(variable),
+        LogicalExpression::FunctionCall {
+            callee: crate::query::plan::Callee::Builtin(crate::query::plan::BuiltinFunction::Labels),
+            args,
+            ..
+        } => match args.as_slice() {
+            [LogicalExpression::Variable(variable)] => Some(variable),
+            _ => None,
+        },
+        _ => None,
+    }
 }
 
 #[cfg(test)]

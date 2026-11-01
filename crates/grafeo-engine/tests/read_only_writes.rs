@@ -324,10 +324,20 @@ fn a_read_only_database_refuses_imports_before_reading_their_input() {
         db.import_tsv_str("Alix\tGus\n", "KNOWS", true),
     );
     #[cfg(feature = "triple-store")]
-    assert_read_only_error(
-        "import_tsv_rdf of a missing file",
-        db.import_tsv_rdf(&missing, "http://ex.org/knows", "http://ex.org/"),
-    );
+    {
+        assert_read_only_error(
+            "import_tsv_rdf of a missing file",
+            db.import_tsv_rdf(&missing, "http://ex.org/knows", "http://ex.org/"),
+        );
+        assert_read_only_error(
+            "load_rdf of a missing file",
+            db.load_rdf(dir.path().join("missing.nt"), None),
+        );
+        let malformed = dir.path().join("malformed.ttl");
+        std::fs::write(&malformed, "<http://ex.org/alix> is no triple\n").unwrap();
+        assert_read_only_error("load_rdf of malformed data", db.load_rdf(&malformed, None));
+        assert_eq!(db.rdf_store().len(), 0, "no triple was added");
+    }
     assert_eq!(db.node_count().unwrap(), 0, "nothing was imported");
 }
 

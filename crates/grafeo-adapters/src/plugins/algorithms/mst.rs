@@ -21,29 +21,6 @@ use super::components::UnionFind;
 use super::traits::{MinScored, impl_algorithm, node_id_from_param};
 
 // ============================================================================
-// Edge Weight Extraction
-// ============================================================================
-
-/// Extracts edge weight from a property value.
-fn extract_weight(
-    store: &super::traits::GraphView<'_>,
-    edge_id: EdgeId,
-    weight_prop: Option<&str>,
-) -> f64 {
-    if let Some(prop_name) = weight_prop
-        && let Some(edge) = store.edge(edge_id)
-        && let Some(value) = edge.get_property(prop_name)
-    {
-        return match value {
-            Value::Int64(i) => *i as f64,
-            Value::Float64(f) => *f,
-            _ => 1.0,
-        };
-    }
-    1.0
-}
-
-// ============================================================================
 // MST Result
 // ============================================================================
 
@@ -139,7 +116,7 @@ pub(crate) fn kruskal_on(
                 let key = if i < j { (i, j) } else { (j, i) };
                 if !seen_edges.contains(&key) {
                     seen_edges.insert(key);
-                    let weight = extract_weight(store, edge_id, weight_property);
+                    let weight = store.edge_number(edge_id, weight_property, 1.0);
                     edges.push((weight, node, neighbor, edge_id));
                 }
             }
@@ -257,7 +234,7 @@ pub(crate) fn prim_on(
 
     // Add edges from start node
     for (neighbor, edge_id) in store.edges(start_node, Direction::Outgoing) {
-        let weight = extract_weight(store, edge_id, weight_property);
+        let weight = store.edge_number(edge_id, weight_property, 1.0);
         heap.push(MinScored::new(weight, (start_node, neighbor, edge_id)));
     }
 
@@ -265,7 +242,7 @@ pub(crate) fn prim_on(
     for &other in &nodes {
         for (neighbor, edge_id) in store.edges(other, Direction::Outgoing) {
             if neighbor == start_node {
-                let weight = extract_weight(store, edge_id, weight_property);
+                let weight = store.edge_number(edge_id, weight_property, 1.0);
                 heap.push(MinScored::new(weight, (other, start_node, edge_id)));
             }
         }
@@ -285,7 +262,7 @@ pub(crate) fn prim_on(
         // Add edges from new node
         for (neighbor, new_edge_id) in store.edges(dst, Direction::Outgoing) {
             if !*in_tree.get(&neighbor).unwrap_or(&false) {
-                let new_weight = extract_weight(store, new_edge_id, weight_property);
+                let new_weight = store.edge_number(new_edge_id, weight_property, 1.0);
                 heap.push(MinScored::new(new_weight, (dst, neighbor, new_edge_id)));
             }
         }
@@ -295,7 +272,7 @@ pub(crate) fn prim_on(
             if !*in_tree.get(&other).unwrap_or(&false) {
                 for (neighbor, new_edge_id) in store.edges(other, Direction::Outgoing) {
                     if neighbor == dst {
-                        let new_weight = extract_weight(store, new_edge_id, weight_property);
+                        let new_weight = store.edge_number(new_edge_id, weight_property, 1.0);
                         heap.push(MinScored::new(new_weight, (other, dst, new_edge_id)));
                     }
                 }

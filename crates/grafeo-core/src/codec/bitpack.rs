@@ -167,16 +167,35 @@ impl BitPackedInts {
 
         let max_value = values.iter().copied().max().unwrap_or(0);
         let bits = Self::bits_needed(max_value);
-        Self::pack_with_bits(values, bits)
+        // The width of the largest value fits every value.
+        Self::packed(values, bits)
     }
 
     /// Packs values using a specified bit width.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics if any value doesn't fit in the specified bit width.
-    #[must_use]
-    pub fn pack_with_bits(values: &[u64], bits_per_value: u8) -> Self {
+    /// An invalid-input error naming the first value that does not fit the
+    /// width: packed, it would read back as its low bits only.
+    pub fn pack_with_bits(values: &[u64], bits_per_value: u8) -> io::Result<Self> {
+        let fits = |value: u64| match bits_per_value {
+            0 => value == 0,
+            bits if bits >= 64 => true,
+            bits => value >> bits == 0,
+        };
+        if let Some((position, value)) = values.iter().enumerate().find(|(_, value)| !fits(**value))
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("value {value} at position {position} does not fit {bits_per_value} bits"),
+            ));
+        }
+        Ok(Self::packed(values, bits_per_value))
+    }
+
+    /// `values` packed at `bits_per_value` bits, each of which fits them
+    /// (see [`pack_with_bits`](Self::pack_with_bits), which checks it).
+    fn packed(values: &[u64], bits_per_value: u8) -> Self {
         if values.is_empty() {
             return Self {
                 data: WordStore::Inline(Vec::new()),
@@ -186,8 +205,7 @@ impl BitPackedInts {
         }
 
         if bits_per_value == 0 {
-            // All values must be 0
-            debug_assert!(values.iter().all(|&v| v == 0));
+            // All values are 0: nothing to store but the count.
             return Self {
                 data: WordStore::Inline(Vec::new()),
                 bits_per_value: 0,
@@ -200,23 +218,10 @@ impl BitPackedInts {
         let num_words = values.len().div_ceil(values_per_word);
 
         let mut words = vec![0u64; num_words];
-        let mask = if bits >= 64 {
-            u64::MAX
-        } else {
-            (1u64 << bits) - 1
-        };
-
         for (i, &value) in values.iter().enumerate() {
-            debug_assert!(
-                value <= mask,
-                "Value {} doesn't fit in {} bits",
-                value,
-                bits_per_value
-            );
-
             let word_idx = i / values_per_word;
             let bit_offset = (i % values_per_word) * bits;
-            words[word_idx] |= (value & mask) << bit_offset;
+            words[word_idx] |= value << bit_offset;
         }
 
         Self {
@@ -843,7 +848,8 @@ mod tests {
         let packed = BitPackedInts::pack_with_bits(
             &(0u64..200).collect::<Vec<_>>(),
             8, // 200 values × 8 bits = 1600 bits = 25 u64 words = 200 bytes
-        );
+        )
+        .unwrap();
         assert_eq!(packed.data_bytes().len(), packed.word_count() * 8);
         // Round-trip: read each word via word_at, recombine, unpack still works.
         let unpacked = packed.unpack();
@@ -978,5 +984,76 @@ mod tests {
         let packed = BitPackedInts::pack(&[]);
         assert!(packed.scan_eq(0).is_empty(), "expected empty");
         assert!(packed.scan_eq(42).is_empty(), "expected empty");
+    }
+
+    /// What `pack_with_bits` gives back, read the same way whether it
+    /// returns the packed values or a `Result` of them, so the tests below
+    /// hold for either signature of the fix.
+    trait PackOutcome {
+        /// The packed values; panics when the packer refused them.
+        fn packed(self) -> BitPackedInts;
+        /// Whether the packer refused the values.
+        fn refused(self) -> bool;
+    }
+
+    impl PackOutcome for BitPackedInts {
+        fn packed(self) -> BitPackedInts {
+            self
+        }
+
+        fn refused(self) -> bool {
+            false
+        }
+    }
+
+    impl<E: std::fmt::Debug> PackOutcome for Result<BitPackedInts, E> {
+        fn packed(self) -> BitPackedInts {
+            self.expect("values that fit their bit width pack")
+        }
+
+        fn refused(self) -> bool {
+            self.is_err()
+        }
+    }
+
+    /// A value wider than the bit width is refused with an error, in
+    /// release builds too: with 0 bits any value but 0, with 3 bits any
+    /// value above 7. It was a `debug_assert` (a panic in debug builds), and
+    /// release builds packed it, reading it back as 0 (or its low bits).
+    #[test]
+    fn pack_with_bits_refuses_a_value_wider_than_its_bits() {
+        let mut failures = Vec::new();
+        for (values, bits) in [(&[0u64, 5, 0][..], 0u8), (&[3, 9][..], 3)] {
+            let outcome =
+                std::panic::catch_unwind(|| BitPackedInts::pack_with_bits(values, bits).refused());
+            match outcome {
+                Ok(true) => {}
+                Ok(false) => failures.push(format!(
+                    "pack_with_bits({values:?}, {bits}) packed them, they read back as {:?}",
+                    BitPackedInts::pack_with_bits(values, bits)
+                        .packed()
+                        .unpack()
+                )),
+                Err(_) => failures.push(format!(
+                    "pack_with_bits({values:?}, {bits}) panicked, where it is refused with an error"
+                )),
+            }
+        }
+        assert!(failures.is_empty(), "\n{}", failures.join("\n"));
+    }
+
+    /// Control: values that fit their bit width pack and read back, zeros
+    /// with 0 bits included.
+    #[test]
+    fn pack_with_bits_packs_values_that_fit() {
+        for (values, bits) in [
+            (&[0u64, 0, 0][..], 0u8),
+            (&[3, 7, 0][..], 3),
+            (&[u64::MAX, 0][..], 64),
+        ] {
+            let packed = BitPackedInts::pack_with_bits(values, bits).packed();
+            assert_eq!(packed.unpack(), values, "{bits} bits");
+            assert_eq!(packed.len(), values.len());
+        }
     }
 }

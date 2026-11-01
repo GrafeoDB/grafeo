@@ -11,9 +11,6 @@
 //! | Edge types | Maps "KNOWS" → EdgeTypeId |
 //! | Indexes | Which properties are indexed for fast lookups |
 
-mod check_eval;
-
-use check_eval::CheckExpression;
 use grafeo_common::types::ReadView;
 
 use std::collections::{HashMap, HashSet};
@@ -195,10 +192,24 @@ impl Catalog {
         self.indexes.drop(id)
     }
 
-    /// Finds an index by its user-defined name.
+    /// Finds an index by its user-defined name: the first of its
+    /// properties for an index over several.
     #[must_use]
     pub fn find_index_by_name(&self, name: &str) -> Option<IndexId> {
         self.indexes.find_by_name(name)
+    }
+
+    /// The definitions a user-defined index name stands for, one per
+    /// property, in the order they were created; empty for an unknown name.
+    #[must_use]
+    pub fn indexes_named(&self, name: &str) -> Vec<IndexDefinition> {
+        self.indexes.named(name)
+    }
+
+    /// Drops every definition a user-defined index name stands for,
+    /// returning how many there were.
+    pub fn drop_indexes_named(&self, name: &str) -> usize {
+        self.indexes.drop_named(name)
     }
 
     /// Gets the index definition for an index ID.
@@ -223,7 +234,7 @@ impl Catalog {
         self.indexes.for_label_property(label, property_key)
     }
 
-    /// Returns all index definitions.
+    /// Returns all index definitions, sorted by name.
     #[must_use]
     pub fn all_indexes(&self) -> Vec<IndexDefinition> {
         self.indexes.all()
@@ -317,7 +328,6 @@ impl Catalog {
     ///
     /// * `CatalogError::SchemaNotEnabled` if schema is disabled.
     /// * `CatalogError::TypeAlreadyExists` if a type with the same name exists.
-    /// * `CatalogError::InvalidCheck` if a CHECK expression does not parse.
     pub fn register_node_type(&self, def: NodeTypeDefinition) -> Result<(), CatalogError> {
         match &self.schema {
             Some(schema) => schema.register_node_type(def),
@@ -368,6 +378,18 @@ impl Catalog {
             .is_some_and(SchemaCatalog::has_node_types)
     }
 
+    /// Forgets every definition: the indexes and their names, and the schema
+    /// (types, graph types and their bindings, schemas, constraints,
+    /// procedures), for a restore that puts the snapshot's in their place
+    /// (#677). The label, edge type and property key ids stay: the stores
+    /// keep the ids they gave out, and a name used again gets its old one.
+    pub(crate) fn clear_definitions(&self) {
+        self.indexes.clear();
+        if let Some(schema) = &self.schema {
+            schema.clear();
+        }
+    }
+
     /// Returns all registered node type names.
     #[must_use]
     pub fn all_node_type_names(&self) -> Vec<String> {
@@ -392,7 +414,6 @@ impl Catalog {
     ///
     /// * `CatalogError::SchemaNotEnabled` if schema is disabled.
     /// * `CatalogError::TypeAlreadyExists` if an edge type with the same name exists.
-    /// * `CatalogError::InvalidCheck` if a CHECK expression does not parse.
     pub fn register_edge_type_def(&self, def: EdgeTypeDefinition) -> Result<(), CatalogError> {
         match &self.schema {
             Some(schema) => schema.register_edge_type(def),
@@ -520,30 +541,17 @@ impl Catalog {
     /// # Errors
     ///
     /// * `CatalogError::SchemaNotEnabled` if schema is disabled.
-    /// * `CatalogError::InvalidCheck` if the constraint is a CHECK whose
-    ///   expression does not parse.
     pub fn add_constraint_to_type(
         &self,
         label: &str,
         constraint: TypeConstraint,
     ) -> Result<(), CatalogError> {
         match &self.schema {
-            Some(schema) => schema.add_constraint_to_type(label, constraint),
+            Some(schema) => {
+                schema.add_constraint_to_type(label, constraint);
+                Ok(())
+            }
             None => Err(CatalogError::SchemaNotEnabled),
-        }
-    }
-
-    /// Whether `properties` (an entity's properties) satisfy the CHECK
-    /// expression `expression`, which is parsed on its first use and kept:
-    /// see [`CheckExpression::evaluate`].
-    fn evaluate_check(
-        &self,
-        expression: &str,
-        properties: &[(String, Value)],
-    ) -> Result<bool, String> {
-        match &self.schema {
-            Some(schema) => schema.check_expression(expression)?.evaluate(properties),
-            None => CheckExpression::parse(expression)?.evaluate(properties),
         }
     }
 
@@ -809,6 +817,19 @@ impl Catalog {
         }
     }
 
+    /// Forgets the graph type of graph `graph_name`, as its drop does: a
+    /// graph created again under the name is untyped. Returns whether it had
+    /// one.
+    pub fn unbind_graph(&self, graph_name: &str) -> bool {
+        self.schema.as_ref().is_some_and(|schema| {
+            schema
+                .graph_type_bindings
+                .write()
+                .remove(graph_name)
+                .is_some()
+        })
+    }
+
     /// Gets the graph type binding for a graph instance.
     pub fn get_graph_type_binding(&self, graph_name: &str) -> Option<String> {
         self.schema
@@ -824,7 +845,7 @@ impl Catalog {
     /// # Errors
     ///
     /// * `CatalogError::SchemaNotEnabled` if schema is disabled.
-    /// * `CatalogError::TypeAlreadyExists` if a procedure with the same name exists.
+    /// * `CatalogError::ProcedureAlreadyExists` if a procedure with the same name exists.
     pub fn register_procedure(&self, def: ProcedureDefinition) -> Result<(), CatalogError> {
         match &self.schema {
             Some(schema) => schema.register_procedure(def),
@@ -852,7 +873,7 @@ impl Catalog {
     /// # Errors
     ///
     /// * `CatalogError::SchemaNotEnabled` if schema is disabled.
-    /// * `CatalogError::TypeNotFound` if the procedure does not exist.
+    /// * `CatalogError::ProcedureNotFound` if the procedure does not exist.
     pub fn drop_procedure(&self, name: &str) -> Result<(), CatalogError> {
         match &self.schema {
             Some(schema) => schema.drop_procedure(name),
@@ -1101,6 +1122,8 @@ pub enum IndexType {
     BTree,
     /// Full-text index for text search.
     FullText,
+    /// Vector index for similarity search.
+    Vector,
 }
 
 /// Index definition.
@@ -1126,11 +1149,21 @@ struct IndexCatalog {
     indexes: RwLock<HashMap<IndexId, IndexDefinition>>,
     label_indexes: RwLock<HashMap<LabelId, Vec<IndexId>>>,
     label_property_indexes: RwLock<HashMap<(LabelId, PropertyKeyId), Vec<IndexId>>>,
-    name_index: RwLock<HashMap<String, IndexId>>,
+    /// The definitions of each name, one per property of the index.
+    name_index: RwLock<HashMap<String, Vec<IndexId>>>,
     next_id: AtomicU32,
 }
 
 impl IndexCatalog {
+    /// Forgets every index definition and name; the ids it gave out are not
+    /// given out again (see [`Catalog::clear_definitions`]).
+    fn clear(&self) {
+        self.indexes.write().clear();
+        self.label_indexes.write().clear();
+        self.label_property_indexes.write().clear();
+        self.name_index.write().clear();
+    }
+
     fn new() -> Self {
         Self {
             indexes: RwLock::new(HashMap::new()),
@@ -1167,7 +1200,11 @@ impl IndexCatalog {
             .entry((label, property_key))
             .or_default()
             .push(id);
-        self.name_index.write().insert(name.to_string(), id);
+        self.name_index
+            .write()
+            .entry(name.to_string())
+            .or_default()
+            .push(id);
 
         id
     }
@@ -1189,7 +1226,13 @@ impl IndexCatalog {
                 ids.retain(|&i| i != id);
             }
             // Remove from name index
-            self.name_index.write().remove(&definition.name);
+            let mut names = self.name_index.write();
+            if let Some(ids) = names.get_mut(&definition.name) {
+                ids.retain(|&i| i != id);
+                if ids.is_empty() {
+                    names.remove(&definition.name);
+                }
+            }
             true
         } else {
             false
@@ -1197,7 +1240,33 @@ impl IndexCatalog {
     }
 
     fn find_by_name(&self, name: &str) -> Option<IndexId> {
-        self.name_index.read().get(name).copied()
+        self.name_index
+            .read()
+            .get(name)
+            .and_then(|ids| ids.first().copied())
+    }
+
+    fn named(&self, name: &str) -> Vec<IndexDefinition> {
+        let ids = self
+            .name_index
+            .read()
+            .get(name)
+            .cloned()
+            .unwrap_or_default();
+        let indexes = self.indexes.read();
+        ids.iter()
+            .filter_map(|id| indexes.get(id).cloned())
+            .collect()
+    }
+
+    fn drop_named(&self, name: &str) -> usize {
+        let ids = self
+            .name_index
+            .read()
+            .get(name)
+            .cloned()
+            .unwrap_or_default();
+        ids.into_iter().filter(|&id| self.drop(id)).count()
     }
 
     fn get(&self, id: IndexId) -> Option<IndexDefinition> {
@@ -1225,7 +1294,10 @@ impl IndexCatalog {
     }
 
     fn all(&self) -> Vec<IndexDefinition> {
-        self.indexes.read().values().cloned().collect()
+        let mut all: Vec<IndexDefinition> = self.indexes.read().values().cloned().collect();
+        // By name, then by id: one name can cover several indexes.
+        all.sort_by(|a, b| a.name.cmp(&b.name).then(a.id.cmp(&b.id)));
+        all
     }
 }
 
@@ -1340,13 +1412,18 @@ pub enum TypeConstraint {
     Unique(Vec<String>),
     /// NOT NULL constraint on a single property.
     NotNull(String),
-    /// CHECK constraint with a named expression string.
-    Check {
-        /// Optional constraint name.
-        name: Option<String>,
-        /// Expression (stored as string for now).
-        expression: String,
-    },
+}
+
+/// The constraint as DDL writes it: `PRIMARY KEY (a, b)`, `UNIQUE (email)`,
+/// `NOT NULL name`.
+impl std::fmt::Display for TypeConstraint {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::PrimaryKey(keys) => write!(f, "PRIMARY KEY ({})", keys.join(", ")),
+            Self::Unique(keys) => write!(f, "UNIQUE ({})", keys.join(", ")),
+            Self::NotNull(key) => write!(f, "NOT NULL {key}"),
+        }
+    }
 }
 
 /// What a named constraint (`CREATE CONSTRAINT`) requires.
@@ -1601,9 +1678,6 @@ pub struct SchemaCatalog {
     procedures: RwLock<HashMap<String, ProcedureDefinition>>,
     /// Named constraints (`CREATE CONSTRAINT`), by name.
     constraints: RwLock<HashMap<String, ConstraintDefinition>>,
-    /// The CHECK expressions parsed so far, by their text: each is parsed
-    /// once, not on every write it checks.
-    checks: RwLock<HashMap<String, Arc<CheckExpression>>>,
 }
 
 impl SchemaCatalog {
@@ -1618,39 +1692,7 @@ impl SchemaCatalog {
             graph_type_bindings: RwLock::new(HashMap::new()),
             procedures: RwLock::new(HashMap::new()),
             constraints: RwLock::new(HashMap::new()),
-            checks: RwLock::new(HashMap::new()),
         }
-    }
-
-    /// The parsed CHECK expression `expression`, parsed on its first use.
-    fn check_expression(&self, expression: &str) -> Result<Arc<CheckExpression>, String> {
-        if let Some(parsed) = self.checks.read().get(expression) {
-            return Ok(Arc::clone(parsed));
-        }
-        let parsed = Arc::new(CheckExpression::parse(expression)?);
-        self.checks
-            .write()
-            .insert(expression.to_string(), Arc::clone(&parsed));
-        Ok(parsed)
-    }
-
-    /// Parses the CHECK expressions among `constraints`, so one that does
-    /// not parse is refused when it is declared, not by every write it
-    /// would check.
-    fn parse_checks<'a>(
-        &self,
-        constraints: impl IntoIterator<Item = &'a TypeConstraint>,
-    ) -> Result<(), CatalogError> {
-        for constraint in constraints {
-            if let TypeConstraint::Check { expression, .. } = constraint {
-                self.check_expression(expression)
-                    .map_err(|reason| CatalogError::InvalidCheck {
-                        expression: expression.clone(),
-                        reason,
-                    })?;
-            }
-        }
-        Ok(())
     }
 
     // --- Node type operations ---
@@ -1660,9 +1702,7 @@ impl SchemaCatalog {
     /// # Errors
     ///
     /// * `CatalogError::TypeAlreadyExists` if a type with the same name exists.
-    /// * `CatalogError::InvalidCheck` if a CHECK expression does not parse.
     pub fn register_node_type(&self, def: NodeTypeDefinition) -> Result<(), CatalogError> {
-        self.parse_checks(&def.constraints)?;
         let mut types = self.node_types.write();
         if types.contains_key(&def.name) {
             return Err(CatalogError::TypeAlreadyExists(def.name));
@@ -1699,6 +1739,19 @@ impl SchemaCatalog {
     #[must_use]
     pub fn has_node_types(&self) -> bool {
         !self.node_types.read().is_empty()
+    }
+
+    /// Forgets every definition (see [`Catalog::clear_definitions`]).
+    fn clear(&self) {
+        self.unique_constraints.write().clear();
+        self.required_properties.write().clear();
+        self.node_types.write().clear();
+        self.edge_types.write().clear();
+        self.graph_types.write().clear();
+        self.schemas.write().clear();
+        self.graph_type_bindings.write().clear();
+        self.procedures.write().clear();
+        self.constraints.write().clear();
     }
 
     /// Gets a resolved node type with inherited properties and constraints from parents.
@@ -1780,9 +1833,7 @@ impl SchemaCatalog {
     /// # Errors
     ///
     /// * `CatalogError::TypeAlreadyExists` if an edge type with the same name exists.
-    /// * `CatalogError::InvalidCheck` if a CHECK expression does not parse.
     pub fn register_edge_type(&self, def: EdgeTypeDefinition) -> Result<(), CatalogError> {
-        self.parse_checks(&def.constraints)?;
         let mut types = self.edge_types.write();
         if types.contains_key(&def.name) {
             return Err(CatalogError::TypeAlreadyExists(def.name));
@@ -1938,16 +1989,7 @@ impl SchemaCatalog {
 
     /// Adds a constraint to an existing node type, creating a minimal type if needed.
     ///
-    /// # Errors
-    ///
-    /// `CatalogError::InvalidCheck` if the constraint is a CHECK whose
-    /// expression does not parse; nothing changes then.
-    pub fn add_constraint_to_type(
-        &self,
-        label: &str,
-        constraint: TypeConstraint,
-    ) -> Result<(), CatalogError> {
-        self.parse_checks([&constraint])?;
+    pub fn add_constraint_to_type(&self, label: &str, constraint: TypeConstraint) {
         let mut types = self.node_types.write();
         if let Some(def) = types.get_mut(label) {
             def.constraints.push(constraint);
@@ -1964,7 +2006,6 @@ impl SchemaCatalog {
                 },
             );
         }
-        Ok(())
     }
 
     /// Adds a property to an existing node type.
@@ -2123,11 +2164,11 @@ impl SchemaCatalog {
     ///
     /// # Errors
     ///
-    /// Returns `CatalogError::TypeAlreadyExists` if a procedure with the same name exists.
+    /// Returns `CatalogError::ProcedureAlreadyExists` if a procedure with the same name exists.
     pub fn register_procedure(&self, def: ProcedureDefinition) -> Result<(), CatalogError> {
         let mut procs = self.procedures.write();
         if procs.contains_key(&def.name) {
-            return Err(CatalogError::TypeAlreadyExists(def.name.clone()));
+            return Err(CatalogError::ProcedureAlreadyExists(def.name.clone()));
         }
         procs.insert(def.name.clone(), def);
         Ok(())
@@ -2142,11 +2183,11 @@ impl SchemaCatalog {
     ///
     /// # Errors
     ///
-    /// Returns `CatalogError::TypeNotFound` if no procedure with the given name exists.
+    /// Returns `CatalogError::ProcedureNotFound` if no procedure with the given name exists.
     pub fn drop_procedure(&self, name: &str) -> Result<(), CatalogError> {
         let mut procs = self.procedures.write();
         if procs.remove(name).is_none() {
-            return Err(CatalogError::TypeNotFound(name.to_string()));
+            return Err(CatalogError::ProcedureNotFound(name.to_string()));
         }
         Ok(())
     }
@@ -2219,7 +2260,7 @@ impl SchemaCatalog {
             return Err(CatalogError::ConstraintAlreadyExists);
         }
         for constraint in def.type_constraints() {
-            self.add_constraint_to_type(&def.label, constraint)?;
+            self.add_constraint_to_type(&def.label, constraint);
         }
         constraints.insert(def.name.clone(), def);
         Ok(())
@@ -2280,6 +2321,10 @@ pub enum CatalogError {
     TypeAlreadyExists(String),
     /// No type with this name exists.
     TypeNotFound(String),
+    /// A stored procedure with this name already exists.
+    ProcedureAlreadyExists(String),
+    /// No stored procedure with this name exists.
+    ProcedureNotFound(String),
     /// A schema with this name already exists.
     SchemaAlreadyExists(String),
     /// No schema with this name exists.
@@ -2299,7 +2344,12 @@ pub enum CatalogError {
         /// The most levels they may nest.
         limit: usize,
     },
-    /// The expression of a CHECK constraint does not parse.
+    /// The expression of a CHECK constraint does not parse. No constraint
+    /// is a CHECK one any more, so nothing returns it.
+    #[deprecated(
+        since = "0.6.1",
+        note = "CHECK constraints are not supported; nothing returns this"
+    )]
     InvalidCheck {
         /// The expression.
         expression: String,
@@ -2326,6 +2376,8 @@ impl std::fmt::Display for CatalogError {
             Self::IndexNotFound(id) => write!(f, "Index not found: {id}"),
             Self::TypeAlreadyExists(name) => write!(f, "Type already exists: {name}"),
             Self::TypeNotFound(name) => write!(f, "Type not found: {name}"),
+            Self::ProcedureAlreadyExists(name) => write!(f, "Procedure already exists: {name}"),
+            Self::ProcedureNotFound(name) => write!(f, "Procedure not found: {name}"),
             Self::SchemaAlreadyExists(name) => write!(f, "Schema already exists: {name}"),
             Self::SchemaNotFound(name) => write!(f, "Schema not found: {name}"),
             Self::PropertyTypeTooDeep { limit } => {
@@ -2336,6 +2388,7 @@ impl std::fmt::Display for CatalogError {
                 "The property types of a node or edge type nest at most {limit} LIST<...> \
                  levels in all, not {levels}"
             ),
+            #[allow(deprecated, reason = "the variant is deprecated but still displays")]
             Self::InvalidCheck { expression, reason } => {
                 write!(f, "Invalid CHECK constraint ({expression}): {reason}")
             }
@@ -2443,6 +2496,11 @@ impl CatalogConstraintValidator {
                 error @ grafeo_common::utils::error::Error::Transaction(
                     grafeo_common::utils::error::TransactionError::IncompleteCommit,
                 ) => OperatorError::Wrapped(Box::new(error)),
+                // Already the conflict: passed on as it is, not wrapped in a
+                // second one.
+                error @ grafeo_common::utils::error::Error::Transaction(
+                    grafeo_common::utils::error::TransactionError::WriteConflict(_),
+                ) => OperatorError::Wrapped(Box::new(error)),
                 error => OperatorError::WriteConflict(error.to_string()),
             })
     }
@@ -2459,9 +2517,17 @@ impl CatalogConstraintValidator {
         self
     }
 
-    /// The node type, with what it inherits, that checks nodes with `label`
-    /// in the schema written in.
+    /// The node type, with what it inherits, that checks nodes with `label`:
+    /// the one the graph's closed graph type names, else the one of the
+    /// schema written in.
     fn node_type(&self, label: &str) -> Option<NodeTypeDefinition> {
+        if let Some(name) = self
+            .closed_type
+            .as_ref()
+            .and_then(|closed| closed.node_type_names.get(label))
+        {
+            return self.catalog.resolved_node_type(name);
+        }
         match &self.schema {
             Some(schema) => self
                 .catalog
@@ -2470,9 +2536,16 @@ impl CatalogConstraintValidator {
         }
     }
 
-    /// The edge type that checks edges of `edge_type` in the schema written
-    /// in.
+    /// The edge type that checks edges of `edge_type`: the one the graph's
+    /// closed graph type names, else the one of the schema written in.
     fn edge_type(&self, edge_type: &str) -> Option<EdgeTypeDefinition> {
+        if let Some(name) = self
+            .closed_type
+            .as_ref()
+            .and_then(|closed| closed.edge_type_names.get(edge_type))
+        {
+            return self.catalog.get_edge_type_def(name);
+        }
         match &self.schema {
             Some(schema) => self
                 .catalog
@@ -2555,6 +2628,40 @@ impl CatalogConstraintValidator {
     }
 }
 
+impl CatalogConstraintValidator {
+    /// Whether `value` is a list a vector index on `key` may take as a
+    /// vector, for some label: a write of it then needs the node's labels.
+    fn indexes_list(&self, key: &str, value: &Value) -> bool {
+        #[cfg(feature = "vector-index")]
+        if let (Value::List(_), Some(store)) = (value, &self.store) {
+            return store.has_vector_index_on(key);
+        }
+        let _ = (key, value);
+        false
+    }
+
+    /// The vector a node with `labels` stores for a list of numbers written
+    /// to `key` when one of its labels has a vector index on it (#587): an
+    /// embedding written as a list, by a list literal, a parameter or an
+    /// import, is the vector of the nearest 32-bit floats, as `vector()`
+    /// makes it, so the index takes it. Its size and values are then checked
+    /// as a vector's ([`validate_node_property`](ConstraintValidator::validate_node_property)).
+    #[cfg(feature = "vector-index")]
+    fn list_as_vector(&self, labels: &[String], key: &str, value: &Value) -> Option<Value> {
+        let (Value::List(items), Some(store)) = (value, &self.store) else {
+            return None;
+        };
+        if !labels
+            .iter()
+            .any(|label| store.vector_index_config(label, key).is_some())
+        {
+            return None;
+        }
+        let vector: Option<Vec<f32>> = items.iter().map(Value::as_vector_component).collect();
+        vector.map(|vector| Value::Vector(vector.into()))
+    }
+}
+
 impl ConstraintValidator for CatalogConstraintValidator {
     fn validate_node_property(
         &self,
@@ -2562,6 +2669,25 @@ impl ConstraintValidator for CatalogConstraintValidator {
         key: &str,
         value: &Value,
     ) -> Result<(), OperatorError> {
+        // A vector index on the property takes a list of numbers as a vector
+        // (`convert_node_property`); a list still a list has an element that
+        // is not a number, which the index could not see (#587).
+        #[cfg(feature = "vector-index")]
+        if let (Value::List(items), Some(store)) = (value, &self.store)
+            && let Some(label) = labels
+                .iter()
+                .find(|label| store.vector_index_config(label, key).is_some())
+            && let Some((position, item)) = items
+                .iter()
+                .enumerate()
+                .find(|(_, item)| item.as_vector_component().is_none())
+        {
+            return Err(OperatorError::limit_violation(format!(
+                "property '{key}' on :{label} has a vector index, which takes a list of numbers: \
+                 got {} at position {position}",
+                item.type_name()
+            )));
+        }
         // A vector index on the property fixes the vector's size, and takes
         // only values it can measure a distance to (#593).
         #[cfg(feature = "vector-index")]
@@ -2666,23 +2792,6 @@ impl ConstraintValidator for CatalogConstraintValidator {
                                 if !prop_names.contains(pk.as_str()) {
                                     return Err(OperatorError::schema_violation(format!(
                                         "missing primary key property '{pk}' on :{label}"
-                                    )));
-                                }
-                            }
-                        }
-                        TypeConstraint::Check { name, expression } => {
-                            let constraint_name = name.as_deref().unwrap_or("unnamed");
-                            match self.catalog.evaluate_check(expression, properties) {
-                                Ok(true) => {}
-                                Ok(false) => {
-                                    return Err(OperatorError::schema_violation(format!(
-                                        "CHECK constraint '{constraint_name}' violated on :{label}"
-                                    )));
-                                }
-                                Err(err) => {
-                                    return Err(OperatorError::schema_violation(format!(
-                                        "CHECK constraint '{constraint_name}' on :{label} \
-                                         cannot be evaluated: {err}"
                                     )));
                                 }
                             }
@@ -2845,26 +2954,6 @@ impl ConstraintValidator for CatalogConstraintValidator {
                     )));
                 }
             }
-
-            for constraint in &type_def.constraints {
-                if let TypeConstraint::Check { name, expression } = constraint {
-                    let constraint_name = name.as_deref().unwrap_or("unnamed");
-                    match self.catalog.evaluate_check(expression, properties) {
-                        Ok(true) => {}
-                        Ok(false) => {
-                            return Err(OperatorError::schema_violation(format!(
-                                "CHECK constraint '{constraint_name}' violated on :{edge_type}"
-                            )));
-                        }
-                        Err(err) => {
-                            return Err(OperatorError::schema_violation(format!(
-                                "CHECK constraint '{constraint_name}' on :{edge_type} \
-                                 cannot be evaluated: {err}"
-                            )));
-                        }
-                    }
-                }
-            }
         }
         Ok(())
     }
@@ -3021,10 +3110,12 @@ impl ConstraintValidator for CatalogConstraintValidator {
         })
     }
 
-    fn constrains_node_property(&self, _key: &str, value: &Value) -> bool {
-        // A vector index on (label, key) fixes a vector's size; the node
-        // types and a closed graph type hold every other constraint.
+    fn constrains_node_property(&self, key: &str, value: &Value) -> bool {
+        // A vector index on (label, key) fixes a vector's size and takes a
+        // list as a vector; the node types and a closed graph type hold every
+        // other constraint.
         matches!(value, Value::Vector(_))
+            || self.indexes_list(key, value)
             || self.catalog.has_node_types()
             || self
                 .closed_type
@@ -3033,14 +3124,23 @@ impl ConstraintValidator for CatalogConstraintValidator {
     }
 
     fn convert_node_property(&self, labels: &[String], key: &str, value: &Value) -> Option<Value> {
-        if value.is_null() || !self.catalog.has_node_types() {
+        if value.is_null() {
             return None;
         }
-        labels.iter().find_map(|label| {
-            let type_def = self.node_type(label)?;
-            let typed = type_def.properties.iter().find(|p| p.name == key)?;
-            typed.data_type.convert(value)
-        })
+        let typed = if self.catalog.has_node_types() {
+            labels.iter().find_map(|label| {
+                let type_def = self.node_type(label)?;
+                let typed = type_def.properties.iter().find(|p| p.name == key)?;
+                typed.data_type.convert(value)
+            })
+        } else {
+            None
+        };
+        #[cfg(feature = "vector-index")]
+        if let Some(vector) = self.list_as_vector(labels, key, typed.as_ref().unwrap_or(value)) {
+            return Some(vector);
+        }
+        typed
     }
 
     fn convert_edge_property(&self, edge_type: &str, key: &str, value: &Value) -> Option<Value> {
@@ -3095,6 +3195,13 @@ struct ClosedGraphType {
     /// The edge types an edge may have, with their properties like
     /// `node_types`.
     edge_types: Option<HashMap<String, Option<HashSet<String>>>>,
+    /// The node type that checks each label, by its catalog name
+    /// (`schema/Type` for a type in a schema): the graph type's own, also
+    /// when the graph was created in another schema.
+    node_type_names: HashMap<String, String>,
+    /// The edge type that checks each edge type name, like
+    /// `node_type_names`.
+    edge_type_names: HashMap<String, String>,
 }
 
 impl ClosedGraphType {
@@ -3109,6 +3216,7 @@ impl ClosedGraphType {
         let declared = |properties: &[TypedProperty]| -> HashSet<String> {
             properties.iter().map(|p| p.name.clone()).collect()
         };
+        let mut node_type_names = HashMap::new();
         let node_types = (!def.allowed_node_types.is_empty()).then(|| {
             let mut labels = HashMap::new();
             for name in &def.allowed_node_types {
@@ -3122,11 +3230,18 @@ impl ClosedGraphType {
                             .entry(key_label.clone())
                             .or_insert_with(|| properties.clone());
                     }
+                    node_type_names.insert(unqualified(name).to_string(), name.clone());
                 }
                 labels.insert(unqualified(name).to_string(), properties);
             }
             labels
         });
+        let edge_type_names = def
+            .allowed_edge_types
+            .iter()
+            .filter(|name| catalog.get_edge_type_def(name).is_some())
+            .map(|name| (unqualified(name).to_string(), name.clone()))
+            .collect();
         let edge_types = (!def.allowed_edge_types.is_empty()).then(|| {
             def.allowed_edge_types
                 .iter()
@@ -3142,6 +3257,8 @@ impl ClosedGraphType {
             name: def.name,
             node_types,
             edge_types,
+            node_type_names,
+            edge_type_names,
         })
     }
 }

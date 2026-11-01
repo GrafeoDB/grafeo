@@ -123,7 +123,7 @@ This guide compares GraphQL (the API query language) with GQL (ISO/IEC 39075 gra
     MATCH (p:Person)
     RETURN p.name, p.age
     ORDER BY p.age DESC
-    LIMIT 10 OFFSET 5
+    OFFSET 5 LIMIT 10
     ```
 
 ### Aggregations

@@ -180,6 +180,8 @@ fn tolerate_repeat(
         Err(
             error @ (CatalogError::TypeAlreadyExists(_)
             | CatalogError::TypeNotFound(_)
+            | CatalogError::ProcedureAlreadyExists(_)
+            | CatalogError::ProcedureNotFound(_)
             | CatalogError::SchemaAlreadyExists(_)
             | CatalogError::SchemaNotFound(_)
             | CatalogError::ConstraintAlreadyExists

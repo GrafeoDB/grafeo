@@ -26,7 +26,6 @@ package grafeo
 */
 import "C"
 import (
-	"encoding/json"
 	"fmt"
 	"runtime"
 	"unsafe"
@@ -125,7 +124,7 @@ func (db *Database) Execute(query string) (*QueryResult, error) {
 // ExecuteParams runs a GQL query with parameters as a Go map.
 // The map is marshaled to JSON internally.
 func (db *Database) ExecuteParams(query string, params map[string]any) (*QueryResult, error) {
-	data, err := json.Marshal(params)
+	data, err := marshalJSON(params)
 	if err != nil {
 		return nil, fmt.Errorf("%w: failed to marshal params: %v", ErrDatabase, err)
 	}

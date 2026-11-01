@@ -259,7 +259,9 @@ impl RdfWriter {
         })
     }
 
-    /// The writer of the transaction whose changes are `changes`.
+    /// The writer of the transaction whose changes are `changes`. Only an
+    /// RDF query writes through one.
+    #[cfg(any(rdf_language, test))]
     pub(crate) fn new(
         store: Arc<RdfStore>,
         changes: Arc<TransactionChanges>,
@@ -426,6 +428,7 @@ impl RdfWriter {
 ///
 /// The error of `body`; the error of beginning or committing the
 /// transaction (a closed database, a commit that did not complete).
+#[cfg(any(rdf_language, test))]
 pub(crate) fn update_privately<T>(
     store: &Arc<RdfStore>,
     manager: &Arc<TransactionManager>,

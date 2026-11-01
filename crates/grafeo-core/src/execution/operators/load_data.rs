@@ -213,6 +213,7 @@ impl LoadDataOperator {
     /// Opens and reads all rows from a Parquet file into a buffer.
     #[cfg(feature = "parquet-import")]
     fn open_parquet(&mut self) -> Result<(), OperatorError> {
+        use parquet::basic::CompressionCodec;
         use parquet::file::reader::FileReader;
 
         let file_path = strip_file_prefix(&self.path);
@@ -229,6 +230,32 @@ impl LoadDataOperator {
                 self.path, e
             ))
         })?;
+
+        // The parquet crate is built with Snappy only (the default of pyarrow,
+        // pandas and Spark). Its own error for another codec names a cargo
+        // feature, so name the file's codec before a page is read.
+        for row_group in reader.metadata().row_groups() {
+            for column in row_group.columns() {
+                let codec = column.compression_codec();
+                if !matches!(
+                    codec,
+                    CompressionCodec::UNCOMPRESSED | CompressionCodec::SNAPPY
+                ) {
+                    return Err(OperatorError::from(
+                        grafeo_common::utils::error::Error::from(
+                            grafeo_common::utils::error::QueryError::new(
+                                grafeo_common::utils::error::QueryErrorKind::Unsupported,
+                                format!(
+                                    "the Parquet file '{}' is compressed with {codec}; this \
+                                     build reads uncompressed and Snappy Parquet files",
+                                    self.path
+                                ),
+                            ),
+                        ),
+                    ));
+                }
+            }
+        }
 
         let schema = reader
             .metadata()
@@ -1005,6 +1032,7 @@ mod tests {
             ByteArray, ByteArrayType, DataType, FixedLenByteArray, FixedLenByteArrayType,
             Int32Type, Int64Type,
         };
+        use parquet::file::metadata::ParquetMetaDataWriter;
         use parquet::file::properties::WriterProperties;
         use parquet::file::reader::{FileReader, SerializedFileReader};
         use parquet::file::writer::{SerializedColumnWriter, SerializedFileWriter};
@@ -1083,6 +1111,86 @@ mod tests {
                     assert_eq!(column.compression(), compression);
                 }
                 assert_eq!(load(&file), want, "{compression:?}");
+            }
+        }
+
+        /// A copy of `file` whose column chunks say they are compressed with
+        /// `codec`, the pages left as they are. This build cannot write those
+        /// codecs, and the loader refuses the file before it reads a page.
+        fn marked_compressed_with(
+            file: &tempfile::NamedTempFile,
+            codec: Compression,
+        ) -> tempfile::NamedTempFile {
+            let bytes = std::fs::read(file.path()).unwrap();
+            // The file ends with its metadata, the metadata's length (four
+            // bytes, little-endian) and `PAR1`.
+            let length_at = bytes.len() - 8;
+            let length = u32::from_le_bytes(bytes[length_at..length_at + 4].try_into().unwrap());
+            let metadata_at = length_at - usize::try_from(length).unwrap();
+            let reader = SerializedFileReader::new(file.reopen().unwrap()).unwrap();
+            let mut builder = reader.metadata().clone().into_builder();
+            let row_groups = builder
+                .take_row_groups()
+                .into_iter()
+                .map(|row_group| {
+                    let columns = row_group
+                        .columns()
+                        .iter()
+                        .map(|column| {
+                            column
+                                .clone()
+                                .into_builder()
+                                .set_compression(codec)
+                                .build()
+                                .unwrap()
+                        })
+                        .collect();
+                    row_group
+                        .into_builder()
+                        .set_column_metadata(columns)
+                        .build()
+                        .unwrap()
+                })
+                .collect();
+            let metadata = builder.set_row_groups(row_groups).build();
+            let mut marked = bytes[..metadata_at].to_vec();
+            ParquetMetaDataWriter::new(&mut marked, &metadata)
+                .finish()
+                .unwrap();
+            let copy = tempfile::NamedTempFile::new().unwrap();
+            std::fs::write(copy.path(), marked).unwrap();
+            copy
+        }
+
+        /// A file in a codec this build lacks fails with the codec's name
+        /// and the codecs it reads, not the parquet crate's compile-time
+        /// feature (`zstd`, `flate2` for gzip).
+        #[test]
+        fn another_codec_is_refused_naming_it() {
+            let snappy = write_people(Compression::SNAPPY);
+            for (codec, name) in [
+                (Compression::ZSTD(Default::default()), "ZSTD"),
+                (Compression::GZIP(Default::default()), "GZIP"),
+                (Compression::LZ4_RAW, "LZ4_RAW"),
+                (Compression::BROTLI(Default::default()), "BROTLI"),
+            ] {
+                let file = marked_compressed_with(&snappy, codec);
+                let mut op = LoadDataOperator::new(
+                    file.path().to_str().unwrap().to_string(),
+                    LoadDataFormat::Parquet,
+                    true,
+                    None,
+                    "row".to_string(),
+                );
+                let message = op.next().unwrap_err().to_string();
+                let path = file.path().display();
+                assert!(
+                    message.ends_with(&format!(
+                        "the Parquet file '{path}' is compressed with {name}; this build \
+                         reads uncompressed and Snappy Parquet files"
+                    )),
+                    "{message}"
+                );
             }
         }
 

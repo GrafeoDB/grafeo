@@ -616,86 +616,179 @@ impl RdfPlanner {
         other_columns: &[String],
         scan_estimate: Option<f64>,
         other_estimate: Option<f64>,
-    ) -> Option<Box<triple_lookup::TripleLookupParts>> {
-        if scan.input.is_some() || matches!(scan.graph, Some(TripleComponent::Variable(_))) {
-            return None;
-        }
-        // More rows than look up, known while planning: the hash join, without
-        // reading the first rows to find out. Only a scan's or a VALUES
-        // block's estimate counts: a join's (left x right / 10) overstates a
-        // star of patterns on one subject, which the switch at run time
-        // handles.
-        let other_estimate = other_estimate.filter(|_| {
-            matches!(
-                other,
-                LogicalOperator::TripleScan(_)
-                    | LogicalOperator::Union(_)
-                    | LogicalOperator::Bind(_)
-                    | LogicalOperator::Empty
-            )
-        });
-        let limit = triple_lookup::lookup_limit(scan_estimate);
-        #[expect(
-            clippy::cast_precision_loss,
-            reason = "the limit is at most LOOKUP_ROWS, which an f64 holds exactly"
-        )]
-        let limit_rows = limit as f64;
-        if other_estimate.is_some_and(|rows| rows > limit_rows) {
-            return None;
-        }
-        let bound_names = crate::query::plan::always_bound(other)?;
-        let variables: Vec<(usize, &str)> = [&scan.subject, &scan.predicate, &scan.object]
+    ) -> Option<triple_lookup::TripleLookupParts> {
+        let limit = lookup_limit_against(other, scan_estimate, other_estimate)?;
+        let full_columns: Vec<String> = pattern_variables(scan)
             .into_iter()
-            .enumerate()
-            .filter_map(|(position, component)| match component {
-                TripleComponent::Variable(name) => Some((position, name.as_str())),
-                _ => None,
-            })
+            .map(|(_, name)| name.to_string())
             .collect();
-        let mut seen = std::collections::HashSet::new();
-        if !variables.iter().all(|(_, name)| seen.insert(*name)) {
-            return None;
-        }
-        let mut left_out = [false; 3];
-        let mut bound = Vec::new();
-        let mut added = Vec::new();
-        let mut added_names = Vec::new();
-        for (full_column, &(position, name)) in variables.iter().enumerate() {
-            match other_columns.iter().position(|column| column == name) {
-                Some(column) if bound_names.contains(name) => {
-                    left_out[position] = true;
-                    bound.push((position, column, full_column));
-                }
-                Some(_) => return None,
-                None => {
-                    added.push(full_column);
-                    added_names.push(name.to_string());
-                }
-            }
-        }
-        if bound.is_empty() {
-            return None;
-        }
+        let (lookups, added_names) =
+            self.pattern_lookups(&[scan], &full_columns, other, other_columns)?;
         let (full, full_columns) = self.triple_scan(scan, [false; 3]);
-        let (lookup, _) = self.triple_scan(scan, left_out);
-        Some(Box::new(triple_lookup::TripleLookupParts {
-            full,
-            lookup,
-            plan: triple_lookup::TripleLookupPlan { bound, added },
+        Some(triple_lookup::TripleLookupParts {
+            full: Box::new(full),
+            full_types: vec![LogicalType::RdfTermId; full_columns.len()],
             full_columns,
+            lookups,
             added_names,
             limit,
-        }))
+        })
+    }
+
+    /// The lookup join of a UNION of triple patterns with `other`, the
+    /// join's other side, when each branch is a pattern `other` would look up
+    /// (see [`Self::pattern_lookups`]; an alternative path `?s (p|^p) ?o` is
+    /// such a UNION): the patterns, the columns the join adds and the limit
+    /// of rows. `union_columns` are the UNION's own. `None` when a branch is
+    /// not a single pattern, or holds no variable `other` binds.
+    fn union_lookup(
+        &self,
+        union: &crate::query::plan::UnionOp,
+        union_columns: &[String],
+        other: &LogicalOperator,
+        other_columns: &[String],
+        other_estimate: Option<f64>,
+    ) -> Option<UnionLookupPlan> {
+        let scans: Vec<&TripleScanOp> = union
+            .inputs
+            .iter()
+            .map(|branch| match union_branch_pattern(branch) {
+                Some(LogicalOperator::TripleScan(scan)) => Some(scan),
+                _ => None,
+            })
+            .collect::<Option<_>>()?;
+        // Each row looks up in every pattern: the limit is that of the
+        // patterns' mean estimate.
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "a count of UNION branches, which an f64 holds exactly"
+        )]
+        let branches = scans.len() as f64;
+        let per_pattern = self
+            .union_patterns_estimate(union)
+            .map(|triples| triples / branches);
+        let limit = lookup_limit_against(other, per_pattern, other_estimate)?;
+        let (lookups, added_names) =
+            self.pattern_lookups(&scans, union_columns, other, other_columns)?;
+        Some((lookups, added_names, limit))
+    }
+
+    /// The lookup of a join of a UNION of patterns with its other side (see
+    /// [`Self::union_lookup`]), and whether the UNION is on the right.
+    fn union_lookup_of_join(
+        &self,
+        join: &crate::query::plan::JoinOp,
+        left_columns: &[String],
+        right_columns: &[String],
+        left_estimate: Option<f64>,
+        right_estimate: Option<f64>,
+    ) -> Option<(UnionLookupPlan, bool)> {
+        let on_right = match join.right.as_ref() {
+            LogicalOperator::Union(union) => self.union_lookup(
+                union,
+                right_columns,
+                &join.left,
+                left_columns,
+                left_estimate,
+            ),
+            _ => None,
+        };
+        if let Some(plan) = on_right {
+            return Some((plan, true));
+        }
+        // A VALUES block of several rows is a UNION too.
+        match join.left.as_ref() {
+            LogicalOperator::Union(union) => self
+                .union_lookup(
+                    union,
+                    left_columns,
+                    &join.right,
+                    right_columns,
+                    right_estimate,
+                )
+                .map(|plan| (plan, false)),
+            _ => None,
+        }
+    }
+
+    /// How many triples the patterns of a UNION of patterns are estimated to
+    /// match together (see [`union_branch_pattern`]), `None` for another
+    /// UNION.
+    fn union_patterns_estimate(&self, union: &crate::query::plan::UnionOp) -> Option<f64> {
+        union
+            .inputs
+            .iter()
+            .map(|branch| {
+                union_branch_pattern(branch)
+                    .and_then(|pattern| estimate_operator_cardinality(pattern, &self.store))
+            })
+            .sum()
+    }
+
+    /// The lookup of each of `scans` per row of `other`, whose columns are
+    /// `other_columns`, and the names of the columns the join adds: those of
+    /// `full_columns` (the columns of the scan, or of the UNION of the scans)
+    /// `other` lacks. `None` when `other` binds no variable of a pattern,
+    /// holds a column of `full_columns` a pattern lacks or that it does not
+    /// always bind (a join then checks the pairs), or a pattern repeats a
+    /// variable, has a graph variable or an input.
+    fn pattern_lookups(
+        &self,
+        scans: &[&TripleScanOp],
+        full_columns: &[String],
+        other: &LogicalOperator,
+        other_columns: &[String],
+    ) -> Option<(Vec<triple_lookup::PatternLookup>, Vec<String>)> {
+        let bound_names = crate::query::plan::always_bound(other)?;
+        let (shared, added_names): (Vec<&String>, Vec<&String>) = full_columns
+            .iter()
+            .partition(|column| other_columns.contains(column));
+        let added_names: Vec<String> = added_names.into_iter().cloned().collect();
+        let mut lookups = Vec::with_capacity(scans.len());
+        for scan in scans {
+            if scan.input.is_some() || matches!(scan.graph, Some(TripleComponent::Variable(_))) {
+                return None;
+            }
+            let variables = pattern_variables(scan);
+            let mut seen = std::collections::HashSet::new();
+            if !variables.iter().all(|(_, name)| seen.insert(*name)) {
+                return None;
+            }
+            let mut left_out = [false; 3];
+            let mut bound = Vec::new();
+            let mut targets = Vec::new();
+            for &(position, name) in &variables {
+                match other_columns.iter().position(|column| column == name) {
+                    Some(column) if bound_names.contains(name) => {
+                        left_out[position] = true;
+                        bound.push((position, column));
+                    }
+                    Some(_) => return None,
+                    None => targets.push(added_names.iter().position(|added| added == name)?),
+                }
+            }
+            // Every column the sides share is a key of each pattern's lookup.
+            if bound.is_empty() || bound.len() != shared.len() {
+                return None;
+            }
+            let (scan, _) = self.triple_scan(scan, left_out);
+            lookups.push(triple_lookup::PatternLookup {
+                scan,
+                bound,
+                targets,
+            });
+        }
+        Some((lookups, added_names))
     }
 
     /// The lookup join of `parts` over `input` (see [`triple_lookup`]), its
-    /// columns those of `input`, then the added ones. Out of line: it holds
-    /// two scans, which would enlarge `plan_join`'s frame at every join of a
-    /// chain.
+    /// columns those of `input`, then the added ones. Out of line: the
+    /// operator it builds would enlarge `plan_join`'s frame at every join of
+    /// a chain.
     #[inline(never)]
     fn lookup_join(
         &self,
-        parts: Box<triple_lookup::TripleLookupParts>,
+        parts: triple_lookup::TripleLookupParts,
         input: Box<dyn Operator>,
         columns: Vec<String>,
         types: Vec<LogicalType>,
@@ -711,7 +804,7 @@ impl RdfPlanner {
         out_columns.extend(parts.added_names.iter().cloned());
         let operator = triple_lookup::TripleLookupOperator::new(
             input,
-            *parts,
+            parts,
             triple_lookup::HashJoinInputs {
                 columns,
                 types,
@@ -722,6 +815,38 @@ impl RdfPlanner {
             self.chunk_size,
         );
         (Box::new(operator), out_columns, out_types)
+    }
+
+    /// The lookup join of the rows of `side` in the patterns of a UNION (see
+    /// [`Self::union_lookup`]), `union` the planned UNION, which the join
+    /// hashes past the limit. The UNION's PROFILE lines, `union_entries`,
+    /// join the lookup's.
+    #[inline(never)]
+    fn union_lookup_join(
+        &self,
+        (lookups, added_names, limit): UnionLookupPlan,
+        side: PlannedOperator,
+        union: PlannedOperator,
+        union_entries: std::ops::Range<usize>,
+        cardinalities: Option<(f64, f64)>,
+        left: bool,
+    ) -> PlannedOperator {
+        if let Some(entries) = self.profile_entries.borrow_mut().get_mut(union_entries) {
+            for entry in entries {
+                entry.absorbed = true;
+            }
+        }
+        let (full, full_columns, full_types) = union;
+        let parts = triple_lookup::TripleLookupParts {
+            full,
+            full_columns,
+            full_types,
+            lookups,
+            added_names,
+            limit,
+        };
+        let (input, columns, types) = side;
+        self.lookup_join(parts, input, columns, types, cardinalities, left)
     }
 
     /// Builds a TriplePattern from a TripleScanOp.
@@ -1548,7 +1673,33 @@ impl RdfPlanner {
         // `LOOKUP_ROWS` lookups before the join hashes the scan.
         let left_estimate = estimate_operator_cardinality(&join.left, &self.store);
         let right_estimate = estimate_operator_cardinality(&join.right, &self.store);
+        // A UNION of patterns with a variable the other side binds (an
+        // alternative path is one): a lookup per row of that side in each
+        // branch, the planned UNION what the join hashes past the limit. Of
+        // a pattern and such a UNION, as of two patterns, the side estimated
+        // to match more is looked up.
+        let union_first = match (join.left.as_ref(), join.right.as_ref()) {
+            (LogicalOperator::TripleScan(_), LogicalOperator::Union(union)) => {
+                self.union_patterns_estimate(union) > left_estimate
+            }
+            (LogicalOperator::Union(union), LogicalOperator::TripleScan(_)) => {
+                self.union_patterns_estimate(union) > right_estimate
+            }
+            _ => false,
+        };
+        let mut union_lookup = if union_first {
+            self.union_lookup_of_join(
+                join,
+                &left_columns,
+                &right_columns,
+                left_estimate,
+                right_estimate,
+            )
+        } else {
+            None
+        };
         let lookup = match (join.left.as_ref(), join.right.as_ref()) {
+            _ if union_lookup.is_some() => None,
             (LogicalOperator::TripleScan(left), LogicalOperator::TripleScan(right)) => {
                 if left_estimate > right_estimate {
                     self.triple_lookup(
@@ -1624,6 +1775,36 @@ impl RdfPlanner {
             }
             return Ok(self.lookup_join(parts, input, columns, types, cardinalities, false));
         }
+
+        if union_lookup.is_none() && !union_first {
+            union_lookup = self.union_lookup_of_join(
+                join,
+                &left_columns,
+                &right_columns,
+                left_estimate,
+                right_estimate,
+            );
+        }
+        if let Some((plan, union_on_right)) = union_lookup {
+            let left = (left_op, left_columns, left_types);
+            let right = (right_op, right_columns, right_types);
+            return Ok(if union_on_right {
+                let entries = right_entry..self.profile_entries.borrow().len();
+                let cardinalities = left_estimate.zip(right_estimate);
+                self.union_lookup_join(plan, left, right, entries, cardinalities, false)
+            } else {
+                let cardinalities = right_estimate.zip(left_estimate);
+                self.union_lookup_join(
+                    plan,
+                    right,
+                    left,
+                    first_entry..right_entry,
+                    cardinalities,
+                    false,
+                )
+            });
+        }
+
         let loose = loosely_shared(
             crate::query::plan::always_bound(&join.left),
             crate::query::plan::always_bound(&join.right),
@@ -1700,6 +1881,32 @@ impl RdfPlanner {
                     left_op,
                     left_columns,
                     left_types,
+                    cardinalities,
+                    true,
+                ));
+            }
+        }
+        // `OPTIONAL { ?s (p|^p) ?o }` the same, in each pattern of the UNION:
+        // a left row none of them joins is kept.
+        if join.condition.is_none()
+            && let LogicalOperator::Union(union) = join.right.as_ref()
+        {
+            let left_estimate = estimate_operator_cardinality(&join.left, &self.store);
+            if let Some(plan) = self.union_lookup(
+                union,
+                &right_columns,
+                &join.left,
+                &left_columns,
+                left_estimate,
+            ) {
+                let entries = right_entry..self.profile_entries.borrow().len();
+                let cardinalities =
+                    left_estimate.zip(estimate_operator_cardinality(&join.right, &self.store));
+                return Ok(self.union_lookup_join(
+                    plan,
+                    (left_op, left_columns, left_types),
+                    (right_op, right_columns, right_types),
+                    entries,
                     cardinalities,
                     true,
                 ));
@@ -4003,6 +4210,94 @@ fn estimate_operator_cardinality(
             .iter()
             .map(|input| estimate_operator_cardinality(input, store))
             .sum::<Option<f64>>(),
+        _ => None,
+    }
+}
+
+/// How many rows of `other` look their triples up in patterns estimated to
+/// match `triples` each (see [`triple_lookup::lookup_limit`]); `None` when
+/// `other` is known while planning to hold more, which the hash join takes
+/// without reading the first rows to find out. Only a scan's or a VALUES
+/// block's estimate counts: a join's (left x right / 10) overstates a star of
+/// patterns on one subject, which the switch at run time handles.
+fn lookup_limit_against(
+    other: &LogicalOperator,
+    triples: Option<f64>,
+    other_estimate: Option<f64>,
+) -> Option<usize> {
+    let other_estimate = other_estimate.filter(|_| {
+        matches!(
+            other,
+            LogicalOperator::TripleScan(_)
+                | LogicalOperator::Union(_)
+                | LogicalOperator::Bind(_)
+                | LogicalOperator::Empty
+        )
+    });
+    let limit = triple_lookup::lookup_limit(triples);
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "the limit is at most LOOKUP_ROWS, which an f64 holds exactly"
+    )]
+    let limit_rows = limit as f64;
+    (!other_estimate.is_some_and(|rows| rows > limit_rows)).then_some(limit)
+}
+
+/// A planned operator: the operator, its columns and their types.
+type PlannedOperator = (Box<dyn Operator>, Vec<String>, Vec<LogicalType>);
+
+/// The lookup of a UNION's patterns (see `RdfPlanner::union_lookup`): the
+/// patterns, the names of the columns the join adds, the limit of rows.
+type UnionLookupPlan = (Vec<triple_lookup::PatternLookup>, Vec<String>, usize);
+
+/// The variables of `scan`'s subject, predicate and object, with their
+/// positions (0, 1 and 2), in that order: the columns of its scan, without a
+/// graph variable.
+fn pattern_variables(scan: &TripleScanOp) -> Vec<(usize, &str)> {
+    [&scan.subject, &scan.predicate, &scan.object]
+        .into_iter()
+        .enumerate()
+        .filter_map(|(position, component)| match component {
+            TripleComponent::Variable(name) => Some((position, name.as_str())),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The triple pattern a UNION branch is: the branch itself, or the pattern
+/// under a projection that keeps each of its variables as it is (the
+/// translator projects an inverse branch of an alternative path, `^p`, on
+/// its two ends). `None` for any other branch.
+fn union_branch_pattern(branch: &LogicalOperator) -> Option<&LogicalOperator> {
+    match branch {
+        LogicalOperator::TripleScan(scan) if scan.input.is_none() => Some(branch),
+        LogicalOperator::Project(project) if !project.pass_through_input => {
+            let pattern = project.input.as_ref();
+            let LogicalOperator::TripleScan(scan) = pattern else {
+                return None;
+            };
+            let mut variables: Vec<&str> = pattern_variables(scan)
+                .into_iter()
+                .map(|(_, name)| name)
+                .chain(scan.graph.as_ref().and_then(TripleComponent::as_variable))
+                .collect();
+            let mut kept = project
+                .projections
+                .iter()
+                .map(
+                    |projection| match (&projection.expression, &projection.alias) {
+                        (LogicalExpression::Variable(name), None) => Some(name.as_str()),
+                        (LogicalExpression::Variable(name), Some(alias)) if alias == name => {
+                            Some(name.as_str())
+                        }
+                        _ => None,
+                    },
+                )
+                .collect::<Option<Vec<&str>>>()?;
+            variables.sort_unstable();
+            kept.sort_unstable();
+            (variables == kept).then_some(pattern)
+        }
         _ => None,
     }
 }

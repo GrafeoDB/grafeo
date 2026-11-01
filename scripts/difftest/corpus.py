@@ -2186,7 +2186,9 @@ ordered("DC25", RDF_PREFIXES + "SELECT ?n WHERE { ?s ex:name ?n } ORDER BY DESC(
 
 # DD: SPARQL writes keep and remove exact terms (#464): a typed literal is removed only by
 #     itself (01 and 1 are two terms), a tagged one only with its tag (the reads are
-#     unordered: an ORDER BY of mixed literals is what DC tests)
+#     unordered: an ORDER BY of mixed literals is what DC tests); a DELETE WHERE whose
+#     pattern has no solution deletes nothing, its triples without variables included
+#     (DD7 to DD9; 0.6.0 deleted those)
 for case_id, query in [
     ("DD1", "INSERT DATA { ex:a ex:v \"01\"^^xsd:integer, \"1\"^^xsd:integer, \"x\"@en, \"x\" }"),
     ("DD2", "SELECT ?v (DATATYPE(?v) AS ?d) WHERE { ex:a ex:v ?v }"),
@@ -2194,6 +2196,9 @@ for case_id, query in [
     ("DD4", "SELECT ?v WHERE { ex:a ex:v ?v }"),
     ("DD5", "DELETE WHERE { ex:a ex:v \"x\"@en }"),
     ("DD6", "SELECT ?v (LANG(?v) AS ?l) WHERE { ex:a ex:v ?v }"),
+    ("DD7", "INSERT DATA { ex:alix ex:nick \"Al\" }"),
+    ("DD8", "DELETE WHERE { ex:alix ex:nick \"Al\" . ex:alix ex:age ?a }"),
+    ("DD9", "SELECT ?k WHERE { ex:alix ex:nick ?k }"),
 ]:
     case(case_id, RDF_PREFIXES + query, SPARQL, "rdf_writes")
 

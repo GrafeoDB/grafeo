@@ -84,11 +84,17 @@ mod tests {
             r#"DELETE DATA { <http://ex.org/gus> <http://ex.org/p> "2" . }"#,
             r#"INSERT { ?s <http://ex.org/p> "copy" } WHERE { ?s <http://ex.org/p> "1" }"#,
             r#"DELETE WHERE { <http://ex.org/alix> <http://ex.org/p> "1" }"#,
+            // No solution (no <q>), so "copy" stays.
+            r#"DELETE WHERE { <http://ex.org/alix> <http://ex.org/p> "copy" .
+                              <http://ex.org/alix> <http://ex.org/q> ?o }"#,
             r#"WITH <http://ex.org/g>
                DELETE { ?s <http://ex.org/p> "3" }
                INSERT { ?s <http://ex.org/p> "30" }
                WHERE  { ?s <http://ex.org/p> "3" }"#,
             r#"INSERT DATA { GRAPH <http://ex.org/g> { <http://ex.org/butch> <http://ex.org/p> "5" . } }"#,
+            // No solution in <g> (no "3" is left), so "5" stays.
+            r#"DELETE WHERE { GRAPH <http://ex.org/g> {
+                   <http://ex.org/butch> <http://ex.org/p> "5" . ?s <http://ex.org/p> "3" } }"#,
         ] {
             session
                 .execute_sparql(update)

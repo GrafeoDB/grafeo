@@ -285,9 +285,10 @@ mod explain_integration {
     /// PROFILE of a pattern whose planner leaves operators out of the
     /// physical plan gives the profile, each operator's numbers on its own
     /// line: the pattern of a `FILTER EXISTS` or `NOT EXISTS` runs inside
-    /// the join that filters (and is named in its detail), and a `DELETE
-    /// WHERE` of a triple without variables deletes it without reading the
-    /// pattern.
+    /// the join that filters (and is named in its detail). A `DELETE WHERE`
+    /// reads its pattern, also of a triple without variables, so its
+    /// profile shows the scan under the delete; `EXPLAIN` of one deletes
+    /// nothing.
     #[test]
     fn profile_of_patterns_the_planner_folds_in() {
         let db = GrafeoDB::new_in_memory();
@@ -349,17 +350,32 @@ mod explain_integration {
             assert!(text.contains(detail), "{query}\n{text}");
         }
 
-        // The triple goes, and the profile names the pattern it matched.
+        let nick_left = || {
+            db.execute_sparql(&format!("{prefix} ASK {{ ex:alix ex:nick ?k }}"))
+                .unwrap()
+                .rows()[0][0]
+                .clone()
+        };
+        let plan = db
+            .execute_sparql(&format!(
+                "{prefix} EXPLAIN DELETE WHERE {{ ex:alix ex:nick \"Al\" }}"
+            ))
+            .unwrap();
+        let text = plan.rows()[0][0].to_string();
+        assert!(text.contains("TripleScan"), "{text}");
+        assert_eq!(nick_left(), grafeo_common::types::Value::Bool(true));
+
+        // The triple goes, after the scan found it.
         let query = format!("PROFILE {prefix} DELETE WHERE {{ ex:alix ex:nick \"Al\" }}");
         let profile = db
             .execute_sparql(&query)
             .unwrap_or_else(|e| panic!("{query}: {e}"));
         let text = profile.rows()[0][0].as_str().expect("the profile text");
-        assert_eq!(profile_lines(text), ["RdfDeleteTriple rows=0"], "{text}");
-        assert!(text.contains("(Pattern"), "{text}");
-        let left = db
-            .execute_sparql(&format!("{prefix} ASK {{ ex:alix ex:nick ?k }}"))
-            .unwrap();
-        assert_eq!(left.rows()[0][0], grafeo_common::types::Value::Bool(false));
+        assert_eq!(
+            profile_lines(text),
+            ["RdfModify rows=0", "  RdfTripleScan rows=1"],
+            "{text}"
+        );
+        assert_eq!(nick_left(), grafeo_common::types::Value::Bool(false));
     }
 }

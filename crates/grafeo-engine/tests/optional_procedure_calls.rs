@@ -301,6 +301,29 @@ mod supported {
     }
 
     #[test]
+    fn a_union_in_a_call_body_checks_the_columns_of_a_procedure_return_star() {
+        let db = registered();
+        // `RETURN *` over the call passes on its YIELD columns, which the
+        // UNION compares with the other branch's
+        let query = "CALL { CALL optional_values() YIELD value RETURN * \
+                     UNION ALL RETURN 1 AS other } RETURN *";
+        let error = db.execute(query).expect_err("the columns differ");
+        assert!(
+            error.to_string().contains("same columns in the same order"),
+            "{query}: {error}"
+        );
+        // The same names are one column
+        assert_eq!(
+            rows(
+                &db,
+                "CALL { CALL optional_values() YIELD value RETURN * \
+                 UNION ALL RETURN 1 AS value } RETURN value ORDER BY value"
+            ),
+            [[Int64(1)], [Int64(7)], [Int64(7)], [Int64(9)]],
+        );
+    }
+
+    #[test]
     fn profile_counts_the_real_procedure_and_null_extended_rows() {
         fn matching<'a>(node: &'a OperatorProfile, name: &str, out: &mut Vec<&'a OperatorProfile>) {
             if node.operator == name {

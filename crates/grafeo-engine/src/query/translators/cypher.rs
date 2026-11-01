@@ -709,6 +709,7 @@ impl CypherTranslator {
                 variable: rel.variable.clone().unwrap_or_default(),
                 group: rel.length.is_some(),
                 types: rel.types.clone(),
+                may_be_null: false,
             })
             .collect();
         let groups = edges_to_compare(&edges, false);

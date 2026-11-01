@@ -778,9 +778,16 @@ impl super::Planner {
         let (scan_variable, scan_label) =
             (checked.scan.variable.clone(), checked.scan.label.clone());
 
-        // Extract property equality conditions from the predicate
-        // Handles both simple (n.prop = val) and compound (n.a = 1 AND n.b = 2)
-        let conditions = Self::extract_equality_conditions(&filter.predicate, &scan_variable);
+        // Extract property equality conditions from the predicate and from
+        // the checks below it: simple (n.prop = val) and compound (n.a = 1
+        // AND n.b = 2). A check that holds the key, below a check of another
+        // label (`(n:Graph:Method {id: $id})` scanning Method), is looked up
+        // here, so that the label check runs on the nodes found, not in a
+        // filter of its own above the lookup.
+        let mut conditions = Self::extract_equality_conditions(&filter.predicate, &scan_variable);
+        for (_, check) in &checked.checks {
+            Self::collect_equality_conditions(check, &scan_variable, &mut conditions);
+        }
 
         // The nodes an index finds may be equal to a condition's value under
         // `=` (#535), the smallest set of any indexed condition, looked up at

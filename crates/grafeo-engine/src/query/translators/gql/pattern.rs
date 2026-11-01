@@ -950,6 +950,7 @@ pub(super) fn different_edges(patterns: &[&ast::Pattern]) -> Result<Option<Logic
                             variable: variable.clone(),
                             group: group || edge.min_hops.is_some() || edge.max_hops.is_some(),
                             types: edge.types.clone(),
+                            may_be_null: edge.questioned,
                         });
                     }
                 }

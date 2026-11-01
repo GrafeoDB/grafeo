@@ -879,6 +879,10 @@ pub(crate) struct EdgeOccurrence {
     pub group: bool,
     /// The edge types the pattern allows, any type when empty.
     pub types: Vec<String>,
+    /// Whether the pattern may match no edge, which leaves `variable` null:
+    /// GQL's questioned edge (`->?`). A null edge binds no edge, so it differs
+    /// from every other.
+    pub may_be_null: bool,
 }
 
 #[cfg(any(feature = "gql", feature = "cypher", test))]
@@ -903,6 +907,30 @@ impl EdgeOccurrence {
         } else {
             id_list(&self.variable)
         }
+    }
+
+    /// The condition that the single edges this pattern and `other` bind
+    /// differ: `id(e1) <> id(e2)`, a comparison per row with no list built.
+    /// A pattern that may leave its edge null (see [`Self::may_be_null`])
+    /// also passes the row when it does, as an empty list of ids would.
+    fn differs_from(&self, other: &Self) -> LogicalExpression {
+        let id = |edge: &Self| LogicalExpression::Id(edge.variable.clone());
+        let differ = LogicalExpression::Binary {
+            left: Box::new(id(self)),
+            op: BinaryOp::Ne,
+            right: Box::new(id(other)),
+        };
+        [self, other]
+            .into_iter()
+            .filter(|edge| edge.may_be_null)
+            .fold(differ, |condition, edge| LogicalExpression::Binary {
+                left: Box::new(condition),
+                op: BinaryOp::Or,
+                right: Box::new(LogicalExpression::Unary {
+                    op: crate::query::plan::UnaryOp::IsNull,
+                    operand: Box::new(id(edge)),
+                }),
+            })
     }
 }
 
@@ -941,19 +969,30 @@ pub(crate) fn edges_to_compare(edges: &[EdgeOccurrence], lone_groups: bool) -> V
     groups
 }
 
+/// The most single edge patterns [`different_edges`] compares pair by pair:
+/// 28 comparisons, each cheaper than building a list of ids per row.
+#[cfg(any(feature = "gql", feature = "cypher", test))]
+const PAIRWISE_EDGES: usize = 8;
+
 /// The condition that the edges the patterns of each of `groups` (indices
 /// into `edges`, see [`edges_to_compare`]) bind are all different, an edge
-/// of a group variable included: `all_different` over their ids, one check
-/// per group. `None` when there is no group.
+/// of a group variable included. `None` when there is no group.
+///
+/// A group of at most [`PAIRWISE_EDGES`] single edges compares each pair of
+/// its patterns that may bind one edge, `id(e1) <> id(e2)` (see
+/// [`EdgeOccurrence::differs_from`]): no list per row. A larger group, whose
+/// pairs grow with the square of its size, and a group with a group
+/// variable, which needs the list of its edges, check `all_different` over
+/// the ids of all its patterns.
 #[cfg(any(feature = "gql", feature = "cypher", test))]
 pub(crate) fn different_edges(
     edges: &[EdgeOccurrence],
     groups: &[Vec<usize>],
 ) -> Option<LogicalExpression> {
-    let checks = groups
-        .iter()
-        .map(|members| {
-            LogicalExpression::builtin(
+    let mut checks = Vec::new();
+    for members in groups {
+        if members.len() > PAIRWISE_EDGES || members.iter().any(|&index| edges[index].group) {
+            checks.push(LogicalExpression::builtin(
                 BuiltinFunction::AllDifferent,
                 vec![concatenation(
                     members
@@ -961,9 +1000,17 @@ pub(crate) fn different_edges(
                         .map(|&index| edges[index].edge_ids())
                         .collect(),
                 )],
-            )
-        })
-        .collect();
+            ));
+            continue;
+        }
+        for (position, &first) in members.iter().enumerate() {
+            for &second in &members[position + 1..] {
+                if edges[first].may_bind_the_edge_of(&edges[second]) {
+                    checks.push(edges[first].differs_from(&edges[second]));
+                }
+            }
+        }
+    }
     join_and_conjuncts(checks)
 }
 
@@ -2289,6 +2336,7 @@ mod tests {
                 .iter()
                 .map(|edge_type| (*edge_type).to_string())
                 .collect(),
+            may_be_null: false,
         }
     }
 
@@ -2336,6 +2384,69 @@ mod tests {
             edges_to_compare(&[group, single], false),
             Vec::<Vec<usize>>::new()
         );
+    }
+
+    /// Single edges are compared pairwise, a questioned one (which may be
+    /// null) passing the row when it is null; a group variable among them
+    /// keeps the list of ids.
+    #[cfg(any(feature = "gql", feature = "cypher"))]
+    #[test]
+    fn single_edges_are_compared_pairwise() {
+        let id = |variable: &str| LogicalExpression::Id(variable.to_string());
+        let differ = |left: &str, right: &str| LogicalExpression::Binary {
+            left: Box::new(id(left)),
+            op: BinaryOp::Ne,
+            right: Box::new(id(right)),
+        };
+        let (a, b) = (edge("a", false, &["KNOWS"]), edge("b", false, &[]));
+        let text = |expression: Option<LogicalExpression>| format!("{expression:?}");
+        assert_eq!(
+            text(different_edges(&[a.clone(), b.clone()], &[vec![0, 1]])),
+            text(Some(differ("a", "b")))
+        );
+        let questioned = EdgeOccurrence {
+            may_be_null: true,
+            ..b.clone()
+        };
+        assert_eq!(
+            text(different_edges(&[a.clone(), questioned], &[vec![0, 1]])),
+            text(Some(LogicalExpression::Binary {
+                left: Box::new(differ("a", "b")),
+                op: BinaryOp::Or,
+                right: Box::new(LogicalExpression::Unary {
+                    op: crate::query::plan::UnaryOp::IsNull,
+                    operand: Box::new(id("b")),
+                }),
+            }))
+        );
+        // Up to eight single edges, 28 comparisons; a ninth makes it a list.
+        let chain = |size: usize| -> Vec<EdgeOccurrence> {
+            (0..size)
+                .map(|i| edge(&format!("e{i}"), false, &["KNOWS"]))
+                .collect()
+        };
+        let pairwise = text(different_edges(
+            &chain(PAIRWISE_EDGES),
+            &[(0..PAIRWISE_EDGES).collect()],
+        ));
+        assert_eq!(pairwise.matches("op: Ne").count(), 28, "{pairwise}");
+        assert!(!pairwise.contains("AllDifferent"), "{pairwise}");
+        let listed = text(different_edges(
+            &chain(PAIRWISE_EDGES + 1),
+            &[(0..=PAIRWISE_EDGES).collect()],
+        ));
+        assert!(
+            listed.contains("AllDifferent") && !listed.contains("op: Ne"),
+            "{listed}"
+        );
+        let group = edge("g", true, &["KNOWS"]);
+        assert!(matches!(
+            different_edges(&[a, group], &[vec![0, 1]]),
+            Some(LogicalExpression::FunctionCall {
+                callee: Callee::Builtin(BuiltinFunction::AllDifferent),
+                ..
+            })
+        ));
     }
 
     /// The names of a statement count from 0 and skip the words it spells.

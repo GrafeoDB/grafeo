@@ -421,6 +421,14 @@ func checkedMul(a, b int64) (int64, bool) {
 	return product, fits
 }
 
+// abs is the magnitude of n, for n above math.MinInt64.
+func abs(n int64) int64 {
+	if n < 0 {
+		return -n
+	}
+	return n
+}
+
 // addProduct adds n * unit to *total, and is false when the product or the
 // sum does not fit 64 bits.
 func addProduct(total *int64, n, unit int64) bool {
@@ -433,25 +441,47 @@ func addProduct(total *int64, n, unit int64) bool {
 }
 
 // secondsNanos reads the seconds of a duration, n or n.fraction, as the
-// engine does: the fraction's digits (up to 9) as nanoseconds, its sign its
-// own, so that the text the engine writes for any duration reads back as it.
+// engine does: the fraction's first nine digits, with the sign of the whole
+// seconds (-0.5 is negative). It also reads what 0.6.0 wrote for a negative
+// fraction in a duration of mixed signs, the sign inside the fraction (-1.-5
+// for -1.5 s, nine characters wide with that sign before its trailing zeros
+// were cut): digits that start with a zero are that eight digit field (0.-05
+// is -0.005 s), others the plain fraction. 0.6.0 wrote a negative fraction
+// from 0.01 to 0.1 s as it wrote ten times it (-0.05 and -0.5 both as -5),
+// so such a text of 0.6.0 reads as the larger one.
 func secondsNanos(number string) (int64, error) {
+	notANumber := errors.New("not a number")
 	whole, fraction, hasFraction := strings.Cut(number, ".")
 	n, err := strconv.ParseInt(whole, 10, 64)
 	if err != nil || whole[0] == '+' {
-		return 0, errors.New("not a number")
+		return 0, notANumber
 	}
 	nanos, fits := checkedMul(n, nanosPerSecond)
 	if hasFraction {
-		if len(fraction) > 9 {
-			fraction = fraction[:9]
+		negative, width := whole[0] == '-', 9
+		if rest, old := strings.CutPrefix(fraction, "-"); old {
+			// 0.6.0 wrote it after seconds of 0 or less only
+			if n > 0 {
+				return 0, notANumber
+			}
+			negative, fraction = true, rest
+			if strings.HasPrefix(fraction, "0") && len(fraction) <= 8 {
+				width = 8
+			}
 		}
-		f, err := strconv.ParseInt(fraction, 10, 64)
-		if err != nil || fraction[0] == '+' {
-			return 0, errors.New("not a number")
+		if len(fraction) > width {
+			fraction = fraction[:width]
+		}
+		value, ok := digits(fraction)
+		if !ok {
+			return 0, notANumber
+		}
+		f := int64(value) * int64(math.Pow10(width-len(fraction)))
+		if negative {
+			f = -f
 		}
 		var sumFits bool
-		nanos, sumFits = checkedAdd(nanos, f*int64(math.Pow10(9-len(fraction))))
+		nanos, sumFits = checkedAdd(nanos, f)
 		fits = fits && sumFits
 	}
 	if !fits {
@@ -493,10 +523,17 @@ func (d Duration) String() string {
 		if minutes != 0 {
 			fmt.Fprintf(&b, "%dM", minutes)
 		}
-		if fraction != 0 {
-			fmt.Fprintf(&b, "%d.%sS", seconds, strings.TrimRight(fmt.Sprintf("%09d", fraction), "0"))
-		} else if seconds != 0 {
-			fmt.Fprintf(&b, "%dS", seconds)
+		if fraction != 0 || seconds != 0 {
+			// The sign once, before the whole seconds (negative only in a
+			// duration of mixed signs), the fraction as a magnitude: T-1.5S
+			if nanos%nanosPerMinute < 0 {
+				b.WriteByte('-')
+			}
+			fmt.Fprintf(&b, "%d", abs(seconds))
+			if fraction != 0 {
+				fmt.Fprintf(&b, ".%s", strings.TrimRight(fmt.Sprintf("%09d", abs(fraction)), "0"))
+			}
+			b.WriteByte('S')
 		}
 	}
 	if !negative && months == 0 && days == 0 && nanos == 0 {

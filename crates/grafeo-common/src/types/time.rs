@@ -307,21 +307,18 @@ fn parse_offset_suffix(s: &str) -> (&str, Option<i32>) {
     if let Some(rest) = s.strip_suffix('Z') {
         return (rest, Some(0));
     }
-    // Look for +HH:MM or -HH:MM at the end
-    if s.len() >= 6 {
-        let sign_pos = s.len() - 6;
-        let candidate = &s[sign_pos..];
-        if (candidate.starts_with('+') || candidate.starts_with('-'))
-            && candidate.as_bytes()[3] == b':'
-        {
-            let sign: i32 = if candidate.starts_with('+') { 1 } else { -1 };
-            if let (Ok(h), Ok(m)) = (
-                candidate[1..3].parse::<i32>(),
-                candidate[4..6].parse::<i32>(),
-            ) {
-                return (&s[..sign_pos], Some(sign * (h * 3600 + m * 60)));
-            }
-        }
+    // Look for +HH:MM or -HH:MM at the end, each field two digits
+    let Some(sign_pos) = s.len().checked_sub(6) else {
+        return (s, None);
+    };
+    if let [sign @ (b'+' | b'-'), h1, h2, b':', m1, m2] = s.as_bytes()[sign_pos..]
+        && [h1, h2, m1, m2].iter().all(u8::is_ascii_digit)
+    {
+        let field = |high: u8, low: u8| i32::from(high - b'0') * 10 + i32::from(low - b'0');
+        let sign: i32 = if sign == b'+' { 1 } else { -1 };
+        let seconds = field(h1, h2) * 3600 + field(m1, m2) * 60;
+        // The bytes before an ASCII sign end a character
+        return (&s[..sign_pos], Some(sign * seconds));
     }
     (s, None)
 }
@@ -466,6 +463,20 @@ mod tests {
 
         let t = Time::parse("14:30:00-05:30").unwrap();
         assert_eq!(t.offset_seconds(), Some(-19800));
+    }
+
+    #[test]
+    fn an_offset_field_is_two_digits_without_a_sign() {
+        for text in [
+            "12:00+-1:00",
+            "12:00:00+-1:00",
+            "12:00:00+01:-1",
+            "12:00:00-+1:00",
+        ] {
+            assert_eq!(Time::parse(text), None, "{text}");
+        }
+        // Not a panic on a character wider than a byte where the offset would be
+        assert_eq!(Time::parse("12:00\u{e9}00:00"), None);
     }
 
     #[test]

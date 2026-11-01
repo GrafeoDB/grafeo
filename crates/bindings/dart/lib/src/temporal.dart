@@ -326,15 +326,16 @@ final class GrafeoDuration {
       final fraction = n.remainder(_nanosPerSecond);
       if (hours != 0) out.write('${hours}H');
       if (minutes != 0) out.write('${minutes}M');
-      if (fraction != 0) {
-        // Nine digits, a sign first for a negative part of a duration of
-        // mixed signs, without trailing zeros, as the engine writes them
-        final digits = fraction < 0
-            ? '-${(-fraction).toString().padLeft(8, '0')}'
-            : fraction.toString().padLeft(9, '0');
-        out.write('$seconds.${digits.replaceFirst(RegExp(r'0+$'), '')}S');
-      } else if (seconds != 0) {
-        out.write('${seconds}S');
+      if (fraction != 0 || seconds != 0) {
+        // The sign once, before the whole seconds (negative only in a
+        // duration of mixed signs), the fraction as a magnitude: `T-1.5S`
+        if (n.remainder(_nanosPerMinute) < 0) out.write('-');
+        out.write(seconds.abs());
+        if (fraction != 0) {
+          final digits = fraction.abs().toString().padLeft(9, '0');
+          out.write('.${digits.replaceFirst(RegExp(r'0+$'), '')}');
+        }
+        out.write('S');
       }
     }
     if (!negative && m == 0 && d == 0 && n == 0) out.write('T0S');
@@ -359,23 +360,36 @@ final class GrafeoDuration {
       RegExp(r'^-?\d+$').hasMatch(text) ? int.tryParse(text) : null;
 
   /// The seconds of a duration, `n` or `n.fraction`, as the engine reads
-  /// them: the fraction's first nine characters as a number of their scale,
-  /// so that the text the engine writes for any duration reads back as it.
+  /// them: the fraction's first nine digits, with the sign of the whole
+  /// seconds (`-0.5` is negative). It also reads what 0.6.0 wrote for a
+  /// negative fraction in a duration of mixed signs, the sign inside the
+  /// fraction (`-1.-5` for -1.5 s, nine characters wide with that sign
+  /// before its trailing zeros were cut): digits that start with a zero are
+  /// that eight digit field (`0.-05` is -0.005 s), others the plain fraction.
   static int? _secondsNanos(String text) {
     final point = text.indexOf('.');
-    final whole = _integer(point < 0 ? text : text.substring(0, point));
+    final wholeText = point < 0 ? text : text.substring(0, point);
+    final whole = _integer(wholeText);
     if (whole == null) return null;
     final nanos = _addProduct(0, whole, _nanosPerSecond);
     if (nanos == null || point < 0) return nanos;
     var fraction = text.substring(point + 1);
-    if (fraction.length > 9) fraction = fraction.substring(0, 9);
-    final digits = _integer(fraction);
+    var negative = wholeText.startsWith('-'), width = 9;
+    if (fraction.startsWith('-')) {
+      // 0.6.0 wrote it after seconds of 0 or less only
+      if (whole > 0) return null;
+      negative = true;
+      fraction = fraction.substring(1);
+      if (fraction.startsWith('0') && fraction.length <= 8) width = 8;
+    }
+    if (fraction.length > width) fraction = fraction.substring(0, width);
+    final digits = _digits(fraction);
     if (digits == null) return null;
     var scale = 1;
-    for (var i = fraction.length; i < 9; i++) {
+    for (var i = fraction.length; i < width; i++) {
       scale *= 10;
     }
-    return _checkedAdd(nanos, digits * scale);
+    return _checkedAdd(nanos, (negative ? -digits : digits) * scale);
   }
 
   /// [a] + [b], or null when the sum does not fit 64 bits.

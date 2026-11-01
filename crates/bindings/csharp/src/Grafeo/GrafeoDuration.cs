@@ -190,10 +190,17 @@ public readonly struct GrafeoDuration : IEquatable<GrafeoDuration>
                     text.Append(invariant, $"{hours}H");
                 if (minutes != 0)
                     text.Append(invariant, $"{minutes}M");
-                if (fraction != 0)
-                    text.Append(invariant, $"{seconds}.{Fraction(fraction)}S");
-                else if (seconds != 0)
-                    text.Append(invariant, $"{seconds}S");
+                if (fraction != 0 || seconds != 0)
+                {
+                    // The sign once, before the whole seconds (negative only in a
+                    // duration of mixed signs), the fraction as a magnitude: T-1.5S
+                    if (nanos % NanosPerMinute < 0)
+                        text.Append('-');
+                    text.Append(invariant, $"{Math.Abs(seconds)}");
+                    if (fraction != 0)
+                        text.Append('.').Append(Math.Abs(fraction).ToString("000000000", invariant).TrimEnd('0'));
+                    text.Append('S');
+                }
             }
             if (!negative && months == 0 && days == 0 && nanos == 0)
                 text.Append("T0S");
@@ -220,15 +227,6 @@ public readonly struct GrafeoDuration : IEquatable<GrafeoDuration>
     /// <summary>Whether two durations differ in a part.</summary>
     public static bool operator !=(GrafeoDuration left, GrafeoDuration right) => !left.Equals(right);
 
-    /// <summary>
-    /// The digits of a fraction of a second as the engine writes them: nine
-    /// digits (a sign first for a negative part of a duration of mixed signs),
-    /// without trailing zeros.
-    /// </summary>
-    private static string Fraction(long nanos) =>
-        (nanos < 0 ? "-" + (-nanos).ToString("00000000", CultureInfo.InvariantCulture)
-            : nanos.ToString("000000000", CultureInfo.InvariantCulture)).TrimEnd('0');
-
     /// <summary>An integer with an optional minus, as the engine reads one.</summary>
     private static bool Integer(string text, out long value) =>
         long.TryParse(text, NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture, out value)
@@ -236,24 +234,42 @@ public readonly struct GrafeoDuration : IEquatable<GrafeoDuration>
 
     /// <summary>
     /// The seconds of a duration, <c>n</c> or <c>n.fraction</c>, as the engine
-    /// reads them: the fraction's first nine characters as a number of their
-    /// scale, so that the text the engine writes for any duration reads back as it.
+    /// reads them: the fraction's first nine digits, with the sign of the whole
+    /// seconds (<c>-0.5</c> is negative). It also reads what 0.6.0 wrote for a
+    /// negative fraction in a duration of mixed signs, the sign inside the
+    /// fraction (<c>-1.-5</c> for -1.5 s, nine characters wide with that sign
+    /// before its trailing zeros were cut): digits that start with a zero are
+    /// that eight digit field (<c>0.-05</c> is -0.005 s), others the plain fraction.
     /// </summary>
     private static bool SecondsNanos(string text, out long nanos)
     {
         nanos = 0;
         var point = text.IndexOf('.');
-        if (!Integer(point < 0 ? text : text[..point], out var whole))
+        var wholeText = point < 0 ? text : text[..point];
+        if (!Integer(wholeText, out var whole))
             return false;
         nanos = checked(whole * NanosPerSecond);
         if (point < 0)
             return true;
         var fraction = text[(point + 1)..];
-        if (fraction.Length > 9)
-            fraction = fraction[..9];
-        if (!Integer(fraction, out var digits))
+        var negative = wholeText.StartsWith('-');
+        var width = 9;
+        if (fraction.StartsWith('-'))
+        {
+            // 0.6.0 wrote it after seconds of 0 or less only
+            if (whole > 0)
+                return false;
+            negative = true;
+            fraction = fraction[1..];
+            if (fraction.StartsWith('0') && fraction.Length <= 8)
+                width = 8;
+        }
+        if (fraction.Length > width)
+            fraction = fraction[..width];
+        if (fraction.Length == 0 || fraction.AsSpan().ContainsAnyExceptInRange('0', '9'))
             return false;
-        nanos = checked(nanos + digits * (long)Math.Pow(10, 9 - fraction.Length));
+        var digits = long.Parse(fraction, CultureInfo.InvariantCulture) * (long)Math.Pow(10, width - fraction.Length);
+        nanos = negative ? checked(nanos - digits) : checked(nanos + digits);
         return true;
     }
 }

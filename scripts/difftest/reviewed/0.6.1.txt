@@ -100,3 +100,5 @@ DN25|cypher b49653534b An EXISTS beside a condition that is false for a row does
 DN25|gql b49653534b An EXISTS beside a condition that is false for a row does not run for that row, also as a mark join, so a subquery that would divide by zero for it no longer fails; 0.6.0 failed with division by zero.
 DN27|cypher a99961e4b7 The WHERE of an OPTIONAL MATCH holding a subquery over the outer rows filters the optional part, so every outer row stays, with nulls where it does not hold; 0.6.0 dropped those rows.
 DN27|gql a99961e4b7 The WHERE of an OPTIONAL MATCH holding a subquery over the outer rows filters the optional part, so every outer row stays, with nulls where it does not hold; 0.6.0 dropped those rows.
+DQ1|gql 5d446249e1 OPTIONAL CALL of a named procedure keeps each incoming row with null when the procedure gives it no rows; 0.6.0 dropped the row as a plain CALL does (#699).
+DQ2|gql b17e0ac727 OPTIONAL CALL of a named procedure with no rows gives one row of nulls; 0.6.0 gave no row (#699).

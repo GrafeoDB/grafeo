@@ -2424,4 +2424,20 @@ case("DP11", "SELECT n FROM GRAPH_TABLE (MATCH (a:Person) COLUMNS (a.name AS n))
 case("DP12", "SELECT n FROM GRAPH_TABLE (MATCH (a:Person) COLUMNS (a.name AS n)) LIMIT $limit", SQL, params={"limit": 1.5})
 case("DP13", "SELECT n FROM GRAPH_TABLE (MATCH (a:Person) COLUMNS (a.name AS n)) OFFSET $offset", SQL, params={"offset": "two"})
 
+# DQ: OPTIONAL CALL of a named procedure keeps the incoming row, with null in each yielded
+#     column, when the procedure gives it no rows (0.6.0 dropped the row like a plain CALL):
+#     YIELD WHERE removes every row, per incoming row (DQ1) and as the first clause (DQ2);
+#     a procedure with rows gives the same rows as CALL (DQ3); RETURN * lists the declared
+#     columns, standalone (DQ4) and after an incoming row (DQ5); an argument from the row is
+#     refused, as in CALL (DQ6)
+for case_id, query in [
+    ("DQ1", "UNWIND [3, 19] AS x OPTIONAL CALL db.labels() YIELD label WHERE label = 'City' RETURN x, label"),
+    ("DQ2", "OPTIONAL CALL db.labels() YIELD label WHERE label = 'City' RETURN label"),
+    ("DQ3", "UNWIND [3, 19] AS x OPTIONAL CALL db.labels() YIELD label RETURN x, label"),
+    ("DQ4", "OPTIONAL CALL same('Alix') RETURN *"),
+    ("DQ5", "UNWIND ['Mia'] AS name OPTIONAL CALL pair('Alix', 'Gus', 'Vincent') RETURN *"),
+    ("DQ6", "UNWIND ['Alix', 'Gus'] AS name OPTIONAL CALL same(name) YIELD v RETURN name, v"),
+]:
+    case(case_id, query, GQL, "procedures")
+
 # fmt: on

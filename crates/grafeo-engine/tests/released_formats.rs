@@ -197,16 +197,30 @@ impl Fixture {
         }
     }
 
-    /// The indexes `SHOW INDEXES` lists (it leaves out vector indexes). A 0.5.43 file holds
-    /// no index definitions, so its closed file has none and its unflushed one only the index
-    /// its WAL defines; the index records of a 0.5.x WAL are replayed (#401), so a WAL
-    /// directory has all of them.
-    fn index_names(self) -> &'static [&'static str] {
-        match (self.version, self.layout) {
-            ("0.5.43", Layout::Closed) => &[],
-            ("0.5.43", Layout::Unflushed) => &["museum_name_index"],
-            _ => &["doc_content", "museum_name_index", "person_name"],
+    /// The rows `SHOW INDEXES` lists, sorted, `NULL` for a null cell: the named indexes and
+    /// those without a definition. A 0.5.43 file holds no index definitions, so its closed
+    /// file lists only the property index on `name`, without a name, and its unflushed one
+    /// the index its WAL defines and the text index without a name; the index records of a
+    /// 0.5.x WAL are replayed (#401), so a WAL directory has all of them. A 0.5 vector index
+    /// has no name: 0.5 kept no vector index definitions.
+    fn index_rows(self) -> Vec<[&'static str; 4]> {
+        let mut indexes = match (self.version, self.layout) {
+            ("0.5.43", Layout::Closed) => vec![["NULL", "Hash", "NULL", "name"]],
+            ("0.5.43", Layout::Unflushed) => vec![
+                ["NULL", "FullText", "Document", "content"],
+                ["museum_name_index", "Hash", "Museum", "name"],
+            ],
+            _ => vec![
+                ["doc_content", "FullText", "Document", "content"],
+                ["museum_name_index", "Hash", "Museum", "name"],
+                ["person_name", "Hash", "Person", "name"],
+            ],
+        };
+        if self.has_search_indexes() {
+            indexes.push(["NULL", "Vector", "Document", "embedding"]);
         }
+        indexes.sort_unstable();
+        indexes
     }
 
     /// Whether the vector and text indexes of the first session are there. 0.5.43 wrote
@@ -939,14 +953,33 @@ fn check_indexes(fixture: Fixture, db: &GrafeoDB) {
     let as_value = |node: NodeId| Value::Int64(i64::try_from(node.as_u64()).unwrap());
     let name = fixture.name();
     let copy = unrestricted_copy(db);
+    let expected = fixture.index_rows();
+    let mut shown: Vec<[String; 4]> = rows(copy.as_ref().unwrap_or(db), "SHOW INDEXES")
+        .into_iter()
+        .map(|row| {
+            let cells: Vec<String> = row
+                .iter()
+                .map(|cell| match cell {
+                    Value::String(text) => text.to_string(),
+                    Value::Null => "NULL".to_string(),
+                    other => panic!("{name}: a SHOW INDEXES cell: {other:?}"),
+                })
+                .collect();
+            cells.try_into().expect("SHOW INDEXES has four columns")
+        })
+        .collect();
+    shown.sort_unstable();
     assert_eq!(
-        names(copy.as_ref().unwrap_or(db), "SHOW INDEXES"),
-        fixture.index_names(),
+        shown,
+        expected
+            .iter()
+            .map(|row| row.map(str::to_string))
+            .collect::<Vec<_>>(),
         "{name}: indexes"
     );
     // The property index `person_name` on `Person.name` is there as an index,
     // not only as a name, and an equality on `name` looks it up (#638).
-    if fixture.index_names().contains(&"person_name") {
+    if expected.iter().any(|row| row[0] == "person_name") {
         assert!(
             db.has_property_index("name"),
             "{name}: the property index on name"

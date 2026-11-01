@@ -547,27 +547,37 @@ mod replay {
         ] {
             assert_eq!(db.has_property_index(property), indexed, "{property}");
         }
-        let mut names: Vec<String> = rows(&db, "SHOW INDEXES")
+        let mut shown: Vec<Vec<String>> = rows(&db, "SHOW INDEXES")
             .into_iter()
-            .map(|row| match &row[0] {
-                Value::String(name) => name.to_string(),
-                other => panic!("an index name: {other:?}"),
+            .map(|row| {
+                row.iter()
+                    .map(|cell| match cell {
+                        Value::String(text) => text.to_string(),
+                        Value::Null => "NULL".to_string(),
+                        other => panic!("a SHOW INDEXES cell: {other:?}"),
+                    })
+                    .collect()
             })
             .collect();
-        names.sort();
+        shown.sort();
         // The DDL indexes carry names, vector ones included; those the API
-        // made (Doc.emb, Doc.body) have none, and the dropped ones are gone.
+        // made (email, Doc.emb, Doc.body) are listed with none, and the
+        // dropped ones are gone.
         assert_eq!(
-            names,
+            shown,
             [
-                "note_emb",
-                "part_emb",
-                "part_serial",
-                "person_bio",
-                "person_city",
-                "person_name"
-            ],
-            "the names, without the one dropped"
+                ["NULL", "FullText", "Doc", "body"],
+                ["NULL", "Hash", "NULL", "email"],
+                ["NULL", "Vector", "Doc", "emb"],
+                ["note_emb", "Vector", "Note", "emb"],
+                ["part_emb", "Vector", "Part", "emb"],
+                ["part_serial", "Hash", "Part", "serial"],
+                ["person_bio", "FullText", "Person", "bio"],
+                ["person_city", "BTree", "Person", "city"],
+                ["person_name", "Hash", "Person", "name"],
+            ]
+            .map(|row| row.map(str::to_string).to_vec()),
+            "every index, without the ones dropped"
         );
 
         let docs = store

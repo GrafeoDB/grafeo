@@ -1505,6 +1505,31 @@ mod tests {
         );
     }
 
+    #[test]
+    fn count_edges_counts_what_the_projection_holds() {
+        let (store, nodes, _) = setup_social_graph_with_ids();
+        let spec = ProjectionSpec::new().with_node_labels(["Person", "City"]);
+        let proj = GraphProjection::new(store, spec);
+        let count = |types: &[&str], end_labels: &[&str]| {
+            let types: Vec<ArcStr> = types.iter().map(|name| ArcStr::from(*name)).collect();
+            let labels: Vec<ArcStr> = end_labels.iter().map(|name| ArcStr::from(*name)).collect();
+            proj.count_edges(
+                nodes[0],
+                crate::graph::Direction::Outgoing,
+                &types,
+                &labels,
+                ReadView::latest(),
+            )
+            .unwrap()
+        };
+        // Alix's edge to Grafeo (Software) is outside the projection.
+        assert_eq!(count(&[], &[]), 2);
+        assert_eq!(count(&["KNOWS"], &[]), 1);
+        assert_eq!(count(&[], &["City"]), 1);
+        assert_eq!(count(&[], &["Software"]), 0);
+        assert_eq!(count(&["KNOWS"], &["City"]), 0);
+    }
+
     // 10. all_node_ids
 
     #[test]

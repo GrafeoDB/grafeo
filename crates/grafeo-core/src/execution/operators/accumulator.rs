@@ -392,9 +392,10 @@ impl From<Value> for HashableValue {
 
 /// A grouping, DISTINCT or UNION key: the identity of each of a row's values
 /// in the key columns (see [`HashableValue`]), so the rows whose key values
-/// are the same values have one key.
+/// are the same values have one key. A key of one or two columns (most)
+/// is kept inline: a grouping builds a key for every row it reads.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub(crate) struct RowKey(Vec<HashableValue>);
+pub(crate) struct RowKey(smallvec::SmallVec<[HashableValue; 2]>);
 
 impl RowKey {
     /// The key of `values`, every value read as itself.

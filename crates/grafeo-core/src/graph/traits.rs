@@ -364,6 +364,36 @@ pub trait GraphStore: Send + Sync {
     }
 
     /// How many edges [`edges`](Self::edges) lists for `node` in `direction`
+    /// of one of `types` (every type when empty) whose other end has every
+    /// label of `end_labels` as `view` sees it: the count of
+    /// `(node)-[:types]->(:end_labels)`, without the list.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error of a read the store cannot do.
+    fn count_edges(
+        &self,
+        node: NodeId,
+        direction: Direction,
+        types: &[ArcStr],
+        end_labels: &[ArcStr],
+        view: ReadView,
+    ) -> Result<usize> {
+        let mut count = 0;
+        for (other, _) in self.edges(node, direction, types, view)? {
+            let mut matches = true;
+            for label in end_labels {
+                if self.node_has_label(other, label, view)? != Some(true) {
+                    matches = false;
+                    break;
+                }
+            }
+            count += usize::from(matches);
+        }
+        Ok(count)
+    }
+
+    /// How many edges [`edges`](Self::edges) lists for `node` in `direction`
     /// of every type.
     ///
     /// # Errors

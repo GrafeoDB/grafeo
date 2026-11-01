@@ -14,6 +14,7 @@ use grafeo_common::types::{
     Decimal, DecimalError, EdgeId, HashableValue, LogicalType, NodeId, PropertyDataType,
     PropertyKey, PropertyMap, ReadView, TemporalComparison, Value, ValueType,
 };
+use grafeo_common::utils::hash::FxHashMap;
 #[cfg(feature = "regex")]
 use regex::Regex;
 #[cfg(all(feature = "regex-lite", not(feature = "regex")))]
@@ -335,7 +336,7 @@ pub struct ExpressionPredicate {
     /// The expression to evaluate.
     expression: FilterExpression,
     /// Map from variable name to column index.
-    variable_columns: HashMap<String, usize>,
+    variable_columns: FxHashMap<String, usize>,
     /// The graph store for property lookups.
     store: Arc<dyn GraphStore>,
     /// Who reads: every lookup answers as this view sees the graph.
@@ -938,7 +939,8 @@ impl ExpressionPredicate {
     ) -> Self {
         Self {
             expression,
-            variable_columns,
+            // Looked up for each variable of each row: a fast hash.
+            variable_columns: variable_columns.into_iter().collect(),
             store,
             view,
             session_context: SessionContext::default(),

@@ -497,6 +497,31 @@ impl Operator for ProjectOperator {
                         .expect("column exists: index matches projection schema");
 
                     let (store, view) = self.reader("property access")?;
+                    let prop_key = PropertyKey::new(property);
+
+                    // A column of nodes holds nothing else: the chunk's
+                    // values are read in one batch (one store read, the
+                    // key looked up once), a null for a null row and for
+                    // a node without the property.
+                    if *input_col.data_type() == LogicalType::Node {
+                        let rows: Vec<usize> = input.selected_indices().collect();
+                        let nodes: Vec<NodeId> = rows
+                            .iter()
+                            .filter_map(|&row| input_col.get_node_id(row))
+                            .collect();
+                        let mut values = store
+                            .node_property_batch(&nodes, &prop_key, view)?
+                            .into_iter();
+                        for row in rows {
+                            let value = if input_col.get_node_id(row).is_some() {
+                                values.next().flatten()
+                            } else {
+                                None
+                            };
+                            output_col.push_value(value.unwrap_or(Value::Null));
+                        }
+                        continue;
+                    }
 
                     // Extract property for each row.
                     // For typed columns (VectorData::NodeId / EdgeId) there is
@@ -504,7 +529,6 @@ impl Operator for ProjectOperator {
                     // join), both get_node_id and get_edge_id can succeed on the
                     // same Int64 value, so we verify against the store to resolve
                     // the entity type.
-                    let prop_key = PropertyKey::new(property);
                     for row in input.selected_indices() {
                         // One value of the entity, read without building it.
                         let value = if let Some(node_id) = input_col.get_node_id(row) {
@@ -1176,6 +1200,58 @@ mod tests {
         } else {
             panic!("Expected Value::Map, got {:?}", value);
         }
+    }
+
+    /// A property of a node column, read in one batch: the value of each
+    /// node in row order, a null for a null row, for a node without the
+    /// property and for a node the view does not see.
+    #[test]
+    fn test_project_property_of_a_node_column() {
+        let store = RowGroupStore::new();
+        let alix = store.create_node(&["Person"]);
+        let gus = store.create_node(&["Person"]);
+        let vincent = store.create_node(&["Person"]);
+        store.set_node_property(alix, "age", Value::Int64(30));
+        store.set_node_property(vincent, "age", Value::Int64(41));
+
+        let mut builder = DataChunkBuilder::new(&[LogicalType::Node]);
+        for node in [Some(vincent), None, Some(gus), Some(alix), Some(NodeId(99))] {
+            let column = builder.column_mut(0).unwrap();
+            match node {
+                Some(node) => column.push_node_id(node),
+                None => column.push_value(Value::Null),
+            }
+            builder.advance_row();
+        }
+        let mock_scan = MockScanOperator {
+            chunks: vec![builder.finish()],
+            position: 0,
+        };
+        let mut project = ProjectOperator::with_store(
+            Box::new(mock_scan),
+            vec![ProjectExpr::PropertyAccess {
+                column: 0,
+                property: "age".to_string(),
+            }],
+            vec![LogicalType::Any],
+            Arc::new(store),
+            ReadView::latest(),
+        );
+
+        let result = project.next().unwrap().unwrap();
+        let ages: Vec<Option<Value>> = (0..result.row_count())
+            .map(|row| result.column(0).unwrap().get_value(row))
+            .collect();
+        assert_eq!(
+            ages,
+            [
+                Some(Value::Int64(41)),
+                Some(Value::Null),
+                Some(Value::Null),
+                Some(Value::Int64(30)),
+                Some(Value::Null),
+            ]
+        );
     }
 
     #[test]

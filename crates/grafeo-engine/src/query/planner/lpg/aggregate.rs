@@ -1,13 +1,14 @@
 //! Aggregate and factorized aggregate planning.
 
 use super::{
-    AggregateOp, Arc, Direction, EntityValue, Error, ExpandDirection, ExpandStep,
+    AggregateOp, Arc, Direction, EntityValue, Error, ExpandDirection, ExpandOp, ExpandStep,
     ExpressionPredicate, FactorizedAggregate, FactorizedAggregateOperator, FilterExpression,
     FilterOperator, GraphStore, HashAggregateOperator, HashMap, LazyFactorizedChainOperator,
-    LogicalAggregateFunction, LogicalExpression, LogicalType, Operator, PhysicalAggregateExpr,
-    ProjectExpr, ProjectOperator, Result, SimpleAggregateOperator, convert_aggregate_function,
-    expression_to_string, resolved_column_name,
+    LogicalAggregateFunction, LogicalExpression, LogicalOperator, LogicalType, Operator, PathMode,
+    PhysicalAggregateExpr, ProjectExpr, ProjectOperator, Result, SimpleAggregateOperator,
+    convert_aggregate_function, expression_to_string, resolved_column_name,
 };
+use crate::query::plan::AggregateExpr;
 
 impl super::Planner {
     /// Plans an AGGREGATE operator.
@@ -74,15 +75,114 @@ impl super::Planner {
             return Ok(counted);
         }
 
+        if let Some(counted) = self.plan_edge_count(agg)? {
+            return Ok(counted);
+        }
+
         // An aggregate that comes first (`RETURN count(*)`) aggregates the
         // one empty row.
-        let (mut input_op, mut input_columns) = self.plan_input(&agg.input)?;
+        let (mut input_op, input_columns) = self.plan_input(&agg.input)?;
         // Values that read the graph after a write (`... SET h.c = i RETURN
         // sum(h.c)`) read what the whole write left (see `after_write`).
         if super::after_write::aggregate_reads(agg) {
             input_op = super::mutation::read_first_after_a_write(input_op, &agg.input);
         }
+        self.aggregate_over(agg, input_op, input_columns)
+    }
 
+    /// A grouped count over one expand that reads neither the edge nor its
+    /// far end (`MATCH (a:V)-[:E]->(:V) RETURN a.id, count(*)`): the count
+    /// of each input row's edges, read from the adjacency (see
+    /// `EdgeCountOperator`), summed per group, where the expand would make a
+    /// row of every edge for the aggregate to count. Labels on the far end
+    /// stay a check of each counted edge, as the store keeps no count of the
+    /// edges to a label. `None` for any other aggregate (see
+    /// [`EdgeCountShape::of`]).
+    fn plan_edge_count(
+        &self,
+        agg: &AggregateOp,
+    ) -> Result<Option<(Box<dyn Operator>, Vec<String>)>> {
+        if !self.factorized_execution {
+            return Ok(None);
+        }
+        let Some(shape) = EdgeCountShape::of(agg) else {
+            return Ok(None);
+        };
+        let expand = shape.expand;
+        let (input_op, columns) = self.plan_operator(&expand.input)?;
+        let source_column = columns
+            .iter()
+            .position(|c| c == &expand.from_variable)
+            .ok_or_else(|| {
+                Error::Internal(format!(
+                    "Source variable '{}' not found in input columns",
+                    expand.from_variable
+                ))
+            })?;
+        let direction = match expand.direction {
+            ExpandDirection::Outgoing => Direction::Outgoing,
+            ExpandDirection::Incoming => Direction::Incoming,
+            ExpandDirection::Both => Direction::Both,
+        };
+        let counts = grafeo_core::execution::operators::EdgeCountOperator::new(
+            Arc::clone(&self.store) as Arc<dyn GraphStore>,
+            input_op,
+            source_column,
+            direction,
+            self.stored_edge_types(&expand.edge_types)?,
+            shape.end_labels,
+            self.read_view(),
+        )
+        .with_read_counter(self.read_counter());
+        // PROFILE shows the count in the expand's place, with the label
+        // checks of the far end it does.
+        let (counts, mut columns) = self.maybe_profile(
+            Ok((Box::new(counts) as Box<dyn Operator>, columns)),
+            shape.node,
+        )?;
+        for check in shape.checks.iter().rev() {
+            self.record_absorbed_scan_entry("Filter", check);
+        }
+        // A name no variable has: the count column of this aggregate.
+        let mut count_column = String::from("_edge_count");
+        while columns.contains(&count_column) {
+            count_column.push('_');
+        }
+        columns.push(count_column.clone());
+        self.scalar_columns
+            .borrow_mut()
+            .insert(count_column.clone());
+        // Each count sums the rows' counts, under the name it had.
+        let summed = AggregateOp {
+            group_by: agg.group_by.clone(),
+            aggregates: agg
+                .aggregates
+                .iter()
+                .map(|aggregate| AggregateExpr {
+                    function: LogicalAggregateFunction::Sum,
+                    expression: Some(LogicalExpression::Variable(count_column.clone())),
+                    expression2: None,
+                    distinct: false,
+                    alias: Some(aggregate.alias.clone().unwrap_or_else(|| {
+                        crate::query::planner::common::aggregate_column_name(aggregate)
+                    })),
+                    percentile: None,
+                    separator: None,
+                })
+                .collect(),
+            input: Box::new(LogicalOperator::Empty),
+            having: agg.having.clone(),
+        };
+        self.aggregate_over(&summed, counts, columns).map(Some)
+    }
+
+    /// Plans `agg` over `input_op`, whose rows hold `input_columns`.
+    fn aggregate_over(
+        &self,
+        agg: &AggregateOp,
+        mut input_op: Box<dyn Operator>,
+        mut input_columns: Vec<String>,
+    ) -> Result<(Box<dyn Operator>, Vec<String>)> {
         // A subquery in a grouping key or an aggregate's argument
         // (`sum(COUNT { ... })`) runs per input row, as one in a projection
         // does (see `lift_subqueries`): its value is a column of the rows
@@ -503,7 +603,7 @@ impl super::Planner {
 
     /// Plans a factorized aggregate that operates directly on factorized data.
     ///
-    /// This avoids the O(n²) cost of flattening before aggregation.
+    /// This avoids the O(nÂ²) cost of flattening before aggregation.
     pub(super) fn plan_factorized_aggregate(
         &self,
         agg: &AggregateOp,
@@ -624,6 +724,117 @@ impl super::Planner {
         variable_columns: &HashMap<String, usize>,
     ) -> Result<usize> {
         crate::query::planner::common::resolve_expression_to_column(expr, variable_columns, "")
+    }
+}
+
+/// A grouped count over one expand that its edge counts answer (see
+/// `plan_edge_count`).
+struct EdgeCountShape<'a> {
+    /// The expand whose edges are counted.
+    expand: &'a ExpandOp,
+    /// The expand as a plan operator.
+    node: &'a LogicalOperator,
+    /// The filters between the aggregate and the expand, from the top
+    /// down: checks of the far end's labels.
+    checks: Vec<&'a LogicalOperator>,
+    /// The labels the far end of each counted edge has.
+    end_labels: Vec<String>,
+}
+
+impl<'a> EdgeCountShape<'a> {
+    /// The shape of `agg` when it counts the edges of one expand per group:
+    ///
+    /// - grouped (a count without groups is 0 over no rows, where a sum is
+    ///   null), with every aggregate a `count(*)` or a `count(x)` without
+    ///   `DISTINCT` of the expand's start, edge or far end, which are never
+    ///   null on its rows, so each counts the rows;
+    /// - over one expand of one edge as a walk or a trail (a one-edge path
+    ///   is both; a simple or acyclic one drops a self-loop) without a path
+    ///   variable, whose edge and far end its input does not bind (an
+    ///   expand to a bound node checks it is that node);
+    /// - with nothing between them but checks of labels on the far end;
+    /// - whose group keys read neither the edge nor the far end, and are
+    ///   the same for each edge of a row (no subquery, no volatile call);
+    /// - and reads no write (the input writes nothing).
+    fn of(agg: &'a AggregateOp) -> Option<Self> {
+        if agg.group_by.is_empty() || agg.input.has_mutations() {
+            return None;
+        }
+        let mut checks = Vec::new();
+        let mut below = agg.input.as_ref();
+        while let LogicalOperator::Filter(filter) = below {
+            checks.push(below);
+            below = &filter.input;
+        }
+        let node = below;
+        let LogicalOperator::Expand(expand) = below else {
+            return None;
+        };
+        if expand.min_hops != 1
+            || expand.max_hops != Some(1)
+            || expand.quantified
+            || expand.path_alias.is_some()
+            || !matches!(expand.path_mode, PathMode::Walk | PathMode::Trail)
+        {
+            return None;
+        }
+        let far = expand.to_variable.as_str();
+        let edge = expand.edge_variable.as_deref();
+        let bound = expand.input.bound_variables(None)?;
+        if bound.contains(far) || edge.is_some_and(|edge| bound.contains(edge)) {
+            return None;
+        }
+        let mut end_labels = Vec::new();
+        for check in &checks {
+            let LogicalOperator::Filter(filter) = check else {
+                return None;
+            };
+            let mut conjuncts = Vec::new();
+            conjuncts_of(&filter.predicate, &mut conjuncts);
+            for conjunct in conjuncts {
+                end_labels.push(super::scan::label_check(conjunct, far)?.to_string());
+            }
+        }
+        let read_by_edge = |variable: &str| variable == far || Some(variable) == edge;
+        for key in &agg.group_by {
+            let variables = super::seek::value_variables(key)?;
+            if variables.iter().any(|variable| read_by_edge(variable)) {
+                return None;
+            }
+        }
+        let counts_rows = |aggregate: &AggregateExpr| {
+            !aggregate.distinct
+                && aggregate.expression2.is_none()
+                && match (aggregate.function, &aggregate.expression) {
+                    (LogicalAggregateFunction::Count, None) => true,
+                    (
+                        LogicalAggregateFunction::Count | LogicalAggregateFunction::CountNonNull,
+                        Some(LogicalExpression::Variable(variable)),
+                    ) => read_by_edge(variable) || *variable == expand.from_variable,
+                    _ => false,
+                }
+        };
+        (!agg.aggregates.is_empty() && agg.aggregates.iter().all(counts_rows)).then_some(Self {
+            expand,
+            node,
+            checks,
+            end_labels,
+        })
+    }
+}
+
+/// The conjuncts of an `AND` chain, in order.
+fn conjuncts_of<'a>(expression: &'a LogicalExpression, out: &mut Vec<&'a LogicalExpression>) {
+    match expression {
+        LogicalExpression::Binary {
+            left,
+            op: crate::query::plan::BinaryOp::And,
+            right,
+        } => {
+            conjuncts_of(left, out);
+            conjuncts_of(right, out);
+        }
+        other => out.push(other),
     }
 }
 

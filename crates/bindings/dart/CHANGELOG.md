@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.1
+
+- Dates, times, durations and zoned datetimes come back as `GrafeoDate`, `GrafeoTime`, `GrafeoDuration` and `GrafeoZonedDateTime`, and go back in as the same GQL type; a `Duration` parameter keeps its fraction of a second and its sign.
+- Bytes, NaN and infinities arrive as native values, also in streamed rows; a map with a tag beside other keys stays a map.
+- `rollback()` after a failed `commit()` does nothing, as in the other bindings.
+
 ## 0.6.0-beta.1
 
 - Version bump to match workspace release

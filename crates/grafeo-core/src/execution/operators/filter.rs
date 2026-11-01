@@ -4698,71 +4698,7 @@ impl ExpressionPredicate {
     /// comparison operators, use [`eval_binary_op`] which returns UNKNOWN
     /// when either operand is NULL.
     fn values_equal(&self, left: &Value, right: &Value) -> bool {
-        match (left, right) {
-            (Value::Null, Value::Null) => true,
-            (Value::Decimal(_), _) | (_, Value::Decimal(_)) => {
-                super::value_utils::compare_with_decimal(left, right)
-                    == Some(std::cmp::Ordering::Equal)
-            }
-            (Value::Bool(a), Value::Bool(b)) => a == b,
-            (Value::Int64(a), Value::Int64(b)) => a == b,
-            // IEEE: NaN equals nothing, -0.0 equals 0.0.
-            (Value::Float64(a), Value::Float64(b)) => a == b,
-            (Value::String(a), Value::String(b)) => a == b,
-            (Value::Int64(a), Value::Float64(b)) | (Value::Float64(b), Value::Int64(a)) => {
-                super::value_utils::int_equals_float(*a, *b)
-            }
-            // RDF stores numeric literals as strings; allow cross-type equality
-            (Value::String(s), Value::Int64(i)) | (Value::Int64(i), Value::String(s)) => {
-                s.parse::<i64>().is_ok_and(|n| n == *i)
-            }
-            (Value::String(s), Value::Float64(f)) | (Value::Float64(f), Value::String(s)) => {
-                super::value_utils::text_equals_float(s, *f)
-            }
-            (Value::List(a), Value::List(b)) => {
-                a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| self.values_equal(x, y))
-            }
-            (Value::Map(a), Value::Map(b)) => {
-                a.len() == b.len()
-                    && a.iter()
-                        .zip(b.iter())
-                        .all(|((k1, v1), (k2, v2))| k1 == k2 && self.values_equal(v1, v2))
-            }
-            (
-                Value::Path {
-                    nodes: n1,
-                    edges: e1,
-                },
-                Value::Path {
-                    nodes: n2,
-                    edges: e2,
-                },
-            ) => {
-                n1.len() == n2.len()
-                    && e1.len() == e2.len()
-                    && n1
-                        .iter()
-                        .zip(n2.iter())
-                        .all(|(a, b)| self.values_equal(a, b))
-                    && e1
-                        .iter()
-                        .zip(e2.iter())
-                        .all(|(a, b)| self.values_equal(a, b))
-            }
-            // A zoned and a local datetime or time: as the query's language
-            // reads them, as `<` and `>` compare them (see
-            // `TemporalComparison`).
-            _ if TemporalComparison::is_mixed_pair(left, right) => self
-                .session_context
-                .temporal_comparison
-                .compare_mixed(left, right)
-                .is_some_and(std::cmp::Ordering::is_eq),
-            // Temporal values, bytes, vectors and the rest: the same variant
-            // with the same value (zoned datetimes compare by instant). This
-            // used to be `false`, so `date('2024-01-01') = date('2024-01-01')`
-            // was false.
-            _ => left == right,
-        }
+        super::value_utils::values_equal(left, right, self.session_context.temporal_comparison)
     }
 
     /// Checks if a value matches a GQL type name (used by IS TYPED).

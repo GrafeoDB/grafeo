@@ -9,12 +9,16 @@
 //! - In-memory partitions can be spilled to disk under memory pressure
 //! - Cold (least recently accessed) partitions are spilled first
 //! - When iterating results, spilled partitions are reloaded
+//! - Each group keeps the position at which it was first inserted, also on
+//!   disk, and draining gives the groups in that order: a `GROUP BY` without
+//!   `ORDER BY` gives its groups in the order of their first rows, whether a
+//!   partition stayed in memory or not
 
 use super::file::SpillFile;
 use super::manager::SpillManager;
 use super::serializer::{deserialize_row, serialize_row};
 use grafeo_common::types::Value;
-use std::collections::HashMap;
+use grafeo_common::utils::hash::FxHashMap;
 use std::io::{Read, Write};
 use std::sync::Arc;
 
@@ -38,11 +42,16 @@ impl SerializedKey {
     }
 }
 
-/// Entry in a partition: the original key columns count and value.
+/// Entry in a partition: the original key columns count, the position at
+/// which the key was first inserted (across all partitions) and the value.
 struct PartitionEntry<V> {
     num_key_columns: usize,
+    first_seen: u64,
     value: V,
 }
+
+/// The groups of one partition.
+type Partition<V> = FxHashMap<SerializedKey, PartitionEntry<V>>;
 
 /// Partitioned accumulator state for spillable aggregation.
 ///
@@ -54,7 +63,7 @@ pub struct PartitionedState<V> {
     /// Number of partitions.
     num_partitions: usize,
     /// In-memory partitions (None = spilled to disk).
-    partitions: Vec<Option<HashMap<SerializedKey, PartitionEntry<V>>>>,
+    partitions: Vec<Option<Partition<V>>>,
     /// Spill files for spilled partitions.
     spill_files: Vec<Option<SpillFile>>,
     /// Number of groups per partition (for spilled partitions too).
@@ -63,6 +72,8 @@ pub struct PartitionedState<V> {
     access_times: Vec<u64>,
     /// Global timestamp counter.
     timestamp: u64,
+    /// The position the next new key gets (see [`PartitionEntry::first_seen`]).
+    next_first_seen: u64,
     /// Serializer for V values.
     value_serializer: Box<dyn Fn(&V, &mut dyn Write) -> std::io::Result<()> + Send + Sync>,
     /// Deserializer for V values.
@@ -84,7 +95,7 @@ impl<V: Clone + Send + Sync + 'static> PartitionedState<V> {
         let mut partitions = Vec::with_capacity(num_partitions);
         let mut spill_files = Vec::with_capacity(num_partitions);
         for _ in 0..num_partitions {
-            partitions.push(Some(HashMap::new()));
+            partitions.push(Some(Partition::default()));
             spill_files.push(None);
         }
 
@@ -99,6 +110,7 @@ impl<V: Clone + Send + Sync + 'static> PartitionedState<V> {
             partition_sizes,
             access_times,
             timestamp: 0,
+            next_first_seen: 0,
             value_serializer: Box::new(value_serializer),
             value_deserializer: Box::new(value_deserializer),
         }
@@ -126,10 +138,7 @@ impl<V: Clone + Send + Sync + 'static> PartitionedState<V> {
     /// # Errors
     ///
     /// Returns an error if reading from disk fails.
-    fn get_partition_mut(
-        &mut self,
-        partition_idx: usize,
-    ) -> std::io::Result<&mut HashMap<SerializedKey, PartitionEntry<V>>> {
+    fn get_partition_mut(&mut self, partition_idx: usize) -> std::io::Result<&mut Partition<V>> {
         self.touch(partition_idx);
 
         // If partition is in memory, return it
@@ -150,7 +159,7 @@ impl<V: Clone + Send + Sync + 'static> PartitionedState<V> {
             self.partitions[partition_idx] = Some(loaded);
         } else {
             // Neither in memory nor on disk - create empty partition
-            self.partitions[partition_idx] = Some(HashMap::new());
+            self.partitions[partition_idx] = Some(Partition::default());
         }
 
         // Invariant: partition was either loaded from disk or created empty above
@@ -160,17 +169,14 @@ impl<V: Clone + Send + Sync + 'static> PartitionedState<V> {
     }
 
     /// Loads a partition from a spill file.
-    fn load_partition(
-        &self,
-        spill_file: &SpillFile,
-    ) -> std::io::Result<HashMap<SerializedKey, PartitionEntry<V>>> {
+    fn load_partition(&self, spill_file: &SpillFile) -> std::io::Result<Partition<V>> {
         let mut reader = spill_file.reader()?;
         let mut adapter = SpillReaderAdapter(&mut reader);
 
         // reason: deserialized counts are bounded by available data
         #[allow(clippy::cast_possible_truncation)]
         let num_entries = read_u64(&mut adapter)? as usize;
-        let mut partition = HashMap::with_capacity(num_entries);
+        let mut partition = Partition::with_capacity_and_hasher(num_entries, Default::default());
 
         for _ in 0..num_entries {
             // Read key
@@ -185,6 +191,7 @@ impl<V: Clone + Send + Sync + 'static> PartitionedState<V> {
             // reason: deserialized counts are bounded by available data
             #[allow(clippy::cast_possible_truncation)]
             let num_key_columns = read_u64(&mut adapter)? as usize;
+            let first_seen = read_u64(&mut adapter)?;
 
             // Read value
             let value = (self.value_deserializer)(&mut adapter)?;
@@ -193,6 +200,7 @@ impl<V: Clone + Send + Sync + 'static> PartitionedState<V> {
                 serialized_key,
                 PartitionEntry {
                     num_key_columns,
+                    first_seen,
                     value,
                 },
             );
@@ -260,6 +268,7 @@ impl<V: Clone + Send + Sync + 'static> PartitionedState<V> {
 
             // Write number of key columns
             write_u64(&mut buf, entry.num_key_columns as u64)?;
+            write_u64(&mut buf, entry.first_seen)?;
 
             // Write value
             (self.value_serializer)(&entry.value, &mut buf)?;
@@ -324,7 +333,8 @@ impl<V: Clone + Send + Sync + 'static> PartitionedState<V> {
         }
     }
 
-    /// Inserts or updates a value for a key.
+    /// Inserts or updates a value for a key. An updated key keeps its
+    /// first-seen position.
     ///
     /// # Errors
     ///
@@ -333,21 +343,23 @@ impl<V: Clone + Send + Sync + 'static> PartitionedState<V> {
         let partition_idx = self.partition_for(&key);
         let num_key_columns = key.len();
         let serialized_key = SerializedKey::from_values(&key);
+        let first_seen = self.next_first_seen;
         let partition = self.get_partition_mut(partition_idx)?;
 
-        let old = partition.insert(
+        if let Some(entry) = partition.get_mut(&serialized_key) {
+            return Ok(Some(std::mem::replace(&mut entry.value, value)));
+        }
+        partition.insert(
             serialized_key,
             PartitionEntry {
                 num_key_columns,
+                first_seen,
                 value,
             },
         );
-
-        if old.is_none() {
-            self.partition_sizes[partition_idx] += 1;
-        }
-
-        Ok(old.map(|e| e.value))
+        self.next_first_seen += 1;
+        self.partition_sizes[partition_idx] += 1;
+        Ok(None)
     }
 
     /// Gets a value for a key.
@@ -378,6 +390,7 @@ impl<V: Clone + Send + Sync + 'static> PartitionedState<V> {
         let partition_idx = self.partition_for(&key);
         let num_key_columns = key.len();
         let serialized_key = SerializedKey::from_values(&key);
+        let first_seen = self.next_first_seen;
 
         let was_new;
         {
@@ -388,12 +401,14 @@ impl<V: Clone + Send + Sync + 'static> PartitionedState<V> {
                     serialized_key.clone(),
                     PartitionEntry {
                         num_key_columns,
+                        first_seen,
                         value: default(),
                     },
                 );
             }
         }
         if was_new {
+            self.next_first_seen += 1;
             self.partition_sizes[partition_idx] += 1;
         }
 
@@ -405,7 +420,8 @@ impl<V: Clone + Send + Sync + 'static> PartitionedState<V> {
             .value)
     }
 
-    /// Drains all entries from all partitions.
+    /// Drains all entries from all partitions, in the order their keys were
+    /// first inserted.
     ///
     /// Loads spilled partitions as needed.
     ///
@@ -413,16 +429,17 @@ impl<V: Clone + Send + Sync + 'static> PartitionedState<V> {
     ///
     /// Returns an error if loading from disk fails.
     pub fn drain_all(&mut self) -> std::io::Result<Vec<(Vec<Value>, V)>> {
-        let mut result = Vec::with_capacity(self.total_size());
+        let mut entries = Vec::with_capacity(self.total_size());
 
         for partition_idx in 0..self.num_partitions {
             let partition = self.get_partition_mut(partition_idx)?;
             for (serialized_key, entry) in partition.drain() {
                 let key = serialized_key.to_values(entry.num_key_columns)?;
-                result.push((key, entry.value));
+                entries.push((entry.first_seen, key, entry.value));
             }
             self.partition_sizes[partition_idx] = 0;
         }
+        let result = in_first_seen_order(entries);
 
         // Clean up any remaining spill files
         for spill_file in &mut self.spill_files {
@@ -436,7 +453,8 @@ impl<V: Clone + Send + Sync + 'static> PartitionedState<V> {
         Ok(result)
     }
 
-    /// Iterates over all entries without draining.
+    /// Iterates over all entries without draining, in the order their keys
+    /// were first inserted.
     ///
     /// Loads spilled partitions as needed.
     ///
@@ -444,17 +462,17 @@ impl<V: Clone + Send + Sync + 'static> PartitionedState<V> {
     ///
     /// Returns an error if loading from disk fails.
     pub fn iter_all(&mut self) -> std::io::Result<Vec<(Vec<Value>, V)>> {
-        let mut result = Vec::with_capacity(self.total_size());
+        let mut entries = Vec::with_capacity(self.total_size());
 
         for partition_idx in 0..self.num_partitions {
             let partition = self.get_partition_mut(partition_idx)?;
             for (serialized_key, entry) in partition.iter() {
                 let key = serialized_key.to_values(entry.num_key_columns)?;
-                result.push((key, entry.value.clone()));
+                entries.push((entry.first_seen, key, entry.value.clone()));
             }
         }
 
-        Ok(result)
+        Ok(in_first_seen_order(entries))
     }
 
     /// Cleans up all spill files.
@@ -468,7 +486,7 @@ impl<V: Clone + Send + Sync + 'static> PartitionedState<V> {
         self.partitions.clear();
         for _ in 0..self.num_partitions {
             self.spill_files.push(None);
-            self.partitions.push(Some(HashMap::new()));
+            self.partitions.push(Some(Partition::default()));
         }
         self.partition_sizes = vec![0; self.num_partitions];
     }
@@ -482,6 +500,16 @@ impl<V> Drop for PartitionedState<V> {
             self.manager.unregister_spilled_bytes(bytes);
         }
     }
+}
+
+/// The keys and values of `entries`, by their first-seen positions (which
+/// are distinct).
+fn in_first_seen_order<V>(mut entries: Vec<(u64, Vec<Value>, V)>) -> Vec<(Vec<Value>, V)> {
+    entries.sort_unstable_by_key(|(first_seen, _, _)| *first_seen);
+    entries
+        .into_iter()
+        .map(|(_, key, value)| (key, value))
+        .collect()
 }
 
 /// Hashes a key (vector of values) to a u64.
@@ -759,6 +787,45 @@ mod tests {
 
         // State should be empty
         assert_eq!(state.total_size(), 0);
+    }
+
+    /// Draining and iterating give the keys in the order they were first
+    /// inserted, across partitions, for a partition that went to disk and
+    /// came back, one still on disk, and a key whose value was replaced.
+    #[test]
+    fn drain_and_iter_give_first_insertion_order() {
+        let (_temp_dir, manager) = create_manager();
+        let mut state: PartitionedState<i64> =
+            PartitionedState::new(manager, 8, serialize_i64, deserialize_i64);
+        let order: Vec<i64> = (0..200).map(|i| (i * 67) % 200).collect();
+        for (round, &k) in order.iter().enumerate() {
+            state.insert(key(&[k]), k).unwrap();
+            if round % 25 == 0 {
+                state.spill_largest().unwrap();
+            }
+        }
+        // A replaced value keeps its key's place; a reloaded partition
+        // keeps the places of its keys.
+        state.insert(key(&[order[0]]), -1).unwrap();
+        *state
+            .get_or_insert_with(key(&[order[1]]), || unreachable!())
+            .unwrap() = -2;
+        state.spill_largest().unwrap();
+        assert!(state.spilled_count() > 0);
+
+        let mut want: Vec<i64> = order.clone();
+        want[0] = -1;
+        want[1] = -2;
+        let values = |entries: Vec<(Vec<Value>, i64)>| -> Vec<i64> {
+            entries.into_iter().map(|(_, value)| value).collect()
+        };
+        assert_eq!(values(state.iter_all().unwrap()), want);
+        state.spill_largest().unwrap();
+        assert_eq!(state.spilled_count(), 1);
+        let drained = state.drain_all().unwrap();
+        let keys: Vec<Vec<Value>> = drained.iter().map(|(k, _)| k.clone()).collect();
+        assert_eq!(keys, order.iter().map(|&k| key(&[k])).collect::<Vec<_>>());
+        assert_eq!(values(drained), want);
     }
 
     #[test]

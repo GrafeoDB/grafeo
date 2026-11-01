@@ -1342,6 +1342,13 @@ impl CypherTranslator {
             result = wrap_filter(result, predicate);
         }
 
+        // An empty range (`*3..1`, `*..0`) matches no path, as openCypher
+        // defines it (TCK Match5, "empty interval"); the expand alone would
+        // read its upper bound as its lower one.
+        if max_hops.is_some_and(|max| max < min_hops) {
+            result = wrap_filter(result, LogicalExpression::Literal(Value::Bool(false)));
+        }
+
         let hop = crate::query::translators::common::PathHop {
             edge: edge_variable_for_filter.unwrap_or_default(),
             target: to_variable,

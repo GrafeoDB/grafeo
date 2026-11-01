@@ -11,9 +11,9 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use grafeo_common::types::{NodeId, PropertyKey, ReadView, Value};
+use grafeo_common::types::{NodeId, PropertyKey, ReadView, TemporalComparison, Value};
 use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind, Result};
-use grafeo_core::execution::operators::value_utils::compare_values;
+use grafeo_core::execution::operators::value_utils::values_equal;
 use grafeo_core::execution::operators::{HashKey, OperatorError};
 use grafeo_core::graph::GraphStore;
 
@@ -364,9 +364,13 @@ fn has_labels(
     Ok(true)
 }
 
-/// Whether `=` finds the stored value equal to the row's key.
+/// Whether the query's `=` finds the stored value equal to the row's key
+/// (`'05' = 5`, but not `'5.0' = 5`), with a local datetime read in UTC
+/// against a zoned one, as GQL reads it by default and as
+/// [`HashKey::for_equality`] files the keys: values it finds equal share a
+/// key there.
 fn equal(stored: &Value, value: &Value) -> bool {
-    compare_values(stored, value) == Some(std::cmp::Ordering::Equal)
+    values_equal(stored, value, TemporalComparison::default())
 }
 
 /// Creates or updates one edge per row between the nodes whose

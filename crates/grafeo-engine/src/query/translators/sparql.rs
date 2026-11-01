@@ -746,44 +746,34 @@ impl SparqlTranslator {
         }
     }
 
+    /// `DELETE WHERE { P }` is `DELETE { P } WHERE { P }` (SPARQL 1.1 Update
+    /// 3.1.3.3): every solution of the whole pattern, read before any
+    /// change, deletes its instance of each triple of P, a triple without
+    /// variables included, and no solution deletes nothing.
     fn translate_delete_where(&mut self, pattern: &ast::GraphPattern) -> Result<LogicalPlan> {
-        // DELETE WHERE uses the pattern both for matching and deletion
-        // First, translate the pattern to get bindings
-        let match_plan = self.translate_graph_pattern(pattern)?;
+        let where_plan = self.translate_graph_pattern(pattern)?;
 
-        // For DELETE WHERE, the WHERE pattern is the same as the delete template
-        // We extract triples from the pattern and create delete operations
-        let triples = Self::extract_triples_from_pattern(pattern);
-
-        // Build delete operators with the match plan as input
-        let mut ops = Vec::new();
-        for (triple, graph) in &triples {
+        let mut delete_templates = Vec::new();
+        for (triple, graph) in &Self::extract_triples_from_pattern(pattern) {
             let subject = self.translate_triple_term(&triple.subject)?;
             let predicate = self.translate_property_path(&triple.predicate)?;
             let object = self.translate_triple_term(&triple.object)?;
             // `GRAPH ?g` resolves to a "?"-prefixed name, which the executor rejects.
             let graph = graph.as_ref().map(|g| self.resolve_variable_or_iri(g));
-
-            ops.push(LogicalOperator::DeleteTriple(DeleteTripleOp {
+            delete_templates.push(TripleTemplate {
                 subject,
                 predicate,
                 object,
                 graph,
-                input: Some(Box::new(match_plan.clone())),
-            }));
+            });
         }
 
-        if ops.is_empty() {
-            Ok(LogicalPlan::new(match_plan))
-        } else if ops.len() == 1 {
-            Ok(LogicalPlan::new(
-                ops.into_iter().next().expect("single-element iterator"),
-            ))
-        } else {
-            Ok(LogicalPlan::new(LogicalOperator::Union(UnionOp {
-                inputs: ops,
-            })))
-        }
+        Ok(LogicalPlan::new(LogicalOperator::Modify(ModifyOp {
+            delete_templates,
+            insert_templates: Vec::new(),
+            where_clause: Box::new(where_plan),
+            graph: None,
+        })))
     }
 
     /// Extracts the triple templates of a DELETE WHERE pattern, each tagged with

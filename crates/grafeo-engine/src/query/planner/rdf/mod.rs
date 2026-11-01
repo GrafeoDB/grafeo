@@ -354,25 +354,6 @@ impl RdfPlanner {
         planned
     }
 
-    /// Records an absorbed profile entry for each operator of `op`, a
-    /// subtree the plan does not run (the pattern of a `DELETE WHERE` of
-    /// triples without variables, which deletes them as they are), in
-    /// post-order: PROFILE names them in the detail of the operator above.
-    fn record_unplanned(&self, op: &LogicalOperator) {
-        if !self.profiling.get() {
-            return;
-        }
-        for child in op.children() {
-            self.record_unplanned(child);
-        }
-        self.profile_entries
-            .borrow_mut()
-            .push(crate::query::profile::ProfileEntry::absorbed(
-                "Pattern",
-                op.display_label(),
-            ));
-    }
-
     /// Plans a single logical operator.
     fn plan_operator(
         &self,
@@ -2295,50 +2276,30 @@ impl RdfPlanner {
         })
     }
 
-    /// Plans a DELETE TRIPLE operator.
+    /// Plans a DELETE TRIPLE operator: with an input, the template's
+    /// instance for each of its rows (none without a row, also for a
+    /// triple without variables), otherwise the triple of `DELETE DATA`.
     fn plan_delete_triple(
         &self,
         delete: &DeleteTripleOp,
     ) -> Result<(Box<dyn Operator>, Vec<String>, Vec<LogicalType>)> {
-        // Check if this is a pattern-based delete (has variables in the template)
-        let has_variables = matches!(&delete.subject, TripleComponent::Variable(_))
-            || matches!(&delete.predicate, TripleComponent::Variable(_))
-            || matches!(&delete.object, TripleComponent::Variable(_));
-
-        if has_variables {
-            // Pattern-based deletion: need to query first, then delete each match
-            if let Some(ref input) = delete.input {
-                let (input_op, input_columns, _input_types) = self.plan_operator(input)?;
-
-                // Build column index map for variable substitution
-                let column_map: HashMap<String, usize> = input_columns
-                    .iter()
-                    .enumerate()
-                    .map(|(i, name)| (name.clone(), i))
-                    .collect();
-
-                let operator = Box::new(RdfDeletePatternOperator::new(
-                    self.writer.clone(),
-                    input_op,
-                    TripleOperands {
-                        subject: delete.subject.clone(),
-                        predicate: delete.predicate.clone(),
-                        object: delete.object.clone(),
-                        column_map,
-                        graph: delete.graph.clone(),
-                        terms: Arc::clone(&self.terms),
-                    },
-                ));
-
-                return Ok((operator, Vec::new(), Vec::new()));
-            }
+        if let Some(ref input) = delete.input {
+            let (input_op, input_columns, _input_types) = self.plan_operator(input)?;
+            let operator = Box::new(RdfDeletePatternOperator::new(
+                self.writer.clone(),
+                input_op,
+                TripleOperands {
+                    subject: delete.subject.clone(),
+                    predicate: delete.predicate.clone(),
+                    object: delete.object.clone(),
+                    column_map: column_map(&input_columns),
+                    graph: delete.graph.clone(),
+                    terms: Arc::clone(&self.terms),
+                },
+            ));
+            return Ok((operator, Vec::new(), Vec::new()));
         }
 
-        // Direct deletion with concrete terms: the pattern (of a `DELETE
-        // WHERE`) is the triple itself, which is deleted without reading it.
-        if let Some(input) = &delete.input {
-            self.record_unplanned(input);
-        }
         let subject = self.component_to_term(&delete.subject)?;
         let predicate = self.component_to_term(&delete.predicate)?;
         let object = self.component_to_term(&delete.object)?;

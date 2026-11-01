@@ -268,28 +268,22 @@ internal static class ValueConverter
             return new GrafeoDecimal(decimalElement.GetString()!);
         }
 
-        // Check for temporal markers from grafeo-bindings-common
-        if (element.TryGetProperty("$timestamp_us", out var tsElement))
+        // Temporal tags from grafeo-bindings-common, each as the object's only
+        // key and with a value of its type, as the engine reads them: an object
+        // with another key, or a value of another type, stays a map
+        if (element.EnumerateObject().Count() == 1)
         {
-            var microseconds = tsElement.GetInt64();
-            var milliseconds = microseconds / 1000;
-            return DateTimeOffset.FromUnixTimeMilliseconds(milliseconds).UtcDateTime;
-        }
-        if (element.TryGetProperty("$date", out var dateElement))
-        {
-            return dateElement.GetString() ?? "";
-        }
-        if (element.TryGetProperty("$time", out var timeElement))
-        {
-            return timeElement.GetString() ?? "";
-        }
-        if (element.TryGetProperty("$duration", out var durElement))
-        {
-            return durElement.GetString() ?? "";
-        }
-        if (element.TryGetProperty("$zoned_datetime", out var zdtElement))
-        {
-            return zdtElement.GetString() ?? "";
+            if (element.TryGetProperty("$timestamp_us", out var tsElement)
+                && tsElement.ValueKind == JsonValueKind.Number
+                && tsElement.TryGetInt64(out var microseconds))
+            {
+                return DateTimeOffset.FromUnixTimeMilliseconds(microseconds / 1000).UtcDateTime;
+            }
+            foreach (var tag in new[] { "$date", "$time", "$duration", "$zoned_datetime" })
+            {
+                if (element.TryGetProperty(tag, out var text) && text.ValueKind == JsonValueKind.String)
+                    return text.GetString()!;
+            }
         }
 
         // Regular object

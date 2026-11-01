@@ -29,9 +29,11 @@ impl Session {
         let graph_store = Arc::clone(&store) as Arc<dyn GraphStore>;
         let graph_store_mut = Some(Arc::clone(&store) as Arc<dyn GraphBackend>);
         Self {
-            store: Some(store),
-            graph_store,
-            graph_store_mut,
+            stores: super::GraphStores {
+                root: Some(store),
+                graph_store,
+                graph_store_mut,
+            },
             catalog: cfg.catalog,
             rdf_store,
             transaction_manager: cfg.transaction_manager,
@@ -39,7 +41,7 @@ impl Session {
             current_transaction: parking_lot::Mutex::new(None),
             read_only_tx: parking_lot::Mutex::new(cfg.read_only),
             db_read_only: cfg.read_only,
-            identity: cfg.identity,
+            identity: Arc::new(cfg.identity),
             auto_commit: true,
             #[cfg(query_language)]
             plan_options: super::PlanOptions {

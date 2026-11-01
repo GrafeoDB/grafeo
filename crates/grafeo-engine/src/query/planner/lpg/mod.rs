@@ -322,6 +322,12 @@ pub struct Planner {
     /// one input row, or a shortest-path search for one (see
     /// [`Self::with_path_search_budget`]).
     path_search_budget: usize,
+    /// The session's part of the planning of the statement being planned,
+    /// so the body of a stored procedure it calls is planned as the same
+    /// statement run directly (see `plan_user_procedure`); `None` for a
+    /// planner built outside a session, which cannot call one.
+    #[cfg(stored_procedures)]
+    session_planning: Option<crate::session::SessionPlanning>,
 }
 
 impl Planner {
@@ -367,6 +373,8 @@ impl Planner {
             limit_hint: std::cell::Cell::new(None),
             reachability_expands: std::cell::RefCell::new(Some(Vec::new())),
             path_search_budget: grafeo_core::execution::operators::DEFAULT_PATH_SEARCH_BUDGET,
+            #[cfg(stored_procedures)]
+            session_planning: None,
         }
     }
 
@@ -428,6 +436,8 @@ impl Planner {
             limit_hint: std::cell::Cell::new(None),
             reachability_expands: std::cell::RefCell::new(Some(Vec::new())),
             path_search_budget: grafeo_core::execution::operators::DEFAULT_PATH_SEARCH_BUDGET,
+            #[cfg(stored_procedures)]
+            session_planning: None,
         }
     }
 
@@ -685,6 +695,19 @@ impl Planner {
     #[must_use]
     pub fn with_projections(mut self, projections: crate::session::ProjectionRegistry) -> Self {
         self.projections = Some(projections);
+        self
+    }
+
+    /// Plans the body of a stored procedure the statement calls with a
+    /// planner built from `planning`, the session's, as the same statement
+    /// run directly is planned.
+    #[must_use]
+    #[cfg(stored_procedures)]
+    pub(crate) fn with_session_planning(
+        mut self,
+        planning: crate::session::SessionPlanning,
+    ) -> Self {
+        self.session_planning = Some(planning);
         self
     }
 

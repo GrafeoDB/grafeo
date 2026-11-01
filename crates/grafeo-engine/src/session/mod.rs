@@ -10,6 +10,7 @@
 //! their documentation has a `# Stability: Experimental` section: see
 //! <https://grafeo.dev/stability/>.
 
+mod planning;
 #[cfg(any(feature = "gql", feature = "cypher", feature = "sql-pgq"))]
 mod prepared;
 #[cfg(feature = "triple-store")]
@@ -36,7 +37,7 @@ use grafeo_core::graph::lpg::{Edge, Node};
 use grafeo_core::graph::rdf::RdfStore;
 use grafeo_core::graph::rowgroup::RowGroupStore;
 
-use crate::catalog::{Catalog, CatalogConstraintValidator};
+use crate::catalog::Catalog;
 use crate::config::GraphModel;
 use crate::database::QueryResult;
 use crate::database::direct;
@@ -44,6 +45,10 @@ use crate::database::direct;
 use crate::query::Executor;
 use crate::query::cache::QueryCache;
 use crate::transaction::TransactionManager;
+
+use planning::{GraphAccess, GraphStores};
+#[cfg(lpg_language)]
+pub(crate) use planning::{SessionPlanning, StatementPlanning};
 
 /// Storage key suffix for the implicit default graph within a schema.
 /// Auto-created by `CREATE SCHEMA` and auto-dropped by `DROP SCHEMA`.
@@ -86,6 +91,29 @@ struct StatementFocus<'a> {
 impl Drop for StatementFocus<'_> {
     fn drop(&mut self) {
         *self.session.statement_graph.lock() = self.previous.take();
+    }
+}
+
+/// How a statement writes (see [`Session::plan_write_kinds`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PlanWrites {
+    /// Whether it writes at all, in its own graph or in another one a
+    /// stored procedure body's `USE` names: it runs as a write, in a
+    /// transaction, refused where the session may not write.
+    any: bool,
+    /// Whether it writes the graph it runs on, which needs a write grant for
+    /// that graph: a write in its plan, or a call of a stored procedure whose
+    /// body, without a `USE` of its own, writes.
+    own_graph: bool,
+}
+
+impl From<bool> for PlanWrites {
+    /// A statement that writes its own graph, or nothing.
+    fn from(writes: bool) -> Self {
+        Self {
+            any: writes,
+            own_graph: writes,
+        }
     }
 }
 
@@ -294,16 +322,9 @@ pub(crate) enum TransactionStatements {
 /// tracks its own transaction state, so you can have multiple concurrent
 /// sessions without them interfering.
 pub struct Session {
-    /// The built-in store, which holds the named graphs, their indexes and
-    /// the search indexes; `None` for a session on a backend of one's own
-    /// (`GrafeoDB::with_store`), which has none of them. Read it through
-    /// [`root_store`](Self::root_store).
-    store: Option<Arc<RowGroupStore>>,
-    /// The default graph's store, as its reads read it.
-    graph_store: Arc<dyn GraphStore>,
-    /// The default graph's backend, which its writes apply in (`None` for a
-    /// read-only one).
-    graph_store_mut: Option<Arc<dyn GraphBackend>>,
+    /// The built-in store, which holds the named graphs (read it through
+    /// [`root_store`](Self::root_store)), and the default graph's stores.
+    stores: GraphStores,
     /// Schema and metadata catalog shared across sessions.
     catalog: Arc<Catalog>,
     /// RDF triple store (if RDF feature is enabled).
@@ -322,8 +343,9 @@ pub struct Session {
     /// Whether the database itself is read-only (set at open time, never changes).
     /// When true, `read_only_tx` is always true regardless of transaction flags.
     db_read_only: bool,
-    /// The identity bound to this session (determines permission level).
-    identity: crate::auth::Identity,
+    /// The identity bound to this session (determines permission level),
+    /// shared with the planning of its statements.
+    identity: Arc<crate::auth::Identity>,
     /// Whether the session is in auto-commit mode.
     auto_commit: bool,
     /// How the session's queries are planned.
@@ -431,16 +453,18 @@ impl Session {
         let graph_store = Arc::clone(&store) as Arc<dyn GraphStore>;
         let graph_store_mut = Some(Arc::clone(&store) as Arc<dyn GraphBackend>);
         Self {
-            store: Some(store),
-            graph_store,
-            graph_store_mut,
+            stores: GraphStores {
+                root: Some(store),
+                graph_store,
+                graph_store_mut,
+            },
             catalog: cfg.catalog,
             transaction_manager: cfg.transaction_manager,
             query_cache: cfg.query_cache,
             current_transaction: parking_lot::Mutex::new(None),
             read_only_tx: parking_lot::Mutex::new(cfg.read_only),
             db_read_only: cfg.read_only,
-            identity: cfg.identity,
+            identity: Arc::new(cfg.identity),
             auto_commit: true,
             #[cfg(query_language)]
             plan_options: PlanOptions {
@@ -491,13 +515,13 @@ impl Session {
     /// The session's built-in store: the default graph's store, which holds
     /// the named graphs; `None` on a backend of one's own.
     fn root_store(&self) -> Option<Arc<RowGroupStore>> {
-        self.store.as_ref().map(Arc::clone)
+        self.stores.root.as_ref().map(Arc::clone)
     }
 
     /// The named graph with storage key `key`: `None` when there is none, as
     /// on a backend of one's own, which holds no named graphs.
     fn named_graph(&self, key: &str) -> Option<Arc<RowGroupStore>> {
-        self.store.as_ref().and_then(|store| store.graph(key))
+        self.stores.named_graph(key)
     }
 
     /// The built-in store, for a feature only it has (`what`): an error on
@@ -607,9 +631,11 @@ impl Session {
         cfg: SessionConfig,
     ) -> Result<Self> {
         Ok(Self {
-            store: None,
-            graph_store: read_store,
-            graph_store_mut: write_store,
+            stores: GraphStores {
+                root: None,
+                graph_store: read_store,
+                graph_store_mut: write_store,
+            },
             catalog: cfg.catalog,
             #[cfg(feature = "triple-store")]
             rdf_store: Arc::new(RdfStore::new()),
@@ -618,7 +644,7 @@ impl Session {
             current_transaction: parking_lot::Mutex::new(None),
             read_only_tx: parking_lot::Mutex::new(cfg.read_only),
             db_read_only: cfg.read_only,
-            identity: cfg.identity,
+            identity: Arc::new(cfg.identity),
             auto_commit: true,
             #[cfg(query_language)]
             plan_options: PlanOptions {
@@ -792,31 +818,15 @@ impl Session {
     /// error when the user may not read it.
     #[cfg(feature = "gql")]
     fn focus_statement(&self, graph: Option<&str>) -> Result<Option<StatementFocus<'_>>> {
-        use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind};
-
         let Some(name) = graph else {
             return Ok(None);
         };
-        let default = name.eq_ignore_ascii_case("default");
-        if self.identity.has_grants()
-            && !default
-            && !self
-                .identity
-                .can_access_graph(name, crate::auth::Role::ReadOnly)
-        {
-            return Err(Error::from(QueryError::new(
-                QueryErrorKind::Semantic,
-                format!(
-                    "permission denied: no grant for graph '{name}' (user: {})",
-                    self.identity.user_id()
-                ),
-            )));
-        }
-        if !default && self.named_graph(&self.effective_graph_key(name)).is_none() {
-            return Err(Error::from(QueryError::invalid_reference(format!(
-                "Graph '{name}' does not exist"
-            ))));
-        }
+        planning::check_focus(
+            &self.identity,
+            &self.stores,
+            self.current_schema().as_deref(),
+            name,
+        )?;
         let previous = self.statement_graph.lock().replace(name.to_string());
         Ok(Some(StatementFocus {
             session: self,
@@ -827,8 +837,8 @@ impl Session {
     /// Returns the graph store for the currently active graph: the session's
     /// default `graph_store` when no graph is selected, otherwise the named
     /// graph's store from the root store. Writes go through a transaction's
-    /// recording (see [`recording_for`](Self::recording_for)), which logs
-    /// them and reports them to change data capture at commit.
+    /// recording (see [`GraphAccess::recording`]), which logs them and
+    /// reports them to change data capture at commit.
     pub(crate) fn active_store(&self) -> Arc<dyn GraphStore> {
         self.store_for_key(self.active_graph_storage_key().as_deref())
     }
@@ -836,52 +846,21 @@ impl Session {
     /// The graph store for the graph with storage key `key` (see
     /// [`active_store`](Self::active_store)).
     fn store_for_key(&self, key: Option<&str>) -> Arc<dyn GraphStore> {
-        match key {
-            None => Arc::clone(&self.graph_store),
-            Some(name) => match self.named_graph(name) {
-                Some(named_store) => named_store as Arc<dyn GraphStore>,
-                // Dropped meanwhile: no data, never the default graph's (the
-                // graph check before a statement reports the drop).
-                None => Arc::new(grafeo_core::graph::NullGraphStore) as Arc<dyn GraphStore>,
-            },
-        }
-    }
-
-    /// Returns the writable store for the active graph, if available.
-    ///
-    /// Returns `None` for read-only databases.
-    #[cfg(lpg_language)]
-    fn active_write_store(&self) -> Option<Arc<dyn GraphBackend>> {
-        self.write_store_for_key(self.active_graph_storage_key().as_deref())
-    }
-
-    /// The writable store for the graph with storage key `key` (see
-    /// [`active_write_store`](Self::active_write_store)).
-    fn write_store_for_key(&self, key: Option<&str>) -> Option<Arc<dyn GraphBackend>> {
-        match key {
-            None => self.graph_store_mut.as_ref().map(Arc::clone),
-            Some(name) => self
-                .named_graph(name)
-                // Dropped meanwhile: nothing to write to, never the default
-                // graph (see `store_for_key`).
-                .map(|named_store| named_store as Arc<dyn GraphBackend>),
-        }
+        self.stores.store_for_key(key)
     }
 
     /// The built-in store of the currently active graph (`None` on a
     /// backend of one's own): its indexes answer the index checks.
     fn active_lpg_store(&self) -> Option<Arc<RowGroupStore>> {
-        self.active_lpg_graph_key()
-            .and_then(|name| self.named_graph(&name))
-            .or_else(|| self.root_store())
+        self.stores
+            .lpg_store(self.active_lpg_graph_key().as_deref())
     }
 
     /// The storage key of the graph [`active_lpg_store`](Self::active_lpg_store)
     /// writes to: the active graph, or `None` (the default graph) when no
     /// graph of that name exists, which is where writes then go.
     fn active_lpg_graph_key(&self) -> Option<String> {
-        self.active_graph_storage_key()
-            .filter(|name| self.named_graph(name).is_some())
+        self.stores.written_key(self.active_graph_storage_key())
     }
 
     /// Resolves a graph name to a built-in store: `None` and `"default"`
@@ -894,31 +873,6 @@ impl Session {
             }
             _ => self.root_store(),
         }
-    }
-
-    /// Where a writer of the open transaction writes the graph with storage
-    /// key `key` (`None` for the default graph) and records its writes:
-    /// the graph's store and the transaction's changes in it. `None` outside
-    /// a transaction, on a read-only external store, and for a named graph
-    /// that no longer exists.
-    ///
-    /// # Errors
-    ///
-    /// Fails when the transaction wrote the graph through another store: it
-    /// was dropped and created again since.
-    fn recording_for(
-        &self,
-        key: Option<&str>,
-    ) -> Result<Option<grafeo_core::execution::operators::Recording>> {
-        let Some(changes) = self.changes.lock().clone() else {
-            return Ok(None);
-        };
-        let Some(target) = self.write_store_for_key(key) else {
-            return Ok(None);
-        };
-        changes
-            .recording(&self.transaction_manager, key, target)
-            .map(Some)
     }
 
     /// Sets the session time zone: a UTC offset (`+01:00`, `-05:30`, `Z` or
@@ -1564,7 +1518,7 @@ impl Session {
             held,
             #[cfg(feature = "wal")]
             self.wal().map(|wal| &**wal),
-            self.store.as_ref(),
+            self.stores.root.as_ref(),
             &self.catalog,
             &self.transaction_manager,
         )?;
@@ -3613,9 +3567,10 @@ impl Session {
             return answer;
         }
 
-        let has_mutations = self.plan_writes(&optimized_plan.root);
+        let writes = self.plan_write_kinds(&optimized_plan.root);
+        let has_mutations = writes.any;
 
-        let result = self.with_auto_commit(has_mutations, || {
+        let result = self.with_auto_commit(writes, || {
             // Get transaction context for MVCC visibility
             let (viewing_epoch, transaction_id, _view_pin) = self.get_transaction_context()?;
 
@@ -4074,9 +4029,9 @@ impl Session {
             return answer;
         }
 
-        let has_mutations = self.plan_writes(&optimized_plan.root);
+        let writes = self.plan_write_kinds(&optimized_plan.root);
 
-        let result = self.with_auto_commit(has_mutations, || {
+        let result = self.with_auto_commit(writes, || {
             // Get transaction context for MVCC visibility
             let (viewing_epoch, transaction_id, _view_pin) = self.get_transaction_context()?;
 
@@ -4159,7 +4114,8 @@ impl Session {
         let optimizer = Optimizer::from_graph_store(&*active);
         let optimized_plan = optimizer.optimize(logical_plan)?;
 
-        let has_mutations = self.plan_writes(&optimized_plan.root);
+        let writes = self.plan_write_kinds(&optimized_plan.root);
+        let has_mutations = writes.any;
         if has_mutations {
             self.require_permission(crate::auth::StatementKind::Write)?;
         }
@@ -4167,7 +4123,7 @@ impl Session {
             return answer;
         }
 
-        let result = self.with_auto_commit(has_mutations, || {
+        let result = self.with_auto_commit(writes, || {
             // Get transaction context for MVCC visibility
             let (viewing_epoch, transaction_id, _view_pin) = self.get_transaction_context()?;
 
@@ -4241,7 +4197,8 @@ impl Session {
         let optimizer = Optimizer::from_graph_store(&*active);
         let optimized_plan = optimizer.optimize(logical_plan)?;
 
-        let has_mutations = self.plan_writes(&optimized_plan.root);
+        let writes = self.plan_write_kinds(&optimized_plan.root);
+        let has_mutations = writes.any;
         if has_mutations {
             self.require_permission(crate::auth::StatementKind::Write)?;
         }
@@ -4249,7 +4206,7 @@ impl Session {
             return answer;
         }
 
-        let result = self.with_auto_commit(has_mutations, || {
+        let result = self.with_auto_commit(writes, || {
             let (viewing_epoch, transaction_id, _view_pin) = self.get_transaction_context()?;
             let planner = self.create_planner_for_store(
                 Arc::clone(&active),
@@ -4326,12 +4283,13 @@ impl Session {
         let active = self.active_store();
         let optimizer = Optimizer::from_graph_store(&*active);
         let optimized_plan = optimizer.optimize(logical_plan)?;
-        let has_mutations = self.plan_writes(&optimized_plan.root);
+        let writes = self.plan_write_kinds(&optimized_plan.root);
+        let has_mutations = writes.any;
         if has_mutations {
             self.require_permission(crate::auth::StatementKind::Write)?;
         }
 
-        let result = self.with_auto_commit(has_mutations, || {
+        let result = self.with_auto_commit(writes, || {
             let (viewing_epoch, transaction_id, _view_pin) = self.get_transaction_context()?;
             let planner = self.create_planner_for_store(
                 Arc::clone(&active),
@@ -4407,12 +4365,13 @@ impl Session {
         let optimizer = Optimizer::from_graph_store(&*active);
         let optimized_plan = optimizer.optimize(logical_plan)?;
 
-        let has_mutations = self.plan_writes(&optimized_plan.root);
+        let writes = self.plan_write_kinds(&optimized_plan.root);
+        let has_mutations = writes.any;
         if has_mutations {
             self.require_permission(crate::auth::StatementKind::Write)?;
         }
 
-        let result = self.with_auto_commit(has_mutations, || {
+        let result = self.with_auto_commit(writes, || {
             let (viewing_epoch, transaction_id, _view_pin) = self.get_transaction_context()?;
             let planner = self.create_planner_for_store(
                 Arc::clone(&active),
@@ -4546,12 +4505,13 @@ impl Session {
 
         // `GRAPH_TABLE (g ...)` reads the graph g, else the current graph.
         let active = self.statement_store(optimized_plan.graph.as_deref())?;
-        let has_mutations = self.plan_writes(&optimized_plan.root);
+        let writes = self.plan_write_kinds(&optimized_plan.root);
+        let has_mutations = writes.any;
         if has_mutations {
             self.require_permission(crate::auth::StatementKind::Write)?;
         }
 
-        let result = self.with_auto_commit(has_mutations, || {
+        let result = self.with_auto_commit(writes, || {
             let (viewing_epoch, transaction_id, _view_pin) = self.get_transaction_context()?;
             let planner = self.create_planner_for_store(
                 Arc::clone(&active),
@@ -4987,7 +4947,7 @@ impl Session {
             // built on) and the named graphs the commit wrote.
             let root: Option<Arc<dyn GraphBackend>> = match self.root_store() {
                 Some(root) => Some(root as Arc<dyn GraphBackend>),
-                None => self.graph_store_mut.as_ref().map(Arc::clone),
+                None => self.stores.graph_store_mut.as_ref().map(Arc::clone),
             };
             let written_stores: Vec<Arc<RowGroupStore>> = written
                 .iter()
@@ -5426,7 +5386,18 @@ impl Session {
     /// so its writes are recorded, logged and undone like any other.
     #[cfg(query_language)]
     fn plan_writes(&self, root: &crate::query::plan::LogicalOperator) -> bool {
-        root.has_mutations() || self.calls_writing_procedure(root, 0)
+        root.has_mutations() || self.procedure_writes(root, 0).any
+    }
+
+    /// How the statement with the plan `root` writes (see [`PlanWrites`]):
+    /// whether at all, as [`plan_writes`](Self::plan_writes) answers, and
+    /// whether in the graph it runs on.
+    #[cfg(query_language)]
+    fn plan_write_kinds(&self, root: &crate::query::plan::LogicalOperator) -> PlanWrites {
+        if root.has_mutations() {
+            return PlanWrites::from(true);
+        }
+        self.procedure_writes(root, 0)
     }
 
     /// Whether `query`, in `language` (as [`execute_language`](Self::execute_language)
@@ -5575,60 +5546,81 @@ impl Session {
         ))
     }
 
-    /// Whether `op` or an operator below it calls a stored procedure whose
-    /// body writes, directly or through the procedures it calls (up to a
-    /// depth that no procedure that runs reaches).
-    #[cfg(all(feature = "algos", feature = "gql"))]
+    /// How the stored procedures that `op` or an operator below it calls
+    /// write, directly or through the procedures they call (a call nested
+    /// deeper than any procedure that runs reaches is taken to write): at
+    /// all, and in the graph of the statement, which a body without a `USE`
+    /// of its own runs on.
+    #[cfg(stored_procedures)]
     #[cfg(query_language)]
-    fn calls_writing_procedure(&self, op: &crate::query::plan::LogicalOperator, depth: u8) -> bool {
+    fn procedure_writes(&self, op: &crate::query::plan::LogicalOperator, depth: u8) -> PlanWrites {
         use crate::query::plan::LogicalOperator;
-
-        /// Calls nested deeper than this are taken to write.
-        const MAX_DEPTH: u8 = 16;
 
         if let LogicalOperator::CallProcedure(call) = op
             // The planner looks a stored procedure up by its last name part.
             && let Some(name) = call.name.last()
             && let Some(procedure) = self.catalog.get_procedure(name)
         {
-            if depth >= MAX_DEPTH {
-                return true;
+            if depth >= crate::query::executor::user_procedure::MAX_CALL_DEPTH {
+                return PlanWrites::from(true);
             }
             // A body that does not translate fails when the call is planned.
-            return crate::query::translators::gql::translate(&procedure.body).is_ok_and(|body| {
-                body.root.has_mutations() || self.calls_writing_procedure(&body.root, depth + 1)
-            });
+            let Ok(body) = crate::query::translators::gql::translate(&procedure.body) else {
+                return PlanWrites::from(false);
+            };
+            let writes = if body.root.has_mutations() {
+                PlanWrites::from(true)
+            } else {
+                self.procedure_writes(&body.root, depth + 1)
+            };
+            // A body focused on a graph by its `USE` writes that graph, whose
+            // grant the call checks when it is planned.
+            return PlanWrites {
+                any: writes.any,
+                own_graph: writes.own_graph && body.graph.is_none(),
+            };
         }
-        op.children()
-            .into_iter()
-            .any(|child| self.calls_writing_procedure(child, depth))
+        let mut writes = PlanWrites::from(false);
+        for child in op.children() {
+            let child = self.procedure_writes(child, depth);
+            writes.any |= child.any;
+            writes.own_graph |= child.own_graph;
+            if writes.own_graph {
+                break;
+            }
+        }
+        writes
     }
 
     /// Without stored procedures, no call writes.
-    #[cfg(not(all(feature = "algos", feature = "gql")))]
+    #[cfg(not(stored_procedures))]
     #[cfg(query_language)]
-    fn calls_writing_procedure(
+    fn procedure_writes(
         &self,
         _op: &crate::query::plan::LogicalOperator,
         _depth: u8,
-    ) -> bool {
-        false
+    ) -> PlanWrites {
+        PlanWrites::from(false)
     }
 
     /// Wraps `body` in an automatic begin/commit when [`needs_auto_commit`]
     /// returns `true`. On error the transaction is rolled back.
     ///
     /// Every statement and direct write passes here: a write fails first
-    /// when the session may not write (see `check_writable`).
-    fn with_auto_commit<T, F>(&self, has_mutations: bool, body: F) -> Result<T>
+    /// when the session may not write (see `check_writable`). A statement
+    /// that writes only in other graphs, through stored procedure bodies
+    /// focused on them, needs no write grant for its own (see
+    /// [`PlanWrites`]).
+    fn with_auto_commit<T, F>(&self, writes: impl Into<PlanWrites>, body: F) -> Result<T>
     where
         F: FnOnce() -> Result<T>,
     {
-        self.check_graph_access(has_mutations)?;
-        if has_mutations {
+        let writes = writes.into();
+        self.check_graph_access(writes)?;
+        if writes.any {
             self.check_writable()?;
         }
-        self.in_statement_transaction(has_mutations, body)
+        self.in_statement_transaction(writes.any, body)
     }
 
     /// Runs `body`, one statement, as a transaction runs it: a write
@@ -5711,12 +5703,13 @@ impl Session {
     /// for it (see `check_active_graph` and `check_graph_grant`). Every
     /// statement checks this in `with_auto_commit`; `EXPLAIN`, which shows a
     /// plan without running it, and streamed queries check it themselves.
-    fn check_graph_access(&self, writes: bool) -> Result<()> {
+    fn check_graph_access(&self, writes: impl Into<PlanWrites>) -> Result<()> {
+        let writes = writes.into();
         self.check_active_graph()?;
-        if writes {
+        if writes.any {
             self.check_reads_the_present()?;
         }
-        self.check_graph_grant(writes)
+        self.check_graph_grant(writes.own_graph)
     }
 
     /// Fails while the session reads at an earlier epoch
@@ -5744,32 +5737,7 @@ impl Session {
     /// `USE GRAPH` makes, so every statement and direct call checks here. The
     /// default graph needs no grant, as for `USE GRAPH`.
     fn check_graph_grant(&self, writes: bool) -> Result<()> {
-        if !self.identity.has_grants() {
-            return Ok(());
-        }
-        let Some(graph) = self.effective_graph() else {
-            return Ok(());
-        };
-        if graph.eq_ignore_ascii_case("default") {
-            return Ok(());
-        }
-        let (role, access) = if writes {
-            (crate::auth::Role::ReadWrite, "write")
-        } else {
-            (crate::auth::Role::ReadOnly, "read")
-        };
-        if self.identity.can_access_graph(&graph, role) {
-            return Ok(());
-        }
-        Err(grafeo_common::utils::error::Error::from(
-            grafeo_common::utils::error::QueryError::new(
-                grafeo_common::utils::error::QueryErrorKind::Semantic,
-                format!(
-                    "permission denied: no {access} grant for graph '{graph}' (user: {})",
-                    self.identity.user_id()
-                ),
-            ),
-        ))
+        planning::check_graph_grant(&self.identity, self.effective_graph().as_deref(), writes)
     }
 
     /// Fails when the selected graph no longer exists, because another session
@@ -5980,7 +5948,7 @@ impl Session {
         if plan.explain {
             use crate::query::processor::{annotate_pushdown_hints, explain_result};
             return Some(
-                self.check_graph_access(self.plan_writes(&plan.root))
+                self.check_graph_access(self.plan_write_kinds(&plan.root))
                     .map(|()| {
                         let mut plan = plan.clone();
                         annotate_pushdown_hints(&mut plan.root, active.as_ref());
@@ -5991,8 +5959,8 @@ impl Session {
         if !plan.profile {
             return None;
         }
-        let has_mutations = self.plan_writes(&plan.root);
-        Some(self.with_auto_commit(has_mutations, || {
+        let writes = self.plan_write_kinds(&plan.root);
+        Some(self.with_auto_commit(writes, || {
             let (viewing_epoch, transaction_id, _view_pin) = self.get_transaction_context()?;
             let planner = self.create_planner_for_store(
                 Arc::clone(active),
@@ -6053,100 +6021,66 @@ impl Session {
         read_only: bool,
         open_cypher: bool,
     ) -> Result<crate::query::Planner> {
-        use crate::query::Planner;
-        use grafeo_core::execution::operators::{LazyValue, SessionContext, StatementClock};
-
-        // Capture store reference for lazy introspection (only computed if info()/schema() called).
-        let info_store = Arc::clone(&store);
-        // The counts as the statement sees the graph.
-        let info_view = if read_only {
-            ReadView::committed(viewing_epoch)
-        } else {
-            ReadView::new(viewing_epoch, transaction_id)
-        };
-        let schema_store = Arc::clone(&store);
-
-        let session_context = SessionContext {
-            current_schema: self.current_schema(),
-            current_graph: self.effective_graph(),
-            home_schema: self.home_schema.clone(),
-            home_graph: self.home_graph.clone(),
-            temporal_comparison: self.temporal_comparison(open_cypher),
-            // One instant for the statement, which every clock function reads.
-            statement_clock: StatementClock::now(),
-            db_info: LazyValue::new(move || Self::build_info_value(&*info_store, info_view)),
-            schema_info: LazyValue::new(move || Self::build_schema_value(&*schema_store)),
-        };
-
-        let write_store = self.active_write_store();
-        let planner_writes = write_store.is_some();
-
-        let mut planner = Planner::with_context(
-            Arc::clone(&store),
-            write_store,
-            Arc::clone(&self.transaction_manager),
-            transaction_id,
-            viewing_epoch,
-        )
-        .with_factorized_execution(self.plan_options.factorized_execution)
-        .with_shuffle_unordered(self.plan_options.shuffle_unordered)
-        .with_reachability(self.plan_options.reachability)
-        .with_path_search_budget(self.plan_options.path_search_budget)
-        .with_catalog(Arc::clone(&self.catalog))
-        .with_session_context(session_context)
-        .with_read_only(read_only);
-
-        // The graph the writes land in: the active one, or the default graph
-        // when no graph of that name exists.
-        if transaction_id.is_some() && planner_writes {
-            planner =
-                planner.with_recording(self.recording_for(self.active_lpg_graph_key().as_deref())?);
-        }
-
-        // Attach the active graph's built-in store, which the query reads, so
-        // CALL grafeo.search.* procedures reach its HNSW / BM25 indexes
-        // (#677); a backend of one's own has none.
-        if let Some(store) = self.active_lpg_store() {
-            planner = planner.with_lpg_store(store);
-        } else {
-            planner = planner.with_external_store();
-        }
-
-        {
-            planner = planner.with_projections(Arc::clone(&self.projections));
-        }
-
-        // Attach the constraint validator for schema enforcement and property size limits
-        planner = planner.with_validator(Arc::new(self.constraint_validator(
-            store,
-            viewing_epoch,
-            transaction_id,
-        )));
-
-        Ok(planner)
+        self.statement_planning(viewing_epoch, transaction_id, read_only, open_cypher)
+            .planner(store)
     }
 
-    /// The checks for writes to `store`, the active graph's: the catalog's
-    /// schema and constraints (the node and edge types of the session's
-    /// schema), the closed graph type the graph is bound to, and the
-    /// property size limit.
-    fn constraint_validator(
+    /// How the planner of the statement being run is built (see
+    /// [`StatementPlanning`]): on the active graph, at `viewing_epoch` in
+    /// the transaction `transaction_id`, with the session's settings now.
+    #[cfg(lpg_language)]
+    fn statement_planning(
         &self,
-        store: Arc<dyn GraphStore>,
-        epoch: EpochId,
+        viewing_epoch: EpochId,
         transaction_id: Option<TransactionId>,
-    ) -> CatalogConstraintValidator {
-        let validator = CatalogConstraintValidator::new(Arc::clone(&self.catalog))
-            .with_store(store)
-            .with_max_property_size(self.max_property_size)
-            .with_transaction_context(epoch, transaction_id)
-            .with_schema(self.current_schema().as_deref());
-        let graph = self.active_graph_storage_key();
-        let validator =
-            validator.with_key_claims(Arc::clone(&self.transaction_manager), graph.as_deref());
-        match graph {
-            Some(graph) => validator.with_graph_name(&graph),
-            None => validator,
+        read_only: bool,
+        open_cypher: bool,
+    ) -> StatementPlanning {
+        let temporal_comparison = self.temporal_comparison(open_cypher);
+        StatementPlanning {
+            session: SessionPlanning {
+                access: self.graph_access(transaction_id.is_some()),
+                #[cfg(stored_procedures)]
+                identity: Arc::clone(&self.identity),
+                plan_options: self.plan_options,
+                projections: Arc::clone(&self.projections),
+                // A body is GQL: only an openCypher statement compares
+                // otherwise.
+                #[cfg(stored_procedures)]
+                gql_temporal_comparison: if open_cypher {
+                    self.temporal_comparison(false)
+                } else {
+                    temporal_comparison
+                },
+                #[cfg(stored_procedures)]
+                call_depth: 0,
+                viewing_epoch,
+                transaction_id,
+                read_only,
+            },
+            schema: self.current_schema(),
+            graph: self.effective_graph(),
+            home_schema: self.home_schema.clone(),
+            home_graph: self.home_graph.clone(),
+            temporal_comparison,
+            statement_clock: grafeo_core::execution::operators::StatementClock::now(),
+        }
+    }
+
+    /// What the statement being run writes through and what checks its
+    /// writes (see [`GraphAccess`]); the open transaction's changes only
+    /// `in_transaction`.
+    fn graph_access(&self, in_transaction: bool) -> GraphAccess {
+        GraphAccess {
+            stores: self.stores.clone(),
+            catalog: Arc::clone(&self.catalog),
+            transaction_manager: Arc::clone(&self.transaction_manager),
+            changes: if in_transaction {
+                self.changes.lock().clone()
+            } else {
+                None
+            },
+            max_property_size: self.max_property_size,
         }
     }
 
@@ -6173,8 +6107,10 @@ impl Session {
 
         self.check_reads_the_present()?;
         self.with_auto_commit(true, || {
+            let access = self.graph_access(true);
+            let schema = self.current_schema();
             let key = self.active_graph_storage_key();
-            let store = self.write_store_for_key(key.as_deref()).ok_or(
+            let store = access.stores.write_store_for_key(key.as_deref()).ok_or(
                 grafeo_common::utils::error::Error::Transaction(
                     grafeo_common::utils::error::TransactionError::ReadOnly,
                 ),
@@ -6183,10 +6119,8 @@ impl Session {
             // The graph the writes land in: the active one, or the default
             // graph when no graph of that name exists. The auto-commit opened
             // a transaction when none was open.
-            let graph = key
-                .as_deref()
-                .filter(|name| self.named_graph(name).is_some());
-            let recording = self.recording_for(graph)?.ok_or_else(|| {
+            let written = access.stores.written_key(key.clone());
+            let recording = access.recording(written.as_deref())?.ok_or_else(|| {
                 grafeo_common::utils::error::Error::Transaction(
                     grafeo_common::utils::error::TransactionError::InvalidState(
                         "a direct write runs in a transaction, and none is open".to_string(),
@@ -6194,8 +6128,10 @@ impl Session {
                 )
             })?;
             let writer = GraphWriter::new(store, recording).with_validator(Arc::new(
-                self.constraint_validator(
-                    self.store_for_key(key.as_deref()),
+                access.constraint_validator(
+                    access.stores.store_for_key(key.as_deref()),
+                    schema.as_deref(),
+                    key.as_deref(),
                     epoch,
                     transaction_id,
                 ),
@@ -8590,7 +8526,12 @@ mod tests {
                 .unwrap(),
             0
         );
-        assert!(session.active_write_store().is_none());
+        assert!(
+            session
+                .stores
+                .write_store_for_key(session.active_graph_storage_key().as_deref())
+                .is_none()
+        );
     }
 
     /// A transaction that resolved a graph before it was dropped (a
@@ -8612,7 +8553,8 @@ mod tests {
         let mut session = db.session();
         session.begin_transaction().unwrap();
         let recording = session
-            .recording_for(Some("trips"))
+            .graph_access(true)
+            .recording(Some("trips"))
             .unwrap()
             .expect("a recording in the graph");
         assert!(

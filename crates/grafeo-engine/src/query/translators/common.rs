@@ -2012,6 +2012,21 @@ fn branch_output_columns(op: &LogicalOperator) -> Option<Vec<Option<String>>> {
         LogicalOperator::Skip(skip) => branch_output_columns(&skip.input),
         LogicalOperator::Distinct(distinct) => branch_output_columns(&distinct.input),
         LogicalOperator::Filter(filter) => branch_output_columns(&filter.input),
+        // A procedure call a CALL body's `RETURN *` passes on: its YIELD
+        // columns, by alias or name. Without YIELD its columns are the
+        // procedure's, known only when it is planned.
+        LogicalOperator::CallProcedure(call) => call.yield_items.as_ref().map(|items| {
+            items
+                .iter()
+                .map(|item| {
+                    Some(
+                        item.alias
+                            .clone()
+                            .unwrap_or_else(|| item.field_name.clone()),
+                    )
+                })
+                .collect()
+        }),
         _ => None,
     }
 }

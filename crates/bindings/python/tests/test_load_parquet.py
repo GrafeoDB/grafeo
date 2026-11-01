@@ -71,7 +71,9 @@ def test_load_data_reads_a_parquet_file(tmp_path, options, codec):
 def test_another_codec_is_refused_naming_it(tmp_path, compression):
     path, codecs = write_people(tmp_path, compression=compression)
     assert codecs == {compression.upper()}
-    # The build has Snappy only: gzip is flate2 in the message.
-    named = {"zstd": "zstd", "gzip": "flate2"}[compression]
-    with pytest.raises(grafeo.GrafeoError, match=named):
+    # The error names the file's codec and the codecs this build reads
+    with pytest.raises(grafeo.GrafeoError) as refused:
         load_people(path)
+    message = str(refused.value)
+    assert f"compressed with {compression.upper()}" in message
+    assert "uncompressed and Snappy" in message

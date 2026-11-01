@@ -111,9 +111,10 @@ pub fn translate_with_bindings(
     Ok(plan)
 }
 
-/// `query` with an `EXPLAIN` or `PROFILE` that follows its prologue (`BASE`
-/// and `PREFIX` declarations) moved before it, or `None` when there is none:
-/// users write the prologue first, and the keyword is read at the start.
+/// `query` with an `EXPLAIN`, `EXPLAIN ANALYZE` or `PROFILE` that follows
+/// its prologue (`BASE` and `PREFIX` declarations) moved before it, or
+/// `None` when there is none: users write the prologue first, and the
+/// keyword is read at the start.
 fn explain_after_prologue(query: &str) -> Option<String> {
     let starts_with_word = |text: &str, word: &str| {
         text.get(..word.len())
@@ -137,11 +138,16 @@ fn explain_after_prologue(query: &str) -> Option<String> {
     let keyword = ["EXPLAIN", "PROFILE"]
         .into_iter()
         .find(|word| starts_with_word(rest, word))?;
-    Some(format!(
-        "{keyword} {}{}",
-        &query[..prologue_end],
-        &rest[keyword.len()..]
-    ))
+    let mut after = &rest[keyword.len()..];
+    // `EXPLAIN ANALYZE` moves as one: the `ANALYZE` left behind the
+    // prologue would start the query.
+    let keyword = if keyword == "EXPLAIN" && starts_with_word(after.trim_start(), "ANALYZE") {
+        after = &after.trim_start()["ANALYZE".len()..];
+        "EXPLAIN ANALYZE"
+    } else {
+        keyword
+    };
+    Some(format!("{keyword} {}{after}", &query[..prologue_end]))
 }
 
 /// Translator from SPARQL AST to LogicalPlan.

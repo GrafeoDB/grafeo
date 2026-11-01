@@ -145,41 +145,72 @@ impl ProfileEntry {
     }
 }
 
-/// Builds a `ProfileNode` tree from the logical plan and a list of
-/// [`ProfileEntry`] items collected during physical planning.
+/// Builds a `ProfileNode` tree from the logical plan and the
+/// [`ProfileEntry`] items collected during physical planning, one for each
+/// logical operator.
 ///
 /// The entries must be in **post-order** (children before parents),
 /// matching the order in which `plan_operator()` processes operators.
 ///
-/// # Panics
+/// # Errors
 ///
-/// Panics if the iterator yields fewer entries than there are logical operators.
+/// An internal error when the entries are fewer or more than the logical
+/// operators: a planner path that replaced operators without recording
+/// their entries (or recorded too many). Such a profile would put each
+/// operator's numbers on the wrong line, so none is shown. An error, not a
+/// panic: PROFILE runs inside a library call, which must not unwind into
+/// the caller over a profile.
 pub fn build_profile_tree(
     logical: &LogicalOperator,
-    entries: &mut impl Iterator<Item = ProfileEntry>,
-) -> ProfileNode {
+    entries: Vec<ProfileEntry>,
+) -> grafeo_common::utils::error::Result<ProfileNode> {
+    let count = entries.len();
+    let mut entries = entries.into_iter();
+    let tree = tree_of(logical, &mut entries, count)?;
+    let left = entries.len();
+    if left > 0 {
+        return Err(mismatch(format!(
+            "{left} of the {count} profile entries are left over once each logical \
+             operator has one"
+        )));
+    }
+    Ok(tree)
+}
+
+/// The internal error of a profile whose entries do not match the plan.
+fn mismatch(detail: String) -> grafeo_common::utils::error::Error {
+    grafeo_common::utils::error::Error::Internal(format!(
+        "PROFILE cannot match the operators that ran to the plan ({detail}): please \
+         report this query"
+    ))
+}
+
+/// The tree of `logical` from `entries` (see [`build_profile_tree`]), of
+/// `count` entries in all.
+fn tree_of(
+    logical: &LogicalOperator,
+    entries: &mut std::vec::IntoIter<ProfileEntry>,
+    count: usize,
+) -> grafeo_common::utils::error::Result<ProfileNode> {
     // Recurse into children first (post-order)
-    let built: Vec<ProfileNode> = logical
+    let built = logical
         .children()
         .into_iter()
-        .map(|child| build_profile_tree(child, entries))
-        .collect();
+        .map(|child| tree_of(child, entries, count))
+        .collect::<grafeo_common::utils::error::Result<Vec<ProfileNode>>>()?;
 
     // Consume the entry for this node
-    let entry = entries.next().unwrap_or_else(|| {
-        panic!(
-            "profile entry count must match logical operator count: \
-             ran out of entries while building tree node for logical \
-             operator: {:?} (label='{}')",
-            std::mem::discriminant(logical),
-            logical.display_label(),
-        )
-    });
+    let entry = entries.next().ok_or_else(|| {
+        mismatch(format!(
+            "the {count} profile entries ran out at the operator '{}'",
+            logical.display_label()
+        ))
+    })?;
 
     // An operator planned as its input has no line: the input takes its
     // place.
     if entry.folded && built.len() == 1 {
-        return built.into_iter().next().expect("one child");
+        return Ok(built.into_iter().next().expect("one child"));
     }
 
     // An absorbed child ran as part of this operator: its children become
@@ -204,13 +235,13 @@ pub fn build_profile_tree(
         }
     }
 
-    ProfileNode {
+    Ok(ProfileNode {
         name: entry.name,
         label,
         stats: entry.stats,
         children,
         absorbed: entry.absorbed,
-    }
+    })
 }
 
 /// Formats a `ProfileNode` tree into a human-readable text representation
@@ -314,8 +345,7 @@ mod tests {
         return_stats.lock().time_ns = 400; // Includes child (250) + 150 own
         return_stats.lock().rows_out = 10;
 
-        let mut iter = vec![scan_entry, filter_entry, return_entry].into_iter();
-        let root = build_profile_tree(&plan, &mut iter);
+        let root = build_profile_tree(&plan, vec![scan_entry, filter_entry, return_entry]).unwrap();
 
         // Root is Return, its child is Filter, whose child is NodeScan.
         assert_eq!(root.name, "Return");
@@ -343,20 +373,57 @@ mod tests {
         let (return_entry, _) = ProfileEntry::new("Return", "n".to_string());
         scan_stats.lock().rows_out = 10;
 
-        let mut iter = vec![
-            scan_entry,
-            ProfileEntry::folded("true".to_string()),
-            return_entry,
-        ]
-        .into_iter();
-        let root = build_profile_tree(&plan, &mut iter);
+        let root = build_profile_tree(
+            &plan,
+            vec![
+                scan_entry,
+                ProfileEntry::folded("true".to_string()),
+                return_entry,
+            ],
+        )
+        .expect("every entry is read, and one for each operator");
 
         assert_eq!(root.name, "Return");
         assert_eq!(root.children.len(), 1);
         let scan = &root.children[0];
         assert_eq!(scan.name, "NodeScan");
         assert_eq!(scan.stats.lock().rows_out, 10);
-        assert!(iter.next().is_none(), "every entry is read");
+    }
+
+    /// Fewer entries than operators (a planner path that records none for
+    /// the operators it replaces) or more is an internal error naming the
+    /// mismatch, not a panic: PROFILE runs inside a library call.
+    #[test]
+    fn entries_that_do_not_match_the_operators_are_an_internal_error() {
+        let plan = three_level_plan();
+        let (scan_entry, _) = ProfileEntry::new("NodeScan", "n:Person".to_string());
+        let (return_entry, _) = ProfileEntry::new("Return", "n".to_string());
+        let error = build_profile_tree(&plan, vec![scan_entry, return_entry])
+            .expect_err("two entries for three operators");
+        assert!(
+            matches!(&error, grafeo_common::utils::error::Error::Internal(_)),
+            "{error:?}"
+        );
+        let message = error.to_string();
+        assert!(
+            message.contains("the 2 profile entries ran out at the operator 'n'"),
+            "{message}"
+        );
+
+        let entries = ["NodeScan", "Filter", "Return", "Return"]
+            .into_iter()
+            .map(|name| ProfileEntry::new(name, String::new()).0)
+            .collect();
+        let error = build_profile_tree(&plan, entries).expect_err("four entries for three");
+        assert!(
+            matches!(&error, grafeo_common::utils::error::Error::Internal(_)),
+            "{error:?}"
+        );
+        let message = error.to_string();
+        assert!(
+            message.contains("1 of the 4 profile entries are left over"),
+            "{message}"
+        );
     }
 
     /// Sanity check for the formatted output produced by `profile_result`.
@@ -380,8 +447,7 @@ mod tests {
         filter_stats.lock().time_ns = 100;
         filter_stats.lock().rows_out = 3;
 
-        let mut iter = vec![scan_entry, filter_entry].into_iter();
-        let root = build_profile_tree(&plan, &mut iter);
+        let root = build_profile_tree(&plan, vec![scan_entry, filter_entry]).unwrap();
         assert_eq!(self_time_ns(&root), 0);
 
         let result = profile_result(&root, 1.23);

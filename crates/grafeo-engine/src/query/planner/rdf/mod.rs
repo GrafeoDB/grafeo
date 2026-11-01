@@ -338,6 +338,41 @@ impl RdfPlanner {
         }
     }
 
+    /// Plans `subquery`, the pattern of an `EXISTS` or `NOT EXISTS` in a
+    /// filter or an `OPTIONAL`'s condition, with profiling off: it is part
+    /// of an expression, with no node of its own in the logical tree PROFILE
+    /// walks, so its rows and time count in the operator that holds it.
+    /// Recording its entries would shift every later one onto the wrong
+    /// operator.
+    fn plan_exists_subquery(
+        &self,
+        subquery: &LogicalOperator,
+    ) -> Result<(Box<dyn Operator>, Vec<String>, Vec<LogicalType>)> {
+        let profiling = self.profiling.replace(false);
+        let planned = self.plan_operator(subquery);
+        self.profiling.set(profiling);
+        planned
+    }
+
+    /// Records an absorbed profile entry for each operator of `op`, a
+    /// subtree the plan does not run (the pattern of a `DELETE WHERE` of
+    /// triples without variables, which deletes them as they are), in
+    /// post-order: PROFILE names them in the detail of the operator above.
+    fn record_unplanned(&self, op: &LogicalOperator) {
+        if !self.profiling.get() {
+            return;
+        }
+        for child in op.children() {
+            self.record_unplanned(child);
+        }
+        self.profile_entries
+            .borrow_mut()
+            .push(crate::query::profile::ProfileEntry::absorbed(
+                "Pattern",
+                op.display_label(),
+            ));
+    }
+
     /// Plans a single logical operator.
     fn plan_operator(
         &self,
@@ -946,7 +981,7 @@ impl RdfPlanner {
         use crate::query::planner::common;
 
         let (left_op, left_columns, left_types) = self.plan_operator(input)?;
-        let (right_op, right_columns, _right_types) = self.plan_operator(subquery)?;
+        let (right_op, right_columns, _right_types) = self.plan_exists_subquery(subquery)?;
 
         // Use Anti for NOT EXISTS, Semi for EXISTS
         let (result_op, result_columns) = if is_negated {
@@ -990,7 +1025,7 @@ impl RdfPlanner {
         for conjunct in conjuncts {
             match self.extract_exists_pattern(conjunct) {
                 Some((subquery, negated)) => {
-                    let (op, columns, _) = self.plan_operator(subquery)?;
+                    let (op, columns, _) = self.plan_exists_subquery(subquery)?;
                     let (keys, subquery_columns) = columns
                         .iter()
                         .enumerate()
@@ -2299,7 +2334,11 @@ impl RdfPlanner {
             }
         }
 
-        // Direct deletion with concrete terms
+        // Direct deletion with concrete terms: the pattern (of a `DELETE
+        // WHERE`) is the triple itself, which is deleted without reading it.
+        if let Some(input) = &delete.input {
+            self.record_unplanned(input);
+        }
         let subject = self.component_to_term(&delete.subject)?;
         let predicate = self.component_to_term(&delete.predicate)?;
         let object = self.component_to_term(&delete.object)?;

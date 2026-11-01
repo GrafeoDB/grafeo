@@ -74,9 +74,16 @@ impl super::Planner {
                 && super::after_write::writes_pending(&agg.input))
             && Self::count_expand_chain(&agg.input).0 >= 2
             && self.is_simple_aggregate(agg)
-            && let Ok((op, cols)) = self.plan_factorized_aggregate(agg)
         {
-            return Ok((op, cols));
+            // The profile entries the attempt recorded go with it when it
+            // fails: the regular path below plans the input again and
+            // records its own, and a second set would shift every later
+            // entry onto the wrong operator.
+            let recorded = self.profile_entries.borrow().len();
+            match self.plan_factorized_aggregate(agg) {
+                Ok(planned) => return Ok(planned),
+                Err(_) => self.profile_entries.borrow_mut().truncate(recorded),
+            }
         }
         // Fall through to regular aggregate if factorized planning fails
 
@@ -655,6 +662,23 @@ impl super::Planner {
         // Get the base operator (before first expand)
         let first_expand = expands[0];
         let (base_op, base_columns) = self.plan_operator(&first_expand.input)?;
+        // The expands run inside the chain, with no operator of their own:
+        // PROFILE names each in the aggregate's detail, from the innermost
+        // up, as the post-order walk of the plan meets them.
+        let mut expand_nodes = Vec::with_capacity(expands.len());
+        let mut node = agg.input.as_ref();
+        while expand_nodes.len() < expands.len() {
+            let LogicalOperator::Expand(expand) = node else {
+                return Err(Error::Internal(
+                    "the factorized chain is not the aggregate's input".to_string(),
+                ));
+            };
+            expand_nodes.push(node);
+            node = &expand.input;
+        }
+        for expand in expand_nodes.into_iter().rev() {
+            self.record_absorbed_scan_entry("Expand", expand);
+        }
 
         let mut columns = base_columns.clone();
         let mut steps = Vec::new();

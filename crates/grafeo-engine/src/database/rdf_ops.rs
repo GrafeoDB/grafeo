@@ -102,7 +102,7 @@ impl GrafeoDB {
                 .with_path_search_budget(path_budget);
             let (_, entries) = planner.plan_profiled(&optimized_plan)?;
             use crate::query::processor::physical_explain_result;
-            return Ok(physical_explain_result(&optimized_plan, entries));
+            return physical_explain_result(&optimized_plan, entries);
         }
 
         // Everything else runs as in a session: an update in a transaction
@@ -295,7 +295,10 @@ impl GrafeoDB {
     /// one bulk write, while the caller holds commits off (`held`): their WAL
     /// records are written as a group that one commit marker closes, then
     /// the triples are inserted, a named graph created when it does not
-    /// exist (as replay creates it). Returns how many were new.
+    /// exist (as replay creates it). Without triples a named graph that does
+    /// not exist is created, empty, as `CREATE GRAPH` creates it: logged as
+    /// a WAL group of its own, so it is there after a reopen. Returns how
+    /// many were new.
     ///
     /// # Errors
     ///
@@ -308,6 +311,20 @@ impl GrafeoDB {
         graph: Option<&str>,
     ) -> Result<usize> {
         if triples.is_empty() {
+            if let Some(name) = graph
+                && self.rdf_store.graph(name).is_none()
+            {
+                crate::database::standalone::commit_rdf(
+                    grafeo_common::change::RdfGraphOp::Create {
+                        name: name.to_string(),
+                    },
+                    held,
+                    #[cfg(feature = "wal")]
+                    self.wal.as_deref(),
+                    &self.rdf_store,
+                    &self.transaction_manager,
+                )?;
+            }
             return Ok(0);
         }
         let changes = self.streaming_changes(held, false);

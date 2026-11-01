@@ -198,10 +198,8 @@ impl Session {
                     .with_deadline(deadline);
                 let _result = executor.execute(physical_plan.operator.as_mut())?;
                 let total_time_ms = start_time.elapsed().as_secs_f64() * 1000.0;
-                let profile_tree = crate::query::profile::build_profile_tree(
-                    &optimized_plan.root,
-                    &mut entries.into_iter(),
-                );
+                let profile_tree =
+                    crate::query::profile::build_profile_tree(&optimized_plan.root, entries)?;
                 return Ok(crate::query::profile::profile_result(
                     &profile_tree,
                     total_time_ms,

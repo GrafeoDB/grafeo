@@ -5970,8 +5970,7 @@ impl Session {
                 .with_read_counter(planner.read_counter());
             let _result = executor.execute(physical_plan.operator.as_mut())?;
             let total_time_ms = started.elapsed().as_secs_f64() * 1000.0;
-            let profile_tree =
-                crate::query::profile::build_profile_tree(&plan.root, &mut entries.into_iter());
+            let profile_tree = crate::query::profile::build_profile_tree(&plan.root, entries)?;
             Ok(crate::query::profile::profile_result(
                 &profile_tree,
                 total_time_ms,

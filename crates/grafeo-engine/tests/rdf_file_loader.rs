@@ -12,7 +12,14 @@
 //! - a file it cannot read, or that is not UTF-8;
 //! - a persistent database: closed and reopened, and crashed after the load
 //!   returned (the WAL replays it);
-//! - a load while another session's transaction is open.
+//! - a load while another session's transaction is open;
+//! - `load_rdf_text`: text loads as its file does, and a line that does not
+//!   parse in it inserts nothing;
+//! - `load_rdf_into` and `load_rdf_text` into a named graph hold what
+//!   `INSERT DATA { GRAPH <g> { ... } }` holds, and leave the default graph
+//!   alone; an empty graph name is refused; a crash after such a load
+//!   returned replays it into its graph;
+//! - SPARQL `LOAD` fails pointing to the loader.
 //!
 //! (A read-only or closed database refuses before reading the file: see
 //! `read_only_writes.rs` and `writes_after_close.rs`.)
@@ -31,9 +38,21 @@ use grafeo_engine::{GrafeoDB, RdfFormat};
 /// Every triple of the default graph, sorted, with blank node labels left
 /// out (two loads label them differently).
 fn triples(db: &GrafeoDB) -> Vec<String> {
+    triples_of(db, "SELECT ?s ?p ?o WHERE { ?s ?p ?o }")
+}
+
+/// Every triple of the named graph `graph`, as [`triples`] lists them.
+fn triples_in(db: &GrafeoDB, graph: &str) -> Vec<String> {
+    triples_of(
+        db,
+        &format!("SELECT ?s ?p ?o WHERE {{ GRAPH <{graph}> {{ ?s ?p ?o }} }}"),
+    )
+}
+
+fn triples_of(db: &GrafeoDB, query: &str) -> Vec<String> {
     use grafeo_common::types::rdf::Term;
     let mut rows: Vec<String> = db
-        .execute_sparql("SELECT ?s ?p ?o WHERE { ?s ?p ?o }")
+        .execute_sparql(query)
         .unwrap()
         .rows()
         .iter()
@@ -325,6 +344,144 @@ fn a_load_beside_an_open_transaction() {
     assert_eq!(db.rdf_store().len(), 5);
 }
 
+/// The named graph the tests load into.
+const PEOPLE_GRAPH: &str = "http://ex.org/graphs/people";
+
+/// A database with `ntriples` inserted into [`PEOPLE_GRAPH`] through
+/// INSERT DATA.
+fn inserted_into_people(ntriples: &str) -> GrafeoDB {
+    let db = GrafeoDB::new_in_memory();
+    db.execute_sparql(&format!(
+        "INSERT DATA {{ GRAPH <{PEOPLE_GRAPH}> {{ {ntriples} }} }}"
+    ))
+    .unwrap();
+    db
+}
+
+/// Text loads as its file does, in either format.
+#[test]
+fn text_loads_as_its_file_does() {
+    let db = GrafeoDB::new_in_memory();
+    assert_eq!(
+        db.load_rdf_text(TURTLE, RdfFormat::Turtle, None).unwrap(),
+        19
+    );
+    assert_eq!(triples(&db), triples(&inserted(TURTLE_AS_NTRIPLES)));
+
+    let db = GrafeoDB::new_in_memory();
+    assert_eq!(
+        db.load_rdf_text(NTRIPLES, RdfFormat::NTriples, None)
+            .unwrap(),
+        4
+    );
+    assert_eq!(triples(&db), triples(&inserted(NTRIPLES)));
+}
+
+/// A line of the text that does not parse inserts nothing and names its
+/// line.
+#[test]
+fn text_with_a_line_that_does_not_parse_loads_nothing() {
+    let db = GrafeoDB::new_in_memory();
+    let bad = "<http://ex.org/alix> <http://ex.org/name> \"Alix\" .\n\
+               <http://ex.org/gus> <http://ex.org/name> .\n";
+    let error = db
+        .load_rdf_text(bad, RdfFormat::NTriples, None)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("the text is no N-Triples"), "{error}");
+    assert!(error.contains('2'), "names line 2: {error}");
+    let error = db
+        .load_rdf_text(
+            "@prefix ex: <http://ex.org/> .\nex:alix ex:name",
+            RdfFormat::Turtle,
+            None,
+        )
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("the text is no Turtle"), "{error}");
+    assert_eq!(db.rdf_store().len(), 0);
+}
+
+/// A file or text loaded into a named graph holds what INSERT DATA into
+/// that graph holds, and the default graph stays empty; a second load adds
+/// nothing new.
+#[test]
+fn a_named_graph_holds_what_insert_data_into_it_holds() {
+    let dir = tempfile::tempdir().unwrap();
+    let expected = triples_in(&inserted_into_people(TURTLE_AS_NTRIPLES), PEOPLE_GRAPH);
+    assert_eq!(expected.len(), 19);
+
+    let db = GrafeoDB::new_in_memory();
+    let file = write(dir.path(), "people.ttl", TURTLE);
+    assert_eq!(
+        db.load_rdf_into(&file, None, Some(PEOPLE_GRAPH)).unwrap(),
+        19
+    );
+    assert_eq!(triples_in(&db, PEOPLE_GRAPH), expected);
+    assert_eq!(triples(&db), Vec::<String>::new(), "the default graph");
+    assert_eq!(db.rdf_store().len(), 0, "the default graph");
+    // A triple the graph holds is nothing new (the file's blank nodes are
+    // new ones on each load, as RDF scopes them to their document).
+    let city = "<http://ex.org/alix> <http://ex.org/city> \"Amsterdam\" .\n";
+    for new in [1, 0] {
+        assert_eq!(
+            db.load_rdf_text(city, RdfFormat::NTriples, Some(PEOPLE_GRAPH))
+                .unwrap(),
+            new
+        );
+    }
+    assert_eq!(triples_in(&db, PEOPLE_GRAPH).len(), 20);
+
+    let db = GrafeoDB::new_in_memory();
+    assert_eq!(
+        db.load_rdf_text(TURTLE, RdfFormat::Turtle, Some(PEOPLE_GRAPH))
+            .unwrap(),
+        19
+    );
+    assert_eq!(triples_in(&db, PEOPLE_GRAPH), expected);
+    // The default graph loads apart from it: the same triples are new there.
+    assert_eq!(
+        db.load_rdf_text(TURTLE, RdfFormat::Turtle, None).unwrap(),
+        19
+    );
+    assert_eq!(triples(&db), triples(&inserted(TURTLE_AS_NTRIPLES)));
+    assert_eq!(triples_in(&db, PEOPLE_GRAPH), expected);
+}
+
+/// A named graph needs a name: an empty one is refused before anything is
+/// read.
+#[test]
+fn an_empty_graph_name_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = GrafeoDB::new_in_memory();
+    let file = write(dir.path(), "people.nt", NTRIPLES);
+    for error in [
+        db.load_rdf_into(&file, None, Some("")).unwrap_err(),
+        db.load_rdf_text(NTRIPLES, RdfFormat::NTriples, Some(""))
+            .unwrap_err(),
+    ] {
+        assert!(error.to_string().contains("empty name"), "{error}");
+    }
+    assert_eq!(db.rdf_store().len(), 0);
+    assert_eq!(db.rdf_store().graph_names(), Vec::<String>::new());
+}
+
+/// SPARQL `LOAD` is not supported: its error names the loader to use.
+#[test]
+fn sparql_load_points_to_the_loader() {
+    let db = GrafeoDB::new_in_memory();
+    let error = db
+        .execute_sparql("LOAD <file:///data/people.ttl>")
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("LOAD is not supported"), "{error}");
+    assert!(
+        error.contains("load_rdf") && error.contains("load_rdf_text"),
+        "{error}"
+    );
+    assert!(!error.contains("  "), "no run of spaces: {error}");
+}
+
 /// A crash after the load returned: the reopen replays the WAL and holds
 /// the file's triples.
 #[cfg(all(feature = "wal", feature = "grafeo-file"))]
@@ -368,6 +525,65 @@ mod crash {
         assert_eq!(
             super::triples(&db),
             super::triples(&super::inserted(super::TURTLE_AS_NTRIPLES))
+        );
+        db.close().unwrap();
+    }
+
+    /// Tells the child process of the named graph crash where its database
+    /// is.
+    const GRAPH_PATH_VAR: &str = "GRAFEO_RDF_FILE_LOADER_GRAPH_CRASH_DIR";
+
+    /// A crash after a load into a named graph returned: the reopen replays
+    /// the triples into that graph, and those of text into the default
+    /// graph.
+    #[test]
+    fn a_named_graph_load_that_returned_survives_a_crash() {
+        use grafeo_engine::RdfFormat;
+
+        if let Some(dir) = std::env::var_os(GRAPH_PATH_VAR) {
+            let dir = PathBuf::from(dir);
+            let db = GrafeoDB::open(dir.join("people.grafeo")).unwrap();
+            let file = super::write(&dir, "people.ttl", super::TURTLE);
+            assert_eq!(
+                db.load_rdf_into(&file, None, Some(super::PEOPLE_GRAPH))
+                    .unwrap(),
+                19
+            );
+            assert_eq!(
+                db.load_rdf_text(super::NTRIPLES, RdfFormat::NTriples, None)
+                    .unwrap(),
+                4
+            );
+            // Crash: no close(), no checkpoint, no destructors.
+            std::process::exit(0);
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let status = child_process::run(
+            std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "crash::a_named_graph_load_that_returned_survives_a_crash",
+                    "--nocapture",
+                ])
+                .env(GRAPH_PATH_VAR, dir.path()),
+        )
+        .unwrap();
+        assert!(status.success(), "the child process failed");
+        assert!(
+            dir.path().join("people.grafeo.wal").exists(),
+            "the crash left the WAL for the reopen to replay"
+        );
+        let db = GrafeoDB::open(dir.path().join("people.grafeo")).unwrap();
+        assert_eq!(
+            super::triples_in(&db, super::PEOPLE_GRAPH),
+            super::triples_in(
+                &super::inserted_into_people(super::TURTLE_AS_NTRIPLES),
+                super::PEOPLE_GRAPH
+            )
+        );
+        assert_eq!(
+            super::triples(&db),
+            super::triples(&super::inserted(super::NTRIPLES))
         );
         db.close().unwrap();
     }

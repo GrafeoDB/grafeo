@@ -24,6 +24,8 @@ Add `--json` for machine-readable output. Exit code 1 when an error is found.
         `# Stability` section
     T7  in a crate with `autotests = false`, every test file is a `mod` of tests/main.rs or a
         `[[test]]` entry with a comment saying why, not both
+    T8  the Node.js package's platform folders, its `napi` targets and the release's build
+        matrix name the same platforms, and its manifest lists no platform packages
     D1  an added #[allow(...)] states a reason = "..."
     D2  no em or en dashes in added Markdown lines or code comments
     D3  no added references to private planning notes; no internal phase wording in docs
@@ -142,6 +144,7 @@ HINTS = {
     "T5": "add `rust-version.workspace = true` to the crate's [package]",
     "T6": "an experimental item has a `# Stability: Experimental` section and a row in docs/stability.md; a module the facade exports has a `# Stability` section",
     "T7": "declare a test file with `mod name;` in tests/main.rs; a separate `[[test]]` entry has a comment above it saying why it cannot be there",
+    "T8": "a platform needs its target in `napi.targets`, in the build matrix of release.yml, and a folder under npm/; the release adds the platform packages to the manifest (scripts/node-platform-deps.sh)",
     "D1": 'add reason = "..." naming the bound or invariant that makes it safe',
     "D2": "em or en dash; rewrite with a comma, colon or parentheses",
     "D3": "public text must stand on its own; restate the content or link a public issue",
@@ -468,6 +471,82 @@ def test_binary_findings(root: Path, files: list[str]) -> list[Finding]:
                         f"{lines[number + 1].strip()} has no comment saying why it is separate",
                     )
                 )
+    return findings
+
+
+# ------------------------------------------------------------------ Node.js package
+
+#: The folder under `npm/` of each target a release of the Node.js package builds.
+NODE_TARGET_FOLDERS = {
+    "x86_64-apple-darwin": "darwin-x64",
+    "aarch64-apple-darwin": "darwin-arm64",
+    "x86_64-pc-windows-msvc": "win32-x64-msvc",
+    "x86_64-unknown-linux-gnu": "linux-x64-gnu",
+    "aarch64-unknown-linux-gnu": "linux-arm64-gnu",
+    "aarch64-unknown-linux-musl": "linux-arm64-musl",
+}
+NODE_BUILD_JOB = re.compile(
+    r"^  build-node-native:\n(.*?)(?=^  \S|\Z)", re.MULTILINE | re.DOTALL
+)
+NODE_BUILD_TARGET = re.compile(r"^\s*(?:- )?target:\s*(\S+)", re.MULTILINE)
+
+
+def node_package_findings(root: Path, files: list[str]) -> list[Finding]:
+    """T8: a release builds, packs and lists the same platforms of the Node.js package.
+
+    The release adds the folders under `npm/` to the manifest it publishes, so a target
+    built without a folder never reaches users, and a folder not built is published empty.
+    The manifest in the repository lists none of them: they are not on npm until the
+    release, and `npm ci` refuses a manifest whose lockfile cannot name them.
+    """
+    rel = "crates/bindings/node/package.json"
+    manifest = read_text(root / rel)
+    if manifest is None:
+        return []
+    package = json.loads(manifest)
+    findings = []
+    if package.get("optionalDependencies"):
+        findings.append(finding("T8", rel, None, "lists optional dependencies"))
+    release = ".github/workflows/release.yml"
+    job = NODE_BUILD_JOB.search(read_text(root / release) or "")
+    built = set(NODE_BUILD_TARGET.findall(job[1])) if job else set()
+    targets = set(package.get("napi", {}).get("targets", []))
+    for target in sorted(targets - built):
+        findings.append(finding("T8", release, None, f"does not build {target}"))
+    for target in sorted(built - targets):
+        findings.append(finding("T8", rel, None, f"has no napi target {target}"))
+    for target in sorted((targets | built) - set(NODE_TARGET_FOLDERS)):
+        findings.append(finding("T8", rel, None, f"no known npm folder for {target}"))
+    prefix = "crates/bindings/node/npm/"
+    folders = {
+        file[len(prefix) : -len("/package.json")]
+        for file in files
+        if file.startswith(prefix)
+        and file.endswith("/package.json")
+        and file[len(prefix) :].count("/") == 1
+    }
+    wanted = {NODE_TARGET_FOLDERS[t] for t in targets if t in NODE_TARGET_FOLDERS}
+    for folder in sorted(wanted - folders):
+        findings.append(
+            finding("T8", f"{prefix}{folder}", None, "this folder is missing")
+        )
+    for folder in sorted(folders - wanted):
+        findings.append(
+            finding(
+                "T8", f"{prefix}{folder}", None, "no napi target builds this folder"
+            )
+        )
+    for folder in sorted(folders):
+        text = read_text(root / f"{prefix}{folder}/package.json") or "{}"
+        if json.loads(text).get("name") != f"@grafeo-db/js-{folder}":
+            findings.append(
+                finding(
+                    "T8",
+                    f"{prefix}{folder}/package.json",
+                    None,
+                    f"its name is not @grafeo-db/js-{folder}",
+                )
+            )
     return findings
 
 
@@ -819,6 +898,7 @@ def tree_findings(root: Path, metadata_arg: str | None) -> list[Finding]:
     findings = toolchain_findings(root) + text_findings(root, files)
     findings += stability_findings(root, files)
     findings += test_binary_findings(root, files)
+    findings += node_package_findings(root, files)
     if metadata_arg != "none" and (root / "Cargo.toml").exists():
         if metadata_arg:
             metadata = json.loads(Path(metadata_arg).read_text(encoding="utf-8"))
@@ -1342,7 +1422,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--json", action="store_true", help="print findings as JSON")
     commands = parser.add_subparsers(dest="command", required=True)
-    tree = commands.add_parser("tree", help="whole-repository rules (T1 to T7)")
+    tree = commands.add_parser("tree", help="whole-repository rules (T1 to T8)")
     tree.add_argument(
         "--metadata", help="cargo metadata JSON file, or 'none' to skip T1"
     )

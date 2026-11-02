@@ -164,7 +164,7 @@ jobs:
       - name: Build native module
         working-directory: crates/bindings/node
         run: |
-          npm install
+          npm ci
           npm run build
       - name: Run spec tests
         run: npx vitest run tests/spec/runners/node/spec-runner.test.mjs
@@ -281,7 +281,7 @@ jobs:
       - name: Run spec tests
         working-directory: tests/spec/runners/wasm
         run: |
-          npm install
+          npm ci
           npx vitest run
 
   # The spec tests on the rdf persona (SPARQL, RDF terms), which the edge build
@@ -315,7 +315,7 @@ jobs:
       - name: Run spec tests
         working-directory: tests/spec/runners/wasm
         run: |
-          npm install
+          npm ci
           npx vitest run
 
   # ── Full test matrices (gated by rust-check) ────────────────────
@@ -885,7 +885,7 @@ jobs:
 
       - name: Install dependencies
         working-directory: crates/bindings/node
-        run: npm install
+        run: npm ci
 
       - name: Build native module
         working-directory: crates/bindings/node
@@ -1299,6 +1299,26 @@ jobs:
 
       - uses: crate-ci/typos@v1.51.1
 
+  # The manifest of @grafeo-db/js as a release publishes it: the repository's leaves out
+  # its platform packages, so a mistake in adding them would ship a package with no
+  # native binaries, and the release is the only other place that step runs.
+  node-package:
+    name: Node.js Package Manifest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+      - name: Check the manifest a release publishes
+        working-directory: crates/bindings/node
+        run: bash "$GITHUB_WORKSPACE/scripts/node-platform-deps.sh" check
+      - name: Check the last published manifest
+        working-directory: crates/bindings/node
+        run: |
+          latest=$(npm view @grafeo-db/js version)
+          bash "$GITHUB_WORKSPACE/scripts/node-platform-deps.sh" published "$latest"
+
   # Repository policy (scripts/check_policy.py): crate boundaries from cargo metadata,
   # workflow toolchain pins that match rust-toolchain.toml and the MSRV, and the
   # public-text rules, plus the script's own tests. Rules on added lines run locally
@@ -1359,6 +1379,7 @@ jobs:
       - msrv
       - typos
       - policy
+      - node-package
     runs-on: ubuntu-latest
     steps:
       - name: Check required jobs

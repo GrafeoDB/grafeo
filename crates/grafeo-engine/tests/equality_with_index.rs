@@ -13,7 +13,7 @@
 //! rows with those of the filter itself.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test equality_with_index
+//! cargo test -p grafeo-engine --all-features --test main equality_with_index::
 //! ```
 
 use std::collections::{BTreeSet, HashMap};

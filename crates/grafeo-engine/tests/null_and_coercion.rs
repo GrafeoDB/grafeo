@@ -4,7 +4,7 @@
 //! T2-04: Type coercion (Int64 vs Float64, mixed aggregates)
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --features full --test null_and_coercion
+//! cargo test -p grafeo-engine --features full --test main null_and_coercion::
 //! ```
 
 use grafeo_common::types::Value;

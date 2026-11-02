@@ -9,7 +9,7 @@
 //! `n += <map>` takes any map (they were refused).
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test merge_set_labels
+//! cargo test -p grafeo-engine --all-features --test main merge_set_labels::
 //! ```
 
 #![cfg(all(feature = "gql", feature = "cypher"))]

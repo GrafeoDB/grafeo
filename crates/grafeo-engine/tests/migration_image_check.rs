@@ -25,8 +25,8 @@
 //! saying so (and, when the migration then installed its image, that too).
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --features full,testing-crash-injection \
-//!     --test migration_image_check
+//! cargo test -p grafeo-engine --all-features \
+//!     --test main migration_image_check::
 //! ```
 
 #![cfg(all(
@@ -172,7 +172,6 @@ fn image_check_child() {
 #[cfg(feature = "testing-crash-injection")]
 #[test]
 fn a_migration_whose_image_lost_rows_fails_and_keeps_the_old_file() {
-    use std::process::Command;
     use std::time::{Duration, Instant};
 
     use grafeo_common::testing::child_process;
@@ -242,8 +241,7 @@ fn a_migration_whose_image_lost_rows_fails_and_keeps_the_old_file() {
             let (path, flag) = (path.clone(), flag.clone());
             std::thread::spawn(move || {
                 child_process::output(
-                    Command::new(std::env::current_exe().unwrap())
-                        .args(["--exact", "image_check_child", "--nocapture"])
+                    grafeo_common::child_test!("image_check_child")
                         .env(PATH_VAR, &path)
                         .env(POINT_VAR, IMAGE_WRITTEN)
                         .env(FLAG_VAR, &flag),

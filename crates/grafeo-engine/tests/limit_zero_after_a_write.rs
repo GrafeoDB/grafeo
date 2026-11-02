@@ -11,7 +11,7 @@
 //! reads).
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test limit_zero_after_a_write
+//! cargo test -p grafeo-engine --all-features --test main limit_zero_after_a_write::
 //! ```
 
 #![cfg(all(feature = "gql", feature = "cypher"))]

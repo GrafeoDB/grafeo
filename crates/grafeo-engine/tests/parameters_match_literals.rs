@@ -9,7 +9,7 @@
 //! decimal is written with its point, in GQL only (Cypher has no decimal
 //! literal).
 //!
-//! cargo test -p grafeo-engine --all-features --test parameters_match_literals
+//! cargo test -p grafeo-engine --all-features --test main parameters_match_literals::
 
 #![cfg(all(feature = "gql", feature = "cypher"))]
 

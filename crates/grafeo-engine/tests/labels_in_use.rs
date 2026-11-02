@@ -14,7 +14,7 @@
 //! - a projection (the trait's default methods).
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test labels_in_use
+//! cargo test -p grafeo-engine --all-features --test main labels_in_use::
 //! ```
 
 #![cfg(all(feature = "gql", feature = "cypher"))]

@@ -17,7 +17,7 @@
 //! factorized count, which keeps the counts of earlier variables.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test factorized_aggregates_match_the_regular_path
+//! cargo test -p grafeo-engine --all-features --test main factorized_aggregates_match_the_regular_path::
 //! ```
 
 #![cfg(feature = "gql")]

@@ -5,12 +5,12 @@
 //! and filters and sums over the reopened values are exact.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test decimal_persistence
+//! cargo test -p grafeo-engine --all-features --test main decimal_persistence::
 //! ```
 
 #![cfg(all(feature = "gql", feature = "grafeo-file", feature = "wal"))]
 
-mod common;
+use crate::common;
 
 use std::path::Path;
 
@@ -98,7 +98,7 @@ fn decimals_survive_a_checkpoint_and_a_reopen() {
 #[test]
 fn decimals_survive_a_crash_and_a_wal_replay() {
     let (_dir, db) = common::replay::reopened_after_crash(
-        "decimals_survive_a_crash_and_a_wal_replay",
+        &grafeo_common::test_path!("decimals_survive_a_crash_and_a_wal_replay"),
         open,
         write_items,
     );

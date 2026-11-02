@@ -5,7 +5,7 @@
 //! of each person, not every person with every visit.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test later_match_comma_patterns
+//! cargo test -p grafeo-engine --all-features --test main later_match_comma_patterns::
 //! ```
 
 use grafeo_common::types::Value;

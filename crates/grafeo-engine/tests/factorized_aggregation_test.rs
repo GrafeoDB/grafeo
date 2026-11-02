@@ -6,7 +6,7 @@
 //! Requires the `cypher` feature (uses `execute_cypher` for graph setup).
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --features cypher --test factorized_aggregation_test
+//! cargo test -p grafeo-engine --all-features --test main factorized_aggregation_test::
 //! ```
 
 #![cfg(feature = "cypher")]

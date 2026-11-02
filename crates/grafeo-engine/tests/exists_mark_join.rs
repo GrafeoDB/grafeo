@@ -24,7 +24,7 @@
 //! In GQL and Cypher.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test exists_mark_join
+//! cargo test -p grafeo-engine --all-features --test main exists_mark_join::
 //! ```
 
 #![cfg(all(feature = "gql", feature = "cypher"))]

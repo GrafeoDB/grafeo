@@ -4,7 +4,7 @@
 //! commits, #411) and the session is left without a transaction.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --features full --test failed_commit_aborts
+//! cargo test -p grafeo-engine --features full --test main failed_commit_aborts::
 //! ```
 
 #![allow(missing_docs)]
@@ -125,9 +125,6 @@ fn failed_commit_discards_its_writes() {
 }
 
 #[cfg(all(feature = "wal", feature = "grafeo-file"))]
-mod common;
-
-#[cfg(all(feature = "wal", feature = "grafeo-file"))]
 mod persistent {
     use super::*;
     use crate::common::replay::reopened_after_crash;
@@ -158,7 +155,7 @@ mod persistent {
     #[test]
     fn failed_commit_is_not_recovered_from_wal() {
         let (_crashed_dir, crashed) = reopened_after_crash(
-            "persistent::failed_commit_is_not_recovered_from_wal",
+            &grafeo_common::test_path!("failed_commit_is_not_recovered_from_wal"),
             open,
             write,
         );

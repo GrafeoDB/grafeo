@@ -22,7 +22,7 @@
 //!
 //! Run with:
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test group_by_keys_beside_aggregates
+//! cargo test -p grafeo-engine --all-features --test main group_by_keys_beside_aggregates::
 //! ```
 
 use grafeo_common::types::{Date, Value};

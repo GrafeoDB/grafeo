@@ -10,7 +10,7 @@
 //! the optional part.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test optional_match_subquery_where
+//! cargo test -p grafeo-engine --all-features --test main optional_match_subquery_where::
 //! ```
 
 #![cfg(all(feature = "gql", feature = "cypher"))]

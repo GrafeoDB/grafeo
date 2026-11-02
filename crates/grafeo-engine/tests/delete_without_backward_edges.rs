@@ -9,8 +9,8 @@
 //! so these tests hold in a release build too (`cargo test --release`).
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test delete_without_backward_edges
-//! cargo test -p grafeo-engine --all-features --release --test delete_without_backward_edges
+//! cargo test -p grafeo-engine --all-features --test main delete_without_backward_edges::
+//! cargo test -p grafeo-engine --all-features --release --test main delete_without_backward_edges::
 //! ```
 
 #![cfg(feature = "gql")]

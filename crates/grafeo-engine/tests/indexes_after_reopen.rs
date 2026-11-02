@@ -9,13 +9,10 @@
 //! the same way, with `Sync` WAL durability: the tests run that open too.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test indexes_after_reopen
+//! cargo test -p grafeo-engine --all-features --test main indexes_after_reopen::
 //! ```
 
 #![cfg(all(feature = "gql", feature = "grafeo-file"))]
-
-#[cfg(feature = "wal")]
-mod common;
 
 use std::path::Path;
 
@@ -281,7 +278,7 @@ mod after_a_crash {
     #[test]
     fn indexes_survive_a_crash_before_any_checkpoint() {
         let (_dir, db) = reopened_after_crash(
-            "after_a_crash::indexes_survive_a_crash_before_any_checkpoint",
+            &grafeo_common::test_path!("indexes_survive_a_crash_before_any_checkpoint"),
             open,
             build,
         );
@@ -293,7 +290,7 @@ mod after_a_crash {
     #[test]
     fn indexes_survive_a_crash_before_any_checkpoint_read_only() {
         let (_dir, db) = reopened_after_crash(
-            "after_a_crash::indexes_survive_a_crash_before_any_checkpoint_read_only",
+            &grafeo_common::test_path!("indexes_survive_a_crash_before_any_checkpoint_read_only"),
             open_new_or_read_only,
             build,
         );
@@ -342,7 +339,9 @@ mod after_a_crash {
     #[test]
     fn indexes_survive_a_crash_of_a_synced_database_before_any_checkpoint() {
         let (dir, db) = reopened_after_crash(
-            "after_a_crash::indexes_survive_a_crash_of_a_synced_database_before_any_checkpoint",
+            &grafeo_common::test_path!(
+                "indexes_survive_a_crash_of_a_synced_database_before_any_checkpoint"
+            ),
             open_synced,
             build,
         );
@@ -356,7 +355,9 @@ mod after_a_crash {
     #[test]
     fn indexes_survive_a_crash_of_a_synced_database_after_a_checkpoint() {
         let (dir, db) = reopened_after_crash(
-            "after_a_crash::indexes_survive_a_crash_of_a_synced_database_after_a_checkpoint",
+            &grafeo_common::test_path!(
+                "indexes_survive_a_crash_of_a_synced_database_after_a_checkpoint"
+            ),
             open_synced,
             build_then_checkpoint_then_write,
         );
@@ -370,7 +371,7 @@ mod after_a_crash {
     #[test]
     fn indexes_take_the_nodes_replayed_after_a_checkpoint() {
         let (_dir, db) = reopened_after_crash(
-            "after_a_crash::indexes_take_the_nodes_replayed_after_a_checkpoint",
+            &grafeo_common::test_path!("indexes_take_the_nodes_replayed_after_a_checkpoint"),
             open,
             build_then_checkpoint_then_write,
         );
@@ -381,7 +382,9 @@ mod after_a_crash {
     #[test]
     fn indexes_take_the_nodes_replayed_after_a_checkpoint_read_only() {
         let (_dir, db) = reopened_after_crash(
-            "after_a_crash::indexes_take_the_nodes_replayed_after_a_checkpoint_read_only",
+            &grafeo_common::test_path!(
+                "indexes_take_the_nodes_replayed_after_a_checkpoint_read_only"
+            ),
             open_new_or_read_only,
             build_then_checkpoint_then_write,
         );
@@ -476,7 +479,7 @@ mod search_indexes {
         #[test]
         fn search_indexes_survive_a_crash_before_any_checkpoint() {
             let (_dir, db) = reopened_after_crash(
-                "search_indexes::after_a_crash::search_indexes_survive_a_crash_before_any_checkpoint",
+                &grafeo_common::test_path!("search_indexes_survive_a_crash_before_any_checkpoint"),
                 open,
                 build,
             );
@@ -487,7 +490,9 @@ mod search_indexes {
         #[test]
         fn search_indexes_survive_a_crash_before_any_checkpoint_read_only() {
             let (_dir, db) = reopened_after_crash(
-                "search_indexes::after_a_crash::search_indexes_survive_a_crash_before_any_checkpoint_read_only",
+                &grafeo_common::test_path!(
+                    "search_indexes_survive_a_crash_before_any_checkpoint_read_only"
+                ),
                 |path: &Path| {
                     if path.exists() {
                         open_read_only(path)

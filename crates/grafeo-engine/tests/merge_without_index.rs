@@ -22,7 +22,7 @@
 //! In GQL and Cypher.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test merge_without_index
+//! cargo test -p grafeo-engine --all-features --test main merge_without_index::
 //! ```
 
 #![cfg(all(feature = "gql", feature = "cypher"))]

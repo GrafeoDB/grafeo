@@ -3,7 +3,7 @@
 //! The decimals come in as parameters, so GQL and Cypher read the same values.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test decimal_values
+//! cargo test -p grafeo-engine --all-features --test main decimal_values::
 //! ```
 
 #![cfg(all(feature = "gql", feature = "cypher"))]

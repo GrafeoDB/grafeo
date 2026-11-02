@@ -9,7 +9,7 @@
 //! Microsoft Corporation.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test path_semantics
+//! cargo test -p grafeo-engine --all-features --test main path_semantics::
 //! ```
 
 use grafeo_common::types::Value;

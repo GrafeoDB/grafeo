@@ -14,7 +14,7 @@
 //!   the counts flip.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test label_node_estimates
+//! cargo test -p grafeo-engine --all-features --test main label_node_estimates::
 //! ```
 
 #![cfg(feature = "gql")]

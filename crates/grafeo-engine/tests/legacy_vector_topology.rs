@@ -12,7 +12,7 @@
 //! `:Document(embedding)` does not hold.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --features full --test legacy_vector_topology
+//! cargo test -p grafeo-engine --features full --test main legacy_vector_topology::
 //! ```
 
 #![cfg(all(

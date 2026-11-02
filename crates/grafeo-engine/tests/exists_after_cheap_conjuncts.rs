@@ -10,7 +10,7 @@
 //! an outgoing edge, so the subquery's WHERE is reached whenever it runs.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test exists_after_cheap_conjuncts
+//! cargo test -p grafeo-engine --all-features --test main exists_after_cheap_conjuncts::
 //! ```
 
 #![cfg(all(feature = "gql", feature = "cypher"))]

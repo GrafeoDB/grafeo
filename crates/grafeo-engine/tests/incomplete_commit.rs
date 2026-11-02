@@ -25,7 +25,7 @@
 //! one, with the `testing-statement-injection` commit hook:
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test incomplete_commit
+//! cargo test -p grafeo-engine --all-features --test main incomplete_commit::
 //! ```
 
 #![cfg(all(feature = "testing-statement-injection", feature = "gql"))]
@@ -38,8 +38,7 @@ use grafeo_common::testing::commit_hook::{
 use grafeo_common::types::{EdgeId, EpochId, NodeId, Value};
 use grafeo_engine::GrafeoDB;
 
-#[path = "common/started.rs"]
-mod started;
+use crate::common::started;
 
 use started::Started;
 

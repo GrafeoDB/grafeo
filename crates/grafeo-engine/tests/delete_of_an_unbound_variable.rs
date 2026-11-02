@@ -7,7 +7,7 @@
 //! already failed ("DELETE requires input"); it now names `w` as well.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test delete_of_an_unbound_variable
+//! cargo test -p grafeo-engine --all-features --test main delete_of_an_unbound_variable::
 //! ```
 
 #![cfg(all(feature = "gql", feature = "cypher"))]

@@ -10,7 +10,7 @@
 //! the snapshot reads, the counts and an algorithm.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test no_dangling_edges
+//! cargo test -p grafeo-engine --all-features --test main no_dangling_edges::
 //! ```
 
 #![cfg(feature = "gql")]
@@ -490,12 +490,8 @@ fn crash_child() {
 fn a_crash_between_the_commits_keeps_the_edge_with_its_ends() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("trips.grafeo");
-    let status = child_process::run(
-        std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "crash_child", "--nocapture"])
-            .env(PATH_VAR, &path),
-    )
-    .unwrap();
+    let status =
+        child_process::run(grafeo_common::child_test!("crash_child").env(PATH_VAR, &path)).unwrap();
     assert!(status.success(), "the child process failed");
 
     let db = persistent(&path);

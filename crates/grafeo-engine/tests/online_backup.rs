@@ -9,7 +9,7 @@
 //! should not wait gets 300 ms to finish.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test online_backup
+//! cargo test -p grafeo-engine --all-features --test main online_backup::
 //! ```
 
 #![cfg(all(
@@ -22,7 +22,6 @@
 
 use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::{Arc, mpsc};
 
 use grafeo_common::testing::child_process;
@@ -31,8 +30,7 @@ use grafeo_common::testing::crash::{CrashResult, with_crash_at, with_failure_at}
 use grafeo_common::types::{EpochId, Value};
 use grafeo_engine::GrafeoDB;
 
-#[path = "common/started.rs"]
-mod started;
+use crate::common::started;
 
 use started::Started;
 
@@ -294,8 +292,7 @@ const BACKED_UP: i32 = 4;
 /// or `None` if the backup completed.
 fn back_up_in_child(crash_point: usize, dir: &Path) -> Option<String> {
     let output = child_process::output(
-        Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "back_up_child", "--nocapture"])
+        grafeo_common::child_test!("back_up_child")
             .env(CRASH_POINT_VAR, crash_point.to_string())
             .env(DIR_VAR, dir),
     )
@@ -563,9 +560,7 @@ fn a_read_only_full_backup_holds_what_it_sees() {
     let path = dir.path().join("ghent.grafeo");
     let backups = dir.path().join("backups");
     let output = child_process::output(
-        Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "leave_commits_in_the_wal_child", "--nocapture"])
-            .env(LEAVE_WAL_PATH_VAR, &path),
+        grafeo_common::child_test!("leave_commits_in_the_wal_child").env(LEAVE_WAL_PATH_VAR, &path),
     )
     .unwrap();
     assert!(

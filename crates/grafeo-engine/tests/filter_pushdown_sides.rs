@@ -5,7 +5,7 @@
 //! rows are those of the filter where it is written, in GQL and Cypher.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test filter_pushdown_sides
+//! cargo test -p grafeo-engine --all-features --test main filter_pushdown_sides::
 //! ```
 
 #![cfg(all(feature = "gql", feature = "cypher"))]

@@ -9,7 +9,7 @@
 //! distinct values, not one run per outer row. In GQL and Cypher.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test exists_delim_join
+//! cargo test -p grafeo-engine --all-features --test main exists_delim_join::
 //! ```
 
 #![cfg(all(feature = "gql", feature = "cypher"))]

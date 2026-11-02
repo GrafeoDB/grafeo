@@ -7,7 +7,7 @@
 //! zero-match named delete does not create an empty named sub-store.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --features full --test named_graph_modify
+//! cargo test -p grafeo-engine --features full --test main named_graph_modify::
 //! ```
 
 #![allow(missing_docs)]

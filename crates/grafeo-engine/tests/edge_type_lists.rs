@@ -16,7 +16,7 @@
 //! created by CREATE, MERGE or INSERT gets one type, never alternatives.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test edge_type_lists
+//! cargo test -p grafeo-engine --all-features --test main edge_type_lists::
 //! ```
 
 #![cfg(all(feature = "gql", feature = "cypher"))]

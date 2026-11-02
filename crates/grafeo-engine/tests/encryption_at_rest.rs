@@ -239,8 +239,7 @@ const CHILD_KEY_VAR: &str = "GRAFEO_ENCRYPTION_AT_REST_KEY";
 /// the sidecar WAL holds him) and exits without `close()`.
 fn write_in_child_and_exit(path: &Path, key: Option<u8>) {
     let output = child_process::output(
-        std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "write_child", "--nocapture"])
+        grafeo_common::child_test!("write_child")
             .env(CHILD_PATH_VAR, path)
             .env(
                 CHILD_KEY_VAR,

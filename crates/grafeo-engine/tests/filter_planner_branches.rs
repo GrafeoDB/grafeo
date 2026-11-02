@@ -8,7 +8,7 @@
 //! and every BETWEEN ordering variant.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test filter_planner_branches
+//! cargo test -p grafeo-engine --all-features --test main filter_planner_branches::
 //! ```
 
 use grafeo_common::types::Value;

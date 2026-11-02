@@ -6,7 +6,7 @@
 //! nothing is checkpointed.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --features full --test named_graph_modify_durability
+//! cargo test -p grafeo-engine --features full --test main named_graph_modify_durability::
 //! ```
 
 #![allow(missing_docs)]
@@ -17,7 +17,7 @@
     feature = "sparql",
     feature = "triple-store"
 ))]
-mod common;
+use crate::common;
 
 #[cfg(all(
     feature = "wal",
@@ -45,7 +45,7 @@ mod durability {
     #[test]
     fn named_graph_modify_survives_reopen() {
         let (_dir, db) = reopened_after_crash(
-            "durability::named_graph_modify_survives_reopen",
+            &grafeo_common::test_path!("named_graph_modify_survives_reopen"),
             open,
             |db| {
                 let session = db.session();
@@ -94,7 +94,7 @@ mod durability {
     #[test]
     fn default_graph_modify_survives_reopen() {
         let (_dir, db) = reopened_after_crash(
-            "durability::default_graph_modify_survives_reopen",
+            &grafeo_common::test_path!("default_graph_modify_survives_reopen"),
             open,
             |db| {
                 let session = db.session();

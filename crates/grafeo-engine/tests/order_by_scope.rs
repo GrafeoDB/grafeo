@@ -10,7 +10,7 @@
 //! duplicates).
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test order_by_scope
+//! cargo test -p grafeo-engine --all-features --test main order_by_scope::
 //! ```
 
 #![cfg(all(feature = "gql", feature = "cypher"))]

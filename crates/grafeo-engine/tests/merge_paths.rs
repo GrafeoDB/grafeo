@@ -9,7 +9,7 @@
 //! refused.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test merge_paths
+//! cargo test -p grafeo-engine --all-features --test main merge_paths::
 //! ```
 
 #![cfg(all(feature = "gql", feature = "cypher"))]

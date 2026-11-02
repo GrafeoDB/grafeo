@@ -91,14 +91,23 @@ fn drop_graph_with_open_changes_is_refused() {
         "IF EXISTS spares only a graph that does not exist"
     );
     assert_eq!(refused(db.drop_graph("trips")), "GRAFEO-T001", "the API");
-    assert_eq!(
-        refused(writer.execute("DROP GRAPH trips")),
-        "GRAFEO-T001",
-        "the transaction that changed the graph"
-    );
     assert!(
         db.drop_graph("visits").unwrap(),
         "a graph no open transaction changed drops"
+    );
+
+    // In another transaction the statement queues, and its commit is refused.
+    let mut dropper = db.session();
+    dropper.begin_transaction().unwrap();
+    dropper.execute("DROP GRAPH trips").unwrap();
+    assert_eq!(
+        refused(dropper.commit()),
+        "GRAFEO-T001",
+        "a transaction's DROP GRAPH meets the check at its commit"
+    );
+    assert!(
+        !dropper.in_transaction(),
+        "the refused commit rolled it back"
     );
 
     writer.commit().unwrap();
@@ -120,10 +129,10 @@ fn drop_graph_with_open_changes_is_refused() {
     assert!(db.list_graphs().is_empty(), "{:?}", db.list_graphs());
 }
 
-/// Q11 A, in memory: DDL and graph commands inside a transaction take effect
-/// at once, and a rollback undoes the transaction's data but not them.
+/// In memory: a rollback undoes DDL and graph commands with the transaction's
+/// data (#727; Q11 A kept them until 0.6.2).
 #[test]
-fn ddl_in_a_rolled_back_transaction_takes_effect_and_stays() {
+fn ddl_in_a_rolled_back_transaction_leaves_nothing() {
     let db = GrafeoDB::new_in_memory();
     let mut session = db.session();
     session.begin_transaction().unwrap();
@@ -138,7 +147,7 @@ fn ddl_in_a_rolled_back_transaction_takes_effect_and_stays() {
 }
 
 /// The DDL of the rolled-back transaction in
-/// [`ddl_in_a_rolled_back_transaction_takes_effect_and_stays`].
+/// [`ddl_in_a_rolled_back_transaction_leaves_nothing`].
 const ROLLED_BACK_DDL: &[&str] = &[
     "CREATE GRAPH archive",
     "CREATE NODE TYPE Robot (name STRING NOT NULL, city STRING DEFAULT 'Berlin')",
@@ -146,32 +155,29 @@ const ROLLED_BACK_DDL: &[&str] = &[
     "CREATE CONSTRAINT robot_serial FOR (r:Robot) ON (r.serial) UNIQUE",
 ];
 
-/// What [`ROLLED_BACK_DDL`] made is there and works, and the rolled-back
-/// data is not.
+/// Nothing [`ROLLED_BACK_DDL`] made is there, and no rule of it refuses a write,
+/// and the rolled-back data is not there either.
 fn check_rolled_back_ddl(db: &GrafeoDB) {
-    assert_eq!(db.list_graphs(), ["archive"]);
+    assert!(db.list_graphs().is_empty(), "{:?}", db.list_graphs());
     assert!(names_in(&db.session()).is_empty(), "the data rolled back");
-    assert!(db.has_property_index("name"), "the index");
+    assert!(!db.has_property_index("name"), "the index");
     let names = |query: &str| -> Vec<Value> {
         rows(db, query)
             .into_iter()
             .map(|row| row[0].clone())
             .collect()
     };
-    assert_eq!(names("SHOW INDEXES"), [Value::from("robot_name")]);
-    assert_eq!(names("SHOW CONSTRAINTS"), [Value::from("robot_serial")]);
-    db.execute("INSERT (:Robot {name: 'Gus', serial: 3})")
-        .unwrap();
+    assert_eq!(names("SHOW INDEXES"), Vec::<Value>::new());
+    assert_eq!(names("SHOW CONSTRAINTS"), Vec::<Value>::new());
+    assert_eq!(names("SHOW NODE TYPES"), Vec::<Value>::new());
+    db.execute("INSERT (:Robot {serial: 3})").unwrap();
     assert_eq!(
         rows(db, "MATCH (r:Robot) RETURN r.city"),
-        [[Value::from("Berlin")]],
-        "the node type and its default"
+        [[Value::Null]],
+        "no node type and no default"
     );
-    let duplicate = db
-        .execute("INSERT (:Robot {name: 'Mia', serial: 3})")
-        .unwrap_err()
-        .to_string();
-    assert!(duplicate.contains("UNIQUE"), "the constraint: {duplicate}");
+    db.execute("INSERT (:Robot {serial: 3})")
+        .unwrap_or_else(|error| panic!("no constraint: {error}"));
 }
 
 #[cfg(all(
@@ -414,14 +420,23 @@ mod replay {
         );
 
         // The defaults work.
-        db.execute("INSERT (:City {name: 'Prague'})-[:ROUTE]->(:City {name: 'Berlin'})")
-            .unwrap();
+        db.execute("CREATE GRAPH checked TYPED travel").unwrap();
+        db.execute(
+            "USE GRAPH checked INSERT (:City {name: 'Prague'})-[:ROUTE]->(:City {name: 'Berlin'})",
+        )
+        .unwrap();
         assert_eq!(
-            single(&db, "MATCH (c:City {name: 'Prague'}) RETURN c.country"),
+            single(
+                &db,
+                "USE GRAPH checked MATCH (c:City {name: 'Prague'}) RETURN c.country"
+            ),
             Value::from("NL")
         );
         assert_eq!(
-            rows(&db, "MATCH ()-[r:ROUTE]->() RETURN r.km, r.toll"),
+            rows(
+                &db,
+                "USE GRAPH checked MATCH ()-[r:ROUTE]->() RETURN r.km, r.toll"
+            ),
             [[Value::Int64(88), Value::Bool(false)]],
             "an edge type's defaults, also of a property added later"
         );
@@ -649,10 +664,10 @@ mod replay {
         assert_eq!(names_in(&db.session()), ["Vincent"]);
     }
 
-    /// Q11 A after a crash: the DDL of a rolled-back transaction was logged
-    /// and comes back, and the transaction's data does not.
+    /// After a crash: the DDL of a rolled-back transaction was never logged, and
+    /// neither it nor the transaction's data comes back (#727).
     #[test]
-    fn ddl_in_a_rolled_back_transaction_survives_replay() {
+    fn ddl_in_a_rolled_back_transaction_does_not_come_back_in_replay() {
         let dir = tempfile::tempdir().unwrap();
         let path = db_path(&dir);
         crash_after("rolled_back_ddl", &path);

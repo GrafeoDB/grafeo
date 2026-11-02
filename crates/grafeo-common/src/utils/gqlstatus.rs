@@ -245,6 +245,7 @@ impl From<&super::error::Error> for GqlStatus {
             },
             Error::Transaction(t) => match t {
                 TransactionError::ReadOnly => GqlStatus::INVALID_TX_READ_ONLY,
+                TransactionError::ActiveTransaction(_) => GqlStatus::INVALID_TX_ACTIVE,
                 TransactionError::InvalidState(_) => GqlStatus::INVALID_TX_STATE,
                 TransactionError::Aborted
                 | TransactionError::Conflict

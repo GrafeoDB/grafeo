@@ -12,6 +12,7 @@
 //!
 //! This gives 10-100x speedups on aggregate queries.
 
+use super::OperatorError;
 use std::sync::Arc;
 
 use super::{FactorizedResult, LazyFactorizedChainOperator, Operator, OperatorResult};
@@ -105,7 +106,11 @@ impl FactorizedAggregate {
     /// For multiple aggregates on the same chunk, prefer using
     /// [`compute_with_multiplicities`](Self::compute_with_multiplicities) with
     /// precomputed multiplicities to avoid O(levels) recomputation per aggregate.
-    pub fn compute(&self, chunk: &FactorizedChunk) -> Value {
+    ///
+    /// # Errors
+    ///
+    /// A count past 64 bits is out of range (22003).
+    pub fn compute(&self, chunk: &FactorizedChunk) -> Result<Value, OperatorError> {
         // For aggregates that need multiplicities, compute them once
         let multiplicities = match self {
             Self::CountColumn { .. } | Self::Sum { .. } | Self::Avg { .. } => {
@@ -142,27 +147,32 @@ impl FactorizedAggregate {
     /// let count = FactorizedAggregate::count().compute_with_multiplicities(&chunk, Some(&mults));
     /// let sum = FactorizedAggregate::sum(0).compute_with_multiplicities(&chunk, Some(&mults));
     /// ```
+    ///
+    /// # Errors
+    ///
+    /// A count past 64 bits is out of range (22003).
     pub fn compute_with_multiplicities(
         &self,
         chunk: &FactorizedChunk,
         multiplicities: Option<&[usize]>,
-    ) -> Value {
-        match self {
-            Self::Count => Value::Int64(i64::try_from(chunk.count_rows()).unwrap_or(i64::MAX)),
+    ) -> Result<Value, OperatorError> {
+        let too_many = || OperatorError::numeric_out_of_range("a count of paths past 64 bits");
+        Ok(match self {
+            Self::Count => Value::Int64(i64::try_from(chunk.count_rows()).map_err(|_| too_many())?),
 
             Self::CountColumn { column_idx } => {
                 // Count non-null values at deepest level, weighted by multiplicity
                 if chunk.level_count() == 0 {
-                    return Value::Int64(0);
+                    return Ok(Value::Int64(0));
                 }
 
                 let deepest_idx = chunk.level_count() - 1;
                 let Some(deepest) = chunk.level(deepest_idx) else {
-                    return Value::Int64(0);
+                    return Ok(Value::Int64(0));
                 };
 
                 let Some(col) = deepest.column(*column_idx) else {
-                    return Value::Int64(0);
+                    return Ok(Value::Int64(0));
                 };
 
                 // Use provided multiplicities or compute them
@@ -180,7 +190,10 @@ impl FactorizedAggregate {
                     if let Some(value) = col.get_physical(phys_idx)
                         && !matches!(value, Value::Null)
                     {
-                        count = count.saturating_add(i64::try_from(*mult).unwrap_or(i64::MAX));
+                        count = i64::try_from(*mult)
+                            .ok()
+                            .and_then(|mult| count.checked_add(mult))
+                            .ok_or_else(too_many)?;
                     }
                 }
 
@@ -200,7 +213,7 @@ impl FactorizedAggregate {
             Self::Min { column_idx } => chunk.min_deepest(*column_idx).unwrap_or(Value::Null),
 
             Self::Max { column_idx } => chunk.max_deepest(*column_idx).unwrap_or(Value::Null),
-        }
+        })
     }
 
     /// Returns the output type for this aggregate.
@@ -280,10 +293,12 @@ impl FactorizedAggregateOperator {
             .iter()
             .map(|agg| {
                 let mut col = ValueVector::with_type(agg.output_type());
-                col.push_value(agg.compute_with_multiplicities(&factorized, Some(&multiplicities)));
-                col
+                col.push_value(
+                    agg.compute_with_multiplicities(&factorized, Some(&multiplicities))?,
+                );
+                Ok(col)
             })
-            .collect();
+            .collect::<Result<_, OperatorError>>()?;
 
         // Create single-row result chunk
         let mut chunk = DataChunk::new(output_cols);
@@ -408,7 +423,7 @@ mod tests {
         let chunk = create_test_factorized_chunk();
 
         let agg = FactorizedAggregate::count();
-        let result = agg.compute(&chunk);
+        let result = agg.compute(&chunk).unwrap();
 
         assert_eq!(result, Value::Int64(5));
     }
@@ -419,7 +434,7 @@ mod tests {
 
         // Sum of deepest level: 1 + 2 + 3 + 4 + 5 = 15
         let agg = FactorizedAggregate::sum(0);
-        let result = agg.compute(&chunk);
+        let result = agg.compute(&chunk).unwrap();
 
         assert_eq!(result, Value::Float64(15.0));
     }
@@ -430,7 +445,7 @@ mod tests {
 
         // Avg of deepest level: 15 / 5 = 3.0
         let agg = FactorizedAggregate::avg(0);
-        let result = agg.compute(&chunk);
+        let result = agg.compute(&chunk).unwrap();
 
         assert_eq!(result, Value::Float64(3.0));
     }
@@ -440,7 +455,7 @@ mod tests {
         let chunk = create_test_factorized_chunk();
 
         let agg = FactorizedAggregate::min(0);
-        let result = agg.compute(&chunk);
+        let result = agg.compute(&chunk).unwrap();
 
         assert_eq!(result, Value::Int64(1));
     }
@@ -450,7 +465,7 @@ mod tests {
         let chunk = create_test_factorized_chunk();
 
         let agg = FactorizedAggregate::max(0);
-        let result = agg.compute(&chunk);
+        let result = agg.compute(&chunk).unwrap();
 
         assert_eq!(result, Value::Int64(5));
     }
@@ -505,12 +520,12 @@ mod tests {
         // SUM at deepest level (each grandchild has multiplicity 1)
         // = 1 + 2 + 3 + 4 + 5 = 15
         let sum_agg = FactorizedAggregate::sum(0);
-        let sum_result = sum_agg.compute(&chunk);
+        let sum_result = sum_agg.compute(&chunk).unwrap();
         assert_eq!(sum_result, Value::Float64(15.0));
 
         // COUNT should be 5
         let count_agg = FactorizedAggregate::count();
-        let count_result = count_agg.compute(&chunk);
+        let count_result = count_agg.compute(&chunk).unwrap();
         assert_eq!(count_result, Value::Int64(5));
     }
 
@@ -519,10 +534,16 @@ mod tests {
         let chunk = FactorizedChunk::empty();
 
         assert_eq!(
-            FactorizedAggregate::count().compute(&chunk),
+            FactorizedAggregate::count().compute(&chunk).unwrap(),
             Value::Int64(0)
         );
-        assert_eq!(FactorizedAggregate::sum(0).compute(&chunk), Value::Null);
-        assert_eq!(FactorizedAggregate::min(0).compute(&chunk), Value::Null);
+        assert_eq!(
+            FactorizedAggregate::sum(0).compute(&chunk).unwrap(),
+            Value::Null
+        );
+        assert_eq!(
+            FactorizedAggregate::min(0).compute(&chunk).unwrap(),
+            Value::Null
+        );
     }
 }

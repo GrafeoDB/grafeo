@@ -52,6 +52,9 @@ pub struct CacheKey {
     /// Whether the plan keeps the statement's parameters, to be filled in on
     /// each call (a prepared plan), or holds no parameter.
     prepared: bool,
+    /// The planner rules the plan is made with (see
+    /// [`PlannerRules`](crate::query::optimizer::PlannerRules)).
+    rules: crate::query::optimizer::PlannerRules,
 }
 
 impl CacheKey {
@@ -64,6 +67,7 @@ impl CacheKey {
             schema: None,
             graph: None,
             prepared: false,
+            rules: crate::query::optimizer::PlannerRules::all(),
         }
     }
 
@@ -80,6 +84,7 @@ impl CacheKey {
             schema: None,
             graph,
             prepared: false,
+            rules: crate::query::optimizer::PlannerRules::all(),
         }
     }
 
@@ -98,7 +103,14 @@ impl CacheKey {
             schema,
             graph,
             prepared: false,
+            rules: crate::query::optimizer::PlannerRules::all(),
         }
+    }
+
+    /// The key of the same statement planned with `rules`.
+    #[must_use]
+    pub fn with_rules(self, rules: crate::query::optimizer::PlannerRules) -> Self {
+        Self { rules, ..self }
     }
 
     /// The key of the same statement's prepared plan: optimized once with

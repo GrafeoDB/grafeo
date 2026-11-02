@@ -67,6 +67,29 @@ pub(crate) fn choose_seek<'a>(
     by_property
 }
 
+/// [`choose_seek`], for a filter the `rules` allow a seek of: `id()` by
+/// [`IdSeek`](crate::query::optimizer::PlannerRule::IdSeek), a property by [`KeySeek`](crate::query::optimizer::PlannerRule::KeySeek).
+pub(crate) fn allowed_seek<'a>(
+    predicate: &'a LogicalExpression,
+    scan: &NodeScanOp,
+    store: &dyn GraphStore,
+    rules: crate::query::optimizer::PlannerRules,
+    after_a_write: bool,
+) -> Option<SeekChoice<'a>> {
+    choose_seek(
+        predicate,
+        scan,
+        |property| {
+            rules.has(crate::query::optimizer::PlannerRule::KeySeek)
+                && store.has_property_index(property)
+        },
+        after_a_write,
+    )
+    .filter(|seek| {
+        !matches!(seek.key, SeekKey::Id) || rules.has(crate::query::optimizer::PlannerRule::IdSeek)
+    })
+}
+
 /// Whether `conjunct` pins `variable` to the nodes a key selects: `id(v) = e`,
 /// or `v.p = e` with `p` indexed, or the `IN` form of either, where `e` reads
 /// only `input` (the variables of the rows the scan of `v` runs for, none
@@ -84,6 +107,32 @@ pub(crate) fn pins(
         value_variables(choice.value)
             .is_some_and(|variables| !variables.contains(variable) && variables.is_subset(input))
     })
+}
+
+/// The seek of a conjunct of `predicate` that pins `variable` to one value
+/// known without a row: `id(v) = e` or `v.p = e` with `p` indexed, where `e`
+/// reads no variable. An ID is preferred over a property.
+pub(crate) fn constant_seek<'a>(
+    predicate: &'a LogicalExpression,
+    variable: &str,
+    has_index: impl Fn(&str) -> bool,
+) -> Option<SeekChoice<'a>> {
+    let mut conjuncts = Vec::new();
+    split_conjuncts(predicate, &mut conjuncts);
+    let mut by_property = None;
+    for conjunct in conjuncts {
+        let Some(choice) = seek_of(conjunct, variable, &has_index) else {
+            continue;
+        };
+        if choice.list || !value_variables(choice.value).is_some_and(|names| names.is_empty()) {
+            continue;
+        }
+        match choice.key {
+            SeekKey::Id => return Some(choice),
+            SeekKey::Property(_) => by_property = by_property.or(Some(choice)),
+        }
+    }
+    by_property
 }
 
 /// The node scan a filter's seek replaces, with the filters between them.
@@ -131,7 +180,7 @@ pub(crate) fn checked_scan(filter: &FilterOp) -> Option<CheckedScan<'_>> {
     })
 }
 
-pub(super) fn split_conjuncts<'a>(
+pub(crate) fn split_conjuncts<'a>(
     expr: &'a LogicalExpression,
     out: &mut Vec<&'a LogicalExpression>,
 ) {
@@ -283,10 +332,11 @@ impl super::Planner {
         // A property index looks values up at the query's view; an ID is no
         // index.
         let after_a_write = !self.reads_the_store_as_planned();
-        let Some(seek) = choose_seek(
+        let Some(seek) = allowed_seek(
             &filter.predicate,
             scan,
-            |property| self.store.has_property_index(property),
+            self.store.as_ref(),
+            self.rules,
             after_a_write,
         )
         .filter(|seek| {

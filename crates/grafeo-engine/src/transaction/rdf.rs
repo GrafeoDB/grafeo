@@ -248,9 +248,20 @@ pub(crate) struct RdfWriter {
     /// The WAL a whole-graph operation is logged to, when the database logs.
     #[cfg(feature = "wal")]
     wal: Option<Arc<grafeo_storage::wal::Wal>>,
+    /// Whether whole-graph operations wait for the commit of a transaction the session
+    /// opened, as its other schema statements do.
+    queues_graph_ops: bool,
 }
 
 impl RdfWriter {
+    /// This writer, in a transaction a session opened: a whole-graph operation queues for
+    /// its commit.
+    #[cfg(rdf_language)]
+    pub(crate) fn queuing_graph_ops(mut self) -> Self {
+        self.queues_graph_ops = true;
+        self
+    }
+
     /// Borrowed, bounded pending reader for the native path operator. The
     /// adapter retains no store or manager and allocates no pending snapshot.
     pub(crate) fn path_overlay(&self) -> Arc<dyn RdfPathReadOverlay> {
@@ -274,6 +285,7 @@ impl RdfWriter {
             manager,
             #[cfg(feature = "wal")]
             wal,
+            queues_graph_ops: false,
         }
     }
 
@@ -400,6 +412,19 @@ impl RdfWriter {
         // passed, it is not held, checked against open changes or logged.
         if onto_itself(&op) {
             check(&self.store)?;
+            return Ok(());
+        }
+        if self.queues_graph_ops {
+            if !check(&self.store)? {
+                return Ok(());
+            }
+            let op = grafeo_common::change::StandaloneOp::RdfGraph(op);
+            for claim in crate::database::standalone::claims_of(&op) {
+                self.manager
+                    .record_key(self.changes.id(), claim)
+                    .map_err(OperatorError::from)?;
+            }
+            self.changes.queue_schema(op, None);
             return Ok(());
         }
         let held = crate::database::standalone::hold(&self.manager, true)?;
@@ -531,8 +556,19 @@ fn refuse_graph_op_with_open_changes(
     held: &CommitsHeld<'_>,
     op: &RdfGraphOp,
 ) -> Result<()> {
-    let written = manager
-        .open_change_sets(held)
+    refuse_graph_op_with_changes_in(&manager.open_change_sets(held), op)
+}
+
+/// Fails when one of `open` has RDF entries in a graph `op` changes.
+///
+/// # Errors
+///
+/// A write conflict naming the graph.
+pub(crate) fn refuse_graph_op_with_changes_in(
+    open: &[Arc<TransactionChanges>],
+    op: &RdfGraphOp,
+) -> Result<()> {
+    let written = open
         .iter()
         .find_map(|changes| changes.written_rdf_graph(|graph| changes_graph(op, graph)));
     match written {

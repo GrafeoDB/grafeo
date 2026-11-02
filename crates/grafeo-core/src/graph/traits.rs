@@ -35,6 +35,69 @@ use std::sync::Arc;
 /// The labels of a node, as [`GraphStore::node_labels`] returns them.
 pub type Labels = grafeo_common::change::Labels;
 
+/// The most nodes [`GraphStore::sampled_degree`] reads: a label of at most this many
+/// is read whole, so its 0 is known, where a larger label's may be a sample that missed.
+pub const DEGREE_SAMPLE_NODES: usize = 256;
+
+/// [`GraphStore::common_edges`] from the two lists: a store that cannot intersect
+/// them where they lie.
+pub(crate) fn common_edges_by_lists(
+    near_edges: Vec<(NodeId, EdgeId)>,
+    far_edges: Vec<(NodeId, EdgeId)>,
+) -> Result<(Vec<CommonEdge>, usize)> {
+    let read = near_edges.len() + far_edges.len();
+    let hash_near = near_edges.len() < far_edges.len();
+    let (hashed, walked) = if hash_near {
+        (near_edges, far_edges)
+    } else {
+        (far_edges, near_edges)
+    };
+    let mut by_node: std::collections::HashMap<NodeId, Vec<EdgeId>> =
+        std::collections::HashMap::with_capacity(hashed.len());
+    for (node, edge) in hashed {
+        by_node.entry(node).or_default().push(edge);
+    }
+    let mut common = Vec::new();
+    for (node, walked_edge) in walked {
+        for hashed_edge in by_node.get(&node).into_iter().flatten() {
+            let (near_edge, far_edge) = if hash_near {
+                (*hashed_edge, walked_edge)
+            } else {
+                (walked_edge, *hashed_edge)
+            };
+            common.push(CommonEdge {
+                node,
+                near_edge,
+                far_edge,
+            });
+        }
+    }
+    common.sort_unstable();
+    Ok((common, read))
+}
+
+/// One side of [`GraphStore::common_edges`]: a node's list of one hop.
+#[derive(Debug, Clone, Copy)]
+pub struct HopFrom<'a> {
+    /// The node.
+    pub node: NodeId,
+    /// The way the list goes.
+    pub direction: Direction,
+    /// The edge types it holds (every type when empty).
+    pub edge_types: &'a [ArcStr],
+}
+
+/// A node two lists reach, by one edge of each.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct CommonEdge {
+    /// The node.
+    pub node: NodeId,
+    /// The edge of the near list.
+    pub near_edge: EdgeId,
+    /// The edge of the far list.
+    pub far_edge: EdgeId,
+}
+
 /// The reads of one graph, each at an explicit [`ReadView`].
 ///
 /// Every read names who reads: a transaction at its snapshot, which sees
@@ -346,6 +409,45 @@ pub trait GraphStore: Send + Sync {
         view: ReadView,
     ) -> Result<Vec<(NodeId, EdgeId)>>;
 
+    /// The nodes both `near`'s and `far`'s lists reach, each with every pair of an
+    /// edge from either list, ordered by node and edges, and the entries read. The
+    /// rows of following `near` and then looking its far ends up in `far`'s list.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error of a read the store cannot do.
+    fn common_edges(
+        &self,
+        near: &HopFrom<'_>,
+        far: &HopFrom<'_>,
+        view: ReadView,
+    ) -> Result<(Vec<CommonEdge>, usize)> {
+        common_edges_by_lists(
+            self.edges(near.node, near.direction, near.edge_types, view)?,
+            self.edges(far.node, far.direction, far.edge_types, view)?,
+        )
+    }
+
+    /// The edges [`edges`](Self::edges) lists for `node` whose other end is
+    /// `other`, in the order it lists them: the closing hop of a cycle, which
+    /// knows the node it comes back to and needs no list of the others.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error of a read the store cannot do.
+    fn edges_between(
+        &self,
+        node: NodeId,
+        other: NodeId,
+        direction: Direction,
+        types: &[ArcStr],
+        view: ReadView,
+    ) -> Result<Vec<EdgeId>> {
+        let mut edges = self.edges(node, direction, types, view)?;
+        edges.retain(|(end, _)| *end == other);
+        Ok(edges.into_iter().map(|(_, edge)| edge).collect())
+    }
+
     /// Whether `view` sees an edge of `node` in `direction` of one of
     /// `types` (any type when empty), as [`edges`](Self::edges) would list
     /// one: an `EXISTS` of one edge needs no more than the first.
@@ -572,6 +674,53 @@ pub trait GraphStore: Send + Sync {
         false
     }
 
+    /// The mean count of `edge_type`'s edges in `direction` over a sample of
+    /// `label`'s nodes, as committed, for the planner to judge a hop: no open
+    /// transaction's writes count, and the same data gives the same value. `None`
+    /// for a store that cannot sample, a label without a node or a read that fails.
+    fn sampled_degree(&self, _label: &str, _edge_type: &str, _direction: Direction) -> Option<f64> {
+        None
+    }
+
+    /// The mean count of `on_types`' edges in `on_direction` at the ends a hop reaches:
+    /// over the edges of `via_types` in `via_direction` from a sample of `start_label`'s
+    /// nodes (of all nodes for `None`), as committed, each end counted as often as an edge
+    /// reaches it. So a hub many edges reach weighs what a path through them meets. A mean
+    /// of 0 stands only when every edge was read. `None` for a store that cannot sample, a
+    /// read that fails, or a 0 from part of the edges.
+    fn sampled_reached_degree(
+        &self,
+        start_label: Option<&str>,
+        via_types: &[&str],
+        via_direction: Direction,
+        on_types: &[&str],
+        on_direction: Direction,
+    ) -> Option<f64> {
+        let mut unlimited = u64::MAX;
+        self.sampled_reached_degree_within(
+            start_label,
+            via_types,
+            via_direction,
+            on_types,
+            on_direction,
+            &mut unlimited,
+        )
+    }
+
+    /// [`sampled_reached_degree`](Self::sampled_reached_degree) that spends the reads it
+    /// takes from `budget`, and reads nothing with none left: a value held costs nothing.
+    fn sampled_reached_degree_within(
+        &self,
+        _start_label: Option<&str>,
+        _via_types: &[&str],
+        _via_direction: Direction,
+        _on_types: &[&str],
+        _on_direction: Direction,
+        _budget: &mut u64,
+    ) -> Option<f64> {
+        None
+    }
+
     /// The nodes `view` sees whose `property` equals `value`, by ascending
     /// id.
     ///
@@ -624,6 +773,24 @@ pub trait GraphStore: Send + Sync {
         &self,
         _property: &str,
         _value: &Value,
+        _view: ReadView,
+    ) -> Result<Option<Vec<NodeId>>> {
+        Ok(None)
+    }
+
+    /// [`find_nodes_maybe_equal`](Self::find_nodes_maybe_equal), for a caller
+    /// that would rather not read a common key: `None` also when the index
+    /// holds more than `limit` candidates for `value`, known before any of them
+    /// is read.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error of a read the store cannot do.
+    fn find_few_nodes_maybe_equal(
+        &self,
+        _property: &str,
+        _value: &Value,
+        _limit: usize,
         _view: ReadView,
     ) -> Result<Option<Vec<NodeId>>> {
         Ok(None)

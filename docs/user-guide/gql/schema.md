@@ -213,6 +213,8 @@ CREATE GRAPH TYPE routes {
 }
 ```
 
+Several patterns of one edge type are one type, so they must declare the same properties. They may differ on one side only, as in `(:Post)-[:HAS_CREATOR]->(:Person), (:Comment)-[:HAS_CREATOR]->(:Person)`, whose sources are then `Post` and `Comment`. Patterns that differ on both sides are not supported yet, as the type would also accept the pairs no pattern states.
+
 ### Graph Type from Existing Graph (LIKE)
 
 Clone a graph type from an existing graph's bound type:
@@ -347,6 +349,8 @@ CREATE CONSTRAINT FOR (p:Person) ON (p.email) EXISTS
 ```
 
 ### Naming, Listing and Dropping Constraints
+
+A constraint over data that already breaks it is refused with `GRAFEO-V001`, naming the constraint and a value that breaks it.
 
 Give a constraint a name after `CREATE CONSTRAINT`; one created without a name is named after its label, properties and kind, such as `Person_email_unique`. A name can be used once: `CREATE CONSTRAINT IF NOT EXISTS name ...` does nothing when the name is taken. `SHOW CONSTRAINTS` lists the constraints with their name, kind, label and properties.
 

@@ -276,6 +276,20 @@ impl Inner {
         }
     }
 
+    /// Whether the index on `property` holds at most `limit` candidates for a
+    /// lookup of `value`; `false` without an index on `property`.
+    pub(super) fn property_candidates_within(
+        &self,
+        property: &str,
+        value: &Value,
+        limit: usize,
+    ) -> bool {
+        self.indexes
+            .property
+            .get(property)
+            .is_some_and(|index| index.candidates_within(value, limit))
+    }
+
     /// The nodes `read` sees whose `property` is `value`, through the
     /// property's index: the candidates the index holds for the value, each
     /// read again at the view. `None` without an index on `property`.

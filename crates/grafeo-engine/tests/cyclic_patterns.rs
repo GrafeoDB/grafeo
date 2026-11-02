@@ -247,3 +247,33 @@ fn a_sql_pgq_anonymous_node_is_not_a_user_variable() {
         vec![vec![1], vec![2], vec![2], vec![3], vec![3], vec![4]]
     );
 }
+
+/// The search's names are shared across the whole plan: two trees in one plan each close a cycle,
+/// so each needs a name of its own, also where a user variable is spelled like one of them. Each
+/// tree alone has the two rows of the 2-cycle 1-2.
+#[test]
+fn two_trees_in_one_plan_keep_their_closing_names_apart() {
+    let db = cycles();
+    for query in [
+        "MATCH (a)-[:K]->(b)-[:K]->(a) MATCH (c)-[:K]->(d)-[:K]->(c) RETURN count(*)",
+        "MATCH (a)-[:K]->(b)-[:K]->(a) MATCH (_cycle_end_0)-[:K]->(d)-[:K]->(_cycle_end_0) RETURN count(*)",
+        "MATCH (_cycle_end_0)-[:K]->(b)-[:K]->(_cycle_end_0) MATCH (c)-[:K]->(d)-[:K]->(c) RETURN count(*)",
+        "MATCH (a)-[:K]->(b), (b)-[:K]->(a), (c)-[:K]->(d), (d)-[:K]->(c) RETURN count(*)",
+    ] {
+        assert_eq!(rows(db.execute(query)), vec![vec![4]], "{query}");
+    }
+    assert_eq!(
+        rows(db.execute(
+            "MATCH (a)-[:K]->(b)-[:K]->(a) RETURN a.n AS n \
+             UNION ALL MATCH (_cycle_end_0)-[:K]->(b)-[:K]->(_cycle_end_0) RETURN b.n AS n"
+        )),
+        vec![vec![1], vec![1], vec![2], vec![2]]
+    );
+    assert_eq!(
+        rows(db.execute(
+            "MATCH (a)-[:K]->(b)-[:K]->(a) WHERE EXISTS { MATCH (a)-[:K]->(x)-[:K]->(a) } \
+             RETURN count(*)"
+        )),
+        vec![vec![2]]
+    );
+}

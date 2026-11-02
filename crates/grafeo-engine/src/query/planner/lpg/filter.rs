@@ -105,12 +105,18 @@ impl super::Planner {
             }
         }
 
+        // A hop that knows its target: this filter stays over it and decides
+        self.note_hop_target(filter);
+
         // Check zone maps for simple property predicates before scanning
         // If zone map says "definitely no matches", we can short-circuit.
         // Not below a mutation, nor after one (see `after_write`): zone maps
         // describe the store as it is before this query runs, not values the
         // query writes first.
         if !input_writes
+            && self
+                .rules
+                .has(crate::query::optimizer::PlannerRule::ZoneMaps)
             && self.reads_the_store_as_planned()
             && let Some(false) = self.check_zone_map_for_predicate(&filter.predicate, &filter.input)
         {
@@ -765,6 +771,12 @@ impl super::Planner {
         &self,
         filter: &FilterOp,
     ) -> Result<Option<(Box<dyn Operator>, Vec<String>)>> {
+        if !self
+            .rules
+            .has(crate::query::optimizer::PlannerRule::IndexLookup)
+        {
+            return Ok(None);
+        }
         // A scan without input, directly below or below filters that check
         // the scanned node alone (`MATCH (m {id: $id}) WHERE m:Post OR
         // m:Comment`): the lookup takes their place, and the nodes it finds
@@ -943,6 +955,12 @@ impl super::Planner {
         &self,
         filter: &FilterOp,
     ) -> Result<Option<(Box<dyn Operator>, Vec<String>)>> {
+        if !self
+            .rules
+            .has(crate::query::optimizer::PlannerRule::IndexLookup)
+        {
+            return Ok(None);
+        }
         // Only optimize if input is a simple NodeScan (not nested).
         let (scan_variable, scan_label) = match filter.input.as_ref() {
             LogicalOperator::NodeScan(scan) if scan.input.is_none() => {
@@ -1122,6 +1140,12 @@ impl super::Planner {
         &self,
         filter: &FilterOp,
     ) -> Result<Option<(Box<dyn Operator>, Vec<String>)>> {
+        if !self
+            .rules
+            .has(crate::query::optimizer::PlannerRule::IndexRange)
+        {
+            return Ok(None);
+        }
         // Only optimize if input is a simple NodeScan (not nested). The range
         // lookup reads the values at the query's view.
         let (scan_variable, scan_label) = match filter.input.as_ref() {
@@ -1439,8 +1463,12 @@ pub(crate) fn scan_hint(
     predicate: &LogicalExpression,
     scan: &NodeScanOp,
     store: &dyn GraphStore,
+    rules: crate::query::optimizer::PlannerRules,
 ) -> Option<PushdownHint> {
-    let has_index = |property: &str| store.has_property_index(property);
+    let has_index = |property: &str| {
+        rules.has(crate::query::optimizer::PlannerRule::IndexLookup)
+            && store.has_property_index(property)
+    };
     if scan.input.is_some() {
         return None;
     }
@@ -1468,6 +1496,7 @@ pub(crate) fn scan_hint(
     if let Some((_, property)) = between
         .filter(|(read, _)| read == variable)
         .or_else(|| range().filter(|(read, _)| read == variable))
+        .filter(|_| rules.has(crate::query::optimizer::PlannerRule::IndexRange))
     {
         return Some(PushdownHint::RangeScan { property });
     }

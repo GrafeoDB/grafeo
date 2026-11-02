@@ -4,7 +4,8 @@
 # Requires: cargo, python, node/npm, go, dotnet, dart
 
 param(
-    [string]$Only = ""
+    # An array, as an unquoted `-Only a,b` is one: a string would join it with spaces.
+    [string[]]$Only = @()
 )
 
 $ErrorActionPreference = "Continue"
@@ -19,10 +20,17 @@ function Write-Header($text) {
     Write-Host "========================================`n" -ForegroundColor Yellow
 }
 
+$suites = @("rust", "python", "node", "go", "csharp", "dart")
+$wanted = @($Only | ForEach-Object { $_ -split "," } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+$unknown = @($wanted | Where-Object { $suites -notcontains $_ })
+if ($unknown.Count -gt 0) {
+    Write-Host "Unknown suite: $($unknown -join ', '). Suites: $($suites -join ', ')" -ForegroundColor Red
+    exit 2
+}
+
 function Should-Run($name) {
-    if ($Only -eq "") { return $true }
-    $list = $Only -split ","
-    return $list -contains $name
+    if ($wanted.Count -eq 0) { return $true }
+    return $wanted -contains $name
 }
 
 # Determine library extension and cargo output name
@@ -185,6 +193,9 @@ if ($passed.Count -gt 0) {
 }
 if ($failures.Count -gt 0) {
     Write-Host "  FAILED: $($failures -join ', ')" -ForegroundColor Red
+    exit 1
+} elseif ($passed.Count -eq 0) {
+    Write-Host "  No suite ran" -ForegroundColor Red
     exit 1
 } else {
     Write-Host "`n  All spec tests passed!" -ForegroundColor Green

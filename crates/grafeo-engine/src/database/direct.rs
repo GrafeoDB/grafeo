@@ -693,6 +693,7 @@ impl GrafeoDB {
                 commit,
                 transaction,
                 changes,
+                &[],
                 grafeo_common::storage::log_record::Origin::Direct,
             ) {
                 Ok(written) => written,

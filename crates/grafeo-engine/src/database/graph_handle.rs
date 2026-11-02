@@ -134,7 +134,7 @@ impl GraphHandle<'_> {
     ///
     /// Returns an error if the graph no longer exists or the query fails.
     pub fn execute(&self, query: &str) -> Result<QueryResult> {
-        self.session()?.execute(query)
+        self.one_call_session()?.execute(query)
     }
 
     /// Runs a GQL query with parameters on this graph.
@@ -147,7 +147,7 @@ impl GraphHandle<'_> {
         query: &str,
         params: HashMap<String, Value>,
     ) -> Result<QueryResult> {
-        self.session()?.execute_with_params(query, params)
+        self.one_call_session()?.execute_with_params(query, params)
     }
 
     /// Runs a query in the named language (`"gql"`, `"cypher"`, ...) on this
@@ -163,7 +163,15 @@ impl GraphHandle<'_> {
         language: &str,
         params: Option<HashMap<String, Value>>,
     ) -> Result<QueryResult> {
-        self.session()?.execute_language(query, language, params)
+        self.one_call_session()?
+            .execute_language(query, language, params)
+    }
+
+    /// A session of this graph for one call.
+    fn one_call_session(&self) -> Result<crate::session::Session> {
+        let mut session = self.session()?;
+        session.last_for_one_call();
+        Ok(session)
     }
 
     fn check_exists(&self) -> Result<()> {

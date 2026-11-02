@@ -22,6 +22,7 @@
 pub mod accumulator;
 mod aggregate;
 mod apply;
+mod chain_counter;
 mod delim;
 mod distinct;
 mod eager;
@@ -33,6 +34,7 @@ mod factorized_filter;
 mod filter;
 mod functions;
 mod horizontal_aggregate;
+mod intersect_expand;
 mod join;
 mod label_count;
 mod leapfrog_join;
@@ -69,6 +71,7 @@ mod writer;
 pub use accumulator::{AggregateExpr, AggregateFunction, HashableValue};
 pub use aggregate::{HashAggregateOperator, SimpleAggregateOperator};
 pub use apply::ApplyOperator;
+pub use chain_counter::{CountedHop, MAX_COUNTED_DIFFERENT_HOPS, MiddleSum};
 pub use delim::{DelimBuffer, DelimReplayOperator, DelimValuesOperator};
 pub use distinct::DistinctOperator;
 pub use eager::{EagerOperator, OneRowAtATimeOperator};
@@ -94,6 +97,7 @@ pub use functions::{
     function_names, function_support, regex_pattern_error,
 };
 pub use horizontal_aggregate::{EntityKind, HorizontalAggregateOperator};
+pub use intersect_expand::{IntersectExpandOperator, IntersectSide};
 pub use join::{
     CompatibleCondition, EqualityCondition, HashJoinOperator, HashKey, JoinCondition, JoinType,
     JoinedRowCondition, NestedLoopJoinOperator,

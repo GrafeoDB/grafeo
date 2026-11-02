@@ -1,11 +1,33 @@
 //! Expand operator for relationship traversal.
 
-use super::{Operator, OperatorError, OperatorResult, ReadCounter};
+use super::node_seek::node_ids;
+use super::{Operator, OperatorError, OperatorResult, ReadCounter, SeekKey};
 use crate::execution::DataChunk;
 use crate::graph::Direction;
 use crate::graph::GraphStore;
-use grafeo_common::types::{ArcStr, EdgeId, LogicalType, NodeId, ReadView};
+use grafeo_common::types::{ArcStr, EdgeId, LogicalType, NodeId, ReadView, Value};
 use std::sync::Arc;
+
+/// The most nodes of a target key an expand looks up and holds: a more common
+/// key costs more to find than the lists it would save.
+const TARGET_KEY_CAP: usize = 1024;
+
+/// What an expand knows of the node each row's edges end at, under a filter
+/// that decides.
+enum HopTarget {
+    /// Nothing: it lists every edge.
+    Unknown,
+    /// The node in this input column.
+    Column(usize),
+    /// A node that holds this key, not looked up yet.
+    Key(SeekKey, Value),
+    /// No node holds the key: there is no edge to find.
+    Nothing,
+    /// This one node.
+    Node(NodeId),
+    /// One of these nodes, sorted.
+    Nodes(Vec<NodeId>),
+}
 
 /// An expand operator that traverses edges from source nodes.
 ///
@@ -22,6 +44,8 @@ pub struct ExpandOperator {
     direction: Direction,
     /// The edge types to follow, as stored (every type when empty).
     edge_types: Vec<ArcStr>,
+    /// What is known of the node each row's edges end at.
+    target: HopTarget,
     /// Chunk capacity.
     chunk_capacity: usize,
     /// Current input chunk being processed.
@@ -57,6 +81,7 @@ impl ExpandOperator {
             source_column,
             direction,
             edge_types: stored_types(edge_types),
+            target: HopTarget::Unknown,
             chunk_capacity: 2048,
             current_input: None,
             current_row: 0,
@@ -79,6 +104,58 @@ impl ExpandOperator {
     pub fn with_read_counter(mut self, reads: Arc<ReadCounter>) -> Self {
         self.reads = Some(reads);
         self
+    }
+
+    /// Looks up the edges to the node in input column `column` instead of
+    /// listing every edge of the row, under a filter that the target is that
+    /// node. A row whose column holds no node id lists its edges, for the
+    /// filter to judge; the filter also judges an integer the column reads as
+    /// an id.
+    #[must_use]
+    pub fn with_target_column(mut self, column: usize) -> Self {
+        self.target = HopTarget::Column(column);
+        self
+    }
+
+    /// Finds the nodes that may hold `value` under `key` once, before the first
+    /// input row, under a filter that the target holds it: no node ends the
+    /// expand without reading its input, one node is a lookup per row, and
+    /// several filter each row's list. A key more than `TARGET_KEY_CAP` nodes
+    /// hold, or one the store cannot look up, lists every edge as usual, so this
+    /// loses at most the reads of the cap.
+    #[must_use]
+    pub fn with_target_key(mut self, key: SeekKey, value: Value) -> Self {
+        self.target = HopTarget::Key(key, value);
+        self
+    }
+
+    /// Finds the nodes of a target key, once: a re-run of the expand (a subquery
+    /// per row) reads the same key at the same view.
+    fn find_target_key(&mut self) -> Result<(), OperatorError> {
+        let HopTarget::Key(key, value) = &self.target else {
+            return Ok(());
+        };
+        let found = match key {
+            SeekKey::Id => Some(node_ids(value)),
+            SeekKey::Property(property) => {
+                self.store
+                    .find_few_nodes_maybe_equal(property, value, TARGET_KEY_CAP, self.view)?
+            }
+        };
+        self.target = match found {
+            None => HopTarget::Unknown,
+            Some(mut nodes) => {
+                super::read_counter::count(self.reads.as_deref(), nodes.len());
+                nodes.sort_unstable();
+                nodes.dedup();
+                match nodes.as_slice() {
+                    [] => HopTarget::Nothing,
+                    [node] => HopTarget::Node(*node),
+                    _ => HopTarget::Nodes(nodes),
+                }
+            }
+        };
+        Ok(())
     }
 
     /// Minimum chunk size for locality sort to be worthwhile.
@@ -135,16 +212,39 @@ impl ExpandOperator {
             .get_node_id(self.current_row)
             .ok_or_else(|| OperatorError::Internal("Expected node ID in source column".into()))?;
 
-        self.current_edges = visible_edges_from(
-            self.store.as_ref(),
-            source_id,
-            self.direction,
-            &EdgeWalk {
-                edge_types: &self.edge_types,
-                view: self.view,
-                reads: self.reads.as_deref(),
-            },
-        )?;
+        let target = match &self.target {
+            HopTarget::Column(column) => chunk
+                .column(*column)
+                .and_then(|column| column.get_node_id(self.current_row)),
+            HopTarget::Node(node) => Some(*node),
+            _ => None,
+        };
+        self.current_edges = if let Some(target) = target {
+            let edges = self.store.edges_between(
+                source_id,
+                target,
+                self.direction,
+                &self.edge_types,
+                self.view,
+            )?;
+            super::read_counter::count(self.reads.as_deref(), edges.len());
+            edges.into_iter().map(|edge| (target, edge)).collect()
+        } else {
+            visible_edges_from(
+                self.store.as_ref(),
+                source_id,
+                self.direction,
+                &EdgeWalk {
+                    edge_types: &self.edge_types,
+                    view: self.view,
+                    reads: self.reads.as_deref(),
+                },
+            )?
+        };
+        if let HopTarget::Nodes(nodes) = &self.target {
+            self.current_edges
+                .retain(|(end, _)| nodes.binary_search(end).is_ok());
+        }
         self.current_edge_idx = 0;
         Ok(true)
     }
@@ -192,7 +292,8 @@ pub(super) fn visible_edges_from(
 
 impl Operator for ExpandOperator {
     fn next(&mut self) -> OperatorResult {
-        if self.exhausted {
+        self.find_target_key()?;
+        if self.exhausted || matches!(self.target, HopTarget::Nothing) {
             return Ok(None);
         }
 

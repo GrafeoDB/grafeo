@@ -305,6 +305,14 @@ impl GrafeoDB {
         Self::with_config(Config::in_memory()).expect("In-memory database creation should not fail")
     }
 
+    /// Logs [`graph_type_scope_warnings`](Self::graph_type_scope_warnings), at open, where a
+    /// build has a log.
+    fn warn_of_types_scoped_to_their_graphs(&self) {
+        for warning in self.graph_type_scope_warnings() {
+            grafeo_common::grafeo_warn!("{}", warning.message);
+        }
+    }
+
     /// Opens a database at the given path, creating it if it doesn't exist.
     ///
     /// If you've used this path before, Grafeo recovers your data from the
@@ -1059,6 +1067,7 @@ impl GrafeoDB {
             db.checkpoint_to_file(&fm)?;
         }
 
+        db.warn_of_types_scoped_to_their_graphs();
         Ok(db)
     }
 

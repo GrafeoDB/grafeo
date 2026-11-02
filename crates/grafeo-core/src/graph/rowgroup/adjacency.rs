@@ -15,6 +15,10 @@ use grafeo_common::utils::hash::{FxHashMap, FxHashSet};
 
 use super::bitset::Bitset;
 
+/// The longest run compared entry by entry along a delta, whose comparisons take far
+/// less than a search of the run.
+const SHORT_RUN: usize = 16;
+
 /// The fewest delta entries a merge waits for.
 const MERGE_MIN: usize = 1_024;
 
@@ -27,6 +31,88 @@ pub(super) struct Adjacent {
     pub other: u64,
     /// The edge.
     pub edge: u64,
+}
+
+/// Calls `found` with each pair of an entry of `near` and of `far`, two runs sorted by
+/// other end, that reach one node, galloping through the longer from the shorter. The
+/// probes it took. The one place that knows how a run is sorted.
+pub(super) fn intersect_runs(
+    near: &[Adjacent],
+    far: &[Adjacent],
+    found: &mut dyn FnMut(&Adjacent, &Adjacent),
+) -> usize {
+    let swapped = near.len() > far.len();
+    let (short, long) = if swapped { (far, near) } else { (near, far) };
+    let mut probes = 0;
+    let mut from = 0;
+    let mut index = 0;
+    while index < short.len() {
+        let other = short[index].other;
+        let run = short[index..].partition_point(|entry| entry.other == other);
+        let (start, reads) = gallop(long, from, other);
+        probes += reads + 1;
+        from = start;
+        let count = long[start..].partition_point(|entry| entry.other == other);
+        for short_entry in &short[index..index + run] {
+            for long_entry in &long[start..start + count] {
+                if swapped {
+                    found(long_entry, short_entry);
+                } else {
+                    found(short_entry, long_entry);
+                }
+            }
+        }
+        index += run;
+    }
+    probes
+}
+
+/// Calls `found` with each pair of an entry of `run`, sorted by other end, and of
+/// `delta`, in no order, that reach one node. The probes it took. A short run compares
+/// its entries along the delta, which a hub's holds many of; a longer one is searched
+/// for each entry of the delta.
+pub(super) fn intersect_run_with_delta(
+    run: &[Adjacent],
+    delta: &[Adjacent],
+    found: &mut dyn FnMut(&Adjacent, &Adjacent),
+) -> usize {
+    if run.len() < SHORT_RUN {
+        for entry in run {
+            for other in delta.iter().filter(|other| other.other == entry.other) {
+                found(entry, other);
+            }
+        }
+        return run.len() * delta.len();
+    }
+    for other in delta {
+        for entry in entries_to(run, other.other) {
+            found(entry, other);
+        }
+    }
+    delta.len()
+}
+
+/// The entries of `run`, sorted by other end, that reach `other`.
+fn entries_to(run: &[Adjacent], other: u64) -> &[Adjacent] {
+    let start = run.partition_point(|entry| entry.other < other);
+    let count = run[start..].partition_point(|entry| entry.other == other);
+    &run[start..start + count]
+}
+
+/// The first position from `from` of `sorted` whose other end is at least `other`,
+/// by doubling steps and then a search of the last step, and the probes it took.
+fn gallop(sorted: &[Adjacent], from: usize, other: u64) -> (usize, usize) {
+    let mut step = 1;
+    let mut low = from;
+    let mut probes = 0;
+    while low + step < sorted.len() && sorted[low + step].other < other {
+        low += step;
+        step *= 2;
+        probes += 1;
+    }
+    let high = (low + step + 1).min(sorted.len());
+    let found = sorted[low..high].partition_point(|entry| entry.other < other);
+    (low + found, probes + step.ilog2() as usize + 1)
 }
 
 /// One direction of a node row group's adjacency.
@@ -57,12 +143,12 @@ impl Adjacency {
     }
 
     /// Whether `adjacent` was taken out of a sorted list.
-    fn is_removed(&self, adjacent: &Adjacent) -> bool {
+    pub(super) fn is_removed(&self, adjacent: &Adjacent) -> bool {
         !self.removed.is_empty() && self.removed.contains(&adjacent.edge)
     }
 
-    /// The row's delta.
-    fn delta_of(&self, row: usize) -> &[Adjacent] {
+    /// The row's delta, in the order it came.
+    pub(super) fn delta_of(&self, row: usize) -> &[Adjacent] {
         if self.delta_rows.get(row) {
             self.delta.get(&row).map_or(&[], Vec::as_slice)
         } else {
@@ -97,6 +183,39 @@ impl Adjacency {
                 self.delta_of(row)
                     .iter()
                     .filter(move |adjacent| adjacent.edge_type == edge_type),
+            )
+            .copied()
+    }
+
+    /// How many entries a read of the row may have to go through: its sorted list
+    /// and its delta, removed edges and other types among them.
+    pub(super) fn entries_of(&self, row: usize) -> usize {
+        self.sorted_of(row).len() + self.delta_of(row).len()
+    }
+
+    /// The row's sorted list as its runs of one type each, each sorted by other end,
+    /// with what `is_removed` drops still in them.
+    pub(super) fn runs_of(&self, row: usize) -> impl Iterator<Item = &[Adjacent]> + '_ {
+        let mut rest = self.sorted_of(row);
+        std::iter::from_fn(move || {
+            let edge_type = rest.first()?.edge_type;
+            let end = rest.partition_point(|adjacent| adjacent.edge_type <= edge_type);
+            let (run, after) = rest.split_at(end);
+            rest = after;
+            Some(run)
+        })
+    }
+
+    /// The row's edges to `other`, in the order [`of`](Self::of) gives them:
+    /// a binary search in the sorted list per edge type, then the delta's.
+    pub(super) fn to_other(&self, row: usize, other: u64) -> impl Iterator<Item = Adjacent> + '_ {
+        self.runs_of(row)
+            .flat_map(move |run| entries_to(run, other))
+            .filter(|adjacent| !self.is_removed(adjacent))
+            .chain(
+                self.delta_of(row)
+                    .iter()
+                    .filter(move |adjacent| adjacent.other == other),
             )
             .copied()
     }

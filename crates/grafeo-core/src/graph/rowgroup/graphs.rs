@@ -113,6 +113,28 @@ impl RowGroupStore {
         Ok(graph)
     }
 
+    /// A new graph that no name reaches yet, for a transaction that creates one: it
+    /// writes there, and [`install_graph`](Self::install_graph) names it at the commit.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AllocError::IdsExhausted`] once every graph id was given
+    /// out.
+    pub fn new_unnamed_graph(&self) -> std::result::Result<Arc<RowGroupStore>, AllocError> {
+        self.graphs.new_graph(self)
+    }
+
+    /// Gives `graph`, from [`new_unnamed_graph`](Self::new_unnamed_graph), the name
+    /// `name`. Returns `false` if a graph has it already.
+    pub fn install_graph(&self, name: &str, graph: Arc<RowGroupStore>) -> bool {
+        let mut named = self.graphs.named.write();
+        if named.contains_key(name) {
+            return false;
+        }
+        named.insert(name.to_string(), graph);
+        true
+    }
+
     /// Creates a named graph. Returns `true` on success, `false` if it
     /// already exists.
     ///

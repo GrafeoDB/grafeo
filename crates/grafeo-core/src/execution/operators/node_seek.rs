@@ -247,7 +247,7 @@ impl Operator for NodeSeekOperator {
 /// compares an ID (an integer) with it: the integer itself, a float of
 /// exactly its value, a whole decimal of its value, or a string that parses
 /// as it.
-fn node_ids(key: &Value) -> Vec<NodeId> {
+pub(super) fn node_ids(key: &Value) -> Vec<NodeId> {
     let id = match key {
         Value::Int64(id) => Some(*id),
         Value::Float64(f) => exact_integer(*f),

@@ -107,6 +107,25 @@ impl PropertyIndex {
         found
     }
 
+    /// Whether [`nodes_maybe_equal`](Self::nodes_maybe_equal) finds at most
+    /// `limit` nodes for `key`, stopping once it is sure: a node under two
+    /// values counts twice, so it may answer no for a key just within the limit.
+    pub(crate) fn candidates_within(&self, key: &Value, limit: usize) -> bool {
+        let Some(class) = HashKey::for_equality(key) else {
+            return true; // NULL equals nothing
+        };
+        let mut count = 0;
+        let mut within = |value: &HashableValue| {
+            count += self.values.get(value).map_or(0, |nodes| nodes.len());
+            count <= limit
+        };
+        probes(key).iter().all(&mut within)
+            && self
+                .others_by_class
+                .get(&class)
+                .is_none_or(|others| others.iter().all(&mut within))
+    }
+
     /// How many distinct values the index holds.
     pub(crate) fn len(&self) -> usize {
         self.values.len()

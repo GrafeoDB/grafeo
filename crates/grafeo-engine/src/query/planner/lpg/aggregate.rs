@@ -1,5 +1,7 @@
 //! Aggregate and factorized aggregate planning.
 
+use grafeo_core::execution::operators::MAX_COUNTED_DIFFERENT_HOPS;
+
 use super::{
     AggregateOp, Arc, Direction, EntityValue, Error, ExpandDirection, ExpandOp, ExpandStep,
     ExpressionPredicate, FactorizedAggregate, FactorizedAggregateOperator, FilterExpression,
@@ -122,7 +124,13 @@ impl super::Planner {
         let Some(shape) = EdgeCountShape::of(agg) else {
             return Ok(None);
         };
-        let expand = shape.expand;
+        if let Some(sum) = self.middle_sum_of(agg, &shape)? {
+            return self.finish_edge_count(agg, &shape, sum.0, sum.1).map(Some);
+        }
+        let Some(first) = shape.hops.last() else {
+            return Ok(None);
+        };
+        let expand = first.expand;
         let (input_op, columns) = self.plan_operator(&expand.input)?;
         let source_column = columns
             .iter()
@@ -133,21 +141,156 @@ impl super::Planner {
                     expand.from_variable
                 ))
             })?;
-        let direction = match expand.direction {
+        let direction_of = |expand: &ExpandOp| match expand.direction {
             ExpandDirection::Outgoing => Direction::Outgoing,
             ExpandDirection::Incoming => Direction::Incoming,
             ExpandDirection::Both => Direction::Both,
         };
+        let direction = direction_of(expand);
         let counts = grafeo_core::execution::operators::EdgeCountOperator::new(
             Arc::clone(&self.store) as Arc<dyn GraphStore>,
             input_op,
             source_column,
             direction,
             self.stored_edge_types(&expand.edge_types)?,
-            shape.end_labels,
+            first.end_labels.clone(),
             self.read_view(),
         )
         .with_read_counter(self.read_counter());
+        // A chain goes on from the first hop, bottom up.
+        let counts = if shape.hops.len() > 1 || !shape.different.is_empty() {
+            let mut rest = Vec::with_capacity(shape.hops.len() - 1);
+            for hop in shape.hops.iter().rev().skip(1) {
+                rest.push(grafeo_core::execution::operators::CountedHop {
+                    direction: direction_of(hop.expand),
+                    edge_types: self
+                        .stored_edge_types(&hop.expand.edge_types)?
+                        .into_iter()
+                        .map(Into::into)
+                        .collect(),
+                    end_labels: hop
+                        .end_labels
+                        .iter()
+                        .map(|label| label.as_str().into())
+                        .collect(),
+                });
+            }
+            counts.with_chain(rest, &shape.different)
+        } else {
+            counts
+        };
+        self.finish_edge_count(agg, &shape, counts, columns)
+            .map(Some)
+    }
+
+    /// The count of a whole-graph path of two hops by its middle nodes: a scan of
+    /// them, each counting its two degrees. Only where nothing but labels narrows
+    /// the first node, nothing is grouped, and the store keeps what a hop read from
+    /// its middle needs. Cypher's different edges need both hops to read an edge the
+    /// same way: then only a self-loop can serve both. `None` otherwise: the chain's
+    /// walk from each first node holds for every other shape.
+    fn middle_sum_of(
+        &self,
+        agg: &AggregateOp,
+        shape: &EdgeCountShape<'_>,
+    ) -> Result<Option<PlannedCount>> {
+        let [on, near] = shape.hops.as_slice() else {
+            return Ok(None);
+        };
+        if !agg.group_by.is_empty() || !self.store.has_backward_adjacency() {
+            return Ok(None);
+        }
+        let mut below = near.expand.input.as_ref();
+        let mut first_labels: Vec<String> = Vec::new();
+        while let LogicalOperator::Filter(filter) = below {
+            let mut conjuncts = Vec::new();
+            conjuncts_of(&filter.predicate, &mut conjuncts);
+            for conjunct in conjuncts {
+                let Some(label) = super::scan::label_check(conjunct, &near.expand.from_variable)
+                else {
+                    return Ok(None);
+                };
+                first_labels.push(label.to_string());
+            }
+            below = &filter.input;
+        }
+        let LogicalOperator::NodeScan(scan) = below else {
+            return Ok(None);
+        };
+        if scan.input.is_some() || scan.variable != near.expand.from_variable {
+            return Ok(None);
+        }
+        first_labels.extend(scan.label.clone());
+        let same_way = near.expand.direction == on.expand.direction
+            && near.expand.direction != ExpandDirection::Both
+            && near.expand.edge_types == on.expand.edge_types;
+        if !shape.different.is_empty() && !same_way {
+            return Ok(None);
+        }
+        let direction_of = |direction: ExpandDirection| match direction {
+            ExpandDirection::Outgoing => Direction::Outgoing,
+            ExpandDirection::Incoming => Direction::Incoming,
+            ExpandDirection::Both => Direction::Both,
+        };
+        let back_direction = match near.expand.direction {
+            ExpandDirection::Outgoing => Direction::Incoming,
+            ExpandDirection::Incoming => Direction::Outgoing,
+            ExpandDirection::Both => Direction::Both,
+        };
+        let stored = |types: &[String]| -> Result<Vec<grafeo_common::types::ArcStr>> {
+            Ok(self
+                .stored_edge_types(types)?
+                .into_iter()
+                .map(Into::into)
+                .collect())
+        };
+        let labels = |labels: &[String]| -> Vec<grafeo_common::types::ArcStr> {
+            labels.iter().map(|label| label.as_str().into()).collect()
+        };
+        let middle_label = near.end_labels.first().cloned();
+        let sum = grafeo_core::execution::operators::MiddleSum {
+            back: grafeo_core::execution::operators::CountedHop {
+                direction: back_direction,
+                edge_types: stored(&near.expand.edge_types)?,
+                end_labels: labels(&first_labels),
+            },
+            on: grafeo_core::execution::operators::CountedHop {
+                direction: direction_of(on.expand.direction),
+                edge_types: stored(&on.expand.edge_types)?,
+                end_labels: labels(&on.end_labels),
+            },
+            middle_labels: labels(near.end_labels.get(1..).unwrap_or_default()),
+            different_edges: !shape.different.is_empty(),
+        };
+        let middle = LogicalOperator::NodeScan(crate::query::plan::NodeScanOp {
+            variable: on.expand.from_variable.clone(),
+            label: middle_label,
+            input: None,
+        });
+        let (input, columns) = self.plan_operator(&middle)?;
+        let counts = grafeo_core::execution::operators::EdgeCountOperator::new(
+            Arc::clone(&self.store) as Arc<dyn GraphStore>,
+            input,
+            0,
+            Direction::Outgoing,
+            Vec::new(),
+            Vec::new(),
+            self.read_view(),
+        )
+        .with_read_counter(self.read_counter())
+        .with_middle_sum(sum);
+        Ok(Some((counts, columns)))
+    }
+
+    /// The plan of `counts` over `columns`, with the aggregate it stands in for:
+    /// each hop's profile entries, then a total or a sum per group.
+    fn finish_edge_count(
+        &self,
+        agg: &AggregateOp,
+        shape: &EdgeCountShape<'_>,
+        counts: grafeo_core::execution::operators::EdgeCountOperator,
+        columns: Vec<String>,
+    ) -> Result<(Box<dyn Operator>, Vec<String>)> {
         // Without groups the count totals itself in one row, which holds 0
         // when no edge matches (a sum of the counts over no rows is null),
         // and stands in for the aggregate too.
@@ -159,8 +302,15 @@ impl super::Planner {
         };
         // PROFILE shows the count in the expand's place, with the label
         // checks of the far end it does.
-        let (counts, mut columns) = self.maybe_profile(Ok((counts, columns)), shape.node)?;
-        for check in shape.checks.iter().rev() {
+        for hop in shape.hops.iter().skip(1).rev() {
+            self.record_absorbed_scan_entry("Expand", hop.node);
+            for check in hop.checks.iter().rev() {
+                self.record_absorbed_scan_entry("Filter", check);
+            }
+        }
+        let last = &shape.hops[0];
+        let (counts, mut columns) = self.maybe_profile(Ok((counts, columns)), last.node)?;
+        for check in last.checks.iter().rev() {
             self.record_absorbed_scan_entry("Filter", check);
         }
         if ungrouped {
@@ -177,7 +327,7 @@ impl super::Planner {
                 self.set_column_entity(total, None);
             }
             let operator = self.filter_having(counts, &totals, agg.having.as_ref())?;
-            return Ok(Some((operator, totals)));
+            return Ok((operator, totals));
         }
         // A name no variable has: the count column of this aggregate.
         let mut count_column = String::from("_edge_count");
@@ -209,7 +359,7 @@ impl super::Planner {
             input: Box::new(LogicalOperator::Empty),
             having: agg.having.clone(),
         };
-        self.aggregate_over(&summed, counts, columns).map(Some)
+        self.aggregate_over(&summed, counts, columns)
     }
 
     /// Plans `agg` over `input_op`, whose rows hold `input_columns`.
@@ -787,78 +937,120 @@ impl super::Planner {
     }
 }
 
+/// A count operator over its input, with the input's columns.
+type PlannedCount = (
+    grafeo_core::execution::operators::EdgeCountOperator,
+    Vec<String>,
+);
+
 /// A grouped count over one expand that its edge counts answer (see
 /// `plan_edge_count`).
 struct EdgeCountShape<'a> {
-    /// The expand whose edges are counted.
+    /// The expands whose paths are counted, the last hop of the path first.
+    hops: Vec<CountedExpand<'a>>,
+    /// Pairs of positions on the path, the first hop at 0, whose edges must
+    /// differ: what Cypher's edge uniqueness asks of hops of one type.
+    different: Vec<(usize, usize)>,
+}
+
+/// One expand of a counted chain.
+struct CountedExpand<'a> {
+    /// The expand.
     expand: &'a ExpandOp,
     /// The expand as a plan operator.
     node: &'a LogicalOperator,
-    /// The filters between the aggregate and the expand, from the top
-    /// down: checks of the far end's labels.
+    /// The filters right above it, from the top down: checks of its far end's
+    /// labels, or of edges that must differ.
     checks: Vec<&'a LogicalOperator>,
     /// The labels the far end of each counted edge has.
     end_labels: Vec<String>,
 }
 
 impl<'a> EdgeCountShape<'a> {
-    /// The shape of `agg` when it counts the edges of one expand per group,
-    /// or in all without groups:
+    /// The shape of `agg` when it counts the paths of a chain of expands per
+    /// group, or in all without groups:
     ///
     /// - with every aggregate a `count(*)` or a `count(x)` without
-    ///   `DISTINCT` of the expand's start, edge or far end, which are never
+    ///   `DISTINCT` of the chain's start, edges or far ends, which are never
     ///   null on its rows, so each counts the rows;
-    /// - over one expand of one edge as a walk or a trail (a one-edge path
+    /// - over expands of one edge each as a walk or a trail (a one-edge path
     ///   is both; a simple or acyclic one drops a self-loop) without a path
-    ///   variable, whose edge and far end its input does not bind (an
-    ///   expand to a bound node checks it is that node);
-    /// - with nothing between them but checks of labels on the far end;
-    /// - whose group keys read neither the edge nor the far end, and are
-    ///   the same for each edge of a row (no subquery, no volatile call);
+    ///   variable, each from the far end of the one below, whose edge and far
+    ///   end nothing below binds (an expand to a bound node checks it is that
+    ///   node);
+    /// - with nothing between them but checks of labels on a far end and of
+    ///   edges that must differ, at most [`MAX_COUNTED_DIFFERENT_HOPS`] hops for
+    ///   those. An expand with anything else above it, or that binds what a group
+    ///   key or count reads, is part of the chain's input;
+    /// - whose group keys are the same for each path of a row (no subquery, no
+    ///   volatile call);
     /// - and reads no write (the input writes nothing).
     fn of(agg: &'a AggregateOp) -> Option<Self> {
         if agg.input.has_mutations() {
             return None;
         }
-        let mut checks = Vec::new();
+        let mut hops: Vec<CountedExpand<'a>> = Vec::new();
+        let mut pairs: Vec<(String, String)> = Vec::new();
         let mut below = agg.input.as_ref();
-        while let LogicalOperator::Filter(filter) = below {
-            checks.push(below);
-            below = &filter.input;
-        }
-        let node = below;
-        let LogicalOperator::Expand(expand) = below else {
-            return None;
-        };
-        if expand.min_hops != 1
-            || expand.max_hops != Some(1)
-            || expand.quantified
-            || expand.path_alias.is_some()
-            || !matches!(expand.path_mode, PathMode::Walk | PathMode::Trail)
-        {
-            return None;
-        }
-        let far = expand.to_variable.as_str();
-        let edge = expand.edge_variable.as_deref();
-        let bound = expand.input.bound_variables(None)?;
-        if bound.contains(far) || edge.is_some_and(|edge| bound.contains(edge)) {
-            return None;
-        }
-        let mut end_labels = Vec::new();
-        for check in &checks {
-            let LogicalOperator::Filter(filter) = check else {
-                return None;
+        loop {
+            let mut checks = Vec::new();
+            let mut at = below;
+            while let LogicalOperator::Filter(filter) = at {
+                checks.push(at);
+                at = &filter.input;
+            }
+            let LogicalOperator::Expand(expand) = at else {
+                break;
             };
-            let mut conjuncts = Vec::new();
-            conjuncts_of(&filter.predicate, &mut conjuncts);
-            for conjunct in conjuncts {
-                end_labels.push(super::scan::label_check(conjunct, far)?.to_string());
+            if expand.min_hops != 1
+                || expand.max_hops != Some(1)
+                || expand.quantified
+                || expand.path_alias.is_some()
+                || !matches!(expand.path_mode, PathMode::Walk | PathMode::Trail)
+                || hops
+                    .last()
+                    .is_some_and(|upper| upper.expand.from_variable != expand.to_variable)
+            {
+                break;
+            }
+            let Some(end_labels) = read_checks(&checks, &expand.to_variable, &mut pairs) else {
+                break;
+            };
+            hops.push(CountedExpand {
+                expand,
+                node: at,
+                checks,
+                end_labels,
+            });
+            below = &expand.input;
+        }
+
+        // A group key or count may read what the lower expands bind: they are
+        // then the chain's input.
+        let mut reads = Vec::new();
+        for key in &agg.group_by {
+            reads.extend(super::seek::value_variables(key)?);
+        }
+        let binds = |hop: &CountedExpand<'_>, variable: &str| {
+            variable == hop.expand.to_variable
+                || hop.expand.edge_variable.as_deref() == Some(variable)
+        };
+        for index in 0..hops.len() {
+            if reads.iter().any(|variable| binds(&hops[index], variable)) {
+                hops.truncate(index);
+                break;
             }
         }
-        let read_by_edge = |variable: &str| variable == far || Some(variable) == edge;
-        for key in &agg.group_by {
-            let variables = super::seek::value_variables(key)?;
-            if variables.iter().any(|variable| read_by_edge(variable)) {
+        let first = hops.last()?;
+        let bound = first.expand.input.bound_variables(None)?;
+        for hop in &hops {
+            if bound.contains(&hop.expand.to_variable)
+                || hop
+                    .expand
+                    .edge_variable
+                    .as_ref()
+                    .is_some_and(|edge| bound.contains(edge))
+            {
                 return None;
             }
         }
@@ -870,17 +1062,74 @@ impl<'a> EdgeCountShape<'a> {
                     (
                         LogicalAggregateFunction::Count | LogicalAggregateFunction::CountNonNull,
                         Some(LogicalExpression::Variable(variable)),
-                    ) => read_by_edge(variable) || *variable == expand.from_variable,
+                    ) => {
+                        *variable == first.expand.from_variable
+                            || hops.iter().any(|hop| binds(hop, variable))
+                    }
                     _ => false,
                 }
         };
-        (!agg.aggregates.is_empty() && agg.aggregates.iter().all(counts_rows)).then_some(Self {
-            expand,
-            node,
-            checks,
-            end_labels,
-        })
+        if agg.aggregates.is_empty() || !agg.aggregates.iter().all(counts_rows) {
+            return None;
+        }
+
+        // Every pair names two edges of this chain.
+        let position = |edge: &str| {
+            hops.iter()
+                .position(|hop| hop.expand.edge_variable.as_deref() == Some(edge))
+                .map(|index| hops.len() - 1 - index)
+        };
+        let mut different = Vec::with_capacity(pairs.len());
+        for (left, right) in &pairs {
+            different.push((position(left)?, position(right)?));
+        }
+        if !different.is_empty() && hops.len() > MAX_COUNTED_DIFFERENT_HOPS {
+            return None;
+        }
+        Some(Self { hops, different })
     }
+}
+
+/// The labels `checks` require of `far`, adding the pairs of edges they require to
+/// differ; `None` when they check anything else.
+fn read_checks(
+    checks: &[&LogicalOperator],
+    far: &str,
+    pairs: &mut Vec<(String, String)>,
+) -> Option<Vec<String>> {
+    let mut end_labels = Vec::new();
+    for check in checks {
+        let LogicalOperator::Filter(filter) = check else {
+            return None;
+        };
+        let mut conjuncts = Vec::new();
+        conjuncts_of(&filter.predicate, &mut conjuncts);
+        for conjunct in conjuncts {
+            if let Some(label) = super::scan::label_check(conjunct, far) {
+                end_labels.push(label.to_string());
+            } else {
+                pairs.push(edges_that_differ(conjunct)?);
+            }
+        }
+    }
+    Some(end_labels)
+}
+
+/// The two variables of `id(a) <> id(b)`.
+fn edges_that_differ(conjunct: &LogicalExpression) -> Option<(String, String)> {
+    let LogicalExpression::Binary {
+        left,
+        op: crate::query::plan::BinaryOp::Ne,
+        right,
+    } = conjunct
+    else {
+        return None;
+    };
+    let id_of = |side: &LogicalExpression| match side {
+        LogicalExpression::Id(variable) => Some(variable.clone()),
+        _ => None,
+    };
+    Some((id_of(left)?, id_of(right)?))
 }
 
 /// The conjuncts of an `AND` chain, in order.

@@ -290,7 +290,8 @@ fn keyword_property_names_are_declared_as_insert_takes_them() {
     );
     assert!(refusal(&db, "INSERT (:Trip {contains: 3})").contains("contains"));
     assert!(refusal(&db, "INSERT (:Trip {ends: 'later'})").contains("ends"));
-    assert!(refusal(&db, "INSERT (:Hike {starts: 19})").contains("starts"));
+    rows(&db, "CREATE GRAPH walks TYPED hikes");
+    assert!(refusal(&db, "USE GRAPH walks INSERT (:Hike {starts: 19})").contains("starts"));
 }
 
 #[test]
@@ -523,6 +524,7 @@ fn type_of_europe(db: &GrafeoDB) -> Value {
 const RECREATED: &[&str] = &[
     "DROP GRAPH europe",
     "DROP GRAPH TYPE atlas",
+    "CREATE NODE TYPE City (name STRING)",
     "CREATE GRAPH TYPE atlas (NODE TYPE City)",
     "CREATE GRAPH europe",
 ];

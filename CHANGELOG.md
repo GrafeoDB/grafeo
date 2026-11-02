@@ -2,6 +2,27 @@
 
 All notable changes to Grafeo, for future reference (and enjoyment).
 
+## [0.6.2] - Unreleased
+
+### Faster queries
+
+- **Planner**: comma patterns pick their join order from sampled degrees, cycles close by lookup or intersection, and same-type chains up to 6 hops count without listing paths. Common queries stay at their speed; the first plan of a comma pattern costs a little more.
+
+### Changed
+
+Queries that ran in 0.6.1 and now fail or behave differently.
+
+- **Rules**: a rule added over data that breaks it fails with `GRAFEO-V001`, and so does a commit whose writes break a rule added since the transaction began.
+- **Graph types**: a type a graph type lists applies only in graphs bound to it, so its rules and defaults no longer reach other graphs; `validate()` reports affected types, and Python warns at open. Dropping a graph type drops the types only it listed, and a second, different declaration of a type is refused. See the upgrade note.
+- **Transactions**: `START TRANSACTION`, `COMMIT` and `ROLLBACK` on a per-call `execute` are refused, `CREATE GRAPH ... AS COPY OF` is refused in a transaction, and no SPARQL statement runs after a SPARQL graph operation until the commit.
+
+### Fixed
+
+- **SPARQL**: fixed a slowdown in multi-way joins from 0.6.1.
+- **Schema statements** roll back with their transaction, also across a crash (#727).
+- **Conditions that can fail**, such as `100 / n.age > 0`, no longer fail on rows a label or an earlier condition rejects.
+- **Graph type patterns**: naming an existing type no longer wipes its properties, and several patterns of one edge type no longer lose all but the last.
+
 ## [0.6.1] - 2026-11-01
 
 Correctness and speed release. Backups and restores survive a crash, stored procedure bodies run as their statements do, SPARQL follows SPARQL 1.1 in `OPTIONAL`, `MINUS`, `BIND` and `FILTER EXISTS`, GQL quantified patterns repeat as ISO GQL defines them, the query timeout stops every query, and dates, times, bytes and NaN keep their type through every binding. Plus a CSV and an RDF file loader, `schema()` with value types, and faster SPARQL lookups, Cypher multi-hop patterns, degree counts and bulk updates by key.

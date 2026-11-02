@@ -33,6 +33,7 @@ impl Session {
                 root: Some(store),
                 graph_store,
                 graph_store_mut,
+                pending_graphs: Arc::default(),
             },
             catalog: cfg.catalog,
             rdf_store,
@@ -48,8 +49,7 @@ impl Session {
                 #[cfg(lpg_language)]
                 factorized_execution: cfg.factorized_execution,
                 shuffle_unordered: cfg.shuffle_unordered,
-                #[cfg(lpg_language)]
-                reachability: true,
+                rules: crate::query::optimizer::PlannerRules::all(),
                 path_search_budget: cfg.path_search_budget,
             },
             graph_model: cfg.graph_model,
@@ -76,6 +76,8 @@ impl Session {
             session_params: parking_lot::Mutex::new(std::collections::HashMap::new()),
             viewing_epoch_override: parking_lot::Mutex::new(None),
             savepoints: parking_lot::Mutex::new(Vec::new()),
+            rules_at_begin: std::sync::atomic::AtomicU64::new(0),
+            pending_schema: parking_lot::Mutex::new(None),
             transaction_nesting_depth: parking_lot::Mutex::new(0),
             last_commit_epoch: parking_lot::Mutex::new(None),
             transaction_statements: super::TransactionStatements::Allowed,

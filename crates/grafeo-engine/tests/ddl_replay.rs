@@ -493,12 +493,13 @@ mod tests {
     /// The statements of #316: types, then a graph type and an `ALTER GRAPH
     /// TYPE` that name them bare (`NODE TYPE Person`), which used to replace
     /// each named type with an empty one.
-    const BARE_REFERENCES: [&str; 5] = [
+    const BARE_REFERENCES: [&str; 6] = [
         "CREATE NODE TYPE Person (name STRING NOT NULL, age INTEGER, city STRING)",
         "CREATE NODE TYPE Product (sku STRING NOT NULL, price FLOAT NOT NULL)",
         "CREATE EDGE TYPE KNOWS (since INTEGER)",
         "CREATE GRAPH TYPE shop_schema (NODE TYPE Person, EDGE TYPE KNOWS)",
         "ALTER GRAPH TYPE shop_schema ADD NODE TYPE Product",
+        "CREATE GRAPH shop TYPED shop_schema",
     ];
 
     /// The node and edge types of `db` are those the three `CREATE` statements
@@ -527,7 +528,7 @@ mod tests {
         );
         let error = db
             .session()
-            .execute("INSERT (:Person {age: 30})")
+            .execute("USE GRAPH shop INSERT (:Person {age: 30})")
             .expect_err("a Person without its NOT NULL name")
             .to_string();
         assert!(error.contains("name"), "{stage}: {error}");

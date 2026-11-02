@@ -12,6 +12,7 @@ use std::sync::Arc;
 
 use grafeo_common::types::{ArcStr, LogicalType, ReadView};
 
+use super::chain_counter::{ChainCounter, CountedHop, MiddleSum};
 use super::{Operator, OperatorError, OperatorResult, ReadCounter};
 use crate::execution::DataChunk;
 use crate::execution::vector::ValueVector;
@@ -37,6 +38,10 @@ pub struct EdgeCountOperator {
     total_columns: Option<usize>,
     /// Whether the row of totals is out.
     totalled: bool,
+    /// The counter of a chain of hops, when the count goes on past this one.
+    chain: Option<ChainCounter>,
+    /// The sum of two hops, when each input row is their middle node.
+    middle_sum: Option<MiddleSum>,
 }
 
 impl EdgeCountOperator {
@@ -64,7 +69,43 @@ impl EdgeCountOperator {
             reads: None,
             total_columns: None,
             totalled: false,
+            chain: None,
+            middle_sum: None,
         }
+    }
+
+    /// Counts the paths through each input row's node of `sum`'s two hops, in place
+    /// of this operator's own hop. Set after the read counter.
+    #[must_use]
+    pub fn with_middle_sum(mut self, sum: MiddleSum) -> Self {
+        self.middle_sum = Some(sum);
+        self
+    }
+
+    /// Whether what it counts is not the edges it reads, which it counts itself.
+    fn counts_its_own_reads(&self) -> bool {
+        self.chain.is_some() || self.middle_sum.is_some()
+    }
+
+    /// Counts the paths of this hop and then `rest`, where the edges of each pair
+    /// of `different` hops (by position, this hop first) differ, without listing
+    /// them: each node's lists are read once. Set after the read counter.
+    #[must_use]
+    pub fn with_chain(mut self, rest: Vec<CountedHop>, different: &[(usize, usize)]) -> Self {
+        let mut hops = vec![CountedHop {
+            direction: self.direction,
+            edge_types: self.edge_types.clone(),
+            end_labels: self.end_labels.clone(),
+        }];
+        hops.extend(rest);
+        self.chain = Some(ChainCounter::new(
+            Arc::clone(&self.store),
+            hops,
+            different,
+            self.view,
+            self.reads.clone(),
+        ));
+        self
     }
 
     /// Counts the edges counted in `reads`, as the expand counts the edges
@@ -98,13 +139,18 @@ impl EdgeCountOperator {
             })?;
             let mut counted: usize = 0;
             for row in chunk.selected_indices() {
-                counted = counted.saturating_add(self.count_of(source, row)?);
+                counted = counted
+                    .checked_add(self.count_of(source, row)?)
+                    .ok_or_else(total_overflow)?;
             }
-            super::read_counter::count(self.reads.as_deref(), counted);
-            total = total.saturating_add(counted);
+            // A chain counts the lists it reads, not the paths it counts.
+            if !self.counts_its_own_reads() {
+                super::read_counter::count(self.reads.as_deref(), counted);
+            }
+            total = total.checked_add(counted).ok_or_else(total_overflow)?;
         }
         self.totalled = true;
-        let total = i64::try_from(total).unwrap_or(i64::MAX);
+        let total = i64::try_from(total).map_err(|_| total_overflow())?;
         let columns = (0..columns)
             .map(|_| {
                 let mut column = ValueVector::with_capacity(LogicalType::Int64, 1);
@@ -116,13 +162,19 @@ impl EdgeCountOperator {
     }
 
     /// The count of the edges of the node in `row` of `column`: 0 for a null.
-    fn count_of(&self, column: &ValueVector, row: usize) -> Result<usize, OperatorError> {
+    fn count_of(&mut self, column: &ValueVector, row: usize) -> Result<usize, OperatorError> {
         if column.is_null(row) {
             return Ok(0);
         }
         let node = column
             .get_node_id(row)
             .ok_or_else(|| OperatorError::Internal("Expected node ID in source column".into()))?;
+        if let Some(chain) = &mut self.chain {
+            return chain.count(node);
+        }
+        if let Some(sum) = &self.middle_sum {
+            return sum.count(self.store.as_ref(), node, self.view, self.reads.as_deref());
+        }
         Ok(self.store.count_edges(
             node,
             self.direction,
@@ -131,6 +183,11 @@ impl EdgeCountOperator {
             self.view,
         )?)
     }
+}
+
+/// The error of a total no 64-bit integer holds (22003).
+fn total_overflow() -> OperatorError {
+    OperatorError::numeric_out_of_range("a count of paths past 64 bits")
 }
 
 impl Operator for EdgeCountOperator {
@@ -148,20 +205,26 @@ impl Operator for EdgeCountOperator {
             let source = chunk.column(self.source_column).ok_or_else(|| {
                 OperatorError::ColumnNotFound(format!("Column {} not found", self.source_column))
             })?;
-            let mut counts = Vec::with_capacity(rows);
+            let mut counts: Vec<i64> = Vec::with_capacity(rows);
             for row in 0..rows {
-                counts.push(self.count_of(source, row)?);
+                let count = self.count_of(source, row)?;
+                counts.push(i64::try_from(count).map_err(|_| total_overflow())?);
             }
-            super::read_counter::count(self.reads.as_deref(), counts.iter().sum());
+            if !self.counts_its_own_reads() {
+                let read: usize = counts
+                    .iter()
+                    .map(|count| usize::try_from(*count).unwrap_or(0))
+                    .sum();
+                super::read_counter::count(self.reads.as_deref(), read);
+            }
             let kept = counts.iter().filter(|&&count| count > 0).count();
             if kept == 0 {
                 continue;
             }
-            let as_integer = |count: usize| i64::try_from(count).unwrap_or(i64::MAX);
             if kept == rows {
                 let mut column = ValueVector::with_capacity(LogicalType::Int64, rows);
                 for &count in &counts {
-                    column.push_int64(as_integer(count));
+                    column.push_int64(count);
                 }
                 chunk.push_column(column);
                 return Ok(Some(chunk));
@@ -186,7 +249,7 @@ impl Operator for EdgeCountOperator {
                     }
                 }
                 if let Some(to) = output.column_mut(width) {
-                    to.push_int64(as_integer(count));
+                    to.push_int64(count);
                 }
             }
             output.set_count(kept);

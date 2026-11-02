@@ -335,6 +335,38 @@ pub(crate) fn vector_index_from_data(
     ef_construction: Option<usize>,
     quantization: Option<&str>,
 ) -> Result<grafeo_core::index::vector::VectorIndexKind> {
+    // The index holds each node's newest vector: it reads every commit so
+    // far, and every search rechecks its candidates at the reader's view.
+    vector_index_at(
+        graph,
+        label,
+        property,
+        dimensions,
+        metric,
+        m,
+        ef_construction,
+        quantization,
+        ReadView::latest(),
+    )
+}
+
+/// [`vector_index_from_data`] of what `latest` sees.
+#[cfg(feature = "vector-index")]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the parameters of an index and the view it reads"
+)]
+fn vector_index_at(
+    graph: &dyn GraphStore,
+    label: &str,
+    property: &str,
+    dimensions: Option<usize>,
+    metric: Option<&str>,
+    m: Option<usize>,
+    ef_construction: Option<usize>,
+    quantization: Option<&str>,
+    latest: ReadView,
+) -> Result<grafeo_core::index::vector::VectorIndexKind> {
     use grafeo_common::types::Value;
     use grafeo_core::index::vector::VectorIndexKind;
 
@@ -342,9 +374,6 @@ pub(crate) fn vector_index_from_data(
     check_vector_index_dimensions(dimensions)?;
     let quantization = super::GrafeoDB::parse_quantization(quantization)?;
 
-    // The index holds each node's newest vector: it reads every commit so
-    // far, and every search rechecks its candidates at the reader's view.
-    let latest = ReadView::latest();
     let nodes = graph.nodes_by_label(label, latest)?;
     let vector_of = |node_id| -> Result<Option<std::sync::Arc<[f32]>>> {
         Ok(match graph.node_property(node_id, property, latest)? {
@@ -408,11 +437,22 @@ pub(crate) fn text_index_from_data(
     property: &str,
     options: &grafeo_core::index::text::TextIndexOptions,
 ) -> Result<grafeo_core::index::text::InvertedIndex> {
+    // The index holds each node's newest text (see `vector_index_from_data`).
+    text_index_at(graph, label, property, options, ReadView::latest())
+}
+
+/// [`text_index_from_data`] of what `latest` sees.
+#[cfg(feature = "text-index")]
+fn text_index_at(
+    graph: &dyn GraphStore,
+    label: &str,
+    property: &str,
+    options: &grafeo_core::index::text::TextIndexOptions,
+    latest: ReadView,
+) -> Result<grafeo_core::index::text::InvertedIndex> {
     use grafeo_common::types::Value;
     use grafeo_core::index::text::InvertedIndex;
 
-    // The index holds each node's newest text (see `vector_index_from_data`).
-    let latest = ReadView::latest();
     let mut index = InvertedIndex::with_options(options.clone());
     for node_id in graph.nodes_by_label(label, latest)? {
         if let Some(Value::String(text)) = graph.node_property(node_id, property, latest)? {
@@ -420,6 +460,50 @@ pub(crate) fn text_index_from_data(
         }
     }
     Ok(index)
+}
+
+/// The vector or text index `record` puts, built from what `view` sees: a commit's, for
+/// a statement of its transaction, holds what the transaction wrote and what others
+/// committed since. `None` for a property index, built as it is put.
+///
+/// # Errors
+///
+/// The errors of the build, which refuse the commit before anything is logged.
+pub(crate) fn built_for_commit(
+    store: &dyn grafeo_core::graph::GraphStore,
+    record: &IndexRecord,
+    view: ReadView,
+) -> Result<Option<crate::transaction::BuiltIndex>> {
+    #[cfg(not(any(feature = "vector-index", feature = "text-index")))]
+    let _ = (store, view);
+    let mut graphs = super::catalog_records::graph_indexes(vec![record.clone()])?;
+    let Some(indexes) = graphs.pop() else {
+        return Ok(None);
+    };
+    #[cfg(feature = "vector-index")]
+    if let Some(def) = indexes.vector.into_iter().next() {
+        let quantization = def.quantization.and_then(quantization_name);
+        return vector_index_at(
+            store,
+            &def.label,
+            &def.property,
+            Some(def.dimensions),
+            Some(def.metric.name()),
+            Some(def.m),
+            Some(def.ef_construction),
+            quantization,
+            view,
+        )
+        .map(|index| Some(crate::transaction::BuiltIndex::Vector(index)));
+    }
+    #[cfg(feature = "text-index")]
+    if let Some(def) = indexes.text.into_iter().next() {
+        return text_index_at(store, &def.label, &def.property, &def.options, view)
+            .map(|index| Some(crate::transaction::BuiltIndex::Text(index)));
+    }
+    #[cfg(not(any(feature = "vector-index", feature = "text-index")))]
+    let _ = indexes;
+    Ok(None)
 }
 
 /// The catalog record of `index`, a vector index of `property` on the nodes

@@ -16,19 +16,11 @@ import { parseGtestFile, coerceParams, paramValue } from './parser.mjs'
 import { assertRowsSorted, assertRowsOrdered, assertRowsWithPrecision, assertHash, describeError, assertGqlStatus, assertTerms } from './comparator.mjs'
 
 // ---------------------------------------------------------------------------
-// Import GrafeoDB (skip all tests gracefully if unavailable)
+// Import GrafeoDB. A binding that does not load fails the run: it must not pass
+// as thousands of skipped tests.
 // ---------------------------------------------------------------------------
 
-let GrafeoDB
-let GRAFEO_AVAILABLE = false
-
-try {
-  const mod = await import('../../../../crates/bindings/node/grafeo.js')
-  GrafeoDB = mod.GrafeoDB
-  GRAFEO_AVAILABLE = true
-} catch {
-  // Bindings not built; all tests will be skipped
-}
+const { GrafeoDB } = await import('../../../../crates/bindings/node/grafeo.js')
 
 // ---------------------------------------------------------------------------
 // Paths
@@ -106,7 +98,8 @@ let _features = null
 function getFeatures(db) {
   if (!_features) {
     const info = db.info()
-    _features = new Set(info.features || [])
+    if (!info.features) throw new Error('db.info() lists no features')
+    _features = new Set(info.features)
   }
   return _features
 }
@@ -191,7 +184,6 @@ for (const filePath of gtestFiles) {
       if (tc.variants && Object.keys(tc.variants).length > 0) {
         for (const [lang, query] of Object.entries(tc.variants)) {
           it(`${tc.name}_${lang}`, async (ctx) => {
-            if (!GRAFEO_AVAILABLE) return ctx.skip()
             if (tc.skip) return ctx.skip()
             const db = GrafeoDB.create()
             try {
@@ -214,8 +206,6 @@ for (const filePath of gtestFiles) {
       }
 
       it(tc.name, async (ctx) => {
-        if (!GRAFEO_AVAILABLE) return ctx.skip()
-
         // Skip by field
         if (tc.skip) return ctx.skip()
 

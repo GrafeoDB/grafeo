@@ -57,8 +57,8 @@ Set<String> _getCompiledFeatures() {
     final db = GrafeoDB.memory();
     try {
       final info = db.info();
-      final features = info['features'] as List<dynamic>?;
-      _compiledFeatures = features?.map((e) => e.toString()).toSet() ?? {};
+      final features = info['features'] as List<dynamic>;
+      _compiledFeatures = features.map((e) => e.toString()).toSet();
     } finally {
       db.close();
     }
@@ -1348,8 +1348,7 @@ void main() {
 
   if (gtestFiles.isEmpty) {
     test('no .gtest files found', () {
-      // Not a failure: the spec files may not be present in all environments
-      markTestSkipped('No .gtest files found under ${_specDir.path}');
+      fail('No .gtest files found under ${_specDir.path}');
     });
     return;
   }

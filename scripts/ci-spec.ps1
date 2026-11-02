@@ -139,8 +139,8 @@ if (Should-Run "csharp") {
         Copy-Item $libSrc $csDest -Force
         Push-Location $csDest
         $env:LD_LIBRARY_PATH = $csDest
-        # Windows finds native DLLs via PATH, not LD_LIBRARY_PATH; without this the
-        # runner silently skips every test or loads a stale copy from bin\.
+        # Windows finds native DLLs via PATH, not LD_LIBRARY_PATH; without this every
+        # test fails or the runner loads a stale copy from bin\.
         # Scoped to this block so later steps see the original PATH.
         $originalPath = $env:PATH
         $env:PATH = "$csDest$([System.IO.Path]::PathSeparator)$env:PATH"

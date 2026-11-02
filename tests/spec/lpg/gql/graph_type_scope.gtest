@@ -1,0 +1,295 @@
+# Graph type scope
+#
+# A graph type's rules hold in the graphs bound to it, and nowhere else: the
+# default graph and other named graphs store what is written, under any label
+# the type declares. A node or edge type no graph type lists is a rule by its
+# label, in every graph without a type of its own. A closed graph type with
+# nothing in it allows no nodes. A rule over data that breaks it is refused
+# with G2000; a graph type alone has no data to check.
+
+meta:
+  language: gql
+  model: lpg
+  section: "20.1"
+  title: Graph type scope
+  dataset: empty
+
+tests:
+
+  # ---------------------------------------------------------------------------
+  # Only the bound graph
+  # ---------------------------------------------------------------------------
+
+  - name: a_graph_type_no_graph_is_bound_to_checks_nothing
+    statements:
+      - "CREATE GRAPH TYPE routes { (:City {name STRING NOT NULL, population INT64})-[:ROUTE {km INT64}]->(:City) }"
+      - "INSERT (:City {population: 'many'})"
+      - "MATCH (c:City) RETURN c.population"
+    expect:
+      rows:
+        - [many]
+
+  - name: the_default_graph_is_not_bound_by_another_graphs_type
+    statements:
+      - "CREATE GRAPH TYPE routes { (:City {name STRING NOT NULL, population INT64})-[:ROUTE {km INT64}]->(:City) }"
+      - "CREATE GRAPH atlas TYPED routes"
+      - "INSERT (:City {population: 'many'})-[:ROUTE {km: 'far'}]->(:Town)"
+      - "MATCH (c:City)-[r:ROUTE]->(t:Town) RETURN c.population, r.km"
+    expect:
+      rows:
+        - [many, far]
+
+  - name: another_named_graph_is_not_bound_by_it
+    statements:
+      - "CREATE GRAPH TYPE routes { (:City {name STRING NOT NULL, population INT64})-[:ROUTE {km INT64}]->(:City) }"
+      - "CREATE GRAPH atlas TYPED routes"
+      - "CREATE GRAPH plain"
+      - "USE GRAPH plain"
+      - "INSERT (:City {population: 'many'})"
+      - "MATCH (c:City) RETURN c.population"
+    expect:
+      rows:
+        - [many]
+
+  - name: the_bound_graph_keeps_its_rules_after_a_write_elsewhere
+    statements:
+      - "CREATE GRAPH TYPE routes { (:City {name STRING NOT NULL, population INT64})-[:ROUTE {km INT64}]->(:City) }"
+      - "CREATE GRAPH atlas TYPED routes"
+      - "INSERT (:City {population: 'many'})"
+      - "USE GRAPH atlas"
+      - "INSERT (:City {name: 'Paris', population: 'many'})"
+    expect:
+      error: population
+      gql_status: "G2000"
+
+  - name: a_default_fills_in_only_in_the_bound_graph
+    statements:
+      - "CREATE GRAPH TYPE people (NODE TYPE Person (name STRING NOT NULL DEFAULT 'Mia', age INT64))"
+      - "CREATE GRAPH circle TYPED people"
+      - "INSERT (:Person {age: 1})"
+      - "USE GRAPH circle"
+      - "INSERT (:Person {age: 2})"
+      - "USE GRAPH default"
+      - "MATCH (p:Person) RETURN p.age, p.name IS NULL"
+    expect:
+      rows:
+        - [1, true]
+
+  - name: the_bound_graph_fills_in_its_default
+    statements:
+      - "CREATE GRAPH TYPE people (NODE TYPE Person (name STRING NOT NULL DEFAULT 'Mia', age INT64))"
+      - "CREATE GRAPH circle TYPED people"
+      - "USE GRAPH circle"
+      - "INSERT (:Person {age: 2})"
+      - "MATCH (p:Person) RETURN p.age, p.name"
+    expect:
+      rows:
+        - [2, Mia]
+
+  # ---------------------------------------------------------------------------
+  # A type by its label, until a graph type lists it
+  # ---------------------------------------------------------------------------
+
+  - name: a_type_no_graph_type_lists_is_a_rule_by_its_label
+    statements:
+      - "CREATE NODE TYPE Person (name STRING NOT NULL)"
+      - "INSERT (:Person {age: 30})"
+    expect:
+      error: name
+      gql_status: "G2000"
+
+  - name: a_type_no_graph_type_lists_holds_in_a_named_graph
+    statements:
+      - "CREATE NODE TYPE Person (name STRING NOT NULL)"
+      - "CREATE GRAPH plain"
+      - "USE GRAPH plain"
+      - "INSERT (:Person {age: 30})"
+    expect:
+      error: name
+      gql_status: "G2000"
+
+  - name: a_type_a_graph_type_lists_holds_only_through_that_graph_type
+    statements:
+      - "CREATE NODE TYPE Person (name STRING NOT NULL)"
+      - "CREATE GRAPH TYPE social (NODE TYPE Person)"
+      - "INSERT (:Person {age: 30})"
+      - "MATCH (p:Person) RETURN p.age"
+    expect:
+      rows:
+        - [30]
+
+  # ---------------------------------------------------------------------------
+  # An empty closed graph type
+  # ---------------------------------------------------------------------------
+
+  - name: an_empty_closed_graph_type_allows_no_labelled_node
+    statements:
+      - "CREATE GRAPH TYPE nothing {node_types: [], edge_types: []}"
+      - "CREATE GRAPH closed TYPED nothing"
+      - "USE GRAPH closed"
+      - "INSERT (:Person {name: 'Gus'})"
+    expect:
+      error: nothing
+      gql_status: "G2000"
+
+  - name: an_empty_closed_graph_type_allows_no_node_without_a_label
+    statements:
+      - "CREATE GRAPH TYPE nothing {node_types: [], edge_types: []}"
+      - "CREATE GRAPH closed TYPED nothing"
+      - "USE GRAPH closed"
+      - "INSERT ({name: 'Gus'})"
+    expect:
+      gql_status: "G2000"
+
+  - name: an_empty_closed_graph_type_leaves_other_graphs_alone
+    statements:
+      - "CREATE GRAPH TYPE nothing {node_types: [], edge_types: []}"
+      - "CREATE GRAPH closed TYPED nothing"
+      - "INSERT (:Person {name: 'Gus'})"
+      - "MATCH (p:Person) RETURN p.name"
+    expect:
+      rows:
+        - [Gus]
+
+  # ---------------------------------------------------------------------------
+  # Rules over data
+  # ---------------------------------------------------------------------------
+
+  - name: a_node_type_over_data_that_breaks_it
+    statements:
+      - "INSERT (:City {size: 3})"
+      - "CREATE NODE TYPE City (name STRING NOT NULL)"
+    expect:
+      error: "missing required property 'name'"
+      gql_status: "G2000"
+
+  - name: a_new_required_property_over_data_without_it
+    statements:
+      - "CREATE NODE TYPE City (name STRING)"
+      - "INSERT (:City {name: 'Paris'})"
+      - "ALTER NODE TYPE City ADD PROPERTY size INTEGER NOT NULL"
+    expect:
+      error: "missing required property 'size'"
+      gql_status: "G2000"
+
+  - name: an_edge_type_over_data_that_breaks_it
+    statements:
+      - "INSERT (:City)-[:ROAD]->(:City)"
+      - "CREATE EDGE TYPE ROAD (km INTEGER NOT NULL)"
+    expect:
+      error: "missing required property 'km'"
+      gql_status: "G2000"
+
+  - name: a_graph_type_alone_checks_no_data
+    statements:
+      - "INSERT (:City {size: 3})"
+      - "CREATE GRAPH TYPE towns (NODE TYPE City (name STRING NOT NULL))"
+      - "MATCH (c:City) RETURN c.size"
+    expect:
+      rows:
+        - [3]
+
+  - name: a_node_type_the_data_meets_is_accepted
+    statements:
+      - "INSERT (:City {name: 'Paris'})"
+      - "CREATE NODE TYPE City (name STRING NOT NULL)"
+      - "MATCH (c:City) RETURN c.name"
+    expect:
+      rows:
+        - [Paris]
+
+  # ---------------------------------------------------------------------------
+  # A drop or a replace takes the types only it listed
+  # ---------------------------------------------------------------------------
+
+  - name: a_drop_takes_a_standalone_type_only_it_listed
+    statements:
+      - "CREATE NODE TYPE City (name STRING NOT NULL)"
+      - "CREATE GRAPH TYPE atlas (NODE TYPE City)"
+      - "DROP GRAPH TYPE atlas"
+      - "INSERT (:City {size: 1})"
+      - "MATCH (c:City) RETURN c.size"
+    expect:
+      rows:
+        - [1]
+
+  - name: a_drop_leaves_a_type_another_graph_type_lists
+    statements:
+      - "CREATE NODE TYPE Person (name STRING NOT NULL)"
+      - "CREATE GRAPH TYPE a (NODE TYPE Person)"
+      - "CREATE GRAPH TYPE b (NODE TYPE Person)"
+      - "CREATE GRAPH circle TYPED b"
+      - "DROP GRAPH TYPE a"
+      - "USE GRAPH circle"
+      - "INSERT (:Person {age: 1})"
+    expect:
+      error: "not declared by node type 'Person' of closed graph type 'b'"
+      gql_status: "G2000"
+
+  - name: a_named_constraint_refuses_the_drop
+    statements:
+      - "CREATE NODE TYPE City (name STRING NOT NULL)"
+      - "CREATE GRAPH TYPE atlas (NODE TYPE City)"
+      - "CREATE CONSTRAINT city_names FOR (n:City) ON (n.name) UNIQUE"
+      - "DROP GRAPH TYPE atlas"
+    expect:
+      error: "constraint 'city_names' is on it: drop the constraint first"
+      gql_status: "42000"
+
+  - name: an_altered_drop_takes_a_type_only_it_listed
+    statements:
+      - "CREATE NODE TYPE City (name STRING NOT NULL)"
+      - "CREATE NODE TYPE Town (name STRING NOT NULL)"
+      - "CREATE GRAPH TYPE atlas (NODE TYPE City, NODE TYPE Town)"
+      - "ALTER GRAPH TYPE atlas DROP NODE TYPE City"
+      - "INSERT (:City {size: 1})"
+      - "MATCH (c:City) RETURN c.size"
+    expect:
+      rows:
+        - [1]
+
+  - name: a_replace_takes_what_it_stops_listing
+    statements:
+      - "CREATE NODE TYPE City (name STRING NOT NULL)"
+      - "CREATE NODE TYPE Town (name STRING NOT NULL)"
+      - "CREATE GRAPH TYPE atlas (NODE TYPE City)"
+      - "CREATE OR REPLACE GRAPH TYPE atlas (NODE TYPE Town)"
+      - "INSERT (:City {size: 1})"
+      - "MATCH (c:City) RETURN c.size"
+    expect:
+      rows:
+        - [1]
+
+  - name: a_named_constraint_refuses_a_replace_that_stops_listing_its_type
+    statements:
+      - "CREATE NODE TYPE City (name STRING NOT NULL)"
+      - "CREATE NODE TYPE Town (name STRING NOT NULL)"
+      - "CREATE GRAPH TYPE atlas (NODE TYPE City)"
+      - "CREATE CONSTRAINT city_names FOR (n:City) ON (n.name) UNIQUE"
+      - "CREATE OR REPLACE GRAPH TYPE atlas (NODE TYPE Town)"
+    expect:
+      error: city_names
+      gql_status: "42000"
+
+  # ---------------------------------------------------------------------------
+  # A name stands for one type
+  # ---------------------------------------------------------------------------
+
+  - name: a_second_different_declaration_of_a_name_is_refused
+    statements:
+      - "CREATE GRAPH TYPE a (NODE TYPE Person (name STRING NOT NULL))"
+      - "CREATE GRAPH TYPE b (NODE TYPE Person (age INT64))"
+    expect:
+      error: "node type 'Person' is already declared differently"
+      gql_status: "42000"
+
+  - name: the_same_declaration_twice_is_one_type
+    statements:
+      - "CREATE GRAPH TYPE a (NODE TYPE Person (name STRING NOT NULL, age INT64))"
+      - "CREATE GRAPH TYPE b (NODE TYPE Person (age INT64, name STRING NOT NULL))"
+      - "CREATE GRAPH circle TYPED b"
+      - "USE GRAPH circle"
+      - "INSERT (:Person {age: 1})"
+    expect:
+      error: name
+      gql_status: "G2000"

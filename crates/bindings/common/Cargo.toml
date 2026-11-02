@@ -14,7 +14,7 @@ grafeo-common = { path = "../../grafeo-common" }
 
 serde_json = { version = "1.0", features = ["arbitrary_precision"] }
 # Bytes travel in JSON as the `$bytes` tag, standard base64 with padding
-base64 = "0.22"
+base64 = "0.23"
 
 [features]
 default = ["embedded"]

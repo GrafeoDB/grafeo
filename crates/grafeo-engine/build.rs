@@ -8,6 +8,10 @@
 //! (`algos`), for the code that runs a stored procedure's GQL body.
 
 fn main() {
+    // What this prints depends only on the features: without this line Cargo
+    // reruns it, and so rebuilds the crate, whenever any file of the package
+    // changes, a test file too.
+    println!("cargo::rerun-if-changed=build.rs");
     println!("cargo::rustc-check-cfg=cfg(query_language)");
     println!("cargo::rustc-check-cfg=cfg(lpg_language)");
     println!("cargo::rustc-check-cfg=cfg(rdf_language)");

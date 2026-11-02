@@ -7,16 +7,13 @@
 //! undone by a rollback, and kept by a close and a crash.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test write_queries_rollback_and_reopen
+//! cargo test -p grafeo-engine --all-features --test main write_queries_rollback_and_reopen::
 //! ```
 
 #![cfg(all(feature = "gql", feature = "cypher"))]
 
 use grafeo_common::types::Value;
 use grafeo_engine::GrafeoDB;
-
-#[cfg(all(feature = "wal", feature = "grafeo-file"))]
-mod common;
 
 /// The #317 statement: counts how often `MERGE` saw the counter `id`.
 fn merge_counter(id: i64) -> String {
@@ -211,7 +208,7 @@ mod persistent {
     #[test]
     fn merge_self_reference_survives_a_crash() {
         let (_dir, db) = reopened_after_crash(
-            "persistent::merge_self_reference_survives_a_crash",
+            &grafeo_common::test_path!("merge_self_reference_survives_a_crash"),
             open,
             |db| {
                 for id in [1, 1, 2] {
@@ -252,7 +249,7 @@ mod persistent {
     #[test]
     fn match_match_create_survives_a_crash() {
         let (_dir, db) = reopened_after_crash(
-            "persistent::match_match_create_survives_a_crash",
+            &grafeo_common::test_path!("match_match_create_survives_a_crash"),
             open,
             |db| {
                 for statement in TWO_NODES {

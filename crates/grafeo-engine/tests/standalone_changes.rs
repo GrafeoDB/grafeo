@@ -12,7 +12,7 @@
 //! into a dropped graph and brings it back on replay.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test standalone_changes
+//! cargo test -p grafeo-engine --all-features --test main standalone_changes::
 //! ```
 
 #![cfg(feature = "gql")]
@@ -213,8 +213,7 @@ mod replay {
     /// it left its sidecar WAL, which the reopen replays.
     fn crash_after(scenario: &str, path: &Path) {
         let status = child_process::run(
-            std::process::Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", "replay::crash_child", "--nocapture"])
+            grafeo_common::child_test!("crash_child")
                 .env(SCENARIO_VAR, scenario)
                 .env(PATH_VAR, path),
         )

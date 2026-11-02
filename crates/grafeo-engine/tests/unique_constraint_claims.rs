@@ -13,7 +13,7 @@
 //! go with the transaction at its commit or rollback.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test unique_constraint_claims
+//! cargo test -p grafeo-engine --all-features --test main unique_constraint_claims::
 //! ```
 
 #![cfg(feature = "gql")]
@@ -510,8 +510,7 @@ fn eight_threads_insert_if_absent_commit_once_under_a_sql_primary_key() {
 /// A crash after the first of two writers committed and the second failed:
 /// the reopened database holds the key once.
 #[cfg(all(feature = "wal", feature = "grafeo-file"))]
-#[path = "common/replay.rs"]
-mod replay;
+use crate::common::replay;
 
 #[cfg(all(feature = "wal", feature = "grafeo-file"))]
 mod persistent {
@@ -520,7 +519,7 @@ mod persistent {
     #[test]
     fn a_crash_after_the_race_keeps_one() {
         let (_dir, db) = replay::reopened_after_crash(
-            "persistent::a_crash_after_the_race_keeps_one",
+            &grafeo_common::test_path!("a_crash_after_the_race_keeps_one"),
             |path| GrafeoDB::open(path).unwrap(),
             |db| {
                 db.execute(CONSTRAINT).unwrap();

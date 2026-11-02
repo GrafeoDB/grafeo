@@ -14,12 +14,12 @@
 //! it.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test type_ddl_declarations
+//! cargo test -p grafeo-engine --all-features --test main type_ddl_declarations::
 //! ```
 
 #![cfg(all(feature = "gql", feature = "grafeo-file", feature = "wal"))]
 
-mod common;
+use crate::common;
 
 use std::path::Path;
 
@@ -198,7 +198,7 @@ fn a_brace_form_graph_type_survives_a_checkpoint_and_a_reopen() {
 #[test]
 fn a_brace_form_graph_type_survives_a_wal_replay() {
     let (_dir, db) = common::replay::reopened_after_crash(
-        "a_brace_form_graph_type_survives_a_wal_replay",
+        &grafeo_common::test_path!("a_brace_form_graph_type_survives_a_wal_replay"),
         open,
         |db| {
             db.execute(BRACE_FORM).unwrap();
@@ -330,12 +330,15 @@ fn map_properties_survive_a_checkpoint_and_a_reopen() {
 
 #[test]
 fn map_properties_survive_a_wal_replay() {
-    let (_dir, db) =
-        common::replay::reopened_after_crash("map_properties_survive_a_wal_replay", open, |db| {
+    let (_dir, db) = common::replay::reopened_after_crash(
+        &grafeo_common::test_path!("map_properties_survive_a_wal_replay"),
+        open,
+        |db| {
             for statement in MAP_TYPES {
                 db.execute(statement).unwrap();
             }
-        });
+        },
+    );
     assert_eq!(
         row_of(&db, "SHOW NODE TYPES", "Config")[1],
         Value::from("settings MAP NOT NULL")

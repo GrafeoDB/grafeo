@@ -7,7 +7,7 @@
 //! then reopen and check exactly which writes survived.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --features full --test wal_transaction_groups
+//! cargo test -p grafeo-engine --features full --test main wal_transaction_groups::
 //! ```
 
 #![allow(missing_docs)]
@@ -49,8 +49,7 @@ mod tests {
     /// database, like a crash.
     fn crash_after(scenario: &str, path: &Path) {
         let status = child_process::run(
-            std::process::Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", "tests::crash_child", "--nocapture"])
+            grafeo_common::child_test!("crash_child")
                 .env(SCENARIO_VAR, scenario)
                 .env(PATH_VAR, path),
         )

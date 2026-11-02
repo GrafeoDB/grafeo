@@ -6,13 +6,12 @@
 //! and `DROP INDEX` of its name failed; `USING VECTOR` recorded it as Hash.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test vector_index_names
+//! cargo test -p grafeo-engine --all-features --test main vector_index_names::
 //! ```
 
 #![cfg(all(feature = "vector-index", feature = "wal", feature = "gql"))]
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use grafeo_common::testing::child_process;
 use grafeo_engine::GrafeoDB;
@@ -56,8 +55,7 @@ fn database(path: &Path) -> GrafeoDB {
 /// Runs this binary's child test for `step` at `path`.
 fn child(step: &str, path: &Path) {
     let status = child_process::run(
-        Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "vector_names_child", "--nocapture"])
+        grafeo_common::child_test!("vector_names_child")
             .env(STEP_VAR, step)
             .env(PATH_VAR, path),
     )

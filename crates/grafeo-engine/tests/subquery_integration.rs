@@ -7,7 +7,7 @@
 //! - apply.rs: EXISTS semi-join, anti-join, optional NULL padding
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --features full --test subquery_integration
+//! cargo test -p grafeo-engine --features full --test main subquery_integration::
 //! ```
 
 use grafeo_common::types::Value;

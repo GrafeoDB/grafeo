@@ -16,7 +16,7 @@
 //!
 //! Run with:
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test value_equivalence
+//! cargo test -p grafeo-engine --all-features --test main value_equivalence::
 //! ```
 
 use grafeo_common::types::Value;

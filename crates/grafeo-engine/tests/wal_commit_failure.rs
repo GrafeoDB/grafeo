@@ -20,7 +20,7 @@
 //! that exits from its panic hook, so nothing unwinds into a cleanup).
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --features full,testing-crash-injection --test wal_commit_failure
+//! cargo test -p grafeo-engine --all-features --test main wal_commit_failure::
 //! ```
 
 #![allow(
@@ -341,8 +341,7 @@ mod tests {
                 let dir = tempfile::tempdir().unwrap();
                 let path = dir.path().join("db.grafeo");
                 let status = child_process::run(
-                    std::process::Command::new(std::env::current_exe().unwrap())
-                        .args(["--exact", "tests::crash_child", "--nocapture"])
+                    grafeo_common::child_test!("crash_child")
                         .env(WRITE_VAR, index.to_string())
                         .env(POINT_VAR, point.to_string())
                         .env(PATH_VAR, &path),

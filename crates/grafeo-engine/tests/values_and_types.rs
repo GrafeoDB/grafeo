@@ -7,7 +7,7 @@
 //! Microsoft Corporation.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test values_and_types
+//! cargo test -p grafeo-engine --all-features --test main values_and_types::
 //! ```
 
 #![cfg(all(feature = "gql", feature = "cypher"))]

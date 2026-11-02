@@ -22,6 +22,8 @@ Add `--json` for machine-readable output. Exit code 1 when an error is found.
     T6  docs/stability.md's Experimental table and the `# Stability: Experimental` sections
         of the facade's crates agree both ways; the facade and its modules have a
         `# Stability` section
+    T7  in a crate with `autotests = false`, every test file is a `mod` of tests/main.rs or a
+        `[[test]]` entry with a comment saying why, not both
     D1  an added #[allow(...)] states a reason = "..."
     D2  no em or en dashes in added Markdown lines or code comments
     D3  no added references to private planning notes; no internal phase wording in docs
@@ -139,6 +141,7 @@ HINTS = {
     "T4": "rewrite with a comma, colon or parentheses",
     "T5": "add `rust-version.workspace = true` to the crate's [package]",
     "T6": "an experimental item has a `# Stability: Experimental` section and a row in docs/stability.md; a module the facade exports has a `# Stability` section",
+    "T7": "declare a test file with `mod name;` in tests/main.rs; a separate `[[test]]` entry has a comment above it saying why it cannot be there",
     "D1": 'add reason = "..." naming the bound or invariant that makes it safe',
     "D2": "em or en dash; rewrite with a comma, colon or parentheses",
     "D3": "public text must stand on its own; restate the content or link a public issue",
@@ -398,6 +401,73 @@ def rust_version_findings(root: Path, metadata: dict) -> list[Finding]:
                 f"not the workspace's {msrv}",
             )
         )
+    return findings
+
+
+# ------------------------------------------------------------------ test binaries
+
+#: A file module of `tests/main.rs`.
+TEST_MODULE = re.compile(r"^\s*mod (\w+);", re.MULTILINE)
+
+
+def test_binary_findings(root: Path, files: list[str]) -> list[Finding]:
+    """T7: every test file of a crate that lists its tests is built, once, for a stated reason.
+
+    With `autotests = false` Cargo builds only what the manifest names, so a test file that
+    `tests/main.rs` does not declare would never compile and its tests would never run, with
+    nothing to show for it. A separate binary links the whole crate again, so each states why.
+    """
+    findings = []
+    for rel in files:
+        if not (rel.startswith("crates/") and rel.endswith("/Cargo.toml")):
+            continue
+        text = read_text(root / rel)
+        if text is None or not re.search(r"^autotests\s*=\s*false", text, re.MULTILINE):
+            continue
+        tests = rel.removesuffix("Cargo.toml") + "tests/"
+        stems = {
+            file[len(tests) : -len(".rs")]
+            for file in files
+            if file.startswith(tests)
+            and file.endswith(".rs")
+            and "/" not in file[len(tests) :]
+        }
+        main = read_text(root / f"{tests}main.rs") or ""
+        modules = set(TEST_MODULE.findall(main))
+        entries = tomllib.loads(text).get("test", [])
+        separate = {
+            Path(entry.get("path", "")).stem
+            for entry in entries
+            if entry.get("name") != "main"
+        }
+        for stem in sorted(stems - modules - separate - {"main"}):
+            findings.append(
+                finding(
+                    "T7", f"{tests}{stem}.rs", None, "this test file is never built"
+                )
+            )
+        for stem in sorted(modules & separate):
+            findings.append(
+                finding(
+                    "T7", f"{tests}{stem}.rs", None, "this test file is built twice"
+                )
+            )
+        lines = text.splitlines()
+        for number, line in enumerate(lines):
+            if (
+                line.strip() != "[[test]]"
+                or lines[number + 1].strip() == 'name = "main"'
+            ):
+                continue
+            if number == 0 or not lines[number - 1].lstrip().startswith("#"):
+                findings.append(
+                    finding(
+                        "T7",
+                        rel,
+                        number + 1,
+                        f"{lines[number + 1].strip()} has no comment saying why it is separate",
+                    )
+                )
     return findings
 
 
@@ -748,6 +818,7 @@ def tree_findings(root: Path, metadata_arg: str | None) -> list[Finding]:
     files = git(root, "ls-files").splitlines()
     findings = toolchain_findings(root) + text_findings(root, files)
     findings += stability_findings(root, files)
+    findings += test_binary_findings(root, files)
     if metadata_arg != "none" and (root / "Cargo.toml").exists():
         if metadata_arg:
             metadata = json.loads(Path(metadata_arg).read_text(encoding="utf-8"))
@@ -1271,7 +1342,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--json", action="store_true", help="print findings as JSON")
     commands = parser.add_subparsers(dest="command", required=True)
-    tree = commands.add_parser("tree", help="whole-repository rules (T1 to T6)")
+    tree = commands.add_parser("tree", help="whole-repository rules (T1 to T7)")
     tree.add_argument(
         "--metadata", help="cargo metadata JSON file, or 'none' to skip T1"
     )

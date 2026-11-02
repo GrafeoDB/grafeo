@@ -4,7 +4,7 @@
 //! across GQL, Cypher, and SPARQL query languages.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --features full --test temporal_types
+//! cargo test -p grafeo-engine --features full --test main temporal_types::
 //! ```
 
 use grafeo_common::types::Value;

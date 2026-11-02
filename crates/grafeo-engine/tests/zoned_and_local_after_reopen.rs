@@ -6,7 +6,7 @@
 //! finds.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test zoned_and_local_after_reopen
+//! cargo test -p grafeo-engine --all-features --test main zoned_and_local_after_reopen::
 //! ```
 
 #![cfg(all(

@@ -10,7 +10,7 @@
 //! here, not the engine's own enumeration.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test undirected_trail_reach
+//! cargo test -p grafeo-engine --all-features --test main undirected_trail_reach::
 //! ```
 
 #![cfg(all(feature = "gql", feature = "cypher", feature = "sql-pgq"))]

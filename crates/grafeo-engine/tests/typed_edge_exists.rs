@@ -13,7 +13,7 @@
 //! In GQL and Cypher.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test typed_edge_exists
+//! cargo test -p grafeo-engine --all-features --test main typed_edge_exists::
 //! ```
 
 #![cfg(all(feature = "gql", feature = "cypher"))]

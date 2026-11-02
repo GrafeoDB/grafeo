@@ -6,7 +6,7 @@
 //! a spilled group must be the language's identity, not the stored bytes.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test temporal_grouping_spill
+//! cargo test -p grafeo-engine --all-features --test main temporal_grouping_spill::
 //! ```
 
 #![cfg(all(feature = "gql", feature = "cypher", feature = "spill"))]

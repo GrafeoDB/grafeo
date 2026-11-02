@@ -3,7 +3,7 @@
 //! it reads, and does not change how often it runs.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test subquery_filters
+//! cargo test -p grafeo-engine --all-features --test main subquery_filters::
 //! ```
 
 #![cfg(feature = "gql")]

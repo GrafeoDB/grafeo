@@ -25,16 +25,16 @@
 //! Tests verify the fix for #327 and run by default:
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --features full --test session_wal_durability
+//! cargo test -p grafeo-engine --features full --test main session_wal_durability::
 //! ```
 
 #![allow(missing_docs)]
 
 #[cfg(all(feature = "wal", feature = "grafeo-file"))]
-mod common;
+use crate::common;
 
 #[cfg(all(feature = "wal", feature = "grafeo-file"))]
-mod session_wal_durability {
+mod durability {
     use super::common::replay::reopened_after_crash;
     use grafeo_common::types::{EdgeId, NodeId, PropertyKey, Value};
     use grafeo_engine::config::StorageFormat;
@@ -59,7 +59,7 @@ mod session_wal_durability {
     #[test]
     fn session_create_node_with_props_survives_reopen() {
         let (_dir, db) = reopened_after_crash(
-            "session_wal_durability::session_create_node_with_props_survives_reopen",
+            &grafeo_common::test_path!("session_create_node_with_props_survives_reopen"),
             open,
             |db| {
                 let mut session = db.session();
@@ -85,7 +85,7 @@ mod session_wal_durability {
     #[test]
     fn session_create_edge_with_props_survives_reopen() {
         let (_dir, db) = reopened_after_crash(
-            "session_wal_durability::session_create_edge_with_props_survives_reopen",
+            &grafeo_common::test_path!("session_create_edge_with_props_survives_reopen"),
             open,
             |db| {
                 // Anchor nodes via the WAL-correct DB-direct path so we know the
@@ -123,7 +123,7 @@ mod session_wal_durability {
     #[test]
     fn session_set_node_property_survives_reopen() {
         let (_dir, db) = reopened_after_crash(
-            "session_wal_durability::session_set_node_property_survives_reopen",
+            &grafeo_common::test_path!("session_set_node_property_survives_reopen"),
             open,
             |db| {
                 // Create node via DB-direct path so the node itself is durable;
@@ -161,7 +161,7 @@ mod session_wal_durability {
     #[test]
     fn session_set_edge_property_survives_reopen() {
         let (_dir, db) = reopened_after_crash(
-            "session_wal_durability::session_set_edge_property_survives_reopen",
+            &grafeo_common::test_path!("session_set_edge_property_survives_reopen"),
             open,
             |db| {
                 // Anchor edge via DB-direct path; isolate the property bug.
@@ -203,7 +203,7 @@ mod session_wal_durability {
     #[test]
     fn cypher_create_node_with_props_survives_reopen() {
         let (_dir, db) = reopened_after_crash(
-            "session_wal_durability::cypher_create_node_with_props_survives_reopen",
+            &grafeo_common::test_path!("cypher_create_node_with_props_survives_reopen"),
             open,
             |db| {
                 db.execute_language("CREATE (:Probe {name: 'cypher'});", "cypher", None)
@@ -227,7 +227,7 @@ mod session_wal_durability {
     #[test]
     fn concurrent_session_direct_ingest_survives_a_crash() {
         let (_dir, db) = reopened_after_crash(
-            "session_wal_durability::concurrent_session_direct_ingest_survives_a_crash",
+            &grafeo_common::test_path!("concurrent_session_direct_ingest_survives_a_crash"),
             open,
             |db| {
                 std::thread::scope(|scope| {
@@ -278,7 +278,7 @@ mod session_wal_durability {
     #[test]
     fn session_create_node_no_props_survives_reopen() {
         let (_dir, db) = reopened_after_crash(
-            "session_wal_durability::session_create_node_no_props_survives_reopen",
+            &grafeo_common::test_path!("session_create_node_no_props_survives_reopen"),
             open,
             |db| {
                 let mut session = db.session();
@@ -297,7 +297,7 @@ mod session_wal_durability {
     #[test]
     fn session_create_edge_no_props_survives_reopen() {
         let (_dir, db) = reopened_after_crash(
-            "session_wal_durability::session_create_edge_no_props_survives_reopen",
+            &grafeo_common::test_path!("session_create_edge_no_props_survives_reopen"),
             open,
             |db| {
                 let alix = db.create_node(&["Person"]).unwrap();
@@ -319,7 +319,7 @@ mod session_wal_durability {
     #[test]
     fn session_delete_node_survives_reopen() {
         let (_dir, db) = reopened_after_crash(
-            "session_wal_durability::session_delete_node_survives_reopen",
+            &grafeo_common::test_path!("session_delete_node_survives_reopen"),
             open,
             |db| {
                 let alix = db.create_node(&["Person"]).unwrap();
@@ -342,7 +342,7 @@ mod session_wal_durability {
     #[test]
     fn session_delete_edge_survives_reopen() {
         let (_dir, db) = reopened_after_crash(
-            "session_wal_durability::session_delete_edge_survives_reopen",
+            &grafeo_common::test_path!("session_delete_edge_survives_reopen"),
             open,
             |db| {
                 let alix = db.create_node(&["Person"]).unwrap();
@@ -374,7 +374,7 @@ mod session_wal_durability {
     #[test]
     fn session_rollback_does_not_resurrect_on_next_commit() {
         let (_dir, db) = reopened_after_crash(
-            "session_wal_durability::session_rollback_does_not_resurrect_on_next_commit",
+            &grafeo_common::test_path!("session_rollback_does_not_resurrect_on_next_commit"),
             open,
             |db| {
                 // tx1: create a node, then rollback. The node must NOT survive reopen.
@@ -758,7 +758,9 @@ mod session_wal_durability {
         #[test]
         fn explicit_property_before_write_is_undone_and_retryable() {
             property_failure(
-                "session_wal_durability::wal_group_failures::explicit_property_before_write_is_undone_and_retryable",
+                &grafeo_common::test_path!(
+                    "explicit_property_before_write_is_undone_and_retryable"
+                ),
                 PropertyCaller::Explicit,
                 GROUP_WRITE,
             );
@@ -767,7 +769,7 @@ mod session_wal_durability {
         #[test]
         fn explicit_property_lost_ack_is_unknown_and_recovers() {
             property_failure(
-                "session_wal_durability::wal_group_failures::explicit_property_lost_ack_is_unknown_and_recovers",
+                &grafeo_common::test_path!("explicit_property_lost_ack_is_unknown_and_recovers"),
                 PropertyCaller::Explicit,
                 GROUP_SYNC,
             );
@@ -776,7 +778,9 @@ mod session_wal_durability {
         #[test]
         fn autocommit_property_before_write_is_undone_and_retryable() {
             property_failure(
-                "session_wal_durability::wal_group_failures::autocommit_property_before_write_is_undone_and_retryable",
+                &grafeo_common::test_path!(
+                    "autocommit_property_before_write_is_undone_and_retryable"
+                ),
                 PropertyCaller::Autocommit,
                 GROUP_WRITE,
             );
@@ -785,7 +789,7 @@ mod session_wal_durability {
         #[test]
         fn autocommit_property_lost_ack_is_unknown_and_recovers() {
             property_failure(
-                "session_wal_durability::wal_group_failures::autocommit_property_lost_ack_is_unknown_and_recovers",
+                &grafeo_common::test_path!("autocommit_property_lost_ack_is_unknown_and_recovers"),
                 PropertyCaller::Autocommit,
                 GROUP_SYNC,
             );
@@ -794,7 +798,7 @@ mod session_wal_durability {
         #[test]
         fn direct_property_not_written_is_fenced_until_reopen() {
             property_failure(
-                "session_wal_durability::wal_group_failures::direct_property_not_written_is_fenced_until_reopen",
+                &grafeo_common::test_path!("direct_property_not_written_is_fenced_until_reopen"),
                 PropertyCaller::Direct,
                 GROUP_WRITE,
             );
@@ -803,7 +807,7 @@ mod session_wal_durability {
         #[test]
         fn direct_property_lost_ack_is_unknown_and_recovers() {
             property_failure(
-                "session_wal_durability::wal_group_failures::direct_property_lost_ack_is_unknown_and_recovers",
+                &grafeo_common::test_path!("direct_property_lost_ack_is_unknown_and_recovers"),
                 PropertyCaller::Direct,
                 GROUP_SYNC,
             );
@@ -812,7 +816,9 @@ mod session_wal_durability {
         #[test]
         fn explicit_query_commit_failure_before_group_write_is_rejected_and_retryable() {
             rejection_before_group_write(
-                "session_wal_durability::wal_group_failures::explicit_query_commit_failure_before_group_write_is_rejected_and_retryable",
+                &grafeo_common::test_path!(
+                    "explicit_query_commit_failure_before_group_write_is_rejected_and_retryable"
+                ),
                 explicit_query_commit,
             );
         }
@@ -820,22 +826,26 @@ mod session_wal_durability {
         #[test]
         fn default_query_autocommit_failure_before_group_write_is_rejected_and_retryable() {
             rejection_before_group_write(
-                "session_wal_durability::wal_group_failures::default_query_autocommit_failure_before_group_write_is_rejected_and_retryable",
+                &grafeo_common::test_path!(
+                    "default_query_autocommit_failure_before_group_write_is_rejected_and_retryable"
+                ),
                 default_query_autocommit,
             );
         }
 
         #[test]
         fn database_create_node_not_written_is_fenced_until_reopen() {
-            direct_call_not_written_is_fenced(
-                "session_wal_durability::wal_group_failures::database_create_node_not_written_is_fenced_until_reopen",
-            );
+            direct_call_not_written_is_fenced(&grafeo_common::test_path!(
+                "database_create_node_not_written_is_fenced_until_reopen"
+            ));
         }
 
         #[test]
         fn explicit_query_commit_failure_after_group_sync_is_unknown_and_recovers() {
             unknown_after_group_sync(
-                "session_wal_durability::wal_group_failures::explicit_query_commit_failure_after_group_sync_is_unknown_and_recovers",
+                &grafeo_common::test_path!(
+                    "explicit_query_commit_failure_after_group_sync_is_unknown_and_recovers"
+                ),
                 explicit_query_commit,
             );
         }
@@ -843,7 +853,9 @@ mod session_wal_durability {
         #[test]
         fn default_query_autocommit_failure_after_group_sync_is_unknown_and_recovers() {
             unknown_after_group_sync(
-                "session_wal_durability::wal_group_failures::default_query_autocommit_failure_after_group_sync_is_unknown_and_recovers",
+                &grafeo_common::test_path!(
+                    "default_query_autocommit_failure_after_group_sync_is_unknown_and_recovers"
+                ),
                 default_query_autocommit,
             );
         }
@@ -851,7 +863,9 @@ mod session_wal_durability {
         #[test]
         fn database_create_node_failure_after_group_sync_is_unknown_and_recovers() {
             unknown_after_group_sync(
-                "session_wal_durability::wal_group_failures::database_create_node_failure_after_group_sync_is_unknown_and_recovers",
+                &grafeo_common::test_path!(
+                    "database_create_node_failure_after_group_sync_is_unknown_and_recovers"
+                ),
                 database_create_node,
             );
         }

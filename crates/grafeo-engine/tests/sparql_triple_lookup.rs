@@ -27,7 +27,7 @@
 //!   repeated variable, GRAPH ?g).
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test sparql_triple_lookup
+//! cargo test -p grafeo-engine --all-features --test main sparql_triple_lookup::
 //! ```
 
 #![cfg(all(feature = "sparql", feature = "triple-store"))]

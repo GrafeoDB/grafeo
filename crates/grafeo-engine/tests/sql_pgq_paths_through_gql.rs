@@ -11,7 +11,7 @@
 //! Django (7) knows no one.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test sql_pgq_paths_through_gql
+//! cargo test -p grafeo-engine --all-features --test main sql_pgq_paths_through_gql::
 //! ```
 
 #![cfg(all(feature = "gql", feature = "sql-pgq"))]

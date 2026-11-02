@@ -5,15 +5,15 @@
 //!
 //! Run with all features:
 //! ```bash
-//! cargo test -p grafeo-engine --features full --test query_correctness
+//! cargo test -p grafeo-engine --features full --test main query_correctness::
 //! ```
 //!
 //! Run for specific query language:
 //! ```bash
-//! cargo test -p grafeo-engine --features gql --test query_correctness -- gql
-//! cargo test -p grafeo-engine --features cypher --test query_correctness -- cypher
-//! cargo test -p grafeo-engine --features gremlin --test query_correctness -- gremlin
-//! cargo test -p grafeo-engine --features graphql --test query_correctness -- graphql
+//! cargo test -p grafeo-engine --all-features --test main -- query_correctness::gql
+//! cargo test -p grafeo-engine --all-features --test main -- query_correctness::cypher
+//! cargo test -p grafeo-engine --all-features --test main -- query_correctness::gremlin
+//! cargo test -p grafeo-engine --all-features --test main -- query_correctness::graphql
 //! ```
 
 use grafeo_common::types::Value;

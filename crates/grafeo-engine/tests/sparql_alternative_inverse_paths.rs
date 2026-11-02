@@ -8,7 +8,7 @@
 //! worked out by hand from those two triples, not by running a query.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test sparql_alternative_inverse_paths
+//! cargo test -p grafeo-engine --all-features --test main sparql_alternative_inverse_paths::
 //! ```
 
 #![cfg(all(feature = "sparql", feature = "triple-store"))]

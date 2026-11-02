@@ -22,7 +22,7 @@
 //! - PROFILE: the per-row operator and its rows.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test sparql_path_per_row
+//! cargo test -p grafeo-engine --all-features --test main sparql_path_per_row::
 //! ```
 
 #![cfg(all(feature = "sparql", feature = "triple-store"))]

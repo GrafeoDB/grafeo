@@ -4,7 +4,7 @@
 //! transactions, constraints, and edge cases.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --test seam_dml_interactions
+//! cargo test -p grafeo-engine --test main seam_dml_interactions::
 //! ```
 
 use grafeo_common::types::{Decimal, Value};

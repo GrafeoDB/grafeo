@@ -20,7 +20,7 @@
 //! pins its sections and their versions, and the WAL segments' version.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test released_formats
+//! cargo test -p grafeo-engine --all-features --test main released_formats::
 //! ```
 
 #![cfg(all(

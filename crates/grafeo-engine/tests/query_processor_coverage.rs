@@ -2,7 +2,7 @@
 //! parameter substitution edge cases, language dispatch, and error handling.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --test query_processor_coverage --all-features
+//! cargo test -p grafeo-engine --test main query_processor_coverage:: --all-features
 //! ```
 
 use std::collections::HashMap;

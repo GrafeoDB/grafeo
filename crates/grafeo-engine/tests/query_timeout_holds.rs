@@ -9,12 +9,11 @@
 //! fails the test instead of hanging it.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test query_timeout_holds
+//! cargo test -p grafeo-engine --all-features --test main query_timeout_holds::
 //! ```
 
 #![cfg(feature = "gql")]
 
-use std::process::Command;
 use std::time::{Duration, Instant};
 
 use grafeo_common::testing::child_process;
@@ -116,9 +115,7 @@ fn the_query_timeout_stops_every_shape() {
     for (index, (name, _)) in SHAPES.iter().enumerate() {
         let started = Instant::now();
         let outcome = child_process::output_with_deadline(
-            Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", "query_timeout_child", "--nocapture"])
-                .env(CHILD_VAR, index.to_string()),
+            grafeo_common::child_test!("query_timeout_child").env(CHILD_VAR, index.to_string()),
             LIMIT + SLACK + Duration::from_secs(15),
         );
         let output = match outcome {

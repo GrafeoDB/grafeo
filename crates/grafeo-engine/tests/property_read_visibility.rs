@@ -5,8 +5,8 @@
 //! edge properties.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test property_read_visibility
-//! cargo test -p grafeo-engine --features full --test property_read_visibility
+//! cargo test -p grafeo-engine --all-features --test main property_read_visibility::
+//! cargo test -p grafeo-engine --features full --test main property_read_visibility::
 //! ```
 
 #![cfg(feature = "gql")]

@@ -16,7 +16,7 @@
 //!   with no node and labels the store does not know.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test selector_paths_s_group_cases
+//! cargo test -p grafeo-engine --all-features --test main selector_paths_s_group_cases::
 //! ```
 
 #![cfg(all(feature = "gql", feature = "cypher"))]

@@ -6,7 +6,7 @@
 //! IDs, so `EXCEPT` and `INTERSECT` compared records with IDs.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test returned_entities
+//! cargo test -p grafeo-engine --all-features --test main returned_entities::
 //! ```
 
 #![cfg(feature = "gql")]

@@ -9,12 +9,10 @@
 //! parent sees, instead of the test run.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test sparql_parser_never_aborts
+//! cargo test -p grafeo-engine --all-features --test main sparql_parser_never_aborts::
 //! ```
 
 #![cfg(all(feature = "sparql", feature = "triple-store"))]
-
-use std::process::Command;
 
 use grafeo_common::testing::child_process;
 use grafeo_engine::GrafeoDB;
@@ -180,8 +178,7 @@ fn malformed_and_unsupported_sparql_is_a_syntax_error_never_an_abort() {
     let mut wrong = Vec::new();
     for (index, (name, _, words)) in QUERIES.iter().enumerate() {
         let output = child_process::output(
-            Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", "sparql_never_aborts_child", "--nocapture"])
+            grafeo_common::child_test!("sparql_never_aborts_child")
                 .env(CHILD_VAR, index.to_string()),
         )
         .unwrap();

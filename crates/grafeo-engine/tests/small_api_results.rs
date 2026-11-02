@@ -4,7 +4,7 @@
 //! names its graph; and `list_graphs` gives the same order on every run.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test small_api_results
+//! cargo test -p grafeo-engine --all-features --test main small_api_results::
 //! ```
 
 #![cfg(feature = "gql")]

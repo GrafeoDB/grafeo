@@ -15,7 +15,7 @@
 //!   joined first.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test sparql_group_order
+//! cargo test -p grafeo-engine --all-features --test main sparql_group_order::
 //! ```
 
 #![cfg(all(feature = "sparql", feature = "triple-store"))]

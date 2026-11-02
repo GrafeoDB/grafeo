@@ -7,7 +7,7 @@
 //! (a WITH or RETURN item that is a parameter alone) is bound with its
 //! values on every call.
 //!
-//! cargo test -p grafeo-engine --all-features --test prepared_plans
+//! cargo test -p grafeo-engine --all-features --test main prepared_plans::
 
 #![cfg(feature = "gql")]
 

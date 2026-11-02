@@ -17,7 +17,7 @@
 //!   * `length(n.name)` on a non-path variable (falls through to expression)
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --test project_coverage --all-features
+//! cargo test -p grafeo-engine --test main project_coverage:: --all-features
 //! ```
 
 use grafeo_common::types::Value;

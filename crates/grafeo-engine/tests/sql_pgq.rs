@@ -5,7 +5,7 @@
 //!
 //! Run with:
 //! ```bash
-//! cargo test -p grafeo-engine --features sql-pgq --test sql_pgq
+//! cargo test -p grafeo-engine --all-features --test main sql_pgq::
 //! ```
 
 #![cfg(feature = "sql-pgq")]

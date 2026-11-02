@@ -4,7 +4,7 @@
 //!
 //! Run with:
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test sql_pgq_row_count_errors
+//! cargo test -p grafeo-engine --all-features --test main sql_pgq_row_count_errors::
 //! ```
 
 #![cfg(all(feature = "sql-pgq", feature = "gql"))]

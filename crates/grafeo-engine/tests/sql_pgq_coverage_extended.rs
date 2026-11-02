@@ -8,7 +8,7 @@
 //!
 //! Run with:
 //! ```bash
-//! cargo test -p grafeo-engine --features sql-pgq --test sql_pgq_coverage_extended
+//! cargo test -p grafeo-engine --all-features --test main sql_pgq_coverage_extended::
 //! ```
 
 #![cfg(feature = "sql-pgq")]

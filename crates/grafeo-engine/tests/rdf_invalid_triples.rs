@@ -14,8 +14,8 @@
 //! its triples unchecked, so files written before keep loading).
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test rdf_invalid_triples
-//! cargo test -p grafeo-engine --all-features --release --test rdf_invalid_triples
+//! cargo test -p grafeo-engine --all-features --test main rdf_invalid_triples::
+//! cargo test -p grafeo-engine --all-features --release --test main rdf_invalid_triples::
 //! ```
 
 #![cfg(all(feature = "sparql", feature = "triple-store"))]

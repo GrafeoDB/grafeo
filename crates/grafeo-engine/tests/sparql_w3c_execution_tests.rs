@@ -5,7 +5,7 @@
 //! Spec reference: <https://www.w3.org/TR/sparql11-query/>
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test sparql_w3c_execution_tests
+//! cargo test -p grafeo-engine --all-features --test main sparql_w3c_execution_tests::
 //! ```
 
 #[cfg(all(feature = "sparql", feature = "triple-store"))]

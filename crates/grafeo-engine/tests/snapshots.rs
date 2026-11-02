@@ -4,7 +4,7 @@
 //! projection and a view of an earlier epoch.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test snapshots
+//! cargo test -p grafeo-engine --all-features --test main snapshots::
 //! ```
 
 use grafeo_common::types::{NodeId, Value};

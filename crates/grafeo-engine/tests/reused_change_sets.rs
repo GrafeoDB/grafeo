@@ -3,7 +3,7 @@
 //! or a failed statement, in an autocommit write or an explicit transaction,
 //! in another graph than the last one's, and after a set too large to keep.
 //!
-//! cargo test -p grafeo-engine --all-features --test reused_change_sets
+//! cargo test -p grafeo-engine --all-features --test main reused_change_sets::
 
 #![cfg(all(feature = "cdc", feature = "gql"))]
 

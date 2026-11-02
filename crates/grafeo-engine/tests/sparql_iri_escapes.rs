@@ -5,7 +5,7 @@
 //! decodes the same escapes).
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test sparql_iri_escapes
+//! cargo test -p grafeo-engine --all-features --test main sparql_iri_escapes::
 //! ```
 
 #![cfg(all(feature = "sparql", feature = "triple-store"))]

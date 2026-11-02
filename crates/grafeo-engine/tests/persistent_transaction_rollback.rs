@@ -6,7 +6,7 @@
 //! otherwise a rolled-back `SET` / `REMOVE` stays applied.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --features full --test persistent_transaction_rollback
+//! cargo test -p grafeo-engine --features full --test main persistent_transaction_rollback::
 //! ```
 
 #![allow(missing_docs)]
@@ -136,8 +136,7 @@ mod tests {
             }
             End::Crash => {
                 let status = child_process::run(
-                    std::process::Command::new(std::env::current_exe().unwrap())
-                        .args(["--exact", "tests::crash_child", "--nocapture"])
+                    grafeo_common::child_test!("crash_child")
                         .env(PATH_VAR, path)
                         .env(CDC_VAR, cdc.to_string())
                         .env(COMMIT_VAR, commit.to_string()),

@@ -7,7 +7,7 @@
 //! `[label-first]`, which the search replaces.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test search_after_a_match
+//! cargo test -p grafeo-engine --all-features --test main search_after_a_match::
 //! ```
 
 #![cfg(all(feature = "text-index", feature = "vector-index", feature = "gql"))]

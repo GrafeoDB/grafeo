@@ -6,7 +6,7 @@
 //! procedures agree on what is in use.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test schema_summary_scenarios
+//! cargo test -p grafeo-engine --all-features --test main schema_summary_scenarios::
 //! ```
 
 #![cfg(feature = "gql")]

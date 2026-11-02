@@ -4,7 +4,7 @@
 //! defaults of its variables.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test sparql_initial_bindings
+//! cargo test -p grafeo-engine --all-features --test main sparql_initial_bindings::
 //! ```
 
 #![cfg(all(feature = "sparql", feature = "triple-store"))]

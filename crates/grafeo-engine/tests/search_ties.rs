@@ -4,7 +4,7 @@
 //! store was a file, whose indexes a reopen builds again in another order).
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test search_ties
+//! cargo test -p grafeo-engine --all-features --test main search_ties::
 //! ```
 
 #![cfg(all(feature = "vector-index", feature = "text-index"))]

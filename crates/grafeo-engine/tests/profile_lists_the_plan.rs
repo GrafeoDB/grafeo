@@ -6,7 +6,7 @@
 //! last subquery and a scan EXPLAIN does not have. In GQL and Cypher.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test profile_lists_the_plan
+//! cargo test -p grafeo-engine --all-features --test main profile_lists_the_plan::
 //! ```
 
 #![cfg(all(feature = "gql", feature = "cypher"))]

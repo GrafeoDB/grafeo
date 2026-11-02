@@ -17,7 +17,7 @@
 //! - PROFILE: the lookup on the left join, with its rows.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test sparql_optional_lookup
+//! cargo test -p grafeo-engine --all-features --test main sparql_optional_lookup::
 //! ```
 
 #![cfg(all(feature = "sparql", feature = "triple-store"))]

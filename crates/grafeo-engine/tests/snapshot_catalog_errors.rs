@@ -8,7 +8,7 @@
 //! A restore that fails on such a record leaves the database as it was.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --features full --test snapshot_catalog_errors
+//! cargo test -p grafeo-engine --features full --test main snapshot_catalog_errors::
 //! ```
 
 #![cfg(feature = "gql")]

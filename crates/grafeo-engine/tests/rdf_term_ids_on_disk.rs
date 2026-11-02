@@ -11,7 +11,7 @@
 //! the version before.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test rdf_term_ids_on_disk
+//! cargo test -p grafeo-engine --all-features --test main rdf_term_ids_on_disk::
 //! ```
 
 #![cfg(all(
@@ -331,8 +331,7 @@ fn every_term_survives_a_checkpoint_and_a_reopen() {
 /// `path`, and returns its exit code.
 fn in_child(scenario: &str, path: &Path) -> i32 {
     let status = child_process::run(
-        std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "crash_child", "--nocapture"])
+        grafeo_common::child_test!("crash_child")
             .env(SCENARIO_VAR, scenario)
             .env(PATH_VAR, path),
     )

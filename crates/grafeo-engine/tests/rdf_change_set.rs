@@ -5,7 +5,7 @@
 //! feed.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test rdf_change_set
+//! cargo test -p grafeo-engine --all-features --test main rdf_change_set::
 //! ```
 
 #![cfg(all(feature = "sparql", feature = "triple-store"))]

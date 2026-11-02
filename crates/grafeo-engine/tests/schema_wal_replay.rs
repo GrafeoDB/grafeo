@@ -5,7 +5,7 @@
 //! (snapshot round-trip) by exercising the on-disk path: WAL append + reopen.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --features full --test schema_wal_replay
+//! cargo test -p grafeo-engine --features full --test main schema_wal_replay::
 //! ```
 
 #![cfg(all(feature = "wal", feature = "grafeo-file"))]

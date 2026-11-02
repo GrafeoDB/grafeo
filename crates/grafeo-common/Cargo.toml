@@ -7,6 +7,7 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "Common types, memory allocators, and utilities for Grafeo"
+autotests = false
 
 [dependencies]
 # Error handling
@@ -79,3 +80,18 @@ workspace = true
 [[bench]]
 name = "arena_bench"
 harness = false
+
+# One integration test binary (tests/main.rs declares each test file as a module).
+[[test]]
+name = "main"
+path = "tests/main.rs"
+
+# Counts allocations with its own global allocator.
+[[test]]
+name = "log_record_decode_bound"
+path = "tests/log_record_decode_bound.rs"
+
+# Counts allocations with its own global allocator.
+[[test]]
+name = "log_record_memory"
+path = "tests/log_record_memory.rs"

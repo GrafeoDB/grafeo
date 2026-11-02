@@ -1,7 +1,10 @@
-//! Helpers shared by integration tests, included with `mod common;`.
+//! Helpers shared by integration tests: `tests/main.rs` declares this module,
+//! and a test file takes it with `use crate::common;`.
 //!
-//! A file that includes this module compiles all of it, and items it does not
-//! use warn as dead code. When a helper is added that not every includer uses,
-//! include the submodules one by one with `#[path = "common/<name>.rs"]`.
+//! The separate test binaries (the `[[test]]` entries in `Cargo.toml`) do not
+//! have `crate::common`: they include a helper with
+//! `#[path = "common/<name>.rs"]`.
 
 pub mod replay;
+#[cfg(all(feature = "testing-statement-injection", feature = "gql"))]
+pub mod started;

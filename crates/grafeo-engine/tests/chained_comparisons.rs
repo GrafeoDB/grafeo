@@ -6,7 +6,7 @@
 //! chained comparison: it rejects one instead of returning null.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test chained_comparisons
+//! cargo test -p grafeo-engine --all-features --test main chained_comparisons::
 //! ```
 
 #![cfg(all(feature = "gql", feature = "cypher"))]

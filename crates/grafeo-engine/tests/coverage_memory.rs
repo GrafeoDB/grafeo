@@ -3,7 +3,7 @@
 //! Targets: memory.rs (0%), admin.rs memory_usage path
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --features full --test coverage_memory
+//! cargo test -p grafeo-engine --features full --test main coverage_memory::
 //! ```
 
 use grafeo_common::types::Value;

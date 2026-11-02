@@ -14,7 +14,7 @@
 //! instead of the node's (100 and up).
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test call_subquery_imports
+//! cargo test -p grafeo-engine --all-features --test main call_subquery_imports::
 //! ```
 
 #![cfg(all(feature = "gql", feature = "cypher"))]

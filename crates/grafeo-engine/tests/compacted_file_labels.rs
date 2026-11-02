@@ -21,7 +21,7 @@
 //! (`CALL db.labels()`, `label_count()`, `schema()`).
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test compacted_file_labels
+//! cargo test -p grafeo-engine --all-features --test main compacted_file_labels::
 //! ```
 
 #![cfg(all(

@@ -7,7 +7,7 @@
 //! one, and `sum(score)` summed zeros.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test aggregate_computed_columns
+//! cargo test -p grafeo-engine --all-features --test main aggregate_computed_columns::
 //! ```
 
 #![cfg(feature = "gql")]

@@ -4,7 +4,7 @@
 //! types of #569.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test catalog_v2
+//! cargo test -p grafeo-engine --all-features --test main catalog_v2::
 //! ```
 
 #![cfg(all(

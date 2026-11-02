@@ -1,5 +1,6 @@
 //! Work started on another thread, for tests that check what waits for what.
-//! Include it with `#[path = "common/started.rs"] mod started;`.
+//! Take it with `use crate::common::started;`, or in a separate test binary
+//! with `#[path = "common/started.rs"] mod started;`.
 
 use std::sync::mpsc;
 use std::thread::JoinHandle;

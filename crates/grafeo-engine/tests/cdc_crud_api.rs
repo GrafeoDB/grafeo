@@ -4,7 +4,7 @@
 //! a session's commit records its transaction's changes.
 //!
 //! ```bash
-//! cargo test --features "cdc" -p grafeo-engine --test cdc_crud_api
+//! cargo test --all-features -p grafeo-engine --test main cdc_crud_api::
 //! ```
 
 #![cfg(feature = "cdc")]

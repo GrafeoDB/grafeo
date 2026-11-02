@@ -6,7 +6,7 @@
 //! `post_compact_overlay_visibility.rs`.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test anchored_edge_after_compact
+//! cargo test -p grafeo-engine --all-features --test main anchored_edge_after_compact::
 //! ```
 
 #![cfg(all(feature = "gql", feature = "cypher"))]

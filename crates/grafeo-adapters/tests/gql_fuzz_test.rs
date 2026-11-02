@@ -10,7 +10,7 @@
 )]
 //!
 //! ```bash
-//! cargo test -p grafeo-adapters --test gql_fuzz_test -- --nocapture
+//! cargo test -p grafeo-adapters --test main gql_fuzz_test:: -- --nocapture
 //! ```
 
 #[cfg(feature = "gql")]

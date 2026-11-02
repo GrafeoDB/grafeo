@@ -450,7 +450,6 @@ mod durable_publication {
 mod incremental_process_crash {
     use std::panic::AssertUnwindSafe;
     use std::path::Path;
-    use std::process::Command;
 
     use grafeo_common::testing::child_process;
     use grafeo_common::testing::crash::{CrashResult, with_crash_at};
@@ -509,12 +508,7 @@ mod incremental_process_crash {
 
     fn back_up_in_child(point: u64, directory: &Path) -> Option<String> {
         let output = child_process::output(
-            Command::new(std::env::current_exe().unwrap())
-                .args([
-                    "--exact",
-                    "incremental_process_crash::incremental_backup_child",
-                    "--nocapture",
-                ])
+            grafeo_common::child_test!("incremental_backup_child")
                 .env(POINT_VAR, point.to_string())
                 .env(DIR_VAR, directory),
         )

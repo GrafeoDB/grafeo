@@ -7,16 +7,13 @@
 //! and ignore records the checkpoint already contains.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --features full --test ddl_replay
+//! cargo test -p grafeo-engine --features full --test main ddl_replay::
 //! ```
 
 #![allow(
     missing_docs,
     reason = "a test crate; each test is documented by its name"
 )]
-
-#[cfg(all(feature = "wal", feature = "gql", feature = "grafeo-file"))]
-mod common;
 
 #[cfg(all(feature = "wal", feature = "gql", feature = "grafeo-file"))]
 mod tests {
@@ -99,7 +96,7 @@ mod tests {
     #[test]
     fn alter_graph_type_survives_replay() {
         let (_dir, db) = replayed(
-            "tests::alter_graph_type_survives_replay",
+            &grafeo_common::test_path!("alter_graph_type_survives_replay"),
             &[
                 "CREATE NODE TYPE Device (serial STRING)",
                 "CREATE NODE TYPE Sensor (unit STRING)",
@@ -118,7 +115,7 @@ mod tests {
     #[test]
     fn alter_node_and_edge_types_survive_replay() {
         let (_dir, db) = replayed(
-            "tests::alter_node_and_edge_types_survive_replay",
+            &grafeo_common::test_path!("alter_node_and_edge_types_survive_replay"),
             &[
                 "CREATE NODE TYPE Sensor (unit STRING)",
                 "ALTER NODE TYPE Sensor ADD PROPERTY location STRING",
@@ -144,10 +141,13 @@ mod tests {
             "CREATE CONSTRAINT person_name FOR (p:Person) ON (p.name) UNIQUE",
             "DROP CONSTRAINT person_name",
         ];
-        let (_replayed_dir, replayed) =
-            reopened_after_crash("tests::constraints_survive_reopen", open, |db| {
+        let (_replayed_dir, replayed) = reopened_after_crash(
+            &grafeo_common::test_path!("constraints_survive_reopen"),
+            open,
+            |db| {
                 run(db, &STATEMENTS);
-            });
+            },
+        );
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("checkpointed.grafeo");
         {
@@ -216,10 +216,13 @@ mod tests {
                 Value::from("name"),
             ],
         ];
-        let (_replayed_dir, replayed) =
-            reopened_after_crash("tests::unnamed_constraints_survive_reopen", open, |db| {
+        let (_replayed_dir, replayed) = reopened_after_crash(
+            &grafeo_common::test_path!("unnamed_constraints_survive_reopen"),
+            open,
+            |db| {
                 run_cypher(db);
-            });
+            },
+        );
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("checkpointed.grafeo");
         {
@@ -274,28 +277,32 @@ mod tests {
             "CREATE EDGE TYPE READS (since INTEGER)",
         ];
         let expected = schema_of(&statements);
-        let (_dir, db) = reopened_after_crash("tests::failed_alter_changes_nothing", open, |db| {
-            run(db, &statements);
-            let before = schema(db);
-            assert_eq!(before, expected, "live schema");
-            // (Graph type alterations cannot fail midway: adding or dropping a
-            // member never fails.)
-            let session = db.session();
-            for failing in [
-                "ALTER NODE TYPE Sensor ADD PROPERTY location STRING DROP PROPERTY missing",
-                "ALTER EDGE TYPE READS DROP PROPERTY since ADD PROPERTY since STRING ADD PROPERTY since STRING",
-            ] {
-                assert!(session.execute(failing).is_err(), "{failing}");
-                assert_eq!(schema(db), before, "live schema after {failing}");
-            }
-        });
+        let (_dir, db) = reopened_after_crash(
+            &grafeo_common::test_path!("failed_alter_changes_nothing"),
+            open,
+            |db| {
+                run(db, &statements);
+                let before = schema(db);
+                assert_eq!(before, expected, "live schema");
+                // (Graph type alterations cannot fail midway: adding or dropping a
+                // member never fails.)
+                let session = db.session();
+                for failing in [
+                    "ALTER NODE TYPE Sensor ADD PROPERTY location STRING DROP PROPERTY missing",
+                    "ALTER EDGE TYPE READS DROP PROPERTY since ADD PROPERTY since STRING ADD PROPERTY since STRING",
+                ] {
+                    assert!(session.execute(failing).is_err(), "{failing}");
+                    assert_eq!(schema(db), before, "live schema after {failing}");
+                }
+            },
+        );
         assert_eq!(schema(&db), expected, "schema after replay");
     }
 
     #[test]
     fn create_or_replace_types_survive_replay() {
         let (_dir, db) = replayed(
-            "tests::create_or_replace_types_survive_replay",
+            &grafeo_common::test_path!("create_or_replace_types_survive_replay"),
             &[
                 "CREATE NODE TYPE Widget (name STRING)",
                 "CREATE OR REPLACE NODE TYPE Widget (name STRING, color STRING)",
@@ -323,7 +330,7 @@ mod tests {
     #[cfg(feature = "algos")]
     fn create_or_replace_procedure_survives_replay() {
         let (_dir, db) = replayed(
-            "tests::create_or_replace_procedure_survives_replay",
+            &grafeo_common::test_path!("create_or_replace_procedure_survives_replay"),
             &[
                 "INSERT (:Person {name: 'Alix'})",
                 "CREATE PROCEDURE people() RETURNS (n INTEGER) AS { MATCH (p:Person) RETURN count(p) AS n }",
@@ -477,7 +484,7 @@ mod tests {
     #[test]
     fn schema_changes_survive_a_crash_before_the_checkpoint() {
         let (_dir, db) = replayed(
-            "tests::schema_changes_survive_a_crash_before_the_checkpoint",
+            &grafeo_common::test_path!("schema_changes_survive_a_crash_before_the_checkpoint"),
             &CRASH_STATEMENTS,
         );
         assert_eq!(graph_type(&db, "iot")[2], Value::from("Device, Sensor"));
@@ -530,7 +537,7 @@ mod tests {
     #[test]
     fn bare_graph_type_references_keep_types_after_replay() {
         let (_dir, db) = replayed(
-            "tests::bare_graph_type_references_keep_types_after_replay",
+            &grafeo_common::test_path!("bare_graph_type_references_keep_types_after_replay"),
             &BARE_REFERENCES,
         );
         assert_bare_references_keep_types(&db, "after replay");

@@ -21,7 +21,7 @@
 //! gap as zeros.
 //!
 //! ```bash
-//! cargo test -p grafeo-storage --features grafeo-file,encryption --test offsets_past_4_gib
+//! cargo test -p grafeo-storage --all-features --test main offsets_past_4_gib::
 //! ```
 
 #![cfg(feature = "grafeo-file")]

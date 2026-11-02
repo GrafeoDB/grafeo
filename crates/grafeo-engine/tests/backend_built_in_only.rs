@@ -5,7 +5,7 @@
 //! API go on working on the backend.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test backend_built_in_only
+//! cargo test -p grafeo-engine --all-features --test main backend_built_in_only::
 //! ```
 
 #![cfg(feature = "gql")]

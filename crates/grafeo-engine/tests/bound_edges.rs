@@ -2,7 +2,7 @@
 //! rows of the same pattern with a fresh edge filtered to equal it.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test bound_edges
+//! cargo test -p grafeo-engine --all-features --test main bound_edges::
 //! ```
 
 use grafeo_common::types::Value;

@@ -17,7 +17,7 @@
 //! The files are written by the test into its own temporary directory.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test csv_loader
+//! cargo test -p grafeo-engine --all-features --test main csv_loader::
 //! ```
 
 #![cfg(all(feature = "gql", feature = "cypher"))]

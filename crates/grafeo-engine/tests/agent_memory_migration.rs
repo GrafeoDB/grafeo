@@ -11,10 +11,10 @@
 //!
 //! ```bash
 //! # Correctness (non-ignored)
-//! cargo test -p grafeo-engine --features full --test agent_memory_migration -- --nocapture
+//! cargo test -p grafeo-engine --features full --test main agent_memory_migration:: -- --nocapture
 //!
 //! # Full benchmarks (ignored)
-//! cargo test -p grafeo-engine --features full --release --test agent_memory_migration -- --ignored --nocapture
+//! cargo test -p grafeo-engine --features full --release --test main agent_memory_migration:: -- --ignored --nocapture
 //! ```
 
 #![cfg(feature = "full")]

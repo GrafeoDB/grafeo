@@ -15,11 +15,21 @@
 //! A child that runs longer than [`DEADLINE`] (or the deadline given to
 //! [`run_with_deadline`] or [`output_with_deadline`]) is killed and the call
 //! fails, so a hung child fails its test instead of blocking the run.
+//!
+//! A test that runs part of itself in a child starts it with [`child_test!`]
+//! (or [`test_command`] and [`test_path!`], when a helper in another module
+//! starts it). The test's full path depends on where its file is built: a
+//! file of `tests/main.rs` adds its name to the path, a separate test binary
+//! does not. A child given a name that matches nothing runs no test and exits
+//! successfully, so a test could pass while checking nothing: [`test_command`]
+//! panics on a name that is not a test of this binary.
 
+use std::collections::BTreeSet;
 use std::io::{self, Read};
+use std::path::Path;
 use std::process::{Child, Command, ExitStatus, Output, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{PoisonError, RwLock};
+use std::sync::{Mutex, PoisonError, RwLock};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -38,6 +48,78 @@ static CHILDREN_STARTED: AtomicBool = AtomicBool::new(false);
 /// How long [`take_lock`] tries a held lock again in a process that starts
 /// children.
 const RETRY_WINDOW: Duration = Duration::from_millis(250);
+
+/// The full path of the test `name`, given relative to the module this is
+/// written in, in the test binary being built: `test_path!("crash_child")` in
+/// `tests/wal_damage.rs`, or `test_path!("crash::crash_child")` there outside
+/// `mod crash`.
+#[macro_export]
+macro_rules! test_path {
+    ($name:expr) => {
+        $crate::testing::child_process::test_path_in(module_path!(), $name)
+    };
+}
+
+/// A [`Command`] that runs the test `name` of this test binary, given
+/// relative to the module this is written in, alone, in a child process.
+/// See [`test_command`].
+#[macro_export]
+macro_rules! child_test {
+    ($name:expr) => {
+        $crate::testing::child_process::test_command(&$crate::test_path!($name))
+    };
+}
+
+pub use crate::{child_test, test_path};
+
+/// What [`test_path!`] expands to: `name` under `module_path`, without the
+/// crate, which the path of a test does not have.
+#[must_use]
+pub fn test_path_in(module_path: &str, name: &str) -> String {
+    match module_path.split_once("::") {
+        Some((_crate, modules)) => format!("{modules}::{name}"),
+        None => name.to_owned(),
+    }
+}
+
+/// A [`Command`] that runs the test at the full path `test` of this test
+/// binary, alone, with `--exact` and `--nocapture`, to pass to [`run`] or
+/// [`output`].
+///
+/// # Panics
+///
+/// If `test` is not a test of this binary: the child would run nothing and
+/// exit successfully.
+#[must_use]
+pub fn test_command(test: &str) -> Command {
+    let executable = std::env::current_exe().expect("the path of the test binary");
+    assert_is_a_test(&executable, test);
+    let mut command = Command::new(executable);
+    command.args(["--exact", test, "--nocapture"]);
+    command
+}
+
+/// Asks the test binary at `executable` whether it has the test `test`, once
+/// per test in a process (a crash test runs its child many times).
+fn assert_is_a_test(executable: &Path, test: &str) {
+    static KNOWN: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
+    let known = || KNOWN.lock().unwrap_or_else(PoisonError::into_inner);
+    if known().contains(test) {
+        return;
+    }
+    let listed =
+        output(Command::new(executable).args(["--list", "--format", "terse", "--exact", test]))
+            .expect("list the tests of this binary");
+    let stdout = String::from_utf8_lossy(&listed.stdout);
+    assert!(
+        stdout
+            .lines()
+            .any(|line| line.strip_suffix(": test") == Some(test)),
+        "this binary has no test `{test}`: a child process given this name would run nothing \
+         and still succeed (listed: {stdout:?})"
+    );
+    known().insert(test.to_owned());
+}
 
 /// Starts `command` and waits for it, like [`Command::status`], for at most
 /// [`DEADLINE`].
@@ -214,14 +296,57 @@ mod tests {
         }
     }
 
+    /// The path of a test is its modules without the crate, in a binary of
+    /// one file and in a file of `tests/main.rs`.
+    #[test]
+    fn a_test_path_has_no_crate() {
+        assert_eq!(test_path_in("wal_damage", "crash_child"), "crash_child");
+        assert_eq!(
+            test_path_in("main::wal_damage", "crash_child"),
+            "wal_damage::crash_child"
+        );
+        assert_eq!(
+            test_path_in("main::wal_damage::replay", "tests::crash_child"),
+            "wal_damage::replay::tests::crash_child"
+        );
+    }
+
+    /// The macro finds a test of this very module, and the command it builds
+    /// runs that test and no other.
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri cannot start child processes")]
+    fn a_child_test_runs_the_named_test() {
+        assert_eq!(
+            test_path!("sleeping_child"),
+            "testing::child_process::tests::sleeping_child"
+        );
+        let output = output(&mut child_test!("sleeping_child")).unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("running 1 test"), "{stdout}");
+        assert!(stdout.contains("1 passed"), "{stdout}");
+    }
+
+    /// A name that matches nothing fails the calling test: a child given one
+    /// runs no test and exits successfully.
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri cannot start child processes")]
+    #[should_panic(expected = "this binary has no test `no_such_child`")]
+    fn a_child_test_that_is_no_test_panics() {
+        let _ = test_command("no_such_child");
+    }
+
+    /// Part of a test's path is not its path.
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri cannot start child processes")]
+    #[should_panic(expected = "this binary has no test `tests::sleeping_child`")]
+    fn a_child_test_without_its_whole_path_panics() {
+        let _ = test_command("tests::sleeping_child");
+    }
+
     fn sleeper() -> Command {
-        let mut command = Command::new(std::env::current_exe().unwrap());
+        let mut command = child_test!("sleeping_child");
         command
-            .args([
-                "--exact",
-                "testing::child_process::tests::sleeping_child",
-                "--nocapture",
-            ])
             .env(SLEEP_VAR, "1")
             .stdout(Stdio::null())
             .stderr(Stdio::null());

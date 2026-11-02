@@ -3,7 +3,7 @@
 //! and a path that returns to an earlier variable.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test cyclic_patterns
+//! cargo test -p grafeo-engine --all-features --test main cyclic_patterns::
 //! ```
 
 use grafeo_engine::GrafeoDB;

@@ -3,7 +3,7 @@
 //! Targets: catalog/mod.rs (36.75%), session.rs DDL paths, parser.rs schema syntax
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --test coverage_schema_ddl
+//! cargo test -p grafeo-engine --test main coverage_schema_ddl::
 //! ```
 
 use grafeo_common::types::Value;

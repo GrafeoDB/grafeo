@@ -5,8 +5,8 @@
 //! `debug_assert` panicked in debug builds; release builds stored it.
 //!
 //! ```bash
-//! cargo test -p grafeo-core --all-features --test rdf_invalid_triples
-//! cargo test -p grafeo-core --all-features --release --test rdf_invalid_triples
+//! cargo test -p grafeo-core --all-features --test main rdf_invalid_triples::
+//! cargo test -p grafeo-core --all-features --release --test main rdf_invalid_triples::
 //! ```
 
 #![cfg(feature = "triple-store")]

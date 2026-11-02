@@ -7,7 +7,7 @@
 //! changes to itself until it commits.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test compact_open_sessions
+//! cargo test -p grafeo-engine --all-features --test main compact_open_sessions::
 //! ```
 
 #![cfg(feature = "gql")]

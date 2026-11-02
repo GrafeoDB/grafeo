@@ -7,7 +7,7 @@
 //! grouping key and split the groups).
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test aggregate_calls
+//! cargo test -p grafeo-engine --all-features --test main aggregate_calls::
 //! ```
 
 #![cfg(all(feature = "gql", feature = "cypher", feature = "sql-pgq"))]

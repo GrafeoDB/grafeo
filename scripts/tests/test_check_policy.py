@@ -605,6 +605,70 @@ def test_t5_holds_for_this_repository() -> None:
     )
 
 
+# ------------------------------------------------------------------ T7 test binaries
+
+
+def test_t7_every_test_file_is_built_once_for_a_stated_reason(tmp_path: Path) -> None:
+    manifest = """[package]
+name = "grafeo-core"
+autotests = false
+
+[[test]]
+name = "main"
+path = "tests/main.rs"
+
+# Counts allocations.
+[[test]]
+name = "counted"
+path = "tests/counted.rs"
+
+[[test]]
+name = "unexplained"
+path = "tests/unexplained.rs"
+
+# Declared in main.rs too.
+[[test]]
+name = "twice"
+path = "tests/twice.rs"
+"""
+    files = {
+        "crates/grafeo-core/Cargo.toml": manifest,
+        "crates/grafeo-core/tests/main.rs": "//! Tests.\n\nmod a_file;\nmod twice;\n",
+        "crates/grafeo-core/tests/a_file.rs": "",
+        "crates/grafeo-core/tests/counted.rs": "",
+        "crates/grafeo-core/tests/forgotten.rs": "",
+        "crates/grafeo-core/tests/twice.rs": "",
+        "crates/grafeo-core/tests/unexplained.rs": "",
+        "crates/grafeo-core/tests/common/helper.rs": "",
+        # Without `autotests = false` Cargo finds every test file itself.
+        "crates/grafeo-wasm/Cargo.toml": '[package]\nname = "grafeo-wasm"\n',
+        "crates/grafeo-wasm/tests/web.rs": "",
+    }
+    for rel, text in files.items():
+        write(tmp_path, rel, text)
+    found = check_policy.test_binary_findings(tmp_path, sorted(files))
+    assert all(f.rule == "T7" for f in found)
+    assert [(f.path, f.line, f.message.split(";")[0]) for f in found] == [
+        (
+            "crates/grafeo-core/tests/forgotten.rs",
+            None,
+            "this test file is never built",
+        ),
+        ("crates/grafeo-core/tests/twice.rs", None, "this test file is built twice"),
+        (
+            "crates/grafeo-core/Cargo.toml",
+            14,
+            'name = "unexplained" has no comment saying why it is separate',
+        ),
+    ]
+
+
+def test_t7_holds_for_this_repository() -> None:
+    root = SCRIPT.parents[1]
+    files = check_policy.git(root, "ls-files").splitlines()
+    assert check_policy.test_binary_findings(root, files) == []
+
+
 # ------------------------------------------------------------------ T6 stability markers
 
 STABILITY_DOC = """# API Stability

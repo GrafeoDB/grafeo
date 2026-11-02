@@ -12,7 +12,7 @@
 //! work that must wait 300 ms to finish anyway.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test commit_pipeline
+//! cargo test -p grafeo-engine --all-features --test main commit_pipeline::
 //! ```
 
 #![cfg(all(
@@ -34,8 +34,7 @@ use grafeo_common::utils::error::{Error, TransactionError};
 use grafeo_engine::config::DurabilityMode;
 use grafeo_engine::{Config, GrafeoDB};
 
-#[path = "common/started.rs"]
-mod started;
+use crate::common::started;
 
 use started::Started;
 

@@ -14,7 +14,7 @@
 //!   4,096 new triples, and with the object index off.
 //!
 //! ```bash
-//! cargo test -p grafeo-core --all-features --test rdf_parallel_load
+//! cargo test -p grafeo-core --all-features --test main rdf_parallel_load::
 //! ```
 
 #![cfg(feature = "triple-store")]

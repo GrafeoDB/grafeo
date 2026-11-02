@@ -8,7 +8,7 @@
 //! and outside a transaction, and in subqueries.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test correlated_label_seek
+//! cargo test -p grafeo-engine --all-features --test main correlated_label_seek::
 //! ```
 
 #![cfg(all(feature = "gql", feature = "cypher"))]

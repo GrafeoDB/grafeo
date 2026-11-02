@@ -9,13 +9,12 @@
 //! checks the files it left before it opens them again.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test backend_durability
+//! cargo test -p grafeo-engine --all-features --test main backend_durability::
 //! ```
 
 #![cfg(all(feature = "wal", feature = "gql", feature = "testing-crash-injection"))]
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::Arc;
 
 use grafeo_common::testing::child_process;
@@ -100,11 +99,8 @@ fn schema_holds(db: &GrafeoDB) -> bool {
 
 /// Runs this binary's `test` as a child process for `step`, at `path`.
 fn child(test: &str, step: &str, path: &Path, crash_at: Option<u64>) -> i32 {
-    let mut command = Command::new(std::env::current_exe().unwrap());
-    command
-        .args(["--exact", test, "--nocapture"])
-        .env(STEP_VAR, step)
-        .env(PATH_VAR, path);
+    let mut command = child_process::test_command(test);
+    command.env(STEP_VAR, step).env(PATH_VAR, path);
     if let Some(point) = crash_at {
         command.env(CRASH_VAR, point.to_string());
     }
@@ -196,7 +192,15 @@ fn backend_child() {
 fn a_backend_that_keeps_nothing_gets_its_commits_back_from_the_log() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("prague");
-    assert_eq!(child("backend_child", "memory", &path, None), 0);
+    assert_eq!(
+        child(
+            &grafeo_common::test_path!("backend_child"),
+            "memory",
+            &path,
+            None
+        ),
+        0
+    );
     assert!(sidecar(&path).is_dir(), "the crash left the log");
     assert!(
         !path.exists(),
@@ -224,7 +228,15 @@ fn a_backend_that_keeps_nothing_gets_its_commits_back_from_the_log() {
 fn a_durable_backend_replays_only_the_commits_after_its_checkpoint() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("vienna");
-    assert_eq!(child("backend_child", "durable", &path, None), 0);
+    assert_eq!(
+        child(
+            &grafeo_common::test_path!("backend_child"),
+            "durable",
+            &path,
+            None
+        ),
+        0
+    );
     assert!(
         backend_file(&path).is_file(),
         "the checkpoint flushed the backend"
@@ -257,7 +269,12 @@ fn a_crash_anywhere_in_a_checkpoint_recovers_the_same_state() {
     for point in 1.. {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("lisbon");
-        let code = child("backend_child", "crash", &path, Some(point));
+        let code = child(
+            &grafeo_common::test_path!("backend_child"),
+            "crash",
+            &path,
+            Some(point),
+        );
         if code == COMPLETED {
             break;
         }

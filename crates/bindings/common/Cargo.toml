@@ -7,6 +7,7 @@ authors.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Shared abstractions for Grafeo language bindings"
+autotests = false
 
 [dependencies]
 grafeo-engine = { path = "../../grafeo-engine", default-features = false }
@@ -42,3 +43,8 @@ full = ["languages", "ai", "algos", "triple-store"]
 
 [lints]
 workspace = true
+
+# One integration test binary (tests/main.rs declares each test file as a module).
+[[test]]
+name = "main"
+path = "tests/main.rs"

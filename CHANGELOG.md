@@ -23,6 +23,10 @@ Queries that ran in 0.6.1 and now fail or behave differently.
 - **Conditions that can fail**, such as `100 / n.age > 0`, no longer fail on rows a label or an earlier condition rejects.
 - **Graph type patterns**: naming an existing type no longer wipes its properties, and several patterns of one edge type no longer lose all but the last.
 
+### Internal
+
+- **Read-only lock test**: a test pins that a read-write open of a file fails while a read-only open of it is held.
+
 ## [0.6.1] - 2026-11-01
 
 Correctness and speed release. Backups and restores survive a crash, stored procedure bodies run as their statements do, SPARQL follows SPARQL 1.1 in `OPTIONAL`, `MINUS`, `BIND` and `FILTER EXISTS`, GQL quantified patterns repeat as ISO GQL defines them, the query timeout stops every query, and dates, times, bytes and NaN keep their type through every binding. Plus a CSV and an RDF file loader, `schema()` with value types, and faster SPARQL lookups, Cypher multi-hop patterns, degree counts and bulk updates by key.

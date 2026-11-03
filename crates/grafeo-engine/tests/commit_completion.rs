@@ -12,7 +12,7 @@
 //! `close()`, so nothing is checkpointed) and reopen, so the WAL is replayed.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test commit_completion
+//! cargo test -p grafeo-engine --all-features --test main commit_completion::
 //! ```
 
 #![cfg(feature = "testing-statement-injection")]
@@ -261,8 +261,7 @@ mod wal {
     /// other node (the scenario creates both first).
     fn by_after_crash(scenario: &str, path: &Path) -> (Option<Value>, Option<Value>) {
         let status = child_process::run(
-            std::process::Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", "wal::crash_child", "--nocapture"])
+            grafeo_common::child_test!("crash_child")
                 .env(SCENARIO_VAR, scenario)
                 .env(PATH_VAR, path),
         )

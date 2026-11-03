@@ -500,6 +500,10 @@ pub enum TransactionError {
     /// Invalid transaction state.
     InvalidState(String),
 
+    /// A statement that cannot run while a transaction is open (GQLSTATUS 25G01). The
+    /// transaction goes on.
+    ActiveTransaction(String),
+
     /// The database is closed: `close()` of a persistent database started,
     /// so it takes no more writes. Open it again to write.
     DatabaseClosed,
@@ -540,7 +544,9 @@ impl TransactionError {
             Self::Deadlock => ErrorCode::TransactionDeadlock,
             Self::Timeout => ErrorCode::TransactionTimeout,
             Self::ReadOnly => ErrorCode::TransactionReadOnly,
-            Self::InvalidState(_) => ErrorCode::TransactionInvalidState,
+            Self::InvalidState(_) | Self::ActiveTransaction(_) => {
+                ErrorCode::TransactionInvalidState
+            }
             Self::DatabaseClosed => ErrorCode::DatabaseClosed,
             Self::IncompleteCommit => ErrorCode::IncompleteCommit,
             Self::LogWriteFailed(_) => ErrorCode::LogWriteFailed,
@@ -563,6 +569,9 @@ impl fmt::Display for TransactionError {
             TransactionError::Timeout => write!(f, "Transaction timeout"),
             TransactionError::ReadOnly => write!(f, "Cannot write in read-only transaction"),
             TransactionError::InvalidState(msg) => write!(f, "Invalid transaction state: {msg}"),
+            TransactionError::ActiveTransaction(msg) => {
+                write!(f, "Invalid in an active transaction: {msg}")
+            }
             TransactionError::DatabaseClosed => write!(
                 f,
                 "the database is closed, so it takes no more writes: open it again to write"

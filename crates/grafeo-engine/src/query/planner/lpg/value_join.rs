@@ -303,6 +303,12 @@ impl super::Planner {
         &self,
         filter: &FilterOp,
     ) -> Result<Option<(Box<dyn Operator>, Vec<String>)>> {
+        if !self
+            .rules
+            .has(crate::query::optimizer::PlannerRule::ValueJoin)
+        {
+            return Ok(None);
+        }
         let Some(ValueJoin {
             checked:
                 CheckedScan {

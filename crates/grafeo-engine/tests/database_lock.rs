@@ -6,7 +6,7 @@
 //! until the first one closes, whatever its name (`.grafeo` or none).
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --features full --test database_lock
+//! cargo test -p grafeo-engine --features full --test main database_lock::
 //! ```
 
 #![allow(missing_docs)]
@@ -133,8 +133,7 @@ mod tests {
             insert(&first, "Alix");
 
             let child = child_process::output(
-                std::process::Command::new(std::env::current_exe().unwrap())
-                    .args(["--exact", "tests::child_open_fails", "--nocapture"])
+                grafeo_common::child_test!("child_open_fails")
                     .env(CHILD_PATH_VAR, &path)
                     .env(CHILD_FORMAT_VAR, name),
             )
@@ -173,8 +172,7 @@ mod tests {
             insert(&first, "Alix");
 
             let child = child_process::output(
-                std::process::Command::new(std::env::current_exe().unwrap())
-                    .args(["--exact", "tests::child_open_fails", "--nocapture"])
+                grafeo_common::child_test!("child_open_fails")
                     .env(CHILD_PATH_VAR, &path)
                     .env(CHILD_FORMAT_VAR, name)
                     .env(CHILD_READ_ONLY_VAR, "1"),

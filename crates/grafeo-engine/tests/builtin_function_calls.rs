@@ -3,7 +3,7 @@
 //! call as written, and a volatile call is never folded.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test builtin_function_calls
+//! cargo test -p grafeo-engine --all-features --test main builtin_function_calls::
 //! ```
 
 #![cfg(all(feature = "gql", feature = "cypher"))]

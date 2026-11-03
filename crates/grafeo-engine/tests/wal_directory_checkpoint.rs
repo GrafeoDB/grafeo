@@ -5,7 +5,7 @@
 //! only loaded (read in place, or migrated to a single file), never written.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --features full --test wal_directory_checkpoint
+//! cargo test -p grafeo-engine --features full --test main wal_directory_checkpoint::
 //! ```
 
 #![cfg(all(feature = "gql", feature = "wal", feature = "grafeo-file"))]

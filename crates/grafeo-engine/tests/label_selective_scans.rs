@@ -5,7 +5,7 @@
 //! inside and outside a transaction.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test label_selective_scans
+//! cargo test -p grafeo-engine --all-features --test main label_selective_scans::
 //! ```
 
 #![cfg(all(feature = "gql", feature = "cypher"))]

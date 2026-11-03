@@ -7,6 +7,7 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "Persistence layer for Grafeo: WAL, container format, section I/O"
+autotests = false
 
 [dependencies]
 grafeo-common.workspace = true
@@ -58,3 +59,13 @@ encryption = ["grafeo-common/encryption"]
 
 [lints]
 workspace = true
+
+# One integration test binary (tests/main.rs declares each test file as a module).
+[[test]]
+name = "main"
+path = "tests/main.rs"
+
+# Counts allocations with its own global allocator.
+[[test]]
+name = "wal_v2_memory"
+path = "tests/wal_v2_memory.rs"

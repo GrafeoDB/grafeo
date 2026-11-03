@@ -5,7 +5,7 @@
 //!
 //! Run with:
 //! ```bash
-//! cargo test -p grafeo-engine --features graphql --test graphql
+//! cargo test -p grafeo-engine --all-features --test main graphql::
 //! ```
 
 #![cfg(feature = "graphql")]

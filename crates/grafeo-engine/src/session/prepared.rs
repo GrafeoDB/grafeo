@@ -14,13 +14,15 @@ use crate::query::plan::LogicalPlan;
 
 impl Session {
     /// The plan cache's key for `query` in `language` in this session: its
-    /// current schema and graph, which the plan is made for.
+    /// current schema and graph and its planner rules, which the plan is made
+    /// for.
     pub(super) fn plan_cache_key(
         &self,
         query: &str,
         language: crate::query::processor::QueryLanguage,
     ) -> CacheKey {
         CacheKey::in_scope(query, language, self.current_schema(), self.current_graph())
+            .with_rules(self.plan_options.rules)
     }
 
     /// The cached plan of a statement in this session (`key`): for a call
@@ -32,8 +34,8 @@ impl Session {
         params: Option<&HashMap<String, Value>>,
     ) -> Option<LogicalPlan> {
         match params {
-            None => self.query_cache.get_optimized(key),
-            Some(_) => self.query_cache.get_optimized(&key.prepared()),
+            None => self.plan_cache().get_optimized(key),
+            Some(_) => self.plan_cache().get_optimized(&key.prepared()),
         }
     }
 
@@ -62,12 +64,12 @@ impl Session {
         key: &CacheKey,
         plan: LogicalPlan,
         params: &HashMap<String, Value>,
-        store: &dyn GraphStore,
+        store: &std::sync::Arc<dyn GraphStore>,
         bound_by_value: bool,
     ) -> Result<LogicalPlan> {
-        use crate::query::{binder::Binder, optimizer::Optimizer};
+        use crate::query::binder::Binder;
 
-        let optimizer = Optimizer::from_graph_store(store);
+        let optimizer = self.optimizer_for(store);
         let mut filled = plan.clone();
         fill_values(&mut filled, params)?;
         Binder::new().bind(&filled)?;
@@ -76,11 +78,11 @@ impl Session {
             binder.bind(&plan)?;
             if !binder.binds_by_value() {
                 let prepared = optimizer.optimize(plan)?;
-                self.query_cache
+                self.plan_cache()
                     .put_optimized(key.prepared(), prepared.clone());
                 return Self::fill_prepared(prepared, Some(params));
             }
-            self.query_cache.put_parsed(key.clone(), plan);
+            self.plan_cache().put_parsed(key.clone(), plan);
         }
         optimizer.optimize(filled)
     }
@@ -121,5 +123,31 @@ fn fill_values(plan: &mut LogicalPlan, params: &HashMap<String, Value>) -> Resul
                 .map(|(name, value)| (name.clone(), value.clone())),
         );
         substitute_params(plan, &merged)
+    }
+}
+
+#[cfg(all(test, feature = "gql"))]
+mod tests {
+    use crate::query::optimizer::PlannerRules;
+    use crate::query::processor::QueryLanguage;
+
+    /// A session with other planner rules plans the query itself: the cache
+    /// holds a plan per set of rules.
+    #[test]
+    fn sessions_with_other_planner_rules_do_not_share_a_cached_plan() {
+        let db = crate::GrafeoDB::new_in_memory();
+        let usual = db.session();
+        let mut plain = db.session();
+        plain.set_planner_rules(PlannerRules::plain());
+        let query = "MATCH (n:Person) RETURN n";
+
+        plain.execute(query).unwrap();
+
+        let cached = |session: &super::Session| {
+            let key = session.plan_cache_key(query, QueryLanguage::Gql);
+            session.plan_cache().get_optimized(&key).is_some()
+        };
+        assert!(cached(&plain));
+        assert!(!cached(&usual));
     }
 }

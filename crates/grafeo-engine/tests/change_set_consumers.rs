@@ -3,7 +3,7 @@
 //! also after `compact()` (#558).
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test change_set_consumers
+//! cargo test -p grafeo-engine --all-features --test main change_set_consumers::
 //! ```
 
 #![cfg(feature = "gql")]
@@ -286,12 +286,9 @@ mod crash {
         );
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("prague.grafeo");
-        let status = child_process::run(
-            std::process::Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", "crash::crash_child", "--nocapture"])
-                .env(PATH_VAR, &path),
-        )
-        .unwrap();
+        let status =
+            child_process::run(grafeo_common::child_test!("crash_child").env(PATH_VAR, &path))
+                .unwrap();
         assert!(status.success(), "the child process failed");
         let mut sidecar = path.as_os_str().to_owned();
         sidecar.push(".wal");

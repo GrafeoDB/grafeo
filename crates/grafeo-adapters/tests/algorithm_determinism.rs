@@ -323,8 +323,7 @@ const CHILD_VAR: &str = "GRAFEO_ALGORITHM_DETERMINISM_CHILD";
 
 #[test]
 fn results_are_the_same_in_another_process() {
-    let output = std::process::Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", "digests_child", "--nocapture"])
+    let output = grafeo_common::child_test!("digests_child")
         .env(CHILD_VAR, "1")
         .output()
         .unwrap();

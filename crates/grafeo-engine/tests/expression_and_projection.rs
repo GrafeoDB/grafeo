@@ -6,7 +6,7 @@
 //! - `gql_translator.rs` (44.78%): aggregates, GROUP BY
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --features full --test expression_and_projection
+//! cargo test -p grafeo-engine --features full --test main expression_and_projection::
 //! ```
 
 use grafeo_common::types::{Decimal, PropertyKey, Value};

@@ -868,6 +868,15 @@ impl LogicalOperator {
                         format!(" [labels: {}]", labels.join("|"))
                     }
                     Some(PushdownHint::IdSeek) => " [seek: id]".to_string(),
+                    Some(PushdownHint::ExpandToKey { key }) => {
+                        format!(" [expand to key: {key}]")
+                    }
+                    Some(PushdownHint::IntersectExpand { target }) => {
+                        format!(" [IntersectExpand into: {target}]")
+                    }
+                    Some(PushdownHint::ExpandInto { target }) => {
+                        format!(" [expand into: {target}]")
+                    }
                     Some(PushdownHint::HashJoin { keys }) => hash_join_hint(keys),
                     None => String::new(),
                 };
@@ -1314,9 +1323,19 @@ impl fmt::Write for ExplainText<'_> {
 impl LogicalOperator {
     /// Formats this operator tree as a human-readable plan for EXPLAIN output.
     pub fn explain_tree(&self) -> String {
+        self.explain_tree_with(crate::query::optimizer::PlannerRules::all())
+    }
+
+    /// [`Self::explain_tree`] of a plan that runs with `rules`.
+    pub(crate) fn explain_tree_with(&self, rules: crate::query::optimizer::PlannerRules) -> String {
+        let reachability = if rules.has(crate::query::optimizer::PlannerRule::Reachability) {
+            crate::query::planner::lpg::reachability::reachability_expands(self)
+        } else {
+            Vec::new()
+        };
         let mut output = ExplainText {
             text: String::new(),
-            reachability: crate::query::planner::lpg::reachability::reachability_expands(self),
+            reachability,
             after_write: crate::query::planner::lpg::after_write::clauses_after_a_write(self),
         };
         self.fmt_tree(&mut output, 0);
@@ -1394,6 +1413,15 @@ impl LogicalOperator {
                         format!(" [labels: {}]", labels.join("|"))
                     }
                     Some(PushdownHint::IdSeek) => " [seek: id]".to_string(),
+                    Some(PushdownHint::ExpandToKey { key }) => {
+                        format!(" [expand to key: {key}]")
+                    }
+                    Some(PushdownHint::IntersectExpand { target }) => {
+                        format!(" [IntersectExpand into: {target}]")
+                    }
+                    Some(PushdownHint::ExpandInto { target }) => {
+                        format!(" [expand into: {target}]")
+                    }
                     Some(PushdownHint::HashJoin { keys }) => hash_join_hint(keys),
                     None => String::new(),
                 };
@@ -2378,6 +2406,24 @@ pub enum PushdownHint {
     },
     /// The node is looked up by ID for each input row.
     IdSeek,
+    /// The filter pins the target of its expand by a key: the expand finds the
+    /// nodes that hold it once and goes on from them.
+    ExpandToKey {
+        /// The indexed property, or `id()`.
+        key: String,
+    },
+    /// The filter's expand closes a cycle right after another hop: the two
+    /// intersect the lists of the bound nodes they meet between.
+    IntersectExpand {
+        /// The variable of the node the last hop comes back to.
+        target: String,
+    },
+    /// The filter's expand closes a cycle: it looks up the edges to the node
+    /// `target` of each row instead of listing every edge.
+    ExpandInto {
+        /// The variable of the node the expand comes back to.
+        target: String,
+    },
     /// The nodes are scanned once and joined to the input's rows by hash on
     /// values that must be equal: each key is the value of the scanned node,
     /// then that of the row.

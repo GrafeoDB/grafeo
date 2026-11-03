@@ -60,6 +60,7 @@ mod checkpoint;
 mod collect;
 mod column;
 mod compress;
+mod degree_samples;
 mod diagnostics;
 mod epochs;
 mod graphs;
@@ -658,6 +659,8 @@ pub struct RowGroupStore {
     /// The oldest epoch the store answers reads at: the newest horizon it
     /// was collected at, or the one its history was loaded from (`history`).
     floor: AtomicU64,
+    /// The degrees it has sampled for the planner (`degree_samples`).
+    degree_samples: degree_samples::DegreeSamples,
 }
 
 /// What a collect took out: rows, and the values and label sets kept for

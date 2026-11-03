@@ -10,7 +10,6 @@
 #![cfg(feature = "gql")]
 
 use std::collections::{BTreeMap, HashMap};
-use std::process::Command;
 use std::sync::Arc;
 
 use grafeo_common::storage::value_codec::MAX_PROPERTY_VALUE_DEPTH;
@@ -128,8 +127,7 @@ fn parameter_depth_child() {
 /// Runs the child for `entry:shape:depth`; returns its exit code and output.
 fn child(entry: &str, shape: &str, depth: usize) -> (Option<i32>, String) {
     let output = child_process::output(
-        Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "parameter_depth_child", "--nocapture"])
+        grafeo_common::child_test!("parameter_depth_child")
             .env(CHILD_VAR, format!("{entry}:{shape}:{depth}")),
     )
     .unwrap();

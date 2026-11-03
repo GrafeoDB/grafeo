@@ -4,7 +4,7 @@
 //! another graph once the selected graph is gone.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test direct_reads
+//! cargo test -p grafeo-engine --all-features --test main direct_reads::
 //! ```
 #![allow(
     deprecated,

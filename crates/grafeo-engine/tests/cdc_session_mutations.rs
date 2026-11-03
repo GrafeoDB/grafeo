@@ -10,7 +10,7 @@
 //! that a rollback reports nothing.
 //!
 //! ```bash
-//! cargo test --features "full" -p grafeo-engine --test cdc_session_mutations
+//! cargo test --features "full" -p grafeo-engine --test main cdc_session_mutations::
 //! ```
 
 #![cfg(all(feature = "cdc", feature = "gql"))]

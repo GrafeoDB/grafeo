@@ -4,7 +4,7 @@
 //! with aggregation, and label expression edge cases.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --test seam_pattern_edge_cases
+//! cargo test -p grafeo-engine --test main seam_pattern_edge_cases::
 //! ```
 
 use grafeo_common::types::Value;

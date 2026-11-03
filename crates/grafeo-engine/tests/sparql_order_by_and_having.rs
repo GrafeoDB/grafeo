@@ -7,7 +7,7 @@
 //! not computed, and one of another argument read the projected one.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test sparql_order_by_and_having
+//! cargo test -p grafeo-engine --all-features --test main sparql_order_by_and_having::
 //! ```
 
 #![cfg(all(feature = "sparql", feature = "triple-store"))]

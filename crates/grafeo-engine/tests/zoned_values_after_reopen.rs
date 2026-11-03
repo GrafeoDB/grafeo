@@ -6,7 +6,7 @@
 //! reopened values find the same nodes.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test zoned_values_after_reopen
+//! cargo test -p grafeo-engine --all-features --test main zoned_values_after_reopen::
 //! ```
 
 #![cfg(all(

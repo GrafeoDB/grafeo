@@ -4,7 +4,7 @@
 //! indexing make of them.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test entity_lists
+//! cargo test -p grafeo-engine --all-features --test main entity_lists::
 //! ```
 
 #![cfg(feature = "gql")]

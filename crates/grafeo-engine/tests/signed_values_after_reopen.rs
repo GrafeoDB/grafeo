@@ -5,7 +5,7 @@
 //! became floats or strings after a compact).
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test signed_values_after_reopen
+//! cargo test -p grafeo-engine --all-features --test main signed_values_after_reopen::
 //! ```
 
 #![cfg(all(feature = "gql", feature = "grafeo-file", feature = "wal"))]

@@ -18,16 +18,17 @@ const CHILD_PATH_VAR: &str = "GRAFEO_REPLAY_TEST_PATH";
 /// that exits without `close()`, so nothing is checkpointed; then reopens the
 /// database here with `open`, which replays its sidecar WAL.
 ///
-/// `test` is the path of the calling test (`module::name`): the child runs it
-/// with `--exact`, and with `--include-ignored` so an ignored test runs its
-/// child too. In the child this function does not return, so call it once per
-/// test, before anything else with effects. Bind the result as `(_dir, db)`:
-/// the database must close before its directory goes.
+/// `test` is the path of the calling test, from
+/// `grafeo_common::test_path!("name")`: the child runs it with `--exact`, and
+/// with `--include-ignored` so an ignored test runs its child too. In the
+/// child this function does not return, so call it once per test, before
+/// anything else with effects. Bind the result as `(_dir, db)`: the database
+/// must close before its directory goes.
 ///
 /// # Panics
 ///
-/// If the child process fails, or creates no database (`test` does not name
-/// the calling test).
+/// If `test` names no test of this binary, if the child process fails, or if
+/// it creates no database (`test` does not name the calling test).
 pub fn reopened_after_crash(
     test: &str,
     open: impl Fn(&Path) -> GrafeoDB,
@@ -57,8 +58,8 @@ pub fn reopened_after_crash_at(
     let dir = tempfile::tempdir().expect("create temp dir");
     let path = dir.path().join(file_name);
     let status = child_process::run(
-        std::process::Command::new(std::env::current_exe().expect("the test executable"))
-            .args(["--exact", test, "--include-ignored", "--nocapture"])
+        child_process::test_command(test)
+            .arg("--include-ignored")
             .env(CHILD_PATH_VAR, &path),
     )
     .expect("run the child process");

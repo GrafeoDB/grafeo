@@ -8,7 +8,7 @@
 //! configuration come back, and so does a SPARQL named-graph MODIFY.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test backup_contents
+//! cargo test -p grafeo-engine --all-features --test main backup_contents::
 //! ```
 
 #![cfg(all(feature = "wal", feature = "grafeo-file", feature = "gql"))]

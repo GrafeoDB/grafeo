@@ -11,7 +11,7 @@
 //! test corpus (which only reads).
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test typed_paths_see_open_writes
+//! cargo test -p grafeo-engine --all-features --test main typed_paths_see_open_writes::
 //! ```
 
 #![cfg(all(feature = "gql", feature = "cypher"))]

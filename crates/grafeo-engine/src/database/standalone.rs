@@ -9,8 +9,9 @@
 //! in memory or in the log, and what replay rebuilds is what the statement
 //! made, record for record.
 //!
-//! Such a change takes effect at once, also inside a transaction, whose
-//! rollback keeps it (0.6.0 has no transactional DDL).
+//! Outside a transaction such a change takes effect at once. In one it queues for
+//! the commit (`QueuedSchemaOp`), whose WAL group holds it among the data records,
+//! and a rollback drops it (ISO/IEC 39075 Feature GP18).
 //!
 //! An RDF graph operation (`CREATE`, `DROP`, `CLEAR`, `COPY`, `MOVE`, `ADD`)
 //! is one too: [`commit_rdf`] logs it as a group of its own and applies it
@@ -196,6 +197,132 @@ pub(crate) fn refuse_drop_with_open_changes(
         ));
     }
     Ok(())
+}
+
+/// Fails when one of `open` has changes in the graph with storage key `name`.
+///
+/// # Errors
+///
+/// A write conflict naming the graph.
+pub(crate) fn refuse_drop_with_changes_in(
+    open: &[Arc<crate::transaction::TransactionChanges>],
+    name: &str,
+) -> Result<()> {
+    if open.iter().any(|changes| changes.writes_graph(Some(name))) {
+        return Err(Error::Transaction(
+            grafeo_common::utils::error::TransactionError::WriteConflict(format!(
+                "graph '{name}' has changes of an open transaction: drop it once that \
+                 transaction commits or rolls back"
+            )),
+        ));
+    }
+    Ok(())
+}
+
+/// What `op` does to `catalog` alone: a transaction's own view of the catalog, in
+/// which a graph or an index exists only by its records.
+///
+/// # Errors
+///
+/// An op that does not apply to it.
+pub(crate) fn apply_to_catalog(op: &StandaloneOp, catalog: &Catalog) -> Result<()> {
+    match op {
+        StandaloneOp::CreateGraph { .. }
+        | StandaloneOp::RdfGraph(_)
+        | StandaloneOp::PutCatalog(CatalogRecord::Index(_))
+        | StandaloneOp::DropCatalog(CatalogKey::Index { .. }) => Ok(()),
+        StandaloneOp::DropGraph { name } => {
+            catalog.unbind_graph(name);
+            Ok(())
+        }
+        other => apply::<grafeo_core::graph::rowgroup::RowGroupStore>(
+            other,
+            None,
+            None,
+            catalog,
+            &mut Applying::Live,
+        ),
+    }
+}
+
+/// A catalog of its own with what `catalog` holds now.
+///
+/// # Errors
+///
+/// A record that does not apply: damage.
+pub(crate) fn copy_of_catalog(catalog: &Catalog) -> Result<Catalog> {
+    let names = super::catalog_section::index_names_of(catalog);
+    let copy = Catalog::new();
+    for record in super::catalog_section::catalog_records(catalog, Vec::new(), &names, true)? {
+        apply_to_catalog(&StandaloneOp::PutCatalog(record), &copy)?;
+    }
+    Ok(copy)
+}
+
+/// The claim on the `name` of a `kind` of the catalog.
+pub(crate) fn name_claim(kind: &str, name: &str) -> crate::transaction::KeyClaim {
+    crate::transaction::KeyClaim {
+        graph: None,
+        label: Arc::from(kind),
+        properties: vec!["name".to_string()],
+        values: vec![grafeo_common::types::HashableValue::from(
+            grafeo_common::types::Value::from(name),
+        )],
+    }
+}
+
+/// The names `op` changes, which a transaction claims at its statement: another that
+/// changes one fails at once.
+pub(crate) fn claims_of(op: &StandaloneOp) -> Vec<crate::transaction::KeyClaim> {
+    use grafeo_common::change::RdfGraphOp;
+
+    let claim = |kind: &str, name: String| name_claim(kind, &name);
+    match op {
+        StandaloneOp::CreateGraph { name } | StandaloneOp::DropGraph { name } => {
+            vec![claim("graph", name.clone())]
+        }
+        StandaloneOp::PutCatalog(record) => vec![match record {
+            CatalogRecord::StoredConfig(_) => claim("stored configuration", String::new()),
+            CatalogRecord::Schema(record) => claim("schema", record.name.clone()),
+            CatalogRecord::NodeType(record) => claim("node type", record.name.clone()),
+            CatalogRecord::EdgeType(record) => claim("edge type", record.name.clone()),
+            CatalogRecord::GraphType(record) => claim("graph type", record.name.clone()),
+            CatalogRecord::GraphBinding(record) => claim("graph", record.graph.clone()),
+            CatalogRecord::Constraint(record) => claim("constraint", record.name.clone()),
+            CatalogRecord::IndexName(record) => claim("index name", record.name.clone()),
+            CatalogRecord::Procedure(record) => claim("procedure", record.name.clone()),
+            CatalogRecord::Index(record) => claim(
+                "index",
+                format!("{:?} {:?}", record.graph, index_key(&record.index)),
+            ),
+        }],
+        StandaloneOp::DropCatalog(key) => vec![match key {
+            CatalogKey::StoredConfig => claim("stored configuration", String::new()),
+            CatalogKey::Schema(name) => claim("schema", name.clone()),
+            CatalogKey::NodeType(name) => claim("node type", name.clone()),
+            CatalogKey::EdgeType(name) => claim("edge type", name.clone()),
+            CatalogKey::GraphType(name) => claim("graph type", name.clone()),
+            CatalogKey::GraphBinding(name) => claim("graph", name.clone()),
+            CatalogKey::Constraint(name) => claim("constraint", name.clone()),
+            CatalogKey::IndexName(name) => claim("index name", name.clone()),
+            CatalogKey::Procedure(name) => claim("procedure", name.clone()),
+            CatalogKey::Index { graph, index } => claim("index", format!("{graph:?} {index:?}")),
+        }],
+        StandaloneOp::RdfGraph(graph_op) => {
+            let rdf = |name: String| claim("RDF graph", name);
+            match graph_op {
+                RdfGraphOp::Create { name } => vec![rdf(name.clone())],
+                RdfGraphOp::Drop { target } | RdfGraphOp::Clear { target } => {
+                    vec![rdf(format!("{target:?}"))]
+                }
+                RdfGraphOp::Copy { source, target }
+                | RdfGraphOp::Move { source, target }
+                | RdfGraphOp::Add { source, target } => {
+                    vec![rdf(format!("{source:?}")), rdf(format!("{target:?}"))]
+                }
+            }
+        }
+    }
 }
 
 /// Logs `change` as one WAL group of its own (to `wal`, when the database

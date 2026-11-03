@@ -255,6 +255,8 @@ tests:
       - "CREATE NODE TYPE Person (name STRING NOT NULL, age INTEGER)"
       - "CREATE EDGE TYPE KNOWS (since INTEGER)"
       - "CREATE GRAPH TYPE social (NODE TYPE Person, EDGE TYPE KNOWS)"
+      - "CREATE GRAPH circle TYPED social"
+      - "USE GRAPH circle"
       - "INSERT (:Person {age: 30})"
     expect:
       error: name
@@ -578,12 +580,10 @@ tests:
       # type that a graph has as its type.
       - "DROP GRAPH hr_graph"
       - "DROP GRAPH TYPE org_chart"
+      # The types only it listed went with it.
       - "DROP NODE TYPE Employee"
-      - "DROP EDGE TYPE REPORTS_TO"
-      - "MATCH (n) RETURN count(n) AS cnt"
     expect:
-      rows:
-        - [0]
+      error: "Type not found: Employee"
 
   # ---------------------------------------------------------------------------
   # Brace-form graph types (ISO <nested graph type specification>), MAP
@@ -593,6 +593,8 @@ tests:
   - name: brace_form_graph_type_declares_property_types
     setup:
       - "CREATE GRAPH TYPE routes { (:City {name STRING NOT NULL, population INT64})-[:ROUTE {km INT64}]->(:City) }"
+      - "CREATE GRAPH atlas TYPED routes"
+      - "USE GRAPH atlas"
     query: "INSERT (:City {name: 'Paris', population: 'many'})"
     expect:
       error: population
@@ -600,6 +602,8 @@ tests:
   - name: brace_form_graph_type_declares_not_null
     setup:
       - "CREATE GRAPH TYPE routes { (:City {name STRING NOT NULL, population INT64})-[:ROUTE {km INT64}]->(:City) }"
+      - "CREATE GRAPH atlas TYPED routes"
+      - "USE GRAPH atlas"
     query: "INSERT (:City {population: 3})"
     expect:
       error: "missing required property 'name'"
@@ -607,6 +611,8 @@ tests:
   - name: brace_form_graph_type_declares_edge_property_types
     setup:
       - "CREATE GRAPH TYPE routes { (:City {name STRING NOT NULL, population INT64})-[:ROUTE {km INT64}]->(:City) }"
+      - "CREATE GRAPH atlas TYPED routes"
+      - "USE GRAPH atlas"
     query: "INSERT (:City {name: 'Paris'})-[:ROUTE {km: 'far'}]->(:City {name: 'Prague'})"
     expect:
       error: km
@@ -614,6 +620,8 @@ tests:
   - name: brace_form_graph_type_declares_edge_endpoints
     setup:
       - "CREATE GRAPH TYPE routes { (:City {name STRING NOT NULL})-[:ROUTE]->(:City), (:Country {code STRING}) }"
+      - "CREATE GRAPH atlas TYPED routes"
+      - "USE GRAPH atlas"
     query: "INSERT (:Country {code: 'NL'})-[:ROUTE]->(:City {name: 'Berlin'})"
     expect:
       error: ROUTE
@@ -621,6 +629,8 @@ tests:
   - name: brace_form_graph_type_accepts_what_it_declares
     statements:
       - "CREATE GRAPH TYPE routes { (:City {name STRING NOT NULL, population INT64})-[:ROUTE {km INT64}]->(:City) }"
+      - "CREATE GRAPH atlas TYPED routes"
+      - "USE GRAPH atlas"
       - "INSERT (:City {name: 'Amsterdam', population: 19})-[:ROUTE {km: 88}]->(:City {name: 'Barcelona'})"
       - "MATCH (a:City)-[r:ROUTE]->(b:City) RETURN a.name, r.km, b.name"
     expect:

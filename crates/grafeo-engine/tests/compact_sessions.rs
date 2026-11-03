@@ -4,7 +4,7 @@
 //! changes to data from before `compact()` included.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test compact_sessions
+//! cargo test -p grafeo-engine --all-features --test main compact_sessions::
 //! ```
 
 #![cfg(feature = "gql")]
@@ -50,8 +50,7 @@ mod crash {
     /// exits without `close()`, like a crash.
     fn crash_after(scenario: &str, path: &Path) {
         let status = child_process::run(
-            std::process::Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", "crash::crash_child", "--nocapture"])
+            grafeo_common::child_test!("crash_child")
                 .env(PATH_VAR, path)
                 .env(SCENARIO_VAR, scenario),
         )

@@ -609,9 +609,8 @@ fn close_with_an_open_transaction_in_child(crash_point: u64, path: &std::path::P
 }
 
 fn run_close_child(crash_point: u64, path: &std::path::Path, open_transaction: bool) -> bool {
-    let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+    let mut command = grafeo_common::child_test!("close_child");
     command
-        .args(["--exact", "close_child", "--nocapture"])
         .env(CHILD_POINT_VAR, crash_point.to_string())
         .env(CHILD_PATH_VAR, path);
     if open_transaction {
@@ -771,8 +770,7 @@ const WAL_OFF_SCENARIO_VAR: &str = "GRAFEO_CRASH_WAL_OFF_SCENARIO";
 #[cfg(feature = "wal")]
 fn run_wal_off_child(scenario: &str, path: &std::path::Path) {
     let output = child_process::output(
-        std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "wal_off_child", "--nocapture"])
+        grafeo_common::child_test!("wal_off_child")
             .env(WAL_OFF_SCENARIO_VAR, scenario)
             .env(CHILD_PATH_VAR, path),
     )
@@ -966,8 +964,7 @@ fn a_crash_while_a_wal_off_open_retires_the_wal_loses_nothing() {
         let path = dir.path().join("wal_off_retire.grafeo");
         run_wal_off_child("writer", &path);
         let output = child_process::output(
-            std::process::Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", "wal_off_open_child", "--nocapture"])
+            grafeo_common::child_test!("wal_off_open_child")
                 .env(CHILD_POINT_VAR, crash_point.to_string())
                 .env(WAL_OFF_OPEN_PATH_VAR, &path),
         )

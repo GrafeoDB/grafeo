@@ -7,7 +7,7 @@
 //! - mmr_search with filters
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --features full --test search_operations
+//! cargo test -p grafeo-engine --features full --test main search_operations::
 //! ```
 
 // ============================================================================

@@ -8,7 +8,7 @@
 //! `insert_each_into`.
 //!
 //! ```bash
-//! cargo test -p grafeo-core --all-features --test rdf_insert_each
+//! cargo test -p grafeo-core --all-features --test main rdf_insert_each::
 //! ```
 
 #![cfg(feature = "triple-store")]

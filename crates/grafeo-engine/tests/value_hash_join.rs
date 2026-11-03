@@ -8,7 +8,7 @@
 //! of the two plans value by value.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test value_hash_join
+//! cargo test -p grafeo-engine --all-features --test main value_hash_join::
 //! ```
 
 #![cfg(all(feature = "gql", feature = "cypher"))]

@@ -5,7 +5,7 @@
 //! reopen: its WAL group holds the graph's creation and every copied entity.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test graph_copy
+//! cargo test -p grafeo-engine --all-features --test main graph_copy::
 //! ```
 
 #![cfg(feature = "gql")]
@@ -195,8 +195,7 @@ fn a_copy_of_an_empty_graph_is_empty() {
 }
 
 #[cfg(all(feature = "wal", feature = "grafeo-file"))]
-#[path = "common/replay.rs"]
-mod replay;
+use crate::common::replay;
 
 #[cfg(all(feature = "wal", feature = "grafeo-file"))]
 mod persistence {
@@ -227,7 +226,7 @@ mod persistence {
     #[test]
     fn a_copy_is_replayed_from_the_wal() {
         let (_dir, db) = reopened_after_crash(
-            "persistence::a_copy_is_replayed_from_the_wal",
+            &grafeo_common::test_path!("a_copy_is_replayed_from_the_wal"),
             |path| GrafeoDB::open(path).unwrap(),
             |db| {
                 trips(db);

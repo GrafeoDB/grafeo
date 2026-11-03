@@ -6,7 +6,7 @@
 //! so the write landed in the session's graph.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test stored_procedure_bodies
+//! cargo test -p grafeo-engine --all-features --test main stored_procedure_bodies::
 //! ```
 
 #![cfg(all(feature = "gql", feature = "algos"))]
@@ -945,12 +945,9 @@ mod crash {
     fn a_transaction_over_two_graphs_survives_a_crash() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("paris.grafeo");
-        let status = child_process::run(
-            std::process::Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", "crash::crash_child", "--nocapture"])
-                .env(PATH_VAR, &path),
-        )
-        .unwrap();
+        let status =
+            child_process::run(grafeo_common::child_test!("crash_child").env(PATH_VAR, &path))
+                .unwrap();
         assert!(status.success(), "the child process failed");
         let mut sidecar = path.as_os_str().to_owned();
         sidecar.push(".wal");

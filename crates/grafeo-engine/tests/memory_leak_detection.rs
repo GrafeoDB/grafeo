@@ -8,8 +8,8 @@
 //! The long-running stress variants are marked `#[ignore]` for CI.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --test memory_leak_detection
-//! cargo test -p grafeo-engine --test memory_leak_detection -- --ignored
+//! cargo test -p grafeo-engine --test main memory_leak_detection::
+//! cargo test -p grafeo-engine --test main memory_leak_detection:: -- --ignored
 //! ```
 
 use std::sync::atomic::{AtomicUsize, Ordering};

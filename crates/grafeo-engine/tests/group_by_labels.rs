@@ -16,7 +16,7 @@
 //! In GQL and Cypher.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test group_by_labels
+//! cargo test -p grafeo-engine --all-features --test main group_by_labels::
 //! ```
 
 #![cfg(all(feature = "gql", feature = "cypher"))]

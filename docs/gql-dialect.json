@@ -1085,7 +1085,7 @@
       "id": "GP18",
       "name": "Catalog and data statement mixing",
       "category": "Procedure Features",
-      "status": "not_supported",
+      "status": "supported",
       "tested": false,
       "test_count": 0
     },

@@ -3,7 +3,7 @@
 //! Targets: session.rs (73.07%), common.rs optional predicate classification
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --features full --test coverage_session
+//! cargo test -p grafeo-engine --features full --test main coverage_session::
 //! ```
 
 use grafeo_common::types::{EpochId, Value};

@@ -4,7 +4,7 @@
 //! types of #569.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test catalog_v2
+//! cargo test -p grafeo-engine --all-features --test main catalog_v2::
 //! ```
 
 #![cfg(all(
@@ -205,9 +205,13 @@ fn the_schema_survives_a_reopen_after_a_checkpoint_in_small_chunks() {
     assert_eq!(names("SHOW SCHEMAS"), [Value::from("archive")]);
 
     // The entries work, not only show.
-    db.execute("INSERT (:City {name: 'Prague'})").unwrap();
+    db.execute("USE GRAPH trips INSERT (:City {name: 'Prague'})")
+        .unwrap();
     assert_eq!(
-        single(&db, "MATCH (c:City {name: 'Prague'}) RETURN c.country"),
+        single(
+            &db,
+            "USE GRAPH trips MATCH (c:City {name: 'Prague'}) RETURN c.country"
+        ),
         Value::from("NL"),
         "the default"
     );

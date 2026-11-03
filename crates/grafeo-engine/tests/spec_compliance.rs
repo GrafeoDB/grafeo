@@ -5,7 +5,7 @@
 //! GQL statements, Cypher features, and SPARQL features.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --features full --test spec_compliance
+//! cargo test -p grafeo-engine --features full --test main spec_compliance::
 //! ```
 
 use grafeo_common::types::{PropertyKey, Value};

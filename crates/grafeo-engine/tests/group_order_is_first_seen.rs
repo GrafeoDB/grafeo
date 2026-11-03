@@ -7,7 +7,7 @@
 //! SQL/PGQ.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test group_order_is_first_seen
+//! cargo test -p grafeo-engine --all-features --test main group_order_is_first_seen::
 //! ```
 
 #![cfg(all(feature = "gql", feature = "cypher", feature = "sql-pgq"))]

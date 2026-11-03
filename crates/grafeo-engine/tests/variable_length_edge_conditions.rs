@@ -6,7 +6,7 @@
 //! `collect`, `collect_list`, was not an aggregate.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test variable_length_edge_conditions
+//! cargo test -p grafeo-engine --all-features --test main variable_length_edge_conditions::
 //! ```
 
 #![cfg(all(feature = "gql", feature = "cypher"))]

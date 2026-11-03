@@ -8,7 +8,7 @@
 //! (which only reads).
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test foreach_rows
+//! cargo test -p grafeo-engine --all-features --test main foreach_rows::
 //! ```
 
 #![cfg(feature = "cypher")]

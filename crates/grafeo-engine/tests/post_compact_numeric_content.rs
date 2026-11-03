@@ -15,8 +15,8 @@
 //! Tracked upstream as GrafeoDB/grafeo#301.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --features "lpg gql" \
-//!     --test post_compact_numeric_content
+//! cargo test -p grafeo-engine --all-features \
+//!     --test main post_compact_numeric_content::
 //! ```
 
 #![cfg(feature = "gql")]

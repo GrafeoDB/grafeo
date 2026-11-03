@@ -16,7 +16,7 @@
 //!   epoch.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test selector_paths_s_group
+//! cargo test -p grafeo-engine --all-features --test main selector_paths_s_group::
 //! ```
 
 #![cfg(feature = "gql")]

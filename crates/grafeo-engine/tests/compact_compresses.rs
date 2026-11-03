@@ -4,7 +4,7 @@
 //! included), and a write after it reads back.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test compact_compresses
+//! cargo test -p grafeo-engine --all-features --test main compact_compresses::
 //! ```
 
 #![cfg(feature = "gql")]

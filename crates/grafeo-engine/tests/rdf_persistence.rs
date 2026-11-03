@@ -214,8 +214,7 @@ fn after_the_change() -> Vec<Vec<String>> {
 /// `path`, and returns its exit code.
 fn in_child(scenario: &str, path: &Path) -> i32 {
     let status = child_process::run(
-        std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "crash_child", "--nocapture"])
+        grafeo_common::child_test!("crash_child")
             .env(SCENARIO_VAR, scenario)
             .env(PATH_VAR, path),
     )

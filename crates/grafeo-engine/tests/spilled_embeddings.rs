@@ -316,8 +316,7 @@ const CHILD_CASE: &str = "GRAFEO_SPILLED_EMBEDDINGS_CASE";
 /// without closing the database.
 fn crash_in_child(path: &Path, case: &str) {
     let output = child_process::output(
-        std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "crash_child", "--nocapture"])
+        grafeo_common::child_test!("crash_child")
             .env(CHILD_PATH, path)
             .env(CHILD_CASE, case),
     )

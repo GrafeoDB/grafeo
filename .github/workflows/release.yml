@@ -388,7 +388,7 @@ jobs:
 
       - name: Install dependencies
         working-directory: crates/bindings/node
-        run: npm install
+        run: npm ci
 
       - name: Build native module
         working-directory: crates/bindings/node
@@ -429,7 +429,7 @@ jobs:
 
       - name: Install dependencies
         working-directory: crates/bindings/node
-        run: npm install
+        run: npm ci
 
       - name: Download all Node.js artifacts
         uses: actions/download-artifact@v8
@@ -461,9 +461,19 @@ jobs:
             fi
           done
 
+      - name: Add the platform packages to the manifest
+        working-directory: crates/bindings/node
+        run: |
+          bash "$GITHUB_WORKSPACE/scripts/node-platform-deps.sh" add "$(node -p "require('./package.json').version")"
+          cat package.json
+
       - name: Publish @grafeo-db/js
         working-directory: crates/bindings/node
         run: bash "$GITHUB_WORKSPACE/scripts/npm-publish.sh" --ignore-scripts
+
+      - name: Check the published manifest
+        working-directory: crates/bindings/node
+        run: bash "$GITHUB_WORKSPACE/scripts/node-platform-deps.sh" published "$(node -p "require('./package.json').version")"
 
   # Publish WASM package to npm
   publish-wasm:

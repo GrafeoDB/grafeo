@@ -16,7 +16,7 @@
 //! committed and seen), and one node is left.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test serializable_isolation -- --include-ignored
+//! cargo test -p grafeo-engine --all-features --test main serializable_isolation:: -- --include-ignored
 //! ```
 
 #![cfg(feature = "gql")]

@@ -11,7 +11,7 @@
 //! differential test corpus (which only reads).
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test merge_after_write
+//! cargo test -p grafeo-engine --all-features --test main merge_after_write::
 //! ```
 
 #![cfg(all(feature = "gql", feature = "cypher"))]

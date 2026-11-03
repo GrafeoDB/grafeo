@@ -5,7 +5,7 @@
 //! language tag (with a region) and its datatype (a custom one too).
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test sparql_term_round_trip
+//! cargo test -p grafeo-engine --all-features --test main sparql_term_round_trip::
 //! ```
 
 #![cfg(all(feature = "sparql", feature = "triple-store", feature = "grafeo-file"))]

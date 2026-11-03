@@ -7,6 +7,7 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "Query engine and database management for Grafeo"
+autotests = false
 
 [dependencies]
 grafeo-common.workspace = true
@@ -153,3 +154,83 @@ harness = false
 name = "write_path_bench"
 harness = false
 required-features = ["cypher", "wal"]
+
+# One integration test binary (tests/main.rs declares each test file as a module).
+[[test]]
+name = "main"
+path = "tests/main.rs"
+
+# CI runs it with only `gql,grafeo-file`, where `main` does not build.
+[[test]]
+name = "compacted_file_in_every_build"
+path = "tests/compacted_file_in_every_build.rs"
+
+# CI runs it with only `gql,wal,grafeo-file,encryption`, where `main` does not build.
+[[test]]
+name = "encryption_at_rest"
+path = "tests/encryption_at_rest.rs"
+
+# CI runs it with only `gql,wal,grafeo-file,encryption`, where `main` does not build.
+[[test]]
+name = "epochs_across_reopen"
+path = "tests/epochs_across_reopen.rs"
+
+# CI runs it with only `gql,grafeo-file`, where `main` does not build.
+[[test]]
+name = "functions_without_their_features"
+path = "tests/functions_without_their_features.rs"
+
+# CI runs it with encryption and crash injection on top of the shipped features; only these three need that build.
+[[test]]
+name = "legacy_spill"
+path = "tests/legacy_spill.rs"
+
+# Installs a global tracing subscriber, and CI runs it with encryption and crash injection on top of the shipped features.
+[[test]]
+name = "migration"
+path = "tests/migration.rs"
+
+# CI runs it with only `gql,grafeo-file`, where `main` does not build.
+[[test]]
+name = "migration_without_wal"
+path = "tests/migration_without_wal.rs"
+
+# Counts allocations with its own global allocator.
+[[test]]
+name = "path_search_budget"
+path = "tests/path_search_budget.rs"
+
+# Counts allocations with its own global allocator.
+[[test]]
+name = "peak_memory"
+path = "tests/peak_memory.rs"
+
+# CI runs it without `triple-store` (`gql,grafeo-file`), where `main` does not build.
+[[test]]
+name = "rdf_file_without_triple_store"
+path = "tests/rdf_file_without_triple_store.rs"
+
+# CI runs it with the `rdf` profile's engine features, where `main` does not build.
+[[test]]
+name = "rdf_persistence"
+path = "tests/rdf_persistence.rs"
+
+# CI runs it with only `gql,grafeo-file`, where `main` does not build.
+[[test]]
+name = "search_indexes_without_their_features"
+path = "tests/search_indexes_without_their_features.rs"
+
+# CI runs it with only `gql,grafeo-file`, where `main` does not build.
+[[test]]
+name = "snapshot_without_its_features"
+path = "tests/snapshot_without_its_features.rs"
+
+# CI runs it with encryption and crash injection on top of the shipped features; only these three need that build.
+[[test]]
+name = "spilled_embeddings"
+path = "tests/spilled_embeddings.rs"
+
+# CI runs it with only `gql,grafeo-file`, where `main` does not build.
+[[test]]
+name = "writes_after_close"
+path = "tests/writes_after_close.rs"

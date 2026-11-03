@@ -14,7 +14,7 @@
 //! In GQL and Cypher.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test writes_row_at_a_time
+//! cargo test -p grafeo-engine --all-features --test main writes_row_at_a_time::
 //! ```
 
 #![cfg(all(feature = "gql", feature = "cypher"))]

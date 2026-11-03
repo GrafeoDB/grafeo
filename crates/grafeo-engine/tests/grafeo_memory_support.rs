@@ -4,7 +4,7 @@
 //! - temporal property versioning API
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test grafeo_memory_support
+//! cargo test -p grafeo-engine --all-features --test main grafeo_memory_support::
 //! ```
 
 use grafeo_common::types::NodeId;

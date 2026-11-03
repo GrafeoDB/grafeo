@@ -7,7 +7,7 @@
 //! then reopen and check exactly which writes survived.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --features full --test wal_transaction_groups
+//! cargo test -p grafeo-engine --features full --test main wal_transaction_groups::
 //! ```
 
 #![allow(missing_docs)]
@@ -49,8 +49,7 @@ mod tests {
     /// database, like a crash.
     fn crash_after(scenario: &str, path: &Path) {
         let status = child_process::run(
-            std::process::Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", "tests::crash_child", "--nocapture"])
+            grafeo_common::child_test!("crash_child")
                 .env(SCENARIO_VAR, scenario)
                 .env(PATH_VAR, path),
         )
@@ -404,20 +403,17 @@ mod tests {
         assert_eq!(open(&path).list_graphs(), vec!["g".to_string()]);
     }
 
-    /// Schema changes take effect immediately and a rollback does not undo
-    /// them in memory, so the log records them as they are applied and a
-    /// reopen matches the state before the crash. (If schema changes become
-    /// transactional, this test changes with them.)
+    /// Schema changes queue for the commit and a rollback undoes them (#727), so
+    /// the log holds none of them, and a reopen after a crash shows none.
     #[test]
-    fn schema_changes_in_a_rolled_back_transaction_match_memory() {
+    fn schema_changes_in_a_rolled_back_transaction_leave_nothing_in_the_log() {
         let dir = tempfile::tempdir().unwrap();
         let path = db_path(&dir);
         crash_after("ddl_in_rolled_back_tx", &path);
         let db = open(&path);
-        assert_eq!(db.list_graphs(), vec!["h".to_string()]);
+        assert!(db.list_graphs().is_empty(), "{:?}", db.list_graphs());
         let types = db.session().execute("SHOW NODE TYPES").unwrap();
-        let names: Vec<Value> = types.rows().iter().map(|row| row[0].clone()).collect();
-        assert_eq!(names, vec![Value::from("Robot")]);
+        assert_eq!(types.row_count(), 0);
     }
 
     /// Rows of a query, each value rendered as text (`NULL` for null).

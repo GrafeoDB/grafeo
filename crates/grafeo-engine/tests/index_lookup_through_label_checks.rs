@@ -8,7 +8,7 @@
 //! rows (no lookup is promised there). In GQL and Cypher.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test index_lookup_through_label_checks
+//! cargo test -p grafeo-engine --all-features --test main index_lookup_through_label_checks::
 //! ```
 
 #![cfg(all(feature = "gql", feature = "cypher"))]

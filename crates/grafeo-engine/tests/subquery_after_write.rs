@@ -9,7 +9,7 @@
 //! they are no cases of the differential test corpus (which only reads).
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test subquery_after_write
+//! cargo test -p grafeo-engine --all-features --test main subquery_after_write::
 //! ```
 
 #![cfg(all(feature = "gql", feature = "cypher"))]

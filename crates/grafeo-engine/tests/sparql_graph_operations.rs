@@ -6,7 +6,7 @@
 //! and 3.2.2), `DEFAULT` the default graph only, `ALL` every graph.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test sparql_graph_operations
+//! cargo test -p grafeo-engine --all-features --test main sparql_graph_operations::
 //! ```
 
 #![cfg(all(feature = "sparql", feature = "triple-store"))]

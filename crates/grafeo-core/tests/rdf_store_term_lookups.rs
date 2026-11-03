@@ -8,7 +8,7 @@
 //! named graphs, triples from another store, and a section save and reload.
 //!
 //! ```bash
-//! cargo test -p grafeo-core --all-features --test rdf_store_term_lookups
+//! cargo test -p grafeo-core --all-features --test main rdf_store_term_lookups::
 //! ```
 
 #![cfg(feature = "triple-store")]

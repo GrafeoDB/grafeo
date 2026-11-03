@@ -19,13 +19,13 @@
 //!   1. Archive the old fixture: `cp fixtures/snapshot_v5.bin fixtures/archive/`
 //!   2. Regenerate:
 //!      ```
-//!      cargo test --all-features -p grafeo-engine --test golden_format -- regenerate_snapshot_fixture --ignored
+//!      cargo test --all-features -p grafeo-engine --test main -- generate_fixture::regenerate_snapshot_fixture --ignored
 //!      ```
 //!   3. Rename the new fixture to match the new version (e.g. `snapshot_v6.bin`)
 //!   4. Update `EXPECTED_SNAPSHOT_VERSION` and `golden_bytes()` below
 //!   5. Commit both the archived and new fixture files
 
-mod generate_fixture;
+use crate::generate_fixture;
 
 use grafeo_common::types::Value;
 use grafeo_engine::GrafeoDB;

@@ -5,7 +5,7 @@
 //! feed.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test rdf_change_set
+//! cargo test -p grafeo-engine --all-features --test main rdf_change_set::
 //! ```
 
 #![cfg(all(feature = "sparql", feature = "triple-store"))]
@@ -242,10 +242,10 @@ fn code_of(
     outcome.unwrap_err().error_code().as_str().to_string()
 }
 
-/// A graph operation is refused with a write conflict while an open
-/// transaction, of another session or its own, has changes in a graph it
-/// changes: the target of each operation, and the source of a move. It runs
-/// once that transaction ends. A copy reads its source as committed.
+/// Outside a transaction a graph operation is refused with a write conflict
+/// while an open transaction has changes in a graph it changes: the target of
+/// each operation, and the source of a move. It runs once that transaction ends.
+/// A copy reads its source as committed.
 #[test]
 fn a_graph_operation_waits_for_the_open_changes_in_the_graphs_it_changes() {
     let db = rdf_db();
@@ -282,16 +282,6 @@ fn a_graph_operation_waits_for_the_open_changes_in_the_graphs_it_changes() {
         ["<http://example.org/jules>"],
         "a copy reads its source as committed"
     );
-    // The writer's own transaction is refused too.
-    assert_eq!(
-        code_of(writer.execute_sparql(&format!("CLEAR GRAPH <{PARIS}>"))),
-        "GRAFEO-T001"
-    );
-    assert!(
-        writer.in_transaction(),
-        "a refused statement keeps the transaction"
-    );
-
     writer.commit().unwrap();
     let both = ["<http://example.org/alix>", "<http://example.org/jules>"];
     assert_eq!(subjects_in(&db, PARIS), both);
@@ -305,10 +295,60 @@ fn a_graph_operation_waits_for_the_open_changes_in_the_graphs_it_changes() {
     );
 }
 
-/// A graph operation takes effect at once, also inside a transaction, whose
-/// rollback keeps it; the transaction's triples go with the rollback.
+/// In a transaction a graph operation queues for the commit: against another
+/// transaction's open changes it fails there, and nothing of it stays.
 #[test]
-fn a_graph_operation_in_a_transaction_survives_its_rollback() {
+fn a_queued_graph_operation_meets_open_changes_at_its_commit() {
+    let db = rdf_db();
+    insert_into(&db.session(), PARIS, "jules");
+    let mut writer = db.session();
+    writer.begin_transaction().unwrap();
+    insert_into(&writer, PARIS, "alix");
+
+    let mut other = db.session();
+    other.begin_transaction().unwrap();
+    other
+        .execute_sparql(&format!("CLEAR GRAPH <{PARIS}>"))
+        .unwrap();
+    let error = other.commit().unwrap_err();
+    assert_eq!(error.error_code().as_str(), "GRAFEO-T001", "{error}");
+    assert!(!other.in_transaction(), "the refused commit rolled it back");
+    writer.commit().unwrap();
+    assert_eq!(
+        subjects_in(&db, PARIS),
+        ["<http://example.org/alix>", "<http://example.org/jules>"],
+        "the clear left nothing"
+    );
+}
+
+/// Against its own open changes it applies after them, in the order they ran.
+#[test]
+fn a_queued_graph_operation_applies_after_its_own_triples() {
+    let db = rdf_db();
+    insert_into(&db.session(), PARIS, "jules");
+    let mut writer = db.session();
+    writer.begin_transaction().unwrap();
+    insert_into(&writer, PARIS, "alix");
+    writer
+        .execute_sparql(&format!("CLEAR GRAPH <{PARIS}>"))
+        .unwrap();
+    assert_eq!(
+        subjects_in(&db, PARIS),
+        ["<http://example.org/jules>"],
+        "another reader before the commit"
+    );
+    writer.commit().unwrap();
+    assert_eq!(
+        subjects_in(&db, PARIS),
+        Vec::<String>::new(),
+        "cleared after both"
+    );
+}
+
+/// A graph operation queues for the commit in a transaction: another reader does
+/// not see it, and a rollback undoes it with the transaction's triples (#727).
+#[test]
+fn a_graph_operation_in_a_transaction_goes_with_its_rollback() {
     let db = rdf_db();
     let mut session = db.session();
     session.begin_transaction().unwrap();
@@ -316,19 +356,25 @@ fn a_graph_operation_in_a_transaction_survives_its_rollback() {
         .execute_sparql(&format!("CREATE GRAPH <{PARIS}>"))
         .unwrap();
     assert!(
-        db.rdf_store().graph(PARIS).is_some(),
-        "another reader sees the graph before the commit"
+        db.rdf_store().graph(PARIS).is_none(),
+        "another reader does not see the graph before the commit"
     );
-    insert_into(&session, BERLIN, "vincent");
     session.rollback().unwrap();
     assert!(
-        db.rdf_store().graph(PARIS).is_some(),
-        "the rollback keeps it"
+        db.rdf_store().graph(PARIS).is_none(),
+        "the rollback undoes it"
     );
-    assert!(
-        db.rdf_store().graph(BERLIN).is_none(),
-        "a rolled-back insert leaves no graph behind"
-    );
+}
+
+/// A rolled-back insert leaves no graph behind.
+#[test]
+fn a_rolled_back_insert_leaves_no_graph() {
+    let db = rdf_db();
+    let mut session = db.session();
+    session.begin_transaction().unwrap();
+    insert_into(&session, BERLIN, "vincent");
+    session.rollback().unwrap();
+    assert!(db.rdf_store().graph(BERLIN).is_none());
 }
 
 /// `DROP ALL` empties the default graph and removes every named graph.

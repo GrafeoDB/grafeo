@@ -12,7 +12,7 @@
 #![allow(clippy::cast_possible_truncation)]
 //! - **Intentional format change** (version bumped): regenerate the fixture:
 //!   ```
-//!   cargo test --all-features -p grafeo-adapters --test golden_grafeo_file -- regenerate_grafeo_fixture --ignored
+//!   cargo test --all-features -p grafeo-storage --test main -- golden_grafeo_file::regenerate_grafeo_fixture --ignored
 //!   ```
 //!   Then commit the new fixture and update the version constant below.
 

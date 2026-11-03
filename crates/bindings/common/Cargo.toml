@@ -7,6 +7,7 @@ authors.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Shared abstractions for Grafeo language bindings"
+autotests = false
 
 [dependencies]
 grafeo-engine = { path = "../../grafeo-engine", default-features = false }
@@ -14,7 +15,7 @@ grafeo-common = { path = "../../grafeo-common" }
 
 serde_json = { version = "1.0", features = ["arbitrary_precision"] }
 # Bytes travel in JSON as the `$bytes` tag, standard base64 with padding
-base64 = "0.22"
+base64 = "0.23"
 
 [features]
 default = ["embedded"]
@@ -42,3 +43,8 @@ full = ["languages", "ai", "algos", "triple-store"]
 
 [lints]
 workspace = true
+
+# One integration test binary (tests/main.rs declares each test file as a module).
+[[test]]
+name = "main"
+path = "tests/main.rs"

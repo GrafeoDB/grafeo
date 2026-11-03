@@ -62,5 +62,5 @@ Write it again only with a change of the format, which a release names:
 
 ```bash
 GRAFEO_WRITE_RDF_TERMS_FIXTURE=$PWD/crates/grafeo-engine/tests/fixtures/rdf/0.6.0/terms.grafeo \
-  cargo test -p grafeo-engine --all-features --test rdf_term_ids_on_disk write_the_golden_fixture
+  cargo test -p grafeo-engine --all-features --test main rdf_term_ids_on_disk::write_the_golden_fixture
 ```

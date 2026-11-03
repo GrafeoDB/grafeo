@@ -10,7 +10,7 @@
 //! RDF planner expression pre-projection, and physical execution.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test sparql_aggregate_expressions
+//! cargo test -p grafeo-engine --all-features --test main sparql_aggregate_expressions::
 //! ```
 
 #[cfg(all(feature = "sparql", feature = "triple-store"))]

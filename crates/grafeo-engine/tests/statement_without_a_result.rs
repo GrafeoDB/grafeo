@@ -23,7 +23,7 @@
 //! cases too (section BR).
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test statement_without_a_result
+//! cargo test -p grafeo-engine --all-features --test main statement_without_a_result::
 //! ```
 
 #![cfg(all(feature = "gql", feature = "cypher"))]

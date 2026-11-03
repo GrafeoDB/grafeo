@@ -4,7 +4,7 @@
 //! that walks typed edges goes through it.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test edge_type_names
+//! cargo test -p grafeo-engine --all-features --test main edge_type_names::
 //! ```
 
 use grafeo_engine::GrafeoDB;

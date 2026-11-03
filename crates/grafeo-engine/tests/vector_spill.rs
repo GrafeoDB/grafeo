@@ -4,7 +4,7 @@
 //! their column reads through, search, and verify correctness (#594 has the
 //! durability tests: `spilled_embeddings.rs`).
 //!
-//! Run with: cargo test -p grafeo-engine --features "embedded,async-storage" --test vector_spill
+//! Run with: cargo test -p grafeo-engine --all-features --test main vector_spill::
 #![allow(
     deprecated,
     reason = "the test reaches the row-group store itself, which only the deprecated GrafeoDB::store() gives, until 0.7.0 removes it"

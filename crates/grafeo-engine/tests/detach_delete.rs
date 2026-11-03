@@ -5,7 +5,7 @@
 //! Concurrent writes to the node's edges conflict (`edge_endpoint_conflicts`).
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test detach_delete
+//! cargo test -p grafeo-engine --all-features --test main detach_delete::
 //! ```
 
 #![cfg(feature = "gql")]
@@ -231,12 +231,9 @@ mod replay {
         people(&db);
         db.close().unwrap();
         drop(db);
-        let status = child_process::run(
-            std::process::Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", "replay::crash_child", "--nocapture"])
-                .env(PATH_VAR, &path),
-        )
-        .unwrap();
+        let status =
+            child_process::run(grafeo_common::child_test!("crash_child").env(PATH_VAR, &path))
+                .unwrap();
         assert!(status.success(), "the child failed");
 
         let db = GrafeoDB::open(&path).unwrap();

@@ -125,6 +125,7 @@ impl Database {
                     commit,
                     transaction,
                     &changes,
+                    &[],
                     grafeo_common::storage::log_record::Origin::Transaction,
                 )
                 .unwrap();

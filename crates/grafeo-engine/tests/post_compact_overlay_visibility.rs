@@ -7,8 +7,8 @@
 //! `compact()` storing data a different way again.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --features "lpg gql" \
-//!     --test post_compact_overlay_visibility
+//! cargo test -p grafeo-engine --all-features \
+//!     --test main post_compact_overlay_visibility::
 //! ```
 
 #![cfg(feature = "gql")]

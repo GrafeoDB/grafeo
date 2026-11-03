@@ -12,7 +12,7 @@
 //! properties, both commit. An edge the schema refuses claims nothing.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test edge_endpoint_conflicts
+//! cargo test -p grafeo-engine --all-features --test main edge_endpoint_conflicts::
 //! ```
 
 #![cfg(feature = "gql")]

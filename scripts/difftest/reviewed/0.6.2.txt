@@ -1,0 +1,21 @@
+# Reviewed differences between 0.6.1 and 0.6.2: case key, fingerprint of the reviewed result, why it changed.
+DR1|cypher 40aa67a14b A filter that can raise goes only to the side of a join that holds the variable's written checks, so it no longer runs on a node the pattern's label leaves out; 0.6.1 copied it to the other side and failed with division by zero (#714).
+DR1|gql 40aa67a14b A filter that can raise goes only to the side of a join that holds the variable's written checks, so it no longer runs on a node the pattern's label leaves out; 0.6.1 copied it to the other side and failed with division by zero (#714).
+DR2|cypher 40aa67a14b A filter that can raise goes only to the side of a join that holds the variable's written checks, so it no longer runs on a node the pattern's label leaves out; 0.6.1 copied it to the other side and failed with division by zero (#714).
+DR2|gql 40aa67a14b A filter that can raise goes only to the side of a join that holds the variable's written checks, so it no longer runs on a node the pattern's label leaves out; 0.6.1 copied it to the other side and failed with division by zero (#714).
+DR3|cypher 40aa67a14b A filter that can raise goes only to the side of a join that holds the variable's written checks, so it no longer runs on a node the pattern's label leaves out; 0.6.1 copied it to the other side and failed with division by zero (#714).
+DR3|gql 40aa67a14b A filter that can raise goes only to the side of a join that holds the variable's written checks, so it no longer runs on a node the pattern's label leaves out; 0.6.1 copied it to the other side and failed with division by zero (#714).
+DR5|cypher 40aa67a14b A filter that can raise goes only to the side of a join that holds the variable's written checks, so it no longer runs on a node the pattern's label leaves out; 0.6.1 copied it to the other side and failed with division by zero (#714).
+DR5|gql 40aa67a14b A filter that can raise goes only to the side of a join that holds the variable's written checks, so it no longer runs on a node the pattern's label leaves out; 0.6.1 copied it to the other side and failed with division by zero (#714).
+DS1|cypher ff917b7788 A graph type's rules hold only in the graphs bound to it, so the default graph keeps what was written; 0.6.1 applied them to every graph by label (#730).
+DS1|gql ff917b7788 A graph type's rules hold only in the graphs bound to it, so the default graph keeps what was written; 0.6.1 applied them to every graph by label (#730).
+DS3|gql 0197c21812 A graph type's rules hold only in the graphs bound to it, so the default graph keeps what was written; 0.6.1 applied them to every graph by label (#730).
+DS4|gql 6372e552e3 A graph type's rules hold only in the graphs bound to it, so the default graph keeps what was written; 0.6.1 applied them to every graph by label (#730).
+DT1|gql 9041599eba A rule over data that breaks it fails and leaves nothing; 0.6.1 accepted it and enforced it only on later writes (#729).
+DT2|gql 46ad402f7e A rule over data that breaks it fails and leaves nothing; 0.6.1 accepted it and enforced it only on later writes (#729).
+DT3|gql 92043cf46c A rule over data that breaks it fails and leaves nothing; 0.6.1 accepted it and enforced it only on later writes (#729).
+DT4|gql ed88a3b624 A rule over data that breaks it fails and leaves nothing; 0.6.1 accepted it and enforced it only on later writes (#729).
+DT7|gql 0197c21812 The edge type is accepted because DT4's refused one left nothing; on 0.6.1 DT4's type already existed (#729).
+DU1|gql a95a21305f START TRANSACTION through a per-call statement is refused and names begin_transaction; 0.6.1 accepted it and dropped the transaction at the end of the call.
+DU2|gql d0ea2add79 The error of COMMIT outside a transaction says why a per-call statement has none; the status is the same.
+DU3|gql d0ea2add79 The error of ROLLBACK outside a transaction says why a per-call statement has none; the status is the same.

@@ -5,7 +5,7 @@
 //! rows are those of the filter where it is written, in GQL and Cypher.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test filter_pushdown_sides
+//! cargo test -p grafeo-engine --all-features --test main filter_pushdown_sides::
 //! ```
 
 #![cfg(all(feature = "gql", feature = "cypher"))]
@@ -340,7 +340,11 @@ fn a_filter_stays_after_a_call_that_writes() {
 #[test]
 fn a_predicate_on_a_join_key_filters_both_sides() {
     let db = graph();
-    let session = db.session();
+    let mut session = db.session();
+    session.set_planner_rules(grafeo_engine::query::optimizer::PlannerRules::all().with(
+        grafeo_engine::query::optimizer::PlannerRule::JoinOrder,
+        false,
+    ));
     let query = "MATCH (a:A), (b:B), (a)-[:R]->(c) WHERE a.k = 1 RETURN a.name, b.name, c.name";
     for language in LANGUAGES {
         let plan = plan(&session, language, query);

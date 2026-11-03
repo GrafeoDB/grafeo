@@ -4,13 +4,13 @@
 //! "Kraków" came back mangled and a query for it found nothing.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test rdf_term_encoding
+//! cargo test -p grafeo-engine --all-features --test main rdf_term_encoding::
 //! ```
 
 #![cfg(all(feature = "sparql", feature = "triple-store"))]
 
 #[cfg(all(feature = "wal", feature = "grafeo-file"))]
-mod common;
+use crate::common;
 
 use grafeo_common::types::Value;
 use grafeo_engine::{Config, GrafeoDB, GraphModel};
@@ -133,10 +133,13 @@ fn non_ascii_terms_survive_a_close_and_reopen() {
 #[cfg(all(feature = "wal", feature = "grafeo-file"))]
 #[test]
 fn non_ascii_terms_survive_a_crash() {
-    let (_dir, db) =
-        common::replay::reopened_after_crash("non_ascii_terms_survive_a_crash", rdf_file, |db| {
+    let (_dir, db) = common::replay::reopened_after_crash(
+        &grafeo_common::test_path!("non_ascii_terms_survive_a_crash"),
+        rdf_file,
+        |db| {
             db.session().execute_sparql(INSERT).unwrap();
-        });
+        },
+    );
     assert_found(&db, "after the WAL replay");
 }
 

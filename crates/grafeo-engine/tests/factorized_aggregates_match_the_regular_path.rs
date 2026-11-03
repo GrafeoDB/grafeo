@@ -17,7 +17,7 @@
 //! factorized count, which keeps the counts of earlier variables.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test factorized_aggregates_match_the_regular_path
+//! cargo test -p grafeo-engine --all-features --test main factorized_aggregates_match_the_regular_path::
 //! ```
 
 #![cfg(feature = "gql")]
@@ -682,9 +682,21 @@ fn profile_of_a_factorized_count_names_the_expands_it_absorbs() {
     // chain (the edge count answers only counts of the last hop's rows):
     // over two hops and over three, of the start, a middle node and the
     // first edge, alone and next to a count of the rows.
+    // From every node the degrees answer it, so no aggregate shows the hops either, and no
+    // expand has a line of its own.
     for (query, count) in [
         ("MATCH (a)-[:R]->(b)-[:R]->(c) RETURN count(a)", 6),
         ("MATCH (a)-[:R]->(b)-[:R]->(c)-[:R]->(d) RETURN count(a)", 2),
+    ] {
+        let lines = profile_lines(&db, query);
+        assert!(
+            lines.iter().all(|(name, _)| !name.contains("Expand")),
+            "{query}: {lines:?}"
+        );
+        assert_eq!(db.execute(query).unwrap().rows()[0][0], Value::Int64(count));
+    }
+    // The one that answers it, a factorized aggregate or a count over the hops, names them.
+    for (query, count) in [
         (
             "MATCH (a:P {name: 'Alix'})-[e1:R]->(b)-[e2:R]->(c)-[e3:R]->(d) RETURN count(b) AS n",
             2,
@@ -713,11 +725,11 @@ fn profile_of_a_factorized_count_names_the_expands_it_absorbs() {
         // with it is the aggregate's.)
         let aggregate = names
             .iter()
-            .rposition(|name| *name == "FactorizedAggregate")
-            .unwrap_or_else(|| panic!("{query}: no factorized aggregate\n{text}"));
+            .rposition(|name| *name == "FactorizedAggregate" || *name == "EdgeCount")
+            .unwrap_or_else(|| panic!("{query}: no factorized aggregate or count\n{text}"));
         let hops = query.matches("-[").count();
         assert_eq!(
-            lines[aggregate].1.matches("Expand").count(),
+            lines[aggregate].1.matches("[:R]").count(),
             hops,
             "{query}\n{text}"
         );
@@ -732,15 +744,6 @@ fn profile_of_a_factorized_count_names_the_expands_it_absorbs() {
             "{query}\n{text}"
         );
         assert!(lines[aggregate].1.contains("rows=1 "), "{query}\n{text}");
-        if hops == 2 && query.starts_with("MATCH (a)-") {
-            // From the top down, as the plan reads.
-            assert!(
-                lines[aggregate]
-                    .1
-                    .contains("Expand (b)->[:R]->(c), Expand (a)->[:R]->(b))"),
-                "{query}\n{text}"
-            );
-        }
         // And it counts what the query counts without PROFILE.
         assert_eq!(
             db.execute(query).unwrap().rows()[0][0],

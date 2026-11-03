@@ -9,7 +9,7 @@
 //! errors.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test gql_quoted_names_and_strings
+//! cargo test -p grafeo-engine --all-features --test main gql_quoted_names_and_strings::
 //! ```
 
 #![cfg(feature = "gql")]

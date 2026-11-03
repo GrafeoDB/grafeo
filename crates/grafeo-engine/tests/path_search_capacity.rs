@@ -9,7 +9,7 @@
 //! searches run in milliseconds; graph-bench's shape is a hub of 571 friends.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test path_search_capacity
+//! cargo test -p grafeo-engine --all-features --test main path_search_capacity::
 //! ```
 
 #![cfg(all(feature = "gql", feature = "cypher"))]

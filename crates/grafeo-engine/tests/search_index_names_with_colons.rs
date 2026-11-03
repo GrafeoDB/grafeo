@@ -6,7 +6,7 @@
 //! label `a`.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test search_index_names_with_colons
+//! cargo test -p grafeo-engine --all-features --test main search_index_names_with_colons::
 //! ```
 
 #![cfg(all(

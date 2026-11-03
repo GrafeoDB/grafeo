@@ -10,7 +10,7 @@
 //! the checkpoint timer, whose thread would use the default caps.)
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test chunked_sections
+//! cargo test -p grafeo-engine --all-features --test main chunked_sections::
 //! ```
 
 #![cfg(all(feature = "gql", feature = "grafeo-file", feature = "wal"))]
@@ -1279,12 +1279,7 @@ mod crash_during_close {
     /// caps. Returns whether the close completed.
     fn close_in_child(crash_point: u64, path: &Path) -> bool {
         let status = grafeo_common::testing::child_process::run(
-            std::process::Command::new(std::env::current_exe().unwrap())
-                .args([
-                    "--exact",
-                    "crash_during_close::closes_in_small_chunks_in_a_child",
-                    "--nocapture",
-                ])
+            grafeo_common::child_test!("closes_in_small_chunks_in_a_child")
                 .env(CHILD_POINT_VAR, crash_point.to_string())
                 .env(CHILD_PATH_VAR, path),
         )

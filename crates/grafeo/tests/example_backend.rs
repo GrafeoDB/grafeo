@@ -7,8 +7,10 @@
 //! the file's epoch, the in-memory one from the whole log.
 //!
 //! ```bash
-//! cargo test -p grafeo --all-features --test example_backend
+//! cargo test -p grafeo --all-features --test main example_backend::
 //! ```
+
+#![cfg(any(feature = "conformance", all(feature = "wal", feature = "gql")))]
 
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -447,8 +449,7 @@ mod database {
 
     fn crash(step: &str, path: &Path) {
         let status = child_process::run(
-            std::process::Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", "database::crash_child", "--nocapture"])
+            grafeo_common::child_test!("crash_child")
                 .env(STEP_VAR, step)
                 .env(PATH_VAR, path),
         )

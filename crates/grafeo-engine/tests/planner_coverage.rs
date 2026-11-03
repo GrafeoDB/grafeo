@@ -6,7 +6,7 @@
 //! rather than line coverage.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --test planner_coverage --all-features
+//! cargo test -p grafeo-engine --test main planner_coverage:: --all-features
 //! ```
 
 use grafeo_common::types::Value;

@@ -8,7 +8,7 @@
 //! and after a MATCH (a range per row, with bounds from the row).
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test range_unwind_matches_range
+//! cargo test -p grafeo-engine --all-features --test main range_unwind_matches_range::
 //! ```
 
 #![cfg(all(feature = "gql", feature = "cypher"))]

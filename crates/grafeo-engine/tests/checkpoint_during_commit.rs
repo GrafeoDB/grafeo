@@ -18,7 +18,7 @@
 //! left of the WAL.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test checkpoint_during_commit
+//! cargo test -p grafeo-engine --all-features --test main checkpoint_during_commit::
 //! ```
 
 #![cfg(all(
@@ -29,7 +29,6 @@
 ))]
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::{Arc, mpsc};
 
 use grafeo_common::storage::ChunkCaps;
@@ -44,8 +43,7 @@ use grafeo_engine::{GrafeoDB, Session};
 
 #[path = "common/image.rs"]
 mod image;
-#[path = "common/started.rs"]
-mod started;
+use crate::common::started;
 
 use image::image_holds;
 use started::Started;
@@ -461,8 +459,7 @@ fn run_child(which: &str, path: &Path) {
 /// ended.
 fn run_child_output(which: &str, path: &Path) -> std::process::Output {
     child_process::output(
-        Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "checkpoint_child", "--nocapture"])
+        grafeo_common::child_test!("checkpoint_child")
             .env(CHILD_VAR, which)
             .env(PATH_VAR, path),
     )

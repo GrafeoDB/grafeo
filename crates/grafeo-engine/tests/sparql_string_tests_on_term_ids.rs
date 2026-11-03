@@ -5,7 +5,7 @@
 //! error (a number, an IRI, an incompatible tag) drops the row.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test sparql_string_tests_on_term_ids
+//! cargo test -p grafeo-engine --all-features --test main sparql_string_tests_on_term_ids::
 //! ```
 
 #![cfg(all(feature = "sparql", feature = "triple-store"))]

@@ -8,7 +8,7 @@
 //! the differential test corpus (which only reads).
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test unit_call_rows
+//! cargo test -p grafeo-engine --all-features --test main unit_call_rows::
 //! ```
 
 #![cfg(all(feature = "gql", feature = "cypher"))]

@@ -1,6 +1,10 @@
 //! Label checks that the node scan below them makes true.
 
-use crate::query::plan::{BinaryOp, FilterOp, LogicalExpression, LogicalOperator};
+use grafeo_common::types::Value;
+
+use crate::query::plan::{
+    BinaryOp, BuiltinFunction, Callee, FilterOp, LogicalExpression, LogicalOperator,
+};
 use crate::query::planner::lpg::scan::label_check;
 
 /// `op` without the label checks a node scan below them guarantees: in
@@ -27,6 +31,39 @@ pub(super) fn drop_scanned_label_checks(op: LogicalOperator) -> LogicalOperator 
         }),
         None => *filter.input,
     }
+}
+
+/// `op` with each count of one label's nodes (see
+/// [`counted_label`](crate::query::plan::AggregateOp::counted_label)) over a
+/// scan of every node and a label check, which counts by reading the rows: the
+/// plan without the store's count.
+pub(super) fn scan_for_label_counts(op: LogicalOperator) -> LogicalOperator {
+    let op = op.map_children(scan_for_label_counts);
+    let LogicalOperator::Aggregate(mut aggregate) = op else {
+        return op;
+    };
+    let Some(label) = aggregate.counted_label().map(str::to_string) else {
+        return LogicalOperator::Aggregate(aggregate);
+    };
+    if let LogicalOperator::NodeScan(scan) = aggregate.input.as_mut() {
+        scan.label = None;
+        let predicate = LogicalExpression::FunctionCall {
+            callee: Callee::Builtin(BuiltinFunction::HasLabel),
+            name: "hasLabel".to_string(),
+            args: vec![
+                LogicalExpression::Variable(scan.variable.clone()),
+                LogicalExpression::Literal(Value::from(label.as_str())),
+            ],
+            distinct: false,
+        };
+        let input = std::mem::replace(aggregate.input.as_mut(), LogicalOperator::Empty);
+        aggregate.input = Box::new(LogicalOperator::Filter(FilterOp {
+            predicate,
+            pushdown_hint: None,
+            input: Box::new(input),
+        }));
+    }
+    LogicalOperator::Aggregate(aggregate)
 }
 
 /// The variable and label of the node scan at the bottom of a chain of

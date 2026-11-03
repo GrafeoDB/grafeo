@@ -3,7 +3,7 @@
 //! `grafeo-engine` or `grafeo-common`.
 //!
 //! ```bash
-//! cargo test -p grafeo --features encryption --test config_from_the_facade
+//! cargo test -p grafeo --features encryption --test main config_from_the_facade::
 //! ```
 
 use std::time::Duration;

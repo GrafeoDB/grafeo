@@ -5,7 +5,7 @@
 //!
 //! Run with:
 //! ```bash
-//! cargo test -p grafeo-engine --features gremlin --test gremlin
+//! cargo test -p grafeo-engine --all-features --test main gremlin::
 //! ```
 
 #![cfg(feature = "gremlin")]

@@ -7,12 +7,12 @@
 //! refused too. A dropped graph types nothing and keeps nothing.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test graph_type_in_use
+//! cargo test -p grafeo-engine --all-features --test main graph_type_in_use::
 //! ```
 
 #![cfg(all(feature = "gql", feature = "grafeo-file", feature = "wal"))]
 
-mod common;
+use crate::common;
 
 use std::path::Path;
 
@@ -110,7 +110,7 @@ fn a_graph_type_a_graph_in_a_schema_has_is_not_dropped() {
 #[test]
 fn a_refused_drop_leaves_the_graph_type_after_a_replay() {
     let (_dir, db) = common::replay::reopened_after_crash(
-        "a_refused_drop_leaves_the_graph_type_after_a_replay",
+        &grafeo_common::test_path!("a_refused_drop_leaves_the_graph_type_after_a_replay"),
         open,
         |db| {
             for statement in TYPED_GRAPH {

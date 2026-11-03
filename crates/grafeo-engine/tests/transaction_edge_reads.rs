@@ -5,7 +5,7 @@
 //! missed it and `type(r)` was null until the commit.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test transaction_edge_reads
+//! cargo test -p grafeo-engine --all-features --test main transaction_edge_reads::
 //! ```
 
 #![cfg(feature = "gql")]

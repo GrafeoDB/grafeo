@@ -5,7 +5,7 @@
 //! filtered lists; text scores stay those of the whole index.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --features hybrid-search,lpg,gql --test search_filters
+//! cargo test -p grafeo-engine --all-features --test main search_filters::
 //! ```
 
 #![cfg(feature = "hybrid-search")]

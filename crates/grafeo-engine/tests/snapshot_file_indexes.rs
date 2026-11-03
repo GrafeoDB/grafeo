@@ -19,9 +19,9 @@
 //! that an import reads it with its indexes.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --features full --test snapshot_file_indexes
-//! cargo test -p grafeo-engine --no-default-features --features gql,wal,grafeo-file \
-//!     --test snapshot_file_indexes
+//! cargo test -p grafeo-engine --features full --test main snapshot_file_indexes::
+//! cargo test -p grafeo-engine --all-features \
+//!     --test main snapshot_file_indexes::
 //! ```
 
 #![cfg(all(feature = "gql", feature = "wal", feature = "grafeo-file", not(miri)))]

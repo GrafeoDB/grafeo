@@ -8,7 +8,7 @@
 //! not the wording.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test error_kinds_of_conflicts_arguments_and_backups
+//! cargo test -p grafeo-engine --all-features --test main error_kinds_of_conflicts_arguments_and_backups::
 //! ```
 
 #![cfg(feature = "gql")]

@@ -3,7 +3,7 @@
 //! predicate decides each, so the rows are those of a scan.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test in_list_index_compound
+//! cargo test -p grafeo-engine --all-features --test main in_list_index_compound::
 //! ```
 
 #![cfg(feature = "gql")]

@@ -5,7 +5,7 @@
 //! stored configuration stays with the file. Version 4 still imports.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test snapshot_v5
+//! cargo test -p grafeo-engine --all-features --test main snapshot_v5::
 //! ```
 
 #![cfg(all(feature = "gql", feature = "vector-index", feature = "text-index"))]

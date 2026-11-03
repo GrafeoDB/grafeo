@@ -267,7 +267,7 @@ impl RowGroupStore {
         let mut indexes = IndexMemory::default();
         indexes.forward_adjacency_bytes = memory.outgoing_bytes;
         indexes.backward_adjacency_bytes = memory.incoming_bytes;
-        indexes.label_index_bytes = memory.label_bitmaps_bytes;
+        indexes.label_index_bytes = memory.label_bitmaps_bytes + self.degree_samples.memory_bytes();
         self.add_index_memory(&mut indexes);
         indexes.compute_total();
 

@@ -12,7 +12,7 @@
 //! - after a crash, the reopened store equals the store the commits left.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test rdf_commit_batches
+//! cargo test -p grafeo-engine --all-features --test main rdf_commit_batches::
 //! ```
 
 #![cfg(all(feature = "sparql", feature = "triple-store"))]
@@ -319,12 +319,9 @@ mod tests {
     fn the_log_replays_what_the_commits_left() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("batches.grafeo");
-        let status = child_process::run(
-            std::process::Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", "tests::crash_child", "--nocapture"])
-                .env(PATH_VAR, &path),
-        )
-        .unwrap();
+        let status =
+            child_process::run(grafeo_common::child_test!("crash_child").env(PATH_VAR, &path))
+                .unwrap();
         assert!(status.success(), "the child failed");
         assert!(sidecar_wal(&path).exists(), "the crash left the WAL");
 

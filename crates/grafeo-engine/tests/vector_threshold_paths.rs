@@ -9,7 +9,7 @@
 //! threshold was in one answer and not the other.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test vector_threshold_paths
+//! cargo test -p grafeo-engine --all-features --test main vector_threshold_paths::
 //! ```
 
 #![cfg(all(feature = "gql", feature = "vector-index"))]

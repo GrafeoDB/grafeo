@@ -13,7 +13,7 @@
 //! overlap, so every result tells which graph it came from.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --features full --test selected_graph_direct_calls
+//! cargo test -p grafeo-engine --features full --test main selected_graph_direct_calls::
 //! ```
 
 #![cfg(feature = "gql")]

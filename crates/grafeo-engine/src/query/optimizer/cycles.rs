@@ -12,25 +12,61 @@ use crate::query::plan::{BinaryOp, CreateElement, FilterOp, LogicalExpression, L
 /// variable itself again would return every path of that shape instead of
 /// the ones through the bound node or edge.
 pub(crate) fn close_cycles(op: LogicalOperator) -> LogicalOperator {
-    let mut taken = HashSet::new();
-    plan_names(&op, &mut taken);
-    close(op, &mut FreshNames { taken, next: 0 }, None)
+    let mut fresh = FreshNames::for_plan(&op);
+    close(op, &mut fresh, None)
+}
+
+/// [`close_cycles`], with the names of the plan, which [`FreshNames::made`] tells the
+/// variables made for its checks of: nothing but those checks reads them, unlike a name
+/// the query wrote.
+pub(super) fn close_cycles_naming(op: LogicalOperator) -> (LogicalOperator, FreshNames) {
+    let mut fresh = FreshNames::for_plan(&op);
+    let closed = close(op, &mut fresh, None);
+    (closed, fresh)
 }
 
 /// Names for the fresh variables, `_cycle_end_N` for a node and
 /// `_bound_edge_N` for an edge, skipping the ones the plan already uses: a
 /// user may name a variable `_cycle_end_0` too.
-struct FreshNames {
+pub(super) struct FreshNames {
     taken: HashSet<String>,
     next: usize,
+    /// The names it has given.
+    made: HashSet<String>,
 }
 
 impl FreshNames {
-    fn next(&mut self, prefix: &str) -> String {
+    /// The names it has given.
+    pub(super) fn made(&self) -> &HashSet<String> {
+        &self.made
+    }
+
+    /// Names for a plan that follows no edge, whose search makes none.
+    pub(super) fn none() -> Self {
+        Self {
+            taken: HashSet::new(),
+            next: 0,
+            made: HashSet::new(),
+        }
+    }
+
+    /// Names that no variable of `op` has.
+    pub(super) fn for_plan(op: &LogicalOperator) -> Self {
+        let mut taken = HashSet::new();
+        plan_names(op, &mut taken);
+        Self {
+            taken,
+            next: 0,
+            made: HashSet::new(),
+        }
+    }
+
+    pub(super) fn next(&mut self, prefix: &str) -> String {
         loop {
             let name = format!("{prefix}_{}", self.next);
             self.next += 1;
             if !self.taken.contains(&name) {
+                self.made.insert(name.clone());
                 return name;
             }
         }
@@ -86,7 +122,7 @@ fn close(
 }
 
 /// `fresh = bound`: the fresh variable is the node or edge bound before.
-fn same(fresh: &str, bound: String) -> LogicalExpression {
+pub(super) fn same(fresh: &str, bound: String) -> LogicalExpression {
     LogicalExpression::Binary {
         left: Box::new(LogicalExpression::Variable(fresh.to_string())),
         op: BinaryOp::Eq,

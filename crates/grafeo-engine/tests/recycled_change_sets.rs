@@ -14,7 +14,6 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::Arc;
 
 use grafeo_common::testing::child_process;
@@ -329,8 +328,7 @@ fn crash_and_compare(which: &str) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("graph.grafeo");
     let output = child_process::output(
-        Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "recycled_child", "--nocapture"])
+        grafeo_common::child_test!("recycled_child")
             .env(CHILD_VAR, which)
             .env(PATH_VAR, &path),
     )

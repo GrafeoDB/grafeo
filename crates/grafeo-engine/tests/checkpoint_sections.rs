@@ -6,7 +6,7 @@
 //! and the periodic timer kept writing the pre-compaction store.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --features full --test checkpoint_sections
+//! cargo test -p grafeo-engine --features full --test main checkpoint_sections::
 //! ```
 
 #![cfg(all(feature = "grafeo-file", feature = "gql"))]

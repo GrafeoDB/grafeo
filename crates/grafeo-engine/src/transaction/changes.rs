@@ -84,6 +84,24 @@ struct State {
     /// over the store.
     #[cfg(feature = "triple-store")]
     triples: super::rdf::PendingTriples,
+    /// The schema statements and graph operations it ran, which apply at its commit.
+    schema: Vec<QueuedSchemaOp>,
+}
+
+/// An op of a schema statement or graph operation in a transaction, for its commit.
+pub(crate) struct QueuedSchemaOp {
+    /// The op.
+    pub op: StandaloneOp,
+    /// How many of the transaction's log records came before it: its place in the
+    /// commit's group, so a graph is created before the writes into it.
+    #[cfg_attr(
+        not(feature = "wal"),
+        expect(dead_code, reason = "only a WAL group has places")
+    )]
+    pub position: usize,
+    /// The graph a `CREATE GRAPH` made, which the transaction writes and the commit
+    /// names.
+    pub graph: Option<Arc<grafeo_core::graph::rowgroup::RowGroupStore>>,
 }
 
 /// A graph a transaction writes: its slot, its backend and the backend's
@@ -113,8 +131,44 @@ impl TransactionChanges {
                 start,
                 #[cfg(feature = "triple-store")]
                 triples: super::rdf::PendingTriples::default(),
+                schema: Vec::new(),
             }),
         }
+    }
+
+    /// Queues `op` for the commit, after the writes recorded so far.
+    pub(crate) fn queue_schema(
+        &self,
+        op: StandaloneOp,
+        graph: Option<Arc<grafeo_core::graph::rowgroup::RowGroupStore>>,
+    ) {
+        let mut state = self.state.lock();
+        let position = state.set.log_records().count();
+        state.schema.push(QueuedSchemaOp {
+            op,
+            position,
+            graph,
+        });
+    }
+
+    /// How many ops are queued, for a savepoint.
+    pub(crate) fn schema_len(&self) -> usize {
+        self.state.lock().schema.len()
+    }
+
+    /// Calls `read` with the queue.
+    pub(crate) fn read_schema<R>(&self, read: impl FnOnce(&[QueuedSchemaOp]) -> R) -> R {
+        read(&self.state.lock().schema)
+    }
+
+    /// Drops the ops queued after the first `len`.
+    pub(crate) fn truncate_schema(&self, len: usize) {
+        self.state.lock().schema.truncate(len);
+    }
+
+    /// Takes the queue, for the commit.
+    pub(crate) fn take_schema(&self) -> Vec<QueuedSchemaOp> {
+        std::mem::take(&mut self.state.lock().schema)
     }
 
     /// Empties this set in place for another transaction, as the one that
@@ -124,6 +178,7 @@ impl TransactionChanges {
         let state = self.state.get_mut();
         state.set.clear();
         state.targets.clear();
+        state.schema.clear();
         state.start = state.set.mark();
         #[cfg(feature = "triple-store")]
         {
@@ -147,7 +202,7 @@ impl TransactionChanges {
     }
 
     /// The transaction.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "triple-store"))]
     pub(crate) fn id(&self) -> TransactionId {
         self.id
     }
@@ -289,6 +344,7 @@ impl TransactionChanges {
     /// backend is asked either way, and the entries are dropped.
     pub(crate) fn rollback(&self) -> std::result::Result<(), ApplyError> {
         let mut state = self.state.lock();
+        state.schema.clear();
         let start = state.start;
         let all = state.set.split_off(start);
         Self::forget_triples(&mut state, &all);
@@ -603,7 +659,6 @@ impl TransactionChanges {
     }
 
     /// Runs `read` on the change set.
-    #[cfg(any(feature = "wal", feature = "cdc"))]
     pub(crate) fn read<R>(&self, read: impl FnOnce(&ChangeSet) -> R) -> R {
         read(&self.state.lock().set)
     }

@@ -352,7 +352,9 @@ impl<'a> DPccp<'a> {
         if n == 1 {
             let node = &self.graph.nodes[0];
             let cardinality = self.card_estimator.estimate(&node.relation);
-            let cost = self.cost_model.estimate(&node.relation, cardinality);
+            let cost = self
+                .cost_model
+                .estimate_tree(&node.relation, self.card_estimator);
             return Some(JoinPlan {
                 nodes: BitSet::singleton(0),
                 operator: node.relation.clone(),
@@ -371,7 +373,9 @@ impl<'a> DPccp<'a> {
         for (i, node) in self.graph.nodes.iter().enumerate() {
             let subset = BitSet::singleton(i);
             let cardinality = self.card_estimator.estimate(&node.relation);
-            let cost = self.cost_model.estimate(&node.relation, cardinality);
+            let cost = self
+                .cost_model
+                .estimate_tree(&node.relation, self.card_estimator);
             self.memo.insert(
                 subset,
                 JoinPlan {

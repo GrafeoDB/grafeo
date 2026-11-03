@@ -8,7 +8,7 @@
 //! deep. A stack overflow aborts the test process.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test statement_depth
+//! cargo test -p grafeo-engine --all-features --test main statement_depth::
 //! ```
 
 use grafeo_adapters::query::limits::MAX_NESTING_DEPTH;

@@ -25,7 +25,6 @@ use std::collections::BTreeSet;
 use std::io::Write;
 use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use grafeo_common::testing::child_process;
 use grafeo_common::testing::crash::{CrashResult, with_crash_at, with_failure_at};
@@ -176,8 +175,7 @@ const CRASH_MESSAGE: &str = "crash injection at: ";
 /// fails some other way (any other panic included).
 fn run_child(scenario: &str, base: &Path, point: u64) -> Option<String> {
     let output = child_process::output(
-        Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "crash_child", "--nocapture"])
+        grafeo_common::child_test!("crash_child")
             .env(SCENARIO_VAR, scenario)
             .env(DIR_VAR, base)
             .env(POINT_VAR, point.to_string()),

@@ -2,7 +2,7 @@
 //! deletes after a compaction reach the edge the id was given to.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --features "lpg gql" --test compact_edge_ids
+//! cargo test -p grafeo-engine --all-features --test main compact_edge_ids::
 //! ```
 
 #![cfg(feature = "gql")]

@@ -6,7 +6,7 @@
 //! load of the same file holds, with the writes that followed the load.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test rdf_load_crash_replay
+//! cargo test -p grafeo-engine --all-features --test main rdf_load_crash_replay::
 //! ```
 
 #[cfg(all(
@@ -87,8 +87,7 @@ mod tests {
     /// database, like a crash.
     fn crash_after(scenario: &str, path: &Path, file: &Path) {
         let status = child_process::run(
-            std::process::Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", "tests::crash_child", "--nocapture"])
+            grafeo_common::child_test!("crash_child")
                 .env(SCENARIO_VAR, scenario)
                 .env(PATH_VAR, path)
                 .env(FILE_VAR, file),

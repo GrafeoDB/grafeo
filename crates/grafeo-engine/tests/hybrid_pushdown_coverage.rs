@@ -22,7 +22,7 @@
 //! Run:
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --test hybrid_pushdown_coverage --all-features
+//! cargo test -p grafeo-engine --test main hybrid_pushdown_coverage:: --all-features
 //! ```
 
 #![cfg(feature = "gql")]

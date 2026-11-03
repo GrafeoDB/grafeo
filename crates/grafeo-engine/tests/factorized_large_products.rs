@@ -10,7 +10,7 @@
 //! paths), and a chain through two hubs whose products multiply.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test factorized_large_products
+//! cargo test -p grafeo-engine --all-features --test main factorized_large_products::
 //! ```
 
 #![cfg(all(feature = "gql", feature = "cypher"))]

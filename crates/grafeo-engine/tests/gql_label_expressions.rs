@@ -7,7 +7,7 @@
 //! SQL/PGQ, whose patterns the same parser reads, gives the same rows.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test gql_label_expressions
+//! cargo test -p grafeo-engine --all-features --test main gql_label_expressions::
 //! ```
 
 #![cfg(all(feature = "gql", feature = "sql-pgq"))]

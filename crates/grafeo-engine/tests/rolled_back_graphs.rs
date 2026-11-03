@@ -2,7 +2,7 @@
 //! transaction: a rollback leaves no graph behind (#415).
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test rolled_back_graphs
+//! cargo test -p grafeo-engine --all-features --test main rolled_back_graphs::
 //! ```
 
 #![cfg(all(feature = "gql", feature = "sparql", feature = "triple-store"))]

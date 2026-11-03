@@ -23,14 +23,6 @@
     "error-status.js",
     "grafeo.d.ts"
   ],
-  "optionalDependencies": {
-    "@grafeo-db/js-darwin-x64": "0.6.1",
-    "@grafeo-db/js-win32-x64-msvc": "0.6.1",
-    "@grafeo-db/js-linux-x64-gnu": "0.6.1",
-    "@grafeo-db/js-darwin-arm64": "0.6.1",
-    "@grafeo-db/js-linux-arm64-gnu": "0.6.1",
-    "@grafeo-db/js-linux-arm64-musl": "0.6.1"
-  },
   "keywords": [
     "graph",
     "database",
@@ -65,6 +57,6 @@
   },
   "devDependencies": {
     "@napi-rs/cli": "^3.10.9",
-    "vitest": "~5.0.5"
+    "vitest": "~5.1.0"
   }
 }

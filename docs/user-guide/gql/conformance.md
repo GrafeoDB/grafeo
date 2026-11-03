@@ -435,7 +435,7 @@ refuses `=~` and LIKE with an error that says so.
 | GP15 | Graphs as procedure arguments | **Not yet** |
 | GP16 | AT schema clause | **Not yet** |
 | GP17 | Binding variable definition block | **Not yet** |
-| GP18 | Catalog and data statement mixing | **Not yet** |
+| GP18 | Catalog and data statement mixing | **Supported**: schema statements queue for the commit of their transaction, and a rollback undoes them. `CREATE GRAPH ... AS COPY OF` is refused in a transaction (25G01) GP18 applies across statements in a transaction; ISO doesn't allow a catalog statement in a `NEXT` chain (9.2). |
 
 ### Query Composition Features
 

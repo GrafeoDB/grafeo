@@ -3,7 +3,7 @@
 //! Targets: pattern.rs (76.07%), expression.rs paths
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --test coverage_patterns
+//! cargo test -p grafeo-engine --test main coverage_patterns::
 //! ```
 
 use grafeo_common::types::{Decimal, Value};

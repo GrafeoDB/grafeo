@@ -6,7 +6,7 @@
 //! Crashes run in a child process that exits without `close()`.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --features full --test checkpoint_replay
+//! cargo test -p grafeo-engine --features full --test main checkpoint_replay::
 //! ```
 
 #![allow(missing_docs)]
@@ -44,8 +44,7 @@ mod tests {
     /// database, like a crash.
     fn crash_after(scenario: &str, path: &Path) {
         let status = child_process::run(
-            std::process::Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", "tests::crash_child", "--nocapture"])
+            grafeo_common::child_test!("crash_child")
                 .env(SCENARIO_VAR, scenario)
                 .env(PATH_VAR, path),
         )

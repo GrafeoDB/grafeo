@@ -9,7 +9,7 @@
 //! - A snapshot taken after `compact()` imports whole.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test compact_whole_state
+//! cargo test -p grafeo-engine --all-features --test main compact_whole_state::
 //! ```
 
 #![cfg(feature = "gql")]

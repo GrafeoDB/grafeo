@@ -2,7 +2,7 @@
 //! open database, and their status (#426).
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test checkpoint_triggers
+//! cargo test -p grafeo-engine --all-features --test main checkpoint_triggers::
 //! ```
 
 #![cfg(all(feature = "gql", feature = "wal", feature = "grafeo-file", not(miri)))]

@@ -5,7 +5,7 @@
 //! queries, and introspection functions reflecting current state.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --test seam_session_state
+//! cargo test -p grafeo-engine --test main seam_session_state::
 //! ```
 
 use grafeo_common::types::Value;

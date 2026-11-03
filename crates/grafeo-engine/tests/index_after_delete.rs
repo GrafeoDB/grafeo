@@ -6,7 +6,7 @@
 //! delete back must restore both.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --features full --test index_after_delete
+//! cargo test -p grafeo-engine --features full --test main index_after_delete::
 //! ```
 
 #![allow(missing_docs)]

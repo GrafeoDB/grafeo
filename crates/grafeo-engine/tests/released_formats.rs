@@ -20,7 +20,7 @@
 //! pins its sections and their versions, and the WAL segments' version.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test released_formats
+//! cargo test -p grafeo-engine --all-features --test main released_formats::
 //! ```
 
 #![cfg(all(
@@ -807,9 +807,20 @@ fn check_constraints(fixture: Fixture, db: &GrafeoDB) {
     assert!(duplicate.contains("UNIQUE"), "{name}: {duplicate}");
     let unnamed = error("INSERT (:Person {email: 'jules@example.org'})");
     assert!(unnamed.contains("NOT NULL"), "{name}: {unnamed}");
+    // A constraint on a label a graph type lists holds in the graphs of that type: `Louvre` is
+    // in `museums`, and in the default graph, which that type does not bind, the name is free. A
+    // 0.5 log did not record the binding, so there `museums` has no type and no such rule.
     if !fixture.replays_into_a_named_graph() {
-        let museum = error("INSERT (:Museum {name: 'Rijksmuseum'})");
-        assert!(museum.contains("UNIQUE"), "{name}: {museum}");
+        let louvre = "USE GRAPH museums INSERT (:Museum {name: 'Louvre'})";
+        if fixture.second_session_schema_in_wal() {
+            db.execute(louvre)
+                .unwrap_or_else(|error| panic!("{name}: museums has no type: {error}"));
+        } else {
+            let museum = error(louvre);
+            assert!(museum.contains("UNIQUE"), "{name}: {museum}");
+        }
+        db.execute("INSERT (:Museum {name: 'Rijksmuseum'})")
+            .unwrap_or_else(|error| panic!("{name}: the default graph has no such rule: {error}"));
     }
     assert_eq!(
         names(db, "SHOW CONSTRAINTS"),
@@ -876,10 +887,14 @@ fn check_schema(fixture: Fixture, db: &GrafeoDB) {
         "{name}: endpoints of IN_CITY"
     );
 
-    // Default values apply to new nodes.
-    db.execute("INSERT (:City {name: 'Barcelona'})").unwrap();
+    // Default values apply to new nodes in the graphs of the type that lists them.
+    db.execute("USE GRAPH trips INSERT (:City {name: 'Barcelona'})")
+        .unwrap();
     assert_eq!(
-        rows(db, "MATCH (c:City {name: 'Barcelona'}) RETURN c.country"),
+        rows(
+            db,
+            "USE GRAPH trips MATCH (c:City {name: 'Barcelona'}) RETURN c.country"
+        ),
         [vec![if first {
             Value::from("NL")
         } else {
@@ -887,15 +902,27 @@ fn check_schema(fixture: Fixture, db: &GrafeoDB) {
         }]],
         "{name}: default of City.country"
     );
-    db.execute("INSERT (:Museum {name: 'Stedelijk'})").unwrap();
+    db.execute("USE GRAPH museums INSERT (:Museum {name: 'Stedelijk'})")
+        .unwrap();
     assert_eq!(
-        rows(db, "MATCH (m:Museum {name: 'Stedelijk'}) RETURN m.open"),
+        rows(
+            db,
+            "USE GRAPH museums MATCH (m:Museum {name: 'Stedelijk'}) RETURN m.open"
+        ),
         [vec![if second {
             Value::Bool(true)
         } else {
             Value::Null
         }]],
         "{name}: default of Museum.open"
+    );
+
+    // The rows stored outside those graphs stay as written, and take no default now.
+    db.execute("INSERT (:City {name: 'Lisbon'})").unwrap();
+    assert_eq!(
+        rows(db, "MATCH (c:City {name: 'Lisbon'}) RETURN c.country"),
+        [vec![Value::Null]],
+        "{name}: no default outside the graphs of the type"
     );
 }
 

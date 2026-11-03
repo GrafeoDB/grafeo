@@ -22,8 +22,8 @@
 //! release:
 //!
 //! ```bash
-//! cargo test --release -p grafeo-engine --features full,arrow-export \
-//!     --test large_database -- --ignored --nocapture
+//! cargo test --release -p grafeo-engine --all-features \
+//!     --test main large_database:: -- --ignored --nocapture
 //! ```
 //!
 //! It writes into a temporary directory under `GRAFEO_LARGE_TEST_DIR` (the

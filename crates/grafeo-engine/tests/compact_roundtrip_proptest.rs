@@ -10,8 +10,8 @@
 //! which ship deterministic tests alongside the fix.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --features "lpg gql" \
-//!     --test compact_roundtrip_proptest
+//! cargo test -p grafeo-engine --all-features \
+//!     --test main compact_roundtrip_proptest::
 //!
 //! # bump coverage locally:
 //! PROPTEST_CASES=1024 cargo test -p grafeo-engine ...

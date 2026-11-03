@@ -373,7 +373,6 @@ mod persistent {
     use super::*;
     use grafeo_common::testing::child_process;
     use std::path::{Path, PathBuf};
-    use std::process::Command;
 
     const CHILD_VAR: &str = "GRAFEO_VECTOR_INDEX_OVER_LISTS_CHILD";
     const PATH_VAR: &str = "GRAFEO_VECTOR_INDEX_OVER_LISTS_PATH";
@@ -387,8 +386,7 @@ mod persistent {
 
     fn crash(which: &str, path: &Path) {
         let output = child_process::output(
-            Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", "persistent::index_child", "--nocapture"])
+            grafeo_common::child_test!("index_child")
                 .env(CHILD_VAR, which)
                 .env(PATH_VAR, path),
         )

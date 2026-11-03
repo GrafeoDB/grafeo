@@ -10,7 +10,7 @@
 //! later ones.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test overlay_vector_index
+//! cargo test -p grafeo-engine --all-features --test main overlay_vector_index::
 //! ```
 
 #![cfg(all(feature = "gql", feature = "vector-index"))]

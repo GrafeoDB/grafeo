@@ -11,7 +11,7 @@
 //! reopen) and after a crash.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --features full --test spilled_embedding_changes
+//! cargo test -p grafeo-engine --features full --test main spilled_embedding_changes::
 //! ```
 
 #![cfg(all(
@@ -729,8 +729,7 @@ fn changes_while_spilled_survive_a_crash() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("prague.grafeo");
         let output = child_process::output(
-            std::process::Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", "crash_child", "--nocapture"])
+            grafeo_common::child_test!("crash_child")
                 .env(CHILD_PATH, &path)
                 .env(CHILD_CASE, case),
         )

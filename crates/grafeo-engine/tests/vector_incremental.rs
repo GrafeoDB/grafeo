@@ -5,9 +5,6 @@
 
 #![cfg(feature = "vector-index")]
 
-#[cfg(all(feature = "wal", feature = "grafeo-file"))]
-mod common;
-
 use grafeo_common::types::Value;
 use grafeo_engine::GrafeoDB;
 
@@ -419,7 +416,7 @@ mod after_a_reopen {
     #[test]
     fn repeated_update_survives_a_crash_before_any_checkpoint() {
         let (_dir, db) = reopened_after_crash(
-            "after_a_reopen::repeated_update_survives_a_crash_before_any_checkpoint",
+            &grafeo_common::test_path!("repeated_update_survives_a_crash_before_any_checkpoint"),
             |path| GrafeoDB::open(path).unwrap(),
             |db| {
                 update(db);

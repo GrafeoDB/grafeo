@@ -10,7 +10,7 @@
 //! read the engine's column.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test self_loops_and_generated_names
+//! cargo test -p grafeo-engine --all-features --test main self_loops_and_generated_names::
 //! ```
 
 #![cfg(all(feature = "gql", feature = "cypher"))]

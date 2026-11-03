@@ -1,0 +1,65 @@
+# Rosetta: a constraint over data that breaks it
+#
+# ISO/IEC 39075 codes: a rule the stored data does not meet is refused with
+# G2000 (graph type violation), naming the rule. Earlier releases accepted it
+# and enforced it only on later writes. The data is not changed, and a rule
+# the data meets is accepted.
+
+meta:
+  model: lpg
+  section: rosetta
+  title: Constraints over existing data
+  dataset: empty
+  requires: [cypher]
+
+tests:
+
+  - name: unique_over_repeated_values
+    setup:
+      - "INSERT (:File {id: 1}), (:File {id: 1})"
+    variants:
+      gql: "CREATE CONSTRAINT c1 FOR (n:File) ON (n.id) UNIQUE"
+      cypher: "CREATE CONSTRAINT c1 FOR (n:File) REQUIRE n.id IS UNIQUE"
+    expect:
+      error: "constraint 'c1' does not hold"
+      gql_status: "G2000"
+
+  - name: not_null_over_a_missing_value
+    setup:
+      - "INSERT (:File {id: 1})"
+    variants:
+      gql: "CREATE CONSTRAINT c1 FOR (n:File) ON (n.must) NOT NULL"
+      cypher: "CREATE CONSTRAINT c1 FOR (n:File) REQUIRE n.must IS NOT NULL"
+    expect:
+      error: "constraint 'c1' does not hold"
+      gql_status: "G2000"
+
+  - name: node_key_over_a_missing_value
+    setup:
+      - "INSERT (:File {part: 1})"
+    variants:
+      gql: "CREATE CONSTRAINT c1 FOR (n:File) ON (n.id) NODE KEY"
+      cypher: "CREATE CONSTRAINT c1 FOR (n:File) REQUIRE n.id IS NODE KEY"
+    expect:
+      error: "constraint 'c1' does not hold"
+      gql_status: "G2000"
+
+  - name: unique_over_different_values_is_accepted
+    setup:
+      - "INSERT (:File {id: 1}), (:File {id: 2})"
+    variants:
+      gql: "CREATE CONSTRAINT c1 FOR (n:File) ON (n.id) UNIQUE"
+      cypher: "CREATE CONSTRAINT c1 FOR (n:File) REQUIRE n.id IS UNIQUE"
+    expect:
+      empty: true
+
+  - name: a_rule_the_data_meets_holds_for_later_writes
+    setup:
+      - "INSERT (:File {id: 1}), (:File {id: 2})"
+      - "CREATE CONSTRAINT c1 FOR (n:File) ON (n.id) UNIQUE"
+    variants:
+      gql: "INSERT (:File {id: 2})"
+      cypher: "CREATE (:File {id: 2})"
+    expect:
+      error: UNIQUE
+      gql_status: "G2000"

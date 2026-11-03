@@ -5,7 +5,7 @@
 //! OPTIONAL MATCH (left join), CALL PROCEDURE.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --features full --test mutation_planning
+//! cargo test -p grafeo-engine --features full --test main mutation_planning::
 //! ```
 
 use grafeo_common::types::Value;

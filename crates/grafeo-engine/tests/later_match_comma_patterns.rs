@@ -5,7 +5,7 @@
 //! of each person, not every person with every visit.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test later_match_comma_patterns
+//! cargo test -p grafeo-engine --all-features --test main later_match_comma_patterns::
 //! ```
 
 use grafeo_common::types::Value;
@@ -149,9 +149,11 @@ fn the_plan_expands_from_the_bound_node() {
     }
     let query = "MATCH (a:Person) MATCH (b:City), (b)<-[:VISITED]-(a) RETURN a.name, b.name";
     for (language, plan) in explain(&db, query) {
+        // Against the edge from b it may join, or close on the bound a by a lookup: the search
+        // chooses (`PlannerRule::JoinOrder`). It never lists b's edges for each a unchecked.
         assert!(
-            plan.contains("Join (Inner)"),
-            "{language}: the part from b is not joined:
+            plan.contains("Join (Inner)") || plan.contains("[expand into: a]"),
+            "{language}: the part from b neither joins nor closes on a:
 {plan}"
         );
     }

@@ -12,11 +12,17 @@
 //! how expensive different plans are, then picks the cheapest.
 
 pub mod cardinality;
+mod closing_hops;
 pub mod cost;
 mod cycles;
+mod degrees;
 mod delim;
+mod intersect_hops;
+mod join_search;
+mod pinned_far_end;
 #[cfg(feature = "triple-store")]
 mod rdf_order;
+mod rules;
 mod scanned_labels;
 pub(crate) use cycles::{close_cycles, plan_names};
 pub mod join_order;
@@ -25,12 +31,15 @@ pub use cardinality::{
     CardinalityEstimator, ColumnStats, EstimationLog, SelectivityConfig, TableStats,
 };
 pub use cost::{Cost, CostModel};
+pub use degrees::{HopDegrees, hop_degree};
 pub use join_order::{BitSet, DPccp, JoinGraph, JoinGraphBuilder, JoinPlan};
+#[doc(hidden)]
+pub use rules::{PlannerRule, PlannerRules};
 
 use crate::query::plan::Callee;
 use crate::query::plan::{
-    BinaryOp, ExpandDirection, ExpandOp, FilterOp, JoinCondition, JoinType, LogicalExpression,
-    LogicalOperator, LogicalPlan, MultiWayJoinOp, NodeScanOp,
+    BinaryOp, BuiltinFunction, ExpandDirection, ExpandOp, FilterOp, JoinCondition, JoinType,
+    LogicalExpression, LogicalOperator, LogicalPlan, MultiWayJoinOp, NodeScanOp, UnaryOp,
 };
 use crate::query::planner::lpg::seek;
 use grafeo_common::grafeo_debug_span;
@@ -73,6 +82,8 @@ pub struct Optimizer {
     card_estimator: CardinalityEstimator,
     /// How cyclic joins of three or more relations are planned.
     cyclic_joins: CyclicJoins,
+    /// The rules this optimizer applies (see [`PlannerRules`]).
+    rules: PlannerRules,
     /// The node properties with a property index: a filter on one of them
     /// pins a node like `id()` does (see `start_at_the_sought_end`).
     indexed_properties: HashSet<String>,
@@ -126,6 +137,7 @@ impl Optimizer {
             cost_model: CostModel::new(),
             card_estimator: CardinalityEstimator::new(),
             cyclic_joins: CyclicJoins::Binary,
+            rules: PlannerRules::all(),
             indexed_properties: HashSet::new(),
             incoming_edges: IncomingEdges::Kept,
             #[cfg(feature = "triple-store")]
@@ -153,7 +165,7 @@ impl Optimizer {
         Self {
             indexed_properties,
             incoming_edges: IncomingEdges::of(store),
-            ..Self::from_statistics(&stats)
+            ..Self::from_statistics(stats)
         }
     }
 
@@ -176,6 +188,7 @@ impl Optimizer {
             cost_model: CostModel::new().with_graph_totals(total, total),
             card_estimator: estimator,
             cyclic_joins: CyclicJoins::MultiWay,
+            rules: PlannerRules::all(),
             indexed_properties: HashSet::new(),
             incoming_edges: IncomingEdges::NotKept,
             rdf_order: Some(rdf_order),
@@ -208,8 +221,10 @@ impl Optimizer {
     /// Extracts label cardinalities, edge type degrees, and graph totals
     /// for both the cardinality estimator and cost model.
     #[must_use]
-    fn from_statistics(stats: &grafeo_core::statistics::Statistics) -> Self {
-        let estimator = CardinalityEstimator::from_statistics(stats);
+    fn from_statistics(stats: std::sync::Arc<grafeo_core::statistics::Statistics>) -> Self {
+        let estimator = CardinalityEstimator::from_statistics(&stats);
+        let degrees =
+            std::sync::Arc::new(HopDegrees::from_statistics(std::sync::Arc::clone(&stats)));
 
         let avg_fanout = if stats.total_nodes > 0 {
             (stats.total_edges as f64 / stats.total_nodes as f64).max(1.0)
@@ -237,9 +252,11 @@ impl Optimizer {
                 .with_avg_fanout(avg_fanout)
                 .with_edge_type_degrees(edge_type_degrees)
                 .with_label_cardinalities(label_cardinalities)
-                .with_graph_totals(stats.total_nodes, stats.total_edges),
-            card_estimator: estimator,
+                .with_graph_totals(stats.total_nodes, stats.total_edges)
+                .with_hop_degrees(degrees.clone()),
+            card_estimator: estimator.with_hop_degrees(degrees),
             cyclic_joins: CyclicJoins::Binary,
+            rules: PlannerRules::all(),
             indexed_properties: HashSet::new(),
             incoming_edges: IncomingEdges::Kept,
             #[cfg(feature = "triple-store")]
@@ -250,6 +267,26 @@ impl Optimizer {
     /// Enables or disables filter pushdown.
     pub fn with_filter_pushdown(mut self, enabled: bool) -> Self {
         self.enable_filter_pushdown = enabled;
+        self
+    }
+
+    /// Lets the join search sample hop degrees from `store`.
+    #[must_use]
+    pub fn with_degree_samples_from(
+        self,
+        store: std::sync::Arc<dyn grafeo_core::graph::GraphStore>,
+    ) -> Self {
+        if let Some(degrees) = self.cost_model.hop_degrees() {
+            degrees.sample_from(store);
+        }
+        self
+    }
+
+    /// Applies only the rules that `rules` turns on.
+    #[must_use]
+    pub fn with_rules(mut self, rules: PlannerRules) -> Self {
+        self.rules = rules;
+        self.enable_join_reorder &= rules.has(PlannerRule::JoinOrder);
         self
     }
 
@@ -318,9 +355,15 @@ impl Optimizer {
         // An EXISTS over the rows' variables runs once over their distinct
         // values (before the cycles: an expand into a shared variable is one).
         let root = delim::decorrelate_exists(plan.root);
+        // A plan that follows no edge has no cycle and nothing for the hop passes.
+        let follows_edges = any_operator(&root, &|op| matches!(op, LogicalOperator::Expand(_)));
         // Correctness first: a pattern through a node or edge that was bound
         // before must be checked.
-        let mut root = cycles::close_cycles(root);
+        let (mut root, names) = if follows_edges {
+            cycles::close_cycles_naming(root)
+        } else {
+            (root, cycles::FreshNames::none())
+        };
 
         // Apply optimization rules
         if self.enable_filter_pushdown {
@@ -333,13 +376,15 @@ impl Optimizer {
             root = self.push_filters_down(root);
             // With each filter right above what it reads, an expand whose
             // target a filter pins starts there.
-            root = self.start_at_the_sought_end(root, false);
+            if self.rules.has(PlannerRule::SoughtEnd) {
+                root = self.start_at_the_sought_end(root, false);
+            }
         }
         // A label check the node scan below makes true is no filter.
         root = scanned_labels::drop_scanned_label_checks(root);
 
         if self.enable_join_reorder {
-            root = self.reorder_joins(root);
+            root = self.reorder_joins(root, names);
             // A SPARQL group's patterns, which the join graph above cannot
             // tell apart, by their selectivity.
             #[cfg(feature = "triple-store")]
@@ -350,6 +395,23 @@ impl Optimizer {
 
         if self.enable_projection_pushdown {
             root = self.push_projections_down(root);
+        }
+
+        if !self.rules.has(PlannerRule::LabelCount) {
+            root = scanned_labels::scan_for_label_counts(root);
+        }
+        if follows_edges {
+            if self.rules.has(PlannerRule::ExpandInto) {
+                root = closing_hops::look_up_closing_hops(root);
+            }
+            if self.rules.has(PlannerRule::ExpandInto)
+                && self.rules.has(PlannerRule::IntersectExpand)
+            {
+                root = self.intersect_closing_hops(root, false);
+            }
+            if self.rules.has(PlannerRule::PinnedFarEnd) {
+                root = self.look_up_pinned_far_ends(root);
+            }
         }
 
         Ok(LogicalPlan {
@@ -651,7 +713,26 @@ impl Optimizer {
     /// 1. Extracting all base relations (scans) and join conditions
     /// 2. Building a join graph
     /// 3. Using dynamic programming to find the cheapest join order
-    fn reorder_joins(&self, op: LogicalOperator) -> LogicalOperator {
+    fn reorder_joins(&self, op: LogicalOperator, names: cycles::FreshNames) -> LogicalOperator {
+        if self.cyclic_joins == CyclicJoins::Binary {
+            // The search orders joins and the hops of a closed cycle: a plan of neither
+            // stays as it is.
+            if names.made().is_empty()
+                && !any_operator(&op, &|op| matches!(op, LogicalOperator::Join(_)))
+            {
+                return op;
+            }
+            let closing = names.made().clone();
+            let names = join_search::PlanNames::new(&closing, names);
+            return self.reorder_property_graph_joins(op, JoinPlace::default(), &names);
+        }
+        self.reorder_rdf_joins(op)
+    }
+
+    /// RDF's join order, by DPccp. The property graph's joins take the search of
+    /// [`join_search`], where the columns allow it (see
+    /// [`Self::start_at_the_sought_end`]).
+    fn reorder_rdf_joins(&self, op: LogicalOperator) -> LogicalOperator {
         // First, recursively optimize children
         let op = self.reorder_joins_recursive(op);
 
@@ -666,54 +747,162 @@ impl Optimizer {
         op
     }
 
+    /// Reorders each join tree below `op` whose columns are `free`, and the
+    /// inputs of a tree that stays as written.
+    fn reorder_property_graph_joins(
+        &self,
+        op: LogicalOperator,
+        place: JoinPlace,
+        names: &join_search::PlanNames<'_>,
+    ) -> LogicalOperator {
+        match op {
+            LogicalOperator::Join(_) => {
+                if place.free
+                    && let Some(ordered) =
+                        join_search::best_order(self, &op, names, place.stops_early)
+                {
+                    return ordered;
+                }
+                // The tree stays as written, and only what it joins may reorder.
+                self.reorder_join_inputs(op, place, names)
+            }
+            LogicalOperator::Filter(_) if place.free => {
+                match join_search::best_order(self, &op, names, place.stops_early) {
+                    Some(ordered) => ordered,
+                    None => op.map_children(|child| {
+                        self.reorder_property_graph_joins(child, place, names)
+                    }),
+                }
+            }
+            LogicalOperator::Return(mut ret) => {
+                let star = ret.items.iter().any(
+                    |item| matches!(&item.expression, LogicalExpression::Variable(name) if name == "*"),
+                );
+                let place = JoinPlace {
+                    free: !star,
+                    ..place
+                };
+                ret.input = Box::new(self.reorder_property_graph_joins(*ret.input, place, names));
+                LogicalOperator::Return(ret)
+            }
+            LogicalOperator::Project(mut project) => {
+                let place = JoinPlace {
+                    free: place.free || !project.pass_through_input,
+                    ..place
+                };
+                project.input =
+                    Box::new(self.reorder_property_graph_joins(*project.input, place, names));
+                LogicalOperator::Project(project)
+            }
+            LogicalOperator::Aggregate(mut aggregate) => {
+                // It reads every row, whatever stops above it.
+                let place = JoinPlace {
+                    free: true,
+                    stops_early: false,
+                };
+                aggregate.input =
+                    Box::new(self.reorder_property_graph_joins(*aggregate.input, place, names));
+                LogicalOperator::Aggregate(aggregate)
+            }
+            op @ LogicalOperator::Sort(_) => op.map_children(|child| {
+                let place = JoinPlace {
+                    stops_early: false,
+                    ..place
+                };
+                self.reorder_property_graph_joins(child, place, names)
+            }),
+            op @ (LogicalOperator::Limit(_) | LogicalOperator::Skip(_)) => {
+                op.map_children(|child| {
+                    let place = JoinPlace {
+                        stops_early: true,
+                        ..place
+                    };
+                    self.reorder_property_graph_joins(child, place, names)
+                })
+            }
+            op @ (LogicalOperator::Union(_)
+            | LogicalOperator::Except(_)
+            | LogicalOperator::Intersect(_)
+            | LogicalOperator::Otherwise(_)) => op.map_children(|child| {
+                let place = JoinPlace {
+                    free: false,
+                    ..place
+                };
+                self.reorder_property_graph_joins(child, place, names)
+            }),
+            other => {
+                other.map_children(|child| self.reorder_property_graph_joins(child, place, names))
+            }
+        }
+    }
+
+    /// `op` with the inputs of the inner joins at its top reordered.
+    fn reorder_join_inputs(
+        &self,
+        op: LogicalOperator,
+        place: JoinPlace,
+        names: &join_search::PlanNames<'_>,
+    ) -> LogicalOperator {
+        match op {
+            LogicalOperator::Join(mut join) if join.join_type == JoinType::Inner => {
+                join.left = Box::new(self.reorder_join_inputs(*join.left, place, names));
+                join.right = Box::new(self.reorder_join_inputs(*join.right, place, names));
+                LogicalOperator::Join(join)
+            }
+            LogicalOperator::Join(join) => LogicalOperator::Join(join)
+                .map_children(|child| self.reorder_property_graph_joins(child, place, names)),
+            other => self.reorder_property_graph_joins(other, place, names),
+        }
+    }
+
     /// Recursively applies join reordering to child operators.
     fn reorder_joins_recursive(&self, op: LogicalOperator) -> LogicalOperator {
         match op {
             LogicalOperator::Return(mut ret) => {
-                ret.input = Box::new(self.reorder_joins(*ret.input));
+                ret.input = Box::new(self.reorder_rdf_joins(*ret.input));
                 LogicalOperator::Return(ret)
             }
             LogicalOperator::Project(mut proj) => {
-                proj.input = Box::new(self.reorder_joins(*proj.input));
+                proj.input = Box::new(self.reorder_rdf_joins(*proj.input));
                 LogicalOperator::Project(proj)
             }
             LogicalOperator::Filter(mut filter) => {
-                filter.input = Box::new(self.reorder_joins(*filter.input));
+                filter.input = Box::new(self.reorder_rdf_joins(*filter.input));
                 LogicalOperator::Filter(filter)
             }
             LogicalOperator::Limit(mut limit) => {
-                limit.input = Box::new(self.reorder_joins(*limit.input));
+                limit.input = Box::new(self.reorder_rdf_joins(*limit.input));
                 LogicalOperator::Limit(limit)
             }
             LogicalOperator::Skip(mut skip) => {
-                skip.input = Box::new(self.reorder_joins(*skip.input));
+                skip.input = Box::new(self.reorder_rdf_joins(*skip.input));
                 LogicalOperator::Skip(skip)
             }
             LogicalOperator::Sort(mut sort) => {
-                sort.input = Box::new(self.reorder_joins(*sort.input));
+                sort.input = Box::new(self.reorder_rdf_joins(*sort.input));
                 LogicalOperator::Sort(sort)
             }
             LogicalOperator::Distinct(mut distinct) => {
-                distinct.input = Box::new(self.reorder_joins(*distinct.input));
+                distinct.input = Box::new(self.reorder_rdf_joins(*distinct.input));
                 LogicalOperator::Distinct(distinct)
             }
             LogicalOperator::Aggregate(mut agg) => {
-                agg.input = Box::new(self.reorder_joins(*agg.input));
+                agg.input = Box::new(self.reorder_rdf_joins(*agg.input));
                 LogicalOperator::Aggregate(agg)
             }
             LogicalOperator::Expand(mut expand) => {
-                expand.input = Box::new(self.reorder_joins(*expand.input));
+                expand.input = Box::new(self.reorder_rdf_joins(*expand.input));
                 LogicalOperator::Expand(expand)
             }
             LogicalOperator::MapCollect(mut mc) => {
-                mc.input = Box::new(self.reorder_joins(*mc.input));
+                mc.input = Box::new(self.reorder_rdf_joins(*mc.input));
                 LogicalOperator::MapCollect(mc)
             }
             LogicalOperator::MultiWayJoin(mut mwj) => {
                 mwj.inputs = mwj
                     .inputs
                     .into_iter()
-                    .map(|input| self.reorder_joins(input))
+                    .map(|input| self.reorder_rdf_joins(input))
                     .collect();
                 LogicalOperator::MultiWayJoin(mwj)
             }
@@ -876,11 +1065,13 @@ impl Optimizer {
                 *var_counts.entry(&cond.left_var).or_default() += 1;
                 *var_counts.entry(&cond.right_var).or_default() += 1;
             }
-            let shared_variables: Vec<String> = var_counts
+            let mut shared_variables: Vec<String> = var_counts
                 .into_iter()
                 .filter(|(_, count)| *count >= 2)
                 .map(|(var, _)| var.to_string())
                 .collect();
+            // A map's order differs per process: the plan must not.
+            shared_variables.sort_unstable();
 
             let join_conditions: Vec<JoinCondition> = conditions
                 .iter()
@@ -1150,8 +1341,7 @@ impl Optimizer {
     ) -> LogicalOperator {
         // Subquery and volatile conjuncts stay above `op`, where they were
         // written; only the others move down.
-        let (pinned, movable): (Vec<_>, Vec<_>) =
-            conjuncts(predicate).into_iter().partition(stays_in_place);
+        let (movable, pinned) = keeping_written_order(conjuncts(predicate), stays_in_place);
         let predicate = match (conjunction(pinned), conjunction(movable)) {
             (Some(pinned), movable) => {
                 let input = match movable {
@@ -1231,10 +1421,9 @@ impl Optimizer {
                 // `id(s) = $s AND id(d) = $d` the first pins `s` before the
                 // expand walks its edges.
                 let introduced: HashSet<String> = introduced_vars.into_iter().cloned().collect();
-                let (below, after): (Vec<_>, Vec<_>) =
-                    conjuncts(predicate).into_iter().partition(|conjunct| {
-                        self.extract_variables(conjunct).is_disjoint(&introduced)
-                    });
+                let (below, after) = keeping_written_order(conjuncts(predicate), |conjunct| {
+                    !self.extract_variables(conjunct).is_disjoint(&introduced)
+                });
                 if let Some(below) = conjunction(below) {
                     expand.input = Box::new(self.try_push_filter_into(below, *expand.input));
                 }
@@ -1269,34 +1458,39 @@ impl Optimizer {
                 let (mut to_left, mut to_right, mut above) = (Vec::new(), Vec::new(), Vec::new());
                 for conjunct in conjuncts(predicate) {
                     let vars = self.extract_variables(&conjunct);
-                    let (in_left, in_right) =
-                        sides
-                            .as_ref()
-                            .map_or((false, false), |(left_vars, right_vars)| {
-                                let shared_equated = vars
-                                    .iter()
-                                    .filter(|v| left_vars.contains(*v) && right_vars.contains(*v))
-                                    .all(equated);
-                                (
-                                    shared_equated
-                                        && vars.is_subset(left_vars)
-                                        && matches!(
-                                            join.join_type,
-                                            JoinType::Inner
-                                                | JoinType::Cross
-                                                | JoinType::Left
-                                                | JoinType::Semi
-                                                | JoinType::Anti
-                                        ),
-                                    shared_equated
-                                        && vars.is_subset(right_vars)
-                                        && matches!(
-                                            join.join_type,
-                                            JoinType::Inner | JoinType::Cross
-                                        ),
-                                )
-                            });
+                    let raises = !cannot_raise(&conjunct);
+                    let (in_left, in_right) = sides
+                        .as_ref()
+                        .filter(|_| !raises || above.is_empty())
+                        .map_or((false, false), |(left_vars, right_vars)| {
+                            let shared_equated = vars
+                                .iter()
+                                .filter(|v| left_vars.contains(*v) && right_vars.contains(*v))
+                                .all(equated);
+                            (
+                                shared_equated
+                                    && vars.is_subset(left_vars)
+                                    && matches!(
+                                        join.join_type,
+                                        JoinType::Inner
+                                            | JoinType::Cross
+                                            | JoinType::Left
+                                            | JoinType::Semi
+                                            | JoinType::Anti
+                                    ),
+                                shared_equated
+                                    && vars.is_subset(right_vars)
+                                    && matches!(join.join_type, JoinType::Inner | JoinType::Cross),
+                            )
+                        });
                     match (in_left, in_right) {
+                        (true, true) if !vars.is_empty() && raises => {
+                            match side_with_the_checks(&join.left, &join.right, &vars) {
+                                Some(Side::Left) => to_left.push(conjunct),
+                                Some(Side::Right) => to_right.push(conjunct),
+                                None => above.push(conjunct),
+                            }
+                        }
                         (true, true) if !vars.is_empty() => {
                             to_left.push(conjunct.clone());
                             to_right.push(conjunct);
@@ -1337,12 +1531,13 @@ impl Optimizer {
                 let (mut to_left, mut to_right, mut above) = (Vec::new(), Vec::new(), Vec::new());
                 for conjunct in conjuncts(predicate) {
                     let vars = self.extract_variables(&conjunct);
-                    let (in_left, in_right) =
-                        sides
-                            .as_ref()
-                            .map_or((false, false), |(left_vars, right_vars)| {
-                                (vars.is_subset(left_vars), vars.is_subset(right_vars))
-                            });
+                    let raises = !cannot_raise(&conjunct);
+                    let (in_left, in_right) = sides
+                        .as_ref()
+                        .filter(|_| !raises || above.is_empty())
+                        .map_or((false, false), |(left_vars, right_vars)| {
+                            (vars.is_subset(left_vars), vars.is_subset(right_vars))
+                        });
                     match (in_left, in_right) {
                         // A conjunct on join-key variables alone also
                         // filters the right side. The OPTIONAL MATCH
@@ -1359,8 +1554,12 @@ impl Optimizer {
                         // hydrate's three independent 30k-row scans into
                         // 6-id index lookups.
                         (true, true) if !vars.is_empty() => {
-                            to_left.push(conjunct.clone());
-                            to_right.push(conjunct);
+                            // A copy for the optional side reads rows the filter was
+                            // not written over: one that may raise stays on the left.
+                            if !raises {
+                                to_right.push(conjunct.clone());
+                            }
+                            to_left.push(conjunct);
                         }
                         (true, _) => to_left.push(conjunct),
                         (false, _) => above.push(conjunct),
@@ -1467,21 +1666,38 @@ impl Optimizer {
             // label filter), pushing past it would evaluate the outer
             // predicate against rows where those columns aren't bound and
             // every row would be filtered out.
+            //
+            // What may raise does not commute with a check of what it reads, which was
+            // written before it: `FILTER a.k <> 0 FILTER 100 / a.k > 0`.
             LogicalOperator::Filter(inner_filter) => {
                 let predicate_vars = self.extract_variables(&predicate);
                 let inner_input_vars = self.collect_output_variables(&inner_filter.input);
                 let safe_to_commute = predicate_vars.iter().all(|v| inner_input_vars.contains(v));
-                if safe_to_commute {
-                    let mut inner_filter = inner_filter;
-                    inner_filter.input =
-                        Box::new(self.try_push_filter_into(predicate, *inner_filter.input));
-                    LogicalOperator::Filter(inner_filter)
-                } else {
-                    LogicalOperator::Filter(FilterOp {
+                if !safe_to_commute {
+                    return LogicalOperator::Filter(FilterOp {
                         predicate,
                         pushdown_hint: None,
                         input: Box::new(LogicalOperator::Filter(inner_filter)),
-                    })
+                    });
+                }
+                let checked = self.extract_variables(&inner_filter.predicate);
+                let (below, above) = keeping_written_order(conjuncts(predicate), |conjunct| {
+                    !cannot_raise(conjunct)
+                        && !self.extract_variables(conjunct).is_disjoint(&checked)
+                });
+                let mut inner_filter = inner_filter;
+                if let Some(below) = conjunction(below) {
+                    inner_filter.input =
+                        Box::new(self.try_push_filter_into(below, *inner_filter.input));
+                }
+                let inner = LogicalOperator::Filter(inner_filter);
+                match conjunction(above) {
+                    Some(predicate) => LogicalOperator::Filter(FilterOp {
+                        predicate,
+                        pushdown_hint: None,
+                        input: Box::new(inner),
+                    }),
+                    None => inner,
                 }
             }
 
@@ -1938,6 +2154,99 @@ impl Default for Optimizer {
     }
 }
 
+/// Whether `op` or an operator below it is one `wanted` picks.
+fn any_operator(op: &LogicalOperator, wanted: &dyn Fn(&LogicalOperator) -> bool) -> bool {
+    wanted(op)
+        || op
+            .children()
+            .into_iter()
+            .any(|child| any_operator(child, wanted))
+}
+
+/// What a join tree's place in the plan lets the search do.
+#[derive(Clone, Copy, Default)]
+struct JoinPlace {
+    /// The columns are free: what is above reads them by name.
+    free: bool,
+    /// What is above may stop before the last row, so a row the written order never
+    /// reaches must not be met by a filter that may raise.
+    stops_early: bool,
+}
+
+/// Whether evaluating `expr` can never raise a condition, on any row: label
+/// checks, null checks, a property or `id(variable)` (null on what is no node or
+/// edge) against a literal or parameter, the string predicates (null on a
+/// non-string), the vector and text functions over such values (null on what
+/// they cannot read), and `AND`, `OR` and `NOT` of those. A closed
+/// list, the first version of what can raise: anything else may, such as
+/// arithmetic, a cast, a function, or a comparison of two variables (a node
+/// against an edge).
+pub(crate) fn cannot_raise(expr: &LogicalExpression) -> bool {
+    let is_value = reads_a_value;
+    match expr {
+        LogicalExpression::Binary { left, op, right } => match op {
+            BinaryOp::And | BinaryOp::Or | BinaryOp::Xor => {
+                cannot_raise(left) && cannot_raise(right)
+            }
+            BinaryOp::Eq
+            | BinaryOp::Ne
+            | BinaryOp::Lt
+            | BinaryOp::Le
+            | BinaryOp::Gt
+            | BinaryOp::Ge
+            | BinaryOp::StartsWith
+            | BinaryOp::EndsWith
+            | BinaryOp::Contains => is_value(left) && is_value(right),
+            _ => false,
+        },
+        LogicalExpression::Unary { op, operand } => match op {
+            UnaryOp::Not => cannot_raise(operand),
+            UnaryOp::IsNull | UnaryOp::IsNotNull => {
+                is_value(operand) || matches!(operand.as_ref(), LogicalExpression::Variable(_))
+            }
+            _ => false,
+        },
+        LogicalExpression::FunctionCall {
+            callee: Callee::Builtin(BuiltinFunction::HasLabel),
+            ..
+        } => true,
+        other => is_search_call(other),
+    }
+}
+
+/// Whether `expr` gives a value without raising: a literal, a parameter, a property,
+/// `id(variable)`, a list of those, or a vector or text function over them.
+fn reads_a_value(expr: &LogicalExpression) -> bool {
+    match expr {
+        LogicalExpression::Literal(_)
+        | LogicalExpression::Parameter(_)
+        | LogicalExpression::Property { .. } => true,
+        LogicalExpression::List(items) => items.iter().all(reads_a_value),
+        other => closing_hops::id_of(other).is_some() || is_search_call(other),
+    }
+}
+
+/// Whether `expr` is a vector or text function over values: on what it cannot read,
+/// such as vectors of two sizes, it gives null.
+fn is_search_call(expr: &LogicalExpression) -> bool {
+    matches!(
+        expr,
+        LogicalExpression::FunctionCall {
+            callee: Callee::Builtin(
+                BuiltinFunction::CosineSimilarity
+                    | BuiltinFunction::CosineDistance
+                    | BuiltinFunction::EuclideanDistance
+                    | BuiltinFunction::DotProduct
+                    | BuiltinFunction::ManhattanDistance
+                    | BuiltinFunction::TextScore
+                    | BuiltinFunction::TextMatch
+            ),
+            args,
+            ..
+        } if args.iter().all(reads_a_value)
+    )
+}
+
 /// Whether a conjunct must stay where it is written: it holds a subquery,
 /// whose outer references [`Optimizer::collect_variables`] does not see, or a
 /// volatile function, which would run a different number of times lower down.
@@ -2092,6 +2401,83 @@ pub(crate) fn movable_variables(expr: &LogicalExpression) -> Option<HashSet<Stri
     let mut vars = HashSet::new();
     Optimizer::collect_variables(expr, &mut vars);
     Some(vars)
+}
+
+/// The `conjuncts` that may move on and those that stay, each in order: those `stays`
+/// picks, and what may raise after any of them. A check that cannot raise may run
+/// earlier; what may raise runs after every check written before it.
+fn keeping_written_order(
+    conjuncts: Vec<LogicalExpression>,
+    stays: impl Fn(&LogicalExpression) -> bool,
+) -> (Vec<LogicalExpression>, Vec<LogicalExpression>) {
+    let (mut moving, mut staying) = (Vec::new(), Vec::new());
+    for conjunct in conjuncts {
+        if stays(&conjunct) || (!staying.is_empty() && !cannot_raise(&conjunct)) {
+            staying.push(conjunct);
+        } else {
+            moving.push(conjunct);
+        }
+    }
+    (moving, staying)
+}
+
+/// A side of a join.
+enum Side {
+    Left,
+    Right,
+}
+
+/// The side of an inner join a filter that may raise over `variables`, which both
+/// sides bind, can go to: the one holding every label and check written on them, so it
+/// reads no row those would reject. `None` when each side has one the other lacks.
+fn side_with_the_checks(
+    left: &LogicalOperator,
+    right: &LogicalOperator,
+    variables: &HashSet<String>,
+) -> Option<Side> {
+    let (mut on_left, mut on_right) = (HashSet::new(), HashSet::new());
+    written_checks(left, variables, &mut on_left);
+    written_checks(right, variables, &mut on_right);
+    if on_right.is_subset(&on_left) {
+        Some(Side::Left)
+    } else if on_left.is_subset(&on_right) {
+        Some(Side::Right)
+    } else {
+        None
+    }
+}
+
+/// The labels and checks written on `variables` in `op`, a label the same whether a
+/// scan reads it or a filter checks it.
+fn written_checks(op: &LogicalOperator, variables: &HashSet<String>, checks: &mut HashSet<String>) {
+    match op {
+        LogicalOperator::NodeScan(scan) if variables.contains(&scan.variable) => {
+            if let Some(label) = &scan.label {
+                checks.insert(format!("{}:{label}", scan.variable));
+            }
+        }
+        LogicalOperator::Filter(filter) => {
+            let mut conjuncts = Vec::new();
+            crate::query::planner::lpg::seek::split_conjuncts(&filter.predicate, &mut conjuncts);
+            for conjunct in conjuncts {
+                let label = variables.iter().find_map(|variable| {
+                    crate::query::planner::lpg::scan::label_check(conjunct, variable)
+                        .map(|label| format!("{variable}:{label}"))
+                });
+                let mut reads = HashSet::new();
+                Optimizer::collect_variables(conjunct, &mut reads);
+                if let Some(label) = label {
+                    checks.insert(label);
+                } else if !reads.is_disjoint(variables) {
+                    checks.insert(format!("{conjunct:?}"));
+                }
+            }
+        }
+        _ => {}
+    }
+    for child in op.children() {
+        written_checks(child, variables, checks);
+    }
 }
 
 /// The conjuncts of an `AND` chain, in order.
@@ -3117,6 +3503,25 @@ mod tests {
         assert!(has_multi_way_join(&optimized.root));
     }
 
+    /// A map's iteration order differs per map: the same query must get the
+    /// same plan every time.
+    #[cfg(feature = "triple-store")]
+    #[test]
+    fn a_multi_way_join_lists_its_shared_variables_in_a_fixed_order() {
+        fn shared_variables(op: &LogicalOperator) -> Vec<String> {
+            match op {
+                LogicalOperator::MultiWayJoin(join) => join.shared_variables.clone(),
+                LogicalOperator::Return(ret) => shared_variables(&ret.input),
+                other => panic!("no multi-way join in {other:?}"),
+            }
+        }
+        for _ in 0..20 {
+            let optimizer = Optimizer::from_rdf_statistics(std::sync::Arc::default());
+            let optimized = optimizer.optimize(triangle_join_plan()).unwrap();
+            assert_eq!(shared_variables(&optimized.root), ["a", "b", "c"]);
+        }
+    }
+
     #[test]
     fn test_acyclic_join_uses_binary_joins() {
         use crate::query::plan::JoinCondition;
@@ -3979,7 +4384,8 @@ mod tests {
                 property("b", "ref"),
             );
             let before = filters_of(&plan);
-            let reordered = Optimizer::new().reorder_joins(plan);
+            let names = cycles::FreshNames::for_plan(&plan);
+            let reordered = Optimizer::new().reorder_joins(plan, names);
             assert_eq!(
                 filters_of(&reordered),
                 before,
@@ -4008,7 +4414,8 @@ mod tests {
                 property("c", "ref"),
             );
             let before = filters_of(&plan);
-            let reordered = Optimizer::new().reorder_joins(plan);
+            let names = cycles::FreshNames::for_plan(&plan);
+            let reordered = Optimizer::new().reorder_joins(plan, names);
             assert_eq!(
                 filters_of(&reordered),
                 before,

@@ -8,7 +8,7 @@
 //! TYPES` shows, a schema sees its own types only.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test types_in_a_schema
+//! cargo test -p grafeo-engine --all-features --test main types_in_a_schema::
 //! ```
 
 #![cfg(feature = "gql")]

@@ -4,7 +4,7 @@
 //! including the full cycle of insert → compact → create index → search.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --features full --test post_compact_index
+//! cargo test -p grafeo-engine --features full --test main post_compact_index::
 //! ```
 
 use grafeo_common::types::ReadView;

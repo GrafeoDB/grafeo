@@ -396,6 +396,48 @@ def codegraph(grafeo):
     return db
 
 
+def raising(grafeo):
+    """`Person` nodes with a key `k` that is never 0, and in the same places, without that label,
+    Hans, whose key is 0: Alix has a K and an L edge, Mia only K, Hans only L. Gus, a `Clerk`, has
+    a key of 0 and no edge. `100 / a.k` raises on Hans and Gus."""
+    db = grafeo.GrafeoDB()
+    db.execute("INSERT (:Town {name: 'Berlin'})")
+    db.execute(
+        "INSERT (:Person:Big {name: 'Alix', k: 2})-[:K]->(:City {name: 'Paris'})"
+    )
+    db.execute("INSERT (:Person {name: 'Mia', k: 5})-[:K]->(:City {name: 'Prague'})")
+    db.execute("INSERT (:Robot {name: 'Hans', k: 0})-[:L]->(:Town {name: 'Rome'})")
+    db.execute("INSERT (:Clerk {name: 'Gus', k: 0})")
+    db.execute(
+        "MATCH (a:Person {name: 'Alix'}), (t:Town {name: 'Berlin'}) INSERT (a)-[:L]->(t)"
+    )
+    return db
+
+
+def type_scope(grafeo):
+    """A graph type with a default and a required property, a graph typed by it holding Mia's
+    default, and in the default graph, which it does not bind, the same label with no name."""
+    db = grafeo.GrafeoDB()
+    db.execute(
+        "CREATE GRAPH TYPE t (NODE TYPE Person (name STRING NOT NULL DEFAULT 'Mia', age INT64))"
+    )
+    db.execute("CREATE GRAPH bound TYPED t")
+    db.execute("INSERT (:Person {age: 1})")
+    db.execute("USE GRAPH bound")
+    db.execute("INSERT (:Person {age: 2})")
+    db.execute("USE GRAPH default")
+    return db
+
+
+def rules_over_data(grafeo):
+    """Data that breaks the rules the cases of section DT try to add: two `File` nodes with one
+    `id`, and no required property on the `File`, the `City` or the `ROAD`."""
+    db = grafeo.GrafeoDB()
+    db.execute("INSERT (:File {id: 1}), (:File {id: 1})")
+    db.execute("INSERT (:City {size: 3})-[:ROAD]->(:City {size: 4})")
+    return db
+
+
 def unlabeled(grafeo):
     """Three labeled nodes and one without a label: `Message:Post` (`id` 1),
     `Message:Comment` (2), `Person` (3) and none (4), `w` 100 to 103; the person KNOWS the
@@ -435,6 +477,10 @@ FIXTURES = {
     "graphs": graphs,
     "codegraph": codegraph,
     "unlabeled": unlabeled,
+    "raising": raising,
+    "type_scope": type_scope,
+    "rules_over_data": rules_over_data,
+    "per_call": empty,
 }
 
 CASES: list[Case] = []
@@ -2450,5 +2496,60 @@ for case_id, query in [
     ("DQ6", "UNWIND ['Alix', 'Gus'] AS name OPTIONAL CALL same(name) YIELD v RETURN name, v"),
 ]:
     case(case_id, query, GQL, "procedures")
+
+# DR: a filter that can raise goes only to the side of a join that holds the variable's written
+#     checks (#714), so it no longer runs on Hans, whom the pattern's label leaves out; 0.6.1
+#     copied it to the other side and failed with division by zero: the comma form (DR1), the
+#     parts swapped (DR2), labels at the far ends (DR3), written from the far ends (DR5). With
+#     checks on both sides (DR4), one chain (DR6), a later MATCH (DR7) or a guard written first
+#     (DR8) it never raised. A key of 0 on a node the pattern's label keeps still raises (DR9),
+#     also below an expand, on a node with no such edge (DR10)
+for case_id, query in [
+    ("DR1", "MATCH (a:Person)-[:K]->(b), (a)-[:L]->(c) WHERE 100 / a.k > 0 RETURN a.name, b.name, c.name"),
+    ("DR2", "MATCH (a:Person)-[:L]->(c), (a)-[:K]->(b) WHERE 100 / a.k > 0 RETURN a.name, b.name, c.name"),
+    ("DR3", "MATCH (a:Person)-[:K]->(b:City), (a)-[:L]->(c:Town) WHERE 100 / a.k > 0 RETURN a.name, b.name, c.name"),
+    ("DR4", "MATCH (a:Person)-[:K]->(b), (a:Big)-[:L]->(c) WHERE 100 / a.k > 0 RETURN a.name, b.name, c.name"),
+    ("DR5", "MATCH (b)<-[:K]-(a:Person), (c)<-[:L]-(a) WHERE 100 / a.k > 0 RETURN a.name, b.name, c.name"),
+    ("DR6", "MATCH (b)<-[:K]-(a:Person)-[:L]->(c) WHERE 100 / a.k > 0 RETURN a.name, b.name, c.name"),
+    ("DR7", "MATCH (a:Person)-[:K]->(b) MATCH (a)-[:L]->(c) WHERE 100 / a.k > 0 RETURN a.name, b.name, c.name"),
+    ("DR8", "MATCH (a:Person)-[:K]->(b), (a)-[:L]->(c) WHERE a.k <> 0 AND 100 / a.k > 0 RETURN a.name, b.name, c.name"),
+    ("DR9", "MATCH (a:Robot)-[:L]->(c) WHERE 100 / a.k > 0 RETURN a.name, c.name"),
+    ("DR10", "MATCH (a:Clerk)-[:K]->(b) WHERE 100 / a.k > 0 RETURN a.name"),
+]:
+    case(case_id, query, BOTH, "raising")
+
+# DS: a graph type's rules hold only in the graphs bound to it (#730): the default graph keeps what
+#     was written, where 0.6.1 filled in Mia (DS1); the bound graph still does (DS2); a write the
+#     type would refuse is the default graph's own, where 0.6.1 refused it (DS3, DS4); replacing a
+#     graph type that a graph is bound to stays refused (DS5)
+case("DS1", "MATCH (p:Person) RETURN p.age, p.name", BOTH, "type_scope")
+case("DS2", "USE GRAPH bound MATCH (p:Person) RETURN p.age, p.name", GQL, "type_scope")
+case("DS3", "INSERT (:Person {age: 'text'})", GQL, "type_scope")
+case("DS4", "MATCH (p:Person) RETURN p.age, p.name", GQL, "type_scope")
+case("DS5", "CREATE OR REPLACE GRAPH TYPE t (NODE TYPE Person (age INT64))", GQL, "type_scope")
+
+# DT: a rule over data that breaks it fails and leaves nothing (#729), where 0.6.1 accepted it and
+#     enforced it only on later writes: UNIQUE (DT1), NOT NULL (DT2), a node type's required
+#     property (DT3) and an edge type's (DT4); rules the data meets are accepted (DT5 to DT7; on
+#     0.6.1 DT7 found the type DT4 had left)
+for case_id, query in [
+    ("DT1", "CREATE CONSTRAINT c1 FOR (n:File) ON (n.id) UNIQUE"),
+    ("DT2", "CREATE CONSTRAINT c2 FOR (n:File) ON (n.must) NOT NULL"),
+    ("DT3", "CREATE NODE TYPE City (name STRING NOT NULL)"),
+    ("DT4", "CREATE EDGE TYPE ROAD (km INTEGER NOT NULL)"),
+    ("DT5", "CREATE CONSTRAINT c5 FOR (n:City) ON (n.size) UNIQUE"),
+    ("DT6", "CREATE CONSTRAINT c6 FOR (n:City) ON (n.size) NOT NULL"),
+    ("DT7", "CREATE EDGE TYPE ROAD (km INTEGER)"),
+]:
+    case(case_id, query, GQL, "rules_over_data")
+
+# DU: a per-call statement cannot start a transaction that nothing could finish (0.6.1 accepted
+#     START TRANSACTION and dropped it), and COMMIT and ROLLBACK keep their 25000
+for case_id, query in [
+    ("DU1", "START TRANSACTION"),
+    ("DU2", "COMMIT"),
+    ("DU3", "ROLLBACK"),
+]:
+    case(case_id, query, GQL, "per_call")
 
 # fmt: on

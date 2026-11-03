@@ -941,6 +941,52 @@ impl ChangeSet {
             .saturating_add(self.held.bytes)
     }
 
+    /// The nodes and edges of the labeled property graphs the set wrote, by graph, each
+    /// once: created, changed or labeled, also those deleted since, and those of a bulk
+    /// range whose rows were not kept.
+    #[must_use]
+    pub fn written_entities(&self) -> Vec<WrittenEntities<'_>> {
+        let mut written: Vec<WrittenEntities<'_>> = self
+            .graphs
+            .iter()
+            .map(|graph| WrittenEntities {
+                graph: graph.key.as_deref(),
+                nodes: Vec::new(),
+                edges: Vec::new(),
+            })
+            .collect();
+        for change in &self.entries {
+            let of_graph = &mut written[change.graph().index()];
+            match change {
+                Change::Data { op, .. } => match op {
+                    DataOp::CreateNode { id, .. }
+                    | DataOp::SetNodeProperty { id, .. }
+                    | DataOp::RemoveNodeProperty { id, .. }
+                    | DataOp::AddNodeLabel { id, .. }
+                    | DataOp::RemoveNodeLabel { id, .. } => of_graph.nodes.push(*id),
+                    DataOp::CreateEdge { id, .. }
+                    | DataOp::SetEdgeProperty { id, .. }
+                    | DataOp::RemoveEdgeProperty { id, .. } => of_graph.edges.push(*id),
+                    DataOp::DeleteNode { .. }
+                    | DataOp::DeleteEdge { .. }
+                    | DataOp::InsertTriple { .. }
+                    | DataOp::DeleteTriple { .. } => {}
+                },
+                Change::Bulk(range) => match range.table {
+                    Table::Nodes => of_graph.nodes.extend(range.ids.clone().map(NodeId::new)),
+                    Table::Edges => of_graph.edges.extend(range.ids.clone().map(EdgeId::new)),
+                },
+            }
+        }
+        for of_graph in &mut written {
+            of_graph.nodes.sort_unstable();
+            of_graph.nodes.dedup();
+            of_graph.edges.sort_unstable();
+            of_graph.edges.dedup();
+        }
+        written
+    }
+
     /// The log records of the set's writes, in the order they were applied
     /// (see [`ops`](Self::ops)), each naming its graph by storage key: the
     /// op of each data entry and the rows kept with a bulk range. A range
@@ -954,6 +1000,17 @@ impl ChangeSet {
             op,
         })
     }
+}
+
+/// What a change set wrote in one graph (see [`ChangeSet::written_entities`]).
+#[derive(Debug)]
+pub struct WrittenEntities<'a> {
+    /// The graph's storage key; `None` for the default graph.
+    pub graph: Option<&'a str>,
+    /// The nodes, ascending.
+    pub nodes: Vec<NodeId>,
+    /// The edges, ascending.
+    pub edges: Vec<EdgeId>,
 }
 
 /// The smallest payload [`ChangeSet::approx_bytes`] counts once however many

@@ -229,6 +229,11 @@ pub struct Planner {
     pub(super) subquery_counter: std::cell::Cell<u32>,
     /// Whether to use factorized execution for multi-hop queries.
     pub(super) factorized_execution: bool,
+    /// The rules this planner applies (see [`PlannerRules`](crate::query::optimizer::PlannerRules)).
+    rules: crate::query::optimizer::PlannerRules,
+    /// What a filter knows of the target of an expand below it, by the
+    /// variable the expand binds: set by the filter, taken by the expand.
+    hop_targets: std::cell::RefCell<std::collections::HashMap<String, expand::HopTarget>>,
     /// Whether a plan without `ORDER BY` returns its rows in random order.
     shuffle_unordered: bool,
     /// Whether the rows are collected or streamed (a stream is shuffled per
@@ -349,6 +354,8 @@ impl Planner {
             pending_edge_conditions: std::cell::RefCell::new(Vec::new()),
             subquery_counter: std::cell::Cell::new(0),
             factorized_execution: true,
+            rules: crate::query::optimizer::PlannerRules::all(),
+            hop_targets: std::cell::RefCell::new(std::collections::HashMap::new()),
             shuffle_unordered: false,
             delivery: Delivery::Collected,
             scalar_columns: std::cell::RefCell::new(std::collections::HashSet::new()),
@@ -412,6 +419,8 @@ impl Planner {
             pending_edge_conditions: std::cell::RefCell::new(Vec::new()),
             subquery_counter: std::cell::Cell::new(0),
             factorized_execution: true,
+            rules: crate::query::optimizer::PlannerRules::all(),
+            hop_targets: std::cell::RefCell::new(std::collections::HashMap::new()),
             shuffle_unordered: false,
             delivery: Delivery::Collected,
             scalar_columns: std::cell::RefCell::new(std::collections::HashSet::new()),
@@ -613,6 +622,14 @@ impl Planner {
     #[must_use]
     pub fn with_factorized_execution(mut self, enabled: bool) -> Self {
         self.factorized_execution = enabled;
+        self
+    }
+
+    /// Applies only the rules that `rules` turns on.
+    #[must_use]
+    #[cfg(lpg_language)]
+    pub(crate) fn with_rules(mut self, rules: crate::query::optimizer::PlannerRules) -> Self {
+        self.rules = rules;
         self
     }
 

@@ -75,8 +75,7 @@ fn crash_after(scenario: &str, path: &Path) -> EpochId {
 /// [`crash_after`], also returning what the child printed.
 fn run_child(scenario: &str, path: &Path) -> (EpochId, String) {
     let output = child_process::output(
-        std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "crash_child", "--nocapture"])
+        grafeo_common::child_test!("crash_child")
             .env(SCENARIO_VAR, scenario)
             .env(PATH_VAR, path),
     )

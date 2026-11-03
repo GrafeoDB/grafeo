@@ -27,10 +27,41 @@ updates:
       - dependency-name: "dtolnay/rust-toolchain"
 
   # Python dependencies
-  - package-ecosystem: "pip"
+  - package-ecosystem: "uv"
     directory: "/crates/bindings/python"
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 5
     commit-message:
       prefix: "deps(python)"
+
+  # Python manifests without a uv.lock: test and docs requirements, the CLI package
+  - package-ecosystem: "pip"
+    directories:
+      - "/crates/bindings/python/tests"
+      - "/docs"
+      - "/packages/grafeo-cli-python"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 3
+    groups:
+      python-tooling:
+        patterns:
+          - "*"
+    commit-message:
+      prefix: "deps(python)"
+
+  # npm dependencies: test tooling, as the lockfiles of these two folders pin it
+  - package-ecosystem: "npm"
+    directories:
+      - "/crates/bindings/node"
+      - "/tests/spec/runners/wasm"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 3
+    groups:
+      npm-dependencies:
+        patterns:
+          - "*"
+    commit-message:
+      prefix: "deps(npm)"

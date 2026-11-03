@@ -522,7 +522,6 @@ mod crash {
     use grafeo_engine::{Config, HistoryRetention};
     use std::collections::{BTreeMap, HashMap};
     use std::path::{Path, PathBuf};
-    use std::process::Command;
     use std::sync::Arc;
 
     /// Which child, and with which history retention: `<scenario>:<off|forever>`.
@@ -567,8 +566,7 @@ mod crash {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("graph.grafeo");
         let output = child_process::output(
-            Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", "crash::direct_write_child", "--nocapture"])
+            grafeo_common::child_test!("direct_write_child")
                 .env(CHILD_VAR, which)
                 .env(PATH_VAR, &path),
         )

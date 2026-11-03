@@ -5,7 +5,7 @@
 //! reports its events at once; a statement that fails reports nothing.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test cdc_commit_order
+//! cargo test -p grafeo-engine --all-features --test main cdc_commit_order::
 //! ```
 
 #![cfg(all(feature = "cdc", feature = "gql"))]

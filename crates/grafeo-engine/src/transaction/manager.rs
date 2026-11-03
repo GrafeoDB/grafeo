@@ -598,7 +598,6 @@ impl CommitGuard<'_> {
     /// which is safe because the commit lock is still held and no later
     /// commit took one, and the transaction is active again, with its claims,
     /// for the caller to roll back. Nothing is published or poisoned.
-    #[cfg(any(test, feature = "wal"))]
     pub(crate) fn abort(self) {
         let Self {
             mut commit,
@@ -652,6 +651,29 @@ pub(crate) struct Publish<'a> {
     commit_time: Option<u64>,
     /// Whether the commit was published or taken back.
     finished: bool,
+}
+
+/// A commit whose group is written, on its way to being published.
+pub(crate) enum WrittenCommit<'a> {
+    /// The commit lock went: the next commit writes while this one syncs.
+    Released(Publish<'a>),
+    /// The commit lock stays until it is published: nothing commits between a change of
+    /// the catalog and its durability, or sees one half applied.
+    Held(CommitGuard<'a>),
+}
+
+impl WrittenCommit<'_> {
+    /// Publishes the commit as [`Publish::complete_with`] does.
+    ///
+    /// # Errors
+    ///
+    /// As [`Publish::complete_with`].
+    pub(crate) fn complete_with(self, ordered: impl FnOnce() -> Result<()>) -> Result<()> {
+        match self {
+            Self::Released(publish) => publish.complete_with(ordered),
+            Self::Held(CommitGuard { commit, _commit }) => commit.complete_with(ordered),
+        }
+    }
 }
 
 impl Publish<'_> {
@@ -944,6 +966,51 @@ impl TransactionManager {
             .filter(|info| info.state == TransactionState::Active)
             .filter_map(|info| info.changes.clone())
             .collect()
+    }
+
+    /// The change sets of the open transactions, for a commit that holds the commit lock
+    /// and has frozen writes ([`freeze_writes`](Self::freeze_writes)). Its own is not
+    /// among them: it is committing.
+    pub(crate) fn open_change_sets_while_frozen(&self) -> Vec<Arc<TransactionChanges>> {
+        self.transactions
+            .read()
+            .values()
+            .filter(|info| info.state == TransactionState::Active)
+            .filter_map(|info| info.changes.clone())
+            .collect()
+    }
+
+    /// Keeps the writes of open transactions out, for a commit that holds the commit lock
+    /// and drops a graph they may be writing (see `write_freeze`): the commit lock is
+    /// taken first, as [`hold_commits`](Self::hold_commits) takes it.
+    pub(crate) fn freeze_writes(&self) -> RwLockWriteGuard<'_, ()> {
+        self.write_freeze.write()
+    }
+
+    /// Fails when an open transaction other than `own` holds `key`, for a statement that
+    /// would change it: it loses to the claim as a second transaction's write would.
+    ///
+    /// # Errors
+    ///
+    /// A write conflict naming the key.
+    pub(crate) fn refuse_claimed(&self, key: &KeyClaim, own: Option<TransactionId>) -> Result<()> {
+        if self.active_count.load(Ordering::Relaxed) == 0 {
+            return Ok(());
+        }
+        let claimed = self.transactions.read().iter().any(|(id, info)| {
+            Some(*id) != own
+                && matches!(
+                    info.state,
+                    TransactionState::Active | TransactionState::Committing
+                )
+                && info.key_set.contains(key)
+        });
+        if claimed {
+            return Err(Error::Transaction(TransactionError::WriteConflict(
+                format!("on {key}: an open transaction changes the same name"),
+            )));
+        }
+        Ok(())
     }
 
     /// Poisons the manager after a broken invariant that leaves the store
@@ -1280,7 +1347,32 @@ impl TransactionManager {
     ///
     /// As [`commit`](Self::commit); the transaction then stays active.
     pub(crate) fn start_commit(&self, transaction_id: TransactionId) -> Result<CommitGuard<'_>> {
+        self.start_commit_after(transaction_id, false)
+    }
+
+    /// [`start_commit`](Self::start_commit) of a commit that reads what others committed
+    /// (one with schema statements, whose indexes hold it): waits for the commits written
+    /// before it to be published.
+    ///
+    /// # Errors
+    ///
+    /// As [`start_commit`](Self::start_commit).
+    pub(crate) fn start_commit_when_quiet(
+        &self,
+        transaction_id: TransactionId,
+    ) -> Result<CommitGuard<'_>> {
+        self.start_commit_after(transaction_id, true)
+    }
+
+    fn start_commit_after(
+        &self,
+        transaction_id: TransactionId,
+        quiet: bool,
+    ) -> Result<CommitGuard<'_>> {
         let commit_lock = self.commit_lock.lock();
+        if quiet {
+            self.wait_for_written_commits();
+        }
         // A commit that did not complete sets this before it releases the
         // commit lock: any epoch published after it would publish its
         // stamped versions too.

@@ -8,7 +8,7 @@
 //! them, and `CREATE INDEX ... USING TEXT {...}` sets them.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test text_index_options
+//! cargo test -p grafeo-engine --all-features --test main text_index_options::
 //! ```
 
 #![cfg(all(feature = "text-index", feature = "gql"))]
@@ -360,8 +360,7 @@ mod persistence {
     /// database (a crash: no checkpoint at close, no destructors).
     fn crash_after(scenario: &str, path: &Path) {
         let status = child_process::run(
-            std::process::Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", "persistence::crash_child", "--nocapture"])
+            grafeo_common::child_test!("crash_child")
                 .env(SCENARIO_VAR, scenario)
                 .env(PATH_VAR, path),
         )

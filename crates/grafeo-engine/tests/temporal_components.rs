@@ -10,7 +10,7 @@
 //! GQL component functions (`month(d)`, ...) read the same values.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test temporal_components
+//! cargo test -p grafeo-engine --all-features --test main temporal_components::
 //! ```
 
 #![cfg(all(feature = "gql", feature = "cypher"))]

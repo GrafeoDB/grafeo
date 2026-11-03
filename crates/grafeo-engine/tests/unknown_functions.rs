@@ -5,7 +5,7 @@
 //! dropped every row.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test unknown_functions
+//! cargo test -p grafeo-engine --all-features --test main unknown_functions::
 //! ```
 
 #![cfg(feature = "gql")]

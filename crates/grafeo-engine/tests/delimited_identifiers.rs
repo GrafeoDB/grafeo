@@ -3,7 +3,7 @@
 //! graph names, in GQL and Cypher.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test delimited_identifiers
+//! cargo test -p grafeo-engine --all-features --test main delimited_identifiers::
 //! ```
 
 #![cfg(all(feature = "gql", feature = "cypher"))]

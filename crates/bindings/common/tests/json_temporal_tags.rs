@@ -6,7 +6,7 @@
 //! WASM, C, Go, C# and Dart).
 //!
 //! ```bash
-//! cargo test -p grafeo-bindings-common --test json_temporal_tags
+//! cargo test -p grafeo-bindings-common --test main json_temporal_tags::
 //! ```
 
 use grafeo_bindings_common::json::json_to_value;

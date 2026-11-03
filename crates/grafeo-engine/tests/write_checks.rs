@@ -5,7 +5,7 @@
 use grafeo_engine::GrafeoDB;
 
 #[cfg(all(feature = "wal", feature = "grafeo-file"))]
-mod common;
+use crate::common;
 
 /// MERGE did not record its writes, so two transactions could both update
 /// the same node through `ON MATCH SET` without a write-write conflict.
@@ -181,7 +181,7 @@ fn a_failed_edge_merge_in_a_transaction_leaves_nothing() {
 #[test]
 fn a_failed_statement_is_not_replayed() {
     let (_dir, db) = common::replay::reopened_after_crash(
-        "a_failed_statement_is_not_replayed",
+        &grafeo_common::test_path!("a_failed_statement_is_not_replayed"),
         |path| GrafeoDB::open(path).unwrap(),
         |db| {
             db.execute("CREATE NODE TYPE Doc (id INTEGER, tag STRING)")
@@ -427,7 +427,7 @@ fn a_statement_with_auto_commit_off_conflicts_with_an_open_transaction() {
 )]
 fn a_failed_statement_with_auto_commit_off_is_not_replayed() {
     let (_dir, db) = common::replay::reopened_after_crash(
-        "a_failed_statement_with_auto_commit_off_is_not_replayed",
+        &grafeo_common::test_path!("a_failed_statement_with_auto_commit_off_is_not_replayed"),
         |path| GrafeoDB::open(path).unwrap(),
         |db| {
             db.execute("CREATE NODE TYPE Doc (id INTEGER, tag STRING)")

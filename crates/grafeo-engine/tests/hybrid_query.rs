@@ -6,7 +6,7 @@
 //! and brute-force fallback without vector index.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --features text-index,vector-index,gql --test hybrid_query 2>&1 | tail -20
+//! cargo test -p grafeo-engine --all-features --test main hybrid_query:: 2>&1 | tail -20
 //! ```
 
 #![cfg(all(feature = "text-index", feature = "vector-index", feature = "gql"))]

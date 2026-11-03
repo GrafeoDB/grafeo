@@ -5,7 +5,7 @@
 //! epoch as it serves one of now and a transaction.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test index_at_past_epoch
+//! cargo test -p grafeo-engine --all-features --test main index_at_past_epoch::
 //! ```
 
 #![cfg(feature = "gql")]

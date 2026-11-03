@@ -12,13 +12,12 @@
 //! replays the commits the WAL holds.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test checkpoint_committed_state
+//! cargo test -p grafeo-engine --all-features --test main checkpoint_committed_state::
 //! ```
 
 #![cfg(all(feature = "gql", feature = "wal", feature = "grafeo-file"))]
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use grafeo_common::testing::child_process;
 use grafeo_common::types::Value;
@@ -96,8 +95,7 @@ fn travellers(path: &Path) {
 /// checks it ended without closing the database: its WAL is still there.
 fn run_child(scenario: &str, graph: &str, path: &Path) {
     let output = child_process::output(
-        Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "committed_state_child", "--nocapture"])
+        grafeo_common::child_test!("committed_state_child")
             .env(CHILD_VAR, format!("{scenario}:{graph}"))
             .env(PATH_VAR, path),
     )

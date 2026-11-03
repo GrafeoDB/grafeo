@@ -6,7 +6,7 @@
 //! byte were the same.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test all_different_values
+//! cargo test -p grafeo-engine --all-features --test main all_different_values::
 //! ```
 
 #![cfg(all(feature = "gql", feature = "cypher"))]

@@ -15,7 +15,7 @@
 //! - graph-bench's IS4 text, verbatim, on a graph named `snb`.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test sql_pgq_label_expressions_and_quantifiers
+//! cargo test -p grafeo-engine --all-features --test main sql_pgq_label_expressions_and_quantifiers::
 //! ```
 
 #![cfg(all(feature = "gql", feature = "sql-pgq"))]

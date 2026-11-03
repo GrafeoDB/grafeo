@@ -545,24 +545,7 @@ impl<S: CatalogStore> CatalogSection<S> {
     /// The names `CREATE INDEX` gave indexes, in the order of
     /// [`IndexName::key`].
     fn collect_index_names(&self) -> Vec<IndexName> {
-        let mut names: Vec<IndexName> = self
-            .catalog
-            .all_indexes()
-            .into_iter()
-            .filter_map(|def| {
-                Some(IndexName {
-                    label: self.catalog.get_label_name(def.label)?.to_string(),
-                    property: self
-                        .catalog
-                        .get_property_key_name(def.property_key)?
-                        .to_string(),
-                    name: def.name,
-                    index_type: def.index_type,
-                })
-            })
-            .collect();
-        names.sort_by(|a, b| a.key().cmp(&b.key()));
-        names
+        index_names_of(&self.catalog)
     }
 
     /// The catalog's records as a snapshot holds them (version 5): framed,
@@ -820,6 +803,25 @@ fn index_key(record: &IndexRecord) -> IndexKey {
             label, property, ..
         } => (graph, 2, label.clone(), property.clone()),
     }
+}
+
+/// The names `CREATE INDEX` gave indexes in `catalog`, in the order of
+/// [`IndexName::key`].
+pub(crate) fn index_names_of(catalog: &Catalog) -> Vec<IndexName> {
+    let mut names: Vec<IndexName> = catalog
+        .all_indexes()
+        .into_iter()
+        .filter_map(|def| {
+            Some(IndexName {
+                label: catalog.get_label_name(def.label)?.to_string(),
+                property: catalog.get_property_key_name(def.property_key)?.to_string(),
+                name: def.name,
+                index_type: def.index_type,
+            })
+        })
+        .collect();
+    names.sort_by(|a, b| a.key().cmp(&b.key()));
+    names
 }
 
 /// Frames records into the record stream, one at a time.

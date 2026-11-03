@@ -18,7 +18,7 @@
 //!   search), and a search after a write in the same statement sees it.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test optional_shortest_path_both_ends
+//! cargo test -p grafeo-engine --all-features --test main optional_shortest_path_both_ends::
 //! ```
 
 #![cfg(all(feature = "gql", feature = "cypher"))]

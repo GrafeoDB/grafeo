@@ -11,7 +11,7 @@
 //! ignored until #398 is fixed.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test memory_limit_enforcement -- --include-ignored
+//! cargo test -p grafeo-engine --all-features --test main memory_limit_enforcement:: -- --include-ignored
 //! ```
 
 #![cfg(feature = "gql")]

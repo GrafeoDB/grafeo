@@ -4,12 +4,10 @@
 //! after WAL replay and after a checkpoint.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test type_ddl_types
+//! cargo test -p grafeo-engine --all-features --test main type_ddl_types::
 //! ```
 
 #![cfg(all(feature = "gql", feature = "grafeo-file", feature = "wal"))]
-
-mod common;
 
 use grafeo_common::types::{Timestamp, Value, ZonedDatetime};
 use grafeo_engine::{Config, GrafeoDB};
@@ -255,7 +253,7 @@ fn the_property_types_of_a_type_nest_at_most_32768_lists_in_all() {
 #[test]
 fn the_new_types_survive_a_reopen_after_wal_replay() {
     let (_dir, db) = crate::common::replay::reopened_after_crash(
-        "the_new_types_survive_a_reopen_after_wal_replay",
+        &grafeo_common::test_path!("the_new_types_survive_a_reopen_after_wal_replay"),
         |path| GrafeoDB::with_config(Config::persistent(path)).unwrap(),
         |db| {
             db.execute("CREATE NODE TYPE Event (begins ZONED DATETIME, tags LIST<STRING>)")

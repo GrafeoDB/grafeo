@@ -357,6 +357,10 @@ WRITE_FIXTURES = {
     "list_embeddings": {"DH"},
     # CP1 runs after BB and its insert is refused, so BB reads the fixture as built
     "typed": {"BB", "CP"},
+    # DS3 stores what the graph type would refuse; DS4 reads it
+    "type_scope": {"DS"},
+    # The rules that DT tries to add, each over this data
+    "rules_over_data": {"DT"},
 }
 
 

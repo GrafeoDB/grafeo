@@ -167,7 +167,9 @@ jobs:
           npm ci
           npm run build
       - name: Run spec tests
-        run: npx vitest run tests/spec/runners/node/spec-runner.test.mjs
+        # The installed vitest: the repository root has no node_modules, so `npx` here
+        # would fetch whichever version is newest.
+        run: crates/bindings/node/node_modules/.bin/vitest run tests/spec/runners/node/spec-runner.test.mjs
 
   go-spec:
     name: Go Spec Tests
@@ -1313,11 +1315,6 @@ jobs:
       - name: Check the manifest a release publishes
         working-directory: crates/bindings/node
         run: bash "$GITHUB_WORKSPACE/scripts/node-platform-deps.sh" check
-      - name: Check the last published manifest
-        working-directory: crates/bindings/node
-        run: |
-          latest=$(npm view @grafeo-db/js version)
-          bash "$GITHUB_WORKSPACE/scripts/node-platform-deps.sh" published "$latest"
 
   # Repository policy (scripts/check_policy.py): crate boundaries from cargo metadata,
   # workflow toolchain pins that match rust-toolchain.toml and the MSRV, and the

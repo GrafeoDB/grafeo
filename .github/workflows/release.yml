@@ -449,6 +449,10 @@ jobs:
           echo "=== Platform packages ==="
           find npm -name '*.node' -ls
 
+      - name: Check that every platform has its binary
+        working-directory: crates/bindings/node
+        run: bash "$GITHUB_WORKSPACE/scripts/node-platform-deps.sh" binaries
+
       - name: Update npm (trusted publishing needs 11.5.1 or later)
         run: npm install -g npm@^11.5.1
 
@@ -456,9 +460,7 @@ jobs:
         working-directory: crates/bindings/node
         run: |
           for dir in npm/*/; do
-            if ls "$dir"*.node 1>/dev/null 2>&1; then
-              (cd "$dir" && bash "$GITHUB_WORKSPACE/scripts/npm-publish.sh")
-            fi
+            (cd "$dir" && bash "$GITHUB_WORKSPACE/scripts/npm-publish.sh")
           done
 
       - name: Add the platform packages to the manifest

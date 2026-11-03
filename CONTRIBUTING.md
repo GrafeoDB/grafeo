@@ -91,7 +91,7 @@ python scripts/check_policy.py diff --base origin/release/0.5.44
 
 ## Integration Tests
 
-Each crate builds its integration tests (`crates/<crate>/tests/`) as one test binary, `tests/main.rs`, so a test run links the crate once and not once per file.
+A crate with `autotests = false` in its manifest, which is every crate but the language bindings (`grafeo-wasm` runs `tests/web.rs` on its own), builds its integration tests (`crates/<crate>/tests/`) as one test binary, `tests/main.rs`, so a test run links the crate once and not once per file.
 
 To add a test file, create it under `tests/` and declare it in `tests/main.rs` with a `mod` line. Cargo does not look for test files in these crates, and the `Policy` CI job fails on a file that is declared nowhere.
 
@@ -100,7 +100,7 @@ cargo test -p grafeo-engine --all-features --test main                        # 
 cargo test -p grafeo-engine --all-features --test main sparql_transactions::  # One file
 ```
 
-Under `cargo test` the tests of a file share a process with every other test file, so a test must not change anything process-wide, such as an environment variable, the current directory, a global logger or a panic hook. A test that needs its own process, for example to crash, runs part of itself as a child with `grafeo_common::child_test!("name_of_the_child_test")`. Only that test runs in the child, so there it may do those things.
+Under `cargo test` the tests of a file share a process with every other test file of that binary, so a test must not change anything process-wide, such as an environment variable, the current directory, a global logger or a panic hook. A test that needs its own process, for example to crash, runs part of itself as a child with `grafeo_common::child_test!("name_of_the_child_test")`. Only that test runs in the child, so there it may do those things.
 
 A test file may be a separate binary only when it cannot share a process (a counting `#[global_allocator]`) or when CI runs it with features that the rest of `main` does not build with. Such a file gets a `[[test]]` entry in the crate's `Cargo.toml`, with a one-line comment above the entry saying why. Keep these rare: each one links the whole crate again.
 

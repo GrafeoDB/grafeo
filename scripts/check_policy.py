@@ -410,7 +410,8 @@ def rust_version_findings(root: Path, metadata: dict) -> list[Finding]:
 # ------------------------------------------------------------------ test binaries
 
 #: A file module of `tests/main.rs`.
-TEST_MODULE = re.compile(r"^\s*mod (\w+);", re.MULTILINE)
+TEST_MODULE = re.compile(r"^\s*(?:pub(?:\([^)]*\))?\s+)?mod\s+(\w+)\s*;", re.MULTILINE)
+TEST_TARGET_HEADER = re.compile(r"^\s*\[\[\s*test\s*\]\]")
 
 
 def test_binary_findings(root: Path, files: list[str]) -> list[Finding]:
@@ -428,50 +429,60 @@ def test_binary_findings(root: Path, files: list[str]) -> list[Finding]:
         if text is None or not re.search(r"^autotests\s*=\s*false", text, re.MULTILINE):
             continue
         tests = rel.removesuffix("Cargo.toml") + "tests/"
-        stems = {
-            file[len(tests) : -len(".rs")]
+        test_files = {
+            file[len(tests) :]
             for file in files
             if file.startswith(tests)
             and file.endswith(".rs")
             and "/" not in file[len(tests) :]
         }
-        main = read_text(root / f"{tests}main.rs") or ""
-        modules = set(TEST_MODULE.findall(main))
         entries = tomllib.loads(text).get("test", [])
-        separate = {
-            Path(entry.get("path", "")).stem
-            for entry in entries
-            if entry.get("name") != "main"
-        }
-        for stem in sorted(stems - modules - separate - {"main"}):
-            findings.append(
-                finding(
-                    "T7", f"{tests}{stem}.rs", None, "this test file is never built"
+        targets = [test_target_path(entry) for entry in entries]
+        # `tests/main.rs` builds its modules only when a target builds it.
+        main = (
+            (read_text(root / f"{tests}main.rs") or "")
+            if "tests/main.rs" in targets
+            else ""
+        )
+        modules = set(TEST_MODULE.findall(main))
+        for name in sorted(test_files):
+            is_target = f"tests/{name}" in targets
+            is_module = name.removesuffix(".rs") in modules
+            if not is_target and not is_module:
+                findings.append(
+                    finding(
+                        "T7", f"{tests}{name}", None, "this test file is never built"
+                    )
                 )
-            )
-        for stem in sorted(modules & separate):
-            findings.append(
-                finding(
-                    "T7", f"{tests}{stem}.rs", None, "this test file is built twice"
+            elif is_target and is_module:
+                findings.append(
+                    finding(
+                        "T7", f"{tests}{name}", None, "this test file is built twice"
+                    )
                 )
-            )
         lines = text.splitlines()
-        for number, line in enumerate(lines):
-            if (
-                line.strip() != "[[test]]"
-                or lines[number + 1].strip() == 'name = "main"'
-            ):
+        headers = [n for n, line in enumerate(lines) if TEST_TARGET_HEADER.match(line)]
+        for number, entry, target in zip(headers, entries, targets, strict=False):
+            if target == "tests/main.rs":
                 continue
             if number == 0 or not lines[number - 1].lstrip().startswith("#"):
+                name = entry.get("name", target)
                 findings.append(
                     finding(
                         "T7",
                         rel,
                         number + 1,
-                        f"{lines[number + 1].strip()} has no comment saying why it is separate",
+                        f'name = "{name}" has no comment saying why it is separate',
                     )
                 )
     return findings
+
+
+def test_target_path(entry: dict[str, Any]) -> str:
+    """The file a `[[test]]` target builds, relative to its crate: Cargo's `tests/<name>.rs`
+    when it names no path."""
+    path = entry.get("path", f"tests/{entry.get('name', '')}.rs")
+    return Path(path).as_posix().removeprefix("./")
 
 
 # ------------------------------------------------------------------ Node.js package
@@ -519,11 +530,9 @@ def node_package_findings(root: Path, files: list[str]) -> list[Finding]:
         findings.append(finding("T8", rel, None, f"no known npm folder for {target}"))
     prefix = "crates/bindings/node/npm/"
     folders = {
-        file[len(prefix) : -len("/package.json")]
+        file[len(prefix) :].split("/")[0]
         for file in files
-        if file.startswith(prefix)
-        and file.endswith("/package.json")
-        and file[len(prefix) :].count("/") == 1
+        if file.startswith(prefix) and "/" in file[len(prefix) :]
     }
     wanted = {NODE_TARGET_FOLDERS[t] for t in targets if t in NODE_TARGET_FOLDERS}
     for folder in sorted(wanted - folders):
@@ -536,7 +545,7 @@ def node_package_findings(root: Path, files: list[str]) -> list[Finding]:
                 "T8", f"{prefix}{folder}", None, "no napi target builds this folder"
             )
         )
-    for folder in sorted(folders):
+    for folder in sorted(folders & wanted):
         text = read_text(root / f"{prefix}{folder}/package.json") or "{}"
         if json.loads(text).get("name") != f"@grafeo-db/js-{folder}":
             findings.append(

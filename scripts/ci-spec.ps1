@@ -102,7 +102,7 @@ if (Should-Run "node") {
     Pop-Location
     if ($LASTEXITCODE -eq 0) {
         Push-Location $root
-        npx vitest run --dir tests/spec/runners/node spec-runner.test.mjs 2>&1 | Tee-Object -Variable nodeOut
+        & "$root\crates\bindings\node\node_modules\.bin\vitest.cmd" run --dir tests/spec/runners/node spec-runner.test.mjs 2>&1 | Tee-Object -Variable nodeOut
         if ($LASTEXITCODE -eq 0) { $passed += "node" } else { $failures += "node" }
         Pop-Location
     } else {
@@ -148,7 +148,7 @@ if (Should-Run "csharp") {
         Push-Location $csDest
         $env:LD_LIBRARY_PATH = $csDest
         # Windows finds native DLLs via PATH, not LD_LIBRARY_PATH; without this every
-        # test fails or the runner loads a stale copy from bin\.
+        # test that loads it fails or the runner loads a stale copy from bin\.
         # Scoped to this block so later steps see the original PATH.
         $originalPath = $env:PATH
         $env:PATH = "$csDest$([System.IO.Path]::PathSeparator)$env:PATH"

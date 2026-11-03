@@ -663,6 +663,147 @@ path = "tests/twice.rs"
     ]
 
 
+def write_lf(root: Path, rel: str, text: str) -> None:
+    """Writes `text` as the repository holds it, with line feeds on every platform."""
+    path = root / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(text.encode())
+
+
+def t7_found(tmp_path: Path, files: dict[str, str]) -> list[tuple[str | None, str]]:
+    for rel, text in files.items():
+        write_lf(tmp_path, rel, text)
+    found = check_policy.test_binary_findings(tmp_path, sorted(files))
+    return [(f.path, f.message.split(";")[0]) for f in found]
+
+
+MAIN_ONLY = """[package]
+name = "grafeo-core"
+autotests = false
+
+[[test]]
+name = "main"
+path = "tests/main.rs"
+"""
+
+
+@pytest.mark.parametrize(
+    "declaration",
+    [
+        "pub mod a_file;",
+        "pub(crate) mod a_file;",
+        "  mod  a_file ;",
+        "pub  mod\ta_file;",
+    ],
+)
+def test_t7_a_module_may_be_written_any_way_rust_takes(
+    tmp_path: Path, declaration: str
+) -> None:
+    assert (
+        t7_found(
+            tmp_path,
+            {
+                "crates/grafeo-core/Cargo.toml": MAIN_ONLY,
+                "crates/grafeo-core/tests/main.rs": f"{declaration}\n",
+                "crates/grafeo-core/tests/a_file.rs": "",
+            },
+        )
+        == []
+    )
+
+
+def test_t7_a_module_in_a_comment_builds_nothing(tmp_path: Path) -> None:
+    assert t7_found(
+        tmp_path,
+        {
+            "crates/grafeo-core/Cargo.toml": MAIN_ONLY,
+            "crates/grafeo-core/tests/main.rs": "// mod a_file;\n",
+            "crates/grafeo-core/tests/a_file.rs": "",
+        },
+    ) == [("crates/grafeo-core/tests/a_file.rs", "this test file is never built")]
+
+
+def test_t7_a_target_with_no_path_is_tests_of_its_name(tmp_path: Path) -> None:
+    manifest = MAIN_ONLY + '\n# Counts allocations.\n[[test]]\nname = "counted"\n'
+    assert (
+        t7_found(
+            tmp_path,
+            {
+                "crates/grafeo-core/Cargo.toml": manifest,
+                "crates/grafeo-core/tests/main.rs": "",
+                "crates/grafeo-core/tests/counted.rs": "",
+            },
+        )
+        == []
+    )
+
+
+def test_t7_a_target_elsewhere_does_not_build_a_test_file_of_its_stem(
+    tmp_path: Path,
+) -> None:
+    manifest = (
+        MAIN_ONLY + '\n# Elsewhere.\n[[test]]\nname = "other"\npath = "src/foo.rs"\n'
+    )
+    assert t7_found(
+        tmp_path,
+        {
+            "crates/grafeo-core/Cargo.toml": manifest,
+            "crates/grafeo-core/src/foo.rs": "",
+            "crates/grafeo-core/tests/main.rs": "",
+            "crates/grafeo-core/tests/foo.rs": "",
+        },
+    ) == [("crates/grafeo-core/tests/foo.rs", "this test file is never built")]
+
+
+def test_t7_a_main_no_target_builds_is_never_built(tmp_path: Path) -> None:
+    manifest = '[package]\nname = "grafeo-core"\nautotests = false\n'
+    assert t7_found(
+        tmp_path,
+        {
+            "crates/grafeo-core/Cargo.toml": manifest,
+            "crates/grafeo-core/tests/main.rs": "",
+        },
+    ) == [("crates/grafeo-core/tests/main.rs", "this test file is never built")]
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        '[[test]]\npath = "tests/main.rs"\nname = "main"\n',
+        "[[test]]\nname = 'main'\npath = 'tests/main.rs'\n",
+        '[[test]]\nharness = true\nname = "main"\npath = "tests/main.rs"\n',
+    ],
+)
+def test_t7_the_main_target_needs_no_comment_in_any_order(
+    tmp_path: Path, entry: str
+) -> None:
+    manifest = f'[package]\nname = "grafeo-core"\nautotests = false\n\n{entry}'
+    assert (
+        t7_found(
+            tmp_path,
+            {
+                "crates/grafeo-core/Cargo.toml": manifest,
+                "crates/grafeo-core/tests/main.rs": "",
+            },
+        )
+        == []
+    )
+
+
+def test_t7_a_separate_target_needs_its_comment_in_any_order(tmp_path: Path) -> None:
+    manifest = MAIN_ONLY + '\n[[test]]\npath = "tests/counted.rs"\nname = "counted"\n'
+    found = t7_found(
+        tmp_path,
+        {
+            "crates/grafeo-core/Cargo.toml": manifest,
+            "crates/grafeo-core/tests/main.rs": "",
+            "crates/grafeo-core/tests/counted.rs": "",
+        },
+    )
+    assert len(found) == 1
+    assert "has no comment saying why it is separate" in found[0][1]
+
+
 def test_t7_holds_for_this_repository() -> None:
     root = SCRIPT.parents[1]
     files = check_policy.git(root, "ls-files").splitlines()
@@ -891,3 +1032,191 @@ def test_t6_holds_for_this_repository() -> None:
     root = SCRIPT.parents[1]
     files = check_policy.git(root, "ls-files").splitlines()
     assert check_policy.stability_findings(root, files) == []
+
+
+# ------------------------------------------------------------------ T8 Node.js package
+
+NODE_TARGETS = {
+    "x86_64-apple-darwin": "darwin-x64",
+    "aarch64-apple-darwin": "darwin-arm64",
+    "x86_64-pc-windows-msvc": "win32-x64-msvc",
+    "x86_64-unknown-linux-gnu": "linux-x64-gnu",
+    "aarch64-unknown-linux-gnu": "linux-arm64-gnu",
+    "aarch64-unknown-linux-musl": "linux-arm64-musl",
+}
+
+
+def node_package(
+    root: Path,
+    targets: list[str] | None = None,
+    built: list[str] | None = None,
+    folders: dict[str, str] | None = None,
+    **manifest: object,
+) -> list[str]:
+    """Writes a Node.js package and its release job; returns the files, as the rule gets them."""
+    targets = list(NODE_TARGETS) if targets is None else targets
+    built = list(NODE_TARGETS) if built is None else built
+    folders = (
+        {folder: f"@grafeo-db/js-{folder}" for folder in NODE_TARGETS.values()}
+        if folders is None
+        else folders
+    )
+    files = ["crates/bindings/node/package.json", ".github/workflows/release.yml"]
+    write_lf(
+        root,
+        files[0],
+        json.dumps({"name": "@grafeo-db/js", "napi": {"targets": targets}, **manifest}),
+    )
+    matrix = "".join(f"          - os: any\n            target: {t}\n" for t in built)
+    write_lf(
+        root,
+        files[1],
+        "jobs:\n  build-node-native:\n    strategy:\n      matrix:\n        include:\n"
+        f"{matrix}    steps:\n      - run: echo\n"
+        "  build-other:\n    strategy:\n      matrix:\n        include:\n"
+        "          - target: wasm32-unknown-unknown\n",
+    )
+    for folder, name in folders.items():
+        rel = f"crates/bindings/node/npm/{folder}/package.json"
+        write_lf(root, rel, json.dumps({"name": name}))
+        files.append(rel)
+    return files
+
+
+def node_findings(root: Path, files: list[str]) -> list[tuple[str, str]]:
+    found = check_policy.node_package_findings(root, sorted(files))
+    assert all(f.rule == "T8" for f in found)
+    return [(f.path, f.message.split(";")[0]) for f in found]
+
+
+def test_t8_a_repository_with_no_node_package_reports_nothing(tmp_path: Path) -> None:
+    assert check_policy.node_package_findings(tmp_path, []) == []
+
+
+def test_t8_a_package_in_step_reports_nothing(tmp_path: Path) -> None:
+    assert node_findings(tmp_path, node_package(tmp_path)) == []
+
+
+def test_t8_the_manifest_lists_no_platform_packages(tmp_path: Path) -> None:
+    files = node_package(
+        tmp_path, optionalDependencies={"@grafeo-db/js-darwin-x64": "1.2.3"}
+    )
+    assert node_findings(tmp_path, files) == [
+        ("crates/bindings/node/package.json", "lists optional dependencies")
+    ]
+
+
+def test_t8_a_target_the_release_does_not_build(tmp_path: Path) -> None:
+    built = [t for t in NODE_TARGETS if t != "aarch64-unknown-linux-musl"]
+    files = node_package(tmp_path, built=built)
+    assert node_findings(tmp_path, files) == [
+        (".github/workflows/release.yml", "does not build aarch64-unknown-linux-musl")
+    ]
+
+
+def test_t8_a_build_with_no_target_in_the_manifest(tmp_path: Path) -> None:
+    targets = [t for t in NODE_TARGETS if t != "aarch64-apple-darwin"]
+    folders = {
+        folder: f"@grafeo-db/js-{folder}"
+        for target, folder in NODE_TARGETS.items()
+        if target != "aarch64-apple-darwin"
+    }
+    files = node_package(tmp_path, targets=targets, folders=folders)
+    assert node_findings(tmp_path, files) == [
+        ("crates/bindings/node/package.json", "has no napi target aarch64-apple-darwin")
+    ]
+
+
+def test_t8_a_target_with_no_known_folder(tmp_path: Path) -> None:
+    extra = "riscv64gc-unknown-linux-gnu"
+    files = node_package(
+        tmp_path, targets=[*NODE_TARGETS, extra], built=[*NODE_TARGETS, extra]
+    )
+    assert node_findings(tmp_path, files) == [
+        ("crates/bindings/node/package.json", f"no known npm folder for {extra}")
+    ]
+
+
+def test_t8_a_target_with_no_folder(tmp_path: Path) -> None:
+    folders = {
+        folder: f"@grafeo-db/js-{folder}"
+        for folder in NODE_TARGETS.values()
+        if folder != "linux-x64-gnu"
+    }
+    assert node_findings(tmp_path, node_package(tmp_path, folders=folders)) == [
+        ("crates/bindings/node/npm/linux-x64-gnu", "this folder is missing")
+    ]
+
+
+def test_t8_a_folder_no_target_builds(tmp_path: Path) -> None:
+    folders = {folder: f"@grafeo-db/js-{folder}" for folder in NODE_TARGETS.values()}
+    folders["linux-riscv64-gnu"] = "@grafeo-db/js-linux-riscv64-gnu"
+    assert node_findings(tmp_path, node_package(tmp_path, folders=folders)) == [
+        (
+            "crates/bindings/node/npm/linux-riscv64-gnu",
+            "no napi target builds this folder",
+        )
+    ]
+
+
+def test_t8_a_folder_with_another_name(tmp_path: Path) -> None:
+    folders = {folder: f"@grafeo-db/js-{folder}" for folder in NODE_TARGETS.values()}
+    folders["linux-x64-gnu"] = "@grafeo-db/js-linux-x64"
+    assert node_findings(tmp_path, node_package(tmp_path, folders=folders)) == [
+        (
+            "crates/bindings/node/npm/linux-x64-gnu/package.json",
+            "its name is not @grafeo-db/js-linux-x64-gnu",
+        )
+    ]
+
+
+def test_t8_a_release_with_no_build_job_builds_nothing(tmp_path: Path) -> None:
+    files = node_package(tmp_path)
+    write_lf(
+        tmp_path, ".github/workflows/release.yml", "jobs:\n  other:\n    steps: []\n"
+    )
+    found = node_findings(tmp_path, files)
+    assert len(found) == len(NODE_TARGETS)
+    assert all(message.startswith("does not build") for _, message in found)
+
+
+def test_t8_only_the_node_build_job_counts(tmp_path: Path) -> None:
+    # The other job's wasm32 target in `node_package` is not a Node.js target.
+    assert node_findings(tmp_path, node_package(tmp_path)) == []
+
+
+def test_t8_a_file_deeper_in_a_folder_is_not_a_folder(tmp_path: Path) -> None:
+    files = node_package(tmp_path)
+    rel = "crates/bindings/node/npm/linux-x64-gnu/sub/package.json"
+    write_lf(tmp_path, rel, "{}")
+    assert node_findings(tmp_path, [*files, rel]) == []
+
+
+def test_t8_the_repository_is_in_step() -> None:
+    root = Path(__file__).resolve().parents[2]
+    result = subprocess.run(
+        [
+            "git",
+            "ls-files",
+            "crates/bindings/node/npm",
+            "crates/bindings/node/package.json",
+        ],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    files = result.stdout.splitlines()
+    assert check_policy.node_package_findings(root, files) == []
+
+
+def test_t8_a_folder_with_no_manifest_is_a_folder(tmp_path: Path) -> None:
+    files = node_package(tmp_path)
+    rel = "crates/bindings/node/npm/linux-riscv64-gnu/README.md"
+    write_lf(tmp_path, rel, "")
+    assert node_findings(tmp_path, [*files, rel]) == [
+        (
+            "crates/bindings/node/npm/linux-riscv64-gnu",
+            "no napi target builds this folder",
+        )
+    ]

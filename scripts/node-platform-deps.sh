@@ -11,7 +11,9 @@
 #   node-platform-deps.sh add VERSION        adds them to package.json, for publishing
 #   node-platform-deps.sh check              packs a temporary copy with them added and
 #                                            checks the packed manifest (CI, every push)
-#   node-platform-deps.sh published VERSION  checks that version on npm
+#   node-platform-deps.sh binaries           checks that each folder under npm/ holds
+#                                            its native binary (release, before publishing)
+#   node-platform-deps.sh published VERSION  checks that version on npm (release, after)
 set -euo pipefail
 
 readonly EXPECTED_COUNT=6
@@ -89,6 +91,16 @@ check() {
   [ "$(cksum package.json)" = "$source_sum" ] || fail "the check changed package.json"
 }
 
+# A folder with no binary would publish nothing while `add` still lists it.
+binaries() {
+  local dir main
+  expected_names >/dev/null
+  for dir in npm/*/; do
+    main=$(node -p "require('./${dir}package.json').main")
+    [ -s "$dir$main" ] || fail "$dir has no $main"
+  done
+}
+
 # A package just published can take a moment to show up.
 published() {
   local version=$1 names listed="" attempt
@@ -108,6 +120,7 @@ published() {
 case "${1:-}" in
   add) [ $# -eq 2 ] || fail "add needs a version"; add "$2" ;;
   check) check ;;
+  binaries) binaries ;;
   published) [ $# -eq 2 ] || fail "published needs a version"; published "$2" ;;
-  *) fail "usage: node-platform-deps.sh add VERSION | check | published VERSION" ;;
+  *) fail "usage: node-platform-deps.sh add VERSION | check | binaries | published VERSION" ;;
 esac

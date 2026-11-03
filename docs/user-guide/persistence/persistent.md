@@ -127,13 +127,13 @@ Open a database in read-only mode to allow multiple processes to read the same d
     let db = GrafeoDB::open_read_only("my_graph.grafeo")?;
     ```
 
-Read-only mode uses a shared file lock instead of an exclusive lock, so multiple readers can coexist. It sees every commit, also those a writer that exited without `close()` left in the WAL (`<path>.wal/`), which it reads without changing anything. A database written by 0.5.x (a file or a WAL directory) is read into memory once instead, and is not migrated (see [Upgrading from 0.5](#upgrading-from-05)).
+Read-only mode takes a shared file lock instead of an exclusive one, so several readers can coexist, in one process or several. A reader and a writer exclude each other: a read-only open fails with `GRAFEO-S004` while a process has the database open for writing, and a read-write open fails while a reader has it open. A read-only handle sees every commit made before it opened, also those a writer that exited without `close()` left in the WAL (`<path>.wal/`), which it reads without changing anything. To see later commits, close it and open it again. A database written by 0.5.x (a file or a WAL directory) is read into memory once instead, and is not migrated (see [Upgrading from 0.5](#upgrading-from-05)). That read locks a file only while it lasts and a WAL directory not at all, so a writer can open the database while the handle is open, and the handle does not see its writes.
 
 ## One Writer at a Time
 
 A persistent database can be open for writing by one `GrafeoDB` instance at a time, in one process. Opening it again, from the same process or another one, fails with `GRAFEO-S004` (GQLSTATUS `08000`, Python `GrafeoLockedError`) until the first instance calls `close()` or is dropped. The message says whether a handle of this process holds the file ("already open in this process") or another process does ("held by another process").
 
-To share a database between processes, run it behind [Grafeo Server](https://github.com/GrafeoDB/grafeo-server), or open it in [read-only mode](#read-only-mode) from the readers.
+To share a database between processes, run it behind [Grafeo Server](https://github.com/GrafeoDB/grafeo-server). [Read-only mode](#read-only-mode) lets several processes read a database that no process is writing.
 
 ## After `close()`
 

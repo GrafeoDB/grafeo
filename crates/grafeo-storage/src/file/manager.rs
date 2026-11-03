@@ -2765,6 +2765,22 @@ mod tests {
     }
 
     #[test]
+    fn a_read_only_manager_prevents_a_read_write_open() {
+        let dir = test_dir();
+        let path = dir.path().join("reader_blocks_writer.grafeo");
+        GrafeoFileManager::create(&path, None)
+            .unwrap()
+            .close()
+            .unwrap();
+        let _reader = GrafeoFileManager::open_read_only(&path, None).unwrap();
+        let error = GrafeoFileManager::open(&path, None)
+            .map(|_| ())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("already open in this process"), "{error}");
+    }
+
+    #[test]
     fn a_read_only_manager_refuses_a_checkpoint() {
         let dir = test_dir();
         let path = dir.path().join("ro_write.grafeo");

@@ -14,6 +14,7 @@ All notable changes to Grafeo, for future reference (and enjoyment).
 Queries that ran in 0.6.1 and now fail or behave differently.
 
 - **`CREATE INDEX`** holds its label only: writes on other labels no longer pay for it, and a query on another label or with no label scans, with the same rows and a note in `EXPLAIN`. Existing indexes stay as they are, and `create_property_index` still covers every label. A 0.6.1 release opens such a file with the same rows, without those indexes, and a checkpoint there drops them.
+- **Closed graph types**: `REMOVE` fails with `G2000` when it would take a node's last label or the label that declares a property it holds, and so does removing a label an edge type's endpoints need, wherever that rule applies. `import_tsv`, `import_tsv_str` and `import_mmio` fail the same way when the graph's rules refuse `_Imported` nodes or the edge. Files already holding such data still open.
 - **Writes**: `|`, `!`, `%` and parentheses in the labels of an `INSERT` or a single-node `MERGE` are an error naming the statement, as they name no labels.
 - **Rules**: a rule added over data that breaks it fails with `GRAFEO-V001`, and so does a commit whose writes break a rule added since the transaction began.
 - **Graph types**: a type a graph type lists applies only in graphs bound to it, so its rules and defaults no longer reach other graphs; `validate()` reports affected types, and Python warns at open. Dropping a graph type drops the types only it listed, and a second, different declaration of a type is refused. See the upgrade note.

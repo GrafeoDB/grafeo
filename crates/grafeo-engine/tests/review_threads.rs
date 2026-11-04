@@ -487,7 +487,6 @@ fn a_schema_qualified_type_over_a_schema_session_default_graph_warns() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[allow(deprecated, reason = "the store's own reads are what this compares")]
 fn edges_between_keeps_the_order_edges_lists() {
     let db = GrafeoDB::new_in_memory();
     let hub = db.create_node(&["Hub"]).unwrap();
@@ -501,7 +500,8 @@ fn edges_between_keeps_the_order_edges_lists() {
         }
         ids.push(db.create_edge(small, hub, "K").unwrap());
     }
-    let store = db.store().unwrap();
+    let snapshot = db.snapshot().unwrap();
+    let store = snapshot.store();
     let k = vec![ArcStr::from("K")];
     let view = ReadView::latest();
     for (from, to, direction) in [
@@ -560,7 +560,7 @@ fn a_middle_node_with_no_way_back_counts_one_read() {
 /// `memory_usage` shows the samples through its breakdown, and `heap_bytes` must agree. A named
 /// graph's samples count as well.
 #[test]
-#[allow(deprecated, reason = "the store's totals are what this compares")]
+#[allow(deprecated, reason = "`heap_bytes` has no route but the store itself")]
 fn the_memory_total_holds_what_the_samples_keep() {
     let db = GrafeoDB::new_in_memory();
     let session = db.session();
@@ -948,4 +948,48 @@ fn a_graph_dropped_twice_in_a_transaction_leaves_the_database_writable() {
         .row_count();
     assert_eq!(rows, 1, "nothing of the refused transaction applied");
     db.close().unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// session/pending_schema.rs: what a commit leaves of the graphs its transaction made
+// ---------------------------------------------------------------------------
+
+/// A graph an earlier, committed transaction made is no graph of the next one's: when another
+/// session drops it, an empty transaction's rollback must not move the session to the default
+/// graph. The next statement says the graph is gone, as with no transaction in between.
+#[test]
+fn a_graph_made_earlier_and_dropped_elsewhere_is_reported_after_a_rollback() {
+    let db = GrafeoDB::new_in_memory();
+    run_all(&db.session(), &["INSERT (:Person {name: 'Gus'})"]);
+    for ending in ["rollback", "nothing"] {
+        let mut session = db.session();
+        session.begin_transaction().unwrap();
+        run_all(&session, &["CREATE GRAPH g", "USE GRAPH g"]);
+        session.commit().unwrap();
+        db.session().execute("DROP GRAPH g").unwrap();
+        if ending == "rollback" {
+            session.begin_transaction().unwrap();
+            session.rollback().unwrap();
+        }
+        for statement in [
+            "MATCH (n) RETURN count(n)",
+            "INSERT (:Person {name: 'Mia'})",
+        ] {
+            let error = session
+                .execute(statement)
+                .expect_err("the session's graph is gone");
+            assert!(
+                error.to_string().contains("Graph 'g' does not exist"),
+                "after {ending}, {statement}: {error}"
+            );
+        }
+        assert_eq!(
+            single_i64(&db.session(), "MATCH (p:Person) RETURN count(p)"),
+            1,
+            "after {ending}: nothing written to the default graph"
+        );
+        // It can still leave.
+        run_all(&session, &["USE GRAPH default"]);
+        assert_eq!(single_i64(&session, "MATCH (p:Person) RETURN count(p)"), 1);
+    }
 }

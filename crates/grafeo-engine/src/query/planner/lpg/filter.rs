@@ -38,6 +38,7 @@ use grafeo_common::collections::GrafeoSet;
 
 use super::subquery::reads_outer_values;
 use grafeo_common::types::{NodeId, TemporalComparison};
+use grafeo_core::execution::operators::find_through_label_indexes;
 
 use super::{
     Arc, BinaryOp, EmptyOperator, Error, ExpressionPredicate, FilterOp, FilterOperator, GraphStore,
@@ -805,13 +806,15 @@ impl super::Planner {
         // `=` (#535), the smallest set of any indexed condition, looked up at
         // the query's view. Without one the scan and the filter run as
         // planned.
+        let labels = super::seek::LookupLabels::of(filter, &scan_variable);
         let mut candidates: Option<Vec<NodeId>> = None;
         {
             for (property, value) in &conditions {
-                if !self.store.has_property_index(property) {
+                if !labels.served_by(self.store.as_ref(), property) {
                     continue;
                 }
-                let Some(found) = self.find_maybe_equal(property, value)? else {
+                let read = labels.to_read(self.store.as_ref(), property);
+                let Some(found) = self.find_maybe_equal(&read, property, value)? else {
                     continue;
                 };
                 // Every lookup reads, also one whose set is not the smallest.
@@ -948,9 +951,9 @@ impl super::Planner {
     /// an indexed property (the whole predicate, or a conjunct of its `AND`
     /// chain, #456) using the property index: the union of the per-value
     /// lookups are the candidates, and the whole predicate decides each.
-    /// Returns `Ok(None)` when not applicable: the input isn't a simple
-    /// `NodeScan`, no conjunct is such an `IN` list, or the index cannot
-    /// answer a value.
+    /// Returns `Ok(None)` when not applicable: the input isn't a `NodeScan`
+    /// below such filters (see [`checked_scan`](super::seek::checked_scan)),
+    /// no conjunct is such an `IN` list, or the index cannot answer a value.
     pub(super) fn try_plan_filter_with_in_list_index(
         &self,
         filter: &FilterOp,
@@ -961,24 +964,37 @@ impl super::Planner {
         {
             return Ok(None);
         }
-        // Only optimize if input is a simple NodeScan (not nested).
-        let (scan_variable, scan_label) = match filter.input.as_ref() {
-            LogicalOperator::NodeScan(scan) if scan.input.is_none() => {
-                (scan.variable.clone(), scan.label.clone())
-            }
-            _ => return Ok(None),
+        // A scan without input, directly below or below filters that check the scanned node
+        // alone, which the lookup takes over: the list may be in any of them.
+        let Some(checked) = super::seek::checked_scan(filter) else {
+            return Ok(None);
         };
+        if checked.scan.input.is_some() {
+            return Ok(None);
+        }
+        let (scan_variable, scan_label) =
+            (checked.scan.variable.clone(), checked.scan.label.clone());
 
-        let Some((property, values)) = indexed_in_list(&filter.predicate, &scan_variable, |p| {
-            self.store.has_property_index(p)
-        }) else {
+        let labels = super::seek::LookupLabels::of(filter, &scan_variable);
+        let Some((property, values)) = std::iter::once(&filter.predicate)
+            .chain(checked.checks.iter().map(|(_, check)| *check))
+            .find_map(|predicate| {
+                indexed_in_list(predicate, &scan_variable, |p| {
+                    labels.served_by(self.store.as_ref(), p)
+                })
+            })
+        else {
             return Ok(None);
         };
         let property = property.as_str();
+        let read = labels.to_read(self.store.as_ref(), property);
         if values.is_empty() {
             // `prop IN []` is always false: return an empty result without
             // touching the store.
-            self.record_absorbed_scan_entry("NodeScan", &filter.input);
+            self.record_absorbed_scan_entry("NodeScan", checked.operator);
+            for (check, _) in &checked.checks {
+                self.record_absorbed_scan_entry("Filter", check);
+            }
             let columns = vec![scan_variable];
             let empty = Box::new(NodeListOperator::new(Vec::new(), 2048));
             return Ok(Some((empty, columns)));
@@ -990,7 +1006,7 @@ impl super::Planner {
         let mut seen: GrafeoSet<_> = GrafeoSet::default();
         let mut matching_nodes = Vec::new();
         for value in &values {
-            let Some(found) = self.find_maybe_equal(property, value)? else {
+            let Some(found) = self.find_maybe_equal(&read, property, value)? else {
                 return Ok(None);
             };
             self.read_counter().add(found.len());
@@ -1010,13 +1026,27 @@ impl super::Planner {
         }
         let matching_nodes = seen;
 
-        // Absorbed-scan PROFILE entry: see `record_absorbed_scan_entry`.
-        self.record_absorbed_scan_entry("NodeScan", &filter.input);
+        // Absorbed-scan PROFILE entries: see `record_absorbed_scan_entry`.
+        self.record_absorbed_scan_entry("NodeScan", checked.operator);
+        for (check, _) in &checked.checks {
+            self.record_absorbed_scan_entry("Filter", check);
+        }
 
         let columns = vec![scan_variable];
-        // The lookup finds candidates: `IN` decides each, with the same `=`
-        // as a scan.
-        let found = self.found_nodes(matching_nodes, &columns, &filter.predicate)?;
+        // The lookup finds candidates: the checks and `IN` decide each, in the order the chain of
+        // filters runs them, with the same `=` as a scan.
+        let predicate = checked
+            .checks
+            .iter()
+            .map(|(_, check)| (*check).clone())
+            .chain(std::iter::once(filter.predicate.clone()))
+            .reduce(|left, right| LogicalExpression::Binary {
+                left: Box::new(left),
+                op: BinaryOp::And,
+                right: Box::new(right),
+            })
+            .expect("the filter's own predicate");
+        let found = self.found_nodes(matching_nodes, &columns, &predicate)?;
         Ok(Some((found, columns)))
     }
 
@@ -1208,17 +1238,27 @@ impl super::Planner {
 
     /// The nodes an index lookup finds that `=` may find equal to `value`
     /// under the query's temporal comparison (see [`equality_probes`]), each
-    /// once and ascending; `None` without an index on `property`, or when no
-    /// set of lookups covers them.
-    fn find_maybe_equal(&self, property: &str, value: &Value) -> Result<Option<Vec<NodeId>>> {
+    /// once and ascending, through the indexes on `labels` (see
+    /// [`find_through_label_indexes`]); `None` without an index to read, or when no set of
+    /// lookups covers them.
+    fn find_maybe_equal(
+        &self,
+        labels: &[String],
+        property: &str,
+        value: &Value,
+    ) -> Result<Option<Vec<NodeId>>> {
         let Some(probes) = equality_probes(value, self.session_context.temporal_comparison) else {
             return Ok(None);
         };
         let mut found = Vec::new();
         for probe in probes {
-            let Some(ids) =
-                self.store
-                    .find_nodes_maybe_equal(property, &probe, self.read_view())?
+            let Some(ids) = find_through_label_indexes(
+                self.store.as_ref(),
+                labels,
+                property,
+                &probe,
+                self.read_view(),
+            )?
             else {
                 return Ok(None);
             };
@@ -1462,12 +1502,13 @@ fn in_list_values(list: &LogicalExpression) -> Option<Vec<Value>> {
 pub(crate) fn scan_hint(
     predicate: &LogicalExpression,
     scan: &NodeScanOp,
+    labels: &super::seek::LookupLabels<'_>,
     store: &dyn GraphStore,
     rules: crate::query::optimizer::PlannerRules,
 ) -> Option<PushdownHint> {
     let has_index = |property: &str| {
         rules.has(crate::query::optimizer::PlannerRule::IndexLookup)
-            && store.has_property_index(property)
+            && labels.served_by(store, property)
     };
     if scan.input.is_some() {
         return None;

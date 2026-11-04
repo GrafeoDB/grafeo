@@ -16,9 +16,10 @@ use grafeo_common::types::Value;
 use grafeo_engine::GrafeoDB;
 use grafeo_engine::query::limits::MAX_PLAN_DEPTH;
 
-/// The stack every statement runs on: well below the smallest stack Grafeo
-/// runs on (the 1 MiB main thread on Windows, the default WebAssembly stack),
-/// with room left for the frames of the caller.
+/// The stack every statement runs on: well below the 1 MiB of the main thread
+/// on Windows and of the WebAssembly builds, with room left for the frames of
+/// the caller. A thread with less stack than this, as some hosts give by
+/// default, needs a larger one for statements this deep.
 const STACK: usize = 640 * 1024;
 
 /// The largest size the shapes are tried at; far beyond every limit.

@@ -15,10 +15,16 @@
     reason = "test graphs of a few thousand nodes"
 )]
 
+use std::time::Duration;
+
 use grafeo_common::types::{NodeId, Value};
 use grafeo_engine::query::optimizer::{PlannerRule, PlannerRules};
 use grafeo_engine::session::Session;
 use grafeo_engine::{Config, GrafeoDB};
+
+/// The rows are what these tests read: a slow build must not make them a test of the query
+/// timeout, and a bad plan must still fail a test by name, well inside the job's own limit.
+const SLOW_BUILD: Duration = Duration::from_secs(600);
 
 const TRIANGLE: &str =
     "MATCH (a:Person)-[:KNOWS]->(b:Person)-[:KNOWS]->(c:Person)-[:KNOWS]->(a) RETURN a.k, b.k, c.k";
@@ -60,9 +66,7 @@ fn without(db: &GrafeoDB) -> Session {
 
 /// `size` people with `degree` random friends each, and some hubs that know everybody.
 fn people(config: Config, size: u64, degree: u64, hubs: u64) -> GrafeoDB {
-    // The rows are what these tests read: a slow build must not make them a test of the query
-    // timeout.
-    let db = GrafeoDB::with_config(config.without_query_timeout()).unwrap();
+    let db = GrafeoDB::with_config(config.with_query_timeout(SLOW_BUILD)).unwrap();
     let ids: Vec<NodeId> = (0..size)
         .map(|key| {
             db.create_node_with_props(&["Person"], [("k", Value::Int64(key as i64))])
@@ -303,9 +307,7 @@ struct Stored {
 /// Random edges with self-loops and parallel edges, a tenth of another type, and hubs with
 /// their lists both ways; the keys are the node positions.
 fn multigraph(size: u64, edges: u64, hubs: u64, seed: u64) -> (GrafeoDB, Vec<Stored>) {
-    // The rows are what these tests read: a slow build must not make them a test of the query
-    // timeout.
-    let db = GrafeoDB::with_config(Config::in_memory().without_query_timeout()).unwrap();
+    let db = GrafeoDB::with_config(Config::in_memory().with_query_timeout(SLOW_BUILD)).unwrap();
     let ids: Vec<NodeId> = (0..size)
         .map(|key| {
             db.create_node_with_props(&["Person"], [("k", Value::Int64(key as i64))])
@@ -626,7 +628,7 @@ fn an_older_view_reads_the_same_every_way() {
 /// spokes, with self-loops and parallel edges of their own and on a far end. Under 1,024 edges all
 /// of the hub's list is in its delta; past it part of it is sorted.
 fn short_against_a_hub(spokes: u64, config: Config) -> (GrafeoDB, Vec<NodeId>, Vec<Stored>) {
-    let db = GrafeoDB::with_config(config.without_query_timeout()).unwrap();
+    let db = GrafeoDB::with_config(config.with_query_timeout(SLOW_BUILD)).unwrap();
     let size = spokes + 4;
     let ids: Vec<NodeId> = (0..size)
         .map(|key| {

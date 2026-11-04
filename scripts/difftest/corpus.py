@@ -348,6 +348,20 @@ def rdf_writes(grafeo):
     return grafeo.GrafeoDB()
 
 
+def label_mix(grafeo):
+    """Five nodes, one per kind of label set, with an edge to a hub and from it."""
+    db = grafeo.GrafeoDB()
+    db.execute(
+        "INSERT (a:A {name: 'Alix', k: 1}), (g:B {name: 'Gus', k: 1}), (v:A:B {name: 'Vincent', k: 1}), (j:C {name: 'Jules', k: 1}), (m {name: 'Mia', k: 1}), (t:T {name: 'Amsterdam', tk: 1}), (a)-[:R]->(t), (g)-[:R]->(t), (v)-[:R]->(t), (j)-[:R]->(t), (m)-[:R]->(t), (t)-[:S]->(a), (t)-[:S]->(g), (t)-[:S]->(v), (t)-[:S]->(j), (t)-[:S]->(m)"
+    )
+    return db
+
+
+def label_writes(grafeo):
+    """An empty database for section DX, whose cases write in corpus order."""
+    return grafeo.GrafeoDB()
+
+
 WRITE_FIXTURES = {
     "writes": {"BR", "BS", "BU", "CT", "DB"},
     "rdf_writes": {"DD"},
@@ -361,6 +375,8 @@ WRITE_FIXTURES = {
     "type_scope": {"DS"},
     # The rules that DT tries to add, each over this data
     "rules_over_data": {"DT"},
+    # Label expressions on what a statement changes or creates
+    "label_writes": {"DX"},
 }
 
 
@@ -491,6 +507,8 @@ FIXTURES = {
     "raising": raising,
     "type_scope": type_scope,
     "rules_over_data": rules_over_data,
+    "label_mix": label_mix,
+    "label_writes": label_writes,
     "booleans": booleans,
     "per_call": empty,
 }
@@ -2587,5 +2605,175 @@ for case_id, query in [
     ("DV11", "RETURN null <= false AS v"),
 ]:
     case(case_id, query, BOTH, "empty")
+
+# DW: a label expression holds on the first node of a path, as it does on a lone node and on
+#     later nodes; 0.6.1 dropped it there and gave every source with the edge, in GQL and in
+#     SQL/PGQ. Plain `:A` and `:A:B`, shortest paths and far ends were right, and stay.
+for case_id, query, languages in [
+    ("DW1", 'MATCH (x:A)-[:R]->(t:T) RETURN x.name', GQL),
+    ("DW2", 'MATCH (x:A:B)-[:R]->(t:T) RETURN x.name', GQL),
+    ("DW3", 'MATCH (x IS A)-[:R]->(t:T) RETURN x.name', GQL),
+    ("DW4", 'MATCH (x IS A&B)-[:R]->(t:T) RETURN x.name', GQL),
+    ("DW5", 'MATCH (x:A&B)-[:R]->(t:T) RETURN x.name', GQL),
+    ("DW6", 'MATCH (x:A|B)-[:R]->(t:T) RETURN x.name', GQL),
+    ("DW7", 'MATCH (x:!A)-[:R]->(t:T) RETURN x.name', GQL),
+    ("DW8", 'MATCH (x:%)-[:R]->(t:T) RETURN x.name', GQL),
+    ("DW9", 'MATCH (x:(A))-[:R]->(t:T) RETURN x.name', GQL),
+    ("DW10", 'MATCH (x:Z&A)-[:R]->(t:T) RETURN x.name', GQL),
+    ("DW11", 'MATCH p = (x:A)-[:R]->(t:T) RETURN x.name', GQL),
+    ("DW12", 'MATCH p = (x:A:B)-[:R]->(t:T) RETURN x.name', GQL),
+    ("DW13", 'MATCH p = (x IS A)-[:R]->(t:T) RETURN x.name', GQL),
+    ("DW14", 'MATCH p = (x IS A&B)-[:R]->(t:T) RETURN x.name', GQL),
+    ("DW15", 'MATCH p = (x:A&B)-[:R]->(t:T) RETURN x.name', GQL),
+    ("DW16", 'MATCH p = (x:A|B)-[:R]->(t:T) RETURN x.name', GQL),
+    ("DW17", 'MATCH p = (x:!A)-[:R]->(t:T) RETURN x.name', GQL),
+    ("DW18", 'MATCH p = (x:%)-[:R]->(t:T) RETURN x.name', GQL),
+    ("DW19", 'MATCH p = (x:(A))-[:R]->(t:T) RETURN x.name', GQL),
+    ("DW20", 'MATCH p = (x:Z&A)-[:R]->(t:T) RETURN x.name', GQL),
+    ("DW21", 'MATCH (x:A)-[:R]->{1,2}(t:T) RETURN x.name', GQL),
+    ("DW22", 'MATCH (x:A:B)-[:R]->{1,2}(t:T) RETURN x.name', GQL),
+    ("DW23", 'MATCH (x IS A)-[:R]->{1,2}(t:T) RETURN x.name', GQL),
+    ("DW24", 'MATCH (x IS A&B)-[:R]->{1,2}(t:T) RETURN x.name', GQL),
+    ("DW25", 'MATCH (x:A&B)-[:R]->{1,2}(t:T) RETURN x.name', GQL),
+    ("DW26", 'MATCH (x:A|B)-[:R]->{1,2}(t:T) RETURN x.name', GQL),
+    ("DW27", 'MATCH (x:!A)-[:R]->{1,2}(t:T) RETURN x.name', GQL),
+    ("DW28", 'MATCH (x:%)-[:R]->{1,2}(t:T) RETURN x.name', GQL),
+    ("DW29", 'MATCH (x:(A))-[:R]->{1,2}(t:T) RETURN x.name', GQL),
+    ("DW30", 'MATCH (x:Z&A)-[:R]->{1,2}(t:T) RETURN x.name', GQL),
+    ("DW31", 'MATCH ANY SHORTEST (x:A)-[:R]->+(t:T) RETURN x.name', GQL),
+    ("DW32", 'MATCH ANY SHORTEST (x:A:B)-[:R]->+(t:T) RETURN x.name', GQL),
+    ("DW33", 'MATCH ANY SHORTEST (x IS A)-[:R]->+(t:T) RETURN x.name', GQL),
+    ("DW34", 'MATCH ANY SHORTEST (x IS A&B)-[:R]->+(t:T) RETURN x.name', GQL),
+    ("DW35", 'MATCH ANY SHORTEST (x:A&B)-[:R]->+(t:T) RETURN x.name', GQL),
+    ("DW36", 'MATCH ANY SHORTEST (x:A|B)-[:R]->+(t:T) RETURN x.name', GQL),
+    ("DW37", 'MATCH ANY SHORTEST (x:!A)-[:R]->+(t:T) RETURN x.name', GQL),
+    ("DW38", 'MATCH ANY SHORTEST (x:%)-[:R]->+(t:T) RETURN x.name', GQL),
+    ("DW39", 'MATCH ANY SHORTEST (x:(A))-[:R]->+(t:T) RETURN x.name', GQL),
+    ("DW40", 'MATCH ANY SHORTEST (x:Z&A)-[:R]->+(t:T) RETURN x.name', GQL),
+    ("DW41", 'MATCH (x:A)((a)-[:R]->(b)){1,1}(t:T) RETURN x.name', GQL),
+    ("DW42", 'MATCH (x:A:B)((a)-[:R]->(b)){1,1}(t:T) RETURN x.name', GQL),
+    ("DW43", 'MATCH (x IS A)((a)-[:R]->(b)){1,1}(t:T) RETURN x.name', GQL),
+    ("DW44", 'MATCH (x IS A&B)((a)-[:R]->(b)){1,1}(t:T) RETURN x.name', GQL),
+    ("DW45", 'MATCH (x:A&B)((a)-[:R]->(b)){1,1}(t:T) RETURN x.name', GQL),
+    ("DW46", 'MATCH (x:A|B)((a)-[:R]->(b)){1,1}(t:T) RETURN x.name', GQL),
+    ("DW47", 'MATCH (x:!A)((a)-[:R]->(b)){1,1}(t:T) RETURN x.name', GQL),
+    ("DW48", 'MATCH (x:%)((a)-[:R]->(b)){1,1}(t:T) RETURN x.name', GQL),
+    ("DW49", 'MATCH (x:(A))((a)-[:R]->(b)){1,1}(t:T) RETURN x.name', GQL),
+    ("DW50", 'MATCH (x:Z&A)((a)-[:R]->(b)){1,1}(t:T) RETURN x.name', GQL),
+    ("DW51", 'MATCH (u:T), (x:A)-[:R]->(u) RETURN x.name', GQL),
+    ("DW52", 'MATCH (u:T), (x:A:B)-[:R]->(u) RETURN x.name', GQL),
+    ("DW53", 'MATCH (u:T), (x IS A)-[:R]->(u) RETURN x.name', GQL),
+    ("DW54", 'MATCH (u:T), (x IS A&B)-[:R]->(u) RETURN x.name', GQL),
+    ("DW55", 'MATCH (u:T), (x:A&B)-[:R]->(u) RETURN x.name', GQL),
+    ("DW56", 'MATCH (u:T), (x:A|B)-[:R]->(u) RETURN x.name', GQL),
+    ("DW57", 'MATCH (u:T), (x:!A)-[:R]->(u) RETURN x.name', GQL),
+    ("DW58", 'MATCH (u:T), (x:%)-[:R]->(u) RETURN x.name', GQL),
+    ("DW59", 'MATCH (u:T), (x:(A))-[:R]->(u) RETURN x.name', GQL),
+    ("DW60", 'MATCH (u:T), (x:Z&A)-[:R]->(u) RETURN x.name', GQL),
+    ("DW61", 'MATCH (x {k: 1}) MATCH (x:A)-[:R]->(t:T) RETURN x.name', GQL),
+    ("DW62", 'MATCH (x {k: 1}) MATCH (x:A:B)-[:R]->(t:T) RETURN x.name', GQL),
+    ("DW63", 'MATCH (x {k: 1}) MATCH (x IS A)-[:R]->(t:T) RETURN x.name', GQL),
+    ("DW64", 'MATCH (x {k: 1}) MATCH (x IS A&B)-[:R]->(t:T) RETURN x.name', GQL),
+    ("DW65", 'MATCH (x {k: 1}) MATCH (x:A&B)-[:R]->(t:T) RETURN x.name', GQL),
+    ("DW66", 'MATCH (x {k: 1}) MATCH (x:A|B)-[:R]->(t:T) RETURN x.name', GQL),
+    ("DW67", 'MATCH (x {k: 1}) MATCH (x:!A)-[:R]->(t:T) RETURN x.name', GQL),
+    ("DW68", 'MATCH (x {k: 1}) MATCH (x:%)-[:R]->(t:T) RETURN x.name', GQL),
+    ("DW69", 'MATCH (x {k: 1}) MATCH (x:(A))-[:R]->(t:T) RETURN x.name', GQL),
+    ("DW70", 'MATCH (x {k: 1}) MATCH (x:Z&A)-[:R]->(t:T) RETURN x.name', GQL),
+    ("DW71", 'OPTIONAL MATCH (x:A)-[:R]->(t:T) RETURN x.name', GQL),
+    ("DW72", 'OPTIONAL MATCH (x:A:B)-[:R]->(t:T) RETURN x.name', GQL),
+    ("DW73", 'OPTIONAL MATCH (x IS A)-[:R]->(t:T) RETURN x.name', GQL),
+    ("DW74", 'OPTIONAL MATCH (x IS A&B)-[:R]->(t:T) RETURN x.name', GQL),
+    ("DW75", 'OPTIONAL MATCH (x:A&B)-[:R]->(t:T) RETURN x.name', GQL),
+    ("DW76", 'OPTIONAL MATCH (x:A|B)-[:R]->(t:T) RETURN x.name', GQL),
+    ("DW77", 'OPTIONAL MATCH (x:!A)-[:R]->(t:T) RETURN x.name', GQL),
+    ("DW78", 'OPTIONAL MATCH (x:%)-[:R]->(t:T) RETURN x.name', GQL),
+    ("DW79", 'OPTIONAL MATCH (x:(A))-[:R]->(t:T) RETURN x.name', GQL),
+    ("DW80", 'OPTIONAL MATCH (x:Z&A)-[:R]->(t:T) RETURN x.name', GQL),
+    ("DW81", 'MATCH (y {k: 1}) WHERE EXISTS { MATCH (y:A)-[:R]->(t:T) } RETURN y.name', GQL),
+    ("DW82", 'MATCH (y {k: 1}) WHERE EXISTS { MATCH (y:A:B)-[:R]->(t:T) } RETURN y.name', GQL),
+    ("DW83", 'MATCH (y {k: 1}) WHERE EXISTS { MATCH (y IS A)-[:R]->(t:T) } RETURN y.name', GQL),
+    ("DW84", 'MATCH (y {k: 1}) WHERE EXISTS { MATCH (y IS A&B)-[:R]->(t:T) } RETURN y.name', GQL),
+    ("DW85", 'MATCH (y {k: 1}) WHERE EXISTS { MATCH (y:A&B)-[:R]->(t:T) } RETURN y.name', GQL),
+    ("DW86", 'MATCH (y {k: 1}) WHERE EXISTS { MATCH (y:A|B)-[:R]->(t:T) } RETURN y.name', GQL),
+    ("DW87", 'MATCH (y {k: 1}) WHERE EXISTS { MATCH (y:!A)-[:R]->(t:T) } RETURN y.name', GQL),
+    ("DW88", 'MATCH (y {k: 1}) WHERE EXISTS { MATCH (y:%)-[:R]->(t:T) } RETURN y.name', GQL),
+    ("DW89", 'MATCH (y {k: 1}) WHERE EXISTS { MATCH (y:(A))-[:R]->(t:T) } RETURN y.name', GQL),
+    ("DW90", 'MATCH (y {k: 1}) WHERE EXISTS { MATCH (y:Z&A)-[:R]->(t:T) } RETURN y.name', GQL),
+    ("DW91", 'MATCH (t:T) RETURN COUNT { MATCH (x:A)-[:R]->(t) } AS c', GQL),
+    ("DW92", 'MATCH (t:T) RETURN COUNT { MATCH (x:A:B)-[:R]->(t) } AS c', GQL),
+    ("DW93", 'MATCH (t:T) RETURN COUNT { MATCH (x IS A)-[:R]->(t) } AS c', GQL),
+    ("DW94", 'MATCH (t:T) RETURN COUNT { MATCH (x IS A&B)-[:R]->(t) } AS c', GQL),
+    ("DW95", 'MATCH (t:T) RETURN COUNT { MATCH (x:A&B)-[:R]->(t) } AS c', GQL),
+    ("DW96", 'MATCH (t:T) RETURN COUNT { MATCH (x:A|B)-[:R]->(t) } AS c', GQL),
+    ("DW97", 'MATCH (t:T) RETURN COUNT { MATCH (x:!A)-[:R]->(t) } AS c', GQL),
+    ("DW98", 'MATCH (t:T) RETURN COUNT { MATCH (x:%)-[:R]->(t) } AS c', GQL),
+    ("DW99", 'MATCH (t:T) RETURN COUNT { MATCH (x:(A))-[:R]->(t) } AS c', GQL),
+    ("DW100", 'MATCH (t:T) RETURN COUNT { MATCH (x:Z&A)-[:R]->(t) } AS c', GQL),
+    ("DW101", 'CALL { MATCH (x:A)-[:R]->(t:T) RETURN x.name AS r } RETURN r', GQL),
+    ("DW102", 'CALL { MATCH (x:A:B)-[:R]->(t:T) RETURN x.name AS r } RETURN r', GQL),
+    ("DW103", 'CALL { MATCH (x IS A)-[:R]->(t:T) RETURN x.name AS r } RETURN r', GQL),
+    ("DW104", 'CALL { MATCH (x IS A&B)-[:R]->(t:T) RETURN x.name AS r } RETURN r', GQL),
+    ("DW105", 'CALL { MATCH (x:A&B)-[:R]->(t:T) RETURN x.name AS r } RETURN r', GQL),
+    ("DW106", 'CALL { MATCH (x:A|B)-[:R]->(t:T) RETURN x.name AS r } RETURN r', GQL),
+    ("DW107", 'CALL { MATCH (x:!A)-[:R]->(t:T) RETURN x.name AS r } RETURN r', GQL),
+    ("DW108", 'CALL { MATCH (x:%)-[:R]->(t:T) RETURN x.name AS r } RETURN r', GQL),
+    ("DW109", 'CALL { MATCH (x:(A))-[:R]->(t:T) RETURN x.name AS r } RETURN r', GQL),
+    ("DW110", 'CALL { MATCH (x:Z&A)-[:R]->(t:T) RETURN x.name AS r } RETURN r', GQL),
+    ("DW111", 'MATCH (t:T)-[:S]->(x:A) RETURN x.name', GQL),
+    ("DW112", 'MATCH (t:T)-[:S]->(x:A:B) RETURN x.name', GQL),
+    ("DW113", 'MATCH (t:T)-[:S]->(x IS A) RETURN x.name', GQL),
+    ("DW114", 'MATCH (t:T)-[:S]->(x IS A&B) RETURN x.name', GQL),
+    ("DW115", 'MATCH (t:T)-[:S]->(x:A&B) RETURN x.name', GQL),
+    ("DW116", 'MATCH (t:T)-[:S]->(x:A|B) RETURN x.name', GQL),
+    ("DW117", 'MATCH (t:T)-[:S]->(x:!A) RETURN x.name', GQL),
+    ("DW118", 'MATCH (t:T)-[:S]->(x:%) RETURN x.name', GQL),
+    ("DW119", 'MATCH (t:T)-[:S]->(x:(A)) RETURN x.name', GQL),
+    ("DW120", 'MATCH (t:T)-[:S]->(x:Z&A) RETURN x.name', GQL),
+    ("DW121", 'SELECT r FROM GRAPH_TABLE (MATCH (x:A)-[:R]->(t IS T) COLUMNS (x.name AS r))', SQL),
+    ("DW122", 'SELECT r FROM GRAPH_TABLE (MATCH (x:A:B)-[:R]->(t IS T) COLUMNS (x.name AS r))', SQL),
+    ("DW123", 'SELECT r FROM GRAPH_TABLE (MATCH (x IS A)-[:R]->(t IS T) COLUMNS (x.name AS r))', SQL),
+    ("DW124", 'SELECT r FROM GRAPH_TABLE (MATCH (x IS A&B)-[:R]->(t IS T) COLUMNS (x.name AS r))', SQL),
+    ("DW125", 'SELECT r FROM GRAPH_TABLE (MATCH (x:A&B)-[:R]->(t IS T) COLUMNS (x.name AS r))', SQL),
+    ("DW126", 'SELECT r FROM GRAPH_TABLE (MATCH (x:A|B)-[:R]->(t IS T) COLUMNS (x.name AS r))', SQL),
+    ("DW127", 'SELECT r FROM GRAPH_TABLE (MATCH (x:!A)-[:R]->(t IS T) COLUMNS (x.name AS r))', SQL),
+    ("DW128", 'SELECT r FROM GRAPH_TABLE (MATCH (x:%)-[:R]->(t IS T) COLUMNS (x.name AS r))', SQL),
+    ("DW129", 'SELECT r FROM GRAPH_TABLE (MATCH (x:(A))-[:R]->(t IS T) COLUMNS (x.name AS r))', SQL),
+    ("DW130", 'SELECT r FROM GRAPH_TABLE (MATCH (x:Z&A)-[:R]->(t IS T) COLUMNS (x.name AS r))', SQL),
+]:
+    case(case_id, query, languages, "label_mix")
+
+# DX: what a statement changes follows the expression (0.6.1 changed every source with the edge,
+#     which a DETACH DELETE removed), and INSERT and MERGE set `IS A` and `A&B`, where 0.6.1
+#     created a node with no label, and refuse `|`, `!`, `%` and parentheses, naming the
+#     statement. In corpus order, on a fixture of its own.
+for case_id, query in [
+    ("DX1", "INSERT (a:A {name: 'Alix', k: 1}), (g:B {name: 'Gus', k: 1}), (v:A:B {name: 'Vincent', k: 1}), (j:C {name: 'Jules', k: 1}), (m {name: 'Mia', k: 1}), (t:T {name: 'Amsterdam', tk: 1}), (a)-[:R]->(t), (g)-[:R]->(t), (v)-[:R]->(t), (j)-[:R]->(t), (m)-[:R]->(t), (t)-[:S]->(a), (t)-[:S]->(g), (t)-[:S]->(v), (t)-[:S]->(j), (t)-[:S]->(m)"),
+    ("DX2", 'MATCH (x:A&B)-[:R]->(t:T) SET x.hit = true'),
+    ("DX3", 'MATCH (x) RETURN x.name AS n, x.hit AS hit'),
+    ("DX4", 'MATCH (x IS A)-[:R]->(t:T) SET x.hit2 = true'),
+    ("DX5", 'MATCH (x) RETURN x.name AS n, x.hit2 AS hit'),
+    ("DX6", 'MATCH (x:!A)-[:R]->(t:T) REMOVE x.k'),
+    ("DX7", 'MATCH (x) RETURN x.name AS n, x.k AS k'),
+    ("DX8", 'MATCH (x:A&!B)-[r:R]->(t:T) DELETE r'),
+    ("DX9", 'MATCH (x)-[:R]->() RETURN x.name AS n'),
+    ("DX10", 'MATCH (x:A&B)-[:R]->(t:T) DETACH DELETE x'),
+    ("DX11", 'MATCH (x) RETURN x.name AS n'),
+    ("DX12", 'MATCH (x) DETACH DELETE x'),
+    ("DX13", 'INSERT (n IS P {k: 1})'),
+    ("DX14", 'INSERT (n:P&Q {k: 2})'),
+    ("DX15", 'INSERT (n IS P)-[:R]->(m:P&Q {k: 3})'),
+    ("DX16", 'MATCH (x) RETURN x.k AS k, size(labels(x)) AS labels'),
+    ("DX17", 'INSERT (n:P|Q {k: 9})'),
+    ("DX18", 'INSERT (n:!P {k: 9})'),
+    ("DX19", 'INSERT (n:% {k: 9})'),
+    ("DX20", 'INSERT (n:(P) {k: 9})'),
+    ("DX21", 'MERGE (n IS P {k: 1})'),
+    ("DX22", 'MERGE (n IS Other {k: 1})'),
+    ("DX23", 'MERGE (n:P&Q {k: 1})'),
+    ("DX24", 'MERGE (n:P|Q {k: 9})'),
+    ("DX25", 'MATCH (x) RETURN x.k AS k, size(labels(x)) AS labels'),
+]:
+    case(case_id, query, GQL, "label_writes")
 
 # fmt: on

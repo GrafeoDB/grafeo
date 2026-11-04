@@ -1,0 +1,410 @@
+# A hop to a key answers alike whichever end it starts from, with and without an index on the far
+# label: the source's label stays a check. Generated with the Rust tests in far_end_turn.rs.
+
+meta:
+  language: cypher
+  model: lpg
+  title: A hop to a key from either end
+  dataset: far_end_mix
+
+tests:
+
+  - name: label_counts
+    query: "MATCH (a:Start)-[:R]->(m:Far {k: 7}) RETURN a.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]
+
+  - name: label_counts_indexed
+    setup:
+      - "CREATE INDEX by_far FOR (n:Far) ON (n.k)"
+    query: "MATCH (a:Start)-[:R]->(m:Far {k: 7}) RETURN a.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]
+
+  - name: label_counts_where
+    query: "MATCH (a:Start)-[:R]->(m:Far) WHERE m.k = 7 RETURN a.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]
+
+  - name: label_counts_where_indexed
+    setup:
+      - "CREATE INDEX by_far FOR (n:Far) ON (n.k)"
+    query: "MATCH (a:Start)-[:R]->(m:Far) WHERE m.k = 7 RETURN a.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]
+
+  - name: label_in_where
+    query: "MATCH (a)-[:R]->(m:Far {k: 7}) WHERE a:Start RETURN a.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]
+
+  - name: label_in_where_indexed
+    setup:
+      - "CREATE INDEX by_far FOR (n:Far) ON (n.k)"
+    query: "MATCH (a)-[:R]->(m:Far {k: 7}) WHERE a:Start RETURN a.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]
+
+  - name: two_labels
+    query: "MATCH (a:Start:Other)-[:R]->(m:Far {k: 7}) RETURN a.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: two_labels_indexed
+    setup:
+      - "CREATE INDEX by_far FOR (n:Far) ON (n.k)"
+    query: "MATCH (a:Start:Other)-[:R]->(m:Far {k: 7}) RETURN a.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: label_nobody_has
+    query: "MATCH (a:Nobody)-[:R]->(m:Far {k: 7}) RETURN a.name"
+    expect:
+      empty: true
+
+  - name: label_nobody_has_indexed
+    setup:
+      - "CREATE INDEX by_far FOR (n:Far) ON (n.k)"
+    query: "MATCH (a:Nobody)-[:R]->(m:Far {k: 7}) RETURN a.name"
+    expect:
+      empty: true
+
+  - name: no_label
+    query: "MATCH (a)-[:R]->(m:Far {k: 7}) RETURN a.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Jules]
+        - [Vincent]
+
+  - name: no_label_indexed
+    setup:
+      - "CREATE INDEX by_far FOR (n:Far) ON (n.k)"
+    query: "MATCH (a)-[:R]->(m:Far {k: 7}) RETURN a.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Jules]
+        - [Vincent]
+
+  - name: incoming
+    query: "MATCH (a:Start)<-[:S]-(m:Far {k: 7}) RETURN a.name"
+    expect:
+      rows:
+        - [Alix]
+
+  - name: incoming_indexed
+    setup:
+      - "CREATE INDEX by_far FOR (n:Far) ON (n.k)"
+    query: "MATCH (a:Start)<-[:S]-(m:Far {k: 7}) RETURN a.name"
+    expect:
+      rows:
+        - [Alix]
+
+  - name: written_backwards
+    query: "MATCH (m:Far {k: 7})<-[:R]-(a:Start) RETURN a.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]
+
+  - name: written_backwards_indexed
+    setup:
+      - "CREATE INDEX by_far FOR (n:Far) ON (n.k)"
+    query: "MATCH (m:Far {k: 7})<-[:R]-(a:Start) RETURN a.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]
+
+  - name: undirected
+    query: "MATCH (a:Start)-[r]-(m:Far {k: 7}) RETURN a.name, r.w"
+    expect:
+      rows:
+        - [Alix, 1]
+        - [Alix, 9]
+        - [Gus, 2]
+        - [Vincent, 3]
+
+  - name: undirected_indexed
+    setup:
+      - "CREATE INDEX by_far FOR (n:Far) ON (n.k)"
+    query: "MATCH (a:Start)-[r]-(m:Far {k: 7}) RETURN a.name, r.w"
+    expect:
+      rows:
+        - [Alix, 1]
+        - [Alix, 9]
+        - [Gus, 2]
+        - [Vincent, 3]
+
+  - name: self_loop_out
+    query: "MATCH (a:Start)-[r:L]->(m:Far {k: 70}) RETURN a.name, r.w"
+    expect:
+      rows:
+        - [Mia, 11]
+
+  - name: self_loop_out_indexed
+    setup:
+      - "CREATE INDEX by_far FOR (n:Far) ON (n.k)"
+    query: "MATCH (a:Start)-[r:L]->(m:Far {k: 70}) RETURN a.name, r.w"
+    expect:
+      rows:
+        - [Mia, 11]
+
+  - name: self_loop_in
+    query: "MATCH (a:Start)<-[r:L]-(m:Far {k: 70}) RETURN a.name, r.w"
+    expect:
+      rows:
+        - [Mia, 11]
+
+  - name: self_loop_in_indexed
+    setup:
+      - "CREATE INDEX by_far FOR (n:Far) ON (n.k)"
+    query: "MATCH (a:Start)<-[r:L]-(m:Far {k: 70}) RETURN a.name, r.w"
+    expect:
+      rows:
+        - [Mia, 11]
+
+  - name: self_loop_undirected
+    query: "MATCH (a:Start)-[r:L]-(m:Far {k: 70}) RETURN a.name, r.w"
+    expect:
+      rows:
+        - [Mia, 11]
+
+  - name: self_loop_undirected_indexed
+    setup:
+      - "CREATE INDEX by_far FOR (n:Far) ON (n.k)"
+    query: "MATCH (a:Start)-[r:L]-(m:Far {k: 70}) RETURN a.name, r.w"
+    expect:
+      rows:
+        - [Mia, 11]
+
+  - name: parallel_edges
+    query: "MATCH (a:Start)-[r:R]->(m:Far {k: 8}) RETURN a.name, r.w"
+    expect:
+      rows:
+        - [Alix, 5]
+        - [Alix, 6]
+
+  - name: parallel_edges_indexed
+    setup:
+      - "CREATE INDEX by_far FOR (n:Far) ON (n.k)"
+    query: "MATCH (a:Start)-[r:R]->(m:Far {k: 8}) RETURN a.name, r.w"
+    expect:
+      rows:
+        - [Alix, 5]
+        - [Alix, 6]
+
+  - name: edge_filter
+    query: "MATCH (a:Start)-[r:R]->(m:Far {k: 7}) WHERE r.w = 2 RETURN a.name, r.w"
+    expect:
+      rows:
+        - [Gus, 2]
+
+  - name: edge_filter_indexed
+    setup:
+      - "CREATE INDEX by_far FOR (n:Far) ON (n.k)"
+    query: "MATCH (a:Start)-[r:R]->(m:Far {k: 7}) WHERE r.w = 2 RETURN a.name, r.w"
+    expect:
+      rows:
+        - [Gus, 2]
+
+  - name: both_ends_filtered
+    query: "MATCH (a:Start)-[:R]->(m:Far {k: 7}) WHERE a.age > 35 AND m.k < 100 RETURN a.name"
+    expect:
+      rows:
+        - [Gus]
+        - [Vincent]
+
+  - name: both_ends_filtered_indexed
+    setup:
+      - "CREATE INDEX by_far FOR (n:Far) ON (n.k)"
+    query: "MATCH (a:Start)-[:R]->(m:Far {k: 7}) WHERE a.age > 35 AND m.k < 100 RETURN a.name"
+    expect:
+      rows:
+        - [Gus]
+        - [Vincent]
+
+  - name: shared_key
+    query: "MATCH (a:Start)-[:R]->(m:Far {k: 9}) RETURN a.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+
+  - name: shared_key_indexed
+    setup:
+      - "CREATE INDEX by_far FOR (n:Far) ON (n.k)"
+    query: "MATCH (a:Start)-[:R]->(m:Far {k: 9}) RETURN a.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+
+  - name: absent_key
+    query: "MATCH (a:Start)-[:R]->(m:Far {k: 123456}) RETURN a.name"
+    expect:
+      empty: true
+
+  - name: absent_key_indexed
+    setup:
+      - "CREATE INDEX by_far FOR (n:Far) ON (n.k)"
+    query: "MATCH (a:Start)-[:R]->(m:Far {k: 123456}) RETURN a.name"
+    expect:
+      empty: true
+
+  - name: unwind_repeats
+    query: "UNWIND [7, 7, 8, 123456, null] AS x MATCH (a:Start)-[:R]->(m:Far {k: x}) RETURN x, a.name"
+    expect:
+      rows:
+        - [7, Alix]
+        - [7, Gus]
+        - [7, Vincent]
+        - [7, Alix]
+        - [7, Gus]
+        - [7, Vincent]
+        - [8, Alix]
+        - [8, Alix]
+
+  - name: unwind_repeats_indexed
+    setup:
+      - "CREATE INDEX by_far FOR (n:Far) ON (n.k)"
+    query: "UNWIND [7, 7, 8, 123456, null] AS x MATCH (a:Start)-[:R]->(m:Far {k: x}) RETURN x, a.name"
+    expect:
+      rows:
+        - [7, Alix]
+        - [7, Gus]
+        - [7, Vincent]
+        - [7, Alix]
+        - [7, Gus]
+        - [7, Vincent]
+        - [8, Alix]
+        - [8, Alix]
+
+  - name: unwind_empty
+    query: "UNWIND [] AS x MATCH (a:Start)-[:R]->(m:Far {k: x}) RETURN a.name"
+    expect:
+      empty: true
+
+  - name: unwind_empty_indexed
+    setup:
+      - "CREATE INDEX by_far FOR (n:Far) ON (n.k)"
+    query: "UNWIND [] AS x MATCH (a:Start)-[:R]->(m:Far {k: x}) RETURN a.name"
+    expect:
+      empty: true
+
+  - name: variable_length
+    query: "MATCH (a:Start)-[:R*1..1]->(m:Far {k: 7}) RETURN a.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]
+
+  - name: variable_length_indexed
+    setup:
+      - "CREATE INDEX by_far FOR (n:Far) ON (n.k)"
+    query: "MATCH (a:Start)-[:R*1..1]->(m:Far {k: 7}) RETURN a.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]
+
+  - name: named_path
+    query: "MATCH p = (a:Start)-[:R]->(m:Far {k: 7}) RETURN a.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]
+
+  - name: named_path_indexed
+    setup:
+      - "CREATE INDEX by_far FOR (n:Far) ON (n.k)"
+    query: "MATCH p = (a:Start)-[:R]->(m:Far {k: 7}) RETURN a.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]
+
+  - name: bound_source
+    query: "MATCH (a:Start {s: 1}) MATCH (a)-[:R]->(m:Far {k: 7}) RETURN a.name"
+    expect:
+      rows:
+        - [Alix]
+
+  - name: bound_source_indexed
+    setup:
+      - "CREATE INDEX by_far FOR (n:Far) ON (n.k)"
+    query: "MATCH (a:Start {s: 1}) MATCH (a)-[:R]->(m:Far {k: 7}) RETURN a.name"
+    expect:
+      rows:
+        - [Alix]
+
+  - name: order_limit
+    query: "MATCH (a:Start)-[:R]->(m:Far {k: 7}) RETURN a.name ORDER BY a.name LIMIT 2"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+
+  - name: order_limit_indexed
+    setup:
+      - "CREATE INDEX by_far FOR (n:Far) ON (n.k)"
+    query: "MATCH (a:Start)-[:R]->(m:Far {k: 7}) RETURN a.name ORDER BY a.name LIMIT 2"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+
+  - name: order_skip
+    query: "MATCH (a:Start)-[:R]->(m:Far {k: 7}) RETURN a.name ORDER BY a.name SKIP 2"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: order_skip_indexed
+    setup:
+      - "CREATE INDEX by_far FOR (n:Far) ON (n.k)"
+    query: "MATCH (a:Start)-[:R]->(m:Far {k: 7}) RETURN a.name ORDER BY a.name SKIP 2"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: parameter_key
+    setup:
+      - "CREATE INDEX by_far FOR (n:Far) ON (n.k)"
+    query: "MATCH (a:Start)-[:R]->(m:Far {k: $v}) RETURN a.name"
+    params:
+      v: 7
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]

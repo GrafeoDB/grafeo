@@ -1,0 +1,115 @@
+# A node or an edge in IN evaluates to its id, an integer, and a list holding that number does not
+# hold the node: a long list answers as a short one, by the kind of the needle.
+
+meta:
+  language: gql
+  model: lpg
+  title: IN with a node or an edge as the needle
+  dataset: empty
+
+tests:
+
+  - name: node_with_its_id_2
+    setup:
+      - "INSERT (:E {x: 1})-[:R]->(:E {x: 2})"
+    query: "MATCH (n:E {x: 1}) RETURN n IN [1000000, 0] AS found"
+    expect:
+      error: "GRAFEO-Q006"
+
+  - name: node_with_its_id_15
+    setup:
+      - "INSERT (:E {x: 1})-[:R]->(:E {x: 2})"
+    query: "MATCH (n:E {x: 1}) RETURN n IN [1000000, 1000001, 1000002, 1000003, 1000004, 1000005, 1000006, 0, 1000008, 1000009, 1000010, 1000011, 1000012, 1000013, 1000014] AS found"
+    expect:
+      error: "GRAFEO-Q006"
+
+  - name: node_with_its_id_16
+    setup:
+      - "INSERT (:E {x: 1})-[:R]->(:E {x: 2})"
+    query: "MATCH (n:E {x: 1}) RETURN n IN [1000000, 1000001, 1000002, 1000003, 1000004, 1000005, 1000006, 1000007, 0, 1000009, 1000010, 1000011, 1000012, 1000013, 1000014, 1000015] AS found"
+    expect:
+      error: "GRAFEO-Q006"
+
+  - name: node_with_its_id_17
+    setup:
+      - "INSERT (:E {x: 1})-[:R]->(:E {x: 2})"
+    query: "MATCH (n:E {x: 1}) RETURN n IN [1000000, 1000001, 1000002, 1000003, 1000004, 1000005, 1000006, 1000007, 0, 1000009, 1000010, 1000011, 1000012, 1000013, 1000014, 1000015, 1000016] AS found"
+    expect:
+      error: "GRAFEO-Q006"
+
+  - name: node_with_its_id_40
+    setup:
+      - "INSERT (:E {x: 1})-[:R]->(:E {x: 2})"
+    query: "MATCH (n:E {x: 1}) RETURN n IN [1000000, 1000001, 1000002, 1000003, 1000004, 1000005, 1000006, 1000007, 1000008, 1000009, 1000010, 1000011, 1000012, 1000013, 1000014, 1000015, 1000016, 1000017, 1000018, 1000019, 0, 1000021, 1000022, 1000023, 1000024, 1000025, 1000026, 1000027, 1000028, 1000029, 1000030, 1000031, 1000032, 1000033, 1000034, 1000035, 1000036, 1000037, 1000038, 1000039] AS found"
+    expect:
+      error: "GRAFEO-Q006"
+
+  - name: node_with_a_string_2
+    setup:
+      - "INSERT (:E {x: 1})-[:R]->(:E {x: 2})"
+    query: "MATCH (n:E {x: 1}) RETURN n IN [1000000, 'n'] AS found"
+    expect:
+      error: "GRAFEO-Q006"
+
+  - name: node_with_a_string_15
+    setup:
+      - "INSERT (:E {x: 1})-[:R]->(:E {x: 2})"
+    query: "MATCH (n:E {x: 1}) RETURN n IN [1000000, 1000001, 1000002, 1000003, 1000004, 1000005, 1000006, 'n', 1000008, 1000009, 1000010, 1000011, 1000012, 1000013, 1000014] AS found"
+    expect:
+      error: "GRAFEO-Q006"
+
+  - name: node_with_a_string_16
+    setup:
+      - "INSERT (:E {x: 1})-[:R]->(:E {x: 2})"
+    query: "MATCH (n:E {x: 1}) RETURN n IN [1000000, 1000001, 1000002, 1000003, 1000004, 1000005, 1000006, 1000007, 'n', 1000009, 1000010, 1000011, 1000012, 1000013, 1000014, 1000015] AS found"
+    expect:
+      error: "GRAFEO-Q006"
+
+  - name: node_with_a_string_17
+    setup:
+      - "INSERT (:E {x: 1})-[:R]->(:E {x: 2})"
+    query: "MATCH (n:E {x: 1}) RETURN n IN [1000000, 1000001, 1000002, 1000003, 1000004, 1000005, 1000006, 1000007, 'n', 1000009, 1000010, 1000011, 1000012, 1000013, 1000014, 1000015, 1000016] AS found"
+    expect:
+      error: "GRAFEO-Q006"
+
+  - name: node_with_a_string_40
+    setup:
+      - "INSERT (:E {x: 1})-[:R]->(:E {x: 2})"
+    query: "MATCH (n:E {x: 1}) RETURN n IN [1000000, 1000001, 1000002, 1000003, 1000004, 1000005, 1000006, 1000007, 1000008, 1000009, 1000010, 1000011, 1000012, 1000013, 1000014, 1000015, 1000016, 1000017, 1000018, 1000019, 'n', 1000021, 1000022, 1000023, 1000024, 1000025, 1000026, 1000027, 1000028, 1000029, 1000030, 1000031, 1000032, 1000033, 1000034, 1000035, 1000036, 1000037, 1000038, 1000039] AS found"
+    expect:
+      error: "GRAFEO-Q006"
+
+  - name: edge_with_its_id_2
+    setup:
+      - "INSERT (:E {x: 1})-[:R]->(:E {x: 2})"
+    query: "MATCH ()-[r:R]->() RETURN r IN [1000000, 0] AS found"
+    expect:
+      error: "GRAFEO-Q006"
+
+  - name: edge_with_its_id_15
+    setup:
+      - "INSERT (:E {x: 1})-[:R]->(:E {x: 2})"
+    query: "MATCH ()-[r:R]->() RETURN r IN [1000000, 1000001, 1000002, 1000003, 1000004, 1000005, 1000006, 0, 1000008, 1000009, 1000010, 1000011, 1000012, 1000013, 1000014] AS found"
+    expect:
+      error: "GRAFEO-Q006"
+
+  - name: edge_with_its_id_16
+    setup:
+      - "INSERT (:E {x: 1})-[:R]->(:E {x: 2})"
+    query: "MATCH ()-[r:R]->() RETURN r IN [1000000, 1000001, 1000002, 1000003, 1000004, 1000005, 1000006, 1000007, 0, 1000009, 1000010, 1000011, 1000012, 1000013, 1000014, 1000015] AS found"
+    expect:
+      error: "GRAFEO-Q006"
+
+  - name: edge_with_its_id_17
+    setup:
+      - "INSERT (:E {x: 1})-[:R]->(:E {x: 2})"
+    query: "MATCH ()-[r:R]->() RETURN r IN [1000000, 1000001, 1000002, 1000003, 1000004, 1000005, 1000006, 1000007, 0, 1000009, 1000010, 1000011, 1000012, 1000013, 1000014, 1000015, 1000016] AS found"
+    expect:
+      error: "GRAFEO-Q006"
+
+  - name: edge_with_its_id_40
+    setup:
+      - "INSERT (:E {x: 1})-[:R]->(:E {x: 2})"
+    query: "MATCH ()-[r:R]->() RETURN r IN [1000000, 1000001, 1000002, 1000003, 1000004, 1000005, 1000006, 1000007, 1000008, 1000009, 1000010, 1000011, 1000012, 1000013, 1000014, 1000015, 1000016, 1000017, 1000018, 1000019, 0, 1000021, 1000022, 1000023, 1000024, 1000025, 1000026, 1000027, 1000028, 1000029, 1000030, 1000031, 1000032, 1000033, 1000034, 1000035, 1000036, 1000037, 1000038, 1000039] AS found"
+    expect:
+      error: "GRAFEO-Q006"

@@ -323,10 +323,11 @@ fn turning_a_rule_off_changes_its_plan_alone() {
     let mut wrong = Vec::new();
     for (rule, query, mark) in RULE_SHAPES {
         // The lookup shows only where the intersection does not take the hop.
-        let start = if rule == PlannerRule::ExpandInto {
-            without_intersection()
-        } else {
-            PlannerRules::all()
+        // The far key shows only where the hop does not start at the far end.
+        let start = match rule {
+            PlannerRule::ExpandInto => without_intersection(),
+            PlannerRule::PinnedFarEnd => PlannerRules::all().with(PlannerRule::SoughtEnd, false),
+            _ => PlannerRules::all(),
         };
         let usual = with_rules(&db, start);
         let without = with_rules(&db, start.with(rule, false));

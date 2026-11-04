@@ -146,6 +146,9 @@ pub(super) mod measured {
     pub const EXPAND_OUTPUT: f64 = 25.0;
     /// One lookup of the edges between two nodes, flat with the degree.
     pub const LOOKUP: f64 = 155.0;
+    /// One check of a node's property in a filter over a scan, from graph-bench's whole scan
+    /// with the filter; it falls when a scan compares a key's column itself.
+    pub const PROPERTY_CHECK: f64 = 95.0;
     /// One row a hash table is built with.
     pub const HASH_BUILD: f64 = 340.0;
     /// One row probing a hash table.

@@ -260,9 +260,14 @@ enum KeyFinder {
     Map(Option<NodesByKey>),
 }
 
+/// `labels` as the store's lookups take them.
+fn label_names(labels: &[String]) -> Vec<&str> {
+    labels.iter().map(String::as_str).collect()
+}
+
 impl KeyFinder {
     fn new(store: &dyn GraphStore, labels: &[String], key: &str, rows: usize) -> Self {
-        if !store.has_property_index(key) {
+        if !store.index_serves(&label_names(labels), key) {
             return Self::Map(None);
         }
         let nodes = match labels.first() {
@@ -290,7 +295,9 @@ impl KeyFinder {
             return Ok(Vec::new());
         };
         if matches!(self, Self::Seek) {
-            if let Some(candidates) = store.find_nodes_maybe_equal(key, value, view)? {
+            if let Some(candidates) =
+                store.find_indexed_maybe_equal(&label_names(labels), key, value, view)?
+            {
                 let mut matched = Vec::new();
                 for node in candidates {
                     if has_labels(store, node, labels, view)?

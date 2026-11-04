@@ -609,13 +609,25 @@ impl GraphWriter {
 
     /// Removes labels from a node. Returns how many it had.
     ///
+    /// Where an edge type's rule on its endpoints applies, a removal claims the node as a delete
+    /// does: a new edge's claim on its endpoints conflicts only with that, and a new edge could
+    /// need the label.
+    ///
     /// # Errors
     ///
-    /// Returns an error for a node the transaction deleted, or a write
-    /// conflict.
+    /// Returns an error for a node the transaction deleted, a schema violation for a node or an
+    /// edge the removal would leave breaking a rule, or a write conflict.
     pub fn remove_labels(&self, id: NodeId, labels: &[String]) -> Result<usize, OperatorError> {
         self.require_node(id)?;
-        self.claim(WriteClaim::Node(id))?;
+        let claims_as_a_delete = match &self.validator {
+            Some(validator) => self.check_labels_removed(validator.as_ref(), id, labels)?,
+            None => false,
+        };
+        self.claim(if claims_as_a_delete {
+            WriteClaim::NodeDelete(id)
+        } else {
+            WriteClaim::Node(id)
+        })?;
         if self.node(id)?.is_none() {
             return Ok(0);
         }
@@ -1160,6 +1172,61 @@ impl GraphWriter {
     }
 
     /// Checks an edge's type and endpoint labels.
+    /// Checks what node `id` is left with once `labels` go, as a create would check it: no label,
+    /// a property no remaining label declares, or an edge whose endpoint no longer fits. Whether
+    /// a removal happens and an edge type's rule on its endpoints applies. A label it does not
+    /// have changes nothing, so it checks nothing.
+    fn check_labels_removed(
+        &self,
+        validator: &dyn ConstraintValidator,
+        id: NodeId,
+        labels: &[String],
+    ) -> Result<bool, OperatorError> {
+        let Some(node) = self.node(id)? else {
+            return Ok(false);
+        };
+        let held = node_labels(&node);
+        if !labels.iter().any(|label| held.contains(label)) {
+            return Ok(false);
+        }
+        let remaining: Vec<String> = held
+            .into_iter()
+            .filter(|label| !labels.contains(label))
+            .collect();
+        if remaining.is_empty() {
+            validator.validate_node_labels_allowed(&remaining)?;
+        }
+        validator
+            .validate_node_properties_declared(&remaining, &property_list(&node.properties))?;
+        if !validator.constrains_some_edge_endpoints() {
+            return Ok(false);
+        }
+        for (direction, is_source) in [(Direction::Outgoing, true), (Direction::Incoming, false)] {
+            for (other, edge) in self.store.edges(id, direction, &[], self.view)? {
+                let Some(edge_type) = self.store.edge_type(edge, self.view)? else {
+                    continue;
+                };
+                if !validator.constrains_edge_endpoints(&edge_type) {
+                    continue;
+                }
+                let others = if other == id {
+                    remaining.clone()
+                } else {
+                    self.node(other)?
+                        .map(|node| node_labels(&node))
+                        .unwrap_or_default()
+                };
+                let (source, target) = if is_source {
+                    (&remaining, &others)
+                } else {
+                    (&others, &remaining)
+                };
+                validator.validate_edge_endpoints(&edge_type, source, target)?;
+            }
+        }
+        Ok(true)
+    }
+
     fn check_new_edge(
         &self,
         validator: &dyn ConstraintValidator,

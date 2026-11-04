@@ -317,6 +317,10 @@ impl RowGroupStore {
                         + size_of::<FxHashSet<grafeo_common::types::NodeId>>()
                         + 32);
             }
+            indexes.property_index_bytes += store.label_indexes_len()
+                * (size_of::<grafeo_common::types::HashableValue>()
+                    + size_of::<FxHashSet<grafeo_common::types::NodeId>>()
+                    + 32);
         }
         #[cfg(any(feature = "vector-index", feature = "text-index"))]
         for (graph, store) in all() {

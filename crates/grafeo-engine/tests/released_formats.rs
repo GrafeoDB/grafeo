@@ -1302,3 +1302,55 @@ fn a_0_6_file_keeps_its_history() {
         db.close().unwrap();
     });
 }
+
+/// A file with a UNIQUE rule and no index stays that way: no index comes at the open or on a write,
+/// and the rule holds by its scan.
+#[test]
+fn a_released_rule_holds_and_gains_no_index() {
+    read_write(|fixture, db| {
+        if !fixture.constraint_names().contains(&"person_email") {
+            return;
+        }
+        let shown = || {
+            let result = db.execute("SHOW INDEXES").unwrap();
+            let mut rows: Vec<String> =
+                result.rows().iter().map(|row| format!("{row:?}")).collect();
+            rows.sort();
+            rows
+        };
+        let at_open = shown();
+        assert!(!db.has_property_index("email"), "an index at the open");
+        db.execute("INSERT (:Person {name: 'Hans', email: 'hans@example.org'})")
+            .unwrap();
+        assert!(
+            db.execute("INSERT (:Person {name: 'Hans', email: 'hans@example.org'})")
+                .is_err(),
+            "the rule holds"
+        );
+        assert_eq!(shown(), at_open, "a write");
+        assert!(!db.has_property_index("email"), "a write");
+    });
+}
+
+/// A file's index from before per-label indexes covers its key on every label, and keeps doing so:
+/// nothing is narrowed at the open, so no lookup a released database relies on gets slower.
+#[test]
+fn a_released_index_stays_key_wide() {
+    read_write(|fixture, db| {
+        let rows = fixture.index_rows();
+        if !rows.iter().any(|row| row[0] == "person_name") {
+            return;
+        }
+        let session = db.session();
+        for pattern in ["(n:Person)", "(n)", "(n:Document)"] {
+            let query =
+                format!("UNWIND ['Alix'] AS x MATCH {pattern} WHERE n.name = x RETURN n.name");
+            let plan = session.execute(&format!("EXPLAIN {query}")).unwrap().rows()[0][0]
+                .as_str()
+                .unwrap()
+                .to_string();
+            assert!(plan.contains("[index: name]"), "{query}\n{plan}");
+        }
+        assert!(db.has_property_index("name"));
+    });
+}

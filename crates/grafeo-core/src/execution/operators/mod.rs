@@ -34,6 +34,7 @@ mod factorized_filter;
 mod filter;
 mod functions;
 mod horizontal_aggregate;
+mod in_set;
 mod intersect_expand;
 mod join;
 mod label_count;
@@ -76,7 +77,7 @@ pub use delim::{DelimBuffer, DelimReplayOperator, DelimValuesOperator};
 pub use distinct::DistinctOperator;
 pub use eager::{EagerOperator, OneRowAtATimeOperator};
 pub use edge_count::EdgeCountOperator;
-pub use expand::ExpandOperator;
+pub use expand::{ExpandOperator, KeyLabels};
 pub use factorized_aggregate::{
     FactorizedAggregate, FactorizedAggregateOperator, FactorizedOperator,
 };
@@ -97,6 +98,7 @@ pub use functions::{
     function_names, function_support, regex_pattern_error,
 };
 pub use horizontal_aggregate::{EntityKind, HorizontalAggregateOperator};
+pub use in_set::InSet;
 pub use intersect_expand::{IntersectExpandOperator, IntersectSide};
 pub use join::{
     CompatibleCondition, EqualityCondition, HashJoinOperator, HashKey, JoinCondition, JoinType,
@@ -113,7 +115,7 @@ pub use mutation::{
     CreateStep, DeleteEdgeOperator, DeleteNodeOperator, PropertySource, RemoveLabelOperator,
     SetPropertyOperator,
 };
-pub use node_seek::{NodeSeekOperator, SeekKey};
+pub use node_seek::{NodeSeekOperator, SeekKey, find_through_label_indexes};
 pub use parameter_scan::{ParameterScanOperator, ParameterState};
 pub use project::{EntityValue, ProjectExpr, ProjectOperator};
 pub use push::{

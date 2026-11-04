@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 use grafeo_common::change::StandaloneOp;
 use grafeo_common::storage::catalog_record::{
-    CatalogKey, CatalogRecord, IndexKeyRecord, IndexKindRecord, IndexRecord,
+    CatalogKey, CatalogRecord, IndexKeyRecord, IndexKindRecord, IndexRecord, LabelIndexRecord,
 };
 use grafeo_common::utils::error::{Error, Result};
 #[cfg(any(feature = "vector-index", feature = "text-index"))]
@@ -59,9 +59,23 @@ pub(crate) fn listed_indexes(catalog: &Catalog, store: Option<&RowGroupStore>) -
                 .map_or_else(|| "?".to_string(), |name| name.to_string()),
         })
         .collect();
-    // Whether a definition of one of `kinds` covers `property` (on `label`,
-    // when given): a property index is on a property of every label, so a
-    // definition on any label covers it.
+    // Whether a definition of one of `kinds` covers `property` (on `label`, when given). An
+    // index on every label has a definition on any label, one a file made before indexes went
+    // per label, unless an index of its own stands for that definition.
+    let on_label = store
+        .map(RowGroupStore::label_index_entries)
+        .unwrap_or_default();
+    let covers_every_label = |property: &str| {
+        listed.iter().any(|index| {
+            matches!(index.kind, IndexType::Hash | IndexType::BTree)
+                && index.property == property
+                && !index.label.as_ref().is_some_and(|label| {
+                    on_label
+                        .iter()
+                        .any(|(own, key)| own == label && key == property)
+                })
+        })
+    };
     let covered = |kinds: &[IndexType], label: Option<&str>, property: &str| {
         listed.iter().any(|index| {
             kinds.contains(&index.kind)
@@ -72,12 +86,22 @@ pub(crate) fn listed_indexes(catalog: &Catalog, store: Option<&RowGroupStore>) -
     let mut unnamed = Vec::new();
     if let Some(store) = store {
         for property in store.property_index_keys() {
-            if !covered(&[IndexType::Hash, IndexType::BTree], None, &property) {
+            if !covers_every_label(&property) {
                 unnamed.push(ListedIndex {
                     name: None,
                     kind: IndexType::Hash,
                     label: None,
                     property,
+                });
+            }
+        }
+        for (label, property) in &on_label {
+            if !covered(&[IndexType::Hash, IndexType::BTree], Some(label), property) {
+                unnamed.push(ListedIndex {
+                    name: None,
+                    kind: IndexType::Hash,
+                    label: Some(label.clone()),
+                    property: property.clone(),
                 });
             }
         }
@@ -578,6 +602,48 @@ pub(crate) fn drop_index(graph: Option<&str>, key: IndexKeyRecord) -> Standalone
     })
 }
 
+/// The put of the property index on `label` and `key` in the graph with storage key `graph`.
+pub(crate) fn put_label_index(graph: Option<&str>, label: &str, key: &str) -> StandaloneOp {
+    StandaloneOp::PutCatalog(CatalogRecord::LabelIndex(LabelIndexRecord {
+        graph: graph.map(ToString::to_string),
+        label: label.to_string(),
+        key: key.to_string(),
+    }))
+}
+
+/// The drop of the property index on `label` and `key` in the graph with storage key `graph`.
+pub(crate) fn drop_label_index(graph: Option<&str>, label: &str, key: &str) -> StandaloneOp {
+    StandaloneOp::DropCatalog(CatalogKey::LabelIndex {
+        graph: graph.map(ToString::to_string),
+        label: label.to_string(),
+        key: key.to_string(),
+    })
+}
+
+/// The drops of every property index on `key` in `store`, the graph with storage key `graph`:
+/// the one on every label and each one on a label.
+pub(crate) fn drops_of_property_indexes(
+    store: &RowGroupStore,
+    graph: Option<&str>,
+    key: &str,
+) -> Vec<StandaloneOp> {
+    let mut drops = Vec::new();
+    if store.index_serves(&[], key) {
+        drops.push(drop_index(
+            graph,
+            IndexKeyRecord::Property {
+                key: key.to_string(),
+            },
+        ));
+    }
+    for (label, on) in store.label_index_entries() {
+        if on == key {
+            drops.push(drop_label_index(graph, &label, key));
+        }
+    }
+    drops
+}
+
 impl super::GrafeoDB {
     // =========================================================================
     // PROPERTY INDEX API
@@ -627,7 +693,7 @@ impl super::GrafeoDB {
     pub fn create_property_index(&self, property: &str) -> Result<()> {
         let held = self.hold_for_standalone(false)?;
         let graph = self.current_graph_key();
-        if self.current_lpg_store()?.has_property_index(property) {
+        if self.current_lpg_store()?.index_serves(&[], property) {
             return Ok(());
         }
         let mut change = StandaloneChange::new();
@@ -640,7 +706,8 @@ impl super::GrafeoDB {
         self.commit_standalone(change, &held)
     }
 
-    /// Drops an index on a node property of the current graph.
+    /// Drops every index on a node property of the current graph: the one on every label and
+    /// each one `CREATE INDEX` made on a label.
     ///
     /// Returns `true` if the index existed and was removed.
     ///
@@ -650,16 +717,15 @@ impl super::GrafeoDB {
     pub fn drop_property_index(&self, property: &str) -> Result<bool> {
         let held = self.hold_for_standalone(false)?;
         let graph = self.current_graph_key();
-        if !self.current_lpg_store()?.has_property_index(property) {
+        let drops =
+            drops_of_property_indexes(&*self.current_lpg_store()?, graph.as_deref(), property);
+        if drops.is_empty() {
             return Ok(false);
         }
         let mut change = StandaloneChange::new();
-        change.push(drop_index(
-            graph.as_deref(),
-            IndexKeyRecord::Property {
-                key: property.to_string(),
-            },
-        ));
+        for drop in drops {
+            change.push(drop);
+        }
         self.commit_standalone(change, &held)?;
         Ok(true)
     }
@@ -673,7 +739,8 @@ impl super::GrafeoDB {
         self.transaction_manager.check_open()
     }
 
-    /// Returns `true` if the property has an index in the current graph.
+    /// Returns `true` if the property has an index in the current graph, on every label or on
+    /// one.
     #[must_use]
     pub fn has_property_index(&self, property: &str) -> bool {
         // A backend of its own has no index.

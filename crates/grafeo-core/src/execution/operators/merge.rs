@@ -381,6 +381,11 @@ impl MergeOperator {
         }
     }
 
+    /// The pattern's labels, as the store's lookups take them.
+    fn label_names(&self) -> SmallVec<[&str; 4]> {
+        self.config.labels.iter().map(String::as_str).collect()
+    }
+
     /// The nodes that match the given resolved properties (every one, as in
     /// openCypher, where MERGE binds each match).
     fn find_matching_nodes(
@@ -389,9 +394,12 @@ impl MergeOperator {
     ) -> Result<Vec<NodeId>, OperatorError> {
         // Use a property index when available to avoid a full label scan.
         // Null conditions are excluded from the index query and verified in the loop.
-        let use_index = resolved_match_props
-            .iter()
-            .any(|(k, v)| !v.is_null() && self.writer.store().has_property_index(k));
+        let use_index = {
+            let labels = self.label_names();
+            resolved_match_props
+                .iter()
+                .any(|(k, v)| !v.is_null() && self.writer.store().index_serves(&labels, k))
+        };
 
         // Without an index, the row's values looked up among the pattern's
         // nodes, when they have a key (see `NodeKeys`).
@@ -417,7 +425,7 @@ impl MergeOperator {
                 .filter(|(_, v)| !v.is_null())
                 .map(|(k, v)| (k.as_str(), v.clone()))
                 .collect();
-            store.find_nodes_by_properties(&conditions, view)?
+            store.find_indexed_by_properties(&self.label_names(), &conditions, view)?
         } else if let Some(label) = self.scan_label()? {
             store.nodes_by_label(label, view)?
         } else {

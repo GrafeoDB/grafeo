@@ -1343,6 +1343,12 @@ impl Session {
                     }
                 }
 
+                crate::database::standalone::index_new_graph_for_its_rules(
+                    &mut change,
+                    &self.effective_catalog(),
+                    &storage_key,
+                )?;
+
                 // AS COPY OF: the new graph holds the source's data, logged
                 // and applied with the graph's creation (#423).
                 if let Some(ref src) = copy_of {
@@ -1923,10 +1929,15 @@ impl Session {
         });
         change.push(StandaloneOp::PutCatalog(CatalogRecord::GraphBinding(
             GraphBindingRecord {
-                graph: graph_key,
+                graph: graph_key.clone(),
                 graph_type: type_key,
             },
         )));
+        crate::database::standalone::index_new_graph_for_its_rules(
+            &mut change,
+            &self.effective_catalog(),
+            &graph_key,
+        )?;
         self.commit_standalone(change, &held)?;
         Ok(Self::ddl_status(format!(
             "Property graph '{}' created ({} node tables, {} edge tables)",
@@ -2223,6 +2234,96 @@ impl Session {
         Err(other_declaration("edge type", &def.name))
     }
 
+    /// Adds the index a uniqueness rule's check reads to `change`, which adds the rule: on
+    /// its first key, the one the check looks up, in each graph the rule reaches that has
+    /// none. Under the constraint's name when it was given one the statement can take, so
+    /// `DROP INDEX` can remove it; a statement that builds nothing names nothing.
+    ///
+    /// # Errors
+    ///
+    /// A record of the change that does not apply to a copy of the catalog: damage.
+    #[cfg(feature = "gql")]
+    fn index_rule(
+        &self,
+        change: &mut crate::transaction::StandaloneChange,
+        stmt: &grafeo_adapters::query::gql::ast::CreateConstraintStatement,
+        kind: crate::catalog::ConstraintType,
+    ) -> Result<()> {
+        use crate::catalog::ConstraintType;
+        use grafeo_adapters::query::gql::ast::IndexKind;
+        use grafeo_common::change::StandaloneOp;
+        use grafeo_common::storage::catalog_record::{
+            CatalogRecord, IndexNameKindRecord, IndexNameRecord,
+        };
+
+        let (ConstraintType::Unique | ConstraintType::NodeKey, Some(key)) =
+            (kind, stmt.properties.first())
+        else {
+            return Ok(());
+        };
+        let graphs = self.graphs_a_rule_needs_an_index_in(change, &stmt.label, key)?;
+        if graphs.is_empty() {
+            return Ok(());
+        }
+        for graph in &graphs {
+            change.push(crate::database::index::put_label_index(
+                graph.as_deref(),
+                &stmt.label,
+                key,
+            ));
+        }
+        if let Some(name) = &stmt.name {
+            let property = std::slice::from_ref(key);
+            if !self.index_name_in_use(name, &stmt.label, property, IndexKind::Property) {
+                change.push(StandaloneOp::PutCatalog(CatalogRecord::IndexName(
+                    IndexNameRecord {
+                        name: name.clone(),
+                        label: stmt.label.clone(),
+                        property: key.clone(),
+                        kind: IndexNameKindRecord::Hash,
+                    },
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// What the status of dropping the constraint `name` adds about its index, which stays:
+    /// how to remove it when it has the constraint's name.
+    #[cfg(feature = "gql")]
+    fn index_that_stays(&self, name: &str) -> String {
+        use crate::catalog::ConstraintType;
+
+        let catalog = self.effective_catalog();
+        let Some(def) = catalog
+            .constraint(name)
+            .filter(|def| matches!(def.kind, ConstraintType::Unique | ConstraintType::NodeKey))
+        else {
+            return String::new();
+        };
+        let Some(key) = def.properties.first() else {
+            return String::new();
+        };
+        let named_for_it = catalog.indexes_named(name).iter().any(|index| {
+            catalog
+                .get_label_name(index.label)
+                .is_some_and(|label| *label == *def.label)
+                && catalog
+                    .get_property_key_name(index.property_key)
+                    .is_some_and(|property| *property == **key)
+        });
+        if named_for_it {
+            format!("; index '{name}' stays, DROP INDEX {name} removes it")
+        } else if self
+            .active_lpg_store()
+            .is_some_and(|store| store.index_serves(&[&*def.label], key))
+        {
+            format!("; the index on property {key} stays")
+        } else {
+            String::new()
+        }
+    }
+
     /// Adds the drop of each of `nodes` and `edges`, types the graph type `graph_type`
     /// stops listing, that no other graph type lists, to `change`: the types of a graph
     /// type go with it (ISO/IEC 39075 12.7 and 4.13.2.2), also one it named by reference.
@@ -2317,8 +2418,7 @@ impl Session {
         use grafeo_adapters::query::gql::ast::SchemaStatement;
         use grafeo_common::change::StandaloneOp;
         use grafeo_common::storage::catalog_record::{
-            CatalogKey, CatalogRecord, IndexKindRecord, IndexNameKindRecord, IndexNameRecord,
-            SchemaRecord,
+            CatalogKey, CatalogRecord, IndexNameKindRecord, IndexNameRecord, SchemaRecord,
         };
         use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind};
 
@@ -2489,10 +2589,19 @@ impl Session {
                 for prop in &stmt.properties {
                     match stmt.index_kind {
                         IndexKind::Property | IndexKind::BTree => {
-                            change.push(crate::database::index::put_index(
-                                graph.as_deref(),
-                                IndexKindRecord::Property { key: prop.clone() },
-                            ));
+                            // An index that covers the label and the key already serves: the
+                            // name stands for it.
+                            let covered = self.active_lpg_store().is_some_and(|store| {
+                                self.property_indexes_on(&graph, &*store, &stmt.label, prop)
+                                    .any()
+                            });
+                            if !covered {
+                                change.push(crate::database::index::put_label_index(
+                                    graph.as_deref(),
+                                    &stmt.label,
+                                    prop,
+                                ));
+                            }
                         }
                         IndexKind::Text => {
                             self.text_index_change(change, &stmt.label, prop, &stmt.options)?;
@@ -2596,6 +2705,7 @@ impl Session {
                 change.push(StandaloneOp::PutCatalog(CatalogRecord::Constraint(
                     constraint_record(&def),
                 )));
+                self.index_rule(change, &stmt, kind)?;
                 done(QueryResult::status(format!(
                     "Created {} constraint '{name}'",
                     kind.name_suffix()
@@ -2612,10 +2722,13 @@ impl Session {
                         "constraint '{name}' does not exist"
                     )));
                 }
+                let stays = self.index_that_stays(&name);
                 change.push(StandaloneOp::DropCatalog(CatalogKey::Constraint(
                     name.clone(),
                 )));
-                done(QueryResult::status(format!("Dropped constraint '{name}'")))
+                done(QueryResult::status(format!(
+                    "Dropped constraint '{name}'{stays}"
+                )))
             }
             SchemaStatement::CreateGraphType(stmt) => {
                 use crate::catalog::GraphTypeDefinition;
@@ -3406,7 +3519,7 @@ impl Session {
             return false;
         };
         properties.iter().all(|property| match kind {
-            IndexKind::Property | IndexKind::BTree => store.has_property_index(property),
+            IndexKind::Property | IndexKind::BTree => store.index_serves(&[label], property),
             IndexKind::Text => {
                 #[cfg(feature = "text-index")]
                 {
@@ -3432,9 +3545,9 @@ impl Session {
 
     /// Drops the index of the active graph that `def`, a named index
     /// `DROP INDEX` drops, stands for: the text or vector index of its label
-    /// and property for a full-text or vector one, else the property index of its
-    /// property, unless another name still stands for that one (property
-    /// indexes are per key, not per label).
+    /// and property for a full-text or vector one. Else the property index of its label and
+    /// property, or, without one, the index of its property on every label, unless another name
+    /// still stands for the index.
     #[cfg(feature = "gql")]
     fn drop_named_index(
         &self,
@@ -3488,16 +3601,28 @@ impl Session {
                 return;
             }
             IndexType::Hash | IndexType::BTree => {
-                let shared = self
-                    .effective_catalog()
-                    .all_indexes()
-                    .into_iter()
-                    .any(|other| {
-                        other.name != def.name
-                            && other.property_key == def.property_key
-                            && matches!(other.index_type, IndexType::Hash | IndexType::BTree)
-                    });
-                if shared || !store.has_property_index(&property) {
+                let Some(label) = self.effective_catalog().get_label_name(def.label) else {
+                    return;
+                };
+                let graph = self.active_lpg_graph_key();
+                let there = self.property_indexes_on(&graph, &*store, &label, &property);
+                let others = self.effective_catalog().all_indexes();
+                let mut others = others.iter().filter(|other| {
+                    other.name != def.name
+                        && other.property_key == def.property_key
+                        && matches!(other.index_type, IndexType::Hash | IndexType::BTree)
+                });
+                if there.this_label {
+                    if !others.any(|other| other.label == def.label) {
+                        change.push(crate::database::index::drop_label_index(
+                            graph.as_deref(),
+                            &label,
+                            &property,
+                        ));
+                    }
+                    return;
+                }
+                if others.next().is_some() || !there.every_label {
                     return;
                 }
                 IndexKeyRecord::Property {
@@ -7068,7 +7193,7 @@ impl Session {
         let held = self.hold_for_standalone(false)?;
         if self
             .active_lpg_store()
-            .is_some_and(|store| store.has_property_index(property))
+            .is_some_and(|store| store.index_serves(&[], property))
         {
             return Ok(());
         }
@@ -7082,27 +7207,28 @@ impl Session {
         self.commit_standalone(change, &held)
     }
 
-    /// Drops the index on a node property of the session's graph. Returns
-    /// whether there was one.
+    /// Drops every index on a node property of the session's graph: the one on every label and
+    /// each one on a label. Returns whether there was one.
     ///
     /// # Errors
     ///
     /// As [`create_property_index`](Self::create_property_index).
     pub fn drop_property_index(&self, property: &str) -> Result<bool> {
         let held = self.hold_for_standalone(false)?;
-        if !self
-            .active_lpg_store()
-            .is_some_and(|store| store.has_property_index(property))
-        {
+        let drops = self.active_lpg_store().map(|store| {
+            crate::database::index::drops_of_property_indexes(
+                &store,
+                self.active_lpg_graph_key().as_deref(),
+                property,
+            )
+        });
+        let Some(drops) = drops.filter(|drops| !drops.is_empty()) else {
             return Ok(false);
-        }
+        };
         let mut change = crate::transaction::StandaloneChange::new();
-        change.push(crate::database::index::drop_index(
-            self.active_lpg_graph_key().as_deref(),
-            grafeo_common::storage::catalog_record::IndexKeyRecord::Property {
-                key: property.to_string(),
-            },
-        ));
+        for drop in drops {
+            change.push(drop);
+        }
         self.commit_standalone(change, &held)?;
         Ok(true)
     }

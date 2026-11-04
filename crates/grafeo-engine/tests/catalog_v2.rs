@@ -198,8 +198,14 @@ fn the_schema_survives_a_reopen_after_a_checkpoint_in_small_chunks() {
     );
     assert_eq!(
         names("SHOW INDEXES"),
-        ["doc_content", "doc_embedding", "person_name"].map(Value::from),
-        "SHOW INDEXES lists the named vector index too"
+        [
+            "doc_content",
+            "doc_embedding",
+            "person_email",
+            "person_name"
+        ]
+        .map(Value::from),
+        "SHOW INDEXES lists the named vector index, and the index of the UNIQUE rule"
     );
     assert_eq!(names("SHOW GRAPHS"), [Value::from("trips")]);
     assert_eq!(names("SHOW SCHEMAS"), [Value::from("archive")]);
@@ -338,6 +344,6 @@ fn the_catalog_section_is_version_2_and_has_no_raw_chunk() {
     let mut distinct = kinds.clone();
     distinct.dedup();
     // Kind 10, the stored configuration, which a database created as a
-    // file stores.
-    assert_eq!(distinct, (1..=10).collect::<Vec<u8>>(), "{kinds:?}");
+    // file stores, and kind 11, the index of one label, which `CREATE INDEX` makes.
+    assert_eq!(distinct, (1..=11).collect::<Vec<u8>>(), "{kinds:?}");
 }

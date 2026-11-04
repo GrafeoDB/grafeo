@@ -1,11 +1,11 @@
 //! Hops whose far end a key pins find that end first.
 
-use grafeo_core::execution::operators::SeekKey;
+use grafeo_core::execution::operators::{KeyLabels, SeekKey};
 
 use super::Optimizer;
 use super::closing_hops::expand_below_filters;
-use crate::query::plan::{ExpandOp, LogicalOperator, PushdownHint};
-use crate::query::planner::lpg::seek::constant_seek;
+use crate::query::plan::{ExpandOp, FilterOp, LogicalOperator, PushdownHint};
+use crate::query::planner::lpg::seek::{LookupLabels, constant_seek};
 
 impl Optimizer {
     /// Marks each filter that pins the target of the expand below it by a key
@@ -20,25 +20,93 @@ impl Optimizer {
     /// those of the plain plan, in its order, so an expand that does not take
     /// the hint is merely slower.
     pub(super) fn look_up_pinned_far_ends(&self, op: LogicalOperator) -> LogicalOperator {
-        let mut op = op.map_children(|child| self.look_up_pinned_far_ends(child));
-        if let LogicalOperator::Filter(filter) = &mut op
-            && filter.pushdown_hint.is_none()
-        {
-            filter.pushdown_hint = expand_below_filters(&filter.input)
-                .filter(|expand| hop_can_take_a_key(expand))
-                .and_then(|expand| {
-                    let has_index = |property: &str| self.indexed_properties.contains(property);
-                    constant_seek(&filter.predicate, &expand.to_variable, has_index)
-                })
-                .map(|seek| PushdownHint::ExpandToKey {
-                    key: match seek.key {
-                        SeekKey::Id => "id()".to_string(),
-                        SeekKey::Property(property) => property,
-                    },
-                });
+        self.pin_far_ends(op, false)
+    }
+
+    /// [`look_up_pinned_far_ends`](Self::look_up_pinned_far_ends) of `op`, whose chain of filters
+    /// is taken as one from its top.
+    fn pin_far_ends(&self, op: LogicalOperator, below_a_filter: bool) -> LogicalOperator {
+        let is_filter = matches!(op, LogicalOperator::Filter(_));
+        let mut op = op.map_children(|child| self.pin_far_ends(child, is_filter));
+        if !below_a_filter && let LogicalOperator::Filter(top) = &mut op {
+            self.pin_far_end_of_chain(top);
         }
         op
     }
+
+    /// Hints at the far end of the expand below the chain of filters `top` heads, on the filter
+    /// that holds the key: the lowest one that pins it, by the label checks of the whole chain, as
+    /// a check above that filter requires its label as much as one below.
+    #[inline(never)]
+    fn pin_far_end_of_chain(&self, top: &mut FilterOp) {
+        let Some((depth, hint)) = self.far_end_key(top) else {
+            return;
+        };
+        let mut filter = top;
+        for _ in 0..depth {
+            let LogicalOperator::Filter(below) = filter.input.as_mut() else {
+                return;
+            };
+            filter = below;
+        }
+        filter.pushdown_hint = Some(hint);
+    }
+
+    /// The hint [`pin_far_end_of_chain`](Self::pin_far_end_of_chain) sets, with how many filters
+    /// below `top` it goes.
+    fn far_end_key(&self, top: &FilterOp) -> Option<(usize, PushdownHint)> {
+        let mut chain = vec![top];
+        let mut below = top.input.as_ref();
+        while let LogicalOperator::Filter(filter) = below {
+            chain.push(filter);
+            below = &filter.input;
+        }
+        let LogicalOperator::Expand(expand) = below else {
+            return None;
+        };
+        if !hop_can_take_a_key(expand) {
+            return None;
+        }
+        let labels = LookupLabels::of(top, &expand.to_variable);
+        let required: Vec<String> = labels.required().iter().map(ToString::to_string).collect();
+        let has_index = |property: &str| self.index_serves(&labels, property);
+        chain.iter().enumerate().rev().find_map(|(depth, filter)| {
+            if filter.pushdown_hint.is_some() || expand_below_filters(&filter.input).is_none() {
+                return None;
+            }
+            let seek = constant_seek(&filter.predicate, &expand.to_variable, has_index)?;
+            let hint = match seek.key {
+                SeekKey::Id => PushdownHint::ExpandToKey {
+                    key: "id()".to_string(),
+                    labels: KeyLabels {
+                        read: Vec::new(),
+                        required: required.clone(),
+                    },
+                },
+                SeekKey::Property(property) => PushdownHint::ExpandToKey {
+                    labels: KeyLabels {
+                        read: self
+                            .index_read(&labels, &property)
+                            .unwrap_or_default()
+                            .iter()
+                            .map(ToString::to_string)
+                            .collect(),
+                        required: required.clone(),
+                    },
+                    key: property,
+                },
+            };
+            Some((depth, hint))
+        })
+    }
+}
+
+/// The variable of the far end of the expand below the chain of filters `top` heads, when a key
+/// could pin it: one hop that can take a key, below filters with no hint and no subquery.
+pub(crate) fn far_end_variable(top: &FilterOp) -> Option<String> {
+    expand_below_filters(&top.input)
+        .filter(|expand| hop_can_take_a_key(expand))
+        .map(|expand| expand.to_variable.clone())
 }
 
 /// Whether `expand` is one hop to a variable it binds itself, over an input

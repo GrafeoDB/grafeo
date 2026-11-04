@@ -20,10 +20,12 @@
 /// fails with a syntax error naming this limit.
 ///
 /// The limit keeps the stack a statement can take at every stage well below
-/// the smallest stack Grafeo runs on (1 MiB: the main thread on Windows and
-/// the WebAssembly builds): about 470 KiB at the most on x86-64, 415 KiB in
-/// WebAssembly. The engine's tests run every kind of nesting at the limit on
-/// a 640 KiB stack.
+/// the 1 MiB of the main thread on Windows and of the WebAssembly builds: about
+/// 580 KiB at the most on x86-64 under the release profile, on Windows and
+/// Linux, about 330 KiB in WebAssembly. The engine's tests run every kind of nesting
+/// at the limit on a 640 KiB stack, also on the release build. A thread with
+/// less stack than that, as some hosts give by default, needs a larger one for
+/// statements this deep.
 pub const MAX_NESTING_DEPTH: u32 = 64;
 
 #[cfg(any(

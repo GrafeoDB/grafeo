@@ -1,0 +1,7174 @@
+# GQL label expressions in every position of a pattern: ISO/IEC 39075:2024 sec 16.8.
+#
+# Generated from one table with the Rust tests in label_expressions_in_paths.rs. A label
+# expression holds wherever a node pattern is written: it was kept on a lone node and on later
+# nodes, and dropped on the first node of a path. Key-wide indexes cannot be made from a query,
+# so the Rust tests cover those.
+
+meta:
+  language: gql
+  model: lpg
+  section: "16.8"
+  title: Label expressions in patterns
+  dataset: label_mix
+  iso: [G074]
+
+tests:
+
+  # A node alone
+
+  - name: a_node_alone_1_colon_a
+    query: "MATCH (x:A) WHERE x.name <> 'Amsterdam' RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: a_node_alone_1_colon_a_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (x:A) WHERE x.name <> 'Amsterdam' RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: a_node_alone_1_colon_a_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (x:A) WHERE x.name <> 'Amsterdam' RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: a_node_alone_1_colon_a_colon_b
+    query: "MATCH (x:A:B) WHERE x.name <> 'Amsterdam' RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: a_node_alone_1_colon_a_colon_b_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (x:A:B) WHERE x.name <> 'Amsterdam' RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: a_node_alone_1_colon_a_colon_b_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (x:A:B) WHERE x.name <> 'Amsterdam' RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: a_node_alone_1_is_a
+    query: "MATCH (x IS A) WHERE x.name <> 'Amsterdam' RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: a_node_alone_1_is_a_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (x IS A) WHERE x.name <> 'Amsterdam' RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: a_node_alone_1_is_a_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (x IS A) WHERE x.name <> 'Amsterdam' RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: a_node_alone_1_is_a_and_b
+    query: "MATCH (x IS A&B) WHERE x.name <> 'Amsterdam' RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: a_node_alone_1_is_a_and_b_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (x IS A&B) WHERE x.name <> 'Amsterdam' RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: a_node_alone_1_is_a_and_b_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (x IS A&B) WHERE x.name <> 'Amsterdam' RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: a_node_alone_1_a_and_b
+    query: "MATCH (x:A&B) WHERE x.name <> 'Amsterdam' RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: a_node_alone_1_a_and_b_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (x:A&B) WHERE x.name <> 'Amsterdam' RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: a_node_alone_1_a_and_b_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (x:A&B) WHERE x.name <> 'Amsterdam' RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: a_node_alone_1_a_or_b
+    query: "MATCH (x:A|B) WHERE x.name <> 'Amsterdam' RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]
+
+  - name: a_node_alone_1_a_or_b_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (x:A|B) WHERE x.name <> 'Amsterdam' RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]
+
+  - name: a_node_alone_1_a_or_b_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (x:A|B) WHERE x.name <> 'Amsterdam' RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]
+
+  - name: a_node_alone_1_not_a
+    query: "MATCH (x:!A) WHERE x.name <> 'Amsterdam' RETURN x.name"
+    expect:
+      rows:
+        - [Gus]
+        - [Jules]
+        - [Mia]
+
+  - name: a_node_alone_1_not_a_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (x:!A) WHERE x.name <> 'Amsterdam' RETURN x.name"
+    expect:
+      rows:
+        - [Gus]
+        - [Jules]
+        - [Mia]
+
+  - name: a_node_alone_1_not_a_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (x:!A) WHERE x.name <> 'Amsterdam' RETURN x.name"
+    expect:
+      rows:
+        - [Gus]
+        - [Jules]
+        - [Mia]
+
+  - name: a_node_alone_1_any_label
+    query: "MATCH (x:%) WHERE x.name <> 'Amsterdam' RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Jules]
+        - [Vincent]
+
+  - name: a_node_alone_1_any_label_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (x:%) WHERE x.name <> 'Amsterdam' RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Jules]
+        - [Vincent]
+
+  - name: a_node_alone_1_any_label_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (x:%) WHERE x.name <> 'Amsterdam' RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Jules]
+        - [Vincent]
+
+  - name: a_node_alone_1_paren_a
+    query: "MATCH (x:(A)) WHERE x.name <> 'Amsterdam' RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: a_node_alone_1_paren_a_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (x:(A)) WHERE x.name <> 'Amsterdam' RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: a_node_alone_1_paren_a_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (x:(A)) WHERE x.name <> 'Amsterdam' RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: a_node_alone_1_nobody
+    query: "MATCH (x:Z&A) WHERE x.name <> 'Amsterdam' RETURN x.name"
+    expect:
+      empty: true
+
+  - name: a_node_alone_1_nobody_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (x:Z&A) WHERE x.name <> 'Amsterdam' RETURN x.name"
+    expect:
+      empty: true
+
+  - name: a_node_alone_1_nobody_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (x:Z&A) WHERE x.name <> 'Amsterdam' RETURN x.name"
+    expect:
+      empty: true
+
+  - name: a_node_alone_2_colon_a
+    query: "MATCH (x:A {k: 1}) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: a_node_alone_2_colon_a_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (x:A {k: 1}) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: a_node_alone_2_colon_a_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (x:A {k: 1}) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: a_node_alone_2_colon_a_colon_b
+    query: "MATCH (x:A:B {k: 1}) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: a_node_alone_2_colon_a_colon_b_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (x:A:B {k: 1}) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: a_node_alone_2_colon_a_colon_b_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (x:A:B {k: 1}) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: a_node_alone_2_is_a
+    query: "MATCH (x IS A {k: 1}) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: a_node_alone_2_is_a_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (x IS A {k: 1}) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: a_node_alone_2_is_a_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (x IS A {k: 1}) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: a_node_alone_2_is_a_and_b
+    query: "MATCH (x IS A&B {k: 1}) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: a_node_alone_2_is_a_and_b_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (x IS A&B {k: 1}) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: a_node_alone_2_is_a_and_b_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (x IS A&B {k: 1}) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: a_node_alone_2_a_and_b
+    query: "MATCH (x:A&B {k: 1}) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: a_node_alone_2_a_and_b_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (x:A&B {k: 1}) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: a_node_alone_2_a_and_b_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (x:A&B {k: 1}) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: a_node_alone_2_a_or_b
+    query: "MATCH (x:A|B {k: 1}) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]
+
+  - name: a_node_alone_2_a_or_b_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (x:A|B {k: 1}) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]
+
+  - name: a_node_alone_2_a_or_b_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (x:A|B {k: 1}) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]
+
+  - name: a_node_alone_2_not_a
+    query: "MATCH (x:!A {k: 1}) RETURN x.name"
+    expect:
+      rows:
+        - [Gus]
+        - [Jules]
+        - [Mia]
+
+  - name: a_node_alone_2_not_a_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (x:!A {k: 1}) RETURN x.name"
+    expect:
+      rows:
+        - [Gus]
+        - [Jules]
+        - [Mia]
+
+  - name: a_node_alone_2_not_a_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (x:!A {k: 1}) RETURN x.name"
+    expect:
+      rows:
+        - [Gus]
+        - [Jules]
+        - [Mia]
+
+  - name: a_node_alone_2_any_label
+    query: "MATCH (x:% {k: 1}) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Jules]
+        - [Vincent]
+
+  - name: a_node_alone_2_any_label_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (x:% {k: 1}) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Jules]
+        - [Vincent]
+
+  - name: a_node_alone_2_any_label_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (x:% {k: 1}) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Jules]
+        - [Vincent]
+
+  - name: a_node_alone_2_paren_a
+    query: "MATCH (x:(A) {k: 1}) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: a_node_alone_2_paren_a_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (x:(A) {k: 1}) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: a_node_alone_2_paren_a_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (x:(A) {k: 1}) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: a_node_alone_2_nobody
+    query: "MATCH (x:Z&A {k: 1}) RETURN x.name"
+    expect:
+      empty: true
+
+  - name: a_node_alone_2_nobody_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (x:Z&A {k: 1}) RETURN x.name"
+    expect:
+      empty: true
+
+  - name: a_node_alone_2_nobody_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (x:Z&A {k: 1}) RETURN x.name"
+    expect:
+      empty: true
+
+  # First node of a path
+
+  - name: first_node_1_colon_a
+    query: "MATCH (x:A)-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: first_node_1_colon_a_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (x:A)-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: first_node_1_colon_a_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (x:A)-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: first_node_1_colon_a_colon_b
+    query: "MATCH (x:A:B)-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: first_node_1_colon_a_colon_b_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (x:A:B)-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: first_node_1_colon_a_colon_b_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (x:A:B)-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: first_node_1_is_a
+    query: "MATCH (x IS A)-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: first_node_1_is_a_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (x IS A)-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: first_node_1_is_a_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (x IS A)-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: first_node_1_is_a_and_b
+    query: "MATCH (x IS A&B)-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: first_node_1_is_a_and_b_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (x IS A&B)-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: first_node_1_is_a_and_b_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (x IS A&B)-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: first_node_1_a_and_b
+    query: "MATCH (x:A&B)-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: first_node_1_a_and_b_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (x:A&B)-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: first_node_1_a_and_b_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (x:A&B)-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: first_node_1_a_or_b
+    query: "MATCH (x:A|B)-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]
+
+  - name: first_node_1_a_or_b_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (x:A|B)-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]
+
+  - name: first_node_1_a_or_b_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (x:A|B)-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]
+
+  - name: first_node_1_not_a
+    query: "MATCH (x:!A)-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Gus]
+        - [Jules]
+        - [Mia]
+
+  - name: first_node_1_not_a_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (x:!A)-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Gus]
+        - [Jules]
+        - [Mia]
+
+  - name: first_node_1_not_a_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (x:!A)-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Gus]
+        - [Jules]
+        - [Mia]
+
+  - name: first_node_1_any_label
+    query: "MATCH (x:%)-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Jules]
+        - [Vincent]
+
+  - name: first_node_1_any_label_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (x:%)-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Jules]
+        - [Vincent]
+
+  - name: first_node_1_any_label_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (x:%)-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Jules]
+        - [Vincent]
+
+  - name: first_node_1_paren_a
+    query: "MATCH (x:(A))-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: first_node_1_paren_a_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (x:(A))-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: first_node_1_paren_a_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (x:(A))-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: first_node_1_nobody
+    query: "MATCH (x:Z&A)-[:R]->(t:T) RETURN x.name"
+    expect:
+      empty: true
+
+  - name: first_node_1_nobody_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (x:Z&A)-[:R]->(t:T) RETURN x.name"
+    expect:
+      empty: true
+
+  - name: first_node_1_nobody_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (x:Z&A)-[:R]->(t:T) RETURN x.name"
+    expect:
+      empty: true
+
+  - name: first_node_2_colon_a
+    query: "MATCH (x:A)-[:R]->(t) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: first_node_2_colon_a_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (x:A)-[:R]->(t) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: first_node_2_colon_a_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (x:A)-[:R]->(t) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: first_node_2_colon_a_colon_b
+    query: "MATCH (x:A:B)-[:R]->(t) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: first_node_2_colon_a_colon_b_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (x:A:B)-[:R]->(t) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: first_node_2_colon_a_colon_b_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (x:A:B)-[:R]->(t) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: first_node_2_is_a
+    query: "MATCH (x IS A)-[:R]->(t) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: first_node_2_is_a_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (x IS A)-[:R]->(t) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: first_node_2_is_a_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (x IS A)-[:R]->(t) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: first_node_2_is_a_and_b
+    query: "MATCH (x IS A&B)-[:R]->(t) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: first_node_2_is_a_and_b_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (x IS A&B)-[:R]->(t) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: first_node_2_is_a_and_b_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (x IS A&B)-[:R]->(t) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: first_node_2_a_and_b
+    query: "MATCH (x:A&B)-[:R]->(t) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: first_node_2_a_and_b_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (x:A&B)-[:R]->(t) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: first_node_2_a_and_b_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (x:A&B)-[:R]->(t) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: first_node_2_a_or_b
+    query: "MATCH (x:A|B)-[:R]->(t) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]
+
+  - name: first_node_2_a_or_b_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (x:A|B)-[:R]->(t) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]
+
+  - name: first_node_2_a_or_b_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (x:A|B)-[:R]->(t) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]
+
+  - name: first_node_2_not_a
+    query: "MATCH (x:!A)-[:R]->(t) RETURN x.name"
+    expect:
+      rows:
+        - [Gus]
+        - [Jules]
+        - [Mia]
+
+  - name: first_node_2_not_a_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (x:!A)-[:R]->(t) RETURN x.name"
+    expect:
+      rows:
+        - [Gus]
+        - [Jules]
+        - [Mia]
+
+  - name: first_node_2_not_a_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (x:!A)-[:R]->(t) RETURN x.name"
+    expect:
+      rows:
+        - [Gus]
+        - [Jules]
+        - [Mia]
+
+  - name: first_node_2_any_label
+    query: "MATCH (x:%)-[:R]->(t) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Jules]
+        - [Vincent]
+
+  - name: first_node_2_any_label_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (x:%)-[:R]->(t) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Jules]
+        - [Vincent]
+
+  - name: first_node_2_any_label_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (x:%)-[:R]->(t) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Jules]
+        - [Vincent]
+
+  - name: first_node_2_paren_a
+    query: "MATCH (x:(A))-[:R]->(t) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: first_node_2_paren_a_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (x:(A))-[:R]->(t) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: first_node_2_paren_a_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (x:(A))-[:R]->(t) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: first_node_2_nobody
+    query: "MATCH (x:Z&A)-[:R]->(t) RETURN x.name"
+    expect:
+      empty: true
+
+  - name: first_node_2_nobody_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (x:Z&A)-[:R]->(t) RETURN x.name"
+    expect:
+      empty: true
+
+  - name: first_node_2_nobody_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (x:Z&A)-[:R]->(t) RETURN x.name"
+    expect:
+      empty: true
+
+  - name: first_node_3_colon_a
+    query: "MATCH (x:A)-[:R]->(:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: first_node_3_colon_a_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (x:A)-[:R]->(:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: first_node_3_colon_a_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (x:A)-[:R]->(:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: first_node_3_colon_a_colon_b
+    query: "MATCH (x:A:B)-[:R]->(:T) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: first_node_3_colon_a_colon_b_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (x:A:B)-[:R]->(:T) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: first_node_3_colon_a_colon_b_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (x:A:B)-[:R]->(:T) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: first_node_3_is_a
+    query: "MATCH (x IS A)-[:R]->(:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: first_node_3_is_a_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (x IS A)-[:R]->(:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: first_node_3_is_a_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (x IS A)-[:R]->(:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: first_node_3_is_a_and_b
+    query: "MATCH (x IS A&B)-[:R]->(:T) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: first_node_3_is_a_and_b_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (x IS A&B)-[:R]->(:T) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: first_node_3_is_a_and_b_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (x IS A&B)-[:R]->(:T) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: first_node_3_a_and_b
+    query: "MATCH (x:A&B)-[:R]->(:T) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: first_node_3_a_and_b_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (x:A&B)-[:R]->(:T) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: first_node_3_a_and_b_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (x:A&B)-[:R]->(:T) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: first_node_3_a_or_b
+    query: "MATCH (x:A|B)-[:R]->(:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]
+
+  - name: first_node_3_a_or_b_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (x:A|B)-[:R]->(:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]
+
+  - name: first_node_3_a_or_b_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (x:A|B)-[:R]->(:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]
+
+  - name: first_node_3_not_a
+    query: "MATCH (x:!A)-[:R]->(:T) RETURN x.name"
+    expect:
+      rows:
+        - [Gus]
+        - [Jules]
+        - [Mia]
+
+  - name: first_node_3_not_a_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (x:!A)-[:R]->(:T) RETURN x.name"
+    expect:
+      rows:
+        - [Gus]
+        - [Jules]
+        - [Mia]
+
+  - name: first_node_3_not_a_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (x:!A)-[:R]->(:T) RETURN x.name"
+    expect:
+      rows:
+        - [Gus]
+        - [Jules]
+        - [Mia]
+
+  - name: first_node_3_any_label
+    query: "MATCH (x:%)-[:R]->(:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Jules]
+        - [Vincent]
+
+  - name: first_node_3_any_label_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (x:%)-[:R]->(:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Jules]
+        - [Vincent]
+
+  - name: first_node_3_any_label_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (x:%)-[:R]->(:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Jules]
+        - [Vincent]
+
+  - name: first_node_3_paren_a
+    query: "MATCH (x:(A))-[:R]->(:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: first_node_3_paren_a_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (x:(A))-[:R]->(:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: first_node_3_paren_a_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (x:(A))-[:R]->(:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: first_node_3_nobody
+    query: "MATCH (x:Z&A)-[:R]->(:T) RETURN x.name"
+    expect:
+      empty: true
+
+  - name: first_node_3_nobody_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (x:Z&A)-[:R]->(:T) RETURN x.name"
+    expect:
+      empty: true
+
+  - name: first_node_3_nobody_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (x:Z&A)-[:R]->(:T) RETURN x.name"
+    expect:
+      empty: true
+
+  # First node, incoming and undirected
+
+  - name: first_node_directions_1_colon_a
+    query: "MATCH (x:A)<-[:S]-(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: first_node_directions_1_colon_a_colon_b
+    query: "MATCH (x:A:B)<-[:S]-(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: first_node_directions_1_is_a
+    query: "MATCH (x IS A)<-[:S]-(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: first_node_directions_1_is_a_and_b
+    query: "MATCH (x IS A&B)<-[:S]-(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: first_node_directions_1_a_and_b
+    query: "MATCH (x:A&B)<-[:S]-(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: first_node_directions_1_a_or_b
+    query: "MATCH (x:A|B)<-[:S]-(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]
+
+  - name: first_node_directions_1_not_a
+    query: "MATCH (x:!A)<-[:S]-(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Gus]
+        - [Jules]
+        - [Mia]
+
+  - name: first_node_directions_1_any_label
+    query: "MATCH (x:%)<-[:S]-(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Jules]
+        - [Vincent]
+
+  - name: first_node_directions_1_paren_a
+    query: "MATCH (x:(A))<-[:S]-(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: first_node_directions_1_nobody
+    query: "MATCH (x:Z&A)<-[:S]-(t:T) RETURN x.name"
+    expect:
+      empty: true
+
+  - name: first_node_directions_2_colon_a
+    query: "MATCH (x:A)-[:R]-(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: first_node_directions_2_colon_a_colon_b
+    query: "MATCH (x:A:B)-[:R]-(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: first_node_directions_2_is_a
+    query: "MATCH (x IS A)-[:R]-(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: first_node_directions_2_is_a_and_b
+    query: "MATCH (x IS A&B)-[:R]-(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: first_node_directions_2_a_and_b
+    query: "MATCH (x:A&B)-[:R]-(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: first_node_directions_2_a_or_b
+    query: "MATCH (x:A|B)-[:R]-(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]
+
+  - name: first_node_directions_2_not_a
+    query: "MATCH (x:!A)-[:R]-(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Gus]
+        - [Jules]
+        - [Mia]
+
+  - name: first_node_directions_2_any_label
+    query: "MATCH (x:%)-[:R]-(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Jules]
+        - [Vincent]
+
+  - name: first_node_directions_2_paren_a
+    query: "MATCH (x:(A))-[:R]-(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: first_node_directions_2_nobody
+    query: "MATCH (x:Z&A)-[:R]-(t:T) RETURN x.name"
+    expect:
+      empty: true
+
+  - name: first_node_directions_3_colon_a
+    query: "MATCH (x:A)<-[:S]-(t) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: first_node_directions_3_colon_a_colon_b
+    query: "MATCH (x:A:B)<-[:S]-(t) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: first_node_directions_3_is_a
+    query: "MATCH (x IS A)<-[:S]-(t) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: first_node_directions_3_is_a_and_b
+    query: "MATCH (x IS A&B)<-[:S]-(t) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: first_node_directions_3_a_and_b
+    query: "MATCH (x:A&B)<-[:S]-(t) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: first_node_directions_3_a_or_b
+    query: "MATCH (x:A|B)<-[:S]-(t) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]
+
+  - name: first_node_directions_3_not_a
+    query: "MATCH (x:!A)<-[:S]-(t) RETURN x.name"
+    expect:
+      rows:
+        - [Gus]
+        - [Jules]
+        - [Mia]
+
+  - name: first_node_directions_3_any_label
+    query: "MATCH (x:%)<-[:S]-(t) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Jules]
+        - [Vincent]
+
+  - name: first_node_directions_3_paren_a
+    query: "MATCH (x:(A))<-[:S]-(t) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: first_node_directions_3_nobody
+    query: "MATCH (x:Z&A)<-[:S]-(t) RETURN x.name"
+    expect:
+      empty: true
+
+  # First node, with WHERE and properties
+
+  - name: first_node_where_1_colon_a
+    query: "MATCH (x:A {k: 1})-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: first_node_where_1_colon_a_colon_b
+    query: "MATCH (x:A:B {k: 1})-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: first_node_where_1_is_a
+    query: "MATCH (x IS A {k: 1})-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: first_node_where_1_is_a_and_b
+    query: "MATCH (x IS A&B {k: 1})-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: first_node_where_1_a_and_b
+    query: "MATCH (x:A&B {k: 1})-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: first_node_where_1_a_or_b
+    query: "MATCH (x:A|B {k: 1})-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]
+
+  - name: first_node_where_1_not_a
+    query: "MATCH (x:!A {k: 1})-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Gus]
+        - [Jules]
+        - [Mia]
+
+  - name: first_node_where_1_any_label
+    query: "MATCH (x:% {k: 1})-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Jules]
+        - [Vincent]
+
+  - name: first_node_where_1_paren_a
+    query: "MATCH (x:(A) {k: 1})-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: first_node_where_1_nobody
+    query: "MATCH (x:Z&A {k: 1})-[:R]->(t:T) RETURN x.name"
+    expect:
+      empty: true
+
+  - name: first_node_where_2_colon_a
+    query: "MATCH (x:A WHERE x.k = 1)-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: first_node_where_2_colon_a_colon_b
+    query: "MATCH (x:A:B WHERE x.k = 1)-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: first_node_where_2_is_a
+    query: "MATCH (x IS A WHERE x.k = 1)-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: first_node_where_2_is_a_and_b
+    query: "MATCH (x IS A&B WHERE x.k = 1)-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: first_node_where_2_a_and_b
+    query: "MATCH (x:A&B WHERE x.k = 1)-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: first_node_where_2_a_or_b
+    query: "MATCH (x:A|B WHERE x.k = 1)-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]
+
+  - name: first_node_where_2_not_a
+    query: "MATCH (x:!A WHERE x.k = 1)-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Gus]
+        - [Jules]
+        - [Mia]
+
+  - name: first_node_where_2_any_label
+    query: "MATCH (x:% WHERE x.k = 1)-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Jules]
+        - [Vincent]
+
+  - name: first_node_where_2_paren_a
+    query: "MATCH (x:(A) WHERE x.k = 1)-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: first_node_where_2_nobody
+    query: "MATCH (x:Z&A WHERE x.k = 1)-[:R]->(t:T) RETURN x.name"
+    expect:
+      empty: true
+
+  - name: first_node_where_3_colon_a
+    query: "MATCH (x:A)-[:R]->(t:T) WHERE x.k = 1 RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: first_node_where_3_colon_a_colon_b
+    query: "MATCH (x:A:B)-[:R]->(t:T) WHERE x.k = 1 RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: first_node_where_3_is_a
+    query: "MATCH (x IS A)-[:R]->(t:T) WHERE x.k = 1 RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: first_node_where_3_is_a_and_b
+    query: "MATCH (x IS A&B)-[:R]->(t:T) WHERE x.k = 1 RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: first_node_where_3_a_and_b
+    query: "MATCH (x:A&B)-[:R]->(t:T) WHERE x.k = 1 RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: first_node_where_3_a_or_b
+    query: "MATCH (x:A|B)-[:R]->(t:T) WHERE x.k = 1 RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]
+
+  - name: first_node_where_3_not_a
+    query: "MATCH (x:!A)-[:R]->(t:T) WHERE x.k = 1 RETURN x.name"
+    expect:
+      rows:
+        - [Gus]
+        - [Jules]
+        - [Mia]
+
+  - name: first_node_where_3_any_label
+    query: "MATCH (x:%)-[:R]->(t:T) WHERE x.k = 1 RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Jules]
+        - [Vincent]
+
+  - name: first_node_where_3_paren_a
+    query: "MATCH (x:(A))-[:R]->(t:T) WHERE x.k = 1 RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: first_node_where_3_nobody
+    query: "MATCH (x:Z&A)-[:R]->(t:T) WHERE x.k = 1 RETURN x.name"
+    expect:
+      empty: true
+
+  # First node, far end pinned by a key
+
+  - name: first_node_pinned_far_end_1_colon_a
+    query: "MATCH (x:A)-[:R]->(t:T {tk: 1}) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: first_node_pinned_far_end_1_colon_a_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (x:A)-[:R]->(t:T {tk: 1}) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: first_node_pinned_far_end_1_colon_a_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (x:A)-[:R]->(t:T {tk: 1}) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: first_node_pinned_far_end_1_colon_a_colon_b
+    query: "MATCH (x:A:B)-[:R]->(t:T {tk: 1}) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: first_node_pinned_far_end_1_colon_a_colon_b_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (x:A:B)-[:R]->(t:T {tk: 1}) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: first_node_pinned_far_end_1_colon_a_colon_b_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (x:A:B)-[:R]->(t:T {tk: 1}) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: first_node_pinned_far_end_1_is_a
+    query: "MATCH (x IS A)-[:R]->(t:T {tk: 1}) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: first_node_pinned_far_end_1_is_a_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (x IS A)-[:R]->(t:T {tk: 1}) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: first_node_pinned_far_end_1_is_a_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (x IS A)-[:R]->(t:T {tk: 1}) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: first_node_pinned_far_end_1_is_a_and_b
+    query: "MATCH (x IS A&B)-[:R]->(t:T {tk: 1}) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: first_node_pinned_far_end_1_is_a_and_b_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (x IS A&B)-[:R]->(t:T {tk: 1}) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: first_node_pinned_far_end_1_is_a_and_b_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (x IS A&B)-[:R]->(t:T {tk: 1}) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: first_node_pinned_far_end_1_a_and_b
+    query: "MATCH (x:A&B)-[:R]->(t:T {tk: 1}) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: first_node_pinned_far_end_1_a_and_b_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (x:A&B)-[:R]->(t:T {tk: 1}) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: first_node_pinned_far_end_1_a_and_b_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (x:A&B)-[:R]->(t:T {tk: 1}) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: first_node_pinned_far_end_1_a_or_b
+    query: "MATCH (x:A|B)-[:R]->(t:T {tk: 1}) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]
+
+  - name: first_node_pinned_far_end_1_a_or_b_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (x:A|B)-[:R]->(t:T {tk: 1}) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]
+
+  - name: first_node_pinned_far_end_1_a_or_b_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (x:A|B)-[:R]->(t:T {tk: 1}) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]
+
+  - name: first_node_pinned_far_end_1_not_a
+    query: "MATCH (x:!A)-[:R]->(t:T {tk: 1}) RETURN x.name"
+    expect:
+      rows:
+        - [Gus]
+        - [Jules]
+        - [Mia]
+
+  - name: first_node_pinned_far_end_1_not_a_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (x:!A)-[:R]->(t:T {tk: 1}) RETURN x.name"
+    expect:
+      rows:
+        - [Gus]
+        - [Jules]
+        - [Mia]
+
+  - name: first_node_pinned_far_end_1_not_a_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (x:!A)-[:R]->(t:T {tk: 1}) RETURN x.name"
+    expect:
+      rows:
+        - [Gus]
+        - [Jules]
+        - [Mia]
+
+  - name: first_node_pinned_far_end_1_any_label
+    query: "MATCH (x:%)-[:R]->(t:T {tk: 1}) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Jules]
+        - [Vincent]
+
+  - name: first_node_pinned_far_end_1_any_label_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (x:%)-[:R]->(t:T {tk: 1}) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Jules]
+        - [Vincent]
+
+  - name: first_node_pinned_far_end_1_any_label_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (x:%)-[:R]->(t:T {tk: 1}) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Jules]
+        - [Vincent]
+
+  - name: first_node_pinned_far_end_1_paren_a
+    query: "MATCH (x:(A))-[:R]->(t:T {tk: 1}) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: first_node_pinned_far_end_1_paren_a_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (x:(A))-[:R]->(t:T {tk: 1}) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: first_node_pinned_far_end_1_paren_a_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (x:(A))-[:R]->(t:T {tk: 1}) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: first_node_pinned_far_end_1_nobody
+    query: "MATCH (x:Z&A)-[:R]->(t:T {tk: 1}) RETURN x.name"
+    expect:
+      empty: true
+
+  - name: first_node_pinned_far_end_1_nobody_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (x:Z&A)-[:R]->(t:T {tk: 1}) RETURN x.name"
+    expect:
+      empty: true
+
+  - name: first_node_pinned_far_end_1_nobody_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (x:Z&A)-[:R]->(t:T {tk: 1}) RETURN x.name"
+    expect:
+      empty: true
+
+  - name: first_node_pinned_far_end_2_colon_a
+    query: "MATCH (x:A)-[:R]->(t:T) WHERE t.tk = 1 RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: first_node_pinned_far_end_2_colon_a_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (x:A)-[:R]->(t:T) WHERE t.tk = 1 RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: first_node_pinned_far_end_2_colon_a_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (x:A)-[:R]->(t:T) WHERE t.tk = 1 RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: first_node_pinned_far_end_2_colon_a_colon_b
+    query: "MATCH (x:A:B)-[:R]->(t:T) WHERE t.tk = 1 RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: first_node_pinned_far_end_2_colon_a_colon_b_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (x:A:B)-[:R]->(t:T) WHERE t.tk = 1 RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: first_node_pinned_far_end_2_colon_a_colon_b_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (x:A:B)-[:R]->(t:T) WHERE t.tk = 1 RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: first_node_pinned_far_end_2_is_a
+    query: "MATCH (x IS A)-[:R]->(t:T) WHERE t.tk = 1 RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: first_node_pinned_far_end_2_is_a_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (x IS A)-[:R]->(t:T) WHERE t.tk = 1 RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: first_node_pinned_far_end_2_is_a_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (x IS A)-[:R]->(t:T) WHERE t.tk = 1 RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: first_node_pinned_far_end_2_is_a_and_b
+    query: "MATCH (x IS A&B)-[:R]->(t:T) WHERE t.tk = 1 RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: first_node_pinned_far_end_2_is_a_and_b_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (x IS A&B)-[:R]->(t:T) WHERE t.tk = 1 RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: first_node_pinned_far_end_2_is_a_and_b_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (x IS A&B)-[:R]->(t:T) WHERE t.tk = 1 RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: first_node_pinned_far_end_2_a_and_b
+    query: "MATCH (x:A&B)-[:R]->(t:T) WHERE t.tk = 1 RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: first_node_pinned_far_end_2_a_and_b_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (x:A&B)-[:R]->(t:T) WHERE t.tk = 1 RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: first_node_pinned_far_end_2_a_and_b_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (x:A&B)-[:R]->(t:T) WHERE t.tk = 1 RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: first_node_pinned_far_end_2_a_or_b
+    query: "MATCH (x:A|B)-[:R]->(t:T) WHERE t.tk = 1 RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]
+
+  - name: first_node_pinned_far_end_2_a_or_b_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (x:A|B)-[:R]->(t:T) WHERE t.tk = 1 RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]
+
+  - name: first_node_pinned_far_end_2_a_or_b_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (x:A|B)-[:R]->(t:T) WHERE t.tk = 1 RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]
+
+  - name: first_node_pinned_far_end_2_not_a
+    query: "MATCH (x:!A)-[:R]->(t:T) WHERE t.tk = 1 RETURN x.name"
+    expect:
+      rows:
+        - [Gus]
+        - [Jules]
+        - [Mia]
+
+  - name: first_node_pinned_far_end_2_not_a_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (x:!A)-[:R]->(t:T) WHERE t.tk = 1 RETURN x.name"
+    expect:
+      rows:
+        - [Gus]
+        - [Jules]
+        - [Mia]
+
+  - name: first_node_pinned_far_end_2_not_a_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (x:!A)-[:R]->(t:T) WHERE t.tk = 1 RETURN x.name"
+    expect:
+      rows:
+        - [Gus]
+        - [Jules]
+        - [Mia]
+
+  - name: first_node_pinned_far_end_2_any_label
+    query: "MATCH (x:%)-[:R]->(t:T) WHERE t.tk = 1 RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Jules]
+        - [Vincent]
+
+  - name: first_node_pinned_far_end_2_any_label_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (x:%)-[:R]->(t:T) WHERE t.tk = 1 RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Jules]
+        - [Vincent]
+
+  - name: first_node_pinned_far_end_2_any_label_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (x:%)-[:R]->(t:T) WHERE t.tk = 1 RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Jules]
+        - [Vincent]
+
+  - name: first_node_pinned_far_end_2_paren_a
+    query: "MATCH (x:(A))-[:R]->(t:T) WHERE t.tk = 1 RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: first_node_pinned_far_end_2_paren_a_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (x:(A))-[:R]->(t:T) WHERE t.tk = 1 RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: first_node_pinned_far_end_2_paren_a_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (x:(A))-[:R]->(t:T) WHERE t.tk = 1 RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: first_node_pinned_far_end_2_nobody
+    query: "MATCH (x:Z&A)-[:R]->(t:T) WHERE t.tk = 1 RETURN x.name"
+    expect:
+      empty: true
+
+  - name: first_node_pinned_far_end_2_nobody_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (x:Z&A)-[:R]->(t:T) WHERE t.tk = 1 RETURN x.name"
+    expect:
+      empty: true
+
+  - name: first_node_pinned_far_end_2_nobody_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (x:Z&A)-[:R]->(t:T) WHERE t.tk = 1 RETURN x.name"
+    expect:
+      empty: true
+
+  - name: first_node_pinned_far_end_3_colon_a
+    query: "MATCH (x:A)-[:R]->(t {tk: 1}) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: first_node_pinned_far_end_3_colon_a_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (x:A)-[:R]->(t {tk: 1}) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: first_node_pinned_far_end_3_colon_a_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (x:A)-[:R]->(t {tk: 1}) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: first_node_pinned_far_end_3_colon_a_colon_b
+    query: "MATCH (x:A:B)-[:R]->(t {tk: 1}) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: first_node_pinned_far_end_3_colon_a_colon_b_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (x:A:B)-[:R]->(t {tk: 1}) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: first_node_pinned_far_end_3_colon_a_colon_b_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (x:A:B)-[:R]->(t {tk: 1}) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: first_node_pinned_far_end_3_is_a
+    query: "MATCH (x IS A)-[:R]->(t {tk: 1}) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: first_node_pinned_far_end_3_is_a_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (x IS A)-[:R]->(t {tk: 1}) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: first_node_pinned_far_end_3_is_a_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (x IS A)-[:R]->(t {tk: 1}) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: first_node_pinned_far_end_3_is_a_and_b
+    query: "MATCH (x IS A&B)-[:R]->(t {tk: 1}) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: first_node_pinned_far_end_3_is_a_and_b_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (x IS A&B)-[:R]->(t {tk: 1}) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: first_node_pinned_far_end_3_is_a_and_b_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (x IS A&B)-[:R]->(t {tk: 1}) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: first_node_pinned_far_end_3_a_and_b
+    query: "MATCH (x:A&B)-[:R]->(t {tk: 1}) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: first_node_pinned_far_end_3_a_and_b_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (x:A&B)-[:R]->(t {tk: 1}) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: first_node_pinned_far_end_3_a_and_b_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (x:A&B)-[:R]->(t {tk: 1}) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: first_node_pinned_far_end_3_a_or_b
+    query: "MATCH (x:A|B)-[:R]->(t {tk: 1}) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]
+
+  - name: first_node_pinned_far_end_3_a_or_b_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (x:A|B)-[:R]->(t {tk: 1}) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]
+
+  - name: first_node_pinned_far_end_3_a_or_b_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (x:A|B)-[:R]->(t {tk: 1}) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]
+
+  - name: first_node_pinned_far_end_3_not_a
+    query: "MATCH (x:!A)-[:R]->(t {tk: 1}) RETURN x.name"
+    expect:
+      rows:
+        - [Gus]
+        - [Jules]
+        - [Mia]
+
+  - name: first_node_pinned_far_end_3_not_a_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (x:!A)-[:R]->(t {tk: 1}) RETURN x.name"
+    expect:
+      rows:
+        - [Gus]
+        - [Jules]
+        - [Mia]
+
+  - name: first_node_pinned_far_end_3_not_a_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (x:!A)-[:R]->(t {tk: 1}) RETURN x.name"
+    expect:
+      rows:
+        - [Gus]
+        - [Jules]
+        - [Mia]
+
+  - name: first_node_pinned_far_end_3_any_label
+    query: "MATCH (x:%)-[:R]->(t {tk: 1}) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Jules]
+        - [Vincent]
+
+  - name: first_node_pinned_far_end_3_any_label_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (x:%)-[:R]->(t {tk: 1}) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Jules]
+        - [Vincent]
+
+  - name: first_node_pinned_far_end_3_any_label_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (x:%)-[:R]->(t {tk: 1}) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Jules]
+        - [Vincent]
+
+  - name: first_node_pinned_far_end_3_paren_a
+    query: "MATCH (x:(A))-[:R]->(t {tk: 1}) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: first_node_pinned_far_end_3_paren_a_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (x:(A))-[:R]->(t {tk: 1}) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: first_node_pinned_far_end_3_paren_a_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (x:(A))-[:R]->(t {tk: 1}) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: first_node_pinned_far_end_3_nobody
+    query: "MATCH (x:Z&A)-[:R]->(t {tk: 1}) RETURN x.name"
+    expect:
+      empty: true
+
+  - name: first_node_pinned_far_end_3_nobody_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (x:Z&A)-[:R]->(t {tk: 1}) RETURN x.name"
+    expect:
+      empty: true
+
+  - name: first_node_pinned_far_end_3_nobody_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (x:Z&A)-[:R]->(t {tk: 1}) RETURN x.name"
+    expect:
+      empty: true
+
+  # First node of a longer path
+
+  - name: first_node_two_hops_1_colon_a
+    query: "MATCH (x:A)-[:R]->(t:T)-[:S]->(y {name: 'Alix'}) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: first_node_two_hops_1_colon_a_colon_b
+    query: "MATCH (x:A:B)-[:R]->(t:T)-[:S]->(y {name: 'Alix'}) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: first_node_two_hops_1_is_a
+    query: "MATCH (x IS A)-[:R]->(t:T)-[:S]->(y {name: 'Alix'}) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: first_node_two_hops_1_is_a_and_b
+    query: "MATCH (x IS A&B)-[:R]->(t:T)-[:S]->(y {name: 'Alix'}) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: first_node_two_hops_1_a_and_b
+    query: "MATCH (x:A&B)-[:R]->(t:T)-[:S]->(y {name: 'Alix'}) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: first_node_two_hops_1_a_or_b
+    query: "MATCH (x:A|B)-[:R]->(t:T)-[:S]->(y {name: 'Alix'}) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]
+
+  - name: first_node_two_hops_1_not_a
+    query: "MATCH (x:!A)-[:R]->(t:T)-[:S]->(y {name: 'Alix'}) RETURN x.name"
+    expect:
+      rows:
+        - [Gus]
+        - [Jules]
+        - [Mia]
+
+  - name: first_node_two_hops_1_any_label
+    query: "MATCH (x:%)-[:R]->(t:T)-[:S]->(y {name: 'Alix'}) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Jules]
+        - [Vincent]
+
+  - name: first_node_two_hops_1_paren_a
+    query: "MATCH (x:(A))-[:R]->(t:T)-[:S]->(y {name: 'Alix'}) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: first_node_two_hops_1_nobody
+    query: "MATCH (x:Z&A)-[:R]->(t:T)-[:S]->(y {name: 'Alix'}) RETURN x.name"
+    expect:
+      empty: true
+
+  # Named path
+
+  - name: named_path_1_colon_a
+    query: "MATCH p = (x:A)-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: named_path_1_colon_a_colon_b
+    query: "MATCH p = (x:A:B)-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: named_path_1_is_a
+    query: "MATCH p = (x IS A)-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: named_path_1_is_a_and_b
+    query: "MATCH p = (x IS A&B)-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: named_path_1_a_and_b
+    query: "MATCH p = (x:A&B)-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: named_path_1_a_or_b
+    query: "MATCH p = (x:A|B)-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]
+
+  - name: named_path_1_not_a
+    query: "MATCH p = (x:!A)-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Gus]
+        - [Jules]
+        - [Mia]
+
+  - name: named_path_1_any_label
+    query: "MATCH p = (x:%)-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Jules]
+        - [Vincent]
+
+  - name: named_path_1_paren_a
+    query: "MATCH p = (x:(A))-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: named_path_1_nobody
+    query: "MATCH p = (x:Z&A)-[:R]->(t:T) RETURN x.name"
+    expect:
+      empty: true
+
+  - name: named_path_2_colon_a
+    query: "MATCH p = (x:A)-[:R]->(t:T)-[:S]->(y {name: 'Alix'}) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: named_path_2_colon_a_colon_b
+    query: "MATCH p = (x:A:B)-[:R]->(t:T)-[:S]->(y {name: 'Alix'}) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: named_path_2_is_a
+    query: "MATCH p = (x IS A)-[:R]->(t:T)-[:S]->(y {name: 'Alix'}) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: named_path_2_is_a_and_b
+    query: "MATCH p = (x IS A&B)-[:R]->(t:T)-[:S]->(y {name: 'Alix'}) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: named_path_2_a_and_b
+    query: "MATCH p = (x:A&B)-[:R]->(t:T)-[:S]->(y {name: 'Alix'}) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: named_path_2_a_or_b
+    query: "MATCH p = (x:A|B)-[:R]->(t:T)-[:S]->(y {name: 'Alix'}) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]
+
+  - name: named_path_2_not_a
+    query: "MATCH p = (x:!A)-[:R]->(t:T)-[:S]->(y {name: 'Alix'}) RETURN x.name"
+    expect:
+      rows:
+        - [Gus]
+        - [Jules]
+        - [Mia]
+
+  - name: named_path_2_any_label
+    query: "MATCH p = (x:%)-[:R]->(t:T)-[:S]->(y {name: 'Alix'}) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Jules]
+        - [Vincent]
+
+  - name: named_path_2_paren_a
+    query: "MATCH p = (x:(A))-[:R]->(t:T)-[:S]->(y {name: 'Alix'}) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: named_path_2_nobody
+    query: "MATCH p = (x:Z&A)-[:R]->(t:T)-[:S]->(y {name: 'Alix'}) RETURN x.name"
+    expect:
+      empty: true
+
+  # Path modes
+
+  - name: path_modes_1_colon_a
+    query: "MATCH TRAIL (x:A)-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: path_modes_1_colon_a_colon_b
+    query: "MATCH TRAIL (x:A:B)-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: path_modes_1_is_a
+    query: "MATCH TRAIL (x IS A)-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: path_modes_1_is_a_and_b
+    query: "MATCH TRAIL (x IS A&B)-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: path_modes_1_a_and_b
+    query: "MATCH TRAIL (x:A&B)-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: path_modes_1_a_or_b
+    query: "MATCH TRAIL (x:A|B)-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]
+
+  - name: path_modes_1_not_a
+    query: "MATCH TRAIL (x:!A)-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Gus]
+        - [Jules]
+        - [Mia]
+
+  - name: path_modes_1_any_label
+    query: "MATCH TRAIL (x:%)-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Jules]
+        - [Vincent]
+
+  - name: path_modes_1_paren_a
+    query: "MATCH TRAIL (x:(A))-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: path_modes_1_nobody
+    query: "MATCH TRAIL (x:Z&A)-[:R]->(t:T) RETURN x.name"
+    expect:
+      empty: true
+
+  - name: path_modes_2_colon_a
+    query: "MATCH ACYCLIC (x:A)-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: path_modes_2_colon_a_colon_b
+    query: "MATCH ACYCLIC (x:A:B)-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: path_modes_2_is_a
+    query: "MATCH ACYCLIC (x IS A)-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: path_modes_2_is_a_and_b
+    query: "MATCH ACYCLIC (x IS A&B)-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: path_modes_2_a_and_b
+    query: "MATCH ACYCLIC (x:A&B)-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: path_modes_2_a_or_b
+    query: "MATCH ACYCLIC (x:A|B)-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]
+
+  - name: path_modes_2_not_a
+    query: "MATCH ACYCLIC (x:!A)-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Gus]
+        - [Jules]
+        - [Mia]
+
+  - name: path_modes_2_any_label
+    query: "MATCH ACYCLIC (x:%)-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Jules]
+        - [Vincent]
+
+  - name: path_modes_2_paren_a
+    query: "MATCH ACYCLIC (x:(A))-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: path_modes_2_nobody
+    query: "MATCH ACYCLIC (x:Z&A)-[:R]->(t:T) RETURN x.name"
+    expect:
+      empty: true
+
+  - name: path_modes_3_colon_a
+    query: "MATCH SIMPLE (x:A)-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: path_modes_3_colon_a_colon_b
+    query: "MATCH SIMPLE (x:A:B)-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: path_modes_3_is_a
+    query: "MATCH SIMPLE (x IS A)-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: path_modes_3_is_a_and_b
+    query: "MATCH SIMPLE (x IS A&B)-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: path_modes_3_a_and_b
+    query: "MATCH SIMPLE (x:A&B)-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: path_modes_3_a_or_b
+    query: "MATCH SIMPLE (x:A|B)-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]
+
+  - name: path_modes_3_not_a
+    query: "MATCH SIMPLE (x:!A)-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Gus]
+        - [Jules]
+        - [Mia]
+
+  - name: path_modes_3_any_label
+    query: "MATCH SIMPLE (x:%)-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Jules]
+        - [Vincent]
+
+  - name: path_modes_3_paren_a
+    query: "MATCH SIMPLE (x:(A))-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: path_modes_3_nobody
+    query: "MATCH SIMPLE (x:Z&A)-[:R]->(t:T) RETURN x.name"
+    expect:
+      empty: true
+
+  # Variable-length hop
+
+  - name: variable_length_1_colon_a
+    query: "MATCH (x:A)-[:R*1..2]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: variable_length_1_colon_a_colon_b
+    query: "MATCH (x:A:B)-[:R*1..2]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: variable_length_1_is_a
+    query: "MATCH (x IS A)-[:R*1..2]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: variable_length_1_is_a_and_b
+    query: "MATCH (x IS A&B)-[:R*1..2]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: variable_length_1_a_and_b
+    query: "MATCH (x:A&B)-[:R*1..2]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: variable_length_1_a_or_b
+    query: "MATCH (x:A|B)-[:R*1..2]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]
+
+  - name: variable_length_1_not_a
+    query: "MATCH (x:!A)-[:R*1..2]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Gus]
+        - [Jules]
+        - [Mia]
+
+  - name: variable_length_1_any_label
+    query: "MATCH (x:%)-[:R*1..2]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Jules]
+        - [Vincent]
+
+  - name: variable_length_1_paren_a
+    query: "MATCH (x:(A))-[:R*1..2]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: variable_length_1_nobody
+    query: "MATCH (x:Z&A)-[:R*1..2]->(t:T) RETURN x.name"
+    expect:
+      empty: true
+
+  - name: variable_length_2_colon_a
+    query: "MATCH (x:A)-[:R]->{1,2}(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: variable_length_2_colon_a_colon_b
+    query: "MATCH (x:A:B)-[:R]->{1,2}(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: variable_length_2_is_a
+    query: "MATCH (x IS A)-[:R]->{1,2}(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: variable_length_2_is_a_and_b
+    query: "MATCH (x IS A&B)-[:R]->{1,2}(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: variable_length_2_a_and_b
+    query: "MATCH (x:A&B)-[:R]->{1,2}(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: variable_length_2_a_or_b
+    query: "MATCH (x:A|B)-[:R]->{1,2}(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]
+
+  - name: variable_length_2_not_a
+    query: "MATCH (x:!A)-[:R]->{1,2}(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Gus]
+        - [Jules]
+        - [Mia]
+
+  - name: variable_length_2_any_label
+    query: "MATCH (x:%)-[:R]->{1,2}(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Jules]
+        - [Vincent]
+
+  - name: variable_length_2_paren_a
+    query: "MATCH (x:(A))-[:R]->{1,2}(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: variable_length_2_nobody
+    query: "MATCH (x:Z&A)-[:R]->{1,2}(t:T) RETURN x.name"
+    expect:
+      empty: true
+
+  - name: variable_length_3_colon_a
+    query: "MATCH (x:A)-[:R]->+(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: variable_length_3_colon_a_colon_b
+    query: "MATCH (x:A:B)-[:R]->+(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: variable_length_3_is_a
+    query: "MATCH (x IS A)-[:R]->+(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: variable_length_3_is_a_and_b
+    query: "MATCH (x IS A&B)-[:R]->+(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: variable_length_3_a_and_b
+    query: "MATCH (x:A&B)-[:R]->+(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: variable_length_3_a_or_b
+    query: "MATCH (x:A|B)-[:R]->+(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]
+
+  - name: variable_length_3_not_a
+    query: "MATCH (x:!A)-[:R]->+(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Gus]
+        - [Jules]
+        - [Mia]
+
+  - name: variable_length_3_any_label
+    query: "MATCH (x:%)-[:R]->+(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Jules]
+        - [Vincent]
+
+  - name: variable_length_3_paren_a
+    query: "MATCH (x:(A))-[:R]->+(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: variable_length_3_nobody
+    query: "MATCH (x:Z&A)-[:R]->+(t:T) RETURN x.name"
+    expect:
+      empty: true
+
+  # Shortest path
+
+  - name: shortest_1_colon_a
+    query: "MATCH ANY SHORTEST (x:A)-[:R]->+(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: shortest_1_colon_a_colon_b
+    query: "MATCH ANY SHORTEST (x:A:B)-[:R]->+(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: shortest_1_is_a
+    query: "MATCH ANY SHORTEST (x IS A)-[:R]->+(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: shortest_1_is_a_and_b
+    query: "MATCH ANY SHORTEST (x IS A&B)-[:R]->+(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: shortest_1_a_and_b
+    query: "MATCH ANY SHORTEST (x:A&B)-[:R]->+(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: shortest_1_a_or_b
+    query: "MATCH ANY SHORTEST (x:A|B)-[:R]->+(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]
+
+  - name: shortest_1_not_a
+    query: "MATCH ANY SHORTEST (x:!A)-[:R]->+(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Gus]
+        - [Jules]
+        - [Mia]
+
+  - name: shortest_1_any_label
+    query: "MATCH ANY SHORTEST (x:%)-[:R]->+(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Jules]
+        - [Vincent]
+
+  - name: shortest_1_paren_a
+    query: "MATCH ANY SHORTEST (x:(A))-[:R]->+(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: shortest_1_nobody
+    query: "MATCH ANY SHORTEST (x:Z&A)-[:R]->+(t:T) RETURN x.name"
+    expect:
+      empty: true
+
+  - name: shortest_2_colon_a
+    query: "MATCH p = ALL SHORTEST (x:A)-[:R]->+(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: shortest_2_colon_a_colon_b
+    query: "MATCH p = ALL SHORTEST (x:A:B)-[:R]->+(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: shortest_2_is_a
+    query: "MATCH p = ALL SHORTEST (x IS A)-[:R]->+(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: shortest_2_is_a_and_b
+    query: "MATCH p = ALL SHORTEST (x IS A&B)-[:R]->+(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: shortest_2_a_and_b
+    query: "MATCH p = ALL SHORTEST (x:A&B)-[:R]->+(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: shortest_2_a_or_b
+    query: "MATCH p = ALL SHORTEST (x:A|B)-[:R]->+(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]
+
+  - name: shortest_2_not_a
+    query: "MATCH p = ALL SHORTEST (x:!A)-[:R]->+(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Gus]
+        - [Jules]
+        - [Mia]
+
+  - name: shortest_2_any_label
+    query: "MATCH p = ALL SHORTEST (x:%)-[:R]->+(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Jules]
+        - [Vincent]
+
+  - name: shortest_2_paren_a
+    query: "MATCH p = ALL SHORTEST (x:(A))-[:R]->+(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: shortest_2_nobody
+    query: "MATCH p = ALL SHORTEST (x:Z&A)-[:R]->+(t:T) RETURN x.name"
+    expect:
+      empty: true
+
+  - name: shortest_3_colon_a
+    query: "MATCH SHORTEST 1 PATH (x:A)-[:R]->+(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: shortest_3_colon_a_colon_b
+    query: "MATCH SHORTEST 1 PATH (x:A:B)-[:R]->+(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: shortest_3_is_a
+    query: "MATCH SHORTEST 1 PATH (x IS A)-[:R]->+(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: shortest_3_is_a_and_b
+    query: "MATCH SHORTEST 1 PATH (x IS A&B)-[:R]->+(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: shortest_3_a_and_b
+    query: "MATCH SHORTEST 1 PATH (x:A&B)-[:R]->+(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: shortest_3_a_or_b
+    query: "MATCH SHORTEST 1 PATH (x:A|B)-[:R]->+(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]
+
+  - name: shortest_3_not_a
+    query: "MATCH SHORTEST 1 PATH (x:!A)-[:R]->+(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Gus]
+        - [Jules]
+        - [Mia]
+
+  - name: shortest_3_any_label
+    query: "MATCH SHORTEST 1 PATH (x:%)-[:R]->+(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Jules]
+        - [Vincent]
+
+  - name: shortest_3_paren_a
+    query: "MATCH SHORTEST 1 PATH (x:(A))-[:R]->+(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: shortest_3_nobody
+    query: "MATCH SHORTEST 1 PATH (x:Z&A)-[:R]->+(t:T) RETURN x.name"
+    expect:
+      empty: true
+
+  - name: shortest_4_colon_a
+    query: "MATCH ANY SHORTEST (t:T)-[:S]->+(x:A) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: shortest_4_colon_a_colon_b
+    query: "MATCH ANY SHORTEST (t:T)-[:S]->+(x:A:B) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: shortest_4_is_a
+    query: "MATCH ANY SHORTEST (t:T)-[:S]->+(x IS A) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: shortest_4_is_a_and_b
+    query: "MATCH ANY SHORTEST (t:T)-[:S]->+(x IS A&B) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: shortest_4_a_and_b
+    query: "MATCH ANY SHORTEST (t:T)-[:S]->+(x:A&B) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: shortest_4_a_or_b
+    query: "MATCH ANY SHORTEST (t:T)-[:S]->+(x:A|B) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]
+
+  - name: shortest_4_not_a
+    query: "MATCH ANY SHORTEST (t:T)-[:S]->+(x:!A) RETURN x.name"
+    expect:
+      rows:
+        - [Gus]
+        - [Jules]
+        - [Mia]
+
+  - name: shortest_4_any_label
+    query: "MATCH ANY SHORTEST (t:T)-[:S]->+(x:%) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Jules]
+        - [Vincent]
+
+  - name: shortest_4_paren_a
+    query: "MATCH ANY SHORTEST (t:T)-[:S]->+(x:(A)) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: shortest_4_nobody
+    query: "MATCH ANY SHORTEST (t:T)-[:S]->+(x:Z&A) RETURN x.name"
+    expect:
+      empty: true
+
+  # Parenthesized path
+
+  - name: parenthesized_1_colon_a
+    query: "MATCH ((x:A)-[:R]->(t:T)) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: parenthesized_1_colon_a_colon_b
+    query: "MATCH ((x:A:B)-[:R]->(t:T)) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: parenthesized_1_is_a
+    query: "MATCH ((x IS A)-[:R]->(t:T)) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: parenthesized_1_is_a_and_b
+    query: "MATCH ((x IS A&B)-[:R]->(t:T)) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: parenthesized_1_a_and_b
+    query: "MATCH ((x:A&B)-[:R]->(t:T)) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: parenthesized_1_a_or_b
+    query: "MATCH ((x:A|B)-[:R]->(t:T)) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]
+
+  - name: parenthesized_1_not_a
+    query: "MATCH ((x:!A)-[:R]->(t:T)) RETURN x.name"
+    expect:
+      rows:
+        - [Gus]
+        - [Jules]
+        - [Mia]
+
+  - name: parenthesized_1_any_label
+    query: "MATCH ((x:%)-[:R]->(t:T)) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Jules]
+        - [Vincent]
+
+  - name: parenthesized_1_paren_a
+    query: "MATCH ((x:(A))-[:R]->(t:T)) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: parenthesized_1_nobody
+    query: "MATCH ((x:Z&A)-[:R]->(t:T)) RETURN x.name"
+    expect:
+      empty: true
+
+  - name: parenthesized_2_colon_a
+    query: "MATCH ((x:A)-[:R]->(t:T) WHERE x.k = 1) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: parenthesized_2_colon_a_colon_b
+    query: "MATCH ((x:A:B)-[:R]->(t:T) WHERE x.k = 1) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: parenthesized_2_is_a
+    query: "MATCH ((x IS A)-[:R]->(t:T) WHERE x.k = 1) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: parenthesized_2_is_a_and_b
+    query: "MATCH ((x IS A&B)-[:R]->(t:T) WHERE x.k = 1) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: parenthesized_2_a_and_b
+    query: "MATCH ((x:A&B)-[:R]->(t:T) WHERE x.k = 1) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: parenthesized_2_a_or_b
+    query: "MATCH ((x:A|B)-[:R]->(t:T) WHERE x.k = 1) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]
+
+  - name: parenthesized_2_not_a
+    query: "MATCH ((x:!A)-[:R]->(t:T) WHERE x.k = 1) RETURN x.name"
+    expect:
+      rows:
+        - [Gus]
+        - [Jules]
+        - [Mia]
+
+  - name: parenthesized_2_any_label
+    query: "MATCH ((x:%)-[:R]->(t:T) WHERE x.k = 1) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Jules]
+        - [Vincent]
+
+  - name: parenthesized_2_paren_a
+    query: "MATCH ((x:(A))-[:R]->(t:T) WHERE x.k = 1) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: parenthesized_2_nobody
+    query: "MATCH ((x:Z&A)-[:R]->(t:T) WHERE x.k = 1) RETURN x.name"
+    expect:
+      empty: true
+
+  # Juxtaposed pattern, the node before the segment
+
+  - name: juxtaposed_outer_node_1_colon_a
+    query: "MATCH (x:A)((a)-[:R]->(b)){1,1}(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: juxtaposed_outer_node_1_colon_a_colon_b
+    query: "MATCH (x:A:B)((a)-[:R]->(b)){1,1}(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: juxtaposed_outer_node_1_is_a
+    query: "MATCH (x IS A)((a)-[:R]->(b)){1,1}(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: juxtaposed_outer_node_1_is_a_and_b
+    query: "MATCH (x IS A&B)((a)-[:R]->(b)){1,1}(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: juxtaposed_outer_node_1_a_and_b
+    query: "MATCH (x:A&B)((a)-[:R]->(b)){1,1}(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: juxtaposed_outer_node_1_a_or_b
+    query: "MATCH (x:A|B)((a)-[:R]->(b)){1,1}(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]
+
+  - name: juxtaposed_outer_node_1_not_a
+    query: "MATCH (x:!A)((a)-[:R]->(b)){1,1}(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Gus]
+        - [Jules]
+        - [Mia]
+
+  - name: juxtaposed_outer_node_1_any_label
+    query: "MATCH (x:%)((a)-[:R]->(b)){1,1}(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Jules]
+        - [Vincent]
+
+  - name: juxtaposed_outer_node_1_paren_a
+    query: "MATCH (x:(A))((a)-[:R]->(b)){1,1}(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: juxtaposed_outer_node_1_nobody
+    query: "MATCH (x:Z&A)((a)-[:R]->(b)){1,1}(t:T) RETURN x.name"
+    expect:
+      empty: true
+
+  - name: juxtaposed_outer_node_2_colon_a
+    query: "MATCH (x:A)(-[:R]->(m)){1,1}(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: juxtaposed_outer_node_2_colon_a_colon_b
+    query: "MATCH (x:A:B)(-[:R]->(m)){1,1}(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: juxtaposed_outer_node_2_is_a
+    query: "MATCH (x IS A)(-[:R]->(m)){1,1}(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: juxtaposed_outer_node_2_is_a_and_b
+    query: "MATCH (x IS A&B)(-[:R]->(m)){1,1}(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: juxtaposed_outer_node_2_a_and_b
+    query: "MATCH (x:A&B)(-[:R]->(m)){1,1}(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: juxtaposed_outer_node_2_a_or_b
+    query: "MATCH (x:A|B)(-[:R]->(m)){1,1}(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]
+
+  - name: juxtaposed_outer_node_2_not_a
+    query: "MATCH (x:!A)(-[:R]->(m)){1,1}(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Gus]
+        - [Jules]
+        - [Mia]
+
+  - name: juxtaposed_outer_node_2_any_label
+    query: "MATCH (x:%)(-[:R]->(m)){1,1}(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Jules]
+        - [Vincent]
+
+  - name: juxtaposed_outer_node_2_paren_a
+    query: "MATCH (x:(A))(-[:R]->(m)){1,1}(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: juxtaposed_outer_node_2_nobody
+    query: "MATCH (x:Z&A)(-[:R]->(m)){1,1}(t:T) RETURN x.name"
+    expect:
+      empty: true
+
+  - name: juxtaposed_outer_node_3_colon_a
+    query: "MATCH (x:A)((a)-[:R]->(m)-[:S]->(b)){1,1}(y {name: 'Alix'}) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: juxtaposed_outer_node_3_colon_a_colon_b
+    query: "MATCH (x:A:B)((a)-[:R]->(m)-[:S]->(b)){1,1}(y {name: 'Alix'}) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: juxtaposed_outer_node_3_is_a
+    query: "MATCH (x IS A)((a)-[:R]->(m)-[:S]->(b)){1,1}(y {name: 'Alix'}) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: juxtaposed_outer_node_3_is_a_and_b
+    query: "MATCH (x IS A&B)((a)-[:R]->(m)-[:S]->(b)){1,1}(y {name: 'Alix'}) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: juxtaposed_outer_node_3_a_and_b
+    query: "MATCH (x:A&B)((a)-[:R]->(m)-[:S]->(b)){1,1}(y {name: 'Alix'}) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: juxtaposed_outer_node_3_a_or_b
+    query: "MATCH (x:A|B)((a)-[:R]->(m)-[:S]->(b)){1,1}(y {name: 'Alix'}) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]
+
+  - name: juxtaposed_outer_node_3_not_a
+    query: "MATCH (x:!A)((a)-[:R]->(m)-[:S]->(b)){1,1}(y {name: 'Alix'}) RETURN x.name"
+    expect:
+      rows:
+        - [Gus]
+        - [Jules]
+        - [Mia]
+
+  - name: juxtaposed_outer_node_3_any_label
+    query: "MATCH (x:%)((a)-[:R]->(m)-[:S]->(b)){1,1}(y {name: 'Alix'}) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Jules]
+        - [Vincent]
+
+  - name: juxtaposed_outer_node_3_paren_a
+    query: "MATCH (x:(A))((a)-[:R]->(m)-[:S]->(b)){1,1}(y {name: 'Alix'}) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: juxtaposed_outer_node_3_nobody
+    query: "MATCH (x:Z&A)((a)-[:R]->(m)-[:S]->(b)){1,1}(y {name: 'Alix'}) RETURN x.name"
+    expect:
+      empty: true
+
+  # Juxtaposed pattern, the segment's own nodes
+
+  - name: juxtaposed_segment_1_colon_a
+    query: "MATCH (x)((a:A)-[:R]->(b)){1,1}(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: juxtaposed_segment_1_colon_a_colon_b
+    query: "MATCH (x)((a:A:B)-[:R]->(b)){1,1}(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: juxtaposed_segment_1_is_a
+    query: "MATCH (x)((a IS A)-[:R]->(b)){1,1}(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: juxtaposed_segment_1_is_a_and_b
+    query: "MATCH (x)((a IS A&B)-[:R]->(b)){1,1}(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: juxtaposed_segment_1_a_and_b
+    query: "MATCH (x)((a:A&B)-[:R]->(b)){1,1}(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: juxtaposed_segment_1_a_or_b
+    query: "MATCH (x)((a:A|B)-[:R]->(b)){1,1}(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]
+
+  - name: juxtaposed_segment_1_not_a
+    query: "MATCH (x)((a:!A)-[:R]->(b)){1,1}(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Gus]
+        - [Jules]
+        - [Mia]
+
+  - name: juxtaposed_segment_1_any_label
+    query: "MATCH (x)((a:%)-[:R]->(b)){1,1}(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Jules]
+        - [Vincent]
+
+  - name: juxtaposed_segment_1_paren_a
+    query: "MATCH (x)((a:(A))-[:R]->(b)){1,1}(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: juxtaposed_segment_1_nobody
+    query: "MATCH (x)((a:Z&A)-[:R]->(b)){1,1}(t:T) RETURN x.name"
+    expect:
+      empty: true
+
+  - name: juxtaposed_segment_2_colon_a
+    query: "MATCH (s:T)((a)-[:S]->(b:A)){1,1}(x) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: juxtaposed_segment_2_colon_a_colon_b
+    query: "MATCH (s:T)((a)-[:S]->(b:A:B)){1,1}(x) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: juxtaposed_segment_2_is_a
+    query: "MATCH (s:T)((a)-[:S]->(b IS A)){1,1}(x) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: juxtaposed_segment_2_is_a_and_b
+    query: "MATCH (s:T)((a)-[:S]->(b IS A&B)){1,1}(x) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: juxtaposed_segment_2_a_and_b
+    query: "MATCH (s:T)((a)-[:S]->(b:A&B)){1,1}(x) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: juxtaposed_segment_2_a_or_b
+    query: "MATCH (s:T)((a)-[:S]->(b:A|B)){1,1}(x) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]
+
+  - name: juxtaposed_segment_2_not_a
+    query: "MATCH (s:T)((a)-[:S]->(b:!A)){1,1}(x) RETURN x.name"
+    expect:
+      rows:
+        - [Gus]
+        - [Jules]
+        - [Mia]
+
+  - name: juxtaposed_segment_2_any_label
+    query: "MATCH (s:T)((a)-[:S]->(b:%)){1,1}(x) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Jules]
+        - [Vincent]
+
+  - name: juxtaposed_segment_2_paren_a
+    query: "MATCH (s:T)((a)-[:S]->(b:(A))){1,1}(x) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: juxtaposed_segment_2_nobody
+    query: "MATCH (s:T)((a)-[:S]->(b:Z&A)){1,1}(x) RETURN x.name"
+    expect:
+      empty: true
+
+  - name: juxtaposed_segment_3_colon_a
+    query: "MATCH (s:T)((a)-[:S]->(b)){1,1}(x:A) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: juxtaposed_segment_3_colon_a_colon_b
+    query: "MATCH (s:T)((a)-[:S]->(b)){1,1}(x:A:B) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: juxtaposed_segment_3_is_a
+    query: "MATCH (s:T)((a)-[:S]->(b)){1,1}(x IS A) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: juxtaposed_segment_3_is_a_and_b
+    query: "MATCH (s:T)((a)-[:S]->(b)){1,1}(x IS A&B) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: juxtaposed_segment_3_a_and_b
+    query: "MATCH (s:T)((a)-[:S]->(b)){1,1}(x:A&B) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: juxtaposed_segment_3_a_or_b
+    query: "MATCH (s:T)((a)-[:S]->(b)){1,1}(x:A|B) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]
+
+  - name: juxtaposed_segment_3_not_a
+    query: "MATCH (s:T)((a)-[:S]->(b)){1,1}(x:!A) RETURN x.name"
+    expect:
+      rows:
+        - [Gus]
+        - [Jules]
+        - [Mia]
+
+  - name: juxtaposed_segment_3_any_label
+    query: "MATCH (s:T)((a)-[:S]->(b)){1,1}(x:%) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Jules]
+        - [Vincent]
+
+  - name: juxtaposed_segment_3_paren_a
+    query: "MATCH (s:T)((a)-[:S]->(b)){1,1}(x:(A)) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: juxtaposed_segment_3_nobody
+    query: "MATCH (s:T)((a)-[:S]->(b)){1,1}(x:Z&A) RETURN x.name"
+    expect:
+      empty: true
+
+  - name: juxtaposed_segment_4_colon_a
+    query: "MATCH (s {name: 'Alix'})((a)-[:R]->(m)-[:S]->(b:A)){1,1}(x) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: juxtaposed_segment_4_colon_a_colon_b
+    query: "MATCH (s {name: 'Alix'})((a)-[:R]->(m)-[:S]->(b:A:B)){1,1}(x) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: juxtaposed_segment_4_is_a
+    query: "MATCH (s {name: 'Alix'})((a)-[:R]->(m)-[:S]->(b IS A)){1,1}(x) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: juxtaposed_segment_4_is_a_and_b
+    query: "MATCH (s {name: 'Alix'})((a)-[:R]->(m)-[:S]->(b IS A&B)){1,1}(x) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: juxtaposed_segment_4_a_and_b
+    query: "MATCH (s {name: 'Alix'})((a)-[:R]->(m)-[:S]->(b:A&B)){1,1}(x) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: juxtaposed_segment_4_a_or_b
+    query: "MATCH (s {name: 'Alix'})((a)-[:R]->(m)-[:S]->(b:A|B)){1,1}(x) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]
+
+  - name: juxtaposed_segment_4_not_a
+    query: "MATCH (s {name: 'Alix'})((a)-[:R]->(m)-[:S]->(b:!A)){1,1}(x) RETURN x.name"
+    expect:
+      rows:
+        - [Gus]
+        - [Jules]
+        - [Mia]
+
+  - name: juxtaposed_segment_4_any_label
+    query: "MATCH (s {name: 'Alix'})((a)-[:R]->(m)-[:S]->(b:%)){1,1}(x) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Jules]
+        - [Vincent]
+
+  - name: juxtaposed_segment_4_paren_a
+    query: "MATCH (s {name: 'Alix'})((a)-[:R]->(m)-[:S]->(b:(A))){1,1}(x) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: juxtaposed_segment_4_nobody
+    query: "MATCH (s {name: 'Alix'})((a)-[:R]->(m)-[:S]->(b:Z&A)){1,1}(x) RETURN x.name"
+    expect:
+      empty: true
+
+  # Comma-separated patterns
+
+  - name: comma_separated_1_colon_a
+    query: "MATCH (x:A)-[:R]->(t:T), (x)-[:R]->(u) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: comma_separated_1_colon_a_colon_b
+    query: "MATCH (x:A:B)-[:R]->(t:T), (x)-[:R]->(u) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: comma_separated_1_is_a
+    query: "MATCH (x IS A)-[:R]->(t:T), (x)-[:R]->(u) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: comma_separated_1_is_a_and_b
+    query: "MATCH (x IS A&B)-[:R]->(t:T), (x)-[:R]->(u) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: comma_separated_1_a_and_b
+    query: "MATCH (x:A&B)-[:R]->(t:T), (x)-[:R]->(u) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: comma_separated_1_a_or_b
+    query: "MATCH (x:A|B)-[:R]->(t:T), (x)-[:R]->(u) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]
+
+  - name: comma_separated_1_not_a
+    query: "MATCH (x:!A)-[:R]->(t:T), (x)-[:R]->(u) RETURN x.name"
+    expect:
+      rows:
+        - [Gus]
+        - [Jules]
+        - [Mia]
+
+  - name: comma_separated_1_any_label
+    query: "MATCH (x:%)-[:R]->(t:T), (x)-[:R]->(u) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Jules]
+        - [Vincent]
+
+  - name: comma_separated_1_paren_a
+    query: "MATCH (x:(A))-[:R]->(t:T), (x)-[:R]->(u) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: comma_separated_1_nobody
+    query: "MATCH (x:Z&A)-[:R]->(t:T), (x)-[:R]->(u) RETURN x.name"
+    expect:
+      empty: true
+
+  - name: comma_separated_2_colon_a
+    query: "MATCH (u:T), (x:A)-[:R]->(u) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: comma_separated_2_colon_a_colon_b
+    query: "MATCH (u:T), (x:A:B)-[:R]->(u) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: comma_separated_2_is_a
+    query: "MATCH (u:T), (x IS A)-[:R]->(u) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: comma_separated_2_is_a_and_b
+    query: "MATCH (u:T), (x IS A&B)-[:R]->(u) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: comma_separated_2_a_and_b
+    query: "MATCH (u:T), (x:A&B)-[:R]->(u) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: comma_separated_2_a_or_b
+    query: "MATCH (u:T), (x:A|B)-[:R]->(u) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]
+
+  - name: comma_separated_2_not_a
+    query: "MATCH (u:T), (x:!A)-[:R]->(u) RETURN x.name"
+    expect:
+      rows:
+        - [Gus]
+        - [Jules]
+        - [Mia]
+
+  - name: comma_separated_2_any_label
+    query: "MATCH (u:T), (x:%)-[:R]->(u) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Jules]
+        - [Vincent]
+
+  - name: comma_separated_2_paren_a
+    query: "MATCH (u:T), (x:(A))-[:R]->(u) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: comma_separated_2_nobody
+    query: "MATCH (u:T), (x:Z&A)-[:R]->(u) RETURN x.name"
+    expect:
+      empty: true
+
+  - name: comma_separated_3_colon_a
+    query: "MATCH (x:A), (x)-[:R]->(u:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: comma_separated_3_colon_a_colon_b
+    query: "MATCH (x:A:B), (x)-[:R]->(u:T) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: comma_separated_3_is_a
+    query: "MATCH (x IS A), (x)-[:R]->(u:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: comma_separated_3_is_a_and_b
+    query: "MATCH (x IS A&B), (x)-[:R]->(u:T) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: comma_separated_3_a_and_b
+    query: "MATCH (x:A&B), (x)-[:R]->(u:T) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: comma_separated_3_a_or_b
+    query: "MATCH (x:A|B), (x)-[:R]->(u:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]
+
+  - name: comma_separated_3_not_a
+    query: "MATCH (x:!A), (x)-[:R]->(u:T) RETURN x.name"
+    expect:
+      rows:
+        - [Gus]
+        - [Jules]
+        - [Mia]
+
+  - name: comma_separated_3_any_label
+    query: "MATCH (x:%), (x)-[:R]->(u:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Jules]
+        - [Vincent]
+
+  - name: comma_separated_3_paren_a
+    query: "MATCH (x:(A)), (x)-[:R]->(u:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: comma_separated_3_nobody
+    query: "MATCH (x:Z&A), (x)-[:R]->(u:T) RETURN x.name"
+    expect:
+      empty: true
+
+  - name: comma_separated_4_colon_a
+    query: "MATCH (t:T)-[:S]->(w {name: 'Alix'}), (x:A)-[:R]->(t) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: comma_separated_4_colon_a_colon_b
+    query: "MATCH (t:T)-[:S]->(w {name: 'Alix'}), (x:A:B)-[:R]->(t) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: comma_separated_4_is_a
+    query: "MATCH (t:T)-[:S]->(w {name: 'Alix'}), (x IS A)-[:R]->(t) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: comma_separated_4_is_a_and_b
+    query: "MATCH (t:T)-[:S]->(w {name: 'Alix'}), (x IS A&B)-[:R]->(t) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: comma_separated_4_a_and_b
+    query: "MATCH (t:T)-[:S]->(w {name: 'Alix'}), (x:A&B)-[:R]->(t) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: comma_separated_4_a_or_b
+    query: "MATCH (t:T)-[:S]->(w {name: 'Alix'}), (x:A|B)-[:R]->(t) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]
+
+  - name: comma_separated_4_not_a
+    query: "MATCH (t:T)-[:S]->(w {name: 'Alix'}), (x:!A)-[:R]->(t) RETURN x.name"
+    expect:
+      rows:
+        - [Gus]
+        - [Jules]
+        - [Mia]
+
+  - name: comma_separated_4_any_label
+    query: "MATCH (t:T)-[:S]->(w {name: 'Alix'}), (x:%)-[:R]->(t) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Jules]
+        - [Vincent]
+
+  - name: comma_separated_4_paren_a
+    query: "MATCH (t:T)-[:S]->(w {name: 'Alix'}), (x:(A))-[:R]->(t) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: comma_separated_4_nobody
+    query: "MATCH (t:T)-[:S]->(w {name: 'Alix'}), (x:Z&A)-[:R]->(t) RETURN x.name"
+    expect:
+      empty: true
+
+  # A source the input already binds
+
+  - name: source_already_bound_1_colon_a
+    query: "MATCH (x {k: 1}) MATCH (x:A)-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: source_already_bound_1_colon_a_colon_b
+    query: "MATCH (x {k: 1}) MATCH (x:A:B)-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: source_already_bound_1_is_a
+    query: "MATCH (x {k: 1}) MATCH (x IS A)-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: source_already_bound_1_is_a_and_b
+    query: "MATCH (x {k: 1}) MATCH (x IS A&B)-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: source_already_bound_1_a_and_b
+    query: "MATCH (x {k: 1}) MATCH (x:A&B)-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: source_already_bound_1_a_or_b
+    query: "MATCH (x {k: 1}) MATCH (x:A|B)-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]
+
+  - name: source_already_bound_1_not_a
+    query: "MATCH (x {k: 1}) MATCH (x:!A)-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Gus]
+        - [Jules]
+        - [Mia]
+
+  - name: source_already_bound_1_any_label
+    query: "MATCH (x {k: 1}) MATCH (x:%)-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Jules]
+        - [Vincent]
+
+  - name: source_already_bound_1_paren_a
+    query: "MATCH (x {k: 1}) MATCH (x:(A))-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: source_already_bound_1_nobody
+    query: "MATCH (x {k: 1}) MATCH (x:Z&A)-[:R]->(t:T) RETURN x.name"
+    expect:
+      empty: true
+
+  - name: source_already_bound_2_colon_a
+    query: "MATCH (x {k: 1}) WITH x MATCH (x:A)-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: source_already_bound_2_colon_a_colon_b
+    query: "MATCH (x {k: 1}) WITH x MATCH (x:A:B)-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: source_already_bound_2_is_a
+    query: "MATCH (x {k: 1}) WITH x MATCH (x IS A)-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: source_already_bound_2_is_a_and_b
+    query: "MATCH (x {k: 1}) WITH x MATCH (x IS A&B)-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: source_already_bound_2_a_and_b
+    query: "MATCH (x {k: 1}) WITH x MATCH (x:A&B)-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: source_already_bound_2_a_or_b
+    query: "MATCH (x {k: 1}) WITH x MATCH (x:A|B)-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]
+
+  - name: source_already_bound_2_not_a
+    query: "MATCH (x {k: 1}) WITH x MATCH (x:!A)-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Gus]
+        - [Jules]
+        - [Mia]
+
+  - name: source_already_bound_2_any_label
+    query: "MATCH (x {k: 1}) WITH x MATCH (x:%)-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Jules]
+        - [Vincent]
+
+  - name: source_already_bound_2_paren_a
+    query: "MATCH (x {k: 1}) WITH x MATCH (x:(A))-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: source_already_bound_2_nobody
+    query: "MATCH (x {k: 1}) WITH x MATCH (x:Z&A)-[:R]->(t:T) RETURN x.name"
+    expect:
+      empty: true
+
+  # First node after other input
+
+  - name: after_input_1_colon_a
+    query: "UNWIND [1] AS i MATCH (x:A)-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: after_input_1_colon_a_colon_b
+    query: "UNWIND [1] AS i MATCH (x:A:B)-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: after_input_1_is_a
+    query: "UNWIND [1] AS i MATCH (x IS A)-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: after_input_1_is_a_and_b
+    query: "UNWIND [1] AS i MATCH (x IS A&B)-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: after_input_1_a_and_b
+    query: "UNWIND [1] AS i MATCH (x:A&B)-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: after_input_1_a_or_b
+    query: "UNWIND [1] AS i MATCH (x:A|B)-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]
+
+  - name: after_input_1_not_a
+    query: "UNWIND [1] AS i MATCH (x:!A)-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Gus]
+        - [Jules]
+        - [Mia]
+
+  - name: after_input_1_any_label
+    query: "UNWIND [1] AS i MATCH (x:%)-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Jules]
+        - [Vincent]
+
+  - name: after_input_1_paren_a
+    query: "UNWIND [1] AS i MATCH (x:(A))-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: after_input_1_nobody
+    query: "UNWIND [1] AS i MATCH (x:Z&A)-[:R]->(t:T) RETURN x.name"
+    expect:
+      empty: true
+
+  - name: after_input_2_colon_a
+    query: "MATCH (u:T) MATCH (x:A)-[:R]->(u) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: after_input_2_colon_a_colon_b
+    query: "MATCH (u:T) MATCH (x:A:B)-[:R]->(u) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: after_input_2_is_a
+    query: "MATCH (u:T) MATCH (x IS A)-[:R]->(u) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: after_input_2_is_a_and_b
+    query: "MATCH (u:T) MATCH (x IS A&B)-[:R]->(u) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: after_input_2_a_and_b
+    query: "MATCH (u:T) MATCH (x:A&B)-[:R]->(u) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: after_input_2_a_or_b
+    query: "MATCH (u:T) MATCH (x:A|B)-[:R]->(u) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]
+
+  - name: after_input_2_not_a
+    query: "MATCH (u:T) MATCH (x:!A)-[:R]->(u) RETURN x.name"
+    expect:
+      rows:
+        - [Gus]
+        - [Jules]
+        - [Mia]
+
+  - name: after_input_2_any_label
+    query: "MATCH (u:T) MATCH (x:%)-[:R]->(u) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Jules]
+        - [Vincent]
+
+  - name: after_input_2_paren_a
+    query: "MATCH (u:T) MATCH (x:(A))-[:R]->(u) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: after_input_2_nobody
+    query: "MATCH (u:T) MATCH (x:Z&A)-[:R]->(u) RETURN x.name"
+    expect:
+      empty: true
+
+  # EXISTS on a node from outside
+
+  - name: exists_on_a_bound_node_1_colon_a
+    query: "MATCH (y {k: 1}) WHERE EXISTS { MATCH (y:A)-[:R]->(t:T) } RETURN y.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: exists_on_a_bound_node_1_colon_a_colon_b
+    query: "MATCH (y {k: 1}) WHERE EXISTS { MATCH (y:A:B)-[:R]->(t:T) } RETURN y.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: exists_on_a_bound_node_1_is_a
+    query: "MATCH (y {k: 1}) WHERE EXISTS { MATCH (y IS A)-[:R]->(t:T) } RETURN y.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: exists_on_a_bound_node_1_is_a_and_b
+    query: "MATCH (y {k: 1}) WHERE EXISTS { MATCH (y IS A&B)-[:R]->(t:T) } RETURN y.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: exists_on_a_bound_node_1_a_and_b
+    query: "MATCH (y {k: 1}) WHERE EXISTS { MATCH (y:A&B)-[:R]->(t:T) } RETURN y.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: exists_on_a_bound_node_1_a_or_b
+    query: "MATCH (y {k: 1}) WHERE EXISTS { MATCH (y:A|B)-[:R]->(t:T) } RETURN y.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]
+
+  - name: exists_on_a_bound_node_1_not_a
+    query: "MATCH (y {k: 1}) WHERE EXISTS { MATCH (y:!A)-[:R]->(t:T) } RETURN y.name"
+    expect:
+      rows:
+        - [Gus]
+        - [Jules]
+        - [Mia]
+
+  - name: exists_on_a_bound_node_1_any_label
+    query: "MATCH (y {k: 1}) WHERE EXISTS { MATCH (y:%)-[:R]->(t:T) } RETURN y.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Jules]
+        - [Vincent]
+
+  - name: exists_on_a_bound_node_1_paren_a
+    query: "MATCH (y {k: 1}) WHERE EXISTS { MATCH (y:(A))-[:R]->(t:T) } RETURN y.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: exists_on_a_bound_node_1_nobody
+    query: "MATCH (y {k: 1}) WHERE EXISTS { MATCH (y:Z&A)-[:R]->(t:T) } RETURN y.name"
+    expect:
+      empty: true
+
+  - name: exists_on_a_bound_node_2_colon_a
+    query: "MATCH (y {k: 1}) WHERE EXISTS { MATCH (t:T)-[:S]->(y:A) } RETURN y.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: exists_on_a_bound_node_2_colon_a_colon_b
+    query: "MATCH (y {k: 1}) WHERE EXISTS { MATCH (t:T)-[:S]->(y:A:B) } RETURN y.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: exists_on_a_bound_node_2_is_a
+    query: "MATCH (y {k: 1}) WHERE EXISTS { MATCH (t:T)-[:S]->(y IS A) } RETURN y.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: exists_on_a_bound_node_2_is_a_and_b
+    query: "MATCH (y {k: 1}) WHERE EXISTS { MATCH (t:T)-[:S]->(y IS A&B) } RETURN y.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: exists_on_a_bound_node_2_a_and_b
+    query: "MATCH (y {k: 1}) WHERE EXISTS { MATCH (t:T)-[:S]->(y:A&B) } RETURN y.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: exists_on_a_bound_node_2_a_or_b
+    query: "MATCH (y {k: 1}) WHERE EXISTS { MATCH (t:T)-[:S]->(y:A|B) } RETURN y.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]
+
+  - name: exists_on_a_bound_node_2_not_a
+    query: "MATCH (y {k: 1}) WHERE EXISTS { MATCH (t:T)-[:S]->(y:!A) } RETURN y.name"
+    expect:
+      rows:
+        - [Gus]
+        - [Jules]
+        - [Mia]
+
+  - name: exists_on_a_bound_node_2_any_label
+    query: "MATCH (y {k: 1}) WHERE EXISTS { MATCH (t:T)-[:S]->(y:%) } RETURN y.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Jules]
+        - [Vincent]
+
+  - name: exists_on_a_bound_node_2_paren_a
+    query: "MATCH (y {k: 1}) WHERE EXISTS { MATCH (t:T)-[:S]->(y:(A)) } RETURN y.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: exists_on_a_bound_node_2_nobody
+    query: "MATCH (y {k: 1}) WHERE EXISTS { MATCH (t:T)-[:S]->(y:Z&A) } RETURN y.name"
+    expect:
+      empty: true
+
+  # NOT EXISTS on a node from outside
+
+  - name: not_exists_on_a_bound_node_1_colon_a
+    query: "MATCH (y {k: 1}) WHERE NOT EXISTS { MATCH (y:A)-[:R]->(t:T) } RETURN y.name"
+    expect:
+      rows:
+        - [Gus]
+        - [Jules]
+        - [Mia]
+
+  - name: not_exists_on_a_bound_node_1_colon_a_colon_b
+    query: "MATCH (y {k: 1}) WHERE NOT EXISTS { MATCH (y:A:B)-[:R]->(t:T) } RETURN y.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Jules]
+        - [Mia]
+
+  - name: not_exists_on_a_bound_node_1_is_a
+    query: "MATCH (y {k: 1}) WHERE NOT EXISTS { MATCH (y IS A)-[:R]->(t:T) } RETURN y.name"
+    expect:
+      rows:
+        - [Gus]
+        - [Jules]
+        - [Mia]
+
+  - name: not_exists_on_a_bound_node_1_is_a_and_b
+    query: "MATCH (y {k: 1}) WHERE NOT EXISTS { MATCH (y IS A&B)-[:R]->(t:T) } RETURN y.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Jules]
+        - [Mia]
+
+  - name: not_exists_on_a_bound_node_1_a_and_b
+    query: "MATCH (y {k: 1}) WHERE NOT EXISTS { MATCH (y:A&B)-[:R]->(t:T) } RETURN y.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Jules]
+        - [Mia]
+
+  - name: not_exists_on_a_bound_node_1_a_or_b
+    query: "MATCH (y {k: 1}) WHERE NOT EXISTS { MATCH (y:A|B)-[:R]->(t:T) } RETURN y.name"
+    expect:
+      rows:
+        - [Jules]
+        - [Mia]
+
+  - name: not_exists_on_a_bound_node_1_not_a
+    query: "MATCH (y {k: 1}) WHERE NOT EXISTS { MATCH (y:!A)-[:R]->(t:T) } RETURN y.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: not_exists_on_a_bound_node_1_any_label
+    query: "MATCH (y {k: 1}) WHERE NOT EXISTS { MATCH (y:%)-[:R]->(t:T) } RETURN y.name"
+    expect:
+      rows:
+        - [Mia]
+
+  - name: not_exists_on_a_bound_node_1_paren_a
+    query: "MATCH (y {k: 1}) WHERE NOT EXISTS { MATCH (y:(A))-[:R]->(t:T) } RETURN y.name"
+    expect:
+      rows:
+        - [Gus]
+        - [Jules]
+        - [Mia]
+
+  - name: not_exists_on_a_bound_node_1_nobody
+    query: "MATCH (y {k: 1}) WHERE NOT EXISTS { MATCH (y:Z&A)-[:R]->(t:T) } RETURN y.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Jules]
+        - [Mia]
+        - [Vincent]
+
+  # EXISTS with a node of its own
+
+  - name: exists_on_its_own_node_1_colon_a
+    query: "MATCH (t:T) WHERE EXISTS { MATCH (x:A)-[:R]->(t) } RETURN t.name"
+    expect:
+      rows:
+        - [Amsterdam]
+
+  - name: exists_on_its_own_node_1_colon_a_colon_b
+    query: "MATCH (t:T) WHERE EXISTS { MATCH (x:A:B)-[:R]->(t) } RETURN t.name"
+    expect:
+      rows:
+        - [Amsterdam]
+
+  - name: exists_on_its_own_node_1_is_a
+    query: "MATCH (t:T) WHERE EXISTS { MATCH (x IS A)-[:R]->(t) } RETURN t.name"
+    expect:
+      rows:
+        - [Amsterdam]
+
+  - name: exists_on_its_own_node_1_is_a_and_b
+    query: "MATCH (t:T) WHERE EXISTS { MATCH (x IS A&B)-[:R]->(t) } RETURN t.name"
+    expect:
+      rows:
+        - [Amsterdam]
+
+  - name: exists_on_its_own_node_1_a_and_b
+    query: "MATCH (t:T) WHERE EXISTS { MATCH (x:A&B)-[:R]->(t) } RETURN t.name"
+    expect:
+      rows:
+        - [Amsterdam]
+
+  - name: exists_on_its_own_node_1_a_or_b
+    query: "MATCH (t:T) WHERE EXISTS { MATCH (x:A|B)-[:R]->(t) } RETURN t.name"
+    expect:
+      rows:
+        - [Amsterdam]
+
+  - name: exists_on_its_own_node_1_not_a
+    query: "MATCH (t:T) WHERE EXISTS { MATCH (x:!A)-[:R]->(t) } RETURN t.name"
+    expect:
+      rows:
+        - [Amsterdam]
+
+  - name: exists_on_its_own_node_1_any_label
+    query: "MATCH (t:T) WHERE EXISTS { MATCH (x:%)-[:R]->(t) } RETURN t.name"
+    expect:
+      rows:
+        - [Amsterdam]
+
+  - name: exists_on_its_own_node_1_paren_a
+    query: "MATCH (t:T) WHERE EXISTS { MATCH (x:(A))-[:R]->(t) } RETURN t.name"
+    expect:
+      rows:
+        - [Amsterdam]
+
+  - name: exists_on_its_own_node_1_nobody
+    query: "MATCH (t:T) WHERE EXISTS { MATCH (x:Z&A)-[:R]->(t) } RETURN t.name"
+    expect:
+      empty: true
+
+  - name: exists_on_its_own_node_2_colon_a
+    query: "MATCH (t:T) WHERE EXISTS { MATCH (t)-[:S]->(x:A) } RETURN t.name"
+    expect:
+      rows:
+        - [Amsterdam]
+
+  - name: exists_on_its_own_node_2_colon_a_colon_b
+    query: "MATCH (t:T) WHERE EXISTS { MATCH (t)-[:S]->(x:A:B) } RETURN t.name"
+    expect:
+      rows:
+        - [Amsterdam]
+
+  - name: exists_on_its_own_node_2_is_a
+    query: "MATCH (t:T) WHERE EXISTS { MATCH (t)-[:S]->(x IS A) } RETURN t.name"
+    expect:
+      rows:
+        - [Amsterdam]
+
+  - name: exists_on_its_own_node_2_is_a_and_b
+    query: "MATCH (t:T) WHERE EXISTS { MATCH (t)-[:S]->(x IS A&B) } RETURN t.name"
+    expect:
+      rows:
+        - [Amsterdam]
+
+  - name: exists_on_its_own_node_2_a_and_b
+    query: "MATCH (t:T) WHERE EXISTS { MATCH (t)-[:S]->(x:A&B) } RETURN t.name"
+    expect:
+      rows:
+        - [Amsterdam]
+
+  - name: exists_on_its_own_node_2_a_or_b
+    query: "MATCH (t:T) WHERE EXISTS { MATCH (t)-[:S]->(x:A|B) } RETURN t.name"
+    expect:
+      rows:
+        - [Amsterdam]
+
+  - name: exists_on_its_own_node_2_not_a
+    query: "MATCH (t:T) WHERE EXISTS { MATCH (t)-[:S]->(x:!A) } RETURN t.name"
+    expect:
+      rows:
+        - [Amsterdam]
+
+  - name: exists_on_its_own_node_2_any_label
+    query: "MATCH (t:T) WHERE EXISTS { MATCH (t)-[:S]->(x:%) } RETURN t.name"
+    expect:
+      rows:
+        - [Amsterdam]
+
+  - name: exists_on_its_own_node_2_paren_a
+    query: "MATCH (t:T) WHERE EXISTS { MATCH (t)-[:S]->(x:(A)) } RETURN t.name"
+    expect:
+      rows:
+        - [Amsterdam]
+
+  - name: exists_on_its_own_node_2_nobody
+    query: "MATCH (t:T) WHERE EXISTS { MATCH (t)-[:S]->(x:Z&A) } RETURN t.name"
+    expect:
+      empty: true
+
+  # NOT EXISTS with a node of its own
+
+  - name: not_exists_on_its_own_node_1_colon_a
+    query: "MATCH (t:T) WHERE NOT EXISTS { MATCH (x:A)-[:R]->(t) } RETURN t.name"
+    expect:
+      empty: true
+
+  - name: not_exists_on_its_own_node_1_colon_a_colon_b
+    query: "MATCH (t:T) WHERE NOT EXISTS { MATCH (x:A:B)-[:R]->(t) } RETURN t.name"
+    expect:
+      empty: true
+
+  - name: not_exists_on_its_own_node_1_is_a
+    query: "MATCH (t:T) WHERE NOT EXISTS { MATCH (x IS A)-[:R]->(t) } RETURN t.name"
+    expect:
+      empty: true
+
+  - name: not_exists_on_its_own_node_1_is_a_and_b
+    query: "MATCH (t:T) WHERE NOT EXISTS { MATCH (x IS A&B)-[:R]->(t) } RETURN t.name"
+    expect:
+      empty: true
+
+  - name: not_exists_on_its_own_node_1_a_and_b
+    query: "MATCH (t:T) WHERE NOT EXISTS { MATCH (x:A&B)-[:R]->(t) } RETURN t.name"
+    expect:
+      empty: true
+
+  - name: not_exists_on_its_own_node_1_a_or_b
+    query: "MATCH (t:T) WHERE NOT EXISTS { MATCH (x:A|B)-[:R]->(t) } RETURN t.name"
+    expect:
+      empty: true
+
+  - name: not_exists_on_its_own_node_1_not_a
+    query: "MATCH (t:T) WHERE NOT EXISTS { MATCH (x:!A)-[:R]->(t) } RETURN t.name"
+    expect:
+      empty: true
+
+  - name: not_exists_on_its_own_node_1_any_label
+    query: "MATCH (t:T) WHERE NOT EXISTS { MATCH (x:%)-[:R]->(t) } RETURN t.name"
+    expect:
+      empty: true
+
+  - name: not_exists_on_its_own_node_1_paren_a
+    query: "MATCH (t:T) WHERE NOT EXISTS { MATCH (x:(A))-[:R]->(t) } RETURN t.name"
+    expect:
+      empty: true
+
+  - name: not_exists_on_its_own_node_1_nobody
+    query: "MATCH (t:T) WHERE NOT EXISTS { MATCH (x:Z&A)-[:R]->(t) } RETURN t.name"
+    expect:
+      rows:
+        - [Amsterdam]
+
+  # COUNT subquery
+
+  - name: count_subquery_1_colon_a
+    query: "MATCH (t:T) RETURN COUNT { MATCH (x:A)-[:R]->(t) } AS c"
+    expect:
+      rows:
+        - [2]
+
+  - name: count_subquery_1_colon_a_colon_b
+    query: "MATCH (t:T) RETURN COUNT { MATCH (x:A:B)-[:R]->(t) } AS c"
+    expect:
+      rows:
+        - [1]
+
+  - name: count_subquery_1_is_a
+    query: "MATCH (t:T) RETURN COUNT { MATCH (x IS A)-[:R]->(t) } AS c"
+    expect:
+      rows:
+        - [2]
+
+  - name: count_subquery_1_is_a_and_b
+    query: "MATCH (t:T) RETURN COUNT { MATCH (x IS A&B)-[:R]->(t) } AS c"
+    expect:
+      rows:
+        - [1]
+
+  - name: count_subquery_1_a_and_b
+    query: "MATCH (t:T) RETURN COUNT { MATCH (x:A&B)-[:R]->(t) } AS c"
+    expect:
+      rows:
+        - [1]
+
+  - name: count_subquery_1_a_or_b
+    query: "MATCH (t:T) RETURN COUNT { MATCH (x:A|B)-[:R]->(t) } AS c"
+    expect:
+      rows:
+        - [3]
+
+  - name: count_subquery_1_not_a
+    query: "MATCH (t:T) RETURN COUNT { MATCH (x:!A)-[:R]->(t) } AS c"
+    expect:
+      rows:
+        - [3]
+
+  - name: count_subquery_1_any_label
+    query: "MATCH (t:T) RETURN COUNT { MATCH (x:%)-[:R]->(t) } AS c"
+    expect:
+      rows:
+        - [4]
+
+  - name: count_subquery_1_paren_a
+    query: "MATCH (t:T) RETURN COUNT { MATCH (x:(A))-[:R]->(t) } AS c"
+    expect:
+      rows:
+        - [2]
+
+  - name: count_subquery_1_nobody
+    query: "MATCH (t:T) RETURN COUNT { MATCH (x:Z&A)-[:R]->(t) } AS c"
+    expect:
+      rows:
+        - [0]
+
+  - name: count_subquery_2_colon_a
+    query: "MATCH (t:T) RETURN COUNT { MATCH (t)-[:S]->(x:A) } AS c"
+    expect:
+      rows:
+        - [2]
+
+  - name: count_subquery_2_colon_a_colon_b
+    query: "MATCH (t:T) RETURN COUNT { MATCH (t)-[:S]->(x:A:B) } AS c"
+    expect:
+      rows:
+        - [1]
+
+  - name: count_subquery_2_is_a
+    query: "MATCH (t:T) RETURN COUNT { MATCH (t)-[:S]->(x IS A) } AS c"
+    expect:
+      rows:
+        - [2]
+
+  - name: count_subquery_2_is_a_and_b
+    query: "MATCH (t:T) RETURN COUNT { MATCH (t)-[:S]->(x IS A&B) } AS c"
+    expect:
+      rows:
+        - [1]
+
+  - name: count_subquery_2_a_and_b
+    query: "MATCH (t:T) RETURN COUNT { MATCH (t)-[:S]->(x:A&B) } AS c"
+    expect:
+      rows:
+        - [1]
+
+  - name: count_subquery_2_a_or_b
+    query: "MATCH (t:T) RETURN COUNT { MATCH (t)-[:S]->(x:A|B) } AS c"
+    expect:
+      rows:
+        - [3]
+
+  - name: count_subquery_2_not_a
+    query: "MATCH (t:T) RETURN COUNT { MATCH (t)-[:S]->(x:!A) } AS c"
+    expect:
+      rows:
+        - [3]
+
+  - name: count_subquery_2_any_label
+    query: "MATCH (t:T) RETURN COUNT { MATCH (t)-[:S]->(x:%) } AS c"
+    expect:
+      rows:
+        - [4]
+
+  - name: count_subquery_2_paren_a
+    query: "MATCH (t:T) RETURN COUNT { MATCH (t)-[:S]->(x:(A)) } AS c"
+    expect:
+      rows:
+        - [2]
+
+  - name: count_subquery_2_nobody
+    query: "MATCH (t:T) RETURN COUNT { MATCH (t)-[:S]->(x:Z&A) } AS c"
+    expect:
+      rows:
+        - [0]
+
+  # COUNT subquery on a node from outside
+
+  - name: count_on_a_bound_node_1_colon_a
+    query: "MATCH (y {k: 1}) WHERE COUNT { MATCH (y:A)-[:R]->() } = 1 RETURN y.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: count_on_a_bound_node_1_colon_a_colon_b
+    query: "MATCH (y {k: 1}) WHERE COUNT { MATCH (y:A:B)-[:R]->() } = 1 RETURN y.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: count_on_a_bound_node_1_is_a
+    query: "MATCH (y {k: 1}) WHERE COUNT { MATCH (y IS A)-[:R]->() } = 1 RETURN y.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: count_on_a_bound_node_1_is_a_and_b
+    query: "MATCH (y {k: 1}) WHERE COUNT { MATCH (y IS A&B)-[:R]->() } = 1 RETURN y.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: count_on_a_bound_node_1_a_and_b
+    query: "MATCH (y {k: 1}) WHERE COUNT { MATCH (y:A&B)-[:R]->() } = 1 RETURN y.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: count_on_a_bound_node_1_a_or_b
+    query: "MATCH (y {k: 1}) WHERE COUNT { MATCH (y:A|B)-[:R]->() } = 1 RETURN y.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]
+
+  - name: count_on_a_bound_node_1_not_a
+    query: "MATCH (y {k: 1}) WHERE COUNT { MATCH (y:!A)-[:R]->() } = 1 RETURN y.name"
+    expect:
+      rows:
+        - [Gus]
+        - [Jules]
+        - [Mia]
+
+  - name: count_on_a_bound_node_1_any_label
+    query: "MATCH (y {k: 1}) WHERE COUNT { MATCH (y:%)-[:R]->() } = 1 RETURN y.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Jules]
+        - [Vincent]
+
+  - name: count_on_a_bound_node_1_paren_a
+    query: "MATCH (y {k: 1}) WHERE COUNT { MATCH (y:(A))-[:R]->() } = 1 RETURN y.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: count_on_a_bound_node_1_nobody
+    query: "MATCH (y {k: 1}) WHERE COUNT { MATCH (y:Z&A)-[:R]->() } = 1 RETURN y.name"
+    expect:
+      empty: true
+
+  # CALL subquery
+
+  - name: call_subquery_1_colon_a
+    query: "CALL { MATCH (x:A)-[:R]->(t:T) RETURN x.name AS r } RETURN r"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: call_subquery_1_colon_a_colon_b
+    query: "CALL { MATCH (x:A:B)-[:R]->(t:T) RETURN x.name AS r } RETURN r"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: call_subquery_1_is_a
+    query: "CALL { MATCH (x IS A)-[:R]->(t:T) RETURN x.name AS r } RETURN r"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: call_subquery_1_is_a_and_b
+    query: "CALL { MATCH (x IS A&B)-[:R]->(t:T) RETURN x.name AS r } RETURN r"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: call_subquery_1_a_and_b
+    query: "CALL { MATCH (x:A&B)-[:R]->(t:T) RETURN x.name AS r } RETURN r"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: call_subquery_1_a_or_b
+    query: "CALL { MATCH (x:A|B)-[:R]->(t:T) RETURN x.name AS r } RETURN r"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]
+
+  - name: call_subquery_1_not_a
+    query: "CALL { MATCH (x:!A)-[:R]->(t:T) RETURN x.name AS r } RETURN r"
+    expect:
+      rows:
+        - [Gus]
+        - [Jules]
+        - [Mia]
+
+  - name: call_subquery_1_any_label
+    query: "CALL { MATCH (x:%)-[:R]->(t:T) RETURN x.name AS r } RETURN r"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Jules]
+        - [Vincent]
+
+  - name: call_subquery_1_paren_a
+    query: "CALL { MATCH (x:(A))-[:R]->(t:T) RETURN x.name AS r } RETURN r"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: call_subquery_1_nobody
+    query: "CALL { MATCH (x:Z&A)-[:R]->(t:T) RETURN x.name AS r } RETURN r"
+    expect:
+      empty: true
+
+  - name: call_subquery_2_colon_a
+    query: "MATCH (y {k: 1}) CALL { WITH y MATCH (y:A)-[:R]->(t:T) RETURN y.name AS r } RETURN r"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: call_subquery_2_colon_a_colon_b
+    query: "MATCH (y {k: 1}) CALL { WITH y MATCH (y:A:B)-[:R]->(t:T) RETURN y.name AS r } RETURN r"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: call_subquery_2_is_a
+    query: "MATCH (y {k: 1}) CALL { WITH y MATCH (y IS A)-[:R]->(t:T) RETURN y.name AS r } RETURN r"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: call_subquery_2_is_a_and_b
+    query: "MATCH (y {k: 1}) CALL { WITH y MATCH (y IS A&B)-[:R]->(t:T) RETURN y.name AS r } RETURN r"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: call_subquery_2_a_and_b
+    query: "MATCH (y {k: 1}) CALL { WITH y MATCH (y:A&B)-[:R]->(t:T) RETURN y.name AS r } RETURN r"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: call_subquery_2_a_or_b
+    query: "MATCH (y {k: 1}) CALL { WITH y MATCH (y:A|B)-[:R]->(t:T) RETURN y.name AS r } RETURN r"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]
+
+  - name: call_subquery_2_not_a
+    query: "MATCH (y {k: 1}) CALL { WITH y MATCH (y:!A)-[:R]->(t:T) RETURN y.name AS r } RETURN r"
+    expect:
+      rows:
+        - [Gus]
+        - [Jules]
+        - [Mia]
+
+  - name: call_subquery_2_any_label
+    query: "MATCH (y {k: 1}) CALL { WITH y MATCH (y:%)-[:R]->(t:T) RETURN y.name AS r } RETURN r"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Jules]
+        - [Vincent]
+
+  - name: call_subquery_2_paren_a
+    query: "MATCH (y {k: 1}) CALL { WITH y MATCH (y:(A))-[:R]->(t:T) RETURN y.name AS r } RETURN r"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: call_subquery_2_nobody
+    query: "MATCH (y {k: 1}) CALL { WITH y MATCH (y:Z&A)-[:R]->(t:T) RETURN y.name AS r } RETURN r"
+    expect:
+      empty: true
+
+  - name: call_subquery_3_colon_a
+    query: "CALL { MATCH (t:T)-[:S]->(x:A) RETURN x.name AS r } RETURN r"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: call_subquery_3_colon_a_colon_b
+    query: "CALL { MATCH (t:T)-[:S]->(x:A:B) RETURN x.name AS r } RETURN r"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: call_subquery_3_is_a
+    query: "CALL { MATCH (t:T)-[:S]->(x IS A) RETURN x.name AS r } RETURN r"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: call_subquery_3_is_a_and_b
+    query: "CALL { MATCH (t:T)-[:S]->(x IS A&B) RETURN x.name AS r } RETURN r"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: call_subquery_3_a_and_b
+    query: "CALL { MATCH (t:T)-[:S]->(x:A&B) RETURN x.name AS r } RETURN r"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: call_subquery_3_a_or_b
+    query: "CALL { MATCH (t:T)-[:S]->(x:A|B) RETURN x.name AS r } RETURN r"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]
+
+  - name: call_subquery_3_not_a
+    query: "CALL { MATCH (t:T)-[:S]->(x:!A) RETURN x.name AS r } RETURN r"
+    expect:
+      rows:
+        - [Gus]
+        - [Jules]
+        - [Mia]
+
+  - name: call_subquery_3_any_label
+    query: "CALL { MATCH (t:T)-[:S]->(x:%) RETURN x.name AS r } RETURN r"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Jules]
+        - [Vincent]
+
+  - name: call_subquery_3_paren_a
+    query: "CALL { MATCH (t:T)-[:S]->(x:(A)) RETURN x.name AS r } RETURN r"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: call_subquery_3_nobody
+    query: "CALL { MATCH (t:T)-[:S]->(x:Z&A) RETURN x.name AS r } RETURN r"
+    expect:
+      empty: true
+
+  # OPTIONAL MATCH, first node
+
+  - name: optional_first_node_1_colon_a
+    query: "OPTIONAL MATCH (x:A)-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: optional_first_node_1_colon_a_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "OPTIONAL MATCH (x:A)-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: optional_first_node_1_colon_a_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "OPTIONAL MATCH (x:A)-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: optional_first_node_1_colon_a_colon_b
+    query: "OPTIONAL MATCH (x:A:B)-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: optional_first_node_1_colon_a_colon_b_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "OPTIONAL MATCH (x:A:B)-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: optional_first_node_1_colon_a_colon_b_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "OPTIONAL MATCH (x:A:B)-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: optional_first_node_1_is_a
+    query: "OPTIONAL MATCH (x IS A)-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: optional_first_node_1_is_a_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "OPTIONAL MATCH (x IS A)-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: optional_first_node_1_is_a_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "OPTIONAL MATCH (x IS A)-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: optional_first_node_1_is_a_and_b
+    query: "OPTIONAL MATCH (x IS A&B)-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: optional_first_node_1_is_a_and_b_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "OPTIONAL MATCH (x IS A&B)-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: optional_first_node_1_is_a_and_b_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "OPTIONAL MATCH (x IS A&B)-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: optional_first_node_1_a_and_b
+    query: "OPTIONAL MATCH (x:A&B)-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: optional_first_node_1_a_and_b_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "OPTIONAL MATCH (x:A&B)-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: optional_first_node_1_a_and_b_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "OPTIONAL MATCH (x:A&B)-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: optional_first_node_1_a_or_b
+    query: "OPTIONAL MATCH (x:A|B)-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]
+
+  - name: optional_first_node_1_a_or_b_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "OPTIONAL MATCH (x:A|B)-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]
+
+  - name: optional_first_node_1_a_or_b_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "OPTIONAL MATCH (x:A|B)-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]
+
+  - name: optional_first_node_1_not_a
+    query: "OPTIONAL MATCH (x:!A)-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Gus]
+        - [Jules]
+        - [Mia]
+
+  - name: optional_first_node_1_not_a_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "OPTIONAL MATCH (x:!A)-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Gus]
+        - [Jules]
+        - [Mia]
+
+  - name: optional_first_node_1_not_a_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "OPTIONAL MATCH (x:!A)-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Gus]
+        - [Jules]
+        - [Mia]
+
+  - name: optional_first_node_1_any_label
+    query: "OPTIONAL MATCH (x:%)-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Jules]
+        - [Vincent]
+
+  - name: optional_first_node_1_any_label_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "OPTIONAL MATCH (x:%)-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Jules]
+        - [Vincent]
+
+  - name: optional_first_node_1_any_label_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "OPTIONAL MATCH (x:%)-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Jules]
+        - [Vincent]
+
+  - name: optional_first_node_1_paren_a
+    query: "OPTIONAL MATCH (x:(A))-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: optional_first_node_1_paren_a_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "OPTIONAL MATCH (x:(A))-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: optional_first_node_1_paren_a_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "OPTIONAL MATCH (x:(A))-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: optional_first_node_1_nobody
+    query: "OPTIONAL MATCH (x:Z&A)-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [null]
+
+  - name: optional_first_node_1_nobody_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "OPTIONAL MATCH (x:Z&A)-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [null]
+
+  - name: optional_first_node_1_nobody_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "OPTIONAL MATCH (x:Z&A)-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [null]
+
+  - name: optional_first_node_2_colon_a
+    query: "MATCH (t:T) OPTIONAL MATCH (x:A)-[:R]->(t) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: optional_first_node_2_colon_a_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (t:T) OPTIONAL MATCH (x:A)-[:R]->(t) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: optional_first_node_2_colon_a_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (t:T) OPTIONAL MATCH (x:A)-[:R]->(t) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: optional_first_node_2_colon_a_colon_b
+    query: "MATCH (t:T) OPTIONAL MATCH (x:A:B)-[:R]->(t) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: optional_first_node_2_colon_a_colon_b_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (t:T) OPTIONAL MATCH (x:A:B)-[:R]->(t) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: optional_first_node_2_colon_a_colon_b_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (t:T) OPTIONAL MATCH (x:A:B)-[:R]->(t) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: optional_first_node_2_is_a
+    query: "MATCH (t:T) OPTIONAL MATCH (x IS A)-[:R]->(t) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: optional_first_node_2_is_a_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (t:T) OPTIONAL MATCH (x IS A)-[:R]->(t) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: optional_first_node_2_is_a_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (t:T) OPTIONAL MATCH (x IS A)-[:R]->(t) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: optional_first_node_2_is_a_and_b
+    query: "MATCH (t:T) OPTIONAL MATCH (x IS A&B)-[:R]->(t) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: optional_first_node_2_is_a_and_b_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (t:T) OPTIONAL MATCH (x IS A&B)-[:R]->(t) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: optional_first_node_2_is_a_and_b_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (t:T) OPTIONAL MATCH (x IS A&B)-[:R]->(t) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: optional_first_node_2_a_and_b
+    query: "MATCH (t:T) OPTIONAL MATCH (x:A&B)-[:R]->(t) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: optional_first_node_2_a_and_b_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (t:T) OPTIONAL MATCH (x:A&B)-[:R]->(t) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: optional_first_node_2_a_and_b_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (t:T) OPTIONAL MATCH (x:A&B)-[:R]->(t) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: optional_first_node_2_a_or_b
+    query: "MATCH (t:T) OPTIONAL MATCH (x:A|B)-[:R]->(t) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]
+
+  - name: optional_first_node_2_a_or_b_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (t:T) OPTIONAL MATCH (x:A|B)-[:R]->(t) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]
+
+  - name: optional_first_node_2_a_or_b_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (t:T) OPTIONAL MATCH (x:A|B)-[:R]->(t) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]
+
+  - name: optional_first_node_2_not_a
+    query: "MATCH (t:T) OPTIONAL MATCH (x:!A)-[:R]->(t) RETURN x.name"
+    expect:
+      rows:
+        - [Gus]
+        - [Jules]
+        - [Mia]
+
+  - name: optional_first_node_2_not_a_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (t:T) OPTIONAL MATCH (x:!A)-[:R]->(t) RETURN x.name"
+    expect:
+      rows:
+        - [Gus]
+        - [Jules]
+        - [Mia]
+
+  - name: optional_first_node_2_not_a_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (t:T) OPTIONAL MATCH (x:!A)-[:R]->(t) RETURN x.name"
+    expect:
+      rows:
+        - [Gus]
+        - [Jules]
+        - [Mia]
+
+  - name: optional_first_node_2_any_label
+    query: "MATCH (t:T) OPTIONAL MATCH (x:%)-[:R]->(t) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Jules]
+        - [Vincent]
+
+  - name: optional_first_node_2_any_label_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (t:T) OPTIONAL MATCH (x:%)-[:R]->(t) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Jules]
+        - [Vincent]
+
+  - name: optional_first_node_2_any_label_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (t:T) OPTIONAL MATCH (x:%)-[:R]->(t) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Jules]
+        - [Vincent]
+
+  - name: optional_first_node_2_paren_a
+    query: "MATCH (t:T) OPTIONAL MATCH (x:(A))-[:R]->(t) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: optional_first_node_2_paren_a_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (t:T) OPTIONAL MATCH (x:(A))-[:R]->(t) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: optional_first_node_2_paren_a_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (t:T) OPTIONAL MATCH (x:(A))-[:R]->(t) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: optional_first_node_2_nobody
+    query: "MATCH (t:T) OPTIONAL MATCH (x:Z&A)-[:R]->(t) RETURN x.name"
+    expect:
+      rows:
+        - [null]
+
+  - name: optional_first_node_2_nobody_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (t:T) OPTIONAL MATCH (x:Z&A)-[:R]->(t) RETURN x.name"
+    expect:
+      rows:
+        - [null]
+
+  - name: optional_first_node_2_nobody_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (t:T) OPTIONAL MATCH (x:Z&A)-[:R]->(t) RETURN x.name"
+    expect:
+      rows:
+        - [null]
+
+  # OPTIONAL MATCH, a source the input binds
+
+  - name: optional_bound_source_1_colon_a
+    query: "MATCH (y {k: 1}) OPTIONAL MATCH (y:A)-[:R]->(t:T) RETURN y.name, t.name"
+    expect:
+      rows:
+        - [Alix, Amsterdam]
+        - [Gus, null]
+        - [Jules, null]
+        - [Mia, null]
+        - [Vincent, Amsterdam]
+
+  - name: optional_bound_source_1_colon_a_colon_b
+    query: "MATCH (y {k: 1}) OPTIONAL MATCH (y:A:B)-[:R]->(t:T) RETURN y.name, t.name"
+    expect:
+      rows:
+        - [Alix, null]
+        - [Gus, null]
+        - [Jules, null]
+        - [Mia, null]
+        - [Vincent, Amsterdam]
+
+  - name: optional_bound_source_1_is_a
+    query: "MATCH (y {k: 1}) OPTIONAL MATCH (y IS A)-[:R]->(t:T) RETURN y.name, t.name"
+    expect:
+      rows:
+        - [Alix, Amsterdam]
+        - [Gus, null]
+        - [Jules, null]
+        - [Mia, null]
+        - [Vincent, Amsterdam]
+
+  - name: optional_bound_source_1_is_a_and_b
+    query: "MATCH (y {k: 1}) OPTIONAL MATCH (y IS A&B)-[:R]->(t:T) RETURN y.name, t.name"
+    expect:
+      rows:
+        - [Alix, null]
+        - [Gus, null]
+        - [Jules, null]
+        - [Mia, null]
+        - [Vincent, Amsterdam]
+
+  - name: optional_bound_source_1_a_and_b
+    query: "MATCH (y {k: 1}) OPTIONAL MATCH (y:A&B)-[:R]->(t:T) RETURN y.name, t.name"
+    expect:
+      rows:
+        - [Alix, null]
+        - [Gus, null]
+        - [Jules, null]
+        - [Mia, null]
+        - [Vincent, Amsterdam]
+
+  - name: optional_bound_source_1_a_or_b
+    query: "MATCH (y {k: 1}) OPTIONAL MATCH (y:A|B)-[:R]->(t:T) RETURN y.name, t.name"
+    expect:
+      rows:
+        - [Alix, Amsterdam]
+        - [Gus, Amsterdam]
+        - [Jules, null]
+        - [Mia, null]
+        - [Vincent, Amsterdam]
+
+  - name: optional_bound_source_1_not_a
+    query: "MATCH (y {k: 1}) OPTIONAL MATCH (y:!A)-[:R]->(t:T) RETURN y.name, t.name"
+    expect:
+      rows:
+        - [Alix, null]
+        - [Gus, Amsterdam]
+        - [Jules, Amsterdam]
+        - [Mia, Amsterdam]
+        - [Vincent, null]
+
+  - name: optional_bound_source_1_any_label
+    query: "MATCH (y {k: 1}) OPTIONAL MATCH (y:%)-[:R]->(t:T) RETURN y.name, t.name"
+    expect:
+      rows:
+        - [Alix, Amsterdam]
+        - [Gus, Amsterdam]
+        - [Jules, Amsterdam]
+        - [Mia, null]
+        - [Vincent, Amsterdam]
+
+  - name: optional_bound_source_1_paren_a
+    query: "MATCH (y {k: 1}) OPTIONAL MATCH (y:(A))-[:R]->(t:T) RETURN y.name, t.name"
+    expect:
+      rows:
+        - [Alix, Amsterdam]
+        - [Gus, null]
+        - [Jules, null]
+        - [Mia, null]
+        - [Vincent, Amsterdam]
+
+  - name: optional_bound_source_1_nobody
+    query: "MATCH (y {k: 1}) OPTIONAL MATCH (y:Z&A)-[:R]->(t:T) RETURN y.name, t.name"
+    expect:
+      rows:
+        - [Alix, null]
+        - [Gus, null]
+        - [Jules, null]
+        - [Mia, null]
+        - [Vincent, null]
+
+  # OPTIONAL MATCH, far end
+
+  - name: optional_far_end_1_colon_a
+    query: "MATCH (t:T) OPTIONAL MATCH (t)-[:S]->(x:A) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: optional_far_end_1_colon_a_colon_b
+    query: "MATCH (t:T) OPTIONAL MATCH (t)-[:S]->(x:A:B) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: optional_far_end_1_is_a
+    query: "MATCH (t:T) OPTIONAL MATCH (t)-[:S]->(x IS A) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: optional_far_end_1_is_a_and_b
+    query: "MATCH (t:T) OPTIONAL MATCH (t)-[:S]->(x IS A&B) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: optional_far_end_1_a_and_b
+    query: "MATCH (t:T) OPTIONAL MATCH (t)-[:S]->(x:A&B) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: optional_far_end_1_a_or_b
+    query: "MATCH (t:T) OPTIONAL MATCH (t)-[:S]->(x:A|B) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]
+
+  - name: optional_far_end_1_not_a
+    query: "MATCH (t:T) OPTIONAL MATCH (t)-[:S]->(x:!A) RETURN x.name"
+    expect:
+      rows:
+        - [Gus]
+        - [Jules]
+        - [Mia]
+
+  - name: optional_far_end_1_any_label
+    query: "MATCH (t:T) OPTIONAL MATCH (t)-[:S]->(x:%) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Jules]
+        - [Vincent]
+
+  - name: optional_far_end_1_paren_a
+    query: "MATCH (t:T) OPTIONAL MATCH (t)-[:S]->(x:(A)) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: optional_far_end_1_nobody
+    query: "MATCH (t:T) OPTIONAL MATCH (t)-[:S]->(x:Z&A) RETURN x.name"
+    expect:
+      rows:
+        - [null]
+
+  # First node without a variable
+
+  - name: no_variable_1_colon_a
+    query: "MATCH (:A)-[:R]->(t:T) RETURN count(*) AS c"
+    expect:
+      rows:
+        - [2]
+
+  - name: no_variable_1_colon_a_colon_b
+    query: "MATCH (:A:B)-[:R]->(t:T) RETURN count(*) AS c"
+    expect:
+      rows:
+        - [1]
+
+  - name: no_variable_1_is_a
+    query: "MATCH ( IS A)-[:R]->(t:T) RETURN count(*) AS c"
+    expect:
+      rows:
+        - [2]
+
+  - name: no_variable_1_is_a_and_b
+    query: "MATCH ( IS A&B)-[:R]->(t:T) RETURN count(*) AS c"
+    expect:
+      rows:
+        - [1]
+
+  - name: no_variable_1_a_and_b
+    query: "MATCH (:A&B)-[:R]->(t:T) RETURN count(*) AS c"
+    expect:
+      rows:
+        - [1]
+
+  - name: no_variable_1_a_or_b
+    query: "MATCH (:A|B)-[:R]->(t:T) RETURN count(*) AS c"
+    expect:
+      rows:
+        - [3]
+
+  - name: no_variable_1_not_a
+    query: "MATCH (:!A)-[:R]->(t:T) RETURN count(*) AS c"
+    expect:
+      rows:
+        - [3]
+
+  - name: no_variable_1_any_label
+    query: "MATCH (:%)-[:R]->(t:T) RETURN count(*) AS c"
+    expect:
+      rows:
+        - [4]
+
+  - name: no_variable_1_paren_a
+    query: "MATCH (:(A))-[:R]->(t:T) RETURN count(*) AS c"
+    expect:
+      rows:
+        - [2]
+
+  - name: no_variable_1_nobody
+    query: "MATCH (:Z&A)-[:R]->(t:T) RETURN count(*) AS c"
+    expect:
+      rows:
+        - [0]
+
+  # Far end
+
+  - name: far_end_1_colon_a
+    query: "MATCH (t:T)-[:S]->(x:A) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: far_end_1_colon_a_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (t:T)-[:S]->(x:A) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: far_end_1_colon_a_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (t:T)-[:S]->(x:A) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: far_end_1_colon_a_colon_b
+    query: "MATCH (t:T)-[:S]->(x:A:B) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: far_end_1_colon_a_colon_b_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (t:T)-[:S]->(x:A:B) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: far_end_1_colon_a_colon_b_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (t:T)-[:S]->(x:A:B) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: far_end_1_is_a
+    query: "MATCH (t:T)-[:S]->(x IS A) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: far_end_1_is_a_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (t:T)-[:S]->(x IS A) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: far_end_1_is_a_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (t:T)-[:S]->(x IS A) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: far_end_1_is_a_and_b
+    query: "MATCH (t:T)-[:S]->(x IS A&B) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: far_end_1_is_a_and_b_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (t:T)-[:S]->(x IS A&B) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: far_end_1_is_a_and_b_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (t:T)-[:S]->(x IS A&B) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: far_end_1_a_and_b
+    query: "MATCH (t:T)-[:S]->(x:A&B) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: far_end_1_a_and_b_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (t:T)-[:S]->(x:A&B) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: far_end_1_a_and_b_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (t:T)-[:S]->(x:A&B) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: far_end_1_a_or_b
+    query: "MATCH (t:T)-[:S]->(x:A|B) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]
+
+  - name: far_end_1_a_or_b_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (t:T)-[:S]->(x:A|B) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]
+
+  - name: far_end_1_a_or_b_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (t:T)-[:S]->(x:A|B) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]
+
+  - name: far_end_1_not_a
+    query: "MATCH (t:T)-[:S]->(x:!A) RETURN x.name"
+    expect:
+      rows:
+        - [Gus]
+        - [Jules]
+        - [Mia]
+
+  - name: far_end_1_not_a_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (t:T)-[:S]->(x:!A) RETURN x.name"
+    expect:
+      rows:
+        - [Gus]
+        - [Jules]
+        - [Mia]
+
+  - name: far_end_1_not_a_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (t:T)-[:S]->(x:!A) RETURN x.name"
+    expect:
+      rows:
+        - [Gus]
+        - [Jules]
+        - [Mia]
+
+  - name: far_end_1_any_label
+    query: "MATCH (t:T)-[:S]->(x:%) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Jules]
+        - [Vincent]
+
+  - name: far_end_1_any_label_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (t:T)-[:S]->(x:%) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Jules]
+        - [Vincent]
+
+  - name: far_end_1_any_label_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (t:T)-[:S]->(x:%) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Jules]
+        - [Vincent]
+
+  - name: far_end_1_paren_a
+    query: "MATCH (t:T)-[:S]->(x:(A)) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: far_end_1_paren_a_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (t:T)-[:S]->(x:(A)) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: far_end_1_paren_a_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (t:T)-[:S]->(x:(A)) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: far_end_1_nobody
+    query: "MATCH (t:T)-[:S]->(x:Z&A) RETURN x.name"
+    expect:
+      empty: true
+
+  - name: far_end_1_nobody_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (t:T)-[:S]->(x:Z&A) RETURN x.name"
+    expect:
+      empty: true
+
+  - name: far_end_1_nobody_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (t:T)-[:S]->(x:Z&A) RETURN x.name"
+    expect:
+      empty: true
+
+  - name: far_end_2_colon_a
+    query: "MATCH (t:T)<-[:R]-(x:A) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: far_end_2_colon_a_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (t:T)<-[:R]-(x:A) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: far_end_2_colon_a_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (t:T)<-[:R]-(x:A) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: far_end_2_colon_a_colon_b
+    query: "MATCH (t:T)<-[:R]-(x:A:B) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: far_end_2_colon_a_colon_b_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (t:T)<-[:R]-(x:A:B) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: far_end_2_colon_a_colon_b_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (t:T)<-[:R]-(x:A:B) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: far_end_2_is_a
+    query: "MATCH (t:T)<-[:R]-(x IS A) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: far_end_2_is_a_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (t:T)<-[:R]-(x IS A) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: far_end_2_is_a_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (t:T)<-[:R]-(x IS A) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: far_end_2_is_a_and_b
+    query: "MATCH (t:T)<-[:R]-(x IS A&B) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: far_end_2_is_a_and_b_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (t:T)<-[:R]-(x IS A&B) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: far_end_2_is_a_and_b_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (t:T)<-[:R]-(x IS A&B) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: far_end_2_a_and_b
+    query: "MATCH (t:T)<-[:R]-(x:A&B) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: far_end_2_a_and_b_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (t:T)<-[:R]-(x:A&B) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: far_end_2_a_and_b_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (t:T)<-[:R]-(x:A&B) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: far_end_2_a_or_b
+    query: "MATCH (t:T)<-[:R]-(x:A|B) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]
+
+  - name: far_end_2_a_or_b_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (t:T)<-[:R]-(x:A|B) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]
+
+  - name: far_end_2_a_or_b_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (t:T)<-[:R]-(x:A|B) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]
+
+  - name: far_end_2_not_a
+    query: "MATCH (t:T)<-[:R]-(x:!A) RETURN x.name"
+    expect:
+      rows:
+        - [Gus]
+        - [Jules]
+        - [Mia]
+
+  - name: far_end_2_not_a_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (t:T)<-[:R]-(x:!A) RETURN x.name"
+    expect:
+      rows:
+        - [Gus]
+        - [Jules]
+        - [Mia]
+
+  - name: far_end_2_not_a_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (t:T)<-[:R]-(x:!A) RETURN x.name"
+    expect:
+      rows:
+        - [Gus]
+        - [Jules]
+        - [Mia]
+
+  - name: far_end_2_any_label
+    query: "MATCH (t:T)<-[:R]-(x:%) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Jules]
+        - [Vincent]
+
+  - name: far_end_2_any_label_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (t:T)<-[:R]-(x:%) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Jules]
+        - [Vincent]
+
+  - name: far_end_2_any_label_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (t:T)<-[:R]-(x:%) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Jules]
+        - [Vincent]
+
+  - name: far_end_2_paren_a
+    query: "MATCH (t:T)<-[:R]-(x:(A)) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: far_end_2_paren_a_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (t:T)<-[:R]-(x:(A)) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: far_end_2_paren_a_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (t:T)<-[:R]-(x:(A)) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: far_end_2_nobody
+    query: "MATCH (t:T)<-[:R]-(x:Z&A) RETURN x.name"
+    expect:
+      empty: true
+
+  - name: far_end_2_nobody_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (t:T)<-[:R]-(x:Z&A) RETURN x.name"
+    expect:
+      empty: true
+
+  - name: far_end_2_nobody_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (t:T)<-[:R]-(x:Z&A) RETURN x.name"
+    expect:
+      empty: true
+
+  - name: far_end_3_colon_a
+    query: "MATCH (t)-[:S]->(x:A) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: far_end_3_colon_a_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (t)-[:S]->(x:A) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: far_end_3_colon_a_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (t)-[:S]->(x:A) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: far_end_3_colon_a_colon_b
+    query: "MATCH (t)-[:S]->(x:A:B) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: far_end_3_colon_a_colon_b_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (t)-[:S]->(x:A:B) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: far_end_3_colon_a_colon_b_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (t)-[:S]->(x:A:B) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: far_end_3_is_a
+    query: "MATCH (t)-[:S]->(x IS A) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: far_end_3_is_a_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (t)-[:S]->(x IS A) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: far_end_3_is_a_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (t)-[:S]->(x IS A) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: far_end_3_is_a_and_b
+    query: "MATCH (t)-[:S]->(x IS A&B) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: far_end_3_is_a_and_b_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (t)-[:S]->(x IS A&B) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: far_end_3_is_a_and_b_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (t)-[:S]->(x IS A&B) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: far_end_3_a_and_b
+    query: "MATCH (t)-[:S]->(x:A&B) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: far_end_3_a_and_b_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (t)-[:S]->(x:A&B) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: far_end_3_a_and_b_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (t)-[:S]->(x:A&B) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: far_end_3_a_or_b
+    query: "MATCH (t)-[:S]->(x:A|B) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]
+
+  - name: far_end_3_a_or_b_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (t)-[:S]->(x:A|B) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]
+
+  - name: far_end_3_a_or_b_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (t)-[:S]->(x:A|B) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]
+
+  - name: far_end_3_not_a
+    query: "MATCH (t)-[:S]->(x:!A) RETURN x.name"
+    expect:
+      rows:
+        - [Gus]
+        - [Jules]
+        - [Mia]
+
+  - name: far_end_3_not_a_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (t)-[:S]->(x:!A) RETURN x.name"
+    expect:
+      rows:
+        - [Gus]
+        - [Jules]
+        - [Mia]
+
+  - name: far_end_3_not_a_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (t)-[:S]->(x:!A) RETURN x.name"
+    expect:
+      rows:
+        - [Gus]
+        - [Jules]
+        - [Mia]
+
+  - name: far_end_3_any_label
+    query: "MATCH (t)-[:S]->(x:%) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Jules]
+        - [Vincent]
+
+  - name: far_end_3_any_label_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (t)-[:S]->(x:%) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Jules]
+        - [Vincent]
+
+  - name: far_end_3_any_label_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (t)-[:S]->(x:%) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Jules]
+        - [Vincent]
+
+  - name: far_end_3_paren_a
+    query: "MATCH (t)-[:S]->(x:(A)) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: far_end_3_paren_a_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (t)-[:S]->(x:(A)) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: far_end_3_paren_a_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (t)-[:S]->(x:(A)) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: far_end_3_nobody
+    query: "MATCH (t)-[:S]->(x:Z&A) RETURN x.name"
+    expect:
+      empty: true
+
+  - name: far_end_3_nobody_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (t)-[:S]->(x:Z&A) RETURN x.name"
+    expect:
+      empty: true
+
+  - name: far_end_3_nobody_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (t)-[:S]->(x:Z&A) RETURN x.name"
+    expect:
+      empty: true
+
+  - name: far_end_4_colon_a
+    query: "MATCH (t:T {tk: 1})-[:S]->(x:A) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: far_end_4_colon_a_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (t:T {tk: 1})-[:S]->(x:A) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: far_end_4_colon_a_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (t:T {tk: 1})-[:S]->(x:A) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: far_end_4_colon_a_colon_b
+    query: "MATCH (t:T {tk: 1})-[:S]->(x:A:B) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: far_end_4_colon_a_colon_b_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (t:T {tk: 1})-[:S]->(x:A:B) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: far_end_4_colon_a_colon_b_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (t:T {tk: 1})-[:S]->(x:A:B) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: far_end_4_is_a
+    query: "MATCH (t:T {tk: 1})-[:S]->(x IS A) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: far_end_4_is_a_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (t:T {tk: 1})-[:S]->(x IS A) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: far_end_4_is_a_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (t:T {tk: 1})-[:S]->(x IS A) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: far_end_4_is_a_and_b
+    query: "MATCH (t:T {tk: 1})-[:S]->(x IS A&B) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: far_end_4_is_a_and_b_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (t:T {tk: 1})-[:S]->(x IS A&B) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: far_end_4_is_a_and_b_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (t:T {tk: 1})-[:S]->(x IS A&B) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: far_end_4_a_and_b
+    query: "MATCH (t:T {tk: 1})-[:S]->(x:A&B) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: far_end_4_a_and_b_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (t:T {tk: 1})-[:S]->(x:A&B) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: far_end_4_a_and_b_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (t:T {tk: 1})-[:S]->(x:A&B) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: far_end_4_a_or_b
+    query: "MATCH (t:T {tk: 1})-[:S]->(x:A|B) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]
+
+  - name: far_end_4_a_or_b_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (t:T {tk: 1})-[:S]->(x:A|B) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]
+
+  - name: far_end_4_a_or_b_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (t:T {tk: 1})-[:S]->(x:A|B) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]
+
+  - name: far_end_4_not_a
+    query: "MATCH (t:T {tk: 1})-[:S]->(x:!A) RETURN x.name"
+    expect:
+      rows:
+        - [Gus]
+        - [Jules]
+        - [Mia]
+
+  - name: far_end_4_not_a_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (t:T {tk: 1})-[:S]->(x:!A) RETURN x.name"
+    expect:
+      rows:
+        - [Gus]
+        - [Jules]
+        - [Mia]
+
+  - name: far_end_4_not_a_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (t:T {tk: 1})-[:S]->(x:!A) RETURN x.name"
+    expect:
+      rows:
+        - [Gus]
+        - [Jules]
+        - [Mia]
+
+  - name: far_end_4_any_label
+    query: "MATCH (t:T {tk: 1})-[:S]->(x:%) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Jules]
+        - [Vincent]
+
+  - name: far_end_4_any_label_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (t:T {tk: 1})-[:S]->(x:%) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Jules]
+        - [Vincent]
+
+  - name: far_end_4_any_label_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (t:T {tk: 1})-[:S]->(x:%) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Jules]
+        - [Vincent]
+
+  - name: far_end_4_paren_a
+    query: "MATCH (t:T {tk: 1})-[:S]->(x:(A)) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: far_end_4_paren_a_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (t:T {tk: 1})-[:S]->(x:(A)) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: far_end_4_paren_a_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (t:T {tk: 1})-[:S]->(x:(A)) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: far_end_4_nobody
+    query: "MATCH (t:T {tk: 1})-[:S]->(x:Z&A) RETURN x.name"
+    expect:
+      empty: true
+
+  - name: far_end_4_nobody_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (t:T {tk: 1})-[:S]->(x:Z&A) RETURN x.name"
+    expect:
+      empty: true
+
+  - name: far_end_4_nobody_on_hub
+    setup:
+      - "CREATE INDEX on_hub FOR (n:T) ON (n.tk)"
+    query: "MATCH (t:T {tk: 1})-[:S]->(x:Z&A) RETURN x.name"
+    expect:
+      empty: true
+
+  # A later node, in the middle
+
+  - name: later_node_1_colon_a
+    query: "MATCH (t:T)-[:S]->(x:A)-[:R]->(u:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: later_node_1_colon_a_colon_b
+    query: "MATCH (t:T)-[:S]->(x:A:B)-[:R]->(u:T) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: later_node_1_is_a
+    query: "MATCH (t:T)-[:S]->(x IS A)-[:R]->(u:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: later_node_1_is_a_and_b
+    query: "MATCH (t:T)-[:S]->(x IS A&B)-[:R]->(u:T) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: later_node_1_a_and_b
+    query: "MATCH (t:T)-[:S]->(x:A&B)-[:R]->(u:T) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: later_node_1_a_or_b
+    query: "MATCH (t:T)-[:S]->(x:A|B)-[:R]->(u:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]
+
+  - name: later_node_1_not_a
+    query: "MATCH (t:T)-[:S]->(x:!A)-[:R]->(u:T) RETURN x.name"
+    expect:
+      rows:
+        - [Gus]
+        - [Jules]
+        - [Mia]
+
+  - name: later_node_1_any_label
+    query: "MATCH (t:T)-[:S]->(x:%)-[:R]->(u:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Jules]
+        - [Vincent]
+
+  - name: later_node_1_paren_a
+    query: "MATCH (t:T)-[:S]->(x:(A))-[:R]->(u:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: later_node_1_nobody
+    query: "MATCH (t:T)-[:S]->(x:Z&A)-[:R]->(u:T) RETURN x.name"
+    expect:
+      empty: true
+
+  - name: later_node_2_colon_a
+    query: "MATCH (y {name: 'Alix'})-[:R]->(t:T)-[:S]->(x:A) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: later_node_2_colon_a_colon_b
+    query: "MATCH (y {name: 'Alix'})-[:R]->(t:T)-[:S]->(x:A:B) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: later_node_2_is_a
+    query: "MATCH (y {name: 'Alix'})-[:R]->(t:T)-[:S]->(x IS A) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: later_node_2_is_a_and_b
+    query: "MATCH (y {name: 'Alix'})-[:R]->(t:T)-[:S]->(x IS A&B) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: later_node_2_a_and_b
+    query: "MATCH (y {name: 'Alix'})-[:R]->(t:T)-[:S]->(x:A&B) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: later_node_2_a_or_b
+    query: "MATCH (y {name: 'Alix'})-[:R]->(t:T)-[:S]->(x:A|B) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]
+
+  - name: later_node_2_not_a
+    query: "MATCH (y {name: 'Alix'})-[:R]->(t:T)-[:S]->(x:!A) RETURN x.name"
+    expect:
+      rows:
+        - [Gus]
+        - [Jules]
+        - [Mia]
+
+  - name: later_node_2_any_label
+    query: "MATCH (y {name: 'Alix'})-[:R]->(t:T)-[:S]->(x:%) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Jules]
+        - [Vincent]
+
+  - name: later_node_2_paren_a
+    query: "MATCH (y {name: 'Alix'})-[:R]->(t:T)-[:S]->(x:(A)) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: later_node_2_nobody
+    query: "MATCH (y {name: 'Alix'})-[:R]->(t:T)-[:S]->(x:Z&A) RETURN x.name"
+    expect:
+      empty: true

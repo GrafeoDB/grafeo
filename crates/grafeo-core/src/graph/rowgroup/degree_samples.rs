@@ -253,6 +253,65 @@ impl RowGroupStore {
         degree
     }
 
+    /// See `GraphStore::far_walk_back_within`. It holds nothing between plans: it reads list
+    /// lengths alone, and only for a plan whose source's sample reached nothing.
+    pub(super) fn sample_far_walk_back(
+        &self,
+        far_label: &str,
+        types: &[&str],
+        back: Direction,
+        budget: &mut u64,
+    ) -> Option<f64> {
+        if types.is_empty() {
+            return None;
+        }
+        let (far_nodes, type_edges, _) =
+            self.committed_reached_counts(Some(far_label), types, types);
+        if far_nodes == 0 {
+            return None;
+        }
+        let view = ReadView::latest();
+        let nodes = self.nodes_by_label(far_label, view).ok()?;
+        let sample: Vec<NodeId> = if nodes.len() <= SAMPLE_NODES {
+            nodes
+        } else {
+            ranks(nodes.len() as u64)
+                .into_iter()
+                .filter_map(|rank| nodes.get(usize::try_from(rank).ok()?).copied())
+                .collect()
+        };
+        let reads = sample.len() as u64;
+        if sample.is_empty() || *budget < reads {
+            return None;
+        }
+        *budget -= reads;
+        self.degree_samples
+            .reached_reads
+            .fetch_add(reads, Ordering::Relaxed);
+        let names: Vec<ArcStr> = types.iter().map(|name| ArcStr::from(*name)).collect();
+        let (mut entries, mut squares) = (0.0_f64, 0.0_f64);
+        for node in &sample {
+            let length = self.inner.read().entries_of_types_at_most(
+                *node,
+                back,
+                &names,
+                super::Read::view(view),
+            )? as f64;
+            entries += length;
+            squares += length * length;
+        }
+        let seen = entries / sample.len() as f64 * far_nodes as f64;
+        // Both ways, each edge is in two lists.
+        let lists = if back == Direction::Both { 2.0 } else { 1.0 };
+        let hidden = (type_edges as f64 * lists - seen).max(0.0);
+        let weighted = if entries > 0.0 {
+            squares / entries
+        } else {
+            0.0
+        };
+        Some(weighted + hidden)
+    }
+
     /// The nodes a reached degree starts from and the edges of its two hops, as committed.
     fn committed_reached_counts(
         &self,

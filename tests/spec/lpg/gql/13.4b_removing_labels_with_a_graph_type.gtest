@@ -1,0 +1,361 @@
+# What a statement may remove on a graph with a type: the state it leaves must fit (ISO/IEC 39075:2024
+# 13.4). Generated with the Rust tests in closed_type_writers.rs. Whether a refused statement moved
+# anything is the Rust tests', since a case reads nothing after an error. Imports and Gremlin and
+# GraphQL writes are theirs too: an import is an API call, and those two languages cannot run this
+# setup.
+
+meta:
+  language: gql
+  model: lpg
+  section: "13.4"
+  title: Removing labels from a graph with a type
+  dataset: empty
+
+tests:
+
+  - name: closed_refuses_the_last_label
+    setup:
+      - "CREATE NODE TYPE Far (k INTEGER, name STRING)"
+      - "CREATE NODE TYPE Near (name STRING)"
+      - "CREATE NODE TYPE Free (id STRING, k INTEGER, name STRING)"
+      - "CREATE EDGE TYPE R CONNECTING (Far) TO (Near)"
+      - "CREATE GRAPH TYPE atlas (NODE TYPE Far, NODE TYPE Near, NODE TYPE Free, EDGE TYPE R)"
+      - "CREATE GRAPH g TYPED atlas"
+      - "USE GRAPH g"
+      - "INSERT (:Free {name: 'Alix'})"
+    query: "MATCH (x {name: 'Alix'}) REMOVE x:Free"
+    expect:
+      gql_status: "G2000"
+
+  - name: closed_refuses_a_label_that_declares_a_held_property
+    setup:
+      - "CREATE NODE TYPE Far (k INTEGER, name STRING)"
+      - "CREATE NODE TYPE Near (name STRING)"
+      - "CREATE NODE TYPE Free (id STRING, k INTEGER, name STRING)"
+      - "CREATE EDGE TYPE R CONNECTING (Far) TO (Near)"
+      - "CREATE GRAPH TYPE atlas (NODE TYPE Far, NODE TYPE Near, NODE TYPE Free, EDGE TYPE R)"
+      - "CREATE GRAPH g TYPED atlas"
+      - "USE GRAPH g"
+      - "INSERT (:Far:Near {name: 'Alix', k: 1})"
+    query: "MATCH (x {name: 'Alix'}) REMOVE x:Far"
+    expect:
+      gql_status: "G2000"
+
+  - name: closed_refuses_two_labels_at_once
+    setup:
+      - "CREATE NODE TYPE Far (k INTEGER, name STRING)"
+      - "CREATE NODE TYPE Near (name STRING)"
+      - "CREATE NODE TYPE Free (id STRING, k INTEGER, name STRING)"
+      - "CREATE EDGE TYPE R CONNECTING (Far) TO (Near)"
+      - "CREATE GRAPH TYPE atlas (NODE TYPE Far, NODE TYPE Near, NODE TYPE Free, EDGE TYPE R)"
+      - "CREATE GRAPH g TYPED atlas"
+      - "USE GRAPH g"
+      - "INSERT (:Far:Free {name: 'Alix'})"
+    query: "MATCH (x {name: 'Alix'}) REMOVE x:Far, x:Free"
+    expect:
+      gql_status: "G2000"
+
+  - name: closed_refuses_the_label_then_a_set_in_one_query
+    setup:
+      - "CREATE NODE TYPE Far (k INTEGER, name STRING)"
+      - "CREATE NODE TYPE Near (name STRING)"
+      - "CREATE NODE TYPE Free (id STRING, k INTEGER, name STRING)"
+      - "CREATE EDGE TYPE R CONNECTING (Far) TO (Near)"
+      - "CREATE GRAPH TYPE atlas (NODE TYPE Far, NODE TYPE Near, NODE TYPE Free, EDGE TYPE R)"
+      - "CREATE GRAPH g TYPED atlas"
+      - "USE GRAPH g"
+      - "INSERT (:Free {name: 'Alix'})"
+    query: "MATCH (x {name: 'Alix'}) REMOVE x:Free SET x:Near"
+    expect:
+      gql_status: "G2000"
+
+  - name: closed_refuses_the_label_an_edges_source_needs
+    setup:
+      - "CREATE NODE TYPE Far (k INTEGER, name STRING)"
+      - "CREATE NODE TYPE Near (name STRING)"
+      - "CREATE NODE TYPE Free (id STRING, k INTEGER, name STRING)"
+      - "CREATE EDGE TYPE R CONNECTING (Far) TO (Near)"
+      - "CREATE GRAPH TYPE atlas (NODE TYPE Far, NODE TYPE Near, NODE TYPE Free, EDGE TYPE R)"
+      - "CREATE GRAPH g TYPED atlas"
+      - "USE GRAPH g"
+      - "INSERT (:Far:Free {name: 'Alix'})-[:R]->(:Near {name: 'Gus'})"
+    query: "MATCH (x {name: 'Alix'}) REMOVE x:Far"
+    expect:
+      gql_status: "G2000"
+
+  - name: closed_refuses_the_label_an_edges_target_needs
+    setup:
+      - "CREATE NODE TYPE Far (k INTEGER, name STRING)"
+      - "CREATE NODE TYPE Near (name STRING)"
+      - "CREATE NODE TYPE Free (id STRING, k INTEGER, name STRING)"
+      - "CREATE EDGE TYPE R CONNECTING (Far) TO (Near)"
+      - "CREATE GRAPH TYPE atlas (NODE TYPE Far, NODE TYPE Near, NODE TYPE Free, EDGE TYPE R)"
+      - "CREATE GRAPH g TYPED atlas"
+      - "USE GRAPH g"
+      - "INSERT (:Far {name: 'Gus'})-[:R]->(:Near:Free {name: 'Alix'})"
+    query: "MATCH (x {name: 'Alix'}) REMOVE x:Near"
+    expect:
+      gql_status: "G2000"
+
+  - name: open_refuses_the_label_an_edges_source_needs
+    setup:
+      - "CREATE NODE TYPE Far (k INTEGER, name STRING)"
+      - "CREATE NODE TYPE Near (name STRING)"
+      - "CREATE NODE TYPE Free (id STRING, k INTEGER, name STRING)"
+      - "CREATE EDGE TYPE R CONNECTING (Far) TO (Near)"
+      - "CREATE GRAPH TYPE atlas { node_types: [Far, Near, Free], edge_types: [R], open: true }"
+      - "CREATE GRAPH g TYPED atlas"
+      - "USE GRAPH g"
+      - "INSERT (:Far:Free {name: 'Alix'})-[:R]->(:Near {name: 'Gus'})"
+    query: "MATCH (x {name: 'Alix'}) REMOVE x:Far"
+    expect:
+      gql_status: "G2000"
+
+  - name: open_refuses_the_label_an_edges_target_needs
+    setup:
+      - "CREATE NODE TYPE Far (k INTEGER, name STRING)"
+      - "CREATE NODE TYPE Near (name STRING)"
+      - "CREATE NODE TYPE Free (id STRING, k INTEGER, name STRING)"
+      - "CREATE EDGE TYPE R CONNECTING (Far) TO (Near)"
+      - "CREATE GRAPH TYPE atlas { node_types: [Far, Near, Free], edge_types: [R], open: true }"
+      - "CREATE GRAPH g TYPED atlas"
+      - "USE GRAPH g"
+      - "INSERT (:Far {name: 'Gus'})-[:R]->(:Near:Free {name: 'Alix'})"
+    query: "MATCH (x {name: 'Alix'}) REMOVE x:Near"
+    expect:
+      gql_status: "G2000"
+
+  - name: untyped_refuses_the_label_an_edges_source_needs
+    setup:
+      - "CREATE NODE TYPE Far (k INTEGER, name STRING)"
+      - "CREATE NODE TYPE Near (name STRING)"
+      - "CREATE NODE TYPE Free (id STRING, k INTEGER, name STRING)"
+      - "CREATE EDGE TYPE R CONNECTING (Far) TO (Near)"
+      - "CREATE GRAPH g"
+      - "USE GRAPH g"
+      - "INSERT (:Far:Free {name: 'Alix'})-[:R]->(:Near {name: 'Gus'})"
+    query: "MATCH (x {name: 'Alix'}) REMOVE x:Far"
+    expect:
+      gql_status: "G2000"
+
+  - name: untyped_refuses_the_label_an_edges_target_needs
+    setup:
+      - "CREATE NODE TYPE Far (k INTEGER, name STRING)"
+      - "CREATE NODE TYPE Near (name STRING)"
+      - "CREATE NODE TYPE Free (id STRING, k INTEGER, name STRING)"
+      - "CREATE EDGE TYPE R CONNECTING (Far) TO (Near)"
+      - "CREATE GRAPH g"
+      - "USE GRAPH g"
+      - "INSERT (:Far {name: 'Gus'})-[:R]->(:Near:Free {name: 'Alix'})"
+    query: "MATCH (x {name: 'Alix'}) REMOVE x:Near"
+    expect:
+      gql_status: "G2000"
+
+  - name: default_graph_refuses_the_label_an_edges_source_needs
+    setup:
+      - "CREATE NODE TYPE Far (k INTEGER, name STRING)"
+      - "CREATE NODE TYPE Near (name STRING)"
+      - "CREATE NODE TYPE Free (id STRING, k INTEGER, name STRING)"
+      - "CREATE EDGE TYPE R CONNECTING (Far) TO (Near)"
+      - "INSERT (:Far:Free {name: 'Alix'})-[:R]->(:Near {name: 'Gus'})"
+    query: "MATCH (x {name: 'Alix'}) REMOVE x:Far"
+    expect:
+      gql_status: "G2000"
+
+  - name: default_graph_refuses_the_label_an_edges_target_needs
+    setup:
+      - "CREATE NODE TYPE Far (k INTEGER, name STRING)"
+      - "CREATE NODE TYPE Near (name STRING)"
+      - "CREATE NODE TYPE Free (id STRING, k INTEGER, name STRING)"
+      - "CREATE EDGE TYPE R CONNECTING (Far) TO (Near)"
+      - "INSERT (:Far {name: 'Gus'})-[:R]->(:Near:Free {name: 'Alix'})"
+    query: "MATCH (x {name: 'Alix'}) REMOVE x:Near"
+    expect:
+      gql_status: "G2000"
+
+  - name: closed_a_label_nothing_needs
+    setup:
+      - "CREATE NODE TYPE Far (k INTEGER, name STRING)"
+      - "CREATE NODE TYPE Near (name STRING)"
+      - "CREATE NODE TYPE Free (id STRING, k INTEGER, name STRING)"
+      - "CREATE EDGE TYPE R CONNECTING (Far) TO (Near)"
+      - "CREATE GRAPH TYPE atlas (NODE TYPE Far, NODE TYPE Near, NODE TYPE Free, EDGE TYPE R)"
+      - "CREATE GRAPH g TYPED atlas"
+      - "USE GRAPH g"
+      - "INSERT (:Far:Free {name: 'Alix', k: 1})"
+    statements:
+      - "MATCH (x {name: 'Alix'}) REMOVE x:Free"
+      - "MATCH (x {name: 'Alix'}) RETURN x.name, size(labels(x))"
+    expect:
+      rows:
+        - [Alix, 1]
+
+  - name: closed_property_then_label_in_one_statement
+    setup:
+      - "CREATE NODE TYPE Far (k INTEGER, name STRING)"
+      - "CREATE NODE TYPE Near (name STRING)"
+      - "CREATE NODE TYPE Free (id STRING, k INTEGER, name STRING)"
+      - "CREATE EDGE TYPE R CONNECTING (Far) TO (Near)"
+      - "CREATE GRAPH TYPE atlas (NODE TYPE Far, NODE TYPE Near, NODE TYPE Free, EDGE TYPE R)"
+      - "CREATE GRAPH g TYPED atlas"
+      - "USE GRAPH g"
+      - "INSERT (:Far:Near {name: 'Alix', k: 1})"
+    statements:
+      - "MATCH (x {name: 'Alix'}) REMOVE x.k, x:Far"
+      - "MATCH (x {name: 'Alix'}) RETURN x.name, size(labels(x))"
+    expect:
+      rows:
+        - [Alix, 1]
+
+  - name: closed_label_then_property_in_one_statement
+    setup:
+      - "CREATE NODE TYPE Far (k INTEGER, name STRING)"
+      - "CREATE NODE TYPE Near (name STRING)"
+      - "CREATE NODE TYPE Free (id STRING, k INTEGER, name STRING)"
+      - "CREATE EDGE TYPE R CONNECTING (Far) TO (Near)"
+      - "CREATE GRAPH TYPE atlas (NODE TYPE Far, NODE TYPE Near, NODE TYPE Free, EDGE TYPE R)"
+      - "CREATE GRAPH g TYPED atlas"
+      - "USE GRAPH g"
+      - "INSERT (:Far:Near {name: 'Alix', k: 1})"
+    statements:
+      - "MATCH (x {name: 'Alix'}) REMOVE x:Far, x.k"
+      - "MATCH (x {name: 'Alix'}) RETURN x.name, size(labels(x))"
+    expect:
+      rows:
+        - [Alix, 1]
+
+  - name: closed_a_label_added_first
+    setup:
+      - "CREATE NODE TYPE Far (k INTEGER, name STRING)"
+      - "CREATE NODE TYPE Near (name STRING)"
+      - "CREATE NODE TYPE Free (id STRING, k INTEGER, name STRING)"
+      - "CREATE EDGE TYPE R CONNECTING (Far) TO (Near)"
+      - "CREATE GRAPH TYPE atlas (NODE TYPE Far, NODE TYPE Near, NODE TYPE Free, EDGE TYPE R)"
+      - "CREATE GRAPH g TYPED atlas"
+      - "USE GRAPH g"
+      - "INSERT (:Free {name: 'Alix'})"
+    statements:
+      - "MATCH (x {name: 'Alix'}) SET x:Near"
+      - "MATCH (x {name: 'Alix'}) REMOVE x:Free"
+      - "MATCH (x {name: 'Alix'}) RETURN x.name, size(labels(x))"
+    expect:
+      rows:
+        - [Alix, 1]
+
+  - name: closed_a_label_it_does_not_have
+    setup:
+      - "CREATE NODE TYPE Far (k INTEGER, name STRING)"
+      - "CREATE NODE TYPE Near (name STRING)"
+      - "CREATE NODE TYPE Free (id STRING, k INTEGER, name STRING)"
+      - "CREATE EDGE TYPE R CONNECTING (Far) TO (Near)"
+      - "CREATE GRAPH TYPE atlas (NODE TYPE Far, NODE TYPE Near, NODE TYPE Free, EDGE TYPE R)"
+      - "CREATE GRAPH g TYPED atlas"
+      - "USE GRAPH g"
+      - "INSERT (:Free {name: 'Alix'})"
+    statements:
+      - "MATCH (x {name: 'Alix'}) REMOVE x:Far"
+      - "MATCH (x {name: 'Alix'}) RETURN x.name, size(labels(x))"
+    expect:
+      rows:
+        - [Alix, 1]
+
+  - name: open_the_last_label
+    setup:
+      - "CREATE NODE TYPE Far (k INTEGER, name STRING)"
+      - "CREATE NODE TYPE Near (name STRING)"
+      - "CREATE NODE TYPE Free (id STRING, k INTEGER, name STRING)"
+      - "CREATE EDGE TYPE R CONNECTING (Far) TO (Near)"
+      - "CREATE GRAPH TYPE atlas { node_types: [Far, Near, Free], edge_types: [R], open: true }"
+      - "CREATE GRAPH g TYPED atlas"
+      - "USE GRAPH g"
+      - "INSERT (:Far {name: 'Alix'})"
+    statements:
+      - "MATCH (x {name: 'Alix'}) REMOVE x:Far"
+      - "MATCH (x {name: 'Alix'}) RETURN x.name, size(labels(x))"
+    expect:
+      rows:
+        - [Alix, 0]
+
+  - name: untyped_the_last_label
+    setup:
+      - "CREATE NODE TYPE Far (k INTEGER, name STRING)"
+      - "CREATE NODE TYPE Near (name STRING)"
+      - "CREATE NODE TYPE Free (id STRING, k INTEGER, name STRING)"
+      - "CREATE EDGE TYPE R CONNECTING (Far) TO (Near)"
+      - "CREATE GRAPH g"
+      - "USE GRAPH g"
+      - "INSERT (:Far {name: 'Alix'})"
+    statements:
+      - "MATCH (x {name: 'Alix'}) REMOVE x:Far"
+      - "MATCH (x {name: 'Alix'}) RETURN x.name, size(labels(x))"
+    expect:
+      rows:
+        - [Alix, 0]
+
+  - name: untyped_a_held_property_stays
+    setup:
+      - "CREATE NODE TYPE Far (k INTEGER, name STRING)"
+      - "CREATE NODE TYPE Near (name STRING)"
+      - "CREATE NODE TYPE Free (id STRING, k INTEGER, name STRING)"
+      - "CREATE EDGE TYPE R CONNECTING (Far) TO (Near)"
+      - "CREATE GRAPH g"
+      - "USE GRAPH g"
+      - "INSERT (:Far:Near {name: 'Alix', k: 1})"
+    statements:
+      - "MATCH (x {name: 'Alix'}) REMOVE x:Far"
+      - "MATCH (x {name: 'Alix'}) RETURN x.name, size(labels(x))"
+    expect:
+      rows:
+        - [Alix, 1]
+
+  - name: closed_refuses_a_write_of_undeclared_label
+    setup:
+      - "CREATE NODE TYPE Far (k INTEGER, name STRING)"
+      - "CREATE NODE TYPE Near (name STRING)"
+      - "CREATE NODE TYPE Free (id STRING, k INTEGER, name STRING)"
+      - "CREATE EDGE TYPE R CONNECTING (Far) TO (Near)"
+      - "CREATE GRAPH TYPE atlas (NODE TYPE Far, NODE TYPE Near, NODE TYPE Free, EDGE TYPE R)"
+      - "CREATE GRAPH g TYPED atlas"
+      - "USE GRAPH g"
+    query: "INSERT (:Undeclared)"
+    expect:
+      error: "closed graph type"
+
+  - name: closed_refuses_a_write_of_no_label
+    setup:
+      - "CREATE NODE TYPE Far (k INTEGER, name STRING)"
+      - "CREATE NODE TYPE Near (name STRING)"
+      - "CREATE NODE TYPE Free (id STRING, k INTEGER, name STRING)"
+      - "CREATE EDGE TYPE R CONNECTING (Far) TO (Near)"
+      - "CREATE GRAPH TYPE atlas (NODE TYPE Far, NODE TYPE Near, NODE TYPE Free, EDGE TYPE R)"
+      - "CREATE GRAPH g TYPED atlas"
+      - "USE GRAPH g"
+    query: "INSERT ({name: 'Alix'})"
+    expect:
+      error: "closed graph type"
+
+  - name: closed_refuses_a_write_of_undeclared_property
+    setup:
+      - "CREATE NODE TYPE Far (k INTEGER, name STRING)"
+      - "CREATE NODE TYPE Near (name STRING)"
+      - "CREATE NODE TYPE Free (id STRING, k INTEGER, name STRING)"
+      - "CREATE EDGE TYPE R CONNECTING (Far) TO (Near)"
+      - "CREATE GRAPH TYPE atlas (NODE TYPE Far, NODE TYPE Near, NODE TYPE Free, EDGE TYPE R)"
+      - "CREATE GRAPH g TYPED atlas"
+      - "USE GRAPH g"
+    query: "INSERT (:Far {undeclared: 1})"
+    expect:
+      error: "closed graph type"
+
+  - name: closed_refuses_a_write_of_edge_the_wrong_way
+    setup:
+      - "CREATE NODE TYPE Far (k INTEGER, name STRING)"
+      - "CREATE NODE TYPE Near (name STRING)"
+      - "CREATE NODE TYPE Free (id STRING, k INTEGER, name STRING)"
+      - "CREATE EDGE TYPE R CONNECTING (Far) TO (Near)"
+      - "CREATE GRAPH TYPE atlas (NODE TYPE Far, NODE TYPE Near, NODE TYPE Free, EDGE TYPE R)"
+      - "CREATE GRAPH g TYPED atlas"
+      - "USE GRAPH g"
+    query: "INSERT (:Near {name: 'Alix'})-[:R]->(:Far {name: 'Gus'})"
+    expect:
+      error: "not allowed for edge type"

@@ -115,6 +115,24 @@ pub(super) struct PendingSchema {
     plans: Arc<QueryCache>,
 }
 
+/// The property indexes that serve a label and a key in a graph.
+#[cfg(feature = "gql")]
+#[derive(Clone, Copy)]
+pub(super) struct PropertyIndexesOn {
+    /// The index on the key, on every label.
+    pub every_label: bool,
+    /// The index on the key of this label.
+    pub this_label: bool,
+}
+
+#[cfg(feature = "gql")]
+impl PropertyIndexesOn {
+    /// Whether either is there.
+    pub fn any(self) -> bool {
+        self.every_label || self.this_label
+    }
+}
+
 impl Session {
     /// The catalog this session's statements read: the open transaction's own view, when
     /// it ran a schema statement.
@@ -353,6 +371,89 @@ impl Session {
             }
             _ => ReadView::latest(),
         }
+    }
+
+    /// The graphs a uniqueness rule on `label` and `key`, which `change` adds, reaches with no
+    /// index on `key`: by storage key (`None` for the default graph). Where a write of the
+    /// label would meet the rule, as the check over the data reads it. An index is there as
+    /// the transaction's queue leaves it, in order: one it creates counts, one it drops does
+    /// not.
+    ///
+    /// # Errors
+    ///
+    /// A record of the change that does not apply to a copy of the catalog: damage.
+    #[cfg(feature = "gql")]
+    pub(super) fn graphs_a_rule_needs_an_index_in(
+        &self,
+        change: &StandaloneChange,
+        label: &str,
+        key: &str,
+    ) -> Result<Vec<Option<String>>> {
+        let what_if = Arc::new(what_if_catalog(change.ops(), &self.effective_catalog())?);
+        Ok(self
+            .reachable_graphs()
+            .into_iter()
+            .filter(|(graph, store)| {
+                !self.property_indexes_on(graph, &**store, label, key).any()
+                    && validator_of(&what_if, graph.as_deref())
+                        .node_type(label)
+                        .is_some()
+            })
+            .map(|(graph, _)| graph)
+            .collect())
+    }
+
+    /// The property indexes that serve `label` and `key` in `store`, the graph `graph`, as the
+    /// transaction's queue leaves them, in order: one it creates counts, one it drops does not.
+    #[cfg(feature = "gql")]
+    pub(super) fn property_indexes_on(
+        &self,
+        graph: &Option<String>,
+        store: &dyn GraphStore,
+        label: &str,
+        key: &str,
+    ) -> PropertyIndexesOn {
+        use grafeo_common::storage::catalog_record::{CatalogKey, IndexKeyRecord, IndexKindRecord};
+
+        let mut there = PropertyIndexesOn {
+            every_label: store.index_serves(&[], key),
+            this_label: store.has_label_index(label, key),
+        };
+        let Some(changes) = self.changes.lock().clone() else {
+            return there;
+        };
+        changes.read_schema(|queue| {
+            for queued in queue {
+                match &queued.op {
+                    StandaloneOp::PutCatalog(CatalogRecord::Index(record))
+                        if record.graph == *graph
+                            && matches!(&record.index, IndexKindRecord::Property { key: on } if on == key) =>
+                    {
+                        there.every_label = true;
+                    }
+                    StandaloneOp::DropCatalog(CatalogKey::Index {
+                        graph: on_graph,
+                        index: IndexKeyRecord::Property { key: on },
+                    }) if on_graph == graph && on == key => there.every_label = false,
+                    StandaloneOp::PutCatalog(CatalogRecord::LabelIndex(record))
+                        if record.graph == *graph
+                            && record.label == label
+                            && record.key == key =>
+                    {
+                        there.this_label = true;
+                    }
+                    StandaloneOp::DropCatalog(CatalogKey::LabelIndex {
+                        graph: on_graph,
+                        label: on_label,
+                        key: on,
+                    }) if on_graph == graph && on_label == label && on == key => {
+                        there.this_label = false;
+                    }
+                    _ => {}
+                }
+            }
+        });
+        there
     }
 
     /// Every graph a statement of this session can reach, by storage key (`None` for the
@@ -662,13 +763,25 @@ impl Session {
         };
         changes.read_schema(|queue| {
             for queued in queue {
+                if let StandaloneOp::DropCatalog(CatalogKey::LabelIndex { label, key, .. }) =
+                    &queued.op
+                {
+                    indexes.retain(|listed| {
+                        listed.name.is_some()
+                            || listed.property != *key
+                            || listed.label.as_deref() != Some(label.as_str())
+                    });
+                    continue;
+                }
                 let StandaloneOp::DropCatalog(CatalogKey::Index { index, .. }) = &queued.op else {
                     continue;
                 };
                 indexes.retain(|listed| {
                     listed.name.is_some()
                         || match index {
-                            IndexKeyRecord::Property { key } => listed.property != *key,
+                            IndexKeyRecord::Property { key } => {
+                                listed.property != *key || listed.label.is_some()
+                            }
                             IndexKeyRecord::Vector { label, property }
                             | IndexKeyRecord::Text { label, property } => {
                                 listed.property != *property
@@ -732,6 +845,7 @@ impl Session {
             let mut graphs = self.stores.pending_graphs.write();
             graphs.created.clear();
             graphs.dropped.clear();
+            graphs.made.clear();
         }
         if queue.is_empty() {
             return;
@@ -829,12 +943,7 @@ fn what_if_catalog<'a>(
 /// The checks a write to the graph with storage key `key` goes through under `catalog`,
 /// without what reads the store: uniqueness takes a pass of its own.
 fn validator_of(catalog: &Arc<Catalog>, key: Option<&str>) -> CatalogConstraintValidator {
-    let schema = key.and_then(|key| key.split_once('/').map(|(schema, _)| schema));
-    let validator = CatalogConstraintValidator::new(Arc::clone(catalog)).with_schema(schema);
-    match key {
-        Some(graph) => validator.with_graph_name(graph),
-        None => validator,
-    }
+    CatalogConstraintValidator::of_graph(catalog, key)
 }
 
 /// Whether the queue drops graph `name` before `queued`, so a graph of that name may

@@ -12,6 +12,19 @@ use std::sync::Arc;
 /// key costs more to find than the lists it would save.
 const TARGET_KEY_CAP: usize = 1024;
 
+/// How many entries of a list one lookup of the edges to one node is worth: past this a row
+/// looks its targets up. A guess, to measure.
+const ENTRIES_PER_TARGET: usize = 5;
+
+/// What a key's labels say to the expand that finds its nodes.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct KeyLabels {
+    /// The labels whose indexes together hold the nodes: none, the key's on every label.
+    pub read: Vec<String>,
+    /// The labels a filter over the expand requires of every target.
+    pub required: Vec<String>,
+}
+
 /// What an expand knows of the node each row's edges end at, under a filter
 /// that decides.
 enum HopTarget {
@@ -19,8 +32,8 @@ enum HopTarget {
     Unknown,
     /// The node in this input column.
     Column(usize),
-    /// A node that holds this key, not looked up yet.
-    Key(SeekKey, Value),
+    /// A node that holds this key, with these labels, not looked up yet.
+    Key(SeekKey, Value, KeyLabels),
     /// No node holds the key: there is no edge to find.
     Nothing,
     /// This one node.
@@ -62,6 +75,30 @@ pub struct ExpandOperator {
     view: ReadView,
     /// Counts the edges the expansion reads.
     reads: Option<Arc<ReadCounter>>,
+}
+
+/// The nodes that may hold `value` under `property`, through the indexes on `labels` or with no
+/// label the index on every label, `None` past [`TARGET_KEY_CAP`] of them or when one of the
+/// indexes is not there.
+fn find_few_through_label_indexes(
+    store: &dyn GraphStore,
+    labels: &[String],
+    property: &str,
+    value: &Value,
+    view: ReadView,
+) -> grafeo_common::utils::error::Result<Option<Vec<NodeId>>> {
+    if labels.is_empty() {
+        return store.find_few_nodes_maybe_equal(property, value, TARGET_KEY_CAP, view);
+    }
+    let mut found = Vec::new();
+    for label in labels {
+        let left = TARGET_KEY_CAP.saturating_sub(found.len());
+        match store.find_few_indexed_maybe_equal(&[label], property, value, left, view)? {
+            Some(nodes) => found.extend(nodes),
+            None => return Ok(None),
+        }
+    }
+    Ok(Some(found))
 }
 
 impl ExpandOperator {
@@ -122,25 +159,29 @@ impl ExpandOperator {
     /// expand without reading its input, one node is a lookup per row, and
     /// several filter each row's list. A key more than `TARGET_KEY_CAP` nodes
     /// hold, or one the store cannot look up, lists every edge as usual, so this
-    /// loses at most the reads of the cap.
+    /// loses at most the reads of the cap. A node found without a label `labels` requires is
+    /// dropped once, as the filter would drop every edge to it.
     #[must_use]
-    pub fn with_target_key(mut self, key: SeekKey, value: Value) -> Self {
-        self.target = HopTarget::Key(key, value);
+    pub fn with_target_key(mut self, key: SeekKey, value: Value, labels: KeyLabels) -> Self {
+        self.target = HopTarget::Key(key, value, labels);
         self
     }
 
     /// Finds the nodes of a target key, once: a re-run of the expand (a subquery
     /// per row) reads the same key at the same view.
     fn find_target_key(&mut self) -> Result<(), OperatorError> {
-        let HopTarget::Key(key, value) = &self.target else {
+        let HopTarget::Key(key, value, labels) = &self.target else {
             return Ok(());
         };
         let found = match key {
             SeekKey::Id => Some(node_ids(value)),
-            SeekKey::Property(property) => {
-                self.store
-                    .find_few_nodes_maybe_equal(property, value, TARGET_KEY_CAP, self.view)?
-            }
+            SeekKey::Property(property) => find_few_through_label_indexes(
+                self.store.as_ref(),
+                &labels.read,
+                property,
+                value,
+                self.view,
+            )?,
         };
         self.target = match found {
             None => HopTarget::Unknown,
@@ -148,6 +189,15 @@ impl ExpandOperator {
                 super::read_counter::count(self.reads.as_deref(), nodes.len());
                 nodes.sort_unstable();
                 nodes.dedup();
+                for label in &labels.required {
+                    let mut kept = Vec::with_capacity(nodes.len());
+                    for node in nodes {
+                        if self.store.node_has_label(node, label, self.view)? == Some(true) {
+                            kept.push(node);
+                        }
+                    }
+                    nodes = kept;
+                }
                 match nodes.as_slice() {
                     [] => HopTarget::Nothing,
                     [node] => HopTarget::Node(*node),
@@ -187,6 +237,41 @@ impl ExpandOperator {
         }
     }
 
+    /// The edges of `source` to each of several targets, target by target, when its list is
+    /// long enough for that to beat reading it. `edges_between` reads the shorter side only for
+    /// one direction and one type, so another hop reads the list.
+    fn edges_to_each_target(
+        &self,
+        source: NodeId,
+    ) -> Result<Option<Vec<(NodeId, EdgeId)>>, OperatorError> {
+        let HopTarget::Nodes(nodes) = &self.target else {
+            return Ok(None);
+        };
+        if self.direction == Direction::Both || self.edge_types.len() != 1 {
+            return Ok(None);
+        }
+        let long = self
+            .store
+            .edge_entries_at_most(source, self.direction, &self.edge_types, self.view)
+            .is_some_and(|entries| entries > nodes.len().saturating_mul(ENTRIES_PER_TARGET));
+        if !long {
+            return Ok(None);
+        }
+        let mut edges = Vec::new();
+        for target in nodes {
+            let found = self.store.edges_between(
+                source,
+                *target,
+                self.direction,
+                &self.edge_types,
+                self.view,
+            )?;
+            super::read_counter::count(self.reads.as_deref(), found.len());
+            edges.extend(found.into_iter().map(|edge| (*target, edge)));
+        }
+        Ok(Some(edges))
+    }
+
     /// Loads edges for the current row.
     fn load_edges_for_current_row(&mut self) -> Result<bool, OperatorError> {
         let Some(chunk) = &self.current_input else {
@@ -219,7 +304,9 @@ impl ExpandOperator {
             HopTarget::Node(node) => Some(*node),
             _ => None,
         };
-        self.current_edges = if let Some(target) = target {
+        self.current_edges = if let Some(edges) = self.edges_to_each_target(source_id)? {
+            edges
+        } else if let Some(target) = target {
             let edges = self.store.edges_between(
                 source_id,
                 target,
@@ -241,6 +328,7 @@ impl ExpandOperator {
                 },
             )?
         };
+        // Edges found target by target have the right ends already; this costs them a search.
         if let HopTarget::Nodes(nodes) = &self.target {
             self.current_edges
                 .retain(|(end, _)| nodes.binary_search(end).is_ok());

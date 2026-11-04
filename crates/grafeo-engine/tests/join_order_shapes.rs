@@ -57,9 +57,11 @@ fn count(plan: &str, word: &str) -> usize {
 /// took the written order into a hash join of 30 million rows.
 fn social() -> GrafeoDB {
     // Written plans of two patterns are cross products: a slow build must not make them a test of
-    // the query timeout.
-    let db =
-        GrafeoDB::with_config(grafeo_engine::Config::in_memory().without_query_timeout()).unwrap();
+    // the query timeout, while a bad plan still fails by name, well inside the job's own limit.
+    let db = GrafeoDB::with_config(
+        grafeo_engine::Config::in_memory().with_query_timeout(std::time::Duration::from_secs(600)),
+    )
+    .unwrap();
     let tags: Vec<NodeId> = (0..20)
         .map(|i| {
             db.create_node_with_props(

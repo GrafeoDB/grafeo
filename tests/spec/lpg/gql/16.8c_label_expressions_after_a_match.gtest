@@ -1,0 +1,1806 @@
+# What follows a match with a label expression changes only the nodes it holds for.
+#
+# Generated from one table with the Rust tests in label_expressions_in_paths.rs. Each case reads
+# back every node. A DELETE that fails cannot read back here; the Rust test checks nothing moved.
+
+meta:
+  language: gql
+  model: lpg
+  section: "16.8"
+  title: Label expressions and the statements after a match
+  dataset: label_mix
+  iso: [G074]
+
+tests:
+
+  # SET a property
+
+  - name: set_a_property_colon_a
+    statements:
+      - "MATCH (x:A)-[:R]->(t:T) SET x.hit = true"
+      - "MATCH (x) RETURN x.name, x.k, x.hit, size(labels(x)), COUNT { MATCH (x)-[:R]->() } AS out"
+    expect:
+      rows:
+        - [Alix, 1, true, 1, 1]
+        - [Amsterdam, null, null, 1, 0]
+        - [Gus, 1, null, 1, 1]
+        - [Jules, 1, null, 1, 1]
+        - [Mia, 1, null, 0, 1]
+        - [Vincent, 1, true, 2, 1]
+
+  - name: set_a_property_colon_a_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    statements:
+      - "MATCH (x:A)-[:R]->(t:T) SET x.hit = true"
+      - "MATCH (x) RETURN x.name, x.k, x.hit, size(labels(x)), COUNT { MATCH (x)-[:R]->() } AS out"
+    expect:
+      rows:
+        - [Alix, 1, true, 1, 1]
+        - [Amsterdam, null, null, 1, 0]
+        - [Gus, 1, null, 1, 1]
+        - [Jules, 1, null, 1, 1]
+        - [Mia, 1, null, 0, 1]
+        - [Vincent, 1, true, 2, 1]
+
+  - name: set_a_property_colon_a_colon_b
+    statements:
+      - "MATCH (x:A:B)-[:R]->(t:T) SET x.hit = true"
+      - "MATCH (x) RETURN x.name, x.k, x.hit, size(labels(x)), COUNT { MATCH (x)-[:R]->() } AS out"
+    expect:
+      rows:
+        - [Alix, 1, null, 1, 1]
+        - [Amsterdam, null, null, 1, 0]
+        - [Gus, 1, null, 1, 1]
+        - [Jules, 1, null, 1, 1]
+        - [Mia, 1, null, 0, 1]
+        - [Vincent, 1, true, 2, 1]
+
+  - name: set_a_property_colon_a_colon_b_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    statements:
+      - "MATCH (x:A:B)-[:R]->(t:T) SET x.hit = true"
+      - "MATCH (x) RETURN x.name, x.k, x.hit, size(labels(x)), COUNT { MATCH (x)-[:R]->() } AS out"
+    expect:
+      rows:
+        - [Alix, 1, null, 1, 1]
+        - [Amsterdam, null, null, 1, 0]
+        - [Gus, 1, null, 1, 1]
+        - [Jules, 1, null, 1, 1]
+        - [Mia, 1, null, 0, 1]
+        - [Vincent, 1, true, 2, 1]
+
+  - name: set_a_property_is_a
+    statements:
+      - "MATCH (x IS A)-[:R]->(t:T) SET x.hit = true"
+      - "MATCH (x) RETURN x.name, x.k, x.hit, size(labels(x)), COUNT { MATCH (x)-[:R]->() } AS out"
+    expect:
+      rows:
+        - [Alix, 1, true, 1, 1]
+        - [Amsterdam, null, null, 1, 0]
+        - [Gus, 1, null, 1, 1]
+        - [Jules, 1, null, 1, 1]
+        - [Mia, 1, null, 0, 1]
+        - [Vincent, 1, true, 2, 1]
+
+  - name: set_a_property_is_a_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    statements:
+      - "MATCH (x IS A)-[:R]->(t:T) SET x.hit = true"
+      - "MATCH (x) RETURN x.name, x.k, x.hit, size(labels(x)), COUNT { MATCH (x)-[:R]->() } AS out"
+    expect:
+      rows:
+        - [Alix, 1, true, 1, 1]
+        - [Amsterdam, null, null, 1, 0]
+        - [Gus, 1, null, 1, 1]
+        - [Jules, 1, null, 1, 1]
+        - [Mia, 1, null, 0, 1]
+        - [Vincent, 1, true, 2, 1]
+
+  - name: set_a_property_is_a_and_b
+    statements:
+      - "MATCH (x IS A&B)-[:R]->(t:T) SET x.hit = true"
+      - "MATCH (x) RETURN x.name, x.k, x.hit, size(labels(x)), COUNT { MATCH (x)-[:R]->() } AS out"
+    expect:
+      rows:
+        - [Alix, 1, null, 1, 1]
+        - [Amsterdam, null, null, 1, 0]
+        - [Gus, 1, null, 1, 1]
+        - [Jules, 1, null, 1, 1]
+        - [Mia, 1, null, 0, 1]
+        - [Vincent, 1, true, 2, 1]
+
+  - name: set_a_property_is_a_and_b_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    statements:
+      - "MATCH (x IS A&B)-[:R]->(t:T) SET x.hit = true"
+      - "MATCH (x) RETURN x.name, x.k, x.hit, size(labels(x)), COUNT { MATCH (x)-[:R]->() } AS out"
+    expect:
+      rows:
+        - [Alix, 1, null, 1, 1]
+        - [Amsterdam, null, null, 1, 0]
+        - [Gus, 1, null, 1, 1]
+        - [Jules, 1, null, 1, 1]
+        - [Mia, 1, null, 0, 1]
+        - [Vincent, 1, true, 2, 1]
+
+  - name: set_a_property_a_and_b
+    statements:
+      - "MATCH (x:A&B)-[:R]->(t:T) SET x.hit = true"
+      - "MATCH (x) RETURN x.name, x.k, x.hit, size(labels(x)), COUNT { MATCH (x)-[:R]->() } AS out"
+    expect:
+      rows:
+        - [Alix, 1, null, 1, 1]
+        - [Amsterdam, null, null, 1, 0]
+        - [Gus, 1, null, 1, 1]
+        - [Jules, 1, null, 1, 1]
+        - [Mia, 1, null, 0, 1]
+        - [Vincent, 1, true, 2, 1]
+
+  - name: set_a_property_a_and_b_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    statements:
+      - "MATCH (x:A&B)-[:R]->(t:T) SET x.hit = true"
+      - "MATCH (x) RETURN x.name, x.k, x.hit, size(labels(x)), COUNT { MATCH (x)-[:R]->() } AS out"
+    expect:
+      rows:
+        - [Alix, 1, null, 1, 1]
+        - [Amsterdam, null, null, 1, 0]
+        - [Gus, 1, null, 1, 1]
+        - [Jules, 1, null, 1, 1]
+        - [Mia, 1, null, 0, 1]
+        - [Vincent, 1, true, 2, 1]
+
+  - name: set_a_property_a_or_b
+    statements:
+      - "MATCH (x:A|B)-[:R]->(t:T) SET x.hit = true"
+      - "MATCH (x) RETURN x.name, x.k, x.hit, size(labels(x)), COUNT { MATCH (x)-[:R]->() } AS out"
+    expect:
+      rows:
+        - [Alix, 1, true, 1, 1]
+        - [Amsterdam, null, null, 1, 0]
+        - [Gus, 1, true, 1, 1]
+        - [Jules, 1, null, 1, 1]
+        - [Mia, 1, null, 0, 1]
+        - [Vincent, 1, true, 2, 1]
+
+  - name: set_a_property_a_or_b_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    statements:
+      - "MATCH (x:A|B)-[:R]->(t:T) SET x.hit = true"
+      - "MATCH (x) RETURN x.name, x.k, x.hit, size(labels(x)), COUNT { MATCH (x)-[:R]->() } AS out"
+    expect:
+      rows:
+        - [Alix, 1, true, 1, 1]
+        - [Amsterdam, null, null, 1, 0]
+        - [Gus, 1, true, 1, 1]
+        - [Jules, 1, null, 1, 1]
+        - [Mia, 1, null, 0, 1]
+        - [Vincent, 1, true, 2, 1]
+
+  - name: set_a_property_not_a
+    statements:
+      - "MATCH (x:!A)-[:R]->(t:T) SET x.hit = true"
+      - "MATCH (x) RETURN x.name, x.k, x.hit, size(labels(x)), COUNT { MATCH (x)-[:R]->() } AS out"
+    expect:
+      rows:
+        - [Alix, 1, null, 1, 1]
+        - [Amsterdam, null, null, 1, 0]
+        - [Gus, 1, true, 1, 1]
+        - [Jules, 1, true, 1, 1]
+        - [Mia, 1, true, 0, 1]
+        - [Vincent, 1, null, 2, 1]
+
+  - name: set_a_property_not_a_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    statements:
+      - "MATCH (x:!A)-[:R]->(t:T) SET x.hit = true"
+      - "MATCH (x) RETURN x.name, x.k, x.hit, size(labels(x)), COUNT { MATCH (x)-[:R]->() } AS out"
+    expect:
+      rows:
+        - [Alix, 1, null, 1, 1]
+        - [Amsterdam, null, null, 1, 0]
+        - [Gus, 1, true, 1, 1]
+        - [Jules, 1, true, 1, 1]
+        - [Mia, 1, true, 0, 1]
+        - [Vincent, 1, null, 2, 1]
+
+  - name: set_a_property_any_label
+    statements:
+      - "MATCH (x:%)-[:R]->(t:T) SET x.hit = true"
+      - "MATCH (x) RETURN x.name, x.k, x.hit, size(labels(x)), COUNT { MATCH (x)-[:R]->() } AS out"
+    expect:
+      rows:
+        - [Alix, 1, true, 1, 1]
+        - [Amsterdam, null, null, 1, 0]
+        - [Gus, 1, true, 1, 1]
+        - [Jules, 1, true, 1, 1]
+        - [Mia, 1, null, 0, 1]
+        - [Vincent, 1, true, 2, 1]
+
+  - name: set_a_property_any_label_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    statements:
+      - "MATCH (x:%)-[:R]->(t:T) SET x.hit = true"
+      - "MATCH (x) RETURN x.name, x.k, x.hit, size(labels(x)), COUNT { MATCH (x)-[:R]->() } AS out"
+    expect:
+      rows:
+        - [Alix, 1, true, 1, 1]
+        - [Amsterdam, null, null, 1, 0]
+        - [Gus, 1, true, 1, 1]
+        - [Jules, 1, true, 1, 1]
+        - [Mia, 1, null, 0, 1]
+        - [Vincent, 1, true, 2, 1]
+
+  - name: set_a_property_paren_a
+    statements:
+      - "MATCH (x:(A))-[:R]->(t:T) SET x.hit = true"
+      - "MATCH (x) RETURN x.name, x.k, x.hit, size(labels(x)), COUNT { MATCH (x)-[:R]->() } AS out"
+    expect:
+      rows:
+        - [Alix, 1, true, 1, 1]
+        - [Amsterdam, null, null, 1, 0]
+        - [Gus, 1, null, 1, 1]
+        - [Jules, 1, null, 1, 1]
+        - [Mia, 1, null, 0, 1]
+        - [Vincent, 1, true, 2, 1]
+
+  - name: set_a_property_paren_a_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    statements:
+      - "MATCH (x:(A))-[:R]->(t:T) SET x.hit = true"
+      - "MATCH (x) RETURN x.name, x.k, x.hit, size(labels(x)), COUNT { MATCH (x)-[:R]->() } AS out"
+    expect:
+      rows:
+        - [Alix, 1, true, 1, 1]
+        - [Amsterdam, null, null, 1, 0]
+        - [Gus, 1, null, 1, 1]
+        - [Jules, 1, null, 1, 1]
+        - [Mia, 1, null, 0, 1]
+        - [Vincent, 1, true, 2, 1]
+
+  - name: set_a_property_nobody
+    statements:
+      - "MATCH (x:Z&A)-[:R]->(t:T) SET x.hit = true"
+      - "MATCH (x) RETURN x.name, x.k, x.hit, size(labels(x)), COUNT { MATCH (x)-[:R]->() } AS out"
+    expect:
+      rows:
+        - [Alix, 1, null, 1, 1]
+        - [Amsterdam, null, null, 1, 0]
+        - [Gus, 1, null, 1, 1]
+        - [Jules, 1, null, 1, 1]
+        - [Mia, 1, null, 0, 1]
+        - [Vincent, 1, null, 2, 1]
+
+  - name: set_a_property_nobody_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    statements:
+      - "MATCH (x:Z&A)-[:R]->(t:T) SET x.hit = true"
+      - "MATCH (x) RETURN x.name, x.k, x.hit, size(labels(x)), COUNT { MATCH (x)-[:R]->() } AS out"
+    expect:
+      rows:
+        - [Alix, 1, null, 1, 1]
+        - [Amsterdam, null, null, 1, 0]
+        - [Gus, 1, null, 1, 1]
+        - [Jules, 1, null, 1, 1]
+        - [Mia, 1, null, 0, 1]
+        - [Vincent, 1, null, 2, 1]
+
+  # SET a label
+
+  - name: set_a_label_colon_a
+    statements:
+      - "MATCH (x:A)-[:R]->(t:T) SET x:New"
+      - "MATCH (x) RETURN x.name, x.k, x.hit, size(labels(x)), COUNT { MATCH (x)-[:R]->() } AS out"
+    expect:
+      rows:
+        - [Alix, 1, null, 2, 1]
+        - [Amsterdam, null, null, 1, 0]
+        - [Gus, 1, null, 1, 1]
+        - [Jules, 1, null, 1, 1]
+        - [Mia, 1, null, 0, 1]
+        - [Vincent, 1, null, 3, 1]
+
+  - name: set_a_label_colon_a_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    statements:
+      - "MATCH (x:A)-[:R]->(t:T) SET x:New"
+      - "MATCH (x) RETURN x.name, x.k, x.hit, size(labels(x)), COUNT { MATCH (x)-[:R]->() } AS out"
+    expect:
+      rows:
+        - [Alix, 1, null, 2, 1]
+        - [Amsterdam, null, null, 1, 0]
+        - [Gus, 1, null, 1, 1]
+        - [Jules, 1, null, 1, 1]
+        - [Mia, 1, null, 0, 1]
+        - [Vincent, 1, null, 3, 1]
+
+  - name: set_a_label_colon_a_colon_b
+    statements:
+      - "MATCH (x:A:B)-[:R]->(t:T) SET x:New"
+      - "MATCH (x) RETURN x.name, x.k, x.hit, size(labels(x)), COUNT { MATCH (x)-[:R]->() } AS out"
+    expect:
+      rows:
+        - [Alix, 1, null, 1, 1]
+        - [Amsterdam, null, null, 1, 0]
+        - [Gus, 1, null, 1, 1]
+        - [Jules, 1, null, 1, 1]
+        - [Mia, 1, null, 0, 1]
+        - [Vincent, 1, null, 3, 1]
+
+  - name: set_a_label_colon_a_colon_b_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    statements:
+      - "MATCH (x:A:B)-[:R]->(t:T) SET x:New"
+      - "MATCH (x) RETURN x.name, x.k, x.hit, size(labels(x)), COUNT { MATCH (x)-[:R]->() } AS out"
+    expect:
+      rows:
+        - [Alix, 1, null, 1, 1]
+        - [Amsterdam, null, null, 1, 0]
+        - [Gus, 1, null, 1, 1]
+        - [Jules, 1, null, 1, 1]
+        - [Mia, 1, null, 0, 1]
+        - [Vincent, 1, null, 3, 1]
+
+  - name: set_a_label_is_a
+    statements:
+      - "MATCH (x IS A)-[:R]->(t:T) SET x:New"
+      - "MATCH (x) RETURN x.name, x.k, x.hit, size(labels(x)), COUNT { MATCH (x)-[:R]->() } AS out"
+    expect:
+      rows:
+        - [Alix, 1, null, 2, 1]
+        - [Amsterdam, null, null, 1, 0]
+        - [Gus, 1, null, 1, 1]
+        - [Jules, 1, null, 1, 1]
+        - [Mia, 1, null, 0, 1]
+        - [Vincent, 1, null, 3, 1]
+
+  - name: set_a_label_is_a_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    statements:
+      - "MATCH (x IS A)-[:R]->(t:T) SET x:New"
+      - "MATCH (x) RETURN x.name, x.k, x.hit, size(labels(x)), COUNT { MATCH (x)-[:R]->() } AS out"
+    expect:
+      rows:
+        - [Alix, 1, null, 2, 1]
+        - [Amsterdam, null, null, 1, 0]
+        - [Gus, 1, null, 1, 1]
+        - [Jules, 1, null, 1, 1]
+        - [Mia, 1, null, 0, 1]
+        - [Vincent, 1, null, 3, 1]
+
+  - name: set_a_label_is_a_and_b
+    statements:
+      - "MATCH (x IS A&B)-[:R]->(t:T) SET x:New"
+      - "MATCH (x) RETURN x.name, x.k, x.hit, size(labels(x)), COUNT { MATCH (x)-[:R]->() } AS out"
+    expect:
+      rows:
+        - [Alix, 1, null, 1, 1]
+        - [Amsterdam, null, null, 1, 0]
+        - [Gus, 1, null, 1, 1]
+        - [Jules, 1, null, 1, 1]
+        - [Mia, 1, null, 0, 1]
+        - [Vincent, 1, null, 3, 1]
+
+  - name: set_a_label_is_a_and_b_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    statements:
+      - "MATCH (x IS A&B)-[:R]->(t:T) SET x:New"
+      - "MATCH (x) RETURN x.name, x.k, x.hit, size(labels(x)), COUNT { MATCH (x)-[:R]->() } AS out"
+    expect:
+      rows:
+        - [Alix, 1, null, 1, 1]
+        - [Amsterdam, null, null, 1, 0]
+        - [Gus, 1, null, 1, 1]
+        - [Jules, 1, null, 1, 1]
+        - [Mia, 1, null, 0, 1]
+        - [Vincent, 1, null, 3, 1]
+
+  - name: set_a_label_a_and_b
+    statements:
+      - "MATCH (x:A&B)-[:R]->(t:T) SET x:New"
+      - "MATCH (x) RETURN x.name, x.k, x.hit, size(labels(x)), COUNT { MATCH (x)-[:R]->() } AS out"
+    expect:
+      rows:
+        - [Alix, 1, null, 1, 1]
+        - [Amsterdam, null, null, 1, 0]
+        - [Gus, 1, null, 1, 1]
+        - [Jules, 1, null, 1, 1]
+        - [Mia, 1, null, 0, 1]
+        - [Vincent, 1, null, 3, 1]
+
+  - name: set_a_label_a_and_b_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    statements:
+      - "MATCH (x:A&B)-[:R]->(t:T) SET x:New"
+      - "MATCH (x) RETURN x.name, x.k, x.hit, size(labels(x)), COUNT { MATCH (x)-[:R]->() } AS out"
+    expect:
+      rows:
+        - [Alix, 1, null, 1, 1]
+        - [Amsterdam, null, null, 1, 0]
+        - [Gus, 1, null, 1, 1]
+        - [Jules, 1, null, 1, 1]
+        - [Mia, 1, null, 0, 1]
+        - [Vincent, 1, null, 3, 1]
+
+  - name: set_a_label_a_or_b
+    statements:
+      - "MATCH (x:A|B)-[:R]->(t:T) SET x:New"
+      - "MATCH (x) RETURN x.name, x.k, x.hit, size(labels(x)), COUNT { MATCH (x)-[:R]->() } AS out"
+    expect:
+      rows:
+        - [Alix, 1, null, 2, 1]
+        - [Amsterdam, null, null, 1, 0]
+        - [Gus, 1, null, 2, 1]
+        - [Jules, 1, null, 1, 1]
+        - [Mia, 1, null, 0, 1]
+        - [Vincent, 1, null, 3, 1]
+
+  - name: set_a_label_a_or_b_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    statements:
+      - "MATCH (x:A|B)-[:R]->(t:T) SET x:New"
+      - "MATCH (x) RETURN x.name, x.k, x.hit, size(labels(x)), COUNT { MATCH (x)-[:R]->() } AS out"
+    expect:
+      rows:
+        - [Alix, 1, null, 2, 1]
+        - [Amsterdam, null, null, 1, 0]
+        - [Gus, 1, null, 2, 1]
+        - [Jules, 1, null, 1, 1]
+        - [Mia, 1, null, 0, 1]
+        - [Vincent, 1, null, 3, 1]
+
+  - name: set_a_label_not_a
+    statements:
+      - "MATCH (x:!A)-[:R]->(t:T) SET x:New"
+      - "MATCH (x) RETURN x.name, x.k, x.hit, size(labels(x)), COUNT { MATCH (x)-[:R]->() } AS out"
+    expect:
+      rows:
+        - [Alix, 1, null, 1, 1]
+        - [Amsterdam, null, null, 1, 0]
+        - [Gus, 1, null, 2, 1]
+        - [Jules, 1, null, 2, 1]
+        - [Mia, 1, null, 1, 1]
+        - [Vincent, 1, null, 2, 1]
+
+  - name: set_a_label_not_a_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    statements:
+      - "MATCH (x:!A)-[:R]->(t:T) SET x:New"
+      - "MATCH (x) RETURN x.name, x.k, x.hit, size(labels(x)), COUNT { MATCH (x)-[:R]->() } AS out"
+    expect:
+      rows:
+        - [Alix, 1, null, 1, 1]
+        - [Amsterdam, null, null, 1, 0]
+        - [Gus, 1, null, 2, 1]
+        - [Jules, 1, null, 2, 1]
+        - [Mia, 1, null, 1, 1]
+        - [Vincent, 1, null, 2, 1]
+
+  - name: set_a_label_any_label
+    statements:
+      - "MATCH (x:%)-[:R]->(t:T) SET x:New"
+      - "MATCH (x) RETURN x.name, x.k, x.hit, size(labels(x)), COUNT { MATCH (x)-[:R]->() } AS out"
+    expect:
+      rows:
+        - [Alix, 1, null, 2, 1]
+        - [Amsterdam, null, null, 1, 0]
+        - [Gus, 1, null, 2, 1]
+        - [Jules, 1, null, 2, 1]
+        - [Mia, 1, null, 0, 1]
+        - [Vincent, 1, null, 3, 1]
+
+  - name: set_a_label_any_label_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    statements:
+      - "MATCH (x:%)-[:R]->(t:T) SET x:New"
+      - "MATCH (x) RETURN x.name, x.k, x.hit, size(labels(x)), COUNT { MATCH (x)-[:R]->() } AS out"
+    expect:
+      rows:
+        - [Alix, 1, null, 2, 1]
+        - [Amsterdam, null, null, 1, 0]
+        - [Gus, 1, null, 2, 1]
+        - [Jules, 1, null, 2, 1]
+        - [Mia, 1, null, 0, 1]
+        - [Vincent, 1, null, 3, 1]
+
+  - name: set_a_label_paren_a
+    statements:
+      - "MATCH (x:(A))-[:R]->(t:T) SET x:New"
+      - "MATCH (x) RETURN x.name, x.k, x.hit, size(labels(x)), COUNT { MATCH (x)-[:R]->() } AS out"
+    expect:
+      rows:
+        - [Alix, 1, null, 2, 1]
+        - [Amsterdam, null, null, 1, 0]
+        - [Gus, 1, null, 1, 1]
+        - [Jules, 1, null, 1, 1]
+        - [Mia, 1, null, 0, 1]
+        - [Vincent, 1, null, 3, 1]
+
+  - name: set_a_label_paren_a_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    statements:
+      - "MATCH (x:(A))-[:R]->(t:T) SET x:New"
+      - "MATCH (x) RETURN x.name, x.k, x.hit, size(labels(x)), COUNT { MATCH (x)-[:R]->() } AS out"
+    expect:
+      rows:
+        - [Alix, 1, null, 2, 1]
+        - [Amsterdam, null, null, 1, 0]
+        - [Gus, 1, null, 1, 1]
+        - [Jules, 1, null, 1, 1]
+        - [Mia, 1, null, 0, 1]
+        - [Vincent, 1, null, 3, 1]
+
+  - name: set_a_label_nobody
+    statements:
+      - "MATCH (x:Z&A)-[:R]->(t:T) SET x:New"
+      - "MATCH (x) RETURN x.name, x.k, x.hit, size(labels(x)), COUNT { MATCH (x)-[:R]->() } AS out"
+    expect:
+      rows:
+        - [Alix, 1, null, 1, 1]
+        - [Amsterdam, null, null, 1, 0]
+        - [Gus, 1, null, 1, 1]
+        - [Jules, 1, null, 1, 1]
+        - [Mia, 1, null, 0, 1]
+        - [Vincent, 1, null, 2, 1]
+
+  - name: set_a_label_nobody_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    statements:
+      - "MATCH (x:Z&A)-[:R]->(t:T) SET x:New"
+      - "MATCH (x) RETURN x.name, x.k, x.hit, size(labels(x)), COUNT { MATCH (x)-[:R]->() } AS out"
+    expect:
+      rows:
+        - [Alix, 1, null, 1, 1]
+        - [Amsterdam, null, null, 1, 0]
+        - [Gus, 1, null, 1, 1]
+        - [Jules, 1, null, 1, 1]
+        - [Mia, 1, null, 0, 1]
+        - [Vincent, 1, null, 2, 1]
+
+  # REMOVE a property
+
+  - name: remove_a_property_colon_a
+    statements:
+      - "MATCH (x:A)-[:R]->(t:T) REMOVE x.k"
+      - "MATCH (x) RETURN x.name, x.k, x.hit, size(labels(x)), COUNT { MATCH (x)-[:R]->() } AS out"
+    expect:
+      rows:
+        - [Alix, null, null, 1, 1]
+        - [Amsterdam, null, null, 1, 0]
+        - [Gus, 1, null, 1, 1]
+        - [Jules, 1, null, 1, 1]
+        - [Mia, 1, null, 0, 1]
+        - [Vincent, null, null, 2, 1]
+
+  - name: remove_a_property_colon_a_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    statements:
+      - "MATCH (x:A)-[:R]->(t:T) REMOVE x.k"
+      - "MATCH (x) RETURN x.name, x.k, x.hit, size(labels(x)), COUNT { MATCH (x)-[:R]->() } AS out"
+    expect:
+      rows:
+        - [Alix, null, null, 1, 1]
+        - [Amsterdam, null, null, 1, 0]
+        - [Gus, 1, null, 1, 1]
+        - [Jules, 1, null, 1, 1]
+        - [Mia, 1, null, 0, 1]
+        - [Vincent, null, null, 2, 1]
+
+  - name: remove_a_property_colon_a_colon_b
+    statements:
+      - "MATCH (x:A:B)-[:R]->(t:T) REMOVE x.k"
+      - "MATCH (x) RETURN x.name, x.k, x.hit, size(labels(x)), COUNT { MATCH (x)-[:R]->() } AS out"
+    expect:
+      rows:
+        - [Alix, 1, null, 1, 1]
+        - [Amsterdam, null, null, 1, 0]
+        - [Gus, 1, null, 1, 1]
+        - [Jules, 1, null, 1, 1]
+        - [Mia, 1, null, 0, 1]
+        - [Vincent, null, null, 2, 1]
+
+  - name: remove_a_property_colon_a_colon_b_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    statements:
+      - "MATCH (x:A:B)-[:R]->(t:T) REMOVE x.k"
+      - "MATCH (x) RETURN x.name, x.k, x.hit, size(labels(x)), COUNT { MATCH (x)-[:R]->() } AS out"
+    expect:
+      rows:
+        - [Alix, 1, null, 1, 1]
+        - [Amsterdam, null, null, 1, 0]
+        - [Gus, 1, null, 1, 1]
+        - [Jules, 1, null, 1, 1]
+        - [Mia, 1, null, 0, 1]
+        - [Vincent, null, null, 2, 1]
+
+  - name: remove_a_property_is_a
+    statements:
+      - "MATCH (x IS A)-[:R]->(t:T) REMOVE x.k"
+      - "MATCH (x) RETURN x.name, x.k, x.hit, size(labels(x)), COUNT { MATCH (x)-[:R]->() } AS out"
+    expect:
+      rows:
+        - [Alix, null, null, 1, 1]
+        - [Amsterdam, null, null, 1, 0]
+        - [Gus, 1, null, 1, 1]
+        - [Jules, 1, null, 1, 1]
+        - [Mia, 1, null, 0, 1]
+        - [Vincent, null, null, 2, 1]
+
+  - name: remove_a_property_is_a_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    statements:
+      - "MATCH (x IS A)-[:R]->(t:T) REMOVE x.k"
+      - "MATCH (x) RETURN x.name, x.k, x.hit, size(labels(x)), COUNT { MATCH (x)-[:R]->() } AS out"
+    expect:
+      rows:
+        - [Alix, null, null, 1, 1]
+        - [Amsterdam, null, null, 1, 0]
+        - [Gus, 1, null, 1, 1]
+        - [Jules, 1, null, 1, 1]
+        - [Mia, 1, null, 0, 1]
+        - [Vincent, null, null, 2, 1]
+
+  - name: remove_a_property_is_a_and_b
+    statements:
+      - "MATCH (x IS A&B)-[:R]->(t:T) REMOVE x.k"
+      - "MATCH (x) RETURN x.name, x.k, x.hit, size(labels(x)), COUNT { MATCH (x)-[:R]->() } AS out"
+    expect:
+      rows:
+        - [Alix, 1, null, 1, 1]
+        - [Amsterdam, null, null, 1, 0]
+        - [Gus, 1, null, 1, 1]
+        - [Jules, 1, null, 1, 1]
+        - [Mia, 1, null, 0, 1]
+        - [Vincent, null, null, 2, 1]
+
+  - name: remove_a_property_is_a_and_b_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    statements:
+      - "MATCH (x IS A&B)-[:R]->(t:T) REMOVE x.k"
+      - "MATCH (x) RETURN x.name, x.k, x.hit, size(labels(x)), COUNT { MATCH (x)-[:R]->() } AS out"
+    expect:
+      rows:
+        - [Alix, 1, null, 1, 1]
+        - [Amsterdam, null, null, 1, 0]
+        - [Gus, 1, null, 1, 1]
+        - [Jules, 1, null, 1, 1]
+        - [Mia, 1, null, 0, 1]
+        - [Vincent, null, null, 2, 1]
+
+  - name: remove_a_property_a_and_b
+    statements:
+      - "MATCH (x:A&B)-[:R]->(t:T) REMOVE x.k"
+      - "MATCH (x) RETURN x.name, x.k, x.hit, size(labels(x)), COUNT { MATCH (x)-[:R]->() } AS out"
+    expect:
+      rows:
+        - [Alix, 1, null, 1, 1]
+        - [Amsterdam, null, null, 1, 0]
+        - [Gus, 1, null, 1, 1]
+        - [Jules, 1, null, 1, 1]
+        - [Mia, 1, null, 0, 1]
+        - [Vincent, null, null, 2, 1]
+
+  - name: remove_a_property_a_and_b_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    statements:
+      - "MATCH (x:A&B)-[:R]->(t:T) REMOVE x.k"
+      - "MATCH (x) RETURN x.name, x.k, x.hit, size(labels(x)), COUNT { MATCH (x)-[:R]->() } AS out"
+    expect:
+      rows:
+        - [Alix, 1, null, 1, 1]
+        - [Amsterdam, null, null, 1, 0]
+        - [Gus, 1, null, 1, 1]
+        - [Jules, 1, null, 1, 1]
+        - [Mia, 1, null, 0, 1]
+        - [Vincent, null, null, 2, 1]
+
+  - name: remove_a_property_a_or_b
+    statements:
+      - "MATCH (x:A|B)-[:R]->(t:T) REMOVE x.k"
+      - "MATCH (x) RETURN x.name, x.k, x.hit, size(labels(x)), COUNT { MATCH (x)-[:R]->() } AS out"
+    expect:
+      rows:
+        - [Alix, null, null, 1, 1]
+        - [Amsterdam, null, null, 1, 0]
+        - [Gus, null, null, 1, 1]
+        - [Jules, 1, null, 1, 1]
+        - [Mia, 1, null, 0, 1]
+        - [Vincent, null, null, 2, 1]
+
+  - name: remove_a_property_a_or_b_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    statements:
+      - "MATCH (x:A|B)-[:R]->(t:T) REMOVE x.k"
+      - "MATCH (x) RETURN x.name, x.k, x.hit, size(labels(x)), COUNT { MATCH (x)-[:R]->() } AS out"
+    expect:
+      rows:
+        - [Alix, null, null, 1, 1]
+        - [Amsterdam, null, null, 1, 0]
+        - [Gus, null, null, 1, 1]
+        - [Jules, 1, null, 1, 1]
+        - [Mia, 1, null, 0, 1]
+        - [Vincent, null, null, 2, 1]
+
+  - name: remove_a_property_not_a
+    statements:
+      - "MATCH (x:!A)-[:R]->(t:T) REMOVE x.k"
+      - "MATCH (x) RETURN x.name, x.k, x.hit, size(labels(x)), COUNT { MATCH (x)-[:R]->() } AS out"
+    expect:
+      rows:
+        - [Alix, 1, null, 1, 1]
+        - [Amsterdam, null, null, 1, 0]
+        - [Gus, null, null, 1, 1]
+        - [Jules, null, null, 1, 1]
+        - [Mia, null, null, 0, 1]
+        - [Vincent, 1, null, 2, 1]
+
+  - name: remove_a_property_not_a_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    statements:
+      - "MATCH (x:!A)-[:R]->(t:T) REMOVE x.k"
+      - "MATCH (x) RETURN x.name, x.k, x.hit, size(labels(x)), COUNT { MATCH (x)-[:R]->() } AS out"
+    expect:
+      rows:
+        - [Alix, 1, null, 1, 1]
+        - [Amsterdam, null, null, 1, 0]
+        - [Gus, null, null, 1, 1]
+        - [Jules, null, null, 1, 1]
+        - [Mia, null, null, 0, 1]
+        - [Vincent, 1, null, 2, 1]
+
+  - name: remove_a_property_any_label
+    statements:
+      - "MATCH (x:%)-[:R]->(t:T) REMOVE x.k"
+      - "MATCH (x) RETURN x.name, x.k, x.hit, size(labels(x)), COUNT { MATCH (x)-[:R]->() } AS out"
+    expect:
+      rows:
+        - [Alix, null, null, 1, 1]
+        - [Amsterdam, null, null, 1, 0]
+        - [Gus, null, null, 1, 1]
+        - [Jules, null, null, 1, 1]
+        - [Mia, 1, null, 0, 1]
+        - [Vincent, null, null, 2, 1]
+
+  - name: remove_a_property_any_label_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    statements:
+      - "MATCH (x:%)-[:R]->(t:T) REMOVE x.k"
+      - "MATCH (x) RETURN x.name, x.k, x.hit, size(labels(x)), COUNT { MATCH (x)-[:R]->() } AS out"
+    expect:
+      rows:
+        - [Alix, null, null, 1, 1]
+        - [Amsterdam, null, null, 1, 0]
+        - [Gus, null, null, 1, 1]
+        - [Jules, null, null, 1, 1]
+        - [Mia, 1, null, 0, 1]
+        - [Vincent, null, null, 2, 1]
+
+  - name: remove_a_property_paren_a
+    statements:
+      - "MATCH (x:(A))-[:R]->(t:T) REMOVE x.k"
+      - "MATCH (x) RETURN x.name, x.k, x.hit, size(labels(x)), COUNT { MATCH (x)-[:R]->() } AS out"
+    expect:
+      rows:
+        - [Alix, null, null, 1, 1]
+        - [Amsterdam, null, null, 1, 0]
+        - [Gus, 1, null, 1, 1]
+        - [Jules, 1, null, 1, 1]
+        - [Mia, 1, null, 0, 1]
+        - [Vincent, null, null, 2, 1]
+
+  - name: remove_a_property_paren_a_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    statements:
+      - "MATCH (x:(A))-[:R]->(t:T) REMOVE x.k"
+      - "MATCH (x) RETURN x.name, x.k, x.hit, size(labels(x)), COUNT { MATCH (x)-[:R]->() } AS out"
+    expect:
+      rows:
+        - [Alix, null, null, 1, 1]
+        - [Amsterdam, null, null, 1, 0]
+        - [Gus, 1, null, 1, 1]
+        - [Jules, 1, null, 1, 1]
+        - [Mia, 1, null, 0, 1]
+        - [Vincent, null, null, 2, 1]
+
+  - name: remove_a_property_nobody
+    statements:
+      - "MATCH (x:Z&A)-[:R]->(t:T) REMOVE x.k"
+      - "MATCH (x) RETURN x.name, x.k, x.hit, size(labels(x)), COUNT { MATCH (x)-[:R]->() } AS out"
+    expect:
+      rows:
+        - [Alix, 1, null, 1, 1]
+        - [Amsterdam, null, null, 1, 0]
+        - [Gus, 1, null, 1, 1]
+        - [Jules, 1, null, 1, 1]
+        - [Mia, 1, null, 0, 1]
+        - [Vincent, 1, null, 2, 1]
+
+  - name: remove_a_property_nobody_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    statements:
+      - "MATCH (x:Z&A)-[:R]->(t:T) REMOVE x.k"
+      - "MATCH (x) RETURN x.name, x.k, x.hit, size(labels(x)), COUNT { MATCH (x)-[:R]->() } AS out"
+    expect:
+      rows:
+        - [Alix, 1, null, 1, 1]
+        - [Amsterdam, null, null, 1, 0]
+        - [Gus, 1, null, 1, 1]
+        - [Jules, 1, null, 1, 1]
+        - [Mia, 1, null, 0, 1]
+        - [Vincent, 1, null, 2, 1]
+
+  # REMOVE a label
+
+  - name: remove_a_label_colon_a
+    statements:
+      - "MATCH (x:A)-[:R]->(t:T) REMOVE x:A"
+      - "MATCH (x) RETURN x.name, x.k, x.hit, size(labels(x)), COUNT { MATCH (x)-[:R]->() } AS out"
+    expect:
+      rows:
+        - [Alix, 1, null, 0, 1]
+        - [Amsterdam, null, null, 1, 0]
+        - [Gus, 1, null, 1, 1]
+        - [Jules, 1, null, 1, 1]
+        - [Mia, 1, null, 0, 1]
+        - [Vincent, 1, null, 1, 1]
+
+  - name: remove_a_label_colon_a_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    statements:
+      - "MATCH (x:A)-[:R]->(t:T) REMOVE x:A"
+      - "MATCH (x) RETURN x.name, x.k, x.hit, size(labels(x)), COUNT { MATCH (x)-[:R]->() } AS out"
+    expect:
+      rows:
+        - [Alix, 1, null, 0, 1]
+        - [Amsterdam, null, null, 1, 0]
+        - [Gus, 1, null, 1, 1]
+        - [Jules, 1, null, 1, 1]
+        - [Mia, 1, null, 0, 1]
+        - [Vincent, 1, null, 1, 1]
+
+  - name: remove_a_label_colon_a_colon_b
+    statements:
+      - "MATCH (x:A:B)-[:R]->(t:T) REMOVE x:A"
+      - "MATCH (x) RETURN x.name, x.k, x.hit, size(labels(x)), COUNT { MATCH (x)-[:R]->() } AS out"
+    expect:
+      rows:
+        - [Alix, 1, null, 1, 1]
+        - [Amsterdam, null, null, 1, 0]
+        - [Gus, 1, null, 1, 1]
+        - [Jules, 1, null, 1, 1]
+        - [Mia, 1, null, 0, 1]
+        - [Vincent, 1, null, 1, 1]
+
+  - name: remove_a_label_colon_a_colon_b_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    statements:
+      - "MATCH (x:A:B)-[:R]->(t:T) REMOVE x:A"
+      - "MATCH (x) RETURN x.name, x.k, x.hit, size(labels(x)), COUNT { MATCH (x)-[:R]->() } AS out"
+    expect:
+      rows:
+        - [Alix, 1, null, 1, 1]
+        - [Amsterdam, null, null, 1, 0]
+        - [Gus, 1, null, 1, 1]
+        - [Jules, 1, null, 1, 1]
+        - [Mia, 1, null, 0, 1]
+        - [Vincent, 1, null, 1, 1]
+
+  - name: remove_a_label_is_a
+    statements:
+      - "MATCH (x IS A)-[:R]->(t:T) REMOVE x:A"
+      - "MATCH (x) RETURN x.name, x.k, x.hit, size(labels(x)), COUNT { MATCH (x)-[:R]->() } AS out"
+    expect:
+      rows:
+        - [Alix, 1, null, 0, 1]
+        - [Amsterdam, null, null, 1, 0]
+        - [Gus, 1, null, 1, 1]
+        - [Jules, 1, null, 1, 1]
+        - [Mia, 1, null, 0, 1]
+        - [Vincent, 1, null, 1, 1]
+
+  - name: remove_a_label_is_a_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    statements:
+      - "MATCH (x IS A)-[:R]->(t:T) REMOVE x:A"
+      - "MATCH (x) RETURN x.name, x.k, x.hit, size(labels(x)), COUNT { MATCH (x)-[:R]->() } AS out"
+    expect:
+      rows:
+        - [Alix, 1, null, 0, 1]
+        - [Amsterdam, null, null, 1, 0]
+        - [Gus, 1, null, 1, 1]
+        - [Jules, 1, null, 1, 1]
+        - [Mia, 1, null, 0, 1]
+        - [Vincent, 1, null, 1, 1]
+
+  - name: remove_a_label_is_a_and_b
+    statements:
+      - "MATCH (x IS A&B)-[:R]->(t:T) REMOVE x:A"
+      - "MATCH (x) RETURN x.name, x.k, x.hit, size(labels(x)), COUNT { MATCH (x)-[:R]->() } AS out"
+    expect:
+      rows:
+        - [Alix, 1, null, 1, 1]
+        - [Amsterdam, null, null, 1, 0]
+        - [Gus, 1, null, 1, 1]
+        - [Jules, 1, null, 1, 1]
+        - [Mia, 1, null, 0, 1]
+        - [Vincent, 1, null, 1, 1]
+
+  - name: remove_a_label_is_a_and_b_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    statements:
+      - "MATCH (x IS A&B)-[:R]->(t:T) REMOVE x:A"
+      - "MATCH (x) RETURN x.name, x.k, x.hit, size(labels(x)), COUNT { MATCH (x)-[:R]->() } AS out"
+    expect:
+      rows:
+        - [Alix, 1, null, 1, 1]
+        - [Amsterdam, null, null, 1, 0]
+        - [Gus, 1, null, 1, 1]
+        - [Jules, 1, null, 1, 1]
+        - [Mia, 1, null, 0, 1]
+        - [Vincent, 1, null, 1, 1]
+
+  - name: remove_a_label_a_and_b
+    statements:
+      - "MATCH (x:A&B)-[:R]->(t:T) REMOVE x:A"
+      - "MATCH (x) RETURN x.name, x.k, x.hit, size(labels(x)), COUNT { MATCH (x)-[:R]->() } AS out"
+    expect:
+      rows:
+        - [Alix, 1, null, 1, 1]
+        - [Amsterdam, null, null, 1, 0]
+        - [Gus, 1, null, 1, 1]
+        - [Jules, 1, null, 1, 1]
+        - [Mia, 1, null, 0, 1]
+        - [Vincent, 1, null, 1, 1]
+
+  - name: remove_a_label_a_and_b_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    statements:
+      - "MATCH (x:A&B)-[:R]->(t:T) REMOVE x:A"
+      - "MATCH (x) RETURN x.name, x.k, x.hit, size(labels(x)), COUNT { MATCH (x)-[:R]->() } AS out"
+    expect:
+      rows:
+        - [Alix, 1, null, 1, 1]
+        - [Amsterdam, null, null, 1, 0]
+        - [Gus, 1, null, 1, 1]
+        - [Jules, 1, null, 1, 1]
+        - [Mia, 1, null, 0, 1]
+        - [Vincent, 1, null, 1, 1]
+
+  - name: remove_a_label_a_or_b
+    statements:
+      - "MATCH (x:A|B)-[:R]->(t:T) REMOVE x:A"
+      - "MATCH (x) RETURN x.name, x.k, x.hit, size(labels(x)), COUNT { MATCH (x)-[:R]->() } AS out"
+    expect:
+      rows:
+        - [Alix, 1, null, 0, 1]
+        - [Amsterdam, null, null, 1, 0]
+        - [Gus, 1, null, 1, 1]
+        - [Jules, 1, null, 1, 1]
+        - [Mia, 1, null, 0, 1]
+        - [Vincent, 1, null, 1, 1]
+
+  - name: remove_a_label_a_or_b_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    statements:
+      - "MATCH (x:A|B)-[:R]->(t:T) REMOVE x:A"
+      - "MATCH (x) RETURN x.name, x.k, x.hit, size(labels(x)), COUNT { MATCH (x)-[:R]->() } AS out"
+    expect:
+      rows:
+        - [Alix, 1, null, 0, 1]
+        - [Amsterdam, null, null, 1, 0]
+        - [Gus, 1, null, 1, 1]
+        - [Jules, 1, null, 1, 1]
+        - [Mia, 1, null, 0, 1]
+        - [Vincent, 1, null, 1, 1]
+
+  - name: remove_a_label_not_a
+    statements:
+      - "MATCH (x:!A)-[:R]->(t:T) REMOVE x:A"
+      - "MATCH (x) RETURN x.name, x.k, x.hit, size(labels(x)), COUNT { MATCH (x)-[:R]->() } AS out"
+    expect:
+      rows:
+        - [Alix, 1, null, 1, 1]
+        - [Amsterdam, null, null, 1, 0]
+        - [Gus, 1, null, 1, 1]
+        - [Jules, 1, null, 1, 1]
+        - [Mia, 1, null, 0, 1]
+        - [Vincent, 1, null, 2, 1]
+
+  - name: remove_a_label_not_a_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    statements:
+      - "MATCH (x:!A)-[:R]->(t:T) REMOVE x:A"
+      - "MATCH (x) RETURN x.name, x.k, x.hit, size(labels(x)), COUNT { MATCH (x)-[:R]->() } AS out"
+    expect:
+      rows:
+        - [Alix, 1, null, 1, 1]
+        - [Amsterdam, null, null, 1, 0]
+        - [Gus, 1, null, 1, 1]
+        - [Jules, 1, null, 1, 1]
+        - [Mia, 1, null, 0, 1]
+        - [Vincent, 1, null, 2, 1]
+
+  - name: remove_a_label_any_label
+    statements:
+      - "MATCH (x:%)-[:R]->(t:T) REMOVE x:A"
+      - "MATCH (x) RETURN x.name, x.k, x.hit, size(labels(x)), COUNT { MATCH (x)-[:R]->() } AS out"
+    expect:
+      rows:
+        - [Alix, 1, null, 0, 1]
+        - [Amsterdam, null, null, 1, 0]
+        - [Gus, 1, null, 1, 1]
+        - [Jules, 1, null, 1, 1]
+        - [Mia, 1, null, 0, 1]
+        - [Vincent, 1, null, 1, 1]
+
+  - name: remove_a_label_any_label_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    statements:
+      - "MATCH (x:%)-[:R]->(t:T) REMOVE x:A"
+      - "MATCH (x) RETURN x.name, x.k, x.hit, size(labels(x)), COUNT { MATCH (x)-[:R]->() } AS out"
+    expect:
+      rows:
+        - [Alix, 1, null, 0, 1]
+        - [Amsterdam, null, null, 1, 0]
+        - [Gus, 1, null, 1, 1]
+        - [Jules, 1, null, 1, 1]
+        - [Mia, 1, null, 0, 1]
+        - [Vincent, 1, null, 1, 1]
+
+  - name: remove_a_label_paren_a
+    statements:
+      - "MATCH (x:(A))-[:R]->(t:T) REMOVE x:A"
+      - "MATCH (x) RETURN x.name, x.k, x.hit, size(labels(x)), COUNT { MATCH (x)-[:R]->() } AS out"
+    expect:
+      rows:
+        - [Alix, 1, null, 0, 1]
+        - [Amsterdam, null, null, 1, 0]
+        - [Gus, 1, null, 1, 1]
+        - [Jules, 1, null, 1, 1]
+        - [Mia, 1, null, 0, 1]
+        - [Vincent, 1, null, 1, 1]
+
+  - name: remove_a_label_paren_a_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    statements:
+      - "MATCH (x:(A))-[:R]->(t:T) REMOVE x:A"
+      - "MATCH (x) RETURN x.name, x.k, x.hit, size(labels(x)), COUNT { MATCH (x)-[:R]->() } AS out"
+    expect:
+      rows:
+        - [Alix, 1, null, 0, 1]
+        - [Amsterdam, null, null, 1, 0]
+        - [Gus, 1, null, 1, 1]
+        - [Jules, 1, null, 1, 1]
+        - [Mia, 1, null, 0, 1]
+        - [Vincent, 1, null, 1, 1]
+
+  - name: remove_a_label_nobody
+    statements:
+      - "MATCH (x:Z&A)-[:R]->(t:T) REMOVE x:A"
+      - "MATCH (x) RETURN x.name, x.k, x.hit, size(labels(x)), COUNT { MATCH (x)-[:R]->() } AS out"
+    expect:
+      rows:
+        - [Alix, 1, null, 1, 1]
+        - [Amsterdam, null, null, 1, 0]
+        - [Gus, 1, null, 1, 1]
+        - [Jules, 1, null, 1, 1]
+        - [Mia, 1, null, 0, 1]
+        - [Vincent, 1, null, 2, 1]
+
+  - name: remove_a_label_nobody_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    statements:
+      - "MATCH (x:Z&A)-[:R]->(t:T) REMOVE x:A"
+      - "MATCH (x) RETURN x.name, x.k, x.hit, size(labels(x)), COUNT { MATCH (x)-[:R]->() } AS out"
+    expect:
+      rows:
+        - [Alix, 1, null, 1, 1]
+        - [Amsterdam, null, null, 1, 0]
+        - [Gus, 1, null, 1, 1]
+        - [Jules, 1, null, 1, 1]
+        - [Mia, 1, null, 0, 1]
+        - [Vincent, 1, null, 2, 1]
+
+  # DELETE an edge
+
+  - name: delete_the_edge_colon_a
+    statements:
+      - "MATCH (x:A)-[r:R]->(t:T) DELETE r"
+      - "MATCH (x) RETURN x.name, x.k, x.hit, size(labels(x)), COUNT { MATCH (x)-[:R]->() } AS out"
+    expect:
+      rows:
+        - [Alix, 1, null, 1, 0]
+        - [Amsterdam, null, null, 1, 0]
+        - [Gus, 1, null, 1, 1]
+        - [Jules, 1, null, 1, 1]
+        - [Mia, 1, null, 0, 1]
+        - [Vincent, 1, null, 2, 0]
+
+  - name: delete_the_edge_colon_a_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    statements:
+      - "MATCH (x:A)-[r:R]->(t:T) DELETE r"
+      - "MATCH (x) RETURN x.name, x.k, x.hit, size(labels(x)), COUNT { MATCH (x)-[:R]->() } AS out"
+    expect:
+      rows:
+        - [Alix, 1, null, 1, 0]
+        - [Amsterdam, null, null, 1, 0]
+        - [Gus, 1, null, 1, 1]
+        - [Jules, 1, null, 1, 1]
+        - [Mia, 1, null, 0, 1]
+        - [Vincent, 1, null, 2, 0]
+
+  - name: delete_the_edge_colon_a_colon_b
+    statements:
+      - "MATCH (x:A:B)-[r:R]->(t:T) DELETE r"
+      - "MATCH (x) RETURN x.name, x.k, x.hit, size(labels(x)), COUNT { MATCH (x)-[:R]->() } AS out"
+    expect:
+      rows:
+        - [Alix, 1, null, 1, 1]
+        - [Amsterdam, null, null, 1, 0]
+        - [Gus, 1, null, 1, 1]
+        - [Jules, 1, null, 1, 1]
+        - [Mia, 1, null, 0, 1]
+        - [Vincent, 1, null, 2, 0]
+
+  - name: delete_the_edge_colon_a_colon_b_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    statements:
+      - "MATCH (x:A:B)-[r:R]->(t:T) DELETE r"
+      - "MATCH (x) RETURN x.name, x.k, x.hit, size(labels(x)), COUNT { MATCH (x)-[:R]->() } AS out"
+    expect:
+      rows:
+        - [Alix, 1, null, 1, 1]
+        - [Amsterdam, null, null, 1, 0]
+        - [Gus, 1, null, 1, 1]
+        - [Jules, 1, null, 1, 1]
+        - [Mia, 1, null, 0, 1]
+        - [Vincent, 1, null, 2, 0]
+
+  - name: delete_the_edge_is_a
+    statements:
+      - "MATCH (x IS A)-[r:R]->(t:T) DELETE r"
+      - "MATCH (x) RETURN x.name, x.k, x.hit, size(labels(x)), COUNT { MATCH (x)-[:R]->() } AS out"
+    expect:
+      rows:
+        - [Alix, 1, null, 1, 0]
+        - [Amsterdam, null, null, 1, 0]
+        - [Gus, 1, null, 1, 1]
+        - [Jules, 1, null, 1, 1]
+        - [Mia, 1, null, 0, 1]
+        - [Vincent, 1, null, 2, 0]
+
+  - name: delete_the_edge_is_a_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    statements:
+      - "MATCH (x IS A)-[r:R]->(t:T) DELETE r"
+      - "MATCH (x) RETURN x.name, x.k, x.hit, size(labels(x)), COUNT { MATCH (x)-[:R]->() } AS out"
+    expect:
+      rows:
+        - [Alix, 1, null, 1, 0]
+        - [Amsterdam, null, null, 1, 0]
+        - [Gus, 1, null, 1, 1]
+        - [Jules, 1, null, 1, 1]
+        - [Mia, 1, null, 0, 1]
+        - [Vincent, 1, null, 2, 0]
+
+  - name: delete_the_edge_is_a_and_b
+    statements:
+      - "MATCH (x IS A&B)-[r:R]->(t:T) DELETE r"
+      - "MATCH (x) RETURN x.name, x.k, x.hit, size(labels(x)), COUNT { MATCH (x)-[:R]->() } AS out"
+    expect:
+      rows:
+        - [Alix, 1, null, 1, 1]
+        - [Amsterdam, null, null, 1, 0]
+        - [Gus, 1, null, 1, 1]
+        - [Jules, 1, null, 1, 1]
+        - [Mia, 1, null, 0, 1]
+        - [Vincent, 1, null, 2, 0]
+
+  - name: delete_the_edge_is_a_and_b_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    statements:
+      - "MATCH (x IS A&B)-[r:R]->(t:T) DELETE r"
+      - "MATCH (x) RETURN x.name, x.k, x.hit, size(labels(x)), COUNT { MATCH (x)-[:R]->() } AS out"
+    expect:
+      rows:
+        - [Alix, 1, null, 1, 1]
+        - [Amsterdam, null, null, 1, 0]
+        - [Gus, 1, null, 1, 1]
+        - [Jules, 1, null, 1, 1]
+        - [Mia, 1, null, 0, 1]
+        - [Vincent, 1, null, 2, 0]
+
+  - name: delete_the_edge_a_and_b
+    statements:
+      - "MATCH (x:A&B)-[r:R]->(t:T) DELETE r"
+      - "MATCH (x) RETURN x.name, x.k, x.hit, size(labels(x)), COUNT { MATCH (x)-[:R]->() } AS out"
+    expect:
+      rows:
+        - [Alix, 1, null, 1, 1]
+        - [Amsterdam, null, null, 1, 0]
+        - [Gus, 1, null, 1, 1]
+        - [Jules, 1, null, 1, 1]
+        - [Mia, 1, null, 0, 1]
+        - [Vincent, 1, null, 2, 0]
+
+  - name: delete_the_edge_a_and_b_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    statements:
+      - "MATCH (x:A&B)-[r:R]->(t:T) DELETE r"
+      - "MATCH (x) RETURN x.name, x.k, x.hit, size(labels(x)), COUNT { MATCH (x)-[:R]->() } AS out"
+    expect:
+      rows:
+        - [Alix, 1, null, 1, 1]
+        - [Amsterdam, null, null, 1, 0]
+        - [Gus, 1, null, 1, 1]
+        - [Jules, 1, null, 1, 1]
+        - [Mia, 1, null, 0, 1]
+        - [Vincent, 1, null, 2, 0]
+
+  - name: delete_the_edge_a_or_b
+    statements:
+      - "MATCH (x:A|B)-[r:R]->(t:T) DELETE r"
+      - "MATCH (x) RETURN x.name, x.k, x.hit, size(labels(x)), COUNT { MATCH (x)-[:R]->() } AS out"
+    expect:
+      rows:
+        - [Alix, 1, null, 1, 0]
+        - [Amsterdam, null, null, 1, 0]
+        - [Gus, 1, null, 1, 0]
+        - [Jules, 1, null, 1, 1]
+        - [Mia, 1, null, 0, 1]
+        - [Vincent, 1, null, 2, 0]
+
+  - name: delete_the_edge_a_or_b_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    statements:
+      - "MATCH (x:A|B)-[r:R]->(t:T) DELETE r"
+      - "MATCH (x) RETURN x.name, x.k, x.hit, size(labels(x)), COUNT { MATCH (x)-[:R]->() } AS out"
+    expect:
+      rows:
+        - [Alix, 1, null, 1, 0]
+        - [Amsterdam, null, null, 1, 0]
+        - [Gus, 1, null, 1, 0]
+        - [Jules, 1, null, 1, 1]
+        - [Mia, 1, null, 0, 1]
+        - [Vincent, 1, null, 2, 0]
+
+  - name: delete_the_edge_not_a
+    statements:
+      - "MATCH (x:!A)-[r:R]->(t:T) DELETE r"
+      - "MATCH (x) RETURN x.name, x.k, x.hit, size(labels(x)), COUNT { MATCH (x)-[:R]->() } AS out"
+    expect:
+      rows:
+        - [Alix, 1, null, 1, 1]
+        - [Amsterdam, null, null, 1, 0]
+        - [Gus, 1, null, 1, 0]
+        - [Jules, 1, null, 1, 0]
+        - [Mia, 1, null, 0, 0]
+        - [Vincent, 1, null, 2, 1]
+
+  - name: delete_the_edge_not_a_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    statements:
+      - "MATCH (x:!A)-[r:R]->(t:T) DELETE r"
+      - "MATCH (x) RETURN x.name, x.k, x.hit, size(labels(x)), COUNT { MATCH (x)-[:R]->() } AS out"
+    expect:
+      rows:
+        - [Alix, 1, null, 1, 1]
+        - [Amsterdam, null, null, 1, 0]
+        - [Gus, 1, null, 1, 0]
+        - [Jules, 1, null, 1, 0]
+        - [Mia, 1, null, 0, 0]
+        - [Vincent, 1, null, 2, 1]
+
+  - name: delete_the_edge_any_label
+    statements:
+      - "MATCH (x:%)-[r:R]->(t:T) DELETE r"
+      - "MATCH (x) RETURN x.name, x.k, x.hit, size(labels(x)), COUNT { MATCH (x)-[:R]->() } AS out"
+    expect:
+      rows:
+        - [Alix, 1, null, 1, 0]
+        - [Amsterdam, null, null, 1, 0]
+        - [Gus, 1, null, 1, 0]
+        - [Jules, 1, null, 1, 0]
+        - [Mia, 1, null, 0, 1]
+        - [Vincent, 1, null, 2, 0]
+
+  - name: delete_the_edge_any_label_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    statements:
+      - "MATCH (x:%)-[r:R]->(t:T) DELETE r"
+      - "MATCH (x) RETURN x.name, x.k, x.hit, size(labels(x)), COUNT { MATCH (x)-[:R]->() } AS out"
+    expect:
+      rows:
+        - [Alix, 1, null, 1, 0]
+        - [Amsterdam, null, null, 1, 0]
+        - [Gus, 1, null, 1, 0]
+        - [Jules, 1, null, 1, 0]
+        - [Mia, 1, null, 0, 1]
+        - [Vincent, 1, null, 2, 0]
+
+  - name: delete_the_edge_paren_a
+    statements:
+      - "MATCH (x:(A))-[r:R]->(t:T) DELETE r"
+      - "MATCH (x) RETURN x.name, x.k, x.hit, size(labels(x)), COUNT { MATCH (x)-[:R]->() } AS out"
+    expect:
+      rows:
+        - [Alix, 1, null, 1, 0]
+        - [Amsterdam, null, null, 1, 0]
+        - [Gus, 1, null, 1, 1]
+        - [Jules, 1, null, 1, 1]
+        - [Mia, 1, null, 0, 1]
+        - [Vincent, 1, null, 2, 0]
+
+  - name: delete_the_edge_paren_a_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    statements:
+      - "MATCH (x:(A))-[r:R]->(t:T) DELETE r"
+      - "MATCH (x) RETURN x.name, x.k, x.hit, size(labels(x)), COUNT { MATCH (x)-[:R]->() } AS out"
+    expect:
+      rows:
+        - [Alix, 1, null, 1, 0]
+        - [Amsterdam, null, null, 1, 0]
+        - [Gus, 1, null, 1, 1]
+        - [Jules, 1, null, 1, 1]
+        - [Mia, 1, null, 0, 1]
+        - [Vincent, 1, null, 2, 0]
+
+  - name: delete_the_edge_nobody
+    statements:
+      - "MATCH (x:Z&A)-[r:R]->(t:T) DELETE r"
+      - "MATCH (x) RETURN x.name, x.k, x.hit, size(labels(x)), COUNT { MATCH (x)-[:R]->() } AS out"
+    expect:
+      rows:
+        - [Alix, 1, null, 1, 1]
+        - [Amsterdam, null, null, 1, 0]
+        - [Gus, 1, null, 1, 1]
+        - [Jules, 1, null, 1, 1]
+        - [Mia, 1, null, 0, 1]
+        - [Vincent, 1, null, 2, 1]
+
+  - name: delete_the_edge_nobody_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    statements:
+      - "MATCH (x:Z&A)-[r:R]->(t:T) DELETE r"
+      - "MATCH (x) RETURN x.name, x.k, x.hit, size(labels(x)), COUNT { MATCH (x)-[:R]->() } AS out"
+    expect:
+      rows:
+        - [Alix, 1, null, 1, 1]
+        - [Amsterdam, null, null, 1, 0]
+        - [Gus, 1, null, 1, 1]
+        - [Jules, 1, null, 1, 1]
+        - [Mia, 1, null, 0, 1]
+        - [Vincent, 1, null, 2, 1]
+
+  # DELETE a node
+
+  - name: delete_the_node_colon_a
+    query: "MATCH (x:A)-[:R]->(t:T) DELETE x"
+    expect:
+      error: "connected edge"
+
+  - name: delete_the_node_colon_a_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (x:A)-[:R]->(t:T) DELETE x"
+    expect:
+      error: "connected edge"
+
+  - name: delete_the_node_colon_a_colon_b
+    query: "MATCH (x:A:B)-[:R]->(t:T) DELETE x"
+    expect:
+      error: "connected edge"
+
+  - name: delete_the_node_colon_a_colon_b_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (x:A:B)-[:R]->(t:T) DELETE x"
+    expect:
+      error: "connected edge"
+
+  - name: delete_the_node_is_a
+    query: "MATCH (x IS A)-[:R]->(t:T) DELETE x"
+    expect:
+      error: "connected edge"
+
+  - name: delete_the_node_is_a_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (x IS A)-[:R]->(t:T) DELETE x"
+    expect:
+      error: "connected edge"
+
+  - name: delete_the_node_is_a_and_b
+    query: "MATCH (x IS A&B)-[:R]->(t:T) DELETE x"
+    expect:
+      error: "connected edge"
+
+  - name: delete_the_node_is_a_and_b_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (x IS A&B)-[:R]->(t:T) DELETE x"
+    expect:
+      error: "connected edge"
+
+  - name: delete_the_node_a_and_b
+    query: "MATCH (x:A&B)-[:R]->(t:T) DELETE x"
+    expect:
+      error: "connected edge"
+
+  - name: delete_the_node_a_and_b_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (x:A&B)-[:R]->(t:T) DELETE x"
+    expect:
+      error: "connected edge"
+
+  - name: delete_the_node_a_or_b
+    query: "MATCH (x:A|B)-[:R]->(t:T) DELETE x"
+    expect:
+      error: "connected edge"
+
+  - name: delete_the_node_a_or_b_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (x:A|B)-[:R]->(t:T) DELETE x"
+    expect:
+      error: "connected edge"
+
+  - name: delete_the_node_not_a
+    query: "MATCH (x:!A)-[:R]->(t:T) DELETE x"
+    expect:
+      error: "connected edge"
+
+  - name: delete_the_node_not_a_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (x:!A)-[:R]->(t:T) DELETE x"
+    expect:
+      error: "connected edge"
+
+  - name: delete_the_node_any_label
+    query: "MATCH (x:%)-[:R]->(t:T) DELETE x"
+    expect:
+      error: "connected edge"
+
+  - name: delete_the_node_any_label_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (x:%)-[:R]->(t:T) DELETE x"
+    expect:
+      error: "connected edge"
+
+  - name: delete_the_node_paren_a
+    query: "MATCH (x:(A))-[:R]->(t:T) DELETE x"
+    expect:
+      error: "connected edge"
+
+  - name: delete_the_node_paren_a_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    query: "MATCH (x:(A))-[:R]->(t:T) DELETE x"
+    expect:
+      error: "connected edge"
+
+  - name: delete_the_node_nobody
+    statements:
+      - "MATCH (x:Z&A)-[:R]->(t:T) DELETE x"
+      - "MATCH (x) RETURN x.name, x.k, x.hit, size(labels(x)), COUNT { MATCH (x)-[:R]->() } AS out"
+    expect:
+      rows:
+        - [Alix, 1, null, 1, 1]
+        - [Amsterdam, null, null, 1, 0]
+        - [Gus, 1, null, 1, 1]
+        - [Jules, 1, null, 1, 1]
+        - [Mia, 1, null, 0, 1]
+        - [Vincent, 1, null, 2, 1]
+
+  - name: delete_the_node_nobody_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    statements:
+      - "MATCH (x:Z&A)-[:R]->(t:T) DELETE x"
+      - "MATCH (x) RETURN x.name, x.k, x.hit, size(labels(x)), COUNT { MATCH (x)-[:R]->() } AS out"
+    expect:
+      rows:
+        - [Alix, 1, null, 1, 1]
+        - [Amsterdam, null, null, 1, 0]
+        - [Gus, 1, null, 1, 1]
+        - [Jules, 1, null, 1, 1]
+        - [Mia, 1, null, 0, 1]
+        - [Vincent, 1, null, 2, 1]
+
+  # DETACH DELETE a node
+
+  - name: detach_delete_the_node_colon_a
+    statements:
+      - "MATCH (x:A)-[:R]->(t:T) DETACH DELETE x"
+      - "MATCH (x) RETURN x.name, x.k, x.hit, size(labels(x)), COUNT { MATCH (x)-[:R]->() } AS out"
+    expect:
+      rows:
+        - [Amsterdam, null, null, 1, 0]
+        - [Gus, 1, null, 1, 1]
+        - [Jules, 1, null, 1, 1]
+        - [Mia, 1, null, 0, 1]
+
+  - name: detach_delete_the_node_colon_a_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    statements:
+      - "MATCH (x:A)-[:R]->(t:T) DETACH DELETE x"
+      - "MATCH (x) RETURN x.name, x.k, x.hit, size(labels(x)), COUNT { MATCH (x)-[:R]->() } AS out"
+    expect:
+      rows:
+        - [Amsterdam, null, null, 1, 0]
+        - [Gus, 1, null, 1, 1]
+        - [Jules, 1, null, 1, 1]
+        - [Mia, 1, null, 0, 1]
+
+  - name: detach_delete_the_node_colon_a_colon_b
+    statements:
+      - "MATCH (x:A:B)-[:R]->(t:T) DETACH DELETE x"
+      - "MATCH (x) RETURN x.name, x.k, x.hit, size(labels(x)), COUNT { MATCH (x)-[:R]->() } AS out"
+    expect:
+      rows:
+        - [Alix, 1, null, 1, 1]
+        - [Amsterdam, null, null, 1, 0]
+        - [Gus, 1, null, 1, 1]
+        - [Jules, 1, null, 1, 1]
+        - [Mia, 1, null, 0, 1]
+
+  - name: detach_delete_the_node_colon_a_colon_b_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    statements:
+      - "MATCH (x:A:B)-[:R]->(t:T) DETACH DELETE x"
+      - "MATCH (x) RETURN x.name, x.k, x.hit, size(labels(x)), COUNT { MATCH (x)-[:R]->() } AS out"
+    expect:
+      rows:
+        - [Alix, 1, null, 1, 1]
+        - [Amsterdam, null, null, 1, 0]
+        - [Gus, 1, null, 1, 1]
+        - [Jules, 1, null, 1, 1]
+        - [Mia, 1, null, 0, 1]
+
+  - name: detach_delete_the_node_is_a
+    statements:
+      - "MATCH (x IS A)-[:R]->(t:T) DETACH DELETE x"
+      - "MATCH (x) RETURN x.name, x.k, x.hit, size(labels(x)), COUNT { MATCH (x)-[:R]->() } AS out"
+    expect:
+      rows:
+        - [Amsterdam, null, null, 1, 0]
+        - [Gus, 1, null, 1, 1]
+        - [Jules, 1, null, 1, 1]
+        - [Mia, 1, null, 0, 1]
+
+  - name: detach_delete_the_node_is_a_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    statements:
+      - "MATCH (x IS A)-[:R]->(t:T) DETACH DELETE x"
+      - "MATCH (x) RETURN x.name, x.k, x.hit, size(labels(x)), COUNT { MATCH (x)-[:R]->() } AS out"
+    expect:
+      rows:
+        - [Amsterdam, null, null, 1, 0]
+        - [Gus, 1, null, 1, 1]
+        - [Jules, 1, null, 1, 1]
+        - [Mia, 1, null, 0, 1]
+
+  - name: detach_delete_the_node_is_a_and_b
+    statements:
+      - "MATCH (x IS A&B)-[:R]->(t:T) DETACH DELETE x"
+      - "MATCH (x) RETURN x.name, x.k, x.hit, size(labels(x)), COUNT { MATCH (x)-[:R]->() } AS out"
+    expect:
+      rows:
+        - [Alix, 1, null, 1, 1]
+        - [Amsterdam, null, null, 1, 0]
+        - [Gus, 1, null, 1, 1]
+        - [Jules, 1, null, 1, 1]
+        - [Mia, 1, null, 0, 1]
+
+  - name: detach_delete_the_node_is_a_and_b_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    statements:
+      - "MATCH (x IS A&B)-[:R]->(t:T) DETACH DELETE x"
+      - "MATCH (x) RETURN x.name, x.k, x.hit, size(labels(x)), COUNT { MATCH (x)-[:R]->() } AS out"
+    expect:
+      rows:
+        - [Alix, 1, null, 1, 1]
+        - [Amsterdam, null, null, 1, 0]
+        - [Gus, 1, null, 1, 1]
+        - [Jules, 1, null, 1, 1]
+        - [Mia, 1, null, 0, 1]
+
+  - name: detach_delete_the_node_a_and_b
+    statements:
+      - "MATCH (x:A&B)-[:R]->(t:T) DETACH DELETE x"
+      - "MATCH (x) RETURN x.name, x.k, x.hit, size(labels(x)), COUNT { MATCH (x)-[:R]->() } AS out"
+    expect:
+      rows:
+        - [Alix, 1, null, 1, 1]
+        - [Amsterdam, null, null, 1, 0]
+        - [Gus, 1, null, 1, 1]
+        - [Jules, 1, null, 1, 1]
+        - [Mia, 1, null, 0, 1]
+
+  - name: detach_delete_the_node_a_and_b_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    statements:
+      - "MATCH (x:A&B)-[:R]->(t:T) DETACH DELETE x"
+      - "MATCH (x) RETURN x.name, x.k, x.hit, size(labels(x)), COUNT { MATCH (x)-[:R]->() } AS out"
+    expect:
+      rows:
+        - [Alix, 1, null, 1, 1]
+        - [Amsterdam, null, null, 1, 0]
+        - [Gus, 1, null, 1, 1]
+        - [Jules, 1, null, 1, 1]
+        - [Mia, 1, null, 0, 1]
+
+  - name: detach_delete_the_node_a_or_b
+    statements:
+      - "MATCH (x:A|B)-[:R]->(t:T) DETACH DELETE x"
+      - "MATCH (x) RETURN x.name, x.k, x.hit, size(labels(x)), COUNT { MATCH (x)-[:R]->() } AS out"
+    expect:
+      rows:
+        - [Amsterdam, null, null, 1, 0]
+        - [Jules, 1, null, 1, 1]
+        - [Mia, 1, null, 0, 1]
+
+  - name: detach_delete_the_node_a_or_b_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    statements:
+      - "MATCH (x:A|B)-[:R]->(t:T) DETACH DELETE x"
+      - "MATCH (x) RETURN x.name, x.k, x.hit, size(labels(x)), COUNT { MATCH (x)-[:R]->() } AS out"
+    expect:
+      rows:
+        - [Amsterdam, null, null, 1, 0]
+        - [Jules, 1, null, 1, 1]
+        - [Mia, 1, null, 0, 1]
+
+  - name: detach_delete_the_node_not_a
+    statements:
+      - "MATCH (x:!A)-[:R]->(t:T) DETACH DELETE x"
+      - "MATCH (x) RETURN x.name, x.k, x.hit, size(labels(x)), COUNT { MATCH (x)-[:R]->() } AS out"
+    expect:
+      rows:
+        - [Alix, 1, null, 1, 1]
+        - [Amsterdam, null, null, 1, 0]
+        - [Vincent, 1, null, 2, 1]
+
+  - name: detach_delete_the_node_not_a_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    statements:
+      - "MATCH (x:!A)-[:R]->(t:T) DETACH DELETE x"
+      - "MATCH (x) RETURN x.name, x.k, x.hit, size(labels(x)), COUNT { MATCH (x)-[:R]->() } AS out"
+    expect:
+      rows:
+        - [Alix, 1, null, 1, 1]
+        - [Amsterdam, null, null, 1, 0]
+        - [Vincent, 1, null, 2, 1]
+
+  - name: detach_delete_the_node_any_label
+    statements:
+      - "MATCH (x:%)-[:R]->(t:T) DETACH DELETE x"
+      - "MATCH (x) RETURN x.name, x.k, x.hit, size(labels(x)), COUNT { MATCH (x)-[:R]->() } AS out"
+    expect:
+      rows:
+        - [Amsterdam, null, null, 1, 0]
+        - [Mia, 1, null, 0, 1]
+
+  - name: detach_delete_the_node_any_label_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    statements:
+      - "MATCH (x:%)-[:R]->(t:T) DETACH DELETE x"
+      - "MATCH (x) RETURN x.name, x.k, x.hit, size(labels(x)), COUNT { MATCH (x)-[:R]->() } AS out"
+    expect:
+      rows:
+        - [Amsterdam, null, null, 1, 0]
+        - [Mia, 1, null, 0, 1]
+
+  - name: detach_delete_the_node_paren_a
+    statements:
+      - "MATCH (x:(A))-[:R]->(t:T) DETACH DELETE x"
+      - "MATCH (x) RETURN x.name, x.k, x.hit, size(labels(x)), COUNT { MATCH (x)-[:R]->() } AS out"
+    expect:
+      rows:
+        - [Amsterdam, null, null, 1, 0]
+        - [Gus, 1, null, 1, 1]
+        - [Jules, 1, null, 1, 1]
+        - [Mia, 1, null, 0, 1]
+
+  - name: detach_delete_the_node_paren_a_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    statements:
+      - "MATCH (x:(A))-[:R]->(t:T) DETACH DELETE x"
+      - "MATCH (x) RETURN x.name, x.k, x.hit, size(labels(x)), COUNT { MATCH (x)-[:R]->() } AS out"
+    expect:
+      rows:
+        - [Amsterdam, null, null, 1, 0]
+        - [Gus, 1, null, 1, 1]
+        - [Jules, 1, null, 1, 1]
+        - [Mia, 1, null, 0, 1]
+
+  - name: detach_delete_the_node_nobody
+    statements:
+      - "MATCH (x:Z&A)-[:R]->(t:T) DETACH DELETE x"
+      - "MATCH (x) RETURN x.name, x.k, x.hit, size(labels(x)), COUNT { MATCH (x)-[:R]->() } AS out"
+    expect:
+      rows:
+        - [Alix, 1, null, 1, 1]
+        - [Amsterdam, null, null, 1, 0]
+        - [Gus, 1, null, 1, 1]
+        - [Jules, 1, null, 1, 1]
+        - [Mia, 1, null, 0, 1]
+        - [Vincent, 1, null, 2, 1]
+
+  - name: detach_delete_the_node_nobody_on_label
+    setup:
+      - "CREATE INDEX on_a FOR (n:A) ON (n.k)"
+    statements:
+      - "MATCH (x:Z&A)-[:R]->(t:T) DETACH DELETE x"
+      - "MATCH (x) RETURN x.name, x.k, x.hit, size(labels(x)), COUNT { MATCH (x)-[:R]->() } AS out"
+    expect:
+      rows:
+        - [Alix, 1, null, 1, 1]
+        - [Amsterdam, null, null, 1, 0]
+        - [Gus, 1, null, 1, 1]
+        - [Jules, 1, null, 1, 1]
+        - [Mia, 1, null, 0, 1]
+        - [Vincent, 1, null, 2, 1]

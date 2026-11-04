@@ -1,6 +1,6 @@
-//! The row-group store's indexes (#412 S7, H1d): a property index per key,
-//! and text and vector indexes per label and key, each graph's its own, kept
-//! by the writes as they apply (decision Q4 A).
+//! The row-group store's indexes (#412 S7, H1d): a property index per key or
+//! per label and key, and text and vector indexes per label and key, each
+//! graph's its own, kept by the writes as they apply (decision Q4 A).
 //!
 //! A property index holds an entry for each value of its key some reader
 //! at the horizon or later may see: a write adds the value it writes and
@@ -13,6 +13,15 @@
 //! candidate's value at the view, as a scan does, so it finds what the
 //! scan finds; a lookup without a view lists every candidate that exists,
 //! for a reader to check at its view, as a label scan without one does.
+//!
+//! An index on a label also holds what a reader may need: a node while its
+//! newest labels or a kept version has the label, under every value of the key
+//! it holds in any version, so a reader that had it at its view finds it. A
+//! write of a value while no version has the label enters nothing, as no reader
+//! sees the two together, and a label added enters every version's value. An
+//! entry goes when no version has the label: at once for an undone add, and at
+//! `collect` for a label removed. A reader checks the label at its view, as it
+//! checks the value.
 //!
 //! A text or vector index holds one document or vector per node, so it holds
 //! the newest state: the text or vector of each node with the label, in
@@ -35,6 +44,8 @@ mod vector;
 pub(super) use text::TextLimit;
 
 use std::fmt;
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use grafeo_common::types::{HashableValue, NodeId, PropertyKey, Value};
 use grafeo_common::utils::hash::FxHashMap;
@@ -42,11 +53,37 @@ use grafeo_common::utils::hash::FxHashMap;
 use self::property::{MaybeEqual, PropertyIndex};
 use super::{Inner, NodeGroup, PENDING, ROWS_PER_GROUP, Read, RowGroupStore};
 
+/// The property index on one label of a key.
+#[derive(Debug)]
+struct LabelIndex {
+    label: String,
+    index: PropertyIndex,
+    /// The label's id, once it has one: ids are permanent, so a write need not look the name up.
+    id: OnceLock<u32>,
+    /// How many labels the store had when the name last had no id: until there are more it has
+    /// none yet.
+    missed_at: AtomicUsize,
+}
+
+impl LabelIndex {
+    fn new(label: &str) -> Self {
+        Self {
+            label: label.to_string(),
+            index: PropertyIndex::default(),
+            id: OnceLock::new(),
+            missed_at: AtomicUsize::new(usize::MAX),
+        }
+    }
+}
+
 /// A store's indexes.
 #[derive(Default)]
 pub(super) struct Indexes {
-    /// The property indexes, by key.
+    /// The property indexes on every label, by key.
     property: FxHashMap<PropertyKey, PropertyIndex>,
+    /// The property indexes on one label, by key, then in the order they were made. By label
+    /// name, so an index on a label no node has yet gives the label no id.
+    on_label: FxHashMap<PropertyKey, Vec<LabelIndex>>,
     /// The text indexes, by label and property.
     #[cfg(feature = "text-index")]
     text: FxHashMap<key::SearchKey, text::TextEntry>,
@@ -59,6 +96,7 @@ impl fmt::Debug for Indexes {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut debug = f.debug_struct("Indexes");
         debug.field("property", &self.property.keys().collect::<Vec<_>>());
+        debug.field("on_label", &self.on_label.keys().collect::<Vec<_>>());
         #[cfg(feature = "text-index")]
         debug.field("text", &self.text.keys().collect::<Vec<_>>());
         #[cfg(feature = "vector-index")]
@@ -70,7 +108,24 @@ impl fmt::Debug for Indexes {
 impl Indexes {
     /// Whether the store has no index: a write then does no index work.
     pub(super) fn is_empty(&self) -> bool {
-        self.property.is_empty() && !self.searches()
+        self.property.is_empty() && self.on_label.is_empty() && !self.searches()
+    }
+
+    /// The index a lookup of `property` reads whose results all have each of `labels`: the
+    /// first of them with an index on the key, in the order given, else the key's own. With no
+    /// label, only the key's: an index on a label holds no other label's nodes.
+    fn serving(&self, labels: &[&str], property: &str) -> Option<&PropertyIndex> {
+        self.on_label
+            .get(property)
+            .and_then(|on_label| {
+                labels.iter().find_map(|label| {
+                    on_label
+                        .iter()
+                        .find(|entry| entry.label == *label)
+                        .map(|entry| &entry.index)
+                })
+            })
+            .or_else(|| self.property.get(property))
     }
 
     /// Whether the store has a text or a vector index.
@@ -144,23 +199,127 @@ impl Inner {
                 }
             }
         }
+        if let Some(on_label) = self.indexes.on_label.get(name.as_str()) {
+            for entry in on_label {
+                // No version with the label: no reader sees the two together, and the node
+                // has no entry to take out.
+                if !self.has_newest_label(group, row, entry)
+                    && !self.had_label(group, row, entry, |_| true)
+                {
+                    continue;
+                }
+                if let Some(newest) = group.columns.get(key, row) {
+                    entry.index.insert(HashableValue::new(newest), id);
+                }
+                if let Some(replaced) = replaced {
+                    let replaced = HashableValue::new(replaced.clone());
+                    if !Self::holds(group, row, key, &replaced) {
+                        entry.index.remove(&replaced, id);
+                    }
+                }
+            }
+        }
         #[cfg(any(feature = "text-index", feature = "vector-index"))]
         if self.indexes.searches() {
             self.sync_searches(raw, Some(name.as_str()), None, true);
         }
     }
 
-    /// Brings the text and vector indexes in line with a change of node
-    /// `raw`'s labels, a write of label `label` (`None`: any, an undo): an
-    /// index of a label the node has now holds it, one of a label it lost
-    /// does not.
+    /// The id of the label of `entry`, `None` while no node has had it.
+    fn id_of_label(&self, entry: &LabelIndex) -> Option<u32> {
+        if let Some(id) = entry.id.get() {
+            return Some(*id);
+        }
+        let names = self.labels.len();
+        if entry.missed_at.load(Ordering::Relaxed) == names {
+            return None;
+        }
+        match self.label_id(&entry.label) {
+            Some(id) => Some(*entry.id.get_or_init(|| id)),
+            None => {
+                entry.missed_at.store(names, Ordering::Relaxed);
+                None
+            }
+        }
+    }
+
+    /// Whether row `row`'s newest labels have the label of `entry`.
+    fn has_newest_label(&self, group: &NodeGroup, row: usize, entry: &LabelIndex) -> bool {
+        self.id_of_label(entry)
+            .and_then(|id| group.labels.get(&id))
+            .is_some_and(|rows| rows.get(row))
+    }
+
+    /// Whether a version a chain keeps of row `row`'s labels has the label of `entry`, among
+    /// those `past` lets through by the stamp of who wrote over them.
+    fn had_label(
+        &self,
+        group: &NodeGroup,
+        row: usize,
+        entry: &LabelIndex,
+        past: impl Fn(u64) -> bool,
+    ) -> bool {
+        !group.label_updates.is_empty()
+            && self.id_of_label(entry).is_some_and(|id| {
+                group
+                    .label_updates
+                    .kept_stamped(row)
+                    .any(|(stamp, kept)| past(stamp) && kept.binary_search(&id).is_ok())
+            })
+    }
+
+    /// The values of key `name` row `row` holds, the newest and every one a chain keeps.
+    fn every_value(group: &NodeGroup, row: usize, key: u32) -> impl Iterator<Item = Value> + '_ {
+        let kept = group
+            .columns
+            .kept(key, row)
+            .filter_map(|(_, kept)| kept.clone());
+        group.columns.get(key, row).into_iter().chain(kept)
+    }
+
+    /// Brings the indexes on labels in line with node `raw`'s labels: of `label` (`None`: any).
+    /// A node with the label enters with every version's value, and one no version has the
+    /// label of leaves. One a chain keeps the label of stays, for the readers that see it,
+    /// until `collect`.
+    fn sync_label_indexes(&self, raw: u64, label: Option<&str>) {
+        let Some((group, row)) = self.node(raw) else {
+            return;
+        };
+        let id = NodeId::new(raw);
+        for (name, on_label) in &self.indexes.on_label {
+            let Some(key) = self.keys.get_id(name.as_str()) else {
+                continue;
+            };
+            for entry in on_label {
+                if label.is_some_and(|label| label != entry.label) {
+                    continue;
+                }
+                if self.has_newest_label(group, row, entry) {
+                    for value in Self::every_value(group, row, key) {
+                        entry.index.insert(HashableValue::new(value), id);
+                    }
+                } else if !self.had_label(group, row, entry, |_| true) {
+                    for value in Self::every_value(group, row, key) {
+                        entry.index.remove(&HashableValue::new(value), id);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Brings the indexes in line with a change of node `raw`'s labels, a
+    /// write of label `label` (`None`: any, an undo): for the text and vector
+    /// indexes an index of a label the node has now holds it, one of a label
+    /// it lost does not; for the property indexes on a label, see
+    /// [`sync_label_indexes`](Self::sync_label_indexes).
     pub(super) fn index_labels(&self, raw: u64, label: Option<&str>) {
+        if !self.indexes.on_label.is_empty() {
+            self.sync_label_indexes(raw, label);
+        }
         #[cfg(any(feature = "text-index", feature = "vector-index"))]
         if self.indexes.searches() {
             self.sync_searches(raw, None, label, false);
         }
-        #[cfg(not(any(feature = "text-index", feature = "vector-index")))]
-        let _ = (raw, label);
     }
 
     /// Indexes node `raw`, which a write just created, with its values and
@@ -177,6 +336,25 @@ impl Inner {
                 .and_then(|key| group.columns.get(key, row))
             {
                 index.insert(HashableValue::new(value), id);
+            }
+        }
+        for (name, on_label) in &self.indexes.on_label {
+            let mut holding = on_label
+                .iter()
+                .filter(|entry| self.has_newest_label(group, row, entry))
+                .peekable();
+            if holding.peek().is_none() {
+                continue;
+            }
+            let Some(value) = self
+                .keys
+                .get_id(name.as_str())
+                .and_then(|key| group.columns.get(key, row))
+            else {
+                continue;
+            };
+            for entry in holding {
+                entry.index.insert(HashableValue::new(value.clone()), id);
             }
         }
         #[cfg(any(feature = "text-index", feature = "vector-index"))]
@@ -205,6 +383,17 @@ impl Inner {
                 index.remove(&HashableValue::new(value), id);
             }
         }
+        for (name, on_label) in &self.indexes.on_label {
+            let Some(key) = self.keys.get_id(name.as_str()) else {
+                continue;
+            };
+            for value in Self::every_value(group, row, key) {
+                let value = HashableValue::new(value);
+                for entry in on_label {
+                    entry.index.remove(&value, id);
+                }
+            }
+        }
         #[cfg(feature = "text-index")]
         self.unindex_text(id);
         #[cfg(feature = "vector-index")]
@@ -226,9 +415,10 @@ impl Inner {
     /// Takes out what no reader at `horizon` or later can find any more,
     /// before `collect` drops it from the rows: every entry of a node a
     /// delete committed by the horizon took out of every such view, and the
-    /// entries of values only versions committed by the horizon held. It
-    /// looks at the node row groups `groups` alone: the listed ones, which
-    /// hold every stamp and chain (`collect`), or every one.
+    /// entries of values only versions committed by the horizon held, and on
+    /// an index on a label the entries of a node whose label only such versions
+    /// held. It looks at the node row groups `groups` alone: the listed ones,
+    /// which hold every stamp and chain (`collect`), or every one.
     pub(super) fn unindex_collected(&self, horizon: u64, groups: &[u64]) {
         if self.indexes.is_empty() {
             return;
@@ -238,6 +428,12 @@ impl Inner {
             .property
             .iter()
             .filter_map(|(name, index)| Some((self.keys.get_id(name.as_str())?, index)))
+            .chain(self.indexes.on_label.iter().flat_map(|(name, on_label)| {
+                let key = self.keys.get_id(name.as_str());
+                on_label
+                    .iter()
+                    .filter_map(move |entry| Some((key?, &entry.index)))
+            }))
             .collect();
         for (number, group) in groups
             .iter()
@@ -273,26 +469,56 @@ impl Inner {
                     }
                 }
             }
+            self.unindex_labels_collected(group, base, horizon);
         }
     }
 
-    /// Whether the index on `property` holds at most `limit` candidates for a
-    /// lookup of `value`; `false` without an index on `property`.
+    /// Takes out of the indexes on labels the nodes of `group`, whose rows start at `base`, whose
+    /// label only versions committed by the horizon held.
+    fn unindex_labels_collected(&self, group: &NodeGroup, base: u64, horizon: u64) {
+        if self.indexes.on_label.is_empty() {
+            return;
+        }
+        let Some(rows) = group.label_updates.rows() else {
+            return;
+        };
+        let past_the_horizon = |stamp: u64| stamp & PENDING != 0 || stamp > horizon;
+        for row in rows.rows() {
+            let id = NodeId::new(base + row as u64);
+            for (name, on_label) in &self.indexes.on_label {
+                let Some(key) = self.keys.get_id(name.as_str()) else {
+                    continue;
+                };
+                for entry in on_label {
+                    if !self.has_newest_label(group, row, entry)
+                        && !self.had_label(group, row, entry, past_the_horizon)
+                    {
+                        for value in Self::every_value(group, row, key) {
+                            entry.index.remove(&HashableValue::new(value), id);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Whether the index that serves `labels` on `property` holds at most `limit` candidates
+    /// for a lookup of `value`; `false` without one.
     pub(super) fn property_candidates_within(
         &self,
+        labels: &[&str],
         property: &str,
         value: &Value,
         limit: usize,
     ) -> bool {
         self.indexes
-            .property
-            .get(property)
+            .serving(labels, property)
             .is_some_and(|index| index.candidates_within(value, limit))
     }
 
-    /// The nodes `read` sees whose `property` is `value`, through the
-    /// property's index: the candidates the index holds for the value, each
-    /// read again at the view. `None` without an index on `property`.
+    /// The nodes `read` sees whose `property` is `value`, through the index
+    /// on the key: the candidates the index holds for the value, each read
+    /// again at the view. `None` without an index on the key.
     pub(super) fn indexed_equal_at(
         &self,
         property: &str,
@@ -314,17 +540,18 @@ impl Inner {
     }
 
     /// The nodes `read` sees that meet every equality of `conditions`,
-    /// starting from the indexed condition with the fewest candidates.
-    /// `None` when no condition's key has an index.
+    /// starting from the indexed condition with the fewest candidates, by
+    /// the indexes that serve `labels`. `None` when no condition's key has one.
     pub(super) fn indexed_matching_at(
         &self,
+        labels: &[&str],
         conditions: &[(&str, Value)],
         read: Read,
     ) -> Option<Vec<NodeId>> {
         let candidates = conditions
             .iter()
             .filter_map(|(key, value)| {
-                let index = self.indexes.property.get(*key)?;
+                let index = self.indexes.serving(labels, key)?;
                 Some(index.nodes(&HashableValue::new(value.clone())))
             })
             .min_by_key(Vec::len)?;
@@ -352,15 +579,16 @@ impl Inner {
     }
 
     /// [`maybe_equal`](Self::maybe_equal) at `read`: the candidates whose
-    /// value as `read` sees it the index finds for `key`, ascending. `None`
-    /// without an index on `property`.
+    /// value as `read` sees it the index that serves `labels` finds for `key`,
+    /// ascending. `None` without one.
     pub(super) fn maybe_equal_at(
         &self,
+        labels: &[&str],
         property: &str,
         key: &Value,
         read: Read,
     ) -> Option<Vec<NodeId>> {
-        let index = self.indexes.property.get(property)?;
+        let index = self.indexes.serving(labels, property)?;
         let Some(test) = MaybeEqual::new(key) else {
             return Some(Vec::new()); // NULL equals nothing
         };
@@ -445,8 +673,85 @@ impl RowGroupStore {
             .insert(PropertyKey::new(property), index);
     }
 
-    /// Drops the index on a node property. Returns `true` if the index
+    /// Creates an index on node property `property` of label `label`: it holds what the
+    /// module documentation says, and the writes keep it from then on. An index on them
+    /// already is kept. No write of a label gives `label` an id here, so it stays out of the
+    /// store's listings until a node has it.
+    pub fn create_label_index(&self, label: &str, property: &str) {
+        let mut inner = self.inner.write();
+        let held = inner
+            .indexes
+            .on_label
+            .get(property)
+            .is_some_and(|on_label| on_label.iter().any(|entry| entry.label == label));
+        if held {
+            return;
+        }
+        let entry = LabelIndex::new(label);
+        if let (Some(key), Some(id)) = (inner.keys.get_id(property), inner.id_of_label(&entry)) {
+            for (number, group) in &inner.nodes {
+                let base = number * ROWS_PER_GROUP;
+                let newest = group.labels.get(&id);
+                let chained = group.label_updates.rows();
+                let rows = newest.iter().flat_map(|rows| rows.rows()).chain(
+                    chained.iter().flat_map(|rows| rows.rows()).filter(|row| {
+                        !newest.is_some_and(|rows| rows.get(*row))
+                            && inner.had_label(group, *row, &entry, |_| true)
+                    }),
+                );
+                for row in rows {
+                    let node = NodeId::new(base + row as u64);
+                    for value in Inner::every_value(group, row, key) {
+                        entry.index.insert(HashableValue::new(value), node);
+                    }
+                }
+            }
+        }
+        inner
+            .indexes
+            .on_label
+            .entry(PropertyKey::new(property))
+            .or_default()
+            .push(entry);
+    }
+
+    /// Drops the index on node property `property` of label `label`. Returns `true` if it
     /// existed and was removed.
+    pub fn drop_label_index(&self, label: &str, property: &str) -> bool {
+        let mut inner = self.inner.write();
+        let on_labels = &mut inner.indexes.on_label;
+        let Some(on_label) = on_labels.get_mut(property) else {
+            return false;
+        };
+        let before = on_label.len();
+        on_label.retain(|entry| entry.label != label);
+        let dropped = on_label.len() != before;
+        if on_label.is_empty() {
+            on_labels.remove(property);
+        }
+        dropped
+    }
+
+    /// The indexes on labels, as `(label, property)`, sorted.
+    #[must_use]
+    pub fn label_index_entries(&self) -> Vec<(String, String)> {
+        let inner = self.inner.read();
+        let mut entries: Vec<(String, String)> = inner
+            .indexes
+            .on_label
+            .iter()
+            .flat_map(|(name, on_label)| {
+                on_label
+                    .iter()
+                    .map(|entry| (entry.label.clone(), name.to_string()))
+            })
+            .collect();
+        entries.sort();
+        entries
+    }
+
+    /// Drops the index on a node property that covers every label. Returns `true` if the
+    /// index existed and was removed.
     pub fn drop_property_index(&self, property: &str) -> bool {
         self.inner
             .write()
@@ -456,13 +761,46 @@ impl RowGroupStore {
             .is_some()
     }
 
-    /// Returns `true` if the property has an index.
+    /// Returns `true` if the property has an index, on every label or on one.
     #[must_use]
     pub fn has_property_index(&self, property: &str) -> bool {
-        self.inner.read().indexes.property.contains_key(property)
+        let inner = self.inner.read();
+        inner.indexes.property.contains_key(property)
+            || inner.indexes.on_label.contains_key(property)
     }
 
-    /// Returns the names of all indexed properties.
+    /// How many distinct values the index that serves `labels` on `property` holds: old and
+    /// pending values count until undo or `collect` takes them out.
+    #[must_use]
+    pub fn indexed_distinct_values(&self, labels: &[&str], property: &str) -> Option<u64> {
+        let inner = self.inner.read();
+        let index = inner.indexes.serving(labels, property)?;
+        u64::try_from(index.len()).ok()
+    }
+
+    /// Whether `label` has an index of its own on `property`.
+    #[must_use]
+    pub fn has_label_index(&self, label: &str, property: &str) -> bool {
+        self.inner
+            .read()
+            .indexes
+            .on_label
+            .get(property)
+            .is_some_and(|on_label| on_label.iter().any(|entry| entry.label == label))
+    }
+
+    /// Whether a lookup of `property` whose results all have each of `labels` has an index to
+    /// read (see `GraphStore::index_serves`).
+    #[must_use]
+    pub fn index_serves(&self, labels: &[&str], property: &str) -> bool {
+        self.inner
+            .read()
+            .indexes
+            .serving(labels, property)
+            .is_some()
+    }
+
+    /// Returns the keys of the property indexes that cover every label.
     #[must_use]
     pub fn property_index_keys(&self) -> Vec<String> {
         self.inner
@@ -496,6 +834,18 @@ impl RowGroupStore {
             .property
             .get(property)
             .map(PropertyIndex::len)
+    }
+
+    /// How many distinct values the indexes on labels hold, added up.
+    pub(crate) fn label_indexes_len(&self) -> usize {
+        self.inner
+            .read()
+            .indexes
+            .on_label
+            .values()
+            .flatten()
+            .map(|entry| entry.index.len())
+            .sum()
     }
 }
 

@@ -2495,6 +2495,7 @@ impl GrafeoDB {
         change.push(grafeo_common::change::StandaloneOp::CreateGraph {
             name: name.to_string(),
         });
+        standalone::index_new_graph_for_its_rules(&mut change, &self.catalog, name)?;
         self.commit_standalone(change, &held)?;
         Ok(true)
     }

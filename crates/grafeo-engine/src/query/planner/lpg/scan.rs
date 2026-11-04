@@ -119,11 +119,12 @@ fn with_label_union_scan(filter: &FilterOp, store: &dyn GraphStore) -> Option<Fi
         return None;
     };
     let (nodes, _) = fewest_label_union(&filter.predicate, &scan.variable, store)?;
+    let labels = super::seek::LookupLabels::of(filter, &scan.variable);
     if nodes.saturating_mul(2) > store.label_node_estimate(label)
         || super::seek::choose_seek(
             &filter.predicate,
             scan,
-            |property| store.has_property_index(property),
+            |property| labels.served_by(store, property),
             true,
             false,
         )
@@ -264,7 +265,10 @@ fn and_conjuncts<'a>(predicate: &'a LogicalExpression, out: &mut Vec<&'a Logical
 /// joined by `OR` (each branch a check or a conjunction holding one), or
 /// `any(l IN labels(variable) WHERE ...)` over equalities of `l` and `IN`
 /// lists of label names.
-fn any_label<'a>(expression: &'a LogicalExpression, variable: &str) -> Option<Vec<&'a str>> {
+pub(super) fn any_label<'a>(
+    expression: &'a LogicalExpression,
+    variable: &str,
+) -> Option<Vec<&'a str>> {
     if let Some(label) = label_check(expression, variable) {
         return Some(vec![label]);
     }

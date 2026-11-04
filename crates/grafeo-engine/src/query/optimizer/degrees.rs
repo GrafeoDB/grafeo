@@ -23,6 +23,10 @@ use crate::query::planner::lpg::seek::split_conjuncts;
 /// them. A placeholder until the first plan's time is measured.
 const REACHED_READS_PER_PLAN: u64 = 8_192;
 
+/// The most reads a plan's choices of where a hop starts spend on samples, apart from the join
+/// search's, so that they leave its plan as it was. A placeholder until measured.
+const TURN_READS_PER_PLAN: u64 = 1_024;
+
 /// The counts a hop's degree derives from, and the store that samples it.
 pub struct HopDegrees {
     /// The store's counts, shared, so a plan with no hop pays no copy of them.
@@ -33,6 +37,8 @@ pub struct HopDegrees {
     sampling: AtomicBool,
     /// The reads left for degrees of reached ends in this plan.
     reached_reads_left: AtomicU64,
+    /// The reads left for the choices of where a hop starts in this plan.
+    turn_reads_left: AtomicU64,
 }
 
 impl std::fmt::Debug for HopDegrees {
@@ -52,6 +58,7 @@ impl HopDegrees {
             sampler: OnceLock::new(),
             sampling: AtomicBool::new(false),
             reached_reads_left: AtomicU64::new(REACHED_READS_PER_PLAN),
+            turn_reads_left: AtomicU64::new(TURN_READS_PER_PLAN),
         }
     }
 
@@ -81,6 +88,61 @@ impl HopDegrees {
         );
         self.reached_reads_left.store(left, Ordering::Relaxed);
         degree
+    }
+
+    /// The degree at the far end of a hop from a node of `start_label`, over `direction` there and
+    /// back, weighted by the edges that reach each end, so that a hub weighs what a walk back from
+    /// it reads. When a sample of the source reaches nothing, as a hub among many starts leaves it,
+    /// the far side's lists of `far_label` tell instead. `None` for a store that cannot sample, or
+    /// past this plan's reads for it.
+    pub(super) fn backward_degree(
+        &self,
+        start_label: Option<&str>,
+        far_label: Option<&str>,
+        types: &[&str],
+        direction: Direction,
+    ) -> Option<f64> {
+        let back = match direction {
+            Direction::Outgoing => Direction::Incoming,
+            Direction::Incoming => Direction::Outgoing,
+            both => both,
+        };
+        let sampler = self.sampler.get()?;
+        let mut left = self.turn_reads_left.load(Ordering::Relaxed);
+        let degree = sampler.sampled_reached_degree_within(
+            start_label,
+            types,
+            direction,
+            types,
+            back,
+            &mut left,
+        );
+        let degree =
+            degree.or_else(|| sampler.far_walk_back_within(far_label?, types, back, &mut left));
+        self.turn_reads_left.store(left, Ordering::Relaxed);
+        degree
+    }
+
+    /// How many distinct values the store's index for `labels` and `key` holds.
+    pub(super) fn distinct_values(&self, labels: &[&str], key: &str) -> Option<u64> {
+        self.sampler.get()?.indexed_distinct_values(labels, key)
+    }
+
+    /// How many nodes have `label`, or how many there are for none.
+    pub(super) fn nodes_with(&self, label: Option<&str>) -> u64 {
+        label.map_or(self.statistics.total_nodes, |label| {
+            self.nodes_of(label).unwrap_or(0)
+        })
+    }
+
+    /// The degree from a node with `labels` by the counts (see [`Self::of`]).
+    pub(super) fn counted_degree(
+        &self,
+        labels: &[&str],
+        types: &[&str],
+        direction: Direction,
+    ) -> Option<f64> {
+        self.degree(None, labels, types, direction)
     }
 
     /// The nodes with `label`, as counted.

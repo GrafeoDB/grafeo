@@ -671,6 +671,9 @@ jobs:
     runs-on: ubuntu-latest
     needs: build-binaries
     environment: nuget
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@v7
 
@@ -700,8 +703,27 @@ jobs:
         working-directory: crates/bindings/csharp/src/Grafeo
         run: dotnet pack -c Release -o ../../nupkg
 
+      # Trusted publishing: a short-lived key, valid for an hour, so it is requested
+      # right before the push. The policy on nuget.org names this file and environment.
+      - name: Get a NuGet key
+        id: nuget-login
+        uses: NuGet/login@v1
+        with:
+          user: StevenBtw
+
       - name: Publish to NuGet
-        run: dotnet nuget push "crates/bindings/csharp/nupkg/*.nupkg" --api-key ${{ secrets.NUGET_API_KEY }} --source https://api.nuget.org/v3/index.json --skip-duplicate
+        run: dotnet nuget push "crates/bindings/csharp/nupkg/*.nupkg" --api-key ${{ steps.nuget-login.outputs.NUGET_API_KEY }} --source https://api.nuget.org/v3/index.json --skip-duplicate
+
+  # Publish the Dart package to pub.dev. The policy on pub.dev names this repository,
+  # the tag pattern and the environment.
+  publish-pub-dev:
+    name: Publish to pub.dev
+    permissions:
+      id-token: write
+    uses: dart-lang/setup-dart/.github/workflows/publish.yml@v1
+    with:
+      working-directory: crates/bindings/dart
+      environment: dart
 
   # Build CLI Python wheels using workflow artifacts (no release asset race)
   build-cli-wheels:
@@ -798,7 +820,7 @@ jobs:
   notify-discord:
     name: Discord Release Notification
     runs-on: ubuntu-latest
-    needs: [publish-crates, publish-npm, publish-wasm, publish-nuget, publish-cli]
+    needs: [publish-crates, publish-npm, publish-wasm, publish-nuget, publish-pub-dev, publish-cli]
     if: always() && needs.publish-crates.result != 'cancelled'
     steps:
       - uses: actions/checkout@v7

@@ -755,8 +755,8 @@ mod tests {
         }
     }
 
-    /// Two transactions create graphs at once: each graph its own id, as a checkpoint refuses two
-    /// of one id. The id's load and store are one step only under the lock of the names.
+    /// Several callers make graphs at once: each graph its own id, as a checkpoint refuses two of
+    /// one id. The id's load and store are one step only under the lock of the names.
     #[test]
     fn concurrent_new_graphs_get_their_own_ids() {
         let store = Arc::new(RowGroupStore::new());

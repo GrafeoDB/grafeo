@@ -1,0 +1,1164 @@
+# Whoever holds a key is found once, whichever way it is looked up and whichever labels are
+# indexed: a node of one label, of two, of a label with no index, and of none. Generated from one
+# table with the Rust tests in key_holders.rs. A key-wide index cannot be made from a query, so
+# the Rust tests cover that.
+
+meta:
+  language: gql
+  model: lpg
+  title: Who holds a key
+  dataset: key_holders
+
+tests:
+
+  - name: label_far_no_index
+    query: "MATCH (n:Far {k: 7}) RETURN n.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: label_far_on_far
+    setup:
+      - "CREATE INDEX on_far FOR (n:Far) ON (n.k)"
+    query: "MATCH (n:Far {k: 7}) RETURN n.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: label_far_on_near
+    setup:
+      - "CREATE INDEX on_near FOR (n:Near) ON (n.k)"
+    query: "MATCH (n:Far {k: 7}) RETURN n.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: label_far_on_far_near
+    setup:
+      - "CREATE INDEX on_far FOR (n:Far) ON (n.k)"
+      - "CREATE INDEX on_near FOR (n:Near) ON (n.k)"
+    query: "MATCH (n:Far {k: 7}) RETURN n.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: label_far_on_every_label
+    setup:
+      - "CREATE INDEX on_far FOR (n:Far) ON (n.k)"
+      - "CREATE INDEX on_near FOR (n:Near) ON (n.k)"
+      - "CREATE INDEX on_other FOR (n:Other) ON (n.k)"
+    query: "MATCH (n:Far {k: 7}) RETURN n.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: label_near_no_index
+    query: "MATCH (n:Near {k: 7}) RETURN n.name"
+    expect:
+      rows:
+        - [Gus]
+        - [Vincent]
+
+  - name: label_near_on_far
+    setup:
+      - "CREATE INDEX on_far FOR (n:Far) ON (n.k)"
+    query: "MATCH (n:Near {k: 7}) RETURN n.name"
+    expect:
+      rows:
+        - [Gus]
+        - [Vincent]
+
+  - name: label_near_on_near
+    setup:
+      - "CREATE INDEX on_near FOR (n:Near) ON (n.k)"
+    query: "MATCH (n:Near {k: 7}) RETURN n.name"
+    expect:
+      rows:
+        - [Gus]
+        - [Vincent]
+
+  - name: label_near_on_far_near
+    setup:
+      - "CREATE INDEX on_far FOR (n:Far) ON (n.k)"
+      - "CREATE INDEX on_near FOR (n:Near) ON (n.k)"
+    query: "MATCH (n:Near {k: 7}) RETURN n.name"
+    expect:
+      rows:
+        - [Gus]
+        - [Vincent]
+
+  - name: label_near_on_every_label
+    setup:
+      - "CREATE INDEX on_far FOR (n:Far) ON (n.k)"
+      - "CREATE INDEX on_near FOR (n:Near) ON (n.k)"
+      - "CREATE INDEX on_other FOR (n:Other) ON (n.k)"
+    query: "MATCH (n:Near {k: 7}) RETURN n.name"
+    expect:
+      rows:
+        - [Gus]
+        - [Vincent]
+
+  - name: label_other_no_index
+    query: "MATCH (n:Other {k: 7}) RETURN n.name"
+    expect:
+      rows:
+        - [Jules]
+
+  - name: label_other_on_far
+    setup:
+      - "CREATE INDEX on_far FOR (n:Far) ON (n.k)"
+    query: "MATCH (n:Other {k: 7}) RETURN n.name"
+    expect:
+      rows:
+        - [Jules]
+
+  - name: label_other_on_near
+    setup:
+      - "CREATE INDEX on_near FOR (n:Near) ON (n.k)"
+    query: "MATCH (n:Other {k: 7}) RETURN n.name"
+    expect:
+      rows:
+        - [Jules]
+
+  - name: label_other_on_far_near
+    setup:
+      - "CREATE INDEX on_far FOR (n:Far) ON (n.k)"
+      - "CREATE INDEX on_near FOR (n:Near) ON (n.k)"
+    query: "MATCH (n:Other {k: 7}) RETURN n.name"
+    expect:
+      rows:
+        - [Jules]
+
+  - name: label_other_on_every_label
+    setup:
+      - "CREATE INDEX on_far FOR (n:Far) ON (n.k)"
+      - "CREATE INDEX on_near FOR (n:Near) ON (n.k)"
+      - "CREATE INDEX on_other FOR (n:Other) ON (n.k)"
+    query: "MATCH (n:Other {k: 7}) RETURN n.name"
+    expect:
+      rows:
+        - [Jules]
+
+  - name: label_far_where_no_index
+    query: "MATCH (n:Far) WHERE n.k = 7 RETURN n.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: label_far_where_on_far
+    setup:
+      - "CREATE INDEX on_far FOR (n:Far) ON (n.k)"
+    query: "MATCH (n:Far) WHERE n.k = 7 RETURN n.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: label_far_where_on_near
+    setup:
+      - "CREATE INDEX on_near FOR (n:Near) ON (n.k)"
+    query: "MATCH (n:Far) WHERE n.k = 7 RETURN n.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: label_far_where_on_far_near
+    setup:
+      - "CREATE INDEX on_far FOR (n:Far) ON (n.k)"
+      - "CREATE INDEX on_near FOR (n:Near) ON (n.k)"
+    query: "MATCH (n:Far) WHERE n.k = 7 RETURN n.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: label_far_where_on_every_label
+    setup:
+      - "CREATE INDEX on_far FOR (n:Far) ON (n.k)"
+      - "CREATE INDEX on_near FOR (n:Near) ON (n.k)"
+      - "CREATE INDEX on_other FOR (n:Other) ON (n.k)"
+    query: "MATCH (n:Far) WHERE n.k = 7 RETURN n.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: label_far_in_no_index
+    query: "MATCH (n:Far) WHERE n.k IN [7, 70] RETURN n.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: label_far_in_on_far
+    setup:
+      - "CREATE INDEX on_far FOR (n:Far) ON (n.k)"
+    query: "MATCH (n:Far) WHERE n.k IN [7, 70] RETURN n.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: label_far_in_on_near
+    setup:
+      - "CREATE INDEX on_near FOR (n:Near) ON (n.k)"
+    query: "MATCH (n:Far) WHERE n.k IN [7, 70] RETURN n.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: label_far_in_on_far_near
+    setup:
+      - "CREATE INDEX on_far FOR (n:Far) ON (n.k)"
+      - "CREATE INDEX on_near FOR (n:Near) ON (n.k)"
+    query: "MATCH (n:Far) WHERE n.k IN [7, 70] RETURN n.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: label_far_in_on_every_label
+    setup:
+      - "CREATE INDEX on_far FOR (n:Far) ON (n.k)"
+      - "CREATE INDEX on_near FOR (n:Near) ON (n.k)"
+      - "CREATE INDEX on_other FOR (n:Other) ON (n.k)"
+    query: "MATCH (n:Far) WHERE n.k IN [7, 70] RETURN n.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: two_labels_no_index
+    query: "MATCH (n:Far:Near {k: 7}) RETURN n.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: two_labels_on_far
+    setup:
+      - "CREATE INDEX on_far FOR (n:Far) ON (n.k)"
+    query: "MATCH (n:Far:Near {k: 7}) RETURN n.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: two_labels_on_near
+    setup:
+      - "CREATE INDEX on_near FOR (n:Near) ON (n.k)"
+    query: "MATCH (n:Far:Near {k: 7}) RETURN n.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: two_labels_on_far_near
+    setup:
+      - "CREATE INDEX on_far FOR (n:Far) ON (n.k)"
+      - "CREATE INDEX on_near FOR (n:Near) ON (n.k)"
+    query: "MATCH (n:Far:Near {k: 7}) RETURN n.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: two_labels_on_every_label
+    setup:
+      - "CREATE INDEX on_far FOR (n:Far) ON (n.k)"
+      - "CREATE INDEX on_near FOR (n:Near) ON (n.k)"
+      - "CREATE INDEX on_other FOR (n:Other) ON (n.k)"
+    query: "MATCH (n:Far:Near {k: 7}) RETURN n.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: no_label_no_index
+    query: "MATCH (n {k: 7}) RETURN n.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Jules]
+        - [Mia]
+        - [Vincent]
+
+  - name: no_label_on_far
+    setup:
+      - "CREATE INDEX on_far FOR (n:Far) ON (n.k)"
+    query: "MATCH (n {k: 7}) RETURN n.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Jules]
+        - [Mia]
+        - [Vincent]
+
+  - name: no_label_on_near
+    setup:
+      - "CREATE INDEX on_near FOR (n:Near) ON (n.k)"
+    query: "MATCH (n {k: 7}) RETURN n.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Jules]
+        - [Mia]
+        - [Vincent]
+
+  - name: no_label_on_far_near
+    setup:
+      - "CREATE INDEX on_far FOR (n:Far) ON (n.k)"
+      - "CREATE INDEX on_near FOR (n:Near) ON (n.k)"
+    query: "MATCH (n {k: 7}) RETURN n.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Jules]
+        - [Mia]
+        - [Vincent]
+
+  - name: no_label_on_every_label
+    setup:
+      - "CREATE INDEX on_far FOR (n:Far) ON (n.k)"
+      - "CREATE INDEX on_near FOR (n:Near) ON (n.k)"
+      - "CREATE INDEX on_other FOR (n:Other) ON (n.k)"
+    query: "MATCH (n {k: 7}) RETURN n.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Jules]
+        - [Mia]
+        - [Vincent]
+
+  - name: no_label_where_no_index
+    query: "MATCH (n) WHERE n.k = 7 RETURN n.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Jules]
+        - [Mia]
+        - [Vincent]
+
+  - name: no_label_where_on_far
+    setup:
+      - "CREATE INDEX on_far FOR (n:Far) ON (n.k)"
+    query: "MATCH (n) WHERE n.k = 7 RETURN n.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Jules]
+        - [Mia]
+        - [Vincent]
+
+  - name: no_label_where_on_near
+    setup:
+      - "CREATE INDEX on_near FOR (n:Near) ON (n.k)"
+    query: "MATCH (n) WHERE n.k = 7 RETURN n.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Jules]
+        - [Mia]
+        - [Vincent]
+
+  - name: no_label_where_on_far_near
+    setup:
+      - "CREATE INDEX on_far FOR (n:Far) ON (n.k)"
+      - "CREATE INDEX on_near FOR (n:Near) ON (n.k)"
+    query: "MATCH (n) WHERE n.k = 7 RETURN n.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Jules]
+        - [Mia]
+        - [Vincent]
+
+  - name: no_label_where_on_every_label
+    setup:
+      - "CREATE INDEX on_far FOR (n:Far) ON (n.k)"
+      - "CREATE INDEX on_near FOR (n:Near) ON (n.k)"
+      - "CREATE INDEX on_other FOR (n:Other) ON (n.k)"
+    query: "MATCH (n) WHERE n.k = 7 RETURN n.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Jules]
+        - [Mia]
+        - [Vincent]
+
+  - name: no_label_in_no_index
+    query: "MATCH (n) WHERE n.k IN [7, 70] RETURN n.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Jules]
+        - [Mia]
+        - [Vincent]
+
+  - name: no_label_in_on_far
+    setup:
+      - "CREATE INDEX on_far FOR (n:Far) ON (n.k)"
+    query: "MATCH (n) WHERE n.k IN [7, 70] RETURN n.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Jules]
+        - [Mia]
+        - [Vincent]
+
+  - name: no_label_in_on_near
+    setup:
+      - "CREATE INDEX on_near FOR (n:Near) ON (n.k)"
+    query: "MATCH (n) WHERE n.k IN [7, 70] RETURN n.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Jules]
+        - [Mia]
+        - [Vincent]
+
+  - name: no_label_in_on_far_near
+    setup:
+      - "CREATE INDEX on_far FOR (n:Far) ON (n.k)"
+      - "CREATE INDEX on_near FOR (n:Near) ON (n.k)"
+    query: "MATCH (n) WHERE n.k IN [7, 70] RETURN n.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Jules]
+        - [Mia]
+        - [Vincent]
+
+  - name: no_label_in_on_every_label
+    setup:
+      - "CREATE INDEX on_far FOR (n:Far) ON (n.k)"
+      - "CREATE INDEX on_near FOR (n:Near) ON (n.k)"
+      - "CREATE INDEX on_other FOR (n:Other) ON (n.k)"
+    query: "MATCH (n) WHERE n.k IN [7, 70] RETURN n.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Jules]
+        - [Mia]
+        - [Vincent]
+
+  - name: union_no_index
+    query: "MATCH (n) WHERE (n:Far OR n:Near) AND n.k = 7 RETURN n.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]
+
+  - name: union_on_far
+    setup:
+      - "CREATE INDEX on_far FOR (n:Far) ON (n.k)"
+    query: "MATCH (n) WHERE (n:Far OR n:Near) AND n.k = 7 RETURN n.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]
+
+  - name: union_on_near
+    setup:
+      - "CREATE INDEX on_near FOR (n:Near) ON (n.k)"
+    query: "MATCH (n) WHERE (n:Far OR n:Near) AND n.k = 7 RETURN n.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]
+
+  - name: union_on_far_near
+    setup:
+      - "CREATE INDEX on_far FOR (n:Far) ON (n.k)"
+      - "CREATE INDEX on_near FOR (n:Near) ON (n.k)"
+    query: "MATCH (n) WHERE (n:Far OR n:Near) AND n.k = 7 RETURN n.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]
+
+  - name: union_on_every_label
+    setup:
+      - "CREATE INDEX on_far FOR (n:Far) ON (n.k)"
+      - "CREATE INDEX on_near FOR (n:Near) ON (n.k)"
+      - "CREATE INDEX on_other FOR (n:Other) ON (n.k)"
+    query: "MATCH (n) WHERE (n:Far OR n:Near) AND n.k = 7 RETURN n.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]
+
+  - name: union_expression_no_index
+    query: "MATCH (n:Far|Near {k: 7}) RETURN n.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]
+
+  - name: union_expression_on_far
+    setup:
+      - "CREATE INDEX on_far FOR (n:Far) ON (n.k)"
+    query: "MATCH (n:Far|Near {k: 7}) RETURN n.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]
+
+  - name: union_expression_on_near
+    setup:
+      - "CREATE INDEX on_near FOR (n:Near) ON (n.k)"
+    query: "MATCH (n:Far|Near {k: 7}) RETURN n.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]
+
+  - name: union_expression_on_far_near
+    setup:
+      - "CREATE INDEX on_far FOR (n:Far) ON (n.k)"
+      - "CREATE INDEX on_near FOR (n:Near) ON (n.k)"
+    query: "MATCH (n:Far|Near {k: 7}) RETURN n.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]
+
+  - name: union_expression_on_every_label
+    setup:
+      - "CREATE INDEX on_far FOR (n:Far) ON (n.k)"
+      - "CREATE INDEX on_near FOR (n:Near) ON (n.k)"
+      - "CREATE INDEX on_other FOR (n:Other) ON (n.k)"
+    query: "MATCH (n:Far|Near {k: 7}) RETURN n.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]
+
+  - name: union_with_a_label_of_no_index_no_index
+    query: "MATCH (n) WHERE (n:Far OR n:Other) AND n.k = 7 RETURN n.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Jules]
+        - [Vincent]
+
+  - name: union_with_a_label_of_no_index_on_far
+    setup:
+      - "CREATE INDEX on_far FOR (n:Far) ON (n.k)"
+    query: "MATCH (n) WHERE (n:Far OR n:Other) AND n.k = 7 RETURN n.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Jules]
+        - [Vincent]
+
+  - name: union_with_a_label_of_no_index_on_near
+    setup:
+      - "CREATE INDEX on_near FOR (n:Near) ON (n.k)"
+    query: "MATCH (n) WHERE (n:Far OR n:Other) AND n.k = 7 RETURN n.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Jules]
+        - [Vincent]
+
+  - name: union_with_a_label_of_no_index_on_far_near
+    setup:
+      - "CREATE INDEX on_far FOR (n:Far) ON (n.k)"
+      - "CREATE INDEX on_near FOR (n:Near) ON (n.k)"
+    query: "MATCH (n) WHERE (n:Far OR n:Other) AND n.k = 7 RETURN n.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Jules]
+        - [Vincent]
+
+  - name: union_with_a_label_of_no_index_on_every_label
+    setup:
+      - "CREATE INDEX on_far FOR (n:Far) ON (n.k)"
+      - "CREATE INDEX on_near FOR (n:Near) ON (n.k)"
+      - "CREATE INDEX on_other FOR (n:Other) ON (n.k)"
+    query: "MATCH (n) WHERE (n:Far OR n:Other) AND n.k = 7 RETURN n.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Jules]
+        - [Vincent]
+
+  - name: hop_far_label_no_index
+    query: "MATCH (a:Start)-[:R]->(m:Far {k: 7}) RETURN a.name, m.name"
+    expect:
+      rows:
+        - [Amsterdam, Alix]
+        - [Amsterdam, Alix]
+        - [Amsterdam, Vincent]
+        - [Berlin, Vincent]
+
+  - name: hop_far_label_on_far
+    setup:
+      - "CREATE INDEX on_far FOR (n:Far) ON (n.k)"
+    query: "MATCH (a:Start)-[:R]->(m:Far {k: 7}) RETURN a.name, m.name"
+    expect:
+      rows:
+        - [Amsterdam, Alix]
+        - [Amsterdam, Alix]
+        - [Amsterdam, Vincent]
+        - [Berlin, Vincent]
+
+  - name: hop_far_label_on_near
+    setup:
+      - "CREATE INDEX on_near FOR (n:Near) ON (n.k)"
+    query: "MATCH (a:Start)-[:R]->(m:Far {k: 7}) RETURN a.name, m.name"
+    expect:
+      rows:
+        - [Amsterdam, Alix]
+        - [Amsterdam, Alix]
+        - [Amsterdam, Vincent]
+        - [Berlin, Vincent]
+
+  - name: hop_far_label_on_far_near
+    setup:
+      - "CREATE INDEX on_far FOR (n:Far) ON (n.k)"
+      - "CREATE INDEX on_near FOR (n:Near) ON (n.k)"
+    query: "MATCH (a:Start)-[:R]->(m:Far {k: 7}) RETURN a.name, m.name"
+    expect:
+      rows:
+        - [Amsterdam, Alix]
+        - [Amsterdam, Alix]
+        - [Amsterdam, Vincent]
+        - [Berlin, Vincent]
+
+  - name: hop_far_label_on_every_label
+    setup:
+      - "CREATE INDEX on_far FOR (n:Far) ON (n.k)"
+      - "CREATE INDEX on_near FOR (n:Near) ON (n.k)"
+      - "CREATE INDEX on_other FOR (n:Other) ON (n.k)"
+    query: "MATCH (a:Start)-[:R]->(m:Far {k: 7}) RETURN a.name, m.name"
+    expect:
+      rows:
+        - [Amsterdam, Alix]
+        - [Amsterdam, Alix]
+        - [Amsterdam, Vincent]
+        - [Berlin, Vincent]
+
+  - name: hop_far_label_where_no_index
+    query: "MATCH (a:Start)-[:R]->(m:Far) WHERE m.k = 7 RETURN a.name, m.name"
+    expect:
+      rows:
+        - [Amsterdam, Alix]
+        - [Amsterdam, Alix]
+        - [Amsterdam, Vincent]
+        - [Berlin, Vincent]
+
+  - name: hop_far_label_where_on_far
+    setup:
+      - "CREATE INDEX on_far FOR (n:Far) ON (n.k)"
+    query: "MATCH (a:Start)-[:R]->(m:Far) WHERE m.k = 7 RETURN a.name, m.name"
+    expect:
+      rows:
+        - [Amsterdam, Alix]
+        - [Amsterdam, Alix]
+        - [Amsterdam, Vincent]
+        - [Berlin, Vincent]
+
+  - name: hop_far_label_where_on_near
+    setup:
+      - "CREATE INDEX on_near FOR (n:Near) ON (n.k)"
+    query: "MATCH (a:Start)-[:R]->(m:Far) WHERE m.k = 7 RETURN a.name, m.name"
+    expect:
+      rows:
+        - [Amsterdam, Alix]
+        - [Amsterdam, Alix]
+        - [Amsterdam, Vincent]
+        - [Berlin, Vincent]
+
+  - name: hop_far_label_where_on_far_near
+    setup:
+      - "CREATE INDEX on_far FOR (n:Far) ON (n.k)"
+      - "CREATE INDEX on_near FOR (n:Near) ON (n.k)"
+    query: "MATCH (a:Start)-[:R]->(m:Far) WHERE m.k = 7 RETURN a.name, m.name"
+    expect:
+      rows:
+        - [Amsterdam, Alix]
+        - [Amsterdam, Alix]
+        - [Amsterdam, Vincent]
+        - [Berlin, Vincent]
+
+  - name: hop_far_label_where_on_every_label
+    setup:
+      - "CREATE INDEX on_far FOR (n:Far) ON (n.k)"
+      - "CREATE INDEX on_near FOR (n:Near) ON (n.k)"
+      - "CREATE INDEX on_other FOR (n:Other) ON (n.k)"
+    query: "MATCH (a:Start)-[:R]->(m:Far) WHERE m.k = 7 RETURN a.name, m.name"
+    expect:
+      rows:
+        - [Amsterdam, Alix]
+        - [Amsterdam, Alix]
+        - [Amsterdam, Vincent]
+        - [Berlin, Vincent]
+
+  - name: hop_no_label_no_index
+    query: "MATCH (a:Start)-[:R]->(m {k: 7}) RETURN a.name, m.name"
+    expect:
+      rows:
+        - [Amsterdam, Alix]
+        - [Amsterdam, Alix]
+        - [Amsterdam, Gus]
+        - [Amsterdam, Jules]
+        - [Amsterdam, Mia]
+        - [Amsterdam, Vincent]
+        - [Berlin, Mia]
+        - [Berlin, Vincent]
+
+  - name: hop_no_label_on_far
+    setup:
+      - "CREATE INDEX on_far FOR (n:Far) ON (n.k)"
+    query: "MATCH (a:Start)-[:R]->(m {k: 7}) RETURN a.name, m.name"
+    expect:
+      rows:
+        - [Amsterdam, Alix]
+        - [Amsterdam, Alix]
+        - [Amsterdam, Gus]
+        - [Amsterdam, Jules]
+        - [Amsterdam, Mia]
+        - [Amsterdam, Vincent]
+        - [Berlin, Mia]
+        - [Berlin, Vincent]
+
+  - name: hop_no_label_on_near
+    setup:
+      - "CREATE INDEX on_near FOR (n:Near) ON (n.k)"
+    query: "MATCH (a:Start)-[:R]->(m {k: 7}) RETURN a.name, m.name"
+    expect:
+      rows:
+        - [Amsterdam, Alix]
+        - [Amsterdam, Alix]
+        - [Amsterdam, Gus]
+        - [Amsterdam, Jules]
+        - [Amsterdam, Mia]
+        - [Amsterdam, Vincent]
+        - [Berlin, Mia]
+        - [Berlin, Vincent]
+
+  - name: hop_no_label_on_far_near
+    setup:
+      - "CREATE INDEX on_far FOR (n:Far) ON (n.k)"
+      - "CREATE INDEX on_near FOR (n:Near) ON (n.k)"
+    query: "MATCH (a:Start)-[:R]->(m {k: 7}) RETURN a.name, m.name"
+    expect:
+      rows:
+        - [Amsterdam, Alix]
+        - [Amsterdam, Alix]
+        - [Amsterdam, Gus]
+        - [Amsterdam, Jules]
+        - [Amsterdam, Mia]
+        - [Amsterdam, Vincent]
+        - [Berlin, Mia]
+        - [Berlin, Vincent]
+
+  - name: hop_no_label_on_every_label
+    setup:
+      - "CREATE INDEX on_far FOR (n:Far) ON (n.k)"
+      - "CREATE INDEX on_near FOR (n:Near) ON (n.k)"
+      - "CREATE INDEX on_other FOR (n:Other) ON (n.k)"
+    query: "MATCH (a:Start)-[:R]->(m {k: 7}) RETURN a.name, m.name"
+    expect:
+      rows:
+        - [Amsterdam, Alix]
+        - [Amsterdam, Alix]
+        - [Amsterdam, Gus]
+        - [Amsterdam, Jules]
+        - [Amsterdam, Mia]
+        - [Amsterdam, Vincent]
+        - [Berlin, Mia]
+        - [Berlin, Vincent]
+
+  - name: hop_union_no_index
+    query: "MATCH (a:Start)-[:R]->(m) WHERE (m:Far OR m:Near) AND m.k = 7 RETURN a.name, m.name"
+    expect:
+      rows:
+        - [Amsterdam, Alix]
+        - [Amsterdam, Alix]
+        - [Amsterdam, Gus]
+        - [Amsterdam, Vincent]
+        - [Berlin, Vincent]
+
+  - name: hop_union_on_far
+    setup:
+      - "CREATE INDEX on_far FOR (n:Far) ON (n.k)"
+    query: "MATCH (a:Start)-[:R]->(m) WHERE (m:Far OR m:Near) AND m.k = 7 RETURN a.name, m.name"
+    expect:
+      rows:
+        - [Amsterdam, Alix]
+        - [Amsterdam, Alix]
+        - [Amsterdam, Gus]
+        - [Amsterdam, Vincent]
+        - [Berlin, Vincent]
+
+  - name: hop_union_on_near
+    setup:
+      - "CREATE INDEX on_near FOR (n:Near) ON (n.k)"
+    query: "MATCH (a:Start)-[:R]->(m) WHERE (m:Far OR m:Near) AND m.k = 7 RETURN a.name, m.name"
+    expect:
+      rows:
+        - [Amsterdam, Alix]
+        - [Amsterdam, Alix]
+        - [Amsterdam, Gus]
+        - [Amsterdam, Vincent]
+        - [Berlin, Vincent]
+
+  - name: hop_union_on_far_near
+    setup:
+      - "CREATE INDEX on_far FOR (n:Far) ON (n.k)"
+      - "CREATE INDEX on_near FOR (n:Near) ON (n.k)"
+    query: "MATCH (a:Start)-[:R]->(m) WHERE (m:Far OR m:Near) AND m.k = 7 RETURN a.name, m.name"
+    expect:
+      rows:
+        - [Amsterdam, Alix]
+        - [Amsterdam, Alix]
+        - [Amsterdam, Gus]
+        - [Amsterdam, Vincent]
+        - [Berlin, Vincent]
+
+  - name: hop_union_on_every_label
+    setup:
+      - "CREATE INDEX on_far FOR (n:Far) ON (n.k)"
+      - "CREATE INDEX on_near FOR (n:Near) ON (n.k)"
+      - "CREATE INDEX on_other FOR (n:Other) ON (n.k)"
+    query: "MATCH (a:Start)-[:R]->(m) WHERE (m:Far OR m:Near) AND m.k = 7 RETURN a.name, m.name"
+    expect:
+      rows:
+        - [Amsterdam, Alix]
+        - [Amsterdam, Alix]
+        - [Amsterdam, Gus]
+        - [Amsterdam, Vincent]
+        - [Berlin, Vincent]
+
+  - name: hop_other_label_no_index
+    query: "MATCH (a:Start)-[:R]->(m:Other {k: 7}) RETURN a.name, m.name"
+    expect:
+      rows:
+        - [Amsterdam, Jules]
+
+  - name: hop_other_label_on_far
+    setup:
+      - "CREATE INDEX on_far FOR (n:Far) ON (n.k)"
+    query: "MATCH (a:Start)-[:R]->(m:Other {k: 7}) RETURN a.name, m.name"
+    expect:
+      rows:
+        - [Amsterdam, Jules]
+
+  - name: hop_other_label_on_near
+    setup:
+      - "CREATE INDEX on_near FOR (n:Near) ON (n.k)"
+    query: "MATCH (a:Start)-[:R]->(m:Other {k: 7}) RETURN a.name, m.name"
+    expect:
+      rows:
+        - [Amsterdam, Jules]
+
+  - name: hop_other_label_on_far_near
+    setup:
+      - "CREATE INDEX on_far FOR (n:Far) ON (n.k)"
+      - "CREATE INDEX on_near FOR (n:Near) ON (n.k)"
+    query: "MATCH (a:Start)-[:R]->(m:Other {k: 7}) RETURN a.name, m.name"
+    expect:
+      rows:
+        - [Amsterdam, Jules]
+
+  - name: hop_other_label_on_every_label
+    setup:
+      - "CREATE INDEX on_far FOR (n:Far) ON (n.k)"
+      - "CREATE INDEX on_near FOR (n:Near) ON (n.k)"
+      - "CREATE INDEX on_other FOR (n:Other) ON (n.k)"
+    query: "MATCH (a:Start)-[:R]->(m:Other {k: 7}) RETURN a.name, m.name"
+    expect:
+      rows:
+        - [Amsterdam, Jules]
+
+  - name: hop_written_backwards_no_index
+    query: "MATCH (m:Far {k: 7})<-[:R]-(a:Start) RETURN a.name, m.name"
+    expect:
+      rows:
+        - [Amsterdam, Alix]
+        - [Amsterdam, Alix]
+        - [Amsterdam, Vincent]
+        - [Berlin, Vincent]
+
+  - name: hop_written_backwards_on_far
+    setup:
+      - "CREATE INDEX on_far FOR (n:Far) ON (n.k)"
+    query: "MATCH (m:Far {k: 7})<-[:R]-(a:Start) RETURN a.name, m.name"
+    expect:
+      rows:
+        - [Amsterdam, Alix]
+        - [Amsterdam, Alix]
+        - [Amsterdam, Vincent]
+        - [Berlin, Vincent]
+
+  - name: hop_written_backwards_on_near
+    setup:
+      - "CREATE INDEX on_near FOR (n:Near) ON (n.k)"
+    query: "MATCH (m:Far {k: 7})<-[:R]-(a:Start) RETURN a.name, m.name"
+    expect:
+      rows:
+        - [Amsterdam, Alix]
+        - [Amsterdam, Alix]
+        - [Amsterdam, Vincent]
+        - [Berlin, Vincent]
+
+  - name: hop_written_backwards_on_far_near
+    setup:
+      - "CREATE INDEX on_far FOR (n:Far) ON (n.k)"
+      - "CREATE INDEX on_near FOR (n:Near) ON (n.k)"
+    query: "MATCH (m:Far {k: 7})<-[:R]-(a:Start) RETURN a.name, m.name"
+    expect:
+      rows:
+        - [Amsterdam, Alix]
+        - [Amsterdam, Alix]
+        - [Amsterdam, Vincent]
+        - [Berlin, Vincent]
+
+  - name: hop_written_backwards_on_every_label
+    setup:
+      - "CREATE INDEX on_far FOR (n:Far) ON (n.k)"
+      - "CREATE INDEX on_near FOR (n:Near) ON (n.k)"
+      - "CREATE INDEX on_other FOR (n:Other) ON (n.k)"
+    query: "MATCH (m:Far {k: 7})<-[:R]-(a:Start) RETURN a.name, m.name"
+    expect:
+      rows:
+        - [Amsterdam, Alix]
+        - [Amsterdam, Alix]
+        - [Amsterdam, Vincent]
+        - [Berlin, Vincent]
+
+  - name: hop_undirected_no_index
+    query: "MATCH (a:Start)-[r]-(m:Near {k: 7}) RETURN a.name, m.name"
+    expect:
+      rows:
+        - [Amsterdam, Gus]
+        - [Amsterdam, Gus]
+        - [Amsterdam, Vincent]
+        - [Berlin, Vincent]
+
+  - name: hop_undirected_on_far
+    setup:
+      - "CREATE INDEX on_far FOR (n:Far) ON (n.k)"
+    query: "MATCH (a:Start)-[r]-(m:Near {k: 7}) RETURN a.name, m.name"
+    expect:
+      rows:
+        - [Amsterdam, Gus]
+        - [Amsterdam, Gus]
+        - [Amsterdam, Vincent]
+        - [Berlin, Vincent]
+
+  - name: hop_undirected_on_near
+    setup:
+      - "CREATE INDEX on_near FOR (n:Near) ON (n.k)"
+    query: "MATCH (a:Start)-[r]-(m:Near {k: 7}) RETURN a.name, m.name"
+    expect:
+      rows:
+        - [Amsterdam, Gus]
+        - [Amsterdam, Gus]
+        - [Amsterdam, Vincent]
+        - [Berlin, Vincent]
+
+  - name: hop_undirected_on_far_near
+    setup:
+      - "CREATE INDEX on_far FOR (n:Far) ON (n.k)"
+      - "CREATE INDEX on_near FOR (n:Near) ON (n.k)"
+    query: "MATCH (a:Start)-[r]-(m:Near {k: 7}) RETURN a.name, m.name"
+    expect:
+      rows:
+        - [Amsterdam, Gus]
+        - [Amsterdam, Gus]
+        - [Amsterdam, Vincent]
+        - [Berlin, Vincent]
+
+  - name: hop_undirected_on_every_label
+    setup:
+      - "CREATE INDEX on_far FOR (n:Far) ON (n.k)"
+      - "CREATE INDEX on_near FOR (n:Near) ON (n.k)"
+      - "CREATE INDEX on_other FOR (n:Other) ON (n.k)"
+    query: "MATCH (a:Start)-[r]-(m:Near {k: 7}) RETURN a.name, m.name"
+    expect:
+      rows:
+        - [Amsterdam, Gus]
+        - [Amsterdam, Gus]
+        - [Amsterdam, Vincent]
+        - [Berlin, Vincent]
+
+  - name: hop_two_types_no_index
+    query: "MATCH (a:Start)-[:R|S]->(m:Near {k: 7}) RETURN a.name, m.name"
+    expect:
+      rows:
+        - [Amsterdam, Gus]
+        - [Amsterdam, Gus]
+        - [Amsterdam, Vincent]
+        - [Berlin, Vincent]
+
+  - name: hop_two_types_on_far
+    setup:
+      - "CREATE INDEX on_far FOR (n:Far) ON (n.k)"
+    query: "MATCH (a:Start)-[:R|S]->(m:Near {k: 7}) RETURN a.name, m.name"
+    expect:
+      rows:
+        - [Amsterdam, Gus]
+        - [Amsterdam, Gus]
+        - [Amsterdam, Vincent]
+        - [Berlin, Vincent]
+
+  - name: hop_two_types_on_near
+    setup:
+      - "CREATE INDEX on_near FOR (n:Near) ON (n.k)"
+    query: "MATCH (a:Start)-[:R|S]->(m:Near {k: 7}) RETURN a.name, m.name"
+    expect:
+      rows:
+        - [Amsterdam, Gus]
+        - [Amsterdam, Gus]
+        - [Amsterdam, Vincent]
+        - [Berlin, Vincent]
+
+  - name: hop_two_types_on_far_near
+    setup:
+      - "CREATE INDEX on_far FOR (n:Far) ON (n.k)"
+      - "CREATE INDEX on_near FOR (n:Near) ON (n.k)"
+    query: "MATCH (a:Start)-[:R|S]->(m:Near {k: 7}) RETURN a.name, m.name"
+    expect:
+      rows:
+        - [Amsterdam, Gus]
+        - [Amsterdam, Gus]
+        - [Amsterdam, Vincent]
+        - [Berlin, Vincent]
+
+  - name: hop_two_types_on_every_label
+    setup:
+      - "CREATE INDEX on_far FOR (n:Far) ON (n.k)"
+      - "CREATE INDEX on_near FOR (n:Near) ON (n.k)"
+      - "CREATE INDEX on_other FOR (n:Other) ON (n.k)"
+    query: "MATCH (a:Start)-[:R|S]->(m:Near {k: 7}) RETURN a.name, m.name"
+    expect:
+      rows:
+        - [Amsterdam, Gus]
+        - [Amsterdam, Gus]
+        - [Amsterdam, Vincent]
+        - [Berlin, Vincent]
+
+  - name: hop_one_start_no_index
+    query: "MATCH (a:Start {name: 'Berlin'})-[:R]->(m {k: 7}) RETURN m.name"
+    expect:
+      rows:
+        - [Mia]
+        - [Vincent]
+
+  - name: hop_one_start_on_far
+    setup:
+      - "CREATE INDEX on_far FOR (n:Far) ON (n.k)"
+    query: "MATCH (a:Start {name: 'Berlin'})-[:R]->(m {k: 7}) RETURN m.name"
+    expect:
+      rows:
+        - [Mia]
+        - [Vincent]
+
+  - name: hop_one_start_on_near
+    setup:
+      - "CREATE INDEX on_near FOR (n:Near) ON (n.k)"
+    query: "MATCH (a:Start {name: 'Berlin'})-[:R]->(m {k: 7}) RETURN m.name"
+    expect:
+      rows:
+        - [Mia]
+        - [Vincent]
+
+  - name: hop_one_start_on_far_near
+    setup:
+      - "CREATE INDEX on_far FOR (n:Far) ON (n.k)"
+      - "CREATE INDEX on_near FOR (n:Near) ON (n.k)"
+    query: "MATCH (a:Start {name: 'Berlin'})-[:R]->(m {k: 7}) RETURN m.name"
+    expect:
+      rows:
+        - [Mia]
+        - [Vincent]
+
+  - name: hop_one_start_on_every_label
+    setup:
+      - "CREATE INDEX on_far FOR (n:Far) ON (n.k)"
+      - "CREATE INDEX on_near FOR (n:Near) ON (n.k)"
+      - "CREATE INDEX on_other FOR (n:Other) ON (n.k)"
+    query: "MATCH (a:Start {name: 'Berlin'})-[:R]->(m {k: 7}) RETURN m.name"
+    expect:
+      rows:
+        - [Mia]
+        - [Vincent]
+
+  - name: hop_from_rows_no_index
+    query: "UNWIND [7, 7] AS x MATCH (a:Start {name: 'Berlin'})-[:R]->(m:Far {k: x}) RETURN m.name"
+    expect:
+      rows:
+        - [Vincent]
+        - [Vincent]
+
+  - name: hop_from_rows_on_far
+    setup:
+      - "CREATE INDEX on_far FOR (n:Far) ON (n.k)"
+    query: "UNWIND [7, 7] AS x MATCH (a:Start {name: 'Berlin'})-[:R]->(m:Far {k: x}) RETURN m.name"
+    expect:
+      rows:
+        - [Vincent]
+        - [Vincent]
+
+  - name: hop_from_rows_on_near
+    setup:
+      - "CREATE INDEX on_near FOR (n:Near) ON (n.k)"
+    query: "UNWIND [7, 7] AS x MATCH (a:Start {name: 'Berlin'})-[:R]->(m:Far {k: x}) RETURN m.name"
+    expect:
+      rows:
+        - [Vincent]
+        - [Vincent]
+
+  - name: hop_from_rows_on_far_near
+    setup:
+      - "CREATE INDEX on_far FOR (n:Far) ON (n.k)"
+      - "CREATE INDEX on_near FOR (n:Near) ON (n.k)"
+    query: "UNWIND [7, 7] AS x MATCH (a:Start {name: 'Berlin'})-[:R]->(m:Far {k: x}) RETURN m.name"
+    expect:
+      rows:
+        - [Vincent]
+        - [Vincent]
+
+  - name: hop_from_rows_on_every_label
+    setup:
+      - "CREATE INDEX on_far FOR (n:Far) ON (n.k)"
+      - "CREATE INDEX on_near FOR (n:Near) ON (n.k)"
+      - "CREATE INDEX on_other FOR (n:Other) ON (n.k)"
+    query: "UNWIND [7, 7] AS x MATCH (a:Start {name: 'Berlin'})-[:R]->(m:Far {k: x}) RETURN m.name"
+    expect:
+      rows:
+        - [Vincent]
+        - [Vincent]

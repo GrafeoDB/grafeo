@@ -21,8 +21,36 @@ use super::{
     LogicalOperator, Result, Value, convert_binary_op, convert_unary_op,
 };
 use crate::query::functions::check_pattern_match;
-use crate::query::plan::Callee;
+use crate::query::plan::{BinaryOp, Callee};
 use grafeo_common::utils::error::QueryError;
+use grafeo_core::execution::operators::InSet;
+use std::sync::Arc;
+
+/// The right side of an `IN` that needs no evaluation per row: its items once, and as a set when
+/// long enough (see [`InSet::of`]). A list of literals is built per row otherwise, and a list value
+/// gains only from a set.
+fn constant_in_list(list: &LogicalExpression) -> Option<(Arc<[Value]>, Option<InSet>)> {
+    match list {
+        LogicalExpression::Literal(Value::List(items)) => {
+            let refs: Vec<&Value> = items.iter().collect();
+            let set = InSet::of(&refs)?;
+            Some((Arc::clone(items), Some(set)))
+        }
+        LogicalExpression::List(items) => {
+            let refs: Vec<&Value> = items
+                .iter()
+                .map(|item| match item {
+                    LogicalExpression::Literal(value) => Some(value),
+                    _ => None,
+                })
+                .collect::<Option<_>>()?;
+            let set = InSet::of(&refs);
+            let items: Vec<Value> = refs.into_iter().cloned().collect();
+            Some((items.into(), set))
+        }
+        _ => None,
+    }
+}
 
 impl super::Planner {
     /// Converts a logical expression to a filter expression.
@@ -48,6 +76,16 @@ impl super::Planner {
                 let left_expr = self.convert_expression(left)?;
                 let right_expr = self.convert_expression(right)?;
                 let filter_op = convert_binary_op(*op)?;
+                if *op == BinaryOp::In
+                    && let Some((items, set)) = constant_in_list(right)
+                {
+                    return Ok(FilterExpression::InConstantList {
+                        needle: Box::new(left_expr),
+                        list: Box::new(right_expr),
+                        items,
+                        set: set.map(Arc::new),
+                    });
+                }
                 Ok(FilterExpression::Binary {
                     left: Box::new(left_expr),
                     op: filter_op,

@@ -26,10 +26,10 @@ use grafeo_engine::{Config, GrafeoDB, HistoryRetention};
 const FIXED_SEEDS: u64 = 30;
 const REPORTED: usize = 8;
 
-/// The most paths a rule set that enumerates is asked for: past this it tests only patience, and
+/// The most walks a rule set that enumerates is asked for: past this it tests only patience, and
 /// a slow build reaches the query timeout (a graph of 15 self-loops has 14^6 at length 6). The
 /// count itself is still checked on them, with every rule on.
-const ENUMERATED_PATHS: i64 = 200_000;
+const ENUMERATED_WALKS: i64 = 200_000;
 
 struct Random(u64);
 
@@ -293,6 +293,41 @@ impl Chain {
         counts
     }
 
+    /// How many steps enumerating the chain can take, whatever its labels let through: a last
+    /// label no node has leaves no row, and every prefix is still walked.
+    fn walks_at_most(&self, graph: &Multigraph) -> i64 {
+        let mut at: BTreeMap<i64, i64> = graph.vertices.iter().map(|v| (v.key, 1)).collect();
+        let mut total = 0_i64;
+        for hop in &self.hops {
+            let mut next: BTreeMap<i64, i64> = BTreeMap::new();
+            for link in &graph.links {
+                if hop.kind.is_some_and(|kind| kind != link.kind) {
+                    continue;
+                }
+                let mut step = |from: i64, to: i64| {
+                    let walks = at.get(&from).copied().unwrap_or(0);
+                    let entry = next.entry(to).or_insert(0);
+                    *entry = entry.saturating_add(walks);
+                };
+                match hop.way {
+                    Way::Out => step(link.from, link.to),
+                    Way::In => step(link.to, link.from),
+                    Way::Either => {
+                        step(link.from, link.to);
+                        if link.from != link.to {
+                            step(link.to, link.from);
+                        }
+                    }
+                }
+            }
+            total = next
+                .values()
+                .fold(total, |sum, walks| sum.saturating_add(*walks));
+            at = next;
+        }
+        total
+    }
+
     fn expected(&self, graph: &Multigraph, edges_may_repeat: bool) -> Vec<Vec<i64>> {
         let counts = self.enumerate(graph, edges_may_repeat);
         if self.grouped {
@@ -440,9 +475,9 @@ fn check(
         let query = chain.text();
         for cypher in [false, true] {
             let expected = chain.expected(seen, !cypher);
-            let paths: i64 = expected.iter().filter_map(|row| row.last()).sum();
+            let walks = chain.walks_at_most(seen);
             for (name, rules) in rule_sets() {
-                if paths > ENUMERATED_PATHS && name != "all rules" {
+                if walks > ENUMERATED_WALKS && name != "all rules" {
                     continue;
                 }
                 session.set_planner_rules(rules);

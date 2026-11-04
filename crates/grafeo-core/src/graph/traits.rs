@@ -667,11 +667,65 @@ pub trait GraphStore: Send + Sync {
 
     // --- Lookups ---
 
-    /// Whether the store keeps a property index on `property`: the planner
-    /// then prefers a lookup to a scan. Not an answer: the lookups answer
-    /// alike either way.
+    /// Whether the store keeps a property index on `property`, on every label or on one. Not
+    /// an answer: the lookups answer alike either way. For what a lookup can read, see
+    /// [`index_serves`](Self::index_serves).
     fn has_property_index(&self, _property: &str) -> bool {
         false
+    }
+
+    /// Whether a lookup of `property` whose results all have each of `labels` has an index to
+    /// read: one on a label among `labels`, or one on every label. The planner then prefers a
+    /// lookup to a scan. A store with no index on one label has only the second kind.
+    fn index_serves(&self, _labels: &[&str], property: &str) -> bool {
+        self.has_property_index(property)
+    }
+
+    /// What a walk back from a node of `far_label` reads over `types` in `back`, by the far side:
+    /// a sample of the label's lists, read for their lengths alone, weighted by their edges, plus
+    /// the edges of `types` the sample's mean does not account for, which may be one hub's. Edges
+    /// to other labels count as such too, so it reads high. It spends the reads it takes from
+    /// `budget`. `None` for a store that cannot read lengths, a label with no node, no types, or
+    /// too little budget.
+    fn far_walk_back_within(
+        &self,
+        _far_label: &str,
+        _types: &[&str],
+        _back: Direction,
+        _budget: &mut u64,
+    ) -> Option<f64> {
+        None
+    }
+
+    /// How many distinct values the index a lookup of `property` among nodes with each of
+    /// `labels` reads holds (see [`index_serves`](Self::index_serves)), for the planner to judge
+    /// how many nodes a value finds. It may read high: values only old versions hold count until
+    /// they are collected. `None` for a store that cannot tell, or without such an index.
+    fn indexed_distinct_values(&self, _labels: &[&str], _property: &str) -> Option<u64> {
+        None
+    }
+
+    /// The most edges [`edges`](Self::edges) can give for `node`, without going through them:
+    /// removed and unseen ones may count, and under [`Direction::Both`] a self-loop twice. `None`
+    /// for a store that cannot tell without reading them.
+    fn edge_entries_at_most(
+        &self,
+        _node: NodeId,
+        _direction: Direction,
+        _types: &[ArcStr],
+        _view: ReadView,
+    ) -> Option<usize> {
+        None
+    }
+
+    /// Whether `label` has a property index of its own on `property`.
+    fn has_label_index(&self, _label: &str, _property: &str) -> bool {
+        false
+    }
+
+    /// The property indexes the store keeps on one label, as `(label, property)`.
+    fn label_index_entries(&self) -> Vec<(String, String)> {
+        Vec::new()
     }
 
     /// The mean count of `edge_type`'s edges in `direction` over a sample of
@@ -762,9 +816,9 @@ pub trait GraphStore: Send + Sync {
     /// The nodes whose `property` may be equal to `value` under `=` (the
     /// filter's equality, see
     /// [`HashKey::for_equality`](crate::execution::operators::HashKey::for_equality)),
-    /// found through the property's index: every node `view` sees that `=`
+    /// found through the property's index on every label: every node `view` sees that `=`
     /// finds equal, and maybe others it sees, for a filter to decide. `None`
-    /// without an index on `property`: the caller then scans.
+    /// without one: the caller then scans.
     ///
     /// # Errors
     ///
@@ -794,6 +848,56 @@ pub trait GraphStore: Send + Sync {
         _view: ReadView,
     ) -> Result<Option<Vec<NodeId>>> {
         Ok(None)
+    }
+
+    /// [`find_nodes_maybe_equal`](Self::find_nodes_maybe_equal) for a caller whose results
+    /// all have each of `labels`, which it checks itself: through the index on the first of them
+    /// that has one on `property`, else the one on every label. `None` without either.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error of a read the store cannot do.
+    fn find_indexed_maybe_equal(
+        &self,
+        _labels: &[&str],
+        property: &str,
+        value: &Value,
+        view: ReadView,
+    ) -> Result<Option<Vec<NodeId>>> {
+        self.find_nodes_maybe_equal(property, value, view)
+    }
+
+    /// [`find_few_nodes_maybe_equal`](Self::find_few_nodes_maybe_equal) through the index
+    /// [`find_indexed_maybe_equal`](Self::find_indexed_maybe_equal) reads.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error of a read the store cannot do.
+    fn find_few_indexed_maybe_equal(
+        &self,
+        _labels: &[&str],
+        property: &str,
+        value: &Value,
+        limit: usize,
+        view: ReadView,
+    ) -> Result<Option<Vec<NodeId>>> {
+        self.find_few_nodes_maybe_equal(property, value, limit, view)
+    }
+
+    /// [`find_nodes_by_properties`](Self::find_nodes_by_properties) for a caller whose results
+    /// all have each of `labels`, which it checks itself: the indexes it reads are those
+    /// [`find_indexed_maybe_equal`](Self::find_indexed_maybe_equal) reads.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error of a read the store cannot do.
+    fn find_indexed_by_properties(
+        &self,
+        _labels: &[&str],
+        conditions: &[(&str, Value)],
+        view: ReadView,
+    ) -> Result<Vec<NodeId>> {
+        self.find_nodes_by_properties(conditions, view)
     }
 
     /// The nodes `view` sees whose `property` lies within the bounds, by

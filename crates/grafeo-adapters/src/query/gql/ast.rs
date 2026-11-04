@@ -589,6 +589,9 @@ pub enum LabelExpression {
     Negation(Box<LabelExpression>),
     /// Wildcard (%): matches any label.
     Wildcard,
+    /// An expression in parentheses: it matches as the expression does, and is no label set, which
+    /// a write needs (ISO/IEC 39075:2024 18).
+    Parenthesized(Box<LabelExpression>),
 }
 
 /// A node pattern like (n:Person) or (n IS Person | Employee).

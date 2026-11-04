@@ -25,11 +25,14 @@
 //! | 8 | [`IndexNameRecord`] |
 //! | 9 | [`ProcedureRecord`] |
 //! | 10 | [`StoredConfigRecord`] |
+//! | 11 | [`LabelIndexRecord`] |
 //!
 //! Kind 0 is never written. A reader skips a record of a kind it does not
 //! know when the record's required flag is clear, and refuses the catalog
 //! when it is set, so a later release can add records that older readers may
-//! ignore. Every kind of this release is written required. A kind's payload
+//! ignore. Every kind is written required but kind 11: an index only speeds
+//! reads, so a release without the kind opens the file and reads the same rows
+//! with no such index. A kind's payload
 //! never changes: a release that needs other fields adds a kind, and the
 //! enums below only get variants appended (bincode writes a variant as its
 //! index).
@@ -168,6 +171,7 @@ const KIND_INDEX: u8 = 7;
 const KIND_INDEX_NAME: u8 = 8;
 const KIND_PROCEDURE: u8 = 9;
 const KIND_STORED_CONFIG: u8 = 10;
+const KIND_LABEL_INDEX: u8 = 11;
 
 // ── Record types ────────────────────────────────────────────────────
 
@@ -774,6 +778,20 @@ pub struct IndexRecord {
     pub index: IndexKindRecord,
 }
 
+/// A property index of one graph on one label (catalog kind 11): the nodes with the label, by
+/// the values of the key. It holds the definition only: a load builds the index from the data.
+/// Not a variant of [`IndexKindRecord`], which kind 7 holds and a reader must know: a release
+/// without this kind skips the record.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LabelIndexRecord {
+    /// The graph's storage key; `None` for the default graph.
+    pub graph: Option<String>,
+    /// The node label.
+    pub label: String,
+    /// The property key.
+    pub key: String,
+}
+
 /// The kind of index a `CREATE INDEX` name stands for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum IndexNameKindRecord {
@@ -884,6 +902,15 @@ pub enum CatalogKey {
     /// The stored configuration, of which a database has one (catalog
     /// kind 10).
     StoredConfig,
+    /// A property index of a graph on a label (catalog kind 11).
+    LabelIndex {
+        /// The graph's storage key; `None` for the default graph.
+        graph: Option<String>,
+        /// The node label.
+        label: String,
+        /// The property key.
+        key: String,
+    },
 }
 
 impl CatalogKey {
@@ -902,6 +929,16 @@ impl CatalogKey {
             Self::IndexName(_) => KIND_INDEX_NAME,
             Self::Procedure(_) => KIND_PROCEDURE,
             Self::StoredConfig => KIND_STORED_CONFIG,
+            Self::LabelIndex { .. } => KIND_LABEL_INDEX,
+        }
+    }
+
+    /// The flags of a record that holds this key, as [`CatalogRecord::flags`] gives them.
+    #[must_use]
+    pub const fn flags(&self) -> u8 {
+        match self {
+            Self::LabelIndex { .. } => 0,
+            _ => RECORD_REQUIRED,
         }
     }
 }
@@ -930,6 +967,8 @@ pub enum CatalogRecord {
     Procedure(ProcedureRecord),
     /// The stored configuration (kind 10).
     StoredConfig(StoredConfigRecord),
+    /// A property index of a graph on a label.
+    LabelIndex(LabelIndexRecord),
 }
 
 impl CatalogRecord {
@@ -950,6 +989,17 @@ impl CatalogRecord {
             Self::IndexName(_) => KIND_INDEX_NAME,
             Self::Procedure(_) => KIND_PROCEDURE,
             Self::StoredConfig(_) => KIND_STORED_CONFIG,
+            Self::LabelIndex(_) => KIND_LABEL_INDEX,
+        }
+    }
+
+    /// The flags the record is written with: required, but for an index on a label, which a
+    /// release that does not know the kind may skip.
+    #[must_use]
+    pub const fn flags(&self) -> u8 {
+        match self {
+            Self::LabelIndex(_) => 0,
+            _ => RECORD_REQUIRED,
         }
     }
 
@@ -987,11 +1037,16 @@ impl CatalogRecord {
             Self::IndexName(record) => CatalogKey::IndexName(record.name.clone()),
             Self::Procedure(record) => CatalogKey::Procedure(record.name.clone()),
             Self::StoredConfig(_) => CatalogKey::StoredConfig,
+            Self::LabelIndex(record) => CatalogKey::LabelIndex {
+                graph: record.graph.clone(),
+                label: record.label.clone(),
+                key: record.key.clone(),
+            },
         }
     }
 
-    /// Appends the record framed: `[kind u8][flags u8][length u32 LE][payload]`.
-    /// Every kind of this release is written with [`RECORD_REQUIRED`].
+    /// Appends the record framed: `[kind u8][flags u8][length u32 LE][payload]`,
+    /// with [`flags`](Self::flags).
     ///
     /// # Errors
     ///
@@ -1002,7 +1057,7 @@ impl CatalogRecord {
     /// than [`MAX_LIST_LEVELS_PER_RECORD`] in all, or the value codec refuses
     /// a default value. `out` is then left as it was.
     pub fn encode_framed(&self, out: &mut Vec<u8>) -> Result<()> {
-        encode_framed_record(&CATALOG_FRAMING, self.kind(), RECORD_REQUIRED, out, |out| {
+        encode_framed_record(&CATALOG_FRAMING, self.kind(), self.flags(), out, |out| {
             // The value codec encodes each default value whole before the
             // payload takes it: refuse them from their sizes first.
             out.check_room(self.default_value_bytes())?;
@@ -1045,6 +1100,7 @@ impl CatalogRecord {
             Self::IndexName(record) => encode_bincode_payload(record, out),
             Self::Procedure(record) => encode_bincode_payload(record, out),
             Self::StoredConfig(record) => encode_bincode_payload(record, out),
+            Self::LabelIndex(record) => encode_bincode_payload(record, out),
         }
     }
 
@@ -1060,7 +1116,8 @@ impl CatalogRecord {
             | Self::Index(_)
             | Self::IndexName(_)
             | Self::Procedure(_)
-            | Self::StoredConfig(_) => &[],
+            | Self::StoredConfig(_)
+            | Self::LabelIndex(_) => &[],
         }
     }
 
@@ -1102,6 +1159,7 @@ impl CatalogRecord {
             KIND_INDEX_NAME => Self::IndexName(decode(payload)?),
             KIND_PROCEDURE => Self::Procedure(decode(payload)?),
             KIND_STORED_CONFIG => Self::StoredConfig(decode(payload)?),
+            KIND_LABEL_INDEX => Self::LabelIndex(decode(payload)?),
             _ => return Ok(None),
         };
         Ok(Some(record))

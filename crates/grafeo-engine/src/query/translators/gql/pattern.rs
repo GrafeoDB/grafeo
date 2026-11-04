@@ -17,7 +17,7 @@ impl GqlTranslator {
                     .variable
                     .clone()
                     .unwrap_or_else(|| self.anonymous_name());
-                let labels = node.labels.clone();
+                let labels = written_labels(node, "MERGE")?;
                 let props: Vec<(String, LogicalExpression)> = node
                     .properties
                     .iter()
@@ -35,7 +35,7 @@ impl GqlTranslator {
                     .variable
                     .clone()
                     .unwrap_or_else(|| self.anonymous_name());
-                let labels = path.source.labels.clone();
+                let labels = written_labels(&path.source, "MERGE")?;
                 let props: Vec<(String, LogicalExpression)> = path
                     .source
                     .properties
@@ -497,30 +497,9 @@ impl GqlTranslator {
             .clone()
             .unwrap_or_else(|| self.anonymous_name());
 
-        let source_label = path.source.labels.first().cloned();
-
-        let mut plan = LogicalOperator::NodeScan(NodeScanOp {
-            variable: source_var.clone(),
-            label: source_label,
-            input: input.map(Box::new),
-        });
-
-        // Add hasLabel filters for additional source labels (AND semantics)
-        if path.source.labels.len() > 1 {
-            plan = Self::add_extra_label_filters(plan, &source_var, &path.source.labels[1..]);
-        }
-
-        // Add filter for source node properties (e.g., {id: 'a'})
-        if !path.source.properties.is_empty() {
-            let predicate = self.build_property_predicate(&source_var, &path.source.properties)?;
-            plan = wrap_filter(plan, predicate);
-        }
-
-        // Add element WHERE clause for source node
-        if let Some(ref where_expr) = path.source.where_clause {
-            let predicate = self.translate_expression(where_expr)?;
-            plan = wrap_filter(plan, predicate);
-        }
+        let mut source = path.source.clone();
+        source.variable = Some(source_var.clone());
+        let mut plan = self.translate_node_pattern(&source, input)?;
 
         // Process each edge in the chain
         let path_start = source_var.clone();
@@ -794,7 +773,7 @@ impl GqlTranslator {
     ) -> Result<CreateElement> {
         Ok(CreateElement::Node {
             variable: variable.to_string(),
-            labels: node.labels.clone(),
+            labels: written_labels(node, "INSERT")?,
             properties: self.insert_properties(&node.properties)?,
         })
     }
@@ -817,6 +796,46 @@ impl GqlTranslator {
     }
 }
 
+/// The labels `statement`, an `INSERT` or a `MERGE`, gives the node of `node`: the list of `:A:B`,
+/// or the labels of `IS A` and `A & B`, each once, the label set ISO/IEC 39075:2024 18 has a new
+/// node take. `|`, `!`, `%` and parentheses name no set of labels.
+///
+/// # Errors
+///
+/// A semantic error naming the statement for those.
+fn written_labels(node: &ast::NodePattern, statement: &str) -> Result<Vec<String>> {
+    fn collect(expression: &ast::LabelExpression, labels: &mut Vec<String>) -> bool {
+        match expression {
+            ast::LabelExpression::Label(name) => {
+                if !labels.contains(name) {
+                    labels.push(name.clone());
+                }
+                true
+            }
+            ast::LabelExpression::Conjunction(operands) => {
+                operands.iter().all(|operand| collect(operand, labels))
+            }
+            ast::LabelExpression::Disjunction(_)
+            | ast::LabelExpression::Negation(_)
+            | ast::LabelExpression::Wildcard
+            | ast::LabelExpression::Parenthesized(_) => false,
+        }
+    }
+    let Some(expression) = &node.label_expression else {
+        return Ok(node.labels.clone());
+    };
+    let mut labels = Vec::new();
+    if collect(expression, &mut labels) {
+        return Ok(labels);
+    }
+    Err(Error::from(QueryError::new(
+        QueryErrorKind::Semantic,
+        format!(
+            "{statement} gives a node the labels it names, as `:A&B` or `IS A&B`: `|`, `!`, `%` and              parentheses name no labels to give"
+        ),
+    )))
+}
+
 /// How an INSERT treats a node pattern: returns its variable and whether it is
 /// a new node.
 ///
@@ -836,7 +855,8 @@ pub(super) fn insert_endpoint(
     let Some(variable) = &node.variable else {
         return Ok((names.next("_anon_"), true));
     };
-    let declares = !node.labels.is_empty() || !node.properties.is_empty();
+    let declares =
+        !node.labels.is_empty() || node.label_expression.is_some() || !node.properties.is_empty();
     if bound.contains(variable) {
         if declares {
             return Err(Error::from(QueryError::new(

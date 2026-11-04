@@ -582,6 +582,49 @@ jobs:
           RUSTC_WRAPPER: sccache
           SCCACHE_GHA_ENABLED: "true"
 
+  # The statement limits hold on the stack they promise (see MAX_PLAN_DEPTH): the
+  # deepest statements run on a 640 KiB thread, and an overflow aborts the job.
+  #
+  # Covers real `release` (link-time optimization, one codegen unit), which ships and
+  # whose frames differ from `ci-release`, with the workspace's feature set, as the
+  # release test job has it: larger frames than `-p grafeo-engine`, so the bound holds
+  # for both. `--test main` keeps that feature set and builds only the crates' `main`
+  # test binaries.
+  statement-depth:
+    name: Statement Depth (${{ matrix.os }}, release)
+    needs: [rust-check]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@1.99.0
+
+      - name: Configure sccache
+        uses: mozilla-actions/sccache-action@v0.0.11
+
+      # Crate sources only, as in the other test jobs.
+      - name: Cache cargo registry
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-registry-
+
+      - name: Run statement depth tests (release)
+        run: |
+          cargo test --all-features --workspace --exclude grafeo-spec-tests --release --test main statement_depth::
+        env:
+          RUSTC_WRAPPER: sccache
+          SCCACHE_GHA_ENABLED: "true"
+
   # Feature matrix: test individual feature combinations that --all-features
   # masks. Catches per-feature cfg bugs, missing imports, and conditional
   # compilation issues. Runs on ubuntu only (feature bugs are OS-independent).
@@ -1362,6 +1405,7 @@ jobs:
       - wasm-spec-rdf
       - rust-test
       - rust-test-release
+      - statement-depth
       - minimal-features
       - shipped-features
       - rust-feature-matrix

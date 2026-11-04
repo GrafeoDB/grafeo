@@ -456,8 +456,9 @@ impl Inner {
     }
 
     /// The most edges [`each_seen`](Self::each_seen) can give, without going through them:
-    /// the entries of the lists it reads, removed and unseen ones among them. `None` when it
-    /// would scan for the incoming edges this store does not keep.
+    /// the entries of the lists it reads, removed and unseen ones among them, and `Both` counts
+    /// a self-loop twice. `None` when it would scan for the incoming edges this store does not
+    /// keep.
     fn entries_at_most(
         &self,
         node: NodeId,
@@ -1428,6 +1429,44 @@ impl GraphStore for RowGroupStore {
         RowGroupStore::has_property_index(self, property)
     }
 
+    fn index_serves(&self, labels: &[&str], property: &str) -> bool {
+        RowGroupStore::index_serves(self, labels, property)
+    }
+
+    fn has_label_index(&self, label: &str, property: &str) -> bool {
+        RowGroupStore::has_label_index(self, label, property)
+    }
+
+    fn far_walk_back_within(
+        &self,
+        far_label: &str,
+        types: &[&str],
+        back: Direction,
+        budget: &mut u64,
+    ) -> Option<f64> {
+        self.sample_far_walk_back(far_label, types, back, budget)
+    }
+
+    fn indexed_distinct_values(&self, labels: &[&str], property: &str) -> Option<u64> {
+        RowGroupStore::indexed_distinct_values(self, labels, property)
+    }
+
+    fn edge_entries_at_most(
+        &self,
+        node: NodeId,
+        direction: Direction,
+        types: &[ArcStr],
+        view: ReadView,
+    ) -> Option<usize> {
+        self.inner
+            .read()
+            .entries_of_types_at_most(node, direction, types, Read::view(view))
+    }
+
+    fn label_index_entries(&self) -> Vec<(String, String)> {
+        RowGroupStore::label_index_entries(self)
+    }
+
     fn sampled_degree(&self, label: &str, edge_type: &str, direction: Direction) -> Option<f64> {
         self.sample_degree(label, edge_type, direction)
     }
@@ -1468,9 +1507,18 @@ impl GraphStore for RowGroupStore {
         conditions: &[(&str, Value)],
         view: ReadView,
     ) -> Result<Vec<NodeId>> {
+        self.find_indexed_by_properties(&[], conditions, view)
+    }
+
+    fn find_indexed_by_properties(
+        &self,
+        labels: &[&str],
+        conditions: &[(&str, Value)],
+        view: ReadView,
+    ) -> Result<Vec<NodeId>> {
         let (inner, read) = (self.inner.read(), Read::view(view));
         Ok(inner
-            .indexed_matching_at(conditions, read)
+            .indexed_matching_at(labels, conditions, read)
             .unwrap_or_else(|| inner.nodes_matching_at(conditions, read)))
     }
 
@@ -1481,10 +1529,21 @@ impl GraphStore for RowGroupStore {
         limit: usize,
         view: ReadView,
     ) -> Result<Option<Vec<NodeId>>> {
+        self.find_few_indexed_maybe_equal(&[], property, value, limit, view)
+    }
+
+    fn find_few_indexed_maybe_equal(
+        &self,
+        labels: &[&str],
+        property: &str,
+        value: &Value,
+        limit: usize,
+        view: ReadView,
+    ) -> Result<Option<Vec<NodeId>>> {
         let inner = self.inner.read();
-        let few = inner.property_candidates_within(property, value, limit);
+        let few = inner.property_candidates_within(labels, property, value, limit);
         Ok(few
-            .then(|| inner.maybe_equal_at(property, value, Read::view(view)))
+            .then(|| inner.maybe_equal_at(labels, property, value, Read::view(view)))
             .flatten())
     }
 
@@ -1494,10 +1553,20 @@ impl GraphStore for RowGroupStore {
         value: &Value,
         view: ReadView,
     ) -> Result<Option<Vec<NodeId>>> {
+        self.find_indexed_maybe_equal(&[], property, value, view)
+    }
+
+    fn find_indexed_maybe_equal(
+        &self,
+        labels: &[&str],
+        property: &str,
+        value: &Value,
+        view: ReadView,
+    ) -> Result<Option<Vec<NodeId>>> {
         Ok(self
             .inner
             .read()
-            .maybe_equal_at(property, value, Read::view(view)))
+            .maybe_equal_at(labels, property, value, Read::view(view)))
     }
 
     fn find_nodes_in_range(

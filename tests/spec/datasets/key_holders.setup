@@ -1,0 +1,6 @@
+# Key Holders Dataset
+# Eight nodes holding `k`, of one label, of two, of another, and of none, reached from two starts.
+#
+# Use case: a key looked up by label, by no label, by a union and at a hop's far end
+
+INSERT (s:Start {name: 'Amsterdam'}), (b:Start {name: 'Berlin'}), (a:Far {name: 'Alix', k: 7}), (g:Near {name: 'Gus', k: 7}), (v:Far:Near {name: 'Vincent', k: 7}), (m {name: 'Mia', k: 7}), (j:Other {name: 'Jules', k: 7}), (c:Far {name: 'Butch', k: 8}), (d:Near {name: 'Django', k: 8}), (h {name: 'Hans', k: 8}), (s)-[:R]->(a), (s)-[:R]->(a), (s)-[:R]->(g), (s)-[:R]->(v), (s)-[:R]->(m), (s)-[:R]->(j), (s)-[:R]->(c), (s)-[:R]->(d), (s)-[:R]->(h), (b)-[:R]->(v), (b)-[:R]->(m), (s)-[:S]->(g)

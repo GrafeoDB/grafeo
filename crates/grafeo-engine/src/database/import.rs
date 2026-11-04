@@ -39,6 +39,9 @@ use std::io::{BufRead, BufReader};
 use std::path::Path;
 use std::sync::Arc;
 
+use crate::catalog::CatalogConstraintValidator;
+use grafeo_core::execution::operators::ConstraintValidator;
+
 use grafeo_common::change::{DataOp, Labels, Table};
 use grafeo_common::types::{ArcStr, EdgeId, EpochId, NodeId};
 use grafeo_common::utils::error::{Error, Result};
@@ -88,6 +91,7 @@ impl super::GrafeoDB {
     ) -> Result<(usize, usize)> {
         // Refused before the file is opened: a refused import does no work.
         self.check_import_allowed()?;
+        self.check_import_shape(edge_type)?;
         let path = path.as_ref();
         let file = std::fs::File::open(path).map_err(|e| {
             Error::Io(std::io::Error::new(
@@ -124,6 +128,7 @@ impl super::GrafeoDB {
         directed: bool,
     ) -> Result<(usize, usize)> {
         self.check_import_allowed()?;
+        self.check_import_shape(edge_type)?;
         let reader = BufReader::new(data.as_bytes());
         let edges = parse_edge_list(reader)?;
         self.import_edge_list(&edges, edge_type, directed)
@@ -163,6 +168,7 @@ impl super::GrafeoDB {
     /// that did not complete.
     pub fn import_mmio(&self, path: impl AsRef<Path>, edge_type: &str) -> Result<(usize, usize)> {
         self.check_import_allowed()?;
+        self.check_import_shape(edge_type)?;
         let path = path.as_ref();
         let file = std::fs::File::open(path).map_err(|e| {
             Error::Io(std::io::Error::new(
@@ -174,6 +180,32 @@ impl super::GrafeoDB {
         let reader = BufReader::new(file);
         let (edges, symmetric) = parse_mmio(reader)?;
         self.import_edge_list(&edges, edge_type, !symmetric)
+    }
+
+    /// Checks the one shape every row of an import has against the rules of the current graph:
+    /// `_Imported` nodes with no properties, and edges of `edge_type` between them.
+    ///
+    /// # Errors
+    ///
+    /// The schema violation a rule gives that shape, such as of a closed graph type that does not
+    /// declare `_Imported`.
+    fn check_import_shape(&self, edge_type: &str) -> Result<()> {
+        let graph = self.current_graph_key();
+        let validator = CatalogConstraintValidator::of_graph(&self.catalog, graph.as_deref());
+        let labels = ["_Imported".to_string()];
+        let checked = validator
+            .validate_node_labels_allowed(&labels)
+            .and_then(|()| validator.validate_node_complete(&labels, &[]))
+            .and_then(|()| validator.validate_edge_type_allowed(edge_type))
+            .and_then(|()| validator.validate_edge_complete(edge_type, &[]))
+            .and_then(|()| {
+                if validator.constrains_edge_endpoints(edge_type) {
+                    validator.validate_edge_endpoints(edge_type, &labels, &labels)
+                } else {
+                    Ok(())
+                }
+            });
+        checked.map_err(crate::query::executor::convert_operator_error)
     }
 
     /// Bulk-imports a pre-parsed edge list into the LPG store, as one bulk

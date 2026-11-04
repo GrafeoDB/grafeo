@@ -856,30 +856,10 @@ impl LogicalOperator {
                 )
             }
             Self::Filter(op) => {
-                let hint = match &op.pushdown_hint {
-                    Some(PushdownHint::IndexLookup { property }) => {
-                        format!(" [index: {property}]")
-                    }
-                    Some(PushdownHint::RangeScan { property }) => {
-                        format!(" [range: {property}]")
-                    }
-                    Some(PushdownHint::LabelFirst) => " [label-first]".to_string(),
-                    Some(PushdownHint::LabelUnion { labels }) => {
-                        format!(" [labels: {}]", labels.join("|"))
-                    }
-                    Some(PushdownHint::IdSeek) => " [seek: id]".to_string(),
-                    Some(PushdownHint::ExpandToKey { key }) => {
-                        format!(" [expand to key: {key}]")
-                    }
-                    Some(PushdownHint::IntersectExpand { target }) => {
-                        format!(" [IntersectExpand into: {target}]")
-                    }
-                    Some(PushdownHint::ExpandInto { target }) => {
-                        format!(" [expand into: {target}]")
-                    }
-                    Some(PushdownHint::HashJoin { keys }) => hash_join_hint(keys),
-                    None => String::new(),
-                };
+                let hint = op
+                    .pushdown_hint
+                    .as_ref()
+                    .map_or_else(String::new, hint_text);
                 format!("{}{hint}", fmt_expr(&op.predicate))
             }
             Self::Project(op) => {
@@ -1401,30 +1381,10 @@ impl LogicalOperator {
                 op.input.fmt_tree(out, depth + 1);
             }
             Self::Filter(op) => {
-                let hint = match &op.pushdown_hint {
-                    Some(PushdownHint::IndexLookup { property }) => {
-                        format!(" [index: {property}]")
-                    }
-                    Some(PushdownHint::RangeScan { property }) => {
-                        format!(" [range: {property}]")
-                    }
-                    Some(PushdownHint::LabelFirst) => " [label-first]".to_string(),
-                    Some(PushdownHint::LabelUnion { labels }) => {
-                        format!(" [labels: {}]", labels.join("|"))
-                    }
-                    Some(PushdownHint::IdSeek) => " [seek: id]".to_string(),
-                    Some(PushdownHint::ExpandToKey { key }) => {
-                        format!(" [expand to key: {key}]")
-                    }
-                    Some(PushdownHint::IntersectExpand { target }) => {
-                        format!(" [IntersectExpand into: {target}]")
-                    }
-                    Some(PushdownHint::ExpandInto { target }) => {
-                        format!(" [expand into: {target}]")
-                    }
-                    Some(PushdownHint::HashJoin { keys }) => hash_join_hint(keys),
-                    None => String::new(),
-                };
+                let hint = op
+                    .pushdown_hint
+                    .as_ref()
+                    .map_or_else(String::new, hint_text);
                 let _ = writeln!(
                     out,
                     "{indent}Filter ({expr}){hint}{after}",
@@ -1823,6 +1783,31 @@ impl LogicalOperator {
 }
 
 /// The text of a [`PushdownHint::HashJoin`]: `[hash join: t.k = f.k, ...]`.
+/// A filter's hint as `EXPLAIN` shows it, after the filter's predicate.
+fn hint_text(hint: &PushdownHint) -> String {
+    match hint {
+        PushdownHint::IndexLookup { property } => format!(" [index: {property}]"),
+        PushdownHint::RangeScan { property } => format!(" [range: {property}]"),
+        PushdownHint::LabelFirst => " [label-first]".to_string(),
+        PushdownHint::LabelUnion { labels } => format!(" [labels: {}]", labels.join("|")),
+        PushdownHint::IdSeek => " [seek: id]".to_string(),
+        PushdownHint::ExpandToKey { key, .. } => format!(" [expand to key: {key}]"),
+        PushdownHint::IntersectExpand { target } => {
+            format!(" [IntersectExpand into: {target}]")
+        }
+        PushdownHint::ExpandInto { target } => format!(" [expand into: {target}]"),
+        PushdownHint::HashJoin { keys } => hash_join_hint(keys),
+        PushdownHint::NoIndex { key, labels, then } => {
+            let path = then.as_deref().map_or_else(String::new, hint_text);
+            let labels: Vec<String> = labels.iter().map(|label| format!(":{label}")).collect();
+            format!(
+                "{path} [no index: {key} is indexed on {} only]",
+                labels.join(", ")
+            )
+        }
+    }
+}
+
 fn hash_join_hint(keys: &[(LogicalExpression, LogicalExpression)]) -> String {
     let keys: Vec<String> = keys
         .iter()
@@ -2411,6 +2396,9 @@ pub enum PushdownHint {
     ExpandToKey {
         /// The indexed property, or `id()`.
         key: String,
+        /// What the label checks of the whole chain of filters over the expand say of the nodes
+        /// that hold it, which this filter alone may not show.
+        labels: grafeo_core::execution::operators::KeyLabels,
     },
     /// The filter's expand closes a cycle right after another hop: the two
     /// intersect the lists of the bound nodes they meet between.
@@ -2430,6 +2418,16 @@ pub enum PushdownHint {
     HashJoin {
         /// The keys, as the filter writes them.
         keys: Vec<(LogicalExpression, LogicalExpression)>,
+    },
+    /// The filter pins a key that only other labels have an index on, so it reads no index:
+    /// `EXPLAIN` says so beside the path it takes.
+    NoIndex {
+        /// The key.
+        key: String,
+        /// The labels with an index on it.
+        labels: Vec<String>,
+        /// The path the filter takes.
+        then: Option<Box<PushdownHint>>,
     },
 }
 

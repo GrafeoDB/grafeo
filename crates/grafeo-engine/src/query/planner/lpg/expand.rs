@@ -29,8 +29,8 @@ pub(crate) struct PendingEdgeCondition {
 pub(super) enum HopTarget {
     /// It is the node in this column of the input.
     Column(String),
-    /// It holds this key.
-    Key(SeekKey, Value),
+    /// It holds this key, with these labels.
+    Key(SeekKey, Value, grafeo_core::execution::operators::KeyLabels),
     /// It is the node in this column, and the hop below goes with it: the two
     /// intersect their lists.
     Intersect(String),
@@ -39,6 +39,7 @@ pub(super) enum HopTarget {
 impl super::Planner {
     /// The hops `near` and `closing` as one intersection of the lists of `near`'s
     /// source and `target`, with the columns the two expands give.
+    #[inline(never)]
     fn plan_intersection(
         &self,
         near: &ExpandOp,
@@ -114,10 +115,10 @@ impl super::Planner {
     }
 
     /// Hands the expand below `filter` what the filter's hint says of its
-    /// target. A key needs a literal value (parameters are filled in by now),
-    /// an index that still exists, and a statement that reads the store as
-    /// planned and whose writes see no row of it while it runs: the expand
-    /// finds the key once.
+    /// target. A key needs a literal value (parameters are filled in by now)
+    /// and a statement that reads the store as planned and whose writes see no
+    /// row of it while it runs: the expand finds the key once, through the
+    /// indexes the hint names, and lists every edge if one has gone since.
     pub(super) fn note_hop_target(&self, filter: &FilterOp) {
         let mut below = filter.input.as_ref();
         while let LogicalOperator::Filter(check) = below {
@@ -131,7 +132,7 @@ impl super::Planner {
             Some(PushdownHint::IntersectExpand { target }) => {
                 Some(HopTarget::Intersect(target.clone()))
             }
-            Some(PushdownHint::ExpandToKey { .. })
+            Some(PushdownHint::ExpandToKey { key, labels })
                 if self.reads_the_store_as_planned()
                     && self
                         .statement_writes
@@ -139,11 +140,11 @@ impl super::Planner {
                         .is_some_and(|writes| !writes.per_row) =>
             {
                 constant_seek(&filter.predicate, &expand.to_variable, |property| {
-                    self.store.has_property_index(property)
+                    property == key
                 })
                 .and_then(|seek| match seek.value {
                     LogicalExpression::Literal(value) => {
-                        Some(HopTarget::Key(seek.key, value.clone()))
+                        Some(HopTarget::Key(seek.key, value.clone(), labels.clone()))
                     }
                     _ => None,
                 })
@@ -171,7 +172,20 @@ impl super::Planner {
 
         // Plan the input operator first
         let (input_op, input_columns) = self.plan_operator(&expand.input)?;
+        self.expand_over(expand, hop_target, input_op, input_columns)
+    }
 
+    /// The expand `expand` over its planned input. Not part of [`plan_expand`](Self::plan_expand):
+    /// that frame is on the stack once per hop of the plan (see `crate::query::limits`), and the
+    /// operators built here by value would make it larger.
+    #[inline(never)]
+    fn expand_over(
+        &self,
+        expand: &ExpandOp,
+        hop_target: Option<HopTarget>,
+        input_op: Box<dyn Operator>,
+        input_columns: Vec<String>,
+    ) -> Result<(Box<dyn Operator>, Vec<String>)> {
         // Find the source column index
         let source_column = input_columns
             .iter()
@@ -320,8 +334,8 @@ impl super::Planner {
                         expand_op = expand_op.with_target_column(column);
                     }
                 }
-                Some(HopTarget::Key(key, value)) => {
-                    expand_op = expand_op.with_target_key(key, value);
+                Some(HopTarget::Key(key, value, labels)) => {
+                    expand_op = expand_op.with_target_key(key, value, labels);
                 }
                 Some(HopTarget::Intersect(_)) | None => {}
             }

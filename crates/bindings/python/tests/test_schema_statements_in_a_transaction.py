@@ -115,13 +115,13 @@ def prepared(kind, path=None):
 
 
 def catalog(db, query):
-    """The catalog's rows, or the error of a procedure that is not there."""
+    """The catalog's rows, or that the procedure is not there; any other failure is the test's."""
     try:
         return sorted(json.dumps(row, sort_keys=True, default=str) for row in db.execute(query))
     except grafeo.GrafeoError as error:
-        if query != PROCEDURE or "p1" not in str(error):
+        if query != PROCEDURE or "unknown procedure 'p1'" not in str(error):
             raise
-        return str(error).split(":")[0]
+        return "no such procedure"
 
 
 def run_in(tx, kind):

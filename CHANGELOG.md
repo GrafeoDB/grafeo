@@ -7,17 +7,23 @@ All notable changes to Grafeo, for future reference (and enjoyment).
 ### Faster queries
 
 - **Planner**: comma patterns pick their join order from sampled degrees, cycles close by lookup or intersection, and same-type chains up to 6 hops count without listing paths. Common queries stay at their speed; the first plan of a comma pattern costs a little more.
+- **Constraints**: `UNIQUE` and `NODE KEY` build an index on their first property, so an insert under one no longer reads the whole label.
 
 ### Changed
 
 Queries that ran in 0.6.1 and now fail or behave differently.
 
+- **`CREATE INDEX`** holds its label only: writes on other labels no longer pay for it, and a query on another label or with no label scans, with the same rows and a note in `EXPLAIN`. Existing indexes stay as they are, and `create_property_index` still covers every label. A 0.6.1 release opens such a file with the same rows, without those indexes, and a checkpoint there drops them.
+- **Writes**: `|`, `!`, `%` and parentheses in the labels of an `INSERT` or a single-node `MERGE` are an error naming the statement, as they name no labels.
 - **Rules**: a rule added over data that breaks it fails with `GRAFEO-V001`, and so does a commit whose writes break a rule added since the transaction began.
 - **Graph types**: a type a graph type lists applies only in graphs bound to it, so its rules and defaults no longer reach other graphs; `validate()` reports affected types, and Python warns at open. Dropping a graph type drops the types only it listed, and a second, different declaration of a type is refused. See the upgrade note.
 - **Transactions**: `START TRANSACTION`, `COMMIT` and `ROLLBACK` on a per-call `execute` are refused, `CREATE GRAPH ... AS COPY OF` is refused in a transaction, and no SPARQL statement runs after a SPARQL graph operation until the commit.
 
 ### Fixed
 
+- **Label expressions on a path's first node**: `IS`, `&`, `|`, `!`, `%` and parentheses were ignored there, so `MATCH (x IS A)-[:R]->(t)` also matched nodes without `A`, and a `SET`, `REMOVE` or `DELETE` after it changed them. All GQL and SQL/PGQ path patterns now check them (#736).
+- **Label expressions in writes**: `INSERT (n IS Person)`, `INSERT (n:A&B)` and `MERGE (n IS Person)` created a node with no labels; `IS A` and `A & B` now set those labels. Databases written before this may hold such nodes, and nodes changed or deleted by the query above, which no fix can recover: find unlabelled nodes with `MATCH (n) WHERE size(labels(n)) = 0 RETURN n`.
+- **`UNIQUE`** refuses `0.0` and `-0.0` as duplicates whether or not the property has an index.
 - **SPARQL**: fixed a slowdown in multi-way joins from 0.6.1.
 - **Booleans**: `<`, `<=`, `>` and `>=` order false below true in every plan; they could return null and lose rows.
 - **Schema statements** roll back with their transaction, also across a crash (#727).

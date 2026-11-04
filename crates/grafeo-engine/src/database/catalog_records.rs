@@ -21,8 +21,8 @@ use std::collections::HashSet;
 use grafeo_common::storage::catalog_record::{
     CatalogRecord, ConstraintRecord, DistanceMetricRecord, EdgeTypeRecord, EndpointPair,
     GraphTypeRecord, IndexKindRecord, IndexNameKindRecord, IndexNameRecord, IndexRecord,
-    MAX_CATALOG_RECORD_PAYLOAD, NamedConstraintKindRecord, NodeTypeRecord, ProcedureRecord,
-    PropertyRecord, PropertyTypeRecord, QuantizationRecord, TextTokenizerRecord,
+    LabelIndexRecord, MAX_CATALOG_RECORD_PAYLOAD, NamedConstraintKindRecord, NodeTypeRecord,
+    ProcedureRecord, PropertyRecord, PropertyTypeRecord, QuantizationRecord, TextTokenizerRecord,
     TypeConstraintRecord,
 };
 use grafeo_common::utils::error::{Error, Result};
@@ -589,6 +589,40 @@ pub(crate) fn index_records(graphs: &[GraphIndexes]) -> Result<Vec<IndexRecord>>
     Ok(records)
 }
 
+/// The records of the indexes on one label of `graphs` (kind 11), in the order the section
+/// holds them: by graph, label and key.
+pub(crate) fn label_index_records(graphs: &[GraphIndexes]) -> Vec<LabelIndexRecord> {
+    let mut records: Vec<LabelIndexRecord> = graphs
+        .iter()
+        .flat_map(|graph| {
+            graph.on_label.iter().map(|(label, key)| LabelIndexRecord {
+                graph: graph.graph.clone(),
+                label: label.clone(),
+                key: key.clone(),
+            })
+        })
+        .collect();
+    records.sort_by(|a, b| (&a.graph, &a.label, &a.key).cmp(&(&b.graph, &b.label, &b.key)));
+    records
+}
+
+/// Adds the indexes `records` hold to `graphs`, a graph with only such an index included.
+pub(crate) fn add_label_indexes(graphs: &mut Vec<GraphIndexes>, records: Vec<LabelIndexRecord>) {
+    for record in records {
+        let at = match graphs.iter().position(|graph| graph.graph == record.graph) {
+            Some(at) => at,
+            None => {
+                graphs.push(GraphIndexes {
+                    graph: record.graph,
+                    ..GraphIndexes::default()
+                });
+                graphs.len() - 1
+            }
+        };
+        graphs[at].on_label.push((record.label, record.key));
+    }
+}
+
 /// The index kind record of a vector index.
 fn vector_index_record(def: &VectorIndexDefinition) -> Result<IndexKindRecord> {
     let unstorable = |what: String| {
@@ -829,6 +863,15 @@ pub(crate) fn record_name(record: &CatalogRecord) -> String {
                 } => format!("the text index on :{label}({property}) of {graph}"),
             }
         }
+        CatalogRecord::LabelIndex(record) => format!(
+            "the property index on :{}({}) of {}",
+            record.label,
+            record.key,
+            record.graph.as_ref().map_or_else(
+                || "the default graph".to_string(),
+                |g| format!("graph '{g}'"),
+            )
+        ),
         CatalogRecord::IndexName(record) => format!(
             "index name '{}' on :{}({})",
             record.name, record.label, record.property
@@ -1258,6 +1301,7 @@ mod tests {
             GraphIndexes {
                 graph: None,
                 property: names(&["id", "name"]),
+                on_label: Vec::new(),
                 vector: vec![
                     vector("Doc", None),
                     vector("Note", Some(QuantizationType::Scalar)),
@@ -1274,6 +1318,7 @@ mod tests {
             GraphIndexes {
                 graph: Some("model".to_string()),
                 property: Vec::new(),
+                on_label: Vec::new(),
                 vector: vec![
                     vector("Doc", Some(QuantizationType::Binary)),
                     vector(
@@ -1286,6 +1331,7 @@ mod tests {
             GraphIndexes {
                 graph: Some("trips".to_string()),
                 property: names(&["km"]),
+                on_label: Vec::new(),
                 vector: Vec::new(),
                 text: vec![text("Stop", TextIndexOptions::new())],
             },

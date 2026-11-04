@@ -20,10 +20,12 @@ mod delim;
 mod intersect_hops;
 mod join_search;
 mod pinned_far_end;
+pub(crate) use pinned_far_end::far_end_variable;
 #[cfg(feature = "triple-store")]
 mod rdf_order;
 mod rules;
 mod scanned_labels;
+mod turn_cost;
 pub(crate) use cycles::{close_cycles, plan_names};
 pub mod join_order;
 
@@ -45,7 +47,7 @@ use crate::query::planner::lpg::seek;
 use grafeo_common::grafeo_debug_span;
 use grafeo_common::utils::error::Result;
 use grafeo_core::execution::operators::Volatility;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 /// Information about a join condition for join reordering.
 #[derive(Debug, Clone)]
@@ -87,6 +89,8 @@ pub struct Optimizer {
     /// The node properties with a property index: a filter on one of them
     /// pins a node like `id()` does (see `start_at_the_sought_end`).
     indexed_properties: HashSet<String>,
+    /// The labels with a property index of their own, by property.
+    label_indexes: HashMap<String, Vec<String>>,
     /// Whether the store keeps the incoming edges of each node.
     incoming_edges: IncomingEdges,
     /// The order of SPARQL groups' patterns, for an optimizer made from RDF
@@ -139,6 +143,7 @@ impl Optimizer {
             cyclic_joins: CyclicJoins::Binary,
             rules: PlannerRules::all(),
             indexed_properties: HashSet::new(),
+            label_indexes: HashMap::new(),
             incoming_edges: IncomingEdges::Kept,
             #[cfg(feature = "triple-store")]
             rdf_order: None,
@@ -160,13 +165,42 @@ impl Optimizer {
             .all_property_keys()
             .unwrap_or_default()
             .into_iter()
-            .filter(|key| store.has_property_index(key))
+            .filter(|key| store.index_serves(&[], key))
             .collect();
+        let mut label_indexes: HashMap<String, Vec<String>> = HashMap::new();
+        for (label, property) in store.label_index_entries() {
+            label_indexes.entry(property).or_default().push(label);
+        }
         Self {
             indexed_properties,
+            label_indexes,
             incoming_edges: IncomingEdges::of(store),
             ..Self::from_statistics(stats)
         }
+    }
+
+    /// Whether a lookup of `property` has an index to read among those `labels` allow, by what
+    /// the store told when the optimizer was made.
+    fn index_serves(&self, labels: &seek::LookupLabels<'_>, property: &str) -> bool {
+        self.index_read(labels, property).is_some()
+    }
+
+    /// The labels whose indexes a lookup of `property` reads, among those `labels` allow (see
+    /// [`seek::LookupLabels::index_for`]).
+    fn index_read<'l, 'a>(
+        &self,
+        labels: &'l seek::LookupLabels<'a>,
+        property: &str,
+    ) -> Option<&'l [&'a str]> {
+        labels.index_for(
+            property,
+            |label, key| {
+                self.label_indexes
+                    .get(key)
+                    .is_some_and(|indexed| indexed.iter().any(|on| on == label))
+            },
+            |key| self.indexed_properties.contains(key),
+        )
     }
 
     /// Creates an optimizer from RDF statistics.
@@ -190,6 +224,7 @@ impl Optimizer {
             cyclic_joins: CyclicJoins::MultiWay,
             rules: PlannerRules::all(),
             indexed_properties: HashSet::new(),
+            label_indexes: HashMap::new(),
             incoming_edges: IncomingEdges::NotKept,
             rdf_order: Some(rdf_order),
         }
@@ -258,6 +293,7 @@ impl Optimizer {
             cyclic_joins: CyclicJoins::Binary,
             rules: PlannerRules::all(),
             indexed_properties: HashSet::new(),
+            label_indexes: HashMap::new(),
             incoming_edges: IncomingEdges::Kept,
             #[cfg(feature = "triple-store")]
             rdf_order: None,
@@ -1796,6 +1832,16 @@ impl Optimizer {
         };
 
         let (source, target) = (expand.from_variable, expand.to_variable);
+        // The label of the scan that goes, which every row still needs, first as the scan was.
+        let source_label = scan.label.map(|label| {
+            LogicalExpression::builtin(
+                BuiltinFunction::HasLabel,
+                vec![
+                    LogicalExpression::Variable(source.clone()),
+                    LogicalExpression::Literal(grafeo_common::types::Value::from(label)),
+                ],
+            )
+        });
         let (on_target, rest): (Vec<_>, Vec<_>) = written.into_iter().partition(|conjunct| {
             movable_variables(conjunct).is_some_and(|vars| {
                 vars.contains(&target)
@@ -1832,7 +1878,13 @@ impl Optimizer {
             path_mode: expand.path_mode,
             quantified: false,
         });
-        match conjunction(checked.into_iter().chain(rest).collect()) {
+        match conjunction(
+            source_label
+                .into_iter()
+                .chain(checked)
+                .chain(rest)
+                .collect(),
+        ) {
             Some(predicate) => LogicalOperator::Filter(FilterOp {
                 predicate,
                 pushdown_hint: None,
@@ -1845,22 +1897,22 @@ impl Optimizer {
     /// The direction of `expand` started at its target, and the variables
     /// of the rows its source's scan runs for, when turning it seeks the
     /// target and keeps every row: `written` (the conjuncts of the filters
-    /// above it) pins the target by a key (see [`seek::pins`]) and
-    /// `checked` (the conjuncts of the checks between it and the scan of
-    /// its source) does not pin the source, which the planner would seek
-    /// then.
+    /// above it) pins the target by a key (see [`seek::pins`]). A source that
+    /// reads every node, with no label and no key in `checked` (the conjuncts of
+    /// the checks between it and the scan of its source), always turns: released
+    /// behaviour, and a walk back reads each edge into the found nodes at most
+    /// once. Another turns when it costs less (see [`Self::turn_wins`]).
     ///
     /// The expand is a single hop without a named path (a path, or the list
-    /// of a quantified edge, would come out reversed). Its source is a scan
-    /// without a label (a label scan answers at the query's view too, so a
-    /// labelled source could turn as well; the rule predates that). The
-    /// checks move above the turned expand,
+    /// of a quantified edge, would come out reversed). The checks move above
+    /// the turned expand, with the label of a scan that has one,
     /// so they read only the source and the scan's input, and may move (see
     /// [`movable_variables`]). The scan's input, whose rows the turned plan
     /// scans the target for, binds none of the expand's variables and does
     /// not write: a seek would not see what it writes for later rows.
     /// Starting an outgoing expand at its target follows incoming edges,
     /// which needs the store's backward edges.
+    #[inline(never)]
     fn turned_direction(
         &self,
         written: &[LogicalExpression],
@@ -1873,7 +1925,6 @@ impl Optimizer {
             || expand.path_alias.is_some()
             || source == target
             || scan.variable != *source
-            || scan.label.is_some()
         {
             return None;
         }
@@ -1897,17 +1948,39 @@ impl Optimizer {
         {
             return None;
         }
-        let has_index = |property: &str| self.indexed_properties.contains(property);
+        let mut source_labels = seek::LookupLabels::of_conjuncts(checked, source);
+        if let Some(label) = scan.label.as_deref() {
+            source_labels.require(label);
+        }
+        let target_labels = seek::LookupLabels::of_conjuncts(written, target);
+        let source_index = |property: &str| self.index_serves(&source_labels, property);
+        let target_index = |property: &str| self.index_serves(&target_labels, property);
         let checks_hold_after = checked.iter().all(|check| {
             movable_variables(check).is_some_and(|vars| {
                 vars.iter()
                     .all(|var| var == source || input_vars.contains(var))
-            }) && !seek::pins(check, source, has_index, &input_vars)
+            })
         });
+        let reads_every_node = scan.label.is_none()
+            && !checked
+                .iter()
+                .any(|check| seek::pins(check, source, source_index, &input_vars));
         let sought = written
             .iter()
-            .any(|conjunct| seek::pins(conjunct, target, has_index, &input_vars));
-        (checks_hold_after && sought).then_some((direction, input_vars))
+            .any(|conjunct| seek::pins(conjunct, target, target_index, &input_vars));
+        let turns = checks_hold_after
+            && sought
+            && (reads_every_node
+                || self.turn_wins(&turn_cost::TurnCandidate {
+                    written,
+                    checked,
+                    expand,
+                    scan,
+                    input_vars: &input_vars,
+                    source_labels: &source_labels,
+                    target_labels: &target_labels,
+                }));
+        turns.then_some((direction, input_vars))
     }
 
     // NOTE: Filter-into-TripleScan pushdown is intentionally not implemented.

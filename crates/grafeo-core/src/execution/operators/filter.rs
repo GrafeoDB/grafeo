@@ -461,6 +461,16 @@ impl OperandKind {
         }
     }
 
+    /// A node or an edge by the type of item `position` of a list of type `list`, read without
+    /// building that type (see `item_type_at`), unknown otherwise.
+    fn of_item(list: &LogicalType, position: usize) -> Self {
+        match list {
+            LogicalType::Tuple(items) => items.get(position).map_or(Self::Unknown, Self::of_shape),
+            LogicalType::List(item) => Self::of_shape(item),
+            _ => Self::Unknown,
+        }
+    }
+
     /// Whether two operands are known to be of kinds a comparison keeps
     /// apart: an entity and a value, or a node and an edge.
     fn apart_from(self, other: Self) -> bool {
@@ -668,6 +678,18 @@ pub struct SessionContext {
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum FilterExpression {
+    /// `needle IN list` with a constant `list`, whose value is built once, and as a set when it is
+    /// long, for the needles a set can answer.
+    InConstantList {
+        /// What the list is searched for.
+        needle: Box<FilterExpression>,
+        /// The list as written, which types its items.
+        list: Box<FilterExpression>,
+        /// The list's items.
+        items: Arc<[Value]>,
+        /// The list's items as a set, when it is long enough.
+        set: Option<Arc<super::InSet>>,
+    },
     /// A literal value.
     Literal(Value),
     /// A variable reference (column index).
@@ -1449,6 +1471,12 @@ impl ExpressionPredicate {
                     value => value.temporal_component(property),
                 }
             }
+            FilterExpression::InConstantList {
+                needle,
+                list,
+                items,
+                set,
+            } => self.eval_in_constant_list(needle, list, items, set.as_deref(), chunk, row),
             FilterExpression::Binary { left, op, right } => {
                 // For IN operator, right side is a list that we evaluate specially
                 if *op == BinaryFilterOp::In {
@@ -2439,6 +2467,40 @@ impl ExpressionPredicate {
         }
     }
 
+    /// `needle IN list` of the constant `items`: through their `set`, for an integer, float, string
+    /// or boolean that is not known to be a node or an edge, which evaluates to its id and meets
+    /// only items of its kind. The walk answers without a set and for any other needle, by its
+    /// rules for it.
+    #[inline(never)]
+    fn eval_in_constant_list(
+        &self,
+        needle: &FilterExpression,
+        list: &FilterExpression,
+        items: &[Value],
+        set: Option<&super::InSet>,
+        chunk: &DataChunk,
+        row: usize,
+    ) -> Option<Value> {
+        let left = self.eval_expr(needle, chunk, row)?;
+        let Some(set) = set else {
+            return self.walk_in_list(needle, &left, list, items, chunk, row);
+        };
+        let answers = match &left {
+            Value::Null => return Some(Value::Null),
+            Value::Float64(_) | Value::String(_) | Value::Bool(_) => true,
+            Value::Int64(_) => !matches!(
+                self.operand_kind(needle, chunk, row),
+                OperandKind::Node | OperandKind::Edge
+            ),
+            _ => false,
+        };
+        if answers {
+            Some(set.answer(&left, |item| self.values_equal(&left, item)))
+        } else {
+            self.walk_in_list(needle, &left, list, items, chunk, row)
+        }
+    }
+
     /// Evaluates `left IN right` with three-valued NULL semantics.
     ///
     /// - `NULL IN [...]` yields UNKNOWN.
@@ -2452,58 +2514,66 @@ impl ExpressionPredicate {
         chunk: &DataChunk,
         row: usize,
     ) -> Option<Value> {
-        let right_val = self.eval_expr(right, chunk, row)?;
-        match right_val {
-            Value::List(items) => {
-                // Three-valued IN: NULL IN (...) is UNKNOWN
-                if left.is_null() {
-                    return Some(Value::Null);
-                }
-                // A node or an edge meets only items of its own kind (see
-                // `compare_across_kinds`), item by item as the list's shape
-                // types them
-                let needle_kind = self.operand_kind(needle, chunk, row);
-                let list_shape = self.shape(right, chunk, row);
-                let mut has_null = false;
-                for (position, item) in items.iter().enumerate() {
-                    if item.is_null() {
-                        has_null = true;
-                        continue;
-                    }
-                    // An item of a list written in the query has the kind of
-                    // its expression; one of a list value, its shape's
-                    let item_kind = match right {
-                        FilterExpression::List(expressions) => expressions
-                            .get(position)
-                            .map_or(OperandKind::Unknown, |expression| {
-                                self.operand_kind(expression, chunk, row)
-                            }),
-                        _ => i64::try_from(position).map_or(OperandKind::Unknown, |position| {
-                            OperandKind::of_shape(&super::project::item_type_at(
-                                &list_shape,
-                                position,
-                            ))
-                        }),
-                    };
-                    if needle_kind.apart_from(item_kind) {
-                        if let TemporalComparison::LocalAt(_) =
-                            self.session_context.temporal_comparison
-                        {
-                            return self.fail(not_comparable(left, needle_kind, item, item_kind));
-                        }
-                        continue;
-                    }
-                    if self.values_equal(left, item) {
-                        return Some(Value::Bool(true));
-                    }
-                }
-                if has_null {
-                    Some(Value::Null) // no match but NULLs present: UNKNOWN
-                } else {
-                    Some(Value::Bool(false))
-                }
-            }
+        match self.eval_expr(right, chunk, row)? {
+            Value::List(items) => self.walk_in_list(needle, left, right, &items, chunk, row),
             _ => None,
+        }
+    }
+
+    /// `left IN items`, `items` being the value of `right`, item by item.
+    fn walk_in_list(
+        &self,
+        needle: &FilterExpression,
+        left: &Value,
+        right: &FilterExpression,
+        items: &[Value],
+        chunk: &DataChunk,
+        row: usize,
+    ) -> Option<Value> {
+        // Three-valued IN: NULL IN (...) is UNKNOWN
+        if left.is_null() {
+            return Some(Value::Null);
+        }
+        // A node or an edge meets only items of its own kind (see
+        // `compare_across_kinds`), item by item as the list's shape types
+        // them. A needle of no known kind is apart from nothing, so no item's
+        // kind is read; only a list value's shape types its items.
+        let needle_kind = self.operand_kind(needle, chunk, row);
+        let list_shape = match (needle_kind, right) {
+            (OperandKind::Unknown, _) | (_, FilterExpression::List(_)) => LogicalType::Any,
+            _ => self.shape(right, chunk, row),
+        };
+        let mut has_null = false;
+        for (position, item) in items.iter().enumerate() {
+            if item.is_null() {
+                has_null = true;
+                continue;
+            }
+            // An item of a list written in the query has the kind of
+            // its expression; one of a list value, its shape's
+            let item_kind = match (needle_kind, right) {
+                (OperandKind::Unknown, _) => OperandKind::Unknown,
+                (_, FilterExpression::List(expressions)) => expressions
+                    .get(position)
+                    .map_or(OperandKind::Unknown, |expression| {
+                        self.operand_kind(expression, chunk, row)
+                    }),
+                _ => OperandKind::of_item(&list_shape, position),
+            };
+            if needle_kind.apart_from(item_kind) {
+                if let TemporalComparison::LocalAt(_) = self.session_context.temporal_comparison {
+                    return self.fail(not_comparable(left, needle_kind, item, item_kind));
+                }
+                continue;
+            }
+            if self.values_equal(left, item) {
+                return Some(Value::Bool(true));
+            }
+        }
+        if has_null {
+            Some(Value::Null) // no match but NULLs present: UNKNOWN
+        } else {
+            Some(Value::Bool(false))
         }
     }
 
@@ -4641,6 +4711,9 @@ impl ExpressionPredicate {
     /// value, such as `id()`), and otherwise unknown: a column whose type is
     /// lost (after `collect()`, a list value) may hold either.
     fn operand_kind(&self, expr: &FilterExpression, chunk: &DataChunk, row: usize) -> OperandKind {
+        if matches!(expr, FilterExpression::Literal(value) if !value.is_null()) {
+            return OperandKind::Value;
+        }
         match OperandKind::of_shape(&self.shape(expr, chunk, row)) {
             OperandKind::Unknown => {}
             entity => return entity,

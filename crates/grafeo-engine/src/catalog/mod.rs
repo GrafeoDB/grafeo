@@ -2472,6 +2472,10 @@ pub struct CatalogConstraintValidator {
     )>,
 }
 
+/// The most nodes a uniqueness check reads through a property index on a store that keeps no
+/// count of the label (see `nodes_with_value`).
+const UNIQUE_CHECK_CANDIDATES: usize = 1024;
+
 impl CatalogConstraintValidator {
     /// Creates a new validator wrapping the given catalog.
     pub fn new(catalog: Arc<Catalog>) -> Self {
@@ -2638,11 +2642,22 @@ impl CatalogConstraintValidator {
             .map_or_else(ReadView::latest, |(epoch, id)| {
                 ReadView::transaction(id, epoch)
             });
-        let candidates = if store.has_property_index(key) {
-            store.find_nodes_by_property(key, value, view)?
+        // An index on every label may hold more of a value than the label has nodes: then the
+        // check reads the label. The count picks the route only, and both routes give the same
+        // verdict, so the latest count serves a transaction too.
+        let latest = ReadView::latest();
+        let limit = if store.label_count_is_kept(label, latest) {
+            store.nodes_by_label_count(label, latest)?
         } else {
-            store.nodes_by_label(label, view)?
+            UNIQUE_CHECK_CANDIDATES
         };
+        // Every spelling an index keeps apart that `==` does not, as `0.0` and `-0.0`: the
+        // verdict is the same with an index and without.
+        let candidates =
+            match store.find_few_indexed_maybe_equal(&[label], key, value, limit, view)? {
+                Some(nodes) => nodes,
+                None => store.nodes_by_label(label, view)?,
+            };
         let key = grafeo_common::types::PropertyKey::from(key);
         let mut found = Vec::new();
         for id in candidates {
@@ -2654,6 +2669,17 @@ impl CatalogConstraintValidator {
             }
         }
         Ok(found)
+    }
+
+    /// The checks of a write to the graph with storage key `key` (`None` for the default
+    /// graph) under `catalog`, without what reads the store.
+    pub(crate) fn of_graph(catalog: &Arc<Catalog>, key: Option<&str>) -> Self {
+        let schema = key.and_then(|key| key.split_once('/').map(|(schema, _)| schema));
+        let validator = Self::new(Arc::clone(catalog)).with_schema(schema);
+        match key {
+            Some(graph) => validator.with_graph_name(graph),
+            None => validator,
+        }
     }
 
     /// Checks writes to the graph with storage key `name` (`schema/graph` in
@@ -3425,6 +3451,21 @@ impl ConstraintValidator for CatalogConstraintValidator {
             }
         }
         Ok(())
+    }
+
+    fn constrains_some_edge_endpoints(&self) -> bool {
+        let of_a_bound_type = self.bound_types.as_ref().is_some_and(|bound| {
+            bound
+                .edge_type_names
+                .keys()
+                .any(|name| self.constrains_edge_endpoints(name))
+        });
+        of_a_bound_type
+            || self
+                .catalog
+                .all_edge_type_defs()
+                .iter()
+                .any(|def| self.constrains_edge_endpoints(unqualified(&def.name)))
     }
 
     fn constrains_edge_endpoints(&self, edge_type: &str) -> bool {

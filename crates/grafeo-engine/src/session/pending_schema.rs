@@ -28,6 +28,82 @@ use crate::transaction::{BuiltIndex, QueuedSchemaOp, StandaloneChange};
 /// The plans a transaction with its own catalog makes, kept from every other session.
 const PRIVATE_PLANS: usize = 64;
 
+/// Which named RDF graphs exist as a commit's queued operations apply in order, for a check
+/// ahead of logging: one that does not apply once logged poisons the database.
+#[cfg(feature = "triple-store")]
+struct RdfGraphsAhead<'a> {
+    store: &'a grafeo_core::graph::rdf::RdfStore,
+    /// The graphs the operations so far made or took away.
+    changed: std::collections::HashMap<String, bool>,
+    /// Whether one took away every named graph there was.
+    all_gone: bool,
+}
+
+#[cfg(feature = "triple-store")]
+impl<'a> RdfGraphsAhead<'a> {
+    fn new(store: &'a grafeo_core::graph::rdf::RdfStore) -> Self {
+        Self {
+            store,
+            changed: std::collections::HashMap::new(),
+            all_gone: false,
+        }
+    }
+
+    fn exists(&self, name: &str) -> bool {
+        self.changed
+            .get(name)
+            .copied()
+            .unwrap_or_else(|| !self.all_gone && self.store.graph(name).is_some())
+    }
+
+    /// Whether `op` applies after those before it, as `RdfStore::apply_graph_op` would.
+    fn applies(&mut self, op: &grafeo_common::change::RdfGraphOp) -> bool {
+        use grafeo_common::change::RdfGraphOp;
+        use grafeo_common::storage::log_record::RdfGraphTarget;
+        match op {
+            RdfGraphOp::Create { name } => {
+                if self.exists(name) {
+                    return false;
+                }
+                self.changed.insert(name.clone(), true);
+            }
+            RdfGraphOp::Drop {
+                target: RdfGraphTarget::Named(name),
+            } => {
+                if !self.exists(name) {
+                    return false;
+                }
+                self.changed.insert(name.clone(), false);
+            }
+            RdfGraphOp::Drop {
+                target: RdfGraphTarget::All | RdfGraphTarget::AllNamed,
+            }
+            | RdfGraphOp::Clear {
+                target: RdfGraphTarget::All | RdfGraphTarget::AllNamed,
+            } => {
+                self.changed.clear();
+                self.all_gone = true;
+            }
+            RdfGraphOp::Drop { .. } | RdfGraphOp::Clear { .. } => {}
+            RdfGraphOp::Copy { source, target }
+            | RdfGraphOp::Move { source, target }
+            | RdfGraphOp::Add { source, target } => {
+                if source != target {
+                    if matches!(op, RdfGraphOp::Move { .. })
+                        && let Some(source) = source
+                    {
+                        self.changed.insert(source.clone(), false);
+                    }
+                    if let Some(target) = target {
+                        self.changed.insert(target.clone(), true);
+                    }
+                }
+            }
+        }
+        true
+    }
+}
+
 /// A transaction's own view of the catalog.
 pub(super) struct PendingSchema {
     /// The catalog at its first schema statement: a savepoint rollback reapplies the
@@ -119,11 +195,13 @@ impl Session {
         let mut graphs = self.stores.pending_graphs.write();
         graphs.created.clear();
         graphs.dropped.clear();
+        graphs.made.clear();
         changes.read_schema(|queue| {
             for queued in queue {
                 match (&queued.op, &queued.graph) {
                     (StandaloneOp::CreateGraph { name }, Some(graph)) => {
                         graphs.created.insert(name.clone(), Arc::clone(graph));
+                        graphs.made.insert(name.clone());
                     }
                     (StandaloneOp::DropGraph { name }, _) => {
                         graphs.created.remove(name);
@@ -163,15 +241,16 @@ impl Session {
         Ok(())
     }
 
-    /// Whether the session is in a graph the transaction created, by its name.
+    /// Whether the session is in a graph the transaction created, also one it has dropped
+    /// since, by its name.
     fn current_graph_created_here(&self) -> Option<String> {
         let current = self.current_graph.lock().clone()?;
         let key = self.effective_graph_key(&current);
         self.stores
             .pending_graphs
             .read()
-            .created
-            .contains_key(&key)
+            .made
+            .contains(&key)
             .then_some(current)
     }
 
@@ -192,6 +271,7 @@ impl Session {
             let mut graphs = self.stores.pending_graphs.write();
             graphs.created.clear();
             graphs.dropped.clear();
+            graphs.made.clear();
         }
         self.leave_graph_if_gone(current);
     }
@@ -222,6 +302,8 @@ impl Session {
         let mut made = std::collections::HashSet::new();
         let view = ReadView::transaction(transaction, EpochId::LATEST);
         let mut built = Vec::with_capacity(queue.len());
+        #[cfg(feature = "triple-store")]
+        let mut rdf_graphs = RdfGraphsAhead::new(&self.rdf_store);
         for queued in queue {
             apply_to_catalog(&queued.op, &check).map_err(|error| conflict(error.to_string()))?;
             let mut index = None;
@@ -245,6 +327,9 @@ impl Session {
                 #[cfg(feature = "triple-store")]
                 StandaloneOp::RdfGraph(op) => {
                     crate::transaction::refuse_graph_op_with_changes_in(&open, op)?;
+                    if !rdf_graphs.applies(op) {
+                        return Err(conflict(format!("the RDF graph of {op:?}")));
+                    }
                 }
                 StandaloneOp::PutCatalog(CatalogRecord::Index(record)) => {
                     index = self.build_for_commit(record, view)?;
@@ -337,7 +422,10 @@ impl Session {
                 }
                 CatalogRecord::EdgeType(record) => {
                     let def = edge_type_definition(record.clone())?;
-                    if !def.properties.is_empty() {
+                    if !def.properties.is_empty()
+                        || !def.source_node_types.is_empty()
+                        || !def.target_node_types.is_empty()
+                    {
                         scope.edge_types.push(short_name(&def.name).to_string());
                     }
                 }
@@ -452,8 +540,6 @@ impl Session {
         transaction: TransactionId,
         changes: Option<&crate::transaction::TransactionChanges>,
     ) -> Result<()> {
-        use grafeo_core::execution::operators::ConstraintValidator;
-
         let began = self
             .rules_at_begin
             .load(std::sync::atomic::Ordering::Relaxed);
@@ -475,13 +561,8 @@ impl Session {
                 }
                 for id in written.edges {
                     if let Some(edge) = store.edge(id, view)? {
-                        let properties: Vec<(String, grafeo_common::types::Value)> = edge
-                            .properties
-                            .iter()
-                            .map(|(key, value)| (key.as_str().to_string(), value.clone()))
-                            .collect();
                         validator
-                            .validate_edge_complete(edge.edge_type.as_str(), &properties)
+                            .check_edge_as_it_stands(&*store, &edge, true, view)
                             .map_err(error)?;
                     }
                 }

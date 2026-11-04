@@ -305,10 +305,15 @@ impl CostModel {
             LogicalOperator::Filter(filter) => self.filter_cost(filter, cardinality),
             LogicalOperator::Project(project) => self.project_cost(project, cardinality),
             // `cardinality` is the rows it gives, its fanout already in.
-            LogicalOperator::Expand(expand) => self.expand_cost(
-                expand,
-                cardinality / self.fanout_for_expand(expand).max(1.0),
-            ),
+            LogicalOperator::Expand(expand) => {
+                let fanout = self.fanout_for_expand(expand);
+                let input = if fanout > 0.0 {
+                    cardinality / fanout
+                } else {
+                    cardinality
+                };
+                self.expand_cost(expand, input)
+            }
             LogicalOperator::Join(join) => self.join_cost(join, cardinality),
             LogicalOperator::Aggregate(agg) => self.aggregate_cost(agg, cardinality),
             LogicalOperator::Sort(sort) => self.sort_cost(sort, cardinality),
@@ -1460,6 +1465,39 @@ mod tests {
             "Person ({}) should have much higher IO than Company ({})",
             person_cost.io,
             company_cost.io
+        );
+    }
+
+    /// A hop that reaches few rows still reads its whole input: the input comes back from the
+    /// rows given and the fanout, also when the fanout is below one.
+    #[test]
+    fn a_fanout_below_one_costs_the_rows_it_reads() {
+        let expand = |edge_type: &str| {
+            LogicalOperator::Expand(ExpandOp {
+                from_variable: "a".to_string(),
+                to_variable: "b".to_string(),
+                edge_variable: None,
+                direction: ExpandDirection::Outgoing,
+                edge_types: vec![edge_type.to_string()],
+                min_hops: 1,
+                max_hops: Some(1),
+                input: Box::new(LogicalOperator::Empty),
+                path_alias: None,
+                path_mode: crate::query::plan::PathMode::Walk,
+                quantified: false,
+            })
+        };
+        let model = CostModel::new().with_edge_type_degrees(std::collections::HashMap::from([
+            ("SPARSE".to_string(), (0.1, 0.1)),
+            ("ONE".to_string(), (1.0, 1.0)),
+        ]));
+        let sparse = model.estimate(&expand("SPARSE"), 100.0);
+        let one = model.estimate(&expand("ONE"), 100.0);
+        assert!(
+            sparse.total() > one.total(),
+            "100 rows from 1,000 inputs against 100 from 100: {} and {}",
+            sparse.total(),
+            one.total()
         );
     }
 

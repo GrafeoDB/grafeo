@@ -114,16 +114,21 @@ impl PropertyIndex {
         let Some(class) = HashKey::for_equality(key) else {
             return true; // NULL equals nothing
         };
+        let probes = probes(key);
         let mut count = 0;
         let mut within = |value: &HashableValue| {
             count += self.values.get(value).map_or(0, |nodes| nodes.len());
             count <= limit
         };
-        probes(key).iter().all(&mut within)
-            && self
-                .others_by_class
-                .get(&class)
-                .is_none_or(|others| others.iter().all(&mut within))
+        probes
+            .iter()
+            .enumerate()
+            .all(|(index, value)| probes[..index].contains(value) || within(value))
+            && self.others_by_class.get(&class).is_none_or(|others| {
+                others
+                    .iter()
+                    .all(|value| probes.contains(value) || within(value))
+            })
     }
 
     /// How many distinct values the index holds.
@@ -492,5 +497,30 @@ mod tests {
                 assert_eq!(finds, found.contains(&(n as u64)), "{key:?} and {value:?}");
             }
         }
+    }
+
+    /// A value reached both as a probe and in the side table counts once, or a key within the cap
+    /// loses its seek and every edge is listed.
+    #[test]
+    fn a_value_counts_once_however_it_is_reached() {
+        let values: Vec<Value> = std::iter::repeat_n(Value::Int64(42), 600).collect();
+        let index = index(&values);
+        assert_eq!(found(&index, Value::Int64(42)).len(), 600);
+        assert!(index.candidates_within(&Value::Int64(42), 600), "the int");
+        assert!(
+            index.candidates_within(&Value::Float64(42.0), 600),
+            "a float of it"
+        );
+        let strings: Vec<Value> = std::iter::repeat_n(Value::from("42"), 600).collect();
+        let index = self::tests::index(&strings);
+        assert_eq!(found(&index, Value::Int64(42)).len(), 600);
+        assert!(
+            index.candidates_within(&Value::Int64(42), 600),
+            "a string of it"
+        );
+        assert!(
+            index.candidates_within(&Value::from("42"), 600),
+            "the string"
+        );
     }
 }

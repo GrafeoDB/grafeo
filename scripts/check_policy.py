@@ -412,6 +412,21 @@ def rust_version_findings(root: Path, metadata: dict) -> list[Finding]:
 #: A file module of `tests/main.rs`.
 TEST_MODULE = re.compile(r"^\s*(?:pub(?:\([^)]*\))?\s+)?mod\s+(\w+)\s*;", re.MULTILINE)
 TEST_TARGET_HEADER = re.compile(r"^\s*\[\[\s*test\s*\]\]")
+RUST_COMMENT_TOKEN = re.compile(r"(//[^\n]*|/\*|\*/)")
+
+
+def without_rust_comments(text: str) -> str:
+    """Rust source with its comments taken out; block comments nest."""
+    kept = []
+    depth = 0
+    for part in RUST_COMMENT_TOKEN.split(text):
+        if part == "/*":
+            depth += 1
+        elif part == "*/":
+            depth = max(depth - 1, 0)
+        elif depth == 0 and not part.startswith("//"):
+            kept.append(part)
+    return "".join(kept)
 
 
 def test_binary_findings(root: Path, files: list[str]) -> list[Finding]:
@@ -444,7 +459,7 @@ def test_binary_findings(root: Path, files: list[str]) -> list[Finding]:
             if "tests/main.rs" in targets
             else ""
         )
-        modules = set(TEST_MODULE.findall(main))
+        modules = set(TEST_MODULE.findall(without_rust_comments(main)))
         for name in sorted(test_files):
             is_target = f"tests/{name}" in targets
             is_module = name.removesuffix(".rs") in modules

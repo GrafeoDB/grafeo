@@ -119,6 +119,8 @@ def catalog(db, query):
     try:
         return sorted(json.dumps(row, sort_keys=True, default=str) for row in db.execute(query))
     except grafeo.GrafeoError as error:
+        if query != PROCEDURE or "p1" not in str(error):
+            raise
         return str(error).split(":")[0]
 
 

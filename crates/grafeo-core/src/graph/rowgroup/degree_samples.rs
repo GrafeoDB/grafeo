@@ -23,6 +23,10 @@ const LEAST_CHANGE: u64 = 16;
 /// The most edges a sample of reached ends keeps.
 const SAMPLE_EDGES: u64 = 256;
 
+/// The longest list a first-stage sample counts: past it the entries it holds stand for
+/// its edges, without going through them.
+const COUNTED_LIST: u64 = 64;
+
 /// The most values of reached ends a store holds: past it they are read again, so a
 /// long-running process with new types does not grow for ever.
 const MOST_REACHED_ENTRIES: usize = 256;
@@ -64,6 +68,8 @@ pub(super) struct DegreeSamples {
     samples: Mutex<FxHashMap<(String, String, Direction), Sample>>,
     reached: Mutex<FxHashMap<ReachedKey, ReachedSample>>,
     taken: AtomicU64,
+    /// The reads samples of reached ends have spent.
+    reached_reads: AtomicU64,
 }
 
 impl DegreeSamples {
@@ -154,6 +160,14 @@ impl RowGroupStore {
         self.degree_samples.taken.load(Ordering::Relaxed)
     }
 
+    /// How many reads the samples of reached ends have spent, for a test to see that a
+    /// budget holds whatever the lists' lengths.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn degree_sample_reads(&self) -> u64 {
+        self.degree_samples.reached_reads.load(Ordering::Relaxed)
+    }
+
     /// The mean count of `edge_type`'s edges in `direction` over a sample of
     /// `label`'s nodes, `None` for a label without a node or a read that fails.
     pub(super) fn sample_degree(
@@ -217,8 +231,11 @@ impl RowGroupStore {
         if *budget == 0 {
             return None;
         }
-        let (degree, reads) = self.read_reached(&key)?;
+        let (degree, reads) = self.read_reached(&key, *budget)?;
         *budget = budget.saturating_sub(reads);
+        self.degree_samples
+            .reached_reads
+            .fetch_add(reads, Ordering::Relaxed);
         self.degree_samples.taken.fetch_add(1, Ordering::Relaxed);
         let mut reached = self.degree_samples.reached.lock();
         if reached.len() >= MOST_REACHED_ENTRIES {
@@ -269,7 +286,14 @@ impl RowGroupStore {
     /// being kept and a hub gets its share by length, and the next hop's count at each end
     /// kept, each distinct end read once. Its value, and the reads it took. Only lists that
     /// hold a kept position are read, one store call at a time.
-    fn read_reached(&self, key: &ReachedKey) -> Option<(Option<f64>, u64)> {
+    ///
+    /// `budget` holds whatever the lists' lengths, past a read per start and per kept end: a
+    /// quarter of it counts the lists and a quarter the ends' edges, and a list longer than
+    /// its share counts as the entries it holds; the rest reads the lists, and a list longer
+    /// than its share gives its first edges, a position past them wrapping round. So short of
+    /// budget, a value reads high by what those entries hold of removed edges, and from the
+    /// edges a hub got first.
+    fn read_reached(&self, key: &ReachedKey, budget: u64) -> Option<(Option<f64>, u64)> {
         let view = ReadView::latest();
         let types_of = |names: &[String]| -> Vec<ArcStr> {
             names
@@ -291,13 +315,17 @@ impl RowGroupStore {
                 .filter_map(|rank| nodes.get(usize::try_from(rank).ok()?).copied())
                 .collect()
         };
-        let mut reads = starts.len() as u64;
+        let share = |spent_up_to: u64, reads: u64, parts: usize| {
+            spent_up_to.saturating_sub(reads) / (parts.max(1) as u64)
+        };
+        let mut reads = 0_u64;
         let mut lengths = Vec::with_capacity(starts.len());
-        for start in &starts {
-            lengths.push(
-                self.count_edges(*start, key.via_direction, &via, &[], view)
-                    .ok()? as u64,
-            );
+        for (index, start) in starts.iter().enumerate() {
+            let within = share(budget / 4, reads, starts.len() - index);
+            let (length, spent) =
+                self.count_within(*start, key.via_direction, &via, within, view)?;
+            lengths.push(length);
+            reads += spent;
         }
         let total: u64 = lengths.iter().sum();
         if total == 0 {
@@ -309,44 +337,89 @@ impl RowGroupStore {
         } else {
             ranks_up_to(total, SAMPLE_EDGES)
         };
-        let mut far_counts: FxHashMap<NodeId, u64> = FxHashMap::default();
-        let mut sum = 0_u64;
-        let mut kept = 0_u64;
-        let mut next = positions.iter().copied().peekable();
+        let mut ends = Vec::with_capacity(positions.len());
+        let mut left = positions.as_slice();
         let mut offset = 0_u64;
         for (start, length) in starts.iter().zip(&lengths) {
             let end = offset + length;
-            if next.peek().is_some_and(|position| *position < end) {
-                let list = self.edges(*start, key.via_direction, &via, view).ok()?;
+            let held = left.partition_point(|position| *position < end);
+            if held > 0 {
+                let (here, after) = left.split_at(held);
+                let spare = share(budget - budget / 4, reads, left.len());
+                let within = spare.saturating_mul(held as u64).max(held as u64);
+                let wanted = here[held - 1] - offset + 1;
+                let limit = usize::try_from(wanted.min(within)).unwrap_or(usize::MAX);
+                let list = self.first_ends(*start, key.via_direction, &via, limit, view);
                 reads += list.len() as u64;
-                while let Some(position) = next.next_if(|position| *position < end) {
-                    let Some((far, _)) = usize::try_from(position - offset)
-                        .ok()
-                        .and_then(|at| list.get(at))
-                    else {
-                        continue;
-                    };
-                    let count = match far_counts.get(far) {
-                        Some(count) => *count,
-                        None => {
-                            let count = self
-                                .count_edges(*far, key.on_direction, &on, &[], view)
-                                .ok()? as u64;
-                            reads += 1;
-                            far_counts.insert(*far, count);
-                            count
-                        }
-                    };
-                    sum += count;
-                    kept += 1;
-                }
+                ends.extend(here.iter().filter_map(|position| {
+                    let at = usize::try_from(position - offset).ok()? % limit;
+                    list.get(at).copied()
+                }));
+                left = after;
             }
             offset = end;
         }
+        let mut far_counts: FxHashMap<NodeId, u64> = FxHashMap::default();
+        let mut sum = 0_u64;
+        for (index, far) in ends.iter().enumerate() {
+            let count = match far_counts.get(far) {
+                Some(count) => *count,
+                None => {
+                    let within = share(budget, reads, ends.len() - index);
+                    let (count, spent) =
+                        self.count_within(*far, key.on_direction, &on, within, view)?;
+                    reads += spent;
+                    far_counts.insert(*far, count);
+                    count
+                }
+            };
+            sum += count;
+        }
+        let kept = ends.len() as u64;
         if kept == 0 || (sum == 0 && !every_edge_read) {
             return Some((None, reads));
         }
         Some((Some(sum as f64 / kept as f64), reads))
+    }
+
+    /// How many edges `node` has of `types`, and the reads that took: a list longer than
+    /// `within` is not gone through, and counts as the entries it holds. A store that keeps
+    /// no list to read counts them all, as one read.
+    fn count_within(
+        &self,
+        node: NodeId,
+        direction: Direction,
+        types: &[ArcStr],
+        within: u64,
+        view: ReadView,
+    ) -> Option<(u64, u64)> {
+        let entries = self.inner.read().entries_of_types_at_most(
+            node,
+            direction,
+            types,
+            super::Read::view(view),
+        );
+        match entries.map(|entries| entries as u64) {
+            Some(entries) if entries > within => Some((entries, 1)),
+            entries => {
+                let count = self.count_edges(node, direction, types, &[], view).ok()? as u64;
+                Some((count, entries.unwrap_or(1).max(1)))
+            }
+        }
+    }
+
+    /// The other ends of the first `limit` edges of `node` of `types`.
+    fn first_ends(
+        &self,
+        node: NodeId,
+        direction: Direction,
+        types: &[ArcStr],
+        limit: usize,
+        view: ReadView,
+    ) -> Vec<NodeId> {
+        self.inner
+            .read()
+            .first_ends_seen(node, direction, types, limit, super::Read::view(view))
     }
 
     /// The nodes of `label` and the edges of `edge_type`, as committed.
@@ -366,7 +439,10 @@ impl RowGroupStore {
         let view = ReadView::latest();
         let nodes = self.nodes_by_label(label, view).ok()?;
         let types = [ArcStr::from(edge_type)];
-        let count = |node| self.count_edges(node, direction, &types, &[], view).ok();
+        let count = |node| {
+            self.count_within(node, direction, &types, COUNTED_LIST, view)
+                .map(|(count, _)| count)
+        };
         let sampled: Vec<NodeId> = if nodes.len() <= SAMPLE_NODES {
             nodes
         } else {

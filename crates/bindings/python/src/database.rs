@@ -356,8 +356,6 @@ impl PyGrafeoDB {
         .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("Arrow export failed: {e}")))
     }
 
-    /// Runs `work` on the database with the GIL released (see
-    /// [`crate::gil`]): the read lock is taken inside, once the GIL is gone.
     /// Warns of the types whose rules no longer reach graphs not bound to their graph type,
     /// which a build without a log would otherwise not tell (see
     /// `GrafeoDB::graph_type_scope_warnings`).
@@ -376,6 +374,8 @@ impl PyGrafeoDB {
         })
     }
 
+    /// Runs `work` on the database with the GIL released (see
+    /// [`crate::gil`]): the read lock is taken inside, once the GIL is gone.
     fn released<T: Send>(
         &self,
         py: Python<'_>,

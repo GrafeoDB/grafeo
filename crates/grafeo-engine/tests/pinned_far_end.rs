@@ -812,6 +812,9 @@ fn keys_of_other_types_find_what_equals_finds() {
             "MATCH (h:Hub)-[:KNOWS]->(b:Person {{id: {value}}}) RETURN b.name"
         ));
     }
+    // A rule may answer where the plain plan raises, not the other way: only an answer of the
+    // plain plan is compared, and most keys must give one, or this compares nothing.
+    let mut compared = 0;
     for key in keys {
         let values = parameters(&[("y", key.clone())]);
         let mut answers = Vec::new();
@@ -823,9 +826,11 @@ fn keys_of_other_types_find_what_equals_finds() {
         for (name, got) in &answers {
             if plain.is_ok() {
                 assert_eq!(got, &plain, "{name}: key {key:?}");
+                compared += 1;
             }
         }
     }
+    assert!(compared > 0, "the plain plan raised for every key");
     for literal in &literals {
         let mut answers = Vec::new();
         for (name, rules) in rule_sets() {
@@ -833,10 +838,9 @@ fn keys_of_other_types_find_what_equals_finds() {
             answers.push((name, run(&session, Language::Gql, literal, &HashMap::new())));
         }
         let (_, plain) = answers.last().unwrap().clone();
+        assert!(plain.is_ok(), "the plain plan raised for {literal}");
         for (name, got) in &answers {
-            if plain.is_ok() {
-                assert_eq!(got, &plain, "{name}: {literal}");
-            }
+            assert_eq!(got, &plain, "{name}: {literal}");
         }
     }
     // An id of another type: the key must not find more or fewer than `=` does.

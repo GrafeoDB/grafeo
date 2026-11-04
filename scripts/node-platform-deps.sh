@@ -97,7 +97,7 @@ binaries() {
   expected_names >/dev/null
   for dir in npm/*/; do
     main=$(node -p "require('./${dir}package.json').main")
-    [ -s "$dir$main" ] || fail "$dir has no $main"
+    { [ -f "$dir$main" ] && [ -s "$dir$main" ]; } || fail "$dir has no $main"
   done
 }
 

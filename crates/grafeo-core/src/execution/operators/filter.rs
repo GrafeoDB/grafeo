@@ -302,11 +302,8 @@ impl ComparisonPredicate {
                         compare_holds(self.op, order.reverse())
                     })
             }
-            (Value::Bool(a), Value::Bool(b)) => match self.op {
-                CompareOp::Eq => a == b,
-                CompareOp::Ne => a != b,
-                _ => false, // Ordering on booleans doesn't make sense
-            },
+            // False is below true (ISO/IEC 39075 19.3).
+            (Value::Bool(a), Value::Bool(b)) => compare_holds(self.op, a.cmp(b)),
             _ => false, // Type mismatch
         }
     }
@@ -4765,6 +4762,8 @@ impl ExpressionPredicate {
                 super::value_utils::compare_with_decimal(left, right).map(|o| o as i32)
             }
             (Value::Int64(a), Value::Int64(b)) => Some(a.cmp(b) as i32),
+            // False is below true (ISO/IEC 39075 19.3).
+            (Value::Bool(a), Value::Bool(b)) => Some(a.cmp(b) as i32),
             // NaN is neither less nor greater than anything (IEEE).
             (Value::Float64(a), Value::Float64(b)) => a.partial_cmp(b).map(|o| o as i32),
             (Value::String(a), Value::String(b)) => Some(a.cmp(b) as i32),

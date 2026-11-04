@@ -2208,8 +2208,11 @@ pub(crate) fn cannot_raise(expr: &LogicalExpression) -> bool {
         },
         LogicalExpression::FunctionCall {
             callee: Callee::Builtin(BuiltinFunction::HasLabel),
+            args,
             ..
-        } => true,
+        } => args
+            .iter()
+            .all(|arg| is_value(arg) || matches!(arg, LogicalExpression::Variable(_))),
         other => is_search_call(other),
     }
 }

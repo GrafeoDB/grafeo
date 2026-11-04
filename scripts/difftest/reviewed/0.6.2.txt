@@ -19,3 +19,17 @@ DT7|gql 0197c21812 The edge type is accepted because DT4's refused one left noth
 DU1|gql a95a21305f START TRANSACTION through a per-call statement is refused and names begin_transaction; 0.6.1 accepted it and dropped the transaction at the end of the call.
 DU2|gql d0ea2add79 The error of COMMIT outside a transaction says why a per-call statement has none; the status is the same.
 DU3|gql d0ea2add79 The error of ROLLBACK outside a transaction says why a per-call statement has none; the status is the same.
+DV1|cypher bb2ca2e463 False is below true (ISO/IEC 39075 19.3); 0.6.1 gave null for a comparison of two Booleans.
+DV1|gql bb2ca2e463 False is below true (ISO/IEC 39075 19.3); 0.6.1 gave null for a comparison of two Booleans.
+DV2|cypher bb2ca2e463 False is below true (ISO/IEC 39075 19.3); 0.6.1 gave null for a comparison of two Booleans.
+DV2|gql bb2ca2e463 False is below true (ISO/IEC 39075 19.3); 0.6.1 gave null for a comparison of two Booleans.
+DV3|cypher 2886b8064e False is below true (ISO/IEC 39075 19.3); 0.6.1 gave null for a comparison of two Booleans.
+DV3|gql 2886b8064e False is below true (ISO/IEC 39075 19.3); 0.6.1 gave null for a comparison of two Booleans.
+DV5|cypher 068d50c9ff False is below true (ISO/IEC 39075 19.3); 0.6.1 lost these rows behind another part of the query, though a filter on a lone scan found them.
+DV5|gql 068d50c9ff False is below true (ISO/IEC 39075 19.3); 0.6.1 lost these rows behind another part of the query, though a filter on a lone scan found them.
+DV6|cypher 7060556dc5 False is below true (ISO/IEC 39075 19.3); 0.6.1 lost these rows behind another part of the query, though a filter on a lone scan found them.
+DV6|gql 7060556dc5 False is below true (ISO/IEC 39075 19.3); 0.6.1 lost these rows behind another part of the query, though a filter on a lone scan found them.
+DV7|cypher cc1c3fcee1 False is below true (ISO/IEC 39075 19.3); 0.6.1 lost these rows behind another part of the query, though a filter on a lone scan found them.
+DV7|gql cc1c3fcee1 False is below true (ISO/IEC 39075 19.3); 0.6.1 lost these rows behind another part of the query, though a filter on a lone scan found them.
+DV8|cypher cc1c3fcee1 False is below true (ISO/IEC 39075 19.3); 0.6.1 lost these rows behind another part of the query, though a filter on a lone scan found them.
+DV8|gql cc1c3fcee1 False is below true (ISO/IEC 39075 19.3); 0.6.1 lost these rows behind another part of the query, though a filter on a lone scan found them.

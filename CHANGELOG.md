@@ -19,9 +19,14 @@ Queries that ran in 0.6.1 and now fail or behave differently.
 ### Fixed
 
 - **SPARQL**: fixed a slowdown in multi-way joins from 0.6.1.
+- **Booleans**: `<`, `<=`, `>` and `>=` order false below true in every plan; they could return null and lose rows.
 - **Schema statements** roll back with their transaction, also across a crash (#727).
 - **Conditions that can fail**, such as `100 / n.age > 0`, no longer fail on rows a label or an earlier condition rejects.
 - **Graph type patterns**: naming an existing type no longer wipes its properties, and several patterns of one edge type no longer lose all but the last.
+
+### Contributors
+
+- Thanks to [atontini](https://github.com/atontini) for correcting the read-only docs and pinning the lock behind them ([#734](https://github.com/GrafeoDB/grafeo/pull/734), [#735](https://github.com/GrafeoDB/grafeo/pull/735)).
 
 ## [0.6.1] - 2026-11-01
 

@@ -30,7 +30,7 @@ pub(crate) struct SeekChoice<'a> {
 /// A conjunct of the filter must pin the scanned node: `id(v) = e`, or
 /// `v.p = e` with `p` indexed, or the `IN` form of either, where `e` does not
 /// read `v` (it may read the scan's input, parameters and literals). An ID is
-/// preferred over a property. A scan without input with a constant property
+/// preferred over a property, and left out without `id_seeks`. A scan without input with a constant property
 /// key is left to the plan-time index lookup, which resolves it once, unless
 /// the filter runs `after_a_write` of its statement: that lookup would not
 /// see the write (see `Planner::reads_the_store_as_planned`), the seek looks
@@ -39,6 +39,7 @@ pub(crate) fn choose_seek<'a>(
     predicate: &'a LogicalExpression,
     scan: &NodeScanOp,
     has_index: impl Fn(&str) -> bool,
+    id_seeks: bool,
     after_a_write: bool,
 ) -> Option<SeekChoice<'a>> {
     let mut conjuncts = Vec::new();
@@ -55,7 +56,8 @@ pub(crate) fn choose_seek<'a>(
             continue;
         }
         match choice.key {
-            SeekKey::Id => return Some(choice),
+            SeekKey::Id if id_seeks => return Some(choice),
+            SeekKey::Id => {}
             SeekKey::Property(_) => {
                 let looked_up_while_planning = scan.input.is_none() && !after_a_write;
                 if !looked_up_while_planning && by_property.is_none() {
@@ -83,11 +85,9 @@ pub(crate) fn allowed_seek<'a>(
             rules.has(crate::query::optimizer::PlannerRule::KeySeek)
                 && store.has_property_index(property)
         },
+        rules.has(crate::query::optimizer::PlannerRule::IdSeek),
         after_a_write,
     )
-    .filter(|seek| {
-        !matches!(seek.key, SeekKey::Id) || rules.has(crate::query::optimizer::PlannerRule::IdSeek)
-    })
 }
 
 /// Whether `conjunct` pins `variable` to the nodes a key selects: `id(v) = e`,

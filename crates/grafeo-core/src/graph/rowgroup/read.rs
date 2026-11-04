@@ -409,6 +409,19 @@ impl Inner {
         edge_types: Option<&[u32]>,
         read: Read,
     ) -> bool {
+        self.seen_until(node, direction, edge_types, read, |_| true)
+    }
+
+    /// Gives the other end of each edge [`each_seen`](Self::each_seen) would give to `stop`,
+    /// until it answers true: whether it did.
+    fn seen_until(
+        &self,
+        node: NodeId,
+        direction: Direction,
+        edge_types: Option<&[u32]>,
+        read: Read,
+        mut stop: impl FnMut(NodeId) -> bool,
+    ) -> bool {
         let raw = node.as_u64();
         let Some((group, row)) = self.node_seen(raw, read) else {
             return false;
@@ -428,17 +441,61 @@ impl Inner {
         directions.iter().any(|&outgoing| {
             if outgoing || self.keeps_incoming() {
                 let adjacency = group.adjacency(outgoing);
+                let mut stops = |adjacent: Adjacent| {
+                    counts(adjacent, outgoing) && stop(NodeId::new(adjacent.other))
+                };
                 match edge_types {
-                    Some(&[edge_type]) => adjacency
-                        .of_type(row, edge_type)
-                        .any(|adjacent| counts(adjacent, outgoing)),
-                    _ => adjacency.of(row).any(|adjacent| counts(adjacent, outgoing)),
+                    Some(&[edge_type]) => adjacency.of_type(row, edge_type).any(&mut stops),
+                    _ => adjacency.of(row).any(&mut stops),
                 }
             } else {
                 self.incoming_by_scan(raw)
-                    .any(|adjacent| counts(adjacent, outgoing))
+                    .any(|adjacent| counts(adjacent, outgoing) && stop(NodeId::new(adjacent.other)))
             }
         })
+    }
+
+    /// The most edges [`each_seen`](Self::each_seen) can give, without going through them:
+    /// the entries of the lists it reads, removed and unseen ones among them. `None` when it
+    /// would scan for the incoming edges this store does not keep.
+    fn entries_at_most(
+        &self,
+        node: NodeId,
+        direction: Direction,
+        edge_types: Option<&[u32]>,
+        read: Read,
+    ) -> Option<usize> {
+        let Some((group, row)) = self.node_seen(node.as_u64(), read) else {
+            return Some(0);
+        };
+        let directions: &[bool] = match direction {
+            Direction::Outgoing => &[true],
+            Direction::Incoming => &[false],
+            Direction::Both => &[true, false],
+        };
+        let mut entries = 0;
+        for &outgoing in directions {
+            if !(outgoing || self.keeps_incoming()) {
+                return None;
+            }
+            let adjacency = group.adjacency(outgoing);
+            entries += match edge_types {
+                None => adjacency.entries_of(row),
+                Some(types) => {
+                    let sorted: usize = adjacency
+                        .runs_of(row)
+                        .filter(|run| types.contains(&run[0].edge_type))
+                        .map(<[Adjacent]>::len)
+                        .sum();
+                    let delta = adjacency.delta_of(row).iter();
+                    sorted
+                        + delta
+                            .filter(|adjacent| types.contains(&adjacent.edge_type))
+                            .count()
+                }
+            };
+        }
+        Some(entries)
     }
 
     /// The type ids of `types`, the names the store has an edge type of;
@@ -450,6 +507,43 @@ impl Inner {
                 .filter_map(|name| self.edge_types.get_id(name))
                 .collect()
         })
+    }
+
+    /// The other ends of the first `limit` of the edges [`edges_seen`](Self::edges_seen)
+    /// lists, reading no further.
+    pub(super) fn first_ends_seen(
+        &self,
+        node: NodeId,
+        direction: Direction,
+        types: &[ArcStr],
+        limit: usize,
+        read: Read,
+    ) -> Vec<NodeId> {
+        let ids = self.type_ids(types);
+        let mut ends = Vec::new();
+        if limit == 0 || ids.as_ref().is_some_and(SmallVec::is_empty) {
+            return ends;
+        }
+        self.seen_until(node, direction, ids.as_deref(), read, |end| {
+            ends.push(end);
+            ends.len() >= limit
+        });
+        ends
+    }
+
+    /// [`entries_at_most`](Self::entries_at_most) of `types` (every type when empty).
+    pub(super) fn entries_of_types_at_most(
+        &self,
+        node: NodeId,
+        direction: Direction,
+        types: &[ArcStr],
+        read: Read,
+    ) -> Option<usize> {
+        let ids = self.type_ids(types);
+        if ids.as_ref().is_some_and(SmallVec::is_empty) {
+            return Some(0);
+        }
+        self.entries_at_most(node, direction, ids.as_deref(), read)
     }
 
     /// The edges of `node` in `direction` of one of `types` (every type

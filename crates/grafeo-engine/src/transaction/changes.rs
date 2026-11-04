@@ -198,7 +198,8 @@ impl TransactionChanges {
     /// transaction: a large transaction's are dropped, so a spare set holds
     /// no more than a few thousand entries' room.
     pub(crate) fn is_worth_keeping(&mut self) -> bool {
-        self.state.get_mut().set.capacity() <= SPARE_ENTRIES
+        let state = self.state.get_mut();
+        state.set.capacity() <= SPARE_ENTRIES && state.schema.capacity() <= SPARE_ENTRIES
     }
 
     /// The transaction.
@@ -1391,6 +1392,24 @@ mod path_overlay_tests {
                 .with_deadline(Some(deadline)),
             entered,
         )
+    }
+
+    /// A spare set holds no more than a few thousand entries' room: a large queue of schema
+    /// statements counts as a large transaction does.
+    #[test]
+    fn a_large_schema_queue_is_not_kept() {
+        use grafeo_common::change::StandaloneOp;
+        use grafeo_common::storage::catalog_record::CatalogKey;
+
+        let mut changes = TransactionChanges::new(TransactionId::new(1), EpochId::new(1));
+        for index in 0..100_000 {
+            changes.queue_schema(
+                StandaloneOp::DropCatalog(CatalogKey::Schema(index.to_string())),
+                None,
+            );
+        }
+        changes.empty();
+        assert!(!changes.is_worth_keeping());
     }
 
     #[test]

@@ -102,7 +102,8 @@ if (Should-Run "node") {
     Pop-Location
     if ($LASTEXITCODE -eq 0) {
         Push-Location $root
-        & "$root\crates\bindings\node\node_modules\.bin\vitest.cmd" run --dir tests/spec/runners/node spec-runner.test.mjs 2>&1 | Tee-Object -Variable nodeOut
+        $vitest = if ($IsLinux -or $IsMacOS) { "vitest" } else { "vitest.cmd" }
+        & (Join-Path $root "crates/bindings/node/node_modules/.bin/$vitest") run --dir tests/spec/runners/node spec-runner.test.mjs 2>&1 | Tee-Object -Variable nodeOut
         if ($LASTEXITCODE -eq 0) { $passed += "node" } else { $failures += "node" }
         Pop-Location
     } else {

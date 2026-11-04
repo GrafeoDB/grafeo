@@ -40,8 +40,9 @@ pub struct Catalog {
     /// The configuration the database file stores (#551), when it stores
     /// one: the catalog section writes it and an open reads it.
     stored_config: RwLock<Option<grafeo_common::storage::catalog_record::StoredConfigRecord>>,
-    /// Moves with every change of the rules writes must meet: a commit compares it with
-    /// its transaction's start, and checks its writes only when it moved.
+    /// Moves with every change of the rules writes must meet, as a catalog op applies
+    /// (`standalone::apply`): a commit compares it with its transaction's start, and checks
+    /// its writes only when it moved.
     rules_generation: std::sync::atomic::AtomicU64,
 }
 
@@ -53,7 +54,7 @@ impl Catalog {
             .load(std::sync::atomic::Ordering::Acquire)
     }
 
-    fn rules_changed(&self) {
+    pub(crate) fn rules_changed(&self) {
         self.rules_generation
             .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
     }
@@ -353,7 +354,6 @@ impl Catalog {
 
     /// Registers or replaces a node type definition.
     pub fn register_or_replace_node_type(&self, def: NodeTypeDefinition) {
-        self.rules_changed();
         if let Some(schema) = &self.schema {
             schema.register_or_replace_node_type(def);
         }
@@ -440,7 +440,6 @@ impl Catalog {
 
     /// Registers or replaces an edge type definition.
     pub fn register_or_replace_edge_type_def(&self, def: EdgeTypeDefinition) {
-        self.rules_changed();
         if let Some(schema) = &self.schema {
             schema.register_or_replace_edge_type(def);
         }
@@ -583,7 +582,6 @@ impl Catalog {
     /// * `CatalogError::ConstraintAlreadyExists` if the name is taken; nothing
     ///   changes then.
     pub fn create_constraint(&self, def: ConstraintDefinition) -> Result<(), CatalogError> {
-        self.rules_changed();
         self.schema
             .as_ref()
             .ok_or(CatalogError::SchemaNotEnabled)?
@@ -2735,7 +2733,7 @@ impl CatalogConstraintValidator {
             .iter()
             .map(|(key, value)| (key.as_str().to_string(), value.clone()))
             .collect();
-        self.validate_node_complete(&labels, &properties)?;
+        self.check_node_values(&labels, &properties, true)?;
         let Some(ref store) = self.store else {
             return Ok(());
         };
@@ -2779,6 +2777,67 @@ impl CatalogConstraintValidator {
                     )));
                 }
             }
+        }
+        Ok(())
+    }
+}
+
+impl CatalogConstraintValidator {
+    /// Checks one node against every rule but uniqueness, which reads others: with
+    /// `in_its_type`, also what the graph's closed type allows.
+    fn check_node_values(
+        &self,
+        labels: &[String],
+        properties: &[(String, Value)],
+        in_its_type: bool,
+    ) -> Result<(), OperatorError> {
+        if in_its_type {
+            self.validate_node_labels_allowed(labels)?;
+            self.validate_node_properties_declared(labels, properties)?;
+        }
+        self.validate_node_complete(labels, properties)?;
+        for (key, value) in properties {
+            self.validate_node_property(labels, key, value)?;
+        }
+        Ok(())
+    }
+
+    /// Checks `edge`, as `view` sees it in `store`, against every rule on it: with
+    /// `in_its_type`, also what the graph's closed type allows. Reads the labels of its ends
+    /// only when its type names some.
+    ///
+    /// # Errors
+    ///
+    /// The schema violation a write of it would meet.
+    pub(crate) fn check_edge_as_it_stands(
+        &self,
+        store: &dyn grafeo_core::graph::GraphStore,
+        edge: &grafeo_core::graph::lpg::Edge,
+        in_its_type: bool,
+        view: ReadView,
+    ) -> Result<(), OperatorError> {
+        let edge_type = edge.edge_type.as_str();
+        let properties: Vec<(String, Value)> = edge
+            .properties
+            .iter()
+            .map(|(key, value)| (key.as_str().to_string(), value.clone()))
+            .collect();
+        if in_its_type {
+            self.validate_edge_type_allowed(edge_type)?;
+            self.validate_edge_properties_declared(edge_type, &properties)?;
+        }
+        self.validate_edge_complete(edge_type, &properties)?;
+        for (key, value) in &properties {
+            self.validate_edge_property(edge_type, key, value)?;
+        }
+        if self.constrains_edge_endpoints(edge_type)
+            && let (Some(source), Some(target)) =
+                (store.node(edge.src, view)?, store.node(edge.dst, view)?)
+        {
+            let labels_of = |node: &grafeo_core::graph::lpg::Node| -> Vec<String> {
+                node.labels.iter().map(ToString::to_string).collect()
+            };
+            self.validate_edge_endpoints(edge_type, &labels_of(&source), &labels_of(&target))?;
         }
         Ok(())
     }
@@ -2832,14 +2891,9 @@ pub(crate) fn check_data_against_rules(
             .map(|(key, value)| (key.as_str().to_string(), value.clone()))
             .collect();
         if scope.whole_graph {
-            validator.validate_node_labels_allowed(&labels)?;
-            validator.validate_node_properties_declared(&labels, &properties)?;
             labels_seen.extend(labels.iter().cloned());
         }
-        validator.validate_node_complete(&labels, &properties)?;
-        for (key, value) in &properties {
-            validator.validate_node_property(&labels, key, value)?;
-        }
+        validator.check_node_values(&labels, &properties, scope.whole_graph)?;
     }
     for label in &labels_seen {
         let Some(type_def) = validator.node_type(label) else {
@@ -2877,20 +2931,7 @@ pub(crate) fn check_data_against_rules(
             let Some(edge) = store.edge(edge, view)? else {
                 continue;
             };
-            let edge_type = edge.edge_type.as_str();
-            let properties: Vec<(String, Value)> = edge
-                .properties
-                .iter()
-                .map(|(key, value)| (key.as_str().to_string(), value.clone()))
-                .collect();
-            if scope.whole_graph {
-                validator.validate_edge_type_allowed(edge_type)?;
-                validator.validate_edge_properties_declared(edge_type, &properties)?;
-            }
-            validator.validate_edge_complete(edge_type, &properties)?;
-            for (key, value) in &properties {
-                validator.validate_edge_property(edge_type, key, value)?;
-            }
+            validator.check_edge_as_it_stands(store, &edge, scope.whole_graph, view)?;
         }
     }
     Ok(())

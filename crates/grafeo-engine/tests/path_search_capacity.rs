@@ -44,7 +44,14 @@ impl Random {
 /// 1,000 persons in clusters of 50, each knowing up to `per_person` others in
 /// their cluster, and person 0 knowing 571: the database and its edges.
 fn hub_graph(per_person: usize) -> (GrafeoDB, Vec<(usize, usize)>) {
-    let db = GrafeoDB::with_config(Config::in_memory().with_memory_limit(MEMORY_LIMIT)).unwrap();
+    // These tests are about the memory budget: their paths are many on purpose, and a slow build
+    // must not make them a test of the query timeout.
+    let db = GrafeoDB::with_config(
+        Config::in_memory()
+            .with_memory_limit(MEMORY_LIMIT)
+            .without_query_timeout(),
+    )
+    .unwrap();
     let mut random = Random(0xD1B5_4A32_D192_ED03);
     let ids: Vec<NodeId> = (0..1_000_i64)
         .map(|id| {

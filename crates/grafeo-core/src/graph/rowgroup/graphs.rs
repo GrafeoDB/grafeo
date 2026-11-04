@@ -121,6 +121,8 @@ impl RowGroupStore {
     /// Returns [`AllocError::IdsExhausted`] once every graph id was given
     /// out.
     pub fn new_unnamed_graph(&self) -> std::result::Result<Arc<RowGroupStore>, AllocError> {
+        // The lock of the names makes taking the next id one step.
+        let _named = self.graphs.named.write();
         self.graphs.new_graph(self)
     }
 
@@ -751,5 +753,33 @@ mod tests {
                 "nothing changed"
             );
         }
+    }
+
+    /// Two transactions create graphs at once: each graph its own id, as a checkpoint refuses two
+    /// of one id. The id's load and store are one step only under the lock of the names.
+    #[test]
+    fn concurrent_new_graphs_get_their_own_ids() {
+        let store = Arc::new(RowGroupStore::new());
+        let barrier = Arc::new(std::sync::Barrier::new(8));
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                let store = Arc::clone(&store);
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    (0..2_000)
+                        .map(|_| store.new_unnamed_graph().unwrap().graph_id())
+                        .collect::<Vec<u32>>()
+                })
+            })
+            .collect();
+        let mut ids: Vec<u32> = handles
+            .into_iter()
+            .flat_map(|handle| handle.join().unwrap())
+            .collect();
+        let all = ids.len();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), all, "{} ids given out twice", all - ids.len());
     }
 }

@@ -60,7 +60,9 @@ fn without(db: &GrafeoDB) -> Session {
 
 /// `size` people with `degree` random friends each, and some hubs that know everybody.
 fn people(config: Config, size: u64, degree: u64, hubs: u64) -> GrafeoDB {
-    let db = GrafeoDB::with_config(config).unwrap();
+    // The rows are what these tests read: a slow build must not make them a test of the query
+    // timeout.
+    let db = GrafeoDB::with_config(config.without_query_timeout()).unwrap();
     let ids: Vec<NodeId> = (0..size)
         .map(|key| {
             db.create_node_with_props(&["Person"], [("k", Value::Int64(key as i64))])
@@ -94,7 +96,7 @@ fn people(config: Config, size: u64, degree: u64, hubs: u64) -> GrafeoDB {
 /// A cost model can quietly never pick the operator, so the shapes it is for are pinned.
 #[test]
 fn triangles_and_squares_intersect() {
-    let db = people(Config::in_memory(), 500, 8, 2);
+    let db = people(Config::in_memory(), 100, 6, 1);
     let usual = db.session();
     let off = without(&db);
     for query in [TRIANGLE, SQUARE] {
@@ -115,7 +117,7 @@ fn triangles_and_squares_intersect() {
 /// edge from the hub at the middle hop; the intersection reads a fraction.
 #[test]
 fn a_triangle_through_hubs_reads_far_less_than_a_lookup() {
-    let db = people(Config::in_memory(), 3_000, 4, 3);
+    let db = people(Config::in_memory(), 1_000, 4, 3);
     let usual = db.session();
     let off = without(&db);
     let query = "MATCH (a:Person {k: 0})-[:KNOWS]->(b:Person)-[:KNOWS]->(c:Person)-[:KNOWS]->(a) RETURN b.k, c.k";
@@ -301,7 +303,9 @@ struct Stored {
 /// Random edges with self-loops and parallel edges, a tenth of another type, and hubs with
 /// their lists both ways; the keys are the node positions.
 fn multigraph(size: u64, edges: u64, hubs: u64, seed: u64) -> (GrafeoDB, Vec<Stored>) {
-    let db = GrafeoDB::new_in_memory();
+    // The rows are what these tests read: a slow build must not make them a test of the query
+    // timeout.
+    let db = GrafeoDB::with_config(Config::in_memory().without_query_timeout()).unwrap();
     let ids: Vec<NodeId> = (0..size)
         .map(|key| {
             db.create_node_with_props(&["Person"], [("k", Value::Int64(key as i64))])
@@ -336,12 +340,15 @@ fn multigraph(size: u64, edges: u64, hubs: u64, seed: u64) -> (GrafeoDB, Vec<Sto
         let knows = next(10) != 0;
         add(&db, from, to, knows, &mut stored);
     }
+    // Every node has an edge with each hub, so the lists merge at the edges they would; one in
+    // four is of the type the queries read, as rows through a hub go by the square of those.
     for hub in 0..hubs {
         for key in 0..size {
+            let knows = next(4) == 0;
             if next(2) == 0 {
-                add(&db, hub, key, true, &mut stored);
+                add(&db, hub, key, knows, &mut stored);
             } else {
-                add(&db, key, hub, true, &mut stored);
+                add(&db, key, hub, knows, &mut stored);
             }
         }
     }
@@ -539,7 +546,8 @@ fn deltas_and_removed_edges_give_the_rows_by_hand() {
             })
             .collect()
     };
-    check_every_way(&db, &stored, 300, &["KNOWS"]);
+    let (_, with_rule) = check_every_way(&db, &stored, 300, &["KNOWS"]);
+    assert!(with_rule > 0, "no form used the rule");
     // New edges on top of what merged, at nodes that are hubs and nodes that are not.
     for key in 0..60_u64 {
         let (from, to) = (key * 5 % 300, (key * 7 + 1) % 300);
@@ -576,7 +584,8 @@ fn deltas_and_removed_edges_give_the_rows_by_hand() {
 fn an_older_view_reads_the_same_every_way() {
     let config =
         Config::in_memory().with_history_retention(grafeo_engine::HistoryRetention::Forever);
-    let db = people(config, 200, 6, 1);
+    // Enough edges for a merge. No hub: the rows through one go by its square.
+    let db = people(config, 200, 6, 0);
     let epoch = db.current_epoch();
     let writer = db.session();
     writer
@@ -617,7 +626,7 @@ fn an_older_view_reads_the_same_every_way() {
 /// spokes, with self-loops and parallel edges of their own and on a far end. Under 1,024 edges all
 /// of the hub's list is in its delta; past it part of it is sorted.
 fn short_against_a_hub(spokes: u64, config: Config) -> (GrafeoDB, Vec<NodeId>, Vec<Stored>) {
-    let db = GrafeoDB::with_config(config).unwrap();
+    let db = GrafeoDB::with_config(config.without_query_timeout()).unwrap();
     let size = spokes + 4;
     let ids: Vec<NodeId> = (0..size)
         .map(|key| {

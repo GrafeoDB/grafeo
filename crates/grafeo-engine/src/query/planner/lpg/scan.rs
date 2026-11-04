@@ -124,6 +124,7 @@ fn with_label_union_scan(filter: &FilterOp, store: &dyn GraphStore) -> Option<Fi
             &filter.predicate,
             scan,
             |property| store.has_property_index(property),
+            true,
             false,
         )
         .is_some()

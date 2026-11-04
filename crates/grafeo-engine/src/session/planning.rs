@@ -48,6 +48,9 @@ pub(crate) struct PendingGraphs {
     pub(super) created: std::collections::HashMap<String, Arc<RowGroupStore>>,
     /// The graphs it dropped, which it cannot resolve.
     pub(super) dropped: std::collections::HashSet<String>,
+    /// The graphs it created, also those it has dropped since: the session may have to
+    /// leave one when the transaction ends without its commit.
+    pub(super) made: std::collections::HashSet<String>,
 }
 
 impl GraphStores {

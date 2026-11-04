@@ -169,10 +169,10 @@ def test_a_new_database_does_not_warn(tmp_path: Path):
 @pytest.mark.parametrize(
     "open_it",
     [
-        pytest.param(lambda path: grafeo.GrafeoDB(path), id="constructor"),
-        pytest.param(lambda path: grafeo.GrafeoDB.open(path), id="open"),
-        pytest.param(lambda path: grafeo.GrafeoDB.open_read_only(path), id="read_only"),
-        pytest.param(lambda path: grafeo.GrafeoDB.open_in_memory(path), id="in_memory"),
+        pytest.param(grafeo.GrafeoDB, id="constructor"),
+        pytest.param(grafeo.GrafeoDB.open, id="open"),
+        pytest.param(grafeo.GrafeoDB.open_read_only, id="read_only"),
+        pytest.param(grafeo.GrafeoDB.open_in_memory, id="in_memory"),
     ],
 )
 def test_every_way_to_open_warns_once(in_default_graph: Path, open_it):

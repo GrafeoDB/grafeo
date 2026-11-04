@@ -271,11 +271,15 @@ pub(crate) fn name_claim(kind: &str, name: &str) -> crate::transaction::KeyClaim
     }
 }
 
+/// The claim of every RDF graph operation, whichever graphs it names: one key, as `DROP ALL`
+/// overlaps them all, until reads of RDF are isolated by triple (#718).
+pub(crate) fn rdf_graph_ops_claim() -> crate::transaction::KeyClaim {
+    name_claim("RDF graph operations", "")
+}
+
 /// The names `op` changes, which a transaction claims at its statement: another that
 /// changes one fails at once.
 pub(crate) fn claims_of(op: &StandaloneOp) -> Vec<crate::transaction::KeyClaim> {
-    use grafeo_common::change::RdfGraphOp;
-
     let claim = |kind: &str, name: String| name_claim(kind, &name);
     match op {
         StandaloneOp::CreateGraph { name } | StandaloneOp::DropGraph { name } => {
@@ -308,20 +312,7 @@ pub(crate) fn claims_of(op: &StandaloneOp) -> Vec<crate::transaction::KeyClaim> 
             CatalogKey::Procedure(name) => claim("procedure", name.clone()),
             CatalogKey::Index { graph, index } => claim("index", format!("{graph:?} {index:?}")),
         }],
-        StandaloneOp::RdfGraph(graph_op) => {
-            let rdf = |name: String| claim("RDF graph", name);
-            match graph_op {
-                RdfGraphOp::Create { name } => vec![rdf(name.clone())],
-                RdfGraphOp::Drop { target } | RdfGraphOp::Clear { target } => {
-                    vec![rdf(format!("{target:?}"))]
-                }
-                RdfGraphOp::Copy { source, target }
-                | RdfGraphOp::Move { source, target }
-                | RdfGraphOp::Add { source, target } => {
-                    vec![rdf(format!("{source:?}")), rdf(format!("{target:?}"))]
-                }
-            }
-        }
+        StandaloneOp::RdfGraph(_) => vec![rdf_graph_ops_claim()],
     }
 }
 
@@ -573,8 +564,20 @@ pub(crate) fn apply<S: RootStore>(
                 applying.missing(op, "the graph does not exist")
             }
         }
-        StandaloneOp::PutCatalog(record) => put(op, record, built, store, catalog, applying),
-        StandaloneOp::DropCatalog(key) => drop_entry(op, key, store, catalog, applying),
+        StandaloneOp::PutCatalog(record) => {
+            put(op, record, built, store, catalog, applying)?;
+            if holds_rules(record) {
+                catalog.rules_changed();
+            }
+            Ok(())
+        }
+        StandaloneOp::DropCatalog(key) => {
+            drop_entry(op, key, store, catalog, applying)?;
+            if key_of_rules(key) {
+                catalog.rules_changed();
+            }
+            Ok(())
+        }
         // A change of the RDF store, which `commit_rdf` and `replay` apply
         // through `apply_rdf`: a change of the labeled property graphs and
         // the catalog never holds one.
@@ -582,6 +585,39 @@ pub(crate) fn apply<S: RootStore>(
             op,
             "an RDF graph operation applies to the RDF store, through `apply_rdf`",
         )),
+    }
+}
+
+/// Whether `record` holds rules writes must meet: an open transaction's commit then checks
+/// its writes again.
+fn holds_rules(record: &CatalogRecord) -> bool {
+    match record {
+        CatalogRecord::NodeType(_)
+        | CatalogRecord::EdgeType(_)
+        | CatalogRecord::GraphType(_)
+        | CatalogRecord::GraphBinding(_)
+        | CatalogRecord::Constraint(_) => true,
+        CatalogRecord::StoredConfig(_)
+        | CatalogRecord::Schema(_)
+        | CatalogRecord::Index(_)
+        | CatalogRecord::IndexName(_)
+        | CatalogRecord::Procedure(_) => false,
+    }
+}
+
+/// [`holds_rules`] of a record `key` names.
+fn key_of_rules(key: &CatalogKey) -> bool {
+    match key {
+        CatalogKey::NodeType(_)
+        | CatalogKey::EdgeType(_)
+        | CatalogKey::GraphType(_)
+        | CatalogKey::GraphBinding(_)
+        | CatalogKey::Constraint(_) => true,
+        CatalogKey::StoredConfig
+        | CatalogKey::Schema(_)
+        | CatalogKey::Index { .. }
+        | CatalogKey::IndexName(_)
+        | CatalogKey::Procedure(_) => false,
     }
 }
 

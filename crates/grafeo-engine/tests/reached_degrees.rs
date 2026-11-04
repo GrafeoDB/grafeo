@@ -385,6 +385,27 @@ fn a_periodic_load_does_not_line_up_with_the_positions() {
 // ---------------------------------------------------------------------------
 
 /// Every edge read and none has the next hop's edges: a true 0.
+/// A budget holds whatever the lists' lengths: a list past its share is counted as one read, and
+/// only its first edges are read.
+#[test]
+fn a_spent_budget_reads_little_of_long_lists() {
+    let db = GrafeoDB::new_in_memory();
+    let ends = nodes(&db, "End", 64);
+    for start in nodes(&db, "Start", 256) {
+        for index in 0..1_000 {
+            db.create_edge(start, ends[index % ends.len()], "VIA")
+                .unwrap();
+        }
+    }
+    let store = db.store().unwrap();
+    let before = store.degree_sample_reads();
+    let mut budget = 1_u64;
+    store.sampled_reached_degree_within(Some("Start"), &["VIA"], OUT, &["ON"], OUT, &mut budget);
+    let reads = store.degree_sample_reads() - before;
+    assert!(reads > 0, "the sample read nothing");
+    assert!(reads < 1_024, "{reads} reads of 256,000 edges");
+}
+
 #[test]
 fn a_zero_stands_when_every_edge_was_read() {
     let db = GrafeoDB::new_in_memory();

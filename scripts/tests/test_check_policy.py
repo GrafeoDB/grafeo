@@ -723,6 +723,43 @@ def test_t7_a_module_in_a_comment_builds_nothing(tmp_path: Path) -> None:
     ) == [("crates/grafeo-core/tests/a_file.rs", "this test file is never built")]
 
 
+@pytest.mark.parametrize(
+    "commented",
+    [
+        "/*\nmod a_file;\n*/\n",
+        "/* outer\n/* inner */\nmod a_file;\n*/\n",
+    ],
+    ids=["block", "nested"],
+)
+def test_t7_a_module_in_a_block_comment_builds_nothing(
+    tmp_path: Path, commented: str
+) -> None:
+    assert t7_found(
+        tmp_path,
+        {
+            "crates/grafeo-core/Cargo.toml": MAIN_ONLY,
+            "crates/grafeo-core/tests/main.rs": commented,
+            "crates/grafeo-core/tests/a_file.rs": "",
+        },
+    ) == [("crates/grafeo-core/tests/a_file.rs", "this test file is never built")]
+
+
+def test_t7_a_module_after_a_comment_is_built(tmp_path: Path) -> None:
+    assert (
+        t7_found(
+            tmp_path,
+            {
+                "crates/grafeo-core/Cargo.toml": MAIN_ONLY,
+                "crates/grafeo-core/tests/main.rs": (
+                    "// see /* here\n/* a note */\nmod a_file;\n"
+                ),
+                "crates/grafeo-core/tests/a_file.rs": "",
+            },
+        )
+        == []
+    )
+
+
 def test_t7_a_target_with_no_path_is_tests_of_its_name(tmp_path: Path) -> None:
     manifest = MAIN_ONLY + '\n# Counts allocations.\n[[test]]\nname = "counted"\n'
     assert (

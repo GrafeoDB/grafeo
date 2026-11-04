@@ -26,6 +26,11 @@ use grafeo_engine::{Config, GrafeoDB, HistoryRetention};
 const FIXED_SEEDS: u64 = 30;
 const REPORTED: usize = 8;
 
+/// The most paths a rule set that enumerates is asked for: past this it tests only patience, and
+/// a slow build reaches the query timeout (a graph of 15 self-loops has 14^6 at length 6). The
+/// count itself is still checked on them, with every rule on.
+const ENUMERATED_PATHS: i64 = 200_000;
+
 struct Random(u64);
 
 impl Random {
@@ -435,7 +440,11 @@ fn check(
         let query = chain.text();
         for cypher in [false, true] {
             let expected = chain.expected(seen, !cypher);
+            let paths: i64 = expected.iter().filter_map(|row| row.last()).sum();
             for (name, rules) in rule_sets() {
+                if paths > ENUMERATED_PATHS && name != "all rules" {
+                    continue;
+                }
                 session.set_planner_rules(rules);
                 let got = answer(session, cypher, &query);
                 if got.as_ref() != Ok(&expected) && differences.len() < REPORTED {

@@ -287,6 +287,17 @@ def test_binaries_fails_on_one_missing_or_empty(tmp_path: Path, size: int) -> No
     assert "linux-x64-gnu" in result.stderr
 
 
+def test_binaries_fails_on_a_directory_named_as_the_binary(tmp_path: Path) -> None:
+    root = package(tmp_path)
+    with_binaries(root, {"linux-x64-gnu": -1})
+    directory = root / "npm" / "linux-x64-gnu" / "grafeo.linux-x64-gnu.node"
+    directory.mkdir()
+    (directory / "a_file").write_bytes(b"x")
+    result = run(root, "binaries")
+    assert result.returncode == 1
+    assert "linux-x64-gnu" in result.stderr
+
+
 def test_binaries_fails_on_a_folder_with_no_main(tmp_path: Path) -> None:
     root = package(tmp_path)
     assert run(root, "binaries").returncode == 1

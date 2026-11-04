@@ -72,8 +72,13 @@ impl MiddleSum {
             store.count_edges(node, hop.direction, &hop.edge_types, &hop.end_labels, view)
         };
         let back = count_hop(&self.back)?;
-        let on = if back == 0 { 0 } else { count_hop(&self.on)? };
-        super::read_counter::count(reads, 2);
+        super::read_counter::count(reads, 1);
+        let on = if back == 0 {
+            0
+        } else {
+            super::read_counter::count(reads, 1);
+            count_hop(&self.on)?
+        };
         let mut paths = (back as u128)
             .checked_mul(on as u128)
             .ok_or_else(too_many_paths)?;

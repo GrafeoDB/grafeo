@@ -429,6 +429,9 @@ impl RdfWriter {
         }
         let held = crate::database::standalone::hold(&self.manager, true)?;
         refuse_graph_op_with_open_changes(&self.manager, &held, &op)?;
+        self.manager
+            .refuse_claimed(&crate::database::standalone::rdf_graph_ops_claim(), None)
+            .map_err(OperatorError::from)?;
         if !check(&self.store)? {
             return Ok(());
         }

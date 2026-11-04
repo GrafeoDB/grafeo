@@ -56,7 +56,10 @@ fn count(plan: &str, word: &str) -> usize {
 /// People with interests in tags, posts with tags and creators: the graph of a benchmark that
 /// took the written order into a hash join of 30 million rows.
 fn social() -> GrafeoDB {
-    let db = GrafeoDB::new_in_memory();
+    // Written plans of two patterns are cross products: a slow build must not make them a test of
+    // the query timeout.
+    let db =
+        GrafeoDB::with_config(grafeo_engine::Config::in_memory().without_query_timeout()).unwrap();
     let tags: Vec<NodeId> = (0..20)
         .map(|i| {
             db.create_node_with_props(
@@ -545,12 +548,26 @@ fn a_property_against_a_value_never_raises() {
             .unwrap();
     }
     session.execute("INSERT (:T)").unwrap();
+    // A pattern of two parts is what can be reordered: the rows of the plain plan, with its
+    // filters where they were written.
+    let mut plain = db.session();
+    plain.set_planner_rules(grafeo_engine::query::optimizer::PlannerRules::plain());
     for operator in ["=", "<>", "<", "<=", ">", ">="] {
         for literal in literals {
             let query = format!("MATCH (n:T) WHERE n.p {operator} {literal} RETURN count(*)");
             session
                 .execute(&query)
                 .unwrap_or_else(|error| panic!("{query}: {error}"));
+            let two_parts = format!(
+                "MATCH (n:T), (m:T) WHERE n.p {operator} {literal} AND m.p = 1 RETURN count(*)"
+            );
+            let usual = session
+                .execute(&two_parts)
+                .unwrap_or_else(|error| panic!("{two_parts}: {error}"));
+            let written = plain
+                .execute(&two_parts)
+                .unwrap_or_else(|error| panic!("{two_parts}, plain: {error}"));
+            assert_eq!(usual.rows(), written.rows(), "{two_parts}");
         }
         for value in [
             Value::Int64(1),

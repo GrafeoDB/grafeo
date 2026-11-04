@@ -9,13 +9,22 @@ procedure added later is covered too, and must name its arguments in
 
 import json
 
+import grafeo
 import pytest
 from grafeo import GrafeoDB
 
+pytestmark = [
+    pytest.mark.skipif(
+        not hasattr(GrafeoDB(), "algorithms"),
+        reason="grafeo built without algos feature",
+    ),
+    pytest.mark.skipif("gql" not in grafeo.features(), reason="grafeo built without gql feature"),
+]
+
 # Alix -> Gus -> Vincent -> Mia
 BEFORE = [
-    "INSERT (:Person {name: 'Alix'}), (:Person {name: 'Gus'}), "
-    "(:Person {name: 'Vincent'}), (:Person {name: 'Mia'})",
+    "INSERT (:Person {name: 'Alix'}), (:Person {name: 'Gus'})",
+    "INSERT (:Person {name: 'Vincent'}), (:Person {name: 'Mia'})",
     "MATCH (a:Person {name: 'Alix'}), (b:Person {name: 'Gus'}) INSERT (a)-[:KNOWS {w: 1}]->(b)",
     "MATCH (a:Person {name: 'Gus'}), (b:Person {name: 'Vincent'}) INSERT (a)-[:KNOWS {w: 1}]->(b)",
     "MATCH (a:Person {name: 'Vincent'}), (b:Person {name: 'Mia'}) INSERT (a)-[:KNOWS {w: 1}]->(b)",

@@ -433,6 +433,13 @@ def type_scope(grafeo):
     return db
 
 
+def booleans(grafeo):
+    """`T` nodes with `p` true, false and 1, and an `A` node for a query's other part."""
+    db = grafeo.GrafeoDB()
+    db.execute("INSERT (:T {p: true}), (:T {p: false}), (:T {p: 1}), (:A {k: 1})")
+    return db
+
+
 def rules_over_data(grafeo):
     """Data that breaks the rules the cases of section DT try to add: two `File` nodes with one
     `id`, and no required property on the `File`, the `City` or the `ROAD`."""
@@ -484,6 +491,7 @@ FIXTURES = {
     "raising": raising,
     "type_scope": type_scope,
     "rules_over_data": rules_over_data,
+    "booleans": booleans,
     "per_call": empty,
 }
 
@@ -2555,5 +2563,29 @@ for case_id, query in [
     ("DU3", "ROLLBACK"),
 ]:
     case(case_id, query, GQL, "per_call")
+
+# DV: false is below true (ISO/IEC 39075 19.3): 0.6.1 gave null from an expression (DV1 to DV3), and
+#     lost the rows of a filter behind another part of the query (DV5 to DV8), though a filter on a
+#     lone scan found them (DV4); null and another type stay null (DV9 to DV11)
+for case_id, query in [
+    ("DV1", "RETURN false < true AS v"),
+    ("DV2", "RETURN true >= true AS v"),
+    ("DV3", "RETURN true < false AS v"),
+]:
+    case(case_id, query, BOTH, "empty")
+for case_id, query in [
+    ("DV4", "MATCH (n:T) WHERE n.p <= true RETURN n.p"),
+    ("DV5", "MATCH (a:A), (n:T) WHERE n.p <= true RETURN n.p"),
+    ("DV6", "MATCH (a:A), (n:T) WHERE n.p < true RETURN n.p"),
+    ("DV7", "MATCH (a:A), (n:T) WHERE n.p >= true RETURN n.p"),
+    ("DV8", "MATCH (a:A), (n:T) WHERE n.p > false RETURN n.p"),
+]:
+    case(case_id, query, BOTH, "booleans")
+for case_id, query in [
+    ("DV9", "RETURN true < 1 AS v"),
+    ("DV10", "RETURN true < null AS v"),
+    ("DV11", "RETURN null <= false AS v"),
+]:
+    case(case_id, query, BOTH, "empty")
 
 # fmt: on

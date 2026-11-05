@@ -4,7 +4,7 @@ All notable changes to Grafeo, for future reference (and enjoyment).
 
 ## [0.6.2] - Unreleased
 
-### Faster queries
+### Gotta need for speed
 
 - **Planner**: comma patterns pick their join order from sampled degrees, cycles close by lookup or intersection, and same-type chains up to 6 hops count without listing paths. Common queries stay at their speed; the first plan of a comma pattern costs a little more.
 - **Pinned far nodes and `IN`**: a hop to a pinned node starts at that end when it costs less, a key on several nodes reads the shorter side, and a long constant `IN` list is a set.

@@ -1342,7 +1342,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: crate-ci/typos@v1.51.1
+      - uses: crate-ci/typos@v1.52.0
 
   # The manifest of @grafeo-db/js as a release publishes it: the repository's leaves out
   # its platform packages, so a mistake in adding them would ship a package with no

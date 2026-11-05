@@ -50,6 +50,7 @@ mod checkpoint_sections;
 mod checkpoint_triggers;
 mod chunked_sections;
 mod clause_after_write;
+mod closed_type_after_a_read;
 mod closed_type_writers;
 mod commit_completion;
 mod commit_pipeline;

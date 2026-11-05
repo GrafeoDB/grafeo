@@ -14,8 +14,8 @@
 use grafeo_common::types::ReadView;
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, OnceLock};
 
 use parking_lot::{Mutex, RwLock};
 
@@ -2445,10 +2445,15 @@ use grafeo_core::execution::operators::OperatorError;
 /// against registered node/edge type definitions.
 pub struct CatalogConstraintValidator {
     catalog: Arc<Catalog>,
-    /// The closed graph type of the graph written to, if it has one.
-    closed_type: Option<ClosedGraphType>,
-    /// The types the graph's graph type lists, open or closed.
-    bound_types: Option<BoundTypes>,
+    /// The storage key of the graph written to, whose graph type checks the writes (`None`: no
+    /// graph type applies).
+    graph: Option<String>,
+    /// The closed graph type of the graph written to, if it has one: read when a write first
+    /// asks, as every statement makes a validator and a read never asks. Boxed, as the validator
+    /// moves through its builders on every write.
+    closed_type: OnceLock<Option<Box<ClosedGraphType>>>,
+    /// The types the graph's graph type lists, open or closed, read likewise.
+    bound_types: OnceLock<Option<Box<BoundTypes>>>,
     /// Optional graph store for UNIQUE constraint enforcement via index lookup
     /// and the dimensions of vector indexes.
     store: Option<Arc<dyn grafeo_core::graph::GraphStore>>,
@@ -2481,8 +2486,9 @@ impl CatalogConstraintValidator {
     pub fn new(catalog: Arc<Catalog>) -> Self {
         Self {
             catalog,
-            closed_type: None,
-            bound_types: None,
+            graph: None,
+            closed_type: OnceLock::new(),
+            bound_types: OnceLock::new(),
             store: None,
             max_property_size: None,
             transaction: None,
@@ -2574,8 +2580,7 @@ impl CatalogConstraintValidator {
     /// schema written in.
     pub(crate) fn node_type(&self, label: &str) -> Option<NodeTypeDefinition> {
         if let Some(name) = self
-            .bound_types
-            .as_ref()
+            .bound_types()
             .and_then(|bound| bound.node_type_names.get(label))
         {
             return self.catalog.resolved_node_type(name);
@@ -2594,8 +2599,7 @@ impl CatalogConstraintValidator {
     /// closed graph type names, else the one of the schema written in.
     fn edge_type(&self, edge_type: &str) -> Option<EdgeTypeDefinition> {
         if let Some(name) = self
-            .bound_types
-            .as_ref()
+            .bound_types()
             .and_then(|bound| bound.edge_type_names.get(edge_type))
         {
             return self.catalog.get_edge_type_def(name);
@@ -2688,9 +2692,28 @@ impl CatalogConstraintValidator {
     /// a type some graph type lists does not apply.
     #[must_use]
     pub fn with_graph_name(mut self, name: &str) -> Self {
-        self.closed_type = ClosedGraphType::of_graph(&self.catalog, name);
-        self.bound_types = BoundTypes::of_graph(&self.catalog, name);
+        self.graph = Some(name.to_string());
         self
+    }
+
+    /// The closed graph type of the graph written to, if it has one.
+    fn closed_type(&self) -> Option<&ClosedGraphType> {
+        self.closed_type
+            .get_or_init(|| {
+                let graph = self.graph.as_deref()?;
+                ClosedGraphType::of_graph(&self.catalog, graph).map(Box::new)
+            })
+            .as_deref()
+    }
+
+    /// The types the graph type of the graph written to lists, open or closed.
+    fn bound_types(&self) -> Option<&BoundTypes> {
+        self.bound_types
+            .get_or_init(|| {
+                let graph = self.graph.as_deref()?;
+                BoundTypes::of_graph(&self.catalog, graph).map(Box::new)
+            })
+            .as_deref()
     }
 
     /// Attaches a graph store for UNIQUE constraint enforcement and vector
@@ -2811,15 +2834,13 @@ impl CatalogConstraintValidator {
 impl CatalogConstraintValidator {
     /// Whether the graph's closed type lists the node type of `label`.
     pub(crate) fn closed_type_lists_node(&self, label: &str) -> bool {
-        self.closed_type
-            .as_ref()
+        self.closed_type()
             .is_some_and(|closed| closed.node_types.contains_key(label))
     }
 
     /// Whether the graph's closed type lists `edge_type`.
     pub(crate) fn closed_type_lists_edge(&self, edge_type: &str) -> bool {
-        self.closed_type
-            .as_ref()
+        self.closed_type()
             .is_some_and(|closed| closed.edge_types.contains_key(edge_type))
     }
 
@@ -3336,7 +3357,7 @@ impl ConstraintValidator for CatalogConstraintValidator {
     }
 
     fn validate_node_labels_allowed(&self, labels: &[String]) -> Result<(), OperatorError> {
-        let Some(closed) = &self.closed_type else {
+        let Some(closed) = self.closed_type() else {
             return Ok(());
         };
         let node_types = &closed.node_types;
@@ -3357,7 +3378,7 @@ impl ConstraintValidator for CatalogConstraintValidator {
     }
 
     fn validate_edge_type_allowed(&self, edge_type: &str) -> Result<(), OperatorError> {
-        let Some(closed) = &self.closed_type else {
+        let Some(closed) = self.closed_type() else {
             return Ok(());
         };
         if closed.edge_types.contains_key(edge_type) {
@@ -3374,7 +3395,7 @@ impl ConstraintValidator for CatalogConstraintValidator {
         labels: &[String],
         properties: &[(String, Value)],
     ) -> Result<(), OperatorError> {
-        let Some(closed) = &self.closed_type else {
+        let Some(closed) = self.closed_type() else {
             return Ok(());
         };
         let node_types = &closed.node_types;
@@ -3416,7 +3437,7 @@ impl ConstraintValidator for CatalogConstraintValidator {
         edge_type: &str,
         properties: &[(String, Value)],
     ) -> Result<(), OperatorError> {
-        let Some(closed) = &self.closed_type else {
+        let Some(closed) = self.closed_type() else {
             return Ok(());
         };
         let Some(Some(declared)) = closed.edge_types.get(edge_type) else {
@@ -3472,7 +3493,7 @@ impl ConstraintValidator for CatalogConstraintValidator {
     }
 
     fn constrains_some_edge_endpoints(&self) -> bool {
-        let of_a_bound_type = self.bound_types.as_ref().is_some_and(|bound| {
+        let of_a_bound_type = self.bound_types().is_some_and(|bound| {
             bound
                 .edge_type_names
                 .keys()
@@ -3499,7 +3520,7 @@ impl ConstraintValidator for CatalogConstraintValidator {
         matches!(value, Value::Vector(_))
             || self.indexes_list(key, value)
             || self.catalog.has_node_types()
-            || self.closed_type.is_some()
+            || self.closed_type().is_some()
     }
 
     fn convert_node_property(&self, labels: &[String], key: &str, value: &Value) -> Option<Value> {
@@ -3688,6 +3709,54 @@ fn property_size_error(key: &str, size: usize, limit: usize) -> OperatorError {
 mod tests {
     use super::*;
     use std::thread;
+
+    /// A validator reads the graph's type when a write first asks, and keeps what it read: a change
+    /// committed between the plan and the first check counts, and one after it does not, so the
+    /// checks of one statement see one type.
+    #[test]
+    fn a_validator_reads_the_closed_type_at_its_first_check_and_keeps_it() {
+        let catalog = Arc::new(Catalog::new());
+        for name in ["City", "Town"] {
+            catalog
+                .register_node_type(NodeTypeDefinition {
+                    name: name.to_string(),
+                    properties: Vec::new(),
+                    constraints: Vec::new(),
+                    parent_types: Vec::new(),
+                    key_labels: Vec::new(),
+                })
+                .unwrap();
+        }
+        catalog
+            .register_graph_type(GraphTypeDefinition {
+                name: "atlas".to_string(),
+                allowed_node_types: vec!["City".to_string()],
+                allowed_edge_types: Vec::new(),
+                open: false,
+            })
+            .unwrap();
+        catalog
+            .bind_graph_type("europe", "atlas".to_string())
+            .unwrap();
+        let validator =
+            || CatalogConstraintValidator::new(Arc::clone(&catalog)).with_graph_name("europe");
+        let town = ["Town".to_string()];
+        let city = ["City".to_string()];
+
+        let made_before = validator();
+        catalog
+            .alter_graph_type_add_node_type("atlas", "Town".to_string())
+            .unwrap();
+        made_before.validate_node_labels_allowed(&town).unwrap();
+
+        let asked = validator();
+        asked.validate_node_labels_allowed(&city).unwrap();
+        catalog
+            .alter_graph_type_drop_node_type("atlas", "Town")
+            .unwrap();
+        asked.validate_node_labels_allowed(&town).unwrap();
+        validator().validate_node_labels_allowed(&town).unwrap_err();
+    }
 
     /// A graph type created under the name of a dropped one types no graph:
     /// the binding the drop left goes, while the other bindings stay.

@@ -9,6 +9,7 @@ All notable changes to Grafeo, for future reference (and enjoyment).
 - **Planner**: comma patterns pick their join order from sampled degrees, cycles close by lookup or intersection, and same-type chains up to 6 hops count without listing paths. Common queries stay at their speed; the first plan of a comma pattern costs a little more.
 - **Pinned far nodes and `IN`**: a hop to a pinned node starts at that end when it costs less, a key on several nodes reads the shorter side, and a long constant `IN` list is a set.
 - **Lookups with no index**: an equality on a property reads its column directly, a `LIMIT` stops early, and reopened columns skip chunks by their stored bounds.
+- **Typed graphs**: a read no longer pays for a graph type's checks, which only a write needs.
 - **Constraints**: `UNIQUE` and `NODE KEY` build an index on their first property, so an insert under one no longer reads the whole label.
 
 ### Changed

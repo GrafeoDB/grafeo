@@ -280,7 +280,7 @@ DROP INDEX index_name
 DROP INDEX IF EXISTS index_name
 ```
 
-A property or B-tree index holds the nodes of its label only, so writes on other labels pay nothing for it. A query uses it when every result must have that label: `MATCH (p:Person {age: 30})` and `MATCH (p:Person:Author {age: 30})` do, `MATCH (p {age: 30})` does not. A query whose results have one of several labels, as `MATCH (p:Person|Company {age: 30})`, uses their indexes when each of those labels has one. A query with no index to use scans, and returns the same rows.
+A property or B-tree index holds the nodes of its label only, so writes on other labels pay nothing for it. A query uses it when every result must have that label: `MATCH (p:Person {age: 30})` and `MATCH (p:Person:Author {age: 30})` do. A query whose results have one of several labels, as `MATCH (p:Person|Company {age: 30})`, or that names no label, as `MATCH (p {age: 30})`, uses the indexes there are and reads the property only of the nodes they do not cover. A query for a label with no index on the property, as `MATCH (p:City {age: 30})`, scans that label. Every one returns the same rows.
 
 `create_property_index` in the API makes an index on a property of every label, which also serves a query with no label. An index on the label and property, or one on the property of every label, makes a later `CREATE INDEX` on them build nothing: its name stands for the index that is there. `drop_property_index` drops every index on the property in the current graph.
 

@@ -1044,6 +1044,57 @@ mod cost_rule {
         assert!(starts_at(&plan, "m"), "{plan}");
     }
 
+    /// Undirected, each edge counts in the lists of both its ends. The rows are the walk's whichever
+    /// start it takes, also where the far key is the hub's own far node.
+    #[test]
+    fn an_undirected_hub_start_answers_as_the_walk() {
+        let db = hub_among_many(&["MATCH (a:Start {s: 1}), (m:Far) INSERT (a)-[:R]->(m)"]);
+        for query in [
+            "MATCH (a:Start)-[:R]-(m:Far {k: 7}) WHERE a.s = 1 RETURN a.s, m.k",
+            "MATCH (a:Start)-[:R]-(m:Far {k: 7}) RETURN a.s, m.k",
+            "MATCH (m:Far {k: 7})-[:R]-(a:Start) RETURN a.s, m.k",
+        ] {
+            same_rows(&db, query);
+            assert_eq!(
+                rows_of(&db.session(), Language::Gql, query, &no_params()).len(),
+                1,
+                "{query}"
+            );
+        }
+        // One far hub, undirected: its walk back is all the edges, and the source stays.
+        let db = hub_among_many(&[
+            "MATCH (a:Start {s: 1}), (m:Far {k: 1}) UNWIND range(1, 5000) AS i INSERT (a)-[:R]->(m)",
+        ]);
+        let query = "MATCH (a:Start)-[:R]-(m:Far {k: 1}) WHERE a.s = 1 RETURN a.s, m.k";
+        same_rows(&db, query);
+        let plan = plan(&db, query);
+        assert!(!starts_at(&plan, "m"), "{plan}");
+    }
+
+    /// A far end of a union has no one label to sample, so the far side reads nothing and the source
+    /// stays. The rows are the walk's.
+    #[test]
+    fn a_far_union_keeps_the_source() {
+        let db = hub_among_many(&[
+            "CREATE INDEX on_near FOR (n:Near) ON (n.k)",
+            "UNWIND range(1, 100) AS i INSERT (:Near {k: i})",
+            "MATCH (a:Start {s: 1}), (m) WHERE m:Far OR m:Near INSERT (a)-[:R]->(m)",
+        ]);
+        for query in [
+            "MATCH (a:Start)-[:R]->(m) WHERE (m:Far OR m:Near) AND m.k = 7 RETURN a.s, m.k",
+            "MATCH (a:Start)-[:R]->(m:Far|Near {k: 7}) RETURN a.s, m.k",
+        ] {
+            same_rows(&db, query);
+            assert_eq!(
+                rows_of(&db.session(), Language::Gql, query, &no_params()).len(),
+                2,
+                "{query}"
+            );
+            let plan = plan(&db, query);
+            assert!(!starts_at(&plan, "m"), "{query}\n{plan}");
+        }
+    }
+
     /// A source with no label and no key has nothing to compare: it turns, as it did.
     #[test]
     fn no_label_and_no_key_always_turns() {

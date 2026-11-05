@@ -461,7 +461,6 @@ const BOTH_INDEXES: [&str; 2] = [
 /// Every node holding the key has a label with an index, so nothing remains to compare, and no value
 /// is read. Each node once, though `:Far:Near` is in two indexes.
 #[test]
-#[ignore = "waits for the union and remainder lookup, the typed scan step"]
 fn no_label_reads_no_value_when_every_holder_has_an_index() {
     let db = crowd(&BOTH_INDEXES);
     let session = db.session();
@@ -481,7 +480,6 @@ fn no_label_reads_no_value_when_every_holder_has_an_index() {
 /// With some labels unindexed, the remainder is what is compared: the read stops short of the labels
 /// the indexes cover.
 #[test]
-#[ignore = "waits for the union and remainder lookup, the typed scan step"]
 fn no_label_compares_only_the_rows_the_indexes_do_not_cover() {
     let db = crowd(&BOTH_INDEXES[..1]);
     let session = db.session();
@@ -502,7 +500,6 @@ fn no_label_compares_only_the_rows_the_indexes_do_not_cover() {
 /// The note says nothing is read through an index. Over a union, or no label, with an index read, it
 /// is not so any more.
 #[test]
-#[ignore = "waits for the union and remainder lookup, the typed scan step"]
 fn no_note_where_a_union_reads_an_index() {
     let db = crowd(&BOTH_INDEXES[..1]);
     let session = db.session();

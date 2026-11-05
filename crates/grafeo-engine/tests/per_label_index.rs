@@ -1598,11 +1598,10 @@ fn the_note_names_the_label_an_index_is_on() {
     let plan = plan_of(&session, "MATCH (n:Other) WHERE n.k = 1 RETURN n.name");
     assert!(plan.contains(NOTE_ON_FILE), "{plan}");
     assert!(!plan.contains("[index: k]"), "{plan}");
+    // With no label, the index on `File` is read, and the rest compared: no note.
     let plan = plan_of(&session, "MATCH (n) WHERE n.k = 1 RETURN n.name");
-    assert!(
-        plan.contains(&format!("[label-first] {NOTE_ON_FILE}")) || plan.contains(NOTE_ON_FILE),
-        "{plan}"
-    );
+    assert!(plan.contains("[indexes and remainder: k]"), "{plan}");
+    assert!(!plan.contains("[no index"), "{plan}");
 }
 
 /// Pinned by a literal or a key from the rows, by `=` or `IN`.
@@ -1617,7 +1616,6 @@ fn the_note_shows_for_each_way_of_pinning_the_node() {
         "MATCH (n:Other) WHERE n.k IN [1, 2] RETURN n.name",
         "UNWIND [1] AS x MATCH (n:Other) WHERE n.k = x RETURN n.name",
         "UNWIND [[1, 2]] AS xs MATCH (n:Other) WHERE n.k IN xs RETURN n.name",
-        "MATCH (n) WHERE n.k = 1 RETURN n.name",
         "UNWIND [1] AS x MATCH (n) WHERE n.k = x RETURN n.name",
     ] {
         let plan = plan_of(&session, query);
@@ -1679,13 +1677,18 @@ fn the_note_stays_away_when_an_index_is_read_or_there_is_none() {
 fn the_note_on_a_union_follows_whether_it_can_be_read() {
     let db = noted(&["CREATE INDEX by_file FOR (n:File) ON (n.k)"]);
     let session = db.session();
-    for query in [
-        "UNWIND [1] AS x MATCH (n:File|Other) WHERE n.k = x RETURN n.name",
-        "MATCH (n) WHERE (n:File OR n:Other) AND n.k = 1 RETURN n.name",
-    ] {
-        let plan = plan_of(&session, query);
-        assert!(plan.contains(NOTE_ON_FILE), "{query}\n{plan}");
-    }
+    // A key from the rows reads no index, as the note says.
+    let query = "UNWIND [1] AS x MATCH (n:File|Other) WHERE n.k = x RETURN n.name";
+    let plan = plan_of(&session, query);
+    assert!(plan.contains(NOTE_ON_FILE), "{query}\n{plan}");
+    // A constant key reads the index it has and compares the rest.
+    let query = "MATCH (n) WHERE (n:File OR n:Other) AND n.k = 1 RETURN n.name";
+    let plan = plan_of(&session, query);
+    assert!(
+        plan.contains("[indexes and remainder: k]"),
+        "{query}\n{plan}"
+    );
+    assert!(!plan.contains("[no index"), "{query}\n{plan}");
     run_all(&session, &["CREATE INDEX by_other FOR (n:Other) ON (n.k)"]);
     let plan = plan_of(
         &session,
@@ -1942,13 +1945,6 @@ fn the_note_shows_in_either_filter_order_when_no_index_is_read() {
         ("cypher", "MATCH (n {k: 7}) WHERE n:Other RETURN n.k"),
         ("gql", "MATCH (n) WHERE n.k = 7 AND n:Other RETURN n.k"),
         ("cypher", "MATCH (n) WHERE n.k = 7 AND n:Other RETURN n.k"),
-        ("gql", "MATCH (n {k: 7}) RETURN n.k"),
-        ("cypher", "MATCH (n {k: 7}) RETURN n.k"),
-        ("gql", "MATCH (n {k: 7}) WHERE n:File OR n:Other RETURN n.k"),
-        (
-            "cypher",
-            "MATCH (n {k: 7}) WHERE n:File OR n:Other RETURN n.k",
-        ),
     ] {
         let plan = plan_in(&session, language, query);
         assert!(

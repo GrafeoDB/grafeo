@@ -811,6 +811,17 @@ impl Columns {
         Ok(done)
     }
 
+    /// Whether the rows hold a column of key `key`.
+    pub(super) fn has(&self, key: u32) -> bool {
+        self.by_key.contains_key(&key)
+    }
+
+    /// The rows holding a newest value of key `key`, `None` while its column is cold, whose
+    /// presence the chunks hold.
+    pub(super) fn hot_present(&self, key: u32) -> Option<&Bitset> {
+        self.by_key.get(&key)?.hot.get().map(|hot| &hot.present)
+    }
+
     /// The value of key `key` at `row`.
     pub(super) fn get(&self, key: u32, row: usize) -> Option<Value> {
         self.by_key.get(&key)?.get(row)

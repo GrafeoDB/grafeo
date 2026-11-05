@@ -50,7 +50,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use grafeo_common::types::{HashableValue, NodeId, PropertyKey, Value};
 use grafeo_common::utils::hash::FxHashMap;
 
-use self::property::{MaybeEqual, PropertyIndex};
+pub(super) use self::property::MaybeEqual;
+use self::property::PropertyIndex;
 use super::{Inner, NodeGroup, PENDING, ROWS_PER_GROUP, Read, RowGroupStore};
 
 /// The property index on one label of a key.

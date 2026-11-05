@@ -234,5 +234,5 @@ pub(crate) use rdf::RdfWriter;
 pub(crate) use rdf::ntriples_terms;
 #[cfg(feature = "triple-store")]
 pub(crate) use rdf::refuse_graph_op_with_changes_in;
-#[cfg(any(rdf_language, test))]
+#[cfg(any(rdf_language, all(test, feature = "triple-store")))]
 pub(crate) use rdf::update_privately;

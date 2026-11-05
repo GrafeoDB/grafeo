@@ -66,6 +66,7 @@ mod epochs;
 mod graphs;
 mod history;
 mod index;
+mod key_column;
 mod load;
 mod read;
 pub mod section;

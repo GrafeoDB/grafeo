@@ -802,6 +802,41 @@ fn chr_backslash() -> char {
     char::from(92_u8)
 }
 
+/// A graph that already breaks its type, as a file from before these checks may: nothing is checked
+/// until a write, so the node reads as it is, and a removal on that node is refused even where the
+/// label it takes is not the cause, since what the statement leaves does not fit. The node stays
+/// readable, and it can be mended first. The type change here is how to reach it; should that change
+/// be refused one day, this needs another way to break the type.
+#[test]
+fn a_node_that_already_breaks_the_type_stays_readable_and_is_refused_a_removal() {
+    let (_db, session) = graph(Kind::Closed);
+    run_all(
+        &session,
+        &[
+            "ALTER NODE TYPE Free ADD PROPERTY extra INTEGER",
+            "INSERT (:Far:Free {name: 'Alix', extra: 1})",
+            "ALTER NODE TYPE Free DROP PROPERTY extra",
+        ],
+    );
+    let read = session
+        .execute("MATCH (x {name: 'Alix'}) RETURN x.extra")
+        .unwrap();
+    assert_eq!(read.rows()[0][0], Value::Int64(1), "it reads as it is");
+    let error = session
+        .execute("MATCH (x {name: 'Alix'}) REMOVE x:Free")
+        .expect_err("what is left does not fit");
+    assert_eq!(status(&error), "G2000", "{error}");
+    assert_eq!(nodes(&session), vec!["Alix:Far,Free"]);
+    run_all(
+        &session,
+        &[
+            "MATCH (x {name: 'Alix'}) REMOVE x.extra",
+            "MATCH (x {name: 'Alix'}) REMOVE x:Free",
+        ],
+    );
+    assert_eq!(nodes(&session), vec!["Alix:Far"]);
+}
+
 /// Replay installs what was committed: a closed graph comes back as it was.
 #[test]
 fn a_reopen_keeps_a_closed_graph_as_committed() {

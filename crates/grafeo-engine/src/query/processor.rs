@@ -802,7 +802,13 @@ fn annotate_hints(
                                 predicate, below.scan, &labels, store, rules,
                             )
                             .filter(|hint| {
-                                matches!(hint, crate::query::plan::PushdownHint::IndexLookup { .. })
+                                matches!(
+                                    hint,
+                                    crate::query::plan::PushdownHint::IndexLookup { .. }
+                                        | crate::query::plan::PushdownHint::IndexesAndRemainder {
+                                            ..
+                                        }
+                                )
                             })
                         })
                 })
@@ -894,6 +900,7 @@ fn note_index_on_other_labels(
             filter.pushdown_hint,
             Some(
                 PushdownHint::IndexLookup { .. }
+                    | PushdownHint::IndexesAndRemainder { .. }
                     | PushdownHint::IdSeek
                     | PushdownHint::ExpandToKey { .. }
             )

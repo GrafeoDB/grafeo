@@ -36,9 +36,11 @@ use std::collections::HashSet;
 
 use grafeo_common::collections::GrafeoSet;
 
+use super::seek::LookupRead;
 use super::subquery::reads_outer_values;
 use grafeo_common::types::{NodeId, TemporalComparison};
 use grafeo_core::execution::operators::find_through_label_indexes;
+use grafeo_core::graph::KeyColumnScope;
 
 use super::{
     Arc, BinaryOp, EmptyOperator, Error, ExpressionPredicate, FilterOp, FilterOperator, GraphStore,
@@ -827,6 +829,20 @@ impl super::Planner {
                 }
             }
         }
+        // No condition has an index of its own: the first with indexes for part of its nodes.
+        if candidates.is_none() {
+            for (property, value) in &conditions {
+                let read = labels.lookup_read(self.store.as_ref(), property, self.rules);
+                if let Some(found) = self.find_through_indexes_and_column(
+                    &read,
+                    property,
+                    std::slice::from_ref(value),
+                )? {
+                    candidates = Some(found);
+                    break;
+                }
+            }
+        }
         let Some(matching_nodes) = candidates else {
             return Ok(None);
         };
@@ -976,11 +992,12 @@ impl super::Planner {
             (checked.scan.variable.clone(), checked.scan.label.clone());
 
         let labels = super::seek::LookupLabels::of(filter, &scan_variable);
+        let lookup_read = |p: &str| labels.lookup_read(self.store.as_ref(), p, self.rules);
         let Some((property, values)) = std::iter::once(&filter.predicate)
             .chain(checked.checks.iter().map(|(_, check)| *check))
             .find_map(|predicate| {
                 indexed_in_list(predicate, &scan_variable, |p| {
-                    labels.served_by(self.store.as_ref(), p)
+                    lookup_read(p) != LookupRead::Scan
                 })
             })
         else {
@@ -1005,16 +1022,25 @@ impl super::Planner {
         // don't want to emit it twice).
         let mut seen: GrafeoSet<_> = GrafeoSet::default();
         let mut matching_nodes = Vec::new();
-        for value in &values {
-            let Some(found) = self.find_maybe_equal(&read, property, value)? else {
-                return Ok(None);
-            };
-            self.read_counter().add(found.len());
-            for node_id in found {
-                if seen.insert(node_id) {
-                    matching_nodes.push(node_id);
+        if matches!(lookup_read(property), LookupRead::Index(_)) {
+            for value in &values {
+                let Some(found) = self.find_maybe_equal(&read, property, value)? else {
+                    return Ok(None);
+                };
+                self.read_counter().add(found.len());
+                for node_id in found {
+                    if seen.insert(node_id) {
+                        matching_nodes.push(node_id);
+                    }
                 }
             }
+        } else {
+            let Some(found) =
+                self.find_through_indexes_and_column(&lookup_read(property), property, &values)?
+            else {
+                return Ok(None);
+            };
+            matching_nodes = found;
         }
 
         // MVCC visibility and the label constraint, as in the equality fast path.
@@ -1263,6 +1289,64 @@ impl super::Planner {
                 return Ok(None);
             };
             found.extend(ids);
+        }
+        found.sort_unstable();
+        found.dedup();
+        Ok(Some(found))
+    }
+
+    /// The nodes of `values`, by `=`, through the indexes and the column `read` says, each once and
+    /// ascending; `None` when `read` says something else, a value has no lookup (see
+    /// [`equality_probes`]), or the store cannot read a column so. Every value is one pass.
+    #[inline(never)]
+    fn find_through_indexes_and_column(
+        &self,
+        read: &LookupRead<'_>,
+        property: &str,
+        values: &[Value],
+    ) -> Result<Option<Vec<NodeId>>> {
+        let LookupRead::IndexesAndRemainder {
+            read,
+            required,
+            one_of,
+        } = read
+        else {
+            return Ok(None);
+        };
+        let mut probes = Vec::with_capacity(values.len());
+        for value in values {
+            let Some(forms) = equality_probes(value, self.session_context.temporal_comparison)
+            else {
+                return Ok(None);
+            };
+            probes.extend(forms);
+        }
+        let except: Vec<&str> = read.iter().map(String::as_str).collect();
+        let scope = KeyColumnScope {
+            required,
+            one_of,
+            except: &except,
+        };
+        let view = self.read_view();
+        let Some(hits) = self
+            .store
+            .find_by_key_column(&scope, property, &probes, view)?
+        else {
+            return Ok(None);
+        };
+        self.read_counter().add(hits.compared);
+        let mut found = hits.nodes;
+        for label in &except {
+            for probe in &probes {
+                let Some(nodes) =
+                    self.store
+                        .find_indexed_maybe_equal(&[label], property, probe, view)?
+                else {
+                    return Ok(None);
+                };
+                self.read_counter().add(nodes.len());
+                found.extend(nodes);
+            }
         }
         found.sort_unstable();
         found.dedup();
@@ -1522,6 +1606,23 @@ pub(crate) fn scan_hint(
     }
     if let Some((property, values)) = indexed_in_list(predicate, variable, has_index) {
         return (!values.is_empty()).then(|| PushdownHint::IndexLookup {
+            property: property.clone(),
+        });
+    }
+    let partly_indexed = |property: &str| {
+        matches!(
+            labels.lookup_read(store, property, rules),
+            super::seek::LookupRead::IndexesAndRemainder { .. }
+        )
+    };
+    let in_list = indexed_in_list(predicate, variable, partly_indexed);
+    if let Some(property) = conditions
+        .iter()
+        .map(|(property, _)| property)
+        .find(|property| partly_indexed(property))
+        .or_else(|| in_list.as_ref().map(|(property, _)| *property))
+    {
+        return Some(PushdownHint::IndexesAndRemainder {
             property: property.clone(),
         });
     }

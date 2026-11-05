@@ -1787,6 +1787,9 @@ impl LogicalOperator {
 fn hint_text(hint: &PushdownHint) -> String {
     match hint {
         PushdownHint::IndexLookup { property } => format!(" [index: {property}]"),
+        PushdownHint::IndexesAndRemainder { property } => {
+            format!(" [indexes and remainder: {property}]")
+        }
         PushdownHint::RangeScan { property } => format!(" [range: {property}]"),
         PushdownHint::LabelFirst => " [label-first]".to_string(),
         PushdownHint::LabelUnion { labels } => format!(" [labels: {}]", labels.join("|")),
@@ -2418,6 +2421,12 @@ pub enum PushdownHint {
     HashJoin {
         /// The keys, as the filter writes them.
         keys: Vec<(LogicalExpression, LogicalExpression)>,
+    },
+    /// A key's holders come from the indexes of some labels and a read of the key's column for
+    /// the rest.
+    IndexesAndRemainder {
+        /// The key.
+        property: String,
     },
     /// The filter pins a key that only other labels have an index on, so it reads no index:
     /// `EXPLAIN` says so beside the path it takes.

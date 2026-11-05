@@ -7,13 +7,14 @@ All notable changes to Grafeo, for future reference (and enjoyment).
 ### Faster queries
 
 - **Planner**: comma patterns pick their join order from sampled degrees, cycles close by lookup or intersection, and same-type chains up to 6 hops count without listing paths. Common queries stay at their speed; the first plan of a comma pattern costs a little more.
+- **Pinned far nodes and `IN`**: a hop to a pinned node starts at that end when it costs less, a key on several nodes reads the shorter side, and a long constant `IN` list is a set.
 - **Constraints**: `UNIQUE` and `NODE KEY` build an index on their first property, so an insert under one no longer reads the whole label.
 
 ### Changed
 
 Queries that ran in 0.6.1 and now fail or behave differently.
 
-- **`CREATE INDEX`** holds its label only: writes on other labels no longer pay for it, and a query on another label or with no label scans, with the same rows and a note in `EXPLAIN`. Existing indexes stay as they are, and `create_property_index` still covers every label. A 0.6.1 release opens such a file with the same rows, without those indexes, and a checkpoint there drops them.
+- **`CREATE INDEX`** holds its label only: writes on other labels no longer pay for it. A query on another label scans, with the same rows and a note in `EXPLAIN`; a query with no label reads the label indexes and scans only the rows they do not cover. Existing indexes stay as they are, and `create_property_index` still covers every label. A 0.6.1 release opens such a file with the same rows, without those indexes, and a checkpoint there drops them.
 - **Closed graph types**: `REMOVE` fails with `G2000` when it would take a node's last label or the label that declares a property it holds, and so does removing a label an edge type's endpoints need, wherever that rule applies. `import_tsv`, `import_tsv_str` and `import_mmio` fail the same way when the graph's rules refuse `_Imported` nodes or the edge. Files already holding such data still open.
 - **Writes**: `|`, `!`, `%` and parentheses in the labels of an `INSERT` or a single-node `MERGE` are an error naming the statement, as they name no labels.
 - **Rules**: a rule added over data that breaks it fails with `GRAFEO-V001`, and so does a commit whose writes break a rule added since the transaction began.

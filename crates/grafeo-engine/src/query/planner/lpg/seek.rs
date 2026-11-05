@@ -241,7 +241,72 @@ pub(crate) struct LookupLabels<'a> {
     unions: Vec<Vec<&'a str>>,
 }
 
+/// What a lookup of a key among nodes with some labels reads. The planner, `EXPLAIN`'s hint and
+/// its note read this one answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum LookupRead<'a> {
+    /// The indexes of these labels, which together hold every result; none: the key's on every
+    /// label.
+    Index(Vec<String>),
+    /// The indexes of `read`, and a read of the key's column for the rest: nodes with one of
+    /// `one_of` (none: any other node) that have none of `read`.
+    IndexesAndRemainder {
+        read: Vec<String>,
+        required: Vec<&'a str>,
+        one_of: Vec<&'a str>,
+    },
+    /// No index: the scan and its filter.
+    Scan,
+}
+
 impl<'a> LookupLabels<'a> {
+    /// What a lookup of `key` at the plan's start reads in `store` under `rules`. A required label
+    /// without an index leaves no index useful, as a node with an indexed label may have it too and
+    /// a node with neither would be read anyway. Otherwise the indexed labels of the first union
+    /// with one, or with no label needed, of every label with an index on the key.
+    pub(crate) fn lookup_read(
+        &self,
+        store: &dyn GraphStore,
+        key: &str,
+        rules: crate::query::optimizer::PlannerRules,
+    ) -> LookupRead<'a> {
+        if !rules.has(crate::query::optimizer::PlannerRule::IndexLookup) {
+            return LookupRead::Scan;
+        }
+        if self.served_by(store, key) {
+            return LookupRead::Index(self.to_read(store, key));
+        }
+        for union in &self.unions {
+            let (indexed, rest): (Vec<&str>, Vec<&str>) = union
+                .iter()
+                .copied()
+                .partition(|label| store.has_label_index(label, key));
+            if !indexed.is_empty() {
+                return LookupRead::IndexesAndRemainder {
+                    read: indexed.iter().map(ToString::to_string).collect(),
+                    required: self.required.clone(),
+                    one_of: rest,
+                };
+            }
+        }
+        if self.required.is_empty() {
+            let read: Vec<String> = store
+                .label_index_entries()
+                .into_iter()
+                .filter(|(_, on)| on == key)
+                .map(|(label, _)| label)
+                .collect();
+            if !read.is_empty() {
+                return LookupRead::IndexesAndRemainder {
+                    read,
+                    required: Vec::new(),
+                    one_of: Vec::new(),
+                };
+            }
+        }
+        LookupRead::Scan
+    }
+
     /// The labels of the filters from `filter` down, and a scan of `variable` below them. It
     /// tells of the whole chain only with `filter` its top.
     pub(crate) fn of(filter: &'a FilterOp, variable: &str) -> Self {

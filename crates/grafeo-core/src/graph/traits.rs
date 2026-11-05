@@ -98,6 +98,28 @@ pub struct CommonEdge {
     pub far_edge: EdgeId,
 }
 
+/// The rows a read of a key's column looks at, by their newest labels (see
+/// [`GraphStore::find_by_key_column`]). A row whose labels a chain keeps is looked at whatever
+/// they are now, as they may differ at a reader's view.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct KeyColumnScope<'a> {
+    /// Labels every result has.
+    pub required: &'a [&'a str],
+    /// Labels of which every result has one; none: no such need.
+    pub one_of: &'a [&'a str],
+    /// Labels whose nodes the caller finds otherwise, through their indexes.
+    pub except: &'a [&'a str],
+}
+
+/// What a read of a key's column found.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct KeyColumnHits {
+    /// The nodes found, ascending.
+    pub nodes: Vec<NodeId>,
+    /// How many rows it looked at, for a statement's count of what it read.
+    pub compared: usize,
+}
+
 /// The reads of one graph, each at an explicit [`ReadView`].
 ///
 /// Every read names who reads: a transaction at its snapshot, which sees
@@ -679,6 +701,23 @@ pub trait GraphStore: Send + Sync {
     /// lookup to a scan. A store with no index on one label has only the second kind.
     fn index_serves(&self, _labels: &[&str], property: &str) -> bool {
         self.has_property_index(property)
+    }
+
+    /// The nodes `scope` leaves whose `property` may be equal under `=` to one of `values`, found
+    /// by reading the key's column, ascending: every such node `view` sees, and maybe others, for
+    /// a filter to decide. `None` for a store that cannot read a column so, whose callers scan.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error of a read the store cannot do.
+    fn find_by_key_column(
+        &self,
+        _scope: &KeyColumnScope<'_>,
+        _property: &str,
+        _values: &[Value],
+        _view: ReadView,
+    ) -> Result<Option<KeyColumnHits>> {
+        Ok(None)
     }
 
     /// What a walk back from a node of `far_label` reads over `types` in `back`, by the far side:

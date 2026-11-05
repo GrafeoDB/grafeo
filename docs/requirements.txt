@@ -7,4 +7,3 @@ pymdown-extensions>=12.3
 pillow>=13.0.0
 cairosvg>=2.9.1
 mike>=2.2.0
-mkdocs-marimo>=0.2.1

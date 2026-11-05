@@ -35,6 +35,8 @@ const MOST_REACHED_ENTRIES: usize = 256;
 #[derive(Debug, Clone, Copy)]
 struct Sample {
     degree: f64,
+    /// The largest count the sample saw.
+    max: f64,
     label_nodes: u64,
     type_edges: u64,
 }
@@ -152,6 +154,18 @@ impl Sample {
 }
 
 impl RowGroupStore {
+    /// About [`SAMPLE_NODES`] committed nodes of `label`, and whether they are all of them (see
+    /// `sampled_nodes_with_label`): never the label's list.
+    fn sample_of_label(&self, label: &str, view: ReadView) -> (Vec<NodeId>, bool) {
+        let inner = self.inner.read();
+        match inner.label_id(label) {
+            Some(label) => {
+                inner.sampled_nodes_with_label(label, SAMPLE_NODES, super::Read::view(view))
+            }
+            None => (Vec::new(), true),
+        }
+    }
+
     /// How many samples it has read, for a test to see that a plain query reads
     /// none and a small change reads no more.
     #[doc(hidden)]
@@ -176,6 +190,24 @@ impl RowGroupStore {
         edge_type: &str,
         direction: Direction,
     ) -> Option<f64> {
+        self.degree_sample(label, edge_type, direction)
+            .map(|sample| sample.degree)
+    }
+
+    /// The largest count the sample of [`sample_degree`](Self::sample_degree) saw, from the same
+    /// read.
+    pub(super) fn sample_max_degree(
+        &self,
+        label: &str,
+        edge_type: &str,
+        direction: Direction,
+    ) -> Option<f64> {
+        self.degree_sample(label, edge_type, direction)
+            .map(|sample| sample.max)
+    }
+
+    /// The sample of `label`'s degrees over `edge_type` in `direction`, kept while it stands.
+    fn degree_sample(&self, label: &str, edge_type: &str, direction: Direction) -> Option<Sample> {
         let (label_nodes, type_edges) = self.committed_counts(label, edge_type);
         if label_nodes == 0 {
             return None;
@@ -184,19 +216,18 @@ impl RowGroupStore {
         if let Some(sample) = self.degree_samples.samples.lock().get(&key)
             && sample.stands(label_nodes, type_edges)
         {
-            return Some(sample.degree);
+            return Some(*sample);
         }
-        let degree = self.read_sample(label, edge_type, direction)?;
+        let (degree, max) = self.read_sample(label, edge_type, direction)?;
         self.degree_samples.taken.fetch_add(1, Ordering::Relaxed);
-        self.degree_samples.samples.lock().insert(
-            key,
-            Sample {
-                degree,
-                label_nodes,
-                type_edges,
-            },
-        );
-        Some(degree)
+        let sample = Sample {
+            degree,
+            max,
+            label_nodes,
+            type_edges,
+        };
+        self.degree_samples.samples.lock().insert(key, sample);
+        Some(sample)
     }
 
     /// See `GraphStore::sampled_reached_degree_within`.
@@ -271,15 +302,7 @@ impl RowGroupStore {
             return None;
         }
         let view = ReadView::latest();
-        let nodes = self.nodes_by_label(far_label, view).ok()?;
-        let sample: Vec<NodeId> = if nodes.len() <= SAMPLE_NODES {
-            nodes
-        } else {
-            ranks(nodes.len() as u64)
-                .into_iter()
-                .filter_map(|rank| nodes.get(usize::try_from(rank).ok()?).copied())
-                .collect()
-        };
+        let (sample, _) = self.sample_of_label(far_label, view);
         let reads = sample.len() as u64;
         if sample.is_empty() || *budget < reads {
             return None;
@@ -361,18 +384,21 @@ impl RowGroupStore {
                 .collect()
         };
         let (via, on) = (types_of(&key.via_types), types_of(&key.on_types));
-        let nodes = match &key.start_label {
-            Some(label) => self.nodes_by_label(label, view).ok()?,
-            None => self.node_ids(view).ok()?,
-        };
-        let every_start_read = nodes.len() <= SAMPLE_NODES;
-        let starts: Vec<NodeId> = if every_start_read {
-            nodes
-        } else {
-            ranks(nodes.len() as u64)
-                .into_iter()
-                .filter_map(|rank| nodes.get(usize::try_from(rank).ok()?).copied())
-                .collect()
+        let (starts, every_start_read) = match &key.start_label {
+            Some(label) => self.sample_of_label(label, view),
+            // No label: every node is a start, sampled from the list of them.
+            None => {
+                let nodes = self.node_ids(view).ok()?;
+                if nodes.len() <= SAMPLE_NODES {
+                    (nodes, true)
+                } else {
+                    let sample = ranks(nodes.len() as u64)
+                        .into_iter()
+                        .filter_map(|rank| nodes.get(usize::try_from(rank).ok()?).copied())
+                        .collect();
+                    (sample, false)
+                }
+            }
         };
         let share = |spent_up_to: u64, reads: u64, parts: usize| {
             spent_up_to.saturating_sub(reads) / (parts.max(1) as u64)
@@ -494,26 +520,25 @@ impl RowGroupStore {
         )
     }
 
-    fn read_sample(&self, label: &str, edge_type: &str, direction: Direction) -> Option<f64> {
+    fn read_sample(
+        &self,
+        label: &str,
+        edge_type: &str,
+        direction: Direction,
+    ) -> Option<(f64, f64)> {
         let view = ReadView::latest();
-        let nodes = self.nodes_by_label(label, view).ok()?;
         let types = [ArcStr::from(edge_type)];
         let count = |node| {
             self.count_within(node, direction, &types, COUNTED_LIST, view)
                 .map(|(count, _)| count)
         };
-        let sampled: Vec<NodeId> = if nodes.len() <= SAMPLE_NODES {
-            nodes
-        } else {
-            ranks(nodes.len() as u64)
-                .into_iter()
-                .filter_map(|rank| nodes.get(usize::try_from(rank).ok()?).copied())
-                .collect()
-        };
-        let mut edges = 0;
+        let (sampled, _) = self.sample_of_label(label, view);
+        let (mut edges, mut max) = (0, 0);
         for node in &sampled {
-            edges += count(*node)?;
+            let counted = count(*node)?;
+            edges += counted;
+            max = max.max(counted);
         }
-        (!sampled.is_empty()).then(|| edges as f64 / sampled.len() as f64)
+        (!sampled.is_empty()).then(|| (edges as f64 / sampled.len() as f64, max as f64))
     }
 }

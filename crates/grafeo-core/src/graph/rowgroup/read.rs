@@ -226,6 +226,68 @@ impl Inner {
         ids
     }
 
+    /// About `size` nodes `read` sees with label `label`, spread over the row groups, and whether
+    /// they are all of the label's nodes. Each group gives its share of `size` by its rows in the
+    /// newest label bitmap, at ranks in a golden-ratio sequence that starts at a point the label
+    /// sets, and a picked row counts when `read` sees it and its labels at `read` hold the label. It
+    /// reads the groups' counts and the picked rows, never the label's list. A label of at most
+    /// `size` rows is read whole. The same nodes for the same data, whoever asks first.
+    pub(super) fn sampled_nodes_with_label(
+        &self,
+        label: u32,
+        size: usize,
+        read: Read,
+    ) -> (Vec<NodeId>, bool) {
+        let counts: Vec<(u64, usize)> = self
+            .nodes
+            .iter()
+            .map(|(index, group)| {
+                let rows = group.labels.get(&label);
+                (
+                    *index,
+                    rows.map_or(0, |rows| rows.count_in(0..rows.words().len() * 64)),
+                )
+            })
+            .collect();
+        let total: usize = counts.iter().map(|(_, count)| count).sum();
+        if total <= size {
+            return (self.nodes_with_labels_at(&[label], read), true);
+        }
+        const GOLDEN: u64 = 0x9E37_79B9_7F4A_7C15;
+        let start = u64::from(label).wrapping_mul(GOLDEN);
+        let mut picked = Vec::with_capacity(size + counts.len());
+        for (index, count) in counts {
+            let (Some(group), Some(rows)) = (
+                self.nodes.get(&index),
+                self.nodes
+                    .get(&index)
+                    .and_then(|group| group.labels.get(&label)),
+            ) else {
+                continue;
+            };
+            if count == 0 {
+                continue;
+            }
+            let share = (size * count).div_ceil(total) as u64;
+            let count = count as u64;
+            let mut ranks: Vec<u64> = (1..=share)
+                .map(|i| {
+                    let fraction = u128::from(start.wrapping_add(i.wrapping_mul(GOLDEN)));
+                    u64::try_from((fraction * u128::from(count)) >> 64).unwrap_or(count - 1)
+                })
+                .collect();
+            ranks.sort_unstable();
+            ranks.dedup();
+            let base = index * ROWS_PER_GROUP;
+            for row in rows.rows_at_ranks(&ranks) {
+                if group.version(row).visible(read) && group.has_label_at(row, label, read) {
+                    picked.push(NodeId::new(base + row as u64));
+                }
+            }
+        }
+        (picked, false)
+    }
+
     /// Every node `read` sees, ascending, a word of rows at a time.
     fn visible_node_ids(&self, read: Read) -> Vec<NodeId> {
         let mut ids = Vec::new();
@@ -1488,6 +1550,15 @@ impl GraphStore for RowGroupStore {
 
     fn sampled_degree(&self, label: &str, edge_type: &str, direction: Direction) -> Option<f64> {
         self.sample_degree(label, edge_type, direction)
+    }
+
+    fn sampled_max_degree(
+        &self,
+        label: &str,
+        edge_type: &str,
+        direction: Direction,
+    ) -> Option<f64> {
+        self.sample_max_degree(label, edge_type, direction)
     }
 
     fn sampled_reached_degree_within(

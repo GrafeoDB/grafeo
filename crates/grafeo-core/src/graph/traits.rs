@@ -779,6 +779,17 @@ pub trait GraphStore: Send + Sync {
         None
     }
 
+    /// The largest count [`sampled_degree`](Self::sampled_degree)'s sample saw, from the same
+    /// read: a node's list it may miss is longer. `None` as there.
+    fn sampled_max_degree(
+        &self,
+        _label: &str,
+        _edge_type: &str,
+        _direction: Direction,
+    ) -> Option<f64> {
+        None
+    }
+
     /// The mean count of `on_types`' edges in `on_direction` at the ends a hop reaches:
     /// over the edges of `via_types` in `via_direction` from a sample of `start_label`'s
     /// nodes (of all nodes for `None`), as committed, each end counted as often as an edge

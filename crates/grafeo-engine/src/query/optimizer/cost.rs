@@ -149,6 +149,9 @@ pub(super) mod measured {
     /// One check of a node's property in a filter over a scan, from graph-bench's whole scan
     /// with the filter; it falls when a scan compares a key's column itself.
     pub const PROPERTY_CHECK: f64 = 95.0;
+    /// One node a scan looks at when it reads an equality's key from the key's column. Used for
+    /// that scan only: a point read of a row's property stays a [`PROPERTY_CHECK`].
+    pub const KEY_COLUMN_ROW: f64 = 4.0;
     /// One row a hash table is built with.
     pub const HASH_BUILD: f64 = 340.0;
     /// One row probing a hash table.

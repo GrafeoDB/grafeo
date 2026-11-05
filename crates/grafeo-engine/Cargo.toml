@@ -205,6 +205,11 @@ path = "tests/path_search_budget.rs"
 name = "typed_read_allocations"
 path = "tests/typed_read_allocations.rs"
 
+# Counts allocated bytes with its own global allocator.
+[[test]]
+name = "turn_sample_allocations"
+path = "tests/turn_sample_allocations.rs"
+
 # Counts allocations with its own global allocator.
 [[test]]
 name = "peak_memory"

@@ -738,7 +738,9 @@ fn a_reopen_after_drop_constraint_keeps_the_index_alone() {
 
 const CRASH_PATH: &str = "GRAFEO_UNIQUE_INDEX_CRASH_PATH";
 const CRASH_POINT: &str = "GRAFEO_UNIQUE_INDEX_CRASH_POINT";
+#[cfg(feature = "testing-crash-injection")]
 const CRASH_MARKER: &str = "GRAFEO_UNIQUE_INDEX_CRASH_MARKER";
+#[cfg(feature = "testing-crash-injection")]
 const CRASH_TRANSACTION: &str = "GRAFEO_UNIQUE_INDEX_CRASH_TRANSACTION";
 
 /// Everything committed, then the process ends with no close: the log has it all.
@@ -780,6 +782,7 @@ fn a_crash_after_the_commit_keeps_the_index_in_every_graph() {
 
 /// The rule's statement, or its commit, up to a crash at the point given. Reports through the
 /// marker file when the statement finished before the point came.
+#[cfg(feature = "testing-crash-injection")]
 #[test]
 fn rule_crash_child() {
     use grafeo_common::testing::crash::{CrashResult, with_crash_at};
@@ -815,6 +818,7 @@ fn rule_crash_child() {
     std::process::exit(0);
 }
 
+#[cfg(feature = "testing-crash-injection")]
 fn crash_sweep(in_transaction: bool) {
     for point in 1..=400_u64 {
         let dir = tempfile::tempdir().unwrap();
@@ -859,11 +863,13 @@ fn crash_sweep(in_transaction: bool) {
     panic!("the statement never finished within the points tried");
 }
 
+#[cfg(feature = "testing-crash-injection")]
 #[test]
 fn a_crash_in_the_statement_leaves_both_or_neither() {
     crash_sweep(false);
 }
 
+#[cfg(feature = "testing-crash-injection")]
 #[test]
 fn a_crash_in_the_commit_leaves_both_or_neither() {
     crash_sweep(true);
@@ -1558,6 +1564,7 @@ fn a_crash_after_the_commit_of_two_rules_replays_both_indexes_and_names() {
     db.close().unwrap();
 }
 
+#[cfg(feature = "testing-crash-injection")]
 #[test]
 fn a_crash_in_the_commit_of_two_rules_leaves_all_or_nothing() {
     for point in 1..=400_u64 {

@@ -145,8 +145,15 @@ fn remove(
             .execute(&text)
             .map(|_| true)
             .map_err(|e| e.to_string()),
+        #[cfg(feature = "cypher")]
         Way::Cypher => session
             .execute_cypher(&text)
+            .map(|_| true)
+            .map_err(|e| e.to_string()),
+        // With no Cypher to write it in, the same statement in GQL.
+        #[cfg(not(feature = "cypher"))]
+        Way::Cypher => session
+            .execute(&text)
             .map(|_| true)
             .map_err(|e| e.to_string()),
         Way::Session => session
@@ -714,6 +721,7 @@ fn the_csv_loader_checks_a_closed_type() {
 }
 
 /// Gremlin writes through the same check: an undeclared label, property and edge type are refused.
+#[cfg(feature = "gremlin")]
 #[test]
 fn gremlin_writes_check_a_closed_type() {
     let (_db, session) = graph(Kind::Closed);
@@ -743,6 +751,7 @@ fn gremlin_writes_check_a_closed_type() {
 }
 
 /// GraphQL mutations too.
+#[cfg(feature = "graphql")]
 #[test]
 fn graphql_writes_check_a_closed_type() {
     let (_db, session) = graph(Kind::Closed);

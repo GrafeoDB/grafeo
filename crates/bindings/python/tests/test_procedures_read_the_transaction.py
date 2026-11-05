@@ -11,11 +11,10 @@ import json
 
 import grafeo
 import pytest
-from grafeo import GrafeoDB
 
 pytestmark = [
     pytest.mark.skipif(
-        not hasattr(GrafeoDB(), "algorithms"),
+        not hasattr(grafeo.GrafeoDB(), "algorithms"),
         reason="grafeo built without algos feature",
     ),
     pytest.mark.skipif("gql" not in grafeo.features(), reason="grafeo built without gql feature"),
@@ -43,7 +42,7 @@ CATALOG = {"grafeo.labels", "grafeo.propertyKeys", "grafeo.relationshipTypes"}
 
 
 def database(*statements):
-    db = GrafeoDB()
+    db = grafeo.GrafeoDB()
     for statement in statements:
         db.execute(statement)
     return db

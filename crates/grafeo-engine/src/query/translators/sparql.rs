@@ -10,11 +10,11 @@ use crate::query::plan::Callee;
 use crate::query::plan::always_bound;
 use crate::query::plan::{
     AddGraphOp, AggregateExpr, AggregateFunction, AggregateOp, AntiJoinOp, BinaryOp, BindOp,
-    ClearGraphOp, ConstructOp, CopyGraphOp, CreateGraphOp, DatasetRestriction, DeleteTripleOp,
-    DropGraphOp, FilterOp, InNamedGraphOp, InsertTripleOp, JoinCondition, JoinOp, JoinType,
-    LeftJoinOp, LoadGraphOp, LogicalExpression, LogicalOperator, LogicalPlan, ModifyOp,
-    MoveGraphOp, NamedGraphsOp, ProjectOp, Projection, SortKey, SortOrder, TripleComponent,
-    TripleScanOp, TripleTemplate, UnaryOp, UnionOp,
+    ClearGraphOp, ConstructOp, CopyGraphOp, CreateGraphOp, DatasetNamedGraphs, DatasetRestriction,
+    DeleteTripleOp, DropGraphOp, FilterOp, InNamedGraphOp, InsertTripleOp, JoinCondition, JoinOp,
+    JoinType, LeftJoinOp, LoadGraphOp, LogicalExpression, LogicalOperator, LogicalPlan, ModifyOp,
+    MoveGraphOp, NamedGraph, NamedGraphsOp, ProjectOp, Projection, SortKey, SortOrder,
+    TripleComponent, TripleScanOp, TripleTemplate, UnaryOp, UnionOp, graph_of_a_sub_select,
 };
 use grafeo_adapters::query::sparql::{self, ast};
 use grafeo_common::storage::log_record::RdfGraphTarget;
@@ -174,10 +174,54 @@ struct SparqlTranslator {
     /// The empty group's one solution inside `GRAPH ?g`, when the pattern
     /// there leaves ?g unbound: one row per named graph (see [`Self::unit`]).
     graph_unit: Option<NamedGraphsOp>,
+    /// How many `EXISTS` patterns are being translated around this point: in one, both sides of a
+    /// `MINUS` start from the row, so one with no variable in common may still remove a row.
+    exists_depth: usize,
 }
 
-/// Whether every solution of `pattern` comes from a triple it reads, so that a graph with no
-/// triple gives it none. A sub-SELECT need not: `COUNT(*)` of nothing is a row.
+/// Whether a `GRAPH ?g` over `pattern` must run it once per graph: a sub-SELECT's projection drops
+/// `?g`, so its aggregate, `ORDER BY` and `LIMIT` would run over all graphs. A nested `GRAPH` has
+/// its own graph.
+fn holds_a_sub_select(pattern: &ast::GraphPattern) -> bool {
+    match pattern {
+        ast::GraphPattern::SubSelect(_) => true,
+        ast::GraphPattern::Group(patterns) | ast::GraphPattern::Union(patterns) => {
+            patterns.iter().any(holds_a_sub_select)
+        }
+        ast::GraphPattern::Optional(inner) | ast::GraphPattern::Minus(inner) => {
+            holds_a_sub_select(inner)
+        }
+        _ => false,
+    }
+}
+
+/// Whether a scan or path in `plan`, or in the pattern of an `EXISTS` in it, reads the graph named
+/// `own`: a sub-SELECT's patterns read `GRAPH ?g`'s graph so, which an `EXISTS` may hold.
+fn reads_the_graph(plan: &LogicalOperator, own: &str) -> bool {
+    let reads = |graph: &Option<TripleComponent>| {
+        graph.as_ref().and_then(TripleComponent::as_variable) == Some(own)
+    };
+    let here = match plan {
+        LogicalOperator::TripleScan(scan) => reads(&scan.graph),
+        LogicalOperator::PropertyPath(path) => reads(&path.graph),
+        _ => false,
+    };
+    here || crate::query::plan::sparql_expressions(plan)
+        .into_iter()
+        .any(|expression| {
+            crate::query::plan::exists_plans(expression)
+                .iter()
+                .any(|exists| reads_the_graph(exists, own))
+        })
+        || plan
+            .children()
+            .into_iter()
+            .any(|child| reads_the_graph(child, own))
+}
+
+/// Whether `pattern`'s reads find a graph the dataset does not name for themselves: its triples
+/// read nothing there, and a path searches only the graphs it names, a zero-length step too. A
+/// sub-SELECT need not: `COUNT(*)` of nothing is a row.
 fn reads_a_triple(pattern: &ast::GraphPattern) -> bool {
     match pattern {
         ast::GraphPattern::Basic(triples) => !triples.is_empty(),
@@ -203,6 +247,7 @@ impl SparqlTranslator {
             initial_bindings: None,
             group_start: None,
             graph_unit: None,
+            exists_depth: 0,
         }
     }
 
@@ -400,6 +445,11 @@ impl SparqlTranslator {
                 let mut read = HashSet::new();
                 for key in sort_keys.iter().flatten() {
                     collect_expression_variables(&key.expression, &mut read);
+                    // An `EXISTS` reads the whole solution by substitution (18.6), whatever the
+                    // SELECT lists.
+                    if crate::query::plan::has_subquery(&key.expression) {
+                        read.extend(Self::collect_operator_variables(&plan));
+                    }
                 }
                 let mut carried: Vec<&String> =
                     read.iter().filter(|name| !names.contains(name)).collect();
@@ -841,7 +891,7 @@ impl SparqlTranslator {
         let previous_dataset = default_graph.as_ref().map(|graph| {
             self.dataset.replace(DatasetRestriction {
                 default_graphs: vec![graph.clone()],
-                named_graphs: Vec::new(),
+                named_graphs: DatasetNamedGraphs::OfTheStore,
             })
         });
 
@@ -1120,7 +1170,10 @@ impl SparqlTranslator {
                     let inner_plan = self.translate_graph_pattern(inner)?;
                     // Minus(Z, P) is Z; MINUS removes a solution only through
                     // a variable both sides bind.
-                    if !self.is_unit(&plan) && self.share_a_pattern_variable(&plan, &inner_plan) {
+                    if self.exists_depth > 0
+                        || (!self.is_unit(&plan)
+                            && self.share_a_pattern_variable(&plan, &inner_plan))
+                    {
                         plan = LogicalOperator::AntiJoin(AntiJoinOp {
                             left: Box::new(plan),
                             right: Box::new(inner_plan),
@@ -1206,17 +1259,9 @@ impl SparqlTranslator {
         inner: &ast::GraphPattern,
     ) -> Result<LogicalOperator> {
         let (right, condition) = if let ast::GraphPattern::Group(patterns) = inner {
+            // Every filter is decided per pair, over the merged solution.
             let (plan, filters) = self.translate_group_returning(patterns, true)?;
-            // An EXISTS or NOT EXISTS conjunct is decided per pair too, in
-            // the condition; any other filter with a subquery stays inside.
-            let (inside, merged): (Vec<_>, Vec<_>) = filters.into_iter().partition(|filter| {
-                crate::query::plan::has_subquery(filter) && !is_exists_test(filter)
-            });
-            let plan = match LogicalExpression::conjunction(inside) {
-                Some(predicate) => wrap_filter(plan, predicate),
-                None => plan,
-            };
-            (plan, LogicalExpression::conjunction(merged))
+            (plan, LogicalExpression::conjunction(filters))
         } else {
             (self.translate_graph_pattern(inner)?, None)
         };
@@ -1225,6 +1270,14 @@ impl SparqlTranslator {
             right: Box::new(right),
             condition,
         }))
+    }
+
+    /// The pattern of an `EXISTS` or `NOT EXISTS`.
+    fn translate_exists_pattern(&mut self, pattern: &ast::GraphPattern) -> Result<LogicalOperator> {
+        self.exists_depth += 1;
+        let subquery = self.translate_graph_pattern(pattern);
+        self.exists_depth -= 1;
+        subquery
     }
 
     /// The empty group's one solution: Z, or inside a `GRAPH ?g` whose
@@ -1277,13 +1330,6 @@ impl SparqlTranslator {
                 })
             }
 
-            ast::GraphPattern::Optional(inner) => {
-                // `{ OPTIONAL { P } }`, a group of one, which the parser
-                // collapses: LeftJoin(Z, P), Z the empty group's one solution.
-                let unit = self.unit();
-                self.translate_optional(unit, inner)
-            }
-
             ast::GraphPattern::Union(alternatives) => {
                 let inputs = alternatives
                     .iter()
@@ -1293,33 +1339,16 @@ impl SparqlTranslator {
                 Ok(LogicalOperator::Union(UnionOp { inputs }))
             }
 
-            ast::GraphPattern::Minus(inner) => {
-                // `{ MINUS { P } }`, a group of one: Minus(Z, P) is Z, the
-                // empty group's one solution, as it shares no variable with a
-                // solution of P (SPARQL 1.1 sec 18.5). P is still translated,
-                // so a pattern this build refuses is refused here too.
-                self.translate_graph_pattern(inner)?;
-                Ok(self.unit())
-            }
-
-            ast::GraphPattern::Filter(expr) => {
-                // Standalone FILTER - handled in Group translation, but support direct call
-                // This can happen when Filter is the top-level pattern
-                let predicate = self.translate_expression(expr)?;
-                Ok(wrap_filter(self.unit(), predicate))
-            }
-
-            ast::GraphPattern::Bind {
-                expression,
-                variable,
-            } => {
-                // Standalone BIND - handled in Group translation, but support direct call
-                let expr = self.translate_expression(expression)?;
-                Ok(LogicalOperator::Bind(BindOp {
-                    expression: expr,
-                    variable: variable.clone(),
-                    input: Box::new(self.unit()),
-                }))
+            // These read the group around them, so the parser keeps theirs; alone they are one.
+            ast::GraphPattern::Optional(_)
+            | ast::GraphPattern::Minus(_)
+            | ast::GraphPattern::Filter(_)
+            | ast::GraphPattern::Bind { .. } => {
+                let (plan, filters) = self.translate_group(std::slice::from_ref(pattern))?;
+                Ok(match LogicalExpression::conjunction(filters) {
+                    Some(predicate) => wrap_filter(plan, predicate),
+                    None => plan,
+                })
             }
 
             ast::GraphPattern::NamedGraph { graph, pattern } => {
@@ -1348,7 +1377,20 @@ impl SparqlTranslator {
                     // graph the dataset does not name; otherwise it must say so.
                     (Ok(plan), ast::VariableOrIri::Iri(iri)) if !reads_a_triple(pattern) => {
                         Ok(LogicalOperator::InNamedGraph(InNamedGraphOp {
-                            graph: self.resolve_iri(iri),
+                            graph: NamedGraph::Iri(self.resolve_iri(iri)),
+                            dataset: self.dataset.clone(),
+                            input: Box::new(plan),
+                        }))
+                    }
+                    (plan, _) => plan,
+                };
+                let plan = match (plan, graph) {
+                    (Ok(plan), ast::VariableOrIri::Variable(name))
+                        if holds_a_sub_select(pattern)
+                            || reads_the_graph(&plan, &graph_of_a_sub_select(name)) =>
+                    {
+                        Ok(LogicalOperator::InNamedGraph(InNamedGraphOp {
+                            graph: NamedGraph::Variable(name.clone()),
                             dataset: self.dataset.clone(),
                             input: Box::new(plan),
                         }))
@@ -1361,8 +1403,23 @@ impl SparqlTranslator {
             }
 
             ast::GraphPattern::SubSelect(subquery) => {
-                let plan = self.translate_select(subquery)?;
-                Ok(plan.root)
+                // Its names are its own: a `?g` in it is not the `GRAPH ?g` around it, which its
+                // patterns read under a name of their own, and its groups start with no `?g` bound.
+                let around = self.graph_context_stack.last().cloned();
+                if let Some(TripleComponent::Variable(variable)) = &around
+                    && let Some(graph) = self.graph_context_stack.last_mut()
+                {
+                    *graph = TripleComponent::Variable(graph_of_a_sub_select(variable));
+                }
+                let unit_around = self.graph_unit.take();
+                let plan = self.translate_select(subquery);
+                self.graph_unit = unit_around;
+                if let Some(around) = around
+                    && let Some(graph) = self.graph_context_stack.last_mut()
+                {
+                    *graph = around;
+                }
+                Ok(plan?.root)
             }
 
             ast::GraphPattern::Service { .. } => Err(Error::from(QueryError::new(
@@ -1511,14 +1568,18 @@ impl SparqlTranslator {
             return Ok(LogicalOperator::Union(UnionOp { inputs: branches }));
         }
 
-        // Handle OneOrMore (path+): native endpoint reachability
-        if let ast::PropertyPath::OneOrMore(inner) = &triple.predicate {
-            return self.translate_one_or_more_path(triple, inner);
-        }
-
-        // Handle ZeroOrMore (path*): native endpoint reachability
-        if let ast::PropertyPath::ZeroOrMore(inner) = &triple.predicate {
-            return self.translate_zero_or_more_path(triple, inner);
+        // A quantified step is one search of its endpoints: path+, path* and path?.
+        match &triple.predicate {
+            ast::PropertyPath::OneOrMore(inner) => {
+                return self.translate_path_search(triple, inner, false, true);
+            }
+            ast::PropertyPath::ZeroOrMore(inner) => {
+                return self.translate_path_search(triple, inner, true, true);
+            }
+            ast::PropertyPath::ZeroOrOne(inner) => {
+                return self.translate_path_search(triple, inner, true, false);
+            }
+            _ => {}
         }
 
         // Handle Inverse (^path): swap subject and object, translate inner path
@@ -1529,11 +1590,6 @@ impl SparqlTranslator {
                 object: triple.subject.clone(),
             };
             return self.translate_triple_pattern(&swapped);
-        }
-
-        // Handle ZeroOrOne (path?): union of reflexive 0-hop and 1-hop
-        if let ast::PropertyPath::ZeroOrOne(inner) = &triple.predicate {
-            return self.translate_zero_or_one_path(triple, inner);
         }
 
         // Handle Negation: !(iri1|^iri2) scans all triples and filters out excluded predicates
@@ -1733,13 +1789,13 @@ impl SparqlTranslator {
 
             ast::Expression::Exists(pattern) => {
                 // EXISTS { pattern } - check if pattern has any matches
-                let subquery = self.translate_graph_pattern(pattern)?;
+                let subquery = self.translate_exists_pattern(pattern)?;
                 Ok(LogicalExpression::ExistsSubquery(Box::new(subquery)))
             }
 
             ast::Expression::NotExists(pattern) => {
                 // NOT EXISTS { pattern } - negate the EXISTS check
-                let subquery = self.translate_graph_pattern(pattern)?;
+                let subquery = self.translate_exists_pattern(pattern)?;
                 Ok(LogicalExpression::Unary {
                     op: UnaryOp::Not,
                     operand: Box::new(LogicalExpression::ExistsSubquery(Box::new(subquery))),
@@ -2175,6 +2231,11 @@ impl SparqlTranslator {
         match op {
             LogicalOperator::InNamedGraph(graph) => {
                 Self::collect_variables_recursive(&graph.input, vars);
+                if let NamedGraph::Variable(variable) = &graph.graph
+                    && !vars.contains(variable)
+                {
+                    vars.push(variable.clone());
+                }
             }
             LogicalOperator::NamedGraphs(graphs) => {
                 if !vars.contains(&graphs.variable) {
@@ -2375,28 +2436,14 @@ impl SparqlTranslator {
         }
     }
 
-    /// Plans one native endpoint traversal instead of a bounded union of walks.
-    fn translate_one_or_more_path(
-        &mut self,
-        triple: &ast::TriplePattern,
-        inner_path: &ast::PropertyPath,
-    ) -> Result<LogicalOperator> {
-        self.translate_repeated_path(triple, inner_path, false)
-    }
-
-    fn translate_zero_or_more_path(
-        &mut self,
-        triple: &ast::TriplePattern,
-        inner_path: &ast::PropertyPath,
-    ) -> Result<LogicalOperator> {
-        self.translate_repeated_path(triple, inner_path, true)
-    }
-
-    fn translate_repeated_path(
+    /// Plans one native endpoint search of `inner_path`: with its zero-length step or not, and
+    /// taking it once or any number of times.
+    fn translate_path_search(
         &mut self,
         triple: &ast::TriplePattern,
         inner_path: &ast::PropertyPath,
         zero_length: bool,
+        repeats: bool,
     ) -> Result<LogicalOperator> {
         Ok(LogicalOperator::PropertyPath(
             crate::query::plan::PropertyPathOp {
@@ -2404,6 +2451,7 @@ impl SparqlTranslator {
                 object: self.translate_triple_term(&triple.object)?,
                 path: self.translate_path_step(inner_path)?,
                 zero_length,
+                repeats,
                 graph: self.graph_context_stack.last().cloned(),
                 dataset: self.dataset.clone(),
             },
@@ -2435,74 +2483,14 @@ impl SparqlTranslator {
                 .map(PathStep::Alternative),
             _ => Err(Error::from(QueryError::new(
                 QueryErrorKind::Unsupported,
-                "Repeated property paths support IRIs, inverse, sequence and alternative; nested quantifiers and negated sets are not supported",
+                "Quantified property paths support IRIs, inverse, sequence and alternative; nested quantifiers and negated sets are not supported",
             ))),
         }
     }
 
-    /// Translates a `ZeroOrOne` property path (`path?`).
-    ///
-    /// Produces a union of 0-hop reflexive matches and exactly 1-hop matches,
-    /// then deduplicates. Same structure as `translate_zero_or_more_path` but
-    /// bounded to depth 0..1 instead of 0..MAX_DEPTH.
-    fn translate_zero_or_one_path(
-        &mut self,
-        triple: &ast::TriplePattern,
-        inner_path: &ast::PropertyPath,
-    ) -> Result<LogicalOperator> {
-        let subject = self.translate_triple_term(&triple.subject)?;
-        let object = self.translate_triple_term(&triple.object)?;
-        let graph = self.graph_context_stack.last().cloned();
-
-        let mut branches = Vec::new();
-
-        // 0-hop reflexive branches
-        self.add_reflexive_branches(&subject, &object, inner_path, &graph, &mut branches)?;
-
-        // 1-hop: exactly one traversal of the predicate (wrapped to match reflexive column count)
-        let one_hop = self.translate_fixed_depth_path(inner_path, &subject, &object, &graph, 1)?;
-        branches.push(self.project_path_endpoints(&subject, &object, one_hop));
-
-        let union = LogicalOperator::Union(UnionOp { inputs: branches });
-        Ok(wrap_distinct(union))
-    }
-
-    /// Adds 0-hop reflexive branches for `ZeroOrMore` and `ZeroOrOne` paths.
-    fn add_reflexive_branches(
-        &mut self,
-        subject: &TripleComponent,
-        object: &TripleComponent,
-        inner_path: &ast::PropertyPath,
-        graph: &Option<TripleComponent>,
-        branches: &mut Vec<LogicalOperator>,
-    ) -> Result<()> {
-        if matches!(subject, TripleComponent::Variable(_)) {
-            let fresh_obj = TripleComponent::Variable(format!("_:refl{}", self.next_anon()));
-            let pred = self.translate_property_path(inner_path)?;
-            let subj_scan = self.make_triple_scan(subject.clone(), pred, fresh_obj, graph.clone());
-            let subj_reflexive = self.project_reflexive(subject, object, subj_scan)?;
-            branches.push(subj_reflexive);
-
-            let fresh_subj = TripleComponent::Variable(format!("_:refl{}", self.next_anon()));
-            let pred2 = self.translate_property_path(inner_path)?;
-            let obj_scan = self.make_triple_scan(fresh_subj, pred2, object.clone(), graph.clone());
-            let obj_reflexive = self.project_reflexive_from_object(subject, object, obj_scan)?;
-            branches.push(obj_reflexive);
-        } else if let TripleComponent::Variable(obj_var) = object {
-            let subj_expr = self.triple_component_to_expression(subject);
-            let reflexive = LogicalOperator::Bind(BindOp {
-                expression: subj_expr,
-                variable: obj_var.clone(),
-                input: Box::new(LogicalOperator::Empty),
-            });
-            branches.push(reflexive);
-        }
-        Ok(())
-    }
-
-    /// Wraps a depth-branch operator in a projection that outputs only the
-    /// subject and object variables, stripping companion columns so that all
-    /// union branches have consistent column counts for DISTINCT.
+    /// Wraps a branch of an alternative path in a projection that outputs only the subject and
+    /// object variables, stripping companion columns so that all union branches have consistent
+    /// column counts.
     fn project_path_endpoints(
         &self,
         subject: &TripleComponent,
@@ -2522,18 +2510,7 @@ impl SparqlTranslator {
                 alias: Some(o.clone()),
             });
         }
-        // Under `GRAPH ?g` the path's graph is an endpoint too: the scans
-        // below bind it, and a branch without it would give ?g as null.
-        if let Some(TripleComponent::Variable(g)) = self.graph_context_stack.last()
-            && !projections
-                .iter()
-                .any(|p| p.alias.as_deref() == Some(g.as_str()))
-        {
-            projections.push(Projection {
-                expression: LogicalExpression::Variable(g.clone()),
-                alias: Some(g.clone()),
-            });
-        }
+        self.keep_the_graph(&mut projections);
         if projections.is_empty() {
             return input;
         }
@@ -2544,136 +2521,18 @@ impl SparqlTranslator {
         })
     }
 
-    /// Translates a property path at a fixed depth (number of hops).
-    ///
-    /// Depth 1 produces a single `TripleScan`. Depth N chains N scans with
-    /// freshly generated intermediate variables joined together.
-    fn translate_fixed_depth_path(
-        &mut self,
-        path: &ast::PropertyPath,
-        subject: &TripleComponent,
-        object: &TripleComponent,
-        graph: &Option<TripleComponent>,
-        depth: usize,
-    ) -> Result<LogicalOperator> {
-        if depth == 1 {
-            let predicate = self.translate_property_path(path)?;
-            return Ok(self.make_triple_scan(
-                subject.clone(),
-                predicate,
-                object.clone(),
-                graph.clone(),
-            ));
-        }
-
-        // Multiple hops: chain triple scans with intermediate variables
-        let mut current_subject = subject.clone();
-        let mut plan = LogicalOperator::Empty;
-        let mut first = true;
-
-        for i in 0..depth {
-            let next_object = if i == depth - 1 {
-                object.clone()
-            } else {
-                TripleComponent::Variable(format!("_:path{}", self.next_anon()))
-            };
-
-            let predicate = self.translate_property_path(path)?;
-            let scan = self.make_triple_scan(
-                current_subject,
-                predicate,
-                next_object.clone(),
-                graph.clone(),
-            );
-
-            if first {
-                plan = scan;
-                first = false;
-            } else {
-                plan = self.join_patterns(plan, scan)?;
-            }
-
-            current_subject = next_object;
-        }
-
-        Ok(plan)
-    }
-
-    /// Projects a scan so that the subject value appears as both the subject
-    /// and object output variables, producing reflexive (0-hop) rows.
-    fn project_reflexive(
-        &self,
-        subject: &TripleComponent,
-        object: &TripleComponent,
-        input: LogicalOperator,
-    ) -> Result<LogicalOperator> {
-        let subj_expr = self.triple_component_to_expression(subject);
-        let obj_var = match object {
-            TripleComponent::Variable(v) => v.clone(),
-            _ => return Ok(input),
-        };
-        let mut projections = Vec::new();
-        // Keep subject variable in output if it is a variable
-        if let TripleComponent::Variable(s_var) = subject {
+    /// Under `GRAPH ?g` a path's graph is an endpoint too: the scans below bind it, and a branch
+    /// without it would give `?g` as null.
+    fn keep_the_graph(&self, projections: &mut Vec<Projection>) {
+        if let Some(TripleComponent::Variable(g)) = self.graph_context_stack.last()
+            && !projections
+                .iter()
+                .any(|p| p.alias.as_deref() == Some(g.as_str()))
+        {
             projections.push(Projection {
-                expression: LogicalExpression::Variable(s_var.clone()),
-                alias: Some(s_var.clone()),
+                expression: LogicalExpression::Variable(g.clone()),
+                alias: Some(g.clone()),
             });
-        }
-        projections.push(Projection {
-            expression: subj_expr,
-            alias: Some(obj_var),
-        });
-        Ok(LogicalOperator::Project(ProjectOp {
-            projections,
-            input: Box::new(input),
-            pass_through_input: false,
-        }))
-    }
-
-    /// Projects a scan so that the object value appears as both the subject
-    /// and object output variables, producing reflexive (0-hop) rows.
-    fn project_reflexive_from_object(
-        &self,
-        subject: &TripleComponent,
-        object: &TripleComponent,
-        input: LogicalOperator,
-    ) -> Result<LogicalOperator> {
-        let obj_expr = self.triple_component_to_expression(object);
-        let subj_var = match subject {
-            TripleComponent::Variable(v) => v.clone(),
-            _ => return Ok(input),
-        };
-        let mut projections = vec![Projection {
-            expression: obj_expr,
-            alias: Some(subj_var),
-        }];
-        // Keep object variable in output if it is a variable
-        if let TripleComponent::Variable(o_var) = object {
-            projections.push(Projection {
-                expression: LogicalExpression::Variable(o_var.clone()),
-                alias: Some(o_var.clone()),
-            });
-        }
-        Ok(LogicalOperator::Project(ProjectOp {
-            projections,
-            input: Box::new(input),
-            pass_through_input: false,
-        }))
-    }
-
-    /// Converts a `TripleComponent` to a `LogicalExpression` for use in projections.
-    fn triple_component_to_expression(&self, component: &TripleComponent) -> LogicalExpression {
-        match component {
-            TripleComponent::Variable(name) => LogicalExpression::Variable(name.clone()),
-            TripleComponent::Iri(iri) => LogicalExpression::Literal(iri_term(iri)),
-            TripleComponent::Literal(val) => LogicalExpression::Literal(val.clone()),
-            TripleComponent::LangLiteral { value, lang } => LogicalExpression::Literal(
-                Value::RdfTerm(Arc::new(Term::lang_literal(value.as_str(), lang.as_str()))),
-            ),
-            TripleComponent::BlankNode(label) => {
-                LogicalExpression::Literal(Value::RdfTerm(Arc::new(Term::blank(label.as_str()))))
-            }
         }
     }
 
@@ -2702,7 +2561,7 @@ impl SparqlTranslator {
 
         Some(DatasetRestriction {
             default_graphs,
-            named_graphs,
+            named_graphs: DatasetNamedGraphs::Listed(named_graphs),
         })
     }
 
@@ -2734,18 +2593,6 @@ impl SparqlTranslator {
 /// An IRI as the constant of an expression.
 fn iri_term(iri: &str) -> Value {
     Value::RdfTerm(Arc::new(Term::iri(iri)))
-}
-
-/// Whether `filter` is an `EXISTS` or `NOT EXISTS` test as a whole.
-fn is_exists_test(filter: &LogicalExpression) -> bool {
-    match filter {
-        LogicalExpression::ExistsSubquery(_) => true,
-        LogicalExpression::Unary {
-            op: crate::query::plan::UnaryOp::Not,
-            operand,
-        } => matches!(operand.as_ref(), LogicalExpression::ExistsSubquery(_)),
-        _ => false,
-    }
 }
 
 #[cfg(test)]

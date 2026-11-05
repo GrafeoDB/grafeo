@@ -395,7 +395,6 @@ fn from_two_graphs_counts_a_triple_in_both_once() {
 /// `?` (ZeroOrOnePath, SPARQL 1.1 sec 18.5): the zero-length pairs of every
 /// term of the graph, and a constant object reached in one hop or itself.
 #[test]
-#[ignore = "p? with a constant object returns other subjects and duplicates, and its zero-length pairs cover only the predicate's terms (0.6.0 too)"]
 fn zero_or_one_with_a_constant_object() {
     let db = GrafeoDB::with_config(Config::in_memory().with_graph_model(GraphModel::Rdf)).unwrap();
     db.execute_sparql(&format!(
@@ -420,7 +419,6 @@ fn zero_or_one_with_a_constant_object() {
 /// `GRAPH ?g { { SELECT ... } }`: the sub-select runs in each named graph
 /// and binds ?g, as the same pattern without the sub-select does.
 #[test]
-#[ignore = "a sub-select inside GRAPH ?g reads every graph and leaves ?g unbound (0.6.0 too)"]
 fn a_subselect_inside_a_graph_variable() {
     let db = named_graphs();
     let execute = |q: &str| db.execute_sparql(q);

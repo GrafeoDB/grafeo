@@ -23,9 +23,14 @@ mod path_lookup_tests {
     use super::*;
     use crate::execution::operators::OperatorError;
 
+    /// A store with no object index walks every triple for an object, and the deadline holds over
+    /// the triples it rejects.
     #[test]
-    fn path_lookup_polls_rejected_index_candidates() {
-        let store = RdfStore::new();
+    fn path_lookup_polls_rejected_candidates() {
+        let store = RdfStore::with_config(RdfStoreConfig {
+            index_objects: false,
+            ..RdfStoreConfig::default()
+        });
         for n in 0..64 {
             store.insert(Triple::new(
                 Term::iri("s"),
@@ -33,10 +38,15 @@ mod path_lookup_tests {
                 Term::literal(n.to_string()),
             ));
         }
+        store.insert(Triple::new(
+            Term::iri("t"),
+            Term::iri("p"),
+            Term::literal("held elsewhere"),
+        ));
         let pattern = TriplePattern {
-            subject: Some(Term::iri("s")),
-            predicate: Some(Term::iri("p")),
-            object: Some(Term::literal("missing")),
+            subject: None,
+            predicate: None,
+            object: Some(Term::literal("held elsewhere")),
         };
         let mut budget = PathBudget::new(4096, None);
         budget.expire_after_polls(8);
@@ -46,7 +56,43 @@ mod path_lookup_tests {
             Ok(())
         });
         assert!(matches!(result, Err(OperatorError::Timeout)));
-        assert_eq!(visits, 0);
+        assert!(visits <= 1, "{visits}");
+    }
+
+    /// Both ends and the predicate bound is one lookup, however long the list of the subject and
+    /// predicate: it polls nothing to reject, held or not.
+    #[test]
+    fn path_lookup_of_a_whole_triple_reads_no_list() {
+        let store = RdfStore::new();
+        for n in 0..64 {
+            store.insert(Triple::new(
+                Term::iri("s"),
+                Term::iri("p"),
+                Term::literal(n.to_string()),
+            ));
+        }
+        store.insert(Triple::new(
+            Term::iri("t"),
+            Term::iri("p"),
+            Term::literal("held elsewhere"),
+        ));
+        for (object, wanted) in [("7", 1), ("held elsewhere", 0), ("in no triple", 0)] {
+            let pattern = TriplePattern {
+                subject: Some(Term::iri("s")),
+                predicate: Some(Term::iri("p")),
+                object: Some(Term::literal(object)),
+            };
+            let mut budget = PathBudget::new(4096, None);
+            budget.expire_after_polls(8);
+            let mut visits = 0;
+            store
+                .visit_matches_with_pending(&pattern, None, &mut budget, &mut |_, _| {
+                    visits += 1;
+                    Ok(())
+                })
+                .unwrap();
+            assert_eq!(visits, wanted, "{object}");
+        }
     }
 
     #[test]
@@ -913,7 +959,15 @@ impl RdfStore {
             return Ok(());
         };
         match keys {
-            [Some(s), Some(p), _] => {
+            // One lookup, however long the list of the subject and predicate.
+            [Some(s), Some(p), Some(o)] => {
+                let triples = budget.read(&self.triples)?;
+                match triples.get(&[s, p, o]) {
+                    Some(held) => visit(&held.0, budget),
+                    None => Ok(()),
+                }
+            }
+            [Some(s), Some(p), None] => {
                 let index = budget.read(&self.sp_index)?;
                 Self::visit_path_candidates(
                     index.get(&(s, p)).into_iter().flatten(),

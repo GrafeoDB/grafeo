@@ -23,9 +23,10 @@ pub enum RdfPathGraph {
     Default,
     /// A merged default graph from FROM; an empty list is an empty graph.
     Union(Vec<String>),
-    /// One existing named graph.
+    /// One named graph, if it exists.
     Named(String),
-    /// Named graphs separately, optionally restricted by FROM NAMED.
+    /// Named graphs separately: those the store holds, or with FROM NAMED, those it lists, held or
+    /// not.
     NamedGraphs(Option<Vec<String>>),
 }
 
@@ -140,9 +141,11 @@ mod physical {
         pub object_var: Option<String>,
         /// Graph variable, if any.
         pub graph_var: Option<String>,
-        /// True for `+`, false for `*`.
+        /// True for `+`, false for `*` and `?`.
         pub min_hops: bool,
-        /// The finite step repeated by the closure.
+        /// Whether the step may be taken more than once: true for `+` and `*`, false for `?`.
+        pub repeats: bool,
+        /// The finite step the quantifier applies to.
         pub path: PathStep,
         /// Active default or named graphs.
         pub graph: RdfPathGraph,
@@ -337,6 +340,7 @@ mod physical {
         fn compile(
             path: &PathStep,
             reverse: bool,
+            repeats: bool,
             budget: &mut PathBudget,
         ) -> Result<Self, OperatorError> {
             let mut tasks = Vec::new();
@@ -431,13 +435,16 @@ mod physical {
                 .saturating_mul(size_of::<CompileTask<'_>>());
             drop(tasks);
             budget.release(task_bytes);
-            budget.reserve_vec(&mut transitions, 1)?;
-            transitions.push(Transition {
-                from: 1,
-                to: 0,
-                predicate: None,
-                inverse: false,
-            });
+            // Accept back to start is all that makes the step a closure.
+            if repeats {
+                budget.reserve_vec(&mut transitions, 1)?;
+                transitions.push(Transition {
+                    from: 1,
+                    to: 0,
+                    predicate: None,
+                    inverse: false,
+                });
+            }
             Ok(Self {
                 transitions,
                 start: 0,
@@ -607,6 +614,13 @@ mod physical {
                 store.visit_path_graphs(names, budget, &mut |name, graph, budget| {
                     add_named_context(&mut contexts, name, Some(graph), budget)
                 })?;
+                // A listed IRI is in the dataset whether or not a graph holds it (SPARQL 1.1 sec
+                // 13.2): an empty graph, where a constant end still has its zero-length solution.
+                if let RdfPathGraph::NamedGraphs(Some(listed)) = &config.graph {
+                    for name in listed {
+                        add_named_context(&mut contexts, name, None, budget)?;
+                    }
+                }
             }
         }
         // The named-store lock is released before borrowing changes. The
@@ -657,6 +671,9 @@ mod physical {
         origin_payload: usize,
         queue: VecDeque<StateKey>,
         visited: FxHashSet<StateKey>,
+        /// Whether no term can come twice: the search reads one list of one graph, whose triples
+        /// differ, so it keeps no set of what it has seen.
+        one_list: bool,
         zero_pending: bool,
     }
 
@@ -665,6 +682,7 @@ mod physical {
             origin: &Term,
             start: usize,
             zero: bool,
+            one_list: bool,
             budget: &mut PathBudget,
         ) -> Result<Self, OperatorError> {
             let origin_payload = term_payload(origin)?;
@@ -674,6 +692,7 @@ mod physical {
                 origin_payload,
                 queue: VecDeque::new(),
                 visited: FxHashSet::default(),
+                one_list,
                 zero_pending: zero,
             };
             search.enqueue(origin, start, budget)?;
@@ -692,13 +711,17 @@ mod physical {
                 state,
                 payload: term_payload(term)?,
             };
-            if self.visited.contains(&key) {
-                return Ok(());
+            if self.one_list {
+                budget.charge(key.payload)?;
+            } else {
+                if self.visited.contains(&key) {
+                    return Ok(());
+                }
+                budget.charge(key.payload.saturating_mul(2))?;
+                budget.reserve_set(&mut self.visited, 1)?;
+                self.visited.insert(key.clone());
             }
-            budget.charge(key.payload.saturating_mul(2))?;
-            budget.reserve_set(&mut self.visited, 1)?;
             budget.reserve_queue(&mut self.queue, 1)?;
-            self.visited.insert(key.clone());
             self.queue.push_back(key);
             Ok(())
         }
@@ -761,7 +784,7 @@ mod physical {
                 _ => {}
             }
             let reverse = config.subject.is_none() && config.object.is_some();
-            let nfa = Nfa::compile(&config.path, reverse, &mut budget)?;
+            let nfa = Nfa::compile(&config.path, reverse, config.repeats, &mut budget)?;
             let contexts = graph_contexts(store, config, read_overlay.as_deref(), &mut budget)?;
             Ok(Self {
                 budget,
@@ -852,6 +875,14 @@ mod physical {
             &mut self,
             config: &RdfPathConfig,
         ) -> Result<Option<(Term, Term, Option<Term>)>, OperatorError> {
+            let both_ends_bound = config.subject.is_some() && config.object.is_some();
+            // No step leaves the accepting state of a path that does not repeat, so with both ends
+            // bound, a last step that does not end at the far one is no use.
+            let last_step_ends_at = if both_ends_bound && !config.repeats {
+                config.object.as_ref()
+            } else {
+                None
+            };
             loop {
                 self.budget.check()?;
                 if self.graph_index >= self.contexts.len() {
@@ -867,10 +898,14 @@ mod physical {
                         self.graph_index += 1;
                         continue;
                     }
+                    let one_list = !config.repeats
+                        && self.nfa.transitions.len() == 1
+                        && self.contexts[self.graph_index].sources.len() == 1;
                     self.search = Some(Search::new(
                         &self.origins[self.origin_index],
                         self.nfa.start,
                         !config.min_hops,
+                        one_list,
                         &mut self.budget,
                     )?);
                     self.origin_index += 1;
@@ -895,11 +930,16 @@ mod physical {
                             context.name.as_ref(),
                         )
                     {
-                        return Ok(Some((
+                        let row = (
                             search.origin.clone(),
                             search.origin.clone(),
                             context.name.clone(),
-                        )));
+                        );
+                        // The one pair this graph can give, found with no read.
+                        if both_ends_bound {
+                            self.release_search();
+                        }
+                        return Ok(Some(row));
                     }
                 }
                 let Some(key) = search.queue.pop_front() else {
@@ -914,9 +954,12 @@ mod physical {
                         continue;
                     }
                     if let Some(predicate) = &transition.predicate {
+                        let far = last_step_ends_at
+                            .filter(|_| transition.to == self.nfa.accept)
+                            .cloned();
                         let pattern = if transition.inverse {
                             TriplePattern {
-                                subject: None,
+                                subject: far,
                                 predicate: Some(predicate.clone()),
                                 object: Some(key.term.clone()),
                             }
@@ -924,7 +967,7 @@ mod physical {
                             TriplePattern {
                                 subject: Some(key.term.clone()),
                                 predicate: Some(predicate.clone()),
-                                object: None,
+                                object: far,
                             }
                         };
                         for source in &context.sources {
@@ -958,7 +1001,7 @@ mod physical {
                         let row = (subject.clone(), object.clone(), context.name.clone());
                         // With both ends bound, the one pair this graph can
                         // give is found: the rest of the search is not read.
-                        if config.subject.is_some() && config.object.is_some() {
+                        if both_ends_bound {
                             self.release_search();
                         }
                         return Ok(Some(row));
@@ -1106,6 +1149,7 @@ mod physical {
                 object_var: Some("o".into()),
                 graph_var: None,
                 min_hops: false,
+                repeats: true,
                 path: PathStep::Predicate("p".into()),
                 graph: RdfPathGraph::Default,
                 transaction_id: None,
@@ -1219,7 +1263,14 @@ mod physical {
                 State::new(&path.store, &path.config, path.budget, path.deadline, None).unwrap();
             state.prepare_origins(&path.config).unwrap();
             state.search = Some(
-                Search::new(&state.origins[0], state.nfa.start, true, &mut state.budget).unwrap(),
+                Search::new(
+                    &state.origins[0],
+                    state.nfa.start,
+                    true,
+                    false,
+                    &mut state.budget,
+                )
+                .unwrap(),
             );
             state.origin_index = 1;
             let search = state.search.as_ref().unwrap();

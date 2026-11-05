@@ -7,7 +7,7 @@
 //!
 //! Better to catch these errors early than waste time executing a broken query.
 
-use crate::query::plan::{AggregateFunction, BuiltinFunction, Callee};
+use crate::query::plan::{AggregateFunction, BuiltinFunction, Callee, NamedGraph};
 use crate::query::plan::{
     CreateElement, ExpandOp, FilterOp, LogicalExpression, LogicalOperator, LogicalPlan, NodeScanOp,
     Projection, ReturnItem, ReturnOp, TripleScanOp,
@@ -319,7 +319,23 @@ impl Binder {
                 }
                 Ok(())
             }
-            LogicalOperator::InNamedGraph(graph) => self.bind_operator(&graph.input),
+            LogicalOperator::InNamedGraph(graph) => {
+                self.bind_operator(&graph.input)?;
+                if let NamedGraph::Variable(variable) = &graph.graph
+                    && !self.context.contains(variable)
+                {
+                    self.context.add_variable(
+                        variable.clone(),
+                        VariableInfo {
+                            name: variable.clone(),
+                            data_type: LogicalType::Any,
+                            is_node: false,
+                            is_edge: false,
+                        },
+                    );
+                }
+                Ok(())
+            }
             LogicalOperator::Limit(limit) => self.bind_operator(&limit.input),
             LogicalOperator::Skip(skip) => self.bind_operator(&skip.input),
             LogicalOperator::Sort(sort) => {
@@ -466,6 +482,8 @@ impl Binder {
 
             // RDF/SPARQL operators
             LogicalOperator::TripleScan(scan) => self.bind_triple_scan(scan),
+            // Made while planning an `EXISTS`, after binding.
+            LogicalOperator::RowValues(_) => Ok(()),
             LogicalOperator::NamedGraphs(graphs) => {
                 if !self.context.contains(&graphs.variable) {
                     self.context.add_variable(
@@ -1289,7 +1307,20 @@ impl Binder {
                 }
             }
             LogicalOperator::Sort(s) => Self::register_subplan_columns(&s.input, ctx),
-            LogicalOperator::InNamedGraph(g) => Self::register_subplan_columns(&g.input, ctx),
+            LogicalOperator::InNamedGraph(g) => {
+                Self::register_subplan_columns(&g.input, ctx);
+                if let NamedGraph::Variable(variable) = &g.graph {
+                    ctx.add_variable(
+                        variable.clone(),
+                        VariableInfo {
+                            name: variable.clone(),
+                            data_type: LogicalType::Any,
+                            is_node: false,
+                            is_edge: false,
+                        },
+                    );
+                }
+            }
             LogicalOperator::Limit(l) => Self::register_subplan_columns(&l.input, ctx),
             LogicalOperator::Skip(s) => Self::register_subplan_columns(&s.input, ctx),
             // The branches of a UNION return the same columns.

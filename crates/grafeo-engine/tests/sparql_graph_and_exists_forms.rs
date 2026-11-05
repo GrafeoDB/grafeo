@@ -446,13 +446,11 @@ fn graph_visits_the_named_graphs_of_the_dataset() {
 }
 
 #[test]
-#[ignore = "waits for #739: a sub-SELECT inside GRAPH runs per graph"]
 fn a_sub_select_inside_graph_runs_per_graph() {
     each_case("sub_select");
 }
 
 #[test]
-#[ignore = "waits for #740: EXISTS outside a FILTER"]
 fn exists_in_a_bind() {
     each_case("bind_");
     each_case("bound_");
@@ -460,13 +458,11 @@ fn exists_in_a_bind() {
 
 /// #740's error reached a projection too, on 0.6.1.
 #[test]
-#[ignore = "waits for #740: EXISTS outside a FILTER"]
 fn exists_in_a_projection() {
     each_case("project_");
 }
 
 #[test]
-#[ignore = "waits for #740: EXISTS outside a FILTER"]
 fn exists_inside_a_function_and_a_graph() {
     each_case("exists_inside");
 }
@@ -478,7 +474,6 @@ fn exists_in_a_filter_still_reads() {
 }
 
 #[test]
-#[ignore = "waits for #740: EXISTS outside a FILTER"]
 fn exists_in_order_by() {
     let db = data();
     let result = db
@@ -518,13 +513,11 @@ fn an_update_reads_its_where_as_a_query_does() {
 }
 
 #[test]
-#[ignore = "waits for #739: a sub-SELECT inside GRAPH runs per graph"]
 fn an_update_reads_a_sub_select_inside_graph() {
     each_update(|name| UPDATES_OF_739.contains(&name));
 }
 
 #[test]
-#[ignore = "waits for #740: EXISTS outside a FILTER"]
 fn an_update_reads_exists_in_its_where() {
     each_update(|name| UPDATES_OF_740.contains(&name));
 }

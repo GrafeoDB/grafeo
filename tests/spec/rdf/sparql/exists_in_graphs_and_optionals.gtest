@@ -1,0 +1,227 @@
+# A test of EXISTS inside GRAPH reads the graph at hand, through a sub-SELECT too; IF(EXISTS ...) in an
+# OPTIONAL's FILTER reads each pair. Generated with sparql_exists_routes.rs, which also compares every
+# route with the per-row definition on generated data.
+
+meta:
+  language: sparql
+  model: rdf
+  section: "17.4.1.4"
+  title: EXISTS in a graph and in an OPTIONAL
+  dataset: empty
+  requires: [sparql, rdf]
+
+tests:
+
+  - name: graph_exists
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :c :q 9 . GRAPH <urn:g1> { :a :p 1 . :b :p 2 . :b :q 3 . :c :p 4 } GRAPH <urn:g2> { :a :q 5 . :d :p 6 } }"
+    query: "PREFIX : <urn:> SELECT ?g ?s WHERE { GRAPH ?g { ?s :p ?o FILTER(EXISTS { ?s :q ?x }) } }"
+    expect:
+      rows:
+        - ["urn:g1", "urn:b"]
+
+  - name: graph_exists_a_sub_select
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :c :q 9 . GRAPH <urn:g1> { :a :p 1 . :b :p 2 . :b :q 3 . :c :p 4 } GRAPH <urn:g2> { :a :q 5 . :d :p 6 } }"
+    query: "PREFIX : <urn:> SELECT ?g ?s WHERE { GRAPH ?g { ?s :p ?o FILTER(EXISTS { { SELECT ?s WHERE { ?s :q ?x } } }) } }"
+    expect:
+      rows:
+        - ["urn:g1", "urn:b"]
+
+  - name: graph_not_exists
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :c :q 9 . GRAPH <urn:g1> { :a :p 1 . :b :p 2 . :b :q 3 . :c :p 4 } GRAPH <urn:g2> { :a :q 5 . :d :p 6 } }"
+    query: "PREFIX : <urn:> SELECT ?g ?s WHERE { GRAPH ?g { ?s :p ?o FILTER(NOT EXISTS { ?s :q ?x }) } }"
+    expect:
+      rows:
+        - ["urn:g1", "urn:a"]
+        - ["urn:g1", "urn:c"]
+        - ["urn:g2", "urn:d"]
+
+  - name: graph_not_exists_a_sub_select
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :c :q 9 . GRAPH <urn:g1> { :a :p 1 . :b :p 2 . :b :q 3 . :c :p 4 } GRAPH <urn:g2> { :a :q 5 . :d :p 6 } }"
+    query: "PREFIX : <urn:> SELECT ?g ?s WHERE { GRAPH ?g { ?s :p ?o FILTER(NOT EXISTS { { SELECT ?s WHERE { ?s :q ?x } } }) } }"
+    expect:
+      rows:
+        - ["urn:g1", "urn:a"]
+        - ["urn:g1", "urn:c"]
+        - ["urn:g2", "urn:d"]
+
+  - name: graph_a_sub_select_that_projects_another
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :c :q 9 . GRAPH <urn:g1> { :a :p 1 . :b :p 2 . :b :q 3 . :c :p 4 } GRAPH <urn:g2> { :a :q 5 . :d :p 6 } }"
+    query: "PREFIX : <urn:> SELECT ?g ?s WHERE { GRAPH ?g { ?s :p ?o FILTER(EXISTS { { SELECT ?x WHERE { ?s :q ?x } } }) } }"
+    expect:
+      rows:
+        - ["urn:g1", "urn:b"]
+
+  - name: graph_a_sub_select_with_a_count
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :c :q 9 . GRAPH <urn:g1> { :a :p 1 . :b :p 2 . :b :q 3 . :c :p 4 } GRAPH <urn:g2> { :a :q 5 . :d :p 6 } }"
+    query: "PREFIX : <urn:> SELECT ?g ?s WHERE { GRAPH ?g { ?s :p ?o FILTER(EXISTS { { SELECT (COUNT(*) AS ?n) WHERE { ?s :q ?x } } FILTER(?n > 0) }) } }"
+    expect:
+      rows:
+        - ["urn:g1", "urn:b"]
+
+  - name: graph_bound_in_a_bind
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :c :q 9 . GRAPH <urn:g1> { :a :p 1 . :b :p 2 . :b :q 3 . :c :p 4 } GRAPH <urn:g2> { :a :q 5 . :d :p 6 } }"
+    query: "PREFIX : <urn:> SELECT ?g ?s ?e WHERE { GRAPH ?g { ?s :p ?o BIND(EXISTS { { SELECT ?s WHERE { ?s :q ?x } } } AS ?e) } }"
+    expect:
+      rows:
+        - ["urn:g1", "urn:a", false]
+        - ["urn:g1", "urn:b", true]
+        - ["urn:g1", "urn:c", false]
+        - ["urn:g2", "urn:d", false]
+
+  - name: graph_in_a_named_graph
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :c :q 9 . GRAPH <urn:g1> { :a :p 1 . :b :p 2 . :b :q 3 . :c :p 4 } GRAPH <urn:g2> { :a :q 5 . :d :p 6 } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { GRAPH <urn:g1> { ?s :p ?o FILTER(EXISTS { { SELECT ?s WHERE { ?s :q ?x } } }) } }"
+    expect:
+      rows:
+        - ["urn:b"]
+
+  - name: graph_in_the_default_graph_it_reads_the_default_graph
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :c :q 9 . GRAPH <urn:g1> { :a :p 1 . :b :p 2 . :b :q 3 . :c :p 4 } GRAPH <urn:g2> { :a :q 5 . :d :p 6 } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :q ?o FILTER(EXISTS { { SELECT ?s WHERE { ?s :q ?x } } }) }"
+    expect:
+      rows:
+        - ["urn:c"]
+
+  - name: graph_a_graph_inside_the_test_reads_that_graph
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :c :q 9 . GRAPH <urn:g1> { :a :p 1 . :b :p 2 . :b :q 3 . :c :p 4 } GRAPH <urn:g2> { :a :q 5 . :d :p 6 } }"
+    query: "PREFIX : <urn:> SELECT ?g ?s WHERE { GRAPH ?g { ?s :p ?o FILTER(EXISTS { GRAPH <urn:g2> { ?s :q ?x } }) } }"
+    expect:
+      rows:
+        - ["urn:g1", "urn:a"]
+
+  - name: graph_the_row_names_the_graph
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :c :q 9 . GRAPH <urn:g1> { :a :p 1 . :b :p 2 . :b :q 3 . :c :p 4 } GRAPH <urn:g2> { :a :q 5 . :d :p 6 } }"
+    query: "PREFIX : <urn:> SELECT ?g ?s WHERE { GRAPH ?g { ?s :p ?o FILTER(EXISTS { GRAPH ?g { ?s :q ?x } }) } }"
+    expect:
+      rows:
+        - ["urn:g1", "urn:b"]
+
+  - name: graph_if_in_a_graph
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :c :q 9 . GRAPH <urn:g1> { :a :p 1 . :b :p 2 . :b :q 3 . :c :p 4 } GRAPH <urn:g2> { :a :q 5 . :d :p 6 } }"
+    query: "PREFIX : <urn:> SELECT ?g ?s WHERE { GRAPH ?g { ?s :p ?o FILTER(IF(EXISTS { { SELECT ?s WHERE { ?s :q ?x } } }, true, false)) } }"
+    expect:
+      rows:
+        - ["urn:g1", "urn:b"]
+
+  - name: optional_if_reads_the_right
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :a :p :d . :b :p :c . :c :r 1 . :d :m :a }"
+      - "PREFIX : <urn:> INSERT DATA { GRAPH <urn:o> { :a :t :k . :a :p :c . :a :p :d . :c :r 1 } }"
+    query: "PREFIX : <urn:> SELECT ?s ?o WHERE { ?s :t :k OPTIONAL { ?s :p ?o FILTER(IF(EXISTS { ?o :r ?z }, true, false)) } }"
+    expect:
+      rows:
+        - ["urn:a", "urn:c"]
+        - ["urn:b", "urn:c"]
+
+  - name: optional_if_keeps_the_left_when_it_rejects_all
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :a :p :d . :b :p :c . :c :r 1 . :d :m :a }"
+      - "PREFIX : <urn:> INSERT DATA { GRAPH <urn:o> { :a :t :k . :a :p :c . :a :p :d . :c :r 1 } }"
+    query: "PREFIX : <urn:> SELECT ?s ?o WHERE { ?s :t :k OPTIONAL { ?s :p ?o FILTER(IF(EXISTS { ?o :nothing ?z }, true, false)) } }"
+    expect:
+      rows:
+        - ["urn:a", null]
+        - ["urn:b", null]
+
+  - name: optional_if_the_other_way_round
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :a :p :d . :b :p :c . :c :r 1 . :d :m :a }"
+      - "PREFIX : <urn:> INSERT DATA { GRAPH <urn:o> { :a :t :k . :a :p :c . :a :p :d . :c :r 1 } }"
+    query: "PREFIX : <urn:> SELECT ?s ?o WHERE { ?s :t :k OPTIONAL { ?s :p ?o FILTER(IF(EXISTS { ?o :r ?z }, false, true)) } }"
+    expect:
+      rows:
+        - ["urn:a", "urn:d"]
+        - ["urn:b", null]
+
+  - name: optional_if_reads_both_sides
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :a :p :d . :b :p :c . :c :r 1 . :d :m :a }"
+      - "PREFIX : <urn:> INSERT DATA { GRAPH <urn:o> { :a :t :k . :a :p :c . :a :p :d . :c :r 1 } }"
+    query: "PREFIX : <urn:> SELECT ?s ?o WHERE { ?s :t :k OPTIONAL { ?s :p ?o FILTER(IF(EXISTS { ?o :m ?s }, true, false)) } }"
+    expect:
+      rows:
+        - ["urn:a", "urn:d"]
+        - ["urn:b", null]
+
+  - name: optional_if_reads_the_left_alone
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :a :p :d . :b :p :c . :c :r 1 . :d :m :a }"
+      - "PREFIX : <urn:> INSERT DATA { GRAPH <urn:o> { :a :t :k . :a :p :c . :a :p :d . :c :r 1 } }"
+    query: "PREFIX : <urn:> SELECT ?s ?o WHERE { ?s :t :k OPTIONAL { :a :p ?o FILTER(IF(EXISTS { ?s :p :d }, true, false)) } }"
+    expect:
+      rows:
+        - ["urn:a", "urn:c"]
+        - ["urn:a", "urn:d"]
+        - ["urn:b", null]
+
+  - name: optional_if_with_no_shared_variable
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :a :p :d . :b :p :c . :c :r 1 . :d :m :a }"
+      - "PREFIX : <urn:> INSERT DATA { GRAPH <urn:o> { :a :t :k . :a :p :c . :a :p :d . :c :r 1 } }"
+    query: "PREFIX : <urn:> SELECT ?s ?o WHERE { ?s :t :k OPTIONAL { ?s :p ?o FILTER(IF(EXISTS { :c :r 1 }, true, false)) } }"
+    expect:
+      rows:
+        - ["urn:a", "urn:c"]
+        - ["urn:a", "urn:d"]
+        - ["urn:b", "urn:c"]
+
+  - name: optional_if_a_sub_select
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :a :p :d . :b :p :c . :c :r 1 . :d :m :a }"
+      - "PREFIX : <urn:> INSERT DATA { GRAPH <urn:o> { :a :t :k . :a :p :c . :a :p :d . :c :r 1 } }"
+    query: "PREFIX : <urn:> SELECT ?s ?o WHERE { ?s :t :k OPTIONAL { ?s :p ?o FILTER(IF(EXISTS { { SELECT ?o WHERE { ?o :r ?z } } }, true, false)) } }"
+    expect:
+      rows:
+        - ["urn:a", "urn:c"]
+        - ["urn:b", "urn:c"]
+
+  - name: optional_if_a_body_a_run_without_the_row_cannot_answer
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :a :p :d . :b :p :c . :c :r 1 . :d :m :a }"
+      - "PREFIX : <urn:> INSERT DATA { GRAPH <urn:o> { :a :t :k . :a :p :c . :a :p :d . :c :r 1 } }"
+    query: "PREFIX : <urn:> SELECT ?s ?o WHERE { ?s :t :k OPTIONAL { ?s :p ?o FILTER(IF(EXISTS { SELECT ?z { ?x :r ?z FILTER(?x = ?o) } }, true, false)) } }"
+    expect:
+      rows:
+        - ["urn:a", "urn:c"]
+        - ["urn:b", "urn:c"]
+
+  - name: optional_if_in_an_and
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :a :p :d . :b :p :c . :c :r 1 . :d :m :a }"
+      - "PREFIX : <urn:> INSERT DATA { GRAPH <urn:o> { :a :t :k . :a :p :c . :a :p :d . :c :r 1 } }"
+    query: "PREFIX : <urn:> SELECT ?s ?o WHERE { ?s :t :k OPTIONAL { ?s :p ?o FILTER(?s = :a && IF(EXISTS { ?o :r ?z }, true, false)) } }"
+    expect:
+      rows:
+        - ["urn:a", "urn:c"]
+        - ["urn:b", null]
+
+  - name: optional_not_of_if
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :a :p :d . :b :p :c . :c :r 1 . :d :m :a }"
+      - "PREFIX : <urn:> INSERT DATA { GRAPH <urn:o> { :a :t :k . :a :p :c . :a :p :d . :c :r 1 } }"
+    query: "PREFIX : <urn:> SELECT ?s ?o WHERE { ?s :t :k OPTIONAL { ?s :p ?o FILTER(!IF(EXISTS { ?o :r ?z }, true, false)) } }"
+    expect:
+      rows:
+        - ["urn:a", "urn:d"]
+        - ["urn:b", null]
+
+  - name: optional_if_inside_a_graph
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :a :p :d . :b :p :c . :c :r 1 . :d :m :a }"
+      - "PREFIX : <urn:> INSERT DATA { GRAPH <urn:o> { :a :t :k . :a :p :c . :a :p :d . :c :r 1 } }"
+    query: "PREFIX : <urn:> SELECT ?s ?o WHERE { GRAPH <urn:o> { ?s :t :k OPTIONAL { ?s :p ?o FILTER(IF(EXISTS { ?o :r ?z }, true, false)) } } }"
+    expect:
+      rows:
+        - ["urn:a", "urn:c"]

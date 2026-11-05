@@ -1,0 +1,452 @@
+# `?` over one predicate: a term comes once, though a self-loop and the zero-length step both give it,
+# and two bound ends answer with a term the graph holds or not. Generated with sparql_one_step_paths.rs.
+
+meta:
+  language: sparql
+  model: rdf
+  section: "18.4"
+  title: One step of a property path
+  dataset: empty
+  requires: [sparql, rdf]
+
+tests:
+
+  - name: loop_from_a_term
+    setup:
+      - "INSERT DATA { <urn:l> <urn:q> <urn:l> . <urn:l> <urn:q> <urn:m> . <urn:l> <urn:q> <urn:n> . <urn:x> <urn:q> <urn:l> . <urn:s> <urn:p> 1 . <urn:s> <urn:p> 2 . <urn:l> <urn:t> <urn:k> . <urn:m> <urn:t> <urn:k> . <urn:y> <urn:t> <urn:k> . GRAPH <urn:g> { <urn:l> <urn:q> <urn:l> . <urn:l> <urn:q> <urn:k> } GRAPH <urn:h> { <urn:l> <urn:q> <urn:k> . <urn:y> <urn:q> <urn:y> } }"
+    query: "SELECT ?o WHERE { <urn:l> <urn:q>? ?o }"
+    expect:
+      rows:
+        - ["urn:l"]
+        - ["urn:m"]
+        - ["urn:n"]
+
+  - name: loop_to_a_term
+    setup:
+      - "INSERT DATA { <urn:l> <urn:q> <urn:l> . <urn:l> <urn:q> <urn:m> . <urn:l> <urn:q> <urn:n> . <urn:x> <urn:q> <urn:l> . <urn:s> <urn:p> 1 . <urn:s> <urn:p> 2 . <urn:l> <urn:t> <urn:k> . <urn:m> <urn:t> <urn:k> . <urn:y> <urn:t> <urn:k> . GRAPH <urn:g> { <urn:l> <urn:q> <urn:l> . <urn:l> <urn:q> <urn:k> } GRAPH <urn:h> { <urn:l> <urn:q> <urn:k> . <urn:y> <urn:q> <urn:y> } }"
+    query: "SELECT ?s WHERE { ?s <urn:q>? <urn:l> }"
+    expect:
+      rows:
+        - ["urn:l"]
+        - ["urn:x"]
+
+  - name: loop_inverse_from_a_term
+    setup:
+      - "INSERT DATA { <urn:l> <urn:q> <urn:l> . <urn:l> <urn:q> <urn:m> . <urn:l> <urn:q> <urn:n> . <urn:x> <urn:q> <urn:l> . <urn:s> <urn:p> 1 . <urn:s> <urn:p> 2 . <urn:l> <urn:t> <urn:k> . <urn:m> <urn:t> <urn:k> . <urn:y> <urn:t> <urn:k> . GRAPH <urn:g> { <urn:l> <urn:q> <urn:l> . <urn:l> <urn:q> <urn:k> } GRAPH <urn:h> { <urn:l> <urn:q> <urn:k> . <urn:y> <urn:q> <urn:y> } }"
+    query: "SELECT ?o WHERE { <urn:l> ^<urn:q>? ?o }"
+    expect:
+      rows:
+        - ["urn:l"]
+        - ["urn:x"]
+
+  - name: loop_inverse_to_a_term
+    setup:
+      - "INSERT DATA { <urn:l> <urn:q> <urn:l> . <urn:l> <urn:q> <urn:m> . <urn:l> <urn:q> <urn:n> . <urn:x> <urn:q> <urn:l> . <urn:s> <urn:p> 1 . <urn:s> <urn:p> 2 . <urn:l> <urn:t> <urn:k> . <urn:m> <urn:t> <urn:k> . <urn:y> <urn:t> <urn:k> . GRAPH <urn:g> { <urn:l> <urn:q> <urn:l> . <urn:l> <urn:q> <urn:k> } GRAPH <urn:h> { <urn:l> <urn:q> <urn:k> . <urn:y> <urn:q> <urn:y> } }"
+    query: "SELECT ?s WHERE { ?s ^<urn:q>? <urn:l> }"
+    expect:
+      rows:
+        - ["urn:l"]
+        - ["urn:m"]
+        - ["urn:n"]
+
+  - name: loop_star_from_a_term
+    setup:
+      - "INSERT DATA { <urn:l> <urn:q> <urn:l> . <urn:l> <urn:q> <urn:m> . <urn:l> <urn:q> <urn:n> . <urn:x> <urn:q> <urn:l> . <urn:s> <urn:p> 1 . <urn:s> <urn:p> 2 . <urn:l> <urn:t> <urn:k> . <urn:m> <urn:t> <urn:k> . <urn:y> <urn:t> <urn:k> . GRAPH <urn:g> { <urn:l> <urn:q> <urn:l> . <urn:l> <urn:q> <urn:k> } GRAPH <urn:h> { <urn:l> <urn:q> <urn:k> . <urn:y> <urn:q> <urn:y> } }"
+    query: "SELECT ?o WHERE { <urn:l> <urn:q>* ?o }"
+    expect:
+      rows:
+        - ["urn:l"]
+        - ["urn:m"]
+        - ["urn:n"]
+
+  - name: loop_plus_from_a_term
+    setup:
+      - "INSERT DATA { <urn:l> <urn:q> <urn:l> . <urn:l> <urn:q> <urn:m> . <urn:l> <urn:q> <urn:n> . <urn:x> <urn:q> <urn:l> . <urn:s> <urn:p> 1 . <urn:s> <urn:p> 2 . <urn:l> <urn:t> <urn:k> . <urn:m> <urn:t> <urn:k> . <urn:y> <urn:t> <urn:k> . GRAPH <urn:g> { <urn:l> <urn:q> <urn:l> . <urn:l> <urn:q> <urn:k> } GRAPH <urn:h> { <urn:l> <urn:q> <urn:k> . <urn:y> <urn:q> <urn:y> } }"
+    query: "SELECT ?o WHERE { <urn:l> <urn:q>+ ?o }"
+    expect:
+      rows:
+        - ["urn:l"]
+        - ["urn:m"]
+        - ["urn:n"]
+
+  - name: no_loop_from_a_term
+    setup:
+      - "INSERT DATA { <urn:l> <urn:q> <urn:l> . <urn:l> <urn:q> <urn:m> . <urn:l> <urn:q> <urn:n> . <urn:x> <urn:q> <urn:l> . <urn:s> <urn:p> 1 . <urn:s> <urn:p> 2 . <urn:l> <urn:t> <urn:k> . <urn:m> <urn:t> <urn:k> . <urn:y> <urn:t> <urn:k> . GRAPH <urn:g> { <urn:l> <urn:q> <urn:l> . <urn:l> <urn:q> <urn:k> } GRAPH <urn:h> { <urn:l> <urn:q> <urn:k> . <urn:y> <urn:q> <urn:y> } }"
+    query: "SELECT ?o WHERE { <urn:x> <urn:q>? ?o }"
+    expect:
+      rows:
+        - ["urn:l"]
+        - ["urn:x"]
+
+  - name: no_edge_from_a_term
+    setup:
+      - "INSERT DATA { <urn:l> <urn:q> <urn:l> . <urn:l> <urn:q> <urn:m> . <urn:l> <urn:q> <urn:n> . <urn:x> <urn:q> <urn:l> . <urn:s> <urn:p> 1 . <urn:s> <urn:p> 2 . <urn:l> <urn:t> <urn:k> . <urn:m> <urn:t> <urn:k> . <urn:y> <urn:t> <urn:k> . GRAPH <urn:g> { <urn:l> <urn:q> <urn:l> . <urn:l> <urn:q> <urn:k> } GRAPH <urn:h> { <urn:l> <urn:q> <urn:k> . <urn:y> <urn:q> <urn:y> } }"
+    query: "SELECT ?o WHERE { <urn:m> <urn:q>? ?o }"
+    expect:
+      rows:
+        - ["urn:m"]
+
+  - name: literals_from_a_term
+    setup:
+      - "INSERT DATA { <urn:l> <urn:q> <urn:l> . <urn:l> <urn:q> <urn:m> . <urn:l> <urn:q> <urn:n> . <urn:x> <urn:q> <urn:l> . <urn:s> <urn:p> 1 . <urn:s> <urn:p> 2 . <urn:l> <urn:t> <urn:k> . <urn:m> <urn:t> <urn:k> . <urn:y> <urn:t> <urn:k> . GRAPH <urn:g> { <urn:l> <urn:q> <urn:l> . <urn:l> <urn:q> <urn:k> } GRAPH <urn:h> { <urn:l> <urn:q> <urn:k> . <urn:y> <urn:q> <urn:y> } }"
+    query: "SELECT ?o WHERE { <urn:s> <urn:p>? ?o }"
+    expect:
+      rows:
+        - [1]
+        - [2]
+        - ["urn:s"]
+
+  - name: no_predicate_from_a_term
+    setup:
+      - "INSERT DATA { <urn:l> <urn:q> <urn:l> . <urn:l> <urn:q> <urn:m> . <urn:l> <urn:q> <urn:n> . <urn:x> <urn:q> <urn:l> . <urn:s> <urn:p> 1 . <urn:s> <urn:p> 2 . <urn:l> <urn:t> <urn:k> . <urn:m> <urn:t> <urn:k> . <urn:y> <urn:t> <urn:k> . GRAPH <urn:g> { <urn:l> <urn:q> <urn:l> . <urn:l> <urn:q> <urn:k> } GRAPH <urn:h> { <urn:l> <urn:q> <urn:k> . <urn:y> <urn:q> <urn:y> } }"
+    query: "SELECT ?o WHERE { <urn:l> <urn:nopredicate>? ?o }"
+    expect:
+      rows:
+        - ["urn:l"]
+
+  - name: no_predicate_to_a_term
+    setup:
+      - "INSERT DATA { <urn:l> <urn:q> <urn:l> . <urn:l> <urn:q> <urn:m> . <urn:l> <urn:q> <urn:n> . <urn:x> <urn:q> <urn:l> . <urn:s> <urn:p> 1 . <urn:s> <urn:p> 2 . <urn:l> <urn:t> <urn:k> . <urn:m> <urn:t> <urn:k> . <urn:y> <urn:t> <urn:k> . GRAPH <urn:g> { <urn:l> <urn:q> <urn:l> . <urn:l> <urn:q> <urn:k> } GRAPH <urn:h> { <urn:l> <urn:q> <urn:k> . <urn:y> <urn:q> <urn:y> } }"
+    query: "SELECT ?s WHERE { ?s <urn:nopredicate>? <urn:l> }"
+    expect:
+      rows:
+        - ["urn:l"]
+
+  - name: not_in_the_graph_from_a_term
+    setup:
+      - "INSERT DATA { <urn:l> <urn:q> <urn:l> . <urn:l> <urn:q> <urn:m> . <urn:l> <urn:q> <urn:n> . <urn:x> <urn:q> <urn:l> . <urn:s> <urn:p> 1 . <urn:s> <urn:p> 2 . <urn:l> <urn:t> <urn:k> . <urn:m> <urn:t> <urn:k> . <urn:y> <urn:t> <urn:k> . GRAPH <urn:g> { <urn:l> <urn:q> <urn:l> . <urn:l> <urn:q> <urn:k> } GRAPH <urn:h> { <urn:l> <urn:q> <urn:k> . <urn:y> <urn:q> <urn:y> } }"
+    query: "SELECT ?o WHERE { <urn:none> <urn:q>? ?o }"
+    expect:
+      rows:
+        - ["urn:none"]
+
+  - name: not_in_the_graph_to_a_term
+    setup:
+      - "INSERT DATA { <urn:l> <urn:q> <urn:l> . <urn:l> <urn:q> <urn:m> . <urn:l> <urn:q> <urn:n> . <urn:x> <urn:q> <urn:l> . <urn:s> <urn:p> 1 . <urn:s> <urn:p> 2 . <urn:l> <urn:t> <urn:k> . <urn:m> <urn:t> <urn:k> . <urn:y> <urn:t> <urn:k> . GRAPH <urn:g> { <urn:l> <urn:q> <urn:l> . <urn:l> <urn:q> <urn:k> } GRAPH <urn:h> { <urn:l> <urn:q> <urn:k> . <urn:y> <urn:q> <urn:y> } }"
+    query: "SELECT ?s WHERE { ?s <urn:q>? <urn:none> }"
+    expect:
+      rows:
+        - ["urn:none"]
+
+  - name: loop_in_a_graph
+    setup:
+      - "INSERT DATA { <urn:l> <urn:q> <urn:l> . <urn:l> <urn:q> <urn:m> . <urn:l> <urn:q> <urn:n> . <urn:x> <urn:q> <urn:l> . <urn:s> <urn:p> 1 . <urn:s> <urn:p> 2 . <urn:l> <urn:t> <urn:k> . <urn:m> <urn:t> <urn:k> . <urn:y> <urn:t> <urn:k> . GRAPH <urn:g> { <urn:l> <urn:q> <urn:l> . <urn:l> <urn:q> <urn:k> } GRAPH <urn:h> { <urn:l> <urn:q> <urn:k> . <urn:y> <urn:q> <urn:y> } }"
+    query: "SELECT ?o WHERE { GRAPH <urn:g> { <urn:l> <urn:q>? ?o } }"
+    expect:
+      rows:
+        - ["urn:k"]
+        - ["urn:l"]
+
+  - name: each_graph
+    setup:
+      - "INSERT DATA { <urn:l> <urn:q> <urn:l> . <urn:l> <urn:q> <urn:m> . <urn:l> <urn:q> <urn:n> . <urn:x> <urn:q> <urn:l> . <urn:s> <urn:p> 1 . <urn:s> <urn:p> 2 . <urn:l> <urn:t> <urn:k> . <urn:m> <urn:t> <urn:k> . <urn:y> <urn:t> <urn:k> . GRAPH <urn:g> { <urn:l> <urn:q> <urn:l> . <urn:l> <urn:q> <urn:k> } GRAPH <urn:h> { <urn:l> <urn:q> <urn:k> . <urn:y> <urn:q> <urn:y> } }"
+    query: "SELECT ?g ?o WHERE { GRAPH ?g { <urn:l> <urn:q>? ?o } }"
+    expect:
+      rows:
+        - ["urn:g", "urn:k"]
+        - ["urn:g", "urn:l"]
+        - ["urn:h", "urn:k"]
+        - ["urn:h", "urn:l"]
+
+  - name: each_graph_to_a_term
+    setup:
+      - "INSERT DATA { <urn:l> <urn:q> <urn:l> . <urn:l> <urn:q> <urn:m> . <urn:l> <urn:q> <urn:n> . <urn:x> <urn:q> <urn:l> . <urn:s> <urn:p> 1 . <urn:s> <urn:p> 2 . <urn:l> <urn:t> <urn:k> . <urn:m> <urn:t> <urn:k> . <urn:y> <urn:t> <urn:k> . GRAPH <urn:g> { <urn:l> <urn:q> <urn:l> . <urn:l> <urn:q> <urn:k> } GRAPH <urn:h> { <urn:l> <urn:q> <urn:k> . <urn:y> <urn:q> <urn:y> } }"
+    query: "SELECT ?g ?s WHERE { GRAPH ?g { ?s <urn:q>? <urn:y> } }"
+    expect:
+      rows:
+        - ["urn:g", "urn:y"]
+        - ["urn:h", "urn:y"]
+
+  - name: a_merge_of_two_graphs
+    setup:
+      - "INSERT DATA { <urn:l> <urn:q> <urn:l> . <urn:l> <urn:q> <urn:m> . <urn:l> <urn:q> <urn:n> . <urn:x> <urn:q> <urn:l> . <urn:s> <urn:p> 1 . <urn:s> <urn:p> 2 . <urn:l> <urn:t> <urn:k> . <urn:m> <urn:t> <urn:k> . <urn:y> <urn:t> <urn:k> . GRAPH <urn:g> { <urn:l> <urn:q> <urn:l> . <urn:l> <urn:q> <urn:k> } GRAPH <urn:h> { <urn:l> <urn:q> <urn:k> . <urn:y> <urn:q> <urn:y> } }"
+    query: "SELECT ?o FROM <urn:g> FROM <urn:h> WHERE { <urn:l> <urn:q>? ?o }"
+    expect:
+      rows:
+        - ["urn:k"]
+        - ["urn:l"]
+
+  - name: a_merge_to_a_term
+    setup:
+      - "INSERT DATA { <urn:l> <urn:q> <urn:l> . <urn:l> <urn:q> <urn:m> . <urn:l> <urn:q> <urn:n> . <urn:x> <urn:q> <urn:l> . <urn:s> <urn:p> 1 . <urn:s> <urn:p> 2 . <urn:l> <urn:t> <urn:k> . <urn:m> <urn:t> <urn:k> . <urn:y> <urn:t> <urn:k> . GRAPH <urn:g> { <urn:l> <urn:q> <urn:l> . <urn:l> <urn:q> <urn:k> } GRAPH <urn:h> { <urn:l> <urn:q> <urn:k> . <urn:y> <urn:q> <urn:y> } }"
+    query: "SELECT ?s FROM <urn:g> FROM <urn:h> WHERE { ?s <urn:q>? <urn:k> }"
+    expect:
+      rows:
+        - ["urn:k"]
+        - ["urn:l"]
+
+  - name: a_join_with_a_loop
+    setup:
+      - "INSERT DATA { <urn:l> <urn:q> <urn:l> . <urn:l> <urn:q> <urn:m> . <urn:l> <urn:q> <urn:n> . <urn:x> <urn:q> <urn:l> . <urn:s> <urn:p> 1 . <urn:s> <urn:p> 2 . <urn:l> <urn:t> <urn:k> . <urn:m> <urn:t> <urn:k> . <urn:y> <urn:t> <urn:k> . GRAPH <urn:g> { <urn:l> <urn:q> <urn:l> . <urn:l> <urn:q> <urn:k> } GRAPH <urn:h> { <urn:l> <urn:q> <urn:k> . <urn:y> <urn:q> <urn:y> } }"
+    query: "SELECT ?s ?o WHERE { ?s <urn:t> <urn:k> . ?s <urn:q>? ?o }"
+    expect:
+      rows:
+        - ["urn:l", "urn:l"]
+        - ["urn:l", "urn:m"]
+        - ["urn:l", "urn:n"]
+        - ["urn:m", "urn:m"]
+        - ["urn:y", "urn:y"]
+
+  - name: a_join_to_the_far_end
+    setup:
+      - "INSERT DATA { <urn:l> <urn:q> <urn:l> . <urn:l> <urn:q> <urn:m> . <urn:l> <urn:q> <urn:n> . <urn:x> <urn:q> <urn:l> . <urn:s> <urn:p> 1 . <urn:s> <urn:p> 2 . <urn:l> <urn:t> <urn:k> . <urn:m> <urn:t> <urn:k> . <urn:y> <urn:t> <urn:k> . GRAPH <urn:g> { <urn:l> <urn:q> <urn:l> . <urn:l> <urn:q> <urn:k> } GRAPH <urn:h> { <urn:l> <urn:q> <urn:k> . <urn:y> <urn:q> <urn:y> } }"
+    query: "SELECT ?s ?o WHERE { ?o <urn:t> <urn:k> . ?s <urn:q>? ?o }"
+    expect:
+      rows:
+        - ["urn:l", "urn:l"]
+        - ["urn:l", "urn:m"]
+        - ["urn:m", "urn:m"]
+        - ["urn:x", "urn:l"]
+        - ["urn:y", "urn:y"]
+
+  - name: ask_loop
+    setup:
+      - "INSERT DATA { <urn:l> <urn:q> <urn:l> . <urn:l> <urn:q> <urn:m> . <urn:l> <urn:q> <urn:n> . <urn:x> <urn:q> <urn:l> . <urn:s> <urn:p> 1 . <urn:s> <urn:p> 2 . <urn:l> <urn:t> <urn:k> . <urn:m> <urn:t> <urn:k> . <urn:y> <urn:t> <urn:k> . GRAPH <urn:g> { <urn:l> <urn:q> <urn:l> . <urn:l> <urn:q> <urn:k> } GRAPH <urn:h> { <urn:l> <urn:q> <urn:k> . <urn:y> <urn:q> <urn:y> } }"
+    query: "ASK { <urn:l> <urn:q>? <urn:l> }"
+    expect:
+      rows:
+        - [true]
+
+  - name: ask_same_no_loop
+    setup:
+      - "INSERT DATA { <urn:l> <urn:q> <urn:l> . <urn:l> <urn:q> <urn:m> . <urn:l> <urn:q> <urn:n> . <urn:x> <urn:q> <urn:l> . <urn:s> <urn:p> 1 . <urn:s> <urn:p> 2 . <urn:l> <urn:t> <urn:k> . <urn:m> <urn:t> <urn:k> . <urn:y> <urn:t> <urn:k> . GRAPH <urn:g> { <urn:l> <urn:q> <urn:l> . <urn:l> <urn:q> <urn:k> } GRAPH <urn:h> { <urn:l> <urn:q> <urn:k> . <urn:y> <urn:q> <urn:y> } }"
+    query: "ASK { <urn:m> <urn:q>? <urn:m> }"
+    expect:
+      rows:
+        - [true]
+
+  - name: ask_an_edge
+    setup:
+      - "INSERT DATA { <urn:l> <urn:q> <urn:l> . <urn:l> <urn:q> <urn:m> . <urn:l> <urn:q> <urn:n> . <urn:x> <urn:q> <urn:l> . <urn:s> <urn:p> 1 . <urn:s> <urn:p> 2 . <urn:l> <urn:t> <urn:k> . <urn:m> <urn:t> <urn:k> . <urn:y> <urn:t> <urn:k> . GRAPH <urn:g> { <urn:l> <urn:q> <urn:l> . <urn:l> <urn:q> <urn:k> } GRAPH <urn:h> { <urn:l> <urn:q> <urn:k> . <urn:y> <urn:q> <urn:y> } }"
+    query: "ASK { <urn:l> <urn:q>? <urn:m> }"
+    expect:
+      rows:
+        - [true]
+
+  - name: ask_the_edge_the_other_way
+    setup:
+      - "INSERT DATA { <urn:l> <urn:q> <urn:l> . <urn:l> <urn:q> <urn:m> . <urn:l> <urn:q> <urn:n> . <urn:x> <urn:q> <urn:l> . <urn:s> <urn:p> 1 . <urn:s> <urn:p> 2 . <urn:l> <urn:t> <urn:k> . <urn:m> <urn:t> <urn:k> . <urn:y> <urn:t> <urn:k> . GRAPH <urn:g> { <urn:l> <urn:q> <urn:l> . <urn:l> <urn:q> <urn:k> } GRAPH <urn:h> { <urn:l> <urn:q> <urn:k> . <urn:y> <urn:q> <urn:y> } }"
+    query: "ASK { <urn:m> <urn:q>? <urn:l> }"
+    expect:
+      rows:
+        - [false]
+
+  - name: ask_inverse_edge
+    setup:
+      - "INSERT DATA { <urn:l> <urn:q> <urn:l> . <urn:l> <urn:q> <urn:m> . <urn:l> <urn:q> <urn:n> . <urn:x> <urn:q> <urn:l> . <urn:s> <urn:p> 1 . <urn:s> <urn:p> 2 . <urn:l> <urn:t> <urn:k> . <urn:m> <urn:t> <urn:k> . <urn:y> <urn:t> <urn:k> . GRAPH <urn:g> { <urn:l> <urn:q> <urn:l> . <urn:l> <urn:q> <urn:k> } GRAPH <urn:h> { <urn:l> <urn:q> <urn:k> . <urn:y> <urn:q> <urn:y> } }"
+    query: "ASK { <urn:m> ^<urn:q>? <urn:l> }"
+    expect:
+      rows:
+        - [true]
+
+  - name: ask_far_end_not_in_the_graph
+    setup:
+      - "INSERT DATA { <urn:l> <urn:q> <urn:l> . <urn:l> <urn:q> <urn:m> . <urn:l> <urn:q> <urn:n> . <urn:x> <urn:q> <urn:l> . <urn:s> <urn:p> 1 . <urn:s> <urn:p> 2 . <urn:l> <urn:t> <urn:k> . <urn:m> <urn:t> <urn:k> . <urn:y> <urn:t> <urn:k> . GRAPH <urn:g> { <urn:l> <urn:q> <urn:l> . <urn:l> <urn:q> <urn:k> } GRAPH <urn:h> { <urn:l> <urn:q> <urn:k> . <urn:y> <urn:q> <urn:y> } }"
+    query: "ASK { <urn:l> <urn:q>? <urn:none> }"
+    expect:
+      rows:
+        - [false]
+
+  - name: ask_near_end_not_in_the_graph
+    setup:
+      - "INSERT DATA { <urn:l> <urn:q> <urn:l> . <urn:l> <urn:q> <urn:m> . <urn:l> <urn:q> <urn:n> . <urn:x> <urn:q> <urn:l> . <urn:s> <urn:p> 1 . <urn:s> <urn:p> 2 . <urn:l> <urn:t> <urn:k> . <urn:m> <urn:t> <urn:k> . <urn:y> <urn:t> <urn:k> . GRAPH <urn:g> { <urn:l> <urn:q> <urn:l> . <urn:l> <urn:q> <urn:k> } GRAPH <urn:h> { <urn:l> <urn:q> <urn:k> . <urn:y> <urn:q> <urn:y> } }"
+    query: "ASK { <urn:none> <urn:q>? <urn:l> }"
+    expect:
+      rows:
+        - [false]
+
+  - name: ask_both_not_in_the_graph_same
+    setup:
+      - "INSERT DATA { <urn:l> <urn:q> <urn:l> . <urn:l> <urn:q> <urn:m> . <urn:l> <urn:q> <urn:n> . <urn:x> <urn:q> <urn:l> . <urn:s> <urn:p> 1 . <urn:s> <urn:p> 2 . <urn:l> <urn:t> <urn:k> . <urn:m> <urn:t> <urn:k> . <urn:y> <urn:t> <urn:k> . GRAPH <urn:g> { <urn:l> <urn:q> <urn:l> . <urn:l> <urn:q> <urn:k> } GRAPH <urn:h> { <urn:l> <urn:q> <urn:k> . <urn:y> <urn:q> <urn:y> } }"
+    query: "ASK { <urn:none> <urn:q>? <urn:none> }"
+    expect:
+      rows:
+        - [true]
+
+  - name: ask_both_not_in_the_graph_differ
+    setup:
+      - "INSERT DATA { <urn:l> <urn:q> <urn:l> . <urn:l> <urn:q> <urn:m> . <urn:l> <urn:q> <urn:n> . <urn:x> <urn:q> <urn:l> . <urn:s> <urn:p> 1 . <urn:s> <urn:p> 2 . <urn:l> <urn:t> <urn:k> . <urn:m> <urn:t> <urn:k> . <urn:y> <urn:t> <urn:k> . GRAPH <urn:g> { <urn:l> <urn:q> <urn:l> . <urn:l> <urn:q> <urn:k> } GRAPH <urn:h> { <urn:l> <urn:q> <urn:k> . <urn:y> <urn:q> <urn:y> } }"
+    query: "ASK { <urn:none> <urn:q>? <urn:none2> }"
+    expect:
+      rows:
+        - [false]
+
+  - name: ask_no_predicate_same
+    setup:
+      - "INSERT DATA { <urn:l> <urn:q> <urn:l> . <urn:l> <urn:q> <urn:m> . <urn:l> <urn:q> <urn:n> . <urn:x> <urn:q> <urn:l> . <urn:s> <urn:p> 1 . <urn:s> <urn:p> 2 . <urn:l> <urn:t> <urn:k> . <urn:m> <urn:t> <urn:k> . <urn:y> <urn:t> <urn:k> . GRAPH <urn:g> { <urn:l> <urn:q> <urn:l> . <urn:l> <urn:q> <urn:k> } GRAPH <urn:h> { <urn:l> <urn:q> <urn:k> . <urn:y> <urn:q> <urn:y> } }"
+    query: "ASK { <urn:l> <urn:nopredicate>? <urn:l> }"
+    expect:
+      rows:
+        - [true]
+
+  - name: ask_no_predicate_differ
+    setup:
+      - "INSERT DATA { <urn:l> <urn:q> <urn:l> . <urn:l> <urn:q> <urn:m> . <urn:l> <urn:q> <urn:n> . <urn:x> <urn:q> <urn:l> . <urn:s> <urn:p> 1 . <urn:s> <urn:p> 2 . <urn:l> <urn:t> <urn:k> . <urn:m> <urn:t> <urn:k> . <urn:y> <urn:t> <urn:k> . GRAPH <urn:g> { <urn:l> <urn:q> <urn:l> . <urn:l> <urn:q> <urn:k> } GRAPH <urn:h> { <urn:l> <urn:q> <urn:k> . <urn:y> <urn:q> <urn:y> } }"
+    query: "ASK { <urn:l> <urn:nopredicate>? <urn:m> }"
+    expect:
+      rows:
+        - [false]
+
+  - name: ask_a_literal
+    setup:
+      - "INSERT DATA { <urn:l> <urn:q> <urn:l> . <urn:l> <urn:q> <urn:m> . <urn:l> <urn:q> <urn:n> . <urn:x> <urn:q> <urn:l> . <urn:s> <urn:p> 1 . <urn:s> <urn:p> 2 . <urn:l> <urn:t> <urn:k> . <urn:m> <urn:t> <urn:k> . <urn:y> <urn:t> <urn:k> . GRAPH <urn:g> { <urn:l> <urn:q> <urn:l> . <urn:l> <urn:q> <urn:k> } GRAPH <urn:h> { <urn:l> <urn:q> <urn:k> . <urn:y> <urn:q> <urn:y> } }"
+    query: "ASK { <urn:s> <urn:p>? 1 }"
+    expect:
+      rows:
+        - [true]
+
+  - name: ask_a_literal_not_held
+    setup:
+      - "INSERT DATA { <urn:l> <urn:q> <urn:l> . <urn:l> <urn:q> <urn:m> . <urn:l> <urn:q> <urn:n> . <urn:x> <urn:q> <urn:l> . <urn:s> <urn:p> 1 . <urn:s> <urn:p> 2 . <urn:l> <urn:t> <urn:k> . <urn:m> <urn:t> <urn:k> . <urn:y> <urn:t> <urn:k> . GRAPH <urn:g> { <urn:l> <urn:q> <urn:l> . <urn:l> <urn:q> <urn:k> } GRAPH <urn:h> { <urn:l> <urn:q> <urn:k> . <urn:y> <urn:q> <urn:y> } }"
+    query: "ASK { <urn:s> <urn:p>? 3 }"
+    expect:
+      rows:
+        - [false]
+
+  - name: ask_star_far_end_not_in_the_graph
+    setup:
+      - "INSERT DATA { <urn:l> <urn:q> <urn:l> . <urn:l> <urn:q> <urn:m> . <urn:l> <urn:q> <urn:n> . <urn:x> <urn:q> <urn:l> . <urn:s> <urn:p> 1 . <urn:s> <urn:p> 2 . <urn:l> <urn:t> <urn:k> . <urn:m> <urn:t> <urn:k> . <urn:y> <urn:t> <urn:k> . GRAPH <urn:g> { <urn:l> <urn:q> <urn:l> . <urn:l> <urn:q> <urn:k> } GRAPH <urn:h> { <urn:l> <urn:q> <urn:k> . <urn:y> <urn:q> <urn:y> } }"
+    query: "ASK { <urn:l> <urn:q>* <urn:none> }"
+    expect:
+      rows:
+        - [false]
+
+  - name: ask_star_near_end_not_in_the_graph
+    setup:
+      - "INSERT DATA { <urn:l> <urn:q> <urn:l> . <urn:l> <urn:q> <urn:m> . <urn:l> <urn:q> <urn:n> . <urn:x> <urn:q> <urn:l> . <urn:s> <urn:p> 1 . <urn:s> <urn:p> 2 . <urn:l> <urn:t> <urn:k> . <urn:m> <urn:t> <urn:k> . <urn:y> <urn:t> <urn:k> . GRAPH <urn:g> { <urn:l> <urn:q> <urn:l> . <urn:l> <urn:q> <urn:k> } GRAPH <urn:h> { <urn:l> <urn:q> <urn:k> . <urn:y> <urn:q> <urn:y> } }"
+    query: "ASK { <urn:none> <urn:q>* <urn:l> }"
+    expect:
+      rows:
+        - [false]
+
+  - name: ask_star_both_not_in_the_graph_same
+    setup:
+      - "INSERT DATA { <urn:l> <urn:q> <urn:l> . <urn:l> <urn:q> <urn:m> . <urn:l> <urn:q> <urn:n> . <urn:x> <urn:q> <urn:l> . <urn:s> <urn:p> 1 . <urn:s> <urn:p> 2 . <urn:l> <urn:t> <urn:k> . <urn:m> <urn:t> <urn:k> . <urn:y> <urn:t> <urn:k> . GRAPH <urn:g> { <urn:l> <urn:q> <urn:l> . <urn:l> <urn:q> <urn:k> } GRAPH <urn:h> { <urn:l> <urn:q> <urn:k> . <urn:y> <urn:q> <urn:y> } }"
+    query: "ASK { <urn:none> <urn:q>* <urn:none> }"
+    expect:
+      rows:
+        - [true]
+
+  - name: ask_plus_far_end_not_in_the_graph
+    setup:
+      - "INSERT DATA { <urn:l> <urn:q> <urn:l> . <urn:l> <urn:q> <urn:m> . <urn:l> <urn:q> <urn:n> . <urn:x> <urn:q> <urn:l> . <urn:s> <urn:p> 1 . <urn:s> <urn:p> 2 . <urn:l> <urn:t> <urn:k> . <urn:m> <urn:t> <urn:k> . <urn:y> <urn:t> <urn:k> . GRAPH <urn:g> { <urn:l> <urn:q> <urn:l> . <urn:l> <urn:q> <urn:k> } GRAPH <urn:h> { <urn:l> <urn:q> <urn:k> . <urn:y> <urn:q> <urn:y> } }"
+    query: "ASK { <urn:l> <urn:q>+ <urn:none> }"
+    expect:
+      rows:
+        - [false]
+
+  - name: ask_plus_near_end_not_in_the_graph
+    setup:
+      - "INSERT DATA { <urn:l> <urn:q> <urn:l> . <urn:l> <urn:q> <urn:m> . <urn:l> <urn:q> <urn:n> . <urn:x> <urn:q> <urn:l> . <urn:s> <urn:p> 1 . <urn:s> <urn:p> 2 . <urn:l> <urn:t> <urn:k> . <urn:m> <urn:t> <urn:k> . <urn:y> <urn:t> <urn:k> . GRAPH <urn:g> { <urn:l> <urn:q> <urn:l> . <urn:l> <urn:q> <urn:k> } GRAPH <urn:h> { <urn:l> <urn:q> <urn:k> . <urn:y> <urn:q> <urn:y> } }"
+    query: "ASK { <urn:none> <urn:q>+ <urn:l> }"
+    expect:
+      rows:
+        - [false]
+
+  - name: ask_plus_both_not_in_the_graph_same
+    setup:
+      - "INSERT DATA { <urn:l> <urn:q> <urn:l> . <urn:l> <urn:q> <urn:m> . <urn:l> <urn:q> <urn:n> . <urn:x> <urn:q> <urn:l> . <urn:s> <urn:p> 1 . <urn:s> <urn:p> 2 . <urn:l> <urn:t> <urn:k> . <urn:m> <urn:t> <urn:k> . <urn:y> <urn:t> <urn:k> . GRAPH <urn:g> { <urn:l> <urn:q> <urn:l> . <urn:l> <urn:q> <urn:k> } GRAPH <urn:h> { <urn:l> <urn:q> <urn:k> . <urn:y> <urn:q> <urn:y> } }"
+    query: "ASK { <urn:none> <urn:q>+ <urn:none> }"
+    expect:
+      rows:
+        - [false]
+
+  - name: star_to_a_term_not_in_the_graph
+    setup:
+      - "INSERT DATA { <urn:l> <urn:q> <urn:l> . <urn:l> <urn:q> <urn:m> . <urn:l> <urn:q> <urn:n> . <urn:x> <urn:q> <urn:l> . <urn:s> <urn:p> 1 . <urn:s> <urn:p> 2 . <urn:l> <urn:t> <urn:k> . <urn:m> <urn:t> <urn:k> . <urn:y> <urn:t> <urn:k> . GRAPH <urn:g> { <urn:l> <urn:q> <urn:l> . <urn:l> <urn:q> <urn:k> } GRAPH <urn:h> { <urn:l> <urn:q> <urn:k> . <urn:y> <urn:q> <urn:y> } }"
+    query: "SELECT ?x WHERE { ?x <urn:q>* <urn:none> }"
+    expect:
+      rows:
+        - ["urn:none"]
+
+  - name: star_from_a_term_not_in_the_graph
+    setup:
+      - "INSERT DATA { <urn:l> <urn:q> <urn:l> . <urn:l> <urn:q> <urn:m> . <urn:l> <urn:q> <urn:n> . <urn:x> <urn:q> <urn:l> . <urn:s> <urn:p> 1 . <urn:s> <urn:p> 2 . <urn:l> <urn:t> <urn:k> . <urn:m> <urn:t> <urn:k> . <urn:y> <urn:t> <urn:k> . GRAPH <urn:g> { <urn:l> <urn:q> <urn:l> . <urn:l> <urn:q> <urn:k> } GRAPH <urn:h> { <urn:l> <urn:q> <urn:k> . <urn:y> <urn:q> <urn:y> } }"
+    query: "SELECT ?x WHERE { <urn:none> <urn:q>* ?x }"
+    expect:
+      rows:
+        - ["urn:none"]
+
+  - name: plus_to_a_term_not_in_the_graph
+    setup:
+      - "INSERT DATA { <urn:l> <urn:q> <urn:l> . <urn:l> <urn:q> <urn:m> . <urn:l> <urn:q> <urn:n> . <urn:x> <urn:q> <urn:l> . <urn:s> <urn:p> 1 . <urn:s> <urn:p> 2 . <urn:l> <urn:t> <urn:k> . <urn:m> <urn:t> <urn:k> . <urn:y> <urn:t> <urn:k> . GRAPH <urn:g> { <urn:l> <urn:q> <urn:l> . <urn:l> <urn:q> <urn:k> } GRAPH <urn:h> { <urn:l> <urn:q> <urn:k> . <urn:y> <urn:q> <urn:y> } }"
+    query: "SELECT ?x WHERE { ?x <urn:q>+ <urn:none> }"
+    expect:
+      empty: true
+
+  - name: plus_from_a_term_not_in_the_graph
+    setup:
+      - "INSERT DATA { <urn:l> <urn:q> <urn:l> . <urn:l> <urn:q> <urn:m> . <urn:l> <urn:q> <urn:n> . <urn:x> <urn:q> <urn:l> . <urn:s> <urn:p> 1 . <urn:s> <urn:p> 2 . <urn:l> <urn:t> <urn:k> . <urn:m> <urn:t> <urn:k> . <urn:y> <urn:t> <urn:k> . GRAPH <urn:g> { <urn:l> <urn:q> <urn:l> . <urn:l> <urn:q> <urn:k> } GRAPH <urn:h> { <urn:l> <urn:q> <urn:k> . <urn:y> <urn:q> <urn:y> } }"
+    query: "SELECT ?x WHERE { <urn:none> <urn:q>+ ?x }"
+    expect:
+      empty: true
+
+  - name: ask_star_two_steps
+    setup:
+      - "INSERT DATA { <urn:l> <urn:q> <urn:l> . <urn:l> <urn:q> <urn:m> . <urn:l> <urn:q> <urn:n> . <urn:x> <urn:q> <urn:l> . <urn:s> <urn:p> 1 . <urn:s> <urn:p> 2 . <urn:l> <urn:t> <urn:k> . <urn:m> <urn:t> <urn:k> . <urn:y> <urn:t> <urn:k> . GRAPH <urn:g> { <urn:l> <urn:q> <urn:l> . <urn:l> <urn:q> <urn:k> } GRAPH <urn:h> { <urn:l> <urn:q> <urn:k> . <urn:y> <urn:q> <urn:y> } }"
+    query: "ASK { <urn:x> <urn:q>* <urn:m> }"
+    expect:
+      rows:
+        - [true]
+
+  - name: ask_star_the_other_way
+    setup:
+      - "INSERT DATA { <urn:l> <urn:q> <urn:l> . <urn:l> <urn:q> <urn:m> . <urn:l> <urn:q> <urn:n> . <urn:x> <urn:q> <urn:l> . <urn:s> <urn:p> 1 . <urn:s> <urn:p> 2 . <urn:l> <urn:t> <urn:k> . <urn:m> <urn:t> <urn:k> . <urn:y> <urn:t> <urn:k> . GRAPH <urn:g> { <urn:l> <urn:q> <urn:l> . <urn:l> <urn:q> <urn:k> } GRAPH <urn:h> { <urn:l> <urn:q> <urn:k> . <urn:y> <urn:q> <urn:y> } }"
+    query: "ASK { <urn:m> <urn:q>* <urn:x> }"
+    expect:
+      rows:
+        - [false]
+
+  - name: ask_plus_same_with_a_loop
+    setup:
+      - "INSERT DATA { <urn:l> <urn:q> <urn:l> . <urn:l> <urn:q> <urn:m> . <urn:l> <urn:q> <urn:n> . <urn:x> <urn:q> <urn:l> . <urn:s> <urn:p> 1 . <urn:s> <urn:p> 2 . <urn:l> <urn:t> <urn:k> . <urn:m> <urn:t> <urn:k> . <urn:y> <urn:t> <urn:k> . GRAPH <urn:g> { <urn:l> <urn:q> <urn:l> . <urn:l> <urn:q> <urn:k> } GRAPH <urn:h> { <urn:l> <urn:q> <urn:k> . <urn:y> <urn:q> <urn:y> } }"
+    query: "ASK { <urn:l> <urn:q>+ <urn:l> }"
+    expect:
+      rows:
+        - [true]
+
+  - name: ask_plus_same_no_loop
+    setup:
+      - "INSERT DATA { <urn:l> <urn:q> <urn:l> . <urn:l> <urn:q> <urn:m> . <urn:l> <urn:q> <urn:n> . <urn:x> <urn:q> <urn:l> . <urn:s> <urn:p> 1 . <urn:s> <urn:p> 2 . <urn:l> <urn:t> <urn:k> . <urn:m> <urn:t> <urn:k> . <urn:y> <urn:t> <urn:k> . GRAPH <urn:g> { <urn:l> <urn:q> <urn:l> . <urn:l> <urn:q> <urn:k> } GRAPH <urn:h> { <urn:l> <urn:q> <urn:k> . <urn:y> <urn:q> <urn:y> } }"
+    query: "ASK { <urn:m> <urn:q>+ <urn:m> }"
+    expect:
+      rows:
+        - [false]
+
+  - name: ask_in_a_graph_held
+    setup:
+      - "INSERT DATA { <urn:l> <urn:q> <urn:l> . <urn:l> <urn:q> <urn:m> . <urn:l> <urn:q> <urn:n> . <urn:x> <urn:q> <urn:l> . <urn:s> <urn:p> 1 . <urn:s> <urn:p> 2 . <urn:l> <urn:t> <urn:k> . <urn:m> <urn:t> <urn:k> . <urn:y> <urn:t> <urn:k> . GRAPH <urn:g> { <urn:l> <urn:q> <urn:l> . <urn:l> <urn:q> <urn:k> } GRAPH <urn:h> { <urn:l> <urn:q> <urn:k> . <urn:y> <urn:q> <urn:y> } }"
+    query: "ASK { GRAPH <urn:g> { <urn:l> <urn:q>? <urn:k> } }"
+    expect:
+      rows:
+        - [true]
+
+  - name: ask_in_a_graph_not_held
+    setup:
+      - "INSERT DATA { <urn:l> <urn:q> <urn:l> . <urn:l> <urn:q> <urn:m> . <urn:l> <urn:q> <urn:n> . <urn:x> <urn:q> <urn:l> . <urn:s> <urn:p> 1 . <urn:s> <urn:p> 2 . <urn:l> <urn:t> <urn:k> . <urn:m> <urn:t> <urn:k> . <urn:y> <urn:t> <urn:k> . GRAPH <urn:g> { <urn:l> <urn:q> <urn:l> . <urn:l> <urn:q> <urn:k> } GRAPH <urn:h> { <urn:l> <urn:q> <urn:k> . <urn:y> <urn:q> <urn:y> } }"
+    query: "ASK { GRAPH <urn:g> { <urn:l> <urn:q>? <urn:m> } }"
+    expect:
+      rows:
+        - [false]
+
+  - name: ask_in_a_graph_the_store_does_not_hold
+    setup:
+      - "INSERT DATA { <urn:l> <urn:q> <urn:l> . <urn:l> <urn:q> <urn:m> . <urn:l> <urn:q> <urn:n> . <urn:x> <urn:q> <urn:l> . <urn:s> <urn:p> 1 . <urn:s> <urn:p> 2 . <urn:l> <urn:t> <urn:k> . <urn:m> <urn:t> <urn:k> . <urn:y> <urn:t> <urn:k> . GRAPH <urn:g> { <urn:l> <urn:q> <urn:l> . <urn:l> <urn:q> <urn:k> } GRAPH <urn:h> { <urn:l> <urn:q> <urn:k> . <urn:y> <urn:q> <urn:y> } }"
+    query: "ASK { GRAPH <urn:none> { <urn:l> <urn:q>? <urn:l> } }"
+    expect:
+      rows:
+        - [false]
+
+  - name: select_two_bound_ends
+    setup:
+      - "INSERT DATA { <urn:l> <urn:q> <urn:l> . <urn:l> <urn:q> <urn:m> . <urn:l> <urn:q> <urn:n> . <urn:x> <urn:q> <urn:l> . <urn:s> <urn:p> 1 . <urn:s> <urn:p> 2 . <urn:l> <urn:t> <urn:k> . <urn:m> <urn:t> <urn:k> . <urn:y> <urn:t> <urn:k> . GRAPH <urn:g> { <urn:l> <urn:q> <urn:l> . <urn:l> <urn:q> <urn:k> } GRAPH <urn:h> { <urn:l> <urn:q> <urn:k> . <urn:y> <urn:q> <urn:y> } }"
+    query: "SELECT * WHERE { <urn:l> <urn:q>? <urn:l> }"
+    expect:
+      count: 1
+
+  - name: select_two_bound_ends_none
+    setup:
+      - "INSERT DATA { <urn:l> <urn:q> <urn:l> . <urn:l> <urn:q> <urn:m> . <urn:l> <urn:q> <urn:n> . <urn:x> <urn:q> <urn:l> . <urn:s> <urn:p> 1 . <urn:s> <urn:p> 2 . <urn:l> <urn:t> <urn:k> . <urn:m> <urn:t> <urn:k> . <urn:y> <urn:t> <urn:k> . GRAPH <urn:g> { <urn:l> <urn:q> <urn:l> . <urn:l> <urn:q> <urn:k> } GRAPH <urn:h> { <urn:l> <urn:q> <urn:k> . <urn:y> <urn:q> <urn:y> } }"
+    query: "SELECT * WHERE { <urn:l> <urn:q>? <urn:none> }"
+    expect:
+      empty: true

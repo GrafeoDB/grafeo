@@ -1380,6 +1380,7 @@ mod path_overlay_tests {
             object_var: None,
             graph_var: None,
             min_hops: false,
+            repeats: true,
             path: PathStep::Predicate("p".into()),
             graph: RdfPathGraph::Default,
             transaction_id: None,

@@ -15,6 +15,25 @@ mod always_bound;
 #[cfg(any(feature = "sparql", feature = "triple-store"))]
 pub(crate) use always_bound::always_bound;
 
+#[cfg(any(
+    feature = "gql",
+    feature = "cypher",
+    feature = "sparql",
+    feature = "sql-pgq",
+    feature = "triple-store",
+    test
+))]
+mod expression_variables;
+#[cfg(any(
+    feature = "gql",
+    feature = "cypher",
+    feature = "sparql",
+    feature = "sql-pgq",
+    feature = "triple-store",
+    test
+))]
+pub(crate) use expression_variables::collect_expression_variables;
+
 /// A count expression for SKIP/LIMIT: either a resolved literal or an unresolved parameter.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -301,6 +320,10 @@ pub enum LogicalOperator {
     /// The named graphs of the dataset, one row per graph.
     NamedGraphs(NamedGraphsOp),
 
+    /// One row: the values an `EXISTS` read for the row it tests. Made only while planning that
+    /// `EXISTS`, so nothing before the planner meets it.
+    RowValues(RowValuesOp),
+
     /// A pattern evaluated in a named graph, empty when the dataset has none of that name.
     InNamedGraph(InNamedGraphOp),
 
@@ -506,6 +529,7 @@ impl LogicalOperator {
             // Leaf operators (read-only)
             Self::PropertyPath(_)
             | Self::NamedGraphs(_)
+            | Self::RowValues(_)
             | Self::Empty
             | Self::ParameterScan(_)
             | Self::DelimScan(_)
@@ -581,6 +605,7 @@ impl LogicalOperator {
             Self::Empty
             | Self::PropertyPath(_)
             | Self::NamedGraphs(_)
+            | Self::RowValues(_)
             | Self::ParameterScan(_)
             | Self::DelimScan(_)
             | Self::CallProcedure(_)
@@ -806,6 +831,7 @@ impl LogicalOperator {
             leaf @ (Self::Empty
             | Self::PropertyPath(_)
             | Self::NamedGraphs(_)
+            | Self::RowValues(_)
             | Self::ParameterScan(_)
             | Self::DelimScan(_)
             | Self::CallProcedure(_)
@@ -828,12 +854,17 @@ impl LogicalOperator {
     pub fn display_label(&self) -> String {
         match self {
             Self::NamedGraphs(op) => format!("GRAPH ?{}", op.variable),
-            Self::InNamedGraph(op) => format!("GRAPH <{}>", op.graph),
+            Self::RowValues(op) => format!("Row ({})", op.names.join(", ")),
+            Self::InNamedGraph(op) => format!("GRAPH {}", op.graph),
             Self::PropertyPath(op) => format!(
                 "{} {:?}{} {}",
                 fmt_triple_component(&op.subject),
                 op.path,
-                if op.zero_length { "*" } else { "+" },
+                match (op.zero_length, op.repeats) {
+                    (false, _) => "+",
+                    (true, true) => "*",
+                    (true, false) => "?",
+                },
                 fmt_triple_component(&op.object),
             ),
             Self::NodeScan(op) => {
@@ -966,9 +997,103 @@ impl LogicalOperator {
     }
 }
 
+/// The plans of the `EXISTS` tests in `expression`, at any depth.
+pub(crate) fn exists_plans(expression: &LogicalExpression) -> Vec<LogicalOperator> {
+    fn found(expression: LogicalExpression, plans: &mut Vec<LogicalOperator>) -> LogicalExpression {
+        match expression {
+            LogicalExpression::ExistsSubquery(plan) => {
+                plans.push(*plan);
+                LogicalExpression::Literal(Value::Null)
+            }
+            other => other.map_children(|child| found(child, plans)),
+        }
+    }
+    let mut plans = Vec::new();
+    found(expression.clone(), &mut plans);
+    plans
+}
+
+/// The expressions `plan`'s own operator holds, of the operators a SPARQL plan holds them in:
+/// a filter, a `BIND`, a projection, a sort, an aggregation and a left join's condition.
+pub(crate) fn sparql_expressions(plan: &LogicalOperator) -> Vec<&LogicalExpression> {
+    match plan {
+        LogicalOperator::Filter(filter) => vec![&filter.predicate],
+        LogicalOperator::Bind(bind) => vec![&bind.expression],
+        LogicalOperator::Project(project) => project
+            .projections
+            .iter()
+            .map(|projection| &projection.expression)
+            .collect(),
+        LogicalOperator::Sort(sort) => sort.keys.iter().map(|key| &key.expression).collect(),
+        LogicalOperator::Aggregate(aggregate) => {
+            let arguments = aggregate
+                .aggregates
+                .iter()
+                .flat_map(|function| [&function.expression, &function.expression2])
+                .flatten();
+            aggregate
+                .group_by
+                .iter()
+                .chain(arguments)
+                .chain(&aggregate.having)
+                .collect()
+        }
+        LogicalOperator::LeftJoin(join) => join.condition.iter().collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// `plan` with `f` applied to each expression [`sparql_expressions`] gives.
+pub(crate) fn map_sparql_expressions(
+    mut plan: LogicalOperator,
+    f: &mut dyn FnMut(LogicalExpression) -> LogicalExpression,
+) -> LogicalOperator {
+    let mut apply = |expression: &mut LogicalExpression| {
+        let taken = std::mem::replace(expression, LogicalExpression::Literal(Value::Null));
+        *expression = f(taken);
+    };
+    match &mut plan {
+        LogicalOperator::Filter(filter) => apply(&mut filter.predicate),
+        LogicalOperator::Bind(bind) => apply(&mut bind.expression),
+        LogicalOperator::Project(project) => {
+            for projection in &mut project.projections {
+                apply(&mut projection.expression);
+            }
+        }
+        LogicalOperator::Sort(sort) => {
+            for key in &mut sort.keys {
+                apply(&mut key.expression);
+            }
+        }
+        LogicalOperator::Aggregate(aggregate) => {
+            for key in &mut aggregate.group_by {
+                apply(key);
+            }
+            for function in &mut aggregate.aggregates {
+                for argument in [&mut function.expression, &mut function.expression2]
+                    .into_iter()
+                    .flatten()
+                {
+                    apply(argument);
+                }
+            }
+            if let Some(having) = &mut aggregate.having {
+                apply(having);
+            }
+        }
+        LogicalOperator::LeftJoin(join) => {
+            if let Some(condition) = &mut join.condition {
+                apply(condition);
+            }
+        }
+        _ => {}
+    }
+    plan
+}
+
 /// Whether `expr` has an `EXISTS`, `COUNT` or value subquery or a pattern
 /// comprehension, whose plan may read variables of the row that
-/// `translators::common::collect_expression_variables` does not list, and reads the store
+/// `collect_expression_variables` does not list, and reads the store
 /// again for each row.
 pub(crate) fn has_subquery(expr: &LogicalExpression) -> bool {
     match expr {
@@ -1072,7 +1197,12 @@ impl LogicalOperator {
                 bound.extend(expand.path_alias.iter().cloned());
             }
             Self::Filter(filter) => return filter.input.bound_variables(imports),
-            Self::InNamedGraph(graph) => return graph.input.bound_variables(imports),
+            Self::InNamedGraph(graph) => {
+                bound = graph.input.bound_variables(imports)?;
+                if let NamedGraph::Variable(variable) = &graph.graph {
+                    bound.insert(variable.clone());
+                }
+            }
             Self::Limit(limit) => return limit.input.bound_variables(imports),
             Self::Skip(skip) => return skip.input.bound_variables(imports),
             Self::Sort(sort) => return sort.input.bound_variables(imports),
@@ -1240,6 +1370,7 @@ impl LogicalOperator {
             // RDF and graph management plans have no node patterns to close.
             Self::PropertyPath(_)
             | Self::NamedGraphs(_)
+            | Self::RowValues(_)
             | Self::TripleScan(_)
             | Self::Construct(_)
             | Self::InsertTriple(_)
@@ -1460,7 +1591,7 @@ impl LogicalOperator {
                 op.input.fmt_tree(out, depth + 1);
             }
             Self::InNamedGraph(op) => {
-                let _ = writeln!(out, "{indent}InNamedGraph (<{}>){after}", op.graph);
+                let _ = writeln!(out, "{indent}InNamedGraph ({}){after}", op.graph);
                 op.input.fmt_tree(out, depth + 1);
             }
             Self::Limit(op) => {
@@ -2760,36 +2891,68 @@ pub struct RemoveLabelOp {
 
 // ==================== RDF/SPARQL Operators ====================
 
-/// SPARQL dataset restriction from FROM / FROM NAMED clauses.
-///
-/// When present, restricts which graphs are visible to a triple scan:
-/// - `default_graphs`: IRIs whose union forms the default graph (basic patterns).
-/// - `named_graphs`: IRIs that enumerate the available named graphs (GRAPH patterns).
+/// The dataset of a query with a `FROM` or `FROM NAMED` clause, or of an update's `WHERE` under
+/// `WITH`: what its basic patterns and its `GRAPH` patterns read.
 #[derive(Debug, Clone, Default)]
 pub struct DatasetRestriction {
-    /// FROM IRIs: the default graph is the union of these named graphs.
-    /// Empty means no FROM clause was specified (unrestricted default graph).
+    /// The graphs whose merge is the default graph; none: an empty default graph, as `FROM NAMED`
+    /// alone makes (SPARQL 1.1 sec 13.2).
     pub default_graphs: Vec<String>,
-    /// FROM NAMED IRIs: only these named graphs are available to GRAPH patterns.
-    /// Empty means no FROM NAMED clause was specified (all named graphs visible).
-    pub named_graphs: Vec<String>,
+    /// The graphs a `GRAPH` pattern visits.
+    pub named_graphs: DatasetNamedGraphs,
 }
 
-/// Endpoint reachability for an outer SPARQL `+` or `*` property path.
+impl DatasetRestriction {
+    /// The named graphs when the dataset lists them, rather than having the store's.
+    #[must_use]
+    pub fn listed_named_graphs(&self) -> Option<&[String]> {
+        match &self.named_graphs {
+            DatasetNamedGraphs::OfTheStore => None,
+            DatasetNamedGraphs::Listed(names) => Some(names),
+        }
+    }
+}
+
+/// The named graphs of a dataset.
+#[derive(Debug, Clone, Default)]
+pub enum DatasetNamedGraphs {
+    /// The store's: `WITH` sets the default graph alone (SPARQL 1.1 Update sec 3.1.3).
+    #[default]
+    OfTheStore,
+    /// These alone: what `FROM NAMED` lists, and none with `FROM` alone (SPARQL 1.1 sec 13.2).
+    Listed(Vec<String>),
+}
+
+/// Endpoint reachability for an outer SPARQL `+`, `*` or `?` property path.
 #[derive(Debug, Clone)]
 pub struct PropertyPathOp {
     /// Starting term or variable.
     pub subject: TripleComponent,
     /// Ending term or variable.
     pub object: TripleComponent,
-    /// Finite path repeated by the outer quantifier.
+    /// Finite path the outer quantifier applies to.
     pub path: grafeo_core::execution::operators::PathStep,
-    /// Whether the zero-length path is included (`*`).
+    /// Whether the zero-length path is included (`*` and `?`).
     pub zero_length: bool,
+    /// Whether the path may be taken more than once (`+` and `*`).
+    pub repeats: bool,
     /// Active named graph or graph variable; absent for the default graph.
     pub graph: Option<TripleComponent>,
     /// Dataset restriction from FROM / FROM NAMED.
     pub dataset: Option<DatasetRestriction>,
+}
+
+/// The name the patterns of a sub-SELECT inside `GRAPH ?variable` read their graph under: a
+/// sub-SELECT's names are its own, so a `?variable` in it is another variable, and no variable has
+/// this name. Named so of itself inside a nested sub-SELECT.
+#[must_use]
+pub fn graph_of_a_sub_select(variable: &str) -> String {
+    const PREFIX: &str = "graph of a sub-select ";
+    if variable.starts_with(PREFIX) {
+        variable.to_string()
+    } else {
+        format!("{PREFIX}{variable}")
+    }
 }
 
 /// The named graphs of the dataset, one row per graph with `variable` bound
@@ -2803,13 +2966,39 @@ pub struct NamedGraphsOp {
     pub dataset: Option<DatasetRestriction>,
 }
 
+/// One row of the values of `names`, as the row an `EXISTS` is tested for binds them.
+#[derive(Debug, Clone)]
+pub struct RowValuesOp {
+    /// The names, which are the columns.
+    pub names: Vec<String>,
+}
+
+/// The graph of a `GRAPH` pattern.
+#[derive(Debug, Clone)]
+pub enum NamedGraph {
+    /// One graph, by its IRI.
+    Iri(String),
+    /// Every named graph of the dataset in turn, this variable bound to its IRI.
+    Variable(String),
+}
+
+impl fmt::Display for NamedGraph {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Iri(iri) => write!(f, "<{iri}>"),
+            Self::Variable(variable) => write!(f, "?{variable}"),
+        }
+    }
+}
+
 /// A pattern evaluated in a named graph of the dataset (SPARQL 1.1 sec 18.6): nothing when the
-/// dataset has no such graph, whatever the pattern gives without reading it. The planner lists the
-/// graphs per run, so a cached plan holds no list.
+/// dataset has no such graph, whatever the pattern gives without reading it, and with a variable
+/// once per graph, so a sub-SELECT's aggregate, `ORDER BY` and `LIMIT` are per graph. The planner
+/// lists the graphs per run, so a cached plan holds no list.
 #[derive(Debug, Clone)]
 pub struct InNamedGraphOp {
-    /// The graph's IRI.
-    pub graph: String,
+    /// The graph or graphs it is evaluated in.
+    pub graph: NamedGraph,
     /// FROM NAMED: when it lists graphs, those are the named graphs.
     pub dataset: Option<DatasetRestriction>,
     /// The pattern, its scans already reading the graph.
@@ -3784,6 +3973,135 @@ impl LogicalExpression {
     #[must_use]
     pub fn conjunction(conjuncts: impl IntoIterator<Item = Self>) -> Option<Self> {
         Self::balanced(BinaryOp::And, conjuncts)
+    }
+
+    /// This expression with each expression directly in it replaced by `f(child)`. A plan inside it
+    /// (an `EXISTS`, a pattern comprehension's) is not an expression and stays as it is. A new
+    /// variant fails to compile here until it says what it holds.
+    #[must_use]
+    pub fn map_children<F: FnMut(Self) -> Self>(self, mut f: F) -> Self {
+        match self {
+            Self::Literal(_)
+            | Self::Variable(_)
+            | Self::Property { .. }
+            | Self::Parameter(_)
+            | Self::Labels(_)
+            | Self::Type(_)
+            | Self::Id(_)
+            | Self::ExistsSubquery(_)
+            | Self::CountSubquery(_)
+            | Self::ValueSubquery(_) => self,
+            Self::Binary { left, op, right } => Self::Binary {
+                left: Box::new(f(*left)),
+                op,
+                right: Box::new(f(*right)),
+            },
+            Self::Unary { op, operand } => Self::Unary {
+                op,
+                operand: Box::new(f(*operand)),
+            },
+            Self::FunctionCall {
+                callee,
+                name,
+                args,
+                distinct,
+            } => Self::FunctionCall {
+                callee,
+                name,
+                args: args.into_iter().map(f).collect(),
+                distinct,
+            },
+            Self::SparqlCall { name, args } => Self::SparqlCall {
+                name,
+                args: args.into_iter().map(f).collect(),
+            },
+            Self::List(items) => Self::List(items.into_iter().map(f).collect()),
+            Self::Map(pairs) => Self::Map(
+                pairs
+                    .into_iter()
+                    .map(|(key, value)| (key, f(value)))
+                    .collect(),
+            ),
+            Self::IndexAccess { base, index } => Self::IndexAccess {
+                base: Box::new(f(*base)),
+                index: Box::new(f(*index)),
+            },
+            Self::MapAccess { base, key } => Self::MapAccess {
+                base: Box::new(f(*base)),
+                key,
+            },
+            Self::SliceAccess { base, start, end } => Self::SliceAccess {
+                base: Box::new(f(*base)),
+                start: start.map(|start| Box::new(f(*start))),
+                end: end.map(|end| Box::new(f(*end))),
+            },
+            Self::Case {
+                operand,
+                when_clauses,
+                else_clause,
+            } => Self::Case {
+                operand: operand.map(|operand| Box::new(f(*operand))),
+                when_clauses: when_clauses
+                    .into_iter()
+                    .map(|(condition, result)| (f(condition), f(result)))
+                    .collect(),
+                else_clause: else_clause.map(|clause| Box::new(f(*clause))),
+            },
+            Self::ListComprehension {
+                variable,
+                list_expr,
+                filter_expr,
+                map_expr,
+            } => Self::ListComprehension {
+                variable,
+                list_expr: Box::new(f(*list_expr)),
+                filter_expr: filter_expr.map(|filter| Box::new(f(*filter))),
+                map_expr: Box::new(f(*map_expr)),
+            },
+            Self::ListPredicate {
+                kind,
+                variable,
+                list_expr,
+                predicate,
+            } => Self::ListPredicate {
+                kind,
+                variable,
+                list_expr: Box::new(f(*list_expr)),
+                predicate: Box::new(f(*predicate)),
+            },
+            Self::MapProjection { base, entries } => Self::MapProjection {
+                base,
+                entries: entries
+                    .into_iter()
+                    .map(|entry| match entry {
+                        MapProjectionEntry::LiteralEntry(key, value) => {
+                            MapProjectionEntry::LiteralEntry(key, f(value))
+                        }
+                        other => other,
+                    })
+                    .collect(),
+            },
+            Self::Reduce {
+                accumulator,
+                initial,
+                variable,
+                list,
+                expression,
+            } => Self::Reduce {
+                accumulator,
+                initial: Box::new(f(*initial)),
+                variable,
+                list: Box::new(f(*list)),
+                expression: Box::new(f(*expression)),
+            },
+            Self::PatternComprehension {
+                subplan,
+                projection,
+            } => Self::PatternComprehension {
+                subplan,
+                projection: Box::new(f(*projection)),
+            },
+        }
     }
 
     /// The `OR` of `disjuncts`, or `None` when there are none (see

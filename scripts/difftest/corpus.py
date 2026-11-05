@@ -362,7 +362,83 @@ def label_writes(grafeo):
     return grafeo.GrafeoDB()
 
 
+def rdf_graphs(grafeo):
+    """A default graph and two named ones, for the dataset clauses of sections DY and DZ."""
+    db = grafeo.GrafeoDB()
+    db.execute_sparql(
+        "INSERT DATA { <urn:d> <urn:p> 0 . GRAPH <urn:g1> { <urn:a> <urn:p> 1 . <urn:a> <urn:q> <urn:b> . <urn:b> <urn:q> <urn:c> } GRAPH <urn:g2> { <urn:a> <urn:p> 2 . <urn:x> <urn:q> <urn:y> } }"
+    )
+    return db
+
+
+def rdf_paths(grafeo):
+    """Edges of one predicate among others, for the zero-length steps of section EA."""
+    db = grafeo.GrafeoDB()
+    db.execute_sparql(
+        "INSERT DATA { <urn:a> <urn:q> <urn:b> . <urn:b> <urn:q> <urn:c> . <urn:e> <urn:q> <urn:a> . <urn:d> <urn:p> 1 . GRAPH <urn:g> { <urn:z> <urn:q> <urn:a> . <urn:d> <urn:p> 2 . } }"
+    )
+    return db
+
+
+def rdf_one_step(grafeo):
+    """A self-loop, a list, literals and two graphs, for `?` and two bound ends."""
+    db = grafeo.GrafeoDB()
+    db.execute_sparql(
+        "INSERT DATA { <urn:l> <urn:q> <urn:l> . <urn:l> <urn:q> <urn:m> . <urn:l> <urn:q> <urn:n> . <urn:x> <urn:q> <urn:l> . <urn:s> <urn:p> 1 . <urn:s> <urn:p> 2 . <urn:l> <urn:t> <urn:k> . <urn:m> <urn:t> <urn:k> . <urn:y> <urn:t> <urn:k> . GRAPH <urn:g> { <urn:l> <urn:q> <urn:l> . <urn:l> <urn:q> <urn:k> } GRAPH <urn:h> { <urn:l> <urn:q> <urn:k> . <urn:y> <urn:q> <urn:y> } }"
+    )
+    return db
+
+
+def rdf_exists_in_graphs(grafeo):
+    """A term's `:q` in its own graph, in the other and in the default graph."""
+    db = grafeo.GrafeoDB()
+    db.execute_sparql(
+        "PREFIX : <urn:> INSERT DATA { :c :q 9 . GRAPH <urn:g1> { :a :p 1 . :b :p 2 . :b :q 3 . :c :p 4 } GRAPH <urn:g2> { :a :q 5 . :d :p 6 } }"
+    )
+    return db
+
+
+def rdf_exists_in_optionals(grafeo):
+    """Pairs of an OPTIONAL a test in its FILTER reads."""
+    db = grafeo.GrafeoDB()
+    db.execute_sparql(
+        "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :a :p :d . :b :p :c . :c :r 1 . :d :m :a }"
+    )
+    db.execute_sparql(
+        "PREFIX : <urn:> INSERT DATA { GRAPH <urn:o> { :a :t :k . :a :p :c . :a :p :d . :c :r 1 } }"
+    )
+    return db
+
+
+def rdf_nested(grafeo):
+    """A group of each kind, for section EB."""
+    db = grafeo.GrafeoDB()
+    db.execute_sparql(
+        "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :a :q 2 . :b :q 2 . GRAPH :g { :a :t :k } }"
+    )
+    return db
+
+
+def rdf_per_row(grafeo):
+    """The rows and the sub-queries of section EC."""
+    db = grafeo.GrafeoDB()
+    db.execute_sparql(
+        "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    )
+    return db
+
+
+def rdf_complex_paths(grafeo):
+    """Paths with `?` over more than one predicate, for section ED."""
+    db = grafeo.GrafeoDB()
+    db.execute_sparql(
+        "INSERT DATA { <urn:a> <urn:q> <urn:b> . <urn:b> <urn:q> <urn:c> . <urn:e> <urn:q> <urn:a> . <urn:d> <urn:p> 1 . GRAPH <urn:g> { <urn:z> <urn:q> <urn:a> . <urn:a> <urn:q> <urn:d> } }"
+    )
+    return db
+
+
 WRITE_FIXTURES = {
+    "rdf_graphs_writes": {"DZ"},
     "writes": {"BR", "BS", "BU", "CT", "DB"},
     "rdf_writes": {"DD"},
     "merges": {"CC"},
@@ -482,6 +558,15 @@ def unlabeled(grafeo):
 FIXTURES = {
     "rdf": rdf,
     "rdf_writes": rdf_writes,
+    "rdf_complex_paths": rdf_complex_paths,
+    "rdf_per_row": rdf_per_row,
+    "rdf_nested": rdf_nested,
+    "rdf_one_step": rdf_one_step,
+    "rdf_exists_in_graphs": rdf_exists_in_graphs,
+    "rdf_exists_in_optionals": rdf_exists_in_optionals,
+    "rdf_graphs": rdf_graphs,
+    "rdf_paths": rdf_paths,
+    "rdf_graphs_writes": rdf_graphs,
     "social": social,
     "chain": chain,
     "empty": empty,
@@ -2776,4 +2861,397 @@ for case_id, query in [
 ]:
     case(case_id, query, GQL, "label_writes")
 
+# DY: `FROM` with no `FROM NAMED` makes a dataset with no named graphs (SPARQL 1.1 13.2, 13.2.1), so
+#     GRAPH finds nothing, where 0.6.1 read every named graph; `FROM NAMED` still lists them, and
+#     with no dataset clause the store's are read
+for case_id, query in [
+    ("DY1", "SELECT ?g ?s FROM <urn:g1> WHERE { GRAPH ?g { ?s ?p ?o } }"),
+    ("DY2", "SELECT * FROM <urn:g1> WHERE { GRAPH ?g { ?s ?p ?o } }"),
+    ("DY3", "SELECT ?s FROM <urn:g1> WHERE { GRAPH <urn:g1> { ?s ?p ?o } }"),
+    ("DY4", "SELECT ?s FROM <urn:g1> WHERE { GRAPH <urn:g2> { ?s ?p ?o } }"),
+    ("DY5", "SELECT ?g FROM <urn:g1> WHERE { GRAPH ?g { } }"),
+    ("DY6", "SELECT ?g ?x FROM <urn:g1> WHERE { GRAPH ?g { BIND(1 AS ?x) } }"),
+    ("DY7", "SELECT ?x FROM <urn:g1> WHERE { GRAPH <urn:g1> { BIND(1 AS ?x) } }"),
+    ("DY8", "SELECT ?s FROM <urn:g1> WHERE { GRAPH <urn:g1> { OPTIONAL { ?s <urn:p> ?o } } }"),
+    ("DY9", "SELECT ?g ?s FROM <urn:g1> FROM <urn:g2> WHERE { GRAPH ?g { ?s ?p ?o } }"),
+    ("DY10", "SELECT ?s FROM <urn:g1> FROM <urn:g2> WHERE { GRAPH <urn:g2> { ?s ?p ?o } }"),
+    ("DY11", "SELECT ?g ?s FROM <urn:g1> FROM <urn:g1> WHERE { GRAPH ?g { ?s ?p ?o } }"),
+    ("DY12", "SELECT ?g ?s FROM <urn:nograph> WHERE { GRAPH ?g { ?s ?p ?o } }"),
+    ("DY13", "SELECT ?g FROM <urn:nograph> WHERE { GRAPH ?g { } }"),
+    ("DY14", "SELECT ?a ?c FROM <urn:g1> WHERE { GRAPH ?g { ?a <urn:q> ?b . ?b <urn:q> ?c } }"),
+    ("DY15", "SELECT ?a ?v FROM <urn:g1> WHERE { GRAPH ?g { ?a <urn:q> ?b . ?b <urn:q> ?c . ?a <urn:p> ?v } }"),
+    ("DY16", "SELECT ?a ?c FROM <urn:g1> WHERE { GRAPH <urn:g1> { ?a <urn:q> ?b . ?b <urn:q> ?c } }"),
+    ("DY17", "SELECT ?s FROM <urn:g1> WHERE { GRAPH ?g { ?s <urn:p> ?o FILTER(?o = 1) } }"),
+    ("DY18", "SELECT ?s FROM <urn:g1> WHERE { GRAPH ?g { ?s ?p ?o } FILTER(?g = <urn:g1>) }"),
+    ("DY19", "SELECT ?s FROM <urn:g1> WHERE { VALUES ?g { <urn:g1> } GRAPH ?g { ?s ?p ?o } }"),
+    ("DY20", "SELECT ?s FROM <urn:g1> WHERE { BIND(<urn:g1> AS ?g) GRAPH ?g { ?s ?p ?o } }"),
+    ("DY21", "SELECT ?s FROM <urn:g1> WHERE { GRAPH ?g { GRAPH <urn:g1> { ?s ?p ?o } } }"),
+    ("DY22", "SELECT DISTINCT ?g FROM <urn:g1> WHERE { GRAPH ?g { ?s ?p ?o } }"),
+    ("DY23", "SELECT ?g FROM <urn:g1> WHERE { GRAPH ?g { ?s ?p ?o } } ORDER BY ?g LIMIT 1"),
+    ("DY24", "SELECT (COUNT(*) AS ?c) FROM <urn:g1> WHERE { GRAPH ?g { ?s ?p ?o } }"),
+    ("DY25", "SELECT (COUNT(*) AS ?c) FROM <urn:g1> WHERE { GRAPH <urn:g1> { ?s ?p ?o } }"),
+    ("DY26", "SELECT ?g (COUNT(*) AS ?c) FROM <urn:g1> WHERE { GRAPH ?g { ?s ?p ?o } } GROUP BY ?g"),
+    ("DY27", "SELECT ?g ?s FROM <urn:g1> WHERE { { SELECT ?g ?s WHERE { GRAPH ?g { ?s <urn:p> ?o } } } }"),
+    ("DY28", "SELECT ?g ?c FROM <urn:g1> WHERE { GRAPH ?g { { SELECT (COUNT(*) AS ?c) WHERE { ?s ?p ?o } } } }"),
+    ("DY29", "ASK FROM <urn:g1> { GRAPH ?g { ?s ?p ?o } }"),
+    ("DY30", "ASK FROM <urn:g1> { GRAPH <urn:g1> { ?s ?p ?o } }"),
+    ("DY31", "CONSTRUCT { ?s ?p ?o } FROM <urn:g1> WHERE { GRAPH ?g { ?s ?p ?o } }"),
+    ("DY32", "CONSTRUCT { ?s ?p ?o } FROM <urn:g1> WHERE { GRAPH <urn:g1> { ?s ?p ?o } }"),
+    ("DY33", "DESCRIBE ?s FROM <urn:g1> WHERE { GRAPH ?g { ?s ?p ?o } }"),
+    ("DY34", "SELECT ?g ?o FROM <urn:g1> WHERE { GRAPH ?g { <urn:a> <urn:q>+ ?o } }"),
+    ("DY35", "SELECT ?o FROM <urn:g1> WHERE { GRAPH <urn:g1> { <urn:a> <urn:q>+ ?o } }"),
+    ("DY36", "SELECT ?g ?s ?o FROM <urn:g1> WHERE { GRAPH ?g { ?s <urn:q>+ ?o } }"),
+    ("DY37", "SELECT ?g ?o FROM <urn:nograph> WHERE { GRAPH ?g { <urn:a> <urn:q>+ ?o } }"),
+    ("DY38", "SELECT ?g ?o FROM <urn:g1> WHERE { GRAPH ?g { <urn:a> <urn:q>* ?o } }"),
+    ("DY39", "SELECT ?o FROM <urn:g1> WHERE { GRAPH <urn:g1> { <urn:a> <urn:q>* ?o } }"),
+    ("DY40", "SELECT ?g ?s ?o FROM <urn:g1> WHERE { GRAPH ?g { ?s <urn:q>* ?o } }"),
+    ("DY41", "SELECT ?g ?o FROM <urn:nograph> WHERE { GRAPH ?g { <urn:a> <urn:q>* ?o } }"),
+    ("DY42", "SELECT ?g ?o FROM <urn:g1> WHERE { GRAPH ?g { <urn:a> <urn:q>? ?o } }"),
+    ("DY43", "SELECT ?o FROM <urn:g1> WHERE { GRAPH <urn:g1> { <urn:a> <urn:q>? ?o } }"),
+    ("DY44", "SELECT ?g ?s ?o FROM <urn:g1> WHERE { GRAPH ?g { ?s <urn:q>? ?o } }"),
+    ("DY45", "SELECT ?g ?o FROM <urn:nograph> WHERE { GRAPH ?g { <urn:a> <urn:q>? ?o } }"),
+    ("DY46", "SELECT ?g ?o FROM <urn:g1> WHERE { GRAPH ?g { <urn:a> <urn:q>/<urn:q> ?o } }"),
+    ("DY47", "SELECT ?o FROM <urn:g1> WHERE { GRAPH <urn:g1> { <urn:a> <urn:q>/<urn:q> ?o } }"),
+    ("DY48", "SELECT ?g ?s ?o FROM <urn:g1> WHERE { GRAPH ?g { ?s <urn:q>/<urn:q> ?o } }"),
+    ("DY49", "SELECT ?g ?o FROM <urn:nograph> WHERE { GRAPH ?g { <urn:a> <urn:q>/<urn:q> ?o } }"),
+    ("DY50", "SELECT ?g ?o FROM <urn:g1> WHERE { GRAPH ?g { <urn:a> <urn:q>|<urn:p> ?o } }"),
+    ("DY51", "SELECT ?o FROM <urn:g1> WHERE { GRAPH <urn:g1> { <urn:a> <urn:q>|<urn:p> ?o } }"),
+    ("DY52", "SELECT ?g ?s ?o FROM <urn:g1> WHERE { GRAPH ?g { ?s <urn:q>|<urn:p> ?o } }"),
+    ("DY53", "SELECT ?g ?o FROM <urn:nograph> WHERE { GRAPH ?g { <urn:a> <urn:q>|<urn:p> ?o } }"),
+    ("DY54", "SELECT ?g ?o FROM <urn:g1> WHERE { GRAPH ?g { <urn:b> ^<urn:q> ?o } }"),
+    ("DY55", "SELECT ?o FROM <urn:g1> WHERE { GRAPH <urn:g1> { <urn:b> ^<urn:q> ?o } }"),
+    ("DY56", "SELECT ?g ?s ?o FROM <urn:g1> WHERE { GRAPH ?g { ?s ^<urn:q> ?o } }"),
+    ("DY57", "SELECT ?g ?o FROM <urn:nograph> WHERE { GRAPH ?g { <urn:b> ^<urn:q> ?o } }"),
+    ("DY58", "SELECT ?g ?o FROM <urn:g1> WHERE { GRAPH ?g { <urn:a> !<urn:p> ?o } }"),
+    ("DY59", "SELECT ?o FROM <urn:g1> WHERE { GRAPH <urn:g1> { <urn:a> !<urn:p> ?o } }"),
+    ("DY60", "SELECT ?g ?s ?o FROM <urn:g1> WHERE { GRAPH ?g { ?s !<urn:p> ?o } }"),
+    ("DY61", "SELECT ?g ?o FROM <urn:nograph> WHERE { GRAPH ?g { <urn:a> !<urn:p> ?o } }"),
+    ("DY62", "SELECT ?o FROM <urn:g1> WHERE { <urn:a> <urn:p> ?o }"),
+    ("DY63", "SELECT ?s ?o FROM <urn:g1> WHERE { ?s <urn:p> ?o }"),
+    ("DY64", "SELECT ?o FROM <urn:g1> FROM <urn:g2> WHERE { <urn:a> <urn:p> ?o }"),
+    ("DY65", "SELECT ?s FROM <urn:nograph> WHERE { ?s ?p ?o }"),
+    ("DY66", "ASK FROM <urn:g1> { <urn:a> <urn:p> 1 }"),
+    ("DY67", "ASK FROM <urn:g1> { <urn:a> <urn:p> 2 }"),
+    ("DY68", "CONSTRUCT { ?s <urn:r> ?o } FROM <urn:g1> WHERE { ?s <urn:p> ?o }"),
+    ("DY69", "SELECT ?o FROM <urn:g1> WHERE { <urn:a> <urn:q>+ ?o }"),
+    ("DY70", "SELECT ?o FROM <urn:g1> WHERE { <urn:a> <urn:q>* ?o }"),
+    ("DY71", "SELECT ?o FROM <urn:g1> WHERE { <urn:a> <urn:q>? ?o }"),
+    ("DY72", "SELECT ?o FROM <urn:g1> WHERE { <urn:a> <urn:q>/<urn:q> ?o }"),
+    ("DY73", "SELECT ?o FROM <urn:g1> WHERE { <urn:a> <urn:q>|<urn:p> ?o }"),
+    ("DY74", "SELECT ?o FROM <urn:g1> WHERE { <urn:b> ^<urn:q> ?o }"),
+    ("DY75", "SELECT ?o FROM <urn:g1> WHERE { <urn:a> !<urn:p> ?o }"),
+    ("DY76", "SELECT ?o ?g FROM <urn:g1> WHERE { <urn:a> <urn:p> ?o . GRAPH ?g { <urn:a> <urn:p> ?x } }"),
+    ("DY77", "SELECT ?o FROM <urn:g1> WHERE { <urn:a> <urn:p> ?o . GRAPH <urn:g1> { <urn:a> <urn:p> ?x } }"),
+    ("DY78", "SELECT ?o ?x FROM <urn:g1> WHERE { <urn:a> <urn:p> ?o OPTIONAL { GRAPH ?g { <urn:a> <urn:p> ?x } } }"),
+    ("DY79", "SELECT ?o ?x FROM <urn:g1> WHERE { <urn:a> <urn:p> ?o OPTIONAL { GRAPH <urn:g1> { <urn:a> <urn:p> ?x } } }"),
+    ("DY80", "SELECT ?o FROM <urn:g1> WHERE { { <urn:a> <urn:p> ?o } UNION { GRAPH ?g { <urn:a> <urn:p> ?o } } }"),
+    ("DY81", "SELECT ?o FROM <urn:g1> WHERE { <urn:a> <urn:p> ?o MINUS { GRAPH ?g { <urn:a> <urn:p> ?o } } }"),
+    ("DY82", "SELECT ?o FROM <urn:g1> WHERE { <urn:a> <urn:p> ?o MINUS { GRAPH <urn:g1> { <urn:a> <urn:p> ?o } } }"),
+    ("DY83", "SELECT ?o FROM <urn:g1> WHERE { <urn:a> <urn:p> ?o FILTER EXISTS { GRAPH ?g { ?s ?p ?y } } }"),
+    ("DY84", "SELECT ?o FROM <urn:g1> WHERE { <urn:a> <urn:p> ?o FILTER EXISTS { GRAPH <urn:g1> { ?s ?p ?y } } }"),
+    ("DY85", "SELECT ?o FROM <urn:g1> WHERE { <urn:a> <urn:p> ?o FILTER NOT EXISTS { GRAPH ?g { ?s ?p ?y } } }"),
+    ("DY86", "SELECT ?o FROM <urn:g1> WHERE { <urn:a> <urn:p> ?o FILTER NOT EXISTS { GRAPH <urn:g1> { ?s ?p ?y } } }"),
+    ("DY87", "SELECT ?o FROM <urn:g1> WHERE { <urn:a> <urn:p> ?o FILTER EXISTS { <urn:b> <urn:q> ?y } }"),
+    ("DY88", "SELECT ?g ?s FROM <urn:g1> FROM NAMED <urn:g2> WHERE { GRAPH ?g { ?s ?p ?o } }"),
+    ("DY89", "SELECT ?g FROM <urn:g1> FROM NAMED <urn:g2> WHERE { GRAPH ?g { } }"),
+    ("DY90", "SELECT ?s FROM <urn:g1> FROM NAMED <urn:g2> WHERE { GRAPH <urn:g2> { ?s <urn:p> ?o } }"),
+    ("DY91", "SELECT ?s FROM <urn:g1> FROM NAMED <urn:g2> WHERE { GRAPH <urn:g1> { ?s <urn:p> ?o } }"),
+    ("DY92", "SELECT ?o FROM <urn:g1> FROM NAMED <urn:g2> WHERE { <urn:a> <urn:p> ?o }"),
+    ("DY93", "SELECT ?v ?g ?o FROM <urn:g1> FROM NAMED <urn:g2> WHERE { <urn:a> <urn:p> ?v . GRAPH ?g { <urn:a> <urn:p> ?o } }"),
+    ("DY94", "SELECT (COUNT(*) AS ?c) FROM <urn:g1> FROM NAMED <urn:g2> WHERE { GRAPH ?g { ?s ?p ?o } }"),
+    ("DY95", "ASK FROM <urn:g1> FROM NAMED <urn:g2> { GRAPH <urn:g1> { ?s ?p ?o } }"),
+    ("DY96", "SELECT ?g ?v ?o FROM <urn:g1> FROM NAMED <urn:g1> WHERE { <urn:a> <urn:p> ?v . GRAPH ?g { <urn:a> <urn:p> ?o } }"),
+    ("DY97", "SELECT ?s FROM <urn:g1> FROM NAMED <urn:g1> WHERE { GRAPH <urn:g1> { ?s <urn:p> ?o } }"),
+    ("DY98", "SELECT ?g ?s FROM NAMED <urn:g2> WHERE { GRAPH ?g { ?s <urn:p> ?o } }"),
+    ("DY99", "SELECT ?s FROM NAMED <urn:g2> WHERE { ?s ?p ?o }"),
+    ("DY100", "SELECT ?o FROM NAMED <urn:g1> WHERE { <urn:a> <urn:q>+ ?o }"),
+    ("DY101", "SELECT ?g ?x FROM <urn:g1> FROM NAMED <urn:nograph> WHERE { GRAPH ?g { BIND(1 AS ?x) } }"),
+    ("DY102", "SELECT ?g ?o FROM <urn:g1> FROM NAMED <urn:g2> WHERE { GRAPH ?g { <urn:x> <urn:q>+ ?o } }"),
+    ("DY103", "SELECT ?o FROM <urn:g1> FROM NAMED <urn:g2> WHERE { GRAPH <urn:g2> { <urn:x> <urn:q>+ ?o } }"),
+    ("DY104", "SELECT ?o FROM <urn:g1> FROM NAMED <urn:g2> WHERE { GRAPH <urn:g1> { <urn:x> <urn:q>+ ?o } }"),
+    ("DY105", "SELECT ?g ?o FROM NAMED <urn:g2> WHERE { GRAPH ?g { <urn:x> <urn:q>+ ?o } }"),
+    ("DY106", "SELECT ?g ?o FROM <urn:g1> FROM NAMED <urn:g2> WHERE { GRAPH ?g { <urn:x> <urn:q>* ?o } }"),
+    ("DY107", "SELECT ?o FROM <urn:g1> FROM NAMED <urn:g2> WHERE { GRAPH <urn:g2> { <urn:x> <urn:q>* ?o } }"),
+    ("DY108", "SELECT ?o FROM <urn:g1> FROM NAMED <urn:g2> WHERE { GRAPH <urn:g1> { <urn:x> <urn:q>* ?o } }"),
+    ("DY109", "SELECT ?g ?o FROM NAMED <urn:g2> WHERE { GRAPH ?g { <urn:x> <urn:q>* ?o } }"),
+    ("DY110", "SELECT ?g ?o FROM <urn:g1> FROM NAMED <urn:g2> WHERE { GRAPH ?g { <urn:x> <urn:q>? ?o } }"),
+    ("DY111", "SELECT ?o FROM <urn:g1> FROM NAMED <urn:g2> WHERE { GRAPH <urn:g2> { <urn:x> <urn:q>? ?o } }"),
+    ("DY112", "SELECT ?o FROM <urn:g1> FROM NAMED <urn:g2> WHERE { GRAPH <urn:g1> { <urn:x> <urn:q>? ?o } }"),
+    ("DY113", "SELECT ?g ?o FROM NAMED <urn:g2> WHERE { GRAPH ?g { <urn:x> <urn:q>? ?o } }"),
+    ("DY114", "SELECT ?g ?o FROM <urn:g1> FROM NAMED <urn:g2> WHERE { GRAPH ?g { <urn:x> <urn:q>/<urn:q> ?o } }"),
+    ("DY115", "SELECT ?o FROM <urn:g1> FROM NAMED <urn:g2> WHERE { GRAPH <urn:g2> { <urn:x> <urn:q>/<urn:q> ?o } }"),
+    ("DY116", "SELECT ?o FROM <urn:g1> FROM NAMED <urn:g2> WHERE { GRAPH <urn:g1> { <urn:x> <urn:q>/<urn:q> ?o } }"),
+    ("DY117", "SELECT ?g ?o FROM NAMED <urn:g2> WHERE { GRAPH ?g { <urn:x> <urn:q>/<urn:q> ?o } }"),
+    ("DY118", "SELECT ?g ?o FROM <urn:g1> FROM NAMED <urn:g2> WHERE { GRAPH ?g { <urn:x> <urn:q>|<urn:p> ?o } }"),
+    ("DY119", "SELECT ?o FROM <urn:g1> FROM NAMED <urn:g2> WHERE { GRAPH <urn:g2> { <urn:x> <urn:q>|<urn:p> ?o } }"),
+    ("DY120", "SELECT ?o FROM <urn:g1> FROM NAMED <urn:g2> WHERE { GRAPH <urn:g1> { <urn:x> <urn:q>|<urn:p> ?o } }"),
+    ("DY121", "SELECT ?g ?o FROM NAMED <urn:g2> WHERE { GRAPH ?g { <urn:x> <urn:q>|<urn:p> ?o } }"),
+    ("DY122", "SELECT ?g ?o FROM <urn:g1> FROM NAMED <urn:g2> WHERE { GRAPH ?g { <urn:y> ^<urn:q> ?o } }"),
+    ("DY123", "SELECT ?o FROM <urn:g1> FROM NAMED <urn:g2> WHERE { GRAPH <urn:g2> { <urn:y> ^<urn:q> ?o } }"),
+    ("DY124", "SELECT ?o FROM <urn:g1> FROM NAMED <urn:g2> WHERE { GRAPH <urn:g1> { <urn:y> ^<urn:q> ?o } }"),
+    ("DY125", "SELECT ?g ?o FROM NAMED <urn:g2> WHERE { GRAPH ?g { <urn:y> ^<urn:q> ?o } }"),
+    ("DY126", "SELECT ?g ?o FROM <urn:g1> FROM NAMED <urn:g2> WHERE { GRAPH ?g { <urn:x> !<urn:p> ?o } }"),
+    ("DY127", "SELECT ?o FROM <urn:g1> FROM NAMED <urn:g2> WHERE { GRAPH <urn:g2> { <urn:x> !<urn:p> ?o } }"),
+    ("DY128", "SELECT ?o FROM <urn:g1> FROM NAMED <urn:g2> WHERE { GRAPH <urn:g1> { <urn:x> !<urn:p> ?o } }"),
+    ("DY129", "SELECT ?g ?o FROM NAMED <urn:g2> WHERE { GRAPH ?g { <urn:x> !<urn:p> ?o } }"),
+    ("DY130", "SELECT ?g ?s WHERE { GRAPH ?g { ?s ?p ?o } }"),
+    ("DY131", "SELECT ?g WHERE { GRAPH ?g { } }"),
+    ("DY132", "SELECT ?o WHERE { GRAPH <urn:g1> { <urn:a> <urn:p> ?o } }"),
+    ("DY133", "SELECT ?s WHERE { ?s <urn:p> ?o }"),
+    ("DY134", "ASK { GRAPH <urn:g2> { ?s ?p ?o } }"),
+    ("DY135", "SELECT ?g ?o WHERE { GRAPH ?g { <urn:a> <urn:q>+ ?o } }"),
+    ("DY136", "SELECT ?g ?o WHERE { GRAPH ?g { <urn:a> <urn:q>* ?o } }"),
+    ("DY137", "SELECT ?g ?o WHERE { GRAPH ?g { <urn:a> <urn:q>? ?o } }"),
+    ("DY138", "SELECT ?g ?o WHERE { GRAPH ?g { <urn:a> <urn:q>/<urn:q> ?o } }"),
+    ("DY139", "SELECT ?g ?o WHERE { GRAPH ?g { <urn:a> <urn:q>|<urn:p> ?o } }"),
+    ("DY140", "SELECT ?g ?o WHERE { GRAPH ?g { <urn:b> ^<urn:q> ?o } }"),
+    ("DY141", "SELECT ?g ?o WHERE { GRAPH ?g { <urn:a> !<urn:p> ?o } }"),
+]:
+    case(case_id, query, SPARQL, "rdf_graphs")
+
+# DZ: `WITH` is not a dataset clause (SPARQL 1.1 Update 3.1.3): GRAPH in its WHERE reads the store's
+#     named graphs. In corpus order, each update followed by the read that shows it
+for case_id, query in [
+    ("DZ1", "WITH <urn:g1> INSERT { <urn:r> <urn:saw> ?g } WHERE { GRAPH ?g { ?s <urn:p> ?o } }"),
+    ("DZ2", "SELECT ?o WHERE { GRAPH <urn:g1> { <urn:r> <urn:saw> ?o } }"),
+    ("DZ3", "WITH <urn:g1> INSERT { <urn:r> <urn:saw> ?g } WHERE { GRAPH ?g { } }"),
+    ("DZ4", "SELECT ?o WHERE { GRAPH <urn:g1> { <urn:r> <urn:saw> ?o } }"),
+    ("DZ5", "WITH <urn:g1> INSERT { <urn:r> <urn:saw> ?o } WHERE { GRAPH <urn:g2> { <urn:x> <urn:q> ?o } }"),
+    ("DZ6", "SELECT ?o WHERE { GRAPH <urn:g1> { <urn:r> <urn:saw> ?o } }"),
+    ("DZ7", "WITH <urn:g1> INSERT { <urn:r> <urn:saw> ?o } WHERE { GRAPH <urn:g1> { <urn:a> <urn:p> ?o } }"),
+    ("DZ8", "SELECT ?o WHERE { GRAPH <urn:g1> { <urn:r> <urn:saw> ?o } }"),
+    ("DZ9", "WITH <urn:g1> INSERT { <urn:r> <urn:saw> ?o } WHERE { GRAPH <urn:g2> { <urn:x> <urn:q>+ ?o } }"),
+    ("DZ10", "SELECT ?o WHERE { GRAPH <urn:g1> { <urn:r> <urn:saw> ?o } }"),
+    ("DZ11", "WITH <urn:g1> INSERT { <urn:r> <urn:saw> ?g } WHERE { GRAPH ?g { <urn:a> <urn:p>? ?o } }"),
+    ("DZ12", "SELECT ?o WHERE { GRAPH <urn:g1> { <urn:r> <urn:saw> ?o } }"),
+    ("DZ13", "WITH <urn:g1> INSERT { <urn:r> <urn:saw> ?o } WHERE { <urn:a> <urn:p> ?o }"),
+    ("DZ14", "SELECT ?o WHERE { GRAPH <urn:g1> { <urn:r> <urn:saw> ?o } }"),
+    ("DZ15", "WITH <urn:g1> DELETE { <urn:a> <urn:p> ?o } WHERE { GRAPH <urn:g1> { <urn:a> <urn:p> ?o } }"),
+    ("DZ16", "SELECT ?o WHERE { GRAPH <urn:g1> { <urn:a> <urn:p> ?o } }"),
+]:
+    case(case_id, query, SPARQL, "rdf_graphs_writes")
+
+# EA: the zero-length step of `?` (SPARQL 1.1 18.4): 0.6.1 kept every subject of the predicate for a
+#     variable and a term, gave false for a term and itself, and read only the predicate's ends for
+#     two variables; `*` and `+` are the same in both
+for case_id, query in [
+    ("EA1", "SELECT ?s WHERE { ?s <urn:q>? <urn:a> }"),
+    ("EA2", "SELECT ?s WHERE { ?s <urn:q>? <urn:b> }"),
+    ("EA3", "SELECT ?s WHERE { ?s <urn:q>? <urn:d> }"),
+    ("EA4", "SELECT ?s WHERE { ?s <urn:q>? <urn:nothing> }"),
+    ("EA5", "SELECT ?o WHERE { <urn:a> <urn:q>? ?o }"),
+    ("EA6", "SELECT ?o WHERE { <urn:nothing> <urn:q>? ?o }"),
+    ("EA7", "ASK { <urn:a> <urn:q>? <urn:a> }"),
+    ("EA8", "ASK { <urn:d> <urn:q>? <urn:d> }"),
+    ("EA9", "ASK { <urn:nothing> <urn:q>? <urn:nothing> }"),
+    ("EA10", "ASK { <urn:a> <urn:q>? <urn:b> }"),
+    ("EA11", "ASK { <urn:a> <urn:q>? <urn:c> }"),
+    ("EA12", "SELECT ?s ?o WHERE { ?s <urn:q>? ?o }"),
+    ("EA13", "SELECT ?s WHERE { ?s <urn:q>? ?s }"),
+    ("EA14", "SELECT ?s ?o WHERE { GRAPH <urn:g> { ?s <urn:q>? ?o } }"),
+    ("EA15", "SELECT ?s WHERE { GRAPH <urn:g> { ?s <urn:q>? <urn:a> } }"),
+    ("EA16", "ASK { GRAPH <urn:g> { <urn:b> <urn:q>? <urn:b> } }"),
+    ("EA17", "SELECT ?s WHERE { ?s <urn:q>* <urn:a> }"),
+    ("EA18", "SELECT ?o WHERE { <urn:a> <urn:q>* ?o }"),
+    ("EA19", "ASK { <urn:d> <urn:q>* <urn:d> }"),
+    ("EA20", "ASK { <urn:nothing> <urn:q>* <urn:nothing> }"),
+    ("EA21", "SELECT ?s ?o WHERE { ?s <urn:q>* ?o }"),
+    ("EA22", "ASK { <urn:a> <urn:q>+ <urn:a> }"),
+    ("EA23", "SELECT ?s ?o WHERE { ?s <urn:q>+ ?o }"),
+]:
+    case(case_id, query, SPARQL, "rdf_paths")
+
+# EB: a group is its own scope (SPARQL 1.1 18.2.2, 18.3.2.7): 0.6.1 merged a nested group of one FILTER, BIND,
+#     OPTIONAL or MINUS into the group around it
+for case_id, query in [
+    ("EB1", "PREFIX : <urn:> SELECT ?s WHERE { ?s :q ?x { FILTER(?x > 0) } }"),
+    ("EB2", "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k { FILTER(BOUND(?s)) } }"),
+    ("EB3", "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k { FILTER(!BOUND(?s)) } }"),
+    ("EB4", "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k { FILTER(1 > 0) } }"),
+    ("EB5", "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k { FILTER(1 > 2) } }"),
+    ("EB6", "PREFIX : <urn:> SELECT ?s WHERE { ?s :q ?x { { FILTER(?x > 0) } } }"),
+    ("EB7", "PREFIX : <urn:> SELECT ?s WHERE { { FILTER(?s = :a) } ?s :t :k }"),
+    ("EB8", "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k { FILTER(?s = :a) } ?s :q ?x }"),
+    ("EB9", "PREFIX : <urn:> SELECT ?s WHERE { ?s :q ?x { ?s :q ?y FILTER(?x > 0) } }"),
+    ("EB10", "PREFIX : <urn:> SELECT ?s WHERE { ?s :q ?x { ?s :q ?y FILTER(?y > 0) } }"),
+    ("EB11", "PREFIX : <urn:> SELECT ?s WHERE { ?s :q ?x FILTER(?x > 0) }"),
+    ("EB12", "PREFIX : <urn:> SELECT ?s ?y WHERE { ?s :t :k { BIND(?s AS ?y) } }"),
+    ("EB13", "PREFIX : <urn:> SELECT ?s ?y WHERE { ?s :t :k { BIND(1 AS ?y) } }"),
+    ("EB14", "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k { BIND(:a AS ?s) } }"),
+    ("EB15", "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k { OPTIONAL { ?s :p ?o } } }"),
+    ("EB16", "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k { OPTIONAL { ?s :none ?o } } }"),
+    ("EB17", "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k { OPTIONAL { ?s :p ?o FILTER(?o = :c) } } }"),
+    ("EB18", "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k OPTIONAL { ?s :p ?o } }"),
+    ("EB19", "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k { MINUS { ?s :p ?o } } }"),
+    ("EB20", "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k MINUS { ?s :p ?o } }"),
+    ("EB21", "PREFIX : <urn:> SELECT ?s WHERE { ?s :q ?x OPTIONAL { FILTER(?x > 5) } }"),
+    ("EB22", "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k OPTIONAL { { FILTER(?s = :a) } } }"),
+    ("EB23", "PREFIX : <urn:> SELECT ?s WHERE { { { FILTER(1 > 2) } } UNION { ?s :p ?o } }"),
+    ("EB24", "PREFIX : <urn:> SELECT ?s WHERE { GRAPH :g { ?s :t :k { FILTER(BOUND(?s)) } } }"),
+    ("EB25", "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k { ?s :p ?o } }"),
+    ("EB26", "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k { { ?s :p ?o } UNION { ?s :none ?o } } }"),
+    ("EB27", "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k { GRAPH :g { ?s :t :k } } }"),
+    ("EB28", "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k { SELECT ?s WHERE { ?s :p ?o } } }"),
+    ("EB29", "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k { VALUES ?s { :a } } }"),
+    ("EB30", "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k { } }"),
+]:
+    case(case_id, query, SPARQL, "rdf_nested")
+
+# EC: EXISTS reads the row by the SPARQL 1.2 draft's definition: 0.6.1 ran the sub-query without it, so a variable
+#     of the row in a filter was unbound, and a variable of the row in a sub-SELECT was not reached
+for case_id, query in [
+    ("EC1", "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER EXISTS { ?s :p ?o } }"),
+    ("EC2", "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER NOT EXISTS { ?s :p ?o } }"),
+    ("EC3", "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER EXISTS { FILTER(?s = :a) } }"),
+    ("EC4", "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER NOT EXISTS { FILTER(?s = :a) } }"),
+    ("EC5", "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER EXISTS { :d :q ?o FILTER(?s = :a) } }"),
+    ("EC6", "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER NOT EXISTS { :d :q ?o FILTER(?s = :a) } }"),
+    ("EC7", "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER EXISTS { :d :q ?o { FILTER(?s = :a) } } }"),
+    ("EC8", "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER NOT EXISTS { :d :q ?o { FILTER(?s = :a) } } }"),
+    ("EC9", "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER EXISTS { :d :q ?o OPTIONAL { ?s :p ?y } } }"),
+    ("EC10", "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER NOT EXISTS { :d :q ?o OPTIONAL { ?s :p ?y } } }"),
+    ("EC11", "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER EXISTS { :d :q ?o OPTIONAL { :d :q ?y FILTER(?s = :a) } } }"),
+    ("EC12", "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER NOT EXISTS { :d :q ?o OPTIONAL { :d :q ?y FILTER(?s = :a) } } }"),
+    ("EC13", "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER EXISTS { ?s :t :k MINUS { ?s :t :k } } }"),
+    ("EC14", "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER NOT EXISTS { ?s :t :k MINUS { ?s :t :k } } }"),
+    ("EC15", "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER EXISTS { :d :q ?o MINUS { :d :q :e } } }"),
+    ("EC16", "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER NOT EXISTS { :d :q ?o MINUS { :d :q :e } } }"),
+    ("EC17", "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER EXISTS { :d :q ?o MINUS { :nobody :q ?z } } }"),
+    ("EC18", "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER NOT EXISTS { :d :q ?o MINUS { :nobody :q ?z } } }"),
+    ("EC19", "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER EXISTS { BIND(:a AS ?s) } }"),
+    ("EC20", "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER NOT EXISTS { BIND(:a AS ?s) } }"),
+    ("EC21", "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER EXISTS { BIND(?s AS ?y) FILTER(?y = :a) } }"),
+    ("EC22", "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER NOT EXISTS { BIND(?s AS ?y) FILTER(?y = :a) } }"),
+    ("EC23", "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER EXISTS { SELECT ?s { ?s :p ?o } } }"),
+    ("EC24", "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER NOT EXISTS { SELECT ?s { ?s :p ?o } } }"),
+    ("EC25", "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER EXISTS { SELECT ?o { ?s :p ?o } } }"),
+    ("EC26", "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER NOT EXISTS { SELECT ?o { ?s :p ?o } } }"),
+    ("EC27", "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER EXISTS { SELECT ?o { ?x :p ?o FILTER(?x = ?s) } } }"),
+    ("EC28", "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER NOT EXISTS { SELECT ?o { ?x :p ?o FILTER(?x = ?s) } } }"),
+    ("EC29", "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER EXISTS { SELECT ?s { ?s :t :k } LIMIT 1 } }"),
+    ("EC30", "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER NOT EXISTS { SELECT ?s { ?s :t :k } LIMIT 1 } }"),
+    ("EC31", "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER EXISTS { SELECT (COUNT(*) AS ?n) { ?s :p ?o } } }"),
+    ("EC32", "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER NOT EXISTS { SELECT (COUNT(*) AS ?n) { ?s :p ?o } } }"),
+    ("EC33", "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER EXISTS { SELECT ?s (COUNT(*) AS ?n) { ?s :p ?o } GROUP BY ?s } }"),
+    ("EC34", "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER NOT EXISTS { SELECT ?s (COUNT(*) AS ?n) { ?s :p ?o } GROUP BY ?s } }"),
+    ("EC35", "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER EXISTS { SELECT ?k { :d :q ?k } GROUP BY ?k HAVING(?s = :a) } }"),
+    ("EC36", "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER NOT EXISTS { SELECT ?k { :d :q ?k } GROUP BY ?k HAVING(?s = :a) } }"),
+    ("EC37", "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER EXISTS { SELECT (?s AS ?y) { :d :q ?o } } }"),
+    ("EC38", "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER NOT EXISTS { SELECT (?s AS ?y) { :d :q ?o } } }"),
+    ("EC39", "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER EXISTS { { ?s :p ?o } UNION { :d :q ?z FILTER(?s = :b) } } }"),
+    ("EC40", "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER NOT EXISTS { { ?s :p ?o } UNION { :d :q ?z FILTER(?s = :b) } } }"),
+    ("EC41", "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER EXISTS { GRAPH <urn:g> { ?s :r* ?y } } }"),
+    ("EC42", "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER NOT EXISTS { GRAPH <urn:g> { ?s :r* ?y } } }"),
+    ("EC43", "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER EXISTS { :d :q ?o FILTER EXISTS { ?s :p ?y } } }"),
+    ("EC44", "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER NOT EXISTS { :d :q ?o FILTER EXISTS { ?s :p ?y } } }"),
+    ("EC45", "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER EXISTS { :d :q ?o FILTER(BOUND(?s)) } }"),
+    ("EC46", "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER NOT EXISTS { :d :q ?o FILTER(BOUND(?s)) } }"),
+]:
+    case(case_id, query, SPARQL, "rdf_per_row")
+
+# ED: `?` over a sequence or an alternative, refused in 0.6.1, and over an inverse, read as one predicate
+for case_id, query in [
+    ("ED1", "SELECT ?o WHERE { <urn:a> (<urn:q>/<urn:q>)? ?o }"),
+    ("ED2", "SELECT ?s WHERE { ?s (<urn:q>/<urn:q>)? <urn:c> }"),
+    ("ED3", "SELECT ?s WHERE { ?s (<urn:q>/<urn:q>)? <urn:d> }"),
+    ("ED4", "ASK { <urn:d> (<urn:q>/<urn:q>)? <urn:d> }"),
+    ("ED5", "ASK { <urn:a> (<urn:q>/<urn:q>)? <urn:c> }"),
+    ("ED6", "ASK { <urn:a> (<urn:q>/<urn:q>)? <urn:b> }"),
+    ("ED7", "SELECT ?s ?o WHERE { ?s (<urn:q>/<urn:q>)? ?o }"),
+    ("ED8", "SELECT ?o WHERE { <urn:d> (<urn:q>|<urn:p>)? ?o }"),
+    ("ED9", "SELECT ?s WHERE { ?s (<urn:q>|<urn:p>)? <urn:a> }"),
+    ("ED10", "ASK { <urn:c> (<urn:q>|<urn:p>)? <urn:c> }"),
+    ("ED11", "SELECT ?s ?o WHERE { ?s (<urn:q>|<urn:p>)? ?o }"),
+    ("ED12", "SELECT ?o WHERE { <urn:a> ^<urn:q>? ?o }"),
+    ("ED13", "SELECT ?s WHERE { ?s ^<urn:q>? <urn:a> }"),
+    ("ED14", "ASK { <urn:d> ^<urn:q>? <urn:d> }"),
+    ("ED15", "SELECT ?s ?o WHERE { ?s ^<urn:q>? ?o }"),
+    ("ED16", "SELECT ?o WHERE { GRAPH <urn:g> { <urn:z> (<urn:q>/<urn:q>)? ?o } }"),
+    ("ED17", "SELECT ?g ?o WHERE { GRAPH ?g { <urn:z> (<urn:q>/<urn:q>)? ?o } }"),
+    ("ED18", "SELECT ?o WHERE { GRAPH <urn:g> { <urn:a> (<urn:q>|<urn:p>)? ?o } }"),
+    ("ED19", "SELECT ?o WHERE { GRAPH <urn:g> { <urn:a> ^<urn:q>? ?o } }"),
+    ("ED20", "SELECT ?s ?o WHERE { ?s <urn:q> <urn:c> . ?s (<urn:q>/<urn:q>)? ?o }"),
+    ("ED21", "SELECT ?o WHERE { <urn:e> <urn:q>/(<urn:q>/<urn:q>)? ?o }"),
+]:
+    case(case_id, query, SPARQL, "rdf_complex_paths")
+
+# EF: `?` gives a term once where a self-loop and the zero-length step both give it (SPARQL 1.1 18.4),
+#     and two bound ends hold of the same term, in the graph or not; 0.6.1 doubled and missed them
+for case_id, query in [
+    ("EF1", "SELECT ?o WHERE { <urn:l> <urn:q>? ?o }"),
+    ("EF2", "SELECT ?s WHERE { ?s <urn:q>? <urn:l> }"),
+    ("EF3", "SELECT ?o WHERE { <urn:l> ^<urn:q>? ?o }"),
+    ("EF4", "SELECT ?s WHERE { ?s ^<urn:q>? <urn:l> }"),
+    ("EF5", "SELECT ?o WHERE { <urn:l> <urn:q>* ?o }"),
+    ("EF6", "SELECT ?o WHERE { <urn:l> <urn:q>+ ?o }"),
+    ("EF7", "SELECT ?o WHERE { <urn:x> <urn:q>? ?o }"),
+    ("EF8", "SELECT ?o WHERE { <urn:m> <urn:q>? ?o }"),
+    ("EF9", "SELECT ?o WHERE { <urn:s> <urn:p>? ?o }"),
+    ("EF10", "SELECT ?o WHERE { <urn:l> <urn:nopredicate>? ?o }"),
+    ("EF11", "SELECT ?s WHERE { ?s <urn:nopredicate>? <urn:l> }"),
+    ("EF12", "SELECT ?o WHERE { <urn:none> <urn:q>? ?o }"),
+    ("EF13", "SELECT ?s WHERE { ?s <urn:q>? <urn:none> }"),
+    ("EF14", "SELECT ?o WHERE { GRAPH <urn:g> { <urn:l> <urn:q>? ?o } }"),
+    ("EF15", "SELECT ?g ?o WHERE { GRAPH ?g { <urn:l> <urn:q>? ?o } }"),
+    ("EF16", "SELECT ?g ?s WHERE { GRAPH ?g { ?s <urn:q>? <urn:y> } }"),
+    ("EF17", "SELECT ?o FROM <urn:g> FROM <urn:h> WHERE { <urn:l> <urn:q>? ?o }"),
+    ("EF18", "SELECT ?s FROM <urn:g> FROM <urn:h> WHERE { ?s <urn:q>? <urn:k> }"),
+    ("EF19", "SELECT ?s ?o WHERE { ?s <urn:t> <urn:k> . ?s <urn:q>? ?o }"),
+    ("EF20", "SELECT ?s ?o WHERE { ?o <urn:t> <urn:k> . ?s <urn:q>? ?o }"),
+    ("EF21", "ASK { <urn:l> <urn:q>? <urn:l> }"),
+    ("EF22", "ASK { <urn:m> <urn:q>? <urn:m> }"),
+    ("EF23", "ASK { <urn:l> <urn:q>? <urn:m> }"),
+    ("EF24", "ASK { <urn:m> <urn:q>? <urn:l> }"),
+    ("EF25", "ASK { <urn:m> ^<urn:q>? <urn:l> }"),
+    ("EF26", "ASK { <urn:l> <urn:q>? <urn:none> }"),
+    ("EF27", "ASK { <urn:none> <urn:q>? <urn:l> }"),
+    ("EF28", "ASK { <urn:none> <urn:q>? <urn:none> }"),
+    ("EF29", "ASK { <urn:none> <urn:q>? <urn:none2> }"),
+    ("EF30", "ASK { <urn:l> <urn:nopredicate>? <urn:l> }"),
+    ("EF31", "ASK { <urn:l> <urn:nopredicate>? <urn:m> }"),
+    ("EF32", "ASK { <urn:s> <urn:p>? 1 }"),
+    ("EF33", "ASK { <urn:s> <urn:p>? 3 }"),
+    ("EF34", "ASK { <urn:l> <urn:q>* <urn:none> }"),
+    ("EF35", "ASK { <urn:none> <urn:q>* <urn:l> }"),
+    ("EF36", "ASK { <urn:none> <urn:q>* <urn:none> }"),
+    ("EF37", "ASK { <urn:x> <urn:q>* <urn:m> }"),
+    ("EF38", "ASK { <urn:m> <urn:q>* <urn:x> }"),
+    ("EF39", "ASK { <urn:l> <urn:q>+ <urn:l> }"),
+    ("EF40", "ASK { <urn:m> <urn:q>+ <urn:m> }"),
+    ("EF41", "ASK { GRAPH <urn:g> { <urn:l> <urn:q>? <urn:k> } }"),
+    ("EF42", "ASK { GRAPH <urn:g> { <urn:l> <urn:q>? <urn:m> } }"),
+    ("EF43", "ASK { GRAPH <urn:none> { <urn:l> <urn:q>? <urn:l> } }"),
+    ("EF44", "SELECT * WHERE { <urn:l> <urn:q>? <urn:l> }"),
+    ("EF45", "SELECT * WHERE { <urn:l> <urn:q>? <urn:none> }"),
+]:
+    case(case_id, query, SPARQL, "rdf_one_step")
+
+# EG: a test of EXISTS inside GRAPH reads the graph at hand through a sub-SELECT, and IF(EXISTS ...) in an
+#     OPTIONAL's FILTER reads each pair
+for case_id, query, fixture in [
+    ("EG1", "PREFIX : <urn:> SELECT ?g ?s WHERE { GRAPH ?g { ?s :p ?o FILTER(EXISTS { ?s :q ?x }) } }", "rdf_exists_in_graphs"),
+    ("EG2", "PREFIX : <urn:> SELECT ?g ?s WHERE { GRAPH ?g { ?s :p ?o FILTER(EXISTS { { SELECT ?s WHERE { ?s :q ?x } } }) } }", "rdf_exists_in_graphs"),
+    ("EG3", "PREFIX : <urn:> SELECT ?g ?s WHERE { GRAPH ?g { ?s :p ?o FILTER(NOT EXISTS { ?s :q ?x }) } }", "rdf_exists_in_graphs"),
+    ("EG4", "PREFIX : <urn:> SELECT ?g ?s WHERE { GRAPH ?g { ?s :p ?o FILTER(NOT EXISTS { { SELECT ?s WHERE { ?s :q ?x } } }) } }", "rdf_exists_in_graphs"),
+    ("EG5", "PREFIX : <urn:> SELECT ?g ?s WHERE { GRAPH ?g { ?s :p ?o FILTER(EXISTS { { SELECT ?x WHERE { ?s :q ?x } } }) } }", "rdf_exists_in_graphs"),
+    ("EG6", "PREFIX : <urn:> SELECT ?g ?s WHERE { GRAPH ?g { ?s :p ?o FILTER(EXISTS { { SELECT (COUNT(*) AS ?n) WHERE { ?s :q ?x } } FILTER(?n > 0) }) } }", "rdf_exists_in_graphs"),
+    ("EG7", "PREFIX : <urn:> SELECT ?g ?s ?e WHERE { GRAPH ?g { ?s :p ?o BIND(EXISTS { { SELECT ?s WHERE { ?s :q ?x } } } AS ?e) } }", "rdf_exists_in_graphs"),
+    ("EG8", "PREFIX : <urn:> SELECT ?s WHERE { GRAPH <urn:g1> { ?s :p ?o FILTER(EXISTS { { SELECT ?s WHERE { ?s :q ?x } } }) } }", "rdf_exists_in_graphs"),
+    ("EG9", "PREFIX : <urn:> SELECT ?s WHERE { ?s :q ?o FILTER(EXISTS { { SELECT ?s WHERE { ?s :q ?x } } }) }", "rdf_exists_in_graphs"),
+    ("EG10", "PREFIX : <urn:> SELECT ?g ?s WHERE { GRAPH ?g { ?s :p ?o FILTER(EXISTS { GRAPH <urn:g2> { ?s :q ?x } }) } }", "rdf_exists_in_graphs"),
+    ("EG11", "PREFIX : <urn:> SELECT ?g ?s WHERE { GRAPH ?g { ?s :p ?o FILTER(EXISTS { GRAPH ?g { ?s :q ?x } }) } }", "rdf_exists_in_graphs"),
+    ("EG12", "PREFIX : <urn:> SELECT ?g ?s WHERE { GRAPH ?g { ?s :p ?o FILTER(IF(EXISTS { { SELECT ?s WHERE { ?s :q ?x } } }, true, false)) } }", "rdf_exists_in_graphs"),
+    ("EG13", "PREFIX : <urn:> SELECT ?s ?o WHERE { ?s :t :k OPTIONAL { ?s :p ?o FILTER(IF(EXISTS { ?o :r ?z }, true, false)) } }", "rdf_exists_in_optionals"),
+    ("EG14", "PREFIX : <urn:> SELECT ?s ?o WHERE { ?s :t :k OPTIONAL { ?s :p ?o FILTER(IF(EXISTS { ?o :nothing ?z }, true, false)) } }", "rdf_exists_in_optionals"),
+    ("EG15", "PREFIX : <urn:> SELECT ?s ?o WHERE { ?s :t :k OPTIONAL { ?s :p ?o FILTER(IF(EXISTS { ?o :r ?z }, false, true)) } }", "rdf_exists_in_optionals"),
+    ("EG16", "PREFIX : <urn:> SELECT ?s ?o WHERE { ?s :t :k OPTIONAL { ?s :p ?o FILTER(IF(EXISTS { ?o :m ?s }, true, false)) } }", "rdf_exists_in_optionals"),
+    ("EG17", "PREFIX : <urn:> SELECT ?s ?o WHERE { ?s :t :k OPTIONAL { :a :p ?o FILTER(IF(EXISTS { ?s :p :d }, true, false)) } }", "rdf_exists_in_optionals"),
+    ("EG18", "PREFIX : <urn:> SELECT ?s ?o WHERE { ?s :t :k OPTIONAL { ?s :p ?o FILTER(IF(EXISTS { :c :r 1 }, true, false)) } }", "rdf_exists_in_optionals"),
+    ("EG19", "PREFIX : <urn:> SELECT ?s ?o WHERE { ?s :t :k OPTIONAL { ?s :p ?o FILTER(IF(EXISTS { { SELECT ?o WHERE { ?o :r ?z } } }, true, false)) } }", "rdf_exists_in_optionals"),
+    ("EG20", "PREFIX : <urn:> SELECT ?s ?o WHERE { ?s :t :k OPTIONAL { ?s :p ?o FILTER(IF(EXISTS { SELECT ?z { ?x :r ?z FILTER(?x = ?o) } }, true, false)) } }", "rdf_exists_in_optionals"),
+    ("EG21", "PREFIX : <urn:> SELECT ?s ?o WHERE { ?s :t :k OPTIONAL { ?s :p ?o FILTER(?s = :a && IF(EXISTS { ?o :r ?z }, true, false)) } }", "rdf_exists_in_optionals"),
+    ("EG22", "PREFIX : <urn:> SELECT ?s ?o WHERE { ?s :t :k OPTIONAL { ?s :p ?o FILTER(!IF(EXISTS { ?o :r ?z }, true, false)) } }", "rdf_exists_in_optionals"),
+    ("EG23", "PREFIX : <urn:> SELECT ?s ?o WHERE { GRAPH <urn:o> { ?s :t :k OPTIONAL { ?s :p ?o FILTER(IF(EXISTS { ?o :r ?z }, true, false)) } } }", "rdf_exists_in_optionals"),
+]:
+    case(case_id, query, SPARQL, fixture)
 # fmt: on

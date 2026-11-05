@@ -2587,13 +2587,23 @@ impl<'a> Parser<'a> {
     }
 }
 
-/// The pattern of a group of `patterns`. A group of one element is that
-/// element, except a group: `{ { P FILTER(F) } }` keeps its inner group,
-/// whose FILTER scopes over P alone, so an OPTIONAL of it is
-/// LeftJoin(G, Filter(F, P)), not LeftJoin(G, P, F) (SPARQL 1.1 sec 18.2.2.6).
+/// The pattern of a group of `patterns`. A group of one element answers as
+/// that element, unless the element reads the group around it: `{ FILTER(F) }`,
+/// `{ BIND(E AS ?v) }`, `{ OPTIONAL { P } }` and `{ MINUS { P } }` start from
+/// their own group's one empty solution, not from the outer group's rows, and
+/// `{ { P FILTER(F) } }` keeps its inner group, whose FILTER scopes over P
+/// alone (SPARQL 1.1 sec 18.2.2.6 and 18.3.2.7).
 fn group_of(patterns: Vec<GraphPattern>) -> GraphPattern {
     match <[GraphPattern; 1]>::try_from(patterns) {
-        Ok([GraphPattern::Group(inner)]) => GraphPattern::Group(vec![GraphPattern::Group(inner)]),
+        Ok(
+            [
+                only @ (GraphPattern::Group(_)
+                | GraphPattern::Filter(_)
+                | GraphPattern::Bind { .. }
+                | GraphPattern::Optional(_)
+                | GraphPattern::Minus(_)),
+            ],
+        ) => GraphPattern::Group(vec![only]),
         Ok([only]) => only,
         Err(patterns) => GraphPattern::Group(patterns),
     }

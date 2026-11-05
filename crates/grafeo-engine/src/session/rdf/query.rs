@@ -27,6 +27,11 @@ impl Session {
             .with_writer(self.rdf_writer())
             .with_path_search_budget(budget)
             .with_deadline(deadline)
+            .with_exists_run_once(
+                self.plan_options
+                    .rules
+                    .has(crate::query::optimizer::PlannerRule::ExistsRunOnce),
+            )
     }
 
     /// Executes a GraphQL query against the RDF store.

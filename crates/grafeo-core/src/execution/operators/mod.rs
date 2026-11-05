@@ -37,6 +37,7 @@ mod horizontal_aggregate;
 mod in_set;
 mod intersect_expand;
 mod join;
+mod key_column_scan;
 mod label_count;
 mod leapfrog_join;
 mod limit;
@@ -104,6 +105,7 @@ pub use join::{
     CompatibleCondition, EqualityCondition, HashJoinOperator, HashKey, JoinCondition, JoinType,
     JoinedRowCondition, NestedLoopJoinOperator,
 };
+pub use key_column_scan::{KeyColumnChecks, KeyColumnIndexes, KeyColumnScanOperator};
 pub use label_count::LabelCountOperator;
 pub use leapfrog_join::LeapfrogJoinOperator;
 pub use limit::{LimitOperator, LimitSkipOperator, SkipOperator};

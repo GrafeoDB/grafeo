@@ -901,6 +901,50 @@ impl Session {
         ))
     }
 
+    /// Refuses to drop the definition of a node or edge type, `type_key` in the catalog, that a
+    /// closed graph type a graph is bound to lists, whether or not the graph holds any of it: the
+    /// closed type would go on naming a type that no longer says what it allows. `ALTER GRAPH
+    /// TYPE ... DROP` takes it out first, and checks the data.
+    ///
+    /// # Errors
+    ///
+    /// A semantic error naming the graph type and the graph, as `DROP GRAPH TYPE` has.
+    #[cfg(feature = "gql")]
+    fn refuse_drop_of_a_listed_type(
+        &self,
+        type_key: &str,
+        name: &str,
+        is_edge: bool,
+    ) -> grafeo_common::utils::error::Result<()> {
+        use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind};
+        let catalog = self.effective_catalog();
+        for (graph, graph_type) in catalog.all_graph_type_bindings() {
+            let Some(def) = catalog.get_graph_type_def(&graph_type) else {
+                continue;
+            };
+            let listed = if is_edge {
+                &def.allowed_edge_types
+            } else {
+                &def.allowed_node_types
+            };
+            if def.open
+                || !listed.iter().any(|on| on == type_key)
+                || self.named_graph(&graph).is_none()
+            {
+                continue;
+            }
+            let kind = if is_edge { "EDGE" } else { "NODE" };
+            return Err(Error::from(QueryError::new(
+                QueryErrorKind::Semantic,
+                format!(
+                    "closed graph type '{graph_type}' of graph '{graph}' lists type '{name}': \
+                     take it out first with ALTER GRAPH TYPE {graph_type} DROP {kind} TYPE {name}"
+                ),
+            )));
+        }
+        Ok(())
+    }
+
     /// Returns the effective storage key for the current graph, accounting for schema.
     ///
     /// Combines `current_schema` and `current_graph` into a flat lookup key.
@@ -2540,6 +2584,7 @@ impl Session {
                         CatalogError::TypeNotFound(effective_name).to_string(),
                     ));
                 }
+                self.refuse_drop_of_a_listed_type(&effective_name, &name, false)?;
                 change.push(StandaloneOp::DropCatalog(CatalogKey::NodeType(
                     effective_name,
                 )));
@@ -2559,6 +2604,7 @@ impl Session {
                         CatalogError::TypeNotFound(effective_name).to_string(),
                     ));
                 }
+                self.refuse_drop_of_a_listed_type(&effective_name, &name, true)?;
                 change.push(StandaloneOp::DropCatalog(CatalogKey::EdgeType(
                     effective_name,
                 )));

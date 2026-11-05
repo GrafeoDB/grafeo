@@ -319,6 +319,7 @@ impl Binder {
                 }
                 Ok(())
             }
+            LogicalOperator::InNamedGraph(graph) => self.bind_operator(&graph.input),
             LogicalOperator::Limit(limit) => self.bind_operator(&limit.input),
             LogicalOperator::Skip(skip) => self.bind_operator(&skip.input),
             LogicalOperator::Sort(sort) => {
@@ -1288,6 +1289,7 @@ impl Binder {
                 }
             }
             LogicalOperator::Sort(s) => Self::register_subplan_columns(&s.input, ctx),
+            LogicalOperator::InNamedGraph(g) => Self::register_subplan_columns(&g.input, ctx),
             LogicalOperator::Limit(l) => Self::register_subplan_columns(&l.input, ctx),
             LogicalOperator::Skip(s) => Self::register_subplan_columns(&s.input, ctx),
             // The branches of a UNION return the same columns.

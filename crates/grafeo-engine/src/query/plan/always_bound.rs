@@ -102,6 +102,7 @@ pub(crate) fn always_bound(op: &LogicalOperator) -> Option<HashSet<String>> {
                 .collect()
         }
         LogicalOperator::NamedGraphs(graphs) => HashSet::from([graphs.variable.clone()]),
+        LogicalOperator::InNamedGraph(graph) => always_bound(&graph.input)?,
         LogicalOperator::Empty => HashSet::new(),
         _ => return None,
     })

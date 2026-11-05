@@ -602,3 +602,64 @@ fn a_spilled_column_keeps_its_value_for_readers_before_a_write() {
         committed(&store).nodes
     );
 }
+
+/// The nodes of a whole read of a key's column.
+fn nodes_by_key(store: &RowGroupStore, key: &str, values: &[Value]) -> Vec<NodeId> {
+    let mut query = crate::graph::rowgroup::KeyColumnQuery::new(&["Item"], &[], &[], key, values);
+    let mut nodes = Vec::new();
+    let mut from = Some(0);
+    while let Some(at) = from {
+        let group = store
+            .key_column_group(&mut query, at, ReadView::latest())
+            .unwrap();
+        nodes.extend(group.nodes);
+        from = group.end;
+    }
+    nodes
+}
+
+/// A read by key finds through a spilled column what it found on the heap, and leaves it spilled:
+/// on a dense column of integers, and a sparse one of vectors, by each kind of key.
+#[test]
+fn a_spilled_column_is_read_by_key() {
+    let store = RowGroupStore::new();
+    let ids = items(&store);
+    let rank = PropertyKey::new("rank");
+    let keys = [
+        Value::Int64(5),
+        Value::Float64(5.0),
+        Value::from("5"),
+        Value::from("5.0"),
+        Value::Int64(1_000_000),
+    ];
+    let ranks_before: Vec<Vec<NodeId>> = keys
+        .iter()
+        .map(|key| nodes_by_key(&store, "rank", std::slice::from_ref(key)))
+        .collect();
+    let embedding_key = [embedding_of(11)];
+    let embeddings_before = nodes_by_key(&store, "embedding", &embedding_key);
+    assert_eq!(ranks_before[0], [ids[5]]);
+    assert_eq!(ranks_before[4], Vec::<NodeId>::new());
+    assert_eq!(embeddings_before, [ids[11]]);
+
+    let files = Files::default();
+    let report = store.spill_node_property_column(&rank, &files).unwrap();
+    assert!(report.spilled_groups > 0, "{report:?}");
+    spill(&store, &files);
+    assert_eq!(store.spilled_node_property_columns().len(), 2);
+
+    let ranks_after: Vec<Vec<NodeId>> = keys
+        .iter()
+        .map(|key| nodes_by_key(&store, "rank", std::slice::from_ref(key)))
+        .collect();
+    assert_eq!(ranks_after, ranks_before);
+    assert_eq!(
+        nodes_by_key(&store, "embedding", &embedding_key),
+        embeddings_before
+    );
+    assert_eq!(
+        store.spilled_node_property_columns().len(),
+        2,
+        "the reads thaw nothing"
+    );
+}

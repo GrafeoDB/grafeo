@@ -375,6 +375,7 @@ impl RdfPlanner {
                     vec![LogicalType::RdfTermId],
                 ))
             }
+            LogicalOperator::InNamedGraph(graph) => self.plan_in_named_graph(graph),
             LogicalOperator::Filter(filter) => self.plan_filter(filter),
             LogicalOperator::Project(project) => self.plan_project(project),
             LogicalOperator::Limit(limit) => self.plan_limit(limit),
@@ -1167,6 +1168,27 @@ impl RdfPlanner {
 
     /// Plans a PROJECT operator: a variable's ids are copied, a constant and
     /// an expression's value are interned.
+    /// A pattern in a named graph: its plan, or with no such graph in the dataset now, nothing
+    /// under the same columns (SPARQL 1.1 sec 18.6).
+    fn plan_in_named_graph(
+        &self,
+        graph: &crate::query::plan::InNamedGraphOp,
+    ) -> Result<(Box<dyn Operator>, Vec<String>, Vec<LogicalType>)> {
+        let (operator, columns, types) = self.plan_operator(&graph.input)?;
+        let names = named_graphs::named_graph_names(
+            &self.store,
+            self.writer.as_ref(),
+            graph.dataset.as_ref(),
+        );
+        if names.binary_search(&graph.graph).is_ok() {
+            return Ok((operator, columns, types));
+        }
+        let empty: Box<dyn Operator> = Box::new(
+            grafeo_core::execution::operators::EmptyOperator::new(types.clone()),
+        );
+        Ok((empty, columns, types))
+    }
+
     fn plan_project(
         &self,
         project: &crate::query::plan::ProjectOp,

@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 
 use grafeo_common::types::Value;
 use grafeo_engine::GrafeoDB;
+use grafeo_engine::query::optimizer::{PlannerRule, PlannerRules};
 use grafeo_engine::session::Session;
 
 /// One literal of each kind and each spelling `=` treats specially, as in `equality_with_index`, and
@@ -743,7 +744,9 @@ fn negative_numbers_answer_as_the_walk() {
 #[test]
 fn a_long_list_does_not_cost_per_item() {
     let db = GrafeoDB::new_in_memory();
-    let session = db.session();
+    let mut session = db.session();
+    session.set_planner_rules(PlannerRules::all().with(PlannerRule::KeyColumnLookup, false));
+    let session = session;
     session
         .execute("UNWIND range(0, 19999) AS i INSERT (:N {x: i})")
         .unwrap();

@@ -301,6 +301,9 @@ pub enum LogicalOperator {
     /// The named graphs of the dataset, one row per graph.
     NamedGraphs(NamedGraphsOp),
 
+    /// A pattern evaluated in a named graph, empty when the dataset has none of that name.
+    InNamedGraph(InNamedGraphOp),
+
     /// Union of multiple result sets.
     Union(UnionOp),
 
@@ -466,6 +469,7 @@ impl LogicalOperator {
             Self::Project(op) => op.input.has_mutations(),
             Self::Aggregate(op) => op.input.has_mutations(),
             Self::Limit(op) => op.input.has_mutations(),
+            Self::InNamedGraph(op) => op.input.has_mutations(),
             Self::Skip(op) => op.input.has_mutations(),
             Self::Sort(op) => op.input.has_mutations(),
             Self::Distinct(op) => op.input.has_mutations(),
@@ -535,6 +539,7 @@ impl LogicalOperator {
             Self::Project(op) => vec![&*op.input],
             Self::Aggregate(op) => vec![&*op.input],
             Self::Limit(op) => vec![&*op.input],
+            Self::InNamedGraph(op) => vec![&*op.input],
             Self::Skip(op) => vec![&*op.input],
             Self::Sort(op) => vec![&*op.input],
             Self::Distinct(op) => vec![&*op.input],
@@ -653,6 +658,10 @@ impl LogicalOperator {
             Self::Aggregate(mut op) => {
                 op.input = Box::new(f(*op.input));
                 Self::Aggregate(op)
+            }
+            Self::InNamedGraph(mut op) => {
+                op.input = Box::new(f(*op.input));
+                Self::InNamedGraph(op)
             }
             Self::Limit(mut op) => {
                 op.input = Box::new(f(*op.input));
@@ -819,6 +828,7 @@ impl LogicalOperator {
     pub fn display_label(&self) -> String {
         match self {
             Self::NamedGraphs(op) => format!("GRAPH ?{}", op.variable),
+            Self::InNamedGraph(op) => format!("GRAPH <{}>", op.graph),
             Self::PropertyPath(op) => format!(
                 "{} {:?}{} {}",
                 fmt_triple_component(&op.subject),
@@ -1062,6 +1072,7 @@ impl LogicalOperator {
                 bound.extend(expand.path_alias.iter().cloned());
             }
             Self::Filter(filter) => return filter.input.bound_variables(imports),
+            Self::InNamedGraph(graph) => return graph.input.bound_variables(imports),
             Self::Limit(limit) => return limit.input.bound_variables(imports),
             Self::Skip(skip) => return skip.input.bound_variables(imports),
             Self::Sort(sort) => return sort.input.bound_variables(imports),
@@ -1448,6 +1459,10 @@ impl LogicalOperator {
                 );
                 op.input.fmt_tree(out, depth + 1);
             }
+            Self::InNamedGraph(op) => {
+                let _ = writeln!(out, "{indent}InNamedGraph (<{}>){after}", op.graph);
+                op.input.fmt_tree(out, depth + 1);
+            }
             Self::Limit(op) => {
                 let _ = writeln!(out, "{indent}Limit ({}){after}", op.count);
                 op.input.fmt_tree(out, depth + 1);
@@ -1790,6 +1805,7 @@ fn hint_text(hint: &PushdownHint) -> String {
         PushdownHint::IndexesAndRemainder { property } => {
             format!(" [indexes and remainder: {property}]")
         }
+        PushdownHint::KeyColumn { property } => format!(" [key column: {property}]"),
         PushdownHint::RangeScan { property } => format!(" [range: {property}]"),
         PushdownHint::LabelFirst => " [label-first]".to_string(),
         PushdownHint::LabelUnion { labels } => format!(" [labels: {}]", labels.join("|")),
@@ -2428,6 +2444,11 @@ pub enum PushdownHint {
         /// The key.
         property: String,
     },
+    /// A key's holders come from a read of the key's column, with no index.
+    KeyColumn {
+        /// The key.
+        property: String,
+    },
     /// The filter pins a key that only other labels have an index on, so it reads no index:
     /// `EXPLAIN` says so beside the path it takes.
     NoIndex {
@@ -2780,6 +2801,19 @@ pub struct NamedGraphsOp {
     pub variable: String,
     /// FROM NAMED: when it lists graphs, those are the named graphs.
     pub dataset: Option<DatasetRestriction>,
+}
+
+/// A pattern evaluated in a named graph of the dataset (SPARQL 1.1 sec 18.6): nothing when the
+/// dataset has no such graph, whatever the pattern gives without reading it. The planner lists the
+/// graphs per run, so a cached plan holds no list.
+#[derive(Debug, Clone)]
+pub struct InNamedGraphOp {
+    /// The graph's IRI.
+    pub graph: String,
+    /// FROM NAMED: when it lists graphs, those are the named graphs.
+    pub dataset: Option<DatasetRestriction>,
+    /// The pattern, its scans already reading the graph.
+    pub input: Box<LogicalOperator>,
 }
 
 /// Scan RDF triples matching a pattern.

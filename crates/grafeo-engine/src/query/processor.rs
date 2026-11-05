@@ -792,7 +792,7 @@ fn annotate_hints(
                 // The index lookup made while planning takes over checks of
                 // the scanned node between the filter and the scan too.
                 .or_else(|| {
-                    if below.checks.is_empty() || below.scan.input.is_some() || after_a_write {
+                    if below.checks.is_empty() || below.scan.input.is_some() {
                         return None;
                     }
                     std::iter::once(&filter.predicate)
@@ -801,14 +801,17 @@ fn annotate_hints(
                             crate::query::planner::lpg::filter::scan_hint(
                                 predicate, below.scan, &labels, store, rules,
                             )
-                            .filter(|hint| {
-                                matches!(
-                                    hint,
-                                    crate::query::plan::PushdownHint::IndexLookup { .. }
-                                        | crate::query::plan::PushdownHint::IndexesAndRemainder {
-                                            ..
-                                        }
-                                )
+                            // A read of a key's column reads as it runs, so also after
+                            // a write; an index's lookup while planning does not.
+                            .filter(|hint| match hint {
+                                crate::query::plan::PushdownHint::IndexLookup { .. } => {
+                                    !after_a_write
+                                }
+                                crate::query::plan::PushdownHint::IndexesAndRemainder {
+                                    ..
+                                }
+                                | crate::query::plan::PushdownHint::KeyColumn { .. } => true,
+                                _ => false,
                             })
                         })
                 })
@@ -1295,6 +1298,7 @@ fn substitute_in_operator(op: &mut LogicalOperator, params: &Substitution<'_>) -
             substitute_in_operator(&mut bind.input, params)?;
         }
         LogicalOperator::PropertyPath(_) | LogicalOperator::NamedGraphs(_) => {}
+        LogicalOperator::InNamedGraph(graph) => substitute_in_operator(&mut graph.input, params)?,
         LogicalOperator::TripleScan(scan) => {
             if let Some(input) = &mut scan.input {
                 substitute_in_operator(input, params)?;

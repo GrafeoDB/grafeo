@@ -106,7 +106,10 @@ fn compound_in_lists_take_the_index_instead_of_a_scan() {
     let indexed = docs(true);
     for query in COMPOUND {
         let plan = profile(&indexed, query);
-        assert!(plan.contains("NodeList"), "{query}:\n{plan}");
+        assert!(
+            plan.contains("NodeList") || plan.contains("KeyColumnScan"),
+            "{query}:\n{plan}"
+        );
         assert!(!plan.contains("rows=1000"), "{query}:\n{plan}");
     }
 }

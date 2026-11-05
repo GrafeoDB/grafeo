@@ -11,10 +11,10 @@ use crate::query::plan::always_bound;
 use crate::query::plan::{
     AddGraphOp, AggregateExpr, AggregateFunction, AggregateOp, AntiJoinOp, BinaryOp, BindOp,
     ClearGraphOp, ConstructOp, CopyGraphOp, CreateGraphOp, DatasetRestriction, DeleteTripleOp,
-    DropGraphOp, FilterOp, InsertTripleOp, JoinCondition, JoinOp, JoinType, LeftJoinOp,
-    LoadGraphOp, LogicalExpression, LogicalOperator, LogicalPlan, ModifyOp, MoveGraphOp,
-    NamedGraphsOp, ProjectOp, Projection, SortKey, SortOrder, TripleComponent, TripleScanOp,
-    TripleTemplate, UnaryOp, UnionOp,
+    DropGraphOp, FilterOp, InNamedGraphOp, InsertTripleOp, JoinCondition, JoinOp, JoinType,
+    LeftJoinOp, LoadGraphOp, LogicalExpression, LogicalOperator, LogicalPlan, ModifyOp,
+    MoveGraphOp, NamedGraphsOp, ProjectOp, Projection, SortKey, SortOrder, TripleComponent,
+    TripleScanOp, TripleTemplate, UnaryOp, UnionOp,
 };
 use grafeo_adapters::query::sparql::{self, ast};
 use grafeo_common::storage::log_record::RdfGraphTarget;
@@ -174,6 +174,17 @@ struct SparqlTranslator {
     /// The empty group's one solution inside `GRAPH ?g`, when the pattern
     /// there leaves ?g unbound: one row per named graph (see [`Self::unit`]).
     graph_unit: Option<NamedGraphsOp>,
+}
+
+/// Whether every solution of `pattern` comes from a triple it reads, so that a graph with no
+/// triple gives it none. A sub-SELECT need not: `COUNT(*)` of nothing is a row.
+fn reads_a_triple(pattern: &ast::GraphPattern) -> bool {
+    match pattern {
+        ast::GraphPattern::Basic(triples) => !triples.is_empty(),
+        ast::GraphPattern::Group(patterns) => patterns.iter().any(reads_a_triple),
+        ast::GraphPattern::Union(patterns) => patterns.iter().all(reads_a_triple),
+        _ => false,
+    }
 }
 
 impl SparqlTranslator {
@@ -1333,6 +1344,15 @@ impl SparqlTranslator {
                         });
                         self.translate_graph_pattern(pattern)
                     }
+                    // With a triple its solutions must read, the scans find nothing in a
+                    // graph the dataset does not name; otherwise it must say so.
+                    (Ok(plan), ast::VariableOrIri::Iri(iri)) if !reads_a_triple(pattern) => {
+                        Ok(LogicalOperator::InNamedGraph(InNamedGraphOp {
+                            graph: self.resolve_iri(iri),
+                            dataset: self.dataset.clone(),
+                            input: Box::new(plan),
+                        }))
+                    }
                     (plan, _) => plan,
                 };
                 self.graph_unit = outer_unit;
@@ -2153,6 +2173,9 @@ impl SparqlTranslator {
 
     fn collect_variables_recursive(op: &LogicalOperator, vars: &mut Vec<String>) {
         match op {
+            LogicalOperator::InNamedGraph(graph) => {
+                Self::collect_variables_recursive(&graph.input, vars);
+            }
             LogicalOperator::NamedGraphs(graphs) => {
                 if !vars.contains(&graphs.variable) {
                     vars.push(graphs.variable.clone());

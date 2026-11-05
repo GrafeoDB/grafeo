@@ -9,9 +9,10 @@ use grafeo_common::types::{Decimal, Value};
 use grafeo_common::utils::error::Result;
 
 use super::{
-    BitPackedInts, BitVector, ChunkCodec, FLAG_EPOCHS, FLAG_ZONE_MAP, HEADER_LEN, check_bitpacked,
-    checked_header, corrupt, presence_words, read_bitmap_body, read_bitpacked_body,
-    read_f32_vector_body, read_le_words_body, skip_zone_map, take,
+    BitPackedInts, BitVector, ChunkCodec, ChunkHeader, FLAG_EPOCHS, FLAG_ZONE_MAP, HEADER_LEN,
+    check_bitpacked, checked_header, corrupt, presence_words, read_bitmap_body,
+    read_bitpacked_body, read_f32_vector_body, read_le_words_body, read_u32, read_zone_map_body,
+    take,
 };
 
 #[derive(Debug)]
@@ -49,6 +50,148 @@ pub(crate) struct PointView {
     body: Body,
 }
 
+/// The bits of `rows`, at most 64, whose key is among `targets`, sorted.
+pub(crate) fn bits_among<T: Copy, K: Copy + Ord>(
+    rows: &[T],
+    targets: &[K],
+    key: impl Fn(T) -> K,
+) -> u64 {
+    fn bits_where<T: Copy>(rows: &[T], test: impl Fn(T) -> bool) -> u64 {
+        let mut bits = 0;
+        for (bit, value) in rows.iter().enumerate() {
+            bits |= u64::from(test(*value)) << bit;
+        }
+        bits
+    }
+    match targets {
+        [] => 0,
+        [target] => bits_where(rows, |value| key(value) == *target),
+        _ => bits_where(rows, |value| targets.binary_search(&key(value)).is_ok()),
+    }
+}
+
+/// `bits`, a bit per value in order, as a bit per row of the rows `present` names.
+fn at_present_rows(mut bits: u64, present: u64) -> u64 {
+    let mut rows = 0;
+    let mut left = present;
+    while bits != 0 && left != 0 {
+        let row = left.isolate_lowest_one();
+        if bits & 1 != 0 {
+            rows |= row;
+        }
+        bits >>= 1;
+        left &= left - 1;
+    }
+    rows
+}
+
+/// Reads the presence bitmap at `*pos`, moving `*pos` past it, and past the zone map and epochs
+/// after it, to the body.
+fn presence_up_to_body(
+    data: &Bytes,
+    header: &ChunkHeader,
+    row_count: u32,
+    pos: &mut usize,
+) -> Result<Option<Presence>> {
+    let presence = if header.sparse {
+        let at = *pos;
+        let words = take(data, pos, presence_words(row_count) * 8)
+            .ok_or_else(|| corrupt(at, "truncated presence bitmap"))?;
+        let mut before = Vec::with_capacity(presence_words(row_count));
+        let mut marked = 0u32;
+        for word in words.as_chunks::<8>().0 {
+            before.push(marked);
+            marked += u64::from_le_bytes(*word).count_ones();
+        }
+        let tail = row_count % 64;
+        if tail != 0
+            && words
+                .as_chunks::<8>()
+                .0
+                .last()
+                .is_some_and(|last| u64::from_le_bytes(*last) >> tail != 0)
+        {
+            return Err(corrupt(at, "presence bitmap marks a row past the chunk"));
+        }
+        if marked != header.value_count {
+            return Err(corrupt(at, "presence bitmap disagrees with value count"));
+        }
+        Some(Presence {
+            words,
+            before: before.into_boxed_slice(),
+        })
+    } else {
+        None
+    };
+    if header.flags & FLAG_ZONE_MAP != 0 {
+        let at = *pos;
+        read_zone_map_body(header.codec, data, pos).map_err(|error| corrupt(at, error))?;
+    }
+    if header.flags & FLAG_EPOCHS != 0 {
+        let at = *pos;
+        let epochs = read_bitpacked_body(data, pos).map_err(|error| corrupt(at, error))?;
+        check_bitpacked(&epochs, header.value_count as usize)
+            .map_err(|error| corrupt(at, error))?;
+    }
+    Ok(presence)
+}
+
+/// The rows of word `word` of a chunk of `row_count` rows that have a value.
+fn present_in_word(presence: Option<&Presence>, row_count: u32, word: usize) -> u64 {
+    match presence {
+        Some(presence) => presence
+            .words
+            .as_chunks::<8>()
+            .0
+            .get(word)
+            .map_or(0, |bits| u64::from_le_bytes(*bits)),
+        None => {
+            let rows = (row_count as usize).saturating_sub(word * 64);
+            if rows >= 64 {
+                u64::MAX
+            } else {
+                (1 << rows) - 1
+            }
+        }
+    }
+}
+
+/// Calls `found` with the offset of each row `scope` names (by the word of rows) whose value's key
+/// is among `targets`, comparing only words with such a row; returns how many rows it compared.
+fn find_values<T: Copy, K: Copy + Ord>(
+    presence: Option<&Presence>,
+    row_count: u32,
+    values: &[T],
+    targets: &[K],
+    key: impl Fn(T) -> K,
+    scope: impl Fn(usize) -> u64,
+    mut found: impl FnMut(u32),
+) -> usize {
+    let mut compared = 0;
+    let mut at = 0;
+    for (word, first) in (0..presence_words(row_count)).zip((0_u32..).step_by(64)) {
+        let present = present_in_word(presence, row_count, word);
+        let count = present.count_ones() as usize;
+        let asked = scope(word) & present;
+        if asked != 0 {
+            compared += asked.count_ones() as usize;
+            let rows = values.get(at..at + count).unwrap_or_default();
+            let mut hits = bits_among(rows, targets, &key);
+            if presence.is_some() {
+                hits = at_present_rows(hits, present);
+            }
+            hits &= asked;
+            while hits != 0 {
+                let bit = hits.trailing_zeros();
+                hits &= hits - 1;
+                found(first + bit);
+            }
+        }
+        at += count;
+    }
+    compared
+}
+
 impl PointView {
     /// Whether a chunk of `codec` gets a view: its values are of one fixed
     /// size, so a row's value is found without reading the others.
@@ -75,46 +218,8 @@ impl PointView {
             return Ok(None);
         }
         let mut pos = HEADER_LEN;
-        let presence = if header.sparse {
-            let at = pos;
-            let words = take(data, &mut pos, presence_words(row_count) * 8)
-                .ok_or_else(|| corrupt(at, "truncated presence bitmap"))?;
-            let mut before = Vec::with_capacity(presence_words(row_count));
-            let mut marked = 0u32;
-            for word in words.as_chunks::<8>().0 {
-                before.push(marked);
-                marked += u64::from_le_bytes(*word).count_ones();
-            }
-            let tail = row_count % 64;
-            if tail != 0
-                && words
-                    .as_chunks::<8>()
-                    .0
-                    .last()
-                    .is_some_and(|last| u64::from_le_bytes(*last) >> tail != 0)
-            {
-                return Err(corrupt(at, "presence bitmap marks a row past the chunk"));
-            }
-            if marked != header.value_count {
-                return Err(corrupt(at, "presence bitmap disagrees with value count"));
-            }
-            Some(Presence {
-                words,
-                before: before.into_boxed_slice(),
-            })
-        } else {
-            None
-        };
-        if header.flags & FLAG_ZONE_MAP != 0 {
-            let at = pos;
-            skip_zone_map(header.codec, data, &mut pos).map_err(|error| corrupt(at, error))?;
-        }
+        let presence = presence_up_to_body(data, &header, row_count, &mut pos)?;
         let count = header.value_count as usize;
-        if header.flags & FLAG_EPOCHS != 0 {
-            let at = pos;
-            let epochs = read_bitpacked_body(data, &mut pos).map_err(|error| corrupt(at, error))?;
-            check_bitpacked(&epochs, count).map_err(|error| corrupt(at, error))?;
-        }
         let at = pos;
         let body = match header.codec {
             ChunkCodec::BitPacked => {
@@ -239,12 +344,147 @@ impl PointView {
         }
     }
 
+    /// Finds the rows of `scope` (by the word of rows) holding one of `integers` or of the bits
+    /// `floats`, both sorted, with no `Value` built, calling `found` with each one's offset;
+    /// returns how many rows it compared, or `None` for a body of another kind.
+    pub(crate) fn find_numbers(
+        &self,
+        integers: &[i64],
+        floats: &[u64],
+        scope: impl Fn(usize) -> u64,
+        found: impl FnMut(u32),
+    ) -> Option<usize> {
+        let presence = self.presence.as_ref();
+        let rows = self.row_count;
+        match &self.body {
+            Body::Int64(words) => Some(find_values(
+                presence,
+                rows,
+                words.as_chunks::<8>().0,
+                integers,
+                i64::from_le_bytes,
+                scope,
+                found,
+            )),
+            Body::Float64(words) => Some(find_values(
+                presence,
+                rows,
+                words.as_chunks::<8>().0,
+                floats,
+                u64::from_le_bytes,
+                scope,
+                found,
+            )),
+            Body::Packed(packed) => {
+                // A packed value is not negative, nor past the largest `Int64` (the load's check).
+                let targets: Vec<u64> = integers
+                    .iter()
+                    .filter_map(|target| u64::try_from(*target).ok())
+                    .collect();
+                let scoped = (0..presence_words(rows)).any(|word| scope(word) != 0);
+                if targets.is_empty() || !scoped {
+                    return Some(0);
+                }
+                Some(find_values(
+                    presence,
+                    rows,
+                    &packed.unpack(),
+                    &targets,
+                    |value| value,
+                    scope,
+                    found,
+                ))
+            }
+            _ => None,
+        }
+    }
+
     /// Owned rank-index bytes, excluding shared encoded backing and inline fields.
     /// Dense chunks allocate no index; the largest sparse index is 4 KiB.
     pub(crate) fn index_heap_bytes(&self) -> usize {
         self.presence
             .as_ref()
             .map_or(0, |presence| std::mem::size_of_val(&*presence.before))
+    }
+}
+
+/// A dictionary chunk, already validated, read in place: its entries are asked once, with no string
+/// built, and its codes compared with those of the entries found.
+#[derive(Debug)]
+pub(crate) struct DictView {
+    row_count: u32,
+    presence: Option<Presence>,
+    /// The codes, a little-endian u32 per value.
+    codes: Bytes,
+    /// The codes of the entries found, ascending.
+    found: Vec<u32>,
+}
+
+impl DictView {
+    /// The view of a chunk `decode_column_chunk_bytes` has validated, asking `finds` of each of its
+    /// entries, by its UTF-8 bytes; `None` for another codec.
+    ///
+    /// # Errors
+    ///
+    /// Returns corruption when the layout contradicts the header or does not fit the bytes.
+    pub(crate) fn read_validated(
+        data: &Bytes,
+        codec: u8,
+        row_count: u32,
+        mut finds: impl FnMut(&[u8]) -> bool,
+    ) -> Result<Option<Self>> {
+        let header = checked_header(data, codec, row_count)?;
+        if header.codec != ChunkCodec::Dict {
+            return Ok(None);
+        }
+        let mut pos = HEADER_LEN;
+        let presence = presence_up_to_body(data, &header, row_count, &mut pos)?;
+        let at = pos;
+        let bad = |error: &'static str| corrupt(at, error);
+        let count = read_u32(data, &mut pos).map_err(bad)?;
+        let mut found = Vec::new();
+        for code in 0..count {
+            let length = read_u32(data, &mut pos).map_err(bad)? as usize;
+            let entry = data
+                .get(pos..)
+                .and_then(|rest| rest.get(..length))
+                .ok_or_else(|| bad("truncated dictionary entry"))?;
+            pos += length;
+            if finds(entry) {
+                found.push(code);
+            }
+        }
+        let codes_count = read_u32(data, &mut pos).map_err(bad)? as usize;
+        if codes_count != header.value_count as usize {
+            return Err(bad("dictionary codes disagree with value count"));
+        }
+        let codes = take(data, &mut pos, codes_count * 4)
+            .ok_or_else(|| bad("truncated dictionary codes"))?;
+        Ok(Some(Self {
+            row_count,
+            presence,
+            codes,
+            found,
+        }))
+    }
+
+    /// Whether no entry was found, so no row can be.
+    pub(crate) fn finds_nothing(&self) -> bool {
+        self.found.is_empty()
+    }
+
+    /// Calls `found` with the offset of each row of `scope` (by the word of rows) whose entry was
+    /// found; returns how many rows it compared.
+    pub(crate) fn find_codes(&self, scope: impl Fn(usize) -> u64, found: impl FnMut(u32)) -> usize {
+        find_values(
+            self.presence.as_ref(),
+            self.row_count,
+            self.codes.as_chunks::<4>().0,
+            &self.found,
+            u32::from_le_bytes,
+            scope,
+            found,
+        )
     }
 }
 

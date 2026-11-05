@@ -248,6 +248,7 @@ fn rule_sets() -> Vec<(String, PlannerRules)> {
     ];
     for rule in [
         PlannerRule::IndexLookup,
+        PlannerRule::KeyColumnLookup,
         PlannerRule::KeySeek,
         PlannerRule::PinnedFarEnd,
         PlannerRule::SoughtEnd,

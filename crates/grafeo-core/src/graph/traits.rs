@@ -98,26 +98,20 @@ pub struct CommonEdge {
     pub far_edge: EdgeId,
 }
 
-/// The rows a read of a key's column looks at, by their newest labels (see
-/// [`GraphStore::find_by_key_column`]). A row whose labels a chain keeps is looked at whatever
-/// they are now, as they may differ at a reader's view.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct KeyColumnScope<'a> {
-    /// Labels every result has.
-    pub required: &'a [&'a str],
-    /// Labels of which every result has one; none: no such need.
-    pub one_of: &'a [&'a str],
-    /// Labels whose nodes the caller finds otherwise, through their indexes.
-    pub except: &'a [&'a str],
-}
-
-/// What a read of a key's column found.
+/// What a read of a key's column found in the rows of one call (see
+/// [`GraphStore::key_column_group`]).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct KeyColumnHits {
+pub struct KeyColumnGroup {
     /// The nodes found, ascending.
     pub nodes: Vec<NodeId>,
     /// How many rows it looked at, for a statement's count of what it read.
     pub compared: usize,
+    /// Whether each node found is `=` a value, not only maybe.
+    pub exact: bool,
+    /// The id the next read starts from; `None` when no group is left.
+    pub end: Option<u64>,
+    /// One past every node id the store had given out when it read.
+    pub ids_given: u64,
 }
 
 /// The reads of one graph, each at an explicit [`ReadView`].
@@ -703,21 +697,31 @@ pub trait GraphStore: Send + Sync {
         self.has_property_index(property)
     }
 
-    /// The nodes `scope` leaves whose `property` may be equal under `=` to one of `values`, found
-    /// by reading the key's column, ascending: every such node `view` sees, and maybe others, for
-    /// a filter to decide. `None` for a store that cannot read a column so, whose callers scan.
+    /// Whether [`key_column_group`](Self::key_column_group) answers.
+    fn reads_key_columns(&self) -> bool {
+        false
+    }
+
+    /// The rows from node id `from` that the store reads at once, a row group or part of one,
+    /// read for `query`: every node of them `view` sees, with the query's labels as `view` sees
+    /// them, whose value of the key as `view` sees it `=` may find equal to one of the query's
+    /// values, and of those labels' nodes maybe others, ascending. A store's rows are grouped as
+    /// it likes; the answer says where the next read starts. `query` keeps what a next read of
+    /// the same rows can use.
     ///
     /// # Errors
     ///
-    /// Returns the error of a read the store cannot do.
-    fn find_by_key_column(
+    /// Returns the error of a read the store cannot do, and of a store that does not read key
+    /// columns (see [`reads_key_columns`](Self::reads_key_columns)).
+    fn key_column_group(
         &self,
-        _scope: &KeyColumnScope<'_>,
-        _property: &str,
-        _values: &[Value],
+        _query: &mut super::rowgroup::KeyColumnQuery,
+        _from: u64,
         _view: ReadView,
-    ) -> Result<Option<KeyColumnHits>> {
-        Ok(None)
+    ) -> Result<KeyColumnGroup> {
+        Err(grafeo_common::utils::error::Error::Internal(
+            "this store does not read key columns".to_string(),
+        ))
     }
 
     /// What a walk back from a node of `far_label` reads over `types` in `back`, by the far side:

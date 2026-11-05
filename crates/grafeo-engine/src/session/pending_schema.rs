@@ -497,6 +497,10 @@ impl Session {
         };
 
         let mut scope = RuleScope::default();
+        // Every type the statement changes, also to one with nothing left to check by itself: a
+        // closed graph type that lists it may then no longer allow what a graph holds.
+        let mut changed_labels = Vec::new();
+        let mut changed_edge_types = Vec::new();
         let mut constraints = Vec::new();
         let mut graph_types = Vec::new();
         let mut bound_graphs = Vec::new();
@@ -517,12 +521,14 @@ impl Session {
                 }
                 CatalogRecord::NodeType(record) => {
                     let def = node_type_definition(record.clone())?;
+                    changed_labels.push(short_name(&def.name).to_string());
                     if !def.properties.is_empty() || !def.constraints.is_empty() {
                         scope.labels.push(short_name(&def.name).to_string());
                     }
                 }
                 CatalogRecord::EdgeType(record) => {
                     let def = edge_type_definition(record.clone())?;
+                    changed_edge_types.push(short_name(&def.name).to_string());
                     if !def.properties.is_empty()
                         || !def.source_node_types.is_empty()
                         || !def.target_node_types.is_empty()
@@ -542,6 +548,8 @@ impl Session {
         if creates_a_graph || !graph_types.is_empty() {
             scope.labels.clear();
             scope.edge_types.clear();
+            changed_labels.clear();
+            changed_edge_types.clear();
         }
         let graphs: Vec<_> = self
             .reachable_graphs()
@@ -552,8 +560,8 @@ impl Session {
             })
             .collect();
         if constraints.is_empty()
-            && scope.labels.is_empty()
-            && scope.edge_types.is_empty()
+            && changed_labels.is_empty()
+            && changed_edge_types.is_empty()
             && graph_types.is_empty()
             && bound_graphs.is_empty()
         {
@@ -580,17 +588,35 @@ impl Session {
                         .iter()
                         .any(|(graph, bound)| graph == key && graph_types.contains(bound))
             });
-            let scope = RuleScope {
+            let validator = validator_of(&what_if, key.as_deref());
+            let mut scope = RuleScope {
                 whole_graph,
                 ..scope.clone()
             };
+            // On this graph, a changed type its closed type lists is checked as a write of its
+            // nodes or edges would be: only those are read.
+            for label in &changed_labels {
+                if validator.closed_type_lists_node(label) {
+                    scope.in_its_type = true;
+                    if !scope.labels.contains(label) {
+                        scope.labels.push(label.clone());
+                    }
+                }
+            }
+            for edge_type in &changed_edge_types {
+                if validator.closed_type_lists_edge(edge_type) {
+                    scope.in_its_type = true;
+                    if !scope.edge_types.contains(edge_type) {
+                        scope.edge_types.push(edge_type.clone());
+                    }
+                }
+            }
             if scope.labels.is_empty() && scope.edge_types.is_empty() && !whole_graph {
                 continue;
             }
             if let Some(key) = &key {
                 refuse_emptied_type(key, &*store, base, &what_if, view)?;
             }
-            let validator = validator_of(&what_if, key.as_deref());
             check_data_against_rules(&validator, &*store, &scope, view)
                 .map_err(crate::query::executor::convert_operator_error)?;
         }

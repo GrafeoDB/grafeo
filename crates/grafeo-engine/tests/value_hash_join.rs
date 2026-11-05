@@ -973,6 +973,6 @@ fn a_range_without_an_index_shows_the_range_scan() {
 
         let both = "MATCH (t:TypeDefinition) WHERE t.line > 3 AND t.name = 'Alix' RETURN t.name";
         let plan = explain(&session, language, both);
-        assert!(plan.contains("[label-first]"), "{language:?}:\n{plan}");
+        assert!(plan.contains("[key column: name]"), "{language:?}:\n{plan}");
     }
 }

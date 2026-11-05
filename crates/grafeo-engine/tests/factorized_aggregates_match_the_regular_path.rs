@@ -740,7 +740,9 @@ fn profile_of_a_factorized_count_names_the_expands_it_absorbs() {
         assert!(
             names[aggregate + 1..]
                 .iter()
-                .all(|name| name.contains("Scan") || name.contains("Filter")),
+                .all(|name| name.contains("Scan")
+                    || name.contains("Filter")
+                    || name.contains("NodeList")),
             "{query}\n{text}"
         );
         assert!(lines[aggregate].1.contains("rows=1 "), "{query}\n{text}");

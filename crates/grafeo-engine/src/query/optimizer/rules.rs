@@ -64,11 +64,14 @@ pub enum PlannerRule {
     /// `EXISTS` and `COUNT` of one hop from a row's node read that node's edges
     /// inline.
     ExistsEdgeCheck,
+    /// An equality on a key no index serves reads the key's column instead
+    /// of filtering every node of the scan.
+    KeyColumnLookup,
 }
 
 impl PlannerRule {
     /// Every rule.
-    pub const ALL: [Self; 15] = [
+    pub const ALL: [Self; 16] = [
         Self::JoinOrder,
         Self::SoughtEnd,
         Self::FactorizedExecution,
@@ -84,6 +87,7 @@ impl PlannerRule {
         Self::ZoneMaps,
         Self::ValueJoin,
         Self::ExistsEdgeCheck,
+        Self::KeyColumnLookup,
     ];
 
     /// The rule's bit in a [`PlannerRules`].

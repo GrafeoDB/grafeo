@@ -783,7 +783,24 @@ impl<'a> Parser<'a> {
             // A nested `{ BIND(...) }` of one element comes back as a bare
             // BIND too, but its group starts with nothing in scope.
             let written_here = self.current.kind == TokenKind::Bind;
+            // Grammar rule 54: one `.` may follow a pattern that is not a triples block, which
+            // takes its own.
+            let not_triples = matches!(
+                self.current.kind,
+                TokenKind::Optional
+                    | TokenKind::Minus
+                    | TokenKind::Graph
+                    | TokenKind::Service
+                    | TokenKind::Filter
+                    | TokenKind::Bind
+                    | TokenKind::Values
+                    | TokenKind::LeftBrace
+                    | TokenKind::Select
+            );
             let element = self.parse_graph_pattern_element()?;
+            if not_triples && self.current.kind == TokenKind::Dot {
+                self.advance();
+            }
             if written_here
                 && let GraphPattern::Bind { variable, .. } = &element
                 && in_scope.contains(variable)

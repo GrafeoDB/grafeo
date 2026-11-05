@@ -2809,6 +2809,20 @@ impl CatalogConstraintValidator {
 }
 
 impl CatalogConstraintValidator {
+    /// Whether the graph's closed type lists the node type of `label`.
+    pub(crate) fn closed_type_lists_node(&self, label: &str) -> bool {
+        self.closed_type
+            .as_ref()
+            .is_some_and(|closed| closed.node_types.contains_key(label))
+    }
+
+    /// Whether the graph's closed type lists `edge_type`.
+    pub(crate) fn closed_type_lists_edge(&self, edge_type: &str) -> bool {
+        self.closed_type
+            .as_ref()
+            .is_some_and(|closed| closed.edge_types.contains_key(edge_type))
+    }
+
     /// Checks one node against every rule but uniqueness, which reads others: with
     /// `in_its_type`, also what the graph's closed type allows.
     fn check_node_values(
@@ -2878,6 +2892,9 @@ pub(crate) struct RuleScope {
     pub edge_types: Vec<String>,
     /// Whether the graph's type changed: its every node and edge.
     pub whole_graph: bool,
+    /// Whether what is read is also checked against what the graph's closed type allows, as it
+    /// always is with `whole_graph`: a changed type the closed type lists.
+    pub in_its_type: bool,
 }
 
 /// Checks what `view` sees in `store` against `validator`'s catalog, as a write of each
@@ -2905,6 +2922,7 @@ pub(crate) fn check_data_against_rules(
     };
     nodes.sort_unstable();
     nodes.dedup();
+    let in_its_type = scope.whole_graph || scope.in_its_type;
     let mut labels_seen: HashSet<String> = scope.labels.iter().cloned().collect();
     for id in nodes {
         let Some(node) = store.node(id, view)? else {
@@ -2919,7 +2937,7 @@ pub(crate) fn check_data_against_rules(
         if scope.whole_graph {
             labels_seen.extend(labels.iter().cloned());
         }
-        validator.check_node_values(&labels, &properties, scope.whole_graph)?;
+        validator.check_node_values(&labels, &properties, in_its_type)?;
     }
     for label in &labels_seen {
         let Some(type_def) = validator.node_type(label) else {
@@ -2957,7 +2975,7 @@ pub(crate) fn check_data_against_rules(
             let Some(edge) = store.edge(edge, view)? else {
                 continue;
             };
-            validator.check_edge_as_it_stands(store, &edge, scope.whole_graph, view)?;
+            validator.check_edge_as_it_stands(store, &edge, in_its_type, view)?;
         }
     }
     Ok(())

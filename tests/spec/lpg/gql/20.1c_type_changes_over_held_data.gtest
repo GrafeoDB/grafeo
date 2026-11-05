@@ -1,0 +1,515 @@
+# A change of a type that the data on a closed graph would break is refused, while the data breaks
+# it (ISO/IEC 39075:2024 G2000). Generated with the Rust tests in closed_type_writers.rs, which also
+# read back that nothing moved, across transactions and from another graph.
+
+meta:
+  language: gql
+  model: lpg
+  title: Type changes over held data
+  dataset: empty
+
+tests:
+
+  - name: closed_refuses_alter_node_drop_property
+    setup:
+      - "CREATE NODE TYPE Held (name STRING, extra INTEGER, k INTEGER)"
+      - "CREATE NODE TYPE Other (k INTEGER)"
+      - "CREATE NODE TYPE Only (x INTEGER)"
+      - "CREATE EDGE TYPE Link (w INTEGER, z INTEGER)"
+      - "CREATE EDGE TYPE Lone (w INTEGER)"
+      - "CREATE GRAPH TYPE held (NODE TYPE Held, NODE TYPE Other, NODE TYPE Only, EDGE TYPE Link, EDGE TYPE Lone)"
+      - "CREATE GRAPH g TYPED held"
+      - "USE GRAPH g"
+      - "INSERT (:Held {name: 'Alix', extra: 1})-[:Link {w: 1}]->(:Only {x: 1})-[:Lone {w: 2}]->(:Other)"
+    query: "ALTER NODE TYPE Held DROP PROPERTY extra"
+    expect:
+      gql_status: "G2000"
+
+  - name: open_allows_alter_node_drop_property
+    setup:
+      - "CREATE NODE TYPE Held (name STRING, extra INTEGER, k INTEGER)"
+      - "CREATE NODE TYPE Other (k INTEGER)"
+      - "CREATE NODE TYPE Only (x INTEGER)"
+      - "CREATE EDGE TYPE Link (w INTEGER, z INTEGER)"
+      - "CREATE EDGE TYPE Lone (w INTEGER)"
+      - "CREATE GRAPH TYPE held { node_types: [Held, Other, Only], edge_types: [Link, Lone], open: true }"
+      - "CREATE GRAPH g TYPED held"
+      - "USE GRAPH g"
+      - "INSERT (:Held {name: 'Alix', extra: 1})-[:Link {w: 1}]->(:Only {x: 1})-[:Lone {w: 2}]->(:Other)"
+    statements:
+      - "ALTER NODE TYPE Held DROP PROPERTY extra"
+      - "MATCH (a:Held {name: 'Alix'}) RETURN a.extra"
+    expect:
+      rows:
+        - [1]
+
+  - name: untyped_allows_alter_node_drop_property
+    setup:
+      - "CREATE NODE TYPE Held (name STRING, extra INTEGER, k INTEGER)"
+      - "CREATE NODE TYPE Other (k INTEGER)"
+      - "CREATE NODE TYPE Only (x INTEGER)"
+      - "CREATE EDGE TYPE Link (w INTEGER, z INTEGER)"
+      - "CREATE EDGE TYPE Lone (w INTEGER)"
+      - "CREATE GRAPH g"
+      - "USE GRAPH g"
+      - "INSERT (:Held {name: 'Alix', extra: 1})-[:Link {w: 1}]->(:Only {x: 1})-[:Lone {w: 2}]->(:Other)"
+    statements:
+      - "ALTER NODE TYPE Held DROP PROPERTY extra"
+      - "MATCH (a:Held {name: 'Alix'}) RETURN a.extra"
+    expect:
+      rows:
+        - [1]
+
+  - name: closed_refuses_alter_node_drop_last_property
+    setup:
+      - "CREATE NODE TYPE Held (name STRING, extra INTEGER, k INTEGER)"
+      - "CREATE NODE TYPE Other (k INTEGER)"
+      - "CREATE NODE TYPE Only (x INTEGER)"
+      - "CREATE EDGE TYPE Link (w INTEGER, z INTEGER)"
+      - "CREATE EDGE TYPE Lone (w INTEGER)"
+      - "CREATE GRAPH TYPE held (NODE TYPE Held, NODE TYPE Other, NODE TYPE Only, EDGE TYPE Link, EDGE TYPE Lone)"
+      - "CREATE GRAPH g TYPED held"
+      - "USE GRAPH g"
+      - "INSERT (:Held {name: 'Alix', extra: 1})-[:Link {w: 1}]->(:Only {x: 1})-[:Lone {w: 2}]->(:Other)"
+    query: "ALTER NODE TYPE Only DROP PROPERTY x"
+    expect:
+      gql_status: "G2000"
+
+  - name: open_allows_alter_node_drop_last_property
+    setup:
+      - "CREATE NODE TYPE Held (name STRING, extra INTEGER, k INTEGER)"
+      - "CREATE NODE TYPE Other (k INTEGER)"
+      - "CREATE NODE TYPE Only (x INTEGER)"
+      - "CREATE EDGE TYPE Link (w INTEGER, z INTEGER)"
+      - "CREATE EDGE TYPE Lone (w INTEGER)"
+      - "CREATE GRAPH TYPE held { node_types: [Held, Other, Only], edge_types: [Link, Lone], open: true }"
+      - "CREATE GRAPH g TYPED held"
+      - "USE GRAPH g"
+      - "INSERT (:Held {name: 'Alix', extra: 1})-[:Link {w: 1}]->(:Only {x: 1})-[:Lone {w: 2}]->(:Other)"
+    statements:
+      - "ALTER NODE TYPE Only DROP PROPERTY x"
+      - "MATCH (a:Held {name: 'Alix'}) RETURN a.extra"
+    expect:
+      rows:
+        - [1]
+
+  - name: untyped_allows_alter_node_drop_last_property
+    setup:
+      - "CREATE NODE TYPE Held (name STRING, extra INTEGER, k INTEGER)"
+      - "CREATE NODE TYPE Other (k INTEGER)"
+      - "CREATE NODE TYPE Only (x INTEGER)"
+      - "CREATE EDGE TYPE Link (w INTEGER, z INTEGER)"
+      - "CREATE EDGE TYPE Lone (w INTEGER)"
+      - "CREATE GRAPH g"
+      - "USE GRAPH g"
+      - "INSERT (:Held {name: 'Alix', extra: 1})-[:Link {w: 1}]->(:Only {x: 1})-[:Lone {w: 2}]->(:Other)"
+    statements:
+      - "ALTER NODE TYPE Only DROP PROPERTY x"
+      - "MATCH (a:Held {name: 'Alix'}) RETURN a.extra"
+    expect:
+      rows:
+        - [1]
+
+  - name: closed_refuses_alter_edge_drop_property
+    setup:
+      - "CREATE NODE TYPE Held (name STRING, extra INTEGER, k INTEGER)"
+      - "CREATE NODE TYPE Other (k INTEGER)"
+      - "CREATE NODE TYPE Only (x INTEGER)"
+      - "CREATE EDGE TYPE Link (w INTEGER, z INTEGER)"
+      - "CREATE EDGE TYPE Lone (w INTEGER)"
+      - "CREATE GRAPH TYPE held (NODE TYPE Held, NODE TYPE Other, NODE TYPE Only, EDGE TYPE Link, EDGE TYPE Lone)"
+      - "CREATE GRAPH g TYPED held"
+      - "USE GRAPH g"
+      - "INSERT (:Held {name: 'Alix', extra: 1})-[:Link {w: 1}]->(:Only {x: 1})-[:Lone {w: 2}]->(:Other)"
+    query: "ALTER EDGE TYPE Link DROP PROPERTY w"
+    expect:
+      gql_status: "G2000"
+
+  - name: open_allows_alter_edge_drop_property
+    setup:
+      - "CREATE NODE TYPE Held (name STRING, extra INTEGER, k INTEGER)"
+      - "CREATE NODE TYPE Other (k INTEGER)"
+      - "CREATE NODE TYPE Only (x INTEGER)"
+      - "CREATE EDGE TYPE Link (w INTEGER, z INTEGER)"
+      - "CREATE EDGE TYPE Lone (w INTEGER)"
+      - "CREATE GRAPH TYPE held { node_types: [Held, Other, Only], edge_types: [Link, Lone], open: true }"
+      - "CREATE GRAPH g TYPED held"
+      - "USE GRAPH g"
+      - "INSERT (:Held {name: 'Alix', extra: 1})-[:Link {w: 1}]->(:Only {x: 1})-[:Lone {w: 2}]->(:Other)"
+    statements:
+      - "ALTER EDGE TYPE Link DROP PROPERTY w"
+      - "MATCH (a:Held {name: 'Alix'}) RETURN a.extra"
+    expect:
+      rows:
+        - [1]
+
+  - name: untyped_allows_alter_edge_drop_property
+    setup:
+      - "CREATE NODE TYPE Held (name STRING, extra INTEGER, k INTEGER)"
+      - "CREATE NODE TYPE Other (k INTEGER)"
+      - "CREATE NODE TYPE Only (x INTEGER)"
+      - "CREATE EDGE TYPE Link (w INTEGER, z INTEGER)"
+      - "CREATE EDGE TYPE Lone (w INTEGER)"
+      - "CREATE GRAPH g"
+      - "USE GRAPH g"
+      - "INSERT (:Held {name: 'Alix', extra: 1})-[:Link {w: 1}]->(:Only {x: 1})-[:Lone {w: 2}]->(:Other)"
+    statements:
+      - "ALTER EDGE TYPE Link DROP PROPERTY w"
+      - "MATCH (a:Held {name: 'Alix'}) RETURN a.extra"
+    expect:
+      rows:
+        - [1]
+
+  - name: closed_refuses_alter_edge_drop_last_property
+    setup:
+      - "CREATE NODE TYPE Held (name STRING, extra INTEGER, k INTEGER)"
+      - "CREATE NODE TYPE Other (k INTEGER)"
+      - "CREATE NODE TYPE Only (x INTEGER)"
+      - "CREATE EDGE TYPE Link (w INTEGER, z INTEGER)"
+      - "CREATE EDGE TYPE Lone (w INTEGER)"
+      - "CREATE GRAPH TYPE held (NODE TYPE Held, NODE TYPE Other, NODE TYPE Only, EDGE TYPE Link, EDGE TYPE Lone)"
+      - "CREATE GRAPH g TYPED held"
+      - "USE GRAPH g"
+      - "INSERT (:Held {name: 'Alix', extra: 1})-[:Link {w: 1}]->(:Only {x: 1})-[:Lone {w: 2}]->(:Other)"
+    query: "ALTER EDGE TYPE Lone DROP PROPERTY w"
+    expect:
+      gql_status: "G2000"
+
+  - name: open_allows_alter_edge_drop_last_property
+    setup:
+      - "CREATE NODE TYPE Held (name STRING, extra INTEGER, k INTEGER)"
+      - "CREATE NODE TYPE Other (k INTEGER)"
+      - "CREATE NODE TYPE Only (x INTEGER)"
+      - "CREATE EDGE TYPE Link (w INTEGER, z INTEGER)"
+      - "CREATE EDGE TYPE Lone (w INTEGER)"
+      - "CREATE GRAPH TYPE held { node_types: [Held, Other, Only], edge_types: [Link, Lone], open: true }"
+      - "CREATE GRAPH g TYPED held"
+      - "USE GRAPH g"
+      - "INSERT (:Held {name: 'Alix', extra: 1})-[:Link {w: 1}]->(:Only {x: 1})-[:Lone {w: 2}]->(:Other)"
+    statements:
+      - "ALTER EDGE TYPE Lone DROP PROPERTY w"
+      - "MATCH (a:Held {name: 'Alix'}) RETURN a.extra"
+    expect:
+      rows:
+        - [1]
+
+  - name: untyped_allows_alter_edge_drop_last_property
+    setup:
+      - "CREATE NODE TYPE Held (name STRING, extra INTEGER, k INTEGER)"
+      - "CREATE NODE TYPE Other (k INTEGER)"
+      - "CREATE NODE TYPE Only (x INTEGER)"
+      - "CREATE EDGE TYPE Link (w INTEGER, z INTEGER)"
+      - "CREATE EDGE TYPE Lone (w INTEGER)"
+      - "CREATE GRAPH g"
+      - "USE GRAPH g"
+      - "INSERT (:Held {name: 'Alix', extra: 1})-[:Link {w: 1}]->(:Only {x: 1})-[:Lone {w: 2}]->(:Other)"
+    statements:
+      - "ALTER EDGE TYPE Lone DROP PROPERTY w"
+      - "MATCH (a:Held {name: 'Alix'}) RETURN a.extra"
+    expect:
+      rows:
+        - [1]
+
+  - name: closed_refuses_replace_node_with_fewer
+    setup:
+      - "CREATE NODE TYPE Held (name STRING, extra INTEGER, k INTEGER)"
+      - "CREATE NODE TYPE Other (k INTEGER)"
+      - "CREATE NODE TYPE Only (x INTEGER)"
+      - "CREATE EDGE TYPE Link (w INTEGER, z INTEGER)"
+      - "CREATE EDGE TYPE Lone (w INTEGER)"
+      - "CREATE GRAPH TYPE held (NODE TYPE Held, NODE TYPE Other, NODE TYPE Only, EDGE TYPE Link, EDGE TYPE Lone)"
+      - "CREATE GRAPH g TYPED held"
+      - "USE GRAPH g"
+      - "INSERT (:Held {name: 'Alix', extra: 1})-[:Link {w: 1}]->(:Only {x: 1})-[:Lone {w: 2}]->(:Other)"
+    query: "CREATE OR REPLACE NODE TYPE Held (name STRING)"
+    expect:
+      gql_status: "G2000"
+
+  - name: open_allows_replace_node_with_fewer
+    setup:
+      - "CREATE NODE TYPE Held (name STRING, extra INTEGER, k INTEGER)"
+      - "CREATE NODE TYPE Other (k INTEGER)"
+      - "CREATE NODE TYPE Only (x INTEGER)"
+      - "CREATE EDGE TYPE Link (w INTEGER, z INTEGER)"
+      - "CREATE EDGE TYPE Lone (w INTEGER)"
+      - "CREATE GRAPH TYPE held { node_types: [Held, Other, Only], edge_types: [Link, Lone], open: true }"
+      - "CREATE GRAPH g TYPED held"
+      - "USE GRAPH g"
+      - "INSERT (:Held {name: 'Alix', extra: 1})-[:Link {w: 1}]->(:Only {x: 1})-[:Lone {w: 2}]->(:Other)"
+    statements:
+      - "CREATE OR REPLACE NODE TYPE Held (name STRING)"
+      - "MATCH (a:Held {name: 'Alix'}) RETURN a.extra"
+    expect:
+      rows:
+        - [1]
+
+  - name: untyped_allows_replace_node_with_fewer
+    setup:
+      - "CREATE NODE TYPE Held (name STRING, extra INTEGER, k INTEGER)"
+      - "CREATE NODE TYPE Other (k INTEGER)"
+      - "CREATE NODE TYPE Only (x INTEGER)"
+      - "CREATE EDGE TYPE Link (w INTEGER, z INTEGER)"
+      - "CREATE EDGE TYPE Lone (w INTEGER)"
+      - "CREATE GRAPH g"
+      - "USE GRAPH g"
+      - "INSERT (:Held {name: 'Alix', extra: 1})-[:Link {w: 1}]->(:Only {x: 1})-[:Lone {w: 2}]->(:Other)"
+    statements:
+      - "CREATE OR REPLACE NODE TYPE Held (name STRING)"
+      - "MATCH (a:Held {name: 'Alix'}) RETURN a.extra"
+    expect:
+      rows:
+        - [1]
+
+  - name: closed_refuses_replace_node_with_none
+    setup:
+      - "CREATE NODE TYPE Held (name STRING, extra INTEGER, k INTEGER)"
+      - "CREATE NODE TYPE Other (k INTEGER)"
+      - "CREATE NODE TYPE Only (x INTEGER)"
+      - "CREATE EDGE TYPE Link (w INTEGER, z INTEGER)"
+      - "CREATE EDGE TYPE Lone (w INTEGER)"
+      - "CREATE GRAPH TYPE held (NODE TYPE Held, NODE TYPE Other, NODE TYPE Only, EDGE TYPE Link, EDGE TYPE Lone)"
+      - "CREATE GRAPH g TYPED held"
+      - "USE GRAPH g"
+      - "INSERT (:Held {name: 'Alix', extra: 1})-[:Link {w: 1}]->(:Only {x: 1})-[:Lone {w: 2}]->(:Other)"
+    query: "CREATE OR REPLACE NODE TYPE Only"
+    expect:
+      gql_status: "G2000"
+
+  - name: open_allows_replace_node_with_none
+    setup:
+      - "CREATE NODE TYPE Held (name STRING, extra INTEGER, k INTEGER)"
+      - "CREATE NODE TYPE Other (k INTEGER)"
+      - "CREATE NODE TYPE Only (x INTEGER)"
+      - "CREATE EDGE TYPE Link (w INTEGER, z INTEGER)"
+      - "CREATE EDGE TYPE Lone (w INTEGER)"
+      - "CREATE GRAPH TYPE held { node_types: [Held, Other, Only], edge_types: [Link, Lone], open: true }"
+      - "CREATE GRAPH g TYPED held"
+      - "USE GRAPH g"
+      - "INSERT (:Held {name: 'Alix', extra: 1})-[:Link {w: 1}]->(:Only {x: 1})-[:Lone {w: 2}]->(:Other)"
+    statements:
+      - "CREATE OR REPLACE NODE TYPE Only"
+      - "MATCH (a:Held {name: 'Alix'}) RETURN a.extra"
+    expect:
+      rows:
+        - [1]
+
+  - name: untyped_allows_replace_node_with_none
+    setup:
+      - "CREATE NODE TYPE Held (name STRING, extra INTEGER, k INTEGER)"
+      - "CREATE NODE TYPE Other (k INTEGER)"
+      - "CREATE NODE TYPE Only (x INTEGER)"
+      - "CREATE EDGE TYPE Link (w INTEGER, z INTEGER)"
+      - "CREATE EDGE TYPE Lone (w INTEGER)"
+      - "CREATE GRAPH g"
+      - "USE GRAPH g"
+      - "INSERT (:Held {name: 'Alix', extra: 1})-[:Link {w: 1}]->(:Only {x: 1})-[:Lone {w: 2}]->(:Other)"
+    statements:
+      - "CREATE OR REPLACE NODE TYPE Only"
+      - "MATCH (a:Held {name: 'Alix'}) RETURN a.extra"
+    expect:
+      rows:
+        - [1]
+
+  - name: closed_refuses_replace_edge_with_fewer
+    setup:
+      - "CREATE NODE TYPE Held (name STRING, extra INTEGER, k INTEGER)"
+      - "CREATE NODE TYPE Other (k INTEGER)"
+      - "CREATE NODE TYPE Only (x INTEGER)"
+      - "CREATE EDGE TYPE Link (w INTEGER, z INTEGER)"
+      - "CREATE EDGE TYPE Lone (w INTEGER)"
+      - "CREATE GRAPH TYPE held (NODE TYPE Held, NODE TYPE Other, NODE TYPE Only, EDGE TYPE Link, EDGE TYPE Lone)"
+      - "CREATE GRAPH g TYPED held"
+      - "USE GRAPH g"
+      - "INSERT (:Held {name: 'Alix', extra: 1})-[:Link {w: 1}]->(:Only {x: 1})-[:Lone {w: 2}]->(:Other)"
+    query: "CREATE OR REPLACE EDGE TYPE Link (z INTEGER)"
+    expect:
+      gql_status: "G2000"
+
+  - name: open_allows_replace_edge_with_fewer
+    setup:
+      - "CREATE NODE TYPE Held (name STRING, extra INTEGER, k INTEGER)"
+      - "CREATE NODE TYPE Other (k INTEGER)"
+      - "CREATE NODE TYPE Only (x INTEGER)"
+      - "CREATE EDGE TYPE Link (w INTEGER, z INTEGER)"
+      - "CREATE EDGE TYPE Lone (w INTEGER)"
+      - "CREATE GRAPH TYPE held { node_types: [Held, Other, Only], edge_types: [Link, Lone], open: true }"
+      - "CREATE GRAPH g TYPED held"
+      - "USE GRAPH g"
+      - "INSERT (:Held {name: 'Alix', extra: 1})-[:Link {w: 1}]->(:Only {x: 1})-[:Lone {w: 2}]->(:Other)"
+    statements:
+      - "CREATE OR REPLACE EDGE TYPE Link (z INTEGER)"
+      - "MATCH (a:Held {name: 'Alix'}) RETURN a.extra"
+    expect:
+      rows:
+        - [1]
+
+  - name: untyped_allows_replace_edge_with_fewer
+    setup:
+      - "CREATE NODE TYPE Held (name STRING, extra INTEGER, k INTEGER)"
+      - "CREATE NODE TYPE Other (k INTEGER)"
+      - "CREATE NODE TYPE Only (x INTEGER)"
+      - "CREATE EDGE TYPE Link (w INTEGER, z INTEGER)"
+      - "CREATE EDGE TYPE Lone (w INTEGER)"
+      - "CREATE GRAPH g"
+      - "USE GRAPH g"
+      - "INSERT (:Held {name: 'Alix', extra: 1})-[:Link {w: 1}]->(:Only {x: 1})-[:Lone {w: 2}]->(:Other)"
+    statements:
+      - "CREATE OR REPLACE EDGE TYPE Link (z INTEGER)"
+      - "MATCH (a:Held {name: 'Alix'}) RETURN a.extra"
+    expect:
+      rows:
+        - [1]
+
+  - name: closed_refuses_replace_edge_with_none
+    setup:
+      - "CREATE NODE TYPE Held (name STRING, extra INTEGER, k INTEGER)"
+      - "CREATE NODE TYPE Other (k INTEGER)"
+      - "CREATE NODE TYPE Only (x INTEGER)"
+      - "CREATE EDGE TYPE Link (w INTEGER, z INTEGER)"
+      - "CREATE EDGE TYPE Lone (w INTEGER)"
+      - "CREATE GRAPH TYPE held (NODE TYPE Held, NODE TYPE Other, NODE TYPE Only, EDGE TYPE Link, EDGE TYPE Lone)"
+      - "CREATE GRAPH g TYPED held"
+      - "USE GRAPH g"
+      - "INSERT (:Held {name: 'Alix', extra: 1})-[:Link {w: 1}]->(:Only {x: 1})-[:Lone {w: 2}]->(:Other)"
+    query: "CREATE OR REPLACE EDGE TYPE Lone"
+    expect:
+      gql_status: "G2000"
+
+  - name: open_allows_replace_edge_with_none
+    setup:
+      - "CREATE NODE TYPE Held (name STRING, extra INTEGER, k INTEGER)"
+      - "CREATE NODE TYPE Other (k INTEGER)"
+      - "CREATE NODE TYPE Only (x INTEGER)"
+      - "CREATE EDGE TYPE Link (w INTEGER, z INTEGER)"
+      - "CREATE EDGE TYPE Lone (w INTEGER)"
+      - "CREATE GRAPH TYPE held { node_types: [Held, Other, Only], edge_types: [Link, Lone], open: true }"
+      - "CREATE GRAPH g TYPED held"
+      - "USE GRAPH g"
+      - "INSERT (:Held {name: 'Alix', extra: 1})-[:Link {w: 1}]->(:Only {x: 1})-[:Lone {w: 2}]->(:Other)"
+    statements:
+      - "CREATE OR REPLACE EDGE TYPE Lone"
+      - "MATCH (a:Held {name: 'Alix'}) RETURN a.extra"
+    expect:
+      rows:
+        - [1]
+
+  - name: untyped_allows_replace_edge_with_none
+    setup:
+      - "CREATE NODE TYPE Held (name STRING, extra INTEGER, k INTEGER)"
+      - "CREATE NODE TYPE Other (k INTEGER)"
+      - "CREATE NODE TYPE Only (x INTEGER)"
+      - "CREATE EDGE TYPE Link (w INTEGER, z INTEGER)"
+      - "CREATE EDGE TYPE Lone (w INTEGER)"
+      - "CREATE GRAPH g"
+      - "USE GRAPH g"
+      - "INSERT (:Held {name: 'Alix', extra: 1})-[:Link {w: 1}]->(:Only {x: 1})-[:Lone {w: 2}]->(:Other)"
+    statements:
+      - "CREATE OR REPLACE EDGE TYPE Lone"
+      - "MATCH (a:Held {name: 'Alix'}) RETURN a.extra"
+    expect:
+      rows:
+        - [1]
+
+  - name: closed_refuses_alter_graph_type_drop_node
+    setup:
+      - "CREATE NODE TYPE Held (name STRING, extra INTEGER, k INTEGER)"
+      - "CREATE NODE TYPE Other (k INTEGER)"
+      - "CREATE NODE TYPE Only (x INTEGER)"
+      - "CREATE EDGE TYPE Link (w INTEGER, z INTEGER)"
+      - "CREATE EDGE TYPE Lone (w INTEGER)"
+      - "CREATE GRAPH TYPE held (NODE TYPE Held, NODE TYPE Other, NODE TYPE Only, EDGE TYPE Link, EDGE TYPE Lone)"
+      - "CREATE GRAPH g TYPED held"
+      - "USE GRAPH g"
+      - "INSERT (:Held {name: 'Alix', extra: 1})-[:Link {w: 1}]->(:Only {x: 1})-[:Lone {w: 2}]->(:Other)"
+    query: "ALTER GRAPH TYPE held DROP NODE TYPE Held"
+    expect:
+      gql_status: "G2000"
+
+  - name: closed_refuses_alter_graph_type_drop_edge
+    setup:
+      - "CREATE NODE TYPE Held (name STRING, extra INTEGER, k INTEGER)"
+      - "CREATE NODE TYPE Other (k INTEGER)"
+      - "CREATE NODE TYPE Only (x INTEGER)"
+      - "CREATE EDGE TYPE Link (w INTEGER, z INTEGER)"
+      - "CREATE EDGE TYPE Lone (w INTEGER)"
+      - "CREATE GRAPH TYPE held (NODE TYPE Held, NODE TYPE Other, NODE TYPE Only, EDGE TYPE Link, EDGE TYPE Lone)"
+      - "CREATE GRAPH g TYPED held"
+      - "USE GRAPH g"
+      - "INSERT (:Held {name: 'Alix', extra: 1})-[:Link {w: 1}]->(:Only {x: 1})-[:Lone {w: 2}]->(:Other)"
+    query: "ALTER GRAPH TYPE held DROP EDGE TYPE Link"
+    expect:
+      gql_status: "G2000"
+
+  - name: closed_allows_a_property_no_node_holds
+    setup:
+      - "CREATE NODE TYPE Held (name STRING, extra INTEGER, k INTEGER)"
+      - "CREATE NODE TYPE Other (k INTEGER)"
+      - "CREATE NODE TYPE Only (x INTEGER)"
+      - "CREATE EDGE TYPE Link (w INTEGER, z INTEGER)"
+      - "CREATE EDGE TYPE Lone (w INTEGER)"
+      - "CREATE GRAPH TYPE held (NODE TYPE Held, NODE TYPE Other, NODE TYPE Only, EDGE TYPE Link, EDGE TYPE Lone)"
+      - "CREATE GRAPH g TYPED held"
+      - "USE GRAPH g"
+      - "INSERT (:Held {name: 'Alix', extra: 1})-[:Link {w: 1}]->(:Only {x: 1})-[:Lone {w: 2}]->(:Other)"
+    statements:
+      - "ALTER NODE TYPE Held DROP PROPERTY k"
+      - "MATCH (a:Held {name: 'Alix'}) RETURN a.extra"
+    expect:
+      rows:
+        - [1]
+
+  - name: closed_allows_an_edge_property_no_edge_holds
+    setup:
+      - "CREATE NODE TYPE Held (name STRING, extra INTEGER, k INTEGER)"
+      - "CREATE NODE TYPE Other (k INTEGER)"
+      - "CREATE NODE TYPE Only (x INTEGER)"
+      - "CREATE EDGE TYPE Link (w INTEGER, z INTEGER)"
+      - "CREATE EDGE TYPE Lone (w INTEGER)"
+      - "CREATE GRAPH TYPE held (NODE TYPE Held, NODE TYPE Other, NODE TYPE Only, EDGE TYPE Link, EDGE TYPE Lone)"
+      - "CREATE GRAPH g TYPED held"
+      - "USE GRAPH g"
+      - "INSERT (:Held {name: 'Alix', extra: 1})-[:Link {w: 1}]->(:Only {x: 1})-[:Lone {w: 2}]->(:Other)"
+    statements:
+      - "ALTER EDGE TYPE Link DROP PROPERTY z"
+      - "MATCH (a:Held {name: 'Alix'}) RETURN a.extra"
+    expect:
+      rows:
+        - [1]
+
+  - name: closed_allows_a_property_another_label_declares
+    setup:
+      - "CREATE NODE TYPE Held (name STRING, extra INTEGER, k INTEGER)"
+      - "CREATE NODE TYPE Other (k INTEGER)"
+      - "CREATE NODE TYPE Only (x INTEGER)"
+      - "CREATE EDGE TYPE Link (w INTEGER, z INTEGER)"
+      - "CREATE EDGE TYPE Lone (w INTEGER)"
+      - "CREATE GRAPH TYPE held (NODE TYPE Held, NODE TYPE Other, NODE TYPE Only, EDGE TYPE Link, EDGE TYPE Lone)"
+      - "CREATE GRAPH g TYPED held"
+      - "USE GRAPH g"
+      - "INSERT (:Held {name: 'Alix', extra: 1})-[:Link {w: 1}]->(:Only {x: 1})-[:Lone {w: 2}]->(:Other)"
+      - "INSERT (:Held:Other {name: 'Gus', k: 7})"
+    statements:
+      - "ALTER NODE TYPE Held DROP PROPERTY k"
+      - "MATCH (a:Other {k: 7}) RETURN a.k"
+    expect:
+      rows:
+        - [7]
+
+  - name: closed_allows_it_once_the_data_lets_it_go
+    setup:
+      - "CREATE NODE TYPE Held (name STRING, extra INTEGER, k INTEGER)"
+      - "CREATE NODE TYPE Other (k INTEGER)"
+      - "CREATE NODE TYPE Only (x INTEGER)"
+      - "CREATE EDGE TYPE Link (w INTEGER, z INTEGER)"
+      - "CREATE EDGE TYPE Lone (w INTEGER)"
+      - "CREATE GRAPH TYPE held (NODE TYPE Held, NODE TYPE Other, NODE TYPE Only, EDGE TYPE Link, EDGE TYPE Lone)"
+      - "CREATE GRAPH g TYPED held"
+      - "USE GRAPH g"
+      - "INSERT (:Held {name: 'Alix', extra: 1})-[:Link {w: 1}]->(:Only {x: 1})-[:Lone {w: 2}]->(:Other)"
+    statements:
+      - "MATCH (a:Held) REMOVE a.extra"
+      - "ALTER NODE TYPE Held DROP PROPERTY extra"
+      - "MATCH (a:Held) RETURN a.name"
+    expect:
+      rows:
+        - [Alix]

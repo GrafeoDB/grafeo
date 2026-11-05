@@ -34,7 +34,7 @@ use super::{Inner, ROWS_PER_GROUP, Read, RowGroupStore};
 use crate::graph::Direction;
 use crate::graph::lpg::{CompareOp, Edge, Node};
 use crate::graph::traits::GraphStore;
-use crate::graph::traits::{CommonEdge, HopFrom, KeyColumnHits, KeyColumnScope};
+use crate::graph::traits::{CommonEdge, HopFrom, KeyColumnGroup};
 #[cfg(feature = "vector-index")]
 use crate::index::vector::{DistanceMetric, HnswConfig};
 use crate::statistics::{EdgeTypeStatistics, LabelStatistics, Statistics};
@@ -1437,18 +1437,23 @@ impl GraphStore for RowGroupStore {
         RowGroupStore::has_label_index(self, label, property)
     }
 
-    fn find_by_key_column(
+    fn reads_key_columns(&self) -> bool {
+        true
+    }
+
+    fn key_column_group(
         &self,
-        scope: &KeyColumnScope<'_>,
-        property: &str,
-        values: &[Value],
-        _view: ReadView,
-    ) -> Result<Option<KeyColumnHits>> {
-        Ok(Some(
-            self.inner
-                .read()
-                .nodes_by_key_column(scope, property, values),
-        ))
+        query: &mut super::KeyColumnQuery,
+        from: u64,
+        view: ReadView,
+    ) -> Result<KeyColumnGroup> {
+        let ids_given = self.next_node_id();
+        let mut group = self
+            .inner
+            .read()
+            .key_column_group(query, from, Read::view(view))?;
+        group.ids_given = ids_given;
+        Ok(group)
     }
 
     fn far_walk_back_within(

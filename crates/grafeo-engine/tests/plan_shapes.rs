@@ -588,7 +588,12 @@ fn a_rule_off_falls_back_and_explain_agrees() {
     let plain = with_rules(&db, PlannerRules::plain());
     let mut wrong = Vec::new();
     for (rule, query, runs, hint) in WAYS_IN {
-        let without = with_rules(&db, PlannerRules::all().with(rule, false));
+        let without = with_rules(
+            &db,
+            PlannerRules::all()
+                .with(rule, false)
+                .with(PlannerRule::KeyColumnLookup, false),
+        );
         let on = text(&usual.execute(&format!("PROFILE {query}")).unwrap());
         if !on.contains(runs) {
             wrong.push(format!("{rule:?} on does not run {runs}: {query}\n{on}"));

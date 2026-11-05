@@ -11,7 +11,7 @@
 //! ```
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use grafeo_common::types::{NodeId, PropertyKey, Value};
 use grafeo_engine::GrafeoDB;
@@ -802,31 +802,63 @@ fn chr_backslash() -> char {
     char::from(92_u8)
 }
 
-/// A graph that already breaks its type, as a file from before these checks may: nothing is checked
-/// until a write, so the node reads as it is, and a removal on that node is refused even where the
-/// label it takes is not the cause, since what the statement leaves does not fit. The node stays
-/// readable, and it can be mended first. The type change here is how to reach it; should that change
-/// be refused one day, this needs another way to break the type.
+/// A closed graph that breaks its type, in a file from 0.6.1, which let it happen
+/// (`scripts/broken_closed_type_fixture.py`). A copy, opened; `g` current.
+fn broken_file() -> (tempfile::TempDir, GrafeoDB, Session) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("broken.grafeo");
+    std::fs::copy(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/closed_type_broken/0.6.1.grafeo"),
+        &path,
+    )
+    .unwrap();
+    let db = GrafeoDB::open(&path).unwrap();
+    let session = db.session();
+    session.execute("USE GRAPH g").unwrap();
+    (dir, db, session)
+}
+
+/// Nothing is checked until a write: the file opens, and every node reads as it is.
 #[test]
-fn a_node_that_already_breaks_the_type_stays_readable_and_is_refused_a_removal() {
-    let (_db, session) = graph(Kind::Closed);
-    run_all(
-        &session,
-        &[
-            "ALTER NODE TYPE Free ADD PROPERTY extra INTEGER",
-            "INSERT (:Far:Free {name: 'Alix', extra: 1})",
-            "ALTER NODE TYPE Free DROP PROPERTY extra",
-        ],
+fn a_file_that_breaks_its_type_opens_and_reads_as_it_is() {
+    let (_dir, db, session) = broken_file();
+    assert_eq!(
+        nodes(&session),
+        vec![
+            "Alix:Far,Free",
+            "Gus:",
+            "Jules:Near",
+            "Mia:Gone",
+            "Vincent:Free"
+        ]
     );
     let read = session
         .execute("MATCH (x {name: 'Alix'}) RETURN x.extra")
         .unwrap();
-    assert_eq!(read.rows()[0][0], Value::Int64(1), "it reads as it is");
+    assert_eq!(read.rows()[0][0], Value::Int64(1));
+    let read = session
+        .execute("MATCH (x {name: 'Mia'}) RETURN x.anything")
+        .unwrap();
+    assert_eq!(read.rows()[0][0], Value::Int64(7));
+    let edges = session
+        .execute("MATCH ({name: 'Vincent'})-[:R]->({name: 'Jules'}) RETURN 1")
+        .unwrap();
+    assert_eq!(edges.row_count(), 1);
+    db.close().unwrap();
+}
+
+/// A removal on a node that already breaks the type is refused even where the label it takes is not
+/// the cause, since what the statement leaves does not fit. The node stays readable, and it can be
+/// mended first.
+#[test]
+fn a_node_that_already_breaks_the_type_is_refused_a_removal_until_it_is_mended() {
+    let (_dir, db, session) = broken_file();
     let error = session
         .execute("MATCH (x {name: 'Alix'}) REMOVE x:Free")
         .expect_err("what is left does not fit");
     assert_eq!(status(&error), "G2000", "{error}");
-    assert_eq!(nodes(&session), vec!["Alix:Far,Free"]);
+    assert!(nodes(&session).contains(&"Alix:Far,Free".to_string()));
     run_all(
         &session,
         &[
@@ -834,7 +866,305 @@ fn a_node_that_already_breaks_the_type_stays_readable_and_is_refused_a_removal()
             "MATCH (x {name: 'Alix'}) REMOVE x:Free",
         ],
     );
-    assert_eq!(nodes(&session), vec!["Alix:Far"]);
+    assert!(nodes(&session).contains(&"Alix:Far".to_string()));
+    db.close().unwrap();
+}
+
+/// A write that does not touch what is broken goes on, and a reopen keeps the file as it was.
+#[test]
+fn other_writes_go_on_in_a_file_that_breaks_its_type() {
+    let (dir, db, session) = broken_file();
+    run_all(&session, &["INSERT (:Near {name: 'Hans'})"]);
+    db.close().unwrap();
+    let db = GrafeoDB::open(dir.path().join("broken.grafeo")).unwrap();
+    let session = db.session();
+    session.execute("USE GRAPH g").unwrap();
+    assert!(nodes(&session).contains(&"Hans:Near".to_string()));
+    assert!(nodes(&session).contains(&"Gus:".to_string()));
+    db.close().unwrap();
+}
+
+/// A listed name with no definition, from an older file: making it again is checked as a change of
+/// the type is. Fewer properties than the data holds are refused, and enough are accepted.
+#[test]
+fn making_a_dropped_type_again_is_checked_against_the_data() {
+    let (_dir, db, session) = broken_file();
+    let error = session
+        .execute("CREATE NODE TYPE Gone (name STRING)")
+        .expect_err("`anything` is held");
+    assert_eq!(status(&error), "G2000", "{error}");
+    run_all(
+        &session,
+        &["CREATE NODE TYPE Gone (name STRING, anything INTEGER)"],
+    );
+    db.close().unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// A change of a type that the data on a closed graph would break
+// ---------------------------------------------------------------------------
+
+/// A closed graph whose node and edge hold what `Held`, `Only` and `Link` declare.
+const HELD_TYPES: &[&str] = &[
+    "CREATE NODE TYPE Held (name STRING, extra INTEGER, k INTEGER)",
+    "CREATE NODE TYPE Other (k INTEGER)",
+    "CREATE NODE TYPE Only (x INTEGER)",
+    "CREATE EDGE TYPE Link (w INTEGER, z INTEGER)",
+    "CREATE EDGE TYPE Lone (w INTEGER)",
+];
+const HELD_DATA: &str = "INSERT (:Held {name: 'Alix', extra: 1})-[:Link {w: 1}]->(:Only {x: 1})-[:Lone {w: 2}]->(:Other)";
+
+fn held(kind: Kind) -> (GrafeoDB, Session) {
+    let db = GrafeoDB::new_in_memory();
+    let session = db.session();
+    run_all(&session, HELD_TYPES);
+    let graph_statements: &[&str] = match kind {
+        Kind::Closed => &[
+            "CREATE GRAPH TYPE held (NODE TYPE Held, NODE TYPE Other, NODE TYPE Only, EDGE TYPE Link, EDGE TYPE Lone)",
+            "CREATE GRAPH g TYPED held",
+        ],
+        Kind::Open => &[
+            "CREATE GRAPH TYPE held { node_types: [Held, Other, Only], edge_types: [Link, Lone], open: true }",
+            "CREATE GRAPH g TYPED held",
+        ],
+        Kind::Untyped => &["CREATE GRAPH g"],
+    };
+    run_all(&session, graph_statements);
+    run_all(&session, &["USE GRAPH g", HELD_DATA]);
+    (db, session)
+}
+
+/// The changes that would leave a held value undeclared, in each form.
+const BREAKING: &[&str] = &[
+    "ALTER NODE TYPE Held DROP PROPERTY extra",
+    "ALTER NODE TYPE Only DROP PROPERTY x",
+    "ALTER EDGE TYPE Link DROP PROPERTY w",
+    "ALTER EDGE TYPE Lone DROP PROPERTY w",
+    "CREATE OR REPLACE NODE TYPE Held (name STRING)",
+    "CREATE OR REPLACE NODE TYPE Only",
+    "CREATE OR REPLACE EDGE TYPE Link (z INTEGER)",
+    "CREATE OR REPLACE EDGE TYPE Lone",
+];
+
+/// While the data on a closed graph breaks it, the change is refused with `G2000`, and the type is as
+/// it was: a value it declared can still be written.
+#[test]
+fn a_type_change_the_data_breaks_is_refused() {
+    for statement in BREAKING {
+        let (_db, session) = held(Kind::Closed);
+        let error = session.execute(statement).expect_err(statement);
+        assert_eq!(status(&error), "G2000", "{statement}: {error}");
+        run_all(
+            &session,
+            &[
+                "INSERT (:Held {name: 'Gus', extra: 2})",
+                "INSERT (:Only {x: 2})",
+                "MATCH (a:Held {name: 'Gus'}), (b:Only {x: 2}) INSERT (a)-[:Link {w: 3}]->(b), (b)-[:Lone {w: 4}]->(a)",
+            ],
+        );
+    }
+}
+
+/// Run from any graph: what counts is the graphs bound to the type, not the current one.
+#[test]
+fn a_type_change_is_refused_from_another_graph() {
+    for statement in BREAKING {
+        let (_db, session) = held(Kind::Closed);
+        run_all(&session, &["USE GRAPH default"]);
+        let error = session.execute(statement).expect_err(statement);
+        assert_eq!(status(&error), "G2000", "{statement}: {error}");
+    }
+}
+
+/// The ways of dropping a type that are refused already.
+#[test]
+fn dropping_from_a_bound_graph_type_stays_refused() {
+    for statement in [
+        "ALTER GRAPH TYPE held DROP NODE TYPE Held",
+        "ALTER GRAPH TYPE held DROP EDGE TYPE Link",
+    ] {
+        let (_db, session) = held(Kind::Closed);
+        let error = session.execute(statement).expect_err(statement);
+        assert_eq!(status(&error), "G2000", "{statement}: {error}");
+    }
+    for statement in [
+        "CREATE OR REPLACE GRAPH TYPE held (NODE TYPE Other)",
+        "CREATE OR REPLACE GRAPH TYPE held (NODE TYPE Other, NODE TYPE Only, EDGE TYPE Lone)",
+    ] {
+        let (_db, session) = held(Kind::Closed);
+        assert!(session.execute(statement).is_err(), "{statement}");
+    }
+}
+
+/// A type a closed graph type lists, with a graph bound to it, stays while the graph does, whether or
+/// not the graph holds anything of it: the graph type would name what no longer exists.
+#[test]
+fn dropping_a_listed_type_is_refused_while_a_closed_graph_is_bound() {
+    for statement in [
+        "DROP NODE TYPE Held",
+        "DROP NODE TYPE Other",
+        "DROP EDGE TYPE Link",
+        "DROP EDGE TYPE Lone",
+    ] {
+        let (_db, session) = held(Kind::Closed);
+        let error = session.execute(statement).expect_err(statement).to_string();
+        assert!(error.contains("closed graph type"), "{statement}: {error}");
+        let read = session
+            .execute("MATCH (a:Held)-[r:Link]->() RETURN a.extra, r.w")
+            .unwrap();
+        assert_eq!(read.row_count(), 1, "{statement}: nothing moved");
+        run_all(&session, &["INSERT (:Held {name: 'Gus', extra: 2})"]);
+    }
+    // With no data at all.
+    for statement in ["DROP NODE TYPE Held", "DROP EDGE TYPE Link"] {
+        let db = GrafeoDB::new_in_memory();
+        let session = db.session();
+        run_all(&session, HELD_TYPES);
+        run_all(
+            &session,
+            &[
+                "CREATE GRAPH TYPE held (NODE TYPE Held, NODE TYPE Other, NODE TYPE Only, EDGE TYPE Link, EDGE TYPE Lone)",
+                "CREATE GRAPH g TYPED held",
+            ],
+        );
+        let error = session.execute(statement).expect_err(statement).to_string();
+        assert!(
+            error.contains("closed graph type"),
+            "{statement}, with no data: {error}"
+        );
+    }
+}
+
+/// An open type's, an unbound type's and an unlisted type's definitions go as they did.
+#[test]
+fn dropping_a_type_goes_where_nothing_closed_is_bound_to_it() {
+    for kind in [Kind::Open, Kind::Untyped] {
+        for statement in ["DROP NODE TYPE Held", "DROP EDGE TYPE Link"] {
+            let (_db, session) = held(kind);
+            session
+                .execute(statement)
+                .unwrap_or_else(|error| panic!("{kind:?}, {statement}: {error}"));
+        }
+    }
+    // A closed type no graph is bound to.
+    let db = GrafeoDB::new_in_memory();
+    let session = db.session();
+    run_all(&session, HELD_TYPES);
+    run_all(
+        &session,
+        &[
+            "CREATE GRAPH TYPE held (NODE TYPE Held, EDGE TYPE Link)",
+            "DROP NODE TYPE Held",
+            "DROP EDGE TYPE Link",
+        ],
+    );
+    // A type the bound closed type does not list.
+    let db = GrafeoDB::new_in_memory();
+    let session = db.session();
+    run_all(&session, HELD_TYPES);
+    run_all(
+        &session,
+        &[
+            "CREATE GRAPH TYPE held (NODE TYPE Held, EDGE TYPE Link)",
+            "CREATE GRAPH g TYPED held",
+            "DROP NODE TYPE Other",
+            "DROP EDGE TYPE Lone",
+        ],
+    );
+}
+
+/// On an open type or an untyped graph, the same changes go, and the values stay readable.
+#[test]
+fn a_type_change_goes_on_where_nothing_is_closed() {
+    for kind in [Kind::Open, Kind::Untyped] {
+        for statement in BREAKING {
+            let (_db, session) = held(kind);
+            session
+                .execute(statement)
+                .unwrap_or_else(|error| panic!("{kind:?}, {statement}: {error}"));
+            let read = session.execute("MATCH (a:Held) RETURN a.extra").unwrap();
+            assert_eq!(read.rows()[0][0], Value::Int64(1), "{kind:?}, {statement}");
+        }
+    }
+}
+
+/// A property no node holds goes, and one another label declares goes: the data still fits.
+#[test]
+fn a_type_change_the_data_does_not_break_goes() {
+    let (_db, session) = held(Kind::Closed);
+    run_all(&session, &["ALTER NODE TYPE Held DROP PROPERTY k"]);
+    let (_db, session) = held(Kind::Closed);
+    run_all(&session, &["ALTER EDGE TYPE Link DROP PROPERTY z"]);
+    let (_db, session) = held(Kind::Closed);
+    run_all(
+        &session,
+        &[
+            "INSERT (:Held:Other {name: 'Gus', k: 7})",
+            "ALTER NODE TYPE Held DROP PROPERTY k",
+        ],
+    );
+    let read = session
+        .execute("MATCH (a:Other {k: 7}) RETURN a.name")
+        .unwrap();
+    assert_eq!(read.rows()[0][0], Value::from("Gus"));
+    // Once the last holder lets it go, it can be dropped.
+    let (_db, session) = held(Kind::Closed);
+    run_all(
+        &session,
+        &[
+            "MATCH (a:Held) REMOVE a.extra",
+            "ALTER NODE TYPE Held DROP PROPERTY extra",
+        ],
+    );
+}
+
+/// A transaction that wrote the property, and commits after another's change of the type, does not
+/// commit a value the type no longer declares.
+#[test]
+fn a_write_in_progress_fails_after_the_type_lost_its_property() {
+    let (db, session) = held(Kind::Closed);
+    run_all(&session, &["MATCH (a:Held) REMOVE a.extra"]);
+    let mut writer = db.session();
+    writer.execute("USE GRAPH g").unwrap();
+    writer.begin_transaction().unwrap();
+    writer
+        .execute("INSERT (:Held {name: 'Gus', extra: 2})")
+        .unwrap();
+    let changed = session.execute("ALTER NODE TYPE Held DROP PROPERTY extra");
+    if changed.is_ok() {
+        assert!(writer.commit().is_err(), "the value is no longer declared");
+        let read = session
+            .execute("MATCH (a:Held {name: 'Gus'}) RETURN a")
+            .unwrap();
+        assert_eq!(read.row_count(), 0);
+    } else {
+        writer.commit().unwrap();
+        let read = session
+            .execute("MATCH (a:Held {name: 'Gus'}) RETURN a.extra")
+            .unwrap();
+        assert_eq!(read.rows()[0][0], Value::Int64(2));
+    }
+}
+
+/// A change inside a transaction that rolls back changes nothing, and one refused there leaves the
+/// transaction's type as it was.
+#[test]
+fn a_type_change_in_a_transaction_that_rolls_back_changes_nothing() {
+    let (_db, mut session) = held(Kind::Closed);
+    session.begin_transaction().unwrap();
+    assert!(
+        session
+            .execute("ALTER NODE TYPE Held DROP PROPERTY extra")
+            .is_err()
+    );
+    session.rollback().unwrap();
+    run_all(&session, &["INSERT (:Held {name: 'Gus', extra: 2})"]);
+
+    let (_db, mut session) = held(Kind::Closed);
+    session.begin_transaction().unwrap();
+    run_all(&session, &["ALTER NODE TYPE Held DROP PROPERTY k"]);
+    session.rollback().unwrap();
+    run_all(&session, &["INSERT (:Held {name: 'Gus', k: 2})"]);
 }
 
 /// Replay installs what was committed: a closed graph comes back as it was.

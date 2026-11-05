@@ -1,0 +1,442 @@
+# SPARQL graph patterns and EXISTS as an expression (SPARQL 1.1 sec 13.3, 17.4.1.4, 18.6 and grammar
+# rule 54): a `.` after a pattern that is not a triple; a graph the dataset does not name; a
+# sub-SELECT inside GRAPH ?g; EXISTS in BIND, a projection, a function and ORDER BY. Generated with
+# the Rust tests in sparql_graph_and_exists_forms.rs, which also compare each `.` with the form
+# without it.
+
+meta:
+  language: sparql
+  model: rdf
+  section: "18.6"
+  title: Graph patterns and EXISTS as an expression
+  dataset: empty
+  requires: [sparql, rdf]
+
+tests:
+
+  - name: dot_after_filter
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:b> <urn:q> 2 . GRAPH <urn:g1> { <urn:c> <urn:p> 4 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT ?s WHERE { ?s <urn:p> ?o . FILTER(?o = 1) . }"
+    expect:
+      count: 1
+
+  - name: no_dot_after_filter
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:b> <urn:q> 2 . GRAPH <urn:g1> { <urn:c> <urn:p> 4 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT ?s WHERE { ?s <urn:p> ?o . FILTER(?o = 1)  }"
+    expect:
+      count: 1
+
+  - name: dot_after_a_nested_group
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:b> <urn:q> 2 . GRAPH <urn:g1> { <urn:c> <urn:p> 4 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT * WHERE { { ?s ?q ?y } . }"
+    expect:
+      count: 2
+
+  - name: no_dot_after_a_nested_group
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:b> <urn:q> 2 . GRAPH <urn:g1> { <urn:c> <urn:p> 4 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT * WHERE { { ?s ?q ?y }  }"
+    expect:
+      count: 2
+
+  - name: dot_in_optional
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:b> <urn:q> 2 . GRAPH <urn:g1> { <urn:c> <urn:p> 4 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT * WHERE { ?a ?b ?c OPTIONAL { { ?s ?q ?y } . } }"
+    expect:
+      count: 4
+
+  - name: no_dot_in_optional
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:b> <urn:q> 2 . GRAPH <urn:g1> { <urn:c> <urn:p> 4 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT * WHERE { ?a ?b ?c OPTIONAL { { ?s ?q ?y }  } }"
+    expect:
+      count: 4
+
+  - name: dot_in_minus
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:b> <urn:q> 2 . GRAPH <urn:g1> { <urn:c> <urn:p> 4 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT * WHERE { ?a ?b ?c MINUS { { ?a ?b ?c } . } }"
+    expect:
+      count: 0
+
+  - name: no_dot_in_minus
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:b> <urn:q> 2 . GRAPH <urn:g1> { <urn:c> <urn:p> 4 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT * WHERE { ?a ?b ?c MINUS { { ?a ?b ?c }  } }"
+    expect:
+      count: 0
+
+  - name: dot_in_graph_variable
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:b> <urn:q> 2 . GRAPH <urn:g1> { <urn:c> <urn:p> 4 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT * WHERE { GRAPH ?g { { ?s ?q ?y } . } }"
+    expect:
+      count: 3
+
+  - name: no_dot_in_graph_variable
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:b> <urn:q> 2 . GRAPH <urn:g1> { <urn:c> <urn:p> 4 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT * WHERE { GRAPH ?g { { ?s ?q ?y }  } }"
+    expect:
+      count: 3
+
+  - name: dot_filter_in_graph
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:b> <urn:q> 2 . GRAPH <urn:g1> { <urn:c> <urn:p> 4 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT ?o WHERE { GRAPH <urn:g1> { <urn:c> <urn:p> ?o . FILTER(?o = 4) . } }"
+    expect:
+      count: 1
+
+  - name: no_dot_filter_in_graph
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:b> <urn:q> 2 . GRAPH <urn:g1> { <urn:c> <urn:p> 4 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT ?o WHERE { GRAPH <urn:g1> { <urn:c> <urn:p> ?o . FILTER(?o = 4)  } }"
+    expect:
+      count: 1
+
+  - name: dot_after_optional
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:b> <urn:q> 2 . GRAPH <urn:g1> { <urn:c> <urn:p> 4 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT * WHERE { ?s ?p ?o OPTIONAL { ?s ?q ?y } . }"
+    expect:
+      count: 2
+
+  - name: no_dot_after_optional
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:b> <urn:q> 2 . GRAPH <urn:g1> { <urn:c> <urn:p> 4 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT * WHERE { ?s ?p ?o OPTIONAL { ?s ?q ?y }  }"
+    expect:
+      count: 2
+
+  - name: dot_after_minus
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:b> <urn:q> 2 . GRAPH <urn:g1> { <urn:c> <urn:p> 4 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT * WHERE { ?s ?p ?o MINUS { ?s <urn:q> ?y } . }"
+    expect:
+      count: 1
+
+  - name: no_dot_after_minus
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:b> <urn:q> 2 . GRAPH <urn:g1> { <urn:c> <urn:p> 4 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT * WHERE { ?s ?p ?o MINUS { ?s <urn:q> ?y }  }"
+    expect:
+      count: 1
+
+  - name: dot_after_graph
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:b> <urn:q> 2 . GRAPH <urn:g1> { <urn:c> <urn:p> 4 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT * WHERE { GRAPH ?g { ?s ?p ?o } . }"
+    expect:
+      count: 3
+
+  - name: no_dot_after_graph
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:b> <urn:q> 2 . GRAPH <urn:g1> { <urn:c> <urn:p> 4 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT * WHERE { GRAPH ?g { ?s ?p ?o }  }"
+    expect:
+      count: 3
+
+  - name: dot_after_bind
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:b> <urn:q> 2 . GRAPH <urn:g1> { <urn:c> <urn:p> 4 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT * WHERE { ?s ?p ?o BIND(1 AS ?x) . }"
+    expect:
+      count: 2
+
+  - name: no_dot_after_bind
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:b> <urn:q> 2 . GRAPH <urn:g1> { <urn:c> <urn:p> 4 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT * WHERE { ?s ?p ?o BIND(1 AS ?x)  }"
+    expect:
+      count: 2
+
+  - name: dot_after_values
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:b> <urn:q> 2 . GRAPH <urn:g1> { <urn:c> <urn:p> 4 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT * WHERE { VALUES ?s { <urn:a> } . ?s ?p ?o }"
+    expect:
+      count: 1
+
+  - name: no_dot_after_values
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:b> <urn:q> 2 . GRAPH <urn:g1> { <urn:c> <urn:p> 4 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT * WHERE { VALUES ?s { <urn:a> }  ?s ?p ?o }"
+    expect:
+      count: 1
+
+  - name: dot_after_union
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:b> <urn:q> 2 . GRAPH <urn:g1> { <urn:c> <urn:p> 4 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT * WHERE { { ?s <urn:p> ?o } UNION { ?s <urn:q> ?o } . }"
+    expect:
+      count: 2
+
+  - name: no_dot_after_union
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:b> <urn:q> 2 . GRAPH <urn:g1> { <urn:c> <urn:p> 4 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT * WHERE { { ?s <urn:p> ?o } UNION { ?s <urn:q> ?o }  }"
+    expect:
+      count: 2
+
+  - name: dot_then_more_triples
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:b> <urn:q> 2 . GRAPH <urn:g1> { <urn:c> <urn:p> 4 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT ?s ?y WHERE { ?s <urn:p> ?o FILTER(?o = 1) . ?s <urn:p> ?y }"
+    expect:
+      count: 1
+
+  - name: no_dot_then_more_triples
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:b> <urn:q> 2 . GRAPH <urn:g1> { <urn:c> <urn:p> 4 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT ?s ?y WHERE { ?s <urn:p> ?o FILTER(?o = 1)  ?s <urn:p> ?y }"
+    expect:
+      count: 1
+
+  - name: dot_after_service_is_not_a_syntax_error
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:b> <urn:q> 2 . GRAPH <urn:g1> { <urn:c> <urn:p> 4 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT * WHERE { SERVICE <urn:e> { ?s ?p ?o } . }"
+    expect:
+      error: "SERVICE"
+
+  - name: refuses_a_dot_before_anything
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:b> <urn:q> 2 . GRAPH <urn:g1> { <urn:c> <urn:p> 4 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT * WHERE { . ?s ?p ?o }"
+    expect:
+      error: "unexpected"
+
+  - name: refuses_a_dot_two_after_a_triple
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:b> <urn:q> 2 . GRAPH <urn:g1> { <urn:c> <urn:p> 4 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT * WHERE { ?s ?p ?o . . }"
+    expect:
+      error: "unexpected"
+
+  - name: refuses_a_dot_two_after_a_filter
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:b> <urn:q> 2 . GRAPH <urn:g1> { <urn:c> <urn:p> 4 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT * WHERE { ?s ?p ?o FILTER(?o = 1) . . }"
+    expect:
+      error: "unexpected"
+
+  - name: refuses_a_dot_two_after_a_group
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:b> <urn:q> 2 . GRAPH <urn:g1> { <urn:c> <urn:p> 4 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT * WHERE { { ?s ?p ?o } . . }"
+    expect:
+      error: "unexpected"
+
+  - name: refuses_a_dot_only_a_dot
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:b> <urn:q> 2 . GRAPH <urn:g1> { <urn:c> <urn:p> 4 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT * WHERE { . }"
+    expect:
+      error: "unexpected"
+
+  - name: no_graph_bind
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:b> <urn:q> 2 . GRAPH <urn:g1> { <urn:c> <urn:p> 4 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT ?x WHERE { GRAPH <urn:nograph> { BIND(1 AS ?x) } }"
+    expect:
+      empty: true
+
+  - name: no_graph_values
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:b> <urn:q> 2 . GRAPH <urn:g1> { <urn:c> <urn:p> 4 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT ?x WHERE { GRAPH <urn:nograph> { VALUES ?x { 1 } } }"
+    expect:
+      empty: true
+
+  - name: no_graph_empty_group
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:b> <urn:q> 2 . GRAPH <urn:g1> { <urn:c> <urn:p> 4 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT * WHERE { GRAPH <urn:nograph> { } }"
+    expect:
+      empty: true
+
+  - name: no_graph_nested_bind
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:b> <urn:q> 2 . GRAPH <urn:g1> { <urn:c> <urn:p> 4 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT ?x WHERE { GRAPH <urn:nograph> { { BIND(1 AS ?x) } } }"
+    expect:
+      empty: true
+
+  - name: no_graph_filter_only
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:b> <urn:q> 2 . GRAPH <urn:g1> { <urn:c> <urn:p> 4 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT * WHERE { GRAPH <urn:nograph> { FILTER(true) } }"
+    expect:
+      empty: true
+
+  - name: no_graph_under_optional
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:b> <urn:q> 2 . GRAPH <urn:g1> { <urn:c> <urn:p> 4 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT ?s ?x WHERE { ?s <urn:p> ?o OPTIONAL { GRAPH <urn:nograph> { BIND(1 AS ?x) } } }"
+    expect:
+      rows:
+        - ["urn:a", null]
+
+  - name: a_named_graph_bind
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:b> <urn:q> 2 . GRAPH <urn:g1> { <urn:c> <urn:p> 4 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT ?x WHERE { GRAPH <urn:g1> { BIND(1 AS ?x) } }"
+    expect:
+      rows:
+        - [1]
+
+  - name: a_named_graph_empty_group
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:b> <urn:q> 2 . GRAPH <urn:g1> { <urn:c> <urn:p> 4 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT ?g WHERE { GRAPH ?g { } }"
+    expect:
+      rows:
+        - ["urn:g1"]
+        - ["urn:g2"]
+
+  - name: each_graph_bind
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:b> <urn:q> 2 . GRAPH <urn:g1> { <urn:c> <urn:p> 4 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT ?g ?x WHERE { GRAPH ?g { BIND(1 AS ?x) } }"
+    expect:
+      rows:
+        - ["urn:g1", 1]
+        - ["urn:g2", 1]
+
+  - name: graph_visit_default_graph_is_not_one
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:b> <urn:q> 2 . GRAPH <urn:g1> { <urn:c> <urn:p> 4 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT ?g ?s WHERE { GRAPH ?g { ?s <urn:q> ?o } }"
+    expect:
+      empty: true
+
+  - name: graph_visit_named_ones_only
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:b> <urn:q> 2 . GRAPH <urn:g1> { <urn:c> <urn:p> 4 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT ?g ?s WHERE { GRAPH ?g { ?s ?p ?o } }"
+    expect:
+      rows:
+        - ["urn:g1", "urn:c"]
+        - ["urn:g2", "urn:d"]
+        - ["urn:g2", "urn:e"]
+
+  - name: graph_visit_from_named
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:b> <urn:q> 2 . GRAPH <urn:g1> { <urn:c> <urn:p> 4 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT ?g ?s FROM NAMED <urn:g1> WHERE { GRAPH ?g { ?s ?p ?o } }"
+    expect:
+      rows:
+        - ["urn:g1", "urn:c"]
+
+  - name: graph_visit_from_named_bind
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:b> <urn:q> 2 . GRAPH <urn:g1> { <urn:c> <urn:p> 4 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT ?g ?x FROM NAMED <urn:g1> WHERE { GRAPH ?g { BIND(1 AS ?x) } }"
+    expect:
+      rows:
+        - ["urn:g1", 1]
+
+  - name: graph_visit_from_named_empty_group
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:b> <urn:q> 2 . GRAPH <urn:g1> { <urn:c> <urn:p> 4 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT ?g FROM NAMED <urn:g2> WHERE { GRAPH ?g { } }"
+    expect:
+      rows:
+        - ["urn:g2"]
+
+  - name: graph_visit_from_named_of_no_graph
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:b> <urn:q> 2 . GRAPH <urn:g1> { <urn:c> <urn:p> 4 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT ?g FROM NAMED <urn:nograph> WHERE { GRAPH ?g { BIND(1 AS ?x) } }"
+    expect:
+      rows:
+        - ["urn:nograph"]
+
+  - name: graph_visit_from_named_a_constant_it_lists
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:b> <urn:q> 2 . GRAPH <urn:g1> { <urn:c> <urn:p> 4 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT ?x FROM NAMED <urn:nograph> WHERE { GRAPH <urn:nograph> { BIND(1 AS ?x) } }"
+    expect:
+      rows:
+        - [1]
+
+  - name: graph_visit_from_named_a_constant_it_does_not_list
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:b> <urn:q> 2 . GRAPH <urn:g1> { <urn:c> <urn:p> 4 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT ?x FROM NAMED <urn:g1> WHERE { GRAPH <urn:nograph> { BIND(1 AS ?x) } }"
+    expect:
+      empty: true
+
+  - name: graph_visit_from_named_of_no_graph_a_triple
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:b> <urn:q> 2 . GRAPH <urn:g1> { <urn:c> <urn:p> 4 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT ?g ?s FROM NAMED <urn:nograph> WHERE { GRAPH ?g { ?s ?p ?o } }"
+    expect:
+      empty: true
+
+  - name: graph_visit_from_named_a_constant_outside_it
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:b> <urn:q> 2 . GRAPH <urn:g1> { <urn:c> <urn:p> 4 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT ?x FROM NAMED <urn:g1> WHERE { GRAPH <urn:g2> { BIND(1 AS ?x) } }"
+    expect:
+      empty: true
+
+  - name: exists_in_a_filter_guard
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:b> <urn:q> 2 . GRAPH <urn:g1> { <urn:c> <urn:p> 4 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT ?s WHERE { ?s ?p ?v FILTER(EXISTS { ?s <urn:p> ?o }) }"
+    expect:
+      rows:
+        - ["urn:a"]
+
+  - name: a_listed_graph_keeps_its_row_after_its_last_triple_goes
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:b> <urn:q> 2 . GRAPH <urn:g1> { <urn:c> <urn:p> 4 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:e> <urn:p> 6 } }"
+    statements:
+      - "DELETE DATA { GRAPH <urn:g1> { <urn:c> <urn:p> 4 } }"
+      - "SELECT ?g FROM NAMED <urn:g1> WHERE { GRAPH ?g { BIND(1 AS ?x) } }"
+    expect:
+      rows:
+        - ["urn:g1"]
+
+  - name: update_with_no_graph_writes_nothing
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:b> <urn:q> 2 . GRAPH <urn:g1> { <urn:c> <urn:p> 4 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:e> <urn:p> 6 } }"
+    statements:
+      - "INSERT { <urn:t> <urn:p> 9 } WHERE { GRAPH <urn:nograph> { BIND(1 AS ?x) } }"
+      - "SELECT ?v WHERE { <urn:t> <urn:p> ?v }"
+    expect:
+      empty: true
+
+  - name: delete_with_no_graph_removes_nothing
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:b> <urn:q> 2 . GRAPH <urn:g1> { <urn:c> <urn:p> 4 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:e> <urn:p> 6 } }"
+    statements:
+      - "DELETE { <urn:a> <urn:p> 1 } WHERE { GRAPH <urn:nograph> { BIND(1 AS ?x) } }"
+      - "SELECT ?v WHERE { <urn:a> <urn:p> ?v }"
+    expect:
+      rows:
+        - [1]
+
+  - name: update_where_with_a_dot
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:b> <urn:q> 2 . GRAPH <urn:g1> { <urn:c> <urn:p> 4 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:e> <urn:p> 6 } }"
+    statements:
+      - "DELETE { ?s <urn:p> ?o } WHERE { ?s <urn:p> ?o . FILTER(?o = 1) . }"
+      - "SELECT ?s WHERE { ?s <urn:p> ?o }"
+    expect:
+      empty: true
+
+  - name: an_empty_named_graph_is_a_graph
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:b> <urn:q> 2 . GRAPH <urn:g1> { <urn:c> <urn:p> 4 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:e> <urn:p> 6 } }"
+    statements:
+      - "CREATE GRAPH <urn:empty>"
+      - "SELECT ?x WHERE { GRAPH <urn:empty> { BIND(1 AS ?x) } }"
+    expect:
+      rows:
+        - [1]

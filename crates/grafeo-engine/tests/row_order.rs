@@ -3,7 +3,7 @@
 //! in random order, and ordered results stay as they are.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --features full --test row_order
+//! cargo test -p grafeo-engine --features full --test main row_order::
 //! ```
 
 #![cfg(feature = "gql")]

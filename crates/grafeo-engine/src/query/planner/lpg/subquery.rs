@@ -175,6 +175,12 @@ impl super::Planner {
     /// with the row: one that shares none has one answer for all rows, which
     /// the edge check would find again for each row by walking every edge.
     fn edge_check_answers(&self, subquery: &LogicalExpression, columns: Option<&[String]>) -> bool {
+        if !self
+            .rules
+            .has(crate::query::optimizer::PlannerRule::ExistsEdgeCheck)
+        {
+            return false;
+        }
         let check = match subquery {
             LogicalExpression::ExistsSubquery(subplan) => self.extract_exists_pattern(subplan),
             LogicalExpression::CountSubquery(subplan) => {

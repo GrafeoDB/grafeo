@@ -14,7 +14,7 @@
 //! - the ring index (ring-index) still goes at the first change.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test rdf_statistics_drift
+//! cargo test -p grafeo-engine --all-features --test main rdf_statistics_drift::
 //! ```
 
 #![cfg(feature = "triple-store")]

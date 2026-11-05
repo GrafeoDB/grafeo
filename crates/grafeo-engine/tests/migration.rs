@@ -16,7 +16,6 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::{Duration, Instant};
 
 use grafeo_common::testing::child_process;
@@ -579,8 +578,7 @@ const OPENED: i32 = 4;
 #[cfg(feature = "testing-crash-injection")]
 fn open_in_child(crash_point: usize, path: &Path) -> Option<String> {
     let output = child_process::output(
-        Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "migrate_child", "--nocapture"])
+        grafeo_common::child_test!("migrate_child")
             .env(CRASH_POINT_VAR, crash_point.to_string())
             .env(PATH_VAR, path),
     )
@@ -1313,8 +1311,7 @@ fn two_processes_opening_a_0_5_file_at_once_migrate_it_once() {
             let (child_path, child_go, child_ready) = (path.clone(), go.clone(), ready.clone());
             let opener = std::thread::spawn(move || {
                 child_process::output(
-                    Command::new(std::env::current_exe().unwrap())
-                        .args(["--exact", "open_child", "--nocapture"])
+                    grafeo_common::child_test!("open_child")
                         .env(PATH_VAR, &child_path)
                         .env(OPEN_GO_VAR, &child_go)
                         .env(LOCK_READY_VAR, &child_ready),
@@ -1420,8 +1417,7 @@ fn start_race_child(
     );
     std::thread::spawn(move || {
         child_process::output(
-            Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", "race_child", "--nocapture"])
+            grafeo_common::child_test!("race_child")
                 .env(RACE_VAR, "1")
                 .env(PATH_VAR, &path)
                 .env(POINT_VAR, &pause_point)
@@ -1669,8 +1665,7 @@ fn a_read_of_a_0_5_database_that_another_process_migrates_meanwhile_fails() {
         let (child_path, child_flag, child_mode) = (path.clone(), flag.clone(), mode.to_string());
         let reader = std::thread::spawn(move || {
             child_process::output(
-                Command::new(std::env::current_exe().unwrap())
-                    .args(["--exact", "read_child", "--nocapture"])
+                grafeo_common::child_test!("read_child")
                     .env(READ_VAR, &child_mode)
                     .env(PATH_VAR, &child_path)
                     .env(POINT_VAR, "wal_recovery:after_listing")
@@ -2504,8 +2499,7 @@ fn a_directory_that_is_the_current_directory_is_read_but_not_migrated() {
     let (dir, path) = copy_directory();
     let before = files(dir.path());
     let output = child_process::output(
-        Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "current_directory_child", "--nocapture"])
+        grafeo_common::child_test!("current_directory_child")
             .env(CURRENT_DIRECTORY_VAR, "1")
             .current_dir(&path),
     )
@@ -2778,9 +2772,8 @@ fn hold_migrate_lock(path: &Path, mode: LockMode) -> LockHolder {
     let child_path = path.to_path_buf();
     let (child_ready, child_release) = (ready.clone(), release.clone());
     let thread = std::thread::spawn(move || {
-        let mut command = Command::new(std::env::current_exe().unwrap());
+        let mut command = grafeo_common::child_test!("lock_holder_child");
         command
-            .args(["--exact", "lock_holder_child", "--nocapture"])
             .env(PATH_VAR, &child_path)
             .env(LOCK_READY_VAR, &child_ready)
             .env(LOCK_RELEASE_VAR, &child_release);

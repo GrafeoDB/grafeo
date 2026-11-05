@@ -2,7 +2,7 @@
 //! operator tree the text cell shows, with rows and times per operator.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test query_profile
+//! cargo test -p grafeo-engine --all-features --test main query_profile::
 //! ```
 
 use grafeo_common::types::Value;

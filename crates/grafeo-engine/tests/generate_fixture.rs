@@ -1,6 +1,6 @@
 //! One-shot helper to regenerate the golden snapshot fixture.
 //!
-//! Run with: cargo test --all-features -p grafeo-engine --test golden_format -- regenerate_snapshot_fixture --ignored
+//! Run with: cargo test --all-features -p grafeo-engine --test main -- generate_fixture::regenerate_snapshot_fixture --ignored
 //! Then commit the updated fixture file. This test is ignored by default.
 //!
 //! **When to regenerate:** only after an intentional snapshot format change

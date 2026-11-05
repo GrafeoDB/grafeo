@@ -5,7 +5,7 @@
 //! that names it, before any row is read.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test regex_patterns
+//! cargo test -p grafeo-engine --all-features --test main regex_patterns::
 //! ```
 
 #![cfg(any(feature = "regex", feature = "regex-lite"))]

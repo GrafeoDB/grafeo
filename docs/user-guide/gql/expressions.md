@@ -51,6 +51,8 @@ RETURN d.name,
     d.budget / NULLIF(d.headcount, 0) AS per_capita
 ```
 
+A condition that can fail while a query runs, such as `100 / n.age > 0`, runs after the conditions written before it, so an earlier `FILTER` or condition guards it. It may still run on rows a later part of the pattern or a join would have dropped: `MATCH (a:Person)-[:KNOWS]->(b) FILTER 100 / a.age > 0` can fail on a person with no edges. The planner also chooses the order of a pattern's parts, so it can fail when another part of a comma pattern matches nothing. Guard the division itself with `NULLIF` to be sure.
+
 ## COALESCE
 
 Returns the first non-null value from the argument list:

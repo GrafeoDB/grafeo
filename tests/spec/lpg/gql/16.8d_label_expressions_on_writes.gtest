@@ -1,0 +1,587 @@
+# INSERT and single-node MERGE with a label expression: ISO/IEC 39075:2024 secs 13.2 and 18.
+#
+# `IS A` and `A&B` set exactly those labels; `|`, `!`, `%` and parentheses are an error that names
+# the statement. They used to create a node with no label. MERGE matches on the labels, not on the
+# property alone. A MERGE of a path takes labels only, and says so.
+
+meta:
+  language: gql
+  model: lpg
+  section: "13.2"
+  title: Label expressions on the nodes a statement writes
+  dataset: empty
+  iso: [G074]
+
+tests:
+
+  - name: insert_is_one_label
+    statements:
+      - "INSERT (n IS A {k: 1})"
+      - "MATCH (x:A) RETURN x.k, size(labels(x))"
+    expect:
+      rows:
+        - [1, 1]
+
+  - name: insert_conjunction
+    statements:
+      - "INSERT (n:A&B {k: 1})"
+      - "MATCH (x:A:B) RETURN x.k, size(labels(x))"
+    expect:
+      rows:
+        - [1, 2]
+
+  - name: insert_is_conjunction
+    statements:
+      - "INSERT (n IS A&B {k: 1})"
+      - "MATCH (x:A:B) RETURN x.k, size(labels(x))"
+    expect:
+      rows:
+        - [1, 2]
+
+  - name: insert_three_labels
+    statements:
+      - "INSERT (n:A&B&C {k: 1})"
+      - "MATCH (x:A:B:C) RETURN x.k, size(labels(x))"
+    expect:
+      rows:
+        - [1, 3]
+
+  - name: insert_a_label_twice
+    statements:
+      - "INSERT (n:A&A {k: 1})"
+      - "MATCH (x:A) RETURN x.k, size(labels(x))"
+    expect:
+      rows:
+        - [1, 1]
+
+  - name: insert_no_variable
+    statements:
+      - "INSERT (:A&B {k: 1})"
+      - "MATCH (x:A:B) RETURN x.k, size(labels(x))"
+    expect:
+      rows:
+        - [1, 2]
+
+  - name: insert_no_variable_is
+    statements:
+      - "INSERT (IS A {k: 1})"
+      - "MATCH (x:A) RETURN x.k, size(labels(x))"
+    expect:
+      rows:
+        - [1, 1]
+
+  - name: insert_both_ends_of_a_path
+    statements:
+      - "INSERT (n IS A {k: 1})-[:R]->(m:A&B {k: 2})"
+      - "MATCH (x:A)-[:R]->(y:A:B) RETURN x.k, y.k, size(labels(x)), size(labels(y))"
+    expect:
+      rows:
+        - [1, 2, 1, 2]
+
+  - name: insert_a_later_node_of_a_path
+    statements:
+      - "INSERT (n:C {k: 1})-[:R]->(m IS A {k: 2})-[:R]->(o:A&B {k: 3})"
+      - "MATCH (:C)-[:R]->(y:A)-[:R]->(z:A:B) RETURN y.k, z.k, size(labels(y)), size(labels(z))"
+    expect:
+      rows:
+        - [2, 3, 1, 2]
+
+  - name: insert_comma_separated
+    statements:
+      - "INSERT (n IS A {k: 1}), (m:B&C {k: 2})"
+      - "MATCH (x) RETURN x.k, size(labels(x))"
+    expect:
+      rows:
+        - [1, 1]
+        - [2, 2]
+
+  - name: insert_from_rows
+    statements:
+      - "UNWIND [1, 2] AS i INSERT (n IS A {k: i})"
+      - "MATCH (x:A) RETURN x.k, size(labels(x))"
+    expect:
+      rows:
+        - [1, 1]
+        - [2, 1]
+
+  - name: insert_plain_label_guard
+    statements:
+      - "INSERT (n:A {k: 1})"
+      - "MATCH (x:A) RETURN x.k, size(labels(x))"
+    expect:
+      rows:
+        - [1, 1]
+
+  - name: insert_two_labels_guard
+    statements:
+      - "INSERT (n:A:B {k: 1})"
+      - "MATCH (x:A:B) RETURN x.k, size(labels(x))"
+    expect:
+      rows:
+        - [1, 2]
+
+  - name: insert_returns_what_it_wrote
+    query: "INSERT (n IS A {k: 1}) RETURN n.k, size(labels(n))"
+    expect:
+      rows:
+        - [1, 1]
+
+  - name: insert_after_a_match
+    setup:
+      - "INSERT (:T {tk: 1})"
+    statements:
+      - "MATCH (t:T) INSERT (t)-[:R]->(n:A&B {k: 1})"
+      - "MATCH (:T)-[:R]->(y:A:B) RETURN y.k, size(labels(y))"
+    expect:
+      rows:
+        - [1, 2]
+
+  - name: insert_refuses_a_or_b
+    query: "INSERT (n:A|B {k: 1})"
+    expect:
+      error: "INSERT"
+
+  - name: insert_refuses_a_or_b_without_a_variable
+    query: "INSERT (:A|B {k: 1})"
+    expect:
+      error: "INSERT"
+
+  - name: insert_refuses_a_or_b_on_a_first_node
+    query: "INSERT (n:A|B)-[:R]->(m:T)"
+    expect:
+      error: "INSERT"
+
+  - name: insert_refuses_a_or_b_on_a_far_end
+    query: "INSERT (n:T)-[:R]->(m:A|B)"
+    expect:
+      error: "INSERT"
+
+  - name: merge_refuses_a_or_b
+    query: "MERGE (n:A|B {k: 1})"
+    expect:
+      error: "MERGE"
+
+  - name: insert_refuses_is_a_or_b
+    query: "INSERT (n IS A|B {k: 1})"
+    expect:
+      error: "INSERT"
+
+  - name: insert_refuses_is_a_or_b_without_a_variable
+    query: "INSERT (IS A|B {k: 1})"
+    expect:
+      error: "INSERT"
+
+  - name: insert_refuses_is_a_or_b_on_a_first_node
+    query: "INSERT (n IS A|B)-[:R]->(m:T)"
+    expect:
+      error: "INSERT"
+
+  - name: insert_refuses_is_a_or_b_on_a_far_end
+    query: "INSERT (n:T)-[:R]->(m IS A|B)"
+    expect:
+      error: "INSERT"
+
+  - name: merge_refuses_is_a_or_b
+    query: "MERGE (n IS A|B {k: 1})"
+    expect:
+      error: "MERGE"
+
+  - name: insert_refuses_not_a
+    query: "INSERT (n:!A {k: 1})"
+    expect:
+      error: "INSERT"
+
+  - name: insert_refuses_not_a_without_a_variable
+    query: "INSERT (:!A {k: 1})"
+    expect:
+      error: "INSERT"
+
+  - name: insert_refuses_not_a_on_a_first_node
+    query: "INSERT (n:!A)-[:R]->(m:T)"
+    expect:
+      error: "INSERT"
+
+  - name: insert_refuses_not_a_on_a_far_end
+    query: "INSERT (n:T)-[:R]->(m:!A)"
+    expect:
+      error: "INSERT"
+
+  - name: merge_refuses_not_a
+    query: "MERGE (n:!A {k: 1})"
+    expect:
+      error: "MERGE"
+
+  - name: insert_refuses_is_not_a
+    query: "INSERT (n IS !A {k: 1})"
+    expect:
+      error: "INSERT"
+
+  - name: insert_refuses_is_not_a_without_a_variable
+    query: "INSERT (IS !A {k: 1})"
+    expect:
+      error: "INSERT"
+
+  - name: insert_refuses_is_not_a_on_a_first_node
+    query: "INSERT (n IS !A)-[:R]->(m:T)"
+    expect:
+      error: "INSERT"
+
+  - name: insert_refuses_is_not_a_on_a_far_end
+    query: "INSERT (n:T)-[:R]->(m IS !A)"
+    expect:
+      error: "INSERT"
+
+  - name: merge_refuses_is_not_a
+    query: "MERGE (n IS !A {k: 1})"
+    expect:
+      error: "MERGE"
+
+  - name: insert_refuses_any_label
+    query: "INSERT (n:% {k: 1})"
+    expect:
+      error: "INSERT"
+
+  - name: insert_refuses_any_label_without_a_variable
+    query: "INSERT (:% {k: 1})"
+    expect:
+      error: "INSERT"
+
+  - name: insert_refuses_any_label_on_a_first_node
+    query: "INSERT (n:%)-[:R]->(m:T)"
+    expect:
+      error: "INSERT"
+
+  - name: insert_refuses_any_label_on_a_far_end
+    query: "INSERT (n:T)-[:R]->(m:%)"
+    expect:
+      error: "INSERT"
+
+  - name: merge_refuses_any_label
+    query: "MERGE (n:% {k: 1})"
+    expect:
+      error: "MERGE"
+
+  - name: insert_refuses_is_any_label
+    query: "INSERT (n IS % {k: 1})"
+    expect:
+      error: "INSERT"
+
+  - name: insert_refuses_is_any_label_without_a_variable
+    query: "INSERT (IS % {k: 1})"
+    expect:
+      error: "INSERT"
+
+  - name: insert_refuses_is_any_label_on_a_first_node
+    query: "INSERT (n IS %)-[:R]->(m:T)"
+    expect:
+      error: "INSERT"
+
+  - name: insert_refuses_is_any_label_on_a_far_end
+    query: "INSERT (n:T)-[:R]->(m IS %)"
+    expect:
+      error: "INSERT"
+
+  - name: merge_refuses_is_any_label
+    query: "MERGE (n IS % {k: 1})"
+    expect:
+      error: "MERGE"
+
+  - name: insert_refuses_paren_a
+    query: "INSERT (n:(A) {k: 1})"
+    expect:
+      error: "INSERT"
+
+  - name: insert_refuses_paren_a_without_a_variable
+    query: "INSERT (:(A) {k: 1})"
+    expect:
+      error: "INSERT"
+
+  - name: insert_refuses_paren_a_on_a_first_node
+    query: "INSERT (n:(A))-[:R]->(m:T)"
+    expect:
+      error: "INSERT"
+
+  - name: insert_refuses_paren_a_on_a_far_end
+    query: "INSERT (n:T)-[:R]->(m:(A))"
+    expect:
+      error: "INSERT"
+
+  - name: merge_refuses_paren_a
+    query: "MERGE (n:(A) {k: 1})"
+    expect:
+      error: "MERGE"
+
+  - name: insert_refuses_is_paren_a
+    query: "INSERT (n IS (A) {k: 1})"
+    expect:
+      error: "INSERT"
+
+  - name: insert_refuses_is_paren_a_without_a_variable
+    query: "INSERT (IS (A) {k: 1})"
+    expect:
+      error: "INSERT"
+
+  - name: insert_refuses_is_paren_a_on_a_first_node
+    query: "INSERT (n IS (A))-[:R]->(m:T)"
+    expect:
+      error: "INSERT"
+
+  - name: insert_refuses_is_paren_a_on_a_far_end
+    query: "INSERT (n:T)-[:R]->(m IS (A))"
+    expect:
+      error: "INSERT"
+
+  - name: merge_refuses_is_paren_a
+    query: "MERGE (n IS (A) {k: 1})"
+    expect:
+      error: "MERGE"
+
+  - name: insert_refuses_paren_a_and_b
+    query: "INSERT (n:(A&B) {k: 1})"
+    expect:
+      error: "INSERT"
+
+  - name: insert_refuses_paren_a_and_b_without_a_variable
+    query: "INSERT (:(A&B) {k: 1})"
+    expect:
+      error: "INSERT"
+
+  - name: insert_refuses_paren_a_and_b_on_a_first_node
+    query: "INSERT (n:(A&B))-[:R]->(m:T)"
+    expect:
+      error: "INSERT"
+
+  - name: insert_refuses_paren_a_and_b_on_a_far_end
+    query: "INSERT (n:T)-[:R]->(m:(A&B))"
+    expect:
+      error: "INSERT"
+
+  - name: merge_refuses_paren_a_and_b
+    query: "MERGE (n:(A&B) {k: 1})"
+    expect:
+      error: "MERGE"
+
+  - name: insert_refuses_a_not_b
+    query: "INSERT (n:A&!B {k: 1})"
+    expect:
+      error: "INSERT"
+
+  - name: insert_refuses_a_not_b_without_a_variable
+    query: "INSERT (:A&!B {k: 1})"
+    expect:
+      error: "INSERT"
+
+  - name: insert_refuses_a_not_b_on_a_first_node
+    query: "INSERT (n:A&!B)-[:R]->(m:T)"
+    expect:
+      error: "INSERT"
+
+  - name: insert_refuses_a_not_b_on_a_far_end
+    query: "INSERT (n:T)-[:R]->(m:A&!B)"
+    expect:
+      error: "INSERT"
+
+  - name: merge_refuses_a_not_b
+    query: "MERGE (n:A&!B {k: 1})"
+    expect:
+      error: "MERGE"
+
+  - name: merge_creates_with_is
+    statements:
+      - "MERGE (n IS A {k: 1})"
+      - "MATCH (x:A) RETURN x.k, size(labels(x))"
+    expect:
+      rows:
+        - [1, 1]
+
+  - name: merge_creates_with_conjunction
+    statements:
+      - "MERGE (n:A&B {k: 1})"
+      - "MATCH (x:A:B) RETURN x.k, size(labels(x))"
+    expect:
+      rows:
+        - [1, 2]
+
+  - name: merge_creates_with_is_conjunction
+    statements:
+      - "MERGE (n IS A&B {k: 1})"
+      - "MATCH (x:A:B) RETURN x.k, size(labels(x))"
+    expect:
+      rows:
+        - [1, 2]
+
+  - name: merge_twice_is_one_node
+    setup:
+      - "MERGE (n IS A {k: 1})"
+    statements:
+      - "MERGE (n IS A {k: 1})"
+      - "MATCH (x) RETURN x.k, size(labels(x))"
+    expect:
+      rows:
+        - [1, 1]
+
+  - name: merge_conjunction_twice_is_one_node
+    setup:
+      - "MERGE (n:A&B {k: 1})"
+    statements:
+      - "MERGE (n:A&B {k: 1})"
+      - "MATCH (x) RETURN x.k, size(labels(x))"
+    expect:
+      rows:
+        - [1, 2]
+
+  - name: merge_another_label_is_not_matched
+    setup:
+      - "INSERT (:Other {k: 1})"
+    statements:
+      - "MERGE (n IS A {k: 1})"
+      - "MATCH (x:A) RETURN x.k, size(labels(x))"
+    expect:
+      rows:
+        - [1, 1]
+
+  - name: merge_no_label_is_not_matched
+    setup:
+      - "INSERT ({k: 1})"
+    statements:
+      - "MERGE (n IS A {k: 1})"
+      - "MATCH (x) RETURN x.k, size(labels(x))"
+    expect:
+      rows:
+        - [1, 0]
+        - [1, 1]
+
+  - name: merge_one_of_two_is_not_matched
+    setup:
+      - "INSERT (:A {k: 1})"
+    statements:
+      - "MERGE (n:A&B {k: 1})"
+      - "MATCH (x) RETURN x.k, size(labels(x))"
+    expect:
+      rows:
+        - [1, 1]
+        - [1, 2]
+
+  - name: merge_the_other_of_two_is_not_matched
+    setup:
+      - "INSERT (:B {k: 1})"
+    statements:
+      - "MERGE (n IS A&B {k: 1})"
+      - "MATCH (x) RETURN x.k, size(labels(x))"
+    expect:
+      rows:
+        - [1, 1]
+        - [1, 2]
+
+  - name: merge_more_labels_are_matched
+    setup:
+      - "INSERT (:A:B {k: 1})"
+    statements:
+      - "MERGE (n IS A {k: 1})"
+      - "MATCH (x) RETURN x.k, size(labels(x))"
+    expect:
+      rows:
+        - [1, 2]
+
+  - name: merge_conjunction_matches_more_labels
+    setup:
+      - "INSERT (:A:B:C {k: 1})"
+    statements:
+      - "MERGE (n:A&B {k: 1})"
+      - "MATCH (x) RETURN x.k, size(labels(x))"
+    expect:
+      rows:
+        - [1, 3]
+
+  - name: merge_another_value_is_not_matched
+    setup:
+      - "INSERT (:A {k: 2})"
+    statements:
+      - "MERGE (n IS A {k: 1})"
+      - "MATCH (x:A) RETURN x.k"
+    expect:
+      rows:
+        - [1]
+        - [2]
+
+  - name: merge_no_property_creates
+    statements:
+      - "MERGE (n IS A)"
+      - "MATCH (x:A) RETURN size(labels(x))"
+    expect:
+      rows:
+        - [1]
+
+  - name: merge_no_property_matches_by_labels
+    setup:
+      - "INSERT (:A {k: 1}), (:B {k: 2})"
+    statements:
+      - "MERGE (n IS A)"
+      - "MATCH (x) RETURN x.k, size(labels(x))"
+    expect:
+      rows:
+        - [1, 1]
+        - [2, 1]
+
+  - name: merge_plain_label_guard
+    setup:
+      - "INSERT (:Other {k: 1})"
+    statements:
+      - "MERGE (n:A {k: 1})"
+      - "MATCH (x) RETURN x.k, size(labels(x))"
+    expect:
+      rows:
+        - [1, 1]
+        - [1, 1]
+
+  - name: merge_two_labels_guard
+    setup:
+      - "INSERT (:A {k: 1})"
+    statements:
+      - "MERGE (n:A:B {k: 1})"
+      - "MATCH (x) RETURN x.k, size(labels(x))"
+    expect:
+      rows:
+        - [1, 1]
+        - [1, 2]
+
+  - name: merge_returns_the_node_it_wrote
+    query: "MERGE (n IS A {k: 1}) RETURN n.k, size(labels(n))"
+    expect:
+      rows:
+        - [1, 1]
+
+  - name: merge_on_create_runs_when_the_labels_do_not_hold
+    setup:
+      - "INSERT (:Other {k: 1})"
+    statements:
+      - "MERGE (n IS A {k: 1}) ON CREATE SET n.new = true ON MATCH SET n.seen = true"
+      - "MATCH (x:A) RETURN x.k, x.new, x.seen"
+    expect:
+      rows:
+        - [1, true, null]
+
+  - name: merge_on_match_runs_when_the_labels_hold
+    setup:
+      - "INSERT (:A:B {k: 1})"
+    statements:
+      - "MERGE (n:A&B {k: 1}) ON CREATE SET n.new = true ON MATCH SET n.seen = true"
+      - "MATCH (x:A:B) RETURN x.k, x.new, x.seen"
+    expect:
+      rows:
+        - [1, null, true]
+
+  - name: merge_of_a_path_refuses_is
+    query: "MERGE (n IS A)-[:R]->(m)"
+    expect:
+      error: "MERGE"
+
+  - name: merge_of_a_path_refuses_a_conjunction
+    query: "MERGE (n:A&B)-[:R]->(m)"
+    expect:
+      error: "MERGE"
+
+  - name: merge_of_a_path_refuses_it_on_a_far_end
+    query: "MERGE (n:A)-[:R]->(m IS B)"
+    expect:
+      error: "MERGE"

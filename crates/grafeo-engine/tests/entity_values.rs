@@ -14,7 +14,7 @@
 //! path of IDs and `startNode(r).name` was an error.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test entity_values
+//! cargo test -p grafeo-engine --all-features --test main entity_values::
 //! ```
 
 #![cfg(all(feature = "gql", feature = "cypher"))]

@@ -3,7 +3,7 @@
 #![cfg(feature = "cypher")]
 
 #[cfg(all(feature = "wal", feature = "grafeo-file"))]
-mod common;
+use crate::common;
 
 use std::collections::HashMap;
 
@@ -389,7 +389,7 @@ fn compound_types_survive_checkpoint_and_reopen() {
 #[test]
 fn compound_types_survive_wal_replay() {
     let (_dir, db) = common::replay::reopened_after_crash(
-        "compound_types_survive_wal_replay",
+        &grafeo_common::test_path!("compound_types_survive_wal_replay"),
         |path| GrafeoDB::with_config(grafeo_engine::Config::persistent(path)).unwrap(),
         |db| {
             db.execute_cypher(EVENT_TYPES).unwrap();

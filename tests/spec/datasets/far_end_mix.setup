@@ -1,0 +1,8 @@
+# Far End Mix Dataset
+# Sources of one label and two, one without the label, parallel edges, a self-loop, a key two nodes
+# hold, and a crowd of sources so that starting at the far end is the cheap side.
+#
+# Use case: a hop to a key, from either end
+
+UNWIND range(1, 2000) AS i INSERT (:Start {s: i + 1000})-[:R]->(:Far {k: i + 1000})
+INSERT (a:Start {s: 1, name: 'Alix', age: 30}), (g:Start {s: 2, name: 'Gus', age: 40}), (v:Start:Other {s: 3, name: 'Vincent', age: 50}), (j:Other {s: 4, name: 'Jules', age: 60}), (m:Far {k: 7}), (e:Far {k: 8}), (n1:Far {k: 9}), (n2:Far {k: 9}), (mia:Start:Far {s: 5, name: 'Mia', k: 70, age: 20}), (a)-[:R {w: 1}]->(m), (g)-[:R {w: 2}]->(m), (v)-[:R {w: 3}]->(m), (j)-[:R {w: 4}]->(m), (a)-[:R {w: 5}]->(e), (a)-[:R {w: 6}]->(e), (a)-[:R {w: 7}]->(n1), (g)-[:R {w: 8}]->(n2), (m)-[:S {w: 9}]->(a), (m)-[:S {w: 10}]->(j), (mia)-[:L {w: 11}]->(mia)

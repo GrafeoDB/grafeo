@@ -3,7 +3,7 @@
 //! Unicode handling, and query correctness.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --test regression_external -- --nocapture
+//! cargo test -p grafeo-engine --test main regression_external:: -- --nocapture
 //! ```
 
 use grafeo_common::types::{Decimal, Value};

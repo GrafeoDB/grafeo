@@ -14,12 +14,12 @@
 //! it.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test type_ddl_declarations
+//! cargo test -p grafeo-engine --all-features --test main type_ddl_declarations::
 //! ```
 
 #![cfg(all(feature = "gql", feature = "grafeo-file", feature = "wal"))]
 
-mod common;
+use crate::common;
 
 use std::path::Path;
 
@@ -28,6 +28,9 @@ use grafeo_engine::{Config, GrafeoDB};
 
 /// A graph type in the brace form: a node type with a NOT NULL property, an
 /// edge type with endpoints and a property, and a node type on its own.
+/// A graph bound to the graph type of [`BRACE_FORM`], where its rules hold.
+const BRACE_BOUND: &str = "CREATE GRAPH atlas TYPED routes";
+
 const BRACE_FORM: &str = "CREATE GRAPH TYPE routes { \
      (:City {name STRING NOT NULL, population INT64})-[:ROUTE {km INT64}]->(:City), \
      (:Country {code STRING}) }";
@@ -137,25 +140,31 @@ fn a_brace_form_graph_type_declares_what_the_paren_form_declares() {
 /// The writes obey the properties a brace-form graph type declares: their
 /// types and NOT NULL.
 fn assert_brace_form_checks_properties(db: &GrafeoDB) {
-    let wrong_type = refusal(db, "INSERT (:City {name: 'Paris', population: 'many'})");
+    let wrong_type = refusal(
+        db,
+        "USE GRAPH atlas INSERT (:City {name: 'Paris', population: 'many'})",
+    );
     assert!(wrong_type.contains("population"), "{wrong_type}");
-    let missing = refusal(db, "INSERT (:City {population: 3})");
+    let missing = refusal(db, "USE GRAPH atlas INSERT (:City {population: 3})");
     assert!(
         missing.contains("missing required property 'name'"),
         "{missing}"
     );
     let wrong_edge = refusal(
         db,
-        "INSERT (:City {name: 'Paris'})-[:ROUTE {km: 'far'}]->(:City {name: 'Prague'})",
+        "USE GRAPH atlas INSERT (:City {name: 'Paris'})-[:ROUTE {km: 'far'}]->(:City {name: 'Prague'})",
     );
     assert!(wrong_edge.contains("km"), "{wrong_edge}");
 
     db.execute(
-        "INSERT (:City {name: 'Amsterdam', population: 19})         -[:ROUTE {km: 88}]->(:City {name: 'Barcelona'})",
+        "USE GRAPH atlas INSERT (:City {name: 'Amsterdam', population: 19})         -[:ROUTE {km: 88}]->(:City {name: 'Barcelona'})",
     )
     .unwrap();
     assert_eq!(
-        single(db, "MATCH (:City)-[r:ROUTE]->(:City) RETURN r.km"),
+        single(
+            db,
+            "USE GRAPH atlas MATCH (:City)-[r:ROUTE]->(:City) RETURN r.km"
+        ),
         Value::Int64(88)
     );
 }
@@ -165,7 +174,7 @@ fn assert_brace_form_checks_properties(db: &GrafeoDB) {
 fn assert_brace_form_checks_endpoints(db: &GrafeoDB) {
     let wrong_source = refusal(
         db,
-        "INSERT (:Country {code: 'NL'})-[:ROUTE {km: 3}]->(:City {name: 'Berlin'})",
+        "USE GRAPH atlas INSERT (:Country {code: 'NL'})-[:ROUTE {km: 3}]->(:City {name: 'Berlin'})",
     );
     assert!(wrong_source.contains("ROUTE"), "{wrong_source}");
 }
@@ -174,6 +183,7 @@ fn assert_brace_form_checks_endpoints(db: &GrafeoDB) {
 fn a_brace_form_graph_type_checks_the_writes() {
     let db = GrafeoDB::new_in_memory();
     db.execute(BRACE_FORM).unwrap();
+    db.execute(BRACE_BOUND).unwrap();
     assert_brace_form_checks_properties(&db);
     assert_brace_form_checks_endpoints(&db);
 }
@@ -185,7 +195,7 @@ fn a_brace_form_graph_type_survives_a_checkpoint_and_a_reopen() {
         reference.execute(BRACE_FORM).unwrap();
         schema(&reference)
     };
-    let (_dir, db) = reopened_after_checkpoint(&[BRACE_FORM]);
+    let (_dir, db) = reopened_after_checkpoint(&[BRACE_FORM, BRACE_BOUND]);
     assert_eq!(schema(&db), expected);
     assert_brace_form_checks_properties(&db);
     assert_brace_form_checks_endpoints(&db);
@@ -198,10 +208,11 @@ fn a_brace_form_graph_type_survives_a_checkpoint_and_a_reopen() {
 #[test]
 fn a_brace_form_graph_type_survives_a_wal_replay() {
     let (_dir, db) = common::replay::reopened_after_crash(
-        "a_brace_form_graph_type_survives_a_wal_replay",
+        &grafeo_common::test_path!("a_brace_form_graph_type_survives_a_wal_replay"),
         open,
         |db| {
             db.execute(BRACE_FORM).unwrap();
+            db.execute(BRACE_BOUND).unwrap();
         },
     );
     let reference = GrafeoDB::new_in_memory();
@@ -330,12 +341,15 @@ fn map_properties_survive_a_checkpoint_and_a_reopen() {
 
 #[test]
 fn map_properties_survive_a_wal_replay() {
-    let (_dir, db) =
-        common::replay::reopened_after_crash("map_properties_survive_a_wal_replay", open, |db| {
+    let (_dir, db) = common::replay::reopened_after_crash(
+        &grafeo_common::test_path!("map_properties_survive_a_wal_replay"),
+        open,
+        |db| {
             for statement in MAP_TYPES {
                 db.execute(statement).unwrap();
             }
-        });
+        },
+    );
     assert_eq!(
         row_of(&db, "SHOW NODE TYPES", "Config")[1],
         Value::from("settings MAP NOT NULL")
@@ -477,13 +491,13 @@ fn every_edge_write_applies_the_default() {
 /// The default applies in a named graph, and in a graph typed with a graph
 /// type that lists the edge type.
 #[test]
-fn edge_type_defaults_apply_in_named_and_typed_graphs() {
+fn edge_type_defaults_apply_in_typed_graphs_only() {
     let db = routes();
     db.execute("CREATE GRAPH TYPE travel (NODE TYPE City, EDGE TYPE ROUTE)")
         .unwrap();
     db.execute("CREATE GRAPH atlas").unwrap();
     db.execute("CREATE GRAPH trips TYPED travel").unwrap();
-    for graph in ["atlas", "trips"] {
+    for (graph, km) in [("atlas", Value::Null), ("trips", Value::Int64(88))] {
         let session = db.session();
         session
             .execute(&format!("SESSION SET GRAPH {graph}"))
@@ -494,7 +508,7 @@ fn edge_type_defaults_apply_in_named_and_typed_graphs() {
                  RETURN r.km",
             )
             .unwrap();
-        assert_eq!(result.rows(), [[Value::Int64(88)]], "graph {graph}");
+        assert_eq!(result.rows(), [[km]], "graph {graph}");
     }
 }
 
@@ -530,7 +544,8 @@ fn assert_inline_defaults(form: &str, db: &GrafeoDB) {
     assert_eq!(
         rows(
             db,
-            "INSERT (a:Stop {name: 'Berlin'})-[l:LEG]->(b:Stop {name: 'Prague', zone: 'B'}) \
+            "USE GRAPH journeys \
+             INSERT (a:Stop {name: 'Berlin'})-[l:LEG]->(b:Stop {name: 'Prague', zone: 'B'}) \
              RETURN a.zone, l.minutes, b.zone"
         ),
         [[Value::from("A"), Value::Int64(19), Value::from("B")]],
@@ -544,10 +559,12 @@ fn assert_inline_defaults(form: &str, db: &GrafeoDB) {
 #[test]
 fn inline_element_type_defaults_fill_missing_properties() {
     for (form, ddl) in INLINE_DEFAULTS {
+        let bound = "CREATE GRAPH journeys TYPED trips";
         let db = GrafeoDB::new_in_memory();
         db.execute(ddl).unwrap();
+        db.execute(bound).unwrap();
         assert_inline_defaults(form, &db);
-        let (_dir, db) = reopened_after_checkpoint(&[ddl]);
+        let (_dir, db) = reopened_after_checkpoint(&[ddl, bound]);
         assert_inline_defaults(form, &db);
     }
 }

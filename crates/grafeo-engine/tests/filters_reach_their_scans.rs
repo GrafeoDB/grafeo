@@ -15,7 +15,7 @@
 //! against a form the change leaves as it was, and against rows written out.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test filters_reach_their_scans
+//! cargo test -p grafeo-engine --all-features --test main filters_reach_their_scans::
 //! ```
 
 #![cfg(feature = "gql")]

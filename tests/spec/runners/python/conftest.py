@@ -19,6 +19,9 @@ import pytest
 # Make sure the runner modules are importable
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+# An import error fails the run: a build that does not load must not pass as
+# thousands of skipped tests.
+import grafeo
 from comparator import (
     assert_columns,
     assert_count,
@@ -32,17 +35,6 @@ from comparator import (
     assert_terms,
 )
 from parser import GtestFile, TestCase, coerce_params, parse_gtest_file
-
-# ---------------------------------------------------------------------------
-# Grafeo availability
-# ---------------------------------------------------------------------------
-
-try:
-    import grafeo
-
-    GRAFEO_AVAILABLE = True
-except ImportError:
-    GRAFEO_AVAILABLE = False
 
 # Languages that require a separate execute method
 _LANGUAGE_METHODS: dict[str, str] = {
@@ -68,7 +60,7 @@ def _get_compiled_features() -> set:
     if _compiled_features is None:
         db = grafeo.GrafeoDB()
         info = db.info()
-        _compiled_features = set(info.get("features", []))
+        _compiled_features = set(info["features"])
         db.close()
     return _compiled_features
 
@@ -102,6 +94,9 @@ class GtestFileCollector(pytest.File):
             gtest_file = parse_gtest_file(self.path)
         except Exception as exc:
             raise pytest.UsageError(f"Failed to parse {self.path}: {exc}") from exc
+        if not gtest_file.tests:
+            # The line parser reads a broken file as a file without tests.
+            raise pytest.UsageError(f"No tests found in {self.path}")
 
         for tc in gtest_file.tests:
             if tc.variants:
@@ -153,10 +148,6 @@ class GtestItem(pytest.Item):
     def runtest(self):
         tc = self.test_case
         meta = self.gtest_file.meta
-
-        # Skip if grafeo is not importable
-        if not GRAFEO_AVAILABLE:
-            pytest.skip("grafeo Python package not installed")
 
         # Skip if test has a skip field
         if tc.skip is not None:

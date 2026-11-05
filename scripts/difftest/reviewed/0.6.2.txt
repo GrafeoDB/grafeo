@@ -1,0 +1,135 @@
+# Reviewed differences between 0.6.1 and 0.6.2: case key, fingerprint of the reviewed result, why it changed.
+DR1|cypher 40aa67a14b A filter that can raise goes only to the side of a join that holds the variable's written checks, so it no longer runs on a node the pattern's label leaves out; 0.6.1 copied it to the other side and failed with division by zero (#714).
+DR1|gql 40aa67a14b A filter that can raise goes only to the side of a join that holds the variable's written checks, so it no longer runs on a node the pattern's label leaves out; 0.6.1 copied it to the other side and failed with division by zero (#714).
+DR2|cypher 40aa67a14b A filter that can raise goes only to the side of a join that holds the variable's written checks, so it no longer runs on a node the pattern's label leaves out; 0.6.1 copied it to the other side and failed with division by zero (#714).
+DR2|gql 40aa67a14b A filter that can raise goes only to the side of a join that holds the variable's written checks, so it no longer runs on a node the pattern's label leaves out; 0.6.1 copied it to the other side and failed with division by zero (#714).
+DR3|cypher 40aa67a14b A filter that can raise goes only to the side of a join that holds the variable's written checks, so it no longer runs on a node the pattern's label leaves out; 0.6.1 copied it to the other side and failed with division by zero (#714).
+DR3|gql 40aa67a14b A filter that can raise goes only to the side of a join that holds the variable's written checks, so it no longer runs on a node the pattern's label leaves out; 0.6.1 copied it to the other side and failed with division by zero (#714).
+DR5|cypher 40aa67a14b A filter that can raise goes only to the side of a join that holds the variable's written checks, so it no longer runs on a node the pattern's label leaves out; 0.6.1 copied it to the other side and failed with division by zero (#714).
+DR5|gql 40aa67a14b A filter that can raise goes only to the side of a join that holds the variable's written checks, so it no longer runs on a node the pattern's label leaves out; 0.6.1 copied it to the other side and failed with division by zero (#714).
+DS1|cypher ff917b7788 A graph type's rules hold only in the graphs bound to it, so the default graph keeps what was written; 0.6.1 applied them to every graph by label (#730).
+DS1|gql ff917b7788 A graph type's rules hold only in the graphs bound to it, so the default graph keeps what was written; 0.6.1 applied them to every graph by label (#730).
+DS3|gql 0197c21812 A graph type's rules hold only in the graphs bound to it, so the default graph keeps what was written; 0.6.1 applied them to every graph by label (#730).
+DS4|gql 6372e552e3 A graph type's rules hold only in the graphs bound to it, so the default graph keeps what was written; 0.6.1 applied them to every graph by label (#730).
+DT1|gql 9041599eba A rule over data that breaks it fails and leaves nothing; 0.6.1 accepted it and enforced it only on later writes (#729).
+DT2|gql 46ad402f7e A rule over data that breaks it fails and leaves nothing; 0.6.1 accepted it and enforced it only on later writes (#729).
+DT3|gql 92043cf46c A rule over data that breaks it fails and leaves nothing; 0.6.1 accepted it and enforced it only on later writes (#729).
+DT4|gql ed88a3b624 A rule over data that breaks it fails and leaves nothing; 0.6.1 accepted it and enforced it only on later writes (#729).
+DT7|gql 0197c21812 The edge type is accepted because DT4's refused one left nothing; on 0.6.1 DT4's type already existed (#729).
+DU1|gql a95a21305f START TRANSACTION through a per-call statement is refused and names begin_transaction; 0.6.1 accepted it and dropped the transaction at the end of the call.
+DU2|gql d0ea2add79 The error of COMMIT outside a transaction says why a per-call statement has none; the status is the same.
+DU3|gql d0ea2add79 The error of ROLLBACK outside a transaction says why a per-call statement has none; the status is the same.
+DV1|cypher bb2ca2e463 False is below true (ISO/IEC 39075 19.3); 0.6.1 gave null for a comparison of two Booleans.
+DV1|gql bb2ca2e463 False is below true (ISO/IEC 39075 19.3); 0.6.1 gave null for a comparison of two Booleans.
+DV2|cypher bb2ca2e463 False is below true (ISO/IEC 39075 19.3); 0.6.1 gave null for a comparison of two Booleans.
+DV2|gql bb2ca2e463 False is below true (ISO/IEC 39075 19.3); 0.6.1 gave null for a comparison of two Booleans.
+DV3|cypher 2886b8064e False is below true (ISO/IEC 39075 19.3); 0.6.1 gave null for a comparison of two Booleans.
+DV3|gql 2886b8064e False is below true (ISO/IEC 39075 19.3); 0.6.1 gave null for a comparison of two Booleans.
+DV5|cypher 068d50c9ff False is below true (ISO/IEC 39075 19.3); 0.6.1 lost these rows behind another part of the query, though a filter on a lone scan found them.
+DV5|gql 068d50c9ff False is below true (ISO/IEC 39075 19.3); 0.6.1 lost these rows behind another part of the query, though a filter on a lone scan found them.
+DV6|cypher 7060556dc5 False is below true (ISO/IEC 39075 19.3); 0.6.1 lost these rows behind another part of the query, though a filter on a lone scan found them.
+DV6|gql 7060556dc5 False is below true (ISO/IEC 39075 19.3); 0.6.1 lost these rows behind another part of the query, though a filter on a lone scan found them.
+DV7|cypher cc1c3fcee1 False is below true (ISO/IEC 39075 19.3); 0.6.1 lost these rows behind another part of the query, though a filter on a lone scan found them.
+DV7|gql cc1c3fcee1 False is below true (ISO/IEC 39075 19.3); 0.6.1 lost these rows behind another part of the query, though a filter on a lone scan found them.
+DV8|cypher cc1c3fcee1 False is below true (ISO/IEC 39075 19.3); 0.6.1 lost these rows behind another part of the query, though a filter on a lone scan found them.
+DV8|gql cc1c3fcee1 False is below true (ISO/IEC 39075 19.3); 0.6.1 lost these rows behind another part of the query, though a filter on a lone scan found them.
+DW3|gql 51645aaa88 A label expression holds on a path's first node, as on a lone node and later nodes; 0.6.1 dropped it there and gave every source with the edge.
+DW4|gql 4e6ba75afd A label expression holds on a path's first node, as on a lone node and later nodes; 0.6.1 dropped it there and gave every source with the edge.
+DW5|gql 4e6ba75afd A label expression holds on a path's first node, as on a lone node and later nodes; 0.6.1 dropped it there and gave every source with the edge.
+DW6|gql f48aeffe1b A label expression holds on a path's first node, as on a lone node and later nodes; 0.6.1 dropped it there and gave every source with the edge.
+DW7|gql 73400fca58 A label expression holds on a path's first node, as on a lone node and later nodes; 0.6.1 dropped it there and gave every source with the edge.
+DW8|gql 6b3d46939a A label expression holds on a path's first node, as on a lone node and later nodes; 0.6.1 dropped it there and gave every source with the edge.
+DW9|gql 51645aaa88 A label expression holds on a path's first node, as on a lone node and later nodes; 0.6.1 dropped it there and gave every source with the edge.
+DW10|gql 7bf1d5ca20 A label expression holds on a path's first node, as on a lone node and later nodes; 0.6.1 dropped it there and gave every source with the edge.
+DW13|gql 51645aaa88 A label expression holds on a path's first node, as on a lone node and later nodes; 0.6.1 dropped it there and gave every source with the edge.
+DW14|gql 4e6ba75afd A label expression holds on a path's first node, as on a lone node and later nodes; 0.6.1 dropped it there and gave every source with the edge.
+DW15|gql 4e6ba75afd A label expression holds on a path's first node, as on a lone node and later nodes; 0.6.1 dropped it there and gave every source with the edge.
+DW16|gql f48aeffe1b A label expression holds on a path's first node, as on a lone node and later nodes; 0.6.1 dropped it there and gave every source with the edge.
+DW17|gql 73400fca58 A label expression holds on a path's first node, as on a lone node and later nodes; 0.6.1 dropped it there and gave every source with the edge.
+DW18|gql 6b3d46939a A label expression holds on a path's first node, as on a lone node and later nodes; 0.6.1 dropped it there and gave every source with the edge.
+DW19|gql 51645aaa88 A label expression holds on a path's first node, as on a lone node and later nodes; 0.6.1 dropped it there and gave every source with the edge.
+DW20|gql 7bf1d5ca20 A label expression holds on a path's first node, as on a lone node and later nodes; 0.6.1 dropped it there and gave every source with the edge.
+DW23|gql 51645aaa88 A label expression holds on a path's first node, as on a lone node and later nodes; 0.6.1 dropped it there and gave every source with the edge.
+DW24|gql 4e6ba75afd A label expression holds on a path's first node, as on a lone node and later nodes; 0.6.1 dropped it there and gave every source with the edge.
+DW25|gql 4e6ba75afd A label expression holds on a path's first node, as on a lone node and later nodes; 0.6.1 dropped it there and gave every source with the edge.
+DW26|gql f48aeffe1b A label expression holds on a path's first node, as on a lone node and later nodes; 0.6.1 dropped it there and gave every source with the edge.
+DW27|gql 73400fca58 A label expression holds on a path's first node, as on a lone node and later nodes; 0.6.1 dropped it there and gave every source with the edge.
+DW28|gql 6b3d46939a A label expression holds on a path's first node, as on a lone node and later nodes; 0.6.1 dropped it there and gave every source with the edge.
+DW29|gql 51645aaa88 A label expression holds on a path's first node, as on a lone node and later nodes; 0.6.1 dropped it there and gave every source with the edge.
+DW30|gql 7bf1d5ca20 A label expression holds on a path's first node, as on a lone node and later nodes; 0.6.1 dropped it there and gave every source with the edge.
+DW43|gql 51645aaa88 A label expression holds on a path's first node, as on a lone node and later nodes; 0.6.1 dropped it there and gave every source with the edge.
+DW44|gql 4e6ba75afd A label expression holds on a path's first node, as on a lone node and later nodes; 0.6.1 dropped it there and gave every source with the edge.
+DW45|gql 4e6ba75afd A label expression holds on a path's first node, as on a lone node and later nodes; 0.6.1 dropped it there and gave every source with the edge.
+DW46|gql f48aeffe1b A label expression holds on a path's first node, as on a lone node and later nodes; 0.6.1 dropped it there and gave every source with the edge.
+DW47|gql 73400fca58 A label expression holds on a path's first node, as on a lone node and later nodes; 0.6.1 dropped it there and gave every source with the edge.
+DW48|gql 6b3d46939a A label expression holds on a path's first node, as on a lone node and later nodes; 0.6.1 dropped it there and gave every source with the edge.
+DW49|gql 51645aaa88 A label expression holds on a path's first node, as on a lone node and later nodes; 0.6.1 dropped it there and gave every source with the edge.
+DW50|gql 7bf1d5ca20 A label expression holds on a path's first node, as on a lone node and later nodes; 0.6.1 dropped it there and gave every source with the edge.
+DW53|gql 51645aaa88 A label expression holds on a path's first node, as on a lone node and later nodes; 0.6.1 dropped it there and gave every source with the edge.
+DW54|gql 4e6ba75afd A label expression holds on a path's first node, as on a lone node and later nodes; 0.6.1 dropped it there and gave every source with the edge.
+DW55|gql 4e6ba75afd A label expression holds on a path's first node, as on a lone node and later nodes; 0.6.1 dropped it there and gave every source with the edge.
+DW56|gql f48aeffe1b A label expression holds on a path's first node, as on a lone node and later nodes; 0.6.1 dropped it there and gave every source with the edge.
+DW57|gql 73400fca58 A label expression holds on a path's first node, as on a lone node and later nodes; 0.6.1 dropped it there and gave every source with the edge.
+DW58|gql 6b3d46939a A label expression holds on a path's first node, as on a lone node and later nodes; 0.6.1 dropped it there and gave every source with the edge.
+DW59|gql 51645aaa88 A label expression holds on a path's first node, as on a lone node and later nodes; 0.6.1 dropped it there and gave every source with the edge.
+DW60|gql 7bf1d5ca20 A label expression holds on a path's first node, as on a lone node and later nodes; 0.6.1 dropped it there and gave every source with the edge.
+DW63|gql 51645aaa88 A label expression holds on a path's first node, as on a lone node and later nodes; 0.6.1 dropped it there and gave every source with the edge.
+DW64|gql 4e6ba75afd A label expression holds on a path's first node, as on a lone node and later nodes; 0.6.1 dropped it there and gave every source with the edge.
+DW65|gql 4e6ba75afd A label expression holds on a path's first node, as on a lone node and later nodes; 0.6.1 dropped it there and gave every source with the edge.
+DW66|gql f48aeffe1b A label expression holds on a path's first node, as on a lone node and later nodes; 0.6.1 dropped it there and gave every source with the edge.
+DW67|gql 73400fca58 A label expression holds on a path's first node, as on a lone node and later nodes; 0.6.1 dropped it there and gave every source with the edge.
+DW68|gql 6b3d46939a A label expression holds on a path's first node, as on a lone node and later nodes; 0.6.1 dropped it there and gave every source with the edge.
+DW69|gql 51645aaa88 A label expression holds on a path's first node, as on a lone node and later nodes; 0.6.1 dropped it there and gave every source with the edge.
+DW70|gql 7bf1d5ca20 A label expression holds on a path's first node, as on a lone node and later nodes; 0.6.1 dropped it there and gave every source with the edge.
+DW73|gql 51645aaa88 A label expression holds on a path's first node, as on a lone node and later nodes; 0.6.1 dropped it there and gave every source with the edge.
+DW74|gql 4e6ba75afd A label expression holds on a path's first node, as on a lone node and later nodes; 0.6.1 dropped it there and gave every source with the edge.
+DW75|gql 4e6ba75afd A label expression holds on a path's first node, as on a lone node and later nodes; 0.6.1 dropped it there and gave every source with the edge.
+DW76|gql f48aeffe1b A label expression holds on a path's first node, as on a lone node and later nodes; 0.6.1 dropped it there and gave every source with the edge.
+DW77|gql 73400fca58 A label expression holds on a path's first node, as on a lone node and later nodes; 0.6.1 dropped it there and gave every source with the edge.
+DW78|gql 6b3d46939a A label expression holds on a path's first node, as on a lone node and later nodes; 0.6.1 dropped it there and gave every source with the edge.
+DW79|gql 51645aaa88 A label expression holds on a path's first node, as on a lone node and later nodes; 0.6.1 dropped it there and gave every source with the edge.
+DW80|gql 8cb992b084 A label expression holds on a path's first node, as on a lone node and later nodes; 0.6.1 dropped it there and gave every source with the edge.
+DW83|gql 23d475b4c0 A label expression holds on a path's first node, as on a lone node and later nodes; 0.6.1 dropped it there and gave every source with the edge.
+DW84|gql ad6be1fea8 A label expression holds on a path's first node, as on a lone node and later nodes; 0.6.1 dropped it there and gave every source with the edge.
+DW85|gql ad6be1fea8 A label expression holds on a path's first node, as on a lone node and later nodes; 0.6.1 dropped it there and gave every source with the edge.
+DW86|gql 1955691d4e A label expression holds on a path's first node, as on a lone node and later nodes; 0.6.1 dropped it there and gave every source with the edge.
+DW87|gql c4934a9d85 A label expression holds on a path's first node, as on a lone node and later nodes; 0.6.1 dropped it there and gave every source with the edge.
+DW88|gql 3cf46e9af2 A label expression holds on a path's first node, as on a lone node and later nodes; 0.6.1 dropped it there and gave every source with the edge.
+DW89|gql 23d475b4c0 A label expression holds on a path's first node, as on a lone node and later nodes; 0.6.1 dropped it there and gave every source with the edge.
+DW90|gql 5ea8e2bf88 A label expression holds on a path's first node, as on a lone node and later nodes; 0.6.1 dropped it there and gave every source with the edge.
+DW93|gql 5d966be177 A label expression holds on a path's first node, as on a lone node and later nodes; 0.6.1 dropped it there and gave every source with the edge.
+DW94|gql ee2e439430 A label expression holds on a path's first node, as on a lone node and later nodes; 0.6.1 dropped it there and gave every source with the edge.
+DW95|gql ee2e439430 A label expression holds on a path's first node, as on a lone node and later nodes; 0.6.1 dropped it there and gave every source with the edge.
+DW96|gql 58ff8f8999 A label expression holds on a path's first node, as on a lone node and later nodes; 0.6.1 dropped it there and gave every source with the edge.
+DW97|gql 58ff8f8999 A label expression holds on a path's first node, as on a lone node and later nodes; 0.6.1 dropped it there and gave every source with the edge.
+DW98|gql 81f980f851 A label expression holds on a path's first node, as on a lone node and later nodes; 0.6.1 dropped it there and gave every source with the edge.
+DW99|gql 5d966be177 A label expression holds on a path's first node, as on a lone node and later nodes; 0.6.1 dropped it there and gave every source with the edge.
+DW100|gql 8133434ea5 A label expression holds on a path's first node, as on a lone node and later nodes; 0.6.1 dropped it there and gave every source with the edge.
+DW103|gql e73fb1d56a A label expression holds on a path's first node, as on a lone node and later nodes; 0.6.1 dropped it there and gave every source with the edge.
+DW104|gql c0bb301067 A label expression holds on a path's first node, as on a lone node and later nodes; 0.6.1 dropped it there and gave every source with the edge.
+DW105|gql c0bb301067 A label expression holds on a path's first node, as on a lone node and later nodes; 0.6.1 dropped it there and gave every source with the edge.
+DW106|gql 86c6138c07 A label expression holds on a path's first node, as on a lone node and later nodes; 0.6.1 dropped it there and gave every source with the edge.
+DW107|gql b86f748900 A label expression holds on a path's first node, as on a lone node and later nodes; 0.6.1 dropped it there and gave every source with the edge.
+DW108|gql 098cd8bf52 A label expression holds on a path's first node, as on a lone node and later nodes; 0.6.1 dropped it there and gave every source with the edge.
+DW109|gql e73fb1d56a A label expression holds on a path's first node, as on a lone node and later nodes; 0.6.1 dropped it there and gave every source with the edge.
+DW110|gql fef519982d A label expression holds on a path's first node, as on a lone node and later nodes; 0.6.1 dropped it there and gave every source with the edge.
+DW123|sql e73fb1d56a A label expression holds on a path's first node, as on a lone node and later nodes; 0.6.1 dropped it there and gave every source with the edge.
+DW124|sql c0bb301067 A label expression holds on a path's first node, as on a lone node and later nodes; 0.6.1 dropped it there and gave every source with the edge.
+DW125|sql c0bb301067 A label expression holds on a path's first node, as on a lone node and later nodes; 0.6.1 dropped it there and gave every source with the edge.
+DW126|sql 86c6138c07 A label expression holds on a path's first node, as on a lone node and later nodes; 0.6.1 dropped it there and gave every source with the edge.
+DW127|sql b86f748900 A label expression holds on a path's first node, as on a lone node and later nodes; 0.6.1 dropped it there and gave every source with the edge.
+DW128|sql 098cd8bf52 A label expression holds on a path's first node, as on a lone node and later nodes; 0.6.1 dropped it there and gave every source with the edge.
+DW129|sql e73fb1d56a A label expression holds on a path's first node, as on a lone node and later nodes; 0.6.1 dropped it there and gave every source with the edge.
+DW130|sql fef519982d A label expression holds on a path's first node, as on a lone node and later nodes; 0.6.1 dropped it there and gave every source with the edge.
+DX3|gql f4437f74cd What a statement changes follows the label expression on a path's first node; 0.6.1 changed every source with the edge.
+DX5|gql 51c4a1a37b What a statement changes follows the label expression on a path's first node; 0.6.1 changed every source with the edge.
+DX7|gql fc32f944ab What a statement changes follows the label expression on a path's first node; 0.6.1 changed every source with the edge.
+DX9|gql 550714e9c4 What a statement changes follows the label expression on a path's first node; 0.6.1 changed every source with the edge.
+DX11|gql af40337115 What a statement changes follows the label expression on a path's first node; 0.6.1 changed every source with the edge.
+DX16|gql 2ccdbdd2e7 INSERT and MERGE set `IS A` and `A&B`, and MERGE matches on the labels; 0.6.1 created a node with no label and matched on the property alone.
+DX17|gql a5416b3f98 INSERT and MERGE refuse `|`, `!`, `%` and parentheses, naming the statement; 0.6.1 created a node with no label.
+DX18|gql a5416b3f98 INSERT and MERGE refuse `|`, `!`, `%` and parentheses, naming the statement; 0.6.1 created a node with no label.
+DX19|gql a5416b3f98 INSERT and MERGE refuse `|`, `!`, `%` and parentheses, naming the statement; 0.6.1 created a node with no label.
+DX20|gql a5416b3f98 INSERT and MERGE refuse `|`, `!`, `%` and parentheses, naming the statement; 0.6.1 created a node with no label.
+DX24|gql b5473b0fb9 INSERT and MERGE refuse `|`, `!`, `%` and parentheses, naming the statement; 0.6.1 created a node with no label.
+DX25|gql 646e30e5ca INSERT and MERGE set `IS A` and `A&B`, and MERGE matches on the labels; 0.6.1 created a node with no label and matched on the property alone.

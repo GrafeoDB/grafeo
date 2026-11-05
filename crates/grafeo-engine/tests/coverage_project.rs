@@ -6,7 +6,7 @@
 //! plan_project, plan_limit, plan_skip, or plan_sort.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test coverage_project
+//! cargo test -p grafeo-engine --all-features --test main coverage_project::
 //! ```
 //!
 //! Test data uses Tarantino characters and European cities per project

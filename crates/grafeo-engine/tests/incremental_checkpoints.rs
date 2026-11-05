@@ -9,7 +9,7 @@
 //! each of its points while a commit lands in the middle of it.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test incremental_checkpoints
+//! cargo test -p grafeo-engine --all-features --test main incremental_checkpoints::
 //! ```
 
 #![cfg(all(feature = "gql", feature = "wal", feature = "grafeo-file"))]
@@ -439,8 +439,7 @@ mod crash {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("crash.grafeo");
             let output = child_process::output(
-                std::process::Command::new(std::env::current_exe().unwrap())
-                    .args(["--exact", "crash::crash_child", "--nocapture"])
+                grafeo_common::child_test!("crash_child")
                     .env(POINT_VAR, point.to_string())
                     .env(PATH_VAR, &path)
                     .env(HISTORY_VAR, if history { "1" } else { "0" }),

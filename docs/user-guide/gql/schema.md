@@ -213,6 +213,8 @@ CREATE GRAPH TYPE routes {
 }
 ```
 
+Several patterns of one edge type are one type, so they must declare the same properties. They may differ on one side only, as in `(:Post)-[:HAS_CREATOR]->(:Person), (:Comment)-[:HAS_CREATOR]->(:Person)`, whose sources are then `Post` and `Comment`. Patterns that differ on both sides are not supported yet, as the type would also accept the pairs no pattern states.
+
 ### Graph Type from Existing Graph (LIKE)
 
 Clone a graph type from an existing graph's bound type:
@@ -278,15 +280,18 @@ DROP INDEX index_name
 DROP INDEX IF EXISTS index_name
 ```
 
+A property or B-tree index holds the nodes of its label only, so writes on other labels pay nothing for it. A query uses it when every result must have that label: `MATCH (p:Person {age: 30})` and `MATCH (p:Person:Author {age: 30})` do. A query whose results have one of several labels, as `MATCH (p:Person|Company {age: 30})`, or that names no label, as `MATCH (p {age: 30})`, uses the indexes there are and reads the property only of the nodes they do not cover. A query for a label with no index on the property, as `MATCH (p:City {age: 30})`, scans that label. Every one returns the same rows.
+
+`create_property_index` in the API makes an index on a property of every label, which also serves a query with no label. An index on the label and property, or one on the property of every label, makes a later `CREATE INDEX` on them build nothing: its name stands for the index that is there. `drop_property_index` drops every index on the property in the current graph.
+
 Index names belong to the database, not to one graph: a name stands for one index definition in all of its graphs.
 `CREATE INDEX` with a name that already stands for another label, property or kind of index, in any graph, fails
 naming it, and `IF NOT EXISTS` (also on `CREATE VECTOR INDEX`) keeps the existing index.
 `DROP INDEX` drops the index the name stands for, whatever its kind, and every property of an index over several.
 `SHOW INDEXES` lists each index by name, with its type, label and property (one row per property), also the indexes
 made through the API (`create_property_index`, `create_vector_index`, `create_text_index`): those have a null name,
-and a property index made that way covers every label, so its label is null too.
-
-When the pattern follows an earlier clause (`UNWIND`, another `MATCH`), an index lookup can miss values that `=` treats as equal without one: a number stored as a string in another spelling (`'42.0'` or `'042'` for `42`), and floats that differ only in the last digit (`0.1 + 0.2` for `0.3`). This holds whether the key comes from the rows, is written in the query or is passed as a parameter. On properties that mix strings and numbers, or that hold computed floats, such a query can return fewer rows once an index exists. Keep a property's values of one type to get the same rows either way.
+and a property index made that way covers every label, so its label is null too. An index a constraint built without
+a name has a null name and its label.
 
 ### Text Indexes
 
@@ -347,6 +352,12 @@ CREATE CONSTRAINT FOR (p:Person) ON (p.email) EXISTS
 ```
 
 ### Naming, Listing and Dropping Constraints
+
+A constraint over data that already breaks it is refused with `GRAFEO-V001`, naming the constraint and a value that breaks it.
+
+`UNIQUE` and `NODE KEY` build a property index on the constraint's first property, in every graph the constraint reaches and in each graph made later, so that checking an insert does not read the whole label. It holds the constraint's label only, so other labels with that property pay nothing for it, and two constraints on one property and different labels each have their own. An index already on the label and property, or on the property of every label, is used. A `NODE KEY` whose first property has few distinct values stays slower: list a property with many values first.
+
+The index takes the constraint's name, when it was given one that no other index has. `DROP CONSTRAINT` leaves the index and says so, and `DROP INDEX` removes it. A constraint without its index still holds: it reads the label to check each write.
 
 Give a constraint a name after `CREATE CONSTRAINT`; one created without a name is named after its label, properties and kind, such as `Person_email_unique`. A name can be used once: `CREATE CONSTRAINT IF NOT EXISTS name ...` does nothing when the name is taken. `SHOW CONSTRAINTS` lists the constraints with their name, kind, label and properties.
 

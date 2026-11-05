@@ -7,7 +7,7 @@
 //! named graphs, and rollback discards them, also across a reopen.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --features full --test sparql_transactions
+//! cargo test -p grafeo-engine --features full --test main sparql_transactions::
 //! ```
 
 #![allow(missing_docs)]
@@ -18,8 +18,6 @@
     feature = "wal",
     feature = "grafeo-file"
 ))]
-mod common;
-
 #[cfg(all(feature = "sparql", feature = "triple-store"))]
 mod tests {
     use grafeo_common::types::Value;
@@ -223,7 +221,7 @@ mod tests {
         fn rolled_back_updates_stay_gone_after_reopen() {
             let (default_before, named_before) = seeded();
             let (_dir, db) = reopened_after_crash(
-                "tests::durability::rolled_back_updates_stay_gone_after_reopen",
+                &grafeo_common::test_path!("rolled_back_updates_stay_gone_after_reopen"),
                 open,
                 |db| {
                     let mut session = db.session();
@@ -254,7 +252,9 @@ mod tests {
         fn auto_committed_write_survives_later_rollback_and_reopen() {
             let (before, _) = seeded();
             let (_dir, db) = reopened_after_crash(
-                "tests::durability::auto_committed_write_survives_later_rollback_and_reopen",
+                &grafeo_common::test_path!(
+                    "auto_committed_write_survives_later_rollback_and_reopen"
+                ),
                 open,
                 |db| {
                     let mut session = db.session();
@@ -273,7 +273,7 @@ mod tests {
         #[test]
         fn committed_updates_survive_reopen() {
             let (_dir, db) = reopened_after_crash(
-                "tests::durability::committed_updates_survive_reopen",
+                &grafeo_common::test_path!("committed_updates_survive_reopen"),
                 open,
                 |db| {
                     let mut session = db.session();

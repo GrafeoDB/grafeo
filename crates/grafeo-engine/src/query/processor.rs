@@ -369,8 +369,15 @@ impl QueryProcessor {
         // 4a. EXPLAIN: annotate pushdown hints and return the plan tree
         if optimized_plan.explain {
             let mut plan = optimized_plan;
-            annotate_pushdown_hints(&mut plan.root, self.graph_store.as_ref());
-            return Ok(explain_result(&plan));
+            annotate_pushdown_hints(
+                &mut plan.root,
+                self.graph_store.as_ref(),
+                crate::query::optimizer::PlannerRules::all(),
+            );
+            return Ok(explain_result(
+                &plan,
+                crate::query::optimizer::PlannerRules::all(),
+            ));
         }
 
         // A write outside a transaction runs in one of its own, which
@@ -708,9 +715,10 @@ impl QueryProcessor {
 pub(crate) fn annotate_pushdown_hints(
     op: &mut LogicalOperator,
     store: &dyn grafeo_core::graph::GraphStore,
+    rules: crate::query::optimizer::PlannerRules,
 ) {
     let writes = crate::query::planner::lpg::value_join::writes_per_row(op);
-    annotate_hints(op, store, writes, false);
+    annotate_hints(op, store, rules, writes, false);
 }
 
 /// [`annotate_pushdown_hints`] below the root of a statement that `writes`,
@@ -722,6 +730,7 @@ pub(crate) fn annotate_pushdown_hints(
 fn annotate_hints(
     op: &mut LogicalOperator,
     store: &dyn grafeo_core::graph::GraphStore,
+    rules: crate::query::optimizer::PlannerRules,
     writes: bool,
     after_a_write: bool,
 ) {
@@ -733,14 +742,14 @@ fn annotate_hints(
         LogicalOperator::Join(crate::query::plan::JoinOp { left, right, .. })
         | LogicalOperator::LeftJoin(crate::query::plan::LeftJoinOp { left, right, .. }) => {
             let later = after_a_write || right_side_runs_after_a_write(left);
-            annotate_hints(left, store, writes, after_a_write);
-            annotate_hints(right, store, writes, later);
+            annotate_hints(left, store, rules, writes, after_a_write);
+            annotate_hints(right, store, rules, writes, later);
             return;
         }
         LogicalOperator::Apply(apply) => {
             let later = after_a_write || subquery_runs_after_a_write(apply);
-            annotate_hints(&mut apply.input, store, writes, after_a_write);
-            annotate_hints(&mut apply.subplan, store, writes, later);
+            annotate_hints(&mut apply.input, store, rules, writes, after_a_write);
+            annotate_hints(&mut apply.subplan, store, rules, writes, later);
             return;
         }
         _ => {}
@@ -751,7 +760,7 @@ fn annotate_hints(
             *filter = reordered;
         }
         // Recurse into children first
-        annotate_hints(&mut filter.input, store, writes, after_a_write);
+        annotate_hints(&mut filter.input, store, rules, writes, after_a_write);
         // A subquery of the predicate is planned like any plan, with the
         // labels it scans chosen the same way.
         let _ = crate::query::planner::lpg::subquery::visit_subqueries(
@@ -761,7 +770,7 @@ fn annotate_hints(
                 | crate::query::plan::LogicalExpression::CountSubquery(plan)
                 | crate::query::plan::LogicalExpression::ValueSubquery(plan) = subquery
                 {
-                    annotate_hints(plan, store, writes, after_a_write);
+                    annotate_hints(plan, store, rules, writes, after_a_write);
                 }
                 Ok(())
             },
@@ -769,30 +778,41 @@ fn annotate_hints(
 
         // A seek or a hash join replaces the scan below the filter
         let replaced = crate::query::planner::lpg::seek::checked_scan(filter).and_then(|below| {
-            seek_hint(&filter.predicate, below.scan, store, after_a_write)
-                // Many rows against a small label join faster than they seek
-                // (see `beats_a_seek`), as the planner chooses.
-                .filter(|hint| {
-                    !matches!(hint, crate::query::plan::PushdownHint::IndexLookup { .. })
-                        || !crate::query::planner::lpg::value_join::beats_a_seek(
-                            filter, writes, store,
-                        )
+            let labels =
+                crate::query::planner::lpg::seek::LookupLabels::of(filter, &below.scan.variable);
+            // Many rows against a small label join faster than they seek
+            // (see `beats_a_seek`), as the planner chooses.
+            seek_hint(filter, &below, &labels, store, rules, after_a_write, writes)
+                .or_else(|| {
+                    rules
+                        .has(crate::query::optimizer::PlannerRule::ValueJoin)
+                        .then(|| value_join_hint(filter, writes))
+                        .flatten()
                 })
-                .or_else(|| value_join_hint(filter, writes))
                 // The index lookup made while planning takes over checks of
                 // the scanned node between the filter and the scan too.
                 .or_else(|| {
-                    (!below.checks.is_empty() && below.scan.input.is_none() && !after_a_write)
-                        .then(|| {
+                    if below.checks.is_empty() || below.scan.input.is_some() {
+                        return None;
+                    }
+                    std::iter::once(&filter.predicate)
+                        .chain(below.checks.iter().map(|(_, check)| *check))
+                        .find_map(|predicate| {
                             crate::query::planner::lpg::filter::scan_hint(
-                                &filter.predicate,
-                                below.scan,
-                                store,
+                                predicate, below.scan, &labels, store, rules,
                             )
-                        })
-                        .flatten()
-                        .filter(|hint| {
-                            matches!(hint, crate::query::plan::PushdownHint::IndexLookup { .. })
+                            // A read of a key's column reads as it runs, so also after
+                            // a write; an index's lookup while planning does not.
+                            .filter(|hint| match hint {
+                                crate::query::plan::PushdownHint::IndexLookup { .. } => {
+                                    !after_a_write
+                                }
+                                crate::query::plan::PushdownHint::IndexesAndRemainder {
+                                    ..
+                                }
+                                | crate::query::plan::PushdownHint::KeyColumn { .. } => true,
+                                _ => false,
+                            })
                         })
                 })
         });
@@ -806,9 +826,17 @@ fn annotate_hints(
                 below = check.input.as_mut();
             }
         } else if let LogicalOperator::NodeScan(scan) = filter.input.as_ref() {
-            filter.pushdown_hint =
-                crate::query::planner::lpg::filter::scan_hint(&filter.predicate, scan, store);
+            let labels = crate::query::planner::lpg::seek::LookupLabels::of(filter, &scan.variable);
+            let hint = crate::query::planner::lpg::filter::scan_hint(
+                &filter.predicate,
+                scan,
+                &labels,
+                store,
+                rules,
+            );
+            filter.pushdown_hint = hint;
         }
+        note_index_on_other_labels(filter, store);
         return;
     }
     if let LogicalOperator::Merge(merge) = op {
@@ -816,7 +844,7 @@ fn annotate_hints(
     }
     let taken = std::mem::replace(op, LogicalOperator::Empty);
     *op = taken.map_children(|mut child| {
-        annotate_hints(&mut child, store, writes, after_a_write);
+        annotate_hints(&mut child, store, rules, writes, after_a_write);
         child
     });
 }
@@ -832,41 +860,119 @@ fn merge_index_hint(
     use crate::query::plan::LogicalExpression;
     use grafeo_common::types::Value;
 
+    let labels: Vec<&str> = merge.labels.iter().map(String::as_str).collect();
     merge
         .match_properties
         .iter()
         .find(|(key, value)| {
             !matches!(value, LogicalExpression::Literal(Value::Null))
-                && store.has_property_index(key)
+                && store.index_serves(&labels, key)
         })
         .map(|(key, _)| key.clone())
+}
+
+/// Adds to the hint of the filter that holds it, in the chain of filters `top` heads over a node
+/// scan or a hop and reading no index, that a key it pins has an index on other labels only.
+/// Filters are annotated from the bottom up, so this comes once per filter of a chain: each time
+/// it takes back what it said below, by the labels of fewer filters.
+fn note_index_on_other_labels(
+    top: &mut crate::query::plan::FilterOp,
+    store: &dyn grafeo_core::graph::GraphStore,
+) {
+    use crate::query::plan::{FilterOp, PushdownHint};
+    use crate::query::planner::lpg::seek;
+
+    let scan = seek::checked_scan(top)
+        .map(|below| (below.scan.variable.clone(), below.scan.input.is_some()));
+    if scan.is_none() {
+        let mut below = top.input.as_ref();
+        while let LogicalOperator::Filter(filter) = below {
+            below = &filter.input;
+        }
+        if !matches!(below, LogicalOperator::Expand(_)) {
+            return;
+        }
+    }
+    let mut reads_an_index = false;
+    let mut filter: &mut FilterOp = &mut *top;
+    loop {
+        if let Some(PushdownHint::NoIndex { then, .. }) = &mut filter.pushdown_hint {
+            filter.pushdown_hint = then.take().map(|hint| *hint);
+        }
+        reads_an_index |= matches!(
+            filter.pushdown_hint,
+            Some(
+                PushdownHint::IndexLookup { .. }
+                    | PushdownHint::IndexesAndRemainder { .. }
+                    | PushdownHint::IdSeek
+                    | PushdownHint::ExpandToKey { .. }
+            )
+        );
+        let LogicalOperator::Filter(below) = filter.input.as_mut() else {
+            break;
+        };
+        filter = below;
+    }
+    if reads_an_index {
+        return;
+    }
+    // A hop looks up one value known without a row, a scan what its operators take.
+    let lists = scan.is_some();
+    let Some((variable, reads_rows)) = scan.or_else(|| {
+        crate::query::optimizer::far_end_variable(top).map(|variable| (variable, false))
+    }) else {
+        return;
+    };
+    let Some(found) = seek::key_indexed_on_other_labels(top, &variable, reads_rows, lists, store)
+    else {
+        return;
+    };
+    let mut filter: &mut FilterOp = top;
+    for _ in 0..found.depth {
+        let LogicalOperator::Filter(below) = filter.input.as_mut() else {
+            return;
+        };
+        filter = below;
+    }
+    filter.pushdown_hint = Some(PushdownHint::NoIndex {
+        key: found.key,
+        labels: found.labels,
+        then: filter.pushdown_hint.take().map(Box::new),
+    });
 }
 
 /// The seek the planner makes of a filter over `scan`: an ID, or an indexed
 /// property per input row, or once for a filter that
 /// runs `after_a_write` of the statement. None after a write in the scan's
 /// input, which the scan reads whole first.
-fn seek_hint(
-    predicate: &LogicalExpression,
-    scan: &crate::query::plan::NodeScanOp,
+fn seek_hint<'a>(
+    filter: &'a crate::query::plan::FilterOp,
+    below: &crate::query::planner::lpg::seek::CheckedScan<'a>,
+    labels: &crate::query::planner::lpg::seek::LookupLabels<'_>,
     store: &dyn grafeo_core::graph::GraphStore,
+    rules: crate::query::optimizer::PlannerRules,
     after_a_write: bool,
+    writes_per_row: bool,
 ) -> Option<crate::query::plan::PushdownHint> {
     use crate::query::plan::PushdownHint;
     use grafeo_core::execution::operators::SeekKey;
 
-    if scan
+    if below
+        .scan
         .input
         .as_deref()
         .is_some_and(LogicalOperator::has_mutations)
     {
         return None;
     }
-    let seek = crate::query::planner::lpg::seek::choose_seek(
-        predicate,
-        scan,
-        |p| store.has_property_index(p),
+    let seek = crate::query::planner::lpg::seek::chain_seek(
+        filter,
+        below,
+        labels,
+        store,
+        rules,
         after_a_write,
+        writes_per_row,
     )?;
     Some(match seek.key {
         SeekKey::Id => PushdownHint::IdSeek,
@@ -892,8 +998,11 @@ fn value_join_hint(
 }
 
 /// Builds a `QueryResult` containing the EXPLAIN plan tree text.
-pub(crate) fn explain_result(plan: &LogicalPlan) -> QueryResult {
-    let tree_text = plan.root.explain_tree();
+pub(crate) fn explain_result(
+    plan: &LogicalPlan,
+    rules: crate::query::optimizer::PlannerRules,
+) -> QueryResult {
+    let tree_text = plan.root.explain_tree_with(rules);
     QueryResult {
         columns: vec!["plan".to_string()],
         column_types: vec![grafeo_common::types::LogicalType::String],
@@ -1189,6 +1298,7 @@ fn substitute_in_operator(op: &mut LogicalOperator, params: &Substitution<'_>) -
             substitute_in_operator(&mut bind.input, params)?;
         }
         LogicalOperator::PropertyPath(_) | LogicalOperator::NamedGraphs(_) => {}
+        LogicalOperator::InNamedGraph(graph) => substitute_in_operator(&mut graph.input, params)?,
         LogicalOperator::TripleScan(scan) => {
             if let Some(input) = &mut scan.input {
                 substitute_in_operator(input, params)?;

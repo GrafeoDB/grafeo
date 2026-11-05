@@ -165,6 +165,7 @@ impl Session {
         language: &'static str,
     ) -> Result<QueryResult> {
         let start_time = Instant::now();
+        self.refuse_sparql_after_graph_op()?;
 
         // A write needs a writable session: a writing role, and no read-only
         // transaction or database.
@@ -176,7 +177,10 @@ impl Session {
         // EXPLAIN: return the logical plan tree without executing
         if optimized_plan.explain {
             use crate::query::processor::explain_result;
-            return Ok(explain_result(optimized_plan));
+            return Ok(explain_result(
+                optimized_plan,
+                crate::query::optimizer::PlannerRules::all(),
+            ));
         }
 
         // A write fails once the database is closed, also inside a
@@ -230,13 +234,16 @@ impl Session {
     /// update records its triples and a read sees them; `None` without one.
     fn rdf_writer(&self) -> Option<crate::transaction::RdfWriter> {
         let changes = self.changes.lock().clone()?;
-        Some(crate::transaction::RdfWriter::new(
-            Arc::clone(&self.rdf_store),
-            changes,
-            Arc::clone(&self.transaction_manager),
-            #[cfg(feature = "wal")]
-            self.wal().cloned(),
-        ))
+        Some(
+            crate::transaction::RdfWriter::new(
+                Arc::clone(&self.rdf_store),
+                changes,
+                Arc::clone(&self.transaction_manager),
+                #[cfg(feature = "wal")]
+                self.wal().cloned(),
+            )
+            .queuing_graph_ops(),
+        )
     }
 
     /// Validates the default graph against SHACL shapes in a named graph.

@@ -402,14 +402,9 @@ fn files_under(directory: &Path) -> Files {
 }
 
 fn child_command(source: &Path, directory: &Path, mode: &str) -> Command {
-    let mut command = Command::new(std::env::current_exe().unwrap());
+    let mut command = grafeo_common::child_test!("backup_serialization_child");
     command
-        .args([
-            "--ignored",
-            "--exact",
-            "backup_serialization_child",
-            "--nocapture",
-        ])
+        .arg("--ignored")
         .env(CHILD_SOURCE, source)
         .env(CHILD_DIRECTORY, directory)
         .env(CHILD_MODE, mode)

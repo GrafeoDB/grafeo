@@ -1,0 +1,7 @@
+# Label Mix Dataset
+# Five nodes, one per kind of label set (A, B, A and B, C, none), each with an edge to a hub
+# (R) and from it (S), and each holding k = 1.
+#
+# Use case: label expressions in every position of a pattern
+
+INSERT (a:A {name: 'Alix', k: 1}), (g:B {name: 'Gus', k: 1}), (v:A:B {name: 'Vincent', k: 1}), (j:C {name: 'Jules', k: 1}), (m {name: 'Mia', k: 1}), (t:T {name: 'Amsterdam', tk: 1}), (a)-[:R]->(t), (g)-[:R]->(t), (v)-[:R]->(t), (j)-[:R]->(t), (m)-[:R]->(t), (t)-[:S]->(a), (t)-[:S]->(g), (t)-[:S]->(v), (t)-[:S]->(j), (t)-[:S]->(m)

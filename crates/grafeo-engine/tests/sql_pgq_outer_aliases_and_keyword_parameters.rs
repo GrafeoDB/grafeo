@@ -5,7 +5,7 @@
 //! Cypher allow, also next to the same keyword in the query.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test sql_pgq_outer_aliases_and_keyword_parameters
+//! cargo test -p grafeo-engine --all-features --test main sql_pgq_outer_aliases_and_keyword_parameters::
 //! ```
 
 #![cfg(all(feature = "gql", feature = "sql-pgq"))]

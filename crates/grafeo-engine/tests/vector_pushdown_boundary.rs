@@ -19,8 +19,8 @@
 //! shared `ExtractedVectorPredicate::strict` constructor.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --features lpg,gql,wal,vector-index \
-//!     --test vector_pushdown_boundary
+//! cargo test -p grafeo-engine --all-features \
+//!     --test main vector_pushdown_boundary::
 //! ```
 
 #![cfg(all(feature = "gql", feature = "vector-index"))]

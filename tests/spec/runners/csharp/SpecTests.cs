@@ -27,11 +27,6 @@ public class SpecTests : IDisposable
     // Constants
     // =========================================================================
 
-    /// <summary>
-    /// Whether the Grafeo native library is available. When false, all tests skip.
-    /// </summary>
-    private static readonly bool GrafeoAvailable = CheckGrafeoAvailable();
-
     /// <summary>Repository root, resolved from this file's location.</summary>
     private static readonly string RepoRoot = FindRepoRoot();
 
@@ -41,8 +36,11 @@ public class SpecTests : IDisposable
     /// <summary>Path to the datasets directory.</summary>
     private static readonly string DatasetsDir = Path.Combine(SpecDir, "datasets");
 
-    /// <summary>Cached set of compiled feature flags from db.Info().</summary>
-    private static readonly HashSet<string> CompiledFeatures = LoadCompiledFeatures();
+    /// <summary>
+    /// Cached set of compiled feature flags from db.Info(). Lazy so that a native
+    /// library that does not load fails each test, instead of test discovery.
+    /// </summary>
+    private static readonly Lazy<HashSet<string>> CompiledFeatures = new(LoadCompiledFeatures);
 
     /// <summary>
     /// Capabilities provided by this runner itself (not compiled into the native
@@ -74,12 +72,6 @@ public class SpecTests : IDisposable
         string? variantQuery,
         string? skipReason)
     {
-        if (!GrafeoAvailable)
-        {
-            Skip.If(true, "Grafeo native library not available");
-            return;
-        }
-
         if (skipReason is not null)
         {
             Skip.If(true, skipReason);
@@ -242,7 +234,7 @@ public class SpecTests : IDisposable
                     "PARSE_ERROR",
                     null,
                     null,
-                    $"Failed to parse: {parseError}",
+                    null,
                 ];
                 continue;
             }
@@ -419,8 +411,8 @@ public class SpecTests : IDisposable
         var key = requirement.Replace('_', '-');
         // Compound language key: "graphql-rdf" requires both "graphql" and "rdf"
         if (key == "graphql-rdf")
-            return CompiledFeatures.Contains("graphql") && CompiledFeatures.Contains("rdf");
-        return CompiledFeatures.Contains(key) || RunnerCapabilities.Contains(key);
+            return CompiledFeatures.Value.Contains("graphql") && CompiledFeatures.Value.Contains("rdf");
+        return CompiledFeatures.Value.Contains(key) || RunnerCapabilities.Contains(key);
     }
 
     // =========================================================================
@@ -958,54 +950,21 @@ public class SpecTests : IDisposable
     // Setup helpers
     // =========================================================================
 
-    private static bool CheckGrafeoAvailable()
-    {
-        try
-        {
-            using var db = GrafeoDB.Memory();
-            return true;
-        }
-        catch
-        {
-            return false;
-        }
-    }
-
     private static HashSet<string> LoadCompiledFeatures()
     {
-        try
+        // A native library that does not load throws here and fails the test: it
+        // must not pass as thousands of skipped tests.
+        using var db = GrafeoDB.Memory();
+        var info = db.Info();
+        if (info.TryGetValue("features", out var featuresObj)
+            && featuresObj is IEnumerable<object?> features)
         {
-            using var db = GrafeoDB.Memory();
-            var info = db.Info();
-            if (info.TryGetValue("features", out var featuresObj)
-                && featuresObj is IEnumerable<object?> features)
-            {
-                return features
-                    .Where(f => f is not null)
-                    .Select(f => f!.ToString()!)
-                    .ToHashSet();
-            }
+            return features
+                .Where(f => f is not null)
+                .Select(f => f!.ToString()!)
+                .ToHashSet();
         }
-        catch (DllNotFoundException)
-        {
-            // Native library not available
-        }
-        catch (BadImageFormatException)
-        {
-            // Native library not available
-        }
-        catch (TypeInitializationException ex)
-        {
-            if (ex.InnerException is DllNotFoundException or BadImageFormatException)
-            {
-                // Native library not available
-            }
-            else
-            {
-                throw;
-            }
-        }
-        return [];
+        throw new InvalidOperationException("db.Info() lists no features");
     }
 
     private static string FindRepoRoot()

@@ -35,6 +35,85 @@ use std::sync::Arc;
 /// The labels of a node, as [`GraphStore::node_labels`] returns them.
 pub type Labels = grafeo_common::change::Labels;
 
+/// The most nodes [`GraphStore::sampled_degree`] reads: a label of at most this many
+/// is read whole, so its 0 is known, where a larger label's may be a sample that missed.
+pub const DEGREE_SAMPLE_NODES: usize = 256;
+
+/// [`GraphStore::common_edges`] from the two lists: a store that cannot intersect
+/// them where they lie.
+pub(crate) fn common_edges_by_lists(
+    near_edges: Vec<(NodeId, EdgeId)>,
+    far_edges: Vec<(NodeId, EdgeId)>,
+) -> Result<(Vec<CommonEdge>, usize)> {
+    let read = near_edges.len() + far_edges.len();
+    let hash_near = near_edges.len() < far_edges.len();
+    let (hashed, walked) = if hash_near {
+        (near_edges, far_edges)
+    } else {
+        (far_edges, near_edges)
+    };
+    let mut by_node: std::collections::HashMap<NodeId, Vec<EdgeId>> =
+        std::collections::HashMap::with_capacity(hashed.len());
+    for (node, edge) in hashed {
+        by_node.entry(node).or_default().push(edge);
+    }
+    let mut common = Vec::new();
+    for (node, walked_edge) in walked {
+        for hashed_edge in by_node.get(&node).into_iter().flatten() {
+            let (near_edge, far_edge) = if hash_near {
+                (*hashed_edge, walked_edge)
+            } else {
+                (walked_edge, *hashed_edge)
+            };
+            common.push(CommonEdge {
+                node,
+                near_edge,
+                far_edge,
+            });
+        }
+    }
+    common.sort_unstable();
+    Ok((common, read))
+}
+
+/// One side of [`GraphStore::common_edges`]: a node's list of one hop.
+#[derive(Debug, Clone, Copy)]
+pub struct HopFrom<'a> {
+    /// The node.
+    pub node: NodeId,
+    /// The way the list goes.
+    pub direction: Direction,
+    /// The edge types it holds (every type when empty).
+    pub edge_types: &'a [ArcStr],
+}
+
+/// A node two lists reach, by one edge of each.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct CommonEdge {
+    /// The node.
+    pub node: NodeId,
+    /// The edge of the near list.
+    pub near_edge: EdgeId,
+    /// The edge of the far list.
+    pub far_edge: EdgeId,
+}
+
+/// What a read of a key's column found in the rows of one call (see
+/// [`GraphStore::key_column_group`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct KeyColumnGroup {
+    /// The nodes found, ascending.
+    pub nodes: Vec<NodeId>,
+    /// How many rows it looked at, for a statement's count of what it read.
+    pub compared: usize,
+    /// Whether each node found is `=` a value, not only maybe.
+    pub exact: bool,
+    /// The id the next read starts from; `None` when no group is left.
+    pub end: Option<u64>,
+    /// One past every node id the store had given out when it read.
+    pub ids_given: u64,
+}
+
 /// The reads of one graph, each at an explicit [`ReadView`].
 ///
 /// Every read names who reads: a transaction at its snapshot, which sees
@@ -346,6 +425,45 @@ pub trait GraphStore: Send + Sync {
         view: ReadView,
     ) -> Result<Vec<(NodeId, EdgeId)>>;
 
+    /// The nodes both `near`'s and `far`'s lists reach, each with every pair of an
+    /// edge from either list, ordered by node and edges, and the entries read. The
+    /// rows of following `near` and then looking its far ends up in `far`'s list.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error of a read the store cannot do.
+    fn common_edges(
+        &self,
+        near: &HopFrom<'_>,
+        far: &HopFrom<'_>,
+        view: ReadView,
+    ) -> Result<(Vec<CommonEdge>, usize)> {
+        common_edges_by_lists(
+            self.edges(near.node, near.direction, near.edge_types, view)?,
+            self.edges(far.node, far.direction, far.edge_types, view)?,
+        )
+    }
+
+    /// The edges [`edges`](Self::edges) lists for `node` whose other end is
+    /// `other`, in the order it lists them: the closing hop of a cycle, which
+    /// knows the node it comes back to and needs no list of the others.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error of a read the store cannot do.
+    fn edges_between(
+        &self,
+        node: NodeId,
+        other: NodeId,
+        direction: Direction,
+        types: &[ArcStr],
+        view: ReadView,
+    ) -> Result<Vec<EdgeId>> {
+        let mut edges = self.edges(node, direction, types, view)?;
+        edges.retain(|(end, _)| *end == other);
+        Ok(edges.into_iter().map(|(_, edge)| edge).collect())
+    }
+
     /// Whether `view` sees an edge of `node` in `direction` of one of
     /// `types` (any type when empty), as [`edges`](Self::edges) would list
     /// one: an `EXISTS` of one edge needs no more than the first.
@@ -565,11 +683,139 @@ pub trait GraphStore: Send + Sync {
 
     // --- Lookups ---
 
-    /// Whether the store keeps a property index on `property`: the planner
-    /// then prefers a lookup to a scan. Not an answer: the lookups answer
-    /// alike either way.
+    /// Whether the store keeps a property index on `property`, on every label or on one. Not
+    /// an answer: the lookups answer alike either way. For what a lookup can read, see
+    /// [`index_serves`](Self::index_serves).
     fn has_property_index(&self, _property: &str) -> bool {
         false
+    }
+
+    /// Whether a lookup of `property` whose results all have each of `labels` has an index to
+    /// read: one on a label among `labels`, or one on every label. The planner then prefers a
+    /// lookup to a scan. A store with no index on one label has only the second kind.
+    fn index_serves(&self, _labels: &[&str], property: &str) -> bool {
+        self.has_property_index(property)
+    }
+
+    /// Whether [`key_column_group`](Self::key_column_group) answers.
+    fn reads_key_columns(&self) -> bool {
+        false
+    }
+
+    /// The rows from node id `from` that the store reads at once, a row group or part of one,
+    /// read for `query`: every node of them `view` sees, with the query's labels as `view` sees
+    /// them, whose value of the key as `view` sees it `=` may find equal to one of the query's
+    /// values, and of those labels' nodes maybe others, ascending. A store's rows are grouped as
+    /// it likes; the answer says where the next read starts. `query` keeps what a next read of
+    /// the same rows can use.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error of a read the store cannot do, and of a store that does not read key
+    /// columns (see [`reads_key_columns`](Self::reads_key_columns)).
+    fn key_column_group(
+        &self,
+        _query: &mut super::rowgroup::KeyColumnQuery,
+        _from: u64,
+        _view: ReadView,
+    ) -> Result<KeyColumnGroup> {
+        Err(grafeo_common::utils::error::Error::Internal(
+            "this store does not read key columns".to_string(),
+        ))
+    }
+
+    /// What a walk back from a node of `far_label` reads over `types` in `back`, by the far side:
+    /// a sample of the label's lists, read for their lengths alone, weighted by their edges, plus
+    /// the edges of `types` the sample's mean does not account for, which may be one hub's. Edges
+    /// to other labels count as such too, so it reads high. It spends the reads it takes from
+    /// `budget`. `None` for a store that cannot read lengths, a label with no node, no types, or
+    /// too little budget.
+    fn far_walk_back_within(
+        &self,
+        _far_label: &str,
+        _types: &[&str],
+        _back: Direction,
+        _budget: &mut u64,
+    ) -> Option<f64> {
+        None
+    }
+
+    /// How many distinct values the index a lookup of `property` among nodes with each of
+    /// `labels` reads holds (see [`index_serves`](Self::index_serves)), for the planner to judge
+    /// how many nodes a value finds. It may read high: values only old versions hold count until
+    /// they are collected. `None` for a store that cannot tell, or without such an index.
+    fn indexed_distinct_values(&self, _labels: &[&str], _property: &str) -> Option<u64> {
+        None
+    }
+
+    /// The most edges [`edges`](Self::edges) can give for `node`, without going through them:
+    /// removed and unseen ones may count, and under [`Direction::Both`] a self-loop twice. `None`
+    /// for a store that cannot tell without reading them.
+    fn edge_entries_at_most(
+        &self,
+        _node: NodeId,
+        _direction: Direction,
+        _types: &[ArcStr],
+        _view: ReadView,
+    ) -> Option<usize> {
+        None
+    }
+
+    /// Whether `label` has a property index of its own on `property`.
+    fn has_label_index(&self, _label: &str, _property: &str) -> bool {
+        false
+    }
+
+    /// The property indexes the store keeps on one label, as `(label, property)`.
+    fn label_index_entries(&self) -> Vec<(String, String)> {
+        Vec::new()
+    }
+
+    /// The mean count of `edge_type`'s edges in `direction` over a sample of
+    /// `label`'s nodes, as committed, for the planner to judge a hop: no open
+    /// transaction's writes count, and the same data gives the same value. `None`
+    /// for a store that cannot sample, a label without a node or a read that fails.
+    fn sampled_degree(&self, _label: &str, _edge_type: &str, _direction: Direction) -> Option<f64> {
+        None
+    }
+
+    /// The mean count of `on_types`' edges in `on_direction` at the ends a hop reaches:
+    /// over the edges of `via_types` in `via_direction` from a sample of `start_label`'s
+    /// nodes (of all nodes for `None`), as committed, each end counted as often as an edge
+    /// reaches it. So a hub many edges reach weighs what a path through them meets. A mean
+    /// of 0 stands only when every edge was read. `None` for a store that cannot sample, a
+    /// read that fails, or a 0 from part of the edges.
+    fn sampled_reached_degree(
+        &self,
+        start_label: Option<&str>,
+        via_types: &[&str],
+        via_direction: Direction,
+        on_types: &[&str],
+        on_direction: Direction,
+    ) -> Option<f64> {
+        let mut unlimited = u64::MAX;
+        self.sampled_reached_degree_within(
+            start_label,
+            via_types,
+            via_direction,
+            on_types,
+            on_direction,
+            &mut unlimited,
+        )
+    }
+
+    /// [`sampled_reached_degree`](Self::sampled_reached_degree) that spends the reads it
+    /// takes from `budget`, and reads nothing with none left: a value held costs nothing.
+    fn sampled_reached_degree_within(
+        &self,
+        _start_label: Option<&str>,
+        _via_types: &[&str],
+        _via_direction: Direction,
+        _on_types: &[&str],
+        _on_direction: Direction,
+        _budget: &mut u64,
+    ) -> Option<f64> {
+        None
     }
 
     /// The nodes `view` sees whose `property` equals `value`, by ascending
@@ -613,9 +859,9 @@ pub trait GraphStore: Send + Sync {
     /// The nodes whose `property` may be equal to `value` under `=` (the
     /// filter's equality, see
     /// [`HashKey::for_equality`](crate::execution::operators::HashKey::for_equality)),
-    /// found through the property's index: every node `view` sees that `=`
+    /// found through the property's index on every label: every node `view` sees that `=`
     /// finds equal, and maybe others it sees, for a filter to decide. `None`
-    /// without an index on `property`: the caller then scans.
+    /// without one: the caller then scans.
     ///
     /// # Errors
     ///
@@ -627,6 +873,74 @@ pub trait GraphStore: Send + Sync {
         _view: ReadView,
     ) -> Result<Option<Vec<NodeId>>> {
         Ok(None)
+    }
+
+    /// [`find_nodes_maybe_equal`](Self::find_nodes_maybe_equal), for a caller
+    /// that would rather not read a common key: `None` also when the index
+    /// holds more than `limit` candidates for `value`, known before any of them
+    /// is read.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error of a read the store cannot do.
+    fn find_few_nodes_maybe_equal(
+        &self,
+        _property: &str,
+        _value: &Value,
+        _limit: usize,
+        _view: ReadView,
+    ) -> Result<Option<Vec<NodeId>>> {
+        Ok(None)
+    }
+
+    /// [`find_nodes_maybe_equal`](Self::find_nodes_maybe_equal) for a caller whose results
+    /// all have each of `labels`, which it checks itself: through the index on the first of them
+    /// that has one on `property`, else the one on every label. `None` without either.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error of a read the store cannot do.
+    fn find_indexed_maybe_equal(
+        &self,
+        _labels: &[&str],
+        property: &str,
+        value: &Value,
+        view: ReadView,
+    ) -> Result<Option<Vec<NodeId>>> {
+        self.find_nodes_maybe_equal(property, value, view)
+    }
+
+    /// [`find_few_nodes_maybe_equal`](Self::find_few_nodes_maybe_equal) through the index
+    /// [`find_indexed_maybe_equal`](Self::find_indexed_maybe_equal) reads.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error of a read the store cannot do.
+    fn find_few_indexed_maybe_equal(
+        &self,
+        _labels: &[&str],
+        property: &str,
+        value: &Value,
+        limit: usize,
+        view: ReadView,
+    ) -> Result<Option<Vec<NodeId>>> {
+        self.find_few_nodes_maybe_equal(property, value, limit, view)
+    }
+
+    /// [`find_nodes_by_properties`](Self::find_nodes_by_properties) for a caller whose results
+    /// all have each of `labels`, which it checks itself: the indexes it reads are those
+    /// [`find_indexed_maybe_equal`](Self::find_indexed_maybe_equal) reads.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error of a read the store cannot do.
+    fn find_indexed_by_properties(
+        &self,
+        _labels: &[&str],
+        conditions: &[(&str, Value)],
+        view: ReadView,
+    ) -> Result<Vec<NodeId>> {
+        self.find_nodes_by_properties(conditions, view)
     }
 
     /// The nodes `view` sees whose `property` lies within the bounds, by

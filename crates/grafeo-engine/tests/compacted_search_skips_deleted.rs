@@ -10,7 +10,7 @@
 //! delete that is not committed yet hides nothing from the other readers.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test compacted_search_skips_deleted
+//! cargo test -p grafeo-engine --all-features --test main compacted_search_skips_deleted::
 //! ```
 
 #![cfg(all(

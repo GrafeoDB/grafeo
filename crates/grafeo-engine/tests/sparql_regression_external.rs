@@ -2,7 +2,7 @@
 //! in other RDF databases (Oxigraph, Blazegraph, Jena, RDF4J).
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test sparql_regression_external
+//! cargo test -p grafeo-engine --all-features --test main sparql_regression_external::
 //! ```
 
 #[cfg(all(feature = "sparql", feature = "triple-store"))]

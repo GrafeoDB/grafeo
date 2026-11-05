@@ -5,7 +5,7 @@
 //! empty sets, NULLIF/COALESCE edge cases, and CASE expressions.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --test seam_aggregates_expressions
+//! cargo test -p grafeo-engine --test main seam_aggregates_expressions::
 //! ```
 
 use grafeo_common::types::Value;

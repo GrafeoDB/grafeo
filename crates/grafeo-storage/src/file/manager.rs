@@ -2748,6 +2748,22 @@ mod tests {
     }
 
     #[test]
+    fn a_read_only_open_refuses_a_read_write_open() {
+        let dir = test_dir();
+        let path = dir.path().join("reader_blocks_writer.grafeo");
+        GrafeoFileManager::create(&path, None)
+            .unwrap()
+            .close()
+            .unwrap();
+        let _reader = GrafeoFileManager::open_read_only(&path, None).unwrap();
+        let error = GrafeoFileManager::open(&path, None)
+            .map(|_| ())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("already open in this process"), "{error}");
+    }
+
+    #[test]
     fn read_only_opens_coexist() {
         let dir = test_dir();
         let path = dir.path().join("coexist.grafeo");

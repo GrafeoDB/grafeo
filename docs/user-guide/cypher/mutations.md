@@ -305,6 +305,8 @@ DROP INDEX index_name
 DROP CONSTRAINT constraint_name
 ```
 
+A constraint over data that already breaks it is refused with `GRAFEO-V001`, naming the constraint and a value that breaks it.
+
 ## EXPLAIN and PROFILE
 
 ```cypher

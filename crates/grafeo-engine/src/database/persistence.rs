@@ -1394,6 +1394,7 @@ pub(super) mod row_groups {
         GraphIndexes {
             graph: None,
             property: indexes.property_indexes,
+            on_label: Vec::new(),
             vector: indexes
                 .vector_indexes
                 .into_iter()

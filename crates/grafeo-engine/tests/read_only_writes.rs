@@ -3,7 +3,7 @@
 //! the direct API (#413).
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test read_only_writes
+//! cargo test -p grafeo-engine --all-features --test main read_only_writes::
 //! ```
 
 use grafeo_common::types::{NodeId, PropertyKey, Value};

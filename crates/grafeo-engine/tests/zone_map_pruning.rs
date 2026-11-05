@@ -7,7 +7,7 @@
 //! tests pin that pruning still happens where it is valid.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --features full --test zone_map_pruning
+//! cargo test -p grafeo-engine --features full --test main zone_map_pruning::
 //! ```
 
 #![allow(missing_docs)]

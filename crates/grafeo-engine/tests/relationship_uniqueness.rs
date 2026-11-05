@@ -8,7 +8,7 @@
 //! hops a walk stops at.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test relationship_uniqueness
+//! cargo test -p grafeo-engine --all-features --test main relationship_uniqueness::
 //! ```
 
 #![cfg(feature = "cypher")]

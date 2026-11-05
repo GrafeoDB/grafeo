@@ -7,7 +7,7 @@
 //! one that returned survives a crash.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test bulk_writes
+//! cargo test -p grafeo-engine --all-features --test main bulk_writes::
 //! ```
 
 #![cfg(feature = "gql")]
@@ -243,12 +243,8 @@ mod crash {
     /// crashed, and returns the database's path.
     fn crashed_by(name: &str, dir: &Path) -> PathBuf {
         let path = dir.join("prague.grafeo");
-        let status = child_process::run(
-            std::process::Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", name, "--nocapture"])
-                .env(PATH_VAR, &path),
-        )
-        .unwrap();
+        let status =
+            child_process::run(child_process::test_command(name).env(PATH_VAR, &path)).unwrap();
         assert!(status.success(), "the child process {name} failed");
         let mut sidecar = path.as_os_str().to_owned();
         sidecar.push(".wal");
@@ -307,7 +303,7 @@ mod crash {
         }
         let dir = tempfile::tempdir().unwrap();
         let path = crashed_by(
-            "crash::batches_and_imports_that_returned_survive_a_crash",
+            &grafeo_common::test_path!("batches_and_imports_that_returned_survive_a_crash"),
             dir.path(),
         );
         let db = GrafeoDB::open(&path).unwrap();
@@ -349,7 +345,7 @@ mod crash {
         }
         let dir = tempfile::tempdir().unwrap();
         let path = crashed_by(
-            "crash::a_crash_in_the_middle_of_a_batch_leaves_nothing_of_it",
+            &grafeo_common::test_path!("a_crash_in_the_middle_of_a_batch_leaves_nothing_of_it"),
             dir.path(),
         );
         let db = GrafeoDB::open(&path).unwrap();
@@ -388,7 +384,10 @@ mod crash {
             unreachable!("the child process exits in the import");
         }
         let dir = tempfile::tempdir().unwrap();
-        let path = crashed_by("crash::an_import_is_atomic_across_a_crash", dir.path());
+        let path = crashed_by(
+            &grafeo_common::test_path!("an_import_is_atomic_across_a_crash"),
+            dir.path(),
+        );
         let db = GrafeoDB::open(&path).unwrap();
         assert_eq!(
             state(&db),
@@ -422,7 +421,9 @@ mod crash {
         }
         let dir = tempfile::tempdir().unwrap();
         let path = crashed_by(
-            "crash::a_failed_import_leaves_nothing_also_after_later_commits_and_a_crash",
+            &grafeo_common::test_path!(
+                "a_failed_import_leaves_nothing_also_after_later_commits_and_a_crash"
+            ),
             dir.path(),
         );
         let db = GrafeoDB::open(&path).unwrap();
@@ -469,7 +470,7 @@ mod crash {
         }
         let dir = tempfile::tempdir().unwrap();
         let path = crashed_by(
-            "crash::rdf_batch_inserts_survive_a_crash_whole_or_not_at_all",
+            &grafeo_common::test_path!("rdf_batch_inserts_survive_a_crash_whole_or_not_at_all"),
             dir.path(),
         );
         let db = GrafeoDB::open(&path).unwrap();

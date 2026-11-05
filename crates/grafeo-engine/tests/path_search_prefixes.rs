@@ -10,7 +10,7 @@
 //! restricts the paths the search picks among.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test path_search_prefixes
+//! cargo test -p grafeo-engine --all-features --test main path_search_prefixes::
 //! ```
 
 use grafeo_common::types::Value;

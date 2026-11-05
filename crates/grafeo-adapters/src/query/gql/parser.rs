@@ -2462,7 +2462,7 @@ impl<'a> Parser<'a> {
             let expr = self.parse_label_expression()?;
             self.exit_nesting();
             self.expect(TokenKind::RParen)?;
-            return Ok(expr);
+            return Ok(LabelExpression::Parenthesized(Box::new(expr)));
         }
         if self.is_label_or_type_name() {
             let name = self.get_identifier_name();

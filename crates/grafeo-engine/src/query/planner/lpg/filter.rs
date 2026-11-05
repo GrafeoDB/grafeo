@@ -36,8 +36,12 @@ use std::collections::HashSet;
 
 use grafeo_common::collections::GrafeoSet;
 
+use super::seek::LookupRead;
 use super::subquery::reads_outer_values;
 use grafeo_common::types::{NodeId, TemporalComparison};
+use grafeo_core::execution::operators::find_through_label_indexes;
+use grafeo_core::execution::operators::{KeyColumnChecks, KeyColumnIndexes, KeyColumnScanOperator};
+use grafeo_core::graph::rowgroup::KeyColumnQuery;
 
 use super::{
     Arc, BinaryOp, EmptyOperator, Error, ExpressionPredicate, FilterOp, FilterOperator, GraphStore,
@@ -105,12 +109,18 @@ impl super::Planner {
             }
         }
 
+        // A hop that knows its target: this filter stays over it and decides
+        self.note_hop_target(filter);
+
         // Check zone maps for simple property predicates before scanning
         // If zone map says "definitely no matches", we can short-circuit.
         // Not below a mutation, nor after one (see `after_write`): zone maps
         // describe the store as it is before this query runs, not values the
         // query writes first.
         if !input_writes
+            && self
+                .rules
+                .has(crate::query::optimizer::PlannerRule::ZoneMaps)
             && self.reads_the_store_as_planned()
             && let Some(false) = self.check_zone_map_for_predicate(&filter.predicate, &filter.input)
         {
@@ -755,9 +765,9 @@ impl super::Planner {
     /// and the input is a simple NodeScan, we can use the index to look up
     /// matching nodes directly instead of scanning all nodes.
     ///
-    /// Not after a write of the statement (see
-    /// [`Self::reads_the_store_as_planned`]): the lookup, and the label-first
-    /// scan without an index, find the nodes while planning.
+    /// An index's lookup not after a write of the statement (see
+    /// [`Self::reads_the_store_as_planned`]): it finds the nodes while
+    /// planning. A read of the key's column reads as it runs.
     ///
     /// Returns `Ok(Some((operator, columns)))` if optimization was applied,
     /// `Ok(None)` if not applicable, or `Err` on error.
@@ -765,6 +775,9 @@ impl super::Planner {
         &self,
         filter: &FilterOp,
     ) -> Result<Option<(Box<dyn Operator>, Vec<String>)>> {
+        if !self.reads_by_key() {
+            return Ok(None);
+        }
         // A scan without input, directly below or below filters that check
         // the scanned node alone (`MATCH (m {id: $id}) WHERE m:Post OR
         // m:Comment`): the lookup takes their place, and the nodes it finds
@@ -772,7 +785,7 @@ impl super::Planner {
         let Some(checked) = super::seek::checked_scan(filter) else {
             return Ok(None);
         };
-        if checked.scan.input.is_some() || !self.reads_the_store_as_planned() {
+        if checked.scan.input.is_some() {
             return Ok(None);
         }
         let (scan_variable, scan_label) =
@@ -793,13 +806,20 @@ impl super::Planner {
         // `=` (#535), the smallest set of any indexed condition, looked up at
         // the query's view. Without one the scan and the filter run as
         // planned.
+        let labels = super::seek::LookupLabels::of(filter, &scan_variable);
         let mut candidates: Option<Vec<NodeId>> = None;
         {
             for (property, value) in &conditions {
-                if !self.store.has_property_index(property) {
+                if !self
+                    .rules
+                    .has(crate::query::optimizer::PlannerRule::IndexLookup)
+                    || !self.reads_the_store_as_planned()
+                    || !labels.served_by(self.store.as_ref(), property)
+                {
                     continue;
                 }
-                let Some(found) = self.find_maybe_equal(property, value)? else {
+                let read = labels.to_read(self.store.as_ref(), property);
+                let Some(found) = self.find_maybe_equal(&read, property, value)? else {
                     continue;
                 };
                 // Every lookup reads, also one whose set is not the smallest.
@@ -813,7 +833,7 @@ impl super::Planner {
             }
         }
         let Some(matching_nodes) = candidates else {
-            return Ok(None);
+            return self.plan_first_column_read(filter, &checked, &labels, &conditions);
         };
 
         // MVCC visibility: filter out nodes not visible at the current epoch/tx
@@ -839,17 +859,7 @@ impl super::Planner {
         // The index finds candidates: the checks and the whole predicate
         // decide each, in the order the chain of filters runs them, with the
         // same `=` as a scan.
-        let predicate = checked
-            .checks
-            .iter()
-            .map(|(_, check)| (*check).clone())
-            .chain(std::iter::once(filter.predicate.clone()))
-            .reduce(|left, right| LogicalExpression::Binary {
-                left: Box::new(left),
-                op: BinaryOp::And,
-                right: Box::new(right),
-            })
-            .expect("the filter's own predicate");
+        let predicate = whole_predicate(filter, &checked);
         let found = self.found_nodes(matching_nodes, &columns, &predicate)?;
         Ok(Some((found, columns)))
     }
@@ -914,56 +924,116 @@ impl super::Planner {
         columns: &[String],
         predicate: &LogicalExpression,
     ) -> Result<Box<dyn Operator>> {
+        let predicate = self.predicate_over(columns, predicate)?;
+        Ok(Box::new(
+            NodeListOperator::new(nodes, 2048).with_predicate(predicate),
+        ))
+    }
+
+    /// `predicate` over rows of `columns`.
+    fn predicate_over(
+        &self,
+        columns: &[String],
+        predicate: &LogicalExpression,
+    ) -> Result<Box<dyn grafeo_core::execution::operators::Predicate>> {
         let variable_columns: HashMap<String, usize> = columns
             .iter()
             .enumerate()
             .map(|(i, name)| (name.clone(), i))
             .collect();
         let filter_expr = self.convert_expression(predicate)?;
-        let predicate = ExpressionPredicate::new(
-            filter_expr,
-            variable_columns,
-            Arc::clone(&self.store) as Arc<dyn GraphStore>,
-            self.read_view(),
-        )
-        .with_session_context(self.session_context.clone());
         Ok(Box::new(
-            NodeListOperator::new(nodes, 2048).with_predicate(Box::new(predicate)),
+            ExpressionPredicate::new(
+                filter_expr,
+                variable_columns,
+                Arc::clone(&self.store) as Arc<dyn GraphStore>,
+                self.read_view(),
+            )
+            .with_session_context(self.session_context.clone()),
         ))
     }
 
-    /// Tries to optimize a filter with a `var.prop IN [literals]` conjunct on
-    /// an indexed property (the whole predicate, or a conjunct of its `AND`
-    /// chain, #456) using the property index: the union of the per-value
-    /// lookups are the candidates, and the whole predicate decides each.
-    /// Returns `Ok(None)` when not applicable: the input isn't a simple
-    /// `NodeScan`, no conjunct is such an `IN` list, or the index cannot
-    /// answer a value.
+    /// Tries to optimize a filter with a `var.prop IN [literals]` conjunct (the
+    /// whole predicate, or a conjunct of its `AND` chain, #456) by what a lookup
+    /// of the property reads: the nodes it finds for the values are the
+    /// candidates, and the whole predicate decides each.
+    /// Returns `Ok(None)` when not applicable: the input isn't a `NodeScan`
+    /// below such filters (see [`checked_scan`](super::seek::checked_scan)),
+    /// no conjunct is such an `IN` list, or the index cannot answer a value.
     pub(super) fn try_plan_filter_with_in_list_index(
         &self,
         filter: &FilterOp,
     ) -> Result<Option<(Box<dyn Operator>, Vec<String>)>> {
-        // Only optimize if input is a simple NodeScan (not nested).
-        let (scan_variable, scan_label) = match filter.input.as_ref() {
-            LogicalOperator::NodeScan(scan) if scan.input.is_none() => {
-                (scan.variable.clone(), scan.label.clone())
-            }
-            _ => return Ok(None),
+        if !self.reads_by_key() {
+            return Ok(None);
+        }
+        // A scan without input, directly below or below filters that check the scanned node
+        // alone, which the lookup takes over: the list may be in any of them.
+        let Some(checked) = super::seek::checked_scan(filter) else {
+            return Ok(None);
         };
+        if checked.scan.input.is_some() {
+            return Ok(None);
+        }
+        let (scan_variable, scan_label) =
+            (checked.scan.variable.clone(), checked.scan.label.clone());
 
-        let Some((property, values)) = indexed_in_list(&filter.predicate, &scan_variable, |p| {
-            self.store.has_property_index(p)
-        }) else {
+        let labels = super::seek::LookupLabels::of(filter, &scan_variable);
+        let lookup_read = |p: &str| labels.lookup_read(self.store.as_ref(), p, self.rules);
+        let Some((property, values)) = std::iter::once(&filter.predicate)
+            .chain(checked.checks.iter().map(|(_, check)| *check))
+            .find_map(|predicate| {
+                indexed_in_list(predicate, &scan_variable, |p| {
+                    lookup_read(p) != LookupRead::Scan
+                })
+            })
+        else {
             return Ok(None);
         };
         let property = property.as_str();
         if values.is_empty() {
             // `prop IN []` is always false: return an empty result without
             // touching the store.
-            self.record_absorbed_scan_entry("NodeScan", &filter.input);
+            self.record_absorbed_scan_entry("NodeScan", checked.operator);
+            for (check, _) in &checked.checks {
+                self.record_absorbed_scan_entry("Filter", check);
+            }
             let columns = vec![scan_variable];
             let empty = Box::new(NodeListOperator::new(Vec::new(), 2048));
             return Ok(Some((empty, columns)));
+        }
+
+        // A list as long as the rows it is read among costs more to prepare than the scan's filter
+        // costs to run.
+        if matches!(lookup_read(property), LookupRead::Column { .. })
+            && values.len() >= labels.nodes_at_most(self.store.as_ref())?
+        {
+            return Ok(None);
+        }
+
+        // A read of the column, as it runs, in one pass for every value: `IN` decides each node.
+        if !matches!(lookup_read(property), LookupRead::Index(_)) {
+            let columns = vec![scan_variable];
+            let predicate = whole_predicate(filter, &checked);
+            let checks = KeyColumnChecks::Always(self.predicate_over(&columns, &predicate)?);
+            let scan = self.key_column_scan(
+                &lookup_read(property),
+                property,
+                &values,
+                scan_label.as_deref(),
+                checks,
+            );
+            let Some(scan) = scan else {
+                return Ok(None);
+            };
+            self.record_absorbed_scan_entry("NodeScan", checked.operator);
+            for (check, _) in &checked.checks {
+                self.record_absorbed_scan_entry("Filter", check);
+            }
+            return Ok(Some((scan, columns)));
+        }
+        if !self.reads_the_store_as_planned() {
+            return Ok(None);
         }
 
         // Per-value index lookup of the nodes `=` may find equal (#535),
@@ -971,8 +1041,9 @@ impl super::Planner {
         // don't want to emit it twice).
         let mut seen: GrafeoSet<_> = GrafeoSet::default();
         let mut matching_nodes = Vec::new();
+        let read = labels.to_read(self.store.as_ref(), property);
         for value in &values {
-            let Some(found) = self.find_maybe_equal(property, value)? else {
+            let Some(found) = self.find_maybe_equal(&read, property, value)? else {
                 return Ok(None);
             };
             self.read_counter().add(found.len());
@@ -992,13 +1063,17 @@ impl super::Planner {
         }
         let matching_nodes = seen;
 
-        // Absorbed-scan PROFILE entry: see `record_absorbed_scan_entry`.
-        self.record_absorbed_scan_entry("NodeScan", &filter.input);
+        // Absorbed-scan PROFILE entries: see `record_absorbed_scan_entry`.
+        self.record_absorbed_scan_entry("NodeScan", checked.operator);
+        for (check, _) in &checked.checks {
+            self.record_absorbed_scan_entry("Filter", check);
+        }
 
         let columns = vec![scan_variable];
-        // The lookup finds candidates: `IN` decides each, with the same `=`
-        // as a scan.
-        let found = self.found_nodes(matching_nodes, &columns, &filter.predicate)?;
+        // The lookup finds candidates: the checks and `IN` decide each, in the order the chain of
+        // filters runs them, with the same `=` as a scan.
+        let predicate = whole_predicate(filter, &checked);
+        let found = self.found_nodes(matching_nodes, &columns, &predicate)?;
         Ok(Some((found, columns)))
     }
 
@@ -1122,6 +1197,12 @@ impl super::Planner {
         &self,
         filter: &FilterOp,
     ) -> Result<Option<(Box<dyn Operator>, Vec<String>)>> {
+        if !self
+            .rules
+            .has(crate::query::optimizer::PlannerRule::IndexRange)
+        {
+            return Ok(None);
+        }
         // Only optimize if input is a simple NodeScan (not nested). The range
         // lookup reads the values at the query's view.
         let (scan_variable, scan_label) = match filter.input.as_ref() {
@@ -1184,17 +1265,27 @@ impl super::Planner {
 
     /// The nodes an index lookup finds that `=` may find equal to `value`
     /// under the query's temporal comparison (see [`equality_probes`]), each
-    /// once and ascending; `None` without an index on `property`, or when no
-    /// set of lookups covers them.
-    fn find_maybe_equal(&self, property: &str, value: &Value) -> Result<Option<Vec<NodeId>>> {
+    /// once and ascending, through the indexes on `labels` (see
+    /// [`find_through_label_indexes`]); `None` without an index to read, or when no set of
+    /// lookups covers them.
+    fn find_maybe_equal(
+        &self,
+        labels: &[String],
+        property: &str,
+        value: &Value,
+    ) -> Result<Option<Vec<NodeId>>> {
         let Some(probes) = equality_probes(value, self.session_context.temporal_comparison) else {
             return Ok(None);
         };
         let mut found = Vec::new();
         for probe in probes {
-            let Some(ids) =
-                self.store
-                    .find_nodes_maybe_equal(property, &probe, self.read_view())?
+            let Some(ids) = find_through_label_indexes(
+                self.store.as_ref(),
+                labels,
+                property,
+                &probe,
+                self.read_view(),
+            )?
             else {
                 return Ok(None);
             };
@@ -1203,6 +1294,120 @@ impl super::Planner {
         found.sort_unstable();
         found.dedup();
         Ok(Some(found))
+    }
+
+    /// Whether a rule lets a filter's equality on a key read other than its scan.
+    fn reads_by_key(&self) -> bool {
+        use crate::query::optimizer::PlannerRule;
+        self.rules.has(PlannerRule::IndexLookup) || self.rules.has(PlannerRule::KeyColumnLookup)
+    }
+
+    /// The read of a key's column for the first of `conditions` that has no index of its own but
+    /// indexes for part of its nodes, else for the first with none, in written order; `None` when
+    /// none can be read so. On a group whose answer is exact the `=` is not checked again, unless
+    /// the statement writes: a row it wrote after the group was read is read again, as a scan's
+    /// filter does.
+    #[inline(never)]
+    fn plan_first_column_read(
+        &self,
+        filter: &FilterOp,
+        checked: &super::seek::CheckedScan<'_>,
+        labels: &super::seek::LookupLabels<'_>,
+        conditions: &[(String, Value)],
+    ) -> Result<Option<(Box<dyn Operator>, Vec<String>)>> {
+        let variable = &checked.scan.variable;
+        let columns = vec![variable.clone()];
+        let whole = whole_predicate(filter, checked);
+        for partly_indexed in [true, false] {
+            for (property, value) in conditions {
+                let read = labels.lookup_read(self.store.as_ref(), property, self.rules);
+                if !matches!(
+                    read,
+                    LookupRead::IndexesAndRemainder { .. } | LookupRead::Column { .. }
+                ) || matches!(read, LookupRead::IndexesAndRemainder { .. }) != partly_indexed
+                {
+                    continue;
+                }
+                let whole_check = self.predicate_over(&columns, &whole)?;
+                let writes = self
+                    .statement_writes
+                    .get()
+                    .is_none_or(|statement| statement.writes);
+                let checks = if writes {
+                    KeyColumnChecks::Always(whole_check)
+                } else {
+                    let rest = without_what_the_read_answered(&whole, variable, property, value)
+                        .map(|rest| self.predicate_over(&columns, &rest))
+                        .transpose()?;
+                    KeyColumnChecks::UnlessExact {
+                        whole: whole_check,
+                        rest,
+                    }
+                };
+                let scan = self.key_column_scan(
+                    &read,
+                    property,
+                    std::slice::from_ref(value),
+                    checked.scan.label.as_deref(),
+                    checks,
+                );
+                if let Some(scan) = scan {
+                    self.record_absorbed_scan_entry("NodeScan", checked.operator);
+                    for (check, _) in &checked.checks {
+                        self.record_absorbed_scan_entry("Filter", check);
+                    }
+                    return Ok(Some((scan, columns)));
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    /// The operator that reads what `read` says for `values`, as it runs; `None` when `read` says
+    /// something else, or a value has no lookup (see [`equality_probes`]). `label` is the scan's,
+    /// which an index read does not check.
+    fn key_column_scan(
+        &self,
+        read: &LookupRead<'_>,
+        property: &str,
+        values: &[Value],
+        label: Option<&str>,
+        checks: KeyColumnChecks,
+    ) -> Option<Box<dyn Operator>> {
+        let (indexed, required, one_of): (&[String], _, _) = match read {
+            LookupRead::IndexesAndRemainder {
+                read,
+                required,
+                one_of,
+            } => (read, required, one_of),
+            LookupRead::Column { required, one_of } => (&[], required, one_of),
+            LookupRead::Index(_) | LookupRead::Scan => return None,
+        };
+        let mut probes = Vec::with_capacity(values.len());
+        for value in values {
+            probes.extend(equality_probes(
+                value,
+                self.session_context.temporal_comparison,
+            )?);
+        }
+        let except: Vec<&str> = indexed.iter().map(String::as_str).collect();
+        let indexes = (!indexed.is_empty()).then(|| KeyColumnIndexes {
+            labels: indexed.to_vec(),
+            values: probes.clone(),
+            label: label.map(ToString::to_string),
+        });
+        let query = KeyColumnQuery::new(required, one_of, &except, property, probes);
+        let mut scan = KeyColumnScanOperator::new(
+            Arc::clone(&self.store) as Arc<dyn GraphStore>,
+            query,
+            self.read_view(),
+            checks,
+        )
+        .with_read_counter(self.read_counter());
+        if let Some(indexes) = indexes {
+            scan = scan.with_indexes(indexes);
+        }
+        Some(Box::new(scan))
     }
 
     /// Whether the store's range lookups and zone maps order `value` against
@@ -1428,8 +1633,9 @@ fn in_list_values(list: &LogicalExpression) -> Option<Vec<Value>> {
 /// in the order the planner tries them: the index lookup of equalities with
 /// constants, the index lookup of an `IN` list of constants, also a conjunct
 /// of an `AND` chain (no hint for a list without a value that is not NULL: it
-/// finds no node, and the planner reads neither index nor label), the
-/// label-first scan of the label of equalities without an index,
+/// finds no node, and the planner reads neither index nor label), a read of
+/// the key's column for equalities without an index, the label-first scan of
+/// the label of equalities when that rule is off,
 /// the range scan of a range of constants (with or without an index), a
 /// vector or text index search (no hint), and otherwise the scan of the label
 /// with the filter above it. A scan per input row takes none of them.
@@ -1438,9 +1644,14 @@ fn in_list_values(list: &LogicalExpression) -> Option<Vec<Value>> {
 pub(crate) fn scan_hint(
     predicate: &LogicalExpression,
     scan: &NodeScanOp,
+    labels: &super::seek::LookupLabels<'_>,
     store: &dyn GraphStore,
+    rules: crate::query::optimizer::PlannerRules,
 ) -> Option<PushdownHint> {
-    let has_index = |property: &str| store.has_property_index(property);
+    let has_index = |property: &str| {
+        rules.has(crate::query::optimizer::PlannerRule::IndexLookup)
+            && labels.served_by(store, property)
+    };
     if scan.input.is_some() {
         return None;
     }
@@ -1456,6 +1667,42 @@ pub(crate) fn scan_hint(
             property: property.clone(),
         });
     }
+    let partly_indexed = |property: &str| {
+        matches!(
+            labels.lookup_read(store, property, rules),
+            super::seek::LookupRead::IndexesAndRemainder { .. }
+        )
+    };
+    let in_list = indexed_in_list(predicate, variable, partly_indexed);
+    if let Some(property) = conditions
+        .iter()
+        .map(|(property, _)| property)
+        .find(|property| partly_indexed(property))
+        .or_else(|| in_list.as_ref().map(|(property, _)| *property))
+    {
+        return Some(PushdownHint::IndexesAndRemainder {
+            property: property.clone(),
+        });
+    }
+    let column = |property: &str| {
+        matches!(
+            labels.lookup_read(store, property, rules),
+            super::seek::LookupRead::Column { .. }
+        )
+    };
+    if let Some((property, _)) = conditions.iter().find(|(property, _)| column(property)) {
+        return Some(PushdownHint::KeyColumn {
+            property: property.clone(),
+        });
+    }
+    if let Some((property, values)) = indexed_in_list(predicate, variable, column) {
+        let keeps_the_filter = labels
+            .nodes_at_most(store)
+            .is_ok_and(|nodes| values.len() >= nodes);
+        return (!values.is_empty() && !keeps_the_filter).then(|| PushdownHint::KeyColumn {
+            property: property.clone(),
+        });
+    }
     if !conditions.is_empty() && scan.label.is_some() {
         return Some(PushdownHint::LabelFirst);
     }
@@ -1468,6 +1715,7 @@ pub(crate) fn scan_hint(
     if let Some((_, property)) = between
         .filter(|(read, _)| read == variable)
         .or_else(|| range().filter(|(read, _)| read == variable))
+        .filter(|_| rules.has(crate::query::optimizer::PlannerRule::IndexRange))
     {
         return Some(PushdownHint::RangeScan { property });
     }
@@ -1872,6 +2120,68 @@ fn edge_condition_of(
     read.iter()
         .all(|name| name == hop || row.contains(name))
         .then(|| (hop.clone(), predicate.as_ref().clone()))
+}
+
+/// The checks below a lookup and the filter's predicate, in the order the chain of filters runs
+/// them.
+fn whole_predicate(filter: &FilterOp, checked: &super::seek::CheckedScan<'_>) -> LogicalExpression {
+    checked
+        .checks
+        .iter()
+        .map(|(_, check)| (*check).clone())
+        .chain(std::iter::once(filter.predicate.clone()))
+        .reduce(|left, right| LogicalExpression::Binary {
+            left: Box::new(left),
+            op: BinaryOp::And,
+            right: Box::new(right),
+        })
+        .expect("the filter's own predicate")
+}
+
+/// `predicate`, the whole of a chain of filters as an `AND` chain, without what an exact read of
+/// a key's column has answered: its first conjunct that is the plain `variable.property = value`,
+/// and each check of one label, which the read's scope holds at the view. `None` when nothing
+/// remains. A conjunct of any other form stays.
+fn without_what_the_read_answered(
+    predicate: &LogicalExpression,
+    variable: &str,
+    property: &str,
+    value: &Value,
+) -> Option<LogicalExpression> {
+    fn conjuncts<'e>(expression: &'e LogicalExpression, out: &mut Vec<&'e LogicalExpression>) {
+        if let LogicalExpression::Binary {
+            left,
+            op: BinaryOp::And,
+            right,
+        } = expression
+        {
+            conjuncts(left, out);
+            conjuncts(right, out);
+        } else {
+            out.push(expression);
+        }
+    }
+    let mut all = Vec::new();
+    conjuncts(predicate, &mut all);
+    let is_the_equality = |conjunct: &&LogicalExpression| match conjunct {
+        LogicalExpression::Binary {
+            left,
+            op: BinaryOp::Eq,
+            right,
+        } => super::Planner::extract_property_equality(left, right).is_some_and(
+            |(on, key, equal_to)| on == variable && key == property && equal_to == *value,
+        ),
+        _ => false,
+    };
+    let at = all.iter().position(is_the_equality);
+    let rest = all
+        .iter()
+        .enumerate()
+        .filter(|(index, conjunct)| {
+            Some(*index) != at && super::scan::label_check(conjunct, variable).is_none()
+        })
+        .map(|(_, conjunct)| (*conjunct).clone());
+    LogicalExpression::conjunction(rest)
 }
 
 /// The values an index lookup probes for `value`, so that it finds every

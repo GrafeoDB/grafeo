@@ -24,6 +24,39 @@ pub(super) struct NamedGraphsOperator {
     done: bool,
 }
 
+/// The IRIs of the named graphs of the dataset the store, the transaction's writer and FROM NAMED
+/// make, sorted and without duplicates: with FROM NAMED those it lists, held or not; otherwise the
+/// store's, with the graphs the transaction wrote to but has not committed.
+pub(super) fn named_graph_names(
+    store: &RdfStore,
+    writer: Option<&RdfWriter>,
+    dataset: Option<&DatasetRestriction>,
+) -> Vec<String> {
+    let mut names = match dataset {
+        Some(dataset) if !dataset.named_graphs.is_empty() => dataset.named_graphs.clone(),
+        _ => {
+            let mut names = store.graph_names();
+            if let Some(writer) = writer.filter(|w| w.has_pending()) {
+                let any = TriplePattern {
+                    subject: None,
+                    predicate: None,
+                    object: None,
+                };
+                names.extend(
+                    writer
+                        .find(&any, Some(&[]))
+                        .into_iter()
+                        .filter_map(|(graph, _)| graph),
+                );
+            }
+            names
+        }
+    };
+    names.sort_unstable();
+    names.dedup();
+    names
+}
+
 impl NamedGraphsOperator {
     pub(super) fn new(
         store: Arc<RdfStore>,
@@ -39,33 +72,6 @@ impl NamedGraphsOperator {
             done: false,
         }
     }
-
-    /// The IRIs of the named graphs, sorted and without duplicates.
-    fn graph_names(&self) -> Vec<String> {
-        let mut names = match &self.dataset {
-            Some(dataset) if !dataset.named_graphs.is_empty() => dataset.named_graphs.clone(),
-            _ => {
-                let mut names = self.store.graph_names();
-                if let Some(writer) = self.writer.as_ref().filter(|w| w.has_pending()) {
-                    let any = TriplePattern {
-                        subject: None,
-                        predicate: None,
-                        object: None,
-                    };
-                    names.extend(
-                        writer
-                            .find(&any, Some(&[]))
-                            .into_iter()
-                            .filter_map(|(graph, _)| graph),
-                    );
-                }
-                names
-            }
-        };
-        names.sort_unstable();
-        names.dedup();
-        names
-    }
 }
 
 impl Operator for NamedGraphsOperator {
@@ -74,7 +80,7 @@ impl Operator for NamedGraphsOperator {
             return Ok(None);
         }
         self.done = true;
-        let names = self.graph_names();
+        let names = named_graph_names(&self.store, self.writer.as_ref(), self.dataset.as_ref());
         if names.is_empty() {
             return Ok(None);
         }

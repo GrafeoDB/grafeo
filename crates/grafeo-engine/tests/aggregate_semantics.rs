@@ -3,7 +3,7 @@
 //!
 //! Run with:
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test aggregate_semantics
+//! cargo test -p grafeo-engine --all-features --test main aggregate_semantics::
 //! ```
 
 use grafeo_common::types::Value;

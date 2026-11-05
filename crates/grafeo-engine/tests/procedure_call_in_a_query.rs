@@ -6,7 +6,7 @@
 //! `RETURN` inside a query.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test procedure_call_in_a_query
+//! cargo test -p grafeo-engine --all-features --test main procedure_call_in_a_query::
 //! ```
 
 #![cfg(all(feature = "gql", feature = "cypher", feature = "algos"))]

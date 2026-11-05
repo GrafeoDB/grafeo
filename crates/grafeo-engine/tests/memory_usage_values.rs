@@ -9,7 +9,7 @@
 //! breakdown add up to its totals.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test memory_usage_values
+//! cargo test -p grafeo-engine --all-features --test main memory_usage_values::
 //! ```
 
 #![cfg(feature = "gql")]

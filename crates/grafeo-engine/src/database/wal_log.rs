@@ -106,6 +106,36 @@ pub(crate) fn write_group_at(
     Ok(())
 }
 
+/// [`write_group_at`] with `schema`, the ops of the transaction's schema statements,
+/// among the records at the places they ran: one group, so a crash leaves all of it or
+/// none, and a graph is created before the writes into it.
+///
+/// # Errors
+///
+/// As [`write_group`].
+fn write_group_with_schema(
+    group: &mut GroupWriter<'_>,
+    set: &ChangeSet,
+    schema: &[crate::transaction::QueuedSchemaOp],
+    epoch: EpochId,
+    origin: Origin,
+    at: Option<u64>,
+) -> Result<()> {
+    let mut encoder = Encoder::new(group);
+    encoder.begin(epoch, origin, at)?;
+    let mut queued = schema.iter().peekable();
+    for (position, record) in set.log_records().enumerate() {
+        while let Some(op) = queued.next_if(|op| op.position <= position) {
+            encoder.push(&LogRecordRef::Standalone(&op.op))?;
+        }
+        encoder.push(&record)?;
+    }
+    for op in queued {
+        encoder.push(&LogRecordRef::Standalone(&op.op))?;
+    }
+    Ok(())
+}
+
 /// Writes the records of a change outside any commit into `group`: its
 /// [`GroupBegin`] at `epoch`, then one record per op, in the order the ops
 /// apply.
@@ -188,9 +218,10 @@ pub(crate) fn write_commit<'a>(
     commit: CommitGuard<'a>,
     transaction_id: TransactionId,
     changes: &TransactionChanges,
+    schema: &[crate::transaction::QueuedSchemaOp],
     origin: Origin,
 ) -> Result<(CommitGuard<'a>, Option<Logged>)> {
-    if changes.is_empty() {
+    if changes.is_empty() && schema.is_empty() {
         return Ok((commit, None));
     }
     let mut group = match wal.begin_group(transaction_id) {
@@ -202,7 +233,9 @@ pub(crate) fn write_commit<'a>(
     };
     let epoch = commit.epoch();
     let at = commit.commit_time();
-    if let Err(error) = changes.read(|set| write_group_at(&mut group, set, epoch, origin, at)) {
+    if let Err(error) =
+        changes.read(|set| write_group_with_schema(&mut group, set, schema, epoch, origin, at))
+    {
         // The group is cut back as it is dropped.
         drop(group);
         commit.abort();

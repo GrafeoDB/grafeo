@@ -18,7 +18,7 @@
 //! comes back into memory when it is written (#412 decision Q9) or reloaded.
 
 use std::ops::Range;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 use bytes::Bytes;
 use grafeo_common::change::PendingVersion;
@@ -31,7 +31,10 @@ use super::Read;
 use super::bitset::Bitset;
 use super::updates::Updates;
 use super::versions::VECTOR_ROWS;
-use crate::codec::column_chunk::{PointView, decode_column_chunk_bytes, encode_column_chunk};
+use crate::codec::column_chunk::{
+    ColumnChunk, DictView, PointView, ZoneMap, decode_checked_chunk, decode_column_chunk_bytes,
+    encode_column_chunk, read_zone_map,
+};
 
 /// The rows of a chunk a spill encodes: a vector of rows, so each chunk
 /// stays small to encode and its zone map tight.
@@ -292,7 +295,8 @@ impl Hot {
     fn decode(chunks: &[ColdChunk]) -> Result<Self> {
         let mut hot = Self {
             present: Bitset::default(),
-            data: Data::Values(Vec::new()),
+            // Typed by its first value (see `set`), as a written column is.
+            data: Data::Int64(Vec::new()),
             updates: Updates::default(),
             bound: Bound::Empty,
         };
@@ -323,8 +327,140 @@ struct ColdChunk {
     row_count: u32,
     codec: u8,
     bytes: Bytes,
-    point: Option<PointView>,
+    point: Option<Arc<PointView>>,
     home: Home,
+}
+
+/// A column as a read of all its rows finds it (see [`Columns::read`]).
+pub(super) enum ColumnRead<'a> {
+    /// Decoded.
+    Hot(HotRows<'a>),
+    /// Still encoded: what to read, each chunk's bytes held apart from the column.
+    Cold(Vec<ColdRows>),
+}
+
+/// A hot column's values, as far as they compare by their kind.
+pub(super) enum HotValues<'a> {
+    /// Integers by row: only the rows with a value mean anything.
+    Int64(&'a [i64]),
+    /// Floats by row: only the rows with a value mean anything.
+    Float64(&'a [f64]),
+    /// Strings by row: only the rows with a value mean anything.
+    String(&'a [ArcStr]),
+    /// Anything else: read a row with [`HotRows::get`].
+    Other,
+}
+
+/// A hot column, read.
+pub(super) struct HotRows<'a>(&'a Hot);
+
+impl<'a> HotRows<'a> {
+    /// The rows with a newest value.
+    pub(super) fn present(&self) -> &'a Bitset {
+        &self.0.present
+    }
+
+    /// Its values.
+    pub(super) fn values(&self) -> HotValues<'a> {
+        match &self.0.data {
+            Data::Int64(values) => HotValues::Int64(values),
+            Data::Float64(values) => HotValues::Float64(values),
+            Data::String(values) => HotValues::String(values),
+            Data::Bool(_) | Data::Values(_) => HotValues::Other,
+        }
+    }
+
+    /// The newest value at `row`, if it has one.
+    pub(super) fn get(&self, row: usize) -> Option<Value> {
+        self.0.get(row)
+    }
+
+    /// Whether a value the column held in any version a reader may see may equal one of `sorted`,
+    /// integers: one search of a long list, by the column's bounds.
+    pub(super) fn might_hold_an_integer_of(&self, sorted: &[i64]) -> bool {
+        match &self.0.bound {
+            Bound::Range {
+                min: Value::Int64(min),
+                max: Value::Int64(max),
+            } => sorted
+                .get(sorted.partition_point(|target| target < min))
+                .is_some_and(|target| target <= max),
+            _ => sorted
+                .iter()
+                .any(|target| self.might_equal(&Value::Int64(*target))),
+        }
+    }
+
+    /// [`might_hold_an_integer_of`](Self::might_hold_an_integer_of), of strings.
+    pub(super) fn might_hold_a_string_of(&self, sorted: &[ArcStr]) -> bool {
+        match &self.0.bound {
+            Bound::Range {
+                min: Value::String(min),
+                max: Value::String(max),
+            } => sorted
+                .get(sorted.partition_point(|target| target < min))
+                .is_some_and(|target| target <= max),
+            _ => sorted
+                .iter()
+                .any(|target| self.might_equal(&Value::String(target.clone()))),
+        }
+    }
+
+    /// Whether a value the column held in any version a reader may see may equal `value`, of the
+    /// kind of the column's values.
+    pub(super) fn might_equal(&self, value: &Value) -> bool {
+        self.0
+            .bound
+            .might_match(crate::graph::lpg::CompareOp::Eq, value)
+    }
+}
+
+/// A cold chunk, read: its bytes outlive the column's lock, and a thaw.
+pub(super) struct ColdRows {
+    first_row: usize,
+    row_count: u32,
+    codec: u8,
+    bytes: Bytes,
+    point: Option<Arc<PointView>>,
+}
+
+impl ColdRows {
+    /// The rows of the row group it covers.
+    pub(super) fn rows(&self) -> Range<usize> {
+        self.first_row..self.first_row + self.row_count as usize
+    }
+
+    /// The zone map its header holds.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error of a header it cannot read.
+    pub(super) fn zone_map(&self) -> Result<Option<ZoneMap>> {
+        read_zone_map(&self.bytes, self.codec, self.row_count)
+    }
+
+    /// Its point view, for a chunk of values of one fixed size.
+    pub(super) fn point(&self) -> Option<&PointView> {
+        self.point.as_deref()
+    }
+
+    /// Its dictionary, read in place, for a chunk of strings, asking `finds` of each entry's bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error of a layout it cannot read.
+    pub(super) fn dict(&self, finds: impl FnMut(&[u8]) -> bool) -> Result<Option<DictView>> {
+        DictView::read_validated(&self.bytes, self.codec, self.row_count, finds)
+    }
+
+    /// Its values, decoded. The load or the spill checked the chunk.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error of a chunk it cannot decode.
+    pub(super) fn decode(&self) -> Result<ColumnChunk> {
+        decode_checked_chunk(&self.bytes, self.codec, self.row_count)
+    }
 }
 
 /// What a spill of a column does (see [`Columns::plan_spill`]).
@@ -417,6 +553,32 @@ impl Column {
         Self {
             cold: Mutex::new(Vec::new()),
             hot: OnceLock::new(),
+        }
+    }
+
+    /// The column as a read of all its rows finds it.
+    fn read(&self) -> ColumnRead<'_> {
+        if let Some(hot) = self.hot.get() {
+            return ColumnRead::Hot(HotRows(hot));
+        }
+        let cold = self.cold.lock();
+        // Under the chunks' lock: a thaw publishes the hot form first.
+        match self.hot.get() {
+            Some(hot) => ColumnRead::Hot(HotRows(hot)),
+            None => {
+                let mut chunks: Vec<ColdRows> = cold
+                    .iter()
+                    .map(|chunk| ColdRows {
+                        first_row: chunk.first_row,
+                        row_count: chunk.row_count,
+                        codec: chunk.codec,
+                        bytes: chunk.bytes.clone(),
+                        point: chunk.point.clone(),
+                    })
+                    .collect();
+                chunks.sort_unstable_by_key(|chunk| chunk.first_row);
+                ColumnRead::Cold(chunks)
+            }
         }
     }
 
@@ -631,7 +793,7 @@ impl Column {
                 row_count: place.row_count,
                 codec: place.codec,
                 bytes,
-                point: Some(point),
+                point: Some(Arc::new(point)),
                 home,
             });
         }
@@ -694,7 +856,10 @@ impl Column {
                         Home::Memory => chunk.bytes.len(),
                         Home::Spilled => 0,
                     };
-                    bytes + chunk.point.as_ref().map_or(0, PointView::index_heap_bytes)
+                    bytes
+                        + chunk.point.as_ref().map_or(0, |point| {
+                            std::mem::size_of::<PointView>() + point.index_heap_bytes()
+                        })
                 })
                 .sum::<usize>()
     }
@@ -811,6 +976,12 @@ impl Columns {
         Ok(done)
     }
 
+    /// The column of key `key` as a read of all its rows finds it, `None` without one. A cold
+    /// column stays cold.
+    pub(super) fn read(&self, key: u32) -> Option<ColumnRead<'_>> {
+        Some(self.by_key.get(&key)?.read())
+    }
+
     /// The value of key `key` at `row`.
     pub(super) fn get(&self, key: u32, row: usize) -> Option<Value> {
         self.by_key.get(&key)?.get(row)
@@ -829,7 +1000,8 @@ impl Columns {
         let column = self.by_key.entry(key).or_insert_with(Column::cold);
         if column.is_cold() {
             let point = PointView::from_validated(&bytes, codec, row_count)
-                .expect("a chunk the load checked");
+                .expect("a chunk the load checked")
+                .map(Arc::new);
             column.cold.lock().push(ColdChunk {
                 first_row,
                 row_count,
@@ -1192,7 +1364,7 @@ mod tests {
     use bytes::Bytes;
     use grafeo_common::types::Value;
 
-    use super::Columns;
+    use super::{Columns, Data, Hot};
     use crate::codec::column_chunk::{decode_column_chunk_bytes, encode_column_chunk};
 
     fn add_chunk(columns: &mut Columns, first: usize, rows: u32, values: &[(u32, Value)]) {
@@ -1201,6 +1373,160 @@ mod tests {
         let bytes = Bytes::from(bytes);
         decode_column_chunk_bytes(&bytes, codec.to_byte(), rows).unwrap();
         columns.add_cold(7, first, rows, codec.to_byte(), bytes);
+    }
+
+    /// The column of key 7, after a write thawed it.
+    fn thawed<'a>(columns: &'a mut Columns, row: usize, value: &Value) -> &'a Hot {
+        columns.set(7, row, value);
+        assert_eq!(columns.cold_count(), 0, "a write thaws the column");
+        columns.by_key[&7].hot.get().expect("thawed")
+    }
+
+    fn all_rows(rows: u32, value: impl Fn(u32) -> Value) -> Vec<(u32, Value)> {
+        (0..rows).map(|row| (row, value(row))).collect()
+    }
+
+    /// A thawed column is as typed as one written row by row, so a compare can read it as a slice and
+    /// it costs what a typed column costs.
+    #[test]
+    fn a_thawed_integer_column_is_typed() {
+        let mut columns = Columns::default();
+        add_chunk(
+            &mut columns,
+            0,
+            4_096,
+            &all_rows(4_096, |row| Value::Int64(i64::from(row))),
+        );
+        add_chunk(
+            &mut columns,
+            4_096,
+            4_096,
+            &all_rows(4_096, |row| Value::Int64(-i64::from(row))),
+        );
+        let hot = thawed(&mut columns, 8_192, &Value::Int64(5));
+        assert!(matches!(hot.data, Data::Int64(_)), "{:?}", hot.data);
+        assert!(
+            columns.hot_bytes() <= 8_193 * 17 + 64,
+            "eight bytes a row, room for as many as a vector doubles, and a presence bit: {} bytes",
+            columns.hot_bytes()
+        );
+        assert_eq!(columns.get(7, 3), Some(Value::Int64(3)));
+        assert_eq!(columns.get(7, 4_099), Some(Value::Int64(-3)));
+        assert_eq!(columns.get(7, 8_192), Some(Value::Int64(5)));
+    }
+
+    #[test]
+    fn a_thawed_column_of_each_kind_is_typed() {
+        let mut columns = Columns::default();
+        add_chunk(
+            &mut columns,
+            0,
+            64,
+            &all_rows(64, |row| Value::Float64(f64::from(row) / 2.0)),
+        );
+        let hot = thawed(&mut columns, 64, &Value::Float64(0.5));
+        assert!(matches!(hot.data, Data::Float64(_)), "{:?}", hot.data);
+        assert_eq!(columns.get(7, 3), Some(Value::Float64(1.5)));
+
+        let mut columns = Columns::default();
+        add_chunk(
+            &mut columns,
+            0,
+            64,
+            &all_rows(64, |row| Value::Bool(row % 2 == 0)),
+        );
+        let hot = thawed(&mut columns, 64, &Value::Bool(true));
+        assert!(matches!(hot.data, Data::Bool(_)), "{:?}", hot.data);
+        assert_eq!(columns.get(7, 3), Some(Value::Bool(false)));
+
+        let mut columns = Columns::default();
+        add_chunk(
+            &mut columns,
+            0,
+            64,
+            &all_rows(64, |row| Value::from(format!("k{row}").as_str())),
+        );
+        let hot = thawed(&mut columns, 64, &Value::from("Alix"));
+        assert!(matches!(hot.data, Data::String(_)), "{:?}", hot.data);
+        assert_eq!(columns.get(7, 3), Some(Value::from("k3")));
+    }
+
+    /// Chunks of two kinds hold each row's own value, whichever kind came first, and a write of
+    /// another kind into a typed one moves it to any values with nothing lost.
+    #[test]
+    fn a_thawed_column_of_mixed_kinds_stays_right() {
+        for (first, second) in [
+            (Value::Int64(1), Value::from("Gus")),
+            (Value::from("Gus"), Value::Int64(1)),
+            (Value::Float64(1.5), Value::Int64(1)),
+        ] {
+            let mut columns = Columns::default();
+            add_chunk(&mut columns, 0, 64, &all_rows(64, |_| first.clone()));
+            add_chunk(&mut columns, 64, 64, &all_rows(64, |_| second.clone()));
+            let written = Value::Bool(true);
+            let hot = thawed(&mut columns, 128, &written);
+            assert!(matches!(hot.data, Data::Values(_)), "{:?}", hot.data);
+            assert_eq!(columns.get(7, 0), Some(first.clone()));
+            assert_eq!(columns.get(7, 63), Some(first.clone()));
+            assert_eq!(columns.get(7, 64), Some(second.clone()));
+            assert_eq!(columns.get(7, 127), Some(second.clone()));
+            assert_eq!(columns.get(7, 128), Some(written));
+        }
+        let mut columns = Columns::default();
+        add_chunk(
+            &mut columns,
+            0,
+            64,
+            &all_rows(64, |row| Value::Int64(i64::from(row))),
+        );
+        let hot = thawed(&mut columns, 3, &Value::from("Gus"));
+        assert!(matches!(hot.data, Data::Values(_)), "{:?}", hot.data);
+        assert_eq!(columns.get(7, 2), Some(Value::Int64(2)));
+        assert_eq!(columns.get(7, 3), Some(Value::from("Gus")));
+    }
+
+    /// A chunk with gaps keeps them: a row with no value is not read as a zero, in a typed column.
+    #[test]
+    fn a_thawed_column_keeps_rows_without_a_value() {
+        let values: Vec<(u32, Value)> = (0..64)
+            .filter(|row| row % 3 == 0)
+            .map(|row| (row, Value::Int64(i64::from(row) + 100)))
+            .collect();
+        let mut columns = Columns::default();
+        add_chunk(&mut columns, 0, 64, &values);
+        let hot = thawed(&mut columns, 70, &Value::Int64(1));
+        assert!(matches!(hot.data, Data::Int64(_)), "{:?}", hot.data);
+        assert_eq!(columns.get(7, 3), Some(Value::Int64(103)));
+        assert_eq!(columns.get(7, 4), None);
+        assert_eq!(columns.get(7, 65), None);
+        assert!(!columns.by_key[&7].hot.get().unwrap().present.get(4));
+    }
+
+    /// The bounds hold every value of a thawed column, so a lookup can still prune by them.
+    #[test]
+    fn a_thawed_column_keeps_its_bounds() {
+        use crate::graph::lpg::CompareOp;
+
+        let mut columns = Columns::default();
+        add_chunk(
+            &mut columns,
+            0,
+            64,
+            &all_rows(64, |row| Value::Int64(i64::from(row))),
+        );
+        thawed(&mut columns, 64, &Value::Int64(1_000));
+        assert_eq!(
+            columns.might_match(7, CompareOp::Eq, &Value::Int64(1_000)),
+            Some(true)
+        );
+        assert_eq!(
+            columns.might_match(7, CompareOp::Eq, &Value::Int64(5)),
+            Some(true)
+        );
+        assert_eq!(
+            columns.might_match(7, CompareOp::Eq, &Value::Int64(1_001)),
+            Some(false)
+        );
     }
 
     /// A point read must not inflate the column into an owned Value per row.

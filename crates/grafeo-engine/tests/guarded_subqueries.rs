@@ -13,7 +13,7 @@
 //! In GQL and Cypher.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test guarded_subqueries
+//! cargo test -p grafeo-engine --all-features --test main guarded_subqueries::
 //! ```
 
 #![cfg(all(feature = "gql", feature = "cypher"))]

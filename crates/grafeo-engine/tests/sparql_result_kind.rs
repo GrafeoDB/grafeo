@@ -3,7 +3,7 @@
 //! whatever the form.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test sparql_result_kind
+//! cargo test -p grafeo-engine --all-features --test main sparql_result_kind::
 //! ```
 
 #![cfg(all(feature = "sparql", feature = "triple-store"))]

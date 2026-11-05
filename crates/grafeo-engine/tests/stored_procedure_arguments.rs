@@ -5,7 +5,7 @@
 //! arrived as its display string.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test stored_procedure_arguments
+//! cargo test -p grafeo-engine --all-features --test main stored_procedure_arguments::
 //! ```
 
 #![cfg(feature = "gql")]

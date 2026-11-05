@@ -5,12 +5,12 @@
 //! language tag or datatype.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test rdf_term_properties
+//! cargo test -p grafeo-engine --all-features --test main rdf_term_properties::
 //! ```
 
 #![cfg(all(feature = "gql", feature = "grafeo-file", feature = "wal"))]
 
-mod common;
+use crate::common;
 
 use std::path::Path;
 use std::sync::Arc;
@@ -87,7 +87,7 @@ fn rdf_terms_survive_a_checkpoint_and_a_reopen() {
 #[test]
 fn rdf_terms_survive_a_crash_and_a_wal_replay() {
     let (_dir, db) = common::replay::reopened_after_crash(
-        "rdf_terms_survive_a_crash_and_a_wal_replay",
+        &grafeo_common::test_path!("rdf_terms_survive_a_crash_and_a_wal_replay"),
         open,
         write_terms,
     );

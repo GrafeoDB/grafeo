@@ -2298,6 +2298,7 @@ pub(crate) fn label_expression_predicate(
                 .map(|operand| label_expression_predicate(variable, operand)),
         )
         .expect("disjunction has at least one operand"),
+        LabelExpression::Parenthesized(inner) => label_expression_predicate(variable, inner),
         LabelExpression::Negation(inner) => LogicalExpression::Unary {
             op: crate::query::plan::UnaryOp::Not,
             operand: Box::new(label_expression_predicate(variable, inner)),

@@ -8,7 +8,7 @@
 //! map.
 //!
 //! ```bash
-//! cargo test -p grafeo-bindings-common --test json_special_floats
+//! cargo test -p grafeo-bindings-common --test main json_special_floats::
 //! ```
 
 use grafeo_bindings_common::json::{json_to_value, value_to_json};

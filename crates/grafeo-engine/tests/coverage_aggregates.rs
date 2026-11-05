@@ -5,7 +5,7 @@
 #![allow(clippy::cast_possible_truncation)]
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --test coverage_aggregates
+//! cargo test -p grafeo-engine --test main coverage_aggregates::
 //! ```
 
 use grafeo_common::types::Value;

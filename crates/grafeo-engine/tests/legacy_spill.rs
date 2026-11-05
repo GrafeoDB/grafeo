@@ -599,8 +599,7 @@ const OPENED: i32 = 4;
 #[cfg(feature = "testing-crash-injection")]
 fn open_in_child(point: u64, path: &Path) -> Option<String> {
     let output = grafeo_common::testing::child_process::output(
-        std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "crash_child", "--nocapture"])
+        grafeo_common::child_test!("crash_child")
             .env(POINT_VAR, point.to_string())
             .env(PATH_VAR, path),
     )

@@ -301,6 +301,9 @@ pub enum LogicalOperator {
     /// The named graphs of the dataset, one row per graph.
     NamedGraphs(NamedGraphsOp),
 
+    /// A pattern evaluated in a named graph, empty when the dataset has none of that name.
+    InNamedGraph(InNamedGraphOp),
+
     /// Union of multiple result sets.
     Union(UnionOp),
 
@@ -466,6 +469,7 @@ impl LogicalOperator {
             Self::Project(op) => op.input.has_mutations(),
             Self::Aggregate(op) => op.input.has_mutations(),
             Self::Limit(op) => op.input.has_mutations(),
+            Self::InNamedGraph(op) => op.input.has_mutations(),
             Self::Skip(op) => op.input.has_mutations(),
             Self::Sort(op) => op.input.has_mutations(),
             Self::Distinct(op) => op.input.has_mutations(),
@@ -535,6 +539,7 @@ impl LogicalOperator {
             Self::Project(op) => vec![&*op.input],
             Self::Aggregate(op) => vec![&*op.input],
             Self::Limit(op) => vec![&*op.input],
+            Self::InNamedGraph(op) => vec![&*op.input],
             Self::Skip(op) => vec![&*op.input],
             Self::Sort(op) => vec![&*op.input],
             Self::Distinct(op) => vec![&*op.input],
@@ -653,6 +658,10 @@ impl LogicalOperator {
             Self::Aggregate(mut op) => {
                 op.input = Box::new(f(*op.input));
                 Self::Aggregate(op)
+            }
+            Self::InNamedGraph(mut op) => {
+                op.input = Box::new(f(*op.input));
+                Self::InNamedGraph(op)
             }
             Self::Limit(mut op) => {
                 op.input = Box::new(f(*op.input));
@@ -819,6 +828,7 @@ impl LogicalOperator {
     pub fn display_label(&self) -> String {
         match self {
             Self::NamedGraphs(op) => format!("GRAPH ?{}", op.variable),
+            Self::InNamedGraph(op) => format!("GRAPH <{}>", op.graph),
             Self::PropertyPath(op) => format!(
                 "{} {:?}{} {}",
                 fmt_triple_component(&op.subject),
@@ -856,21 +866,10 @@ impl LogicalOperator {
                 )
             }
             Self::Filter(op) => {
-                let hint = match &op.pushdown_hint {
-                    Some(PushdownHint::IndexLookup { property }) => {
-                        format!(" [index: {property}]")
-                    }
-                    Some(PushdownHint::RangeScan { property }) => {
-                        format!(" [range: {property}]")
-                    }
-                    Some(PushdownHint::LabelFirst) => " [label-first]".to_string(),
-                    Some(PushdownHint::LabelUnion { labels }) => {
-                        format!(" [labels: {}]", labels.join("|"))
-                    }
-                    Some(PushdownHint::IdSeek) => " [seek: id]".to_string(),
-                    Some(PushdownHint::HashJoin { keys }) => hash_join_hint(keys),
-                    None => String::new(),
-                };
+                let hint = op
+                    .pushdown_hint
+                    .as_ref()
+                    .map_or_else(String::new, hint_text);
                 format!("{}{hint}", fmt_expr(&op.predicate))
             }
             Self::Project(op) => {
@@ -1073,6 +1072,7 @@ impl LogicalOperator {
                 bound.extend(expand.path_alias.iter().cloned());
             }
             Self::Filter(filter) => return filter.input.bound_variables(imports),
+            Self::InNamedGraph(graph) => return graph.input.bound_variables(imports),
             Self::Limit(limit) => return limit.input.bound_variables(imports),
             Self::Skip(skip) => return skip.input.bound_variables(imports),
             Self::Sort(sort) => return sort.input.bound_variables(imports),
@@ -1314,9 +1314,19 @@ impl fmt::Write for ExplainText<'_> {
 impl LogicalOperator {
     /// Formats this operator tree as a human-readable plan for EXPLAIN output.
     pub fn explain_tree(&self) -> String {
+        self.explain_tree_with(crate::query::optimizer::PlannerRules::all())
+    }
+
+    /// [`Self::explain_tree`] of a plan that runs with `rules`.
+    pub(crate) fn explain_tree_with(&self, rules: crate::query::optimizer::PlannerRules) -> String {
+        let reachability = if rules.has(crate::query::optimizer::PlannerRule::Reachability) {
+            crate::query::planner::lpg::reachability::reachability_expands(self)
+        } else {
+            Vec::new()
+        };
         let mut output = ExplainText {
             text: String::new(),
-            reachability: crate::query::planner::lpg::reachability::reachability_expands(self),
+            reachability,
             after_write: crate::query::planner::lpg::after_write::clauses_after_a_write(self),
         };
         self.fmt_tree(&mut output, 0);
@@ -1382,21 +1392,10 @@ impl LogicalOperator {
                 op.input.fmt_tree(out, depth + 1);
             }
             Self::Filter(op) => {
-                let hint = match &op.pushdown_hint {
-                    Some(PushdownHint::IndexLookup { property }) => {
-                        format!(" [index: {property}]")
-                    }
-                    Some(PushdownHint::RangeScan { property }) => {
-                        format!(" [range: {property}]")
-                    }
-                    Some(PushdownHint::LabelFirst) => " [label-first]".to_string(),
-                    Some(PushdownHint::LabelUnion { labels }) => {
-                        format!(" [labels: {}]", labels.join("|"))
-                    }
-                    Some(PushdownHint::IdSeek) => " [seek: id]".to_string(),
-                    Some(PushdownHint::HashJoin { keys }) => hash_join_hint(keys),
-                    None => String::new(),
-                };
+                let hint = op
+                    .pushdown_hint
+                    .as_ref()
+                    .map_or_else(String::new, hint_text);
                 let _ = writeln!(
                     out,
                     "{indent}Filter ({expr}){hint}{after}",
@@ -1458,6 +1457,10 @@ impl LogicalOperator {
                     groups = groups.join(", "),
                     aggs = aggs.join(", "),
                 );
+                op.input.fmt_tree(out, depth + 1);
+            }
+            Self::InNamedGraph(op) => {
+                let _ = writeln!(out, "{indent}InNamedGraph (<{}>){after}", op.graph);
                 op.input.fmt_tree(out, depth + 1);
             }
             Self::Limit(op) => {
@@ -1795,6 +1798,35 @@ impl LogicalOperator {
 }
 
 /// The text of a [`PushdownHint::HashJoin`]: `[hash join: t.k = f.k, ...]`.
+/// A filter's hint as `EXPLAIN` shows it, after the filter's predicate.
+fn hint_text(hint: &PushdownHint) -> String {
+    match hint {
+        PushdownHint::IndexLookup { property } => format!(" [index: {property}]"),
+        PushdownHint::IndexesAndRemainder { property } => {
+            format!(" [indexes and remainder: {property}]")
+        }
+        PushdownHint::KeyColumn { property } => format!(" [key column: {property}]"),
+        PushdownHint::RangeScan { property } => format!(" [range: {property}]"),
+        PushdownHint::LabelFirst => " [label-first]".to_string(),
+        PushdownHint::LabelUnion { labels } => format!(" [labels: {}]", labels.join("|")),
+        PushdownHint::IdSeek => " [seek: id]".to_string(),
+        PushdownHint::ExpandToKey { key, .. } => format!(" [expand to key: {key}]"),
+        PushdownHint::IntersectExpand { target } => {
+            format!(" [IntersectExpand into: {target}]")
+        }
+        PushdownHint::ExpandInto { target } => format!(" [expand into: {target}]"),
+        PushdownHint::HashJoin { keys } => hash_join_hint(keys),
+        PushdownHint::NoIndex { key, labels, then } => {
+            let path = then.as_deref().map_or_else(String::new, hint_text);
+            let labels: Vec<String> = labels.iter().map(|label| format!(":{label}")).collect();
+            format!(
+                "{path} [no index: {key} is indexed on {} only]",
+                labels.join(", ")
+            )
+        }
+    }
+}
+
 fn hash_join_hint(keys: &[(LogicalExpression, LogicalExpression)]) -> String {
     let keys: Vec<String> = keys
         .iter()
@@ -2378,12 +2410,54 @@ pub enum PushdownHint {
     },
     /// The node is looked up by ID for each input row.
     IdSeek,
+    /// The filter pins the target of its expand by a key: the expand finds the
+    /// nodes that hold it once and goes on from them.
+    ExpandToKey {
+        /// The indexed property, or `id()`.
+        key: String,
+        /// What the label checks of the whole chain of filters over the expand say of the nodes
+        /// that hold it, which this filter alone may not show.
+        labels: grafeo_core::execution::operators::KeyLabels,
+    },
+    /// The filter's expand closes a cycle right after another hop: the two
+    /// intersect the lists of the bound nodes they meet between.
+    IntersectExpand {
+        /// The variable of the node the last hop comes back to.
+        target: String,
+    },
+    /// The filter's expand closes a cycle: it looks up the edges to the node
+    /// `target` of each row instead of listing every edge.
+    ExpandInto {
+        /// The variable of the node the expand comes back to.
+        target: String,
+    },
     /// The nodes are scanned once and joined to the input's rows by hash on
     /// values that must be equal: each key is the value of the scanned node,
     /// then that of the row.
     HashJoin {
         /// The keys, as the filter writes them.
         keys: Vec<(LogicalExpression, LogicalExpression)>,
+    },
+    /// A key's holders come from the indexes of some labels and a read of the key's column for
+    /// the rest.
+    IndexesAndRemainder {
+        /// The key.
+        property: String,
+    },
+    /// A key's holders come from a read of the key's column, with no index.
+    KeyColumn {
+        /// The key.
+        property: String,
+    },
+    /// The filter pins a key that only other labels have an index on, so it reads no index:
+    /// `EXPLAIN` says so beside the path it takes.
+    NoIndex {
+        /// The key.
+        key: String,
+        /// The labels with an index on it.
+        labels: Vec<String>,
+        /// The path the filter takes.
+        then: Option<Box<PushdownHint>>,
     },
 }
 
@@ -2727,6 +2801,19 @@ pub struct NamedGraphsOp {
     pub variable: String,
     /// FROM NAMED: when it lists graphs, those are the named graphs.
     pub dataset: Option<DatasetRestriction>,
+}
+
+/// A pattern evaluated in a named graph of the dataset (SPARQL 1.1 sec 18.6): nothing when the
+/// dataset has no such graph, whatever the pattern gives without reading it. The planner lists the
+/// graphs per run, so a cached plan holds no list.
+#[derive(Debug, Clone)]
+pub struct InNamedGraphOp {
+    /// The graph's IRI.
+    pub graph: String,
+    /// FROM NAMED: when it lists graphs, those are the named graphs.
+    pub dataset: Option<DatasetRestriction>,
+    /// The pattern, its scans already reading the graph.
+    pub input: Box<LogicalOperator>,
 }
 
 /// Scan RDF triples matching a pattern.

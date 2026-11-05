@@ -7,7 +7,7 @@
 //! index on `id`.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test outer_values_in_patterns
+//! cargo test -p grafeo-engine --all-features --test main outer_values_in_patterns::
 //! ```
 
 #![cfg(all(feature = "gql", feature = "cypher"))]

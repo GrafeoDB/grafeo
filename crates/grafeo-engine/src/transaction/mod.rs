@@ -213,12 +213,13 @@ mod prepared;
 #[cfg(feature = "triple-store")]
 mod rdf;
 
-pub(crate) use changes::{BuiltIndex, StandaloneChange};
+pub(crate) use changes::{BuiltIndex, QueuedSchemaOp, StandaloneChange};
 pub(crate) use changes::{StreamingChanges, TransactionChanges};
 pub(crate) use history::HistoryImage;
 #[cfg(feature = "wal")]
 pub(crate) use manager::CommitGuard;
 pub(crate) use manager::ReadPin;
+pub(crate) use manager::WrittenCommit;
 pub(crate) use manager::{ClaimMark, CommitsHeld};
 pub use manager::{
     EntityId, GraphEntity, IsolationLevel, KeyClaim, TransactionInfo, TransactionManager,
@@ -231,5 +232,7 @@ pub use prepared::{CommitInfo, PreparedCommit};
 pub(crate) use rdf::RdfWriter;
 #[cfg(all(feature = "triple-store", feature = "cdc"))]
 pub(crate) use rdf::ntriples_terms;
-#[cfg(any(rdf_language, test))]
+#[cfg(feature = "triple-store")]
+pub(crate) use rdf::refuse_graph_op_with_changes_in;
+#[cfg(any(rdf_language, all(test, feature = "triple-store")))]
 pub(crate) use rdf::update_privately;

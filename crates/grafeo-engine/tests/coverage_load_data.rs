@@ -3,7 +3,7 @@
 //! Targets: load_data.rs (61.77%), parser.rs LOAD DATA syntax
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --features full --test coverage_load_data
+//! cargo test -p grafeo-engine --features full --test main coverage_load_data::
 //! ```
 
 use grafeo_common::types::Value;

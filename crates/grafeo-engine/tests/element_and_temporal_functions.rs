@@ -6,7 +6,7 @@
 //! where its offset puts them.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test element_and_temporal_functions
+//! cargo test -p grafeo-engine --all-features --test main element_and_temporal_functions::
 //! ```
 
 #![cfg(all(feature = "gql", feature = "cypher"))]

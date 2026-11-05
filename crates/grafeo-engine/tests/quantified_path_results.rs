@@ -7,7 +7,7 @@
 //! not bind.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test quantified_path_results
+//! cargo test -p grafeo-engine --all-features --test main quantified_path_results::
 //! ```
 
 use grafeo_common::types::Value;

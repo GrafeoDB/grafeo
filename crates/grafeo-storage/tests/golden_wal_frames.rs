@@ -13,7 +13,7 @@
 //! - **Accidental breakage**: fix the regression.
 //! - **Intentional format change**: regenerate the fixture:
 //!   ```
-//!   cargo test --all-features -p grafeo-adapters --test golden_wal_frames -- regenerate_wal_fixture --ignored
+//!   cargo test --all-features -p grafeo-storage --test main -- golden_wal_frames::regenerate_wal_fixture --ignored
 //!   ```
 
 #![cfg(feature = "wal")]

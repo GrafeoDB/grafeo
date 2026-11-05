@@ -13,7 +13,7 @@
 //! hand from these edges.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test procedure_call_shapes
+//! cargo test -p grafeo-engine --all-features --test main procedure_call_shapes::
 //! ```
 
 #![cfg(all(feature = "gql", feature = "cypher", feature = "algos"))]

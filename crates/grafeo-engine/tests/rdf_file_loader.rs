@@ -25,7 +25,7 @@
 //! `read_only_writes.rs` and `writes_after_close.rs`.)
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test rdf_file_loader
+//! cargo test -p grafeo-engine --all-features --test main rdf_file_loader::
 //! ```
 
 #![cfg(all(feature = "sparql", feature = "triple-store"))]
@@ -573,12 +573,7 @@ mod crash {
         }
         let dir = tempfile::tempdir().unwrap();
         let status = child_process::run(
-            std::process::Command::new(std::env::current_exe().unwrap())
-                .args([
-                    "--exact",
-                    "crash::a_load_that_returned_survives_a_crash",
-                    "--nocapture",
-                ])
+            grafeo_common::child_test!("a_load_that_returned_survives_a_crash")
                 .env(PATH_VAR, dir.path()),
         )
         .unwrap();
@@ -632,12 +627,7 @@ mod crash {
         }
         let dir = tempfile::tempdir().unwrap();
         let status = child_process::run(
-            std::process::Command::new(std::env::current_exe().unwrap())
-                .args([
-                    "--exact",
-                    "crash::a_named_graph_load_that_returned_survives_a_crash",
-                    "--nocapture",
-                ])
+            grafeo_common::child_test!("a_named_graph_load_that_returned_survives_a_crash")
                 .env(GRAPH_PATH_VAR, dir.path()),
         )
         .unwrap();

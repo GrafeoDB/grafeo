@@ -228,16 +228,33 @@ pub fn int_equals_float(int: i64, float: f64) -> bool {
     compare_int_float(int, float).is_eq()
 }
 
+/// How `=` reads text against a number, the one place for its order: integer
+/// text exactly as that integer, by `integer`; other number text as the float
+/// it parses as, by `float`, and `None` when no float is compared, so such text
+/// equals nothing and is not parsed as one.
+#[must_use]
+pub fn text_reads_as_number(
+    text: &str,
+    integer: impl FnOnce(i64) -> bool,
+    float: Option<impl FnOnce(f64) -> bool>,
+) -> bool {
+    match text.parse::<i64>() {
+        Ok(value) => integer(value),
+        Err(_) => float.is_some_and(|float| text.parse::<f64>().is_ok_and(float)),
+    }
+}
+
 /// Whether `=` finds a numeric string equal to a float (RDF stores numeric
 /// literals as strings): integer text exactly as that integer, so
 /// `'9007199254740993'` does not equal the float `2^53`; other number text
 /// as the float it parses as.
 #[must_use]
 pub fn text_equals_float(text: &str, float: f64) -> bool {
-    match text.parse::<i64>() {
-        Ok(integer) => int_equals_float(integer, float),
-        Err(_) => text.parse::<f64>().is_ok_and(|number| number == float),
-    }
+    text_reads_as_number(
+        text,
+        |integer| int_equals_float(integer, float),
+        Some(|number| number == float),
+    )
 }
 
 /// Whether the query's `=` finds two values equal, with `temporal` as the
@@ -251,6 +268,13 @@ pub fn text_equals_float(text: &str, float: f64) -> bool {
 /// `'+5' = 5`, but `'5.0' = 5` is false), against a float any number text
 /// (`'5.0' = 5.0`). Two strings, and the other values, compare as
 /// themselves; lists, maps and paths element by element.
+///
+/// Two places restate these rules without building a comparison per value, and
+/// must change with them: `MaybeEqual`'s probes (`graph/rowgroup/index/property.rs`),
+/// the values an index or a column read may find equal, and
+/// `Targets::text_equals_a_number` (`graph/rowgroup/key_column.rs`), a string
+/// against number keys. The test `text_against_number_keys_answers_as_values_equal`
+/// in `key_column.rs` holds the second to this function.
 #[must_use]
 pub fn values_equal(left: &Value, right: &Value, temporal: TemporalComparison) -> bool {
     let equal = |left: &Value, right: &Value| values_equal(left, right, temporal);

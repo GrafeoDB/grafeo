@@ -375,6 +375,7 @@ impl RdfPlanner {
                     vec![LogicalType::RdfTermId],
                 ))
             }
+            LogicalOperator::InNamedGraph(graph) => self.plan_in_named_graph(graph),
             LogicalOperator::Filter(filter) => self.plan_filter(filter),
             LogicalOperator::Project(project) => self.plan_project(project),
             LogicalOperator::Limit(limit) => self.plan_limit(limit),
@@ -1167,6 +1168,27 @@ impl RdfPlanner {
 
     /// Plans a PROJECT operator: a variable's ids are copied, a constant and
     /// an expression's value are interned.
+    /// A pattern in a named graph: its plan, or with no such graph in the dataset now, nothing
+    /// under the same columns (SPARQL 1.1 sec 18.6).
+    fn plan_in_named_graph(
+        &self,
+        graph: &crate::query::plan::InNamedGraphOp,
+    ) -> Result<(Box<dyn Operator>, Vec<String>, Vec<LogicalType>)> {
+        let (operator, columns, types) = self.plan_operator(&graph.input)?;
+        let names = named_graphs::named_graph_names(
+            &self.store,
+            self.writer.as_ref(),
+            graph.dataset.as_ref(),
+        );
+        if names.binary_search(&graph.graph).is_ok() {
+            return Ok((operator, columns, types));
+        }
+        let empty: Box<dyn Operator> = Box::new(
+            grafeo_core::execution::operators::EmptyOperator::new(types.clone()),
+        );
+        Ok((empty, columns, types))
+    }
+
     fn plan_project(
         &self,
         project: &crate::query::plan::ProjectOp,
@@ -2030,11 +2052,18 @@ impl RdfPlanner {
         // Sort by cardinality (smallest first) so we build on smaller inputs
         planned.sort_by(|a, b| a.3.partial_cmp(&b.3).unwrap_or(std::cmp::Ordering::Equal));
 
-        // Fold left-to-right with pairwise hash joins; a shared variable a
-        // side may leave unbound is checked per pair (see `loosely_shared`).
+        // Fold with pairwise hash joins, each time on the smallest input that
+        // shares a variable with the rows so far (see `next_join_input`); a
+        // shared variable a side may leave unbound is checked per pair (see
+        // `loosely_shared`).
         let (mut current_op, mut current_cols, mut current_types, mut current_card, mut bound) =
             planned.remove(0);
-        for (right_op, right_cols, right_types, right_card, right_bound) in planned {
+        while !planned.is_empty() {
+            let next = next_join_input(
+                planned.iter().map(|input| input.1.as_slice()),
+                &current_cols,
+            );
+            let (right_op, right_cols, right_types, right_card, right_bound) = planned.remove(next);
             let loose = loosely_shared(
                 bound.clone(),
                 right_bound.clone(),
@@ -4354,6 +4383,18 @@ fn conjuncts_of<'a>(expression: &'a LogicalExpression, into: &mut Vec<&'a Logica
     }
 }
 
+/// The position in `inputs` (their columns, smallest estimate first) of the
+/// next input of a multi-way join over the rows of `joined`: the smallest one
+/// that shares a variable with them, or the smallest when none does. Taking
+/// the smallest whatever it shares would cross small inputs that are not
+/// connected yet: a 7-pattern join crossed its 20 tags, 1,000 posts and 1,001
+/// people first.
+fn next_join_input<'a>(mut inputs: impl Iterator<Item = &'a [String]>, joined: &[String]) -> usize {
+    inputs
+        .position(|columns| columns.iter().any(|column| joined.contains(column)))
+        .unwrap_or(0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5881,6 +5922,100 @@ mod tests {
             rows += c.row_count();
         }
         assert_eq!(rows, 1);
+    }
+
+    #[test]
+    fn a_multi_way_join_takes_the_smallest_connected_input_next() {
+        let names = |list: &[&str]| list.iter().map(ToString::to_string).collect::<Vec<_>>();
+        let (post, person, tagged, interest) = (
+            names(&["m"]),
+            names(&["p"]),
+            names(&["m", "t"]),
+            names(&["p", "t"]),
+        );
+        let inputs = [
+            post.as_slice(),
+            person.as_slice(),
+            tagged.as_slice(),
+            interest.as_slice(),
+        ];
+        // Over the tags the posts and people are smaller but unconnected.
+        assert_eq!(next_join_input(inputs.into_iter(), &names(&["t"])), 2);
+        // Once `m` is bound the posts connect, and they are the smallest.
+        assert_eq!(next_join_input(inputs.into_iter(), &names(&["t", "m"])), 0);
+        // Nothing connects: the smallest, a real cross product.
+        assert_eq!(next_join_input(inputs.into_iter(), &names(&["x"])), 0);
+    }
+
+    /// Reads the tags of a graph where the smallest inputs share no variable:
+    /// 60 tags, 1,500 posts and 1,501 people cross to 135 million rows, which
+    /// runs into the timeout, when a join takes them by size alone.
+    #[cfg(feature = "sparql")]
+    #[test]
+    fn a_multi_way_join_does_not_cross_its_smallest_inputs() {
+        use std::fmt::Write as _;
+
+        let db = crate::GrafeoDB::with_config(
+            crate::config::Config::in_memory()
+                .with_query_timeout(std::time::Duration::from_secs(10)),
+        )
+        .unwrap();
+        let mut triples = String::new();
+        for tag in 0..60 {
+            writeln!(
+                triples,
+                "<urn:t{tag}> a <urn:Tag> ; <urn:name> \"tag{tag:02}\" ."
+            )
+            .unwrap();
+        }
+        for person in 0..1501 {
+            let (first, second) = (person % 60, (person + 1) % 60);
+            writeln!(
+                triples,
+                "<urn:p{person}> a <urn:Person> ; <urn:interest> <urn:t{first}> , <urn:t{second}> ."
+            )
+            .unwrap();
+        }
+        for post in 0..1500 {
+            let tag = post % 60;
+            writeln!(
+                triples,
+                "<urn:m{post}> a <urn:Post> ; <urn:tag> <urn:t{tag}> ; <urn:creator> <urn:p{post}> ."
+            )
+            .unwrap();
+        }
+        // Tagged and created like a post, but not one: these make the edges
+        // outnumber the posts and people, as in a real graph.
+        for comment in 0..2000 {
+            let (tag, creator) = (comment % 60, comment % 1501);
+            writeln!(
+                triples,
+                "<urn:c{comment}> <urn:tag> <urn:t{tag}> ; <urn:creator> <urn:p{creator}> ."
+            )
+            .unwrap();
+        }
+        db.execute_sparql(&format!(
+            "INSERT DATA {{
+{triples}}}"
+        ))
+        .unwrap();
+
+        let result = db
+            .execute_sparql(
+                "SELECT ?name (COUNT(*) AS ?posts) WHERE {
+                   ?p a <urn:Person> ; <urn:interest> ?t .
+                   ?t a <urn:Tag> ; <urn:name> ?name .
+                   ?m a <urn:Post> ; <urn:tag> ?t ; <urn:creator> ?p .
+                 } GROUP BY ?name ORDER BY ?name",
+            )
+            .unwrap();
+
+        // Post i has tag i % 60 and creator i, whose interests include that
+        // tag: each of the 60 tags counts its 25 posts.
+        let expected: Vec<Vec<Value>> = (0..60)
+            .map(|tag| vec![literal(&format!("tag{tag:02}")), integer(25)])
+            .collect();
+        assert_eq!(result.rows(), expected.as_slice());
     }
 
     #[test]

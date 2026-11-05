@@ -8,7 +8,7 @@
 //! engine, and read the CLI's own output only for which rows a query returned.
 //!
 //! ```bash
-//! cargo test -p grafeo-cli --all-features --test cli_runs
+//! cargo test -p grafeo-cli --all-features --test main cli_runs::
 //! ```
 
 use std::path::Path;

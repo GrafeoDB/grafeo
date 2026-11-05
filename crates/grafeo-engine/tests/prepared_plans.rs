@@ -7,7 +7,7 @@
 //! (a WITH or RETURN item that is a parameter alone) is bound with its
 //! values on every call.
 //!
-//! cargo test -p grafeo-engine --all-features --test prepared_plans
+//! cargo test -p grafeo-engine --all-features --test main prepared_plans::
 
 #![cfg(feature = "gql")]
 
@@ -15,6 +15,7 @@ use std::collections::HashMap;
 
 use grafeo_common::types::Value;
 use grafeo_engine::GrafeoDB;
+use grafeo_engine::query::optimizer::{PlannerRule, PlannerRules};
 use grafeo_engine::query::{CacheKey, QueryLanguage};
 
 fn params(pairs: &[(&str, Value)]) -> HashMap<String, Value> {
@@ -309,7 +310,9 @@ fn a_value_of_another_type_answers_as_its_literal() {
 #[test]
 fn an_index_made_after_the_statement_was_prepared_is_used() {
     let db = people();
-    let session = db.session();
+    let mut session = db.session();
+    session.set_planner_rules(PlannerRules::all().with(PlannerRule::KeyColumnLookup, false));
+    let session = session;
     let statement = "MATCH (p:Person {name: $name}) RETURN p.age";
     let profile = |name: &str| {
         session
@@ -447,8 +450,9 @@ fn a_restore_makes_the_cached_plans_again() {
     let without_index = people().export_snapshot().unwrap();
 
     let profile_of = |db: &GrafeoDB| {
-        let rows = db
-            .session()
+        let mut session = db.session();
+        session.set_planner_rules(PlannerRules::all().with(PlannerRule::KeyColumnLookup, false));
+        let rows = session
             .execute_with_params(
                 &format!("PROFILE {statement}"),
                 params(&[("name", Value::from("Gus"))]),

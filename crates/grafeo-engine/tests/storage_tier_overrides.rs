@@ -10,8 +10,8 @@
 //!  - `TierOverride::Auto` (default) does NOT auto-spill at open.
 //!
 //! Run with:
-//!   cargo test -p grafeo-engine --features "embedded,async-storage" \
-//!              --test storage_tier_overrides
+//!   cargo test -p grafeo-engine --all-features \
+//!              --test main storage_tier_overrides::
 
 #![allow(unused_imports, dead_code)]
 

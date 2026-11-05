@@ -4,7 +4,7 @@
 //! when it has none, on every path that runs a query.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test sparql_ask
+//! cargo test -p grafeo-engine --all-features --test main sparql_ask::
 //! ```
 
 #![cfg(all(feature = "sparql", feature = "triple-store"))]

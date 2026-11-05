@@ -9,7 +9,7 @@
 //! property index).
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test compact_keeps_indexes
+//! cargo test -p grafeo-engine --all-features --test main compact_keeps_indexes::
 //! ```
 
 #![cfg(all(feature = "gql", feature = "text-index", feature = "vector-index"))]
@@ -394,7 +394,6 @@ fn indexes_stay_across_recompact_and_another_compact() {
 #[cfg(all(feature = "wal", feature = "grafeo-file"))]
 mod file {
     use std::path::{Path, PathBuf};
-    use std::process::Command;
 
     use grafeo_common::testing::child_process;
 
@@ -485,13 +484,7 @@ mod file {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("people.grafeo");
         let output = child_process::output(
-            Command::new(std::env::current_exe().unwrap())
-                .args([
-                    "--exact",
-                    "file::compact_keeps_indexes_child",
-                    "--nocapture",
-                ])
-                .env(PATH_VAR, &path),
+            grafeo_common::child_test!("compact_keeps_indexes_child").env(PATH_VAR, &path),
         )
         .unwrap();
         assert_eq!(

@@ -7,7 +7,7 @@
 //! a reopen.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test use_graph_statement
+//! cargo test -p grafeo-engine --all-features --test main use_graph_statement::
 //! ```
 
 #![cfg(feature = "gql")]

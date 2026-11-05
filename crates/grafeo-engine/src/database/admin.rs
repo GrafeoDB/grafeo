@@ -354,6 +354,102 @@ impl super::GrafeoDB {
             .collect()
     }
 
+    /// The types whose rules an older release applied in graphs not bound to their graph
+    /// type: since 0.6.2 a type a graph type lists applies only in its graphs, so a database
+    /// written before may hold elements those rules no longer check. One warning per type,
+    /// from the counts the store keeps, so no scan. For [`validate`](Self::validate), and
+    /// for a binding to tell at open.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn graph_type_scope_warnings(&self) -> Vec<crate::admin::ValidationWarning> {
+        type Listed<'a> = &'a dyn Fn(&crate::catalog::GraphTypeDefinition) -> bool;
+        type Held<'a> = &'a dyn Fn(&grafeo_core::graph::rowgroup::RowGroupStore) -> bool;
+
+        let mut warnings = Vec::new();
+        let graph_types = self.catalog.all_graph_type_defs();
+        let Some(root) = self.root_store().filter(|_| !graph_types.is_empty()) else {
+            return warnings;
+        };
+        let bindings = self.catalog.all_graph_type_bindings();
+        let graph_names = root.graph_names();
+        // Whether `graph` has a graph type that lists the type.
+        let bound = |graph: &str, listed: Listed<'_>| {
+            bindings.iter().any(|(bound_graph, type_name)| {
+                bound_graph == graph
+                    && graph_types
+                        .iter()
+                        .any(|def| def.name == *type_name && listed(def))
+            })
+        };
+        // The first graph of the type's schema, not bound to it, holding what `held` counts.
+        let unbound_holder = |name: &str, listed: Listed<'_>, held: Held<'_>| {
+            let in_schema = name.rsplit_once('/').map(|(schema, _)| schema);
+            if in_schema.is_none() && held(&root) {
+                return Some("the default graph".to_string());
+            }
+            graph_names.iter().find_map(|graph| {
+                let holds = graph.rsplit_once('/').map(|(schema, _)| schema) == in_schema
+                    && !bound(graph, listed)
+                    && root.graph(graph).is_some_and(|store| held(&store));
+                holds.then(|| format!("graph '{graph}'"))
+            })
+        };
+        let mut warn = |kind: &str, name: &str, graph_type: &str, graph: String| {
+            let short = crate::catalog::unqualified(name);
+            warnings.push(crate::admin::ValidationWarning {
+                code: "GRAPH_TYPE_NOT_BOUND".to_string(),
+                message: format!(
+                    "{kind} type '{short}' is listed by graph type '{graph_type}', so its rules \
+                     apply only in graphs bound to that type, and {graph} holds some: to keep \
+                     them enforced there, use a graph typed by it, or take the type out of the \
+                     graph type and declare it with CREATE {} TYPE",
+                    kind.to_uppercase()
+                ),
+                context: Some(format!("{kind}_type:{short}")),
+            });
+        };
+        let mut warned = std::collections::HashSet::new();
+        for def in &graph_types {
+            if crate::catalog::is_current_graph_type(&def.name) {
+                continue;
+            }
+            for name in &def.allowed_node_types {
+                if !warned.insert(("node", name.clone())) {
+                    continue;
+                }
+                let label = crate::catalog::unqualified(name);
+                let holder = unbound_holder(
+                    name,
+                    &|other| other.allowed_node_types.contains(name),
+                    &|store| store.label_node_estimate(label) > 0,
+                );
+                if let Some(graph) = holder {
+                    warn("node", name, &def.name, graph);
+                }
+            }
+            for name in &def.allowed_edge_types {
+                if !warned.insert(("edge", name.clone())) {
+                    continue;
+                }
+                let edge_type = crate::catalog::unqualified(name);
+                let holder = unbound_holder(
+                    name,
+                    &|other| other.allowed_edge_types.contains(name),
+                    &|store| {
+                        store
+                            .statistics()
+                            .get_edge_type(edge_type)
+                            .is_some_and(|counted| counted.edge_count > 0)
+                    },
+                );
+                if let Some(graph) = holder {
+                    warn("edge", name, &def.name, graph);
+                }
+            }
+        }
+        warnings
+    }
+
     /// Validates database integrity.
     ///
     /// Checks for:
@@ -422,6 +518,7 @@ impl super::GrafeoDB {
                 context: None,
             });
         }
+        result.warnings.extend(self.graph_type_scope_warnings());
 
         Ok(result)
     }

@@ -6,7 +6,7 @@
 //! null without an error.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test numeric_errors
+//! cargo test -p grafeo-engine --all-features --test main numeric_errors::
 //! ```
 
 #![cfg(all(feature = "gql", feature = "cypher"))]

@@ -356,8 +356,15 @@ impl PyGrafeoDB {
         .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("Arrow export failed: {e}")))
     }
 
-    /// Runs `work` on the database with the GIL released (see
-    /// [`crate::gil`]): the read lock is taken inside, once the GIL is gone.
+    /// Warns of the types whose rules no longer reach graphs not bound to their graph type,
+    /// which a build without a log would otherwise not tell (see
+    /// `GrafeoDB::graph_type_scope_warnings`).
+    fn warning_of_graph_type_scope(self, py: Python<'_>) -> PyResult<Self> {
+        let warnings = self.inner.read().graph_type_scope_warnings();
+        warn_of(py, warnings)?;
+        Ok(self)
+    }
+
     /// Opens a database with the GIL released: recovery reads the file and
     /// replays the WAL.
     fn open_with(py: Python<'_>, config: Config) -> PyResult<Self> {
@@ -367,6 +374,8 @@ impl PyGrafeoDB {
         })
     }
 
+    /// Runs `work` on the database with the GIL released (see
+    /// [`crate::gil`]): the read lock is taken inside, once the GIL is gone.
     fn released<T: Send>(
         &self,
         py: Python<'_>,
@@ -442,6 +451,25 @@ fn timeout_seconds(seconds: f64, what: &str) -> Option<PyResult<std::time::Durat
                 ))
             }),
     )
+}
+
+/// Raises each of `warnings` as a `UserWarning`, its code leading the message, so a filter
+/// can name it.
+fn warn_of(
+    py: Python<'_>,
+    warnings: impl IntoIterator<Item = grafeo_engine::admin::ValidationWarning>,
+) -> PyResult<()> {
+    for warning in warnings {
+        let message = std::ffi::CString::new(format!("{}: {}", warning.code, warning.message))
+            .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
+        PyErr::warn(
+            py,
+            py.get_type::<pyo3::exceptions::PyUserWarning>().as_any(),
+            &message,
+            1,
+        )?;
+    }
+    Ok(())
 }
 
 #[pymethods]
@@ -536,7 +564,7 @@ impl PyGrafeoDB {
             }
         }
 
-        Self::open_with(py, config)
+        Self::open_with(py, config)?.warning_of_graph_type_scope(py)
     }
 
     /// Returns the current storage tier of every registered section.
@@ -582,7 +610,7 @@ impl PyGrafeoDB {
     /// Open an existing database.
     #[staticmethod]
     fn open(path: String, py: Python<'_>) -> PyResult<Self> {
-        Self::open_with(py, Config::persistent(path))
+        Self::open_with(py, Config::persistent(path))?.warning_of_graph_type_scope(py)
     }
 
     /// Open an existing database in read-only mode.
@@ -601,7 +629,7 @@ impl PyGrafeoDB {
     ///     result = db.execute("MATCH (n) RETURN n LIMIT 10")
     #[staticmethod]
     fn open_read_only(path: String, py: Python<'_>) -> PyResult<Self> {
-        Self::open_with(py, Config::read_only(path))
+        Self::open_with(py, Config::read_only(path))?.warning_of_graph_type_scope(py)
     }
 
     /// Runs a GQL query and returns the results.
@@ -3080,12 +3108,23 @@ impl PyGrafeoDB {
     ///     list of error dicts (empty = valid). Each error has keys:
     ///     code, message, context
     ///
+    /// A type whose rules no longer reach a graph not bound to its graph type raises a
+    /// UserWarning with the code GRAPH_TYPE_NOT_BOUND, as opening the database does.
+    ///
     /// Example:
     ///     errors = db.validate()
     ///     if not errors:
     ///         print("Database is valid")
     fn validate(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let result = self.released(py, |db| Ok(db.validate()?))?;
+        // The list stays the errors'; this warning reaches Python as it does at open.
+        warn_of(
+            py,
+            result
+                .warnings
+                .into_iter()
+                .filter(|warning| warning.code == "GRAPH_TYPE_NOT_BOUND"),
+        )?;
 
         let errors = pyo3::types::PyList::empty(py);
         for error in result.errors {
@@ -3299,9 +3338,10 @@ impl PyGrafeoDB {
             Ok(grafeo_engine::GrafeoDB::open_in_memory(path)?)
         })?;
 
-        Ok(Self {
+        Self {
             inner: Arc::new(RwLock::new(db)),
-        })
+        }
+        .warning_of_graph_type_scope(py)
     }
 
     /// Returns true if this database is backed by a file (persistent).

@@ -16,7 +16,7 @@
 //! - a join is planned the same after a statement load as after a bulk load.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test rdf_statistics_collection
+//! cargo test -p grafeo-engine --all-features --test main rdf_statistics_collection::
 //! ```
 
 #![cfg(all(feature = "sparql", feature = "triple-store"))]

@@ -20,7 +20,7 @@
 //! - a persistent database replays it from the WAL after a crash.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test update_nodes_by_key
+//! cargo test -p grafeo-engine --all-features --test main update_nodes_by_key::
 //! ```
 
 #![cfg(feature = "gql")]
@@ -534,12 +534,9 @@ mod crash {
     fn a_crash_after_it_replays_it() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("updates.grafeo");
-        let status = child_process::run(
-            std::process::Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", "crash::crash_child", "--nocapture"])
-                .env(PATH_VAR, &path),
-        )
-        .unwrap();
+        let status =
+            child_process::run(grafeo_common::child_test!("crash_child").env(PATH_VAR, &path))
+                .unwrap();
         assert!(status.success(), "the child process failed");
         assert!(sidecar_wal(&path).exists(), "a crash leaves the WAL");
 

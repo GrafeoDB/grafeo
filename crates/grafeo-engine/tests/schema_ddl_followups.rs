@@ -5,7 +5,7 @@
 //! are in `tests/spec/lpg/gql/index_and_graph_type_ddl.gtest`.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test schema_ddl_followups
+//! cargo test -p grafeo-engine --all-features --test main schema_ddl_followups::
 //! ```
 
 #![cfg(feature = "gql")]

@@ -4,7 +4,7 @@
 //! includes it.
 //!
 //! ```bash
-//! cargo test -p grafeo --no-default-features --features rdf --test rdf_profile
+//! cargo test -p grafeo --no-default-features --features rdf --test main rdf_profile::
 //! ```
 
 #![cfg(feature = "rdf")]
@@ -59,9 +59,7 @@ fn triples_survive_a_reopen() {
         let path = dir.join(name);
         if crash {
             let status = child_process::run(
-                std::process::Command::new(std::env::current_exe().unwrap())
-                    .args(["--exact", "crash_child", "--nocapture"])
-                    .env(CRASH_PATH_VAR, &path),
+                grafeo_common::child_test!("crash_child").env(CRASH_PATH_VAR, &path),
             )
             .unwrap();
             assert!(status.success(), "{name}: the child process failed");

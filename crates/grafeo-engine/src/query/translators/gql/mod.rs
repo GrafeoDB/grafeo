@@ -1876,19 +1876,21 @@ impl GqlTranslator {
         mut plan: LogicalOperator,
         remove_clause: &ast::RemoveClause,
     ) -> LogicalOperator {
-        for label_op in &remove_clause.label_operations {
-            plan = LogicalOperator::RemoveLabel(RemoveLabelOp {
-                variable: label_op.variable.clone(),
-                labels: label_op.labels.clone(),
-                input: Box::new(plan),
-            });
-        }
+        // The properties first: a statement is checked on the state it leaves (ISO/IEC 39075:2024
+        // 13.4), so `REMOVE n:Far, n.p` may drop the property only `Far` declares.
         for (variable, property) in &remove_clause.property_removals {
             plan = LogicalOperator::SetProperty(SetPropertyOp {
                 variable: variable.clone(),
                 properties: vec![(property.clone(), LogicalExpression::Literal(Value::Null))],
                 replace: false,
                 is_edge: false,
+                input: Box::new(plan),
+            });
+        }
+        for label_op in &remove_clause.label_operations {
+            plan = LogicalOperator::RemoveLabel(RemoveLabelOp {
+                variable: label_op.variable.clone(),
+                labels: label_op.labels.clone(),
                 input: Box::new(plan),
             });
         }

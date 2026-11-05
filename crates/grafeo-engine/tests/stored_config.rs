@@ -7,7 +7,7 @@
 //! open with the defaults.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test stored_config
+//! cargo test -p grafeo-engine --all-features --test main stored_config::
 //! ```
 
 #![cfg(all(feature = "gql", feature = "wal", feature = "grafeo-file"))]
@@ -16,8 +16,7 @@
     reason = "a test crate has no public API: each test documents itself"
 )]
 
-#[path = "common/replay.rs"]
-mod replay;
+use crate::common::replay;
 
 use std::path::{Path, PathBuf};
 
@@ -156,7 +155,7 @@ fn a_read_only_open_applies_the_stored_configuration() {
 #[test]
 fn a_reopen_after_a_crash_applies_the_stored_configuration() {
     let (dir, db) = reopened_after_crash(
-        "a_reopen_after_a_crash_applies_the_stored_configuration",
+        &grafeo_common::test_path!("a_reopen_after_a_crash_applies_the_stored_configuration"),
         |path| {
             if path.exists() {
                 GrafeoDB::open(path).unwrap()

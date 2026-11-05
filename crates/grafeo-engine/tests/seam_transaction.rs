@@ -6,7 +6,7 @@
 //! interactions, and basic isolation between sessions.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --test seam_transaction
+//! cargo test -p grafeo-engine --test main seam_transaction::
 //! ```
 
 use grafeo_common::types::Value;

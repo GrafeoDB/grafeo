@@ -9,7 +9,7 @@
 //! either way round, and creates one from left to right when none matches.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test write_directions
+//! cargo test -p grafeo-engine --all-features --test main write_directions::
 //! ```
 
 #![cfg(all(feature = "gql", feature = "cypher"))]

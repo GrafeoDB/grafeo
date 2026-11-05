@@ -4,7 +4,7 @@
 //! <https://www.w3.org/TR/sparql11-query/>.
 //!
 //! ```bash
-//! cargo test -p grafeo-adapters --all-features --test sparql_w3c_parser_tests
+//! cargo test -p grafeo-adapters --all-features --test main sparql_w3c_parser_tests::
 //! ```
 
 #[cfg(feature = "sparql")]

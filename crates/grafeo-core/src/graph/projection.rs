@@ -472,6 +472,18 @@ impl GraphStore for GraphProjection {
         self.inner.has_property_index(property)
     }
 
+    fn index_serves(&self, labels: &[&str], property: &str) -> bool {
+        self.inner.index_serves(labels, property)
+    }
+
+    fn has_label_index(&self, label: &str, property: &str) -> bool {
+        self.inner.has_label_index(label, property)
+    }
+
+    fn label_index_entries(&self) -> Vec<(String, String)> {
+        self.inner.label_index_entries()
+    }
+
     fn find_nodes_by_property(
         &self,
         property: &str,
@@ -490,6 +502,35 @@ impl GraphStore for GraphProjection {
         view: ReadView,
     ) -> Result<Vec<NodeId>> {
         self.projected(self.inner.find_nodes_by_properties(conditions, view)?, view)
+    }
+
+    fn find_indexed_by_properties(
+        &self,
+        labels: &[&str],
+        conditions: &[(&str, Value)],
+        view: ReadView,
+    ) -> Result<Vec<NodeId>> {
+        self.projected(
+            self.inner
+                .find_indexed_by_properties(labels, conditions, view)?,
+            view,
+        )
+    }
+
+    fn find_indexed_maybe_equal(
+        &self,
+        labels: &[&str],
+        property: &str,
+        value: &Value,
+        view: ReadView,
+    ) -> Result<Option<Vec<NodeId>>> {
+        match self
+            .inner
+            .find_indexed_maybe_equal(labels, property, value, view)?
+        {
+            Some(nodes) => Ok(Some(self.projected(nodes, view)?)),
+            None => Ok(None),
+        }
     }
 
     fn find_nodes_maybe_equal(

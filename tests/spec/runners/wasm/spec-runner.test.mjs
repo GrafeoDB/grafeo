@@ -18,31 +18,15 @@ import { parseGtestFile, coerceParams } from '../node/parser.mjs'
 import { assertRowsSorted, assertRowsOrdered, assertRowsWithPrecision, assertHash, describeError, assertGqlStatus, assertTerms } from '../node/comparator.mjs'
 
 // ---------------------------------------------------------------------------
-// Import WASM bindings (skip all tests gracefully if unavailable)
+// Import WASM bindings. A package that does not load fails the run: it must not
+// pass as thousands of skipped tests.
 // ---------------------------------------------------------------------------
 
-let Database
-let initSync
-let WASM_AVAILABLE = false
+const wasmPkgPath = resolve(import.meta.dirname, '..', '..', '..', '..', 'crates', 'bindings', 'wasm', 'pkg')
+const { Database, initSync } = await import('../../../../crates/bindings/wasm/pkg/grafeo_wasm.js')
 
-try {
-  const wasmPkgPath = resolve(import.meta.dirname, '..', '..', '..', '..', 'crates', 'bindings', 'wasm', 'pkg')
-  const wasmJsPath = join(wasmPkgPath, 'grafeo_wasm.js')
-  const wasmBinPath = join(wasmPkgPath, 'grafeo_wasm_bg.wasm')
-
-  if (existsSync(wasmJsPath) && existsSync(wasmBinPath)) {
-    const mod = await import('../../../../crates/bindings/wasm/pkg/grafeo_wasm.js')
-    Database = mod.Database
-    initSync = mod.initSync
-
-    // Initialize WASM synchronously from the .wasm file
-    const wasmBytes = readFileSync(wasmBinPath)
-    initSync({ module: wasmBytes })
-    WASM_AVAILABLE = true
-  }
-} catch {
-  // WASM package not built or initialization failed; all tests will be skipped
-}
+// Initialize WASM synchronously from the .wasm file
+initSync({ module: readFileSync(join(wasmPkgPath, 'grafeo_wasm_bg.wasm')) })
 
 // ---------------------------------------------------------------------------
 // Paths
@@ -172,7 +156,8 @@ let _features = null
 function getFeatures(db) {
   if (!_features) {
     const info = db.info()
-    _features = new Set(info.features || [])
+    if (!info.features) throw new Error('db.info() lists no features')
+    _features = new Set(info.features)
   }
   return _features
 }
@@ -221,7 +206,6 @@ for (const filePath of gtestFiles) {
       if (tc.variants && Object.keys(tc.variants).length > 0) {
         for (const [lang, query] of Object.entries(tc.variants)) {
           it(`${tc.name}_${lang}`, (ctx) => {
-            if (!WASM_AVAILABLE) return ctx.skip()
             if (tc.skip) return ctx.skip()
             const db = new Database()
             try {
@@ -249,8 +233,6 @@ for (const filePath of gtestFiles) {
       }
 
       it(tc.name, (ctx) => {
-        if (!WASM_AVAILABLE) return ctx.skip()
-
         // Skip by field
         if (tc.skip) return ctx.skip()
 

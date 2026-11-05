@@ -9,7 +9,7 @@
 //! searches run in milliseconds; graph-bench's shape is a hub of 571 friends.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test path_search_capacity
+//! cargo test -p grafeo-engine --all-features --test main path_search_capacity::
 //! ```
 
 #![cfg(all(feature = "gql", feature = "cypher"))]
@@ -44,7 +44,14 @@ impl Random {
 /// 1,000 persons in clusters of 50, each knowing up to `per_person` others in
 /// their cluster, and person 0 knowing 571: the database and its edges.
 fn hub_graph(per_person: usize) -> (GrafeoDB, Vec<(usize, usize)>) {
-    let db = GrafeoDB::with_config(Config::in_memory().with_memory_limit(MEMORY_LIMIT)).unwrap();
+    // These tests are about the memory budget: their paths are many on purpose, and a slow build
+    // must not make them a test of the query timeout, while a bad plan still fails by name.
+    let db = GrafeoDB::with_config(
+        Config::in_memory()
+            .with_memory_limit(MEMORY_LIMIT)
+            .with_query_timeout(Duration::from_secs(600)),
+    )
+    .unwrap();
     let mut random = Random(0xD1B5_4A32_D192_ED03);
     let ids: Vec<NodeId> = (0..1_000_i64)
         .map(|id| {

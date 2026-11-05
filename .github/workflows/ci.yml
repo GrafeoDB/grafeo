@@ -164,10 +164,12 @@ jobs:
       - name: Build native module
         working-directory: crates/bindings/node
         run: |
-          npm install
+          npm ci
           npm run build
       - name: Run spec tests
-        run: npx vitest run tests/spec/runners/node/spec-runner.test.mjs
+        # The installed vitest: the repository root has no node_modules, so `npx` here
+        # would fetch whichever version is newest.
+        run: crates/bindings/node/node_modules/.bin/vitest run tests/spec/runners/node/spec-runner.test.mjs
 
   go-spec:
     name: Go Spec Tests
@@ -281,7 +283,7 @@ jobs:
       - name: Run spec tests
         working-directory: tests/spec/runners/wasm
         run: |
-          npm install
+          npm ci
           npx vitest run
 
   # The spec tests on the rdf persona (SPARQL, RDF terms), which the edge build
@@ -315,7 +317,7 @@ jobs:
       - name: Run spec tests
         working-directory: tests/spec/runners/wasm
         run: |
-          npm install
+          npm ci
           npx vitest run
 
   # ── Full test matrices (gated by rust-check) ────────────────────
@@ -447,7 +449,7 @@ jobs:
 
       - name: Test and lint the grafeo crate with its default features
         run: |
-          cargo nextest run -p grafeo --test open_with_default_features
+          cargo nextest run -p grafeo --test main open_with_default_features::
           cargo clippy -p grafeo --all-targets -- -D warnings
         env:
           RUSTC_WRAPPER: sccache
@@ -580,6 +582,49 @@ jobs:
           RUSTC_WRAPPER: sccache
           SCCACHE_GHA_ENABLED: "true"
 
+  # The statement limits hold on the stack they promise (see MAX_PLAN_DEPTH): the
+  # deepest statements run on a 640 KiB thread, and an overflow aborts the job.
+  #
+  # Covers real `release` (link-time optimization, one codegen unit), which ships and
+  # whose frames differ from `ci-release`, with the workspace's feature set, as the
+  # release test job has it: larger frames than `-p grafeo-engine`, so the bound holds
+  # for both. `--test main` keeps that feature set and builds only the crates' `main`
+  # test binaries.
+  statement-depth:
+    name: Statement Depth (${{ matrix.os }}, release)
+    needs: [rust-check]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@1.99.0
+
+      - name: Configure sccache
+        uses: mozilla-actions/sccache-action@v0.0.11
+
+      # Crate sources only, as in the other test jobs.
+      - name: Cache cargo registry
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-registry-
+
+      - name: Run statement depth tests (release)
+        run: |
+          cargo test --all-features --workspace --exclude grafeo-spec-tests --release --test main statement_depth::
+        env:
+          RUSTC_WRAPPER: sccache
+          SCCACHE_GHA_ENABLED: "true"
+
   # Feature matrix: test individual feature combinations that --all-features
   # masks. Catches per-feature cfg bugs, missing imports, and conditional
   # compilation issues. Runs on ubuntu only (feature bugs are OS-independent).
@@ -621,7 +666,7 @@ jobs:
             features: "--features gql,sparql,graphql,triple-store,spill,mmap,regex"
             engine_features: "--features gql,sparql,graphql,triple-store,shacl,wal,grafeo-file,spill,mmap,regex"
             # The facade's `rdf` profile on its own keeps its data across a reopen (#544).
-            facade_test: "--features rdf --test rdf_profile"
+            facade_test: "--features rdf --test main rdf_profile::"
           # Analytics persona: Data Scientist (algorithms + search + bulk import)
           - profile: analytics
             features: "--features algos,vector-index,text-index,hybrid-search,jsonl-import,parquet-import"
@@ -885,7 +930,7 @@ jobs:
 
       - name: Install dependencies
         working-directory: crates/bindings/node
-        run: npm install
+        run: npm ci
 
       - name: Build native module
         working-directory: crates/bindings/node
@@ -1299,6 +1344,21 @@ jobs:
 
       - uses: crate-ci/typos@v1.51.1
 
+  # The manifest of @grafeo-db/js as a release publishes it: the repository's leaves out
+  # its platform packages, so a mistake in adding them would ship a package with no
+  # native binaries, and the release is the only other place that step runs.
+  node-package:
+    name: Node.js Package Manifest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+      - name: Check the manifest a release publishes
+        working-directory: crates/bindings/node
+        run: bash "$GITHUB_WORKSPACE/scripts/node-platform-deps.sh" check
+
   # Repository policy (scripts/check_policy.py): crate boundaries from cargo metadata,
   # workflow toolchain pins that match rust-toolchain.toml and the MSRV, and the
   # public-text rules, plus the script's own tests. Rules on added lines run locally
@@ -1345,6 +1405,7 @@ jobs:
       - wasm-spec-rdf
       - rust-test
       - rust-test-release
+      - statement-depth
       - minimal-features
       - shipped-features
       - rust-feature-matrix
@@ -1359,6 +1420,7 @@ jobs:
       - msrv
       - typos
       - policy
+      - node-package
     runs-on: ubuntu-latest
     steps:
       - name: Check required jobs

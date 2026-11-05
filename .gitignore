@@ -46,6 +46,8 @@ venv/
 node_modules/
 *.node
 package-lock.json
+!crates/bindings/node/package-lock.json
+!tests/spec/runners/wasm/package-lock.json
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*

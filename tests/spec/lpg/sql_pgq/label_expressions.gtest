@@ -1,0 +1,563 @@
+# SQL/PGQ GRAPH_TABLE takes GQL's patterns, so a label expression holds in every position.
+#
+# Generated from one table with the Rust tests in label_expressions_in_paths.rs.
+
+meta:
+  language: sql-pgq
+  model: lpg
+  title: Label expressions in GRAPH_TABLE
+  dataset: label_mix
+
+tests:
+
+  - name: first_node_colon_a
+    query: "SELECT r FROM GRAPH_TABLE (MATCH (x:A)-[:R]->(t IS T) COLUMNS (x.name AS r))"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: first_node_colon_a_colon_b
+    query: "SELECT r FROM GRAPH_TABLE (MATCH (x:A:B)-[:R]->(t IS T) COLUMNS (x.name AS r))"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: first_node_is_a
+    query: "SELECT r FROM GRAPH_TABLE (MATCH (x IS A)-[:R]->(t IS T) COLUMNS (x.name AS r))"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: first_node_is_a_and_b
+    query: "SELECT r FROM GRAPH_TABLE (MATCH (x IS A&B)-[:R]->(t IS T) COLUMNS (x.name AS r))"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: first_node_a_and_b
+    query: "SELECT r FROM GRAPH_TABLE (MATCH (x:A&B)-[:R]->(t IS T) COLUMNS (x.name AS r))"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: first_node_a_or_b
+    query: "SELECT r FROM GRAPH_TABLE (MATCH (x:A|B)-[:R]->(t IS T) COLUMNS (x.name AS r))"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]
+
+  - name: first_node_not_a
+    query: "SELECT r FROM GRAPH_TABLE (MATCH (x:!A)-[:R]->(t IS T) COLUMNS (x.name AS r))"
+    expect:
+      rows:
+        - [Gus]
+        - [Jules]
+        - [Mia]
+
+  - name: first_node_any_label
+    query: "SELECT r FROM GRAPH_TABLE (MATCH (x:%)-[:R]->(t IS T) COLUMNS (x.name AS r))"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Jules]
+        - [Vincent]
+
+  - name: first_node_paren_a
+    query: "SELECT r FROM GRAPH_TABLE (MATCH (x:(A))-[:R]->(t IS T) COLUMNS (x.name AS r))"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: first_node_nobody
+    query: "SELECT r FROM GRAPH_TABLE (MATCH (x:Z&A)-[:R]->(t IS T) COLUMNS (x.name AS r))"
+    expect:
+      empty: true
+
+  - name: first_node_incoming_colon_a
+    query: "SELECT r FROM GRAPH_TABLE (MATCH (x:A)<-[:S]-(t IS T) COLUMNS (x.name AS r))"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: first_node_incoming_colon_a_colon_b
+    query: "SELECT r FROM GRAPH_TABLE (MATCH (x:A:B)<-[:S]-(t IS T) COLUMNS (x.name AS r))"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: first_node_incoming_is_a
+    query: "SELECT r FROM GRAPH_TABLE (MATCH (x IS A)<-[:S]-(t IS T) COLUMNS (x.name AS r))"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: first_node_incoming_is_a_and_b
+    query: "SELECT r FROM GRAPH_TABLE (MATCH (x IS A&B)<-[:S]-(t IS T) COLUMNS (x.name AS r))"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: first_node_incoming_a_and_b
+    query: "SELECT r FROM GRAPH_TABLE (MATCH (x:A&B)<-[:S]-(t IS T) COLUMNS (x.name AS r))"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: first_node_incoming_a_or_b
+    query: "SELECT r FROM GRAPH_TABLE (MATCH (x:A|B)<-[:S]-(t IS T) COLUMNS (x.name AS r))"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]
+
+  - name: first_node_incoming_not_a
+    query: "SELECT r FROM GRAPH_TABLE (MATCH (x:!A)<-[:S]-(t IS T) COLUMNS (x.name AS r))"
+    expect:
+      rows:
+        - [Gus]
+        - [Jules]
+        - [Mia]
+
+  - name: first_node_incoming_any_label
+    query: "SELECT r FROM GRAPH_TABLE (MATCH (x:%)<-[:S]-(t IS T) COLUMNS (x.name AS r))"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Jules]
+        - [Vincent]
+
+  - name: first_node_incoming_paren_a
+    query: "SELECT r FROM GRAPH_TABLE (MATCH (x:(A))<-[:S]-(t IS T) COLUMNS (x.name AS r))"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: first_node_incoming_nobody
+    query: "SELECT r FROM GRAPH_TABLE (MATCH (x:Z&A)<-[:S]-(t IS T) COLUMNS (x.name AS r))"
+    expect:
+      empty: true
+
+  - name: first_node_where_colon_a
+    query: "SELECT r FROM GRAPH_TABLE (MATCH (x:A WHERE x.k = 1)-[:R]->(t IS T) COLUMNS (x.name AS r))"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: first_node_where_colon_a_colon_b
+    query: "SELECT r FROM GRAPH_TABLE (MATCH (x:A:B WHERE x.k = 1)-[:R]->(t IS T) COLUMNS (x.name AS r))"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: first_node_where_is_a
+    query: "SELECT r FROM GRAPH_TABLE (MATCH (x IS A WHERE x.k = 1)-[:R]->(t IS T) COLUMNS (x.name AS r))"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: first_node_where_is_a_and_b
+    query: "SELECT r FROM GRAPH_TABLE (MATCH (x IS A&B WHERE x.k = 1)-[:R]->(t IS T) COLUMNS (x.name AS r))"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: first_node_where_a_and_b
+    query: "SELECT r FROM GRAPH_TABLE (MATCH (x:A&B WHERE x.k = 1)-[:R]->(t IS T) COLUMNS (x.name AS r))"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: first_node_where_a_or_b
+    query: "SELECT r FROM GRAPH_TABLE (MATCH (x:A|B WHERE x.k = 1)-[:R]->(t IS T) COLUMNS (x.name AS r))"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]
+
+  - name: first_node_where_not_a
+    query: "SELECT r FROM GRAPH_TABLE (MATCH (x:!A WHERE x.k = 1)-[:R]->(t IS T) COLUMNS (x.name AS r))"
+    expect:
+      rows:
+        - [Gus]
+        - [Jules]
+        - [Mia]
+
+  - name: first_node_where_any_label
+    query: "SELECT r FROM GRAPH_TABLE (MATCH (x:% WHERE x.k = 1)-[:R]->(t IS T) COLUMNS (x.name AS r))"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Jules]
+        - [Vincent]
+
+  - name: first_node_where_paren_a
+    query: "SELECT r FROM GRAPH_TABLE (MATCH (x:(A) WHERE x.k = 1)-[:R]->(t IS T) COLUMNS (x.name AS r))"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: first_node_where_nobody
+    query: "SELECT r FROM GRAPH_TABLE (MATCH (x:Z&A WHERE x.k = 1)-[:R]->(t IS T) COLUMNS (x.name AS r))"
+    expect:
+      empty: true
+
+  - name: first_node_two_hops_colon_a
+    query: "SELECT r FROM GRAPH_TABLE (MATCH (x:A)-[:R]->(t IS T)-[:S]->(y {name: 'Alix'}) COLUMNS (x.name AS r))"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: first_node_two_hops_colon_a_colon_b
+    query: "SELECT r FROM GRAPH_TABLE (MATCH (x:A:B)-[:R]->(t IS T)-[:S]->(y {name: 'Alix'}) COLUMNS (x.name AS r))"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: first_node_two_hops_is_a
+    query: "SELECT r FROM GRAPH_TABLE (MATCH (x IS A)-[:R]->(t IS T)-[:S]->(y {name: 'Alix'}) COLUMNS (x.name AS r))"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: first_node_two_hops_is_a_and_b
+    query: "SELECT r FROM GRAPH_TABLE (MATCH (x IS A&B)-[:R]->(t IS T)-[:S]->(y {name: 'Alix'}) COLUMNS (x.name AS r))"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: first_node_two_hops_a_and_b
+    query: "SELECT r FROM GRAPH_TABLE (MATCH (x:A&B)-[:R]->(t IS T)-[:S]->(y {name: 'Alix'}) COLUMNS (x.name AS r))"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: first_node_two_hops_a_or_b
+    query: "SELECT r FROM GRAPH_TABLE (MATCH (x:A|B)-[:R]->(t IS T)-[:S]->(y {name: 'Alix'}) COLUMNS (x.name AS r))"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]
+
+  - name: first_node_two_hops_not_a
+    query: "SELECT r FROM GRAPH_TABLE (MATCH (x:!A)-[:R]->(t IS T)-[:S]->(y {name: 'Alix'}) COLUMNS (x.name AS r))"
+    expect:
+      rows:
+        - [Gus]
+        - [Jules]
+        - [Mia]
+
+  - name: first_node_two_hops_any_label
+    query: "SELECT r FROM GRAPH_TABLE (MATCH (x:%)-[:R]->(t IS T)-[:S]->(y {name: 'Alix'}) COLUMNS (x.name AS r))"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Jules]
+        - [Vincent]
+
+  - name: first_node_two_hops_paren_a
+    query: "SELECT r FROM GRAPH_TABLE (MATCH (x:(A))-[:R]->(t IS T)-[:S]->(y {name: 'Alix'}) COLUMNS (x.name AS r))"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: first_node_two_hops_nobody
+    query: "SELECT r FROM GRAPH_TABLE (MATCH (x:Z&A)-[:R]->(t IS T)-[:S]->(y {name: 'Alix'}) COLUMNS (x.name AS r))"
+    expect:
+      empty: true
+
+  - name: comma_separated_colon_a
+    query: "SELECT r FROM GRAPH_TABLE (MATCH (u IS T), (x:A)-[:R]->(u) COLUMNS (x.name AS r))"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: comma_separated_colon_a_colon_b
+    query: "SELECT r FROM GRAPH_TABLE (MATCH (u IS T), (x:A:B)-[:R]->(u) COLUMNS (x.name AS r))"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: comma_separated_is_a
+    query: "SELECT r FROM GRAPH_TABLE (MATCH (u IS T), (x IS A)-[:R]->(u) COLUMNS (x.name AS r))"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: comma_separated_is_a_and_b
+    query: "SELECT r FROM GRAPH_TABLE (MATCH (u IS T), (x IS A&B)-[:R]->(u) COLUMNS (x.name AS r))"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: comma_separated_a_and_b
+    query: "SELECT r FROM GRAPH_TABLE (MATCH (u IS T), (x:A&B)-[:R]->(u) COLUMNS (x.name AS r))"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: comma_separated_a_or_b
+    query: "SELECT r FROM GRAPH_TABLE (MATCH (u IS T), (x:A|B)-[:R]->(u) COLUMNS (x.name AS r))"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]
+
+  - name: comma_separated_not_a
+    query: "SELECT r FROM GRAPH_TABLE (MATCH (u IS T), (x:!A)-[:R]->(u) COLUMNS (x.name AS r))"
+    expect:
+      rows:
+        - [Gus]
+        - [Jules]
+        - [Mia]
+
+  - name: comma_separated_any_label
+    query: "SELECT r FROM GRAPH_TABLE (MATCH (u IS T), (x:%)-[:R]->(u) COLUMNS (x.name AS r))"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Jules]
+        - [Vincent]
+
+  - name: comma_separated_paren_a
+    query: "SELECT r FROM GRAPH_TABLE (MATCH (u IS T), (x:(A))-[:R]->(u) COLUMNS (x.name AS r))"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: comma_separated_nobody
+    query: "SELECT r FROM GRAPH_TABLE (MATCH (u IS T), (x:Z&A)-[:R]->(u) COLUMNS (x.name AS r))"
+    expect:
+      empty: true
+
+  - name: far_end_colon_a
+    query: "SELECT r FROM GRAPH_TABLE (MATCH (t IS T)-[:S]->(x:A) COLUMNS (x.name AS r))"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: far_end_colon_a_colon_b
+    query: "SELECT r FROM GRAPH_TABLE (MATCH (t IS T)-[:S]->(x:A:B) COLUMNS (x.name AS r))"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: far_end_is_a
+    query: "SELECT r FROM GRAPH_TABLE (MATCH (t IS T)-[:S]->(x IS A) COLUMNS (x.name AS r))"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: far_end_is_a_and_b
+    query: "SELECT r FROM GRAPH_TABLE (MATCH (t IS T)-[:S]->(x IS A&B) COLUMNS (x.name AS r))"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: far_end_a_and_b
+    query: "SELECT r FROM GRAPH_TABLE (MATCH (t IS T)-[:S]->(x:A&B) COLUMNS (x.name AS r))"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: far_end_a_or_b
+    query: "SELECT r FROM GRAPH_TABLE (MATCH (t IS T)-[:S]->(x:A|B) COLUMNS (x.name AS r))"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]
+
+  - name: far_end_not_a
+    query: "SELECT r FROM GRAPH_TABLE (MATCH (t IS T)-[:S]->(x:!A) COLUMNS (x.name AS r))"
+    expect:
+      rows:
+        - [Gus]
+        - [Jules]
+        - [Mia]
+
+  - name: far_end_any_label
+    query: "SELECT r FROM GRAPH_TABLE (MATCH (t IS T)-[:S]->(x:%) COLUMNS (x.name AS r))"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Jules]
+        - [Vincent]
+
+  - name: far_end_paren_a
+    query: "SELECT r FROM GRAPH_TABLE (MATCH (t IS T)-[:S]->(x:(A)) COLUMNS (x.name AS r))"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: far_end_nobody
+    query: "SELECT r FROM GRAPH_TABLE (MATCH (t IS T)-[:S]->(x:Z&A) COLUMNS (x.name AS r))"
+    expect:
+      empty: true
+
+  - name: later_node_colon_a
+    query: "SELECT r FROM GRAPH_TABLE (MATCH (t IS T)-[:S]->(x:A)-[:R]->(u IS T) COLUMNS (x.name AS r))"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: later_node_colon_a_colon_b
+    query: "SELECT r FROM GRAPH_TABLE (MATCH (t IS T)-[:S]->(x:A:B)-[:R]->(u IS T) COLUMNS (x.name AS r))"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: later_node_is_a
+    query: "SELECT r FROM GRAPH_TABLE (MATCH (t IS T)-[:S]->(x IS A)-[:R]->(u IS T) COLUMNS (x.name AS r))"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: later_node_is_a_and_b
+    query: "SELECT r FROM GRAPH_TABLE (MATCH (t IS T)-[:S]->(x IS A&B)-[:R]->(u IS T) COLUMNS (x.name AS r))"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: later_node_a_and_b
+    query: "SELECT r FROM GRAPH_TABLE (MATCH (t IS T)-[:S]->(x:A&B)-[:R]->(u IS T) COLUMNS (x.name AS r))"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: later_node_a_or_b
+    query: "SELECT r FROM GRAPH_TABLE (MATCH (t IS T)-[:S]->(x:A|B)-[:R]->(u IS T) COLUMNS (x.name AS r))"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]
+
+  - name: later_node_not_a
+    query: "SELECT r FROM GRAPH_TABLE (MATCH (t IS T)-[:S]->(x:!A)-[:R]->(u IS T) COLUMNS (x.name AS r))"
+    expect:
+      rows:
+        - [Gus]
+        - [Jules]
+        - [Mia]
+
+  - name: later_node_any_label
+    query: "SELECT r FROM GRAPH_TABLE (MATCH (t IS T)-[:S]->(x:%)-[:R]->(u IS T) COLUMNS (x.name AS r))"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Jules]
+        - [Vincent]
+
+  - name: later_node_paren_a
+    query: "SELECT r FROM GRAPH_TABLE (MATCH (t IS T)-[:S]->(x:(A))-[:R]->(u IS T) COLUMNS (x.name AS r))"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: later_node_nobody
+    query: "SELECT r FROM GRAPH_TABLE (MATCH (t IS T)-[:S]->(x:Z&A)-[:R]->(u IS T) COLUMNS (x.name AS r))"
+    expect:
+      empty: true
+
+  - name: a_node_alone_colon_a
+    query: "SELECT r FROM GRAPH_TABLE (MATCH (x:A {k: 1}) COLUMNS (x.name AS r))"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: a_node_alone_colon_a_colon_b
+    query: "SELECT r FROM GRAPH_TABLE (MATCH (x:A:B {k: 1}) COLUMNS (x.name AS r))"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: a_node_alone_is_a
+    query: "SELECT r FROM GRAPH_TABLE (MATCH (x IS A {k: 1}) COLUMNS (x.name AS r))"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: a_node_alone_is_a_and_b
+    query: "SELECT r FROM GRAPH_TABLE (MATCH (x IS A&B {k: 1}) COLUMNS (x.name AS r))"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: a_node_alone_a_and_b
+    query: "SELECT r FROM GRAPH_TABLE (MATCH (x:A&B {k: 1}) COLUMNS (x.name AS r))"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: a_node_alone_a_or_b
+    query: "SELECT r FROM GRAPH_TABLE (MATCH (x:A|B {k: 1}) COLUMNS (x.name AS r))"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]
+
+  - name: a_node_alone_not_a
+    query: "SELECT r FROM GRAPH_TABLE (MATCH (x:!A {k: 1}) COLUMNS (x.name AS r))"
+    expect:
+      rows:
+        - [Gus]
+        - [Jules]
+        - [Mia]
+
+  - name: a_node_alone_any_label
+    query: "SELECT r FROM GRAPH_TABLE (MATCH (x:% {k: 1}) COLUMNS (x.name AS r))"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Jules]
+        - [Vincent]
+
+  - name: a_node_alone_paren_a
+    query: "SELECT r FROM GRAPH_TABLE (MATCH (x:(A) {k: 1}) COLUMNS (x.name AS r))"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: a_node_alone_nobody
+    query: "SELECT r FROM GRAPH_TABLE (MATCH (x:Z&A {k: 1}) COLUMNS (x.name AS r))"
+    expect:
+      empty: true

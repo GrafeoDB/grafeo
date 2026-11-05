@@ -10,6 +10,7 @@
 //! their documentation has a `# Stability: Experimental` section: see
 //! <https://grafeo.dev/stability/>.
 
+mod pending_schema;
 mod planning;
 #[cfg(any(feature = "gql", feature = "cypher", feature = "sql-pgq"))]
 mod prepared;
@@ -165,6 +166,49 @@ fn parse_default_literal(text: &str) -> Value {
     Value::String(text.into())
 }
 
+/// Properties as a declaration states them, whatever their order.
+#[cfg(feature = "gql")]
+fn declared_properties(properties: &[crate::catalog::TypedProperty]) -> Vec<String> {
+    let mut declared: Vec<String> = properties.iter().map(|p| format!("{p:?}")).collect();
+    declared.sort_unstable();
+    declared
+}
+
+/// Whether two lists hold the same names, whatever their order.
+#[cfg(feature = "gql")]
+fn same_names(first: &[String], second: &[String]) -> bool {
+    let sorted = |names: &[String]| {
+        let mut names = names.to_vec();
+        names.sort_unstable();
+        names
+    };
+    sorted(first) == sorted(second)
+}
+
+/// The error of a second, different declaration of a type's name.
+#[cfg(feature = "gql")]
+fn other_declaration(kind: &str, name: &str) -> grafeo_common::utils::error::Error {
+    use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind};
+    let short = crate::catalog::unqualified(name);
+    Error::from(QueryError::new(
+        QueryErrorKind::Semantic,
+        format!(
+            "{kind} '{short}' is already declared differently: a name stands for one type \
+             across graph types, so declare it the same way or use another name"
+        ),
+    ))
+}
+
+/// What a status line adds for the types a statement dropped with their graph type.
+#[cfg(feature = "gql")]
+fn types_gone(gone: &[String]) -> String {
+    if gone.is_empty() {
+        String::new()
+    } else {
+        format!(", and its types {}", gone.join(", "))
+    }
+}
+
 /// The catalog's property for a property definition of a type DDL statement,
 /// with its default value.
 ///
@@ -227,6 +271,61 @@ fn merge_occurrence(
         .map_err(|e| Error::from(QueryError::new(QueryErrorKind::Semantic, e.to_string())))
 }
 
+/// The error of patterns of one edge type that its one definition cannot hold.
+#[cfg(feature = "gql")]
+fn unsupported_edge_patterns(name: &str, what: &str) -> grafeo_common::utils::error::Error {
+    use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind};
+    let short = crate::catalog::unqualified(name);
+    Error::from(QueryError::new(
+        QueryErrorKind::Semantic,
+        format!(
+            "edge type '{short}' appears in this graph type with {what}, which is not supported \
+             yet: its patterns must have the same properties and may differ on one side only"
+        ),
+    ))
+}
+
+/// Adds the endpoints of a later pattern of edge type `name` to those of the earlier ones. The
+/// catalog holds a list of sources and a list of targets, each of one with each of the other,
+/// so the two lists together must state no pair that no pattern did: `(:A)-[:E]->(:B)` with
+/// `(:C)-[:E]->(:D)` would accept `A` to `D`, and fails.
+#[cfg(feature = "gql")]
+fn merge_endpoints(
+    name: &str,
+    sources: &mut Vec<String>,
+    targets: &mut Vec<String>,
+    more_sources: &[String],
+    more_targets: &[String],
+) -> Result<()> {
+    let both = |first: &[String], second: &[String]| {
+        let mut names = first.to_vec();
+        for name in second {
+            if !names.contains(name) {
+                names.push(name.clone());
+            }
+        }
+        names
+    };
+    let all_sources = both(sources, more_sources);
+    let all_targets = both(targets, more_targets);
+    let stated = |source: &String, target: &String| {
+        (sources.contains(source) && targets.contains(target))
+            || (more_sources.contains(source) && more_targets.contains(target))
+    };
+    if !all_sources
+        .iter()
+        .all(|source| all_targets.iter().all(|target| stated(source, target)))
+    {
+        return Err(unsupported_edge_patterns(
+            name,
+            "endpoints that differ on both sides",
+        ));
+    }
+    *sources = all_sources;
+    *targets = all_targets;
+    Ok(())
+}
+
 /// The catalog's properties for the property definitions of one node or
 /// edge type in a type DDL statement, with their default values.
 ///
@@ -260,11 +359,9 @@ pub(crate) struct PlanOptions {
     /// Whether queries without `ORDER BY` return their rows in random order
     /// (the `shuffle_unordered` test option).
     pub shuffle_unordered: bool,
-    /// Whether a variable-length expand whose rows only reach a consumer that
-    /// ignores duplicate rows runs as a reachability search. Always on; tests
-    /// turn it off to compare with the plan that enumerates every walk.
-    #[cfg(lpg_language)]
-    pub reachability: bool,
+    /// The planner rules queries are planned with: all of them, unless a test
+    /// turns some off (see [`Session::set_planner_rules`]).
+    pub rules: crate::query::optimizer::PlannerRules,
     /// The bytes one path search may hold (`Config::path_search_budget`).
     pub path_search_budget: usize,
 }
@@ -314,6 +411,9 @@ pub(crate) enum TransactionStatements {
     Allowed,
     /// They are refused: the session of a binding's transaction object.
     Refused,
+    /// They are refused: the session of one call, which ends with it, so a transaction
+    /// would too, and what follows would commit at once.
+    OneCall,
 }
 
 /// Your handle to the database - execute queries and manage transactions.
@@ -398,6 +498,11 @@ pub struct Session {
     viewing_epoch_override: parking_lot::Mutex<Option<EpochId>>,
     /// Savepoints within the current transaction.
     savepoints: parking_lot::Mutex<Vec<SavepointState>>,
+    /// The catalog's rules as the open transaction began: a commit that finds them
+    /// changed checks its writes again.
+    rules_at_begin: std::sync::atomic::AtomicU64,
+    /// The open transaction's own view of the catalog, from its first schema statement.
+    pending_schema: parking_lot::Mutex<Option<pending_schema::PendingSchema>>,
     /// Nesting depth for nested transactions (0 = outermost).
     /// Nested `START TRANSACTION` creates an auto-savepoint; nested `COMMIT`
     /// releases it, nested `ROLLBACK` rolls back to it.
@@ -443,6 +548,8 @@ struct SavepointState {
     mark: grafeo_common::change::ChangeMark,
     /// The same boundary in the transaction's conflict claims.
     claims: crate::transaction::ClaimMark,
+    /// How many schema ops the transaction had queued.
+    schema_ops: usize,
 }
 
 impl Session {
@@ -457,6 +564,7 @@ impl Session {
                 root: Some(store),
                 graph_store,
                 graph_store_mut,
+                pending_graphs: Arc::default(),
             },
             catalog: cfg.catalog,
             transaction_manager: cfg.transaction_manager,
@@ -471,8 +579,7 @@ impl Session {
                 #[cfg(lpg_language)]
                 factorized_execution: cfg.factorized_execution,
                 shuffle_unordered: cfg.shuffle_unordered,
-                #[cfg(lpg_language)]
-                reachability: true,
+                rules: crate::query::optimizer::PlannerRules::all(),
                 path_search_budget: cfg.path_search_budget,
             },
             graph_model: cfg.graph_model,
@@ -498,6 +605,8 @@ impl Session {
             session_params: parking_lot::Mutex::new(std::collections::HashMap::new()),
             viewing_epoch_override: parking_lot::Mutex::new(None),
             savepoints: parking_lot::Mutex::new(Vec::new()),
+            rules_at_begin: std::sync::atomic::AtomicU64::new(0),
+            pending_schema: parking_lot::Mutex::new(None),
             transaction_nesting_depth: parking_lot::Mutex::new(0),
             last_commit_epoch: parking_lot::Mutex::new(None),
             transaction_statements: TransactionStatements::Allowed,
@@ -585,6 +694,7 @@ impl Session {
         commit: crate::transaction::CommitGuard<'a>,
         transaction_id: TransactionId,
         changes: Option<&crate::transaction::TransactionChanges>,
+        schema: &[crate::transaction::QueuedSchemaOp],
     ) -> Result<(
         crate::transaction::CommitGuard<'a>,
         Option<crate::database::wal_log::Logged>,
@@ -595,6 +705,7 @@ impl Session {
                 commit,
                 transaction_id,
                 changes,
+                schema,
                 grafeo_common::storage::log_record::Origin::Transaction,
             ),
             _ => Ok((commit, None)),
@@ -635,6 +746,7 @@ impl Session {
                 root: None,
                 graph_store: read_store,
                 graph_store_mut: write_store,
+                pending_graphs: Arc::default(),
             },
             catalog: cfg.catalog,
             #[cfg(feature = "triple-store")]
@@ -651,8 +763,7 @@ impl Session {
                 #[cfg(lpg_language)]
                 factorized_execution: cfg.factorized_execution,
                 shuffle_unordered: cfg.shuffle_unordered,
-                #[cfg(lpg_language)]
-                reachability: true,
+                rules: crate::query::optimizer::PlannerRules::all(),
                 path_search_budget: cfg.path_search_budget,
             },
             graph_model: cfg.graph_model,
@@ -678,6 +789,8 @@ impl Session {
             session_params: parking_lot::Mutex::new(std::collections::HashMap::new()),
             viewing_epoch_override: parking_lot::Mutex::new(None),
             savepoints: parking_lot::Mutex::new(Vec::new()),
+            rules_at_begin: std::sync::atomic::AtomicU64::new(0),
+            pending_schema: parking_lot::Mutex::new(None),
             transaction_nesting_depth: parking_lot::Mutex::new(0),
             last_commit_epoch: parking_lot::Mutex::new(None),
             transaction_statements: TransactionStatements::Allowed,
@@ -743,7 +856,6 @@ impl Session {
     ///
     /// Per ISO/IEC 39075 Section 17.2, graphs resolve relative to the current schema.
     /// Uses `/` as separator since it is invalid in GQL identifiers.
-    #[cfg(any(feature = "gql", feature = "sql-pgq"))]
     fn effective_graph_key(&self, graph_name: &str) -> String {
         let schema = self.current_schema.lock().clone();
         match schema {
@@ -769,7 +881,7 @@ impl Session {
     /// Syntax Rule 6). The binding a dropped graph left behind does not count.
     #[cfg(any(feature = "gql", feature = "sql-pgq"))]
     fn graph_typed_by(&self, graph_type: &str) -> Option<String> {
-        self.catalog
+        self.effective_catalog()
             .all_graph_type_bindings()
             .into_iter()
             .filter(|(graph, bound)| bound == graph_type && self.named_graph(graph).is_some())
@@ -787,6 +899,50 @@ impl Session {
                 "graph type '{graph_type}' is the type of graph '{graph}': drop the graph first"
             ),
         ))
+    }
+
+    /// Refuses to drop the definition of a node or edge type, `type_key` in the catalog, that a
+    /// closed graph type a graph is bound to lists, whether or not the graph holds any of it: the
+    /// closed type would go on naming a type that no longer says what it allows. `ALTER GRAPH
+    /// TYPE ... DROP` takes it out first, and checks the data.
+    ///
+    /// # Errors
+    ///
+    /// A semantic error naming the graph type and the graph, as `DROP GRAPH TYPE` has.
+    #[cfg(feature = "gql")]
+    fn refuse_drop_of_a_listed_type(
+        &self,
+        type_key: &str,
+        name: &str,
+        is_edge: bool,
+    ) -> grafeo_common::utils::error::Result<()> {
+        use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind};
+        let catalog = self.effective_catalog();
+        for (graph, graph_type) in catalog.all_graph_type_bindings() {
+            let Some(def) = catalog.get_graph_type_def(&graph_type) else {
+                continue;
+            };
+            let listed = if is_edge {
+                &def.allowed_edge_types
+            } else {
+                &def.allowed_node_types
+            };
+            if def.open
+                || !listed.iter().any(|on| on == type_key)
+                || self.named_graph(&graph).is_none()
+            {
+                continue;
+            }
+            let kind = if is_edge { "EDGE" } else { "NODE" };
+            return Err(Error::from(QueryError::new(
+                QueryErrorKind::Semantic,
+                format!(
+                    "closed graph type '{graph_type}' of graph '{graph}' lists type '{name}': \
+                     take it out first with ALTER GRAPH TYPE {graph_type} DROP {kind} TYPE {name}"
+                ),
+            )));
+        }
+        Ok(())
     }
 
     /// Returns the effective storage key for the current graph, accounting for schema.
@@ -1137,6 +1293,18 @@ impl Session {
                 }
                 let storage_key = self.effective_graph_key(&name);
                 let held = self.hold_for_standalone(false)?;
+                self.refuse_name_claimed("graph", &storage_key)?;
+                // Its copy is logged and applied with the graph's creation, as one group of
+                // its own, which no transaction can take back.
+                if copy_of.is_some() && self.in_transaction() {
+                    return Err(Error::Transaction(
+                        grafeo_common::utils::error::TransactionError::ActiveTransaction(
+                        "CREATE GRAPH ... AS COPY OF cannot run in a transaction: run it outside \
+                         one"
+                        .to_string(),
+                    ),
+                    ));
+                }
 
                 // Validate source graph exists for LIKE / AS COPY OF
                 if let Some(ref src) = like_graph {
@@ -1181,7 +1349,11 @@ impl Session {
                     } else {
                         self.effective_type_key(&type_name)
                     };
-                    if self.catalog.get_graph_type_def(&graph_type).is_none() {
+                    if self
+                        .effective_catalog()
+                        .get_graph_type_def(&graph_type)
+                        .is_none()
+                    {
                         return Err(Error::from(QueryError::new(
                             QueryErrorKind::InvalidReference,
                             crate::catalog::CatalogError::TypeNotFound(graph_type).to_string(),
@@ -1199,8 +1371,12 @@ impl Session {
                 // when its graph type exists.
                 if let Some(src) = like_graph.as_ref().or(copy_of.as_ref()) {
                     let src_key = self.effective_graph_key(src);
-                    if let Some(src_type) = self.catalog.get_graph_type_binding(&src_key)
-                        && self.catalog.get_graph_type_def(&src_type).is_some()
+                    if let Some(src_type) =
+                        self.effective_catalog().get_graph_type_binding(&src_key)
+                        && self
+                            .effective_catalog()
+                            .get_graph_type_def(&src_type)
+                            .is_some()
                     {
                         change.push(StandaloneOp::PutCatalog(CatalogRecord::GraphBinding(
                             GraphBindingRecord {
@@ -1210,6 +1386,12 @@ impl Session {
                         )));
                     }
                 }
+
+                crate::database::standalone::index_new_graph_for_its_rules(
+                    &mut change,
+                    &self.effective_catalog(),
+                    &storage_key,
+                )?;
 
                 // AS COPY OF: the new graph holds the source's data, logged
                 // and applied with the graph's creation (#423).
@@ -1221,6 +1403,7 @@ impl Session {
                             format!("Source graph '{src}' does not exist"),
                         ))
                     })?;
+                    self.check_copy_against_its_type(&change, &*source, &storage_key)?;
                     crate::database::standalone::commit_copy(
                         change,
                         &held,
@@ -1251,15 +1434,21 @@ impl Session {
                         format!("Graph '{name}' does not exist"),
                     )));
                 }
-                crate::database::standalone::refuse_drop_with_open_changes(
-                    &self.transaction_manager,
-                    &held,
-                    &storage_key,
-                )?;
+                if !self.in_transaction() {
+                    crate::database::standalone::refuse_drop_with_open_changes(
+                        &self.transaction_manager,
+                        &held,
+                        &storage_key,
+                    )?;
+                }
                 let mut change = crate::transaction::StandaloneChange::new();
                 change.push(StandaloneOp::DropGraph { name: storage_key });
                 self.commit_standalone(change, &held)?;
                 drop(held);
+                // In a transaction the session leaves it at the commit.
+                if self.in_transaction() {
+                    return Ok(QueryResult::empty());
+                }
                 // If this session was using the dropped graph, reset to default
                 let mut current = self.current_graph.lock();
                 if current
@@ -1330,7 +1519,7 @@ impl Session {
             }
             SessionCommand::SessionSetSchema(name) => {
                 // ISO/IEC 39075 Section 7.1 GR1: set session schema (independent of graph)
-                if !self.catalog.schema_exists(&name) {
+                if !self.effective_catalog().schema_exists(&name) {
                     return Err(Error::from(QueryError::new(
                         QueryErrorKind::InvalidReference,
                         format!("Schema '{name}' does not exist"),
@@ -1394,8 +1583,27 @@ impl Session {
                 Err(Error::Transaction(
                     grafeo_common::utils::error::TransactionError::InvalidState(format!(
                         "{statement} cannot run inside a transaction object: end the \
-                         transaction with its commit() or rollback() call instead"
+                         transaction with its commit() or rollback() call instead \
+                         (commitTransaction() or rollbackTransaction() in WebAssembly)"
                     )),
+                ))
+            }
+            SessionCommand::StartTransaction { .. }
+            | SessionCommand::Commit
+            | SessionCommand::Rollback
+                if self.transaction_statements == TransactionStatements::OneCall =>
+            {
+                let hint = "this call runs in a session of its own, which ends with it: use \
+                            begin_transaction (beginTransaction in JavaScript), or run the \
+                            statements in a session";
+                let message = match &cmd {
+                    SessionCommand::StartTransaction { .. } => {
+                        format!("START TRANSACTION would end with the call: {hint}")
+                    }
+                    _ => format!("No active transaction: {hint}"),
+                };
+                Err(Error::Transaction(
+                    grafeo_common::utils::error::TransactionError::InvalidState(message),
                 ))
             }
             SessionCommand::StartTransaction {
@@ -1513,6 +1721,22 @@ impl Session {
         change: crate::transaction::StandaloneChange,
         held: &crate::transaction::CommitsHeld<'_>,
     ) -> Result<()> {
+        // A rule the data breaks is refused here, ahead of logging: `standalone::apply`
+        // installs what replay gives it without a check, so an older file still opens.
+        self.check_change_over_data(
+            &change.ops().collect::<Vec<_>>(),
+            self.statement_view(),
+            &self.effective_catalog(),
+        )?;
+        // In a transaction it waits for the commit.
+        if self.in_transaction() {
+            return self.queue_schema_change(change);
+        }
+        for op in change.ops() {
+            for claim in crate::database::standalone::claims_of(op) {
+                self.transaction_manager.refuse_claimed(&claim, None)?;
+            }
+        }
         crate::database::standalone::commit(
             change,
             held,
@@ -1615,7 +1839,7 @@ impl Session {
         let held = self.hold_for_standalone(op.or_replace)?;
 
         let graph_exists = self.named_graph(&graph_key).is_some();
-        let old_type = self.catalog.get_graph_type_def(&type_key);
+        let old_type = self.effective_catalog().get_graph_type_def(&type_key);
         if (graph_exists || old_type.is_some()) && op.if_not_exists {
             return Ok(Self::ddl_status("No change".to_string()));
         }
@@ -1675,7 +1899,8 @@ impl Session {
         let mut node_types = Vec::new();
         for table in &op.node_tables {
             let key = self.effective_type_key(&table.name);
-            if self.catalog.get_node_type(&key).is_some() && !replaced.0.contains(&key) {
+            if self.effective_catalog().get_node_type(&key).is_some() && !replaced.0.contains(&key)
+            {
                 return Err(semantic(format!(
                     "Node type '{}' already exists",
                     table.name
@@ -1706,7 +1931,9 @@ impl Session {
         let mut edge_types = Vec::new();
         for table in &op.edge_tables {
             let key = self.effective_type_key(&table.name);
-            if self.catalog.get_edge_type_def(&key).is_some() && !replaced.1.contains(&key) {
+            if self.effective_catalog().get_edge_type_def(&key).is_some()
+                && !replaced.1.contains(&key)
+            {
                 return Err(semantic(format!(
                     "Edge type '{}' already exists",
                     table.name
@@ -1746,10 +1973,15 @@ impl Session {
         });
         change.push(StandaloneOp::PutCatalog(CatalogRecord::GraphBinding(
             GraphBindingRecord {
-                graph: graph_key,
+                graph: graph_key.clone(),
                 graph_type: type_key,
             },
         )));
+        crate::database::standalone::index_new_graph_for_its_rules(
+            &mut change,
+            &self.effective_catalog(),
+            &graph_key,
+        )?;
         self.commit_standalone(change, &held)?;
         Ok(Self::ddl_status(format!(
             "Property graph '{}' created ({} node tables, {} edge tables)",
@@ -1786,7 +2018,7 @@ impl Session {
         let type_key = self.effective_type_key(&op.name);
         let held = self.hold_for_standalone(true)?;
         let graph_exists = self.named_graph(&graph_key).is_some();
-        let graph_type = self.catalog.get_graph_type_def(&type_key);
+        let graph_type = self.effective_catalog().get_graph_type_def(&type_key);
         if !graph_exists && graph_type.is_none() {
             if op.if_exists {
                 return Ok(Self::ddl_status("No change".to_string()));
@@ -1864,7 +2096,7 @@ impl Session {
         def: &crate::catalog::GraphTypeDefinition,
     ) -> (Vec<String>, Vec<String>) {
         let others: Vec<_> = self
-            .catalog
+            .effective_catalog()
             .schema()
             .map(crate::catalog::SchemaCatalog::all_graph_type_defs)
             .unwrap_or_default()
@@ -1917,6 +2149,7 @@ impl Session {
 
         // A vector index takes the lists of numbers already written as
         // vectors: they are converted first, in a transaction of their own.
+        self.refuse_claimed_name(&cmd)?;
         self.convert_vector_index_lists(&cmd)?;
         // DROP SCHEMA drops the schema's default graph: it also keeps the
         // writes of open transactions out while it checks them (see
@@ -1928,6 +2161,8 @@ impl Session {
         drop(held);
         match after {
             AfterSchemaChange::Nothing => {}
+            // In a transaction the session leaves it at the commit.
+            AfterSchemaChange::LeaveSchema(_) if self.in_transaction() => {}
             AfterSchemaChange::LeaveSchema(name) => {
                 // If this session was using the dropped schema, reset it.
                 let mut current = self.current_schema.lock();
@@ -1943,6 +2178,265 @@ impl Session {
         // DDL is rare, so clearing the entire cache is cheap and correct.
         self.query_cache.clear();
         Ok(result)
+    }
+
+    /// Whether the graph type `graph_type` declares `def`: not when its name stands for a
+    /// type already and it states nothing of its own, as `(:City)` in a pattern over a
+    /// declared `City` only names it. A name is one type until each graph type has its own
+    /// (0.7.0, #676), so a different declaration fails; an identical one stays that one
+    /// type, and a replace may change one that only it lists (`own`).
+    ///
+    /// # Errors
+    ///
+    /// A semantic error naming the type.
+    #[cfg(feature = "gql")]
+    fn declares_node_type(
+        &self,
+        def: &crate::catalog::NodeTypeDefinition,
+        graph_type: &str,
+        own: bool,
+    ) -> Result<bool> {
+        let catalog = self.effective_catalog();
+        let Some(existing) = catalog.get_node_type(&def.name) else {
+            return Ok(true);
+        };
+        if def.properties.is_empty() && def.key_labels.is_empty() {
+            return Ok(false);
+        }
+        let listed_elsewhere = catalog
+            .all_graph_type_defs()
+            .iter()
+            .any(|other| other.name != graph_type && other.allowed_node_types.contains(&def.name));
+        if (own && !listed_elsewhere)
+            || (declared_properties(&existing.properties) == declared_properties(&def.properties)
+                && same_names(&existing.parent_types, &def.parent_types)
+                && same_names(&existing.key_labels, &def.key_labels))
+        {
+            return Ok(true);
+        }
+        Err(other_declaration("node type", &def.name))
+    }
+
+    /// What the graph type `graph_type` declares of the edge type `def`, to store: `None`
+    /// when that changes nothing, as with `(:A)-[:E]->(:B)` over an `E` of those endpoints,
+    /// where properties and keys left out stay the type's. As for
+    /// [`declares_node_type`](Self::declares_node_type), a different declaration fails,
+    /// and a replace may change a type only it lists (`own`).
+    ///
+    /// A type with no endpoints on a side says nothing they could differ from, so a pattern
+    /// may add them, unless they would reach further than this graph type: another graph
+    /// type lists it, or `graph_type` is Cypher's `__current__`, whose types are rules by
+    /// label in every graph.
+    ///
+    /// # Errors
+    ///
+    /// A semantic error naming the type.
+    #[cfg(feature = "gql")]
+    fn declares_edge_type(
+        &self,
+        mut def: crate::catalog::EdgeTypeDefinition,
+        graph_type: &str,
+        own: bool,
+    ) -> Result<Option<crate::catalog::EdgeTypeDefinition>> {
+        let catalog = self.effective_catalog();
+        let Some(existing) = catalog.get_edge_type_def(&def.name) else {
+            return Ok(Some(def));
+        };
+        if def.properties.is_empty() && def.key_labels.is_empty() {
+            if def.source_node_types.is_empty() && def.target_node_types.is_empty() {
+                return Ok(None);
+            }
+            def.properties.clone_from(&existing.properties);
+            def.constraints.clone_from(&existing.constraints);
+            def.key_labels.clone_from(&existing.key_labels);
+        }
+        let listed_elsewhere = catalog
+            .all_graph_type_defs()
+            .iter()
+            .any(|other| other.name != graph_type && other.allowed_edge_types.contains(&def.name));
+        if own && !listed_elsewhere {
+            return Ok(Some(def));
+        }
+        let same_sources = same_names(&existing.source_node_types, &def.source_node_types);
+        let same_targets = same_names(&existing.target_node_types, &def.target_node_types);
+        if declared_properties(&existing.properties) != declared_properties(&def.properties)
+            || !same_names(&existing.key_labels, &def.key_labels)
+        {
+            return Err(other_declaration("edge type", &def.name));
+        }
+        if same_sources && same_targets {
+            return Ok(None);
+        }
+        let only_adds_endpoints = (same_sources || existing.source_node_types.is_empty())
+            && (same_targets || existing.target_node_types.is_empty());
+        if only_adds_endpoints
+            && !listed_elsewhere
+            && !crate::catalog::is_current_graph_type(graph_type)
+        {
+            return Ok(Some(def));
+        }
+        Err(other_declaration("edge type", &def.name))
+    }
+
+    /// Adds the index a uniqueness rule's check reads to `change`, which adds the rule: on
+    /// its first key, the one the check looks up, in each graph the rule reaches that has
+    /// none. Under the constraint's name when it was given one the statement can take, so
+    /// `DROP INDEX` can remove it; a statement that builds nothing names nothing.
+    ///
+    /// # Errors
+    ///
+    /// A record of the change that does not apply to a copy of the catalog: damage.
+    #[cfg(feature = "gql")]
+    fn index_rule(
+        &self,
+        change: &mut crate::transaction::StandaloneChange,
+        stmt: &grafeo_adapters::query::gql::ast::CreateConstraintStatement,
+        kind: crate::catalog::ConstraintType,
+    ) -> Result<()> {
+        use crate::catalog::ConstraintType;
+        use grafeo_adapters::query::gql::ast::IndexKind;
+        use grafeo_common::change::StandaloneOp;
+        use grafeo_common::storage::catalog_record::{
+            CatalogRecord, IndexNameKindRecord, IndexNameRecord,
+        };
+
+        let (ConstraintType::Unique | ConstraintType::NodeKey, Some(key)) =
+            (kind, stmt.properties.first())
+        else {
+            return Ok(());
+        };
+        let graphs = self.graphs_a_rule_needs_an_index_in(change, &stmt.label, key)?;
+        if graphs.is_empty() {
+            return Ok(());
+        }
+        for graph in &graphs {
+            change.push(crate::database::index::put_label_index(
+                graph.as_deref(),
+                &stmt.label,
+                key,
+            ));
+        }
+        if let Some(name) = &stmt.name {
+            let property = std::slice::from_ref(key);
+            if !self.index_name_in_use(name, &stmt.label, property, IndexKind::Property) {
+                change.push(StandaloneOp::PutCatalog(CatalogRecord::IndexName(
+                    IndexNameRecord {
+                        name: name.clone(),
+                        label: stmt.label.clone(),
+                        property: key.clone(),
+                        kind: IndexNameKindRecord::Hash,
+                    },
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// What the status of dropping the constraint `name` adds about its index, which stays:
+    /// how to remove it when it has the constraint's name.
+    #[cfg(feature = "gql")]
+    fn index_that_stays(&self, name: &str) -> String {
+        use crate::catalog::ConstraintType;
+
+        let catalog = self.effective_catalog();
+        let Some(def) = catalog
+            .constraint(name)
+            .filter(|def| matches!(def.kind, ConstraintType::Unique | ConstraintType::NodeKey))
+        else {
+            return String::new();
+        };
+        let Some(key) = def.properties.first() else {
+            return String::new();
+        };
+        let named_for_it = catalog.indexes_named(name).iter().any(|index| {
+            catalog
+                .get_label_name(index.label)
+                .is_some_and(|label| *label == *def.label)
+                && catalog
+                    .get_property_key_name(index.property_key)
+                    .is_some_and(|property| *property == **key)
+        });
+        if named_for_it {
+            format!("; index '{name}' stays, DROP INDEX {name} removes it")
+        } else if self
+            .active_lpg_store()
+            .is_some_and(|store| store.index_serves(&[&*def.label], key))
+        {
+            format!("; the index on property {key} stays")
+        } else {
+            String::new()
+        }
+    }
+
+    /// Adds the drop of each of `nodes` and `edges`, types the graph type `graph_type`
+    /// stops listing, that no other graph type lists, to `change`: the types of a graph
+    /// type go with it (ISO/IEC 39075 12.7 and 4.13.2.2), also one it named by reference.
+    /// Cypher's `__current__` keeps its types, which are rules by label. The names of the
+    /// types going.
+    ///
+    /// # Errors
+    ///
+    /// A named constraint on one of them, to drop first: the statement leaves nothing.
+    #[cfg(feature = "gql")]
+    fn drop_types_only_listed_by(
+        &self,
+        graph_type: &str,
+        nodes: &[String],
+        edges: &[String],
+        change: &mut crate::transaction::StandaloneChange,
+    ) -> Result<Vec<String>> {
+        use grafeo_common::change::StandaloneOp;
+        use grafeo_common::storage::catalog_record::CatalogKey;
+        use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind};
+
+        let catalog = self.effective_catalog();
+        if crate::catalog::is_current_graph_type(graph_type) {
+            return Ok(Vec::new());
+        }
+        let others: Vec<_> = catalog
+            .all_graph_type_defs()
+            .into_iter()
+            .filter(|def| def.name != graph_type)
+            .collect();
+        let short = |name: &str| crate::catalog::unqualified(name).to_string();
+        let mut gone = Vec::new();
+        for name in nodes {
+            if catalog.get_node_type(name).is_none()
+                || others
+                    .iter()
+                    .any(|def| def.allowed_node_types.contains(name))
+            {
+                continue;
+            }
+            let label = short(name);
+            if let Some(constraint) = catalog.constraints().iter().find(|c| c.label == label) {
+                return Err(Error::from(QueryError::new(
+                    QueryErrorKind::Semantic,
+                    format!(
+                        "node type '{label}' goes with its graph type, and constraint '{}' is \
+                         on it: drop the constraint first",
+                        constraint.name
+                    ),
+                )));
+            }
+            change.push(StandaloneOp::DropCatalog(CatalogKey::NodeType(
+                name.clone(),
+            )));
+            gone.push(label);
+        }
+        for name in edges {
+            if catalog.get_edge_type_def(name).is_some()
+                && !others
+                    .iter()
+                    .any(|def| def.allowed_edge_types.contains(name))
+            {
+                change.push(StandaloneOp::DropCatalog(CatalogKey::EdgeType(
+                    name.clone(),
+                )));
+                gone.push(short(name));
+            }
+        }
+        Ok(gone)
     }
 
     /// The checks of the schema statement `cmd` (no `SHOW`), which add what
@@ -1968,8 +2462,7 @@ impl Session {
         use grafeo_adapters::query::gql::ast::SchemaStatement;
         use grafeo_common::change::StandaloneOp;
         use grafeo_common::storage::catalog_record::{
-            CatalogKey, CatalogRecord, IndexKindRecord, IndexNameKindRecord, IndexNameRecord,
-            SchemaRecord,
+            CatalogKey, CatalogRecord, IndexNameKindRecord, IndexNameRecord, SchemaRecord,
         };
         use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind};
 
@@ -1990,7 +2483,12 @@ impl Session {
                     parent_types: stmt.parent_types.clone(),
                     key_labels: Vec::new(),
                 };
-                if !stmt.or_replace && self.catalog.get_node_type(&effective_name).is_some() {
+                if !stmt.or_replace
+                    && self
+                        .effective_catalog()
+                        .get_node_type(&effective_name)
+                        .is_some()
+                {
                     if stmt.if_not_exists {
                         return done(QueryResult::status("No change"));
                     }
@@ -2016,7 +2514,12 @@ impl Session {
                     target_node_types: stmt.target_node_types.clone(),
                     key_labels: Vec::new(),
                 };
-                if !stmt.or_replace && self.catalog.get_edge_type_def(&effective_name).is_some() {
+                if !stmt.or_replace
+                    && self
+                        .effective_catalog()
+                        .get_edge_type_def(&effective_name)
+                        .is_some()
+                {
                     if stmt.if_not_exists {
                         return done(QueryResult::status("No change"));
                     }
@@ -2069,7 +2572,11 @@ impl Session {
             }
             SchemaStatement::DropNodeType { name, if_exists } => {
                 let effective_name = self.effective_type_key(&name);
-                if self.catalog.get_node_type(&effective_name).is_none() {
+                if self
+                    .effective_catalog()
+                    .get_node_type(&effective_name)
+                    .is_none()
+                {
                     if if_exists {
                         return done(QueryResult::status("No change"));
                     }
@@ -2077,6 +2584,7 @@ impl Session {
                         CatalogError::TypeNotFound(effective_name).to_string(),
                     ));
                 }
+                self.refuse_drop_of_a_listed_type(&effective_name, &name, false)?;
                 change.push(StandaloneOp::DropCatalog(CatalogKey::NodeType(
                     effective_name,
                 )));
@@ -2084,7 +2592,11 @@ impl Session {
             }
             SchemaStatement::DropEdgeType { name, if_exists } => {
                 let effective_name = self.effective_type_key(&name);
-                if self.catalog.get_edge_type_def(&effective_name).is_none() {
+                if self
+                    .effective_catalog()
+                    .get_edge_type_def(&effective_name)
+                    .is_none()
+                {
                     if if_exists {
                         return done(QueryResult::status("No change"));
                     }
@@ -2092,6 +2604,7 @@ impl Session {
                         CatalogError::TypeNotFound(effective_name).to_string(),
                     ));
                 }
+                self.refuse_drop_of_a_listed_type(&effective_name, &name, true)?;
                 change.push(StandaloneOp::DropCatalog(CatalogKey::EdgeType(
                     effective_name,
                 )));
@@ -2122,10 +2635,19 @@ impl Session {
                 for prop in &stmt.properties {
                     match stmt.index_kind {
                         IndexKind::Property | IndexKind::BTree => {
-                            change.push(crate::database::index::put_index(
-                                graph.as_deref(),
-                                IndexKindRecord::Property { key: prop.clone() },
-                            ));
+                            // An index that covers the label and the key already serves: the
+                            // name stands for it.
+                            let covered = self.active_lpg_store().is_some_and(|store| {
+                                self.property_indexes_on(&graph, &*store, &stmt.label, prop)
+                                    .any()
+                            });
+                            if !covered {
+                                change.push(crate::database::index::put_label_index(
+                                    graph.as_deref(),
+                                    &stmt.label,
+                                    prop,
+                                ));
+                            }
                         }
                         IndexKind::Text => {
                             self.text_index_change(change, &stmt.label, prop, &stmt.options)?;
@@ -2159,7 +2681,7 @@ impl Session {
             SchemaStatement::DropIndex { name, if_exists } => {
                 // The indexes the name stands for, one per property, and
                 // the property index of each property in the active graph.
-                let named = self.catalog.indexes_named(&name);
+                let named = self.effective_catalog().indexes_named(&name);
                 if named.is_empty() {
                     if if_exists {
                         return done(QueryResult::status("No change".to_string()));
@@ -2199,7 +2721,7 @@ impl Session {
                         );
                         let mut name = base.clone();
                         let mut suffix = 2;
-                        while let Some(other) = self.catalog.constraint(&name) {
+                        while let Some(other) = self.effective_catalog().constraint(&name) {
                             if other.label == stmt.label
                                 && other.properties == stmt.properties
                                 && other.kind == kind
@@ -2212,7 +2734,7 @@ impl Session {
                         name
                     }
                 };
-                if self.catalog.constraint(&name).is_some() {
+                if self.effective_catalog().constraint(&name).is_some() {
                     if stmt.if_not_exists {
                         return done(QueryResult::status(format!(
                             "Constraint '{name}' already exists"
@@ -2229,13 +2751,14 @@ impl Session {
                 change.push(StandaloneOp::PutCatalog(CatalogRecord::Constraint(
                     constraint_record(&def),
                 )));
+                self.index_rule(change, &stmt, kind)?;
                 done(QueryResult::status(format!(
                     "Created {} constraint '{name}'",
                     kind.name_suffix()
                 )))
             }
             SchemaStatement::DropConstraint { name, if_exists } => {
-                if self.catalog.constraint(&name).is_none() {
+                if self.effective_catalog().constraint(&name).is_none() {
                     if if_exists {
                         return done(QueryResult::status(format!(
                             "No constraint '{name}' to drop"
@@ -2245,17 +2768,23 @@ impl Session {
                         "constraint '{name}' does not exist"
                     )));
                 }
+                let stays = self.index_that_stays(&name);
                 change.push(StandaloneOp::DropCatalog(CatalogKey::Constraint(
                     name.clone(),
                 )));
-                done(QueryResult::status(format!("Dropped constraint '{name}'")))
+                done(QueryResult::status(format!(
+                    "Dropped constraint '{name}'{stays}"
+                )))
             }
             SchemaStatement::CreateGraphType(stmt) => {
                 use crate::catalog::GraphTypeDefinition;
                 use grafeo_adapters::query::gql::ast::InlineElementType;
 
                 let effective_name = self.effective_type_key(&stmt.name);
-                let exists = self.catalog.get_graph_type_def(&effective_name).is_some();
+                let exists = self
+                    .effective_catalog()
+                    .get_graph_type_def(&effective_name)
+                    .is_some();
                 // OR REPLACE drops the graph type it replaces first (ISO/IEC
                 // 39075:2024 12.6, General Rule 2), which 12.7 refuses for
                 // the type of a graph: before anything is declared.
@@ -2275,6 +2804,12 @@ impl Session {
                     ));
                 }
 
+                // What it replaces, whose own declarations it may change.
+                let replaced = self
+                    .effective_catalog()
+                    .get_graph_type_def(&effective_name)
+                    .filter(|_| exists);
+
                 // GG04: LIKE clause copies type from existing graph
                 let (mut node_types, mut edge_types, open) =
                     if let Some(ref like_graph) = stmt.like_graph {
@@ -2282,9 +2817,11 @@ impl Session {
                         // existing types: the graph's key in the current
                         // schema, as CREATE GRAPH ... LIKE resolves it
                         let like_key = self.effective_graph_key(like_graph);
-                        if let Some(type_name) = self.catalog.get_graph_type_binding(&like_key) {
+                        if let Some(type_name) =
+                            self.effective_catalog().get_graph_type_binding(&like_key)
+                        {
                             if let Some(existing) = self
-                                .catalog
+                                .effective_catalog()
                                 .schema()
                                 .and_then(|s| s.get_graph_type(&type_name))
                             {
@@ -2331,10 +2868,16 @@ impl Session {
                     .collect::<Result<Vec<_>>>()?;
                 // A node type declared more than once (`(:City)-[:R]->(:City
                 // {name STRING})`) is one type with the properties and key
-                // labels of every occurrence, put at its first one.
+                // labels of every occurrence, put at its first one. So is an
+                // edge type, whose patterns must agree on its properties and
+                // whose endpoints are those of every pattern.
                 let mut key_labels: Vec<Vec<String>> = Vec::new();
                 let mut first_occurrence: grafeo_common::utils::hash::FxHashMap<String, usize> =
                     grafeo_common::utils::hash::FxHashMap::default();
+                let mut edge_occurrences: grafeo_common::utils::hash::FxHashMap<
+                    String,
+                    (usize, Vec<String>, Vec<String>),
+                > = grafeo_common::utils::hash::FxHashMap::default();
                 for (index, inline) in stmt.inline_types.iter().enumerate() {
                     let labels = match inline {
                         InlineElementType::Node {
@@ -2355,6 +2898,42 @@ impl Session {
                                 }
                             } else {
                                 first_occurrence.insert(name, index);
+                            }
+                            labels.clone()
+                        }
+                        InlineElementType::Edge {
+                            name,
+                            key_labels: labels,
+                            source_node_types,
+                            target_node_types,
+                            is_reference: false,
+                            ..
+                        } => {
+                            let name = self.effective_type_key(name);
+                            if let Some((first, sources, targets)) = edge_occurrences.get_mut(&name)
+                            {
+                                let more = inline_properties[index].take().unwrap_or_default();
+                                let known = inline_properties[*first].as_deref().unwrap_or(&[]);
+                                if declared_properties(known) != declared_properties(&more)
+                                    || !same_names(&key_labels[*first], labels)
+                                {
+                                    return Err(unsupported_edge_patterns(
+                                        &name,
+                                        "different properties",
+                                    ));
+                                }
+                                merge_endpoints(
+                                    &name,
+                                    sources,
+                                    targets,
+                                    source_node_types,
+                                    target_node_types,
+                                )?;
+                            } else {
+                                edge_occurrences.insert(
+                                    name,
+                                    (index, source_node_types.clone(), target_node_types.clone()),
+                                );
                             }
                             labels.clone()
                         }
@@ -2382,7 +2961,11 @@ impl Session {
                             let inline_effective = self.effective_type_key(name);
                             if *is_reference {
                                 // Reference: validate existence; declare nothing.
-                                if self.catalog.get_node_type(&inline_effective).is_none() {
+                                if self
+                                    .effective_catalog()
+                                    .get_node_type(&inline_effective)
+                                    .is_none()
+                                {
                                     return Err(invalid_reference(format!(
                                         "Referenced node type '{inline_effective}' does not exist"
                                     )));
@@ -2397,40 +2980,55 @@ impl Session {
                                     parent_types: key_labels.clone(),
                                     key_labels: key_labels.clone(),
                                 };
-                                change.push(StandaloneOp::PutCatalog(CatalogRecord::NodeType(
-                                    node_type_record(&def),
-                                )));
+                                let own = replaced.as_ref().is_some_and(|old| {
+                                    old.allowed_node_types.contains(&inline_effective)
+                                });
+                                if self.declares_node_type(&def, &effective_name, own)? {
+                                    change.push(StandaloneOp::PutCatalog(CatalogRecord::NodeType(
+                                        node_type_record(&def),
+                                    )));
+                                }
                             }
                             if !node_types.contains(&inline_effective) {
                                 node_types.push(inline_effective);
                             }
                         }
                         InlineElementType::Edge {
-                            name,
-                            source_node_types,
-                            target_node_types,
-                            is_reference,
-                            ..
+                            name, is_reference, ..
                         } => {
                             let inline_effective = self.effective_type_key(name);
                             if *is_reference {
-                                if self.catalog.get_edge_type_def(&inline_effective).is_none() {
+                                if self
+                                    .effective_catalog()
+                                    .get_edge_type_def(&inline_effective)
+                                    .is_none()
+                                {
                                     return Err(invalid_reference(format!(
                                         "Referenced edge type '{inline_effective}' does not exist"
                                     )));
                                 }
-                            } else {
+                            } else if let Some(typed_properties) = typed_properties {
+                                let (_, source_node_types, target_node_types) = edge_occurrences
+                                    .remove(&inline_effective)
+                                    .unwrap_or_default();
                                 let def = EdgeTypeDefinition {
                                     name: inline_effective.clone(),
-                                    properties: typed_properties.unwrap_or_default(),
+                                    properties: typed_properties,
                                     constraints: Vec::new(),
-                                    source_node_types: source_node_types.clone(),
-                                    target_node_types: target_node_types.clone(),
+                                    source_node_types,
+                                    target_node_types,
                                     key_labels: key_labels.clone(),
                                 };
-                                change.push(StandaloneOp::PutCatalog(CatalogRecord::EdgeType(
-                                    edge_type_record(&def)?,
-                                )));
+                                let own = replaced.as_ref().is_some_and(|old| {
+                                    old.allowed_edge_types.contains(&inline_effective)
+                                });
+                                if let Some(def) =
+                                    self.declares_edge_type(def, &effective_name, own)?
+                                {
+                                    change.push(StandaloneOp::PutCatalog(CatalogRecord::EdgeType(
+                                        edge_type_record(&def)?,
+                                    )));
+                                }
                             }
                             if !edge_types.contains(&inline_effective) {
                                 edge_types.push(inline_effective);
@@ -2445,6 +3043,23 @@ impl Session {
                     allowed_edge_types: edge_types,
                     open,
                 };
+                // What it stops listing goes, as with `ALTER GRAPH TYPE ... DROP`.
+                let stopped_listing = |before: &[String], after: &[String]| -> Vec<String> {
+                    before
+                        .iter()
+                        .filter(|name| !after.contains(name))
+                        .cloned()
+                        .collect()
+                };
+                let gone = match &replaced {
+                    Some(old) => self.drop_types_only_listed_by(
+                        &effective_name,
+                        &stopped_listing(&old.allowed_node_types, &def.allowed_node_types),
+                        &stopped_listing(&old.allowed_edge_types, &def.allowed_edge_types),
+                        change,
+                    )?,
+                    None => Vec::new(),
+                };
                 // The type it replaces is dropped first, which also drops
                 // the bindings a dropped graph left to its name.
                 if exists {
@@ -2456,8 +3071,9 @@ impl Session {
                     graph_type_record(&def),
                 )));
                 done(QueryResult::status(format!(
-                    "Created graph type '{}'",
-                    stmt.name
+                    "Created graph type '{}'{}",
+                    stmt.name,
+                    types_gone(&gone)
                 )))
             }
             SchemaStatement::DropGraphType { name, if_exists } => {
@@ -2468,7 +3084,11 @@ impl Session {
                 if let Some(graph) = self.graph_typed_by(&effective_name) {
                     return Err(Self::graph_type_in_use(&name, &graph));
                 }
-                if self.catalog.get_graph_type_def(&effective_name).is_none() {
+                if self
+                    .effective_catalog()
+                    .get_graph_type_def(&effective_name)
+                    .is_none()
+                {
                     if if_exists {
                         return done(QueryResult::status("No change"));
                     }
@@ -2476,10 +3096,19 @@ impl Session {
                         CatalogError::TypeNotFound(effective_name).to_string(),
                     ));
                 }
+                let def = self.effective_catalog().get_graph_type_def(&effective_name);
+                let (nodes, edges) = def.map_or_else(Default::default, |def| {
+                    (def.allowed_node_types, def.allowed_edge_types)
+                });
+                let gone =
+                    self.drop_types_only_listed_by(&effective_name, &nodes, &edges, change)?;
                 change.push(StandaloneOp::DropCatalog(CatalogKey::GraphType(
                     effective_name,
                 )));
-                done(QueryResult::status(format!("Dropped graph type '{name}'")))
+                done(QueryResult::status(format!(
+                    "Dropped graph type '{name}'{}",
+                    types_gone(&gone)
+                )))
             }
             SchemaStatement::CreateSchema {
                 name,
@@ -2490,7 +3119,7 @@ impl Session {
                         "Schema name '{name}' must not contain '/' (reserved as schema/graph separator)"
                     )));
                 }
-                if self.catalog.schema_names().contains(&name) {
+                if self.effective_catalog().schema_names().contains(&name) {
                     if if_not_exists {
                         return done(QueryResult::status("No change"));
                     }
@@ -2521,17 +3150,17 @@ impl Session {
                     .iter()
                     .any(|g| g.starts_with(&prefix) && *g != default_graph_key);
                 let has_types = self
-                    .catalog
+                    .effective_catalog()
                     .all_node_type_names()
                     .iter()
                     .any(|n| n.starts_with(&prefix))
                     || self
-                        .catalog
+                        .effective_catalog()
                         .all_edge_type_names()
                         .iter()
                         .any(|n| n.starts_with(&prefix))
                     || self
-                        .catalog
+                        .effective_catalog()
                         .all_graph_type_names()
                         .iter()
                         .any(|n| n.starts_with(&prefix));
@@ -2540,7 +3169,7 @@ impl Session {
                         "Schema '{name}' is not empty: drop all graphs and types first"
                     )));
                 }
-                if !self.catalog.schema_names().contains(&name) {
+                if !self.effective_catalog().schema_names().contains(&name) {
                     if if_exists {
                         return done(QueryResult::status("No change"));
                     }
@@ -2551,11 +3180,13 @@ impl Session {
                 change.push(StandaloneOp::DropCatalog(CatalogKey::Schema(name.clone())));
                 // The auto-created default graph partition goes with it.
                 if self.named_graph(&default_graph_key).is_some() {
-                    crate::database::standalone::refuse_drop_with_open_changes(
-                        &self.transaction_manager,
-                        held,
-                        &default_graph_key,
-                    )?;
+                    if !self.in_transaction() {
+                        crate::database::standalone::refuse_drop_with_open_changes(
+                            &self.transaction_manager,
+                            held,
+                            &default_graph_key,
+                        )?;
+                    }
                     change.push(StandaloneOp::DropGraph {
                         name: default_graph_key,
                     });
@@ -2570,11 +3201,14 @@ impl Session {
                 let effective_name = self.effective_type_key(&stmt.name);
                 // The whole statement or nothing: the alterations apply to a
                 // copy of the type, which replaces it once all of them pass.
-                let mut def = self.catalog.get_node_type(&effective_name).ok_or_else(|| {
-                    invalid_reference(
-                        CatalogError::TypeNotFound(effective_name.clone()).to_string(),
-                    )
-                })?;
+                let mut def = self
+                    .effective_catalog()
+                    .get_node_type(&effective_name)
+                    .ok_or_else(|| {
+                        invalid_reference(
+                            CatalogError::TypeNotFound(effective_name.clone()).to_string(),
+                        )
+                    })?;
                 for alt in &stmt.alterations {
                     match alt {
                         TypeAlteration::AddProperty(prop) => crate::catalog::add_property(
@@ -2603,7 +3237,7 @@ impl Session {
                 let effective_name = self.effective_type_key(&stmt.name);
                 // The whole statement or nothing (see ALTER NODE TYPE).
                 let mut def = self
-                    .catalog
+                    .effective_catalog()
                     .get_edge_type_def(&effective_name)
                     .ok_or_else(|| {
                         invalid_reference(
@@ -2639,13 +3273,17 @@ impl Session {
                 // The whole statement or nothing (see ALTER NODE TYPE); the
                 // graphs of the type keep it.
                 let mut def = self
-                    .catalog
+                    .effective_catalog()
                     .get_graph_type_def(&effective_name)
                     .ok_or_else(|| {
                         invalid_reference(
                             CatalogError::TypeNotFound(effective_name.clone()).to_string(),
                         )
                     })?;
+                let (nodes_before, edges_before) = (
+                    def.allowed_node_types.clone(),
+                    def.allowed_edge_types.clone(),
+                );
                 for alt in &stmt.alterations {
                     match alt {
                         GraphTypeAlteration::AddNodeType(name) => {
@@ -2666,18 +3304,32 @@ impl Session {
                         }
                     }
                 }
+                let removed = |before: Vec<String>, after: &[String]| -> Vec<String> {
+                    before
+                        .into_iter()
+                        .filter(|name| !after.contains(name))
+                        .collect()
+                };
+                let gone = self.drop_types_only_listed_by(
+                    &effective_name,
+                    &removed(nodes_before, &def.allowed_node_types),
+                    &removed(edges_before, &def.allowed_edge_types),
+                    change,
+                )?;
                 change.push(StandaloneOp::PutCatalog(CatalogRecord::GraphType(
                     graph_type_record(&def),
                 )));
                 done(QueryResult::status(format!(
-                    "Altered graph type '{}'",
-                    stmt.name
+                    "Altered graph type '{}'{}",
+                    stmt.name,
+                    types_gone(&gone)
                 )))
             }
             SchemaStatement::CreateProcedure(stmt) => {
                 use crate::catalog::ProcedureDefinition;
 
-                if !stmt.or_replace && self.catalog.get_procedure(&stmt.name).is_some() {
+                if !stmt.or_replace && self.effective_catalog().get_procedure(&stmt.name).is_some()
+                {
                     if stmt.if_not_exists {
                         return done(QueryResult::empty());
                     }
@@ -2708,7 +3360,7 @@ impl Session {
                 )))
             }
             SchemaStatement::DropProcedure { name, if_exists } => {
-                if self.catalog.get_procedure(&name).is_none() {
+                if self.effective_catalog().get_procedure(&name).is_none() {
                     if if_exists {
                         return done(QueryResult::empty());
                     }
@@ -2880,7 +3532,7 @@ impl Session {
         use grafeo_adapters::query::gql::ast::IndexKind;
 
         let named: Vec<_> = self
-            .catalog
+            .effective_catalog()
             .all_indexes()
             .into_iter()
             .filter(|def| def.name == name)
@@ -2898,11 +3550,11 @@ impl Session {
             && named.iter().all(|def| {
                 def.index_type == index_type
                     && self
-                        .catalog
+                        .effective_catalog()
                         .get_label_name(def.label)
                         .is_some_and(|known| *known == *label)
                     && self
-                        .catalog
+                        .effective_catalog()
                         .get_property_key_name(def.property_key)
                         .is_some_and(|key| properties.iter().any(|p| **p == *key))
             });
@@ -2913,7 +3565,7 @@ impl Session {
             return false;
         };
         properties.iter().all(|property| match kind {
-            IndexKind::Property | IndexKind::BTree => store.has_property_index(property),
+            IndexKind::Property | IndexKind::BTree => store.index_serves(&[label], property),
             IndexKind::Text => {
                 #[cfg(feature = "text-index")]
                 {
@@ -2939,9 +3591,9 @@ impl Session {
 
     /// Drops the index of the active graph that `def`, a named index
     /// `DROP INDEX` drops, stands for: the text or vector index of its label
-    /// and property for a full-text or vector one, else the property index of its
-    /// property, unless another name still stands for that one (property
-    /// indexes are per key, not per label).
+    /// and property for a full-text or vector one. Else the property index of its label and
+    /// property, or, without one, the index of its property on every label, unless another name
+    /// still stands for the index.
     #[cfg(feature = "gql")]
     fn drop_named_index(
         &self,
@@ -2950,7 +3602,10 @@ impl Session {
     ) {
         use crate::catalog::IndexType;
         use grafeo_common::storage::catalog_record::IndexKeyRecord;
-        let Some(property) = self.catalog.get_property_key_name(def.property_key) else {
+        let Some(property) = self
+            .effective_catalog()
+            .get_property_key_name(def.property_key)
+        else {
             return;
         };
         let Some(store) = self.active_lpg_store() else {
@@ -2960,7 +3615,7 @@ impl Session {
             IndexType::FullText => {
                 #[cfg(feature = "text-index")]
                 {
-                    let Some(label) = self.catalog.get_label_name(def.label) else {
+                    let Some(label) = self.effective_catalog().get_label_name(def.label) else {
                         return;
                     };
                     if store.get_text_index(&label, &property).is_none() {
@@ -2977,7 +3632,7 @@ impl Session {
             IndexType::Vector => {
                 #[cfg(feature = "vector-index")]
                 {
-                    let Some(label) = self.catalog.get_label_name(def.label) else {
+                    let Some(label) = self.effective_catalog().get_label_name(def.label) else {
                         return;
                     };
                     if store.get_vector_index(&label, &property).is_none() {
@@ -2992,12 +3647,28 @@ impl Session {
                 return;
             }
             IndexType::Hash | IndexType::BTree => {
-                let shared = self.catalog.all_indexes().into_iter().any(|other| {
+                let Some(label) = self.effective_catalog().get_label_name(def.label) else {
+                    return;
+                };
+                let graph = self.active_lpg_graph_key();
+                let there = self.property_indexes_on(&graph, &*store, &label, &property);
+                let others = self.effective_catalog().all_indexes();
+                let mut others = others.iter().filter(|other| {
                     other.name != def.name
                         && other.property_key == def.property_key
                         && matches!(other.index_type, IndexType::Hash | IndexType::BTree)
                 });
-                if shared || !store.has_property_index(&property) {
+                if there.this_label {
+                    if !others.any(|other| other.label == def.label) {
+                        change.push(crate::database::index::drop_label_index(
+                            graph.as_deref(),
+                            &label,
+                            &property,
+                        ));
+                    }
+                    return;
+                }
+                if others.next().is_some() || !there.every_label {
                     return;
                 }
                 IndexKeyRecord::Property {
@@ -3067,7 +3738,9 @@ impl Session {
     #[cfg(feature = "gql")]
     fn execute_show_indexes(&self) -> Result<QueryResult> {
         let store = self.active_lpg_store();
-        let indexes = crate::database::index::listed_indexes(&self.catalog, store.as_deref());
+        let mut indexes =
+            crate::database::index::listed_indexes(&self.effective_catalog(), store.as_deref());
+        self.hide_indexes_dropped_here(&mut indexes);
         let columns = vec![
             "name".to_string(),
             "type".to_string(),
@@ -3097,7 +3770,7 @@ impl Session {
     #[cfg(feature = "gql")]
     fn execute_show_constraints(&self) -> Result<QueryResult> {
         let rows = self
-            .catalog
+            .effective_catalog()
             .constraints()
             .into_iter()
             .map(|def| {
@@ -3132,7 +3805,7 @@ impl Session {
             "parents".to_string(),
         ];
         let schema = self.current_schema.lock().clone();
-        let all_names = self.catalog.all_node_type_names();
+        let all_names = self.effective_catalog().all_node_type_names();
         let type_names: Vec<String> = match &schema {
             Some(s) => {
                 let prefix = format!("{s}/");
@@ -3150,7 +3823,7 @@ impl Session {
                     Some(s) => format!("{s}/{name}"),
                     None => name.clone(),
                 };
-                let def = self.catalog.get_node_type(&lookup)?;
+                let def = self.effective_catalog().get_node_type(&lookup)?;
                 let props: Vec<String> = def
                     .properties
                     .iter()
@@ -3188,7 +3861,7 @@ impl Session {
             "target_types".to_string(),
         ];
         let schema = self.current_schema.lock().clone();
-        let all_names = self.catalog.all_edge_type_names();
+        let all_names = self.effective_catalog().all_edge_type_names();
         let type_names: Vec<String> = match &schema {
             Some(s) => {
                 let prefix = format!("{s}/");
@@ -3206,7 +3879,7 @@ impl Session {
                     Some(s) => format!("{s}/{name}"),
                     None => name.clone(),
                 };
-                let def = self.catalog.get_edge_type_def(&lookup)?;
+                let def = self.effective_catalog().get_edge_type_def(&lookup)?;
                 let props: Vec<String> = def
                     .properties
                     .iter()
@@ -3243,7 +3916,7 @@ impl Session {
             "edge_types".to_string(),
         ];
         let schema = self.current_schema.lock().clone();
-        let all_names = self.catalog.all_graph_type_names();
+        let all_names = self.effective_catalog().all_graph_type_names();
         let type_names: Vec<String> = match &schema {
             Some(s) => {
                 let prefix = format!("{s}/");
@@ -3261,7 +3934,7 @@ impl Session {
                     Some(s) => format!("{s}/{name}"),
                     None => name.clone(),
                 };
-                let def = self.catalog.get_graph_type_def(&lookup)?;
+                let def = self.effective_catalog().get_graph_type_def(&lookup)?;
                 // Strip schema prefix from allowed type names for display
                 let strip = |n: &String| -> String {
                     match &schema {
@@ -3295,10 +3968,24 @@ impl Session {
     #[cfg(feature = "gql")]
     fn execute_show_graphs(&self) -> Result<QueryResult> {
         let schema = self.current_schema.lock().clone();
-        let all_names = self
+        let mut all_names = self
             .root_store()
             .map(|store| store.graph_names())
             .unwrap_or_default();
+        {
+            let pending = self.stores.pending_graphs.read();
+            all_names.retain(|name| !pending.dropped.contains(name));
+            all_names.extend(
+                pending
+                    .created
+                    .keys()
+                    .filter(|name| {
+                        self.root_store()
+                            .is_none_or(|root| root.graph(name).is_none())
+                    })
+                    .cloned(),
+            );
+        }
 
         let mut names: Vec<String> = match &schema {
             Some(s) => {
@@ -3325,7 +4012,7 @@ impl Session {
     /// Returns the list of all schema namespaces.
     #[cfg(feature = "gql")]
     fn execute_show_schemas(&self) -> Result<QueryResult> {
-        let mut names = self.catalog.schema_names();
+        let mut names = self.effective_catalog().schema_names();
         names.sort();
         let rows: Vec<Vec<Value>> = names.into_iter().map(|n| vec![Value::from(n)]).collect();
         Ok(QueryResult {
@@ -3341,12 +4028,15 @@ impl Session {
     fn execute_show_graph_type(&self, name: &str) -> Result<QueryResult> {
         use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind};
 
-        let def = self.catalog.get_graph_type_def(name).ok_or_else(|| {
-            Error::from(QueryError::new(
-                QueryErrorKind::InvalidReference,
-                format!("Graph type '{name}' not found"),
-            ))
-        })?;
+        let def = self
+            .effective_catalog()
+            .get_graph_type_def(name)
+            .ok_or_else(|| {
+                Error::from(QueryError::new(
+                    QueryErrorKind::InvalidReference,
+                    format!("Graph type '{name}' not found"),
+                ))
+            })?;
 
         let columns = vec![
             "name".to_string(),
@@ -3382,8 +4072,8 @@ impl Session {
             "edge_types".to_string(),
         ];
 
-        if let Some(type_name) = self.catalog.get_graph_type_binding(&graph_name)
-            && let Some(def) = self.catalog.get_graph_type_def(&type_name)
+        if let Some(type_name) = self.effective_catalog().get_graph_type_binding(&graph_name)
+            && let Some(def) = self.effective_catalog().get_graph_type_def(&type_name)
         {
             let rows = vec![vec![
                 Value::from(graph_name),
@@ -3462,9 +4152,7 @@ impl Session {
             grafeo_common::utils::error::Error::Internal(format!("injected failure: {e}"))
         })?;
 
-        use crate::query::{
-            binder::Binder, optimizer::Optimizer, processor::QueryLanguage, translators::gql,
-        };
+        use crate::query::{binder::Binder, processor::QueryLanguage, translators::gql};
 
         let _span = grafeo_info_span!(
             "grafeo::session::execute",
@@ -3511,7 +4199,7 @@ impl Session {
             // A statement with values that binds by value keeps its parsed
             // plan, which each call fills, binds and optimizes with its values
             // (`plan_with_values`).
-            let parsed = params.and_then(|_| self.query_cache.get_parsed(&cache_key));
+            let parsed = params.and_then(|_| self.plan_cache().get_parsed(&cache_key));
             let bound_by_value = parsed.is_some();
             let mut logical_plan = match parsed {
                 Some(plan) => plan,
@@ -3535,8 +4223,8 @@ impl Session {
             let params = params_to_fill(&mut logical_plan, params)?;
             if let Some(params) = params {
                 let active = self.active_store();
-                self.plan_with_values(&cache_key, logical_plan, params, &*active, bound_by_value)?
-            } else if given && let Some(cached_plan) = self.query_cache.get_optimized(&cache_key) {
+                self.plan_with_values(&cache_key, logical_plan, params, &active, bound_by_value)?
+            } else if given && let Some(cached_plan) = self.plan_cache().get_optimized(&cache_key) {
                 cached_plan
             } else {
                 // Semantic validation
@@ -3545,11 +4233,11 @@ impl Session {
 
                 // Optimize the plan
                 let active = self.active_store();
-                let optimizer = Optimizer::from_graph_store(&*active);
+                let optimizer = self.optimizer_for(&active);
                 let plan = optimizer.optimize(logical_plan)?;
 
                 // Cache the optimized plan for future use
-                self.query_cache.put_optimized(cache_key, plan.clone());
+                self.plan_cache().put_optimized(cache_key, plan.clone());
 
                 plan
             }
@@ -3683,9 +4371,7 @@ impl Session {
         Option<Instant>,
         Option<crate::transaction::ReadPin>,
     )> {
-        use crate::query::{
-            binder::Binder, optimizer::Optimizer, processor::QueryLanguage, translators::gql,
-        };
+        use crate::query::{binder::Binder, processor::QueryLanguage, translators::gql};
 
         self.require_lpg("GQL")?;
 
@@ -3736,7 +4422,7 @@ impl Session {
 
         // Cache + bind + optimize (same path as execute).
         let cache_key = self.plan_cache_key(query, QueryLanguage::Gql);
-        let optimized_plan = if let Some(cached) = self.query_cache.get_optimized(&cache_key) {
+        let optimized_plan = if let Some(cached) = self.plan_cache().get_optimized(&cache_key) {
             cached
         } else {
             // A stream takes no parameters: the plan's defaults fill what they
@@ -3747,9 +4433,9 @@ impl Session {
             let mut binder = Binder::new();
             let _binding_context = binder.bind(&logical_plan)?;
             let active = self.active_store();
-            let optimizer = Optimizer::from_graph_store(&*active);
+            let optimizer = self.optimizer_for(&active);
             let plan = optimizer.optimize(logical_plan)?;
-            self.query_cache.put_optimized(cache_key, plan.clone());
+            self.plan_cache().put_optimized(cache_key, plan.clone());
             plan
         };
 
@@ -3942,9 +4628,7 @@ impl Session {
         query: &str,
         params: Option<&std::collections::HashMap<String, Value>>,
     ) -> Result<QueryResult> {
-        use crate::query::{
-            binder::Binder, optimizer::Optimizer, processor::QueryLanguage, translators::cypher,
-        };
+        use crate::query::{binder::Binder, processor::QueryLanguage, translators::cypher};
 
         let start_time = Instant::now();
 
@@ -3957,7 +4641,7 @@ impl Session {
         } else {
             // A statement that binds by value keeps its parsed plan (see
             // execute_gql).
-            let parsed = params.and_then(|_| self.query_cache.get_parsed(&cache_key));
+            let parsed = params.and_then(|_| self.plan_cache().get_parsed(&cache_key));
             let bound_by_value = parsed.is_some();
             let mut logical_plan = match parsed {
                 Some(plan) => plan,
@@ -3989,11 +4673,11 @@ impl Session {
                         &cache_key,
                         logical_plan,
                         params,
-                        &*active,
+                        &active,
                         bound_by_value,
                     )?
                 }
-            } else if given && let Some(cached_plan) = self.query_cache.get_optimized(&cache_key) {
+            } else if given && let Some(cached_plan) = self.plan_cache().get_optimized(&cache_key) {
                 cached_plan
             } else {
                 // Semantic validation
@@ -4002,11 +4686,11 @@ impl Session {
 
                 // Optimize the plan
                 let active = self.active_store();
-                let optimizer = Optimizer::from_graph_store(&*active);
+                let optimizer = self.optimizer_for(&active);
                 let plan = optimizer.optimize(logical_plan)?;
 
                 // Cache the optimized plan
-                self.query_cache.put_optimized(cache_key, plan.clone());
+                self.plan_cache().put_optimized(cache_key, plan.clone());
 
                 plan
             }
@@ -4087,10 +4771,7 @@ impl Session {
     /// [`execute_gremlin`](Self::execute_gremlin) without the time of the whole call.
     #[cfg(feature = "gremlin")]
     fn execute_gremlin_untimed(&self, query: &str) -> Result<QueryResult> {
-        use crate::query::{
-            binder::Binder, optimizer::Optimizer, processor::substitute_params,
-            translators::gremlin,
-        };
+        use crate::query::{binder::Binder, processor::substitute_params, translators::gremlin};
 
         let start_time = Instant::now();
 
@@ -4106,7 +4787,7 @@ impl Session {
 
         // Optimize the plan
         let active = self.active_store();
-        let optimizer = Optimizer::from_graph_store(&*active);
+        let optimizer = self.optimizer_for(&active);
         let optimized_plan = optimizer.optimize(logical_plan)?;
 
         let writes = self.plan_write_kinds(&optimized_plan.root);
@@ -4170,10 +4851,7 @@ impl Session {
         query: &str,
         params: std::collections::HashMap<String, Value>,
     ) -> Result<QueryResult> {
-        use crate::query::{
-            binder::Binder, optimizer::Optimizer, processor::substitute_params,
-            translators::gremlin,
-        };
+        use crate::query::{binder::Binder, processor::substitute_params, translators::gremlin};
 
         let start_time = Instant::now();
 
@@ -4189,7 +4867,7 @@ impl Session {
 
         // Optimize the plan
         let active = self.active_store();
-        let optimizer = Optimizer::from_graph_store(&*active);
+        let optimizer = self.optimizer_for(&active);
         let optimized_plan = optimizer.optimize(logical_plan)?;
 
         let writes = self.plan_write_kinds(&optimized_plan.root);
@@ -4257,10 +4935,7 @@ impl Session {
     /// [`execute_graphql`](Self::execute_graphql) without the time of the whole call.
     #[cfg(feature = "graphql")]
     fn execute_graphql_untimed(&self, query: &str) -> Result<QueryResult> {
-        use crate::query::{
-            binder::Binder, optimizer::Optimizer, processor::substitute_params,
-            translators::graphql,
-        };
+        use crate::query::{binder::Binder, processor::substitute_params, translators::graphql};
 
         #[cfg(feature = "metrics")]
         let start_time = Instant::now();
@@ -4276,7 +4951,7 @@ impl Session {
         let _binding_context = binder.bind(&logical_plan)?;
 
         let active = self.active_store();
-        let optimizer = Optimizer::from_graph_store(&*active);
+        let optimizer = self.optimizer_for(&active);
         let optimized_plan = optimizer.optimize(logical_plan)?;
         let writes = self.plan_write_kinds(&optimized_plan.root);
         let has_mutations = writes.any;
@@ -4331,10 +5006,7 @@ impl Session {
         query: &str,
         params: std::collections::HashMap<String, Value>,
     ) -> Result<QueryResult> {
-        use crate::query::{
-            binder::Binder, optimizer::Optimizer, processor::substitute_params,
-            translators::graphql,
-        };
+        use crate::query::{binder::Binder, processor::substitute_params, translators::graphql};
 
         #[cfg(feature = "metrics")]
         let start_time = Instant::now();
@@ -4357,7 +5029,7 @@ impl Session {
 
         // Optimize the plan
         let active = self.active_store();
-        let optimizer = Optimizer::from_graph_store(&*active);
+        let optimizer = self.optimizer_for(&active);
         let optimized_plan = optimizer.optimize(logical_plan)?;
 
         let writes = self.plan_write_kinds(&optimized_plan.root);
@@ -4429,8 +5101,7 @@ impl Session {
         params: Option<&std::collections::HashMap<String, Value>>,
     ) -> Result<QueryResult> {
         use crate::query::{
-            binder::Binder, optimizer::Optimizer, plan::LogicalOperator, processor::QueryLanguage,
-            translators::sql_pgq,
+            binder::Binder, plan::LogicalOperator, processor::QueryLanguage, translators::sql_pgq,
         };
 
         #[cfg(feature = "metrics")]
@@ -4446,7 +5117,7 @@ impl Session {
         } else {
             // A statement that binds by value keeps its parsed plan (see
             // execute_gql).
-            let parsed = params.and_then(|_| self.query_cache.get_parsed(&cache_key));
+            let parsed = params.and_then(|_| self.plan_cache().get_parsed(&cache_key));
             let bound_by_value = parsed.is_some();
             let mut logical_plan = match parsed {
                 Some(plan) => plan,
@@ -4481,19 +5152,19 @@ impl Session {
                         &cache_key,
                         logical_plan,
                         params,
-                        &*active,
+                        &active,
                         bound_by_value,
                     )?
                 }
-            } else if given && let Some(cached_plan) = self.query_cache.get_optimized(&cache_key) {
+            } else if given && let Some(cached_plan) = self.plan_cache().get_optimized(&cache_key) {
                 cached_plan
             } else {
                 let mut binder = Binder::new();
                 let _binding_context = binder.bind(&logical_plan)?;
                 let active = self.statement_store(logical_plan.graph.as_deref())?;
-                let optimizer = Optimizer::from_graph_store(&*active);
+                let optimizer = self.optimizer_for(&active);
                 let plan = optimizer.optimize(logical_plan)?;
-                self.query_cache.put_optimized(cache_key, plan.clone());
+                self.plan_cache().put_optimized(cache_key, plan.clone());
                 plan
             }
         };
@@ -4710,6 +5381,11 @@ impl Session {
             return Ok(());
         }
 
+        // Read before it begins: a rule that came between counts as changed.
+        self.rules_at_begin.store(
+            self.catalog.rules_generation(),
+            std::sync::atomic::Ordering::Relaxed,
+        );
         let transaction_id = if let Some(level) = isolation_level {
             self.transaction_manager.begin_with_isolation(level)
         } else {
@@ -4790,11 +5466,22 @@ impl Session {
         })?;
 
         let changes = self.changes.lock().take();
+        // Taken out before the commit lock, with no session lock held across it.
+        let schema = changes
+            .as_ref()
+            .map_or_else(Vec::new, |changes| changes.take_schema());
+        *self.pending_schema.lock() = None;
         // Until `commit.complete()`, the commit holds its writes, readers do
         // not see its epoch, and no other commit or transaction start can
         // run: the versions, events and WAL records below are complete
         // before anything that comes after the commit (#548).
-        let commit = match self.transaction_manager.start_commit(transaction_id) {
+        let started = if schema.is_empty() {
+            self.transaction_manager.start_commit(transaction_id)
+        } else {
+            self.transaction_manager
+                .start_commit_when_quiet(transaction_id)
+        };
+        let commit = match started {
             Ok(commit) => commit,
             Err(e) => {
                 // Conflict detected: abort the transaction completely so its
@@ -4821,15 +5508,48 @@ impl Session {
         #[cfg(feature = "testing-statement-injection")]
         grafeo_common::testing::commit_hook::run_after_commit_epoch();
 
+        // A rule that came since it began did not check its writes.
+        if let Err(error) = self.check_writes_against_new_rules(transaction_id, changes.as_deref())
+        {
+            commit.abort();
+            let _ = self.abort_transaction(transaction_id, changes.as_deref());
+            return Err(error);
+        }
+
+        // A commit that drops a graph keeps the writes of open transactions out, as such a
+        // statement does outside a transaction: none records a change there meanwhile.
+        let frozen = schema
+            .iter()
+            .any(|queued| {
+                matches!(
+                    queued.op,
+                    grafeo_common::change::StandaloneOp::DropGraph { .. }
+                        | grafeo_common::change::StandaloneOp::RdfGraph(_)
+                )
+            })
+            .then(|| self.transaction_manager.freeze_writes());
+        // Checked and built before anything is logged: a commit refused here leaves
+        // nothing.
+        let built = match self.ready_schema_ops(transaction_id, &schema) {
+            Ok(built) => built,
+            Err(error) => {
+                drop(frozen);
+                commit.abort();
+                let _ = self.abort_transaction(transaction_id, changes.as_deref());
+                return Err(error);
+            }
+        };
+
         // Write the transaction's group to the WAL before anything of it is
         // stamped or reported (#498): a group that is not written leaves
         // nothing behind, so the commit is taken back and the transaction
         // rolled back.
         #[cfg(feature = "wal")]
         let (commit, logged) =
-            match self.write_commit_group(commit, transaction_id, changes.as_deref()) {
+            match self.write_commit_group(commit, transaction_id, changes.as_deref(), &schema) {
                 Ok(written) => written,
                 Err(error) => {
+                    drop(frozen);
                     // A taken-back commit left the transaction active: roll
                     // it back, so the session can go on (and retry).
                     if self.transaction_manager.state(transaction_id)
@@ -4848,7 +5568,11 @@ impl Session {
 
         // The group is in the log: the commit lock goes, so the next commit
         // writes its group while this one syncs and waits for its turn.
-        let publish = commit.written();
+        let publish = if schema.is_empty() {
+            crate::transaction::WrittenCommit::Released(commit.written())
+        } else {
+            crate::transaction::WrittenCommit::Held(commit)
+        };
         #[cfg(feature = "testing-statement-injection")]
         grafeo_common::testing::commit_hook::run_after_commit_written();
 
@@ -4892,6 +5616,9 @@ impl Session {
                 )));
             }
 
+            // Its schema statements, after its data: a new index holds it.
+            self.apply_schema_ops(&schema, built)?;
+
             #[cfg(feature = "testing-statement-injection")]
             grafeo_common::testing::commit_hook::run_after_commit_stamped();
 
@@ -4922,6 +5649,8 @@ impl Session {
         #[cfg(feature = "wal")]
         let published = published
             .map_err(|error| crate::database::wal_log::publish_error(error, logged.is_some()));
+        drop(frozen);
+        self.schema_committed(&schema);
         published?;
         *self.last_commit_epoch.lock() = Some(commit_epoch);
         let written = changes
@@ -5090,6 +5819,7 @@ impl Session {
         };
 
         self.savepoints.lock().clear();
+        self.forget_pending_schema();
 
         let result = self.transaction_manager.abort(transaction_id);
 
@@ -5144,14 +5874,15 @@ impl Session {
         transaction_id: TransactionId,
         name: &str,
     ) -> Result<SavepointState> {
-        let mark = self.changes.lock().as_ref().map_or_else(
-            || grafeo_common::change::ChangeSet::new().mark(),
-            |changes| changes.mark(),
+        let (mark, schema_ops) = self.changes.lock().as_ref().map_or_else(
+            || (grafeo_common::change::ChangeSet::new().mark(), 0),
+            |changes| (changes.mark(), changes.schema_len()),
         );
         Ok(SavepointState {
             name: name.to_string(),
             mark,
             claims: self.transaction_manager.mark_claims(transaction_id)?,
+            schema_ops,
         })
     }
 
@@ -5218,7 +5949,8 @@ impl Session {
                 .map_err(|failure| self.rollback_failed(transaction_id, &failure))?;
         }
         self.transaction_manager
-            .restore_claims(transaction_id, sp_state.claims)
+            .restore_claims(transaction_id, sp_state.claims)?;
+        self.schema_back_to(sp_state.schema_ops)
     }
 
     /// Releases (removes) a named savepoint without rolling back.
@@ -5258,6 +5990,12 @@ impl Session {
     /// allowed.
     pub fn refuse_transaction_statements(&mut self) {
         self.transaction_statements = TransactionStatements::Refused;
+    }
+
+    /// Refuses the statements that start or end a transaction, as this session lasts for
+    /// one call: the error says what to use instead.
+    pub(crate) fn last_for_one_call(&mut self) {
+        self.transaction_statements = TransactionStatements::OneCall;
     }
 
     /// Sets the query timeout of this session's queries, in place of the
@@ -5554,7 +6292,7 @@ impl Session {
         if let LogicalOperator::CallProcedure(call) = op
             // The planner looks a stored procedure up by its last name part.
             && let Some(name) = call.name.last()
-            && let Some(procedure) = self.catalog.get_procedure(name)
+            && let Some(procedure) = self.effective_catalog().get_procedure(name)
         {
             if depth >= crate::query::executor::user_procedure::MAX_CALL_DEPTH {
                 return PlanWrites::from(true);
@@ -5923,7 +6661,28 @@ impl Session {
     /// Cypher).
     #[cfg(all(test, feature = "gql", feature = "cypher"))]
     pub(crate) fn set_reachability(&mut self, enabled: bool) {
-        self.plan_options.reachability = enabled;
+        self.plan_options.rules = self
+            .plan_options
+            .rules
+            .with(crate::query::optimizer::PlannerRule::Reachability, enabled);
+    }
+
+    /// Plans this session's queries with only the rules `rules` turns on, so
+    /// that a test can compare the plans: a rule changes how a query runs,
+    /// never what it answers. Not for tuning: every rule is on by default and
+    /// this may change in any release.
+    #[doc(hidden)]
+    #[cfg(query_language)]
+    pub fn set_planner_rules(&mut self, rules: crate::query::optimizer::PlannerRules) {
+        self.plan_options.rules = rules;
+    }
+
+    /// An optimizer for this session's queries on `store`.
+    #[cfg(lpg_language)]
+    fn optimizer_for(&self, store: &Arc<dyn GraphStore>) -> crate::query::optimizer::Optimizer {
+        crate::query::optimizer::Optimizer::from_graph_store(store.as_ref())
+            .with_rules(self.plan_options.rules)
+            .with_degree_samples_from(Arc::clone(store))
     }
 
     /// What an `EXPLAIN` (the plan, with its pushdown hints) or a `PROFILE`
@@ -5946,8 +6705,12 @@ impl Session {
                 self.check_graph_access(self.plan_write_kinds(&plan.root))
                     .map(|()| {
                         let mut plan = plan.clone();
-                        annotate_pushdown_hints(&mut plan.root, active.as_ref());
-                        explain_result(&plan)
+                        annotate_pushdown_hints(
+                            &mut plan.root,
+                            active.as_ref(),
+                            self.plan_options.rules,
+                        );
+                        explain_result(&plan, self.plan_options.rules)
                     }),
             );
         }
@@ -6067,7 +6830,7 @@ impl Session {
     fn graph_access(&self, in_transaction: bool) -> GraphAccess {
         GraphAccess {
             stores: self.stores.clone(),
-            catalog: Arc::clone(&self.catalog),
+            catalog: self.effective_catalog(),
             transaction_manager: Arc::clone(&self.transaction_manager),
             changes: if in_transaction {
                 self.changes.lock().clone()
@@ -6476,7 +7239,7 @@ impl Session {
         let held = self.hold_for_standalone(false)?;
         if self
             .active_lpg_store()
-            .is_some_and(|store| store.has_property_index(property))
+            .is_some_and(|store| store.index_serves(&[], property))
         {
             return Ok(());
         }
@@ -6490,27 +7253,28 @@ impl Session {
         self.commit_standalone(change, &held)
     }
 
-    /// Drops the index on a node property of the session's graph. Returns
-    /// whether there was one.
+    /// Drops every index on a node property of the session's graph: the one on every label and
+    /// each one on a label. Returns whether there was one.
     ///
     /// # Errors
     ///
     /// As [`create_property_index`](Self::create_property_index).
     pub fn drop_property_index(&self, property: &str) -> Result<bool> {
         let held = self.hold_for_standalone(false)?;
-        if !self
-            .active_lpg_store()
-            .is_some_and(|store| store.has_property_index(property))
-        {
+        let drops = self.active_lpg_store().map(|store| {
+            crate::database::index::drops_of_property_indexes(
+                &store,
+                self.active_lpg_graph_key().as_deref(),
+                property,
+            )
+        });
+        let Some(drops) = drops.filter(|drops| !drops.is_empty()) else {
             return Ok(false);
-        }
+        };
         let mut change = crate::transaction::StandaloneChange::new();
-        change.push(crate::database::index::drop_index(
-            self.active_lpg_graph_key().as_deref(),
-            grafeo_common::storage::catalog_record::IndexKeyRecord::Property {
-                key: property.to_string(),
-            },
-        ));
+        for drop in drops {
+            change.push(drop);
+        }
         self.commit_standalone(change, &held)?;
         Ok(true)
     }

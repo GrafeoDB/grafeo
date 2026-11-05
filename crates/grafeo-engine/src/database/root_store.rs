@@ -39,6 +39,12 @@ pub(crate) trait RootStore: CatalogStore + LoadTarget + GraphBackend {
     /// Drops the property index on `key`; `false` when there is none.
     fn drop_property_index(&self, key: &str) -> bool;
 
+    /// Creates the property index on `key` of `label`, built from the data.
+    fn create_label_index(&self, label: &str, key: &str);
+
+    /// Drops the property index on `key` of `label`; `false` when there is none.
+    fn drop_label_index(&self, label: &str, key: &str) -> bool;
+
     /// Installs `index` as the vector index on `label:property`.
     #[cfg(feature = "vector-index")]
     fn add_vector_index(
@@ -148,6 +154,14 @@ macro_rules! root_store_indexes {
 
         fn drop_property_index(&self, key: &str) -> bool {
             Self::drop_property_index(self, key)
+        }
+
+        fn create_label_index(&self, label: &str, key: &str) {
+            Self::create_label_index(self, label, key);
+        }
+
+        fn drop_label_index(&self, label: &str, key: &str) -> bool {
+            Self::drop_label_index(self, label, key)
         }
 
         #[cfg(feature = "vector-index")]

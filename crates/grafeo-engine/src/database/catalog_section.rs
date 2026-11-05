@@ -11,7 +11,9 @@
 //! - stream 0 of graph 0 ([`ChunkKind::Stream`] pieces of at most the byte
 //!   cap): the framed records, one per entry, in this order: schemas, node
 //!   types, edge types, graph types, graph type bindings, named
-//!   constraints, index definitions, index names, procedures.
+//!   constraints, index definitions, index names, procedures, the stored
+//!   configuration, then the indexes on one label (kind 11, by graph, label
+//!   and key), which a release without the kind skips.
 //!
 //! The records of each kind come in increasing order of their names (a
 //! binding by its graph; index definitions by graph, the default graph
@@ -40,7 +42,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use serde::{Deserialize, Serialize};
 
 use grafeo_common::storage::catalog_record::{
-    CatalogRecord, GraphBindingRecord, IndexKindRecord, IndexRecord, SchemaRecord,
+    CatalogRecord, GraphBindingRecord, IndexKindRecord, IndexRecord, LabelIndexRecord, SchemaRecord,
 };
 use grafeo_common::storage::chunk::{
     ChunkCaps, ChunkStreamReader, ChunkStreamWriter, stream_error,
@@ -56,10 +58,10 @@ use grafeo_core::index::text::TextIndexOptions;
 use grafeo_core::index::vector::{DistanceMetric, QuantizationType};
 
 use super::catalog_records::{
-    constraint_definition, constraint_record, edge_type_definition, edge_type_record,
-    graph_indexes, graph_type_definition, graph_type_record, index_name, index_name_record,
-    index_records, node_type_definition, node_type_record, procedure_definition, procedure_record,
-    record_name,
+    add_label_indexes, constraint_definition, constraint_record, edge_type_definition,
+    edge_type_record, graph_indexes, graph_type_definition, graph_type_record, index_name,
+    index_name_record, index_records, label_index_records, node_type_definition, node_type_record,
+    procedure_definition, procedure_record, record_name,
 };
 use crate::catalog::{
     Catalog, CatalogError, ConstraintDefinition, EdgeTypeDefinition, GraphTypeDefinition,
@@ -173,8 +175,11 @@ pub(crate) trait CatalogStore: Send + Sync + 'static {
     /// When every graph id was given out.
     fn create_graph(&self, name: &str) -> Result<bool>;
 
-    /// The keys of the property indexes.
+    /// The keys of the property indexes on every label.
     fn property_index_keys(&self) -> Vec<String>;
+
+    /// The property indexes on one label, as `(label, key)`, sorted.
+    fn label_index_entries(&self) -> Vec<(String, String)>;
 
     /// The vector indexes, as `(label, property, index)`.
     #[cfg(feature = "vector-index")]
@@ -218,6 +223,10 @@ macro_rules! catalog_store {
                 <$store>::property_index_keys(self)
             }
 
+            fn label_index_entries(&self) -> Vec<(String, String)> {
+                <$store>::label_index_entries(self)
+            }
+
             #[cfg(feature = "vector-index")]
             fn vector_index_entries(
                 &self,
@@ -252,8 +261,12 @@ catalog_store!(RowGroupStore);
 pub(crate) struct GraphIndexes {
     /// The graph's storage key; `None` for the default graph.
     pub graph: Option<String>,
-    /// Indexed node properties.
+    /// Indexed node properties, on every label.
     pub property: Vec<String>,
+    /// Indexed node properties of one label, as `(label, key)`. Catalog records of their own
+    /// (kind 11), so no layout of the older catalogs holds them.
+    #[serde(skip)]
+    pub on_label: Vec<(String, String)>,
     /// Vector indexes.
     pub vector: Vec<VectorIndexDefinition>,
     /// Text indexes.
@@ -304,6 +317,7 @@ impl GraphIndexes {
         Self {
             graph,
             property,
+            on_label: store.label_index_entries(),
             vector,
             text,
         }
@@ -311,7 +325,10 @@ impl GraphIndexes {
 
     /// Whether the graph has no index.
     pub fn is_empty(&self) -> bool {
-        self.property.is_empty() && self.vector.is_empty() && self.text.is_empty()
+        self.property.is_empty()
+            && self.on_label.is_empty()
+            && self.vector.is_empty()
+            && self.text.is_empty()
     }
 }
 
@@ -407,6 +424,7 @@ impl SnapshotIndexes {
         GraphIndexes {
             graph: None,
             property: self.property_indexes,
+            on_label: Vec::new(),
             vector: self
                 .vector_indexes
                 .into_iter()
@@ -545,24 +563,7 @@ impl<S: CatalogStore> CatalogSection<S> {
     /// The names `CREATE INDEX` gave indexes, in the order of
     /// [`IndexName::key`].
     fn collect_index_names(&self) -> Vec<IndexName> {
-        let mut names: Vec<IndexName> = self
-            .catalog
-            .all_indexes()
-            .into_iter()
-            .filter_map(|def| {
-                Some(IndexName {
-                    label: self.catalog.get_label_name(def.label)?.to_string(),
-                    property: self
-                        .catalog
-                        .get_property_key_name(def.property_key)?
-                        .to_string(),
-                    name: def.name,
-                    index_type: def.index_type,
-                })
-            })
-            .collect();
-        names.sort_by(|a, b| a.key().cmp(&b.key()));
-        names
+        index_names_of(&self.catalog)
     }
 
     /// The catalog's records as a snapshot holds them (version 5): framed,
@@ -601,7 +602,8 @@ impl<S: CatalogStore> CatalogSection<S> {
     /// is the one its `finish` returns), or the error of a record that does
     /// not encode, with the section and the entry named.
     fn write_records(&self, stream: &mut dyn std::io::Write, with_config: bool) -> Result<()> {
-        let indexes = index_records(&self.collect_graph_indexes()).map_err(in_section)?;
+        let graphs = self.collect_graph_indexes();
+        let indexes = index_records(&graphs).map_err(in_section)?;
         let index_names = self.collect_index_names();
         let mut writer = RecordWriter {
             stream,
@@ -609,6 +611,9 @@ impl<S: CatalogStore> CatalogSection<S> {
         };
         for record in catalog_records(&self.catalog, indexes, &index_names, with_config)? {
             writer.write(&record)?;
+        }
+        for record in label_index_records(&graphs) {
+            writer.write(&CatalogRecord::LabelIndex(record))?;
         }
         Ok(())
     }
@@ -654,6 +659,7 @@ impl<S: CatalogStore> CatalogSection<S> {
                 loading.constraints.push(constraint_definition(record));
             }
             CatalogRecord::Index(record) => loading.indexes.push(record),
+            CatalogRecord::LabelIndex(record) => loading.label_indexes.push(record),
             CatalogRecord::IndexName(record) => loading.index_names.push(index_name(record)),
             CatalogRecord::Procedure(record) => self
                 .catalog
@@ -684,6 +690,7 @@ impl<S: CatalogStore> CatalogSection<S> {
                 .create_index(&index.name, label, property, index.index_type);
         }
         self.loaded_indexes = graph_indexes(loading.indexes)?;
+        add_label_indexes(&mut self.loaded_indexes, loading.label_indexes);
         Ok(())
     }
 }
@@ -732,8 +739,10 @@ struct Loading {
     index_name: Option<(String, String, String, u8)>,
     procedure: Option<String>,
     stored_config: Option<()>,
+    label_index: Option<(Option<String>, String, String)>,
     constraints: Vec<ConstraintDefinition>,
     indexes: Vec<IndexRecord>,
+    label_indexes: Vec<LabelIndexRecord>,
     index_names: Vec<IndexName>,
 }
 
@@ -785,6 +794,15 @@ impl Loading {
                 follow(&mut self.procedure, record.name.clone(), name)
             }
             CatalogRecord::StoredConfig(_) => follow(&mut self.stored_config, (), name),
+            CatalogRecord::LabelIndex(record) => follow(
+                &mut self.label_index,
+                (
+                    record.graph.clone(),
+                    record.label.clone(),
+                    record.key.clone(),
+                ),
+                name,
+            ),
         }
     }
 }
@@ -820,6 +838,25 @@ fn index_key(record: &IndexRecord) -> IndexKey {
             label, property, ..
         } => (graph, 2, label.clone(), property.clone()),
     }
+}
+
+/// The names `CREATE INDEX` gave indexes in `catalog`, in the order of
+/// [`IndexName::key`].
+pub(crate) fn index_names_of(catalog: &Catalog) -> Vec<IndexName> {
+    let mut names: Vec<IndexName> = catalog
+        .all_indexes()
+        .into_iter()
+        .filter_map(|def| {
+            Some(IndexName {
+                label: catalog.get_label_name(def.label)?.to_string(),
+                property: catalog.get_property_key_name(def.property_key)?.to_string(),
+                name: def.name,
+                index_type: def.index_type,
+            })
+        })
+        .collect();
+    names.sort_by(|a, b| a.key().cmp(&b.key()));
+    names
 }
 
 /// Frames records into the record stream, one at a time.

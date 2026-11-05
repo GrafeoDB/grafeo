@@ -9,7 +9,7 @@
 //! and the CDC log (`RwLock<HashMap>`) under concurrent workloads.
 //!
 //! ```bash
-//! cargo test --features "full" -p grafeo-engine --test epoch_monotonicity -- --nocapture
+//! cargo test --features "full" -p grafeo-engine --test main epoch_monotonicity:: -- --nocapture
 //! ```
 
 #![cfg(all(feature = "cdc", feature = "gql"))]

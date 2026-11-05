@@ -6,7 +6,7 @@
 //! `tests/spec/rosetta/statement_clock.gtest`.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test statement_clock
+//! cargo test -p grafeo-engine --all-features --test main statement_clock::
 //! ```
 
 #![cfg(feature = "gql")]

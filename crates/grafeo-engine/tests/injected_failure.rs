@@ -10,8 +10,8 @@
 //!   * both properties hold across schema boundaries.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --features lpg,gql,wal,cypher,testing-statement-injection \
-//!     --test injected_failure
+//! cargo test -p grafeo-engine --all-features \
+//!     --test main injected_failure::
 //! ```
 
 #![cfg(feature = "testing-statement-injection")]

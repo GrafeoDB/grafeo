@@ -1,0 +1,101 @@
+# openCypher's node pattern takes `:A:B` and no label expression: a syntax error, not a dropped
+# label. `:A:B` and a WHERE on labels are how to write these.
+
+meta:
+  language: cypher
+  model: lpg
+  title: Label expressions are refused
+  dataset: label_mix
+
+tests:
+
+  - name: refuses_match_conjunction
+    query: "MATCH (x:A&B)-[:R]->(t:T) RETURN x.name"
+    expect:
+      error: "Cypher"
+
+  - name: refuses_match_disjunction
+    query: "MATCH (x:A|B)-[:R]->(t:T) RETURN x.name"
+    expect:
+      error: "Cypher"
+
+  - name: refuses_match_negation
+    query: "MATCH (x:!A)-[:R]->(t:T) RETURN x.name"
+    expect:
+      error: "Cypher"
+
+  - name: refuses_match_wildcard
+    query: "MATCH (x:%)-[:R]->(t:T) RETURN x.name"
+    expect:
+      error: "Cypher"
+
+  - name: refuses_match_parentheses
+    query: "MATCH (x:(A))-[:R]->(t:T) RETURN x.name"
+    expect:
+      error: "Cypher"
+
+  - name: refuses_match_is
+    query: "MATCH (x IS A)-[:R]->(t:T) RETURN x.name"
+    expect:
+      error: "Cypher"
+
+  - name: refuses_match_alone_conjunction
+    query: "MATCH (x:A&B) RETURN x.name"
+    expect:
+      error: "Cypher"
+
+  - name: refuses_match_far_end_disjunction
+    query: "MATCH (t:T)-[:S]->(x:A|B) RETURN x.name"
+    expect:
+      error: "Cypher"
+
+  - name: refuses_create_conjunction
+    query: "CREATE (n:A&B {k: 1})"
+    expect:
+      error: "Cypher"
+
+  - name: refuses_create_is
+    query: "CREATE (n IS A {k: 1})"
+    expect:
+      error: "Cypher"
+
+  - name: refuses_create_disjunction
+    query: "CREATE (n:A|B {k: 1})"
+    expect:
+      error: "Cypher"
+
+  - name: refuses_merge_conjunction
+    query: "MERGE (n:A&B {k: 1})"
+    expect:
+      error: "Cypher"
+
+  - name: refuses_merge_is
+    query: "MERGE (n IS A {k: 1})"
+    expect:
+      error: "Cypher"
+
+  - name: refuses_merge_disjunction
+    query: "MERGE (n:A|B {k: 1})"
+    expect:
+      error: "Cypher"
+
+  - name: two_labels_on_a_first_node
+    query: "MATCH (x:A:B)-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: one_label_on_a_first_node
+    query: "MATCH (x:A)-[:R]->(t:T) RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+
+  - name: a_where_on_labels
+    query: "MATCH (x)-[:R]->(t:T) WHERE x:A OR x:B RETURN x.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]

@@ -14,7 +14,7 @@
 //! join), not raw ids.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --features full --test restore_durability
+//! cargo test -p grafeo-engine --features full --test main restore_durability::
 //! ```
 
 #![cfg(all(feature = "gql", feature = "wal", feature = "grafeo-file"))]
@@ -175,8 +175,7 @@ fn sidecar_wal(path: &Path) -> PathBuf {
 /// child reached after its last commit.
 fn crash_after(scenario: &str, path: &Path) -> EpochId {
     let output = child_process::output(
-        std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "restore_crash_child", "--nocapture"])
+        grafeo_common::child_test!("restore_crash_child")
             .env(SCENARIO_VAR, scenario)
             .env(PATH_VAR, path),
     )

@@ -138,6 +138,9 @@ pub(super) fn restore_row_group_indexes(root: &Arc<RowGroupStore>, graphs: Vec<G
         for property in &graph.property {
             target.create_property_index(property);
         }
+        for (label, property) in &graph.on_label {
+            target.create_label_index(label, property);
+        }
         #[cfg(feature = "vector-index")]
         for def in &graph.vector {
             let quantization = def.quantization.and_then(super::index::quantization_name);

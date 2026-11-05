@@ -4,7 +4,7 @@
 //! the statement returns, so a full scan behind a single count shows.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test rows_scanned
+//! cargo test -p grafeo-engine --all-features --test main rows_scanned::
 //! ```
 
 use grafeo_engine::GrafeoDB;

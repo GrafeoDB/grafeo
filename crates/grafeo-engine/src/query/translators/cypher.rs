@@ -3176,26 +3176,28 @@ impl CypherTranslator {
 
         let mut plan = input;
 
+        // The properties first: a statement is checked on the state it leaves, so
+        // `REMOVE n:Far, n.p` may drop the property only `Far` declares.
         for item in &remove_clause.items {
-            match item {
-                ast::RemoveItem::Property { variable, property } => {
-                    // REMOVE n.prop sets the property to null
-                    plan = push_set_property(
-                        plan,
-                        variable,
-                        property.clone(),
-                        LogicalExpression::Literal(Value::Null),
-                        self.is_edge_variable(variable),
-                    );
-                }
-                ast::RemoveItem::Labels { variable, labels } => {
-                    // REMOVE n:Label removes labels from the node
-                    plan = LogicalOperator::RemoveLabel(RemoveLabelOp {
-                        variable: variable.clone(),
-                        labels: labels.clone(),
-                        input: Box::new(plan),
-                    });
-                }
+            if let ast::RemoveItem::Property { variable, property } = item {
+                // REMOVE n.prop sets the property to null
+                plan = push_set_property(
+                    plan,
+                    variable,
+                    property.clone(),
+                    LogicalExpression::Literal(Value::Null),
+                    self.is_edge_variable(variable),
+                );
+            }
+        }
+        for item in &remove_clause.items {
+            if let ast::RemoveItem::Labels { variable, labels } = item {
+                // REMOVE n:Label removes labels from the node
+                plan = LogicalOperator::RemoveLabel(RemoveLabelOp {
+                    variable: variable.clone(),
+                    labels: labels.clone(),
+                    input: Box::new(plan),
+                });
             }
         }
 

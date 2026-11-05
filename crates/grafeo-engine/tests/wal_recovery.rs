@@ -4,11 +4,8 @@
 //! and checkpoint operations.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --features full --test wal_recovery
+//! cargo test -p grafeo-engine --features full --test main wal_recovery::
 //! ```
-
-#[cfg(all(feature = "wal", feature = "grafeo-file"))]
-mod common;
 
 #[cfg(all(feature = "wal", feature = "grafeo-file"))]
 mod wal {
@@ -684,12 +681,16 @@ mod wal {
 
     #[test]
     fn test_create_node_type_persists() {
-        let (_dir, db) = reopened_after_crash("wal::test_create_node_type_persists", open, |db| {
-            let session = db.session();
-            session
-                .execute("CREATE NODE TYPE Vehicle (make STRING NOT NULL, year INTEGER)")
-                .unwrap();
-        });
+        let (_dir, db) = reopened_after_crash(
+            &grafeo_common::test_path!("test_create_node_type_persists"),
+            open,
+            |db| {
+                let session = db.session();
+                session
+                    .execute("CREATE NODE TYPE Vehicle (make STRING NOT NULL, year INTEGER)")
+                    .unwrap();
+            },
+        );
 
         {
             let session = db.session();
@@ -712,12 +713,16 @@ mod wal {
 
     #[test]
     fn test_create_edge_type_persists() {
-        let (_dir, db) = reopened_after_crash("wal::test_create_edge_type_persists", open, |db| {
-            let session = db.session();
-            session
-                .execute("CREATE EDGE TYPE SUPPLIES (quantity INTEGER)")
-                .unwrap();
-        });
+        let (_dir, db) = reopened_after_crash(
+            &grafeo_common::test_path!("test_create_edge_type_persists"),
+            open,
+            |db| {
+                let session = db.session();
+                session
+                    .execute("CREATE EDGE TYPE SUPPLIES (quantity INTEGER)")
+                    .unwrap();
+            },
+        );
 
         {
             let session = db.session();
@@ -740,16 +745,20 @@ mod wal {
 
     #[test]
     fn test_drop_node_type_persists() {
-        let (_dir, db) = reopened_after_crash("wal::test_drop_node_type_persists", open, |db| {
-            let session = db.session();
-            session
-                .execute("CREATE NODE TYPE Temp (name STRING)")
-                .unwrap();
-            session.execute("DROP NODE TYPE Temp").unwrap();
-            session
-                .execute("CREATE NODE TYPE Kept (name STRING)")
-                .unwrap();
-        });
+        let (_dir, db) = reopened_after_crash(
+            &grafeo_common::test_path!("test_drop_node_type_persists"),
+            open,
+            |db| {
+                let session = db.session();
+                session
+                    .execute("CREATE NODE TYPE Temp (name STRING)")
+                    .unwrap();
+                session.execute("DROP NODE TYPE Temp").unwrap();
+                session
+                    .execute("CREATE NODE TYPE Kept (name STRING)")
+                    .unwrap();
+            },
+        );
 
         {
             let session = db.session();
@@ -776,18 +785,22 @@ mod wal {
 
     #[test]
     fn test_schema_with_data_persists() {
-        let (_dir, db) = reopened_after_crash("wal::test_schema_with_data_persists", open, |db| {
-            let session = db.session();
-            session
-                .execute("CREATE NODE TYPE Person (name STRING NOT NULL, age INTEGER)")
-                .unwrap();
-            session
-                .execute("INSERT (:Person {name: 'Alix', age: 30})")
-                .unwrap();
-            session
-                .execute("INSERT (:Person {name: 'Gus', age: 25})")
-                .unwrap();
-        });
+        let (_dir, db) = reopened_after_crash(
+            &grafeo_common::test_path!("test_schema_with_data_persists"),
+            open,
+            |db| {
+                let session = db.session();
+                session
+                    .execute("CREATE NODE TYPE Person (name STRING NOT NULL, age INTEGER)")
+                    .unwrap();
+                session
+                    .execute("INSERT (:Person {name: 'Alix', age: 30})")
+                    .unwrap();
+                session
+                    .execute("INSERT (:Person {name: 'Gus', age: 25})")
+                    .unwrap();
+            },
+        );
 
         {
             let session = db.session();
@@ -1146,7 +1159,7 @@ mod wal {
         use grafeo_storage::file::detect::{OnDisk, detect};
 
         let (_dir, db) = reopened_after_crash_at(
-            "wal::a_path_without_the_grafeo_extension_replays_after_a_crash",
+            &grafeo_common::test_path!("a_path_without_the_grafeo_extension_replays_after_a_crash"),
             "db",
             |path| {
                 if path.exists() {

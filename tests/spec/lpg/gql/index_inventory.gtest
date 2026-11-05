@@ -109,3 +109,63 @@ tests:
         - [a_index, Hash, Person, z]
         - [b_index, Hash, Zone, a]
         - [c_index, Hash, City, m]
+
+  # A rule that compares values builds its index, named after a named rule.
+  - name: a_unique_rule_lists_its_index
+    setup:
+      - "CREATE CONSTRAINT c1 FOR (n:File) ON (n.id) UNIQUE"
+    query: "SHOW INDEXES"
+    expect:
+      rows:
+        - [c1, Hash, File, id]
+
+  - name: a_rule_with_no_name_lists_an_index_with_none
+    setup:
+      - "CREATE CONSTRAINT FOR (n:File) ON (n.id) UNIQUE"
+    query: "SHOW INDEXES"
+    expect:
+      rows:
+        - [null, Hash, File, id]
+
+  # One index on the first key, as the check reads only that one.
+  - name: a_node_key_over_two_properties_lists_one_index
+    setup:
+      - "CREATE CONSTRAINT c1 FOR (n:File) ON (n.id, n.part) NODE KEY"
+    query: "SHOW INDEXES"
+    expect:
+      rows:
+        - [c1, Hash, File, id]
+
+  - name: a_not_null_rule_lists_no_index
+    setup:
+      - "CREATE CONSTRAINT c1 FOR (n:File) ON (n.id) NOT NULL"
+    query: "SHOW INDEXES"
+    expect:
+      empty: true
+
+  - name: dropping_a_rule_leaves_its_index
+    setup:
+      - "CREATE CONSTRAINT c1 FOR (n:File) ON (n.id) UNIQUE"
+      - "DROP CONSTRAINT c1"
+    query: "SHOW INDEXES"
+    expect:
+      rows:
+        - [c1, Hash, File, id]
+
+  - name: dropping_a_rules_index_leaves_the_rule
+    setup:
+      - "CREATE CONSTRAINT c1 FOR (n:File) ON (n.id) UNIQUE"
+      - "INSERT (:File {id: 1})"
+      - "DROP INDEX c1"
+    query: "INSERT (:File {id: 1})"
+    expect:
+      error: "UNIQUE constraint violation"
+
+  # The index changes no verdict: both zeros are one value, with it as without it.
+  - name: a_rule_with_its_index_takes_the_two_zeros_as_one
+    setup:
+      - "CREATE CONSTRAINT c1 FOR (n:File) ON (n.id) UNIQUE"
+      - "INSERT (:File {id: 0.0e0})"
+    query: "INSERT (:File {id: -0.0e0})"
+    expect:
+      error: "UNIQUE constraint violation"

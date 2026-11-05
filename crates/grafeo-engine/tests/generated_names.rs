@@ -5,7 +5,7 @@
 //! error like any other.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test generated_names
+//! cargo test -p grafeo-engine --all-features --test main generated_names::
 //! ```
 
 use grafeo_common::types::Value;

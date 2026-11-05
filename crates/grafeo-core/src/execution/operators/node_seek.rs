@@ -42,6 +42,8 @@ pub struct NodeSeekOperator {
     key_expression: ExpressionPredicate,
     list: bool,
     label: Option<String>,
+    /// The labels whose indexes together hold every result; none: the key's on every label.
+    index_labels: Vec<String>,
     /// Who reads: the seek finds the nodes this view sees.
     view: ReadView,
     chunk_capacity: usize,
@@ -54,6 +56,36 @@ pub struct NodeSeekOperator {
     next_match: usize,
     /// Counts the node IDs the lookups return.
     reads: Option<Arc<ReadCounter>>,
+}
+
+/// The nodes whose `property` may be equal to `value` under `=`, through the indexes on `labels`
+/// (one read each: a node with two of them comes twice), or with no label the index on every
+/// label. The caller's labels hold every result, and it checks them. `None` when one of the
+/// indexes is not there.
+///
+/// # Errors
+///
+/// The error of a read the store cannot do.
+pub fn find_through_label_indexes(
+    store: &dyn GraphStore,
+    labels: &[String],
+    property: &str,
+    value: &Value,
+    view: ReadView,
+) -> grafeo_common::utils::error::Result<Option<Vec<NodeId>>> {
+    let Some((first, rest)) = labels.split_first() else {
+        return store.find_nodes_maybe_equal(property, value, view);
+    };
+    let Some(mut found) = store.find_indexed_maybe_equal(&[first], property, value, view)? else {
+        return Ok(None);
+    };
+    for label in rest {
+        match store.find_indexed_maybe_equal(&[label], property, value, view)? {
+            Some(nodes) => found.extend(nodes),
+            None => return Ok(None),
+        }
+    }
+    Ok(Some(found))
 }
 
 impl NodeSeekOperator {
@@ -75,6 +107,7 @@ impl NodeSeekOperator {
             key_expression,
             list: false,
             label,
+            index_labels: Vec::new(),
             view,
             chunk_capacity: 2048,
             current_input: None,
@@ -84,6 +117,14 @@ impl NodeSeekOperator {
             next_match: 0,
             reads: None,
         }
+    }
+
+    /// Looks a key up through the indexes of these labels, which together hold every result
+    /// (see [`find_through_label_indexes`]), rather than the key's index on every label.
+    #[must_use]
+    pub fn with_index_labels(mut self, labels: Vec<String>) -> Self {
+        self.index_labels = labels;
+        self
     }
 
     /// Looks up each element of a list key (`n.p IN key`).
@@ -120,10 +161,13 @@ impl NodeSeekOperator {
             match &self.key {
                 SeekKey::Id => found.extend(node_ids(key)),
                 SeekKey::Property(property) => {
-                    match self
-                        .store
-                        .find_nodes_maybe_equal(property, key, self.view)?
-                    {
+                    match find_through_label_indexes(
+                        self.store.as_ref(),
+                        &self.index_labels,
+                        property,
+                        key,
+                        self.view,
+                    )? {
                         Some(nodes) => found.extend(nodes),
                         // The store cannot look the key up: every node is a
                         // candidate, as for the scan the seek replaces.
@@ -247,7 +291,7 @@ impl Operator for NodeSeekOperator {
 /// compares an ID (an integer) with it: the integer itself, a float of
 /// exactly its value, a whole decimal of its value, or a string that parses
 /// as it.
-fn node_ids(key: &Value) -> Vec<NodeId> {
+pub(super) fn node_ids(key: &Value) -> Vec<NodeId> {
     let id = match key {
         Value::Int64(id) => Some(*id),
         Value::Float64(f) => exact_integer(*f),

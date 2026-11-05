@@ -12,7 +12,7 @@
 //! With and without the index, in GQL and Cypher.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test two_label_seek
+//! cargo test -p grafeo-engine --all-features --test main two_label_seek::
 //! ```
 
 #![cfg(all(feature = "gql", feature = "cypher"))]

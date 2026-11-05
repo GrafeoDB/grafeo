@@ -82,8 +82,8 @@
 //! know when the record's required flag is clear, and refuses it naming the
 //! kind when the flag is set. The same holds for a catalog record of a kind
 //! it does not know inside kind 40 or 41: the log record's flag decides, and
-//! a writer gives the log record the catalog record's flag. Every kind of
-//! this release is written required. A kind's payload never changes: a
+//! a writer gives the log record the catalog record's flag. Every kind is
+//! written required but a catalog record of kind 11. A kind's payload never changes: a
 //! release that needs other fields adds a kind, and the enums of a payload
 //! only get variants appended.
 //!
@@ -382,8 +382,8 @@ impl LogRecord {
         }
     }
 
-    /// Appends the record framed: `[kind u8][flags u8][length u32 LE][payload]`.
-    /// Every kind of this release is written with [`RECORD_REQUIRED`].
+    /// Appends the record framed: `[kind u8][flags u8][length u32 LE][payload]`,
+    /// with the flags of [`LogRecordRef::flags`].
     ///
     /// # Errors
     ///
@@ -586,9 +586,19 @@ impl LogRecordRef<'_> {
         }
     }
 
+    /// The flags the record is written with: required, but for a catalog record a release
+    /// that does not know its kind may skip, whose flag it takes.
+    #[must_use]
+    pub const fn flags(&self) -> u8 {
+        match self {
+            Self::Standalone(StandaloneOp::PutCatalog(record)) => record.flags(),
+            Self::Standalone(StandaloneOp::DropCatalog(key)) => key.flags(),
+            _ => RECORD_REQUIRED,
+        }
+    }
+
     /// Appends the record framed: `[kind u8][flags u8][length u32 LE][payload]`,
-    /// the bytes of the [`LogRecord`] it stands for. Every kind of this
-    /// release is written with [`RECORD_REQUIRED`].
+    /// the bytes of the [`LogRecord`] it stands for, with [`flags`](Self::flags).
     ///
     /// # Errors
     ///
@@ -600,7 +610,7 @@ impl LogRecordRef<'_> {
     /// [`PutCatalog`](StandaloneOp::PutCatalog) (as the catalog section
     /// would, its maximum included). `out` is then left as it was.
     pub fn encode_framed(&self, out: &mut Vec<u8>) -> Result<()> {
-        encode_framed_record(&LOG_FRAMING, self.kind(), RECORD_REQUIRED, out, |out| {
+        encode_framed_record(&LOG_FRAMING, self.kind(), self.flags(), out, |out| {
             // The value codec encodes each value whole before the payload
             // takes it: refuse them from their sizes first.
             out.check_room(self.value_bytes())?;
@@ -754,6 +764,9 @@ fn encode_catalog_key(key: &CatalogKey, out: &mut PayloadWriter<'_>) -> Result<(
         | CatalogKey::Constraint(name)
         | CatalogKey::IndexName(name)
         | CatalogKey::Procedure(name) => encode_bincode_payload(name, out),
+        CatalogKey::LabelIndex { graph, label, key } => {
+            encode_bincode_payload(&(graph, label, key), out)
+        }
         CatalogKey::Index { graph, index } => encode_bincode_payload(&(graph, index), out),
         // There is one: the kind names it.
         CatalogKey::StoredConfig => Ok(()),
@@ -822,6 +835,10 @@ fn decode_catalog_key(required: bool, payload: &[u8]) -> Result<Option<CatalogKe
         }
         8 => CatalogKey::IndexName(name()?),
         9 => CatalogKey::Procedure(name()?),
+        11 => {
+            let (Graph(graph), Text(label), Text(key)): (Graph, Text, Text) = decode(key)?;
+            CatalogKey::LabelIndex { graph, label, key }
+        }
         10 if key.is_empty() => CatalogKey::StoredConfig,
         10 => {
             return Err(Error::corruption(format!(

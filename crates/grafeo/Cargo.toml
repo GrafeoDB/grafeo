@@ -8,6 +8,7 @@ repository.workspace = true
 description = "A high-performance, embeddable graph database with a Rust core and no required C dependencies"
 keywords = ["graph", "database", "gql", "knowledge-graph", "embedded"]
 categories = ["database-implementations", "data-structures"]
+autotests = false
 
 [dependencies]
 grafeo-engine.workspace = true
@@ -87,3 +88,8 @@ mimalloc-allocator = ["mimalloc"]
 
 [lints]
 workspace = true
+
+# One integration test binary (tests/main.rs declares each test file as a module).
+[[test]]
+name = "main"
+path = "tests/main.rs"

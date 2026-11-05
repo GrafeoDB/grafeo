@@ -6,7 +6,7 @@
 //! shows each plan; every query also checks its rows.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test bulk_selector_plans
+//! cargo test -p grafeo-engine --all-features --test main bulk_selector_plans::
 //! ```
 
 #![cfg(all(feature = "gql", feature = "cypher"))]

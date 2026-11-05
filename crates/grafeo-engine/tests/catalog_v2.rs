@@ -4,7 +4,7 @@
 //! types of #569.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test catalog_v2
+//! cargo test -p grafeo-engine --all-features --test main catalog_v2::
 //! ```
 
 #![cfg(all(
@@ -198,16 +198,26 @@ fn the_schema_survives_a_reopen_after_a_checkpoint_in_small_chunks() {
     );
     assert_eq!(
         names("SHOW INDEXES"),
-        ["doc_content", "doc_embedding", "person_name"].map(Value::from),
-        "SHOW INDEXES lists the named vector index too"
+        [
+            "doc_content",
+            "doc_embedding",
+            "person_email",
+            "person_name"
+        ]
+        .map(Value::from),
+        "SHOW INDEXES lists the named vector index, and the index of the UNIQUE rule"
     );
     assert_eq!(names("SHOW GRAPHS"), [Value::from("trips")]);
     assert_eq!(names("SHOW SCHEMAS"), [Value::from("archive")]);
 
     // The entries work, not only show.
-    db.execute("INSERT (:City {name: 'Prague'})").unwrap();
+    db.execute("USE GRAPH trips INSERT (:City {name: 'Prague'})")
+        .unwrap();
     assert_eq!(
-        single(&db, "MATCH (c:City {name: 'Prague'}) RETURN c.country"),
+        single(
+            &db,
+            "USE GRAPH trips MATCH (c:City {name: 'Prague'}) RETURN c.country"
+        ),
         Value::from("NL"),
         "the default"
     );
@@ -334,6 +344,6 @@ fn the_catalog_section_is_version_2_and_has_no_raw_chunk() {
     let mut distinct = kinds.clone();
     distinct.dedup();
     // Kind 10, the stored configuration, which a database created as a
-    // file stores.
-    assert_eq!(distinct, (1..=10).collect::<Vec<u8>>(), "{kinds:?}");
+    // file stores, and kind 11, the index of one label, which `CREATE INDEX` makes.
+    assert_eq!(distinct, (1..=11).collect::<Vec<u8>>(), "{kinds:?}");
 }

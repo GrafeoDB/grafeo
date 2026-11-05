@@ -9,7 +9,7 @@
 //! child process that exits without `close()`:
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test history_retention
+//! cargo test -p grafeo-engine --all-features --test main history_retention::
 //! ```
 
 #![cfg(feature = "gql")]
@@ -819,8 +819,7 @@ mod crash {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("history.grafeo");
             let output = child_process::output(
-                std::process::Command::new(std::env::current_exe().unwrap())
-                    .args(["--exact", "crash::crash_child", "--nocapture"])
+                grafeo_common::child_test!("crash_child")
                     .env(POINT_VAR, point.to_string())
                     .env(PATH_VAR, &path),
             )

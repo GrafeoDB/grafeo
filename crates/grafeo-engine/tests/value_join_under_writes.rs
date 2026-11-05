@@ -17,7 +17,7 @@
 //! In GQL and Cypher.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test value_join_under_writes
+//! cargo test -p grafeo-engine --all-features --test main value_join_under_writes::
 //! ```
 
 #![cfg(all(feature = "gql", feature = "cypher"))]

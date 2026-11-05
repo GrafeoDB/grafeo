@@ -8,7 +8,7 @@
 //! form, escapes, named graphs and a triple repeated across graphs.
 //!
 //! ```bash
-//! cargo test -p grafeo-core --all-features --test rdf_statistics_counts
+//! cargo test -p grafeo-core --all-features --test main rdf_statistics_counts::
 //! ```
 
 #![cfg(feature = "triple-store")]

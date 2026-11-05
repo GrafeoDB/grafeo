@@ -26,6 +26,7 @@ use grafeo_common::utils::hash::FxHashMap;
 use smallvec::SmallVec;
 
 use super::adjacency::Adjacent;
+use super::adjacency::{Adjacency, intersect_run_with_delta, intersect_runs};
 use super::column::Columns;
 #[cfg(feature = "text-index")]
 use super::index::TextLimit;
@@ -33,6 +34,7 @@ use super::{Inner, ROWS_PER_GROUP, Read, RowGroupStore};
 use crate::graph::Direction;
 use crate::graph::lpg::{CompareOp, Edge, Node};
 use crate::graph::traits::GraphStore;
+use crate::graph::traits::{CommonEdge, HopFrom, KeyColumnGroup};
 #[cfg(feature = "vector-index")]
 use crate::index::vector::{DistanceMetric, HnswConfig};
 use crate::statistics::{EdgeTypeStatistics, LabelStatistics, Statistics};
@@ -43,6 +45,67 @@ use crate::graph::traits::value_in_range as in_range;
 /// A count kept as a signed total, as a size.
 fn size(count: i64) -> usize {
     usize::try_from(count.max(0)).unwrap_or(usize::MAX)
+}
+
+/// One way of a hop an intersection reads.
+struct HopSide<'a> {
+    adjacency: &'a Adjacency,
+    row: usize,
+    /// A `Both` reads a self-loop once, going out: the incoming side drops it.
+    skips_self_loops: bool,
+}
+
+/// The ways a hop goes, and what they keep.
+struct HopSides<'a> {
+    sides: SmallVec<[HopSide<'a>; 2]>,
+    /// The edge types it follows, `None` for every type.
+    ids: Option<SmallVec<[u32; 4]>>,
+    node: u64,
+}
+
+/// A list this short asks its far ends rather than walking a long delta.
+const FEW_ENTRIES: usize = 4;
+
+/// The delta that makes a walk of it cost more than asking those far ends.
+const LONG_DELTA: usize = 64;
+
+impl<'a> HopSides<'a> {
+    /// The entries of the hop's lists, other types and removed edges among them.
+    fn entries(&self) -> usize {
+        self.sides
+            .iter()
+            .map(|side| side.adjacency.entries_of(side.row))
+            .sum()
+    }
+
+    /// The entries of the hop's deltas.
+    fn delta_entries(&self) -> usize {
+        self.sides
+            .iter()
+            .map(|side| side.adjacency.delta_of(side.row).len())
+            .sum()
+    }
+
+    /// The sorted runs of `side` of the types the hop follows.
+    fn runs(&self, side: &HopSide<'a>) -> impl Iterator<Item = &'a [Adjacent]> + use<'a, '_> {
+        side.adjacency.runs_of(side.row).filter(|run| {
+            self.ids.as_ref().is_none_or(|ids| {
+                run.first()
+                    .is_some_and(|entry| ids.contains(&entry.edge_type))
+            })
+        })
+    }
+
+    /// Whether the hop follows `entry` of `side`.
+    fn keeps(&self, entry: &Adjacent, side: &HopSide<'_>) -> bool {
+        let dropped_self_loop = side.skips_self_loops && entry.other == self.node;
+        !dropped_self_loop
+            && !side.adjacency.is_removed(entry)
+            && self
+                .ids
+                .as_ref()
+                .is_none_or(|ids| ids.contains(&entry.edge_type))
+    }
 }
 
 impl Inner {
@@ -346,6 +409,19 @@ impl Inner {
         edge_types: Option<&[u32]>,
         read: Read,
     ) -> bool {
+        self.seen_until(node, direction, edge_types, read, |_| true)
+    }
+
+    /// Gives the other end of each edge [`each_seen`](Self::each_seen) would give to `stop`,
+    /// until it answers true: whether it did.
+    fn seen_until(
+        &self,
+        node: NodeId,
+        direction: Direction,
+        edge_types: Option<&[u32]>,
+        read: Read,
+        mut stop: impl FnMut(NodeId) -> bool,
+    ) -> bool {
         let raw = node.as_u64();
         let Some((group, row)) = self.node_seen(raw, read) else {
             return false;
@@ -365,17 +441,62 @@ impl Inner {
         directions.iter().any(|&outgoing| {
             if outgoing || self.keeps_incoming() {
                 let adjacency = group.adjacency(outgoing);
+                let mut stops = |adjacent: Adjacent| {
+                    counts(adjacent, outgoing) && stop(NodeId::new(adjacent.other))
+                };
                 match edge_types {
-                    Some(&[edge_type]) => adjacency
-                        .of_type(row, edge_type)
-                        .any(|adjacent| counts(adjacent, outgoing)),
-                    _ => adjacency.of(row).any(|adjacent| counts(adjacent, outgoing)),
+                    Some(&[edge_type]) => adjacency.of_type(row, edge_type).any(&mut stops),
+                    _ => adjacency.of(row).any(&mut stops),
                 }
             } else {
                 self.incoming_by_scan(raw)
-                    .any(|adjacent| counts(adjacent, outgoing))
+                    .any(|adjacent| counts(adjacent, outgoing) && stop(NodeId::new(adjacent.other)))
             }
         })
+    }
+
+    /// The most edges [`each_seen`](Self::each_seen) can give, without going through them:
+    /// the entries of the lists it reads, removed and unseen ones among them, and `Both` counts
+    /// a self-loop twice. `None` when it would scan for the incoming edges this store does not
+    /// keep.
+    fn entries_at_most(
+        &self,
+        node: NodeId,
+        direction: Direction,
+        edge_types: Option<&[u32]>,
+        read: Read,
+    ) -> Option<usize> {
+        let Some((group, row)) = self.node_seen(node.as_u64(), read) else {
+            return Some(0);
+        };
+        let directions: &[bool] = match direction {
+            Direction::Outgoing => &[true],
+            Direction::Incoming => &[false],
+            Direction::Both => &[true, false],
+        };
+        let mut entries = 0;
+        for &outgoing in directions {
+            if !(outgoing || self.keeps_incoming()) {
+                return None;
+            }
+            let adjacency = group.adjacency(outgoing);
+            entries += match edge_types {
+                None => adjacency.entries_of(row),
+                Some(types) => {
+                    let sorted: usize = adjacency
+                        .runs_of(row)
+                        .filter(|run| types.contains(&run[0].edge_type))
+                        .map(<[Adjacent]>::len)
+                        .sum();
+                    let delta = adjacency.delta_of(row).iter();
+                    sorted
+                        + delta
+                            .filter(|adjacent| types.contains(&adjacent.edge_type))
+                            .count()
+                }
+            };
+        }
+        Some(entries)
     }
 
     /// The type ids of `types`, the names the store has an edge type of;
@@ -387,6 +508,43 @@ impl Inner {
                 .filter_map(|name| self.edge_types.get_id(name))
                 .collect()
         })
+    }
+
+    /// The other ends of the first `limit` of the edges [`edges_seen`](Self::edges_seen)
+    /// lists, reading no further.
+    pub(super) fn first_ends_seen(
+        &self,
+        node: NodeId,
+        direction: Direction,
+        types: &[ArcStr],
+        limit: usize,
+        read: Read,
+    ) -> Vec<NodeId> {
+        let ids = self.type_ids(types);
+        let mut ends = Vec::new();
+        if limit == 0 || ids.as_ref().is_some_and(SmallVec::is_empty) {
+            return ends;
+        }
+        self.seen_until(node, direction, ids.as_deref(), read, |end| {
+            ends.push(end);
+            ends.len() >= limit
+        });
+        ends
+    }
+
+    /// [`entries_at_most`](Self::entries_at_most) of `types` (every type when empty).
+    pub(super) fn entries_of_types_at_most(
+        &self,
+        node: NodeId,
+        direction: Direction,
+        types: &[ArcStr],
+        read: Read,
+    ) -> Option<usize> {
+        let ids = self.type_ids(types);
+        if ids.as_ref().is_some_and(SmallVec::is_empty) {
+            return Some(0);
+        }
+        self.entries_at_most(node, direction, ids.as_deref(), read)
     }
 
     /// The edges of `node` in `direction` of one of `types` (every type
@@ -425,6 +583,228 @@ impl Inner {
         self.each_seen(node, direction, ids.as_deref(), read, |other, edge| {
             edges.push((other, edge));
         });
+        edges
+    }
+
+    /// The adjacency a hop reads for an intersection, one per way it goes; a `Both`
+    /// lists a self-loop once, going out. `None` when `read` does not see the node.
+    fn hop_sides<'a>(&'a self, hop: &HopFrom<'_>, read: Read) -> Option<HopSides<'a>> {
+        let (group, row) = self.node_seen(hop.node.as_u64(), read)?;
+        let ways: &[bool] = match hop.direction {
+            Direction::Outgoing => &[true],
+            Direction::Incoming => &[false],
+            Direction::Both => &[true, false],
+        };
+        Some(HopSides {
+            sides: ways
+                .iter()
+                .map(|&outgoing| HopSide {
+                    adjacency: group.adjacency(outgoing),
+                    row,
+                    skips_self_loops: hop.direction == Direction::Both && !outgoing,
+                })
+                .collect(),
+            ids: self.type_ids(hop.edge_types),
+            node: hop.node.as_u64(),
+        })
+    }
+
+    /// [`GraphStore::common_edges`] on the lists where they lie: each pair of sorted
+    /// runs gallops from the shorter, and a delta is searched entry by entry. `None`
+    /// when the store keeps no list of a way a hop goes. A node `read` does not see
+    /// has no edges.
+    fn common_edges_seen(
+        &self,
+        near: &HopFrom<'_>,
+        far: &HopFrom<'_>,
+        read: Read,
+    ) -> Option<(Vec<CommonEdge>, usize)> {
+        let kept =
+            |hop: &HopFrom<'_>| hop.direction == Direction::Outgoing || self.keeps_incoming();
+        if !kept(near) || !kept(far) {
+            return None;
+        }
+        let (Some(near_sides), Some(far_sides)) =
+            (self.hop_sides(near, read), self.hop_sides(far, read))
+        else {
+            return Some((Vec::new(), 0));
+        };
+        // A very short list against a hub's delta, which only a walk can search: the far
+        // ends' own lists, usually short, say it sooner. Near 4 entries the two are level.
+        if near_sides.entries() < FEW_ENTRIES && far_sides.delta_entries() >= LONG_DELTA {
+            return Some(self.common_edges_by_far_ends(&near_sides, far, read, false));
+        }
+        if far_sides.entries() < FEW_ENTRIES && near_sides.delta_entries() >= LONG_DELTA {
+            return Some(self.common_edges_by_far_ends(&far_sides, near, read, true));
+        }
+        let mut common = Vec::new();
+        let mut probes = 0;
+        let mut pair = |near_entry: &Adjacent,
+                        far_entry: &Adjacent,
+                        near_side: &HopSide<'_>,
+                        far_side: &HopSide<'_>| {
+            if near_sides.keeps(near_entry, near_side)
+                && far_sides.keeps(far_entry, far_side)
+                && self.edge_visible(near_entry.edge, read)
+                && self.edge_visible(far_entry.edge, read)
+            {
+                common.push(CommonEdge {
+                    node: NodeId::new(near_entry.other),
+                    near_edge: EdgeId::new(near_entry.edge),
+                    far_edge: EdgeId::new(far_entry.edge),
+                });
+            }
+        };
+        for near_side in &near_sides.sides {
+            for far_side in &far_sides.sides {
+                for near_run in near_sides.runs(near_side) {
+                    for far_run in far_sides.runs(far_side) {
+                        probes += intersect_runs(near_run, far_run, &mut |a, b| {
+                            pair(a, b, near_side, far_side);
+                        });
+                    }
+                }
+                // A delta against the other side's runs and delta.
+                let near_delta = near_side.adjacency.delta_of(near_side.row);
+                let far_delta = far_side.adjacency.delta_of(far_side.row);
+                for far_run in far_sides.runs(far_side) {
+                    probes += intersect_run_with_delta(far_run, near_delta, &mut |far, near| {
+                        pair(near, far, near_side, far_side);
+                    });
+                }
+                for near_run in near_sides.runs(near_side) {
+                    probes += intersect_run_with_delta(near_run, far_delta, &mut |near, far| {
+                        pair(near, far, near_side, far_side);
+                    });
+                }
+                probes += near_delta.len() * far_delta.len();
+                for near_entry in near_delta {
+                    for far_entry in far_delta
+                        .iter()
+                        .filter(|entry| entry.other == near_entry.other)
+                    {
+                        pair(near_entry, far_entry, near_side, far_side);
+                    }
+                }
+            }
+        }
+        common.sort_unstable();
+        Some((common, probes))
+    }
+
+    /// [`common_edges_seen`](Self::common_edges_seen) from the entries of `short`, each
+    /// far end asked for its edges to `other`'s node: `flipped` when `short` is the far
+    /// hop of the two.
+    fn common_edges_by_far_ends(
+        &self,
+        short: &HopSides<'_>,
+        other: &HopFrom<'_>,
+        read: Read,
+        flipped: bool,
+    ) -> (Vec<CommonEdge>, usize) {
+        let back = match other.direction {
+            Direction::Outgoing => Direction::Incoming,
+            Direction::Incoming => Direction::Outgoing,
+            Direction::Both => Direction::Both,
+        };
+        let mut common = Vec::new();
+        let mut probes = 0;
+        for side in &short.sides {
+            for entry in side.adjacency.of(side.row) {
+                probes += 1;
+                if !short.keeps(&entry, side) || !self.edge_visible(entry.edge, read) {
+                    continue;
+                }
+                let node = NodeId::new(entry.other);
+                let edges = self.edges_between_seen(node, other.node, back, other.edge_types, read);
+                probes += edges.len();
+                for edge in edges {
+                    let own = EdgeId::new(entry.edge);
+                    let (near_edge, far_edge) = if flipped { (edge, own) } else { (own, edge) };
+                    common.push(CommonEdge {
+                        node,
+                        near_edge,
+                        far_edge,
+                    });
+                }
+            }
+        }
+        common.sort_unstable();
+        (common, probes)
+    }
+
+    /// The edges [`edges_seen`](Self::edges_seen) lists for `node` whose other
+    /// end is `other`, in its order, from a search of each adjacency it keeps.
+    fn edges_between_seen(
+        &self,
+        node: NodeId,
+        other: NodeId,
+        direction: Direction,
+        types: &[ArcStr],
+        read: Read,
+    ) -> Vec<EdgeId> {
+        if direction != Direction::Outgoing && !self.keeps_incoming() {
+            let mut edges = self.edges_seen(node, direction, types, read);
+            edges.retain(|(end, _)| *end == other);
+            return edges.into_iter().map(|(_, edge)| edge).collect();
+        }
+        let ids = self.type_ids(types);
+        if ids.as_ref().is_some_and(SmallVec::is_empty) {
+            return Vec::new();
+        }
+        let (raw, target) = (node.as_u64(), other.as_u64());
+        let Some((group, row)) = self.node_seen(raw, read) else {
+            return Vec::new();
+        };
+        // One way and one type, the far end's list holds the same edges in the same
+        // order (by edge, the type's other end being fixed): the shorter is read,
+        // as a hub's delta is searched entry by entry.
+        if direction != Direction::Both
+            && self.keeps_incoming()
+            && ids.as_ref().is_some_and(|ids| ids.len() == 1)
+            && let Some((far_group, far_row)) = self.node_seen(target, read)
+        {
+            let outgoing = direction == Direction::Outgoing;
+            let near_entries = group.adjacency(outgoing).entries_of(row);
+            let far_entries = far_group.adjacency(!outgoing).entries_of(far_row);
+            if far_entries < near_entries {
+                let mut edges: Vec<EdgeId> = far_group
+                    .adjacency(!outgoing)
+                    .to_other(far_row, raw)
+                    .filter(|adjacent| {
+                        ids.as_ref()
+                            .is_none_or(|ids| ids.contains(&adjacent.edge_type))
+                            && self.edge_visible(adjacent.edge, read)
+                    })
+                    .map(|adjacent| EdgeId::new(adjacent.edge))
+                    .collect();
+                edges.sort_unstable();
+                return edges;
+            }
+        }
+        let directions: &[bool] = match direction {
+            Direction::Outgoing => &[true],
+            Direction::Incoming => &[false],
+            Direction::Both => &[true, false],
+        };
+        let mut edges = Vec::new();
+        for &outgoing in directions {
+            // A self-loop is listed once, going out, when both ways are read.
+            if direction == Direction::Both && !outgoing && raw == target {
+                continue;
+            }
+            edges.extend(
+                group
+                    .adjacency(outgoing)
+                    .to_other(row, target)
+                    .filter(|adjacent| {
+                        ids.as_ref()
+                            .is_none_or(|ids| ids.contains(&adjacent.edge_type))
+                            && self.edge_visible(adjacent.edge, read)
+                    })
+                    .map(|adjacent| EdgeId::new(adjacent.edge)),
+            );
+        }
         edges
     }
 
@@ -803,6 +1183,39 @@ impl GraphStore for RowGroupStore {
             .edges_seen(node, direction, types, Read::view(view)))
     }
 
+    fn common_edges(
+        &self,
+        near: &HopFrom<'_>,
+        far: &HopFrom<'_>,
+        view: ReadView,
+    ) -> Result<(Vec<CommonEdge>, usize)> {
+        if let Some(found) = self
+            .inner
+            .read()
+            .common_edges_seen(near, far, Read::view(view))
+        {
+            return Ok(found);
+        }
+        crate::graph::traits::common_edges_by_lists(
+            self.edges(near.node, near.direction, near.edge_types, view)?,
+            self.edges(far.node, far.direction, far.edge_types, view)?,
+        )
+    }
+
+    fn edges_between(
+        &self,
+        node: NodeId,
+        other: NodeId,
+        direction: Direction,
+        types: &[ArcStr],
+        view: ReadView,
+    ) -> Result<Vec<EdgeId>> {
+        Ok(self
+            .inner
+            .read()
+            .edges_between_seen(node, other, direction, types, Read::view(view)))
+    }
+
     fn has_edge(
         &self,
         node: NodeId,
@@ -1016,6 +1429,86 @@ impl GraphStore for RowGroupStore {
         RowGroupStore::has_property_index(self, property)
     }
 
+    fn index_serves(&self, labels: &[&str], property: &str) -> bool {
+        RowGroupStore::index_serves(self, labels, property)
+    }
+
+    fn has_label_index(&self, label: &str, property: &str) -> bool {
+        RowGroupStore::has_label_index(self, label, property)
+    }
+
+    fn reads_key_columns(&self) -> bool {
+        true
+    }
+
+    fn key_column_group(
+        &self,
+        query: &mut super::KeyColumnQuery,
+        from: u64,
+        view: ReadView,
+    ) -> Result<KeyColumnGroup> {
+        let ids_given = self.next_node_id();
+        let mut group = self
+            .inner
+            .read()
+            .key_column_group(query, from, Read::view(view))?;
+        group.ids_given = ids_given;
+        Ok(group)
+    }
+
+    fn far_walk_back_within(
+        &self,
+        far_label: &str,
+        types: &[&str],
+        back: Direction,
+        budget: &mut u64,
+    ) -> Option<f64> {
+        self.sample_far_walk_back(far_label, types, back, budget)
+    }
+
+    fn indexed_distinct_values(&self, labels: &[&str], property: &str) -> Option<u64> {
+        RowGroupStore::indexed_distinct_values(self, labels, property)
+    }
+
+    fn edge_entries_at_most(
+        &self,
+        node: NodeId,
+        direction: Direction,
+        types: &[ArcStr],
+        view: ReadView,
+    ) -> Option<usize> {
+        self.inner
+            .read()
+            .entries_of_types_at_most(node, direction, types, Read::view(view))
+    }
+
+    fn label_index_entries(&self) -> Vec<(String, String)> {
+        RowGroupStore::label_index_entries(self)
+    }
+
+    fn sampled_degree(&self, label: &str, edge_type: &str, direction: Direction) -> Option<f64> {
+        self.sample_degree(label, edge_type, direction)
+    }
+
+    fn sampled_reached_degree_within(
+        &self,
+        start_label: Option<&str>,
+        via_types: &[&str],
+        via_direction: Direction,
+        on_types: &[&str],
+        on_direction: Direction,
+        budget: &mut u64,
+    ) -> Option<f64> {
+        self.sample_reached_degree(
+            start_label,
+            via_types,
+            via_direction,
+            on_types,
+            on_direction,
+            budget,
+        )
+    }
+
     fn find_nodes_by_property(
         &self,
         property: &str,
@@ -1033,10 +1526,44 @@ impl GraphStore for RowGroupStore {
         conditions: &[(&str, Value)],
         view: ReadView,
     ) -> Result<Vec<NodeId>> {
+        self.find_indexed_by_properties(&[], conditions, view)
+    }
+
+    fn find_indexed_by_properties(
+        &self,
+        labels: &[&str],
+        conditions: &[(&str, Value)],
+        view: ReadView,
+    ) -> Result<Vec<NodeId>> {
         let (inner, read) = (self.inner.read(), Read::view(view));
         Ok(inner
-            .indexed_matching_at(conditions, read)
+            .indexed_matching_at(labels, conditions, read)
             .unwrap_or_else(|| inner.nodes_matching_at(conditions, read)))
+    }
+
+    fn find_few_nodes_maybe_equal(
+        &self,
+        property: &str,
+        value: &Value,
+        limit: usize,
+        view: ReadView,
+    ) -> Result<Option<Vec<NodeId>>> {
+        self.find_few_indexed_maybe_equal(&[], property, value, limit, view)
+    }
+
+    fn find_few_indexed_maybe_equal(
+        &self,
+        labels: &[&str],
+        property: &str,
+        value: &Value,
+        limit: usize,
+        view: ReadView,
+    ) -> Result<Option<Vec<NodeId>>> {
+        let inner = self.inner.read();
+        let few = inner.property_candidates_within(labels, property, value, limit);
+        Ok(few
+            .then(|| inner.maybe_equal_at(labels, property, value, Read::view(view)))
+            .flatten())
     }
 
     fn find_nodes_maybe_equal(
@@ -1045,10 +1572,20 @@ impl GraphStore for RowGroupStore {
         value: &Value,
         view: ReadView,
     ) -> Result<Option<Vec<NodeId>>> {
+        self.find_indexed_maybe_equal(&[], property, value, view)
+    }
+
+    fn find_indexed_maybe_equal(
+        &self,
+        labels: &[&str],
+        property: &str,
+        value: &Value,
+        view: ReadView,
+    ) -> Result<Option<Vec<NodeId>>> {
         Ok(self
             .inner
             .read()
-            .maybe_equal_at(property, value, Read::view(view)))
+            .maybe_equal_at(labels, property, value, Read::view(view)))
     }
 
     fn find_nodes_in_range(
@@ -1243,9 +1780,10 @@ impl RowGroupStore {
 #[cfg(test)]
 mod tests {
     use grafeo_common::types::ReadView;
-    use grafeo_common::types::{PropertyKey, Value};
+    use grafeo_common::types::{ArcStr, PropertyKey, Value};
 
     use super::in_range;
+    use crate::graph::Direction;
     use crate::graph::conformance::{Tx, people};
     use crate::graph::rowgroup::RowGroupStore;
     use crate::graph::traits::GraphStore;
@@ -1332,6 +1870,69 @@ mod tests {
                 [gus],
                 "indexed: {indexed}"
             );
+        }
+    }
+
+    /// The edges between two nodes are the ones the list holds, in its order,
+    /// for each direction and set of types, through sorted lists, deltas,
+    /// merges and removed edges, with and without the incoming edges kept.
+    #[test]
+    fn edges_between_are_the_edges_the_list_holds() {
+        let types = ["KNOWS", "LIKES", "HATES"];
+        for backward in [true, false] {
+            let store = RowGroupStore::with_backward_edges(backward);
+            let nodes: Vec<_> = (0..24).map(|_| store.create_node(&["Person"])).collect();
+            // Enough edges for the adjacency to merge its delta on the way,
+            // several between one pair and self-loops among them.
+            let mut state = 7_u64;
+            let mut next = |bound: usize| {
+                state = state
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1);
+                usize::try_from(state >> 33).unwrap() % bound
+            };
+            let mut edges = Vec::new();
+            for _ in 0..3_000 {
+                let (from, to) = (nodes[next(24)], nodes[next(24)]);
+                edges.push(store.create_edge(from, to, types[next(3)]));
+            }
+            for edge in edges.iter().step_by(7) {
+                assert!(store.delete_edge(*edge));
+            }
+            for _ in 0..40 {
+                store.create_edge(nodes[next(24)], nodes[next(24)], types[next(3)]);
+            }
+
+            let view = ReadView::latest();
+            let knows = [ArcStr::from("KNOWS")];
+            let two = [ArcStr::from("HATES"), ArcStr::from("KNOWS")];
+            let none = [ArcStr::from("NO_SUCH_TYPE")];
+            let filters: [&[ArcStr]; 4] = [&[], &knows, &two, &none];
+            let mut found = 0;
+            for &node in &nodes {
+                for &other in &nodes {
+                    for direction in [Direction::Outgoing, Direction::Incoming, Direction::Both] {
+                        for filter in filters {
+                            let listed: Vec<_> = store
+                                .edges(node, direction, filter, view)
+                                .unwrap()
+                                .into_iter()
+                                .filter(|(end, _)| *end == other)
+                                .map(|(_, edge)| edge)
+                                .collect();
+                            found += listed.len();
+                            assert_eq!(
+                                store
+                                    .edges_between(node, other, direction, filter, view)
+                                    .unwrap(),
+                                listed,
+                                "{node:?} {other:?} {direction:?} {filter:?} backward {backward}"
+                            );
+                        }
+                    }
+                }
+            }
+            assert!(found > 10_000, "only {found} edges compared");
         }
     }
 

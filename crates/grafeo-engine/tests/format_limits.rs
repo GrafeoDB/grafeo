@@ -6,7 +6,7 @@
 //! reads it back from the file alone.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --features full --test format_limits
+//! cargo test -p grafeo-engine --features full --test main format_limits::
 //! ```
 
 #![allow(missing_docs)]

@@ -4,7 +4,7 @@
 //! tighter than the comparisons.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test cypher_write_patterns
+//! cargo test -p grafeo-engine --all-features --test main cypher_write_patterns::
 //! ```
 
 #![cfg(all(feature = "gql", feature = "cypher"))]

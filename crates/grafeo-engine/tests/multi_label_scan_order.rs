@@ -5,7 +5,7 @@
 //! Graph is the small one. The same inside an EXISTS. EXPLAIN shows the scan.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test multi_label_scan_order
+//! cargo test -p grafeo-engine --all-features --test main multi_label_scan_order::
 //! ```
 
 #![cfg(feature = "gql")]

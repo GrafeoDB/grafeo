@@ -39,8 +39,8 @@
 //! Nothing here is ignored.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test snapshot_isolation
-//! cargo test -p grafeo-engine --features full --test snapshot_isolation
+//! cargo test -p grafeo-engine --all-features --test main snapshot_isolation::
+//! cargo test -p grafeo-engine --features full --test main snapshot_isolation::
 //! ```
 
 #![cfg(feature = "gql")]
@@ -2164,8 +2164,7 @@ fn g12_a_delete_takes_effect_at_its_commit_epoch() {
 }
 
 #[cfg(all(feature = "wal", feature = "grafeo-file"))]
-#[path = "common/replay.rs"]
-mod replay;
+use crate::common::replay;
 
 /// G12 after a replay: the deleting transaction of
 /// [`g12_a_delete_takes_effect_at_its_commit_epoch`] in a database file
@@ -2184,7 +2183,7 @@ fn g12_a_replayed_delete_takes_effect_at_its_commit_epoch() {
     }
 
     let (_dir, db) = replay::reopened_after_crash(
-        "g12_a_replayed_delete_takes_effect_at_its_commit_epoch",
+        &grafeo_common::test_path!("g12_a_replayed_delete_takes_effect_at_its_commit_epoch"),
         // History kept: the reads between the start and the commit need it
         // (the file stores the setting, so the reopen keeps it too).
         |path: &Path| {

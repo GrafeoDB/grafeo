@@ -144,13 +144,14 @@ echo "  Gzip:   $(( GZ_SIZE / 1024 )) KB"
 # (exact decimals, the row-group store and its column encoders, RDF property
 # paths), full reached 1591 KB in 0.6.0. The generic code (sorts, hash maps,
 # serde) is most of what is left; it shrinks by sharing paths, not by gates.
+# 0.6.2's planner rules took lite from 1170 KB to 1249 KB, so its limits rose.
 if [[ "$FEATURES" == *"full"* ]]; then
     WARN_THRESHOLD=1835008   # 1.75 MB
     FAIL_THRESHOLD=1992294   # 1.9 MB
     LABEL="full profile"
 else
-    WARN_THRESHOLD=1205862   # 1.15 MB
-    FAIL_THRESHOLD=1310720   # 1.25 MB
+    WARN_THRESHOLD=1363149   # 1.3 MB
+    FAIL_THRESHOLD=1468006   # 1.4 MB
     LABEL="browser profile"
 fi
 

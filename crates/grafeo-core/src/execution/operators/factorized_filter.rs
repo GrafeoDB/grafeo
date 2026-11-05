@@ -165,11 +165,8 @@ impl ColumnPredicate {
                 CompareOp::Gt => a > b,
                 CompareOp::Ge => a >= b,
             },
-            (Value::Bool(a), Value::Bool(b)) => match self.op {
-                CompareOp::Eq => a == b,
-                CompareOp::Ne => a != b,
-                _ => false,
-            },
+            // False is below true (ISO/IEC 39075 19.3).
+            (Value::Bool(a), Value::Bool(b)) => holds(self.op, a.cmp(b)),
             (Value::Int64(int), Value::Float64(float)) => {
                 match super::value_utils::partial_cmp_int_float(*int, *float) {
                     Some(order) => holds(self.op, order),
@@ -347,11 +344,8 @@ impl PropertyPredicate {
                 CompareOp::Gt => a > b,
                 CompareOp::Ge => a >= b,
             },
-            (Value::Bool(a), Value::Bool(b)) => match self.op {
-                CompareOp::Eq => a == b,
-                CompareOp::Ne => a != b,
-                _ => false,
-            },
+            // False is below true (ISO/IEC 39075 19.3).
+            (Value::Bool(a), Value::Bool(b)) => holds(self.op, a.cmp(b)),
             (Value::Timestamp(a), Value::Timestamp(b)) => match self.op {
                 CompareOp::Eq => a == b,
                 CompareOp::Ne => a != b,

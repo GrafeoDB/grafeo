@@ -37,12 +37,35 @@ pub(crate) struct GraphStores {
     /// The default graph's backend, which its writes apply in (`None` for a
     /// read-only one).
     pub(super) graph_store_mut: Option<Arc<dyn GraphBackend>>,
+    /// The graphs the session's open transaction created and dropped.
+    pub(super) pending_graphs: Arc<parking_lot::RwLock<PendingGraphs>>,
+}
+
+/// What an open transaction's own statements see of the named graphs, until its commit.
+#[derive(Default)]
+pub(crate) struct PendingGraphs {
+    /// The graphs it created, by storage key, which nobody else can reach.
+    pub(super) created: std::collections::HashMap<String, Arc<RowGroupStore>>,
+    /// The graphs it dropped, which it cannot resolve.
+    pub(super) dropped: std::collections::HashSet<String>,
+    /// The graphs it created, also those it has dropped since: the session may have to
+    /// leave one when the transaction ends without its commit.
+    pub(super) made: std::collections::HashSet<String>,
 }
 
 impl GraphStores {
     /// The named graph with storage key `key`: `None` when there is none, as
     /// on a backend of one's own, which holds no named graphs.
     pub(super) fn named_graph(&self, key: &str) -> Option<Arc<RowGroupStore>> {
+        {
+            let pending = self.pending_graphs.read();
+            if let Some(graph) = pending.created.get(key) {
+                return Some(Arc::clone(graph));
+            }
+            if pending.dropped.contains(key) {
+                return None;
+            }
+        }
         self.root.as_ref().and_then(|store| store.graph(key))
     }
 
@@ -294,6 +317,7 @@ impl StatementPlanning {
     /// another store: the graph was dropped and created again since.
     pub(crate) fn planner(self, store: Arc<dyn GraphStore>) -> Result<crate::query::Planner> {
         use crate::query::Planner;
+        use crate::query::optimizer::PlannerRule;
         use grafeo_common::types::ReadView;
         use grafeo_core::execution::operators::{LazyValue, SessionContext};
 
@@ -361,9 +385,16 @@ impl StatementPlanning {
             transaction_id,
             viewing_epoch,
         )
-        .with_factorized_execution(session.plan_options.factorized_execution)
+        .with_factorized_execution(
+            session.plan_options.factorized_execution
+                && session
+                    .plan_options
+                    .rules
+                    .has(PlannerRule::FactorizedExecution),
+        )
+        .with_rules(session.plan_options.rules)
         .with_shuffle_unordered(session.plan_options.shuffle_unordered)
-        .with_reachability(session.plan_options.reachability)
+        .with_reachability(session.plan_options.rules.has(PlannerRule::Reachability))
         .with_path_search_budget(session.plan_options.path_search_budget)
         .with_catalog(Arc::clone(&access.catalog))
         .with_session_context(session_context)

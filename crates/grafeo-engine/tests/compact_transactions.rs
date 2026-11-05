@@ -8,7 +8,7 @@
 //! reopen.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test compact_transactions
+//! cargo test -p grafeo-engine --all-features --test main compact_transactions::
 //! ```
 
 #![cfg(feature = "gql")]
@@ -276,7 +276,6 @@ fn an_unlabeled_scan_in_a_transaction_finds_its_own_creates() {
 #[cfg(all(feature = "wal", feature = "grafeo-file"))]
 mod file {
     use std::path::{Path, PathBuf};
-    use std::process::Command;
 
     use grafeo_common::testing::child_process;
 
@@ -366,8 +365,7 @@ mod file {
     /// the child left.
     fn crash_child(which: &str, path: &Path) {
         let output = child_process::output(
-            Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", "file::compact_transactions_child", "--nocapture"])
+            grafeo_common::child_test!("compact_transactions_child")
                 .env(CHILD_VAR, which)
                 .env(PATH_VAR, path),
         )

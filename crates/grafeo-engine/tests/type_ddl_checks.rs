@@ -18,12 +18,12 @@
 //! Each holds after a reopen too: after a checkpoint and after a WAL replay.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test type_ddl_checks
+//! cargo test -p grafeo-engine --all-features --test main type_ddl_checks::
 //! ```
 
 #![cfg(all(feature = "gql", feature = "grafeo-file", feature = "wal"))]
 
-mod common;
+use crate::common;
 
 use std::path::{Path, PathBuf};
 
@@ -290,7 +290,8 @@ fn keyword_property_names_are_declared_as_insert_takes_them() {
     );
     assert!(refusal(&db, "INSERT (:Trip {contains: 3})").contains("contains"));
     assert!(refusal(&db, "INSERT (:Trip {ends: 'later'})").contains("ends"));
-    assert!(refusal(&db, "INSERT (:Hike {starts: 19})").contains("starts"));
+    rows(&db, "CREATE GRAPH walks TYPED hikes");
+    assert!(refusal(&db, "USE GRAPH walks INSERT (:Hike {starts: 19})").contains("starts"));
 }
 
 #[test]
@@ -302,7 +303,7 @@ fn keyword_property_names_survive_a_checkpoint_and_a_reopen() {
 #[test]
 fn keyword_property_names_survive_a_wal_replay() {
     let (_dir, db) = common::replay::reopened_after_crash(
-        "keyword_property_names_survive_a_wal_replay",
+        &grafeo_common::test_path!("keyword_property_names_survive_a_wal_replay"),
         open,
         |db| {
             for statement in KEYWORD_NAMES {
@@ -378,12 +379,15 @@ fn signed_defaults_survive_a_checkpoint_and_a_reopen() {
 /// Replay of the DDL keeps the types (a v1 WAL record holds no default).
 #[test]
 fn signed_defaults_replay_their_types() {
-    let (_dir, db) =
-        common::replay::reopened_after_crash("signed_defaults_replay_their_types", open, |db| {
+    let (_dir, db) = common::replay::reopened_after_crash(
+        &grafeo_common::test_path!("signed_defaults_replay_their_types"),
+        open,
+        |db| {
             for statement in SIGNED_DEFAULTS {
                 rows(db, statement);
             }
-        });
+        },
+    );
     assert_eq!(
         property_list(&db, "SHOW NODE TYPES", "Reading"),
         "celsius INT64, trim FLOAT64, gain INT64, floor INT64, scale FLOAT64, mask INT64, \
@@ -520,6 +524,7 @@ fn type_of_europe(db: &GrafeoDB) -> Value {
 const RECREATED: &[&str] = &[
     "DROP GRAPH europe",
     "DROP GRAPH TYPE atlas",
+    "CREATE NODE TYPE City (name STRING)",
     "CREATE GRAPH TYPE atlas (NODE TYPE City)",
     "CREATE GRAPH europe",
 ];
@@ -552,7 +557,7 @@ fn a_recreated_graph_type_types_no_graph() {
 #[test]
 fn a_replayed_drop_of_a_graph_type_drops_the_bindings() {
     let (_dir, db) = common::replay::reopened_after_crash(
-        "a_replayed_drop_of_a_graph_type_drops_the_bindings",
+        &grafeo_common::test_path!("a_replayed_drop_of_a_graph_type_drops_the_bindings"),
         open,
         |db| {
             for statement in TYPED_GRAPH {
@@ -662,7 +667,7 @@ fn decimal_property_types_survive_a_checkpoint_and_a_reopen() {
 #[test]
 fn decimal_property_types_replay_their_types() {
     let (_dir, db) = common::replay::reopened_after_crash(
-        "decimal_property_types_replay_their_types",
+        &grafeo_common::test_path!("decimal_property_types_replay_their_types"),
         open,
         |db| {
             for statement in DECIMAL_TYPES {

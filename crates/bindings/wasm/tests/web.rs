@@ -457,6 +457,40 @@ fn test_begin_commit_transaction_persists_writes() {
     assert_eq!(db.node_count().unwrap(), 1, "writes visible after commit");
 }
 
+/// With no `beginTransaction()` a call has no lasting session: a transaction statement is refused,
+/// holds nothing open, and leaves the writes around it alone.
+#[wasm_bindgen_test]
+fn test_transaction_statements_with_no_transaction_are_refused() {
+    let db = Database::new().expect("create db");
+    for statement in ["START TRANSACTION", "COMMIT", "ROLLBACK"] {
+        assert!(db.execute(statement).is_err(), "{statement} was accepted");
+        assert!(!db.is_transaction_active(), "{statement} left one open");
+    }
+    db.execute("INSERT (:T {x: 1})").expect("insert");
+    assert!(db.execute("ROLLBACK").is_err());
+    assert_eq!(
+        db.node_count().unwrap(),
+        1,
+        "the refused rollback undid nothing"
+    );
+}
+
+/// Within `beginTransaction()` the session lasts, and the transaction ends only with
+/// `commitTransaction()` or `rollbackTransaction()`: the statements are refused and it goes on.
+#[wasm_bindgen_test]
+fn test_transaction_statements_in_a_transaction_are_refused_and_it_goes_on() {
+    let db = Database::new().expect("create db");
+    db.begin_transaction().expect("begin");
+    db.execute("INSERT (:T {x: 1})").expect("insert");
+    for statement in ["START TRANSACTION", "COMMIT", "ROLLBACK"] {
+        assert!(db.execute(statement).is_err(), "{statement} was accepted");
+        assert!(db.is_transaction_active(), "{statement} ended it");
+    }
+    assert_eq!(db.node_count().unwrap(), 0, "not committed");
+    db.commit_transaction().expect("commit");
+    assert_eq!(db.node_count().unwrap(), 1);
+}
+
 #[wasm_bindgen_test]
 fn test_rollback_transaction_discards_writes() {
     let db = Database::new().expect("create db");

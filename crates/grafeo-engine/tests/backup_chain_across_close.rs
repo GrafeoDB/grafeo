@@ -10,14 +10,13 @@
 //! database that never takes a backup still loses its sidecar at `close()`.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test backup_chain_across_close
+//! cargo test -p grafeo-engine --all-features --test main backup_chain_across_close::
 //! ```
 
 #![cfg(all(feature = "wal", feature = "grafeo-file", feature = "gql"))]
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use grafeo_common::testing::child_process;
 use grafeo_common::types::{EpochId, Value};
@@ -88,8 +87,7 @@ fn segments(path: &Path) -> Vec<u64> {
 /// does the step and closes it (or exits without closing, for `crash`).
 fn in_child(step: &str, path: &Path) {
     let status = child_process::run(
-        Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "step_child", "--nocapture"])
+        grafeo_common::child_test!("step_child")
             .env(STEP_VAR, step)
             .env(PATH_VAR, path),
     )

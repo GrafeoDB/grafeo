@@ -38,14 +38,23 @@ var runnerCapabilities = map[string]bool{"int64-safe": true}
 
 func TestMain(m *testing.M) {
 	db, err := grafeo.OpenInMemory()
-	if err == nil {
-		info, err := db.Info()
-		if err == nil {
-			for _, f := range info.Features {
-				compiledFeatures[f] = true
-			}
-		}
-		db.Close()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "the native library does not work: %v\n", err)
+		os.Exit(1)
+	}
+	info, err := db.Info()
+	db.Close()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "the native library gives no info: %v\n", err)
+		os.Exit(1)
+	}
+	if len(info.Features) == 0 {
+		// Every test that needs a feature would skip, and the run would pass.
+		fmt.Fprintln(os.Stderr, "the native library lists no features")
+		os.Exit(1)
+	}
+	for _, f := range info.Features {
+		compiledFeatures[f] = true
 	}
 	os.Exit(m.Run())
 }

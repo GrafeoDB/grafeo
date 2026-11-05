@@ -462,6 +462,7 @@ impl Versions {
     /// Whether `read` sees `row`, in one lookup: a row of a flat vector,
     /// the common case, is seen by every reader once it exists (a bit
     /// test); a stamped vector's row by its stamps.
+    #[inline]
     pub(super) fn visible(&self, row: usize, read: Read) -> bool {
         match self.vectors.get(row / VECTOR_ROWS) {
             None => false,
@@ -493,7 +494,8 @@ impl Versions {
     /// `read` sees, as a mask: the word itself where the vector's rows are
     /// seen alike (a flat vector, or a stamped one whose rows share one
     /// version), a row at a time in the others.
-    fn visible_word(&self, index: usize, asked: u64, read: Read) -> u64 {
+    #[inline]
+    pub(super) fn visible_word(&self, index: usize, asked: u64, read: Read) -> u64 {
         if asked == 0 {
             return 0;
         }

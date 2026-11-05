@@ -5,7 +5,7 @@
 //! default graph, indexes) is an error, never a stand-in that is empty.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test backend_sessions
+//! cargo test -p grafeo-engine --all-features --test main backend_sessions::
 //! ```
 
 #![cfg(feature = "gql")]

@@ -8,7 +8,7 @@
 //! of the two plans value by value.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test value_hash_join
+//! cargo test -p grafeo-engine --all-features --test main value_hash_join::
 //! ```
 
 #![cfg(all(feature = "gql", feature = "cypher"))]
@@ -973,6 +973,6 @@ fn a_range_without_an_index_shows_the_range_scan() {
 
         let both = "MATCH (t:TypeDefinition) WHERE t.line > 3 AND t.name = 'Alix' RETURN t.name";
         let plan = explain(&session, language, both);
-        assert!(plan.contains("[label-first]"), "{language:?}:\n{plan}");
+        assert!(plan.contains("[key column: name]"), "{language:?}:\n{plan}");
     }
 }

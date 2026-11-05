@@ -348,6 +348,20 @@ def rdf_writes(grafeo):
     return grafeo.GrafeoDB()
 
 
+def label_mix(grafeo):
+    """Five nodes, one per kind of label set, with an edge to a hub and from it."""
+    db = grafeo.GrafeoDB()
+    db.execute(
+        "INSERT (a:A {name: 'Alix', k: 1}), (g:B {name: 'Gus', k: 1}), (v:A:B {name: 'Vincent', k: 1}), (j:C {name: 'Jules', k: 1}), (m {name: 'Mia', k: 1}), (t:T {name: 'Amsterdam', tk: 1}), (a)-[:R]->(t), (g)-[:R]->(t), (v)-[:R]->(t), (j)-[:R]->(t), (m)-[:R]->(t), (t)-[:S]->(a), (t)-[:S]->(g), (t)-[:S]->(v), (t)-[:S]->(j), (t)-[:S]->(m)"
+    )
+    return db
+
+
+def label_writes(grafeo):
+    """An empty database for section DX, whose cases write in corpus order."""
+    return grafeo.GrafeoDB()
+
+
 WRITE_FIXTURES = {
     "writes": {"BR", "BS", "BU", "CT", "DB"},
     "rdf_writes": {"DD"},
@@ -357,6 +371,12 @@ WRITE_FIXTURES = {
     "list_embeddings": {"DH"},
     # CP1 runs after BB and its insert is refused, so BB reads the fixture as built
     "typed": {"BB", "CP"},
+    # DS3 stores what the graph type would refuse; DS4 reads it
+    "type_scope": {"DS"},
+    # The rules that DT tries to add, each over this data
+    "rules_over_data": {"DT"},
+    # Label expressions on what a statement changes or creates
+    "label_writes": {"DX"},
 }
 
 
@@ -393,6 +413,55 @@ def codegraph(grafeo):
         db.execute(
             f"MATCH (a {{i: {source}}}), (b {{i: {target}}}) INSERT (a)-[:{edge_type} {{w: 1}}]->(b)"
         )
+    return db
+
+
+def raising(grafeo):
+    """`Person` nodes with a key `k` that is never 0, and in the same places, without that label,
+    Hans, whose key is 0: Alix has a K and an L edge, Mia only K, Hans only L. Gus, a `Clerk`, has
+    a key of 0 and no edge. `100 / a.k` raises on Hans and Gus."""
+    db = grafeo.GrafeoDB()
+    db.execute("INSERT (:Town {name: 'Berlin'})")
+    db.execute(
+        "INSERT (:Person:Big {name: 'Alix', k: 2})-[:K]->(:City {name: 'Paris'})"
+    )
+    db.execute("INSERT (:Person {name: 'Mia', k: 5})-[:K]->(:City {name: 'Prague'})")
+    db.execute("INSERT (:Robot {name: 'Hans', k: 0})-[:L]->(:Town {name: 'Rome'})")
+    db.execute("INSERT (:Clerk {name: 'Gus', k: 0})")
+    db.execute(
+        "MATCH (a:Person {name: 'Alix'}), (t:Town {name: 'Berlin'}) INSERT (a)-[:L]->(t)"
+    )
+    return db
+
+
+def type_scope(grafeo):
+    """A graph type with a default and a required property, a graph typed by it holding Mia's
+    default, and in the default graph, which it does not bind, the same label with no name."""
+    db = grafeo.GrafeoDB()
+    db.execute(
+        "CREATE GRAPH TYPE t (NODE TYPE Person (name STRING NOT NULL DEFAULT 'Mia', age INT64))"
+    )
+    db.execute("CREATE GRAPH bound TYPED t")
+    db.execute("INSERT (:Person {age: 1})")
+    db.execute("USE GRAPH bound")
+    db.execute("INSERT (:Person {age: 2})")
+    db.execute("USE GRAPH default")
+    return db
+
+
+def booleans(grafeo):
+    """`T` nodes with `p` true, false and 1, and an `A` node for a query's other part."""
+    db = grafeo.GrafeoDB()
+    db.execute("INSERT (:T {p: true}), (:T {p: false}), (:T {p: 1}), (:A {k: 1})")
+    return db
+
+
+def rules_over_data(grafeo):
+    """Data that breaks the rules the cases of section DT try to add: two `File` nodes with one
+    `id`, and no required property on the `File`, the `City` or the `ROAD`."""
+    db = grafeo.GrafeoDB()
+    db.execute("INSERT (:File {id: 1}), (:File {id: 1})")
+    db.execute("INSERT (:City {size: 3})-[:ROAD]->(:City {size: 4})")
     return db
 
 
@@ -435,6 +504,13 @@ FIXTURES = {
     "graphs": graphs,
     "codegraph": codegraph,
     "unlabeled": unlabeled,
+    "raising": raising,
+    "type_scope": type_scope,
+    "rules_over_data": rules_over_data,
+    "label_mix": label_mix,
+    "label_writes": label_writes,
+    "booleans": booleans,
+    "per_call": empty,
 }
 
 CASES: list[Case] = []
@@ -2450,5 +2526,254 @@ for case_id, query in [
     ("DQ6", "UNWIND ['Alix', 'Gus'] AS name OPTIONAL CALL same(name) YIELD v RETURN name, v"),
 ]:
     case(case_id, query, GQL, "procedures")
+
+# DR: a filter that can raise goes only to the side of a join that holds the variable's written
+#     checks (#714), so it no longer runs on Hans, whom the pattern's label leaves out; 0.6.1
+#     copied it to the other side and failed with division by zero: the comma form (DR1), the
+#     parts swapped (DR2), labels at the far ends (DR3), written from the far ends (DR5). With
+#     checks on both sides (DR4), one chain (DR6), a later MATCH (DR7) or a guard written first
+#     (DR8) it never raised. A key of 0 on a node the pattern's label keeps still raises (DR9),
+#     also below an expand, on a node with no such edge (DR10)
+for case_id, query in [
+    ("DR1", "MATCH (a:Person)-[:K]->(b), (a)-[:L]->(c) WHERE 100 / a.k > 0 RETURN a.name, b.name, c.name"),
+    ("DR2", "MATCH (a:Person)-[:L]->(c), (a)-[:K]->(b) WHERE 100 / a.k > 0 RETURN a.name, b.name, c.name"),
+    ("DR3", "MATCH (a:Person)-[:K]->(b:City), (a)-[:L]->(c:Town) WHERE 100 / a.k > 0 RETURN a.name, b.name, c.name"),
+    ("DR4", "MATCH (a:Person)-[:K]->(b), (a:Big)-[:L]->(c) WHERE 100 / a.k > 0 RETURN a.name, b.name, c.name"),
+    ("DR5", "MATCH (b)<-[:K]-(a:Person), (c)<-[:L]-(a) WHERE 100 / a.k > 0 RETURN a.name, b.name, c.name"),
+    ("DR6", "MATCH (b)<-[:K]-(a:Person)-[:L]->(c) WHERE 100 / a.k > 0 RETURN a.name, b.name, c.name"),
+    ("DR7", "MATCH (a:Person)-[:K]->(b) MATCH (a)-[:L]->(c) WHERE 100 / a.k > 0 RETURN a.name, b.name, c.name"),
+    ("DR8", "MATCH (a:Person)-[:K]->(b), (a)-[:L]->(c) WHERE a.k <> 0 AND 100 / a.k > 0 RETURN a.name, b.name, c.name"),
+    ("DR9", "MATCH (a:Robot)-[:L]->(c) WHERE 100 / a.k > 0 RETURN a.name, c.name"),
+    ("DR10", "MATCH (a:Clerk)-[:K]->(b) WHERE 100 / a.k > 0 RETURN a.name"),
+]:
+    case(case_id, query, BOTH, "raising")
+
+# DS: a graph type's rules hold only in the graphs bound to it (#730): the default graph keeps what
+#     was written, where 0.6.1 filled in Mia (DS1); the bound graph still does (DS2); a write the
+#     type would refuse is the default graph's own, where 0.6.1 refused it (DS3, DS4); replacing a
+#     graph type that a graph is bound to stays refused (DS5)
+case("DS1", "MATCH (p:Person) RETURN p.age, p.name", BOTH, "type_scope")
+case("DS2", "USE GRAPH bound MATCH (p:Person) RETURN p.age, p.name", GQL, "type_scope")
+case("DS3", "INSERT (:Person {age: 'text'})", GQL, "type_scope")
+case("DS4", "MATCH (p:Person) RETURN p.age, p.name", GQL, "type_scope")
+case("DS5", "CREATE OR REPLACE GRAPH TYPE t (NODE TYPE Person (age INT64))", GQL, "type_scope")
+
+# DT: a rule over data that breaks it fails and leaves nothing (#729), where 0.6.1 accepted it and
+#     enforced it only on later writes: UNIQUE (DT1), NOT NULL (DT2), a node type's required
+#     property (DT3) and an edge type's (DT4); rules the data meets are accepted (DT5 to DT7; on
+#     0.6.1 DT7 found the type DT4 had left)
+for case_id, query in [
+    ("DT1", "CREATE CONSTRAINT c1 FOR (n:File) ON (n.id) UNIQUE"),
+    ("DT2", "CREATE CONSTRAINT c2 FOR (n:File) ON (n.must) NOT NULL"),
+    ("DT3", "CREATE NODE TYPE City (name STRING NOT NULL)"),
+    ("DT4", "CREATE EDGE TYPE ROAD (km INTEGER NOT NULL)"),
+    ("DT5", "CREATE CONSTRAINT c5 FOR (n:City) ON (n.size) UNIQUE"),
+    ("DT6", "CREATE CONSTRAINT c6 FOR (n:City) ON (n.size) NOT NULL"),
+    ("DT7", "CREATE EDGE TYPE ROAD (km INTEGER)"),
+]:
+    case(case_id, query, GQL, "rules_over_data")
+
+# DU: a per-call statement cannot start a transaction that nothing could finish (0.6.1 accepted
+#     START TRANSACTION and dropped it), and COMMIT and ROLLBACK keep their 25000
+for case_id, query in [
+    ("DU1", "START TRANSACTION"),
+    ("DU2", "COMMIT"),
+    ("DU3", "ROLLBACK"),
+]:
+    case(case_id, query, GQL, "per_call")
+
+# DV: false is below true (ISO/IEC 39075 19.3): 0.6.1 gave null from an expression (DV1 to DV3), and
+#     lost the rows of a filter behind another part of the query (DV5 to DV8), though a filter on a
+#     lone scan found them (DV4); null and another type stay null (DV9 to DV11)
+for case_id, query in [
+    ("DV1", "RETURN false < true AS v"),
+    ("DV2", "RETURN true >= true AS v"),
+    ("DV3", "RETURN true < false AS v"),
+]:
+    case(case_id, query, BOTH, "empty")
+for case_id, query in [
+    ("DV4", "MATCH (n:T) WHERE n.p <= true RETURN n.p"),
+    ("DV5", "MATCH (a:A), (n:T) WHERE n.p <= true RETURN n.p"),
+    ("DV6", "MATCH (a:A), (n:T) WHERE n.p < true RETURN n.p"),
+    ("DV7", "MATCH (a:A), (n:T) WHERE n.p >= true RETURN n.p"),
+    ("DV8", "MATCH (a:A), (n:T) WHERE n.p > false RETURN n.p"),
+]:
+    case(case_id, query, BOTH, "booleans")
+for case_id, query in [
+    ("DV9", "RETURN true < 1 AS v"),
+    ("DV10", "RETURN true < null AS v"),
+    ("DV11", "RETURN null <= false AS v"),
+]:
+    case(case_id, query, BOTH, "empty")
+
+# DW: a label expression holds on the first node of a path, as it does on a lone node and on
+#     later nodes; 0.6.1 dropped it there and gave every source with the edge, in GQL and in
+#     SQL/PGQ. Plain `:A` and `:A:B`, shortest paths and far ends were right, and stay.
+for case_id, query, languages in [
+    ("DW1", 'MATCH (x:A)-[:R]->(t:T) RETURN x.name', GQL),
+    ("DW2", 'MATCH (x:A:B)-[:R]->(t:T) RETURN x.name', GQL),
+    ("DW3", 'MATCH (x IS A)-[:R]->(t:T) RETURN x.name', GQL),
+    ("DW4", 'MATCH (x IS A&B)-[:R]->(t:T) RETURN x.name', GQL),
+    ("DW5", 'MATCH (x:A&B)-[:R]->(t:T) RETURN x.name', GQL),
+    ("DW6", 'MATCH (x:A|B)-[:R]->(t:T) RETURN x.name', GQL),
+    ("DW7", 'MATCH (x:!A)-[:R]->(t:T) RETURN x.name', GQL),
+    ("DW8", 'MATCH (x:%)-[:R]->(t:T) RETURN x.name', GQL),
+    ("DW9", 'MATCH (x:(A))-[:R]->(t:T) RETURN x.name', GQL),
+    ("DW10", 'MATCH (x:Z&A)-[:R]->(t:T) RETURN x.name', GQL),
+    ("DW11", 'MATCH p = (x:A)-[:R]->(t:T) RETURN x.name', GQL),
+    ("DW12", 'MATCH p = (x:A:B)-[:R]->(t:T) RETURN x.name', GQL),
+    ("DW13", 'MATCH p = (x IS A)-[:R]->(t:T) RETURN x.name', GQL),
+    ("DW14", 'MATCH p = (x IS A&B)-[:R]->(t:T) RETURN x.name', GQL),
+    ("DW15", 'MATCH p = (x:A&B)-[:R]->(t:T) RETURN x.name', GQL),
+    ("DW16", 'MATCH p = (x:A|B)-[:R]->(t:T) RETURN x.name', GQL),
+    ("DW17", 'MATCH p = (x:!A)-[:R]->(t:T) RETURN x.name', GQL),
+    ("DW18", 'MATCH p = (x:%)-[:R]->(t:T) RETURN x.name', GQL),
+    ("DW19", 'MATCH p = (x:(A))-[:R]->(t:T) RETURN x.name', GQL),
+    ("DW20", 'MATCH p = (x:Z&A)-[:R]->(t:T) RETURN x.name', GQL),
+    ("DW21", 'MATCH (x:A)-[:R]->{1,2}(t:T) RETURN x.name', GQL),
+    ("DW22", 'MATCH (x:A:B)-[:R]->{1,2}(t:T) RETURN x.name', GQL),
+    ("DW23", 'MATCH (x IS A)-[:R]->{1,2}(t:T) RETURN x.name', GQL),
+    ("DW24", 'MATCH (x IS A&B)-[:R]->{1,2}(t:T) RETURN x.name', GQL),
+    ("DW25", 'MATCH (x:A&B)-[:R]->{1,2}(t:T) RETURN x.name', GQL),
+    ("DW26", 'MATCH (x:A|B)-[:R]->{1,2}(t:T) RETURN x.name', GQL),
+    ("DW27", 'MATCH (x:!A)-[:R]->{1,2}(t:T) RETURN x.name', GQL),
+    ("DW28", 'MATCH (x:%)-[:R]->{1,2}(t:T) RETURN x.name', GQL),
+    ("DW29", 'MATCH (x:(A))-[:R]->{1,2}(t:T) RETURN x.name', GQL),
+    ("DW30", 'MATCH (x:Z&A)-[:R]->{1,2}(t:T) RETURN x.name', GQL),
+    ("DW31", 'MATCH ANY SHORTEST (x:A)-[:R]->+(t:T) RETURN x.name', GQL),
+    ("DW32", 'MATCH ANY SHORTEST (x:A:B)-[:R]->+(t:T) RETURN x.name', GQL),
+    ("DW33", 'MATCH ANY SHORTEST (x IS A)-[:R]->+(t:T) RETURN x.name', GQL),
+    ("DW34", 'MATCH ANY SHORTEST (x IS A&B)-[:R]->+(t:T) RETURN x.name', GQL),
+    ("DW35", 'MATCH ANY SHORTEST (x:A&B)-[:R]->+(t:T) RETURN x.name', GQL),
+    ("DW36", 'MATCH ANY SHORTEST (x:A|B)-[:R]->+(t:T) RETURN x.name', GQL),
+    ("DW37", 'MATCH ANY SHORTEST (x:!A)-[:R]->+(t:T) RETURN x.name', GQL),
+    ("DW38", 'MATCH ANY SHORTEST (x:%)-[:R]->+(t:T) RETURN x.name', GQL),
+    ("DW39", 'MATCH ANY SHORTEST (x:(A))-[:R]->+(t:T) RETURN x.name', GQL),
+    ("DW40", 'MATCH ANY SHORTEST (x:Z&A)-[:R]->+(t:T) RETURN x.name', GQL),
+    ("DW41", 'MATCH (x:A)((a)-[:R]->(b)){1,1}(t:T) RETURN x.name', GQL),
+    ("DW42", 'MATCH (x:A:B)((a)-[:R]->(b)){1,1}(t:T) RETURN x.name', GQL),
+    ("DW43", 'MATCH (x IS A)((a)-[:R]->(b)){1,1}(t:T) RETURN x.name', GQL),
+    ("DW44", 'MATCH (x IS A&B)((a)-[:R]->(b)){1,1}(t:T) RETURN x.name', GQL),
+    ("DW45", 'MATCH (x:A&B)((a)-[:R]->(b)){1,1}(t:T) RETURN x.name', GQL),
+    ("DW46", 'MATCH (x:A|B)((a)-[:R]->(b)){1,1}(t:T) RETURN x.name', GQL),
+    ("DW47", 'MATCH (x:!A)((a)-[:R]->(b)){1,1}(t:T) RETURN x.name', GQL),
+    ("DW48", 'MATCH (x:%)((a)-[:R]->(b)){1,1}(t:T) RETURN x.name', GQL),
+    ("DW49", 'MATCH (x:(A))((a)-[:R]->(b)){1,1}(t:T) RETURN x.name', GQL),
+    ("DW50", 'MATCH (x:Z&A)((a)-[:R]->(b)){1,1}(t:T) RETURN x.name', GQL),
+    ("DW51", 'MATCH (u:T), (x:A)-[:R]->(u) RETURN x.name', GQL),
+    ("DW52", 'MATCH (u:T), (x:A:B)-[:R]->(u) RETURN x.name', GQL),
+    ("DW53", 'MATCH (u:T), (x IS A)-[:R]->(u) RETURN x.name', GQL),
+    ("DW54", 'MATCH (u:T), (x IS A&B)-[:R]->(u) RETURN x.name', GQL),
+    ("DW55", 'MATCH (u:T), (x:A&B)-[:R]->(u) RETURN x.name', GQL),
+    ("DW56", 'MATCH (u:T), (x:A|B)-[:R]->(u) RETURN x.name', GQL),
+    ("DW57", 'MATCH (u:T), (x:!A)-[:R]->(u) RETURN x.name', GQL),
+    ("DW58", 'MATCH (u:T), (x:%)-[:R]->(u) RETURN x.name', GQL),
+    ("DW59", 'MATCH (u:T), (x:(A))-[:R]->(u) RETURN x.name', GQL),
+    ("DW60", 'MATCH (u:T), (x:Z&A)-[:R]->(u) RETURN x.name', GQL),
+    ("DW61", 'MATCH (x {k: 1}) MATCH (x:A)-[:R]->(t:T) RETURN x.name', GQL),
+    ("DW62", 'MATCH (x {k: 1}) MATCH (x:A:B)-[:R]->(t:T) RETURN x.name', GQL),
+    ("DW63", 'MATCH (x {k: 1}) MATCH (x IS A)-[:R]->(t:T) RETURN x.name', GQL),
+    ("DW64", 'MATCH (x {k: 1}) MATCH (x IS A&B)-[:R]->(t:T) RETURN x.name', GQL),
+    ("DW65", 'MATCH (x {k: 1}) MATCH (x:A&B)-[:R]->(t:T) RETURN x.name', GQL),
+    ("DW66", 'MATCH (x {k: 1}) MATCH (x:A|B)-[:R]->(t:T) RETURN x.name', GQL),
+    ("DW67", 'MATCH (x {k: 1}) MATCH (x:!A)-[:R]->(t:T) RETURN x.name', GQL),
+    ("DW68", 'MATCH (x {k: 1}) MATCH (x:%)-[:R]->(t:T) RETURN x.name', GQL),
+    ("DW69", 'MATCH (x {k: 1}) MATCH (x:(A))-[:R]->(t:T) RETURN x.name', GQL),
+    ("DW70", 'MATCH (x {k: 1}) MATCH (x:Z&A)-[:R]->(t:T) RETURN x.name', GQL),
+    ("DW71", 'OPTIONAL MATCH (x:A)-[:R]->(t:T) RETURN x.name', GQL),
+    ("DW72", 'OPTIONAL MATCH (x:A:B)-[:R]->(t:T) RETURN x.name', GQL),
+    ("DW73", 'OPTIONAL MATCH (x IS A)-[:R]->(t:T) RETURN x.name', GQL),
+    ("DW74", 'OPTIONAL MATCH (x IS A&B)-[:R]->(t:T) RETURN x.name', GQL),
+    ("DW75", 'OPTIONAL MATCH (x:A&B)-[:R]->(t:T) RETURN x.name', GQL),
+    ("DW76", 'OPTIONAL MATCH (x:A|B)-[:R]->(t:T) RETURN x.name', GQL),
+    ("DW77", 'OPTIONAL MATCH (x:!A)-[:R]->(t:T) RETURN x.name', GQL),
+    ("DW78", 'OPTIONAL MATCH (x:%)-[:R]->(t:T) RETURN x.name', GQL),
+    ("DW79", 'OPTIONAL MATCH (x:(A))-[:R]->(t:T) RETURN x.name', GQL),
+    ("DW80", 'OPTIONAL MATCH (x:Z&A)-[:R]->(t:T) RETURN x.name', GQL),
+    ("DW81", 'MATCH (y {k: 1}) WHERE EXISTS { MATCH (y:A)-[:R]->(t:T) } RETURN y.name', GQL),
+    ("DW82", 'MATCH (y {k: 1}) WHERE EXISTS { MATCH (y:A:B)-[:R]->(t:T) } RETURN y.name', GQL),
+    ("DW83", 'MATCH (y {k: 1}) WHERE EXISTS { MATCH (y IS A)-[:R]->(t:T) } RETURN y.name', GQL),
+    ("DW84", 'MATCH (y {k: 1}) WHERE EXISTS { MATCH (y IS A&B)-[:R]->(t:T) } RETURN y.name', GQL),
+    ("DW85", 'MATCH (y {k: 1}) WHERE EXISTS { MATCH (y:A&B)-[:R]->(t:T) } RETURN y.name', GQL),
+    ("DW86", 'MATCH (y {k: 1}) WHERE EXISTS { MATCH (y:A|B)-[:R]->(t:T) } RETURN y.name', GQL),
+    ("DW87", 'MATCH (y {k: 1}) WHERE EXISTS { MATCH (y:!A)-[:R]->(t:T) } RETURN y.name', GQL),
+    ("DW88", 'MATCH (y {k: 1}) WHERE EXISTS { MATCH (y:%)-[:R]->(t:T) } RETURN y.name', GQL),
+    ("DW89", 'MATCH (y {k: 1}) WHERE EXISTS { MATCH (y:(A))-[:R]->(t:T) } RETURN y.name', GQL),
+    ("DW90", 'MATCH (y {k: 1}) WHERE EXISTS { MATCH (y:Z&A)-[:R]->(t:T) } RETURN y.name', GQL),
+    ("DW91", 'MATCH (t:T) RETURN COUNT { MATCH (x:A)-[:R]->(t) } AS c', GQL),
+    ("DW92", 'MATCH (t:T) RETURN COUNT { MATCH (x:A:B)-[:R]->(t) } AS c', GQL),
+    ("DW93", 'MATCH (t:T) RETURN COUNT { MATCH (x IS A)-[:R]->(t) } AS c', GQL),
+    ("DW94", 'MATCH (t:T) RETURN COUNT { MATCH (x IS A&B)-[:R]->(t) } AS c', GQL),
+    ("DW95", 'MATCH (t:T) RETURN COUNT { MATCH (x:A&B)-[:R]->(t) } AS c', GQL),
+    ("DW96", 'MATCH (t:T) RETURN COUNT { MATCH (x:A|B)-[:R]->(t) } AS c', GQL),
+    ("DW97", 'MATCH (t:T) RETURN COUNT { MATCH (x:!A)-[:R]->(t) } AS c', GQL),
+    ("DW98", 'MATCH (t:T) RETURN COUNT { MATCH (x:%)-[:R]->(t) } AS c', GQL),
+    ("DW99", 'MATCH (t:T) RETURN COUNT { MATCH (x:(A))-[:R]->(t) } AS c', GQL),
+    ("DW100", 'MATCH (t:T) RETURN COUNT { MATCH (x:Z&A)-[:R]->(t) } AS c', GQL),
+    ("DW101", 'CALL { MATCH (x:A)-[:R]->(t:T) RETURN x.name AS r } RETURN r', GQL),
+    ("DW102", 'CALL { MATCH (x:A:B)-[:R]->(t:T) RETURN x.name AS r } RETURN r', GQL),
+    ("DW103", 'CALL { MATCH (x IS A)-[:R]->(t:T) RETURN x.name AS r } RETURN r', GQL),
+    ("DW104", 'CALL { MATCH (x IS A&B)-[:R]->(t:T) RETURN x.name AS r } RETURN r', GQL),
+    ("DW105", 'CALL { MATCH (x:A&B)-[:R]->(t:T) RETURN x.name AS r } RETURN r', GQL),
+    ("DW106", 'CALL { MATCH (x:A|B)-[:R]->(t:T) RETURN x.name AS r } RETURN r', GQL),
+    ("DW107", 'CALL { MATCH (x:!A)-[:R]->(t:T) RETURN x.name AS r } RETURN r', GQL),
+    ("DW108", 'CALL { MATCH (x:%)-[:R]->(t:T) RETURN x.name AS r } RETURN r', GQL),
+    ("DW109", 'CALL { MATCH (x:(A))-[:R]->(t:T) RETURN x.name AS r } RETURN r', GQL),
+    ("DW110", 'CALL { MATCH (x:Z&A)-[:R]->(t:T) RETURN x.name AS r } RETURN r', GQL),
+    ("DW111", 'MATCH (t:T)-[:S]->(x:A) RETURN x.name', GQL),
+    ("DW112", 'MATCH (t:T)-[:S]->(x:A:B) RETURN x.name', GQL),
+    ("DW113", 'MATCH (t:T)-[:S]->(x IS A) RETURN x.name', GQL),
+    ("DW114", 'MATCH (t:T)-[:S]->(x IS A&B) RETURN x.name', GQL),
+    ("DW115", 'MATCH (t:T)-[:S]->(x:A&B) RETURN x.name', GQL),
+    ("DW116", 'MATCH (t:T)-[:S]->(x:A|B) RETURN x.name', GQL),
+    ("DW117", 'MATCH (t:T)-[:S]->(x:!A) RETURN x.name', GQL),
+    ("DW118", 'MATCH (t:T)-[:S]->(x:%) RETURN x.name', GQL),
+    ("DW119", 'MATCH (t:T)-[:S]->(x:(A)) RETURN x.name', GQL),
+    ("DW120", 'MATCH (t:T)-[:S]->(x:Z&A) RETURN x.name', GQL),
+    ("DW121", 'SELECT r FROM GRAPH_TABLE (MATCH (x:A)-[:R]->(t IS T) COLUMNS (x.name AS r))', SQL),
+    ("DW122", 'SELECT r FROM GRAPH_TABLE (MATCH (x:A:B)-[:R]->(t IS T) COLUMNS (x.name AS r))', SQL),
+    ("DW123", 'SELECT r FROM GRAPH_TABLE (MATCH (x IS A)-[:R]->(t IS T) COLUMNS (x.name AS r))', SQL),
+    ("DW124", 'SELECT r FROM GRAPH_TABLE (MATCH (x IS A&B)-[:R]->(t IS T) COLUMNS (x.name AS r))', SQL),
+    ("DW125", 'SELECT r FROM GRAPH_TABLE (MATCH (x:A&B)-[:R]->(t IS T) COLUMNS (x.name AS r))', SQL),
+    ("DW126", 'SELECT r FROM GRAPH_TABLE (MATCH (x:A|B)-[:R]->(t IS T) COLUMNS (x.name AS r))', SQL),
+    ("DW127", 'SELECT r FROM GRAPH_TABLE (MATCH (x:!A)-[:R]->(t IS T) COLUMNS (x.name AS r))', SQL),
+    ("DW128", 'SELECT r FROM GRAPH_TABLE (MATCH (x:%)-[:R]->(t IS T) COLUMNS (x.name AS r))', SQL),
+    ("DW129", 'SELECT r FROM GRAPH_TABLE (MATCH (x:(A))-[:R]->(t IS T) COLUMNS (x.name AS r))', SQL),
+    ("DW130", 'SELECT r FROM GRAPH_TABLE (MATCH (x:Z&A)-[:R]->(t IS T) COLUMNS (x.name AS r))', SQL),
+]:
+    case(case_id, query, languages, "label_mix")
+
+# DX: what a statement changes follows the expression (0.6.1 changed every source with the edge,
+#     which a DETACH DELETE removed), and INSERT and MERGE set `IS A` and `A&B`, where 0.6.1
+#     created a node with no label, and refuse `|`, `!`, `%` and parentheses, naming the
+#     statement. In corpus order, on a fixture of its own.
+for case_id, query in [
+    ("DX1", "INSERT (a:A {name: 'Alix', k: 1}), (g:B {name: 'Gus', k: 1}), (v:A:B {name: 'Vincent', k: 1}), (j:C {name: 'Jules', k: 1}), (m {name: 'Mia', k: 1}), (t:T {name: 'Amsterdam', tk: 1}), (a)-[:R]->(t), (g)-[:R]->(t), (v)-[:R]->(t), (j)-[:R]->(t), (m)-[:R]->(t), (t)-[:S]->(a), (t)-[:S]->(g), (t)-[:S]->(v), (t)-[:S]->(j), (t)-[:S]->(m)"),
+    ("DX2", 'MATCH (x:A&B)-[:R]->(t:T) SET x.hit = true'),
+    ("DX3", 'MATCH (x) RETURN x.name AS n, x.hit AS hit'),
+    ("DX4", 'MATCH (x IS A)-[:R]->(t:T) SET x.hit2 = true'),
+    ("DX5", 'MATCH (x) RETURN x.name AS n, x.hit2 AS hit'),
+    ("DX6", 'MATCH (x:!A)-[:R]->(t:T) REMOVE x.k'),
+    ("DX7", 'MATCH (x) RETURN x.name AS n, x.k AS k'),
+    ("DX8", 'MATCH (x:A&!B)-[r:R]->(t:T) DELETE r'),
+    ("DX9", 'MATCH (x)-[:R]->() RETURN x.name AS n'),
+    ("DX10", 'MATCH (x:A&B)-[:R]->(t:T) DETACH DELETE x'),
+    ("DX11", 'MATCH (x) RETURN x.name AS n'),
+    ("DX12", 'MATCH (x) DETACH DELETE x'),
+    ("DX13", 'INSERT (n IS P {k: 1})'),
+    ("DX14", 'INSERT (n:P&Q {k: 2})'),
+    ("DX15", 'INSERT (n IS P)-[:R]->(m:P&Q {k: 3})'),
+    ("DX16", 'MATCH (x) RETURN x.k AS k, size(labels(x)) AS labels'),
+    ("DX17", 'INSERT (n:P|Q {k: 9})'),
+    ("DX18", 'INSERT (n:!P {k: 9})'),
+    ("DX19", 'INSERT (n:% {k: 9})'),
+    ("DX20", 'INSERT (n:(P) {k: 9})'),
+    ("DX21", 'MERGE (n IS P {k: 1})'),
+    ("DX22", 'MERGE (n IS Other {k: 1})'),
+    ("DX23", 'MERGE (n:P&Q {k: 1})'),
+    ("DX24", 'MERGE (n:P|Q {k: 9})'),
+    ("DX25", 'MATCH (x) RETURN x.k AS k, size(labels(x)) AS labels'),
+]:
+    case(case_id, query, GQL, "label_writes")
 
 # fmt: on

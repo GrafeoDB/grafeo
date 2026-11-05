@@ -15,7 +15,7 @@
 //! more such statement.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test gql_statement_order
+//! cargo test -p grafeo-engine --all-features --test main gql_statement_order::
 //! ```
 
 #![cfg(feature = "gql")]

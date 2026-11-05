@@ -14,11 +14,14 @@
 //! - More accurate range selectivity than assuming uniform distribution
 //! - Adaptive to actual data characteristics
 
+use super::closing_hops::id_of;
 use crate::query::plan::{
     AggregateOp, BinaryOp, DistinctOp, ExpandOp, FilterOp, JoinOp, JoinType, LeftJoinOp, LimitOp,
     LogicalExpression, LogicalOperator, MultiWayJoinOp, NodeScanOp, ProjectOp, SkipOp, SortOp,
     TextScanOp, TripleComponent, TripleScanOp, UnaryOp, VectorJoinOp, VectorScanOp,
 };
+use crate::query::planner::lpg::scan::label_check;
+use crate::query::planner::lpg::seek::split_conjuncts;
 use std::collections::HashMap;
 
 /// A bucket in an equi-depth histogram.
@@ -560,6 +563,15 @@ impl EstimationLog {
     }
 }
 
+/// The hop with named edge types below `op`, through filters.
+fn typed_hop_below(op: &LogicalOperator) -> Option<&ExpandOp> {
+    match op {
+        LogicalOperator::Filter(filter) => typed_hop_below(&filter.input),
+        LogicalOperator::Expand(expand) if !expand.edge_types.is_empty() => Some(expand),
+        _ => None,
+    }
+}
+
 /// Cardinality estimator.
 pub struct CardinalityEstimator {
     /// Statistics for each label/table.
@@ -568,6 +580,8 @@ pub struct CardinalityEstimator {
     default_row_count: u64,
     /// Default selectivity for unknown predicates.
     default_selectivity: f64,
+    /// The degree of a hop from the store's counts, where they say.
+    hop_degrees: Option<std::sync::Arc<super::HopDegrees>>,
     /// Average edge fanout (outgoing edges per node).
     avg_fanout: f64,
     /// Configurable selectivity defaults.
@@ -585,6 +599,7 @@ impl CardinalityEstimator {
             table_stats: HashMap::new(),
             default_row_count: 1000,
             default_selectivity: config.default,
+            hop_degrees: None,
             avg_fanout: 10.0,
             selectivity_config: config,
             rdf_statistics: None,
@@ -598,6 +613,7 @@ impl CardinalityEstimator {
             table_stats: HashMap::new(),
             default_row_count: 1000,
             default_selectivity: config.default,
+            hop_degrees: None,
             avg_fanout: 10.0,
             selectivity_config: config,
             rdf_statistics: None,
@@ -679,6 +695,13 @@ impl CardinalityEstimator {
     /// Adds statistics for a table/label.
     pub fn add_table_stats(&mut self, name: &str, stats: TableStats) {
         self.table_stats.insert(name.to_string(), stats);
+    }
+
+    /// Sets the average edge fanout.
+    #[must_use]
+    pub fn with_hop_degrees(mut self, degrees: std::sync::Arc<super::HopDegrees>) -> Self {
+        self.hop_degrees = Some(degrees);
+        self
     }
 
     /// Sets the average edge fanout.
@@ -784,7 +807,20 @@ impl CardinalityEstimator {
     /// Estimates filter cardinality.
     fn estimate_filter(&self, filter: &FilterOp) -> f64 {
         let input_cardinality = self.estimate(&filter.input);
-        let selectivity = self.estimate_selectivity(&filter.predicate);
+        let selectivity = match typed_hop_below(&filter.input) {
+            // A label check of a typed hop's far end usually holds (every
+            // HAS_INTEREST target is a Tag), and no count says how often it fails.
+            Some(expand) => {
+                let mut conjuncts = Vec::new();
+                split_conjuncts(&filter.predicate, &mut conjuncts);
+                conjuncts
+                    .into_iter()
+                    .filter(|conjunct| label_check(conjunct, &expand.to_variable).is_none())
+                    .map(|conjunct| self.estimate_selectivity(conjunct))
+                    .product()
+            }
+            None => self.estimate_selectivity(&filter.predicate),
+        };
         (input_cardinality * selectivity).max(1.0)
     }
 
@@ -798,7 +834,13 @@ impl CardinalityEstimator {
         let input_cardinality = self.estimate(&expand.input);
 
         // Apply fanout based on edge type
-        let fanout = if !expand.edge_types.is_empty() {
+        let fanout = if let Some(degree) = self
+            .hop_degrees
+            .as_ref()
+            .and_then(|degrees| degrees.of(expand))
+        {
+            degree
+        } else if !expand.edge_types.is_empty() {
             // Specific edge type(s) typically have lower fanout
             self.avg_fanout * 0.5
         } else {
@@ -1053,6 +1095,33 @@ impl CardinalityEstimator {
         }
     }
 
+    /// `id(a) < c`, or the same turned round, read from the id range: ids run from 0
+    /// past the node count, so the share below `c` is `c` over that count. `None` for
+    /// anything but an integer. Deleted ids make it wrong, never the rows.
+    fn id_range_selectivity(
+        &self,
+        left: &LogicalExpression,
+        op: BinaryOp,
+        right: &LogicalExpression,
+    ) -> Option<f64> {
+        let (limit, id_is_below) = match (id_of(left), id_of(right)) {
+            (Some(_), None) => (right, matches!(op, BinaryOp::Lt | BinaryOp::Le)),
+            (None, Some(_)) => (left, matches!(op, BinaryOp::Gt | BinaryOp::Ge)),
+            _ => return None,
+        };
+        if !matches!(
+            op,
+            BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge
+        ) {
+            return None;
+        }
+        let LogicalExpression::Literal(grafeo_common::types::Value::Int64(limit)) = limit else {
+            return None;
+        };
+        let below = (*limit as f64 / (self.default_row_count as f64).max(1.0)).clamp(0.0, 1.0);
+        Some(if id_is_below { below } else { 1.0 - below })
+    }
+
     /// Estimates binary expression selectivity.
     fn estimate_binary_selectivity(
         &self,
@@ -1134,6 +1203,9 @@ impl CardinalityEstimator {
         op: BinaryOp,
         right: &LogicalExpression,
     ) -> Option<f64> {
+        if let Some(selectivity) = self.id_range_selectivity(left, op, right) {
+            return Some(selectivity);
+        }
         // Extract property access and literal value
         let (label, column, value) = self.extract_column_and_value(left, right)?;
 

@@ -6,7 +6,7 @@
 //! `recompact()`, and a close and reopen.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test compact_unlabeled_nodes
+//! cargo test -p grafeo-engine --all-features --test main compact_unlabeled_nodes::
 //! ```
 
 #![cfg(feature = "gql")]

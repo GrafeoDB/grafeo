@@ -116,6 +116,8 @@ pub struct CostModel {
     avg_tuple_size: f64,
     /// Page size in bytes.
     page_size: f64,
+    /// The degree of a hop from the store's counts, where they say.
+    hop_degrees: Option<std::sync::Arc<super::HopDegrees>>,
     /// Global average edge fanout (fallback when per-type stats unavailable).
     avg_fanout: f64,
     /// Per-edge-type degree stats: (avg_out_degree, avg_in_degree).
@@ -128,6 +130,74 @@ pub struct CostModel {
     total_edges: u64,
 }
 
+/// What the join search's steps cost, in nanoseconds, as measured on a release build
+/// over a medium social graph (2026-11-02, review's `costs.log`). The search compares
+/// plans in these; the model's older units serve the rest of the optimizer.
+pub(super) mod measured {
+    /// One row a node scan gives.
+    pub const SCAN_ROW: f64 = 5.67;
+    /// Asking for one input row's list, through the operator.
+    pub const LIST_CALL: f64 = 69.0;
+    /// One entry of a list read.
+    pub const LIST_ENTRY: f64 = 18.0;
+    /// One far-end label check.
+    pub const LABEL_CHECK: f64 = 22.0;
+    /// One row an expand gives.
+    pub const EXPAND_OUTPUT: f64 = 25.0;
+    /// One lookup of the edges between two nodes, flat with the degree.
+    pub const LOOKUP: f64 = 155.0;
+    /// One check of a node's property in a filter over a scan, from graph-bench's whole scan
+    /// with the filter; it falls when a scan compares a key's column itself.
+    pub const PROPERTY_CHECK: f64 = 95.0;
+    /// One row a hash table is built with.
+    pub const HASH_BUILD: f64 = 340.0;
+    /// One row probing a hash table.
+    pub const HASH_PROBE: f64 = 44.0;
+    /// One row a hash join gives, at one column.
+    pub const JOIN_OUTPUT: f64 = 210.0;
+    /// Each further column of a row a hash join gives: 514 at four columns.
+    pub const JOIN_OUTPUT_COLUMN: f64 = 101.0;
+    /// What one of the model's older units costs, to price a relation the search
+    /// takes whole: its tuple cost (0.01) as an expand's output row.
+    pub const OLD_UNIT: f64 = EXPAND_OUTPUT / 0.01;
+
+    /// A hop over `input` rows that reads `read` list entries and gives `output`
+    /// rows, checking a far-end label on each entry when `checks_label`.
+    #[must_use]
+    pub fn hop(input: f64, read: f64, output: f64, checks_label: bool) -> f64 {
+        let checks = if checks_label {
+            read * LABEL_CHECK
+        } else {
+            0.0
+        };
+        input * LIST_CALL + read * LIST_ENTRY + checks + output * EXPAND_OUTPUT
+    }
+
+    /// A hop over `input` rows that looks its bound far end up.
+    #[must_use]
+    pub fn closing_hop(input: f64, output: f64) -> f64 {
+        input * LOOKUP + output * EXPAND_OUTPUT
+    }
+
+    /// Two hops over `input` rows run as one intersection of lists of `near` and `far`
+    /// entries per row, giving `output` rows: two list calls per row, and a gallop from
+    /// the shorter list. Each probe taken as a list entry: not measured on its own.
+    #[must_use]
+    pub fn intersection(input: f64, near: f64, far: f64, output: f64) -> f64 {
+        let (short, long) = if near < far { (near, far) } else { (far, near) };
+        let probes = short * (1.0 + (long / short.max(1.0)).max(1.0).log2());
+        input * (2.0 * LIST_CALL + probes * LIST_ENTRY) + output * EXPAND_OUTPUT
+    }
+
+    /// A hash join that builds `build` rows, probes `probe` and gives `output` of
+    /// `columns` columns.
+    #[must_use]
+    pub fn hash_join(build: f64, probe: f64, output: f64, columns: u32) -> f64 {
+        let width = JOIN_OUTPUT + JOIN_OUTPUT_COLUMN * f64::from(columns.max(1) - 1);
+        build * HASH_BUILD + probe * HASH_PROBE + output * width
+    }
+}
+
 impl CostModel {
     /// Creates a new cost model with calibrated default parameters.
     #[must_use]
@@ -138,12 +208,26 @@ impl CostModel {
             sort_comparison_cost: 0.02,
             avg_tuple_size: 100.0,
             page_size: 8192.0,
+            hop_degrees: None,
             avg_fanout: 10.0,
             edge_type_degrees: HashMap::new(),
             label_cardinalities: HashMap::new(),
             total_nodes: 0,
             total_edges: 0,
         }
+    }
+
+    /// Derives each hop's degree from the store's counts.
+    #[must_use]
+    pub fn with_hop_degrees(mut self, degrees: std::sync::Arc<super::HopDegrees>) -> Self {
+        self.hop_degrees = Some(degrees);
+        self
+    }
+
+    /// The counts each hop's degree derives from, when the model has them.
+    #[must_use]
+    pub(super) fn hop_degrees(&self) -> Option<&super::HopDegrees> {
+        self.hop_degrees.as_deref()
     }
 
     /// Sets the global average fanout from graph statistics.
@@ -182,6 +266,13 @@ impl CostModel {
     /// Uses per-edge-type degree stats when available, falling back to the
     /// global average fanout. For multiple edge types, sums per-type fanouts.
     fn fanout_for_expand(&self, expand: &ExpandOp) -> f64 {
+        if let Some(degree) = self
+            .hop_degrees
+            .as_ref()
+            .and_then(|degrees| degrees.of(expand))
+        {
+            return degree;
+        }
         if expand.edge_types.is_empty() {
             return self.avg_fanout;
         }
@@ -216,7 +307,16 @@ impl CostModel {
             LogicalOperator::NodeScan(scan) => self.node_scan_cost(scan, cardinality),
             LogicalOperator::Filter(filter) => self.filter_cost(filter, cardinality),
             LogicalOperator::Project(project) => self.project_cost(project, cardinality),
-            LogicalOperator::Expand(expand) => self.expand_cost(expand, cardinality),
+            // `cardinality` is the rows it gives, its fanout already in.
+            LogicalOperator::Expand(expand) => {
+                let fanout = self.fanout_for_expand(expand);
+                let input = if fanout > 0.0 {
+                    cardinality / fanout
+                } else {
+                    cardinality
+                };
+                self.expand_cost(expand, input)
+            }
             LogicalOperator::Join(join) => self.join_cost(join, cardinality),
             LogicalOperator::Aggregate(agg) => self.aggregate_cost(agg, cardinality),
             LogicalOperator::Sort(sort) => self.sort_cost(sort, cardinality),
@@ -276,12 +376,12 @@ impl CostModel {
     ///
     /// Uses per-edge-type degree stats when available, otherwise falls back
     /// to the global average fanout.
-    fn expand_cost(&self, expand: &ExpandOp, cardinality: f64) -> Cost {
+    fn expand_cost(&self, expand: &ExpandOp, input_rows: f64) -> Cost {
         let fanout = self.fanout_for_expand(expand);
         // Adjacency list lookup per input row
-        let lookup_cost = cardinality * self.hash_lookup_cost;
+        let lookup_cost = input_rows * self.hash_lookup_cost;
         // Process each expanded output tuple
-        let output_cost = cardinality * fanout * self.cpu_tuple_cost;
+        let output_cost = input_rows * fanout * self.cpu_tuple_cost;
         Cost::cpu(lookup_cost + output_cost)
     }
 
@@ -565,7 +665,7 @@ impl CostModel {
             }
             LogicalOperator::Expand(expand) => {
                 let child_cost = self.estimate_tree_inner(&expand.input, card_est);
-                child_cost + self.expand_cost(expand, cardinality)
+                child_cost + self.expand_cost(expand, card_est.estimate(&expand.input))
             }
             LogicalOperator::Join(join) => {
                 let left_cost = self.estimate_tree_inner(&join.left, card_est);
@@ -1368,6 +1468,39 @@ mod tests {
             "Person ({}) should have much higher IO than Company ({})",
             person_cost.io,
             company_cost.io
+        );
+    }
+
+    /// A hop that reaches few rows still reads its whole input: the input comes back from the
+    /// rows given and the fanout, also when the fanout is below one.
+    #[test]
+    fn a_fanout_below_one_costs_the_rows_it_reads() {
+        let expand = |edge_type: &str| {
+            LogicalOperator::Expand(ExpandOp {
+                from_variable: "a".to_string(),
+                to_variable: "b".to_string(),
+                edge_variable: None,
+                direction: ExpandDirection::Outgoing,
+                edge_types: vec![edge_type.to_string()],
+                min_hops: 1,
+                max_hops: Some(1),
+                input: Box::new(LogicalOperator::Empty),
+                path_alias: None,
+                path_mode: crate::query::plan::PathMode::Walk,
+                quantified: false,
+            })
+        };
+        let model = CostModel::new().with_edge_type_degrees(std::collections::HashMap::from([
+            ("SPARSE".to_string(), (0.1, 0.1)),
+            ("ONE".to_string(), (1.0, 1.0)),
+        ]));
+        let sparse = model.estimate(&expand("SPARSE"), 100.0);
+        let one = model.estimate(&expand("ONE"), 100.0);
+        assert!(
+            sparse.total() > one.total(),
+            "100 rows from 1,000 inputs against 100 from 100: {} and {}",
+            sparse.total(),
+            one.total()
         );
     }
 

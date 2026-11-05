@@ -8,7 +8,7 @@
 //! once, and the segments of 0.6.0.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test wal_damage
+//! cargo test -p grafeo-engine --all-features --test main wal_damage::
 //! ```
 
 #![cfg(all(feature = "gql", feature = "wal", feature = "grafeo-file", not(miri)))]
@@ -249,12 +249,8 @@ fn segments_after_a_crash(path: &Path) -> Vec<PathBuf> {
     db.execute("INSERT (:Person {name: 'Alix'})").unwrap();
     db.close().unwrap();
     drop(db);
-    let status = child_process::run(
-        std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "crash_child", "--nocapture"])
-            .env(PATH_VAR, path),
-    )
-    .unwrap();
+    let status =
+        child_process::run(grafeo_common::child_test!("crash_child").env(PATH_VAR, path)).unwrap();
     assert!(status.success(), "the child failed");
     let mut segments: Vec<PathBuf> = std::fs::read_dir(sidecar(path))
         .unwrap()

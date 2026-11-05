@@ -3,7 +3,7 @@
 //! queries all return the store's error.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test read_errors
+//! cargo test -p grafeo-engine --all-features --test main read_errors::
 //! ```
 
 use std::sync::Arc;

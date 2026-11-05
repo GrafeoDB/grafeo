@@ -388,7 +388,7 @@ jobs:
 
       - name: Install dependencies
         working-directory: crates/bindings/node
-        run: npm install
+        run: npm ci
 
       - name: Build native module
         working-directory: crates/bindings/node
@@ -429,7 +429,7 @@ jobs:
 
       - name: Install dependencies
         working-directory: crates/bindings/node
-        run: npm install
+        run: npm ci
 
       - name: Download all Node.js artifacts
         uses: actions/download-artifact@v8
@@ -449,6 +449,10 @@ jobs:
           echo "=== Platform packages ==="
           find npm -name '*.node' -ls
 
+      - name: Check that every platform has its binary
+        working-directory: crates/bindings/node
+        run: bash "$GITHUB_WORKSPACE/scripts/node-platform-deps.sh" binaries
+
       - name: Update npm (trusted publishing needs 11.5.1 or later)
         run: npm install -g npm@^11.5.1
 
@@ -456,14 +460,22 @@ jobs:
         working-directory: crates/bindings/node
         run: |
           for dir in npm/*/; do
-            if ls "$dir"*.node 1>/dev/null 2>&1; then
-              (cd "$dir" && bash "$GITHUB_WORKSPACE/scripts/npm-publish.sh")
-            fi
+            (cd "$dir" && bash "$GITHUB_WORKSPACE/scripts/npm-publish.sh")
           done
+
+      - name: Add the platform packages to the manifest
+        working-directory: crates/bindings/node
+        run: |
+          bash "$GITHUB_WORKSPACE/scripts/node-platform-deps.sh" add "$(node -p "require('./package.json').version")"
+          cat package.json
 
       - name: Publish @grafeo-db/js
         working-directory: crates/bindings/node
         run: bash "$GITHUB_WORKSPACE/scripts/npm-publish.sh" --ignore-scripts
+
+      - name: Check the published manifest
+        working-directory: crates/bindings/node
+        run: bash "$GITHUB_WORKSPACE/scripts/node-platform-deps.sh" published "$(node -p "require('./package.json').version")"
 
   # Publish WASM package to npm
   publish-wasm:
@@ -659,6 +671,9 @@ jobs:
     runs-on: ubuntu-latest
     needs: build-binaries
     environment: nuget
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@v7
 
@@ -688,8 +703,27 @@ jobs:
         working-directory: crates/bindings/csharp/src/Grafeo
         run: dotnet pack -c Release -o ../../nupkg
 
+      # Trusted publishing: a short-lived key, valid for an hour, so it is requested
+      # right before the push. The policy on nuget.org names this file and environment.
+      - name: Get a NuGet key
+        id: nuget-login
+        uses: NuGet/login@v1
+        with:
+          user: StevenBtw
+
       - name: Publish to NuGet
-        run: dotnet nuget push "crates/bindings/csharp/nupkg/*.nupkg" --api-key ${{ secrets.NUGET_API_KEY }} --source https://api.nuget.org/v3/index.json --skip-duplicate
+        run: dotnet nuget push "crates/bindings/csharp/nupkg/*.nupkg" --api-key ${{ steps.nuget-login.outputs.NUGET_API_KEY }} --source https://api.nuget.org/v3/index.json --skip-duplicate
+
+  # Publish the Dart package to pub.dev. The policy on pub.dev names this repository,
+  # the tag pattern and the environment.
+  publish-pub-dev:
+    name: Publish to pub.dev
+    permissions:
+      id-token: write
+    uses: dart-lang/setup-dart/.github/workflows/publish.yml@v1
+    with:
+      working-directory: crates/bindings/dart
+      environment: dart
 
   # Build CLI Python wheels using workflow artifacts (no release asset race)
   build-cli-wheels:
@@ -786,7 +820,7 @@ jobs:
   notify-discord:
     name: Discord Release Notification
     runs-on: ubuntu-latest
-    needs: [publish-crates, publish-npm, publish-wasm, publish-nuget, publish-cli]
+    needs: [publish-crates, publish-npm, publish-wasm, publish-nuget, publish-pub-dev, publish-cli]
     if: always() && needs.publish-crates.result != 'cancelled'
     steps:
       - uses: actions/checkout@v7

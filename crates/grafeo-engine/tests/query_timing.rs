@@ -3,7 +3,7 @@
 //! `EXPLAIN`, `PROFILE`, `SHOW`, schema and session commands too.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test query_timing
+//! cargo test -p grafeo-engine --all-features --test main query_timing::
 //! ```
 
 use std::collections::HashMap;

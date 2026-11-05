@@ -60,11 +60,13 @@ mod checkpoint;
 mod collect;
 mod column;
 mod compress;
+mod degree_samples;
 mod diagnostics;
 mod epochs;
 mod graphs;
 mod history;
 mod index;
+mod key_column;
 mod load;
 mod read;
 pub mod section;
@@ -91,6 +93,7 @@ pub use self::compress::CompressReport;
 pub use self::diagnostics::RowGroupMemory;
 #[cfg(any(feature = "text-index", feature = "vector-index"))]
 pub use self::index::IndexSearch;
+pub use self::key_column::KeyColumnQuery;
 pub use self::spill::{ColumnSpill, ColumnSpillReport};
 use self::updates::Updates;
 #[cfg(test)]
@@ -464,6 +467,7 @@ impl Inner {
 
     /// The node's group and row, if `read` sees the node: one lookup of
     /// its vector's versions, a bit test while the vector is flat.
+    #[inline]
     fn node_seen(&self, id: u64, read: Read) -> Option<(&NodeGroup, usize)> {
         let (group, row) = locate(id);
         let group = self.nodes.get(&group)?;
@@ -472,6 +476,7 @@ impl Inner {
 
     /// The edge's group and row, if `read` sees the edge (see
     /// [`node_seen`](Self::node_seen)).
+    #[inline]
     fn edge_seen(&self, id: u64, read: Read) -> Option<(&EdgeGroup, usize)> {
         let (group, row) = locate(id);
         let group = self.edges.get(&group)?;
@@ -658,6 +663,8 @@ pub struct RowGroupStore {
     /// The oldest epoch the store answers reads at: the newest horizon it
     /// was collected at, or the one its history was loaded from (`history`).
     floor: AtomicU64,
+    /// The degrees it has sampled for the planner (`degree_samples`).
+    degree_samples: degree_samples::DegreeSamples,
 }
 
 /// What a collect took out: rows, and the values and label sets kept for

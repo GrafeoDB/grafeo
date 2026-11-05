@@ -13,7 +13,7 @@
 //!   uncommitted ones included (18.6).
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test sparql_update_group_algebra
+//! cargo test -p grafeo-engine --all-features --test main sparql_update_group_algebra::
 //! ```
 
 #![cfg(all(feature = "sparql", feature = "triple-store"))]

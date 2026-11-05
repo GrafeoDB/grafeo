@@ -6,7 +6,7 @@
 //! reopen replays them.
 //!
 //! ```bash
-//! cargo test -p grafeo --test open_with_default_features
+//! cargo test -p grafeo --test main open_with_default_features::
 //! ```
 
 #![cfg(feature = "grafeo-file")]
@@ -82,9 +82,7 @@ fn a_process_that_exits_keeps_what_it_checkpointed() {
     let dir = test_dir("open-default-exit");
     let path = dir.join("berlin.grafeo");
     let status = child_process::run(
-        std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "exit_without_closing_child", "--nocapture"])
-            .env(PATH_VAR, &path),
+        grafeo_common::child_test!("exit_without_closing_child").env(PATH_VAR, &path),
     )
     .unwrap();
     assert!(status.success(), "the child process failed");

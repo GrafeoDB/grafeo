@@ -74,7 +74,7 @@ use super::{BitPackedInts, BitVector, DictionaryBuilder, DictionaryEncoding};
 // Point views read one row of an encoded chunk: only the row-group store
 // reads them.
 mod point;
-pub(crate) use point::PointView;
+pub(crate) use point::{DictView, PointView, bits_among};
 
 /// The most bytes of each bound of a [`StringZoneMap`]: longer strings are
 /// cut to this many.
@@ -389,6 +389,25 @@ pub fn decode_column_chunk(bytes: &[u8], codec: u8, row_count: u32) -> Result<Co
 ///
 /// As [`decode_column_chunk`].
 pub fn decode_column_chunk_bytes(data: &Bytes, codec: u8, row_count: u32) -> Result<ColumnChunk> {
+    decode_chunk(data, codec, row_count, true)
+}
+
+/// The values of a chunk a load or a spill has already checked, without
+/// reading its zone map again: the result has no `zone_map`.
+///
+/// # Errors
+///
+/// As [`decode_column_chunk`], but for the zone map.
+pub(crate) fn decode_checked_chunk(data: &Bytes, codec: u8, row_count: u32) -> Result<ColumnChunk> {
+    decode_chunk(data, codec, row_count, false)
+}
+
+fn decode_chunk(
+    data: &Bytes,
+    codec: u8,
+    row_count: u32,
+    check_zone_map: bool,
+) -> Result<ColumnChunk> {
     let bytes: &[u8] = data;
     let ChunkHeader {
         codec,
@@ -404,7 +423,7 @@ pub fn decode_column_chunk_bytes(data: &Bytes, codec: u8, row_count: u32) -> Res
     };
     let zone_start = pos;
     if flags & FLAG_ZONE_MAP != 0 {
-        skip_zone_map(codec, bytes, &mut pos)
+        read_zone_map_body(codec, bytes, &mut pos)
             .map_err(|error| corrupt(zone_start, format!("zone map: {error}")))?;
     }
     let zone_end = pos;
@@ -420,17 +439,22 @@ pub fn decode_column_chunk_bytes(data: &Bytes, codec: u8, row_count: u32) -> Res
             format!("{} bytes after the end of the values", bytes.len() - pos),
         ));
     }
-    let zone_map = zone_map(codec, values.iter())?;
-    let mut expected = Vec::new();
-    if let Some(zone_map) = &zone_map {
-        encode_zone_map(zone_map, &mut expected)?;
-    }
-    if bytes[zone_start..zone_end] != expected[..] {
-        return Err(corrupt(
-            zone_start,
-            format!("the zone map is not the values' bounds {zone_map:?}"),
-        ));
-    }
+    let zone_map = if check_zone_map {
+        let zone_map = zone_map(codec, values.iter())?;
+        let mut expected = Vec::new();
+        if let Some(zone_map) = &zone_map {
+            encode_zone_map(zone_map, &mut expected)?;
+        }
+        if bytes[zone_start..zone_end] != expected[..] {
+            return Err(corrupt(
+                zone_start,
+                format!("the zone map is not the values' bounds {zone_map:?}"),
+            ));
+        }
+        zone_map
+    } else {
+        None
+    };
     let values = match rows {
         Some(rows) => rows.into_iter().zip(values).collect(),
         None => (0u32..).zip(values).collect(),
@@ -441,6 +465,31 @@ pub fn decode_column_chunk_bytes(data: &Bytes, codec: u8, row_count: u32) -> Res
         epochs,
         zone_map,
     })
+}
+
+/// The zone map a chunk holds after its header, read with no value decoded.
+///
+/// # Errors
+///
+/// Returns corruption when the header or the zone map cannot be read.
+pub fn read_zone_map(bytes: &[u8], codec: u8, row_count: u32) -> Result<Option<ZoneMap>> {
+    let ChunkHeader {
+        codec,
+        flags,
+        sparse,
+        ..
+    } = checked_header(bytes, codec, row_count)?;
+    if flags & FLAG_ZONE_MAP == 0 {
+        return Ok(None);
+    }
+    let mut pos = HEADER_LEN;
+    if sparse {
+        pos += presence_words(row_count) * 8;
+    }
+    let start = pos;
+    read_zone_map_body(codec, bytes, &mut pos)
+        .map(Some)
+        .map_err(|error| corrupt(start, format!("zone map: {error}")))
 }
 
 /// What a chunk's header says, once [`checked_header`] has checked it.
@@ -1175,35 +1224,51 @@ fn checked_u8(length: usize) -> Result<u8> {
         })
 }
 
-/// Moves `pos` past the zone map of a `codec` chunk at `pos` in `bytes`,
-/// refusing a bound longer than [`STRING_ZONE_PREFIX`] and unknown string
-/// zone map flags; the caller then compares its bytes with the values'.
-fn skip_zone_map(
+/// Reads the zone map of a `codec` chunk at `pos` in `bytes`, moving `pos`
+/// past it, refusing a bound longer than [`STRING_ZONE_PREFIX`] and unknown
+/// string zone map flags. A decode then compares its bytes with the values'.
+fn read_zone_map_body(
     codec: ChunkCodec,
     bytes: &[u8],
     pos: &mut usize,
-) -> std::result::Result<(), String> {
+) -> std::result::Result<ZoneMap, String> {
     if codec != ChunkCodec::Dict {
-        for _ in 0..2 {
-            decode_value(bytes, pos).map_err(|error| error.to_string())?;
-        }
-        return Ok(());
+        let min = decode_value(bytes, pos).map_err(|error| error.to_string())?;
+        let max = decode_value(bytes, pos).map_err(|error| error.to_string())?;
+        return Ok(ZoneMap::Values(min, max));
     }
-    for bound in ["minimum", "maximum"] {
+    let mut read_bound = |bound: &str| {
         let length = usize::from(*bytes.get(*pos).ok_or("truncated string zone map")?);
         if length > STRING_ZONE_PREFIX {
             return Err(format!(
                 "a {bound} of {length} bytes, past {STRING_ZONE_PREFIX}"
             ));
         }
-        *pos = end_of(bytes, *pos + 1, length).ok_or("truncated string zone map")?;
-    }
+        let start = *pos + 1;
+        *pos = end_of(bytes, start, length).ok_or("truncated string zone map")?;
+        Ok(bytes[start..*pos].to_vec())
+    };
+    let min = read_bound("minimum")?;
+    let max = read_bound("maximum")?;
     let flags = *bytes.get(*pos).ok_or("truncated string zone map")?;
     if flags & !(MIN_EXACT | MAX_EXACT) != 0 {
         return Err(format!("unknown string zone map flags {flags:#04x}"));
     }
-    *pos = end_of(bytes, *pos + 1, 8).ok_or("truncated string zone map")?;
-    Ok(())
+    let lengths = *pos + 1;
+    *pos = end_of(bytes, lengths, 8).ok_or("truncated string zone map")?;
+    let length_at = |at: usize| {
+        let mut length = [0; 4];
+        length.copy_from_slice(&bytes[at..at + 4]);
+        u32::from_le_bytes(length)
+    };
+    Ok(ZoneMap::Strings(StringZoneMap {
+        min,
+        min_exact: flags & MIN_EXACT != 0,
+        max,
+        max_exact: flags & MAX_EXACT != 0,
+        min_len: length_at(lengths),
+        max_len: length_at(lengths + 4),
+    }))
 }
 
 fn min_max<T: Copy>(

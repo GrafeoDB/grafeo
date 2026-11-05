@@ -13,7 +13,7 @@
 //! rows with those of the filter itself.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test equality_with_index
+//! cargo test -p grafeo-engine --all-features --test main equality_with_index::
 //! ```
 
 use std::collections::{BTreeSet, HashMap};
@@ -148,7 +148,7 @@ fn plans(
         (
             "parameter",
             "MATCH (d:Doc) WHERE d.p = $key RETURN d.k".to_string(),
-            Some(param),
+            Some(param.clone()),
         ),
         (
             "key from the row",
@@ -158,6 +158,23 @@ fn plans(
         (
             "constant key after a clause",
             format!("MATCH (m:Other) MATCH (d:Doc) WHERE d.p = {literal} RETURN d.k"),
+            None,
+        ),
+        (
+            "parameter after a clause",
+            "MATCH (m:Other) MATCH (d:Doc) WHERE d.p = $key RETURN d.k".to_string(),
+            Some(param.clone()),
+        ),
+        (
+            "parameter from the row",
+            "UNWIND [$key] AS key MATCH (d:Doc) WHERE d.p = key RETURN d.k".to_string(),
+            Some(param),
+        ),
+        (
+            "key from an earlier clause",
+            format!(
+                "MATCH (m:Other) WITH {literal} AS key MATCH (d:Doc) WHERE d.p = key RETURN d.k"
+            ),
             None,
         ),
     ]

@@ -6,7 +6,7 @@
 //! rule.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test jsonl_wide_integers
+//! cargo test -p grafeo-engine --all-features --test main jsonl_wide_integers::
 //! ```
 
 #![cfg(feature = "jsonl-import")]

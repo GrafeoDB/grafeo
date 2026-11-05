@@ -4,7 +4,7 @@
 //! (Section 7.2).
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --test home_graph
+//! cargo test -p grafeo-engine --test main home_graph::
 //! ```
 
 use grafeo_common::types::Value;

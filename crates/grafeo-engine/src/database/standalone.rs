@@ -9,8 +9,9 @@
 //! in memory or in the log, and what replay rebuilds is what the statement
 //! made, record for record.
 //!
-//! Such a change takes effect at once, also inside a transaction, whose
-//! rollback keeps it (0.6.0 has no transactional DDL).
+//! Outside a transaction such a change takes effect at once. In one it queues for
+//! the commit (`QueuedSchemaOp`), whose WAL group holds it among the data records,
+//! and a rollback drops it (ISO/IEC 39075 Feature GP18).
 //!
 //! An RDF graph operation (`CREATE`, `DROP`, `CLEAR`, `COPY`, `MOVE`, `ADD`)
 //! is one too: [`commit_rdf`] logs it as a group of its own and applies it
@@ -198,6 +199,194 @@ pub(crate) fn refuse_drop_with_open_changes(
     Ok(())
 }
 
+/// Fails when one of `open` has changes in the graph with storage key `name`.
+///
+/// # Errors
+///
+/// A write conflict naming the graph.
+pub(crate) fn refuse_drop_with_changes_in(
+    open: &[Arc<crate::transaction::TransactionChanges>],
+    name: &str,
+) -> Result<()> {
+    if open.iter().any(|changes| changes.writes_graph(Some(name))) {
+        return Err(Error::Transaction(
+            grafeo_common::utils::error::TransactionError::WriteConflict(format!(
+                "graph '{name}' has changes of an open transaction: drop it once that \
+                 transaction commits or rolls back"
+            )),
+        ));
+    }
+    Ok(())
+}
+
+/// What `op` does to `catalog` alone: a transaction's own view of the catalog, in
+/// which a graph or an index exists only by its records.
+///
+/// # Errors
+///
+/// An op that does not apply to it.
+pub(crate) fn apply_to_catalog(op: &StandaloneOp, catalog: &Catalog) -> Result<()> {
+    match op {
+        StandaloneOp::CreateGraph { .. }
+        | StandaloneOp::RdfGraph(_)
+        | StandaloneOp::PutCatalog(CatalogRecord::Index(_) | CatalogRecord::LabelIndex(_))
+        | StandaloneOp::DropCatalog(CatalogKey::Index { .. } | CatalogKey::LabelIndex { .. }) => {
+            Ok(())
+        }
+        StandaloneOp::DropGraph { name } => {
+            catalog.unbind_graph(name);
+            Ok(())
+        }
+        other => apply::<grafeo_core::graph::rowgroup::RowGroupStore>(
+            other,
+            None,
+            None,
+            catalog,
+            &mut Applying::Live,
+        ),
+    }
+}
+
+/// A catalog of its own with what `catalog` holds now.
+///
+/// # Errors
+///
+/// A record that does not apply: damage.
+pub(crate) fn copy_of_catalog(catalog: &Catalog) -> Result<Catalog> {
+    let names = super::catalog_section::index_names_of(catalog);
+    let copy = Catalog::new();
+    for record in super::catalog_section::catalog_records(catalog, Vec::new(), &names, true)? {
+        apply_to_catalog(&StandaloneOp::PutCatalog(record), &copy)?;
+    }
+    Ok(copy)
+}
+
+/// Adds to `change`, which creates the graph with storage key `graph`, the index of each
+/// uniqueness rule that reaches it: its first key, which the check looks up, so its writes
+/// do not scan. Nothing for a catalog with no such rule, without copying it.
+///
+/// # Errors
+///
+/// A record of the change that does not apply to a copy of the catalog: damage.
+pub(crate) fn index_new_graph_for_its_rules(
+    change: &mut StandaloneChange,
+    base: &Catalog,
+    graph: &str,
+) -> Result<()> {
+    use crate::catalog::{CatalogConstraintValidator, NodeTypeDefinition, TypeConstraint};
+
+    let first_key = |def: &NodeTypeDefinition| -> Vec<String> {
+        def.constraints
+            .iter()
+            .filter_map(|constraint| match constraint {
+                TypeConstraint::Unique(keys) | TypeConstraint::PrimaryKey(keys) => {
+                    keys.first().cloned()
+                }
+                _ => None,
+            })
+            .collect()
+    };
+    let declares_types = change
+        .ops()
+        .any(|op| matches!(op, StandaloneOp::PutCatalog(CatalogRecord::NodeType(_))));
+    if !declares_types
+        && base
+            .all_node_type_defs()
+            .iter()
+            .all(|def| first_key(def).is_empty())
+    {
+        return Ok(());
+    }
+    let what_if = copy_of_catalog(base)?;
+    for op in change.ops() {
+        apply_to_catalog(op, &what_if)?;
+    }
+    let what_if = Arc::new(what_if);
+    let validator = CatalogConstraintValidator::of_graph(&what_if, Some(graph));
+    let mut indexes = std::collections::BTreeSet::new();
+    for def in what_if.all_node_type_defs() {
+        let label = crate::catalog::unqualified(&def.name);
+        if validator.node_type(label).is_some() {
+            for key in first_key(&def) {
+                indexes.insert((label.to_string(), key));
+            }
+        }
+    }
+    for (label, key) in indexes {
+        change.push(super::index::put_label_index(Some(graph), &label, &key));
+    }
+    Ok(())
+}
+
+/// The claim on the `name` of a `kind` of the catalog.
+pub(crate) fn name_claim(kind: &str, name: &str) -> crate::transaction::KeyClaim {
+    crate::transaction::KeyClaim {
+        graph: None,
+        label: Arc::from(kind),
+        properties: vec!["name".to_string()],
+        values: vec![grafeo_common::types::HashableValue::from(
+            grafeo_common::types::Value::from(name),
+        )],
+    }
+}
+
+/// The claim of every RDF graph operation, whichever graphs it names: one key, as `DROP ALL`
+/// overlaps them all, until reads of RDF are isolated by triple (#718).
+pub(crate) fn rdf_graph_ops_claim() -> crate::transaction::KeyClaim {
+    name_claim("RDF graph operations", "")
+}
+
+/// The names `op` changes, which a transaction claims at its statement: another that
+/// changes one fails at once.
+pub(crate) fn claims_of(op: &StandaloneOp) -> Vec<crate::transaction::KeyClaim> {
+    let claim = |kind: &str, name: String| name_claim(kind, &name);
+    match op {
+        StandaloneOp::CreateGraph { name } | StandaloneOp::DropGraph { name } => {
+            vec![claim("graph", name.clone())]
+        }
+        StandaloneOp::PutCatalog(record) => vec![match record {
+            CatalogRecord::StoredConfig(_) => claim("stored configuration", String::new()),
+            CatalogRecord::Schema(record) => claim("schema", record.name.clone()),
+            CatalogRecord::NodeType(record) => claim("node type", record.name.clone()),
+            CatalogRecord::EdgeType(record) => claim("edge type", record.name.clone()),
+            CatalogRecord::GraphType(record) => claim("graph type", record.name.clone()),
+            CatalogRecord::GraphBinding(record) => claim("graph", record.graph.clone()),
+            CatalogRecord::Constraint(record) => claim("constraint", record.name.clone()),
+            CatalogRecord::IndexName(record) => claim("index name", record.name.clone()),
+            CatalogRecord::Procedure(record) => claim("procedure", record.name.clone()),
+            CatalogRecord::Index(record) => claim(
+                "index",
+                format!("{:?} {:?}", record.graph, index_key(&record.index)),
+            ),
+            CatalogRecord::LabelIndex(record) => claim(
+                "index",
+                label_index_claim(record.graph.as_ref(), &record.label, &record.key),
+            ),
+        }],
+        StandaloneOp::DropCatalog(key) => vec![match key {
+            CatalogKey::StoredConfig => claim("stored configuration", String::new()),
+            CatalogKey::Schema(name) => claim("schema", name.clone()),
+            CatalogKey::NodeType(name) => claim("node type", name.clone()),
+            CatalogKey::EdgeType(name) => claim("edge type", name.clone()),
+            CatalogKey::GraphType(name) => claim("graph type", name.clone()),
+            CatalogKey::GraphBinding(name) => claim("graph", name.clone()),
+            CatalogKey::Constraint(name) => claim("constraint", name.clone()),
+            CatalogKey::IndexName(name) => claim("index name", name.clone()),
+            CatalogKey::Procedure(name) => claim("procedure", name.clone()),
+            CatalogKey::Index { graph, index } => claim("index", format!("{graph:?} {index:?}")),
+            CatalogKey::LabelIndex { graph, label, key } => {
+                claim("index", label_index_claim(graph.as_ref(), label, key))
+            }
+        }],
+        StandaloneOp::RdfGraph(_) => vec![rdf_graph_ops_claim()],
+    }
+}
+
+/// What a claim on the index on `label` and `key` of `graph` names, its put and its drop alike.
+fn label_index_claim(graph: Option<&String>, label: &str, key: &str) -> String {
+    format!("{graph:?} on label {label:?} {key:?}")
+}
+
 /// Logs `change` as one WAL group of its own (to `wal`, when the database
 /// logs), then applies its ops in order. The caller checked every op while
 /// holding commits off (`_held`), so a checkpoint or `close()` sees all of
@@ -250,8 +439,14 @@ pub(crate) fn commit<S: RootStore>(
 /// so a database without the built-in store applies it.
 fn catalog_only(op: &StandaloneOp) -> bool {
     match op {
-        StandaloneOp::PutCatalog(record) => !matches!(record, CatalogRecord::Index(_)),
-        StandaloneOp::DropCatalog(key) => !matches!(key, CatalogKey::Index { .. }),
+        StandaloneOp::PutCatalog(record) => !matches!(
+            record,
+            CatalogRecord::Index(_) | CatalogRecord::LabelIndex(_)
+        ),
+        StandaloneOp::DropCatalog(key) => !matches!(
+            key,
+            CatalogKey::Index { .. } | CatalogKey::LabelIndex { .. }
+        ),
         StandaloneOp::CreateGraph { .. }
         | StandaloneOp::DropGraph { .. }
         | StandaloneOp::RdfGraph(_) => false,
@@ -446,8 +641,20 @@ pub(crate) fn apply<S: RootStore>(
                 applying.missing(op, "the graph does not exist")
             }
         }
-        StandaloneOp::PutCatalog(record) => put(op, record, built, store, catalog, applying),
-        StandaloneOp::DropCatalog(key) => drop_entry(op, key, store, catalog, applying),
+        StandaloneOp::PutCatalog(record) => {
+            put(op, record, built, store, catalog, applying)?;
+            if holds_rules(record) {
+                catalog.rules_changed();
+            }
+            Ok(())
+        }
+        StandaloneOp::DropCatalog(key) => {
+            drop_entry(op, key, store, catalog, applying)?;
+            if key_of_rules(key) {
+                catalog.rules_changed();
+            }
+            Ok(())
+        }
         // A change of the RDF store, which `commit_rdf` and `replay` apply
         // through `apply_rdf`: a change of the labeled property graphs and
         // the catalog never holds one.
@@ -455,6 +662,41 @@ pub(crate) fn apply<S: RootStore>(
             op,
             "an RDF graph operation applies to the RDF store, through `apply_rdf`",
         )),
+    }
+}
+
+/// Whether `record` holds rules writes must meet: an open transaction's commit then checks
+/// its writes again.
+fn holds_rules(record: &CatalogRecord) -> bool {
+    match record {
+        CatalogRecord::NodeType(_)
+        | CatalogRecord::EdgeType(_)
+        | CatalogRecord::GraphType(_)
+        | CatalogRecord::GraphBinding(_)
+        | CatalogRecord::Constraint(_) => true,
+        CatalogRecord::StoredConfig(_)
+        | CatalogRecord::Schema(_)
+        | CatalogRecord::Index(_)
+        | CatalogRecord::LabelIndex(_)
+        | CatalogRecord::IndexName(_)
+        | CatalogRecord::Procedure(_) => false,
+    }
+}
+
+/// [`holds_rules`] of a record `key` names.
+fn key_of_rules(key: &CatalogKey) -> bool {
+    match key {
+        CatalogKey::NodeType(_)
+        | CatalogKey::EdgeType(_)
+        | CatalogKey::GraphType(_)
+        | CatalogKey::GraphBinding(_)
+        | CatalogKey::Constraint(_) => true,
+        CatalogKey::StoredConfig
+        | CatalogKey::Schema(_)
+        | CatalogKey::Index { .. }
+        | CatalogKey::LabelIndex { .. }
+        | CatalogKey::IndexName(_)
+        | CatalogKey::Procedure(_) => false,
     }
 }
 
@@ -574,6 +816,15 @@ fn put<S: RootStore>(
         }
         CatalogRecord::Index(record) => {
             put_index(op, record, built, built_in(store, op)?, applying)
+        }
+        CatalogRecord::LabelIndex(record) => {
+            match graph_store(built_in(store, op)?, record.graph.as_deref()) {
+                Some(target) => {
+                    target.create_label_index(&record.label, &record.key);
+                    Ok(())
+                }
+                None => applying.missing(op, "the graph does not exist"),
+            }
         }
         CatalogRecord::IndexName(record) => {
             if !has_index_name(catalog, record) {
@@ -798,6 +1049,13 @@ fn drop_entry<S: RootStore>(
             }
             match graph_store(built_in(store, op)?, graph.as_deref()) {
                 Some(target) if remove_index(&*target, index) => Ok(()),
+                Some(_) => applying.missing(op, "there is no such index"),
+                None => applying.missing(op, "the graph does not exist"),
+            }
+        }
+        CatalogKey::LabelIndex { graph, label, key } => {
+            match graph_store(built_in(store, op)?, graph.as_deref()) {
+                Some(target) if target.drop_label_index(label, key) => Ok(()),
                 Some(_) => applying.missing(op, "there is no such index"),
                 None => applying.missing(op, "the graph does not exist"),
             }

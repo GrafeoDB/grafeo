@@ -4,7 +4,7 @@
 //! backup chain model.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --features full --test backup_restore
+//! cargo test -p grafeo-engine --features full --test main backup_restore::
 //! ```
 
 #![cfg(all(feature = "wal", feature = "grafeo-file"))]

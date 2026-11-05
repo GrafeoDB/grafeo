@@ -6,7 +6,7 @@
 //! Fixes: <https://github.com/GrafeoDB/grafeo/issues/167>
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --test schema_type_isolation
+//! cargo test -p grafeo-engine --test main schema_type_isolation::
 //! ```
 
 use grafeo_engine::GrafeoDB;

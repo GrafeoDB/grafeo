@@ -95,16 +95,17 @@ fn named_ddl_metadata_is_preserved_without_duplicate_physical_rows() {
     assert!(db.has_property_index("email"));
     assert!(db.has_property_index("rank"));
     db.create_property_index("email").unwrap();
+    // The API's index covers the key on every label, beside the one of `Doc`: two to list.
     db.create_property_index("rank").unwrap();
     assert_show(
         &db,
         &[
             ["doc_email", "Hash", "Doc", "email"],
             ["doc_rank", "BTree", "Doc", "rank"],
+            ["NULL", "Hash", "NULL", "rank"],
         ],
     );
-    // Two written DDL names remain two metadata rows even though the
-    // current global property index is keyed only by the property.
+    // Two written names over one key-wide index remain two rows, with no row of its own.
     db.execute("CREATE INDEX other_email FOR (o:Other) ON (o.email)")
         .unwrap();
     assert_show(
@@ -112,6 +113,7 @@ fn named_ddl_metadata_is_preserved_without_duplicate_physical_rows() {
         &[
             ["doc_email", "Hash", "Doc", "email"],
             ["doc_rank", "BTree", "Doc", "rank"],
+            ["NULL", "Hash", "NULL", "rank"],
             ["other_email", "Hash", "Other", "email"],
         ],
     );

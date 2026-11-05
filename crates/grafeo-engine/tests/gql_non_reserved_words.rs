@@ -4,7 +4,7 @@
 //! `RETURN 1 AS trail` failed with "Expected alias name".
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test gql_non_reserved_words
+//! cargo test -p grafeo-engine --all-features --test main gql_non_reserved_words::
 //! ```
 
 #![cfg(feature = "gql")]

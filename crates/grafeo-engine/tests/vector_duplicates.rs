@@ -6,7 +6,7 @@
 //! the direct search and the GQL procedure, after a reopen too.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test vector_duplicates
+//! cargo test -p grafeo-engine --all-features --test main vector_duplicates::
 //! ```
 
 #![cfg(feature = "vector-index")]

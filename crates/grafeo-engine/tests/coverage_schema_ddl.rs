@@ -3,7 +3,7 @@
 //! Targets: catalog/mod.rs (36.75%), session.rs DDL paths, parser.rs schema syntax
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --test coverage_schema_ddl
+//! cargo test -p grafeo-engine --test main coverage_schema_ddl::
 //! ```
 
 use grafeo_common::types::Value;
@@ -339,6 +339,7 @@ fn test_full_schema_lifecycle() {
     // keeps a graph type that a graph has as its type.
     session.execute("DROP GRAPH hr_graph").unwrap();
     session.execute("DROP GRAPH TYPE org_chart").unwrap();
-    session.execute("DROP NODE TYPE Employee").unwrap();
-    session.execute("DROP EDGE TYPE REPORTS_TO").unwrap();
+    // The types only it listed went with it.
+    assert!(session.execute("DROP NODE TYPE Employee").is_err());
+    assert!(session.execute("DROP EDGE TYPE REPORTS_TO").is_err());
 }

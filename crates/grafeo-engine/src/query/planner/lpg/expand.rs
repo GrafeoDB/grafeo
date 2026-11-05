@@ -1,10 +1,16 @@
 //! Relationship expansion planning.
 
+use grafeo_common::types::Value;
+use grafeo_core::execution::operators::{IntersectExpandOperator, IntersectSide, SeekKey};
+
 use super::reachability::ReachabilityMode;
+use super::seek::constant_seek;
 use super::{
-    Arc, Direction, Error, ExecutionPathMode, ExpandDirection, ExpandOp, ExpandOperator,
-    GraphStore, LogicalExpression, Operator, PathMode, Result, VariableLengthExpandOperator,
+    Arc, Direction, Error, ExecutionPathMode, ExpandDirection, ExpandOp, ExpandOperator, FilterOp,
+    GraphStore, LogicalExpression, LogicalOperator, Operator, PathMode, Result,
+    VariableLengthExpandOperator,
 };
+use crate::query::plan::PushdownHint;
 
 /// A condition on every edge of the path a variable-length expand binds: the
 /// edge is `hops` (each of them names it), the predicate may read the input
@@ -18,15 +24,168 @@ pub(crate) struct PendingEdgeCondition {
     pub(crate) predicate: LogicalExpression,
 }
 
+/// What a filter knows of the target of the expand below it (see
+/// [`Planner::note_hop_target`](super::Planner::note_hop_target)).
+pub(super) enum HopTarget {
+    /// It is the node in this column of the input.
+    Column(String),
+    /// It holds this key, with these labels.
+    Key(SeekKey, Value, grafeo_core::execution::operators::KeyLabels),
+    /// It is the node in this column, and the hop below goes with it: the two
+    /// intersect their lists.
+    Intersect(String),
+}
+
 impl super::Planner {
+    /// The hops `near` and `closing` as one intersection of the lists of `near`'s
+    /// source and `target`, with the columns the two expands give.
+    #[inline(never)]
+    fn plan_intersection(
+        &self,
+        near: &ExpandOp,
+        closing: &ExpandOp,
+        target: &str,
+    ) -> Result<(Box<dyn Operator>, Vec<String>)> {
+        let (input, mut columns) = self.plan_operator(&near.input)?;
+        let column_of = |name: &str| {
+            columns
+                .iter()
+                .position(|column| column == name)
+                .ok_or_else(|| {
+                    Error::Internal(format!("Variable '{name}' not found in input columns"))
+                })
+        };
+        let side = |column, direction, types: &[String]| -> Result<IntersectSide> {
+            Ok(IntersectSide {
+                column,
+                direction,
+                edge_types: self
+                    .stored_edge_types(types)?
+                    .into_iter()
+                    .map(Into::into)
+                    .collect(),
+            })
+        };
+        let direction_of = |direction: ExpandDirection| match direction {
+            ExpandDirection::Outgoing => Direction::Outgoing,
+            ExpandDirection::Incoming => Direction::Incoming,
+            ExpandDirection::Both => Direction::Both,
+        };
+        let near_side = side(
+            column_of(&near.from_variable)?,
+            direction_of(near.direction),
+            &near.edge_types,
+        )?;
+        // A hop that goes on from where they meet is read from the node it comes
+        // back to; one that ends there, from the node it starts at.
+        let ends_there = near.to_variable == target;
+        let far_side = if ends_there {
+            side(
+                column_of(&closing.from_variable)?,
+                direction_of(closing.direction),
+                &closing.edge_types,
+            )?
+        } else {
+            let back = match closing.direction {
+                ExpandDirection::Outgoing => Direction::Incoming,
+                ExpandDirection::Incoming => Direction::Outgoing,
+                ExpandDirection::Both => Direction::Both,
+            };
+            side(column_of(target)?, back, &closing.edge_types)?
+        };
+        let operator = IntersectExpandOperator::new(
+            Arc::clone(&self.store) as Arc<dyn GraphStore>,
+            input,
+            near_side,
+            far_side,
+            self.read_view(),
+        )
+        .with_read_counter(self.read_counter());
+        let operator = if ends_there {
+            operator.ending_at_the_common_node()
+        } else {
+            operator
+        };
+        columns.push(self.register_edge_column(&near.edge_variable));
+        columns.push(near.to_variable.clone());
+        columns.push(self.register_edge_column(&closing.edge_variable));
+        columns.push(closing.to_variable.clone());
+        self.record_absorbed_scan_entry("Expand", &LogicalOperator::Expand(near.clone()));
+        Ok((Box::new(operator), columns))
+    }
+
+    /// Hands the expand below `filter` what the filter's hint says of its
+    /// target. A key needs a literal value (parameters are filled in by now)
+    /// and a statement that reads the store as planned and whose writes see no
+    /// row of it while it runs: the expand finds the key once, through the
+    /// indexes the hint names, and lists every edge if one has gone since.
+    pub(super) fn note_hop_target(&self, filter: &FilterOp) {
+        let mut below = filter.input.as_ref();
+        while let LogicalOperator::Filter(check) = below {
+            below = &check.input;
+        }
+        let LogicalOperator::Expand(expand) = below else {
+            return;
+        };
+        let target = match &filter.pushdown_hint {
+            Some(PushdownHint::ExpandInto { target }) => Some(HopTarget::Column(target.clone())),
+            Some(PushdownHint::IntersectExpand { target }) => {
+                Some(HopTarget::Intersect(target.clone()))
+            }
+            Some(PushdownHint::ExpandToKey { key, labels })
+                if self.reads_the_store_as_planned()
+                    && self
+                        .statement_writes
+                        .get()
+                        .is_some_and(|writes| !writes.per_row) =>
+            {
+                constant_seek(&filter.predicate, &expand.to_variable, |property| {
+                    property == key
+                })
+                .and_then(|seek| match seek.value {
+                    LogicalExpression::Literal(value) => {
+                        Some(HopTarget::Key(seek.key, value.clone(), labels.clone()))
+                    }
+                    _ => None,
+                })
+            }
+            _ => None,
+        };
+        if let Some(target) = target {
+            self.hop_targets
+                .borrow_mut()
+                .insert(expand.to_variable.clone(), target);
+        }
+    }
+
     /// Plans an expand operator.
     pub(super) fn plan_expand(
         &self,
         expand: &ExpandOp,
     ) -> Result<(Box<dyn Operator>, Vec<String>)> {
+        let hop_target = self.hop_targets.borrow_mut().remove(&expand.to_variable);
+        if let Some(HopTarget::Intersect(target)) = &hop_target
+            && let LogicalOperator::Expand(near) = expand.input.as_ref()
+        {
+            return self.plan_intersection(near, expand, target);
+        }
+
         // Plan the input operator first
         let (input_op, input_columns) = self.plan_operator(&expand.input)?;
+        self.expand_over(expand, hop_target, input_op, input_columns)
+    }
 
+    /// The expand `expand` over its planned input. Not part of [`plan_expand`](Self::plan_expand):
+    /// that frame is on the stack once per hop of the plan (see `crate::query::limits`), and the
+    /// operators built here by value would make it larger.
+    #[inline(never)]
+    fn expand_over(
+        &self,
+        expand: &ExpandOp,
+        hop_target: Option<HopTarget>,
+        input_op: Box<dyn Operator>,
+        input_columns: Vec<String>,
+    ) -> Result<(Box<dyn Operator>, Vec<String>)> {
         // Find the source column index
         let source_column = input_columns
             .iter()
@@ -160,7 +319,7 @@ impl super::Planner {
             Box::new(expand_op)
         } else {
             // Use simple ExpandOperator for single-hop paths without named paths
-            let expand_op = ExpandOperator::new(
+            let mut expand_op = ExpandOperator::new(
                 Arc::clone(&self.store) as Arc<dyn GraphStore>,
                 input_op,
                 source_column,
@@ -169,6 +328,17 @@ impl super::Planner {
                 self.read_view(),
             )
             .with_read_counter(self.read_counter());
+            match hop_target {
+                Some(HopTarget::Column(target)) => {
+                    if let Some(column) = input_columns.iter().position(|name| *name == target) {
+                        expand_op = expand_op.with_target_column(column);
+                    }
+                }
+                Some(HopTarget::Key(key, value, labels)) => {
+                    expand_op = expand_op.with_target_key(key, value, labels);
+                }
+                Some(HopTarget::Intersect(_)) | None => {}
+            }
             Box::new(expand_op)
         };
 

@@ -25,6 +25,8 @@ use crate::graph::lpg::{Edge, Node};
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct RowGroupMemory {
+    /// What the degrees sampled for the planner hold.
+    pub degree_samples_bytes: usize,
     /// The stores counted: the root and its named graphs.
     pub graphs: usize,
     /// The row groups of the node tables.
@@ -99,11 +101,13 @@ impl RowGroupMemory {
             + self.labels_bytes
             + self.edge_types_bytes
             + self.keys_bytes
+            + self.degree_samples_bytes
     }
 
     /// Adds `other`'s figures to these.
     fn add(&mut self, other: &Self) {
         self.graphs += other.graphs;
+        self.degree_samples_bytes += other.degree_samples_bytes;
         self.node_groups += other.node_groups;
         self.edge_groups += other.edge_groups;
         self.node_tables_bytes += other.node_tables_bytes;
@@ -228,6 +232,7 @@ impl RowGroupStore {
     #[must_use]
     pub fn memory(&self) -> RowGroupMemory {
         let mut memory = self.inner.read().memory();
+        memory.degree_samples_bytes = self.degree_samples.memory_bytes();
         for name in self.graph_names() {
             // Dropped since the names were read: not counted.
             if let Some(graph) = self.graph(&name) {
@@ -267,7 +272,7 @@ impl RowGroupStore {
         let mut indexes = IndexMemory::default();
         indexes.forward_adjacency_bytes = memory.outgoing_bytes;
         indexes.backward_adjacency_bytes = memory.incoming_bytes;
-        indexes.label_index_bytes = memory.label_bitmaps_bytes;
+        indexes.label_index_bytes = memory.label_bitmaps_bytes + memory.degree_samples_bytes;
         self.add_index_memory(&mut indexes);
         indexes.compute_total();
 
@@ -312,6 +317,10 @@ impl RowGroupStore {
                         + size_of::<FxHashSet<grafeo_common::types::NodeId>>()
                         + 32);
             }
+            indexes.property_index_bytes += store.label_indexes_len()
+                * (size_of::<grafeo_common::types::HashableValue>()
+                    + size_of::<FxHashSet<grafeo_common::types::NodeId>>()
+                    + 32);
         }
         #[cfg(any(feature = "vector-index", feature = "text-index"))]
         for (graph, store) in all() {

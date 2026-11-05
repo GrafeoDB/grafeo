@@ -3,7 +3,7 @@
 //! and a graph handle, the open transaction's own for a session.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test node_edges
+//! cargo test -p grafeo-engine --all-features --test main node_edges::
 //! ```
 
 use grafeo_common::types::{EdgeId, NodeId};

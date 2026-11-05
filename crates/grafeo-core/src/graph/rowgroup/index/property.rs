@@ -107,6 +107,30 @@ impl PropertyIndex {
         found
     }
 
+    /// Whether [`nodes_maybe_equal`](Self::nodes_maybe_equal) finds at most
+    /// `limit` nodes for `key`, stopping once it is sure: a node under two
+    /// values counts twice, so it may answer no for a key just within the limit.
+    pub(crate) fn candidates_within(&self, key: &Value, limit: usize) -> bool {
+        let Some(class) = HashKey::for_equality(key) else {
+            return true; // NULL equals nothing
+        };
+        let probes = probes(key);
+        let mut count = 0;
+        let mut within = |value: &HashableValue| {
+            count += self.values.get(value).map_or(0, |nodes| nodes.len());
+            count <= limit
+        };
+        probes
+            .iter()
+            .enumerate()
+            .all(|(index, value)| probes[..index].contains(value) || within(value))
+            && self.others_by_class.get(&class).is_none_or(|others| {
+                others
+                    .iter()
+                    .all(|value| probes.contains(value) || within(value))
+            })
+    }
+
     /// How many distinct values the index holds.
     pub(crate) fn len(&self) -> usize {
         self.values.len()
@@ -118,6 +142,7 @@ impl PropertyIndex {
 /// them. A lookup that reads a candidate's value again (at a reader's view)
 /// keeps the candidate when this finds the value, so it keeps what the index
 /// would find for the value the reader sees.
+#[derive(Debug)]
 pub(crate) struct MaybeEqual {
     class: HashKey,
     probes: Vec<HashableValue>,
@@ -131,6 +156,57 @@ impl MaybeEqual {
             class: HashKey::for_equality(key)?,
             probes: probes(key),
         })
+    }
+
+    /// Adds the integers and the bits of the floats a lookup of `key`, an
+    /// integer or a float, finds: what [`integers`](Self::integers) and
+    /// [`floats`](Self::floats) of its own lookup list, without the decimals
+    /// and the texts a lookup of a column of other values needs. A long `IN`
+    /// over a column of numbers builds none of those.
+    pub(crate) fn number_forms(key: &Value, integers: &mut Vec<i64>, floats: &mut Vec<u64>) {
+        let float_forms = |float: f64, integers: &mut Vec<i64>, floats: &mut Vec<u64>| {
+            if float.is_nan() {
+                return;
+            }
+            if float == 0.0 {
+                floats.push(0.0_f64.to_bits());
+                floats.push((-0.0_f64).to_bits());
+            } else {
+                floats.push(float.to_bits());
+            }
+            integers.extend(whole_integer(float));
+        };
+        match key {
+            Value::Int64(integer) => {
+                integers.push(*integer);
+                if let Some(float) = exact_float(*integer) {
+                    float_forms(float, integers, floats);
+                }
+            }
+            Value::Float64(float) => {
+                floats.push(float.to_bits());
+                float_forms(*float, integers, floats);
+            }
+            _ => {}
+        }
+    }
+
+    /// The integers it finds. Every integer is found by a probe or not at
+    /// all (see [`is_found_by_probes`]), so an integer is found if and only
+    /// if it is one of these.
+    pub(crate) fn integers(&self) -> impl Iterator<Item = i64> + '_ {
+        self.probes
+            .iter()
+            .filter_map(|probe| probe.inner().as_int64())
+    }
+
+    /// The floats it finds. Every float is found by a probe or not at all
+    /// (see [`is_found_by_probes`]), so a float of the same bits as one of
+    /// these is found, and no other.
+    pub(crate) fn floats(&self) -> impl Iterator<Item = f64> + '_ {
+        self.probes
+            .iter()
+            .filter_map(|probe| probe.inner().as_float64())
     }
 
     /// Whether the lookup finds `value`: a probe of the key, or a value no
@@ -199,22 +275,40 @@ fn push_integer_forms(probes: &mut Vec<HashableValue>, integer: i64) {
         integer,
     ))));
     probes.push(HashableValue::new(Value::from(integer.to_string())));
+    if let Some(float) = exact_float(integer) {
+        push_float_forms(probes, float);
+    }
+}
+
+/// The float of exactly the value of `integer`, if there is one.
+fn exact_float(integer: i64) -> Option<f64> {
     #[allow(
         clippy::cast_precision_loss,
         reason = "the float is kept only when it is exactly the integer"
     )]
     let float = integer as f64;
-    if crate::execution::operators::value_utils::int_equals_float(integer, float) {
-        push_float_forms(probes, float);
+    crate::execution::operators::value_utils::int_equals_float(integer, float).then_some(float)
+}
+
+/// The integer of a whole float in the `i64` range.
+fn whole_integer(float: f64) -> Option<i64> {
+    // 2^63 as f64 is exact; every integral float in [-2^63, 2^63) fits i64.
+    const LIMIT: f64 = 9_223_372_036_854_775_808.0;
+    if float.fract() == 0.0 && (-LIMIT..LIMIT).contains(&float) {
+        #[allow(
+            clippy::cast_possible_truncation,
+            reason = "float is integral and within [-2^63, 2^63), checked above, so the cast is exact"
+        )]
+        let integer = float as i64;
+        return Some(integer);
     }
+    None
 }
 
 /// The forms of a float `=` may find equal: the float (both zeros for a
 /// zero) and its shortest text, and for a whole float in the `i64` range its
 /// integer and that integer's text. NaN equals nothing, so it has no forms.
 fn push_float_forms(probes: &mut Vec<HashableValue>, float: f64) {
-    // 2^63 as f64 is exact; every integral float in [-2^63, 2^63) fits i64.
-    const LIMIT: f64 = 9_223_372_036_854_775_808.0;
     if float.is_nan() {
         return;
     }
@@ -225,12 +319,7 @@ fn push_float_forms(probes: &mut Vec<HashableValue>, float: f64) {
         probes.push(HashableValue::new(Value::Float64(float)));
     }
     probes.push(HashableValue::new(Value::from(float.to_string())));
-    if float.fract() == 0.0 && (-LIMIT..LIMIT).contains(&float) {
-        #[allow(
-            clippy::cast_possible_truncation,
-            reason = "float is integral and within [-2^63, 2^63), checked above, so the cast is exact"
-        )]
-        let integer = float as i64;
+    if let Some(integer) = whole_integer(float) {
         probes.push(HashableValue::new(Value::Int64(integer)));
         probes.push(HashableValue::new(Value::from(integer.to_string())));
     }
@@ -473,5 +562,30 @@ mod tests {
                 assert_eq!(finds, found.contains(&(n as u64)), "{key:?} and {value:?}");
             }
         }
+    }
+
+    /// A value reached both as a probe and in the side table counts once, or a key within the cap
+    /// loses its seek and every edge is listed.
+    #[test]
+    fn a_value_counts_once_however_it_is_reached() {
+        let values: Vec<Value> = std::iter::repeat_n(Value::Int64(42), 600).collect();
+        let index = index(&values);
+        assert_eq!(found(&index, Value::Int64(42)).len(), 600);
+        assert!(index.candidates_within(&Value::Int64(42), 600), "the int");
+        assert!(
+            index.candidates_within(&Value::Float64(42.0), 600),
+            "a float of it"
+        );
+        let strings: Vec<Value> = std::iter::repeat_n(Value::from("42"), 600).collect();
+        let index = self::tests::index(&strings);
+        assert_eq!(found(&index, Value::Int64(42)).len(), 600);
+        assert!(
+            index.candidates_within(&Value::Int64(42), 600),
+            "a string of it"
+        );
+        assert!(
+            index.candidates_within(&Value::from("42"), 600),
+            "the string"
+        );
     }
 }

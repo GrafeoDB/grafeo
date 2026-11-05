@@ -6,7 +6,7 @@
 //! until the first one closes, whatever its name (`.grafeo` or none).
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --features full --test database_lock
+//! cargo test -p grafeo-engine --features full --test main database_lock::
 //! ```
 
 #![allow(missing_docs)]
@@ -133,8 +133,7 @@ mod tests {
             insert(&first, "Alix");
 
             let child = child_process::output(
-                std::process::Command::new(std::env::current_exe().unwrap())
-                    .args(["--exact", "tests::child_open_fails", "--nocapture"])
+                grafeo_common::child_test!("child_open_fails")
                     .env(CHILD_PATH_VAR, &path)
                     .env(CHILD_FORMAT_VAR, name),
             )
@@ -173,8 +172,7 @@ mod tests {
             insert(&first, "Alix");
 
             let child = child_process::output(
-                std::process::Command::new(std::env::current_exe().unwrap())
-                    .args(["--exact", "tests::child_open_fails", "--nocapture"])
+                grafeo_common::child_test!("child_open_fails")
                     .env(CHILD_PATH_VAR, &path)
                     .env(CHILD_FORMAT_VAR, name)
                     .env(CHILD_READ_ONLY_VAR, "1"),
@@ -201,6 +199,83 @@ mod tests {
             );
             reopened.close().unwrap();
         }
+    }
+
+    /// A reader keeps a writer in another process out, until it closes.
+    #[test]
+    fn read_write_open_from_another_process_while_a_reader_holds_it() {
+        let dir = tempfile::tempdir().unwrap();
+        for (name, path, format) in formats(dir.path()) {
+            let first = open(&path, format).unwrap();
+            insert(&first, "Alix");
+            first.close().unwrap();
+
+            let reader = GrafeoDB::open_read_only(&path).unwrap();
+            let child = child_process::output(
+                grafeo_common::child_test!("child_open_fails")
+                    .env(CHILD_PATH_VAR, &path)
+                    .env(CHILD_FORMAT_VAR, name),
+            )
+            .unwrap();
+            let stdout = String::from_utf8_lossy(&child.stdout);
+            assert!(
+                child.status.success(),
+                "{name}: the other process could open the database to write\n{}",
+                String::from_utf8_lossy(&child.stderr)
+            );
+            assert!(
+                stdout.contains("1 passed"),
+                "{name}: the child ran no test:\n{stdout}"
+            );
+            assert_eq!(names(&reader), vec![Value::String("Alix".into())], "{name}");
+            reader.close().unwrap();
+
+            let writer = open(&path, format).unwrap();
+            insert(&writer, "Gus");
+            writer.close().unwrap();
+        }
+    }
+
+    /// Readers in two processes coexist.
+    #[test]
+    fn read_only_open_from_another_process_while_a_reader_holds_it() {
+        let dir = tempfile::tempdir().unwrap();
+        for (name, path, format) in formats(dir.path()) {
+            let first = open(&path, format).unwrap();
+            insert(&first, "Alix");
+            first.close().unwrap();
+
+            let reader = GrafeoDB::open_read_only(&path).unwrap();
+            let child = child_process::output(
+                grafeo_common::child_test!("child_read_only_open_reads")
+                    .env(CHILD_PATH_VAR, &path)
+                    .env(CHILD_FORMAT_VAR, name),
+            )
+            .unwrap();
+            let stdout = String::from_utf8_lossy(&child.stdout);
+            assert!(
+                child.status.success(),
+                "{name}: the other process could not read\n{}",
+                String::from_utf8_lossy(&child.stderr)
+            );
+            assert!(
+                stdout.contains("1 passed"),
+                "{name}: the child ran no test:\n{stdout}"
+            );
+            reader.close().unwrap();
+        }
+    }
+
+    /// Helper for [`read_only_open_from_another_process_while_a_reader_holds_it`]; a no-op when
+    /// run directly.
+    #[test]
+    fn child_read_only_open_reads() {
+        let Some(path) = std::env::var_os(CHILD_PATH_VAR) else {
+            return;
+        };
+        let reader = GrafeoDB::open_read_only(Path::new(&path)).unwrap();
+        assert_eq!(names(&reader), vec![Value::String("Alix".into())]);
+        reader.close().unwrap();
     }
 
     /// Helper for [`open_from_another_process_fails`] and

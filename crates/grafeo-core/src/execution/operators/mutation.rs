@@ -125,6 +125,12 @@ pub trait ConstraintValidator: Send + Sync {
         Ok(())
     }
 
+    /// Whether some edge type's rule on its endpoints applies to this graph, so that a label a
+    /// node loses may be one an edge needs.
+    fn constrains_some_edge_endpoints(&self) -> bool {
+        false
+    }
+
     /// Validates that edge endpoints have the correct node type labels.
     ///
     /// # Errors

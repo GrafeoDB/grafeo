@@ -26,6 +26,7 @@ impl super::GrafeoDB {
         // One-shot calls share the database's graph context like one long session,
         // whose home stays the default graph and schema.
         session.set_home(None, None);
+        session.last_for_one_call();
         configure(&mut session);
         let result = func(&session);
         // Sync graph, schema and time zone state back, even on error (the session
@@ -46,7 +47,8 @@ impl super::GrafeoDB {
     /// Graph context commands (`USE GRAPH`, `SESSION SET GRAPH`, `SESSION RESET`)
     /// persist across calls: running `execute("USE GRAPH analytics")` followed
     /// by `execute("MATCH (n) RETURN n")` routes the second query to the
-    /// analytics graph.
+    /// analytics graph. `START TRANSACTION`, `COMMIT` and `ROLLBACK` are refused here, as
+    /// the session ends with the call: use a [`session()`](Self::session).
     ///
     /// # Errors
     ///

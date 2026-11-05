@@ -14,8 +14,8 @@
 use grafeo_common::types::ReadView;
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, OnceLock};
 
 use parking_lot::{Mutex, RwLock};
 
@@ -40,9 +40,25 @@ pub struct Catalog {
     /// The configuration the database file stores (#551), when it stores
     /// one: the catalog section writes it and an open reads it.
     stored_config: RwLock<Option<grafeo_common::storage::catalog_record::StoredConfigRecord>>,
+    /// Moves with every change of the rules writes must meet, as a catalog op applies
+    /// (`standalone::apply`): a commit compares it with its transaction's start, and checks
+    /// its writes only when it moved.
+    rules_generation: std::sync::atomic::AtomicU64,
 }
 
 impl Catalog {
+    /// How many changes of the rules writes must meet there have been.
+    #[must_use]
+    pub(crate) fn rules_generation(&self) -> u64 {
+        self.rules_generation
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    pub(crate) fn rules_changed(&self) {
+        self.rules_generation
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+    }
+
     /// Creates a new empty catalog with schema support enabled.
     #[must_use]
     pub fn new() -> Self {
@@ -53,6 +69,7 @@ impl Catalog {
             indexes: IndexCatalog::new(),
             schema: Some(SchemaCatalog::new()),
             stored_config: RwLock::new(None),
+            rules_generation: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
@@ -1921,6 +1938,25 @@ impl SchemaCatalog {
         Ok(())
     }
 
+    /// Whether a graph type lists the node type stored as `name`. Cypher's
+    /// `ALTER CURRENT GRAPH TYPE` keeps its types in `__current__`, which no graph is
+    /// bound to: they are rules by label, as it declares them for the graph in use.
+    fn lists_node_type(&self, name: &str) -> bool {
+        self.graph_types.read().values().any(|def| {
+            !is_current_graph_type(&def.name)
+                && def.allowed_node_types.iter().any(|listed| listed == name)
+        })
+    }
+
+    /// Whether a graph type lists the edge type stored as `name`, as
+    /// [`lists_node_type`](Self::lists_node_type) counts it.
+    fn lists_edge_type(&self, name: &str) -> bool {
+        self.graph_types.read().values().any(|def| {
+            !is_current_graph_type(&def.name)
+                && def.allowed_edge_types.iter().any(|listed| listed == name)
+        })
+    }
+
     /// Gets a graph type definition by name.
     #[must_use]
     pub fn get_graph_type(&self, name: &str) -> Option<GraphTypeDefinition> {
@@ -2409,8 +2445,15 @@ use grafeo_core::execution::operators::OperatorError;
 /// against registered node/edge type definitions.
 pub struct CatalogConstraintValidator {
     catalog: Arc<Catalog>,
-    /// The closed graph type of the graph written to, if it has one.
-    closed_type: Option<ClosedGraphType>,
+    /// The storage key of the graph written to, whose graph type checks the writes (`None`: no
+    /// graph type applies).
+    graph: Option<String>,
+    /// The closed graph type of the graph written to, if it has one: read when a write first
+    /// asks, as every statement makes a validator and a read never asks. Boxed, as the validator
+    /// moves through its builders on every write.
+    closed_type: OnceLock<Option<Box<ClosedGraphType>>>,
+    /// The types the graph's graph type lists, open or closed, read likewise.
+    bound_types: OnceLock<Option<Box<BoundTypes>>>,
     /// Optional graph store for UNIQUE constraint enforcement via index lookup
     /// and the dimensions of vector indexes.
     store: Option<Arc<dyn grafeo_core::graph::GraphStore>>,
@@ -2434,12 +2477,18 @@ pub struct CatalogConstraintValidator {
     )>,
 }
 
+/// The most nodes a uniqueness check reads through a property index on a store that keeps no
+/// count of the label (see `nodes_with_value`).
+const UNIQUE_CHECK_CANDIDATES: usize = 1024;
+
 impl CatalogConstraintValidator {
     /// Creates a new validator wrapping the given catalog.
     pub fn new(catalog: Arc<Catalog>) -> Self {
         Self {
             catalog,
-            closed_type: None,
+            graph: None,
+            closed_type: OnceLock::new(),
+            bound_types: OnceLock::new(),
             store: None,
             max_property_size: None,
             transaction: None,
@@ -2517,41 +2566,51 @@ impl CatalogConstraintValidator {
         self
     }
 
+    /// The catalog's name of the type `name` of the schema written in. Every write looks
+    /// types up, so a write outside a schema allocates nothing here.
+    fn type_key<'a>(&self, name: &'a str) -> std::borrow::Cow<'a, str> {
+        match &self.schema {
+            Some(schema) => std::borrow::Cow::Owned(format!("{schema}/{name}")),
+            None => std::borrow::Cow::Borrowed(name),
+        }
+    }
+
     /// The node type, with what it inherits, that checks nodes with `label`:
     /// the one the graph's closed graph type names, else the one of the
     /// schema written in.
-    fn node_type(&self, label: &str) -> Option<NodeTypeDefinition> {
+    pub(crate) fn node_type(&self, label: &str) -> Option<NodeTypeDefinition> {
         if let Some(name) = self
-            .closed_type
-            .as_ref()
-            .and_then(|closed| closed.node_type_names.get(label))
+            .bound_types()
+            .and_then(|bound| bound.node_type_names.get(label))
         {
             return self.catalog.resolved_node_type(name);
         }
-        match &self.schema {
-            Some(schema) => self
-                .catalog
-                .resolved_node_type(&format!("{schema}/{label}")),
-            None => self.catalog.resolved_node_type(label),
-        }
+        let name = self.type_key(label);
+        let def = self.catalog.resolved_node_type(&name)?;
+        // A type a graph type lists is that graph type's, not a rule by label.
+        let listed = self
+            .catalog
+            .schema()
+            .is_some_and(|schema| schema.lists_node_type(&name));
+        (!listed).then_some(def)
     }
 
     /// The edge type that checks edges of `edge_type`: the one the graph's
     /// closed graph type names, else the one of the schema written in.
     fn edge_type(&self, edge_type: &str) -> Option<EdgeTypeDefinition> {
         if let Some(name) = self
-            .closed_type
-            .as_ref()
-            .and_then(|closed| closed.edge_type_names.get(edge_type))
+            .bound_types()
+            .and_then(|bound| bound.edge_type_names.get(edge_type))
         {
             return self.catalog.get_edge_type_def(name);
         }
-        match &self.schema {
-            Some(schema) => self
-                .catalog
-                .get_edge_type_def(&format!("{schema}/{edge_type}")),
-            None => self.catalog.get_edge_type_def(edge_type),
-        }
+        let name = self.type_key(edge_type);
+        let def = self.catalog.get_edge_type_def(&name)?;
+        let listed = self
+            .catalog
+            .schema()
+            .is_some_and(|schema| schema.lists_edge_type(&name));
+        (!listed).then_some(def)
     }
 
     /// Checks as `transaction_id` sees the data, reading at `epoch`: a UNIQUE
@@ -2587,11 +2646,22 @@ impl CatalogConstraintValidator {
             .map_or_else(ReadView::latest, |(epoch, id)| {
                 ReadView::transaction(id, epoch)
             });
-        let candidates = if store.has_property_index(key) {
-            store.find_nodes_by_property(key, value, view)?
+        // An index on every label may hold more of a value than the label has nodes: then the
+        // check reads the label. The count picks the route only, and both routes give the same
+        // verdict, so the latest count serves a transaction too.
+        let latest = ReadView::latest();
+        let limit = if store.label_count_is_kept(label, latest) {
+            store.nodes_by_label_count(label, latest)?
         } else {
-            store.nodes_by_label(label, view)?
+            UNIQUE_CHECK_CANDIDATES
         };
+        // Every spelling an index keeps apart that `==` does not, as `0.0` and `-0.0`: the
+        // verdict is the same with an index and without.
+        let candidates =
+            match store.find_few_indexed_maybe_equal(&[label], key, value, limit, view)? {
+                Some(nodes) => nodes,
+                None => store.nodes_by_label(label, view)?,
+            };
         let key = grafeo_common::types::PropertyKey::from(key);
         let mut found = Vec::new();
         for id in candidates {
@@ -2605,13 +2675,45 @@ impl CatalogConstraintValidator {
         Ok(found)
     }
 
+    /// The checks of a write to the graph with storage key `key` (`None` for the default
+    /// graph) under `catalog`, without what reads the store.
+    pub(crate) fn of_graph(catalog: &Arc<Catalog>, key: Option<&str>) -> Self {
+        let schema = key.and_then(|key| key.split_once('/').map(|(schema, _)| schema));
+        let validator = Self::new(Arc::clone(catalog)).with_schema(schema);
+        match key {
+            Some(graph) => validator.with_graph_name(graph),
+            None => validator,
+        }
+    }
+
     /// Checks writes to the graph with storage key `name` (`schema/graph` in
-    /// a schema) against the closed graph type it is bound to, if any: the
-    /// labels, edge types and properties it declares.
+    /// a schema) against the graph type it is bound to, if any: the types it lists, and
+    /// when it is closed, the labels, edge types and properties it declares. Without one,
+    /// a type some graph type lists does not apply.
     #[must_use]
     pub fn with_graph_name(mut self, name: &str) -> Self {
-        self.closed_type = ClosedGraphType::of_graph(&self.catalog, name);
+        self.graph = Some(name.to_string());
         self
+    }
+
+    /// The closed graph type of the graph written to, if it has one.
+    fn closed_type(&self) -> Option<&ClosedGraphType> {
+        self.closed_type
+            .get_or_init(|| {
+                let graph = self.graph.as_deref()?;
+                ClosedGraphType::of_graph(&self.catalog, graph).map(Box::new)
+            })
+            .as_deref()
+    }
+
+    /// The types the graph type of the graph written to lists, open or closed.
+    fn bound_types(&self) -> Option<&BoundTypes> {
+        self.bound_types
+            .get_or_init(|| {
+                let graph = self.graph.as_deref()?;
+                BoundTypes::of_graph(&self.catalog, graph).map(Box::new)
+            })
+            .as_deref()
     }
 
     /// Attaches a graph store for UNIQUE constraint enforcement and vector
@@ -2660,6 +2762,302 @@ impl CatalogConstraintValidator {
         let vector: Option<Vec<f32>> = items.iter().map(Value::as_vector_component).collect();
         vector.map(|vector| Value::Vector(vector.into()))
     }
+}
+
+impl CatalogConstraintValidator {
+    /// Checks `node`, as it stands, against the rules on its labels, with the checks a
+    /// write of it goes through: for a commit, whose writes were checked by a catalog
+    /// that has since changed.
+    ///
+    /// # Errors
+    ///
+    /// The schema violation a write of it would meet.
+    pub(crate) fn check_node_as_it_stands(
+        &self,
+        node: &grafeo_core::graph::lpg::Node,
+    ) -> Result<(), OperatorError> {
+        let labels: Vec<String> = node.labels.iter().map(ToString::to_string).collect();
+        let properties: Vec<(String, Value)> = node
+            .properties
+            .iter()
+            .map(|(key, value)| (key.as_str().to_string(), value.clone()))
+            .collect();
+        self.check_node_values(&labels, &properties, true)?;
+        let Some(ref store) = self.store else {
+            return Ok(());
+        };
+        for label in &labels {
+            let Some(type_def) = self.node_type(label) else {
+                continue;
+            };
+            for constraint in &type_def.constraints {
+                let (TypeConstraint::Unique(keys) | TypeConstraint::PrimaryKey(keys)) = constraint
+                else {
+                    continue;
+                };
+                let values: Option<Vec<&Value>> = keys
+                    .iter()
+                    .map(|key| {
+                        node.properties
+                            .get(&grafeo_common::types::PropertyKey::from(key.as_str()))
+                            .filter(|value| !value.is_null())
+                    })
+                    .collect();
+                let (Some(values), Some(first)) = (values, keys.first()) else {
+                    continue;
+                };
+                let duplicate = self
+                    .nodes_with_value(store.as_ref(), label, first, values[0])?
+                    .into_iter()
+                    .filter(|other| other.id != node.id)
+                    .any(|other| {
+                        keys.iter().zip(&values).all(|(key, value)| {
+                            other
+                                .properties
+                                .get(&grafeo_common::types::PropertyKey::from(key.as_str()))
+                                == Some(*value)
+                        })
+                    });
+                if duplicate {
+                    return Err(OperatorError::schema_violation(format!(
+                        "UNIQUE constraint violation: properties ({}) with values {values:?} \
+                         already exist on :{label}",
+                        keys.join(", ")
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+impl CatalogConstraintValidator {
+    /// Whether the graph's closed type lists the node type of `label`.
+    pub(crate) fn closed_type_lists_node(&self, label: &str) -> bool {
+        self.closed_type()
+            .is_some_and(|closed| closed.node_types.contains_key(label))
+    }
+
+    /// Whether the graph's closed type lists `edge_type`.
+    pub(crate) fn closed_type_lists_edge(&self, edge_type: &str) -> bool {
+        self.closed_type()
+            .is_some_and(|closed| closed.edge_types.contains_key(edge_type))
+    }
+
+    /// Checks one node against every rule but uniqueness, which reads others: with
+    /// `in_its_type`, also what the graph's closed type allows.
+    fn check_node_values(
+        &self,
+        labels: &[String],
+        properties: &[(String, Value)],
+        in_its_type: bool,
+    ) -> Result<(), OperatorError> {
+        if in_its_type {
+            self.validate_node_labels_allowed(labels)?;
+            self.validate_node_properties_declared(labels, properties)?;
+        }
+        self.validate_node_complete(labels, properties)?;
+        for (key, value) in properties {
+            self.validate_node_property(labels, key, value)?;
+        }
+        Ok(())
+    }
+
+    /// Checks `edge`, as `view` sees it in `store`, against every rule on it: with
+    /// `in_its_type`, also what the graph's closed type allows. Reads the labels of its ends
+    /// only when its type names some.
+    ///
+    /// # Errors
+    ///
+    /// The schema violation a write of it would meet.
+    pub(crate) fn check_edge_as_it_stands(
+        &self,
+        store: &dyn grafeo_core::graph::GraphStore,
+        edge: &grafeo_core::graph::lpg::Edge,
+        in_its_type: bool,
+        view: ReadView,
+    ) -> Result<(), OperatorError> {
+        let edge_type = edge.edge_type.as_str();
+        let properties: Vec<(String, Value)> = edge
+            .properties
+            .iter()
+            .map(|(key, value)| (key.as_str().to_string(), value.clone()))
+            .collect();
+        if in_its_type {
+            self.validate_edge_type_allowed(edge_type)?;
+            self.validate_edge_properties_declared(edge_type, &properties)?;
+        }
+        self.validate_edge_complete(edge_type, &properties)?;
+        for (key, value) in &properties {
+            self.validate_edge_property(edge_type, key, value)?;
+        }
+        if self.constrains_edge_endpoints(edge_type)
+            && let (Some(source), Some(target)) =
+                (store.node(edge.src, view)?, store.node(edge.dst, view)?)
+        {
+            let labels_of = |node: &grafeo_core::graph::lpg::Node| -> Vec<String> {
+                node.labels.iter().map(ToString::to_string).collect()
+            };
+            self.validate_edge_endpoints(edge_type, &labels_of(&source), &labels_of(&target))?;
+        }
+        Ok(())
+    }
+}
+
+/// What a statement's new rules cover in a graph.
+#[derive(Debug, Default, Clone)]
+pub(crate) struct RuleScope {
+    /// The node labels whose type changed.
+    pub labels: Vec<String>,
+    /// The edge types whose type changed.
+    pub edge_types: Vec<String>,
+    /// Whether the graph's type changed: its every node and edge.
+    pub whole_graph: bool,
+    /// Whether what is read is also checked against what the graph's closed type allows, as it
+    /// always is with `whole_graph`: a changed type the closed type lists.
+    pub in_its_type: bool,
+}
+
+/// Checks what `view` sees in `store` against `validator`'s catalog, as a write of each
+/// element would be checked, over `scope`. Uniqueness takes one pass per rule: a check per
+/// node would read the label for each of its nodes.
+///
+/// # Errors
+///
+/// The schema violation (GQLSTATUS G2000) a write of the first element that breaks a rule
+/// would meet.
+pub(crate) fn check_data_against_rules(
+    validator: &CatalogConstraintValidator,
+    store: &dyn grafeo_core::graph::GraphStore,
+    scope: &RuleScope,
+    view: ReadView,
+) -> Result<(), OperatorError> {
+    let mut nodes = if scope.whole_graph {
+        store.node_ids(view)?
+    } else {
+        let mut nodes = Vec::new();
+        for label in &scope.labels {
+            nodes.extend(store.nodes_by_label(label, view)?);
+        }
+        nodes
+    };
+    nodes.sort_unstable();
+    nodes.dedup();
+    let in_its_type = scope.whole_graph || scope.in_its_type;
+    let mut labels_seen: HashSet<String> = scope.labels.iter().cloned().collect();
+    for id in nodes {
+        let Some(node) = store.node(id, view)? else {
+            continue;
+        };
+        let labels: Vec<String> = node.labels.iter().map(ToString::to_string).collect();
+        let properties: Vec<(String, Value)> = node
+            .properties
+            .iter()
+            .map(|(key, value)| (key.as_str().to_string(), value.clone()))
+            .collect();
+        if scope.whole_graph {
+            labels_seen.extend(labels.iter().cloned());
+        }
+        validator.check_node_values(&labels, &properties, in_its_type)?;
+    }
+    for label in &labels_seen {
+        let Some(type_def) = validator.node_type(label) else {
+            continue;
+        };
+        for constraint in &type_def.constraints {
+            if let TypeConstraint::Unique(keys) | TypeConstraint::PrimaryKey(keys) = constraint {
+                check_rule_over_nodes(
+                    &ConstraintDefinition {
+                        name: format!("{label}({})", keys.join(", ")),
+                        label: label.clone(),
+                        properties: keys.clone(),
+                        kind: ConstraintType::Unique,
+                    },
+                    store,
+                    view,
+                )?;
+            }
+        }
+    }
+    if !scope.whole_graph && scope.edge_types.is_empty() {
+        return Ok(());
+    }
+    let types: Vec<grafeo_common::types::ArcStr> = if scope.whole_graph {
+        Vec::new()
+    } else {
+        scope
+            .edge_types
+            .iter()
+            .map(|name| name.as_str().into())
+            .collect()
+    };
+    for id in store.node_ids(view)? {
+        for (_, edge) in store.edges(id, grafeo_core::graph::Direction::Outgoing, &types, view)? {
+            let Some(edge) = store.edge(edge, view)? else {
+                continue;
+            };
+            validator.check_edge_as_it_stands(store, &edge, in_its_type, view)?;
+        }
+    }
+    Ok(())
+}
+
+/// Checks the rule `def` against the nodes of its label that `view` sees: at the rule's
+/// statement, and at its commit. One read of each node, so an index need not exist yet.
+///
+/// # Errors
+///
+/// A schema violation naming the rule and a value that breaks it.
+pub(crate) fn check_rule_over_nodes(
+    def: &ConstraintDefinition,
+    store: &dyn grafeo_core::graph::GraphStore,
+    view: ReadView,
+) -> Result<(), OperatorError> {
+    let requires_values = matches!(
+        def.kind,
+        ConstraintType::NotNull | ConstraintType::Exists | ConstraintType::NodeKey
+    );
+    let unique = matches!(def.kind, ConstraintType::Unique | ConstraintType::NodeKey);
+    let keys: Vec<grafeo_common::types::PropertyKey> = def
+        .properties
+        .iter()
+        .map(|property| grafeo_common::types::PropertyKey::from(property.as_str()))
+        .collect();
+    let mut seen: HashSet<Vec<grafeo_common::types::HashableValue>> = HashSet::new();
+    for id in store.nodes_by_label(&def.label, view)? {
+        let Some(node) = store.node(id, view)? else {
+            continue;
+        };
+        let values: Vec<Option<&Value>> = keys
+            .iter()
+            .map(|key| node.properties.get(key).filter(|value| !value.is_null()))
+            .collect();
+        if requires_values && let Some(at) = values.iter().position(Option::is_none) {
+            return Err(OperatorError::schema_violation(format!(
+                "constraint '{}' does not hold: node {} of :{} has no value for '{}'",
+                def.name,
+                id.as_u64(),
+                def.label,
+                def.properties[at]
+            )));
+        }
+        if unique && let Some(values) = values.into_iter().collect::<Option<Vec<&Value>>>() {
+            let key: Vec<grafeo_common::types::HashableValue> = values
+                .iter()
+                .map(|value| grafeo_common::types::HashableValue::from((*value).clone()))
+                .collect();
+            if !seen.insert(key) {
+                return Err(OperatorError::schema_violation(format!(
+                    "constraint '{}' does not hold: more than one node of :{} has ({}) = \
+                     {values:?}",
+                    def.name,
+                    def.label,
+                    def.properties.join(", ")
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 impl ConstraintValidator for CatalogConstraintValidator {
@@ -2959,12 +3357,10 @@ impl ConstraintValidator for CatalogConstraintValidator {
     }
 
     fn validate_node_labels_allowed(&self, labels: &[String]) -> Result<(), OperatorError> {
-        let Some(closed) = &self.closed_type else {
+        let Some(closed) = self.closed_type() else {
             return Ok(());
         };
-        let Some(node_types) = &closed.node_types else {
-            return Ok(());
-        };
+        let node_types = &closed.node_types;
         if labels.is_empty() {
             return Err(OperatorError::schema_violation(format!(
                 "a node without a label is not allowed by closed graph type '{}': \
@@ -2982,18 +3378,16 @@ impl ConstraintValidator for CatalogConstraintValidator {
     }
 
     fn validate_edge_type_allowed(&self, edge_type: &str) -> Result<(), OperatorError> {
-        let Some(closed) = &self.closed_type else {
+        let Some(closed) = self.closed_type() else {
             return Ok(());
         };
-        match &closed.edge_types {
-            Some(edge_types) if !edge_types.contains_key(edge_type) => {
-                Err(OperatorError::schema_violation(format!(
-                    "edge type '{edge_type}' is not an edge type of closed graph type '{}'",
-                    closed.name
-                )))
-            }
-            _ => Ok(()),
+        if closed.edge_types.contains_key(edge_type) {
+            return Ok(());
         }
+        Err(OperatorError::schema_violation(format!(
+            "edge type '{edge_type}' is not an edge type of closed graph type '{}'",
+            closed.name
+        )))
     }
 
     fn validate_node_properties_declared(
@@ -3001,12 +3395,10 @@ impl ConstraintValidator for CatalogConstraintValidator {
         labels: &[String],
         properties: &[(String, Value)],
     ) -> Result<(), OperatorError> {
-        let Some(closed) = &self.closed_type else {
+        let Some(closed) = self.closed_type() else {
             return Ok(());
         };
-        let Some(node_types) = &closed.node_types else {
-            return Ok(());
-        };
+        let node_types = &closed.node_types;
         // The properties the node's node types declare; `None` when one of
         // them has no definition to check against.
         let mut declared: Vec<&HashSet<String>> = Vec::new();
@@ -3045,14 +3437,10 @@ impl ConstraintValidator for CatalogConstraintValidator {
         edge_type: &str,
         properties: &[(String, Value)],
     ) -> Result<(), OperatorError> {
-        let Some(closed) = &self.closed_type else {
+        let Some(closed) = self.closed_type() else {
             return Ok(());
         };
-        let Some(Some(Some(declared))) = closed
-            .edge_types
-            .as_ref()
-            .map(|edge_types| edge_types.get(edge_type))
-        else {
+        let Some(Some(declared)) = closed.edge_types.get(edge_type) else {
             return Ok(());
         };
         let undeclared = properties
@@ -3104,6 +3492,21 @@ impl ConstraintValidator for CatalogConstraintValidator {
         Ok(())
     }
 
+    fn constrains_some_edge_endpoints(&self) -> bool {
+        let of_a_bound_type = self.bound_types().is_some_and(|bound| {
+            bound
+                .edge_type_names
+                .keys()
+                .any(|name| self.constrains_edge_endpoints(name))
+        });
+        of_a_bound_type
+            || self
+                .catalog
+                .all_edge_type_defs()
+                .iter()
+                .any(|def| self.constrains_edge_endpoints(unqualified(&def.name)))
+    }
+
     fn constrains_edge_endpoints(&self, edge_type: &str) -> bool {
         self.edge_type(edge_type).is_some_and(|def| {
             !def.source_node_types.is_empty() || !def.target_node_types.is_empty()
@@ -3117,10 +3520,7 @@ impl ConstraintValidator for CatalogConstraintValidator {
         matches!(value, Value::Vector(_))
             || self.indexes_list(key, value)
             || self.catalog.has_node_types()
-            || self
-                .closed_type
-                .as_ref()
-                .is_some_and(|closed| closed.node_types.is_some())
+            || self.closed_type().is_some()
     }
 
     fn convert_node_property(&self, labels: &[String], key: &str, value: &Value) -> Option<Value> {
@@ -3189,12 +3589,17 @@ struct ClosedGraphType {
     name: String,
     /// The labels a node may have, each with the properties its node type
     /// declares (`None` when the node type has no definition to check
-    /// against). `None` when the graph type lists no node types: it does not
-    /// restrict them.
-    node_types: Option<HashMap<String, Option<HashSet<String>>>>,
+    /// against). None at all for a graph type that lists no node type
+    /// (ISO/IEC 39075 4.13.2.1).
+    node_types: HashMap<String, Option<HashSet<String>>>,
     /// The edge types an edge may have, with their properties like
     /// `node_types`.
-    edge_types: Option<HashMap<String, Option<HashSet<String>>>>,
+    edge_types: HashMap<String, Option<HashSet<String>>>,
+}
+
+/// The types a graph's graph type lists, open or closed.
+#[derive(Debug)]
+struct BoundTypes {
     /// The node type that checks each label, by its catalog name
     /// (`schema/Type` for a type in a schema): the graph type's own, also
     /// when the graph was created in another schema.
@@ -3202,6 +3607,29 @@ struct ClosedGraphType {
     /// The edge type that checks each edge type name, like
     /// `node_type_names`.
     edge_type_names: HashMap<String, String>,
+}
+
+impl BoundTypes {
+    /// The types the graph type of the graph with storage key `graph` lists; `None` for a
+    /// graph without one.
+    fn of_graph(catalog: &Catalog, graph: &str) -> Option<Self> {
+        let type_name = catalog.get_graph_type_binding(graph)?;
+        let def = catalog.schema()?.get_graph_type(&type_name)?;
+        Some(Self {
+            node_type_names: def
+                .allowed_node_types
+                .iter()
+                .filter(|name| catalog.resolved_node_type(name).is_some())
+                .map(|name| (unqualified(name).to_string(), name.clone()))
+                .collect(),
+            edge_type_names: def
+                .allowed_edge_types
+                .iter()
+                .filter(|name| catalog.get_edge_type_def(name).is_some())
+                .map(|name| (unqualified(name).to_string(), name.clone()))
+                .collect(),
+        })
+    }
 }
 
 impl ClosedGraphType {
@@ -3216,56 +3644,48 @@ impl ClosedGraphType {
         let declared = |properties: &[TypedProperty]| -> HashSet<String> {
             properties.iter().map(|p| p.name.clone()).collect()
         };
-        let mut node_type_names = HashMap::new();
-        let node_types = (!def.allowed_node_types.is_empty()).then(|| {
-            let mut labels = HashMap::new();
-            for name in &def.allowed_node_types {
-                // A node type of a graph type in a schema is named
-                // `schema/Type`; its nodes carry the label `Type`.
-                let resolved = catalog.resolved_node_type(name);
-                let properties = resolved.as_ref().map(|t| declared(&t.properties));
-                if let Some(node_type) = &resolved {
-                    for key_label in &node_type.key_labels {
-                        labels
-                            .entry(key_label.clone())
-                            .or_insert_with(|| properties.clone());
-                    }
-                    node_type_names.insert(unqualified(name).to_string(), name.clone());
+        let mut node_types = HashMap::new();
+        for name in &def.allowed_node_types {
+            // A node type of a graph type in a schema is named
+            // `schema/Type`; its nodes carry the label `Type`.
+            let resolved = catalog.resolved_node_type(name);
+            let properties = resolved.as_ref().map(|t| declared(&t.properties));
+            if let Some(node_type) = &resolved {
+                for key_label in &node_type.key_labels {
+                    node_types
+                        .entry(key_label.clone())
+                        .or_insert_with(|| properties.clone());
                 }
-                labels.insert(unqualified(name).to_string(), properties);
             }
-            labels
-        });
-        let edge_type_names = def
+            node_types.insert(unqualified(name).to_string(), properties);
+        }
+        let edge_types = def
             .allowed_edge_types
             .iter()
-            .filter(|name| catalog.get_edge_type_def(name).is_some())
-            .map(|name| (unqualified(name).to_string(), name.clone()))
+            .map(|name| {
+                let properties = catalog
+                    .get_edge_type_def(name)
+                    .map(|t| declared(&t.properties));
+                (unqualified(name).to_string(), properties)
+            })
             .collect();
-        let edge_types = (!def.allowed_edge_types.is_empty()).then(|| {
-            def.allowed_edge_types
-                .iter()
-                .map(|name| {
-                    let properties = catalog
-                        .get_edge_type_def(name)
-                        .map(|t| declared(&t.properties));
-                    (unqualified(name).to_string(), properties)
-                })
-                .collect()
-        });
         Some(Self {
             name: def.name,
             node_types,
             edge_types,
-            node_type_names,
-            edge_type_names,
         })
     }
 }
 
+/// Whether `name` is the graph type Cypher's `ALTER CURRENT GRAPH TYPE` keeps its types
+/// in, in a schema or not.
+pub(crate) fn is_current_graph_type(name: &str) -> bool {
+    unqualified(name) == "__current__"
+}
+
 /// A type name without the schema a graph type in a schema prefixes it with
 /// (`schema/Type`).
-fn unqualified(name: &str) -> &str {
+pub(crate) fn unqualified(name: &str) -> &str {
     name.rsplit_once('/').map_or(name, |(_, name)| name)
 }
 
@@ -3289,6 +3709,54 @@ fn property_size_error(key: &str, size: usize, limit: usize) -> OperatorError {
 mod tests {
     use super::*;
     use std::thread;
+
+    /// A validator reads the graph's type when a write first asks, and keeps what it read: a change
+    /// committed between the plan and the first check counts, and one after it does not, so the
+    /// checks of one statement see one type.
+    #[test]
+    fn a_validator_reads_the_closed_type_at_its_first_check_and_keeps_it() {
+        let catalog = Arc::new(Catalog::new());
+        for name in ["City", "Town"] {
+            catalog
+                .register_node_type(NodeTypeDefinition {
+                    name: name.to_string(),
+                    properties: Vec::new(),
+                    constraints: Vec::new(),
+                    parent_types: Vec::new(),
+                    key_labels: Vec::new(),
+                })
+                .unwrap();
+        }
+        catalog
+            .register_graph_type(GraphTypeDefinition {
+                name: "atlas".to_string(),
+                allowed_node_types: vec!["City".to_string()],
+                allowed_edge_types: Vec::new(),
+                open: false,
+            })
+            .unwrap();
+        catalog
+            .bind_graph_type("europe", "atlas".to_string())
+            .unwrap();
+        let validator =
+            || CatalogConstraintValidator::new(Arc::clone(&catalog)).with_graph_name("europe");
+        let town = ["Town".to_string()];
+        let city = ["City".to_string()];
+
+        let made_before = validator();
+        catalog
+            .alter_graph_type_add_node_type("atlas", "Town".to_string())
+            .unwrap();
+        made_before.validate_node_labels_allowed(&town).unwrap();
+
+        let asked = validator();
+        asked.validate_node_labels_allowed(&city).unwrap();
+        catalog
+            .alter_graph_type_drop_node_type("atlas", "Town")
+            .unwrap();
+        asked.validate_node_labels_allowed(&town).unwrap();
+        validator().validate_node_labels_allowed(&town).unwrap_err();
+    }
 
     /// A graph type created under the name of a dropped one types no graph:
     /// the binding the drop left goes, while the other bindings stay.

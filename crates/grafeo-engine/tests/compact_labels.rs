@@ -7,7 +7,7 @@
 //! reopen too.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test compact_labels
+//! cargo test -p grafeo-engine --all-features --test main compact_labels::
 //! ```
 
 #![cfg(feature = "gql")]

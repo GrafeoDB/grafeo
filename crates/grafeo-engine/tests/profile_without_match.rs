@@ -9,7 +9,7 @@
 //! returns.
 //!
 //! ```bash
-//! cargo test -p grafeo-engine --all-features --test profile_without_match
+//! cargo test -p grafeo-engine --all-features --test main profile_without_match::
 //! ```
 
 #![cfg(all(feature = "gql", feature = "cypher"))]

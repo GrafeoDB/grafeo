@@ -133,3 +133,276 @@ DX19|gql a5416b3f98 INSERT and MERGE refuse `|`, `!`, `%` and parentheses, namin
 DX20|gql a5416b3f98 INSERT and MERGE refuse `|`, `!`, `%` and parentheses, naming the statement; 0.6.1 created a node with no label.
 DX24|gql b5473b0fb9 INSERT and MERGE refuse `|`, `!`, `%` and parentheses, naming the statement; 0.6.1 created a node with no label.
 DX25|gql 646e30e5ca INSERT and MERGE set `IS A` and `A&B`, and MERGE matches on the labels; 0.6.1 created a node with no label and matched on the property alone.
+AJ3|cypher 5281012dac A string equals no number, whatever number it spells, in a filter, a lookup with or without an index, IN, CASE, a join and id() (GA04, ISO/IEC 39075 19.3); numbers stay one kind. 0.6.1 found '42' and '042' equal to 42.
+AJ3|gql 2b08c10158 A string equals no number, whatever number it spells, in a filter, a lookup with or without an index, IN, CASE, a join and id() (GA04, ISO/IEC 39075 19.3); numbers stay one kind. 0.6.1 found '42' and '042' equal to 42.
+AV1|cypher 4d0fb10455 A string equals no number, whatever number it spells, in a filter, a lookup with or without an index, IN, CASE, a join and id() (GA04, ISO/IEC 39075 19.3); numbers stay one kind. 0.6.1 found '42' and '042' equal to 42.
+AV1|gql 4d0fb10455 A string equals no number, whatever number it spells, in a filter, a lookup with or without an index, IN, CASE, a join and id() (GA04, ISO/IEC 39075 19.3); numbers stay one kind. 0.6.1 found '42' and '042' equal to 42.
+AV2|cypher 4d0fb10455 A string equals no number, whatever number it spells, in a filter, a lookup with or without an index, IN, CASE, a join and id() (GA04, ISO/IEC 39075 19.3); numbers stay one kind. 0.6.1 found '42' and '042' equal to 42.
+AV2|gql 4d0fb10455 A string equals no number, whatever number it spells, in a filter, a lookup with or without an index, IN, CASE, a join and id() (GA04, ISO/IEC 39075 19.3); numbers stay one kind. 0.6.1 found '42' and '042' equal to 42.
+AV3|cypher decf1e07f6 A string equals no number, whatever number it spells, in a filter, a lookup with or without an index, IN, CASE, a join and id() (GA04, ISO/IEC 39075 19.3); numbers stay one kind. 0.6.1 found '42' and '042' equal to 42.
+AV3|gql decf1e07f6 A string equals no number, whatever number it spells, in a filter, a lookup with or without an index, IN, CASE, a join and id() (GA04, ISO/IEC 39075 19.3); numbers stay one kind. 0.6.1 found '42' and '042' equal to 42.
+AV4|cypher f2239a8455 A string equals no number, whatever number it spells, in a filter, a lookup with or without an index, IN, CASE, a join and id() (GA04, ISO/IEC 39075 19.3); numbers stay one kind. 0.6.1 found '42' and '042' equal to 42.
+AV4|gql f2239a8455 A string equals no number, whatever number it spells, in a filter, a lookup with or without an index, IN, CASE, a join and id() (GA04, ISO/IEC 39075 19.3); numbers stay one kind. 0.6.1 found '42' and '042' equal to 42.
+AV5|cypher 13cd563428 A string equals no number, whatever number it spells, in a filter, a lookup with or without an index, IN, CASE, a join and id() (GA04, ISO/IEC 39075 19.3); numbers stay one kind. 0.6.1 found '42' and '042' equal to 42.
+AV5|gql 823b1c8f22 A string equals no number, whatever number it spells, in a filter, a lookup with or without an index, IN, CASE, a join and id() (GA04, ISO/IEC 39075 19.3); numbers stay one kind. 0.6.1 found '42' and '042' equal to 42.
+AV7|cypher 4d0fb10455 A string equals no number, whatever number it spells, in a filter, a lookup with or without an index, IN, CASE, a join and id() (GA04, ISO/IEC 39075 19.3); numbers stay one kind. 0.6.1 found '42' and '042' equal to 42.
+AV7|gql 4d0fb10455 A string equals no number, whatever number it spells, in a filter, a lookup with or without an index, IN, CASE, a join and id() (GA04, ISO/IEC 39075 19.3); numbers stay one kind. 0.6.1 found '42' and '042' equal to 42.
+AV8|cypher 20233fc7fc A string equals no number, whatever number it spells, in a filter, a lookup with or without an index, IN, CASE, a join and id() (GA04, ISO/IEC 39075 19.3); numbers stay one kind. 0.6.1 found '42' and '042' equal to 42.
+AV8|gql 20233fc7fc A string equals no number, whatever number it spells, in a filter, a lookup with or without an index, IN, CASE, a join and id() (GA04, ISO/IEC 39075 19.3); numbers stay one kind. 0.6.1 found '42' and '042' equal to 42.
+AV9|cypher 4d0fb10455 A string equals no number, whatever number it spells, in a filter, a lookup with or without an index, IN, CASE, a join and id() (GA04, ISO/IEC 39075 19.3); numbers stay one kind. 0.6.1 found '42' and '042' equal to 42.
+AV9|gql 4d0fb10455 A string equals no number, whatever number it spells, in a filter, a lookup with or without an index, IN, CASE, a join and id() (GA04, ISO/IEC 39075 19.3); numbers stay one kind. 0.6.1 found '42' and '042' equal to 42.
+AV10|cypher 4d0fb10455 A string equals no number, whatever number it spells, in a filter, a lookup with or without an index, IN, CASE, a join and id() (GA04, ISO/IEC 39075 19.3); numbers stay one kind. 0.6.1 found '42' and '042' equal to 42.
+AV10|gql 4d0fb10455 A string equals no number, whatever number it spells, in a filter, a lookup with or without an index, IN, CASE, a join and id() (GA04, ISO/IEC 39075 19.3); numbers stay one kind. 0.6.1 found '42' and '042' equal to 42.
+AV11|cypher decf1e07f6 A string equals no number, whatever number it spells, in a filter, a lookup with or without an index, IN, CASE, a join and id() (GA04, ISO/IEC 39075 19.3); numbers stay one kind. 0.6.1 found '42' and '042' equal to 42.
+AV11|gql decf1e07f6 A string equals no number, whatever number it spells, in a filter, a lookup with or without an index, IN, CASE, a join and id() (GA04, ISO/IEC 39075 19.3); numbers stay one kind. 0.6.1 found '42' and '042' equal to 42.
+AV12|cypher f2239a8455 A string equals no number, whatever number it spells, in a filter, a lookup with or without an index, IN, CASE, a join and id() (GA04, ISO/IEC 39075 19.3); numbers stay one kind. 0.6.1 found '42' and '042' equal to 42.
+AV12|gql f2239a8455 A string equals no number, whatever number it spells, in a filter, a lookup with or without an index, IN, CASE, a join and id() (GA04, ISO/IEC 39075 19.3); numbers stay one kind. 0.6.1 found '42' and '042' equal to 42.
+AV13|cypher 13cd563428 A string equals no number, whatever number it spells, in a filter, a lookup with or without an index, IN, CASE, a join and id() (GA04, ISO/IEC 39075 19.3); numbers stay one kind. 0.6.1 found '42' and '042' equal to 42.
+AV13|gql 823b1c8f22 A string equals no number, whatever number it spells, in a filter, a lookup with or without an index, IN, CASE, a join and id() (GA04, ISO/IEC 39075 19.3); numbers stay one kind. 0.6.1 found '42' and '042' equal to 42.
+AV15|cypher 4d0fb10455 A string equals no number, whatever number it spells, in a filter, a lookup with or without an index, IN, CASE, a join and id() (GA04, ISO/IEC 39075 19.3); numbers stay one kind. 0.6.1 found '42' and '042' equal to 42.
+AV15|gql 4d0fb10455 A string equals no number, whatever number it spells, in a filter, a lookup with or without an index, IN, CASE, a join and id() (GA04, ISO/IEC 39075 19.3); numbers stay one kind. 0.6.1 found '42' and '042' equal to 42.
+AV16|cypher 20233fc7fc A string equals no number, whatever number it spells, in a filter, a lookup with or without an index, IN, CASE, a join and id() (GA04, ISO/IEC 39075 19.3); numbers stay one kind. 0.6.1 found '42' and '042' equal to 42.
+AV16|gql 20233fc7fc A string equals no number, whatever number it spells, in a filter, a lookup with or without an index, IN, CASE, a join and id() (GA04, ISO/IEC 39075 19.3); numbers stay one kind. 0.6.1 found '42' and '042' equal to 42.
+AV17|cypher d17b7759bd A string equals no number, whatever number it spells, in a filter, a lookup with or without an index, IN, CASE, a join and id() (GA04, ISO/IEC 39075 19.3); numbers stay one kind. 0.6.1 found '42' and '042' equal to 42.
+AV17|gql d17b7759bd A string equals no number, whatever number it spells, in a filter, a lookup with or without an index, IN, CASE, a join and id() (GA04, ISO/IEC 39075 19.3); numbers stay one kind. 0.6.1 found '42' and '042' equal to 42.
+AV19|cypher d17b7759bd A string equals no number, whatever number it spells, in a filter, a lookup with or without an index, IN, CASE, a join and id() (GA04, ISO/IEC 39075 19.3); numbers stay one kind. 0.6.1 found '42' and '042' equal to 42.
+AV19|gql d17b7759bd A string equals no number, whatever number it spells, in a filter, a lookup with or without an index, IN, CASE, a join and id() (GA04, ISO/IEC 39075 19.3); numbers stay one kind. 0.6.1 found '42' and '042' equal to 42.
+BV9|gql d53780f4bb A string equals no number, whatever number it spells, in a filter, a lookup with or without an index, IN, CASE, a join and id() (GA04, ISO/IEC 39075 19.3); numbers stay one kind. 0.6.1 found '42' and '042' equal to 42.
+CZ1|gql b992cdc0e9 A node compared with a value or an edge is false in GQL, as in Cypher (GA04); 0.6.1 failed the comparison as not comparable.
+CZ2|gql 52b6a18503 A node compared with a value or an edge is false in GQL, as in Cypher (GA04); 0.6.1 failed the comparison as not comparable.
+CZ3|gql f0c845b50c A node compared with a value or an edge is false in GQL, as in Cypher (GA04); 0.6.1 failed the comparison as not comparable.
+DY1|sparql b12062bf71 FROM without FROM NAMED makes a dataset with no named graphs (SPARQL 1.1 13.2), so GRAPH finds nothing; 0.6.1 read every named graph.
+DY2|sparql 57bb68b24d FROM without FROM NAMED makes a dataset with no named graphs (SPARQL 1.1 13.2), so GRAPH finds nothing; 0.6.1 read every named graph.
+DY3|sparql 683368f94a FROM without FROM NAMED makes a dataset with no named graphs (SPARQL 1.1 13.2), so GRAPH finds nothing; 0.6.1 read every named graph.
+DY4|sparql 683368f94a FROM without FROM NAMED makes a dataset with no named graphs (SPARQL 1.1 13.2), so GRAPH finds nothing; 0.6.1 read every named graph.
+DY5|sparql d26ed2fe32 FROM without FROM NAMED makes a dataset with no named graphs (SPARQL 1.1 13.2), so GRAPH finds nothing; 0.6.1 read every named graph.
+DY6|sparql 713a8ca093 FROM without FROM NAMED makes a dataset with no named graphs (SPARQL 1.1 13.2), so GRAPH finds nothing; 0.6.1 read every named graph.
+DY7|sparql a86180c8a6 FROM without FROM NAMED makes a dataset with no named graphs (SPARQL 1.1 13.2), so GRAPH finds nothing; 0.6.1 read every named graph.
+DY8|sparql 683368f94a FROM without FROM NAMED makes a dataset with no named graphs (SPARQL 1.1 13.2), so GRAPH finds nothing; 0.6.1 read every named graph.
+DY9|sparql b12062bf71 FROM without FROM NAMED makes a dataset with no named graphs (SPARQL 1.1 13.2), so GRAPH finds nothing; 0.6.1 read every named graph.
+DY10|sparql 683368f94a FROM without FROM NAMED makes a dataset with no named graphs (SPARQL 1.1 13.2), so GRAPH finds nothing; 0.6.1 read every named graph.
+DY11|sparql b12062bf71 FROM without FROM NAMED makes a dataset with no named graphs (SPARQL 1.1 13.2), so GRAPH finds nothing; 0.6.1 read every named graph.
+DY12|sparql b12062bf71 FROM without FROM NAMED makes a dataset with no named graphs (SPARQL 1.1 13.2), so GRAPH finds nothing; 0.6.1 read every named graph.
+DY13|sparql d26ed2fe32 FROM without FROM NAMED makes a dataset with no named graphs (SPARQL 1.1 13.2), so GRAPH finds nothing; 0.6.1 read every named graph.
+DY14|sparql d27d898b77 FROM without FROM NAMED makes a dataset with no named graphs (SPARQL 1.1 13.2), so GRAPH finds nothing; 0.6.1 read every named graph.
+DY15|sparql 4aaa1dcee9 FROM without FROM NAMED makes a dataset with no named graphs (SPARQL 1.1 13.2), so GRAPH finds nothing; 0.6.1 read every named graph.
+DY16|sparql d27d898b77 FROM without FROM NAMED makes a dataset with no named graphs (SPARQL 1.1 13.2), so GRAPH finds nothing; 0.6.1 read every named graph.
+DY17|sparql 683368f94a FROM without FROM NAMED makes a dataset with no named graphs (SPARQL 1.1 13.2), so GRAPH finds nothing; 0.6.1 read every named graph.
+DY18|sparql 683368f94a FROM without FROM NAMED makes a dataset with no named graphs (SPARQL 1.1 13.2), so GRAPH finds nothing; 0.6.1 read every named graph.
+DY19|sparql 683368f94a FROM without FROM NAMED makes a dataset with no named graphs (SPARQL 1.1 13.2), so GRAPH finds nothing; 0.6.1 read every named graph.
+DY20|sparql 683368f94a FROM without FROM NAMED makes a dataset with no named graphs (SPARQL 1.1 13.2), so GRAPH finds nothing; 0.6.1 read every named graph.
+DY21|sparql 683368f94a FROM without FROM NAMED makes a dataset with no named graphs (SPARQL 1.1 13.2), so GRAPH finds nothing; 0.6.1 read every named graph.
+DY22|sparql d26ed2fe32 FROM without FROM NAMED makes a dataset with no named graphs (SPARQL 1.1 13.2), so GRAPH finds nothing; 0.6.1 read every named graph.
+DY23|sparql d26ed2fe32 FROM without FROM NAMED makes a dataset with no named graphs (SPARQL 1.1 13.2), so GRAPH finds nothing; 0.6.1 read every named graph.
+DY24|sparql 97f0e95745 FROM without FROM NAMED makes a dataset with no named graphs (SPARQL 1.1 13.2), so GRAPH finds nothing; 0.6.1 read every named graph.
+DY25|sparql 97f0e95745 FROM without FROM NAMED makes a dataset with no named graphs (SPARQL 1.1 13.2), so GRAPH finds nothing; 0.6.1 read every named graph.
+DY26|sparql 18d0b6193e FROM without FROM NAMED makes a dataset with no named graphs (SPARQL 1.1 13.2), so GRAPH finds nothing; 0.6.1 read every named graph.
+DY27|sparql b12062bf71 FROM without FROM NAMED makes a dataset with no named graphs (SPARQL 1.1 13.2), so GRAPH finds nothing; 0.6.1 read every named graph.
+DY28|sparql 18d0b6193e FROM without FROM NAMED makes a dataset with no named graphs (SPARQL 1.1 13.2), so GRAPH finds nothing; 0.6.1 read every named graph.
+DY29|sparql 1a5ada6bbb FROM without FROM NAMED makes a dataset with no named graphs (SPARQL 1.1 13.2), so GRAPH finds nothing; 0.6.1 read every named graph.
+DY30|sparql 1a5ada6bbb FROM without FROM NAMED makes a dataset with no named graphs (SPARQL 1.1 13.2), so GRAPH finds nothing; 0.6.1 read every named graph.
+DY31|sparql b26d593c01 FROM without FROM NAMED makes a dataset with no named graphs (SPARQL 1.1 13.2), so GRAPH finds nothing; 0.6.1 read every named graph.
+DY32|sparql b26d593c01 FROM without FROM NAMED makes a dataset with no named graphs (SPARQL 1.1 13.2), so GRAPH finds nothing; 0.6.1 read every named graph.
+DY33|sparql b26d593c01 FROM without FROM NAMED makes a dataset with no named graphs (SPARQL 1.1 13.2), so GRAPH finds nothing; 0.6.1 read every named graph.
+DY42|sparql 119f412e99 FROM without FROM NAMED makes a dataset with no named graphs (SPARQL 1.1 13.2), so GRAPH finds nothing; 0.6.1 read every named graph.
+DY43|sparql f724c7aae1 FROM without FROM NAMED makes a dataset with no named graphs (SPARQL 1.1 13.2), so GRAPH finds nothing; 0.6.1 read every named graph.
+DY44|sparql c7a4018d06 FROM without FROM NAMED makes a dataset with no named graphs (SPARQL 1.1 13.2), so GRAPH finds nothing; 0.6.1 read every named graph.
+DY45|sparql 119f412e99 FROM without FROM NAMED makes a dataset with no named graphs (SPARQL 1.1 13.2), so GRAPH finds nothing; 0.6.1 read every named graph.
+DY46|sparql 119f412e99 FROM without FROM NAMED makes a dataset with no named graphs (SPARQL 1.1 13.2), so GRAPH finds nothing; 0.6.1 read every named graph.
+DY47|sparql f724c7aae1 FROM without FROM NAMED makes a dataset with no named graphs (SPARQL 1.1 13.2), so GRAPH finds nothing; 0.6.1 read every named graph.
+DY48|sparql c7a4018d06 FROM without FROM NAMED makes a dataset with no named graphs (SPARQL 1.1 13.2), so GRAPH finds nothing; 0.6.1 read every named graph.
+DY49|sparql 119f412e99 FROM without FROM NAMED makes a dataset with no named graphs (SPARQL 1.1 13.2), so GRAPH finds nothing; 0.6.1 read every named graph.
+DY50|sparql 119f412e99 FROM without FROM NAMED makes a dataset with no named graphs (SPARQL 1.1 13.2), so GRAPH finds nothing; 0.6.1 read every named graph.
+DY51|sparql f724c7aae1 FROM without FROM NAMED makes a dataset with no named graphs (SPARQL 1.1 13.2), so GRAPH finds nothing; 0.6.1 read every named graph.
+DY52|sparql c7a4018d06 FROM without FROM NAMED makes a dataset with no named graphs (SPARQL 1.1 13.2), so GRAPH finds nothing; 0.6.1 read every named graph.
+DY53|sparql 119f412e99 FROM without FROM NAMED makes a dataset with no named graphs (SPARQL 1.1 13.2), so GRAPH finds nothing; 0.6.1 read every named graph.
+DY54|sparql 119f412e99 FROM without FROM NAMED makes a dataset with no named graphs (SPARQL 1.1 13.2), so GRAPH finds nothing; 0.6.1 read every named graph.
+DY55|sparql f724c7aae1 FROM without FROM NAMED makes a dataset with no named graphs (SPARQL 1.1 13.2), so GRAPH finds nothing; 0.6.1 read every named graph.
+DY56|sparql c7a4018d06 FROM without FROM NAMED makes a dataset with no named graphs (SPARQL 1.1 13.2), so GRAPH finds nothing; 0.6.1 read every named graph.
+DY57|sparql 119f412e99 FROM without FROM NAMED makes a dataset with no named graphs (SPARQL 1.1 13.2), so GRAPH finds nothing; 0.6.1 read every named graph.
+DY58|sparql 119f412e99 FROM without FROM NAMED makes a dataset with no named graphs (SPARQL 1.1 13.2), so GRAPH finds nothing; 0.6.1 read every named graph.
+DY59|sparql f724c7aae1 FROM without FROM NAMED makes a dataset with no named graphs (SPARQL 1.1 13.2), so GRAPH finds nothing; 0.6.1 read every named graph.
+DY60|sparql c7a4018d06 FROM without FROM NAMED makes a dataset with no named graphs (SPARQL 1.1 13.2), so GRAPH finds nothing; 0.6.1 read every named graph.
+DY61|sparql 119f412e99 FROM without FROM NAMED makes a dataset with no named graphs (SPARQL 1.1 13.2), so GRAPH finds nothing; 0.6.1 read every named graph.
+DY76|sparql 297c692fae FROM without FROM NAMED makes a dataset with no named graphs (SPARQL 1.1 13.2), so GRAPH finds nothing; 0.6.1 read every named graph.
+DY77|sparql f724c7aae1 FROM without FROM NAMED makes a dataset with no named graphs (SPARQL 1.1 13.2), so GRAPH finds nothing; 0.6.1 read every named graph.
+DY78|sparql c49c370aa3 FROM without FROM NAMED makes a dataset with no named graphs (SPARQL 1.1 13.2), so GRAPH finds nothing; 0.6.1 read every named graph.
+DY79|sparql c49c370aa3 FROM without FROM NAMED makes a dataset with no named graphs (SPARQL 1.1 13.2), so GRAPH finds nothing; 0.6.1 read every named graph.
+DY80|sparql 5b6b0eb7c2 FROM without FROM NAMED makes a dataset with no named graphs (SPARQL 1.1 13.2), so GRAPH finds nothing; 0.6.1 read every named graph.
+DY81|sparql 5b6b0eb7c2 FROM without FROM NAMED makes a dataset with no named graphs (SPARQL 1.1 13.2), so GRAPH finds nothing; 0.6.1 read every named graph.
+DY82|sparql 5b6b0eb7c2 FROM without FROM NAMED makes a dataset with no named graphs (SPARQL 1.1 13.2), so GRAPH finds nothing; 0.6.1 read every named graph.
+DY83|sparql f724c7aae1 FROM without FROM NAMED makes a dataset with no named graphs (SPARQL 1.1 13.2), so GRAPH finds nothing; 0.6.1 read every named graph.
+DY84|sparql f724c7aae1 FROM without FROM NAMED makes a dataset with no named graphs (SPARQL 1.1 13.2), so GRAPH finds nothing; 0.6.1 read every named graph.
+DY85|sparql 5b6b0eb7c2 FROM without FROM NAMED makes a dataset with no named graphs (SPARQL 1.1 13.2), so GRAPH finds nothing; 0.6.1 read every named graph.
+DY86|sparql 5b6b0eb7c2 FROM without FROM NAMED makes a dataset with no named graphs (SPARQL 1.1 13.2), so GRAPH finds nothing; 0.6.1 read every named graph.
+DY110|sparql 9686eee6c8 The zero-length step of ? inside GRAPH ?g holds in each named graph, with ?g bound (SPARQL 1.1 18.4, 18.6); 0.6.1 gave it once with ?g unbound.
+DY112|sparql f724c7aae1 FROM without FROM NAMED makes a dataset with no named graphs (SPARQL 1.1 13.2), so GRAPH finds nothing; 0.6.1 read every named graph.
+DY113|sparql 9686eee6c8 The zero-length step of ? inside GRAPH ?g holds in each named graph, with ?g bound (SPARQL 1.1 18.4, 18.6); 0.6.1 gave it once with ?g unbound.
+DY137|sparql e422697050 The zero-length step of ? inside GRAPH ?g holds in each named graph, with ?g bound (SPARQL 1.1 18.4, 18.6); 0.6.1 gave it once with ?g unbound.
+EA1|sparql 2223f4aed9 The zero-length step of ? holds of a term and itself and of every term for two variables (SPARQL 1.1 18.4); 0.6.1 kept every subject of the predicate for a variable and a term.
+EA2|sparql a53eb7a0c9 The zero-length step of ? holds of a term and itself and of every term for two variables (SPARQL 1.1 18.4); 0.6.1 kept every subject of the predicate for a variable and a term.
+EA3|sparql 28051e35e3 The zero-length step of ? holds of a term and itself and of every term for two variables (SPARQL 1.1 18.4); 0.6.1 kept every subject of the predicate for a variable and a term.
+EA4|sparql bfa9399670 The zero-length step of ? holds of a term and itself and of every term for two variables (SPARQL 1.1 18.4); 0.6.1 kept every subject of the predicate for a variable and a term.
+EA7|sparql 35775adbfa The zero-length step of ? holds of a term and itself and of every term for two variables (SPARQL 1.1 18.4); 0.6.1 kept every subject of the predicate for a variable and a term.
+EA8|sparql 35775adbfa The zero-length step of ? holds of a term and itself and of every term for two variables (SPARQL 1.1 18.4); 0.6.1 kept every subject of the predicate for a variable and a term.
+EA9|sparql 35775adbfa The zero-length step of ? holds of a term and itself and of every term for two variables (SPARQL 1.1 18.4); 0.6.1 kept every subject of the predicate for a variable and a term.
+EA12|sparql 7806214f94 The zero-length step of ? holds of a term and itself and of every term for two variables (SPARQL 1.1 18.4); 0.6.1 kept every subject of the predicate for a variable and a term.
+EA13|sparql c609211c23 The zero-length step of ? holds of a term and itself and of every term for two variables (SPARQL 1.1 18.4); 0.6.1 kept every subject of the predicate for a variable and a term.
+EA14|sparql 3e760fb3b5 The zero-length step of ? holds of a term and itself and of every term for two variables (SPARQL 1.1 18.4); 0.6.1 kept every subject of the predicate for a variable and a term.
+EA15|sparql be239c0879 The zero-length step of ? holds of a term and itself and of every term for two variables (SPARQL 1.1 18.4); 0.6.1 kept every subject of the predicate for a variable and a term.
+EA16|sparql 35775adbfa The zero-length step of ? holds of a term and itself and of every term for two variables (SPARQL 1.1 18.4); 0.6.1 kept every subject of the predicate for a variable and a term.
+EB1|sparql 683368f94a A nested group is its own scope (SPARQL 1.1 18.2.2); 0.6.1 merged a group of one FILTER, BIND, OPTIONAL or MINUS into the group around it.
+EB2|sparql 683368f94a A nested group is its own scope (SPARQL 1.1 18.2.2); 0.6.1 merged a group of one FILTER, BIND, OPTIONAL or MINUS into the group around it.
+EB3|sparql a53eb7a0c9 A nested group is its own scope (SPARQL 1.1 18.2.2); 0.6.1 merged a group of one FILTER, BIND, OPTIONAL or MINUS into the group around it.
+EB6|sparql 683368f94a A nested group is its own scope (SPARQL 1.1 18.2.2); 0.6.1 merged a group of one FILTER, BIND, OPTIONAL or MINUS into the group around it.
+EB7|sparql 683368f94a A nested group is its own scope (SPARQL 1.1 18.2.2); 0.6.1 merged a group of one FILTER, BIND, OPTIONAL or MINUS into the group around it.
+EB8|sparql 683368f94a A nested group is its own scope (SPARQL 1.1 18.2.2); 0.6.1 merged a group of one FILTER, BIND, OPTIONAL or MINUS into the group around it.
+EB12|sparql 0f9f8007f6 A nested group is its own scope (SPARQL 1.1 18.2.2); 0.6.1 merged a group of one FILTER, BIND, OPTIONAL or MINUS into the group around it.
+EB14|sparql a909cd1082 A nested group is its own scope (SPARQL 1.1 18.2.2); 0.6.1 merged a group of one FILTER, BIND, OPTIONAL or MINUS into the group around it.
+EB15|sparql a909cd1082 A nested group is its own scope (SPARQL 1.1 18.2.2); 0.6.1 merged a group of one FILTER, BIND, OPTIONAL or MINUS into the group around it.
+EB17|sparql a909cd1082 A nested group is its own scope (SPARQL 1.1 18.2.2); 0.6.1 merged a group of one FILTER, BIND, OPTIONAL or MINUS into the group around it.
+EB19|sparql a53eb7a0c9 A nested group is its own scope (SPARQL 1.1 18.2.2); 0.6.1 merged a group of one FILTER, BIND, OPTIONAL or MINUS into the group around it.
+EB24|sparql 683368f94a A nested group is its own scope (SPARQL 1.1 18.2.2); 0.6.1 merged a group of one FILTER, BIND, OPTIONAL or MINUS into the group around it.
+EC3|sparql a909cd1082 EXISTS reads the row (SPARQL 1.2 draft): a variable of the row is bound in its filters and sub-SELECT's WHERE; 0.6.1 ran the test without the row.
+EC4|sparql 969d53e522 EXISTS reads the row (SPARQL 1.2 draft): a variable of the row is bound in its filters and sub-SELECT's WHERE; 0.6.1 ran the test without the row.
+EC5|sparql a909cd1082 EXISTS reads the row (SPARQL 1.2 draft): a variable of the row is bound in its filters and sub-SELECT's WHERE; 0.6.1 ran the test without the row.
+EC6|sparql 969d53e522 EXISTS reads the row (SPARQL 1.2 draft): a variable of the row is bound in its filters and sub-SELECT's WHERE; 0.6.1 ran the test without the row.
+EC7|sparql a909cd1082 EXISTS reads the row (SPARQL 1.2 draft): a variable of the row is bound in its filters and sub-SELECT's WHERE; 0.6.1 ran the test without the row.
+EC8|sparql 969d53e522 EXISTS reads the row (SPARQL 1.2 draft): a variable of the row is bound in its filters and sub-SELECT's WHERE; 0.6.1 ran the test without the row.
+EC9|sparql a53eb7a0c9 EXISTS reads the row (SPARQL 1.2 draft): a variable of the row is bound in its filters and sub-SELECT's WHERE; 0.6.1 ran the test without the row.
+EC10|sparql 683368f94a EXISTS reads the row (SPARQL 1.2 draft): a variable of the row is bound in its filters and sub-SELECT's WHERE; 0.6.1 ran the test without the row.
+EC15|sparql 683368f94a EXISTS reads the row (SPARQL 1.2 draft): a variable of the row is bound in its filters and sub-SELECT's WHERE; 0.6.1 ran the test without the row.
+EC16|sparql a53eb7a0c9 EXISTS reads the row (SPARQL 1.2 draft): a variable of the row is bound in its filters and sub-SELECT's WHERE; 0.6.1 ran the test without the row.
+EC21|sparql a909cd1082 EXISTS reads the row (SPARQL 1.2 draft): a variable of the row is bound in its filters and sub-SELECT's WHERE; 0.6.1 ran the test without the row.
+EC22|sparql 969d53e522 EXISTS reads the row (SPARQL 1.2 draft): a variable of the row is bound in its filters and sub-SELECT's WHERE; 0.6.1 ran the test without the row.
+EC25|sparql a909cd1082 EXISTS reads the row (SPARQL 1.2 draft): a variable of the row is bound in its filters and sub-SELECT's WHERE; 0.6.1 ran the test without the row.
+EC26|sparql 969d53e522 EXISTS reads the row (SPARQL 1.2 draft): a variable of the row is bound in its filters and sub-SELECT's WHERE; 0.6.1 ran the test without the row.
+EC27|sparql a909cd1082 EXISTS reads the row (SPARQL 1.2 draft): a variable of the row is bound in its filters and sub-SELECT's WHERE; 0.6.1 ran the test without the row.
+EC28|sparql 969d53e522 EXISTS reads the row (SPARQL 1.2 draft): a variable of the row is bound in its filters and sub-SELECT's WHERE; 0.6.1 ran the test without the row.
+EC29|sparql a53eb7a0c9 EXISTS reads the row (SPARQL 1.2 draft): a variable of the row is bound in its filters and sub-SELECT's WHERE; 0.6.1 ran the test without the row.
+EC30|sparql 683368f94a EXISTS reads the row (SPARQL 1.2 draft): a variable of the row is bound in its filters and sub-SELECT's WHERE; 0.6.1 ran the test without the row.
+EC39|sparql a53eb7a0c9 EXISTS reads the row (SPARQL 1.2 draft): a variable of the row is bound in its filters and sub-SELECT's WHERE; 0.6.1 ran the test without the row.
+EC40|sparql 683368f94a EXISTS reads the row (SPARQL 1.2 draft): a variable of the row is bound in its filters and sub-SELECT's WHERE; 0.6.1 ran the test without the row.
+EC43|sparql a909cd1082 EXISTS reads the row (SPARQL 1.2 draft): a variable of the row is bound in its filters and sub-SELECT's WHERE; 0.6.1 ran the test without the row.
+EC44|sparql 969d53e522 EXISTS reads the row (SPARQL 1.2 draft): a variable of the row is bound in its filters and sub-SELECT's WHERE; 0.6.1 ran the test without the row.
+EC45|sparql a53eb7a0c9 EXISTS reads the row (SPARQL 1.2 draft): a variable of the row is bound in its filters and sub-SELECT's WHERE; 0.6.1 ran the test without the row.
+EC46|sparql 683368f94a EXISTS reads the row (SPARQL 1.2 draft): a variable of the row is bound in its filters and sub-SELECT's WHERE; 0.6.1 ran the test without the row.
+ED1|sparql b6f4f7a589 ? over a sequence, an alternative or an inverse holds as the path does or of a term and itself (SPARQL 1.1 18.4); 0.6.1 refused the first two and read an inverse as one predicate.
+ED2|sparql 329c099f3e ? over a sequence, an alternative or an inverse holds as the path does or of a term and itself (SPARQL 1.1 18.4); 0.6.1 refused the first two and read an inverse as one predicate.
+ED3|sparql 28051e35e3 ? over a sequence, an alternative or an inverse holds as the path does or of a term and itself (SPARQL 1.1 18.4); 0.6.1 refused the first two and read an inverse as one predicate.
+ED4|sparql 35775adbfa ? over a sequence, an alternative or an inverse holds as the path does or of a term and itself (SPARQL 1.1 18.4); 0.6.1 refused the first two and read an inverse as one predicate.
+ED5|sparql 35775adbfa ? over a sequence, an alternative or an inverse holds as the path does or of a term and itself (SPARQL 1.1 18.4); 0.6.1 refused the first two and read an inverse as one predicate.
+ED6|sparql 1a5ada6bbb ? over a sequence, an alternative or an inverse holds as the path does or of a term and itself (SPARQL 1.1 18.4); 0.6.1 refused the first two and read an inverse as one predicate.
+ED7|sparql a286fc0485 ? over a sequence, an alternative or an inverse holds as the path does or of a term and itself (SPARQL 1.1 18.4); 0.6.1 refused the first two and read an inverse as one predicate.
+ED8|sparql e9dc24546f ? over a sequence, an alternative or an inverse holds as the path does or of a term and itself (SPARQL 1.1 18.4); 0.6.1 refused the first two and read an inverse as one predicate.
+ED9|sparql 2223f4aed9 ? over a sequence, an alternative or an inverse holds as the path does or of a term and itself (SPARQL 1.1 18.4); 0.6.1 refused the first two and read an inverse as one predicate.
+ED10|sparql 35775adbfa ? over a sequence, an alternative or an inverse holds as the path does or of a term and itself (SPARQL 1.1 18.4); 0.6.1 refused the first two and read an inverse as one predicate.
+ED11|sparql efe9c3e019 ? over a sequence, an alternative or an inverse holds as the path does or of a term and itself (SPARQL 1.1 18.4); 0.6.1 refused the first two and read an inverse as one predicate.
+ED12|sparql a2ebd9e2f9 ? over a sequence, an alternative or an inverse holds as the path does or of a term and itself (SPARQL 1.1 18.4); 0.6.1 refused the first two and read an inverse as one predicate.
+ED14|sparql 35775adbfa ? over a sequence, an alternative or an inverse holds as the path does or of a term and itself (SPARQL 1.1 18.4); 0.6.1 refused the first two and read an inverse as one predicate.
+ED15|sparql 9888a358d9 ? over a sequence, an alternative or an inverse holds as the path does or of a term and itself (SPARQL 1.1 18.4); 0.6.1 refused the first two and read an inverse as one predicate.
+ED16|sparql 23ebdf8e6b ? over a sequence, an alternative or an inverse holds as the path does or of a term and itself (SPARQL 1.1 18.4); 0.6.1 refused the first two and read an inverse as one predicate.
+ED17|sparql 2a77e0ace6 ? over a sequence, an alternative or an inverse holds as the path does or of a term and itself (SPARQL 1.1 18.4); 0.6.1 refused the first two and read an inverse as one predicate.
+ED18|sparql 526d0f0ed2 ? over a sequence, an alternative or an inverse holds as the path does or of a term and itself (SPARQL 1.1 18.4); 0.6.1 refused the first two and read an inverse as one predicate.
+ED19|sparql 1e6723ac20 ? over a sequence, an alternative or an inverse holds as the path does or of a term and itself (SPARQL 1.1 18.4); 0.6.1 refused the first two and read an inverse as one predicate.
+ED20|sparql acfe0015f8 ? over a sequence, an alternative or an inverse holds as the path does or of a term and itself (SPARQL 1.1 18.4); 0.6.1 refused the first two and read an inverse as one predicate.
+ED21|sparql b6f4f7a589 ? over a sequence, an alternative or an inverse holds as the path does or of a term and itself (SPARQL 1.1 18.4); 0.6.1 refused the first two and read an inverse as one predicate.
+EF2|sparql e3b74b8c88 ? gives a term once where a self-loop and the zero-length step both give it, and two bound ends hold of one term (SPARQL 1.1 18.4); 0.6.1 doubled and missed them.
+EF3|sparql e8381a960d ? gives a term once where a self-loop and the zero-length step both give it, and two bound ends hold of one term (SPARQL 1.1 18.4); 0.6.1 doubled and missed them.
+EF11|sparql f51941d964 ? gives a term once where a self-loop and the zero-length step both give it, and two bound ends hold of one term (SPARQL 1.1 18.4); 0.6.1 doubled and missed them.
+EF13|sparql 7134ca370a ? gives a term once where a self-loop and the zero-length step both give it, and two bound ends hold of one term (SPARQL 1.1 18.4); 0.6.1 doubled and missed them.
+EF15|sparql 1ae83d2a2b ? gives a term once where a self-loop and the zero-length step both give it, and two bound ends hold of one term (SPARQL 1.1 18.4); 0.6.1 doubled and missed them.
+EF16|sparql 05f9f65a18 ? gives a term once where a self-loop and the zero-length step both give it, and two bound ends hold of one term (SPARQL 1.1 18.4); 0.6.1 doubled and missed them.
+EF18|sparql 22f4f4c510 ? gives a term once where a self-loop and the zero-length step both give it, and two bound ends hold of one term (SPARQL 1.1 18.4); 0.6.1 doubled and missed them.
+EF19|sparql 9de24b7df9 ? gives a term once where a self-loop and the zero-length step both give it, and two bound ends hold of one term (SPARQL 1.1 18.4); 0.6.1 doubled and missed them.
+EF20|sparql 2774f5f0f3 ? gives a term once where a self-loop and the zero-length step both give it, and two bound ends hold of one term (SPARQL 1.1 18.4); 0.6.1 doubled and missed them.
+EF22|sparql 35775adbfa ? gives a term once where a self-loop and the zero-length step both give it, and two bound ends hold of one term (SPARQL 1.1 18.4); 0.6.1 doubled and missed them.
+EF28|sparql 35775adbfa ? gives a term once where a self-loop and the zero-length step both give it, and two bound ends hold of one term (SPARQL 1.1 18.4); 0.6.1 doubled and missed them.
+EF30|sparql 35775adbfa ? gives a term once where a self-loop and the zero-length step both give it, and two bound ends hold of one term (SPARQL 1.1 18.4); 0.6.1 doubled and missed them.
+EG2|sparql 1b98768ead EXISTS inside GRAPH reads the graph at hand, also through a sub-SELECT, and IF(EXISTS ...) in an OPTIONAL's FILTER reads each pair; 0.6.1 read every graph or failed with an internal error.
+EG4|sparql ff792d4300 EXISTS inside GRAPH reads the graph at hand, also through a sub-SELECT, and IF(EXISTS ...) in an OPTIONAL's FILTER reads each pair; 0.6.1 read every graph or failed with an internal error.
+EG5|sparql 1b98768ead EXISTS inside GRAPH reads the graph at hand, also through a sub-SELECT, and IF(EXISTS ...) in an OPTIONAL's FILTER reads each pair; 0.6.1 read every graph or failed with an internal error.
+EG6|sparql 1b98768ead EXISTS inside GRAPH reads the graph at hand, also through a sub-SELECT, and IF(EXISTS ...) in an OPTIONAL's FILTER reads each pair; 0.6.1 read every graph or failed with an internal error.
+EG7|sparql 18f752c20c EXISTS inside GRAPH reads the graph at hand, also through a sub-SELECT, and IF(EXISTS ...) in an OPTIONAL's FILTER reads each pair; 0.6.1 read every graph or failed with an internal error.
+EG12|sparql 1b98768ead EXISTS inside GRAPH reads the graph at hand, also through a sub-SELECT, and IF(EXISTS ...) in an OPTIONAL's FILTER reads each pair; 0.6.1 read every graph or failed with an internal error.
+EG13|sparql 0fc7899144 EXISTS inside GRAPH reads the graph at hand, also through a sub-SELECT, and IF(EXISTS ...) in an OPTIONAL's FILTER reads each pair; 0.6.1 read every graph or failed with an internal error.
+EG14|sparql 7c55e0db08 EXISTS inside GRAPH reads the graph at hand, also through a sub-SELECT, and IF(EXISTS ...) in an OPTIONAL's FILTER reads each pair; 0.6.1 read every graph or failed with an internal error.
+EG15|sparql f515afa78d EXISTS inside GRAPH reads the graph at hand, also through a sub-SELECT, and IF(EXISTS ...) in an OPTIONAL's FILTER reads each pair; 0.6.1 read every graph or failed with an internal error.
+EG16|sparql f515afa78d EXISTS inside GRAPH reads the graph at hand, also through a sub-SELECT, and IF(EXISTS ...) in an OPTIONAL's FILTER reads each pair; 0.6.1 read every graph or failed with an internal error.
+EG17|sparql 0884722b3a EXISTS inside GRAPH reads the graph at hand, also through a sub-SELECT, and IF(EXISTS ...) in an OPTIONAL's FILTER reads each pair; 0.6.1 read every graph or failed with an internal error.
+EG18|sparql 6d523656ec EXISTS inside GRAPH reads the graph at hand, also through a sub-SELECT, and IF(EXISTS ...) in an OPTIONAL's FILTER reads each pair; 0.6.1 read every graph or failed with an internal error.
+EG19|sparql 0fc7899144 EXISTS inside GRAPH reads the graph at hand, also through a sub-SELECT, and IF(EXISTS ...) in an OPTIONAL's FILTER reads each pair; 0.6.1 read every graph or failed with an internal error.
+EG20|sparql 0fc7899144 EXISTS inside GRAPH reads the graph at hand, also through a sub-SELECT, and IF(EXISTS ...) in an OPTIONAL's FILTER reads each pair; 0.6.1 read every graph or failed with an internal error.
+EG21|sparql 6f3a6099de EXISTS inside GRAPH reads the graph at hand, also through a sub-SELECT, and IF(EXISTS ...) in an OPTIONAL's FILTER reads each pair; 0.6.1 read every graph or failed with an internal error.
+EG22|sparql f515afa78d EXISTS inside GRAPH reads the graph at hand, also through a sub-SELECT, and IF(EXISTS ...) in an OPTIONAL's FILTER reads each pair; 0.6.1 read every graph or failed with an internal error.
+EG23|sparql 3afe540835 EXISTS inside GRAPH reads the graph at hand, also through a sub-SELECT, and IF(EXISTS ...) in an OPTIONAL's FILTER reads each pair; 0.6.1 read every graph or failed with an internal error.
+EH1|cypher 4d0fb10455 A string equals no number, whatever number it spells, in a filter, a lookup with or without an index, IN, CASE, a join and id() (GA04, ISO/IEC 39075 19.3); numbers stay one kind. 0.6.1 found '42' and '042' equal to 42.
+EH1|gql 4d0fb10455 A string equals no number, whatever number it spells, in a filter, a lookup with or without an index, IN, CASE, a join and id() (GA04, ISO/IEC 39075 19.3); numbers stay one kind. 0.6.1 found '42' and '042' equal to 42.
+EH2|cypher e9a81e47b4 A string equals no number, whatever number it spells, in a filter, a lookup with or without an index, IN, CASE, a join and id() (GA04, ISO/IEC 39075 19.3); numbers stay one kind. 0.6.1 found '42' and '042' equal to 42.
+EH2|gql e9a81e47b4 A string equals no number, whatever number it spells, in a filter, a lookup with or without an index, IN, CASE, a join and id() (GA04, ISO/IEC 39075 19.3); numbers stay one kind. 0.6.1 found '42' and '042' equal to 42.
+EH3|cypher decf1e07f6 A string equals no number, whatever number it spells, in a filter, a lookup with or without an index, IN, CASE, a join and id() (GA04, ISO/IEC 39075 19.3); numbers stay one kind. 0.6.1 found '42' and '042' equal to 42.
+EH3|gql decf1e07f6 A string equals no number, whatever number it spells, in a filter, a lookup with or without an index, IN, CASE, a join and id() (GA04, ISO/IEC 39075 19.3); numbers stay one kind. 0.6.1 found '42' and '042' equal to 42.
+EH4|cypher 918e4b21f3 A string equals no number, whatever number it spells, in a filter, a lookup with or without an index, IN, CASE, a join and id() (GA04, ISO/IEC 39075 19.3); numbers stay one kind. 0.6.1 found '42' and '042' equal to 42.
+EH4|gql 918e4b21f3 A string equals no number, whatever number it spells, in a filter, a lookup with or without an index, IN, CASE, a join and id() (GA04, ISO/IEC 39075 19.3); numbers stay one kind. 0.6.1 found '42' and '042' equal to 42.
+EH5|cypher 4d0fb10455 A string equals no number, whatever number it spells, in a filter, a lookup with or without an index, IN, CASE, a join and id() (GA04, ISO/IEC 39075 19.3); numbers stay one kind. 0.6.1 found '42' and '042' equal to 42.
+EH5|gql 4d0fb10455 A string equals no number, whatever number it spells, in a filter, a lookup with or without an index, IN, CASE, a join and id() (GA04, ISO/IEC 39075 19.3); numbers stay one kind. 0.6.1 found '42' and '042' equal to 42.
+EH6|cypher 960287c394 A string equals no number, whatever number it spells, in a filter, a lookup with or without an index, IN, CASE, a join and id() (GA04, ISO/IEC 39075 19.3); numbers stay one kind. 0.6.1 found '42' and '042' equal to 42.
+EH6|gql 960287c394 A string equals no number, whatever number it spells, in a filter, a lookup with or without an index, IN, CASE, a join and id() (GA04, ISO/IEC 39075 19.3); numbers stay one kind. 0.6.1 found '42' and '042' equal to 42.
+EH7|cypher 393e001ee0 A string equals no number, whatever number it spells, in a filter, a lookup with or without an index, IN, CASE, a join and id() (GA04, ISO/IEC 39075 19.3); numbers stay one kind. 0.6.1 found '42' and '042' equal to 42.
+EH7|gql 393e001ee0 A string equals no number, whatever number it spells, in a filter, a lookup with or without an index, IN, CASE, a join and id() (GA04, ISO/IEC 39075 19.3); numbers stay one kind. 0.6.1 found '42' and '042' equal to 42.
+EH8|cypher be13c30bb9 A string equals no number, whatever number it spells, in a filter, a lookup with or without an index, IN, CASE, a join and id() (GA04, ISO/IEC 39075 19.3); numbers stay one kind. 0.6.1 found '42' and '042' equal to 42.
+EH8|gql be13c30bb9 A string equals no number, whatever number it spells, in a filter, a lookup with or without an index, IN, CASE, a join and id() (GA04, ISO/IEC 39075 19.3); numbers stay one kind. 0.6.1 found '42' and '042' equal to 42.
+EH9|cypher be22824dba A string equals no number, whatever number it spells, in a filter, a lookup with or without an index, IN, CASE, a join and id() (GA04, ISO/IEC 39075 19.3); numbers stay one kind. 0.6.1 found '42' and '042' equal to 42.
+EH9|gql be22824dba A string equals no number, whatever number it spells, in a filter, a lookup with or without an index, IN, CASE, a join and id() (GA04, ISO/IEC 39075 19.3); numbers stay one kind. 0.6.1 found '42' and '042' equal to 42.
+EH12|cypher b52ecc3d23 A string equals no number, whatever number it spells, in a filter, a lookup with or without an index, IN, CASE, a join and id() (GA04, ISO/IEC 39075 19.3); numbers stay one kind. 0.6.1 found '42' and '042' equal to 42.
+EH12|gql b52ecc3d23 A string equals no number, whatever number it spells, in a filter, a lookup with or without an index, IN, CASE, a join and id() (GA04, ISO/IEC 39075 19.3); numbers stay one kind. 0.6.1 found '42' and '042' equal to 42.
+EH14|cypher 20233fc7fc A string equals no number, whatever number it spells, in a filter, a lookup with or without an index, IN, CASE, a join and id() (GA04, ISO/IEC 39075 19.3); numbers stay one kind. 0.6.1 found '42' and '042' equal to 42.
+EH14|gql 20233fc7fc A string equals no number, whatever number it spells, in a filter, a lookup with or without an index, IN, CASE, a join and id() (GA04, ISO/IEC 39075 19.3); numbers stay one kind. 0.6.1 found '42' and '042' equal to 42.
+EH15|cypher 2e4a1ea689 A string equals no number, whatever number it spells, in a filter, a lookup with or without an index, IN, CASE, a join and id() (GA04, ISO/IEC 39075 19.3); numbers stay one kind. 0.6.1 found '42' and '042' equal to 42.
+EH15|gql 2e4a1ea689 A string equals no number, whatever number it spells, in a filter, a lookup with or without an index, IN, CASE, a join and id() (GA04, ISO/IEC 39075 19.3); numbers stay one kind. 0.6.1 found '42' and '042' equal to 42.
+EH16|cypher 4d0fb10455 A string equals no number, whatever number it spells, in a filter, a lookup with or without an index, IN, CASE, a join and id() (GA04, ISO/IEC 39075 19.3); numbers stay one kind. 0.6.1 found '42' and '042' equal to 42.
+EH16|gql 4d0fb10455 A string equals no number, whatever number it spells, in a filter, a lookup with or without an index, IN, CASE, a join and id() (GA04, ISO/IEC 39075 19.3); numbers stay one kind. 0.6.1 found '42' and '042' equal to 42.
+EH17|cypher e9a81e47b4 A string equals no number, whatever number it spells, in a filter, a lookup with or without an index, IN, CASE, a join and id() (GA04, ISO/IEC 39075 19.3); numbers stay one kind. 0.6.1 found '42' and '042' equal to 42.
+EH17|gql e9a81e47b4 A string equals no number, whatever number it spells, in a filter, a lookup with or without an index, IN, CASE, a join and id() (GA04, ISO/IEC 39075 19.3); numbers stay one kind. 0.6.1 found '42' and '042' equal to 42.
+EH18|cypher decf1e07f6 A string equals no number, whatever number it spells, in a filter, a lookup with or without an index, IN, CASE, a join and id() (GA04, ISO/IEC 39075 19.3); numbers stay one kind. 0.6.1 found '42' and '042' equal to 42.
+EH18|gql decf1e07f6 A string equals no number, whatever number it spells, in a filter, a lookup with or without an index, IN, CASE, a join and id() (GA04, ISO/IEC 39075 19.3); numbers stay one kind. 0.6.1 found '42' and '042' equal to 42.
+EH19|cypher 918e4b21f3 A string equals no number, whatever number it spells, in a filter, a lookup with or without an index, IN, CASE, a join and id() (GA04, ISO/IEC 39075 19.3); numbers stay one kind. 0.6.1 found '42' and '042' equal to 42.
+EH19|gql 918e4b21f3 A string equals no number, whatever number it spells, in a filter, a lookup with or without an index, IN, CASE, a join and id() (GA04, ISO/IEC 39075 19.3); numbers stay one kind. 0.6.1 found '42' and '042' equal to 42.
+EH20|cypher 4d0fb10455 A string equals no number, whatever number it spells, in a filter, a lookup with or without an index, IN, CASE, a join and id() (GA04, ISO/IEC 39075 19.3); numbers stay one kind. 0.6.1 found '42' and '042' equal to 42.
+EH20|gql 4d0fb10455 A string equals no number, whatever number it spells, in a filter, a lookup with or without an index, IN, CASE, a join and id() (GA04, ISO/IEC 39075 19.3); numbers stay one kind. 0.6.1 found '42' and '042' equal to 42.
+EH21|cypher 960287c394 A string equals no number, whatever number it spells, in a filter, a lookup with or without an index, IN, CASE, a join and id() (GA04, ISO/IEC 39075 19.3); numbers stay one kind. 0.6.1 found '42' and '042' equal to 42.
+EH21|gql 960287c394 A string equals no number, whatever number it spells, in a filter, a lookup with or without an index, IN, CASE, a join and id() (GA04, ISO/IEC 39075 19.3); numbers stay one kind. 0.6.1 found '42' and '042' equal to 42.
+EH22|cypher 393e001ee0 A string equals no number, whatever number it spells, in a filter, a lookup with or without an index, IN, CASE, a join and id() (GA04, ISO/IEC 39075 19.3); numbers stay one kind. 0.6.1 found '42' and '042' equal to 42.
+EH22|gql 393e001ee0 A string equals no number, whatever number it spells, in a filter, a lookup with or without an index, IN, CASE, a join and id() (GA04, ISO/IEC 39075 19.3); numbers stay one kind. 0.6.1 found '42' and '042' equal to 42.
+EH23|cypher be13c30bb9 A string equals no number, whatever number it spells, in a filter, a lookup with or without an index, IN, CASE, a join and id() (GA04, ISO/IEC 39075 19.3); numbers stay one kind. 0.6.1 found '42' and '042' equal to 42.
+EH23|gql be13c30bb9 A string equals no number, whatever number it spells, in a filter, a lookup with or without an index, IN, CASE, a join and id() (GA04, ISO/IEC 39075 19.3); numbers stay one kind. 0.6.1 found '42' and '042' equal to 42.
+EH24|cypher be22824dba A string equals no number, whatever number it spells, in a filter, a lookup with or without an index, IN, CASE, a join and id() (GA04, ISO/IEC 39075 19.3); numbers stay one kind. 0.6.1 found '42' and '042' equal to 42.
+EH24|gql be22824dba A string equals no number, whatever number it spells, in a filter, a lookup with or without an index, IN, CASE, a join and id() (GA04, ISO/IEC 39075 19.3); numbers stay one kind. 0.6.1 found '42' and '042' equal to 42.
+EH27|cypher b52ecc3d23 A string equals no number, whatever number it spells, in a filter, a lookup with or without an index, IN, CASE, a join and id() (GA04, ISO/IEC 39075 19.3); numbers stay one kind. 0.6.1 found '42' and '042' equal to 42.
+EH27|gql b52ecc3d23 A string equals no number, whatever number it spells, in a filter, a lookup with or without an index, IN, CASE, a join and id() (GA04, ISO/IEC 39075 19.3); numbers stay one kind. 0.6.1 found '42' and '042' equal to 42.
+EH29|cypher 20233fc7fc A string equals no number, whatever number it spells, in a filter, a lookup with or without an index, IN, CASE, a join and id() (GA04, ISO/IEC 39075 19.3); numbers stay one kind. 0.6.1 found '42' and '042' equal to 42.
+EH29|gql 20233fc7fc A string equals no number, whatever number it spells, in a filter, a lookup with or without an index, IN, CASE, a join and id() (GA04, ISO/IEC 39075 19.3); numbers stay one kind. 0.6.1 found '42' and '042' equal to 42.
+EH30|cypher 2e4a1ea689 A string equals no number, whatever number it spells, in a filter, a lookup with or without an index, IN, CASE, a join and id() (GA04, ISO/IEC 39075 19.3); numbers stay one kind. 0.6.1 found '42' and '042' equal to 42.
+EH30|gql 2e4a1ea689 A string equals no number, whatever number it spells, in a filter, a lookup with or without an index, IN, CASE, a join and id() (GA04, ISO/IEC 39075 19.3); numbers stay one kind. 0.6.1 found '42' and '042' equal to 42.
+EI1|cypher 56fc05ecde A list or record holding a null compares unknown when no pair is false (ISO/IEC 39075 19.3 General Rule 2 b ii and iii), and a key holding a null meets nothing; 0.6.1 gave [null] = [null] true.
+EI1|gql 56fc05ecde A list or record holding a null compares unknown when no pair is false (ISO/IEC 39075 19.3 General Rule 2 b ii and iii), and a key holding a null meets nothing; 0.6.1 gave [null] = [null] true.
+EI2|cypher 56fc05ecde A list or record holding a null compares unknown when no pair is false (ISO/IEC 39075 19.3 General Rule 2 b ii and iii), and a key holding a null meets nothing; 0.6.1 gave [null] = [null] true.
+EI2|gql 56fc05ecde A list or record holding a null compares unknown when no pair is false (ISO/IEC 39075 19.3 General Rule 2 b ii and iii), and a key holding a null meets nothing; 0.6.1 gave [null] = [null] true.
+EI3|cypher 56fc05ecde A list or record holding a null compares unknown when no pair is false (ISO/IEC 39075 19.3 General Rule 2 b ii and iii), and a key holding a null meets nothing; 0.6.1 gave [null] = [null] true.
+EI3|gql 56fc05ecde A list or record holding a null compares unknown when no pair is false (ISO/IEC 39075 19.3 General Rule 2 b ii and iii), and a key holding a null meets nothing; 0.6.1 gave [null] = [null] true.
+EI7|cypher 56fc05ecde A list or record holding a null compares unknown when no pair is false (ISO/IEC 39075 19.3 General Rule 2 b ii and iii), and a key holding a null meets nothing; 0.6.1 gave [null] = [null] true.
+EI7|gql 56fc05ecde A list or record holding a null compares unknown when no pair is false (ISO/IEC 39075 19.3 General Rule 2 b ii and iii), and a key holding a null meets nothing; 0.6.1 gave [null] = [null] true.
+EI9|cypher 56fc05ecde A list or record holding a null compares unknown when no pair is false (ISO/IEC 39075 19.3 General Rule 2 b ii and iii), and a key holding a null meets nothing; 0.6.1 gave [null] = [null] true.
+EI9|gql 56fc05ecde A list or record holding a null compares unknown when no pair is false (ISO/IEC 39075 19.3 General Rule 2 b ii and iii), and a key holding a null meets nothing; 0.6.1 gave [null] = [null] true.
+EI11|cypher 56fc05ecde A list or record holding a null compares unknown when no pair is false (ISO/IEC 39075 19.3 General Rule 2 b ii and iii), and a key holding a null meets nothing; 0.6.1 gave [null] = [null] true.
+EI11|gql 56fc05ecde A list or record holding a null compares unknown when no pair is false (ISO/IEC 39075 19.3 General Rule 2 b ii and iii), and a key holding a null meets nothing; 0.6.1 gave [null] = [null] true.
+EI12|cypher 56fc05ecde A list or record holding a null compares unknown when no pair is false (ISO/IEC 39075 19.3 General Rule 2 b ii and iii), and a key holding a null meets nothing; 0.6.1 gave [null] = [null] true.
+EI12|gql 56fc05ecde A list or record holding a null compares unknown when no pair is false (ISO/IEC 39075 19.3 General Rule 2 b ii and iii), and a key holding a null meets nothing; 0.6.1 gave [null] = [null] true.
+EI13|cypher 20233fc7fc A list or record holding a null compares unknown when no pair is false (ISO/IEC 39075 19.3 General Rule 2 b ii and iii), and a key holding a null meets nothing; 0.6.1 gave [null] = [null] true.
+EI13|gql 20233fc7fc A list or record holding a null compares unknown when no pair is false (ISO/IEC 39075 19.3 General Rule 2 b ii and iii), and a key holding a null meets nothing; 0.6.1 gave [null] = [null] true.
+EI14|cypher 20233fc7fc A list or record holding a null compares unknown when no pair is false (ISO/IEC 39075 19.3 General Rule 2 b ii and iii), and a key holding a null meets nothing; 0.6.1 gave [null] = [null] true.
+EI14|gql 20233fc7fc A list or record holding a null compares unknown when no pair is false (ISO/IEC 39075 19.3 General Rule 2 b ii and iii), and a key holding a null meets nothing; 0.6.1 gave [null] = [null] true.
+EI15|cypher 6ec51c3a77 A list or record holding a null compares unknown when no pair is false (ISO/IEC 39075 19.3 General Rule 2 b ii and iii), and a key holding a null meets nothing; 0.6.1 gave [null] = [null] true.
+EI15|gql 6ec51c3a77 A list or record holding a null compares unknown when no pair is false (ISO/IEC 39075 19.3 General Rule 2 b ii and iii), and a key holding a null meets nothing; 0.6.1 gave [null] = [null] true.
+EI16|cypher 5aabed48ae A list or record holding a null compares unknown when no pair is false (ISO/IEC 39075 19.3 General Rule 2 b ii and iii), and a key holding a null meets nothing; 0.6.1 gave [null] = [null] true.
+EI16|gql 5aabed48ae A list or record holding a null compares unknown when no pair is false (ISO/IEC 39075 19.3 General Rule 2 b ii and iii), and a key holding a null meets nothing; 0.6.1 gave [null] = [null] true.

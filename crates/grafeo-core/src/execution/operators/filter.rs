@@ -1979,20 +1979,11 @@ impl ExpressionPredicate {
             },
             // NULL = anything or anything = NULL is UNKNOWN (three-valued logic).
             // values_equal is preserved for structural equality (DISTINCT, GROUP BY).
-            BinaryFilterOp::Eq => {
-                if left.is_null() || right.is_null() {
-                    Some(Value::Null)
-                } else {
-                    Some(Value::Bool(self.values_equal(left, right)))
-                }
-            }
-            BinaryFilterOp::Ne => {
-                if left.is_null() || right.is_null() {
-                    Some(Value::Null)
-                } else {
-                    Some(Value::Bool(!self.values_equal(left, right)))
-                }
-            }
+            BinaryFilterOp::Eq => Some(self.equals(left, right).map_or(Value::Null, Value::Bool)),
+            BinaryFilterOp::Ne => Some(
+                self.equals(left, right)
+                    .map_or(Value::Null, |equal| Value::Bool(!equal)),
+            ),
             // NaN is neither less nor greater than a number (IEEE): the
             // comparison is false, not unknown.
             BinaryFilterOp::Lt | BinaryFilterOp::Le | BinaryFilterOp::Gt | BinaryFilterOp::Ge
@@ -2495,7 +2486,7 @@ impl ExpressionPredicate {
             _ => false,
         };
         if answers {
-            Some(set.answer(&left, |item| self.values_equal(&left, item)))
+            Some(set.answer(&left, |item| self.equals(&left, item) == Some(true)))
         } else {
             self.walk_in_list(needle, &left, list, items, chunk, row)
         }
@@ -2560,14 +2551,14 @@ impl ExpressionPredicate {
                     }),
                 _ => OperandKind::of_item(&list_shape, position),
             };
+            // An item of the other kind is not equal to it, in both languages.
             if needle_kind.apart_from(item_kind) {
-                if let TemporalComparison::LocalAt(_) = self.session_context.temporal_comparison {
-                    return self.fail(not_comparable(left, needle_kind, item, item_kind));
-                }
                 continue;
             }
-            if self.values_equal(left, item) {
-                return Some(Value::Bool(true));
+            match self.equals(left, item) {
+                Some(true) => return Some(Value::Bool(true)),
+                None => has_null = true,
+                Some(false) => {}
             }
         }
         if has_null {
@@ -4553,7 +4544,7 @@ impl ExpressionPredicate {
                 // Three-valued: NULLIF(NULL, x) = NULL; NULLIF(x, NULL) = x
                 if val1.is_null() || val2.is_null() {
                     Some(val1)
-                } else if self.values_equal(&val1, &val2) {
+                } else if self.equals(&val1, &val2) == Some(true) {
                     Some(Value::Null)
                 } else {
                     Some(val1)
@@ -4581,7 +4572,7 @@ impl ExpressionPredicate {
                 // Three-valued logic: NULL never matches anything in simple CASE
                 if !test_val.is_null()
                     && !when_val.is_null()
-                    && self.values_equal(&test_val, &when_val)
+                    && self.equals(&test_val, &when_val) == Some(true)
                 {
                     return self.eval_expr(then_expr, chunk, row);
                 }
@@ -4681,10 +4672,11 @@ impl ExpressionPredicate {
             .then_some((left_kind, right_kind))
     }
 
-    /// A comparison between operands of kinds kept apart: Cypher keeps them
-    /// apart, as openCypher does (`=` is false, `<>` true, the ordering
-    /// operators null), and GQL fails the comparison as not comparable
-    /// (22G04), as ISO GQL makes a node and a number.
+    /// A comparison between operands of kinds kept apart: `=` is false and
+    /// `<>` true in both languages (ISO/IEC 39075 19.3 General Rule 2 a i
+    /// with universal comparison, and openCypher). The ordering operators are
+    /// null in Cypher, and in GQL still fail as not comparable (22G04) until a
+    /// value can hold a node or an edge.
     fn compare_across_kinds(
         &self,
         left: &Value,
@@ -4693,13 +4685,11 @@ impl ExpressionPredicate {
         right: &Value,
         right_kind: OperandKind,
     ) -> Option<Value> {
-        match self.session_context.temporal_comparison {
-            TemporalComparison::TypesApart => match op {
-                BinaryFilterOp::Eq => Some(Value::Bool(false)),
-                BinaryFilterOp::Ne => Some(Value::Bool(true)),
-                _ => None,
-            },
-            TemporalComparison::LocalAt(_) => {
+        match (op, self.session_context.temporal_comparison) {
+            (BinaryFilterOp::Eq, _) => Some(Value::Bool(false)),
+            (BinaryFilterOp::Ne, _) => Some(Value::Bool(true)),
+            (_, TemporalComparison::TypesApart) => None,
+            (_, TemporalComparison::LocalAt(_)) => {
                 self.fail(not_comparable(left, left_kind, right, right_kind))
             }
         }
@@ -4762,13 +4752,10 @@ impl ExpressionPredicate {
         (nan(left) && number(right)) || (nan(right) && number(left))
     }
 
-    /// Structural equality for DISTINCT, GROUP BY, and list/map comparison.
-    ///
-    /// Treats NULL == NULL as `true` (grouping semantics). For SQL/GQL
-    /// comparison operators, use [`eval_binary_op`] which returns UNKNOWN
-    /// when either operand is NULL.
-    fn values_equal(&self, left: &Value, right: &Value) -> bool {
-        super::value_utils::values_equal(left, right, self.session_context.temporal_comparison)
+    /// The query's `=`, three-valued: `None` for Unknown (see
+    /// [`equals`](super::value_utils::equals)).
+    fn equals(&self, left: &Value, right: &Value) -> Option<bool> {
+        super::value_utils::equals(left, right, self.session_context.temporal_comparison)
     }
 
     /// Checks if a value matches a GQL type name (used by IS TYPED).
@@ -4832,7 +4819,7 @@ impl ExpressionPredicate {
     fn compare_values(&self, left: &Value, right: &Value) -> Option<i32> {
         match (left, right) {
             (Value::Decimal(_), _) | (_, Value::Decimal(_)) => {
-                super::value_utils::compare_with_decimal(left, right).map(|o| o as i32)
+                left.compare_decimal(right).map(|o| o as i32)
             }
             (Value::Int64(a), Value::Int64(b)) => Some(a.cmp(b) as i32),
             // False is below true (ISO/IEC 39075 19.3).
@@ -4846,19 +4833,6 @@ impl ExpressionPredicate {
             }
             (Value::Float64(a), Value::Int64(b)) => {
                 super::value_utils::partial_cmp_int_float(*b, *a).map(|o| o.reverse() as i32)
-            }
-            // RDF stores numeric literals as strings; allow cross-type comparison
-            (Value::String(s), Value::Int64(i)) => {
-                super::value_utils::partial_cmp_text_int(s, *i).map(|o| o as i32)
-            }
-            (Value::Int64(i), Value::String(s)) => {
-                super::value_utils::partial_cmp_text_int(s, *i).map(|o| o.reverse() as i32)
-            }
-            (Value::String(s), Value::Float64(f)) => {
-                super::value_utils::partial_cmp_text_float(s, *f).map(|o| o as i32)
-            }
-            (Value::Float64(f), Value::String(s)) => {
-                super::value_utils::partial_cmp_text_float(s, *f).map(|o| o.reverse() as i32)
             }
             // A zoned and a local datetime or time: as the query's language
             // reads them (see `TemporalComparison`).
@@ -6410,9 +6384,8 @@ mod tests {
 
     // ── Cross-type equality (String ↔ numeric) ──────────────────────────
 
-    /// Regression test: RDF stores numeric literals as strings, so filters
-    /// like `FILTER(?age = 30)` compare `Value::String("30")` with
-    /// `Value::Int64(30)`.  The `values_equal` path must coerce.
+    /// A string equals no number, whatever it spells (GA04): `"42" = 42` is
+    /// false and `"42" <> 99` true.
     #[test]
     fn test_cross_type_string_int_equality() {
         use crate::graph::rowgroup::RowGroupStore;
@@ -6422,7 +6395,7 @@ mod tests {
         let builder = DataChunkBuilder::new(&[LogicalType::Int64]);
         let chunk = builder.finish();
 
-        // String "42" == Int64(42)
+        // String "42" is not Int64(42)
         let pred = ExpressionPredicate::new(
             FilterExpression::Binary {
                 left: Box::new(FilterExpression::Literal(Value::String("42".into()))),
@@ -6433,7 +6406,7 @@ mod tests {
             Arc::clone(&store),
             ReadView::latest(),
         );
-        assert!(pred.evaluate(&chunk, 0).unwrap());
+        assert!(!pred.evaluate(&chunk, 0).unwrap());
 
         // String "42" != Int64(99)
         let pred_ne = ExpressionPredicate::new(
@@ -6462,7 +6435,7 @@ mod tests {
         assert!(!pred_bad.evaluate(&chunk, 0).unwrap());
     }
 
-    /// String ↔ Float64 equality: "7.25" == Float64(7.25)
+    /// String ↔ Float64: "7.25" is not Float64(7.25), and "7.25" <> 2.5 (GA04).
     #[test]
     fn test_cross_type_string_float_equality() {
         use crate::graph::rowgroup::RowGroupStore;
@@ -6482,7 +6455,7 @@ mod tests {
             Arc::clone(&store),
             ReadView::latest(),
         );
-        assert!(pred.evaluate(&chunk, 0).unwrap());
+        assert!(!pred.evaluate(&chunk, 0).unwrap());
 
         // "7.25" != 2.5
         let pred_ne = ExpressionPredicate::new(
@@ -6496,72 +6469,6 @@ mod tests {
             ReadView::latest(),
         );
         assert!(pred_ne.evaluate(&chunk, 0).unwrap());
-    }
-
-    // ── Cross-type ordering (String ↔ numeric) ──────────────────────────
-
-    /// Regression test: String-encoded numbers must support range comparisons
-    /// so that `FILTER(?age > 25)` works when `?age` is stored as "30".
-    #[test]
-    fn test_cross_type_string_numeric_ordering() {
-        use crate::graph::rowgroup::RowGroupStore;
-
-        let store: Arc<dyn GraphStore> = Arc::new(RowGroupStore::new());
-        let vc = HashMap::new();
-        let builder = DataChunkBuilder::new(&[LogicalType::Int64]);
-        let chunk = builder.finish();
-
-        // "30" > Int64(25)
-        let pred_gt = ExpressionPredicate::new(
-            FilterExpression::Binary {
-                left: Box::new(FilterExpression::Literal(Value::String("30".into()))),
-                op: BinaryFilterOp::Gt,
-                right: Box::new(FilterExpression::Literal(Value::Int64(25))),
-            },
-            vc.clone(),
-            Arc::clone(&store),
-            ReadView::latest(),
-        );
-        assert!(pred_gt.evaluate(&chunk, 0).unwrap());
-
-        // Int64(10) < "20.5" (cross Float64 path)
-        let pred_lt = ExpressionPredicate::new(
-            FilterExpression::Binary {
-                left: Box::new(FilterExpression::Literal(Value::Int64(10))),
-                op: BinaryFilterOp::Lt,
-                right: Box::new(FilterExpression::Literal(Value::String("20.5".into()))),
-            },
-            vc.clone(),
-            Arc::clone(&store),
-            ReadView::latest(),
-        );
-        assert!(pred_lt.evaluate(&chunk, 0).unwrap());
-
-        // "2.5" <= Float64(2.5)
-        let pred_le = ExpressionPredicate::new(
-            FilterExpression::Binary {
-                left: Box::new(FilterExpression::Literal(Value::String("2.5".into()))),
-                op: BinaryFilterOp::Le,
-                right: Box::new(FilterExpression::Literal(Value::Float64(2.5))),
-            },
-            vc.clone(),
-            Arc::clone(&store),
-            ReadView::latest(),
-        );
-        assert!(pred_le.evaluate(&chunk, 0).unwrap());
-
-        // Float64(100.0) >= "99.9"
-        let pred_ge = ExpressionPredicate::new(
-            FilterExpression::Binary {
-                left: Box::new(FilterExpression::Literal(Value::Float64(100.0))),
-                op: BinaryFilterOp::Ge,
-                right: Box::new(FilterExpression::Literal(Value::String("99.9".into()))),
-            },
-            vc,
-            store,
-            ReadView::latest(),
-        );
-        assert!(pred_ge.evaluate(&chunk, 0).unwrap());
     }
 
     // ── Stacked filter (selection vector preservation) ───────────────────

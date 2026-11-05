@@ -289,14 +289,13 @@ impl Operator for NodeSeekOperator {
 
 /// The node IDs `=` finds equal to a key, as the filter `id(n) = key`
 /// compares an ID (an integer) with it: the integer itself, a float of
-/// exactly its value, a whole decimal of its value, or a string that parses
-/// as it.
+/// exactly its value, or a whole decimal of its value. A string is not a
+/// number, so it finds none.
 pub(super) fn node_ids(key: &Value) -> Vec<NodeId> {
     let id = match key {
         Value::Int64(id) => Some(*id),
         Value::Float64(f) => exact_integer(*f),
         Value::Decimal(d) if d.floor() == *d => d.trunc_to_i64(),
-        Value::String(s) => s.parse::<i64>().ok(),
         _ => None,
     };
     id.and_then(|id| u64::try_from(id).ok())
@@ -385,10 +384,12 @@ mod tests {
         store.set_node_property(other, "id", Value::Int64(7));
 
         let id = || SeekKey::Property("id".to_string());
-        let all = vec![as_int, as_float, as_string];
-        assert_eq!(seek(&store, id(), Value::Int64(42), None), all);
-        assert_eq!(seek(&store, id(), Value::Float64(42.0), None), all);
-        assert_eq!(seek(&store, id(), Value::from("42"), None), all);
+        // The numbers of one value; the string is text, not a number.
+        let numbers = vec![as_int, as_float];
+        assert_eq!(seek(&store, id(), Value::Int64(42), None), numbers);
+        assert_eq!(seek(&store, id(), Value::Float64(42.0), None), numbers);
+        assert_eq!(seek(&store, id(), Value::from("42"), None), vec![as_string]);
+        assert_eq!(seek(&store, id(), Value::from("042"), None), []);
         assert_eq!(seek(&store, id(), Value::Float64(f64::NAN), None), []);
         assert_eq!(seek(&store, id(), Value::Null, None), []);
     }

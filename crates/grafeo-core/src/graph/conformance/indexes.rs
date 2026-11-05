@@ -307,11 +307,11 @@ pub(crate) fn an_undone_write_leaves_no_index_entry<S: Indexed>(make: &dyn Fn() 
     )
 }
 
-/// `=` finds a number in every spelling (an integer, a float, a numeric
-/// string): the maybe-equal lookup at a view finds each node whose value
-/// at the view `=` finds equal, and not one whose value changed away from
-/// it, nor one a pending write moved to it, for the readers that do not
-/// see the write.
+/// `=` finds a number as an integer and a float, and never as a string,
+/// whatever the string spells: the maybe-equal lookup at a view finds each
+/// node whose value at the view `=` finds equal, and not one whose value
+/// changed away from it, nor one a pending write moved to it, for the
+/// readers that do not see the write.
 pub(crate) fn maybe_equal_finds_every_spelling_at_a_view<S: Indexed>(
     make: &dyn Fn() -> S,
 ) -> Outcome {
@@ -349,28 +349,43 @@ pub(crate) fn maybe_equal_finds_every_spelling_at_a_view<S: Indexed>(
         .map(|found| set(&found))
         .ok_or_else(|| "no answer from the index on code".to_string())
     };
-    for key in [Value::Int64(42), Value::Float64(42.0), Value::from("42.0")] {
+    for key in [Value::Int64(42), Value::Float64(42.0)] {
         let at_before = maybe(before, &key)?;
         ensure(
-            [nodes[0], nodes[1], nodes[2]]
+            [nodes[0], nodes[1]]
                 .iter()
                 .all(|id| at_before.contains(&id.as_u64()))
                 && !at_before.contains(&nodes[3].as_u64()),
             || {
                 format!(
-                    "{key:?} before the write finds {at_before:?}, expected the three spellings of 42"
+                    "{key:?} before the write finds {at_before:?}, expected the integer and the float"
                 )
             },
         )?;
         let at_own = maybe(own, &key)?;
         ensure(
-            [nodes[1], nodes[2], nodes[3]]
-                .iter()
-                .all(|id| at_own.contains(&id.as_u64()))
-                && !at_own.contains(&nodes[0].as_u64()),
-            || format!("{key:?} in the transaction finds {at_own:?}, expected the 42s it sees"),
+            at_own.contains(&nodes[1].as_u64())
+                && !at_own.contains(&nodes[0].as_u64())
+                && !at_own.contains(&nodes[3].as_u64()),
+            || format!("{key:?} in the transaction finds {at_own:?}, expected the float alone"),
         )?;
     }
+    // Text finds its own text.
+    same(
+        &maybe(before, &Value::from("042"))?,
+        &set(&[nodes[2]]),
+        "'042' before the write",
+    )?;
+    same(
+        &maybe(own, &Value::from("42"))?,
+        &set(&[nodes[3]]),
+        "'42' in the transaction",
+    )?;
+    same(
+        &maybe(own, &Value::from("42.0"))?,
+        &BTreeSet::new(),
+        "'42.0' is held by no node",
+    )?;
     same(
         &maybe(before, &Value::from("xyz"))?,
         &BTreeSet::new(),

@@ -2534,7 +2534,11 @@ impl CatalogConstraintValidator {
             properties: keys.to_vec(),
             values: values
                 .iter()
-                .map(|value| grafeo_common::types::HashableValue((*value).clone()))
+                .map(|value| {
+                    grafeo_common::types::HashableValue(
+                        key_identity(value).representative().clone(),
+                    )
+                })
                 .collect(),
         };
         manager
@@ -2657,17 +2661,26 @@ impl CatalogConstraintValidator {
         };
         // Every spelling an index keeps apart that `==` does not, as `0.0` and `-0.0`: the
         // verdict is the same with an index and without.
-        let candidates =
-            match store.find_few_indexed_maybe_equal(&[label], key, value, limit, view)? {
-                Some(nodes) => nodes,
-                None => store.nodes_by_label(label, view)?,
-            };
+        // A value that holds a null: the index answers `=`, which finds nothing for it, where the
+        // rule treats nulls as not distinct, so the label is read.
+        let indexed = if grafeo_core::execution::operators::value_utils::holds_null(value) {
+            None
+        } else {
+            store.find_few_indexed_maybe_equal(&[label], key, value, limit, view)?
+        };
+        let candidates = match indexed {
+            Some(nodes) => nodes,
+            None => store.nodes_by_label(label, view)?,
+        };
         let key = grafeo_common::types::PropertyKey::from(key);
         let mut found = Vec::new();
         for id in candidates {
             if let Some(node) = store.node(id, view)?
                 && node.labels.iter().any(|l| l.as_str() == label)
-                && node.properties.get(&key) == Some(value)
+                && node
+                    .properties
+                    .get(&key)
+                    .is_some_and(|held| same_key_value(held, value))
             {
                 found.push(node);
             }
@@ -2815,7 +2828,7 @@ impl CatalogConstraintValidator {
                             other
                                 .properties
                                 .get(&grafeo_common::types::PropertyKey::from(key.as_str()))
-                                == Some(*value)
+                                .is_some_and(|held| same_key_value(held, value))
                         })
                     });
                 if duplicate {
@@ -3007,6 +3020,18 @@ pub(crate) fn check_data_against_rules(
 ///
 /// # Errors
 ///
+/// A key value as a UNIQUE rule tells values apart: by the identity grouping and `DISTINCT` read,
+/// so values `=` finds equal are one value (`1` and `1.0`, and `[1]` and `[1.0]`), and a string
+/// and a number, of two kinds, are two.
+fn key_identity(value: &Value) -> grafeo_core::execution::operators::HashableValue {
+    grafeo_core::execution::operators::HashableValue::from(value)
+}
+
+/// Whether two key values are one value to a UNIQUE rule (see [`key_identity`]).
+fn same_key_value(held: &Value, value: &Value) -> bool {
+    key_identity(held) == key_identity(value)
+}
+
 /// A schema violation naming the rule and a value that breaks it.
 pub(crate) fn check_rule_over_nodes(
     def: &ConstraintDefinition,
@@ -3023,7 +3048,7 @@ pub(crate) fn check_rule_over_nodes(
         .iter()
         .map(|property| grafeo_common::types::PropertyKey::from(property.as_str()))
         .collect();
-    let mut seen: HashSet<Vec<grafeo_common::types::HashableValue>> = HashSet::new();
+    let mut seen: HashSet<Vec<grafeo_core::execution::operators::HashableValue>> = HashSet::new();
     for id in store.nodes_by_label(&def.label, view)? {
         let Some(node) = store.node(id, view)? else {
             continue;
@@ -3042,10 +3067,8 @@ pub(crate) fn check_rule_over_nodes(
             )));
         }
         if unique && let Some(values) = values.into_iter().collect::<Option<Vec<&Value>>>() {
-            let key: Vec<grafeo_common::types::HashableValue> = values
-                .iter()
-                .map(|value| grafeo_common::types::HashableValue::from((*value).clone()))
-                .collect();
+            let key: Vec<grafeo_core::execution::operators::HashableValue> =
+                values.iter().map(|value| key_identity(value)).collect();
             if !seen.insert(key) {
                 return Err(OperatorError::schema_violation(format!(
                     "constraint '{}' does not hold: more than one node of :{} has ({}) = \
@@ -3287,7 +3310,7 @@ impl ConstraintValidator for CatalogConstraintValidator {
                             other
                                 .properties
                                 .get(&grafeo_common::types::PropertyKey::from(key.as_str()))
-                                == Some(*value)
+                                .is_some_and(|held| same_key_value(held, value))
                         })
                     });
                 if duplicate {

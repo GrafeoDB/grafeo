@@ -12,7 +12,6 @@
 use std::collections::HashMap;
 
 use grafeo_common::types::Value;
-use grafeo_core::execution::operators::value_utils::int_equals_float;
 use grafeo_engine::GrafeoDB;
 use grafeo_engine::query::optimizer::{PlannerRule, PlannerRules};
 use grafeo_engine::session::Session;
@@ -230,14 +229,17 @@ fn a_key_finds_the_values_equal_to_it_in_each_kind() {
         found(Value::Float64(1.0)).len()
     );
     let at_42 = found(Value::Int64(42));
-    for value in [
-        "Int64(42)",
-        "Float64(42)",
-        "String(\"42\")",
-        "String(\"042\")",
-    ] {
+    for value in ["Int64(42)", "Float64(42)"] {
         assert!(at_42.iter().any(|row| row == value), "{value} in {at_42:?}");
     }
+    // A string equals no number, whatever it spells (GA04).
+    for value in ["String(\"42\")", "String(\"042\")"] {
+        assert!(
+            !at_42.iter().any(|row| row == value),
+            "{value} not in {at_42:?}"
+        );
+    }
+    assert_eq!(found(Value::from("042")), ["String(\"042\")"]);
     assert!(
         found(Value::Float64(f64::NAN)).is_empty(),
         "NaN equals nothing"
@@ -1295,8 +1297,8 @@ fn a_rare_and_a_common_label_read_a_cold_column_alike() {
 // Strings that read as numbers, and a limit over each kind
 // ---------------------------------------------------------------------------
 
-/// Strings by how `=` reads them against a number. Written with the rule beside them, not the code's
-/// list, so a typed compare of strings has something to answer to.
+/// Strings of every spelling a number may have. No string equals a number, whatever it spells (ISO/IEC
+/// 39075 19.3, openCypher): a number key finds none of them, and a string key only its own text.
 const SPELLINGS: &[&str] = &[
     "42",
     "042",
@@ -1368,15 +1370,10 @@ const SPELLINGS: &[&str] = &[
     "42é",
 ];
 
-/// `=` of a string and a key, as the rule reads: against an integer only integer text; against a
-/// float integer text exactly, and other number text by `parse::<f64>`; against a string itself.
+/// `=` of a string and a key: a string equals a string of the same text, and never a number.
 fn equal_by_the_rule(text: &str, key: &Value) -> bool {
     match key {
-        Value::Int64(key) => text.parse::<i64>().is_ok_and(|number| number == *key),
-        Value::Float64(key) => match text.parse::<i64>() {
-            Ok(number) => int_equals_float(number, *key),
-            Err(_) => text.parse::<f64>().is_ok_and(|number| number == *key),
-        },
+        Value::Int64(_) | Value::Float64(_) => false,
         Value::String(key) => text == key.as_str(),
         other => panic!("{other:?}"),
     }
@@ -1466,8 +1463,7 @@ fn answers_by_the_rule(db: &GrafeoDB, stage: &str) {
 }
 
 /// A string column against a number key and a string key, in every spelling, on each way a column
-/// is held: `'042' = 42`, not `'42.0' = 42`, `'42.0' = 42.0`, `'inf' = Infinity`, and no string
-/// equals NaN, whatever it spells; `'042'` is not `'42'` as two strings.
+/// is held: a number key finds no string, and `'042'` is not `'42'` as two strings.
 #[test]
 fn a_string_column_answers_as_equals_reads_it() {
     let db = GrafeoDB::new_in_memory();
@@ -1492,9 +1488,10 @@ fn a_string_column_answers_as_equals_reads_it() {
     db.close().unwrap();
 }
 
-/// The cases spelled out, as the agreement above would hold of a rule written wrongly.
+/// The cases spelled out, as the agreement above would hold of a rule written wrongly: a number key
+/// finds no string however it is spelled, and a string key only its own text.
 #[test]
-fn the_rule_of_a_string_and_a_number() {
+fn no_string_equals_a_number() {
     let db = GrafeoDB::new_in_memory();
     string_column(&db);
     let session = db.session();
@@ -1504,26 +1501,24 @@ fn the_rule_of_a_string_and_a_number() {
             .map(|row| SPELLINGS[usize::try_from(row).unwrap()])
             .collect()
     };
-    assert_eq!(texts(Value::Int64(42)), ["42", "042", "0042", "+42"]);
-    assert_eq!(
-        texts(Value::Float64(42.0)),
-        [
-            "42", "042", "0042", "+42", "42.0", "42.00", "+42.0", "4.2e1", "4.2E1", "420e-1"
-        ]
-    );
+    let none: Vec<&str> = Vec::new();
+    for key in [
+        Value::Int64(42),
+        Value::Float64(42.0),
+        Value::Int64(0),
+        Value::Float64(-0.0),
+        Value::Int64(1_000),
+        Value::Float64(f64::NAN),
+        Value::Float64(f64::INFINITY),
+        Value::Int64(9_007_199_254_740_993),
+    ] {
+        assert_eq!(texts(key.clone()), none, "{key:?}");
+    }
     assert_eq!(texts(Value::from("042")), ["042"]);
+    assert_eq!(texts(Value::from("42")), ["42"]);
     assert_eq!(texts(Value::from("")), [""]);
     assert_eq!(texts(Value::from("nan")), ["nan"]);
-    assert_eq!(texts(Value::Int64(0)), ["0", "00", "-0", "+0"]);
-    assert_eq!(texts(Value::Float64(f64::NAN)), Vec::<&str>::new());
-    let infinite = texts(Value::Float64(f64::INFINITY));
-    for text in ["inf", "Inf", "INF", "+inf", "infinity", "Infinity", "1e400"] {
-        assert!(infinite.contains(&text), "{text} in {infinite:?}");
-    }
-    assert!(
-        !infinite.contains(&"-inf") && !infinite.contains(&"infin"),
-        "{infinite:?}"
-    );
+    assert_eq!(texts(Value::from("inf")), ["inf"]);
 }
 
 /// A limit over each kind gives the rows the scan gives, in its order, across a chunk and a group,
@@ -1693,12 +1688,12 @@ fn finds_rows(db: &GrafeoDB, stage: &str, key: &Value, wanted: &[i64]) {
 fn a_string_key_over_an_integer_column() {
     let values = [Value::Int64(42), Value::Int64(7)];
     on_each_stage(&values, |db, stage| {
-        finds_rows(db, stage, &Value::from("42"), &[0]);
-        finds_rows(db, stage, &Value::from("042"), &[0]);
-        finds_rows(db, stage, &Value::from("+42"), &[0]);
-        finds_rows(db, stage, &Value::from("4.2e1"), &[]);
-        finds_rows(db, stage, &Value::from("42.0"), &[]);
-        finds_rows(db, stage, &Value::from("abc"), &[]);
+        // No string equals a number.
+        for text in ["42", "042", "+42", "4.2e1", "42.0", "abc"] {
+            finds_rows(db, stage, &Value::from(text), &[]);
+        }
+        finds_rows(db, stage, &Value::Int64(42), &[0]);
+        finds_rows(db, stage, &Value::Float64(42.0), &[0]);
     });
 }
 
@@ -1706,12 +1701,11 @@ fn a_string_key_over_an_integer_column() {
 fn a_string_key_over_a_float_column() {
     let values = [Value::Float64(42.0), Value::Float64(7.5)];
     on_each_stage(&values, |db, stage| {
-        finds_rows(db, stage, &Value::from("42"), &[0]);
-        finds_rows(db, stage, &Value::from("042"), &[0]);
-        finds_rows(db, stage, &Value::from("4.2e1"), &[0]);
-        finds_rows(db, stage, &Value::from("42.0"), &[0]);
-        finds_rows(db, stage, &Value::from("7.5"), &[1]);
-        finds_rows(db, stage, &Value::from("abc"), &[]);
+        for text in ["42", "042", "4.2e1", "42.0", "7.5", "abc"] {
+            finds_rows(db, stage, &Value::from(text), &[]);
+        }
+        finds_rows(db, stage, &Value::Int64(42), &[0]);
+        finds_rows(db, stage, &Value::Float64(7.5), &[1]);
     });
 }
 
@@ -1721,14 +1715,14 @@ fn a_key_over_a_column_of_strings_that_read_as_numbers() {
     on_each_stage(&values, |db, stage| {
         finds_rows(db, stage, &Value::from("42"), &[1]);
         finds_rows(db, stage, &Value::from("042"), &[0]);
-        finds_rows(db, stage, &Value::Int64(42), &[0, 1]);
-        finds_rows(db, stage, &Value::Float64(42.0), &[0, 1]);
+        finds_rows(db, stage, &Value::Int64(42), &[]);
+        finds_rows(db, stage, &Value::Float64(42.0), &[]);
         finds_rows(db, stage, &Value::from("Gus"), &[2]);
     });
 }
 
-/// A group of any values: a string key reads `'42'`'s bytes against a string and its number against
-/// the integer, so `'042'` finds `'042'` and `42`, not `'42'`.
+/// A group of any values: a string key finds its own text, a number key the numbers, and neither
+/// the other kind.
 #[test]
 fn a_key_over_a_column_of_any_values() {
     let values = [
@@ -1738,12 +1732,14 @@ fn a_key_over_a_column_of_any_values() {
         Value::Bool(true),
     ];
     on_each_stage(&values, |db, stage| {
-        finds_rows(db, stage, &Value::from("042"), &[0, 2]);
-        finds_rows(db, stage, &Value::from("42"), &[1, 2]);
+        finds_rows(db, stage, &Value::from("042"), &[0]);
+        finds_rows(db, stage, &Value::from("42"), &[1]);
         finds_rows(db, stage, &Value::from("4.2e1"), &[]);
-        finds_rows(db, stage, &Value::Int64(42), &[0, 1, 2]);
-        finds_rows(db, stage, &Value::Float64(42.0), &[0, 1, 2]);
+        finds_rows(db, stage, &Value::Int64(42), &[2]);
+        finds_rows(db, stage, &Value::Float64(42.0), &[2]);
         finds_rows(db, stage, &Value::Bool(true), &[3]);
+        finds_rows(db, stage, &Value::from("true"), &[]);
+        finds_rows(db, stage, &Value::Int64(1), &[]);
     });
 }
 
@@ -1763,15 +1759,15 @@ fn a_list_of_string_and_number_keys() {
         for (query, wanted) in [
             (
                 "MATCH (n:L) WHERE n.k IN ['042', '42'] RETURN n.row",
-                &[0, 1, 2][..],
+                &[0, 1][..],
             ),
             (
                 "MATCH (n:L) WHERE n.k IN ['042', 7] RETURN n.row",
-                &[0, 2, 3, 4][..],
+                &[0, 3][..],
             ),
             (
                 "MATCH (n:L) WHERE n.k IN [42, 42.0, '42'] RETURN n.row",
-                &[0, 1, 2][..],
+                &[1, 2][..],
             ),
             ("MATCH (n:L) WHERE n.k IN ['nobody'] RETURN n.row", &[][..]),
         ] {
@@ -1796,11 +1792,13 @@ fn a_list_of_string_and_number_keys() {
 /// Rows of a column read by slices, any kinds, over three slices of a group.
 const SLICED: i64 = 7_000;
 
+/// Each kind holds every digit, so `k: 3` finds integers and floats and `k: '3'` the strings (GA04).
 fn sliced_value(row: i64) -> Value {
+    let digit = (row / 4) % 10;
     match row % 4 {
-        0 => Value::Int64(row % 10),
-        1 => Value::from(format!("{}", row % 10).as_str()),
-        2 => Value::Float64((row % 10) as f64),
+        0 => Value::Int64(digit),
+        1 => Value::from(format!("{digit}").as_str()),
+        2 => Value::Float64(digit as f64),
         _ => Value::Bool(row % 8 == 3),
     }
 }
@@ -1858,9 +1856,10 @@ fn a_chained_row_in_a_later_slice_is_read_at_the_view() {
             .iter()
             .map(|query| reader.execute(query).unwrap().rows().to_vec())
             .collect();
+        assert!(!before[0].is_empty(), "{stage}: k: 3 finds rows");
         // Rows in the third slice: one leaves `k: 3`, one comes to `k: 99`, and one comes in.
         db.session()
-            .execute("MATCH (n:L {row: 4800}) SET n.k = 99")
+            .execute("MATCH (n:L {row: 4812}) SET n.k = 99")
             .unwrap();
         db.session()
             .execute("MATCH (n:L {row: 4803}) SET n.k = 99")
@@ -1928,7 +1927,7 @@ fn a_limit_reads_a_slice_of_a_column_it_compares_by_value() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn a_number_key_over_each_spelling_of_a_string() {
+fn a_number_key_finds_no_spelling_of_a_string() {
     let values = [
         Value::from("42"),
         Value::from("42.0"),
@@ -1936,24 +1935,27 @@ fn a_number_key_over_each_spelling_of_a_string() {
         Value::from("+42"),
     ];
     on_each_stage(&values, |db, stage| {
-        finds_rows(db, stage, &Value::Int64(42), &[0, 3]);
-        finds_rows(db, stage, &Value::Float64(42.0), &[0, 1, 2, 3]);
+        // A number key finds no string, however it spells the number.
+        finds_rows(db, stage, &Value::Int64(42), &[]);
+        finds_rows(db, stage, &Value::Float64(42.0), &[]);
         finds_rows(db, stage, &Value::Float64(42.5), &[]);
         finds_rows(db, stage, &Value::Int64(43), &[]);
+        finds_rows(db, stage, &Value::from("42.0"), &[1]);
     });
 }
 
-/// An integer past what a float holds reads its own text, not a neighbour's that the same float is.
+/// Past what a float holds as well: a number key finds no string, the string key its own text.
 #[test]
-fn a_number_key_past_a_floats_reach_over_strings() {
+fn a_number_key_past_a_floats_reach_finds_no_string() {
     let values = [
         Value::from("9007199254740993"),
         Value::from("9007199254740992"),
     ];
     on_each_stage(&values, |db, stage| {
-        finds_rows(db, stage, &Value::Int64(9_007_199_254_740_993), &[0]);
-        finds_rows(db, stage, &Value::Int64(9_007_199_254_740_992), &[1]);
-        finds_rows(db, stage, &Value::Float64(9_007_199_254_740_992.0), &[1]);
+        finds_rows(db, stage, &Value::Int64(9_007_199_254_740_993), &[]);
+        finds_rows(db, stage, &Value::Int64(9_007_199_254_740_992), &[]);
+        finds_rows(db, stage, &Value::Float64(9_007_199_254_740_992.0), &[]);
+        finds_rows(db, stage, &Value::from("9007199254740993"), &[0]);
     });
 }
 
@@ -2011,6 +2013,24 @@ fn a_key_in_a_later_dictionary_chunk_is_found() {
     check(&db, "hot");
     let (_dir, db) = reopened(by_group);
     check(&db, "reopened");
+    let session = db.session();
+    for key in [Value::Int64(42), Value::Float64(42.0)] {
+        assert_eq!(
+            rows_of(&session, "MATCH (n:L {k: $v}) RETURN count(n)", &key),
+            ["[Int64(0)]"],
+            "a number key over a dictionary of text: {key:?}"
+        );
+    }
+    assert_eq!(
+        rows_of(
+            &session,
+            "MATCH (n:L {k: $v}) RETURN count(n)",
+            &Value::from("042")
+        ),
+        ["[Int64(1667)]"],
+        "the text alone"
+    );
+    drop(session);
     db.close().unwrap();
 }
 
@@ -2087,7 +2107,7 @@ fn a_key_only_a_chain_holds_is_read_at_the_view() {
         }
         let plain_new = session_with(db, PlannerRules::plain());
         for form in CHAINED_FORMS {
-            for key in ["5", "5.0e0", "'5'", "'05'"] {
+            for key in ["5", "5.0e0"] {
                 let query = form.replace('@', key);
                 let old = reader.execute(&query).unwrap();
                 assert_eq!(
@@ -2107,7 +2127,8 @@ fn a_key_only_a_chain_holds_is_read_at_the_view() {
                 );
                 assert_eq!(plain_new.execute(&query).unwrap().row_count(), 0, "{stage}");
             }
-            for key in ["0", "5000000", "'nobody'"] {
+            // A string equals no number, whatever it spells (GA04).
+            for key in ["0", "5000000", "'nobody'", "'5'", "'05'"] {
                 let query = form.replace('@', key);
                 assert_eq!(
                     reader.execute(&query).unwrap().row_count(),

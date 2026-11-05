@@ -2,16 +2,15 @@
 //! values `=` can find equal to a key that are not among the forms the key
 //! names itself (#535).
 //!
-//! `=` is lenient across kinds (see [`HashKey::for_equality`]): a number
-//! equals a string it parses as (`'042' = 42`), an integer, a float and a
-//! decimal of the same value are equal, and lists and maps compare element by
-//! element. Numbers compare exactly (IEEE for floats: `-0.0 = 0.0`, NaN
-//! equals nothing). The index finds values by exact value, so a lookup by `=`
-//! probes the forms a key names (the key, and for a number its integer, its
-//! float, its decimal and its canonical strings), and the values no such
-//! probe finds (a number spelled another way, such as `'042'`, or a list)
-//! wait in a side table by their `=` class, which is empty for a property
-//! that holds none of them.
+//! `=` reads numbers by value (see [`HashKey::for_equality`]): an integer, a
+//! float and a decimal of the same value are equal, and lists and maps
+//! compare element by element. Two values of different kinds are never equal:
+//! a string is not the number it spells. Numbers compare exactly (IEEE for
+//! floats: `-0.0 = 0.0`, NaN equals nothing). The index finds values by exact
+//! value, so a lookup by `=` probes the forms a key names (the key, and for a
+//! number its integer, its float and its decimal), and the values no such
+//! probe finds (a list or a map of numbers) wait in a side table by their `=`
+//! class, which is empty for a property that holds none of them.
 
 use dashmap::DashMap;
 use dashmap::mapref::entry::Entry;
@@ -161,8 +160,8 @@ impl MaybeEqual {
     /// Adds the integers and the bits of the floats a lookup of `key`, an
     /// integer or a float, finds: what [`integers`](Self::integers) and
     /// [`floats`](Self::floats) of its own lookup list, without the decimals
-    /// and the texts a lookup of a column of other values needs. A long `IN`
-    /// over a column of numbers builds none of those.
+    /// a lookup of a column of other values needs. A long `IN` over a column
+    /// of numbers builds none of those.
     pub(crate) fn number_forms(key: &Value, integers: &mut Vec<i64>, floats: &mut Vec<u64>) {
         let float_forms = |float: f64, integers: &mut Vec<i64>, floats: &mut Vec<u64>| {
             if float.is_nan() {
@@ -219,10 +218,10 @@ impl MaybeEqual {
 }
 
 /// The values a key is looked up as: the key itself; for an integer, its
-/// decimal, its text and, when a float has exactly its value, that float's
-/// forms; for a float, its decimal and its forms (see [`push_float_forms`]);
-/// for a decimal, its float's forms and, when whole, its integer and that
-/// integer's text; for a string, the integer, decimal and float it reads as.
+/// decimal and, when a float has exactly its value, that float's forms; for a
+/// float, its decimal and its forms (see [`push_float_forms`]); for a decimal,
+/// its float's forms and, when whole, its integer. A string is looked up as
+/// itself: it equals no number.
 fn probes(key: &Value) -> Vec<HashableValue> {
     let mut probes = vec![HashableValue::new(key.clone())];
     // A decimal equals an integer of its value and a float whose shortest
@@ -244,37 +243,18 @@ fn probes(key: &Value) -> Vec<HashableValue> {
                 push_integer_forms(&mut probes, integer);
             }
         }
-        // A numeric string equals the decimal of the number it reads as:
-        // decimal text exactly, other number text (`'4.2e1'`) as its float.
-        Value::String(s) => {
-            let decimal = Decimal::parse(s).ok().or_else(|| {
-                s.parse::<f64>()
-                    .ok()
-                    .and_then(|f| Decimal::from_f64(f).ok())
-            });
-            if let Some(d) = decimal {
-                probes.push(HashableValue::new(Value::Decimal(d)));
-            }
-            if let Ok(integer) = s.parse::<i64>() {
-                push_integer_forms(&mut probes, integer);
-            }
-            if let Ok(number) = s.parse::<f64>() {
-                push_float_forms(&mut probes, number);
-            }
-        }
         _ => {}
     }
     probes
 }
 
-/// The forms of an integer: itself, its decimal and its text, and the forms
-/// of the float of exactly its value, if there is one.
+/// The forms of an integer: itself and its decimal, and the forms of the
+/// float of exactly its value, if there is one.
 fn push_integer_forms(probes: &mut Vec<HashableValue>, integer: i64) {
     probes.push(HashableValue::new(Value::Int64(integer)));
     probes.push(HashableValue::new(Value::Decimal(Decimal::from_i64(
         integer,
     ))));
-    probes.push(HashableValue::new(Value::from(integer.to_string())));
     if let Some(float) = exact_float(integer) {
         push_float_forms(probes, float);
     }
@@ -306,8 +286,8 @@ fn whole_integer(float: f64) -> Option<i64> {
 }
 
 /// The forms of a float `=` may find equal: the float (both zeros for a
-/// zero) and its shortest text, and for a whole float in the `i64` range its
-/// integer and that integer's text. NaN equals nothing, so it has no forms.
+/// zero), and for a whole float in the `i64` range its integer. NaN equals
+/// nothing, so it has no forms.
 fn push_float_forms(probes: &mut Vec<HashableValue>, float: f64) {
     if float.is_nan() {
         return;
@@ -318,10 +298,8 @@ fn push_float_forms(probes: &mut Vec<HashableValue>, float: f64) {
     } else {
         probes.push(HashableValue::new(Value::Float64(float)));
     }
-    probes.push(HashableValue::new(Value::from(float.to_string())));
     if let Some(integer) = whole_integer(float) {
         probes.push(HashableValue::new(Value::Int64(integer)));
-        probes.push(HashableValue::new(Value::from(integer.to_string())));
     }
 }
 
@@ -332,15 +310,8 @@ fn is_found_by_probes(value: &Value) -> bool {
         // Integers, floats and decimals are among the forms of every number
         // equal to them; NaN equals nothing.
         Value::Int64(_) | Value::Float64(_) | Value::Decimal(_) => true,
-        // A number is found in its canonical text (`'42'`, `'0.3'`, `'-0'`
-        // for the float, `'0'` for the integer); other spellings (`'042'`,
-        // `'42.0'`, `'4.2e1'`) wait in the side table. A string that is no
-        // number equals only itself.
-        Value::String(s) => match (s.parse::<i64>(), s.parse::<f64>()) {
-            (Ok(integer), _) => integer.to_string() == s.as_str(),
-            (Err(_), Ok(n)) if !n.is_nan() => n.to_string() == s.as_str(),
-            _ => true,
-        },
+        // A string equals only itself.
+        Value::String(_) => true,
         // Elements compare by `=` too.
         Value::List(_) | Value::Map(_) | Value::Path { .. } | Value::Vector(_) => false,
         // Equal by their own equality, which their hash agrees with.
@@ -387,8 +358,10 @@ mod tests {
             .collect()
     }
 
+    /// A number finds the numbers of its value, a string its own text: no string equals a number,
+    /// whatever it spells.
     #[test]
-    fn numbers_are_found_in_every_spelling() {
+    fn a_number_finds_numbers_and_a_string_its_text() {
         let index = index(&[
             Value::Int64(42),
             Value::Float64(42.0),
@@ -399,22 +372,25 @@ mod tests {
             Value::from("abc"),
             Value::Int64(19),
         ]);
-        let all = vec![0, 1, 2, 3, 4, 5];
-        assert_eq!(found(&index, Value::Int64(42)), all);
-        assert_eq!(found(&index, Value::Float64(42.0)), all);
-        assert_eq!(found(&index, Value::from("042")), all);
+        assert_eq!(found(&index, Value::Int64(42)), vec![0, 1]);
+        assert_eq!(found(&index, Value::Float64(42.0)), vec![0, 1]);
+        assert_eq!(found(&index, Value::from("042")), vec![3]);
+        assert_eq!(found(&index, Value::from("42")), vec![2]);
+        assert_eq!(found(&index, Value::from("42.0")), vec![5]);
         assert_eq!(found(&index, Value::from("abc")), vec![6]);
         assert_eq!(found(&index, Value::Null), Vec::<u64>::new());
     }
 
     #[test]
-    fn a_decimal_is_found_by_the_strings_that_read_as_it() {
+    fn a_decimal_is_found_by_numbers_not_by_text() {
         let decimal = |text: &str| Value::Decimal(Decimal::parse(text).unwrap());
         let index = index(&[decimal("42.0"), decimal("0.3"), Value::from("abc")]);
-        for key in ["42", "042", "+42", "42.00", "4.2e1"] {
-            assert_eq!(found(&index, Value::from(key)), vec![0], "{key}");
+        for key in ["42", "042", "+42", "42.00", "4.2e1", "0.30"] {
+            assert_eq!(found(&index, Value::from(key)), Vec::<u64>::new(), "{key}");
         }
-        assert_eq!(found(&index, Value::from("0.30")), vec![1]);
+        assert_eq!(found(&index, Value::Int64(42)), vec![0]);
+        assert_eq!(found(&index, Value::Float64(42.0)), vec![0]);
+        assert_eq!(found(&index, decimal("0.30")), vec![1]);
         assert_eq!(found(&index, Value::from("abc")), vec![2]);
     }
 
@@ -462,8 +438,9 @@ mod tests {
             Value::Int64(1 << 53),
             Value::from(above.to_string()),
         ]);
-        // 2^53 + 1 has no float of its value.
-        assert_eq!(found(&index, Value::Int64(above)), vec![0, 3]);
+        // 2^53 + 1 has no float of its value, and its text is no number.
+        assert_eq!(found(&index, Value::Int64(above)), vec![0]);
+        assert_eq!(found(&index, Value::from(above.to_string())), vec![3]);
         assert_eq!(
             found(&index, Value::Float64(9_007_199_254_740_992.0)),
             vec![1, 2]
@@ -481,7 +458,7 @@ mod tests {
         assert_eq!(found(&index, Value::Int64(1)), vec![1, 2]);
         assert_eq!(found(&index, Value::Int64(0)), vec![0]);
         assert_eq!(found(&index, Value::Float64(1.0)), vec![1, 2]);
-        assert_eq!(found(&index, Value::from("1")), vec![1, 2]);
+        assert_eq!(found(&index, Value::from("1")), Vec::<u64>::new());
         assert_eq!(
             found(&index, Value::Float64(0.999_999_999_999_999_9)),
             Vec::<u64>::new()
@@ -492,9 +469,11 @@ mod tests {
     #[test]
     fn a_removed_value_leaves_the_side_table() {
         let index = index(&[Value::from("042"), Value::from("42")]);
-        assert_eq!(found(&index, Value::Int64(42)), vec![0, 1]);
+        assert_eq!(found(&index, Value::Int64(42)), Vec::<u64>::new());
+        assert_eq!(found(&index, Value::from("042")), vec![0]);
         index.remove(&HashableValue::new(Value::from("042")), NodeId::new(0));
-        assert_eq!(found(&index, Value::Int64(42)), vec![1]);
+        assert_eq!(found(&index, Value::from("042")), Vec::<u64>::new());
+        assert_eq!(found(&index, Value::from("42")), vec![1]);
         assert!(
             index.others_by_class.is_empty(),
             "no value no probe finds is left"
@@ -521,19 +500,17 @@ mod tests {
             Value::from("abc"),
             Value::from("NaN"),
             Value::Bool(true),
-        ] {
-            assert!(is_found_by_probes(&value), "{value:?}");
-        }
-        for value in [
+            // A string is found by its own text, whatever number it spells.
             Value::from("042"),
             Value::from("42.0"),
             Value::from("0.30"),
             Value::from("4.2e1"),
             Value::from("-0"),
-            Value::List(vec![Value::Int64(42)].into()),
         ] {
-            assert!(!is_found_by_probes(&value), "{value:?}");
+            assert!(is_found_by_probes(&value), "{value:?}");
         }
+        let list = Value::List(vec![Value::Int64(42)].into());
+        assert!(!is_found_by_probes(&list), "{list:?}");
     }
 
     /// `MaybeEqual` finds a value exactly when the index's lookup of the key
@@ -578,10 +555,12 @@ mod tests {
         );
         let strings: Vec<Value> = std::iter::repeat_n(Value::from("42"), 600).collect();
         let index = self::tests::index(&strings);
-        assert_eq!(found(&index, Value::Int64(42)).len(), 600);
+        assert_eq!(found(&index, Value::from("42")).len(), 600);
+        // A number finds no string, whatever it spells (GA04).
+        assert_eq!(found(&index, Value::Int64(42)), Vec::<u64>::new());
         assert!(
             index.candidates_within(&Value::Int64(42), 600),
-            "a string of it"
+            "a number, which finds none"
         );
         assert!(
             index.candidates_within(&Value::from("42"), 600),

@@ -17,6 +17,7 @@
 //! The answer is at the reader's view: visibility by the word of found rows, which is one `AND` in
 //! a vector without stamps, and a row a chain holds is read as the view sees it.
 
+use crate::execution::operators::value_utils::holds_null;
 use std::ops::Range;
 use std::sync::OnceLock;
 
@@ -29,7 +30,6 @@ use super::column::{ColdRows, ColumnRead, HotRows, HotValues};
 use super::index::MaybeEqual;
 use super::{Inner, LabelIds, ROWS_PER_GROUP, Read};
 use crate::codec::column_chunk::{DictView, ZoneMap, bits_among};
-use crate::execution::operators::value_utils::text_reads_as_number;
 use crate::graph::traits::KeyColumnGroup;
 
 /// The words of a row group's bits.
@@ -153,10 +153,8 @@ struct Targets {
     /// Whether every key is an integer or a float other than NaN, so an integer or float found
     /// is `=` the key, not only maybe.
     number_keys: bool,
-    /// Whether every key is a string: a stored string `=` one only when it has its bytes.
+    /// Whether every key is a string.
     string_keys: bool,
-    /// Whether a key is a float.
-    float_keys: bool,
     finders: OnceLock<Vec<MaybeEqual>>,
     forms: OnceLock<NumberForms>,
     strings: OnceLock<Vec<ArcStr>>,
@@ -170,14 +168,12 @@ struct NumberForms {
     /// The bits of the floats found, sorted: `=`'s two zeros are both among them, and a NaN is
     /// found as the index finds it, for the filter to refuse.
     floats: Vec<u64>,
-    /// The last digits of the integers, a bit per digit.
-    last_digits: u16,
 }
 
 impl Targets {
-    /// What finds `values`; `None` when `=` finds nothing equal to any (NULL).
+    /// What finds `values`; `None` when `=` finds nothing equal to any: each is or holds a null.
     fn new(mut values: Vec<Value>) -> Option<Self> {
-        values.retain(|value| !value.is_null());
+        values.retain(|value| !holds_null(value));
         if values.is_empty() {
             return None;
         }
@@ -187,14 +183,10 @@ impl Targets {
             _ => false,
         });
         let string_keys = values.iter().all(|value| matches!(value, Value::String(_)));
-        let float_keys = values
-            .iter()
-            .any(|value| matches!(value, Value::Float64(_)));
         Some(Self {
             values,
             number_keys,
             string_keys,
-            float_keys,
             finders: OnceLock::new(),
             forms: OnceLock::new(),
             strings: OnceLock::new(),
@@ -223,18 +215,12 @@ impl Targets {
             integers.dedup();
             floats.sort_unstable();
             floats.dedup();
-            let last_digits = integers.iter().fold(0, |digits, integer: &i64| {
-                digits | (1 << (integer.unsigned_abs() % 10))
-            });
-            NumberForms {
-                integers,
-                floats,
-                last_digits,
-            }
+            NumberForms { integers, floats }
         })
     }
 
-    /// The string keys, sorted.
+    /// The string keys, sorted: a stored string `=` a key only when it is one of them, by its
+    /// bytes, as no string equals a number.
     fn strings(&self) -> &[ArcStr] {
         self.strings.get_or_init(|| {
             let mut strings: Vec<ArcStr> = self
@@ -251,16 +237,16 @@ impl Targets {
         })
     }
 
-    /// Whether a found `value` is `=` a key, not only maybe.
+    /// Whether a found `value` is `=` a key, not only maybe: a string found is one of the keys.
     fn is_exact(&self, value: &Value) -> bool {
         match value {
             Value::Int64(_) | Value::Float64(_) => self.number_keys,
-            Value::String(_) => self.string_keys || self.number_keys,
+            Value::String(_) => true,
             _ => false,
         }
     }
 
-    /// Whether `text` is one of the keys, when every key is a string.
+    /// Whether `text` is one of the string keys.
     fn is_a_key(&self, text: &[u8]) -> bool {
         match self.strings() {
             [] => false,
@@ -275,59 +261,19 @@ impl Targets {
         }
     }
 
-    /// Whether `text` need not be read against number keys: with no float among them only text that
-    /// reads as an integer `=` one, and such text ends in that integer's last digit.
-    fn number_text_is_ruled_out(&self, text: &[u8]) -> bool {
-        !self.float_keys
-            && !text.last().is_some_and(|byte| {
-                byte.is_ascii_digit() && self.forms().last_digits & (1 << (byte - b'0')) != 0
-            })
-    }
-
-    /// Whether `text` `=` a key, when every key is an integer or a float, by the rules of `=` (see
-    /// `values_equal`): the integers found hold every key an integer `=`, and other number text
-    /// `=` only a float.
-    fn text_equals_a_number(&self, text: &str) -> bool {
-        if self.number_text_is_ruled_out(text.as_bytes()) {
-            return false;
-        }
-        text_reads_as_number(
-            text,
-            |integer| self.forms().integers.binary_search(&integer).is_ok(),
-            self.float_keys.then_some(|number: f64| {
-                self.values
-                    .iter()
-                    .any(|key| matches!(key, Value::Float64(float) if *float == number))
-            }),
-        )
-    }
-
-    /// Whether a dictionary's entry, by its bytes, is found.
-    fn entry_is_found(&self, entry: &[u8]) -> bool {
-        if self.string_keys {
-            return self.is_a_key(entry);
-        }
-        if self.number_keys && self.number_text_is_ruled_out(entry) {
-            return false;
-        }
-        std::str::from_utf8(entry).is_ok_and(|text| {
-            if self.number_keys {
-                self.text_equals_a_number(text)
-            } else {
-                self.finds(&Value::from(text))
-            }
-        })
-    }
-
     /// Whether the lookup finds `value`, as [`MaybeEqual::finds`] says.
     fn finds(&self, value: &Value) -> bool {
         match value {
             Value::Int64(value) => self.forms().integers.binary_search(value).is_ok(),
             Value::Float64(value) => self.forms().floats.binary_search(&value.to_bits()).is_ok(),
-            Value::String(text) if self.string_keys => self.is_a_key(text.as_bytes()),
-            Value::String(text) if self.number_keys => self.text_equals_a_number(text),
+            Value::String(text) => self.is_a_key(text.as_bytes()),
             _ => self.finders().iter().any(|find| find.finds(value)),
         }
+    }
+
+    /// Whether a dictionary's entry, a string by its bytes, is found.
+    fn entry_is_found(&self, entry: &[u8]) -> bool {
+        self.is_a_key(entry)
     }
 
     /// Whether a hot column is read a slice at a time: its values are read one by one, as strings
@@ -345,7 +291,7 @@ impl Targets {
                 .floats
                 .iter()
                 .any(|target| hot.might_equal(&Value::Float64(f64::from_bits(*target)))),
-            HotValues::String(_) => !self.string_keys || hot.might_hold_a_string_of(self.strings()),
+            HotValues::String(_) => hot.might_hold_a_string_of(self.strings()),
             HotValues::Other => true,
         }
     }
@@ -365,9 +311,7 @@ impl Targets {
                     target.is_nan() || (*min..=*max).contains(&target)
                 })
             }
-            ZoneMap::Strings(zone) => {
-                self.string_keys && !self.strings().iter().any(|string| zone.may_hold(string))
-            }
+            ZoneMap::Strings(zone) => !self.strings().iter().any(|string| zone.may_hold(string)),
             ZoneMap::Values(..) => false,
         }
     }
@@ -395,7 +339,7 @@ impl Targets {
                 *exact &= self.number_keys || found & to_compare == 0;
                 found
             }
-            HotValues::String(values) if self.string_keys => {
+            HotValues::String(values) => {
                 let mut found = 0;
                 let mut rows = to_compare;
                 while rows != 0 {
@@ -410,22 +354,7 @@ impl Targets {
                 }
                 found
             }
-            HotValues::String(values) if self.number_keys => {
-                let mut found = 0;
-                let mut rows = to_compare;
-                while rows != 0 {
-                    let bit = rows.trailing_zeros() as usize;
-                    rows &= rows - 1;
-                    if values
-                        .get(word * 64 + bit)
-                        .is_some_and(|value| self.text_equals_a_number(value))
-                    {
-                        found |= 1 << bit;
-                    }
-                }
-                found
-            }
-            HotValues::String(_) | HotValues::Other => {
+            HotValues::Other => {
                 let mut found = 0;
                 let mut rows = to_compare;
                 while rows != 0 {
@@ -550,15 +479,9 @@ impl Targets {
             }
             match &kept.values {
                 KeptValues::Dict(view) => {
-                    let mut found_any = false;
-                    answer.compared += view.find_codes(
-                        |word| chunk_scope(&scoped, first, word),
-                        |offset| {
-                            hit(offset);
-                            found_any = true;
-                        },
-                    );
-                    answer.exact &= self.string_keys || self.number_keys || !found_any;
+                    // An entry found is a string key, which is exactly `=`.
+                    answer.compared +=
+                        view.find_codes(|word| chunk_scope(&scoped, first, word), hit);
                 }
                 KeptValues::Decoded(values) => {
                     let from =
@@ -1485,7 +1408,7 @@ mod tests {
         }
     }
 
-    /// The pins of a string key: its bytes against a string, as `=` says against a number.
+    /// The pins of a string key: its bytes against a string, and never a number, whatever it spells.
     #[test]
     fn a_string_key_against_each_kind() {
         let targets = |key: &str| Targets::new(vec![string(key)]).unwrap();
@@ -1493,13 +1416,13 @@ mod tests {
             ("042", string("42"), false),
             ("042", string("042"), true),
             ("42", string("042"), false),
-            ("042", Value::Int64(42), true),
-            ("42", Value::Int64(42), true),
+            ("042", Value::Int64(42), false),
+            ("42", Value::Int64(42), false),
             ("4.2e1", Value::Int64(42), false),
             ("42.0", Value::Int64(42), false),
-            ("4.2e1", Value::Float64(42.0), true),
-            ("42.0", Value::Float64(42.0), true),
-            ("42", Value::Float64(42.0), true),
+            ("4.2e1", Value::Float64(42.0), false),
+            ("42.0", Value::Float64(42.0), false),
+            ("42", Value::Float64(42.0), false),
             ("abc", Value::Int64(42), false),
             ("", string(""), true),
             ("", Value::Int64(0), false),

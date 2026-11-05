@@ -404,13 +404,14 @@ fn a_key_several_nodes_hold_none_hold_and_a_null_key() {
 }
 
 /// A key the index does not read alike is found as `=` finds it: one type's key against another's.
+/// A float of the value equals the integer 7; a string equals no number (GA04).
 #[test]
 fn a_key_of_another_kind_finds_what_equals_finds() {
-    for key in ["7.0", "'7'", "'07'"] {
+    for (key, count) in [("7.0", 3), ("'7'", 0), ("'07'", 0)] {
         let db = in_memory();
         let query = format!("MATCH (a:Start)-[:R]->(m:Far) WHERE m.k = {key} RETURN a.name");
         let wanted = rows_of(&plain(&db), Language::Gql, &query, &no_params());
-        assert_eq!(wanted.len(), 3, "{key} equals 7");
+        assert_eq!(wanted.len(), count, "{key} against 7");
         assert_eq!(
             rows_of(&db.session(), Language::Gql, &query, &no_params()),
             wanted,

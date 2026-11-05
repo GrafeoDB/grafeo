@@ -14,7 +14,7 @@ use crate::graph::GraphStore;
 use crate::graph::lpg::Node;
 use arcstr::ArcStr;
 use grafeo_common::change::ChangeMark;
-use grafeo_common::types::{EdgeId, LogicalType, NodeId, PropertyKey, Value};
+use grafeo_common::types::{EdgeId, LogicalType, NodeId, PropertyKey, TemporalComparison, Value};
 use grafeo_common::utils::hash::FxHashMap;
 use smallvec::SmallVec;
 use std::sync::Arc;
@@ -122,10 +122,11 @@ struct NodeKeys {
 /// The match values of a node or a row.
 type MatchKey = SmallVec<[KeyPart; 1]>;
 
-/// A match value as a key: the kinds whose `==` compares their parts, so
-/// equal values have equal keys. A row with a value of another kind (a
-/// float, whose `-0.0` equals `0.0`, a temporal value, a list or map, a
-/// null) reads the store as before.
+/// A match value as a key: the kinds whose `=` compares their parts, so
+/// equal values have equal keys. A number that equals an integer (`1.0`, a
+/// whole decimal) is keyed as that integer, as `=` reads numbers by value. A
+/// row with a value of another kind (another float, a temporal value, a list
+/// or map, a null) reads the store as before.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum KeyPart {
     Bool(bool),
@@ -139,11 +140,24 @@ impl KeyPart {
         match value {
             Value::Bool(value) => Some(Self::Bool(*value)),
             Value::Int64(value) => Some(Self::Int64(*value)),
+            Value::Float64(_) | Value::Decimal(_) => {
+                match super::accumulator::HashableValue::from(value).representative() {
+                    Value::Int64(integer) => Some(Self::Int64(*integer)),
+                    _ => None,
+                }
+            }
             Value::String(value) => Some(Self::String(value.clone())),
             Value::Bytes(value) => Some(Self::Bytes(Arc::clone(value))),
             _ => None,
         }
     }
+}
+
+/// Whether a stored value matches a MERGE pattern's value: when `=` is True (`1` and `1.0`, and
+/// `[1]` and `[1.0]`, match; `[null]` matches nothing), with a zoned and a local datetime or time
+/// kept apart, as before.
+fn matches_by_equals(stored: &Value, expected: &Value) -> bool {
+    super::value_utils::equals(stored, expected, TemporalComparison::TypesApart) == Some(true)
 }
 
 impl NodeKeys {
@@ -460,7 +474,7 @@ impl MergeOperator {
                     // Null in a MERGE pattern matches both absent and explicitly null properties
                     prop.map_or(true, |v| v.is_null())
                 } else {
-                    prop.is_some_and(|v| v == expected_value)
+                    prop.is_some_and(|v| matches_by_equals(v, expected_value))
                 }
             }))
     }
@@ -932,7 +946,7 @@ impl MergeRelationshipOperator {
                         // Null in a MERGE pattern matches both absent and explicitly null properties
                         prop.is_none_or(Value::is_null)
                     } else {
-                        prop.is_some_and(|v| v == expected)
+                        prop.is_some_and(|v| matches_by_equals(v, expected))
                     }
                 });
 

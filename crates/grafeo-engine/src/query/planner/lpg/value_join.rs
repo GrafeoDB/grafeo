@@ -739,15 +739,7 @@ mod tests {
             let pair = |a: &Value, b: &Value| vec![number(&values, a), number(&values, b)];
             let two_to_53 = 1_i64 << 53;
             for (a, b) in [
-                (Value::from("5"), Value::Int64(5)),
-                (Value::from("+5"), Value::Float64(5.0)),
-                (Value::from("1e3"), Value::Float64(1000.0)),
                 (Value::Float64(-0.0), Value::Float64(0.0)),
-                (list(vec![Value::Null]), list(vec![Value::Null])),
-                (
-                    list(vec![Value::from("1")]),
-                    list(vec![Value::Float64(1.0)]),
-                ),
                 (map("a", Value::Float64(1.0)), map("a", Value::Int64(1))),
                 (time("14:00:00+01:00"), time("13:00:00Z")),
                 (
@@ -762,7 +754,17 @@ mod tests {
                 assert!(joined.contains(&pair(&a, &b)), "{language}: {a:?} = {b:?}");
             }
             for (a, b) in [
+                // A string equals no number, whatever it spells, and a list with a
+                // null meets nothing (GA04).
+                (Value::from("5"), Value::Int64(5)),
+                (Value::from("+5"), Value::Float64(5.0)),
+                (Value::from("1e3"), Value::Float64(1000.0)),
                 (Value::from("5.0"), Value::Int64(5)),
+                (list(vec![Value::Null]), list(vec![Value::Null])),
+                (
+                    list(vec![Value::from("1")]),
+                    list(vec![Value::Float64(1.0)]),
+                ),
                 (Value::Float64(f64::NAN), Value::Float64(f64::NAN)),
                 (Value::Float64(2.0), Value::Float64(1.999_999_999_999_999_8)),
                 (Value::Int64(two_to_53), Value::Int64(two_to_53 + 1)),
@@ -921,7 +923,8 @@ mod tests {
         let mut session = db.session();
         session.begin_transaction().unwrap();
         for change in [
-            "CREATE (:File {i: 100, k: 5.0}), (:TypeDefinition {i: 100, k: '5'})",
+            "CREATE (:File {i: 100, k: 5.0}), (:TypeDefinition {i: 100, k: 5}), \
+             (:TypeDefinition {i: 101, k: '5'})",
             "MATCH (t:TypeDefinition) WHERE t.i % 4 = 1 REMOVE t:TypeDefinition",
             "MATCH (f:File) WHERE f.i % 5 = 2 SET f.k = 1000",
             "MATCH (f:File) WHERE f.i % 6 = 3 REMOVE f:File SET f:Draft",
@@ -940,6 +943,13 @@ mod tests {
                 joined
                     .rows()
                     .contains(&vec![Value::Int64(100), Value::Int64(100)]),
+                "{language}"
+            );
+            // A string equals no number (GA04).
+            assert!(
+                !joined
+                    .rows()
+                    .contains(&vec![Value::Int64(100), Value::Int64(101)]),
                 "{language}"
             );
         }

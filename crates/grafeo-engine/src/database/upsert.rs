@@ -13,7 +13,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use grafeo_common::types::{NodeId, PropertyKey, ReadView, TemporalComparison, Value};
 use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind, Result};
-use grafeo_core::execution::operators::value_utils::values_equal;
+use grafeo_core::execution::operators::value_utils::equals;
 use grafeo_core::execution::operators::{HashKey, OperatorError};
 use grafeo_core::graph::GraphStore;
 
@@ -371,13 +371,13 @@ fn has_labels(
     Ok(true)
 }
 
-/// Whether the query's `=` finds the stored value equal to the row's key
-/// (`'05' = 5`, but not `'5.0' = 5`), with a local datetime read in UTC
-/// against a zoned one, as GQL reads it by default and as
-/// [`HashKey::for_equality`] files the keys: values it finds equal share a
-/// key there.
+/// Whether the query's `=` is True of the stored value and the row's key
+/// (`5 = 5.0`; a string never equals a number, and a key that holds a null
+/// equals nothing), with a local datetime read in UTC against a zoned one, as
+/// GQL reads it by default and as [`HashKey::for_equality`] files the keys:
+/// values it finds equal share a key there.
 fn equal(stored: &Value, value: &Value) -> bool {
-    values_equal(stored, value, TemporalComparison::default())
+    equals(stored, value, TemporalComparison::default()) == Some(true)
 }
 
 /// Creates or updates one edge per row between the nodes whose

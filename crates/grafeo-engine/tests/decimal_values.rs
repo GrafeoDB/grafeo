@@ -114,12 +114,12 @@ fn decimals_compare_with_every_number() {
             ("RETURN $a >= $b AS x", "Bool(true)"),
             ("RETURN $a IN [1, $b] AS x", "Bool(true)"),
             ("RETURN $a = null AS x", "Null"),
-            // A numeric string meets a decimal as it meets a float.
-            ("RETURN '1.5' = $a AS x", "Bool(true)"),
-            ("RETURN $c = '3' AS x", "Bool(true)"),
-            ("RETURN $c = '03.00' AS x", "Bool(true)"),
-            ("RETURN $a = '15e-1' AS x", "Bool(true)"),
-            ("RETURN '1.4' < $a AS x", "Bool(true)"),
+            // A string equals no decimal, whatever number it spells (GA04).
+            ("RETURN '1.5' = $a AS x", "Bool(false)"),
+            ("RETURN $c = '3' AS x", "Bool(false)"),
+            ("RETURN $c = '03.00' AS x", "Bool(false)"),
+            ("RETURN $a = '15e-1' AS x", "Bool(false)"),
+            ("RETURN $a <> '1.5' AS x", "Bool(true)"),
             ("RETURN $a = 'one' AS x", "Bool(false)"),
             ("RETURN 1.5e0 = 'one' AS x", "Bool(false)"),
         ] {

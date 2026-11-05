@@ -532,6 +532,15 @@ def booleans(grafeo):
     return db
 
 
+def empty_with_null_keys(grafeo):
+    """`A` and `B` nodes whose `k` is `[null]` or `[1]`, for lookups and joins on a key with a null."""
+    db = grafeo.GrafeoDB()
+    db.execute(
+        "INSERT (:A {k: [null], name: 'Alix'}), (:B {k: [null], name: 'Gus'}), (:A {k: [1], name: 'Jules'}), (:B {k: [1], name: 'Hans'})"
+    )
+    return db
+
+
 def rules_over_data(grafeo):
     """Data that breaks the rules the cases of section DT try to add: two `File` nodes with one
     `id`, and no required property on the `File`, the `City` or the `ROAD`."""
@@ -595,6 +604,7 @@ FIXTURES = {
     "label_mix": label_mix,
     "label_writes": label_writes,
     "booleans": booleans,
+    "empty_with_null_keys": empty_with_null_keys,
     "per_call": empty,
 }
 
@@ -3254,4 +3264,64 @@ for case_id, query, fixture in [
     ("EG23", "PREFIX : <urn:> SELECT ?s ?o WHERE { GRAPH <urn:o> { ?s :t :k OPTIONAL { ?s :p ?o FILTER(IF(EXISTS { ?o :r ?z }, true, false)) } } }", "rdf_exists_in_optionals"),
 ]:
     case(case_id, query, SPARQL, fixture)
+
+# EH: `=` across kinds is false in GQL and Cypher (ISO/IEC 39075 19.3, openCypher): a string equals no
+#     number, whatever it spells; numbers stay one kind, so 42 = 42.0. 0.6.1 read '042' as 42
+for case_id, query, fixture in [
+    ("EH1", "MATCH (d:Doc) WHERE d.p = 42 RETURN d.n AS n", "mixed"),
+    ("EH2", "MATCH (d:Doc) WHERE d.p = '42' RETURN d.n AS n", "mixed"),
+    ("EH3", "MATCH (d:Doc) WHERE d.p = '042' RETURN d.n AS n", "mixed"),
+    ("EH4", "MATCH (d:Doc) WHERE d.p <> 42 RETURN d.n AS n", "mixed"),
+    ("EH5", "MATCH (d:Doc {p: 42}) RETURN d.n AS n", "mixed"),
+    ("EH6", "MATCH (d:Doc {p: '42.0'}) RETURN d.n AS n", "mixed"),
+    ("EH7", "MATCH (d:Doc) WHERE d.p IN [42, 'abc'] RETURN d.n AS n", "mixed"),
+    ("EH8", "MATCH (d:Doc) WHERE d.p IN ['42', '042'] RETURN d.n AS n", "mixed"),
+    ("EH9", "MATCH (d:Doc) RETURN d.n AS n, CASE d.p WHEN 42 THEN 'number' WHEN '42' THEN 'text' ELSE 'other' END AS k", "mixed"),
+    ("EH10", "UNWIND [42, '42', 42.0, '042'] AS x RETURN DISTINCT x", "mixed"),
+    ("EH11", "UNWIND [42, '42', 42.0, '042'] AS x RETURN x, count(*) AS c", "mixed"),
+    ("EH12", "RETURN '42' = 42 AS a, '042' = 42 AS b, '42' <> 42 AS c, 42 = 42.0 AS d, [1] = ['1'] AS e, {a: 1} = {a: '1'} AS f", "mixed"),
+    ("EH13", "RETURN 'true' = true AS a, '2024-01-01' = date('2024-01-01') AS b, 0 = false AS c", "mixed"),
+    ("EH14", "MATCH (a:Doc {n: 'int'}) MATCH (b:Doc) WHERE id(b) = toString(id(a)) RETURN b.n AS n", "mixed"),
+    ("EH15", "MATCH (a:Doc), (b:Doc) WHERE a.p = b.p AND a.n < b.n RETURN a.n AS a, b.n AS b", "mixed"),
+    ("EH16", "MATCH (d:Doc) WHERE d.p = 42 RETURN d.n AS n", "mixed_indexed"),
+    ("EH17", "MATCH (d:Doc) WHERE d.p = '42' RETURN d.n AS n", "mixed_indexed"),
+    ("EH18", "MATCH (d:Doc) WHERE d.p = '042' RETURN d.n AS n", "mixed_indexed"),
+    ("EH19", "MATCH (d:Doc) WHERE d.p <> 42 RETURN d.n AS n", "mixed_indexed"),
+    ("EH20", "MATCH (d:Doc {p: 42}) RETURN d.n AS n", "mixed_indexed"),
+    ("EH21", "MATCH (d:Doc {p: '42.0'}) RETURN d.n AS n", "mixed_indexed"),
+    ("EH22", "MATCH (d:Doc) WHERE d.p IN [42, 'abc'] RETURN d.n AS n", "mixed_indexed"),
+    ("EH23", "MATCH (d:Doc) WHERE d.p IN ['42', '042'] RETURN d.n AS n", "mixed_indexed"),
+    ("EH24", "MATCH (d:Doc) RETURN d.n AS n, CASE d.p WHEN 42 THEN 'number' WHEN '42' THEN 'text' ELSE 'other' END AS k", "mixed_indexed"),
+    ("EH25", "UNWIND [42, '42', 42.0, '042'] AS x RETURN DISTINCT x", "mixed_indexed"),
+    ("EH26", "UNWIND [42, '42', 42.0, '042'] AS x RETURN x, count(*) AS c", "mixed_indexed"),
+    ("EH27", "RETURN '42' = 42 AS a, '042' = 42 AS b, '42' <> 42 AS c, 42 = 42.0 AS d, [1] = ['1'] AS e, {a: 1} = {a: '1'} AS f", "mixed_indexed"),
+    ("EH28", "RETURN 'true' = true AS a, '2024-01-01' = date('2024-01-01') AS b, 0 = false AS c", "mixed_indexed"),
+    ("EH29", "MATCH (a:Doc {n: 'int'}) MATCH (b:Doc) WHERE id(b) = toString(id(a)) RETURN b.n AS n", "mixed_indexed"),
+    ("EH30", "MATCH (a:Doc), (b:Doc) WHERE a.p = b.p AND a.n < b.n RETURN a.n AS a, b.n AS b", "mixed_indexed"),
+]:
+    case(case_id, query, BOTH, fixture)
+
+# EI: a null inside a list or a record compares Unknown when no pair is False (ISO/IEC 39075 19.3 GR 2
+#     b ii, iii); 0.6.1 gave `[null] = [null]` true and `[1] = [null]` false; a key with a null meets nothing
+for case_id, query in [
+    ("EI1", "RETURN [null] = [null] AS eq, [null] <> [null] AS ne"),
+    ("EI2", "RETURN [1] = [null] AS eq, [1] <> [null] AS ne"),
+    ("EI3", "RETURN [1, null] = [1, 2] AS eq, [1, null] <> [1, 2] AS ne"),
+    ("EI4", "RETURN [1, 2] = [null, 3] AS eq, [1, 2] <> [null, 3] AS ne"),
+    ("EI5", "RETURN [1] = [1, null] AS eq, [1] <> [1, null] AS ne"),
+    ("EI6", "RETURN [] = [] AS eq, [] <> [] AS ne"),
+    ("EI7", "RETURN {a: 1} = {a: null} AS eq, {a: 1} <> {a: null} AS ne"),
+    ("EI8", "RETURN {a: 1, b: null} = {a: 2, b: null} AS eq, {a: 1, b: null} <> {a: 2, b: null} AS ne"),
+    ("EI9", "RETURN [[null]] = [[null]] AS eq, [[null]] <> [[null]] AS ne"),
+    ("EI10", "RETURN [[1, null]] = [[2, null]] AS eq, [[1, null]] <> [[2, null]] AS ne"),
+    ("EI11", "RETURN {a: [null]} = {a: [null]} AS eq, {a: [null]} <> {a: [null]} AS ne"),
+    ("EI12", "RETURN [{a: null}] = [{a: 1}] AS eq, [{a: null}] <> [{a: 1}] AS ne"),
+    ("EI13", "MATCH (n:A) WHERE NOT (n.k = [null]) RETURN n.name AS n"),
+    ("EI14", "MATCH (n:A {k: [null]}) RETURN n.name AS n"),
+    ("EI15", "MATCH (a:A), (b:B) WHERE a.k = b.k RETURN a.name AS n"),
+    ("EI16", "RETURN [null] IN [[null]] AS r"),
+    ("EI17", "UNWIND [[null], [null]] AS x RETURN count(DISTINCT x) AS c"),
+]:
+    case(case_id, query, BOTH, "empty_with_null_keys")
+
 # fmt: on

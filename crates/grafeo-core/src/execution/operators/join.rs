@@ -189,9 +189,10 @@ impl HashKey {
     }
 
     /// The key of `value` for a join on `=` (see
-    /// [`HashJoinOperator::with_value_equality_keys`]), or `None` for NULL,
-    /// which `=` finds equal to nothing. Values that `=` finds equal have
-    /// equal keys; values it tells apart may share one.
+    /// [`HashJoinOperator::with_value_equality_keys`]), or `None` for a value
+    /// that is or holds a null at any depth, which `=` finds equal to nothing
+    /// (it is Unknown at best). Values that `=` finds equal have equal keys;
+    /// values it tells apart may share one.
     #[must_use]
     pub fn for_equality(value: &Value) -> Option<Self> {
         Self::for_equality_in(value, TemporalComparison::default())
@@ -202,15 +203,15 @@ impl HashKey {
     /// their instant with the local one at the comparison's offset, or apart.
     #[must_use]
     pub fn for_equality_in(value: &Value, comparison: TemporalComparison) -> Option<Self> {
-        (!value.is_null()).then(|| Self::equality_key(value, comparison))
+        Self::equality_key(value, comparison)
     }
 
-    /// The key of a value, by the rules of `=` (a filter's `values_equal`).
-    fn equality_key(value: &Value, comparison: TemporalComparison) -> Self {
+    /// The key of a value, by the rules of `=` (`value_utils::equals`); `None`
+    /// for one that is or holds a null.
+    fn equality_key(value: &Value, comparison: TemporalComparison) -> Option<Self> {
         let key = |value: &Value| Self::equality_key(value, comparison);
-        match value {
-            // Inside a list or map, NULL equals NULL.
-            Value::Null => HashKey::Null,
+        Some(match value {
+            Value::Null => return None,
             Value::Bool(b) => HashKey::Bool(*b),
             // An integer equals only a float of exactly its value, which is
             // this `f64`.
@@ -218,27 +219,22 @@ impl HashKey {
             Value::Float64(f) => Self::number_key(*f),
             // A decimal equals the integer and the float of its value.
             Value::Decimal(d) => Self::number_key(d.to_f64()),
-            // A string equals a float it parses as (`'5.0' = 5.0`) and an
-            // integer it parses as (`'05' = 5`, and such a string parses as
-            // the float of that integer too), and otherwise only itself.
-            Value::String(s) => match s.parse::<f64>() {
-                Ok(number) if !number.is_nan() => Self::number_key(number),
-                _ => HashKey::String(s.clone()),
-            },
-            Value::List(items) => HashKey::Composite(items.iter().map(key).collect()),
+            // A string equals only itself, never the number it spells.
+            Value::String(s) => HashKey::String(s.clone()),
+            Value::List(items) => HashKey::Composite(items.iter().map(key).collect::<Option<_>>()?),
             Value::Map(map) => HashKey::Composite(
                 map.iter()
                     .map(|(name, value)| {
-                        HashKey::Composite(vec![
+                        Some(HashKey::Composite(vec![
                             HashKey::String(ArcStr::from(name.as_str())),
-                            key(value),
-                        ])
+                            key(value)?,
+                        ]))
                     })
-                    .collect(),
+                    .collect::<Option<_>>()?,
             ),
             Value::Path { nodes, edges } => HashKey::Composite(vec![
-                HashKey::Composite(nodes.iter().map(key).collect()),
-                HashKey::Composite(edges.iter().map(key).collect()),
+                HashKey::Composite(nodes.iter().map(key).collect::<Option<_>>()?),
+                HashKey::Composite(edges.iter().map(key).collect::<Option<_>>()?),
             ]),
             Value::Timestamp(_) | Value::ZonedDatetime(_) | Value::Time(_) => {
                 Self::temporal_key(value, comparison)
@@ -261,7 +257,7 @@ impl HashKey {
                 HashableValue(other.clone()).hash(&mut hasher);
                 HashKey::Int64(hasher.finish().cast_signed())
             }
-        }
+        })
     }
 
     /// The key of a datetime or a time by the rules of `=` under
@@ -2395,30 +2391,18 @@ mod tests {
         }
 
         /// The pairs that make the keys above more than exact: `=` finds
-        /// them equal, so the invariant covers them.
+        /// them equal, so the invariant covers them; and the pairs `=` keeps
+        /// apart.
         #[test]
         fn equality_holds_across_kinds_and_forms() {
             let two_to_53 = 1_i64 << 53;
             let pairs = [
-                (Value::from("5"), Value::Int64(5)),
-                (Value::from("05"), Value::Int64(5)),
-                (Value::from("+5"), Value::Int64(5)),
-                (Value::from("5"), Value::Float64(5.0)),
-                (Value::from("5.0"), Value::Float64(5.0)),
-                (Value::from("1e3"), Value::Float64(1000.0)),
-                (Value::from("-0"), Value::Float64(0.0)),
                 (Value::from("NaN"), Value::from("NaN")),
                 (Value::Int64(5), Value::Float64(5.0)),
                 (Value::Int64(0), Value::Float64(-0.0)),
                 (Value::Float64(0.0), Value::Float64(-0.0)),
                 (Value::Float64(f64::INFINITY), Value::Float64(f64::INFINITY)),
                 (Value::Int64(two_to_53), Value::Float64(two_to_53 as f64)),
-                (list(vec![Value::Null]), list(vec![Value::Null])),
-                (
-                    list(vec![Value::Int64(1), Value::Null]),
-                    list(vec![Value::Float64(1.0), Value::Null]),
-                ),
-                (list(vec![Value::from("1")]), list(vec![Value::Int64(1)])),
                 (map("a", Value::Int64(1)), map("a", Value::Float64(1.0))),
                 (time("14:00:00+01:00"), time("13:00:00Z")),
                 // A local time reads at UTC without a session time zone
@@ -2437,6 +2421,21 @@ mod tests {
             }
             // And these are not: a key may still be shared (see the keys).
             for (a, b) in [
+                // A string equals no number, whatever it spells, and a list
+                // with a null is Unknown against any list (GA04).
+                (Value::from("5"), Value::Int64(5)),
+                (Value::from("05"), Value::Int64(5)),
+                (Value::from("+5"), Value::Int64(5)),
+                (Value::from("5"), Value::Float64(5.0)),
+                (Value::from("5.0"), Value::Float64(5.0)),
+                (Value::from("1e3"), Value::Float64(1000.0)),
+                (Value::from("-0"), Value::Float64(0.0)),
+                (list(vec![Value::Null]), list(vec![Value::Null])),
+                (
+                    list(vec![Value::Int64(1), Value::Null]),
+                    list(vec![Value::Float64(1.0), Value::Null]),
+                ),
+                (list(vec![Value::from("1")]), list(vec![Value::Int64(1)])),
                 (Value::from("5.0"), Value::Int64(5)),
                 (Value::Int64(two_to_53), Value::Int64(two_to_53 + 1)),
                 (
@@ -2458,12 +2457,22 @@ mod tests {
             }
         }
 
-        /// NULL equals nothing, so it has no key; a NULL inside a list is a
-        /// value like any other.
+        /// NULL equals nothing, so it has no key, and neither has a value
+        /// with a null at any depth: `[null] = [null]` is Unknown (ISO/IEC
+        /// 39075 19.3 General Rule 2 b ii and iii), so a join meets nothing.
         #[test]
         fn null_has_no_key() {
             assert_eq!(HashKey::for_equality(&Value::Null), None);
-            assert!(HashKey::for_equality(&list(vec![Value::Null])).is_some());
+            assert_eq!(HashKey::for_equality(&list(vec![Value::Null])), None);
+            assert_eq!(
+                HashKey::for_equality(&list(vec![Value::Int64(1), Value::Null])),
+                None
+            );
+            assert_eq!(
+                HashKey::for_equality(&list(vec![list(vec![Value::Null])])),
+                None
+            );
+            assert!(HashKey::for_equality(&list(vec![Value::Int64(1)])).is_some());
         }
 
         /// Values `=` tells apart get different keys here, so the join does
@@ -2535,9 +2544,9 @@ mod tests {
             pairs
         }
 
-        /// 5 meets 5.0 and '5', and '5.0', which `=` rejects (the filter
-        /// above the join does): the keys pick the candidates, each probe row
-        /// with its build rows in build order. NULL meets nothing.
+        /// 5 meets 5.0 and no string, '5' and '5.0' included (GA04): the keys
+        /// pick the candidates, each probe row with its build rows in build
+        /// order. NULL meets nothing.
         #[test]
         fn a_join_on_value_equality_keys_pairs_candidates_in_order() {
             let probe = [Value::Int64(5), Value::Null, Value::Int64(7)];
@@ -2553,8 +2562,6 @@ mod tests {
                 joined(&probe, &build),
                 [
                     (Value::Int64(5), Value::Float64(5.0)),
-                    (Value::Int64(5), Value::from("5")),
-                    (Value::Int64(5), Value::from("5.0")),
                     (Value::Int64(7), Value::Int64(7)),
                 ]
             );

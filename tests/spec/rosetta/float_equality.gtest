@@ -86,13 +86,14 @@ tests:
       rows:
         - [false, true, true]
 
-  - name: a_numeric_string_compares_exactly
+  # A string equals no number, whatever it spells (GA04).
+  - name: a_numeric_string_equals_no_float
     variants:
       gql: "RETURN '9007199254740993' = 9007199254740992.0e0 AS above, '0.3' = 0.3e0 AS text, '0.3' = 0.1e0 + 0.2e0 AS sum"
       cypher: "RETURN '9007199254740993' = 9007199254740992.0 AS above, '0.3' = 0.3 AS text, '0.3' = 0.1 + 0.2 AS sum"
     expect:
       rows:
-        - [false, true, false]
+        - [false, false, false]
 
   # ---------------------------------------------------------------------------
   # Stored values: a filter, a property index and a join agree

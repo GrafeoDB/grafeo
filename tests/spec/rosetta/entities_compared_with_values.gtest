@@ -1,10 +1,10 @@
 # A node or an edge compared with a value of another kind (#180)
 #
 # A node or an edge is equal only to an entity of its own kind. Compared with
-# a number, a string or an entity of the other kind, Cypher keeps them apart,
-# as openCypher defines it (= is false, <> true, <, <=, >, >= null), and GQL
-# fails the comparison as not comparable (22G04), as ISO GQL makes a node and
-# a number. Both evaluate a node to its id inside an expression, so
+# a number, a string or an entity of the other kind, both languages keep them
+# apart: `=` is false and `<>` true; `<`, `<=`, `>`, `>=` are null in Cypher, as
+# openCypher defines it, and order the two by kind in GQL, an entity before a
+# number (GA04, 2026-11-05). No comparison of two kinds is an error. Both evaluate a node to its id inside an expression, so
 # `startNode(r) = id(s)` was true, and so was node 0 = edge 0. A comparison of
 # two entities of one kind, and of their ids, is unchanged.
 
@@ -114,53 +114,49 @@ tests:
       empty: true
 
   # ---------------------------------------------------------------------------
-  # GQL: not comparable
+  # GQL: two kinds, never an error
   # ---------------------------------------------------------------------------
 
-  - name: gql_cannot_compare_a_node_with_its_id
+  - name: gql_a_node_is_not_its_id
     setup:
       - "INSERT (:P {name: 'Alix'})-[:KNOWS]->(:P {name: 'Gus'})"
     variants:
       gql: "MATCH (s)-[r:KNOWS]->(t) RETURN startNode(r) = id(s) AS a"
     expect:
-      gql_status: "22G04"
+      rows:
+        - [false]
 
-  - name: gql_cannot_order_a_node_and_a_number
-    setup:
-      - "INSERT (:P {name: 'Alix'})"
-    variants:
-      gql: "MATCH (n:P) RETURN n < 5 AS a"
-    expect:
-      gql_status: "22G04"
-
-  - name: gql_cannot_compare_a_node_with_a_string
+  - name: gql_a_node_is_not_a_string
     setup:
       - "INSERT (:P {name: 'Alix'})"
     variants:
       gql: "MATCH (n:P) RETURN n = 'Alix' AS a"
     expect:
-      gql_status: "22G04"
+      rows:
+        - [false]
 
-  - name: gql_cannot_compare_a_node_with_an_edge
+  - name: gql_a_node_is_not_an_edge
     setup:
       - "INSERT (:P {name: 'Alix'})-[:KNOWS]->(:P {name: 'Gus'})"
     variants:
       gql: "MATCH (s)-[r:KNOWS]->(t) RETURN s = r AS a"
     expect:
-      gql_status: "22G04"
+      rows:
+        - [false]
 
-  - name: gql_cannot_look_for_a_node_in_a_list_of_ids
+  - name: gql_a_node_is_not_in_a_list_of_ids
     setup:
       - "INSERT (:P {name: 'Alix'})-[:KNOWS]->(:P {name: 'Gus'})"
     variants:
       gql: "MATCH (s)-[r:KNOWS]->(t) RETURN s IN [id(s), id(t)] AS a"
     expect:
-      gql_status: "22G04"
+      rows:
+        - [false]
 
-  - name: gql_cannot_filter_a_node_by_an_integer
+  - name: gql_a_node_filtered_by_an_integer_finds_none
     setup:
       - "INSERT (:P {name: 'Alix'})"
     variants:
       gql: "MATCH (n:P) WHERE n = 0 RETURN n.name AS name"
     expect:
-      gql_status: "22G04"
+      empty: true

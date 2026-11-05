@@ -1,0 +1,113 @@
+# #743: a NODE KEY is the values of its properties taken together. No two nodes of the label hold the
+# same values, and every node of the label holds a value for each property: UNIQUE over the tuple plus
+# NOT NULL on each property, on insert, update and a label added. node_key_claims.rs also covers existing
+# data, transactions, the index it builds, a reopen and the comparison with UNIQUE and NOT NULL.
+
+meta:
+  language: gql
+  model: lpg
+  title: NODE KEY constraints
+  dataset: empty
+
+tests:
+
+  - name: the_same_tuple_is_refused
+    setup:
+      - "CREATE CONSTRAINT person_key FOR (p:Person) ON (p.first, p.last) NODE KEY"
+      - "INSERT (:Person {first: 'Alix', last: 'Gus'})"
+    query: "INSERT (:Person {first: 'Alix', last: 'Gus'})"
+    expect:
+      error: ""
+
+  - name: one_property_alone_may_repeat
+    setup:
+      - "CREATE CONSTRAINT person_key FOR (p:Person) ON (p.first, p.last) NODE KEY"
+      - "INSERT (:Person {first: 'Alix', last: 'Gus'})"
+      - "INSERT (:Person {first: 'Alix', last: 'Mia'})"
+      - "INSERT (:Person {first: 'Vincent', last: 'Gus'})"
+    query: "MATCH (p:Person) RETURN count(p) AS c"
+    expect:
+      rows:
+        - [3]
+
+  - name: a_missing_key_property_is_refused
+    setup:
+      - "CREATE CONSTRAINT person_key FOR (p:Person) ON (p.first, p.last) NODE KEY"
+    query: "INSERT (:Person {first: 'Mia'})"
+    expect:
+      error: ""
+
+  - name: a_null_key_property_is_refused
+    setup:
+      - "CREATE CONSTRAINT person_key FOR (p:Person) ON (p.first, p.last) NODE KEY"
+    query: "INSERT (:Person {first: 'Mia', last: null})"
+    expect:
+      error: ""
+
+  - name: removing_a_key_property_is_refused
+    setup:
+      - "CREATE CONSTRAINT person_key FOR (p:Person) ON (p.first, p.last) NODE KEY"
+      - "INSERT (:Person {first: 'Alix', last: 'Gus'})"
+    query: "MATCH (p:Person {first: 'Alix'}) REMOVE p.last"
+    expect:
+      error: ""
+
+  - name: an_update_to_a_taken_key_is_refused
+    setup:
+      - "CREATE CONSTRAINT person_key FOR (p:Person) ON (p.first, p.last) NODE KEY"
+      - "INSERT (:Person {first: 'Alix', last: 'Gus'}), (:Person {first: 'Vincent', last: 'Gus'})"
+    query: "MATCH (p:Person {first: 'Vincent'}) SET p.first = 'Alix'"
+    expect:
+      error: ""
+
+  - name: an_update_to_a_free_key_is_taken
+    setup:
+      - "CREATE CONSTRAINT person_key FOR (p:Person) ON (p.first, p.last) NODE KEY"
+      - "INSERT (:Person {first: 'Alix', last: 'Gus'}), (:Person {first: 'Vincent', last: 'Gus'})"
+      - "MATCH (p:Person {first: 'Vincent'}) SET p.last = 'Mia'"
+    query: "MATCH (p:Person {first: 'Vincent'}) RETURN p.last AS l"
+    expect:
+      rows:
+        - ["Mia"]
+
+  - name: a_label_added_with_a_taken_key_is_refused
+    setup:
+      - "CREATE CONSTRAINT person_key FOR (p:Person) ON (p.first, p.last) NODE KEY"
+      - "INSERT (:Person {first: 'Alix', last: 'Gus'}), (:Guest {first: 'Alix', last: 'Gus'})"
+    query: "MATCH (g:Guest) SET g:Person"
+    expect:
+      error: ""
+
+  - name: a_label_added_without_a_key_property_is_refused
+    setup:
+      - "CREATE CONSTRAINT person_key FOR (p:Person) ON (p.first, p.last) NODE KEY"
+      - "INSERT (:Guest {first: 'Mia'})"
+    query: "MATCH (g:Guest) SET g:Person"
+    expect:
+      error: ""
+
+  - name: existing_duplicates_refuse_the_constraint
+    setup:
+      - "INSERT (:Person {first: 'Alix', last: 'Gus'}), (:Person {first: 'Alix', last: 'Gus'})"
+    query: "CREATE CONSTRAINT person_key FOR (p:Person) ON (p.first, p.last) NODE KEY"
+    expect:
+      error: ""
+
+  - name: another_label_is_not_held
+    setup:
+      - "CREATE CONSTRAINT person_key FOR (p:Person) ON (p.first, p.last) NODE KEY"
+      - "INSERT (:Person {first: 'Alix', last: 'Gus'}), (:Other {first: 'Alix', last: 'Gus'}), (:Other {first: 'Mia'})"
+    query: "MATCH (o:Other) RETURN count(o) AS c"
+    expect:
+      rows:
+        - [2]
+
+  - name: cypher_writes_the_same_key
+    language: cypher
+    requires: [cypher]
+    statements:
+      - "CREATE CONSTRAINT person_key FOR (p:Person) REQUIRE (p.first, p.last) IS NODE KEY"
+      - "CREATE (:Person {first: 'Alix', last: 'Gus'})"
+      - "CREATE (:Person {first: 'Alix', last: 'Gus'})"
+    expect:
+      error: ""

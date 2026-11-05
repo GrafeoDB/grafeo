@@ -171,9 +171,9 @@ fn a_join_on_a_property_is_a_hash_join_with_the_rows_of_the_scan_per_row() {
     }
 }
 
-/// `=` compares an integer with a float, and with a string that reads as
-/// it: 7 meets '7', 5 meets 5.0. The rows are in the order of the scan per
-/// row.
+/// `=` compares an integer with a float, 5 meets 5.0, and a string with no
+/// number, 7 does not meet '7' (GA04). The rows are in the order of the scan
+/// per row.
 #[test]
 fn numbers_meet_across_kinds() {
     let db = files();
@@ -184,7 +184,6 @@ fn numbers_meet_across_kinds() {
         &["a.rs", "Alix"],
         &["a.rs", "Gus"],
         &["a.rs", "Mia"],
-        &["b.rs", "Vincent"],
         &["c.rs", "Alix"],
         &["c.rs", "Gus"],
         &["c.rs", "Mia"],
@@ -213,7 +212,8 @@ fn keys_and_the_conjuncts_beside_them() {
             "MATCH (f:File) MATCH (t:TypeDefinition) \
              WHERE t.filePath = f.path AND t.line = f.lines RETURN f.path, t.name",
             Some("t.filePath = f.path, t.line = f.lines"),
-            table(&[&["a.rs", "Gus"], &["b.rs", "Vincent"]]),
+            // Vincent's line '7' is a string: it does not meet b.rs's 7 (GA04).
+            table(&[&["a.rs", "Gus"]]),
         ),
         (
             "MATCH (f:File) MATCH (t:TypeDefinition) \

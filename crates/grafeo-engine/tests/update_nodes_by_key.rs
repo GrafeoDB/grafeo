@@ -219,25 +219,25 @@ fn updates_and_matches(stored: &Value, key: &Value, index: bool) -> (bool, bool)
     (updated == 1, matches == 1)
 }
 
-/// A key compares with the stored key as `=` does: a string of digits
-/// equals that integer ("5", "05" and "+5" equal 5), other number text
-/// ("5.0", "5e0") does not; an integer equals a float of its value; and the
-/// other way round, a stored string "5" equals the integer and the float 5.
+/// A key compares with the stored key as `=` does: a string equals no
+/// number, whatever it spells ("5", "05", "+5", "5.0" and "5e0" against 5,
+/// and a stored "5" against the integer and the float 5, GA04); an integer
+/// equals a float of its value; two strings are equal only when identical.
 /// `update_nodes` updates exactly the nodes `MATCH (n {id: $k})` matches,
 /// with an index on the key and without.
 #[test]
 fn a_key_matches_as_equals_in_a_query_does() {
     let cases = [
-        (Value::Int64(5), Value::from("5"), true),
-        (Value::Int64(5), Value::from("05"), true),
-        (Value::Int64(5), Value::from("+5"), true),
+        (Value::Int64(5), Value::from("5"), false),
+        (Value::Int64(5), Value::from("05"), false),
+        (Value::Int64(5), Value::from("+5"), false),
         (Value::Int64(5), Value::from("5.0"), false),
         (Value::Int64(5), Value::from("5e0"), false),
         (Value::Int64(5), Value::Float64(5.0), true),
         (Value::Int64(5), Value::Int64(5), true),
         (Value::Int64(5), Value::from("6"), false),
-        (Value::from("5"), Value::Int64(5), true),
-        (Value::from("5"), Value::Float64(5.0), true),
+        (Value::from("5"), Value::Int64(5), false),
+        (Value::from("5"), Value::Float64(5.0), false),
         (Value::from("5"), Value::from("5"), true),
         (Value::from("5"), Value::from("05"), false),
         (Value::from("5"), Value::Int64(6), false),

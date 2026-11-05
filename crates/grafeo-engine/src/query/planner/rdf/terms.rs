@@ -238,7 +238,7 @@ fn native_kind(native: &Value) -> Option<Operand<'static>> {
 /// `None` when a NaN takes part.
 fn compare_numbers(a: &Value, b: &Value) -> Option<Ordering> {
     match (a, b) {
-        (Value::Decimal(_), _) | (_, Value::Decimal(_)) => value_utils::compare_with_decimal(a, b),
+        (Value::Decimal(_), _) | (_, Value::Decimal(_)) => a.compare_decimal(b),
         (Value::Int64(x), Value::Int64(y)) => Some(x.cmp(y)),
         (Value::Float64(x), Value::Float64(y)) => x.partial_cmp(y),
         (Value::Int64(x), Value::Float64(y)) => value_utils::partial_cmp_int_float(*x, *y),

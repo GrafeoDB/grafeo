@@ -312,7 +312,20 @@ impl PointView {
         })
     }
 
+    /// How many rows compared in place, or decoded for a body with no such compare, cost what one
+    /// read of [`get`](Self::get) does, as measured: a read of fewer rows than the chunk's over
+    /// this goes through `get`. The other bodies have no measure of their own.
+    pub(crate) fn rows_per_point_read(&self) -> usize {
+        match (&self.body, &self.presence) {
+            (Body::Packed(_) | Body::Int64(_), None) => 6,
+            (Body::Packed(_) | Body::Int64(_), Some(_)) => 10,
+            (Body::Float64(_), _) => 20,
+            _ => 16,
+        }
+    }
+
     /// Reads a row offset; absent rows and offsets outside the chunk return `None`.
+    #[inline]
     pub(crate) fn get(&self, row: u32) -> Option<Value> {
         let index = self.index_of(row)?;
         let word = |bytes: &Bytes| bytes.as_chunks::<8>().0.get(index).copied();
@@ -443,17 +456,21 @@ impl DictView {
         let bad = |error: &'static str| corrupt(at, error);
         let count = read_u32(data, &mut pos).map_err(bad)?;
         let mut found = Vec::new();
+        // A walk over every entry to reach the codes, so a test per entry is what it costs.
+        let mut rest = data.get(pos..).unwrap_or_default();
         for code in 0..count {
-            let length = read_u32(data, &mut pos).map_err(bad)? as usize;
-            let entry = data
-                .get(pos..)
-                .and_then(|rest| rest.get(..length))
+            let (length, after) = rest
+                .split_first_chunk::<4>()
                 .ok_or_else(|| bad("truncated dictionary entry"))?;
-            pos += length;
+            let (entry, after) = after
+                .split_at_checked(u32::from_le_bytes(*length) as usize)
+                .ok_or_else(|| bad("truncated dictionary entry"))?;
+            rest = after;
             if finds(entry) {
                 found.push(code);
             }
         }
+        pos = data.len() - rest.len();
         let codes_count = read_u32(data, &mut pos).map_err(bad)? as usize;
         if codes_count != header.value_count as usize {
             return Err(bad("dictionary codes disagree with value count"));

@@ -84,7 +84,7 @@ const OTHER_NEEDLES: &[&str] = &[
     "'2026-11-04'",
 ];
 
-/// Around the guess of 16, and well over it: the constant is the Engineer's to measure, and these
+/// Around the guess of 16, and well over it: the constant may be measured again, and these
 /// hold whatever it becomes up to the largest.
 const LENGTHS: [usize; 9] = [2, 8, 15, 16, 17, 32, 64, 257, 1_100];
 

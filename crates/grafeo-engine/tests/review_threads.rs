@@ -123,7 +123,7 @@ fn fill(db: &GrafeoDB) {
     }
 }
 
-/// One claim for all queued RDF graph operations (the Architect's ruling): a second transaction's
+/// One claim for all queued RDF graph operations: a second transaction's
 /// operation fails at its statement, with `GRAFEO-T001`, whichever graphs the two name.
 #[test]
 fn two_transactions_with_graph_operations_conflict_at_the_second_statement() {
@@ -700,7 +700,7 @@ fn a_comparison_of_booleans_answers_alike_in_every_plan() {
 }
 
 // ---------------------------------------------------------------------------
-// The Architect's ruling: a queued graph operation that would not apply
+// A queued graph operation that would not apply
 // ---------------------------------------------------------------------------
 
 const X: &str = "http://example.org/x";

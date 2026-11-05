@@ -2313,7 +2313,7 @@ fn the_current_graph_type_cannot_add_endpoints_to_a_standalone_edge_type() {
     assert_eq!(row_of_type(&session, "SHOW EDGE TYPES", "E"), before);
 }
 
-/// The Engineer's reading of "nothing else uses it": edges of a standalone type in an unbound graph
+/// One reading of "nothing else uses it": edges of a standalone type in an unbound graph
 /// do not stop a pattern from adding endpoints, and that graph's rules do not change through it:
 /// listing moved the rule off it, and the endpoints reach only the graph type's graphs.
 #[test]
@@ -2499,7 +2499,7 @@ fn a_third_pattern_that_would_allow_what_none_states_is_refused() {
     assert_two_patterns_refused(&session, &error);
 }
 
-/// `{km INT64}` against no properties is a difference as written. Pending the Architect's reading:
+/// `{km INT64}` against no properties is a difference as written. Pending a decision on its reading:
 /// if a bare pattern only names the type, this one becomes the merge.
 #[test]
 fn a_pattern_with_properties_and_one_without_are_refused() {

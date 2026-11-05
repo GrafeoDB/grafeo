@@ -2037,3 +2037,378 @@ fn a_read_cut_short_in_a_dictionary_chunk_starts_again() {
     }
     db.close().unwrap();
 }
+
+/// A row of each kind of scope, with `k: 5` until a writer moves it, among rows of `k` from 1,000 up,
+/// in two groups: `moved` is read through its chain.
+fn chained_scopes(db: &GrafeoDB) {
+    let row = |row: i64| ("row", Value::Int64(row));
+    for at in 0..GROUP + 200 {
+        let key = if matches!(at, 7 | 9) || at == GROUP + 7 || at == GROUP + 9 {
+            5
+        } else {
+            1_000 + at % 1_000
+        };
+        let labels: &[&str] = match at {
+            9 => &[],
+            _ if at == GROUP + 9 => &["M"],
+            _ => &["L"],
+        };
+        db.create_node_with_props(labels, [row(at), ("k", Value::Int64(key))])
+            .unwrap();
+    }
+}
+
+const CHAINED_FORMS: &[&str] = &[
+    "MATCH (n:L {k: @}) RETURN n.row ORDER BY n.row",
+    "MATCH (n {k: @}) RETURN n.row ORDER BY n.row",
+    "MATCH (n:L|M {k: @}) RETURN n.row ORDER BY n.row",
+    "MATCH (n:M|Nobody {k: @}) RETURN n.row ORDER BY n.row",
+    "MATCH (n) WHERE (n:L OR n:M) AND n.k = @ RETURN n.row ORDER BY n.row",
+    "MATCH (n:L) WHERE n.k IN [@, 6] RETURN n.row ORDER BY n.row",
+];
+
+/// A key that only a chain holds now: an old reader finds the rows, with and without labels, and a
+/// new one does not, against the plain plan at both views. A key past every value finds nothing at
+/// either, though the chained rows are read for it.
+#[test]
+fn a_key_only_a_chain_holds_is_read_at_the_view() {
+    let check = |db: &GrafeoDB, stage: &str| {
+        let plain = |view: &mut Session| {
+            view.begin_transaction().unwrap();
+        };
+        let mut reader = db.session();
+        let mut plain_reader = session_with(db, PlannerRules::plain());
+        plain(&mut reader);
+        plain(&mut plain_reader);
+        for moved in [7, 9, GROUP + 7, GROUP + 9] {
+            db.session()
+                .execute(&format!("MATCH (n {{row: {moved}}}) SET n.k = 1500"))
+                .unwrap();
+        }
+        let plain_new = session_with(db, PlannerRules::plain());
+        for form in CHAINED_FORMS {
+            for key in ["5", "5.0e0", "'5'", "'05'"] {
+                let query = form.replace('@', key);
+                let old = reader.execute(&query).unwrap();
+                assert_eq!(
+                    old.rows(),
+                    plain_reader.execute(&query).unwrap().rows(),
+                    "{stage}: the old reader, {query}"
+                );
+                assert!(
+                    old.row_count() > 0,
+                    "{stage}: the old reader finds it: {query}"
+                );
+                let new = db.session().execute(&query).unwrap();
+                assert_eq!(
+                    new.row_count(),
+                    0,
+                    "{stage}: only a chain holds it: {query}"
+                );
+                assert_eq!(plain_new.execute(&query).unwrap().row_count(), 0, "{stage}");
+            }
+            for key in ["0", "5000000", "'nobody'"] {
+                let query = form.replace('@', key);
+                assert_eq!(
+                    reader.execute(&query).unwrap().row_count(),
+                    0,
+                    "{stage}: {query}"
+                );
+                assert_eq!(
+                    db.session().execute(&query).unwrap().row_count(),
+                    0,
+                    "{stage}: {query}"
+                );
+            }
+        }
+        reader.rollback().unwrap();
+        plain_reader.rollback().unwrap();
+    };
+    let db = GrafeoDB::new_in_memory();
+    chained_scopes(&db);
+    check(&db, "hot");
+    let (_dir, db) = reopened(chained_scopes);
+    check(&db, "reopened");
+    db.close().unwrap();
+}
+
+/// One label's rows, and a row far past them that loses a label while a reader lives: under a union
+/// and under a required label, where the group's other rows no longer reach that word, and in a
+/// group where no row has the label any more.
+fn label_chains(db: &GrafeoDB) {
+    let node = |labels: &[&str], row: i64, key: i64| {
+        db.create_node_with_props(
+            labels,
+            [("row", Value::Int64(row)), ("k", Value::Int64(key))],
+        )
+        .unwrap();
+    };
+    for at in 0..GROUP + 8 {
+        match at {
+            3 => node(&["A"], at, 5),
+            4 => node(&["B"], at, 5),
+            5 => node(&["A", "B"], at, 5),
+            // Far past the other rows of `A`, in a word of its own.
+            40_000 => node(&["A", "Other"], at, 5),
+            // The only row of `A` and `B` in the second group.
+            _ if at == GROUP + 2 => node(&["A"], at, 5),
+            _ if at == GROUP + 3 => node(&["B"], at, 6),
+            _ => node(&["Other"], at, 6),
+        }
+    }
+}
+
+/// A row whose newest labels lost a label its chain keeps is read for a reader of that view, and not
+/// after, in every form of scope, hot and with the key's column cold.
+#[test]
+fn a_row_that_lost_a_label_its_chain_keeps_is_read_under_a_union() {
+    let forms: &[&str] = &[
+        "MATCH (n:A {k: 5}) RETURN n.row ORDER BY n.row",
+        "MATCH (n:A|Nobody {k: 5}) RETURN n.row ORDER BY n.row",
+        "MATCH (n:A|B {k: 5}) RETURN n.row ORDER BY n.row",
+        "MATCH (n:B|A {k: 5}) RETURN n.row ORDER BY n.row",
+        "MATCH (n) WHERE (n:A OR n:B) AND n.k = 5 RETURN n.row ORDER BY n.row",
+        "MATCH (n:A) WHERE n.k IN [5, 7] RETURN n.row ORDER BY n.row",
+        "MATCH (n:A|B) WHERE n.k IN [5, 7] RETURN n.row ORDER BY n.row",
+    ];
+    let rows = |session: &Session, query: &str| -> Vec<i64> {
+        session
+            .execute(query)
+            .unwrap()
+            .rows()
+            .iter()
+            .map(|row| match row[0] {
+                Value::Int64(at) => at,
+                ref other => panic!("{other:?}"),
+            })
+            .collect()
+    };
+    let check = |db: &GrafeoDB, stage: &str| {
+        let mut reader = db.session();
+        let mut plain_reader = session_with(db, PlannerRules::plain());
+        reader.begin_transaction().unwrap();
+        plain_reader.begin_transaction().unwrap();
+        let before: Vec<Vec<i64>> = forms.iter().map(|query| rows(&reader, query)).collect();
+        assert_eq!(before[0], [3, 5, 40_000, GROUP + 2], "{stage}");
+        assert_eq!(before[2], [3, 4, 5, 40_000, GROUP + 2], "{stage}");
+        for query in [
+            "MATCH (n {row: 3}) REMOVE n:A",
+            "MATCH (n {row: 40000}) REMOVE n:A",
+        ] {
+            db.session().execute(query).unwrap();
+        }
+        db.session()
+            .execute(&format!("MATCH (n {{row: {}}}) REMOVE n:A", GROUP + 2))
+            .unwrap();
+        db.session()
+            .execute(&format!(
+                "MATCH (n {{row: {}}}) SET n:A, n.k = 5",
+                GROUP + 5
+            ))
+            .unwrap();
+        let plain_new = session_with(db, PlannerRules::plain());
+        for (query, before) in forms.iter().zip(&before) {
+            assert_eq!(
+                &rows(&reader, query),
+                before,
+                "{stage}: the old reader, {query}"
+            );
+            assert_eq!(
+                &rows(&plain_reader, query),
+                before,
+                "{stage}: the plain plan, {query}"
+            );
+            let new = rows(&db.session(), query);
+            assert_eq!(
+                new,
+                rows(&plain_new, query),
+                "{stage}: the new reader, {query}"
+            );
+            assert!(
+                !new.contains(&40_000) && new.contains(&(GROUP + 5)),
+                "{stage}: {query}: {new:?}"
+            );
+        }
+        reader.rollback().unwrap();
+        plain_reader.rollback().unwrap();
+    };
+    let db = GrafeoDB::new_in_memory();
+    label_chains(&db);
+    check(&db, "hot");
+    let (_dir, db) = reopened(label_chains);
+    check(&db, "reopened");
+    db.close().unwrap();
+}
+
+/// A list of `len` distinct keys held by the first rows, as GQL.
+fn list_of(len: usize) -> String {
+    let keys: Vec<String> = (0..len).map(|key| key.to_string()).collect();
+    format!("[{}]", keys.join(", "))
+}
+
+/// Whether the plan reads the key's column, by `EXPLAIN` and by `PROFILE`, which must agree.
+fn reads_the_column(session: &Session, query: &str) -> bool {
+    let explained = plan(session, &format!("EXPLAIN {query}"));
+    let profiled = session.execute(&format!("PROFILE {query}")).unwrap();
+    let profiled = format!("{:?}", profiled.rows());
+    let by_explain = explained.contains("key column");
+    let by_profile = profiled.contains("KeyColumnScan");
+    assert_eq!(
+        by_explain, by_profile,
+        "{query}\nEXPLAIN {explained}\nPROFILE {profiled}"
+    );
+    by_explain
+}
+
+/// Below a table's size a list reads the column, and from its size up it keeps the plain filter, as
+/// the rarest required label, a union's sum and all nodes count it. `EXPLAIN` and `PROFILE` say the
+/// same on each side, and each answer is the plain plan's.
+#[test]
+fn explain_and_profile_agree_around_a_long_list() {
+    let db = GrafeoDB::new_in_memory();
+    let node = |labels: &[&str], key: i64| {
+        db.create_node_with_props(labels, [("k", Value::Int64(key))])
+            .unwrap();
+    };
+    // Few: 5 rows. Pair: 3 more. Both: 2 of Few with Many too. Many: 50 in all. 60 nodes.
+    for key in 0..3 {
+        node(&["Few"], key);
+    }
+    for key in 3..5 {
+        node(&["Few", "Many"], key);
+    }
+    for key in 5..8 {
+        node(&["Pair"], key);
+    }
+    for key in 8..56 {
+        node(&["Many"], key);
+    }
+    for key in 56..60 {
+        node(&["Other"], key);
+    }
+    let session = db.session();
+    let plain = session_with(&db, PlannerRules::plain());
+    // Pattern, size of what a read looks at.
+    let scopes: &[(&str, usize)] = &[
+        ("MATCH (n:Few) WHERE n.k IN @ RETURN n.k ORDER BY n.k", 5),
+        ("MATCH (n:Pair) WHERE n.k IN @ RETURN n.k ORDER BY n.k", 3),
+        (
+            "MATCH (n:Few&Many) WHERE n.k IN @ RETURN n.k ORDER BY n.k",
+            5,
+        ),
+        (
+            "MATCH (n:Many&Few) WHERE n.k IN @ RETURN n.k ORDER BY n.k",
+            5,
+        ),
+        (
+            "MATCH (n:Few|Pair) WHERE n.k IN @ RETURN n.k ORDER BY n.k",
+            8,
+        ),
+        ("MATCH (n) WHERE n.k IN @ RETURN n.k ORDER BY n.k", 60),
+    ];
+    for (form, size) in scopes {
+        for len in [1, size / 2, size - 1, *size, size + 1, size * 3] {
+            if len == 0 {
+                continue;
+            }
+            let query = form.replace('@', &list_of(len));
+            assert_eq!(
+                reads_the_column(&session, &query),
+                len < *size,
+                "{query}: a list of {len} over {size}"
+            );
+            assert_eq!(
+                session.execute(&query).unwrap().rows(),
+                plain.execute(&query).unwrap().rows(),
+                "{query}"
+            );
+        }
+    }
+
+    // A list's length is what is written: a repeated key counts.
+    let repeated = "MATCH (n:Pair) WHERE n.k IN [5, 5, 5] RETURN n.k";
+    assert!(!reads_the_column(&session, repeated));
+    assert_eq!(session.execute(repeated).unwrap().row_count(), 1);
+
+    // A label no node has: nothing to read, either way.
+    let nobody = "MATCH (n:Nobody) WHERE n.k IN [1] RETURN n.k";
+    reads_the_column(&session, nobody);
+    assert_eq!(session.execute(nobody).unwrap().row_count(), 0);
+
+    // An equality is no list, and an index goes first whatever the list's length.
+    assert!(reads_the_column(
+        &session,
+        "MATCH (n:Pair {k: 5}) RETURN n.k"
+    ));
+    let indexed = GrafeoDB::new_in_memory();
+    for key in 0..3 {
+        indexed
+            .create_node_with_props(&["Few"], [("k", Value::Int64(key))])
+            .unwrap();
+    }
+    let on_index = indexed.session();
+    on_index
+        .execute("CREATE INDEX few_k FOR (n:Few) ON (n.k)")
+        .unwrap();
+    let long = format!("MATCH (n:Few) WHERE n.k IN {} RETURN n.k", list_of(9));
+    assert!(
+        plan(&on_index, &format!("EXPLAIN {long}")).contains("few_k")
+            || !plan(&on_index, &format!("EXPLAIN {long}")).contains("key column"),
+        "the index, not the column"
+    );
+    assert_eq!(on_index.execute(&long).unwrap().row_count(), 3);
+}
+
+/// A statement's own rows and a list over a table that grew or shrank: the count picks a route only,
+/// so a reader's answer holds whichever side of the boundary the latest count is on.
+#[test]
+fn the_count_that_picks_the_route_does_not_change_an_answer() {
+    let db = GrafeoDB::new_in_memory();
+    for key in 0..4 {
+        db.create_node_with_props(&["Few"], [("k", Value::Int64(key))])
+            .unwrap();
+    }
+    let query = "MATCH (n:Few) WHERE n.k IN [0, 1, 2, 3] RETURN n.k ORDER BY n.k";
+    let mut reader = db.session();
+    reader.begin_transaction().unwrap();
+    let before = reader.execute(query).unwrap().rows().to_vec();
+    assert_eq!(before.len(), 4);
+    // Growing the table moves the latest count over the list's length.
+    let writer = db.session();
+    for key in 0..4 {
+        writer
+            .execute(&format!("INSERT (:Few {{k: {key}}})"))
+            .unwrap();
+    }
+    assert_eq!(
+        reader.execute(query).unwrap().rows(),
+        before,
+        "the old view"
+    );
+    assert_eq!(
+        writer.execute(query).unwrap().row_count(),
+        8,
+        "the new view"
+    );
+    // Shrinking it moves the count back under, for the old reader too.
+    writer.execute("MATCH (n:Few) DETACH DELETE n").unwrap();
+    assert_eq!(
+        reader.execute(query).unwrap().rows(),
+        before,
+        "the old view"
+    );
+    assert_eq!(
+        writer.execute(query).unwrap().row_count(),
+        0,
+        "the new view"
+    );
+    reader.rollback().unwrap();
+
+    // Rows the transaction made itself are read on both sides.
+    let mut own = db.session();
+    own.begin_transaction().unwrap();
+    own.execute("INSERT (:Few {k: 0}), (:Few {k: 1})").unwrap();
+    assert_eq!(own.execute(query).unwrap().row_count(), 2);
+    own.rollback().unwrap();
+    assert_eq!(db.session().execute(query).unwrap().row_count(), 0);
+}

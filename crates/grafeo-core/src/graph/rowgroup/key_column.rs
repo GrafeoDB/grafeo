@@ -22,11 +22,12 @@ use std::sync::OnceLock;
 
 use grafeo_common::types::{ArcStr, NodeId, Value};
 use grafeo_common::utils::error::Result;
+use smallvec::{SmallVec, smallvec};
 
 use super::bitset::Bitset;
 use super::column::{ColdRows, ColumnRead, HotRows, HotValues};
 use super::index::MaybeEqual;
-use super::{Inner, ROWS_PER_GROUP, Read};
+use super::{Inner, LabelIds, ROWS_PER_GROUP, Read};
 use crate::codec::column_chunk::{DictView, ZoneMap, bits_among};
 use crate::execution::operators::value_utils::text_reads_as_number;
 use crate::graph::traits::KeyColumnGroup;
@@ -36,10 +37,6 @@ const GROUP_WORDS: usize = (ROWS_PER_GROUP / 64) as usize;
 
 /// The rows of a row group.
 const GROUP_ROWS: usize = GROUP_WORDS * 64;
-
-/// How many rows of a chunk one point read costs as much as, compared in place or decoded: a chunk
-/// with fewer rows in scope than its rows over this reads them one at a time.
-const ROWS_PER_POINT_READ: usize = 16;
 
 /// The rows a read of values one by one reads at once: a scan's first batch.
 const SLICE_ROWS: usize = 2048;
@@ -59,6 +56,19 @@ pub struct KeyColumnQuery {
     targets: Option<Targets>,
     /// A chunk it decoded and reads a slice at a time.
     decoded: Option<DecodedChunk>,
+    /// Its names as the store's ids, for the next group.
+    ids: Option<ReadIds>,
+}
+
+/// A read's names as a store's ids. An id is never given twice, so ids are kept once every name has
+/// one; a name without one may get one by the next read.
+#[derive(Debug)]
+struct ReadIds {
+    key: u32,
+    required: LabelIds,
+    one_of: LabelIds,
+    except: LabelIds,
+    every_name_known: bool,
 }
 
 /// What a read keeps of a cold chunk between its slices: a cold column's values do not change, as
@@ -112,6 +122,7 @@ impl KeyColumnQuery {
             property: property.to_string(),
             targets: Targets::new(values.into()),
             decoded: None,
+            ids: None,
         }
     }
 
@@ -124,6 +135,7 @@ impl KeyColumnQuery {
     /// Reads the rows of the labels left out too, whose indexes the caller could not read.
     pub fn read_every_label(&mut self) {
         self.except.clear();
+        self.ids = None;
     }
 
     /// Lets go of what it kept for a next read.
@@ -158,6 +170,8 @@ struct NumberForms {
     /// The bits of the floats found, sorted: `=`'s two zeros are both among them, and a NaN is
     /// found as the index finds it, for the filter to refuse.
     floats: Vec<u64>,
+    /// The last digits of the integers, a bit per digit.
+    last_digits: u16,
 }
 
 impl Targets {
@@ -209,7 +223,14 @@ impl Targets {
             integers.dedup();
             floats.sort_unstable();
             floats.dedup();
-            NumberForms { integers, floats }
+            let last_digits = integers.iter().fold(0, |digits, integer: &i64| {
+                digits | (1 << (integer.unsigned_abs() % 10))
+            });
+            NumberForms {
+                integers,
+                floats,
+                last_digits,
+            }
         })
     }
 
@@ -243,9 +264,10 @@ impl Targets {
     fn is_a_key(&self, text: &[u8]) -> bool {
         match self.strings() {
             [] => false,
+            // Keys that share their start, as ids do, differ at their end.
             [key] => {
                 let key = key.as_bytes();
-                key.first() == text.first() && key == text
+                key.last() == text.last() && key == text
             }
             keys => keys
                 .binary_search_by(|key| key.as_bytes().cmp(text))
@@ -253,10 +275,22 @@ impl Targets {
         }
     }
 
+    /// Whether `text` need not be read against number keys: with no float among them only text that
+    /// reads as an integer `=` one, and such text ends in that integer's last digit.
+    fn number_text_is_ruled_out(&self, text: &[u8]) -> bool {
+        !self.float_keys
+            && !text.last().is_some_and(|byte| {
+                byte.is_ascii_digit() && self.forms().last_digits & (1 << (byte - b'0')) != 0
+            })
+    }
+
     /// Whether `text` `=` a key, when every key is an integer or a float, by the rules of `=` (see
     /// `values_equal`): the integers found hold every key an integer `=`, and other number text
     /// `=` only a float.
     fn text_equals_a_number(&self, text: &str) -> bool {
+        if self.number_text_is_ruled_out(text.as_bytes()) {
+            return false;
+        }
         text_reads_as_number(
             text,
             |integer| self.forms().integers.binary_search(&integer).is_ok(),
@@ -272,6 +306,9 @@ impl Targets {
     fn entry_is_found(&self, entry: &[u8]) -> bool {
         if self.string_keys {
             return self.is_a_key(entry);
+        }
+        if self.number_keys && self.number_text_is_ruled_out(entry) {
+            return false;
         }
         std::str::from_utf8(entry).is_ok_and(|text| {
             if self.number_keys {
@@ -454,7 +491,7 @@ impl Targets {
                 let scope = |word: usize| chunk_scope(&scoped, first, word);
                 let point = chunk.point();
                 if let Some(point) = point
-                    && in_scope * ROWS_PER_POINT_READ < rows.len()
+                    && in_scope * point.rows_per_point_read() < rows.len()
                 {
                     for (word, at) in (0..rows.len().div_ceil(64)).zip((0_u32..).step_by(64)) {
                         let mut bits = scope(word);
@@ -567,19 +604,27 @@ fn chunk_scope(scoped: &[u64], first: usize, word: usize) -> u64 {
     }
 }
 
-/// Calls `read` with each of `words` to read: with `rarest`, a label every row in scope has and no
-/// chain to add others, only those with a row of it, which a lookup on a rare label finds in a
-/// tight loop over its words.
-fn words_to_read(rarest: Option<&Bitset>, words: Range<usize>, mut read: impl FnMut(usize)) {
-    let Some(label) = rarest else {
-        words.for_each(read);
-        return;
-    };
-    let held = label.words();
-    if let Some(held) = held.get(words.start..words.end.min(held.len())) {
-        for (at, bits) in held.iter().enumerate() {
-            if *bits != 0 {
-                read(words.start + at);
+/// Calls `read` with each of `words` that has a row in one of `within`, or with every one of them
+/// without it: a lookup on a rare label finds its words in a tight loop.
+fn words_to_read(within: Option<&[&Bitset]>, words: Range<usize>, mut read: impl FnMut(usize)) {
+    match within {
+        None => words.for_each(read),
+        Some([rows]) => {
+            let held = rows.words();
+            if let Some(held) = held.get(words.start..words.end.min(held.len())) {
+                for (at, bits) in held.iter().enumerate() {
+                    if *bits != 0 {
+                        read(words.start + at);
+                    }
+                }
+            }
+        }
+        Some(sets) => {
+            let end = sets.iter().map(|rows| rows.words().len()).max();
+            for word in words.start..words.end.min(end.unwrap_or(0)) {
+                if sets.iter().any(|rows| rows.word(word) != 0) {
+                    read(word);
+                }
             }
         }
     }
@@ -600,6 +645,36 @@ fn among<T: Copy, K: Copy + Ord>(
 }
 
 impl Inner {
+    /// `query`'s names as ids; `None` when no node has the key, or a label every result has: no
+    /// node has it in any version.
+    fn read_ids(
+        &self,
+        required: &[String],
+        one_of: &[String],
+        except: &[String],
+        property: &str,
+    ) -> Option<ReadIds> {
+        let key = self.keys.get_id(property)?;
+        let required = required
+            .iter()
+            .map(|label| self.label_id(label))
+            .collect::<Option<LabelIds>>()?;
+        let known = |labels: &[String]| -> LabelIds {
+            labels
+                .iter()
+                .filter_map(|label| self.label_id(label))
+                .collect()
+        };
+        let (one_of_ids, except_ids) = (known(one_of), known(except));
+        Some(ReadIds {
+            key,
+            required,
+            every_name_known: one_of_ids.len() == one_of.len() && except_ids.len() == except.len(),
+            one_of: one_of_ids,
+            except: except_ids,
+        })
+    }
+
     /// See `GraphStore::key_column_group`.
     ///
     /// # Errors
@@ -619,37 +694,45 @@ impl Inner {
             property,
             targets,
             decoded,
+            ids,
         } = query;
-        let (Some(key), Some(targets)) = (self.keys.get_id(property), &*targets) else {
+        let Some(targets) = &*targets else {
             return Ok(answer);
         };
-        let ids = |labels: &[String]| -> Vec<Option<u32>> {
-            labels.iter().map(|label| self.label_id(label)).collect()
+        if ids.as_ref().is_none_or(|ids| !ids.every_name_known) {
+            *ids = self.read_ids(required, one_of, except, property);
+        }
+        let Some(ids) = &*ids else {
+            return Ok(answer);
         };
         let any_of_labels = !one_of.is_empty();
-        let (required, one_of, except) = (ids(required), ids(one_of), ids(except));
-        // A label no node has had: no node has it in any version.
-        if required.iter().any(Option::is_none) {
-            return Ok(answer);
-        }
+        let (key, required, one_of, except) = (ids.key, &ids.required, &ids.one_of, &ids.except);
         let Some((number, group)) = self.nodes.range(from / ROWS_PER_GROUP..).next() else {
             return Ok(answer);
         };
         let base = number * ROWS_PER_GROUP;
         answer.end = Some(base + ROWS_PER_GROUP);
         answer.exact = targets.number_keys || targets.string_keys;
-        let bits = |labels: &[Option<u32>]| -> Vec<&Bitset> {
+        // Built only past the tests below, and outliving what borrows them.
+        let (value_chains, label_chains);
+        let bits = |labels: &[u32]| -> SmallVec<[&Bitset; 4]> {
             labels
                 .iter()
-                .flatten()
                 .filter_map(|id| group.labels.get(id))
                 .collect()
         };
         let (required_bits, one_of_bits, except_bits) =
-            (bits(&required), bits(&one_of), bits(&except));
+            (bits(required), bits(one_of), bits(except));
+        // As slices, and the one test as a flag: `in_scope` runs for each word of a group.
+        let (required_bits, one_of_bits, except_bits) = (
+            required_bits.as_slice(),
+            one_of_bits.as_slice(),
+            except_bits.as_slice(),
+        );
+        let a_required_label_is_missing = required_bits.len() < required.len();
         // A group with no row of the scope's labels, and no chain that may keep one: a lookup on a
         // rare label pays one test per other group.
-        let no_row_in_scope = required_bits.len() < required.len()
+        let no_row_in_scope = a_required_label_is_missing
             || required_bits.iter().any(|label| label.is_empty())
             || (any_of_labels && one_of_bits.iter().all(|label| label.is_empty()));
         if no_row_in_scope && group.label_updates.is_empty() {
@@ -658,14 +741,22 @@ impl Inner {
         let Some(column) = group.columns.read(key) else {
             return Ok(answer);
         };
+        // A hot column's bound covers every version a reader may see, chained ones too, so no read
+        // of it can find a value outside it.
+        if let ColumnRead::Hot(hot) = &column
+            && !targets.may_be_in(hot)
+        {
+            return Ok(answer);
+        }
         // Every row with a label of the scope in its newest labels, less those the indexes hold.
         // A label's bits are empty in a group without it.
         let in_scope = |word: usize| -> u64 {
-            let mut rows = u64::MAX;
-            if required_bits.len() < required.len() {
-                rows = 0;
-            }
-            for label in &required_bits {
+            let mut rows = if a_required_label_is_missing {
+                0
+            } else {
+                u64::MAX
+            };
+            for label in required_bits {
                 rows &= label.word(word);
             }
             if any_of_labels {
@@ -673,13 +764,13 @@ impl Inner {
                     .iter()
                     .fold(0, |any, label| any | label.word(word));
             }
-            for label in &except_bits {
+            for label in except_bits {
                 rows &= !label.word(word);
             }
             rows
         };
-        let value_chains = group.columns.chained_rows(key);
-        let label_chains = group.label_updates.rows();
+        value_chains = group.columns.chained_rows(key);
+        label_chains = group.label_updates.rows();
         let word_of = |chains: &Option<Bitset>, word: usize| {
             chains.as_ref().map_or(0, |rows| rows.word(word))
         };
@@ -691,19 +782,28 @@ impl Inner {
         // The rows of this read: from `from`, on a word as the last read ended on one, up to the
         // group's end or a slice's.
         let mut span = usize::try_from(from.saturating_sub(base)).unwrap_or(GROUP_ROWS)..GROUP_ROWS;
-        let rarest = required_bits
+        // What holds every row in scope, when something other than every row does: its rarest
+        // required label, or the labels it has one of.
+        let scope_rows: Option<SmallVec<[&Bitset; 4]>> = if a_required_label_is_missing {
+            Some(SmallVec::new())
+        } else if let Some(rarest) = required_bits
             .iter()
             .copied()
             .min_by_key(|label| label.words().len())
-            .filter(|_| value_chains.is_none() && label_chains.is_none());
+        {
+            Some(smallvec![rarest])
+        } else if any_of_labels {
+            Some(SmallVec::from_slice(one_of_bits))
+        } else {
+            None
+        };
         let mut cold_found = None;
         let may_find = match &column {
             ColumnRead::Hot(hot) => {
-                let may_find = targets.may_be_in(hot);
-                if may_find && Targets::reads_in_slices(hot) {
+                if Targets::reads_in_slices(hot) {
                     span.end = span.end.min(slice_end(span.start));
                 }
-                may_find
+                true
             }
             ColumnRead::Cold(chunks) => {
                 // Going on through a kept chunk, the scope is that of the slice alone.
@@ -714,10 +814,14 @@ impl Inner {
                     span.end = slice_end(span.start);
                 }
                 let mut to_compare = vec![0_u64; GROUP_WORDS];
-                words_to_read(rarest, span.start / 64..span.end.div_ceil(64), |word| {
-                    let scoped = in_scope(word);
-                    to_compare[word] = scoped & !chained(word, scoped);
-                });
+                words_to_read(
+                    scope_rows.as_deref(),
+                    span.start / 64..span.end.div_ceil(64),
+                    |word| {
+                        let scoped = in_scope(word);
+                        to_compare[word] = scoped & !chained(word, scoped);
+                    },
+                );
                 cold_found = targets.compare_chunks(
                     chunks,
                     *number,
@@ -732,55 +836,62 @@ impl Inner {
         if span.end < GROUP_ROWS {
             answer.end = Some(base + span.end as u64);
         }
-        if !may_find && value_chains.is_none() && label_chains.is_none() {
-            return Ok(answer);
-        }
+        // A row found is in scope, and a chained row is read whatever it holds now: with nothing to
+        // find, which only a cold column gets to and which has no value chains, only the rows whose
+        // labels are chained are looked at.
+        let to_read: Option<SmallVec<[&Bitset; 4]>> = if may_find {
+            scope_rows.map(|mut rows| {
+                rows.extend(label_chains.as_ref());
+                rows
+            })
+        } else {
+            Some(label_chains.iter().collect())
+        };
         // The labels of the scope, as the view sees a chained row's.
         let labels_in_scope = |row: usize| {
-            if required.is_empty() && one_of.is_empty() {
+            if required.is_empty() && !any_of_labels {
                 return true;
             }
             let labels = group.labels_at(row, read);
-            required
-                .iter()
-                .flatten()
-                .all(|label| labels.contains(label))
-                && (one_of.is_empty()
-                    || one_of.iter().flatten().any(|label| labels.contains(label)))
+            required.iter().all(|label| labels.contains(label))
+                && (!any_of_labels || one_of.iter().any(|label| labels.contains(label)))
         };
-        words_to_read(rarest, span.start / 64..span.end.div_ceil(64), |word| {
-            let scoped = in_scope(word);
-            let always = chained(word, scoped);
-            let found = match &column {
-                ColumnRead::Hot(hot) if may_find => {
-                    let to_compare = scoped & hot.present().word(word) & !always;
-                    answer.compared += to_compare.count_ones() as usize;
-                    targets.found_in_word(hot, word, to_compare, &mut answer.exact)
-                }
-                ColumnRead::Hot(_) => 0,
-                ColumnRead::Cold(_) => cold_found.as_ref().map_or(0, |found| found[word]),
-            };
-            answer.compared += always.count_ones() as usize;
-            let mut rows = group.versions.visible_word(word, found, read) | always;
-            while rows != 0 {
-                let bit = rows.trailing_zeros() as usize;
-                rows &= rows - 1;
-                let row = word * 64 + bit;
-                if always & (1 << bit) != 0 {
-                    if !group.versions.visible(row, read) || !labels_in_scope(row) {
-                        continue;
+        words_to_read(
+            to_read.as_deref(),
+            span.start / 64..span.end.div_ceil(64),
+            |word| {
+                let scoped = in_scope(word);
+                let always = chained(word, scoped);
+                let found = match &column {
+                    ColumnRead::Hot(hot) => {
+                        let to_compare = scoped & hot.present().word(word) & !always;
+                        answer.compared += to_compare.count_ones() as usize;
+                        targets.found_in_word(hot, word, to_compare, &mut answer.exact)
                     }
-                    let Some(value) = group.columns.get_at(key, row, read) else {
-                        continue;
-                    };
-                    if !targets.finds(&value) {
-                        continue;
+                    ColumnRead::Cold(_) => cold_found.as_ref().map_or(0, |found| found[word]),
+                };
+                answer.compared += always.count_ones() as usize;
+                let mut rows = group.versions.visible_word(word, found, read) | always;
+                while rows != 0 {
+                    let bit = rows.trailing_zeros() as usize;
+                    rows &= rows - 1;
+                    let row = word * 64 + bit;
+                    if always & (1 << bit) != 0 {
+                        if !group.versions.visible(row, read) || !labels_in_scope(row) {
+                            continue;
+                        }
+                        let Some(value) = group.columns.get_at(key, row, read) else {
+                            continue;
+                        };
+                        if !targets.finds(&value) {
+                            continue;
+                        }
+                        answer.exact &= targets.is_exact(&value);
                     }
-                    answer.exact &= targets.is_exact(&value);
+                    answer.nodes.push(NodeId::new(base + row as u64));
                 }
-                answer.nodes.push(NodeId::new(base + row as u64));
-            }
-        });
+            },
+        );
         Ok(answer)
     }
 }
@@ -791,15 +902,19 @@ mod tests {
     use std::sync::Arc;
 
     use bytes::Bytes;
+    use grafeo_common::change::DataOp;
     use grafeo_common::types::{
-        Date, Decimal, PropertyKey, TemporalComparison, Value, ZonedDatetime,
+        Date, Decimal, NodeId, PropertyKey, ReadView, TemporalComparison, Value, ZonedDatetime,
     };
 
     use super::super::column::{ColumnRead, Columns};
-    use super::{GROUP_ROWS, GROUP_WORDS, MaybeEqual, Targets};
+    use super::super::{ROWS_PER_GROUP, RowGroupStore};
+    use super::{GROUP_ROWS, GROUP_WORDS, KeyColumnQuery, MaybeEqual, Targets};
     use crate::codec::column_chunk::encode_column_chunk;
     use crate::execution::operators::value_utils::values_equal;
-    use crate::graph::traits::KeyColumnGroup;
+    use crate::graph::apply::{GraphBackend, Writer};
+    use crate::graph::conformance::{apply_all, labels, next_epoch, properties};
+    use crate::graph::traits::{GraphStore, KeyColumnGroup};
 
     const KEY: u32 = 7;
 
@@ -1577,5 +1692,281 @@ mod tests {
         assert!(Targets::new(vec![Value::Null]).is_none());
         assert!(Targets::new(vec![Value::Null, Value::Null]).is_none());
         assert!(Targets::new(vec![Value::Null, Value::Int64(1)]).is_some());
+    }
+
+    /// Nodes of `labels` with `k: 5` at `ids`, as later writes do.
+    fn create_at(
+        store: &RowGroupStore,
+        ids: &[u64],
+        node_labels: &[&str],
+        values: &[(&str, Value)],
+    ) {
+        let ops: Vec<DataOp> = ids
+            .iter()
+            .map(|&id| DataOp::CreateNode {
+                id: NodeId::new(id),
+                labels: labels(node_labels),
+                properties: properties(values),
+            })
+            .collect();
+        apply_all(
+            store,
+            &ops,
+            Writer::Replay {
+                epoch: next_epoch(store),
+            },
+        )
+        .unwrap();
+    }
+
+    /// A store with room for ids in two groups, and a node of `A` with `k: 5` in the first.
+    fn two_groups() -> RowGroupStore {
+        let store = RowGroupStore::new();
+        store.reserve_node_ids(ROWS_PER_GROUP + 8).unwrap();
+        create_at(&store, &[1], &["A"], &[("k", Value::Int64(5))]);
+        store
+    }
+
+    /// Reads from `from` to the end; the nodes found, as raw ids.
+    fn read_on(store: &RowGroupStore, query: &mut KeyColumnQuery, mut from: u64) -> Vec<u64> {
+        let mut found = Vec::new();
+        loop {
+            let group = store
+                .key_column_group(query, from, ReadView::latest())
+                .unwrap();
+            found.extend(group.nodes.iter().map(|id| id.as_u64()));
+            match group.end {
+                Some(end) => from = end,
+                None => return found,
+            }
+        }
+    }
+
+    /// The first read of one query, then the second group's: what appears between them.
+    fn first_group(store: &RowGroupStore, query: &mut KeyColumnQuery) -> Vec<u64> {
+        let group = store
+            .key_column_group(query, 0, ReadView::latest())
+            .unwrap();
+        group.nodes.iter().map(|id| id.as_u64()).collect()
+    }
+
+    const SECOND_GROUP: u64 = ROWS_PER_GROUP;
+
+    /// A label of a union no node had at the first read is read by the next: its id is not kept as
+    /// missing.
+    #[test]
+    fn a_label_of_a_union_that_appears_between_two_reads_is_read() {
+        let store = two_groups();
+        let mut query = KeyColumnQuery::new(&[], &["A", "B"], &[], "k", [Value::Int64(5)]);
+        assert_eq!(first_group(&store, &mut query), [1]);
+        create_at(
+            &store,
+            &[SECOND_GROUP + 1],
+            &["B"],
+            &[("k", Value::Int64(5))],
+        );
+        assert_eq!(
+            read_on(&store, &mut query, SECOND_GROUP),
+            [SECOND_GROUP + 1]
+        );
+    }
+
+    /// A label left out that no node had at the first read still leaves out its rows after it appears:
+    /// the index that holds them may have been read by then.
+    #[test]
+    fn a_label_left_out_that_appears_between_two_reads_stays_out() {
+        let store = two_groups();
+        let mut query = KeyColumnQuery::new(&[], &[], &["B"], "k", [Value::Int64(5)]);
+        assert_eq!(first_group(&store, &mut query), [1]);
+        create_at(
+            &store,
+            &[SECOND_GROUP + 1],
+            &["B"],
+            &[("k", Value::Int64(5))],
+        );
+        create_at(
+            &store,
+            &[SECOND_GROUP + 2],
+            &["A"],
+            &[("k", Value::Int64(5))],
+        );
+        assert_eq!(
+            read_on(&store, &mut query, SECOND_GROUP),
+            [SECOND_GROUP + 2]
+        );
+    }
+
+    /// A required label no node had finds nothing, and once it has a node a read finds it: nothing
+    /// was kept from the read that knew no such name.
+    #[test]
+    fn a_required_label_that_appears_between_two_reads_is_read() {
+        let store = two_groups();
+        let mut query = KeyColumnQuery::new(&["B"], &[], &[], "k", [Value::Int64(5)]);
+        assert_eq!(first_group(&store, &mut query), Vec::<u64>::new());
+        create_at(
+            &store,
+            &[SECOND_GROUP + 1],
+            &["B"],
+            &[("k", Value::Int64(5))],
+        );
+        assert_eq!(
+            read_on(&store, &mut query, SECOND_GROUP),
+            [SECOND_GROUP + 1]
+        );
+        assert_eq!(read_on(&store, &mut query, 0), [SECOND_GROUP + 1]);
+    }
+
+    /// As for a label, a key no node had.
+    #[test]
+    fn a_key_that_appears_between_two_reads_is_read() {
+        let store = two_groups();
+        let mut query = KeyColumnQuery::new(&["A"], &[], &[], "late", [Value::Int64(5)]);
+        assert_eq!(first_group(&store, &mut query), Vec::<u64>::new());
+        create_at(
+            &store,
+            &[SECOND_GROUP + 1],
+            &["A"],
+            &[("late", Value::Int64(5))],
+        );
+        assert_eq!(
+            read_on(&store, &mut query, SECOND_GROUP),
+            [SECOND_GROUP + 1]
+        );
+    }
+
+    /// With every name known the ids are kept, and a label that appears later changes nothing.
+    #[test]
+    fn a_new_label_leaves_a_read_of_known_names_as_it_is() {
+        let store = two_groups();
+        create_at(&store, &[2], &["B"], &[("k", Value::Int64(5))]);
+        let mut query = KeyColumnQuery::new(&["A"], &[], &["B"], "k", [Value::Int64(5)]);
+        assert_eq!(first_group(&store, &mut query), [1]);
+        create_at(
+            &store,
+            &[SECOND_GROUP + 1],
+            &["C"],
+            &[("k", Value::Int64(5))],
+        );
+        create_at(
+            &store,
+            &[SECOND_GROUP + 2],
+            &["A", "C"],
+            &[("k", Value::Int64(5))],
+        );
+        create_at(
+            &store,
+            &[SECOND_GROUP + 3],
+            &["A", "B"],
+            &[("k", Value::Int64(5))],
+        );
+        assert_eq!(
+            read_on(&store, &mut query, SECOND_GROUP),
+            [SECOND_GROUP + 2]
+        );
+    }
+
+    /// Reading the labels left out too, after a read that kept their ids.
+    #[test]
+    fn reading_every_label_after_a_first_read_reads_the_rows_left_out() {
+        let store = two_groups();
+        create_at(&store, &[2], &["B"], &[("k", Value::Int64(5))]);
+        let mut query = KeyColumnQuery::new(&[], &[], &["B"], "k", [Value::Int64(5)]);
+        assert_eq!(first_group(&store, &mut query), [1]);
+        query.read_every_label();
+        assert_eq!(read_on(&store, &mut query, 0), [1, 2]);
+    }
+
+    /// Text that cannot reach a number key is left out by its last byte, and what `=` finds is not:
+    /// the keys' last digits with the sign and the leading zeros of each, the extremes, and text
+    /// ending in anything else.
+    #[test]
+    fn the_last_digit_rules_out_only_what_equals_rules_out() {
+        let lists = [
+            vec![Value::Int64(0)],
+            vec![Value::Int64(10)],
+            vec![Value::Int64(-7)],
+            vec![Value::Int64(42), Value::Int64(-42), Value::Int64(1_003)],
+            vec![Value::Int64(i64::MIN)],
+            vec![Value::Int64(i64::MAX)],
+        ];
+        let texts = [
+            "",
+            " ",
+            "0",
+            "-0",
+            "+0",
+            "00",
+            "10",
+            "010",
+            "+10",
+            "-10",
+            "7",
+            "-7",
+            "07",
+            "-07",
+            "+7",
+            "42",
+            "042",
+            "+42",
+            "-42",
+            "-042",
+            "42.0",
+            "4.2e1",
+            "42 ",
+            " 42",
+            "42a",
+            "a42",
+            "1003",
+            "01003",
+            "-9223372036854775808",
+            "9223372036854775808",
+            "9223372036854775807",
+            "+9223372036854775807",
+            "\u{0664}\u{0662}",
+            "42\u{0660}",
+        ];
+        for keys in lists {
+            let targets = Targets::new(keys.clone()).unwrap();
+            for text in texts {
+                let value = string(text);
+                let by_equals = keys.iter().any(|key| equal(key, &value));
+                assert_eq!(
+                    targets.finds(&value),
+                    by_equals,
+                    "{text:?} against {keys:?}"
+                );
+                assert_eq!(
+                    targets.entry_is_found(text.as_bytes()),
+                    by_equals,
+                    "the dictionary's test, {text:?} against {keys:?}"
+                );
+            }
+        }
+    }
+
+    /// One string key compares its last byte first: keys and text that share an end, a start, or
+    /// have nothing to compare.
+    #[test]
+    fn one_string_key_finds_only_itself() {
+        for key in ["", "a", "person_12", "person_22", "\u{00e9}"] {
+            let targets = Targets::new(vec![string(key)]).unwrap();
+            for text in [
+                "",
+                "a",
+                "b",
+                "person_12",
+                "person_22",
+                "person_2",
+                "erson_12",
+                "\u{00e9}",
+                "e",
+            ] {
+                assert_eq!(
+                    targets.entry_is_found(text.as_bytes()),
+                    text == key,
+                    "{text:?} against {key:?}"
+                );
+            }
+        }
     }
 }

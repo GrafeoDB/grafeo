@@ -3,6 +3,7 @@
 
 use std::collections::HashSet;
 
+use grafeo_common::types::ReadView;
 use grafeo_core::execution::operators::{
     ExpressionPredicate, FilterOperator, NodeSeekOperator, Operator, SeekKey, SingleRowOperator,
 };
@@ -322,6 +323,29 @@ impl<'a> LookupLabels<'a> {
             };
         }
         LookupRead::Scan
+    }
+
+    /// At most how many nodes a read of a key's column looks at: of its rarest required label, the
+    /// labels it has one of, or all. Counted at the latest view, as the count picks a route only
+    /// and both give the same answer; a store that reads key columns keeps these counts.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error of a read the store cannot do.
+    pub(crate) fn nodes_at_most(&self, store: &dyn GraphStore) -> Result<usize> {
+        let latest = ReadView::latest();
+        let count = |label: &&str| store.nodes_by_label_count(label, latest);
+        if !self.required.is_empty() {
+            return self
+                .required
+                .iter()
+                .map(count)
+                .try_fold(usize::MAX, |least, nodes| Ok(least.min(nodes?)));
+        }
+        match self.unions.first() {
+            Some(union) => union.iter().map(count).sum(),
+            None => store.node_count(latest),
+        }
     }
 
     /// The labels of the filters from `filter` down, and a scan of `variable` below them. It

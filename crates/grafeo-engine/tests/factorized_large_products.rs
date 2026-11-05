@@ -2,8 +2,8 @@
 //! (65,535, the u16 selection) must not panic, and must count every path.
 //! 0.6.0 flattened a whole factorized chain, or a whole input chunk's product,
 //! into one chunk, so a filter above `(a)-[:E]->(b)-[:E]->(c)` panicked at
-//! selection.rs (`index <= MAX_CAPACITY`) once the product passed 65,536 rows
-//! (found by grafeo-31, 2026-10-31). Each case checks the exact count or rows,
+//! selection.rs (`index <= MAX_CAPACITY`) once the product passed 65,536 rows.
+//! Each case checks the exact count or rows,
 //! and the same query with factorized execution off.
 //!
 //! The graphs: sources into a hub, the hub out to `n` leaves (`k` x `n`

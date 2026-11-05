@@ -1,8 +1,7 @@
 //! A statement written with a parameter answers as the statement with the
 //! parameter's value written as a literal: the same rows, or the same error,
 //! in GQL and in Cypher, value after value, through the plan prepared on the
-//! first call (a differential, from grafeo-c6's verification of prepared
-//! plans).
+//! first call (a differential).
 //!
 //! A value is written as the literal of its own type: in GQL a float takes
 //! an exponent (`0.0e0`), since `0.0` is an exact numeric (a decimal); a

@@ -1003,6 +1003,14 @@ impl super::Planner {
             return Ok(Some((empty, columns)));
         }
 
+        // A list as long as the rows it is read among costs more to prepare than the scan's filter
+        // costs to run.
+        if matches!(lookup_read(property), LookupRead::Column { .. })
+            && values.len() >= labels.nodes_at_most(self.store.as_ref())?
+        {
+            return Ok(None);
+        }
+
         // A read of the column, as it runs, in one pass for every value: `IN` decides each node.
         if !matches!(lookup_read(property), LookupRead::Index(_)) {
             let columns = vec![scan_variable];
@@ -1688,7 +1696,10 @@ pub(crate) fn scan_hint(
         });
     }
     if let Some((property, values)) = indexed_in_list(predicate, variable, column) {
-        return (!values.is_empty()).then(|| PushdownHint::KeyColumn {
+        let keeps_the_filter = labels
+            .nodes_at_most(store)
+            .is_ok_and(|nodes| values.len() >= nodes);
+        return (!values.is_empty() && !keeps_the_filter).then(|| PushdownHint::KeyColumn {
             property: property.clone(),
         });
     }

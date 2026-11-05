@@ -964,3 +964,92 @@ tests:
     expect:
       rows:
         - [null]
+
+  # A list as long as the rows it is read among: its rows are the same on either side.
+  - name: list_shorter_than_a_label
+    setup:
+      - "INSERT (:Few {k: 0}), (:Few {k: 1}), (:Few {k: 2}), (:Many {k: 3}), (:Many {k: 4}), (:Many {k: 5}), (:Many {k: 6})"
+    query: "MATCH (n:Few) WHERE n.k IN [0, 1] RETURN n.k ORDER BY n.k"
+    expect:
+      ordered: true
+      rows:
+        - [0]
+        - [1]
+
+  - name: list_as_long_as_a_label
+    setup:
+      - "INSERT (:Few {k: 0}), (:Few {k: 1}), (:Few {k: 2}), (:Many {k: 3}), (:Many {k: 4}), (:Many {k: 5}), (:Many {k: 6})"
+    query: "MATCH (n:Few) WHERE n.k IN [0, 2, 3] RETURN n.k ORDER BY n.k"
+    expect:
+      ordered: true
+      rows:
+        - [0]
+        - [2]
+
+  - name: list_longer_than_a_label
+    setup:
+      - "INSERT (:Few {k: 0}), (:Few {k: 1}), (:Few {k: 2}), (:Many {k: 3}), (:Many {k: 4}), (:Many {k: 5}), (:Many {k: 6})"
+    query: "MATCH (n:Few) WHERE n.k IN [0, 1, 2, 3, 4, 5] RETURN n.k ORDER BY n.k"
+    expect:
+      ordered: true
+      rows:
+        - [0]
+        - [1]
+        - [2]
+
+  - name: list_as_long_as_a_union
+    setup:
+      - "INSERT (:Few {k: 0}), (:Few {k: 1}), (:Pair {k: 2}), (:Many {k: 3}), (:Many {k: 4})"
+    query: "MATCH (n:Few|Pair) WHERE n.k IN [0, 2, 3] RETURN n.k ORDER BY n.k"
+    expect:
+      ordered: true
+      rows:
+        - [0]
+        - [2]
+
+  - name: list_as_long_as_every_node
+    setup:
+      - "INSERT (:Few {k: 0}), (:Few {k: 1}), (:Pair {k: 2})"
+    query: "MATCH (n) WHERE n.k IN [0, 2, 9] RETURN n.k ORDER BY n.k"
+    expect:
+      ordered: true
+      rows:
+        - [0]
+        - [2]
+
+  - name: list_of_a_repeated_key_as_long_as_a_label
+    setup:
+      - "INSERT (:Few {k: 0}), (:Few {k: 1}), (:Many {k: 0})"
+    query: "MATCH (n:Few) WHERE n.k IN [0, 0] RETURN n.k"
+    expect:
+      rows:
+        - [0]
+
+  - name: list_of_spellings_as_long_as_a_label
+    setup:
+      - "INSERT (:Few {k: '042'}), (:Few {k: 42}), (:Few {k: '42.0'}), (:Many {k: 42})"
+    query: "MATCH (n:Few) WHERE n.k IN [42, 7, 8] RETURN n.k"
+    expect:
+      count: 2
+
+  # A key text ending in another digit, and in the same one.
+  - name: number_key_over_text_with_another_last_digit
+    setup:
+      - "INSERT (:T {k: '41'}), (:T {k: '42'}), (:T {k: '042'}), (:T {k: '+42'}), (:T {k: '-42'}), (:T {k: '42 '}), (:T {k: ''}), (:T {k: 'a2'})"
+    query: "MATCH (n:T {k: 42}) RETURN n.k"
+    expect:
+      count: 3
+
+  - name: negative_key_over_text_with_its_last_digit
+    setup:
+      - "INSERT (:T {k: '-7'}), (:T {k: '7'}), (:T {k: '-07'}), (:T {k: '-8'})"
+    query: "MATCH (n:T {k: -7}) RETURN n.k"
+    expect:
+      count: 2
+
+  - name: union_of_a_label_with_no_node
+    setup:
+      - "INSERT (:A {k: 5}), (:B {k: 5}), (:C {k: 5})"
+    query: "MATCH (n:A|Nobody {k: 5}) RETURN labels(n) AS l"
+    expect:
+      count: 1

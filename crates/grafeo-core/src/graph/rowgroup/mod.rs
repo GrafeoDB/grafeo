@@ -467,6 +467,7 @@ impl Inner {
 
     /// The node's group and row, if `read` sees the node: one lookup of
     /// its vector's versions, a bit test while the vector is flat.
+    #[inline]
     fn node_seen(&self, id: u64, read: Read) -> Option<(&NodeGroup, usize)> {
         let (group, row) = locate(id);
         let group = self.nodes.get(&group)?;
@@ -475,6 +476,7 @@ impl Inner {
 
     /// The edge's group and row, if `read` sees the edge (see
     /// [`node_seen`](Self::node_seen)).
+    #[inline]
     fn edge_seen(&self, id: u64, read: Read) -> Option<(&EdgeGroup, usize)> {
         let (group, row) = locate(id);
         let group = self.edges.get(&group)?;

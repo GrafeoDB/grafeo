@@ -92,6 +92,8 @@ mod upsert;
 // The commit's WAL group, written from its change set.
 #[cfg(feature = "wal")]
 pub(crate) mod wal_log;
+#[cfg(all(feature = "wal", feature = "grafeo-file"))]
+mod wal_retention;
 
 use grafeo_common::grafeo_error;
 use std::sync::Arc;
@@ -169,6 +171,10 @@ pub struct GrafeoDB {
     /// at the last checkpoint: the status reports the records after it.
     #[cfg(feature = "wal")]
     pub(super) wal_records_at_checkpoint: Arc<AtomicU64>,
+    /// How much WAL a checkpoint keeps for the backup cursor at most, and
+    /// the warnings it gave (see [`wal_retention`]).
+    #[cfg(all(feature = "wal", feature = "grafeo-file"))]
+    pub(super) wal_retention: Arc<wal_retention::WalRetention>,
     /// Query cache for parsed and optimized plans.
     pub(super) query_cache: Arc<QueryCache>,
     /// Shared commit counter for auto-GC across sessions.
@@ -906,6 +912,8 @@ impl GrafeoDB {
 
         #[cfg(feature = "cdc")]
         let cdc_enabled_val = config.cdc_enabled();
+        #[cfg(all(feature = "wal", feature = "grafeo-file"))]
+        let wal_retention_limit = config.wal_retention_limit();
         #[cfg(feature = "cdc")]
         let cdc_retention = config.cdc_retention().clone();
 
@@ -940,6 +948,8 @@ impl GrafeoDB {
             checkpoint_failures: Arc::default(),
             #[cfg(feature = "wal")]
             wal_records_at_checkpoint: Arc::new(AtomicU64::new(0)),
+            #[cfg(all(feature = "wal", feature = "grafeo-file"))]
+            wal_retention: Arc::new(wal_retention::WalRetention::new(wal_retention_limit)),
             #[cfg(feature = "wal")]
             wal_flusher: parking_lot::Mutex::new(wal_flusher),
             #[cfg(feature = "wal")]
@@ -1143,6 +1153,8 @@ impl GrafeoDB {
 
         #[cfg(feature = "cdc")]
         let cdc_enabled_val = config.cdc_enabled();
+        #[cfg(all(feature = "wal", feature = "grafeo-file"))]
+        let wal_retention_limit = config.wal_retention_limit();
 
         let db = Self {
             config,
@@ -1175,6 +1187,8 @@ impl GrafeoDB {
             checkpoint_failures: Arc::default(),
             #[cfg(feature = "wal")]
             wal_records_at_checkpoint: Arc::new(AtomicU64::new(0)),
+            #[cfg(all(feature = "wal", feature = "grafeo-file"))]
+            wal_retention: Arc::new(wal_retention::WalRetention::new(wal_retention_limit)),
             #[cfg(feature = "wal")]
             wal_flusher: parking_lot::Mutex::new(None),
             #[cfg(feature = "wal")]
@@ -1253,6 +1267,8 @@ impl GrafeoDB {
 
         #[cfg(feature = "cdc")]
         let cdc_enabled_val = config.cdc_enabled();
+        #[cfg(all(feature = "wal", feature = "grafeo-file"))]
+        let wal_retention_limit = config.wal_retention_limit();
 
         Ok(Self {
             config,
@@ -1285,6 +1301,8 @@ impl GrafeoDB {
             checkpoint_failures: Arc::default(),
             #[cfg(feature = "wal")]
             wal_records_at_checkpoint: Arc::new(AtomicU64::new(0)),
+            #[cfg(all(feature = "wal", feature = "grafeo-file"))]
+            wal_retention: Arc::new(wal_retention::WalRetention::new(wal_retention_limit)),
             #[cfg(feature = "wal")]
             wal_flusher: parking_lot::Mutex::new(None),
             #[cfg(feature = "wal")]
@@ -3268,6 +3286,8 @@ impl GrafeoDB {
             wal: self.wal.clone(),
             #[cfg(feature = "wal")]
             wal_records_at_checkpoint: Arc::clone(&self.wal_records_at_checkpoint),
+            #[cfg(all(feature = "wal", feature = "grafeo-file"))]
+            wal_retention: Arc::clone(&self.wal_retention),
         })
     }
 
@@ -3472,10 +3492,18 @@ impl GrafeoDB {
     ///
     /// # Errors
     ///
-    /// Returns an error if no full backup exists; `GRAFEO-S005`
+    /// Returns an invalid-input error when the backup directory holds no full
+    /// backup yet; `GRAFEO-S005`
     /// ([`ErrorCode::BackupChainBroken`](grafeo_common::utils::error::ErrorCode::BackupChainBroken))
-    /// when the log the chain continues from was removed, which a new full
-    /// backup fixes; the database-closed error after `close()`; the
+    /// when the chain cannot continue, which a new full backup fixes, its
+    /// message naming the cause: the database has no backup cursor (none was
+    /// written, or [`release_backup_cursor`](Self::release_backup_cursor)
+    /// released it), the cursor is of the WAL format before 0.6.0, the chain
+    /// ends before the cursor, the WAL from the cursor on passed the
+    /// [retention limit](crate::Config::with_wal_retention_limit) and was
+    /// removed, the segment where the last backup ended was removed from
+    /// outside, or the WAL has a gap; the database-closed error after
+    /// `close()`; the
     /// unsupported error on a database on a backend of its own
     /// ([`with_store`](Self::with_store)), which has no full backup to
     /// follow.
@@ -3496,7 +3524,7 @@ impl GrafeoDB {
 
         let _destination = backup::lock_backup_directory(backup_dir, false)?;
         let current_epoch = self.transaction_manager.current_epoch();
-        backup::do_backup_incremental(backup_dir, wal, current_epoch)
+        backup::do_backup_incremental(backup_dir, wal, &self.wal_retention, current_epoch)
     }
 
     /// Waits for the previous backup before capturing any backup state.
@@ -3527,6 +3555,32 @@ impl GrafeoDB {
         self.wal
             .as_ref()
             .and_then(|wal| backup::read_backup_cursor(wal.dir()).ok().flatten())
+    }
+
+    /// Releases the backup cursor: the next backup must be a full one.
+    ///
+    /// After a full backup, every checkpoint keeps the WAL from where the
+    /// last backup ended, so the next incremental backup can copy it (up to
+    /// the [retention limit](crate::Config::with_wal_retention_limit)).
+    /// When you stop taking incremental backups, release the cursor, and
+    /// checkpoints keep only the WAL a reopen needs. An incremental backup
+    /// after the release fails with `GRAFEO-S005`
+    /// ([`ErrorCode::BackupChainBroken`](grafeo_common::utils::error::ErrorCode::BackupChainBroken)),
+    /// and a full backup starts a new chain. Returns whether there was a
+    /// cursor to release.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the cursor cannot be removed, and the
+    /// database-closed error after `close()`.
+    #[cfg(all(feature = "wal", feature = "grafeo-file"))]
+    pub fn release_backup_cursor(&self) -> Result<bool> {
+        let _open = self.hold_open()?;
+        let _backup = self.hold_backup();
+        match self.wal.as_ref() {
+            Some(wal) => backup::remove_backup_cursor(wal.dir()),
+            None => Ok(false),
+        }
     }
 
     /// Restores a database from a backup chain to a specific epoch.

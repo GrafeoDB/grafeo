@@ -54,7 +54,7 @@ fn sidecar_wal_path(path: &std::path::Path) -> std::path::PathBuf {
 /// snapshot and lets commits go on, the file manager writes the new image
 /// (its chunks, a sync, the header, the trim), then the flush removes the
 /// segment the image covers.
-const CHECKPOINT_POINTS: [&str; 15] = [
+const CHECKPOINT_POINTS: [&str; 16] = [
     "flush:before_serialize",
     "wal:after_segment_create",
     "wal:after_segment_header",
@@ -70,12 +70,13 @@ const CHECKPOINT_POINTS: [&str; 15] = [
     "flush:before_remove_segments",
     "wal:before_remove_segment",
     "wal:after_remove_segment",
+    "flush:after_retention_release",
 ];
 
 /// The crash points of `close()` with the WAL enabled (in `NoSync` mode, so
 /// no background flusher syncs first): the sync of the WAL and its sync
 /// marker, the checkpoint's, then the removal of the sidecar WAL.
-const CLOSE_POINTS: [&str; 19] = [
+const CLOSE_POINTS: [&str; 20] = [
     "wal:before_sync",
     "wal:after_sync",
     "wal:after_frame",
@@ -94,6 +95,7 @@ const CLOSE_POINTS: [&str; 19] = [
     CHECKPOINT_POINTS[12],
     CHECKPOINT_POINTS[13],
     CHECKPOINT_POINTS[14],
+    CHECKPOINT_POINTS[15],
     "close:before_remove_sidecar_wal",
 ];
 

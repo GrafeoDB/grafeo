@@ -65,7 +65,10 @@ pub use admin::{
 };
 pub use auth::{Grant, Identity, Role, StatementKind};
 pub use catalog::{Catalog, CatalogError, IndexDefinition, IndexType};
-pub use config::{AccessMode, Config, ConfigError, DurabilityMode, GraphModel, HistoryRetention};
+pub use config::{
+    AccessMode, Config, ConfigError, DEFAULT_WAL_RETENTION_LIMIT, DurabilityMode, GraphModel,
+    HistoryRetention,
+};
 pub use database::GrafeoDB;
 pub use database::GraphHandle;
 /// The syntax `GrafeoDB::load_rdf` reads.

@@ -179,6 +179,11 @@ pub struct CreateOptions {
     /// default); `null` or `Infinity` runs queries without a limit.
     #[napi(ts_type = "number | null")]
     pub query_timeout: Option<Either<f64, Null>>,
+    /// How many bytes of WAL a checkpoint keeps at most for the next
+    /// incremental backup (1 GiB by default). Past it, the oldest part goes
+    /// and the next incremental backup fails, asking for a full backup. For
+    /// this open only.
+    pub wal_retention_limit: Option<i64>,
 }
 
 /// The query timeout `options.queryTimeout` sets: `None` for `null` or
@@ -222,12 +227,13 @@ impl JsGrafeoDB {
             .and_then(|options| options.shuffle_unordered)
             .unwrap_or(false);
         let mut config = config.with_shuffle_unordered(shuffle_unordered);
-        let (wal_salvage, history_retention, timeout) =
-            options.map_or((None, None, None), |options| {
+        let (wal_salvage, history_retention, timeout, wal_retention_limit) =
+            options.map_or((None, None, None, None), |options| {
                 (
                     options.wal_salvage,
                     options.history_retention,
                     options.query_timeout,
+                    options.wal_retention_limit,
                 )
             });
         if wal_salvage.unwrap_or(false) {
@@ -242,6 +248,14 @@ impl JsGrafeoDB {
         if let Some(retention) = history_retention {
             config =
                 config.with_history_retention(crate::time_travel::history_retention(retention)?);
+        }
+        if let Some(bytes) = wal_retention_limit {
+            let bytes = u64::try_from(bytes).map_err(|_| {
+                NodeGrafeoError::InvalidArgument(format!(
+                    "walRetentionLimit must be a number of bytes, not negative: {bytes}"
+                ))
+            })?;
+            config = config.with_wal_retention_limit(bytes);
         }
         let db = GrafeoDB::with_config(config).map_err(NodeGrafeoError::from)?;
         Ok(Self {
@@ -862,6 +876,17 @@ impl JsGrafeoDB {
         let db = self.inner.read();
         db.backup_incremental(std::path::Path::new(&backup_dir))
             .map(|_| ())
+            .map_err(NodeGrafeoError::from)
+            .map_err(napi::Error::from)
+    }
+
+    /// Release the backup cursor: the next backup must be a full one.
+    /// Checkpoints then keep only the WAL a reopen needs. Returns whether
+    /// there was a cursor to release.
+    #[napi]
+    pub fn release_backup_cursor(&self) -> Result<bool> {
+        let db = self.inner.read();
+        db.release_backup_cursor()
             .map_err(NodeGrafeoError::from)
             .map_err(napi::Error::from)
     }

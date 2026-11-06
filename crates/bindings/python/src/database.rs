@@ -515,6 +515,11 @@ impl PyGrafeoDB {
     ///
     /// query_timeout is how many seconds a query may run before it fails
     /// (30 by default); None or math.inf runs queries without a limit.
+    ///
+    /// wal_retention_limit is how many bytes of WAL a checkpoint keeps at
+    /// most for the next incremental backup (1 GiB by default). Past it,
+    /// the oldest part goes and the next incremental backup fails, asking
+    /// for a full backup. For this open only.
     #[new]
     #[pyo3(signature = (
         path=None,
@@ -524,7 +529,8 @@ impl PyGrafeoDB {
         shuffle_unordered=false,
         wal_salvage=false,
         history_retention=None,
-        query_timeout=default_query_timeout()
+        query_timeout=default_query_timeout(),
+        wal_retention_limit=None
     ))]
     #[allow(
         clippy::too_many_arguments,
@@ -538,6 +544,7 @@ impl PyGrafeoDB {
         wal_salvage: bool,
         history_retention: Option<&Bound<'_, PyAny>>,
         query_timeout: Option<f64>,
+        wal_retention_limit: Option<u64>,
         py: Python<'_>,
     ) -> PyResult<Self> {
         let mut config = if let Some(p) = path {
@@ -555,6 +562,9 @@ impl PyGrafeoDB {
         if let Some(retention) = history_retention {
             config =
                 config.with_history_retention(crate::time_travel::history_retention(retention)?);
+        }
+        if let Some(bytes) = wal_retention_limit {
+            config = config.with_wal_retention_limit(bytes);
         }
         config = match query_timeout.map(|seconds| timeout_seconds(seconds, "query_timeout")) {
             Some(Some(timeout)) => config.with_query_timeout(timeout?),
@@ -3297,6 +3307,19 @@ impl PyGrafeoDB {
             db.backup_incremental(std::path::Path::new(&backup_dir))?;
             Ok(())
         })
+    }
+
+    /// Releases the backup cursor: the next backup must be a full one.
+    ///
+    /// After a full backup, checkpoints keep the WAL the next incremental
+    /// backup copies (up to wal_retention_limit). When you stop taking
+    /// incremental backups, release the cursor so checkpoints keep only
+    /// what a reopen needs. Returns whether there was a cursor to release.
+    ///
+    /// Example:
+    ///     db.release_backup_cursor()
+    fn release_backup_cursor(&self, py: Python<'_>) -> PyResult<bool> {
+        self.released(py, |db| Ok(db.release_backup_cursor()?))
     }
 
     /// Restores a database to a specific epoch from a backup chain.

@@ -785,6 +785,18 @@ public sealed class GrafeoDB : IGrafeoDB, IDisposable, IAsyncDisposable
     }
 
     /// <summary>
+    /// Release the backup cursor: the next backup must be a full one, and
+    /// checkpoints then keep only the WAL a reopen needs. Returns whether
+    /// there was a cursor to release.
+    /// </summary>
+    public bool ReleaseBackupCursor()
+    {
+        ThrowIfDisposed();
+        GrafeoException.ThrowIfFailed(NativeMethods.grafeo_release_backup_cursor(Handle, out var released));
+        return released != 0;
+    }
+
+    /// <summary>
     /// Restore database to a specific epoch from a backup directory. An epoch
     /// past the end of the chain restores the latest state the chain holds.
     /// </summary>

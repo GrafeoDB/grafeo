@@ -956,7 +956,7 @@ fn a_backup_chain_taken_by_0_6_0_restores() {
 #[cfg(feature = "gql")]
 #[test]
 fn incremental_backup_refuses_a_cursor_from_another_directory() {
-    use grafeo_common::utils::error::{Error, ErrorCode};
+    use grafeo_common::utils::error::{Error, ErrorCode, StorageError};
     use std::collections::BTreeMap;
 
     fn directory_bytes(path: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
@@ -1003,9 +1003,13 @@ fn incremental_backup_refuses_a_cursor_from_another_directory() {
     let a_before = directory_bytes(&backups_a);
 
     let error = db.backup_incremental(&backups_a).unwrap_err();
-    assert_eq!(error.error_code(), ErrorCode::InvalidInput);
-    let Error::InvalidValue(message) = error else {
-        panic!("wrong backup chain must be InvalidValue, got {error:?}");
+    // Another chain moved the cursor: this chain cannot continue, a new full backup starts one.
+    assert_eq!(error.error_code(), ErrorCode::BackupChainBroken);
+    let Error::Storage(storage) = error else {
+        panic!("wrong backup chain must be a broken chain, got {error:?}");
+    };
+    let StorageError::BackupChainBroken(message) = *storage else {
+        panic!("wrong backup chain must be BackupChainBroken, got {storage:?}");
     };
     assert!(message.contains(backups_a.to_str().unwrap()), "{message}");
     for epoch in [full_a.end_epoch, full_b.end_epoch] {
@@ -1045,7 +1049,7 @@ fn incremental_backup_refuses_a_cursor_from_another_directory() {
 /// would leave the change out.
 #[test]
 fn incremental_backup_refuses_a_cursor_further_along_the_log_at_the_same_epoch() {
-    use grafeo_common::utils::error::{Error, ErrorCode};
+    use grafeo_common::utils::error::{Error, ErrorCode, StorageError};
 
     let dir = tempfile::tempdir().unwrap();
     let source = dir.path().join("source.grafeo");
@@ -1063,9 +1067,12 @@ fn incremental_backup_refuses_a_cursor_further_along_the_log_at_the_same_epoch()
     db.execute("INSERT (:Person {name: 'Gus'})").unwrap();
 
     let error = db.backup_incremental(&backups_a).unwrap_err();
-    assert_eq!(error.error_code(), ErrorCode::InvalidInput);
-    let Error::InvalidValue(message) = error else {
-        panic!("a chain behind the cursor must be InvalidValue, got {error:?}");
+    assert_eq!(error.error_code(), ErrorCode::BackupChainBroken);
+    let Error::Storage(storage) = error else {
+        panic!("a chain behind the cursor must be a broken chain, got {error:?}");
+    };
+    let StorageError::BackupChainBroken(message) = *storage else {
+        panic!("a chain behind the cursor must be BackupChainBroken, got {storage:?}");
     };
     assert!(message.contains(backups_a.to_str().unwrap()), "{message}");
 

@@ -281,6 +281,12 @@ export declare class GrafeoDB {
   /** Create an incremental backup (WAL records since last backup). */
   backupIncremental(backupDir: string): void
   /**
+   * Release the backup cursor: the next backup must be a full one.
+   * Checkpoints then keep only the WAL a reopen needs. Returns whether
+   * there was a cursor to release.
+   */
+  releaseBackupCursor(): boolean
+  /**
    * Restore a database to a specific epoch from a backup chain. An epoch
    * past the end of the chain restores the latest state the chain holds.
    */
@@ -830,6 +836,13 @@ export interface CreateOptions {
    * default); `null` or `Infinity` runs queries without a limit.
    */
   queryTimeout?: number | null
+  /**
+   * How many bytes of WAL a checkpoint keeps at most for the next
+   * incremental backup (1 GiB by default). Past it, the oldest part goes
+   * and the next incremental backup fails, asking for a full backup. For
+   * this open only.
+   */
+  walRetentionLimit?: number
 }
 
 /** Options for CSV import. */

@@ -283,8 +283,10 @@ fn every_crash_and_replay_continues_the_epochs() {
 #[test]
 fn a_crash_during_a_checkpoint_keeps_the_epoch() {
     let mut crashes = 0;
-    // More points than a checkpoint has, so the last runs complete.
-    for point in 1..=16 {
+    // More points than a checkpoint has (17 with the WAL retention
+    // release), so the last runs complete.
+    const POINTS: u32 = 24;
+    for point in 1..=POINTS {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("people.grafeo");
         let scenario = format!("checkpoint:{point}");
@@ -309,8 +311,8 @@ fn a_crash_during_a_checkpoint_keeps_the_epoch() {
         db.close().unwrap();
     }
     assert!(
-        (1..16).contains(&crashes),
-        "{crashes} of 16 runs crashed: the sweep covers every point of a checkpoint"
+        (1..POINTS).contains(&crashes),
+        "{crashes} of {POINTS} runs crashed: the sweep covers every point of a checkpoint"
     );
 }
 

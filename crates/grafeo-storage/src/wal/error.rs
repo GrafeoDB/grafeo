@@ -203,6 +203,18 @@ pub enum WalError {
         path: PathBuf,
     },
 
+    /// A scan of segments that are regions of a larger file (an incremental
+    /// backup) was asked for what only a WAL directory has, or its regions
+    /// do not form a log: their headers do not rise in file order, or one
+    /// is shorter than a segment header.
+    #[error("the WAL segments in {} cannot be read as a log: {reason}", .path.display())]
+    RegionSource {
+        /// The file the regions lie in.
+        path: PathBuf,
+        /// What is wrong.
+        reason: String,
+    },
+
     /// A log position would pass the largest one.
     #[error("the WAL log position would pass the largest LSN ({})", u64::MAX)]
     LsnOverflow,
@@ -293,7 +305,8 @@ impl From<WalError> for Error {
             | WalError::UnsupportedFrame { .. }
             | WalError::Misplaced { .. }
             | WalError::OccupiedSegment { .. }
-            | WalError::TemporaryWithFrames { .. } => {
+            | WalError::TemporaryWithFrames { .. }
+            | WalError::RegionSource { .. } => {
                 Error::from(StorageError::RecoveryFailed(error.to_string()))
             }
             WalError::RecordTooLarge { .. } => Error::InvalidValue(error.to_string()),

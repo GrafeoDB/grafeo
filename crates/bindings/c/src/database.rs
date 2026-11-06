@@ -2265,6 +2265,28 @@ pub extern "C" fn grafeo_backup_incremental(
     }
 }
 
+/// Release the backup cursor: the next backup must be a full one, and
+/// checkpoints then keep only the WAL a reopen needs. Writes 1 to
+/// `out_released` when there was a cursor to release, 0 when there was none
+/// (`out_released` may be null).
+#[unsafe(no_mangle)]
+pub extern "C" fn grafeo_release_backup_cursor(
+    db: *mut GrafeoDatabase,
+    out_released: *mut i32,
+) -> GrafeoStatus {
+    let db = db_ref!(db);
+    match db.inner.read().release_backup_cursor() {
+        Ok(released) => {
+            if !out_released.is_null() {
+                // SAFETY: the caller passes null or a valid pointer to an i32.
+                unsafe { *out_released = i32::from(released) };
+            }
+            GrafeoStatus::Ok
+        }
+        Err(e) => set_error(&e),
+    }
+}
+
 /// Restore a database to a specific epoch from a backup chain. An epoch past
 /// the end of the chain restores the latest state the chain holds.
 #[unsafe(no_mangle)]

@@ -84,7 +84,9 @@ pub use frame::{
     MAX_FRAME_PAYLOAD, MAX_FRAME_RECORD_BYTES, SEALED_OVERHEAD,
 };
 pub use log::{CheckpointMetadata, DurabilityMode, WalCipher, WalConfig, WalManager};
-pub use reader::{GROUP_BUFFER_BYTES, GroupFrames, ScanEnd, ScanOptions, Tail, TailKind, WalScan};
+pub use reader::{
+    GROUP_BUFFER_BYTES, GroupFrames, ScanEnd, ScanOptions, SegmentSource, Tail, TailKind, WalScan,
+};
 pub use record::{
     GraphTypeAlterationKind, NamedConstraintKind, PropertyAlterationKind, TypeConstraintKind,
     WalEntry, WalRecord,

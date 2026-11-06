@@ -42,6 +42,7 @@ mod inner {
         static AFTER_STAMPED: RefCell<Option<Hook>> = const { RefCell::new(None) };
         static AFTER_LOGGED: RefCell<Option<Hook>> = const { RefCell::new(None) };
         static AFTER_BACKUP_STATE_READ: RefCell<Option<Hook>> = const { RefCell::new(None) };
+        static AFTER_BACKUP_SEGMENT: RefCell<Option<Hook>> = const { RefCell::new(None) };
         static BEFORE_BACKUP_WAIT: RefCell<Option<Hook>> = const { RefCell::new(None) };
         static DURING_CHECKPOINT: RefCell<Option<Hook>> = const { RefCell::new(None) };
         static DURING_CHECKPOINT_WRITE: RefCell<Option<Hook>> = const { RefCell::new(None) };
@@ -134,6 +135,20 @@ mod inner {
     #[inline]
     pub fn run_after_backup_state_read() {
         if let Some(hook) = AFTER_BACKUP_STATE_READ.with(|slot| slot.borrow_mut().take()) {
+            hook();
+        }
+    }
+
+    /// Arms `hook` to run once after the next incremental backup on this
+    /// thread copied a WAL segment, before it opens the next one.
+    pub fn after_next_backup_segment_copied(hook: impl FnOnce() + 'static) {
+        AFTER_BACKUP_SEGMENT.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+    }
+
+    /// Runs the backup segment hook armed on this thread, if any.
+    #[inline]
+    pub fn run_after_backup_segment_copied() {
+        if let Some(hook) = AFTER_BACKUP_SEGMENT.with(|slot| slot.borrow_mut().take()) {
             hook();
         }
     }
@@ -316,6 +331,13 @@ mod inner {
     /// No-op when injection is disabled.
     #[inline]
     pub fn run_after_backup_state_read() {}
+
+    /// No-op when injection is disabled.
+    pub fn after_next_backup_segment_copied(_hook: impl FnOnce() + 'static) {}
+
+    /// No-op when injection is disabled.
+    #[inline]
+    pub fn run_after_backup_segment_copied() {}
 
     /// No-op when injection is disabled.
     pub fn before_next_backup_wait(_hook: impl FnOnce() + 'static) {}

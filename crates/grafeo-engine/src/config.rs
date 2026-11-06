@@ -411,6 +411,11 @@ impl fmt::Display for ConfigError {
 
 impl std::error::Error for ConfigError {}
 
+/// How much WAL a checkpoint keeps at most beyond the log it covers for
+/// incremental backups, by default: 1 GiB (see
+/// [`Config::with_wal_retention_limit`]).
+pub const DEFAULT_WAL_RETENTION_LIMIT: u64 = 1 << 30;
+
 /// Database configuration.
 ///
 /// Start from [`Config::in_memory()`], [`Config::persistent()`] or
@@ -726,6 +731,9 @@ pub struct Config {
     /// Checkpoint once the WAL holds this many bytes since the last
     /// checkpoint (see [`Config::with_checkpoint_wal_size`]).
     checkpoint_wal_size: Option<u64>,
+    /// The WAL a checkpoint keeps beyond its log position for a backup at
+    /// most, in bytes (see [`Config::with_wal_retention_limit`]).
+    wal_retention_limit: u64,
     /// How long the database keeps history (see
     /// [`Config::with_history_retention`]).
     history_retention: HistoryRetention,
@@ -894,6 +902,7 @@ impl Default for Config {
             encryption: None,
             wal_salvage: false,
             checkpoint_wal_size: None,
+            wal_retention_limit: DEFAULT_WAL_RETENTION_LIMIT,
             history_retention: HistoryRetention::Off,
             set: SetFields::default(),
         }
@@ -1362,6 +1371,25 @@ impl Config {
         self
     }
 
+    /// Sets how much WAL, in bytes, a checkpoint keeps at most beyond the
+    /// log it covers for incremental backups: 1 GiB by default
+    /// ([`DEFAULT_WAL_RETENTION_LIMIT`]).
+    ///
+    /// A checkpoint keeps the WAL from where the last backup ended, so the
+    /// next incremental backup can copy it. When backups stop, that WAL
+    /// would grow until the disk is full: past this limit a checkpoint
+    /// removes the oldest segments, so the WAL kept stays within it, and
+    /// warns once. The next incremental backup then fails with
+    /// `GRAFEO-S005`
+    /// ([`ErrorCode::BackupChainBroken`](grafeo_common::utils::error::ErrorCode::BackupChainBroken)),
+    /// and a full backup starts a new chain. Raise it when more than this
+    /// much is written between two incremental backups.
+    #[must_use]
+    pub fn with_wal_retention_limit(mut self, bytes: u64) -> Self {
+        self.wal_retention_limit = bytes;
+        self
+    }
+
     /// Sets how long the database keeps history (see [`HistoryRetention`]):
     /// a stored setting, which a database file keeps.
     #[must_use]
@@ -1570,6 +1598,14 @@ impl Config {
     #[must_use]
     pub fn checkpoint_wal_size(&self) -> Option<u64> {
         self.checkpoint_wal_size
+    }
+
+    /// How much WAL a checkpoint keeps at most beyond the log it covers for
+    /// incremental backups (see
+    /// [`with_wal_retention_limit`](Self::with_wal_retention_limit)).
+    #[must_use]
+    pub fn wal_retention_limit(&self) -> u64 {
+        self.wal_retention_limit
     }
 
     /// How long the database keeps history (see
@@ -2215,6 +2251,7 @@ mod tests {
             .with_checkpoint_interval(Duration::from_secs(88))
             .with_checkpoint_wal_size(19 * 1024 * 1024)
             .with_history_retention(HistoryRetention::Duration(Duration::from_secs(88)))
+            .with_wal_retention_limit(19 * 1024 * 1024)
             .with_wal_salvage();
         #[expect(
             deprecated,
@@ -2269,11 +2306,17 @@ mod tests {
             wal_salvage,
             checkpoint_wal_size,
             history_retention,
+            wal_retention_limit,
             // What the builders set: see the stored-configuration tests.
             set: _,
         } = config;
 
         assert_eq!(checkpoint_wal_size, Some(19 * 1024 * 1024));
+        assert_eq!(
+            wal_retention_limit,
+            19 * 1024 * 1024,
+            "with_wal_retention_limit sets the limit"
+        );
         assert_eq!(
             history_retention,
             HistoryRetention::Duration(Duration::from_secs(88)),

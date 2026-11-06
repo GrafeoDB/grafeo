@@ -814,8 +814,11 @@ mod crash {
     /// what was committed, whichever image the crash left.
     #[test]
     fn a_crash_in_a_checkpoint_keeps_the_history() {
+        // A ceiling on a checkpoint's crash points (17 with the WAL
+        // retention release): the first point past the last completes.
+        const MOST_POINTS: u64 = 24;
         let mut completed = false;
-        for point in 1..=16_u64 {
+        for point in 1..=MOST_POINTS {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("history.grafeo");
             let output = child_process::output(
@@ -852,7 +855,10 @@ mod crash {
                 break;
             }
         }
-        assert!(completed, "a checkpoint has fewer than 16 crash points");
+        assert!(
+            completed,
+            "a checkpoint has fewer than {MOST_POINTS} crash points"
+        );
     }
 }
 

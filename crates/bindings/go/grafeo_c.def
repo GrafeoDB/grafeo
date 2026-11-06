@@ -119,6 +119,7 @@ grafeo_open_read_only
 grafeo_open_single_file
 grafeo_open_with_history
 grafeo_rebuild_vector_index
+grafeo_release_backup_cursor
 grafeo_remove_edge_property
 grafeo_remove_node_label
 grafeo_remove_node_property

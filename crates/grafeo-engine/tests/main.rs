@@ -28,6 +28,7 @@ mod backup_contents;
 mod backup_full_segment_checked;
 mod backup_publication_durability;
 mod backup_restore;
+mod backup_retention;
 mod backup_serialization;
 mod backward_compatibility;
 mod benchmark_comparison;

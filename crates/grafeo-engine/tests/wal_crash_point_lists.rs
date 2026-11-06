@@ -51,30 +51,36 @@ fn read(path: &Path) -> String {
 }
 
 /// The `wal:` points of `maybe_crash("...")` calls in `text`, in the order they appear.
-fn crash_calls(text: &str) -> Vec<String> {
-    text.match_indices("maybe_crash(\"wal:")
+fn crash_calls(text: &str, prefix: &str) -> Vec<String> {
+    text.match_indices(&format!("maybe_crash(\"{prefix}"))
         .filter_map(|(at, call)| {
-            let start = at + call.len() - "wal:".len();
+            let start = at + call.len() - prefix.len();
             let end = text[start..].find('"')? + start;
             Some(text[start..end].to_string())
         })
         .collect()
 }
 
-/// The quoted `"wal:..."` strings of `text`, in order.
+/// The quoted crash points of `text` (`"wal:..."`, `"flush:..."` and `"checkpoint:..."`), in the
+/// order they appear.
 fn quoted_points(text: &str) -> Vec<String> {
-    text.match_indices("\"wal:")
-        .filter_map(|(at, _)| {
-            let start = at + 1;
-            let end = text[start..].find('"')? + start;
-            let point = &text[start..end];
-            point
-                .chars()
-                .skip(4)
-                .all(|c| c.is_ascii_lowercase() || c == '_')
-                .then(|| point.to_string())
+    let mut found: Vec<(usize, String)> = ["wal:", "flush:", "checkpoint:"]
+        .into_iter()
+        .flat_map(|prefix| {
+            text.match_indices(&format!("\"{prefix}"))
+                .filter_map(move |(at, _)| {
+                    let start = at + 1;
+                    let end = text[start..].find('"')? + start;
+                    let point = &text[start..end];
+                    let name = &point[prefix.len()..];
+                    (!name.is_empty() && name.chars().all(|c| c.is_ascii_lowercase() || c == '_'))
+                        .then(|| (at, point.to_string()))
+                })
+                .collect::<Vec<_>>()
         })
-        .collect()
+        .collect();
+    found.sort_unstable_by_key(|(at, _)| *at);
+    found.into_iter().map(|(_, point)| point).collect()
 }
 
 /// The quoted points of the `const NAME` array in `file`.
@@ -98,10 +104,13 @@ fn in_rotation(point: &str) -> bool {
 const UNTESTED: &[(&str, &str)] = &[];
 
 #[test]
-fn every_wal_crash_point_in_the_code_is_named_by_a_test() {
+fn every_wal_and_flush_crash_point_in_the_code_is_named_by_a_test() {
     let mut code = BTreeSet::new();
     for file in sources(&crates().join("grafeo-storage/src")) {
-        code.extend(crash_calls(&read(&file)));
+        code.extend(crash_calls(&read(&file), "wal:"));
+    }
+    for file in sources(&crates().join("grafeo-engine/src")) {
+        code.extend(crash_calls(&read(&file), "flush:"));
     }
     assert!(code.len() > 10, "the WAL's points were found: {code:?}");
     let mut named = BTreeSet::new();
@@ -121,10 +130,10 @@ fn every_wal_crash_point_in_the_code_is_named_by_a_test() {
     );
 }
 
-/// The rotation's run as a checkpoint reaches it: the checkpoint's points walked in turn, a panic
-/// at each, on a database built outside the closure.
+/// Every crash point a checkpoint reaches, in order: the checkpoint's points walked in turn, a
+/// panic at each, on a database built outside the closure.
 #[cfg(all(feature = "grafeo-file", feature = "testing-crash-injection"))]
-fn rotation_run() -> Vec<String> {
+fn checkpoint_run() -> Vec<String> {
     use grafeo_common::testing::crash::{disable_crash, enable_crash_at};
     use std::panic::{AssertUnwindSafe, catch_unwind};
 
@@ -150,10 +159,7 @@ fn rotation_run() -> Vec<String> {
             .downcast_ref::<String>()
             .cloned()
             .unwrap_or_default();
-        let point = message.rsplit(' ').next().unwrap_or_default().to_string();
-        if in_rotation(&point) {
-            run.push(point);
-        }
+        run.push(message.rsplit(' ').next().unwrap_or_default().to_string());
     }
     panic!("a checkpoint ran past 64 crash points")
 }
@@ -161,7 +167,10 @@ fn rotation_run() -> Vec<String> {
 #[cfg(all(feature = "grafeo-file", feature = "testing-crash-injection"))]
 #[test]
 fn the_flow_lists_hold_the_rotation_run_a_checkpoint_reaches() {
-    let run = rotation_run();
+    let run: Vec<String> = checkpoint_run()
+        .into_iter()
+        .filter(|point| in_rotation(point))
+        .collect();
     assert!(run.len() >= 3, "the rotation's points were found: {run:?}");
     for (file, name) in [
         ("grafeo-storage/tests/wal_v2_crash.rs", "WRITE_POINTS"),
@@ -181,4 +190,16 @@ fn the_flow_lists_hold_the_rotation_run_a_checkpoint_reaches() {
             "{file} `{name}`: the rotation's points, in the code's order"
         );
     }
+}
+
+/// `CHECKPOINT_POINTS` is every crash point a checkpoint reaches, in its order: a point added to
+/// the checkpoint fails here until the list names it.
+#[cfg(all(feature = "grafeo-file", feature = "testing-crash-injection"))]
+#[test]
+fn the_checkpoint_list_is_every_point_a_checkpoint_reaches() {
+    let listed = listed(
+        &crates().join("grafeo-engine/tests/crash_injection_single_file.rs"),
+        "CHECKPOINT_POINTS",
+    );
+    assert_eq!(listed, checkpoint_run());
 }

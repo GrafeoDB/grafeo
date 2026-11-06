@@ -61,6 +61,7 @@ pub(super) struct RowPlanParts {
     pub(super) path_search_budget: usize,
     pub(super) deadline: Option<grafeo_common::clock::Instant>,
     pub(super) read_counter: Arc<grafeo_core::execution::operators::ReadCounter>,
+    pub(super) warnings: Arc<grafeo_common::utils::warning::WarningSink>,
     pub(super) clock: StatementClock,
 }
 

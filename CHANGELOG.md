@@ -38,6 +38,14 @@ Queries that ran in 0.6.1 and now fail or behave differently.
 ### Added
 
 - **Graph procedures**: `CALL grafeo.ktruss()` and `grafeo.ktruss(k)`, `grafeo.total_triangles()` and `grafeo.subgraph_isomorphism()`, and the Python methods `ktruss(k=None)` and `subgraph_isomorphism_count(pattern_edges, pattern_nodes)`.
+- **Query warnings**: a statement that uses a deprecated form or has something worth knowing returns its rows with warnings, each with a GQLSTATUS code (class 01), a kind and a message. They are on `QueryResult::warnings` and on streaming results, in every binding (Python also raises them through `warnings.warn`), and the CLI prints them on stderr. Experimental.
+- **SQL/PGQ `||`** concatenates strings and lists.
+- **`grafeo.pagerank`** warns (01Y01) when it runs out of iterations before its scores settle within `tolerance`.
+
+### Deprecated
+
+- **`ZONED DATETIME '...'` and `ZONED TIME '...'` literals**: write `DATETIME '...'` or `TIME '...'` with an offset. They warn with 01X01 and 01X03, and 0.7.0 refuses them.
+- **`+` on two lists** in GQL and SQL/PGQ: use `||`. It warns with 01X02, and 0.7.0 refuses it.
 
 ### Fixed
 

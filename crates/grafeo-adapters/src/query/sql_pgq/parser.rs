@@ -667,9 +667,11 @@ impl<'a> Parser<'a> {
         let mut left = self.parse_multiplicative_expression()?;
 
         loop {
+            // SQL's `||` joins strings and lists, at the precedence of `+`.
             let op = match self.current.kind {
                 TokenKind::Plus => BinaryOp::Add,
                 TokenKind::Minus => BinaryOp::Sub,
+                TokenKind::Concat => BinaryOp::Concat,
                 _ => break,
             };
 

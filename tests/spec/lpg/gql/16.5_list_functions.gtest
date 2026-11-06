@@ -224,7 +224,7 @@ tests:
   - name: list_concatenation
     setup:
       - "INSERT (:N {v: 1})"
-    query: "MATCH (n:N) RETURN [1, 2] + [3, 4] AS combined"
+    query: "MATCH (n:N) RETURN [1, 2] || [3, 4] AS combined"
     expect:
       rows:
         - ["[1, 2, 3, 4]"]
@@ -232,7 +232,7 @@ tests:
   - name: list_concat_with_empty
     setup:
       - "INSERT (:N {v: 1})"
-    query: "MATCH (n:N) RETURN [1, 2] + [] AS combined"
+    query: "MATCH (n:N) RETURN [1, 2] || [] AS combined"
     expect:
       rows:
         - ["[1, 2]"]

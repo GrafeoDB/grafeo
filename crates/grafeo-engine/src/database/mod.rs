@@ -1637,7 +1637,7 @@ impl GrafeoDB {
                         && !target_store.load_edge(*id, *src, *dst, edge_type)?
                     {
                         grafeo_common::grafeo_warn!(
-                            "left out edge {} of the WAL {}: its graph holds no node at one of                              its ends",
+                            "left out edge {} of the WAL {}: its graph holds no node at one of its ends",
                             id.as_u64(),
                             wal.display()
                         );
@@ -3747,6 +3747,7 @@ impl crate::admin::AdminService for GrafeoDB {
 // =========================================================================
 
 pub use crate::query::profile::{OperatorProfile, QueryProfile};
+pub use grafeo_common::utils::warning::{QueryWarning, WarningKind};
 pub use grafeo_core::execution::operators::WriteCounters;
 
 /// What a [`QueryResult`] holds.
@@ -3829,6 +3830,16 @@ pub struct QueryResult {
     pub profile: Option<QueryProfile>,
     /// What the result holds: rows, a SPARQL ASK boolean, or a SPARQL graph.
     pub kind: ResultKind,
+    /// The warnings the statement raised, each once, ordered by code: a
+    /// deprecated form it wrote or ran, or a notice (GQLSTATUS class `01`).
+    /// Empty when it raised none, and for a statement that failed, which
+    /// returns its error only.
+    ///
+    /// # Stability: Experimental
+    ///
+    /// New in 0.6.2: new warnings and kinds may be added in any release,
+    /// with a CHANGELOG entry. See <https://grafeo.dev/stability/>.
+    pub warnings: Vec<QueryWarning>,
 }
 
 impl QueryResult {
@@ -3882,6 +3893,7 @@ impl QueryResult {
             counters: Default::default(),
             profile: None,
             kind: ResultKind::Rows,
+            warnings: Vec::new(),
         }
     }
 
@@ -3900,6 +3912,7 @@ impl QueryResult {
             counters: Default::default(),
             profile: None,
             kind: ResultKind::Rows,
+            warnings: Vec::new(),
         }
     }
 
@@ -3923,6 +3936,7 @@ impl QueryResult {
             counters: Default::default(),
             profile: None,
             kind: ResultKind::Rows,
+            warnings: Vec::new(),
         })
     }
 
@@ -3948,6 +3962,7 @@ impl QueryResult {
             counters: Default::default(),
             profile: None,
             kind: ResultKind::Rows,
+            warnings: Vec::new(),
         })
     }
 
@@ -3974,6 +3989,7 @@ impl QueryResult {
             counters: Default::default(),
             profile: None,
             kind: ResultKind::Rows,
+            warnings: Vec::new(),
         })
     }
 
@@ -4049,6 +4065,28 @@ impl QueryResult {
             ));
         }
         T::from_value(&self.rows[0][0])
+    }
+
+    /// The warnings the statement raised (see [`warnings`](Self::warnings)).
+    ///
+    /// # Stability: Experimental
+    ///
+    /// New in 0.6.2. See <https://grafeo.dev/stability/>.
+    #[must_use]
+    pub fn warnings(&self) -> &[QueryWarning] {
+        &self.warnings
+    }
+
+    /// Returns the result with the statement's `warnings`, each once,
+    /// ordered by code.
+    #[cfg(any(lpg_language, rdf_language))]
+    #[must_use]
+    pub(crate) fn with_warnings(
+        mut self,
+        warnings: grafeo_common::utils::warning::WarningSet,
+    ) -> Self {
+        self.warnings = warnings.to_query_warnings();
+        self
     }
 
     /// Returns a slice of all result rows.

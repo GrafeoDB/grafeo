@@ -35,6 +35,9 @@ pub struct ProcedureCallOperator {
     /// for PageRank, even though the algorithm internally names it `"pagerank"`).
     /// Used to remap procedure result columns for YIELD matching.
     canonical_columns: Vec<String>,
+    /// Where the calling statement raises its warnings, which the
+    /// procedure's run adds to.
+    warnings: Option<Arc<grafeo_common::utils::warning::WarningSink>>,
     /// Cached procedure result (populated on first next()).
     result: Option<AlgorithmResult>,
     /// Current row position in the cached result.
@@ -65,6 +68,7 @@ impl ProcedureCallOperator {
             lpg_store: None,
             yield_columns,
             canonical_columns,
+            warnings: None,
             result: None,
             row_index: 0,
             output_columns: Vec::new(),
@@ -83,6 +87,13 @@ impl ProcedureCallOperator {
         self
     }
 
+    /// Raises the procedure's warnings into `sink`, the calling statement's.
+    #[must_use]
+    pub fn with_warnings(mut self, sink: Arc<grafeo_common::utils::warning::WarningSink>) -> Self {
+        self.warnings = Some(sink);
+        self
+    }
+
     /// Executes the procedure and resolves YIELD column mapping.
     fn execute_algorithm(&mut self) -> Result<(), OperatorError> {
         let ctx = match self.lpg_store.as_deref() {
@@ -96,6 +107,9 @@ impl ProcedureCallOperator {
             // arguments stays one (a query vector the index cannot measure,
             // #593), with the procedure's own message.
             .map_err(OperatorError::from)?;
+        if let Some(sink) = &self.warnings {
+            sink.raise_all(result.warnings);
+        }
 
         // Use canonical column names if available (same length as result columns),
         // otherwise fall back to the algorithm's own column names.

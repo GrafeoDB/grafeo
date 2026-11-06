@@ -27,6 +27,7 @@ impl Session {
             .with_writer(self.rdf_writer())
             .with_path_search_budget(budget)
             .with_deadline(deadline)
+            .with_warnings(self.statement_warnings())
             .with_exists_run_once(
                 self.plan_options
                     .rules
@@ -49,7 +50,8 @@ impl Session {
     fn execute_graphql_rdf_untimed(&self, query: &str) -> Result<QueryResult> {
         use crate::query::{optimizer::Optimizer, translators::graphql_rdf};
 
-        let mut logical_plan = graphql_rdf::translate(query, "http://example.org/")?;
+        let mut logical_plan =
+            self.translated(graphql_rdf::translate(query, "http://example.org/")?);
         crate::query::processor::substitute_with_defaults(&mut logical_plan, None)?;
         let active = self.active_store();
         let optimizer = Optimizer::from_graph_store(&*active);
@@ -83,7 +85,8 @@ impl Session {
         };
 
         // Parse and translate the query to a logical plan
-        let mut logical_plan = graphql_rdf::translate(query, "http://example.org/")?;
+        let mut logical_plan =
+            self.translated(graphql_rdf::translate(query, "http://example.org/")?);
 
         // The query's own defaults, then the parameters given
         substitute_with_defaults(&mut logical_plan, Some(&params))?;
@@ -113,7 +116,7 @@ impl Session {
     fn execute_sparql_untimed(&self, query: &str) -> Result<QueryResult> {
         use crate::query::{optimizer::Optimizer, translators::sparql};
 
-        let logical_plan = sparql::translate(query)?;
+        let logical_plan = self.translated(sparql::translate(query)?);
         let optimizer = Optimizer::for_rdf_plan(&self.rdf_store, &logical_plan);
         let optimized_plan = optimizer.optimize(logical_plan)?;
         self.run_rdf_plan(&optimized_plan, "sparql")
@@ -142,7 +145,7 @@ impl Session {
     ) -> Result<QueryResult> {
         use crate::query::{optimizer::Optimizer, translators::sparql};
 
-        let logical_plan = sparql::translate_with_bindings(query, &params)?;
+        let logical_plan = self.translated(sparql::translate_with_bindings(query, &params)?);
 
         let optimizer = Optimizer::for_rdf_plan(&self.rdf_store, &logical_plan);
         let optimized_plan = optimizer.optimize(logical_plan)?;
@@ -203,22 +206,23 @@ impl Session {
             if optimized_plan.profile {
                 let (mut physical_plan, entries) = planner.plan_profiled(optimized_plan)?;
                 let executor = self
-                    .make_executor(physical_plan.columns.clone())
+                    .executor_with_deadline(physical_plan.columns.clone())
                     .with_deadline(deadline);
                 let _result = executor.execute(physical_plan.operator.as_mut())?;
                 let total_time_ms = start_time.elapsed().as_secs_f64() * 1000.0;
                 let profile_tree =
                     crate::query::profile::build_profile_tree(&optimized_plan.root, entries)?;
-                return Ok(crate::query::profile::profile_result(
-                    &profile_tree,
-                    total_time_ms,
-                ));
+                return Ok(
+                    crate::query::profile::profile_result(&profile_tree, total_time_ms)
+                        .with_warnings(planner.warnings().raised()),
+                );
             }
             let mut physical_plan = planner.plan(optimized_plan)?;
             let executor = self
-                .make_executor(physical_plan.columns.clone())
+                .executor_with_deadline(physical_plan.columns.clone())
                 .with_deadline(deadline)
-                .with_read_counter(planner.read_counter());
+                .with_read_counter(planner.read_counter())
+                .with_warnings(planner.warnings());
             executor
                 .execute(physical_plan.operator.as_mut())
                 .map(|result| result.with_kind(optimized_plan.result_kind))

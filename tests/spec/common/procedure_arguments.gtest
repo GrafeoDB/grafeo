@@ -42,6 +42,8 @@ tests:
         - [2, 0.2802]
         - [3, 0.2742]
         - [4, 0.1587]
+      # The iteration limit stops it before the tolerance: a notice.
+      warnings: ["01Y01"]
 
   # An expression of parameters runs like its value: $half * 2 is 0.5.
   - name: pagerank_expression_of_parameters
@@ -62,6 +64,8 @@ tests:
         - [2, 0.2802]
         - [3, 0.2742]
         - [4, 0.1587]
+      # The iteration limit stops it before the tolerance: a notice.
+      warnings: ["01Y01"]
 
   - name: pagerank_parameters_in_a_map
     setup:

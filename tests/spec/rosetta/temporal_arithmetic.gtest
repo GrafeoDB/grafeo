@@ -64,7 +64,7 @@ tests:
         - [11, "+01:00"]
 
   - name: a_zoned_datetime_minus_a_duration
-    query: "RETURN ZONED DATETIME '2024-03-15T10:00:00+01:00' - DURATION 'PT1H' = ZONED DATETIME '2024-03-15T09:00:00+01:00' AS r"
+    query: "RETURN DATETIME '2024-03-15T10:00:00+01:00' - DURATION 'PT1H' = DATETIME '2024-03-15T09:00:00+01:00' AS r"
     expect:
       rows:
         - [true]

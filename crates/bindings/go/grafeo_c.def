@@ -138,6 +138,10 @@ grafeo_result_nodes_json
 grafeo_result_properties_set
 grafeo_result_row_count
 grafeo_result_rows_scanned
+grafeo_result_warning_code
+grafeo_result_warning_count
+grafeo_result_warning_kind
+grafeo_result_warning_message
 grafeo_rollback
 grafeo_save
 grafeo_set_cdc_enabled
@@ -149,6 +153,10 @@ grafeo_stream_columns_json
 grafeo_stream_free
 grafeo_stream_next_row_json
 grafeo_stream_open
+grafeo_stream_warning_code
+grafeo_stream_warning_count
+grafeo_stream_warning_kind
+grafeo_stream_warning_message
 grafeo_transaction_execute
 grafeo_transaction_execute_language
 grafeo_transaction_execute_with_params

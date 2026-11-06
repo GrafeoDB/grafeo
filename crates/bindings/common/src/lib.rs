@@ -11,3 +11,4 @@ pub mod cdc;
 pub mod entity;
 pub mod error;
 pub mod json;
+pub mod warning;

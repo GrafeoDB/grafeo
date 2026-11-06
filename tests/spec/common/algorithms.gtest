@@ -38,6 +38,8 @@ tests:
     query: "CALL grafeo.pagerank({damping: 0.85, max_iterations: 10})"
     expect:
       count: 2
+      # The iteration limit stops it before the tolerance: a notice.
+      warnings: ["01Y01"]
 
   # The path Jules - Alix - Gus - Vincent, its edges pointing different ways:
   # undirected PageRank ranks the two inner nodes equal and first, the two

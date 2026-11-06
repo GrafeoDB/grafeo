@@ -28,6 +28,8 @@ import (
 type ResultStream struct {
 	handle  *C.GrafeoStream
 	columns []string
+	// warnings is what the stream had when it was closed.
+	warnings []QueryWarning
 }
 
 // ErrStreamClosed is returned by Next after Close has been called.
@@ -61,6 +63,29 @@ func (db *Database) ExecuteStream(query string) (*ResultStream, error) {
 // Columns returns the column names in the order they appear in each row map.
 func (s *ResultStream) Columns() []string {
 	return s.columns
+}
+
+// Warnings returns the warnings the statement raised so far, ordered by
+// code: its translation's from the open, its run's as the rows that raise
+// them are pulled, all of them once Next returned (nil, nil). After Close it
+// returns what the stream had when it was closed.
+//
+// Experimental (0.6.2+).
+func (s *ResultStream) Warnings() []QueryWarning {
+	if s.handle == nil {
+		return s.warnings
+	}
+	count := int(C.grafeo_stream_warning_count(s.handle))
+	warnings := make([]QueryWarning, 0, count)
+	for i := 0; i < count; i++ {
+		index := C.size_t(i)
+		warnings = append(warnings, QueryWarning{
+			Code:    C.GoString(C.grafeo_stream_warning_code(s.handle, index)),
+			Kind:    C.GoString(C.grafeo_stream_warning_kind(s.handle, index)),
+			Message: C.GoString(C.grafeo_stream_warning_message(s.handle, index)),
+		})
+	}
+	return warnings
 }
 
 // Next pulls the next row as a map keyed by column name. Returns (nil, nil)
@@ -123,6 +148,7 @@ func (s *ResultStream) Collect() ([]map[string]any, error) {
 // Close releases the underlying Rust iterator. Safe to call multiple times.
 func (s *ResultStream) Close() {
 	if s.handle != nil {
+		s.warnings = s.Warnings()
 		C.grafeo_stream_free(s.handle)
 		s.handle = nil
 		runtime.SetFinalizer(s, nil)

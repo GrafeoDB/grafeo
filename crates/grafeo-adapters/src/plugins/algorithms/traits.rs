@@ -30,6 +30,7 @@ impl Ticker {
 
     /// A worker thread's ticker of the deadline its caller handed over (see
     /// [`deadline::handoff`](grafeo_core::execution::deadline::handoff)).
+    #[cfg(feature = "parallel")]
     #[must_use]
     pub fn with_handoff(handoff: grafeo_core::execution::deadline::Handoff) -> Self {
         Self(grafeo_core::execution::deadline::Ticker::with_handoff(

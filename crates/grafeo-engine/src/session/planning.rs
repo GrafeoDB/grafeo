@@ -304,6 +304,8 @@ pub(crate) struct StatementPlanning {
     /// One instant for the statement, which every clock function reads, a
     /// body's included.
     pub(super) statement_clock: grafeo_core::execution::operators::StatementClock,
+    /// Where the statement raises its warnings, a body's included.
+    pub(super) warnings: Arc<grafeo_common::utils::warning::WarningSink>,
 }
 
 #[cfg(lpg_language)]
@@ -332,6 +334,7 @@ impl StatementPlanning {
             temporal_comparison,
             language,
             statement_clock,
+            warnings,
         } = self;
         let access = &session.access;
         let (viewing_epoch, transaction_id) = (session.viewing_epoch, session.transaction_id);
@@ -380,6 +383,7 @@ impl StatementPlanning {
                 super::Session::build_info_value(&*info_store, info_view)
             }),
             schema_info: LazyValue::new(move || super::Session::build_schema_value(&*schema_store)),
+            warnings,
         };
 
         let planner = Planner::with_context(
@@ -489,6 +493,7 @@ impl SessionPlanning {
             temporal_comparison: self.gql_temporal_comparison,
             language: grafeo_common::types::StatementLanguage::Gql,
             statement_clock: caller.statement_clock,
+            warnings: Arc::clone(&caller.warnings),
         })
     }
 }

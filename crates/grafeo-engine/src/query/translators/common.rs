@@ -742,14 +742,16 @@ pub(crate) fn path_edge_ids(hops: &[PathHop]) -> LogicalExpression {
     )
 }
 
-/// The lists `parts` joined into one (`a + b + ...`).
+/// The lists `parts` joined into one (`a || b || ...`): with `||`, not the
+/// `+` GQL deprecates for lists, so a path the statement names raises no
+/// warning it did not write.
 #[cfg(any(feature = "gql", feature = "cypher", test))]
 fn concatenation(parts: Vec<LogicalExpression>) -> LogicalExpression {
     parts
         .into_iter()
         .reduce(|left, right| LogicalExpression::Binary {
             left: Box::new(left),
-            op: BinaryOp::Add,
+            op: BinaryOp::Concat,
             right: Box::new(right),
         })
         .unwrap_or(LogicalExpression::List(Vec::new()))

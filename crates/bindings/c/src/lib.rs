@@ -34,3 +34,4 @@ mod stream;
 mod time_travel;
 mod types;
 mod upsert;
+mod warning;

@@ -15,6 +15,7 @@ use grafeo_common::types::{
     PropertyKey, PropertyMap, ReadView, StatementLanguage, TemporalComparison, Value, ValueType,
 };
 use grafeo_common::utils::hash::FxHashMap;
+use grafeo_common::utils::warning::{Warning, WarningSink};
 #[cfg(feature = "regex")]
 use regex::Regex;
 #[cfg(all(feature = "regex-lite", not(feature = "regex")))]
@@ -730,6 +731,9 @@ pub struct SessionContext {
     pub db_info: LazyValue,
     /// Lazily-computed `schema()` result.
     pub schema_info: LazyValue,
+    /// Where the statement's run raises its warnings, shared by every operator and worker of
+    /// the run.
+    pub warnings: Arc<WarningSink>,
 }
 
 /// A filter expression that can be evaluated.
@@ -2177,7 +2181,17 @@ impl ExpressionPredicate {
                         Some(Value::ZonedDatetime(zdt.add_duration(dur)))
                     }
                     (Value::Duration(a), Value::Duration(b)) => Some(Value::Duration(a.add(*b))),
-                    (Value::List(a), Value::List(b)) => Some(joined(a, b)),
+                    // GQL's and SQL/PGQ's `+` joins two lists as `||` does, deprecated since
+                    // 0.6.2.
+                    (Value::List(a), Value::List(b)) => {
+                        if matches!(
+                            self.session_context.language,
+                            StatementLanguage::Gql | StatementLanguage::SqlPgq
+                        ) {
+                            self.session_context.warnings.raise(Warning::ListPlus);
+                        }
+                        Some(joined(a, b))
+                    }
                     _ => self.eval_arithmetic(
                         left,
                         right,

@@ -59,6 +59,8 @@ temporal = []  # Deprecated since 0.6.0: enables nothing (LpgStore, its only use
 tracing = ["dep:tracing"]
 testing-crash-injection = []
 testing-statement-injection = []
+# `Warning::Probe` (01Z99), the notice the warning channel's tests raise.
+testing-warning-probe = []
 # RDF term fixtures (`types::rdf::testing`) for the tests of crates that depend on this one.
 testing-rdf-terms = []
 # The seed of the random functions (`utils::random`) from the operating

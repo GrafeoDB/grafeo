@@ -267,6 +267,8 @@ mod query_processor_coverage;
 mod query_profile;
 mod query_timeout_holds;
 mod query_timing;
+mod query_warning_probe;
+mod query_warnings;
 mod raising_filter_placement;
 mod range_column_read;
 mod range_unwind_matches_range;

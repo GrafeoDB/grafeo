@@ -16,6 +16,10 @@ mod planning;
 mod prepared;
 #[cfg(feature = "triple-store")]
 mod rdf;
+#[cfg(feature = "testing-warning-probe")]
+mod warning_probe;
+#[cfg(feature = "testing-warning-probe")]
+pub use warning_probe::ProbeStage;
 
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
@@ -537,6 +541,9 @@ pub struct Session {
             std::collections::HashMap<String, Arc<grafeo_core::graph::GraphProjection>>,
         >,
     >,
+    /// The warning probe the tests set (see [`ProbeStage`]).
+    #[cfg(feature = "testing-warning-probe")]
+    warning_probe: parking_lot::Mutex<Option<ProbeStage>>,
 }
 
 /// A savepoint: its name, and how far the transaction's changes reached
@@ -618,6 +625,8 @@ impl Session {
             tx_start_time: parking_lot::Mutex::new(None),
             #[cfg(lpg_language)]
             projections: cfg.projections,
+            #[cfg(feature = "testing-warning-probe")]
+            warning_probe: parking_lot::Mutex::new(None),
         }
     }
 
@@ -802,6 +811,8 @@ impl Session {
             tx_start_time: parking_lot::Mutex::new(None),
             #[cfg(lpg_language)]
             projections: cfg.projections,
+            #[cfg(feature = "testing-warning-probe")]
+            warning_probe: parking_lot::Mutex::new(None),
         })
     }
 
@@ -2094,6 +2105,7 @@ impl Session {
             counters: Default::default(),
             profile: None,
             kind: crate::database::ResultKind::Rows,
+            warnings: Vec::new(),
         }
     }
 
@@ -4226,7 +4238,7 @@ impl Session {
                         self.check_schema_command(&cmd)?;
                         return self.execute_schema_command(cmd);
                     }
-                    gql::GqlTranslationResult::Plan(plan) => plan,
+                    gql::GqlTranslationResult::Plan(plan) => self.translated(plan),
                 },
             };
             _focus = self.focus_statement(logical_plan.graph.as_deref())?;
@@ -4293,10 +4305,7 @@ impl Session {
             let physical_plan = planner.plan(&optimized_plan)?;
 
             // Execute the plan via push-based pipeline when possible
-            let executor = self
-                .make_executor(physical_plan.columns.clone())
-                .with_write_counter(planner.write_counter())
-                .with_read_counter(planner.read_counter());
+            let executor = self.make_executor(&planner, physical_plan.columns.clone());
             let (mut source, push_ops) = {
                 #[cfg(feature = "spill")]
                 {
@@ -4368,9 +4377,9 @@ impl Session {
     ) -> Result<crate::query::executor::stream::ResultStream<'_>> {
         use crate::query::executor::stream::{ResultStream, StreamGuard};
 
-        let (source, columns, deadline, pin) = self.build_streaming_plan(query)?;
+        let plan = self.build_streaming_plan(query)?;
         let guard = StreamGuard::new(&self.active_streams);
-        ResultStream::new(source, columns, deadline, guard, pin)
+        ResultStream::new(plan, guard)
     }
 
     /// Builds a pull-based physical pipeline for streaming, returning the
@@ -4385,12 +4394,7 @@ impl Session {
     pub(crate) fn build_streaming_plan(
         &self,
         query: &str,
-    ) -> Result<(
-        Box<dyn grafeo_core::execution::operators::Operator>,
-        Vec<String>,
-        Option<Instant>,
-        Option<crate::transaction::ReadPin>,
-    )> {
+    ) -> Result<crate::query::executor::stream::StreamPlan> {
         use crate::query::{binder::Binder, processor::QueryLanguage, translators::gql};
 
         self.require_lpg("GQL")?;
@@ -4432,7 +4436,7 @@ impl Session {
                 if !self.identity.can_admin() {
                     self.require_permission(crate::auth::StatementKind::Read)?;
                 }
-                plan
+                self.translated(plan)
             }
         };
         // The stream keeps the store it is planned on: the graph a `USE g`
@@ -4494,6 +4498,7 @@ impl Session {
             .for_streaming();
         let physical_plan = planner.plan(&optimized_plan)?;
         let columns = physical_plan.columns.clone();
+        let warnings = planner.warnings();
 
         // Streaming only supports the pure pull path. Reject plans that would
         // require push operators (Sort, Aggregate, Distinct, etc.) so we never
@@ -4524,7 +4529,13 @@ impl Session {
             ));
         }
 
-        Ok((source, columns, self.query_deadline(), pin))
+        Ok(crate::query::executor::stream::StreamPlan {
+            operator: source,
+            columns,
+            deadline: self.query_deadline(),
+            pin,
+            warnings,
+        })
     }
 
     /// Executes a GQL query with visibility at the specified epoch.
@@ -4680,7 +4691,7 @@ impl Session {
                     cypher::CypherTranslationResult::ShowCurrentGraphType => {
                         return self.execute_show_current_graph_type();
                     }
-                    cypher::CypherTranslationResult::Plan(plan) => plan,
+                    cypher::CypherTranslationResult::Plan(plan) => self.translated(plan),
                 },
             };
 
@@ -4749,10 +4760,7 @@ impl Session {
             let mut physical_plan = planner.plan(&optimized_plan)?;
 
             // Execute the plan
-            let executor = self
-                .make_executor(physical_plan.columns.clone())
-                .with_write_counter(planner.write_counter())
-                .with_read_counter(planner.read_counter());
+            let executor = self.make_executor(&planner, physical_plan.columns.clone());
             executor.execute(physical_plan.operator.as_mut())
         });
 
@@ -4801,7 +4809,7 @@ impl Session {
         let start_time = Instant::now();
 
         // Parse and translate the query to a logical plan
-        let mut logical_plan = gremlin::translate(query)?;
+        let mut logical_plan = self.translated(gremlin::translate(query)?);
 
         // No parameters are supplied, so one the query uses is missing.
         substitute_params(&mut logical_plan, &std::collections::HashMap::new())?;
@@ -4843,10 +4851,7 @@ impl Session {
             let mut physical_plan = planner.plan(&optimized_plan)?;
 
             // Execute the plan
-            let executor = self
-                .make_executor(physical_plan.columns.clone())
-                .with_write_counter(planner.write_counter())
-                .with_read_counter(planner.read_counter());
+            let executor = self.make_executor(&planner, physical_plan.columns.clone());
             executor.execute(physical_plan.operator.as_mut())
         });
 
@@ -4886,7 +4891,7 @@ impl Session {
         let start_time = Instant::now();
 
         // Parse and translate the query to a logical plan
-        let mut logical_plan = gremlin::translate(query)?;
+        let mut logical_plan = self.translated(gremlin::translate(query)?);
 
         // Substitute parameters
         substitute_params(&mut logical_plan, &params)?;
@@ -4923,10 +4928,7 @@ impl Session {
                 grafeo_common::types::StatementLanguage::Gremlin,
             )?;
             let mut physical_plan = planner.plan(&optimized_plan)?;
-            let executor = self
-                .make_executor(physical_plan.columns.clone())
-                .with_write_counter(planner.write_counter())
-                .with_read_counter(planner.read_counter());
+            let executor = self.make_executor(&planner, physical_plan.columns.clone());
             executor.execute(physical_plan.operator.as_mut())
         });
 
@@ -4975,7 +4977,7 @@ impl Session {
         #[cfg(feature = "metrics")]
         let start_time = Instant::now();
 
-        let mut logical_plan = graphql::translate(query)?;
+        let mut logical_plan = self.translated(graphql::translate(query)?);
 
         // Substitute default parameter values from variable declarations; a
         // variable without a default is missing.
@@ -5003,10 +5005,7 @@ impl Session {
                 grafeo_common::types::StatementLanguage::GraphQl,
             )?;
             let mut physical_plan = planner.plan(&optimized_plan)?;
-            let executor = self
-                .make_executor(physical_plan.columns.clone())
-                .with_write_counter(planner.write_counter())
-                .with_read_counter(planner.read_counter());
+            let executor = self.make_executor(&planner, physical_plan.columns.clone());
             executor.execute(physical_plan.operator.as_mut())
         });
 
@@ -5047,7 +5046,7 @@ impl Session {
         let start_time = Instant::now();
 
         // Parse and translate the query to a logical plan
-        let mut logical_plan = graphql::translate(query)?;
+        let mut logical_plan = self.translated(graphql::translate(query)?);
 
         // Merge default params with caller-supplied params
         if !logical_plan.default_params.is_empty() {
@@ -5082,10 +5081,7 @@ impl Session {
                 grafeo_common::types::StatementLanguage::GraphQl,
             )?;
             let mut physical_plan = planner.plan(&optimized_plan)?;
-            let executor = self
-                .make_executor(physical_plan.columns.clone())
-                .with_write_counter(planner.write_counter())
-                .with_read_counter(planner.read_counter());
+            let executor = self.make_executor(&planner, physical_plan.columns.clone());
             executor.execute(physical_plan.operator.as_mut())
         });
 
@@ -5158,7 +5154,7 @@ impl Session {
                 Some(plan) => plan,
                 None => {
                     // Parse and translate
-                    let logical_plan = sql_pgq::translate(query)?;
+                    let logical_plan = self.translated(sql_pgq::translate(query)?);
 
                     // Property graph DDL is a standalone change of its own (see
                     // `create_property_graph`), outside the query pipeline.
@@ -5221,10 +5217,7 @@ impl Session {
                 grafeo_common::types::StatementLanguage::SqlPgq,
             )?;
             let mut physical_plan = planner.plan(&optimized_plan)?;
-            let executor = self
-                .make_executor(physical_plan.columns.clone())
-                .with_write_counter(planner.write_counter())
-                .with_read_counter(planner.read_counter());
+            let executor = self.make_executor(&planner, physical_plan.columns.clone());
             executor.execute(physical_plan.operator.as_mut())
         });
 
@@ -6550,10 +6543,21 @@ impl Session {
 
     /// Creates an executor with deadline and timeout duration configured.
     #[cfg(query_language)]
-    fn make_executor(&self, columns: Vec<String>) -> Executor {
+    fn executor_with_deadline(&self, columns: Vec<String>) -> Executor {
         Executor::with_columns(columns)
             .with_deadline(self.query_deadline())
             .with_timeout_duration(self.query_timeout)
+    }
+
+    /// The executor of a plan `planner` built: with the deadline and the
+    /// timeout, and reporting the planner's write and read counters and the
+    /// statement's warnings.
+    #[cfg(lpg_language)]
+    fn make_executor(&self, planner: &crate::query::Planner, columns: Vec<String>) -> Executor {
+        self.executor_with_deadline(columns)
+            .with_write_counter(planner.write_counter())
+            .with_read_counter(planner.read_counter())
+            .with_warnings(planner.warnings())
     }
 
     /// Creates a per-query `OperatorMemoryContext` for memory-aware spilling.
@@ -6762,17 +6766,14 @@ impl Session {
                 language,
             )?;
             let (mut physical_plan, entries) = planner.plan_profiled(plan)?;
-            let executor = self
-                .make_executor(physical_plan.columns.clone())
-                .with_write_counter(planner.write_counter())
-                .with_read_counter(planner.read_counter());
+            let executor = self.make_executor(&planner, physical_plan.columns.clone());
             let _result = executor.execute(physical_plan.operator.as_mut())?;
             let total_time_ms = started.elapsed().as_secs_f64() * 1000.0;
             let profile_tree = crate::query::profile::build_profile_tree(&plan.root, entries)?;
-            Ok(crate::query::profile::profile_result(
-                &profile_tree,
-                total_time_ms,
-            ))
+            Ok(
+                crate::query::profile::profile_result(&profile_tree, total_time_ms)
+                    .with_warnings(planner.warnings().raised()),
+            )
         }))
     }
 
@@ -6854,7 +6855,28 @@ impl Session {
             temporal_comparison,
             language,
             statement_clock: grafeo_core::execution::operators::StatementClock::now(),
+            warnings: self.statement_warnings(),
         }
+    }
+
+    /// Where a statement raises its warnings, made with its planner (the
+    /// warning probe's run stage raises into it).
+    #[cfg(query_language)]
+    fn statement_warnings(&self) -> Arc<grafeo_common::utils::warning::WarningSink> {
+        let sink = Arc::new(grafeo_common::utils::warning::WarningSink::new());
+        #[cfg(feature = "testing-warning-probe")]
+        self.probe_run(&sink);
+        sink
+    }
+
+    /// `plan`, translated for a statement now (the warning probe's
+    /// translate stage adds its notice).
+    #[cfg(query_language)]
+    #[inline]
+    fn translated(&self, plan: crate::query::plan::LogicalPlan) -> crate::query::plan::LogicalPlan {
+        #[cfg(feature = "testing-warning-probe")]
+        let plan = self.probe_translation(plan);
+        plan
     }
 
     /// What the statement being run writes through and what checks its

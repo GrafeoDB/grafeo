@@ -11,6 +11,7 @@ pub mod gqlstatus;
 pub mod hash;
 pub mod random;
 pub mod strings;
+pub mod warning;
 
 pub use error::{Error, Result};
 pub use gqlstatus::{DiagnosticRecord, GqlStatus};

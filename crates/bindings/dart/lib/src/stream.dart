@@ -19,6 +19,7 @@ import 'package:ffi/ffi.dart';
 
 import 'error.dart';
 import 'ffi/bindings.dart';
+import 'types.dart';
 import 'value.dart';
 
 /// Async cursor over the rows of a read-only GQL query.
@@ -34,6 +35,9 @@ class ResultStream implements Finalizable {
   Pointer<Void> _handle;
   final List<String> _columns;
   bool _closed = false;
+
+  /// What the stream had when it was closed.
+  List<QueryWarning> _warnings = const [];
 
   static NativeFinalizer? _finalizer;
 
@@ -144,9 +148,23 @@ class ResultStream implements Finalizable {
     return out;
   }
 
+  /// The warnings the statement raised so far, ordered by code: its
+  /// translation's from the open, its run's as the rows that raise them are
+  /// pulled, all of them once the stream is exhausted. After [close] it
+  /// holds what the stream had then. Experimental (0.6.2+).
+  List<QueryWarning> get warnings => _closed ? _warnings : _readWarnings();
+
+  List<QueryWarning> _readWarnings() => readWarnings(
+        _bindings.grafeoStreamWarningCount(_handle),
+        (index) => _bindings.grafeoStreamWarningCode(_handle, index),
+        (index) => _bindings.grafeoStreamWarningKind(_handle, index),
+        (index) => _bindings.grafeoStreamWarningMessage(_handle, index),
+      );
+
   /// Explicitly releases the underlying Rust iterator.
   void close() {
     if (_closed) return;
+    _warnings = _readWarnings();
     _closed = true;
     _finalizer!.detach(this);
     _bindings.grafeoStreamFree(_handle);

@@ -469,6 +469,7 @@ impl Optimizer {
             graph: plan.graph,
             result_kind: plan.result_kind,
             count_clauses: plan.count_clauses,
+            warnings: plan.warnings,
         })
     }
 

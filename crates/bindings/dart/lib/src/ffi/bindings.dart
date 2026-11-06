@@ -218,6 +218,27 @@ final class GrafeoBindings {
       Uint64 Function(Pointer<Void>),
       int Function(Pointer<Void>)>('grafeo_result_labels_removed');
 
+
+  /// The number of warnings the statement raised.
+  late final grafeoResultWarningCount = library.lookupFunction<
+      Size Function(Pointer<Void>),
+      int Function(Pointer<Void>)>('grafeo_result_warning_count');
+
+  /// The code of a warning; null past the last.
+  late final grafeoResultWarningCode = library.lookupFunction<
+      Pointer<Utf8> Function(Pointer<Void>, Size),
+      Pointer<Utf8> Function(Pointer<Void>, int)>('grafeo_result_warning_code');
+
+  /// The kind of a warning; null past the last.
+  late final grafeoResultWarningKind = library.lookupFunction<
+      Pointer<Utf8> Function(Pointer<Void>, Size),
+      Pointer<Utf8> Function(Pointer<Void>, int)>('grafeo_result_warning_kind');
+
+  /// The message of a warning; null past the last.
+  late final grafeoResultWarningMessage = library.lookupFunction<
+      Pointer<Utf8> Function(Pointer<Void>, Size),
+      Pointer<Utf8> Function(Pointer<Void>, int)>('grafeo_result_warning_message');
+
   /// Free a result handle.
   late final grafeoFreeResult = library.lookupFunction<
       Void Function(Pointer<Void>),
@@ -252,6 +273,26 @@ final class GrafeoBindings {
   late final grafeoStreamFree = library.lookupFunction<
       Void Function(Pointer<Void>),
       void Function(Pointer<Void>)>('grafeo_stream_free');
+
+  /// The number of warnings the stream's statement raised so far, taken for the accessors.
+  late final grafeoStreamWarningCount = library.lookupFunction<
+      Size Function(Pointer<Void>),
+      int Function(Pointer<Void>)>('grafeo_stream_warning_count');
+
+  /// The code of a warning; null past the last.
+  late final grafeoStreamWarningCode = library.lookupFunction<
+      Pointer<Utf8> Function(Pointer<Void>, Size),
+      Pointer<Utf8> Function(Pointer<Void>, int)>('grafeo_stream_warning_code');
+
+  /// The kind of a warning; null past the last.
+  late final grafeoStreamWarningKind = library.lookupFunction<
+      Pointer<Utf8> Function(Pointer<Void>, Size),
+      Pointer<Utf8> Function(Pointer<Void>, int)>('grafeo_stream_warning_kind');
+
+  /// The message of a warning; null past the last.
+  late final grafeoStreamWarningMessage = library.lookupFunction<
+      Pointer<Utf8> Function(Pointer<Void>, Size),
+      Pointer<Utf8> Function(Pointer<Void>, int)>('grafeo_stream_warning_message');
 
   // ===========================================================================
   // Schema context

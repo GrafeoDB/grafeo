@@ -149,7 +149,7 @@ impl GqlStatus {
 
     /// Creates a `GqlStatus` from a 5-byte array. Panics if bytes are not ASCII.
     #[must_use]
-    const fn from_bytes(bytes: [u8; 5]) -> Self {
+    pub(crate) const fn from_bytes(bytes: [u8; 5]) -> Self {
         Self { code: bytes }
     }
 

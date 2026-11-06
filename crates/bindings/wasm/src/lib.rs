@@ -313,12 +313,15 @@ impl Database {
     /// Executes a GQL query and returns raw columns, rows, and metadata.
     ///
     /// Returns `{ columns: string[], rows: any[][], executionTimeMs?: number,
-    /// counters, profile? }`, `profile` for a `PROFILE` statement only.
+    /// counters, warnings, profile? }`, `profile` for a `PROFILE` statement
+    /// only. `warnings` lists what the statement raised (`{ code, kind,
+    /// message }`, ordered by code), empty when nothing.
     ///
     /// # Stability: Experimental
     ///
-    /// The `profile` key only: new in 0.6.0, its operators and keys may still
-    /// change. The rest is stable. See <https://grafeo.dev/stability/>.
+    /// The `profile` key: new in 0.6.0, its operators and keys may still
+    /// change. The `warnings` key: new in 0.6.2, new warnings and kinds may
+    /// come. The rest is stable. See <https://grafeo.dev/stability/>.
     ///
     /// # Errors
     ///
@@ -1855,6 +1858,26 @@ fn raw_result_to_js(result: &grafeo_engine::database::QueryResult) -> Result<JsV
         &JsValue::from_str("counters"),
         &counters_to_js(&result.counters),
     );
+
+    // warnings: {code, kind, message}[], ordered by code
+    let warnings = grafeo_bindings_common::warning::of_result(result);
+    let js_warnings = Array::new_with_length(warnings.len() as u32);
+    for (i, warning) in warnings.iter().enumerate() {
+        let js_warning = js_sys::Object::new();
+        for (key, value) in [
+            ("code", warning.code.as_str()),
+            ("kind", warning.kind),
+            ("message", warning.message.as_str()),
+        ] {
+            let _ = js_sys::Reflect::set(
+                &js_warning,
+                &JsValue::from_str(key),
+                &JsValue::from_str(value),
+            );
+        }
+        js_warnings.set(i as u32, js_warning.into());
+    }
+    let _ = js_sys::Reflect::set(&obj, &JsValue::from_str("warnings"), &js_warnings);
 
     // profile?: {root, totalTimeMs}, for a PROFILE statement
     if let Some(profile) = result.profile() {

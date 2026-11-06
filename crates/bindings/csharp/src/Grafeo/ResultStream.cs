@@ -30,6 +30,8 @@ public sealed class ResultStream : IDisposable, IAsyncDisposable
     private readonly object _sync = new();
     private nint _handle;
     private int _disposed; // 0 = live, 1 = disposed; updated via Interlocked for atomic guard.
+    // What the stream had when it was disposed.
+    private IReadOnlyList<QueryWarning> _warnings = [];
 
     internal ResultStream(nint handle, IReadOnlyList<string> columns)
     {
@@ -39,6 +41,32 @@ public sealed class ResultStream : IDisposable, IAsyncDisposable
 
     /// <summary>Column names in the order they appear in each row dictionary.</summary>
     public IReadOnlyList<string> Columns => _columns;
+
+    /// <summary>
+    /// The warnings the statement raised so far, ordered by code: its
+    /// translation's from the open, its run's as the rows that raise them are
+    /// pulled, all of them once <see cref="Next"/> returned <c>null</c>. After
+    /// <see cref="Dispose"/> it holds what the stream had then.
+    /// Experimental (0.6.2+).
+    /// </summary>
+    public IReadOnlyList<QueryWarning> Warnings
+    {
+        get
+        {
+            lock (_sync)
+            {
+                return _handle == nint.Zero ? _warnings : ReadWarnings();
+            }
+        }
+    }
+
+    // Reads the warnings through the native handle; the caller holds _sync.
+    private IReadOnlyList<QueryWarning> ReadWarnings() =>
+        GrafeoDB.ReadWarnings(
+            NativeMethods.grafeo_stream_warning_count(_handle),
+            index => NativeMethods.grafeo_stream_warning_code(_handle, index),
+            index => NativeMethods.grafeo_stream_warning_kind(_handle, index),
+            index => NativeMethods.grafeo_stream_warning_message(_handle, index));
 
     /// <summary>
     /// Pulls the next row, or returns <c>null</c> when the stream is exhausted.
@@ -119,6 +147,7 @@ public sealed class ResultStream : IDisposable, IAsyncDisposable
         {
             if (_handle != nint.Zero)
             {
+                _warnings = ReadWarnings();
                 NativeMethods.grafeo_stream_free(_handle);
                 _handle = nint.Zero;
             }

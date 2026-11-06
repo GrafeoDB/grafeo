@@ -345,7 +345,7 @@ tests:
         - [true, true, false, false]
 
   - name: zoned_datetime_literals_compare_as_instants
-    query: "RETURN ZONED DATETIME '2022-01-01T00:00:00Z' > ZONED DATETIME '2000-01-01T00:00:00+00:00' AS later, ZONED DATETIME '2021-12-31T23:00:00Z' >= ZONED DATETIME '2022-01-01T00:00:00+01:00' AS same_instant"
+    query: "RETURN DATETIME '2022-01-01T00:00:00Z' > DATETIME '2000-01-01T00:00:00+00:00' AS later, DATETIME '2021-12-31T23:00:00Z' >= DATETIME '2022-01-01T00:00:00+01:00' AS same_instant"
     expect:
       rows:
         - [true, true]
@@ -372,9 +372,9 @@ tests:
 
   - name: zoned_datetime_range_on_stored_values
     setup:
-      - "INSERT (:Event {name: 'Alix', at: ZONED DATETIME '2024-03-15T10:30:00+01:00'})"
-      - "INSERT (:Event {name: 'Gus', at: ZONED DATETIME '2019-03-15T10:30:00Z'})"
-    query: "MATCH (e:Event) WHERE e.at > ZONED DATETIME '2020-01-01T00:00:00Z' AND e.at < ZONED DATETIME '2030-01-01T00:00:00Z' RETURN e.name"
+      - "INSERT (:Event {name: 'Alix', at: DATETIME '2024-03-15T10:30:00+01:00'})"
+      - "INSERT (:Event {name: 'Gus', at: DATETIME '2019-03-15T10:30:00Z'})"
+    query: "MATCH (e:Event) WHERE e.at > DATETIME '2020-01-01T00:00:00Z' AND e.at < DATETIME '2030-01-01T00:00:00Z' RETURN e.name"
     expect:
       rows:
         - [Alix]

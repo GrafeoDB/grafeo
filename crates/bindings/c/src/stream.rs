@@ -36,6 +36,31 @@ pub struct GrafeoStream {
     /// mutex also lets `grafeo_stream_next_row_json` be called from different
     /// threads (one at a time) when the stream handle is shared.
     iter: Mutex<Option<OwnedRowIterator>>,
+    /// Where the statement raises its warnings, read without the iterator's
+    /// lock.
+    warnings: Arc<grafeo_common::utils::warning::WarningSink>,
+    /// The warnings `grafeo_stream_warning_count` last took, which the
+    /// accessors read.
+    taken: Mutex<Vec<crate::warning::CWarning>>,
+}
+
+impl GrafeoStream {
+    /// Takes the warnings raised so far for the accessors; their number.
+    pub(crate) fn take_warnings(&self) -> usize {
+        let warnings =
+            crate::warning::c_warnings(&grafeo_bindings_common::warning::of_sink(&self.warnings));
+        let count = warnings.len();
+        *self.taken.lock() = warnings;
+        count
+    }
+
+    /// Reads the warnings the last count took.
+    pub(crate) fn with_warnings<T>(
+        &self,
+        read: impl FnOnce(&[crate::warning::CWarning]) -> T,
+    ) -> T {
+        read(&self.taken.lock())
+    }
 }
 
 /// Opens a read-only streaming query. Returns null on error; call
@@ -62,10 +87,13 @@ pub extern "C" fn grafeo_stream_open(
         }
     };
     let columns = stream.columns().to_vec();
+    let warnings = stream.warning_sink();
     let handle = Box::new(GrafeoStream {
         _database: Arc::clone(&db.inner),
         columns,
         iter: Mutex::new(Some(stream.into_row_iter())),
+        warnings,
+        taken: Mutex::new(Vec::new()),
     });
     Box::into_raw(handle)
 }

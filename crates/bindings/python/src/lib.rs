@@ -52,6 +52,7 @@ mod query;
 mod stream;
 mod time_travel;
 mod types;
+mod warning;
 
 #[cfg(feature = "algos")]
 use bridges::{PyAlgorithms, PyNetworkXAdapter, PySolvORAdapter};
@@ -178,6 +179,7 @@ fn grafeo(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyNode>()?;
     m.add_class::<PyEdge>()?;
     m.add_class::<PyQueryResult>()?;
+    m.add_class::<warning::PyQueryWarning>()?;
     m.add_class::<PyResultStream>()?;
     m.add_class::<time_travel::PyAsOfView>()?;
     m.add_class::<AsyncQueryResult>()?;

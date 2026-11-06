@@ -449,7 +449,8 @@ impl QueryProcessor {
 
         // 6. Execute and collect results
         let executor = Executor::with_columns(physical_plan.columns.clone())
-            .with_read_counter(planner.read_counter());
+            .with_read_counter(planner.read_counter())
+            .with_warnings(planner.warnings());
         let result = executor.execute(physical_plan.operator.as_mut())?;
 
         // Add execution metrics (the executor set `rows_scanned`).
@@ -648,11 +649,13 @@ impl QueryProcessor {
 
                 let tree =
                     crate::query::profile::build_profile_tree(&optimized_plan.root, entries)?;
-                return Ok(crate::query::profile::profile_result(&tree, elapsed_ms));
+                return Ok(crate::query::profile::profile_result(&tree, elapsed_ms)
+                    .with_warnings(planner.warnings().raised()));
             }
 
             let mut physical_plan = planner.plan(&optimized_plan)?;
-            let executor = Executor::with_columns(physical_plan.columns.clone());
+            let executor = Executor::with_columns(physical_plan.columns.clone())
+                .with_warnings(planner.warnings());
             executor
                 .execute(physical_plan.operator.as_mut())
                 .map(|result| result.with_kind(optimized_plan.result_kind))
@@ -1014,6 +1017,8 @@ pub(crate) fn explain_result(
         counters: Default::default(),
         profile: None,
         kind: crate::database::ResultKind::Rows,
+        // EXPLAIN runs nothing: the warnings its translation found.
+        warnings: plan.warnings.to_query_warnings(),
     }
 }
 
@@ -1040,6 +1045,7 @@ pub(crate) fn physical_explain_result(
         counters: Default::default(),
         profile: None,
         kind: crate::database::ResultKind::Rows,
+        warnings: plan.warnings.to_query_warnings(),
     })
 }
 

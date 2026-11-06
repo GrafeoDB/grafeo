@@ -143,6 +143,7 @@ fn build_result_checked(
         edges_json: CString::new(edges_str).unwrap_or_default(),
         counters: result.counters,
         kind: result.kind,
+        warnings: crate::warning::c_warnings(&grafeo_bindings_common::warning::of_result(result)),
     })))
 }
 

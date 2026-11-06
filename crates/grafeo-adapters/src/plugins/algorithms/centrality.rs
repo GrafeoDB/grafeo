@@ -187,8 +187,16 @@ pub fn pagerank(
     directed: bool,
 ) -> grafeo_common::utils::error::Result<FxHashMap<NodeId, f64>> {
     let graph = super::traits::GraphView::new(store, view);
-    let found = pagerank_on(&graph, damping, max_iterations, tolerance, directed);
+    let found =
+        pagerank_on(&graph, damping, max_iterations, tolerance, directed).map(|found| found.scores);
     graph.finish(found)?
+}
+
+/// The scores of a power iteration, and whether they settled: an iteration changed none of
+/// them by `tolerance` or more before `max_iterations` ran out.
+pub(crate) struct Scores {
+    pub(crate) scores: FxHashMap<NodeId, f64>,
+    pub(crate) converged: bool,
 }
 
 /// [`pagerank`] on the graph a [`GraphView`](super::traits::GraphView) reads.
@@ -198,7 +206,7 @@ pub(crate) fn pagerank_on(
     max_iterations: usize,
     tolerance: f64,
     directed: bool,
-) -> grafeo_common::utils::error::Result<FxHashMap<NodeId, f64>> {
+) -> grafeo_common::utils::error::Result<Scores> {
     pagerank_in_order_on(
         store,
         &store.node_ids(),
@@ -233,7 +241,8 @@ pub fn pagerank_in_order(
     directed: bool,
 ) -> grafeo_common::utils::error::Result<FxHashMap<NodeId, f64>> {
     let graph = super::traits::GraphView::new(store, view);
-    let found = pagerank_in_order_on(&graph, nodes, damping, max_iterations, tolerance, directed);
+    let found = pagerank_in_order_on(&graph, nodes, damping, max_iterations, tolerance, directed)
+        .map(|found| found.scores);
     graph.finish(found)?
 }
 
@@ -245,12 +254,15 @@ pub(crate) fn pagerank_in_order_on(
     max_iterations: usize,
     tolerance: f64,
     directed: bool,
-) -> grafeo_common::utils::error::Result<FxHashMap<NodeId, f64>> {
+) -> grafeo_common::utils::error::Result<Scores> {
     let mut ticker = Ticker::new();
     let n = nodes.len();
 
     if n == 0 {
-        return Ok(FxHashMap::default());
+        return Ok(Scores {
+            scores: FxHashMap::default(),
+            converged: true,
+        });
     }
 
     // Build node index mapping for efficient access
@@ -299,6 +311,7 @@ pub(crate) fn pagerank_in_order_on(
     let dangling: Vec<usize> = (0..n).filter(|&i| out_degree[i] == 0).collect();
 
     // Power iteration
+    let mut converged = false;
     for _ in 0..max_iterations {
         // Compute dangling contribution
         let dangling_sum: f64 = dangling.iter().map(|&i| scores[i]).sum();
@@ -330,16 +343,20 @@ pub(crate) fn pagerank_in_order_on(
         std::mem::swap(&mut scores, &mut new_scores);
 
         if max_diff < tolerance {
+            converged = true;
             break;
         }
     }
 
     // Convert back to NodeId map
-    Ok(nodes
-        .iter()
-        .enumerate()
-        .map(|(idx, &node)| (node, scores[idx]))
-        .collect())
+    Ok(Scores {
+        scores: nodes
+            .iter()
+            .enumerate()
+            .map(|(idx, &node)| (node, scores[idx]))
+            .collect(),
+        converged,
+    })
 }
 
 /// The visible out-neighbours of each of `nodes` among `nodes`, in adjacency
@@ -675,15 +692,19 @@ impl_algorithm! {
         let tolerance = params.get_float("tolerance").unwrap_or(1e-6);
         let directed = params.get_bool("directed").unwrap_or(true);
 
-        let scores = pagerank_on(store, damping, max_iter, tolerance, directed)?;
+        let found = pagerank_on(store, damping, max_iter, tolerance, directed)?;
 
-        let mut builder = NodeValueResultBuilder::with_capacity("pagerank", scores.len());
-        for (node, score) in scores {
+        let mut builder = NodeValueResultBuilder::with_capacity("pagerank", found.scores.len());
+        for (node, score) in found.scores {
             builder.push(node, Value::Float64(score));
         }
 
         let mut result = builder.build();
         result.sort_by_id_columns(1);
+        // A tolerance of 0 asks for every iteration, so running them all is no news.
+        if !found.converged && tolerance > 0.0 {
+            result = result.with_warning(grafeo_common::utils::warning::Warning::NotConverged);
+        }
         Ok(result)
     }
 }

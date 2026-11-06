@@ -599,6 +599,15 @@ export declare class JsNode {
 export declare class QueryResult {
   /** Get column names. */
   get columns(): Array<string>
+  /**
+   * The warnings the statement raised, ordered by code: a deprecated form
+   * it wrote or ran, or a notice; empty when there were none.
+   *
+   * # Stability: Experimental
+   *
+   * New in 0.6.2. See <https://grafeo.dev/stability/>.
+   */
+  get warnings(): Array<QueryWarning>
   /** Get number of rows. */
   get length(): number
   /** Query execution time in milliseconds (if available). */
@@ -669,6 +678,16 @@ export declare class QueryResult {
 export declare class ResultStream {
   /** Column names in the order they appear in each row object. */
   get columns(): Array<string>
+  /**
+   * The warnings the statement raised so far, ordered by code: its
+   * translation's from the start, its run's as the rows that raise them
+   * are pulled, all of them once `next()` returned `null`.
+   *
+   * # Stability: Experimental
+   *
+   * New in 0.6.2. See <https://grafeo.dev/stability/>.
+   */
+  get warnings(): Array<QueryWarning>
   /**
    * Pulls the next row as a plain object, or `null` when the stream is
    * exhausted. Runs the Rust work on a blocking thread so the Node.js
@@ -874,6 +893,23 @@ export interface QueryProfile {
    * adds parsing, planning and the commit.
    */
   totalTimeMs: number
+}
+
+/**
+ * A warning a statement raised: a deprecated form it wrote or ran, or a
+ * notice.
+ *
+ * # Stability: Experimental
+ *
+ * New in 0.6.2: new warnings and kinds may be added in any release. See <https://grafeo.dev/stability/>.
+ */
+export interface QueryWarning {
+  /** Its GQLSTATUS code, of class `01` (for example `01X01`). */
+  code: string
+  /** `deprecation` or `notice`. */
+  kind: string
+  /** What it says, naming the replacement of a deprecated form. */
+  message: string
 }
 
 /** Returns the active SIMD instruction set for vector operations. */

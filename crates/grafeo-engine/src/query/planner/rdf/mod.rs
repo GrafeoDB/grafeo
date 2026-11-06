@@ -131,6 +131,9 @@ pub struct RdfPlanner {
     /// Counts the triples the plan's scans read: the statement's
     /// `rows_scanned`.
     read_counter: Arc<grafeo_core::execution::operators::ReadCounter>,
+    /// Where the statement raises its warnings: the translation's, which
+    /// [`plan`](Self::plan) raises, and the run's.
+    warnings: Arc<grafeo_common::utils::warning::WarningSink>,
     /// The instant the query started, which `NOW()` gives in every row:
     /// the planner is made for one execution of the query.
     clock: StatementClock,
@@ -161,6 +164,7 @@ impl RdfPlanner {
             path_search_budget: grafeo_core::execution::operators::DEFAULT_PATH_SEARCH_BUDGET,
             deadline: None,
             read_counter: Arc::default(),
+            warnings: Arc::default(),
             clock: StatementClock::now(),
             row: None,
             exists_run_once: true,
@@ -184,6 +188,7 @@ impl RdfPlanner {
             path_search_budget: parts.path_search_budget,
             deadline: parts.deadline,
             read_counter: Arc::clone(&parts.read_counter),
+            warnings: Arc::clone(&parts.warnings),
             clock: parts.clock,
             row: Some(row),
             exists_run_once: false,
@@ -210,6 +215,7 @@ impl RdfPlanner {
             path_search_budget: self.path_search_budget,
             deadline: self.deadline,
             read_counter: Arc::clone(&self.read_counter),
+            warnings: Arc::clone(&self.warnings),
             clock: self.clock,
         }
     }
@@ -263,6 +269,20 @@ impl RdfPlanner {
     #[must_use]
     pub fn read_counter(&self) -> Arc<grafeo_core::execution::operators::ReadCounter> {
         Arc::clone(&self.read_counter)
+    }
+
+    /// Where the statement's warnings go (see [`with_warnings`](Self::with_warnings)).
+    #[must_use]
+    pub fn warnings(&self) -> Arc<grafeo_common::utils::warning::WarningSink> {
+        Arc::clone(&self.warnings)
+    }
+
+    /// Raises the statement's warnings into `sink`, which the session made
+    /// for it.
+    #[must_use]
+    pub fn with_warnings(mut self, sink: Arc<grafeo_common::utils::warning::WarningSink>) -> Self {
+        self.warnings = sink;
+        self
     }
 
     /// Sets the chunk size for vectorized execution.
@@ -326,6 +346,7 @@ impl RdfPlanner {
     ///
     /// Returns an error if planning fails.
     pub fn plan(&self, logical_plan: &LogicalPlan) -> Result<PhysicalPlan> {
+        self.warnings.raise_all(logical_plan.warnings);
         let (operator, columns, types) =
             self.without_hidden_columns(self.plan_operator(&logical_plan.root)?);
         let operator = self.decode_results(operator, &types, logical_plan.result_kind);
@@ -354,6 +375,7 @@ impl RdfPlanner {
     ) -> Result<(PhysicalPlan, Vec<crate::query::profile::ProfileEntry>)> {
         self.profiling.set(true);
         self.profile_entries.borrow_mut().clear();
+        self.warnings.raise_all(logical_plan.warnings);
 
         let result = self.plan_operator(&logical_plan.root);
 

@@ -295,6 +295,21 @@ pub fn assert_columns(result: &QueryResult, expected: &[&str]) {
     );
 }
 
+/// Asserts the codes of the warnings `result` carries, in its order (by code).
+///
+/// # Panics
+///
+/// Panics if they differ from `expected`.
+pub fn assert_warnings(result: &QueryResult, expected: &[&str]) {
+    let actual: Vec<&str> = result.warnings().iter().map(|w| w.code.as_str()).collect();
+    assert_eq!(
+        actual,
+        expected,
+        "Warning mismatch: got {actual:?}, expected {expected:?} ({:?})",
+        result.warnings()
+    );
+}
+
 /// Assert rows match with floating-point tolerance.
 ///
 /// Cells that parse as `f64` on both sides are compared within `10^(-precision)`.

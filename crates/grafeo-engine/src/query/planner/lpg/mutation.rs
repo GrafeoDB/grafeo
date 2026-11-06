@@ -1037,7 +1037,8 @@ impl super::Planner {
             yield_columns,
             canonical_columns,
             self.read_view(),
-        );
+        )
+        .with_warnings(self.warnings());
         if let Some(lpg_store) = self.lpg_store.as_ref() {
             op = op.with_lpg_store(Arc::clone(lpg_store));
         }

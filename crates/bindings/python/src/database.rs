@@ -159,10 +159,19 @@ pub struct AsyncQueryResult {
     column_types: Vec<LogicalType>,
     nodes: Vec<PyNode>,
     edges: Vec<PyEdge>,
+    warnings: Vec<grafeo_bindings_common::warning::Warning>,
 }
 
 #[pymethods]
 impl AsyncQueryResult {
+    /// The warnings the statement raised, ordered by code (see
+    /// `QueryResult.warnings`); each was also raised through `warnings.warn`
+    /// when the coroutine finished.
+    #[getter]
+    fn warnings(&self) -> Vec<crate::warning::PyQueryWarning> {
+        crate::warning::to_py(&self.warnings)
+    }
+
     /// Get all nodes from the result.
     fn nodes(&self) -> Vec<PyNode> {
         self.nodes.clone()
@@ -416,13 +425,14 @@ impl PyGrafeoDB {
         params: Option<&Bound<'_, pyo3::types::PyDict>>,
     ) -> PyResult<PyQueryResult> {
         let params = crate::direct::params(params)?;
-        without_gil(py, || {
+        let result = without_gil(py, || {
             let result = self
                 .inner
                 .read()
                 .execute_language(query, language, params)?;
             Ok(crate::direct::query_result(result))
-        })
+        });
+        crate::direct::surfaced(py, result)
     }
 }
 
@@ -656,13 +666,14 @@ impl PyGrafeoDB {
         };
         let timeout = timeout_seconds(seconds, "timeout").transpose()?;
         let params = crate::direct::params(params)?;
-        without_gil(py, || {
+        let result = without_gil(py, || {
             let result = self
                 .inner
                 .read()
                 .execute_language_with_timeout(query, "gql", params, timeout)?;
             Ok(crate::direct::query_result(result))
-        })
+        });
+        crate::direct::surfaced(py, result)
     }
 
     /// Runs a read-only GQL query and returns a lazy iterator.
@@ -689,10 +700,9 @@ impl PyGrafeoDB {
         // Sync graph/schema state is not needed: execute_streaming rejects the
         // session commands that would change them.
         let stream = self.released(py, |db| Ok(db.execute_streaming(query)?))?;
-        Ok(crate::stream::PyResultStream::new(
-            Arc::clone(&self.inner),
-            stream,
-        ))
+        let mut stream = crate::stream::PyResultStream::new(Arc::clone(&self.inner), stream);
+        stream.warn_new(py)?;
+        Ok(stream)
     }
 
     /// Execute a GQL query at a specific historical epoch.
@@ -712,14 +722,15 @@ impl PyGrafeoDB {
         py: Python<'_>,
     ) -> PyResult<PyQueryResult> {
         let params = crate::direct::params(params)?;
-        self.released(py, |db| {
+        let result = self.released(py, |db| {
             let result = db.session().execute_at_epoch_with_params(
                 query,
                 grafeo_common::types::EpochId::new(epoch),
                 params,
             )?;
             Ok(crate::direct::query_result(result))
-        })
+        });
+        crate::direct::surfaced(py, result)
     }
 
     /// A read-only view of the database as it was at `point`: an `int`
@@ -761,13 +772,14 @@ impl PyGrafeoDB {
     ) -> PyResult<PyQueryResult> {
         let point = crate::time_travel::time_point(point)?;
         let params = crate::direct::params(params)?;
-        self.released(py, |db| {
+        let result = self.released(py, |db| {
             let epoch = db.epoch_as_of(point)?;
             let result = db
                 .session()
                 .execute_at_epoch_with_params(query, epoch, params)?;
             Ok(crate::direct::query_result(result))
-        })
+        });
+        crate::direct::surfaced(py, result)
     }
 
     /// The epoch a read as of `point` reads at (see `as_of`): the epoch
@@ -870,12 +882,15 @@ impl PyGrafeoDB {
             );
             let columns = std::mem::take(&mut result.columns);
             let column_types = std::mem::take(&mut result.column_types);
+            let warnings = grafeo_bindings_common::warning::of_result(&result);
+            Python::attach(|py| crate::warning::raise(py, &warnings))?;
             Ok(AsyncQueryResult {
                 columns,
                 rows: result.into_rows(),
                 column_types,
                 nodes,
                 edges,
+                warnings,
             })
         })
     }
@@ -4424,9 +4439,10 @@ impl PyTransaction {
                 .map(|session| crate::direct::run(session, language, query, params))
                 .transpose()
         })?;
-        result.ok_or_else(|| {
+        let result = result.ok_or_else(|| {
             pyo3::exceptions::PyRuntimeError::new_err("Transaction session not available")
-        })
+        });
+        crate::direct::surfaced(py, result)
     }
 
     /// Begins a transaction on `session` with an optional isolation level.

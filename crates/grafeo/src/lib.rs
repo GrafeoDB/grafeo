@@ -118,6 +118,8 @@ pub use grafeo_engine::session;
 // Re-export query results
 pub use grafeo_engine::database::QueryResult;
 pub use grafeo_engine::database::ResultKind;
+// The warnings a result carries (`QueryResult::warnings`)
+pub use grafeo_engine::database::{QueryWarning, WarningKind};
 
 // Re-export MemoryUsage, ProjectionSpec at top level for convenience
 pub use grafeo_engine::MemoryUsage;

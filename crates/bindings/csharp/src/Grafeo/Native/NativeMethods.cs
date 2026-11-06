@@ -149,6 +149,22 @@ internal static partial class NativeMethods
     [LibraryImport(LibName)]
     internal static partial nint grafeo_result_edges_json(nint result);
 
+    /// <summary>The number of warnings the statement raised.</summary>
+    [LibraryImport(LibName)]
+    internal static partial nuint grafeo_result_warning_count(nint result);
+
+    /// <summary>The code of a warning; null past the last. Valid until grafeo_free_result.</summary>
+    [LibraryImport(LibName)]
+    internal static partial nint grafeo_result_warning_code(nint result, nuint index);
+
+    /// <summary>The kind of a warning; null past the last. Valid until grafeo_free_result.</summary>
+    [LibraryImport(LibName)]
+    internal static partial nint grafeo_result_warning_kind(nint result, nuint index);
+
+    /// <summary>The message of a warning; null past the last. Valid until grafeo_free_result.</summary>
+    [LibraryImport(LibName)]
+    internal static partial nint grafeo_result_warning_message(nint result, nuint index);
+
     /// <summary>Free a query result.</summary>
     [LibraryImport(LibName)]
     internal static partial void grafeo_free_result(nint result);
@@ -175,6 +191,22 @@ internal static partial class NativeMethods
     /// <summary>Frees a stream handle.</summary>
     [LibraryImport(LibName)]
     internal static partial void grafeo_stream_free(nint stream);
+
+    /// <summary>Takes the warnings the stream's statement raised so far; their number.</summary>
+    [LibraryImport(LibName)]
+    internal static partial nuint grafeo_stream_warning_count(nint stream);
+
+    /// <summary>The code of a warning the last count took; valid until the next count.</summary>
+    [LibraryImport(LibName)]
+    internal static partial nint grafeo_stream_warning_code(nint stream, nuint index);
+
+    /// <summary>The kind of a warning the last count took; valid until the next count.</summary>
+    [LibraryImport(LibName)]
+    internal static partial nint grafeo_stream_warning_kind(nint stream, nuint index);
+
+    /// <summary>The message of a warning the last count took; valid until the next count.</summary>
+    [LibraryImport(LibName)]
+    internal static partial nint grafeo_stream_warning_message(nint stream, nuint index);
 
     // =========================================================================
     // Schema context

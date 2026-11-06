@@ -339,9 +339,13 @@ impl GqlTranslator {
                     Value::String(s.clone().into())
                 }
             }
-            ast::Literal::ZonedDatetime(s) => grafeo_common::types::ZonedDatetime::parse(s)
-                .map_or_else(|| Value::String(s.clone().into()), Value::ZonedDatetime),
+            ast::Literal::ZonedDatetime(s) => {
+                self.warn(grafeo_common::utils::warning::Warning::ZonedDatetimeLiteral);
+                grafeo_common::types::ZonedDatetime::parse(s)
+                    .map_or_else(|| Value::String(s.clone().into()), Value::ZonedDatetime)
+            }
             ast::Literal::ZonedTime(s) => {
+                self.warn(grafeo_common::utils::warning::Warning::ZonedTimeLiteral);
                 // Parse as Time with required offset
                 if let Some(t) = grafeo_common::types::Time::parse(s)
                     && t.offset_seconds().is_some()

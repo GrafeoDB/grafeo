@@ -1,0 +1,102 @@
+# Query warnings
+#
+# A deprecated form returns its rows with a warning: GQLSTATUS class 01, one per kind per
+# statement, ordered by code. `expect: warnings:` lists the codes; without the key a test expects
+# none, so every other gtest also asserts that it raises no warning. A new warning is one row here.
+# The codes: 01X01 ZONED DATETIME literals, 01X02 GQL `+` on two lists, 01X03 ZONED TIME literals
+# (each deprecated in 0.6.2, refused from 0.7.0; docs/upgrading/deprecations.md).
+
+meta:
+  language: gql
+  model: lpg
+  section: warnings
+  title: Query warnings
+  dataset: empty
+
+tests:
+
+  - name: a_zoned_literal_warns
+    query: "RETURN ZONED DATETIME '2024-01-01T10:00:00+01:00' IS NOT NULL AS v"
+    expect:
+      rows:
+        - [true]
+      warnings: ["01X01"]
+
+  - name: a_zoned_literal_twice_warns_once
+    query: "RETURN ZONED DATETIME '2024-01-01T10:00:00+01:00' IS NOT NULL AS a, ZONED DATETIME '2024-01-02T10:00:00Z' IS NOT NULL AS b"
+    expect:
+      rows:
+        - [true, true]
+      warnings: ["01X01"]
+
+  - name: a_zoned_time_literal_warns
+    query: "RETURN ZONED TIME '10:00:00+01:00' = TIME '10:00:00+01:00' AS v"
+    expect:
+      rows:
+        - [true]
+      warnings: ["01X03"]
+
+  - name: both_zoned_literals_warn_each_ordered_by_code
+    query: "RETURN ZONED TIME '10:00:00+01:00' IS NOT NULL AS a, ZONED DATETIME '2024-01-01T10:00:00+01:00' IS NOT NULL AS b"
+    expect:
+      rows:
+        - [true, true]
+      warnings: ["01X01", "01X03"]
+
+  - name: gql_list_plus_warns
+    query: "RETURN size([1] + [2]) AS v"
+    expect:
+      rows:
+        - [2]
+      warnings: ["01X02"]
+
+  - name: gql_list_plus_from_a_property_warns
+    setup:
+      - "INSERT (:L {l: [1, 2]})"
+    query: "MATCH (n:L) RETURN size(n.l + [3]) AS v"
+    expect:
+      rows:
+        - [3]
+      warnings: ["01X02"]
+
+  - name: both_forms_ordered_by_code
+    query: "RETURN size([1] + [2]) AS a, ZONED DATETIME '2024-01-01T10:00:00+01:00' IS NOT NULL AS b"
+    expect:
+      rows:
+        - [2, true]
+      warnings: ["01X01", "01X02"]
+
+  - name: a_zoned_literal_in_a_branch_never_taken_warns
+    query: "RETURN CASE WHEN false THEN ZONED DATETIME '2024-01-01T10:00:00+01:00' END IS NULL AS v"
+    expect:
+      rows:
+        - [true]
+      warnings: ["01X01"]
+
+  - name: list_plus_in_a_branch_never_taken_does_not_warn
+    query: "RETURN CASE WHEN false THEN [1] + [2] END IS NULL AS v"
+    expect:
+      rows:
+        - [true]
+      warnings: []
+
+  - name: the_replacements_do_not_warn
+    query: "RETURN size([1] || [2]) AS a, DATETIME '2024-01-01T10:00:00+01:00' IS NOT NULL AS b, TIME '10:00:00+01:00' IS NOT NULL AS c"
+    expect:
+      rows:
+        - [2, true, true]
+      warnings: []
+
+  - name: cypher_list_plus_does_not_warn
+    language: cypher
+    query: "RETURN size([1] + [2]) AS v"
+    expect:
+      rows:
+        - [2]
+      warnings: []
+
+  - name: a_plain_query_has_no_warnings_key
+    query: "RETURN 1 AS v"
+    expect:
+      rows:
+        - [1]

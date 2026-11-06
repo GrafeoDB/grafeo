@@ -306,6 +306,9 @@ pub struct AlgorithmResult {
     pub columns: Vec<String>,
     /// Result rows.
     pub rows: Vec<Vec<grafeo_common::types::Value>>,
+    /// The warnings of the run, which the statement that called it reports (a scores
+    /// procedure that ran out of iterations, `NotConverged`).
+    pub warnings: grafeo_common::utils::warning::WarningSet,
 }
 
 impl AlgorithmResult {
@@ -314,7 +317,15 @@ impl AlgorithmResult {
         Self {
             columns,
             rows: Vec::new(),
+            warnings: grafeo_common::utils::warning::WarningSet::EMPTY,
         }
+    }
+
+    /// Returns the result with `warning` among its warnings.
+    #[must_use]
+    pub fn with_warning(mut self, warning: grafeo_common::utils::warning::Warning) -> Self {
+        self.warnings.insert(warning);
+        self
     }
 
     /// Adds a row to the result.

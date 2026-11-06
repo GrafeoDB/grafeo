@@ -88,6 +88,8 @@ impl Session {
             tx_start_time: parking_lot::Mutex::new(None),
             #[cfg(lpg_language)]
             projections: cfg.projections,
+            #[cfg(feature = "testing-warning-probe")]
+            warning_probe: parking_lot::Mutex::new(None),
         }
     }
 }

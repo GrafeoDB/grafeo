@@ -195,6 +195,9 @@ pub struct LogicalPlan {
     /// What the statement calls its SKIP and LIMIT clauses, for the errors
     /// of a count given as a parameter (set by the SQL/PGQ translator).
     pub count_clauses: CountClauses,
+    /// The warnings translation found (a deprecated literal): every run of
+    /// the plan, a cached one too, reports them.
+    pub warnings: grafeo_common::utils::warning::WarningSet,
 }
 
 impl LogicalPlan {
@@ -208,6 +211,7 @@ impl LogicalPlan {
             graph: None,
             result_kind: crate::database::ResultKind::Rows,
             count_clauses: CountClauses::SkipLimit,
+            warnings: grafeo_common::utils::warning::WarningSet::EMPTY,
         }
     }
 
@@ -221,6 +225,7 @@ impl LogicalPlan {
             graph: None,
             result_kind: crate::database::ResultKind::Rows,
             count_clauses: CountClauses::SkipLimit,
+            warnings: grafeo_common::utils::warning::WarningSet::EMPTY,
         }
     }
 
@@ -241,6 +246,7 @@ impl LogicalPlan {
             graph: None,
             result_kind: crate::database::ResultKind::Rows,
             count_clauses: CountClauses::SkipLimit,
+            warnings: grafeo_common::utils::warning::WarningSet::EMPTY,
         }
     }
 }

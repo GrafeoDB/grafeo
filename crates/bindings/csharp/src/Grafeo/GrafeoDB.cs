@@ -1100,6 +1100,11 @@ public sealed class GrafeoDB : IGrafeoDB, IDisposable, IAsyncDisposable
             return new QueryResult(columns, rows, nodes, edges, executionTimeMs, rowsScanned)
             {
                 Kind = (ResultKind)NativeMethods.grafeo_result_kind(resultPtr),
+                Warnings = ReadWarnings(
+                    NativeMethods.grafeo_result_warning_count(resultPtr),
+                    index => NativeMethods.grafeo_result_warning_code(resultPtr, index),
+                    index => NativeMethods.grafeo_result_warning_kind(resultPtr, index),
+                    index => NativeMethods.grafeo_result_warning_message(resultPtr, index)),
                 Counters = new WriteCounters(
                     (long)NativeMethods.grafeo_result_nodes_created(resultPtr),
                     (long)NativeMethods.grafeo_result_nodes_deleted(resultPtr),
@@ -1114,6 +1119,24 @@ public sealed class GrafeoDB : IGrafeoDB, IDisposable, IAsyncDisposable
         {
             NativeMethods.grafeo_free_result(resultPtr);
         }
+    }
+
+    /// <summary>The warnings a native result or stream holds, through its accessors.</summary>
+    internal static IReadOnlyList<QueryWarning> ReadWarnings(
+        nuint count,
+        Func<nuint, nint> code,
+        Func<nuint, nint> kind,
+        Func<nuint, nint> message)
+    {
+        var warnings = new List<QueryWarning>((int)count);
+        for (nuint index = 0; index < count; index++)
+        {
+            warnings.Add(new QueryWarning(
+                Marshal.PtrToStringUTF8(code(index)) ?? "",
+                Marshal.PtrToStringUTF8(kind(index)) ?? "",
+                Marshal.PtrToStringUTF8(message(index)) ?? ""));
+        }
+        return warnings;
     }
 
     /// <summary>Read a node from a native GrafeoNode pointer.</summary>

@@ -83,6 +83,7 @@ pub fn translate_full(query: &str) -> Result<GqlTranslationResult> {
     match translator.translate_statement_full(&statement)? {
         GqlTranslationResult::Plan(mut plan) => {
             plan.graph = graph;
+            plan.warnings = translator.warnings.get();
             Ok(GqlTranslationResult::Plan(
                 crate::query::limits::check_plan_depth(plan)?,
             ))
@@ -116,6 +117,8 @@ struct GqlTranslator {
     /// path that edge walks (`nodes(k)` of `-[k]->{1,3}`), as SQL/PGQ reads
     /// it (see [`GqlTranslator::group_path_call`]).
     group_variables_as_paths: bool,
+    /// The warnings the translation found, which the plan carries.
+    warnings: std::cell::Cell<grafeo_common::utils::warning::WarningSet>,
 }
 
 /// The rows a query passes to the one after `NEXT`: its final `RETURN` as a
@@ -621,7 +624,15 @@ impl GqlTranslator {
             call_imports: CallImports::default(),
             sort_scope: std::cell::RefCell::new(None),
             group_variables_as_paths: false,
+            warnings: std::cell::Cell::default(),
         }
+    }
+
+    /// Records that the statement wrote a form `warning` names.
+    fn warn(&self, warning: grafeo_common::utils::warning::Warning) {
+        let mut warnings = self.warnings.get();
+        warnings.insert(warning);
+        self.warnings.set(warnings);
     }
 
     /// A name for an anonymous element, one the statement does not spell.

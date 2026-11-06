@@ -540,6 +540,14 @@ impl Planner {
         Arc::clone(&self.read_counter)
     }
 
+    /// Where the statement's warnings go: those the translation of a plan
+    /// this planner plans found, and those its run raises, a stored
+    /// procedure's body included.
+    #[must_use]
+    pub fn warnings(&self) -> Arc<grafeo_common::utils::warning::WarningSink> {
+        Arc::clone(&self.session_context.warnings)
+    }
+
     /// Counts the reads into `counter` instead of a counter of its own, so
     /// the reads of a stored procedure's body count for the statement that
     /// calls it.
@@ -907,6 +915,9 @@ impl Planner {
         let _span = grafeo_debug_span!("grafeo::query::plan");
         self.take_plan_names(logical_plan);
         self.find_reachability_expands(&logical_plan.root);
+        self.session_context
+            .warnings
+            .raise_all(logical_plan.warnings);
         let (operator, columns) = self.plan_operator(&logical_plan.root)?;
         let operator = self.shuffled_root(logical_plan, operator);
         Ok(PhysicalPlan { operator, columns })
@@ -930,6 +941,9 @@ impl Planner {
         self.profile_entries.borrow_mut().clear();
         self.take_plan_names(logical_plan);
         self.find_reachability_expands(&logical_plan.root);
+        self.session_context
+            .warnings
+            .raise_all(logical_plan.warnings);
 
         let result = self.plan_operator(&logical_plan.root);
 

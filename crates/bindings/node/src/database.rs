@@ -1778,6 +1778,7 @@ pub(crate) fn js_result(mut result: EngineQueryResult) -> QueryResult {
     let counters = result.counters;
     let profile = result.profile.take();
     let kind = result.kind;
+    let warnings = grafeo_bindings_common::warning::of_result(&result);
     QueryResult::with_metrics(
         columns,
         result.into_rows(),
@@ -1789,6 +1790,7 @@ pub(crate) fn js_result(mut result: EngineQueryResult) -> QueryResult {
     .with_counters(counters)
     .with_profile(profile)
     .with_kind(kind)
+    .with_warnings(warnings)
 }
 
 /// A node of the engine as a JavaScript node.

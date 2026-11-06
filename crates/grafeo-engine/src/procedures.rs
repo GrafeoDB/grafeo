@@ -18,6 +18,8 @@
 
 use std::sync::Arc;
 
+#[cfg(feature = "vector-index")]
+use grafeo_adapters::plugins::Domain;
 use grafeo_adapters::plugins::algorithms::{
     ArticulationPointsAlgorithm, BellmanFordAlgorithm, BetweennessCentralityAlgorithm,
     BfsAlgorithm, BridgesAlgorithm, ClosenessCentralityAlgorithm, ClusteringCoefficientAlgorithm,
@@ -27,7 +29,7 @@ use grafeo_adapters::plugins::algorithms::{
     PageRankAlgorithm, PrimAlgorithm, SsspAlgorithm, StronglyConnectedComponentsAlgorithm,
     SubgraphIsomorphismAlgorithm, TopologicalSortAlgorithm, TotalTrianglesAlgorithm,
 };
-use grafeo_adapters::plugins::{AlgorithmResult, Domain, ParameterDef, ParameterType, Parameters};
+use grafeo_adapters::plugins::{AlgorithmResult, ParameterDef, ParameterType, Parameters};
 use grafeo_common::types::{ReadView, Value};
 use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind, Result};
 use grafeo_core::graph::GraphStore;

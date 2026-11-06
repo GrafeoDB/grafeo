@@ -278,7 +278,7 @@ tests:
         - [true, null, null]
 
   - name: cast_a_datetime_to_its_local_date
-    query: "RETURN CAST(ZONED DATETIME '2024-03-15T23:30:00+01:00' AS DATE) = DATE '2024-03-15' AS zoned, CAST(datetime('2024-03-15T10:00:00') AS DATE) = DATE '2024-03-15' AS local"
+    query: "RETURN CAST(DATETIME '2024-03-15T23:30:00+01:00' AS DATE) = DATE '2024-03-15' AS zoned, CAST(datetime('2024-03-15T10:00:00') AS DATE) = DATE '2024-03-15' AS local"
     expect:
       rows:
         - [true, true]
@@ -290,7 +290,7 @@ tests:
         - [true, true, null]
 
   - name: cast_text_to_datetimes
-    query: "RETURN CAST('2024-03-15T10:00:00' AS DATETIME) = datetime('2024-03-15T10:00:00') AS local, CAST('2024-03-15T10:00:00+01:00' AS ZONED DATETIME) = ZONED DATETIME '2024-03-15T09:00:00Z' AS zoned"
+    query: "RETURN CAST('2024-03-15T10:00:00' AS DATETIME) = datetime('2024-03-15T10:00:00') AS local, CAST('2024-03-15T10:00:00+01:00' AS ZONED DATETIME) = DATETIME '2024-03-15T09:00:00Z' AS zoned"
     expect:
       rows:
         - [true, true]

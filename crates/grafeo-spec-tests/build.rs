@@ -125,6 +125,10 @@ struct Expect {
     /// Rows of RDF terms in N-Triples form, each cell compared as the exact
     /// term (kind, lexical form, datatype and language); see `assert_terms`.
     terms: Vec<Vec<String>>,
+    /// The codes of the warnings the statement raises, in the result's order
+    /// (by code): none without the key, so every test that runs to a result
+    /// also checks that it raises no other warning.
+    warnings: Vec<String>,
 }
 
 fn parse_gtest_file(path: &Path) -> Result<GtestFile, String> {
@@ -424,6 +428,10 @@ fn parse_expect(lines: &[&str], idx: &mut usize) -> Result<Expect, String> {
                 "terms" => {
                     *idx += 1;
                     expect.terms = parse_rows(lines, idx);
+                }
+                "warnings" => {
+                    expect.warnings = parse_yaml_list(value);
+                    *idx += 1;
                 }
                 // A key no runner reads would leave a test that checks
                 // nothing and passes.
@@ -1511,6 +1519,20 @@ fn generate_execute_and_assert(
         )
         .unwrap();
     }
+
+    // The warnings, also when none are expected: a statement that raises one
+    // it should not fails here.
+    let warnings: Vec<String> = expect
+        .warnings
+        .iter()
+        .map(|code| format!("\"{}\"", escape_rust_string(code)))
+        .collect();
+    writeln!(
+        output,
+        "        assert_warnings(&result, &[{}]);",
+        warnings.join(", ")
+    )
+    .unwrap();
 
     // Column assertion (checked before value assertions)
     if !expect.columns.is_empty() {

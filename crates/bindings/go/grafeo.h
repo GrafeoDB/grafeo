@@ -153,6 +153,15 @@ uint64_t    grafeo_result_labels_added(const GrafeoResult* result);
 uint64_t    grafeo_result_labels_removed(const GrafeoResult* result);
 const char* grafeo_result_nodes_json(const GrafeoResult* result);
 const char* grafeo_result_edges_json(const GrafeoResult* result);
+/* The warnings the statement raised, ordered by code: a deprecated form it
+ * wrote or ran, or a notice (experimental, 0.6.2+). The code is a GQLSTATUS of
+ * class 01 (for example "01X01"), the kind "deprecation" or "notice", and the
+ * message names the replacement of a deprecated form. The strings belong to
+ * the result (valid until grafeo_free_result); NULL past the last warning. */
+size_t      grafeo_result_warning_count(const GrafeoResult* result);
+const char* grafeo_result_warning_code(const GrafeoResult* result, size_t index);
+const char* grafeo_result_warning_kind(const GrafeoResult* result, size_t index);
+const char* grafeo_result_warning_message(const GrafeoResult* result, size_t index);
 void        grafeo_free_result(GrafeoResult* result);
 
 /* ---- Streaming (experimental, 0.5.40+) ---------------------------------- */
@@ -176,6 +185,16 @@ GrafeoStatus grafeo_stream_next_row_json(GrafeoStream* stream, char** out_json);
 
 /* Frees a stream handle. Safe to call on NULL. */
 void grafeo_stream_free(GrafeoStream* stream);
+
+/* The warnings the stream's statement raised so far (experimental, 0.6.2+):
+ * its translation's from the open, its run's as the rows that raise them are
+ * pulled, all of them once the stream is exhausted. grafeo_stream_warning_count
+ * takes them for the accessors, which read what it took; the strings are valid
+ * until the next count or grafeo_stream_free. NULL past the last warning. */
+size_t      grafeo_stream_warning_count(const GrafeoStream* stream);
+const char* grafeo_stream_warning_code(const GrafeoStream* stream, size_t index);
+const char* grafeo_stream_warning_kind(const GrafeoStream* stream, size_t index);
+const char* grafeo_stream_warning_message(const GrafeoStream* stream, size_t index);
 
 /* ---- Schema context ------------------------------------------------------ */
 

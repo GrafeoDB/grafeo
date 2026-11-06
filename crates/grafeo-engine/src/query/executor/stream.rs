@@ -24,8 +24,24 @@ use grafeo_core::execution::operators::Operator;
 use grafeo_core::execution::{DataChunk, deadline};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use std::sync::Arc;
+
+use grafeo_common::utils::warning::{QueryWarning, WarningSink};
+
 use crate::database::QueryResult;
 use crate::transaction::ReadPin;
+
+/// What a stream runs: the pipeline `Session::build_streaming_plan` built, with its columns,
+/// its deadline, its snapshot pin and its warnings.
+pub(crate) struct StreamPlan {
+    pub(crate) operator: Box<dyn Operator>,
+    pub(crate) columns: Vec<String>,
+    pub(crate) deadline: Option<Instant>,
+    pub(crate) pin: Option<ReadPin>,
+    /// Where the statement raises its warnings: its translation's, there when the stream
+    /// opens, and its run's, as the rows that raise them are pulled.
+    pub(crate) warnings: Arc<WarningSink>,
+}
 
 /// RAII guard that increments/decrements a session's active-stream counter.
 ///
@@ -64,6 +80,7 @@ pub struct ResultStream<'session> {
     _guard: StreamGuard<'session>,
     /// The stream's committed snapshot pin, including a historical override.
     _pin: Option<ReadPin>,
+    warnings: Arc<WarningSink>,
 }
 
 impl<'s> ResultStream<'s> {
@@ -73,24 +90,35 @@ impl<'s> ResultStream<'s> {
     ///
     /// Returns [`QueryErrorKind::Semantic`](grafeo_common::utils::error::QueryErrorKind)
     /// if `columns` contains a repeated column name.
-    pub(crate) fn new(
-        operator: Box<dyn Operator>,
-        columns: Vec<String>,
-        deadline: Option<Instant>,
-        guard: StreamGuard<'s>,
-        pin: Option<ReadPin>,
-    ) -> Result<Self> {
-        QueryResult::validate_unique_columns(&columns)?;
-        let len = columns.len();
+    pub(crate) fn new(plan: StreamPlan, guard: StreamGuard<'s>) -> Result<Self> {
+        QueryResult::validate_unique_columns(&plan.columns)?;
+        let len = plan.columns.len();
         Ok(Self {
-            operator,
-            columns,
+            operator: plan.operator,
+            columns: plan.columns,
             column_types: vec![LogicalType::Any; len],
-            deadline,
+            deadline: plan.deadline,
             exhausted: false,
             _guard: guard,
-            _pin: pin,
+            _pin: plan.pin,
+            warnings: plan.warnings,
         })
+    }
+
+    /// The warnings the statement raised so far, each once, ordered by code:
+    /// its translation's from the start, its run's as the rows that raise
+    /// them are pulled, all of them once the stream is exhausted. After an
+    /// error it keeps what was raised before it.
+    #[must_use]
+    pub fn warnings(&self) -> Vec<QueryWarning> {
+        self.warnings.raised().to_query_warnings()
+    }
+    /// Where the statement raises its warnings, for a caller that reads them
+    /// while another thread pulls rows: reading it never waits for the
+    /// stream.
+    #[must_use]
+    pub fn warning_sink(&self) -> Arc<WarningSink> {
+        Arc::clone(&self.warnings)
     }
 
     /// Column names in the order they appear in each row.
@@ -157,6 +185,7 @@ impl<'s> ResultStream<'s> {
             append_chunk(&chunk, &mut result);
         }
         result.column_types = self.column_types;
+        result.warnings = self.warnings.raised().to_query_warnings();
         Ok(result)
     }
 }
@@ -177,6 +206,19 @@ impl RowIterator<'_> {
     #[must_use]
     pub fn columns(&self) -> &[String] {
         self.stream.columns()
+    }
+
+    /// The warnings the statement raised so far (see [`ResultStream::warnings`]).
+    #[must_use]
+    pub fn warnings(&self) -> Vec<QueryWarning> {
+        self.stream.warnings()
+    }
+
+    /// Where the statement raises its warnings (see
+    /// [`ResultStream::warning_sink`]).
+    #[must_use]
+    pub fn warning_sink(&self) -> Arc<WarningSink> {
+        self.stream.warning_sink()
     }
 }
 
@@ -230,6 +272,7 @@ pub struct OwnedResultStream {
     exhausted: bool,
     /// The stream's committed snapshot pin, including a historical override.
     _pin: Option<ReadPin>,
+    warnings: Arc<WarningSink>,
 }
 
 impl std::fmt::Debug for OwnedResultStream {
@@ -251,22 +294,31 @@ impl OwnedResultStream {
     ///
     /// Returns [`QueryErrorKind::Semantic`](grafeo_common::utils::error::QueryErrorKind)
     /// if `columns` contains a repeated column name.
-    pub(crate) fn new(
-        operator: Box<dyn Operator>,
-        columns: Vec<String>,
-        deadline: Option<Instant>,
-        pin: Option<ReadPin>,
-    ) -> Result<Self> {
-        QueryResult::validate_unique_columns(&columns)?;
-        let len = columns.len();
+    pub(crate) fn new(plan: StreamPlan) -> Result<Self> {
+        QueryResult::validate_unique_columns(&plan.columns)?;
+        let len = plan.columns.len();
         Ok(Self {
-            operator,
-            columns,
+            operator: plan.operator,
+            columns: plan.columns,
             column_types: vec![LogicalType::Any; len],
-            deadline,
+            deadline: plan.deadline,
             exhausted: false,
-            _pin: pin,
+            _pin: plan.pin,
+            warnings: plan.warnings,
         })
+    }
+
+    /// The warnings the statement raised so far (see [`ResultStream::warnings`]).
+    #[must_use]
+    pub fn warnings(&self) -> Vec<QueryWarning> {
+        self.warnings.raised().to_query_warnings()
+    }
+    /// Where the statement raises its warnings, for a caller that reads them
+    /// while another thread pulls rows: reading it never waits for the
+    /// stream.
+    #[must_use]
+    pub fn warning_sink(&self) -> Arc<WarningSink> {
+        Arc::clone(&self.warnings)
     }
 
     /// Column names in the order they appear in each row.
@@ -327,6 +379,7 @@ impl OwnedResultStream {
             append_chunk(&chunk, &mut result);
         }
         result.column_types = self.column_types;
+        result.warnings = self.warnings.raised().to_query_warnings();
         Ok(result)
     }
 }
@@ -345,6 +398,19 @@ impl OwnedRowIterator {
     #[must_use]
     pub fn columns(&self) -> &[String] {
         self.stream.columns()
+    }
+
+    /// The warnings the statement raised so far (see [`ResultStream::warnings`]).
+    #[must_use]
+    pub fn warnings(&self) -> Vec<QueryWarning> {
+        self.stream.warnings()
+    }
+
+    /// Where the statement raises its warnings (see
+    /// [`ResultStream::warning_sink`]).
+    #[must_use]
+    pub fn warning_sink(&self) -> Arc<WarningSink> {
+        self.stream.warning_sink()
     }
 }
 

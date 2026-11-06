@@ -285,13 +285,22 @@ impl super::GrafeoDB {
         Ok(file.saturating_add(wal))
     }
 
-    /// The total size of the files under `dir` (0 when it does not exist).
+    /// The total size of the files under `dir` (0 when it does not exist),
+    /// without the WAL segments still being created (`*.log.tmp`), which are
+    /// never part of the database.
     #[cfg(feature = "wal")]
     fn directory_size(dir: &Path) -> Result<usize> {
         let mut total = 0usize;
         if dir.is_dir() {
             for entry in std::fs::read_dir(dir)? {
                 let entry = entry?;
+                if entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(grafeo_storage::wal::is_segment_temp_file_name)
+                {
+                    continue;
+                }
                 // From the file itself: on Windows a listing's size is stale
                 // while the file is open (the active WAL segment).
                 let metadata = std::fs::metadata(entry.path())?;

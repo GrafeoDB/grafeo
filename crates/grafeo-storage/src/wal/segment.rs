@@ -1,7 +1,9 @@
 //! WAL v2 segment files: their names and their 128-byte header.
 //!
 //! A WAL is a directory of segment files named after the log position (LSN)
-//! of their first frame, `wal_{first_lsn:020}.log`. Each starts with a
+//! of their first frame, `wal_{first_lsn:020}.log`; a segment the writer is
+//! still creating is named `wal_{first_lsn:020}.log.tmp` until its header is
+//! synced, so a segment name always has a synced header. Each starts with a
 //! 128-byte header (little endian):
 //!
 //! | Offset | Field |
@@ -26,6 +28,7 @@
 use std::path::{Path, PathBuf};
 
 use super::error::WalError;
+use super::frame::{FRAME_HEADER_BYTES, FrameHeader};
 
 /// Size of a segment header in bytes, as the header stores it.
 const SEGMENT_HEADER_LENGTH: u16 = 128;
@@ -242,10 +245,64 @@ pub fn is_unfinished_segment(path: &Path) -> Result<bool, WalError> {
     }
 }
 
+/// Whether the segment file at `path` may hold frames: it holds a complete
+/// frame, or a first frame header that does not decode (bytes this build
+/// cannot tell from a frame are never taken for nothing). A file shorter
+/// than a header and one frame header, a file of zeros, and one whose first
+/// frame runs past its end hold no complete frame.
+///
+/// # Errors
+///
+/// Returns [`WalError::Io`] when the file cannot be read.
+pub fn segment_may_hold_frames(path: &Path) -> Result<bool, WalError> {
+    let io = |source| WalError::io(path, source);
+    let mut file = std::fs::File::open(path).map_err(io)?;
+    let length = file.metadata().map_err(io)?.len();
+    if length < (SEGMENT_HEADER_BYTES + FRAME_HEADER_BYTES) as u64 {
+        return Ok(false);
+    }
+    if is_unfinished_segment(path)? {
+        return Ok(false);
+    }
+    let mut bytes = [0u8; FRAME_HEADER_BYTES];
+    std::io::Seek::seek(
+        &mut file,
+        std::io::SeekFrom::Start(SEGMENT_HEADER_BYTES as u64),
+    )
+    .map_err(io)?;
+    std::io::Read::read_exact(&mut file, &mut bytes).map_err(io)?;
+    Ok(match FrameHeader::decode(&bytes) {
+        Ok(header) => (SEGMENT_HEADER_BYTES as u64).saturating_add(header.frame_bytes()) <= length,
+        Err(_) => true,
+    })
+}
+
 /// The file name of the segment whose first frame is at `first_lsn`.
 #[must_use]
 pub fn segment_file_name(first_lsn: u64) -> String {
     format!("wal_{first_lsn:020}.log")
+}
+
+/// The suffix of a segment the writer is still creating: its header is
+/// written and synced under [`segment_temp_file_name`], and only then is
+/// it renamed to its segment name, so a segment name always has a synced
+/// header.
+const TEMP_SUFFIX: &str = ".tmp";
+
+/// The name a new segment at `first_lsn` is created under, before it is
+/// renamed to [`segment_file_name`].
+#[must_use]
+pub fn segment_temp_file_name(first_lsn: u64) -> String {
+    format!("{}{TEMP_SUFFIX}", segment_file_name(first_lsn))
+}
+
+/// Whether `name` is the name of a segment being created
+/// ([`segment_temp_file_name`]).
+#[must_use]
+pub fn is_segment_temp_file_name(name: &str) -> bool {
+    name.strip_suffix(TEMP_SUFFIX)
+        .and_then(parse_segment_file_name)
+        .is_some()
 }
 
 /// The first LSN a segment file name stands for, or `None` for a name that
@@ -260,12 +317,23 @@ pub fn parse_segment_file_name(name: &str) -> Option<u64> {
     digits.parse().ok()
 }
 
-/// The entries of a WAL directory: its segments in LSN order, and every
-/// other entry, which is never deleted.
+/// The entries of a WAL directory: its segments in LSN order, the files no
+/// log position can need (segments being created, and segments proven
+/// unused), and every other entry, which is never deleted.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WalDirectory {
     /// The segments, as (first LSN, path), in LSN order.
     pub segments: Vec<(u64, PathBuf)>,
+    /// Segments the writer was still creating ([`segment_temp_file_name`]),
+    /// in name order: never part of the log. A writable open removes them.
+    pub temporary: Vec<PathBuf>,
+    /// Segment files proven unused, in LSN order: they hold no complete
+    /// frame, and their name lies strictly inside the frames of the segment
+    /// before them, where no segment can start (a segment starts exactly
+    /// where the frames of the one before it end). A panic while creating a
+    /// segment left them before 0.6.2. Never part of the log; a writable
+    /// open removes them.
+    pub unused: Vec<PathBuf>,
     /// Entries that are not segments, in name order.
     pub others: Vec<PathBuf>,
 }
@@ -274,24 +342,50 @@ pub struct WalDirectory {
 ///
 /// # Errors
 ///
-/// Returns [`WalError::Io`] when the directory cannot be read.
+/// Returns [`WalError::Io`] when the directory or a segment's metadata
+/// cannot be read, or a segment that may be unused cannot be read.
 pub fn list_wal_directory(dir: &Path) -> Result<WalDirectory, WalError> {
     let entries = std::fs::read_dir(dir).map_err(|source| WalError::io(dir, source))?;
     let mut listing = WalDirectory::default();
+    let mut segments = Vec::new();
     for entry in entries {
         let entry = entry.map_err(|source| WalError::io(dir, source))?;
         let path = entry.path();
-        let lsn = entry.file_name().to_str().and_then(parse_segment_file_name);
+        let name = entry.file_name();
+        let name = name.to_str();
+        let lsn = name.and_then(parse_segment_file_name);
         let is_file = entry
             .file_type()
             .map_err(|source| WalError::io(&path, source))?
             .is_file();
         match lsn {
-            Some(lsn) if is_file => listing.segments.push((lsn, path)),
+            Some(lsn) if is_file => segments.push((lsn, path)),
+            _ if is_file && name.is_some_and(is_segment_temp_file_name) => {
+                listing.temporary.push(path);
+            }
             _ => listing.others.push(path),
         }
     }
-    listing.segments.sort_unstable_by_key(|(lsn, _)| *lsn);
+    segments.sort_unstable_by_key(|(lsn, _)| *lsn);
+    // The first LSN and the end of the frames of the last segment kept.
+    let mut previous: Option<(u64, u64)> = None;
+    for (lsn, path) in segments {
+        if let Some((first, end)) = previous
+            && first < lsn
+            && lsn < end
+            && !segment_may_hold_frames(&path)?
+        {
+            listing.unused.push(path);
+            continue;
+        }
+        let length = std::fs::metadata(&path)
+            .map_err(|source| WalError::io(&path, source))?
+            .len();
+        let frames = length.saturating_sub(SEGMENT_HEADER_BYTES as u64);
+        previous = Some((lsn, lsn.saturating_add(frames)));
+        listing.segments.push((lsn, path));
+    }
+    listing.temporary.sort();
     listing.others.sort();
     Ok(listing)
 }

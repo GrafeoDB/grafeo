@@ -53,6 +53,8 @@ let db = GrafeoDB::with_config(Config::persistent("my_graph.grafeo").with_wal_sa
 
 Nothing is deleted: what the open did not replay is kept in `<file>.wal.damaged` (`<file>.wal.damaged-2` and so on for later salvages). The setting applies to that open only; the database file does not store it.
 
+A WAL segment gets its name only once its header is on disk, so an empty or headerless newest segment right after another segment counts as damage too: it was emptied, and the commits it held are lost. One case is not damage: a release before 0.6.2 that crashed while it started a new segment left such a file. Reopen that database once with salvage, which sets the empty file aside; nothing is lost.
+
 ## Checkpointing
 
 Checkpoints merge WAL changes into the database file:

@@ -34,6 +34,7 @@ Queries that ran in 0.6.1 and now fail or behave differently.
 - **`grafeo.max_flow` and `grafeo.min_cost_max_flow` rows**: one row per edge that carries flow, so parallel edges each get a row; they gave one row per node pair.
 - **`grafeo.topological_sort` on a graph with a cycle** raises a data exception (22000) naming one cycle, such as `3 -> 5 -> 8 -> 3`; it returned a row in an undocumented `error` column. The Python method still returns `None` for a cycle.
 - **Minimum spanning trees of equal weight**: `grafeo.kruskal` and `grafeo.prim` return the one with the lowest edge ids (it depended on the order edges were read).
+- **A WAL with an empty segment**, which a crash in 0.6.1 could leave while starting one, is refused at open with an error naming `wal_salvage`: reopen it once with `wal_salvage`, which sets the empty file aside and loses no commit (#725).
 
 ### Added
 
@@ -72,6 +73,7 @@ Queries that ran in 0.6.1 and now fail or behave differently.
 - **`grafeo.kruskal` and `grafeo.prim`** take the lightest of the edges between two nodes, in either direction, and `grafeo.prim` from a start node returns the whole tree; Kruskal kept the first edge it met and Prim missed a lighter edge pointing back, both reporting a heavier tree, and Prim followed only outgoing edges.
 - **`grafeo.topological_sort`** gives the same order on every run (the lexicographically smallest by node id).
 - **`YIELD`**: a column a procedure does not have is refused when the call is planned, naming its columns; it failed only after the algorithm had run (4.5 s on 4,000 nodes).
+- **WAL segments**: a panic while the WAL started a new segment no longer makes every later checkpoint fail until a reopen (#725).
 
 ### Contributors
 

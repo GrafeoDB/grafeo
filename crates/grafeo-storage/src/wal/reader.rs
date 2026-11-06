@@ -23,7 +23,7 @@
 //! | A FIRST frame whose `synced_lsn` lies past its own position | any | damage |
 //! | A whole frame (checksum right) with a flag of a later release | any | refused: the WAL needs a newer version, also with salvage |
 //! | A segment header of a later version or with an incompatible flag of a later release | any | refused: the WAL needs a newer version, also with salvage |
-//! | A segment shorter than its header, or zeros from its first byte to its last | newest segment | cut off while it was created: removed by the cut |
+//! | A segment shorter than its header, or zeros from its first byte to its last | newest segment | refused as damage: a segment gets its name only once its header is synced (#725), so it was emptied, or left by a release before 0.6.2 that crashed while creating it; `salvage` sets it aside |
 //! | A header of zeros with other bytes behind it | any | refused: the header is damaged (it is synced before any frame) |
 //!
 //! With `salvage`, damage and gaps end the scan at the last complete group
@@ -143,9 +143,6 @@ pub struct ScanEnd {
     pub end_lsn: u64,
     /// What follows that end, if anything.
     pub tail: Option<Tail>,
-    /// The newest segment, when its header was cut off while it was created:
-    /// it holds no frame, and the cut removes it.
-    pub unfinished_segment: Option<PathBuf>,
     /// Entries of the WAL directory that are neither segments nor known
     /// files. They are reported and never deleted.
     pub unknown_files: Vec<PathBuf>,
@@ -154,11 +151,11 @@ pub struct ScanEnd {
 
 impl ScanEnd {
     /// Cuts what follows the last complete group, for a read-write open: a
-    /// torn tail is truncated, salvaged damage is copied and moved into a
-    /// new `damaged-<lsn>/` directory first, and an unfinished newest
-    /// segment is removed. Each step is synced; a crash in between leaves a
-    /// log that scans to the same end again, and bytes set aside stay where
-    /// they were put.
+    /// torn tail is truncated, and salvaged damage (an emptied newest
+    /// segment included) is copied and moved into a new `damaged-<lsn>/`
+    /// directory first. Each step is synced; a crash in between leaves a log
+    /// that scans to the same end again, and bytes set aside stay where they
+    /// were put.
     ///
     /// # Errors
     ///
@@ -173,24 +170,13 @@ impl ScanEnd {
                 truncate_segment(segment, tail.offset)?;
             }
         }
-        if let Some(path) = &self.unfinished_segment {
-            maybe_crash("wal:before_remove_unfinished");
-            maybe_fail("wal:truncate").map_err(|error| WalError::injected(path, error))?;
-            match std::fs::remove_file(path) {
-                Ok(()) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(source) => return Err(WalError::io(path, source)),
-            }
-            maybe_crash("wal:after_remove_unfinished");
-            sync_directory(&self.dir)?;
-        }
         Ok(())
     }
 
     /// Whether the scan found nothing to cut.
     #[must_use]
     pub fn is_clean(&self) -> bool {
-        self.tail.is_none() && self.unfinished_segment.is_none()
+        self.tail.is_none()
     }
 }
 
@@ -330,7 +316,6 @@ pub struct WalScan {
     /// Where the scan starts: the checkpoint LSN, where a group must start.
     start_lsn: u64,
     ending: Option<Ending>,
-    unfinished_segment: Option<PathBuf>,
     unknown_files: Vec<PathBuf>,
 }
 
@@ -368,7 +353,6 @@ impl WalScan {
             position: from_lsn,
             start_lsn: from_lsn,
             ending: None,
-            unfinished_segment: None,
             unknown_files: Vec::new(),
         };
         let listing = match list_wal_directory(&scan.dir) {
@@ -385,6 +369,8 @@ impl WalScan {
             .collect();
         let newest = listing.segments.len().checked_sub(1);
         let mut used = Vec::new();
+        // A newest segment that was emptied, which salvage sets aside.
+        let mut emptied: Option<(PathBuf, String)> = None;
         for (index, (first_lsn, path)) in listing.segments.into_iter().enumerate() {
             let (bytes, length) = read_header_bytes(&path)?;
             if header_is_blank(&bytes) {
@@ -396,7 +382,20 @@ impl WalScan {
                     });
                 }
                 if is_unfinished_segment(&path)? {
-                    scan.unfinished_segment = Some(path);
+                    // The writer gives a segment its name only once its
+                    // header is synced (#725), the first one included, so a
+                    // blank one was emptied, and its groups are lost. A
+                    // release before 0.6.2 could leave one when it crashed
+                    // while creating it: salvage sets it aside.
+                    let reason = "the newest segment has no complete header: a segment gets \
+                                  its name only once its header is synced, so it was emptied, \
+                                  or left by a release before 0.6.2 that crashed while \
+                                  creating it; open with wal_salvage to set it aside"
+                        .to_string();
+                    if !options.salvage {
+                        return Err(WalError::SegmentHeader { path, reason });
+                    }
+                    emptied = Some((path, reason));
                     continue;
                 }
                 return Err(WalError::SegmentHeader {
@@ -435,6 +434,14 @@ impl WalScan {
             }
             let beyond = used.drain(keep..).map(|segment| segment.path).collect();
             scan.beyond_gap = Some((beyond, reason));
+        }
+        // Salvage sets an emptied newest segment aside with what follows a
+        // gap, if any.
+        if let Some((path, reason)) = emptied {
+            match &mut scan.beyond_gap {
+                Some((beyond, _)) => beyond.push(path),
+                None => scan.beyond_gap = Some((vec![path], reason)),
+            }
         }
         if let Some(first) = used.first() {
             scan.position = from_lsn.max(first.first_lsn);
@@ -546,7 +553,6 @@ impl WalScan {
         Ok(ScanEnd {
             end_lsn: ending.end_lsn,
             tail: ending.tail,
-            unfinished_segment: self.unfinished_segment.take(),
             unknown_files: std::mem::take(&mut self.unknown_files),
             dir: self.dir,
         })
@@ -1844,27 +1850,63 @@ mod tests {
         );
     }
 
+    /// A newest segment emptied (no bytes, a header of zeros, or its magic
+    /// alone) where the previous segment ends is damage: since 0.6.2 a writer
+    /// never leaves one (#725). Without salvage the scan refuses it, naming the
+    /// file and `wal_salvage`; with salvage the scan ends where the previous
+    /// segment ends, the cut moves the file whole into a `damaged-*`
+    /// directory, and the log then scans clean and is written on.
     #[test]
-    fn a_segment_cut_off_while_it_was_created_is_removed_by_the_cut() {
+    fn an_emptied_newest_segment_is_refused_and_salvage_sets_it_aside() {
         for contents in [Vec::new(), vec![0u8; 128], b"GRAFWAL\0".to_vec()] {
             let dir = tempfile::tempdir().unwrap();
             let wal = Wal::open(dir.path(), writer_options(0)).unwrap();
             let end = write_group(&wal, 1, &["Alix"]);
             drop(wal);
-            let unfinished = segment_path(dir.path(), end.end_lsn);
-            std::fs::write(&unfinished, &contents).unwrap();
-            let (groups, scanned) = scan_all(dir.path(), ScanOptions::new(DATABASE, 0)).unwrap();
-            assert_eq!(groups, [group(1, &["Alix"])]);
-            assert_eq!(scanned.end_lsn, end.end_lsn);
-            assert_eq!(
-                scanned.unfinished_segment.as_deref(),
-                Some(unfinished.as_path())
+            let emptied = segment_path(dir.path(), end.end_lsn);
+            std::fs::write(&emptied, &contents).unwrap();
+            let what = format!("{} bytes", contents.len());
+
+            let error = scan_all(dir.path(), ScanOptions::new(DATABASE, 0)).unwrap_err();
+            let message = error.to_string();
+            assert!(
+                matches!(&error, WalError::SegmentHeader { path, .. } if path == &emptied),
+                "{what}: {message}"
             );
-            assert!(scanned.tail.is_none());
+            assert!(message.contains("wal_salvage"), "{what}: {message}");
+            assert_eq!(std::fs::read(&emptied).unwrap(), contents, "{what}: kept");
+
+            let salvage = ScanOptions {
+                salvage: true,
+                ..ScanOptions::new(DATABASE, 0)
+            };
+            let (groups, scanned) = scan_all(dir.path(), salvage).unwrap();
+            assert_eq!(groups, [group(1, &["Alix"])], "{what}");
+            assert_eq!(scanned.end_lsn, end.end_lsn, "{what}");
+            let tail = scanned.tail.as_ref().expect("a damaged tail");
+            assert_eq!(tail.kind, TailKind::Damaged, "{what}");
+            assert_eq!(tail.lsn, end.end_lsn, "{what}");
+            assert_eq!(tail.set_aside, std::slice::from_ref(&emptied), "{what}");
             scanned.cut_torn_tail().unwrap();
-            assert!(!unfinished.exists());
+            assert!(!emptied.exists(), "{what}: moved");
+            let kept = dir
+                .path()
+                .join(format!("damaged-{:020}", end.end_lsn))
+                .join(emptied.file_name().unwrap());
+            assert_eq!(
+                std::fs::read(&kept).unwrap(),
+                contents,
+                "{what}: kept whole"
+            );
+
+            let (groups, scanned) = scan_all(dir.path(), ScanOptions::new(DATABASE, 0)).unwrap();
+            assert_eq!(groups, [group(1, &["Alix"])], "{what}");
+            assert!(scanned.is_clean(), "{what}: {scanned:?}");
             let wal = Wal::open(dir.path(), writer_options(end.end_lsn)).unwrap();
             write_group(&wal, 2, &["Gus"]);
+            drop(wal);
+            let (groups, _) = scan_all(dir.path(), ScanOptions::new(DATABASE, 0)).unwrap();
+            assert_eq!(groups, [group(1, &["Alix"]), group(2, &["Gus"])], "{what}");
         }
         // An unfinished header before a later segment is damage, not a crash
         // during creation.

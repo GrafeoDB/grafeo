@@ -49,14 +49,16 @@ fn sidecar_wal_path(path: &std::path::Path) -> std::path::PathBuf {
 
 /// The crash points of a checkpoint with the WAL enabled, in the order
 /// `wal_checkpoint()` and `close()` reach them: the flush starts a new WAL
-/// segment (created, its header written, the directory synced), takes its
+/// segment (made under a temporary name, its header written, renamed into place, the
+/// directory synced), takes its
 /// snapshot and lets commits go on, the file manager writes the new image
 /// (its chunks, a sync, the header, the trim), then the flush removes the
 /// segment the image covers.
-const CHECKPOINT_POINTS: [&str; 14] = [
+const CHECKPOINT_POINTS: [&str; 15] = [
     "flush:before_serialize",
     "wal:after_segment_create",
     "wal:after_segment_header",
+    "wal:after_segment_rename",
     "wal:before_dir_sync",
     "flush:after_rotate",
     "flush:after_snapshot",
@@ -73,7 +75,7 @@ const CHECKPOINT_POINTS: [&str; 14] = [
 /// The crash points of `close()` with the WAL enabled (in `NoSync` mode, so
 /// no background flusher syncs first): the sync of the WAL and its sync
 /// marker, the checkpoint's, then the removal of the sidecar WAL.
-const CLOSE_POINTS: [&str; 18] = [
+const CLOSE_POINTS: [&str; 19] = [
     "wal:before_sync",
     "wal:after_sync",
     "wal:after_frame",
@@ -91,6 +93,7 @@ const CLOSE_POINTS: [&str; 18] = [
     CHECKPOINT_POINTS[11],
     CHECKPOINT_POINTS[12],
     CHECKPOINT_POINTS[13],
+    CHECKPOINT_POINTS[14],
     "close:before_remove_sidecar_wal",
 ];
 

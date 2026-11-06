@@ -22,9 +22,12 @@
 //! **Segments** start with a FIRST frame and end after a LAST frame: the
 //! writer rotates when a group begins in a segment that has reached the
 //! configured size, and when [`Wal::rotate`] is called (every checkpoint).
-//! Creating a segment writes and syncs its header, then syncs the directory
-//! (Unix), before the first frame. Rotation syncs the old segment first, so
-//! only the last segment can hold unsynced frames.
+//! Creating a segment writes and syncs its header under a temporary name,
+//! renames it to its segment name, switches the writer to it and syncs the
+//! directory (Unix), before the first frame: a segment name always has a
+//! synced header, and a panic while creating one leaves only a temporary
+//! file, which the next writable open removes (#725). Rotation syncs the
+//! old segment first, so only the last segment can hold unsynced frames.
 //!
 //! **Group commit:** [`Wal::sync_until`] makes every group up to a log
 //! position durable; one fsync covers every group published before it, and
@@ -68,8 +71,9 @@ use super::frame::{
     MAX_FRAME_PAYLOAD, MAX_FRAME_RECORD_BYTES, SEALED_OVERHEAD,
 };
 use super::segment::{
-    KEY_CHECK_BYTES, SALT_BYTES, SEGMENT_HEADER_BYTES, SegmentHeader, is_unfinished_segment,
-    list_wal_directory, segment_file_name, stored_key_check_aad,
+    KEY_CHECK_BYTES, SALT_BYTES, SEGMENT_HEADER_BYTES, SegmentHeader, WalDirectory,
+    is_unfinished_segment, list_wal_directory, segment_file_name, segment_may_hold_frames,
+    segment_temp_file_name, stored_key_check_aad,
 };
 use super::{DurabilityMode, WalCipher};
 
@@ -230,6 +234,11 @@ pub struct Wal {
     marker_end_lsn: AtomicU64,
     poisoned: AtomicBool,
     poison_reason: Mutex<Option<String>>,
+    /// The writer switched to a new segment whose name may not be durable
+    /// yet: a panic came between the switch and the directory sync. The
+    /// next group or rotation syncs the directory first, so no frame lands
+    /// in a segment a power loss could leave under its temporary name.
+    directory_sync_due: AtomicBool,
 }
 
 impl std::fmt::Debug for Wal {
@@ -252,6 +261,10 @@ impl Wal {
     /// are). When there is no segment, or the newest one ends below the
     /// start (the image covers it), a new segment starts there.
     ///
+    /// First it removes the files that are never part of the log: segments
+    /// a writer was still creating, and segments proven unused (see
+    /// [`WalDirectory`](super::WalDirectory)).
+    ///
     /// # Errors
     ///
     /// - [`WalError::Misplaced`] when a segment reaches past the start: scan
@@ -263,8 +276,12 @@ impl Wal {
     ///   append to.
     /// - [`WalError::Encryption`] for a cipher without the `encryption`
     ///   feature.
+    /// - [`WalError::OccupiedSegment`] when a new segment is to start where a
+    ///   file that may hold frames already is.
+    /// - [`WalError::TemporaryWithFrames`] for a segment still under its
+    ///   temporary name that holds frames (damage; the file is kept).
     /// - [`WalError::Io`] when a file or the directory cannot be read,
-    ///   created or synced.
+    ///   created, removed or synced.
     pub fn open(dir: impl AsRef<Path>, options: WalOptions) -> Result<Self, WalError> {
         let dir = dir.as_ref().to_path_buf();
         #[cfg(not(feature = "encryption"))]
@@ -276,19 +293,26 @@ impl Wal {
         ensure_directory(&dir)?;
         let start = options.start_lsn;
         let listing = list_wal_directory(&dir)?;
+        remove_dead_files(&dir, &listing)?;
         let appended = match listing.segments.last() {
             Some((first_lsn, path)) => open_newest(path, *first_lsn, &options)?,
             None => None,
         };
         let segment = match appended {
             Some(segment) => segment,
-            None => create_segment(
-                &dir,
-                start,
-                options.database_id,
-                options.cipher_for_salt.as_ref(),
-            )
-            .map_err(|failure| failure.error)?,
+            None => {
+                let segment = create_segment(
+                    &dir,
+                    start,
+                    options.database_id,
+                    options.cipher_for_salt.as_ref(),
+                )
+                .map_err(|failure| failure.error)?;
+                maybe_crash("wal:after_segment_rename");
+                maybe_crash("wal:before_dir_sync");
+                sync_directory(&dir)?;
+                segment
+            }
         };
         let first_lsn = segment.first_lsn;
         // A segment the writer appends to holds at most one frame per frame
@@ -325,6 +349,7 @@ impl Wal {
             marker_end_lsn: AtomicU64::new(0),
             poisoned: AtomicBool::new(false),
             poison_reason: Mutex::new(None),
+            directory_sync_due: AtomicBool::new(false),
         })
     }
 
@@ -346,6 +371,8 @@ impl Wal {
         self.check_available().map_err(as_unavailable)?;
         let mut state = self.state.lock();
         self.check_available().map_err(as_unavailable)?;
+        self.sync_directory_if_due()
+            .map_err(GroupError::NotWritten)?;
         let used = state.end_lsn - state.segment.first_lsn;
         let full = (SEGMENT_HEADER_BYTES as u64).saturating_add(used) >= self.segment_bytes
             || state.frames >= self.frames_per_segment_key;
@@ -398,9 +425,12 @@ impl Wal {
     ///
     /// # Errors
     ///
-    /// Returns [`WalError::Unavailable`] when the writer is poisoned, and the
-    /// error of syncing the active segment (which poisons the writer) or of
-    /// creating the new one.
+    /// Returns [`WalError::Unavailable`] when the writer is poisoned, the
+    /// error of syncing the active segment or the directory (which poisons
+    /// the writer) or of creating the new one, and
+    /// [`WalError::OccupiedSegment`] when a file that may hold frames has the
+    /// new segment's name (the file is left untouched, and the writer stays
+    /// on the active segment).
     pub fn rotate(&self) -> Result<u64, WalError> {
         self.check_available()?;
         let mut state = self.state.lock();
@@ -471,8 +501,12 @@ impl Wal {
         if target > before && !only_the_marker {
             self.marker_due.store(true, Ordering::Release);
             // A group being written holds the writer: the marker follows
-            // its LAST frame (see `GroupWriter::finish`).
-            if let Some(state) = self.state.try_lock() {
+            // its LAST frame (see `GroupWriter::finish`). A segment whose
+            // name is not durable yet takes no marker: the next group syncs
+            // the directory, and its prologue records this sync.
+            if let Some(state) = self.state.try_lock()
+                && !self.directory_sync_due.load(Ordering::Acquire)
+            {
                 self.group_writer(state, TransactionId::SYSTEM.as_u64())
                     .write_marker_if_due();
             }
@@ -632,6 +666,7 @@ impl Wal {
     /// Seals the active segment (sync) and starts a new one at the end of
     /// the log; keeps an active segment without frames.
     fn rotate_locked(&self, state: &mut WriterState) -> Result<u64, WalError> {
+        self.sync_directory_if_due()?;
         let end_lsn = state.end_lsn;
         if end_lsn == state.segment.first_lsn {
             return Ok(end_lsn);
@@ -660,6 +695,10 @@ impl Wal {
                 return Err(failure.error);
             }
         };
+        // The segment has its name: switch to it before anything that can
+        // fail or panic, so the writer never tries to create it again
+        // (#725).
+        self.directory_sync_due.store(true, Ordering::Release);
         *self.published.lock() = SyncTarget {
             file: segment.file.clone(),
             path: segment.path.clone(),
@@ -668,7 +707,29 @@ impl Wal {
         self.active_first_lsn.store(end_lsn, Ordering::Release);
         state.segment = segment;
         state.frames = 0;
+        maybe_crash("wal:after_segment_rename");
+        // Still under the writer's lock: no group lands in the segment
+        // before its name is durable.
+        self.sync_directory_if_due()?;
         Ok(end_lsn)
+    }
+
+    /// Syncs the WAL directory when the writer switched to a segment whose
+    /// name is not durable yet (see `directory_sync_due`). Called under the
+    /// writer's lock. A failure poisons the writer.
+    fn sync_directory_if_due(&self) -> Result<(), WalError> {
+        if !self.directory_sync_due.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        maybe_crash("wal:before_dir_sync");
+        if let Err(error) = sync_directory(&self.dir) {
+            self.poison(format!(
+                "syncing the WAL directory after starting a segment failed: {error}"
+            ));
+            return Err(error);
+        }
+        self.directory_sync_due.store(false, Ordering::Release);
+        Ok(())
     }
 }
 
@@ -1110,48 +1171,68 @@ pub(crate) fn check_identity(
 /// Why creating a segment failed, and whether the writer must stop.
 struct CreateFailure {
     error: WalError,
-    /// A sync failed, or the half-made segment could not be removed.
+    /// A sync failed.
     poisons: bool,
 }
 
-/// Creates the segment starting at `first_lsn`: writes and syncs its
-/// header, then syncs the directory. A segment whose header was not made
-/// durable is removed again.
+/// Creates the segment starting at `first_lsn` and gives it its name, so
+/// that a segment name in the WAL directory always has a synced header
+/// (#725): the header is written and synced under the segment's temporary
+/// name ([`segment_temp_file_name`]), then the file is renamed to the
+/// segment name. A file already there that holds no complete frame (a
+/// leftover of a rotation that panicked before 0.6.2) is replaced; one that
+/// may hold frames is left untouched, and creating fails with
+/// [`WalError::OccupiedSegment`].
+///
+/// The directory is not synced: the caller switches to the segment first
+/// and syncs the directory next ([`sync_directory`]), before any group
+/// lands in it. A failure leaves no segment name behind, and removes the
+/// temporary file when it can (a writable open removes one left over).
 fn create_segment(
     dir: &Path,
     first_lsn: u64,
     database_id: u128,
     cipher_for_salt: Option<&CipherForSalt>,
 ) -> Result<ActiveSegment, CreateFailure> {
+    let temporary = dir.join(segment_temp_file_name(first_lsn));
     let path = dir.join(segment_file_name(first_lsn));
+    // A temporary file never holds frames: one a crash left is cut back.
     let file = OpenOptions::new()
         .read(true)
         .write(true)
-        .create_new(true)
-        .open(&path)
+        .create(true)
+        .truncate(true)
+        .open(&temporary)
         .map_err(|source| CreateFailure {
-            error: WalError::io(&path, source),
+            error: WalError::io(&temporary, source),
             poisons: false,
         })?;
     maybe_crash("wal:after_segment_create");
-    let cipher = match write_and_sync_header(&file, &path, first_lsn, database_id, cipher_for_salt)
-    {
-        Ok(cipher) => cipher,
-        Err((error, sync_failed)) => {
-            drop(file);
-            let removed = std::fs::remove_file(&path);
-            return Err(CreateFailure {
-                error,
-                poisons: sync_failed || removed.is_err(),
-            });
-        }
+    let given_up = |file: File, error: WalError, poisons: bool| {
+        drop(file);
+        // Best effort: a writable open removes a temporary file left over.
+        let _removed: std::io::Result<()> = std::fs::remove_file(&temporary);
+        CreateFailure { error, poisons }
     };
-    maybe_crash("wal:before_dir_sync");
-    if let Err(error) = sync_directory(dir) {
-        return Err(CreateFailure {
-            error,
-            poisons: true,
-        });
+    let cipher =
+        match write_and_sync_header(&file, &temporary, first_lsn, database_id, cipher_for_salt) {
+            Ok(cipher) => cipher,
+            Err((error, sync_failed)) => return Err(given_up(file, error, sync_failed)),
+        };
+    let occupied = match std::fs::symlink_metadata(&path) {
+        Ok(_) => segment_may_hold_frames(&path),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(source) => Err(WalError::io(&path, source)),
+    };
+    match occupied {
+        Ok(false) => {}
+        Ok(true) => {
+            return Err(given_up(file, WalError::OccupiedSegment { path }, false));
+        }
+        Err(error) => return Err(given_up(file, error, false)),
+    }
+    if let Err(source) = std::fs::rename(&temporary, &path) {
+        return Err(given_up(file, WalError::io(&path, source), false));
     }
     Ok(ActiveSegment {
         file: Some(Arc::new(file)),
@@ -1159,6 +1240,39 @@ fn create_segment(
         first_lsn,
         cipher,
     })
+}
+
+/// Removes the files of `listing` that are never part of the log: segments
+/// a writer was still creating, and segments proven unused (see
+/// [`WalDirectory`]), then syncs the directory when it removed any. Only a
+/// writable open calls it; a read-only scan leaves them.
+///
+/// # Errors
+///
+/// [`WalError::TemporaryWithFrames`] for a segment still under its
+/// temporary name that holds frames: no writer leaves one (frames go only
+/// into a segment with its name), so it is damage, and nothing is removed.
+/// [`WalError::Io`] when a file cannot be read or removed, or the directory
+/// cannot be synced.
+fn remove_dead_files(dir: &Path, listing: &WalDirectory) -> Result<(), WalError> {
+    for path in &listing.temporary {
+        if segment_may_hold_frames(path)? {
+            return Err(WalError::TemporaryWithFrames { path: path.clone() });
+        }
+    }
+    let dead: Vec<&PathBuf> = listing
+        .temporary
+        .iter()
+        .chain(listing.unused.iter())
+        .collect();
+    for path in &dead {
+        std::fs::remove_file(path).map_err(|source| WalError::io(*path, source))?;
+    }
+    if dead.is_empty() {
+        Ok(())
+    } else {
+        sync_directory(dir)
+    }
 }
 
 /// Writes and syncs a new segment's header; on failure, the flag says
@@ -2090,6 +2204,335 @@ mod tests {
                     assert_eq!(next.start_lsn, end.end_lsn);
                     assert_eq!(wal.rotate().unwrap(), next.end_lsn);
                 }
+            }
+        }
+    }
+
+    use super::super::segment::{is_segment_temp_file_name, segment_temp_file_name};
+
+    /// The files of `dir` whose names end in `.tmp`.
+    fn temps(dir: &Path) -> Vec<String> {
+        let mut found: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| is_segment_temp_file_name(name))
+            .collect();
+        found.sort();
+        found
+    }
+
+    /// What a rotation can find at the next segment's name that holds no complete frame: an empty
+    /// file, a torn header, a header only, and a header with a torn frame (#725).
+    fn without_a_frame(first_lsn: u64) -> Vec<(&'static str, Vec<u8>)> {
+        let other = tempfile::tempdir().unwrap();
+        let name = segment_file_name(first_lsn);
+        let wal = Wal::open(other.path(), options(first_lsn)).unwrap();
+        let header = std::fs::read(other.path().join(&name)).unwrap();
+        assert_eq!(
+            header.len(),
+            SEGMENT_HEADER_BYTES,
+            "a new segment holds its header"
+        );
+        write_group(&wal, 9, &["Vincent"]);
+        drop(wal);
+        let full = std::fs::read(other.path().join(&name)).unwrap();
+        vec![
+            ("empty", Vec::new()),
+            ("a torn header", header[..SEGMENT_HEADER_BYTES / 2].to_vec()),
+            ("a header only", header),
+            (
+                "a header and a torn frame",
+                full[..SEGMENT_HEADER_BYTES + FRAME_HEADER_BYTES + 3].to_vec(),
+            ),
+        ]
+    }
+
+    /// A file at the next segment's name with no complete frame is replaced by the rotation's
+    /// rename: the rotation succeeds, the segment holds its header alone, and the next group lands
+    /// in it (#725).
+    #[test]
+    fn a_next_segment_without_a_complete_frame_is_replaced() {
+        let probe = tempfile::tempdir().unwrap();
+        let end = write_group(&Wal::open(probe.path(), options(0)).unwrap(), 1, &["Alix"]).end_lsn;
+        for (leftover, bytes) in without_a_frame(end) {
+            let dir = tempfile::tempdir().unwrap();
+            let wal = Wal::open(dir.path(), options(0)).unwrap();
+            assert_eq!(write_group(&wal, 1, &["Alix"]).end_lsn, end);
+            std::fs::write(dir.path().join(segment_file_name(end)), &bytes).unwrap();
+            let rotated = wal
+                .rotate()
+                .unwrap_or_else(|error| panic!("{leftover}: {error}"));
+            assert_eq!(rotated, end, "{leftover}");
+            assert_eq!(
+                segment_len(dir.path(), end),
+                SEGMENT_HEADER_BYTES as u64,
+                "{leftover}: the published segment holds its header alone"
+            );
+            assert!(temps(dir.path()).is_empty(), "{leftover}: no temp left");
+            let next = write_group(&wal, 2, &["Gus"]);
+            assert_eq!(next.start_lsn, end, "{leftover}");
+            assert!(!wal.is_poisoned(), "{leftover}");
+            let groups = raw_groups(&raw_frames(dir.path()));
+            assert_eq!(groups.len(), 2, "{leftover}: {groups:?}");
+        }
+    }
+
+    /// A file at the next segment's name that holds a complete frame, or a first frame header that
+    /// does not decode, is never replaced: the rotation fails with `OccupiedSegment` naming it, the
+    /// file keeps its bytes, nothing is poisoned (groups go on in the old segment), and once the
+    /// file is gone the next rotation succeeds (#725).
+    #[test]
+    fn an_occupied_next_segment_is_refused_and_kept() {
+        let probe = tempfile::tempdir().unwrap();
+        let end = write_group(&Wal::open(probe.path(), options(0)).unwrap(), 1, &["Alix"]).end_lsn;
+        let other = tempfile::tempdir().unwrap();
+        {
+            let foreign = Wal::open(other.path(), options(end)).unwrap();
+            write_group(&foreign, 9, &["Vincent"]);
+        }
+        let name = segment_file_name(end);
+        let with_a_frame = std::fs::read(other.path().join(&name)).unwrap();
+        let mut undecodable = with_a_frame[..SEGMENT_HEADER_BYTES].to_vec();
+        undecodable.extend(std::iter::repeat_n(0xFF, FRAME_HEADER_BYTES + 8));
+        for (occupant, bytes) in [
+            ("a complete frame", with_a_frame),
+            ("a first frame header that does not decode", undecodable),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let wal = Wal::open(dir.path(), options(0)).unwrap();
+            write_group(&wal, 1, &["Alix"]);
+            std::fs::write(dir.path().join(&name), &bytes).unwrap();
+            let error = wal.rotate().unwrap_err();
+            assert!(
+                matches!(&error, WalError::OccupiedSegment { path } if path.ends_with(&name)),
+                "{occupant}: {error:?}"
+            );
+            assert!(error.to_string().contains(&name), "{occupant}: {error}");
+            assert_eq!(
+                std::fs::read(dir.path().join(&name)).unwrap(),
+                bytes,
+                "{occupant}: the file is untouched"
+            );
+            assert!(
+                !wal.is_poisoned(),
+                "{occupant}: nothing was written, nothing poisoned"
+            );
+            assert!(temps(dir.path()).is_empty(), "{occupant}: no temp left");
+            let more = write_group(&wal, 2, &["Gus"]);
+            std::fs::remove_file(dir.path().join(&name)).unwrap();
+            assert_eq!(
+                wal.rotate()
+                    .unwrap_or_else(|error| panic!("{occupant}: the retry: {error}")),
+                more.end_lsn,
+                "{occupant}"
+            );
+        }
+    }
+
+    /// A 0.6.1 leftover (a blank or header-only file whose name lies strictly inside the previous
+    /// segment's frame range) is a proven-unused rotation: a writable open reads the log past it
+    /// and removes it (#725).
+    #[test]
+    fn a_leftover_inside_the_previous_segments_frames_is_removed_on_open() {
+        for blank in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            let (inside, end) = {
+                let wal = Wal::open(dir.path(), options(0)).unwrap();
+                let first = write_group(&wal, 1, &["Alix"]);
+                let second = write_group(&wal, 2, &["Gus"]);
+                (first.end_lsn, second.end_lsn)
+            };
+            let name = segment_file_name(inside);
+            let bytes = if blank {
+                Vec::new()
+            } else {
+                let other = tempfile::tempdir().unwrap();
+                drop(Wal::open(other.path(), options(inside)).unwrap());
+                std::fs::read(other.path().join(&name)).unwrap()
+            };
+            std::fs::write(dir.path().join(&name), &bytes).unwrap();
+            let listing = list_wal_directory(dir.path()).unwrap();
+            assert!(
+                format!("{:?}", listing.unused).contains(&name),
+                "blank {blank}: listed as unused: {:?}",
+                listing.unused
+            );
+            let wal = Wal::open(dir.path(), options(end))
+                .unwrap_or_else(|error| panic!("blank {blank}: {error}"));
+            assert!(
+                !dir.path().join(&name).exists(),
+                "blank {blank}: a writable open removes the leftover"
+            );
+            write_group(&wal, 3, &["Mia"]);
+            assert_eq!(
+                raw_groups(&raw_frames(dir.path())).len(),
+                3,
+                "blank {blank}"
+            );
+        }
+    }
+
+    /// A stale temp file (a segment never published) is ignored by the directory listing and
+    /// removed by a writable open (#725).
+    #[test]
+    fn a_stale_temp_is_ignored_and_removed_on_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let end = write_group(&Wal::open(dir.path(), options(0)).unwrap(), 1, &["Alix"]).end_lsn;
+        let temp = segment_temp_file_name(end);
+        assert_eq!(temp, format!("{}.tmp", segment_file_name(end)));
+        assert!(is_segment_temp_file_name(&temp));
+        std::fs::write(dir.path().join(&temp), b"never published").unwrap();
+        let listing = list_wal_directory(dir.path()).unwrap();
+        assert_eq!(listing.segments.len(), 1, "the temp is no segment");
+        assert!(
+            format!("{:?}", listing.temporary).contains(&temp),
+            "listed as temporary: {:?}",
+            listing.temporary
+        );
+        drop(Wal::open(dir.path(), options(end)).unwrap());
+        assert!(temps(dir.path()).is_empty(), "a writable open removes it");
+    }
+
+    /// A temp file that holds frames was never published, yet holds data a writer put there: a
+    /// writable open refuses it with `TemporaryWithFrames` naming it, and keeps it (#725).
+    #[test]
+    fn a_temp_with_frames_is_refused_and_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let end = write_group(&Wal::open(dir.path(), options(0)).unwrap(), 1, &["Alix"]).end_lsn;
+        let other = tempfile::tempdir().unwrap();
+        {
+            let foreign = Wal::open(other.path(), options(end)).unwrap();
+            write_group(&foreign, 9, &["Vincent"]);
+        }
+        let bytes = std::fs::read(other.path().join(segment_file_name(end))).unwrap();
+        let temp = segment_temp_file_name(end);
+        std::fs::write(dir.path().join(&temp), &bytes).unwrap();
+        let error = Wal::open(dir.path(), options(end)).unwrap_err();
+        assert!(
+            matches!(&error, WalError::TemporaryWithFrames { path } if path.ends_with(&temp)),
+            "{error:?}"
+        );
+        assert_eq!(
+            std::fs::read(dir.path().join(&temp)).unwrap(),
+            bytes,
+            "the temp is kept"
+        );
+    }
+
+    #[cfg(feature = "testing-crash-injection")]
+    mod rotation_panics {
+        use std::panic::{AssertUnwindSafe, catch_unwind};
+
+        use grafeo_common::testing::crash::{disable_crash, enable_crash_at};
+
+        use super::*;
+
+        /// Runs `f` with a panic armed at the `count`th crash point: the point it fired at, if any.
+        fn panic_at(count: u64, f: impl FnOnce()) -> Option<String> {
+            enable_crash_at(count);
+            let outcome = catch_unwind(AssertUnwindSafe(f));
+            disable_crash();
+            outcome.err().map(|payload| {
+                payload
+                    .downcast_ref::<String>()
+                    .cloned()
+                    .unwrap_or_default()
+            })
+        }
+
+        /// The crash points a rotation after one group reaches, in order, with their counts.
+        fn rotation_points() -> Vec<(u64, String)> {
+            let mut points = Vec::new();
+            for count in 1..=32 {
+                let dir = tempfile::tempdir().unwrap();
+                let wal = Wal::open(dir.path(), options(0)).unwrap();
+                write_group(&wal, 1, &["Alix"]);
+                match panic_at(count, || {
+                    let _rotated = wal.rotate();
+                }) {
+                    Some(message) => points.push((count, message)),
+                    None => return points,
+                }
+            }
+            panic!("a rotation ran past 32 crash points: {points:?}")
+        }
+
+        /// The rotation reaches the ruled points in the ruled order: the temp created, its header
+        /// synced, then (after the rename and the switch) the rename point, then the directory sync.
+        #[test]
+        fn a_rotation_reaches_its_points_in_order() {
+            let fired: Vec<String> = rotation_points()
+                .into_iter()
+                .map(|(_, message)| message)
+                .collect();
+            let order = [
+                "wal:after_segment_create",
+                "wal:after_segment_header",
+                "wal:after_segment_rename",
+                "wal:before_dir_sync",
+            ];
+            let positions: Vec<usize> = order
+                .iter()
+                .map(|point| {
+                    fired
+                        .iter()
+                        .position(|message| message.ends_with(point))
+                        .unwrap_or_else(|| panic!("never reached {point}: {fired:?}"))
+                })
+                .collect();
+            assert!(positions.is_sorted(), "{fired:?}");
+        }
+
+        /// A panic at each crash point of a rotation, with no reopen: before the rename it leaves
+        /// a temp file and the writer at its old segment; after it, the writer on the new one.
+        /// Either way the log goes on: groups are written, the next rotation succeeds, and a
+        /// writable reopen reads every group and removes any temp (#725).
+        #[test]
+        fn a_panic_while_rotating_leaves_the_log_going_on() {
+            for (count, point) in rotation_points() {
+                let dir = tempfile::tempdir().unwrap();
+                let wal = Wal::open(dir.path(), options(0)).unwrap();
+                let first = write_group(&wal, 1, &["Alix"]);
+                let fired = panic_at(count, || {
+                    let _rotated = wal.rotate();
+                });
+                assert_eq!(fired.as_deref(), Some(point.as_str()), "{point}");
+                let before_rename = point.ends_with("wal:after_segment_create")
+                    || point.ends_with("wal:after_segment_header");
+                if before_rename {
+                    assert_eq!(temps(dir.path()).len(), 1, "{point}: a temp is left");
+                    assert_eq!(
+                        list_wal_directory(dir.path()).unwrap().segments.len(),
+                        1,
+                        "{point}: no new segment name"
+                    );
+                }
+                if point.ends_with("wal:after_segment_rename") {
+                    let first_point = panic_at(1, || {
+                        write_group(&wal, 7, &["Butch"]);
+                    });
+                    assert!(
+                        first_point
+                            .as_deref()
+                            .is_some_and(|message| message.ends_with("wal:before_dir_sync")),
+                        "{point}: the next write syncs the directory before it lands: {first_point:?}"
+                    );
+                }
+                let second = write_group(&wal, 2, &["Gus"]);
+                let rotated = wal
+                    .rotate()
+                    .unwrap_or_else(|error| panic!("{point}: the next rotation: {error}"));
+                assert_eq!(rotated, second.end_lsn, "{point}");
+                let third = write_group(&wal, 3, &["Mia"]);
+                assert!(!wal.is_poisoned(), "{point}");
+                assert!(third.start_lsn > first.end_lsn, "{point}");
+                drop(wal);
+                drop(Wal::open(dir.path(), options(third.end_lsn)).unwrap());
+                assert!(
+                    temps(dir.path()).is_empty(),
+                    "{point}: the reopen removed the temp"
+                );
+                assert_eq!(raw_groups(&raw_frames(dir.path())).len(), 3, "{point}");
             }
         }
     }

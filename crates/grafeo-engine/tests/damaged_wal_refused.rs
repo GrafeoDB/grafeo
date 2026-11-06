@@ -478,6 +478,121 @@ fn a_damaged_wal_is_refused_or_salvaged_up_to_the_damage() {
     );
 }
 
+/// The newest segment emptied (blank, or its header torn) where the previous segment's frames end
+/// exactly at its name is damage, not a rotation leftover: since 0.6.2 a writer never leaves a
+/// blank segment name (a leftover is ignored only when its name lies strictly inside the previous
+/// segment's frames, #725). Read-write and read-only refuse it, naming the segment and
+/// `wal_salvage`, and keep it; a salvaging open then opens with exactly the commits before it.
+#[test]
+fn an_emptied_segment_where_the_previous_one_ends_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let crashed = crashed(&dir.path().join("pristine"), true);
+    let work = dir.path().join("work");
+    let path = work.join("db.grafeo");
+    let second = crashed.segments[1].file_name().unwrap();
+    // The commits before the second segment: the state with it gone.
+    restore(&work, &crashed.files);
+    std::fs::remove_file(work.join("db.grafeo.wal").join(second)).unwrap();
+    let before = match open(&path, "read-write") {
+        Opened::Read(read) => read,
+        other => panic!("the WAL without its second segment: {}", other.show()),
+    };
+    for (emptied, keep) in [("blank", 0), ("a torn header", 12)] {
+        let empty = |segment: &Path| {
+            let mut bytes = std::fs::read(segment).unwrap();
+            bytes.truncate(keep);
+            std::fs::write(segment, &bytes).unwrap();
+            bytes
+        };
+        for how in ["read-write", "read-only"] {
+            restore(&work, &crashed.files);
+            let segment = work.join("db.grafeo.wal").join(second);
+            let bytes = empty(&segment);
+            let files = files_in(&work);
+            match open(&path, how) {
+                Opened::Refused(file) => assert!(
+                    file.ends_with(second),
+                    "{emptied}, {how}: refused naming {}",
+                    file.display()
+                ),
+                other => panic!("{emptied}, {how}: {}", other.show()),
+            }
+            assert_eq!(
+                std::fs::read(&segment).unwrap(),
+                bytes,
+                "{emptied}, {how}: the segment is kept"
+            );
+            if how == "read-only" {
+                assert!(
+                    files_in(&work) == files,
+                    "{emptied}: a read-only refusal changes nothing"
+                );
+            }
+        }
+        restore(&work, &crashed.files);
+        empty(&work.join("db.grafeo.wal").join(second));
+        let message = match GrafeoDB::open(&path) {
+            Err(error) => error.to_string(),
+            Ok(_) => panic!("{emptied}: opened"),
+        };
+        assert!(
+            message.contains("wal_salvage"),
+            "{emptied}: names wal_salvage: {message}"
+        );
+        match open(&path, "salvaging") {
+            Opened::Read(read) => assert_eq!(
+                read, before,
+                "{emptied}: salvage keeps every commit before the emptied segment"
+            ),
+            other => panic!("{emptied}, salvaging: {}", other.show()),
+        }
+        match open(&path, "read-write") {
+            Opened::Read(read) => assert_eq!(read, before, "{emptied}: an open after the salvage"),
+            other => panic!("{emptied}: an open after the salvage: {}", other.show()),
+        }
+    }
+}
+
+/// A database whose only segment is emptied (blank, or its header torn) is refused too: no writer
+/// since 0.6.2 leaves one, whatever comes before it (#725). Read-write and read-only refuse it,
+/// naming it, and the read-only open changes nothing.
+#[test]
+fn an_emptied_only_segment_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let crashed = crashed(&dir.path().join("pristine"), true);
+    let work = dir.path().join("work");
+    let path = work.join("db.grafeo");
+    let (first, second) = (
+        crashed.segments[0].file_name().unwrap(),
+        crashed.segments[1].file_name().unwrap(),
+    );
+    for (emptied, keep) in [("blank", 0), ("a torn header", 12)] {
+        for how in ["read-write", "read-only"] {
+            restore(&work, &crashed.files);
+            let wal = work.join("db.grafeo.wal");
+            std::fs::remove_file(wal.join(second)).unwrap();
+            let mut bytes = std::fs::read(wal.join(first)).unwrap();
+            bytes.truncate(keep);
+            std::fs::write(wal.join(first), &bytes).unwrap();
+            let files = files_in(&work);
+            match open(&path, how) {
+                Opened::Refused(file) => assert!(
+                    file.ends_with(first),
+                    "{emptied}, {how}: refused naming {}",
+                    file.display()
+                ),
+                other => panic!("{emptied}, {how}: {}", other.show()),
+            }
+            if how == "read-only" {
+                assert!(
+                    files_in(&work) == files,
+                    "{emptied}: a read-only refusal changes nothing"
+                );
+            }
+        }
+    }
+}
+
 /// Damages every frame of a crashed WAL in turn, with `sync` as the child's durability.
 fn damage_every_frame(sync: bool, wrong: &mut Vec<String>, checked: &mut usize) {
     let dir = tempfile::tempdir().unwrap();

@@ -175,6 +175,34 @@ pub enum WalError {
         reason: String,
     },
 
+    /// A rotation found a file under the name of the segment it was to
+    /// start, and that file may hold frames: it is left as it is, and the
+    /// rotation fails. The writer stays usable; the next rotation tries
+    /// again.
+    #[error(
+        "the WAL segment {} already exists and may hold frames, so the writer cannot start a \
+         new segment there; it was left untouched",
+        .path.display()
+    )]
+    OccupiedSegment {
+        /// The segment file.
+        path: PathBuf,
+    },
+
+    /// A segment the writer was still creating (its temporary name) holds
+    /// frames. The writer writes frames only once a segment has its name,
+    /// so this is damage: the open refuses, and the file is left where it
+    /// is.
+    #[error(
+        "the WAL file {} was never given its segment name, yet it holds frames: no writer \
+         leaves one like that, so the WAL is damaged; the file was left untouched",
+        .path.display()
+    )]
+    TemporaryWithFrames {
+        /// The file.
+        path: PathBuf,
+    },
+
     /// A log position would pass the largest one.
     #[error("the WAL log position would pass the largest LSN ({})", u64::MAX)]
     LsnOverflow,
@@ -263,7 +291,9 @@ impl From<WalError> for Error {
             | WalError::NotEncrypted { .. }
             | WalError::UnsupportedSegment { .. }
             | WalError::UnsupportedFrame { .. }
-            | WalError::Misplaced { .. } => {
+            | WalError::Misplaced { .. }
+            | WalError::OccupiedSegment { .. }
+            | WalError::TemporaryWithFrames { .. } => {
                 Error::from(StorageError::RecoveryFailed(error.to_string()))
             }
             WalError::RecordTooLarge { .. } => Error::InvalidValue(error.to_string()),

@@ -618,12 +618,14 @@ fn migrate_child() {
 }
 
 /// The crash points of a read-write open after its migration: the WAL's first
-/// segment is created, its header written and the directory synced. The
+/// segment is made under a temporary name, its header written, renamed into place and the
+/// directory synced. The
 /// migration is over (its lock removed) when they are reached.
 #[cfg(feature = "testing-crash-injection")]
-const OPEN_WAL_POINTS: [&str; 3] = [
+const OPEN_WAL_POINTS: [&str; 4] = [
     "wal:after_segment_create",
     "wal:after_segment_header",
+    "wal:after_segment_rename",
     "wal:before_dir_sync",
 ];
 

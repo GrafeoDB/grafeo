@@ -11,9 +11,9 @@
 //! cuts everything after them, and the writer continues right there. The
 //! sweeps cover writing (without syncs, encrypted, and syncing every group),
 //! a failed group's cut back, the removal of segments below a checkpoint,
-//! the cut of a torn tail, the removal of a segment cut off while it was
-//! created, and the salvage that sets damaged bytes aside (which must keep
-//! every byte it moves, whatever step the crash cuts short).
+//! the cut of a torn tail, and the salvage that sets damaged bytes aside
+//! (damage inside the log, or an emptied newest segment), which must keep
+//! every byte it moves, whatever step the crash cuts short.
 //!
 //! The crash model is a process crash: what was written reaches the files.
 //!
@@ -30,7 +30,7 @@ use grafeo_common::testing::child_process;
 use grafeo_common::testing::crash::{CrashResult, with_crash_at, with_failure_at};
 use grafeo_common::types::TransactionId;
 use grafeo_storage::wal::{
-    DurabilityMode, ScanEnd, ScanOptions, Wal, WalOptions, WalScan, list_wal_directory,
+    DurabilityMode, ScanEnd, ScanOptions, Wal, WalError, WalOptions, WalScan, list_wal_directory,
     segment_file_name,
 };
 
@@ -123,7 +123,7 @@ fn writer_options(scenario: &str, start_lsn: u64) -> WalOptions {
 
 fn scan_options(scenario: &str) -> ScanOptions {
     let options = ScanOptions {
-        salvage: scenario == "salvage",
+        salvage: matches!(scenario, "salvage" | "emptied"),
         ..ScanOptions::new(DATABASE, 0)
     };
     if encrypted(scenario) {
@@ -237,7 +237,7 @@ fn crash_child() {
     let progress = base.join("progress.txt");
     let result = match scenario.as_str() {
         // The parent left a log to open; the child cuts what follows it.
-        "cut" | "unfinished" | "salvage" => with_crash_at(point, || {
+        "cut" | "emptied" | "salvage" => with_crash_at(point, || {
             let (_, end) = scan(&wal_dir, &scenario);
             end.cut_torn_tail().unwrap();
         }),
@@ -399,10 +399,11 @@ fn sweep_writes(scenario: &str, expected: &[Group]) -> BTreeSet<String> {
 }
 
 /// The crash points of writing and rotating.
-const WRITE_POINTS: [&str; 4] = [
+const WRITE_POINTS: [&str; 5] = [
     "wal:after_frame",
     "wal:after_segment_create",
     "wal:after_segment_header",
+    "wal:after_segment_rename",
     "wal:before_dir_sync",
 ];
 
@@ -488,9 +489,10 @@ fn a_crash_while_cutting_the_torn_tail_leaves_a_log_that_scans_the_same() {
     panic!("the cut never completed");
 }
 
-/// A log with three complete groups and, after them, a newest segment whose
-/// header was cut off while it was created (all zero), in `base/wal`.
-fn log_with_an_unfinished_segment(base: &Path, scenario: &str) -> (Vec<Group>, PathBuf) {
+/// A log with three complete groups and, after them, an emptied newest
+/// segment (a header of zeros), in `base/wal`. Without salvage the scan
+/// refuses it, naming the file and `wal_salvage` (#725).
+fn log_with_an_emptied_segment(base: &Path, scenario: &str) -> (Vec<Group>, PathBuf) {
     let dir = base.join("wal");
     let wal = Wal::open(&dir, writer_options(scenario, 0)).unwrap();
     let planned = planned_groups();
@@ -499,53 +501,61 @@ fn log_with_an_unfinished_segment(base: &Path, scenario: &str) -> (Vec<Group>, P
     }
     let end = wal.end_lsn();
     drop(wal);
-    let unfinished = dir.join(segment_file_name(end));
-    std::fs::write(&unfinished, [0u8; 128]).unwrap();
-    let (groups, scanned) = scan(&dir, scenario);
-    assert_eq!(groups, planned[..3]);
-    assert_eq!(
-        scanned.unfinished_segment.as_deref(),
-        Some(unfinished.as_path())
+    let emptied = dir.join(segment_file_name(end));
+    std::fs::write(&emptied, [0u8; 128]).unwrap();
+    let refusal = (|| -> Result<(), WalError> {
+        let mut scan = WalScan::open(&dir, ScanOptions::new(DATABASE, 0))?;
+        while let Some(mut frames) = scan.next_group()? {
+            while frames.next_payload()?.is_some() {}
+        }
+        scan.finish().map(drop)
+    })()
+    .expect_err("an emptied newest segment is refused without salvage");
+    let message = refusal.to_string();
+    assert!(
+        matches!(&refusal, WalError::SegmentHeader { path, .. } if path == &emptied),
+        "{message}"
     );
-    (groups, unfinished)
+    assert!(message.contains("wal_salvage"), "{message}");
+    (planned[..3].to_vec(), emptied)
 }
 
+/// Salvage moves an emptied newest segment into a `damaged-*` directory. A
+/// crash at any step, followed by the next open's salvage, keeps the file
+/// whole there, leaves the three groups, and the log then scans clean
+/// without salvage and is written on.
 #[test]
-fn a_crash_while_removing_an_unfinished_segment_leaves_a_log_that_scans_the_same() {
-    let scenario = "unfinished";
+fn a_crash_while_salvaging_an_emptied_segment_keeps_it_whole() {
+    let scenario = "emptied";
     let mut seen = BTreeSet::new();
     for point in 1..=MAX_POINTS {
         let base = tempfile::tempdir().unwrap();
-        let (groups, unfinished) = log_with_an_unfinished_segment(base.path(), scenario);
+        let (groups, emptied) = log_with_an_emptied_segment(base.path(), scenario);
         let crash = run_child(scenario, base.path(), point);
         let completed = crash.is_none();
         seen.extend(crash);
-        let at = format!("unfinished at crash point {point}");
+        let at = format!("emptied at crash point {point}");
         let dir = base.path().join("wal");
+        // The next open salvages again, without crashing.
         let (after, end) = scan(&dir, scenario);
         assert_eq!(after, groups, "{at}: the second open finds the same groups");
-        assert_eq!(
-            end.unfinished_segment.is_some(),
-            unfinished.exists(),
-            "{at}: an unfinished segment that is left is found again"
+        end.cut_torn_tail().unwrap();
+        assert!(!emptied.exists(), "{at}: set aside");
+        assert!(
+            set_aside_files(&dir).contains(&vec![0u8; 128]),
+            "{at}: the emptied segment is kept whole"
         );
+        // Without salvage now: nothing is left to refuse.
+        let (after, end) = scan(&dir, "plain");
+        assert_eq!(after, groups, "{at}");
+        assert!(end.is_clean(), "{at}: {end:?}");
+        reopen_and_write_on(&dir, scenario, &groups, &end, &at);
         if completed {
-            assert!(end.is_clean() && !unfinished.exists(), "{at}: {end:?}");
-            assert_eq!(point, 3, "a crash before and after the removal, then none");
-            assert_crashed_at(
-                scenario,
-                &seen,
-                &[
-                    "wal:before_remove_unfinished",
-                    "wal:after_remove_unfinished",
-                ],
-            );
-            reopen_and_write_on(&dir, scenario, &groups, &end, &at);
+            assert_crashed_at(scenario, &seen, &["wal:salvage_dir", "wal:salvage_move"]);
             return;
         }
-        reopen_and_write_on(&dir, scenario, &groups, &end, &at);
     }
-    panic!("the removal never completed");
+    panic!("the salvage never completed");
 }
 
 /// Removing the segments below a checkpoint goes oldest first: a crash at

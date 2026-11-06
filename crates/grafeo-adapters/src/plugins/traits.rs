@@ -117,17 +117,37 @@ impl Domain {
     }
 }
 
-/// Refuses an argument of `params` outside the domain its definition in `defs` declares, with
-/// "invalid parameter value" (22023) naming `procedure`, the parameter, the values it allows and
-/// the value. The one check of every way into a procedure (`CALL` and the bindings' algorithm
-/// methods), run once all the arguments are set, so a domain that names another parameter
-/// (`fetch_k` at least `k`) reads that one as given, or else its default. A parameter left out
-/// keeps its default, which lies inside.
+/// Refuses `params` when a required parameter of `defs` has no value, left out or given null,
+/// and an argument outside the domain its definition declares, both with "invalid parameter
+/// value" (22023) naming `procedure` and the parameter: a missing one with its type, an argument
+/// outside with the values it allows and the value. The one check of every way into a procedure
+/// (`CALL` and the bindings' algorithm methods), run once all the arguments are set, so a domain
+/// that names another parameter (`fetch_k` at least `k`) reads that one as given, or else its
+/// default. An optional parameter left out keeps its default, which lies inside.
 ///
 /// # Errors
 ///
-/// The invalid parameter value of the first argument outside its domain.
+/// The invalid parameter value of the first required parameter without a value, else of the
+/// first argument outside its domain.
 pub fn check_parameters(procedure: &str, defs: &[ParameterDef], params: &Parameters) -> Result<()> {
+    if let Some(def) = defs
+        .iter()
+        .find(|def| def.required && !params.has_value(&def.name))
+    {
+        let null = if params.given_null(&def.name) {
+            ", got null"
+        } else {
+            ""
+        };
+        return Err(Error::from(QueryError::new(
+            QueryErrorKind::InvalidParameterValue,
+            format!(
+                "{procedure}: missing required argument '{}' ({}){null}",
+                def.name,
+                def.param_type.name()
+            ),
+        )));
+    }
     for def in defs {
         let Some((value, given)) = params.number(&def.name) else {
             continue;
@@ -155,6 +175,52 @@ pub fn check_parameters(procedure: &str, defs: &[ParameterDef], params: &Paramet
     Ok(())
 }
 
+/// Gives each optional parameter of `defs` without a value in `params` (left out or given null)
+/// the default its definition declares, so a caller that reads the values itself, the bindings'
+/// algorithm methods, takes the default `CALL grafeo.procedures()` lists rather than a copy of
+/// its own. A parameter that declares no default stays without a value.
+///
+/// # Errors
+///
+/// An internal error naming the parameter for a declared default that is no value of its type.
+pub fn apply_defaults(defs: &[ParameterDef], params: &mut Parameters) -> Result<()> {
+    for def in defs {
+        let Some(default) = def.default.as_deref() else {
+            continue;
+        };
+        if def.required || params.has_value(&def.name) {
+            continue;
+        }
+        let name = def.name.as_str();
+        let parsed = match def.param_type {
+            ParameterType::Integer | ParameterType::NodeId => default
+                .parse()
+                .map(|value| params.set_int(name, value))
+                .ok(),
+            ParameterType::Float => default
+                .parse()
+                .map(|value| params.set_float(name, value))
+                .ok(),
+            ParameterType::Boolean => default
+                .parse()
+                .map(|value| params.set_bool(name, value))
+                .ok(),
+            ParameterType::String => {
+                params.set_string(name, default);
+                Some(())
+            }
+            ParameterType::List => None,
+        };
+        if parsed.is_none() {
+            return Err(Error::Internal(format!(
+                "the declared default '{default}' of '{name}' is no {}",
+                def.param_type.name()
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Types of algorithm parameters.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ParameterType {
@@ -170,6 +236,22 @@ pub enum ParameterType {
     NodeId,
     /// List of arbitrary values (for vector queries, multi-value filters, etc.).
     List,
+}
+
+impl ParameterType {
+    /// The type's name in an error: `INTEGER`, `FLOAT`, `STRING`, `BOOLEAN`, `NODE ID` or
+    /// `LIST`.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Integer => "INTEGER",
+            Self::Float => "FLOAT",
+            Self::String => "STRING",
+            Self::Boolean => "BOOLEAN",
+            Self::NodeId => "NODE ID",
+            Self::List => "LIST",
+        }
+    }
 }
 
 /// Parameters passed to an algorithm.
@@ -213,6 +295,73 @@ impl Parameters {
     /// Sets a list parameter.
     pub fn set_list(&mut self, name: impl Into<String>, value: Vec<grafeo_common::types::Value>) {
         self.values.insert(name.into(), ParameterValue::List(value));
+    }
+
+    /// Records that the call gave `name` a null: an optional parameter keeps its default, and
+    /// [`check_parameters`] refuses a required one as given null.
+    pub fn set_null(&mut self, name: impl Into<String>) {
+        self.values.insert(name.into(), ParameterValue::Null);
+    }
+
+    /// Whether the call gave `name` a value (not left out, not null).
+    #[must_use]
+    pub fn has_value(&self, name: &str) -> bool {
+        self.values
+            .get(name)
+            .is_some_and(|value| !matches!(value, ParameterValue::Null))
+    }
+
+    /// Whether the call gave `name` a null.
+    #[must_use]
+    pub fn given_null(&self, name: &str) -> bool {
+        matches!(self.values.get(name), Some(ParameterValue::Null))
+    }
+
+    /// The integer of `name`, which has a value: a required parameter once [`check_parameters`]
+    /// has passed, or an optional one with a declared default once [`apply_defaults`] has run.
+    ///
+    /// # Errors
+    ///
+    /// An internal error naming it when it has none, which only a caller that skips those gets.
+    pub fn required_int(&self, name: &str) -> Result<i64> {
+        self.get_int(name).ok_or_else(|| unchecked(name))
+    }
+
+    /// The float of `name`, which has a value, as [`required_int`](Self::required_int).
+    ///
+    /// # Errors
+    ///
+    /// An internal error naming it when it has none, as [`required_int`](Self::required_int).
+    pub fn required_float(&self, name: &str) -> Result<f64> {
+        self.get_float(name).ok_or_else(|| unchecked(name))
+    }
+
+    /// The boolean of `name`, which has a value, as [`required_int`](Self::required_int).
+    ///
+    /// # Errors
+    ///
+    /// An internal error naming it when it has none, as [`required_int`](Self::required_int).
+    pub fn required_bool(&self, name: &str) -> Result<bool> {
+        self.get_bool(name).ok_or_else(|| unchecked(name))
+    }
+
+    /// The string of the required parameter `name`.
+    ///
+    /// # Errors
+    ///
+    /// An internal error naming it when it has none, as [`required_int`](Self::required_int).
+    pub fn required_string(&self, name: &str) -> Result<&str> {
+        self.get_string(name).ok_or_else(|| unchecked(name))
+    }
+
+    /// The count of the required parameter `name`, as [`get_count`](Self::get_count) reads it.
+    ///
+    /// # Errors
+    ///
+    /// An internal error naming it when it has none, as [`required_int`](Self::required_int),
+    /// and the invalid parameter value of [`get_count`](Self::get_count).
+    pub fn required_count(&self, name: &str) -> Result<usize> {
+        self.get_count(name)?.ok_or_else(|| unchecked(name))
     }
 
     /// Gets an integer parameter.
@@ -290,9 +439,20 @@ impl Default for Parameters {
     }
 }
 
+/// The error of a required parameter without a value that reached the procedure, which
+/// [`check_parameters`] would have refused, or of an optional one [`apply_defaults`] would have
+/// given its default.
+fn unchecked(name: &str) -> Error {
+    Error::Internal(format!(
+        "argument '{name}' reached the procedure without a value"
+    ))
+}
+
 /// A parameter value.
 #[derive(Debug, Clone)]
 enum ParameterValue {
+    /// A null the call gave, which is no value.
+    Null,
     Integer(i64),
     Float(f64),
     String(String),

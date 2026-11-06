@@ -729,9 +729,7 @@ impl GraphAlgorithm for DijkstraAlgorithm {
         let graph = super::traits::GraphView::new(store, view);
         let store = &graph;
         let found = super::traits::evaluated(|| {
-            let source_id = params
-                .get_int("source")
-                .ok_or_else(|| Error::InvalidValue("source parameter required".to_string()))?;
+            let source_id = params.required_int("source")?;
 
             let source = node_id_from_param(source_id, "source")?;
             let weight_prop = params.get_string("weight");
@@ -853,9 +851,7 @@ impl GraphAlgorithm for SsspAlgorithm {
         let graph = super::traits::GraphView::new(store, view);
         let store = &graph;
         let found = super::traits::evaluated(|| {
-            let source_str = params
-                .get_string("source")
-                .ok_or_else(|| Error::InvalidValue("source parameter required".to_string()))?;
+            let source_str = params.required_string("source")?;
 
             // Resolve source: try integer parse first, then name property lookup
             let source = if let Ok(id) = source_str.parse::<u64>() {
@@ -929,9 +925,7 @@ impl_algorithm! {
     description: "Bellman-Ford shortest path algorithm (handles negative weights)",
     params: bellman_ford_params,
     execute(store, params) {
-        let source_id = params
-            .get_int("source")
-            .ok_or_else(|| Error::InvalidValue("source parameter required".to_string()))?;
+        let source_id = params.required_int("source")?;
 
         let source = node_id_from_param(source_id, "source")?;
         let weight_prop = params.get_string("weight");

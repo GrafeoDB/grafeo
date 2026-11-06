@@ -519,9 +519,7 @@ impl_algorithm! {
     description: "Breadth-first search traversal from a starting node",
     params: bfs_params,
     execute(store, params) {
-        let start_id = params.get_int("start").ok_or_else(|| {
-            grafeo_common::utils::error::Error::InvalidValue("start parameter required".to_string())
-        })?;
+        let start_id = params.required_int("start")?;
 
         let start = node_id_from_param(start_id, "start")?;
         let layers = bfs_layers_on(store, start)?;
@@ -574,9 +572,7 @@ impl_algorithm! {
     description: "Depth-first search traversal from a starting node",
     params: dfs_params,
     execute(store, params) {
-        let start_id = params.get_int("start").ok_or_else(|| {
-            grafeo_common::utils::error::Error::InvalidValue("start parameter required".to_string())
-        })?;
+        let start_id = params.required_int("start")?;
 
         let start = node_id_from_param(start_id, "start")?;
         // Each node in discovery order, with its depth; and its finish position.

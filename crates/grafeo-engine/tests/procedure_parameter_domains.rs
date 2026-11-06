@@ -450,7 +450,8 @@ fn pagerank_at_zero_iterations_gives_the_starting_scores() {
 }
 
 /// A null argument takes the default of an optional parameter, however the null is computed, in both
-/// forms; for a required parameter it is the error of an omitted argument.
+/// forms; for a required parameter it is the error of an omitted argument, which then says it got
+/// null.
 #[test]
 fn a_null_argument_takes_the_default() {
     let db = graph();
@@ -491,7 +492,7 @@ fn a_null_argument_takes_the_default() {
             "CALL grafeo.search.vector({{label: {null}, property: 'emb', query: [1.0, 0.0], k: 1}})"
         );
         let error = db.execute(&query).expect_err(&query).to_string();
-        assert_eq!(error, omitted, "{query}");
+        assert_eq!(error, format!("{omitted}, got null"), "{query}");
     }
 }
 

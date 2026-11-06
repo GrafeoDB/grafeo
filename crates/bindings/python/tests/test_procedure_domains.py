@@ -1,9 +1,9 @@
 """The algorithm bridge refuses a value outside its parameter's domain as CALL does (22023).
 
 `db.algorithms.pagerank(damping=2.0)` and the other bridge functions run the same check as
-`CALL grafeo.pagerank(2.0)`, so neither way in runs an algorithm on a meaningless value, and each
-bridge function's keyword defaults are the catalogue's (`CALL grafeo.procedures()`). 0.6.1 ran
-them and returned NaN or meaningless scores.
+`CALL grafeo.pagerank(2.0)`, so neither way in runs an algorithm on a meaningless value. A bridge
+function holds no default of its own: its keyword defaults to None, which runs as the catalogue's
+default (`CALL grafeo.procedures()`). 0.6.1 ran them and returned NaN or meaningless scores.
 """
 
 import inspect
@@ -84,13 +84,16 @@ def test_a_value_outside_the_domain_is_refused(function, keyword, kind, domain):
 
 @pytest.mark.parametrize(("function", "keyword", "kind", "domain"), DOMAINS)
 def test_the_bridge_defaults_are_the_catalogues(function, keyword, kind, domain):
+    """The keyword defaults to None, and None runs as the catalogue's default given explicitly."""
     signature = inspect.signature(getattr(grafeo.GrafeoDB().algorithms, function))
-    bridge = signature.parameters[keyword].default
+    assert signature.parameters[keyword].default is None, (function, keyword, signature)
     listed = catalogue()[function].get(keyword)
     if listed is None:
-        assert bridge is None, (function, keyword, bridge)
-    else:
-        assert float(bridge) == float(listed), (function, keyword, bridge, listed)
+        return
+    db = graph()
+    run = getattr(db.algorithms, function)
+    value = int(listed) if kind == "int" else float(listed)
+    assert repr(run(**{keyword: None})) == repr(run(**{keyword: value})), (function, keyword)
 
 
 def test_the_bridge_and_call_refuse_the_same_damping():

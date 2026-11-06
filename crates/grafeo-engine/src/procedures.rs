@@ -397,16 +397,8 @@ impl Procedure for SearchVectorProcedure {
 
     fn execute(&self, ctx: &ProcedureContext<'_>, params: &Parameters) -> Result<AlgorithmResult> {
         let lpg = require_lpg_store(ctx, "CALL grafeo.search.vector")?;
-        let label = params.get_string("label").ok_or_else(|| {
-            grafeo_common::utils::error::Error::InvalidValue(
-                "CALL grafeo.search.vector: missing required parameter 'label'".into(),
-            )
-        })?;
-        let property = params.get_string("property").ok_or_else(|| {
-            grafeo_common::utils::error::Error::InvalidValue(
-                "CALL grafeo.search.vector: missing required parameter 'property'".into(),
-            )
-        })?;
+        let label = params.required_string("label")?;
+        let property = params.required_string("property")?;
         let query = coerce_params_to_vector(params, "query")?;
         let k = k_limit(params, 10)?;
 
@@ -526,16 +518,8 @@ impl Procedure for SearchMmrProcedure {
         use grafeo_core::index::vector::mmr_select;
 
         let lpg = require_lpg_store(ctx, "CALL grafeo.search.mmr")?;
-        let label = params.get_string("label").ok_or_else(|| {
-            grafeo_common::utils::error::Error::InvalidValue(
-                "CALL grafeo.search.mmr: missing required parameter 'label'".into(),
-            )
-        })?;
-        let property = params.get_string("property").ok_or_else(|| {
-            grafeo_common::utils::error::Error::InvalidValue(
-                "CALL grafeo.search.mmr: missing required parameter 'property'".into(),
-            )
-        })?;
+        let label = params.required_string("label")?;
+        let property = params.required_string("property")?;
         let query = coerce_params_to_vector(params, "query")?;
         let k = k_limit(params, 10)?;
         let fetch_k = params
@@ -670,21 +654,9 @@ impl Procedure for SearchTextProcedure {
                 ),
             )
         })?;
-        let label = params.get_string("label").ok_or_else(|| {
-            grafeo_common::utils::error::Error::InvalidValue(
-                "CALL grafeo.search.text: missing required parameter 'label'".into(),
-            )
-        })?;
-        let property = params.get_string("property").ok_or_else(|| {
-            grafeo_common::utils::error::Error::InvalidValue(
-                "CALL grafeo.search.text: missing required parameter 'property'".into(),
-            )
-        })?;
-        let query = params.get_string("query").ok_or_else(|| {
-            grafeo_common::utils::error::Error::InvalidValue(
-                "CALL grafeo.search.text: missing required parameter 'query'".into(),
-            )
-        })?;
+        let label = params.required_string("label")?;
+        let property = params.required_string("property")?;
+        let query = params.required_string("query")?;
         let k = k_limit(params, 10)?;
 
         let search = grafeo_core::graph::rowgroup::IndexSearch {
@@ -985,16 +957,17 @@ const PASS_THROUGH_KEYS: &[&str] = &["projection"];
 /// Each value must suit its parameter's type: an integer passes for a float
 /// and a vector for a list, and then its domain (see
 /// [`check_parameters`](grafeo_adapters::plugins::check_parameters)). A null
-/// leaves the parameter out, so an optional one keeps its default and a
-/// required one fails as missing when the procedure runs. A map key that names no parameter passes through only as
-/// one of the keys every call takes (`projection`), with the type of its
-/// value.
+/// is no value: an optional parameter keeps its default. A required parameter
+/// left out or given null is refused, naming it. A map key that names no
+/// parameter passes through only as one of the keys every call takes
+/// (`projection`), with the type of its value.
 ///
 /// # Errors
 ///
 /// Returns a semantic error naming the argument and `procedure` when a value
-/// does not suit its parameter's type, and an invalid parameter value when
-/// it lies outside its domain: such a value never falls back to the
+/// does not suit its parameter's type, and an invalid parameter value when a
+/// required parameter has none or a value lies outside its domain: such a
+/// value never falls back to the
 /// parameter's default. Returns an invalid reference naming the parameters
 /// for a map key that names none of them (`{dampingg: 0.5}`), and for more
 /// positional values than the procedure has parameters: a mistyped or
@@ -1072,7 +1045,7 @@ fn set_parameter(
 ) -> Result<()> {
     use ParameterType as Type;
     match (expected, value) {
-        (_, Value::Null) => {}
+        (_, Value::Null) => params.set_null(name),
         (Some(Type::Integer | Type::NodeId) | None, Value::Int64(v)) => params.set_int(name, *v),
         (Some(Type::Float), Value::Int64(v)) => params.set_float(name, *v as f64),
         (Some(Type::Float) | None, Value::Float64(v)) => params.set_float(name, *v),

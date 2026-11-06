@@ -14,5 +14,5 @@ mod traits;
 pub use registry::PluginRegistry;
 pub use traits::{
     Algorithm, AlgorithmResult, Domain, ParameterDef, ParameterType, Parameters, Plugin,
-    check_parameters,
+    apply_defaults, check_parameters,
 };

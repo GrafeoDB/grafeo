@@ -546,8 +546,8 @@ impl GraphAlgorithm for SubgraphIsomorphismAlgorithm {
         let graph = super::traits::GraphView::new(store, view);
         let store = &graph;
         let found = super::traits::evaluated(|| {
-            let edges_str = params.get_string("pattern_edges").unwrap_or("");
-            let node_count = params.get_count("pattern_nodes")?.unwrap_or(0);
+            let edges_str = params.required_string("pattern_edges")?;
+            let node_count = params.required_count("pattern_nodes")?;
             let edges = pattern_edges(edges_str, node_count)?;
 
             let count = count_from_edges_on(store, &edges, node_count)?;

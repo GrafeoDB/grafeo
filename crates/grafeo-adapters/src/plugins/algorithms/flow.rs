@@ -563,12 +563,8 @@ impl_algorithm! {
     description: "Maximum flow using Edmonds-Karp algorithm",
     params: max_flow_params,
     execute(store, params) {
-        let source_id = params
-            .get_int("source")
-            .ok_or_else(|| Error::InvalidValue("source parameter required".to_string()))?;
-        let sink_id = params
-            .get_int("sink")
-            .ok_or_else(|| Error::InvalidValue("sink parameter required".to_string()))?;
+        let source_id = params.required_int("source")?;
+        let sink_id = params.required_int("sink")?;
 
         let source = node_id_from_param(source_id, "source")?;
         let sink = node_id_from_param(sink_id, "sink")?;
@@ -661,12 +657,8 @@ impl_algorithm! {
     description: "Minimum cost maximum flow using successive shortest paths",
     params: min_cost_flow_params,
     execute(store, params) {
-        let source_id = params
-            .get_int("source")
-            .ok_or_else(|| Error::InvalidValue("source parameter required".to_string()))?;
-        let sink_id = params
-            .get_int("sink")
-            .ok_or_else(|| Error::InvalidValue("sink parameter required".to_string()))?;
+        let source_id = params.required_int("source")?;
+        let sink_id = params.required_int("sink")?;
 
         let source = node_id_from_param(source_id, "source")?;
         let sink = node_id_from_param(sink_id, "sink")?;

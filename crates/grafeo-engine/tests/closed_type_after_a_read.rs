@@ -291,6 +291,11 @@ fn a_type_changed_during_a_transaction_answers_alike_with_a_read_first() {
         let committed = session.commit().is_ok();
         (written, committed)
     };
+    assert_eq!(
+        outcome(false),
+        (true, true),
+        "the write and its commit go through"
+    );
     assert_eq!(outcome(false), outcome(true));
 }
 

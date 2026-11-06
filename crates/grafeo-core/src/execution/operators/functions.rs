@@ -653,3 +653,28 @@ mod tests {
         assert_eq!(regex_pattern_error("(src"), None);
     }
 }
+
+#[cfg(test)]
+mod catalogue {
+    //! Class test 0: `BuiltinFunction::ALL` is the catalogue `tests/catalogue/builtin_function.txt`.
+
+    use super::BuiltinFunction;
+
+    #[test]
+    fn builtin_function_catalogue_names_every_function() {
+        let file = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tests/catalogue/builtin_function.txt"
+        ));
+        let listed: Vec<&str> = file
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+            .collect();
+        let all: Vec<String> = BuiltinFunction::ALL
+            .iter()
+            .map(|function| format!("{function:?}"))
+            .collect();
+        assert_eq!(listed, all);
+    }
+}

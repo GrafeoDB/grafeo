@@ -13,12 +13,12 @@ use grafeo_core::execution::operators::SeekKey;
 use grafeo_core::graph::Direction;
 
 use super::cost::measured::{
-    EXPAND_OUTPUT, KEY_COLUMN_ROW, LABEL_CHECK, LIST_CALL, LIST_ENTRY, LOOKUP, PROPERTY_CHECK,
-    SCAN_ROW,
+    EXPAND_OUTPUT, KEY_COLUMN_CHECK, KEY_COLUMN_ROW, LABEL_CHECK, LIST_CALL, LIST_ENTRY, LOOKUP,
+    PROPERTY_CHECK, SCAN_ROW,
 };
 use super::degrees::Candidates;
 use super::{Optimizer, PlannerRule};
-use crate::query::plan::{ExpandDirection, ExpandOp, LogicalExpression, NodeScanOp};
+use crate::query::plan::{BinaryOp, ExpandDirection, ExpandOp, LogicalExpression, NodeScanOp};
 use crate::query::plan::{FilterOp, LogicalOperator};
 use crate::query::planner::lpg::scan::label_check;
 use crate::query::planner::lpg::seek::{self, LookupLabels, SeekChoice};
@@ -119,11 +119,20 @@ impl Optimizer {
             }
             None => {
                 let scanned = degrees.nodes_with(candidate.scan.label.as_deref()) as f64;
+                // A scan whose checks each compare a key with a value no row gives reads the
+                // keys' columns; any other check reads the row's property.
+                let checks_on_columns = candidate.scan.input.is_none()
+                    && degrees.reads_key_columns()
+                    && candidate
+                        .checked
+                        .iter()
+                        .filter(|check| label_check(check, source).is_none())
+                        .all(|check| compares_a_key_with_a_constant(check, source));
                 let per_row = SCAN_ROW
-                    + if source_checks_property {
-                        PROPERTY_CHECK
-                    } else {
-                        0.0
+                    + match (source_checks_property, checks_on_columns) {
+                        (false, _) => 0.0,
+                        (true, true) => KEY_COLUMN_CHECK,
+                        (true, false) => PROPERTY_CHECK,
                     };
                 // An equality with no index: the rows are what a read of its values finds at the
                 // least, which errs towards the source, and the scan is still priced whole, so a
@@ -326,6 +335,28 @@ fn unlabelled_with_an_unindexed_pin(optimizer: &Optimizer, candidate: &TurnCandi
 }
 
 /// Whether the value of `pin` reads no row, so a hop can find its nodes once.
+/// Whether `check` compares a key of `variable` with a value no row gives, by `<`, `<=`, `>` or
+/// `>=` (`a.age > 90`, `$low <= a.age`), which a filter over a scan reads from the key's column.
+fn compares_a_key_with_a_constant(check: &LogicalExpression, variable: &str) -> bool {
+    let LogicalExpression::Binary { left, op, right } = check else {
+        return false;
+    };
+    if !matches!(
+        op,
+        BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge
+    ) {
+        return false;
+    }
+    let is_key = |side: &LogicalExpression| matches!(side, LogicalExpression::Property { variable: of, .. } if of == variable);
+    let is_constant = |side: &LogicalExpression| {
+        matches!(
+            side,
+            LogicalExpression::Literal(_) | LogicalExpression::Parameter(_)
+        )
+    };
+    (is_key(left) && is_constant(right)) || (is_constant(left) && is_key(right))
+}
+
 fn reads_no_row(pin: &SeekChoice<'_>) -> bool {
     matches!(
         pin.value,

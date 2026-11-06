@@ -1049,8 +1049,8 @@ fn groups_between(
 /// Restores a database to a specific epoch from a backup chain.
 ///
 /// 1. Finds the most recent full backup with `end_epoch <= target_epoch`
-///    and the incremental segments after it, and checks `keys` against the
-///    full backup ([`restore_ciphers`]).
+///    and the incremental segments after it, checks the full backup's
+///    checksum, and checks `keys` against it ([`restore_ciphers`]).
 /// 2. Copies the full backup into a writable file in a temporary sibling directory.
 /// 3. Writes the WAL groups of the incremental segments up to `target_epoch`
 ///    as the sidecar WAL of the restored file, which its next open replays.
@@ -1103,8 +1103,11 @@ pub(super) fn do_restore_to_epoch(
         .filter(|s| s.kind == BackupKind::Incremental && s.start_epoch <= target_epoch)
         .collect();
 
-    // The key is checked before anything is written.
+    // The full backup's bytes, then the key, are checked before anything is written.
     let full_path = backup_dir.join(&full.filename);
+    let (full_crc, _) = file_checksum(&full_path)
+        .map_err(|e| e.wrapped(format_args!("full backup {}", full_path.display())))?;
+    refuse_damaged(full, &full_path, full_crc)?;
     let ciphers = restore_ciphers(&full_path, keys, !incrementals.is_empty())?;
 
     // Keep every intermediate artifact under one owned directory beside the
@@ -1119,19 +1122,14 @@ pub(super) fn do_restore_to_epoch(
         if !incrementals.is_empty() {
             let mut segments = Vec::with_capacity(incrementals.len());
             for incr in &incrementals {
-                let incr_data = std::fs::read(backup_dir.join(&incr.filename)).map_err(|e| {
+                let incr_path = backup_dir.join(&incr.filename);
+                let incr_data = std::fs::read(&incr_path).map_err(|e| {
                     Error::Internal(format!(
                         "failed to read incremental backup {}: {e}",
                         incr.filename
                     ))
                 })?;
-                let actual_crc = crc32fast::hash(&incr_data);
-                if actual_crc != incr.checksum {
-                    return Err(Error::corruption(format!(
-                        "incremental backup {} CRC mismatch: expected {:08x}, got {actual_crc:08x}",
-                        incr.filename, incr.checksum,
-                    )));
-                }
+                refuse_damaged(incr, &incr_path, crc32fast::hash(&incr_data))?;
                 let version = backup_version(&incr_data)?;
                 segments.push((incr.filename.as_str(), version, incr_data));
             }
@@ -1179,6 +1177,24 @@ pub(super) fn do_restore_to_epoch(
         };
     }
     Ok(())
+}
+
+/// Refuses the backup `segment`, read from `path`, as damaged when `actual`, the CRC-32 of the bytes
+/// read, is not the checksum its manifest entry recorded when it was written: a full backup and an
+/// incremental one alike, the file named.
+fn refuse_damaged(segment: &BackupSegment, path: &Path, actual: u32) -> Result<()> {
+    if actual == segment.checksum {
+        return Ok(());
+    }
+    let kind = match segment.kind {
+        BackupKind::Full => "full",
+        BackupKind::Incremental => "incremental",
+    };
+    Err(Error::corruption(format!(
+        "{kind} backup {} CRC mismatch: expected {:08x}, got {actual:08x}",
+        segment.filename, segment.checksum,
+    ))
+    .in_file(path))
 }
 
 fn restore_sidecar(path: &Path) -> std::path::PathBuf {
@@ -2082,5 +2098,50 @@ mod tests {
             sidecar.exists(),
             "refused restore must leave the sidecar in place"
         );
+    }
+}
+
+#[cfg(test)]
+mod catalogue {
+    //! Class test 0: the catalogue of this file's enums (`tests/catalogue/`), as the class tests
+    //! read it.
+
+    use super::BackupKind;
+
+    /// Takes the variant list once: an exhaustive match, which fails to compile when the enum gains a
+    /// variant this list does not name, and the names, which the test holds to the checked-in file.
+    macro_rules! catalogue {
+        ($name_of:ident, $names:ident, $enum:ident: $($variant:ident),+ $(,)?) => {
+            fn $name_of(value: &$enum) -> &'static str {
+                match value {
+                    $($enum::$variant { .. } => stringify!($variant),)+
+                }
+            }
+            const $names: &[&str] = &[$(stringify!($variant)),+];
+        };
+    }
+
+    /// The names a catalogue file lists: one per line, `#` lines and blank lines aside.
+    fn listed(file: &str) -> Vec<&str> {
+        file.lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+            .collect()
+    }
+
+    catalogue!(
+        backup_kind_name,
+        BACKUP_KIND_NAMES,
+        BackupKind: Full, Incremental
+    );
+
+    #[test]
+    fn backup_kind_catalogue_names_every_variant() {
+        std::hint::black_box(backup_kind_name as fn(&BackupKind) -> &'static str);
+        let file = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tests/catalogue/backup_kind.txt"
+        ));
+        assert_eq!(listed(file), BACKUP_KIND_NAMES);
     }
 }

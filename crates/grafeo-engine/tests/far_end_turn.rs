@@ -1539,3 +1539,28 @@ fn a_common_far_value_on_a_small_label_gives_the_same_rows() {
         }
     }
 }
+
+/// No label on the source and a check few rows pass: the source's plan reads every node and few
+/// edges, the walk back every edge into the far node.
+#[test]
+fn a_selective_check_on_a_source_with_no_label_stays_at_the_source() {
+    let db = GrafeoDB::new_in_memory();
+    let hub = db
+        .create_node_with_props(&["Far"], [("id", Value::Int64(1))])
+        .unwrap();
+    for i in 0..40_000 {
+        let age = if i % 2_000 == 0 { 95 } else { 30 };
+        let a = db
+            .create_node_with_props(&["Person"], [("age", Value::Int64(age))])
+            .unwrap();
+        if i % 2 == 0 {
+            db.create_edge(a, hub, "R").unwrap();
+        }
+    }
+    db.create_property_index("id").unwrap();
+    stays_at_the_source(
+        &db,
+        Language::Gql,
+        "MATCH (a)-[:R]->(m {id: 1}) WHERE a.age > 90 RETURN a.age",
+    );
+}

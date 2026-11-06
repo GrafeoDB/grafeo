@@ -44,6 +44,7 @@ Queries that ran in 0.6.1 and now fail or behave differently.
 - **Conditions that can fail**, such as `100 / n.age > 0`, no longer fail on rows a label or an earlier condition rejects.
 - **Graph type patterns**: naming an existing type no longer wipes its properties, and several patterns of one edge type no longer lose all but the last.
 - **Closed graph types in a schema**: a node or edge type added with `ALTER GRAPH TYPE ... ADD` is held like one listed by `CREATE GRAPH TYPE`, so `DROP NODE TYPE` and `DROP EDGE TYPE` refuse it while listed, and `ALTER GRAPH TYPE ... DROP` takes it out, in files written by 0.6.1 too.
+- **Backups**: a restore checks the full backup's checksum, as it does an incremental backup's, and refuses a damaged file by name before it writes anything (#744).
 
 ### Contributors
 

@@ -2585,3 +2585,80 @@ mod tests {
         assert_eq!(dropped.kind(), 7);
     }
 }
+
+#[cfg(test)]
+mod catalogue {
+    //! Class test 0: the catalogue of this file's enums (`tests/catalogue/`), as the class tests
+    //! read it.
+
+    use super::{DataOp, RdfGraphOp, StandaloneOp};
+
+    /// Takes the variant list once: an exhaustive match, which fails to compile when the enum gains a
+    /// variant this list does not name, and the names, which the test holds to the checked-in file.
+    macro_rules! catalogue {
+        ($name_of:ident, $names:ident, $enum:ident: $($variant:ident),+ $(,)?) => {
+            fn $name_of(value: &$enum) -> &'static str {
+                match value {
+                    $($enum::$variant { .. } => stringify!($variant),)+
+                }
+            }
+            const $names: &[&str] = &[$(stringify!($variant)),+];
+        };
+    }
+
+    /// The names a catalogue file lists: one per line, `#` lines and blank lines aside.
+    fn listed(file: &str) -> Vec<&str> {
+        file.lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+            .collect()
+    }
+
+    catalogue!(
+        data_op_name,
+        DATA_OP_NAMES,
+        DataOp: CreateNode, DeleteNode, CreateEdge, DeleteEdge, SetNodeProperty, RemoveNodeProperty, SetEdgeProperty, RemoveEdgeProperty, AddNodeLabel, RemoveNodeLabel, InsertTriple, DeleteTriple
+    );
+
+    #[test]
+    fn data_op_catalogue_names_every_variant() {
+        std::hint::black_box(data_op_name as fn(&DataOp) -> &'static str);
+        let file = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tests/catalogue/data_op.txt"
+        ));
+        assert_eq!(listed(file), DATA_OP_NAMES);
+    }
+
+    catalogue!(
+        standalone_op_name,
+        STANDALONE_OP_NAMES,
+        StandaloneOp: CreateGraph, DropGraph, PutCatalog, DropCatalog, RdfGraph
+    );
+
+    #[test]
+    fn standalone_op_catalogue_names_every_variant() {
+        std::hint::black_box(standalone_op_name as fn(&StandaloneOp) -> &'static str);
+        let file = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tests/catalogue/standalone_op.txt"
+        ));
+        assert_eq!(listed(file), STANDALONE_OP_NAMES);
+    }
+
+    catalogue!(
+        rdf_graph_op_name,
+        RDF_GRAPH_OP_NAMES,
+        RdfGraphOp: Create, Drop, Clear, Copy, Move, Add
+    );
+
+    #[test]
+    fn rdf_graph_op_catalogue_names_every_variant() {
+        std::hint::black_box(rdf_graph_op_name as fn(&RdfGraphOp) -> &'static str);
+        let file = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tests/catalogue/rdf_graph_op.txt"
+        ));
+        assert_eq!(listed(file), RDF_GRAPH_OP_NAMES);
+    }
+}

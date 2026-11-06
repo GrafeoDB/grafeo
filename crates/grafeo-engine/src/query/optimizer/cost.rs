@@ -152,6 +152,13 @@ pub(super) mod measured {
     /// One node a scan looks at when it reads an equality's key from the key's column. Used for
     /// that scan only: a point read of a row's property stays a [`PROPERTY_CHECK`].
     pub const KEY_COLUMN_ROW: f64 = 4.0;
+    /// One check a filter over a scan makes of a node's key against a value no row gives
+    /// (`a.age > 90`), read from the key's typed column: measured at about 4 ns a row beyond
+    /// the scan, hot, and 6 to 8 ns on a reopened database (release, 40,001 rows,
+    /// 2026-11-06). A column of mixed kinds decodes its strings on its first read, a cost of the
+    /// first query this leaves out. A point read of a row's property stays a
+    /// [`PROPERTY_CHECK`].
+    pub const KEY_COLUMN_CHECK: f64 = 5.0;
     /// One row a hash table is built with.
     pub const HASH_BUILD: f64 = 340.0;
     /// One row probing a hash table.

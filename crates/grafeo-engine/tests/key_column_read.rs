@@ -2372,10 +2372,10 @@ fn explain_and_profile_agree_around_a_long_list() {
         .execute("CREATE INDEX few_k FOR (n:Few) ON (n.k)")
         .unwrap();
     let long = format!("MATCH (n:Few) WHERE n.k IN {} RETURN n.k", list_of(9));
+    let shown = plan(&on_index, &long);
     assert!(
-        plan(&on_index, &format!("EXPLAIN {long}")).contains("few_k")
-            || !plan(&on_index, &format!("EXPLAIN {long}")).contains("key column"),
-        "the index, not the column"
+        shown.contains("[index: k]"),
+        "the index, not the column: {shown}"
     );
     assert_eq!(on_index.execute(&long).unwrap().row_count(), 3);
 }

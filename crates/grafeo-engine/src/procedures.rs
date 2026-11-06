@@ -22,12 +22,12 @@ use grafeo_adapters::plugins::algorithms::{
     ArticulationPointsAlgorithm, BellmanFordAlgorithm, BetweennessCentralityAlgorithm,
     BfsAlgorithm, BridgesAlgorithm, ClosenessCentralityAlgorithm, ClusteringCoefficientAlgorithm,
     ConnectedComponentsAlgorithm, DegreeCentralityAlgorithm, DfsAlgorithm, DijkstraAlgorithm,
-    FloydWarshallAlgorithm, GraphAlgorithm, KCoreAlgorithm, KruskalAlgorithm,
+    FloydWarshallAlgorithm, GraphAlgorithm, KCoreAlgorithm, KTrussAlgorithm, KruskalAlgorithm,
     LabelPropagationAlgorithm, LouvainAlgorithm, MaxFlowAlgorithm, MinCostFlowAlgorithm,
     PageRankAlgorithm, PrimAlgorithm, SsspAlgorithm, StronglyConnectedComponentsAlgorithm,
-    TopologicalSortAlgorithm,
+    SubgraphIsomorphismAlgorithm, TopologicalSortAlgorithm, TotalTrianglesAlgorithm,
 };
-use grafeo_adapters::plugins::{AlgorithmResult, ParameterDef, ParameterType, Parameters};
+use grafeo_adapters::plugins::{AlgorithmResult, Domain, ParameterDef, ParameterType, Parameters};
 use grafeo_common::types::{ReadView, Value};
 use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind, Result};
 use grafeo_core::graph::GraphStore;
@@ -306,11 +306,15 @@ fn coerce_params_to_vector(params: &Parameters, key: &str) -> Result<Vec<f32>> {
     )))
 }
 
-/// Converts a `k` parameter (signed, user-supplied) to an unsigned limit.
-/// Negative values clamp to 0 so they can't silently flip via cast.
+/// The `k` parameter as a limit, `default` when the call leaves it out.
+///
+/// # Errors
+///
+/// An invalid parameter value for a negative `k`, which its domain refuses
+/// before the procedure runs (see [`evaluate_arguments`]).
 #[cfg(any(feature = "vector-index", feature = "text-index"))]
-fn k_limit(params: &Parameters, default: i64) -> usize {
-    usize::try_from(params.get_int("k").unwrap_or(default).max(0)).unwrap_or(0)
+fn k_limit(params: &Parameters, default: usize) -> Result<usize> {
+    Ok(params.get_count("k")?.unwrap_or(default))
 }
 
 /// Converts a NodeId into a `Value::Int64`.
@@ -339,6 +343,7 @@ impl SearchVectorProcedure {
                     param_type: ParameterType::String,
                     required: true,
                     default: None,
+                    domain: Domain::OfType,
                     description: "Node label that was vector-indexed".into(),
                 },
                 ParameterDef {
@@ -346,6 +351,7 @@ impl SearchVectorProcedure {
                     param_type: ParameterType::String,
                     required: true,
                     default: None,
+                    domain: Domain::OfType,
                     description: "Property name holding the embedding".into(),
                 },
                 ParameterDef {
@@ -353,6 +359,7 @@ impl SearchVectorProcedure {
                     param_type: ParameterType::List,
                     required: true,
                     default: None,
+                    domain: Domain::OfType,
                     description: "Query vector as a list of floats".into(),
                 },
                 ParameterDef {
@@ -360,6 +367,7 @@ impl SearchVectorProcedure {
                     param_type: ParameterType::Integer,
                     required: false,
                     default: Some("10".into()),
+                    domain: Domain::NonNegative,
                     description: "Number of nearest neighbors to return".into(),
                 },
             ],
@@ -398,7 +406,7 @@ impl Procedure for SearchVectorProcedure {
             )
         })?;
         let query = coerce_params_to_vector(params, "query")?;
-        let k = k_limit(params, 10);
+        let k = k_limit(params, 10)?;
 
         let missing = || {
             grafeo_common::utils::error::Error::InvalidValue(format!(
@@ -414,7 +422,7 @@ impl Procedure for SearchVectorProcedure {
             allowed: None,
         };
         let results = lpg
-            .vector_index_search_at(label, property, &query, search, ctx.view())
+            .vector_index_search_at(label, property, &query, search, ctx.view())?
             .ok_or_else(missing)?;
 
         let mut result = AlgorithmResult::new(vec!["node_id".into(), "distance".into()]);
@@ -446,6 +454,7 @@ impl SearchMmrProcedure {
                     param_type: ParameterType::String,
                     required: true,
                     default: None,
+                    domain: Domain::OfType,
                     description: "Node label that was vector-indexed".into(),
                 },
                 ParameterDef {
@@ -453,6 +462,7 @@ impl SearchMmrProcedure {
                     param_type: ParameterType::String,
                     required: true,
                     default: None,
+                    domain: Domain::OfType,
                     description: "Property name holding the embedding".into(),
                 },
                 ParameterDef {
@@ -460,6 +470,7 @@ impl SearchMmrProcedure {
                     param_type: ParameterType::List,
                     required: true,
                     default: None,
+                    domain: Domain::OfType,
                     description: "Query vector as a list of floats".into(),
                 },
                 ParameterDef {
@@ -467,6 +478,7 @@ impl SearchMmrProcedure {
                     param_type: ParameterType::Integer,
                     required: false,
                     default: Some("10".into()),
+                    domain: Domain::NonNegative,
                     description: "Number of diverse results to return".into(),
                 },
                 ParameterDef {
@@ -474,6 +486,7 @@ impl SearchMmrProcedure {
                     param_type: ParameterType::Integer,
                     required: false,
                     default: None,
+                    domain: Domain::AtLeast("k"),
                     description: "Initial HNSW candidate count (default: 4*k)".into(),
                 },
                 ParameterDef {
@@ -481,6 +494,7 @@ impl SearchMmrProcedure {
                     param_type: ParameterType::Float,
                     required: false,
                     default: Some("0.5".into()),
+                    domain: Domain::Unit,
                     description: "Relevance vs diversity in [0, 1]".into(),
                 },
             ],
@@ -521,12 +535,10 @@ impl Procedure for SearchMmrProcedure {
             )
         })?;
         let query = coerce_params_to_vector(params, "query")?;
-        let k = k_limit(params, 10);
+        let k = k_limit(params, 10)?;
         let fetch_k = params
-            .get_int("fetch_k")
-            .map_or(k.saturating_mul(4).max(k), |v| {
-                usize::try_from(v.max(0)).unwrap_or(0)
-            });
+            .get_count("fetch_k")?
+            .unwrap_or_else(|| k.saturating_mul(4));
         #[allow(
             clippy::cast_possible_truncation,
             reason = "lambda is a unit-interval weighting factor; f32 precision is sufficient"
@@ -548,7 +560,7 @@ impl Procedure for SearchMmrProcedure {
             allowed: None,
         };
         let initial = lpg
-            .vector_index_search_at(label, property, &query, search, view)
+            .vector_index_search_at(label, property, &query, search, view)?
             .ok_or_else(missing)?;
         if initial.is_empty() {
             return Ok(AlgorithmResult::new(vec![
@@ -598,6 +610,7 @@ impl SearchTextProcedure {
                     param_type: ParameterType::String,
                     required: true,
                     default: None,
+                    domain: Domain::OfType,
                     description: "Node label that was text-indexed".into(),
                 },
                 ParameterDef {
@@ -605,6 +618,7 @@ impl SearchTextProcedure {
                     param_type: ParameterType::String,
                     required: true,
                     default: None,
+                    domain: Domain::OfType,
                     description: "Property holding the indexed text".into(),
                 },
                 ParameterDef {
@@ -612,6 +626,7 @@ impl SearchTextProcedure {
                     param_type: ParameterType::String,
                     required: true,
                     default: None,
+                    domain: Domain::OfType,
                     description: "Text query for BM25 scoring".into(),
                 },
                 ParameterDef {
@@ -619,6 +634,7 @@ impl SearchTextProcedure {
                     param_type: ParameterType::Integer,
                     required: false,
                     default: Some("10".into()),
+                    domain: Domain::NonNegative,
                     description: "Number of top results to return".into(),
                 },
             ],
@@ -667,7 +683,7 @@ impl Procedure for SearchTextProcedure {
                 "CALL grafeo.search.text: missing required parameter 'query'".into(),
             )
         })?;
-        let k = k_limit(params, 10);
+        let k = k_limit(params, 10)?;
 
         let search = grafeo_core::graph::rowgroup::IndexSearch {
             k,
@@ -675,7 +691,7 @@ impl Procedure for SearchTextProcedure {
             allowed: None,
         };
         let results = lpg
-            .text_index_search_at(label, property, query, search, ctx.view())
+            .text_index_search_at(label, property, query, search, ctx.view())?
             .ok_or_else(|| {
                 grafeo_common::utils::error::Error::InvalidValue(format!(
                     "there is no text index on :{label}({property}); create one first"
@@ -736,6 +752,7 @@ impl BuiltinProcedures {
 
         // Clustering
         register_algo(Arc::new(ClusteringCoefficientAlgorithm));
+        register_algo(Arc::new(TotalTrianglesAlgorithm));
 
         // Community
         register_algo(Arc::new(LabelPropagationAlgorithm));
@@ -753,6 +770,10 @@ impl BuiltinProcedures {
         register_algo(Arc::new(ArticulationPointsAlgorithm));
         register_algo(Arc::new(BridgesAlgorithm));
         register_algo(Arc::new(KCoreAlgorithm));
+        register_algo(Arc::new(KTrussAlgorithm));
+
+        // Pattern matching
+        register_algo(Arc::new(SubgraphIsomorphismAlgorithm));
 
         // Catalog introspection
         let mut register = |proc: Arc<dyn Procedure>| {
@@ -858,6 +879,7 @@ pub fn canonical_output_columns(algo: &dyn GraphAlgorithm, params: &Parameters) 
             "path".into(),
         ],
         "kcore" if params.get_int("k").is_some() => vec!["node_id".into(), "in_k_core".into()],
+        "ktruss" if params.get_int("k").is_some() => vec!["source".into(), "target".into()],
         "degree_centrality" if params.get_bool("normalized") == Some(true) => {
             vec!["node_id".into(), "centrality".into()]
         }
@@ -919,8 +941,21 @@ pub fn canonical_output_columns(algo: &dyn GraphAlgorithm, params: &Parameters) 
         "articulation_points" => vec!["node_id".into()],
         "bridges" => vec!["source".into(), "target".into()],
         "kcore" => vec!["node_id".into(), "core_number".into(), "max_core".into()],
+        "ktruss" => vec!["source".into(), "target".into(), "truss_number".into()],
+        "total_triangles" => vec!["total_triangles".into()],
+        "subgraph_isomorphism" => vec!["count".into()],
         _ => vec!["node_id".into(), "value".into()],
     }
+}
+
+/// The error of a YIELD item that names no column of the procedure, listing the columns it has:
+/// an invalid reference (a mistake in the query text), raised when the call is planned.
+#[must_use]
+pub fn no_such_yield_column(field: &str, columns: &[String]) -> Error {
+    Error::from(QueryError::invalid_reference(format!(
+        "YIELD column '{field}' is no column of the procedure (it has: {})",
+        columns.join(", ")
+    )))
 }
 
 /// The name an error gives positional argument `index` of a call: its
@@ -946,16 +981,18 @@ const PASS_THROUGH_KEYS: &[&str] = &["projection"];
 ///    of `param_defs`.
 ///
 /// Each value must suit its parameter's type: an integer passes for a float
-/// and a vector for a list. A null leaves the parameter out, so an optional
-/// one keeps its default and a required one fails as missing when the
-/// procedure runs. A map key that names no parameter passes through only as
+/// and a vector for a list, and then its domain (see
+/// [`check_parameters`](grafeo_adapters::plugins::check_parameters)). A null
+/// leaves the parameter out, so an optional one keeps its default and a
+/// required one fails as missing when the procedure runs. A map key that names no parameter passes through only as
 /// one of the keys every call takes (`projection`), with the type of its
 /// value.
 ///
 /// # Errors
 ///
 /// Returns a semantic error naming the argument and `procedure` when a value
-/// does not suit its parameter: such a value never falls back to the
+/// does not suit its parameter's type, and an invalid parameter value when
+/// it lies outside its domain: such a value never falls back to the
 /// parameter's default. Returns an invalid reference naming the parameters
 /// for a map key that names none of them (`{dampingg: 0.5}`), and for more
 /// positional values than the procedure has parameters: a mistyped or
@@ -984,6 +1021,7 @@ pub fn evaluate_arguments(
                 value,
             )?;
         }
+        grafeo_adapters::plugins::check_parameters(procedure, param_defs, &params)?;
         return Ok(params);
     }
 
@@ -1004,7 +1042,7 @@ pub fn evaluate_arguments(
             value,
         )?;
     }
-
+    grafeo_adapters::plugins::check_parameters(procedure, param_defs, &params)?;
     Ok(params)
 }
 
@@ -1158,6 +1196,7 @@ mod tests {
             param_type,
             required,
             default: None,
+            domain: Domain::OfType,
             description: String::new(),
         }
     }
@@ -1723,18 +1762,28 @@ mod tests {
     #[test]
     fn k_limit_returns_default_when_missing() {
         let params = Parameters::new();
-        assert_eq!(k_limit(&params, 7), 7);
+        assert_eq!(k_limit(&params, 7).ok(), Some(7));
     }
 
+    /// A negative `k` lies outside its domain (`k >= 0`) and is refused with 22023 naming the
+    /// argument (0.6.2), where it clamped to 0 before; it never flips to a huge count. Zero stays
+    /// a valid count.
     #[cfg(any(feature = "vector-index", feature = "text-index"))]
     #[test]
-    fn k_limit_clamps_negative_to_zero() {
-        // A negative `k` must clamp to 0 (not flip to a huge usize via
-        // bit-cast), so a caller that passes -1 gets "no results" instead
-        // of scanning the entire index.
+    fn k_limit_refuses_a_negative_k() {
         let mut params = Parameters::new();
-        params.set_int("k", -5);
-        assert_eq!(k_limit(&params, 10), 0);
+        for k in [-5, -1, i64::MIN] {
+            params.set_int("k", k);
+            let error = k_limit(&params, 10).expect_err("a negative k");
+            assert_eq!(
+                grafeo_common::utils::gqlstatus::GqlStatus::from(&error).as_str(),
+                "22023",
+                "k = {k}: {error}"
+            );
+            assert!(error.to_string().contains("'k'"), "k = {k}: {error}");
+        }
+        params.set_int("k", 0);
+        assert_eq!(k_limit(&params, 10).ok(), Some(0));
     }
 
     #[cfg(any(feature = "vector-index", feature = "text-index"))]
@@ -1742,7 +1791,7 @@ mod tests {
     fn k_limit_passes_through_positive_value() {
         let mut params = Parameters::new();
         params.set_int("k", 25);
-        assert_eq!(k_limit(&params, 10), 25);
+        assert_eq!(k_limit(&params, 10).ok(), Some(25));
     }
 
     /// Every graph algorithm, called in each shape its arguments give, names

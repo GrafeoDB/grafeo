@@ -2372,6 +2372,14 @@ impl GrafeoDB {
         &self.config
     }
 
+    /// The deadline of a statement that starts now under the database's query timeout
+    /// ([`Config::query_timeout`]), as a query reckons it; `None` without a timeout. A binding's
+    /// algorithm call runs under it, so it stops as `execute` past its timeout does.
+    #[must_use]
+    pub fn query_deadline(&self) -> Option<grafeo_common::clock::Instant> {
+        Config::deadline_after(self.config.query_timeout())
+    }
+
     /// Returns the graph data model of this database.
     #[must_use]
     pub fn graph_model(&self) -> crate::config::GraphModel {

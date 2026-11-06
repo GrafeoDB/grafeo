@@ -765,7 +765,8 @@ impl QueryError {
             | QueryErrorKind::InvalidValueType
             | QueryErrorKind::WrongKind
             | QueryErrorKind::InvalidTimeZoneDisplacement
-            | QueryErrorKind::ValuesNotComparable => ErrorCode::QueryExecution,
+            | QueryErrorKind::ValuesNotComparable
+            | QueryErrorKind::InvalidParameterValue => ErrorCode::QueryExecution,
             QueryErrorKind::Timeout => ErrorCode::QueryTimeout,
             QueryErrorKind::Unsupported => ErrorCode::QueryUnsupported,
         }
@@ -903,6 +904,11 @@ pub enum QueryErrorKind {
     /// Two values a comparison cannot compare, such as a node and a number
     /// in GQL (GQLSTATUS 22G04).
     ValuesNotComparable,
+    /// An argument of a procedure, or a value it reads as one (an edge's
+    /// weight), outside the values the procedure allows, such as a damping
+    /// of 2.0 (GQLSTATUS 22023: ISO/IEC 9075-2 13.3 General Rule 7, which GQL
+    /// takes as a code of another International Standard).
+    InvalidParameterValue,
 }
 
 impl fmt::Display for QueryErrorKind {
@@ -930,6 +936,7 @@ impl fmt::Display for QueryErrorKind {
                 write!(f, "invalid time zone displacement value")
             }
             QueryErrorKind::ValuesNotComparable => write!(f, "values not comparable"),
+            QueryErrorKind::InvalidParameterValue => write!(f, "invalid parameter value"),
         }
     }
 }

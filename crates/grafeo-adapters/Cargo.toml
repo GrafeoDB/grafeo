@@ -48,6 +48,7 @@ triple-store = ["grafeo-core/triple-store"]  # RDF triple store model
 rdf = ["triple-store"]                      # Deprecated: use triple-store
 parallel = ["rayon", "grafeo-core/parallel"]  # Parallel algorithms (rayon)
 algos = []  # Graph algorithm plugin (SSSP, PageRank, centrality, community detection, etc.)
+testing-deadline-probe = ["grafeo-core/testing-deadline-probe"]  # Test only: see grafeo-core
 # Convenience groups
 languages = ["gql", "cypher", "sparql", "gremlin", "graphql", "sql-pgq"]  # All query language parsers
 full = ["languages", "triple-store", "parallel", "algos"]

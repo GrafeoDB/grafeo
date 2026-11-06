@@ -14,8 +14,8 @@ use grafeo_core::graph::GraphStore;
 #[cfg(test)]
 use grafeo_core::graph::rowgroup::RowGroupStore;
 
-use super::super::{AlgorithmResult, ParameterDef, ParameterType};
-use super::traits::{Control, TraversalEvent, impl_algorithm, node_id_from_param};
+use super::super::{AlgorithmResult, Domain, ParameterDef, ParameterType};
+use super::traits::{Control, Ticker, TraversalEvent, impl_algorithm, node_id_from_param};
 
 // ============================================================================
 // BFS Implementation
@@ -44,19 +44,22 @@ pub fn bfs(
 ) -> grafeo_common::utils::error::Result<Vec<NodeId>> {
     let graph = super::traits::GraphView::new(store, view);
     let found = bfs_on(&graph, start);
-    graph.finish(found)
+    graph.finish(found)?
 }
 
 /// [`bfs`] on the graph a [`GraphView`](super::traits::GraphView) reads.
-pub(crate) fn bfs_on(store: &super::traits::GraphView<'_>, start: NodeId) -> Vec<NodeId> {
+pub(crate) fn bfs_on(
+    store: &super::traits::GraphView<'_>,
+    start: NodeId,
+) -> grafeo_common::utils::error::Result<Vec<NodeId>> {
     let mut visited = Vec::new();
-    bfs_with_visitor_on(store, start, |event| -> Control<()> {
+    bfs_with_visitor_on(store, &mut Ticker::new(), start, |event| -> Control<()> {
         if let TraversalEvent::Discover(node) = event {
             visited.push(node);
         }
         Control::Continue
-    });
-    visited
+    })?;
+    Ok(visited)
 }
 
 /// Performs breadth-first search with a visitor callback.
@@ -87,16 +90,17 @@ where
     F: FnMut(TraversalEvent) -> Control<B>,
 {
     let graph = super::traits::GraphView::new(store, view);
-    let found = bfs_with_visitor_on::<B, F>(&graph, start, visitor);
-    graph.finish(found)
+    let found = bfs_with_visitor_on::<B, F>(&graph, &mut Ticker::new(), start, visitor);
+    graph.finish(found)?
 }
 
 /// [`bfs_with_visitor`] on the graph a [`GraphView`](super::traits::GraphView) reads.
 pub(crate) fn bfs_with_visitor_on<B, F>(
     store: &super::traits::GraphView<'_>,
+    ticker: &mut Ticker,
     start: NodeId,
     mut visitor: F,
-) -> Option<B>
+) -> grafeo_common::utils::error::Result<Option<B>>
 where
     F: FnMut(TraversalEvent) -> Control<B>,
 {
@@ -104,27 +108,31 @@ where
     let mut queue: VecDeque<NodeId> = VecDeque::new();
 
     // Check if start node exists
-    store.node(start)?;
+    if store.node(start).is_none() {
+        return Ok(None);
+    }
 
     // Discover the start node
     discovered.insert(start);
     queue.push_back(start);
 
     match visitor(TraversalEvent::Discover(start)) {
-        Control::Break(b) => return Some(b),
+        Control::Break(b) => return Ok(Some(b)),
         Control::Prune => {
             // Prune means don't explore neighbors, but we still finish the node
             match visitor(TraversalEvent::Finish(start)) {
-                Control::Break(b) => return Some(b),
-                _ => return None,
+                Control::Break(b) => return Ok(Some(b)),
+                _ => return Ok(None),
             }
         }
         Control::Continue => {}
     }
 
     while let Some(node) = queue.pop_front() {
+        ticker.tick()?;
         // Iterate over outgoing edges
         for (neighbor, edge_id) in store.edges(node, Direction::Outgoing) {
+            ticker.tick()?;
             if discovered.insert(neighbor) {
                 // Tree edge - neighbor not yet discovered
                 match visitor(TraversalEvent::TreeEdge {
@@ -132,13 +140,13 @@ where
                     target: neighbor,
                     edge: edge_id,
                 }) {
-                    Control::Break(b) => return Some(b),
+                    Control::Break(b) => return Ok(Some(b)),
                     Control::Prune => continue, // Don't add to queue
                     Control::Continue => {}
                 }
 
                 match visitor(TraversalEvent::Discover(neighbor)) {
-                    Control::Break(b) => return Some(b),
+                    Control::Break(b) => return Ok(Some(b)),
                     Control::Prune => continue, // Don't explore neighbors
                     Control::Continue => {}
                 }
@@ -151,7 +159,7 @@ where
                     target: neighbor,
                     edge: edge_id,
                 }) {
-                    Control::Break(b) => return Some(b),
+                    Control::Break(b) => return Ok(Some(b)),
                     _ => {}
                 }
             }
@@ -159,12 +167,12 @@ where
 
         // Node processing complete
         match visitor(TraversalEvent::Finish(node)) {
-            Control::Break(b) => return Some(b),
+            Control::Break(b) => return Ok(Some(b)),
             _ => {}
         }
     }
 
-    None
+    Ok(None)
 }
 
 /// BFS layers - returns nodes grouped by their distance from the start.
@@ -188,21 +196,22 @@ pub fn bfs_layers(
 ) -> grafeo_common::utils::error::Result<Vec<Vec<NodeId>>> {
     let graph = super::traits::GraphView::new(store, view);
     let found = bfs_layers_on(&graph, start);
-    graph.finish(found)
+    graph.finish(found)?
 }
 
 /// [`bfs_layers`] on the graph a [`GraphView`](super::traits::GraphView) reads.
 pub(crate) fn bfs_layers_on(
     store: &super::traits::GraphView<'_>,
     start: NodeId,
-) -> Vec<Vec<NodeId>> {
+) -> grafeo_common::utils::error::Result<Vec<Vec<NodeId>>> {
+    let mut ticker = Ticker::new();
     let mut layers: Vec<Vec<NodeId>> = Vec::new();
     let mut discovered: FxHashSet<NodeId> = FxHashSet::default();
     let mut current_layer: Vec<NodeId> = Vec::new();
     let mut next_layer: Vec<NodeId> = Vec::new();
 
     if store.node(start).is_none() {
-        return layers;
+        return Ok(layers);
     }
 
     discovered.insert(start);
@@ -212,7 +221,9 @@ pub(crate) fn bfs_layers_on(
         layers.push(current_layer.clone());
 
         for &node in &current_layer {
+            ticker.tick()?;
             for (neighbor, _) in store.edges(node, Direction::Outgoing) {
+                ticker.tick()?;
                 if discovered.insert(neighbor) {
                     next_layer.push(neighbor);
                 }
@@ -223,7 +234,7 @@ pub(crate) fn bfs_layers_on(
         std::mem::swap(&mut current_layer, &mut next_layer);
     }
 
-    layers
+    Ok(layers)
 }
 
 // ============================================================================
@@ -264,19 +275,22 @@ pub fn dfs(
 ) -> grafeo_common::utils::error::Result<Vec<NodeId>> {
     let graph = super::traits::GraphView::new(store, view);
     let found = dfs_on(&graph, start);
-    graph.finish(found)
+    graph.finish(found)?
 }
 
 /// [`dfs`] on the graph a [`GraphView`](super::traits::GraphView) reads.
-pub(crate) fn dfs_on(store: &super::traits::GraphView<'_>, start: NodeId) -> Vec<NodeId> {
+pub(crate) fn dfs_on(
+    store: &super::traits::GraphView<'_>,
+    start: NodeId,
+) -> grafeo_common::utils::error::Result<Vec<NodeId>> {
     let mut finished = Vec::new();
-    dfs_with_visitor_on(store, start, |event| -> Control<()> {
+    dfs_with_visitor_on(store, &mut Ticker::new(), start, |event| -> Control<()> {
         if let TraversalEvent::Finish(node) = event {
             finished.push(node);
         }
         Control::Continue
-    });
-    finished
+    })?;
+    Ok(finished)
 }
 
 /// Performs depth-first search with a visitor callback.
@@ -306,16 +320,17 @@ where
     F: FnMut(TraversalEvent) -> Control<B>,
 {
     let graph = super::traits::GraphView::new(store, view);
-    let found = dfs_with_visitor_on::<B, F>(&graph, start, visitor);
-    graph.finish(found)
+    let found = dfs_with_visitor_on::<B, F>(&graph, &mut Ticker::new(), start, visitor);
+    graph.finish(found)?
 }
 
 /// [`dfs_with_visitor`] on the graph a [`GraphView`](super::traits::GraphView) reads.
 pub(crate) fn dfs_with_visitor_on<B, F>(
     store: &super::traits::GraphView<'_>,
+    ticker: &mut Ticker,
     start: NodeId,
     mut visitor: F,
-) -> Option<B>
+) -> grafeo_common::utils::error::Result<Option<B>>
 where
     F: FnMut(TraversalEvent) -> Control<B>,
 {
@@ -326,17 +341,19 @@ where
     let mut stack: Vec<(NodeId, Vec<(NodeId, grafeo_common::types::EdgeId)>, usize)> = Vec::new();
 
     // Check if start node exists
-    store.node(start)?;
+    if store.node(start).is_none() {
+        return Ok(None);
+    }
 
     // Discover start node
     color.insert(start, NodeColor::Gray);
     match visitor(TraversalEvent::Discover(start)) {
-        Control::Break(b) => return Some(b),
+        Control::Break(b) => return Ok(Some(b)),
         Control::Prune => {
             color.insert(start, NodeColor::Black);
             match visitor(TraversalEvent::Finish(start)) {
-                Control::Break(b) => return Some(b),
-                _ => return None,
+                Control::Break(b) => return Ok(Some(b)),
+                _ => return Ok(None),
             }
         }
         Control::Continue => {}
@@ -349,13 +366,14 @@ where
     stack.push((start, neighbors, 0));
 
     while let Some((node, neighbors, idx)) = stack.last_mut() {
+        ticker.tick()?;
         if *idx >= neighbors.len() {
             // All neighbors processed, finish this node
             let node = *node;
             stack.pop();
             color.insert(node, NodeColor::Black);
             match visitor(TraversalEvent::Finish(node)) {
-                Control::Break(b) => return Some(b),
+                Control::Break(b) => return Ok(Some(b)),
                 _ => {}
             }
             continue;
@@ -372,18 +390,18 @@ where
                     target: neighbor,
                     edge: edge_id,
                 }) {
-                    Control::Break(b) => return Some(b),
+                    Control::Break(b) => return Ok(Some(b)),
                     Control::Prune => continue,
                     Control::Continue => {}
                 }
 
                 color.insert(neighbor, NodeColor::Gray);
                 match visitor(TraversalEvent::Discover(neighbor)) {
-                    Control::Break(b) => return Some(b),
+                    Control::Break(b) => return Ok(Some(b)),
                     Control::Prune => {
                         color.insert(neighbor, NodeColor::Black);
                         match visitor(TraversalEvent::Finish(neighbor)) {
-                            Control::Break(b) => return Some(b),
+                            Control::Break(b) => return Ok(Some(b)),
                             _ => {}
                         }
                         continue;
@@ -404,7 +422,7 @@ where
                     target: neighbor,
                     edge: edge_id,
                 }) {
-                    Control::Break(b) => return Some(b),
+                    Control::Break(b) => return Ok(Some(b)),
                     _ => {}
                 }
             }
@@ -415,14 +433,14 @@ where
                     target: neighbor,
                     edge: edge_id,
                 }) {
-                    Control::Break(b) => return Some(b),
+                    Control::Break(b) => return Ok(Some(b)),
                     _ => {}
                 }
             }
         }
     }
 
-    None
+    Ok(None)
 }
 
 /// Performs DFS on all nodes, visiting each connected component.
@@ -438,20 +456,24 @@ pub fn dfs_all(
 ) -> grafeo_common::utils::error::Result<Vec<NodeId>> {
     let graph = super::traits::GraphView::new(store, view);
     let found = dfs_all_on(&graph);
-    graph.finish(found)
+    graph.finish(found)?
 }
 
 /// [`dfs_all`] on the graph a [`GraphView`](super::traits::GraphView) reads.
-pub(crate) fn dfs_all_on(store: &super::traits::GraphView<'_>) -> Vec<NodeId> {
+pub(crate) fn dfs_all_on(
+    store: &super::traits::GraphView<'_>,
+) -> grafeo_common::utils::error::Result<Vec<NodeId>> {
+    let mut ticker = Ticker::new();
     let mut finished = Vec::new();
     let mut visited: FxHashSet<NodeId> = FxHashSet::default();
 
     for node_id in store.node_ids() {
+        ticker.tick()?;
         if visited.contains(&node_id) {
             continue;
         }
 
-        dfs_with_visitor_on(store, node_id, |event| -> Control<()> {
+        dfs_with_visitor_on(store, &mut ticker, node_id, |event| -> Control<()> {
             match event {
                 TraversalEvent::Discover(n) => {
                     visited.insert(n);
@@ -462,10 +484,10 @@ pub(crate) fn dfs_all_on(store: &super::traits::GraphView<'_>) -> Vec<NodeId> {
                 _ => {}
             }
             Control::Continue
-        });
+        })?;
     }
 
-    finished
+    Ok(finished)
 }
 
 // ============================================================================
@@ -483,6 +505,7 @@ fn bfs_params() -> &'static [ParameterDef] {
             param_type: ParameterType::NodeId,
             required: true,
             default: None,
+            domain: Domain::OfType,
         }]
     })
 }
@@ -501,7 +524,7 @@ impl_algorithm! {
         })?;
 
         let start = node_id_from_param(start_id, "start")?;
-        let layers = bfs_layers_on(store, start);
+        let layers = bfs_layers_on(store, start)?;
 
         let mut result = AlgorithmResult::new(vec!["node_id".to_string(), "distance".to_string()]);
 
@@ -531,6 +554,7 @@ fn dfs_params() -> &'static [ParameterDef] {
             param_type: ParameterType::NodeId,
             required: true,
             default: None,
+            domain: Domain::OfType,
         }]
     })
 }
@@ -559,7 +583,7 @@ impl_algorithm! {
         let mut discovered: Vec<(NodeId, usize)> = Vec::new();
         let mut depth: FxHashMap<NodeId, usize> = FxHashMap::default();
         let mut finish: FxHashMap<NodeId, usize> = FxHashMap::default();
-        dfs_with_visitor_on(store, start, |event| -> Control<()> {
+        dfs_with_visitor_on(store, &mut Ticker::new(), start, |event| -> Control<()> {
             match event {
                 TraversalEvent::TreeEdge { source, target, .. } => {
                     let below = depth.get(&source).map_or(0, |d| d + 1);
@@ -575,7 +599,7 @@ impl_algorithm! {
                 _ => {}
             }
             Control::Continue
-        });
+        })?;
 
         let count = |n: usize| Value::Int64(i64::try_from(n).unwrap_or(i64::MAX));
         let mut result = AlgorithmResult::new(vec![

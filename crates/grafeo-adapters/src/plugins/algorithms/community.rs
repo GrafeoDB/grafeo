@@ -13,8 +13,8 @@ use grafeo_core::graph::GraphStore;
 #[cfg(test)]
 use grafeo_core::graph::rowgroup::RowGroupStore;
 
-use super::super::{AlgorithmResult, ParameterDef, ParameterType};
-use super::traits::{ComponentResultBuilder, impl_algorithm};
+use super::super::{AlgorithmResult, Domain, ParameterDef, ParameterType};
+use super::traits::{ComponentResultBuilder, Ticker, impl_algorithm};
 
 // ============================================================================
 // Label Propagation
@@ -59,14 +59,14 @@ pub fn label_propagation(
 ) -> grafeo_common::utils::error::Result<FxHashMap<NodeId, u64>> {
     let graph = super::traits::GraphView::new(store, view);
     let found = label_propagation_on(&graph, max_iterations);
-    graph.finish(found)
+    graph.finish(found)?
 }
 
 /// [`label_propagation`] on the graph a [`GraphView`](super::traits::GraphView) reads.
 pub(crate) fn label_propagation_on(
     store: &super::traits::GraphView<'_>,
     max_iterations: usize,
-) -> FxHashMap<NodeId, u64> {
+) -> grafeo_common::utils::error::Result<FxHashMap<NodeId, u64>> {
     let mut nodes = store.node_ids();
     nodes.sort_unstable();
     label_propagation_in_order_on(store, &nodes, max_iterations)
@@ -98,7 +98,7 @@ pub fn label_propagation_in_order(
 ) -> grafeo_common::utils::error::Result<FxHashMap<NodeId, u64>> {
     let graph = super::traits::GraphView::new(store, view);
     let found = label_propagation_in_order_on(&graph, nodes, max_iterations);
-    graph.finish(found)
+    graph.finish(found)?
 }
 
 /// [`label_propagation_in_order`] on the graph a [`GraphView`](super::traits::GraphView) reads.
@@ -106,11 +106,12 @@ pub(crate) fn label_propagation_in_order_on(
     store: &super::traits::GraphView<'_>,
     nodes: &[NodeId],
     max_iterations: usize,
-) -> FxHashMap<NodeId, u64> {
+) -> grafeo_common::utils::error::Result<FxHashMap<NodeId, u64>> {
+    let mut ticker = Ticker::new();
     let n = nodes.len();
 
     if n == 0 {
-        return FxHashMap::default();
+        return Ok(FxHashMap::default());
     }
 
     // Initialize labels: each node gets its own unique label
@@ -136,6 +137,7 @@ pub(crate) fn label_propagation_in_order_on(
             // Consider both outgoing and incoming edges (undirected community detection)
             // Outgoing edges: node -> neighbor
             for (neighbor, _) in store.edges(node, Direction::Outgoing) {
+                ticker.tick()?;
                 if let Some(&label) = labels.get(&neighbor) {
                     *label_counts.entry(label).or_insert(0) += 1;
                 }
@@ -144,6 +146,7 @@ pub(crate) fn label_propagation_in_order_on(
             // Incoming edges: neighbor -> node
             // Uses backward adjacency index for O(degree) instead of O(V*E)
             for (incoming_neighbor, _) in store.edges(node, Direction::Incoming) {
+                ticker.tick()?;
                 if let Some(&label) = labels.get(&incoming_neighbor) {
                     *label_counts.entry(label).or_insert(0) += 1;
                 }
@@ -188,10 +191,10 @@ pub(crate) fn label_propagation_in_order_on(
         label_map.entry(label).or_insert(next);
     }
 
-    labels
+    Ok(labels
         .into_iter()
         .map(|(node, label)| (node, *label_map.get(&label).expect("label present in map")))
-        .collect()
+        .collect())
 }
 
 // ============================================================================
@@ -255,11 +258,14 @@ pub fn louvain(
 ) -> grafeo_common::utils::error::Result<LouvainResult> {
     let graph = super::traits::GraphView::new(store, view);
     let found = louvain_on(&graph, resolution);
-    graph.finish(found)
+    graph.finish(found)?
 }
 
 /// [`louvain`] on the graph a [`GraphView`](super::traits::GraphView) reads.
-pub(crate) fn louvain_on(store: &super::traits::GraphView<'_>, resolution: f64) -> LouvainResult {
+pub(crate) fn louvain_on(
+    store: &super::traits::GraphView<'_>,
+    resolution: f64,
+) -> grafeo_common::utils::error::Result<LouvainResult> {
     let mut nodes = store.node_ids();
     nodes.sort_unstable();
     louvain_in_order_on(store, &nodes, resolution)
@@ -287,7 +293,7 @@ pub fn louvain_in_order(
 ) -> grafeo_common::utils::error::Result<LouvainResult> {
     let graph = super::traits::GraphView::new(store, view);
     let found = louvain_in_order_on(&graph, nodes, resolution);
-    graph.finish(found)
+    graph.finish(found)?
 }
 
 /// [`louvain_in_order`] on the graph a [`GraphView`](super::traits::GraphView) reads.
@@ -295,15 +301,16 @@ pub(crate) fn louvain_in_order_on(
     store: &super::traits::GraphView<'_>,
     nodes: &[NodeId],
     resolution: f64,
-) -> LouvainResult {
+) -> grafeo_common::utils::error::Result<LouvainResult> {
+    let mut ticker = Ticker::new();
     let n = nodes.len();
 
     if n == 0 {
-        return LouvainResult {
+        return Ok(LouvainResult {
             communities: FxHashMap::default(),
             modularity: 0.0,
             num_communities: 0,
-        };
+        });
     }
 
     let node_to_idx: FxHashMap<NodeId, usize> = nodes
@@ -318,6 +325,7 @@ pub(crate) fn louvain_in_order_on(
     let mut total_weight = 0.0;
     for (i, &node) in nodes.iter().enumerate() {
         for (neighbor, _edge_id) in store.edges(node, Direction::Outgoing) {
+            ticker.tick()?;
             if let Some(&j) = node_to_idx.get(&neighbor) {
                 *adjacency[i].entry(j).or_insert(0.0) += 1.0;
                 *adjacency[j].entry(i).or_insert(0.0) += 1.0;
@@ -333,11 +341,11 @@ pub(crate) fn louvain_in_order_on(
             .enumerate()
             .map(|(idx, &node)| (node, idx as u64))
             .collect();
-        return LouvainResult {
+        return Ok(LouvainResult {
             communities,
             modularity: 0.0,
             num_communities: n,
-        };
+        });
     }
 
     let weights = sorted_neighbors(adjacency);
@@ -346,14 +354,14 @@ pub(crate) fn louvain_in_order_on(
     let mut membership: Vec<usize> = (0..n).collect();
     let mut level = weights.clone();
     loop {
-        let Some(community) = move_nodes(&level, total_weight, resolution) else {
+        let Some(community) = move_nodes(&level, total_weight, resolution, &mut ticker)? else {
             break;
         };
         let (renumbered, count) = number_by_first_member(&community);
         for super_node in &mut membership {
             *super_node = renumbered[*super_node];
         }
-        level = aggregate(&level, &renumbered, count);
+        level = aggregate(&level, &renumbered, count, &mut ticker)?;
     }
 
     // Super-nodes are numbered by their first member, so `membership` already
@@ -366,11 +374,11 @@ pub(crate) fn louvain_in_order_on(
         .collect();
     let modularity = compute_modularity(&weights, &membership, total_weight, resolution);
 
-    LouvainResult {
+    Ok(LouvainResult {
         communities,
         modularity,
         num_communities,
-    }
+    })
 }
 
 /// Turns adjacency maps into neighbour lists sorted by index, so every sum over
@@ -402,7 +410,8 @@ fn move_nodes(
     graph: &[Vec<(usize, f64)>],
     total_weight: f64,
     resolution: f64,
-) -> Option<Vec<usize>> {
+    ticker: &mut Ticker,
+) -> grafeo_common::utils::error::Result<Option<Vec<usize>>> {
     let k = graph.len();
     // Edge weights are whole numbers, so at resolution 1 every gain below is a
     // whole number too and compares exactly (see `move_gains`).
@@ -430,6 +439,7 @@ fn move_nodes(
     loop {
         let mut improved = false;
         for i in 0..k {
+            ticker.tick()?;
             let current = community[i];
             for &(j, w) in &graph[i] {
                 if j == i {
@@ -491,7 +501,7 @@ fn move_nodes(
         moved = true;
     }
 
-    moved.then_some(community)
+    Ok(moved.then_some(community))
 }
 
 /// Whether a move gains modularity for certain. The scaled gains of moving
@@ -545,14 +555,16 @@ fn aggregate(
     graph: &[Vec<(usize, f64)>],
     community: &[usize],
     count: usize,
-) -> Vec<Vec<(usize, f64)>> {
+    ticker: &mut Ticker,
+) -> grafeo_common::utils::error::Result<Vec<Vec<(usize, f64)>>> {
     let mut adjacency: Vec<FxHashMap<usize, f64>> = vec![FxHashMap::default(); count];
     for (i, neighbors) in graph.iter().enumerate() {
+        ticker.tick()?;
         for &(j, w) in neighbors {
             *adjacency[community[i]].entry(community[j]).or_insert(0.0) += w;
         }
     }
-    sorted_neighbors(adjacency)
+    Ok(sorted_neighbors(adjacency))
 }
 
 /// Computes the modularity of a community assignment:
@@ -634,7 +646,7 @@ pub fn stochastic_block_partition(
 ) -> grafeo_common::utils::error::Result<StochasticBlockPartitionResult> {
     let graph = super::traits::GraphView::new(store, view);
     let found = stochastic_block_partition_on(&graph, num_blocks, max_iterations);
-    graph.finish(found)
+    graph.finish(found)?
 }
 
 /// [`stochastic_block_partition`] on the graph a [`GraphView`](super::traits::GraphView) reads.
@@ -642,7 +654,7 @@ pub(crate) fn stochastic_block_partition_on(
     store: &super::traits::GraphView<'_>,
     num_blocks: Option<usize>,
     max_iterations: usize,
-) -> StochasticBlockPartitionResult {
+) -> grafeo_common::utils::error::Result<StochasticBlockPartitionResult> {
     stochastic_block_partition_inner(store, num_blocks, max_iterations, None)
 }
 
@@ -663,7 +675,7 @@ pub fn stochastic_block_partition_incremental(
 ) -> grafeo_common::utils::error::Result<StochasticBlockPartitionResult> {
     let graph = super::traits::GraphView::new(store, view);
     let found = stochastic_block_partition_incremental_on(&graph, prior_partition, max_iterations);
-    graph.finish(found)
+    graph.finish(found)?
 }
 
 /// [`stochastic_block_partition_incremental`] on the graph a [`GraphView`](super::traits::GraphView) reads.
@@ -671,7 +683,7 @@ pub(crate) fn stochastic_block_partition_incremental_on(
     store: &super::traits::GraphView<'_>,
     prior_partition: &FxHashMap<NodeId, usize>,
     max_iterations: usize,
-) -> StochasticBlockPartitionResult {
+) -> grafeo_common::utils::error::Result<StochasticBlockPartitionResult> {
     stochastic_block_partition_inner(store, None, max_iterations, Some(prior_partition))
 }
 
@@ -681,18 +693,19 @@ fn stochastic_block_partition_inner(
     target_blocks: Option<usize>,
     max_iterations: usize,
     warm_start: Option<&FxHashMap<NodeId, usize>>,
-) -> StochasticBlockPartitionResult {
+) -> grafeo_common::utils::error::Result<StochasticBlockPartitionResult> {
+    let mut ticker = Ticker::new();
     // In id order: the order blocks are tried and numbered in.
     let mut nodes = store.node_ids();
     nodes.sort_unstable();
     let n = nodes.len();
 
     if n == 0 {
-        return StochasticBlockPartitionResult {
+        return Ok(StochasticBlockPartitionResult {
             partition: FxHashMap::default(),
             num_blocks: 0,
             description_length: 0.0,
-        };
+        });
     }
 
     // Build node index mapping.
@@ -708,6 +721,7 @@ fn stochastic_block_partition_inner(
     for &node in &nodes {
         let i = node_to_idx[&node];
         for (neighbor, _) in store.edges(node, Direction::Outgoing) {
+            ticker.tick()?;
             if let Some(&j) = node_to_idx.get(&neighbor) {
                 adj[i].insert(j);
                 adj[j].insert(i);
@@ -743,11 +757,11 @@ fn stochastic_block_partition_inner(
             .enumerate()
             .map(|(i, &node)| (node, i))
             .collect();
-        return StochasticBlockPartitionResult {
+        return Ok(StochasticBlockPartitionResult {
             partition,
             num_blocks: n,
             description_length: 0.0,
-        };
+        });
     }
 
     // Compute block-level statistics.
@@ -788,6 +802,7 @@ fn stochastic_block_partition_inner(
         block_list.sort_unstable();
         for i in 0..block_list.len() {
             for j in (i + 1)..block_list.len() {
+                ticker.tick()?;
                 let bi = block_list[i];
                 let bj = block_list[j];
 
@@ -827,6 +842,7 @@ fn stochastic_block_partition_inner(
                 let mut least_worst = f64::MAX;
                 for i in 0..block_list.len() {
                     for j in (i + 1)..block_list.len() {
+                        ticker.tick()?;
                         let bi = block_list[i];
                         let bj = block_list[j];
 
@@ -909,11 +925,11 @@ fn stochastic_block_partition_inner(
         .map(|(i, &node)| (node, block_map[&block[i]]))
         .collect();
 
-    StochasticBlockPartitionResult {
+    Ok(StochasticBlockPartitionResult {
         partition,
         num_blocks: block_map.len(),
         description_length: current_dl,
-    }
+    })
 }
 
 /// Computes the description length (MDL) of a partition under the degree-corrected SBM.
@@ -1000,6 +1016,7 @@ fn label_prop_params() -> &'static [ParameterDef] {
             param_type: ParameterType::Integer,
             required: false,
             default: Some("100".to_string()),
+            domain: Domain::NonNegative,
         }]
     })
 }
@@ -1013,21 +1030,9 @@ impl_algorithm! {
     description: "Label Propagation community detection",
     params: label_prop_params,
     execute(store, params) {
-        let max_iter = match params.get_int("max_iterations") {
-            Some(v) if v < 0 => {
-                return Err(grafeo_common::utils::error::Error::InvalidValue(
-                    format!("max_iterations must be non-negative, got {v}"),
-                ));
-            }
-            Some(v) => usize::try_from(v).map_err(|_| {
-                grafeo_common::utils::error::Error::InvalidValue(
-                    format!("max_iterations value {v} exceeds maximum supported size"),
-                )
-            })?,
-            None => 100,
-        };
+        let max_iter = params.get_count("max_iterations")?.unwrap_or(100);
 
-        let communities = label_propagation_on(store, max_iter);
+        let communities = label_propagation_on(store, max_iter)?;
 
         let mut builder = ComponentResultBuilder::with_capacity(communities.len());
         for (node, community_id) in communities {
@@ -1051,6 +1056,7 @@ fn louvain_params() -> &'static [ParameterDef] {
             param_type: ParameterType::Float,
             required: false,
             default: Some("1.0".to_string()),
+            domain: Domain::NonNegative,
         }]
     })
 }
@@ -1066,7 +1072,7 @@ impl_algorithm! {
     execute(store, params) {
         let resolution = params.get_float("resolution").unwrap_or(1.0);
 
-        let result = louvain_on(store, resolution);
+        let result = louvain_on(store, resolution)?;
 
         let mut output = AlgorithmResult::new(vec![
             "node_id".to_string(),
@@ -1104,6 +1110,7 @@ fn sbp_params() -> &'static [ParameterDef] {
                 param_type: ParameterType::Integer,
                 required: false,
                 default: None,
+                domain: Domain::Positive,
             },
             ParameterDef {
                 name: "max_iterations".to_string(),
@@ -1111,6 +1118,7 @@ fn sbp_params() -> &'static [ParameterDef] {
                 param_type: ParameterType::Integer,
                 required: false,
                 default: Some("100".to_string()),
+                domain: Domain::NonNegative,
             },
         ]
     })
@@ -1125,34 +1133,10 @@ impl_algorithm! {
     description: "Stochastic Block Model community detection (MDL minimization)",
     params: sbp_params,
     execute(store, params) {
-        let num_blocks = match params.get_int("num_blocks") {
-            Some(v) if v < 0 => {
-                return Err(grafeo_common::utils::error::Error::InvalidValue(
-                    format!("num_blocks must be non-negative, got {v}"),
-                ));
-            }
-            Some(v) => Some(usize::try_from(v).map_err(|_| {
-                grafeo_common::utils::error::Error::InvalidValue(
-                    format!("num_blocks value {v} exceeds maximum supported size"),
-                )
-            })?),
-            None => None,
-        };
-        let max_iter = match params.get_int("max_iterations") {
-            Some(v) if v < 0 => {
-                return Err(grafeo_common::utils::error::Error::InvalidValue(
-                    format!("max_iterations must be non-negative, got {v}"),
-                ));
-            }
-            Some(v) => usize::try_from(v).map_err(|_| {
-                grafeo_common::utils::error::Error::InvalidValue(
-                    format!("max_iterations value {v} exceeds maximum supported size"),
-                )
-            })?,
-            None => 100,
-        };
+        let num_blocks = params.get_count("num_blocks")?;
+        let max_iter = params.get_count("max_iterations")?.unwrap_or(100);
 
-        let result = stochastic_block_partition_on(store, num_blocks, max_iter);
+        let result = stochastic_block_partition_on(store, num_blocks, max_iter)?;
 
         let mut output = AlgorithmResult::new(vec![
             "node_id".to_string(),
@@ -1744,8 +1728,9 @@ mod tests {
                     (0..edge_count).map(|_| (next(n), next(n))).collect();
                 let graph = level_weights(n, &edges);
                 let m = to_f64(i128::try_from(edges.len()).unwrap());
-                let community =
-                    move_nodes(&graph, m, resolution).unwrap_or_else(|| (0..n).collect());
+                let community = move_nodes(&graph, m, resolution, &mut Ticker::new())
+                    .unwrap()
+                    .unwrap_or_else(|| (0..n).collect());
 
                 // The same weights as whole numbers: each edge adds 1 both ways.
                 let mut weight: Vec<FxHashMap<usize, i128>> = vec![FxHashMap::default(); n];

@@ -1759,14 +1759,14 @@ impl GraphStore for RowGroupStore {
         k: usize,
         view: ReadView,
     ) -> Result<Vec<(NodeId, f64)>> {
-        Ok(self.inner.read().text_search_at(
+        self.inner.read().text_search_at(
             label,
             property,
             query,
             TextLimit::Top(k),
             None,
             Read::view(view),
-        ))
+        )
     }
 
     #[cfg(feature = "text-index")]
@@ -1778,14 +1778,14 @@ impl GraphStore for RowGroupStore {
         threshold: f64,
         view: ReadView,
     ) -> Result<Vec<(NodeId, f64)>> {
-        Ok(self.inner.read().text_search_at(
+        self.inner.read().text_search_at(
             label,
             property,
             query,
             TextLimit::AtLeast(threshold),
             None,
             Read::view(view),
-        ))
+        )
     }
 
     #[cfg(feature = "vector-index")]
@@ -1808,10 +1808,9 @@ impl GraphStore for RowGroupStore {
         metric: DistanceMetric,
         view: ReadView,
     ) -> Result<Vec<(NodeId, f64)>> {
-        Ok(self
-            .inner
+        self.inner
             .read()
-            .vector_search_at(label, property, query, k, metric, Read::view(view)))
+            .vector_search_at(label, property, query, k, metric, Read::view(view))
     }
 
     #[cfg(feature = "vector-index")]

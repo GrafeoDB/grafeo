@@ -563,6 +563,35 @@ fn reset_entry_point(
 /// default (100), so that a rebuild gives the same graph.
 const DEFAULT_SEED: u64 = 100;
 
+/// What a layer search measures against: the topology it walks, the vectors and the query.
+struct Probe<'a, A> {
+    nodes: &'a TopologyBackend,
+    accessor: &'a A,
+    query: &'a [f32],
+}
+
+impl<A> Clone for Probe<'_, A> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<A> Copy for Probe<'_, A> {}
+
+/// The visit of a search with no bound on its work, which never fails (see
+/// [`HnswIndex::search_visiting`]).
+pub(crate) fn no_visit() -> std::result::Result<(), std::convert::Infallible> {
+    Ok(())
+}
+
+/// The answer of a search whose visit cannot fail.
+pub(crate) fn infallible<T>(found: std::result::Result<T, std::convert::Infallible>) -> T {
+    match found {
+        Ok(found) => found,
+        Err(never) => match never {},
+    }
+}
+
 impl HnswIndex {
     /// Creates a new empty HNSW index with the given configuration.
     ///
@@ -955,7 +984,16 @@ impl HnswIndex {
         // Search from top to the level above the new node's max layer.
         let mut current_ep = ep;
         for lc in (level + 1..=current_max_level).rev() {
-            current_ep = self.search_layer_single(&nodes, accessor, vector, current_ep, lc);
+            current_ep = infallible(self.search_layer_single(
+                &Probe {
+                    nodes: &nodes,
+                    accessor,
+                    query: vector,
+                },
+                current_ep,
+                lc,
+                &mut no_visit,
+            ));
         }
 
         // For each layer from the new node's max layer down to 0
@@ -967,14 +1005,17 @@ impl HnswIndex {
             };
 
             // Find ef_construction nearest neighbors at this layer
-            let neighbors = self.search_layer(
-                &nodes,
-                accessor,
-                vector,
+            let neighbors = infallible(self.search_layer(
+                &Probe {
+                    nodes: &nodes,
+                    accessor,
+                    query: vector,
+                },
                 current_ep,
                 self.config.ef_construction,
                 lc,
-            );
+                &mut no_visit,
+            ));
 
             // Select neighbors using diversity-aware heuristic
             let selected = self.select_neighbors_heuristic(accessor, &neighbors, m_max);
@@ -1360,40 +1401,7 @@ impl HnswIndex {
         ef: usize,
         accessor: &impl VectorAccessor,
     ) -> Vec<(NodeId, f32)> {
-        if query.len() != self.config.dimensions {
-            return Vec::new();
-        }
-
-        let nodes = self.nodes.read();
-        let entry_point = self.entry_point.read();
-        let max_level = *self.max_level.read();
-
-        if entry_point.is_none() || nodes.is_empty() {
-            return Vec::new();
-        }
-
-        let ep = entry_point.expect("entry_point confirmed Some above");
-
-        // Greedy search from top layer to layer 1
-        let mut current_ep = ep;
-        for lc in (1..=max_level).rev() {
-            current_ep = self.search_layer_single(&nodes, accessor, query, current_ep, lc);
-        }
-
-        // Beam search at layer 0
-        let ef_search = ef.max(k);
-        let candidates = self.search_layer(&nodes, accessor, query, current_ep, ef_search, 0);
-
-        // Return top k, each node's exact duplicates with it: the results
-        // hold only nodes with a vector (#594)
-        let found = candidates
-            .into_iter()
-            .take(k)
-            .map(|n| (n.id, n.distance))
-            .collect();
-        let mut found = self.duplicates.read().expand(found);
-        found.truncate(k);
-        found
+        infallible(self.search_visiting(query, k, ef, None, accessor, &mut no_visit))
     }
 
     /// Searches for the k nearest neighbors with an allowlist filter.
@@ -1401,7 +1409,8 @@ impl HnswIndex {
     /// Only nodes in the `allowlist` can appear in results. The HNSW graph
     /// is still fully traversed for connectivity; the filter only restricts
     /// the result set. The search beam width (`ef`) is automatically scaled
-    /// based on the allowlist selectivity to maintain recall.
+    /// based on the allowlist selectivity to maintain recall (see
+    /// [`filtered_ef`](Self::filtered_ef)).
     ///
     /// Returns an empty vector if the allowlist is empty.
     #[must_use]
@@ -1412,10 +1421,19 @@ impl HnswIndex {
         allowlist: &HashSet<NodeId>,
         accessor: &impl VectorAccessor,
     ) -> Vec<(NodeId, f32)> {
-        if allowlist.is_empty() {
-            return Vec::new();
-        }
-        // Auto-scale ef based on selectivity ratio
+        self.search_with_ef_and_filter(
+            query,
+            k,
+            self.filtered_ef(k, allowlist),
+            allowlist,
+            accessor,
+        )
+    }
+
+    /// The beam width of a search among `allowlist` without one given: the configured `ef`,
+    /// scaled up by how few nodes the allowlist keeps, at most every node and at least `k`.
+    #[must_use]
+    pub fn filtered_ef(&self, k: usize, allowlist: &HashSet<NodeId>) -> usize {
         let total = self.nodes.read().len();
         let selectivity = if total == 0 {
             1.0
@@ -1427,7 +1445,7 @@ impl HnswIndex {
         let ef_scaled = ((self.config.ef as f64 / selectivity).ceil() as usize)
             .min(total)
             .max(k);
-        self.search_with_ef_and_filter(query, k, ef_scaled, allowlist, accessor)
+        ef_scaled
     }
 
     /// Searches with a custom ef (beam width) and an allowlist filter.
@@ -1447,25 +1465,69 @@ impl HnswIndex {
         allowlist: &HashSet<NodeId>,
         accessor: &impl VectorAccessor,
     ) -> Vec<(NodeId, f32)> {
-        if allowlist.is_empty() || query.len() != self.config.dimensions {
-            return Vec::new();
+        infallible(self.search_visiting(query, k, ef, Some(allowlist), accessor, &mut no_visit))
+    }
+
+    /// The search behind every `search` method: the `k` nearest nodes to `query` with beam width
+    /// `ef`, among `allowlist` when given, calling `visit` before each node it expands, so a
+    /// caller can bound the work (a query's deadline). The first error of `visit` ends the
+    /// search, which returns it. A query of another size than the configured `dimensions`, and an
+    /// empty allowlist, find nothing.
+    ///
+    /// # Errors
+    ///
+    /// The first error of `visit`.
+    pub fn search_visiting<E>(
+        &self,
+        query: &[f32],
+        k: usize,
+        ef: usize,
+        allowlist: Option<&HashSet<NodeId>>,
+        accessor: &impl VectorAccessor,
+        visit: &mut impl FnMut() -> std::result::Result<(), E>,
+    ) -> std::result::Result<Vec<(NodeId, f32)>, E> {
+        if query.len() != self.config.dimensions || allowlist.is_some_and(HashSet::is_empty) {
+            return Ok(Vec::new());
         }
 
         let nodes = self.nodes.read();
-        let entry_point = self.entry_point.read();
+        let entry_point = *self.entry_point.read();
         let max_level = *self.max_level.read();
 
-        if entry_point.is_none() || nodes.is_empty() {
-            return Vec::new();
+        let Some(ep) = entry_point else {
+            return Ok(Vec::new());
+        };
+        if nodes.is_empty() {
+            return Ok(Vec::new());
         }
 
-        let ep = entry_point.expect("entry_point confirmed Some above");
-
+        let probe = Probe {
+            nodes: &nodes,
+            accessor,
+            query,
+        };
         // Greedy search from top layer to layer 1
         let mut current_ep = ep;
         for lc in (1..=max_level).rev() {
-            current_ep = self.search_layer_single(&nodes, accessor, query, current_ep, lc);
+            current_ep = self.search_layer_single(&probe, current_ep, lc, visit)?;
         }
+        let ef_search = ef.max(k);
+
+        let Some(allowlist) = allowlist else {
+            // Beam search at layer 0
+            let candidates = self.search_layer(&probe, current_ep, ef_search, 0, visit)?;
+
+            // Return top k, each node's exact duplicates with it: the results
+            // hold only nodes with a vector (#594)
+            let found = candidates
+                .into_iter()
+                .take(k)
+                .map(|n| (n.id, n.distance))
+                .collect();
+            let mut found = self.duplicates.read().expand(found);
+            found.truncate(k);
+            return Ok(found);
+        };
 
         // An allowed duplicate is found through its representative, which
         // the search then takes as allowed too.
@@ -1483,9 +1545,8 @@ impl HnswIndex {
         };
 
         // Filtered beam search at layer 0
-        let ef_search = ef.max(k);
         let candidates =
-            self.search_layer_filtered(&nodes, accessor, query, current_ep, ef_search, 0, searched);
+            self.search_layer_filtered(&probe, current_ep, ef_search, 0, searched, visit)?;
 
         // Return top k allowed, each node's exact duplicates with it: the
         // results hold only nodes with a vector (#594)
@@ -1493,7 +1554,7 @@ impl HnswIndex {
         let mut found = duplicates.expand(found);
         found.retain(|(id, _)| allowlist.contains(id));
         found.truncate(k);
-        found
+        Ok(found)
     }
 
     /// Removes a vector from the index.
@@ -1541,21 +1602,31 @@ impl HnswIndex {
         level
     }
 
-    /// Single-element greedy search at a layer.
-    fn search_layer_single(
+    /// Single-element greedy search at a layer, calling `visit` before each node it expands.
+    // A function of its own, as the search's hot loop: inlined into its caller, the hashing of
+    // the visited set was no longer inlined in it (measured, about 30 percent more instructions
+    // a search).
+    #[inline(never)]
+    fn search_layer_single<A: VectorAccessor, E>(
         &self,
-        nodes: &TopologyBackend,
-        accessor: &impl VectorAccessor,
-        query: &[f32],
+        probe: &Probe<'_, A>,
         ep: NodeId,
         layer: usize,
-    ) -> NodeId {
+        visit: &mut impl FnMut() -> std::result::Result<(), E>,
+    ) -> std::result::Result<NodeId, E> {
+        let Probe {
+            nodes,
+            accessor,
+            query,
+        } = *probe;
         let mut current = ep;
+        visit()?;
         let mut current_dist = self.node_distance(accessor, query, ep);
 
         loop {
             let mut changed = false;
 
+            visit()?;
             if let Some(neighbors) = nodes.neighbors_at(current, layer) {
                 for neighbor in neighbors {
                     let dist = self.node_distance(accessor, query, neighbor);
@@ -1572,21 +1643,31 @@ impl HnswIndex {
             }
         }
 
-        current
+        Ok(current)
     }
 
-    /// Beam search at a layer, returning ef nearest neighbors.
-    fn search_layer(
+    /// Beam search at a layer, returning ef nearest neighbors, calling `visit` before each node
+    /// it expands.
+    // A function of its own, as the search's hot loop: inlined into its caller, the hashing of
+    // the visited set was no longer inlined in it (measured, about 30 percent more instructions
+    // a search).
+    #[inline(never)]
+    fn search_layer<A: VectorAccessor, E>(
         &self,
-        nodes: &TopologyBackend,
-        accessor: &impl VectorAccessor,
-        query: &[f32],
+        probe: &Probe<'_, A>,
         ep: NodeId,
         ef: usize,
         layer: usize,
-    ) -> Vec<Neighbor> {
+        visit: &mut impl FnMut() -> std::result::Result<(), E>,
+    ) -> std::result::Result<Vec<Neighbor>, E> {
+        let Probe {
+            nodes,
+            accessor,
+            query,
+        } = *probe;
         // A node without a vector is explored (its links lead on) but never
         // a result: the search reads no result twice to tell (#594).
+        visit()?;
         let ep_dist = self.distance_to(accessor, query, ep);
 
         // Min-heap of candidates to explore
@@ -1607,6 +1688,7 @@ impl HnswIndex {
         visited.insert(ep);
 
         while let Some(current) = candidates.pop() {
+            visit()?;
             // If the closest candidate is further than the furthest result, stop
             if let Some(furthest) = results.peek()
                 && current.distance > furthest.distance
@@ -1668,26 +1750,35 @@ impl HnswIndex {
             .collect();
         // Equal distances by ascending id, not in the heap's order
         result_vec.sort_by_key(|a| (OrderedFloat(a.distance), a.id));
-        result_vec
+        Ok(result_vec)
     }
 
-    /// Beam search at a layer with an allowlist filter on the result set.
+    /// Beam search at a layer with an allowlist filter on the result set, calling `visit` before
+    /// each node it expands.
     ///
     /// All nodes are visited for graph traversal (neighbor links followed),
     /// but only nodes in the `allowlist` can enter the result set. This
     /// preserves HNSW connectivity while restricting which nodes are returned.
-    #[allow(clippy::too_many_arguments)]
-    fn search_layer_filtered(
+    // A function of its own, as the search's hot loop: inlined into its caller, the hashing of
+    // the visited set was no longer inlined in it (measured, about 30 percent more instructions
+    // a search).
+    #[inline(never)]
+    fn search_layer_filtered<A: VectorAccessor, E>(
         &self,
-        nodes: &TopologyBackend,
-        accessor: &impl VectorAccessor,
-        query: &[f32],
+        probe: &Probe<'_, A>,
         ep: NodeId,
         ef: usize,
         layer: usize,
         allowlist: &HashSet<NodeId>,
-    ) -> Vec<Neighbor> {
+        visit: &mut impl FnMut() -> std::result::Result<(), E>,
+    ) -> std::result::Result<Vec<Neighbor>, E> {
+        let Probe {
+            nodes,
+            accessor,
+            query,
+        } = *probe;
         // A node without a vector is explored but never a result (#594).
+        visit()?;
         let ep_vector = self.distance_to(accessor, query, ep);
         let ep_dist = ep_vector.unwrap_or(f32::MAX);
 
@@ -1719,6 +1810,7 @@ impl HnswIndex {
         visited.insert(ep);
 
         while let Some(current) = candidates.pop() {
+            visit()?;
             // Terminate when best candidate is worse than worst in best_seen
             if let Some(furthest) = best_seen.peek()
                 && current.distance > furthest.distance
@@ -1784,7 +1876,7 @@ impl HnswIndex {
             .collect();
         // Equal distances by ascending id, not in the heap's order
         result_vec.sort_by_key(|a| (OrderedFloat(a.distance), a.id));
-        result_vec
+        Ok(result_vec)
     }
 
     /// Selects neighbors using diversity-aware heuristic (Vamana-style).

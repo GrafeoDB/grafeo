@@ -1227,9 +1227,11 @@ mod physical {
 
         #[test]
         fn deadline_after_bfs_started_discards_chunk_and_releases_state() {
+            // Longer than one clock period (1,024 units), so the resumed hops of the one chunk
+            // reach a clock read whichever unit the probe stops at.
             let store = Arc::new(RdfStore::new());
             let mut subject = Term::iri("s");
-            for n in 0..64 {
+            for n in 0..2_048 {
                 let object = Term::iri(format!("n{n}"));
                 store.insert(Triple::new(subject, Term::iri("p"), object.clone()));
                 subject = object;
@@ -1237,7 +1239,7 @@ mod physical {
             let mut cfg = config();
             cfg.min_hops = true;
             cfg.object_var = None;
-            cfg.chunk_capacity = 64;
+            cfg.chunk_capacity = 2_048;
             let mut path = RdfPathOperator::new(Arc::clone(&store), cfg);
             let idle_references = Arc::strong_count(&store);
             path.state = Some(
@@ -1254,9 +1256,10 @@ mod physical {
             }));
             assert!(!search.queue.is_empty());
             assert!(state.budget.used() > 0);
-            // The first real edge and its accepting state have already run.
-            // Allow resumed work, then expire during the remaining 63 hops.
-            state.budget.expire_after_polls(50);
+            // The first real edge and its accepting state have already run. No clock read
+            // is left: the probe stops the resumed work at its next read, within the
+            // remaining 2,047 hops.
+            state.budget.expire_after_polls(0);
             assert!(matches!(path.next(), Err(OperatorError::Timeout)));
             assert!(path.state.is_none());
             assert_eq!(Arc::strong_count(&store), idle_references);
@@ -1266,7 +1269,7 @@ mod physical {
             while let Some(chunk) = path.next().unwrap() {
                 rows += chunk.len();
             }
-            assert_eq!(rows, 64);
+            assert_eq!(rows, 2_048);
             assert!(path.state.is_none());
             assert_eq!(Arc::strong_count(&store), idle_references);
         }

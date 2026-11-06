@@ -11,6 +11,7 @@ All notable changes to Grafeo, for future reference (and enjoyment).
 - **Lookups with no index**: an equality on a property reads its column directly, a `LIMIT` stops early, and reopened columns skip chunks by their stored bounds.
 - **Typed graphs**: a read no longer pays for a graph type's checks, which only a write needs.
 - **Constraints**: `UNIQUE` and `NODE KEY` build an index on their first property, so an insert under one no longer reads the whole label.
+- **Weighted algorithms**: Dijkstra, SSSP, A*, Bellman-Ford, Floyd-Warshall, Kruskal, Prim, `max_flow` and `min_cost_max_flow` read each edge's weight directly instead of loading the whole edge; Dijkstra takes about a third fewer instructions.
 
 ### Changed
 
@@ -27,6 +28,16 @@ Queries that ran in 0.6.1 and now fail or behave differently.
 - **Comparing values of two kinds** with `<`, `<=`, `>` and `>=`: GQL orders them as ORDER BY does (a string before every number, a boolean before every number), with or without an index; Cypher and Gremlin answer null; SQL/PGQ raises 22G04, as do its `=` and `<>`, whichever plan reads them (an index or key-column read returned rows where the scan raised).
 - **Wrong kinds**: an operator or list index given an operand of a kind it does not take (`true + 1`, `-'a'`, `[1, 2, 3][1.5]`) raises invalid value type (22G12) instead of answering null; a sign on a non-number reports 22G12 rather than 22G03. A null operand still gives null.
 - **`+` of a string and another kind** in GQL raises invalid value type (22G12) in either order, for any non-null value that is not a string (`'x' + 3` gave `'x3'`, `'is:' + true` gave `'is:true'`).
+- **Procedure arguments**: a value outside what an argument allows raises invalid parameter value (22023), in CALL and in the Python `db.algorithms` methods; `grafeo.pagerank(2.0)`, a negative `max_iterations`, a NaN tolerance or a negative `k` ran with meaningless results or clamped values (in Python, `pagerank(damping=2.0)` returned scores like 39,602,142,754).
+- **Edge weights**: weighted algorithms refuse an edge value they cannot use and name the edge and property: a non-number raises 22G12 (it read as 1.0); NaN, an infinity, or a negative weight in Dijkstra, A*, SSSP or a flow capacity raises 22023.
+- **Procedure timeouts**: graph algorithm, search and schema procedures, and the Python algorithm methods, stop at the query timeout with the usual timeout error, never a partial answer; a run used to hold its thread until it ended.
+- **`grafeo.max_flow` and `grafeo.min_cost_max_flow` rows**: one row per edge that carries flow, so parallel edges each get a row; they gave one row per node pair.
+- **`grafeo.topological_sort` on a graph with a cycle** raises a data exception (22000) naming one cycle, such as `3 -> 5 -> 8 -> 3`; it returned a row in an undocumented `error` column. The Python method still returns `None` for a cycle.
+- **Minimum spanning trees of equal weight**: `grafeo.kruskal` and `grafeo.prim` return the one with the lowest edge ids (it depended on the order edges were read).
+
+### Added
+
+- **Graph procedures**: `CALL grafeo.ktruss()` and `grafeo.ktruss(k)`, `grafeo.total_triangles()` and `grafeo.subgraph_isomorphism()`, and the Python methods `ktruss(k=None)` and `subgraph_isomorphism_count(pattern_edges, pattern_nodes)`.
 
 ### Fixed
 
@@ -48,6 +59,11 @@ Queries that ran in 0.6.1 and now fail or behave differently.
 - **Graph type patterns**: naming an existing type no longer wipes its properties, and several patterns of one edge type no longer lose all but the last.
 - **Closed graph types in a schema**: a node or edge type added with `ALTER GRAPH TYPE ... ADD` is held like one listed by `CREATE GRAPH TYPE`, so `DROP NODE TYPE` and `DROP EDGE TYPE` refuse it while listed, and `ALTER GRAPH TYPE ... DROP` takes it out, in files written by 0.6.1 too.
 - **Backups**: a restore checks the full backup's checksum, as it does an incremental backup's, and refuses a damaged file by name before it writes anything (#744).
+- **A null procedure argument**, however computed, takes the parameter's default instead of failing.
+- **`grafeo.min_cost_max_flow`** gives each parallel edge its own capacity and cost (two edges costing 1 and 5 reported 50 where 30 is right), and refuses a negative-cost cycle the source reaches (22023), where the call never returned.
+- **`grafeo.kruskal` and `grafeo.prim`** take the lightest of the edges between two nodes, in either direction, and `grafeo.prim` from a start node returns the whole tree; Kruskal kept the first edge it met and Prim missed a lighter edge pointing back, both reporting a heavier tree, and Prim followed only outgoing edges.
+- **`grafeo.topological_sort`** gives the same order on every run (the lexicographically smallest by node id).
+- **`YIELD`**: a column a procedure does not have is refused when the call is planned, naming its columns; it failed only after the algorithm had run (4.5 s on 4,000 nodes).
 
 ### Contributors
 

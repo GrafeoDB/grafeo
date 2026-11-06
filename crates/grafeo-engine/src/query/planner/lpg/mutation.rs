@@ -998,8 +998,20 @@ impl super::Planner {
             procedures::evaluate_arguments(&resolved_name, &values, procedure.parameters())?;
 
         // Canonical column names for this call (user-facing names, for the
-        // shape these arguments give)
+        // shape these arguments give). A YIELD item is checked against them now, before the
+        // procedure runs: a misspelt column is a mistake in the query text, not something a
+        // long run should end on.
         let canonical_columns = procedure.output_columns_for(&params);
+        if let Some(items) = &call.yield_items
+            && let Some(item) = items
+                .iter()
+                .find(|item| !canonical_columns.contains(&item.field_name))
+        {
+            return Err(procedures::no_such_yield_column(
+                &item.field_name,
+                &canonical_columns,
+            ));
+        }
 
         // Determine output columns from YIELD or procedure defaults
         let yield_columns = call.yield_items.as_ref().map(|items| {
@@ -1076,8 +1088,8 @@ impl super::Planner {
     ///
     /// A procedure runs once, before any row, so an argument that reads a row
     /// (a variable an earlier clause binds) or the graph (a subquery) is an
-    /// error, as is a parameter nobody supplied and an expression that cannot
-    /// be evaluated: the procedure would otherwise run with the default.
+    /// error, as is a parameter nobody supplied. An expression that gives no
+    /// value is a null, which takes an optional parameter's default.
     #[cfg(feature = "algos")]
     fn constant_argument(
         &self,
@@ -1085,8 +1097,6 @@ impl super::Planner {
         argument: &str,
         expression: &LogicalExpression,
     ) -> Result<Value> {
-        let semantic =
-            |message: String| Error::from(QueryError::new(QueryErrorKind::Semantic, message));
         let reads = match first_non_constant(expression, &mut Vec::new()) {
             None => None,
             Some(NonConstant::Row(variable)) => Some(format!("the variable '{variable}'")),
@@ -1113,7 +1123,9 @@ impl super::Planner {
             self.read_view(),
         )
         .with_session_context(self.session_context.clone());
-        evaluator
+        // An expression that gives no value (`null + 1`, `head([])`) is a null, as a literal null
+        // is: an argument means its value, however it is written.
+        Ok(evaluator
             .eval_at(&grafeo_core::execution::DataChunk::empty(), 0)
             .map_err(|error| {
                 naming_the_argument(
@@ -1122,11 +1134,7 @@ impl super::Planner {
                     procedure,
                 )
             })?
-            .ok_or_else(|| {
-                semantic(format!(
-                    "Argument '{argument}' of {procedure} cannot be evaluated"
-                ))
-            })
+            .unwrap_or(Value::Null))
     }
 
     /// The store a procedure reads: the projection its `projection` argument
@@ -1169,13 +1177,7 @@ impl super::Planner {
                     .iter()
                     .position(|c| c == &item.field_name)
                     .ok_or_else(|| {
-                        grafeo_common::utils::error::Error::from(
-                            grafeo_common::utils::error::QueryError::invalid_reference(format!(
-                                "YIELD column '{}' is no column of the procedure (it has: {})",
-                                item.field_name,
-                                result.columns.join(", ")
-                            )),
-                        )
+                        crate::procedures::no_such_yield_column(&item.field_name, &result.columns)
                     })?;
                 indices.push(idx);
                 cols.push(

@@ -112,14 +112,11 @@ impl ProcedureCallOperator {
                     .iter()
                     .position(|c| c == field_name)
                     .ok_or_else(|| {
-                        // A mistake in the query text: the procedure has no
-                        // such column.
-                        OperatorError::from(grafeo_common::utils::error::Error::from(
-                            grafeo_common::utils::error::QueryError::invalid_reference(format!(
-                                "YIELD column '{}' is no column of the procedure (it has: {})",
-                                field_name,
-                                display_columns.join(", ")
-                            )),
+                        // A mistake in the query text, which planning refuses for the columns
+                        // the procedure declares; here for a result of another shape.
+                        OperatorError::from(crate::procedures::no_such_yield_column(
+                            field_name,
+                            display_columns,
                         ))
                     })?;
                 self.column_indices.push(idx);

@@ -197,15 +197,23 @@ type EdgeTally = (usize, PropertyTally, BTreeMap<(String, String), usize>);
 
 impl LpgSchemaInfo {
     /// What a reader at `view` finds in `store`: one pass over the nodes and
-    /// their outgoing edges, so it reads the whole graph.
+    /// their outgoing edges, so it reads the whole graph, and stops at the
+    /// running query's deadline, a unit of work per node and per edge.
     /// `GrafeoDB::schema` and the `db.labels`, `db.relationshipTypes` and
     /// `db.propertyKeys` procedures read this one summary, so they agree.
     pub(crate) fn in_use(store: &dyn GraphStore, view: ReadView) -> GrafeoResult<Self> {
+        let mut ticker = grafeo_core::execution::deadline::Ticker::new();
+        let mut tick = || {
+            ticker
+                .tick()
+                .map_err(crate::query::executor::convert_operator_error)
+        };
         let mut labels: BTreeMap<String, (usize, PropertyTally)> = BTreeMap::new();
         let mut node_labels: FxHashMap<NodeId, Labels> = FxHashMap::default();
         let mut keys: BTreeSet<String> = BTreeSet::new();
         let node_ids = store.node_ids(view)?;
         for &id in &node_ids {
+            tick()?;
             let Some(node) = store.node(id, view)? else {
                 continue;
             };
@@ -224,6 +232,7 @@ impl LpgSchemaInfo {
                 continue;
             };
             for (target, edge_id) in store.edges(id, Direction::Outgoing, &[], view)? {
+                tick()?;
                 let Some(edge) = store.edge(edge_id, view)? else {
                     continue;
                 };

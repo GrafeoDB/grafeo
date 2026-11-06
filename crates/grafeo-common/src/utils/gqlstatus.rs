@@ -94,6 +94,9 @@ impl GqlStatus {
     /// `22G04` - values not comparable.
     pub const DATA_VALUES_NOT_COMPARABLE: Self = Self::from_bytes(*b"22G04");
 
+    /// `22023` - invalid parameter value (ISO/IEC 9075-2 13.3 General Rule 7).
+    pub const DATA_INVALID_PARAMETER_VALUE: Self = Self::from_bytes(*b"22023");
+
     // ── Invalid transaction state (class 25) ──────────────────────────
 
     /// `25000` - invalid transaction state, no subclass.
@@ -244,6 +247,7 @@ impl From<&super::error::Error> for GqlStatus {
                     GqlStatus::DATA_INVALID_TIME_ZONE_DISPLACEMENT
                 }
                 QueryErrorKind::ValuesNotComparable => GqlStatus::DATA_VALUES_NOT_COMPARABLE,
+                QueryErrorKind::InvalidParameterValue => GqlStatus::DATA_INVALID_PARAMETER_VALUE,
                 // GQL defines no class for a feature an implementation lacks.
                 QueryErrorKind::Unsupported => GqlStatus::SYNTAX_ERROR,
             },
@@ -463,67 +467,53 @@ mod tests {
     fn every_query_error_kind_has_its_gqlstatus() {
         use super::super::error::{Error, ErrorCode, QueryError, QueryErrorKind};
 
-        for (kind, status, code) in [
-            (QueryErrorKind::Lexer, "42001", ErrorCode::QuerySyntax),
-            (QueryErrorKind::Syntax, "42001", ErrorCode::QuerySyntax),
-            (QueryErrorKind::Semantic, "42000", ErrorCode::QuerySemantic),
-            (
-                QueryErrorKind::InvalidReference,
-                "42002",
-                ErrorCode::QuerySemantic,
-            ),
-            (
-                QueryErrorKind::Optimization,
-                "42000",
-                ErrorCode::QueryOptimization,
-            ),
-            (
-                QueryErrorKind::Unsupported,
-                "42000",
-                ErrorCode::QueryUnsupported,
-            ),
-            (
-                QueryErrorKind::Execution,
-                "22000",
-                ErrorCode::QueryExecution,
-            ),
-            (QueryErrorKind::Timeout, "22000", ErrorCode::QueryTimeout),
-            (
-                QueryErrorKind::NumericOutOfRange,
-                "22003",
-                ErrorCode::QueryExecution,
-            ),
-            (
-                QueryErrorKind::DivisionByZero,
-                "22012",
-                ErrorCode::QueryExecution,
-            ),
-            (
-                QueryErrorKind::NegativeLimit,
-                "22G02",
-                ErrorCode::QueryExecution,
-            ),
-            (
-                QueryErrorKind::InvalidValueType,
-                "22G03",
-                ErrorCode::QueryExecution,
-            ),
-            (
-                QueryErrorKind::WrongKind,
-                "22G12",
-                ErrorCode::QueryExecution,
-            ),
-            (
-                QueryErrorKind::InvalidTimeZoneDisplacement,
-                "22009",
-                ErrorCode::QueryExecution,
-            ),
-            (
-                QueryErrorKind::ValuesNotComparable,
-                "22G04",
-                ErrorCode::QueryExecution,
-            ),
-        ] {
+        /// The decided status and error code of each kind, by an exhaustive match: a kind
+        /// added to `QueryErrorKind` fails to compile here until it has its row (and a place in
+        /// `KINDS` below).
+        fn decided(kind: QueryErrorKind) -> (&'static str, ErrorCode) {
+            match kind {
+                QueryErrorKind::Lexer | QueryErrorKind::Syntax => ("42001", ErrorCode::QuerySyntax),
+                QueryErrorKind::Semantic => ("42000", ErrorCode::QuerySemantic),
+                QueryErrorKind::InvalidReference => ("42002", ErrorCode::QuerySemantic),
+                QueryErrorKind::Optimization => ("42000", ErrorCode::QueryOptimization),
+                QueryErrorKind::Unsupported => ("42000", ErrorCode::QueryUnsupported),
+                QueryErrorKind::Execution => ("22000", ErrorCode::QueryExecution),
+                QueryErrorKind::Timeout => ("22000", ErrorCode::QueryTimeout),
+                QueryErrorKind::NumericOutOfRange => ("22003", ErrorCode::QueryExecution),
+                QueryErrorKind::InvalidCharacterValueForCast => {
+                    ("22018", ErrorCode::QueryExecution)
+                }
+                QueryErrorKind::DivisionByZero => ("22012", ErrorCode::QueryExecution),
+                QueryErrorKind::NegativeLimit => ("22G02", ErrorCode::QueryExecution),
+                QueryErrorKind::InvalidValueType => ("22G03", ErrorCode::QueryExecution),
+                QueryErrorKind::WrongKind => ("22G12", ErrorCode::QueryExecution),
+                QueryErrorKind::InvalidTimeZoneDisplacement => ("22009", ErrorCode::QueryExecution),
+                QueryErrorKind::ValuesNotComparable => ("22G04", ErrorCode::QueryExecution),
+                QueryErrorKind::InvalidParameterValue => ("22023", ErrorCode::QueryExecution),
+            }
+        }
+
+        const KINDS: [QueryErrorKind; 17] = [
+            QueryErrorKind::Lexer,
+            QueryErrorKind::Syntax,
+            QueryErrorKind::Semantic,
+            QueryErrorKind::InvalidReference,
+            QueryErrorKind::Optimization,
+            QueryErrorKind::Unsupported,
+            QueryErrorKind::Execution,
+            QueryErrorKind::Timeout,
+            QueryErrorKind::NumericOutOfRange,
+            QueryErrorKind::InvalidCharacterValueForCast,
+            QueryErrorKind::DivisionByZero,
+            QueryErrorKind::NegativeLimit,
+            QueryErrorKind::InvalidValueType,
+            QueryErrorKind::WrongKind,
+            QueryErrorKind::InvalidTimeZoneDisplacement,
+            QueryErrorKind::ValuesNotComparable,
+            QueryErrorKind::InvalidParameterValue,
+        ];
+        for kind in KINDS {
+            let (status, code) = decided(kind);
             let error = QueryError::new(kind, "message");
             assert_eq!(error.error_code(), code, "{kind:?}");
             assert_eq!(

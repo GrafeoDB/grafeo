@@ -3,8 +3,11 @@
 //! This module provides algorithms for finding connected components,
 //! strongly connected components, and topological ordering.
 
-use grafeo_common::types::{NodeId, Value};
-use grafeo_common::utils::error::Result;
+use std::cmp::Reverse;
+use std::collections::BinaryHeap;
+
+use grafeo_common::types::NodeId;
+use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind, Result};
 use grafeo_common::utils::hash::{FxHashMap, FxHashSet};
 use grafeo_core::graph::Direction;
 use grafeo_core::graph::GraphStore;
@@ -13,7 +16,7 @@ use grafeo_core::graph::GraphStore;
 use grafeo_core::graph::rowgroup::RowGroupStore;
 
 use super::super::{AlgorithmResult, ParameterDef, Parameters};
-use super::traits::{ComponentResultBuilder, GraphAlgorithm, impl_algorithm, int_value};
+use super::traits::{ComponentResultBuilder, GraphAlgorithm, Ticker, impl_algorithm, int_value};
 
 // ============================================================================
 // Union-Find Data Structure
@@ -105,18 +108,19 @@ pub fn connected_components(
 ) -> grafeo_common::utils::error::Result<FxHashMap<NodeId, u64>> {
     let graph = super::traits::GraphView::new(store, view);
     let found = connected_components_on(&graph);
-    graph.finish(found)
+    graph.finish(found)?
 }
 
 /// [`connected_components`] on the graph a [`GraphView`](super::traits::GraphView) reads.
 pub(crate) fn connected_components_on(
     store: &super::traits::GraphView<'_>,
-) -> FxHashMap<NodeId, u64> {
+) -> grafeo_common::utils::error::Result<FxHashMap<NodeId, u64>> {
+    let mut ticker = Ticker::new();
     let node_ids = store.node_ids();
     let n = node_ids.len();
 
     if n == 0 {
-        return FxHashMap::default();
+        return Ok(FxHashMap::default());
     }
 
     // Map NodeId -> index
@@ -133,6 +137,7 @@ pub(crate) fn connected_components_on(
 
         // Outgoing edges
         for (neighbor, _) in store.edges(node, Direction::Outgoing) {
+            ticker.tick()?;
             if let Some(&neighbor_idx) = node_to_idx.get(&neighbor) {
                 uf.union(idx, neighbor_idx);
             }
@@ -140,6 +145,7 @@ pub(crate) fn connected_components_on(
 
         // Incoming edges (for weakly connected)
         for (neighbor, _) in store.edges(node, Direction::Incoming) {
+            ticker.tick()?;
             if let Some(&neighbor_idx) = node_to_idx.get(&neighbor) {
                 uf.union(idx, neighbor_idx);
             }
@@ -161,7 +167,7 @@ pub(crate) fn connected_components_on(
         result.insert(node, component_id);
     }
 
-    result
+    Ok(result)
 }
 
 /// Returns the number of connected components.
@@ -175,14 +181,16 @@ pub fn connected_component_count(
 ) -> grafeo_common::utils::error::Result<usize> {
     let graph = super::traits::GraphView::new(store, view);
     let found = connected_component_count_on(&graph);
-    graph.finish(found)
+    graph.finish(found)?
 }
 
 /// [`connected_component_count`] on the graph a [`GraphView`](super::traits::GraphView) reads.
-pub(crate) fn connected_component_count_on(store: &super::traits::GraphView<'_>) -> usize {
-    let components = connected_components_on(store);
+pub(crate) fn connected_component_count_on(
+    store: &super::traits::GraphView<'_>,
+) -> grafeo_common::utils::error::Result<usize> {
+    let components = connected_components_on(store)?;
     let unique: FxHashSet<u64> = components.values().copied().collect();
-    unique.len()
+    Ok(unique.len())
 }
 
 // ============================================================================
@@ -215,17 +223,18 @@ pub fn strongly_connected_components(
 ) -> grafeo_common::utils::error::Result<FxHashMap<NodeId, u64>> {
     let graph = super::traits::GraphView::new(store, view);
     let found = strongly_connected_components_on(&graph);
-    graph.finish(found)
+    graph.finish(found)?
 }
 
 /// [`strongly_connected_components`] on the graph a [`GraphView`](super::traits::GraphView) reads.
 pub(crate) fn strongly_connected_components_on(
     store: &super::traits::GraphView<'_>,
-) -> FxHashMap<NodeId, u64> {
+) -> grafeo_common::utils::error::Result<FxHashMap<NodeId, u64>> {
+    let mut ticker = Ticker::new();
     let node_ids = store.node_ids();
 
     if node_ids.is_empty() {
-        return FxHashMap::default();
+        return Ok(FxHashMap::default());
     }
 
     // State for Tarjan's algorithm
@@ -265,6 +274,7 @@ pub(crate) fn strongly_connected_components_on(
         dfs_stack.push((start, neighbors, 0, true));
 
         while let Some((node, neighbors, neighbor_idx, _first_visit)) = dfs_stack.last_mut() {
+            ticker.tick()?;
             let node = *node;
 
             if *neighbor_idx >= neighbors.len() {
@@ -338,7 +348,7 @@ pub(crate) fn strongly_connected_components_on(
         }
     }
 
-    result
+    Ok(result)
 }
 
 /// Returns the number of strongly connected components.
@@ -352,14 +362,16 @@ pub fn strongly_connected_component_count(
 ) -> grafeo_common::utils::error::Result<usize> {
     let graph = super::traits::GraphView::new(store, view);
     let found = strongly_connected_component_count_on(&graph);
-    graph.finish(found)
+    graph.finish(found)?
 }
 
 /// [`strongly_connected_component_count`] on the graph a [`GraphView`](super::traits::GraphView) reads.
-pub(crate) fn strongly_connected_component_count_on(store: &super::traits::GraphView<'_>) -> usize {
-    let components = strongly_connected_components_on(store);
+pub(crate) fn strongly_connected_component_count_on(
+    store: &super::traits::GraphView<'_>,
+) -> grafeo_common::utils::error::Result<usize> {
+    let components = strongly_connected_components_on(store)?;
     let unique: FxHashSet<u64> = components.values().copied().collect();
-    unique.len()
+    Ok(unique.len())
 }
 
 // ============================================================================
@@ -367,6 +379,10 @@ pub(crate) fn strongly_connected_component_count_on(store: &super::traits::Graph
 // ============================================================================
 
 /// Performs topological sort on a directed acyclic graph using Kahn's algorithm.
+///
+/// The order is the lexicographically smallest by node id: of the nodes with no edge left into
+/// them, the smallest id comes next (a min-heap, O(n log n) more), so it depends on the graph
+/// alone.
 ///
 /// # Returns
 ///
@@ -381,15 +397,27 @@ pub fn topological_sort(
 ) -> grafeo_common::utils::error::Result<Option<Vec<NodeId>>> {
     let graph = super::traits::GraphView::new(store, view);
     let found = topological_sort_on(&graph);
-    graph.finish(found)
+    graph.finish(found)?
 }
 
 /// [`topological_sort`] on the graph a [`GraphView`](super::traits::GraphView) reads.
-pub(crate) fn topological_sort_on(store: &super::traits::GraphView<'_>) -> Option<Vec<NodeId>> {
+pub(crate) fn topological_sort_on(
+    store: &super::traits::GraphView<'_>,
+) -> grafeo_common::utils::error::Result<Option<Vec<NodeId>>> {
+    let (order, left) = kahn_on(store, &mut Ticker::new())?;
+    Ok(left.is_empty().then_some(order))
+}
+
+/// Kahn's algorithm over `store`, the smallest ready id first: the order it reached, and the
+/// nodes it left, those on or downstream of a cycle (none for a DAG).
+fn kahn_on(
+    store: &super::traits::GraphView<'_>,
+    ticker: &mut Ticker,
+) -> grafeo_common::utils::error::Result<(Vec<NodeId>, FxHashSet<NodeId>)> {
     let node_ids = store.node_ids();
 
     if node_ids.is_empty() {
-        return Some(Vec::new());
+        return Ok((Vec::new(), FxHashSet::default()));
     }
 
     // Compute in-degrees
@@ -400,38 +428,97 @@ pub(crate) fn topological_sort_on(store: &super::traits::GraphView<'_>) -> Optio
 
     for &node in &node_ids {
         for (neighbor, _) in store.edges(node, Direction::Outgoing) {
+            ticker.tick()?;
             *in_degree.entry(neighbor).or_default() += 1;
         }
     }
 
-    // Initialize queue with nodes having in-degree 0
-    let mut queue: Vec<NodeId> = in_degree
+    // The nodes with no edge left into them, smallest id first.
+    let mut queue: BinaryHeap<Reverse<NodeId>> = node_ids
         .iter()
-        .filter(|&(_, deg)| *deg == 0)
-        .map(|(&node, _)| node)
+        .filter(|&&node| in_degree.get(&node) == Some(&0))
+        .map(|&node| Reverse(node))
         .collect();
 
     let mut result = Vec::with_capacity(node_ids.len());
 
-    while let Some(node) = queue.pop() {
+    while let Some(Reverse(node)) = queue.pop() {
+        ticker.tick()?;
         result.push(node);
 
         for (neighbor, _) in store.edges(node, Direction::Outgoing) {
+            ticker.tick()?;
             if let Some(deg) = in_degree.get_mut(&neighbor) {
                 *deg -= 1;
                 if *deg == 0 {
-                    queue.push(neighbor);
+                    queue.push(Reverse(neighbor));
                 }
             }
         }
     }
 
-    // Check for cycle
-    if result.len() == node_ids.len() {
-        Some(result)
-    } else {
-        None // Cycle detected
+    let left: FxHashSet<NodeId> = in_degree
+        .into_iter()
+        .filter(|&(_, degree)| degree > 0)
+        .map(|(node, _)| node)
+        .collect();
+    Ok((result, left))
+}
+
+/// One cycle among `left`, the nodes Kahn's algorithm left, found the same way every time: from
+/// the smallest of them, back along the smallest of each node's predecessors among them until a
+/// node comes again (every node left has a predecessor left, and a walk back cannot dead-end below
+/// a cycle as a walk forward can). The cycle's nodes in edge direction.
+fn a_cycle(
+    store: &super::traits::GraphView<'_>,
+    left: &FxHashSet<NodeId>,
+    ticker: &mut Ticker,
+) -> Result<Vec<NodeId>> {
+    let Some(&start) = left.iter().min() else {
+        return Ok(Vec::new());
+    };
+    let mut walked: Vec<NodeId> = vec![start];
+    let mut position: FxHashMap<NodeId, usize> = FxHashMap::default();
+    position.insert(start, 0);
+    let mut at = start;
+    loop {
+        ticker.tick()?;
+        let previous = store
+            .edges(at, Direction::Incoming)
+            .into_iter()
+            .map(|(source, _)| source)
+            .filter(|source| left.contains(source))
+            .min();
+        let Some(previous) = previous else {
+            return Ok(Vec::new());
+        };
+        if let Some(&first) = position.get(&previous) {
+            // `walked[first..]` runs against the edges: reversed, it follows them.
+            let mut cycle = walked.split_off(first);
+            cycle.reverse();
+            return Ok(cycle);
+        }
+        position.insert(previous, walked.len());
+        walked.push(previous);
+        at = previous;
     }
+}
+
+/// The text of a cycle in edge direction, back to its first node: `3 -> 5 -> 8 -> 3`, a
+/// self-loop `4 -> 4`, and past 16 nodes the first 16 then the count.
+fn cycle_text(cycle: &[NodeId]) -> String {
+    const SHOWN: usize = 16;
+    let mut parts: Vec<String> = cycle
+        .iter()
+        .take(SHOWN)
+        .map(|node| node.as_u64().to_string())
+        .collect();
+    if cycle.len() > SHOWN {
+        parts.push(format!("... ({} nodes)", cycle.len()));
+    } else if let Some(first) = cycle.first() {
+        parts.push(first.as_u64().to_string());
+    }
+    parts.join(" -> ")
 }
 
 /// Checks if the graph is a DAG (Directed Acyclic Graph).
@@ -445,12 +532,14 @@ pub fn is_dag(
 ) -> grafeo_common::utils::error::Result<bool> {
     let graph = super::traits::GraphView::new(store, view);
     let found = is_dag_on(&graph);
-    graph.finish(found)
+    graph.finish(found)?
 }
 
 /// [`is_dag`] on the graph a [`GraphView`](super::traits::GraphView) reads.
-pub(crate) fn is_dag_on(store: &super::traits::GraphView<'_>) -> bool {
-    topological_sort_on(store).is_some()
+pub(crate) fn is_dag_on(
+    store: &super::traits::GraphView<'_>,
+) -> grafeo_common::utils::error::Result<bool> {
+    Ok(topological_sort_on(store)?.is_some())
 }
 
 // ============================================================================
@@ -466,7 +555,7 @@ impl_algorithm! {
     description: "Find connected components (undirected) or weakly connected components (directed)",
     params: &[],
     execute(store, _params) {
-        let components = connected_components_on(store);
+        let components = connected_components_on(store)?;
 
         let mut builder = ComponentResultBuilder::with_capacity(components.len());
         for (node, component) in components {
@@ -488,7 +577,7 @@ impl_algorithm! {
     description: "Find strongly connected components using Tarjan's algorithm",
     params: &[],
     execute(store, _params) {
-        let components = strongly_connected_components_on(store);
+        let components = strongly_connected_components_on(store)?;
 
         let mut builder = ComponentResultBuilder::with_capacity(components.len());
         for (node, component) in components {
@@ -526,22 +615,24 @@ impl GraphAlgorithm for TopologicalSortAlgorithm {
         let graph = super::traits::GraphView::new(store, view);
         let store = &graph;
         let found = super::traits::evaluated(|| {
-            match topological_sort_on(store) {
-                Some(order) => {
-                    let mut result =
-                        AlgorithmResult::new(vec!["node_id".to_string(), "order".to_string()]);
-                    for (idx, node) in order.iter().enumerate() {
-                        result.add_row(vec![int_value(node.0)?, int_value(idx)?]);
-                    }
-                    Ok(result)
-                }
-                None => {
-                    // Return empty result with error indication for cycles
-                    let mut result = AlgorithmResult::new(vec!["error".to_string()]);
-                    result.add_row(vec![Value::String("Graph contains a cycle".into())]);
-                    Ok(result)
-                }
+            // A graph with a cycle has no topological order: a data exception naming one cycle.
+            let mut ticker = Ticker::new();
+            let (order, left) = kahn_on(store, &mut ticker)?;
+            if !left.is_empty() {
+                let cycle = a_cycle(store, &left, &mut ticker)?;
+                return Err(Error::from(QueryError::new(
+                    QueryErrorKind::Execution,
+                    format!(
+                        "topological_sort: the graph has a cycle: {}",
+                        cycle_text(&cycle)
+                    ),
+                )));
             }
+            let mut result = AlgorithmResult::new(vec!["node_id".to_string(), "order".to_string()]);
+            for (idx, node) in order.iter().enumerate() {
+                result.add_row(vec![int_value(node.0)?, int_value(idx)?]);
+            }
+            Ok(result)
         });
         graph.finish(found)?
     }

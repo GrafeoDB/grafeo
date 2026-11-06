@@ -1,6 +1,6 @@
 //! Plugin traits.
 
-use grafeo_common::utils::error::Result;
+use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind, Result};
 use std::collections::HashMap;
 
 /// A Grafeo plugin.
@@ -62,6 +62,97 @@ pub struct ParameterDef {
     pub required: bool,
     /// Default value (if any).
     pub default: Option<String>,
+    /// The values a numeric parameter allows beyond its type, which every call is checked
+    /// against (see [`check_parameters`]); [`Domain::OfType`] for a string, a boolean, a node id
+    /// or a list.
+    pub domain: Domain,
+}
+
+/// The values a number a procedure reads may take, beyond its type: a numeric argument, or an
+/// edge property it reads as a weight, a capacity or a cost. A float must also be finite. A value
+/// outside is refused with "invalid parameter value" (22023) before it is used.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Domain {
+    /// Nothing beyond its type: a string, a boolean, a node id or a list, which the procedure
+    /// reads itself; for a number, any finite one.
+    OfType,
+    /// Zero or more.
+    NonNegative,
+    /// More than zero.
+    Positive,
+    /// From 0 to 1, both included.
+    Unit,
+    /// At least the value of the parameter named, as the call gives it or by its default.
+    AtLeast(&'static str),
+}
+
+impl Domain {
+    /// Whether `value` lies inside, with `floor` the value of the parameter an
+    /// [`AtLeast`](Self::AtLeast) names (`None`: not known, so no bound).
+    #[must_use]
+    pub fn admits(self, value: f64, floor: Option<f64>) -> bool {
+        value.is_finite()
+            && match self {
+                Self::OfType => true,
+                Self::NonNegative => value >= 0.0,
+                Self::Positive => value > 0.0,
+                Self::Unit => (0.0..=1.0).contains(&value),
+                Self::AtLeast(_) => floor.is_none_or(|floor| value >= floor),
+            }
+    }
+
+    /// The values it allows, for an error, with `floor` as in [`admits`](Self::admits).
+    #[must_use]
+    pub fn describe(self, floor: Option<f64>) -> String {
+        match self {
+            Self::OfType => "a finite number".to_string(),
+            Self::NonNegative => "a finite number of 0 or more".to_string(),
+            Self::Positive => "a finite number above 0".to_string(),
+            Self::Unit => "a number from 0 to 1".to_string(),
+            Self::AtLeast(other) => match floor {
+                Some(floor) => format!("a finite number of at least '{other}' ({floor})"),
+                None => format!("a finite number of at least '{other}'"),
+            },
+        }
+    }
+}
+
+/// Refuses an argument of `params` outside the domain its definition in `defs` declares, with
+/// "invalid parameter value" (22023) naming `procedure`, the parameter, the values it allows and
+/// the value. The one check of every way into a procedure (`CALL` and the bindings' algorithm
+/// methods), run once all the arguments are set, so a domain that names another parameter
+/// (`fetch_k` at least `k`) reads that one as given, or else its default. A parameter left out
+/// keeps its default, which lies inside.
+///
+/// # Errors
+///
+/// The invalid parameter value of the first argument outside its domain.
+pub fn check_parameters(procedure: &str, defs: &[ParameterDef], params: &Parameters) -> Result<()> {
+    for def in defs {
+        let Some((value, given)) = params.number(&def.name) else {
+            continue;
+        };
+        let floor = match def.domain {
+            Domain::AtLeast(other) => params.number(other).map(|(floor, _)| floor).or_else(|| {
+                defs.iter()
+                    .find(|def| def.name == other)
+                    .and_then(|def| def.default.as_deref())
+                    .and_then(|default| default.parse().ok())
+            }),
+            _ => None,
+        };
+        if !def.domain.admits(value, floor) {
+            return Err(Error::from(QueryError::new(
+                QueryErrorKind::InvalidParameterValue,
+                format!(
+                    "argument '{}' of {procedure} must be {}, got {given}",
+                    def.name,
+                    def.domain.describe(floor)
+                ),
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Types of algorithm parameters.
@@ -136,6 +227,34 @@ impl Parameters {
     pub fn get_float(&self, name: &str) -> Option<f64> {
         match self.values.get(name) {
             Some(ParameterValue::Float(v)) => Some(*v),
+            _ => None,
+        }
+    }
+
+    /// An integer parameter that counts (iterations, a `k`, a threshold) as a `usize`; `None`
+    /// when the call leaves it out.
+    ///
+    /// # Errors
+    ///
+    /// An invalid parameter value (22023) for a negative one, which only a caller that skips
+    /// [`check_parameters`] can give.
+    pub fn get_count(&self, name: &str) -> Result<Option<usize>> {
+        match self.values.get(name) {
+            Some(ParameterValue::Integer(v)) => usize::try_from(*v).map(Some).map_err(|_| {
+                Error::from(QueryError::new(
+                    QueryErrorKind::InvalidParameterValue,
+                    format!("argument '{name}' must be a finite number of 0 or more, got {v}"),
+                ))
+            }),
+            _ => Ok(None),
+        }
+    }
+
+    /// A numeric parameter as a float, with its text as the call gave it (`-1`, `NaN`).
+    fn number(&self, name: &str) -> Option<(f64, String)> {
+        match self.values.get(name) {
+            Some(ParameterValue::Integer(v)) => Some((*v as f64, v.to_string())),
+            Some(ParameterValue::Float(v)) => Some((*v, v.to_string())),
             _ => None,
         }
     }

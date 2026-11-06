@@ -296,6 +296,39 @@ impl VectorIndexKind {
         }
     }
 
+    /// The search behind every `search` method of either kind: the `k` nearest nodes to `query`,
+    /// with beam width `ef` (`None`: the index's own, scaled for an allowlist as
+    /// [`search_with_filter`](Self::search_with_filter) scales it), among `allowlist` when given,
+    /// calling `visit` before each node the graph search expands, so a caller can bound the work
+    /// (a query's deadline).
+    ///
+    /// # Errors
+    ///
+    /// The first error of `visit`, which ends the search.
+    pub fn search_visiting<E>(
+        &self,
+        query: &[f32],
+        k: usize,
+        ef: Option<usize>,
+        allowlist: Option<&HashSet<NodeId>>,
+        accessor: &impl VectorAccessor,
+        visit: &mut impl FnMut() -> std::result::Result<(), E>,
+    ) -> std::result::Result<Vec<(NodeId, f32)>, E> {
+        match self {
+            Self::Hnsw(idx) => {
+                let ef = ef.unwrap_or_else(|| match allowlist {
+                    Some(allowlist) => idx.filtered_ef(k, allowlist),
+                    None => idx.config().ef,
+                });
+                idx.search_visiting(query, k, ef, allowlist, accessor, visit)
+            }
+            Self::Quantized(idx) => {
+                let ef = ef.unwrap_or(idx.config().ef);
+                idx.search_visiting(query, k, ef, allowlist, visit)
+            }
+        }
+    }
+
     /// Batch search for multiple queries.
     #[must_use]
     pub fn batch_search(

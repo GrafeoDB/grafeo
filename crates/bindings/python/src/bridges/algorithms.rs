@@ -11,7 +11,8 @@ use parking_lot::RwLock;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
-use grafeo_adapters::plugins::algorithms::{self, KeyOrderError};
+use grafeo_adapters::plugins::algorithms::{self, GraphAlgorithm, KeyOrderError};
+use grafeo_adapters::plugins::{Parameters, check_parameters};
 use grafeo_common::types::{NodeId, ReadView, Value};
 use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind};
 use grafeo_core::graph::GraphStore;
@@ -234,8 +235,10 @@ impl PyAlgorithms {
     }
 
     /// Runs `compute` on a snapshot of what the algorithm reads (see
-    /// [`snapshot_for`](Self::snapshot_for)) with the GIL released; a read the
-    /// store cannot do raises its error.
+    /// [`snapshot_for`](Self::snapshot_for)) with the GIL released, under the
+    /// database's query deadline from the call's start
+    /// ([`GrafeoDB::query_deadline`]); a read the store cannot do raises its
+    /// error, and a run past the deadline the query timeout, as `execute` does.
     fn compute<T: Send, E: Into<PyGrafeoError>>(
         &self,
         py: Python<'_>,
@@ -244,6 +247,7 @@ impl PyAlgorithms {
     ) -> PyResult<T> {
         without_gil(py, || {
             let db = self.db.read();
+            let _deadline = grafeo_core::execution::deadline::enter(db.query_deadline());
             let snapshot = self.snapshot_for(&db, projection)?;
             compute(snapshot.store(), snapshot.view()).map_err(Into::into)
         })
@@ -252,6 +256,7 @@ impl PyAlgorithms {
     /// Like [`compute`](Self::compute), in the node order of `key=` (see
     /// [`ordered_by_key`]): `compute` gets the ordered nodes, read with the
     /// algorithm, and the order comes back with its keys as Python objects.
+    /// Under the database's query deadline, as [`compute`](Self::compute).
     fn compute_keyed<T: Send, E: Into<PyGrafeoError>>(
         &self,
         py: Python<'_>,
@@ -261,6 +266,7 @@ impl PyAlgorithms {
     ) -> PyResult<(T, Option<KeyOrder>)> {
         let (result, ordered) = without_gil(py, || {
             let db = self.db.read();
+            let _deadline = grafeo_core::execution::deadline::enter(db.query_deadline());
             let snapshot = self.snapshot_for(&db, projection)?;
             let (store, view) = (snapshot.store(), snapshot.view());
             let ordered = ordered_by_key(store, view, key)?;
@@ -745,12 +751,18 @@ impl PyAlgorithms {
     fn pagerank(
         &self,
         damping: f64,
-        max_iterations: usize,
+        max_iterations: i64,
         tolerance: f64,
         directed: bool,
         projection: Option<&str>,
         key: Option<&str>,
     ) -> PyResult<Py<PyAny>> {
+        let params = checked(&algorithms::PageRankAlgorithm, |params| {
+            params.set_float("damping", damping);
+            params.set_int("max_iterations", max_iterations);
+            params.set_float("tolerance", tolerance);
+        })?;
+        let max_iterations = count(&params, "max_iterations")?;
         // The GIL is held: `attach` hands out its token without an eighth
         // argument.
         Python::attach(|py| {
@@ -851,11 +863,15 @@ impl PyAlgorithms {
     #[pyo3(signature = (max_iterations=100, *, projection=None, key=None))]
     fn label_propagation(
         &self,
-        max_iterations: usize,
+        max_iterations: i64,
         projection: Option<&str>,
         key: Option<&str>,
         py: Python<'_>,
     ) -> PyResult<Py<PyAny>> {
+        let params = checked(&algorithms::LabelPropagationAlgorithm, |params| {
+            params.set_int("max_iterations", max_iterations);
+        })?;
+        let max_iterations = count(&params, "max_iterations")?;
         let (result, order) =
             self.compute_keyed(py, projection, key, |store, view, nodes| match nodes {
                 Some(nodes) => {
@@ -889,6 +905,9 @@ impl PyAlgorithms {
         key: Option<&str>,
         py: Python<'_>,
     ) -> PyResult<Py<PyAny>> {
+        checked(&algorithms::LouvainAlgorithm, |params| {
+            params.set_float("resolution", resolution);
+        })?;
         let (result, order) =
             self.compute_keyed(py, projection, key, |store, view, nodes| match nodes {
                 Some(nodes) => algorithms::louvain_in_order(store, view, nodes, resolution),
@@ -1263,11 +1282,17 @@ impl PyAlgorithms {
     #[pyo3(signature = (k=None, *, projection=None, key=None))]
     fn kcore(
         &self,
-        k: Option<usize>,
+        k: Option<i64>,
         projection: Option<&str>,
         key: Option<&str>,
         py: Python<'_>,
     ) -> PyResult<Py<PyAny>> {
+        let params = checked(&algorithms::KCoreAlgorithm, |params| {
+            if let Some(k) = k {
+                params.set_int("k", k);
+            }
+        })?;
+        let k = params.get_count("k").map_err(PyGrafeoError::from)?;
         let (result, order) = self.compute_keyed(py, projection, key, |store, view, _| {
             algorithms::kcore_decomposition(store, view)
         })?;
@@ -1284,7 +1309,139 @@ impl PyAlgorithms {
         }
     }
 
+    /// Compute the k-truss decomposition.
+    ///
+    /// The truss number of an edge is the largest k for which the edge is in
+    /// the k-truss: the subgraph where every edge lies in at least k - 2
+    /// triangles. The graph is treated as simple and undirected: edge
+    /// direction is ignored, parallel edges count once and self-loops are in
+    /// no truss.
+    ///
+    /// Args:
+    ///     k: If provided, return only the edges in the k-truss
+    ///
+    /// Returns:
+    ///     If k is None: Dict with 'truss_numbers' ((source, target) to truss
+    ///     number, one entry per edge with source < target, in node-id order)
+    ///     and 'max_truss' (the largest truss number) keys
+    ///     If k is provided: List of (source, target) tuples in the k-truss,
+    ///     source < target, in node-id order
+    #[pyo3(signature = (k=None, *, projection=None))]
+    fn ktruss(
+        &self,
+        k: Option<i64>,
+        projection: Option<&str>,
+        py: Python<'_>,
+    ) -> PyResult<Py<PyAny>> {
+        let params = checked(&algorithms::KTrussAlgorithm, |params| {
+            if let Some(k) = k {
+                params.set_int("k", k);
+            }
+        })?;
+        let k = params.get_count("k").map_err(PyGrafeoError::from)?;
+        let result = self.compute(py, projection, |store, view| {
+            algorithms::ktruss_decomposition(store, view)
+        })?;
+
+        if let Some(k_val) = k {
+            let edges: Vec<(u64, u64)> = result
+                .k_truss(k_val)
+                .into_iter()
+                .map(|(source, target)| (source.0, target.0))
+                .collect();
+            Ok(edges.into_pyobject(py)?.into_any().unbind())
+        } else {
+            // In node-id order, the same in every process.
+            let by_edge: BTreeMap<(u64, u64), usize> = result
+                .truss_numbers
+                .into_iter()
+                .map(|((source, target), truss)| ((source.0, target.0), truss))
+                .collect();
+            let truss_numbers = PyDict::new(py);
+            for (edge, truss) in by_edge {
+                truss_numbers.set_item(edge, truss)?;
+            }
+            let dict = PyDict::new(py);
+            dict.set_item("truss_numbers", truss_numbers)?;
+            dict.set_item("max_truss", result.max_truss)?;
+            Ok(dict.into_any().unbind())
+        }
+    }
+
+    // ==========================================================================
+    // Pattern Matching
+    // ==========================================================================
+
+    /// Count the copies of a pattern graph in the graph.
+    ///
+    /// The count is of non-induced subgraph isomorphisms (monomorphisms):
+    /// every pattern edge must map to a graph edge, while graph edges between
+    /// mapped nodes that the pattern lacks are allowed. Edge direction is
+    /// ignored. Each distinct copy counts once per automorphism of the
+    /// pattern, so a triangle pattern counts six per triangle. A pattern
+    /// self-loop needs a self-loop in the graph.
+    ///
+    /// Args:
+    ///     pattern_edges: The pattern's edges as (u, v) pairs of node numbers,
+    ///         each from 0 up to pattern_nodes - 1
+    ///     pattern_nodes: The number of nodes in the pattern
+    ///
+    /// Returns:
+    ///     The number of mappings of the pattern into the graph
+    #[pyo3(signature = (pattern_edges, pattern_nodes, *, projection=None))]
+    fn subgraph_isomorphism_count(
+        &self,
+        pattern_edges: Vec<(i64, i64)>,
+        pattern_nodes: i64,
+        projection: Option<&str>,
+        py: Python<'_>,
+    ) -> PyResult<i64> {
+        // The pairs in the form `CALL` gives them, `"0-1,1-2"`, so the algorithm's own parse and
+        // domain checks serve both ways in (a negative number is no pair of node numbers there).
+        let text = pattern_edges
+            .iter()
+            .map(|(from, to)| format!("{from}-{to}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let params = checked(&algorithms::SubgraphIsomorphismAlgorithm, |params| {
+            params.set_string("pattern_edges", text);
+            params.set_int("pattern_nodes", pattern_nodes);
+        })?;
+        let result = self.compute(py, projection, |store, view| {
+            algorithms::SubgraphIsomorphismAlgorithm.execute(store, view, &params)
+        })?;
+        match result.rows.first().and_then(|row| row.first()) {
+            Some(Value::Int64(count)) => Ok(*count),
+            _ => Err(PyErr::from(PyGrafeoError::from(Error::Internal(
+                "subgraph_isomorphism gave no count".to_string(),
+            )))),
+        }
+    }
+
     fn __repr__(&self) -> String {
         "Algorithms()".to_string()
     }
+}
+
+/// The keyword arguments `fill` sets, checked against the domains of `algorithm`'s parameters as
+/// `CALL` checks them (see [`check_parameters`]), so neither way in runs it on a value outside
+/// them.
+fn checked(
+    algorithm: &dyn GraphAlgorithm,
+    fill: impl FnOnce(&mut Parameters),
+) -> Result<Parameters, PyGrafeoError> {
+    let mut params = Parameters::new();
+    fill(&mut params);
+    check_parameters(algorithm.name(), algorithm.parameters(), &params)?;
+    Ok(params)
+}
+
+/// The checked count `name` of `params`, which [`checked`] set.
+fn count(params: &Parameters, name: &str) -> Result<usize, PyGrafeoError> {
+    params.get_count(name)?.ok_or_else(|| {
+        PyGrafeoError::from(Error::from(QueryError::new(
+            QueryErrorKind::InvalidParameterValue,
+            format!("argument '{name}' is missing"),
+        )))
+    })
 }

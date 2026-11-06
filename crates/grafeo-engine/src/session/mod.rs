@@ -6545,7 +6545,7 @@ impl Session {
     #[must_use]
     #[cfg(query_language)]
     fn query_deadline(&self) -> Option<Instant> {
-        self.query_timeout.map(|d| Instant::now() + d)
+        crate::config::Config::deadline_after(self.query_timeout)
     }
 
     /// Creates an executor with deadline and timeout duration configured.

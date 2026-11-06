@@ -280,10 +280,37 @@ impl InvertedIndex {
         query: &str,
         keep: impl Fn(NodeId) -> bool,
     ) -> HashMap<NodeId, f64> {
+        let Ok(scores) =
+            self.scores_visiting(query, keep, || Ok::<(), std::convert::Infallible>(()));
+        scores
+    }
+
+    /// [`scores`](Self::scores), checking the running query's deadline with `ticker`, a unit of
+    /// work per posting read.
+    ///
+    /// # Errors
+    ///
+    /// The timeout once the deadline has passed.
+    pub(crate) fn scores_until(
+        &self,
+        query: &str,
+        keep: impl Fn(NodeId) -> bool,
+        ticker: &mut crate::execution::deadline::Ticker,
+    ) -> std::result::Result<HashMap<NodeId, f64>, crate::execution::operators::OperatorError> {
+        self.scores_visiting(query, keep, || ticker.tick())
+    }
+
+    /// The walk of [`scores`](Self::scores), calling `visit` before each posting read.
+    fn scores_visiting<E>(
+        &self,
+        query: &str,
+        keep: impl Fn(NodeId) -> bool,
+        mut visit: impl FnMut() -> std::result::Result<(), E>,
+    ) -> std::result::Result<HashMap<NodeId, f64>, E> {
         let query_tokens = self.tokenizer.tokenize(query);
         let mut scores: HashMap<NodeId, f64> = HashMap::new();
         if query_tokens.is_empty() || self.doc_lengths.is_empty() {
-            return scores;
+            return Ok(scores);
         }
 
         let n = self.doc_lengths.len() as f64;
@@ -294,6 +321,7 @@ impl InvertedIndex {
             };
             let df = posting_list.postings.len() as f64;
             for posting in &posting_list.postings {
+                visit()?;
                 if !keep(posting.node_id) {
                     continue;
                 }
@@ -303,7 +331,7 @@ impl InvertedIndex {
                     self.bm25_term_score(df, tf, dl, n, avg_dl);
             }
         }
-        scores
+        Ok(scores)
     }
 
     /// The `k` best of `scores`, by descending score, equal scores by

@@ -24,14 +24,15 @@ mod path_lookup_tests {
     use crate::execution::operators::OperatorError;
 
     /// A store with no object index walks every triple for an object, and the deadline holds over
-    /// the triples it rejects.
+    /// the triples it rejects: past the first clock read, which comes at the first unit, the
+    /// second comes 1,024 units later, inside the 2,048 rejected triples.
     #[test]
     fn path_lookup_polls_rejected_candidates() {
         let store = RdfStore::with_config(RdfStoreConfig {
             index_objects: false,
             ..RdfStoreConfig::default()
         });
-        for n in 0..64 {
+        for n in 0..2_048 {
             store.insert(Triple::new(
                 Term::iri("s"),
                 Term::iri("p"),
@@ -49,7 +50,7 @@ mod path_lookup_tests {
             object: Some(Term::literal("held elsewhere")),
         };
         let mut budget = PathBudget::new(4096, None);
-        budget.expire_after_polls(8);
+        budget.expire_after_polls(1);
         let mut visits = 0;
         let result = store.visit_matches_with_pending(&pattern, None, &mut budget, &mut |_, _| {
             visits += 1;
@@ -103,7 +104,8 @@ mod path_lookup_tests {
     fn path_lookup_polls_rejected_pending_operations() {
         let store = RdfStore::new();
         let tx = TransactionId::new(1);
-        for n in 0..64 {
+        // Past 1,024 units, so the second clock read comes inside the rejected operations.
+        for n in 0..2_048 {
             store.insert_in_transaction(
                 tx,
                 Triple::new(
@@ -114,7 +116,7 @@ mod path_lookup_tests {
             );
         }
         let mut budget = PathBudget::new(4096, None);
-        budget.expire_after_polls(8);
+        budget.expire_after_polls(1);
         let result = store.visit_matches_with_pending(
             &TriplePattern::with_predicate(Term::iri("p")),
             Some(tx),

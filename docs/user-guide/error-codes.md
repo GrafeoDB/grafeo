@@ -99,6 +99,7 @@ GQLSTATUS says what kind of condition it is, as SQL's SQLSTATE does:
 | `22009`   | invalid time zone displacement value | `SESSION SET TIME ZONE 'Europe/Amsterdam'`: a time zone that is not a UTC offset, or one past 14 hours |
 | `22012`   | division by zero               | `RETURN 10 / 0`, `RETURN 10 % 0`                 |
 | `22018`   | invalid character value for cast | `CAST('Alix' AS INT64)`: text that spells no number, cast to an integer, a float or a decimal (`toInteger('Alix')` is null instead) |
+| `22023`   | invalid parameter value        | a procedure argument outside the values it allows, `CALL grafeo.pagerank(2.0)` (a damping above 1); an edge weight an algorithm cannot use, such as NaN, an infinity, or a negative weight for `grafeo.dijkstra`; a negative-cost cycle in `grafeo.min_cost_max_flow` |
 | `22G02`   | negative limit value           | `LIMIT $k` with `k = -1`                         |
 | `22G03`   | invalid value type             | `LIMIT $k` with `k = 'three'`, a procedure argument of another type |
 | `22G04`   | values not comparable          | two values a comparison cannot compare: a node and a number under `<` in GQL, and two values of different kinds in SQL/PGQ, `=` included |

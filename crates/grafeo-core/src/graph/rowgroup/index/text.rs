@@ -146,20 +146,34 @@ impl Inner {
         limit: TextLimit,
         allowed: Option<&HashSet<NodeId>>,
         read: Read,
-    ) -> Vec<(NodeId, f64)> {
+    ) -> grafeo_common::utils::error::Result<Vec<(NodeId, f64)>> {
         let Some(entry) = self.indexes.text.get(&search_key(label, property)) else {
-            return Vec::new();
+            return Ok(Vec::new());
+        };
+        // The running query's deadline, a unit of work per posting and per changed row.
+        let mut ticker = crate::execution::deadline::Ticker::new();
+        let timeout = |_| {
+            grafeo_common::utils::error::Error::from(
+                grafeo_common::utils::error::QueryError::timeout(),
+            )
         };
         let key = self.keys.get_id(property);
         let changed = self.changed_rows(key);
         let index = entry.index.read();
-        let mut scores = index.scores(query, |id| {
-            allowed.is_none_or(|allowed| allowed.contains(&id))
-                && !changed.contains(&id.as_u64())
-                && self.node_visible(id.as_u64(), read)
-        });
+        let mut scores = index
+            .scores_until(
+                query,
+                |id| {
+                    allowed.is_none_or(|allowed| allowed.contains(&id))
+                        && !changed.contains(&id.as_u64())
+                        && self.node_visible(id.as_u64(), read)
+                },
+                &mut ticker,
+            )
+            .map_err(timeout)?;
         if let Some(label) = self.label_id(label) {
             for raw in changed {
+                ticker.tick().map_err(timeout)?;
                 if allowed.is_some_and(|allowed| !allowed.contains(&NodeId::new(raw))) {
                     continue;
                 }
@@ -170,14 +184,14 @@ impl Inner {
                 }
             }
         }
-        match limit {
+        Ok(match limit {
             TextLimit::Top(k) => InvertedIndex::top(scores, k),
             TextLimit::AtLeast(threshold) => {
                 scores.retain(|_, score| *score >= threshold);
                 let count = scores.len();
                 InvertedIndex::top(scores, count)
             }
-        }
+        })
     }
 
     /// The BM25 score of node `raw`'s text against `query` as `read` sees
@@ -251,7 +265,10 @@ impl RowGroupStore {
     ///
     /// The store's lock is held for the search, and the index's lock only
     /// inside it, in the order the writes take them.
-    #[must_use]
+    ///
+    /// # Errors
+    ///
+    /// The timeout of a search past the running query's deadline.
     pub fn text_index_search_at(
         &self,
         label: &str,
@@ -259,10 +276,10 @@ impl RowGroupStore {
         query: &str,
         search: IndexSearch<'_>,
         view: ReadView,
-    ) -> Option<Vec<(NodeId, f64)>> {
+    ) -> grafeo_common::utils::error::Result<Option<Vec<(NodeId, f64)>>> {
         let inner = self.inner.read();
         if !inner.has_text_index(label, property) {
-            return None;
+            return Ok(None);
         }
         Some(inner.text_search_at(
             label,
@@ -272,6 +289,7 @@ impl RowGroupStore {
             search.allowed,
             Read::view(view),
         ))
+        .transpose()
     }
 
     /// Retrieves the text index for a label and a property.

@@ -18,10 +18,10 @@ use grafeo_core::graph::rowgroup::RowGroupStore;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
-use super::super::{AlgorithmResult, ParameterDef, ParameterType, Parameters};
+use super::super::{AlgorithmResult, Domain, ParameterDef, ParameterType, Parameters};
 #[cfg(feature = "parallel")]
 use super::traits::ParallelGraphAlgorithm;
-use super::traits::{GraphAlgorithm, int_value};
+use super::traits::{GraphAlgorithm, Ticker, int_value};
 
 // ============================================================================
 // Result Types
@@ -50,7 +50,8 @@ pub struct ClusteringCoefficientResult {
 /// self-loop closes no triangle).
 fn build_undirected_neighbors(
     store: &super::traits::GraphView<'_>,
-) -> FxHashMap<NodeId, FxHashSet<NodeId>> {
+    ticker: &mut Ticker,
+) -> grafeo_common::utils::error::Result<FxHashMap<NodeId, FxHashSet<NodeId>>> {
     let nodes = store.node_ids();
     let mut neighbors: FxHashMap<NodeId, FxHashSet<NodeId>> = nodes
         .iter()
@@ -60,6 +61,7 @@ fn build_undirected_neighbors(
     // Every edge is an outgoing edge of its source: add it both ways.
     for &node in &nodes {
         for (neighbor, _) in store.edges(node, Direction::Outgoing) {
+            ticker.tick()?;
             if neighbor == node || !neighbors.contains_key(&neighbor) {
                 continue;
             }
@@ -72,20 +74,22 @@ fn build_undirected_neighbors(
         }
     }
 
-    neighbors
+    Ok(neighbors)
 }
 
 /// Counts triangles for a single node given its neighbors and the full neighbor map.
 fn count_node_triangles(
     node_neighbors: &FxHashSet<NodeId>,
     all_neighbors: &FxHashMap<NodeId, FxHashSet<NodeId>>,
-) -> u64 {
+    ticker: &mut Ticker,
+) -> grafeo_common::utils::error::Result<u64> {
     let neighbor_list: Vec<NodeId> = node_neighbors.iter().copied().collect();
     let k = neighbor_list.len();
     let mut triangles = 0u64;
 
-    // For each pair of neighbors, check if they're connected
+    // For each pair of neighbors, check if they're connected: a unit of work per row of pairs.
     for i in 0..k {
+        ticker.tick()?;
         for j in (i + 1)..k {
             let u = neighbor_list[i];
             let w = neighbor_list[j];
@@ -99,7 +103,7 @@ fn count_node_triangles(
         }
     }
 
-    triangles
+    Ok(triangles)
 }
 
 // ============================================================================
@@ -132,20 +136,24 @@ pub fn triangle_count(
 ) -> grafeo_common::utils::error::Result<FxHashMap<NodeId, u64>> {
     let graph = super::traits::GraphView::new(store, view);
     let found = triangle_count_on(&graph);
-    graph.finish(found)
+    graph.finish(found)?
 }
 
 /// [`triangle_count`] on the graph a [`GraphView`](super::traits::GraphView) reads.
-pub(crate) fn triangle_count_on(store: &super::traits::GraphView<'_>) -> FxHashMap<NodeId, u64> {
-    let neighbors = build_undirected_neighbors(store);
+pub(crate) fn triangle_count_on(
+    store: &super::traits::GraphView<'_>,
+) -> grafeo_common::utils::error::Result<FxHashMap<NodeId, u64>> {
+    let mut ticker = Ticker::new();
+    let neighbors = build_undirected_neighbors(store, &mut ticker)?;
     let mut counts: FxHashMap<NodeId, u64> = FxHashMap::default();
 
     for (&node, node_neighbors) in &neighbors {
-        let triangles = count_node_triangles(node_neighbors, &neighbors);
+        ticker.tick()?;
+        let triangles = count_node_triangles(node_neighbors, &neighbors, &mut ticker)?;
         counts.insert(node, triangles);
     }
 
-    counts
+    Ok(counts)
 }
 
 /// Computes the local clustering coefficient for each node.
@@ -178,31 +186,33 @@ pub fn local_clustering_coefficient(
 ) -> grafeo_common::utils::error::Result<FxHashMap<NodeId, f64>> {
     let graph = super::traits::GraphView::new(store, view);
     let found = local_clustering_coefficient_on(&graph);
-    graph.finish(found)
+    graph.finish(found)?
 }
 
 /// [`local_clustering_coefficient`] on the graph a [`GraphView`](super::traits::GraphView) reads.
 pub(crate) fn local_clustering_coefficient_on(
     store: &super::traits::GraphView<'_>,
-) -> FxHashMap<NodeId, f64> {
-    let neighbors = build_undirected_neighbors(store);
+) -> grafeo_common::utils::error::Result<FxHashMap<NodeId, f64>> {
+    let mut ticker = Ticker::new();
+    let neighbors = build_undirected_neighbors(store, &mut ticker)?;
     let mut coefficients: FxHashMap<NodeId, f64> = FxHashMap::default();
 
     for (&node, node_neighbors) in &neighbors {
+        ticker.tick()?;
         let k = node_neighbors.len();
 
         if k < 2 {
             // Cannot form triangles with fewer than 2 neighbors
             coefficients.insert(node, 0.0);
         } else {
-            let triangles = count_node_triangles(node_neighbors, &neighbors);
+            let triangles = count_node_triangles(node_neighbors, &neighbors, &mut ticker)?;
             let max_triangles = (k * (k - 1)) / 2;
             let coefficient = triangles as f64 / max_triangles as f64;
             coefficients.insert(node, coefficient);
         }
     }
 
-    coefficients
+    Ok(coefficients)
 }
 
 /// Computes the global (average) clustering coefficient.
@@ -231,18 +241,20 @@ pub fn global_clustering_coefficient(
 ) -> grafeo_common::utils::error::Result<f64> {
     let graph = super::traits::GraphView::new(store, view);
     let found = global_clustering_coefficient_on(&graph);
-    graph.finish(found)
+    graph.finish(found)?
 }
 
 /// [`global_clustering_coefficient`] on the graph a [`GraphView`](super::traits::GraphView) reads.
-pub(crate) fn global_clustering_coefficient_on(store: &super::traits::GraphView<'_>) -> f64 {
-    let local = local_clustering_coefficient_on(store);
+pub(crate) fn global_clustering_coefficient_on(
+    store: &super::traits::GraphView<'_>,
+) -> grafeo_common::utils::error::Result<f64> {
+    let local = local_clustering_coefficient_on(store)?;
 
     if local.is_empty() {
-        return 0.0;
+        return Ok(0.0);
     }
 
-    sum_in_node_order(&local) / local.len() as f64
+    Ok(sum_in_node_order(&local) / local.len() as f64)
 }
 
 /// The sum of the per-node coefficients, added in node-id order with
@@ -292,18 +304,25 @@ pub fn total_triangles(
 ) -> grafeo_common::utils::error::Result<u64> {
     let graph = super::traits::GraphView::new(store, view);
     let found = total_triangles_on(&graph);
-    graph.finish(found)
+    graph.finish(found)?
 }
 
 /// [`total_triangles`] on the graph a [`GraphView`](super::traits::GraphView) reads.
-pub(crate) fn total_triangles_on(store: &super::traits::GraphView<'_>) -> u64 {
-    let (oriented_adj, edge_list) = build_oriented_adjacency(store);
+pub(crate) fn total_triangles_on(
+    store: &super::traits::GraphView<'_>,
+) -> grafeo_common::utils::error::Result<u64> {
+    let mut ticker = Ticker::new();
+    let (oriented_adj, edge_list) = build_oriented_adjacency(store, &mut ticker)?;
     let mut total = 0u64;
-    for &(_u, v) in &edge_list {
-        total += sorted_intersection_count(&oriented_adj[_u], &oriented_adj[v]);
+    for &(u, v) in &edge_list {
+        ticker.tick()?;
+        total += sorted_intersection_count(&oriented_adj[u], &oriented_adj[v]);
     }
-    total
+    Ok(total)
 }
+
+/// The degree-oriented adjacency of [`build_oriented_adjacency`], and its edges.
+type OrientedAdjacency = (Vec<Vec<usize>>, Vec<(usize, usize)>);
 
 /// Builds degree-oriented adjacency lists directly from a GraphStore.
 ///
@@ -312,11 +331,12 @@ pub(crate) fn total_triangles_on(store: &super::traits::GraphView<'_>) -> u64 {
 /// to high-degree. Returns (oriented_adj, edge_list) for triangle counting.
 fn build_oriented_adjacency(
     store: &super::traits::GraphView<'_>,
-) -> (Vec<Vec<usize>>, Vec<(usize, usize)>) {
+    ticker: &mut Ticker,
+) -> grafeo_common::utils::error::Result<OrientedAdjacency> {
     let node_list = store.node_ids();
     let n = node_list.len();
     if n == 0 {
-        return (Vec::new(), Vec::new());
+        return Ok((Vec::new(), Vec::new()));
     }
 
     // Map NodeId -> contiguous index
@@ -328,6 +348,7 @@ fn build_oriented_adjacency(
     let mut adj: Vec<Vec<usize>> = vec![Vec::new(); n];
     for (u, &node_u) in node_list.iter().enumerate() {
         for (neighbor, _) in store.edges(node_u, Direction::Outgoing) {
+            ticker.tick()?;
             if let Some(&v) = node_to_idx.get(&neighbor)
                 && v != u
             {
@@ -360,7 +381,7 @@ fn build_oriented_adjacency(
         oriented_adj[u].sort_unstable();
     }
 
-    (oriented_adj, edge_list)
+    Ok((oriented_adj, edge_list))
 }
 
 /// Computes all clustering metrics in a single pass.
@@ -390,22 +411,24 @@ pub fn clustering_coefficient(
 ) -> grafeo_common::utils::error::Result<ClusteringCoefficientResult> {
     let graph = super::traits::GraphView::new(store, view);
     let found = clustering_coefficient_on(&graph);
-    graph.finish(found)
+    graph.finish(found)?
 }
 
 /// [`clustering_coefficient`] on the graph a [`GraphView`](super::traits::GraphView) reads.
 pub(crate) fn clustering_coefficient_on(
     store: &super::traits::GraphView<'_>,
-) -> ClusteringCoefficientResult {
-    let neighbors = build_undirected_neighbors(store);
+) -> grafeo_common::utils::error::Result<ClusteringCoefficientResult> {
+    let mut ticker = Ticker::new();
+    let neighbors = build_undirected_neighbors(store, &mut ticker)?;
     let n = neighbors.len();
 
     let mut coefficients: FxHashMap<NodeId, f64> = FxHashMap::default();
     let mut triangle_counts: FxHashMap<NodeId, u64> = FxHashMap::default();
 
     for (&node, node_neighbors) in &neighbors {
+        ticker.tick()?;
         let k = node_neighbors.len();
-        let triangles = count_node_triangles(node_neighbors, &neighbors);
+        let triangles = count_node_triangles(node_neighbors, &neighbors, &mut ticker)?;
 
         triangle_counts.insert(node, triangles);
 
@@ -425,12 +448,12 @@ pub(crate) fn clustering_coefficient_on(
         sum_in_node_order(&coefficients) / n as f64
     };
 
-    ClusteringCoefficientResult {
+    Ok(ClusteringCoefficientResult {
         coefficients,
         triangle_counts,
         total_triangles,
         global_coefficient,
-    }
+    })
 }
 
 // ============================================================================
@@ -470,7 +493,7 @@ pub fn clustering_coefficient_parallel(
 ) -> grafeo_common::utils::error::Result<ClusteringCoefficientResult> {
     let graph = super::traits::GraphView::new(store, view);
     let found = clustering_coefficient_parallel_on(&graph, parallel_threshold);
-    graph.finish(found)
+    graph.finish(found)?
 }
 
 /// [`clustering_coefficient_parallel`] on the graph a [`GraphView`](super::traits::GraphView) reads.
@@ -478,8 +501,9 @@ pub fn clustering_coefficient_parallel(
 pub(crate) fn clustering_coefficient_parallel_on(
     store: &super::traits::GraphView<'_>,
     parallel_threshold: usize,
-) -> ClusteringCoefficientResult {
-    let neighbors = build_undirected_neighbors(store);
+) -> grafeo_common::utils::error::Result<ClusteringCoefficientResult> {
+    let mut ticker = Ticker::new();
+    let neighbors = build_undirected_neighbors(store, &mut ticker)?;
     let n = neighbors.len();
 
     if n < parallel_threshold {
@@ -491,16 +515,27 @@ pub(crate) fn clustering_coefficient_parallel_on(
     let neighbors = Arc::new(neighbors);
     let nodes: Vec<NodeId> = neighbors.keys().copied().collect();
 
-    // Parallel computation using fold-reduce pattern
+    // Parallel computation using fold-reduce pattern. A worker does not see the query's
+    // deadline, so each fold takes it over from the handoff; the first timeout wins.
+    let handoff = grafeo_core::execution::deadline::handoff();
     let (coefficients, triangle_counts): (FxHashMap<NodeId, f64>, FxHashMap<NodeId, u64>) = nodes
         .par_iter()
-        .fold(
-            || (FxHashMap::default(), FxHashMap::default()),
-            |(mut coeffs, mut triangles), &node| {
-                let node_neighbors = neighbors.get(&node).expect("node in neighbor map");
+        .try_fold(
+            || {
+                (
+                    Ticker::with_handoff(handoff),
+                    FxHashMap::default(),
+                    FxHashMap::default(),
+                )
+            },
+            |(mut ticker, mut coeffs, mut triangles), &node| {
+                ticker.tick()?;
+                let Some(node_neighbors) = neighbors.get(&node) else {
+                    return Ok((ticker, coeffs, triangles));
+                };
                 let k = node_neighbors.len();
 
-                let t = count_node_triangles(node_neighbors, &neighbors);
+                let t = count_node_triangles(node_neighbors, &neighbors, &mut ticker)?;
 
                 triangles.insert(node, t);
 
@@ -512,17 +547,18 @@ pub(crate) fn clustering_coefficient_parallel_on(
                 };
                 coeffs.insert(node, coefficient);
 
-                (coeffs, triangles)
+                Ok::<_, grafeo_common::utils::error::Error>((ticker, coeffs, triangles))
             },
         )
-        .reduce(
+        .map(|folded| folded.map(|(_, coeffs, triangles)| (coeffs, triangles)))
+        .try_reduce(
             || (FxHashMap::default(), FxHashMap::default()),
             |(mut c1, mut t1), (c2, t2)| {
                 c1.extend(c2);
                 t1.extend(t2);
-                (c1, t1)
+                Ok((c1, t1))
             },
-        );
+        )?;
 
     let total_triangles = triangle_counts.values().sum::<u64>() / 3;
     let global_coefficient = if n == 0 {
@@ -531,12 +567,12 @@ pub(crate) fn clustering_coefficient_parallel_on(
         sum_in_node_order(&coefficients) / n as f64
     };
 
-    ClusteringCoefficientResult {
+    Ok(ClusteringCoefficientResult {
         coefficients,
         triangle_counts,
         total_triangles,
         global_coefficient,
-    }
+    })
 }
 
 /// Counts the total number of unique triangles in parallel.
@@ -579,7 +615,7 @@ pub fn total_triangles_parallel(
 ) -> grafeo_common::utils::error::Result<u64> {
     let graph = super::traits::GraphView::new(store, view);
     let found = total_triangles_parallel_on(&graph, parallel_threshold);
-    graph.finish(found)
+    graph.finish(found)?
 }
 
 /// [`total_triangles_parallel`] on the graph a [`GraphView`](super::traits::GraphView) reads.
@@ -587,27 +623,34 @@ pub fn total_triangles_parallel(
 pub(crate) fn total_triangles_parallel_on(
     store: &super::traits::GraphView<'_>,
     parallel_threshold: usize,
-) -> u64 {
+) -> grafeo_common::utils::error::Result<u64> {
     let nodes = store.node_ids();
     if nodes.len() < parallel_threshold {
         return total_triangles_on(store);
     }
 
-    let (oriented_adj, edge_list) = build_oriented_adjacency(store);
+    let (oriented_adj, edge_list) = build_oriented_adjacency(store, &mut Ticker::new())?;
     if oriented_adj.is_empty() {
-        return 0;
+        return Ok(0);
     }
 
-    // Parallel triangle counting over the edge list.
+    // Parallel triangle counting over the edge list. A worker does not see the query's
+    // deadline, so each takes it over from the handoff; the first timeout wins.
     let oriented_adj = Arc::new(oriented_adj);
     let counter = std::sync::atomic::AtomicU64::new(0);
+    let handoff = grafeo_core::execution::deadline::handoff();
 
-    edge_list.par_iter().for_each(|&(u, v)| {
-        let count = sorted_intersection_count(&oriented_adj[u], &oriented_adj[v]);
-        counter.fetch_add(count, std::sync::atomic::Ordering::Relaxed);
-    });
+    edge_list.par_iter().try_for_each_init(
+        || Ticker::with_handoff(handoff),
+        |ticker, &(u, v)| {
+            ticker.tick()?;
+            let count = sorted_intersection_count(&oriented_adj[u], &oriented_adj[v]);
+            counter.fetch_add(count, std::sync::atomic::Ordering::Relaxed);
+            Ok::<_, grafeo_common::utils::error::Error>(())
+        },
+    )?;
 
-    counter.load(std::sync::atomic::Ordering::Relaxed)
+    Ok(counter.load(std::sync::atomic::Ordering::Relaxed))
 }
 
 /// Counts the size of the intersection of two sorted slices.
@@ -647,6 +690,7 @@ fn total_triangles_params() -> &'static [ParameterDef] {
                 param_type: ParameterType::Boolean,
                 required: false,
                 default: Some("true".to_string()),
+                domain: Domain::OfType,
             },
             ParameterDef {
                 name: "parallel_threshold".to_string(),
@@ -654,6 +698,7 @@ fn total_triangles_params() -> &'static [ParameterDef] {
                 param_type: ParameterType::Integer,
                 required: false,
                 default: Some("50".to_string()),
+                domain: Domain::NonNegative,
             },
         ]
     })
@@ -690,20 +735,19 @@ impl GraphAlgorithm for TotalTrianglesAlgorithm {
             #[cfg(feature = "parallel")]
             let count = {
                 let parallel = params.get_bool("parallel").unwrap_or(true);
-                let threshold = usize::try_from(params.get_int("parallel_threshold").unwrap_or(50))
-                    .unwrap_or(50);
+                let threshold = params.get_count("parallel_threshold")?.unwrap_or(50);
 
                 if parallel {
-                    total_triangles_parallel_on(store, threshold)
+                    total_triangles_parallel_on(store, threshold)?
                 } else {
-                    total_triangles_on(store)
+                    total_triangles_on(store)?
                 }
             };
 
             #[cfg(not(feature = "parallel"))]
             let count = {
                 let _ = params;
-                total_triangles_on(store)
+                total_triangles_on(store)?
             };
 
             let mut output = AlgorithmResult::new(vec!["total_triangles".to_string()]);
@@ -726,6 +770,7 @@ fn clustering_params() -> &'static [ParameterDef] {
                 param_type: ParameterType::Boolean,
                 required: false,
                 default: Some("true".to_string()),
+                domain: Domain::OfType,
             },
             ParameterDef {
                 name: "parallel_threshold".to_string(),
@@ -733,6 +778,7 @@ fn clustering_params() -> &'static [ParameterDef] {
                 param_type: ParameterType::Integer,
                 required: false,
                 default: Some("50".to_string()),
+                domain: Domain::NonNegative,
             },
         ]
     })
@@ -766,20 +812,19 @@ impl GraphAlgorithm for ClusteringCoefficientAlgorithm {
             #[cfg(feature = "parallel")]
             let result = {
                 let parallel = params.get_bool("parallel").unwrap_or(true);
-                let threshold = usize::try_from(params.get_int("parallel_threshold").unwrap_or(50))
-                    .unwrap_or(50);
+                let threshold = params.get_count("parallel_threshold")?.unwrap_or(50);
 
                 if parallel {
-                    clustering_coefficient_parallel_on(store, threshold)
+                    clustering_coefficient_parallel_on(store, threshold)?
                 } else {
-                    clustering_coefficient_on(store)
+                    clustering_coefficient_on(store)?
                 }
             };
 
             #[cfg(not(feature = "parallel"))]
             let result = {
                 let _ = params; // suppress unused warning
-                clustering_coefficient_on(store)
+                clustering_coefficient_on(store)?
             };
 
             let mut output = AlgorithmResult::new(vec![

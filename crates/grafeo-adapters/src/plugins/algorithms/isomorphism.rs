@@ -8,8 +8,8 @@
 
 use std::sync::OnceLock;
 
-use grafeo_common::types::{NodeId, ReadView, Value};
-use grafeo_common::utils::error::Result;
+use grafeo_common::types::{NodeId, ReadView};
+use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind, Result};
 use grafeo_common::utils::hash::{FxHashMap, FxHashSet};
 use grafeo_core::graph::Direction;
 use grafeo_core::graph::GraphStore;
@@ -17,8 +17,8 @@ use grafeo_core::graph::GraphStore;
 #[cfg(test)]
 use grafeo_core::graph::rowgroup::RowGroupStore;
 
-use super::super::{AlgorithmResult, ParameterDef, ParameterType, Parameters};
-use super::traits::{GraphAlgorithm, GraphView};
+use super::super::{AlgorithmResult, Domain, ParameterDef, ParameterType, Parameters};
+use super::traits::{GraphAlgorithm, GraphView, Ticker};
 
 /// Counts all subgraph isomorphisms of `pattern` in `target`.
 ///
@@ -47,9 +47,9 @@ pub fn subgraph_isomorphism_count(
         GraphView::new(target, target_view),
         GraphView::new(pattern, pattern_view),
     );
-    let count = VF2State::new(&target, &pattern).count_all();
+    let count = VF2State::new(&target, &pattern).and_then(|mut state| state.count_all());
     let count = pattern.finish(count)?;
-    target.finish(count)
+    target.finish(count)?
 }
 
 /// Enumerates subgraph isomorphisms (up to a limit).
@@ -76,9 +76,9 @@ pub fn subgraph_isomorphism(
         GraphView::new(target, target_view),
         GraphView::new(pattern, pattern_view),
     );
-    let mappings = VF2State::new(&target, &pattern).enumerate(limit);
+    let mappings = VF2State::new(&target, &pattern).and_then(|mut state| state.enumerate(limit));
     let mappings = pattern.finish(mappings)?;
-    target.finish(mappings)
+    target.finish(mappings)?
 }
 
 /// Counts subgraph isomorphisms using an edge list to define the pattern.
@@ -104,7 +104,7 @@ pub fn subgraph_isomorphism_count_from_edges(
 ) -> Result<u64> {
     let target = GraphView::new(target, view);
     let count = count_from_edges_on(&target, pattern_edges, pattern_node_count);
-    target.finish(count)
+    target.finish(count)?
 }
 
 /// [`subgraph_isomorphism_count_from_edges`] on the graph a [`GraphView`]
@@ -113,9 +113,9 @@ fn count_from_edges_on(
     target: &GraphView<'_>,
     pattern_edges: &[(usize, usize)],
     pattern_node_count: usize,
-) -> u64 {
+) -> Result<u64> {
     let pattern_adj = build_pattern_adjacency(pattern_edges, pattern_node_count);
-    let mut state = VF2StateFromAdj::new(target, &pattern_adj, pattern_node_count);
+    let mut state = VF2StateFromAdj::new(target, &pattern_adj, pattern_node_count)?;
     state.count_all()
 }
 
@@ -133,51 +133,56 @@ struct VF2State {
     mapping: FxHashMap<NodeId, NodeId>,
     /// Reverse mapping: target_node -> pattern_node (for quick membership checks).
     reverse_mapping: FxHashSet<NodeId>,
+    /// The run's check of the query's deadline: a unit per candidate tried.
+    ticker: Ticker,
 }
 
 impl VF2State {
-    fn new(target: &GraphView<'_>, pattern: &GraphView<'_>) -> Self {
+    fn new(target: &GraphView<'_>, pattern: &GraphView<'_>) -> Result<Self> {
+        let mut ticker = Ticker::new();
         let target_nodes = target.node_ids();
         let pattern_nodes = pattern.node_ids();
 
-        let target_adj = build_undirected_adj(target);
-        let pattern_adj = build_undirected_adj(pattern);
+        let target_adj = build_undirected_adj(target, &mut ticker)?;
+        let pattern_adj = build_undirected_adj(pattern, &mut ticker)?;
 
-        Self {
+        Ok(Self {
             target_nodes,
             target_adj,
             pattern_nodes,
             pattern_adj,
             mapping: FxHashMap::default(),
             reverse_mapping: FxHashSet::default(),
-        }
+            ticker,
+        })
     }
 
-    fn count_all(&mut self) -> u64 {
+    fn count_all(&mut self) -> Result<u64> {
         if self.pattern_nodes.is_empty() {
-            return 1;
+            return Ok(1);
         }
         self.backtrack_count(0)
     }
 
-    fn enumerate(&mut self, limit: Option<usize>) -> Vec<Vec<(NodeId, NodeId)>> {
+    fn enumerate(&mut self, limit: Option<usize>) -> Result<Vec<Vec<(NodeId, NodeId)>>> {
         let mut results = Vec::new();
         if self.pattern_nodes.is_empty() {
-            return results;
+            return Ok(results);
         }
-        self.backtrack_enumerate(0, &mut results, limit);
-        results
+        self.backtrack_enumerate(0, &mut results, limit)?;
+        Ok(results)
     }
 
-    fn backtrack_count(&mut self, depth: usize) -> u64 {
+    fn backtrack_count(&mut self, depth: usize) -> Result<u64> {
         if depth == self.pattern_nodes.len() {
-            return 1; // Complete mapping found.
+            return Ok(1); // Complete mapping found.
         }
 
         let pattern_node = self.pattern_nodes[depth];
         let mut count = 0u64;
 
         for i in 0..self.target_nodes.len() {
+            self.ticker.tick()?;
             let target_node = self.target_nodes[i];
 
             if self.reverse_mapping.contains(&target_node) {
@@ -188,14 +193,14 @@ impl VF2State {
                 self.mapping.insert(pattern_node, target_node);
                 self.reverse_mapping.insert(target_node);
 
-                count += self.backtrack_count(depth + 1);
+                count += self.backtrack_count(depth + 1)?;
 
                 self.mapping.remove(&pattern_node);
                 self.reverse_mapping.remove(&target_node);
             }
         }
 
-        count
+        Ok(count)
     }
 
     fn backtrack_enumerate(
@@ -203,23 +208,24 @@ impl VF2State {
         depth: usize,
         results: &mut Vec<Vec<(NodeId, NodeId)>>,
         limit: Option<usize>,
-    ) {
+    ) -> Result<()> {
         if let Some(max) = limit
             && results.len() >= max
         {
-            return;
+            return Ok(());
         }
 
         if depth == self.pattern_nodes.len() {
             let mapping: Vec<(NodeId, NodeId)> =
                 self.mapping.iter().map(|(&p, &t)| (p, t)).collect();
             results.push(mapping);
-            return;
+            return Ok(());
         }
 
         let pattern_node = self.pattern_nodes[depth];
 
         for i in 0..self.target_nodes.len() {
+            self.ticker.tick()?;
             let target_node = self.target_nodes[i];
 
             if self.reverse_mapping.contains(&target_node) {
@@ -230,7 +236,7 @@ impl VF2State {
                 self.mapping.insert(pattern_node, target_node);
                 self.reverse_mapping.insert(target_node);
 
-                self.backtrack_enumerate(depth + 1, results, limit);
+                self.backtrack_enumerate(depth + 1, results, limit)?;
 
                 self.mapping.remove(&pattern_node);
                 self.reverse_mapping.remove(&target_node);
@@ -238,10 +244,11 @@ impl VF2State {
                 if let Some(max) = limit
                     && results.len() >= max
                 {
-                    return;
+                    return Ok(());
                 }
             }
         }
+        Ok(())
     }
 
     /// Checks if mapping pattern_node -> target_node is feasible.
@@ -261,6 +268,14 @@ impl VF2State {
                 .any(|on| self.mapping.contains_key(on));
         };
 
+        // A pattern self-loop needs a target self-loop (a monomorphism: a target loop the pattern
+        // lacks is allowed).
+        let pattern_loop = pattern_neighbors.contains(&pattern_node);
+        let target_loop = target_neighbors.contains(&target_node);
+        if pattern_loop && !target_loop {
+            return false;
+        }
+
         // Connectivity check: every mapped neighbor of pattern_node must map to
         // a neighbor of target_node.
         for &on in pattern_neighbors {
@@ -271,13 +286,10 @@ impl VF2State {
             }
         }
 
-        // Degree pruning: target_node must have enough neighbors to potentially
-        // satisfy all pattern_node's constraints.
-        if target_neighbors.len() < pattern_neighbors.len() {
-            return false;
-        }
-
-        true
+        // Degree pruning, a self-loop counted alike on both sides (not at all): target_node must
+        // have enough other neighbors to satisfy all pattern_node's.
+        loop_free_degree(target_neighbors.len(), target_loop)
+            >= loop_free_degree(pattern_neighbors.len(), pattern_loop)
     }
 }
 
@@ -295,6 +307,8 @@ struct VF2StateFromAdj {
     mapping: Vec<Option<NodeId>>,
     /// Set of mapped target nodes.
     mapped_targets: FxHashSet<NodeId>,
+    /// The run's check of the query's deadline: a unit per candidate tried.
+    ticker: Ticker,
 }
 
 impl VF2StateFromAdj {
@@ -302,35 +316,38 @@ impl VF2StateFromAdj {
         target: &GraphView<'_>,
         pattern_adj: &[FxHashSet<usize>],
         pattern_node_count: usize,
-    ) -> Self {
+    ) -> Result<Self> {
+        let mut ticker = Ticker::new();
         let target_nodes = target.node_ids();
-        let target_adj = build_undirected_adj(target);
+        let target_adj = build_undirected_adj(target, &mut ticker)?;
 
-        Self {
+        Ok(Self {
             target_nodes,
             target_adj,
             pattern_adj: pattern_adj.to_vec(),
             pattern_node_count,
             mapping: vec![None; pattern_node_count],
             mapped_targets: FxHashSet::default(),
-        }
+            ticker,
+        })
     }
 
-    fn count_all(&mut self) -> u64 {
+    fn count_all(&mut self) -> Result<u64> {
         if self.pattern_node_count == 0 {
-            return 1;
+            return Ok(1);
         }
         self.backtrack_count(0)
     }
 
-    fn backtrack_count(&mut self, depth: usize) -> u64 {
+    fn backtrack_count(&mut self, depth: usize) -> Result<u64> {
         if depth == self.pattern_node_count {
-            return 1;
+            return Ok(1);
         }
 
         let mut count = 0u64;
 
         for i in 0..self.target_nodes.len() {
+            self.ticker.tick()?;
             let target_node = self.target_nodes[i];
 
             if self.mapped_targets.contains(&target_node) {
@@ -341,26 +358,37 @@ impl VF2StateFromAdj {
                 self.mapping[depth] = Some(target_node);
                 self.mapped_targets.insert(target_node);
 
-                count += self.backtrack_count(depth + 1);
+                count += self.backtrack_count(depth + 1)?;
 
                 self.mapping[depth] = None;
                 self.mapped_targets.remove(&target_node);
             }
         }
 
-        count
+        Ok(count)
     }
 
     fn is_feasible_adj(&self, pattern_idx: usize, target_node: NodeId) -> bool {
         let pattern_neighbors = &self.pattern_adj[pattern_idx];
+        let pattern_loop = pattern_neighbors.contains(&pattern_idx);
 
         let Some(target_neighbors) = self.target_adj.get(&target_node) else {
-            return !pattern_neighbors
-                .iter()
-                .any(|&on| self.mapping[on].is_some());
+            return !pattern_loop
+                && !pattern_neighbors
+                    .iter()
+                    .any(|&on| self.mapping[on].is_some());
         };
 
-        if target_neighbors.len() < pattern_neighbors.len() {
+        // A pattern self-loop needs a target self-loop (a monomorphism: a target loop the pattern
+        // lacks is allowed), and the degree pruning counts a self-loop alike on both sides (not
+        // at all).
+        let target_loop = target_neighbors.contains(&target_node);
+        if pattern_loop && !target_loop {
+            return false;
+        }
+        if loop_free_degree(target_neighbors.len(), target_loop)
+            < loop_free_degree(pattern_neighbors.len(), pattern_loop)
+        {
             return false;
         }
 
@@ -380,7 +408,10 @@ impl VF2StateFromAdj {
 // Helpers
 // ============================================================================
 
-fn build_undirected_adj(store: &GraphView<'_>) -> FxHashMap<NodeId, FxHashSet<NodeId>> {
+fn build_undirected_adj(
+    store: &GraphView<'_>,
+    ticker: &mut Ticker,
+) -> Result<FxHashMap<NodeId, FxHashSet<NodeId>>> {
     let nodes = store.node_ids();
     let mut adj: FxHashMap<NodeId, FxHashSet<NodeId>> = FxHashMap::default();
     for &node in &nodes {
@@ -388,6 +419,7 @@ fn build_undirected_adj(store: &GraphView<'_>) -> FxHashMap<NodeId, FxHashSet<No
     }
     for &node in &nodes {
         for (neighbor, _) in store.edges(node, Direction::Outgoing) {
+            ticker.tick()?;
             if let Some(set) = adj.get_mut(&node) {
                 set.insert(neighbor);
             }
@@ -396,7 +428,13 @@ fn build_undirected_adj(store: &GraphView<'_>) -> FxHashMap<NodeId, FxHashSet<No
             }
         }
     }
-    adj
+    Ok(adj)
+}
+
+/// The number of neighbours of a node other than itself: `neighbours` in its set, a self-loop
+/// (`looped`) among them.
+fn loop_free_degree(neighbours: usize, looped: bool) -> usize {
+    neighbours - usize::from(looped)
 }
 
 fn build_pattern_adjacency(edges: &[(usize, usize)], node_count: usize) -> Vec<FxHashSet<usize>> {
@@ -408,6 +446,50 @@ fn build_pattern_adjacency(edges: &[(usize, usize)], node_count: usize) -> Vec<F
         }
     }
     adj
+}
+
+/// The edges of a pattern written as `"0-1,1-2,2-0"`: pairs of node numbers below
+/// `node_count`, each part and each number trimmed, an empty part (a trailing comma, an empty
+/// string) adding none. A self-loop and a duplicate are edges as the search reads them.
+///
+/// # Errors
+///
+/// An invalid parameter value (22023) naming the part, for a part that is no pair of node numbers
+/// (`0-x`, `0_1`, `0-1-2`, a negative number) and for a number at or above `node_count`.
+fn pattern_edges(text: &str, node_count: usize) -> Result<Vec<(usize, usize)>> {
+    let refused = |part: &str, why: String| {
+        Error::from(QueryError::new(
+            QueryErrorKind::InvalidParameterValue,
+            format!("subgraph_isomorphism: the part '{part}' of argument 'pattern_edges' {why}"),
+        ))
+    };
+    let mut edges = Vec::new();
+    for part in text
+        .split(',')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+    {
+        let numbers: Vec<Option<usize>> = part
+            .split('-')
+            .map(|number| number.trim().parse().ok())
+            .collect();
+        let [Some(from), Some(to)] = numbers[..] else {
+            return Err(refused(
+                part,
+                "is no pair of node numbers, such as '0-1'".to_string(),
+            ));
+        };
+        if let Some(beyond) = [from, to].into_iter().find(|&node| node >= node_count) {
+            return Err(refused(
+                part,
+                format!(
+                    "names node {beyond}, where 'pattern_nodes' gives {node_count} (0 up to one less)"
+                ),
+            ));
+        }
+        edges.push((from, to));
+    }
+    Ok(edges)
 }
 
 // ============================================================================
@@ -425,6 +507,7 @@ fn subgraph_iso_params() -> &'static [ParameterDef] {
                 param_type: ParameterType::String,
                 required: true,
                 default: None,
+                domain: Domain::OfType,
             },
             ParameterDef {
                 name: "pattern_nodes".to_string(),
@@ -432,6 +515,7 @@ fn subgraph_iso_params() -> &'static [ParameterDef] {
                 param_type: ParameterType::Integer,
                 required: true,
                 default: None,
+                domain: Domain::NonNegative,
             },
         ]
     })
@@ -463,26 +547,13 @@ impl GraphAlgorithm for SubgraphIsomorphismAlgorithm {
         let store = &graph;
         let found = super::traits::evaluated(|| {
             let edges_str = params.get_string("pattern_edges").unwrap_or("");
-            let node_count =
-                usize::try_from(params.get_int("pattern_nodes").unwrap_or(0)).unwrap_or(0);
+            let node_count = params.get_count("pattern_nodes")?.unwrap_or(0);
+            let edges = pattern_edges(edges_str, node_count)?;
 
-            let edges: Vec<(usize, usize)> = edges_str
-                .split(',')
-                .filter(|s| !s.is_empty())
-                .filter_map(|s| {
-                    let parts: Vec<&str> = s.split('-').collect();
-                    if parts.len() == 2 {
-                        Some((parts[0].parse().ok()?, parts[1].parse().ok()?))
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-
-            let count = count_from_edges_on(store, &edges, node_count);
+            let count = count_from_edges_on(store, &edges, node_count)?;
 
             let mut output = AlgorithmResult::new(vec!["count".to_string()]);
-            output.add_row(vec![Value::Int64(i64::try_from(count).unwrap_or(i64::MAX))]);
+            output.add_row(vec![super::traits::int_value(count)?]);
             Ok(output)
         });
         graph.finish(found)?
@@ -496,6 +567,7 @@ impl GraphAlgorithm for SubgraphIsomorphismAlgorithm {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use grafeo_common::types::Value;
 
     fn create_triangle() -> RowGroupStore {
         let store = RowGroupStore::new();

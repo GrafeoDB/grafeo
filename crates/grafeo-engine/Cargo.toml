@@ -126,6 +126,7 @@ arrow-export = ["dep:arrow-schema", "dep:arrow-array", "dep:arrow-ipc"]  # Arrow
 # Testing utilities (zero overhead when disabled)
 testing-crash-injection = ["dep:grafeo-storage", "grafeo-common/testing-crash-injection", "grafeo-storage/testing-crash-injection"]  # Crash injection for recovery testing
 testing-statement-injection = ["grafeo-common/testing-statement-injection"]  # Failure injection at statement / commit entry for rollback atomicity tests, and a hook inside commit
+testing-deadline-probe = ["grafeo-core/testing-deadline-probe", "grafeo-adapters/testing-deadline-probe"]  # Test only: a deadline that passes after N clock reads in procedures and paths
 
 [lints]
 workspace = true
@@ -149,6 +150,11 @@ harness = false
 [[bench]]
 name = "topk_e2e"
 harness = false
+
+[[bench]]
+name = "algorithms_bench"
+harness = false
+required-features = ["algos", "vector-index"]
 
 [[bench]]
 name = "write_path_bench"

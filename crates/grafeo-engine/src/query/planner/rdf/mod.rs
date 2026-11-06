@@ -2554,7 +2554,7 @@ impl RdfPlanner {
         }
 
         // Sort by cardinality (smallest first) so we build on smaller inputs
-        planned.sort_by(|a, b| a.3.partial_cmp(&b.3).unwrap_or(std::cmp::Ordering::Equal));
+        planned.sort_by(|a, b| a.3.total_cmp(&b.3));
 
         // Fold with pairwise hash joins, each time on the smallest input that
         // shares a variable with the rows so far (see `next_join_input`); a

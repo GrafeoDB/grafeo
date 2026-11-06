@@ -1510,6 +1510,13 @@ impl Config {
         self.query_timeout
     }
 
+    /// The deadline of a statement that starts now under `timeout`, `None` for no limit: the one
+    /// reckoning of a query's deadline, a session's and the bindings' algorithm calls alike.
+    #[must_use]
+    pub fn deadline_after(timeout: Option<Duration>) -> Option<grafeo_common::clock::Instant> {
+        timeout.map(|limit| grafeo_common::clock::Instant::now() + limit)
+    }
+
     /// The largest property value in bytes, `None` for no limit.
     #[must_use]
     pub fn max_property_size(&self) -> Option<usize> {

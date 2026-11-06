@@ -71,6 +71,7 @@ parallel = ["rayon", "crossbeam"]  # Morsel-driven parallelism (rayon, crossbeam
 spill = []                         # Disk spilling for out-of-core execution (sync only, async in grafeo-engine)
 mmap = []                          # File-backed vector storage (MmapStorage)
 triple-store = []  # Enable RDF triple store model
+testing-deadline-probe = []  # Test only: `deadline::expire_after_polls` lets every ticker's deadline pass after N clock reads; in no default and no profile
 rdf = ["triple-store"]  # Deprecated: use triple-store
 tiered-storage = []  # Deprecated since 0.6.0: enables nothing (the row-group store replaced LpgStore, which it shaped); removed in 0.7.0
 temporal = []  # Deprecated since 0.6.0: enables nothing (a database's history retention, Config::with_history_retention, replaces it); removed in 0.7.0

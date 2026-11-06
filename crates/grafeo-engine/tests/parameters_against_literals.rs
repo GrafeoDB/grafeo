@@ -337,8 +337,8 @@ fn a_parameter_answers_as_its_literal_in_every_expression() {
     );
 }
 
-/// A grouping key built from a parameter groups as the same key written as a literal (Architect,
-/// 2026-11-06; inbox: it failed as an undefined variable).
+/// A grouping key built from a parameter groups as the same key written as a literal (2026-11-06;
+/// it failed as an undefined variable).
 #[test]
 fn a_grouping_key_built_from_a_parameter_groups_as_its_literal() {
     let db = GrafeoDB::new_in_memory();

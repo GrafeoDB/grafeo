@@ -124,6 +124,51 @@ def test_d2_dashes_in_docs_and_comments_only(repo: Path) -> None:
     ]
 
 
+def test_d7_text_addressed_to_the_private_workflow(repo: Path) -> None:
+    lines = [
+        # Each a finding: a session role by name, the inbox, a private note.
+        "// openCypher List4; the Architect's ruling, 2026-11-05",
+        "/// confirmed by the Engineer against each algorithm",
+        "/// groups as a literal (Architect, 2026-11-06)",
+        "// a sweep (Review, 2026-11-06)",
+        "//! answers (the review's oracle)",
+        "// Review's sweep of the procedure errors",
+        "// the Orchestrator asked for it",
+        "// fails today (inbox, 2026-11-06)",
+        "// the table in entity-values-design.md",
+        "// see decisions.md",
+        # None a finding: ordinary words.
+        "fn review_threads() {}",
+        "// Decided (#728 review): the change goes through",
+        "// Review the plan before it runs",
+        "// the architecture of the planner",
+        "// an engineer reading the code",
+        "// a code review found it",
+    ]
+    write(repo, "crates/grafeo-core/src/notes.rs", "\n".join(lines) + "\n")
+    write(
+        repo,
+        "tests/spec/lpg/gql/notes.gtest",
+        "# openCypher List4, the Architect's ruling\n",
+    )
+    write(repo, "docs/guide.md", "The plan is in the inbox.\n")
+    result = policy(repo, "diff", "--base", "HEAD")
+    assert found(result) == [
+        "D7 crates/grafeo-core/src/notes.rs:1",
+        "D7 crates/grafeo-core/src/notes.rs:2",
+        "D7 crates/grafeo-core/src/notes.rs:3",
+        "D7 crates/grafeo-core/src/notes.rs:4",
+        "D7 crates/grafeo-core/src/notes.rs:5",
+        "D7 crates/grafeo-core/src/notes.rs:6",
+        "D7 crates/grafeo-core/src/notes.rs:7",
+        "D7 crates/grafeo-core/src/notes.rs:8",
+        "D7 crates/grafeo-core/src/notes.rs:9",
+        "D7 crates/grafeo-core/src/notes.rs:10",
+        "D7 docs/guide.md:1",
+        "D7 tests/spec/lpg/gql/notes.gtest:1",
+    ]
+
+
 def test_d3_internal_references(repo: Path) -> None:
     write(
         repo,

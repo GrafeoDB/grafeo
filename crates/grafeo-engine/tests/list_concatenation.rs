@@ -179,7 +179,7 @@ fn cypher_appends_or_prepends_one_value() {
 }
 
 /// Cypher's `+` takes a null as one more element of the list, before or after it, as any other value
-/// (openCypher List4; the Architect's ruling, 2026-11-05). The TCK has no case of a null operand today:
+/// (openCypher List4; ruled 2026-11-05). The TCK has no case of a null operand today:
 /// follow it if a later TCK adds one. A null with a number, or with a null, stays null.
 #[test]
 fn cypher_takes_a_null_as_an_element() {

@@ -605,7 +605,7 @@ fn grouping_deciders_keep_one_of_each_same_set() {
     }
     let got_classes: BTreeSet<BTreeSet<usize>> = rows(
         &session,
-        // Through WITH: a grouping key built from a parameter fails today (inbox, 2026-11-06).
+        // Through WITH: a grouping key built from a parameter fails today (found 2026-11-06).
         "UNWIND range(0, $n - 1) AS i WITH i, $vals[i] AS x RETURN x, collect(i) AS members",
         &[("n", Value::Int64(wide(n))), ("vals", list(values.clone()))],
     )

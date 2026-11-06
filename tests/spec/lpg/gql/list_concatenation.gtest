@@ -116,7 +116,7 @@ tests:
       rows:
         - ["[1, null]"]
 
-  # openCypher List4, the Architect's ruling: the TCK has no null case today; follow it if one comes.
+  # openCypher List4, as ruled: the TCK has no null case today; follow it if one comes.
   - name: cypher_appends_a_null
     language: cypher
     requires: [cypher]

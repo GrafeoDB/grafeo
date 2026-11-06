@@ -34,6 +34,8 @@ Add `--json` for machine-readable output. Exit code 1 when an error is found.
         code (the stores themselves, STORES, implement the traits; test modules are not library
         code)
     D6  no `let _ =` in WAL, replay and recovery code (errors must propagate)
+    D7  no added text addressed to the project's private workflow: its session roles, its
+        inbox, its private design and decision notes
     W1  warning: new feature cfg in grafeo-core or grafeo-engine (features add modules)
     P1  pull requests target release/*; main only receives release branches
     P2  contributor pull requests link a planned issue (milestone, help wanted, good first issue)
@@ -76,6 +78,18 @@ PRIVATE_ALLOWED = {
 }
 INTERNAL_PHRASES = re.compile(
     r"\bPhase [0-9]|consolidated plan|internal roadmap", re.IGNORECASE
+)
+# Text addressed to the private workflow (D7): its session roles by name, its inbox, and its
+# design and decision notes. The roles match as names only ("the Architect", "Review's", "by
+# Review"), so ordinary words stay free: "a PR review", `review_threads`, "Review the plan",
+# "the architecture", "an engineer".
+WORKFLOW_TEXT = re.compile(
+    r"\b(?:Architect|Orchestrator|git Manager)(?:'s)?\b"
+    r"|\bthe Engineer(?:'s)?\b|\(Engineer\b|\bEngineer's\b"
+    r"|\bReview(?:'s| Expert| session)\b|\b(?:by|from|for|with) Review\b|\(Review\b"
+    r"|\bthe review's\b"
+    r"|\binbox\b"
+    r"|[\w.-]+-design\.md\b|\bdecisions\.md\b|\bquestions-pending\.md\b"
 )
 ALLOW_ATTRIBUTE = re.compile(r"#!?\[\s*(?:cfg_attr\s*\(.*?,\s*)?allow\s*\(")
 IGNORE_ATTRIBUTE = re.compile(r"#\[\s*ignore\b")
@@ -151,6 +165,8 @@ HINTS = {
     "D4": "crash-injection tests must run in CI; make it fast enough instead of ignoring it",
     "D5": "cross-cutting concerns derive from the transaction change set, not from store wrappers (only the store RowGroupStore implements the store traits)",
     "D6": "replay and recovery must propagate errors; handle or return the result",
+    "D7": "public text must not address the private workflow; state the rule or the date "
+    "itself, or link a public issue",
     "W1": "features should add modules, not fork core types",
     "P1": "open the pull request against the current release/<milestone> branch",
     "P2": 'link a planned issue with "Fixes #N" (it needs a milestone, or the "help wanted" '
@@ -1024,6 +1040,8 @@ def diff_findings(
                 findings.append(
                     finding("D3", path, number, "internal planning wording")
                 )
+            if path not in PRIVATE_ALLOWED and WORKFLOW_TEXT.search(text):
+                findings.append(finding("D7", path, number))
             if suffix != ".rs":
                 continue
             if IGNORE_ATTRIBUTE.search(text) and is_crash_test(path, content):

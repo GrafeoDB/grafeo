@@ -533,6 +533,14 @@ impl GraphStore for GraphProjection {
         }
     }
 
+    fn index_kinds(
+        &self,
+        labels: &[&str],
+        property: &str,
+    ) -> Option<crate::execution::operators::value_utils::ValueKinds> {
+        self.inner.index_kinds(labels, property)
+    }
+
     fn find_nodes_maybe_equal(
         &self,
         property: &str,

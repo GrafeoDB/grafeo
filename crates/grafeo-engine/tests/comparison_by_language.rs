@@ -188,6 +188,27 @@ mod sql_pgq {
         )))
     }
 
+    /// Every comparison operator across kinds raises 22G04 when a row brings two kinds together,
+    /// `=` and `<>` included, with a literal on either side.
+    #[test]
+    fn sql_pgq_raises_for_every_comparison_across_kinds() {
+        let db = graph();
+        let session = db.session();
+        for op in ["=", "<>", "<", "<=", ">", ">="] {
+            for condition in [
+                format!("n.k {op} 5"),
+                format!("5 {op} n.k"),
+                format!("n.k {op} 'b'"),
+            ] {
+                assert_eq!(
+                    sql(&session, "L", &condition),
+                    Err(NOT_COMPARABLE.to_string()),
+                    "`{condition}`"
+                );
+            }
+        }
+    }
+
     /// A property against a property: of one kind it compares, of two kinds it raises.
     #[test]
     fn sql_pgq_raises_for_two_properties_of_two_kinds() {
@@ -202,6 +223,20 @@ mod sql_pgq {
             sql(&session, "Q", "n.a < n.b"),
             Err(NOT_COMPARABLE.to_string())
         );
+    }
+
+    /// A parameter of another kind raises too: SQL types a dynamic parameter from its context,
+    /// and a property has no declared type to give it.
+    #[test]
+    fn sql_pgq_raises_for_a_parameter_of_another_kind() {
+        let db = graph();
+        let session = db.session();
+        let query = "SELECT * FROM GRAPH_TABLE (MATCH (n:N) WHERE n.k = $p COLUMNS (n.row AS row))";
+        let with = |p: Value| {
+            rows(session.execute_sql_with_params(query, HashMap::from([("p".to_string(), p)])))
+        };
+        assert_eq!(with(Value::Int64(2)), Ok(vec![0]));
+        assert_eq!(with(Value::from("2")), Err(NOT_COMPARABLE.to_string()));
     }
 
     /// No error where no two kinds meet: numbers of two numeric kinds are comparable (4.5.1), a

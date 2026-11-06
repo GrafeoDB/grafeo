@@ -17,12 +17,12 @@
 //! The answer is at the reader's view: visibility by the word of found rows, which is one `AND` in
 //! a vector without stamps, and a row a chain holds is read as the view sees it.
 
-use crate::execution::operators::value_utils::holds_null;
+use crate::execution::operators::value_utils::{EqualAcrossKinds, ValueKinds, holds_null};
 use std::ops::Range;
 use std::sync::OnceLock;
 
 use grafeo_common::types::{ArcStr, NodeId, Value};
-use grafeo_common::utils::error::Result;
+use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind, Result};
 use smallvec::{SmallVec, smallvec};
 
 use super::bitset::Bitset;
@@ -58,6 +58,8 @@ pub struct KeyColumnQuery {
     decoded: Option<DecodedChunk>,
     /// Its names as the store's ids, for the next group.
     ids: Option<ReadIds>,
+    /// What the statement's `=` gives across kinds.
+    equal: EqualAcrossKinds,
 }
 
 /// A read's names as a store's ids. An id is never given twice, so ids are kept once every name has
@@ -123,7 +125,24 @@ impl KeyColumnQuery {
             targets: Targets::new(values.into()),
             decoded: None,
             ids: None,
+            equal: EqualAcrossKinds::False,
         }
+    }
+
+    /// Reads as a statement whose `=` gives `equal` across kinds compares: where it raises
+    /// (SQL/PGQ), a row of the read's labels whose value is of another kind than the keys' fails
+    /// the read (22G04), as the scan's `=` would meet it, whatever the read finds.
+    #[must_use]
+    pub fn with_equal_across_kinds(mut self, equal: EqualAcrossKinds) -> Self {
+        self.equal = equal;
+        self
+    }
+
+    /// What the statement's `=` gives across kinds (see
+    /// [`with_equal_across_kinds`](Self::with_equal_across_kinds)).
+    #[must_use]
+    pub fn equal_across_kinds(&self) -> EqualAcrossKinds {
+        self.equal
     }
 
     /// The key it reads.
@@ -244,6 +263,77 @@ impl Targets {
             strings.dedup();
             strings
         })
+    }
+
+    /// The kinds of the keys.
+    fn kinds(&self) -> ValueKinds {
+        self.values
+            .iter()
+            .fold(ValueKinds::default(), |kinds, key| {
+                kinds.union(ValueKinds::of(key))
+            })
+    }
+
+    /// Whether every value of `column` in the rows of `span` is of the keys' one kind, by what
+    /// the column says of itself: a hot column of integers, floats or strings, and cold chunks
+    /// whose zone maps bound integers, floats or strings. Values a chain holds are not counted.
+    fn column_is_of_their_kind(
+        &self,
+        column: &ColumnRead<'_>,
+        span: &Range<usize>,
+    ) -> Result<bool> {
+        let keys = self.kinds();
+        if !keys.is_one() {
+            return Ok(false);
+        }
+        match column {
+            ColumnRead::Hot(hot) => Ok(match hot.values() {
+                HotValues::Int64(_) | HotValues::Float64(_) => keys == ValueKinds::NUMBERS,
+                HotValues::String(_) => keys == ValueKinds::STRINGS,
+                HotValues::Other => false,
+            }),
+            ColumnRead::Cold(chunks) => {
+                for chunk in chunks {
+                    let rows = chunk.rows();
+                    if rows.end <= span.start || rows.start >= span.end {
+                        continue;
+                    }
+                    let kinds = match chunk.zone_map()? {
+                        Some(ZoneMap::Values(Value::Int64(_) | Value::Float64(_), _)) => {
+                            ValueKinds::NUMBERS
+                        }
+                        Some(ZoneMap::Strings(_)) => ValueKinds::STRINGS,
+                        _ => return Ok(false),
+                    };
+                    if kinds != keys {
+                        return Ok(false);
+                    }
+                }
+                Ok(true)
+            }
+        }
+    }
+
+    /// The error of a key `=` a value of another kind meets, in a statement where that raises.
+    fn not_comparable(&self, found: &Value) -> Error {
+        let kind = ValueKinds::of(found);
+        let key = self
+            .values
+            .iter()
+            .find(|key| ValueKinds::of(key) != kind)
+            .or(self.values.first());
+        let message = match key {
+            Some(key) => format!(
+                "a value of type {} ({key}) cannot be compared with a value of type {} ({found})",
+                key.type_name(),
+                found.type_name()
+            ),
+            None => format!("a value of type {} ({found})", found.type_name()),
+        };
+        Error::from(QueryError::new(
+            QueryErrorKind::ValuesNotComparable,
+            message,
+        ))
     }
 
     /// Whether a found `value` is `=` a key, not only maybe: a string found is one of the keys.
@@ -627,7 +717,9 @@ impl Inner {
             targets,
             decoded,
             ids,
+            equal,
         } = query;
+        let raises = *equal == EqualAcrossKinds::Raises;
         let Some(targets) = &*targets else {
             return Ok(answer);
         };
@@ -674,8 +766,10 @@ impl Inner {
             return Ok(answer);
         };
         // A hot column's bound covers every version a reader may see, chained ones too, so no read
-        // of it can find a value outside it.
+        // of it can find a value outside it. Where `=` raises across kinds, the values it holds are
+        // read all the same, below.
         if let ColumnRead::Hot(hot) = &column
+            && !raises
             && !targets.may_be_in(hot)
         {
             return Ok(answer);
@@ -729,6 +823,14 @@ impl Inner {
         } else {
             None
         };
+        // The rows the check of kinds reads, where `=` raises: those of the scope, and those whose
+        // labels a chain holds.
+        let kind_scope = raises.then(|| {
+            scope_rows.clone().map(|mut rows| {
+                rows.extend(label_chains.as_ref());
+                rows
+            })
+        });
         let mut cold_found = None;
         let may_find = match &column {
             ColumnRead::Hot(hot) => {
@@ -824,6 +926,49 @@ impl Inner {
                 }
             },
         );
+        // Where `=` raises across kinds, a row of the scope the view sees whose value is of another
+        // kind than the keys' fails the read, as the scan's `=` would meet it. A column of the
+        // keys' one kind has such a value only in a chain.
+        if let Some(kind_scope) = kind_scope {
+            let keys = targets.kinds();
+            let of_their_kind = targets.column_is_of_their_kind(&column, &span)?;
+            let mut met = None;
+            words_to_read(
+                kind_scope.as_deref(),
+                span.start / 64..span.end.div_ceil(64),
+                |word| {
+                    if met.is_some() {
+                        return;
+                    }
+                    let labels_chained = word_of(&label_chains, word);
+                    let mut rows = if of_their_kind {
+                        word_of(&value_chains, word) & (in_scope(word) | labels_chained)
+                    } else {
+                        in_scope(word) | labels_chained
+                    };
+                    while rows != 0 {
+                        let bit = rows.trailing_zeros() as usize;
+                        rows &= rows - 1;
+                        let row = word * 64 + bit;
+                        if !group.versions.visible(row, read)
+                            || (labels_chained & (1 << bit) != 0 && !labels_in_scope(row))
+                        {
+                            continue;
+                        }
+                        if let Some(value) = group.columns.get_at(key, row, read)
+                            && !value.is_null()
+                            && ValueKinds::of(&value) != keys
+                        {
+                            met = Some(value);
+                            return;
+                        }
+                    }
+                },
+            );
+            if let Some(found) = met {
+                return Err(targets.not_comparable(&found));
+            }
+        }
         Ok(answer)
     }
 }

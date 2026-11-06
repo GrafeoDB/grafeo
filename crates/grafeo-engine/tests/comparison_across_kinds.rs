@@ -268,7 +268,8 @@ fn two_kinds_compare_by_the_rule() {
 }
 
 /// Two values of one family, as the evaluator answered them before the change: `name op name answer`,
-/// one per line, both languages.
+/// one per line, both languages. Two lists order element by element since 2026-11-06 (0.6.1 gave
+/// null for every ordering of two lists, `[1] < [1]` included): their rows hold that answer.
 const SAME_FAMILY: &str = include_str!("comparison_across_kinds.golden");
 
 /// Every pair of one family compares as it did.
@@ -632,8 +633,8 @@ fn gql_orders_across_kinds_as_order_by_does() {
                 .clone();
             let less = truth(&session, Language::Gql, "<", a, b);
             let greater = truth(&session, Language::Gql, ">", a, b);
-            // Within a family `<` may be null where ORDER BY still orders (NaN, durations, lists): only a
-            // definite answer is checked.
+            // Within a family `<` may be null where ORDER BY still orders (NaN, durations, a list
+            // whose deciding pair holds a null): only a definite answer is checked.
             if let (Some(less), Some(greater)) = (less, greater)
                 && (less && first != *a || greater && first != *b)
             {

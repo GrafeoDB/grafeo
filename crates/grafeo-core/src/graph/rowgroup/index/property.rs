@@ -12,12 +12,15 @@
 //! probe finds (a list or a map of numbers) wait in a side table by their `=`
 //! class, which is empty for a property that holds none of them.
 
+use std::sync::atomic::{AtomicU32, Ordering};
+
 use dashmap::DashMap;
 use dashmap::mapref::entry::Entry;
 use grafeo_common::types::{Decimal, HashableValue, NodeId, Value};
 use grafeo_common::utils::hash::FxHashSet;
 
 use crate::execution::operators::HashKey;
+use crate::execution::operators::value_utils::ValueKinds;
 
 /// The index of one node property.
 #[derive(Debug, Default)]
@@ -28,11 +31,17 @@ pub(crate) struct PropertyIndex {
     /// [`is_found_by_probes`]), by their `=` class. A value is added and
     /// removed here under the lock of its entry in `values`.
     others_by_class: DashMap<HashKey, FxHashSet<HashableValue>>,
+    /// The kinds of every value it has held (see [`ValueKinds`]): one `OR` per insert, never
+    /// cleared, so it errs toward a read of the values themselves after a delete. Built again with
+    /// the index when a database opens, as the index is.
+    kinds: AtomicU32,
 }
 
 impl PropertyIndex {
     /// Adds `node` under `value`.
     pub(crate) fn insert(&self, value: HashableValue, node: NodeId) {
+        self.kinds
+            .fetch_or(ValueKinds::of(value.inner()).bits(), Ordering::Relaxed);
         match self.values.entry(value) {
             Entry::Occupied(mut entry) => {
                 entry.get_mut().insert(node);
@@ -69,6 +78,11 @@ impl PropertyIndex {
             }
             empty
         });
+    }
+
+    /// The kinds of every value it has held, deleted ones too.
+    pub(crate) fn kinds(&self) -> ValueKinds {
+        ValueKinds::from_bits(self.kinds.load(Ordering::Relaxed))
     }
 
     /// The nodes that hold exactly `value`.
@@ -334,6 +348,7 @@ impl Clone for PropertyIndex {
         Self {
             values: self.values.clone(),
             others_by_class: self.others_by_class.clone(),
+            kinds: AtomicU32::new(self.kinds.load(Ordering::Relaxed)),
         }
     }
 }

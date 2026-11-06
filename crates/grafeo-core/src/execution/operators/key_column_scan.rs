@@ -104,8 +104,9 @@ impl KeyColumnScanOperator {
         self
     }
 
-    /// What the indexes hold for its values, ascending; an index gone since planning leaves its
-    /// nodes to the column.
+    /// What the indexes hold for its values, ascending; an index gone since planning, or one that
+    /// cannot answer as the statement compares (see [`super::find_indexed_as_compared`]), leaves
+    /// its nodes to the column.
     fn read_indexes(&mut self) -> Result<Vec<NodeId>, OperatorError> {
         let Some(indexes) = &self.indexes else {
             return Ok(Vec::new());
@@ -113,11 +114,13 @@ impl KeyColumnScanOperator {
         let mut found = Vec::new();
         for label in &indexes.labels {
             for value in &indexes.values {
-                let Some(nodes) = self.store.find_indexed_maybe_equal(
+                let Some(nodes) = super::find_indexed_as_compared(
+                    self.store.as_ref(),
                     &[label.as_str()],
                     self.query.property(),
                     value,
                     self.view,
+                    self.query.equal_across_kinds(),
                 )?
                 else {
                     self.query.read_every_label();

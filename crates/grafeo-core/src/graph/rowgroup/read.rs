@@ -1655,6 +1655,14 @@ impl GraphStore for RowGroupStore {
             .maybe_equal_at(labels, property, value, Read::view(view)))
     }
 
+    fn index_kinds(
+        &self,
+        labels: &[&str],
+        property: &str,
+    ) -> Option<crate::execution::operators::value_utils::ValueKinds> {
+        self.inner.read().index_kinds(labels, property)
+    }
+
     fn find_nodes_in_range(
         &self,
         property: &str,

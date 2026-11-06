@@ -100,7 +100,8 @@ fn table(rows: &[&[&str]]) -> Vec<Vec<Value>> {
 /// Files `a.rs` (5.0 `lines`), `b.rs` (7), `c.rs` (5) and one without a
 /// path (1), then type definitions: Alix in `b.rs` at `line` 5, Gus in
 /// `a.rs` at 5, Vincent in `b.rs` at '7' (a string), Jules without a path at
-/// 1, and Mia in `z.rs`, which no file has, at 5.0.
+/// 1, and Mia in `z.rs`, which no file has, at 5.0. Each also has a numeric
+/// `depth`, its `line` but Vincent's 8, for a key computed in every language.
 fn files() -> GrafeoDB {
     // History kept: a read at an earlier epoch needs it.
     let db = GrafeoDB::with_config(
@@ -114,11 +115,11 @@ fn files() -> GrafeoDB {
     )
     .unwrap();
     db.execute(
-        "INSERT (:TypeDefinition {name: 'Alix', filePath: 'b.rs', line: 5}), \
-                (:TypeDefinition {name: 'Gus', filePath: 'a.rs', line: 5}), \
-                (:TypeDefinition {name: 'Vincent', filePath: 'b.rs', line: '7'}), \
-                (:TypeDefinition {name: 'Jules', line: 1}), \
-                (:TypeDefinition {name: 'Mia', filePath: 'z.rs', line: 5.0})",
+        "INSERT (:TypeDefinition {name: 'Alix', filePath: 'b.rs', line: 5, depth: 5}), \
+                (:TypeDefinition {name: 'Gus', filePath: 'a.rs', line: 5, depth: 5}), \
+                (:TypeDefinition {name: 'Vincent', filePath: 'b.rs', line: '7', depth: 8}), \
+                (:TypeDefinition {name: 'Jules', line: 1, depth: 1}), \
+                (:TypeDefinition {name: 'Mia', filePath: 'z.rs', line: 5.0, depth: 5.0})",
     )
     .unwrap();
     db
@@ -223,9 +224,11 @@ fn keys_and_the_conjuncts_beside_them() {
             table(&[&["a.rs", "Gus"], &["b.rs", "Alix"]]),
         ),
         (
+            // A key computed from a property every row holds as a number (Vincent's string
+            // `line` has no sum with 2 in GQL, 22G12).
             "MATCH (f:File) MATCH (t:TypeDefinition) \
-             WHERE t.line + 2 = f.lines RETURN f.path, t.name",
-            Some("t.line Add 2 = f.lines"),
+             WHERE t.depth + 2 = f.lines RETURN f.path, t.name",
+            Some("t.depth Add 2 = f.lines"),
             table(&[&["b.rs", "Alix"], &["b.rs", "Gus"], &["b.rs", "Mia"]]),
         ),
         (

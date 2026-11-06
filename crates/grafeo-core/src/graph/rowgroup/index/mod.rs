@@ -582,6 +582,18 @@ impl Inner {
     /// [`maybe_equal`](Self::maybe_equal) at `read`: the candidates whose
     /// value as `read` sees it the index that serves `labels` finds for `key`,
     /// ascending. `None` without one.
+    /// The kinds the index a lookup of `property` among nodes with each of `labels` reads has
+    /// held (see [`maybe_equal_at`](Self::maybe_equal_at)); `None` without one.
+    pub(super) fn index_kinds(
+        &self,
+        labels: &[&str],
+        property: &str,
+    ) -> Option<crate::execution::operators::value_utils::ValueKinds> {
+        self.indexes
+            .serving(labels, property)
+            .map(PropertyIndex::kinds)
+    }
+
     pub(super) fn maybe_equal_at(
         &self,
         labels: &[&str],

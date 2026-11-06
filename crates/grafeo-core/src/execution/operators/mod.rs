@@ -117,7 +117,9 @@ pub use mutation::{
     CreateStep, DeleteEdgeOperator, DeleteNodeOperator, PropertySource, RemoveLabelOperator,
     SetPropertyOperator,
 };
-pub use node_seek::{NodeSeekOperator, SeekKey, find_through_label_indexes};
+pub use node_seek::{
+    NodeSeekOperator, SeekKey, find_indexed_as_compared, find_through_label_indexes,
+};
 pub use parameter_scan::{ParameterScanOperator, ParameterState};
 pub use project::{EntityValue, ProjectExpr, ProjectOperator};
 pub use push::{

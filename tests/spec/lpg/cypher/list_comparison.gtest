@@ -1,0 +1,265 @@
+# `<` on two lists, element by element (GA04 step b, 2026-11-06): the first pair that is not equal
+# decides, null when it holds a null, GQL's order of kinds or Cypher's null for two kinds; a prefix
+# is the lesser. Includes the openCypher TCK's Comparison2 scenario 4. Generated from
+# comparison_of_lists.rs.
+
+meta:
+  language: cypher
+  model: lpg
+  section: "comparison"
+  title: Lists compared element by element
+  dataset: empty
+
+tests:
+
+  - name: list_l_1_0_r_ge_l_1_r
+    query: "RETURN [1, 0] >= [1] AS v"
+    expect:
+      rows:
+        - [true]
+
+  - name: list_l_1_null_r_ge_l_1_r
+    query: "RETURN [1, null] >= [1] AS v"
+    expect:
+      rows:
+        - [true]
+
+  - name: list_l_1_2_r_ge_l_1_null_r
+    query: "RETURN [1, 2] >= [1, null] AS v"
+    expect:
+      rows:
+        - [null]
+
+  - name: list_l_1_sa_r_ge_l_1_null_r
+    query: "RETURN [1, 'a'] >= [1, null] AS v"
+    expect:
+      rows:
+        - [null]
+
+  - name: list_l_1_2_r_ge_l_3_null_r
+    query: "RETURN [1, 2] >= [3, null] AS v"
+    expect:
+      rows:
+        - [false]
+
+  - name: list_l_1_r_lt_l_1_r
+    query: "RETURN [1] < [1] AS v"
+    expect:
+      rows:
+        - [false]
+
+  - name: list_l_1_r_le_l_1_r
+    query: "RETURN [1] <= [1] AS v"
+    expect:
+      rows:
+        - [true]
+
+  - name: list_l_1_r_gt_l_1_r
+    query: "RETURN [1] > [1] AS v"
+    expect:
+      rows:
+        - [false]
+
+  - name: list_l_1_r_ge_l_1_r
+    query: "RETURN [1] >= [1] AS v"
+    expect:
+      rows:
+        - [true]
+
+  - name: list_l_r_lt_l_r
+    query: "RETURN [] < [] AS v"
+    expect:
+      rows:
+        - [false]
+
+  - name: list_l_r_le_l_r
+    query: "RETURN [] <= [] AS v"
+    expect:
+      rows:
+        - [true]
+
+  - name: list_l_sa_sb_r_ge_l_sa_sb_r
+    query: "RETURN ['a', 'b'] >= ['a', 'b'] AS v"
+    expect:
+      rows:
+        - [true]
+
+  - name: list_l_1_r_lt_l_1p0_r
+    query: "RETURN [1] < [1.0] AS v"
+    expect:
+      rows:
+        - [false]
+
+  - name: list_l_1_r_le_l_1p0_r
+    query: "RETURN [1] <= [1.0] AS v"
+    expect:
+      rows:
+        - [true]
+
+  - name: list_l_1p0_2_r_lt_l_1_3_r
+    query: "RETURN [1.0, 2] < [1, 3] AS v"
+    expect:
+      rows:
+        - [true]
+
+  - name: list_l_r_lt_l_1_r
+    query: "RETURN [] < [1] AS v"
+    expect:
+      rows:
+        - [true]
+
+  - name: list_l_1_r_lt_l_1_2_r
+    query: "RETURN [1] < [1, 2] AS v"
+    expect:
+      rows:
+        - [true]
+
+  - name: list_l_1_2_r_gt_l_1_r
+    query: "RETURN [1, 2] > [1] AS v"
+    expect:
+      rows:
+        - [true]
+
+  - name: list_l_r_lt_l_null_r
+    query: "RETURN [] < [null] AS v"
+    expect:
+      rows:
+        - [true]
+
+  - name: list_l_1_null_r_lt_l_1_r
+    query: "RETURN [1, null] < [1] AS v"
+    expect:
+      rows:
+        - [false]
+
+  - name: list_l_1_null_r_gt_l_1_r
+    query: "RETURN [1, null] > [1] AS v"
+    expect:
+      rows:
+        - [true]
+
+  - name: list_l_1_2_r_lt_l_1_3_r
+    query: "RETURN [1, 2] < [1, 3] AS v"
+    expect:
+      rows:
+        - [true]
+
+  - name: list_l_2_r_gt_l_1_5_r
+    query: "RETURN [2] > [1, 5] AS v"
+    expect:
+      rows:
+        - [true]
+
+  - name: list_l_1_9_r_lt_l_2_0_r
+    query: "RETURN [1, 9] < [2, 0] AS v"
+    expect:
+      rows:
+        - [true]
+
+  - name: list_l_sa_r_lt_l_sb_r
+    query: "RETURN ['a'] < ['b'] AS v"
+    expect:
+      rows:
+        - [true]
+
+  - name: list_l_1_sa_r_lt_l_2_r
+    query: "RETURN [1, 'a'] < [2] AS v"
+    expect:
+      rows:
+        - [true]
+
+  - name: list_l_1_sa_r_lt_l_1_sb_r
+    query: "RETURN [1, 'a'] < [1, 'b'] AS v"
+    expect:
+      rows:
+        - [true]
+
+  - name: list_l_1_null_r_lt_l_1_2_r
+    query: "RETURN [1, null] < [1, 2] AS v"
+    expect:
+      rows:
+        - [null]
+
+  - name: list_l_null_1_r_lt_l_2_0_r
+    query: "RETURN [null, 1] < [2, 0] AS v"
+    expect:
+      rows:
+        - [null]
+
+  - name: list_l_1_r_lt_l_null_r
+    query: "RETURN [1] < [null] AS v"
+    expect:
+      rows:
+        - [null]
+
+  - name: list_l_null_r_lt_l_null_r
+    query: "RETURN [null] < [null] AS v"
+    expect:
+      rows:
+        - [null]
+
+  - name: list_l_null_r_le_l_null_r
+    query: "RETURN [null] <= [null] AS v"
+    expect:
+      rows:
+        - [null]
+
+  - name: list_l_l_1_r_r_lt_l_l_2_r_r
+    query: "RETURN [[1]] < [[2]] AS v"
+    expect:
+      rows:
+        - [true]
+
+  - name: list_l_l_1_r_2_r_lt_l_l_1_r_3_r
+    query: "RETURN [[1], 2] < [[1], 3] AS v"
+    expect:
+      rows:
+        - [true]
+
+  - name: list_l_l_1_2_r_r_gt_l_l_1_r_r
+    query: "RETURN [[1, 2]] > [[1]] AS v"
+    expect:
+      rows:
+        - [true]
+
+  - name: list_l_l_1_null_r_r_lt_l_l_1_2_r_r
+    query: "RETURN [[1, null]] < [[1, 2]] AS v"
+    expect:
+      rows:
+        - [null]
+
+  - name: list_l_1_r_lt_l_s1_r
+    query: "RETURN [1] < ['1'] AS v"
+    expect:
+      rows:
+        - [null]
+
+  - name: list_l_s1_r_lt_l_1_r
+    query: "RETURN ['1'] < [1] AS v"
+    expect:
+      rows:
+        - [null]
+
+  - name: list_l_true_r_lt_l_1_r
+    query: "RETURN [true] < [1] AS v"
+    expect:
+      rows:
+        - [null]
+
+  - name: list_l_1_sa_r_lt_l_1_2_r
+    query: "RETURN [1, 'a'] < [1, 2] AS v"
+    expect:
+      rows:
+        - [null]
+
+  - name: list_l_l_1_r_r_lt_l_1_r
+    query: "RETURN [[1]] < [1] AS v"
+    expect:
+      rows:
+        - [null]
+
+  - name: list_l_1_sa_r_lt_l_2_3_r
+    query: "RETURN [1, 'a'] < [2, 3] AS v"
+    expect:
+      rows:
+        - [true]

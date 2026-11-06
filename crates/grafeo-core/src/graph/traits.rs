@@ -921,6 +921,20 @@ pub trait GraphStore: Send + Sync {
         self.find_nodes_maybe_equal(property, value, view)
     }
 
+    /// The kinds of value (see
+    /// [`ValueKinds`](crate::execution::operators::value_utils::ValueKinds)) the index that
+    /// [`find_indexed_maybe_equal`](Self::find_indexed_maybe_equal) reads for `labels` and
+    /// `property` has held since it was made, deleted values too; `None` without that index, or
+    /// for a store that does not keep them, which a statement whose `=` raises across kinds then
+    /// does not read.
+    fn index_kinds(
+        &self,
+        _labels: &[&str],
+        _property: &str,
+    ) -> Option<crate::execution::operators::value_utils::ValueKinds> {
+        None
+    }
+
     /// [`find_few_nodes_maybe_equal`](Self::find_few_nodes_maybe_equal) through the index
     /// [`find_indexed_maybe_equal`](Self::find_indexed_maybe_equal) reads.
     ///
@@ -1325,16 +1339,7 @@ impl ValueRange {
     /// them; of another, by the range's rule.
     #[must_use]
     pub fn contains(&self, value: &Value) -> bool {
-        let order = |bound: &Value| {
-            compare_for_range(value, bound).or_else(|| {
-                crate::execution::operators::value_utils::order_beyond_kind(
-                    value,
-                    bound,
-                    self.across_kinds,
-                    grafeo_common::types::TemporalComparison::default(),
-                )
-            })
-        };
+        let order = |bound: &Value| self.order(value, bound);
         let above = self.min.as_ref().is_none_or(|min| match order(min) {
             Some(CmpOrdering::Greater) => true,
             Some(CmpOrdering::Equal) => self.min_inclusive,
@@ -1346,6 +1351,27 @@ impl ValueRange {
             _ => false,
         });
         above && below
+    }
+
+    /// The order of `value` against `bound` as the statement's `<` finds it; `None` when it is
+    /// unknown or neither less nor greater. Two lists, or two paths, at their first pair of
+    /// elements that are not equal, else by their lengths (see
+    /// [`walk_elements`](crate::execution::operators::value_utils::walk_elements)).
+    fn order(&self, value: &Value, bound: &Value) -> Option<CmpOrdering> {
+        use crate::execution::operators::value_utils::{
+            Walk, equals, order_beyond_kind, sequences, walk_elements,
+        };
+        if let Some((a, b)) = sequences(value, bound) {
+            let temporal = grafeo_common::types::TemporalComparison::default();
+            return match walk_elements(a, b, |x, y| {
+                (equals(x, y, temporal) != Some(true)).then(|| self.order(x, y))
+            }) {
+                Walk::Decided(order) => order,
+                Walk::Lengths(order) => Some(order),
+            };
+        }
+        compare_for_range(value, bound)
+            .or_else(|| order_beyond_kind(value, bound, self.across_kinds))
     }
 }
 

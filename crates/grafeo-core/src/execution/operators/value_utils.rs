@@ -76,6 +76,9 @@ pub fn compare_values_total(a: &Value, b: &Value) -> Ordering {
     if by_type.is_ne() {
         return by_type;
     }
+    if let Some((a, b)) = sequences(a, b) {
+        return compare_sequences(a, b);
+    }
     match (a, b) {
         (Value::Bool(a), Value::Bool(b)) => a.cmp(b),
         // A decimal among the numbers; NaN after every decimal.
@@ -97,20 +100,6 @@ pub fn compare_values_total(a: &Value, b: &Value) -> Ordering {
         (Value::Duration(a), Value::Duration(b)) => {
             (a.months(), a.days(), a.nanos()).cmp(&(b.months(), b.days(), b.nanos()))
         }
-        (Value::List(a), Value::List(b)) => compare_sequences(a.iter(), b.iter()),
-        (
-            Value::Path {
-                nodes: a_nodes,
-                edges: a_edges,
-            },
-            Value::Path {
-                nodes: b_nodes,
-                edges: b_edges,
-            },
-        ) => compare_sequences(
-            path_elements(a_nodes, a_edges),
-            path_elements(b_nodes, b_edges),
-        ),
         (Value::Map(a), Value::Map(b)) => a
             .len()
             .cmp(&b.len())
@@ -137,10 +126,84 @@ pub fn compare_values_total(a: &Value, b: &Value) -> Ordering {
 /// compared as the statement's temporal mode reads them. A null is of no kind.
 #[must_use]
 pub fn of_two_kinds(a: &Value, b: &Value) -> bool {
-    !a.is_null()
-        && !b.is_null()
-        && type_rank(a) != type_rank(b)
-        && !TemporalComparison::is_mixed_pair(a, b)
+    match (kind_of(a), kind_of(b)) {
+        (Some(a), Some(b)) => a != b,
+        _ => false,
+    }
+}
+
+/// The kind of `value` that `=` keeps apart from the others (see [`of_two_kinds`]): its type's
+/// place in the order across types, a zoned and a local datetime one kind, and a zoned and a local
+/// time one; `None` for a null.
+fn kind_of(value: &Value) -> Option<u8> {
+    match type_rank(value) {
+        NULL_RANK => None,
+        LOCAL_DATETIME_RANK => Some(ZONED_DATETIME_RANK),
+        LOCAL_TIME_RANK => Some(ZONED_TIME_RANK),
+        rank => Some(rank),
+    }
+}
+
+/// A set of the kinds `=` keeps apart (see [`of_two_kinds`]), small enough to keep in one word: a
+/// structure that answers equalities keeps the kinds it has held, so a statement whose `=` raises
+/// across kinds reads it only when the probe's kind is the only one there.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ValueKinds(u32);
+
+impl ValueKinds {
+    /// Numbers: integers, floats and decimals, one kind.
+    pub const NUMBERS: Self = Self(1 << NUMBER_RANK);
+    /// Strings.
+    pub const STRINGS: Self = Self(1 << STRING_RANK);
+
+    /// The kind of `value`; no kind for a null.
+    #[must_use]
+    pub fn of(value: &Value) -> Self {
+        kind_of(value).map_or(Self(0), |kind| Self(1 << kind))
+    }
+
+    /// The kinds of both.
+    #[must_use]
+    pub const fn union(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+
+    /// Whether it holds exactly one kind.
+    #[must_use]
+    pub const fn is_one(self) -> bool {
+        self.0.is_power_of_two()
+    }
+
+    /// Whether it holds no kind but those of `other`.
+    #[must_use]
+    pub const fn within(self, other: Self) -> bool {
+        self.0 & !other.0 == 0
+    }
+
+    /// Its bits, which [`from_bits`](Self::from_bits) reads back: a set kept in an atomic word.
+    #[must_use]
+    pub const fn bits(self) -> u32 {
+        self.0
+    }
+
+    /// The set of [`bits`](Self::bits).
+    #[must_use]
+    pub const fn from_bits(bits: u32) -> Self {
+        Self(bits)
+    }
+}
+
+/// What `=` gives two values of two kinds (see [`of_two_kinds`]): a comparison rule, which each
+/// statement's language picks, as [`AcrossKinds`] is `<`'s.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum EqualAcrossKinds {
+    /// False (ISO GQL, openCypher).
+    #[default]
+    False,
+    /// The error values not comparable (22G04): SQL's comparands must be comparable (SQL/PGQ,
+    /// ISO/IEC 9075-2 8.2 Syntax Rule 3). An answer must not depend on the plan, so a structure
+    /// answers such an equality only when it holds no value of another kind than the probe's.
+    Raises,
 }
 
 /// How `<` orders two values of two kinds (see [`of_two_kinds`]): a comparison rule, which each
@@ -153,29 +216,87 @@ pub enum AcrossKinds {
     Apart,
 }
 
-/// The order of two values that the order of one kind leaves undecided, by `across`: two values
-/// of two kinds, and two lists through their first elements that differ, where those are of two
-/// kinds. `None`: unordered (lists whose first difference is of one kind, or holds a null, stay
-/// so). `temporal` reads elements as `=` does.
+/// The order of two values of two kinds (see [`of_two_kinds`]) by `across`; `None`: unordered,
+/// and for two values of one kind, which their kind's own order compares.
 #[must_use]
-pub fn order_beyond_kind(
-    a: &Value,
-    b: &Value,
-    across: AcrossKinds,
-    temporal: TemporalComparison,
-) -> Option<Ordering> {
-    let (a, b) = match (a, b) {
-        (Value::List(left), Value::List(right)) => left
-            .iter()
-            .zip(right.iter())
-            .find(|(a, b)| equals(a, b, temporal) != Some(true))?,
-        _ => (a, b),
-    };
+pub fn order_beyond_kind(a: &Value, b: &Value, across: AcrossKinds) -> Option<Ordering> {
     match across {
         AcrossKinds::Ordered if of_two_kinds(a, b) => Some(compare_values_total(a, b)),
         _ => None,
     }
 }
+
+/// Where a walk of two sequences ends (see [`walk_elements`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Walk<R> {
+    /// At a pair of elements that are not the same, with the answer the walk's caller gave it.
+    Decided(R),
+    /// Past the end of one: no pair differed, so the lengths decide, a prefix the lesser.
+    Lengths(Ordering),
+}
+
+/// Walks two sequences element by element to the first pair `decide` answers (`Some`; `None`
+/// passes a pair as the same), or else to the end of the shorter: the one walk by which `<`,
+/// `<=`, `>`, `>=` and ORDER BY compare two lists, and two paths (ISO/IEC 39075 19.3 General Rule
+/// 2 b iv: a path compares as its list of elements), so they cannot disagree.
+pub fn walk_elements<'a, R>(
+    a: impl IntoIterator<Item = &'a Value>,
+    b: impl IntoIterator<Item = &'a Value>,
+    mut decide: impl FnMut(&'a Value, &'a Value) -> Option<R>,
+) -> Walk<R> {
+    let mut b = b.into_iter();
+    for x in a {
+        let Some(y) = b.next() else {
+            return Walk::Lengths(Ordering::Greater);
+        };
+        if let Some(answer) = decide(x, y) {
+            return Walk::Decided(answer);
+        }
+    }
+    Walk::Lengths(if b.next().is_some() {
+        Ordering::Less
+    } else {
+        Ordering::Equal
+    })
+}
+
+/// The elements of two lists, or of two paths (their nodes and edges alternating from the first
+/// node), which [`walk_elements`] walks; `None` for any other pair.
+#[must_use]
+pub fn sequences<'a>(
+    a: &'a Value,
+    b: &'a Value,
+) -> Option<(
+    impl Iterator<Item = &'a Value> + use<'a>,
+    impl Iterator<Item = &'a Value> + use<'a>,
+)> {
+    match (a, b) {
+        (Value::List(a), Value::List(b)) => Some((path_elements(a, &[]), path_elements(b, &[]))),
+        (
+            Value::Path {
+                nodes: a_nodes,
+                edges: a_edges,
+            },
+            Value::Path {
+                nodes: b_nodes,
+                edges: b_edges,
+            },
+        ) => Some((
+            path_elements(a_nodes, a_edges),
+            path_elements(b_nodes, b_edges),
+        )),
+        _ => None,
+    }
+}
+
+/// The places in the order across types that [`kind_of`] names.
+const ZONED_DATETIME_RANK: u8 = 4;
+const LOCAL_DATETIME_RANK: u8 = 5;
+const ZONED_TIME_RANK: u8 = 7;
+const LOCAL_TIME_RANK: u8 = 8;
+const STRING_RANK: u8 = 11;
+const NUMBER_RANK: u8 = 15;
+const NULL_RANK: u8 = 16;
 
 /// The position of a value's type in the order across types.
 fn type_rank(value: &Value) -> u8 {
@@ -184,18 +305,18 @@ fn type_rank(value: &Value) -> u8 {
         Value::List(_) => 1,
         Value::Path { .. } => 2,
         Value::Vector(_) => 3,
-        Value::ZonedDatetime(_) => 4,
-        Value::Timestamp(_) => 5,
+        Value::ZonedDatetime(_) => ZONED_DATETIME_RANK,
+        Value::Timestamp(_) => LOCAL_DATETIME_RANK,
         Value::Date(_) => 6,
-        Value::Time(time) if time.offset_seconds().is_some() => 7,
-        Value::Time(_) => 8,
+        Value::Time(time) if time.offset_seconds().is_some() => ZONED_TIME_RANK,
+        Value::Time(_) => LOCAL_TIME_RANK,
         Value::Duration(_) => 9,
         Value::Bytes(_) => 10,
-        Value::String(_) => 11,
+        Value::String(_) => STRING_RANK,
         Value::Bool(_) => 12,
         Value::GCounter(_) | Value::OnCounter { .. } => 13,
-        Value::Int64(_) | Value::Float64(_) | Value::Decimal(_) => 15,
-        Value::Null => 16,
+        Value::Int64(_) | Value::Float64(_) | Value::Decimal(_) => NUMBER_RANK,
+        Value::Null => NULL_RANK,
         // RDF terms: SPARQL results order them among themselves; next to other
         // types they take the place openCypher leaves for types it does not define.
         Value::RdfTerm(_) => 14,
@@ -426,29 +547,20 @@ fn compare_int_float(int: i64, float: f64) -> Ordering {
         .then_with(|| whole.partial_cmp(&float).unwrap_or(Ordering::Equal))
 }
 
-/// Compares two sequences element by element; a prefix comes first.
+/// Compares two sequences element by element in the total order; a prefix comes first.
 fn compare_sequences<'a>(
     a: impl IntoIterator<Item = &'a Value>,
     b: impl IntoIterator<Item = &'a Value>,
 ) -> Ordering {
-    let mut b = b.into_iter();
-    for x in a {
-        let Some(y) = b.next() else {
-            return Ordering::Greater;
-        };
+    match walk_elements(a, b, |x, y| {
         let order = compare_values_total(x, y);
-        if order.is_ne() {
-            return order;
-        }
-    }
-    if b.next().is_some() {
-        Ordering::Less
-    } else {
-        Ordering::Equal
+        order.is_ne().then_some(order)
+    }) {
+        Walk::Decided(order) | Walk::Lengths(order) => order,
     }
 }
 
-/// The nodes and edges of a path, alternating from its first node.
+/// The nodes and edges of a path, alternating from its first node; a list's items with no edges.
 fn path_elements<'a>(nodes: &'a [Value], edges: &'a [Value]) -> impl Iterator<Item = &'a Value> {
     nodes
         .iter()

@@ -26,6 +26,9 @@ Add `--json` for machine-readable output. Exit code 1 when an error is found.
         `[[test]]` entry with a comment saying why, not both
     T8  the Node.js package's platform folders, its `napi` targets and the release's build
         matrix name the same platforms, and its manifest lists no platform packages
+    T9  every expected failure (a gtest `xfail:`, a strict pytest xfail mark, a Rust
+        `xfail(...)`) names its spec and an issue: `#N`, or `fix in X.Y.Z` not below the
+        release CHANGELOG.md's first `## [X.Y.Z]` heading names
     D1  an added #[allow(...)] states a reason = "..."
     D2  no em or en dashes in added Markdown lines or code comments
     D3  no added references to private planning notes; no internal phase wording in docs
@@ -57,6 +60,7 @@ Standard library only (Python 3.11+). Tests: scripts/tests/test_check_policy.py.
 from __future__ import annotations
 
 import argparse
+import ast
 import json
 import os
 import re
@@ -159,6 +163,9 @@ HINTS = {
     "T6": "an experimental item has a `# Stability: Experimental` section and a row in docs/stability.md; a module the facade exports has a `# Stability` section",
     "T7": "declare a test file with `mod name;` in tests/main.rs; a separate `[[test]]` entry has a comment above it saying why it cannot be there",
     "T8": "a platform needs its target in `napi.targets`, in the build matrix of release.yml, and a folder under npm/; the release adds the platform packages to the manifest (scripts/node-platform-deps.sh)",
+    "T9": "an expected failure names its spec and an issue (`#N`, or `fix in X.Y.Z` for "
+    "the release being made or a later one); a pytest mark is `strict=True` with `raises=` "
+    'and `reason="spec: <ref>; issue: <issue>"`',
     "D1": 'add reason = "..." naming the bound or invariant that makes it safe',
     "D2": "em or en dash; rewrite with a comma, colon or parentheses",
     "D3": "public text must stand on its own; restate the content or link a public issue",
@@ -590,6 +597,282 @@ def node_package_findings(root: Path, files: list[str]) -> list[Finding]:
     return findings
 
 
+# ------------------------------------------------------------------- T9: expected failures
+
+#: `issue` of an expected failure: a GitHub issue, or the release that fixes it.
+T9_ISSUE = re.compile(r"#[1-9][0-9]*|fix in (\d+)\.(\d+)\.(\d+)")
+#: The first release heading of CHANGELOG.md, `## [X.Y.Z]` (not `## [Unreleased]`).
+T9_RELEASE_HEADING = re.compile(r"^## \[(\d+)\.(\d+)\.(\d+)\]", re.MULTILINE)
+#: A pytest mark's reason: `spec: <ref>; issue: <issue>`.
+T9_PYTEST_REASON = re.compile(r"spec:(?P<spec>[^;]*);\s*issue:(?P<issue>.*)")
+#: A Rust literal the call scanner steps over whole: a raw string, a string, a char.
+RUST_LITERAL = re.compile(
+    r'r(#*)"(?:.|\n)*?"\1|"(?:[^"\\]|\\.|\n)*"|\'(?:\\.|[^\\\'\n])\''
+)
+
+Release = tuple[int, int, int]
+
+
+def release_floor(root: Path) -> Release | None:
+    """The release being made: the first `## [X.Y.Z]` heading of CHANGELOG.md."""
+    match = T9_RELEASE_HEADING.search(read_text(root / "CHANGELOG.md") or "")
+    if not match:
+        return None
+    major, minor, patch = (int(part) for part in match.groups())
+    return major, minor, patch
+
+
+def issue_problem(issue: str, floor: Release | None) -> str | None:
+    """Why `issue` is not a valid `issue`, or None: `#N`, or `fix in X.Y.Z` not below
+    `floor` (not judged without one)."""
+    issue = issue.strip()
+    match = T9_ISSUE.fullmatch(issue)
+    if not match:
+        return f"`{issue}` is neither `#N` nor `fix in X.Y.Z`"
+    if match.group(1) is not None and floor is not None:
+        major, minor, patch = (int(part) for part in match.groups())
+        if (major, minor, patch) < floor:
+            release = ".".join(map(str, floor))
+            return f"`{issue}` names a release before {release}, the one being made"
+    return None
+
+
+def unquoted(value: str) -> str:
+    value = value.strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+        return value[1:-1]
+    return value
+
+
+def gtest_xfail_findings(rel: str, text: str, floor: Release | None) -> list[Finding]:
+    """T9 for a .gtest file: each `xfail:` key has a non-empty `spec:` and a valid `issue:`."""
+    findings = []
+    lines = text.splitlines()
+    for index, line in enumerate(lines):
+        if line.strip() != "xfail:":
+            continue
+        indent = len(line) - len(line.lstrip())
+        keys: dict[str, tuple[int, str]] = {}
+        for below in range(index + 1, len(lines)):
+            child = lines[below]
+            if not child.strip() or child.lstrip().startswith("#"):
+                continue
+            if len(child) - len(child.lstrip()) <= indent:
+                break
+            key, _, value = child.strip().partition(":")
+            keys[key.strip()] = (below + 1, unquoted(value))
+        for key in ("spec", "issue"):
+            if key not in keys:
+                findings.append(
+                    finding("T9", rel, index + 1, f"the xfail has no `{key}:`")
+                )
+        if "spec" in keys and not keys["spec"][1].strip():
+            findings.append(
+                finding("T9", rel, keys["spec"][0], "the xfail's `spec:` is empty")
+            )
+        if "issue" in keys:
+            problem = issue_problem(keys["issue"][1], floor)
+            if problem:
+                findings.append(finding("T9", rel, keys["issue"][0], problem))
+    return findings
+
+
+def dotted_name(node: ast.expr) -> str:
+    """`pytest.mark.xfail` for the expression that names it; empty for any other."""
+    parts = []
+    while isinstance(node, ast.Attribute):
+        parts.append(node.attr)
+        node = node.value
+    if not isinstance(node, ast.Name):
+        return ""
+    parts.append(node.id)
+    return ".".join(reversed(parts))
+
+
+def pytest_mark_problem(call: ast.Call) -> tuple[int, str] | None:
+    """The line and the problem of an xfail mark's arguments, or None (the issue aside)."""
+    keywords = {keyword.arg: keyword for keyword in call.keywords if keyword.arg}
+    strict = keywords.get("strict")
+    is_strict = (
+        strict is not None
+        and isinstance(strict.value, ast.Constant)
+        and strict.value.value is True
+    )
+    if not is_strict or "raises" not in keywords:
+        return call.lineno, "the xfail mark needs `strict=True` and `raises=`"
+    reason = keywords.get("reason")
+    if reason is None or not (
+        isinstance(reason.value, ast.Constant) and isinstance(reason.value.value, str)
+    ):
+        return call.lineno, "the xfail mark needs a literal `reason=`"
+    return None
+
+
+def pytest_xfail_findings(rel: str, text: str, floor: Release | None) -> list[Finding]:
+    """T9 for a Python file: each xfail mark is strict, names the error it expects and has a
+    `spec: <ref>; issue: <issue>` reason; an imperative `pytest.xfail()` is never strict."""
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return []
+    findings = []
+    called: set[int] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        called.add(id(node.func))
+        name = dotted_name(node.func)
+        if name == "pytest.xfail":
+            detail = "`pytest.xfail()` is never strict; mark the test instead"
+            findings.append(finding("T9", rel, node.lineno, detail))
+            continue
+        if name != "pytest.mark.xfail":
+            continue
+        problem = pytest_mark_problem(node)
+        if problem:
+            findings.append(finding("T9", rel, problem[0], problem[1]))
+            continue
+        reason = next(
+            keyword.value for keyword in node.keywords if keyword.arg == "reason"
+        )
+        assert isinstance(reason, ast.Constant) and isinstance(reason.value, str)
+        match = T9_PYTEST_REASON.fullmatch(reason.value.strip())
+        if not match:
+            detail = "the reason is not `spec: <ref>; issue: <issue>`"
+        elif not match.group("spec").strip():
+            detail = "the reason's spec is empty"
+        else:
+            detail = issue_problem(match.group("issue"), floor) or ""
+        if detail:
+            findings.append(finding("T9", rel, reason.lineno, detail))
+    # A mark used without arguments (`@pytest.mark.xfail`) is not strict.
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Attribute)
+            and id(node) not in called
+            and dotted_name(node) == "pytest.mark.xfail"
+        ):
+            detail = "the xfail mark needs `strict=True` and `raises=`"
+            findings.append(finding("T9", rel, node.lineno, detail))
+    return findings
+
+
+def rust_calls(text: str, name: str) -> list[tuple[int, list[tuple[int, str]]]]:
+    """The calls `name(...)` in Rust source outside comments and literals, each as its line
+    and its top-level arguments (line, text); `fn name(` and `x.name(` are not calls."""
+    call_start = re.compile(rf"(?<![\w.]){re.escape(name)}\s*\(")
+    calls = []
+    i, line, n = 0, 1, len(text)
+    while i < n:
+        if literal := RUST_LITERAL.match(text, i):
+            line += literal.group().count("\n")
+            i = literal.end()
+        elif text.startswith("//", i):
+            end = text.find("\n", i)
+            i = n if end < 0 else end
+        elif text.startswith("/*", i):
+            depth, i = 1, i + 2
+            while i < n and depth:
+                if text.startswith("/*", i):
+                    depth, i = depth + 1, i + 2
+                elif text.startswith("*/", i):
+                    depth, i = depth - 1, i + 2
+                else:
+                    line += text[i] == "\n"
+                    i += 1
+        elif (call := call_start.match(text, i)) and not re.search(
+            r"\bfn\s+$", text[max(0, i - 8) : i]
+        ):
+            calls.append((line, []))
+            i, line = rust_arguments(text, call.end(), line, calls[-1][1])
+        else:
+            line += text[i] == "\n"
+            i += 1
+    return calls
+
+
+def rust_arguments(
+    text: str, i: int, line: int, args: list[tuple[int, str]]
+) -> tuple[int, int]:
+    """Collects into `args` the top-level arguments of the call whose `(` ends before `i`;
+    the position after its `)` and the line there."""
+    depth, start, start_line = 0, i, line
+    while i < len(text):
+        if literal := RUST_LITERAL.match(text, i):
+            line += literal.group().count("\n")
+            i = literal.end()
+            continue
+        c = text[i]
+        if c in ",)" and not depth:
+            arg = text[start:i]
+            lead = arg[: len(arg) - len(arg.lstrip())]
+            if arg.strip():
+                args.append((start_line + lead.count("\n"), arg.strip()))
+            if c == ")":
+                return i + 1, line
+            start, start_line = i + 1, line
+        elif c in "([{":
+            depth += 1
+        elif c in ")]}":
+            depth -= 1
+        line += c == "\n"
+        i += 1
+    return i, line
+
+
+def rust_xfail_findings(rel: str, text: str, floor: Release | None) -> list[Finding]:
+    """T9 for a Rust file: each `xfail(spec, issue, ..)` call names a non-empty spec and a
+    valid issue, both as string literals."""
+    findings = []
+    for call_line, args in rust_calls(text, "xfail"):
+        if len(args) < 2:
+            findings.append(
+                finding("T9", rel, call_line, "the xfail names no spec and issue")
+            )
+            continue
+        for (line, arg), what in zip(args[:2], ("spec", "issue")):
+            literal = re.fullmatch(r'"((?:[^"\\]|\\.)*)"', arg)
+            if not literal:
+                detail = f"the xfail's {what} is not a string literal"
+            elif what == "spec":
+                detail = "" if literal.group(1).strip() else "the xfail's spec is empty"
+            else:
+                detail = issue_problem(literal.group(1), floor) or ""
+            if detail:
+                findings.append(finding("T9", rel, line, detail))
+    return findings
+
+
+def xfail_findings(root: Path, files: list[str]) -> list[Finding]:
+    """T9: every expected failure (a gtest `xfail:`, a pytest xfail mark, a Rust `xfail(...)`)
+    names the spec it is held against and a valid issue: `#N`, or `fix in X.Y.Z` not below
+    the release being made, the first `## [X.Y.Z]` heading of CHANGELOG.md. Without that
+    heading a `fix in X.Y.Z` cannot be judged, which is a finding of its own."""
+    floor = release_floor(root)
+    findings = []
+    placeholder = False
+    forms: list[
+        tuple[str, Callable[[str, str, Release | None], list[Finding]], str]
+    ] = [
+        (".gtest", gtest_xfail_findings, "xfail:"),
+        (".py", pytest_xfail_findings, "xfail"),
+        (".rs", rust_xfail_findings, "xfail("),
+    ]
+    for rel in files:
+        for suffix, check, needle in forms:
+            if rel.endswith(suffix):
+                text = read_text(root / rel)
+                if text and needle in text:
+                    findings += check(rel, text, floor)
+                    placeholder = placeholder or "fix in " in text
+    if floor is None and placeholder:
+        detail = (
+            "no `## [X.Y.Z]` heading names the release a `fix in X.Y.Z` is judged by"
+        )
+        findings.append(finding("T9", "CHANGELOG.md", None, detail))
+    return findings
+
+
 # ------------------------------------------------------------------ stability markers
 
 #: The crates whose code the `grafeo` facade exposes: where experimental items live.
@@ -939,6 +1222,7 @@ def tree_findings(root: Path, metadata_arg: str | None) -> list[Finding]:
     findings += stability_findings(root, files)
     findings += test_binary_findings(root, files)
     findings += node_package_findings(root, files)
+    findings += xfail_findings(root, files)
     if metadata_arg != "none" and (root / "Cargo.toml").exists():
         if metadata_arg:
             metadata = json.loads(Path(metadata_arg).read_text(encoding="utf-8"))

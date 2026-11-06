@@ -5,6 +5,7 @@ Covers: Aggregation, scalar, string, numeric, list, path, temporal functions.
 
 import math
 
+import grafeo
 import pytest
 
 # =============================================================================
@@ -518,14 +519,22 @@ class TestTemporalFunctions:
         result = list(db.execute_cypher("MATCH (n:N) RETURN day(date('2024-03-15')) AS r"))
         assert result[0]["r"] == 15
 
-    @pytest.mark.xfail(reason="Spatial types not implemented")
+    @pytest.mark.xfail(
+        strict=True,
+        raises=grafeo.GrafeoError,
+        reason="spec: #534 (point values and distance); issue: #534",
+    )
     def test_point_2d(self, db):
         """point({x, y}) 2D Cartesian."""
         db.create_node(["N"], {"v": 1})
         result = list(db.execute_cypher("MATCH (n:N) RETURN point({x: 1.0, y: 2.0}) AS r"))
         assert result[0]["r"] is not None
 
-    @pytest.mark.xfail(reason="Spatial types not implemented")
+    @pytest.mark.xfail(
+        strict=True,
+        raises=grafeo.GrafeoError,
+        reason="spec: #534 (point values and distance); issue: #534",
+    )
     def test_distance(self, db):
         """distance(point1, point2)."""
         db.create_node(["N"], {"v": 1})

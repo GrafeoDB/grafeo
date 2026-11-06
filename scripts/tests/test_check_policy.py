@@ -1302,3 +1302,331 @@ def test_t8_a_folder_with_no_manifest_is_a_folder(tmp_path: Path) -> None:
             "no napi target builds this folder",
         )
     ]
+
+
+# ------------------------------------------------------------------ T9: expected failures
+
+# T9: an expected failure names the spec it is held against and the issue that fixes it, in each
+# of its three forms: the gtest `xfail:` key, pytest's xfail mark, and the Rust `xfail(...)`
+# helper. `issue` is `#N` or `fix in X.Y.Z`, the version not below the first `## [X.Y.Z]` heading
+# of CHANGELOG.md (the release being made); a pytest mark is also strict and names the error it
+# expects, so a fixed test reports itself (XPASS) and a crash is never taken for the failure.
+
+T9_CHANGELOG = "# Changelog\n\n## [Unreleased]\n\n## [0.6.2] - Unreleased\n\n## [0.6.1] - 2026-10-30\n"
+
+T9_GTEST = """meta:
+  model: lpg
+  section: probes
+
+tests:
+  - name: a_numbered_issue
+    xfail:
+      spec: "ISO/IEC 39075 20.2"
+      issue: "#748"
+    query: "RETURN 1 AS v"
+
+  - name: the_release_being_made
+    xfail:
+      spec: "ISO/IEC 39075 20.2"
+      issue: "fix in 0.6.2"
+    query: "RETURN 1 AS v"
+
+  - name: a_later_release
+    xfail:
+      spec: "openCypher 9, 6.3"
+      issue: "fix in 0.7.0"
+    query: "RETURN 1 AS v"
+
+  - name: not_an_xfail
+    query: "RETURN 1 AS v"
+    expect:
+      rows:
+        - [1]
+
+  - name: an_empty_spec
+    xfail:
+      spec: ""
+      issue: "#748"
+    query: "RETURN 1 AS v"
+
+  - name: no_spec
+    xfail:
+      issue: "#748"
+    query: "RETURN 1 AS v"
+
+  - name: no_issue
+    xfail:
+      spec: "ISO/IEC 39075 20.2"
+    query: "RETURN 1 AS v"
+
+  - name: no_issue_yet
+    xfail:
+      spec: "ISO/IEC 39075 20.2"
+      issue: "none yet"
+    query: "RETURN 1 AS v"
+
+  - name: not_a_number
+    xfail:
+      spec: "ISO/IEC 39075 20.2"
+      issue: "#12a"
+    query: "RETURN 1 AS v"
+
+  - name: a_release_already_made
+    xfail:
+      spec: "ISO/IEC 39075 20.2"
+      issue: "fix in 0.6.1"
+    query: "RETURN 1 AS v"
+"""
+
+T9_PYTEST = """import pytest
+
+
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason="spec: ISO/IEC 39075 20.2; issue: #748")
+def test_a_numbered_issue():
+    assert False
+
+
+@pytest.mark.xfail(
+    strict=True,
+    raises=AssertionError,
+    reason="spec: openCypher 9, 6.3; issue: fix in 0.6.2",
+)
+def test_written_over_lines():
+    assert False
+
+
+@pytest.mark.parametrize(
+    "v",
+    [
+        1,
+        pytest.param(
+            2,
+            marks=pytest.mark.xfail(
+                strict=True, raises=AssertionError, reason="spec: SQL:2023 9.1; issue: #19"
+            ),
+        ),
+    ],
+)
+def test_a_param(v):
+    assert v == 1
+
+
+@pytest.mark.xfail(reason="Spatial types not implemented")
+def test_the_old_form():
+    assert False
+
+
+@pytest.mark.xfail(raises=AssertionError, reason="spec: ISO/IEC 39075 20.2; issue: #748")
+def test_not_strict():
+    assert False
+
+
+@pytest.mark.xfail(strict=True, reason="spec: ISO/IEC 39075 20.2; issue: #748")
+def test_no_raises():
+    assert False
+
+
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason="spec: ; issue: #748")
+def test_an_empty_spec():
+    assert False
+
+
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason="spec: ISO/IEC 39075 20.2; issue: soon")
+def test_no_issue_yet():
+    assert False
+
+
+@pytest.mark.xfail(
+    strict=True,
+    raises=AssertionError,
+    reason="spec: ISO/IEC 39075 20.2; issue: fix in 0.6.1",
+)
+def test_a_release_already_made_over_lines():
+    assert False
+
+
+@pytest.mark.parametrize("v", [pytest.param(3, marks=pytest.mark.xfail(reason="later"))])
+def test_an_old_param(v):
+    assert False
+
+
+def test_an_imperative_xfail():
+    pytest.xfail("not yet")
+"""
+
+T9_RUST = """/// Asserts the found value differs from the spec's while the bug is open (`xfail`).
+fn xfail<T: PartialEq + std::fmt::Debug>(spec: &str, issue: &str, found: T, expected: T) {
+    assert_ne!(found, expected, "{spec}, {issue}: fixed");
+}
+
+#[test]
+fn a_numbered_issue() {
+    xfail("ISO/IEC 39075 20.2", "#748", 1, 2);
+}
+
+#[test]
+fn written_over_lines() {
+    xfail(
+        "openCypher 9, 6.3",
+        "fix in 0.7.0",
+        1,
+        2,
+    );
+}
+
+#[test]
+fn an_empty_spec() {
+    xfail("", "#748", 1, 2);
+}
+
+#[test]
+fn no_issue_yet() {
+    xfail("ISO/IEC 39075 20.2", "none yet", 1, 2);
+}
+
+#[test]
+fn a_release_already_made_over_lines() {
+    xfail(
+        "ISO/IEC 39075 20.2",
+        "fix in 0.6.1",
+        1,
+        2,
+    );
+}
+
+#[test]
+fn not_a_literal() {
+    let spec = "ISO/IEC 39075 20.2";
+    xfail(spec, "#748", 1, 2);
+}
+"""
+
+T9_FILES = {
+    "CHANGELOG.md": T9_CHANGELOG,
+    "tests/spec/lpg/gql/xfail_rows.gtest": T9_GTEST,
+    "crates/bindings/python/tests/test_xfail_rows.py": T9_PYTEST,
+    "crates/grafeo-engine/tests/xfail_rows.rs": T9_RUST,
+}
+
+
+def t9_line(text: str, after: str, needle: str) -> int:
+    """The 1-based line of the first `needle` at or after the first line holding `after`."""
+    lines = text.splitlines()
+    start = next(i for i, line in enumerate(lines) if after in line)
+    return next(i for i in range(start, len(lines)) if needle in lines[i]) + 1
+
+
+def t9_found(tmp_path: Path, files: dict[str, str]) -> list[tuple[str, int | None]]:
+    for rel, text in files.items():
+        write_lf(tmp_path, rel, text)
+    found = check_policy.xfail_findings(tmp_path, sorted(files))
+    assert all(f.rule == "T9" for f in found), found
+    return sorted((f.path, f.line) for f in found)
+
+
+def test_t9_a_gtest_xfail_names_its_spec_and_a_valid_issue(tmp_path: Path) -> None:
+    gtest = "tests/spec/lpg/gql/xfail_rows.gtest"
+    found = [row for row in t9_found(tmp_path, T9_FILES) if row[0] == gtest]
+    assert found == sorted(
+        [
+            (gtest, t9_line(T9_GTEST, "name: an_empty_spec", "spec:")),
+            (gtest, t9_line(T9_GTEST, "name: no_spec", "xfail:")),
+            (gtest, t9_line(T9_GTEST, "name: no_issue", "xfail:")),
+            (gtest, t9_line(T9_GTEST, "name: no_issue_yet", "issue:")),
+            (gtest, t9_line(T9_GTEST, "name: not_a_number", "issue:")),
+            (gtest, t9_line(T9_GTEST, "name: a_release_already_made", "issue:")),
+        ]
+    )
+
+
+def test_t9_a_pytest_xfail_is_strict_names_its_error_its_spec_and_a_valid_issue(
+    tmp_path: Path,
+) -> None:
+    test = "crates/bindings/python/tests/test_xfail_rows.py"
+    found = [row for row in t9_found(tmp_path, T9_FILES) if row[0] == test]
+    assert found == sorted(
+        [
+            (test, t9_line(T9_PYTEST, 'reason="Spatial types', "xfail(")),
+            (test, t9_line(T9_PYTEST, "xfail(raises=AssertionError", "xfail(")),
+            (test, t9_line(T9_PYTEST, 'xfail(strict=True, reason="spec', "xfail(")),
+            (test, t9_line(T9_PYTEST, 'reason="spec: ; issue', "reason=")),
+            (test, t9_line(T9_PYTEST, "issue: soon", "reason=")),
+            (test, t9_line(T9_PYTEST, "issue: fix in 0.6.1", "reason=")),
+            (
+                test,
+                t9_line(T9_PYTEST, 'marks=pytest.mark.xfail(reason="later")', "xfail("),
+            ),
+            (test, t9_line(T9_PYTEST, 'pytest.xfail("not yet")', "xfail(")),
+        ]
+    )
+
+
+def test_t9_a_rust_xfail_names_its_spec_and_a_valid_issue_as_literals(
+    tmp_path: Path,
+) -> None:
+    rust = "crates/grafeo-engine/tests/xfail_rows.rs"
+    found = [row for row in t9_found(tmp_path, T9_FILES) if row[0] == rust]
+    assert found == sorted(
+        [
+            (rust, t9_line(T9_RUST, "fn an_empty_spec", 'xfail("", ')),
+            (rust, t9_line(T9_RUST, "fn no_issue_yet", "xfail(")),
+            (
+                rust,
+                t9_line(
+                    T9_RUST, "fn a_release_already_made_over_lines", '"fix in 0.6.1"'
+                ),
+            ),
+            (rust, t9_line(T9_RUST, "fn not_a_literal", "xfail(spec")),
+        ]
+    )
+
+
+def test_t9_without_a_release_heading_in_the_changelog_the_rule_cannot_check(
+    tmp_path: Path,
+) -> None:
+    files = {
+        "CHANGELOG.md": "# Changelog\n\n## [Unreleased]\n\nNothing yet.\n",
+        "tests/spec/lpg/gql/one.gtest": T9_GTEST.split("  - name: not_an_xfail")[0],
+    }
+    assert t9_found(tmp_path, files) == [("CHANGELOG.md", None)]
+
+
+def test_t9_the_changelog_matters_only_for_a_placeholder_version(
+    tmp_path: Path,
+) -> None:
+    """The heading is read only to judge a `fix in X.Y.Z`: with numbered issues alone neither a
+    missing heading nor a missing CHANGELOG is a finding, and a placeholder with no CHANGELOG at
+    all is the same finding as one with no heading."""
+    numbered = T9_GTEST.split("  - name: the_release_being_made")[0]
+    placeholder = T9_GTEST.split("  - name: a_later_release")[0]
+    gtest = "tests/spec/lpg/gql/one.gtest"
+    no_heading = "# Changelog\n\n## [Unreleased]\n"
+    assert t9_found(tmp_path / "a", {"CHANGELOG.md": no_heading, gtest: numbered}) == []
+    assert t9_found(tmp_path / "b", {gtest: numbered}) == []
+    assert t9_found(tmp_path / "c", {gtest: placeholder}) == [("CHANGELOG.md", None)]
+
+
+def test_t9_the_floor_is_the_first_release_heading(tmp_path: Path) -> None:
+    gtest = "tests/spec/lpg/gql/one.gtest"
+    text = """tests:
+  - name: the_release_being_made
+    xfail:
+      spec: "ISO/IEC 39075 20.2"
+      issue: "fix in 0.7.0"
+    query: "RETURN 1 AS v"
+"""
+    files = {
+        "CHANGELOG.md": "## [0.7.0] - Unreleased\n\n## [0.6.2] - 2026-11-10\n",
+        gtest: text,
+    }
+    assert t9_found(tmp_path, files) == []
+    files["CHANGELOG.md"] = "## [0.7.1] - Unreleased\n\n## [0.7.0] - 2026-12-01\n"
+    assert t9_found(tmp_path, files) == [(gtest, t9_line(text, "name:", "issue:"))]
+
+
+def test_t9_the_repository_is_in_step() -> None:
+    root = Path(__file__).resolve().parents[2]
+    files = subprocess.run(
+        ["git", "ls-files"], cwd=root, capture_output=True, text=True, check=True
+    ).stdout.splitlines()
+    assert check_policy.xfail_findings(root, files) == []

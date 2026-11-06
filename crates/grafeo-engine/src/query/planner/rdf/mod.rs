@@ -726,24 +726,33 @@ impl RdfPlanner {
         // Build the triple pattern for querying the store
         let pattern = self.build_triple_pattern(scan);
 
-        // Determine which columns are variables (and thus in output)
-        let mut columns = Vec::new();
+        // Determine which columns are variables (and thus in output). A variable repeated in
+        // the pattern is one column, and the scan keeps the rows whose positions hold the same
+        // term there.
+        let mut columns: Vec<String> = Vec::new();
         let mut output_mask = [false, false, false, false]; // s, p, o, g
-
+        let mut same_as: [Option<usize>; 4] = [None; 4];
+        let mut first_at: Vec<(&str, usize)> = Vec::with_capacity(4);
+        let graph = scan.graph.as_ref();
         for (position, component) in [&scan.subject, &scan.predicate, &scan.object]
             .into_iter()
+            .chain(graph)
             .enumerate()
         {
-            if let TripleComponent::Variable(name) = component
-                && !left_out[position]
-            {
-                columns.push(name.clone());
-                output_mask[position] = true;
+            if position < 3 && left_out[position] {
+                continue;
             }
-        }
-        if let Some(TripleComponent::Variable(name)) = &scan.graph {
-            columns.push(name.clone());
-            output_mask[3] = true;
+            let TripleComponent::Variable(name) = component else {
+                continue;
+            };
+            match first_at.iter().find(|(seen, _)| *seen == name) {
+                Some(&(_, first)) => same_as[position] = Some(first),
+                None => {
+                    first_at.push((name, position));
+                    columns.push(name.clone());
+                    output_mask[position] = true;
+                }
+            }
         }
 
         // Resolve graph context
@@ -767,6 +776,7 @@ impl RdfPlanner {
             },
             Arc::clone(&self.terms),
         )
+        .with_same_terms(same_as)
         .with_writer(self.writer.clone())
         .with_read_counter(self.read_counter());
         (scan_op, columns)
@@ -2054,6 +2064,10 @@ impl RdfPlanner {
         let s_var = scan.subject.as_variable().is_some();
         let p_var = scan.predicate.as_variable().is_some();
         let o_var = scan.object.as_variable().is_some();
+        // A variable the pattern repeats keeps fewer triples than the store counts.
+        if repeats_a_variable(scan) {
+            return None;
+        }
 
         // Per-graph count: GRAPH <iri> { ?s ?p ?o }
         if let Some(graph) = &scan.graph {
@@ -4267,6 +4281,9 @@ struct RdfTripleScanOperator {
     writer: Option<RdfWriter>,
     /// Counts the triples the scan reads.
     reads: Option<Arc<grafeo_core::execution::operators::ReadCounter>>,
+    /// For each position [s, p, o, g], the earlier position that must hold the same term: a
+    /// variable repeated in the pattern (`?x :p ?x`).
+    same_as: [Option<usize>; 4],
 }
 
 impl RdfTripleScanOperator {
@@ -4289,6 +4306,7 @@ impl RdfTripleScanOperator {
             terms,
             writer: None,
             reads: None,
+            same_as: [None; 4],
         }
     }
 
@@ -4306,7 +4324,15 @@ impl RdfTripleScanOperator {
             terms: Arc::clone(&self.terms),
             writer: self.writer.clone(),
             reads: self.reads.clone(),
+            same_as: self.same_as,
         }
+    }
+
+    /// Keeps the rows whose position `i` holds the same term as position `same_as[i]` (see
+    /// [`same_as`](Self::same_as)).
+    fn with_same_terms(mut self, same_as: [Option<usize>; 4]) -> Self {
+        self.same_as = same_as;
+        self
     }
 
     /// Makes the scan see the writes of the transaction of `writer`
@@ -4448,7 +4474,10 @@ impl Operator for RdfTripleScanOperator {
         // pending write, the ring's) gets them here. A graph name is an IRI
         // (the same for runs of rows), and a default-graph triple's graph is
         // unbound.
-        let mut last_graph: Option<(&str, Value)> = None;
+        let mut last_graph: Option<(&str, TermId)> = None;
+        let constrained = self.same_as.iter().any(Option::is_some);
+        let graph_read = self.output_mask[3] || self.same_as[3].is_some();
+        let mut kept = 0;
         for (graph, triple) in &triples[self.position..end] {
             let ids = match triple.ids() {
                 Some(ids) => ids,
@@ -4461,6 +4490,32 @@ impl Operator for RdfTripleScanOperator {
                     [ids[0], ids[1], ids[2]]
                 }
             };
+            // A graph name's id, the same for runs of rows; a default-graph triple's graph is
+            // unbound, and equals no term.
+            let graph_id = match (graph_read, graph.as_deref()) {
+                (true, Some(name)) => Some(match last_graph {
+                    Some((last, id)) if last == name => id,
+                    _ => {
+                        let id = self.terms.intern(&Term::iri(name))?;
+                        last_graph = Some((name, id));
+                        id
+                    }
+                }),
+                _ => None,
+            };
+            if constrained {
+                let id_at = |position: usize| match position {
+                    3 => graph_id,
+                    position => Some(ids[position]),
+                };
+                let holds = self.same_as.iter().enumerate().all(|(position, first)| {
+                    first.is_none_or(|first| id_at(position) == id_at(first))
+                });
+                if !holds {
+                    continue;
+                }
+            }
+            kept += 1;
             let mut col_idx = 0;
             for (component, id) in ids.into_iter().enumerate() {
                 if self.output_mask[component] {
@@ -4472,17 +4527,7 @@ impl Operator for RdfTripleScanOperator {
                 }
             }
             if self.output_mask[3] {
-                let value = match graph.as_deref() {
-                    None => Value::Null,
-                    Some(name) => match &last_graph {
-                        Some((last, id)) if *last == name => id.clone(),
-                        _ => {
-                            let id = id_value(self.terms.intern(&Term::iri(name))?);
-                            last_graph = Some((name, id.clone()));
-                            id
-                        }
-                    },
-                };
+                let value = graph_id.map_or(Value::Null, id_value);
                 chunk
                     .column_mut(col_idx)
                     .expect("column exists")
@@ -4490,7 +4535,7 @@ impl Operator for RdfTripleScanOperator {
             }
         }
 
-        chunk.set_count(batch_size);
+        chunk.set_count(kept);
         self.position = end;
 
         Ok(Some(chunk))
@@ -4513,6 +4558,20 @@ impl Operator for RdfTripleScanOperator {
 // ============================================================================
 // Helper Functions
 // ============================================================================
+
+/// Whether `scan`'s pattern names one variable in two positions (subject, predicate, object or
+/// graph).
+fn repeats_a_variable(scan: &TripleScanOp) -> bool {
+    let names: Vec<&str> = [&scan.subject, &scan.predicate, &scan.object]
+        .into_iter()
+        .chain(scan.graph.as_ref())
+        .filter_map(TripleComponent::as_variable)
+        .collect();
+    names
+        .iter()
+        .enumerate()
+        .any(|(at, name)| names[..at].contains(name))
+}
 
 /// Aligns a UNION branch to the unified columns by name, filling columns the
 /// branch does not bind with NULL.

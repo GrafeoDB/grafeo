@@ -24,6 +24,9 @@ pub(crate) use pinned_far_end::far_end_variable;
 #[cfg(feature = "triple-store")]
 mod rdf_order;
 mod rules;
+// A sameTerm between RDF columns only exists where SPARQL or the triple store does.
+#[cfg(any(feature = "sparql", feature = "triple-store"))]
+mod same_term;
 mod scanned_labels;
 mod turn_cost;
 pub(crate) use cycles::{close_cycles, plan_names};
@@ -391,6 +394,14 @@ impl Optimizer {
         // An EXISTS over the rows' variables runs once over their distinct
         // values (before the cycles: an expand into a shared variable is one).
         let root = delim::decorrelate_exists(plan.root);
+        // A `sameTerm` between two RDF columns is enforced where they first meet: a scan's
+        // repeated variable or a join key, not a filter above the join.
+        #[cfg(any(feature = "sparql", feature = "triple-store"))]
+        let root = if any_operator(&root, &|op| matches!(op, LogicalOperator::TripleScan(_))) {
+            same_term::push_same_term(root)
+        } else {
+            root
+        };
         // A plan that follows no edge has no cycle and nothing for the hop passes.
         let follows_edges = any_operator(&root, &|op| matches!(op, LogicalOperator::Expand(_)));
         // Correctness first: a pattern through a node or edge that was bound

@@ -3410,4 +3410,33 @@ for case_id, query in [
 ]:
     case(case_id, query, BOTH, "range_keys")
 
+
+# EK: a variable named twice in one pattern binds one element, on the fixture with a self-loop
+#     beside ordinary edges: the loop alone (EK1), with two labels (EK2), with a property only
+#     another node has (EK3), in EXISTS (EK4), in OPTIONAL MATCH (EK5), from a parameter (EK6).
+#     GQL and SQL/PGQ repeat elements, Cypher does not (edge isomorphism): a two-hop cycle takes
+#     the loop twice in GQL (EK7) and never in Cypher (EK8), and so do one edge variable twice
+#     (EK9, EK10) and a closed variable-length path (EK11, EK12); SQL/PGQ as GQL (EK13 to EK15)
+for case_id, query in [
+    ("EK1", "MATCH (a)-[:KNOWS]->(a) RETURN a.name AS name"),
+    ("EK2", "MATCH (a:Person)-[:KNOWS]->(a:Person) RETURN a.name AS name"),
+    ("EK3", "MATCH (a {name: 'Gus'})-[:KNOWS]->(a) RETURN a.name AS name"),
+    ("EK4", "MATCH (a) WHERE EXISTS { MATCH (a)-[:KNOWS]->(a) } RETURN a.name AS name"),
+    ("EK5", "MATCH (a:Person) OPTIONAL MATCH (a)-[r:KNOWS]->(a) RETURN a.name AS name, r.since AS since"),
+]:
+    case(case_id, query, BOTH, "loops")
+case("EK6", "MATCH (a {name: $n})-[:KNOWS]->(a) RETURN a.name AS name", BOTH, "loops", params={"n": "Mia"})
+for case_id, query, languages in [
+    ("EK7", "MATCH (a)-[:KNOWS]->(b)-[:KNOWS]->(a) RETURN a.name AS a, b.name AS b", GQL),
+    ("EK8", "MATCH (a)-[:KNOWS]->(b)-[:KNOWS]->(a) RETURN a.name AS a, b.name AS b", CYPHER),
+    ("EK9", "MATCH (a)-[e:KNOWS]->(b)-[e:KNOWS]->(c) RETURN a.name AS a, c.name AS c", GQL),
+    ("EK10", "MATCH (a)-[e:KNOWS]->(b)-[e:KNOWS]->(c) RETURN a.name AS a, c.name AS c", CYPHER),
+    ("EK11", "MATCH (a)-[:KNOWS]->{1,3}(a) RETURN a.name AS name, count(*) AS c", GQL),
+    ("EK12", "MATCH (a)-[:KNOWS*1..3]->(a) RETURN a.name AS name, count(*) AS c", CYPHER),
+    ("EK13", "SELECT * FROM GRAPH_TABLE (MATCH (a)-[:KNOWS]->(a) COLUMNS (a.name AS name))", SQL),
+    ("EK14", "SELECT * FROM GRAPH_TABLE (MATCH (a)-[e:KNOWS]->(b)-[e:KNOWS]->(c) COLUMNS (a.name AS a, c.name AS c))", SQL),
+    ("EK15", "SELECT name, count(*) AS c FROM GRAPH_TABLE (MATCH (a)-[:KNOWS]->{1,3}(a) COLUMNS (a.name AS name)) GROUP BY name", SQL),
+]:
+    case(case_id, query, languages, "loops")
+
 # fmt: on

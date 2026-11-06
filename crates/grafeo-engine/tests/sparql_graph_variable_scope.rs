@@ -4,7 +4,7 @@
 //! graph; a nested `GRAPH ?g` on a join or union path of `P` binds it and the join keeps the rows of the
 //! graph at hand. A `FILTER` on `?g` inside `P` sees it unbound, and a triple of `P` that names `?g` binds
 //! it before the join. `FROM NAMED` limits the graphs both levels range over. rdflib gives the same
-//! answers (the review's oracle) but for the `MINUS` pair inside `EXISTS`, where it follows SPARQL 1.1
+//! answers (the oracle) but for the `MINUS` pair inside `EXISTS`, where it follows SPARQL 1.1
 //! and grafeo the 1.2 draft by decision. Also #728's two SPARQL threads: a graph a transaction empties is
 //! listed alike before and after its commit, and a sub-SELECT alone in a group takes no `.` after it.
 //!
@@ -164,17 +164,26 @@ const FORMS: &[(&str, &str, &[&str])] = &[
     ),
 ];
 
-/// The plan names the graph a group reads under its hidden name, as EXPLAIN shows it: pinned, so a
-/// rename shows here.
+/// Where `?g` is a term of the group's one pattern, the scan itself enforces it (0.6.2): one scan
+/// with `?g` in the object position and no hidden graph column. Where a side may leave the column unbound (an `OPTIONAL` group), the hidden graph's
+/// check stays above the join and EXPLAIN names it under its hidden name: pinned, so a rename
+/// shows here.
 #[test]
-fn explain_names_the_hidden_graph() {
+fn explain_shows_the_hidden_graph_only_where_its_check_stays() {
     let db = with_graphs();
-    let plan = db
-        .session()
-        .execute_sparql("EXPLAIN PREFIX : <urn:> SELECT ?g ?s WHERE { GRAPH ?g { ?s :in ?g } }")
-        .unwrap();
-    let text = format!("{:?}", plan.rows());
-    assert!(text.contains("graph of GRAPH ?g at 0"), "{text}");
+    let session = db.session();
+    let plan = |query: &str| {
+        let result = session
+            .execute_sparql(&format!("EXPLAIN PREFIX : <urn:> {query}"))
+            .unwrap();
+        format!("{:?}", result.rows())
+    };
+    let object = plan("SELECT ?g ?s WHERE { GRAPH ?g { ?s :in ?g } }");
+    assert!(!object.contains("graph of GRAPH ?g"), "{object}");
+    assert!(object.contains("TripleScan"), "{object}");
+    let optional =
+        plan("SELECT ?g ?s ?x WHERE { GRAPH ?g { ?s :p ?o OPTIONAL { GRAPH ?g { ?s :q ?x } } } }");
+    assert!(optional.contains("graph of GRAPH ?g at 0"), "{optional}");
 }
 
 #[test]
@@ -207,7 +216,7 @@ fn select_star_shows_no_hidden_column() {
 }
 
 /// #728 (`rdf/named_graphs.rs:47`, b): a graph a transaction gave its only triple and then took it from
-/// again is listed alike before the commit and after it (the Architect's ruling: listed).
+/// again is listed alike before the commit and after it (ruled: listed).
 #[test]
 fn a_graph_a_transaction_empties_answers_alike_before_and_after_the_commit() {
     let db = GrafeoDB::new_in_memory();

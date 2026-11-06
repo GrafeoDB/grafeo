@@ -432,7 +432,8 @@ fn every_refusal_of_an_incremental_backup_has_its_code() {
 /// case and a code.
 #[test]
 fn the_refusal_list_matches_do_backup_incremental() {
-    let source = include_str!("../src/database/backup.rs");
+    // A Windows checkout may hold the file with CRLF line ends.
+    let source = include_str!("../src/database/backup.rs").replace("\r\n", "\n");
     let start = source
         .find("fn do_backup_incremental(")
         .expect("do_backup_incremental");

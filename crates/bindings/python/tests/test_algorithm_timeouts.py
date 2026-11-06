@@ -8,6 +8,7 @@ database answers again. One realistic case runs betweenness (hundreds of millise
 a 1 ms timeout. 0.6.1 had no deadline in the bridge: a method ran to its end whatever the timeout.
 """
 
+import math
 import random
 
 import grafeo
@@ -58,6 +59,7 @@ def calls(ids):
         "global_clustering_coefficient": lambda a: a.global_clustering_coefficient(),
         "is_dag": lambda a: a.is_dag(),
         "kcore": lambda a: a.kcore(),
+        "ktruss": lambda a: a.ktruss(),
         "kruskal": lambda a: a.kruskal(weight="w"),
         "label_propagation": lambda a: a.label_propagation(),
         "local_clustering_coefficient": lambda a: a.local_clustering_coefficient(),
@@ -68,6 +70,9 @@ def calls(ids):
         "prim": lambda a: a.prim(weight="w"),
         "sssp": lambda a: a.sssp("v0", weight_attr="w"),
         "strongly_connected_components": lambda a: a.strongly_connected_components(),
+        "subgraph_isomorphism_count": lambda a: a.subgraph_isomorphism_count(
+            [(0, 1), (1, 2), (2, 0)], 3
+        ),
         "topological_sort": lambda a: a.topological_sort(),
         "total_triangles": lambda a: a.total_triangles(),
         "triangle_count": lambda a: a.triangle_count(),
@@ -104,8 +109,10 @@ def test_a_bridge_method_stops_at_the_timeout(method, timed_out):
     assert type(raised.value) is type(reference), method
     assert raised.value.gql_status == reference.gql_status, (method, str(raised.value))
     assert "timeout" in str(raised.value).lower(), (method, str(raised.value))
-    # The database answers the next statement.
-    assert [list(r.values()) for r in db.execute("RETURN 1 AS one")] == [[1]]
+    # The database answers the next statement once it may take more than a microsecond: no
+    # statement meets a 1 microsecond deadline, whose clock starts before the setup of its run.
+    answer = db.execute("RETURN 1 AS one", timeout=math.inf)
+    assert [list(r.values()) for r in answer] == [[1]]
 
 
 def test_betweenness_stops_at_a_one_millisecond_timeout():

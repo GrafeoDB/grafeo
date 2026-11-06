@@ -28,14 +28,18 @@ BEFORE = [
     "MATCH (a:Person {name: 'Gus'}), (b:Person {name: 'Vincent'}) INSERT (a)-[:KNOWS {w: 1}]->(b)",
     "MATCH (a:Person {name: 'Vincent'}), (b:Person {name: 'Mia'}) INSERT (a)-[:KNOWS {w: 1}]->(b)",
 ]
-# Adds a node and an edge, and removes the edge that held the chain together.
+# Adds a node and two edges, and removes the edge that held the chain together. The new edges
+# close a triangle (Vincent, Mia, Butch) that has no directed cycle, so the triangle counts see the
+# change and a topological order still exists.
 CHANGE = [
     "INSERT (:Person {name: 'Butch'})",
     "MATCH (:Person {name: 'Gus'})-[e:KNOWS]->(:Person {name: 'Vincent'}) DELETE e",
     "MATCH (a:Person {name: 'Mia'}), (b:Person {name: 'Butch'}) INSERT (a)-[:KNOWS {w: 1}]->(b)",
+    "MATCH (a:Person {name: 'Vincent'}), (b:Person {name: 'Butch'}) "
+    "INSERT (a)-[:KNOWS {w: 1}]->(b)",
 ]
 EDGES_BEFORE = [("Alix", "Gus"), ("Gus", "Vincent"), ("Vincent", "Mia")]
-EDGES_AFTER = [("Alix", "Gus"), ("Vincent", "Mia"), ("Mia", "Butch")]
+EDGES_AFTER = [("Alix", "Gus"), ("Vincent", "Mia"), ("Mia", "Butch"), ("Vincent", "Butch")]
 
 # These list the catalog: the change adds no label, property or edge type.
 CATALOG = {"grafeo.labels", "grafeo.propertyKeys", "grafeo.relationshipTypes"}
@@ -66,6 +70,8 @@ def arguments_of(name):
         "grafeo.sssp": "'Alix'",
         "grafeo.max_flow": f"{alix}, {mia}",
         "grafeo.min_cost_max_flow": f"{alix}, {mia}",
+        # Its pattern is required: a triangle.
+        "grafeo.subgraph_isomorphism": "'0-1,1-2,2-0', 3",
     }.get(name, "")
 
 

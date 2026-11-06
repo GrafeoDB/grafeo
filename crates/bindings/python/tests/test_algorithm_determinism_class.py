@@ -63,6 +63,7 @@ def calls(ids):
         "global_clustering_coefficient": lambda a: a.global_clustering_coefficient(),
         "is_dag": lambda a: a.is_dag(),
         "kcore": lambda a: a.kcore(),
+        "ktruss": lambda a: a.ktruss(),
         "kruskal": lambda a: a.kruskal(weight="w"),
         "label_propagation": lambda a: a.label_propagation(),
         "local_clustering_coefficient": lambda a: a.local_clustering_coefficient(),
@@ -73,6 +74,9 @@ def calls(ids):
         "prim": lambda a: a.prim(weight="w"),
         "sssp": lambda a: a.sssp("v0", weight_attr="w"),
         "strongly_connected_components": lambda a: a.strongly_connected_components(),
+        "subgraph_isomorphism_count": lambda a: a.subgraph_isomorphism_count(
+            [(0, 1), (1, 2), (2, 0)], 3
+        ),
         "topological_sort": lambda a: a.topological_sort(),
         "total_triangles": lambda a: a.total_triangles(),
         "triangle_count": lambda a: a.triangle_count(),

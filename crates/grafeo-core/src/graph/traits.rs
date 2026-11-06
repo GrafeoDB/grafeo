@@ -954,10 +954,9 @@ pub trait GraphStore: Send + Sync {
         self.find_nodes_by_properties(conditions, view)
     }
 
-    /// The nodes `view` sees whose `property` lies within the bounds, by
-    /// ascending id. Values compare as a filter compares them: integers,
-    /// floats and decimals by value, strings, booleans and temporal values
-    /// each among their kind.
+    /// The nodes `view` sees whose `property` lies within `range`, by
+    /// ascending id. Values compare as a filter of the range's rule compares
+    /// them (see [`ValueRange`]).
     ///
     /// # Errors
     ///
@@ -965,16 +964,13 @@ pub trait GraphStore: Send + Sync {
     fn find_nodes_in_range(
         &self,
         property: &str,
-        min: Option<&Value>,
-        max: Option<&Value>,
-        min_inclusive: bool,
-        max_inclusive: bool,
+        range: &ValueRange,
         view: ReadView,
     ) -> Result<Vec<NodeId>> {
         let mut found = Vec::new();
         for id in self.node_ids(view)? {
             if let Some(value) = self.node_property(id, property, view)?
-                && value_in_range(&value, min, max, min_inclusive, max_inclusive)
+                && range.contains(&value)
             {
                 found.push(id);
             }
@@ -1292,25 +1288,65 @@ pub(crate) fn compare_for_range(a: &Value, b: &Value) -> Option<CmpOrdering> {
     }
 }
 
-/// Whether `value` lies between the bounds of a range lookup.
-pub(crate) fn value_in_range(
-    value: &Value,
-    min: Option<&Value>,
-    max: Option<&Value>,
+/// The bounds of a range read of a property, and the rule by which a value of another kind than a
+/// bound compares with it: the rule of the statement's `<`, so a range read and a filter agree
+/// (ISO GQL orders two kinds, openCypher does not; see [`AcrossKinds`]).
+///
+/// [`AcrossKinds`]: crate::execution::operators::value_utils::AcrossKinds
+#[derive(Debug, Clone)]
+pub struct ValueRange {
+    min: Option<Value>,
+    max: Option<Value>,
     min_inclusive: bool,
     max_inclusive: bool,
-) -> bool {
-    let above = min.is_none_or(|min| match compare_for_range(value, min) {
-        Some(CmpOrdering::Greater) => true,
-        Some(CmpOrdering::Equal) => min_inclusive,
-        _ => false,
-    });
-    let below = max.is_none_or(|max| match compare_for_range(value, max) {
-        Some(CmpOrdering::Less) => true,
-        Some(CmpOrdering::Equal) => max_inclusive,
-        _ => false,
-    });
-    above && below
+    across_kinds: crate::execution::operators::value_utils::AcrossKinds,
+}
+
+impl ValueRange {
+    /// A range between the bounds (`None`: open), each inclusive or not, read by `across_kinds`.
+    #[must_use]
+    pub fn new(
+        min: Option<&Value>,
+        max: Option<&Value>,
+        min_inclusive: bool,
+        max_inclusive: bool,
+        across_kinds: crate::execution::operators::value_utils::AcrossKinds,
+    ) -> Self {
+        Self {
+            min: min.cloned(),
+            max: max.cloned(),
+            min_inclusive,
+            max_inclusive,
+            across_kinds,
+        }
+    }
+
+    /// Whether `value` lies between the bounds: of one kind with a bound, as a filter compares
+    /// them; of another, by the range's rule.
+    #[must_use]
+    pub fn contains(&self, value: &Value) -> bool {
+        let order = |bound: &Value| {
+            compare_for_range(value, bound).or_else(|| {
+                crate::execution::operators::value_utils::order_beyond_kind(
+                    value,
+                    bound,
+                    self.across_kinds,
+                    grafeo_common::types::TemporalComparison::default(),
+                )
+            })
+        };
+        let above = self.min.as_ref().is_none_or(|min| match order(min) {
+            Some(CmpOrdering::Greater) => true,
+            Some(CmpOrdering::Equal) => self.min_inclusive,
+            _ => false,
+        });
+        let below = self.max.as_ref().is_none_or(|max| match order(max) {
+            Some(CmpOrdering::Less) => true,
+            Some(CmpOrdering::Equal) => self.max_inclusive,
+            _ => false,
+        });
+        above && below
+    }
 }
 
 /// A no-op [`GraphStore`] that returns empty results for all queries.
@@ -1621,10 +1657,13 @@ mod tests {
             store
                 .find_nodes_in_range(
                     "age",
-                    Some(&Value::Float64(3.0)),
-                    Some(&Value::Int64(88)),
-                    false,
-                    true,
+                    &crate::graph::ValueRange::new(
+                        Some(&Value::Float64(3.0)),
+                        Some(&Value::Int64(88)),
+                        false,
+                        true,
+                        crate::execution::operators::value_utils::AcrossKinds::Apart
+                    ),
                     NOW
                 )
                 .unwrap(),

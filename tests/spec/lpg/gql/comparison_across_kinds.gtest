@@ -975,3 +975,443 @@ tests:
     expect:
       rows:
         - [false, true]
+
+  # GQL orders two kinds by rank (GA04 step b).
+
+  - name: gql_number_against_string_ordered
+    query: "RETURN 0 < '0' AS lt, 0 <= '0' AS le, 0 > '0' AS gt, 0 >= '0' AS ge"
+    expect:
+      rows:
+        - [false, false, true, true]
+
+  - name: gql_number_against_bool_ordered
+    query: "RETURN 0 < false AS lt, 0 <= false AS le, 0 > false AS gt, 0 >= false AS ge"
+    expect:
+      rows:
+        - [false, false, true, true]
+
+  - name: gql_number_against_date_ordered
+    query: "RETURN 0 < DATE '2024-01-01' AS lt, 0 <= DATE '2024-01-01' AS le, 0 > DATE '2024-01-01' AS gt, 0 >= DATE '2024-01-01' AS ge"
+    expect:
+      rows:
+        - [false, false, true, true]
+
+  - name: gql_number_against_datetime_ordered
+    query: "RETURN 0 < DATETIME '2024-01-01T10:00:00' AS lt, 0 <= DATETIME '2024-01-01T10:00:00' AS le, 0 > DATETIME '2024-01-01T10:00:00' AS gt, 0 >= DATETIME '2024-01-01T10:00:00' AS ge"
+    expect:
+      rows:
+        - [false, false, true, true]
+
+  - name: gql_number_against_time_ordered
+    query: "RETURN 0 < TIME '10:00:00' AS lt, 0 <= TIME '10:00:00' AS le, 0 > TIME '10:00:00' AS gt, 0 >= TIME '10:00:00' AS ge"
+    expect:
+      rows:
+        - [false, false, true, true]
+
+  - name: gql_number_against_duration_ordered
+    query: "RETURN 0 < DURATION 'P1D' AS lt, 0 <= DURATION 'P1D' AS le, 0 > DURATION 'P1D' AS gt, 0 >= DURATION 'P1D' AS ge"
+    expect:
+      rows:
+        - [false, false, true, true]
+
+  - name: gql_number_against_list_ordered
+    query: "RETURN 0 < [1] AS lt, 0 <= [1] AS le, 0 > [1] AS gt, 0 >= [1] AS ge"
+    expect:
+      rows:
+        - [false, false, true, true]
+
+  - name: gql_number_against_map_ordered
+    query: "RETURN 0 < {a: 1} AS lt, 0 <= {a: 1} AS le, 0 > {a: 1} AS gt, 0 >= {a: 1} AS ge"
+    expect:
+      rows:
+        - [false, false, true, true]
+
+  - name: gql_string_against_number_ordered
+    query: "RETURN '0' < 0 AS lt, '0' <= 0 AS le, '0' > 0 AS gt, '0' >= 0 AS ge"
+    expect:
+      rows:
+        - [true, true, false, false]
+
+  - name: gql_string_against_bool_ordered
+    query: "RETURN '0' < false AS lt, '0' <= false AS le, '0' > false AS gt, '0' >= false AS ge"
+    expect:
+      rows:
+        - [true, true, false, false]
+
+  - name: gql_string_against_date_ordered
+    query: "RETURN '0' < DATE '2024-01-01' AS lt, '0' <= DATE '2024-01-01' AS le, '0' > DATE '2024-01-01' AS gt, '0' >= DATE '2024-01-01' AS ge"
+    expect:
+      rows:
+        - [false, false, true, true]
+
+  - name: gql_string_against_datetime_ordered
+    query: "RETURN '0' < DATETIME '2024-01-01T10:00:00' AS lt, '0' <= DATETIME '2024-01-01T10:00:00' AS le, '0' > DATETIME '2024-01-01T10:00:00' AS gt, '0' >= DATETIME '2024-01-01T10:00:00' AS ge"
+    expect:
+      rows:
+        - [false, false, true, true]
+
+  - name: gql_string_against_time_ordered
+    query: "RETURN '0' < TIME '10:00:00' AS lt, '0' <= TIME '10:00:00' AS le, '0' > TIME '10:00:00' AS gt, '0' >= TIME '10:00:00' AS ge"
+    expect:
+      rows:
+        - [false, false, true, true]
+
+  - name: gql_string_against_duration_ordered
+    query: "RETURN '0' < DURATION 'P1D' AS lt, '0' <= DURATION 'P1D' AS le, '0' > DURATION 'P1D' AS gt, '0' >= DURATION 'P1D' AS ge"
+    expect:
+      rows:
+        - [false, false, true, true]
+
+  - name: gql_string_against_list_ordered
+    query: "RETURN '0' < [1] AS lt, '0' <= [1] AS le, '0' > [1] AS gt, '0' >= [1] AS ge"
+    expect:
+      rows:
+        - [false, false, true, true]
+
+  - name: gql_string_against_map_ordered
+    query: "RETURN '0' < {a: 1} AS lt, '0' <= {a: 1} AS le, '0' > {a: 1} AS gt, '0' >= {a: 1} AS ge"
+    expect:
+      rows:
+        - [false, false, true, true]
+
+  - name: gql_bool_against_number_ordered
+    query: "RETURN false < 0 AS lt, false <= 0 AS le, false > 0 AS gt, false >= 0 AS ge"
+    expect:
+      rows:
+        - [true, true, false, false]
+
+  - name: gql_bool_against_string_ordered
+    query: "RETURN false < '0' AS lt, false <= '0' AS le, false > '0' AS gt, false >= '0' AS ge"
+    expect:
+      rows:
+        - [false, false, true, true]
+
+  - name: gql_bool_against_date_ordered
+    query: "RETURN false < DATE '2024-01-01' AS lt, false <= DATE '2024-01-01' AS le, false > DATE '2024-01-01' AS gt, false >= DATE '2024-01-01' AS ge"
+    expect:
+      rows:
+        - [false, false, true, true]
+
+  - name: gql_bool_against_datetime_ordered
+    query: "RETURN false < DATETIME '2024-01-01T10:00:00' AS lt, false <= DATETIME '2024-01-01T10:00:00' AS le, false > DATETIME '2024-01-01T10:00:00' AS gt, false >= DATETIME '2024-01-01T10:00:00' AS ge"
+    expect:
+      rows:
+        - [false, false, true, true]
+
+  - name: gql_bool_against_time_ordered
+    query: "RETURN false < TIME '10:00:00' AS lt, false <= TIME '10:00:00' AS le, false > TIME '10:00:00' AS gt, false >= TIME '10:00:00' AS ge"
+    expect:
+      rows:
+        - [false, false, true, true]
+
+  - name: gql_bool_against_duration_ordered
+    query: "RETURN false < DURATION 'P1D' AS lt, false <= DURATION 'P1D' AS le, false > DURATION 'P1D' AS gt, false >= DURATION 'P1D' AS ge"
+    expect:
+      rows:
+        - [false, false, true, true]
+
+  - name: gql_bool_against_list_ordered
+    query: "RETURN false < [1] AS lt, false <= [1] AS le, false > [1] AS gt, false >= [1] AS ge"
+    expect:
+      rows:
+        - [false, false, true, true]
+
+  - name: gql_bool_against_map_ordered
+    query: "RETURN false < {a: 1} AS lt, false <= {a: 1} AS le, false > {a: 1} AS gt, false >= {a: 1} AS ge"
+    expect:
+      rows:
+        - [false, false, true, true]
+
+  - name: gql_date_against_number_ordered
+    query: "RETURN DATE '2024-01-01' < 0 AS lt, DATE '2024-01-01' <= 0 AS le, DATE '2024-01-01' > 0 AS gt, DATE '2024-01-01' >= 0 AS ge"
+    expect:
+      rows:
+        - [true, true, false, false]
+
+  - name: gql_date_against_string_ordered
+    query: "RETURN DATE '2024-01-01' < '0' AS lt, DATE '2024-01-01' <= '0' AS le, DATE '2024-01-01' > '0' AS gt, DATE '2024-01-01' >= '0' AS ge"
+    expect:
+      rows:
+        - [true, true, false, false]
+
+  - name: gql_date_against_bool_ordered
+    query: "RETURN DATE '2024-01-01' < false AS lt, DATE '2024-01-01' <= false AS le, DATE '2024-01-01' > false AS gt, DATE '2024-01-01' >= false AS ge"
+    expect:
+      rows:
+        - [true, true, false, false]
+
+  - name: gql_date_against_datetime_ordered
+    query: "RETURN DATE '2024-01-01' < DATETIME '2024-01-01T10:00:00' AS lt, DATE '2024-01-01' <= DATETIME '2024-01-01T10:00:00' AS le, DATE '2024-01-01' > DATETIME '2024-01-01T10:00:00' AS gt, DATE '2024-01-01' >= DATETIME '2024-01-01T10:00:00' AS ge"
+    expect:
+      rows:
+        - [false, false, true, true]
+
+  - name: gql_date_against_time_ordered
+    query: "RETURN DATE '2024-01-01' < TIME '10:00:00' AS lt, DATE '2024-01-01' <= TIME '10:00:00' AS le, DATE '2024-01-01' > TIME '10:00:00' AS gt, DATE '2024-01-01' >= TIME '10:00:00' AS ge"
+    expect:
+      rows:
+        - [true, true, false, false]
+
+  - name: gql_date_against_duration_ordered
+    query: "RETURN DATE '2024-01-01' < DURATION 'P1D' AS lt, DATE '2024-01-01' <= DURATION 'P1D' AS le, DATE '2024-01-01' > DURATION 'P1D' AS gt, DATE '2024-01-01' >= DURATION 'P1D' AS ge"
+    expect:
+      rows:
+        - [true, true, false, false]
+
+  - name: gql_date_against_list_ordered
+    query: "RETURN DATE '2024-01-01' < [1] AS lt, DATE '2024-01-01' <= [1] AS le, DATE '2024-01-01' > [1] AS gt, DATE '2024-01-01' >= [1] AS ge"
+    expect:
+      rows:
+        - [false, false, true, true]
+
+  - name: gql_date_against_map_ordered
+    query: "RETURN DATE '2024-01-01' < {a: 1} AS lt, DATE '2024-01-01' <= {a: 1} AS le, DATE '2024-01-01' > {a: 1} AS gt, DATE '2024-01-01' >= {a: 1} AS ge"
+    expect:
+      rows:
+        - [false, false, true, true]
+
+  - name: gql_datetime_against_number_ordered
+    query: "RETURN DATETIME '2024-01-01T10:00:00' < 0 AS lt, DATETIME '2024-01-01T10:00:00' <= 0 AS le, DATETIME '2024-01-01T10:00:00' > 0 AS gt, DATETIME '2024-01-01T10:00:00' >= 0 AS ge"
+    expect:
+      rows:
+        - [true, true, false, false]
+
+  - name: gql_datetime_against_string_ordered
+    query: "RETURN DATETIME '2024-01-01T10:00:00' < '0' AS lt, DATETIME '2024-01-01T10:00:00' <= '0' AS le, DATETIME '2024-01-01T10:00:00' > '0' AS gt, DATETIME '2024-01-01T10:00:00' >= '0' AS ge"
+    expect:
+      rows:
+        - [true, true, false, false]
+
+  - name: gql_datetime_against_bool_ordered
+    query: "RETURN DATETIME '2024-01-01T10:00:00' < false AS lt, DATETIME '2024-01-01T10:00:00' <= false AS le, DATETIME '2024-01-01T10:00:00' > false AS gt, DATETIME '2024-01-01T10:00:00' >= false AS ge"
+    expect:
+      rows:
+        - [true, true, false, false]
+
+  - name: gql_datetime_against_date_ordered
+    query: "RETURN DATETIME '2024-01-01T10:00:00' < DATE '2024-01-01' AS lt, DATETIME '2024-01-01T10:00:00' <= DATE '2024-01-01' AS le, DATETIME '2024-01-01T10:00:00' > DATE '2024-01-01' AS gt, DATETIME '2024-01-01T10:00:00' >= DATE '2024-01-01' AS ge"
+    expect:
+      rows:
+        - [true, true, false, false]
+
+  - name: gql_datetime_against_time_ordered
+    query: "RETURN DATETIME '2024-01-01T10:00:00' < TIME '10:00:00' AS lt, DATETIME '2024-01-01T10:00:00' <= TIME '10:00:00' AS le, DATETIME '2024-01-01T10:00:00' > TIME '10:00:00' AS gt, DATETIME '2024-01-01T10:00:00' >= TIME '10:00:00' AS ge"
+    expect:
+      rows:
+        - [true, true, false, false]
+
+  - name: gql_datetime_against_duration_ordered
+    query: "RETURN DATETIME '2024-01-01T10:00:00' < DURATION 'P1D' AS lt, DATETIME '2024-01-01T10:00:00' <= DURATION 'P1D' AS le, DATETIME '2024-01-01T10:00:00' > DURATION 'P1D' AS gt, DATETIME '2024-01-01T10:00:00' >= DURATION 'P1D' AS ge"
+    expect:
+      rows:
+        - [true, true, false, false]
+
+  - name: gql_datetime_against_list_ordered
+    query: "RETURN DATETIME '2024-01-01T10:00:00' < [1] AS lt, DATETIME '2024-01-01T10:00:00' <= [1] AS le, DATETIME '2024-01-01T10:00:00' > [1] AS gt, DATETIME '2024-01-01T10:00:00' >= [1] AS ge"
+    expect:
+      rows:
+        - [false, false, true, true]
+
+  - name: gql_datetime_against_map_ordered
+    query: "RETURN DATETIME '2024-01-01T10:00:00' < {a: 1} AS lt, DATETIME '2024-01-01T10:00:00' <= {a: 1} AS le, DATETIME '2024-01-01T10:00:00' > {a: 1} AS gt, DATETIME '2024-01-01T10:00:00' >= {a: 1} AS ge"
+    expect:
+      rows:
+        - [false, false, true, true]
+
+  - name: gql_time_against_number_ordered
+    query: "RETURN TIME '10:00:00' < 0 AS lt, TIME '10:00:00' <= 0 AS le, TIME '10:00:00' > 0 AS gt, TIME '10:00:00' >= 0 AS ge"
+    expect:
+      rows:
+        - [true, true, false, false]
+
+  - name: gql_time_against_string_ordered
+    query: "RETURN TIME '10:00:00' < '0' AS lt, TIME '10:00:00' <= '0' AS le, TIME '10:00:00' > '0' AS gt, TIME '10:00:00' >= '0' AS ge"
+    expect:
+      rows:
+        - [true, true, false, false]
+
+  - name: gql_time_against_bool_ordered
+    query: "RETURN TIME '10:00:00' < false AS lt, TIME '10:00:00' <= false AS le, TIME '10:00:00' > false AS gt, TIME '10:00:00' >= false AS ge"
+    expect:
+      rows:
+        - [true, true, false, false]
+
+  - name: gql_time_against_date_ordered
+    query: "RETURN TIME '10:00:00' < DATE '2024-01-01' AS lt, TIME '10:00:00' <= DATE '2024-01-01' AS le, TIME '10:00:00' > DATE '2024-01-01' AS gt, TIME '10:00:00' >= DATE '2024-01-01' AS ge"
+    expect:
+      rows:
+        - [false, false, true, true]
+
+  - name: gql_time_against_datetime_ordered
+    query: "RETURN TIME '10:00:00' < DATETIME '2024-01-01T10:00:00' AS lt, TIME '10:00:00' <= DATETIME '2024-01-01T10:00:00' AS le, TIME '10:00:00' > DATETIME '2024-01-01T10:00:00' AS gt, TIME '10:00:00' >= DATETIME '2024-01-01T10:00:00' AS ge"
+    expect:
+      rows:
+        - [false, false, true, true]
+
+  - name: gql_time_against_duration_ordered
+    query: "RETURN TIME '10:00:00' < DURATION 'P1D' AS lt, TIME '10:00:00' <= DURATION 'P1D' AS le, TIME '10:00:00' > DURATION 'P1D' AS gt, TIME '10:00:00' >= DURATION 'P1D' AS ge"
+    expect:
+      rows:
+        - [true, true, false, false]
+
+  - name: gql_time_against_list_ordered
+    query: "RETURN TIME '10:00:00' < [1] AS lt, TIME '10:00:00' <= [1] AS le, TIME '10:00:00' > [1] AS gt, TIME '10:00:00' >= [1] AS ge"
+    expect:
+      rows:
+        - [false, false, true, true]
+
+  - name: gql_time_against_map_ordered
+    query: "RETURN TIME '10:00:00' < {a: 1} AS lt, TIME '10:00:00' <= {a: 1} AS le, TIME '10:00:00' > {a: 1} AS gt, TIME '10:00:00' >= {a: 1} AS ge"
+    expect:
+      rows:
+        - [false, false, true, true]
+
+  - name: gql_duration_against_number_ordered
+    query: "RETURN DURATION 'P1D' < 0 AS lt, DURATION 'P1D' <= 0 AS le, DURATION 'P1D' > 0 AS gt, DURATION 'P1D' >= 0 AS ge"
+    expect:
+      rows:
+        - [true, true, false, false]
+
+  - name: gql_duration_against_string_ordered
+    query: "RETURN DURATION 'P1D' < '0' AS lt, DURATION 'P1D' <= '0' AS le, DURATION 'P1D' > '0' AS gt, DURATION 'P1D' >= '0' AS ge"
+    expect:
+      rows:
+        - [true, true, false, false]
+
+  - name: gql_duration_against_bool_ordered
+    query: "RETURN DURATION 'P1D' < false AS lt, DURATION 'P1D' <= false AS le, DURATION 'P1D' > false AS gt, DURATION 'P1D' >= false AS ge"
+    expect:
+      rows:
+        - [true, true, false, false]
+
+  - name: gql_duration_against_date_ordered
+    query: "RETURN DURATION 'P1D' < DATE '2024-01-01' AS lt, DURATION 'P1D' <= DATE '2024-01-01' AS le, DURATION 'P1D' > DATE '2024-01-01' AS gt, DURATION 'P1D' >= DATE '2024-01-01' AS ge"
+    expect:
+      rows:
+        - [false, false, true, true]
+
+  - name: gql_duration_against_datetime_ordered
+    query: "RETURN DURATION 'P1D' < DATETIME '2024-01-01T10:00:00' AS lt, DURATION 'P1D' <= DATETIME '2024-01-01T10:00:00' AS le, DURATION 'P1D' > DATETIME '2024-01-01T10:00:00' AS gt, DURATION 'P1D' >= DATETIME '2024-01-01T10:00:00' AS ge"
+    expect:
+      rows:
+        - [false, false, true, true]
+
+  - name: gql_duration_against_time_ordered
+    query: "RETURN DURATION 'P1D' < TIME '10:00:00' AS lt, DURATION 'P1D' <= TIME '10:00:00' AS le, DURATION 'P1D' > TIME '10:00:00' AS gt, DURATION 'P1D' >= TIME '10:00:00' AS ge"
+    expect:
+      rows:
+        - [false, false, true, true]
+
+  - name: gql_duration_against_list_ordered
+    query: "RETURN DURATION 'P1D' < [1] AS lt, DURATION 'P1D' <= [1] AS le, DURATION 'P1D' > [1] AS gt, DURATION 'P1D' >= [1] AS ge"
+    expect:
+      rows:
+        - [false, false, true, true]
+
+  - name: gql_duration_against_map_ordered
+    query: "RETURN DURATION 'P1D' < {a: 1} AS lt, DURATION 'P1D' <= {a: 1} AS le, DURATION 'P1D' > {a: 1} AS gt, DURATION 'P1D' >= {a: 1} AS ge"
+    expect:
+      rows:
+        - [false, false, true, true]
+
+  - name: gql_list_against_number_ordered
+    query: "RETURN [1] < 0 AS lt, [1] <= 0 AS le, [1] > 0 AS gt, [1] >= 0 AS ge"
+    expect:
+      rows:
+        - [true, true, false, false]
+
+  - name: gql_list_against_string_ordered
+    query: "RETURN [1] < '0' AS lt, [1] <= '0' AS le, [1] > '0' AS gt, [1] >= '0' AS ge"
+    expect:
+      rows:
+        - [true, true, false, false]
+
+  - name: gql_list_against_bool_ordered
+    query: "RETURN [1] < false AS lt, [1] <= false AS le, [1] > false AS gt, [1] >= false AS ge"
+    expect:
+      rows:
+        - [true, true, false, false]
+
+  - name: gql_list_against_date_ordered
+    query: "RETURN [1] < DATE '2024-01-01' AS lt, [1] <= DATE '2024-01-01' AS le, [1] > DATE '2024-01-01' AS gt, [1] >= DATE '2024-01-01' AS ge"
+    expect:
+      rows:
+        - [true, true, false, false]
+
+  - name: gql_list_against_datetime_ordered
+    query: "RETURN [1] < DATETIME '2024-01-01T10:00:00' AS lt, [1] <= DATETIME '2024-01-01T10:00:00' AS le, [1] > DATETIME '2024-01-01T10:00:00' AS gt, [1] >= DATETIME '2024-01-01T10:00:00' AS ge"
+    expect:
+      rows:
+        - [true, true, false, false]
+
+  - name: gql_list_against_time_ordered
+    query: "RETURN [1] < TIME '10:00:00' AS lt, [1] <= TIME '10:00:00' AS le, [1] > TIME '10:00:00' AS gt, [1] >= TIME '10:00:00' AS ge"
+    expect:
+      rows:
+        - [true, true, false, false]
+
+  - name: gql_list_against_duration_ordered
+    query: "RETURN [1] < DURATION 'P1D' AS lt, [1] <= DURATION 'P1D' AS le, [1] > DURATION 'P1D' AS gt, [1] >= DURATION 'P1D' AS ge"
+    expect:
+      rows:
+        - [true, true, false, false]
+
+  - name: gql_list_against_map_ordered
+    query: "RETURN [1] < {a: 1} AS lt, [1] <= {a: 1} AS le, [1] > {a: 1} AS gt, [1] >= {a: 1} AS ge"
+    expect:
+      rows:
+        - [false, false, true, true]
+
+  - name: gql_map_against_number_ordered
+    query: "RETURN {a: 1} < 0 AS lt, {a: 1} <= 0 AS le, {a: 1} > 0 AS gt, {a: 1} >= 0 AS ge"
+    expect:
+      rows:
+        - [true, true, false, false]
+
+  - name: gql_map_against_string_ordered
+    query: "RETURN {a: 1} < '0' AS lt, {a: 1} <= '0' AS le, {a: 1} > '0' AS gt, {a: 1} >= '0' AS ge"
+    expect:
+      rows:
+        - [true, true, false, false]
+
+  - name: gql_map_against_bool_ordered
+    query: "RETURN {a: 1} < false AS lt, {a: 1} <= false AS le, {a: 1} > false AS gt, {a: 1} >= false AS ge"
+    expect:
+      rows:
+        - [true, true, false, false]
+
+  - name: gql_map_against_date_ordered
+    query: "RETURN {a: 1} < DATE '2024-01-01' AS lt, {a: 1} <= DATE '2024-01-01' AS le, {a: 1} > DATE '2024-01-01' AS gt, {a: 1} >= DATE '2024-01-01' AS ge"
+    expect:
+      rows:
+        - [true, true, false, false]
+
+  - name: gql_map_against_datetime_ordered
+    query: "RETURN {a: 1} < DATETIME '2024-01-01T10:00:00' AS lt, {a: 1} <= DATETIME '2024-01-01T10:00:00' AS le, {a: 1} > DATETIME '2024-01-01T10:00:00' AS gt, {a: 1} >= DATETIME '2024-01-01T10:00:00' AS ge"
+    expect:
+      rows:
+        - [true, true, false, false]
+
+  - name: gql_map_against_time_ordered
+    query: "RETURN {a: 1} < TIME '10:00:00' AS lt, {a: 1} <= TIME '10:00:00' AS le, {a: 1} > TIME '10:00:00' AS gt, {a: 1} >= TIME '10:00:00' AS ge"
+    expect:
+      rows:
+        - [true, true, false, false]
+
+  - name: gql_map_against_duration_ordered
+    query: "RETURN {a: 1} < DURATION 'P1D' AS lt, {a: 1} <= DURATION 'P1D' AS le, {a: 1} > DURATION 'P1D' AS gt, {a: 1} >= DURATION 'P1D' AS ge"
+    expect:
+      rows:
+        - [true, true, false, false]
+
+  - name: gql_map_against_list_ordered
+    query: "RETURN {a: 1} < [1] AS lt, {a: 1} <= [1] AS le, {a: 1} > [1] AS gt, {a: 1} >= [1] AS ge"
+    expect:
+      rows:
+        - [true, true, false, false]
+
+  - name: gql_list_with_a_number_against_list_with_a_string_ordered
+    query: "RETURN [1] < ['1'] AS lt, [1] > ['1'] AS gt"
+    expect:
+      rows:
+        - [false, true]

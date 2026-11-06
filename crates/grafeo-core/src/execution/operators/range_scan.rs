@@ -36,22 +36,19 @@
 
 use std::sync::Arc;
 
-use grafeo_common::types::{LogicalType, NodeId, ReadView, Value};
+use grafeo_common::types::{LogicalType, NodeId, ReadView};
 use grafeo_common::utils::hash::FxHashSet;
 
 use super::{Operator, OperatorError, OperatorResult, ReadCounter};
 use crate::execution::DataChunk;
-use crate::graph::GraphStore;
+use crate::graph::{GraphStore, ValueRange};
 
 /// Pull-based operator that emits node ids whose property value falls
 /// within a range. See the module docs for details.
 pub struct RangeScanOperator {
     store: Arc<dyn GraphStore>,
     property: String,
-    min: Option<Value>,
-    max: Option<Value>,
-    min_inclusive: bool,
-    max_inclusive: bool,
+    range: ValueRange,
     chunk_capacity: usize,
     /// Optional row-count cap for LIMIT pushdown (Phase 4e).
     limit: Option<usize>,
@@ -75,27 +72,17 @@ impl RangeScanOperator {
     /// `chunk_capacity` is the number of rows per emitted `DataChunk`;
     /// the standard default in this codebase is 2048.
     #[must_use]
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "the range's parts and the view it reads at; the options are builders"
-    )]
     pub fn new(
         store: Arc<dyn GraphStore>,
         property: impl Into<String>,
-        min: Option<Value>,
-        max: Option<Value>,
-        min_inclusive: bool,
-        max_inclusive: bool,
+        range: ValueRange,
         chunk_capacity: usize,
         view: ReadView,
     ) -> Self {
         Self {
             store,
             property: property.into(),
-            min,
-            max,
-            min_inclusive,
-            max_inclusive,
+            range,
             chunk_capacity,
             limit: None,
             label_filter: None,
@@ -159,15 +146,9 @@ impl RangeScanOperator {
             None => None,
         };
 
-        let (min, max) = (self.min.as_ref(), self.max.as_ref());
-        let iter = self.store.find_nodes_in_range(
-            &self.property,
-            min,
-            max,
-            self.min_inclusive,
-            self.max_inclusive,
-            self.view,
-        )?;
+        let iter = self
+            .store
+            .find_nodes_in_range(&self.property, &self.range, self.view)?;
 
         // Filter inline by label and stop only after `limit` matches
         // *survive* the filter. Applying limit before filtering would
@@ -245,6 +226,8 @@ impl Operator for RangeScanOperator {
 
 #[cfg(test)]
 mod tests {
+    use grafeo_common::types::Value;
+
     use super::*;
     use crate::graph::rowgroup::RowGroupStore;
 
@@ -271,10 +254,13 @@ mod tests {
         let mut op = RangeScanOperator::new(
             store,
             "age",
-            Some(Value::Int64(30)),
-            Some(Value::Int64(40)),
-            true,
-            true,
+            ValueRange::new(
+                Some(&Value::Int64(30)),
+                Some(&Value::Int64(40)),
+                true,
+                true,
+                crate::execution::operators::value_utils::AcrossKinds::Apart,
+            ),
             2048,
             ReadView::latest(),
         );
@@ -290,8 +276,19 @@ mod tests {
         let values: Vec<i64> = (0..100).collect();
         let store = store_with(&[("Big", "v", &values)]);
 
-        let mut op =
-            RangeScanOperator::new(store, "v", None, None, true, true, 10, ReadView::latest());
+        let mut op = RangeScanOperator::new(
+            store,
+            "v",
+            ValueRange::new(
+                None,
+                None,
+                true,
+                true,
+                crate::execution::operators::value_utils::AcrossKinds::Apart,
+            ),
+            10,
+            ReadView::latest(),
+        );
 
         let mut total = 0usize;
         let mut chunk_count = 0usize;
@@ -309,9 +306,20 @@ mod tests {
         let values: Vec<i64> = (0..1000).collect();
         let store = store_with(&[("Big", "v", &values)]);
 
-        let mut op =
-            RangeScanOperator::new(store, "v", None, None, true, true, 64, ReadView::latest())
-                .with_limit(5);
+        let mut op = RangeScanOperator::new(
+            store,
+            "v",
+            ValueRange::new(
+                None,
+                None,
+                true,
+                true,
+                crate::execution::operators::value_utils::AcrossKinds::Apart,
+            ),
+            64,
+            ReadView::latest(),
+        )
+        .with_limit(5);
 
         let mut total = 0usize;
         while let Some(chunk) = op.next().unwrap() {
@@ -326,10 +334,13 @@ mod tests {
         let mut op = RangeScanOperator::new(
             store,
             "age",
-            Some(Value::Int64(100)),
-            Some(Value::Int64(200)),
-            true,
-            true,
+            ValueRange::new(
+                Some(&Value::Int64(100)),
+                Some(&Value::Int64(200)),
+                true,
+                true,
+                crate::execution::operators::value_utils::AcrossKinds::Apart,
+            ),
             2048,
             ReadView::latest(),
         );
@@ -342,10 +353,13 @@ mod tests {
         let mut op = RangeScanOperator::new(
             store,
             "age",
-            Some(Value::Int64(25)),
-            Some(Value::Int64(45)),
-            true,
-            true,
+            ValueRange::new(
+                Some(&Value::Int64(25)),
+                Some(&Value::Int64(45)),
+                true,
+                true,
+                crate::execution::operators::value_utils::AcrossKinds::Apart,
+            ),
             2,
             ReadView::latest(),
         );
@@ -369,10 +383,13 @@ mod tests {
         let op = RangeScanOperator::new(
             store,
             "age",
-            None,
-            None,
-            true,
-            true,
+            ValueRange::new(
+                None,
+                None,
+                true,
+                true,
+                crate::execution::operators::value_utils::AcrossKinds::Apart,
+            ),
             2048,
             ReadView::latest(),
         );
@@ -386,10 +403,13 @@ mod tests {
         let op = RangeScanOperator::new(
             store,
             "age",
-            None,
-            None,
-            true,
-            true,
+            ValueRange::new(
+                None,
+                None,
+                true,
+                true,
+                crate::execution::operators::value_utils::AcrossKinds::Apart,
+            ),
             2048,
             ReadView::latest(),
         );
@@ -405,10 +425,13 @@ mod tests {
         let mut op = RangeScanOperator::new(
             Arc::clone(&store),
             "v",
-            None,
-            None,
-            true,
-            true,
+            ValueRange::new(
+                None,
+                None,
+                true,
+                true,
+                crate::execution::operators::value_utils::AcrossKinds::Apart,
+            ),
             2048,
             ReadView::latest(),
         )
@@ -419,8 +442,19 @@ mod tests {
         assert_eq!(chunk.row_count(), 3);
 
         // Sanity: without the label filter, we'd see 6 rows.
-        let mut op_no_label =
-            RangeScanOperator::new(store, "v", None, None, true, true, 2048, ReadView::latest());
+        let mut op_no_label = RangeScanOperator::new(
+            store,
+            "v",
+            ValueRange::new(
+                None,
+                None,
+                true,
+                true,
+                crate::execution::operators::value_utils::AcrossKinds::Apart,
+            ),
+            2048,
+            ReadView::latest(),
+        );
         let chunk2 = op_no_label.next().unwrap().expect("at least one chunk");
         assert_eq!(chunk2.row_count(), 6);
     }
@@ -429,9 +463,20 @@ mod tests {
     fn beatrix_range_scan_label_filter_with_disjoint_label_yields_nothing() {
         let store = store_with(&[("A", "v", &[1, 2, 3])]);
 
-        let mut op =
-            RangeScanOperator::new(store, "v", None, None, true, true, 2048, ReadView::latest())
-                .with_label_filter("Z");
+        let mut op = RangeScanOperator::new(
+            store,
+            "v",
+            ValueRange::new(
+                None,
+                None,
+                true,
+                true,
+                crate::execution::operators::value_utils::AcrossKinds::Apart,
+            ),
+            2048,
+            ReadView::latest(),
+        )
+        .with_label_filter("Z");
 
         // Label "Z" doesn't exist; intersection is empty.
         assert!(op.next().unwrap().is_none());
@@ -445,10 +490,13 @@ mod tests {
         let mut op = RangeScanOperator::new(
             Arc::clone(&store),
             "age",
-            Some(Value::Int64(25)),
-            Some(Value::Int64(45)),
-            true,
-            true,
+            ValueRange::new(
+                Some(&Value::Int64(25)),
+                Some(&Value::Int64(45)),
+                true,
+                true,
+                crate::execution::operators::value_utils::AcrossKinds::Apart,
+            ),
             2048,
             ReadView::latest(),
         );

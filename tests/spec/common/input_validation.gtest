@@ -135,6 +135,12 @@ tests:
       rows:
         - [0]
 
+  - name: numeric_string_ordered_against_a_number
+    query: "RETURN '50' < 43 AS lt"
+    expect:
+      rows:
+        - [true]
+
   - name: numeric_string_compared_with_a_number_in_cypher
     language: cypher
     requires: [cypher]

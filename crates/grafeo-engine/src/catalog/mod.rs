@@ -1600,6 +1600,26 @@ pub struct GraphTypeDefinition {
     pub open: bool,
 }
 
+impl GraphTypeDefinition {
+    /// This definition with each type it lists named by its catalog key (see
+    /// [`listed_type_key`]), each once.
+    fn listing_type_keys(mut self) -> Self {
+        let keys = |entries: Vec<String>| -> Vec<String> {
+            let mut keys: Vec<String> = Vec::with_capacity(entries.len());
+            for entry in entries {
+                let key = listed_type_key(&self.name, entry);
+                if !keys.contains(&key) {
+                    keys.push(key);
+                }
+            }
+            keys
+        };
+        self.allowed_node_types = keys(std::mem::take(&mut self.allowed_node_types));
+        self.allowed_edge_types = keys(std::mem::take(&mut self.allowed_edge_types));
+        self
+    }
+}
+
 /// Definition of a stored procedure.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ProcedureDefinition {
@@ -1909,6 +1929,7 @@ impl SchemaCatalog {
     ///
     /// Returns `CatalogError::TypeAlreadyExists` if a graph type with the same name exists.
     pub fn register_graph_type(&self, def: GraphTypeDefinition) -> Result<(), CatalogError> {
+        let def = def.listing_type_keys();
         let mut types = self.graph_types.write();
         if types.contains_key(&def.name) {
             return Err(CatalogError::TypeAlreadyExists(def.name));
@@ -1922,6 +1943,7 @@ impl SchemaCatalog {
 
     /// Registers or replaces a graph type definition.
     pub fn register_or_replace_graph_type(&self, def: GraphTypeDefinition) {
+        let def = def.listing_type_keys();
         self.graph_types.write().insert(def.name.clone(), def);
     }
 
@@ -2132,6 +2154,7 @@ impl SchemaCatalog {
         let def = types
             .get_mut(graph_type_name)
             .ok_or_else(|| CatalogError::TypeNotFound(graph_type_name.to_string()))?;
+        let node_type = listed_type_key(graph_type_name, node_type);
         if !def.allowed_node_types.contains(&node_type) {
             def.allowed_node_types.push(node_type);
         }
@@ -2152,7 +2175,8 @@ impl SchemaCatalog {
         let def = types
             .get_mut(graph_type_name)
             .ok_or_else(|| CatalogError::TypeNotFound(graph_type_name.to_string()))?;
-        def.allowed_node_types.retain(|t| t != node_type);
+        let node_type = listed_type_key(graph_type_name, node_type.to_string());
+        def.allowed_node_types.retain(|t| *t != node_type);
         Ok(())
     }
 
@@ -2170,6 +2194,7 @@ impl SchemaCatalog {
         let def = types
             .get_mut(graph_type_name)
             .ok_or_else(|| CatalogError::TypeNotFound(graph_type_name.to_string()))?;
+        let edge_type = listed_type_key(graph_type_name, edge_type);
         if !def.allowed_edge_types.contains(&edge_type) {
             def.allowed_edge_types.push(edge_type);
         }
@@ -2190,7 +2215,8 @@ impl SchemaCatalog {
         let def = types
             .get_mut(graph_type_name)
             .ok_or_else(|| CatalogError::TypeNotFound(graph_type_name.to_string()))?;
-        def.allowed_edge_types.retain(|t| t != edge_type);
+        let edge_type = listed_type_key(graph_type_name, edge_type.to_string());
+        def.allowed_edge_types.retain(|t| *t != edge_type);
         Ok(())
     }
 
@@ -2661,9 +2687,12 @@ impl CatalogConstraintValidator {
         };
         // Every spelling an index keeps apart that `==` does not, as `0.0` and `-0.0`: the
         // verdict is the same with an index and without.
-        // A value that holds a null: the index answers `=`, which finds nothing for it, where the
-        // rule treats nulls as not distinct, so the label is read.
-        let indexed = if grafeo_core::execution::operators::value_utils::holds_null(value) {
+        // A value that holds a null or a NaN: the index answers `=`, which finds nothing for a null
+        // and only the same bits for a NaN, where the rule treats nulls as not distinct and every
+        // NaN as one, so the label is read.
+        let indexed = if grafeo_core::execution::operators::value_utils::holds_null(value)
+            || grafeo_core::execution::operators::value_utils::holds_nan(value)
+        {
             None
         } else {
             store.find_few_indexed_maybe_equal(&[label], key, value, limit, view)?
@@ -3710,6 +3739,19 @@ pub(crate) fn is_current_graph_type(name: &str) -> bool {
 /// (`schema/Type`).
 pub(crate) fn unqualified(name: &str) -> &str {
     name.rsplit_once('/').map_or(name, |(_, name)| name)
+}
+
+/// The catalog key of the type `entry` names in the graph type `graph_type`. A graph type in a
+/// schema (`schema/name`) lists its types as `schema/Type`, as they are stored; 0.6.1's `ALTER
+/// GRAPH TYPE ... ADD` stored an added type bare, and its files and logs still hold such entries,
+/// which name the type in that schema. Cypher's `__current__` lists rules by label, as written.
+fn listed_type_key(graph_type: &str, entry: String) -> String {
+    match graph_type.rsplit_once('/') {
+        Some((schema, _)) if !entry.contains('/') && !is_current_graph_type(graph_type) => {
+            format!("{schema}/{entry}")
+        }
+        _ => entry,
+    }
 }
 
 /// The error for a property value over the size limit.

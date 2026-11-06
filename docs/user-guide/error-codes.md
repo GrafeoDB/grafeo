@@ -101,7 +101,8 @@ GQLSTATUS says what kind of condition it is, as SQL's SQLSTATE does:
 | `22018`   | invalid character value for cast | `CAST('Alix' AS INT64)`: text that spells no number, cast to an integer, a float or a decimal (`toInteger('Alix')` is null instead) |
 | `22G02`   | negative limit value           | `LIMIT $k` with `k = -1`                         |
 | `22G03`   | invalid value type             | `LIMIT $k` with `k = 'three'`, a procedure argument of another type |
-| `22G04`   | values not comparable          | two values a comparison cannot compare, such as a node and a number in GQL |
+| `22G04`   | values not comparable          | two values a comparison cannot compare: a node and a number under `<` in GQL, and two values of different kinds in SQL/PGQ, `=` included |
+| `22G12`   | invalid value type             | an operator or a list index given an operand of a kind it does not take, found as the statement runs: `RETURN true + 1`, `RETURN -'a'`, `RETURN [1, 2, 3][1.5]` |
 | `22000`   | data exception                 | other failures on the statement's data, such as a vector of another size than its index or a property value past its size limit |
 | `G2000`   | graph type violation           | a write the graph's schema refuses: a property of another type than its node or edge type declares, a missing `NOT NULL` property, a label, edge type or property a closed graph type does not declare, a `UNIQUE`, `NOT NULL` or key constraint |
 | `G1001`   | dependent object error: edges still exist | `DELETE` of a node that still has edges (use `DETACH DELETE`) |

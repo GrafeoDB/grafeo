@@ -620,9 +620,10 @@ fn a_closing_self_loop_answers_alike_without_backward_edges() {
 // Found while checking join_order_shapes.rs:550: booleans have no order, in some plans
 // ---------------------------------------------------------------------------
 
-/// False is below true (ISO/IEC 39075 19.3, General Rule 2, b, g). A range read of a property found
-/// them while an expression gave null, so `n.p <= true` kept rows alone and lost them behind
-/// anything else: a wrong count, the same query written in another order.
+/// False is below true (ISO/IEC 39075 19.3, General Rule 2, b, g), and a boolean takes its place in
+/// GQL's order of kinds against another: after a string, before a number. A range read of a property
+/// once found them while an expression gave null, so `n.p <= true` kept rows alone and lost them
+/// behind anything else: a wrong count, the same query written in another order. Every plan agrees.
 #[test]
 fn a_comparison_of_booleans_answers_alike_in_every_plan() {
     let db = GrafeoDB::new_in_memory();
@@ -644,11 +645,15 @@ fn a_comparison_of_booleans_answers_alike_in_every_plan() {
     };
     for (condition, want) in [
         ("n.p <= true", vec!["Bool(false)", "Bool(true)"]),
-        ("n.p >= true", vec!["Bool(true)"]),
+        ("n.p >= true", vec!["Bool(true)", "Int64(1)"]),
         ("n.p < true", vec!["Bool(false)"]),
-        ("n.p > false", vec!["Bool(true)"]),
-        ("n.p >= false", vec!["Bool(false)", "Bool(true)"]),
+        ("n.p > false", vec!["Bool(true)", "Int64(1)"]),
+        (
+            "n.p >= false",
+            vec!["Bool(false)", "Bool(true)", "Int64(1)"],
+        ),
         ("true >= n.p", vec!["Bool(false)", "Bool(true)"]),
+        ("n.p > true", vec!["Int64(1)"]),
     ] {
         for query in [
             format!("MATCH (n:T) WHERE {condition} RETURN n.p"),
@@ -660,7 +665,7 @@ fn a_comparison_of_booleans_answers_alike_in_every_plan() {
             assert_eq!(names(&query), want, "{query}");
         }
     }
-    // Null and another type stay unknown: no row, and null as a value.
+    // Null stays unknown: no row, and null as a value.
     for condition in ["n.p <= null", "n.p > null", "null >= n.p"] {
         for query in [
             format!("MATCH (n:T) WHERE {condition} RETURN n.p"),
@@ -669,13 +674,7 @@ fn a_comparison_of_booleans_answers_alike_in_every_plan() {
             assert_eq!(names(&query), Vec::<String>::new(), "{query}");
         }
     }
-    for expression in [
-        "true < 1",
-        "1 < true",
-        "true >= 'x'",
-        "true < null",
-        "null <= false",
-    ] {
+    for expression in ["true < null", "null <= false", "null > true"] {
         let query = format!("RETURN {expression} AS v");
         assert!(
             session.execute(&query).unwrap().rows()[0][0].is_null(),
@@ -689,6 +688,11 @@ fn a_comparison_of_booleans_answers_alike_in_every_plan() {
         ("true >= true", true),
         ("false >= true", false),
         ("true < false", false),
+        // A string, a boolean and a number, in GQL's order of kinds.
+        ("true < 1", true),
+        ("1 < true", false),
+        ("true >= 'x'", true),
+        ("'x' < false", true),
     ] {
         let query = format!("RETURN {expression} AS v");
         assert_eq!(

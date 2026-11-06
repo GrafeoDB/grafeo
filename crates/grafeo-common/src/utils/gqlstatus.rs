@@ -88,6 +88,9 @@ impl GqlStatus {
     /// `22G03` - invalid value type.
     pub const DATA_INVALID_VALUE_TYPE: Self = Self::from_bytes(*b"22G03");
 
+    /// `22G12` - invalid value type, of a dynamically typed operand (ISO/IEC 39075 4.14.4).
+    pub const DATA_INVALID_OPERAND_TYPE: Self = Self::from_bytes(*b"22G12");
+
     /// `22G04` - values not comparable.
     pub const DATA_VALUES_NOT_COMPARABLE: Self = Self::from_bytes(*b"22G04");
 
@@ -236,6 +239,7 @@ impl From<&super::error::Error> for GqlStatus {
                 QueryErrorKind::DivisionByZero => GqlStatus::DATA_DIVISION_BY_ZERO,
                 QueryErrorKind::NegativeLimit => GqlStatus::DATA_NEGATIVE_LIMIT,
                 QueryErrorKind::InvalidValueType => GqlStatus::DATA_INVALID_VALUE_TYPE,
+                QueryErrorKind::WrongKind => GqlStatus::DATA_INVALID_OPERAND_TYPE,
                 QueryErrorKind::InvalidTimeZoneDisplacement => {
                     GqlStatus::DATA_INVALID_TIME_ZONE_DISPLACEMENT
                 }
@@ -502,6 +506,11 @@ mod tests {
             (
                 QueryErrorKind::InvalidValueType,
                 "22G03",
+                ErrorCode::QueryExecution,
+            ),
+            (
+                QueryErrorKind::WrongKind,
+                "22G12",
                 ErrorCode::QueryExecution,
             ),
             (

@@ -763,6 +763,7 @@ impl QueryError {
             | QueryErrorKind::DivisionByZero
             | QueryErrorKind::NegativeLimit
             | QueryErrorKind::InvalidValueType
+            | QueryErrorKind::WrongKind
             | QueryErrorKind::InvalidTimeZoneDisplacement
             | QueryErrorKind::ValuesNotComparable => ErrorCode::QueryExecution,
             QueryErrorKind::Timeout => ErrorCode::QueryTimeout,
@@ -892,6 +893,10 @@ pub enum QueryErrorKind {
     /// A value of another type than the statement needs where it is used,
     /// such as a parameter or a procedure argument (GQLSTATUS 22G03).
     InvalidValueType,
+    /// An operand of a kind its operator does not take, found as the
+    /// statement runs, such as `true + 1` or `[1, 2][1.5]` (GQLSTATUS 22G12:
+    /// ISO/IEC 39075 4.14.4, the type test of a dynamically typed operand).
+    WrongKind,
     /// A time zone that is not a UTC offset (`+01:00`, `Z`, `UTC`), or one
     /// past 14 hours (GQLSTATUS 22009).
     InvalidTimeZoneDisplacement,
@@ -918,7 +923,9 @@ impl fmt::Display for QueryErrorKind {
             }
             QueryErrorKind::DivisionByZero => write!(f, "division by zero"),
             QueryErrorKind::NegativeLimit => write!(f, "negative limit value"),
-            QueryErrorKind::InvalidValueType => write!(f, "invalid value type"),
+            QueryErrorKind::InvalidValueType | QueryErrorKind::WrongKind => {
+                write!(f, "invalid value type")
+            }
             QueryErrorKind::InvalidTimeZoneDisplacement => {
                 write!(f, "invalid time zone displacement value")
             }

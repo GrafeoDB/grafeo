@@ -246,10 +246,6 @@ fn two_kinds_compare_by_the_rule() {
             }
             for language in [Language::Gql, Language::Cypher] {
                 for op in OPS {
-                    // GQL orders two kinds by rank from GA04 step b; held out until then.
-                    if matches!(language, Language::Gql) && !matches!(op, "=" | "<>") {
-                        continue;
-                    }
                     let want = across(op, (a_family, *a_rank), (b_family, *b_rank), language);
                     let found = outcome(&session, language, op, a, b);
                     checked += 1;
@@ -368,6 +364,42 @@ fn two_kinds_inside_compare_by_the_rule() {
                             "{language:?}: {x_name} {op} {y_name}: {found}, want {want}"
                         ));
                     }
+                }
+            }
+        }
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
+
+/// Step b: two lists order by their first elements that differ, so a list whose first element is a
+/// number comes after one whose first element is a string in GQL (`[1] > ['1']`, the rank of
+/// numbers above strings) and the order is null in Cypher, as `1 < '1'` is. Maps whose values differ
+/// in kind are not ordered here: no ruling yet.
+#[test]
+fn two_kinds_inside_a_list_order_by_the_rule() {
+    let db = GrafeoDB::new_in_memory();
+    let session = db.session();
+    let values = values();
+    let named = |name: &str| values.iter().find(|v| v.0 == name).unwrap().3.clone();
+    let mut wrong = Vec::new();
+    for number_list in ["list42", "list43"] {
+        let (numbers, strings) = (named(number_list), named("list44"));
+        for (op, gql_want) in [
+            ("<", "false"),
+            ("<=", "false"),
+            (">", "true"),
+            (">=", "true"),
+        ] {
+            for language in [Language::Gql, Language::Cypher] {
+                let want = match language {
+                    Language::Gql => gql_want,
+                    Language::Cypher => "null",
+                };
+                let found = outcome(&session, language, op, &numbers, &strings);
+                if found != want {
+                    wrong.push(format!(
+                        "{language:?}: {number_list} {op} list44: {found}, want {want}"
+                    ));
                 }
             }
         }
@@ -866,6 +898,13 @@ fn a_change_of_kind_in_a_transaction_is_read_by_kind() {
                 "MATCH (n:L) WHERE n.k > 40 RETURN n.row",
                 none.clone(),
                 row(0),
+            ),
+            // In GQL text orders before every number.
+            (
+                Language::Gql,
+                "MATCH (n:L) WHERE n.k < 5 RETURN n.row",
+                row(0),
+                none.clone(),
             ),
             (
                 Language::Cypher,

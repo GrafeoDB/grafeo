@@ -1,0 +1,142 @@
+# List concatenation. ISO/IEC 39075 joins two lists with `||` (list value concatenation); a null operand
+# gives null, and null elements are kept. openCypher joins with `+`, and `+` of a list and a single value
+# appends or prepends that value. Both forms read the same from literals and from stored properties.
+
+meta:
+  language: gql
+  model: lpg
+  title: List concatenation
+  dataset: empty
+
+tests:
+
+  - name: two_lists_join_with_the_concatenation_operator
+    query: "RETURN [1, 2] || [3] AS r"
+    expect:
+      rows:
+        - ["[1, 2, 3]"]
+
+  - name: an_empty_list_joins_as_nothing
+    query: "RETURN [] || [1] AS r"
+    expect:
+      rows:
+        - ["[1]"]
+
+  - name: lists_of_strings_join
+    query: "RETURN ['Alix'] || ['Gus'] AS r"
+    expect:
+      rows:
+        - ["[Alix, Gus]"]
+
+  - name: nested_lists_stay_elements
+    query: "RETURN size([[1]] || [[2, 3]]) AS r"
+    expect:
+      rows:
+        - [2]
+
+  - name: null_elements_are_kept
+    query: "RETURN size([1] || [null]) AS r"
+    expect:
+      rows:
+        - [2]
+
+  - name: a_null_operand_gives_null
+    query: "RETURN [1] || null AS r"
+    expect:
+      rows:
+        - [null]
+
+  - name: stored_lists_join
+    setup:
+      - "INSERT (:N {name: 'Mia', a: [1, 2], b: [3]})"
+    query: "MATCH (n:N) RETURN n.a || n.b AS r"
+    expect:
+      rows:
+        - ["[1, 2, 3]"]
+
+  - name: cypher_appends_a_value_to_a_list
+    language: cypher
+    requires: [cypher]
+    query: "RETURN [1, 2] + 3 AS r"
+    expect:
+      rows:
+        - ["[1, 2, 3]"]
+
+  - name: cypher_prepends_a_value_to_a_list
+    language: cypher
+    requires: [cypher]
+    query: "RETURN 0 + [1, 2] AS r"
+    expect:
+      rows:
+        - ["[0, 1, 2]"]
+
+  - name: cypher_appends_to_an_empty_list
+    language: cypher
+    requires: [cypher]
+    query: "RETURN [] + 1 AS r"
+    expect:
+      rows:
+        - ["[1]"]
+
+  - name: cypher_appends_a_string
+    language: cypher
+    requires: [cypher]
+    query: "RETURN ['Alix'] + 'Gus' AS r"
+    expect:
+      rows:
+        - ["[Alix, Gus]"]
+
+  - name: cypher_a_list_plus_a_list_of_lists_joins_one_level
+    language: cypher
+    requires: [cypher]
+    query: "RETURN size([1] + [[2]]) AS r"
+    expect:
+      rows:
+        - [2]
+
+  - name: cypher_appends_a_stored_value_to_a_stored_list
+    language: cypher
+    requires: [cypher]
+    setup:
+      - "INSERT (:N {name: 'Mia', a: [1, 2], k: 3})"
+    query: "MATCH (n:N) RETURN n.a + n.k AS r"
+    expect:
+      rows:
+        - ["[1, 2, 3]"]
+
+  - name: a_null_on_either_side_gives_null
+    query: "RETURN [1, 2] || null AS a, null || [1, 2] AS b"
+    expect:
+      rows:
+        - [null, null]
+
+  - name: a_null_element_is_kept
+    query: "RETURN [1] || [null] AS r"
+    expect:
+      rows:
+        - ["[1, null]"]
+
+  # openCypher List4, the Architect's ruling: the TCK has no null case today; follow it if one comes.
+  - name: cypher_appends_a_null
+    language: cypher
+    requires: [cypher]
+    query: "RETURN [1, 2] + null AS r"
+    expect:
+      rows:
+        - ["[1, 2, null]"]
+
+  - name: cypher_prepends_a_null
+    language: cypher
+    requires: [cypher]
+    query: "RETURN null + [1, 2] AS r"
+    expect:
+      rows:
+        - ["[null, 1, 2]"]
+
+  - name: cypher_a_null_with_a_number_stays_null
+    language: cypher
+    requires: [cypher]
+    query: "RETURN null + 1 AS a, null + null AS b"
+    expect:
+      rows:
+        - [null, null]

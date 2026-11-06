@@ -299,6 +299,8 @@ pub(crate) struct StatementPlanning {
     /// How the statement compares a zoned datetime or time with a local
     /// one, which depends on its language.
     pub(super) temporal_comparison: grafeo_common::types::TemporalComparison,
+    /// The statement's language, whose value rules apply (a stored procedure's body is GQL).
+    pub(super) language: grafeo_common::types::StatementLanguage,
     /// One instant for the statement, which every clock function reads, a
     /// body's included.
     pub(super) statement_clock: grafeo_core::execution::operators::StatementClock,
@@ -328,6 +330,7 @@ impl StatementPlanning {
             home_schema,
             home_graph,
             temporal_comparison,
+            language,
             statement_clock,
         } = self;
         let access = &session.access;
@@ -371,6 +374,7 @@ impl StatementPlanning {
             home_schema,
             home_graph,
             temporal_comparison,
+            language,
             statement_clock,
             db_info: LazyValue::new(move || {
                 super::Session::build_info_value(&*info_store, info_view)
@@ -483,6 +487,7 @@ impl SessionPlanning {
             home_schema: caller.home_schema.clone(),
             home_graph: caller.home_graph.clone(),
             temporal_comparison: self.gql_temporal_comparison,
+            language: grafeo_common::types::StatementLanguage::Gql,
             statement_clock: caller.statement_clock,
         })
     }

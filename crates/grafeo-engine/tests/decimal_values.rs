@@ -132,6 +132,23 @@ fn decimals_compare_with_every_number() {
     }
 }
 
+/// Step b of GA04: a string and a decimal order by kind in GQL, a string before a number, whatever
+/// number the string spells; in Cypher the order is null.
+#[test]
+fn a_string_and_a_decimal_order_by_kind() {
+    let db = GrafeoDB::new_in_memory();
+    let params = [("a", d("1.5"))];
+    for (language, expected) in [("gql", "Bool(true)"), ("cypher", "Null")] {
+        for query in ["RETURN '1.4' < $a AS x", "RETURN '9' < $a AS x"] {
+            assert_eq!(
+                one(&db, language, query, &params),
+                expected,
+                "{language} `{query}`"
+            );
+        }
+    }
+}
+
 #[test]
 fn decimals_order_among_the_other_numbers() {
     let db = GrafeoDB::new_in_memory();

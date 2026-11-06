@@ -40,7 +40,6 @@ use crate::index::vector::{DistanceMetric, HnswConfig};
 use crate::statistics::{EdgeTypeStatistics, LabelStatistics, Statistics};
 
 pub(super) use crate::graph::traits::compare_for_range;
-use crate::graph::traits::value_in_range as in_range;
 
 /// A count kept as a signed total, as a size.
 fn size(count: i64) -> usize {
@@ -314,10 +313,7 @@ impl Inner {
     fn nodes_in_range_at(
         &self,
         property: &str,
-        min: Option<&Value>,
-        max: Option<&Value>,
-        min_inclusive: bool,
-        max_inclusive: bool,
+        range: &crate::graph::ValueRange,
         read: Read,
     ) -> Vec<NodeId> {
         // The key's id once, not per row: no node has a key the store has
@@ -330,7 +326,7 @@ impl Inner {
                 && group
                     .columns
                     .get_at(key, row, read)
-                    .is_some_and(|value| in_range(&value, min, max, min_inclusive, max_inclusive))
+                    .is_some_and(|value| range.contains(&value))
         })
     }
 
@@ -1662,20 +1658,13 @@ impl GraphStore for RowGroupStore {
     fn find_nodes_in_range(
         &self,
         property: &str,
-        min: Option<&Value>,
-        max: Option<&Value>,
-        min_inclusive: bool,
-        max_inclusive: bool,
+        range: &crate::graph::ValueRange,
         view: ReadView,
     ) -> Result<Vec<NodeId>> {
-        Ok(self.inner.read().nodes_in_range_at(
-            property,
-            min,
-            max,
-            min_inclusive,
-            max_inclusive,
-            Read::view(view),
-        ))
+        Ok(self
+            .inner
+            .read()
+            .nodes_in_range_at(property, range, Read::view(view)))
     }
 
     fn node_property_might_match(
@@ -1853,8 +1842,9 @@ mod tests {
     use grafeo_common::types::ReadView;
     use grafeo_common::types::{ArcStr, PropertyKey, Value};
 
-    use super::in_range;
+    use crate::execution::operators::value_utils::AcrossKinds;
     use crate::graph::Direction;
+    use crate::graph::ValueRange;
     use crate::graph::conformance::{Tx, people};
     use crate::graph::rowgroup::RowGroupStore;
     use crate::graph::traits::GraphStore;
@@ -1931,10 +1921,13 @@ mod tests {
                 store
                     .find_nodes_in_range(
                         "price",
-                        Some(&decimal("197.50")),
-                        None,
-                        false,
-                        true,
+                        &crate::graph::ValueRange::new(
+                            Some(&decimal("197.50")),
+                            None,
+                            false,
+                            true,
+                            crate::execution::operators::value_utils::AcrossKinds::Apart
+                        ),
                         ReadView::latest()
                     )
                     .unwrap(),
@@ -2099,24 +2092,29 @@ mod tests {
     fn range_bounds_include_or_exclude_their_ends() {
         let (three, nineteen, eighty_eight) =
             (Value::Int64(3), Value::Int64(19), Value::Float64(88.0));
-        assert!(in_range(
-            &nineteen,
-            Some(&three),
-            Some(&eighty_eight),
-            false,
-            false
-        ));
-        assert!(in_range(&three, Some(&three), None, true, false));
-        assert!(!in_range(&three, Some(&three), None, false, false));
-        assert!(!in_range(
-            &Value::Int64(88),
-            None,
-            Some(&eighty_eight),
-            true,
-            false
-        ));
         assert!(
-            !in_range(&Value::from("Gus"), Some(&three), None, true, true),
+            ValueRange::new(
+                Some(&three),
+                Some(&eighty_eight),
+                false,
+                false,
+                AcrossKinds::Apart
+            )
+            .contains(&nineteen)
+        );
+        assert!(
+            ValueRange::new(Some(&three), None, true, false, AcrossKinds::Apart).contains(&three)
+        );
+        assert!(
+            !ValueRange::new(Some(&three), None, false, false, AcrossKinds::Apart).contains(&three)
+        );
+        assert!(
+            !ValueRange::new(None, Some(&eighty_eight), true, false, AcrossKinds::Apart)
+                .contains(&Value::Int64(88))
+        );
+        assert!(
+            !ValueRange::new(Some(&three), None, true, true, AcrossKinds::Apart)
+                .contains(&Value::from("Gus")),
             "no order between them"
         );
     }

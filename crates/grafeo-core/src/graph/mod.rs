@@ -45,7 +45,9 @@ pub mod rdf;
 
 pub use apply::{BackendTransaction, GraphBackend};
 pub use projection::{GraphProjection, ProjectionSpec};
-pub use traits::{GraphStore, KeyColumnGroup, Labels, NullGraphStore, list_self_loops_once};
+pub use traits::{
+    GraphStore, KeyColumnGroup, Labels, NullGraphStore, ValueRange, list_self_loops_once,
+};
 
 /// Controls which edges to follow during traversal.
 ///

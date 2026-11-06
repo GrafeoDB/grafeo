@@ -934,6 +934,12 @@ impl Session {
                 continue;
             }
             let kind = if is_edge { "EDGE" } else { "NODE" };
+            // Named as a statement in the schema writes them: the graph type lists only types of
+            // its own schema, which is the one the type is dropped in.
+            let (graph_type, graph) = (
+                crate::catalog::unqualified(&graph_type),
+                crate::catalog::unqualified(&graph),
+            );
             return Err(Error::from(QueryError::new(
                 QueryErrorKind::Semantic,
                 format!(
@@ -1062,13 +1068,16 @@ impl Session {
         *self.time_zone.lock() = Some(zone);
     }
 
-    /// How this session compares a zoned datetime or time with a local one:
-    /// openCypher keeps the types apart, GQL and SQL/PGQ read the local one
-    /// at the session time zone (UTC without one).
+    /// How this session compares a zoned datetime or time with a local one in a statement of
+    /// `language`: openCypher keeps the types apart, the others read the local one at the
+    /// session time zone (UTC without one).
     #[cfg(lpg_language)]
-    fn temporal_comparison(&self, open_cypher: bool) -> grafeo_common::types::TemporalComparison {
+    fn temporal_comparison(
+        &self,
+        language: grafeo_common::types::StatementLanguage,
+    ) -> grafeo_common::types::TemporalComparison {
         use grafeo_common::types::TemporalComparison;
-        if open_cypher {
+        if language == grafeo_common::types::StatementLanguage::Cypher {
             return TemporalComparison::TypesApart;
         }
         let offset = self
@@ -3284,23 +3293,29 @@ impl Session {
                     def.allowed_node_types.clone(),
                     def.allowed_edge_types.clone(),
                 );
+                // A type is named as the graph type lists it: by its key in the current
+                // schema, as CREATE GRAPH TYPE lists its types.
                 for alt in &stmt.alterations {
                     match alt {
                         GraphTypeAlteration::AddNodeType(name) => {
-                            if !def.allowed_node_types.contains(name) {
-                                def.allowed_node_types.push(name.clone());
+                            let key = self.effective_type_key(name);
+                            if !def.allowed_node_types.contains(&key) {
+                                def.allowed_node_types.push(key);
                             }
                         }
                         GraphTypeAlteration::DropNodeType(name) => {
-                            def.allowed_node_types.retain(|t| t != name);
+                            let key = self.effective_type_key(name);
+                            def.allowed_node_types.retain(|t| *t != key);
                         }
                         GraphTypeAlteration::AddEdgeType(name) => {
-                            if !def.allowed_edge_types.contains(name) {
-                                def.allowed_edge_types.push(name.clone());
+                            let key = self.effective_type_key(name);
+                            if !def.allowed_edge_types.contains(&key) {
+                                def.allowed_edge_types.push(key);
                             }
                         }
                         GraphTypeAlteration::DropEdgeType(name) => {
-                            def.allowed_edge_types.retain(|t| t != name);
+                            let key = self.effective_type_key(name);
+                            def.allowed_edge_types.retain(|t| *t != key);
                         }
                     }
                 }
@@ -4246,7 +4261,12 @@ impl Session {
         // Resolve the active store for query execution
         let active = self.active_store();
 
-        if let Some(answer) = self.explain_or_profile(&optimized_plan, &active, false, start_time) {
+        if let Some(answer) = self.explain_or_profile(
+            &optimized_plan,
+            &active,
+            grafeo_common::types::StatementLanguage::Gql,
+            start_time,
+        ) {
             return answer;
         }
 
@@ -4268,7 +4288,7 @@ impl Session {
                 viewing_epoch,
                 transaction_id,
                 read_only,
-                false,
+                grafeo_common::types::StatementLanguage::Gql,
             )?;
             let physical_plan = planner.plan(&optimized_plan)?;
 
@@ -4469,7 +4489,7 @@ impl Session {
                 viewing_epoch,
                 transaction_id,
                 !has_active_tx,
-                false,
+                grafeo_common::types::StatementLanguage::Gql,
             )?
             .for_streaming();
         let physical_plan = planner.plan(&optimized_plan)?;
@@ -4704,7 +4724,12 @@ impl Session {
         // Resolve the active store for query execution
         let active = self.active_store();
 
-        if let Some(answer) = self.explain_or_profile(&optimized_plan, &active, true, start_time) {
+        if let Some(answer) = self.explain_or_profile(
+            &optimized_plan,
+            &active,
+            grafeo_common::types::StatementLanguage::Cypher,
+            start_time,
+        ) {
             return answer;
         }
 
@@ -4719,7 +4744,7 @@ impl Session {
                 Arc::clone(&active),
                 viewing_epoch,
                 transaction_id,
-                true,
+                grafeo_common::types::StatementLanguage::Cypher,
             )?;
             let mut physical_plan = planner.plan(&optimized_plan)?;
 
@@ -4795,7 +4820,12 @@ impl Session {
         if has_mutations {
             self.require_permission(crate::auth::StatementKind::Write)?;
         }
-        if let Some(answer) = self.explain_or_profile(&optimized_plan, &active, false, start_time) {
+        if let Some(answer) = self.explain_or_profile(
+            &optimized_plan,
+            &active,
+            grafeo_common::types::StatementLanguage::Gremlin,
+            start_time,
+        ) {
             return answer;
         }
 
@@ -4808,7 +4838,7 @@ impl Session {
                 Arc::clone(&active),
                 viewing_epoch,
                 transaction_id,
-                false,
+                grafeo_common::types::StatementLanguage::Gremlin,
             )?;
             let mut physical_plan = planner.plan(&optimized_plan)?;
 
@@ -4875,7 +4905,12 @@ impl Session {
         if has_mutations {
             self.require_permission(crate::auth::StatementKind::Write)?;
         }
-        if let Some(answer) = self.explain_or_profile(&optimized_plan, &active, false, start_time) {
+        if let Some(answer) = self.explain_or_profile(
+            &optimized_plan,
+            &active,
+            grafeo_common::types::StatementLanguage::Gremlin,
+            start_time,
+        ) {
             return answer;
         }
 
@@ -4885,7 +4920,7 @@ impl Session {
                 Arc::clone(&active),
                 viewing_epoch,
                 transaction_id,
-                false,
+                grafeo_common::types::StatementLanguage::Gremlin,
             )?;
             let mut physical_plan = planner.plan(&optimized_plan)?;
             let executor = self
@@ -4965,7 +5000,7 @@ impl Session {
                 Arc::clone(&active),
                 viewing_epoch,
                 transaction_id,
-                false,
+                grafeo_common::types::StatementLanguage::GraphQl,
             )?;
             let mut physical_plan = planner.plan(&optimized_plan)?;
             let executor = self
@@ -5044,7 +5079,7 @@ impl Session {
                 Arc::clone(&active),
                 viewing_epoch,
                 transaction_id,
-                false,
+                grafeo_common::types::StatementLanguage::GraphQl,
             )?;
             let mut physical_plan = planner.plan(&optimized_plan)?;
             let executor = self
@@ -5183,7 +5218,7 @@ impl Session {
                 Arc::clone(&active),
                 viewing_epoch,
                 transaction_id,
-                false,
+                grafeo_common::types::StatementLanguage::SqlPgq,
             )?;
             let mut physical_plan = planner.plan(&optimized_plan)?;
             let executor = self
@@ -6688,7 +6723,7 @@ impl Session {
     /// What an `EXPLAIN` (the plan, with its pushdown hints) or a `PROFILE`
     /// (a run of `plan` that returns its operator tree) of `plan` answers, or
     /// `None` for a plan that runs as usual. Every language that takes the
-    /// prefixes answers them here. `open_cypher` is the planner's mode (see
+    /// prefixes answers them here. `language` is the statement's (see
     /// [`create_planner_for_store`](Self::create_planner_for_store)), and
     /// `started` when the statement began, for the profile's total time.
     #[cfg(any(feature = "gql", feature = "gremlin"))]
@@ -6696,7 +6731,7 @@ impl Session {
         &self,
         plan: &crate::query::plan::LogicalPlan,
         active: &Arc<dyn GraphStore>,
-        open_cypher: bool,
+        language: grafeo_common::types::StatementLanguage,
         started: Instant,
     ) -> Option<Result<QueryResult>> {
         if plan.explain {
@@ -6724,7 +6759,7 @@ impl Session {
                 Arc::clone(active),
                 viewing_epoch,
                 transaction_id,
-                open_cypher,
+                language,
             )?;
             let (mut physical_plan, entries) = planner.plan_profiled(plan)?;
             let executor = self
@@ -6751,14 +6786,14 @@ impl Session {
         store: Arc<dyn GraphStore>,
         viewing_epoch: EpochId,
         transaction_id: Option<TransactionId>,
-        open_cypher: bool,
+        language: grafeo_common::types::StatementLanguage,
     ) -> Result<crate::query::Planner> {
         self.create_planner_for_store_with_read_only(
             store,
             viewing_epoch,
             transaction_id,
             false,
-            open_cypher,
+            language,
         )
     }
 
@@ -6776,9 +6811,9 @@ impl Session {
         viewing_epoch: EpochId,
         transaction_id: Option<TransactionId>,
         read_only: bool,
-        open_cypher: bool,
+        language: grafeo_common::types::StatementLanguage,
     ) -> Result<crate::query::Planner> {
-        self.statement_planning(viewing_epoch, transaction_id, read_only, open_cypher)
+        self.statement_planning(viewing_epoch, transaction_id, read_only, language)
             .planner(store)
     }
 
@@ -6791,9 +6826,9 @@ impl Session {
         viewing_epoch: EpochId,
         transaction_id: Option<TransactionId>,
         read_only: bool,
-        open_cypher: bool,
+        language: grafeo_common::types::StatementLanguage,
     ) -> StatementPlanning {
-        let temporal_comparison = self.temporal_comparison(open_cypher);
+        let temporal_comparison = self.temporal_comparison(language);
         StatementPlanning {
             session: SessionPlanning {
                 access: self.graph_access(transaction_id.is_some()),
@@ -6804,11 +6839,8 @@ impl Session {
                 // A body is GQL: only an openCypher statement compares
                 // otherwise.
                 #[cfg(stored_procedures)]
-                gql_temporal_comparison: if open_cypher {
-                    self.temporal_comparison(false)
-                } else {
-                    temporal_comparison
-                },
+                gql_temporal_comparison: self
+                    .temporal_comparison(grafeo_common::types::StatementLanguage::Gql),
                 #[cfg(stored_procedures)]
                 call_depth: 0,
                 viewing_epoch,
@@ -6820,6 +6852,7 @@ impl Session {
             home_schema: self.home_schema.clone(),
             home_graph: self.home_graph.clone(),
             temporal_comparison,
+            language,
             statement_clock: grafeo_core::execution::operators::StatementClock::now(),
         }
     }

@@ -24,21 +24,26 @@ Queries that ran in 0.6.1 and now fail or behave differently.
 - **Transactions**: `START TRANSACTION`, `COMMIT` and `ROLLBACK` on a per-call `execute` are refused, `CREATE GRAPH ... AS COPY OF` is refused in a transaction, and no SPARQL statement runs after a SPARQL graph operation until the commit.
 - **A string and a number** are never equal: `'5' = 5` is false and `'5' <> 5` true, in GQL and Cypher, also in indexes, joins, `IN`, `MERGE` and upserts; `id(n) = '5'` finds nothing. In GQL, a node compared with `=` to another kind of value is false instead of an error.
 - **Lists and records holding a null** compare as unknown: `[null] = [null]` and `[1] = [null]` drop the row in a `WHERE`, and such a value matches nothing in a join or a lookup. `DISTINCT`, grouping and `UNIQUE` still treat nulls as one value.
+- **Comparing values of two kinds** with `<`, `<=`, `>` and `>=`: GQL orders them as ORDER BY does (a string before every number, a boolean before every number), with or without an index; Cypher and Gremlin answer null; SQL/PGQ raises 22G04, as do its `=` and `<>`.
+- **Wrong kinds**: an operator or list index given an operand of a kind it does not take (`true + 1`, `-'a'`, `[1, 2, 3][1.5]`) raises invalid value type (22G12) instead of answering null; a sign on a non-number reports 22G12 rather than 22G03. A null operand still gives null.
 
 ### Fixed
 
 - **Label expressions on a path's first node**: `IS`, `&`, `|`, `!`, `%` and parentheses were ignored there, so `MATCH (x IS A)-[:R]->(t)` also matched nodes without `A`, and a `SET`, `REMOVE` or `DELETE` after it changed them. All GQL and SQL/PGQ path patterns now check them (#736).
 - **Label expressions in writes**: `INSERT (n IS Person)`, `INSERT (n:A&B)` and `MERGE (n IS Person)` created a node with no labels; `IS A` and `A & B` now set those labels. Databases written before this may hold such nodes, and nodes changed or deleted by the query above, which no fix can recover: find unlabelled nodes with `MATCH (n) WHERE size(labels(n)) = 0 RETURN n`.
 - **`UNIQUE`** refuses `0.0` and `-0.0` as duplicates whether or not the property has an index.
-- **`UNIQUE`, `NODE KEY` and `MERGE`** treat `1`, `1.0` and the decimal `1.0`, and `[1]` and `[1.0]`, as one value.
+- **`UNIQUE`, `NODE KEY` and `MERGE`** treat `1`, `1.0` and the decimal `1.0`, and `[1]` and `[1.0]`, as one value, and `UNIQUE` and `NODE KEY` count every NaN, of either sign, as one value.
 - **SPARQL**: fixed a slowdown in multi-way joins from 0.6.1.
 - **SPARQL**: a `.` after a `FILTER`, `OPTIONAL`, `MINUS`, `GRAPH` or nested group parses again (#737), and `GRAPH <iri>` over a graph the dataset does not hold gives no row (#738).
 - **SPARQL**: a sub-select inside `GRAPH ?g` binds `?g` (#739), `BIND(EXISTS {...} AS ?v)` evaluates (#740), and `EXISTS` and `NOT EXISTS` read each row's values, as the SPARQL 1.2 draft says. `FROM` over two graphs returns a shared triple once, `FROM` without `FROM NAMED` exposes no named graphs, `?s :p? :o` with a constant object returns `:o` and the subjects that reach it, each once (it returned every subject of `:p`, repeated), a subquery with an aggregate gives all its rows, and nested groups keep their rows.
 - **SPARQL**: inside `GRAPH ?g { ... }`, `?g` is bound only after the group, as SPARQL says: a `FILTER` on `?g`, `?g` used as a term, and a nested `GRAPH ?g` inside `EXISTS`, `NOT EXISTS`, `OPTIONAL` or `MINUS` no longer see it bound early, which gave missing or extra rows.
 - **Booleans**: `<`, `<=`, `>` and `>=` order false below true in every plan; they could return null and lose rows.
+- **Lists**: GQL `||` concatenates lists, and Cypher `+` appends or prepends a single value to a list, a null included (`[1, 2] + 3`, `[1, 2] + null`); both gave null before.
+- **Grouping by a parameter**: a grouping key built from a parameter (`RETURN $p + 1 AS x, count(*)`, `$m.k`, `$list[0]`, `size($list)`) no longer fails with an undefined variable.
 - **Schema statements** roll back with their transaction, also across a crash (#727).
 - **Conditions that can fail**, such as `100 / n.age > 0`, no longer fail on rows a label or an earlier condition rejects.
 - **Graph type patterns**: naming an existing type no longer wipes its properties, and several patterns of one edge type no longer lose all but the last.
+- **Closed graph types in a schema**: a node or edge type added with `ALTER GRAPH TYPE ... ADD` is held like one listed by `CREATE GRAPH TYPE`, so `DROP NODE TYPE` and `DROP EDGE TYPE` refuse it while listed, and `ALTER GRAPH TYPE ... DROP` takes it out, in files written by 0.6.1 too.
 
 ### Contributors
 

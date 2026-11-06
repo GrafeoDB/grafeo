@@ -1417,6 +1417,10 @@ impl super::Planner {
     /// against one with an offset by more than its instant, so a time is
     /// never left to them.
     fn store_orders_like_query(&self, value: &Value) -> bool {
+        // SQL/PGQ raises for two kinds, which only its filter meets.
+        if self.session_context.language == grafeo_common::types::StatementLanguage::SqlPgq {
+            return false;
+        }
         match value {
             Value::Time(_) => false,
             Value::Timestamp(_) | Value::ZonedDatetime(_) => {
@@ -1446,13 +1450,23 @@ impl super::Planner {
         property: &str,
         bounds: RangeBounds<'_>,
     ) -> Result<Option<(Box<dyn Operator>, Vec<String>)>> {
+        // The statement's rule for two kinds: ISO GQL orders them, openCypher does not.
+        let across_kinds = if self.session_context.language.follows_opencypher() {
+            grafeo_core::execution::operators::value_utils::AcrossKinds::Apart
+        } else {
+            grafeo_core::execution::operators::value_utils::AcrossKinds::Ordered
+        };
+        let range = grafeo_core::graph::ValueRange::new(
+            bounds.min,
+            bounds.max,
+            bounds.min_inclusive,
+            bounds.max_inclusive,
+            across_kinds,
+        );
         let mut op = RangeScanOperator::new(
             Arc::clone(&self.store),
             property.to_string(),
-            bounds.min.cloned(),
-            bounds.max.cloned(),
-            bounds.min_inclusive,
-            bounds.max_inclusive,
+            range,
             2048,
             self.read_view(),
         )

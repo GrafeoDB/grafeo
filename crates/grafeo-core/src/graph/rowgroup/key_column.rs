@@ -132,9 +132,18 @@ impl KeyColumnQuery {
         &self.property
     }
 
-    /// Reads the rows of the labels left out too, whose indexes the caller could not read.
+    /// Reads the rows of the labels left out too, whose indexes the caller could not read. Their
+    /// nodes were to come from the indexes, so a need of one of some labels takes them in: over
+    /// `n:A|B` with A's index read, the column read B's nodes only, and now reads A's as well.
     pub fn read_every_label(&mut self) {
-        self.except.clear();
+        let left_out = std::mem::take(&mut self.except);
+        if !self.one_of.is_empty() {
+            for label in left_out {
+                if !self.one_of.contains(&label) {
+                    self.one_of.push(label);
+                }
+            }
+        }
         self.ids = None;
     }
 

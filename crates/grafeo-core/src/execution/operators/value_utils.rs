@@ -132,6 +132,51 @@ pub fn compare_values_total(a: &Value, b: &Value) -> Ordering {
     }
 }
 
+/// Whether `a` and `b` are of two kinds, which `=` keeps apart and `<` orders by each
+/// language's rule: numbers are one kind, and a zoned and a local datetime or time are one too,
+/// compared as the statement's temporal mode reads them. A null is of no kind.
+#[must_use]
+pub fn of_two_kinds(a: &Value, b: &Value) -> bool {
+    !a.is_null()
+        && !b.is_null()
+        && type_rank(a) != type_rank(b)
+        && !TemporalComparison::is_mixed_pair(a, b)
+}
+
+/// How `<` orders two values of two kinds (see [`of_two_kinds`]): a comparison rule, which each
+/// statement's language picks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AcrossKinds {
+    /// By the order across kinds that ORDER BY, `min` and `max` use (ISO GQL).
+    Ordered,
+    /// Not at all: the comparison is unknown (openCypher).
+    Apart,
+}
+
+/// The order of two values that the order of one kind leaves undecided, by `across`: two values
+/// of two kinds, and two lists through their first elements that differ, where those are of two
+/// kinds. `None`: unordered (lists whose first difference is of one kind, or holds a null, stay
+/// so). `temporal` reads elements as `=` does.
+#[must_use]
+pub fn order_beyond_kind(
+    a: &Value,
+    b: &Value,
+    across: AcrossKinds,
+    temporal: TemporalComparison,
+) -> Option<Ordering> {
+    let (a, b) = match (a, b) {
+        (Value::List(left), Value::List(right)) => left
+            .iter()
+            .zip(right.iter())
+            .find(|(a, b)| equals(a, b, temporal) != Some(true))?,
+        _ => (a, b),
+    };
+    match across {
+        AcrossKinds::Ordered if of_two_kinds(a, b) => Some(compare_values_total(a, b)),
+        _ => None,
+    }
+}
+
 /// The position of a value's type in the order across types.
 fn type_rank(value: &Value) -> u8 {
     match value {
@@ -263,6 +308,21 @@ pub fn holds_null(value: &Value) -> bool {
         Value::List(items) => items.iter().any(holds_null),
         Value::Map(map) => map.values().any(holds_null),
         Value::Path { nodes, edges } => nodes.iter().chain(edges.iter()).any(holds_null),
+        _ => false,
+    }
+}
+
+/// Whether `value` is a NaN or holds one at any depth, a vector's item too: `=` finds a NaN
+/// equal to nothing, so an index lookup finds at most the same bits, where the grouping form
+/// (UNIQUE, NODE KEY, `GROUP BY`) takes every NaN, of either sign and any payload, as one.
+#[must_use]
+pub fn holds_nan(value: &Value) -> bool {
+    match value {
+        Value::Float64(float) => float.is_nan(),
+        Value::Vector(items) => items.iter().any(|item| item.is_nan()),
+        Value::List(items) => items.iter().any(holds_nan),
+        Value::Map(map) => map.values().any(holds_nan),
+        Value::Path { nodes, edges } => nodes.iter().chain(edges.iter()).any(holds_nan),
         _ => false,
     }
 }

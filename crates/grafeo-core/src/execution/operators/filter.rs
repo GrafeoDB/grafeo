@@ -12,7 +12,7 @@ use crate::graph::GraphStore;
 use crate::graph::lpg::{Edge, Node};
 use grafeo_common::types::{
     Decimal, DecimalError, EdgeId, HashableValue, LogicalType, NodeId, PropertyDataType,
-    PropertyKey, PropertyMap, ReadView, TemporalComparison, Value, ValueType,
+    PropertyKey, PropertyMap, ReadView, StatementLanguage, TemporalComparison, Value, ValueType,
 };
 use grafeo_common::utils::hash::FxHashMap;
 #[cfg(feature = "regex")]
@@ -395,12 +395,52 @@ fn binary_text(left: &Value, op: BinaryFilterOp, right: &Value) -> String {
     format!("{left} {symbol} {right}")
 }
 
+/// The list of `first`'s items, then `second`'s.
+fn joined(first: &[Value], second: &[Value]) -> Value {
+    let mut items = Vec::with_capacity(first.len() + second.len());
+    items.extend_from_slice(first);
+    items.extend_from_slice(second);
+    Value::List(items.into())
+}
+
 /// The error of a unary `sign` on a value that is neither a number nor a
-/// duration: a type error (22G03), as ISO GQL makes it a data exception.
+/// duration: invalid value type (22G12, see [`wrong_kinds`]).
 fn sign_of_a_non_number(sign: char, value: &Value) -> OperatorError {
-    OperatorError::invalid_value_type(format!(
+    OperatorError::wrong_kind(format!(
         "unary {sign} takes a number or a duration, got a {} value: {sign}{value}",
         value.type_name()
+    ))
+}
+
+/// The error of `op` given two operands of kinds it does not take, found as the statement runs:
+/// invalid value type (22G12), as ISO/IEC 39075 4.14.4 makes the type test of a dynamically
+/// typed operand raise, and openCypher a type error. Neither operand is null: a null answers
+/// null first.
+fn wrong_kinds(left: &Value, op: BinaryFilterOp, right: &Value) -> OperatorError {
+    OperatorError::wrong_kind(format!(
+        "no {} of {} and {}: {}",
+        match op {
+            BinaryFilterOp::Add => "sum",
+            BinaryFilterOp::Sub => "difference",
+            BinaryFilterOp::Mul => "product",
+            BinaryFilterOp::Div => "quotient",
+            BinaryFilterOp::Mod => "remainder",
+            BinaryFilterOp::Concat => "concatenation",
+            _ => "result",
+        },
+        left.type_name(),
+        right.type_name(),
+        binary_text(left, op, right)
+    ))
+}
+
+/// The error of a list or a string indexed by something other than an integer: invalid value
+/// type (22G12, see [`wrong_kinds`]).
+fn wrong_index(base: &Value, index: &Value) -> OperatorError {
+    OperatorError::wrong_kind(format!(
+        "a {} index is an integer, not {}: {base}[{index}]",
+        base.type_name(),
+        index.type_name()
     ))
 }
 
@@ -666,6 +706,9 @@ pub struct SessionContext {
     /// at the session time zone (GQL, SQL/PGQ), or as different types
     /// (Cypher).
     pub temporal_comparison: TemporalComparison,
+    /// The language of the statement, whose value rules apply (see
+    /// [`StatementLanguage`]).
+    pub language: StatementLanguage,
     /// The instant the statement started, which the clock functions read.
     pub statement_clock: StatementClock,
     /// Lazily-computed `info()` result.
@@ -1502,8 +1545,19 @@ impl ExpressionPredicate {
                     let right_val = self.eval_expr(right, chunk, row).unwrap_or(Value::Null);
                     return self.eval_binary_op(&left_val, *op, &right_val);
                 }
-                let left_val = self.eval_expr(left, chunk, row)?;
-                let right_val = self.eval_expr(right, chunk, row)?;
+                // A `+` reads a missing value (a property the entity does not have) as a null,
+                // as a list literal does: Cypher's `+` keeps it as an element of a list.
+                let (left_val, right_val) = if *op == BinaryFilterOp::Add {
+                    (
+                        self.eval_expr(left, chunk, row).unwrap_or(Value::Null),
+                        self.eval_expr(right, chunk, row).unwrap_or(Value::Null),
+                    )
+                } else {
+                    (
+                        self.eval_expr(left, chunk, row)?,
+                        self.eval_expr(right, chunk, row)?,
+                    )
+                };
                 if let Some((left_kind, right_kind)) =
                     self.kinds_apart(left, &left_val, *op, right, &right_val, chunk, row)
                 {
@@ -1630,7 +1684,14 @@ impl ExpressionPredicate {
                                 _ => None,
                             };
                         }
+                        // A list is indexed by a position, not a name.
+                        if matches!(base_val, Value::List(_)) {
+                            return self.fail(wrong_index(&base_val, &index_val));
+                        }
                         None
+                    }
+                    (Value::List(_) | Value::String(_), index) if !index.is_null() => {
+                        self.fail(wrong_index(&base_val, &index_val))
                     }
                     _ => None,
                 }
@@ -1979,6 +2040,18 @@ impl ExpressionPredicate {
             },
             // NULL = anything or anything = NULL is UNKNOWN (three-valued logic).
             // values_equal is preserved for structural equality (DISTINCT, GROUP BY).
+            // SQL/PGQ's comparands must be comparable, for `=` too (ISO/IEC 9075-2 8.2 SR 3).
+            BinaryFilterOp::Eq | BinaryFilterOp::Ne
+                if self.session_context.language == StatementLanguage::SqlPgq
+                    && super::value_utils::of_two_kinds(left, right) =>
+            {
+                self.fail(not_comparable(
+                    left,
+                    OperandKind::Value,
+                    right,
+                    OperandKind::Value,
+                ))
+            }
             BinaryFilterOp::Eq => Some(self.equals(left, right).map_or(Value::Null, Value::Bool)),
             BinaryFilterOp::Ne => Some(
                 self.equals(left, right)
@@ -2001,8 +2074,21 @@ impl ExpressionPredicate {
                 .map(|c| Value::Bool(c >= 0)),
             // Arithmetic operators
             BinaryFilterOp::Add => {
-                // String concatenation: string + string, or string + other
                 match (left, right) {
+                    // openCypher's `+` of a list and one value appends or prepends it, a null
+                    // too (`[1, 2] + null` is `[1, 2, null]`); a list with a list joins them
+                    // (below).
+                    (Value::List(items), item)
+                        if self.follows_opencypher() && !matches!(item, Value::List(_)) =>
+                    {
+                        Some(joined(items, std::slice::from_ref(item)))
+                    }
+                    (item, Value::List(items))
+                        if self.follows_opencypher() && !matches!(item, Value::List(_)) =>
+                    {
+                        Some(joined(std::slice::from_ref(item), items))
+                    }
+                    // String concatenation: string + string, or string + other
                     (Value::String(a), Value::String(b)) => {
                         let mut s = String::with_capacity(a.len() + b.len());
                         s.push_str(a);
@@ -2041,12 +2127,7 @@ impl ExpressionPredicate {
                         Some(Value::ZonedDatetime(zdt.add_duration(dur)))
                     }
                     (Value::Duration(a), Value::Duration(b)) => Some(Value::Duration(a.add(*b))),
-                    (Value::List(a), Value::List(b)) => {
-                        let mut combined = Vec::with_capacity(a.len() + b.len());
-                        combined.extend_from_slice(a);
-                        combined.extend_from_slice(b);
-                        Some(Value::List(combined.into()))
-                    }
+                    (Value::List(a), Value::List(b)) => Some(joined(a, b)),
                     _ => self.eval_arithmetic(
                         left,
                         right,
@@ -2234,8 +2315,10 @@ impl ExpressionPredicate {
                     None
                 }
             }
-            // String concatenation (||)
+            // `||` joins strings, and lists as ISO GQL's list value concatenation: null
+            // elements and nested lists stay elements, and a null operand gives null.
             BinaryFilterOp::Concat => match (left, right) {
+                (Value::List(a), Value::List(b)) => Some(joined(a, b)),
                 (Value::String(a), Value::String(b)) => {
                     let mut s = String::with_capacity(a.len() + b.len());
                     s.push_str(a);
@@ -2257,7 +2340,7 @@ impl ExpressionPredicate {
                     Some(Value::String(s.into()))
                 }
                 (Value::Null, _) | (_, Value::Null) => Some(Value::Null),
-                _ => None,
+                _ => self.fail(wrong_kinds(left, BinaryFilterOp::Concat, right)),
             },
         }
     }
@@ -2306,7 +2389,10 @@ impl ExpressionPredicate {
             (Value::Float64(a), Value::Float64(b)) => Some(Value::Float64(float_op(*a, *b))),
             (Value::Int64(a), Value::Float64(b)) => Some(Value::Float64(float_op(*a as f64, *b))),
             (Value::Float64(a), Value::Int64(b)) => Some(Value::Float64(float_op(*a, *b as f64))),
-            _ => None,
+            (Value::Null, _) | (_, Value::Null) => None,
+            // A string's `+` keeps its answer until the languages' rules for it are settled.
+            (Value::String(_), _) | (_, Value::String(_)) if op == BinaryFilterOp::Add => None,
+            _ => self.fail(wrong_kinds(left, op, right)),
         }
     }
 
@@ -2454,7 +2540,8 @@ impl ExpressionPredicate {
             (Value::Float64(a), Value::Float64(b)) => Some(Value::Float64(a % b)),
             (Value::Int64(a), Value::Float64(b)) => Some(Value::Float64(*a as f64 % b)),
             (Value::Float64(a), Value::Int64(b)) => Some(Value::Float64(a % *b as f64)),
-            _ => None,
+            (Value::Null, _) | (_, Value::Null) => None,
+            _ => self.fail(wrong_kinds(left, op, right)),
         }
     }
 
@@ -4685,13 +4772,11 @@ impl ExpressionPredicate {
         right: &Value,
         right_kind: OperandKind,
     ) -> Option<Value> {
-        match (op, self.session_context.temporal_comparison) {
-            (BinaryFilterOp::Eq, _) => Some(Value::Bool(false)),
-            (BinaryFilterOp::Ne, _) => Some(Value::Bool(true)),
-            (_, TemporalComparison::TypesApart) => None,
-            (_, TemporalComparison::LocalAt(_)) => {
-                self.fail(not_comparable(left, left_kind, right, right_kind))
-            }
+        match op {
+            BinaryFilterOp::Eq => Some(Value::Bool(false)),
+            BinaryFilterOp::Ne => Some(Value::Bool(true)),
+            _ if self.follows_opencypher() => None,
+            _ => self.fail(not_comparable(left, left_kind, right, right_kind)),
         }
     }
 
@@ -4750,6 +4835,12 @@ impl ExpressionPredicate {
             )
         };
         (nan(left) && number(right)) || (nan(right) && number(left))
+    }
+
+    /// Whether values follow openCypher's rules rather than ISO GQL's, by the statement's
+    /// language.
+    fn follows_opencypher(&self) -> bool {
+        self.session_context.language.follows_opencypher()
     }
 
     /// The query's `=`, three-valued: `None` for Unknown (see
@@ -4818,7 +4909,8 @@ impl ExpressionPredicate {
 
     fn compare_values(&self, left: &Value, right: &Value) -> Option<i32> {
         match (left, right) {
-            (Value::Decimal(_), _) | (_, Value::Decimal(_)) => {
+            (Value::Decimal(_), Value::Decimal(_) | Value::Int64(_) | Value::Float64(_))
+            | (Value::Int64(_) | Value::Float64(_), Value::Decimal(_)) => {
                 left.compare_decimal(right).map(|o| o as i32)
             }
             (Value::Int64(a), Value::Int64(b)) => Some(a.cmp(b) as i32),
@@ -4845,8 +4937,45 @@ impl ExpressionPredicate {
             (Value::Timestamp(a), Value::Timestamp(b)) => Some(a.cmp(b) as i32),
             (Value::Date(a), Value::Date(b)) => Some(a.cmp(b) as i32),
             (Value::Time(a), Value::Time(b)) => Some(a.cmp(b) as i32),
+            _ if super::value_utils::of_two_kinds(left, right) => {
+                self.order_across_kinds(left, right)
+            }
+            (Value::List(_), Value::List(_)) => self.order_across_kinds(left, right),
             // Zoned datetimes, also against a timestamp: by their instant.
             _ => left.compare_instants(right).map(|o| o as i32),
+        }
+    }
+
+    /// The order of two values the order of one kind leaves undecided (two kinds, two lists),
+    /// by the statement's rule (see [`across_kinds`](Self::across_kinds)); SQL/PGQ raises for two
+    /// kinds, as its comparands must be comparable (22G04).
+    fn order_across_kinds(&self, left: &Value, right: &Value) -> Option<i32> {
+        if self.session_context.language == StatementLanguage::SqlPgq
+            && super::value_utils::of_two_kinds(left, right)
+        {
+            self.fail(not_comparable(
+                left,
+                OperandKind::Value,
+                right,
+                OperandKind::Value,
+            ));
+            return None;
+        }
+        super::value_utils::order_beyond_kind(
+            left,
+            right,
+            self.across_kinds(),
+            self.session_context.temporal_comparison,
+        )
+        .map(|order| order as i32)
+    }
+
+    /// How the statement's `<` orders two kinds: GQL by the order across kinds, openCypher not.
+    fn across_kinds(&self) -> super::value_utils::AcrossKinds {
+        if self.follows_opencypher() {
+            super::value_utils::AcrossKinds::Apart
+        } else {
+            super::value_utils::AcrossKinds::Ordered
         }
     }
 }
@@ -6469,6 +6598,62 @@ mod tests {
             ReadView::latest(),
         );
         assert!(pred_ne.evaluate(&chunk, 0).unwrap());
+    }
+
+    // ── Cross-type ordering (String ↔ numeric) ──────────────────────────
+
+    /// GA04 step b: under GQL's rule (the default session) a string and a number order by kind,
+    /// a string before every number, whatever number the string spells; never by the number it
+    /// spells, as before 0.6.2 (`'30' > 25` was true). Each case runs both ways round.
+    #[test]
+    fn test_cross_type_string_numeric_ordering() {
+        use crate::graph::rowgroup::RowGroupStore;
+
+        let store: Arc<dyn GraphStore> = Arc::new(RowGroupStore::new());
+        let chunk = DataChunkBuilder::new(&[LogicalType::Int64]).finish();
+        let answer = |left: Value, op: BinaryFilterOp, right: Value| {
+            ExpressionPredicate::new(
+                FilterExpression::Binary {
+                    left: Box::new(FilterExpression::Literal(left)),
+                    op,
+                    right: Box::new(FilterExpression::Literal(right)),
+                },
+                HashMap::new(),
+                Arc::clone(&store),
+                ReadView::latest(),
+            )
+            .eval_at(&chunk, 0)
+            .unwrap()
+        };
+        let text = |s: &str| Value::String(s.into());
+        let cases = [
+            // The string spells a larger number, a smaller one, and the same one.
+            (text("30"), Value::Int64(25)),
+            (text("20.5"), Value::Int64(10)),
+            (text("2.5"), Value::Float64(2.5)),
+            (text("99.9"), Value::Float64(100.0)),
+            (text("-1"), Value::Int64(-5)),
+            (text("abc"), Value::Int64(0)),
+        ];
+        for (string, number) in cases {
+            for (op, string_first, number_first) in [
+                (BinaryFilterOp::Lt, true, false),
+                (BinaryFilterOp::Le, true, false),
+                (BinaryFilterOp::Gt, false, true),
+                (BinaryFilterOp::Ge, false, true),
+            ] {
+                assert_eq!(
+                    answer(string.clone(), op, number.clone()),
+                    Some(Value::Bool(string_first)),
+                    "{string:?} {op:?} {number:?}"
+                );
+                assert_eq!(
+                    answer(number.clone(), op, string.clone()),
+                    Some(Value::Bool(number_first)),
+                    "{number:?} {op:?} {string:?}"
+                );
+            }
+        }
     }
 
     // ── Stacked filter (selection vector preservation) ───────────────────

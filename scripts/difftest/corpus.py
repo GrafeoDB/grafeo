@@ -541,6 +541,16 @@ def empty_with_null_keys(grafeo):
     return db
 
 
+def range_keys(grafeo):
+    """`L` nodes whose `k` is a number or text that may spell one, for a range on a key."""
+    db = grafeo.GrafeoDB()
+    db.execute(
+        "INSERT (:L {r: 0, k: 7}), (:L {r: 1, k: 50}), (:L {r: 2, k: 1.5}), (:L {r: 3, k: '7'}), (:L {r: 4, k: '50'}), "
+        "(:L {r: 5, k: '042'}), (:L {r: 6, k: '4.2e1'}), (:L {r: 7, k: 'Alix'}), (:L {r: 8, k: ''}), (:L {r: 9, k: true}), (:L {r: 10})"
+    )
+    return db
+
+
 def rules_over_data(grafeo):
     """Data that breaks the rules the cases of section DT try to add: two `File` nodes with one
     `id`, and no required property on the `File`, the `City` or the `ROAD`."""
@@ -604,6 +614,7 @@ FIXTURES = {
     "label_mix": label_mix,
     "label_writes": label_writes,
     "booleans": booleans,
+    "range_keys": range_keys,
     "empty_with_null_keys": empty_with_null_keys,
     "per_call": empty,
 }
@@ -1358,8 +1369,8 @@ for case_id, query, languages in [
 
 # AV: `=` finds the same rows with and without a property index, in every plan that runs it
 #     (#535): a constant key with and without a label, an IN list, a key from the row, a key
-#     after a clause, and an id() from a string. `=` finds a number equal to the strings
-#     that parse as it and numbers within EPSILON equal; the lookups of an index found
+#     after a clause, and an id() from a string. A string never equals a number (since
+#     0.6.2), and `=` finds numbers within EPSILON equal; the lookups of an index found
 #     their exact value only, and a constant key on a label scan without an index used a
 #     stricter `=` of its own. AV1 to AV8 without an index, AV9 to AV16 with one
 #     An IN list in an AND chain takes the index too (#456): AV17 and AV18 without one, AV19
@@ -2297,10 +2308,10 @@ for case_id, query in [
     case(case_id, query, CYPHER, "empty")
 ordered("DA4", "UNWIND [3, 1, 2, 5] AS x RETURN x ORDER BY x SKIP 1 LIMIT 2", CYPHER, "empty")
 
-# CZ: a node or an edge compared with a value of another kind (#180): Cypher keeps them apart
-#     (= false, <> true, ordering null) and GQL fails the comparison as not comparable (22G04),
-#     so the parity run reports CZ1 to CZ3 on purpose; a node compared with a node, and ids
-#     with ids, are unchanged (CZ4)
+# CZ: a node or an edge compared with a value of another kind (#180): both languages keep
+#     them apart, `=` false and `<>` true with no error (ordering is null in Cypher and fails
+#     as not comparable, 22G04, in GQL); a node compared with a node, and ids with ids, are
+#     unchanged (CZ4)
 for case_id, query in [
     ("CZ1", "MATCH (a:Person {name: 'Alix'})-[r:KNOWS]->(b) RETURN startNode(r) = id(a) AS node_is_id"),
     ("CZ2", "MATCH (a:Person {name: 'Alix'})-[r:KNOWS]->(b) RETURN a = r AS node_is_edge"),
@@ -3323,5 +3334,80 @@ for case_id, query in [
     ("EI17", "UNWIND [[null], [null]] AS x RETURN count(DISTINCT x) AS c"),
 ]:
     case(case_id, query, BOTH, "empty_with_null_keys")
+
+# EJ: list concatenation. GQL joins two lists with `||` (ISO/IEC 39075); Cypher joins with `+`, and `+` of a
+#     list and one value appends or prepends it (openCypher). 0.6.1 gave null for all but `[1] + [2]`
+for case_id, query, languages in [
+    ("EJ1", "RETURN [1, 2] || [3] AS r", GQL),
+    ("EJ2", "RETURN [] || [1] AS r, [1] || [] AS s", GQL),
+    ("EJ3", "RETURN [1] || null AS r, null || [1] AS s", GQL),
+    ("EJ4", "RETURN size([[1]] || [[2, 3]]) AS r, [1] || [null] AS s", GQL),
+    ("EJ5", "RETURN ['Alix'] || ['Gus'] AS r, [1] || ['a'] AS s", GQL),
+    ("EJ6", "LET a = [1, 2], b = [3] RETURN a || b AS r", GQL),
+    ("EJ7", "RETURN [1, 2] + [3] AS r", BOTH),
+    ("EJ8", "RETURN [1, 2] + 3 AS r, 0 + [1, 2] AS s, [] + 1 AS t", CYPHER),
+    ("EJ9", "RETURN ['Alix'] + 'Gus' AS r, [1] + [[2]] AS s", CYPHER),
+    ("EJ10", "WITH [1, 2] AS a, 3 AS k RETURN a + k AS r, k + a AS s", CYPHER),
+    ("EJ11", "RETURN 'Ali' || 'x' AS r", GQL),
+    ("EJ12", "RETURN [1, 2] || null AS r, null || [1, 2] AS s, [1] || [null] AS t", GQL),
+    ("EJ13", "RETURN [1, 2] + null AS r, null + [1, 2] AS s, null + 1 AS t", CYPHER),
+]:
+    case(case_id, query, languages, "empty")
+
+# EE: a range across kinds (GA04 b): GQL orders by kind, text before numbers; Cypher gives null. A string
+#     never reads as a number. 0.6.1's filter read '50' as 50, while its range read left it out
+for case_id, query in [
+    ("EE1", "MATCH (n:L) WHERE n.k > 5 RETURN n.r"),
+    ("EE2", "MATCH (n:L) WHERE n.k >= 5 RETURN n.r"),
+    ("EE3", "MATCH (n:L) WHERE n.k < 5 RETURN n.r"),
+    ("EE4", "MATCH (n:L) WHERE n.k <= 5 RETURN n.r"),
+    ("EE5", "MATCH (n:L) WHERE n.k > 42 RETURN n.r"),
+    ("EE6", "MATCH (n:L) WHERE n.k >= 42 RETURN n.r"),
+    ("EE7", "MATCH (n:L) WHERE n.k < 42 RETURN n.r"),
+    ("EE8", "MATCH (n:L) WHERE n.k <= 42 RETURN n.r"),
+    ("EE9", "MATCH (n:L) WHERE n.k > 42.0 RETURN n.r"),
+    ("EE10", "MATCH (n:L) WHERE n.k >= 42.0 RETURN n.r"),
+    ("EE11", "MATCH (n:L) WHERE n.k < 42.0 RETURN n.r"),
+    ("EE12", "MATCH (n:L) WHERE n.k <= 42.0 RETURN n.r"),
+    ("EE13", "MATCH (n:L) WHERE n.k > 1.5 RETURN n.r"),
+    ("EE14", "MATCH (n:L) WHERE n.k >= 1.5 RETURN n.r"),
+    ("EE15", "MATCH (n:L) WHERE n.k < 1.5 RETURN n.r"),
+    ("EE16", "MATCH (n:L) WHERE n.k <= 1.5 RETURN n.r"),
+    ("EE17", "MATCH (n:L) WHERE n.k > 1.0e3 RETURN n.r"),
+    ("EE18", "MATCH (n:L) WHERE n.k >= 1.0e3 RETURN n.r"),
+    ("EE19", "MATCH (n:L) WHERE n.k < 1.0e3 RETURN n.r"),
+    ("EE20", "MATCH (n:L) WHERE n.k <= 1.0e3 RETURN n.r"),
+    ("EE21", "MATCH (n:L) WHERE n.k > '5' RETURN n.r"),
+    ("EE22", "MATCH (n:L) WHERE n.k >= '5' RETURN n.r"),
+    ("EE23", "MATCH (n:L) WHERE n.k < '5' RETURN n.r"),
+    ("EE24", "MATCH (n:L) WHERE n.k <= '5' RETURN n.r"),
+    ("EE25", "MATCH (n:L) WHERE n.k > '42' RETURN n.r"),
+    ("EE26", "MATCH (n:L) WHERE n.k >= '42' RETURN n.r"),
+    ("EE27", "MATCH (n:L) WHERE n.k < '42' RETURN n.r"),
+    ("EE28", "MATCH (n:L) WHERE n.k <= '42' RETURN n.r"),
+    ("EE29", "MATCH (n:L) WHERE n.k > '4.2e1' RETURN n.r"),
+    ("EE30", "MATCH (n:L) WHERE n.k >= '4.2e1' RETURN n.r"),
+    ("EE31", "MATCH (n:L) WHERE n.k < '4.2e1' RETURN n.r"),
+    ("EE32", "MATCH (n:L) WHERE n.k <= '4.2e1' RETURN n.r"),
+    ("EE33", "MATCH (n:L) WHERE n.k > 'Alix' RETURN n.r"),
+    ("EE34", "MATCH (n:L) WHERE n.k >= 'Alix' RETURN n.r"),
+    ("EE35", "MATCH (n:L) WHERE n.k < 'Alix' RETURN n.r"),
+    ("EE36", "MATCH (n:L) WHERE n.k <= 'Alix' RETURN n.r"),
+    ("EE37", "MATCH (n:L) WHERE n.k > true RETURN n.r"),
+    ("EE38", "MATCH (n:L) WHERE n.k >= true RETURN n.r"),
+    ("EE39", "MATCH (n:L) WHERE n.k < true RETURN n.r"),
+    ("EE40", "MATCH (n:L) WHERE n.k <= true RETURN n.r"),
+    ("EE41", "MATCH (n:L) WHERE n.k > null RETURN n.r"),
+    ("EE42", "MATCH (n:L) WHERE n.k >= null RETURN n.r"),
+    ("EE43", "MATCH (n:L) WHERE n.k < null RETURN n.r"),
+    ("EE44", "MATCH (n:L) WHERE n.k <= null RETURN n.r"),
+    ("EE45", "MATCH (n:L) WHERE n.k >= 5 AND n.k < 50 RETURN n.r"),
+    ("EE46", "MATCH (n:L) WHERE n.k > 5 AND n.k <= '50' RETURN n.r"),
+    ("EE47", "MATCH (n:L) WHERE n.k >= '5' AND n.k < '50' RETURN n.r"),
+    ("EE48", "MATCH (n:L) WHERE 5 < n.k RETURN n.r"),
+    ("EE49", "MATCH (n) WHERE n.k > 5 RETURN n.r"),
+    ("EE50", "MATCH (n:L) WHERE n.k > 5 RETURN count(n)"),
+]:
+    case(case_id, query, BOTH, "range_keys")
 
 # fmt: on

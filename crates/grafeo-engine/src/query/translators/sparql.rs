@@ -11,10 +11,11 @@ use crate::query::plan::always_bound;
 use crate::query::plan::{
     AddGraphOp, AggregateExpr, AggregateFunction, AggregateOp, AntiJoinOp, BinaryOp, BindOp,
     ClearGraphOp, ConstructOp, CopyGraphOp, CreateGraphOp, DatasetNamedGraphs, DatasetRestriction,
-    DeleteTripleOp, DropGraphOp, FilterOp, InNamedGraphOp, InsertTripleOp, JoinCondition, JoinOp,
-    JoinType, LeftJoinOp, LoadGraphOp, LogicalExpression, LogicalOperator, LogicalPlan, ModifyOp,
-    MoveGraphOp, NamedGraph, NamedGraphsOp, ProjectOp, Projection, SortKey, SortOrder,
-    TripleComponent, TripleScanOp, TripleTemplate, UnaryOp, UnionOp, graph_of_a_sub_select,
+    DeleteTripleOp, DropGraphOp, FilterOp, GroupGraph, InNamedGraphOp, InsertTripleOp,
+    JoinCondition, JoinOp, JoinType, LeftJoinOp, LoadGraphOp, LogicalExpression, LogicalOperator,
+    LogicalPlan, ModifyOp, MoveGraphOp, NamedGraph, NamedGraphsOp, ProjectOp, Projection, SortKey,
+    SortOrder, TripleComponent, TripleScanOp, TripleTemplate, UnaryOp, UnionOp, group_graph_name,
+    is_hidden_variable,
 };
 use grafeo_adapters::query::sparql::{self, ast};
 use grafeo_common::storage::log_record::RdfGraphTarget;
@@ -195,6 +196,168 @@ fn holds_a_sub_select(pattern: &ast::GraphPattern) -> bool {
     }
 }
 
+/// What a walk of a pattern meets: a variable, wherever it is written, or a sub-SELECT.
+enum Met<'a> {
+    Variable(&'a str),
+    SubSelect,
+}
+
+/// Whether `found` holds of something `pattern` holds at any depth: its triples' terms and paths,
+/// its filters, `BIND`s, `VALUES` and nested `GRAPH`s, and the patterns of its `EXISTS` and
+/// sub-selects.
+fn pattern_holds(pattern: &ast::GraphPattern, found: &mut dyn FnMut(Met<'_>) -> bool) -> bool {
+    use ast::GraphPattern as Pattern;
+    let variable_or_iri = |graph: &ast::VariableOrIri, found: &mut dyn FnMut(Met<'_>) -> bool| matches!(graph, ast::VariableOrIri::Variable(name) if found(Met::Variable(name)));
+    match pattern {
+        Pattern::Basic(triples) => triples.iter().any(|triple| {
+            term_holds(&triple.subject, found)
+                || path_holds(&triple.predicate, found)
+                || term_holds(&triple.object, found)
+        }),
+        Pattern::Group(patterns) | Pattern::Union(patterns) => {
+            patterns.iter().any(|pattern| pattern_holds(pattern, found))
+        }
+        Pattern::Optional(inner) | Pattern::Minus(inner) => pattern_holds(inner, found),
+        Pattern::NamedGraph { graph, pattern } => {
+            variable_or_iri(graph, found) || pattern_holds(pattern, found)
+        }
+        Pattern::Service {
+            endpoint, pattern, ..
+        } => variable_or_iri(endpoint, found) || pattern_holds(pattern, found),
+        Pattern::Filter(expression) => expression_holds(expression, found),
+        Pattern::Bind {
+            expression,
+            variable,
+        } => found(Met::Variable(variable)) || expression_holds(expression, found),
+        Pattern::InlineData(data) => data.variables.iter().any(|name| found(Met::Variable(name))),
+        Pattern::SubSelect(select) => found(Met::SubSelect) || select_holds(select, found),
+    }
+}
+
+/// [`pattern_holds`] of a sub-SELECT: its pattern, its projection and its modifiers.
+fn select_holds(select: &ast::SelectQuery, found: &mut dyn FnMut(Met<'_>) -> bool) -> bool {
+    let modifiers = &select.solution_modifiers;
+    pattern_holds(&select.where_clause, found)
+        || matches!(&select.projection, ast::Projection::Variables(projected) if projected.iter().any(|projected| {
+            projected.alias.as_deref().is_some_and(|alias| found(Met::Variable(alias)))
+                || expression_holds(&projected.expression, found)
+        }))
+        || modifiers
+            .group_by
+            .iter()
+            .flatten()
+            .any(|group| match group {
+                ast::GroupCondition::Variable(name) => found(Met::Variable(name)),
+                ast::GroupCondition::Expression { expression, alias } => {
+                    alias
+                        .as_deref()
+                        .is_some_and(|alias| found(Met::Variable(alias)))
+                        || expression_holds(expression, found)
+                }
+                ast::GroupCondition::BuiltInCall(expression) => expression_holds(expression, found),
+            })
+        || modifiers
+            .having
+            .as_ref()
+            .is_some_and(|having| expression_holds(having, found))
+        || modifiers
+            .order_by
+            .iter()
+            .flatten()
+            .any(|order| expression_holds(&order.expression, found))
+        || modifiers
+            .values
+            .iter()
+            .any(|data| data.variables.iter().any(|name| found(Met::Variable(name))))
+}
+
+/// [`pattern_holds`] of a triple's subject or object.
+fn term_holds(term: &ast::TripleTerm, found: &mut dyn FnMut(Met<'_>) -> bool) -> bool {
+    match term {
+        ast::TripleTerm::Variable(name) => found(Met::Variable(name)),
+        ast::TripleTerm::BlankNode(ast::BlankNode::Anonymous(properties)) => properties
+            .iter()
+            .any(|(path, object)| path_holds(path, found) || term_holds(object, found)),
+        _ => false,
+    }
+}
+
+/// [`pattern_holds`] of a triple's predicate.
+fn path_holds(path: &ast::PropertyPath, found: &mut dyn FnMut(Met<'_>) -> bool) -> bool {
+    use ast::PropertyPath as Path;
+    match path {
+        Path::Variable(name) => found(Met::Variable(name)),
+        Path::Inverse(inner)
+        | Path::ZeroOrMore(inner)
+        | Path::OneOrMore(inner)
+        | Path::ZeroOrOne(inner) => path_holds(inner, found),
+        Path::Sequence(paths) | Path::Alternative(paths) => {
+            paths.iter().any(|path| path_holds(path, found))
+        }
+        Path::Predicate(_) | Path::RdfType | Path::Negation(_) => false,
+    }
+}
+
+/// [`pattern_holds`] of an expression.
+fn expression_holds(expression: &ast::Expression, found: &mut dyn FnMut(Met<'_>) -> bool) -> bool {
+    use ast::AggregateExpression as Aggregate;
+    use ast::Expression;
+    match expression {
+        Expression::Variable(name) | Expression::Bound(name) => found(Met::Variable(name)),
+        Expression::Iri(_) | Expression::Literal(_) => false,
+        Expression::Binary { left, right, .. } => {
+            expression_holds(left, found) || expression_holds(right, found)
+        }
+        Expression::Unary { operand, .. } | Expression::Bracketed(operand) => {
+            expression_holds(operand, found)
+        }
+        Expression::FunctionCall { arguments, .. } | Expression::Coalesce(arguments) => arguments
+            .iter()
+            .any(|argument| expression_holds(argument, found)),
+        Expression::Conditional {
+            condition,
+            then_expression,
+            else_expression,
+        } => {
+            expression_holds(condition, found)
+                || expression_holds(then_expression, found)
+                || expression_holds(else_expression, found)
+        }
+        Expression::Exists(pattern) | Expression::NotExists(pattern) => {
+            pattern_holds(pattern, found)
+        }
+        Expression::In { expression, list } | Expression::NotIn { expression, list } => {
+            expression_holds(expression, found)
+                || list.iter().any(|item| expression_holds(item, found))
+        }
+        Expression::Aggregate(aggregate) => match aggregate {
+            Aggregate::Count { expression, .. } => expression
+                .as_deref()
+                .is_some_and(|expression| expression_holds(expression, found)),
+            Aggregate::Sum { expression, .. }
+            | Aggregate::Average { expression, .. }
+            | Aggregate::Minimum { expression }
+            | Aggregate::Maximum { expression }
+            | Aggregate::Sample { expression }
+            | Aggregate::GroupConcat { expression, .. } => expression_holds(expression, found),
+        },
+    }
+}
+
+/// Whether `pattern` names the variable `name` anywhere (see [`pattern_holds`]). A sub-SELECT's
+/// own `?name` counts too, which errs only towards the hidden reading of a graph.
+fn names_the_variable(pattern: &ast::GraphPattern, name: &str) -> bool {
+    pattern_holds(
+        pattern,
+        &mut |met| matches!(met, Met::Variable(variable) if variable == name),
+    )
+}
+
+/// Whether `pattern` holds a sub-SELECT anywhere, an `EXISTS`'s pattern included.
+fn holds_a_sub_select_anywhere(pattern: &ast::GraphPattern) -> bool {
+    pattern_holds(pattern, &mut |met| matches!(met, Met::SubSelect))
+}
+
 /// Whether a scan or path in `plan`, or in the pattern of an `EXISTS` in it, reads the graph named
 /// `own`: a sub-SELECT's patterns read `GRAPH ?g`'s graph so, which an `EXISTS` may hold.
 fn reads_the_graph(plan: &LogicalOperator, own: &str) -> bool {
@@ -206,17 +369,45 @@ fn reads_the_graph(plan: &LogicalOperator, own: &str) -> bool {
         LogicalOperator::PropertyPath(path) => reads(&path.graph),
         _ => false,
     };
-    here || crate::query::plan::sparql_expressions(plan)
+    here || sparql_expressions(plan).into_iter().any(|expression| {
+        crate::query::plan::subqueries::exists_plans(expression)
+            .iter()
+            .any(|exists| reads_the_graph(exists, own))
+    }) || plan
+        .children()
         .into_iter()
-        .any(|expression| {
-            crate::query::plan::exists_plans(expression)
+        .any(|child| reads_the_graph(child, own))
+}
+
+/// The expressions `plan`'s own operator holds, of the operators a SPARQL plan holds them in:
+/// a filter, a `BIND`, a projection, a sort, an aggregation and a left join's condition. The
+/// RDF planner's `map_sparql_expressions` (`planner/rdf/named_graphs.rs`) maps the same list.
+fn sparql_expressions(plan: &LogicalOperator) -> Vec<&LogicalExpression> {
+    match plan {
+        LogicalOperator::Filter(filter) => vec![&filter.predicate],
+        LogicalOperator::Bind(bind) => vec![&bind.expression],
+        LogicalOperator::Project(project) => project
+            .projections
+            .iter()
+            .map(|projection| &projection.expression)
+            .collect(),
+        LogicalOperator::Sort(sort) => sort.keys.iter().map(|key| &key.expression).collect(),
+        LogicalOperator::Aggregate(aggregate) => {
+            let arguments = aggregate
+                .aggregates
                 .iter()
-                .any(|exists| reads_the_graph(exists, own))
-        })
-        || plan
-            .children()
-            .into_iter()
-            .any(|child| reads_the_graph(child, own))
+                .flat_map(|function| [&function.expression, &function.expression2])
+                .flatten();
+            aggregate
+                .group_by
+                .iter()
+                .chain(arguments)
+                .chain(&aggregate.having)
+                .collect()
+        }
+        LogicalOperator::LeftJoin(join) => join.condition.iter().collect(),
+        _ => Vec::new(),
+    }
 }
 
 /// Whether `pattern`'s reads find a graph the dataset does not name for themselves: its triples
@@ -1272,6 +1463,153 @@ impl SparqlTranslator {
         }))
     }
 
+    /// `GRAPH <iri> { P }`: P with its scans reading the graph, and nothing when the dataset has no
+    /// such graph.
+    fn translate_graph_iri(
+        &mut self,
+        pattern: &ast::GraphPattern,
+        iri: &ast::Iri,
+    ) -> Result<LogicalOperator> {
+        let iri = self.resolve_iri(iri);
+        self.graph_context_stack
+            .push(TripleComponent::Iri(iri.clone()));
+        let outer_unit = self.graph_unit.take();
+        let plan = match self.translate_graph_pattern(pattern) {
+            // With a triple its solutions must read, the scans find nothing in a graph the dataset
+            // does not name; otherwise it must say so.
+            Ok(plan) if !reads_a_triple(pattern) => {
+                Ok(LogicalOperator::InNamedGraph(InNamedGraphOp {
+                    graph: NamedGraph::Iri(iri),
+                    dataset: self.dataset.clone(),
+                    input: Box::new(plan),
+                    read_as: None,
+                }))
+            }
+            plan => plan,
+        };
+        self.graph_unit = outer_unit;
+        self.graph_context_stack.pop();
+        plan
+    }
+
+    /// `GRAPH ?name { P }`: P evaluated in each named graph, then joined with `?name` bound to that
+    /// graph (sec 18.6). Where P uses `?name` only as its graph, its scans read the graph into
+    /// `?name`, which is that join. Where P names `?name` itself, `?name` is free in P: its scans
+    /// read the graph under a hidden name, and the join follows P.
+    fn translate_graph_variable(
+        &mut self,
+        pattern: &ast::GraphPattern,
+        name: &str,
+    ) -> Result<LogicalOperator> {
+        let read_as = GroupGraph {
+            name: group_graph_name(name, self.graph_context_stack.len()),
+            whole_pattern: names_the_variable(pattern, name),
+        };
+        let read_into = if read_as.whole_pattern {
+            read_as.name.clone()
+        } else {
+            name.to_string()
+        };
+        self.graph_context_stack
+            .push(TripleComponent::Variable(read_into.clone()));
+        let outer_unit = self.graph_unit.take();
+        let plan = match self.translate_graph_pattern(pattern) {
+            // A solution of P that reads no graph (the empty group's, which an OPTIONAL or MINUS
+            // can keep) belongs to every graph: P is translated again with that solution as one
+            // row per named graph.
+            Ok(plan) if !always_bound(&plan).is_none_or(|bound| bound.contains(&read_into)) => {
+                self.graph_unit = Some(NamedGraphsOp {
+                    variable: read_into,
+                    dataset: self.dataset.clone(),
+                });
+                self.translate_graph_pattern(pattern)
+            }
+            plan => plan,
+        };
+        // A sub-SELECT's projection drops the graph, so its aggregate, `ORDER BY` and `LIMIT` run
+        // once per graph.
+        let per_graph = |plan: &LogicalOperator| {
+            if read_as.whole_pattern {
+                holds_a_sub_select_anywhere(pattern)
+            } else {
+                holds_a_sub_select(pattern) || reads_the_graph(plan, &read_as.name)
+            }
+        };
+        let plan = match plan {
+            Ok(plan) if per_graph(&plan) => Ok(LogicalOperator::InNamedGraph(InNamedGraphOp {
+                graph: NamedGraph::Variable(name.to_string()),
+                dataset: self.dataset.clone(),
+                input: Box::new(plan),
+                read_as: Some(read_as),
+            })),
+            Ok(plan) if read_as.whole_pattern => {
+                Ok(self.joined_with_its_graph(plan, name, &read_as.name))
+            }
+            plan => plan,
+        };
+        self.graph_unit = outer_unit;
+        self.graph_context_stack.pop();
+        plan
+    }
+
+    /// `plan`, the pattern of `GRAPH ?name` that read its graph under `graph`, joined with `?name`
+    /// bound to that graph, as sec 18.6 joins it: a solution whose own `?name` is another graph
+    /// goes, and `?name` is the graph. A solution that read no graph (a branch of a UNION that holds
+    /// only a nested `GRAPH`) is the pattern's in every graph, so it meets each first.
+    fn joined_with_its_graph(
+        &self,
+        plan: LogicalOperator,
+        name: &str,
+        graph: &str,
+    ) -> LogicalOperator {
+        let plan = if always_bound(&plan).is_none_or(|bound| bound.contains(graph)) {
+            plan
+        } else {
+            LogicalOperator::Join(JoinOp {
+                left: Box::new(LogicalOperator::NamedGraphs(NamedGraphsOp {
+                    variable: graph.to_string(),
+                    dataset: self.dataset.clone(),
+                })),
+                right: Box::new(plan),
+                join_type: JoinType::Inner,
+                conditions: Vec::new(),
+            })
+        };
+        let graph = LogicalExpression::Variable(graph.to_string());
+        let plan = if Self::collect_operator_variables(&plan)
+            .iter()
+            .any(|variable| variable == name)
+        {
+            let own = LogicalExpression::Variable(name.to_string());
+            let unbound = LogicalExpression::Unary {
+                op: UnaryOp::Not,
+                operand: Box::new(LogicalExpression::SparqlCall {
+                    name: "BOUND".to_string(),
+                    args: vec![own.clone()],
+                }),
+            };
+            let same = LogicalExpression::SparqlCall {
+                name: "SAMETERM".to_string(),
+                args: vec![own, graph.clone()],
+            };
+            wrap_filter(
+                plan,
+                LogicalExpression::Binary {
+                    left: Box::new(unbound),
+                    op: BinaryOp::Or,
+                    right: Box::new(same),
+                },
+            )
+        } else {
+            plan
+        };
+        LogicalOperator::Bind(BindOp {
+            expression: graph,
+            variable: name.to_string(),
+            input: Box::new(plan),
+        })
+    }
+
     /// The pattern of an `EXISTS` or `NOT EXISTS`.
     fn translate_exists_pattern(&mut self, pattern: &ast::GraphPattern) -> Result<LogicalOperator> {
         self.exists_depth += 1;
@@ -1312,6 +1650,7 @@ impl SparqlTranslator {
                     .graph_context_stack
                     .iter()
                     .any(|graph| graph.as_variable() == Some(name.as_str()))
+                && !is_hidden_variable(name)
         })
     }
 
@@ -1351,65 +1690,23 @@ impl SparqlTranslator {
                 })
             }
 
-            ast::GraphPattern::NamedGraph { graph, pattern } => {
-                let graph_component = match graph {
-                    ast::VariableOrIri::Variable(name) => TripleComponent::Variable(name.clone()),
-                    ast::VariableOrIri::Iri(iri) => TripleComponent::Iri(self.resolve_iri(iri)),
-                };
-                self.graph_context_stack.push(graph_component);
-                let outer_unit = self.graph_unit.take();
-                let plan = match (self.translate_graph_pattern(pattern), graph) {
-                    // SPARQL evaluates P once per named graph (sec 18.6), so
-                    // a solution of P that binds no ?g (the empty group's,
-                    // which an OPTIONAL or MINUS can keep) belongs to every
-                    // graph: P is translated again with that solution as one
-                    // row per named graph.
-                    (Ok(plan), ast::VariableOrIri::Variable(name))
-                        if !always_bound(&plan).is_none_or(|bound| bound.contains(name)) =>
-                    {
-                        self.graph_unit = Some(NamedGraphsOp {
-                            variable: name.clone(),
-                            dataset: self.dataset.clone(),
-                        });
-                        self.translate_graph_pattern(pattern)
-                    }
-                    // With a triple its solutions must read, the scans find nothing in a
-                    // graph the dataset does not name; otherwise it must say so.
-                    (Ok(plan), ast::VariableOrIri::Iri(iri)) if !reads_a_triple(pattern) => {
-                        Ok(LogicalOperator::InNamedGraph(InNamedGraphOp {
-                            graph: NamedGraph::Iri(self.resolve_iri(iri)),
-                            dataset: self.dataset.clone(),
-                            input: Box::new(plan),
-                        }))
-                    }
-                    (plan, _) => plan,
-                };
-                let plan = match (plan, graph) {
-                    (Ok(plan), ast::VariableOrIri::Variable(name))
-                        if holds_a_sub_select(pattern)
-                            || reads_the_graph(&plan, &graph_of_a_sub_select(name)) =>
-                    {
-                        Ok(LogicalOperator::InNamedGraph(InNamedGraphOp {
-                            graph: NamedGraph::Variable(name.clone()),
-                            dataset: self.dataset.clone(),
-                            input: Box::new(plan),
-                        }))
-                    }
-                    (plan, _) => plan,
-                };
-                self.graph_unit = outer_unit;
-                self.graph_context_stack.pop();
-                plan
-            }
+            ast::GraphPattern::NamedGraph { graph, pattern } => match graph {
+                ast::VariableOrIri::Variable(name) => self.translate_graph_variable(pattern, name),
+                ast::VariableOrIri::Iri(iri) => self.translate_graph_iri(pattern, iri),
+            },
 
             ast::GraphPattern::SubSelect(subquery) => {
-                // Its names are its own: a `?g` in it is not the `GRAPH ?g` around it, which its
-                // patterns read under a name of their own, and its groups start with no `?g` bound.
+                // Its names are its own: a `?g` in it is not the `GRAPH ?g` around it, whose graph
+                // its patterns read under the group's hidden name (the one the whole pattern reads
+                // when it names `?g`, and itself in a nested sub-SELECT), and its groups start with
+                // no `?g` bound.
                 let around = self.graph_context_stack.last().cloned();
+                let depth = self.graph_context_stack.len().saturating_sub(1);
                 if let Some(TripleComponent::Variable(variable)) = &around
+                    && !is_hidden_variable(variable)
                     && let Some(graph) = self.graph_context_stack.last_mut()
                 {
-                    *graph = TripleComponent::Variable(graph_of_a_sub_select(variable));
+                    *graph = TripleComponent::Variable(group_graph_name(variable, depth));
                 }
                 let unit_around = self.graph_unit.take();
                 let plan = self.translate_select(subquery);

@@ -111,11 +111,15 @@ impl ExistsPerRow {
                 name,
             })
             .collect();
+        // A mark and a hidden name (the graph a `GRAPH ?g` group reads) are no variables of the
+        // row: binding one alone binds nothing, for a `MINUS`.
         let bindable = |columns: &[String]| {
             columns
                 .iter()
                 .enumerate()
-                .filter(|(_, name)| !name.starts_with(MARK_PREFIX))
+                .filter(|(_, name)| {
+                    !name.starts_with(MARK_PREFIX) && !crate::query::plan::is_hidden_variable(name)
+                })
                 .map(|(at, _)| at)
                 .collect()
         };

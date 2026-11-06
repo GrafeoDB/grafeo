@@ -15,9 +15,10 @@
 use std::borrow::Cow;
 use std::collections::HashSet;
 
+use crate::query::plan::subqueries::exists_plans;
 use crate::query::plan::{
     FilterOp, LogicalExpression, LogicalOperator, NamedGraph, TripleComponent, always_bound,
-    collect_expression_variables, exists_plans,
+    collect_expression_variables,
 };
 
 /// How to run an `EXISTS` once, over rows of some columns.

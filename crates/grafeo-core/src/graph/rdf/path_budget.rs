@@ -12,13 +12,23 @@ use parking_lot::{RwLock, RwLockReadGuard};
 use crate::execution::operators::OperatorError;
 
 /// Local only: charging never calls an allocator manager or evicts a store.
+///
+/// A deadline is read two ways. A wait or a retry (a lock wait, an overlay's poll) reads the clock
+/// every time ([`check`](Self::check)). Small work (a visited state, a scanned candidate, an
+/// origin, a row, a charge) counts a unit and reads it on the first and every [`CLOCK_EVERY`]th
+/// ([`tick`](Self::tick)), so a search that emits nothing still meets its deadline.
 pub(crate) struct PathBudget {
     limit: usize,
     used: usize,
     deadline: Option<Instant>,
+    /// The units of work counted so far.
+    work: u32,
     #[cfg(test)]
     polls_left: Option<usize>,
 }
+
+/// How many units of work a path counts per read of the clock.
+const CLOCK_EVERY: u32 = 1_024;
 
 impl PathBudget {
     pub(crate) fn new(limit: usize, deadline: Option<Instant>) -> Self {
@@ -26,24 +36,51 @@ impl PathBudget {
             limit,
             used: 0,
             deadline,
+            work: 0,
             #[cfg(test)]
             polls_left: None,
         }
     }
 
+    /// Reads the clock: for a wait or a retry, which may take any time.
     pub(crate) fn check(&mut self) -> Result<(), OperatorError> {
         #[cfg(test)]
-        if let Some(left) = &mut self.polls_left {
-            if *left == 0 {
-                return Err(OperatorError::Timeout);
-            }
-            *left -= 1;
-        }
+        self.expired_by_test()?;
         if self
             .deadline
             .is_some_and(|deadline| Instant::now() >= deadline)
         {
             return Err(OperatorError::Timeout);
+        }
+        Ok(())
+    }
+
+    /// Counts a unit of small work and reads the clock on the first and every
+    /// [`CLOCK_EVERY`]th.
+    pub(crate) fn tick(&mut self) -> Result<(), OperatorError> {
+        #[cfg(test)]
+        self.expired_by_test()?;
+        let reads_the_clock = self.work.is_multiple_of(CLOCK_EVERY);
+        self.work = self.work.wrapping_add(1);
+        if reads_the_clock
+            && self
+                .deadline
+                .is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            return Err(OperatorError::Timeout);
+        }
+        Ok(())
+    }
+
+    /// A test's deadline, counted in polls and units of work alike (see
+    /// [`expire_after_polls`](Self::expire_after_polls)).
+    #[cfg(test)]
+    fn expired_by_test(&mut self) -> Result<(), OperatorError> {
+        if let Some(left) = &mut self.polls_left {
+            if *left == 0 {
+                return Err(OperatorError::Timeout);
+            }
+            *left -= 1;
         }
         Ok(())
     }
@@ -56,7 +93,7 @@ impl PathBudget {
     }
 
     pub(crate) fn charge(&mut self, bytes: usize) -> Result<(), OperatorError> {
-        self.check()?;
+        self.tick()?;
         let used = self
             .used
             .checked_add(bytes)
@@ -143,7 +180,7 @@ impl PathBudget {
         values: &mut FxHashMap<K, V>,
         additional: usize,
     ) -> Result<(), OperatorError> {
-        self.check()?;
+        self.tick()?;
         if additional <= values.capacity().saturating_sub(values.len()) {
             return Ok(());
         }
@@ -163,7 +200,7 @@ impl PathBudget {
         values: &mut FxHashSet<T>,
         additional: usize,
     ) -> Result<(), OperatorError> {
-        self.check()?;
+        self.tick()?;
         if additional <= values.capacity().saturating_sub(values.len()) {
             return Ok(());
         }
@@ -183,7 +220,7 @@ impl PathBudget {
         values: &mut Vec<T>,
         additional: usize,
     ) -> Result<(), OperatorError> {
-        self.check()?;
+        self.tick()?;
         if additional <= values.capacity().saturating_sub(values.len()) {
             return Ok(());
         }
@@ -210,7 +247,7 @@ impl PathBudget {
         values: &mut VecDeque<T>,
         additional: usize,
     ) -> Result<(), OperatorError> {
-        self.check()?;
+        self.tick()?;
         if additional <= values.capacity().saturating_sub(values.len()) {
             return Ok(());
         }

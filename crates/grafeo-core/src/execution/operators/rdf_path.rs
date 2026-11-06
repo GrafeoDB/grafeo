@@ -354,7 +354,7 @@ mod physical {
             let mut transitions = Vec::new();
             let mut states = 2usize;
             while let Some(task) = tasks.pop() {
-                budget.check()?;
+                budget.tick()?;
                 match task.step {
                     PathStep::Predicate(predicate) => {
                         budget.charge(predicate.capacity())?;
@@ -386,7 +386,7 @@ mod physical {
                         budget.charge(steps.capacity().saturating_mul(size_of::<PathStep>()))?;
                         let mut from = task.from;
                         for position in 0..steps.len() {
-                            budget.check()?;
+                            budget.tick()?;
                             let to = if position + 1 == steps.len() {
                                 task.to
                             } else {
@@ -418,7 +418,7 @@ mod physical {
                         }
                         budget.charge(steps.capacity().saturating_mul(size_of::<PathStep>()))?;
                         for step in steps {
-                            budget.check()?;
+                            budget.tick()?;
                             budget.reserve_vec(&mut tasks, 1)?;
                             tasks.push(CompileTask {
                                 step,
@@ -515,7 +515,7 @@ mod physical {
         budget: &mut PathBudget,
     ) -> Result<(), OperatorError> {
         for source in sources.iter_mut() {
-            budget.check()?;
+            budget.tick()?;
             if source
                 .name
                 .as_ref()
@@ -547,7 +547,7 @@ mod physical {
         budget: &mut PathBudget,
     ) -> Result<(), OperatorError> {
         for context in contexts.iter_mut() {
-            budget.check()?;
+            budget.tick()?;
             if context
                 .name
                 .as_ref()
@@ -574,7 +574,7 @@ mod physical {
         budget: &mut PathBudget,
     ) -> Result<bool, OperatorError> {
         for selected in names {
-            budget.check()?;
+            budget.tick()?;
             if selected == name {
                 return Ok(true);
             }
@@ -705,7 +705,7 @@ mod physical {
             state: usize,
             budget: &mut PathBudget,
         ) -> Result<(), OperatorError> {
-            budget.check()?;
+            budget.tick()?;
             let key = StateKey {
                 term: term.clone(),
                 state,
@@ -749,6 +749,8 @@ mod physical {
         search: Option<Search>,
         reverse: bool,
         finished: bool,
+        /// The store, whose dictionary tells a far end no triple of the dataset holds.
+        store: Arc<RdfStore>,
     }
 
     impl State {
@@ -799,6 +801,7 @@ mod physical {
                 search: None,
                 reverse,
                 finished: false,
+                store: Arc::clone(store),
             })
         }
 
@@ -809,6 +812,21 @@ mod physical {
                 config.subject.as_ref()
             };
             if let Some(term) = bound {
+                // With both ends bound and apart, a far end no triple of the dataset holds is
+                // reached by no step: there is nothing to search, and no list is read.
+                if config.subject.is_some()
+                    && config.object.is_some()
+                    && config.subject != config.object
+                    && config.transaction_id.is_none()
+                    && self.read_overlay.is_none()
+                    && config
+                        .object
+                        .as_ref()
+                        .is_some_and(|far| self.store.dictionary().lookup(far).is_none())
+                {
+                    self.origins_ready = true;
+                    return Ok(());
+                }
                 self.budget.reserve_vec(&mut self.origins, 1)?;
                 let payload = term_payload(term)?;
                 self.budget.charge(payload)?;
@@ -825,7 +843,7 @@ mod physical {
                         &mut self.budget,
                         &mut |triple, budget| {
                             for term in [triple.subject(), triple.object()] {
-                                budget.check()?;
+                                budget.tick()?;
                                 if !unique.contains(term) {
                                     let payload = term_payload(term)?;
                                     budget.charge(payload)?;
@@ -884,7 +902,7 @@ mod physical {
                 None
             };
             loop {
-                self.budget.check()?;
+                self.budget.tick()?;
                 if self.graph_index >= self.contexts.len() {
                     self.finished = true;
                     return Ok(None);
@@ -947,9 +965,16 @@ mod physical {
                     continue;
                 };
                 // Complete this state's transitions before yielding an accepted
-                // endpoint, so resumption never loses its next repetition.
-                for transition in &self.nfa.transitions {
-                    self.budget.check()?;
+                // endpoint, so resumption never loses its next repetition. A search of one
+                // list has none from its accepting state.
+                let transitions: &[Transition] = if search.one_list && key.state == self.nfa.accept
+                {
+                    &[]
+                } else {
+                    &self.nfa.transitions
+                };
+                for transition in transitions {
+                    self.budget.tick()?;
                     if transition.from != key.state {
                         continue;
                     }
@@ -998,7 +1023,13 @@ mod physical {
                         (&search.origin, &key.term)
                     };
                     if row_matches(config, subject, object, context.name.as_ref()) {
-                        let row = (subject.clone(), object.clone(), context.name.clone());
+                        // The key was taken off the queue: its term moves into the row.
+                        let StateKey { term, .. } = key;
+                        let row = if self.reverse {
+                            (term, search.origin.clone(), context.name.clone())
+                        } else {
+                            (search.origin.clone(), term, context.name.clone())
+                        };
                         // With both ends bound, the one pair this graph can
                         // give is found: the rest of the search is not read.
                         if both_ends_bound {

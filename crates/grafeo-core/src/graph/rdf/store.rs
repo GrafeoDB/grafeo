@@ -908,7 +908,7 @@ impl RdfStore {
                 && let Some(ops) = buffer.buffers.get(&tx)
             {
                 for op in ops {
-                    budget.check()?;
+                    budget.tick()?;
                     let (triple, present) = match op {
                         PendingOp::Insert(triple) => (triple, true),
                         PendingOp::Delete(triple) => (triple, false),
@@ -933,7 +933,7 @@ impl RdfStore {
                 visit(triple, budget)
             })?;
             for (triple, present) in &net {
-                budget.check()?;
+                budget.tick()?;
                 if *present {
                     visit(triple, budget)?;
                 }
@@ -1053,7 +1053,7 @@ impl RdfStore {
         ) -> Result<(), crate::execution::operators::OperatorError>,
     ) -> Result<(), crate::execution::operators::OperatorError> {
         for triple in candidates {
-            budget.check()?; // Rejected candidates must still obey the deadline.
+            budget.tick()?; // Rejected candidates must still obey the deadline.
             if pattern.matches(triple) {
                 visit(triple, budget)?;
             }
@@ -1077,7 +1077,7 @@ impl RdfStore {
         match names {
             Some(names) => {
                 for name in names {
-                    budget.check()?;
+                    budget.tick()?;
                     if let Some(store) = graphs.get(name) {
                         visit(name, store, budget)?;
                     }
@@ -1085,7 +1085,7 @@ impl RdfStore {
             }
             None => {
                 for (name, store) in graphs.iter() {
-                    budget.check()?;
+                    budget.tick()?;
                     visit(name, store, budget)?;
                 }
             }

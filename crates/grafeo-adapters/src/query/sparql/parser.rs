@@ -784,7 +784,8 @@ impl<'a> Parser<'a> {
             // BIND too, but its group starts with nothing in scope.
             let written_here = self.current.kind == TokenKind::Bind;
             // Grammar rule 54: one `.` may follow a pattern that is not a triples block, which
-            // takes its own.
+            // takes its own. A sub-SELECT is not one of them: a group that is one holds only it
+            // (rule 53), so `{ SELECT ... } .` is an error, and `{ { SELECT ... } . }` is not.
             let not_triples = matches!(
                 self.current.kind,
                 TokenKind::Optional
@@ -795,7 +796,6 @@ impl<'a> Parser<'a> {
                     | TokenKind::Bind
                     | TokenKind::Values
                     | TokenKind::LeftBrace
-                    | TokenKind::Select
             );
             let element = self.parse_graph_pattern_element()?;
             if not_triples && self.current.kind == TokenKind::Dot {

@@ -99,12 +99,13 @@ tests:
       rows:
         - ["urn:g1", "urn:a"]
 
-  - name: graph_the_row_names_the_graph
+  - name: graph_a_graph_variable_inside_the_test_is_free
     setup:
       - "PREFIX : <urn:> INSERT DATA { :c :q 9 . GRAPH <urn:g1> { :a :p 1 . :b :p 2 . :b :q 3 . :c :p 4 } GRAPH <urn:g2> { :a :q 5 . :d :p 6 } }"
     query: "PREFIX : <urn:> SELECT ?g ?s WHERE { GRAPH ?g { ?s :p ?o FILTER(EXISTS { GRAPH ?g { ?s :q ?x } }) } }"
     expect:
       rows:
+        - ["urn:g1", "urn:a"]
         - ["urn:g1", "urn:b"]
 
   - name: graph_if_in_a_graph

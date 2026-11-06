@@ -331,6 +331,7 @@ mod sparql_exists_routes;
 mod sparql_from_without_from_named;
 mod sparql_graph_and_exists_forms;
 mod sparql_graph_operations;
+mod sparql_graph_variable_scope;
 mod sparql_group_order;
 mod sparql_initial_bindings;
 mod sparql_iri_escapes;

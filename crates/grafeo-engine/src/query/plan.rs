@@ -15,6 +15,9 @@ mod always_bound;
 #[cfg(any(feature = "sparql", feature = "triple-store"))]
 pub(crate) use always_bound::always_bound;
 
+#[cfg(any(feature = "sparql", feature = "triple-store"))]
+pub(crate) mod subqueries;
+
 #[cfg(any(
     feature = "gql",
     feature = "cypher",
@@ -995,100 +998,6 @@ impl LogicalOperator {
             _ => String::new(),
         }
     }
-}
-
-/// The plans of the `EXISTS` tests in `expression`, at any depth.
-pub(crate) fn exists_plans(expression: &LogicalExpression) -> Vec<LogicalOperator> {
-    fn found(expression: LogicalExpression, plans: &mut Vec<LogicalOperator>) -> LogicalExpression {
-        match expression {
-            LogicalExpression::ExistsSubquery(plan) => {
-                plans.push(*plan);
-                LogicalExpression::Literal(Value::Null)
-            }
-            other => other.map_children(|child| found(child, plans)),
-        }
-    }
-    let mut plans = Vec::new();
-    found(expression.clone(), &mut plans);
-    plans
-}
-
-/// The expressions `plan`'s own operator holds, of the operators a SPARQL plan holds them in:
-/// a filter, a `BIND`, a projection, a sort, an aggregation and a left join's condition.
-pub(crate) fn sparql_expressions(plan: &LogicalOperator) -> Vec<&LogicalExpression> {
-    match plan {
-        LogicalOperator::Filter(filter) => vec![&filter.predicate],
-        LogicalOperator::Bind(bind) => vec![&bind.expression],
-        LogicalOperator::Project(project) => project
-            .projections
-            .iter()
-            .map(|projection| &projection.expression)
-            .collect(),
-        LogicalOperator::Sort(sort) => sort.keys.iter().map(|key| &key.expression).collect(),
-        LogicalOperator::Aggregate(aggregate) => {
-            let arguments = aggregate
-                .aggregates
-                .iter()
-                .flat_map(|function| [&function.expression, &function.expression2])
-                .flatten();
-            aggregate
-                .group_by
-                .iter()
-                .chain(arguments)
-                .chain(&aggregate.having)
-                .collect()
-        }
-        LogicalOperator::LeftJoin(join) => join.condition.iter().collect(),
-        _ => Vec::new(),
-    }
-}
-
-/// `plan` with `f` applied to each expression [`sparql_expressions`] gives.
-pub(crate) fn map_sparql_expressions(
-    mut plan: LogicalOperator,
-    f: &mut dyn FnMut(LogicalExpression) -> LogicalExpression,
-) -> LogicalOperator {
-    let mut apply = |expression: &mut LogicalExpression| {
-        let taken = std::mem::replace(expression, LogicalExpression::Literal(Value::Null));
-        *expression = f(taken);
-    };
-    match &mut plan {
-        LogicalOperator::Filter(filter) => apply(&mut filter.predicate),
-        LogicalOperator::Bind(bind) => apply(&mut bind.expression),
-        LogicalOperator::Project(project) => {
-            for projection in &mut project.projections {
-                apply(&mut projection.expression);
-            }
-        }
-        LogicalOperator::Sort(sort) => {
-            for key in &mut sort.keys {
-                apply(&mut key.expression);
-            }
-        }
-        LogicalOperator::Aggregate(aggregate) => {
-            for key in &mut aggregate.group_by {
-                apply(key);
-            }
-            for function in &mut aggregate.aggregates {
-                for argument in [&mut function.expression, &mut function.expression2]
-                    .into_iter()
-                    .flatten()
-                {
-                    apply(argument);
-                }
-            }
-            if let Some(having) = &mut aggregate.having {
-                apply(having);
-            }
-        }
-        LogicalOperator::LeftJoin(join) => {
-            if let Some(condition) = &mut join.condition {
-                apply(condition);
-            }
-        }
-        _ => {}
-    }
-    plan
 }
 
 /// Whether `expr` has an `EXISTS`, `COUNT` or value subquery or a pattern
@@ -2942,17 +2851,35 @@ pub struct PropertyPathOp {
     pub dataset: Option<DatasetRestriction>,
 }
 
-/// The name the patterns of a sub-SELECT inside `GRAPH ?variable` read their graph under: a
-/// sub-SELECT's names are its own, so a `?variable` in it is another variable, and no variable has
-/// this name. Named so of itself inside a nested sub-SELECT.
+/// The hidden name the pattern of a `GRAPH ?variable` group reads its graph under where its reads
+/// are not `?variable`'s (see [`GroupGraph`]); `depth` counts the `GRAPH` groups around the group,
+/// so nested groups of one variable read theirs apart. No query can write the name
+/// ([`is_hidden_variable`]).
 #[must_use]
-pub fn graph_of_a_sub_select(variable: &str) -> String {
-    const PREFIX: &str = "graph of a sub-select ";
-    if variable.starts_with(PREFIX) {
-        variable.to_string()
-    } else {
-        format!("{PREFIX}{variable}")
-    }
+pub fn group_graph_name(variable: &str, depth: usize) -> String {
+    format!("{HIDDEN_PREFIX}{variable} at {depth}")
+}
+
+/// Whether `name` is a hidden name: one no query can write, which no solution shows (`SELECT *`
+/// leaves it out) and no pattern shares as a variable of its own (see [`group_graph_name`]).
+#[must_use]
+pub fn is_hidden_variable(name: &str) -> bool {
+    name.starts_with(HIDDEN_PREFIX)
+}
+
+/// The start of every hidden name: a variable has no space.
+const HIDDEN_PREFIX: &str = "graph of GRAPH ?";
+
+/// How the pattern of a `GRAPH ?g` group reads its graph where that is not `?g` (SPARQL 1.1 sec
+/// 18.6 evaluates the pattern in each graph, then joins it with `?g` bound to that graph).
+#[derive(Debug, Clone)]
+pub struct GroupGraph {
+    /// The hidden name it reads the graph under (see [`group_graph_name`]).
+    pub name: String,
+    /// Whether the whole pattern reads it so: the pattern names `?g` itself, which is then free in
+    /// it. Otherwise only its sub-selects do, whose names are their own, and its other reads bind
+    /// `?g`.
+    pub whole_pattern: bool,
 }
 
 /// The named graphs of the dataset, one row per graph with `variable` bound
@@ -3003,6 +2930,8 @@ pub struct InNamedGraphOp {
     pub dataset: Option<DatasetRestriction>,
     /// The pattern, its scans already reading the graph.
     pub input: Box<LogicalOperator>,
+    /// With a variable, how the pattern reads the graph where it is not the variable's.
+    pub read_as: Option<GroupGraph>,
 }
 
 /// Scan RDF triples matching a pattern.

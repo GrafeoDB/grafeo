@@ -67,3 +67,75 @@ fn a_long_path_walk_times_out() {
         assert_eq!(count.row_count(), 1, "{query}");
     }
 }
+
+/// 5,000 nodes with up to ten `q` edges each, every edge to a later node: no cycle, and from an early
+/// node `+` reaches most of the graph. `<urn:island>` is held (a `t` triple) but no `q` edge reaches it.
+fn acyclic() -> GrafeoDB {
+    let db = GrafeoDB::with_config(Config::in_memory().with_query_timeout(LIMIT)).unwrap();
+    let session = db.session();
+    let mut triples = vec!["<urn:island> <urn:t> <urn:k0> .".to_string()];
+    for node in 0..5_000_u64 {
+        for step in 1..=10_u64 {
+            let target = node + step * 3;
+            if target < 5_000 {
+                triples.push(format!("<urn:n{node}> <urn:q> <urn:n{target}> ."));
+            }
+        }
+    }
+    for part in triples.chunks(2_000) {
+        session
+            .execute_sparql(&format!("INSERT DATA {{ {} }}", part.join(" ")))
+            .unwrap();
+    }
+    db
+}
+
+/// The deadline counts the work a path search does, not the rows it gives: a search that finds nothing
+/// still stops at the limit (every 1,024 states it visits). `?x q+ ?x` over a graph without a cycle walks
+/// every node's descendants and gives no row; no term is missing from the graph, so `ASK`'s no-read
+/// shortcut does not apply. A search to a held term no edge reaches may be answered quickly by a plan
+/// that walks back from it; it must still end by the limit, empty or with the timeout.
+#[test]
+fn a_path_search_that_finds_nothing_stops_at_the_limit() {
+    let db = acyclic();
+    for (query, must_time_out) in [
+        ("SELECT ?x WHERE { ?x <urn:q>+ ?x }", true),
+        ("SELECT (COUNT(*) AS ?c) WHERE { ?x <urn:q>+ ?x }", true),
+        ("SELECT ?x WHERE { ?x <urn:q>+ <urn:island> }", false),
+        ("ASK { ?x <urn:q>+ <urn:island> }", false),
+        (
+            "SELECT ?x WHERE { <urn:n0> <urn:q>+ ?x . ?x <urn:q>+ <urn:island> }",
+            false,
+        ),
+    ] {
+        let session = db.session();
+        let started = Instant::now();
+        let outcome = session.execute_sparql(query);
+        let elapsed = started.elapsed();
+        match outcome {
+            Err(error) => {
+                let error = error.to_string().to_lowercase();
+                assert!(
+                    error.contains("timeout") || error.contains("timed out"),
+                    "{query}: {error}"
+                );
+            }
+            Ok(result) => {
+                assert!(!must_time_out, "{query}: finished in {elapsed:?}");
+                // Nothing to find; `ASK` answers false, a count 0.
+                use grafeo_common::types::Value;
+                let rows = result.rows().to_vec();
+                assert!(
+                    rows.is_empty()
+                        || rows == vec![vec![Value::Bool(false)]]
+                        || rows == vec![vec![Value::Int64(0)]],
+                    "{query}: {rows:?}"
+                );
+            }
+        }
+        assert!(
+            elapsed <= LIMIT + SLACK,
+            "{query}: it ended after {elapsed:?}"
+        );
+    }
+}

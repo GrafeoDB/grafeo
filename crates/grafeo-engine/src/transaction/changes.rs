@@ -514,6 +514,27 @@ impl TransactionChanges {
         !self.state.lock().triples.is_empty()
     }
 
+    /// The named graphs the transaction inserted a triple into, each once: its commit creates
+    /// them, an emptied one too. One pass over the transaction's own entries. A `CREATE GRAPH` it
+    /// queued is not among them: no SPARQL statement runs after one until the commit
+    /// (`refuse_sparql_after_graph_op`), so no read could list it.
+    #[cfg(feature = "triple-store")]
+    pub(crate) fn rdf_graphs_inserted_into(&self) -> Vec<String> {
+        let state = self.state.lock();
+        if state.triples.is_empty() {
+            return Vec::new();
+        }
+        let mut names: Vec<String> = Vec::new();
+        for change in state.set.entries() {
+            if let Some(name) = super::rdf::graph_inserted_into(&state.set, change)
+                && !names.iter().any(|known| known == name)
+            {
+                names.push(name.to_string());
+            }
+        }
+        names
+    }
+
     /// The first RDF graph that `graph` takes in which the transaction has
     /// an entry, as an error names it (see `PendingTriples::written_graph`).
     #[cfg(feature = "triple-store")]

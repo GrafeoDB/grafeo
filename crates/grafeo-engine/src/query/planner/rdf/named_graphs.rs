@@ -3,16 +3,16 @@
 
 use std::sync::Arc;
 
-use grafeo_common::types::LogicalType;
 use grafeo_common::types::rdf::Term;
+use grafeo_common::types::{LogicalType, Value};
 use grafeo_core::execution::DataChunk;
 use grafeo_core::execution::operators::{Operator, OperatorResult};
-use grafeo_core::graph::rdf::{RdfStore, TriplePattern};
+use grafeo_core::graph::rdf::RdfStore;
 
 use super::term_ids::{QueryTermIds, id_value};
 use crate::query::plan::{
-    DatasetNamedGraphs, DatasetRestriction, LogicalExpression, LogicalOperator, NamedGraph,
-    TripleComponent, graph_of_a_sub_select, map_sparql_expressions,
+    DatasetNamedGraphs, DatasetRestriction, GroupGraph, LogicalExpression, LogicalOperator,
+    TripleComponent,
 };
 use crate::transaction::RdfWriter;
 
@@ -29,8 +29,8 @@ pub(super) struct NamedGraphsOperator {
 
 /// The IRIs of the named graphs of the dataset the store, the transaction's writer and the query's
 /// clauses make, sorted and without duplicates: those `FROM NAMED` lists, held or not, none with
-/// `FROM` alone; otherwise the store's, with the graphs the transaction wrote to but has not
-/// committed.
+/// `FROM` alone; otherwise the store's, with the graphs the transaction inserted into and has not
+/// committed, an emptied one too, as its commit creates them.
 pub(super) fn named_graph_names(
     store: &RdfStore,
     writer: Option<&RdfWriter>,
@@ -40,18 +40,8 @@ pub(super) fn named_graph_names(
         Some(listed) => listed.to_vec(),
         None => {
             let mut names = store.graph_names();
-            if let Some(writer) = writer.filter(|w| w.has_pending()) {
-                let any = TriplePattern {
-                    subject: None,
-                    predicate: None,
-                    object: None,
-                };
-                names.extend(
-                    writer
-                        .find(&any, Some(&[]))
-                        .into_iter()
-                        .filter_map(|(graph, _)| graph),
-                );
+            if let Some(writer) = writer {
+                names.extend(writer.graphs_inserted_into());
             }
             names
         }
@@ -67,28 +57,51 @@ pub(super) fn read_only_graph(dataset: &mut Option<DatasetRestriction>, name: &s
         DatasetNamedGraphs::Listed(vec![name.to_string()]);
 }
 
-/// `plan` as it reads with `variable` the graph `name`: whatever reads that variable as its graph
-/// lists that one graph, keeping the variable, which a filter beside it may read, and a sub-SELECT's
-/// patterns read that graph as a constant, as the variable is not theirs. The pattern of an
-/// `EXISTS` in it reads so too. A nested `GRAPH` of another graph stays as it is.
-pub(super) fn in_one_graph(plan: LogicalOperator, variable: &str, name: &str) -> LogicalOperator {
-    let own = graph_of_a_sub_select(variable);
-    in_the_graph(plan, variable, &own, name)
+/// `plan` as it reads with `variable` the graph `name`: what reads the graph under the group's
+/// hidden name (`read_as`: a sub-SELECT's patterns, whose names are their own, or all of the
+/// pattern when it names the variable itself) reads that graph as a constant; otherwise what reads
+/// the variable as its graph lists that one graph, keeping the variable, which a filter beside it
+/// may read. The pattern of an `EXISTS` in it reads so too. Where the pattern names the variable,
+/// a nested `GRAPH` of it stays free: the join with the graph's row decides (sec 18.6).
+pub(super) fn in_one_graph(
+    plan: LogicalOperator,
+    variable: &str,
+    read_as: Option<&GroupGraph>,
+    name: &str,
+) -> LogicalOperator {
+    let reads = Reads {
+        variable,
+        own: read_as.map(|read_as| read_as.name.as_str()),
+        whole_pattern: read_as.is_some_and(|read_as| read_as.whole_pattern),
+    };
+    in_the_graph(plan, &reads, name)
 }
 
-fn in_the_graph(plan: LogicalOperator, variable: &str, own: &str, name: &str) -> LogicalOperator {
-    let reads = |graph: &Option<TripleComponent>, reader: &str| {
-        graph.as_ref().and_then(TripleComponent::as_variable) == Some(reader)
+/// How the pattern of a `GRAPH` group reads its graph, for [`in_the_graph`].
+struct Reads<'a> {
+    /// The group's variable.
+    variable: &'a str,
+    /// The hidden name, if the group has one.
+    own: Option<&'a str>,
+    /// Whether all of the pattern reads the hidden name: a read of the variable is then a nested
+    /// group's.
+    whole_pattern: bool,
+}
+
+fn in_the_graph(plan: LogicalOperator, how: &Reads<'_>, name: &str) -> LogicalOperator {
+    let reads = |graph: &Option<TripleComponent>, reader: Option<&str>| {
+        reader.is_some() && graph.as_ref().and_then(TripleComponent::as_variable) == reader
     };
-    let plan = plan.map_children(|child| in_the_graph(child, variable, own, name));
+    let variable = (!how.whole_pattern).then_some(how.variable);
+    let plan = plan.map_children(|child| in_the_graph(child, how, name));
     let mut plan = map_sparql_expressions(plan, &mut |expression| {
-        in_the_graph_of_an_expression(expression, variable, own, name)
+        in_the_graph_of_an_expression(expression, how, name)
     });
     match &mut plan {
-        LogicalOperator::TripleScan(scan) if reads(&scan.graph, own) => {
+        LogicalOperator::TripleScan(scan) if reads(&scan.graph, how.own) => {
             scan.graph = Some(TripleComponent::Iri(name.to_string()));
         }
-        LogicalOperator::PropertyPath(path) if reads(&path.graph, own) => {
+        LogicalOperator::PropertyPath(path) if reads(&path.graph, how.own) => {
             path.graph = Some(TripleComponent::Iri(name.to_string()));
         }
         LogicalOperator::TripleScan(scan) if reads(&scan.graph, variable) => {
@@ -97,12 +110,61 @@ fn in_the_graph(plan: LogicalOperator, variable: &str, own: &str, name: &str) ->
         LogicalOperator::PropertyPath(path) if reads(&path.graph, variable) => {
             read_only_graph(&mut path.dataset, name);
         }
-        LogicalOperator::NamedGraphs(graphs) if graphs.variable == variable => {
+        LogicalOperator::NamedGraphs(graphs)
+            if Some(graphs.variable.as_str()) == how.own
+                || Some(graphs.variable.as_str()) == variable =>
+        {
             read_only_graph(&mut graphs.dataset, name);
         }
-        LogicalOperator::InNamedGraph(graph) if matches!(&graph.graph, NamedGraph::Variable(nested) if nested == variable) =>
-        {
-            read_only_graph(&mut graph.dataset, name);
+        _ => {}
+    }
+    plan
+}
+
+/// `plan` with `f` applied to each expression its own operator holds, of the operators a SPARQL
+/// plan holds them in: a filter, a `BIND`, a projection, a sort, an aggregation and a left join's
+/// condition: the list the SPARQL translator's `sparql_expressions` reads.
+fn map_sparql_expressions(
+    mut plan: LogicalOperator,
+    f: &mut dyn FnMut(LogicalExpression) -> LogicalExpression,
+) -> LogicalOperator {
+    let mut apply = |expression: &mut LogicalExpression| {
+        let taken = std::mem::replace(expression, LogicalExpression::Literal(Value::Null));
+        *expression = f(taken);
+    };
+    match &mut plan {
+        LogicalOperator::Filter(filter) => apply(&mut filter.predicate),
+        LogicalOperator::Bind(bind) => apply(&mut bind.expression),
+        LogicalOperator::Project(project) => {
+            for projection in &mut project.projections {
+                apply(&mut projection.expression);
+            }
+        }
+        LogicalOperator::Sort(sort) => {
+            for key in &mut sort.keys {
+                apply(&mut key.expression);
+            }
+        }
+        LogicalOperator::Aggregate(aggregate) => {
+            for key in &mut aggregate.group_by {
+                apply(key);
+            }
+            for function in &mut aggregate.aggregates {
+                for argument in [&mut function.expression, &mut function.expression2]
+                    .into_iter()
+                    .flatten()
+                {
+                    apply(argument);
+                }
+            }
+            if let Some(having) = &mut aggregate.having {
+                apply(having);
+            }
+        }
+        LogicalOperator::LeftJoin(join) => {
+            if let Some(condition) = &mut join.condition {
+                apply(condition);
+            }
         }
         _ => {}
     }
@@ -112,17 +174,14 @@ fn in_the_graph(plan: LogicalOperator, variable: &str, own: &str, name: &str) ->
 /// `expression` with the plan of each `EXISTS` in it as [`in_the_graph`] makes it.
 fn in_the_graph_of_an_expression(
     expression: LogicalExpression,
-    variable: &str,
-    own: &str,
+    how: &Reads<'_>,
     name: &str,
 ) -> LogicalExpression {
     match expression {
         LogicalExpression::ExistsSubquery(plan) => {
-            LogicalExpression::ExistsSubquery(Box::new(in_the_graph(*plan, variable, own, name)))
+            LogicalExpression::ExistsSubquery(Box::new(in_the_graph(*plan, how, name)))
         }
-        other => {
-            other.map_children(|child| in_the_graph_of_an_expression(child, variable, own, name))
-        }
+        other => other.map_children(|child| in_the_graph_of_an_expression(child, how, name)),
     }
 }
 

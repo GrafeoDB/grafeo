@@ -194,6 +194,7 @@ impl RdfPlanner {
     /// Whether an `EXISTS` that a run without the row answers runs once; off, every one runs per
     /// row, which must give the same answers.
     #[must_use]
+    #[cfg(feature = "sparql")]
     pub(crate) fn with_exists_run_once(mut self, run_once: bool) -> Self {
         self.exists_run_once = run_once;
         self
@@ -325,7 +326,8 @@ impl RdfPlanner {
     ///
     /// Returns an error if planning fails.
     pub fn plan(&self, logical_plan: &LogicalPlan) -> Result<PhysicalPlan> {
-        let (operator, columns, types) = self.plan_operator(&logical_plan.root)?;
+        let (operator, columns, types) =
+            self.without_hidden_columns(self.plan_operator(&logical_plan.root)?);
         let operator = self.decode_results(operator, &types, logical_plan.result_kind);
         let operator: Box<dyn Operator> =
             if self.shuffle_unordered && !super::common::orders_rows(&logical_plan.root) {
@@ -356,11 +358,24 @@ impl RdfPlanner {
         let result = self.plan_operator(&logical_plan.root);
 
         self.profiling.set(false);
-        let (operator, columns, types) = result?;
+        let (operator, columns, types) = self.without_hidden_columns(result?);
         let operator = self.decode_results(operator, &types, logical_plan.result_kind);
         let entries = self.profile_entries.borrow_mut().drain(..).collect();
 
         Ok((PhysicalPlan { operator, columns }, entries))
+    }
+
+    /// `planned` without the columns of hidden names, which no solution shows (see
+    /// [`is_hidden_variable`](crate::query::plan::is_hidden_variable)).
+    fn without_hidden_columns(&self, planned: PlannedOperator) -> PlannedOperator {
+        let keep = planned
+            .1
+            .iter()
+            .enumerate()
+            .filter(|(_, name)| !crate::query::plan::is_hidden_variable(name))
+            .map(|(at, _)| at)
+            .collect();
+        self.keeping_columns(planned, keep)
     }
 
     /// Decodes the term id columns of a plan's result: each becomes the
@@ -1516,8 +1531,6 @@ impl RdfPlanner {
         Ok((Box::new(sort_op), columns, types))
     }
 
-    /// Plans a PROJECT operator: a variable's ids are copied, a constant and
-    /// an expression's value are interned.
     /// A pattern in a named graph: its plan, or with no such graph in the dataset now, nothing
     /// under the same columns (SPARQL 1.1 sec 18.6).
     fn plan_in_named_graph(
@@ -1585,6 +1598,7 @@ impl RdfPlanner {
                     right: Box::new(named_graphs::in_one_graph(
                         (*graph.input).clone(),
                         variable,
+                        graph.read_as.as_ref(),
                         name,
                     )),
                     join_type: JoinType::Inner,
@@ -1598,6 +1612,8 @@ impl RdfPlanner {
         planned
     }
 
+    /// Plans a PROJECT operator: a variable's ids are copied, a constant and
+    /// an expression's value are interned.
     fn plan_project(
         &self,
         project: &crate::query::plan::ProjectOp,
@@ -1702,6 +1718,11 @@ impl RdfPlanner {
         let variable_columns = column_map(&input_columns);
         let filter_expr = convert_filter_expression(&expression)?;
 
+        // A BIND onto a name the input binds replaces its column: SPARQL refuses one in a query
+        // (sec 18.2.1), and `GRAPH ?g` binds `?g` so after a pattern that names it.
+        let replaced = input_columns
+            .iter()
+            .position(|column| *column == bind.variable);
         let mut output_columns = input_columns;
         output_columns.push(bind.variable.clone());
         input_types.push(LogicalType::RdfTermId);
@@ -1717,10 +1738,13 @@ impl RdfPlanner {
             terms: Arc::clone(&self.terms),
         });
         let bound = output_columns.len() - 1;
-        Ok(self.keeping_columns(
-            (operator, output_columns, input_types),
-            (0..width).chain([bound]).collect(),
-        ))
+        let keep = match replaced {
+            Some(at) if at < width => (0..width)
+                .map(|column| if column == at { bound } else { column })
+                .collect(),
+            _ => (0..width).chain([bound]).collect(),
+        };
+        Ok(self.keeping_columns((operator, output_columns, input_types), keep))
     }
 
     /// Plans a CONSTRUCT operator.

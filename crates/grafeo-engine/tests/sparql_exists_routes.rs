@@ -342,7 +342,9 @@ fn every_route_answers_as_per_row_on_generated_data() {
 const GRAPH_DATA: &str = "PREFIX : <urn:> INSERT DATA { :c :q 9 . GRAPH <urn:g1> { :a :p 1 . :b :p 2 . :b :q 3 . :c :p 4 } GRAPH <urn:g2> { :a :q 5 . :d :p 6 } }";
 
 /// Name, query, rows. A test inside `GRAPH` reads the graph at hand (SPARQL 1.1 18.6), through a
-/// sub-SELECT too: `a`'s `:q` in the other graph does not count.
+/// sub-SELECT too: `a`'s `:q` in the other graph does not count. A `GRAPH ?g` inside the test is
+/// another matter: the filter runs before the outer `GRAPH ?g` binds ?g, so the inner one reaches
+/// every named graph, and `a`'s `:q` in g2 counts (`sparql_graph_variable_scope.rs`).
 const IN_A_GRAPH: &[(&str, &str, &[&str])] = &[
     (
         "exists",
@@ -400,9 +402,9 @@ const IN_A_GRAPH: &[(&str, &str, &[&str])] = &[
         &["urn:g1|urn:a"],
     ),
     (
-        "the_row_names_the_graph",
+        "a_graph_variable_inside_the_test_is_free",
         "SELECT ?g ?s WHERE { GRAPH ?g { ?s :p ?o FILTER(EXISTS { GRAPH ?g { ?s :q ?x } }) } }",
-        &["urn:g1|urn:b"],
+        &["urn:g1|urn:a", "urn:g1|urn:b"],
     ),
     (
         "if_in_a_graph",

@@ -34,6 +34,7 @@ Queries that ran in 0.6.1 and now fail or behave differently.
 - **SPARQL**: fixed a slowdown in multi-way joins from 0.6.1.
 - **SPARQL**: a `.` after a `FILTER`, `OPTIONAL`, `MINUS`, `GRAPH` or nested group parses again (#737), and `GRAPH <iri>` over a graph the dataset does not hold gives no row (#738).
 - **SPARQL**: a sub-select inside `GRAPH ?g` binds `?g` (#739), `BIND(EXISTS {...} AS ?v)` evaluates (#740), and `EXISTS` and `NOT EXISTS` read each row's values, as the SPARQL 1.2 draft says. `FROM` over two graphs returns a shared triple once, `FROM` without `FROM NAMED` exposes no named graphs, `?s :p? :o` with a constant object returns `:o` and the subjects that reach it, each once (it returned every subject of `:p`, repeated), a subquery with an aggregate gives all its rows, and nested groups keep their rows.
+- **SPARQL**: inside `GRAPH ?g { ... }`, `?g` is bound only after the group, as SPARQL says: a `FILTER` on `?g`, `?g` used as a term, and a nested `GRAPH ?g` inside `EXISTS`, `NOT EXISTS`, `OPTIONAL` or `MINUS` no longer see it bound early, which gave missing or extra rows.
 - **Booleans**: `<`, `<=`, `>` and `>=` order false below true in every plan; they could return null and lose rows.
 - **Schema statements** roll back with their transaction, also across a crash (#727).
 - **Conditions that can fail**, such as `100 / n.age > 0`, no longer fail on rows a label or an earlier condition rejects.

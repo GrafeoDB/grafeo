@@ -48,9 +48,11 @@ function wrapRawResult(rawResult) {
   // can be released before db.free() is called.
   const columns = [...rawResult.columns]
   const rows = rawResult.rows.map(row => [...row])
+  const warnings = rawResult.warnings.map(w => ({ code: w.code, kind: w.kind, message: w.message }))
 
   return {
     columns,
+    warnings,
     length: rows.length,
     toArray() {
       const arr = []
@@ -317,6 +319,9 @@ function runTestCase(db, tc, language, setupLanguage) {
   // Wrap eagerly and release the WASM reference to avoid borrow conflicts on db.free()
   const result = wrapRawResult(rawResult)
   rawResult = null
+
+  // The warnings, also when none are expected
+  expect(result.warnings.map(w => w.code)).toEqual(exp.warnings)
 
   // Column assertion (checked before value assertions)
   if (exp.columns && exp.columns.length > 0) {

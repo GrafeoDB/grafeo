@@ -28,6 +28,9 @@ import { readFileSync } from 'fs'
  * @property {string|null} hash
  * @property {number|null} precision
  * @property {string[]} columns
+ * @property {string[]} warnings The codes of the warnings the statement raises,
+ *   in the result's order (by code): none without the key, so every test that
+ *   runs to a result also checks that it raises no other warning.
  */
 
 /**
@@ -243,7 +246,7 @@ function parseSingleTest(ctx) {
 // ---------------------------------------------------------------------------
 
 function makeExpect() {
-  return { rows: [], ordered: false, count: null, empty: false, error: null, gqlStatus: null, hash: null, precision: null, columns: [], terms: [] }
+  return { rows: [], ordered: false, count: null, empty: false, error: null, gqlStatus: null, hash: null, precision: null, columns: [], terms: [], warnings: [] }
 }
 
 function parseExpectBlock(ctx) {
@@ -274,6 +277,7 @@ function parseExpectBlock(ctx) {
       case 'hash': expect.hash = unquote(value); ctx.idx++; break
       case 'precision': expect.precision = parseInt(value, 10); ctx.idx++; break
       case 'columns': expect.columns = parseYamlList(value); ctx.idx++; break
+      case 'warnings': expect.warnings = parseYamlList(value); ctx.idx++; break
       case 'rows': ctx.idx++; expect.rows = parseRows(ctx); break
       case 'terms': ctx.idx++; expect.terms = parseRows(ctx); break
       // A key no runner reads would leave a test that checks nothing.

@@ -125,6 +125,10 @@ type Expect struct {
 	// Terms are rows of RDF terms in N-Triples form, each cell compared as
 	// the exact term (see assertTerms).
 	Terms [][]string
+	// Warnings are the codes of the warnings the statement raises, in the
+	// result's order (by code): none without the key, so every test that runs
+	// to a result also checks that it raises no other warning.
+	Warnings []string
 	// UnknownKey is an expect key no runner reads: the test fails on it, as
 	// it would otherwise check nothing.
 	UnknownKey string
@@ -567,6 +571,20 @@ func assertEmpty(t *testing.T, result *grafeo.QueryResult) {
 	}
 }
 
+func assertWarnings(t *testing.T, result *grafeo.QueryResult, expected []string) {
+	t.Helper()
+	actual := make([]string, 0, len(result.Warnings))
+	for _, warning := range result.Warnings {
+		actual = append(actual, warning.Code)
+	}
+	if len(expected) == 0 {
+		expected = []string{}
+	}
+	if strings.Join(actual, ",") != strings.Join(expected, ",") {
+		t.Fatalf("Warning mismatch: got %v, expected %v (%v)", actual, expected, result.Warnings)
+	}
+}
+
 func assertColumns(t *testing.T, result *grafeo.QueryResult, expected []string) {
 	t.Helper()
 	actual := result.Columns
@@ -949,6 +967,9 @@ func parseExpectBlock(ctx *parseContext) Expect {
 			ctx.idx++
 		case "columns":
 			exp.Columns = parseYamlList(value)
+			ctx.idx++
+		case "warnings":
+			exp.Warnings = parseYamlList(value)
 			ctx.idx++
 		case "rows":
 			ctx.idx++
@@ -1421,6 +1442,9 @@ func runSingleTest(t *testing.T, gf *GtestFile, tc TestCase, variantLang, varian
 		}
 		t.Fatalf("Query failed: %v\nQuery: %s", err, queries[len(queries)-1])
 	}
+
+	// The warnings, also when none are expected
+	assertWarnings(t, result, exp.Warnings)
 
 	// Column assertion (checked before value assertions)
 	if len(exp.Columns) > 0 {

@@ -156,6 +156,9 @@ public class SpecTests : IDisposable
             // Last query: capture result (with params if present)
             var result = ExecuteQuery(_db, language, queries[^1], parameters);
 
+            // The warnings, also when none are expected
+            Assert.Equal(expect.Warnings, result.Warnings.Select(w => w.Code).ToList());
+
             // Column assertion
             if (expect.Columns.Count > 0)
                 AssertColumns(result, expect.Columns);

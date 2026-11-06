@@ -218,6 +218,8 @@ public static class GtestParser
                     ctx.Idx++; break;
                 case "columns":
                     expect.Columns = ParseYamlList(value); ctx.Idx++; break;
+                case "warnings":
+                    expect.Warnings = ParseYamlList(value); ctx.Idx++; break;
                 case "rows":
                     ctx.Idx++; expect.Rows = ParseRows(ctx); break;
                 case "terms":

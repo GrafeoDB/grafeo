@@ -28,6 +28,12 @@ public sealed class Expect
     public int? Precision { get; set; }
     public List<string> Columns { get; set; } = [];
 
+    /// <summary>
+    /// The codes of the warnings the statement raises, in the result's order (by code): none
+    /// without the key, so every test that runs to a result also checks that it raises no other.
+    /// </summary>
+    public List<string> Warnings { get; set; } = [];
+
     /// <summary>Rows of RDF terms in N-Triples form, each cell compared as the exact term.</summary>
     public List<List<string>> Terms { get; set; } = [];
 

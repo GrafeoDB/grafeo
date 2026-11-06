@@ -63,6 +63,10 @@ class Expect:
     terms: list[list[str | None]] = field(default_factory=list)
 
     columns: list[str] = field(default_factory=list)
+    # The codes of the warnings the statement raises, in the result's order (by
+    # code): none without the key, so every test that runs to a result also
+    # checks that it raises no other warning.
+    warnings: list[str] = field(default_factory=list)
 
 
 # The keys an expectation may have: any other is an error, as a key no runner
@@ -79,6 +83,7 @@ EXPECT_KEYS = frozenset(
         "precision",
         "columns",
         "terms",
+        "warnings",
     }
 )
 
@@ -278,6 +283,7 @@ def _parse_expect_dict(d: dict) -> Expect:
         e.precision = int(precision)
 
     e.columns = _as_string_list(d.get("columns", []))
+    e.warnings = _as_string_list(d.get("warnings", []))
 
     # rows: list of lists, each element becomes a string for comparison
     raw_rows = d.get("rows", [])
@@ -470,6 +476,9 @@ def _lb_parse_expect(lines: list[str], idx: int) -> tuple:
             idx += 1
         elif key == "columns":
             e.columns = _lb_parse_yaml_list(value)
+            idx += 1
+        elif key == "warnings":
+            e.warnings = _lb_parse_yaml_list(value)
             idx += 1
         elif key == "rows":
             idx += 1

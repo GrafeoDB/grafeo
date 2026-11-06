@@ -282,6 +282,9 @@ async function runTestCase(db, tc, language, setupLanguage) {
     result = await executeQuery(db, language, queries[i], params)
   }
 
+  // The warnings, also when none are expected
+  expect(result.warnings.map(w => w.code)).toEqual(exp.warnings)
+
   // Column assertion (checked before value assertions)
   if (exp.columns && exp.columns.length > 0) {
     const actualCols = result.columns ? [...result.columns] : []

@@ -618,6 +618,11 @@ class _Expect {
   /// Rows of RDF terms in N-Triples form, each cell compared as the exact term.
   List<List<String>> terms = [];
 
+  /// The codes of the warnings the statement raises, in the result's order (by
+  /// code): none without the key, so every test that runs to a result also
+  /// checks that it raises no other warning.
+  List<String> warnings = [];
+
   /// An expect key no runner reads: the test fails on it, as it would
   /// otherwise check nothing.
   String? unknownKey;
@@ -891,6 +896,9 @@ _Expect _parseExpectBlock(_ParseContext ctx) {
         ctx.idx++;
       case 'columns':
         e.columns = _parseYamlList(value);
+        ctx.idx++;
+      case 'warnings':
+        e.warnings = _parseYamlList(value);
         ctx.idx++;
       case 'rows':
         ctx.idx++;
@@ -1221,6 +1229,10 @@ void _runTestCase(GrafeoDB db, _TestCase tc, String language,
     result = _executeQuery(db, language, q,
         params: tc.params.isNotEmpty ? tc.params : null);
   }
+
+  // The warnings, also when none are expected
+  expect([for (final w in result.warnings) w.code], equals(exp.warnings),
+      reason: 'Warning mismatch: ${result.warnings}');
 
   // Column assertion (checked before value assertions)
   if (exp.columns.isNotEmpty) {

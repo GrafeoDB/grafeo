@@ -12,6 +12,7 @@ result.
 from __future__ import annotations
 
 import sys
+import warnings
 from pathlib import Path
 
 import pytest
@@ -33,6 +34,7 @@ from comparator import (
     assert_rows_sorted,
     assert_rows_with_precision,
     assert_terms,
+    assert_warnings,
 )
 from parser import GtestFile, TestCase, coerce_params, parse_gtest_file
 
@@ -218,6 +220,9 @@ class GtestItem(pytest.Item):
         # Last query: capture result (with params if present)
         result = _execute(db, language, queries[-1], params)
 
+        # The warnings, also when none are expected
+        assert_warnings(result, expect.warnings)
+
         # Column assertion (checked before value assertions)
         if expect.columns:
             assert_columns(result, expect.columns)
@@ -311,6 +316,16 @@ def _describe(expected_substr: str | None, expected_status: str | None) -> str:
 
 
 def _execute(db, language: str, query: str, params=None):
+    """Execute a query in the specified language, returning the QueryResult.
+
+    The binding also raises each warning through ``warnings.warn``; the runner
+    checks them on ``result.warnings``, so it does not show them twice."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        return _execute_quietly(db, language, query, params)
+
+
+def _execute_quietly(db, language: str, query: str, params=None):
     """Execute a query in the specified language, returning the QueryResult."""
     method_name = _LANGUAGE_METHODS.get(language)
     if method_name is not None:

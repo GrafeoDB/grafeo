@@ -186,6 +186,10 @@ fn write_sections(
         });
     }
 
+    // Too little disk space refuses the checkpoint before it starts a new
+    // WAL segment, so the refusal changes nothing (#726).
+    fm.check_checkpoint_space()?;
+
     // Step 1: the groups logged before the checkpoint LSN are in sealed
     // segments, and their effects are in the snapshot below (commits are
     // held, so no group follows them until the image is written).

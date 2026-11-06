@@ -74,6 +74,7 @@ Queries that ran in 0.6.1 and now fail or behave differently.
 - **`grafeo.topological_sort`** gives the same order on every run (the lexicographically smallest by node id).
 - **`YIELD`**: a column a procedure does not have is refused when the call is planned, naming its columns; it failed only after the algorithm had run (4.5 s on 4,000 nodes).
 - **WAL segments**: a panic while the WAL started a new segment no longer makes every later checkpoint fail until a reopen (#725).
+- **Checkpoints** check free disk space first and fail with a clear error naming the space needed and available, changing nothing; a checkpoint that fails partway gives back the disk space it took (#726).
 
 ### Contributors
 

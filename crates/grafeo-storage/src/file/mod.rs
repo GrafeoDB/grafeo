@@ -64,8 +64,10 @@ pub mod header;
 pub(crate) mod holder;
 pub mod legacy;
 pub mod manager;
+pub mod space;
 pub mod v3;
 
 pub use format::{DbHeader, FileHeader, MAGIC};
 pub use manager::{CheckpointHeader, GrafeoFileManager, ImageStats};
+pub use space::InsufficientSpace;
 pub use v3::CheckpointStats;

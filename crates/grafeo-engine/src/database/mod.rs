@@ -1399,6 +1399,9 @@ impl GrafeoDB {
     ) -> Result<()> {
         let path = fm.sidecar_wal_path();
         std::fs::create_dir_all(&path)?;
+        // A checkpoint starts a new WAL segment, and the log grows on in it:
+        // a checkpoint leaves room for one (#726).
+        fm.set_checkpoint_headroom(grafeo_storage::wal::DEFAULT_SEGMENT_BYTES);
         self.open_wal_at(&path, fm.database_id(), keys, start_lsn)
     }
 

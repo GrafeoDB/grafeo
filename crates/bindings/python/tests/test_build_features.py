@@ -2,6 +2,7 @@
 
 import os
 import re
+from pathlib import Path
 
 import grafeo
 import pytest
@@ -34,6 +35,19 @@ def test_features_match_the_api_of_this_build():
         assert (feature in features) == hasattr(db, attribute), feature
 
 
+def test_requires_marks_know_every_feature_the_build_can_report():
+    # conftest's `requires` mark refuses a name outside KNOWN_FEATURES, so the set
+    # must hold exactly the names features() can report: read them from its source.
+    from tests.conftest import KNOWN_FEATURES
+
+    source = (Path(__file__).parent.parent / "src" / "lib.rs").read_text(encoding="utf-8")
+    body = source[source.index("fn features()") :]
+    body = body[: body.index(".into_iter()")]
+    reported = set(re.findall(r'\("([a-z-]+)", cfg!\(feature = "\1"\)\)', body))
+    assert len(reported) >= 15, reported
+    assert reported == KNOWN_FEATURES
+
+
 def test_features_are_exported_from_the_package():
     assert {"features", "build_info"} <= set(grafeo.__all__)
 
@@ -58,3 +72,13 @@ def test_build_info_describes_this_build():
 )
 def test_release_build_has_every_query_language():
     assert QUERY_LANGUAGES <= set(grafeo.features())
+
+
+@pytest.mark.skipif(
+    os.environ.get("GRAFEO_RELEASE_BUILD") != "1",
+    reason="checks a release-equivalent build: set GRAFEO_RELEASE_BUILD=1",
+)
+def test_release_build_imports_parquet():
+    # The wheel's `full` feature once left out `parquet-import`, so the statement
+    # the GQL guide shows failed in every installed wheel.
+    assert "parquet-import" in grafeo.features()

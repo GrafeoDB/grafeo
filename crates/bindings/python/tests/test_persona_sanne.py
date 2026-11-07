@@ -17,7 +17,10 @@ try:
 except ImportError:
     GRAFEO_AVAILABLE = False
 
-pytestmark = pytest.mark.skipif(not GRAFEO_AVAILABLE, reason="Grafeo Python bindings not installed")
+pytestmark = [
+    pytest.mark.skipif(not GRAFEO_AVAILABLE, reason="Grafeo Python bindings not installed"),
+    pytest.mark.requires("sparql"),
+]
 
 P = "PREFIX foaf: <http://xmlns.com/foaf/0.1/>\nPREFIX ex: <http://example.org/>\n"
 EX = "http://example.org/"

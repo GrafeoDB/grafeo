@@ -75,6 +75,7 @@ db.execute("INSERT (:Person {name: 'Gus', age: 25})")
 """
 
 
+@pytest.mark.requires("cdc")
 def test_persona_first_time_user_follows_the_transaction_example(tmp_path):
     # The Python README's transaction block, after the quick start.
     block = next(b for b in python_blocks(READMES["python"]) if "begin_transaction()" in b)

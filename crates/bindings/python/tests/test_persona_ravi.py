@@ -67,6 +67,7 @@ def topics_of(db, hits):
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.requires("text-index", "arrow-export")
 def test_persona_ravi_numpy_embeddings_are_stored_as_vectors(db):
     pytest.importorskip("pyarrow")
     row = db.execute("MATCH (d:Doc {title: 'd00'}) RETURN d.emb AS e").to_list()[0]
@@ -76,6 +77,7 @@ def test_persona_ravi_numpy_embeddings_are_stored_as_vectors(db):
     assert str(schema.field("e").type) == "fixed_size_list<item: float not null>[4]"
 
 
+@pytest.mark.requires("text-index", "arrow-export")
 def test_persona_ravi_exports_to_pandas_and_arrow(db):
     pytest.importorskip("pandas")
     pytest.importorskip("pyarrow")
@@ -98,6 +100,7 @@ def test_persona_ravi_exports_to_pandas_and_arrow(db):
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.requires("text-index")
 def test_persona_ravi_top_k_finds_the_topic_from_any_array_kind(db):
     for topic in TOPICS:
         want = db.vector_search("Doc", "emb", topic_vector(topic), 4)
@@ -108,6 +111,7 @@ def test_persona_ravi_top_k_finds_the_topic_from_any_array_kind(db):
         assert db.vector_search("Doc", "emb", as_ints, 4) == want
 
 
+@pytest.mark.requires("text-index")
 def test_persona_ravi_a_threshold_and_top_k_in_a_query(db):
     query = topic_vector("canals")
     rows = db.execute(
@@ -126,6 +130,7 @@ def test_persona_ravi_a_threshold_and_top_k_in_a_query(db):
     assert [row["t"] for row in rows] == titles
 
 
+@pytest.mark.requires("text-index")
 def test_persona_ravi_a_threshold_nobody_passes_gives_no_rows(db):
     rows = db.execute(
         "MATCH (d:Doc) WHERE cosine_similarity(d.emb, $q) > 0.999999 RETURN d.title AS t LIMIT 3",
@@ -134,17 +139,20 @@ def test_persona_ravi_a_threshold_nobody_passes_gives_no_rows(db):
     assert rows == []
 
 
+@pytest.mark.requires("text-index")
 def test_persona_ravi_filters_keep_one_topic(db):
     hits = db.vector_search("Doc", "emb", topic_vector("graphs"), 3, filters={"topic": "canals"})
     assert topics_of(db, hits) == ["canals"] * 3
 
 
+@pytest.mark.requires("text-index")
 def test_persona_ravi_a_batch_gives_each_queries_hits(db):
     queries = np.stack([topic_vector(topic) for topic in TOPICS])
     batch = db.batch_vector_search("Doc", "emb", queries, 2)
     assert batch == [db.vector_search("Doc", "emb", query, 2) for query in queries]
 
 
+@pytest.mark.requires("text-index", "hybrid-search")
 def test_persona_ravi_hybrid_search(db):
     hits = db.hybrid_search("Doc", "body", "emb", "canals", 3, query_vector=topic_vector("canals"))
     assert topics_of(db, hits) == ["canals"] * 3
@@ -160,6 +168,7 @@ def test_persona_ravi_hybrid_search(db):
     assert topics_of(db, filtered) == ["cycling"] * 3
 
 
+@pytest.mark.requires("text-index")
 def test_persona_ravi_mmr_starts_at_the_nearest_and_spreads(db):
     query = topic_vector("graphs")
     nearest = db.vector_search("Doc", "emb", query, 1)[0][0]
@@ -186,6 +195,7 @@ def test_persona_ravi_searches_before_creating_the_index():
         db.vector_search("Doc", "emb", topic_vector("graphs"), 3)
 
 
+@pytest.mark.requires("text-index")
 def test_persona_ravi_a_query_vector_of_the_wrong_size(db):
     with pytest.raises(
         grafeo.GrafeoError, match="3 dimensions; the index on :Doc\\(emb\\) expects 4"
@@ -193,11 +203,13 @@ def test_persona_ravi_a_query_vector_of_the_wrong_size(db):
         db.vector_search("Doc", "emb", [1.0, 0.0, 0.0], 3)
 
 
+@pytest.mark.requires("text-index")
 def test_persona_ravi_a_nan_from_a_broken_model(db):
     with pytest.raises(grafeo.GrafeoError, match="NaN at position 0"):
         db.vector_search("Doc", "emb", [float("nan"), 0.0, 0.0, 0.0], 3)
 
 
+@pytest.mark.requires("text-index")
 def test_persona_ravi_k_of_zero_gives_nothing(db):
     assert db.vector_search("Doc", "emb", topic_vector("graphs"), 0) == []
 

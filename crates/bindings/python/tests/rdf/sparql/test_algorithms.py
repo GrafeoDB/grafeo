@@ -6,6 +6,8 @@ Note: Algorithms are accessed via db.algorithms.*, not via SPARQL queries.
 
 import random
 
+import pytest
+
 from tests.bases.test_algorithms import BaseAlgorithmsTest
 
 
@@ -37,6 +39,7 @@ class TestSPARQLAlgorithms(BaseAlgorithmsTest):
         return {"node_ids": node_ids, "edge_count": len(edges)}
 
 
+@pytest.mark.requires("algos")
 class TestSPARQLAlgorithmVerification:
     """Tests that verify algorithm results (uses Python API only)."""
 

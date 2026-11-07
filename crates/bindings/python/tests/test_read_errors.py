@@ -33,6 +33,7 @@ def test_a_graph_handle_raises_once_its_graph_is_dropped():
     assert len(raised.value.gql_status) == 5
 
 
+@pytest.mark.requires("algos")
 def test_the_graph_bridges_read_the_selected_graph():
     db = GrafeoDB()
     db.create_node(["Person"], {"name": "Alix"})

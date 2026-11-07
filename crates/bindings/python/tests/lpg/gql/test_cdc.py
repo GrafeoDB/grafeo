@@ -2,6 +2,8 @@
 
 import pytest
 
+pytestmark = pytest.mark.requires("cdc")
+
 try:
     from grafeo import GrafeoDB
 

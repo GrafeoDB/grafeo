@@ -52,6 +52,7 @@ def assert_refused(call, message):
     assert message in str(caught.value)
 
 
+@pytest.mark.requires("text-index", "hybrid-search")
 @pytest.mark.parametrize(("query", "message"), CASES, ids=IDS)
 def test_every_search_call_refuses_a_query_vector_the_index_cannot_measure(docs, query, message):
     assert_refused(lambda: docs.vector_search("Doc", "emb", query, 2), message)
@@ -73,6 +74,7 @@ def test_every_search_call_refuses_a_query_vector_the_index_cannot_measure(docs,
     assert_still_answers(docs)
 
 
+@pytest.mark.requires("text-index")
 @pytest.mark.parametrize(("query", "message"), [SHORT, LONG], ids=["short", "long"])
 def test_search_procedures_refuse_a_query_vector_of_another_size(docs, query, message):
     literal = "[" + ", ".join(str(value) for value in query) + "]"
@@ -87,6 +89,7 @@ def test_search_procedures_refuse_a_query_vector_of_another_size(docs, query, me
     assert_still_answers(docs)
 
 
+@pytest.mark.requires("text-index")
 @pytest.mark.parametrize(("query", "message"), CASES, ids=IDS)
 def test_a_vector_predicate_on_an_indexed_property_refuses_it(docs, query, message):
     assert_refused(
@@ -99,6 +102,7 @@ def test_a_vector_predicate_on_an_indexed_property_refuses_it(docs, query, messa
     assert_still_answers(docs)
 
 
+@pytest.mark.requires("text-index")
 def test_an_indexed_property_refuses_nan(docs):
     assert_refused(
         lambda: docs.create_node(["Doc"], {"emb": [0.9, math.nan, 0.0]}),
@@ -109,6 +113,7 @@ def test_an_indexed_property_refuses_nan(docs):
     assert_still_answers(docs)
 
 
+@pytest.mark.requires("text-index")
 def test_vector_index_arguments_are_invalid_values(docs):
     assert_refused(
         lambda: docs.create_vector_index("Doc", "other", dimensions=0),

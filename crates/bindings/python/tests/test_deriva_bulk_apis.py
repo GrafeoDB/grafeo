@@ -291,6 +291,7 @@ def test_the_arrow_extra_is_declared_and_brings_pyarrow():
     assert not arrow[0].marker.evaluate({"extra": ""})
 
 
+@pytest.mark.requires("arrow-export")
 def test_nodes_to_arrow_with_the_extra(db):
     pa = pytest.importorskip("pyarrow")
     table = db.nodes_to_arrow()

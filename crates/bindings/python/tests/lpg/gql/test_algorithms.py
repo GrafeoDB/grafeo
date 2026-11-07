@@ -5,6 +5,8 @@ Tests graph algorithms with GQL for setup/verification.
 
 import random
 
+import pytest
+
 from tests.bases.test_algorithms import BaseAlgorithmsTest
 
 
@@ -38,6 +40,7 @@ class TestGQLAlgorithms(BaseAlgorithmsTest):
 # Additional GQL-specific algorithm tests using GQL for verification
 
 
+@pytest.mark.requires("algos")
 class TestGQLAlgorithmVerification:
     """Tests that verify algorithm results using GQL queries."""
 

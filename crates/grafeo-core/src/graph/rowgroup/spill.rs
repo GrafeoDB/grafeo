@@ -118,11 +118,19 @@ impl RowGroupStore {
             let resident = chunks.resident;
             let file_bytes = chunks.bytes.len();
             let mut inner = RwLockUpgradableReadGuard::upgrade(inner);
+            // Counted on its own: the writes' bracket closes first.
+            inner.close_bracket();
+            let thaws = inner.account.sink(grafeo_common::change::Table::Nodes);
             let group = inner
                 .nodes
                 .get_mut(&number)
                 .ok_or_else(|| Error::Internal("a spilled row group is gone".to_string()))?;
-            let after = group.columns.install_spill(key, chunks, &mapped)?;
+            let held = group.lines();
+            let installed = group.columns.install_spill(key, chunks, &mapped, &thaws);
+            let moved = group.lines();
+            inner.account.moved(&held, &moved);
+            inner.settle_tight();
+            let after = installed?;
             report.spilled_groups += 1;
             report.file_bytes += file_bytes;
             report.freed_bytes += resident.saturating_sub(after);
@@ -143,11 +151,19 @@ impl RowGroupStore {
         let Some(key) = inner.keys.get_id(key.as_str()) else {
             return Ok(false);
         };
-        let mut reloaded = false;
+        let mut reloaded = Ok(false);
         for group in inner.nodes.values_mut() {
-            reloaded |= group.columns.reload(key)?;
+            // A reload is a thaw, which the store's thaws count.
+            match group.columns.reload(key) {
+                Ok(was) => reloaded = reloaded.map(|before| before | was),
+                Err(error) => {
+                    reloaded = Err(error);
+                    break;
+                }
+            }
         }
-        Ok(reloaded)
+        inner.settle();
+        reloaded
     }
 
     /// The keys of the node property columns some row group holds spilled,

@@ -420,10 +420,33 @@ impl Default for Vector {
     }
 }
 
+impl Vector {
+    /// The heap bytes the vector's versions take.
+    fn heap_bytes(&self) -> usize {
+        match self {
+            Self::Flat(exists) => exists.heap_bytes(),
+            Self::Stamped(stamped) => stamped.heap_bytes(),
+        }
+    }
+}
+
 /// The versions of a row group's rows.
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub(super) struct Versions {
     vectors: Vec<Vector>,
+    /// The heap bytes of the vectors' versions, kept as they change (see
+    /// [`counted_bytes`](Self::counted_bytes)).
+    counted: usize,
+}
+
+/// Its vectors, without the count: what the versions say, which two stores
+/// with the same versions show alike.
+impl std::fmt::Debug for Versions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Versions")
+            .field("vectors", &self.vectors)
+            .finish()
+    }
 }
 
 impl Versions {
@@ -441,6 +464,16 @@ impl Versions {
             }
             Some(Vector::Stamped(stamped)) => stamped.get(row % VECTOR_ROWS),
         }
+    }
+
+    /// The heap bytes of vector `index`'s versions, 0 for none.
+    fn vector_bytes(&self, index: usize) -> usize {
+        self.vectors.get(index).map_or(0, Vector::heap_bytes)
+    }
+
+    /// Counts what vector `index` takes now, `before` being what it took.
+    fn recount_vector(&mut self, index: usize, before: usize) {
+        self.counted = super::sub_count(self.counted + self.vector_bytes(index), before);
     }
 
     /// The stamps of vector `index`, stamping it if it is flat.
@@ -562,14 +595,20 @@ impl Versions {
 
     /// Sets who created `row`: its vector holds stamps from then on.
     pub(super) fn set_created(&mut self, row: usize, stamp: u64) {
-        self.stamped_mut(row / VECTOR_ROWS)
+        let index = row / VECTOR_ROWS;
+        let before = self.vector_bytes(index);
+        self.stamped_mut(index)
             .set_created(row % VECTOR_ROWS, stamp);
+        self.recount_vector(index, before);
     }
 
     /// Sets who deleted `row` ([`ABSENT`]: no one); the row exists.
     pub(super) fn set_deleted(&mut self, row: usize, stamp: u64) {
-        self.stamped_mut(row / VECTOR_ROWS)
+        let index = row / VECTOR_ROWS;
+        let before = self.vector_bytes(index);
+        self.stamped_mut(index)
             .set_deleted(row % VECTOR_ROWS, stamp);
+        self.recount_vector(index, before);
     }
 
     /// Commits transaction stamp `from`'s creates among `rows` at epoch
@@ -611,6 +650,7 @@ impl Versions {
         if index >= self.vectors.len() {
             self.vectors.resize_with(index + 1, Vector::default);
         }
+        let before = self.vector_bytes(index);
         let offset = row % VECTOR_ROWS;
         match &mut self.vectors[index] {
             Vector::Flat(exists) => exists.set(offset),
@@ -619,17 +659,21 @@ impl Versions {
                 stamped.set_deleted(offset, ABSENT);
             }
         }
+        self.recount_vector(index, before);
     }
 
     /// Takes `row` out: it no longer exists for any reader. A flat vector
     /// stays flat, as a load's deleted rows leave it.
     pub(super) fn remove(&mut self, row: usize) {
+        let index = row / VECTOR_ROWS;
+        let before = self.vector_bytes(index);
         let offset = row % VECTOR_ROWS;
-        match self.vectors.get_mut(row / VECTOR_ROWS) {
+        match self.vectors.get_mut(index) {
             None => {}
             Some(Vector::Flat(exists)) => exists.clear(offset),
             Some(Vector::Stamped(stamped)) => stamped.remove(offset),
         }
+        self.recount_vector(index, before);
     }
 
     /// The rows that exist, ascending, each with its version.
@@ -656,7 +700,9 @@ impl Versions {
     pub(super) fn collapse(&mut self, horizon: u64) -> Vec<usize> {
         let mut gone = Vec::new();
         for index in 0..self.vectors.len() {
+            let before = self.vector_bytes(index);
             self.collapse_into(index, horizon, &mut gone);
+            self.recount_vector(index, before);
         }
         gone
     }
@@ -668,6 +714,14 @@ impl Versions {
     /// anew from every row (the reference this must equal, which the collect
     /// of every vector keeps).
     pub(super) fn collapse_vector(&mut self, index: usize, horizon: u64) -> Vec<usize> {
+        let before = self.vector_bytes(index);
+        let gone = self.collapse_vector_uncounted(index, horizon);
+        self.recount_vector(index, before);
+        gone
+    }
+
+    /// [`collapse_vector`](Self::collapse_vector), leaving the count to it.
+    fn collapse_vector_uncounted(&mut self, index: usize, horizon: u64) -> Vec<usize> {
         let mut gone = Vec::new();
         let Some(vector) = self.vectors.get_mut(index) else {
             return gone;
@@ -756,17 +810,23 @@ impl Versions {
             .count()
     }
 
-    /// The heap bytes the versions take.
+    /// The heap bytes the versions take: a walk of every vector, for the
+    /// oracle.
     pub(super) fn heap_bytes(&self) -> usize {
         self.vectors.capacity() * std::mem::size_of::<Vector>()
-            + self
-                .vectors
-                .iter()
-                .map(|vector| match vector {
-                    Vector::Flat(exists) => exists.heap_bytes(),
-                    Vector::Stamped(stamped) => stamped.heap_bytes(),
-                })
-                .sum::<usize>()
+            + self.vectors.iter().map(Vector::heap_bytes).sum::<usize>()
+    }
+
+    /// [`heap_bytes`](Self::heap_bytes), from what the versions keep as
+    /// they change: two loads.
+    pub(super) fn counted_bytes(&self) -> usize {
+        self.vectors.capacity() * std::mem::size_of::<Vector>() + self.counted
+    }
+
+    /// Sets its count to what its vectors take: after a load that built them
+    /// without counting.
+    pub(super) fn retally(&mut self) {
+        self.counted = self.vectors.iter().map(Vector::heap_bytes).sum();
     }
 
     /// The rows of the vectors that hold stamps, ascending: the rows whose

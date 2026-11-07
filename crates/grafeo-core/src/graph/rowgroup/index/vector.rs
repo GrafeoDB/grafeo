@@ -3,10 +3,11 @@
 //! searches at a view (see the parent module).
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use grafeo_common::types::{ArcStr, NodeId, PropertyKey, ReadView, Value};
 
-use super::super::{Inner, ROWS_PER_GROUP, Read, RowGroupStore};
+use super::super::{Inner, ROWS_PER_GROUP, Read, RowGroupStore, Touched};
 use super::IndexSearch;
 use super::key::{SearchKey, search_key};
 use crate::index::ranking::by_ascending_distance;
@@ -23,6 +24,27 @@ pub(super) struct VectorEntry {
     label: ArcStr,
     property: PropertyKey,
     index: Arc<VectorIndexKind>,
+    /// The index's heap bytes as the store's writes last left them (see
+    /// [`VectorIndexKind::counted_bytes`]).
+    counted: AtomicUsize,
+}
+
+impl VectorEntry {
+    /// The index's heap bytes as the writes keep them: one load.
+    pub(super) fn counted_bytes(&self) -> usize {
+        self.counted.load(Ordering::Relaxed)
+    }
+
+    /// The index's heap bytes by a walk of its topology: the oracle.
+    pub(super) fn walk_bytes(&self) -> usize {
+        self.index.heap_memory_bytes()
+    }
+
+    /// Notes what the index holds now, after a write to it.
+    fn note(&self) {
+        self.counted
+            .store(self.index.counted_bytes(), Ordering::Relaxed);
+    }
 }
 
 /// The vectors of one key as the store holds them now, the newest in
@@ -81,11 +103,13 @@ impl Inner {
             Some(vector) => {
                 if value_changed || !entry.index.contains(id) {
                     entry.index.insert(id, &vector, &vectors);
+                    entry.note();
                 }
             }
             None => {
                 if entry.index.contains(id) {
                     entry.index.remove(id, &vectors);
+                    entry.note();
                 }
             }
         }
@@ -119,6 +143,7 @@ impl Inner {
                 entry
                     .index
                     .remove(id, &self.newest_vectors(entry.property.as_str()));
+                entry.note();
             }
         }
     }
@@ -355,13 +380,17 @@ impl RowGroupStore {
         let entry = VectorEntry {
             label: ArcStr::from(label),
             property: PropertyKey::new(property),
+            counted: AtomicUsize::new(index.counted_bytes()),
             index,
         };
-        inner.reconcile_vectors(&entry);
-        inner
-            .indexes
-            .vector
-            .insert(SearchKey::new(label, property), entry);
+        inner.counting(Touched::none(), |inner| {
+            inner.reconcile_vectors(&entry);
+            inner
+                .indexes
+                .vector
+                .insert(SearchKey::new(label, property), entry);
+        });
+        inner.settle();
     }
 
     /// The nodes `view` sees nearest to `query`, nearest first, through the
@@ -446,12 +475,37 @@ impl RowGroupStore {
     /// Removes the vector index for a label and a property. Returns `true`
     /// if the index existed and was removed.
     pub fn remove_vector_index(&self, label: &str, property: &str) -> bool {
+        let mut inner = self.inner.write();
+        let removed = inner.counting(Touched::none(), |inner| {
+            inner
+                .indexes
+                .vector
+                .remove(&search_key(label, property))
+                .is_some()
+        });
+        inner.settle();
+        removed
+    }
+
+    /// The vector indexes of this store as the account counts them: label,
+    /// property, heap bytes and vectors, without a walk.
+    pub(in crate::graph::rowgroup) fn vector_index_figures(
+        &self,
+    ) -> Vec<(String, String, usize, usize)> {
         self.inner
-            .write()
+            .read()
             .indexes
             .vector
-            .remove(&search_key(label, property))
-            .is_some()
+            .iter()
+            .map(|(key, entry)| {
+                (
+                    key.label.clone(),
+                    key.property.clone(),
+                    entry.counted_bytes(),
+                    entry.index.len(),
+                )
+            })
+            .collect()
     }
 
     /// Returns all vector indexes as `(label, property, index)`.

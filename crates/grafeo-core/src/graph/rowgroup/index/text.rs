@@ -4,11 +4,12 @@
 
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use grafeo_common::types::{ArcStr, NodeId, PropertyKey, ReadView, Value};
 use parking_lot::RwLock;
 
-use super::super::{Inner, ROWS_PER_GROUP, Read, RowGroupStore};
+use super::super::{Inner, ROWS_PER_GROUP, Read, RowGroupStore, Touched};
 use super::IndexSearch;
 use super::key::{SearchKey, search_key};
 use crate::index::text::InvertedIndex;
@@ -18,6 +19,26 @@ pub(super) struct TextEntry {
     label: ArcStr,
     property: PropertyKey,
     index: Arc<RwLock<InvertedIndex>>,
+    /// The index's heap bytes as the store's writes last left them (see
+    /// [`InvertedIndex::counted_bytes`]), read without its lock.
+    counted: AtomicUsize,
+}
+
+impl TextEntry {
+    /// The index's heap bytes as the writes keep them: one load.
+    pub(super) fn counted_bytes(&self) -> usize {
+        self.counted.load(Ordering::Relaxed)
+    }
+
+    /// The index's heap bytes by a walk of its terms: the oracle.
+    pub(super) fn walk_bytes(&self) -> usize {
+        self.index.read().heap_memory_bytes()
+    }
+
+    /// Notes what `index`, this entry's under its write lock, holds now.
+    fn note(&self, index: &InvertedIndex) {
+        self.counted.store(index.counted_bytes(), Ordering::Relaxed);
+    }
 }
 
 /// Which documents a text search returns, best first.
@@ -58,6 +79,7 @@ impl Inner {
                 let mut index = entry.index.write();
                 if value_changed || !index.contains(id) {
                     index.insert(id, &text);
+                    entry.note(&index);
                 }
             }
             None => {
@@ -66,7 +88,9 @@ impl Inner {
                 // the removal then undoes as the newest state wants.
                 let held = entry.index.read().contains(id);
                 if held {
-                    entry.index.write().remove(id);
+                    let mut index = entry.index.write();
+                    index.remove(id);
+                    entry.note(&index);
                 }
             }
         }
@@ -97,7 +121,9 @@ impl Inner {
         for entry in self.indexes.text.values() {
             let held = entry.index.read().contains(id);
             if held {
-                entry.index.write().remove(id);
+                let mut index = entry.index.write();
+                index.remove(id);
+                entry.note(&index);
             }
         }
     }
@@ -245,16 +271,21 @@ impl RowGroupStore {
     /// the current epoch sees lacks open transactions' writes).
     pub fn add_text_index(&self, label: &str, property: &str, index: Arc<RwLock<InvertedIndex>>) {
         let mut inner = self.inner.write();
+        let counted = index.read().counted_bytes();
         let entry = TextEntry {
             label: ArcStr::from(label),
             property: PropertyKey::new(property),
+            counted: AtomicUsize::new(counted),
             index,
         };
-        inner.reconcile_text(&entry);
-        inner
-            .indexes
-            .text
-            .insert(SearchKey::new(label, property), entry);
+        inner.counting(Touched::none(), |inner| {
+            inner.reconcile_text(&entry);
+            inner
+                .indexes
+                .text
+                .insert(SearchKey::new(label, property), entry);
+        });
+        inner.settle();
     }
 
     /// The best `search.k` documents of the text index on `label` and
@@ -310,12 +341,37 @@ impl RowGroupStore {
     /// Removes the text index for a label and a property. Returns `true` if
     /// the index existed and was removed.
     pub fn remove_text_index(&self, label: &str, property: &str) -> bool {
+        let mut inner = self.inner.write();
+        let removed = inner.counting(Touched::none(), |inner| {
+            inner
+                .indexes
+                .text
+                .remove(&search_key(label, property))
+                .is_some()
+        });
+        inner.settle();
+        removed
+    }
+
+    /// The text indexes of this store as the account counts them: label,
+    /// property, heap bytes and documents, without a walk.
+    pub(in crate::graph::rowgroup) fn text_index_figures(
+        &self,
+    ) -> Vec<(String, String, usize, usize)> {
         self.inner
-            .write()
+            .read()
             .indexes
             .text
-            .remove(&search_key(label, property))
-            .is_some()
+            .iter()
+            .map(|(key, entry)| {
+                (
+                    key.label.clone(),
+                    key.property.clone(),
+                    entry.counted_bytes(),
+                    entry.index.read().len(),
+                )
+            })
+            .collect()
     }
 
     /// Returns all text indexes as `(label, property, index)`.

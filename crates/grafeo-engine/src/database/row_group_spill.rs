@@ -17,9 +17,11 @@
 //! `RowGroupVectorConsumer` reports the vector indexes of the root and every
 //! named graph: under memory pressure it spills each vector index's
 //! embedding column, and its reload brings every spilled column back.
-//! `RowGroupTextConsumer` reports the text indexes; the store's own memory
-//! is reported by a [`SectionConsumer`](super::section_consumer::SectionConsumer)
-//! of its section ([`register_row_group_consumers`]).
+//! `RowGroupTextConsumer` reports the text indexes; `RowGroupStoreConsumer`
+//! the store's own memory, as the grants of its account hold it
+//! ([`register_row_group_consumers`]). Each holds the root weakly: the
+//! store's grants hold the buffer manager, so a consumer that held the
+//! store would keep both alive past the database.
 
 #[cfg(all(feature = "wal", feature = "vector-index"))]
 use std::io;
@@ -27,18 +29,15 @@ use std::io;
 use std::path::Path;
 #[cfg(all(feature = "wal", feature = "vector-index"))]
 use std::path::PathBuf;
-use std::sync::Arc;
-#[cfg(any(feature = "vector-index", feature = "text-index"))]
-use std::sync::Weak;
 #[cfg(all(feature = "wal", feature = "vector-index"))]
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Weak};
 
 #[cfg(all(feature = "wal", feature = "vector-index"))]
 use bytes::Bytes;
 use grafeo_common::memory::buffer::BufferManager;
 #[cfg(feature = "vector-index")]
 use grafeo_common::memory::buffer::SpillError;
-#[cfg(any(feature = "vector-index", feature = "text-index"))]
 use grafeo_common::memory::buffer::{MemoryConsumer, MemoryRegion, priorities};
 #[cfg(all(feature = "wal", feature = "vector-index"))]
 use grafeo_common::storage::SectionType;
@@ -47,7 +46,6 @@ use grafeo_common::types::PropertyKey;
 #[cfg(all(feature = "wal", feature = "vector-index"))]
 use grafeo_core::graph::rowgroup::ColumnSpill;
 use grafeo_core::graph::rowgroup::RowGroupStore;
-use grafeo_core::graph::rowgroup::section::RowGroupStoreSection;
 #[cfg(all(feature = "wal", feature = "vector-index"))]
 use grafeo_storage::container::{MmapSection, write_and_mmap_spill_file};
 
@@ -244,7 +242,7 @@ impl MemoryConsumer for RowGroupVectorConsumer {
             graphs(&root)
                 .iter()
                 .flat_map(|graph| graph.vector_index_entries())
-                .map(|(_, _, index)| index.heap_memory_bytes())
+                .map(|(_, _, index)| index.counted_bytes())
                 .sum()
         })
     }
@@ -360,7 +358,7 @@ impl MemoryConsumer for RowGroupTextConsumer {
             graphs(&root)
                 .iter()
                 .flat_map(|graph| graph.text_index_entries())
-                .map(|(_, _, index)| index.read().heap_memory_bytes())
+                .map(|(_, _, index)| index.read().counted_bytes())
                 .sum()
         })
     }
@@ -386,20 +384,65 @@ impl MemoryConsumer for RowGroupTextConsumer {
     }
 }
 
+/// The memory consumer of the row-group store itself, its named graphs
+/// with it: the bytes the grants of their accounts hold, read without a
+/// walk. It cannot evict or spill (the store reports so until 0.6.3).
+pub(super) struct RowGroupStoreConsumer {
+    root: Weak<RowGroupStore>,
+}
+
+impl RowGroupStoreConsumer {
+    /// The consumer of `root` and its named graphs.
+    pub(super) fn new(root: &Arc<RowGroupStore>) -> Self {
+        Self {
+            root: Arc::downgrade(root),
+        }
+    }
+}
+
+impl MemoryConsumer for RowGroupStoreConsumer {
+    fn name(&self) -> &str {
+        "section:LpgStore"
+    }
+
+    fn memory_usage(&self) -> usize {
+        self.root.upgrade().map_or(0, |root| root.granted_bytes())
+    }
+
+    fn eviction_priority(&self) -> u8 {
+        priorities::GRAPH_STORAGE
+    }
+
+    fn region(&self) -> MemoryRegion {
+        MemoryRegion::GraphStorage
+    }
+
+    fn evict(&self, _target_bytes: usize) -> usize {
+        0
+    }
+
+    fn current_tier(&self) -> grafeo_common::memory::StorageTier {
+        if self.memory_usage() == 0 {
+            grafeo_common::memory::StorageTier::Uninitialized
+        } else {
+            grafeo_common::memory::StorageTier::InMemory
+        }
+    }
+}
+
 /// Registers the row-group store's memory consumers with `buffer_manager`:
-/// its section (the store's heap), its vector indexes, spilling their
-/// columns into `vector_cache` (`None`: no spill), and its text indexes.
+/// the store itself, its vector indexes, spilling their columns into
+/// `vector_cache` (`None`: no spill), and its text indexes.
 pub(super) fn register_row_group_consumers(
-    buffer_manager: &BufferManager,
+    buffer_manager: &Arc<BufferManager>,
     root: &Arc<RowGroupStore>,
     #[cfg(all(feature = "wal", feature = "vector-index"))] vector_cache: Option<
         Arc<SpillDirectory>,
     >,
     #[cfg(all(feature = "wal", feature = "vector-index"))] horizon: Option<CollectHorizon>,
 ) {
-    buffer_manager.register_consumer(Arc::new(super::section_consumer::SectionConsumer::new(
-        Arc::new(RowGroupStoreSection::new(Arc::clone(root))),
-    )));
+    buffer_manager.register_consumer(Arc::new(RowGroupStoreConsumer::new(root)));
+    root.unregister_on_drop(buffer_manager, "section:LpgStore");
     #[cfg(all(feature = "wal", feature = "vector-index"))]
     buffer_manager.register_consumer(Arc::new(
         RowGroupVectorConsumer::new(root, vector_cache.map(ColumnSpillFiles::new))

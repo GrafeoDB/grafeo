@@ -22,6 +22,8 @@ pub(crate) struct NameDictionary {
     by_name: FxHashMap<ArcStr, u32>,
     /// Id to name (index = id); `None` for an id that names nothing.
     by_id: Vec<Option<ArcStr>>,
+    /// The bytes of the names it holds, kept as names come and go.
+    name_bytes: usize,
 }
 
 impl NameDictionary {
@@ -48,9 +50,21 @@ impl NameDictionary {
         let id = u32::try_from(self.by_id.len())
             .expect("a name dictionary holds at most 4,294,967,296 ids");
         let name: ArcStr = name.into();
+        self.name_bytes += name.len();
         self.by_name.insert(name.clone(), id);
         self.by_id.push(Some(name));
         id
+    }
+
+    /// [`get_or_create`](Self::get_or_create), with the bytes the dictionary
+    /// grew by: 0 for a name it holds (one lookup, as `get_or_create`).
+    pub(crate) fn get_or_create_counted(&mut self, name: &str) -> (u32, usize) {
+        if let Some(&id) = self.by_name.get(name) {
+            return (id, 0);
+        }
+        let before = self.counted_bytes();
+        let id = self.get_or_create(name);
+        (id, self.counted_bytes().saturating_sub(before))
     }
 
     /// Gives `name` the id `id`, as a load restores it; the ids below `id`
@@ -72,6 +86,7 @@ impl NameDictionary {
             self.by_id.resize(at + 1, None);
         }
         let name: ArcStr = name.into();
+        self.name_bytes += name.len();
         self.by_name.insert(name.clone(), id);
         self.by_id[at] = Some(name);
         Ok(())
@@ -83,6 +98,8 @@ impl NameDictionary {
     /// (see `LoadTarget::load_forget_label`).
     pub(crate) fn remove(&mut self, name: &str) -> Option<u32> {
         let id = self.by_name.remove(name)?;
+        debug_assert!(self.name_bytes >= name.len(), "a name count drifted");
+        self.name_bytes = self.name_bytes.saturating_sub(name.len());
         if let Some(slot) = self.by_id.get_mut(id as usize) {
             *slot = None;
         }
@@ -122,13 +139,23 @@ impl NameDictionary {
             .filter_map(|(name, id)| Some((id, name.as_ref()?)))
     }
 
-    /// Estimates heap memory usage in bytes.
+    /// Estimates heap memory usage in bytes: a walk of every name, for the
+    /// oracle of the counted figure.
     pub(crate) fn heap_bytes(&self) -> usize {
-        let map_bytes =
-            self.by_name.capacity() * (std::mem::size_of::<ArcStr>() + std::mem::size_of::<u32>());
-        let vec_bytes = self.by_id.capacity() * std::mem::size_of::<Option<ArcStr>>();
         let string_bytes: usize = self.by_name.keys().map(|name| name.len()).sum();
-        map_bytes + vec_bytes + string_bytes
+        self.table_bytes() + string_bytes
+    }
+
+    /// [`heap_bytes`](Self::heap_bytes), from the name bytes it keeps as
+    /// names come and go: a few loads.
+    pub(crate) fn counted_bytes(&self) -> usize {
+        self.table_bytes() + self.name_bytes
+    }
+
+    /// The heap bytes of its map and its list, without the names.
+    fn table_bytes(&self) -> usize {
+        self.by_name.capacity() * (std::mem::size_of::<ArcStr>() + std::mem::size_of::<u32>())
+            + self.by_id.capacity() * std::mem::size_of::<Option<ArcStr>>()
     }
 }
 

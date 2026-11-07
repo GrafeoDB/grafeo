@@ -127,6 +127,14 @@ pub struct InvertedIndex {
     /// The options the index was made with; their BM25 parameters are the
     /// ones it scores with.
     options: TextIndexOptions,
+    /// The heap bytes of its terms and posting lists, kept as they change
+    /// (see [`counted_bytes`](Self::counted_bytes)).
+    counted: usize,
+}
+
+/// The heap bytes of a posting list's postings.
+fn posting_bytes(list: &PostingList) -> usize {
+    list.postings.capacity() * std::mem::size_of::<Posting>()
 }
 
 impl InvertedIndex {
@@ -148,6 +156,7 @@ impl InvertedIndex {
             total_length: 0,
             tokenizer: Box::new(OptionsTokenizer::new(&options)),
             options,
+            counted: 0,
         }
     }
 
@@ -168,6 +177,7 @@ impl InvertedIndex {
             total_length: 0,
             tokenizer,
             options: TextIndexOptions::new().with_bm25(config),
+            counted: 0,
         }
     }
 
@@ -226,14 +236,19 @@ impl InvertedIndex {
 
         // Add to posting lists
         for (term, freq) in term_freqs {
-            self.postings
-                .entry(term.to_string())
-                .or_default()
-                .postings
-                .push(Posting {
-                    node_id: id,
-                    term_freq: freq,
-                });
+            let list = match self.postings.entry(term.to_string()) {
+                std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    self.counted += entry.key().len();
+                    entry.insert(PostingList::default())
+                }
+            };
+            let before = posting_bytes(list);
+            list.postings.push(Posting {
+                node_id: id,
+                term_freq: freq,
+            });
+            self.counted += posting_bytes(list) - before;
         }
 
         self.doc_lengths.insert(id, doc_len);
@@ -252,10 +267,17 @@ impl InvertedIndex {
         self.total_length -= u64::from(doc_len);
 
         // Remove from all posting lists
-        self.postings.retain(|_, list| {
+        let mut freed = 0;
+        self.postings.retain(|term, list| {
             list.postings.retain(|p| p.node_id != id);
-            !list.postings.is_empty()
+            let kept = !list.postings.is_empty();
+            if !kept {
+                freed += term.len() + posting_bytes(list);
+            }
+            kept
         });
+        debug_assert!(self.counted >= freed, "a text index count drifted");
+        self.counted = self.counted.saturating_sub(freed);
 
         true
     }
@@ -612,6 +634,7 @@ impl InvertedIndex {
     pub fn begin_restore(&mut self, config: BM25Config, total_length: u64) {
         self.postings = HashMap::new();
         self.doc_lengths = HashMap::new();
+        self.counted = 0;
         self.total_length = total_length;
         self.options.set_bm25(config);
     }
@@ -623,7 +646,15 @@ impl InvertedIndex {
             .into_iter()
             .map(|(node_id, term_freq)| Posting { node_id, term_freq })
             .collect();
-        self.postings.insert(term, PostingList { postings });
+        let list = PostingList { postings };
+        let (term_bytes, added) = (term.len(), posting_bytes(&list));
+        match self.postings.insert(term, list) {
+            // The map keeps the key it had.
+            Some(replaced) => {
+                self.counted = (self.counted + added).saturating_sub(posting_bytes(&replaced));
+            }
+            None => self.counted += term_bytes + added,
+        }
     }
 
     /// Sets the length (in tokens) of the document of `node`. The sum of
@@ -632,7 +663,23 @@ impl InvertedIndex {
         self.doc_lengths.insert(node, length);
     }
 
-    /// Returns estimated heap memory in bytes.
+    /// [`heap_memory_bytes`](Self::heap_memory_bytes), from what the index
+    /// keeps as its terms and posting lists change: a few loads.
+    #[must_use]
+    pub fn counted_bytes(&self) -> usize {
+        self.map_bytes() + self.counted
+    }
+
+    /// The heap bytes of its two maps' slots.
+    fn map_bytes(&self) -> usize {
+        self.postings.capacity()
+            * (std::mem::size_of::<String>() + std::mem::size_of::<PostingList>() + 1)
+            + self.doc_lengths.capacity()
+                * (std::mem::size_of::<NodeId>() + std::mem::size_of::<u32>() + 1)
+    }
+
+    /// Returns estimated heap memory in bytes: a walk of every term, the
+    /// oracle of [`counted_bytes`](Self::counted_bytes).
     #[must_use]
     pub fn heap_memory_bytes(&self) -> usize {
         // Postings map: term strings + PostingList vecs

@@ -230,6 +230,42 @@ pub enum DataOp {
 }
 
 impl DataOp {
+    /// About the heap bytes of the values the op carries: what a store's
+    /// admission keeps headroom for before it applies the op. Shallow, so it
+    /// costs the same for any value: a string, bytes or a vector by their
+    /// length, a list or a map by its entries (not what each holds besides).
+    #[must_use]
+    pub fn payload_bytes(&self) -> usize {
+        fn shallow(value: &Value) -> usize {
+            match value {
+                Value::String(text) => text.len(),
+                Value::Bytes(bytes) => bytes.len(),
+                Value::Vector(vector) => vector.len() * size_of::<f32>(),
+                Value::List(items) => items.len() * size_of::<Value>(),
+                Value::Map(entries) => {
+                    entries.len() * (size_of::<Value>() + size_of::<PropertyKey>())
+                }
+                _ => 0,
+            }
+        }
+        match self {
+            Self::CreateNode { properties, .. } | Self::CreateEdge { properties, .. } => {
+                properties.iter().map(|(_, value)| shallow(value)).sum()
+            }
+            Self::SetNodeProperty { value, .. } | Self::SetEdgeProperty { value, .. } => {
+                shallow(value)
+            }
+            Self::DeleteNode { .. }
+            | Self::DeleteEdge { .. }
+            | Self::RemoveNodeProperty { .. }
+            | Self::RemoveEdgeProperty { .. }
+            | Self::AddNodeLabel { .. }
+            | Self::RemoveNodeLabel { .. }
+            | Self::InsertTriple { .. }
+            | Self::DeleteTriple { .. } => 0,
+        }
+    }
+
     /// The model of the graphs the op applies to: triples to RDF graphs,
     /// every other op to labeled property graphs.
     #[must_use]

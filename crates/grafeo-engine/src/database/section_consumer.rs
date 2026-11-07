@@ -52,7 +52,9 @@ impl<S: Section + ?Sized> SectionConsumer<S> {
     ///
     /// Calling `spill()` on a consumer constructed via `new` returns
     /// [`SpillError::NoSpillDirectory`]. Use [`with_spill`](Self::with_spill)
-    /// to enable disk-backed eviction.
+    /// to enable disk-backed eviction. The RDF sections take one (the
+    /// row-group store has a consumer of its own, `RowGroupStoreConsumer`).
+    #[cfg(any(feature = "triple-store", test))]
     pub fn new(section: Arc<S>) -> Self {
         Self::build(section, None)
     }

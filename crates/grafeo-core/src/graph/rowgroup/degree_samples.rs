@@ -4,8 +4,10 @@
 //! first, and it is a function of the data only: the same ranks on every platform,
 //! whichever chunks are resident. It costs no write and no file format.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
+use grafeo_common::memory::buffer::{BufferManager, MemoryGrant, MemoryRegion};
 use grafeo_common::types::{ArcStr, NodeId, ReadView};
 use grafeo_common::utils::hash::FxHashMap;
 use parking_lot::Mutex;
@@ -72,32 +74,79 @@ pub(super) struct DegreeSamples {
     taken: AtomicU64,
     /// The reads samples of reached ends have spent.
     reached_reads: AtomicU64,
+    /// What [`memory_bytes`](Self::memory_bytes) walks, kept as samples come
+    /// and go.
+    counted: AtomicUsize,
+    /// The grant of those bytes, once a database attaches its memory: a
+    /// bounded cache, with a grant of its own.
+    grant: Mutex<Option<MemoryGrant>>,
+}
+
+/// What a sample of degrees holds on the heap.
+fn sample_bytes((label, edge_type, _): &(String, String, Direction)) -> usize {
+    label.len() + edge_type.len() + std::mem::size_of::<(String, String, Sample)>()
+}
+
+/// What a sample of reached ends holds on the heap.
+fn reached_bytes(key: &ReachedKey) -> usize {
+    let text = |texts: &[String]| texts.iter().map(String::len).sum::<usize>();
+    key.start_label.as_ref().map_or(0, String::len)
+        + text(&key.via_types)
+        + text(&key.on_types)
+        + std::mem::size_of::<(ReachedKey, ReachedSample)>()
 }
 
 impl DegreeSamples {
-    /// About what the samples hold on the heap.
+    /// About what the samples hold on the heap, by a walk of every sample:
+    /// the oracle of [`counted_bytes`](Self::counted_bytes).
     pub(super) fn memory_bytes(&self) -> usize {
-        let text = |texts: &[String]| texts.iter().map(String::len).sum::<usize>();
-        let samples: usize = self
-            .samples
-            .lock()
-            .keys()
-            .map(|(label, edge_type, _)| {
-                label.len() + edge_type.len() + std::mem::size_of::<(String, String, Sample)>()
-            })
-            .sum();
-        let reached: usize = self
-            .reached
-            .lock()
-            .keys()
-            .map(|key| {
-                key.start_label.as_ref().map_or(0, String::len)
-                    + text(&key.via_types)
-                    + text(&key.on_types)
-                    + std::mem::size_of::<(ReachedKey, ReachedSample)>()
-            })
-            .sum();
+        let samples: usize = self.samples.lock().keys().map(sample_bytes).sum();
+        let reached: usize = self.reached.lock().keys().map(reached_bytes).sum();
         samples + reached
+    }
+
+    /// [`memory_bytes`](Self::memory_bytes), as the samples keep it: one
+    /// load.
+    pub(super) fn counted_bytes(&self) -> usize {
+        self.counted.load(Ordering::Relaxed)
+    }
+
+    /// Takes the grant of its bytes from `manager` from now on.
+    pub(super) fn attach(&self, manager: &Arc<BufferManager>) {
+        let mut grant = self.grant.lock();
+        if grant.is_none() {
+            *grant = Some(manager.empty_grant(MemoryRegion::IndexBuffers));
+        }
+        drop(grant);
+        self.settle();
+    }
+
+    /// Notes `grown` more bytes, `freed` fewer: called with the lock of the
+    /// map that changed held, so a clear never takes out bytes an insert has
+    /// not added yet. Saturating: a count never below what it holds.
+    fn moved(&self, grown: usize, freed: usize) {
+        if grown == freed {
+            return;
+        }
+        let _ = self
+            .counted
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |counted| {
+                debug_assert!(counted + grown >= freed, "a degree sample count drifted");
+                Some((counted + grown).saturating_sub(freed))
+            });
+    }
+
+    /// Brings the grant to the counted bytes.
+    fn settle(&self) {
+        let counted = self.counted_bytes();
+        if let Some(grant) = self.grant.lock().as_mut() {
+            let held = grant.size();
+            if held < counted {
+                grant.grow_forced(counted - held);
+            } else {
+                grant.shrink(held - counted);
+            }
+        }
     }
 }
 
@@ -226,7 +275,16 @@ impl RowGroupStore {
             label_nodes,
             type_edges,
         };
-        self.degree_samples.samples.lock().insert(key, sample);
+        let bytes = sample_bytes(&key);
+        {
+            let mut samples = self.degree_samples.samples.lock();
+            if samples.insert(key, sample).is_none() {
+                self.degree_samples.moved(bytes, 0);
+            }
+        }
+        // Rare: a sample is kept until its counts move. Forced: a sample is a
+        // read's, which never fails.
+        self.degree_samples.settle();
         Some(sample)
     }
 
@@ -269,10 +327,13 @@ impl RowGroupStore {
             .fetch_add(reads, Ordering::Relaxed);
         self.degree_samples.taken.fetch_add(1, Ordering::Relaxed);
         let mut reached = self.degree_samples.reached.lock();
+        let mut freed = 0;
         if reached.len() >= MOST_REACHED_ENTRIES {
+            freed = reached.keys().map(reached_bytes).sum();
             reached.clear();
         }
-        reached.insert(
+        let bytes = reached_bytes(&key);
+        let replaced = reached.insert(
             key,
             ReachedSample {
                 degree,
@@ -281,6 +342,10 @@ impl RowGroupStore {
                 on_edges,
             },
         );
+        let grown = if replaced.is_none() { bytes } else { 0 };
+        self.degree_samples.moved(grown, freed);
+        drop(reached);
+        self.degree_samples.settle();
         degree
     }
 

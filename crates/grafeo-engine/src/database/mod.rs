@@ -536,6 +536,9 @@ impl GrafeoDB {
             ..BufferManagerConfig::with_budget(budget)
         };
         let buffer_manager = BufferManager::new(buffer_config);
+        // The store's account takes its grants from the database's manager,
+        // from the load on: its cold chunks and its writes are counted there.
+        store.attach_memory(Arc::clone(&buffer_manager));
 
         // Create catalog early so WAL replay can restore schema definitions
         let catalog = Arc::new(Catalog::new());

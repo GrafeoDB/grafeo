@@ -12,7 +12,7 @@
 //! probe finds (a list or a map of numbers) wait in a side table by their `=`
 //! class, which is empty for a property that holds none of them.
 
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
 use dashmap::DashMap;
 use dashmap::mapref::entry::Entry;
@@ -35,49 +35,134 @@ pub(crate) struct PropertyIndex {
     /// cleared, so it errs toward a read of the values themselves after a delete. Built again with
     /// the index when a database opens, as the index is.
     kinds: AtomicU32,
+    /// The heap bytes the index holds by [`entry_bytes`], kept as its entries change (see
+    /// [`counted_bytes`](Self::counted_bytes)).
+    counted: AtomicUsize,
+}
+
+/// The bytes an entry takes besides its value's payload and its set of ids: its value and set,
+/// and a word of the map's own.
+const ENTRY_BYTES: usize = std::mem::size_of::<HashableValue>()
+    + std::mem::size_of::<FxHashSet<NodeId>>()
+    + std::mem::size_of::<usize>();
+
+/// The bytes a class of `others_by_class` takes besides its set's table: its key and set, and a
+/// word of the map's own.
+const CLASS_BYTES: usize = std::mem::size_of::<HashKey>()
+    + std::mem::size_of::<FxHashSet<HashableValue>>()
+    + std::mem::size_of::<usize>();
+
+/// The heap bytes of the entry of `value` with the ids `nodes`: the one formula of the index's
+/// size, which its walk and its count both read. A set is measured by its table's allocation, not
+/// its capacity: an erase that leaves a tombstone lowers the capacity and a later insert into it
+/// raises it again, while the allocation stays. `DashMap::capacity` is not read: it locks every
+/// shard.
+fn entry_bytes(value: &HashableValue, nodes: &FxHashSet<NodeId>) -> usize {
+    ENTRY_BYTES + value.inner().estimated_size_bytes() + nodes.allocation_size()
+}
+
+/// The heap bytes of a class of `others_by_class` with the values `others` (clones of keys of
+/// `values`, whose payload those count).
+fn class_bytes(others: &FxHashSet<HashableValue>) -> usize {
+    CLASS_BYTES + others.allocation_size()
 }
 
 impl PropertyIndex {
+    /// The heap bytes the index holds, as its entries' changes left them: one load.
+    pub(crate) fn counted_bytes(&self) -> usize {
+        self.counted.load(Ordering::Relaxed)
+    }
+
+    /// The heap bytes the index holds, by a walk of every entry and class: the oracle of
+    /// [`counted_bytes`](Self::counted_bytes).
+    pub(crate) fn walk_bytes(&self) -> usize {
+        self.values
+            .iter()
+            .map(|entry| entry_bytes(entry.key(), entry.value()))
+            .sum::<usize>()
+            + self
+                .others_by_class
+                .iter()
+                .map(|class| class_bytes(class.value()))
+                .sum::<usize>()
+    }
+
+    /// Adds `bytes` to the count, takes `freed` off.
+    fn count(&self, bytes: usize, freed: usize) {
+        if bytes == freed {
+            return;
+        }
+        // A count never below its parts: saturating, so a drift cannot wrap into a huge figure.
+        let _ = self
+            .counted
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |counted| {
+                debug_assert!(counted + bytes >= freed, "a property index count drifted");
+                Some((counted + bytes).saturating_sub(freed))
+            });
+    }
+
     /// Adds `node` under `value`.
     pub(crate) fn insert(&self, value: HashableValue, node: NodeId) {
         self.kinds
             .fetch_or(ValueKinds::of(value.inner()).bits(), Ordering::Relaxed);
-        match self.values.entry(value) {
+        let (bytes, freed) = match self.values.entry(value) {
             Entry::Occupied(mut entry) => {
-                entry.get_mut().insert(node);
+                let nodes = entry.get_mut();
+                let before = nodes.allocation_size();
+                nodes.insert(node);
+                (nodes.allocation_size(), before)
             }
             Entry::Vacant(entry) => {
+                let (mut bytes, mut freed) = (0, 0);
                 if let Some(class) = other_class(entry.key().inner()) {
-                    self.others_by_class
-                        .entry(class)
-                        .or_default()
-                        .insert(entry.key().clone());
+                    let mut others = self.others_by_class.entry(class).or_default();
+                    // A new class's set is empty: its bytes before are the class's own.
+                    freed = if others.is_empty() {
+                        0
+                    } else {
+                        class_bytes(&others)
+                    };
+                    others.insert(entry.key().clone());
+                    bytes = class_bytes(&others);
                 }
                 let mut nodes = FxHashSet::default();
                 nodes.insert(node);
+                bytes += entry_bytes(entry.key(), &nodes);
                 entry.insert(nodes);
+                (bytes, freed)
             }
-        }
+        };
+        self.count(bytes, freed);
     }
 
     /// Removes `node` from `value`, dropping the value when no node holds it.
     pub(crate) fn remove(&self, value: &HashableValue, node: NodeId) {
+        // An erase keeps the set's table: nothing to count until the entry goes.
         if let Some(mut nodes) = self.values.get_mut(value) {
             nodes.remove(&node);
         }
         // Checked again under the shard lock: between releasing the bucket and
         // removing it, another writer may have added a node to it.
-        self.values.remove_if(value, |value, nodes| {
+        let mut freed = 0;
+        let removed = self.values.remove_if(value, |value, nodes| {
             let empty = nodes.is_empty();
             if empty && let Some(class) = other_class(value.inner()) {
                 if let Some(mut others) = self.others_by_class.get_mut(&class) {
                     others.remove(value);
                 }
-                self.others_by_class
-                    .remove_if(&class, |_, others| others.is_empty());
+                if let Some((_, others)) = self
+                    .others_by_class
+                    .remove_if(&class, |_, others| others.is_empty())
+                {
+                    freed += class_bytes(&others);
+                }
             }
             empty
         });
+        if let Some((value, nodes)) = removed {
+            freed += entry_bytes(&value, &nodes);
+        }
+        self.count(0, freed);
     }
 
     /// The kinds of every value it has held, deleted ones too.
@@ -349,6 +434,8 @@ impl Clone for PropertyIndex {
             values: self.values.clone(),
             others_by_class: self.others_by_class.clone(),
             kinds: AtomicU32::new(self.kinds.load(Ordering::Relaxed)),
+            // A clone of a set keeps its capacity: the same bytes.
+            counted: AtomicUsize::new(self.counted_bytes()),
         }
     }
 }
@@ -363,6 +450,49 @@ mod tests {
             index.insert(HashableValue::new(value.clone()), NodeId::new(n as u64));
         }
         index
+    }
+
+    /// Ids taken out of a set and put back, and values that come and go (lists among them, which
+    /// wait in a class of their own), leave the index's count equal to its walk after every step:
+    /// a set's erase leaves a tombstone, which lowers its capacity but not its table.
+    #[test]
+    fn the_count_follows_ids_that_come_and_go() {
+        let index = PropertyIndex::default();
+        let counted = |index: &PropertyIndex, what: &str| {
+            assert_eq!(index.counted_bytes(), index.walk_bytes(), "{what}");
+        };
+        let shared = HashableValue::new(Value::from("Amsterdam"));
+        for id in 0..40 {
+            index.insert(shared.clone(), NodeId::new(id));
+        }
+        counted(&index, "forty ids under one value");
+        for round in 0..5_u64 {
+            for id in (0..40).filter(|id| id % 3 == round % 3) {
+                index.remove(&shared, NodeId::new(id));
+            }
+            counted(&index, &format!("round {round}: removed"));
+            for id in (0..40).filter(|id| id % 3 == round % 3) {
+                index.insert(shared.clone(), NodeId::new(id + 100 * round));
+            }
+            counted(&index, &format!("round {round}: put back"));
+        }
+        let list = |n: u64| {
+            HashableValue::new(Value::List(
+                vec![Value::Int64(i64::try_from(n).unwrap())].into(),
+            ))
+        };
+        for n in 0..20 {
+            index.insert(list(n), NodeId::new(1_000 + n));
+        }
+        counted(&index, "lists, in their class");
+        for n in (0..20).step_by(2) {
+            index.remove(&list(n), NodeId::new(1_000 + n));
+        }
+        counted(&index, "half the lists gone");
+        for n in 0..20 {
+            index.remove(&list(n), NodeId::new(1_000 + n));
+        }
+        counted(&index, "every list gone, and its class");
     }
 
     fn found(index: &PropertyIndex, key: Value) -> Vec<u64> {

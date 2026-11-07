@@ -22,12 +22,14 @@ use std::sync::{Arc, OnceLock};
 
 use bytes::Bytes;
 use grafeo_common::change::PendingVersion;
+use grafeo_common::memory::buffer::BufferManager;
 use grafeo_common::types::{ArcStr, Value};
 use grafeo_common::utils::error::{Error, Result};
 use grafeo_common::utils::hash::FxHashMap;
 use parking_lot::Mutex;
 
 use super::Read;
+use super::account::{ThawSink, granted_chunk};
 use super::bitset::Bitset;
 use super::updates::Updates;
 use super::versions::VECTOR_ROWS;
@@ -64,29 +66,25 @@ impl Data {
     }
 
     /// Writes `value` at `row` when it is of this column's type; returns
-    /// whether it was.
+    /// whether it was. The vectors grow through [`grow_rows`]; what they
+    /// hold is read through [`heap_bytes`](Self::heap_bytes).
     fn put(&mut self, row: usize, value: &Value) -> bool {
-        fn grow<T: Clone>(values: &mut Vec<T>, row: usize, filler: T) {
-            if row >= values.len() {
-                values.resize(row + 1, filler);
-            }
-        }
         match (self, value) {
             (Self::Int64(values), Value::Int64(v)) => {
-                grow(values, row, 0);
+                grow_rows(values, row, 0);
                 values[row] = *v;
             }
             (Self::Float64(values), Value::Float64(v)) => {
-                grow(values, row, 0.0);
+                grow_rows(values, row, 0.0);
                 values[row] = *v;
             }
             (Self::Bool(bits), Value::Bool(v)) => bits.put(row, *v),
             (Self::String(values), Value::String(v)) => {
-                grow(values, row, ArcStr::default());
+                grow_rows(values, row, ArcStr::default());
                 values[row] = v.clone();
             }
             (Self::Values(values), v) => {
-                grow(values, row, Value::Null);
+                grow_rows(values, row, Value::Null);
                 values[row] = v.clone();
             }
             _ => return false,
@@ -123,6 +121,16 @@ impl Data {
         }
     }
 
+    /// The heap bytes the value at `row` holds besides the column's vector,
+    /// as [`payload_bytes`](Self::payload_bytes) counts it; 0 past the rows.
+    fn payload_at(&self, row: usize) -> usize {
+        match self {
+            Self::Int64(_) | Self::Float64(_) | Self::Bool(_) => 0,
+            Self::String(values) => values.get(row).map_or(0, |value| value.len()),
+            Self::Values(values) => values.get(row).map_or(0, Value::estimated_size_bytes),
+        }
+    }
+
     /// The heap bytes the values hold besides the column's own vectors: the
     /// bytes of strings, and of every value of another kind that holds any
     /// (vectors, bytes, lists, maps, paths, counters), as
@@ -136,6 +144,8 @@ impl Data {
         }
     }
 
+    /// The heap bytes of the column's own vectors: their capacity, the one
+    /// figure of their size both the walk and the account read.
     fn heap_bytes(&self) -> usize {
         match self {
             Self::Int64(values) => values.capacity() * std::mem::size_of::<i64>(),
@@ -147,12 +157,24 @@ impl Data {
     }
 }
 
+/// Grows `values` so `row` is in it, with `filler` in the rows it adds:
+/// the one place a column's vectors grow, whose capacity
+/// [`Data::heap_bytes`] reads.
+fn grow_rows<T: Clone>(values: &mut Vec<T>, row: usize, filler: T) {
+    if row >= values.len() {
+        values.resize(row + 1, filler);
+    }
+}
+
 /// A column's values, decoded: typed vectors with presence bits.
 #[derive(Debug)]
 struct Hot {
     /// The rows with a value.
     present: Bitset,
     data: Data,
+    /// The heap bytes the values hold besides the vectors (see
+    /// [`Data::payload_bytes`]), kept as the values change.
+    payload: usize,
     /// What rows held before the writes some readers must not see: a
     /// column with update chains is hot (a write thaws a cold column).
     updates: Updates<Option<Value>>,
@@ -176,6 +198,14 @@ enum Bound {
 }
 
 impl Bound {
+    /// The heap bytes the kept least and greatest values hold.
+    fn payload_bytes(&self) -> usize {
+        match self {
+            Self::Range { min, max } => min.estimated_size_bytes() + max.estimated_size_bytes(),
+            Self::Empty | Self::Any => 0,
+        }
+    }
+
     /// Takes `value` in.
     fn widen(&mut self, value: &Value) {
         use std::cmp::Ordering;
@@ -243,32 +273,52 @@ impl Hot {
 
     /// Sets the value at `row`.
     fn set(&mut self, row: usize, value: &Value) {
+        let replaced = self.data.payload_at(row);
+        self.set_replacing(row, value, replaced);
+    }
+
+    /// [`set`](Self::set) of a row whose value holds `replaced` bytes (see
+    /// [`Data::payload_at`]), which the caller measured: each value is
+    /// measured once.
+    fn set_replacing(&mut self, row: usize, value: &Value, replaced: usize) {
         self.bound.widen(value);
-        if !self.data.put(row, value) {
+        if self.data.put(row, value) {
+            self.payload = super::sub_count(self.payload + self.data.payload_at(row), replaced);
+        } else {
             if self.present.is_empty() {
+                // Every row was taken out: the values hold nothing.
                 self.data = Data::for_value(value);
             } else {
                 // Another type: every row's value moves to a column of any
                 // values.
                 let mut values = Vec::new();
                 for present in self.present.rows() {
-                    if present >= values.len() {
-                        values.resize(present + 1, Value::Null);
-                    }
+                    grow_rows(&mut values, present, Value::Null);
                     values[present] = self.data.get(present);
                 }
                 self.data = Data::Values(values);
             }
+            self.payload = self.data.payload_bytes();
+            let replaced = self.data.payload_at(row);
             let typed = self.data.put(row, value);
             debug_assert!(typed, "a column of any values takes every value");
+            self.payload = super::sub_count(self.payload + self.data.payload_at(row), replaced);
         }
         self.present.set(row);
     }
 
     /// Takes the value at `row` out, if it has one.
     fn take(&mut self, row: usize) -> Option<Value> {
+        let replaced = self.data.payload_at(row);
+        self.take_replacing(row, replaced)
+    }
+
+    /// [`take`](Self::take) of a row whose value holds `replaced` bytes,
+    /// which the caller measured.
+    fn take_replacing(&mut self, row: usize, replaced: usize) -> Option<Value> {
         let value = self.get(row)?;
         self.present.clear(row);
+        self.payload = super::sub_count(self.payload, replaced);
         self.data.reset(row);
         Some(value)
     }
@@ -285,10 +335,23 @@ impl Hot {
         self.get(row)
     }
 
-    /// The heap bytes of its presence bits, its values and what they hold
-    /// (the update chains are counted with the versions).
+    /// The heap bytes of its presence bits, its values and what they hold,
+    /// with its bounds' values (the update chains are counted with the
+    /// versions): a walk of every value, for the oracle.
     fn heap_bytes(&self) -> usize {
-        self.present.heap_bytes() + self.data.heap_bytes() + self.data.payload_bytes()
+        self.present.heap_bytes()
+            + self.data.heap_bytes()
+            + self.data.payload_bytes()
+            + self.bound.payload_bytes()
+    }
+
+    /// [`heap_bytes`](Self::heap_bytes) from what the column keeps as its
+    /// values change: a few loads.
+    fn counted_bytes(&self) -> usize {
+        self.present.heap_bytes()
+            + self.data.heap_bytes()
+            + self.payload
+            + self.bound.payload_bytes()
     }
 
     /// The decoded values of `chunks`.
@@ -297,6 +360,7 @@ impl Hot {
             present: Bitset::default(),
             // Typed by its first value (see `set`), as a written column is.
             data: Data::Int64(Vec::new()),
+            payload: 0,
             updates: Updates::default(),
             bound: Bound::Empty,
         };
@@ -329,6 +393,39 @@ struct ColdChunk {
     bytes: Bytes,
     point: Option<Arc<PointView>>,
     home: Home,
+}
+
+impl ColdChunk {
+    /// About what the chunk takes decoded, at most: a value a row, for the
+    /// headroom an op that thaws it asks for.
+    fn decoded_bytes(&self) -> usize {
+        self.row_count as usize * std::mem::size_of::<Value>()
+    }
+}
+
+/// The heap bytes of a cold column's chunk list and point views, besides
+/// the chunks' bytes.
+fn cold_meta_bytes(cold: &Vec<ColdChunk>) -> usize {
+    cold.capacity() * std::mem::size_of::<ColdChunk>()
+        + cold
+            .iter()
+            .map(|chunk| {
+                chunk.point.as_ref().map_or(0, |point| {
+                    std::mem::size_of::<PointView>() + point.index_heap_bytes()
+                })
+            })
+            .sum::<usize>()
+}
+
+/// The bytes of a cold column's chunks in memory (a spilled chunk's are in
+/// its file).
+fn cold_chunk_bytes(cold: &[ColdChunk]) -> usize {
+    cold.iter()
+        .map(|chunk| match chunk.home {
+            Home::Memory => chunk.bytes.len(),
+            Home::Spilled => 0,
+        })
+        .sum()
 }
 
 /// A column as a read of all its rows finds it (see [`Columns::read`]).
@@ -526,12 +623,54 @@ impl SpillChunks {
 /// form once. A write thaws a cold column (#412 decision Q9), so the update
 /// chains of a column live with its decoded values, and a cold column has
 /// none.
-#[derive(Debug)]
 pub(super) struct Column {
     /// The chunks not decoded yet; emptied when the hot form is published.
     cold: Mutex<Vec<ColdChunk>>,
     /// The decoded values, set when a caller needs the hot form.
     hot: OnceLock<Hot>,
+    /// Where a thaw reports what it gained and freed (`account`); `None`
+    /// for a column that was never cold.
+    thaws: Option<ThawSink>,
+}
+
+/// Its chunks and its decoded values, without where its thaw reports: what
+/// it holds, which two stores with the same values show alike.
+impl std::fmt::Debug for Column {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Column")
+            .field("cold", &self.cold)
+            .field("hot", &self.hot)
+            .finish()
+    }
+}
+
+/// What a column holds, as the account counts it: its decoded bytes, its
+/// cold chunks' metadata and bytes, and its update chains.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) struct ColumnCounts {
+    /// The decoded values, with the columns' entries.
+    pub(super) hot: usize,
+    /// The cold chunks' metadata.
+    pub(super) cold: usize,
+    /// The cold chunks' bytes in memory.
+    pub(super) chunks: usize,
+    /// The update chains.
+    pub(super) updates: usize,
+}
+
+impl ColumnCounts {
+    /// Adds what changed from `before` to `after`. The counts move by
+    /// differences, so they wrap (see `account`).
+    fn moved(&mut self, before: Self, after: Self) {
+        self.hot = self.hot.wrapping_add(after.hot.wrapping_sub(before.hot));
+        self.cold = self.cold.wrapping_add(after.cold.wrapping_sub(before.cold));
+        self.chunks = self
+            .chunks
+            .wrapping_add(after.chunks.wrapping_sub(before.chunks));
+        self.updates = self
+            .updates
+            .wrapping_add(after.updates.wrapping_sub(before.updates));
+    }
 }
 
 impl Column {
@@ -542,17 +681,67 @@ impl Column {
             hot: OnceLock::from(Hot {
                 present: Bitset::default(),
                 data: Data::for_value(value),
+                payload: 0,
                 updates: Updates::default(),
                 bound: Bound::Empty,
             }),
+            thaws: None,
         }
     }
 
-    /// An empty column that takes cold chunks.
-    fn cold() -> Self {
+    /// An empty column that takes cold chunks, reporting its thaw to
+    /// `thaws`.
+    fn cold(thaws: Option<ThawSink>) -> Self {
         Self {
             cold: Mutex::new(Vec::new()),
             hot: OnceLock::new(),
+            thaws,
+        }
+    }
+
+    /// What it holds now, as the account counts it: a few loads while it
+    /// is hot, its chunks' figures while it is cold.
+    fn counts(&self) -> ColumnCounts {
+        let of_hot = |hot: &Hot| ColumnCounts {
+            hot: hot.counted_bytes(),
+            updates: hot.updates.counted_bytes(),
+            ..ColumnCounts::default()
+        };
+        if let Some(hot) = self.hot.get() {
+            return of_hot(hot);
+        }
+        let cold = self.cold.lock();
+        // Under the chunks' lock: a thaw publishes the hot form first.
+        match self.hot.get() {
+            Some(hot) => of_hot(hot),
+            None => ColumnCounts {
+                cold: cold_meta_bytes(&cold),
+                chunks: cold_chunk_bytes(&cold),
+                ..ColumnCounts::default()
+            },
+        }
+    }
+
+    /// The hot form, thawing the column (a thaw the store's thaws count),
+    /// with what it holds as the account counts it.
+    fn hot_counted(&mut self) -> (&mut Hot, ColumnCounts) {
+        let hot = self.hot_mut();
+        let counts = ColumnCounts {
+            hot: hot.counted_bytes(),
+            updates: hot.updates.counted_bytes(),
+            ..ColumnCounts::default()
+        };
+        (hot, counts)
+    }
+
+    /// Reports the thaw of `cold` into `hot` to the store's thaws.
+    fn report_thaw(&self, cold: &Vec<ColdChunk>, hot: &Hot) {
+        if let Some(thaws) = &self.thaws {
+            thaws.thawed(
+                hot.counted_bytes() + hot.updates.counted_bytes(),
+                cold_meta_bytes(cold),
+                cold_chunk_bytes(cold),
+            );
         }
     }
 
@@ -606,13 +795,18 @@ impl Column {
     /// `keep` (the writer's stamp and the epoch it reads at) writes next;
     /// `None` keeps nothing. Returns what the write does to the writer's
     /// version of the value.
-    fn keep(&mut self, row: usize, keep: Option<(u64, u64)>) -> PendingVersion {
+    /// `held` is what the value at `row` holds on the heap (see
+    /// [`Data::payload_at`]), which the caller measured.
+    fn keep(&mut self, row: usize, keep: Option<(u64, u64)>, held: usize) -> PendingVersion {
         let Some((stamp, snapshot)) = keep else {
             return PendingVersion::Created;
         };
         let hot = self.hot_mut();
         let current = hot.get(row);
-        if hot.updates.keep(row, stamp, snapshot, || current) {
+        if hot
+            .updates
+            .keep_with(row, stamp, snapshot, || current, |_| held)
+        {
             PendingVersion::Created
         } else {
             PendingVersion::Replaced
@@ -631,6 +825,7 @@ impl Column {
             // The load decoded each chunk once to check it, and a spill
             // checked that its file holds the chunks it encoded.
             let hot = Hot::decode(&cold).expect("a chunk the load or the spill checked");
+            self.report_thaw(&cold, &hot);
             *cold = Vec::new();
             hot
         })
@@ -643,9 +838,15 @@ impl Column {
         if self.hot.get().is_some() {
             return Ok(());
         }
-        let cold = self.cold.get_mut();
-        let hot = Hot::decode(cold)?;
-        *cold = Vec::new();
+        let cold = std::mem::take(self.cold.get_mut());
+        let hot = match Hot::decode(&cold) {
+            Ok(hot) => hot,
+            Err(error) => {
+                *self.cold.get_mut() = cold;
+                return Err(error);
+            }
+        };
+        self.report_thaw(&cold, &hot);
         self.hot = OnceLock::from(hot);
         Ok(())
     }
@@ -697,7 +898,7 @@ impl Column {
         if hot.present.is_empty() {
             return Ok(SpillPlan::Nothing);
         }
-        let mut chunks = SpillChunks::new(hot.heap_bytes());
+        let mut chunks = SpillChunks::new(hot.counted_bytes());
         let rows = u32::try_from(SPILL_CHUNK_ROWS).expect("a vector of rows fits a chunk");
         let mut window: Vec<(u32, Value)> = Vec::new();
         let mut first_row = 0;
@@ -757,31 +958,50 @@ impl Column {
     ///
     /// Returns [`Error::Internal`], changing nothing, when `mapped` does not
     /// hold the bytes `chunks` encoded, or a chunk gets no point view.
-    fn install_spill(&mut self, chunks: SpillChunks, mapped: &Bytes) -> Result<()> {
+    fn install_spill(
+        &mut self,
+        chunks: SpillChunks,
+        mapped: &Bytes,
+        thaws: &ThawSink,
+    ) -> Result<()> {
         if mapped.as_ref() != chunks.bytes.as_slice() {
             return Err(Error::Internal(
                 "a spill file does not hold the chunks written to it".to_string(),
             ));
         }
-        self.install_chunks(chunks.places, mapped, Home::Spilled)
+        self.install_chunks(chunks.places, mapped, Home::Spilled, thaws)
     }
 
     /// Makes the column cold, its chunks `chunks` (from
     /// [`plan_spill`](Self::plan_spill), with no write since) kept on the
-    /// heap: compression on request (`compress`).
+    /// heap, holding a grant of their bytes from `memory`: compression on
+    /// request (`compress`).
     ///
     /// # Errors
     ///
     /// Returns [`Error::Internal`], changing nothing, when a chunk gets no
     /// point view.
-    fn install_in_memory(&mut self, chunks: SpillChunks) -> Result<()> {
+    fn install_in_memory(
+        &mut self,
+        chunks: SpillChunks,
+        memory: Option<&Arc<BufferManager>>,
+        thaws: &ThawSink,
+    ) -> Result<()> {
         let SpillChunks { bytes, places, .. } = chunks;
-        self.install_chunks(places, &Bytes::from(bytes), Home::Memory)
+        let bytes = granted_chunk(Bytes::from(bytes), memory);
+        self.install_chunks(places, &bytes, Home::Memory, thaws)
     }
 
     /// Makes the column cold, the chunk of each of `places` read from its
-    /// range of `bytes`, which are kept at `home`.
-    fn install_chunks(&mut self, places: Vec<ChunkPlace>, bytes: &Bytes, home: Home) -> Result<()> {
+    /// range of `bytes`, which are kept at `home`; a later thaw reports to
+    /// `thaws`.
+    fn install_chunks(
+        &mut self,
+        places: Vec<ChunkPlace>,
+        bytes: &Bytes,
+        home: Home,
+        thaws: &ThawSink,
+    ) -> Result<()> {
         let mut cold = Vec::with_capacity(places.len());
         for place in places {
             let bytes = bytes.slice(place.range);
@@ -799,6 +1019,9 @@ impl Column {
         }
         *self.cold.get_mut() = cold;
         self.hot = OnceLock::new();
+        if self.thaws.is_none() {
+            self.thaws = Some(thaws.clone());
+        }
         Ok(())
     }
 
@@ -846,22 +1069,27 @@ impl Column {
     /// The heap bytes of the chunks it still holds encoded: their metadata,
     /// the point views' indexes, and the bytes of the chunks in memory (a
     /// spilled chunk's are in its file).
+    #[cfg(test)]
     fn cold_bytes(&self) -> usize {
-        let cold = self.cold.lock();
-        cold.capacity() * std::mem::size_of::<ColdChunk>()
-            + cold
-                .iter()
-                .map(|chunk| {
-                    let bytes = match chunk.home {
-                        Home::Memory => chunk.bytes.len(),
-                        Home::Spilled => 0,
-                    };
-                    bytes
-                        + chunk.point.as_ref().map_or(0, |point| {
-                            std::mem::size_of::<PointView>() + point.index_heap_bytes()
-                        })
-                })
-                .sum::<usize>()
+        self.cold_meta_bytes() + self.cold_chunk_bytes()
+    }
+
+    /// The metadata of its cold chunks (see [`cold_bytes`](Self::cold_bytes)).
+    fn cold_meta_bytes(&self) -> usize {
+        cold_meta_bytes(&self.cold.lock())
+    }
+
+    /// The bytes of its cold chunks in memory.
+    fn cold_chunk_bytes(&self) -> usize {
+        cold_chunk_bytes(&self.cold.lock())
+    }
+
+    /// About what a thaw of it decodes: 0 for a hot column.
+    fn thaw_bytes(&self) -> usize {
+        if self.hot.get().is_some() {
+            return 0;
+        }
+        self.cold.lock().iter().map(ColdChunk::decoded_bytes).sum()
     }
 
     /// The bytes of its chunks in a spill file.
@@ -919,13 +1147,48 @@ pub(super) struct Compressed {
     pub(super) freed_bytes: usize,
 }
 
+/// The column of `key`, made for values like `value` when there is none;
+/// whether it was made. One lookup.
+fn column_of<'a>(
+    by_key: &'a mut FxHashMap<u32, Column>,
+    key: u32,
+    value: &Value,
+) -> (&'a mut Column, bool) {
+    match by_key.entry(key) {
+        hashbrown::hash_map::Entry::Occupied(entry) => (entry.into_mut(), false),
+        hashbrown::hash_map::Entry::Vacant(entry) => (entry.insert(Column::for_value(value)), true),
+    }
+}
+
 /// The columns of a row group, by property key id.
+///
+/// Each write measures the column it changes before and after, hot (after
+/// any thaw, which the store's thaws count), and adds the difference to
+/// what it counts ([`counts`](Self::counts)); the account reads that count
+/// before and after an op.
 #[derive(Debug, Default)]
 pub(super) struct Columns {
     by_key: FxHashMap<u32, Column>,
+    /// What the writes moved its columns by, thaws aside (see `account`).
+    counted: ColumnCounts,
 }
 
 impl Columns {
+    /// What its columns hold as the account counts it: what the writes
+    /// moved them by, with the columns' entries. Read before and after a
+    /// write, the difference is the write's.
+    pub(super) fn counts(&self) -> ColumnCounts {
+        ColumnCounts {
+            hot: self.counted.hot.wrapping_add(self.entries_bytes()),
+            ..self.counted
+        }
+    }
+
+    /// The heap bytes of the columns' entries in the map.
+    fn entries_bytes(&self) -> usize {
+        self.by_key.capacity() * (std::mem::size_of::<u32>() + std::mem::size_of::<Column>())
+    }
+
     /// What a compression of the hot columns encodes: each hot column with
     /// values, no update chains and only kinds with a point view, a vector
     /// of rows a chunk (as a spill encodes it). Cold columns stay as they
@@ -961,7 +1224,12 @@ impl Columns {
     ///
     /// Returns [`Error::Internal`] when a planned column is gone or a chunk
     /// gets no point view; the columns before it stay cold.
-    pub(super) fn install_compressed(&mut self, plan: CompressPlan) -> Result<Compressed> {
+    pub(super) fn install_compressed(
+        &mut self,
+        plan: CompressPlan,
+        memory: Option<&Arc<BufferManager>>,
+        thaws: &ThawSink,
+    ) -> Result<Compressed> {
         let mut done = plan.counts();
         for (key, chunks) in plan.columns {
             let column = self
@@ -969,9 +1237,12 @@ impl Columns {
                 .get_mut(&key)
                 .ok_or_else(|| Error::Internal("a compressed column is gone".to_string()))?;
             let resident = chunks.resident;
-            column.install_in_memory(chunks)?;
+            let before = column.counts();
+            column.install_in_memory(chunks, memory, thaws)?;
+            let after = column.counts();
+            self.counted.moved(before, after);
             done.columns += 1;
-            done.freed_bytes += resident.saturating_sub(column.cold_bytes());
+            done.freed_bytes += resident.saturating_sub(after.cold + after.chunks);
         }
         Ok(done)
     }
@@ -989,6 +1260,7 @@ impl Columns {
 
     /// Adds a chunk of key `key` as the file holds it, for rows from
     /// `first_row`. The load has already decoded and validated the chunk.
+    #[cfg(test)]
     pub(super) fn add_cold(
         &mut self,
         key: u32,
@@ -997,7 +1269,26 @@ impl Columns {
         codec: u8,
         bytes: Bytes,
     ) {
-        let column = self.by_key.entry(key).or_insert_with(Column::cold);
+        self.add_cold_reporting(key, first_row, row_count, codec, bytes, None);
+    }
+
+    /// Adds a chunk of key `key` as the file holds it, for rows from
+    /// `first_row`, a new column reporting its thaw to `thaws`. The load has
+    /// already decoded and validated the chunk.
+    pub(super) fn add_cold_reporting(
+        &mut self,
+        key: u32,
+        first_row: usize,
+        row_count: u32,
+        codec: u8,
+        bytes: Bytes,
+        thaws: Option<ThawSink>,
+    ) {
+        let column = self
+            .by_key
+            .entry(key)
+            .or_insert_with(|| Column::cold(thaws));
+        let before = column.counts();
         if column.is_cold() {
             let point = PointView::from_validated(&bytes, codec, row_count)
                 .expect("a chunk the load checked")
@@ -1019,6 +1310,8 @@ impl Columns {
                 hot.set(first_row + offset as usize, &value);
             }
         }
+        let after = column.counts();
+        self.counted.moved(before, after);
     }
 
     /// Whether a value of key `key` may meet `value` by `op`: by the zone
@@ -1051,17 +1344,29 @@ impl Columns {
     }
 
     /// Sets the value of key `key` at `row`.
-    pub(super) fn set(&mut self, key: u32, row: usize, value: &Value) {
-        self.by_key
-            .entry(key)
-            .or_insert_with(|| Column::for_value(value))
-            .hot_mut()
-            .set(row, value);
+    /// Returns whether it made the column.
+    pub(super) fn set(&mut self, key: u32, row: usize, value: &Value) -> bool {
+        let (column, made) = column_of(&mut self.by_key, key, value);
+        let (hot, _) = column.hot_counted();
+        let held = hot.counted_bytes();
+        hot.set(row, value);
+        self.counted.hot = self
+            .counted
+            .hot
+            .wrapping_add(hot.counted_bytes().wrapping_sub(held));
+        made
     }
 
     /// Takes the value of key `key` at `row` out.
     pub(super) fn take(&mut self, key: u32, row: usize) -> Option<Value> {
-        self.by_key.get_mut(&key)?.hot_mut().take(row)
+        let (hot, _) = self.by_key.get_mut(&key)?.hot_counted();
+        let held = hot.counted_bytes();
+        let taken = hot.take(row);
+        self.counted.hot = self
+            .counted
+            .hot
+            .wrapping_add(hot.counted_bytes().wrapping_sub(held));
+        taken
     }
 
     /// The value of key `key` at `row` as `read` sees it.
@@ -1080,33 +1385,40 @@ impl Columns {
         row: usize,
         value: Option<&Value>,
         keep: Option<(u64, u64)>,
-    ) -> PendingVersion {
-        let column = match value {
-            Some(value) => self
-                .by_key
-                .entry(key)
-                .or_insert_with(|| Column::for_value(value)),
+    ) -> (PendingVersion, bool) {
+        let (column, made) = match value {
+            Some(value) => column_of(&mut self.by_key, key, value),
             None => match self.by_key.get_mut(&key) {
-                Some(column) => column,
-                None => return PendingVersion::Created,
+                Some(column) => (column, false),
+                None => return (PendingVersion::Created, false),
             },
         };
-        let version = column.keep(row, keep);
+        let (hot, before) = column.hot_counted();
+        // What the replaced value holds, measured once: for the chain that
+        // keeps it and for the values' count.
+        let replaced = hot.data.payload_at(row);
+        let version = column.keep(row, keep, replaced);
         let hot = column.hot_mut();
         match value {
-            Some(value) => hot.set(row, value),
+            Some(value) => hot.set_replacing(row, value, replaced),
             None => {
-                hot.take(row);
+                hot.take_replacing(row, replaced);
             }
         }
-        version
+        let (_, after) = column.hot_counted();
+        self.counted.moved(before, after);
+        (version, made)
     }
 
     /// Writes `value` back at `row` of key `key` (`None` takes the value
     /// out), keeping nothing: an undo.
     pub(super) fn restore(&mut self, key: u32, row: usize, value: Option<&Value>) {
         match value {
-            Some(value) => self.set(key, row, value),
+            // The column of a value an undo writes back is there: the write
+            // undone was to it.
+            Some(value) => {
+                self.set(key, row, value);
+            }
             None => {
                 self.take(key, row);
             }
@@ -1131,6 +1443,7 @@ impl Columns {
         let Some(column) = self.by_key.get_mut(&key) else {
             return false;
         };
+        let (_, before) = column.hot_counted();
         let Some(kept) = column.updates_mut().undo(row, pending) else {
             return false;
         };
@@ -1141,6 +1454,8 @@ impl Columns {
                 hot.take(row);
             }
         }
+        let (_, after) = column.hot_counted();
+        self.counted.moved(before, after);
         true
     }
 
@@ -1150,7 +1465,10 @@ impl Columns {
         let mut dropped = 0;
         for column in self.by_key.values_mut() {
             if column.updates().is_some_and(|updates| !updates.is_empty()) {
+                let (_, before) = column.hot_counted();
                 dropped += column.updates_mut().collect(horizon);
+                let (_, after) = column.hot_counted();
+                self.counted.moved(before, after);
             }
         }
         dropped
@@ -1164,7 +1482,10 @@ impl Columns {
                 .updates()
                 .is_some_and(|updates| updates.has_chain(vector))
             {
+                let (_, before) = column.hot_counted();
                 dropped += column.updates_mut().collect_vector(vector, horizon);
+                let (_, after) = column.hot_counted();
+                self.counted.moved(before, after);
             }
         }
         dropped
@@ -1199,11 +1520,13 @@ impl Columns {
             if column.is_cold() && !column.has_value(row) {
                 continue;
             }
-            let hot = column.hot_mut();
+            let (hot, before) = column.hot_counted();
             hot.take(row);
             if !hot.updates.is_empty() {
                 hot.updates.remove_row(row);
             }
+            let (_, after) = column.hot_counted();
+            self.counted.moved(before, after);
         }
     }
 
@@ -1247,11 +1570,11 @@ impl Columns {
     /// chains is hot (Q9). A key with no value left in the rows (every row
     /// had it removed last) gets an empty column to hold them.
     pub(super) fn load_kept(&mut self, key: u32, kept: Vec<(usize, u64, Option<Value>)>) {
-        self.by_key
-            .entry(key)
-            .or_insert_with(Column::cold)
-            .updates_mut()
-            .load(kept);
+        let column = self.by_key.entry(key).or_insert_with(|| Column::cold(None));
+        let (_, before) = column.hot_counted();
+        column.updates_mut().load(kept);
+        let (_, after) = column.hot_counted();
+        self.counted.moved(before, after);
     }
 
     /// The rows the update chains of key `key` hold, `None` when they hold
@@ -1284,8 +1607,41 @@ impl Columns {
     }
 
     /// The heap bytes of the chunks its columns still hold encoded.
+    #[cfg(test)]
     pub(super) fn cold_bytes(&self) -> usize {
         self.by_key.values().map(Column::cold_bytes).sum::<usize>()
+    }
+
+    /// The metadata of the chunks its columns still hold encoded.
+    pub(super) fn cold_meta_bytes(&self) -> usize {
+        self.by_key
+            .values()
+            .map(Column::cold_meta_bytes)
+            .sum::<usize>()
+    }
+
+    /// The bytes of the chunks its columns still hold encoded, in memory.
+    pub(super) fn cold_chunk_bytes(&self) -> usize {
+        self.by_key
+            .values()
+            .map(Column::cold_chunk_bytes)
+            .sum::<usize>()
+    }
+
+    /// About what a write of key `key` thaws: the decoded bytes of its
+    /// column while it is cold.
+    pub(super) fn thaw_bytes(&self, key: u32) -> usize {
+        self.by_key.get(&key).map_or(0, Column::thaw_bytes)
+    }
+
+    /// Sets its count to what its columns hold: after a load that built them
+    /// without counting, so its count moves with them from then on.
+    pub(super) fn retally(&mut self) {
+        let mut counted = ColumnCounts::default();
+        for column in self.by_key.values() {
+            counted.moved(ColumnCounts::default(), column.counts());
+        }
+        self.counted = counted;
     }
 
     /// What a spill of key `key`'s column writes (see [`SpillPlan`]).
@@ -1313,13 +1669,17 @@ impl Columns {
         key: u32,
         chunks: SpillChunks,
         mapped: &Bytes,
+        thaws: &ThawSink,
     ) -> Result<usize> {
         let column = self
             .by_key
             .get_mut(&key)
             .ok_or_else(|| Error::Internal("a spilled column is gone".to_string()))?;
-        column.install_spill(chunks, mapped)?;
-        Ok(column.cold_bytes())
+        let before = column.counts();
+        column.install_spill(chunks, mapped, thaws)?;
+        let after = column.counts();
+        self.counted.moved(before, after);
+        Ok(after.cold + after.chunks)
     }
 
     /// Brings key `key`'s spilled column back into memory; returns whether

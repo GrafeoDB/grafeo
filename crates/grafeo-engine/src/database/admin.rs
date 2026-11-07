@@ -146,12 +146,14 @@ impl super::GrafeoDB {
 
     /// Returns a hierarchical memory usage breakdown.
     ///
-    /// Walks all internal structures (store, indexes, MVCC chains, caches,
-    /// string pools, buffer manager) and returns estimated heap bytes for each.
-    /// Safe to call concurrently with queries. On a database on a backend of
-    /// its own the store, its indexes and its versions are the backend's,
-    /// which the engine does not measure: they count as zero, and the rest
-    /// (caches, buffers, the catalog) is the engine's own.
+    /// The store, its indexes, its versions and its dictionaries come from
+    /// the store's account (counted as they grow, so the report takes time
+    /// independent of the store's size), the rest from the caches, string
+    /// pools and buffer manager, each as estimated heap bytes. Safe to call
+    /// concurrently with queries. On a database on a backend of its own the
+    /// store, its indexes and its versions are the backend's, which the
+    /// engine does not measure: they count as zero, and the rest (caches,
+    /// buffers, the catalog) is the engine's own.
     #[must_use]
     pub fn memory_usage(&self) -> crate::memory_usage::MemoryUsage {
         use crate::memory_usage::{BufferManagerMemory, CacheMemory, MemoryUsage};
@@ -159,7 +161,7 @@ impl super::GrafeoDB {
 
         let (store, indexes, mvcc, string_pool) = self
             .root_store()
-            .map(|store| store.memory_breakdown())
+            .map(|store| store.counted_breakdown())
             .unwrap_or_default();
 
         let (parsed_bytes, optimized_bytes, cached_plan_count) =

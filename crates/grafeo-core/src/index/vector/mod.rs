@@ -467,12 +467,23 @@ impl VectorIndexKind {
         }
     }
 
-    /// Returns estimated heap memory in bytes.
+    /// Returns estimated heap memory in bytes: a walk, the oracle of
+    /// [`counted_bytes`](Self::counted_bytes).
     #[must_use]
     pub fn heap_memory_bytes(&self) -> usize {
         match self {
             Self::Hnsw(idx) => idx.heap_memory_bytes(),
             Self::Quantized(idx) => idx.heap_memory_bytes(),
+        }
+    }
+
+    /// [`heap_memory_bytes`](Self::heap_memory_bytes), as the writes keep
+    /// it: without a walk.
+    #[must_use]
+    pub fn counted_bytes(&self) -> usize {
+        match self {
+            Self::Hnsw(idx) => idx.counted_bytes(),
+            Self::Quantized(idx) => idx.counted_bytes(),
         }
     }
 

@@ -52,7 +52,7 @@ use grafeo_common::utils::hash::FxHashMap;
 
 pub(super) use self::property::MaybeEqual;
 use self::property::PropertyIndex;
-use super::{Inner, NodeGroup, PENDING, ROWS_PER_GROUP, Read, RowGroupStore};
+use super::{Inner, NodeGroup, PENDING, ROWS_PER_GROUP, Read, RowGroupStore, Touched};
 
 /// The property index on one label of a key.
 #[derive(Debug)]
@@ -127,6 +127,66 @@ impl Indexes {
                 })
             })
             .or_else(|| self.property.get(property))
+    }
+
+    /// The heap bytes of its property indexes (on every label and on one), its text indexes
+    /// and its vector indexes, as the writes keep each index's count: a load per index.
+    pub(super) fn counted_bytes(&self) -> [usize; 3] {
+        self.bytes(true)
+    }
+
+    /// [`counted_bytes`](Self::counted_bytes) by a walk of every index: the oracle.
+    pub(super) fn walk_bytes(&self) -> [usize; 3] {
+        self.bytes(false)
+    }
+
+    /// The heap bytes of its property, text and vector indexes, as their counts (`counted`)
+    /// or their walks give them.
+    fn bytes(&self, counted: bool) -> [usize; 3] {
+        let of = |index: &PropertyIndex| {
+            if counted {
+                index.counted_bytes()
+            } else {
+                index.walk_bytes()
+            }
+        };
+        let mut bytes = [0; 3];
+        bytes[0] = self.property.values().map(of).sum::<usize>()
+            + self
+                .on_label
+                .values()
+                .flatten()
+                .map(|entry| of(&entry.index))
+                .sum::<usize>();
+        #[cfg(feature = "text-index")]
+        {
+            bytes[1] = self
+                .text
+                .values()
+                .map(|entry| {
+                    if counted {
+                        entry.counted_bytes()
+                    } else {
+                        entry.walk_bytes()
+                    }
+                })
+                .sum();
+        }
+        #[cfg(feature = "vector-index")]
+        {
+            bytes[2] = self
+                .vector
+                .values()
+                .map(|entry| {
+                    if counted {
+                        entry.counted_bytes()
+                    } else {
+                        entry.walk_bytes()
+                    }
+                })
+                .sum();
+        }
+        bytes
     }
 
     /// Whether the store has a text or a vector index.
@@ -664,6 +724,40 @@ impl RowGroupStore {
         if inner.indexes.property.contains_key(property) {
             return;
         }
+        inner.counting(Touched::none(), |inner| {
+            inner.build_property_index(property);
+        });
+        inner.settle();
+    }
+
+    /// Creates an index on node property `property` of label `label`: it holds what the
+    /// module documentation says, and the writes keep it from then on. An index on them
+    /// already is kept. No write of a label gives `label` an id here, so it stays out of the
+    /// store's listings until a node has it.
+    pub fn create_label_index(&self, label: &str, property: &str) {
+        let mut inner = self.inner.write();
+        inner.counting(Touched::none(), |inner| {
+            inner.build_label_index(label, property);
+        });
+        inner.settle();
+    }
+
+    /// Drops the index on node property `property` of label `label`. Returns `true` if it
+    /// existed and was removed.
+    pub fn drop_label_index(&self, label: &str, property: &str) -> bool {
+        let mut inner = self.inner.write();
+        let dropped = inner.counting(Touched::none(), |inner| {
+            inner.drop_label_index(label, property)
+        });
+        inner.settle();
+        dropped
+    }
+}
+
+impl Inner {
+    /// Builds the index on `property` from every value of the key any node has in any version.
+    fn build_property_index(&mut self, property: &str) {
+        let inner = self;
         let index = PropertyIndex::default();
         if let Some(key) = inner.keys.get_id(property) {
             for (number, group) in &inner.nodes {
@@ -686,12 +780,10 @@ impl RowGroupStore {
             .insert(PropertyKey::new(property), index);
     }
 
-    /// Creates an index on node property `property` of label `label`: it holds what the
-    /// module documentation says, and the writes keep it from then on. An index on them
-    /// already is kept. No write of a label gives `label` an id here, so it stays out of the
-    /// store's listings until a node has it.
-    pub fn create_label_index(&self, label: &str, property: &str) {
-        let mut inner = self.inner.write();
+    /// Builds the index of [`RowGroupStore::create_label_index`], unless one on the label and
+    /// the property is there.
+    fn build_label_index(&mut self, label: &str, property: &str) {
+        let inner = self;
         let held = inner
             .indexes
             .on_label
@@ -728,11 +820,9 @@ impl RowGroupStore {
             .push(entry);
     }
 
-    /// Drops the index on node property `property` of label `label`. Returns `true` if it
-    /// existed and was removed.
-    pub fn drop_label_index(&self, label: &str, property: &str) -> bool {
-        let mut inner = self.inner.write();
-        let on_labels = &mut inner.indexes.on_label;
+    /// Drops the index on node property `property` of label `label`; whether it existed.
+    fn drop_label_index(&mut self, label: &str, property: &str) -> bool {
+        let on_labels = &mut self.indexes.on_label;
         let Some(on_label) = on_labels.get_mut(property) else {
             return false;
         };
@@ -744,7 +834,9 @@ impl RowGroupStore {
         }
         dropped
     }
+}
 
+impl RowGroupStore {
     /// The indexes on labels, as `(label, property)`, sorted.
     #[must_use]
     pub fn label_index_entries(&self) -> Vec<(String, String)> {
@@ -766,12 +858,12 @@ impl RowGroupStore {
     /// Drops the index on a node property that covers every label. Returns `true` if the
     /// index existed and was removed.
     pub fn drop_property_index(&self, property: &str) -> bool {
-        self.inner
-            .write()
-            .indexes
-            .property
-            .remove(property)
-            .is_some()
+        let mut inner = self.inner.write();
+        let dropped = inner.counting(Touched::none(), |inner| {
+            inner.indexes.property.remove(property).is_some()
+        });
+        inner.settle();
+        dropped
     }
 
     /// Returns `true` if the property has an index, on every label or on one.
@@ -840,6 +932,7 @@ impl RowGroupStore {
     /// How many distinct values the index on `property` holds, `None`
     /// without one: old and pending values count until undo or `collect`
     /// takes them out.
+    #[cfg(test)]
     pub(crate) fn property_index_len(&self, property: &str) -> Option<usize> {
         self.inner
             .read()
@@ -847,18 +940,6 @@ impl RowGroupStore {
             .property
             .get(property)
             .map(PropertyIndex::len)
-    }
-
-    /// How many distinct values the indexes on labels hold, added up.
-    pub(crate) fn label_indexes_len(&self) -> usize {
-        self.inner
-            .read()
-            .indexes
-            .on_label
-            .values()
-            .flatten()
-            .map(|entry| entry.index.len())
-            .sum()
     }
 }
 

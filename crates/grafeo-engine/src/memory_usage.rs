@@ -71,16 +71,22 @@ pub struct MemoryUsage {
 }
 
 impl MemoryUsage {
-    /// Recomputes `total_bytes` from child totals.
+    /// Recomputes `total_bytes` from child totals, each byte once: the
+    /// components (store, indexes, MVCC, caches, string pool, RDF, CDC), and
+    /// of the buffer manager only the regions no component reports
+    /// (execution buffers, spill staging). Its graph storage and index
+    /// buffer regions hold the grants that cover the components, so they are
+    /// not added again.
     pub fn compute_total(&mut self) {
         self.total_bytes = self.store.total_bytes
             + self.indexes.total_bytes
             + self.mvcc.total_bytes
             + self.caches.total_bytes
             + self.string_pool.total_bytes
-            + self.buffer_manager.allocated_bytes
             + self.rdf.total_bytes
-            + self.cdc.total_bytes;
+            + self.cdc.total_bytes
+            + self.buffer_manager.execution_buffers_bytes
+            + self.buffer_manager.spill_staging_bytes;
     }
 }
 
@@ -244,7 +250,11 @@ mod tests {
                 ..Default::default()
             },
             buffer_manager: BufferManagerMemory {
-                allocated_bytes: 20,
+                // The grants of the components: not counted again.
+                allocated_bytes: 1_000,
+                graph_storage_bytes: 900,
+                execution_buffers_bytes: 15,
+                spill_staging_bytes: 5,
                 ..Default::default()
             },
             rdf: RdfMemory {

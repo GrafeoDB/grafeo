@@ -784,10 +784,18 @@ impl QuantizedHnswIndex {
         self.hnsw.first_broken_link()
     }
 
-    /// Returns estimated heap memory in bytes.
+    /// Returns estimated heap memory in bytes: the topology's walk and its
+    /// vector copies.
     #[must_use]
     pub fn heap_memory_bytes(&self) -> usize {
         self.hnsw.heap_memory_bytes() + self.memory_usage()
+    }
+
+    /// [`heap_memory_bytes`](Self::heap_memory_bytes), the topology as its
+    /// writes keep it: without a walk.
+    #[must_use]
+    pub fn counted_bytes(&self) -> usize {
+        self.hnsw.counted_bytes() + self.memory_usage()
     }
 }
 

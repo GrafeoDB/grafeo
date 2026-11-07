@@ -60,14 +60,18 @@ impl RowGroupStore {
         let labels = std::mem::take(&mut inner.labels);
         let edge_types = std::mem::take(&mut inner.edge_types);
         let keys = std::mem::take(&mut inner.keys);
+        let account = std::mem::take(&mut inner.account);
         let incoming_edges = inner.incoming_edges;
         *inner = super::Inner {
             labels,
             edge_types,
             keys,
             incoming_edges,
+            account,
             ..super::Inner::default()
         };
+        // The store keeps its account and its grants, counted again.
+        inner.recount();
         self.next_node_id.store(0, Ordering::Release);
         self.next_edge_id.store(0, Ordering::Release);
     }
@@ -256,34 +260,44 @@ impl LoadTarget for RowGroupStore {
         if used {
             return false;
         }
-        for group in inner.nodes.values_mut() {
-            group.labels.remove(&id);
-        }
-        inner.labels.remove(name).is_some()
+        let forgot = inner.counting(super::Touched::none(), |inner| {
+            for group in inner.nodes.values_mut() {
+                let before = group.lines();
+                group.forget_label(id);
+                inner.account.moved(&before, &group.lines());
+            }
+            inner.labels.remove(name).is_some()
+        });
+        inner.settle();
+        forgot
     }
 
     fn load_names(&self, names: LoadedNames<'_>) -> std::result::Result<(), String> {
         let mut inner = self.inner.write();
-        let super::Inner {
-            labels,
-            edge_types,
-            keys,
-            ..
-        } = &mut *inner;
-        let [next_label, next_edge_type, next_key] = names.next_ids;
-        for (dictionary, listed, next, what) in [
-            (labels, names.labels, next_label, "label"),
-            (edge_types, names.edge_types, next_edge_type, "edge type"),
-            (keys, names.keys, next_key, "property key"),
-        ] {
-            for (id, name) in listed {
-                dictionary
-                    .insert_at(*id, name)
-                    .map_err(|error| format!("{what}: {error}"))?;
+        let restored = inner.counting(super::Touched::none(), |inner| {
+            let super::Inner {
+                labels,
+                edge_types,
+                keys,
+                ..
+            } = inner;
+            let [next_label, next_edge_type, next_key] = names.next_ids;
+            for (dictionary, listed, next, what) in [
+                (labels, names.labels, next_label, "label"),
+                (edge_types, names.edge_types, next_edge_type, "edge type"),
+                (keys, names.keys, next_key, "property key"),
+            ] {
+                for (id, name) in listed {
+                    dictionary
+                        .insert_at(*id, name)
+                        .map_err(|error| format!("{what}: {error}"))?;
+                }
+                dictionary.reserve_below(next);
             }
-            dictionary.reserve_below(next);
-        }
-        Ok(())
+            Ok(())
+        });
+        inner.settle();
+        restored
     }
 
     fn load_next_ids(&self, node: u64, edge: u64) {

@@ -51,6 +51,7 @@ use grafeo_common::change::{BulkRange, DataOp, Table};
 use grafeo_common::storage::ImageId;
 use grafeo_common::types::EpochId;
 
+use super::account::Line;
 use super::versions::VECTOR_ROWS;
 use super::{Inner, ROWS_PER_GROUP, RowGroupStore, locate};
 
@@ -75,6 +76,11 @@ impl ColumnMarks {
     /// Whether no column changed.
     pub(super) fn is_empty(&self) -> bool {
         self.0.is_empty()
+    }
+
+    /// The heap bytes of its marks.
+    pub(super) fn heap_bytes(&self) -> usize {
+        self.0.capacity() * std::mem::size_of::<u32>()
     }
 
     /// The columns that changed, ascending.
@@ -122,6 +128,11 @@ impl Marks {
         } else {
             self.incoming = true;
         }
+    }
+
+    /// The heap bytes of its marks of keys and labels.
+    pub(super) fn heap_bytes(&self) -> usize {
+        self.keys.heap_bytes() + self.labels.heap_bytes()
     }
 
     /// Whether nothing changed.
@@ -310,6 +321,8 @@ impl RowGroupStore {
     /// now (see [`CheckpointSnapshot::take`]).
     fn take_checkpoint_marks(&self) -> GraphMarks {
         let mut inner = self.inner.write();
+        // Counted on its own: the writes' bracket closes first.
+        inner.close_bracket();
         let mut marks = GraphMarks {
             baseline: inner.baseline,
             next_node_id: self.next_node_id.load(Ordering::Acquire),
@@ -321,16 +334,23 @@ impl RowGroupStore {
             ],
             ..GraphMarks::default()
         };
+        // The marks taken leave the account with their bytes.
+        let (mut node_marks, mut edge_marks) = (0, 0);
         for (index, group) in &mut inner.nodes {
             if !group.marks.is_empty() {
+                node_marks += group.marks.heap_bytes();
                 marks.nodes.insert(*index, std::mem::take(&mut group.marks));
             }
         }
         for (index, group) in &mut inner.edges {
             if !group.marks.is_empty() {
+                edge_marks += group.marks.heap_bytes();
                 marks.edges.insert(*index, std::mem::take(&mut group.marks));
             }
         }
+        inner.account.moved_line(Line::NodeTables, node_marks, 0);
+        inner.account.moved_line(Line::EdgeTables, edge_marks, 0);
+        inner.settle();
         marks
     }
 
@@ -370,18 +390,26 @@ impl RowGroupStore {
 }
 
 impl Inner {
-    /// Marks node row group of `id` with `mark`, when the group exists.
-    fn mark_node(&mut self, id: u64, mark: impl FnOnce(&mut Marks)) {
-        if let Some(group) = self.nodes.get_mut(&locate(id).0) {
-            mark(&mut group.marks);
-        }
+    /// Marks node row group of `id` with `mark`, when the group exists;
+    /// returns the bytes its marks grew by.
+    fn mark_node(&mut self, id: u64, mark: impl FnOnce(&mut Marks)) -> usize {
+        let Some(group) = self.nodes.get_mut(&locate(id).0) else {
+            return 0;
+        };
+        let before = group.marks.heap_bytes();
+        mark(&mut group.marks);
+        group.marks.heap_bytes().saturating_sub(before)
     }
 
-    /// Marks edge row group of `id` with `mark`, when the group exists.
-    fn mark_edge(&mut self, id: u64, mark: impl FnOnce(&mut Marks)) {
-        if let Some(group) = self.edges.get_mut(&locate(id).0) {
-            mark(&mut group.marks);
-        }
+    /// Marks edge row group of `id` with `mark`, when the group exists;
+    /// returns the bytes its marks grew by.
+    fn mark_edge(&mut self, id: u64, mark: impl FnOnce(&mut Marks)) -> usize {
+        let Some(group) = self.edges.get_mut(&locate(id).0) else {
+            return 0;
+        };
+        let before = group.marks.heap_bytes();
+        mark(&mut group.marks);
+        group.marks.heap_bytes().saturating_sub(before)
     }
 
     /// Marks an edge's row group and its ends' adjacency.
@@ -393,14 +421,19 @@ impl Inner {
         }
     }
 
-    /// Marks what `op` changes, once it takes effect for readers.
-    pub(super) fn mark_op(&mut self, op: &DataOp) {
+    /// Marks what `op` changes, once it takes effect for readers; returns
+    /// the bytes the marks of the node and of the edge row groups grew by
+    /// (only a key's or a label's first mark in a group grows them), for a
+    /// caller that counts them itself (a commit).
+    pub(super) fn mark_op(&mut self, op: &DataOp) -> (usize, usize) {
         match op {
             DataOp::CreateNode { id, .. } | DataOp::DeleteNode { id } => {
                 self.mark_node(id.as_u64(), |marks| marks.rows = true);
+                (0, 0)
             }
             DataOp::CreateEdge { id, src, dst, .. } => {
                 self.mark_edge_and_ends(id.as_u64(), Some((src.as_u64(), dst.as_u64())));
+                (0, 0)
             }
             DataOp::DeleteEdge { id } => {
                 let ends = self.edge(id.as_u64()).map(|(group, row)| {
@@ -408,26 +441,33 @@ impl Inner {
                     (src, dst)
                 });
                 self.mark_edge_and_ends(id.as_u64(), ends);
+                (0, 0)
             }
             DataOp::SetNodeProperty { id, key, .. } | DataOp::RemoveNodeProperty { id, key } => {
-                if let Some(key) = self.keys.get_id(key.as_str()) {
-                    let row = locate(id.as_u64()).1;
-                    self.mark_node(id.as_u64(), |marks| marks.keys.mark(key, row));
-                }
+                let Some(key) = self.keys.get_id(key.as_str()) else {
+                    return (0, 0);
+                };
+                let row = locate(id.as_u64()).1;
+                let grown = self.mark_node(id.as_u64(), |marks| marks.keys.mark(key, row));
+                (grown, 0)
             }
             DataOp::SetEdgeProperty { id, key, .. } | DataOp::RemoveEdgeProperty { id, key } => {
-                if let Some(key) = self.keys.get_id(key.as_str()) {
-                    let row = locate(id.as_u64()).1;
-                    self.mark_edge(id.as_u64(), |marks| marks.keys.mark(key, row));
-                }
+                let Some(key) = self.keys.get_id(key.as_str()) else {
+                    return (0, 0);
+                };
+                let row = locate(id.as_u64()).1;
+                let grown = self.mark_edge(id.as_u64(), |marks| marks.keys.mark(key, row));
+                (0, grown)
             }
             DataOp::AddNodeLabel { id, label } | DataOp::RemoveNodeLabel { id, label } => {
-                if let Some(label) = self.label_id(label) {
-                    let row = locate(id.as_u64()).1;
-                    self.mark_node(id.as_u64(), |marks| marks.labels.mark(label, row));
-                }
+                let Some(label) = self.label_id(label) else {
+                    return (0, 0);
+                };
+                let row = locate(id.as_u64()).1;
+                let grown = self.mark_node(id.as_u64(), |marks| marks.labels.mark(label, row));
+                (grown, 0)
             }
-            DataOp::InsertTriple { .. } | DataOp::DeleteTriple { .. } => {}
+            DataOp::InsertTriple { .. } | DataOp::DeleteTriple { .. } => (0, 0),
         }
     }
 

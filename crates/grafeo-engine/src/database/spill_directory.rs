@@ -266,7 +266,7 @@ pub(crate) fn remove_stale_cache(cache: &Path) {
     // An open makes `cache` a directory: a link there (a symbolic link, or a
     // junction on Windows) is not one it left, and reading through it would
     // delete the files it points at. The link itself goes, never followed.
-    if std::fs::symlink_metadata(cache).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+    if is_link(cache) {
         // A link to a directory is removed as a directory on Windows.
         if let Err(error) = std::fs::remove_file(cache).or_else(|_| std::fs::remove_dir(cache)) {
             grafeo_common::grafeo_warn!(
@@ -312,9 +312,26 @@ pub(crate) fn remove_leftovers(layout: &SpillLayout) {
         return;
     };
     if let Some(root) = cache.parent() {
+        // An open makes `<file>.spill` a directory: a link there is not one
+        // it left (in a shared directory another user can plant one), and
+        // reading through it would delete what it points at.
+        if is_link(root) {
+            grafeo_common::grafeo_warn!(
+                "the spill directory {} is a link, not a directory an open made: nothing in it \
+                 is removed",
+                root.display()
+            );
+            return;
+        }
         remove_query_directories(root);
     }
     remove_stale_cache(cache);
+}
+
+/// Whether `path` is a link (a symbolic link, or a junction on Windows,
+/// which the standard library reports as one), never followed.
+fn is_link(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink())
 }
 
 /// Removes the `query_*` directories under `root` (a link there goes, not
@@ -509,6 +526,68 @@ mod tests {
         );
     }
 
+    /// Makes `link` a link to the directory `target`. Windows creates symbolic
+    /// links only with the privilege to (or in developer mode); a junction,
+    /// which directory reads follow as well, needs none.
+    fn link_directory(target: &Path, link: &Path) -> std::io::Result<()> {
+        #[cfg(unix)]
+        let linked = std::os::unix::fs::symlink(target, link);
+        #[cfg(windows)]
+        let linked = std::os::windows::fs::symlink_dir(target, link).or_else(|_| {
+            let made = std::process::Command::new("cmd")
+                .arg("/C")
+                .arg("mklink")
+                .arg("/J")
+                .arg(link)
+                .arg(target)
+                .output()?;
+            if made.status.success() {
+                Ok(())
+            } else {
+                Err(std::io::Error::other(
+                    String::from_utf8_lossy(&made.stderr).into_owned(),
+                ))
+            }
+        });
+        #[cfg(not(any(unix, windows)))]
+        let linked: std::io::Result<()> = Err(std::io::Error::other("no symbolic links"));
+        linked
+    }
+
+    /// A link planted at `<file>.spill` (another user of a shared directory
+    /// can make one) is not followed: the open removes no `query_*`
+    /// directory and no `cache/` from the directory it points at.
+    #[test]
+    fn the_leftover_removal_does_not_follow_a_linked_spill_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let victim = dir.path().join("victim");
+        std::fs::create_dir_all(victim.join("query_7")).unwrap();
+        std::fs::create_dir_all(victim.join("cache")).unwrap();
+        std::fs::write(victim.join("query_7").join("vincent.bin"), b"keep").unwrap();
+        std::fs::write(victim.join("cache").join("jules.bin"), b"keep").unwrap();
+        let database = dir.path().join("amsterdam.grafeo");
+        let spill = dir.path().join("amsterdam.grafeo.spill");
+        if let Err(error) = link_directory(&victim, &spill) {
+            eprintln!("skipped: this platform or user cannot create a directory link: {error}");
+            return;
+        }
+        assert!(is_link(&spill), "the spill path is a link");
+
+        let layout = SpillLayout::for_open(None, Some(&database), false);
+        assert_eq!(layout.stale_cache, Some(spill.join("cache")));
+        remove_leftovers(&layout);
+        drop(layout);
+        assert_eq!(
+            std::fs::read(victim.join("query_7").join("vincent.bin")).unwrap(),
+            b"keep"
+        );
+        assert_eq!(
+            std::fs::read(victim.join("cache").join("jules.bin")).unwrap(),
+            b"keep"
+        );
+        assert!(is_link(&spill), "the link is left as it was");
+    }
+
     #[test]
     fn nothing_spills_without_a_path() {
         let layout = SpillLayout::for_open(None, None, false);
@@ -578,31 +657,7 @@ mod tests {
         std::fs::create_dir_all(elsewhere.join("nested")).unwrap();
         std::fs::write(elsewhere.join("gus.txt"), b"keep").unwrap();
         std::fs::write(elsewhere.join("nested").join("mia.txt"), b"keep").unwrap();
-        #[cfg(unix)]
-        let linked = std::os::unix::fs::symlink(&elsewhere, &cache);
-        // Windows creates symbolic links only with the privilege to (or in
-        // developer mode); a junction, which directory reads follow as well,
-        // needs none.
-        #[cfg(windows)]
-        let linked = std::os::windows::fs::symlink_dir(&elsewhere, &cache).or_else(|_| {
-            let made = std::process::Command::new("cmd")
-                .arg("/C")
-                .arg("mklink")
-                .arg("/J")
-                .arg(&cache)
-                .arg(&elsewhere)
-                .output()?;
-            if made.status.success() {
-                Ok(())
-            } else {
-                Err(std::io::Error::other(
-                    String::from_utf8_lossy(&made.stderr).into_owned(),
-                ))
-            }
-        });
-        #[cfg(not(any(unix, windows)))]
-        let linked: std::io::Result<()> = Err(std::io::Error::other("no symbolic links"));
-        if let Err(error) = linked {
+        if let Err(error) = link_directory(&elsewhere, &cache) {
             eprintln!("skipped: this platform or user cannot create a directory link: {error}");
             return;
         }

@@ -130,6 +130,28 @@ impl SpillAccount {
         })
     }
 
+    /// [`reserve`](Self::reserve) of up to `wanted` bytes and at least
+    /// `at_least`: as much of `wanted` as the cap leaves, and only
+    /// `at_least` when the room refuses more.
+    ///
+    /// # Errors
+    ///
+    /// As [`reserve`](Self::reserve), when not even `at_least` fits.
+    pub fn reserve_up_to(
+        self: &Arc<Self>,
+        owner: SpillOwner,
+        wanted: u64,
+        at_least: u64,
+        new_file: bool,
+    ) -> Result<SpillReservation, LimitRefusal> {
+        let bytes = self.take_up_to(owner, wanted, at_least, new_file)?;
+        Ok(SpillReservation {
+            account: Arc::clone(self),
+            owner,
+            bytes,
+        })
+    }
+
     /// The bytes spilled now.
     #[must_use]
     pub fn used(&self) -> u64 {
@@ -150,25 +172,47 @@ impl SpillAccount {
 
     /// Counts `bytes` for `owner` if the cap and the room allow them.
     fn take(&self, owner: SpillOwner, bytes: u64, new_file: bool) -> Result<(), LimitRefusal> {
+        self.take_up_to(owner, bytes, bytes, new_file).map(|_| ())
+    }
+
+    /// Counts up to `wanted` bytes for `owner` and at least `at_least`
+    /// (`at_least <= wanted`): as much as the cap leaves, then only
+    /// `at_least` when the room refuses that. The bytes counted.
+    fn take_up_to(
+        &self,
+        owner: SpillOwner,
+        wanted: u64,
+        at_least: u64,
+        new_file: bool,
+    ) -> Result<u64, LimitRefusal> {
         let limit = match self.cap {
             SpillCap::Bytes(limit) => limit,
             SpillCap::Unlimited => u64::MAX,
         };
+        let at_least = at_least.min(wanted);
+        let mut bytes = at_least;
         self.used
             .try_update(Ordering::AcqRel, Ordering::Acquire, |used| {
-                used.checked_add(bytes).filter(|total| *total <= limit)
+                bytes = wanted.min(limit.saturating_sub(used));
+                (bytes >= at_least).then_some(used + bytes)
             })
             .map_err(|used| LimitRefusal::Spill {
-                requested: bytes,
+                requested: at_least,
                 used,
                 limit,
             })?;
         if let Err(refusal) = self.check_room(bytes, new_file) {
-            self.used.fetch_sub(bytes, Ordering::AcqRel);
-            return Err(refusal);
+            // A step the room refuses may leave room for what the write
+            // needs: the probe of a new file was just taken.
+            if bytes == at_least || self.check_room(at_least, false).is_err() {
+                self.used.fetch_sub(bytes, Ordering::AcqRel);
+                return Err(refusal);
+            }
+            self.used.fetch_sub(bytes - at_least, Ordering::AcqRel);
+            bytes = at_least;
         }
         self.by_owner[owner.index()].fetch_add(bytes, Ordering::Relaxed);
-        Ok(())
+        Ok(bytes)
     }
 
     /// Whether `bytes` more leave the room the database needs: probes for a
@@ -209,13 +253,19 @@ impl SpillAccount {
         Ok(())
     }
 
-    /// Gives back `bytes` of `owner`'s.
+    /// Gives back `bytes` of `owner`'s. They no longer take room since the
+    /// last probe either: what the next reservation sees free grows by them
+    /// (at most by what it counted since that probe).
     fn give_back(&self, owner: SpillOwner, bytes: u64) {
         if bytes == 0 {
             return;
         }
         self.used.fetch_sub(bytes, Ordering::AcqRel);
         self.by_owner[owner.index()].fetch_sub(bytes, Ordering::Relaxed);
+        if self.room.is_some() {
+            let mut state = self.probe.lock();
+            state.reserved_since = state.reserved_since.saturating_sub(bytes);
+        }
     }
 }
 
@@ -237,6 +287,20 @@ impl SpillReservation {
     pub fn grow(&mut self, bytes: u64) -> Result<(), LimitRefusal> {
         self.account.take(self.owner, bytes, false)?;
         self.bytes += bytes;
+        Ok(())
+    }
+
+    /// Reserves up to `wanted` bytes more and at least `at_least` (see
+    /// [`SpillAccount::reserve_up_to`]).
+    ///
+    /// # Errors
+    ///
+    /// As [`SpillAccount::reserve`], when not even `at_least` fits; the
+    /// reservation keeps its size then.
+    pub fn grow_up_to(&mut self, wanted: u64, at_least: u64) -> Result<(), LimitRefusal> {
+        self.bytes += self
+            .account
+            .take_up_to(self.owner, wanted, at_least, false)?;
         Ok(())
     }
 

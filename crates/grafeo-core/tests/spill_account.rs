@@ -142,3 +142,84 @@ fn a_failing_probe_keeps_the_cap() {
         .expect_err("past the cap");
     assert_eq!(refusal.bound(), LimitBound::SpillLimit);
 }
+
+/// A cap under a file step still spills: a new file reserves what the cap leaves, at least a
+/// byte, and a cap that leaves nothing refuses it.
+#[cfg(feature = "spill")]
+#[test]
+fn a_cap_under_a_file_step_still_spills() {
+    use grafeo_core::execution::spill::SpillManager;
+
+    let directory = tempfile::tempdir().unwrap();
+    let account = SpillAccount::new(SpillCap::Bytes(512 * 1024), None);
+    let manager = SpillManager::new(directory.path().join("query_1"))
+        .unwrap()
+        .with_account(Arc::clone(&account));
+    let mut file = manager
+        .create_file(SpillOwner::Sort, "sort")
+        .expect("a cap under a step still spills");
+    assert_eq!(account.used(), 512 * 1024, "what the cap leaves");
+    file.write_all(&vec![1; 300 * 1024]).unwrap();
+    file.write_all(&vec![2; 200 * 1024]).unwrap();
+    let refused = file
+        .write_all(&vec![3; 20 * 1024])
+        .expect_err("past the cap");
+    assert_eq!(refused.kind(), std::io::ErrorKind::StorageFull);
+    assert_eq!(file.bytes_written(), 500 * 1024, "nothing of it is written");
+    let full = manager
+        .create_file(SpillOwner::Sort, "sort")
+        .expect_err("the cap leaves nothing");
+    assert_eq!(full.kind(), std::io::ErrorKind::StorageFull);
+    file.finish_write().unwrap();
+    assert_eq!(account.used(), 500 * 1024);
+}
+
+/// A write near the cap reserves only what it needs when the cap leaves less than a step.
+#[cfg(feature = "spill")]
+#[test]
+fn a_write_near_the_cap_reserves_only_what_it_needs() {
+    use grafeo_core::execution::spill::SpillManager;
+
+    let directory = tempfile::tempdir().unwrap();
+    let account = SpillAccount::new(SpillCap::Bytes(5 * MIB / 2), None);
+    let manager = SpillManager::new(directory.path().join("query_2"))
+        .unwrap()
+        .with_account(Arc::clone(&account));
+    let mut file = manager
+        .create_file(SpillOwner::Aggregate, "partition")
+        .unwrap();
+    let mib = usize::try_from(MIB).unwrap();
+    // One step at the creation, a second for this write: 2 MiB reserved.
+    file.write_all(&vec![1; 2 * mib]).unwrap();
+    assert_eq!(account.used(), 2 * MIB);
+    // A step would pass the cap; the 300 KiB this write needs do not.
+    file.write_all(&vec![2; 300 * 1024]).unwrap();
+    assert_eq!(account.used(), 5 * MIB / 2, "the rest of the cap");
+    let refused = file
+        .write_all(&vec![3; 300 * 1024])
+        .expect_err("past the cap");
+    assert_eq!(refused.kind(), std::io::ErrorKind::StorageFull);
+    file.finish_write().unwrap();
+    assert_eq!(account.used(), 2 * MIB + 300 * 1024);
+}
+
+/// What a dropped reservation gives back is free again for the room before the next probe.
+#[test]
+fn a_dropped_reservation_frees_room_before_the_next_probe() {
+    let (room, probes) = room(Some(100 * MIB), 90 * MIB);
+    let account = SpillAccount::new(SpillCap::Unlimited, Some(room));
+    let first = account.reserve(SpillOwner::Sort, 8 * MIB, true).unwrap();
+    // Not a new file: the count since the probe goes on.
+    let mut second = account.reserve(SpillOwner::Sort, MIB, false).unwrap();
+    assert_eq!(probes.load(Ordering::SeqCst), 1);
+    second.grow(MIB).unwrap();
+    second
+        .grow(4 * MIB)
+        .expect_err("8 + 2 + 4 MiB leave less than 90 MiB free");
+    drop(first);
+    second
+        .grow(4 * MIB)
+        .expect("the 8 MiB given back are free again");
+    assert_eq!(probes.load(Ordering::SeqCst), 1, "without a probe");
+    assert_eq!(account.used(), 6 * MIB);
+}

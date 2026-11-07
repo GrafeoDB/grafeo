@@ -386,9 +386,55 @@ impl std::fmt::Debug for LogMemory {
 /// overhead per entry.
 const ENTRY_BYTES: usize = std::mem::size_of::<(EntityId, Vec<ChangeEvent>)>() + 8;
 
-/// The bytes the room of `events` takes.
-fn events_bytes(events: &Vec<ChangeEvent>) -> usize {
+/// The bytes the room of `events` takes, without what each event owns.
+fn room_bytes(events: &Vec<ChangeEvent>) -> usize {
     events.capacity() * std::mem::size_of::<ChangeEvent>()
+}
+
+/// The bytes `events` take: their room and what each event owns.
+fn events_bytes(events: &Vec<ChangeEvent>) -> usize {
+    room_bytes(events) + events.iter().map(event_heap_bytes).sum::<usize>()
+}
+
+/// The heap bytes `event` owns besides its place in its entity's vector:
+/// its strings, its label lists and its property maps with their keys and
+/// values. An event never changes in the log, so the figure at its push is
+/// the figure at its prune and in the walk.
+fn event_heap_bytes(event: &ChangeEvent) -> usize {
+    let text = |text: &Option<String>| text.as_ref().map_or(0, String::capacity);
+    let names = |names: &Option<Vec<String>>| {
+        names.as_ref().map_or(0, |names| {
+            names.capacity() * std::mem::size_of::<String>()
+                + names.iter().map(String::capacity).sum::<usize>()
+        })
+    };
+    let properties = |properties: &Option<HashMap<String, Value>>| {
+        properties.as_ref().map_or(0, |properties| {
+            // A slot per entry of the table's room, and a control byte each.
+            properties.capacity() * (std::mem::size_of::<(String, Value)>() + 1)
+                + properties
+                    .iter()
+                    .map(|(key, value)| key.capacity() + value.estimated_size_bytes())
+                    .sum::<usize>()
+        })
+    };
+    text(&event.graph)
+        + text(&event.edge_type)
+        + text(&event.triple_subject)
+        + text(&event.triple_predicate)
+        + text(&event.triple_object)
+        + text(&event.triple_graph)
+        + names(&event.labels)
+        + names(&event.before_labels)
+        + properties(&event.before)
+        + properties(&event.after)
+}
+
+/// `bytes` rounded up to the grant step.
+fn step_above(bytes: usize) -> usize {
+    bytes
+        .checked_next_multiple_of(GRANT_STEP)
+        .unwrap_or(usize::MAX)
 }
 
 impl CdcLog {
@@ -442,11 +488,39 @@ impl CdcLog {
             return;
         }
         let mut grant = self.memory.grant.lock();
+        // Read again under the grant's lock, so a settle that read an older
+        // count cannot shrink what a newer one just grew.
+        let counted = self.counted.load(Ordering::Relaxed);
         manager.settle_forced(&mut grant, MemoryRegion::ExecutionBuffers, counted);
         self.memory.granted.store(
             grant.as_ref().map_or(0, MemoryGrant::size),
             Ordering::Relaxed,
         );
+    }
+
+    /// [`settle`](Self::settle) without the slack: the grant keeps no more
+    /// than the step the counted bytes round up to, so what an eviction
+    /// pruned leaves the buffer manager's count at once (the eviction cycle
+    /// reads it). The bytes the grant gave back.
+    fn settle_tight(&self) -> usize {
+        let Some(manager) = self.memory.manager.get() else {
+            return 0;
+        };
+        let mut grant = self.memory.grant.lock();
+        let counted = self.counted.load(Ordering::Relaxed);
+        let held = grant.as_ref().map_or(0, MemoryGrant::size);
+        let mut given_back = 0;
+        if held < counted {
+            manager.settle_forced(&mut grant, MemoryRegion::ExecutionBuffers, counted);
+        } else if let Some(grant) = grant.as_mut() {
+            given_back = held.saturating_sub(step_above(counted));
+            grant.shrink(given_back);
+        }
+        self.memory.granted.store(
+            grant.as_ref().map_or(0, MemoryGrant::size),
+            Ordering::Relaxed,
+        );
+        given_back
     }
 
     /// Pushes `event` under `guard`, counting what it grew.
@@ -455,7 +529,7 @@ impl CdcLog {
         guard: &mut HbHashMap<(Option<String>, EntityId), Vec<ChangeEvent>>,
         event: ChangeEvent,
     ) {
-        let mut grown = 0;
+        let mut grown = event_heap_bytes(&event);
         let events = match guard.entry((event.graph.clone(), event.entity_id)) {
             hashbrown::hash_map::Entry::Occupied(entry) => entry.into_mut(),
             hashbrown::hash_map::Entry::Vacant(entry) => {
@@ -463,9 +537,9 @@ impl CdcLog {
                 entry.insert(Vec::new())
             }
         };
-        let before = events_bytes(events);
+        let before = room_bytes(events);
         events.push(event);
-        grown += events_bytes(events) - before;
+        grown += room_bytes(events) - before;
         // One writer, under the events' write lock: a load and a store.
         self.counted.store(
             self.counted.load(Ordering::Relaxed) + grown,
@@ -800,12 +874,8 @@ impl CdcLog {
     /// Estimates the heap footprint of the log in bytes.
     ///
     /// Counts the entity-keyed hash map overhead, the per-entity `Vec<ChangeEvent>`
-    /// capacity, and the events themselves. `ChangeEvent` contains owned `Value`
-    /// payloads that can be arbitrarily large (property snapshots), but this
-    /// estimate treats them as fixed-size and therefore undercounts histories
-    /// that hold large strings, vectors, or bytes. Good enough to surface
-    /// "CDC is dominating heap" in a memory-usage breakdown; not a precise
-    /// accounting.
+    /// capacity, and what each event owns on the heap: its strings, labels and
+    /// property snapshots (a value as [`Value::estimated_size_bytes`] reads it).
     #[must_use]
     pub fn heap_memory_bytes(&self) -> (usize, usize, usize) {
         let guard = self.events.read();
@@ -816,7 +886,9 @@ impl CdcLog {
         let event_size = std::mem::size_of::<ChangeEvent>();
         for events in guard.values() {
             event_count += events.len();
-            bytes += entry_overhead + events.capacity() * event_size;
+            bytes += entry_overhead
+                + events.capacity() * event_size
+                + events.iter().map(event_heap_bytes).sum::<usize>();
         }
         debug_assert_eq!(entry_overhead, ENTRY_BYTES);
         (bytes, entity_count, event_count)
@@ -827,23 +899,31 @@ impl CdcLog {
     /// Entities whose entire history falls below the threshold are removed
     /// from the map entirely.
     pub fn prune_before(&self, min_epoch: EpochId) {
-        {
-            let mut guard = self.events.write();
-            let (mut bytes, mut held) = (0, 0);
-            guard.retain(|_, events| {
-                events.retain(|e| e.epoch >= min_epoch);
-                let kept = !events.is_empty();
-                if kept {
-                    bytes += ENTRY_BYTES + events_bytes(events);
-                    held += events.len();
-                }
-                kept
-            });
-            // Every entity was visited: counted again with them.
-            self.counted.store(bytes, Ordering::Relaxed);
-            self.held_events.store(held, Ordering::Relaxed);
-        }
+        self.prune(min_epoch);
         self.settle();
+    }
+
+    /// [`prune_before`](Self::prune_before) without settling the grant. An
+    /// entity's events keep at most twice the room they need: what a prune
+    /// takes from a long history is given back.
+    fn prune(&self, min_epoch: EpochId) {
+        let mut guard = self.events.write();
+        let (mut bytes, mut held) = (0, 0);
+        guard.retain(|_, events| {
+            events.retain(|e| e.epoch >= min_epoch);
+            let kept = !events.is_empty();
+            if kept {
+                if events.capacity() > 2 * events.len() {
+                    events.shrink_to_fit();
+                }
+                bytes += ENTRY_BYTES + events_bytes(events);
+                held += events.len();
+            }
+            kept
+        });
+        // Every entity was visited: counted again with them.
+        self.counted.store(bytes, Ordering::Relaxed);
+        self.held_events.store(held, Ordering::Relaxed);
     }
 
     /// Prunes the oldest events to stay within `max_events`, if configured.
@@ -952,9 +1032,15 @@ impl MemoryConsumer for CdcLog {
         epochs.sort();
         let cutoff_idx = events_to_remove.min(epochs.len()).saturating_sub(1);
         let cutoff = epochs[cutoff_idx];
-        self.prune_before(EpochId::new(cutoff.as_u64() + 1));
-
-        before.saturating_sub(self.counted.load(Ordering::Relaxed))
+        self.prune(EpochId::new(cutoff.as_u64() + 1));
+        // The caller (the eviction cycle) reads the buffer manager's count:
+        // what the grant gave back is what it freed. Without a manager the
+        // counted bytes are all there is.
+        if self.memory.manager.get().is_some() {
+            self.settle_tight()
+        } else {
+            before.saturating_sub(self.counted.load(Ordering::Relaxed))
+        }
     }
 
     fn can_evict(&self) -> bool {
@@ -1622,6 +1708,117 @@ mod tests {
         let freed = log.evict(100);
         assert_eq!(freed, 0, "evict with target < 256 bytes should be a no-op");
         assert_eq!(log.event_count(), 10);
+    }
+
+    /// A create of node `id` at `epoch` whose `name` holds `bytes` bytes.
+    fn record_named(log: &CdcLog, id: u64, epoch: u64, bytes: usize) {
+        let props = HashMap::from([("name".to_string(), Value::from("j".repeat(bytes)))]);
+        log.record_create_node(NodeId::new(id), EpochId(epoch), Some(props), None);
+    }
+
+    /// The log counts what each event owns (its property snapshot, labels
+    /// and strings), at its push and its prune, as the walk does.
+    #[test]
+    fn the_count_holds_what_each_event_owns() {
+        let log = CdcLog::new();
+        record_named(&log, 1, 1, 100_000);
+        log.record_create_node(
+            NodeId::new(2),
+            EpochId(2),
+            None,
+            Some(vec!["Vincent".to_string(), "Mia".to_string()]),
+        );
+        let (counted, _, _) = log.counted_memory_bytes();
+        assert!(counted >= 100_000, "the snapshot is counted: {counted}");
+        assert_eq!(log.account_mismatches(), Vec::new());
+
+        log.prune_before(EpochId(2));
+        let (counted, _, events) = log.counted_memory_bytes();
+        assert_eq!(events, 1);
+        assert!(counted < 100_000, "the pruned snapshot is not: {counted}");
+        assert_eq!(log.account_mismatches(), Vec::new());
+        log.prune_before(EpochId(3));
+        assert_eq!(log.counted_memory_bytes().0, 0);
+    }
+
+    /// A prune that leaves a long history short gives its room back: the
+    /// count drops with it.
+    #[test]
+    fn a_partial_prune_gives_the_room_back() {
+        let log = CdcLog::new();
+        for epoch in 1..=64 {
+            log.record_create_node(NodeId::new(1), EpochId(epoch), None, None);
+        }
+        log.prune_before(EpochId(60));
+        let (counted, entities, events) = log.counted_memory_bytes();
+        assert_eq!((entities, events), (1, 5));
+        assert!(
+            counted <= ENTRY_BYTES + 2 * 5 * std::mem::size_of::<ChangeEvent>(),
+            "{counted}"
+        );
+        assert_eq!(log.account_mismatches(), Vec::new());
+    }
+
+    /// An eviction gives back what it pruned from the grant at once (no slack
+    /// kept), and reports the grant's drop: the eviction cycle reads the
+    /// buffer manager's count.
+    #[test]
+    fn an_eviction_reports_the_grant_it_gave_back() {
+        let manager = BufferManager::with_budget(1 << 30);
+        let log = CdcLog::new();
+        log.attach_memory(Arc::clone(&manager));
+        for epoch in 1..=40 {
+            record_named(&log, epoch, epoch, 64 * 1024);
+        }
+        let granted = log.granted_bytes();
+        let counted = log.counted_memory_bytes().0;
+        assert!(granted >= counted && counted > 2 * GRANT_STEP, "{counted}");
+
+        // The eviction removes an event per 256 bytes asked for: the 30
+        // oldest go, the 10 newest (about 640 KiB) stay.
+        let freed = log.evict(30 * 256);
+        let (counted, _, events) = log.counted_memory_bytes();
+        assert_eq!(events, 10);
+        assert_eq!(freed, granted - log.granted_bytes());
+        assert!(freed > 0);
+        assert!(
+            log.granted_bytes() >= counted && log.granted_bytes() <= step_above(counted),
+            "granted {} for {counted}",
+            log.granted_bytes()
+        );
+        assert_eq!(log.account_mismatches(), Vec::new());
+    }
+
+    /// Writers and pruners at once leave the grant covering the count: a
+    /// settle that read an older count never shrinks what a newer one grew.
+    #[test]
+    fn concurrent_writes_and_prunes_keep_the_grant_covering_the_count() {
+        let manager = BufferManager::with_budget(1 << 30);
+        let log = Arc::new(CdcLog::new());
+        log.attach_memory(Arc::clone(&manager));
+        std::thread::scope(|scope| {
+            for writer in 0..3_u64 {
+                let log = Arc::clone(&log);
+                scope.spawn(move || {
+                    for i in 0..200 {
+                        record_named(&log, writer * 1_000 + i, 10 + i, 16 * 1024);
+                    }
+                });
+            }
+            let log = Arc::clone(&log);
+            scope.spawn(move || {
+                for epoch in 0..200 {
+                    log.prune_before(EpochId(epoch));
+                }
+            });
+        });
+        let counted = log.counted_memory_bytes().0;
+        assert!(
+            log.granted_bytes() >= counted,
+            "granted {} for {counted}",
+            log.granted_bytes()
+        );
+        assert_eq!(log.account_mismatches(), Vec::new());
     }
 
     #[test]

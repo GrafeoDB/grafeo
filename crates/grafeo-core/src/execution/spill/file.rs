@@ -24,6 +24,9 @@ pub struct SpillFile {
     /// Its bytes in the spill account, reserved before they are written
     /// and given back when the file is deleted or dropped.
     reservation: Option<super::SpillReservation>,
+    /// The files of the manager that made it: a removal that fails hands
+    /// the reservation there, given back once the manager removes the file.
+    tracked: Option<std::sync::Arc<super::manager::ActiveFiles>>,
 }
 
 impl SpillFile {
@@ -41,14 +44,23 @@ impl SpillFile {
             writer: Some(writer),
             bytes_written: 0,
             reservation: None,
+            tracked: None,
         })
     }
 
     /// Reserves its writes in `reservation`'s account, growing it a
-    /// [`SPILL_FILE_STEP`](super::SPILL_FILE_STEP) or more at a time.
+    /// [`SPILL_FILE_STEP`](super::SPILL_FILE_STEP) at a time (or only what a
+    /// write needs, where the cap leaves less).
     #[must_use]
     pub fn with_reservation(mut self, reservation: super::SpillReservation) -> Self {
         self.reservation = Some(reservation);
+        self
+    }
+
+    /// Tracked in `files`, the files of the manager that made it.
+    #[must_use]
+    pub(super) fn tracked_in(mut self, files: std::sync::Arc<super::manager::ActiveFiles>) -> Self {
+        self.tracked = Some(files);
         self
     }
 
@@ -80,8 +92,12 @@ impl SpillFile {
         if let Some(reservation) = &mut self.reservation {
             let after = self.bytes_written + data.len() as u64;
             if after > reservation.bytes() {
-                let more = (after - reservation.bytes()).max(super::SPILL_FILE_STEP);
-                reservation.grow(more).map_err(super::refused)?;
+                // A step ahead where the cap leaves one, and only what this
+                // write needs where it (or the room) leaves less.
+                let needed = after - reservation.bytes();
+                reservation
+                    .grow_up_to(needed.max(super::SPILL_FILE_STEP), needed)
+                    .map_err(super::refused)?;
             }
         }
         writer.write_all(data)?;
@@ -158,7 +174,10 @@ impl SpillFile {
 
     /// Deletes this spill file.
     ///
-    /// Consumes the SpillFile handle.
+    /// Consumes the SpillFile handle. A file its manager tracks leaves the
+    /// manager's list; one that cannot be removed stays there with its
+    /// reservation, which the manager gives back when its cleanup removes
+    /// the file (its bytes are still on disk until then).
     ///
     /// # Errors
     ///
@@ -166,7 +185,30 @@ impl SpillFile {
     pub fn delete(mut self) -> std::io::Result<()> {
         // Close the writer first
         self.writer = None;
-        std::fs::remove_file(&self.path)
+        let removed = std::fs::remove_file(&self.path);
+        if removed.is_ok() {
+            self.reservation = None;
+            if let Some(files) = &self.tracked {
+                files.removed(&self.path);
+            }
+        }
+        // A file still on disk keeps its reservation (see `Drop`).
+        removed
+    }
+}
+
+impl Drop for SpillFile {
+    /// A file dropped while still on disk (not deleted, or its removal
+    /// failed) hands its reservation to its manager, which gives it back
+    /// once its cleanup removes the file.
+    fn drop(&mut self) {
+        if let Some(files) = &self.tracked
+            && let Some(mut reservation) = self.reservation.take()
+        {
+            // What it reserved past its length was never written.
+            reservation.trim_to(self.bytes_written);
+            files.keep(&self.path, reservation);
+        }
     }
 }
 

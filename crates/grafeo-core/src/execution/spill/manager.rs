@@ -1,6 +1,6 @@
 //! Spill manager for file lifecycle management.
 
-use super::account::{SpillAccount, SpillOwner};
+use super::account::{SpillAccount, SpillOwner, SpillReservation};
 use super::file::SpillFile;
 use parking_lot::Mutex;
 use std::path::{Path, PathBuf};
@@ -8,8 +8,76 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 /// The bytes a spill file reserves at a time: its first ones when it is
-/// created, then as its writes pass what it holds.
+/// created, then as its writes pass what it holds (less where the cap
+/// leaves less).
 pub const SPILL_FILE_STEP: u64 = 1 << 20;
+
+/// The files a manager removes at its cleanup, shared with the files: one
+/// still on disk when it drops (not deleted, or its removal failed) leaves
+/// its reservation here, next to its path, until the cleanup removes it.
+#[derive(Default)]
+pub(super) struct ActiveFiles(Mutex<Vec<ActiveFile>>);
+
+/// A file of [`ActiveFiles`], with the reservation it left.
+struct ActiveFile {
+    path: PathBuf,
+    reservation: Option<SpillReservation>,
+}
+
+impl ActiveFiles {
+    /// Tracks `path`, a new file.
+    fn track(&self, path: PathBuf) {
+        self.0.lock().push(ActiveFile {
+            path,
+            reservation: None,
+        });
+    }
+
+    /// `path` was removed: no longer tracked.
+    pub(super) fn removed(&self, path: &Path) {
+        self.0.lock().retain(|file| file.path != path);
+    }
+
+    /// `path` stays on disk: its reservation is kept with it.
+    pub(super) fn keep(&self, path: &Path, reservation: SpillReservation) {
+        let mut files = self.0.lock();
+        match files.iter_mut().find(|file| file.path == path) {
+            Some(file) => file.reservation = Some(reservation),
+            None => files.push(ActiveFile {
+                path: path.to_path_buf(),
+                reservation: Some(reservation),
+            }),
+        }
+    }
+
+    /// The files tracked.
+    fn len(&self) -> usize {
+        self.0.lock().len()
+    }
+
+    /// Removes every file (one already gone counts as removed), giving back
+    /// the reservations of those removed. One that cannot be removed stays
+    /// tracked, with its reservation; the last error is returned.
+    fn remove_all(&self) -> std::io::Result<()> {
+        let files = std::mem::take(&mut *self.0.lock());
+        let mut last_error = None;
+        let mut kept = Vec::new();
+        for file in files {
+            match std::fs::remove_file(&file.path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    last_error = Some(error);
+                    kept.push(file);
+                }
+            }
+        }
+        if !kept.is_empty() {
+            self.0.lock().append(&mut kept);
+        }
+        last_error.map_or(Ok(()), Err)
+    }
+}
 
 /// Manages spill file lifecycle for out-of-core processing.
 ///
@@ -27,8 +95,8 @@ pub struct SpillManager {
     spill_dir: PathBuf,
     /// Counter for unique file IDs.
     next_file_id: AtomicU64,
-    /// Active spill file paths for cleanup.
-    active_files: Mutex<Vec<PathBuf>>,
+    /// Active spill files for cleanup, shared with the files.
+    active_files: Arc<ActiveFiles>,
     /// Total bytes currently spilled to disk.
     total_spilled_bytes: AtomicU64,
     /// Whether `Drop` should remove `spill_dir` itself (non-recursive).
@@ -60,7 +128,7 @@ impl SpillManager {
         Ok(Self {
             spill_dir: spill_dir.into(),
             next_file_id: AtomicU64::new(0),
-            active_files: Mutex::new(Vec::new()),
+            active_files: Arc::new(ActiveFiles::default()),
             total_spilled_bytes: AtomicU64::new(0),
             owns_dir: false,
             dir_ready: AtomicBool::new(false),
@@ -116,7 +184,8 @@ impl SpillManager {
     /// Creates a new spill file of `owner` with the given prefix, and the
     /// spill directory with the first one. With an account, the file first
     /// reserves its first [`SPILL_FILE_STEP`] bytes there (probing the free
-    /// space), and holds the reservation as it grows.
+    /// space; less where the cap or the room leaves less, at least a byte),
+    /// and holds the reservation as it grows.
     ///
     /// The file name format is: `{prefix}_{file_id}.spill`
     ///
@@ -129,7 +198,7 @@ impl SpillManager {
         let reservation = match &self.account {
             Some(account) => Some(
                 account
-                    .reserve(owner, SPILL_FILE_STEP, true)
+                    .reserve_up_to(owner, SPILL_FILE_STEP, 1, true)
                     .map_err(super::refused)?,
             ),
             None => None,
@@ -153,9 +222,9 @@ impl SpillManager {
         let file_path = self.spill_dir.join(file_name);
 
         // Track the file for cleanup
-        self.active_files.lock().push(file_path.clone());
+        self.active_files.track(file_path.clone());
 
-        let file = SpillFile::new(file_path)?;
+        let file = SpillFile::new(file_path)?.tracked_in(Arc::clone(&self.active_files));
         Ok(match reservation {
             Some(reservation) => file.with_reservation(reservation),
             None => file,
@@ -178,8 +247,7 @@ impl SpillManager {
 
     /// Removes a file path from tracking (called when file is deleted).
     pub fn unregister_file(&self, path: &Path) {
-        let mut files = self.active_files.lock();
-        files.retain(|p| p != path);
+        self.active_files.removed(path);
     }
 
     /// Returns total bytes currently spilled to disk.
@@ -191,35 +259,23 @@ impl SpillManager {
     /// Returns the number of active spill files.
     #[must_use]
     pub fn active_file_count(&self) -> usize {
-        self.active_files.lock().len()
+        self.active_files.len()
     }
 
     /// Cleans up all spill files.
     ///
     /// This is called automatically on drop, but can be called manually.
+    /// A file it removes gives back the reservation it left (see
+    /// [`SpillFile::delete`]); one it cannot remove stays tracked, with its
+    /// reservation, for the next cleanup.
     ///
     /// # Errors
     ///
     /// Returns an error if any file cannot be deleted (continues trying others).
     pub fn cleanup(&self) -> std::io::Result<()> {
-        let files = std::mem::take(&mut *self.active_files.lock());
-        let mut last_error = None;
-
-        for path in files {
-            if let Err(e) = std::fs::remove_file(&path) {
-                // Ignore "not found" errors (file may have been deleted already)
-                if e.kind() != std::io::ErrorKind::NotFound {
-                    last_error = Some(e);
-                }
-            }
-        }
-
+        let removed = self.active_files.remove_all();
         self.total_spilled_bytes.store(0, Ordering::Relaxed);
-
-        match last_error {
-            Some(e) => Err(e),
-            None => Ok(()),
-        }
+        removed
     }
 }
 
@@ -471,6 +527,106 @@ mod tests {
             !relative.exists(),
             "the owned directory is removed with the manager"
         );
+    }
+
+    /// A file whose removal fails keeps its bytes in the account (they are
+    /// still on disk) until the manager's cleanup removes it.
+    #[test]
+    fn a_failed_removal_keeps_the_reservation_until_cleanup() {
+        use crate::execution::spill::SpillCap;
+
+        let temp_dir = TempDir::new().unwrap();
+        let query_dir = temp_dir.path().join("query_3");
+        let account = SpillAccount::new(SpillCap::Unlimited, None);
+        let manager = SpillManager::new(&query_dir)
+            .unwrap()
+            .with_account(Arc::clone(&account));
+        let mut file = manager.create_file(SpillOwner::Sort, "sort").unwrap();
+        file.write_all(&[7; 4096]).unwrap();
+        file.finish_write().unwrap();
+        assert_eq!(account.used(), 4096);
+        let path = file.path().to_path_buf();
+
+        // No sharing at all on Windows, no write permission on the
+        // directory on Unix: the removal fails.
+        #[cfg(windows)]
+        let held = {
+            use std::os::windows::fs::OpenOptionsExt;
+            std::fs::OpenOptions::new()
+                .read(true)
+                .share_mode(0)
+                .open(&path)
+                .unwrap()
+        };
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&query_dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+        }
+        let removed = file.delete();
+        #[cfg(windows)]
+        drop(held);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&query_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        if removed.is_ok() {
+            eprintln!("skipped: this platform or user removed a file it should not have");
+            return;
+        }
+        assert!(path.exists());
+        assert_eq!(account.used(), 4096, "the file is still on disk");
+        assert_eq!(manager.active_file_count(), 1);
+
+        manager.cleanup().unwrap();
+        assert!(!path.exists());
+        assert_eq!(account.used(), 0, "the cleanup removed it");
+        assert_eq!(manager.active_file_count(), 0);
+    }
+
+    /// A file dropped without a delete stays on disk until the manager's
+    /// cleanup, and so do its written bytes in the account.
+    #[test]
+    fn a_dropped_file_keeps_its_written_bytes_until_cleanup() {
+        use crate::execution::spill::SpillCap;
+
+        let temp_dir = TempDir::new().unwrap();
+        let account = SpillAccount::new(SpillCap::Unlimited, None);
+        let manager = SpillManager::new(temp_dir.path().join("query_5"))
+            .unwrap()
+            .with_account(Arc::clone(&account));
+        let mut file = manager
+            .create_file(SpillOwner::Aggregate, "partition")
+            .unwrap();
+        file.write_all(&[5; 1000]).unwrap();
+        assert_eq!(account.used(), SPILL_FILE_STEP, "a step ahead");
+        let path = file.path().to_path_buf();
+        drop(file);
+        assert!(path.exists());
+        assert_eq!(account.used(), 1000, "what it wrote, not its step");
+
+        manager.cleanup().unwrap();
+        assert!(!path.exists());
+        assert_eq!(account.used(), 0);
+    }
+
+    /// A deleted file leaves the manager's list and gives its bytes back.
+    #[test]
+    fn a_deleted_file_is_no_longer_tracked() {
+        use crate::execution::spill::SpillCap;
+
+        let temp_dir = TempDir::new().unwrap();
+        let account = SpillAccount::new(SpillCap::Unlimited, None);
+        let manager = SpillManager::new(temp_dir.path())
+            .unwrap()
+            .with_account(Arc::clone(&account));
+        let mut file = manager.create_file(SpillOwner::Sort, "sort").unwrap();
+        let _other = manager.create_file(SpillOwner::Sort, "sort").unwrap();
+        file.write_all(b"mia").unwrap();
+        file.delete().unwrap();
+        assert_eq!(manager.active_file_count(), 1);
+        assert_eq!(account.used(), SPILL_FILE_STEP, "the other file's step");
     }
 
     #[test]

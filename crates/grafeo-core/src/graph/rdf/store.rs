@@ -484,8 +484,11 @@ impl RdfStore {
     /// [`BufferManager::settle_forced`]).
     fn settle(&self) {
         if let Some(manager) = self.memory.get() {
+            // Read under the grant's lock, so a settle that read an older
+            // count cannot shrink what a newer one just grew.
+            let mut grant = self.grant.lock();
             let counted = self.counted_total();
-            manager.settle_forced(&mut self.grant.lock(), MemoryRegion::GraphStorage, counted);
+            manager.settle_forced(&mut grant, MemoryRegion::GraphStorage, counted);
         }
     }
 
@@ -1477,6 +1480,9 @@ impl RdfStore {
         let triples = self.triples.read();
         if triples.is_empty() {
             *self.ring.write() = None;
+            drop(triples);
+            // The ring it held (one set at a load) is no longer counted.
+            self.settle();
             return;
         }
         // The ring is an index: one that cannot be built (more distinct
@@ -4155,6 +4161,39 @@ this is not valid ntriples
 
         let ring = store.ring().expect("ring should exist after bulk load");
         assert_eq!(ring.len(), 2);
+    }
+
+    /// A rebuild over no triples drops the ring a load set, and the grant
+    /// gives its bytes back.
+    #[test]
+    #[cfg(feature = "ring-index")]
+    fn a_rebuild_over_no_triples_gives_the_ring_grant_back() {
+        use grafeo_common::memory::buffer::GRANT_STEP;
+
+        let store = RdfStore::new();
+        store.attach_memory(BufferManager::with_budget(1 << 30));
+        // Over two grant steps of ring (12 bytes a triple), so the grant
+        // gives it back past its slack.
+        let ring = crate::index::ring::TripleRing::try_from_triples((0..200_000).map(|i| {
+            Triple::new(
+                Term::iri(format!("http://ex.org/vincent{i}")),
+                Term::iri("http://ex.org/knows"),
+                Term::iri("http://ex.org/jules"),
+            )
+        }))
+        .unwrap();
+        store.set_ring(ring);
+        assert!(store.granted_bytes() >= store.counted_bytes());
+        assert!(store.counted_bytes() > 2 * GRANT_STEP);
+
+        store.rebuild_ring();
+        assert!(store.ring().is_none());
+        assert!(
+            store.granted_bytes() < store.counted_bytes() + 2 * GRANT_STEP,
+            "granted {} for {}",
+            store.granted_bytes(),
+            store.counted_bytes()
+        );
     }
 
     #[test]

@@ -17,7 +17,7 @@ use grafeo_core::graph::GraphStore;
 #[cfg(test)]
 use grafeo_core::graph::rowgroup::RowGroupStore;
 
-use super::super::{AlgorithmResult, Domain, ParameterDef, ParameterType, Parameters};
+use super::super::{AlgorithmResult, Domain, ParameterDef, ParameterType, Prepared};
 use super::traits::{GraphAlgorithm, GraphView, Ticker};
 
 /// Counts all subgraph isomorphisms of `pattern` in `target`.
@@ -537,11 +537,11 @@ impl GraphAlgorithm for SubgraphIsomorphismAlgorithm {
         subgraph_iso_params()
     }
 
-    fn execute(
+    fn compute(
         &self,
         store: &dyn GraphStore,
         view: grafeo_common::types::ReadView,
-        params: &Parameters,
+        params: &Prepared,
     ) -> Result<AlgorithmResult> {
         let graph = super::traits::GraphView::new(store, view);
         let store = &graph;
@@ -567,6 +567,7 @@ impl GraphAlgorithm for SubgraphIsomorphismAlgorithm {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::plugins::Parameters;
     use grafeo_common::types::Value;
 
     fn create_triangle() -> RowGroupStore {

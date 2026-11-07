@@ -15,7 +15,7 @@ use grafeo_core::graph::GraphStore;
 #[cfg(test)]
 use grafeo_core::graph::rowgroup::RowGroupStore;
 
-use super::super::{AlgorithmResult, ParameterDef, Parameters};
+use super::super::{AlgorithmResult, ParameterDef, Prepared};
 use super::traits::{ComponentResultBuilder, GraphAlgorithm, Ticker, impl_algorithm, int_value};
 
 // ============================================================================
@@ -554,7 +554,7 @@ impl_algorithm! {
     name: "connected_components",
     description: "Find connected components (undirected) or weakly connected components (directed)",
     params: &[],
-    execute(store, _params) {
+    compute(store, _params) {
         let components = connected_components_on(store)?;
 
         let mut builder = ComponentResultBuilder::with_capacity(components.len());
@@ -576,7 +576,7 @@ impl_algorithm! {
     name: "strongly_connected_components",
     description: "Find strongly connected components using Tarjan's algorithm",
     params: &[],
-    execute(store, _params) {
+    compute(store, _params) {
         let components = strongly_connected_components_on(store)?;
 
         let mut builder = ComponentResultBuilder::with_capacity(components.len());
@@ -606,11 +606,11 @@ impl GraphAlgorithm for TopologicalSortAlgorithm {
         &[]
     }
 
-    fn execute(
+    fn compute(
         &self,
         store: &dyn GraphStore,
         view: grafeo_common::types::ReadView,
-        _params: &Parameters,
+        _params: &Prepared,
     ) -> Result<AlgorithmResult> {
         let graph = super::traits::GraphView::new(store, view);
         let store = &graph;

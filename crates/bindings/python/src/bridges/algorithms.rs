@@ -12,7 +12,7 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
 use grafeo_adapters::plugins::algorithms::{self, GraphAlgorithm, KeyOrderError};
-use grafeo_adapters::plugins::{Parameters, apply_defaults, check_parameters};
+use grafeo_adapters::plugins::{Parameters, Prepared};
 use grafeo_common::types::{NodeId, ReadView, Value};
 use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind};
 use grafeo_core::graph::GraphStore;
@@ -797,7 +797,9 @@ impl PyAlgorithms {
         let damping = params
             .required_float("damping")
             .map_err(PyGrafeoError::from)?;
-        let max_iterations = count(&params, "max_iterations")?;
+        let max_iterations = params
+            .required_count("max_iterations")
+            .map_err(PyGrafeoError::from)?;
         let tolerance = params
             .required_float("tolerance")
             .map_err(PyGrafeoError::from)?;
@@ -930,7 +932,9 @@ impl PyAlgorithms {
                 params.set_int("max_iterations", max_iterations);
             }
         })?;
-        let max_iterations = count(&params, "max_iterations")?;
+        let max_iterations = params
+            .required_count("max_iterations")
+            .map_err(PyGrafeoError::from)?;
         let (result, order) =
             self.compute_keyed(py, projection, key, |store, view, nodes| match nodes {
                 Some(nodes) => {
@@ -1470,10 +1474,9 @@ impl PyAlgorithms {
             .map(|(from, to)| format!("{from}-{to}"))
             .collect::<Vec<_>>()
             .join(",");
-        let params = checked(&algorithms::SubgraphIsomorphismAlgorithm, |params| {
-            params.set_string("pattern_edges", text);
-            params.set_int("pattern_nodes", pattern_nodes);
-        })?;
+        let mut params = Parameters::new();
+        params.set_string("pattern_edges", text);
+        params.set_int("pattern_nodes", pattern_nodes);
         let result = self.compute(py, projection, |store, view| {
             algorithms::SubgraphIsomorphismAlgorithm.execute(store, view, &params)
         })?;
@@ -1490,26 +1493,24 @@ impl PyAlgorithms {
     }
 }
 
-/// The keyword arguments `fill` sets, checked against `algorithm`'s parameters as `CALL` checks
-/// them (see [`check_parameters`]): a required one without a value is refused, and one outside
-/// its domain, so neither way in runs it on a missing value or one outside it. An optional one
-/// without a value (a None) then takes the default its definition declares (see
-/// [`apply_defaults`]), the one `CALL grafeo.procedures()` lists, so a method holds no default of
-/// its own.
+/// The keyword arguments `fill` sets, prepared for `algorithm` as `CALL` prepares them (see
+/// [`Parameters::resolved`]): a required one without a value is refused, and one outside its
+/// domain, so neither way in runs it on a missing value or one outside it; an optional one
+/// without a value (a None) takes the default its definition declares, the one
+/// `CALL grafeo.procedures()` lists, so a method holds no default of its own. For a method that
+/// runs the algorithm's functions on a projection, which `GraphAlgorithm::execute` cannot.
 fn checked(
     algorithm: &dyn GraphAlgorithm,
     fill: impl FnOnce(&mut Parameters),
-) -> Result<Parameters, PyGrafeoError> {
+) -> Result<Prepared, PyGrafeoError> {
     let mut params = Parameters::new();
     fill(&mut params);
-    check_parameters(algorithm.name(), algorithm.parameters(), &params)?;
-    apply_defaults(algorithm.parameters(), &mut params)?;
-    Ok(params)
+    Ok(params.resolved(algorithm)?)
 }
 
 /// The node ids of the required node-id arguments `nodes` of `algorithm`, checked as `CALL`
-/// checks them (see [`check_parameters`]): a None is refused as a null, naming the argument. An
-/// id above the largest `CALL` can give is refused too, as no node has it.
+/// checks them (see [`Parameters::resolved`]): a None is refused as a null, naming the argument.
+/// An id above the largest `CALL` can give is refused too, as no node has it.
 fn required_nodes<const N: usize>(
     algorithm: &dyn GraphAlgorithm,
     nodes: [(&str, Option<u64>); N],
@@ -1530,7 +1531,7 @@ fn required_nodes<const N: usize>(
             None => params.set_null(name),
         }
     }
-    check_parameters(algorithm.name(), algorithm.parameters(), &params)?;
+    params.resolved(algorithm)?;
     let mut ids = [NodeId::INVALID; N];
     for (slot, (name, id)) in ids.iter_mut().zip(nodes) {
         let id = id.ok_or_else(|| {
@@ -1541,14 +1542,4 @@ fn required_nodes<const N: usize>(
         *slot = NodeId::new(id);
     }
     Ok(ids)
-}
-
-/// The checked count `name` of `params`, which [`checked`] set.
-fn count(params: &Parameters, name: &str) -> Result<usize, PyGrafeoError> {
-    params.get_count(name)?.ok_or_else(|| {
-        PyGrafeoError::from(Error::from(QueryError::new(
-            QueryErrorKind::InvalidParameterValue,
-            format!("argument '{name}' is missing"),
-        )))
-    })
 }

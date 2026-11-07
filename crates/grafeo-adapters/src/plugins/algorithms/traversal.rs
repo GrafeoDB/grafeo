@@ -518,7 +518,7 @@ impl_algorithm! {
     name: "bfs",
     description: "Breadth-first search traversal from a starting node",
     params: bfs_params,
-    execute(store, params) {
+    compute(store, params) {
         let start_id = params.required_int("start")?;
 
         let start = node_id_from_param(start_id, "start")?;
@@ -571,7 +571,7 @@ impl_algorithm! {
     name: "dfs",
     description: "Depth-first search traversal from a starting node",
     params: dfs_params,
-    execute(store, params) {
+    compute(store, params) {
         let start_id = params.required_int("start")?;
 
         let start = node_id_from_param(start_id, "start")?;

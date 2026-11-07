@@ -15,7 +15,7 @@ use grafeo_core::graph::GraphStore;
 #[cfg(test)]
 use grafeo_core::graph::rowgroup::RowGroupStore;
 
-use super::super::{AlgorithmResult, Domain, ParameterDef, ParameterType, Parameters};
+use super::super::{AlgorithmResult, Domain, ParameterDef, ParameterType, Prepared};
 use super::traits::{GraphAlgorithm, NodeValueResultBuilder, Ticker, impl_algorithm, int_value};
 
 // ============================================================================
@@ -685,12 +685,12 @@ impl_algorithm! {
     name: "pagerank",
     description: "PageRank algorithm for measuring node importance",
     params: pagerank_params,
-    execute(store, params) {
-        let damping = params.get_float("damping").unwrap_or(0.85);
+    compute(store, params) {
+        let damping = params.required_float("damping")?;
         // Clamp to non-negative: negative iterations treated as 0
-        let max_iter = params.get_count("max_iterations")?.unwrap_or(100);
-        let tolerance = params.get_float("tolerance").unwrap_or(1e-6);
-        let directed = params.get_bool("directed").unwrap_or(true);
+        let max_iter = params.required_count("max_iterations")?;
+        let tolerance = params.required_float("tolerance")?;
+        let directed = params.required_bool("directed")?;
 
         let found = pagerank_on(store, damping, max_iter, tolerance, directed)?;
 
@@ -733,8 +733,8 @@ impl_algorithm! {
     name: "betweenness_centrality",
     description: "Betweenness centrality using Brandes' algorithm",
     params: betweenness_params,
-    execute(store, params) {
-        let normalized = params.get_bool("normalized").unwrap_or(true);
+    compute(store, params) {
+        let normalized = params.required_bool("normalized")?;
 
         let scores = betweenness_centrality_on(store, normalized)?;
 
@@ -774,8 +774,8 @@ impl_algorithm! {
     name: "closeness_centrality",
     description: "Closeness centrality based on shortest path distances",
     params: closeness_params,
-    execute(store, params) {
-        let wf_improved = params.get_bool("wf_improved").unwrap_or(false);
+    compute(store, params) {
+        let wf_improved = params.required_bool("wf_improved")?;
 
         let scores = closeness_centrality_on(store, wf_improved)?;
 
@@ -822,16 +822,16 @@ impl GraphAlgorithm for DegreeCentralityAlgorithm {
         degree_params()
     }
 
-    fn execute(
+    fn compute(
         &self,
         store: &dyn GraphStore,
         view: grafeo_common::types::ReadView,
-        params: &Parameters,
+        params: &Prepared,
     ) -> Result<AlgorithmResult> {
         let graph = super::traits::GraphView::new(store, view);
         let store = &graph;
         let found = super::traits::evaluated(|| {
-            let normalized = params.get_bool("normalized").unwrap_or(false);
+            let normalized = params.required_bool("normalized")?;
 
             if normalized {
                 let scores = degree_centrality_normalized_on(store)?;
@@ -881,6 +881,7 @@ impl GraphAlgorithm for DegreeCentralityAlgorithm {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::plugins::Parameters;
     use grafeo_common::types::ReadView;
 
     fn create_test_graph() -> RowGroupStore {

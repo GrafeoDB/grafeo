@@ -562,7 +562,7 @@ impl_algorithm! {
     name: "max_flow",
     description: "Maximum flow using Edmonds-Karp algorithm",
     params: max_flow_params,
-    execute(store, params) {
+    compute(store, params) {
         let source_id = params.required_int("source")?;
         let sink_id = params.required_int("sink")?;
 
@@ -656,7 +656,7 @@ impl_algorithm! {
     name: "min_cost_max_flow",
     description: "Minimum cost maximum flow using successive shortest paths",
     params: min_cost_flow_params,
-    execute(store, params) {
+    compute(store, params) {
         let source_id = params.required_int("source")?;
         let sink_id = params.required_int("sink")?;
 

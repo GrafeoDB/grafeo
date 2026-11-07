@@ -13,7 +13,7 @@ use grafeo_core::graph::GraphStore;
 #[cfg(test)]
 use grafeo_core::graph::rowgroup::RowGroupStore;
 
-use super::super::{AlgorithmResult, Domain, ParameterDef, ParameterType, Parameters};
+use super::super::{AlgorithmResult, Domain, ParameterDef, ParameterType, Prepared};
 use super::traits::{GraphAlgorithm, Ticker, impl_algorithm};
 
 // ============================================================================
@@ -811,7 +811,7 @@ impl_algorithm! {
     name: "articulation_points",
     description: "Find articulation points (cut vertices) in the graph",
     params: articulation_params,
-    execute(store, _params) {
+    compute(store, _params) {
         let points = articulation_points_on(store)?;
 
         let mut result = AlgorithmResult::new(vec!["node_id".to_string()]);
@@ -842,7 +842,7 @@ impl_algorithm! {
     name: "bridges",
     description: "Find bridges (cut edges) in the graph",
     params: bridges_params,
-    execute(store, _params) {
+    compute(store, _params) {
         let bridge_list = bridges_on(store)?;
 
         let mut result = AlgorithmResult::new(vec!["source".to_string(), "target".to_string()]);
@@ -893,11 +893,11 @@ impl GraphAlgorithm for KCoreAlgorithm {
 
     // reason: node IDs and core numbers are bounded by graph size
     #[allow(clippy::cast_possible_wrap)]
-    fn execute(
+    fn compute(
         &self,
         store: &dyn GraphStore,
         view: grafeo_common::types::ReadView,
-        params: &Parameters,
+        params: &Prepared,
     ) -> Result<AlgorithmResult> {
         let graph = super::traits::GraphView::new(store, view);
         let store = &graph;
@@ -976,11 +976,11 @@ impl GraphAlgorithm for KTrussAlgorithm {
 
     // reason: node IDs and truss numbers are bounded by graph size
     #[allow(clippy::cast_possible_wrap)]
-    fn execute(
+    fn compute(
         &self,
         store: &dyn GraphStore,
         view: grafeo_common::types::ReadView,
-        params: &Parameters,
+        params: &Prepared,
     ) -> Result<AlgorithmResult> {
         let graph = super::traits::GraphView::new(store, view);
         let store = &graph;
@@ -1030,6 +1030,7 @@ impl GraphAlgorithm for KTrussAlgorithm {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::plugins::Parameters;
     use grafeo_common::types::ReadView;
 
     fn create_simple_path() -> RowGroupStore {

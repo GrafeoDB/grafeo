@@ -18,7 +18,7 @@ use grafeo_core::graph::GraphStore;
 use grafeo_core::graph::rowgroup::RowGroupStore;
 
 use super::super::Domain;
-use super::super::{AlgorithmResult, ParameterDef, ParameterType, Parameters};
+use super::super::{AlgorithmResult, ParameterDef, ParameterType, Prepared};
 use super::traits::{
     EdgeWeight, GraphAlgorithm, MinScored, Ticker, impl_algorithm, int_value, node_id_from_param,
 };
@@ -720,11 +720,11 @@ impl GraphAlgorithm for DijkstraAlgorithm {
 
     // reason: node IDs are sequential counters, well within i64::MAX
     #[allow(clippy::cast_possible_wrap)]
-    fn execute(
+    fn compute(
         &self,
         store: &dyn GraphStore,
         view: grafeo_common::types::ReadView,
-        params: &Parameters,
+        params: &Prepared,
     ) -> Result<AlgorithmResult> {
         let graph = super::traits::GraphView::new(store, view);
         let store = &graph;
@@ -842,11 +842,11 @@ impl GraphAlgorithm for SsspAlgorithm {
         sssp_params()
     }
 
-    fn execute(
+    fn compute(
         &self,
         store: &dyn GraphStore,
         view: grafeo_common::types::ReadView,
-        params: &Parameters,
+        params: &Prepared,
     ) -> Result<AlgorithmResult> {
         let graph = super::traits::GraphView::new(store, view);
         let store = &graph;
@@ -924,7 +924,7 @@ impl_algorithm! {
     name: "bellman_ford",
     description: "Bellman-Ford shortest path algorithm (handles negative weights)",
     params: bellman_ford_params,
-    execute(store, params) {
+    compute(store, params) {
         let source_id = params.required_int("source")?;
 
         let source = node_id_from_param(source_id, "source")?;
@@ -977,7 +977,7 @@ impl_algorithm! {
     name: "floyd_warshall",
     description: "Floyd-Warshall all-pairs shortest paths algorithm",
     params: floyd_warshall_params,
-    execute(store, params) {
+    compute(store, params) {
         let weight_prop = params.get_string("weight");
 
         let fw_result = floyd_warshall_on(store, weight_prop)?;
@@ -1015,6 +1015,7 @@ impl_algorithm! {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::plugins::Parameters;
     use grafeo_common::types::ReadView;
 
     fn create_weighted_graph() -> RowGroupStore {

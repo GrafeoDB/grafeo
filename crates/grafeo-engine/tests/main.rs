@@ -257,6 +257,7 @@ mod procedure_call_shapes;
 mod procedure_deadlines;
 mod procedure_determinism;
 mod procedure_edge_weights;
+mod procedure_optional_defaults;
 mod procedure_parameter_domains;
 mod procedure_required_arguments;
 mod profile_lists_the_plan;

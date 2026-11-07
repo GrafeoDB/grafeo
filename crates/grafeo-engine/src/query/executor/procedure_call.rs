@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use grafeo_adapters::plugins::{AlgorithmResult, Parameters};
+use grafeo_adapters::plugins::{AlgorithmResult, Prepared};
 use grafeo_common::types::{LogicalType, ReadView, Value};
 use grafeo_core::execution::DataChunk;
 use grafeo_core::execution::operators::{Operator, OperatorError, OperatorResult};
@@ -25,7 +25,8 @@ pub struct ProcedureCallOperator {
     /// for the call.
     snapshot: crate::Snapshot,
     procedure: Arc<dyn Procedure>,
-    params: Parameters,
+    /// The call's arguments, prepared when the statement was planned.
+    params: Prepared,
     /// Optional LPG store handle, required by search procedures that reach
     /// the HNSW / BM25 indexes rather than the raw graph store.
     lpg_store: Option<Arc<grafeo_core::graph::rowgroup::RowGroupStore>>,
@@ -56,7 +57,7 @@ impl ProcedureCallOperator {
     pub fn new(
         store: Arc<dyn GraphStore>,
         procedure: Arc<dyn Procedure>,
-        params: Parameters,
+        params: Prepared,
         yield_columns: Option<Vec<(String, Option<String>)>>,
         canonical_columns: Vec<String>,
         view: ReadView,
@@ -102,7 +103,7 @@ impl ProcedureCallOperator {
         };
         let result = self
             .procedure
-            .execute(&ctx, &self.params)
+            .compute(&ctx, &self.params)
             // The procedure's error keeps its code: a mistake in the
             // arguments stays one (a query vector the index cannot measure,
             // #593), with the procedure's own message.

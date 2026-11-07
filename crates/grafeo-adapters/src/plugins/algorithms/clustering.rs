@@ -18,7 +18,7 @@ use grafeo_core::graph::rowgroup::RowGroupStore;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
-use super::super::{AlgorithmResult, Domain, ParameterDef, ParameterType, Parameters};
+use super::super::{AlgorithmResult, Domain, ParameterDef, ParameterType, Prepared};
 #[cfg(feature = "parallel")]
 use super::traits::ParallelGraphAlgorithm;
 use super::traits::{GraphAlgorithm, Ticker, int_value};
@@ -723,19 +723,19 @@ impl GraphAlgorithm for TotalTrianglesAlgorithm {
         total_triangles_params()
     }
 
-    fn execute(
+    fn compute(
         &self,
         store: &dyn GraphStore,
         view: grafeo_common::types::ReadView,
-        params: &Parameters,
+        params: &Prepared,
     ) -> Result<AlgorithmResult> {
         let graph = super::traits::GraphView::new(store, view);
         let store = &graph;
         let found = super::traits::evaluated(|| {
             #[cfg(feature = "parallel")]
             let count = {
-                let parallel = params.get_bool("parallel").unwrap_or(true);
-                let threshold = params.get_count("parallel_threshold")?.unwrap_or(50);
+                let parallel = params.required_bool("parallel")?;
+                let threshold = params.required_count("parallel_threshold")?;
 
                 if parallel {
                     total_triangles_parallel_on(store, threshold)?
@@ -800,19 +800,19 @@ impl GraphAlgorithm for ClusteringCoefficientAlgorithm {
         clustering_params()
     }
 
-    fn execute(
+    fn compute(
         &self,
         store: &dyn GraphStore,
         view: grafeo_common::types::ReadView,
-        params: &Parameters,
+        params: &Prepared,
     ) -> Result<AlgorithmResult> {
         let graph = super::traits::GraphView::new(store, view);
         let store = &graph;
         let found = super::traits::evaluated(|| {
             #[cfg(feature = "parallel")]
             let result = {
-                let parallel = params.get_bool("parallel").unwrap_or(true);
-                let threshold = params.get_count("parallel_threshold")?.unwrap_or(50);
+                let parallel = params.required_bool("parallel")?;
+                let threshold = params.required_count("parallel_threshold")?;
 
                 if parallel {
                     clustering_coefficient_parallel_on(store, threshold)?
@@ -855,11 +855,11 @@ impl ParallelGraphAlgorithm for ClusteringCoefficientAlgorithm {
         50
     }
 
-    fn execute_parallel(
+    fn compute_parallel(
         &self,
         store: &dyn GraphStore,
         view: grafeo_common::types::ReadView,
-        _params: &Parameters,
+        _params: &Prepared,
         _num_threads: usize,
     ) -> Result<AlgorithmResult> {
         let result = clustering_coefficient_parallel(store, view, self.parallel_threshold())?;
@@ -893,6 +893,7 @@ impl ParallelGraphAlgorithm for ClusteringCoefficientAlgorithm {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::plugins::Parameters;
     use grafeo_common::types::ReadView;
 
     fn create_triangle_graph() -> RowGroupStore {

@@ -29,7 +29,9 @@ use grafeo_adapters::plugins::algorithms::{
     PageRankAlgorithm, PrimAlgorithm, SsspAlgorithm, StronglyConnectedComponentsAlgorithm,
     SubgraphIsomorphismAlgorithm, TopologicalSortAlgorithm, TotalTrianglesAlgorithm,
 };
-use grafeo_adapters::plugins::{AlgorithmResult, ParameterDef, ParameterType, Parameters};
+use grafeo_adapters::plugins::{
+    AlgorithmResult, ParameterDef, ParameterType, Parameters, Prepared, prepare,
+};
 use grafeo_common::types::{ReadView, Value};
 use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind, Result};
 use grafeo_core::graph::GraphStore;
@@ -68,14 +70,36 @@ pub trait Procedure: Send + Sync {
         self.output_columns()
     }
 
-    /// Executes the procedure against the supplied context and parameters.
+    /// Runs the procedure against the supplied context with the arguments
+    /// `params`, prepared first (see [`prepare`]) and named as `CALL` names
+    /// it (`grafeo.<name>`): a required argument without a value, or one
+    /// outside its domain, is refused before any work, and an optional one
+    /// left out takes its declared default. `CALL` prepares its arguments
+    /// when it plans the statement (see [`evaluate_arguments`]) and runs
+    /// [`compute`](Self::compute) with them.
+    ///
+    /// Implement [`compute`](Self::compute), never this: an override would
+    /// skip the check.
     ///
     /// # Errors
     ///
-    /// Returns an error when required parameters are missing, types are
-    /// wrong, or the backing operation (graph algorithm, search index, or
-    /// catalog lookup) fails.
-    fn execute(&self, ctx: &ProcedureContext<'_>, params: &Parameters) -> Result<AlgorithmResult>;
+    /// The invalid parameter value of [`prepare`], and the errors of
+    /// [`compute`](Self::compute).
+    fn execute(&self, ctx: &ProcedureContext<'_>, params: &Parameters) -> Result<AlgorithmResult> {
+        let name = format!("grafeo.{}", self.name());
+        let prepared = prepare(&name, self.parameters(), params)?;
+        self.compute(ctx, &prepared)
+    }
+
+    /// The procedure's work against the supplied context, with arguments
+    /// [`prepare`] checked and completed: a required one has a value, and an
+    /// optional one that declares a default has it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the backing operation (graph algorithm, search
+    /// index, or catalog lookup) fails.
+    fn compute(&self, ctx: &ProcedureContext<'_>, params: &Prepared) -> Result<AlgorithmResult>;
 }
 
 /// Runtime context passed to [`Procedure::execute`].
@@ -174,8 +198,10 @@ impl Procedure for GraphAlgorithmProcedure {
         canonical_output_columns(self.inner.as_ref(), params)
     }
 
-    fn execute(&self, ctx: &ProcedureContext<'_>, params: &Parameters) -> Result<AlgorithmResult> {
-        self.inner.execute(ctx.store(), ctx.view(), params)
+    fn compute(&self, ctx: &ProcedureContext<'_>, params: &Prepared) -> Result<AlgorithmResult> {
+        // The definitions are the algorithm's, so the arguments are its,
+        // prepared once.
+        self.inner.compute(ctx.store(), ctx.view(), params)
     }
 }
 
@@ -203,7 +229,7 @@ impl Procedure for LabelsProcedure {
         vec!["label".into()]
     }
 
-    fn execute(&self, ctx: &ProcedureContext<'_>, _params: &Parameters) -> Result<AlgorithmResult> {
+    fn compute(&self, ctx: &ProcedureContext<'_>, _params: &Prepared) -> Result<AlgorithmResult> {
         let mut result = AlgorithmResult::new(vec!["label".into()]);
         for label in ctx.schema()?.labels {
             result.rows.push(vec![Value::String(label.name.into())]);
@@ -233,7 +259,7 @@ impl Procedure for RelationshipTypesProcedure {
         vec!["relationshipType".into()]
     }
 
-    fn execute(&self, ctx: &ProcedureContext<'_>, _params: &Parameters) -> Result<AlgorithmResult> {
+    fn compute(&self, ctx: &ProcedureContext<'_>, _params: &Prepared) -> Result<AlgorithmResult> {
         let mut result = AlgorithmResult::new(vec!["relationshipType".into()]);
         for edge_type in ctx.schema()?.edge_types {
             result.rows.push(vec![Value::String(edge_type.name.into())]);
@@ -263,7 +289,7 @@ impl Procedure for PropertyKeysProcedure {
         vec!["propertyKey".into()]
     }
 
-    fn execute(&self, ctx: &ProcedureContext<'_>, _params: &Parameters) -> Result<AlgorithmResult> {
+    fn compute(&self, ctx: &ProcedureContext<'_>, _params: &Prepared) -> Result<AlgorithmResult> {
         let mut result = AlgorithmResult::new(vec!["propertyKey".into()]);
         for key in ctx.schema()?.property_keys {
             result.rows.push(vec![Value::String(key.into())]);
@@ -308,15 +334,17 @@ fn coerce_params_to_vector(params: &Parameters, key: &str) -> Result<Vec<f32>> {
     )))
 }
 
-/// The `k` parameter as a limit, `default` when the call leaves it out.
+/// The `k` parameter as a limit, its declared default (10) when the call
+/// leaves it out, which [`prepare`] fills in.
 ///
 /// # Errors
 ///
 /// An invalid parameter value for a negative `k`, which its domain refuses
-/// before the procedure runs (see [`evaluate_arguments`]).
+/// before the procedure runs (see [`prepare`]), and an internal error when
+/// `params` were not prepared.
 #[cfg(any(feature = "vector-index", feature = "text-index"))]
-fn k_limit(params: &Parameters, default: usize) -> Result<usize> {
-    Ok(params.get_count("k")?.unwrap_or(default))
+fn k_limit(params: &Parameters) -> Result<usize> {
+    params.required_count("k")
 }
 
 /// Converts a NodeId into a `Value::Int64`.
@@ -395,12 +423,12 @@ impl Procedure for SearchVectorProcedure {
         vec!["node_id".into(), "distance".into()]
     }
 
-    fn execute(&self, ctx: &ProcedureContext<'_>, params: &Parameters) -> Result<AlgorithmResult> {
+    fn compute(&self, ctx: &ProcedureContext<'_>, params: &Prepared) -> Result<AlgorithmResult> {
         let lpg = require_lpg_store(ctx, "CALL grafeo.search.vector")?;
         let label = params.required_string("label")?;
         let property = params.required_string("property")?;
         let query = coerce_params_to_vector(params, "query")?;
-        let k = k_limit(params, 10)?;
+        let k = k_limit(params)?;
 
         let missing = || {
             grafeo_common::utils::error::Error::InvalidValue(format!(
@@ -514,14 +542,14 @@ impl Procedure for SearchMmrProcedure {
         vec!["node_id".into(), "distance".into()]
     }
 
-    fn execute(&self, ctx: &ProcedureContext<'_>, params: &Parameters) -> Result<AlgorithmResult> {
+    fn compute(&self, ctx: &ProcedureContext<'_>, params: &Prepared) -> Result<AlgorithmResult> {
         use grafeo_core::index::vector::mmr_select;
 
         let lpg = require_lpg_store(ctx, "CALL grafeo.search.mmr")?;
         let label = params.required_string("label")?;
         let property = params.required_string("property")?;
         let query = coerce_params_to_vector(params, "query")?;
-        let k = k_limit(params, 10)?;
+        let k = k_limit(params)?;
         let fetch_k = params
             .get_count("fetch_k")?
             .unwrap_or_else(|| k.saturating_mul(4));
@@ -529,7 +557,7 @@ impl Procedure for SearchMmrProcedure {
             clippy::cast_possible_truncation,
             reason = "lambda is a unit-interval weighting factor; f32 precision is sufficient"
         )]
-        let lambda = params.get_float("lambda").unwrap_or(0.5) as f32;
+        let lambda = params.required_float("lambda")? as f32;
 
         let missing = || {
             grafeo_common::utils::error::Error::InvalidValue(format!(
@@ -646,7 +674,7 @@ impl Procedure for SearchTextProcedure {
         vec!["node_id".into(), "score".into()]
     }
 
-    fn execute(&self, ctx: &ProcedureContext<'_>, params: &Parameters) -> Result<AlgorithmResult> {
+    fn compute(&self, ctx: &ProcedureContext<'_>, params: &Prepared) -> Result<AlgorithmResult> {
         let lpg = ctx.lpg_store.ok_or_else(|| {
             grafeo_common::utils::error::Error::from(
                 grafeo_common::utils::error::QueryError::unsupported(
@@ -657,7 +685,7 @@ impl Procedure for SearchTextProcedure {
         let label = params.required_string("label")?;
         let property = params.required_string("property")?;
         let query = params.required_string("query")?;
-        let k = k_limit(params, 10)?;
+        let k = k_limit(params)?;
 
         let search = grafeo_core::graph::rowgroup::IndexSearch {
             k,
@@ -955,10 +983,11 @@ const PASS_THROUGH_KEYS: &[&str] = &["projection"];
 ///    of `param_defs`.
 ///
 /// Each value must suit its parameter's type: an integer passes for a float
-/// and a vector for a list, and then its domain (see
-/// [`check_parameters`](grafeo_adapters::plugins::check_parameters)). A null
-/// is no value: an optional parameter keeps its default. A required parameter
-/// left out or given null is refused, naming it. A map key that names no
+/// and a vector for a list. The arguments are then prepared (see
+/// [`prepare`]), once, when the statement is planned: a value outside its
+/// domain is refused, a required parameter left out or given null is refused
+/// naming it, and an optional one without a value takes its declared
+/// default (a null is no value). A map key that names no
 /// parameter passes through only as one of the keys every call takes
 /// (`projection`), with the type of its value.
 ///
@@ -976,7 +1005,7 @@ pub fn evaluate_arguments(
     procedure: &str,
     args: &[Value],
     param_defs: &[ParameterDef],
-) -> Result<Parameters> {
+) -> Result<Prepared> {
     let mut params = Parameters::new();
 
     if let [Value::Map(entries)] = args {
@@ -996,8 +1025,7 @@ pub fn evaluate_arguments(
                 value,
             )?;
         }
-        grafeo_adapters::plugins::check_parameters(procedure, param_defs, &params)?;
-        return Ok(params);
+        return params.prepared(procedure, param_defs);
     }
 
     if args.len() > param_defs.len() {
@@ -1017,8 +1045,7 @@ pub fn evaluate_arguments(
             value,
         )?;
     }
-    grafeo_adapters::plugins::check_parameters(procedure, param_defs, &params)?;
-    Ok(params)
+    params.prepared(procedure, param_defs)
 }
 
 /// The names of `param_defs`, for an error: `none` for a procedure without
@@ -1423,11 +1450,11 @@ mod tests {
         fn parameters(&self) -> &[ParameterDef] {
             &[]
         }
-        fn execute(
+        fn compute(
             &self,
             _store: &dyn grafeo_core::graph::GraphStore,
             _view: grafeo_common::types::ReadView,
-            _params: &Parameters,
+            _params: &Prepared,
         ) -> Result<AlgorithmResult> {
             Ok(AlgorithmResult::new(vec!["node_id".into(), "value".into()]))
         }
@@ -1733,11 +1760,19 @@ mod tests {
         }
     }
 
-    #[cfg(any(feature = "vector-index", feature = "text-index"))]
+    /// `k` left out takes the default search.vector declares (10), which `prepare` fills in; a
+    /// `k` read from parameters nobody prepared is an error, never a default of k_limit's own.
+    #[cfg(feature = "vector-index")]
     #[test]
-    fn k_limit_returns_default_when_missing() {
-        let params = Parameters::new();
-        assert_eq!(k_limit(&params, 7).ok(), Some(7));
+    fn k_limit_reads_the_declared_default_when_k_is_left_out() {
+        let procedure = SearchVectorProcedure::new();
+        let mut params = Parameters::new();
+        params.set_string("label", "Doc");
+        params.set_string("property", "emb");
+        params.set_list("query", vec![Value::Float64(0.5)]);
+        let prepared = prepare("grafeo.search.vector", procedure.parameters(), &params).unwrap();
+        assert_eq!(k_limit(&prepared).ok(), Some(10));
+        assert!(k_limit(&Parameters::new()).is_err());
     }
 
     /// A negative `k` lies outside its domain (`k >= 0`) and is refused with 22023 naming the
@@ -1749,7 +1784,7 @@ mod tests {
         let mut params = Parameters::new();
         for k in [-5, -1, i64::MIN] {
             params.set_int("k", k);
-            let error = k_limit(&params, 10).expect_err("a negative k");
+            let error = k_limit(&params).expect_err("a negative k");
             assert_eq!(
                 grafeo_common::utils::gqlstatus::GqlStatus::from(&error).as_str(),
                 "22023",
@@ -1758,7 +1793,7 @@ mod tests {
             assert!(error.to_string().contains("'k'"), "k = {k}: {error}");
         }
         params.set_int("k", 0);
-        assert_eq!(k_limit(&params, 10).ok(), Some(0));
+        assert_eq!(k_limit(&params).ok(), Some(0));
     }
 
     #[cfg(any(feature = "vector-index", feature = "text-index"))]
@@ -1766,7 +1801,7 @@ mod tests {
     fn k_limit_passes_through_positive_value() {
         let mut params = Parameters::new();
         params.set_int("k", 25);
-        assert_eq!(k_limit(&params, 10).ok(), Some(25));
+        assert_eq!(k_limit(&params).ok(), Some(25));
     }
 
     /// Every graph algorithm, called in each shape its arguments give, names

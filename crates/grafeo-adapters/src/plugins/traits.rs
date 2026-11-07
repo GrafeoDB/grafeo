@@ -1,6 +1,7 @@
 //! Plugin traits.
 
 use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind, Result};
+use grafeo_core::execution::operators::value_utils::compare_values;
 use std::collections::HashMap;
 
 /// A Grafeo plugin.
@@ -63,7 +64,7 @@ pub struct ParameterDef {
     /// Default value (if any).
     pub default: Option<String>,
     /// The values a numeric parameter allows beyond its type, which every call is checked
-    /// against (see [`check_parameters`]); [`Domain::OfType`] for a string, a boolean, a node id
+    /// against (see [`prepare`]); [`Domain::OfType`] for a string, a boolean, a node id
     /// or a list.
     pub domain: Domain,
 }
@@ -87,23 +88,25 @@ pub enum Domain {
 }
 
 impl Domain {
-    /// Whether `value` lies inside, with `floor` the value of the parameter an
-    /// [`AtLeast`](Self::AtLeast) names (`None`: not known, so no bound).
+    /// Whether `value` lies inside, apart from the floor of an
+    /// [`AtLeast`](Self::AtLeast): [`prepare`] compares a value with the
+    /// parameter it names exactly, an integer as an integer.
     #[must_use]
-    pub fn admits(self, value: f64, floor: Option<f64>) -> bool {
+    pub fn admits(self, value: f64) -> bool {
         value.is_finite()
             && match self {
-                Self::OfType => true,
+                Self::OfType | Self::AtLeast(_) => true,
                 Self::NonNegative => value >= 0.0,
                 Self::Positive => value > 0.0,
                 Self::Unit => (0.0..=1.0).contains(&value),
-                Self::AtLeast(_) => floor.is_none_or(|floor| value >= floor),
             }
     }
 
-    /// The values it allows, for an error, with `floor` as in [`admits`](Self::admits).
+    /// The values it allows, for an error, with `floor` the value of the
+    /// parameter an [`AtLeast`](Self::AtLeast) names, as the call gave it
+    /// (`None`: not known).
     #[must_use]
-    pub fn describe(self, floor: Option<f64>) -> String {
+    pub fn describe(self, floor: Option<&str>) -> String {
         match self {
             Self::OfType => "a finite number".to_string(),
             Self::NonNegative => "a finite number of 0 or more".to_string(),
@@ -117,19 +120,45 @@ impl Domain {
     }
 }
 
-/// Refuses `params` when a required parameter of `defs` has no value, left out or given null,
-/// and an argument outside the domain its definition declares, both with "invalid parameter
-/// value" (22023) naming `procedure` and the parameter: a missing one with its type, an argument
-/// outside with the values it allows and the value. The one check of every way into a procedure
-/// (`CALL` and the bindings' algorithm methods), run once all the arguments are set, so a domain
-/// that names another parameter (`fetch_k` at least `k`) reads that one as given, or else its
-/// default. An optional parameter left out keeps its default, which lies inside.
+/// The arguments of one call of a procedure, checked and completed by [`prepare`], the only
+/// way to build one: every required parameter has a value, every argument lies inside its
+/// domain, and every optional parameter that declares a default has it. A procedure's work
+/// takes these, so none runs on arguments that were not checked, and none holds a default of its
+/// own. They read through the getters of [`Parameters`].
+#[derive(Debug, Clone)]
+pub struct Prepared(Parameters);
+
+impl std::ops::Deref for Prepared {
+    type Target = Parameters;
+
+    fn deref(&self) -> &Parameters {
+        &self.0
+    }
+}
+
+/// The arguments `params` of a call of `procedure`, whose parameters `defs` defines, prepared
+/// for it: the one check of every way into a procedure (`CALL`, a direct call, the bindings'
+/// algorithm methods), run once all the arguments are set.
+///
+/// A required parameter without a value, left out or given null, is refused with "invalid
+/// parameter value" (22023) naming `procedure`, the parameter and its type; so is an argument
+/// outside the domain its definition declares, naming the values it allows and the value. A
+/// domain that names another parameter (`fetch_k` at least `k`) reads that one as given, or else
+/// its default. Each optional parameter without a value then takes the default its definition
+/// declares, the one `CALL grafeo.procedures()` lists; one that declares none stays without.
 ///
 /// # Errors
 ///
 /// The invalid parameter value of the first required parameter without a value, else of the
-/// first argument outside its domain.
-pub fn check_parameters(procedure: &str, defs: &[ParameterDef], params: &Parameters) -> Result<()> {
+/// first argument outside its domain; an internal error for a declared default that is no value
+/// of its parameter's type.
+pub fn prepare(procedure: &str, defs: &[ParameterDef], params: &Parameters) -> Result<Prepared> {
+    params.clone().prepared(procedure, defs)
+}
+
+/// The check of [`prepare`]: a required parameter without a value, then an argument outside its
+/// domain.
+fn check_parameters(procedure: &str, defs: &[ParameterDef], params: &Parameters) -> Result<()> {
     if let Some(def) = defs
         .iter()
         .find(|def| def.required && !params.has_value(&def.name))
@@ -149,25 +178,34 @@ pub fn check_parameters(procedure: &str, defs: &[ParameterDef], params: &Paramet
         )));
     }
     for def in defs {
-        let Some((value, given)) = params.number(&def.name) else {
+        let Some(value) = params.number(&def.name) else {
             continue;
         };
+        // The parameter an `AtLeast` names, as the call gives it or by its declared default.
         let floor = match def.domain {
-            Domain::AtLeast(other) => params.number(other).map(|(floor, _)| floor).or_else(|| {
+            Domain::AtLeast(other) => params.number(other).or_else(|| {
                 defs.iter()
                     .find(|def| def.name == other)
                     .and_then(|def| def.default.as_deref())
-                    .and_then(|default| default.parse().ok())
+                    .and_then(declared_number)
             }),
             _ => None,
         };
-        if !def.domain.admits(value, floor) {
+        // An integer against an integer floor as integers, so a value one below a floor past
+        // 2^53 is refused; an integer against a float exactly.
+        let inside = def.domain.admits(number_as_float(&value))
+            && floor.as_ref().is_none_or(|floor| {
+                compare_values(&value, floor).is_some_and(std::cmp::Ordering::is_ge)
+            });
+        if !inside {
+            let floor = floor.as_ref().map(number_text);
             return Err(Error::from(QueryError::new(
                 QueryErrorKind::InvalidParameterValue,
                 format!(
-                    "argument '{}' of {procedure} must be {}, got {given}",
+                    "argument '{}' of {procedure} must be {}, got {}",
                     def.name,
-                    def.domain.describe(floor)
+                    def.domain.describe(floor.as_deref()),
+                    number_text(&value)
                 ),
             )));
         }
@@ -175,15 +213,40 @@ pub fn check_parameters(procedure: &str, defs: &[ParameterDef], params: &Paramet
     Ok(())
 }
 
-/// Gives each optional parameter of `defs` without a value in `params` (left out or given null)
-/// the default its definition declares, so a caller that reads the values itself, the bindings'
-/// algorithm methods, takes the default `CALL grafeo.procedures()` lists rather than a copy of
-/// its own. A parameter that declares no default stays without a value.
-///
-/// # Errors
-///
-/// An internal error naming the parameter for a declared default that is no value of its type.
-pub fn apply_defaults(defs: &[ParameterDef], params: &mut Parameters) -> Result<()> {
+/// A declared default of a numeric parameter as a number: an integer when it reads as one.
+fn declared_number(default: &str) -> Option<grafeo_common::types::Value> {
+    use grafeo_common::types::Value;
+    default
+        .parse()
+        .map(Value::Int64)
+        .or_else(|_| default.parse().map(Value::Float64))
+        .ok()
+}
+
+/// A number of [`Parameters::number`] as a float, for the domains that bound its sign or its
+/// range, which a float reads exactly enough.
+fn number_as_float(value: &grafeo_common::types::Value) -> f64 {
+    use grafeo_common::types::Value;
+    match value {
+        Value::Int64(v) => *v as f64,
+        Value::Float64(v) => *v,
+        _ => f64::NAN,
+    }
+}
+
+/// A number of [`Parameters::number`] as the call gave it (`-1`, `NaN`), for an error.
+fn number_text(value: &grafeo_common::types::Value) -> String {
+    use grafeo_common::types::Value;
+    match value {
+        Value::Int64(v) => v.to_string(),
+        Value::Float64(v) => v.to_string(),
+        other => other.to_string(),
+    }
+}
+
+/// The defaults of [`prepare`]: each optional parameter of `defs` without a value in `params`
+/// takes the default its definition declares.
+fn apply_defaults(defs: &[ParameterDef], params: &mut Parameters) -> Result<()> {
     for def in defs {
         let Some(default) = def.default.as_deref() else {
             continue;
@@ -255,6 +318,7 @@ impl ParameterType {
 }
 
 /// Parameters passed to an algorithm.
+#[derive(Debug, Clone)]
 pub struct Parameters {
     /// Parameter values.
     values: HashMap<String, ParameterValue>,
@@ -298,9 +362,21 @@ impl Parameters {
     }
 
     /// Records that the call gave `name` a null: an optional parameter keeps its default, and
-    /// [`check_parameters`] refuses a required one as given null.
+    /// [`prepare`] refuses a required one as given null.
     pub fn set_null(&mut self, name: impl Into<String>) {
         self.values.insert(name.into(), ParameterValue::Null);
+    }
+
+    /// These arguments of a call of `procedure`, whose parameters `defs` defines, prepared for
+    /// it, as [`prepare`] prepares them, without a copy.
+    ///
+    /// # Errors
+    ///
+    /// The errors of [`prepare`].
+    pub fn prepared(mut self, procedure: &str, defs: &[ParameterDef]) -> Result<Prepared> {
+        check_parameters(procedure, defs, &self)?;
+        apply_defaults(defs, &mut self)?;
+        Ok(Prepared(self))
     }
 
     /// Whether the call gave `name` a value (not left out, not null).
@@ -317,8 +393,8 @@ impl Parameters {
         matches!(self.values.get(name), Some(ParameterValue::Null))
     }
 
-    /// The integer of `name`, which has a value: a required parameter once [`check_parameters`]
-    /// has passed, or an optional one with a declared default once [`apply_defaults`] has run.
+    /// The integer of `name`, which has a value: a required parameter, or an optional one that
+    /// declares a default, once [`prepare`] has passed.
     ///
     /// # Errors
     ///
@@ -386,7 +462,7 @@ impl Parameters {
     /// # Errors
     ///
     /// An invalid parameter value (22023) for a negative one, which only a caller that skips
-    /// [`check_parameters`] can give.
+    /// [`prepare`] can give.
     pub fn get_count(&self, name: &str) -> Result<Option<usize>> {
         match self.values.get(name) {
             Some(ParameterValue::Integer(v)) => usize::try_from(*v).map(Some).map_err(|_| {
@@ -399,11 +475,12 @@ impl Parameters {
         }
     }
 
-    /// A numeric parameter as a float, with its text as the call gave it (`-1`, `NaN`).
-    fn number(&self, name: &str) -> Option<(f64, String)> {
+    /// A numeric parameter as the call gave it: an integer or a float.
+    fn number(&self, name: &str) -> Option<grafeo_common::types::Value> {
+        use grafeo_common::types::Value;
         match self.values.get(name) {
-            Some(ParameterValue::Integer(v)) => Some((*v as f64, v.to_string())),
-            Some(ParameterValue::Float(v)) => Some((*v, v.to_string())),
+            Some(ParameterValue::Integer(v)) => Some(Value::Int64(*v)),
+            Some(ParameterValue::Float(v)) => Some(Value::Float64(*v)),
             _ => None,
         }
     }
@@ -440,8 +517,7 @@ impl Default for Parameters {
 }
 
 /// The error of a required parameter without a value that reached the procedure, which
-/// [`check_parameters`] would have refused, or of an optional one [`apply_defaults`] would have
-/// given its default.
+/// [`prepare`] would have refused, or of an optional one it would have given its default.
 fn unchecked(name: &str) -> Error {
     Error::Internal(format!(
         "argument '{name}' reached the procedure without a value"
@@ -461,6 +537,7 @@ enum ParameterValue {
 }
 
 /// Result of an algorithm execution.
+#[derive(Debug)]
 pub struct AlgorithmResult {
     /// Result columns.
     pub columns: Vec<String>,

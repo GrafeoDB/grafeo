@@ -13,6 +13,6 @@ mod traits;
 
 pub use registry::PluginRegistry;
 pub use traits::{
-    Algorithm, AlgorithmResult, Domain, ParameterDef, ParameterType, Parameters, Plugin,
-    apply_defaults, check_parameters,
+    Algorithm, AlgorithmResult, Domain, ParameterDef, ParameterType, Parameters, Plugin, Prepared,
+    prepare,
 };

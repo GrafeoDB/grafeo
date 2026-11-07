@@ -12,7 +12,7 @@ use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 
-use super::super::{AlgorithmResult, Domain, ParameterDef, Parameters};
+use super::super::{AlgorithmResult, Domain, ParameterDef, Parameters, Prepared, prepare};
 
 /// The check of the running query's deadline an algorithm makes in its work loops: a
 /// [`deadline::Ticker`](grafeo_core::execution::deadline::Ticker), whose timeout is the query
@@ -231,7 +231,7 @@ impl<'a> GraphView<'a> {
             Value::Decimal(d) => d.to_f64(),
             other => return Err(weight_refused(id, name, weight, other, false)),
         };
-        if weight.domain.admits(number, None) {
+        if weight.domain.admits(number) {
             return Ok(number);
         }
         Err(weight_refused(id, name, weight, &value, true))
@@ -497,17 +497,51 @@ pub trait GraphAlgorithm: Send + Sync {
     /// Returns the parameter definitions for this algorithm.
     fn parameters(&self) -> &[ParameterDef];
 
-    /// Executes the algorithm on the given graph store.
+    /// Runs the algorithm on the given graph store with the arguments `params`, prepared first
+    /// (see [`prepare`]): a required argument without a value, or one outside its domain, is
+    /// refused before any work, and an optional one left out takes its declared default.
+    ///
+    /// Implement [`compute`](Self::compute), never this: an override would skip the check.
     ///
     /// # Errors
     ///
-    /// Returns an error if the algorithm fails (e.g., invalid parameters or graph state).
+    /// The invalid parameter value of [`prepare`], and the errors of
+    /// [`compute`](Self::compute).
     fn execute(
         &self,
         store: &dyn GraphStore,
         view: ReadView,
         params: &Parameters,
+    ) -> Result<AlgorithmResult> {
+        let prepared = prepare(self.name(), self.parameters(), params)?;
+        self.compute(store, view, &prepared)
+    }
+
+    /// The algorithm's work on the given graph store, with arguments [`prepare`] checked and
+    /// completed: a required one has a value, and an optional one that declares a default has it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the algorithm fails (for example, on the graph's state).
+    fn compute(
+        &self,
+        store: &dyn GraphStore,
+        view: ReadView,
+        params: &Prepared,
     ) -> Result<AlgorithmResult>;
+}
+
+impl Parameters {
+    /// These arguments prepared for `algorithm` (see [`prepare`]), for a caller that runs its
+    /// work some other way than [`GraphAlgorithm::execute`] (the bindings' algorithm methods,
+    /// which run its functions on a projection).
+    ///
+    /// # Errors
+    ///
+    /// The errors of [`prepare`].
+    pub fn resolved(self, algorithm: &dyn GraphAlgorithm) -> Result<Prepared> {
+        self.prepared(algorithm.name(), algorithm.parameters())
+    }
 }
 
 /// A graph algorithm that supports parallel execution.
@@ -523,16 +557,38 @@ pub trait ParallelGraphAlgorithm: GraphAlgorithm {
         50
     }
 
-    /// Executes the algorithm with explicit parallelism control.
+    /// Runs the algorithm with explicit parallelism control, with the arguments `params`
+    /// prepared first, as [`GraphAlgorithm::execute`] prepares them.
+    ///
+    /// Implement [`compute_parallel`](Self::compute_parallel), never this: an override would
+    /// skip the check.
     ///
     /// # Errors
     ///
-    /// Returns an error if the algorithm fails (e.g., invalid parameters or graph state).
+    /// The invalid parameter value of [`prepare`], and the errors of
+    /// [`compute_parallel`](Self::compute_parallel).
     fn execute_parallel(
         &self,
         store: &dyn GraphStore,
         view: ReadView,
         params: &Parameters,
+        num_threads: usize,
+    ) -> Result<AlgorithmResult> {
+        let prepared = prepare(self.name(), self.parameters(), params)?;
+        self.compute_parallel(store, view, &prepared, num_threads)
+    }
+
+    /// The algorithm's work with explicit parallelism control, with arguments [`prepare`]
+    /// checked and completed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the algorithm fails (for example, on the graph's state).
+    fn compute_parallel(
+        &self,
+        store: &dyn GraphStore,
+        view: ReadView,
+        params: &Prepared,
         num_threads: usize,
     ) -> Result<AlgorithmResult>;
 }
@@ -582,13 +638,14 @@ impl<V> DistanceMap<V> for HashMap<NodeId, V> {
 ///     name: "algorithm_name",
 ///     description: "What the algorithm does",
 ///     params: params_fn,            // fn() -> &'static [ParameterDef]
-///     execute(store, params) { ... } // body that returns Result<AlgorithmResult>,
-///                                    // `store` the `GraphView` it reads
+///     compute(store, params) { ... } // body that returns Result<AlgorithmResult>,
+///                                    // `store` the `GraphView` it reads, `params`
+///                                    // the prepared arguments
 /// }
 /// ```
 ///
 /// For algorithms with no parameters, use `params: &[]` instead of a function name.
-/// If the execute body does not use `params`, prefix it with `_` to silence warnings:
+/// If the compute body does not use `params`, prefix it with `_` to silence warnings:
 ///
 /// ```ignore
 /// impl_algorithm! {
@@ -596,7 +653,7 @@ impl<V> DistanceMap<V> for HashMap<NodeId, V> {
 ///     name: "algorithm_name",
 ///     description: "What the algorithm does",
 ///     params: &[],
-///     execute(store, _params) { ... }
+///     compute(store, _params) { ... }
 /// }
 /// ```
 macro_rules! impl_algorithm {
@@ -605,7 +662,7 @@ macro_rules! impl_algorithm {
         name: $name:expr,
         description: $desc:expr,
         params: &[],
-        execute($store:ident, $params:ident) $body:block
+        compute($store:ident, $params:ident) $body:block
     ) => {
         impl $crate::plugins::algorithms::GraphAlgorithm for $struct_name {
             fn name(&self) -> &str {
@@ -620,11 +677,11 @@ macro_rules! impl_algorithm {
                 &[]
             }
 
-            fn execute(
+            fn compute(
                 &self,
                 store: &dyn grafeo_core::graph::GraphStore,
                 view: grafeo_common::types::ReadView,
-                $params: &super::super::Parameters,
+                $params: &super::super::Prepared,
             ) -> grafeo_common::utils::error::Result<super::super::AlgorithmResult> {
                 let graph = $crate::plugins::algorithms::GraphView::new(store, view);
                 let $store = &graph;
@@ -638,7 +695,7 @@ macro_rules! impl_algorithm {
         name: $name:expr,
         description: $desc:expr,
         params: $params_fn:expr,
-        execute($store:ident, $params:ident) $body:block
+        compute($store:ident, $params:ident) $body:block
     ) => {
         impl $crate::plugins::algorithms::GraphAlgorithm for $struct_name {
             fn name(&self) -> &str {
@@ -653,11 +710,11 @@ macro_rules! impl_algorithm {
                 $params_fn()
             }
 
-            fn execute(
+            fn compute(
                 &self,
                 store: &dyn grafeo_core::graph::GraphStore,
                 view: grafeo_common::types::ReadView,
-                $params: &super::super::Parameters,
+                $params: &super::super::Prepared,
             ) -> grafeo_common::utils::error::Result<super::super::AlgorithmResult> {
                 let graph = $crate::plugins::algorithms::GraphView::new(store, view);
                 let $store = &graph;
@@ -671,8 +728,8 @@ macro_rules! impl_algorithm {
 pub(crate) use impl_algorithm;
 
 /// The result of an algorithm's `body`, which may return early: the
-/// execute bodies of [`impl_algorithm!`] and the hand-written ones run in a
-/// closure so a `return` leaves the body, not `execute`, and the
+/// compute bodies of [`impl_algorithm!`] and the hand-written ones run in a
+/// closure so a `return` leaves the body, not `compute`, and the
 /// [`GraphView`]'s read error is still checked after it.
 pub(crate) fn evaluated<T>(body: impl FnOnce() -> T) -> T {
     body()

@@ -1029,8 +1029,8 @@ impl_algorithm! {
     name: "label_propagation",
     description: "Label Propagation community detection",
     params: label_prop_params,
-    execute(store, params) {
-        let max_iter = params.get_count("max_iterations")?.unwrap_or(100);
+    compute(store, params) {
+        let max_iter = params.required_count("max_iterations")?;
 
         let communities = label_propagation_on(store, max_iter)?;
 
@@ -1069,8 +1069,8 @@ impl_algorithm! {
     name: "louvain",
     description: "Louvain community detection (modularity optimization)",
     params: louvain_params,
-    execute(store, params) {
-        let resolution = params.get_float("resolution").unwrap_or(1.0);
+    compute(store, params) {
+        let resolution = params.required_float("resolution")?;
 
         let result = louvain_on(store, resolution)?;
 
@@ -1132,9 +1132,9 @@ impl_algorithm! {
     name: "stochastic_block_partition",
     description: "Stochastic Block Model community detection (MDL minimization)",
     params: sbp_params,
-    execute(store, params) {
+    compute(store, params) {
         let num_blocks = params.get_count("num_blocks")?;
-        let max_iter = params.get_count("max_iterations")?.unwrap_or(100);
+        let max_iter = params.required_count("max_iterations")?;
 
         let result = stochastic_block_partition_on(store, num_blocks, max_iter)?;
 

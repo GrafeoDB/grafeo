@@ -352,7 +352,7 @@ impl_algorithm! {
     name: "kruskal",
     description: "Kruskal's Minimum Spanning Tree algorithm",
     params: kruskal_params,
-    execute(store, params) {
+    compute(store, params) {
         let weight_prop = params.get_string("weight");
 
         let result = kruskal_on(store, weight_prop)?;
@@ -413,7 +413,7 @@ impl_algorithm! {
     name: "prim",
     description: "Prim's Minimum Spanning Tree algorithm",
     params: prim_params,
-    execute(store, params) {
+    compute(store, params) {
         let weight_prop = params.get_string("weight");
         let start = params.get_int("start").map(|id| node_id_from_param(id, "start")).transpose()?;
 

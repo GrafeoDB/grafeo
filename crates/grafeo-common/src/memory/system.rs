@@ -23,7 +23,7 @@
     reason = "the Windows and macOS detection calls are FFI; each unsafe block says why it is sound"
 )]
 
-#[cfg(any(target_os = "linux", test))]
+#[cfg(all(not(miri), any(target_os = "linux", test)))]
 use std::path::Path;
 
 /// The share of the detected memory the default budget takes.
@@ -205,7 +205,10 @@ fn detect() -> DetectedMemory {
 
 /// The machine's memory and the smallest limit on the process, as one figure: a limit binds
 /// only below the machine's memory; with neither, the fallback.
-#[cfg(any(target_os = "linux", windows, target_os = "macos", test))]
+#[cfg(all(
+    not(miri),
+    any(target_os = "linux", windows, target_os = "macos", test)
+))]
 fn combine(machine: Option<usize>, limit: Option<usize>) -> DetectedMemory {
     match (machine, limit) {
         (Some(machine), Some(limit)) if limit < machine => DetectedMemory {
@@ -226,11 +229,11 @@ fn combine(machine: Option<usize>, limit: Option<usize>) -> DetectedMemory {
 
 /// A cgroup value at or above this is no limit: v1 writes the largest page-aligned `i64`
 /// (`0x7FFF_FFFF_FFFF_F000`) for "unlimited", and no machine has 4 EiB.
-#[cfg(any(target_os = "linux", test))]
+#[cfg(all(not(miri), any(target_os = "linux", test)))]
 const NO_CGROUP_LIMIT: u64 = 1 << 62;
 
 /// The `MemTotal` of a `/proc/meminfo` text, in bytes.
-#[cfg(any(target_os = "linux", test))]
+#[cfg(all(not(miri), any(target_os = "linux", test)))]
 pub(crate) fn meminfo_total(meminfo: &str) -> Option<usize> {
     let line = meminfo
         .lines()
@@ -251,7 +254,7 @@ pub(crate) fn meminfo_total(meminfo: &str) -> Option<usize> {
 /// `<root>/memory/<path>` up to `<root>/memory`. On a hybrid system, with both lines, v2 counts
 /// only when `<root>/cgroup.controllers` lists `memory`. A cgroup path that does not exist
 /// inside a container's mount is walked up to the root, which is the container's own cgroup.
-#[cfg(any(target_os = "linux", test))]
+#[cfg(all(not(miri), any(target_os = "linux", test)))]
 pub(crate) fn cgroup_limit(cgroup_root: &Path, proc_self_cgroup: &str) -> Option<usize> {
     let mut v2 = None;
     let mut v1 = None;
@@ -284,7 +287,7 @@ pub(crate) fn cgroup_limit(cgroup_root: &Path, proc_self_cgroup: &str) -> Option
 }
 
 /// The smallest limit in `file` at `<base>/<path>` and each parent up to `base`.
-#[cfg(any(target_os = "linux", test))]
+#[cfg(all(not(miri), any(target_os = "linux", test)))]
 fn smallest_on_path(base: &Path, path: &str, file: &str) -> Option<usize> {
     let relative = Path::new(path.trim_start_matches('/'));
     relative
@@ -302,7 +305,7 @@ fn smallest_on_path(base: &Path, path: &str, file: &str) -> Option<usize> {
 /// Linux detection over texts and a root, for the fixtures: `meminfo` and `proc_self_cgroup`
 /// stand for the texts of `/proc/meminfo` and `/proc/self/cgroup` (`None` when unreadable),
 /// `cgroup_root` for `/sys/fs/cgroup`.
-#[cfg(any(target_os = "linux", test))]
+#[cfg(all(not(miri), any(target_os = "linux", test)))]
 pub(crate) fn linux_memory(
     meminfo: Option<&str>,
     cgroup_root: &Path,
@@ -314,5 +317,7 @@ pub(crate) fn linux_memory(
     )
 }
 
-#[cfg(test)]
+// The fixtures write and read cgroup trees on disk, which Miri's isolation refuses; the code
+// they test does no unsafe, so Miri has nothing to check there.
+#[cfg(all(test, not(miri)))]
 mod tests;

@@ -73,10 +73,10 @@ pub struct MemoryUsage {
 impl MemoryUsage {
     /// Recomputes `total_bytes` from child totals, each byte once: the
     /// components (store, indexes, MVCC, caches, string pool, RDF, CDC), and
-    /// of the buffer manager only the regions no component reports
-    /// (execution buffers, spill staging). Its graph storage and index
-    /// buffer regions hold the grants that cover the components, so they are
-    /// not added again.
+    /// of the buffer manager only what no component reports (the execution
+    /// buffers but the CDC log's grant, and the spill staging). Its graph
+    /// storage and index buffer regions hold the grants that cover the
+    /// components, so they are not added again.
     pub fn compute_total(&mut self) {
         self.total_bytes = self.store.total_bytes
             + self.indexes.total_bytes
@@ -85,7 +85,10 @@ impl MemoryUsage {
             + self.string_pool.total_bytes
             + self.rdf.total_bytes
             + self.cdc.total_bytes
-            + self.buffer_manager.execution_buffers_bytes
+            + self
+                .buffer_manager
+                .execution_buffers_bytes
+                .saturating_sub(self.cdc.granted_bytes)
             + self.buffer_manager.spill_staging_bytes;
     }
 }
@@ -187,6 +190,11 @@ pub struct CdcMemory {
     pub entity_count: usize,
     /// Total number of recorded change events across all entities.
     pub event_count: usize,
+    /// The CDC log's grant, part of the buffer manager's execution buffers:
+    /// [`MemoryUsage::compute_total`] counts the log once, as
+    /// `total_bytes`, and leaves the grant out of the execution buffers.
+    #[serde(default)]
+    pub granted_bytes: usize,
 }
 
 impl CdcMemory {
@@ -267,6 +275,7 @@ mod tests {
                 total_bytes: 40,
                 event_count: 3,
                 entity_count: 2,
+                granted_bytes: 0,
             },
             ..Default::default()
         };
@@ -276,6 +285,34 @@ mod tests {
         usage.string_pool.total_bytes = 10;
         usage.compute_total();
         assert_eq!(usage.total_bytes, 950);
+    }
+
+    #[test]
+    fn the_cdc_grant_in_the_execution_buffers_is_counted_once() {
+        // The log counts 40 bytes under a grant of 64 in the execution
+        // buffers, beside 15 bytes of other execution buffers.
+        let mut usage = MemoryUsage {
+            buffer_manager: BufferManagerMemory {
+                allocated_bytes: 79,
+                execution_buffers_bytes: 79,
+                ..Default::default()
+            },
+            cdc: CdcMemory {
+                total_bytes: 40,
+                event_count: 3,
+                entity_count: 2,
+                granted_bytes: 64,
+            },
+            ..Default::default()
+        };
+        usage.compute_total();
+        assert_eq!(usage.total_bytes, 40 + 15);
+
+        // CDC off: no grant, the execution buffers count whole.
+        usage.cdc = CdcMemory::default();
+        usage.buffer_manager.execution_buffers_bytes = 15;
+        usage.compute_total();
+        assert_eq!(usage.total_bytes, 15);
     }
 
     #[test]

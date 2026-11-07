@@ -428,6 +428,11 @@ pub struct TransactionManager {
     /// with their buffers (see [`recycle`](Self::recycle)): an autocommit
     /// write allocates no new set. At most [`SPARE_CHANGE_SETS`].
     spare_changes: Mutex<Vec<Arc<TransactionChanges>>>,
+    /// The buffer manager the change sets take their grants from, once the
+    /// database attaches it. Weak: the manager holds consumers that hold this
+    /// manager (the vector consumer's collect horizon), and a strong handle
+    /// would keep both, and the spill directory, past the database.
+    memory: std::sync::OnceLock<std::sync::Weak<grafeo_common::memory::buffer::BufferManager>>,
 }
 
 /// The most emptied change sets the manager keeps for new transactions.
@@ -960,7 +965,15 @@ impl TransactionManager {
             reads: Arc::new(ReadPins::default()),
             history: History::default(),
             spare_changes: Mutex::new(Vec::new()),
+            memory: std::sync::OnceLock::new(),
         }
+    }
+
+    /// Gives the change sets made from now on their grants from `manager`
+    /// (see `TransactionChanges`). A manager keeps the first it gets.
+    pub(crate) fn attach_memory(&self, manager: Arc<grafeo_common::memory::buffer::BufferManager>) {
+        // A second attach changes nothing.
+        let _ = self.memory.set(Arc::downgrade(&manager));
     }
 
     /// A manager whose commits take their times from `clock` (milliseconds
@@ -1068,9 +1081,18 @@ impl TransactionManager {
             && let Some(set) = Arc::get_mut(&mut changes)
         {
             set.reuse(transaction_id, epoch);
+            set.memory = self.memory_manager();
             return changes;
         }
-        Arc::new(TransactionChanges::new(transaction_id, epoch))
+        let mut changes = TransactionChanges::new(transaction_id, epoch);
+        changes.memory = self.memory_manager();
+        Arc::new(changes)
+    }
+
+    /// The manager a new change set takes its grant from: one upgrade per
+    /// transaction, none per write.
+    fn memory_manager(&self) -> Option<Arc<grafeo_common::memory::buffer::BufferManager>> {
+        self.memory.get().and_then(std::sync::Weak::upgrade)
     }
 
     /// Keeps the change set of a transaction that ended (committed or rolled

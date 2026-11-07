@@ -539,6 +539,10 @@ impl GrafeoDB {
         // The store's account takes its grants from the database's manager,
         // from the load on: its cold chunks and its writes are counted there.
         store.attach_memory(Arc::clone(&buffer_manager));
+        // So do the RDF store's and the change sets'.
+        #[cfg(feature = "triple-store")]
+        rdf_store.attach_memory(Arc::clone(&buffer_manager));
+        transaction_manager.attach_memory(Arc::clone(&buffer_manager));
 
         // Create catalog early so WAL replay can restore schema definitions
         let catalog = Arc::new(Catalog::new());
@@ -924,7 +928,11 @@ impl GrafeoDB {
         #[cfg(all(feature = "wal", feature = "grafeo-file"))]
         let wal_retention_limit = config.wal_retention_limit();
         #[cfg(feature = "cdc")]
-        let cdc_retention = config.cdc_retention().clone();
+        let cdc_log = {
+            let log = crate::cdc::CdcLog::with_retention(config.cdc_retention().clone());
+            log.attach_memory(Arc::clone(&buffer_manager));
+            Arc::new(log)
+        };
 
         let mut db = Self {
             config,
@@ -942,7 +950,7 @@ impl GrafeoDB {
             #[cfg(feature = "wal")]
             backup_lock: parking_lot::Mutex::new(()),
             #[cfg(feature = "cdc")]
-            cdc_log: Arc::new(crate::cdc::CdcLog::with_retention(cdc_retention)),
+            cdc_log,
             #[cfg(feature = "cdc")]
             cdc_enabled: std::sync::atomic::AtomicBool::new(cdc_enabled_val),
             #[cfg(feature = "embed")]
@@ -1156,6 +1164,15 @@ impl GrafeoDB {
         warn_of_undetected_memory(budget, detected_memory);
         let buffer_config = BufferManagerConfig::with_budget(budget);
         let buffer_manager = BufferManager::new(buffer_config);
+        transaction_manager.attach_memory(Arc::clone(&buffer_manager));
+        #[cfg(feature = "triple-store")]
+        let rdf_store = Arc::new(RdfStore::new());
+        #[cfg(feature = "triple-store")]
+        rdf_store.attach_memory(Arc::clone(&buffer_manager));
+        #[cfg(feature = "cdc")]
+        let cdc_log = Arc::new(crate::cdc::CdcLog::new());
+        #[cfg(feature = "cdc")]
+        cdc_log.attach_memory(Arc::clone(&buffer_manager));
 
         let query_cache = Arc::new(QueryCache::default());
 
@@ -1169,7 +1186,7 @@ impl GrafeoDB {
             store: None,
             catalog: Arc::new(Catalog::new()),
             #[cfg(feature = "triple-store")]
-            rdf_store: Arc::new(RdfStore::new()),
+            rdf_store,
             transaction_manager,
             buffer_manager,
             #[cfg(feature = "wal")]
@@ -1180,7 +1197,7 @@ impl GrafeoDB {
             #[cfg(feature = "wal")]
             backup_lock: parking_lot::Mutex::new(()),
             #[cfg(feature = "cdc")]
-            cdc_log: Arc::new(crate::cdc::CdcLog::new()),
+            cdc_log,
             #[cfg(feature = "cdc")]
             cdc_enabled: std::sync::atomic::AtomicBool::new(cdc_enabled_val),
             #[cfg(feature = "embed")]
@@ -1268,6 +1285,15 @@ impl GrafeoDB {
         warn_of_undetected_memory(budget, detected_memory);
         let buffer_config = BufferManagerConfig::with_budget(budget);
         let buffer_manager = BufferManager::new(buffer_config);
+        transaction_manager.attach_memory(Arc::clone(&buffer_manager));
+        #[cfg(feature = "triple-store")]
+        let rdf_store = Arc::new(RdfStore::new());
+        #[cfg(feature = "triple-store")]
+        rdf_store.attach_memory(Arc::clone(&buffer_manager));
+        #[cfg(feature = "cdc")]
+        let cdc_log = Arc::new(crate::cdc::CdcLog::new());
+        #[cfg(feature = "cdc")]
+        cdc_log.attach_memory(Arc::clone(&buffer_manager));
 
         let query_cache = Arc::new(QueryCache::default());
 
@@ -1281,7 +1307,7 @@ impl GrafeoDB {
             store: None,
             catalog: Arc::new(Catalog::new()),
             #[cfg(feature = "triple-store")]
-            rdf_store: Arc::new(RdfStore::new()),
+            rdf_store,
             transaction_manager,
             buffer_manager,
             #[cfg(feature = "wal")]
@@ -1292,7 +1318,7 @@ impl GrafeoDB {
             #[cfg(feature = "wal")]
             backup_lock: parking_lot::Mutex::new(()),
             #[cfg(feature = "cdc")]
-            cdc_log: Arc::new(crate::cdc::CdcLog::new()),
+            cdc_log,
             #[cfg(feature = "cdc")]
             cdc_enabled: std::sync::atomic::AtomicBool::new(cdc_enabled_val),
             #[cfg(feature = "embed")]
@@ -3925,6 +3951,16 @@ impl Drop for GrafeoDB {
         if let Err(e) = self.close() {
             grafeo_error!("Error closing database: {}", e);
         }
+        // The RDF and CDC consumers hold their stores, whose grants hold the
+        // buffer manager: unregistered here, so the manager, and the spill
+        // directory it removes when it drops, go with the database.
+        #[cfg(feature = "triple-store")]
+        {
+            self.buffer_manager.unregister_consumer("section:RdfStore");
+            self.buffer_manager.unregister_consumer("section:RdfRing");
+        }
+        #[cfg(feature = "cdc")]
+        self.buffer_manager.unregister_consumer("cdc_log");
     }
 }
 

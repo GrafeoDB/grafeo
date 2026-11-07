@@ -214,3 +214,197 @@ fn the_account_equals_the_walk_after_a_delete_that_empties_every_group() {
     db.execute("MATCH (p:Person) DETACH DELETE p").unwrap();
     assert_account_matches_walk(&db, "after deleting every row");
 }
+
+// ---------------------------------------------------------------------------
+// RDF, CDC and change sets (#751 patch 4)
+// ---------------------------------------------------------------------------
+
+/// The bytes the LPG store's walk finds, its four components together.
+#[cfg(all(feature = "triple-store", feature = "sparql"))]
+fn lpg_walked(db: &GrafeoDB) -> usize {
+    let (store, indexes, mvcc, strings) = db.store().unwrap().memory_breakdown();
+    store.total_bytes + indexes.total_bytes + mvcc.total_bytes + strings.total_bytes
+}
+
+/// The RDF store's account against its walk: no line differs, the report's `rdf` part equals
+/// the walk, and the buffer manager's grants cover it with the LPG store's bytes.
+#[cfg(all(feature = "triple-store", feature = "sparql"))]
+fn assert_rdf_account_matches_walk(db: &GrafeoDB, what: &str) {
+    let mismatches = db.rdf_store().account_mismatches();
+    assert!(
+        mismatches.is_empty(),
+        "{what}: the RDF account's lines differ from the walk (line, counted, walked): {mismatches:?}"
+    );
+    let (_, triples_and_indexes, dictionary, ring, _) = db.rdf_store().heap_memory_bytes();
+    let walked = triples_and_indexes + dictionary + ring;
+    let usage = db.memory_usage();
+    assert_eq!(
+        usage.rdf.total_bytes, walked,
+        "{what}: the report's rdf part"
+    );
+    let held = lpg_walked(db) + walked;
+    assert!(
+        usage.buffer_manager.allocated_bytes >= held,
+        "{what}: {} bytes granted for {held} bytes held",
+        usage.buffer_manager.allocated_bytes
+    );
+}
+
+/// `count` N-Triples statements naming people of Lyon, from `from` on.
+#[cfg(all(feature = "triple-store", feature = "sparql"))]
+fn lyon_people(from: usize, count: usize) -> String {
+    use std::fmt::Write;
+
+    let mut text = String::new();
+    for i in from..from + count {
+        write!(
+            text,
+            "<http://example.org/person/{i}> <http://example.org/name> \"person {i} of Lyon\" . "
+        )
+        .unwrap();
+    }
+    text
+}
+
+/// The RDF account follows every way triples come and go: SPARQL `INSERT DATA` into the default
+/// and a named graph, `batch_insert_rdf`, `load_rdf`, `DELETE DATA`, `DROP GRAPH`, and a reopen.
+#[cfg(all(feature = "triple-store", feature = "sparql"))]
+#[test]
+fn the_rdf_account_equals_its_walk() {
+    use grafeo_core::graph::rdf::{Term, Triple};
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("lyon.grafeo");
+    let db = GrafeoDB::open(&path).unwrap();
+    assert_rdf_account_matches_walk(&db, "empty");
+
+    db.execute_sparql(&format!("INSERT DATA {{ {} }}", lyon_people(0, 300)))
+        .unwrap();
+    assert_rdf_account_matches_walk(&db, "INSERT DATA");
+    db.execute_sparql(&format!(
+        "INSERT DATA {{ GRAPH <http://example.org/g> {{ {} }} }}",
+        lyon_people(0, 200)
+    ))
+    .unwrap();
+    assert_rdf_account_matches_walk(&db, "INSERT DATA into a named graph");
+
+    let knows = |from: usize| {
+        Triple::new(
+            Term::iri(format!("http://example.org/person/{from}")),
+            Term::iri("http://example.org/knows"),
+            Term::iri(format!("http://example.org/person/{}", from + 1)),
+        )
+    };
+    db.batch_insert_rdf((0..500).map(knows)).unwrap();
+    assert_rdf_account_matches_walk(&db, "batch_insert_rdf");
+
+    let file = dir.path().join("cities.nt");
+    let mut lines = String::new();
+    for i in 0..400 {
+        use std::fmt::Write;
+
+        writeln!(
+            lines,
+            "<http://example.org/city/{i}> <http://example.org/label> \"city {i}\" ."
+        )
+        .unwrap();
+    }
+    std::fs::write(&file, lines).unwrap();
+    db.load_rdf(&file, None).unwrap();
+    assert_rdf_account_matches_walk(&db, "load_rdf");
+
+    db.execute_sparql(&format!("DELETE DATA {{ {} }}", lyon_people(0, 150)))
+        .unwrap();
+    assert_rdf_account_matches_walk(&db, "DELETE DATA");
+    db.execute_sparql("DROP GRAPH <http://example.org/g>")
+        .unwrap();
+    assert_rdf_account_matches_walk(&db, "DROP GRAPH");
+    db.close().unwrap();
+    drop(db);
+
+    let db = GrafeoDB::open(&path).unwrap();
+    assert_rdf_account_matches_walk(&db, "reopened");
+    db.close().unwrap();
+}
+
+/// With CDC on, the log's counted bytes equal its walk after commits and after a collect that
+/// prunes it to its retention, and the report's `cdc` part equals the walk.
+#[cfg(feature = "cdc")]
+#[test]
+fn the_cdc_account_equals_its_walk() {
+    use grafeo_engine::Config;
+    use grafeo_engine::cdc::CdcRetentionConfig;
+
+    let check = |db: &GrafeoDB, what: &str| {
+        let mismatches = db.cdc_log().account_mismatches();
+        assert!(
+            mismatches.is_empty(),
+            "{what}: the CDC account differs from the walk: {mismatches:?}"
+        );
+        let (walked, _, events) = db.cdc_log().heap_memory_bytes();
+        let usage = db.memory_usage();
+        assert_eq!(
+            usage.cdc.total_bytes, walked,
+            "{what}: the report's cdc part"
+        );
+        events
+    };
+    let db = GrafeoDB::with_config(
+        Config::in_memory()
+            .with_cdc()
+            .with_cdc_retention(CdcRetentionConfig::unlimited().with_max_events(200)),
+    )
+    .unwrap();
+    check(&db, "empty");
+    for round in 0..20 {
+        db.execute(&format!(
+            "UNWIND range(1, 50) AS i INSERT (:Person {{round: {round}, name: 'person ' || CAST(i AS STRING)}})"
+        ))
+        .unwrap();
+        db.execute(&format!(
+            "MATCH (p:Person {{round: {round}}}) SET p.city = 'Lyon'"
+        ))
+        .unwrap();
+    }
+    let before = check(&db, "after the commits");
+    db.gc();
+    let after = check(&db, "after the collect");
+    assert!(
+        after < before,
+        "the collect pruned the log to its retention: {before} events before, {after} after"
+    );
+}
+
+/// A transaction's change set holds a grant of the execution buffers while it is open (grants
+/// move a step at a time, so the writes cross at least one), and gives it back at the commit and
+/// at the rollback.
+#[test]
+fn a_change_set_holds_its_grant_until_the_transaction_ends() {
+    use grafeo_common::memory::buffer::GRANT_STEP;
+
+    let db = GrafeoDB::new_in_memory();
+    let held = |db: &GrafeoDB| db.memory_usage().buffer_manager.execution_buffers_bytes;
+    // 3,000 rows of 1,000-byte strings: past a grant step.
+    let write = format!(
+        "UNWIND range(1, 3000) AS i INSERT (:Person {{name: CAST(i AS STRING) || '{}'}})",
+        "x".repeat(1_000)
+    );
+    for end in ["commit", "rollback"] {
+        let before = held(&db);
+        let mut session = db.session();
+        session.begin_transaction().unwrap();
+        session.execute(&write).unwrap();
+        let during = held(&db);
+        assert!(
+            during >= before + GRANT_STEP,
+            "{end}: the change set holds at least one grant step ({before} before, {during} with \
+             the writes)"
+        );
+        if end == "commit" {
+            session.commit().unwrap();
+        } else {
+            session.rollback().unwrap();
+        }
+        assert_eq!(held(&db), before, "{end}: the grant is given back");
+    }
+}

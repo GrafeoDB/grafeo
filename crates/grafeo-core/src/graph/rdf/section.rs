@@ -477,8 +477,9 @@ impl Section for RdfStoreSection {
         self.dirty.store(false, Ordering::Release);
     }
 
+    /// The bytes the store counts, its named graphs' included: no walk.
     fn memory_usage(&self) -> usize {
-        self.store.len() * 200
+        self.store.counted_bytes()
     }
 }
 
@@ -556,9 +557,14 @@ mod tests {
             Term::iri("http://xmlns.com/foaf/0.1/knows"),
             Term::iri("http://example.org/jules"),
         ));
-        let section = RdfStoreSection::new(store);
-        let usage = section.memory_usage();
-        assert_eq!(usage, 200);
+        let section = RdfStoreSection::new(Arc::clone(&store));
+        // The store's counted bytes, which equal its walk.
+        let (_, triples_and_indexes, dictionary, ring, _) = store.heap_memory_bytes();
+        assert_eq!(
+            section.memory_usage(),
+            triples_and_indexes + dictionary + ring
+        );
+        assert_eq!(store.account_mismatches(), Vec::new());
     }
 
     #[test]
@@ -631,7 +637,11 @@ mod tests {
             .deserialize(&bytes)
             .expect("deserialize empty store");
         assert_eq!(section2.store().len(), 0);
-        assert_eq!(section2.memory_usage(), 0);
+        let (_, triples_and_indexes, dictionary, ring, _) = section2.store().heap_memory_bytes();
+        assert_eq!(
+            section2.memory_usage(),
+            triples_and_indexes + dictionary + ring
+        );
     }
 
     #[test]

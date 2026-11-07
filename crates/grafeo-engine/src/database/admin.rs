@@ -203,7 +203,7 @@ impl super::GrafeoDB {
                 term_dictionary_bytes,
                 ring_index_bytes,
                 named_graph_count,
-            ) = self.rdf_store.heap_memory_bytes();
+            ) = self.rdf_store.counted_memory_bytes();
             usage.rdf = RdfMemory {
                 triple_count,
                 triples_and_indexes_bytes,
@@ -218,11 +218,12 @@ impl super::GrafeoDB {
         #[cfg(feature = "cdc")]
         {
             use crate::memory_usage::CdcMemory;
-            let (total_bytes, entity_count, event_count) = self.cdc_log.heap_memory_bytes();
+            let (total_bytes, entity_count, event_count) = self.cdc_log.counted_memory_bytes();
             usage.cdc = CdcMemory {
                 total_bytes,
                 entity_count,
                 event_count,
+                granted_bytes: self.cdc_log.granted_bytes(),
             };
         }
 
@@ -712,6 +713,15 @@ impl super::GrafeoDB {
     // =========================================================================
     // ADMIN API: Change Data Capture
     // =========================================================================
+
+    /// The database's change log, for tests and explicit checks of its
+    /// memory account (`CdcLog::account_mismatches`).
+    #[doc(hidden)]
+    #[cfg(feature = "cdc")]
+    #[must_use]
+    pub fn cdc_log(&self) -> &std::sync::Arc<crate::cdc::CdcLog> {
+        &self.cdc_log
+    }
 
     /// Returns whether CDC is enabled by default for new sessions.
     #[cfg(feature = "cdc")]

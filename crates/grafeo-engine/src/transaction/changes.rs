@@ -44,6 +44,7 @@ use grafeo_common::change::{
     Before, BulkRange, Change, ChangeMark, ChangeSet, DataModel, DataOp, Entity, GraphRef,
     GraphSlot, PendingVersion, Table,
 };
+use grafeo_common::memory::buffer::{BufferManager, MemoryGrant, MemoryRegion};
 use grafeo_common::types::{ArcStr, EpochId, NodeId, TransactionId};
 use grafeo_common::utils::error::{Error, Result, TransactionError};
 use grafeo_core::execution::operators::{
@@ -68,6 +69,9 @@ pub(crate) struct TransactionChanges {
     /// The set and the stores. Lock order: taken after the write freeze
     /// and the transaction manager's lock, never before them.
     state: Mutex<State>,
+    /// The buffer manager its grant comes from (`None` before a database
+    /// attached one).
+    pub(super) memory: Option<Arc<BufferManager>>,
 }
 
 /// The mutable part of [`TransactionChanges`].
@@ -86,6 +90,22 @@ struct State {
     triples: super::rdf::PendingTriples,
     /// The schema statements and graph operations it ran, which apply at its commit.
     schema: Vec<QueuedSchemaOp>,
+    /// The grant of what the set holds (`ChangeSet::approx_bytes`), settled
+    /// as entries come, forced (a refusal after a store applied an op would
+    /// leave a change the statement's undo cannot see), and given back when
+    /// the transaction ends.
+    grant: Option<MemoryGrant>,
+}
+
+impl State {
+    /// Brings the grant to what the set holds: a compare while it is within
+    /// two steps above it (see `BufferManager::settle_forced`).
+    fn settle(&mut self, memory: Option<&Arc<BufferManager>>) {
+        if let Some(manager) = memory {
+            let held = self.set.approx_bytes();
+            manager.settle_forced(&mut self.grant, MemoryRegion::ExecutionBuffers, held);
+        }
+    }
 }
 
 /// An op of a schema statement or graph operation in a transaction, for its commit.
@@ -132,7 +152,9 @@ impl TransactionChanges {
                 #[cfg(feature = "triple-store")]
                 triples: super::rdf::PendingTriples::default(),
                 schema: Vec::new(),
+                grant: None,
             }),
+            memory: None,
         }
     }
 
@@ -175,7 +197,11 @@ impl TransactionChanges {
     /// had it ends: no entry, graph or pending triple, with the buffers kept
     /// (see [`TransactionManager::recycle`](super::TransactionManager::recycle)).
     pub(crate) fn empty(&mut self) {
+        // A spare set holds no manager: the transaction manager keeps it,
+        // and its next transaction gets the manager again.
+        self.memory = None;
         let state = self.state.get_mut();
+        state.grant = None;
         state.set.clear();
         state.targets.clear();
         state.schema.clear();
@@ -220,17 +246,23 @@ impl TransactionChanges {
     /// Records that a bulk write reserved `ids` in `table` of the graph of
     /// `slot`: one entry for the range.
     fn record_bulk(&self, slot: GraphSlot, table: Table, ids: Range<u64>) -> Result<()> {
-        self.state.lock().set.push_bulk(BulkRange {
+        let mut state = self.state.lock();
+        state.set.push_bulk(BulkRange {
             graph: slot,
             table,
             ids,
-        })
+        })?;
+        state.settle(self.memory.as_ref());
+        Ok(())
     }
 
     /// Keeps `rows` with the range a bulk write in the graph of `slot`
     /// recorded last.
     fn record_bulk_rows(&self, slot: GraphSlot, rows: Vec<DataOp>) -> Result<()> {
-        self.state.lock().set.push_bulk_rows(slot, rows)
+        let mut state = self.state.lock();
+        state.set.push_bulk_rows(slot, rows)?;
+        state.settle(self.memory.as_ref());
+        Ok(())
     }
 
     /// The epoch the transaction reads at.
@@ -318,7 +350,10 @@ impl TransactionChanges {
         before: Before,
         version: PendingVersion,
     ) -> Result<()> {
-        self.state.lock().set.push(slot, op, before, version)
+        let mut state = self.state.lock();
+        state.set.push(slot, op, before, version)?;
+        state.settle(self.memory.as_ref());
+        Ok(())
     }
 
     /// The position after the last entry, for a savepoint.
@@ -354,6 +389,8 @@ impl TransactionChanges {
     /// backend is asked either way, and the entries are dropped.
     pub(crate) fn rollback(&self) -> std::result::Result<(), ApplyError> {
         let mut state = self.state.lock();
+        // The transaction ends: its grant goes back.
+        state.grant = None;
         state.schema.clear();
         let start = state.start;
         let all = state.set.split_off(start);
@@ -382,6 +419,7 @@ impl TransactionChanges {
         if tail.is_empty() {
             return Ok(());
         }
+        state.settle(self.memory.as_ref());
         Self::forget_triples(&mut state, &tail);
         let mut failure = None;
         for bound in state.targets.iter().flatten() {
@@ -421,7 +459,7 @@ impl TransactionChanges {
     /// commit must not complete (the caller drops its commit guard, which
     /// poisons the database).
     pub(crate) fn commit(&self, epoch: EpochId) -> std::result::Result<(), ApplyError> {
-        let state = self.state.lock();
+        let mut state = self.state.lock();
         for bound in state.targets.iter().flatten() {
             bound.backend.commit(
                 bound.transaction,
@@ -429,6 +467,8 @@ impl TransactionChanges {
                 epoch,
             )?;
         }
+        // The transaction ends: its grant goes back.
+        state.grant = None;
         Ok(())
     }
 
@@ -464,6 +504,7 @@ impl TransactionChanges {
         state
             .set
             .push(slot, op, Before::Absent, PendingVersion::Created)?;
+        state.settle(self.memory.as_ref());
         state.triples.note(graph, Arc::new(triple), insert);
         Ok(())
     }

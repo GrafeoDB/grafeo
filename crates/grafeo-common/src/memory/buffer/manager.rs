@@ -1,7 +1,7 @@
 //! Unified buffer manager implementation.
 
 use super::consumer::MemoryConsumer;
-use super::grant::{GrantReleaser, MemoryGrant};
+use super::grant::{GRANT_STEP, GrantReleaser, MemoryGrant};
 use super::region::MemoryRegion;
 use super::stats::{BufferStats, PressureLevel};
 use crate::memory::system::detect_memory;
@@ -181,6 +181,34 @@ impl BufferManager {
     pub fn reserve_forced(self: &Arc<Self>, size: usize, region: MemoryRegion) -> MemoryGrant {
         self.reserve_forced_raw(size, region);
         MemoryGrant::new(Arc::clone(self) as Arc<dyn GrantReleaser>, size, region)
+    }
+
+    /// Brings `grant` (an empty one of `region` from this manager when it is `None`) to cover
+    /// `counted` bytes whatever the limit, for memory a part holds already (a commit's, a read's,
+    /// a load's): it grows to the step at or above `counted` when short, and gives back what it
+    /// holds two steps past `counted`, so `counted <= size < counted + 2 * GRANT_STEP`. A
+    /// compare while it is within that bound; an atomic only when it crosses a step.
+    pub fn settle_forced(
+        self: &Arc<Self>,
+        grant: &mut Option<MemoryGrant>,
+        region: MemoryRegion,
+        counted: usize,
+    ) {
+        let step = |bytes: usize| {
+            bytes
+                .checked_next_multiple_of(GRANT_STEP)
+                .unwrap_or(usize::MAX)
+        };
+        let held = grant.as_ref().map_or(0, MemoryGrant::size);
+        if held < counted {
+            grant
+                .get_or_insert_with(|| self.empty_grant(region))
+                .grow_forced(step(counted).saturating_sub(held));
+        } else if held - counted >= 2 * GRANT_STEP
+            && let Some(grant) = grant.as_mut()
+        {
+            grant.shrink(held.saturating_sub(step(counted.saturating_add(GRANT_STEP))));
+        }
     }
 
     /// Runs the eviction cycle until `needed` more bytes fit under the hard limit, or until a

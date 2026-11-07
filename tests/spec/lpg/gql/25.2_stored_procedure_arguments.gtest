@@ -9,7 +9,6 @@ meta:
   model: lpg
   title: Stored procedure arguments are values
   dataset: empty
-  requires: [algos]
 
 tests:
 

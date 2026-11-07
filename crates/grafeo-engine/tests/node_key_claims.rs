@@ -231,7 +231,9 @@ fn it_builds_an_index_on_its_first_property() {
     );
 }
 
-/// Two open transactions taking one key: the second to commit fails, and one node holds it.
+/// Two open transactions taking one key: the key is claimed when it is written, so the second
+/// writer's insert fails with a write conflict (40000), both commits succeed after it, and one node
+/// holds the key.
 #[test]
 fn two_transactions_cannot_both_take_a_key() {
     let db = keyed();
@@ -242,11 +244,16 @@ fn two_transactions_cannot_both_take_a_key() {
     let two = outcome(&b, "INSERT (:Person {first: 'Mia', last: 'Hans'})");
     let three = a.commit().map_err(|error| error.to_string());
     let four = b.commit().map_err(|error| error.to_string());
-    let taken = [one.is_ok() && three.is_ok(), two.is_ok() && four.is_ok()];
-    assert_eq!(
-        taken.iter().filter(|t| **t).count(),
-        1,
-        "{one:?} {two:?} {three:?} {four:?}"
+    assert!(one.is_ok(), "{one:?}");
+    let conflict = two.expect_err("the second insert of the key");
+    assert!(
+        conflict.starts_with("40000") && conflict.contains("Person"),
+        "{conflict}"
+    );
+    assert!(three.is_ok(), "{three:?}");
+    assert!(
+        four.is_ok(),
+        "the second commit, with nothing written: {four:?}"
     );
     let rows = db
         .session()

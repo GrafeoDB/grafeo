@@ -64,6 +64,8 @@ mod rdf_ops;
 #[cfg(feature = "wal")]
 mod schema_replay;
 mod search;
+// The consumers of the RDF sections, the only sections it wraps.
+#[cfg(any(feature = "triple-store", test))]
 pub(crate) mod section_consumer;
 mod sections;
 // The history's time index in the file (H2c).
@@ -3203,29 +3205,28 @@ impl GrafeoDB {
             );
         }
 
-        // RDF store: only when data exists
+        // RDF store: always, as triples may come after the open; it
+        // reports what its account counts (none while empty).
         #[cfg(feature = "triple-store")]
-        if !self.rdf_store.is_empty() || self.rdf_store.graph_count() > 0 {
+        {
             let rdf = grafeo_core::graph::rdf::RdfStoreSection::new(Arc::clone(&self.rdf_store));
             self.buffer_manager.register_consumer(Arc::new(
                 section_consumer::SectionConsumer::new(Arc::new(rdf)),
             ));
         }
 
-        // Ring Index: only when Ring has been built
+        // Ring index: always too, as a ring may be built after the open; it
+        // reports none until then.
         #[cfg(feature = "ring-index")]
-        if self.rdf_store.ring().is_some() {
+        {
             let ring = grafeo_core::index::ring::RdfRingSection::new(Arc::clone(&self.rdf_store));
-            // Ring is the first index section to opt into spill wiring.
-            // The Ring's `swap_to_mmap` still returns `NotSupported` until
-            // its packed disk format lands, so a spill attempt today fails
-            // cleanly without leaking files; once the format is in place,
-            // no engine-side change is required to enable real eviction.
-            let consumer = match self.buffer_manager.config().spill_path.clone() {
-                Some(path) => section_consumer::SectionConsumer::with_spill(Arc::new(ring), path),
-                None => section_consumer::SectionConsumer::new(Arc::new(ring)),
-            };
-            self.buffer_manager.register_consumer(Arc::new(consumer));
+            // Without a spill directory: the ring's `swap_to_mmap` copies
+            // the mapped bytes back onto the heap, so a spill would free
+            // nothing. The consumer reports it cannot spill until the ring
+            // reads from a file.
+            self.buffer_manager.register_consumer(Arc::new(
+                section_consumer::SectionConsumer::new(Arc::new(ring)),
+            ));
         }
 
         // CDC log: register as memory consumer so the buffer manager can

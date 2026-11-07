@@ -928,7 +928,7 @@ impl MemoryConsumer for CdcLog {
     }
 
     fn evict(&self, target_bytes: usize) -> usize {
-        let before = self.approximate_memory_bytes();
+        let before = self.counted.load(Ordering::Relaxed);
         if before == 0 {
             return 0;
         }
@@ -954,7 +954,7 @@ impl MemoryConsumer for CdcLog {
         let cutoff = epochs[cutoff_idx];
         self.prune_before(EpochId::new(cutoff.as_u64() + 1));
 
-        before.saturating_sub(self.approximate_memory_bytes())
+        before.saturating_sub(self.counted.load(Ordering::Relaxed))
     }
 
     fn can_evict(&self) -> bool {

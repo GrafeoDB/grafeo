@@ -1084,6 +1084,27 @@ impl Column {
         cold_chunk_bytes(&self.cold.lock())
     }
 
+    /// The heap bytes a spill of it would move to disk: a hot column's
+    /// values when it has no update chains (a chained one stays), a cold
+    /// one's chunks in memory, none once it is spilled.
+    fn spillable_bytes(&self) -> usize {
+        if let Some(hot) = self.hot.get() {
+            return if hot.updates.is_empty() {
+                hot.counted_bytes()
+            } else {
+                0
+            };
+        }
+        let cold = self.cold.lock();
+        match self.hot.get() {
+            // A thaw published the hot form meanwhile.
+            Some(hot) if hot.updates.is_empty() => hot.counted_bytes(),
+            Some(_) => 0,
+            None if cold.iter().any(|chunk| chunk.home == Home::Spilled) => 0,
+            None => cold_chunk_bytes(&cold),
+        }
+    }
+
     /// About what a thaw of it decodes: 0 for a hot column.
     fn thaw_bytes(&self) -> usize {
         if self.hot.get().is_some() {
@@ -1626,6 +1647,12 @@ impl Columns {
             .values()
             .map(Column::cold_chunk_bytes)
             .sum::<usize>()
+    }
+
+    /// The heap bytes a spill of key `key`'s column would move to disk
+    /// (see `Column::spillable_bytes`).
+    pub(super) fn spillable_bytes(&self, key: u32) -> usize {
+        self.by_key.get(&key).map_or(0, Column::spillable_bytes)
     }
 
     /// About what a write of key `key` thaws: the decoded bytes of its

@@ -1,6 +1,6 @@
 //! Unified buffer manager implementation.
 
-use super::consumer::MemoryConsumer;
+use super::consumer::{ConsumerStats, MemoryConsumer};
 use super::grant::{GRANT_STEP, GrantReleaser, MemoryGrant};
 use super::region::MemoryRegion;
 use super::stats::{BufferStats, PressureLevel};
@@ -269,6 +269,18 @@ impl BufferManager {
     pub fn pressure_level(&self) -> PressureLevel {
         let current = self.allocated.load(Ordering::Relaxed);
         self.compute_pressure_level(current)
+    }
+
+    /// The statistics of each registered consumer, in registration order:
+    /// what it reports holding, its region and priority, and whether it can
+    /// spill or evict. Asks each consumer for its usage.
+    #[must_use]
+    pub fn consumer_stats(&self) -> Vec<ConsumerStats> {
+        self.consumers
+            .read()
+            .iter()
+            .map(|consumer| ConsumerStats::from_consumer(consumer.as_ref()))
+            .collect()
     }
 
     /// Returns current buffer statistics.

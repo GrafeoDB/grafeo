@@ -347,3 +347,155 @@ fn mia_storage_tiers_lists_only_section_consumers() {
         "LpgStore consumer must be registered: {tiers:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Honest flags (#751 patch 5)
+// ---------------------------------------------------------------------------
+
+/// A database at `path` with 200 `:Item` nodes, each with an 8-dimension embedding, and a vector
+/// index on them; closed.
+#[cfg(all(feature = "vector-index", feature = "mmap"))]
+fn items_with_vectors(path: &std::path::Path) {
+    let db = GrafeoDB::open(path).unwrap();
+    for i in 1..=200 {
+        let id = db.create_node(&["Item"]).unwrap();
+        db.set_node_property(id, "name", Value::from(format!("item_{i}")))
+            .unwrap();
+        db.set_node_property(id, "embedding", Value::Vector(make_embedding(i, 8).into()))
+            .unwrap();
+    }
+    db.create_vector_index("Item", "embedding", Some(8), None, None, None, None)
+        .unwrap();
+    db.close().unwrap();
+}
+
+/// The ids a search near item 7's vector returns, in order.
+#[cfg(all(feature = "vector-index", feature = "mmap"))]
+fn near_item_seven(db: &GrafeoDB) -> Vec<grafeo_common::types::NodeId> {
+    db.vector_search("Item", "embedding", &make_embedding(7, 8), 5, None, None)
+        .unwrap()
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect()
+}
+
+/// `ForceDisk` on the vector store does what it says: the open of a database holding vectors
+/// spills them, so the consumer is on disk right after the open, and searches answer as before.
+#[test]
+#[cfg(all(feature = "vector-index", feature = "mmap"))]
+fn force_disk_on_the_vector_store_spills_it_at_open() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let path = dir.path().join("lille.grafeo");
+    items_with_vectors(&path);
+    let before = {
+        let db = GrafeoDB::open(&path).unwrap();
+        let found = near_item_seven(&db);
+        db.close().unwrap();
+        found
+    };
+
+    let db = GrafeoDB::with_config(
+        Config::persistent(&path)
+            .with_section_tier(SectionType::VectorStore, TierOverride::ForceDisk),
+    )
+    .unwrap();
+    assert_eq!(
+        db.storage_tiers().get(&SectionType::VectorStore),
+        Some(&StorageTier::OnDisk),
+        "the vector store is on disk after the open"
+    );
+    assert_eq!(near_item_seven(&db), before, "searches answer as before");
+    db.close().unwrap();
+}
+
+/// The usage a consumer reports, by name, from the buffer manager's consumer list.
+#[cfg(all(feature = "vector-index", feature = "mmap"))]
+fn reported(db: &GrafeoDB, name: &str) -> usize {
+    db.buffer_manager()
+        .consumer_stats()
+        .into_iter()
+        .find(|stats| stats.name == name)
+        .unwrap_or_else(|| panic!("{name} is registered"))
+        .usage_bytes
+}
+
+/// The vector consumer reports what a spill frees (the embedding column), not the HNSW topology
+/// it keeps: a spill frees about what it reported, and the report drops by about as much.
+#[test]
+#[cfg(all(feature = "vector-index", feature = "mmap"))]
+fn the_vector_consumer_reports_what_its_spill_frees() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let path = dir.path().join("nantes.grafeo");
+    items_with_vectors(&path);
+    let db = GrafeoDB::open(&path).unwrap();
+    let before = reported(&db, "section:VectorStore");
+    assert!(
+        before > 0,
+        "the vectors are in memory: {before} bytes reported"
+    );
+    let freed = db
+        .buffer_manager()
+        .spill_consumer_by_name("section:VectorStore");
+    let after = reported(&db, "section:VectorStore");
+    let within_a_tenth = |a: usize, b: usize| a.abs_diff(b) * 10 <= b.max(1);
+    assert!(
+        within_a_tenth(freed, before),
+        "the spill freed {freed} bytes for {before} reported"
+    );
+    assert!(
+        within_a_tenth(before - after.min(before), before),
+        "the report dropped from {before} to {after} bytes"
+    );
+    assert_eq!(
+        near_item_seven(&db).len(),
+        5,
+        "searches answer after the spill"
+    );
+    db.close().unwrap();
+}
+
+/// Each consumer says whether its `evict` frees memory: the LPG store, the RDF store and ring,
+/// and the text index cannot (they hold the data itself), the CDC log can (it drops old events).
+#[test]
+#[cfg(all(
+    feature = "vector-index",
+    feature = "mmap",
+    feature = "text-index",
+    feature = "triple-store",
+    feature = "ring-index",
+    feature = "cdc",
+    feature = "gql"
+))]
+fn each_consumer_says_whether_it_can_evict() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let path = dir.path().join("rennes.grafeo");
+    let db = GrafeoDB::with_config(Config::persistent(&path).with_cdc()).unwrap();
+    db.execute("INSERT (:Doc {body: 'the canals of Amsterdam'})")
+        .unwrap();
+    db.create_text_index("Doc", "body").unwrap();
+    db.execute_sparql(
+        "INSERT DATA { <http://example.org/alix> <http://example.org/lives> \"Amsterdam\" }",
+    )
+    .unwrap();
+    let stats = db.buffer_manager().consumer_stats();
+    let can_evict = |name: &str| {
+        stats
+            .iter()
+            .find(|consumer| consumer.name == name)
+            .unwrap_or_else(|| {
+                let names: Vec<&str> = stats.iter().map(|c| c.name.as_str()).collect();
+                panic!("{name} is registered: {names:?}")
+            })
+            .can_evict
+    };
+    for name in [
+        "section:LpgStore",
+        "section:RdfStore",
+        "section:RdfRing",
+        "section:TextIndex",
+    ] {
+        assert!(!can_evict(name), "{name} cannot evict");
+    }
+    assert!(can_evict("cdc_log"), "the CDC log can evict");
+    db.close().unwrap();
+}

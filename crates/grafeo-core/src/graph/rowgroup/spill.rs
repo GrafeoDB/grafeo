@@ -138,6 +138,24 @@ impl RowGroupStore {
         Ok(report)
     }
 
+    /// The heap bytes a spill of the node property column of `key` would
+    /// move to disk, over every row group: what
+    /// [`spill_node_property_column`](Self::spill_node_property_column)
+    /// frees, give or take the metadata of the chunks it keeps. A row
+    /// group's column with update chains, or already spilled, counts none.
+    #[must_use]
+    pub fn node_property_column_spillable_bytes(&self, key: &PropertyKey) -> usize {
+        let inner = self.inner.read();
+        let Some(key) = inner.keys.get_id(key.as_str()) else {
+            return 0;
+        };
+        inner
+            .nodes
+            .values()
+            .map(|group| group.columns.spillable_bytes(key))
+            .sum()
+    }
+
     /// Brings the spilled node property column of `key` back into memory in
     /// every row group, letting go of its files; returns whether a row group
     /// held it spilled.

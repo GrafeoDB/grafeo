@@ -212,7 +212,6 @@ impl RowGroupVectorConsumer {
 
     /// The embedding properties of a graph's vector indexes, each once, in
     /// order (indexes on two labels can share one property column).
-    #[cfg(all(feature = "wal", feature = "vector-index"))]
     fn indexed_properties(store: &RowGroupStore) -> Vec<PropertyKey> {
         let mut properties: Vec<PropertyKey> = store
             .vector_index_entries()
@@ -237,12 +236,21 @@ impl MemoryConsumer for RowGroupVectorConsumer {
         "section:VectorStore"
     }
 
+    /// What its spill frees: the heap bytes of the indexed embedding
+    /// columns that are not spilled yet. The indexes' graphs (the HNSW
+    /// topology) stay in memory through a spill, so they are not reported
+    /// here; the store's account counts them. Walks the row groups of each
+    /// indexed property: read on the eviction path, not by statements.
     fn memory_usage(&self) -> usize {
         self.root.upgrade().map_or(0, |root| {
             graphs(&root)
                 .iter()
-                .flat_map(|graph| graph.vector_index_entries())
-                .map(|(_, _, index)| index.counted_bytes())
+                .map(|graph| {
+                    Self::indexed_properties(graph)
+                        .iter()
+                        .map(|property| graph.node_property_column_spillable_bytes(property))
+                        .sum::<usize>()
+                })
                 .sum()
         })
     }
@@ -330,8 +338,12 @@ impl MemoryConsumer for RowGroupVectorConsumer {
     }
 }
 
-/// The memory consumer of the row-group store's text indexes: their memory
-/// (they do not spill).
+/// The memory consumer of the row-group store's text indexes: it reports
+/// the bytes of their inverted indexes (postings, terms and document
+/// lengths, as each index counts them). Those are built in memory from the
+/// indexed property and have no file form to read from, so the consumer
+/// can neither spill nor evict: it reports what they hold, for the buffer
+/// manager's figures.
 #[cfg(feature = "text-index")]
 pub(super) struct RowGroupTextConsumer {
     root: Weak<RowGroupStore>,

@@ -356,11 +356,18 @@ pub enum ConfigError {
     MemoryFractionNotFinite,
 }
 
-/// Whether a section of `section_type` can be moved to disk: only a section
-/// whose data can be mapped from a file can (the `mmap_able` flag of its
-/// directory entry).
+/// Whether a section of `section_type` can be moved to disk: whether its
+/// memory consumer really spills it, so that a disk tier override does what
+/// it says. Only the vector store does (its embedding columns go to spill
+/// files); a mappable section whose consumer cannot spill (the text and
+/// property indexes, the RDF ring, which a spill would copy back onto the
+/// heap) or that has no consumer (the compact store, read only from older
+/// files) cannot.
 pub(crate) fn can_spill(section_type: grafeo_common::storage::SectionType) -> bool {
-    section_type.default_flags().mmap_able
+    matches!(
+        section_type,
+        grafeo_common::storage::SectionType::VectorStore
+    )
 }
 
 /// The section types that can be moved to disk, in section type order, as
@@ -2312,8 +2319,8 @@ mod tests {
             grafeo_common::encryption::KeyChain::new([88; 32]),
         ));
         let config = Config::persistent("prague.grafeo")
-            .with_section_tier(SectionType::VectorStore, TierOverride::ForceRam)
-            .with_section_tier(SectionType::TextIndex, TierOverride::Auto)
+            .with_section_tier(SectionType::TextIndex, TierOverride::ForceRam)
+            .with_section_tier(SectionType::RdfRing, TierOverride::Auto)
             .with_encryption(encryption);
         assert_eq!(
             config.validate(),
@@ -2322,19 +2329,19 @@ mod tests {
         );
 
         let mut config =
-            config.with_section_tier(SectionType::CompactStore, TierOverride::ForceDisk);
+            config.with_section_tier(SectionType::VectorStore, TierOverride::ForceDisk);
         let error = config
             .validate()
             .expect_err("a section forced to disk on an encrypted database")
             .to_string();
         assert!(
-            error.contains("disk tier override") && error.contains("CompactStore"),
+            error.contains("disk tier override") && error.contains("VectorStore"),
             "the error names the override and the section: {error}"
         );
         assert_eq!(
             config.validate(),
             Err(ConfigError::EncryptionWithForceDisk(
-                SectionType::CompactStore
+                SectionType::VectorStore
             ))
         );
         config.encryption = None;
@@ -2354,6 +2361,13 @@ mod tests {
             SectionType::RdfStore,
             SectionType::OverlayDeletions,
             SectionType::TimeIndex,
+            // Mappable, but nothing moves them to disk: a disk override would do nothing. The
+            // compact store is only read from a 0.5 file and folded into row groups; the ring's
+            // swap copies its mapped bytes back onto the heap.
+            SectionType::TextIndex,
+            SectionType::PropertyIndex,
+            SectionType::CompactStore,
+            SectionType::RdfRing,
         ] {
             let config = Config::persistent("berlin.grafeo")
                 .with_section_tier(section_type, TierOverride::ForceDisk);
@@ -2366,8 +2380,7 @@ mod tests {
                 ConfigError::ForceDiskOnUnspillableSection(section_type).to_string(),
                 format!(
                     "the {section_type:?} section cannot be moved to disk, so it takes no disk \
-                     tier override; the sections that can are CompactStore, VectorStore, \
-                     TextIndex, RdfRing and PropertyIndex"
+                     tier override; the sections that can are VectorStore"
                 )
             );
             for tier in [TierOverride::Auto, TierOverride::ForceRam] {
@@ -2377,17 +2390,9 @@ mod tests {
             }
         }
 
-        for section_type in [
-            SectionType::CompactStore,
-            SectionType::VectorStore,
-            SectionType::TextIndex,
-            SectionType::RdfRing,
-            SectionType::PropertyIndex,
-        ] {
-            let config = Config::persistent("berlin.grafeo")
-                .with_section_tier(section_type, TierOverride::ForceDisk);
-            assert_eq!(config.validate(), Ok(()), "{section_type:?} can spill");
-        }
+        let config = Config::persistent("berlin.grafeo")
+            .with_section_tier(SectionType::VectorStore, TierOverride::ForceDisk);
+        assert_eq!(config.validate(), Ok(()), "the vector store spills");
     }
 
     // --- Builder chaining with new fields ---

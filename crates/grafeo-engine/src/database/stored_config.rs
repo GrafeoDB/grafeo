@@ -350,7 +350,7 @@ mod tests {
             tier: TierRecord::ForceDisk,
         });
         stored.sections.push(SectionMemoryRecord {
-            section: SectionType::TextIndex.to_u8(),
+            section: SectionType::VectorStore.to_u8(),
             max_ram: None,
             tier: TierRecord::ForceDisk,
         });
@@ -368,7 +368,7 @@ mod tests {
             Some((TierOverride::Auto, Some(4096)))
         );
         assert_eq!(
-            tier(SectionType::TextIndex),
+            tier(SectionType::VectorStore),
             Some((TierOverride::ForceDisk, None)),
             "a section that can spill keeps its override"
         );

@@ -51,10 +51,10 @@ pub(crate) enum Applying<'a> {
     /// text indexes it puts are kept in `unbuilt`, built from the data once
     /// the whole WAL is replayed. A snapshot's catalog applies the same way.
     #[cfg_attr(
-        not(feature = "wal"),
+        not(any(feature = "wal", feature = "triple-store")),
         expect(
             dead_code,
-            reason = "only a WAL is replayed, and a build without it has none"
+            reason = "WAL replay and a transaction's RDF graph ops apply this way; neither is built"
         )
     )]
     Replay {

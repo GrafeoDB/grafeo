@@ -18,6 +18,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	grafeo "github.com/GrafeoDB/grafeo/crates/bindings/go"
@@ -56,7 +57,9 @@ func TestMain(m *testing.M) {
 	for _, f := range info.Features {
 		compiledFeatures[f] = true
 	}
-	os.Exit(m.Run())
+	code := m.Run()
+	fmt.Printf("gtest summary: skipped=%d xfailed=%d\n", summary.skipped.Load(), summary.xfailed.Load())
+	os.Exit(code)
 }
 
 // hasFeature checks if a feature or compound language key is available.
@@ -105,10 +108,21 @@ type TestCase struct {
 	Tags       []string
 	Requires   []string
 	Skip       string
-	Language   string
-	Dataset    string
-	Expect     Expect
-	Variants   map[string]string
+	// Xfail is the spec and the issue of a case expected to fail (`xfail:`), nil otherwise.
+	Xfail *Xfail
+	// Probe is a runner probe (`probe:`), only in a file under a spec-probes directory.
+	Probe    string
+	Language string
+	Dataset  string
+	Expect   Expect
+	Variants map[string]string
+}
+
+// Xfail is the spec a case's expected result is held against and the issue that fixes it
+// (`#N` or `fix in X.Y.Z`).
+type Xfail struct {
+	Spec  string
+	Issue string
 }
 
 // Expect holds the expected result assertions for a test case.
@@ -492,7 +506,7 @@ func expectedRows(rows [][]string) [][]string {
 // Assertions
 // ---------------------------------------------------------------------------
 
-func assertRowsSorted(t *testing.T, result *grafeo.QueryResult, expected [][]string) {
+func assertRowsSorted(t specT, result *grafeo.QueryResult, expected [][]string) {
 	t.Helper()
 	actual := resultToRows(result, nil)
 	sortRows(actual)
@@ -500,13 +514,13 @@ func assertRowsSorted(t *testing.T, result *grafeo.QueryResult, expected [][]str
 	assertRowsEqual(t, actual, expected, "sorted")
 }
 
-func assertRowsOrdered(t *testing.T, result *grafeo.QueryResult, expected [][]string) {
+func assertRowsOrdered(t specT, result *grafeo.QueryResult, expected [][]string) {
 	t.Helper()
 	actual := resultToRows(result, nil)
 	assertRowsEqual(t, actual, expected, "ordered")
 }
 
-func assertRowsEqual(t *testing.T, actual, expected [][]string, mode string) {
+func assertRowsEqual(t specT, actual, expected [][]string, mode string) {
 	t.Helper()
 	if len(actual) != len(expected) {
 		t.Fatalf("Row count mismatch (%s): got %d, expected %d\nActual:   %v\nExpected: %v",
@@ -526,7 +540,7 @@ func assertRowsEqual(t *testing.T, actual, expected [][]string, mode string) {
 	}
 }
 
-func assertRowsWithPrecision(t *testing.T, result *grafeo.QueryResult, expected [][]string, precision int) {
+func assertRowsWithPrecision(t specT, result *grafeo.QueryResult, expected [][]string, precision int) {
 	t.Helper()
 	actual := resultToRows(result, nil)
 	tolerance := math.Pow(10, float64(-precision))
@@ -555,7 +569,7 @@ func assertRowsWithPrecision(t *testing.T, result *grafeo.QueryResult, expected 
 	}
 }
 
-func assertCount(t *testing.T, result *grafeo.QueryResult, expected int) {
+func assertCount(t specT, result *grafeo.QueryResult, expected int) {
 	t.Helper()
 	actual := len(result.Rows)
 	if actual != expected {
@@ -563,7 +577,7 @@ func assertCount(t *testing.T, result *grafeo.QueryResult, expected int) {
 	}
 }
 
-func assertEmpty(t *testing.T, result *grafeo.QueryResult) {
+func assertEmpty(t specT, result *grafeo.QueryResult) {
 	t.Helper()
 	actual := len(result.Rows)
 	if actual != 0 {
@@ -571,7 +585,7 @@ func assertEmpty(t *testing.T, result *grafeo.QueryResult) {
 	}
 }
 
-func assertWarnings(t *testing.T, result *grafeo.QueryResult, expected []string) {
+func assertWarnings(t specT, result *grafeo.QueryResult, expected []string) {
 	t.Helper()
 	actual := make([]string, 0, len(result.Warnings))
 	for _, warning := range result.Warnings {
@@ -585,7 +599,7 @@ func assertWarnings(t *testing.T, result *grafeo.QueryResult, expected []string)
 	}
 }
 
-func assertColumns(t *testing.T, result *grafeo.QueryResult, expected []string) {
+func assertColumns(t specT, result *grafeo.QueryResult, expected []string) {
 	t.Helper()
 	actual := result.Columns
 	if len(actual) != len(expected) {
@@ -599,7 +613,7 @@ func assertColumns(t *testing.T, result *grafeo.QueryResult, expected []string) 
 	}
 }
 
-func assertHash(t *testing.T, result *grafeo.QueryResult, expectedHash string) {
+func assertHash(t specT, result *grafeo.QueryResult, expectedHash string) {
 	t.Helper()
 	rows := resultToRows(result, nil)
 	sortRows(rows)
@@ -632,7 +646,7 @@ func sortRows(rows [][]string) {
 // Dataset loading
 // ---------------------------------------------------------------------------
 
-func loadDataset(t *testing.T, db *grafeo.Database, datasetName string, datasetsDir string) {
+func loadDataset(t specT, db *grafeo.Database, datasetName string, datasetsDir string) {
 	t.Helper()
 	setupPath := filepath.Join(datasetsDir, datasetName+".setup")
 	f, err := os.Open(setupPath)
@@ -715,6 +729,7 @@ func findGtestFiles(dir string) ([]string, error) {
 // parseContext holds the parser state: the lines of the file and the current
 // line index.
 type parseContext struct {
+	path  string
 	lines []string
 	idx   int
 }
@@ -728,7 +743,7 @@ func parseGtestFile(path string) (*GtestFile, error) {
 	}
 	content := strings.ReplaceAll(string(data), "\r\n", "\n")
 	lines := strings.Split(content, "\n")
-	ctx := &parseContext{lines: lines, idx: 0}
+	ctx := &parseContext{path: path, lines: lines, idx: 0}
 
 	skipBlankAndComments(ctx)
 	meta, err := parseMeta(ctx)
@@ -808,7 +823,10 @@ func parseTests(ctx *parseContext) ([]TestCase, error) {
 		}
 		trimmed := strings.TrimSpace(ctx.lines[ctx.idx])
 		if strings.HasPrefix(trimmed, "- name:") {
-			tc := parseSingleTest(ctx)
+			tc, err := parseSingleTest(ctx)
+			if err != nil {
+				return nil, err
+			}
 			tests = append(tests, tc)
 		} else {
 			break
@@ -817,7 +835,7 @@ func parseTests(ctx *parseContext) ([]TestCase, error) {
 	return tests, nil
 }
 
-func parseSingleTest(ctx *parseContext) TestCase {
+func parseSingleTest(ctx *parseContext) (TestCase, error) {
 	tc := TestCase{
 		Params:   make(map[string]string),
 		Variants: make(map[string]string),
@@ -863,6 +881,15 @@ func parseSingleTest(ctx *parseContext) TestCase {
 		case "skip":
 			tc.Skip = unquote(value)
 			ctx.idx++
+		case "xfail":
+			xfail, err := parseXfail(ctx)
+			if err != nil {
+				return tc, fmt.Errorf("test '%s': %w", tc.Name, err)
+			}
+			tc.Xfail = xfail
+		case "probe":
+			tc.Probe = unquote(value)
+			ctx.idx++
 		case "language":
 			tc.Language = unquote(value)
 			ctx.idx++
@@ -894,7 +921,68 @@ func parseSingleTest(ctx *parseContext) TestCase {
 			ctx.idx++
 		}
 	}
-	return tc
+	return tc, checkMarks(tc, ctx.path)
+}
+
+// checkMarks checks the rules of the marks, as every runner does: an `xfail:` names its spec
+// and its issue, a case is never both `skip:` and `xfail:`, and `probe:` is for the runner
+// probes only, in a file under a spec-probes directory.
+func checkMarks(tc TestCase, path string) error {
+	if tc.Xfail != nil {
+		if strings.TrimSpace(tc.Xfail.Spec) == "" {
+			return fmt.Errorf("test '%s': an xfail names its `spec:`", tc.Name)
+		}
+		if strings.TrimSpace(tc.Xfail.Issue) == "" {
+			return fmt.Errorf("test '%s': an xfail names its `issue:`", tc.Name)
+		}
+	}
+	if tc.Skip != "" && tc.Xfail != nil {
+		return fmt.Errorf("test '%s': a case is either skipped or expected to fail, not both", tc.Name)
+	}
+	if tc.Probe != "" {
+		inProbes := false
+		for _, part := range strings.FieldsFunc(path, func(r rune) bool { return r == '/' || r == '\\' }) {
+			inProbes = inProbes || part == "spec-probes"
+		}
+		if !inProbes {
+			return fmt.Errorf("test '%s': `probe:` is for the runner probes only, under a `spec-probes` directory, not in %s", tc.Name, path)
+		}
+		if tc.Probe != "runner_error" {
+			return fmt.Errorf("test '%s': unknown probe '%s' (known: runner_error)", tc.Name, tc.Probe)
+		}
+	}
+	return nil
+}
+
+// parseXfail reads the `spec:` and `issue:` under an `xfail:` at ctx.lines[ctx.idx]; checkMarks
+// checks that both are there.
+func parseXfail(ctx *parseContext) (*Xfail, error) {
+	indent := func(line string) int { return len(line) - len(strings.TrimLeft(line, " \t")) }
+	own := indent(ctx.lines[ctx.idx])
+	ctx.idx++
+	xfail := &Xfail{}
+	for ctx.idx < len(ctx.lines) {
+		line := ctx.lines[ctx.idx]
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			ctx.idx++
+			continue
+		}
+		if indent(line) <= own {
+			break
+		}
+		kv := parseKV(trimmed)
+		switch {
+		case kv != nil && kv[0] == "spec":
+			xfail.Spec = unquote(kv[1])
+		case kv != nil && kv[0] == "issue":
+			xfail.Issue = unquote(kv[1])
+		default:
+			return nil, fmt.Errorf("unknown xfail key at line %d: '%s'", ctx.idx+1, trimmed)
+		}
+		ctx.idx++
+	}
+	return xfail, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -1271,6 +1359,15 @@ func TestSpec(t *testing.T) {
 	root := repoRoot()
 	specDir := filepath.Join(root, "tests", "spec")
 	datasetsDir := filepath.Join(specDir, "datasets")
+	// The .gtest files the run reads: tests/spec, or GRAFEO_SPEC_ROOT (the runner probes),
+	// relative to the repository or absolute.
+	if specRoot := os.Getenv("GRAFEO_SPEC_ROOT"); specRoot != "" {
+		if filepath.IsAbs(specRoot) {
+			specDir = specRoot
+		} else {
+			specDir = filepath.Join(root, specRoot)
+		}
+	}
 
 	gtestFiles, err := findGtestFiles(specDir)
 	if err != nil {
@@ -1320,7 +1417,83 @@ func runSingleTest(t *testing.T, gf *GtestFile, tc TestCase, variantLang, varian
 
 	// Skip if test has a skip field
 	if tc.Skip != "" {
+		summary.skipped.Add(1)
 		t.Skipf("skipped in .gtest: %s", tc.Skip)
+	}
+	if tc.Xfail == nil {
+		runCase(t, gf, tc, variantLang, variantQuery, datasetsDir)
+		return
+	}
+	marked := &xfailT{t: t}
+	if runXfail(func() { runCase(marked, gf, tc, variantLang, variantQuery, datasetsDir) }) {
+		summary.xfailed.Add(1)
+		t.Logf("expected failure (%s, %s): %s", tc.Xfail.Spec, tc.Xfail.Issue, marked.failure)
+		return
+	}
+	t.Fatalf("XPASS: the case passes, but it is marked xfail against %s (%s); take the mark off", tc.Xfail.Spec, tc.Xfail.Issue)
+}
+
+// specT is what a spec case's checks use of their test: a *testing.T in an ordinary case, an
+// *xfailT in a case marked `xfail:`.
+type specT interface {
+	Helper()
+	Fatalf(format string, args ...any)
+	Skipf(format string, args ...any)
+}
+
+// specFailure is the panic an xfailT's Fatalf stops a case with: the failure of a spec case,
+// the only one runXfail recovers.
+type specFailure struct{ message string }
+
+// xfailT runs a case marked `xfail:`: a failed check stops the case with a specFailure instead
+// of failing the test, and a skip skips it.
+type xfailT struct {
+	t       *testing.T
+	failure string
+}
+
+func (x *xfailT) Helper() {}
+
+func (x *xfailT) Fatalf(format string, args ...any) {
+	x.failure = fmt.Sprintf(format, args...)
+	panic(specFailure{x.failure})
+}
+
+func (x *xfailT) Skipf(format string, args ...any) {
+	x.t.Helper()
+	x.t.Skipf(format, args...)
+}
+
+// runXfail runs a marked case: true when it stopped with a specFailure (the expected failure),
+// false when it passed. Any other panic, a fault of the runner, goes on as it is.
+func runXfail(run func()) (failed bool) {
+	defer func() {
+		if r := recover(); r != nil {
+			if _, ok := r.(specFailure); ok {
+				failed = true
+				return
+			}
+			panic(r)
+		}
+	}()
+	run()
+	return false
+}
+
+// summary holds the run's counts for the `gtest summary` line.
+var summary struct {
+	skipped atomic.Int64
+	xfailed atomic.Int64
+}
+
+// runCase runs one case: its availability checks, dataset, setup, statements and checks.
+func runCase(t specT, gf *GtestFile, tc TestCase, variantLang, variantQuery string, datasetsDir string) {
+	t.Helper()
+
+	// A probe of the runner: it fails as the runner itself fails, which no `xfail:` may take
+	// for the expected failure.
+	if tc.Probe == "runner_error" {
+		panic("runner error probe: the runner fails, not the case")
 	}
 
 	// Determine language: per-test override > rosetta variant > file meta
@@ -1478,7 +1651,7 @@ func runSingleTest(t *testing.T, gf *GtestFile, tc TestCase, variantLang, varian
 // runErrorTest executes queries expecting the last one to produce an error:
 // one whose message contains expectedSubstr and whose GQLSTATUS is
 // expectedStatus, for each that is given.
-func runErrorTest(t *testing.T, db *grafeo.Database, language string, queries []string, expectedSubstr *string, expectedStatus *string, paramsJSON string) {
+func runErrorTest(t specT, db *grafeo.Database, language string, queries []string, expectedSubstr *string, expectedStatus *string, paramsJSON string) {
 	t.Helper()
 
 	// Execute all-but-last normally (with params so $param works)
@@ -1638,7 +1811,7 @@ func normalizeExpectedTerm(expected string) string {
 // assertTerms asserts that each cell holds the exact RDF term expected names,
 // in order when ordered, as a multiset otherwise. A blank node matches a blank
 // node; in order, the labels must also correspond one to one.
-func assertTerms(t *testing.T, result *grafeo.QueryResult, expected [][]string, ordered bool) {
+func assertTerms(t specT, result *grafeo.QueryResult, expected [][]string, ordered bool) {
 	t.Helper()
 	actual := make([][]string, len(result.Rows))
 	for i, row := range result.Rows {

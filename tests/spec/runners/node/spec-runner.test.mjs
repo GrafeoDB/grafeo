@@ -5,7 +5,7 @@
  * vitest tests that execute queries through the Node.js GrafeoDB bindings.
  */
 
-import { describe, it, expect, vi } from 'vitest'
+import { afterAll, describe, it, expect, vi } from 'vitest'
 
 // A test that loads a dataset (the LDBC files) takes seconds through the binding,
 // close to vitest's 5 s default on a busy machine: give each test a minute.
@@ -14,6 +14,7 @@ import { readFileSync, readdirSync, statSync, existsSync } from 'fs'
 import { join, relative, resolve } from 'path'
 import { parseGtestFile, coerceParams, paramValue } from './parser.mjs'
 import { assertRowsSorted, assertRowsOrdered, assertRowsWithPrecision, assertHash, describeError, assertGqlStatus, assertTerms } from './comparator.mjs'
+import { SpecFailure, runMarked, runProbe, specRoot, summary, summaryLine } from './xfail.mjs'
 
 // ---------------------------------------------------------------------------
 // Import GrafeoDB. A binding that does not load fails the run: it must not pass
@@ -27,6 +28,8 @@ const { GrafeoDB } = await import('../../../../crates/bindings/node/grafeo.js')
 // ---------------------------------------------------------------------------
 
 const SPEC_DIR = resolve(import.meta.dirname, '..', '..')
+// The .gtest files the run reads: tests/spec, or GRAFEO_SPEC_ROOT (the runner probes).
+const SPEC_ROOT = specRoot(SPEC_DIR)
 const DATASETS_DIR = join(SPEC_DIR, 'datasets')
 
 // ---------------------------------------------------------------------------
@@ -156,13 +159,18 @@ describe('parameter values', () => {
 // Discover and register tests
 // ---------------------------------------------------------------------------
 
-const gtestFiles = findGtestFiles(SPEC_DIR)
+const gtestFiles = findGtestFiles(SPEC_ROOT)
+
+// One line with the run's skipped and expected-failure counts, written past vitest's
+// console capture, which keeps a passing run's logs back.
+afterAll(() => process.stdout.write(`${summaryLine()}
+`))
 
 for (const filePath of gtestFiles) {
   // Skip runner directories
   if (filePath.includes('runners')) continue
 
-  const relPath = relative(SPEC_DIR, filePath).replace(/\\/g, '/')
+  const relPath = relative(SPEC_ROOT, filePath).replace(/\\/g, '/')
   let parsed
 
   try {
@@ -184,7 +192,10 @@ for (const filePath of gtestFiles) {
       if (tc.variants && Object.keys(tc.variants).length > 0) {
         for (const [lang, query] of Object.entries(tc.variants)) {
           it(`${tc.name}_${lang}`, async (ctx) => {
-            if (tc.skip) return ctx.skip()
+            if (tc.skip) {
+              summary.skipped++
+              return ctx.skip()
+            }
             const db = GrafeoDB.create()
             try {
               if (!isAvailable(db, lang)) return ctx.skip()
@@ -196,7 +207,7 @@ for (const filePath of gtestFiles) {
               if (effectiveDataset && effectiveDataset !== 'empty') {
                 await loadDataset(db, effectiveDataset)
               }
-              await runTestCase(db, { ...tc, query }, lang, meta.language || 'gql')
+              await runMarked(tc, () => runTestCase(db, { ...tc, query }, lang, meta.language || 'gql'))
             } finally {
               db.close()
             }
@@ -207,7 +218,10 @@ for (const filePath of gtestFiles) {
 
       it(tc.name, async (ctx) => {
         // Skip by field
-        if (tc.skip) return ctx.skip()
+        if (tc.skip) {
+          summary.skipped++
+          return ctx.skip()
+        }
 
         const db = GrafeoDB.create()
         try {
@@ -231,7 +245,7 @@ for (const filePath of gtestFiles) {
             await loadDataset(db, effectiveDataset)
           }
 
-          await runTestCase(db, tc, tc.language || meta.language, meta.language || 'gql')
+          await runMarked(tc, () => runTestCase(db, tc, tc.language || meta.language, meta.language || 'gql'))
         } finally {
           db.close()
         }
@@ -242,6 +256,7 @@ for (const filePath of gtestFiles) {
 
 /** Execute a single test case and assert the expected result. */
 async function runTestCase(db, tc, language, setupLanguage) {
+  runProbe(tc)
   // Run setup queries in the file's declared language (not the variant language)
   for (const setupQ of tc.setup) {
     await executeQuery(db, setupLanguage || language, setupQ)
@@ -268,7 +283,7 @@ async function runTestCase(db, tc, language, setupLanguage) {
       failure = err
     }
     if (failure === null) {
-      throw new Error(`Expected error ${describeError(exp)} but query succeeded`)
+      throw new SpecFailure(`Expected error ${describeError(exp)} but query succeeded`)
     }
     if (exp.error != null) expect(failure.message || String(failure)).toContain(exp.error)
     if (exp.gqlStatus != null) assertGqlStatus(failure, exp.gqlStatus)

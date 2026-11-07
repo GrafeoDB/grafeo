@@ -89,6 +89,19 @@ EXPECT_KEYS = frozenset(
 
 
 @dataclass
+class Xfail:
+    """A case expected to fail (``xfail:``): the spec its expected result is held against and
+    the issue that fixes it (``#N`` or ``fix in X.Y.Z``)."""
+
+    spec: str
+    issue: str
+
+
+#: The runner probes a ``probe:`` key may name, only in a file under ``spec-probes``.
+PROBES = {"runner_error"}
+
+
+@dataclass
 class TestCase:
     name: str = ""
     query: str | None = None
@@ -101,6 +114,8 @@ class TestCase:
     requires: list[str] = field(default_factory=list)
     iso: list[str] = field(default_factory=list)
     skip: str | None = None
+    xfail: Xfail | None = None
+    probe: str | None = None
     expect: Expect = field(default_factory=Expect)
     variants: dict[str, str] = field(default_factory=dict)
     language: str | None = None
@@ -128,12 +143,40 @@ def parse_gtest_file(path: Path) -> GtestFile:
     content = path.read_text(encoding="utf-8")
     if HAS_YAML:
         try:
-            return _parse_with_yaml(content, path)
+            parsed = _parse_with_yaml(content, path)
         except (_yaml.YAMLError, TypeError):
             # .gtest files may contain bare strings with colons that YAML
             # rejects: the line-based parser reads them.
-            return _parse_line_based(content, path)
-    return _parse_line_based(content, path)
+            parsed = _parse_line_based(content, path)
+    else:
+        parsed = _parse_line_based(content, path)
+    for tc in parsed.tests:
+        _check_marks(tc, path)
+    return parsed
+
+
+def _check_marks(tc: TestCase, path: Path) -> None:
+    """The rules of the marks, as every runner checks them: an ``xfail:`` names its spec and
+    its issue, a case is never both ``skip:`` and ``xfail:``, and ``probe:`` is for the runner
+    probes only, in a file under a ``spec-probes`` directory."""
+    if tc.xfail is not None:
+        for key in ("spec", "issue"):
+            if not getattr(tc.xfail, key).strip():
+                raise ValueError(f"test '{tc.name}': an xfail names its `{key}:`")
+    if tc.skip is not None and tc.xfail is not None:
+        raise ValueError(
+            f"test '{tc.name}': a case is either skipped or expected to fail, not both"
+        )
+    if tc.probe is not None:
+        if "spec-probes" not in path.parts:
+            raise ValueError(
+                f"test '{tc.name}': `probe:` is for the runner probes only, under a "
+                f"`spec-probes` directory, not in {path}"
+            )
+        if tc.probe not in PROBES:
+            raise ValueError(
+                f"test '{tc.name}': unknown probe {tc.probe!r} (known: runner_error)"
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -213,6 +256,14 @@ def _parse_test_dict(d: dict) -> TestCase:
     tc.skip = d.get("skip")
     if tc.skip is not None:
         tc.skip = str(tc.skip)
+    if "xfail" in d:
+        raw = d["xfail"] if isinstance(d["xfail"], dict) else {}
+        tc.xfail = Xfail(
+            spec=str(raw.get("spec") or ""), issue=str(raw.get("issue") or "")
+        )
+    probe = d.get("probe")
+    if probe is not None:
+        tc.probe = str(probe)
     tc.tags = _as_string_list(d.get("tags", []))
     tc.requires = _as_string_list(d.get("requires", []))
     tc.iso = _as_string_list(d.get("iso", []))
@@ -402,6 +453,11 @@ def _lb_parse_single_test(lines: list[str], idx: int) -> tuple:
         elif key == "skip":
             tc.skip = _unquote(value)
             idx += 1
+        elif key == "xfail":
+            tc.xfail, idx = _lb_parse_xfail(lines, idx)
+        elif key == "probe":
+            tc.probe = _unquote(value)
+            idx += 1
         elif key == "setup":
             idx += 1
             tc.setup, idx = _lb_parse_string_list(lines, idx)
@@ -430,6 +486,32 @@ def _lb_parse_single_test(lines: list[str], idx: int) -> tuple:
             idx += 1
 
     return tc, idx
+
+
+def _lb_parse_xfail(lines: list[str], idx: int) -> tuple:
+    """The ``spec:`` and ``issue:`` under an ``xfail:`` at ``lines[idx]``; both are checked by
+    ``_check_marks``."""
+
+    def indent(line: str) -> int:
+        return len(line) - len(line.lstrip())
+
+    own = indent(lines[idx])
+    idx += 1
+    found: dict[str, str] = {}
+    while idx < len(lines):
+        line = lines[idx]
+        trimmed = line.strip()
+        if not trimmed or trimmed.startswith("#"):
+            idx += 1
+            continue
+        if indent(line) <= own:
+            break
+        key, value = _lb_parse_kv(trimmed)
+        if key not in ("spec", "issue"):
+            raise ValueError(f"unknown xfail key at line {idx + 1}: {trimmed!r}")
+        found[key] = _unquote(value)
+        idx += 1
+    return Xfail(spec=found.get("spec", ""), issue=found.get("issue", "")), idx
 
 
 def _lb_parse_expect(lines: list[str], idx: int) -> tuple:

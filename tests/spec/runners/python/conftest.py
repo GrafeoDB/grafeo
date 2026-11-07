@@ -7,10 +7,16 @@ pytest test items.
 Each test case gets a **fresh** ``GrafeoDB()`` instance, loads the declared
 dataset, runs setup queries, executes the query, and asserts the expected
 result.
+
+A case marked ``xfail:`` passes as an expected failure only when it fails the way a spec case
+fails, on an assertion or on an error the binding raises (``EXPECTED_FAILURES``); a case that
+passes fails the run (XPASS, naming the spec and the issue), and any other error is a fault of
+the runner and fails it as it is.
 """
 
 from __future__ import annotations
 
+import os
 import sys
 import warnings
 from pathlib import Path
@@ -69,6 +75,29 @@ def _get_compiled_features() -> set:
 
 # Repo root: tests/spec/runners/python/conftest.py -> five .parent calls
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent.parent
+
+#: The failures of a spec case: an assertion of the comparator, a ``pytest.fail`` of this
+#: runner's checks, and an error the binding raises. The only ones an ``xfail:`` absorbs.
+EXPECTED_FAILURES = (AssertionError, pytest.fail.Exception, grafeo.GrafeoError)
+
+#: The run's counts for the ``gtest summary`` line: the cases skipped by ``skip:`` and the
+#: ones that failed as expected.
+SUMMARY_KEY = pytest.StashKey[dict]()
+
+
+def summary_of(config) -> dict:
+    """The run's counts (``SUMMARY_KEY``), started at zero."""
+    return config.stash.setdefault(SUMMARY_KEY, {"skipped": 0, "xfailed": 0})
+
+
+def spec_root() -> Path | None:
+    """The directory ``GRAFEO_SPEC_ROOT`` names (the runner probes), relative to the
+    repository or absolute; ``None`` when unset, and the run reads ``tests/spec``."""
+    root = os.environ.get("GRAFEO_SPEC_ROOT")
+    if not root:
+        return None
+    path = Path(root)
+    return path if path.is_absolute() else _REPO_ROOT / path
 
 
 # ---------------------------------------------------------------------------
@@ -149,11 +178,36 @@ class GtestItem(pytest.Item):
 
     def runtest(self):
         tc = self.test_case
-        meta = self.gtest_file.meta
+        summary = summary_of(self.config)
 
         # Skip if test has a skip field
         if tc.skip is not None:
+            summary["skipped"] += 1
             pytest.skip(f"skipped in .gtest: {tc.skip}")
+
+        if tc.xfail is None:
+            self._run_case()
+            return
+        try:
+            self._run_case()
+        except EXPECTED_FAILURES:
+            # The expected failure: the case passes, and the summary line counts it, as the
+            # other runners do (no `pytest.xfail()`, which is never strict).
+            summary["xfailed"] += 1
+            return
+        pytest.fail(
+            f"XPASS: the case passes, but it is marked xfail against {tc.xfail.spec} "
+            f"({tc.xfail.issue}); take the mark off"
+        )
+
+    def _run_case(self):
+        tc = self.test_case
+        meta = self.gtest_file.meta
+
+        # A probe of the runner: it fails as the runner itself fails, which no `xfail:`
+        # may take for the expected failure.
+        if tc.probe == "runner_error":
+            raise RuntimeError("runner error probe: the runner fails, not the case")
 
         # Determine language: per-test override > rosetta variant > file meta
         language = self.variant_lang or tc.language or meta.language or "gql"

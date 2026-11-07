@@ -20,3 +20,21 @@ sys.modules[_spec.name] = _mod
 _spec.loader.exec_module(_mod)
 
 pytest_collect_file = _mod.pytest_collect_file
+
+
+def pytest_configure(config):
+    """With ``GRAFEO_SPEC_ROOT`` set (the runner probes), the run collects the .gtest files
+    under that directory instead of ``tests/spec``: the runner becomes a plugin, as this
+    conftest's collection hook covers ``tests/spec`` only."""
+    root = _mod.spec_root()
+    if root is not None:
+        config.pluginmanager.register(_mod, "grafeo_gtest_runner")
+        config.args = [str(root)]
+
+
+def pytest_terminal_summary(terminalreporter):
+    """One line with the run's skipped and expected-failure counts (``gtest summary``)."""
+    summary = _mod.summary_of(terminalreporter.config)
+    terminalreporter.write_line(
+        f"gtest summary: skipped={summary['skipped']} xfailed={summary['xfailed']}"
+    )

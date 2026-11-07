@@ -20,21 +20,30 @@ import 'package:test/test.dart';
 // Paths
 // =============================================================================
 
-/// Resolve spec directory relative to this test file.
-final _specDir = _resolveSpecDir();
-final _datasetsDir = Directory('${_specDir.path}/datasets');
+/// The repository root, found from the working directory.
+final _repoRoot = _resolveRepoRoot();
 
-Directory _resolveSpecDir() {
+/// The directory whose .gtest files the run reads: tests/spec, or GRAFEO_SPEC_ROOT (the runner
+/// probes), relative to the repository or absolute.
+final _specDir = _resolveSpecDir();
+final _datasetsDir = Directory('${_repoRoot.path}/tests/spec/datasets');
+
+Directory _resolveRepoRoot() {
   // Walk up from the working directory until we find Cargo.toml (repo root).
   var dir = Directory.current;
   while (dir.path != dir.parent.path) {
-    if (File('${dir.path}/Cargo.toml').existsSync()) {
-      return Directory('${dir.path}/tests/spec');
-    }
+    if (File('${dir.path}/Cargo.toml').existsSync()) return dir;
     dir = dir.parent;
   }
   // Fallback: assume cwd is repo root
-  return Directory('${Directory.current.path}/tests/spec');
+  return Directory.current;
+}
+
+Directory _resolveSpecDir() {
+  final root = Platform.environment['GRAFEO_SPEC_ROOT'];
+  if (root == null || root.isEmpty) return Directory('${_repoRoot.path}/tests/spec');
+  final isAbsolute = root.startsWith('/') || RegExp(r'^[A-Za-z]:[\\/]').hasMatch(root);
+  return Directory(isAbsolute ? root : '${_repoRoot.path}/$root');
 }
 
 // =============================================================================
@@ -648,6 +657,12 @@ class _TestCase {
   List<String> statements;
   List<String> setup;
   String? skip;
+
+  /// The spec and the issue of a case expected to fail (`xfail:`), null otherwise.
+  _Xfail? xfail;
+
+  /// A runner probe (`probe:`), only in a file under a spec-probes directory.
+  String? probe;
   String? language;
   String? dataset;
   _Expect expect;
@@ -665,6 +680,7 @@ class _TestCase {
     List<String>? statements,
     List<String>? setup,
     this.skip,
+    this.probe,
     this.language,
     this.dataset,
     _Expect? expect,
@@ -679,6 +695,13 @@ class _TestCase {
         tags = tags ?? [],
         requires = requires ?? [],
         params = params ?? {};
+}
+
+/// The spec a case's expected result is held against and the issue that fixes it (`#N` or
+/// `fix in X.Y.Z`).
+class _Xfail {
+  String spec = '';
+  String issue = '';
 }
 
 /// Parsed .gtest file.
@@ -711,7 +734,68 @@ _GtestFile _parseGtestFile(File file) {
   final meta = _parseMeta(ctx);
   _skipBlankAndComments(ctx);
   final tests = _parseTests(ctx);
+  for (final tc in tests) {
+    _checkMarks(tc, file.path);
+  }
   return _GtestFile(meta, tests);
+}
+
+/// The rules of the marks, as every runner checks them: an `xfail:` names its spec and its
+/// issue, a case is never both `skip:` and `xfail:`, and `probe:` is for the runner probes
+/// only, in a file under a `spec-probes` directory.
+void _checkMarks(_TestCase tc, String path) {
+  final xfail = tc.xfail;
+  if (xfail != null) {
+    if (xfail.spec.trim().isEmpty) {
+      throw FormatException("test '${tc.name}': an xfail names its `spec:`");
+    }
+    if (xfail.issue.trim().isEmpty) {
+      throw FormatException("test '${tc.name}': an xfail names its `issue:`");
+    }
+  }
+  if (tc.skip != null && xfail != null) {
+    throw FormatException(
+        "test '${tc.name}': a case is either skipped or expected to fail, not both");
+  }
+  final probe = tc.probe;
+  if (probe != null) {
+    if (!path.split(RegExp(r'[\\/]')).contains('spec-probes')) {
+      throw FormatException("test '${tc.name}': `probe:` is for the runner probes only, "
+          'under a `spec-probes` directory, not in $path');
+    }
+    if (probe != 'runner_error') {
+      throw FormatException("test '${tc.name}': unknown probe '$probe' (known: runner_error)");
+    }
+  }
+}
+
+/// The `spec:` and `issue:` under an `xfail:` at `ctx.lines[ctx.idx]`, checked by
+/// [_checkMarks].
+_Xfail _parseXfail(_ParseContext ctx) {
+  int indent(String line) => line.length - line.trimLeft().length;
+  final own = indent(ctx.lines[ctx.idx]);
+  ctx.idx++;
+  final xfail = _Xfail();
+  while (ctx.idx < ctx.lines.length) {
+    final line = ctx.lines[ctx.idx];
+    final trimmed = line.trim();
+    if (trimmed.isEmpty || trimmed.startsWith('#')) {
+      ctx.idx++;
+      continue;
+    }
+    if (indent(line) <= own) break;
+    final kv = _parseKV(trimmed);
+    switch (kv?.$1) {
+      case 'spec':
+        xfail.spec = _unquote(kv!.$2);
+      case 'issue':
+        xfail.issue = _unquote(kv!.$2);
+      default:
+        throw FormatException("unknown xfail key at line ${ctx.idx + 1}: '$trimmed'");
+    }
+    ctx.idx++;
+  }
+  return xfail;
 }
 
 // ---------------------------------------------------------------------------
@@ -806,6 +890,11 @@ _TestCase _parseSingleTest(_ParseContext ctx) {
         }
       case 'skip':
         tc.skip = _unquote(value);
+        ctx.idx++;
+      case 'xfail':
+        tc.xfail = _parseXfail(ctx);
+      case 'probe':
+        tc.probe = _unquote(value);
         ctx.idx++;
       case 'language':
         tc.language = _unquote(value);
@@ -1193,8 +1282,41 @@ List<File> _findGtestFiles(Directory dir) {
 // =============================================================================
 
 /// Run a single test case against [db].
+/// The run's counts for the `gtest summary` line.
+var _skipped = 0;
+var _xfailed = 0;
+
+/// Whether [failure] is a spec case's failure, the only one an `xfail:` absorbs: a check that
+/// does not hold, or an error the binding raises. Any other error, a fault of the runner, goes
+/// on.
+bool _isExpectedFailure(Object failure) => failure is TestFailure || failure is GrafeoException;
+
+/// Runs [run], the case [tc]: as it is without an `xfail:`; with one, a spec failure is the
+/// expected failure, a pass an XPASS, and any other error goes on.
+void _runMarked(_TestCase tc, void Function() run) {
+  final xfail = tc.xfail;
+  if (xfail == null) {
+    run();
+    return;
+  }
+  try {
+    run();
+  } catch (failure) {
+    if (!_isExpectedFailure(failure)) rethrow;
+    _xfailed++;
+    return;
+  }
+  fail('XPASS: the case passes, but it is marked xfail against ${xfail.spec} '
+      '(${xfail.issue}); take the mark off');
+}
+
 void _runTestCase(GrafeoDB db, _TestCase tc, String language,
     [String? setupLanguage]) {
+  // A probe of the runner: it fails as the runner itself fails, which no `xfail:` may take
+  // for the expected failure.
+  if (tc.probe == 'runner_error') {
+    throw StateError('runner error probe: the runner fails, not the case');
+  }
   // Run setup queries in the file's declared language (not the variant language)
   final setupLang = setupLanguage ?? language;
   for (final setupQ in tc.setup) {
@@ -1358,6 +1480,9 @@ void main() {
 
   final gtestFiles = _findGtestFiles(_specDir);
 
+  // One line with the run's skipped and expected-failure counts.
+  tearDownAll(() => print('gtest summary: skipped=$_skipped xfailed=$_xfailed'));
+
   if (gtestFiles.isEmpty) {
     test('no .gtest files found', () {
       fail('No .gtest files found under ${_specDir.path}');
@@ -1393,6 +1518,7 @@ void main() {
             final variantQuery = entry.value;
             test('${tc.name}_$lang', () {
               if (tc.skip != null) {
+                _skipped++;
                 markTestSkipped('skipped in .gtest: ${tc.skip}');
                 return;
               }
@@ -1414,8 +1540,9 @@ void main() {
                   expect: tc.expect,
                   tags: tc.tags,
                   params: tc.params,
+                  probe: tc.probe,
                 );
-                _runTestCase(db, variantTc, lang, meta.language);
+                _runMarked(tc, () => _runTestCase(db, variantTc, lang, meta.language));
               } finally {
                 db.close();
               }
@@ -1427,6 +1554,7 @@ void main() {
         test(tc.name, () {
           // Skip if test has a skip field
           if (tc.skip != null) {
+            _skipped++;
             markTestSkipped('skipped in .gtest: ${tc.skip}');
             return;
           }
@@ -1471,8 +1599,8 @@ void main() {
               _loadDataset(db, effectiveDataset);
             }
 
-            _runTestCase(
-                db, tc, tc.language ?? meta.language, meta.language);
+            _runMarked(tc,
+                () => _runTestCase(db, tc, tc.language ?? meta.language, meta.language));
           } finally {
             db.close();
           }

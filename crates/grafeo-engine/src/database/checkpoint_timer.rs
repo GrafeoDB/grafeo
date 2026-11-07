@@ -122,6 +122,11 @@ pub(super) struct Job {
     /// The size a WAL segment grows to: after a failed checkpoint the size
     /// trigger waits for this much more log.
     pub segment_bytes: u64,
+    /// Without a WAL: whether a commit with changes came after the last
+    /// checkpoint. An interval tick without one writes nothing, so a
+    /// read-only workload never checkpoints. `None` with a WAL, whose
+    /// position tells.
+    pub changed: Option<Box<dyn Fn() -> bool + Send>>,
 }
 
 /// What wakes the thread, under the lock the thread checks it with: a wake
@@ -326,20 +331,24 @@ impl CheckpointTimer {
     /// Arms the checkpointer for `triggers`, at least one of which can fire:
     /// an interval, or a WAL size with `job.log` set. No thread starts unless
     /// work already waits: a log past the size mark, or, with an interval,
-    /// changes since the last checkpoint (the log past the checkpoint's
-    /// position, or, without a log, `changed`: a commit since it).
-    pub(super) fn arm(
-        triggers: CheckpointTriggers,
-        job: Job,
-        shared: Shared,
-        changed: bool,
-    ) -> Self {
+    /// the log past the last checkpoint's position. Without a log, the
+    /// caller starts it ([`start`](Self::start)) when a change waits.
+    pub(super) fn arm(triggers: CheckpointTriggers, job: Job, shared: Shared) -> Self {
         let signal = Arc::new(Signal::default());
         let lazy = Arc::new(Lazy {
             signal,
             triggers,
-            phase: Mutex::new(Phase::Stopped),
+            phase: Mutex::new(Phase::Waiting(job, shared)),
         });
+        // The mark is armed with the timer already waiting and its phase
+        // locked: a commit that crosses it meanwhile calls `wake`, which
+        // takes the lock after this and finds the timer waiting (the WAL
+        // calls its waker with no lock of its own held), so no crossing is
+        // lost.
+        let phase = lazy.phase.lock();
+        let Phase::Waiting(job, _) = &*phase else {
+            unreachable!("set above")
+        };
         // The mark that starts the thread: the size mark, or, with an
         // interval, just past the log's end, so the first commit starts it.
         let mark = job.log.as_deref().and_then(|log| {
@@ -361,19 +370,27 @@ impl CheckpointTimer {
         // Work already waiting starts the thread at once: a log past the size
         // mark, or, with an interval, changes since the last checkpoint.
         let unflushed = triggers.interval.is_some()
-            && match job.log.as_deref() {
-                Some(log) => log.end_lsn() > log.checkpoint_lsn(),
-                None => changed,
-            };
-        let past = match (&job.log, mark) {
+            && job
+                .log
+                .as_deref()
+                .is_some_and(|log| log.end_lsn() > log.checkpoint_lsn());
+        let crossed = match (&job.log, mark) {
             (Some(log), Some(mark)) => log.arm_wake(mark),
             _ => false,
-        } || unflushed;
-        *lazy.phase.lock() = Phase::Waiting(job, shared);
-        if past {
-            lazy.start();
+        };
+        #[cfg(feature = "testing-statement-injection")]
+        grafeo_common::testing::commit_hook::run_during_checkpoint_arm();
+        if crossed || unflushed {
+            lazy.start_locked(phase, false);
+        } else {
+            drop(phase);
         }
         Self { lazy }
+    }
+
+    /// Starts the thread if it still waits for work.
+    pub(super) fn start(&self) {
+        self.lazy.start();
     }
 
     /// What starts the thread on the first committed change of a database
@@ -482,6 +499,15 @@ impl Run<'_> {
         }
     }
 
+    /// When the interval next fires after `now`, at least `pause` from it:
+    /// `None` without an interval, or for one past what an `Instant` holds
+    /// (it never fires).
+    fn next_interval(&self, now: Instant, pause: Duration) -> Option<Instant> {
+        self.triggers
+            .interval
+            .and_then(|interval| now.checked_add(interval.max(pause)))
+    }
+
     /// Whether a trigger is due: a signal can come from a mark armed before
     /// the last checkpoint, which the log has not reached since.
     fn due(&self, state: &State) -> bool {
@@ -494,10 +520,7 @@ impl Run<'_> {
     fn run(&self) {
         let mut state = State {
             mark: u64::MAX,
-            interval_at: self
-                .triggers
-                .interval
-                .map(|interval| Instant::now() + interval),
+            interval_at: self.next_interval(Instant::now(), Duration::ZERO),
             pause: None,
         };
         // A WAL already past the mark (one an open replayed and kept) is
@@ -519,6 +542,11 @@ impl Run<'_> {
                 if !self.due(&state) {
                     continue;
                 }
+                // An interval tick with no change to write writes nothing.
+                if self.job.changed.as_ref().is_some_and(|changed| !changed()) {
+                    state.interval_at = self.next_interval(Instant::now(), Duration::ZERO);
+                    continue;
+                }
             }
 
             self.shared.counts.attempts.fetch_add(1, Ordering::AcqRel);
@@ -528,7 +556,7 @@ impl Run<'_> {
                 Ok(()) => {
                     self.shared.failures.succeeded();
                     state.pause = None;
-                    state.interval_at = self.triggers.interval.map(|interval| now + interval);
+                    state.interval_at = self.next_interval(now, Duration::ZERO);
                     self.size_trigger()
                         .map(|(log, limit)| log.checkpoint_lsn().saturating_add(limit))
                 }
@@ -548,10 +576,7 @@ impl Run<'_> {
                         .pause
                         .map_or(FIRST_RETRY, |pause| (pause * 2).min(LAST_RETRY));
                     state.pause = Some(pause);
-                    state.interval_at = self
-                        .triggers
-                        .interval
-                        .map(|interval| now + interval.max(pause));
+                    state.interval_at = self.next_interval(now, pause);
                     let retry = match (self.size_trigger().is_some(), state.interval_at.is_some()) {
                         (true, true) => format!(
                             "tried again once the WAL grows by one more segment, or in {}s",
@@ -669,6 +694,7 @@ mod tests {
             hopeless: Box::new(move || hopeless),
             log: Some(Box::new(Arc::clone(log))),
             segment_bytes: SEGMENT,
+            changed: None,
         }
     }
 
@@ -703,8 +729,7 @@ mod tests {
             #[cfg(feature = "testing-crash-injection")]
             gate: Arc::clone(&shared.gate),
         };
-        let timer =
-            CheckpointTimer::arm(triggers, job(log, failing, hopeless), thread_shared, false);
+        let timer = CheckpointTimer::arm(triggers, job(log, failing, hopeless), thread_shared);
         (timer, shared)
     }
 

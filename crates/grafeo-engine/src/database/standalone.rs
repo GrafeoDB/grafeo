@@ -162,6 +162,14 @@ pub(crate) fn hold(manager: &TransactionManager, writes_too: bool) -> Result<Com
     } else {
         manager.hold_commits_for_change()?
     };
+    // A standalone change cannot tell here whether it will change anything:
+    // it counts, as the hold is released.
+    #[cfg(feature = "grafeo-file")]
+    let held = {
+        let mut held = held;
+        held.changed(manager);
+        held
+    };
     // Tests start a checkpoint or `close()` here, which must wait.
     #[cfg(feature = "testing-statement-injection")]
     grafeo_common::testing::commit_hook::run_during_held_change();

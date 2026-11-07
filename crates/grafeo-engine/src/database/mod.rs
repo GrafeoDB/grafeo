@@ -2859,7 +2859,7 @@ impl GrafeoDB {
             if let Some(mut timer) = self.checkpoint_timer.lock().take() {
                 timer.stop();
             }
-            self.transaction_manager.set_first_commit_hook(None);
+            self.transaction_manager.clear_first_commit_hook();
         }
 
         // Stop the WAL flusher before the WAL is synced and closed below; its
@@ -3043,6 +3043,13 @@ impl GrafeoDB {
         // Checks the incomplete-commit and closed states again, under the
         // hold: they may have changed since.
         let held = self.transaction_manager.hold_commits_for_change()?;
+        // An import counts as a committed change as the hold is released.
+        #[cfg(feature = "grafeo-file")]
+        let held = {
+            let mut held = held;
+            held.changed(&self.transaction_manager);
+            held
+        };
         // Tests start a checkpoint or `close()` here, which must wait.
         #[cfg(feature = "testing-statement-injection")]
         grafeo_common::testing::commit_hook::run_during_held_change();
@@ -3338,7 +3345,7 @@ impl GrafeoDB {
         if let Some(mut timer) = running.take() {
             timer.stop();
         }
-        self.transaction_manager.set_first_commit_hook(None);
+        self.transaction_manager.clear_first_commit_hook();
         let triggers = *self.checkpoint_triggers.lock();
         // The WAL the size trigger watches: without one it never fires.
         #[cfg(feature = "wal")]
@@ -3364,11 +3371,20 @@ impl GrafeoDB {
         {
             let checkpoint_fm = Arc::clone(fm);
             let transaction_manager = Arc::clone(&self.transaction_manager);
+            // Without a WAL, a commit with changes after the file's last
+            // checkpoint is the interval's work.
+            let changed: Option<Box<dyn Fn() -> bool + Send>> = if log.is_none() {
+                let changed_tm = Arc::clone(&self.transaction_manager);
+                Some(Box::new(move || changed_tm.changed_since_checkpoint()))
+            } else {
+                None
+            };
             let job = checkpoint_timer::Job {
                 checkpoint: Box::new(move || flush::flush(&checkpoint_fm, &sources).map(|_| ())),
                 hopeless: Box::new(move || transaction_manager.has_incomplete_commit()),
                 log,
                 segment_bytes: self.config.wal_segment_size(),
+                changed,
             };
             let shared = checkpoint_timer::Shared {
                 failures: Arc::clone(&self.checkpoint_failures),
@@ -3379,15 +3395,21 @@ impl GrafeoDB {
             // Armed, not started: the thread starts the first time it has work
             // (see `CheckpointTimer`).
             let without_log = job.log.is_none();
-            // Without a WAL, the interval's work is a commit since the last
-            // checkpoint: one read at arming, never on the commit path.
-            let changed = without_log
-                && self.transaction_manager.current_epoch().as_u64() > fm.active_header().epoch;
-            let timer = checkpoint_timer::CheckpointTimer::arm(triggers, job, shared, changed);
+            let timer = checkpoint_timer::CheckpointTimer::arm(triggers, job, shared);
+            // No WAL group to cross: the first commit with changes starts the
+            // interval, or the arming does when one came after the file's
+            // last checkpoint (one read at arming, never on the commit path).
             if without_log && triggers.interval.is_some() {
-                // No WAL group to cross: the first commit starts the interval.
-                self.transaction_manager
-                    .set_first_commit_hook(Some(timer.starter()));
+                #[cfg(feature = "testing-statement-injection")]
+                grafeo_common::testing::commit_hook::run_before_first_commit_arming();
+                let changed = self
+                    .transaction_manager
+                    .arm_first_commit_hook(timer.starter());
+                #[cfg(feature = "testing-statement-injection")]
+                grafeo_common::testing::commit_hook::run_after_first_commit_arming();
+                if changed {
+                    timer.start();
+                }
             }
             *running = Some(timer);
         }

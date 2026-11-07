@@ -67,9 +67,13 @@ fn write(db: &GrafeoDB, bytes: u64) {
     .unwrap();
 }
 
-/// Commits 64 KiB nodes while the WAL stays at least `margin` below `limit`.
+/// Commits 64 KiB nodes until the WAL is at least `margin` below `limit` no more: as many as the
+/// WAL lacks, counted before the first, since each grows it by more than 64 KiB. The count is
+/// fixed up front, so an automatic checkpoint between two of them cannot make the writes cross
+/// the mark a second time.
 fn write_up_to(db: &GrafeoDB, limit: u64, margin: u64) {
-    while wal_bytes(db) + margin < limit {
+    let short = limit.saturating_sub(margin).saturating_sub(wal_bytes(db));
+    for _ in 0..short.div_ceil(64 * 1024) {
         write(db, 64 * 1024);
     }
 }
@@ -358,6 +362,136 @@ fn a_wal_written_at_one_segment_size_reopens_at_another() {
     db.close().unwrap();
 }
 
+// ---------------------------------------------------------------------------
+// An Instant plus a duration a user sets (the class)
+// ---------------------------------------------------------------------------
+
+/// The crates whose source the scan below reads: every crate that can hold a deadline.
+const SCANNED: [&str; 6] = [
+    "grafeo-common/src",
+    "grafeo-core/src",
+    "grafeo-storage/src",
+    "grafeo-adapters/src",
+    "grafeo-engine/src",
+    "grafeo/src",
+];
+
+/// Whether the right side of an `Instant` addition is a constant: `Duration::from_*` of a literal,
+/// or an upper-case constant.
+fn is_constant(right: &str) -> bool {
+    let right = right.trim_start();
+    if right.starts_with(|c: char| c.is_ascii_uppercase())
+        && right
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '_')
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+    {
+        return true;
+    }
+    let right = right.strip_prefix("std::time::").unwrap_or(right);
+    [
+        "Duration::from_secs(",
+        "Duration::from_millis(",
+        "Duration::from_micros(",
+        "Duration::from_nanos(",
+    ]
+    .iter()
+    .any(|prefix| {
+        right.strip_prefix(prefix).is_some_and(|rest| {
+            let digits = rest.find(')').map_or("", |end| &rest[..end]);
+            !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit() || c == '_')
+        })
+    })
+}
+
+/// The `Instant` additions of one source text that add something other than a constant, as
+/// `line: text`: `Instant::now() + x`, or `now + x` for a variable named `now`.
+fn unchecked_additions(text: &str) -> Vec<String> {
+    let mut found = Vec::new();
+    for (number, line) in text.lines().enumerate() {
+        if line.trim_start().starts_with("//") {
+            continue;
+        }
+        for needle in ["Instant::now() +", "now +"] {
+            let mut from = 0;
+            while let Some(at) = line[from..].find(needle).map(|at| at + from) {
+                from = at + needle.len();
+                let before = line[..at].chars().next_back();
+                let word = needle == "now +"
+                    && before
+                        .is_some_and(|c| c.is_alphanumeric() || c == '_' || c == '.' || c == ':');
+                if word || is_constant(&line[from..]) {
+                    continue;
+                }
+                found.push(format!("{}: {}", number + 1, line.trim()));
+            }
+        }
+    }
+    found
+}
+
+/// The scan itself finds what it must: an interval, a timeout or a backoff added to an `Instant`
+/// is found, a constant is not, and neither is a checked addition.
+#[test]
+fn the_instant_scan_tells_a_user_duration_from_a_constant() {
+    let text = "let a = Instant::now() + interval;
+let b = now + interval.max(pause);
+let c = Instant::now() + Duration::from_secs(10);
+let d = Instant::now() + LOCK_WAIT;
+let e = now.checked_add(interval);
+let f = std::time::Instant::now() + std::time::Duration::from_millis(1_500);
+let g = snow + 1;
+// let h = now + interval;
+let i = state.now + 1;";
+    let found = unchecked_additions(text);
+    assert_eq!(
+        found,
+        [
+            "1: let a = Instant::now() + interval;",
+            "2: let b = now + interval.max(pause);"
+        ]
+    );
+}
+
+/// Every `Instant` plus a duration in the source adds a constant. A duration a user sets (a
+/// checkpoint interval, a query timeout, a backoff from either) goes through `checked_add`, where a
+/// deadline past what an `Instant` holds means it never comes: an unchecked `+` panics for
+/// `Duration::MAX`. The behavior rows are `an_interval_too_long_to_reckon_never_fires_and_the_thread_lives`
+/// and `query_timeout_holds::a_timeout_too_long_to_reckon_runs_as_no_limit`. grafeo-common's
+/// `testing` module is left out: test helpers whose callers pass constants.
+#[test]
+fn every_instant_addition_in_the_source_adds_a_constant() {
+    fn walk(dir: &Path, files: &mut Vec<PathBuf>) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                if !path.ends_with("testing") {
+                    walk(&path, files);
+                }
+            } else if path.extension().is_some_and(|extension| extension == "rs") {
+                files.push(path);
+            }
+        }
+    }
+    let crates = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+    let mut files = Vec::new();
+    for dir in SCANNED {
+        walk(&crates.join(dir), &mut files);
+    }
+    assert!(files.len() > 200, "{} files", files.len());
+    let mut unchecked = Vec::new();
+    for file in &files {
+        let text = std::fs::read_to_string(file).unwrap();
+        for finding in unchecked_additions(&text) {
+            unchecked.push(format!("{}:{finding}", file.display()));
+        }
+    }
+    assert!(
+        unchecked.is_empty(),
+        "unchecked Instant additions: {unchecked:#?}"
+    );
+}
+
 #[cfg(feature = "testing-crash-injection")]
 mod hooks {
     //! The tests that read the checkpoint thread's counts or make its checkpoint fail.
@@ -618,6 +752,242 @@ mod hooks {
                 counts(&db).attempts >= 1
             });
             assert_eq!(counts(&db).starts, 1, "wal {wal}: {:?}", counts(&db));
+            db.close().unwrap();
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // v4: the checked interval, the arm race, the restart window, changes
+    // -----------------------------------------------------------------------
+
+    /// A checkpoint interval past what an `Instant` holds never fires, and the thread that waits
+    /// on it lives on: it still checkpoints by size, and the database closes. Three rows, one per
+    /// place the interval's next deadline is reckoned: set at open, armed by the setter, and the
+    /// backoff after a failed checkpoint (the larger of the interval and the backoff).
+    #[test]
+    fn an_interval_too_long_to_reckon_never_fires_and_the_thread_lives() {
+        let both = CheckpointTriggers::none()
+            .with_wal_bytes(MIB)
+            .with_interval(Duration::MAX);
+        for row in ["at open", "by the setter", "after a failure"] {
+            let dir = tempfile::tempdir().unwrap();
+            let db = open(&dir.path().join("hoorn.grafeo"), |config| {
+                let config = config.with_wal_segment_size(MIB);
+                if row == "at open" {
+                    config
+                        .with_checkpoint_wal_size(MIB)
+                        .with_checkpoint_interval(Duration::MAX)
+                } else {
+                    config.without_checkpoint_wal_size()
+                }
+            });
+            if row != "at open" {
+                db.set_checkpoint_triggers(both).unwrap();
+            }
+            if row == "after a failure" {
+                with_free_space_under(dir.path(), Some(TOO_LITTLE), || {
+                    write_up_to(&db, MIB + 64 * 1024, 0);
+                    wait_until("the failed size checkpoint", || {
+                        db.checkpoint_status().failures == 1
+                    });
+                });
+                // One more segment past the failure: the size trigger tries again, with room.
+                let failed = wal_bytes(&db);
+                write_up_to(&db, failed + MIB + 64 * 1024, 0);
+                wait_until("the size checkpoint after the backoff", || {
+                    db.checkpoint_status().failures == 0 && wal_bytes(&db) < MIB
+                });
+            } else {
+                write_up_to(&db, MIB + 64 * 1024, 0);
+                wait_until("the size checkpoint", || {
+                    counts(&db).attempts >= 1 && wal_bytes(&db) < MIB
+                });
+            }
+            assert_eq!(counts(&db).starts, 1, "{row}: {:?}", counts(&db));
+            db.close().unwrap_or_else(|error| panic!("{row}: {error}"));
+        }
+    }
+
+    /// A commit that crosses the WAL mark while the size trigger is being armed starts the
+    /// thread: the crossing is the mark's only signal (the WAL clears the mark as it calls the
+    /// waker), so the timer must already wait for work when the mark is armed. The hook runs on
+    /// the arming thread after the mark is armed and before the arming checks whether the log is
+    /// past it; another thread commits past the mark meanwhile. Its waker may wait for the arming
+    /// to finish, so the hook waits only until the WAL has passed the mark, not for the commit.
+    #[cfg(feature = "testing-statement-injection")]
+    #[test]
+    fn a_crossing_while_the_mark_is_armed_starts_the_thread() {
+        use std::sync::{Arc, Mutex};
+
+        use grafeo_common::testing::commit_hook;
+
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(open(
+            &dir.path().join("purmerend.grafeo"),
+            Config::without_checkpoint_wal_size,
+        ));
+        for _ in 0..12 {
+            write(&db, 64 * 1024);
+        }
+        let logged = wal_bytes(&db);
+        assert!(logged < MIB, "{logged}");
+        let blobs_to_cross = (MIB - logged) / (64 * 1024) + 2;
+        let writer: Arc<Mutex<Option<std::thread::JoinHandle<()>>>> = Arc::default();
+        let (writer_slot, writer_db, watched) =
+            (Arc::clone(&writer), Arc::clone(&db), Arc::clone(&db));
+        commit_hook::during_next_checkpoint_arm(move || {
+            *writer_slot.lock().unwrap() = Some(std::thread::spawn(move || {
+                for _ in 0..blobs_to_cross {
+                    write(&writer_db, 64 * 1024);
+                }
+            }));
+            wait_until("the WAL past the mark", || wal_bytes(&watched) >= MIB);
+        });
+        db.set_checkpoint_triggers(CheckpointTriggers::none().with_wal_bytes(MIB))
+            .unwrap();
+        writer
+            .lock()
+            .unwrap()
+            .take()
+            .expect("the arming ran the hook")
+            .join()
+            .unwrap();
+        wait_until("the checkpoint of the crossing", || {
+            counts(&db).attempts >= 1 && wal_bytes(&db) < MIB
+        });
+        assert_eq!(counts(&db).starts, 1, "{:?}", counts(&db));
+        db.close().unwrap();
+    }
+
+    /// Without a WAL, a first commit with changes while the interval is armed again starts it,
+    /// wherever it lands around the arming of the first-commit start: just before it, where the
+    /// arming's check for a change since the last checkpoint sees the commit, or just after it,
+    /// where the commit runs the hook. The hooks run on the restarting thread with no lock held
+    /// that a commit takes; the commit runs on another thread and ends before the restart goes on.
+    #[cfg(feature = "testing-statement-injection")]
+    #[test]
+    fn a_first_commit_around_a_restart_starts_the_interval() {
+        use std::sync::Arc;
+
+        use grafeo_common::testing::commit_hook;
+
+        for row in ["just before the arming", "just after the arming"] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("medemblik.grafeo");
+            let config = |config: Config| config.without_checkpoint_wal_size().without_wal();
+            {
+                let db = open(&path, config);
+                write(&db, 1024);
+                db.close().unwrap();
+            }
+            let db = Arc::new(open(&path, config));
+            let writer_db = Arc::clone(&db);
+            let commit = move || {
+                std::thread::spawn(move || write(&writer_db, 1024))
+                    .join()
+                    .unwrap();
+            };
+            if row == "just before the arming" {
+                commit_hook::before_next_first_commit_arming(commit);
+            } else {
+                commit_hook::after_next_first_commit_arming(commit);
+            }
+            db.set_checkpoint_triggers(
+                CheckpointTriggers::none().with_interval(Duration::from_millis(100)),
+            )
+            .unwrap();
+            assert_eq!(blobs(&db), 2, "{row}: the hook's commit ran");
+            wait_until("the interval checkpoint of the commit", || {
+                counts(&db).attempts >= 1
+            });
+            assert_eq!(counts(&db).starts, 1, "{row}: {:?}", counts(&db));
+            db.close().unwrap();
+        }
+    }
+
+    /// Without a WAL, only a commit with changes is the interval's work: one the WAL would record,
+    /// a change set or a schema change. A read in a transaction, a query, a DELETE that matched
+    /// nothing and a direct removal of a property the node lacks commit without changes: no thread
+    /// starts and nothing checkpoints, at the interval and after the triggers are armed again (the
+    /// arming compares the last commit with changes, not the epoch, which such commits take). A
+    /// write then starts it. A DDL statement alone, an index or a node type, is a change: it
+    /// starts the thread, and the next tick checkpoints.
+    #[test]
+    fn only_commits_with_changes_give_an_interval_work() {
+        let interval = CheckpointTriggers::none().with_interval(Duration::from_millis(100));
+        let rows = [
+            ("a read in a transaction", false),
+            ("a query", false),
+            ("a DELETE that matched nothing", false),
+            ("a removal of a missing property", false),
+            ("an index alone", true),
+            ("a node type alone", true),
+        ];
+        for (row, is_change) in rows {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("edam.grafeo");
+            let config = |config: Config| config.without_checkpoint_wal_size().without_wal();
+            let city = {
+                let db = open(&path, config);
+                let city = db.create_node(&["City"]).unwrap();
+                db.close().unwrap();
+                city
+            };
+            let db = open(&path, |config_at_open| {
+                config(config_at_open).with_checkpoint_interval(Duration::from_millis(100))
+            });
+            let rounds = if is_change { 1 } else { 3 };
+            for _ in 0..rounds {
+                match row {
+                    "a read in a transaction" => {
+                        let mut session = db.session();
+                        session.begin_transaction().unwrap();
+                        session.execute("MATCH (c:City) RETURN c").unwrap();
+                        session.commit().unwrap();
+                    }
+                    "a query" => {
+                        db.execute("MATCH (c:City) RETURN count(c) AS n").unwrap();
+                    }
+                    "a DELETE that matched nothing" => {
+                        db.execute("MATCH (n:Nobody) DELETE n").unwrap();
+                    }
+                    "a removal of a missing property" => {
+                        let removed = db.remove_node_property(city, "name").unwrap();
+                        assert!(!removed, "the node has no name");
+                    }
+                    "an index alone" => {
+                        db.execute("CREATE INDEX on_name FOR (c:City) ON (c.name)")
+                            .unwrap();
+                    }
+                    _ => {
+                        db.execute("CREATE NODE TYPE Harbor (name STRING)").unwrap();
+                    }
+                }
+            }
+            if is_change {
+                wait_until("the checkpoint of the schema change", || {
+                    counts(&db).attempts >= 1
+                });
+                assert_eq!(counts(&db).starts, 1, "{row}: {:?}", counts(&db));
+                db.close().unwrap();
+                continue;
+            }
+            std::thread::sleep(Duration::from_millis(600));
+            let idle = counts(&db);
+            assert_eq!((idle.starts, idle.attempts), (0, 0), "{row}: {idle:?}");
+            db.set_checkpoint_triggers(interval).unwrap();
+            std::thread::sleep(Duration::from_millis(600));
+            let rearmed = counts(&db);
+            assert_eq!(
+                (rearmed.starts, rearmed.attempts),
+                (0, 0),
+                "{row}, armed again: {rearmed:?}"
+            );
+            write(&db, 1024);
+            wait_until("the checkpoint of the first change", || {
+                counts(&db).attempts >= 1
+            });
+            assert_eq!(counts(&db).starts, 1, "{row}: {:?}", counts(&db));
             db.close().unwrap();
         }
     }

@@ -221,7 +221,7 @@ pub(crate) fn write_commit<'a>(
     schema: &[crate::transaction::QueuedSchemaOp],
     origin: Origin,
 ) -> Result<(CommitGuard<'a>, Option<Logged>)> {
-    if changes.is_empty() && schema.is_empty() {
+    if !TransactionChanges::records_a_change(Some(changes), schema) {
         return Ok((commit, None));
     }
     let mut group = match wal.begin_group(transaction_id) {

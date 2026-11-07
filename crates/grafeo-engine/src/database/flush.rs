@@ -140,11 +140,14 @@ pub(super) fn flush_held(
     let image = sources.snapshot(&commits)?;
     let section_refs: Vec<&dyn Section> = image.sections.iter().map(AsRef::as_ref).collect();
     let held = image.held;
+    // The changes the image holds: commits are held off, so none comes
+    // between the image and this count.
+    let covered = sources.transaction_manager.change_count();
 
     #[cfg(feature = "testing-statement-injection")]
     grafeo_common::testing::commit_hook::run_during_checkpoint();
 
-    write_sections(
+    let result = write_sections(
         fm,
         (&section_refs, held),
         &image.context,
@@ -159,7 +162,11 @@ pub(super) fn flush_held(
         }),
         covered_lsn,
         commits,
-    )
+    )?;
+    // Only a checkpoint that succeeded covers the changes: after a failed
+    // one the database stays changed, and the next tick tries again.
+    sources.transaction_manager.checkpointed(covered);
+    Ok(result)
 }
 
 /// Steps 1 to 3 of [`flush`] for `sections`, the sections of `image` when

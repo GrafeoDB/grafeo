@@ -47,6 +47,57 @@ mod inner {
         static DURING_CHECKPOINT: RefCell<Option<Hook>> = const { RefCell::new(None) };
         static DURING_CHECKPOINT_WRITE: RefCell<Option<Hook>> = const { RefCell::new(None) };
         static DURING_HELD_CHANGE: RefCell<Option<Hook>> = const { RefCell::new(None) };
+        static DURING_CHECKPOINT_ARM: RefCell<Option<Hook>> = const { RefCell::new(None) };
+        static BEFORE_FIRST_COMMIT_ARMING: RefCell<Option<Hook>> = const { RefCell::new(None) };
+        static AFTER_FIRST_COMMIT_ARMING: RefCell<Option<Hook>> = const { RefCell::new(None) };
+    }
+
+    /// Arms `hook` to run once inside the next arming of the automatic
+    /// checkpointer on this thread, once the WAL's mark is armed and before
+    /// the arming looks whether work already waits.
+    pub fn during_next_checkpoint_arm(hook: impl FnOnce() + 'static) {
+        DURING_CHECKPOINT_ARM.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+    }
+
+    /// Runs the [`during_next_checkpoint_arm`] hook armed on this thread, if
+    /// any. Called by the engine's checkpointer as it arms.
+    #[inline]
+    pub fn run_during_checkpoint_arm() {
+        if let Some(hook) = DURING_CHECKPOINT_ARM.with(|slot| slot.borrow_mut().take()) {
+            hook();
+        }
+    }
+
+    /// Arms `hook` to run once on this thread just before the next restart
+    /// of the checkpointer of a database without a WAL arms its first-commit
+    /// hook.
+    pub fn before_next_first_commit_arming(hook: impl FnOnce() + 'static) {
+        BEFORE_FIRST_COMMIT_ARMING.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+    }
+
+    /// Runs the [`before_next_first_commit_arming`] hook armed on this
+    /// thread, if any.
+    #[inline]
+    pub fn run_before_first_commit_arming() {
+        if let Some(hook) = BEFORE_FIRST_COMMIT_ARMING.with(|slot| slot.borrow_mut().take()) {
+            hook();
+        }
+    }
+
+    /// Arms `hook` to run once on this thread just after the next restart of
+    /// the checkpointer of a database without a WAL armed its first-commit
+    /// hook, before it starts the thread for a change that came first.
+    pub fn after_next_first_commit_arming(hook: impl FnOnce() + 'static) {
+        AFTER_FIRST_COMMIT_ARMING.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+    }
+
+    /// Runs the [`after_next_first_commit_arming`] hook armed on this thread,
+    /// if any.
+    #[inline]
+    pub fn run_after_first_commit_arming() {
+        if let Some(hook) = AFTER_FIRST_COMMIT_ARMING.with(|slot| slot.borrow_mut().take()) {
+            hook();
+        }
     }
 
     /// Arms a one-shot hook after the next changed backend write is recorded
@@ -269,6 +320,27 @@ mod inner {
 #[cfg(not(feature = "testing-statement-injection"))]
 mod inner {
     use std::path::Path;
+
+    /// No-op when injection is disabled.
+    pub fn during_next_checkpoint_arm(_hook: impl FnOnce() + 'static) {}
+
+    /// No-op when injection is disabled.
+    #[inline]
+    pub fn run_during_checkpoint_arm() {}
+
+    /// No-op when injection is disabled.
+    pub fn before_next_first_commit_arming(_hook: impl FnOnce() + 'static) {}
+
+    /// No-op when injection is disabled.
+    #[inline]
+    pub fn run_before_first_commit_arming() {}
+
+    /// No-op when injection is disabled.
+    pub fn after_next_first_commit_arming(_hook: impl FnOnce() + 'static) {}
+
+    /// No-op when injection is disabled.
+    #[inline]
+    pub fn run_after_first_commit_arming() {}
 
     /// No-op when injection is disabled.
     pub fn after_next_data_write(

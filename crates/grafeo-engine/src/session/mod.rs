@@ -5532,6 +5532,17 @@ impl Session {
             }
         };
         let commit_epoch = commit.epoch();
+        // A committed change, for the checkpointer, is what the WAL records
+        // (a read, or a write that matched nothing, is none).
+        #[cfg(feature = "grafeo-file")]
+        let commit = {
+            let mut commit = commit;
+            commit.set_changed(crate::transaction::TransactionChanges::records_a_change(
+                changes.as_deref(),
+                &schema,
+            ));
+            commit
+        };
 
         #[cfg(feature = "testing-statement-injection")]
         grafeo_common::testing::commit_hook::run_after_commit_epoch();

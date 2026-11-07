@@ -446,6 +446,16 @@ impl GrafeoDB {
                  is not published"
             )));
         };
+        // A call that changed nothing (a removal of what is not there) is no
+        // committed change, as the WAL logs no group for it.
+        #[cfg(feature = "grafeo-file")]
+        let commits = {
+            let mut commits = commits;
+            if !changes.is_empty() {
+                commits.changed(&self.transaction_manager);
+            }
+            commits
+        };
         // While the database keeps history, the time of the call: its WAL
         // group carries it, and the time index records it once published.
         let at = self.transaction_manager.commit_time();
@@ -678,6 +688,14 @@ impl GrafeoDB {
             }
         };
         let epoch = commit.epoch();
+        // A call that changed nothing (a removal of what is not there) is no
+        // committed change for the checkpointer, as the WAL records none.
+        #[cfg(feature = "grafeo-file")]
+        let commit = {
+            let mut commit = commit;
+            commit.set_changed(TransactionChanges::records_a_change(Some(changes), &[]));
+            commit
+        };
         // Tests start a checkpoint or `close()` here (the commit holds its
         // epoch, nothing is published yet), which must wait for it.
         #[cfg(feature = "testing-statement-injection")]

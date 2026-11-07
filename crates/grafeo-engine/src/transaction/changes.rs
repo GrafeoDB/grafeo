@@ -327,9 +327,18 @@ impl TransactionChanges {
     }
 
     /// Whether the transaction changed nothing (that is still recorded).
-    #[cfg(feature = "wal")]
+    #[cfg(any(feature = "wal", feature = "grafeo-file"))]
     pub(crate) fn is_empty(&self) -> bool {
         self.state.lock().set.is_empty()
+    }
+
+    /// Whether a commit of `changes` (none for a transaction that recorded
+    /// no change set) with the schema changes `schema` is a committed change:
+    /// the one fact that decides both whether the WAL records the commit and
+    /// whether the checkpointer counts it.
+    #[cfg(any(feature = "wal", feature = "grafeo-file"))]
+    pub(crate) fn records_a_change(changes: Option<&Self>, schema: &[QueuedSchemaOp]) -> bool {
+        !schema.is_empty() || changes.is_some_and(|changes| !changes.is_empty())
     }
 
     /// Rolls the transaction back: every entry goes, and each graph's

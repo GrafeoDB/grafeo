@@ -43,6 +43,7 @@ Queries that ran in 0.6.1 and now fail or behave differently.
 - **`file:` URLs follow RFC 8089**: in `LOAD CSV`, `LOAD DATA` and the load procedures, `file:///srv/data.csv` and `file://localhost/srv/data.csv` name the absolute path `/srv/data.csv` (`file:///` was stripped and the rest read as a relative path), and a `file:` URL with another host is refused.
 - **Permission refusals have their own codes**: GQLSTATUS `42501`, with `GRAFEO-Q007` for a write, DDL or writing procedure that the session's role or graph grants refuse and `GRAFEO-Q008` for a statement that reaches outside the database on a session without external access; both were `GRAFEO-Q002` with `42000`. Python raises `GrafeoPermissionError`, a subclass of `GrafeoError`.
 - **`memory_usage()` reports what the store holds**: its store, index, version and string-pool figures are the counted bytes, kept as each write grows them, instead of estimates.
+- **`TierOverride::ForceDisk` is refused on sections that cannot spill**: only `VectorStore` can move to disk, so `ForceDisk` on another section (`TextIndex`, `PropertyIndex`, `LpgStore`, `RdfRing`, `CompactStore` and the rest) now fails `Config::validate`, where it was accepted and did nothing.
 
 ### Added
 

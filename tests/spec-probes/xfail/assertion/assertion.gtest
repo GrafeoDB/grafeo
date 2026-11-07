@@ -1,0 +1,28 @@
+# Both cases fail as expected: the run passes and its summary says xfailed=2.
+
+meta:
+  language: gql
+  model: lpg
+  section: probes
+  title: "xfail probe: a failing assertion and a failing statement"
+  dataset: empty
+
+tests:
+
+  - name: probe_xfail_on_a_row_mismatch
+    xfail:
+      spec: "harness probe: a spec assertion fails"
+      issue: "fix in 0.6.2"
+    query: "RETURN 1 AS v"
+    expect:
+      rows:
+        - [2]
+
+  - name: probe_xfail_on_a_statement_error
+    xfail:
+      spec: "harness probe: the statement fails"
+      issue: "fix in 0.6.2"
+    query: "RETURN 1 / 0 AS v"
+    expect:
+      rows:
+        - [1]

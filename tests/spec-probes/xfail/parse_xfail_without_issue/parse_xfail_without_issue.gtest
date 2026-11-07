@@ -1,0 +1,18 @@
+# An xfail without an issue: the parser refuses the file, naming the case.
+
+meta:
+  language: gql
+  model: lpg
+  section: probes
+  title: "xfail probe: xfail without an issue"
+  dataset: empty
+
+tests:
+
+  - name: probe_xfail_without_issue
+    xfail:
+      spec: "harness probe: an xfail names its issue"
+    query: "RETURN 1 AS v"
+    expect:
+      rows:
+        - [2]

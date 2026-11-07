@@ -1624,6 +1624,25 @@ def test_t9_the_floor_is_the_first_release_heading(tmp_path: Path) -> None:
     assert t9_found(tmp_path, files) == [(gtest, t9_line(text, "name:", "issue:"))]
 
 
+def test_t9_the_harness_probes_are_fixtures_not_expected_failures(
+    tmp_path: Path,
+) -> None:
+    # tests/spec-probes holds the gtest harness's own fixtures, some refused on
+    # purpose (an xfail without an issue): T9 judges the spec suite, not them. The
+    # match is on a whole path component, as the runners' `probe` key is.
+    files = {"CHANGELOG.md": T9_CHANGELOG}
+    probe = "tests/spec-probes/xfail/rows/rows.gtest"
+    near = [
+        "tests/my-spec-probes/rows.gtest",
+        "tests/spec/spec-probes-notes/rows.gtest",
+    ]
+    files[probe] = T9_GTEST
+    for rel in near:
+        files[rel] = T9_GTEST
+    paths = {path for path, _ in t9_found(tmp_path, files)}
+    assert paths == set(near)
+
+
 def test_t9_the_repository_is_in_step() -> None:
     root = Path(__file__).resolve().parents[2]
     files = subprocess.run(

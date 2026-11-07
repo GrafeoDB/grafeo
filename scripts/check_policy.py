@@ -960,6 +960,11 @@ def xfail_findings(root: Path, files: list[str]) -> list[Finding]:
         (".rs", rust_xfail_findings, "xfail("),
     ]
     for rel in files:
+        # The gtest harness's own fixtures, some refused on purpose (an xfail without an
+        # issue): the spec suite is judged, not them. A whole path component, as the
+        # runners' `probe:` key matches it.
+        if "spec-probes" in rel.split("/"):
+            continue
         for suffix, check, needle in forms:
             if rel.endswith(suffix):
                 text = read_text(root / rel)

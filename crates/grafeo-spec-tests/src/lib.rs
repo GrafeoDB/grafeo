@@ -2,14 +2,141 @@
 //!
 //! Provides helper functions called by the build.rs-generated test code:
 //! dataset loading, query execution, and result comparison.
+//!
+//! A case fails the way a spec case fails, on one of the assertions or on an error of one of its
+//! statements, with a [`SpecFailure`] (see [`spec_failure`]). Only that failure is a case's
+//! expected failure under `xfail:` (see [`run_xfail`]); any other panic is a fault of the engine
+//! or of the runner and goes on as it is.
 
 use std::fs;
+use std::panic::{AssertUnwindSafe, catch_unwind, panic_any, resume_unwind};
 use std::path::PathBuf;
 
 use grafeo_common::types::Value;
 use grafeo_common::utils::error::Result;
 use grafeo_engine::GrafeoDB;
 use grafeo_engine::database::QueryResult;
+
+/// The `.gtest` file model and its parser, which the build script shares to generate the
+/// tests.
+pub mod gtest {
+    include!("gtest.rs");
+}
+
+/// The failure of a spec case: an assertion that does not hold, or an error of one of its
+/// statements, with its text. The one panic payload [`run_xfail`] takes for a case's expected
+/// failure.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpecFailure(pub String);
+
+/// Fails the running case with a [`SpecFailure`] carrying `message`, printed first, so a case
+/// that fails shows what differed.
+///
+/// # Panics
+///
+/// Always, with the [`SpecFailure`] as the payload.
+pub fn spec_failure(message: impl Into<String>) -> ! {
+    let message = message.into();
+    eprintln!("{message}");
+    panic_any(SpecFailure(message))
+}
+
+/// Runs `case`, marked `xfail:` against `spec` until `issue` fixes it: `Ok` when it fails with a
+/// [`SpecFailure`] (the expected failure), an `XPASS` error naming the spec and the issue when it
+/// passes, so the mark comes off.
+///
+/// # Errors
+///
+/// The `XPASS` message, when `case` passes.
+///
+/// # Panics
+///
+/// With the payload of any other panic of `case`, unchanged: an engine or a runner fault is
+/// never the expected failure.
+pub fn run_xfail(spec: &str, issue: &str, case: impl FnOnce()) -> std::result::Result<(), String> {
+    match catch_unwind(AssertUnwindSafe(case)) {
+        Ok(()) => Err(format!(
+            "XPASS: the case passes, but it is marked xfail against {spec} ({issue}); take the \
+             mark off"
+        )),
+        Err(payload) => match payload.downcast::<SpecFailure>() {
+            Ok(_) => Ok(()),
+            Err(other) => resume_unwind(other),
+        },
+    }
+}
+
+/// `assert!` for a spec case: fails it with a [`SpecFailure`] carrying the message.
+macro_rules! check {
+    ($condition:expr, $($message:tt)+) => {
+        let holds: bool = $condition;
+        if !holds {
+            $crate::spec_failure(format!($($message)+))
+        }
+    };
+}
+
+/// `assert_eq!` for a spec case: fails it with a [`SpecFailure`] carrying the message and both
+/// sides.
+macro_rules! check_eq {
+    ($left:expr, $right:expr, $($message:tt)+) => {
+        match (&$left, &$right) {
+            (left, right) => {
+                if left != right {
+                    $crate::spec_failure(format!(
+                        "{}\n  left: {left:?}\n right: {right:?}",
+                        format_args!($($message)+)
+                    ))
+                }
+            }
+        }
+    };
+}
+
+/// The result of a statement of a case, which must succeed.
+///
+/// # Panics
+///
+/// With a [`SpecFailure`] naming the statement and its error, when it failed.
+pub fn statement_result(result: Result<QueryResult>, query: &str) -> QueryResult {
+    result.unwrap_or_else(|e| spec_failure(format!("Query failed: {query}\nError: {e}")))
+}
+
+/// Runs a statement of a case with its parameters, which must succeed: `params` is the error a
+/// binding gives for a parameter it cannot type, when it is one.
+///
+/// # Panics
+///
+/// With a [`SpecFailure`] naming the statement and its error, when it or its parameters failed.
+pub fn run_statement_with_params(
+    db: &GrafeoDB,
+    language: &str,
+    model: &str,
+    query: &str,
+    params: &Result<std::collections::HashMap<String, Value>>,
+) -> QueryResult {
+    match params {
+        Ok(params) => statement_result(
+            execute_query_result_with_params(db, language, model, query, params.clone()),
+            query,
+        ),
+        Err(e) => spec_failure(format!("Query failed: {query}\nError: {e}")),
+    }
+}
+
+/// Asserts that `result` has `expected` rows.
+///
+/// # Panics
+///
+/// With a [`SpecFailure`] when it has another number.
+pub fn assert_row_count(result: &QueryResult, expected: usize) {
+    check_eq!(
+        result.row_count(),
+        expected,
+        "Row count mismatch: got {} rows, expected {expected}",
+        result.row_count()
+    );
+}
 
 /// Root directory of the grafeo repository.
 fn repo_root() -> PathBuf {
@@ -52,9 +179,11 @@ pub fn execute_query(db: &GrafeoDB, language: &str, query: &str) {
 ///
 /// Panics if `execute_query_result` returns an error for the given query and language.
 pub fn execute_query_with_model(db: &GrafeoDB, language: &str, model: &str, query: &str) {
-    execute_query_result(db, language, model, query).unwrap_or_else(|e| {
-        panic!("Query failed: {query}\nLanguage: {language}\nModel: {model}\nError: {e}")
-    });
+    if let Err(e) = execute_query_result(db, language, model, query) {
+        spec_failure(format!(
+            "Query failed: {query}\nLanguage: {language}\nModel: {model}\nError: {e}"
+        ));
+    }
 }
 
 /// Execute a query using the (language, model) dispatch key, returning the Result.
@@ -224,7 +353,7 @@ pub fn assert_rows_sorted(result: &QueryResult, expected: &[Vec<String>]) {
     actual.sort();
     expected.sort();
 
-    assert_eq!(
+    check_eq!(
         actual.len(),
         expected.len(),
         "Row count mismatch: got {} rows, expected {}\nActual: {actual:?}\nExpected: {expected:?}",
@@ -233,7 +362,7 @@ pub fn assert_rows_sorted(result: &QueryResult, expected: &[Vec<String>]) {
     );
 
     for (i, (act, exp)) in actual.iter().zip(expected.iter()).enumerate() {
-        assert_eq!(
+        check_eq!(
             act.len(),
             exp.len(),
             "Column count mismatch at row {i}: got {} cols, expected {}\nActual row: {act:?}\nExpected row: {exp:?}",
@@ -241,8 +370,9 @@ pub fn assert_rows_sorted(result: &QueryResult, expected: &[Vec<String>]) {
             exp.len()
         );
         for (j, (a, e)) in act.iter().zip(exp.iter()).enumerate() {
-            assert_eq!(
-                a, e,
+            check_eq!(
+                a,
+                e,
                 "Mismatch at sorted row {i}, col {j}: got '{a}', expected '{e}'\nFull actual row: {act:?}\nFull expected row: {exp:?}"
             );
         }
@@ -257,7 +387,7 @@ pub fn assert_rows_sorted(result: &QueryResult, expected: &[Vec<String>]) {
 pub fn assert_rows_ordered(result: &QueryResult, expected: &[Vec<String>]) {
     let actual = result_to_strings(result);
 
-    assert_eq!(
+    check_eq!(
         actual.len(),
         expected.len(),
         "Row count mismatch: got {} rows, expected {}\nActual: {actual:?}\nExpected: {expected:?}",
@@ -266,7 +396,7 @@ pub fn assert_rows_ordered(result: &QueryResult, expected: &[Vec<String>]) {
     );
 
     for (i, (act, exp)) in actual.iter().zip(expected.iter()).enumerate() {
-        assert_eq!(
+        check_eq!(
             act.len(),
             exp.len(),
             "Column count mismatch at row {i}: got {} cols, expected {}\nActual row: {act:?}\nExpected row: {exp:?}",
@@ -274,8 +404,9 @@ pub fn assert_rows_ordered(result: &QueryResult, expected: &[Vec<String>]) {
             exp.len()
         );
         for (j, (a, e)) in act.iter().zip(exp.iter()).enumerate() {
-            assert_eq!(
-                a, e,
+            check_eq!(
+                a,
+                e,
                 "Mismatch at row {i}, col {j}: got '{a}', expected '{e}'\nFull actual row: {act:?}\nFull expected row: {exp:?}"
             );
         }
@@ -289,8 +420,9 @@ pub fn assert_rows_ordered(result: &QueryResult, expected: &[Vec<String>]) {
 /// Panics if the result column names do not match the `expected` slice.
 pub fn assert_columns(result: &QueryResult, expected: &[&str]) {
     let actual: Vec<&str> = result.columns.iter().map(|s| s.as_str()).collect();
-    assert_eq!(
-        actual, expected,
+    check_eq!(
+        actual,
+        expected,
         "Column mismatch: got {actual:?}, expected {expected:?}"
     );
 }
@@ -302,7 +434,7 @@ pub fn assert_columns(result: &QueryResult, expected: &[&str]) {
 /// Panics if they differ from `expected`.
 pub fn assert_warnings(result: &QueryResult, expected: &[&str]) {
     let actual: Vec<&str> = result.warnings().iter().map(|w| w.code.as_str()).collect();
-    assert_eq!(
+    check_eq!(
         actual,
         expected,
         "Warning mismatch: got {actual:?}, expected {expected:?} ({:?})",
@@ -324,7 +456,7 @@ pub fn assert_rows_with_precision(result: &QueryResult, expected: &[Vec<String>]
     #[allow(clippy::cast_possible_wrap)]
     let tolerance = 10f64.powi(-(precision as i32));
 
-    assert_eq!(
+    check_eq!(
         actual.len(),
         expected.len(),
         "Row count mismatch: got {} rows, expected {}\nActual: {actual:?}\nExpected: {expected:?}",
@@ -333,7 +465,7 @@ pub fn assert_rows_with_precision(result: &QueryResult, expected: &[Vec<String>]
     );
 
     for (i, (act_row, exp_row)) in actual.iter().zip(expected.iter()).enumerate() {
-        assert_eq!(
+        check_eq!(
             act_row.len(),
             exp_row.len(),
             "Column count mismatch at row {i}: got {} cols, expected {}",
@@ -342,13 +474,14 @@ pub fn assert_rows_with_precision(result: &QueryResult, expected: &[Vec<String>]
         );
         for (j, (a, e)) in act_row.iter().zip(exp_row.iter()).enumerate() {
             if let (Ok(af), Ok(ef)) = (a.parse::<f64>(), e.parse::<f64>()) {
-                assert!(
+                check!(
                     (af - ef).abs() < tolerance,
                     "Float mismatch at row {i}, col {j}: got {af}, expected {ef} (tolerance {tolerance})"
                 );
             } else {
-                assert_eq!(
-                    a, e,
+                check_eq!(
+                    a,
+                    e,
                     "Mismatch at row {i}, col {j}: got '{a}', expected '{e}'"
                 );
             }
@@ -372,8 +505,9 @@ pub fn assert_hash(result: &QueryResult, expected_hash: &str) {
     }
     let hash = format!("{:x}", ctx.finalize());
 
-    assert_eq!(
-        hash, expected_hash,
+    check_eq!(
+        hash,
+        expected_hash,
         "Hash mismatch: got '{hash}', expected '{expected_hash}'\nRows: {rows:?}"
     );
 }
@@ -396,19 +530,20 @@ pub fn assert_error(result: Result<QueryResult>, message: Option<&str>, gql_stat
         (None, None) => "an error".to_string(),
     };
     let Err(error) = result else {
-        panic!("Expected {expected} but query succeeded");
+        spec_failure(format!("Expected {expected} but query succeeded"));
     };
     let text = error.to_string();
     if let Some(message) = message {
-        assert!(
+        check!(
             text.contains(message),
             "Error '{text}' does not contain '{message}'"
         );
     }
     if let Some(status) = gql_status {
         let actual = grafeo_common::utils::GqlStatus::from(&error).to_string();
-        assert_eq!(
-            actual, status,
+        check_eq!(
+            actual,
+            status,
             "Error '{text}' has GQLSTATUS {actual}, expected {status}"
         );
     }
@@ -449,7 +584,9 @@ pub fn term_to_string(value: &Value) -> String {
     let term = match value {
         Value::Null => return "null".to_string(),
         Value::RdfTerm(term) => term,
-        other => panic!("a `terms:` expectation got a value that is not an RDF term: {other:?}"),
+        other => spec_failure(format!(
+            "a `terms:` expectation got a value that is not an RDF term: {other:?}"
+        )),
     };
     match term.as_ref() {
         Term::Iri(iri) => format!("<{}>", iri.as_str()),
@@ -545,8 +682,9 @@ pub fn assert_terms(result: &QueryResult, expected: &[Vec<String>], ordered: boo
         got.sort();
         want.sort();
     }
-    assert_eq!(
-        got, want,
+    check_eq!(
+        got,
+        want,
         "terms differ\nactual:   {actual:?}\nexpected: {expected:?}"
     );
     if ordered {
@@ -555,12 +693,12 @@ pub fn assert_terms(result: &QueryResult, expected: &[Vec<String>], ordered: boo
         for (row_a, row_e) in actual.iter().zip(&expected) {
             for (a, e) in row_a.iter().zip(row_e) {
                 if a.starts_with("_:") {
-                    assert_eq!(
+                    check_eq!(
                         *pairs.entry(e.as_str()).or_insert(a.as_str()),
                         a.as_str(),
                         "{e} names two blank nodes\nactual: {actual:?}"
                     );
-                    assert_eq!(
+                    check_eq!(
                         *back.entry(a.as_str()).or_insert(e.as_str()),
                         e.as_str(),
                         "blank node {a} is named both {e} and another label\nactual: {actual:?}"

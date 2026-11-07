@@ -1,0 +1,20 @@
+# A case both skipped and expected to fail: the parser refuses the file, naming the case.
+
+meta:
+  language: gql
+  model: lpg
+  section: probes
+  title: "xfail probe: skip and xfail"
+  dataset: empty
+
+tests:
+
+  - name: probe_skip_and_xfail
+    skip: "harness probe"
+    xfail:
+      spec: "harness probe: skip and xfail together"
+      issue: "fix in 0.6.2"
+    query: "RETURN 1 AS v"
+    expect:
+      rows:
+        - [1]

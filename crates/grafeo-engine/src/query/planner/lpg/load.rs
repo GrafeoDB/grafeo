@@ -11,7 +11,7 @@ use crate::query::plan::{CallProcedureOp, LogicalExpression};
 
 /// Whether `call` is a load procedure.
 pub(super) fn is_load(call: &CallProcedureOp) -> bool {
-    call.writes()
+    crate::loader::is_load(&call.name)
 }
 
 impl super::Planner {

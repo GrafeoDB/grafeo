@@ -44,6 +44,12 @@ pub enum ErrorCode {
     QueryOptimization,
     /// Query execution failed.
     QueryExecution,
+    /// The session may not do what the statement does: its role or its
+    /// graph grants refuse it.
+    QueryPermissionDenied,
+    /// The statement reaches outside the database (a file, a URL, a model)
+    /// and the session has no external access.
+    QueryExternalAccessDenied,
 
     // Transaction errors (T)
     /// Write-write conflict (retry possible).
@@ -121,6 +127,8 @@ impl ErrorCode {
             Self::QueryUnsupported => "GRAFEO-Q004",
             Self::QueryOptimization => "GRAFEO-Q005",
             Self::QueryExecution => "GRAFEO-Q006",
+            Self::QueryPermissionDenied => "GRAFEO-Q007",
+            Self::QueryExternalAccessDenied => "GRAFEO-Q008",
 
             Self::TransactionConflict => "GRAFEO-T001",
             Self::TransactionTimeout => "GRAFEO-T002",
@@ -885,6 +893,20 @@ impl QueryError {
         Self::new(QueryErrorKind::Unsupported, message)
     }
 
+    /// A refused permission (`GRAFEO-Q007`, GQLSTATUS 42501): the session's
+    /// role or its graph grants do not allow what the statement does.
+    #[must_use]
+    pub fn permission_denied(message: impl Into<String>) -> Self {
+        Self::new(QueryErrorKind::PermissionDenied, message)
+    }
+
+    /// Refused external access (`GRAFEO-Q008`, GQLSTATUS 42501): the
+    /// statement reaches outside the database and the session may not.
+    #[must_use]
+    pub fn external_access_denied(message: impl Into<String>) -> Self {
+        Self::new(QueryErrorKind::ExternalAccessDenied, message)
+    }
+
     /// Creates a query timeout error.
     #[must_use]
     pub fn timeout() -> Self {
@@ -928,6 +950,8 @@ impl QueryError {
             | QueryErrorKind::InvalidParameterValue => ErrorCode::QueryExecution,
             QueryErrorKind::Timeout => ErrorCode::QueryTimeout,
             QueryErrorKind::Unsupported => ErrorCode::QueryUnsupported,
+            QueryErrorKind::PermissionDenied => ErrorCode::QueryPermissionDenied,
+            QueryErrorKind::ExternalAccessDenied => ErrorCode::QueryExternalAccessDenied,
         }
     }
 
@@ -1068,6 +1092,14 @@ pub enum QueryErrorKind {
     /// of 2.0 (GQLSTATUS 22023: ISO/IEC 9075-2 13.3 General Rule 7, which GQL
     /// takes as a code of another International Standard).
     InvalidParameterValue,
+    /// The session's role or its graph grants refuse what the statement
+    /// does, such as a write on a read-only session (GQLSTATUS 42501,
+    /// insufficient privilege: ISO/IEC 9075-2, which GQL's class 42 for an
+    /// access rule violation leaves without a subclass of its own).
+    PermissionDenied,
+    /// The statement reaches outside the database (a file, a URL, a model)
+    /// on a session without external access (GQLSTATUS 42501).
+    ExternalAccessDenied,
 }
 
 impl fmt::Display for QueryErrorKind {
@@ -1096,6 +1128,9 @@ impl fmt::Display for QueryErrorKind {
             }
             QueryErrorKind::ValuesNotComparable => write!(f, "values not comparable"),
             QueryErrorKind::InvalidParameterValue => write!(f, "invalid parameter value"),
+            QueryErrorKind::PermissionDenied | QueryErrorKind::ExternalAccessDenied => {
+                write!(f, "permission denied")
+            }
         }
     }
 }

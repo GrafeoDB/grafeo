@@ -266,6 +266,7 @@ mod procedure_edge_weights;
 mod procedure_optional_defaults;
 mod procedure_parameter_domains;
 mod procedure_required_arguments;
+mod procedures_declare_what_call_enforces;
 mod profile_lists_the_plan;
 mod profile_without_match;
 mod project_coverage;

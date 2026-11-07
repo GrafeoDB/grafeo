@@ -20,9 +20,11 @@
 //!   with the statement's writer.
 //!
 //! The registry is in every build; the graph algorithms need `algos`.
-//! Each procedure states whether it reaches outside the database
-//! ([`Procedure::external_access`]), which a session without external access
-//! refuses.
+//! Each procedure states whether it writes the graph
+//! ([`Procedure::graph_access`]), which a read-only session refuses, and
+//! whether it reaches outside the database ([`Procedure::external_access`]),
+//! which a session without external access refuses. `grafeo.procedures()`
+//! lists both.
 
 use std::sync::Arc;
 
@@ -50,6 +52,15 @@ use grafeo_core::graph::rowgroup::RowGroupStore;
 use crate::Snapshot;
 use hashbrown::HashMap;
 
+/// What a procedure does to the graph it is called on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum GraphAccess {
+    /// It only reads the graph.
+    Reads,
+    /// It writes the graph: a read-only session refuses the call.
+    Writes,
+}
+
 /// Unified interface for built-in procedures callable via `CALL`.
 ///
 /// Subsumes graph algorithms (through [`GraphAlgorithmProcedure`]), catalog
@@ -72,6 +83,11 @@ pub trait Procedure: Send + Sync {
     /// [`Identity::with_external_access`](crate::auth::Identity::with_external_access)). Every
     /// procedure states it: one added later is never let through by a default.
     fn external_access(&self) -> ExternalAccess;
+
+    /// Whether the procedure writes the graph, which a read-only session refuses before the
+    /// call is planned (GRAFEO-Q007). Every procedure states it: one added later is never
+    /// taken for a read by a default.
+    fn graph_access(&self) -> GraphAccess;
 
     /// Returns the canonical output column names in order, for a call with
     /// the parameters' defaults (as `grafeo.procedures()` lists them).
@@ -201,6 +217,10 @@ impl Procedure for GraphAlgorithmProcedure {
         ExternalAccess::None
     }
 
+    fn graph_access(&self) -> GraphAccess {
+        GraphAccess::Reads
+    }
+
     fn name(&self) -> &str {
         self.inner.name()
     }
@@ -240,6 +260,10 @@ impl Procedure for LabelsProcedure {
         ExternalAccess::None
     }
 
+    fn graph_access(&self) -> GraphAccess {
+        GraphAccess::Reads
+    }
+
     fn name(&self) -> &str {
         "labels"
     }
@@ -274,6 +298,10 @@ impl Procedure for RelationshipTypesProcedure {
         ExternalAccess::None
     }
 
+    fn graph_access(&self) -> GraphAccess {
+        GraphAccess::Reads
+    }
+
     fn name(&self) -> &str {
         "relationshipTypes"
     }
@@ -306,6 +334,10 @@ struct PropertyKeysProcedure;
 impl Procedure for PropertyKeysProcedure {
     fn external_access(&self) -> ExternalAccess {
         ExternalAccess::None
+    }
+
+    fn graph_access(&self) -> GraphAccess {
+        GraphAccess::Reads
     }
 
     fn name(&self) -> &str {
@@ -446,6 +478,10 @@ impl Procedure for SearchVectorProcedure {
         ExternalAccess::None
     }
 
+    fn graph_access(&self) -> GraphAccess {
+        GraphAccess::Reads
+    }
+
     fn name(&self) -> &str {
         "search.vector"
     }
@@ -567,6 +603,10 @@ impl SearchMmrProcedure {
 impl Procedure for SearchMmrProcedure {
     fn external_access(&self) -> ExternalAccess {
         ExternalAccess::None
+    }
+
+    fn graph_access(&self) -> GraphAccess {
+        GraphAccess::Reads
     }
 
     fn name(&self) -> &str {
@@ -703,6 +743,10 @@ impl SearchTextProcedure {
 impl Procedure for SearchTextProcedure {
     fn external_access(&self) -> ExternalAccess {
         ExternalAccess::None
+    }
+
+    fn graph_access(&self) -> GraphAccess {
+        GraphAccess::Reads
     }
 
     fn name(&self) -> &str {
@@ -873,6 +917,7 @@ impl BuiltinProcedures {
                 description: proc.description().to_string(),
                 parameters: proc.parameters().to_vec(),
                 output_columns: proc.output_columns(),
+                writes: proc.graph_access() == GraphAccess::Writes,
                 external_access: proc.external_access(),
             })
             .collect();
@@ -904,6 +949,8 @@ pub struct ProcedureInfo {
     pub parameters: Vec<ParameterDef>,
     /// Output column names.
     pub output_columns: Vec<String>,
+    /// Whether it writes the graph (see [`Procedure::graph_access`]).
+    pub writes: bool,
     /// Whether it reaches outside the database (see [`Procedure::external_access`]).
     pub external_access: ExternalAccess,
 }
@@ -1174,7 +1221,9 @@ fn set_parameter(
     Ok(())
 }
 
-/// Builds a `grafeo.procedures()` result listing all registered procedures.
+/// Builds a `grafeo.procedures()` result listing all registered procedures: name, description,
+/// parameters, output columns, whether it writes the graph (`writes`, a BOOLEAN) and what it
+/// reaches outside the database (`external_access`: 'none', 'reads' or 'writes').
 #[must_use]
 pub fn procedures_result(registry: &BuiltinProcedures) -> AlgorithmResult {
     let procedures = registry.list();
@@ -1183,6 +1232,8 @@ pub fn procedures_result(registry: &BuiltinProcedures) -> AlgorithmResult {
         "description".into(),
         "parameters".into(),
         "output_columns".into(),
+        "writes".into(),
+        "external_access".into(),
     ]);
     for proc in procedures {
         let param_desc: String = proc
@@ -1217,6 +1268,8 @@ pub fn procedures_result(registry: &BuiltinProcedures) -> AlgorithmResult {
             Value::from(proc.description.as_str()),
             Value::from(param_desc.as_str()),
             Value::from(columns_desc.as_str()),
+            Value::Bool(proc.writes),
+            Value::from(proc.external_access.name()),
         ]);
     }
     result
@@ -1709,7 +1762,14 @@ mod tests {
         let result = procedures_result(&registry);
         assert_eq!(
             result.columns,
-            vec!["name", "description", "parameters", "output_columns"],
+            vec![
+                "name",
+                "description",
+                "parameters",
+                "output_columns",
+                "writes",
+                "external_access"
+            ],
             "column shape is part of the public CALL grafeo.procedures() contract"
         );
         assert!(!result.rows.is_empty(), "result.rows is empty");

@@ -828,6 +828,10 @@ impl crate::procedures::Procedure for LoadProcedure {
         ExternalAccess::Reads
     }
 
+    fn graph_access(&self) -> crate::procedures::GraphAccess {
+        crate::procedures::GraphAccess::Writes
+    }
+
     fn compute(
         &self,
         _ctx: &crate::procedures::ProcedureContext<'_>,

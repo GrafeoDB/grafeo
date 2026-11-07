@@ -362,6 +362,16 @@ pub enum ExternalAccess {
 }
 
 impl ExternalAccess {
+    /// Its name as `grafeo.procedures()` lists it: "none", "reads" or "writes".
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Reads => "reads",
+            Self::Writes => "writes",
+        }
+    }
+
     /// What it does outside, for the refusal: "reads" or "writes".
     #[must_use]
     pub const fn verb(self) -> &'static str {
@@ -397,17 +407,30 @@ pub struct PermissionDenied {
     pub user_id: String,
 }
 
-impl fmt::Display for PermissionDenied {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "permission denied: {} operations require {} role (user: {})",
+impl PermissionDenied {
+    /// Why the statement is refused, after the "permission denied" its error says.
+    fn reason(&self) -> String {
+        format!(
+            "{} operations require {} role (user: {})",
             self.operation, self.required, self.user_id
         )
     }
 }
 
+impl fmt::Display for PermissionDenied {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "permission denied: {}", self.reason())
+    }
+}
+
 impl std::error::Error for PermissionDenied {}
+
+/// A role's refusal as a statement's error: `GRAFEO-Q007`, GQLSTATUS 42501.
+impl From<PermissionDenied> for grafeo_common::utils::error::Error {
+    fn from(denied: PermissionDenied) -> Self {
+        grafeo_common::utils::error::QueryError::permission_denied(denied.reason()).into()
+    }
+}
 
 #[cfg(test)]
 mod tests {

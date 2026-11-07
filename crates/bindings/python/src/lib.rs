@@ -155,6 +155,10 @@ fn grafeo(m: &Bound<'_, PyModule>) -> PyResult<()> {
         "GrafeoLockedError",
         m.py().get_type::<crate::error::GrafeoLockedError>(),
     )?;
+    m.add(
+        "GrafeoPermissionError",
+        m.py().get_type::<crate::error::GrafeoPermissionError>(),
+    )?;
     m.add_class::<PyGrafeoDB>()?;
     m.add_class::<graph_handle::PyGraphHandle>()?;
     m.add_class::<PyNode>()?;

@@ -3908,12 +3908,17 @@ pub struct CallProcedureOp {
 }
 
 impl CallProcedureOp {
-    /// Whether the procedure writes: the load procedures
-    /// (`grafeo.load_nodes_csv`, `grafeo.load_edges_csv`, see
-    /// [`crate::loader`]); every other one reads.
+    /// Whether the procedure writes the graph, as the built-in procedure it
+    /// names declares it (see [`Procedure::graph_access`](crate::procedures::Procedure::graph_access)):
+    /// the load procedures do. A name the registry does not hold writes
+    /// nothing here: planning resolves it, or refuses it.
     #[must_use]
     pub fn writes(&self) -> bool {
-        crate::loader::is_load(&self.name)
+        crate::procedures::registry()
+            .get(&self.name)
+            .is_some_and(|procedure| {
+                procedure.graph_access() == crate::procedures::GraphAccess::Writes
+            })
     }
 }
 

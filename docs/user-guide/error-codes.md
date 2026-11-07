@@ -41,6 +41,8 @@ Categories:
 | `GRAFEO-Q004` | QueryUnsupported    | no        | The database or this build cannot run the statement: a feature the build leaves out (vector or text indexes, procedures, RDF, an import format), a language of another graph model (GQL on an RDF database), an operation the database cannot do (a backup of an in-memory database), or an isolation level that is not available yet (`SERIALIZABLE`). |
 | `GRAFEO-Q005` | QueryOptimization   | no        | Optimizer could not produce a plan. Report with the query text if you hit this. |
 | `GRAFEO-Q006` | QueryExecution      | no        | A valid statement failed while it ran, on its data: a file to load that cannot be read, a SPARQL graph that exists already or does not exist, a write to a node the transaction deleted, an integer or decimal result out of range, a float converted to an integer outside its range, a division by zero, or text a cast cannot read as a number (GQLSTATUS `22003`, `22012` and `22018`). |
+| `GRAFEO-Q007` | QueryPermissionDenied | no      | The session may not do what the statement does: a write, DDL or a writing procedure on a read-only session (`Role::ReadOnly`, Python `db.session(read_only=True)`), an administration statement without the admin role, or a graph its grants do not cover (GQLSTATUS `42501`). Python raises `GrafeoPermissionError`, a subclass of `GrafeoError`. |
+| `GRAFEO-Q008` | QueryExternalAccessDenied | no  | The statement reads or writes outside the database (a load of a file, a procedure that reaches a file, a URL or a model) on a session without external access (`Identity::with_external_access(false)`, Python `db.session(external_access=False)`); GQLSTATUS `42501`. `CALL grafeo.procedures()` lists what each procedure reaches in its `external_access` column. Python raises `GrafeoPermissionError`. |
 
 ## Transaction (T)
 
@@ -115,10 +117,12 @@ GQLSTATUS says what kind of condition it is, as SQL's SQLSTATE does:
 | `40003`   | transaction completion unknown | a commit written to the log but not made durable (`GRAFEO-T010`), and every commit after an earlier one that did not complete (`GRAFEO-T008`) |
 | `42001`   | syntax error                   | `MATCH (n RETURN n`                              |
 | `42002`   | invalid reference              | a name that resolves to nothing: an undefined variable, an unknown function, procedure, parameter, graph or type |
-| `42000`   | syntax error or access rule violation | any other rule a statement breaks beyond the grammar (an aggregate in a `WHERE`, a wrong number of arguments, a pattern `MERGE` cannot take), a feature Grafeo lacks, and a permission the user does not have |
+| `42501`   | insufficient privilege         | a statement the session may not run: a write on a read-only session, a graph its grants do not cover (`GRAFEO-Q007`), external access the session does not have (`GRAFEO-Q008`) |
+| `42000`   | syntax error or access rule violation | any other rule a statement breaks beyond the grammar (an aggregate in a `WHERE`, a wrong number of arguments, a pattern `MERGE` cannot take), and a feature Grafeo lacks |
 
 `42000` is the code ISO GQL gives a violated syntax or access rule that names no condition of its own; the
-message says which rule it is.
+message says which rule it is. `42501` is SQL's code for insufficient privilege, which GQL's class 42 leaves
+without a subclass of its own.
 
 Python has it as `GrafeoError.gql_status`, Node.js and WASM as the `gqlStatus` property of the thrown `Error` (in
 Node.js next to `errorCode`, the Grafeo code, and `isRetryable`), C as

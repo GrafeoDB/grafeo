@@ -11,7 +11,7 @@
 use std::sync::Arc;
 
 use grafeo_common::types::{EpochId, TransactionId};
-use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind, Result};
+use grafeo_common::utils::error::{Error, QueryError, Result};
 use grafeo_core::execution::operators::Recording;
 use grafeo_core::graph::GraphBackend;
 use grafeo_core::graph::GraphStore;
@@ -193,13 +193,10 @@ pub(super) fn check_focus(
         return Ok(());
     }
     if identity.has_grants() && !identity.can_access_graph(name, Role::ReadOnly) {
-        return Err(Error::from(QueryError::new(
-            QueryErrorKind::Semantic,
-            format!(
-                "permission denied: no grant for graph '{name}' (user: {})",
-                identity.user_id()
-            ),
-        )));
+        return Err(Error::from(QueryError::permission_denied(format!(
+            "no grant for graph '{name}' (user: {})",
+            identity.user_id()
+        ))));
     }
     let key = super::graph_storage_key(schema, Some(name));
     if key.is_some_and(|key| stores.named_graph(&key).is_none()) {
@@ -235,13 +232,10 @@ pub(super) fn check_graph_grant(
     if identity.can_access_graph(graph, role) {
         return Ok(());
     }
-    Err(Error::from(QueryError::new(
-        QueryErrorKind::Semantic,
-        format!(
-            "permission denied: no {access} grant for graph '{graph}' (user: {})",
-            identity.user_id()
-        ),
-    )))
+    Err(Error::from(QueryError::permission_denied(format!(
+        "no {access} grant for graph '{graph}' (user: {})",
+        identity.user_id()
+    ))))
 }
 
 /// The part of a statement's planning that is the session's, the same for
@@ -471,7 +465,7 @@ impl SessionPlanning {
 
         if self.call_depth >= MAX_CALL_DEPTH {
             return Err(Error::from(QueryError::new(
-                QueryErrorKind::Semantic,
+                grafeo_common::utils::error::QueryErrorKind::Semantic,
                 format!(
                     "procedure '{procedure}' is called more than {MAX_CALL_DEPTH} calls deep: \
                      does a procedure call itself?"

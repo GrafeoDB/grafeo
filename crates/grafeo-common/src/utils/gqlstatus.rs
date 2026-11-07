@@ -132,6 +132,11 @@ impl GqlStatus {
     /// `42002` - invalid reference.
     pub const SYNTAX_INVALID_REFERENCE: Self = Self::from_bytes(*b"42002");
 
+    /// `42501` - insufficient privilege: the session may not do what the
+    /// statement does (ISO/IEC 9075-2; GQL leaves an access rule violation
+    /// in class 42 without a subclass of its own).
+    pub const SYNTAX_INSUFFICIENT_PRIVILEGE: Self = Self::from_bytes(*b"42501");
+
     // ── Dependent object error (class G1) ─────────────────────────────
 
     /// `G1000` - dependent object error, no subclass.
@@ -250,6 +255,9 @@ impl From<&super::error::Error> for GqlStatus {
                 QueryErrorKind::InvalidParameterValue => GqlStatus::DATA_INVALID_PARAMETER_VALUE,
                 // GQL defines no class for a feature an implementation lacks.
                 QueryErrorKind::Unsupported => GqlStatus::SYNTAX_ERROR,
+                QueryErrorKind::PermissionDenied | QueryErrorKind::ExternalAccessDenied => {
+                    GqlStatus::SYNTAX_INSUFFICIENT_PRIVILEGE
+                }
             },
             Error::Transaction(t) => match t {
                 TransactionError::ReadOnly => GqlStatus::INVALID_TX_READ_ONLY,
@@ -490,6 +498,10 @@ mod tests {
                 QueryErrorKind::InvalidTimeZoneDisplacement => ("22009", ErrorCode::QueryExecution),
                 QueryErrorKind::ValuesNotComparable => ("22G04", ErrorCode::QueryExecution),
                 QueryErrorKind::InvalidParameterValue => ("22023", ErrorCode::QueryExecution),
+                QueryErrorKind::PermissionDenied => ("42501", ErrorCode::QueryPermissionDenied),
+                QueryErrorKind::ExternalAccessDenied => {
+                    ("42501", ErrorCode::QueryExternalAccessDenied)
+                }
             }
         }
 
@@ -516,7 +528,9 @@ mod tests {
                 Some(K::WrongKind) => Some(K::InvalidTimeZoneDisplacement),
                 Some(K::InvalidTimeZoneDisplacement) => Some(K::ValuesNotComparable),
                 Some(K::ValuesNotComparable) => Some(K::InvalidParameterValue),
-                Some(K::InvalidParameterValue) => None,
+                Some(K::InvalidParameterValue) => Some(K::PermissionDenied),
+                Some(K::PermissionDenied) => Some(K::ExternalAccessDenied),
+                Some(K::ExternalAccessDenied) => None,
             }
         }
 
@@ -527,7 +541,7 @@ mod tests {
             kinds.push(kind);
             at = next(Some(kind));
         }
-        assert_eq!(kinds.len(), 17, "{kinds:?}");
+        assert_eq!(kinds.len(), 19, "{kinds:?}");
         for kind in kinds {
             let (status, code) = decided(kind);
             let error = QueryError::new(kind, "message");

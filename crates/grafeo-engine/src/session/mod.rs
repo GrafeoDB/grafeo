@@ -1218,12 +1218,8 @@ impl Session {
         if self.identity.can_admin() {
             return Ok(());
         }
-        crate::auth::check_permission(&self.identity, kind).map_err(|denied| {
-            grafeo_common::utils::error::Error::from(grafeo_common::utils::error::QueryError::new(
-                grafeo_common::utils::error::QueryErrorKind::Semantic,
-                denied.to_string(),
-            ))
-        })
+        crate::auth::check_permission(&self.identity, kind)
+            .map_err(grafeo_common::utils::error::Error::from)
     }
 
     /// Fails when this session may not write: its role is read-only, or a
@@ -1269,13 +1265,10 @@ impl Session {
                         .identity
                         .can_access_graph(name, crate::auth::Role::ReadWrite) =>
                 {
-                    return Err(Error::from(QueryError::new(
-                        QueryErrorKind::Semantic,
-                        format!(
-                            "permission denied: no grant for graph '{name}' (user: {})",
-                            self.identity.user_id()
-                        ),
-                    )));
+                    return Err(Error::from(QueryError::permission_denied(format!(
+                        "no grant for graph '{name}' (user: {})",
+                        self.identity.user_id()
+                    ))));
                 }
                 _ => {}
             }
@@ -1488,13 +1481,10 @@ impl Session {
                         .identity
                         .can_access_graph(&name, crate::auth::Role::ReadOnly)
                 {
-                    return Err(Error::from(QueryError::new(
-                        QueryErrorKind::Semantic,
-                        format!(
-                            "permission denied: no grant for graph '{name}' (user: {})",
-                            self.identity.user_id()
-                        ),
-                    )));
+                    return Err(Error::from(QueryError::permission_denied(format!(
+                        "no grant for graph '{name}' (user: {})",
+                        self.identity.user_id()
+                    ))));
                 }
                 // Verify graph exists (resolve within current schema)
                 let effective_key = self.effective_graph_key(&name);
@@ -1518,13 +1508,10 @@ impl Session {
                         .identity
                         .can_access_graph(&name, crate::auth::Role::ReadOnly)
                 {
-                    return Err(Error::from(QueryError::new(
-                        QueryErrorKind::Semantic,
-                        format!(
-                            "permission denied: no grant for graph '{name}' (user: {})",
-                            self.identity.user_id()
-                        ),
-                    )));
+                    return Err(Error::from(QueryError::permission_denied(format!(
+                        "no grant for graph '{name}' (user: {})",
+                        self.identity.user_id()
+                    ))));
                 }
                 let effective_key = self.effective_graph_key(&name);
                 if !name.eq_ignore_ascii_case("default")
@@ -1782,7 +1769,7 @@ impl Session {
     /// error when the user may not read it.
     #[cfg(feature = "sql-pgq")]
     fn statement_store(&self, graph: Option<&str>) -> Result<Arc<dyn GraphStore>> {
-        use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind};
+        use grafeo_common::utils::error::{Error, QueryError};
 
         let Some(name) = graph else {
             return Ok(self.active_store());
@@ -1792,13 +1779,10 @@ impl Session {
                 .identity
                 .can_access_graph(name, crate::auth::Role::ReadOnly)
         {
-            return Err(Error::from(QueryError::new(
-                QueryErrorKind::Semantic,
-                format!(
-                    "permission denied: no grant for graph '{name}' (user: {})",
-                    self.identity.user_id()
-                ),
-            )));
+            return Err(Error::from(QueryError::permission_denied(format!(
+                "no grant for graph '{name}' (user: {})",
+                self.identity.user_id()
+            ))));
         }
         let key = self.effective_graph_key(name);
         if self.named_graph(&key).is_some() {
@@ -7009,8 +6993,8 @@ impl Session {
     /// [`LogicalOperator::reaches_outside`](crate::query::plan::LogicalOperator::reaches_outside))
     /// and this session's identity has no external access
     /// ([`Identity::with_external_access`](crate::auth::Identity::with_external_access)):
-    /// with the permission-denied error of a role denial, naming what reaches
-    /// outside. It reads the plan only, so `EXPLAIN` and a plan whose
+    /// with `GRAFEO-Q008` (GQLSTATUS 42501, as a role's refusal), naming what
+    /// reaches outside. It reads the plan only, so `EXPLAIN` and a plan whose
     /// parameters have no values yet are judged too. A session with access
     /// walks nothing.
     #[cfg(query_language)]
@@ -7024,12 +7008,8 @@ impl Session {
         {
             None => Ok(()),
             Some(reach) => Err(grafeo_common::utils::error::Error::from(
-                grafeo_common::utils::error::QueryError::new(
-                    grafeo_common::utils::error::QueryErrorKind::Semantic,
-                    format!(
-                        "permission denied: {}",
-                        crate::auth::external_access_denied(&reach.what, reach.how)
-                    ),
+                grafeo_common::utils::error::QueryError::external_access_denied(
+                    crate::auth::external_access_denied(&reach.what, reach.how),
                 ),
             )),
         }

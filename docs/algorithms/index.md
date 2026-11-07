@@ -172,6 +172,11 @@ CALL grafeo.pagerank({projection: 'people'})
 CALL grafeo.procedures()
 ```
 
+`grafeo.procedures()` lists each procedure's `name`, `description`, `parameters` and
+`output_columns`, whether it writes the graph (`writes`, a BOOLEAN, refused on a read-only
+session) and what it reaches outside the database (`external_access`: `'none'`, `'reads'` or
+`'writes'`, refused on a session without external access).
+
 A `CALL` reads the graph the session selects (`USE GRAPH`, or `set_graph()` in
 Python), unless its `projection` argument names a projection.
 

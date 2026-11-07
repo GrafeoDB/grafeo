@@ -527,4 +527,4 @@ tests:
   - name: list_procedures
     query: "CALL grafeo.procedures()"
     expect:
-      columns: [name, description, parameters, output_columns]
+      columns: [name, description, parameters, output_columns, writes, external_access]

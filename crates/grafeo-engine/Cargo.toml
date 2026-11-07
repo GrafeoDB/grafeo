@@ -216,6 +216,7 @@ path = "tests/typed_read_allocations.rs"
 [[test]]
 name = "turn_sample_allocations"
 path = "tests/turn_sample_allocations.rs"
+required-features = ["gql", "grafeo-file"]
 
 # Counts allocations with its own global allocator.
 [[test]]

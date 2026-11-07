@@ -12,6 +12,7 @@
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use grafeo_common::types::Value;
 use grafeo_engine::GrafeoDB;
@@ -42,6 +43,14 @@ unsafe impl GlobalAlloc for Counting {
 
 #[global_allocator]
 static GLOBAL: Counting = Counting;
+
+/// Held by each test for its whole run: the tests of a binary run in parallel, and another test's
+/// allocations would count in this one's bytes.
+static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
+
+fn one_at_a_time() -> MutexGuard<'static, ()> {
+    ONE_AT_A_TIME.lock().unwrap_or_else(PoisonError::into_inner)
+}
 
 const CANDIDATE: &str = "EXPLAIN MATCH (a:Start)-[:R]->(m:Far {k: 7}) RETURN a.s, m.k";
 
@@ -76,6 +85,7 @@ const GROWTH: f64 = 2.0;
 
 #[test]
 fn the_first_plan_does_not_grow_with_the_label() {
+    let _one = one_at_a_time();
     let mut hot = Vec::new();
     let mut reopened = Vec::new();
     let dir = tempfile::tempdir().unwrap();
@@ -108,6 +118,7 @@ fn the_first_plan_does_not_grow_with_the_label() {
 /// The sample gives the same plan every time: across fresh sessions, and across opens of one file.
 #[test]
 fn the_plan_is_the_same_between_runs() {
+    let _one = one_at_a_time();
     let db = GrafeoDB::new_in_memory();
     fill(&db, 20_000);
     let plans: Vec<String> = (0..5).map(|_| first_plan_bytes(&db).1).collect();
@@ -138,6 +149,7 @@ fn the_plan_is_the_same_between_runs() {
 /// were all deleted, starts with no edges, and nodes only an open transaction holds.
 #[test]
 fn a_sample_never_fails_planning() {
+    let _one = one_at_a_time();
     let query = "MATCH (a:Start)-[:R]->(m:Far {k: 7}) RETURN a.s, m.k";
     let cases: [(&str, &[&str]); 4] = [
         ("an empty label", &["INSERT (:Far {k: 7})"]),

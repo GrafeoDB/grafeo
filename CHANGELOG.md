@@ -79,6 +79,13 @@ Queries that ran in 0.6.1 and now fail or behave differently.
 - **`grafeo.min_cost_max_flow`** gives each parallel edge its own capacity and cost (two edges costing 1 and 5 reported 50 where 30 is right), and refuses a negative-cost cycle the source reaches (22023), where the call never returned.
 - **`grafeo.kruskal` and `grafeo.prim`** take the lightest of the edges between two nodes, in either direction, and `grafeo.prim` from a start node returns the whole tree; Kruskal kept the first edge it met and Prim missed a lighter edge pointing back, both reporting a heavier tree, and Prim followed only outgoing edges.
 - **`grafeo.topological_sort`** gives the same order on every run (the lexicographically smallest by node id).
+- **GQL statements after `CALL ... YIELD`**: a statement that starts with a procedure call goes on with any clause, `MATCH`, `OPTIONAL MATCH`, `FILTER`, `LET`, `FOR`, `ORDER BY`, another `CALL`, `SET` or `INSERT`, as ISO GQL allows (14.3); only `RETURN` was accepted, and a following `MATCH` was a syntax error.
+- **GQL `NEXT` then `CALL`**: a procedure call after `NEXT` kept the earlier statement's columns, grouping the result by them; it now returns only its own columns, and the incoming fields stay in scope.
+- **`SKIP` and `LIMIT` after a GQL `CALL`**: `SKIP $n` and `LIMIT $n` in the `RETURN` after a procedure call take effect (they were ignored), and a negative count raises 22G02 as in every other `RETURN`.
+- **`HAVING` and `FINISH` after a GQL `CALL`** are accepted; they were a syntax error.
+- **SQL/PGQ `CALL ... LIMIT $n`** takes its limit; it was ignored.
+- **`INTERSECT` and `EXCEPT` inside `CALL { }`**: the columns they return are visible after the call, as with `UNION` and `OTHERWISE`; reading them raised "Undefined variable".
+- **A `MERGE` after an `OTHERWISE` body in `CALL { }`** uses the node the body returns; it raised "Variable already declared outside the CALL subquery".
 - **`YIELD`**: a column a procedure does not have is refused when the call is planned, naming its columns; it failed only after the algorithm had run (4.5 s on 4,000 nodes).
 - **WAL segments**: a panic while the WAL started a new segment no longer makes every later checkpoint fail until a reopen (#725).
 - **Checkpoints** check free disk space first and fail with a clear error naming the space needed and available, changing nothing; a checkpoint that fails partway gives back the disk space it took (#726).

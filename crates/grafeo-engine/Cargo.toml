@@ -155,7 +155,7 @@ harness = false
 [[bench]]
 name = "algorithms_bench"
 harness = false
-required-features = ["algos", "vector-index"]
+required-features = ["algos", "gql", "vector-index"]
 
 [[bench]]
 name = "write_path_bench"

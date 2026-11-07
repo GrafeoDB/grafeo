@@ -118,9 +118,29 @@ fn run(
         .map_err(|error| error.to_string())
 }
 
+/// The temporal kind a bound holds: the value alone or inside lists (with integers beside it).
+fn temporal_kind(value: &Value) -> &'static str {
+    match value {
+        Value::Date(_) => "date",
+        Value::Timestamp(_) => "local datetime",
+        Value::ZonedDatetime(_) => "zoned datetime",
+        Value::Time(_) => "time",
+        Value::Duration(_) => "duration",
+        Value::List(items) => items
+            .iter()
+            .map(temporal_kind)
+            .find(|kind| *kind != "other")
+            .unwrap_or("other"),
+        _ => "other",
+    }
+}
+
+/// Whether the statement runs a range read: `PROFILE` lists the operators the physical planner
+/// chose. `EXPLAIN`'s `[range: k]` hint reads the predicate's shape alone, so it shows for a bound
+/// the physical planner leaves to the filter (a time, or a datetime outside the default rule).
 fn reads_the_range(session: &Session, language: Language, query: &str, bound: &Value) -> bool {
-    run(session, language, &format!("EXPLAIN {query}"), bound)
-        .is_ok_and(|plan| plan.iter().any(|line| line.contains("[range: k]")))
+    run(session, language, &format!("PROFILE {query}"), bound)
+        .is_ok_and(|rows| rows.iter().any(|row| row.contains("RangeScan")))
 }
 
 #[test]
@@ -139,6 +159,8 @@ fn a_range_read_follows_the_temporal_rule_of_the_statement() {
     }
     let mut wrong = Vec::new();
     let mut ranged = 0;
+    // The range reads per temporal kind of the bound, under the default rule (GQL in UTC) or not.
+    let mut ranged_by: HashMap<(&str, bool), usize> = HashMap::new();
     for time_zone in TIME_ZONES {
         let read = session(&db, time_zone, true);
         let filter = session(&db, time_zone, false);
@@ -147,6 +169,10 @@ fn a_range_read_follows_the_temporal_rule_of_the_statement() {
                 for form in FORMS {
                     if reads_the_range(&read, language, form, bound) {
                         ranged += 1;
+                        let default_rule = matches!(language, Language::Gql) && time_zone.is_none();
+                        *ranged_by
+                            .entry((temporal_kind(bound), default_rule))
+                            .or_default() += 1;
                     }
                     let found = run(&read, language, form, bound);
                     let wanted = run(&filter, language, form, bound);
@@ -163,6 +189,35 @@ fn a_range_read_follows_the_temporal_rule_of_the_statement() {
         ranged > 0,
         "no form took the range read: the test compares the filter with itself"
     );
+    // The rule, kind by kind: the store orders a time apart from the query, and a datetime only
+    // as the default rule does; every other kind as every rule does.
+    let count = |kind: &'static str, default_rule: bool| {
+        ranged_by.get(&(kind, default_rule)).copied().unwrap_or(0)
+    };
+    for kind in ["date", "local datetime", "zoned datetime", "duration"] {
+        assert!(
+            count(kind, true) > 0,
+            "a {kind} bound never took the range read in GQL in UTC: {ranged_by:?}"
+        );
+    }
+    for kind in ["date", "duration"] {
+        assert!(
+            count(kind, false) > 0,
+            "a {kind} bound took the range read only in GQL in UTC: {ranged_by:?}"
+        );
+    }
+    for (kind, default_rule) in [
+        ("time", true),
+        ("time", false),
+        ("local datetime", false),
+        ("zoned datetime", false),
+    ] {
+        assert_eq!(
+            count(kind, default_rule),
+            0,
+            "a {kind} bound took the range read (default rule {default_rule}): {ranged_by:?}"
+        );
+    }
     assert!(
         wrong.is_empty(),
         "{} wrong ({ranged} took the range read):\n{}",

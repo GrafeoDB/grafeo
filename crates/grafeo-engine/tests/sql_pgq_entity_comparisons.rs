@@ -167,12 +167,23 @@ fn an_element_compared_across_kinds_is_refused() {
     );
 }
 
-/// GQL keeps its own rule for the same comparison: no error.
+/// GQL keeps its own rule for the same comparison: no error, and a node equals no integer, so
+/// `=` holds for no row and `<>` for every row.
 #[test]
 fn gql_answers_a_node_compared_with_an_integer() {
     let db = graph();
-    for op in ["=", "<>"] {
-        let result = db.execute(&format!("MATCH (n:P) WHERE n {op} 1 RETURN n.name AS name"));
-        assert!(result.is_ok(), "n {op} 1: {:?}", result.err());
+    for (op, wanted) in [("=", vec![]), ("<>", vec!["Alix", "Gus"])] {
+        let result = db
+            .execute(&format!(
+                "MATCH (n:P) WHERE n {op} 1 RETURN n.name AS name ORDER BY name"
+            ))
+            .unwrap_or_else(|error| panic!("n {op} 1: {error}"));
+        let names: Vec<grafeo_common::types::Value> =
+            result.rows().iter().map(|row| row[0].clone()).collect();
+        let wanted: Vec<grafeo_common::types::Value> = wanted
+            .into_iter()
+            .map(grafeo_common::types::Value::from)
+            .collect();
+        assert_eq!(names, wanted, "n {op} 1");
     }
 }

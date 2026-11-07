@@ -17,8 +17,9 @@ use grafeo_common::types::Value;
 use grafeo_engine::GrafeoDB;
 
 /// A seeded graph of `nodes` nodes and `nodes * degree` edges, each with a weight `w` from 1 to
-/// 9, on a ring (so every node is reached) plus seeded chords. Two statements, two commits: the
-/// nodes, then the edges from one list (a commit per node, edge and weight took minutes).
+/// 9, on a ring (so every node is reached) plus seeded chords. Three statements, three commits:
+/// the nodes, an index on their number, then the edges from one list, each found by that index (a
+/// commit per node, edge and weight took minutes).
 fn graph(nodes: usize, degree: usize) -> GrafeoDB {
     let db = GrafeoDB::new_in_memory();
     db.execute(&format!(

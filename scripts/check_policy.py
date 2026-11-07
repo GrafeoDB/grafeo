@@ -31,6 +31,8 @@ Add `--json` for machine-readable output. Exit code 1 when an error is found.
         release CHANGELOG.md's first `## [X.Y.Z]` heading names
     T10 per build: the facade's profiles, the CLI and the bindings reach no tokio, and the WAL
         no crossbeam, but through the crates allowed to depend on them (cargo tree)
+    T11 per binding build (its default and each profile): no engine feature is compiled whose
+        same-name feature of the binding is off (cargo tree)
     D1  an added #[allow(...)] states a reason = "..."
     D2  no em or en dashes in added Markdown lines or code comments
     D3  no added references to private planning notes; no internal phase wording in docs
@@ -180,6 +182,24 @@ RUNTIME_RULES: list[tuple[str, str | None, str, frozenset[str]]] = [
 # every rule above pass by reading nothing.
 RUNTIME_CONTROL = ("grafeo", "async-storage", "tokio")
 
+# T11: every binding crate that depends on the engine, with its default build (`None`) and each
+# profile its manifest defines.
+_BINDING_PROFILES = ("lpg", "rdf", "ai", "analytics", "edge", "embedded", "full")
+PROFILE_BUILDS: list[tuple[str, str | None]] = [
+    (package, features)
+    for package, profiles in (
+        ("grafeo-c", _BINDING_PROFILES),
+        ("grafeo-node", _BINDING_PROFILES),
+        ("grafeo-python", _BINDING_PROFILES),
+        ("grafeo-wasm", ("lpg", "rdf", "ai", "analytics", "edge", "full")),
+    )
+    for features in (None, *profiles)
+]
+
+# A build that must compile an engine feature and report it: without it another cargo output
+# would let every build above pass by reading nothing.
+PROFILE_CONTROL = ("grafeo-python", "full", "vector-index")
+
 HINTS = {
     "T2": "bump the pin together with rust-toolchain.toml (or rust-version for the MSRV job)",
     "T3": "restate what matters inline or link a public issue",
@@ -191,6 +211,8 @@ HINTS = {
     "T9": "an expected failure names its spec and an issue (`#N`, or `fix in X.Y.Z` for "
     "the release being made or a later one); a pytest mark is `strict=True` with `raises=` "
     'and `reason="spec: <ref>; issue: <issue>"`',
+    "T11": "a binding's profile lists the features it compiles: turn the dependency's default "
+    "features off and forward each feature the profile needs",
     "T10": "tokio belongs to `async-storage` and `server` (and a binding's own async API); "
     "make the dependency optional behind those features, or name the binding's edge in "
     "RUNTIME_RULES",
@@ -473,6 +495,114 @@ def runtime_findings(tree) -> list[Finding]:
                     )
                 )
     return findings
+
+
+def reportable_features(manifest: str) -> set[str]:
+    """The features of a binding's manifest that forward the engine feature of their own name
+    (`gql = ["grafeo-engine/gql"]`): the ones a build can be judged by. Groups, profiles and
+    features of another name do not count."""
+    features = tomllib.loads(manifest).get("features", {})
+    return {
+        name for name, enables in features.items() if f"grafeo-engine/{name}" in enables
+    }
+
+
+def compiled_features(text: str, package: str) -> tuple[dict[str, list[str]], set[str]]:
+    """From `cargo tree -e features -i grafeo-engine --prefix depth` of `package`: each engine
+    feature compiled, with the features that enable it directly (`crate/feature`, in cargo's
+    order), and the features of `package` that are on."""
+    pattern = re.compile(r'^(\d+)(\S+) feature "([^"]+)"')
+    engine: dict[str, list[str]] = {}
+    own: set[str] = set()
+    current: str | None = None
+    for line in text.splitlines():
+        match = pattern.match(line)
+        if not match:
+            # A package line: an engine feature's enablers end at a line of its own depth.
+            if line[:1].isdigit() and int(re.match(r"\d+", line).group()) <= 1:
+                current = None
+            continue
+        depth, crate, feature = int(match.group(1)), match.group(2), match.group(3)
+        if crate == package:
+            own.add(feature)
+        if depth == 1 and crate == "grafeo-engine":
+            current = feature
+            engine.setdefault(feature, [])
+        elif depth == 1:
+            current = None
+        elif depth == 2 and current is not None:
+            enabler = f"{crate}/{feature}"
+            if enabler not in engine[current]:
+                engine[current].append(enabler)
+    return engine, own
+
+
+def profile_findings(tree, manifests: dict[str, str]) -> list[Finding]:
+    """T11: no build of PROFILE_BUILDS compiles an engine feature whose same-name feature of the
+    binding is off. `tree(package, features)` is the build's `cargo tree` output (`None`: no tree
+    to judge); `manifests` holds each binding's Cargo.toml text."""
+    findings: list[Finding] = []
+    package, features, feature = PROFILE_CONTROL
+    text = tree(package, features)
+    engine, own = compiled_features(text, package) if text else ({}, set())
+    if feature not in engine or feature not in own:
+        findings.append(
+            Finding(
+                "T11",
+                "Cargo.toml",
+                None,
+                f"{package} with --features {features} compiles no engine {feature}: the check "
+                "reads nothing; update PROFILE_CONTROL",
+            )
+        )
+    for package, features in PROFILE_BUILDS:
+        text = tree(package, features)
+        manifest = manifests.get(package)
+        if not text or manifest is None:
+            continue
+        engine, own = compiled_features(text, package)
+        build = f"--features {features}" if features else "its default features"
+        for name in sorted(engine.keys() & reportable_features(manifest)):
+            if name in own:
+                continue
+            findings.append(
+                Finding(
+                    "T11",
+                    "Cargo.toml",
+                    None,
+                    f"{package} with {build} compiles the engine's {name}, which its own {name} "
+                    f"feature leaves off: enabled by {', '.join(engine[name])}",
+                )
+            )
+    return findings
+
+
+def cargo_tree_features(root: Path, package: str, features: str | None) -> str | None:
+    """`cargo tree -e features -i grafeo-engine` of `package` with `features` (`None`: its
+    defaults); `None` when the build does not reach the engine."""
+    args = ["cargo", "tree", "--locked", "-p", package, "-e", "features"]
+    if features is not None:
+        args += ["--no-default-features", "--features", features]
+    args += ["-i", "grafeo-engine", "--prefix", "depth"]
+    result = subprocess.run(
+        args, cwd=root, capture_output=True, text=True, encoding="utf-8"
+    )
+    if result.returncode != 0:
+        if "did not match any packages" in result.stderr:
+            return None
+        raise SystemExit(f"{' '.join(args)} failed: {result.stderr.strip()}")
+    return result.stdout if result.stdout.strip() else None
+
+
+def binding_manifests(root: Path) -> dict[str, str]:
+    """Each binding crate's Cargo.toml text, by package name."""
+    manifests: dict[str, str] = {}
+    for manifest in sorted(root.glob("crates/bindings/*/Cargo.toml")):
+        text = manifest.read_text(encoding="utf-8")
+        name = tomllib.loads(text).get("package", {}).get("name")
+        if name:
+            manifests[name] = text
+    return manifests
 
 
 def cargo_metadata(root: Path) -> dict:
@@ -1340,6 +1470,10 @@ def tree_findings(root: Path, metadata_arg: str | None) -> list[Finding]:
             lambda package, features, crate: cargo_tree_inverse(
                 root, package, features, crate
             )
+        )
+        findings += profile_findings(
+            lambda package, features: cargo_tree_features(root, package, features),
+            binding_manifests(root),
         )
     return findings
 

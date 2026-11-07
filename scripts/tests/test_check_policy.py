@@ -1735,3 +1735,159 @@ def test_t10_every_rule_names_a_workspace_crate_and_its_features() -> None:
             text = manifests[0].read_text(encoding="utf-8")
             for feature in features.split(","):
                 assert f"\n{feature} = " in text, (package, feature)
+
+
+# ------------------------------------------------------------------ T11
+
+# `cargo tree -p grafeo-python --no-default-features --features lpg -e features
+# -i grafeo-engine --prefix depth`, cut down: the binding depends on
+# grafeo-bindings-common with its default features, whose `embedded` turns on the
+# engine's vector-index and algos.
+PYTHON_LPG_FEATURES = """0grafeo-engine v0.6.1 (/repo/crates/grafeo-engine)
+1grafeo-bindings-common v0.6.1 (/repo/crates/bindings/common)
+2grafeo-python v0.6.1 (/repo/crates/bindings/python)
+1grafeo-engine feature "algos"
+2grafeo-bindings-common feature "algos"
+3grafeo-bindings-common feature "embedded"
+4grafeo-bindings-common feature "default"
+5grafeo-python v0.6.1 (/repo/crates/bindings/python) (*)
+1grafeo-engine feature "gql"
+2grafeo-python feature "gql"
+3grafeo-python feature "lpg"
+2grafeo-bindings-common feature "gql"
+3grafeo-bindings-common feature "embedded" (*)
+1grafeo-engine feature "regex"
+2grafeo-python feature "lpg" (*)
+1grafeo-engine feature "vector-index"
+2grafeo-bindings-common feature "vector-index"
+3grafeo-bindings-common feature "ai"
+4grafeo-bindings-common feature "embedded" (*)
+2grafeo-engine feature "hybrid-search"
+3grafeo-bindings-common feature "hybrid-search"
+4grafeo-bindings-common feature "ai" (*)
+"""
+
+# The same build once the binding forwards only what it enables.
+PYTHON_LPG_CLEAN = """0grafeo-engine v0.6.1 (/repo/crates/grafeo-engine)
+1grafeo-python v0.6.1 (/repo/crates/bindings/python)
+1grafeo-engine feature "gql"
+2grafeo-python feature "gql"
+3grafeo-python feature "lpg"
+1grafeo-engine feature "regex"
+2grafeo-python feature "lpg" (*)
+"""
+
+# The control build: the full profile reports vector-index itself.
+PYTHON_FULL_FEATURES = """0grafeo-engine v0.6.1 (/repo/crates/grafeo-engine)
+1grafeo-python v0.6.1 (/repo/crates/bindings/python)
+1grafeo-engine feature "vector-index"
+2grafeo-python feature "vector-index"
+3grafeo-python feature "ai"
+4grafeo-python feature "full"
+"""
+
+PYTHON_MANIFEST = """[package]
+name = "grafeo-python"
+
+[features]
+default = ["embedded"]
+gql = ["grafeo-engine/gql"]
+sparql = ["grafeo-engine/sparql", "triple-store"]
+vector-index = ["grafeo-engine/vector-index"]
+algos = ["grafeo-engine/algos"]
+hybrid-search = ["grafeo-engine/hybrid-search"]
+triple-store = ["grafeo-engine/triple-store", "grafeo-engine/regex"]
+compact-store = []
+ai = ["vector-index", "hybrid-search"]
+lpg = ["gql", "storage", "grafeo-engine/regex"]
+storage = ["grafeo-engine/storage"]
+
+[lints]
+workspace = true
+"""
+
+
+def profiles(trees: dict) -> list[str]:
+    """T11 messages with `trees[(package, features)]` as cargo's output, the control
+    build reporting vector-index unless the key says otherwise."""
+    trees = {check_policy.PROFILE_CONTROL[:2]: PYTHON_FULL_FEATURES, **trees}
+    manifests = {"grafeo-python": PYTHON_MANIFEST}
+    return [
+        f"{f.rule} {f.message}"
+        for f in check_policy.profile_findings(
+            lambda package, features: trees.get((package, features)), manifests
+        )
+    ]
+
+
+def test_t11_a_binding_reports_each_feature_it_forwards_by_the_same_name() -> None:
+    # A feature counts when its list names the engine feature of its own name
+    # (`storage` too); a group (`ai`), a profile (`lpg`), an engine feature of
+    # another name (`regex`) or an empty one (`compact-store`) does not.
+    assert check_policy.reportable_features(PYTHON_MANIFEST) == {
+        "gql",
+        "sparql",
+        "vector-index",
+        "algos",
+        "hybrid-search",
+        "triple-store",
+        "storage",
+    }
+
+
+def test_t11_the_tree_gives_each_engine_feature_its_direct_enablers() -> None:
+    engine, own = check_policy.compiled_features(PYTHON_LPG_FEATURES, "grafeo-python")
+    assert engine == {
+        "algos": ["grafeo-bindings-common/algos"],
+        "gql": ["grafeo-python/gql", "grafeo-bindings-common/gql"],
+        "regex": ["grafeo-python/lpg"],
+        "vector-index": [
+            "grafeo-bindings-common/vector-index",
+            "grafeo-engine/hybrid-search",
+        ],
+    }
+    assert own == {"gql", "lpg"}
+
+
+def test_t11_a_profile_compiling_an_engine_feature_it_leaves_off_names_the_enabler() -> (
+    None
+):
+    assert profiles({("grafeo-python", "lpg"): PYTHON_LPG_FEATURES}) == [
+        "T11 grafeo-python with --features lpg compiles the engine's algos, which its "
+        "own algos feature leaves off: enabled by grafeo-bindings-common/algos",
+        "T11 grafeo-python with --features lpg compiles the engine's vector-index, "
+        "which its own vector-index feature leaves off: enabled by "
+        "grafeo-bindings-common/vector-index, grafeo-engine/hybrid-search",
+    ]
+
+
+def test_t11_a_profile_compiling_only_what_it_enables_passes() -> None:
+    assert profiles({("grafeo-python", "lpg"): PYTHON_LPG_CLEAN}) == []
+    assert profiles({}) == [], "only the builds cargo gives a tree for are judged"
+
+
+def test_t11_a_control_that_reports_nothing_is_an_error() -> None:
+    package, features, feature = check_policy.PROFILE_CONTROL
+    assert profiles({(package, features): None}) == [
+        f"T11 {package} with --features {features} compiles no engine {feature}: "
+        "the check reads nothing; update PROFILE_CONTROL",
+    ]
+    assert profiles({(package, features): PYTHON_LPG_CLEAN}) != []
+
+
+def test_t11_every_binding_and_every_profile_it_defines_is_checked() -> None:
+    # The class: each binding crate that depends on the engine, with its default
+    # build and every persona or deployment profile its manifest defines.
+    root = Path(__file__).resolve().parents[2]
+    names = ["lpg", "rdf", "ai", "analytics", "edge", "enterprise", "embedded", "full"]
+    expected = set()
+    for manifest in sorted(root.glob("crates/bindings/*/Cargo.toml")):
+        text = manifest.read_text(encoding="utf-8")
+        package = text.split('name = "', 1)[1].split('"', 1)[0]
+        if "\ngrafeo-engine = " not in text or package == "grafeo-bindings-common":
+            continue
+        expected.add((package, None))
+        expected |= {(package, name) for name in names if f"\n{name} = [" in text}
+    assert len({package for package, _ in expected}) >= 4, expected
+    assert set(check_policy.PROFILE_BUILDS) == expected
+    assert check_policy.PROFILE_CONTROL[:2] in expected

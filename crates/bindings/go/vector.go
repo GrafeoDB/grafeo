@@ -12,6 +12,7 @@ import (
 
 // CreateVectorIndex creates an HNSW similarity index on a vector property.
 func (db *Database) CreateVectorIndex(label, property string, opts ...VectorIndexOption) error {
+	defer runtime.KeepAlive(db)
 	cfg := vectorIndexConfig{dimensions: -1, m: -1, efConstruction: -1}
 	for _, opt := range opts {
 		opt(&cfg)
@@ -39,6 +40,7 @@ func (db *Database) CreateVectorIndex(label, property string, opts ...VectorInde
 
 // VectorSearch finds the k nearest neighbors of a query vector.
 func (db *Database) VectorSearch(label, property string, query []float32, k int, opts ...SearchOption) ([]VectorResult, error) {
+	defer runtime.KeepAlive(db)
 	cfg := searchConfig{ef: -1}
 	for _, opt := range opts {
 		opt(&cfg)
@@ -85,6 +87,7 @@ func (db *Database) VectorSearch(label, property string, query []float32, k int,
 // BatchCreateNodes bulk-inserts nodes with vector properties.
 // Returns the IDs of the created nodes.
 func (db *Database) BatchCreateNodes(label, property string, vectors [][]float32) ([]uint64, error) {
+	defer runtime.KeepAlive(db)
 	if len(vectors) == 0 {
 		return nil, nil
 	}

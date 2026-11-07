@@ -81,6 +81,7 @@ func OpenSingleFile(path string) (*Database, error) {
 
 // Close flushes any pending writes and releases the database handle.
 func (db *Database) Close() error {
+	defer runtime.KeepAlive(db)
 	if db.handle == nil {
 		return nil
 	}
@@ -96,6 +97,7 @@ func (db *Database) Close() error {
 
 // free is called by the Go runtime finalizer for leak prevention.
 func (db *Database) free() {
+	defer runtime.KeepAlive(db)
 	if db.handle != nil {
 		C.grafeo_close(db.handle)
 		C.grafeo_free_database(db.handle)
@@ -105,6 +107,7 @@ func (db *Database) free() {
 
 // Execute runs a GQL query and returns the results.
 func (db *Database) Execute(query string) (*QueryResult, error) {
+	defer runtime.KeepAlive(db)
 	cQuery := C.CString(query)
 	defer C.free(unsafe.Pointer(cQuery))
 	runtime.LockOSThread()
@@ -133,6 +136,7 @@ func (db *Database) ExecuteParams(query string, params map[string]any) (*QueryRe
 
 // ExecuteWithParams runs a GQL query with parameters encoded as a JSON object.
 func (db *Database) ExecuteWithParams(query string, paramsJSON string) (*QueryResult, error) {
+	defer runtime.KeepAlive(db)
 	cQuery := C.CString(query)
 	defer C.free(unsafe.Pointer(cQuery))
 	cParams := C.CString(paramsJSON)
@@ -151,6 +155,7 @@ func (db *Database) ExecuteWithParams(query string, paramsJSON string) (*QueryRe
 
 // ExecuteCypher runs a Cypher query (requires cypher feature at compile time).
 func (db *Database) ExecuteCypher(query string) (*QueryResult, error) {
+	defer runtime.KeepAlive(db)
 	cQuery := C.CString(query)
 	defer C.free(unsafe.Pointer(cQuery))
 	runtime.LockOSThread()
@@ -167,6 +172,7 @@ func (db *Database) ExecuteCypher(query string) (*QueryResult, error) {
 
 // ExecuteGremlin runs a Gremlin query (requires gremlin feature at compile time).
 func (db *Database) ExecuteGremlin(query string) (*QueryResult, error) {
+	defer runtime.KeepAlive(db)
 	cQuery := C.CString(query)
 	defer C.free(unsafe.Pointer(cQuery))
 	runtime.LockOSThread()
@@ -183,6 +189,7 @@ func (db *Database) ExecuteGremlin(query string) (*QueryResult, error) {
 
 // ExecuteGraphQL runs a GraphQL query (requires graphql feature at compile time).
 func (db *Database) ExecuteGraphQL(query string) (*QueryResult, error) {
+	defer runtime.KeepAlive(db)
 	cQuery := C.CString(query)
 	defer C.free(unsafe.Pointer(cQuery))
 	runtime.LockOSThread()
@@ -199,6 +206,7 @@ func (db *Database) ExecuteGraphQL(query string) (*QueryResult, error) {
 
 // ExecuteSPARQL runs a SPARQL query (requires sparql feature at compile time).
 func (db *Database) ExecuteSPARQL(query string) (*QueryResult, error) {
+	defer runtime.KeepAlive(db)
 	cQuery := C.CString(query)
 	defer C.free(unsafe.Pointer(cQuery))
 	runtime.LockOSThread()
@@ -215,6 +223,7 @@ func (db *Database) ExecuteSPARQL(query string) (*QueryResult, error) {
 
 // ExecuteSQL runs a SQL/PGQ query (requires sql-pgq feature at compile time).
 func (db *Database) ExecuteSQL(query string) (*QueryResult, error) {
+	defer runtime.KeepAlive(db)
 	cQuery := C.CString(query)
 	defer C.free(unsafe.Pointer(cQuery))
 	runtime.LockOSThread()
@@ -231,6 +240,7 @@ func (db *Database) ExecuteSQL(query string) (*QueryResult, error) {
 
 // ExecuteCypherWithParams runs a Cypher query with JSON-encoded parameters.
 func (db *Database) ExecuteCypherWithParams(query, paramsJSON string) (*QueryResult, error) {
+	defer runtime.KeepAlive(db)
 	cQuery := C.CString(query)
 	defer C.free(unsafe.Pointer(cQuery))
 	cParams := C.CString(paramsJSON)
@@ -249,6 +259,7 @@ func (db *Database) ExecuteCypherWithParams(query, paramsJSON string) (*QueryRes
 
 // ExecuteGremlinWithParams runs a Gremlin query with JSON-encoded parameters.
 func (db *Database) ExecuteGremlinWithParams(query, paramsJSON string) (*QueryResult, error) {
+	defer runtime.KeepAlive(db)
 	cQuery := C.CString(query)
 	defer C.free(unsafe.Pointer(cQuery))
 	cParams := C.CString(paramsJSON)
@@ -267,6 +278,7 @@ func (db *Database) ExecuteGremlinWithParams(query, paramsJSON string) (*QueryRe
 
 // ExecuteGraphQLWithParams runs a GraphQL query with JSON-encoded parameters.
 func (db *Database) ExecuteGraphQLWithParams(query, paramsJSON string) (*QueryResult, error) {
+	defer runtime.KeepAlive(db)
 	cQuery := C.CString(query)
 	defer C.free(unsafe.Pointer(cQuery))
 	cParams := C.CString(paramsJSON)
@@ -285,6 +297,7 @@ func (db *Database) ExecuteGraphQLWithParams(query, paramsJSON string) (*QueryRe
 
 // ExecuteSPARQLWithParams runs a SPARQL query with JSON-encoded parameters.
 func (db *Database) ExecuteSPARQLWithParams(query, paramsJSON string) (*QueryResult, error) {
+	defer runtime.KeepAlive(db)
 	cQuery := C.CString(query)
 	defer C.free(unsafe.Pointer(cQuery))
 	cParams := C.CString(paramsJSON)
@@ -303,6 +316,7 @@ func (db *Database) ExecuteSPARQLWithParams(query, paramsJSON string) (*QueryRes
 
 // ExecuteSQLWithParams runs a SQL/PGQ query with JSON-encoded parameters.
 func (db *Database) ExecuteSQLWithParams(query, paramsJSON string) (*QueryResult, error) {
+	defer runtime.KeepAlive(db)
 	cQuery := C.CString(query)
 	defer C.free(unsafe.Pointer(cQuery))
 	cParams := C.CString(paramsJSON)
@@ -323,6 +337,7 @@ func (db *Database) ExecuteSQLWithParams(query, paramsJSON string) (*QueryResult
 // parameters. language is one of: "gql", "cypher", "gremlin", "graphql",
 // "sparql", "sql". Pass "" for paramsJSON if no parameters are needed.
 func (db *Database) ExecuteLanguage(language, query, paramsJSON string) (*QueryResult, error) {
+	defer runtime.KeepAlive(db)
 	cLang := C.CString(language)
 	defer C.free(unsafe.Pointer(cLang))
 	cQuery := C.CString(query)
@@ -349,6 +364,7 @@ func (db *Database) ExecuteLanguage(language, query, paramsJSON string) (*QueryR
 // database refuses the change (for example after a commit that did not
 // complete).
 func (db *Database) DropVectorIndex(label, property string) (bool, error) {
+	defer runtime.KeepAlive(db)
 	cLabel := C.CString(label)
 	defer C.free(unsafe.Pointer(cLabel))
 	cProp := C.CString(property)
@@ -367,6 +383,7 @@ func (db *Database) DropVectorIndex(label, property string) (bool, error) {
 // RebuildVectorIndex drops and recreates a vector index, rescanning all
 // matching nodes. Preserves the original index configuration.
 func (db *Database) RebuildVectorIndex(label, property string) error {
+	defer runtime.KeepAlive(db)
 	cLabel := C.CString(label)
 	defer C.free(unsafe.Pointer(cLabel))
 	cProp := C.CString(property)
@@ -381,6 +398,7 @@ func (db *Database) RebuildVectorIndex(label, property string) error {
 // lambda controls relevance vs diversity (0=diverse, 1=relevant; use -1 for default 0.5).
 // ef is the HNSW beam width (use -1 for default).
 func (db *Database) MmrSearch(label, property string, query []float32, k int, fetchK int, lambda float32, ef int) ([]VectorResult, error) {
+	defer runtime.KeepAlive(db)
 	cLabel := C.CString(label)
 	defer C.free(unsafe.Pointer(cLabel))
 	cProp := C.CString(property)
@@ -421,6 +439,7 @@ func (db *Database) MmrSearch(label, property string, query []float32, k int, fe
 // NodeCount returns the number of nodes in the database, or the error of a
 // read the store cannot do.
 func (db *Database) NodeCount() (int, error) {
+	defer runtime.KeepAlive(db)
 	var count C.size_t
 	if err := lockAndCheckStatus(func() C.GrafeoStatus {
 		return C.grafeo_node_count(db.handle, &count)
@@ -433,6 +452,7 @@ func (db *Database) NodeCount() (int, error) {
 // EdgeCount returns the number of edges in the database, or the error of a
 // read the store cannot do.
 func (db *Database) EdgeCount() (int, error) {
+	defer runtime.KeepAlive(db)
 	var count C.size_t
 	if err := lockAndCheckStatus(func() C.GrafeoStatus {
 		return C.grafeo_edge_count(db.handle, &count)

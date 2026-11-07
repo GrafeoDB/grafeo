@@ -29,6 +29,7 @@ type NodeEdge struct {
 // query, only those of edgeTypes when any are given. A node that does not
 // exist has none.
 func (db *Database) GetNodeEdges(nodeID uint64, direction Direction, edgeTypes ...string) ([]NodeEdge, error) {
+	defer runtime.KeepAlive(db)
 	return nodeEdgesCall(edgeTypes, func(types *C.char, neighbors, edges **C.uint64_t, count *C.size_t) C.GrafeoStatus {
 		return C.grafeo_get_node_edges(db.handle, C.uint64_t(nodeID), C.GrafeoDirection(direction), types, neighbors, edges, count)
 	})
@@ -36,6 +37,7 @@ func (db *Database) GetNodeEdges(nodeID uint64, direction Direction, edgeTypes .
 
 // GetNodeEdges is Database.GetNodeEdges in the graph.
 func (g *Graph) GetNodeEdges(nodeID uint64, direction Direction, edgeTypes ...string) ([]NodeEdge, error) {
+	defer runtime.KeepAlive(g)
 	return nodeEdgesCall(edgeTypes, func(types *C.char, neighbors, edges **C.uint64_t, count *C.size_t) C.GrafeoStatus {
 		return C.grafeo_graph_get_node_edges(g.handle, C.uint64_t(nodeID), C.GrafeoDirection(direction), types, neighbors, edges, count)
 	})

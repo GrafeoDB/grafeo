@@ -37,6 +37,7 @@ var ErrStreamClosed = errors.New("grafeo: stream is closed")
 
 // ExecuteStream opens a lazy cursor over a read-only GQL query.
 func (db *Database) ExecuteStream(query string) (*ResultStream, error) {
+	defer runtime.KeepAlive(db)
 	cQuery := C.CString(query)
 	defer C.free(unsafe.Pointer(cQuery))
 
@@ -72,6 +73,7 @@ func (s *ResultStream) Columns() []string {
 //
 // Experimental (0.6.2+).
 func (s *ResultStream) Warnings() []QueryWarning {
+	defer runtime.KeepAlive(s)
 	if s.handle == nil {
 		return s.warnings
 	}
@@ -91,6 +93,7 @@ func (s *ResultStream) Warnings() []QueryWarning {
 // Next pulls the next row as a map keyed by column name. Returns (nil, nil)
 // when the stream is exhausted.
 func (s *ResultStream) Next() (map[string]any, error) {
+	defer runtime.KeepAlive(s)
 	if s.handle == nil {
 		return nil, ErrStreamClosed
 	}
@@ -147,6 +150,7 @@ func (s *ResultStream) Collect() ([]map[string]any, error) {
 
 // Close releases the underlying Rust iterator. Safe to call multiple times.
 func (s *ResultStream) Close() {
+	defer runtime.KeepAlive(s)
 	if s.handle != nil {
 		s.warnings = s.Warnings()
 		C.grafeo_stream_free(s.handle)
@@ -157,6 +161,7 @@ func (s *ResultStream) Close() {
 
 // finalize is the Go finalizer for leak prevention.
 func (s *ResultStream) finalize() {
+	defer runtime.KeepAlive(s)
 	if s.handle != nil {
 		C.grafeo_stream_free(s.handle)
 		s.handle = nil

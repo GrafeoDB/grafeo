@@ -408,3 +408,62 @@ fn a_change_set_holds_its_grant_until_the_transaction_ends() {
         assert_eq!(held(&db), before, "{end}: the grant is given back");
     }
 }
+
+/// A database on a store of its own reports what it holds besides the store (its CDC log, RDF
+/// store and ring) to the buffer manager, as one on the built-in store does, and its CDC log
+/// keeps the configured retention.
+#[cfg(feature = "cdc")]
+#[test]
+fn a_database_on_its_own_store_registers_its_consumers_and_keeps_the_cdc_retention() {
+    use std::sync::Arc;
+
+    use grafeo_core::graph::rowgroup::RowGroupStore;
+    use grafeo_core::graph::{GraphBackend, GraphStore};
+    use grafeo_engine::Config;
+    use grafeo_engine::cdc::CdcRetentionConfig;
+
+    let config = || {
+        Config::in_memory()
+            .with_cdc()
+            .with_cdc_retention(CdcRetentionConfig::unlimited().with_max_events(3))
+    };
+    let names = |db: &GrafeoDB| -> Vec<String> {
+        db.buffer_manager()
+            .consumer_stats()
+            .into_iter()
+            .map(|consumer| consumer.name)
+            .collect()
+    };
+    let db = GrafeoDB::with_store(
+        Arc::new(RowGroupStore::new()) as Arc<dyn GraphBackend>,
+        config(),
+    )
+    .unwrap();
+    let registered = names(&db);
+    assert!(
+        registered.iter().any(|name| name == "cdc_log"),
+        "{registered:?}"
+    );
+    for name in ["Vincent", "Jules", "Mia", "Butch", "Alix"] {
+        db.execute(&format!("INSERT (:Person {{name: '{name}'}})"))
+            .unwrap();
+    }
+    assert_eq!(db.cdc_log().event_count(), 5);
+    db.gc();
+    assert!(
+        db.cdc_log().event_count() <= 3,
+        "the configured retention: {} events",
+        db.cdc_log().event_count()
+    );
+
+    let read = GrafeoDB::with_read_store(
+        Arc::new(RowGroupStore::new()) as Arc<dyn GraphStore>,
+        config(),
+    )
+    .unwrap();
+    let registered = names(&read);
+    assert!(
+        registered.iter().any(|name| name == "cdc_log"),
+        "{registered:?}"
+    );
+}

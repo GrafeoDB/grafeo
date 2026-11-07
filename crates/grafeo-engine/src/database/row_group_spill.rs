@@ -309,6 +309,7 @@ impl MemoryConsumer for RowGroupVectorConsumer {
         let files = self.files.as_ref().ok_or(SpillError::NoSpillDirectory)?;
         let root = self.root()?;
         let mut freed = 0;
+        let mut refused = None;
         if let Some(horizon) = &self.horizon {
             // The root's collect covers every named graph's.
             root.gc_versions(horizon());
@@ -321,18 +322,14 @@ impl MemoryConsumer for RowGroupVectorConsumer {
                 }
                 match graph.spill_node_property_column(&property, files) {
                     Ok(report) => freed += report.freed_bytes,
-                    // The spill account refused: the columns after this one
-                    // would be refused too, and this one stays in memory.
+                    // The spill account refused: this column stays in memory,
+                    // and a smaller one after it may still fit.
                     Err(error) if let Some(refusal) = spill_refusal(&error) => {
                         grafeo_common::grafeo_warn!(
                             "the vector column {} stays in memory: {refusal}",
                             property.as_str()
                         );
-                        return if freed > 0 {
-                            Ok(freed)
-                        } else {
-                            Err(SpillError::Refused(Box::new(refusal)))
-                        };
+                        refused.get_or_insert(refusal);
                     }
                     // Continue: what spilled so far counts, and this column
                     // keeps what did not spill on the heap.
@@ -343,7 +340,11 @@ impl MemoryConsumer for RowGroupVectorConsumer {
                 }
             }
         }
-        Ok(freed)
+        match refused {
+            // Nothing freed, and the account refused: the refusal is the answer.
+            Some(refusal) if freed == 0 => Err(SpillError::Refused(Box::new(refusal))),
+            _ => Ok(freed),
+        }
     }
 
     fn reload(&self) -> Result<(), SpillError> {

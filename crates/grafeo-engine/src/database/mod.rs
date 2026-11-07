@@ -928,6 +928,7 @@ impl GrafeoDB {
             budget,
             #[cfg(feature = "grafeo-file")]
             file_manager.as_ref(),
+            is_read_only,
         );
 
         // The WAL is the sidecar directory of the database file. It opens once
@@ -1190,7 +1191,9 @@ impl GrafeoDB {
         #[cfg(feature = "triple-store")]
         rdf_store.attach_memory(Arc::clone(&buffer_manager));
         #[cfg(feature = "cdc")]
-        let cdc_log = Arc::new(crate::cdc::CdcLog::new());
+        let cdc_log = Arc::new(crate::cdc::CdcLog::with_retention(
+            config.cdc_retention().clone(),
+        ));
         #[cfg(feature = "cdc")]
         cdc_log.attach_memory(Arc::clone(&buffer_manager));
 
@@ -1201,7 +1204,7 @@ impl GrafeoDB {
         #[cfg(all(feature = "wal", feature = "grafeo-file"))]
         let wal_retention_limit = config.wal_retention_limit();
 
-        let db = Self {
+        let mut db = Self {
             config,
             store: None,
             catalog: Arc::new(Catalog::new()),
@@ -1257,12 +1260,11 @@ impl GrafeoDB {
             projections: Arc::new(RwLock::new(std::collections::HashMap::new())),
             immediate_writes: std::sync::OnceLock::new(),
         };
+        // What it holds besides the backend (its RDF store and ring, its CDC
+        // log) reports to the buffer manager, as on the built-in store.
+        db.register_section_consumers();
         #[cfg(feature = "wal")]
-        let db = {
-            let mut db = db;
-            db.open_backend_wal(&store)?;
-            db
-        };
+        db.open_backend_wal(&store)?;
         Ok(db)
     }
 
@@ -1312,7 +1314,9 @@ impl GrafeoDB {
         #[cfg(feature = "triple-store")]
         rdf_store.attach_memory(Arc::clone(&buffer_manager));
         #[cfg(feature = "cdc")]
-        let cdc_log = Arc::new(crate::cdc::CdcLog::new());
+        let cdc_log = Arc::new(crate::cdc::CdcLog::with_retention(
+            config.cdc_retention().clone(),
+        ));
         #[cfg(feature = "cdc")]
         cdc_log.attach_memory(Arc::clone(&buffer_manager));
 
@@ -1323,7 +1327,7 @@ impl GrafeoDB {
         #[cfg(all(feature = "wal", feature = "grafeo-file"))]
         let wal_retention_limit = config.wal_retention_limit();
 
-        Ok(Self {
+        let mut db = Self {
             config,
             store: None,
             catalog: Arc::new(Catalog::new()),
@@ -1378,7 +1382,11 @@ impl GrafeoDB {
             read_only: true,
             projections: Arc::new(RwLock::new(std::collections::HashMap::new())),
             immediate_writes: std::sync::OnceLock::new(),
-        })
+        };
+        // What it holds besides the store reports to the buffer manager, as
+        // on the built-in store.
+        db.register_section_consumers();
+        Ok(db)
     }
 
     /// Compacts the database: writes a checkpoint of a persistent database

@@ -190,15 +190,31 @@ fn a_stored_zoned_literal_keeps_its_offset_through_a_reopen() {
         vec![Value::from("Alix"), zoned(plus_one)],
         vec![Value::from("Gus"), zoned(utc)],
     ];
+    // Zoned values compare by their instant: the offsets are compared on their own.
+    let offsets = |rows: &[Vec<Value>]| -> Vec<Option<i32>> {
+        rows.iter()
+            .map(|row| match &row[1] {
+                Value::ZonedDatetime(at) => Some(at.offset_seconds()),
+                _ => None,
+            })
+            .collect()
+    };
+    assert_eq!(offsets(&want), [Some(3_600), Some(0)]);
     let read = |db: &GrafeoDB, what: &str| {
         let gql = db
             .execute("MATCH (e:Event) RETURN e.who AS who, e.at AS at ORDER BY who")
             .unwrap();
         assert_eq!(gql.rows(), want, "{what}, GQL");
+        assert_eq!(offsets(gql.rows()), offsets(&want), "{what}, GQL offsets");
         let cypher = db
             .execute_cypher("MATCH (e:Event) RETURN e.who AS who, e.at AS at ORDER BY who")
             .unwrap();
         assert_eq!(cypher.rows(), want, "{what}, Cypher");
+        assert_eq!(
+            offsets(cypher.rows()),
+            offsets(&want),
+            "{what}, Cypher offsets"
+        );
     };
 
     let db = GrafeoDB::open(&path).unwrap();

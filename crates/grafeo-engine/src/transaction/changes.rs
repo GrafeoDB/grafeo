@@ -459,7 +459,7 @@ impl TransactionChanges {
     /// commit must not complete (the caller drops its commit guard, which
     /// poisons the database).
     pub(crate) fn commit(&self, epoch: EpochId) -> std::result::Result<(), ApplyError> {
-        let mut state = self.state.lock();
+        let state = self.state.lock();
         for bound in state.targets.iter().flatten() {
             bound.backend.commit(
                 bound.transaction,
@@ -467,8 +467,9 @@ impl TransactionChanges {
                 epoch,
             )?;
         }
-        // The transaction ends: its grant goes back.
-        state.grant = None;
+        // The set lives on through the rest of the commit (its triples, schema
+        // ops and change events, the collect): the grant goes when the set is
+        // emptied or dropped.
         Ok(())
     }
 

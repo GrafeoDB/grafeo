@@ -230,6 +230,23 @@ fn a_column_without_point_views_stays_in_memory() {
     );
 }
 
+/// What a spill would free counts only the columns it moves: a loaded
+/// string column (chunks without point views) reports none, as its spill
+/// frees none; the embeddings report theirs.
+#[test]
+fn the_spillable_bytes_count_only_what_a_spill_moves() {
+    let store = RowGroupStore::new();
+    items(&store);
+    let loaded = read(&write(&store));
+    let name = PropertyKey::new("name");
+    assert_eq!(loaded.node_property_column_spillable_bytes(&name), 0);
+    let report = loaded
+        .spill_node_property_column(&name, &Files::default())
+        .unwrap();
+    assert_eq!(report.freed_bytes, 0, "{report:?}");
+    assert!(loaded.node_property_column_spillable_bytes(&embedding()) > 0);
+}
+
 /// A write to a spilled column thaws its row group's column alone (Q9),
 /// which lets go of its file; the other row group stays spilled. A reload
 /// brings the rest back and lets go of every file.

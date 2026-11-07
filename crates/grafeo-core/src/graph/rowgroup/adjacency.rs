@@ -437,13 +437,24 @@ impl Adjacency {
             .saturating_sub(self.first_row)
             .min(self.offsets.len().saturating_sub(1));
         if cut == 0 {
+            // Only the end is left: the rows start at `row`, so the same
+            // dead head is not due again.
+            if self.offsets.len() == 1 && row > self.first_row {
+                self.first_row = row;
+            }
             return 0;
         }
         let before = self.offsets.capacity();
         let mut kept = Vec::with_capacity(self.offsets.len() - cut);
         kept.extend(self.offsets.drain(cut..));
         self.offsets = kept;
-        self.first_row += cut;
+        // With only the end left, no row below `row` has a list: the rows
+        // start there (a dead head is due only past it).
+        self.first_row = if self.offsets.len() == 1 {
+            row
+        } else {
+            self.first_row + cut
+        };
         (before - self.offsets.capacity()) * std::mem::size_of::<usize>()
     }
 
@@ -580,6 +591,26 @@ mod tests {
         }
         assert_eq!(adjacency.delta_len, 0, "the push past the minimum merged");
         assert_eq!(adjacency.sorted.len(), MERGE_MIN + 1);
+    }
+
+    /// A trim past every row with a list leaves only the end, and the rows
+    /// start at the trimmed row: the same dead head is not due again.
+    #[test]
+    fn a_trim_past_every_list_starts_the_rows_at_the_trimmed_row() {
+        use super::super::versions::VECTOR_ROWS;
+
+        let mut adjacency = Adjacency::default();
+        for row in 0..4 {
+            adjacency.push(row, edge(0, row as u64, row as u64));
+        }
+        adjacency.merge();
+        let head = 2 * VECTOR_ROWS;
+        assert!(adjacency.trim_dead_head(head) > 0, "the offsets went");
+        assert_eq!(adjacency.offsets.len(), 1, "only the end is left");
+        assert_eq!(adjacency.first_row, head);
+        assert!(!super::super::slots::trims(adjacency.first_row, head));
+        assert_eq!(adjacency.trim_dead_head(head), 0);
+        assert_eq!(edges(&adjacency, 3), Vec::<u64>::new());
     }
 
     /// Two adjacencies that took the same pushes and removes report the same

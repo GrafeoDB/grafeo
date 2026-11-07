@@ -1082,23 +1082,32 @@ impl Column {
         cold_chunk_bytes(&self.cold.lock())
     }
 
-    /// The heap bytes a spill of it would move to disk: a hot column's
-    /// values when it has no update chains (a chained one stays), a cold
-    /// one's chunks in memory, none once it is spilled.
+    /// The heap bytes a spill of it would move to disk, as
+    /// [`plan_spill`](Self::plan_spill) decides: a hot column's values when
+    /// it holds any and has no update chains (a chained one stays), a cold
+    /// one's chunks in memory when each has a point view, none once it is
+    /// spilled.
     fn spillable_bytes(&self) -> usize {
-        if let Some(hot) = self.hot.get() {
-            return if hot.updates.is_empty() {
+        let hot_bytes = |hot: &Hot| {
+            if hot.updates.is_empty() && !hot.present.is_empty() {
                 hot.counted_bytes()
             } else {
                 0
-            };
+            }
+        };
+        if let Some(hot) = self.hot.get() {
+            return hot_bytes(hot);
         }
         let cold = self.cold.lock();
         match self.hot.get() {
             // A thaw published the hot form meanwhile.
-            Some(hot) if hot.updates.is_empty() => hot.counted_bytes(),
-            Some(_) => 0,
-            None if cold.iter().any(|chunk| chunk.home == Home::Spilled) => 0,
+            Some(hot) => hot_bytes(hot),
+            None if cold
+                .iter()
+                .any(|chunk| chunk.home == Home::Spilled || chunk.point.is_none()) =>
+            {
+                0
+            }
             None => cold_chunk_bytes(&cold),
         }
     }

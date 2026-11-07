@@ -27,16 +27,19 @@ use crate::config::SpillLimit;
 /// spills nothing, and has no account), capped by `limit`, with `budget` the
 /// open's memory budget (the default cap when the free space cannot be
 /// read). `database` is the open's file manager, for the room the next
-/// checkpoint needs.
+/// checkpoint needs; a `read_only` open never checkpoints, and keeps none.
 pub(super) fn open_account(
     limit: SpillLimit,
     root: Option<&Path>,
     budget: usize,
     #[cfg(feature = "grafeo-file")] database: Option<&Arc<GrafeoFileManager>>,
+    read_only: bool,
 ) -> Option<Arc<SpillAccount>> {
     let root = root?;
     #[cfg(feature = "grafeo-file")]
-    let room = Some(room(root, database));
+    let room = Some(room(root, database.filter(|_| !read_only)));
+    #[cfg(not(feature = "grafeo-file"))]
+    let _ = read_only;
     // No probe in this build (C17): the cap alone bounds.
     #[cfg(not(feature = "grafeo-file"))]
     let room: Option<SpillRoom> = None;
@@ -182,12 +185,62 @@ mod tests {
     #[test]
     fn an_explicit_limit_is_the_cap_without_a_probe_of_its_own() {
         let dir = tempfile::tempdir().unwrap();
-        let account = open_account(SpillLimit::Bytes(88), Some(dir.path()), 1 << 20, None)
-            .expect("a spill directory has an account");
+        let account = open_account(
+            SpillLimit::Bytes(88),
+            Some(dir.path()),
+            1 << 20,
+            None,
+            false,
+        )
+        .expect("a spill directory has an account");
         assert_eq!(account.cap(), SpillCap::Bytes(88));
-        let account = open_account(SpillLimit::Unlimited, Some(dir.path()), 1 << 20, None)
-            .expect("a spill directory has an account");
+        let account = open_account(
+            SpillLimit::Unlimited,
+            Some(dir.path()),
+            1 << 20,
+            None,
+            false,
+        )
+        .expect("a spill directory has an account");
         assert_eq!(account.cap(), SpillCap::Unlimited);
-        assert!(open_account(SpillLimit::Default, None, 1 << 20, None).is_none());
+        assert!(open_account(SpillLimit::Default, None, 1 << 20, None, false).is_none());
+    }
+
+    /// A read-write open keeps the room of the file's next checkpoint free;
+    /// a read-only one never checkpoints, and keeps none.
+    #[cfg(feature = "testing-crash-injection")]
+    #[test]
+    fn a_read_only_open_keeps_no_room_for_a_checkpoint() {
+        use grafeo_core::execution::spill::SpillOwner;
+        use grafeo_storage::file::space::with_free_space;
+
+        let dir = tempfile::tempdir().unwrap();
+        let database =
+            Arc::new(GrafeoFileManager::create(dir.path().join("ghent.grafeo"), None).unwrap());
+        let needed = database.file_size().unwrap() + database.checkpoint_headroom();
+        assert!(needed > 0);
+        // Exactly the room the next checkpoint needs is free.
+        with_free_space(Some(needed), || {
+            let open = |read_only| {
+                open_account(
+                    SpillLimit::Unlimited,
+                    Some(dir.path()),
+                    1 << 20,
+                    Some(&database),
+                    read_only,
+                )
+                .expect("a spill directory has an account")
+            };
+            let refusal = open(false)
+                .reserve(SpillOwner::Sort, 1, true)
+                .expect_err("a read-write open keeps the room");
+            assert_eq!(
+                refusal.bound(),
+                grafeo_common::utils::error::LimitBound::CheckpointRoom
+            );
+            open(true)
+                .reserve(SpillOwner::Sort, 1, true)
+                .expect("a read-only open keeps none");
+        });
     }
 }

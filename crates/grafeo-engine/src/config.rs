@@ -399,15 +399,17 @@ pub enum ConfigError {
 /// Whether a section of `section_type` can be moved to disk: whether its
 /// memory consumer really spills it, so that a disk tier override does what
 /// it says. Only the vector store does (its embedding columns go to spill
-/// files); a mappable section whose consumer cannot spill (the text and
+/// files), in a build with `wal` and `vector-index`, whose consumer writes
+/// them; a mappable section whose consumer cannot spill (the text and
 /// property indexes, the RDF ring, which a spill would copy back onto the
 /// heap) or that has no consumer (the compact store, read only from older
 /// files) cannot.
 pub(crate) fn can_spill(section_type: grafeo_common::storage::SectionType) -> bool {
-    matches!(
-        section_type,
-        grafeo_common::storage::SectionType::VectorStore
-    )
+    cfg!(all(feature = "wal", feature = "vector-index"))
+        && matches!(
+            section_type,
+            grafeo_common::storage::SectionType::VectorStore
+        )
 }
 
 /// The section types that can be moved to disk, in section type order, as
@@ -421,7 +423,7 @@ fn spillable_sections() -> String {
     match names.split_last() {
         Some((last, [])) => last.clone(),
         Some((last, rest)) => format!("{} and {last}", rest.join(", ")),
-        None => String::new(),
+        None => "none in this build".to_string(),
     }
 }
 
@@ -1495,9 +1497,9 @@ impl Config {
     /// tier, max_ram: None })`. Pass [`TierOverride::ForceDisk`] to spill the
     /// section at database open, [`TierOverride::ForceRam`] to declare it
     /// must stay in RAM (declarative only until Phase 8g), or
-    /// [`TierOverride::Auto`] (the default). Only `CompactStore`,
-    /// `VectorStore`, `TextIndex`, `RdfRing` and `PropertyIndex` can be
-    /// moved to disk: [`validate`](Self::validate) refuses `ForceDisk` for
+    /// [`TierOverride::Auto`] (the default). Only `VectorStore` can be
+    /// moved to disk (its embedding columns, in a build with `wal` and
+    /// `vector-index`): [`validate`](Self::validate) refuses `ForceDisk` for
     /// any other section.
     ///
     /// # Examples
@@ -1506,9 +1508,9 @@ impl Config {
     /// # use grafeo_engine::Config;
     /// use grafeo_common::storage::{SectionType, TierOverride};
     ///
-    /// // Force the LPG compact base to mmap mode at open.
-    /// let config = Config::in_memory()
-    ///     .with_section_tier(SectionType::CompactStore, TierOverride::ForceDisk);
+    /// // Spill the embedding columns of the vector indexes at open.
+    /// let config = Config::persistent("lyon.grafeo")
+    ///     .with_section_tier(SectionType::VectorStore, TierOverride::ForceDisk);
     /// ```
     ///
     /// [`TierOverride::ForceDisk`]: grafeo_common::storage::TierOverride::ForceDisk
@@ -2406,7 +2408,12 @@ mod tests {
     /// An encrypted database spills nothing to disk, so a section pinned to
     /// disk could not be honored: `TierOverride::ForceDisk` with encryption
     /// is invalid, while `Auto` and `ForceRam` are fine.
-    #[cfg(all(feature = "encryption", not(miri)))]
+    #[cfg(all(
+        feature = "encryption",
+        feature = "wal",
+        feature = "vector-index",
+        not(miri)
+    ))]
     #[test]
     #[allow(
         deprecated,
@@ -2476,11 +2483,16 @@ mod tests {
                 Err(ConfigError::ForceDiskOnUnspillableSection(section_type)),
                 "{section_type:?} cannot spill"
             );
+            let spillable = if cfg!(all(feature = "wal", feature = "vector-index")) {
+                "VectorStore"
+            } else {
+                "none in this build"
+            };
             assert_eq!(
                 ConfigError::ForceDiskOnUnspillableSection(section_type).to_string(),
                 format!(
                     "the {section_type:?} section cannot be moved to disk, so it takes no disk \
-                     tier override; the sections that can are VectorStore"
+                     tier override; the sections that can are {spillable}"
                 )
             );
             for tier in [TierOverride::Auto, TierOverride::ForceRam] {
@@ -2492,7 +2504,17 @@ mod tests {
 
         let config = Config::persistent("berlin.grafeo")
             .with_section_tier(SectionType::VectorStore, TierOverride::ForceDisk);
-        assert_eq!(config.validate(), Ok(()), "the vector store spills");
+        if cfg!(all(feature = "wal", feature = "vector-index")) {
+            assert_eq!(config.validate(), Ok(()), "the vector store spills");
+        } else {
+            // Nothing writes the embedding columns to disk in this build.
+            assert_eq!(
+                config.validate(),
+                Err(ConfigError::ForceDiskOnUnspillableSection(
+                    SectionType::VectorStore
+                ))
+            );
+        }
     }
 
     // --- Builder chaining with new fields ---

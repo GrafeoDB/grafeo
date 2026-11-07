@@ -4211,4 +4211,43 @@ mod tests {
         mgr.commit(linker).unwrap();
         mgr.commit(deleter).unwrap();
     }
+
+    /// The change set's grant covers it after the backends committed: the
+    /// commit still applies its triples, schema ops and change events from
+    /// it. The grant goes with the set.
+    #[cfg(feature = "triple-store")]
+    #[test]
+    fn a_commit_keeps_the_change_set_grant_until_the_set_goes() {
+        use grafeo_common::memory::buffer::BufferManager;
+        use grafeo_core::graph::rdf::{Term, Triple};
+
+        let memory = BufferManager::with_budget(1 << 30);
+        let manager = TransactionManager::new();
+        manager.attach_memory(Arc::clone(&memory));
+        let (_transaction, changes) = manager.begin_private().unwrap();
+        for i in 0..20_000 {
+            changes
+                .record_triple(
+                    None,
+                    Triple::new(
+                        Term::iri(format!("http://ex.org/vincent{i}")),
+                        Term::iri("http://ex.org/knows"),
+                        Term::iri("http://ex.org/mia"),
+                    ),
+                    true,
+                )
+                .unwrap();
+        }
+        let held = memory.allocated();
+        assert!(held > 0, "the set holds a grant");
+        changes.commit(EpochId::new(1)).unwrap();
+        assert_eq!(
+            memory.allocated(),
+            held,
+            "the set lives on through the rest of the commit"
+        );
+        drop(changes);
+        drop(manager);
+        assert_eq!(memory.allocated(), 0, "the grant went with the set");
+    }
 }

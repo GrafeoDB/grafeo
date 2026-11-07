@@ -2,7 +2,8 @@
 //!
 //! Store-level types (`StoreMemory`, `IndexMemory`, etc.) live in grafeo-common.
 //! This module defines the top-level `MemoryUsage` aggregate and engine-specific
-//! types (`CacheMemory`, `BufferManagerMemory`, `RdfMemory`, `CdcMemory`).
+//! types (`CacheMemory`, `BufferManagerMemory`, `RdfMemory`, `CdcMemory`,
+//! `SpillMemory`).
 //!
 //! The breakdowns are read, not built, outside this crate: later releases may
 //! add fields. [`GrafeoDB::memory_usage`](crate::GrafeoDB::memory_usage)

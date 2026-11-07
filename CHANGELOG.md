@@ -12,6 +12,7 @@ All notable changes to Grafeo, for future reference (and enjoyment).
 - **Typed graphs**: a read no longer pays for a graph type's checks, which only a write needs.
 - **Constraints**: `UNIQUE` and `NODE KEY` build an index on their first property, so an insert under one no longer reads the whole label.
 - **Weighted algorithms**: Dijkstra, SSSP, A*, Bellman-Ford, Floyd-Warshall, Kruskal, Prim, `max_flow` and `min_cost_max_flow` read each edge's weight directly instead of loading the whole edge; Dijkstra takes about a third fewer instructions.
+- **Smaller default builds**: the `wal` feature no longer pulls in tokio; only `async-storage` and `server` do.
 
 ### Changed
 
@@ -36,10 +37,11 @@ Queries that ran in 0.6.1 and now fail or behave differently.
 - **Minimum spanning trees of equal weight**: `grafeo.kruskal` and `grafeo.prim` return the one with the lowest edge ids (it depended on the order edges were read).
 - **A WAL with an empty segment**, which a crash in 0.6.1 could leave while starting one, is refused at open with an error naming `wal_salvage`: reopen it once with `wal_salvage`, which sets the empty file aside and loses no commit (#725).
 - **Incremental backups that cannot continue their chain** fail with `GRAFEO-S005`, naming the cause: no backup cursor, a chain behind the cursor, or log that was removed. Some of these raised an invalid-input error. A new full backup starts a new chain (#673).
+- **Automatic checkpoints are on**: a file database checkpoints by itself once its WAL holds 256 MiB past the last checkpoint, on a background thread that starts when it first has work; turn it off with `checkpoint_wal_size=None` (Python), `checkpointWalSize: null` (Node.js) or `Config::without_checkpoint_wal_size()`. The WAL's segment size is a setting (`wal_segment_size`, 1 MiB to 1 GiB, 64 MiB by default), and a checkpoint size below 1 MiB is refused.
 
 ### Added
 
-- **Graph procedures**: `CALL grafeo.ktruss()` and `grafeo.ktruss(k)`, `grafeo.total_triangles()` and `grafeo.subgraph_isomorphism()`, and the Python methods `ktruss(k=None)` and `subgraph_isomorphism_count(pattern_edges, pattern_nodes)`.
+- **Graph procedures**: `CALL grafeo.ktruss()` and `grafeo.ktruss(k)`, `grafeo.total_triangles()` and `grafeo.subgraph_isomorphism(pattern_edges, pattern_nodes)`, and the Python methods `ktruss(k=None)` and `subgraph_isomorphism_count(pattern_edges, pattern_nodes)`.
 - **Query warnings**: a statement that uses a deprecated form or has something worth knowing returns its rows with warnings, each with a GQLSTATUS code (class 01), a kind and a message. They are on `QueryResult::warnings` and on streaming results, in every binding (Python also raises them through `warnings.warn`), and the CLI prints them on stderr. Experimental.
 - **SQL/PGQ `||`** concatenates strings and lists.
 - **`grafeo.pagerank`** warns (01Y01) when it runs out of iterations before its scores settle within `tolerance`.
@@ -77,6 +79,8 @@ Queries that ran in 0.6.1 and now fail or behave differently.
 - **`YIELD`**: a column a procedure does not have is refused when the call is planned, naming its columns; it failed only after the algorithm had run (4.5 s on 4,000 nodes).
 - **WAL segments**: a panic while the WAL started a new segment no longer makes every later checkpoint fail until a reopen (#725).
 - **Checkpoints** check free disk space first and fail with a clear error naming the space needed and available, changing nothing; a checkpoint that fails partway gives back the disk space it took (#726).
+- **Go and C# bindings**: a database, transaction, graph, stream or point-in-time view could be freed by the garbage collector while a call on it was still running, which could crash the process (for example on the last `Next` of a stream in Go); every native call now keeps its handle alive. In C#, an async call on a database disposed meanwhile throws `ObjectDisposedException`.
+- **Vector search with a filter on a quantized index** could return fewer than `k` results, or none, when the allowed nodes lay far from the query; it now searches among the allowed nodes.
 
 ### Contributors
 

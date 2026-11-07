@@ -20,16 +20,19 @@ pytestmark = pytest.mark.skipif(
 )
 
 NODES = 2_000
+# The graph every method runs to its end on: Floyd-Warshall alone is cubic in the nodes.
+SMALL = 120
 
 
-def build(query_timeout):
-    """A DAG of 2,000 nodes, ~6,000 edges from lower to higher index in a seeded order, each with a
-    weight `w`, a capacity `c` and a cost `k`, all positive; node names `v0`, `v1`, ..."""
+def build(query_timeout, nodes=NODES):
+    """A DAG of `nodes` nodes, about three edges per node from lower to higher index in a seeded
+    order, each with a weight `w`, a capacity `c` and a cost `k`, all positive; node names `v0`,
+    `v1`, ..."""
     rng = random.Random(17)
     db = grafeo.GrafeoDB(query_timeout=query_timeout)
-    ids = [db.create_node(["V"], {"name": f"v{i}"}).id for i in range(NODES)]
-    for _ in range(3 * NODES):
-        u, v = rng.randrange(NODES), rng.randrange(NODES)
+    ids = [db.create_node(["V"], {"name": f"v{i}"}).id for i in range(nodes)]
+    for _ in range(3 * nodes):
+        u, v = rng.randrange(nodes), rng.randrange(nodes)
         if u != v:
             props = {"w": rng.randint(1, 9), "c": rng.randint(1, 5), "k": rng.randint(1, 4)}
             db.create_edge(ids[min(u, v)], ids[max(u, v)], "E", props)
@@ -123,7 +126,7 @@ def test_betweenness_stops_at_a_one_millisecond_timeout():
 
 
 def test_without_a_timeout_every_method_answers():
-    db, ids = build(None)
+    db, ids = build(None, SMALL)
     for method, call in calls(ids).items():
         try:
             call(db.algorithms)

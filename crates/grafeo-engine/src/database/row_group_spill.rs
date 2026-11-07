@@ -41,7 +41,7 @@ use grafeo_common::memory::buffer::SpillError;
 use grafeo_common::memory::buffer::{MemoryConsumer, MemoryRegion, priorities};
 #[cfg(all(feature = "wal", feature = "vector-index"))]
 use grafeo_common::storage::SectionType;
-#[cfg(all(feature = "wal", feature = "vector-index"))]
+#[cfg(feature = "vector-index")]
 use grafeo_common::types::PropertyKey;
 #[cfg(all(feature = "wal", feature = "vector-index"))]
 use grafeo_core::execution::spill::{SpillAccount, SpillOwner, SpillReservation};

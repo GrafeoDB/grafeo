@@ -127,6 +127,7 @@ mod error_paths;
 mod exists_after_cheap_conjuncts;
 mod exists_delim_join;
 mod exists_mark_join;
+mod explain_plans_physically;
 mod expression_and_projection;
 mod factorized_aggregates_match_the_regular_path;
 mod factorized_aggregation_test;

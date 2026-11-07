@@ -44,7 +44,7 @@ use std::sync::Arc;
 ///     Some("Document".to_string()),
 ///     "embedding".to_string(),
 ///     query,
-///     10,
+///     Some(10),
 ///     DistanceMetric::Cosine,
 ///     view,
 /// );
@@ -64,7 +64,9 @@ pub struct VectorScanOperator {
     label: Option<String>,
     property: String,
     query: Vec<f32>,
-    k: usize,
+    /// How many nearest neighbours the search finds; `None` (a threshold scan) for every node
+    /// the view sees with the label, counted when the scan first runs.
+    k: Option<usize>,
     metric: DistanceMetric,
     min_similarity: Option<f32>,
     max_distance: Option<f32>,
@@ -83,14 +85,17 @@ impl VectorScanOperator {
     ///
     /// `label` scopes the search to nodes carrying that label (use `None` to
     /// scan every node with the named property). The store decides between
-    /// HNSW and brute force based on (label, property, metric).
+    /// HNSW and brute force based on (label, property, metric). `k` is the
+    /// number of nearest neighbours; `None` (a threshold scan) bounds the
+    /// search by the nodes `view` sees with the label, counted at the first
+    /// pull, so planning reads nothing and the count is the search's snapshot.
     #[must_use]
     pub fn new(
         store: Arc<dyn GraphStore>,
         label: Option<String>,
         property: String,
         query: Vec<f32>,
-        k: usize,
+        k: Option<usize>,
         metric: DistanceMetric,
         view: ReadView,
     ) -> Self {
@@ -151,14 +156,16 @@ impl VectorScanOperator {
         self.executed = true;
 
         let (label, property) = (self.label.as_deref(), &self.property);
-        self.results = self.store.vector_search(
-            label,
-            property,
-            &self.query,
-            self.k,
-            self.metric,
-            self.view,
-        )?;
+        // A threshold scan has no k of its own: every node the view sees with the label, at the
+        // snapshot the search reads (which bounds HNSW, never `usize::MAX`).
+        let k = match (self.k, label) {
+            (Some(k), _) => k,
+            (None, None) => self.store.node_count(self.view)?,
+            (None, Some(label)) => self.store.nodes_by_label_count(label, self.view)?,
+        };
+        self.results =
+            self.store
+                .vector_search(label, property, &self.query, k, self.metric, self.view)?;
         super::read_counter::count(self.reads.as_deref(), self.results.len());
 
         self.apply_filters();
@@ -289,7 +296,7 @@ mod tests {
             Some("Document".to_string()),
             "embedding".to_string(),
             query,
-            2,
+            Some(2),
             DistanceMetric::Euclidean,
             ReadView::latest(),
         );
@@ -314,7 +321,7 @@ mod tests {
             None,
             "vec".to_string(),
             vec![0.1, 0.2],
-            10,
+            Some(10),
             DistanceMetric::Cosine,
             ReadView::latest(),
         );
@@ -341,7 +348,7 @@ mod tests {
             Some("Doc".to_string()),
             "vec".to_string(),
             vec![0.0, 0.0],
-            10,
+            Some(10),
             DistanceMetric::Euclidean,
             ReadView::latest(),
         )
@@ -362,7 +369,7 @@ mod tests {
             None,
             "embedding".to_string(),
             vec![0.1, 0.2],
-            10,
+            Some(10),
             DistanceMetric::Cosine,
             ReadView::latest(),
         );
@@ -383,7 +390,7 @@ mod tests {
             Some("Doc".to_string()),
             "vec".to_string(),
             vec![0.0, 1.0],
-            10,
+            Some(10),
             DistanceMetric::Cosine,
             ReadView::latest(),
         )
@@ -407,7 +414,7 @@ mod tests {
             Some("Doc".to_string()),
             "vec".to_string(),
             vec![0.0, 0.0],
-            10,
+            Some(10),
             DistanceMetric::Euclidean,
             ReadView::latest(),
         )
@@ -432,7 +439,7 @@ mod tests {
             None,
             "vec".to_string(),
             vec![0.1],
-            10,
+            Some(10),
             DistanceMetric::Cosine,
             ReadView::latest(),
         );

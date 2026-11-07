@@ -1125,6 +1125,15 @@ pub(crate) fn refuse_deep_params(
     )))
 }
 
+/// Whether `plan` still names a parameter no value fills (an `EXPLAIN` given no values):
+/// substituting no values fails exactly then, by the one walk that fills them. `EXPLAIN` asks
+/// it, in the languages that answer `EXPLAIN` (see the session's `explain_or_profile`).
+#[cfg(any(feature = "gql", feature = "gremlin"))]
+#[must_use]
+pub(crate) fn has_unresolved_parameters(plan: &LogicalPlan) -> bool {
+    substitute_params(&mut plan.clone(), &QueryParams::new()).is_err()
+}
+
 /// Substitutes parameters in a logical plan with their values.
 ///
 /// # Errors

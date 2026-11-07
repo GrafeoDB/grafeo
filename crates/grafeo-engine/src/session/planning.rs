@@ -278,6 +278,10 @@ pub(crate) struct SessionPlanning {
     /// Whether the statement's operators read as a committed reader (see
     /// `Planner::with_read_only`).
     pub(super) read_only: bool,
+    /// Whether the plan is only built, never run (`EXPLAIN`): outside a transaction its writers
+    /// write through a plan-only recording, which refuses every write, so no transaction is
+    /// begun to build them.
+    pub(super) plan_only: bool,
 }
 
 /// How the planner of one statement is built: the session's part (see
@@ -344,10 +348,15 @@ impl StatementPlanning {
         // The graph the writes land in: the statement's, or the default
         // graph when no graph of that name exists.
         let written = access.stores.written_key(key.clone());
-        let recording = if transaction_id.is_some() && write_store.is_some() {
-            access.recording(written.as_deref())?
-        } else {
-            None
+        let recording = match &write_store {
+            Some(_) if transaction_id.is_some() => access.recording(written.as_deref())?,
+            Some(target) if session.plan_only => {
+                Some(grafeo_core::execution::operators::Recording::plan_only(
+                    Arc::clone(target),
+                    viewing_epoch,
+                ))
+            }
+            _ => None,
         };
         // The graph's built-in store, which the query reads, so CALL
         // grafeo.search.* procedures reach its HNSW / BM25 indexes (#677);

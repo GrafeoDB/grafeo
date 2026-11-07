@@ -1311,17 +1311,10 @@ impl Planner {
             VectorMetric::Manhattan => DistanceMetric::Manhattan,
         });
 
-        // Top-k mode uses HNSW when available; threshold/unbounded mode
-        // bounds k to the label's node count so we don't feed usize::MAX
-        // into HNSW (which degrades to full traversal and risks overflow
-        // in quantized rescore paths even with saturating_mul).
-        let k = match scan.k {
-            Some(k) => k,
-            None => match scan.label.as_ref() {
-                None => self.store.node_count(self.read_view())?,
-                Some(label) => self.store.nodes_by_label_count(label, self.read_view())?,
-            },
-        };
+        // Top-k mode uses HNSW when available; a threshold scan has no k, and
+        // the operator bounds it by the label's node count when it first runs,
+        // at its own view: planning reads nothing (`EXPLAIN` plans at any epoch).
+        let k = scan.k;
 
         // A query vector the index cannot measure is an error that names the
         // index (#593), whichever metric the predicate asks for: a search of

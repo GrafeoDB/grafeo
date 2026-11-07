@@ -6647,6 +6647,17 @@ impl Session {
         Option<TransactionId>,
         Option<crate::transaction::ReadPin>,
     )> {
+        let (epoch, transaction_id, historical) = self.statement_epoch();
+        if historical {
+            let pin = self.transaction_manager.pin_read_at(epoch)?;
+            return Ok((pin.epoch(), None, Some(pin)));
+        }
+        Ok((epoch, transaction_id, None))
+    }
+
+    /// The epoch a statement reads at, its transaction, and whether the epoch is a historical
+    /// override, which a statement that reads pins (see `get_transaction_context`).
+    fn statement_epoch(&self) -> (EpochId, Option<TransactionId>, bool) {
         let viewing = *self.viewing_epoch_override.lock();
         let transaction = *self.current_transaction.lock();
         // A historical override reads committed data, excluding pending
@@ -6655,8 +6666,7 @@ impl Session {
             let epoch = transaction
                 .and_then(|transaction_id| self.transaction_manager.start_epoch(transaction_id))
                 .map_or(epoch, |start| epoch.min(start));
-            let pin = self.transaction_manager.pin_read_at(epoch)?;
-            return Ok((pin.epoch(), None, Some(pin)));
+            return (epoch, None, true);
         }
 
         if let Some(transaction_id) = transaction {
@@ -6664,9 +6674,9 @@ impl Session {
                 .transaction_manager
                 .start_epoch(transaction_id)
                 .unwrap_or_else(|| self.transaction_manager.current_epoch());
-            Ok((epoch, Some(transaction_id), None))
+            (epoch, Some(transaction_id), false)
         } else {
-            Ok((self.transaction_manager.current_epoch(), None, None))
+            (self.transaction_manager.current_epoch(), None, false)
         }
     }
 
@@ -6724,6 +6734,35 @@ impl Session {
             .with_degree_samples_from(Arc::clone(store))
     }
 
+    #[cfg(any(feature = "gql", feature = "gremlin"))]
+    /// Plans `plan` physically and drops the operators without running them, so `EXPLAIN` refuses
+    /// what planning refuses (a procedure's arguments, a `YIELD` column) as the statement would.
+    /// It plans in a read context at the session's snapshot: it begins no transaction, also for
+    /// a write, and planning has no side effects. It pins no epoch either, since planning reads
+    /// no versioned rows, so an `EXPLAIN` at a historical epoch collection has passed still
+    /// plans. A plan that still names a parameter no value fills (`EXPLAIN` given no values) is
+    /// not planned: it is no statement that can run, and what it would refuse depends on the
+    /// values.
+    ///
+    /// # Errors
+    ///
+    /// The error planning the statement gives.
+    fn plan_and_drop(
+        &self,
+        plan: &crate::query::plan::LogicalPlan,
+        active: &Arc<dyn GraphStore>,
+        language: grafeo_common::types::StatementLanguage,
+    ) -> Result<()> {
+        if crate::query::processor::has_unresolved_parameters(plan) {
+            return Ok(());
+        }
+        let (viewing_epoch, transaction_id, _historical) = self.statement_epoch();
+        let mut planning = self.statement_planning(viewing_epoch, transaction_id, false, language);
+        planning.session.plan_only = true;
+        drop(planning.planner(Arc::clone(active))?.plan(plan)?);
+        Ok(())
+    }
+
     /// What an `EXPLAIN` (the plan, with its pushdown hints) or a `PROFILE`
     /// (a run of `plan` that returns its operator tree) of `plan` answers, or
     /// `None` for a plan that runs as usual. Every language that takes the
@@ -6742,6 +6781,7 @@ impl Session {
             use crate::query::processor::{annotate_pushdown_hints, explain_result};
             return Some(
                 self.check_graph_access(self.plan_write_kinds(&plan.root))
+                    .and_then(|()| self.plan_and_drop(plan, active, language))
                     .map(|()| {
                         let mut plan = plan.clone();
                         annotate_pushdown_hints(
@@ -6847,6 +6887,7 @@ impl Session {
                 viewing_epoch,
                 transaction_id,
                 read_only,
+                plan_only: false,
             },
             schema: self.current_schema(),
             graph: self.effective_graph(),

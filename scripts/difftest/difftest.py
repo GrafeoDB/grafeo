@@ -137,6 +137,7 @@ def run_case(db, language: str, query: str, params: dict | None = None) -> dict:
 def run_corpus(out: Path) -> None:
     # Imported here, so that comparing results works without grafeo installed.
     import grafeo
+
     from corpus import CASES, FIXTURES
 
     databases = {}

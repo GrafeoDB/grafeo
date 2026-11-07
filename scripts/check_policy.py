@@ -1068,7 +1068,7 @@ def rust_xfail_findings(rel: str, text: str, floor: Release | None) -> list[Find
                 finding("T9", rel, call_line, "the xfail names no spec and issue")
             )
             continue
-        for (line, arg), what in zip(args[:2], ("spec", "issue")):
+        for (line, arg), what in zip(args[:2], ("spec", "issue"), strict=True):
             literal = re.fullmatch(r'"((?:[^"\\]|\\.)*)"', arg)
             if not literal:
                 detail = f"the xfail's {what} is not a string literal"

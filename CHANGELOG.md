@@ -97,6 +97,7 @@ Queries that ran in 0.6.1 and now fail or behave differently.
 - **WASM `importRdf`** is in every build with the RDF store, the `full` package (`@grafeo-db/wasm`) included; it was missing there.
 - **Vector search with a filter on a quantized index** could return fewer than `k` results, or none, when the allowed nodes lay far from the query; it now searches among the allowed nodes.
 - **Opening and closing without writes leaves the file unchanged**: `close()` checkpoints only when something changed since the last checkpoint, so a database opened only for reads keeps its file byte for byte (its header was rewritten on every close).
+- **The C header declares the backup functions**: `grafeo_backup_full`, `grafeo_backup_incremental`, `grafeo_restore_to_epoch` and `grafeo_clear_plan_cache`, exported since earlier releases, are now declared in `grafeo.h`.
 
 ### Contributors
 

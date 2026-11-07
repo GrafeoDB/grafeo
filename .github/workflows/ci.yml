@@ -690,7 +690,7 @@ jobs:
             engine_test: "--features gql,wal,grafeo-file,tracing,testing-crash-injection --test storage_events"
           # Full: all features combined (`full` is a deprecated alias, removed in 0.7.0 per #468; use persona combos)
           - profile: full
-            features: "--features languages,triple-store,algos,parallel,vector-index,text-index,hybrid-search,spill,mmap,regex,jsonl-import,parquet-import"
+            features: "--features gql,cypher,sparql,gremlin,graphql,sql-pgq,triple-store,algos,parallel,vector-index,text-index,hybrid-search,spill,mmap,regex,jsonl-import,parquet-import"
             engine_features: "--features full"
     steps:
       - uses: actions/checkout@v7
@@ -731,8 +731,8 @@ jobs:
       # Library-only build for the engine crate: its integration tests assume
       # all features are available and need incremental cfg-gating (tracked).
       # Full test coverage runs under --all-features in the rust-test job.
-      # Uses engine_features when the profile name differs from foundation features
-      # (e.g. "embedded" and "browser" are engine-level profile names).
+      # Uses engine_features when the engine needs other features than the foundation
+      # crates (e.g. the engine's own `full`, or `wal` and `grafeo-file`).
       - name: Build engine + facade (${{ matrix.profile }})
         run: >
           cargo build --lib
@@ -962,7 +962,7 @@ jobs:
 
   # Node.js tests
   # Default profile: napi-rs builds grafeo-node with its crate-level default
-  # features, which pull in "full" (all languages + AI) via grafeo-engine.
+  # features, its `embedded` profile.
   node-test:
     name: Node.js Test (${{ matrix.os }}, Node ${{ matrix.node }})
     needs: [node-spec]

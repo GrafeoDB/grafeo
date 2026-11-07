@@ -1431,17 +1431,34 @@ impl super::Planner {
     /// at UTC against a zoned one, which is the query's reading only in a GQL
     /// session without a time zone, and order a time without an offset
     /// against one with an offset by more than its instant, so a time is
-    /// never left to them.
+    /// never left to them. The same holds for a time or datetime inside a
+    /// list, a map or a path, whose elements they compare the same way.
     fn store_orders_like_query(&self, value: &Value) -> bool {
         // SQL/PGQ raises for two kinds, which only its filter meets.
         if self.session_context.language == grafeo_common::types::StatementLanguage::SqlPgq {
             return false;
         }
+        self.store_orders_elements_like_query(value)
+    }
+
+    /// [`store_orders_like_query`](Self::store_orders_like_query) for
+    /// `value` and every value it holds.
+    fn store_orders_elements_like_query(&self, value: &Value) -> bool {
         match value {
             Value::Time(_) => false,
             Value::Timestamp(_) | Value::ZonedDatetime(_) => {
                 self.session_context.temporal_comparison == TemporalComparison::default()
             }
+            Value::List(items) => items
+                .iter()
+                .all(|item| self.store_orders_elements_like_query(item)),
+            Value::Map(entries) => entries
+                .values()
+                .all(|entry| self.store_orders_elements_like_query(entry)),
+            Value::Path { nodes, edges } => nodes
+                .iter()
+                .chain(edges.iter())
+                .all(|element| self.store_orders_elements_like_query(element)),
             _ => true,
         }
     }

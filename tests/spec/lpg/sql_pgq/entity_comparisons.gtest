@@ -1,0 +1,72 @@
+# A SQL/PGQ comparison of a graph element with a value of another kind is refused with 22G04, `=`
+# and `<>` included (GA04; ISO/IEC 9075-2 8.2 Syntax Rule 3: the comparands must be comparable). A
+# null on either side gives null, which leaves the row out without an error, and two nodes compare
+# by identity. sql_pgq_entity_comparisons.rs runs every element against every operand. The setup
+# runs in GQL (the file's language), each query in SQL/PGQ.
+
+meta:
+  language: gql
+  model: lpg
+  section: "8.2"
+  title: Comparisons of graph elements across kinds
+  dataset: empty
+  requires: [sql-pgq]
+
+tests:
+
+  - name: a_node_equal_to_an_integer_raises
+    language: sql-pgq
+    setup:
+      - "INSERT (:P {k: 1, name: 'Alix'})-[:R {w: 1}]->(:P {k: 2, name: 'Gus'})"
+    query: "SELECT * FROM GRAPH_TABLE (MATCH (n:P)-[e:R]->(m:P) WHERE n = 1 COLUMNS (n.name AS name))"
+    expect:
+      gql_status: "22G04"
+
+  - name: a_node_unequal_to_an_integer_raises
+    language: sql-pgq
+    setup:
+      - "INSERT (:P {k: 1, name: 'Alix'})-[:R {w: 1}]->(:P {k: 2, name: 'Gus'})"
+    query: "SELECT * FROM GRAPH_TABLE (MATCH (n:P)-[e:R]->(m:P) WHERE n <> 1 COLUMNS (n.name AS name))"
+    expect:
+      gql_status: "22G04"
+
+  - name: a_string_equal_to_a_node_raises
+    language: sql-pgq
+    setup:
+      - "INSERT (:P {k: 1, name: 'Alix'})-[:R {w: 1}]->(:P {k: 2, name: 'Gus'})"
+    query: "SELECT * FROM GRAPH_TABLE (MATCH (n:P)-[e:R]->(m:P) WHERE 'Alix' = n COLUMNS (n.name AS name))"
+    expect:
+      gql_status: "22G04"
+
+  - name: an_edge_equal_to_a_property_raises
+    language: sql-pgq
+    setup:
+      - "INSERT (:P {k: 1, name: 'Alix'})-[:R {w: 1}]->(:P {k: 2, name: 'Gus'})"
+    query: "SELECT * FROM GRAPH_TABLE (MATCH (n:P)-[e:R]->(m:P) WHERE e = m.name COLUMNS (n.name AS name))"
+    expect:
+      gql_status: "22G04"
+
+  - name: a_node_equal_to_an_edge_raises
+    language: sql-pgq
+    setup:
+      - "INSERT (:P {k: 1, name: 'Alix'})-[:R {w: 1}]->(:P {k: 2, name: 'Gus'})"
+    query: "SELECT * FROM GRAPH_TABLE (MATCH (n:P)-[e:R]->(m:P) WHERE n = e COLUMNS (n.name AS name))"
+    expect:
+      gql_status: "22G04"
+
+  - name: a_node_equal_to_null_is_null
+    language: sql-pgq
+    setup:
+      - "INSERT (:P {k: 1, name: 'Alix'})-[:R {w: 1}]->(:P {k: 2, name: 'Gus'})"
+    query: "SELECT * FROM GRAPH_TABLE (MATCH (n:P)-[e:R]->(m:P) WHERE n = NULL COLUMNS (n.name AS name))"
+    expect:
+      rows: []
+
+  - name: two_nodes_compare_by_identity
+    language: sql-pgq
+    setup:
+      - "INSERT (:P {k: 1, name: 'Alix'})-[:R {w: 1}]->(:P {k: 2, name: 'Gus'})"
+    query: "SELECT * FROM GRAPH_TABLE (MATCH (n:P)-[e:R]->(m:P) WHERE n <> m COLUMNS (n.name AS name))"
+    expect:
+      rows:
+        - [Alix]

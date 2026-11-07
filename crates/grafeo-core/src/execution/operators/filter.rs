@@ -4837,10 +4837,14 @@ impl ExpressionPredicate {
     }
 
     /// A comparison between operands of kinds kept apart: `=` is false and
-    /// `<>` true in both languages (ISO/IEC 39075 19.3 General Rule 2 a i
-    /// with universal comparison, and openCypher). The ordering operators are
-    /// null in Cypher, and in GQL still fail as not comparable (22G04) until a
-    /// value can hold a node or an edge.
+    /// `<>` true in GQL and Cypher (ISO/IEC 39075 19.3 General Rule 2 a i
+    /// with universal comparison, and openCypher). SQL/PGQ's comparands must
+    /// be comparable, for `=` and `<>` too (ISO/IEC 9075-2 8.2 Syntax Rule 3),
+    /// so there every operator fails as not comparable (22G04), as a
+    /// comparison of two values of different kinds does. The ordering
+    /// operators are null in Cypher, and in GQL still fail as not comparable
+    /// until a value can hold a node or an edge. A null never gets here: a
+    /// comparison with one is unknown.
     fn compare_across_kinds(
         &self,
         left: &Value,
@@ -4850,6 +4854,9 @@ impl ExpressionPredicate {
         right_kind: OperandKind,
     ) -> Option<Value> {
         match op {
+            _ if self.session_context.language == StatementLanguage::SqlPgq => {
+                self.fail(not_comparable(left, left_kind, right, right_kind))
+            }
             BinaryFilterOp::Eq => Some(Value::Bool(false)),
             BinaryFilterOp::Ne => Some(Value::Bool(true)),
             _ if self.follows_opencypher() => None,

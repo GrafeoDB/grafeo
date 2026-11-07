@@ -406,18 +406,23 @@ impl MergeOperator {
         &mut self,
         resolved_match_props: &[(String, Value)],
     ) -> Result<Vec<NodeId>, OperatorError> {
-        // Use a property index when available to avoid a full label scan.
-        // Null conditions are excluded from the index query and verified in the loop.
-        let use_index = {
+        // A property index, when one serves a match value, gives the
+        // candidates instead of a label scan. It is read for every value `=`
+        // finds equal (`1` and `1.0`, `[1]` and `[1.0]`), as the filter
+        // compares, and maybe others: the loop below checks each candidate's
+        // labels and every match value, a null one included.
+        let indexed = {
             let labels = self.label_names();
             resolved_match_props
                 .iter()
-                .any(|(k, v)| !v.is_null() && self.writer.store().index_serves(&labels, k))
+                .find(|(k, v)| !v.is_null() && self.writer.store().index_serves(&labels, k))
         };
 
         // Without an index, the row's values looked up among the pattern's
         // nodes, when they have a key (see `NodeKeys`).
-        if !use_index && let Some(candidates) = self.keyed_candidates(resolved_match_props)? {
+        if indexed.is_none()
+            && let Some(candidates) = self.keyed_candidates(resolved_match_props)?
+        {
             let mut matches = Vec::with_capacity(candidates.len());
             for node_id in candidates {
                 if self.node_matches(node_id, resolved_match_props)? {
@@ -433,13 +438,17 @@ impl MergeOperator {
         // way.
         let store = self.writer.store();
         let view = self.writer.view();
-        let candidates: Vec<NodeId> = if use_index {
-            let conditions: Vec<(&str, Value)> = resolved_match_props
-                .iter()
-                .filter(|(_, v)| !v.is_null())
-                .map(|(k, v)| (k.as_str(), v.clone()))
-                .collect();
-            store.find_indexed_by_properties(&self.label_names(), &conditions, view)?
+        let found = match indexed {
+            Some((key, value)) => {
+                store.find_indexed_maybe_equal(&self.label_names(), key, value, view)?
+            }
+            None => None,
+        };
+        let candidates: Vec<NodeId> = if let Some(mut found) = found {
+            // In ID order, as a scan reads them.
+            found.sort_unstable();
+            found.dedup();
+            found
         } else if let Some(label) = self.scan_label()? {
             store.nodes_by_label(label, view)?
         } else {

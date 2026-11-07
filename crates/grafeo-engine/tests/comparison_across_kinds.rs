@@ -782,60 +782,147 @@ fn a_property_against_a_property_answers_as_the_comparison() {
     );
 }
 
-/// `MERGE` finds a node whose key `=` holds of and makes one where it does not; a UNIQUE rule refuses
-/// a second value `=` holds of and takes one it does not.
-#[test]
-fn merge_and_unique_keys_follow_equality() {
-    let sample = sample();
-    let mut wrong = Vec::new();
-    for (a_name, a) in &sample {
-        for (b_name, b) in &sample {
-            if a.is_null() || b.is_null() {
-                continue;
-            }
-            let db = GrafeoDB::new_in_memory();
-            let session = db.session();
-            let equal = outcome(&session, Language::Gql, "=", a, b) == "true";
-            for (language, merge) in [
-                (Language::Gql, "MERGE (n:M {k: $a}) RETURN n.k"),
-                (Language::Cypher, "MERGE (n:C {k: $a}) RETURN n.k"),
-            ] {
-                run(&session, language, merge, pair(a, b)).unwrap();
-                run(&session, language, &merge.replace("$a", "$b"), pair(a, b)).unwrap();
-            }
-            for label in ["M", "C"] {
-                let count = run(
-                    &session,
+/// How the key `k` is indexed while `MERGE` and the UNIQUE rule look for its holders.
+#[derive(Clone, Copy, Debug)]
+enum KeyIndex {
+    /// No index: the label is read.
+    None,
+    /// A property index on `k` (every label).
+    Property,
+    /// An index on `k` of the label (`CREATE INDEX ... FOR (n:L) ON (n.k)`).
+    Label,
+}
+
+const KEY_INDEXES: [KeyIndex; 3] = [KeyIndex::None, KeyIndex::Property, KeyIndex::Label];
+
+fn index_key(db: &GrafeoDB, session: &Session, index: KeyIndex, labels: &[&str]) {
+    match index {
+        KeyIndex::None => {}
+        KeyIndex::Property => db.create_property_index("k").unwrap(),
+        KeyIndex::Label => {
+            for label in labels {
+                run(
+                    session,
                     Language::Gql,
-                    &format!("MATCH (n:{label}) RETURN count(n) AS c"),
+                    &format!("CREATE INDEX k_of_{label} FOR (n:{label}) ON (n.k)"),
                     HashMap::new(),
                 )
-                .unwrap()[0][0]
-                    .clone();
-                let want = Value::Int64(if equal { 1 } else { 2 });
-                if count != want {
-                    wrong.push(format!(
-                        "MERGE {label} of {a_name} then {b_name}: {count:?}, want {want:?}"
-                    ));
-                }
+                .unwrap();
             }
-            let db = GrafeoDB::new_in_memory();
-            let session = db.session();
-            run(
+        }
+    }
+}
+
+/// Whether a UNIQUE rule takes `a` and `b` for one key: the grouping form (22.12), where two NaNs
+/// are one key though `NaN = NaN` is false, else `=` (`equal`). The values here hold NaN only as
+/// a float of their own.
+fn grouping_same(a: &Value, b: &Value, equal: bool) -> bool {
+    match (a, b) {
+        (Value::Float64(x), Value::Float64(y)) if x.is_nan() && y.is_nan() => true,
+        _ => equal,
+    }
+}
+
+/// `MERGE` of `a` then `b`, in GQL and in Cypher, makes one node where `=` holds of them and two
+/// where it does not (the equality form); a UNIQUE rule with `a` held refuses `b` exactly where the
+/// grouping form takes them for one key (two NaNs are, though `NaN = NaN` is false). With the key
+/// indexed as `index` before either write.
+fn merge_and_unique(pairs: &[(&str, Value, &str, Value)], index: KeyIndex) -> Vec<String> {
+    let mut wrong = Vec::new();
+    for (a_name, a, b_name, b) in pairs {
+        if a.is_null() || b.is_null() {
+            continue;
+        }
+        let db = GrafeoDB::new_in_memory();
+        let session = db.session();
+        let equal = outcome(&session, Language::Gql, "=", a, b) == "true";
+        index_key(&db, &session, index, &["M", "C"]);
+        for (language, merge) in [
+            (Language::Gql, "MERGE (n:M {k: $a}) RETURN n.k"),
+            (Language::Cypher, "MERGE (n:C {k: $a}) RETURN n.k"),
+        ] {
+            run(&session, language, merge, pair(a, b)).unwrap();
+            run(&session, language, &merge.replace("$a", "$b"), pair(a, b)).unwrap();
+        }
+        for label in ["M", "C"] {
+            let count = run(
                 &session,
                 Language::Gql,
-                "CREATE CONSTRAINT one_k FOR (n:U) ON (n.k) UNIQUE",
+                &format!("MATCH (n:{label}) RETURN count(n) AS c"),
                 HashMap::new(),
             )
-            .unwrap();
-            run(&session, Language::Gql, "INSERT (:U {k: $a})", pair(a, b)).unwrap();
-            let second = run(&session, Language::Gql, "INSERT (:U {k: $b})", pair(a, b));
-            if second.is_ok() == equal {
+            .unwrap()[0][0]
+                .clone();
+            let want = Value::Int64(if equal { 1 } else { 2 });
+            if count != want {
                 wrong.push(format!(
-                    "UNIQUE with {a_name} then {b_name}: {second:?}, `=` holds: {equal}"
+                    "{index:?}: MERGE {label} of {a_name} then {b_name}: {count:?}, want {want:?}"
                 ));
             }
         }
+        let db = GrafeoDB::new_in_memory();
+        let session = db.session();
+        index_key(&db, &session, index, &["U"]);
+        run(
+            &session,
+            Language::Gql,
+            "CREATE CONSTRAINT one_k FOR (n:U) ON (n.k) UNIQUE",
+            HashMap::new(),
+        )
+        .unwrap();
+        run(&session, Language::Gql, "INSERT (:U {k: $a})", pair(a, b)).unwrap();
+        let second = run(&session, Language::Gql, "INSERT (:U {k: $b})", pair(a, b));
+        let same = grouping_same(a, b, equal);
+        if second.is_ok() == same {
+            wrong.push(format!(
+                "{index:?}: UNIQUE with {a_name} then {b_name}: {second:?}, one key: {same}"
+            ));
+        }
+    }
+    wrong
+}
+
+/// `MERGE` finds a node whose key `=` holds of and makes one where it does not; a UNIQUE rule refuses
+/// a second value `=` holds of and takes one it does not. One value of each family against each.
+#[test]
+fn merge_and_unique_keys_follow_equality() {
+    let sample = sample();
+    let pairs: Vec<_> = sample
+        .iter()
+        .flat_map(|(a_name, a)| {
+            sample
+                .iter()
+                .map(|(b_name, b)| (*a_name, a.clone(), *b_name, b.clone()))
+        })
+        .collect();
+    let wrong = merge_and_unique(&pairs, KeyIndex::None);
+    assert!(
+        wrong.is_empty(),
+        "{} wrong:\n{}",
+        wrong.len(),
+        wrong.join("\n")
+    );
+}
+
+/// The same with and without an index, over every pair within a family, where the values `=` holds
+/// of across kinds are (`1` and `1.0`, `0.0` and `-0.0`, `[1]` and `[1.0]`, two zoned datetimes of
+/// one instant): an index answers as the label does, so a `MERGE` of `1.0` finds the node of `1`
+/// and makes no second one.
+#[test]
+fn merge_and_unique_keys_follow_equality_with_an_index() {
+    let values = values();
+    let pairs: Vec<_> = values
+        .iter()
+        .flat_map(|(a_name, a_family, _, a)| {
+            values
+                .iter()
+                .filter(move |(_, b_family, _, _)| b_family == a_family)
+                .map(|(b_name, _, _, b)| (*a_name, a.clone(), *b_name, b.clone()))
+        })
+        .collect();
+    let mut wrong = Vec::new();
+    for index in KEY_INDEXES {
+        wrong.extend(merge_and_unique(&pairs, index));
     }
     assert!(
         wrong.is_empty(),

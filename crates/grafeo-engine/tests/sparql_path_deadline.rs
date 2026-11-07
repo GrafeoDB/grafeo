@@ -1,6 +1,8 @@
 //! The query timeout stops a long property path: `*` over a dense graph, and `?` run per row over a large
 //! input, both well past the limit on any machine. The path checks its deadline on its first row and every
-//! 1,024 rows, so the error comes soon after the limit, and the database answers after it.
+//! 1,024 rows, so the error comes soon after the limit, and the database answers after it. Each case
+//! runs in a child process with a deadline, so a path that ignores the limit fails its test rather than
+//! hanging the test binary.
 //!
 //! ```bash
 //! cargo test -p grafeo-engine --all-features --test main sparql_path_deadline::
@@ -35,8 +37,7 @@ fn dense() -> GrafeoDB {
     db
 }
 
-#[test]
-fn a_long_path_walk_times_out() {
+fn a_long_path_walk_times_out_here() {
     let db = dense();
     for query in [
         "SELECT (COUNT(*) AS ?c) WHERE { ?x <urn:q>* ?y }",
@@ -95,8 +96,7 @@ fn acyclic() -> GrafeoDB {
 /// every node's descendants and gives no row; no term is missing from the graph, so `ASK`'s no-read
 /// shortcut does not apply. A search to a held term no edge reaches may be answered quickly by a plan
 /// that walks back from it; it must still end by the limit, empty or with the timeout.
-#[test]
-fn a_path_search_that_finds_nothing_stops_at_the_limit() {
+fn a_path_search_that_finds_nothing_stops_at_the_limit_here() {
     let db = acyclic();
     for (query, must_time_out) in [
         ("SELECT ?x WHERE { ?x <urn:q>+ ?x }", true),
@@ -138,4 +138,43 @@ fn a_path_search_that_finds_nothing_stops_at_the_limit() {
             "{query}: it ended after {elapsed:?}"
         );
     }
+}
+
+/// The variable naming the case the child runs.
+const CHILD_VAR: &str = "GRAFEO_SPARQL_PATH_DEADLINE_CHILD";
+/// How long a child may take: building its graph, then every query within the limit and its slack.
+const CHILD_DEADLINE: Duration = Duration::from_secs(120);
+
+/// The child: runs the case [`CHILD_VAR`] names. A no-op when run directly.
+#[test]
+fn path_deadline_child() {
+    match std::env::var(CHILD_VAR).as_deref() {
+        Ok("walk") => a_long_path_walk_times_out_here(),
+        Ok("nothing") => a_path_search_that_finds_nothing_stops_at_the_limit_here(),
+        _ => {}
+    }
+}
+
+fn in_a_child(case: &str) {
+    let output = grafeo_common::testing::child_process::output_with_deadline(
+        grafeo_common::child_test!("path_deadline_child").env(CHILD_VAR, case),
+        CHILD_DEADLINE,
+    )
+    .unwrap_or_else(|error| panic!("{case}: still running after {CHILD_DEADLINE:?}: {error}"));
+    assert!(
+        output.status.success(),
+        "{case}:\n{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn a_long_path_walk_times_out() {
+    in_a_child("walk");
+}
+
+#[test]
+fn a_path_search_that_finds_nothing_stops_at_the_limit() {
+    in_a_child("nothing");
 }

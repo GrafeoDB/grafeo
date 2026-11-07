@@ -47,8 +47,8 @@ rdf = ["triple-store", "gql", "sparql", "graphql", "storage", "grafeo-engine/reg
 analytics = ["algos", "vector-index", "text-index", "hybrid-search", "jsonl-import", "parquet-import"]
 edge = ["gql", "grafeo-engine/regex-lite"]
 # Deployment-based profiles (deprecated)
-embedded = ["gql", "ai", "algos", "grafeo-engine/parallel", "grafeo-engine/regex", "grafeo-engine/grafeo-file"]
-full = ["languages", "ai", "algos", "triple-store"]
+embedded = ["gql", "storage", "ai", "algos", "grafeo-engine/parallel", "grafeo-engine/regex", "grafeo-engine/grafeo-file"]
+full = ["languages", "ai", "algos", "triple-store", "storage"]
 
 [lints]
 workspace = true

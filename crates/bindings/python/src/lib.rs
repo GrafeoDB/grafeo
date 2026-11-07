@@ -82,10 +82,11 @@ fn simd_support() -> &'static str {
 /// `sparql`, `gremlin`, `graphql`, `sql-pgq`) and the optional capabilities
 /// (`algos`, `vector-index`, `text-index`, `hybrid-search`, `cdc`,
 /// `triple-store`, `shacl`, `embed`, `arrow-export`,
-/// `jsonl-import`, `parquet-import`, `metrics`). Groups and profiles such as
-/// `full` or `ai` are not listed, only the features they enable. Persistence
-/// (WAL and `.grafeo` files) is part of every build, and so is reading a
-/// database file compacted by 0.5.x.
+/// `jsonl-import`, `parquet-import`, `metrics`, and `storage`: persistence,
+/// the WAL and `.grafeo` files). Groups and profiles such as `full` or `ai`
+/// are not listed, only the features they enable. A method that needs a
+/// feature exists only in a build with it. Every build that opens files reads
+/// a database file compacted by 0.5.x.
 ///
 /// Example:
 ///     import grafeo

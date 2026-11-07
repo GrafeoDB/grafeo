@@ -43,8 +43,9 @@ pub fn version() -> String {
 /// `sparql`, `gremlin`, `graphql`, `sql-pgq`) and the optional capabilities
 /// (`algos`, `vector-index`, `text-index`, `hybrid-search`, `cdc`,
 /// `triple-store`, `shacl`, `embed`, `arrow-export`, `jsonl-import`,
-/// `parquet-import`, `metrics`). Profiles such as `full` are not listed, only
-/// what they enable.
+/// `parquet-import`, `metrics`, and `storage`: persistence, the WAL and
+/// `.grafeo` files). Profiles such as `full` are not listed, only what they
+/// enable. A method that needs a feature exists only in a build with it.
 ///
 /// ```ts
 /// if (!features().includes('cypher')) throw new Error('this build has no Cypher')

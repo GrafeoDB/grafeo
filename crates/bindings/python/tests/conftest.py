@@ -41,6 +41,7 @@ KNOWN_FEATURES = frozenset(
         "shacl",
         "sparql",
         "sql-pgq",
+        "storage",
         "text-index",
         "triple-store",
         "vector-index",

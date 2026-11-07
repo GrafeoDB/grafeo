@@ -2214,6 +2214,9 @@ pub extern "C" fn grafeo_info(db: *mut GrafeoDatabase) -> *mut c_char {
 }
 
 /// Save database to a path. Caller provides a path string.
+///
+/// Needs the `storage` feature (in the default and `full` builds).
+#[cfg(feature = "storage")]
 #[unsafe(no_mangle)]
 pub extern "C" fn grafeo_save(db: *mut GrafeoDatabase, path: *const c_char) -> GrafeoStatus {
     let db = db_ref!(db);
@@ -2228,6 +2231,9 @@ pub extern "C" fn grafeo_save(db: *mut GrafeoDatabase, path: *const c_char) -> G
 }
 
 /// Create a full backup of the database.
+///
+/// Needs the `storage` feature (in the default and `full` builds).
+#[cfg(feature = "storage")]
 #[unsafe(no_mangle)]
 pub extern "C" fn grafeo_backup_full(
     db: *mut GrafeoDatabase,
@@ -2245,6 +2251,9 @@ pub extern "C" fn grafeo_backup_full(
 }
 
 /// Create an incremental backup (WAL records since last backup).
+///
+/// Needs the `storage` feature (in the default and `full` builds).
+#[cfg(feature = "storage")]
 #[unsafe(no_mangle)]
 pub extern "C" fn grafeo_backup_incremental(
     db: *mut GrafeoDatabase,
@@ -2269,6 +2278,9 @@ pub extern "C" fn grafeo_backup_incremental(
 /// checkpoints then keep only the WAL a reopen needs. Writes 1 to
 /// `out_released` when there was a cursor to release, 0 when there was none
 /// (`out_released` may be null).
+///
+/// Needs the `storage` feature (in the default and `full` builds).
+#[cfg(feature = "storage")]
 #[unsafe(no_mangle)]
 pub extern "C" fn grafeo_release_backup_cursor(
     db: *mut GrafeoDatabase,
@@ -2289,6 +2301,9 @@ pub extern "C" fn grafeo_release_backup_cursor(
 
 /// Restore a database to a specific epoch from a backup chain. An epoch past
 /// the end of the chain restores the latest state the chain holds.
+///
+/// Needs the `storage` feature (in the default and `full` builds).
+#[cfg(feature = "storage")]
 #[unsafe(no_mangle)]
 pub extern "C" fn grafeo_restore_to_epoch(
     backup_dir: *const c_char,

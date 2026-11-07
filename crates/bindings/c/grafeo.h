@@ -392,6 +392,7 @@ void               grafeo_free_transaction(GrafeoTransaction* tx);
 /* ---- Admin --------------------------------------------------------------- */
 
 char*        grafeo_info(GrafeoDatabase* db);
+/* Needs the `storage` feature (in the default and `full` builds). */
 GrafeoStatus grafeo_save(GrafeoDatabase* db, const char* path);
 GrafeoStatus grafeo_wal_checkpoint(GrafeoDatabase* db);
 /* Automatic checkpoints: every interval_ms milliseconds and once the WAL holds

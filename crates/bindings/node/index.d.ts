@@ -211,14 +211,6 @@ export declare class GrafeoDB {
   beginTransaction(isolationLevel?: string | undefined | null): Transaction
   /** Create a vector similarity index on a node property. */
   createVectorIndex(label: string, property: string, dimensions?: number | undefined | null, metric?: string | undefined | null, m?: number | undefined | null, efConstruction?: number | undefined | null, quantization?: string | undefined | null): Promise<void>
-  /**
-   * Search for the k nearest neighbors of a query vector.
-   *
-   * Returns an array of [nodeId, distance] pairs sorted by distance
-   * ascending (lower = more similar). The distance scale depends on
-   * the metric configured at index creation.
-   */
-  vectorSearch(label: string, property: string, query: Array<number>, k: number, ef?: number | undefined | null, filters?: Record<string, any> | undefined | null): Promise<Array<Array<number>>>
   /** Bulk-insert nodes with vector properties. */
   batchCreateNodes(label: string, property: string, vectors: Array<Array<number>>): Promise<Array<number>>
   /** Remove a property from a node. Returns true if the property existed. */
@@ -268,30 +260,6 @@ export declare class GrafeoDB {
    * Flushes all pending WAL records to the main storage.
    */
   walCheckpoint(): void
-  /**
-   * Saves the database to a file path.
-   *
-   * If in-memory, creates a new persistent database at the given path.
-   * If file-backed, creates a copy at the new path.
-   * The copy is a single file, whatever the extension; fails if `path`
-   * exists. The original database remains unchanged.
-   */
-  save(path: string): void
-  /** Create a full backup of the database. */
-  backupFull(backupDir: string): void
-  /** Create an incremental backup (WAL records since last backup). */
-  backupIncremental(backupDir: string): void
-  /**
-   * Release the backup cursor: the next backup must be a full one.
-   * Checkpoints then keep only the WAL a reopen needs. Returns whether
-   * there was a cursor to release.
-   */
-  releaseBackupCursor(): boolean
-  /**
-   * Restore a database to a specific epoch from a backup chain. An epoch
-   * past the end of the chain restores the latest state the chain holds.
-   */
-  static restoreToEpoch(backupDir: string, epoch: number, outputPath: string): void
   /** Close the database. */
   close(): void
   /**
@@ -324,6 +292,16 @@ export declare class GrafeoDB {
   /** Returns the names of all graph projections. */
   listProjections(): Array<string>
   /**
+   * Search for the k nearest neighbors of a query vector.
+   *
+   * Returns an array of [nodeId, distance] pairs sorted by distance
+   * ascending (lower = more similar). The distance scale depends on
+   * the metric configured at index creation.
+   *
+   * Needs the `vector-index` feature (in the default and `full` builds).
+   */
+  vectorSearch(label: string, property: string, query: Array<number>, k: number, ef?: number | undefined | null, filters?: Record<string, any> | undefined | null): Promise<Array<Array<number>>>
+  /**
    * Drop a vector index for the given label and property.
    * Returns true if the index existed and was removed.
    */
@@ -349,6 +327,44 @@ export declare class GrafeoDB {
    * balance, not distance sorting.
    */
   mmrSearch(label: string, property: string, query: Array<number>, k: number, fetchK?: number | undefined | null, lambdaMult?: number | undefined | null, ef?: number | undefined | null, filters?: Record<string, any> | undefined | null): Promise<Array<Array<number>>>
+  /**
+   * Saves the database to a file path.
+   *
+   * If in-memory, creates a new persistent database at the given path.
+   * If file-backed, creates a copy at the new path.
+   * The copy is a single file, whatever the extension; fails if `path`
+   * exists. The original database remains unchanged.
+   *
+   * Needs the `storage` feature (in the default and `full` builds).
+   */
+  save(path: string): void
+  /**
+   * Create a full backup of the database.
+   *
+   * Needs the `storage` feature (in the default and `full` builds).
+   */
+  backupFull(backupDir: string): void
+  /**
+   * Create an incremental backup (WAL records since last backup).
+   *
+   * Needs the `storage` feature (in the default and `full` builds).
+   */
+  backupIncremental(backupDir: string): void
+  /**
+   * Release the backup cursor: the next backup must be a full one.
+   * Checkpoints then keep only the WAL a reopen needs. Returns whether
+   * there was a cursor to release.
+   *
+   * Needs the `storage` feature (in the default and `full` builds).
+   */
+  releaseBackupCursor(): boolean
+  /**
+   * Restore a database to a specific epoch from a backup chain. An epoch
+   * past the end of the chain restores the latest state the chain holds.
+   *
+   * Needs the `storage` feature (in the default and `full` builds).
+   */
+  static restoreToEpoch(backupDir: string, epoch: number, outputPath: string): void
   /**
    * Create a BM25 text index on a node property for full-text search.
    *
@@ -874,8 +890,9 @@ export interface CsvImportOptions {
  * `sparql`, `gremlin`, `graphql`, `sql-pgq`) and the optional capabilities
  * (`algos`, `vector-index`, `text-index`, `hybrid-search`, `cdc`,
  * `triple-store`, `shacl`, `embed`, `arrow-export`, `jsonl-import`,
- * `parquet-import`, `metrics`). Profiles such as `full` are not listed, only
- * what they enable.
+ * `parquet-import`, `metrics`, and `storage`: persistence, the WAL and
+ * `.grafeo` files). Profiles such as `full` are not listed, only what they
+ * enable. A method that needs a feature exists only in a build with it.
  *
  * ```ts
  * if (!features().includes('cypher')) throw new Error('this build has no Cypher')

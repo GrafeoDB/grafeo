@@ -328,6 +328,11 @@ pub struct PyGrafeoDB {
 
 impl PyGrafeoDB {
     /// Converts an optional Python dict of property filters to a Rust HashMap.
+    #[cfg(any(
+        feature = "vector-index",
+        feature = "text-index",
+        feature = "hybrid-search"
+    ))]
     fn convert_filters(
         filters: Option<&Bound<'_, pyo3::types::PyDict>>,
     ) -> PyResult<Option<HashMap<String, Value>>> {
@@ -1746,6 +1751,9 @@ impl PyGrafeoDB {
     ///
     /// Example:
     ///     removed = db.drop_vector_index("Doc", "embedding")
+    ///
+    /// Needs the `vector-index` feature (in the default and `full` builds).
+    #[cfg(feature = "vector-index")]
     fn drop_vector_index(&self, label: &str, property: &str) -> PyResult<bool> {
         let db = self.inner.read();
         Ok(db
@@ -1773,6 +1781,9 @@ impl PyGrafeoDB {
     ///
     /// Example:
     ///     db.rebuild_vector_index("Doc", "embedding")
+    ///
+    /// Needs the `vector-index` feature (in the default and `full` builds).
+    #[cfg(feature = "vector-index")]
     fn rebuild_vector_index(&self, label: &str, property: &str, py: Python<'_>) -> PyResult<()> {
         self.released(py, |db| Ok(db.rebuild_vector_index(label, property)?))
     }
@@ -1801,6 +1812,9 @@ impl PyGrafeoDB {
     ///
     ///     # With property filters (only search among user_id=42 nodes):
     ///     results = db.vector_search("Doc", "embedding", query, k=10, filters={"user_id": 42})
+    ///
+    /// Needs the `vector-index` feature (in the default and `full` builds).
+    #[cfg(feature = "vector-index")]
     #[pyo3(signature = (label, property, query, k, ef=None, filters=None))]
     fn vector_search(
         &self,
@@ -2264,6 +2278,9 @@ impl PyGrafeoDB {
     ///
     /// Example:
     ///     results = db.batch_vector_search("Doc", "embedding", [[1.0, 0.0], [0.0, 1.0]], k=5)
+    ///
+    /// Needs the `vector-index` feature (in the default and `full` builds).
+    #[cfg(feature = "vector-index")]
     #[pyo3(signature = (label, property, queries, k, ef=None, filters=None))]
     fn batch_vector_search(
         &self,
@@ -2318,6 +2335,9 @@ impl PyGrafeoDB {
     ///     results = db.mmr_search("Doc", "embedding", [1.0, 0.0, 0.0], k=4, lambda_mult=0.5)
     ///     for node_id, distance in results:
     ///         print(f"Node {node_id}: distance={distance:.4f}")
+    ///
+    /// Needs the `vector-index` feature (in the default and `full` builds).
+    #[cfg(feature = "vector-index")]
     #[pyo3(signature = (label, property, query, k, fetch_k=None, lambda_mult=None, ef=None, filters=None))]
     #[allow(clippy::too_many_arguments)]
     fn mmr_search(
@@ -3298,6 +3318,9 @@ impl PyGrafeoDB {
     ///     db = GrafeoDB()  # in-memory
     ///     db.create_node(["Person"], {"name": "Alix"})
     ///     db.save("./mydb")  # save to file
+    ///
+    /// Needs the `storage` feature (in the default and `full` builds).
+    #[cfg(feature = "storage")]
     fn save(&self, path: String, py: Python<'_>) -> PyResult<()> {
         self.released(py, |db| Ok(db.save(path)?))
     }
@@ -3311,6 +3334,9 @@ impl PyGrafeoDB {
     /// Example:
     ///     db = GrafeoDB("./mydb.grafeo")
     ///     db.backup_full("./backups/mydb")
+    ///
+    /// Needs the `storage` feature (in the default and `full` builds).
+    #[cfg(feature = "storage")]
     fn backup_full(&self, backup_dir: String, py: Python<'_>) -> PyResult<()> {
         self.released(py, |db| {
             db.backup_full(std::path::Path::new(&backup_dir))?;
@@ -3324,6 +3350,9 @@ impl PyGrafeoDB {
     ///
     /// Example:
     ///     db.backup_incremental("./backups/mydb")
+    ///
+    /// Needs the `storage` feature (in the default and `full` builds).
+    #[cfg(feature = "storage")]
     fn backup_incremental(&self, backup_dir: String, py: Python<'_>) -> PyResult<()> {
         self.released(py, |db| {
             db.backup_incremental(std::path::Path::new(&backup_dir))?;
@@ -3340,6 +3369,9 @@ impl PyGrafeoDB {
     ///
     /// Example:
     ///     db.release_backup_cursor()
+    ///
+    /// Needs the `storage` feature (in the default and `full` builds).
+    #[cfg(feature = "storage")]
     fn release_backup_cursor(&self, py: Python<'_>) -> PyResult<bool> {
         self.released(py, |db| Ok(db.release_backup_cursor()?))
     }
@@ -3351,6 +3383,9 @@ impl PyGrafeoDB {
     ///
     /// Example:
     ///     GrafeoDB.restore_to_epoch("./backups/mydb", 500, "./restored.grafeo")
+    ///
+    /// Needs the `storage` feature (in the default and `full` builds).
+    #[cfg(feature = "storage")]
     #[staticmethod]
     fn restore_to_epoch(
         backup_dir: String,
@@ -3392,6 +3427,9 @@ impl PyGrafeoDB {
     /// Example:
     ///     db = GrafeoDB.open_in_memory("./mydb")
     ///     db.create_node(...)  # doesn't affect file
+    ///
+    /// Needs the `storage` feature (in the default and `full` builds).
+    #[cfg(feature = "storage")]
     #[staticmethod]
     fn open_in_memory(path: String, py: Python<'_>) -> PyResult<Self> {
         let db = without_gil(py, move || {

@@ -40,6 +40,7 @@ macro_rules! reported_features {
             ("jsonl-import", cfg!(feature = "jsonl-import")),
             ("parquet-import", cfg!(feature = "parquet-import")),
             ("metrics", cfg!(feature = "metrics")),
+            ("storage", cfg!(feature = "storage")),
         ]
         .into_iter()
         .filter_map(|(name, enabled)| enabled.then_some(name))

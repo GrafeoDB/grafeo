@@ -30,6 +30,8 @@ use grafeo_storage::wal::DEFAULT_SEGMENT_BYTES;
 
 /// Free bytes no checkpoint of the test database fits in.
 const TOO_LITTLE: u64 = 4_321;
+/// Room for any checkpoint of these tests.
+const PLENTY: u64 = 1 << 40;
 
 /// A file database with 2,000 people, so its checkpoint needs far more than `TOO_LITTLE`.
 fn database(path: &Path) -> GrafeoDB {
@@ -249,7 +251,10 @@ fn a_write_failing_before_the_header_cuts_the_file_back() {
             let dir = tempfile::tempdir().unwrap();
             let (db, path) = with_commits_after_a_checkpoint(dir.path());
             let length = std::fs::metadata(&path).unwrap().len();
-            match with_failure_at(count, || db.wal_checkpoint()) {
+            // Room on any host: the injected failure, not the real disk, stops the checkpoint.
+            match with_free_space(Some(PLENTY), || {
+                with_failure_at(count, || db.wal_checkpoint())
+            }) {
                 Err(error) if error.to_string().contains(point) => {
                     fired = Some((dir, db, path, length));
                     break;

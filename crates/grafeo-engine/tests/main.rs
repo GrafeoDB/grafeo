@@ -209,6 +209,7 @@ mod memory_leak_detection;
 mod memory_limit_enforcement;
 mod memory_usage_values;
 mod merge_after_write;
+mod merge_null_entries;
 mod merge_paths;
 mod merge_rollback;
 mod merge_set_labels;

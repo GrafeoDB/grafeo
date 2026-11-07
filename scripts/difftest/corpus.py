@@ -362,6 +362,11 @@ def label_writes(grafeo):
     return grafeo.GrafeoDB()
 
 
+def merge_nulls(grafeo):
+    """An empty database for section EN, whose cases write in corpus order."""
+    return grafeo.GrafeoDB()
+
+
 def rdf_graphs(grafeo):
     """A default graph and two named ones, for the dataset clauses of sections DY and DZ."""
     db = grafeo.GrafeoDB()
@@ -453,6 +458,8 @@ WRITE_FIXTURES = {
     "rules_over_data": {"DT"},
     # Label expressions on what a statement changes or creates
     "label_writes": {"DX"},
+    # MERGEs with a null entry, run again
+    "merge_nulls": {"EN"},
 }
 
 
@@ -613,6 +620,7 @@ FIXTURES = {
     "rules_over_data": rules_over_data,
     "label_mix": label_mix,
     "label_writes": label_writes,
+    "merge_nulls": merge_nulls,
     "booleans": booleans,
     "range_keys": range_keys,
     "empty_with_null_keys": empty_with_null_keys,
@@ -3475,5 +3483,22 @@ ordered("EL15", "CALL grafeo.pagerank() YIELD node_id, score ORDER BY score DESC
 case("EM1", "MATCH (n:Person {w: NULL}) RETURN n.name AS n", BOTH)
 case("EM2", "MATCH (a)-[e:KNOWS {years: NULL}]->(b) RETURN a.name AS a", BOTH)
 case("EM3", "SELECT n FROM GRAPH_TABLE (MATCH (p:Person {w: NULL}) COLUMNS (p.name AS n))", SQL)
+
+# EN: a MERGE with a null entry matches what it inserted (an insert stores no null), so running
+#     it again finds the path: a null literal (EN1, EN2), a null parameter in GQL (EN3) and in
+#     Cypher (EN4), on an edge between bound nodes (EN5, EN6). In corpus order, on a fixture of
+#     its own; EN7 and EN8 count what they made: one city, one country, one edge of each type.
+#     In 0.6.1 a null parameter inserted the path again.
+for case_id, query, languages, params in [
+    ("EN1", "MERGE (a:City {name: 'Amsterdam', code: null})-[:LOCATED_IN]->(c:Country {name: 'NL'})", GQL, None),
+    ("EN2", "MERGE (a:City {name: 'Amsterdam', code: null})-[:LOCATED_IN]->(c:Country {name: 'NL'})", GQL, None),
+    ("EN3", "MERGE (a:City {name: 'Amsterdam', code: $c})-[:LOCATED_IN]->(c:Country {name: 'NL'})", GQL, {"c": None}),
+    ("EN4", "MERGE (a:City {name: 'Amsterdam', code: $c})-[:LOCATED_IN]->(c:Country {name: 'NL'})", CYPHER, {"c": None}),
+    ("EN5", "MATCH (a:City {name: 'Amsterdam'}), (b:Country {name: 'NL'}) MERGE (a)-[:VISITED {since: $c}]->(b)", GQL, {"c": None}),
+    ("EN6", "MATCH (a:City {name: 'Amsterdam'}), (b:Country {name: 'NL'}) MERGE (a)-[:VISITED {since: $c}]->(b)", CYPHER, {"c": None}),
+    ("EN7", "MATCH (n) RETURN labels(n) AS l, count(n) AS c", GQL, None),
+    ("EN8", "MATCH ()-[e]->() RETURN type(e) AS t, count(e) AS c", GQL, None),
+]:
+    case(case_id, query, languages, "merge_nulls", params=params)
 
 # fmt: on

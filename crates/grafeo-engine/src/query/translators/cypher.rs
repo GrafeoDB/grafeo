@@ -1913,9 +1913,9 @@ impl CypherTranslator {
             span: None,
         };
         // A null in a MERGE pattern matches an absent or null property, as the MERGE operators
-        // match it; a pattern's property map compares by equality, which a null never meets, so
-        // those entries become `IS NULL` conditions of the match.
-        let (matching, null_keys) = without_null_properties(path);
+        // match it (an insert stores no null); a pattern's property map compares by equality,
+        // which a null never meets, so those entries become conditions of the match.
+        let (matching, null_keys) = merge_match_entries(path);
         let mut match_clauses = vec![ast::Clause::Match(ast::MatchClause {
             patterns: vec![named(matching)],
             span: None,
@@ -4090,28 +4090,51 @@ fn sum_of_no_values_is_zero(column: LogicalExpression) -> LogicalExpression {
     )
 }
 
-/// `path` without the entries of its property maps whose value is the literal `null`, and the
-/// conjunction of `variable.key IS NULL` for each (`None` when there are none). Every element
-/// of `path` has a name.
-fn without_null_properties(
-    mut path: ast::PathPattern,
-) -> (ast::PathPattern, Option<ast::Expression>) {
+/// The match branch of a path MERGE: `path` keeping the entries of its property maps whose
+/// value is a literal other than null, and the condition for each other entry, all of them
+/// joined by `AND` (`None` when there are none). An insert stores no null, so the match takes
+/// an element whose key is absent or null for a null value: `x.k IS NULL` for a literal null,
+/// and `x.k = v OR (v IS NULL AND x.k IS NULL)` for a value known only as the statement runs
+/// (a parameter, a computed value). A literal value stays an entry of the pattern, which an
+/// index on the key serves. Every element of `path` has a name. GQL's MERGE reads its entries
+/// the same way.
+fn merge_match_entries(mut path: ast::PathPattern) -> (ast::PathPattern, Option<ast::Expression>) {
     let mut conditions = Vec::new();
     let mut take = |variable: Option<&String>, properties: &mut Vec<(String, ast::Expression)>| {
         let Some(variable) = variable else {
             return;
         };
         properties.retain(|(key, value)| {
-            if !matches!(value, ast::Expression::Literal(ast::Literal::Null)) {
-                return true;
-            }
-            conditions.push(ast::Expression::Unary {
+            let property = || ast::Expression::PropertyAccess {
+                base: Box::new(ast::Expression::Variable(variable.clone())),
+                property: key.clone(),
+            };
+            let is_null = |operand: ast::Expression| ast::Expression::Unary {
                 op: ast::UnaryOp::IsNull,
-                operand: Box::new(ast::Expression::PropertyAccess {
-                    base: Box::new(ast::Expression::Variable(variable.clone())),
-                    property: key.clone(),
-                }),
-            });
+                operand: Box::new(operand),
+            };
+            let binary = |left: ast::Expression, op: ast::BinaryOp, right: ast::Expression| {
+                ast::Expression::Binary {
+                    left: Box::new(left),
+                    op,
+                    right: Box::new(right),
+                }
+            };
+            match value {
+                ast::Expression::Literal(ast::Literal::Null) => {
+                    conditions.push(is_null(property()));
+                }
+                ast::Expression::Literal(_) => return true,
+                value => conditions.push(binary(
+                    binary(property(), ast::BinaryOp::Eq, value.clone()),
+                    ast::BinaryOp::Or,
+                    binary(
+                        is_null(value.clone()),
+                        ast::BinaryOp::And,
+                        is_null(property()),
+                    ),
+                )),
+            }
             false
         });
     };

@@ -177,3 +177,13 @@ fn queries_within_the_limit_finish() {
         grafeo_common::types::Value::Int64(1_000_000)
     );
 }
+
+/// A timeout too long to add to the clock (`Duration::MAX`) runs as no limit: the query answers,
+/// with no overflow in the reckoning of its deadline.
+#[test]
+fn a_timeout_too_long_to_reckon_runs_as_no_limit() {
+    let db = GrafeoDB::with_config(Config::in_memory().with_query_timeout(Duration::MAX)).unwrap();
+    db.execute("INSERT (:P {n: 1})").unwrap();
+    let rows = db.execute("MATCH (p:P) RETURN count(p) AS c").unwrap();
+    assert_eq!(rows.rows()[0][0], grafeo_common::types::Value::Int64(1));
+}

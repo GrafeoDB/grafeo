@@ -1631,10 +1631,11 @@ impl Config {
     }
 
     /// The deadline of a statement that starts now under `timeout`, `None` for no limit: the one
-    /// reckoning of a query's deadline, a session's and the bindings' algorithm calls alike.
+    /// reckoning of a query's deadline, a session's and the bindings' algorithm calls alike. A
+    /// timeout too long to reckon from now (`Duration::MAX`) is no limit too.
     #[must_use]
     pub fn deadline_after(timeout: Option<Duration>) -> Option<grafeo_common::clock::Instant> {
-        timeout.map(|limit| grafeo_common::clock::Instant::now() + limit)
+        timeout.and_then(|limit| grafeo_common::clock::Instant::now().checked_add(limit))
     }
 
     /// The largest property value in bytes, `None` for no limit.

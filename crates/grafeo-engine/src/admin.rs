@@ -419,9 +419,10 @@ pub struct CheckpointStatus {
     /// `None` before the first.
     pub last_checkpoint: Option<u64>,
     /// Automatic checkpoints that failed since the last one that succeeded.
-    /// One the WAL size started is tried again once the WAL has grown by one
-    /// more segment, and one the interval started after a pause that doubles
-    /// from one second to five minutes; the WAL keeps the commits meanwhile.
+    /// A checkpoint the WAL size started is tried again once the WAL has
+    /// grown by one more segment. One the interval started is tried again
+    /// after a pause that doubles from one second to five minutes. The WAL
+    /// keeps the commits meanwhile.
     pub failures: u64,
     /// The error of the last failed automatic checkpoint.
     pub last_error: Option<String>,

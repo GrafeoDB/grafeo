@@ -66,27 +66,35 @@ db.wal_checkpoint()
 
 ### Automatic checkpoints
 
-A database checkpoints when asked, at `close()`, and by itself, which bounds the WAL on disk and the time a reopen replays it. Since 0.6.2 a file database checkpoints by itself once its WAL holds 256 MiB past the last checkpoint: the commit that takes the WAL past it wakes a background thread, which checkpoints while commits go on. A database that is not written to does no work. It can also checkpoint every given interval, which is off by default.
+A database checkpoints when asked, at `close()`, and by itself, which bounds the WAL on disk and the time a reopen replays it. Since 0.6.2 a file database checkpoints by itself once its WAL holds 256 MiB past the last checkpoint: the commit that takes the WAL past it wakes a background thread, which checkpoints while commits go on. A database that is not written to does no work, except once at open when the WAL it replays is already past the size. It can also checkpoint every given interval, which is off by default; an interval that passes with no change since the last checkpoint writes nothing.
 
 The size is at least 1 MiB. Turning it off (`checkpoint_wal_size=None` in Python, `checkpointWalSize: null` in Node.js, `Config::without_checkpoint_wal_size()` in Rust) lets the WAL grow until `close()` or a manual checkpoint. These settings apply to the open database only: the file does not store them.
 
+Each line below is an alternative: the triggers set last are the ones in force.
+
 ```python
+# At open: a smaller size, or none
 db = grafeo.GrafeoDB("./mydb.grafeo", checkpoint_wal_size=64 * 1024 * 1024)
 db = grafeo.GrafeoDB("./mydb.grafeo", checkpoint_wal_size=None)  # off
+
+# On an open database: an interval and a size, or no automatic checkpoints
 db.set_checkpoint_triggers(interval_secs=300, wal_bytes=64 * 1024 * 1024)
-db.set_checkpoint_triggers()  # no automatic checkpoints for this open
+db.set_checkpoint_triggers()
 ```
 
 ```javascript
+// At open
 const db = GrafeoDB.create('./mydb.grafeo', { checkpointWalSize: 64 * 1024 * 1024 });
+// Or on an open database
 db.setCheckpointTriggers({ intervalMs: 300_000, walBytes: 64 * 1024 * 1024 });
 ```
 
 ```rust
+// At open
 let config = Config::persistent("my_graph.grafeo")
     .with_checkpoint_interval(Duration::from_secs(300))
     .with_checkpoint_wal_size(64 * 1024 * 1024);
-// or on an open database:
+// Or on an open database
 db.set_checkpoint_triggers(CheckpointTriggers::none().with_wal_bytes(64 * 1024 * 1024))?;
 ```
 
@@ -94,7 +102,7 @@ The WAL is a series of files, segments, of 64 MiB each by default. A checkpoint 
 
 C has `grafeo_set_checkpoint_triggers(db, interval_ms, wal_bytes)` (0 turns a trigger off), Go `SetCheckpointTriggers`, C# `SetCheckpointTriggers` and Dart `setCheckpointTriggers`. An in-memory or read-only database refuses them.
 
-A failed automatic checkpoint is logged as a warning, and the WAL keeps the commits meanwhile. One the WAL size started is tried again once the WAL has grown by one more segment, so a full disk with no writes costs nothing; one the interval started is tried again after a pause that doubles from one second to five minutes. `checkpoint_status()` (`checkpointStatus()`, `grafeo_checkpoint_status`, `CheckpointStatus`) reports the triggers, the last checkpoint, the automatic checkpoints that failed since the last that succeeded with the last error, and whether they stopped (after a commit that did not complete, none can succeed until the database is reopened):
+A failed automatic checkpoint is logged as a warning, and the WAL keeps the commits meanwhile. A checkpoint the WAL size started is tried again once the WAL has grown by one more segment, so a full disk with no writes costs nothing. One the interval started is tried again after a pause that doubles from one second to five minutes. `checkpoint_status()` (`checkpointStatus()`, `grafeo_checkpoint_status`, `CheckpointStatus`) reports the triggers, the last checkpoint, the automatic checkpoints that failed since the last that succeeded with the last error, and whether they stopped (after a commit that did not complete, none can succeed until the database is reopened):
 
 ```python
 status = db.checkpoint_status()

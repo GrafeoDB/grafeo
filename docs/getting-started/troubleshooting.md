@@ -298,7 +298,7 @@ def execute_with_retry(db, query, max_retries=3):
 db.wal_checkpoint()
 ```
 
-A file database checkpoints by itself once its WAL holds 256 MiB; lower it, or add an interval (see [Automatic checkpoints](../user-guide/persistence/wal.md#automatic-checkpoints)):
+By default a file database checkpoints by itself once its WAL holds 256 MiB past the last checkpoint; lower it, or add an interval (see [Automatic checkpoints](../user-guide/persistence/wal.md#automatic-checkpoints)):
 ```python
 db.set_checkpoint_triggers(interval_secs=300, wal_bytes=64 * 1024 * 1024)
 ```

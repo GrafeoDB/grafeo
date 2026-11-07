@@ -1274,7 +1274,7 @@ print(f"WAL size: {wal['size_bytes']} bytes")
 
 ### set_checkpoint_triggers()
 
-Let the database checkpoint by itself: every `interval_secs` seconds, and once the WAL holds `wal_bytes` bytes since the last checkpoint. Call it without arguments to turn automatic checkpoints off. A file database opens with `wal_bytes` at 256 MiB (the `checkpoint_wal_size` open option) and no interval; `wal_bytes` is at least 1 MiB. For this open only; an in-memory or read-only database raises.
+Let the database checkpoint by itself: every `interval_secs` seconds, and once the WAL holds `wal_bytes` bytes since the last checkpoint. Call it without arguments to turn automatic checkpoints off. A file database opens with `wal_bytes` at 256 MiB by default (set it with the `checkpoint_wal_size` open option, where `None` turns it off) and no interval. A `wal_bytes` number is at least 1 MiB. For this open only; an in-memory or read-only database raises.
 
 ```python
 def set_checkpoint_triggers(self, interval_secs: Optional[float] = None, wal_bytes: Optional[int] = None) -> None

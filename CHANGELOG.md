@@ -81,6 +81,7 @@ Queries that ran in 0.6.1 and now fail or behave differently.
 - **WAL segments**: a panic while the WAL started a new segment no longer makes every later checkpoint fail until a reopen (#725).
 - **Checkpoints** check free disk space first and fail with a clear error naming the space needed and available, changing nothing; a checkpoint that fails partway gives back the disk space it took (#726).
 - **Go and C# bindings**: a database, transaction, graph, stream or point-in-time view could be freed by the garbage collector while a call on it was still running, which could crash the process (for example on the last `Next` of a stream in Go); every native call now keeps its handle alive. In C#, an async call on a database disposed meanwhile throws `ObjectDisposedException`.
+- **WASM `importRdf`** is in every build with the RDF store, the `full` package (`@grafeo-db/wasm`) included; it was missing there.
 - **Vector search with a filter on a quantized index** could return fewer than `k` results, or none, when the allowed nodes lay far from the query; it now searches among the allowed nodes.
 
 ### Contributors

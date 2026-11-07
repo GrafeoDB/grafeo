@@ -3442,4 +3442,31 @@ for case_id, query, languages in [
 ]:
     case(case_id, query, languages, "loops")
 
+# EL: a procedure call as a statement among others (ISO 14.3, 9.2). Any statement follows a
+#     leading CALL ... YIELD: MATCH (EL1), FILTER (EL2), ORDER BY with LIMIT (EL3), a second
+#     CALL (EL4). After NEXT, a CALL reads the whole working table and its RETURN gives only
+#     what it names (EL5, EL6). INTERSECT and EXCEPT inside CALL { } yield their columns as UNION
+#     does (EL7 to EL9), and for nodes (EL10, EL11). The leading form answers as in Cypher
+#     (EL12); a RETURN after NEXT renames (EL13); LIMIT after a CALL takes a parameter, in GQL
+#     (EL14) and SQL/PGQ (EL15). Each was a syntax error, a wrong answer or an undefined
+#     variable in 0.6.1.
+for case_id, query in [
+    ("EL1", "CALL grafeo.labels() YIELD label MATCH (p:Person) RETURN label, count(p) AS c"),
+    ("EL2", "CALL grafeo.pagerank() YIELD node_id, score FILTER score > 0 RETURN count(*) AS c"),
+    ("EL4", "CALL grafeo.labels() YIELD label CALL grafeo.relationshipTypes() YIELD relationshipType RETURN count(*) AS c"),
+    ("EL5", "UNWIND [1, 2] AS x RETURN x NEXT CALL grafeo.labels() YIELD label RETURN count(label) AS c"),
+    ("EL6", "UNWIND [1, 2] AS x RETURN x NEXT CALL grafeo.labels() YIELD label RETURN label"),
+    ("EL7", "CALL { MATCH (p:Person) RETURN p.name AS a INTERSECT MATCH (p:Person {name: 'Alix'}) RETURN p.name AS a } RETURN a"),
+    ("EL8", "CALL { MATCH (p:Person) RETURN p.name AS a EXCEPT MATCH (p:Person {name: 'Alix'}) RETURN p.name AS a } RETURN a"),
+    ("EL9", "CALL { MATCH (p:Person) RETURN p.name AS a UNION MATCH (p:Person {name: 'Alix'}) RETURN p.name AS a } RETURN a"),
+]:
+    case(case_id, query, GQL)
+case("EL3", "CALL grafeo.labels() YIELD label ORDER BY label LIMIT 1 RETURN label", GQL, ordered=True)
+case("EL10", "CALL { MATCH (a:Person) RETURN a AS x INTERSECT MATCH (a:Person)-[:KNOWS]->() RETURN a AS x } RETURN x.name AS n", GQL)
+case("EL11", "CALL { MATCH (a:Person) RETURN a AS x EXCEPT MATCH (a:Person)-[:KNOWS]->() RETURN a AS x } RETURN x.name AS n", GQL)
+case("EL12", "CALL db.labels() YIELD label MATCH (p:Person) RETURN count(*) AS c", BOTH)
+case("EL13", "UNWIND [1, 2] AS x RETURN x NEXT CALL grafeo.labels() YIELD label RETURN label AS t", GQL)
+ordered("EL14", "CALL grafeo.labels() YIELD label RETURN label ORDER BY label LIMIT $k", GQL, params={"k": 1})
+ordered("EL15", "CALL grafeo.pagerank() YIELD node_id, score ORDER BY score DESC LIMIT $n", SQL, params={"n": 1})
+
 # fmt: on

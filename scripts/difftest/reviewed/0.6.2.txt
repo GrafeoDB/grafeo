@@ -440,3 +440,17 @@ EJ9|cypher cf6645bf72 In Cypher + of two lists joins them and + of a list and a 
 EJ10|cypher d800146064 In Cypher + of two lists joins them and + of a list and a value appends or prepends it (openCypher List4; a null is appended as a value, the TCK has no null case); 0.6.1 gave null.
 EJ12|gql 0b8076a3db GQL joins two lists with || (ISO/IEC 39075 20.15): a null operand gives null, a null element is kept; 0.6.1 gave null.
 EJ13|cypher 55c8d5ee75 In Cypher + of two lists joins them and + of a list and a value appends or prepends it (openCypher List4; a null is appended as a value, the TCK has no null case); 0.6.1 gave null.
+EL1|gql 6123f42ed2 A statement that starts with a procedure call goes on with any clause (ISO/IEC 39075 14.3); 0.6.1 refused every clause but RETURN after it as a syntax error.
+EL2|gql dbd50055e0 A statement that starts with a procedure call goes on with any clause (ISO/IEC 39075 14.3); 0.6.1 refused every clause but RETURN after it as a syntax error.
+EL3|gql b6e30ed9cb A statement that starts with a procedure call goes on with any clause (ISO/IEC 39075 14.3); 0.6.1 refused every clause but RETURN after it as a syntax error.
+EL4|gql 81f980f851 A statement that starts with a procedure call goes on with any clause (ISO/IEC 39075 14.3); 0.6.1 refused every clause but RETURN after it as a syntax error.
+EL5|gql 81f980f851 After NEXT, a procedure call reads the whole working table and its RETURN gives only what it names (ISO/IEC 39075 9.2 GR 3, 15.1); 0.6.1 kept the earlier statement's columns and grouped by them.
+EL6|gql ae971e691b After NEXT, a procedure call reads the whole working table and its RETURN gives only what it names (ISO/IEC 39075 9.2 GR 3, 15.1); 0.6.1 kept the earlier statement's columns and grouped by them.
+EL7|gql b52639bfd1 INTERSECT and EXCEPT inside CALL { } pass their columns on, as UNION does (ISO/IEC 39075 14.2, 15.2); 0.6.1 lost them (Undefined variable).
+EL8|gql ca6c0bc5e4 INTERSECT and EXCEPT inside CALL { } pass their columns on, as UNION does (ISO/IEC 39075 14.2, 15.2); 0.6.1 lost them (Undefined variable).
+EL10|gql d3e2543617 INTERSECT and EXCEPT inside CALL { } pass their columns on, as UNION does (ISO/IEC 39075 14.2, 15.2); 0.6.1 lost them (Undefined variable).
+EL11|gql 670a8faca6 INTERSECT and EXCEPT inside CALL { } pass their columns on, as UNION does (ISO/IEC 39075 14.2, 15.2); 0.6.1 lost them (Undefined variable).
+EL12|gql a7c82952ef A statement that starts with a procedure call goes on with any clause (ISO/IEC 39075 14.3); 0.6.1 refused every clause but RETURN after it as a syntax error. The Cypher form answered the same before and after.
+EL13|gql 23b6445aad After NEXT, a procedure call reads the whole working table and its RETURN gives only what it names (ISO/IEC 39075 9.2 GR 3, 15.1); 0.6.1 kept the earlier statement's columns and grouped by them.
+EL14|gql b6e30ed9cb LIMIT after a procedure call takes a parameter, as every other LIMIT; 0.6.1 ignored it and returned every row.
+EL15|sql b9ec06a025 LIMIT after a procedure call takes a parameter, as every other LIMIT; 0.6.1 ignored it and returned every row.

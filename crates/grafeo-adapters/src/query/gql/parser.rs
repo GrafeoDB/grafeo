@@ -715,7 +715,6 @@ impl<'a> Parser<'a> {
             arguments,
             yield_items,
             where_clause,
-            return_clause: None,
             span: Some(SourceSpan::new(span_start, self.current.span.start, 1, 1)),
         })
     }

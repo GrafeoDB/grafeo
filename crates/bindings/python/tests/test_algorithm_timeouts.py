@@ -1,11 +1,15 @@
 """Every algorithm bridge method stops at the database's query timeout, as `execute` does.
 
 `db.algorithms.<method>()` enters the database's deadline (`query_timeout`) when it is called, and
-the algorithm reads the clock on its first unit of work. With a timeout of 1 microsecond, the
-snapshot and the setup before that unit always outlast it, so every method raises the timeout at
-its first poll, on any machine; the same exception as `execute` past its timeout, after which the
-database answers again. One realistic case runs betweenness (hundreds of milliseconds here) under
-a 1 ms timeout. 0.6.1 had no deadline in the bridge: a method ran to its end whatever the timeout.
+the algorithm reads the clock on its first unit of work and every 1,024th after it. A fast machine
+can reach the first read within a microsecond, so the graph makes every method do more than 1,024
+units: a chain `v0 -> v1 -> ... -> v1999` under the random edges lets each method that starts at
+`v0` reach every node and the last one (a breadth-first search does about 10,000 units, a shortest
+path to the last node about 2,900). The second read then comes long after a microsecond, and every
+method raises the timeout on any machine; the same exception as `execute` past its timeout, after
+which the database answers again. One realistic case runs betweenness (hundreds of milliseconds
+here) under a 1 ms timeout. 0.6.1 had no deadline in the bridge: a method ran to its end whatever
+the timeout.
 """
 
 import math
@@ -26,8 +30,8 @@ SMALL = 120
 
 def build(query_timeout, nodes=NODES):
     """A DAG of `nodes` nodes, about three edges per node from lower to higher index in a seeded
-    order, each with a weight `w`, a capacity `c` and a cost `k`, all positive; node names `v0`,
-    `v1`, ..."""
+    order, and a chain from each node to the next, each edge with a weight `w`, a capacity `c` and
+    a cost `k`, all positive; node names `v0`, `v1`, ..."""
     rng = random.Random(17)
     db = grafeo.GrafeoDB(query_timeout=query_timeout)
     ids = [db.create_node(["V"], {"name": f"v{i}"}).id for i in range(nodes)]
@@ -36,6 +40,10 @@ def build(query_timeout, nodes=NODES):
         if u != v:
             props = {"w": rng.randint(1, 9), "c": rng.randint(1, 5), "k": rng.randint(1, 4)}
             db.create_edge(ids[min(u, v)], ids[max(u, v)], "E", props)
+    # Without it `v0` reaches 18 nodes in 35 units of a breadth-first search, under the clock's
+    # second read, and the last node not at all.
+    for u, v in zip(ids, ids[1:], strict=False):
+        db.create_edge(u, v, "E", {"w": 9, "c": 5, "k": 4})
     return db, ids
 
 

@@ -23,7 +23,7 @@ algos = []
 shacl = ["triple-store", "grafeo-engine/shacl"]
 
 [dependencies]
-grafeo-engine = { workspace = true, features = ["embedded", "languages", "triple-store", "wal"] }
+grafeo-engine = { workspace = true, features = ["gql", "ai", "algos", "parallel", "regex", "jsonl-import", "grafeo-file", "arrow-export", "languages", "triple-store", "wal"] }
 grafeo-common = { workspace = true }
 md5 = { workspace = true }
 

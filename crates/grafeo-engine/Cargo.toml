@@ -98,9 +98,6 @@ ai = ["vector-index", "text-index", "hybrid-search", "cdc"]  # All AI/RAG featur
 storage = ["wal", "grafeo-file", "spill", "mmap"]  # Persistent storage (WAL, single-file, disk spill, mmap)
 
 # Named profiles (ecosystem-aligned)
-embedded = ["gql", "ai", "algos", "parallel", "regex", "jsonl-import", "grafeo-file", "arrow-export"]  # Python libs, MCP, in-process
-browser = ["gql", "regex-lite"]  # WASM / grafeo-web
-server = ["full", "async-storage", "metrics", "tracing"]  # grafeo-server
 full = ["languages", "ai", "triple-store", "regex", "parallel", "algos", "storage", "jsonl-import", "parquet-import"]
 
 # Data import

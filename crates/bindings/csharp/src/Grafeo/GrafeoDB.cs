@@ -1052,7 +1052,7 @@ public sealed class GrafeoDB : IGrafeoDB, IDisposable, IAsyncDisposable
     // =========================================================================
 
     private Task<QueryResult> ExecuteLanguageAsync(
-        Func<nint, string, nint> nativeMethod,
+        Func<DatabaseHandle, string, nint> nativeMethod,
         string query,
         CancellationToken ct)
     {
@@ -1069,12 +1069,12 @@ public sealed class GrafeoDB : IGrafeoDB, IDisposable, IAsyncDisposable
     }
 
     /// <summary>Get the raw handle, checking for disposal first.</summary>
-    private nint Handle
+    private DatabaseHandle Handle
     {
         get
         {
             ThrowIfDisposed();
-            return _handle.DangerousGetHandle();
+            return _handle;
         }
     }
 

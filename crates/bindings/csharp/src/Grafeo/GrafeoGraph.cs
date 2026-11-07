@@ -30,12 +30,12 @@ public sealed class GrafeoGraph : IDisposable
         _handle.Dispose();
     }
 
-    private nint Handle
+    private GraphHandle Handle
     {
         get
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
-            return _handle.DangerousGetHandle();
+            return _handle;
         }
     }
 

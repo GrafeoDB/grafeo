@@ -28,6 +28,8 @@ pub(crate) mod catalog_records;
 pub(crate) mod catalog_section;
 #[cfg(feature = "grafeo-file")]
 mod checkpoint_timer;
+#[cfg(all(feature = "grafeo-file", feature = "testing-crash-injection"))]
+pub(crate) use checkpoint_timer::RearmGate;
 // What runs after each immediate call and commit: the version collect.
 pub(crate) mod collect;
 mod crud;
@@ -209,6 +211,13 @@ pub struct GrafeoDB {
     /// [`checkpoint_status`](Self::checkpoint_status)).
     #[cfg(feature = "grafeo-file")]
     checkpoint_failures: Arc<checkpoint_timer::Failures>,
+    /// What the checkpoint thread did, for the test hook
+    /// `checkpoint_thread_counts`.
+    #[cfg(feature = "grafeo-file")]
+    checkpoint_counts: Arc<checkpoint_timer::Counts>,
+    /// The hold of the test hook `hold_checkpoint_rearm`.
+    #[cfg(all(feature = "grafeo-file", feature = "testing-crash-injection"))]
+    checkpoint_rearm_gate: Arc<checkpoint_timer::RearmGate>,
     /// Syncs the WAL in the background under `DurabilityMode::Adaptive`.
     /// Wrapped in Mutex because `close()` takes `&self` but stops it.
     #[cfg(feature = "wal")]
@@ -946,6 +955,10 @@ impl GrafeoDB {
             checkpoint_triggers: parking_lot::Mutex::new(crate::admin::CheckpointTriggers::none()),
             #[cfg(feature = "grafeo-file")]
             checkpoint_failures: Arc::default(),
+            #[cfg(feature = "grafeo-file")]
+            checkpoint_counts: Arc::default(),
+            #[cfg(all(feature = "grafeo-file", feature = "testing-crash-injection"))]
+            checkpoint_rearm_gate: Arc::default(),
             #[cfg(feature = "wal")]
             wal_records_at_checkpoint: Arc::new(AtomicU64::new(0)),
             #[cfg(all(feature = "wal", feature = "grafeo-file"))]
@@ -1185,6 +1198,10 @@ impl GrafeoDB {
             checkpoint_triggers: parking_lot::Mutex::new(crate::admin::CheckpointTriggers::none()),
             #[cfg(feature = "grafeo-file")]
             checkpoint_failures: Arc::default(),
+            #[cfg(feature = "grafeo-file")]
+            checkpoint_counts: Arc::default(),
+            #[cfg(all(feature = "grafeo-file", feature = "testing-crash-injection"))]
+            checkpoint_rearm_gate: Arc::default(),
             #[cfg(feature = "wal")]
             wal_records_at_checkpoint: Arc::new(AtomicU64::new(0)),
             #[cfg(all(feature = "wal", feature = "grafeo-file"))]
@@ -1299,6 +1316,10 @@ impl GrafeoDB {
             checkpoint_triggers: parking_lot::Mutex::new(crate::admin::CheckpointTriggers::none()),
             #[cfg(feature = "grafeo-file")]
             checkpoint_failures: Arc::default(),
+            #[cfg(feature = "grafeo-file")]
+            checkpoint_counts: Arc::default(),
+            #[cfg(all(feature = "grafeo-file", feature = "testing-crash-injection"))]
+            checkpoint_rearm_gate: Arc::default(),
             #[cfg(feature = "wal")]
             wal_records_at_checkpoint: Arc::new(AtomicU64::new(0)),
             #[cfg(all(feature = "wal", feature = "grafeo-file"))]
@@ -1418,8 +1439,8 @@ impl GrafeoDB {
         let path = fm.sidecar_wal_path();
         std::fs::create_dir_all(&path)?;
         // A checkpoint starts a new WAL segment, and the log grows on in it:
-        // a checkpoint leaves room for one (#726).
-        fm.set_checkpoint_headroom(grafeo_storage::wal::DEFAULT_SEGMENT_BYTES);
+        // a checkpoint leaves room for one of the configured size (#726).
+        fm.set_checkpoint_headroom(self.config.wal_segment_size());
         self.open_wal_at(&path, fm.database_id(), keys, start_lsn)
     }
 
@@ -1459,6 +1480,7 @@ impl GrafeoDB {
                 path,
                 WalOptions {
                     durability,
+                    segment_bytes: self.config.wal_segment_size(),
                     cipher_for_salt: keys.wal_segment_ciphers(database_id),
                     ..WalOptions::new(database_id, start_lsn)
                 },
@@ -2833,8 +2855,11 @@ impl GrafeoDB {
         // Stop the periodic checkpoint timer first, before any early return,
         // so it does not race with the closed file manager.
         #[cfg(feature = "grafeo-file")]
-        if let Some(mut timer) = self.checkpoint_timer.lock().take() {
-            timer.stop();
+        {
+            if let Some(mut timer) = self.checkpoint_timer.lock().take() {
+                timer.stop();
+            }
+            self.transaction_manager.set_first_commit_hook(None);
         }
 
         // Stop the WAL flusher before the WAL is synced and closed below; its
@@ -3291,8 +3316,8 @@ impl GrafeoDB {
         })
     }
 
-    /// Starts the automatic checkpointer when a trigger is set, replacing a
-    /// running one.
+    /// Starts the automatic checkpointer when a trigger can fire (an
+    /// interval, or a WAL size with a WAL), replacing a running one.
     #[cfg(feature = "grafeo-file")]
     fn start_checkpoint_timer(&self) {
         // A closed database has released its file.
@@ -3305,48 +3330,81 @@ impl GrafeoDB {
     /// caller that holds the database open.
     #[cfg(feature = "grafeo-file")]
     fn restart_checkpoint_timer(&self) {
-        self.stop_checkpoint_timer();
+        // One lock from the stop to the start: two restarts at once cannot
+        // each start a thread, and the old thread, which clears the WAL's
+        // waker as it exits, is gone before the new one sets it. The thread
+        // and its checkpoints never take this lock.
+        let mut running = self.checkpoint_timer.lock();
+        if let Some(mut timer) = running.take() {
+            timer.stop();
+        }
+        self.transaction_manager.set_first_commit_hook(None);
         let triggers = *self.checkpoint_triggers.lock();
+        // The WAL the size trigger watches: without one it never fires.
+        #[cfg(feature = "wal")]
+        let log: Option<Box<dyn checkpoint_timer::WatchedLog>> =
+            match (&self.file_manager, &self.wal) {
+                (Some(fm), Some(wal)) => Some(Box::new(WalWatch {
+                    wal: Arc::clone(wal),
+                    file_manager: Arc::clone(fm),
+                })),
+                _ => None,
+            };
+        #[cfg(not(feature = "wal"))]
+        let log: Option<Box<dyn checkpoint_timer::WatchedLog>> = None;
+        let can_fire =
+            triggers.interval.is_some() || (triggers.wal_bytes.is_some() && log.is_some());
         // A file opened read-only stays so. A database with a file has the
         // built-in store, which its checkpoints write.
         if let Some(fm) = &self.file_manager
-            && triggers.any()
+            && can_fire
             && !self.read_only
             && !fm.is_read_only()
             && let Ok(sources) = self.checkpoint_sources()
         {
-            let (checkpoint_fm, size_fm) = (Arc::clone(fm), Arc::clone(fm));
-            #[cfg(feature = "wal")]
-            let wal = self.wal.clone();
+            let checkpoint_fm = Arc::clone(fm);
             let transaction_manager = Arc::clone(&self.transaction_manager);
             let job = checkpoint_timer::Job {
                 checkpoint: Box::new(move || flush::flush(&checkpoint_fm, &sources).map(|_| ())),
-                wal_bytes: Box::new(move || {
-                    #[cfg(feature = "wal")]
-                    if let Some(wal) = &wal {
-                        return wal
-                            .end_lsn()
-                            .saturating_sub(size_fm.active_header().checkpoint_lsn);
-                    }
-                    let _ = &size_fm;
-                    0
-                }),
                 hopeless: Box::new(move || transaction_manager.has_incomplete_commit()),
+                log,
+                segment_bytes: self.config.wal_segment_size(),
             };
-            *self.checkpoint_timer.lock() = Some(checkpoint_timer::CheckpointTimer::start(
-                triggers,
-                job,
-                Arc::clone(&self.checkpoint_failures),
-            ));
+            let shared = checkpoint_timer::Shared {
+                failures: Arc::clone(&self.checkpoint_failures),
+                counts: Arc::clone(&self.checkpoint_counts),
+                #[cfg(feature = "testing-crash-injection")]
+                gate: Arc::clone(&self.checkpoint_rearm_gate),
+            };
+            // Armed, not started: the thread starts the first time it has work
+            // (see `CheckpointTimer`).
+            let without_log = job.log.is_none();
+            let timer = checkpoint_timer::CheckpointTimer::arm(triggers, job, shared);
+            if without_log && triggers.interval.is_some() {
+                // No WAL group to cross: the first commit starts the interval.
+                self.transaction_manager
+                    .set_first_commit_hook(Some(timer.starter()));
+            }
+            *running = Some(timer);
         }
     }
 
-    /// Stops the periodic checkpoint timer, if one is running.
-    #[cfg(feature = "grafeo-file")]
-    fn stop_checkpoint_timer(&self) {
-        let running = self.checkpoint_timer.lock().take();
-        if let Some(mut timer) = running {
-            timer.stop();
+    /// What the checkpoint thread did since the database opened: the times
+    /// it woke and the checkpoints it ran. For tests only.
+    #[cfg(all(feature = "grafeo-file", feature = "testing-crash-injection"))]
+    #[must_use]
+    pub fn checkpoint_thread_counts(&self) -> crate::admin::CheckpointThreadCounts {
+        self.checkpoint_counts.snapshot()
+    }
+
+    /// Holds the checkpoint thread after its next checkpoint, before it arms
+    /// the WAL mark that wakes it again, until the returned hold is dropped:
+    /// no commit wakes it meanwhile. For tests only.
+    #[cfg(all(feature = "grafeo-file", feature = "testing-crash-injection"))]
+    pub fn hold_checkpoint_rearm(&self) -> crate::admin::CheckpointRearmHold {
+        self.checkpoint_rearm_gate.hold();
+        crate::admin::CheckpointRearmHold {
+            gate: Arc::clone(&self.checkpoint_rearm_gate),
         }
     }
 
@@ -3739,6 +3797,35 @@ fn wal_directories_are_no_longer_created(path: &std::path::Path) -> Error {
          any path",
         path.display()
     ))
+}
+
+/// The WAL as the checkpoint thread's size trigger watches it.
+#[cfg(feature = "wal")]
+struct WalWatch {
+    wal: Arc<grafeo_storage::wal::Wal>,
+    file_manager: Arc<GrafeoFileManager>,
+}
+
+#[cfg(feature = "wal")]
+impl checkpoint_timer::WatchedLog for WalWatch {
+    fn checkpoint_lsn(&self) -> u64 {
+        self.file_manager.active_header().checkpoint_lsn
+    }
+
+    fn end_lsn(&self) -> u64 {
+        self.wal.end_lsn()
+    }
+
+    fn arm_wake(&self, lsn: u64) -> bool {
+        self.wal.arm_wake(lsn)
+    }
+
+    fn set_waker(&self, waker: Option<grafeo_storage::wal::Waker>) {
+        if waker.is_none() {
+            self.wal.disarm_wake();
+        }
+        self.wal.set_waker(waker);
+    }
 }
 
 /// The error of a configuration [`Config::validate`] refuses: a setting the

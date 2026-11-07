@@ -345,6 +345,12 @@ pub enum ConfigError {
     /// [`TierOverride::ForceDisk`](grafeo_common::storage::TierOverride::ForceDisk)
     /// that cannot be moved to disk: the override would have no effect.
     ForceDiskOnUnspillableSection(grafeo_common::storage::SectionType),
+    /// `wal_segment_size` is outside [`MIN_WAL_SEGMENT_SIZE`] to
+    /// [`MAX_WAL_SEGMENT_SIZE`]; holds the size given.
+    WalSegmentSizeOutOfBounds(u64),
+    /// `checkpoint_wal_size` is below [`MIN_CHECKPOINT_WAL_SIZE`]: a smaller
+    /// one would checkpoint after nearly every commit. Holds the size given.
+    CheckpointWalSizeTooSmall(u64),
 }
 
 /// Whether a section of `section_type` can be moved to disk: only a section
@@ -405,7 +411,39 @@ impl fmt::Display for ConfigError {
                  tier override; the sections that can are {}",
                 spillable_sections()
             ),
+            Self::WalSegmentSizeOutOfBounds(bytes) => write!(
+                f,
+                "wal_segment_size must be between 1 MiB and 1 GiB, and {bytes} bytes is not"
+            ),
+            Self::CheckpointWalSizeTooSmall(0) => write!(
+                f,
+                "checkpoint_wal_size must be at least 1 MiB: zero would checkpoint after every \
+                 commit; turn automatic checkpoints off with \
+                 Config::without_checkpoint_wal_size() instead"
+            ),
+            Self::CheckpointWalSizeTooSmall(bytes) => write!(
+                f,
+                "checkpoint_wal_size must be at least 1 MiB, and {bytes} bytes is not; turn \
+                 automatic checkpoints off with Config::without_checkpoint_wal_size() instead"
+            ),
         }
+    }
+}
+
+/// Refuses a `checkpoint_wal_size` below [`MIN_CHECKPOINT_WAL_SIZE`]: the one
+/// check of [`Config::validate`] and of `GrafeoDB::set_checkpoint_triggers`,
+/// so the floor is the same at open and on an open database. `None` (off)
+/// passes.
+///
+/// # Errors
+///
+/// [`ConfigError::CheckpointWalSizeTooSmall`].
+pub(crate) fn check_checkpoint_wal_size(bytes: Option<u64>) -> Result<(), ConfigError> {
+    match bytes {
+        Some(bytes) if bytes < MIN_CHECKPOINT_WAL_SIZE => {
+            Err(ConfigError::CheckpointWalSizeTooSmall(bytes))
+        }
+        _ => Ok(()),
     }
 }
 
@@ -415,6 +453,30 @@ impl std::error::Error for ConfigError {}
 /// incremental backups, by default: 1 GiB (see
 /// [`Config::with_wal_retention_limit`]).
 pub const DEFAULT_WAL_RETENTION_LIMIT: u64 = 1 << 30;
+
+/// The WAL size past the last checkpoint at which a file database
+/// checkpoints by itself, by default: 256 MiB, four segments of the default
+/// size (see [`Config::with_checkpoint_wal_size`]).
+pub const DEFAULT_CHECKPOINT_WAL_SIZE: u64 = 256 << 20;
+
+/// The smallest `checkpoint_wal_size`: 1 MiB.
+pub const MIN_CHECKPOINT_WAL_SIZE: u64 = 1 << 20;
+
+/// The size a WAL segment grows to before the log goes on in a new one, by
+/// default: 64 MiB (see [`Config::with_wal_segment_size`]).
+pub const DEFAULT_WAL_SEGMENT_SIZE: u64 = 64 << 20;
+
+/// The smallest `wal_segment_size`: 1 MiB.
+pub const MIN_WAL_SEGMENT_SIZE: u64 = 1 << 20;
+
+/// The largest `wal_segment_size`: 1 GiB.
+pub const MAX_WAL_SEGMENT_SIZE: u64 = 1 << 30;
+
+#[cfg(feature = "wal")]
+const _: () = assert!(
+    DEFAULT_WAL_SEGMENT_SIZE == grafeo_storage::wal::DEFAULT_SEGMENT_BYTES,
+    "the engine's default segment size is the WAL's"
+);
 
 /// Database configuration.
 ///
@@ -731,6 +793,9 @@ pub struct Config {
     /// Checkpoint once the WAL holds this many bytes since the last
     /// checkpoint (see [`Config::with_checkpoint_wal_size`]).
     checkpoint_wal_size: Option<u64>,
+    /// The size a WAL segment grows to (see
+    /// [`Config::with_wal_segment_size`]).
+    wal_segment_size: u64,
     /// The WAL a checkpoint keeps beyond its log position for a backup at
     /// most, in bytes (see [`Config::with_wal_retention_limit`]).
     wal_retention_limit: u64,
@@ -901,7 +966,8 @@ impl Default for Config {
             #[cfg(feature = "encryption")]
             encryption: None,
             wal_salvage: false,
-            checkpoint_wal_size: None,
+            checkpoint_wal_size: Some(DEFAULT_CHECKPOINT_WAL_SIZE),
+            wal_segment_size: DEFAULT_WAL_SEGMENT_SIZE,
             wal_retention_limit: DEFAULT_WAL_RETENTION_LIMIT,
             history_retention: HistoryRetention::Off,
             set: SetFields::default(),
@@ -1361,13 +1427,39 @@ impl Config {
     }
 
     /// Checkpoints once the WAL holds `bytes` since the last checkpoint,
-    /// which bounds the log a reopen replays (DuckDB's
-    /// `checkpoint_threshold` is 16 MiB). Off by default; see
-    /// [`CheckpointTriggers`](crate::admin::CheckpointTriggers). Without a
-    /// WAL it never fires.
+    /// which bounds the WAL on disk and the log a reopen replays: 256 MiB by
+    /// default ([`DEFAULT_CHECKPOINT_WAL_SIZE`]), at least 1 MiB
+    /// ([`validate`](Self::validate) refuses less). The checkpoint runs on a
+    /// background thread, which a commit that takes the WAL past the size
+    /// wakes; see [`CheckpointTriggers`](crate::admin::CheckpointTriggers).
+    /// Without a WAL it never fires.
     #[must_use]
     pub fn with_checkpoint_wal_size(mut self, bytes: u64) -> Self {
         self.checkpoint_wal_size = Some(bytes);
+        self
+    }
+
+    /// Turns automatic checkpoints by WAL size off: the WAL then grows until
+    /// the database closes or [`wal_checkpoint`](crate::GrafeoDB::wal_checkpoint)
+    /// runs, unless [`with_checkpoint_interval`](Self::with_checkpoint_interval)
+    /// sets an interval.
+    #[must_use]
+    pub fn without_checkpoint_wal_size(mut self) -> Self {
+        self.checkpoint_wal_size = None;
+        self
+    }
+
+    /// Sets the size, in bytes, a WAL segment grows to before the log goes on
+    /// in a new one: 64 MiB by default ([`DEFAULT_WAL_SEGMENT_SIZE`]), from
+    /// 1 MiB to 1 GiB ([`validate`](Self::validate) refuses other sizes).
+    /// A checkpoint removes whole segments and keeps one segment of free
+    /// disk space for the WAL to grow in, so smaller segments free the disk
+    /// sooner and need less room. A WAL written at one size reopens at
+    /// another: the segments it holds keep their size, and new ones get the
+    /// new one.
+    #[must_use]
+    pub fn with_wal_segment_size(mut self, bytes: u64) -> Self {
+        self.wal_segment_size = bytes;
         self
     }
 
@@ -1600,6 +1692,13 @@ impl Config {
         self.checkpoint_wal_size
     }
 
+    /// The size a WAL segment grows to (see
+    /// [`with_wal_segment_size`](Self::with_wal_segment_size)).
+    #[must_use]
+    pub fn wal_segment_size(&self) -> u64 {
+        self.wal_segment_size
+    }
+
     /// How much WAL a checkpoint keeps at most beyond the log it covers for
     /// incremental backups (see
     /// [`with_wal_retention_limit`](Self::with_wal_retention_limit)).
@@ -1671,6 +1770,13 @@ impl Config {
         }
 
         self.check_section_tiers()?;
+
+        if !(MIN_WAL_SEGMENT_SIZE..=MAX_WAL_SEGMENT_SIZE).contains(&self.wal_segment_size) {
+            return Err(ConfigError::WalSegmentSizeOutOfBounds(
+                self.wal_segment_size,
+            ));
+        }
+        check_checkpoint_wal_size(self.checkpoint_wal_size)?;
 
         #[cfg(feature = "encryption")]
         if self.encryption.is_some() {
@@ -2224,6 +2330,77 @@ mod tests {
         assert!(config.validate().is_ok());
     }
 
+    #[test]
+    fn the_wal_sizes_have_their_defaults_and_bounds() {
+        let config = Config::persistent("lyon.grafeo");
+        assert_eq!(
+            config.checkpoint_wal_size(),
+            Some(DEFAULT_CHECKPOINT_WAL_SIZE)
+        );
+        assert_eq!(config.wal_segment_size(), DEFAULT_WAL_SEGMENT_SIZE);
+        assert_eq!(
+            Config::in_memory().checkpoint_wal_size(),
+            Some(DEFAULT_CHECKPOINT_WAL_SIZE),
+            "a setting; only a database with a WAL acts on it"
+        );
+        assert_eq!(
+            config
+                .clone()
+                .without_checkpoint_wal_size()
+                .checkpoint_wal_size(),
+            None
+        );
+        for (bytes, accepted) in [
+            (MIN_WAL_SEGMENT_SIZE - 1, false),
+            (MIN_WAL_SEGMENT_SIZE, true),
+            (MAX_WAL_SEGMENT_SIZE, true),
+            (MAX_WAL_SEGMENT_SIZE + 1, false),
+        ] {
+            assert_eq!(
+                config
+                    .clone()
+                    .with_wal_segment_size(bytes)
+                    .validate()
+                    .is_ok(),
+                accepted,
+                "{bytes}"
+            );
+        }
+        assert_eq!(
+            config
+                .clone()
+                .with_checkpoint_wal_size(MIN_CHECKPOINT_WAL_SIZE - 1)
+                .validate(),
+            Err(ConfigError::CheckpointWalSizeTooSmall(
+                MIN_CHECKPOINT_WAL_SIZE - 1
+            ))
+        );
+        assert!(
+            config
+                .with_checkpoint_wal_size(MIN_CHECKPOINT_WAL_SIZE)
+                .validate()
+                .is_ok()
+        );
+    }
+
+    /// The setter on an open database applies the same check, so its error
+    /// is the one an open gives; zero says why it is refused.
+    #[test]
+    fn the_checkpoint_size_floor_is_one_check() {
+        assert_eq!(check_checkpoint_wal_size(None), Ok(()));
+        assert_eq!(
+            check_checkpoint_wal_size(Some(MIN_CHECKPOINT_WAL_SIZE)),
+            Ok(())
+        );
+        let zero = check_checkpoint_wal_size(Some(0)).unwrap_err().to_string();
+        assert!(zero.contains("zero") && zero.contains("1 MiB"), "{zero}");
+        let small = check_checkpoint_wal_size(Some(19)).unwrap_err().to_string();
+        assert!(
+            small.contains("19 bytes") && small.contains("1 MiB"),
+            "{small}"
+        );
+    }
+
     /// Every setting can be changed with a constructor or a `with_*` or
     /// `without_*` method, so code outside this crate never needs a struct
     /// literal. The pattern names every field: a new setting does not
@@ -2252,6 +2429,7 @@ mod tests {
             .with_checkpoint_wal_size(19 * 1024 * 1024)
             .with_history_retention(HistoryRetention::Duration(Duration::from_secs(88)))
             .with_wal_retention_limit(19 * 1024 * 1024)
+            .with_wal_segment_size(3 * 1024 * 1024)
             .with_wal_salvage();
         #[expect(
             deprecated,
@@ -2307,10 +2485,16 @@ mod tests {
             checkpoint_wal_size,
             history_retention,
             wal_retention_limit,
+            wal_segment_size,
             // What the builders set: see the stored-configuration tests.
             set: _,
         } = config;
 
+        assert_eq!(
+            wal_segment_size,
+            3 * 1024 * 1024,
+            "with_wal_segment_size sets the size"
+        );
         assert_eq!(checkpoint_wal_size, Some(19 * 1024 * 1024));
         assert_eq!(
             wal_retention_limit,

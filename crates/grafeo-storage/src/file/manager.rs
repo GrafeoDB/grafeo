@@ -426,11 +426,12 @@ impl GrafeoFileManager {
     ///
     /// After a failure before the header write, the file holds no image newer
     /// than before the call, and it is cut back to its length before the
-    /// call, so a full disk gets back the room the partial image took. After a failure at or after the header write,
-    /// the new header may be on disk: [`active_header`](Self::active_header)
-    /// and [`read_image`](Self::read_image) keep serving the previous image,
-    /// while a reopen may find the new one. The next checkpoint spares
-    /// the pages of both. The caller must therefore keep the WAL from the
+    /// call, so a full disk gets back the room the partial image took. After
+    /// a failure at or after the header write, the new header may be on
+    /// disk: [`active_header`](Self::active_header) and
+    /// [`read_image`](Self::read_image) keep serving the previous image,
+    /// while a reopen may find the new one. The next checkpoint spares the
+    /// pages of both. The caller must therefore keep the WAL from the
     /// previous image's `checkpoint_lsn` until a later checkpoint succeeds.
     pub fn write_checkpoint(
         &self,
@@ -592,9 +593,10 @@ impl GrafeoFileManager {
     }
 
     /// Sets the free space, in bytes, a checkpoint leaves for the WAL beyond
-    /// the size of the file: the engine sets one WAL segment, since a
-    /// checkpoint starts a new segment and the log grows on in it. 0 (the
-    /// default) checks the file's size alone.
+    /// the size of the file: the engine sets one WAL segment of the
+    /// configured size, since a checkpoint starts a new segment and the log
+    /// grows on in it. 0 (the default, and a database without a WAL) checks
+    /// the file's size alone.
     pub fn set_checkpoint_headroom(&self, bytes: u64) {
         self.checkpoint_headroom.store(bytes, Ordering::Relaxed);
     }
@@ -621,11 +623,13 @@ impl GrafeoFileManager {
     /// headroom. A probe that fails skips the check, with one warning per
     /// manager: the check is a guard, and a full disk still fails the write.
     fn check_free_space(&self, file_length: u64) -> Result<()> {
-        let needed = file_length.saturating_add(self.checkpoint_headroom.load(Ordering::Relaxed));
+        let headroom = self.checkpoint_headroom.load(Ordering::Relaxed);
+        let needed = file_length.saturating_add(headroom);
         match free_space(&self.path) {
             Ok(available) if available < needed => Err(Error::from(InsufficientSpace {
                 path: self.path.clone(),
                 needed,
+                headroom,
                 available,
             })),
             Ok(_) => Ok(()),

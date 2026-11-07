@@ -360,16 +360,22 @@ pub struct WalStatus {
 /// When a database checkpoints by itself (see
 /// [`GrafeoDB::set_checkpoint_triggers`](crate::GrafeoDB::set_checkpoint_triggers)):
 /// when the interval has passed since the last automatic checkpoint, or when
-/// the WAL holds more than the given bytes since the last checkpoint. Both
-/// are off by default, and a checkpoint then runs only when asked
+/// the WAL holds the given bytes since the last checkpoint. A file database
+/// checkpoints by WAL size by default, at 256 MiB
+/// ([`DEFAULT_CHECKPOINT_WAL_SIZE`](crate::config::DEFAULT_CHECKPOINT_WAL_SIZE)),
+/// and by no interval. With neither, a checkpoint runs only when asked
 /// (`wal_checkpoint()`) and at `close()`.
+///
+/// [`none`](Self::none) is no trigger at all, not the default: the default
+/// comes from [`Config`](crate::Config).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct CheckpointTriggers {
     /// Checkpoint when this long has passed since the last automatic one.
     pub interval: Option<std::time::Duration>,
     /// Checkpoint once the WAL holds this many bytes since the last
-    /// checkpoint (checked every 100 ms).
+    /// checkpoint, at least 1 MiB: the commit that takes the WAL past it
+    /// wakes the checkpoint thread.
     pub wal_bytes: Option<u64>,
 }
 
@@ -413,8 +419,9 @@ pub struct CheckpointStatus {
     /// `None` before the first.
     pub last_checkpoint: Option<u64>,
     /// Automatic checkpoints that failed since the last one that succeeded.
-    /// A failed one is retried after a pause that doubles from one second
-    /// to five minutes; the WAL keeps the commits meanwhile.
+    /// One the WAL size started is tried again once the WAL has grown by one
+    /// more segment, and one the interval started after a pause that doubles
+    /// from one second to five minutes; the WAL keeps the commits meanwhile.
     pub failures: u64,
     /// The error of the last failed automatic checkpoint.
     pub last_error: Option<String>,
@@ -423,6 +430,39 @@ pub struct CheckpointStatus {
     /// Whether automatic checkpoints have stopped: after a commit that did
     /// not complete, none can succeed until the database is reopened.
     pub stopped: bool,
+}
+
+/// What the checkpoint thread of a database did since it opened, for tests
+/// (see `GrafeoDB::checkpoint_thread_counts`).
+#[cfg(feature = "testing-crash-injection")]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct CheckpointThreadCounts {
+    /// The times its thread started: 0 until its first work (it starts the
+    /// first time it has work).
+    pub starts: u64,
+    /// The times it woke: a commit that took the WAL past the mark (the one
+    /// that starts the thread included), or the interval passing. A start
+    /// that finds the WAL already past the mark is no wake.
+    pub wakes: u64,
+    /// The checkpoints it ran, whether they succeeded or not.
+    pub attempts: u64,
+}
+
+/// Holds the checkpoint thread after its next checkpoint, before it sets the
+/// WAL mark that wakes it again, until dropped (see
+/// `GrafeoDB::hold_checkpoint_rearm`). For tests only.
+#[cfg(feature = "testing-crash-injection")]
+#[must_use = "the thread is held only while this lives"]
+pub struct CheckpointRearmHold {
+    pub(crate) gate: std::sync::Arc<crate::database::RearmGate>,
+}
+
+#[cfg(feature = "testing-crash-injection")]
+impl Drop for CheckpointRearmHold {
+    fn drop(&mut self) {
+        self.gate.release();
+    }
 }
 
 /// Validation result.

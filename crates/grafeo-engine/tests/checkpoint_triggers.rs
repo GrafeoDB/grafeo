@@ -7,10 +7,13 @@
 
 #![cfg(all(feature = "gql", feature = "wal", feature = "grafeo-file", not(miri)))]
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+use grafeo_common::types::Value;
 use grafeo_engine::admin::CheckpointTriggers;
+use grafeo_engine::config::DEFAULT_CHECKPOINT_WAL_SIZE;
 use grafeo_engine::{Config, GrafeoDB};
 
 /// The bytes of WAL a reopen would replay.
@@ -37,15 +40,27 @@ fn insert(db: &GrafeoDB, count: usize) {
     }
 }
 
+/// Commits one node holding 64 KiB of text, so the WAL grows fast.
+fn blob(db: &GrafeoDB) {
+    db.execute_with_params(
+        "INSERT (:Blob {b: $b})",
+        HashMap::from([("b".to_string(), Value::from("x".repeat(64 * 1024).as_str()))]),
+    )
+    .unwrap();
+}
+
 fn open(path: &Path, config: impl FnOnce(Config) -> Config) -> GrafeoDB {
     GrafeoDB::with_config(config(Config::persistent(path))).unwrap()
 }
 
-/// Without triggers nothing checkpoints by itself: the WAL keeps growing.
+/// With both triggers off (`without_checkpoint_wal_size()` and no interval) nothing checkpoints
+/// by itself: the WAL keeps growing.
 #[test]
 fn without_triggers_the_wal_is_checkpointed_only_when_asked() {
     let dir = tempfile::tempdir().unwrap();
-    let db = open(&dir.path().join("amsterdam.grafeo"), |config| config);
+    let db = open(&dir.path().join("amsterdam.grafeo"), |config| {
+        config.without_checkpoint_wal_size()
+    });
     assert_eq!(db.checkpoint_status().triggers, CheckpointTriggers::none());
     insert(&db, 3);
     let before = wal_bytes(&db);
@@ -60,7 +75,7 @@ fn without_triggers_the_wal_is_checkpointed_only_when_asked() {
 #[test]
 fn a_wal_size_set_at_open_checkpoints_once_the_wal_passes_it() {
     let dir = tempfile::tempdir().unwrap();
-    let limit = 16 * 1024;
+    let limit = 1024 * 1024;
     let db = open(&dir.path().join("berlin.grafeo"), |config| {
         config.with_checkpoint_wal_size(limit)
     });
@@ -71,7 +86,7 @@ fn a_wal_size_set_at_open_checkpoints_once_the_wal_passes_it() {
     assert!(wal_bytes(&db) > 0, "a small WAL stays");
 
     while wal_bytes(&db) < usize::try_from(limit).unwrap() {
-        insert(&db, 50);
+        blob(&db);
     }
     wait_until("the checkpoint", || {
         wal_bytes(&db) < usize::try_from(limit).unwrap()
@@ -117,15 +132,19 @@ fn the_triggers_change_on_an_open_database() {
     db.close().unwrap();
     drop(db);
 
-    // The file does not store them: the next open has none.
+    // The file does not store them: the next open has the default.
     let db = open(&path, |config| config);
-    assert_eq!(db.checkpoint_status().triggers, CheckpointTriggers::none());
+    assert_eq!(
+        db.checkpoint_status().triggers,
+        CheckpointTriggers::none().with_wal_bytes(DEFAULT_CHECKPOINT_WAL_SIZE)
+    );
 }
 
 /// The setter refuses what never checkpoints, and a zero trigger.
 #[test]
 fn the_setter_refuses_what_never_checkpoints() {
-    let triggers = CheckpointTriggers::none().with_wal_bytes(1024);
+    // At the 1 MiB floor, so each refusal below is for its own reason.
+    let triggers = CheckpointTriggers::none().with_wal_bytes(1024 * 1024);
     assert!(
         GrafeoDB::new_in_memory()
             .set_checkpoint_triggers(triggers)

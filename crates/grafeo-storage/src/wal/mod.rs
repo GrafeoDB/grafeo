@@ -100,4 +100,4 @@ pub use segment::{
     stored_key_check_aad,
 };
 pub use typed::{LpgWal, TypedWal};
-pub use writer::{DEFAULT_SEGMENT_BYTES, GroupEnd, GroupWriter, Wal, WalOptions};
+pub use writer::{DEFAULT_SEGMENT_BYTES, GroupEnd, GroupWriter, Waker, Wal, WalOptions};

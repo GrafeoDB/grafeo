@@ -66,8 +66,8 @@ pub use admin::{
 pub use auth::{Grant, Identity, Role, StatementKind};
 pub use catalog::{Catalog, CatalogError, IndexDefinition, IndexType};
 pub use config::{
-    AccessMode, Config, ConfigError, DEFAULT_WAL_RETENTION_LIMIT, DurabilityMode, GraphModel,
-    HistoryRetention,
+    AccessMode, Config, ConfigError, DEFAULT_CHECKPOINT_WAL_SIZE, DEFAULT_WAL_RETENTION_LIMIT,
+    DEFAULT_WAL_SEGMENT_SIZE, DurabilityMode, GraphModel, HistoryRetention,
 };
 pub use database::GrafeoDB;
 pub use database::GraphHandle;

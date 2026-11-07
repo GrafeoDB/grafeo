@@ -321,6 +321,13 @@ pub struct TransactionManager {
     /// ([`current_epoch`](Self::current_epoch)). It trails `assigned_epoch`
     /// while a commit is being written, so no snapshot holds part of one.
     published_epoch: AtomicU64,
+    /// Called once, after the first commit published while it is set: what
+    /// starts a database's interval checkpoints when no WAL group can.
+    #[cfg(feature = "grafeo-file")]
+    first_commit_hook: parking_lot::Mutex<Option<FirstCommitHook>>,
+    /// Whether a first-commit hook is set: one relaxed load per commit.
+    #[cfg(feature = "grafeo-file")]
+    first_commit_armed: AtomicBool,
     /// Number of currently active transactions (for fast-path conflict skip).
     active_count: AtomicU64,
     /// Active transactions.
@@ -768,7 +775,40 @@ impl Publish<'_> {
         self.finished = true;
         drop(turn);
         manager.published.notify_all();
+        #[cfg(feature = "grafeo-file")]
+        manager.run_first_commit_hook();
         Ok(())
+    }
+}
+
+/// What [`TransactionManager::set_first_commit_hook`] calls.
+#[cfg(feature = "grafeo-file")]
+pub(crate) type FirstCommitHook = std::sync::Arc<dyn Fn() + Send + Sync>;
+
+/// The first-commit hook: only a database with a file has interval
+/// checkpoints to start.
+#[cfg(feature = "grafeo-file")]
+impl TransactionManager {
+    /// Sets what the next published commit calls, once, or none. It runs
+    /// after the commit's publish turn is released and must not wait for
+    /// another commit.
+    pub(crate) fn set_first_commit_hook(&self, hook: Option<FirstCommitHook>) {
+        let armed = hook.is_some();
+        *self.first_commit_hook.lock() = hook;
+        self.first_commit_armed.store(armed, Ordering::Release);
+    }
+
+    /// Runs and clears the first-commit hook, if one is set.
+    fn run_first_commit_hook(&self) {
+        if !self.first_commit_armed.load(Ordering::Relaxed)
+            || !self.first_commit_armed.swap(false, Ordering::AcqRel)
+        {
+            return;
+        }
+        let hook = self.first_commit_hook.lock().take();
+        if let Some(hook) = hook {
+            hook();
+        }
     }
 }
 
@@ -797,6 +837,10 @@ impl TransactionManager {
             next_transaction_id: AtomicU64::new(2),
             assigned_epoch: AtomicU64::new(0),
             published_epoch: AtomicU64::new(0),
+            #[cfg(feature = "grafeo-file")]
+            first_commit_hook: parking_lot::Mutex::new(None),
+            #[cfg(feature = "grafeo-file")]
+            first_commit_armed: AtomicBool::new(false),
             active_count: AtomicU64::new(0),
             transactions: RwLock::new(FxHashMap::default()),
             committed_epochs: RwLock::new(FxHashMap::default()),

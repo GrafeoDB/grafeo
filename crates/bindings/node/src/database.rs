@@ -184,6 +184,27 @@ pub struct CreateOptions {
     /// and the next incremental backup fails, asking for a full backup. For
     /// this open only.
     pub wal_retention_limit: Option<i64>,
+    /// How many bytes of WAL past the last checkpoint make the database
+    /// checkpoint by itself, on a background thread: 256 MiB when left out,
+    /// at least 1 MiB. `null` turns automatic checkpoints off: the WAL then
+    /// grows until close or `walCheckpoint()`. For this open only.
+    #[napi(ts_type = "number | null")]
+    pub checkpoint_wal_size: Option<Either<i64, Null>>,
+    /// The size a WAL file grows to before the log goes on in a new one:
+    /// 64 MiB by default, from 1 MiB to 1 GiB. A checkpoint removes whole
+    /// files and keeps one segment of free disk space for the WAL. For this
+    /// open only.
+    pub wal_segment_size: Option<i64>,
+}
+
+/// A size in bytes from the option `what`: an error for a negative number.
+fn size_option(bytes: i64, what: &str) -> Result<u64> {
+    u64::try_from(bytes).map_err(|_| {
+        NodeGrafeoError::InvalidArgument(format!(
+            "{what} must be a number of bytes, not negative: {bytes}"
+        ))
+        .into()
+    })
 }
 
 /// The query timeout `options.queryTimeout` sets: `None` for `null` or
@@ -227,15 +248,23 @@ impl JsGrafeoDB {
             .and_then(|options| options.shuffle_unordered)
             .unwrap_or(false);
         let mut config = config.with_shuffle_unordered(shuffle_unordered);
-        let (wal_salvage, history_retention, timeout, wal_retention_limit) =
-            options.map_or((None, None, None, None), |options| {
-                (
-                    options.wal_salvage,
-                    options.history_retention,
-                    options.query_timeout,
-                    options.wal_retention_limit,
-                )
-            });
+        let (
+            wal_salvage,
+            history_retention,
+            timeout,
+            wal_retention_limit,
+            checkpoint_wal_size,
+            wal_segment_size,
+        ) = options.map_or((None, None, None, None, None, None), |options| {
+            (
+                options.wal_salvage,
+                options.history_retention,
+                options.query_timeout,
+                options.wal_retention_limit,
+                options.checkpoint_wal_size,
+                options.wal_segment_size,
+            )
+        });
         if wal_salvage.unwrap_or(false) {
             config = config.with_wal_salvage();
         }
@@ -250,12 +279,17 @@ impl JsGrafeoDB {
                 config.with_history_retention(crate::time_travel::history_retention(retention)?);
         }
         if let Some(bytes) = wal_retention_limit {
-            let bytes = u64::try_from(bytes).map_err(|_| {
-                NodeGrafeoError::InvalidArgument(format!(
-                    "walRetentionLimit must be a number of bytes, not negative: {bytes}"
-                ))
-            })?;
-            config = config.with_wal_retention_limit(bytes);
+            config = config.with_wal_retention_limit(size_option(bytes, "walRetentionLimit")?);
+        }
+        match checkpoint_wal_size {
+            Some(Either::A(bytes)) => {
+                config = config.with_checkpoint_wal_size(size_option(bytes, "checkpointWalSize")?);
+            }
+            Some(Either::B(_)) => config = config.without_checkpoint_wal_size(),
+            None => {}
+        }
+        if let Some(bytes) = wal_segment_size {
+            config = config.with_wal_segment_size(size_option(bytes, "walSegmentSize")?);
         }
         let db = GrafeoDB::with_config(config).map_err(NodeGrafeoError::from)?;
         Ok(Self {
@@ -795,7 +829,8 @@ impl JsGrafeoDB {
     /// Sets when the database checkpoints by itself: every
     /// `triggers.intervalMs` milliseconds, and once the WAL holds
     /// `triggers.walBytes` bytes since the last checkpoint. Leave both out to
-    /// turn automatic checkpoints off (the default). For this open only.
+    /// turn automatic checkpoints off. For this open only.
+    /// A file database opens with a WAL size of 256 MiB (at least 1 MiB) and no interval.
     /// Throws for a database in memory or opened read-only, and for zero.
     #[napi(js_name = "setCheckpointTriggers")]
     pub fn set_checkpoint_triggers(&self, triggers: CheckpointTriggers) -> Result<()> {

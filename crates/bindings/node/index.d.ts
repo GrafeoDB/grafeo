@@ -252,7 +252,8 @@ export declare class GrafeoDB {
    * Sets when the database checkpoints by itself: every
    * `triggers.intervalMs` milliseconds, and once the WAL holds
    * `triggers.walBytes` bytes since the last checkpoint. Leave both out to
-   * turn automatic checkpoints off (the default). For this open only.
+   * turn automatic checkpoints off. For this open only.
+   * A file database opens with a WAL size of 256 MiB (at least 1 MiB) and no interval.
    * Throws for a database in memory or opened read-only, and for zero.
    */
   setCheckpointTriggers(triggers: CheckpointTriggers): void
@@ -843,6 +844,20 @@ export interface CreateOptions {
    * this open only.
    */
   walRetentionLimit?: number
+  /**
+   * How many bytes of WAL past the last checkpoint make the database
+   * checkpoint by itself, on a background thread: 256 MiB when left out,
+   * at least 1 MiB. `null` turns automatic checkpoints off: the WAL then
+   * grows until close or `walCheckpoint()`. For this open only.
+   */
+  checkpointWalSize?: number | null
+  /**
+   * The size a WAL file grows to before the log goes on in a new one:
+   * 64 MiB by default, from 1 MiB to 1 GiB. A checkpoint removes whole
+   * files and keeps one segment of free disk space for the WAL. For this
+   * open only.
+   */
+  walSegmentSize?: number
 }
 
 /** Options for CSV import. */

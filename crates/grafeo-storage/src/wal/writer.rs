@@ -239,7 +239,17 @@ pub struct Wal {
     /// next group or rotation syncs the directory first, so no frame lands
     /// in a segment a power loss could leave under its temporary name.
     directory_sync_due: AtomicBool,
+    /// The log position whose crossing calls the waker
+    /// ([`arm_wake`](Self::arm_wake)); `u64::MAX` when none is armed. Set
+    /// and compared under the writer's lock.
+    wake_at: AtomicU64,
+    /// What a crossing of `wake_at` calls, after the writer's lock is
+    /// released ([`set_waker`](Self::set_waker)).
+    waker: Mutex<Option<Waker>>,
 }
+
+/// What [`Wal::set_waker`] calls when a group crosses the armed mark.
+pub type Waker = Arc<dyn Fn() + Send + Sync>;
 
 impl std::fmt::Debug for Wal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -350,7 +360,47 @@ impl Wal {
             poisoned: AtomicBool::new(false),
             poison_reason: Mutex::new(None),
             directory_sync_due: AtomicBool::new(false),
+            wake_at: AtomicU64::new(u64::MAX),
+            waker: Mutex::new(None),
         })
+    }
+
+    /// Sets what a group that crosses the armed mark calls, or none. The
+    /// waker runs on the thread that wrote the group, after the writer's
+    /// lock is released, so it may take locks of its own; it should only
+    /// signal.
+    pub fn set_waker(&self, waker: Option<Waker>) {
+        *self.waker.lock() = waker;
+    }
+
+    /// Arms the mark `lsn`: the first group that ends at or past it takes
+    /// the crossing and calls the waker, once; later groups call nothing
+    /// until a mark is armed again. Returns `true` when the log already
+    /// ends at or past `lsn`: the caller then has the crossing, the mark
+    /// stays unarmed, and no waker is called for it.
+    ///
+    /// Armed under the writer's lock, which a group holds while it compares
+    /// its end with the mark, so no crossing falls between the two.
+    pub fn arm_wake(&self, lsn: u64) -> bool {
+        let state = self.state.lock();
+        let past = state.end_lsn >= lsn;
+        self.wake_at
+            .store(if past { u64::MAX } else { lsn }, Ordering::Release);
+        past
+    }
+
+    /// Disarms the mark: no group calls the waker.
+    pub fn disarm_wake(&self) {
+        let _state = self.state.lock();
+        self.wake_at.store(u64::MAX, Ordering::Release);
+    }
+
+    /// Calls the waker for a crossing (see [`arm_wake`](Self::arm_wake)).
+    fn wake(&self) {
+        let waker = self.waker.lock().clone();
+        if let Some(waker) = waker {
+            waker();
+        }
     }
 
     /// Begins the group of `transaction_id`. The group holds the writer's
@@ -415,6 +465,7 @@ impl Wal {
             failure: None,
             marker: false,
             frame: Vec::new(),
+            crossed: false,
         }
     }
 
@@ -762,6 +813,9 @@ pub struct GroupWriter<'wal> {
     marker: bool,
     /// Scratch space for a frame's header and payload.
     frame: Vec<u8>,
+    /// A group this writer finished crossed the armed mark: the waker runs
+    /// once the writer's lock is released.
+    crossed: bool,
 }
 
 impl GroupWriter<'_> {
@@ -894,6 +948,12 @@ impl GroupWriter<'_> {
         self.wal.published.lock().end_lsn = end_lsn;
         self.wal.end_lsn.store(end_lsn, Ordering::Release);
         self.touched_file = false;
+        // Under the writer's lock, where `arm_wake` sets the mark: the first
+        // group at or past it takes the crossing.
+        if end_lsn >= self.wal.wake_at.load(Ordering::Acquire) {
+            self.wal.wake_at.store(u64::MAX, Ordering::Release);
+            self.crossed = true;
+        }
         Ok(GroupEnd {
             start_lsn: self.start_lsn,
             end_lsn,
@@ -1041,6 +1101,11 @@ impl Drop for GroupWriter<'_> {
         {
             self.wal
                 .poison(format!("cutting an abandoned group back failed: {error}"));
+        }
+        // The writer's lock goes first: the waker may take locks of its own.
+        self.state = None;
+        if self.crossed {
+            self.wal.wake();
         }
     }
 }
@@ -1511,6 +1576,92 @@ mod tests {
             group.push(&record(text)).unwrap();
         }
         group.finish().unwrap()
+    }
+
+    /// A waker that counts its calls, and whether the writer's lock was
+    /// free when it ran.
+    fn counting_waker(wal: &Arc<Wal>) -> (Arc<AtomicU64>, Arc<AtomicBool>) {
+        let (calls, locked) = (
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicBool::new(false)),
+        );
+        let weak = Arc::downgrade(wal);
+        let (count, saw_lock) = (Arc::clone(&calls), Arc::clone(&locked));
+        wal.set_waker(Some(Arc::new(move || {
+            if let Some(wal) = weak.upgrade()
+                && wal.state.try_lock().is_none()
+            {
+                saw_lock.store(true, Ordering::SeqCst);
+            }
+            count.fetch_add(1, Ordering::SeqCst);
+        })));
+        (calls, locked)
+    }
+
+    #[test]
+    fn the_first_group_past_the_mark_calls_the_waker_once_without_the_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let wal = Arc::new(Wal::open(dir.path(), options(0)).unwrap());
+        let (calls, locked) = counting_waker(&wal);
+        let first = write_group(&wal, 3, &["Alix"]);
+        assert!(!wal.arm_wake(first.end_lsn + 1));
+        write_group(&wal, 4, &["Gus"]);
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "the crossing");
+        write_group(&wal, 5, &["Vincent"]);
+        write_group(&wal, 6, &["Jules"]);
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "once per arming");
+        assert!(
+            !locked.load(Ordering::SeqCst),
+            "the lock was released first"
+        );
+
+        assert!(!wal.arm_wake(wal.end_lsn() + 1));
+        write_group(&wal, 7, &["Mia"]);
+        assert_eq!(calls.load(Ordering::SeqCst), 2, "armed again");
+    }
+
+    #[test]
+    fn a_mark_the_log_already_passed_is_taken_by_the_caller() {
+        let dir = tempfile::tempdir().unwrap();
+        let wal = Arc::new(Wal::open(dir.path(), options(0)).unwrap());
+        let (calls, _) = counting_waker(&wal);
+        let end = write_group(&wal, 3, &["Alix"]);
+        assert!(wal.arm_wake(end.end_lsn), "the log ends at the mark");
+        assert!(wal.arm_wake(1), "and past it");
+        write_group(&wal, 4, &["Gus"]);
+        assert_eq!(calls.load(Ordering::SeqCst), 0, "the caller took it");
+    }
+
+    #[test]
+    fn a_disarmed_mark_and_no_waker_call_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let wal = Arc::new(Wal::open(dir.path(), options(0)).unwrap());
+        let (calls, _) = counting_waker(&wal);
+        assert!(!wal.arm_wake(1));
+        wal.disarm_wake();
+        write_group(&wal, 3, &["Alix"]);
+        assert_eq!(calls.load(Ordering::SeqCst), 0, "disarmed");
+
+        wal.set_waker(None);
+        assert!(!wal.arm_wake(wal.end_lsn() + 1));
+        write_group(&wal, 4, &["Gus"]);
+        assert_eq!(calls.load(Ordering::SeqCst), 0, "no waker");
+        assert!(wal.arm_wake(wal.end_lsn()), "the crossing was taken");
+    }
+
+    /// An abandoned group ends nothing, so it crosses no mark.
+    #[test]
+    fn an_abandoned_group_crosses_no_mark() {
+        let dir = tempfile::tempdir().unwrap();
+        let wal = Arc::new(Wal::open(dir.path(), options(0)).unwrap());
+        let (calls, _) = counting_waker(&wal);
+        assert!(!wal.arm_wake(1));
+        let mut group = wal.begin_group(transaction(3)).unwrap();
+        group.push(&record("Alix")).unwrap();
+        drop(group);
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        write_group(&wal, 4, &["Gus"]);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
     fn segment_len(dir: &Path, first_lsn: u64) -> u64 {

@@ -556,16 +556,18 @@ impl super::GrafeoDB {
     ///
     /// # Errors
     ///
-    /// A zero interval or size, a database without a file (in memory) or
-    /// opened read-only, which never checkpoints, and the database-closed
-    /// error after `close()`.
+    /// A zero interval, a size below 1 MiB (the error an open gives for
+    /// such a `Config::with_checkpoint_wal_size`), a database without a file
+    /// (in memory) or opened read-only, which never checkpoints, and the
+    /// database-closed error after `close()`.
     pub fn set_checkpoint_triggers(
         &self,
         triggers: crate::admin::CheckpointTriggers,
     ) -> Result<()> {
-        if triggers.interval.is_some_and(|interval| interval.is_zero())
-            || triggers.wal_bytes == Some(0)
-        {
+        // The floor `Config::validate` applies at open, with its error.
+        crate::config::check_checkpoint_wal_size(triggers.wal_bytes)
+            .map_err(super::config_error)?;
+        if triggers.interval.is_some_and(|interval| interval.is_zero()) {
             return Err(grafeo_common::utils::error::Error::InvalidValue(
                 "a checkpoint trigger of zero would checkpoint without pause: leave it unset \
                  to turn it off"

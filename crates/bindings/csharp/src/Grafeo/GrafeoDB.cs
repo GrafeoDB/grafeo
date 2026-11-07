@@ -628,7 +628,8 @@ public sealed class GrafeoDB : IGrafeoDB, IDisposable, IAsyncDisposable
     /// <summary>
     /// Set when the database checkpoints by itself: every <paramref name="interval"/>, and once
     /// the WAL holds <paramref name="walBytes"/> bytes since the last checkpoint. Leave both null
-    /// to turn automatic checkpoints off (the default). For this open only.
+    /// to turn automatic checkpoints off. For this open only.
+    /// A file database opens with a WAL size of 256 MiB (at least 1 MiB) and no interval.
     /// </summary>
     public void SetCheckpointTriggers(TimeSpan? interval = null, ulong? walBytes = null)
     {

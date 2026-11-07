@@ -46,6 +46,7 @@ mod chained_comparisons;
 mod change_set_consumers;
 mod change_set_transactions;
 mod checkpoint_committed_state;
+mod checkpoint_default;
 mod checkpoint_during_commit;
 mod checkpoint_free_space;
 mod checkpoint_replay;

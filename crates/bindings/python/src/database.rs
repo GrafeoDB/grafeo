@@ -520,6 +520,16 @@ impl PyGrafeoDB {
     /// most for the next incremental backup (1 GiB by default). Past it,
     /// the oldest part goes and the next incremental backup fails, asking
     /// for a full backup. For this open only.
+    ///
+    /// checkpoint_wal_size is how many bytes of WAL past the last checkpoint
+    /// make the database checkpoint by itself, on a background thread: 256
+    /// MiB by default, at least 1 MiB. None turns automatic checkpoints off:
+    /// the WAL then grows until close or wal_checkpoint(). For this open only.
+    ///
+    /// wal_segment_size is the size a WAL file grows to before the log goes
+    /// on in a new one: 64 MiB by default, from 1 MiB to 1 GiB. A checkpoint
+    /// removes whole files and keeps one segment of free disk space for the
+    /// WAL. For this open only.
     #[new]
     #[pyo3(signature = (
         path=None,
@@ -530,7 +540,9 @@ impl PyGrafeoDB {
         wal_salvage=false,
         history_retention=None,
         query_timeout=default_query_timeout(),
-        wal_retention_limit=None
+        wal_retention_limit=None,
+        checkpoint_wal_size=Some(grafeo_engine::config::DEFAULT_CHECKPOINT_WAL_SIZE),
+        wal_segment_size=None
     ))]
     #[allow(
         clippy::too_many_arguments,
@@ -545,6 +557,8 @@ impl PyGrafeoDB {
         history_retention: Option<&Bound<'_, PyAny>>,
         query_timeout: Option<f64>,
         wal_retention_limit: Option<u64>,
+        checkpoint_wal_size: Option<u64>,
+        wal_segment_size: Option<u64>,
         py: Python<'_>,
     ) -> PyResult<Self> {
         let mut config = if let Some(p) = path {
@@ -565,6 +579,13 @@ impl PyGrafeoDB {
         }
         if let Some(bytes) = wal_retention_limit {
             config = config.with_wal_retention_limit(bytes);
+        }
+        config = match checkpoint_wal_size {
+            Some(bytes) => config.with_checkpoint_wal_size(bytes),
+            None => config.without_checkpoint_wal_size(),
+        };
+        if let Some(bytes) = wal_segment_size {
+            config = config.with_wal_segment_size(bytes);
         }
         config = match query_timeout.map(|seconds| timeout_seconds(seconds, "query_timeout")) {
             Some(Some(timeout)) => config.with_query_timeout(timeout?),
@@ -3190,7 +3211,8 @@ impl PyGrafeoDB {
     /// Sets when the database checkpoints by itself: every
     /// `interval_secs` seconds, and once the WAL holds `wal_bytes` bytes
     /// since the last checkpoint. Leave both out to turn automatic
-    /// checkpoints off (the default). For this open only.
+    /// checkpoints off. For this open only.
+    /// A file database opens with a WAL size of 256 MiB (at least 1 MiB) and no interval.
     ///
     /// Raises for a database in memory or opened read-only, which never
     /// checkpoint, and for a zero value.

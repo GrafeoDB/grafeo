@@ -1274,7 +1274,7 @@ print(f"WAL size: {wal['size_bytes']} bytes")
 
 ### set_checkpoint_triggers()
 
-Let the database checkpoint by itself: every `interval_secs` seconds, and once the WAL holds `wal_bytes` bytes since the last checkpoint. Call it without arguments to turn automatic checkpoints off (the default). For this open only; an in-memory or read-only database raises.
+Let the database checkpoint by itself: every `interval_secs` seconds, and once the WAL holds `wal_bytes` bytes since the last checkpoint. Call it without arguments to turn automatic checkpoints off. A file database opens with `wal_bytes` at 256 MiB (the `checkpoint_wal_size` open option) and no interval; `wal_bytes` is at least 1 MiB. For this open only; an in-memory or read-only database raises.
 
 ```python
 def set_checkpoint_triggers(self, interval_secs: Optional[float] = None, wal_bytes: Optional[int] = None) -> None
@@ -1286,7 +1286,7 @@ db.set_checkpoint_triggers(interval_secs=300, wal_bytes=64 * 1024 * 1024)
 
 ### checkpoint_status()
 
-How the automatic checkpoints fare. Returns a dict with keys: `interval_secs` and `wal_bytes` (the triggers, `None` when off), `last_checkpoint` (Unix seconds of the last checkpoint of any kind), `failures` (automatic checkpoints that failed since the last that succeeded), `last_error`, `last_failure` and `stopped` (no automatic checkpoint can succeed until a reopen). A failed automatic checkpoint is also logged and retried after a pause.
+How the automatic checkpoints fare. Returns a dict with keys: `interval_secs` and `wal_bytes` (the triggers, `None` when off), `last_checkpoint` (Unix seconds of the last checkpoint of any kind), `failures` (automatic checkpoints that failed since the last that succeeded), `last_error`, `last_failure` and `stopped` (no automatic checkpoint can succeed until a reopen). A failed automatic checkpoint is also logged, and tried again once the WAL has grown one more segment (or, for the interval, after a pause).
 
 ```python
 def checkpoint_status(self) -> Dict[str, Any]

@@ -894,6 +894,56 @@ jobs:
           GRAFEO_RELEASE_BUILD: "1"
         run: pytest crates/bindings/python/tests/ -v --ignore=crates/bindings/python/tests/benchmark_phases.py
 
+  # Python tests on a reduced build: the wheel with the `lpg` profile (GQL, Cypher, Gremlin and
+  # SQL/PGQ with storage; no algorithms, no vector or text index, no RDF) runs the whole suite,
+  # which must pass or skip. A test that assumes a feature the build lacks (an expectation without
+  # its feature check, or a catalogue read at import) fails here instead of in a user's build.
+  python-test-lpg:
+    name: Python Test (lpg profile)
+    needs: [python-spec]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@1.99.0
+
+      - name: Cache cargo registry
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-python-lpg-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-python-lpg-
+
+      # --features replaces pyproject.toml's list, so the PyO3 features are named again.
+      - name: Build the lpg wheel
+        uses: PyO3/maturin-action@v1
+        with:
+          command: build
+          args: --release --out dist -m crates/bindings/python/Cargo.toml --no-default-features --features pyo3/extension-module,pyo3/abi3-py312,lpg
+          sccache: 'true'
+
+      - name: Install Python package and test dependencies
+        shell: bash
+        run: |
+          uv pip install --system dist/*.whl
+          uv pip install --system pytest pytest-asyncio networkx numpy scipy solvor pandas pyarrow polars
+
+      - name: Run Python tests
+        run: pytest crates/bindings/python/tests/ -v --ignore=crates/bindings/python/tests/benchmark_phases.py
+
   # Node.js tests
   # Default profile: napi-rs builds grafeo-node with its crate-level default
   # features, which pull in "full" (all languages + AI) via grafeo-engine.
@@ -1411,6 +1461,7 @@ jobs:
       - rust-feature-matrix
       - miri
       - python-test
+      - python-test-lpg
       - node-test
       - go-test
       - csharp-test

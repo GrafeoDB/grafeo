@@ -86,6 +86,7 @@ Queries that ran in 0.6.1 and now fail or behave differently.
 - **`HAVING` and `FINISH` after a GQL `CALL`** are accepted; they were a syntax error.
 - **SQL/PGQ `CALL ... LIMIT $n`** takes its limit; it was ignored.
 - **Stored procedures** run in builds without the graph algorithms (the `lpg` and `edge` profiles, the CLI): `CREATE PROCEDURE` succeeded there and its `CALL` said the procedure was unknown.
+- **A null in a property map** (`MATCH (n {k: NULL})`, also on an edge, in GQL, Cypher and SQL/PGQ) finds nothing, as an equality with null does; it found the elements without the key. A null in a `MERGE` pattern still matches an absent property.
 - **SQL/PGQ `EXPLAIN`** returns the plan; it ran the statement and returned its rows, in Python's `explain_sql` too.
 - **`INTERSECT` and `EXCEPT` inside `CALL { }`**: the columns they return are visible after the call, as with `UNION` and `OTHERWISE`; reading them raised "Undefined variable".
 - **A `MERGE` after an `OTHERWISE` body in `CALL { }`** uses the node the body returns; it raised "Variable already declared outside the CALL subquery".

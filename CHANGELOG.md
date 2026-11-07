@@ -41,6 +41,7 @@ Queries that ran in 0.6.1 and now fail or behave differently.
 - **The default memory limit follows the process's real ceiling** ([#751](https://github.com/GrafeoDB/grafeo/issues/751)): 75% of the smaller of the machine's memory and any cgroup (Linux, at the process's cgroup or a parent) or job-object (Windows) limit. Windows and macOS now read their memory instead of assuming 1 GiB; WASM keeps 768 MiB.
 - **`Config::with_memory_fraction` applies per open**: it is taken of the memory detected when the database opens, and a database file no longer stores its bytes; `with_memory_limit` is stored as before.
 - **`file:` URLs follow RFC 8089**: in `LOAD CSV`, `LOAD DATA` and the load procedures, `file:///srv/data.csv` and `file://localhost/srv/data.csv` name the absolute path `/srv/data.csv` (`file:///` was stripped and the rest read as a relative path), and a `file:` URL with another host is refused.
+- **Permission refusals have their own codes**: GQLSTATUS `42501`, with `GRAFEO-Q007` for a write, DDL or writing procedure that the session's role or graph grants refuse and `GRAFEO-Q008` for a statement that reaches outside the database on a session without external access; both were `GRAFEO-Q002` with `42000`. Python raises `GrafeoPermissionError`, a subclass of `GrafeoError`.
 
 ### Added
 
@@ -48,6 +49,9 @@ Queries that ran in 0.6.1 and now fail or behave differently.
 - **Query warnings**: a statement that uses a deprecated form or has something worth knowing returns its rows with warnings, each with a GQLSTATUS code (class 01), a kind and a message. They are on `QueryResult::warnings` and on streaming results, in every binding (Python also raises them through `warnings.warn`), and the CLI prints them on stderr. Experimental.
 - **SQL/PGQ `||`** concatenates strings and lists.
 - **Procedures in every build**: `CALL grafeo.procedures()` and the CSV load procedures are listed in every build, with each argument's type, default and allowed values where it declares them.
+- **Sessions without external access**: `Identity::with_external_access(false)` refuses every statement that reads or writes outside the database, such as the CSV loads, before it runs.
+- **Sessions in the bindings**: `db.session(read_only=..., external_access=...)` in Python, `db.session({ readOnly, externalAccess })` in Node.js and `grafeo_session_open` in C run queries with those limits; `external_access=False` refuses every statement that reads or writes outside the database.
+- **The procedure listing says what each procedure does**: `CALL grafeo.procedures()` lists whether it writes the graph (`writes`, a BOOLEAN) and what it reaches outside the database (`external_access`: `'none'`, `'reads'` or `'writes'`).
 - **`grafeo.pagerank`** warns (01Y01) when it runs out of iterations before its scores settle within `tolerance`.
 - **WAL retention limit**: after a backup, checkpoints keep the WAL the next incremental backup needs, up to `Config::with_wal_retention_limit` (1 GiB by default; Python `wal_retention_limit`, Node `walRetentionLimit`). Past the limit the oldest log is removed with a warning, and the next incremental backup fails with `GRAFEO-S005`. `release_backup_cursor()` (Rust, Python, Node, C, C#) stops keeping log for backups (#673).
 
@@ -98,6 +102,10 @@ Queries that ran in 0.6.1 and now fail or behave differently.
 - **Vector search with a filter on a quantized index** could return fewer than `k` results, or none, when the allowed nodes lay far from the query; it now searches among the allowed nodes.
 - **Opening and closing without writes leaves the file unchanged**: `close()` checkpoints only when something changed since the last checkpoint, so a database opened only for reads keeps its file byte for byte (its header was rewritten on every close).
 - **The C header declares the backup functions**: `grafeo_backup_full`, `grafeo_backup_incremental`, `grafeo_restore_to_epoch` and `grafeo_clear_plan_cache`, exported since earlier releases, are now declared in `grafeo.h`.
+
+### Security
+
+- **Queries can be kept from reading local files**: a session without external access refuses `LOAD CSV`, `LOAD DATA`, the CSV load procedures and SPARQL `LOAD` before any file is opened; through a server, give remote sessions none.
 
 ### Contributors
 

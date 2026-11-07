@@ -853,7 +853,10 @@ impl LoadCall {
     /// An invalid parameter value (22023) naming the procedure, the argument and the key or
     /// element at fault.
     pub(crate) fn from_prepared(procedure: &str, params: &Prepared) -> Result<Self, Error> {
-        let path = PathBuf::from(params.required_string("path")?);
+        let path = grafeo_common::utils::file_url::local_path(params.required_string("path")?)
+            .map_err(|error| {
+                argument_error(procedure, "path", &format!("names no local file: {error}"))
+            })?;
         let header = params.required_bool("header")?;
         // The domain makes it one ASCII character, so one byte.
         let delimiter = match params.required_string("delimiter")?.as_bytes() {

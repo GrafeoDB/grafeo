@@ -82,9 +82,9 @@ impl LoadDataOperator {
 
     /// Opens the file and reads headers if needed (CSV/JSONL).
     fn open_text(&mut self) -> Result<(), OperatorError> {
-        let file_path = strip_file_prefix(&self.path);
+        let file_path = local_file(&self.path)?;
 
-        let file = File::open(file_path).map_err(|e| {
+        let file = File::open(&file_path).map_err(|e| {
             OperatorError::Execution(format!(
                 "Failed to open {} file '{}': {}",
                 format_name(self.format),
@@ -216,8 +216,8 @@ impl LoadDataOperator {
         use parquet::basic::CompressionCodec;
         use parquet::file::reader::FileReader;
 
-        let file_path = strip_file_prefix(&self.path);
-        let file = File::open(file_path).map_err(|e| {
+        let file_path = local_file(&self.path)?;
+        let file = File::open(&file_path).map_err(|e| {
             OperatorError::Execution(format!(
                 "Failed to open Parquet file '{}': {}",
                 self.path, e
@@ -358,11 +358,11 @@ impl Operator for LoadDataOperator {
 // Helper functions
 // ============================================================================
 
-/// Strips `file:///` or `file://` prefix from a path (Neo4j convention).
-fn strip_file_prefix(path: &str) -> &str {
-    path.strip_prefix("file:///")
-        .or_else(|| path.strip_prefix("file://"))
-        .unwrap_or(path)
+/// The local file `path` names: a path as given, or a `file:` URL's (RFC 8089, see
+/// [`grafeo_common::utils::file_url`]).
+fn local_file(path: &str) -> Result<std::path::PathBuf, OperatorError> {
+    grafeo_common::utils::file_url::local_path(path)
+        .map_err(|error| OperatorError::Execution(error.to_string()))
 }
 
 /// Returns a human-readable format name.
@@ -779,11 +779,12 @@ mod tests {
     }
 
     #[test]
-    fn test_strip_file_prefix() {
-        assert_eq!(strip_file_prefix("file:///data.csv"), "data.csv");
-        assert_eq!(strip_file_prefix("file://data.csv"), "data.csv");
-        assert_eq!(strip_file_prefix("data.csv"), "data.csv");
-        assert_eq!(strip_file_prefix("/tmp/data.csv"), "/tmp/data.csv");
+    fn a_file_url_names_its_absolute_path_and_a_path_is_kept() {
+        let path = |name: &str| local_file(name).unwrap().to_string_lossy().into_owned();
+        assert_eq!(path("file:///tmp/data.csv"), "/tmp/data.csv");
+        assert_eq!(path("data.csv"), "data.csv");
+        assert_eq!(path("/tmp/data.csv"), "/tmp/data.csv");
+        assert!(local_file("file://server/data.csv").is_err());
     }
 
     #[test]

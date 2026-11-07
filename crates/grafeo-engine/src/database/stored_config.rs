@@ -51,8 +51,9 @@ pub(super) fn record_of(config: &Config, path: &Path) -> StoredConfigRecord {
         schema_constraints: config.stored_schema_constraints(),
         wal_enabled: config.wal_enabled(),
         wal_durability: durability_record(config.wal_durability()),
+        // A fraction applies per open: no limit is stored for it.
         memory_limit: config
-            .memory_limit()
+            .explicit_memory_limit()
             .map(|limit| u64::try_from(limit).unwrap_or(u64::MAX)),
         spill_path: config
             .spill_path()
@@ -152,6 +153,7 @@ pub(super) fn applied(config: Config, stored: &StoredConfigRecord, path: &Path) 
         config = config.with_wal_durability(durability_mode(stored.wal_durability));
     }
     if !set(&config, SetFields::MEMORY_LIMIT)
+        && config.memory_fraction().is_none()
         && let Some(limit) = stored.memory_limit
     {
         config = config.with_memory_limit(usize::try_from(limit).unwrap_or(usize::MAX));

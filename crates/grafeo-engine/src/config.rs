@@ -805,6 +805,15 @@ pub struct Config {
     /// The settings a builder set: they win over the values a database file
     /// stores (see `GrafeoDB::open`), where a default does not.
     set: SetFields,
+
+    /// The memory limit as a share of the memory detected at open
+    /// ([`with_memory_fraction`](Self::with_memory_fraction)): per open, never stored. Set only
+    /// while `memory_limit` is `None`.
+    memory_fraction: Option<f64>,
+
+    /// `memory_fraction`'s bytes, taken of the memory detected when the database opened, so
+    /// [`memory_limit`](Self::memory_limit) reads the figure the open's budget has.
+    memory_fraction_bytes: Option<usize>,
 }
 
 /// The settings of a [`Config`] a database file can store, as a set: a
@@ -939,6 +948,8 @@ impl Default for Config {
             graph_model: GraphModel::default(),
             path: None,
             memory_limit: None,
+            memory_fraction: None,
+            memory_fraction_bytes: None,
             spill_path: None,
             threads: num_cpus::get(),
             wal_enabled: true,
@@ -1013,6 +1024,8 @@ impl Config {
     #[must_use]
     pub fn with_memory_limit(mut self, limit: usize) -> Self {
         self.memory_limit = Some(limit);
+        self.memory_fraction = None;
+        self.memory_fraction_bytes = None;
         self.set.insert(SetFields::MEMORY_LIMIT);
         self
     }
@@ -1024,7 +1037,7 @@ impl Config {
     #[must_use]
     #[cfg(query_language)]
     pub(crate) fn path_search_budget(&self) -> usize {
-        self.memory_limit.map_or(
+        self.memory_limit().map_or(
             grafeo_core::execution::operators::DEFAULT_PATH_SEARCH_BUDGET,
             |limit| (limit / 4).max(1),
         )
@@ -1114,16 +1127,19 @@ impl Config {
         self
     }
 
-    /// Sets the memory budget as a fraction of system RAM.
+    /// Sets the memory limit to `fraction` of the memory this process may use, detected when
+    /// the database opens ([`detect_memory`](grafeo_common::memory::detect_memory): the smaller
+    /// of the machine's memory and a container's or job's limit).
+    ///
+    /// The share applies to this open only: a database file stores no limit for it, so a file
+    /// moved to a smaller machine does not carry another machine's bytes. An explicit
+    /// [`with_memory_limit`](Self::with_memory_limit) is stored, and the later of the two calls
+    /// wins. A fraction that is not above zero fails [`validate`](Self::validate).
     #[must_use]
     pub fn with_memory_fraction(mut self, fraction: f64) -> Self {
-        use grafeo_common::memory::buffer::BufferManagerConfig;
-        let system_memory = BufferManagerConfig::detect_system_memory();
-        // reason: product of system RAM and a 0..1 fraction is always a valid positive usize
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let budget = (system_memory as f64 * fraction) as usize;
-        self.memory_limit = Some(budget);
-        self.set.insert(SetFields::MEMORY_LIMIT);
+        self.memory_limit = None;
+        self.memory_fraction = Some(fraction);
+        self.memory_fraction_bytes = None;
         self
     }
 
@@ -1529,11 +1545,47 @@ impl Config {
         self.path.as_deref()
     }
 
-    /// The memory limit in bytes, `None` for three quarters of the system's
-    /// RAM.
+    /// The memory limit in bytes: the one set, or
+    /// [`with_memory_fraction`](Self::with_memory_fraction)'s share of the memory detected (when
+    /// the database opened, for a database's own configuration; now, before an open); `None`
+    /// for the default, [`DEFAULT_MEMORY_FRACTION`](grafeo_common::memory::DEFAULT_MEMORY_FRACTION)
+    /// of the detected memory.
     #[must_use]
     pub fn memory_limit(&self) -> Option<usize> {
         self.memory_limit
+            .or(self.memory_fraction_bytes)
+            .or_else(|| {
+                self.memory_fraction.map(|fraction| {
+                    grafeo_common::memory::system::fraction_of(
+                        grafeo_common::memory::detect_memory().bytes,
+                        fraction,
+                    )
+                })
+            })
+    }
+
+    /// The memory limit set with [`with_memory_limit`](Self::with_memory_limit), the one a
+    /// database file stores; `None` for the default or a fraction.
+    #[must_use]
+    pub(crate) fn explicit_memory_limit(&self) -> Option<usize> {
+        self.memory_limit
+    }
+
+    /// The share of the detected memory set with
+    /// [`with_memory_fraction`](Self::with_memory_fraction), when no explicit limit replaced it.
+    #[must_use]
+    pub(crate) fn memory_fraction(&self) -> Option<f64> {
+        self.memory_fraction
+    }
+
+    /// The configuration with the bytes the open took for its fraction, read back by
+    /// [`memory_limit`](Self::memory_limit); unchanged without a fraction.
+    #[must_use]
+    pub(crate) fn with_open_memory_budget(mut self, bytes: usize) -> Self {
+        if self.memory_fraction.is_some() {
+            self.memory_fraction_bytes = Some(bytes);
+        }
+        self
     }
 
     /// The spill directory for out-of-core processing, when one is set.
@@ -1749,6 +1801,12 @@ impl Config {
     pub fn validate(&self) -> std::result::Result<(), ConfigError> {
         if let Some(limit) = self.memory_limit
             && limit == 0
+        {
+            return Err(ConfigError::ZeroMemoryLimit);
+        }
+        if self
+            .memory_fraction
+            .is_some_and(|fraction| fraction.is_nan() || fraction <= 0.0)
         {
             return Err(ConfigError::ZeroMemoryLimit);
         }
@@ -2489,6 +2547,8 @@ mod tests {
             wal_segment_size,
             // What the builders set: see the stored-configuration tests.
             set: _,
+            memory_fraction,
+            memory_fraction_bytes,
         } = config;
 
         assert_eq!(
@@ -2516,6 +2576,8 @@ mod tests {
             Some(std::path::Path::new("amsterdam.grafeo"))
         );
         assert_eq!(memory_limit, Some(88 * 1024 * 1024));
+        // `with_memory_fraction` is the other way to set the limit; the explicit one is set here.
+        assert_eq!((memory_fraction, memory_fraction_bytes), (None, None));
         assert_eq!(
             spill_path.as_deref(),
             Some(std::path::Path::new("amsterdam.spill"))

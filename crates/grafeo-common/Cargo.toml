@@ -51,6 +51,14 @@ rand = { workspace = true, optional = true }
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 web-time.workspace = true
 
+# The memory this process may use (memory::system): the physical memory and the job object's
+# limits on Windows, `hw.memsize` on macOS
+[target.'cfg(windows)'.dependencies]
+windows-sys.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+libc.workspace = true
+
 [features]
 default = []
 tiered-storage = []  # Deprecated since 0.6.0: enables nothing (LpgStore, its only user, is gone); removed in 0.7.0

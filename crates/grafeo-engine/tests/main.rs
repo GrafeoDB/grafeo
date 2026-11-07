@@ -104,6 +104,7 @@ mod decimal_algorithm_weights;
 mod decimal_persistence;
 mod decimal_sum_and_avg;
 mod decimal_values;
+mod default_memory_budget;
 mod degree_estimates;
 mod delete_of_an_unbound_variable;
 mod delete_without_backward_edges;

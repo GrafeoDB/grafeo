@@ -1665,6 +1665,7 @@ dependencies = [
  "hashbrown 0.17.1",
  "hkdf",
  "indexmap",
+ "libc",
  "num-bigint",
  "parking_lot 0.13.0",
  "proptest",
@@ -1675,6 +1676,7 @@ dependencies = [
  "thiserror",
  "tracing",
  "web-time",
+ "windows-sys 0.61.2",
  "zeroize",
 ]
 

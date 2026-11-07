@@ -106,6 +106,7 @@ use std::sync::atomic::AtomicUsize;
 use parking_lot::RwLock;
 
 use grafeo_common::memory::buffer::{BufferManager, BufferManagerConfig};
+use grafeo_common::memory::{DetectedMemory, MemorySource, detect_memory};
 use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind, Result};
 use grafeo_core::graph::GraphBackend;
 use grafeo_core::graph::GraphStore;
@@ -528,15 +529,11 @@ impl GrafeoDB {
         let mut reads_a_0_5_database = false;
 
         // Create buffer manager with configured limits
+        let (budget, detected_memory) = memory_budget(&config);
+        let config = config.with_open_memory_budget(budget);
         let buffer_config = BufferManagerConfig {
-            budget: config.memory_limit().unwrap_or_else(|| {
-                // reason: product of system RAM and 0.75 is always a valid positive usize
-                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-                let b = (BufferManagerConfig::detect_system_memory() as f64 * 0.75) as usize;
-                b
-            }),
             spill_path: spill_layout.root.clone(),
-            ..BufferManagerConfig::default()
+            ..BufferManagerConfig::with_budget(budget)
         };
         let buffer_manager = BufferManager::new(buffer_config);
 
@@ -1091,6 +1088,7 @@ impl GrafeoDB {
         }
 
         db.warn_of_types_scoped_to_their_graphs();
+        warn_of_undetected_memory(budget, detected_memory);
         Ok(db)
     }
 
@@ -1150,16 +1148,10 @@ impl GrafeoDB {
         let transaction_manager = Arc::new(TransactionManager::new());
         transaction_manager.sync_epoch(store.committed_epoch());
 
-        let buffer_config = BufferManagerConfig {
-            budget: config.memory_limit().unwrap_or_else(|| {
-                // reason: product of system RAM and 0.75 is always a valid positive usize
-                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-                let b = (BufferManagerConfig::detect_system_memory() as f64 * 0.75) as usize;
-                b
-            }),
-            spill_path: None,
-            ..BufferManagerConfig::default()
-        };
+        let (budget, detected_memory) = memory_budget(&config);
+        let config = config.with_open_memory_budget(budget);
+        warn_of_undetected_memory(budget, detected_memory);
+        let buffer_config = BufferManagerConfig::with_budget(budget);
         let buffer_manager = BufferManager::new(buffer_config);
 
         let query_cache = Arc::new(QueryCache::default());
@@ -1268,16 +1260,10 @@ impl GrafeoDB {
         let transaction_manager = Arc::new(TransactionManager::new());
         transaction_manager.sync_epoch(store.committed_epoch());
 
-        let buffer_config = BufferManagerConfig {
-            budget: config.memory_limit().unwrap_or_else(|| {
-                // reason: product of system RAM and 0.75 is always a valid positive usize
-                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-                let b = (BufferManagerConfig::detect_system_memory() as f64 * 0.75) as usize;
-                b
-            }),
-            spill_path: None,
-            ..BufferManagerConfig::default()
-        };
+        let (budget, detected_memory) = memory_budget(&config);
+        let config = config.with_open_memory_budget(budget);
+        warn_of_undetected_memory(budget, detected_memory);
+        let buffer_config = BufferManagerConfig::with_budget(budget);
         let buffer_manager = BufferManager::new(buffer_config);
 
         let query_cache = Arc::new(QueryCache::default());
@@ -3851,6 +3837,32 @@ impl checkpoint_timer::WatchedLog for WalWatch {
             self.wal.disarm_wake();
         }
         self.wal.set_waker(waker);
+    }
+}
+
+/// The buffer budget of `config`: its memory limit, or its fraction (or the default share) of
+/// the memory detected now, with the detection when one ran, for the open to warn about.
+fn memory_budget(config: &Config) -> (usize, Option<DetectedMemory>) {
+    if let Some(limit) = config.explicit_memory_limit() {
+        return (limit, None);
+    }
+    let detected = detect_memory();
+    let budget = config.memory_fraction().map_or_else(
+        || detected.default_budget(),
+        |fraction| grafeo_common::memory::system::fraction_of(detected.bytes, fraction),
+    );
+    (budget, Some(detected))
+}
+
+/// Logs, where a build has a log, that the memory budget rests on the fallback figure because
+/// the memory this process may use could not be detected.
+fn warn_of_undetected_memory(budget: usize, detected: Option<DetectedMemory>) {
+    if detected.is_some_and(|detected| detected.source == MemorySource::Fallback) {
+        grafeo_common::grafeo_warn!(
+            "could not detect the memory this process may use: the memory limit is {} MiB, \
+             taken of a 1 GiB fallback; set it with Config::with_memory_limit",
+            budget >> 20
+        );
     }
 }
 

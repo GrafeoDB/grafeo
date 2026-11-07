@@ -4,14 +4,12 @@ use super::consumer::MemoryConsumer;
 use super::grant::{GrantReleaser, MemoryGrant};
 use super::region::MemoryRegion;
 use super::stats::{BufferStats, PressureLevel};
+use crate::memory::system::detect_memory;
 use parking_lot::RwLock;
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-
-/// Default memory budget as a fraction of system memory.
-const DEFAULT_MEMORY_FRACTION: f64 = 0.75;
 
 /// Configuration for the buffer manager.
 #[derive(Debug, Clone)]
@@ -31,60 +29,13 @@ pub struct BufferManagerConfig {
 }
 
 impl BufferManagerConfig {
-    /// Detects system memory size.
-    ///
-    /// Returns a conservative estimate if detection fails.
+    /// The memory this process may use, in bytes: [`detect_memory`]'s figure (the smaller of
+    /// the machine's memory and every limit set on the process, or
+    /// [`FALLBACK_SYSTEM_MEMORY`](crate::memory::FALLBACK_SYSTEM_MEMORY) when nothing can be
+    /// read).
     #[must_use]
     pub fn detect_system_memory() -> usize {
-        // Under Miri, file I/O is blocked by isolation: use fallback directly
-        #[cfg(miri)]
-        {
-            return Self::fallback_system_memory();
-        }
-
-        // Try to detect system memory
-        // On failure, return a conservative 1GB default
-        #[cfg(not(miri))]
-        {
-            #[cfg(target_os = "windows")]
-            {
-                // Windows: Use GetPhysicallyInstalledSystemMemory or GlobalMemoryStatusEx
-                // For now, use a fallback
-                Self::fallback_system_memory()
-            }
-
-            #[cfg(target_os = "linux")]
-            {
-                // Linux: Read from /proc/meminfo
-                if let Ok(contents) = std::fs::read_to_string("/proc/meminfo") {
-                    for line in contents.lines() {
-                        if line.starts_with("MemTotal:")
-                            && let Some(kb_str) = line.split_whitespace().nth(1)
-                            && let Ok(kb) = kb_str.parse::<usize>()
-                        {
-                            return kb * 1024;
-                        }
-                    }
-                }
-                Self::fallback_system_memory()
-            }
-
-            #[cfg(target_os = "macos")]
-            {
-                // macOS: Use sysctl
-                Self::fallback_system_memory()
-            }
-
-            #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
-            {
-                Self::fallback_system_memory()
-            }
-        }
-    }
-
-    fn fallback_system_memory() -> usize {
-        // Default to 1GB if detection fails
-        1024 * 1024 * 1024
+        detect_memory().bytes
     }
 
     /// Creates a config with the given budget.
@@ -92,24 +43,20 @@ impl BufferManagerConfig {
     pub fn with_budget(budget: usize) -> Self {
         Self {
             budget,
-            ..Default::default()
-        }
-    }
-}
-
-impl Default for BufferManagerConfig {
-    fn default() -> Self {
-        let system_memory = Self::detect_system_memory();
-        Self {
-            // reason: memory fraction (0.0..1.0) of a positive usize is always a valid positive usize
-            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-            budget: (system_memory as f64 * DEFAULT_MEMORY_FRACTION) as usize,
             soft_limit_fraction: 0.70,
             evict_limit_fraction: 0.85,
             hard_limit_fraction: 0.95,
             background_eviction: false, // Disabled by default for simplicity
             spill_path: None,
         }
+    }
+}
+
+impl Default for BufferManagerConfig {
+    /// The default budget: [`DEFAULT_MEMORY_FRACTION`](crate::memory::DEFAULT_MEMORY_FRACTION)
+    /// of the memory this process may use.
+    fn default() -> Self {
+        Self::with_budget(detect_memory().default_budget())
     }
 }
 

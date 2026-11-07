@@ -9,12 +9,15 @@
 //! | [`bump`] | Temporary data within a query | Must reset to free anything |
 //! | [`pool`] | Frequently reused objects | Fixed-size objects only |
 //! | [`buffer`] | Large data, memory pressure | More complex API |
+//!
+//! [`system`] detects the memory this process may use, the base of the default memory limit.
 
 pub mod arena;
 pub mod buffer;
 pub mod bump;
 pub mod pool;
 pub mod reporter;
+pub mod system;
 pub mod usage;
 
 pub use arena::{AllocError, Arena, ArenaAllocator};
@@ -25,4 +28,8 @@ pub use buffer::{
 pub use bump::BumpAllocator;
 pub use pool::ObjectPool;
 pub use reporter::MemoryReporter;
+pub use system::{
+    DEFAULT_MEMORY_FRACTION, DetectedMemory, FALLBACK_SYSTEM_MEMORY, MemorySource,
+    WASM_PLATFORM_MEMORY, detect_memory,
+};
 pub use usage::{IndexMemory, MvccMemory, NamedMemory, StoreMemory, StringPoolMemory};

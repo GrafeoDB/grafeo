@@ -50,6 +50,10 @@ web-time = "1.1.0"
 getrandom = "0.4"
 crossbeam = "0.8"
 rayon = "1"
+# The memory a process may use (grafeo_common::memory::system): the physical memory and the
+# job object's limits on Windows, `hw.memsize` on macOS
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_SystemInformation", "Win32_System_JobObjects", "Win32_System_Threading"] }
+libc = "0.2"
 
 # Data structures
 hashbrown = { version = "0.17", features = ["serde"] }

@@ -14,12 +14,15 @@ import re
 import grafeo
 import pytest
 
+# The lists below are built at import from the catalogue and the bridge: in a build without
+# either they stay empty, so the module is collected and skipped rather than failing.
+HAS_ALGORITHMS = hasattr(grafeo.GrafeoDB(), "algorithms")
+HAS_GQL = "gql" in grafeo.features()
+RUNS = HAS_ALGORITHMS and HAS_GQL
+
 pytestmark = [
-    pytest.mark.skipif(
-        not hasattr(grafeo.GrafeoDB(), "algorithms"),
-        reason="grafeo built without algos feature",
-    ),
-    pytest.mark.skipif("gql" not in grafeo.features(), reason="grafeo built without gql feature"),
+    pytest.mark.skipif(not HAS_ALGORITHMS, reason="grafeo built without algos feature"),
+    pytest.mark.skipif(not HAS_GQL, reason="grafeo built without gql feature"),
 ]
 
 INVALID_PARAMETER_VALUE = "22023"
@@ -87,7 +90,7 @@ def calls_without(procedure, parameters, missing, node):
 
 REQUIRED = [
     (procedure, parameters, parameter)
-    for procedure, parameters in catalogue()
+    for procedure, parameters in (catalogue() if RUNS else [])
     for parameter, _, required in parameters
     if required
 ]
@@ -95,12 +98,14 @@ REQUIRED = [
 
 def test_the_catalogue_lists_required_parameters():
     found = {f"{procedure}.{parameter}" for procedure, _, parameter in REQUIRED}
-    for known in (
+    expected = [
         "grafeo.subgraph_isomorphism.pattern_edges",
         "grafeo.bfs.start",
         "grafeo.max_flow.sink",
-        "grafeo.search.vector.label",
-    ):
+    ]
+    if "vector-index" in grafeo.features():
+        expected.append("grafeo.search.vector.label")
+    for known in expected:
         assert known in found, (known, sorted(found))
 
 
@@ -279,7 +284,7 @@ def declared():
     return found
 
 
-DECLARED = declared()
+DECLARED = declared() if RUNS else {}
 
 
 def optional_bridge_parameters():
@@ -302,7 +307,7 @@ def optional_bridge_parameters():
     return found
 
 
-OPTIONAL_BRIDGE = optional_bridge_parameters()
+OPTIONAL_BRIDGE = optional_bridge_parameters() if RUNS else []
 
 
 def test_the_class_finds_every_named_optional_parameter():

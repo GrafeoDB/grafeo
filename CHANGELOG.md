@@ -106,6 +106,7 @@ Queries that ran in 0.6.1 and now fail or behave differently.
 - **Opening and closing without writes leaves the file unchanged**: `close()` checkpoints only when something changed since the last checkpoint, so a database opened only for reads keeps its file byte for byte (its header was rewritten on every close).
 - **The C header declares the backup functions**: `grafeo_backup_full`, `grafeo_backup_incremental`, `grafeo_restore_to_epoch` and `grafeo_clear_plan_cache`, exported since earlier releases, are now declared in `grafeo.h`.
 - **A crashed query's spill files are removed at open**: the next read-write open deletes the `<file>.spill/query_*` directories a crash left, with the vector cache, before it measures the spill volume.
+- **A graph cleared and written back keeps its size**: the slots of deleted rows (edge ends, property values, adjacency offsets) go back once a whole vector of 2,048 rows below the live ones is gone, in a session and across reopens. In 0.6.1 each clear and rewrite of 2,400 nodes and 4,800 edges added about 500 KB within a session.
 
 ### Security
 

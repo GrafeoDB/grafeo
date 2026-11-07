@@ -6,16 +6,33 @@
 // size outside 1 MiB to 1 GiB and a checkpoint size below 1 MiB are refused,
 // naming the setting and its bounds.
 
-import { existsSync, mkdtempSync, readdirSync, statSync } from 'node:fs'
+import { existsSync, mkdtempSync, readdirSync, rmSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { describe, it, expect } from 'vitest'
+import { afterEach, describe, it, expect } from 'vitest'
 import { GrafeoDB } from '../grafeo.js'
 
 const MIB = 1024 * 1024
 
+// Every directory a test made, removed after it (its database closed by then).
+const made = []
+
 function temp() {
-  return mkdtempSync(join(tmpdir(), 'grafeo-checkpoint-'))
+  const dir = mkdtempSync(join(tmpdir(), 'grafeo-checkpoint-'))
+  made.push(dir)
+  return dir
+}
+
+afterEach(() => {
+  while (made.length) rmSync(made.pop(), { recursive: true, force: true })
+})
+
+async function waitUntil(what, condition) {
+  const deadline = Date.now() + 10_000
+  while (!condition()) {
+    if (Date.now() > deadline) throw new Error(`never: ${what}`)
+    await new Promise((resolve) => setTimeout(resolve, 20))
+  }
 }
 
 async function write(db, size = 64 * 1024) {
@@ -45,9 +62,18 @@ describe('checkpoint default', () => {
     db.close()
   })
 
-  it('takes a checkpoint size', () => {
+  it('takes a checkpoint size, and checkpoints at it by itself', async () => {
     const db = GrafeoDB.create(join(temp(), 'lisbon.grafeo'), { checkpointWalSize: MIB })
     expect(db.checkpointStatus().walBytes).toBe(MIB)
+    // The create checkpointed, in Unix seconds: the automatic checkpoint shows as a later second.
+    const created = db.checkpointStatus().lastCheckpoint
+    await waitUntil('the next second', () => Date.now() / 1000 >= created + 1)
+    // Past the mark with a count fixed up front: 18 nodes of 64 KiB are over 1 MiB of WAL.
+    for (let i = 0; i < 18; i++) {
+      await write(db)
+    }
+    await waitUntil('the automatic checkpoint', () => db.checkpointStatus().lastCheckpoint > created)
+    expect(db.checkpointStatus().failures).toBe(0)
     db.close()
   })
 

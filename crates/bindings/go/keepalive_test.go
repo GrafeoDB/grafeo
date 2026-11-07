@@ -103,34 +103,49 @@ func finalizedNames(fn *ast.FuncDecl, types map[string]bool) []string {
 	return names
 }
 
-// passesHandle reports whether a `C.` call in body has an argument that reads a field of x.
+// passesHandle reports whether body hands x's native handle to C: it reads a field of x (not a
+// method of it), and either makes a `C.` call or passes such a field to any call. The field may
+// reach C through a local it was copied to, or through a helper that takes it, so a C call whose
+// own arguments never name x counts as well.
 func passesHandle(body *ast.BlockStmt, x string) bool {
-	found := false
+	readsField, passesField, callsC := false, false, false
+	isField := func(expr ast.Expr) bool {
+		field, ok := expr.(*ast.SelectorExpr)
+		if !ok {
+			return false
+		}
+		ident, ok := field.X.(*ast.Ident)
+		return ok && ident.Name == x
+	}
+	methods := map[ast.Expr]bool{}
 	ast.Inspect(body, func(node ast.Node) bool {
 		call, ok := node.(*ast.CallExpr)
-		if !ok || found {
-			return !found
-		}
-		selector, ok := call.Fun.(*ast.SelectorExpr)
 		if !ok {
 			return true
 		}
-		if pkg, ok := selector.X.(*ast.Ident); !ok || pkg.Name != "C" {
-			return true
+		methods[call.Fun] = true
+		if selector, ok := call.Fun.(*ast.SelectorExpr); ok {
+			if pkg, ok := selector.X.(*ast.Ident); ok && pkg.Name == "C" {
+				callsC = true
+			}
 		}
 		for _, arg := range call.Args {
 			ast.Inspect(arg, func(inner ast.Node) bool {
-				if field, ok := inner.(*ast.SelectorExpr); ok {
-					if ident, ok := field.X.(*ast.Ident); ok && ident.Name == x {
-						found = true
-					}
+				if expr, ok := inner.(ast.Expr); ok && isField(expr) {
+					passesField = true
 				}
-				return !found
+				return true
 			})
 		}
 		return true
 	})
-	return found
+	ast.Inspect(body, func(node ast.Node) bool {
+		if expr, ok := node.(ast.Expr); ok && isField(expr) && !methods[expr] {
+			readsField = true
+		}
+		return true
+	})
+	return readsField && (callsC || passesField)
 }
 
 // startsWithKeepAlive reports whether body's first statement is `defer runtime.KeepAlive(x)`.
@@ -180,5 +195,37 @@ func TestEveryNativeCallKeepsItsHandleAlive(t *testing.T) {
 	sort.Strings(wrong)
 	for _, line := range wrong {
 		t.Error(line)
+	}
+}
+
+// The scan counts a handle that reaches C through a local or a helper, and leaves out a function
+// that only calls methods of x or makes no call with its fields.
+func TestTheHandleScanFollowsCopiesAndHelpers(t *testing.T) {
+	source := `package grafeo
+
+func direct(s *ResultStream) { C.grafeo_stream_next(s.handle) }
+
+func copied(s *ResultStream) {
+	h := s.handle
+	C.grafeo_stream_next(h)
+}
+
+func helper(s *ResultStream) { next(s.handle) }
+
+func methodOnly(s *ResultStream) { s.Close() }
+
+func fieldOnly(s *ResultStream) bool { return s.closed }
+`
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "sample.go", source, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]bool{"direct": true, "copied": true, "helper": true, "methodOnly": false, "fieldOnly": false}
+	for _, decl := range file.Decls {
+		fn := decl.(*ast.FuncDecl)
+		if got := passesHandle(fn.Body, "s"); got != want[fn.Name.Name] {
+			t.Errorf("%s: passesHandle %v, want %v", fn.Name.Name, got, want[fn.Name.Name])
+		}
 	}
 }

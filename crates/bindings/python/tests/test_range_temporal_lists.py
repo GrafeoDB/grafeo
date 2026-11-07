@@ -57,7 +57,14 @@ def bound_shapes(value):
     return [[value], [value, 1], [1, value], [[value]]]
 
 
-@pytest.fixture(params=SESSIONS, ids=lambda s: f"{s[0]}-{s[1] or 'no-zone'}")
+# The Cypher session needs a build with Cypher.
+SESSION_PARAMS = [
+    pytest.param(s, marks=pytest.mark.requires("cypher")) if s[0] == "cypher" else s
+    for s in SESSIONS
+]
+
+
+@pytest.fixture(params=SESSION_PARAMS, ids=lambda s: f"{s[0]}-{s[1] or 'no-zone'}")
 def database(request):
     language, zone = request.param
     db = GrafeoDB()

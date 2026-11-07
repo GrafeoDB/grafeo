@@ -8,6 +8,7 @@ where the WAL rotates, 64 MiB by default. A segment size outside 1 MiB to
 its bounds.
 """
 
+import math
 import time
 from pathlib import Path
 
@@ -60,7 +61,9 @@ def test_none_turns_automatic_checkpoints_off(tmp_path):
 def test_a_checkpoint_size_checkpoints_by_itself(tmp_path):
     db = grafeo.GrafeoDB(str(tmp_path / "lisbon.grafeo"), checkpoint_wal_size=MIB)
     assert db.checkpoint_status()["wal_bytes"] == MIB
-    while wal_bytes(db) < MIB + 64 * 1024:
+    # As many writes as the WAL lacks, counted first: the automatic checkpoint may shrink the WAL
+    # between two of them, and a loop on its size would then go on writing.
+    for _ in range(math.ceil((MIB + 64 * 1024 - wal_bytes(db)) / (64 * 1024))):
         write(db)
     wait_until("the automatic checkpoint", lambda: wal_bytes(db) < MIB)
     assert db.checkpoint_status()["failures"] == 0

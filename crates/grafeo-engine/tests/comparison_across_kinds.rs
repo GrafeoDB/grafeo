@@ -655,6 +655,27 @@ fn gql_orders_across_kinds_as_order_by_does() {
                     "min of {a_name} and {b_name} is {min:?}, ORDER BY puts {first:?} first"
                 ));
             }
+            let last = run(
+                &session,
+                Language::Gql,
+                "UNWIND [$a, $b] AS x RETURN x ORDER BY x DESC LIMIT 1",
+                pair(a, b),
+            )
+            .unwrap()[0][0]
+                .clone();
+            let max = run(
+                &session,
+                Language::Gql,
+                "UNWIND [$a, $b] AS x RETURN max(x) AS m",
+                pair(a, b),
+            )
+            .unwrap()[0][0]
+                .clone();
+            if max != last {
+                wrong.push(format!(
+                    "max of {a_name} and {b_name} is {max:?}, ORDER BY DESC puts {last:?} first"
+                ));
+            }
         }
     }
     assert!(

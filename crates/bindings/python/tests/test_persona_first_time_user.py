@@ -62,12 +62,30 @@ FEATURE_CALLS = {
     "execute_sparql": "sparql",
     "CREATE VECTOR INDEX": "vector-index",
     "CREATE TEXT INDEX": "text-index",
-    "CALL grafeo.": "algos",
 }
+
+# The procedures a `CALL grafeo.<name>` reaches that a build may leave out: the search ones need
+# their index, and every name not listed here or in NO_FEATURE is a graph algorithm.
+PROCEDURE_FEATURES = {
+    "search.vector": "vector-index",
+    "search.mmr": "vector-index",
+    "search.text": "text-index",
+}
+# The procedures every build registers: the catalog, the listing and the CSV loads.
+NO_FEATURE = {"labels", "relationshipTypes", "propertyKeys", "procedures"}
+
+
+def procedure_feature(name):
+    if name in NO_FEATURE or name.startswith("load_"):
+        return None
+    return PROCEDURE_FEATURES.get(name, "algos")
 
 
 def features_of(block):
-    return {feature for call, feature in FEATURE_CALLS.items() if call in block}
+    called = {
+        procedure_feature(name) for name in re.findall(r"CALL\s+grafeo\.([A-Za-z_.]+)", block)
+    }
+    return {feature for call, feature in FEATURE_CALLS.items() if call in block} | (called - {None})
 
 
 def run(code, cwd):

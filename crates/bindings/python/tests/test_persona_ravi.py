@@ -19,7 +19,11 @@ except ImportError:
 
 np = pytest.importorskip("numpy")
 
-pytestmark = pytest.mark.skipif(not GRAFEO_AVAILABLE, reason="Grafeo Python bindings not installed")
+# make_db and every query run GQL.
+pytestmark = [
+    pytest.mark.skipif(not GRAFEO_AVAILABLE, reason="Grafeo Python bindings not installed"),
+    pytest.mark.requires("gql"),
+]
 
 TOPICS = ["graphs", "canals", "cycling"]
 

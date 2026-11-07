@@ -391,44 +391,29 @@ impl QuantizedHnswIndex {
         allowlist: Option<&std::collections::HashSet<NodeId>>,
         visit: &mut impl FnMut() -> std::result::Result<(), E>,
     ) -> std::result::Result<Vec<(NodeId, f32)>, E> {
-        let Some(allowlist) = allowlist else {
-            return self.nearest_visiting(query, k, ef, visit);
-        };
-        let results = self.nearest_visiting(query, k.max(allowlist.len()), ef, visit)?;
-        Ok(results
-            .into_iter()
-            .filter(|(id, _)| allowlist.contains(id))
-            .take(k)
-            .collect())
-    }
-
-    /// The `k` nearest nodes to `query`, by the index's quantization, calling `visit` before each
-    /// node the graph search measures.
-    fn nearest_visiting<E>(
-        &self,
-        query: &[f32],
-        k: usize,
-        ef: usize,
-        visit: &mut impl FnMut() -> std::result::Result<(), E>,
-    ) -> std::result::Result<Vec<(NodeId, f32)>, E> {
         if query.len() != self.config().dimensions {
             return Ok(Vec::new());
         }
+        // The allowlist goes into the graph search, which collects only
+        // allowed nodes as it walks the whole graph: filtering the nearest
+        // nodes overall afterwards found fewer than `k`, or none, when the
+        // allowed ones lay farther out. Rescoring then only reorders allowed
+        // candidates.
         let accessor = self.accessor();
         match self.quantization_type {
             QuantizationType::None => {
                 // No quantization, use standard HNSW
                 self.hnsw
-                    .search_visiting(query, k, ef, None, &accessor, visit)
+                    .search_visiting(query, k, ef, allowlist, &accessor, visit)
             }
             QuantizationType::Scalar => {
-                self.search_scalar_quantized(query, k, ef, &accessor, visit)
+                self.search_scalar_quantized(query, k, ef, allowlist, &accessor, visit)
             }
             QuantizationType::Binary => {
-                self.search_binary_quantized(query, k, ef, &accessor, visit)
+                self.search_binary_quantized(query, k, ef, allowlist, &accessor, visit)
             }
             QuantizationType::Product { .. } => {
-                self.search_product_quantized(query, k, ef, &accessor, visit)
+                self.search_product_quantized(query, k, ef, allowlist, &accessor, visit)
             }
         }
     }
@@ -439,6 +424,7 @@ impl QuantizedHnswIndex {
         query: &[f32],
         k: usize,
         ef: usize,
+        allowlist: Option<&std::collections::HashSet<NodeId>>,
         accessor: &impl VectorAccessor,
         visit: &mut impl FnMut() -> std::result::Result<(), E>,
     ) -> std::result::Result<Vec<(NodeId, f32)>, E> {
@@ -448,7 +434,7 @@ impl QuantizedHnswIndex {
             // Quantizer not ready, fall back to exact search
             return self
                 .hnsw
-                .search_visiting(query, k, ef, None, accessor, visit);
+                .search_visiting(query, k, ef, allowlist, accessor, visit);
         }
 
         // Get candidates using HNSW (with full precision distances for now)
@@ -461,7 +447,7 @@ impl QuantizedHnswIndex {
 
         let candidates =
             self.hnsw
-                .search_visiting(query, num_candidates, ef, None, accessor, visit)?;
+                .search_visiting(query, num_candidates, ef, allowlist, accessor, visit)?;
 
         if !self.rescore {
             return Ok(candidates.into_iter().take(k).collect());
@@ -477,6 +463,7 @@ impl QuantizedHnswIndex {
         query: &[f32],
         k: usize,
         ef: usize,
+        allowlist: Option<&std::collections::HashSet<NodeId>>,
         accessor: &impl VectorAccessor,
         visit: &mut impl FnMut() -> std::result::Result<(), E>,
     ) -> std::result::Result<Vec<(NodeId, f32)>, E> {
@@ -485,7 +472,7 @@ impl QuantizedHnswIndex {
         if binary_vecs.is_empty() {
             return self
                 .hnsw
-                .search_visiting(query, k, ef, None, accessor, visit);
+                .search_visiting(query, k, ef, allowlist, accessor, visit);
         }
 
         // Quantize the query
@@ -502,7 +489,7 @@ impl QuantizedHnswIndex {
         // Use HNSW to get initial candidates, then filter by hamming distance
         let hnsw_candidates =
             self.hnsw
-                .search_visiting(query, num_candidates, ef, None, accessor, visit)?;
+                .search_visiting(query, num_candidates, ef, allowlist, accessor, visit)?;
 
         // Compute hamming distances for candidates
         let mut scored: Vec<(NodeId, f32)> = hnsw_candidates
@@ -535,6 +522,7 @@ impl QuantizedHnswIndex {
         query: &[f32],
         k: usize,
         ef: usize,
+        allowlist: Option<&std::collections::HashSet<NodeId>>,
         accessor: &impl VectorAccessor,
         visit: &mut impl FnMut() -> std::result::Result<(), E>,
     ) -> std::result::Result<Vec<(NodeId, f32)>, E> {
@@ -544,7 +532,7 @@ impl QuantizedHnswIndex {
             // Quantizer not ready, fall back to exact search
             return self
                 .hnsw
-                .search_visiting(query, k, ef, None, accessor, visit);
+                .search_visiting(query, k, ef, allowlist, accessor, visit);
         }
 
         // Get candidates using HNSW
@@ -556,7 +544,7 @@ impl QuantizedHnswIndex {
 
         let candidates =
             self.hnsw
-                .search_visiting(query, num_candidates, ef, None, accessor, visit)?;
+                .search_visiting(query, num_candidates, ef, allowlist, accessor, visit)?;
 
         if !self.rescore {
             return Ok(candidates.into_iter().take(k).collect());
@@ -676,9 +664,10 @@ impl QuantizedHnswIndex {
 
     /// Searches with an allowlist filter.
     ///
-    /// Only nodes in the `allowlist` can appear in results. The candidate
-    /// count `k` is auto-scaled to `max(k, allowlist.len())` so the
-    /// underlying search retrieves enough candidates before filtering.
+    /// Only nodes in the `allowlist` can appear in results: the graph search
+    /// walks the whole graph and collects only allowed nodes, with its beam
+    /// width scaled by how few nodes the allowlist keeps, as
+    /// [`HnswIndex::search_with_filter`] does (see [`HnswIndex::filtered_ef`]).
     #[must_use]
     pub fn search_with_filter(
         &self,
@@ -686,7 +675,16 @@ impl QuantizedHnswIndex {
         k: usize,
         allowlist: &std::collections::HashSet<NodeId>,
     ) -> Vec<(NodeId, f32)> {
-        infallible(self.search_visiting(query, k, self.config().ef, Some(allowlist), &mut no_visit))
+        let ef = self.filtered_ef(k, allowlist);
+        infallible(self.search_visiting(query, k, ef, Some(allowlist), &mut no_visit))
+    }
+
+    /// The beam width of a search among `allowlist` without one given: the
+    /// configured `ef` scaled up by how few nodes the allowlist keeps (see
+    /// [`HnswIndex::filtered_ef`]).
+    #[must_use]
+    pub fn filtered_ef(&self, k: usize, allowlist: &std::collections::HashSet<NodeId>) -> usize {
+        self.hnsw.filtered_ef(k, allowlist)
     }
 
     /// Searches with a custom ef and an allowlist filter.

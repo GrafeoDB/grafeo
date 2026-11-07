@@ -86,6 +86,8 @@ mod simd;
 pub mod storage;
 pub mod zone_map;
 
+#[cfg(all(test, feature = "vector-index"))]
+mod allowlist_tests;
 #[cfg(feature = "vector-index")]
 pub(crate) mod batch;
 #[cfg(feature = "vector-index")]
@@ -323,7 +325,10 @@ impl VectorIndexKind {
                 idx.search_visiting(query, k, ef, allowlist, accessor, visit)
             }
             Self::Quantized(idx) => {
-                let ef = ef.unwrap_or(idx.config().ef);
+                let ef = ef.unwrap_or_else(|| match allowlist {
+                    Some(allowlist) => idx.filtered_ef(k, allowlist),
+                    None => idx.config().ef,
+                });
                 idx.search_visiting(query, k, ef, allowlist, visit)
             }
         }

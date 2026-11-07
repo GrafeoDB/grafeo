@@ -3049,6 +3049,9 @@ for case_id, query in [
     ("DZ14", "SELECT ?o WHERE { GRAPH <urn:g1> { <urn:r> <urn:saw> ?o } }"),
     ("DZ15", "WITH <urn:g1> DELETE { <urn:a> <urn:p> ?o } WHERE { GRAPH <urn:g1> { <urn:a> <urn:p> ?o } }"),
     ("DZ16", "SELECT ?o WHERE { GRAPH <urn:g1> { <urn:a> <urn:p> ?o } }"),
+    # DZ3 again with an object no earlier case wrote, so its read shows which graphs `{ }` matched
+    ("DZ17", "WITH <urn:g1> INSERT { <urn:r> <urn:empty> ?g } WHERE { GRAPH ?g { } }"),
+    ("DZ18", "SELECT ?o WHERE { GRAPH <urn:g1> { <urn:r> <urn:empty> ?o } }"),
 ]:
     case(case_id, query, SPARQL, "rdf_graphs_writes")
 

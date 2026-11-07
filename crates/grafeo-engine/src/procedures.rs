@@ -1222,9 +1222,88 @@ pub fn procedures_result(registry: &BuiltinProcedures) -> AlgorithmResult {
     result
 }
 
+/// The procedures a build leaves out unless it has a feature: the feature, and the names it
+/// registers. A call of one in a build without it is told so (see [`missing_feature`]), not
+/// taken for a misspelt name. A test holds this table to the registry of a build with every
+/// feature.
+const FEATURE_GATED: &[(&str, &[&str])] = &[
+    (
+        "algos",
+        &[
+            "articulation_points",
+            "bellman_ford",
+            "betweenness_centrality",
+            "bfs",
+            "bridges",
+            "closeness_centrality",
+            "clustering_coefficient",
+            "connected_components",
+            "degree_centrality",
+            "dfs",
+            "dijkstra",
+            "floyd_warshall",
+            "kcore",
+            "kruskal",
+            "ktruss",
+            "label_propagation",
+            "louvain",
+            "max_flow",
+            "min_cost_max_flow",
+            "pagerank",
+            "prim",
+            "sssp",
+            "strongly_connected_components",
+            "subgraph_isomorphism",
+            "topological_sort",
+            "total_triangles",
+        ],
+    ),
+    ("vector-index", &["search.mmr", "search.vector"]),
+    ("text-index", &["search.text"]),
+];
+
+/// The feature a build needs for the procedure `name` (dotted, as a call writes it) when this
+/// build leaves it out: `None` for a procedure it has, or a name no build has.
+#[must_use]
+pub fn missing_feature(name: &[String]) -> Option<&'static str> {
+    let key = resolve_name(name);
+    if registry().procedures.contains_key(&key) {
+        return None;
+    }
+    FEATURE_GATED
+        .iter()
+        .find(|(_, names)| names.contains(&key.as_str()))
+        .map(|(feature, _)| *feature)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// With every feature, the registry holds every gated name and nothing gated beyond them:
+    /// a procedure added behind a feature is told apart from a misspelt name once it is listed.
+    #[cfg(all(feature = "algos", feature = "vector-index", feature = "text-index"))]
+    #[test]
+    fn every_feature_gated_procedure_is_listed() {
+        const IN_EVERY_BUILD: &[&str] = &[
+            "labels",
+            "load_edges_csv",
+            "load_nodes_csv",
+            "propertyKeys",
+            "relationshipTypes",
+        ];
+        let mut registered: Vec<&str> = registry().procedures.keys().map(String::as_str).collect();
+        registered.sort_unstable();
+        let mut listed: Vec<&str> = FEATURE_GATED
+            .iter()
+            .flat_map(|(_, names)| names.iter().copied())
+            .chain(IN_EVERY_BUILD.iter().copied())
+            .collect();
+        listed.sort_unstable();
+        assert_eq!(registered, listed);
+        assert_eq!(missing_feature(&["grafeo".into(), "pagerank".into()]), None);
+        assert_eq!(missing_feature(&["grafeo".into(), "no_such".into()]), None);
+    }
 
     #[test]
     fn test_registry_has_all_algorithms() {

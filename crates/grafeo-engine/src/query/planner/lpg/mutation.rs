@@ -977,11 +977,17 @@ impl super::Planner {
 
         // Look up the procedure
         let procedure = registry.get(&call.name).ok_or_else(|| {
+            let name = call.name.join(".");
+            // One other builds have is not a misspelling: say which feature brings it.
             grafeo_common::utils::error::Error::from(
-                grafeo_common::utils::error::QueryError::invalid_reference(format!(
-                    "unknown procedure '{}'; CALL grafeo.procedures() lists the procedures",
-                    call.name.join(".")
-                )),
+                match procedures::missing_feature(&call.name) {
+                    Some(feature) => grafeo_common::utils::error::QueryError::unsupported(format!(
+                        "procedure '{name}' is not in this build: it needs the `{feature}` feature"
+                    )),
+                    None => grafeo_common::utils::error::QueryError::invalid_reference(format!(
+                        "unknown procedure '{name}'; CALL grafeo.procedures() lists the procedures"
+                    )),
+                },
             )
         })?;
 

@@ -30,6 +30,7 @@ use grafeo_common::types::{
 use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind};
 use grafeo_common::utils::hash::FxHashMap;
 use grafeo_core::execution::DataChunk;
+use grafeo_core::execution::deadline;
 use grafeo_core::execution::operators::{
     GraphWriter, HashKey, NewEdge, Operator, OperatorError, OperatorResult,
 };
@@ -234,7 +235,10 @@ pub(crate) fn load_nodes(
     let mut seen_keys: FxHashMap<ExactKey, u64> = FxHashMap::default();
     let mut rows = Vec::new();
     let mut count = 0_u64;
+    // A load in a query stops at the query's deadline, a record at a time.
+    let mut ticker = deadline::Ticker::new();
     while let Some((line, fields)) = records.next_record()? {
+        ticker.tick()?;
         count += 1;
         let values = layout.values(&fields, line, &spec.nulls)?;
         if let Some(position) = key {
@@ -278,18 +282,21 @@ pub(crate) fn load_edges(
     let layout = Layout::of(&mut records, spec.header, &spec.columns, path)?;
     let source_column = layout.position(&spec.source.column, path)?;
     let target_column = layout.position(&spec.target.column, path)?;
-    let source_keys = key_map(writer, &spec.source)?;
+    // A load in a query stops at the query's deadline, a node or a record at a time.
+    let mut ticker = deadline::Ticker::new();
+    let source_keys = key_map(writer, &spec.source, &mut ticker)?;
     let same_keys =
         spec.source.label == spec.target.label && spec.source.property == spec.target.property;
     let target_keys = if same_keys {
         None
     } else {
-        Some(key_map(writer, &spec.target)?)
+        Some(key_map(writer, &spec.target, &mut ticker)?)
     };
     let target_keys = target_keys.as_ref().unwrap_or(&source_keys);
     let mut edges = Vec::new();
     let (mut count, mut skipped) = (0_u64, 0_u64);
     while let Some((line, fields)) = records.next_record()? {
+        ticker.tick()?;
         count += 1;
         let values = layout.values(&fields, line, &spec.nulls)?;
         let ends = [
@@ -334,16 +341,18 @@ pub(crate) fn load_edges(
 }
 
 /// The nodes of `end`'s label that the writer sees, by their value of its
-/// property (compared exactly, see [`exact_key`]).
+/// property (compared exactly, see [`exact_key`]), each counted on `ticker`.
 fn key_map(
     writer: &GraphWriter,
     end: &EndKey,
+    ticker: &mut deadline::Ticker,
 ) -> Result<FxHashMap<ExactKey, NodeId>, OperatorError> {
     let store = writer.store();
     let view = writer.view();
     let nodes = store.nodes_by_label(&end.label, view)?;
     let mut keys = FxHashMap::with_capacity_and_hasher(nodes.len(), Default::default());
     for node in nodes {
+        ticker.tick()?;
         if let Some(value) = store.node_property(node, &end.property, view)? {
             keys.entry(exact_key(&value)).or_insert(node);
         }

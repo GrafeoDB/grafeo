@@ -24,7 +24,7 @@ use std::time::{Duration, Instant};
 use grafeo_common::types::Value;
 use grafeo_common::utils::error::{Error, QueryErrorKind};
 use grafeo_core::execution::deadline;
-use grafeo_engine::procedures::{BuiltinProcedures, ExternalAccess};
+use grafeo_engine::procedures::BuiltinProcedures;
 use grafeo_engine::{Config, GrafeoDB};
 
 /// What a procedure does under the probe.
@@ -78,7 +78,9 @@ fn row(name: &str) -> Row {
         | "grafeo.stochastic_block_partition"
         | "grafeo.search.vector"
         | "grafeo.search.text"
-        | "grafeo.search.mmr" => Row::Polls,
+        | "grafeo.search.mmr"
+        | "grafeo.load_nodes_csv"
+        | "grafeo.load_edges_csv" => Row::Polls,
         other => panic!("`{other}` is new in the catalogue: give it a row here"),
     }
 }
@@ -136,10 +138,43 @@ fn graph() -> (GrafeoDB, HashMap<String, Value>) {
     (db, params)
 }
 
+/// The quoted path of a CSV fixture the loads read, written once per process: `nodes.csv` with
+/// 2,000 names (past the ticker's 1,024), `edges.csv` with an edge from each `v{i}` of the graph
+/// to `v{i+1}` (so the graph stays acyclic).
+fn fixture(name: &str) -> &'static str {
+    static PATHS: std::sync::OnceLock<(&'static str, &'static str)> = std::sync::OnceLock::new();
+    let (nodes, edges) = PATHS.get_or_init(|| {
+        let dir =
+            std::env::temp_dir().join(format!("grafeo-deadline-loads-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let nodes: String = std::iter::once("name\n".to_string())
+            .chain((0..2_000).map(|i| format!("Loaded{i}\n")))
+            .collect();
+        let edges: String = std::iter::once("from,to\n".to_string())
+            .chain((0..199).map(|i| format!("v{i},v{}\n", i + 1)))
+            .collect();
+        let quoted = |file: &str, text: &str| -> &'static str {
+            let path = dir.join(file);
+            std::fs::write(&path, text).unwrap();
+            let path = path.to_string_lossy().replace('\\', "/");
+            Box::leak(format!("'{path}'").into_boxed_str())
+        };
+        (quoted("nodes.csv", &nodes), quoted("edges.csv", &edges))
+    });
+    if name == "nodes.csv" { nodes } else { edges }
+}
+
 /// The value a call gives `parameter` of `procedure`: the required ones, and the edge properties
 /// the weighted procedures read.
 fn argument(procedure: &str, parameter: &str, required: bool) -> Option<&'static str> {
     Some(match (procedure, parameter) {
+        // The loads read a CSV fixture: 2,000 nodes, and an edge from each `v{i}` to `v{i+1}`.
+        ("grafeo.load_nodes_csv", "path") => fixture("nodes.csv"),
+        ("grafeo.load_nodes_csv", "labels") => "'Loaded'",
+        ("grafeo.load_edges_csv", "path") => fixture("edges.csv"),
+        ("grafeo.load_edges_csv", "type") => "'LOADED'",
+        ("grafeo.load_edges_csv", "source") => "{label: 'V', property: 'name', column: 'from'}",
+        ("grafeo.load_edges_csv", "target") => "{label: 'V', property: 'name', column: 'to'}",
         // `sssp` names its source by the node's `name`.
         ("grafeo.sssp", "source") => "'v0'",
         (_, "source" | "start") => "$s",
@@ -167,10 +202,8 @@ fn calls() -> Vec<(String, String, Row)> {
     let mut found: Vec<(String, String, Row)> = BuiltinProcedures::new()
         .list()
         .into_iter()
-        // A procedure that reaches outside reads a file and writes the graph: it has no
-        // argument here and no answer to compare, and the external-access and loader tests
-        // cover it.
-        .filter(|info| info.external_access == ExternalAccess::None)
+        // Every procedure has its row, the loads included (they read the CSV fixture): a new
+        // procedure, one that reaches outside too, fails here until it has its arguments.
         .map(|info| {
             let entries: Vec<String> = info
                 .parameters

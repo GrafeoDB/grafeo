@@ -27,7 +27,6 @@ foldhash.workspace = true
 # Serialization
 serde.workspace = true
 bincode.workspace = true
-byteorder.workspace = true
 bytes.workspace = true
 
 # Concurrency

@@ -13,17 +13,6 @@ autotests = false
 grafeo-common.workspace = true
 grafeo-core.workspace = true
 
-# Error handling
-thiserror.workspace = true
-
-# Data structures
-smallvec.workspace = true
-hashbrown.workspace = true
-
-# Serialization
-serde.workspace = true
-bincode.workspace = true
-
 # Concurrency
 parking_lot.workspace = true
 rayon = { workspace = true, optional = true }

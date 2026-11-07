@@ -19,7 +19,6 @@ thiserror.workspace = true
 serde.workspace = true
 bincode.workspace = true
 bytes.workspace = true
-byteorder.workspace = true
 
 # Concurrency
 parking_lot.workspace = true

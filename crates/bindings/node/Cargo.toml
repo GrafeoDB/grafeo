@@ -16,7 +16,6 @@ doc = false
 grafeo-engine = { path = "../../grafeo-engine" }
 grafeo-core = { path = "../../grafeo-core" }
 grafeo-common = { path = "../../grafeo-common" }
-grafeo-adapters = { path = "../../grafeo-adapters" }
 grafeo-bindings-common = { path = "../common" }
 
 napi = { version = "3", default-features = false, features = ["napi9", "async", "serde-json", "error_anyhow"] }

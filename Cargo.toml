@@ -62,7 +62,6 @@ arcstr = { version = "1", features = ["serde"] }
 # Memory & I/O
 memmap2 = "0.9"
 bytes = "1"
-byteorder = "1"
 fs2 = "0.4"
 
 # Checksums & hashing

@@ -22,13 +22,9 @@ indexmap.workspace = true
 dashmap.workspace = true
 arcstr.workspace = true
 
-# Hashing
-foldhash.workspace = true
-
 # Serialization
 serde.workspace = true
 serde_json = { version = "1", optional = true, features = ["arbitrary_precision"] }
-byteorder.workspace = true
 bytes.workspace = true
 bincode.workspace = true
 

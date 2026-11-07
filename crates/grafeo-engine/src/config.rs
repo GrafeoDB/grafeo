@@ -351,6 +351,9 @@ pub enum ConfigError {
     /// `checkpoint_wal_size` is below [`MIN_CHECKPOINT_WAL_SIZE`]: a smaller
     /// one would checkpoint after nearly every commit. Holds the size given.
     CheckpointWalSizeTooSmall(u64),
+    /// [`Config::with_memory_fraction`] was given an infinite fraction, which
+    /// would make the memory limit unbounded.
+    MemoryFractionNotFinite,
 }
 
 /// Whether a section of `section_type` can be moved to disk: only a section
@@ -379,6 +382,7 @@ impl fmt::Display for ConfigError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::ZeroMemoryLimit => write!(f, "memory_limit must be greater than zero"),
+            Self::MemoryFractionNotFinite => write!(f, "memory_fraction must be a finite number"),
             Self::ZeroThreads => write!(f, "threads must be greater than zero"),
             Self::ZeroAdaptiveFlushInterval => write!(
                 f,
@@ -836,6 +840,10 @@ impl SetFields {
         self.0 |= field.0;
     }
 
+    fn remove(&mut self, field: Self) {
+        self.0 &= !field.0;
+    }
+
     #[cfg(feature = "grafeo-file")]
     fn contains(self, field: Self) -> bool {
         self.0 & field.0 == field.0
@@ -1134,12 +1142,15 @@ impl Config {
     /// The share applies to this open only: a database file stores no limit for it, so a file
     /// moved to a smaller machine does not carry another machine's bytes. An explicit
     /// [`with_memory_limit`](Self::with_memory_limit) is stored, and the later of the two calls
-    /// wins. A fraction that is not above zero fails [`validate`](Self::validate).
+    /// wins. A fraction that is infinite, not above zero, or so small its share comes to no
+    /// byte fails [`validate`](Self::validate).
     #[must_use]
     pub fn with_memory_fraction(mut self, fraction: f64) -> Self {
         self.memory_limit = None;
         self.memory_fraction = Some(fraction);
         self.memory_fraction_bytes = None;
+        // An explicit limit set before is replaced: nothing is left to store.
+        self.set.remove(SetFields::MEMORY_LIMIT);
         self
     }
 
@@ -1804,11 +1815,23 @@ impl Config {
         {
             return Err(ConfigError::ZeroMemoryLimit);
         }
-        if self
-            .memory_fraction
-            .is_some_and(|fraction| fraction.is_nan() || fraction <= 0.0)
-        {
-            return Err(ConfigError::ZeroMemoryLimit);
+        if let Some(fraction) = self.memory_fraction {
+            if fraction.is_infinite() {
+                return Err(ConfigError::MemoryFractionNotFinite);
+            }
+            // NaN and fractions not above zero, and those whose share of the
+            // detected memory comes to no byte, as a zero limit.
+            if fraction.is_nan()
+                || fraction <= 0.0
+                || self.memory_fraction_bytes.unwrap_or_else(|| {
+                    grafeo_common::memory::system::fraction_of(
+                        grafeo_common::memory::detect_memory().bytes,
+                        fraction,
+                    )
+                }) == 0
+            {
+                return Err(ConfigError::ZeroMemoryLimit);
+            }
         }
 
         if self.threads == 0 {

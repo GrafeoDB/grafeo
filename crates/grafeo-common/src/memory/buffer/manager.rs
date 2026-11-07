@@ -184,29 +184,26 @@ impl BufferManager {
     }
 
     /// Runs the eviction cycle until `needed` more bytes fit under the hard limit, or until a
-    /// pass frees nothing; whether they fit. Consumers take their own locks while they evict
-    /// or spill, so a caller holds no store lock.
+    /// pass leaves the reserved bytes no lower (it freed nothing, or what it reports freed
+    /// was not given back); whether they fit. Each pass asks every consumer for at most half
+    /// of what it holds, so it may take several. Consumers take their own locks while they
+    /// evict or spill, so a caller holds no store lock.
     pub fn make_room(&self, needed: usize) -> bool {
-        // Each pass asks every consumer for at most half of what it holds, so a few passes
-        // reach what one cannot; a pass that frees nothing ends the attempt.
-        const PASSES: usize = 4;
-        for _ in 0..PASSES {
-            let over = self
-                .allocated
-                .load(Ordering::Relaxed)
+        let mut allocated = self.allocated.load(Ordering::Relaxed);
+        loop {
+            let over = allocated
                 .saturating_add(needed)
                 .saturating_sub(self.hard_limit);
             if over == 0 {
                 return true;
             }
-            if self.run_eviction_internal(over) == 0 {
+            let freed = self.run_eviction_internal(over);
+            let now = self.allocated.load(Ordering::Relaxed);
+            if freed == 0 || now >= allocated {
                 return false;
             }
+            allocated = now;
         }
-        self.allocated
-            .load(Ordering::Relaxed)
-            .saturating_add(needed)
-            <= self.hard_limit
     }
 
     /// The line past which reservations are refused.

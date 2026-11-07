@@ -2,7 +2,8 @@
 //! memory detected for the process (a container's limit where one binds, never the fallback on
 //! a machine whose memory can be read). A fraction is taken of the memory detected at open,
 //! applies to the open that names it and is not stored; an explicit limit is stored and holds on
-//! reopen. A fraction that is NaN or not above zero is refused.
+//! reopen, unless a fraction set after it replaces it. A fraction that is NaN, infinite, not
+//! above zero or too small to give a byte is refused.
 //!
 //! ```bash
 //! cargo test -p grafeo-engine --all-features --test main default_memory_budget::
@@ -149,10 +150,20 @@ fn a_fraction_applies_to_its_open_only() {
     db.close().unwrap();
 }
 
-/// A fraction that is NaN or not above zero is refused as a zero limit; above 1 is allowed.
+/// A fraction that is NaN, not above zero, or so small that its budget comes to 0 bytes is
+/// refused as a zero limit; an infinite one is refused as not finite (it would saturate to an
+/// unbounded budget); above 1 is allowed.
 #[test]
 fn a_fraction_must_be_above_zero() {
-    for fraction in [0.0, -0.5, f64::NAN] {
+    for fraction in [f64::INFINITY, f64::NEG_INFINITY] {
+        let error = Config::in_memory()
+            .with_memory_fraction(fraction)
+            .validate()
+            .unwrap_err();
+        assert_eq!(error, ConfigError::MemoryFractionNotFinite, "{fraction}");
+        assert_eq!(error.to_string(), "memory_fraction must be a finite number");
+    }
+    for fraction in [0.0, -0.5, f64::NAN, 1e-300] {
         assert_eq!(
             Config::in_memory()
                 .with_memory_fraction(fraction)
@@ -162,10 +173,54 @@ fn a_fraction_must_be_above_zero() {
             "{fraction}"
         );
     }
-    assert!(
-        Config::in_memory()
-            .with_memory_fraction(1.5)
-            .validate()
-            .is_ok()
+    for fraction in [0.5, 1.5] {
+        assert!(
+            Config::in_memory()
+                .with_memory_fraction(fraction)
+                .validate()
+                .is_ok(),
+            "{fraction}"
+        );
+    }
+}
+
+/// Storing a Config stores its limit only when its last memory call set one: a fraction set
+/// after a limit replaces it, so storing that Config leaves the stored limit as it was; a limit
+/// set after a fraction is stored.
+#[test]
+fn the_later_memory_call_decides_what_is_stored() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("order.grafeo");
+    let db = GrafeoDB::with_config(Config::persistent(&path).with_memory_limit(48 * MIB)).unwrap();
+    db.set_stored_config(
+        &Config::in_memory()
+            .with_memory_limit(64 * MIB)
+            .with_memory_fraction(0.5),
+    )
+    .unwrap();
+    db.close().unwrap();
+    drop(db);
+    let db = GrafeoDB::with_config(Config::persistent(&path)).unwrap();
+    assert_eq!(
+        db.memory_limit(),
+        Some(48 * MIB),
+        "the fraction set last replaced the limit: the stored one stays"
     );
+
+    db.set_stored_config(
+        &Config::in_memory()
+            .with_memory_fraction(0.5)
+            .with_memory_limit(64 * MIB),
+    )
+    .unwrap();
+    db.close().unwrap();
+    drop(db);
+    let db = GrafeoDB::with_config(Config::persistent(&path)).unwrap();
+    assert_eq!(
+        db.memory_limit(),
+        Some(64 * MIB),
+        "the limit set last is stored"
+    );
+    assert_eq!(db.buffer_manager().budget(), 64 * MIB);
+    db.close().unwrap();
 }

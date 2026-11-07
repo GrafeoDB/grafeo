@@ -502,3 +502,105 @@ fn other_errors_carry_no_refusal() {
     let error = Error::Internal("not a bound".to_string());
     assert_eq!(error.limit_refusal(), None);
 }
+
+/// A consumer that frees half of what it holds on each call, or (`lies`) says it freed half
+/// and keeps it all.
+struct Halver {
+    held: Mutex<MemoryGrant>,
+    lies: bool,
+    calls: AtomicUsize,
+}
+
+impl Halver {
+    fn new(manager: &Arc<BufferManager>, bytes: usize, lies: bool) -> Arc<Self> {
+        let mut grant = manager.empty_grant(MemoryRegion::GraphStorage);
+        grant.grow_forced(bytes);
+        Arc::new(Self {
+            held: Mutex::new(grant),
+            lies,
+            calls: AtomicUsize::new(0),
+        })
+    }
+}
+
+impl MemoryConsumer for Halver {
+    fn name(&self) -> &str {
+        if self.lies { "liar" } else { "halver" }
+    }
+
+    fn memory_usage(&self) -> usize {
+        self.held.lock().unwrap().size()
+    }
+
+    fn eviction_priority(&self) -> u8 {
+        10
+    }
+
+    fn region(&self) -> MemoryRegion {
+        MemoryRegion::GraphStorage
+    }
+
+    fn evict(&self, _target_bytes: usize) -> usize {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        let mut held = self.held.lock().unwrap();
+        let half = held.size() / 2;
+        if !self.lies {
+            held.shrink(half);
+        }
+        half
+    }
+
+    fn can_evict(&self) -> bool {
+        true
+    }
+
+    fn current_tier(&self) -> StorageTier {
+        StorageTier::InMemory
+    }
+}
+
+/// `make_room` keeps asking while each pass lowers the reservation: a consumer that frees half
+/// per call is called until the bytes fit, however many halvings that takes (six here, from
+/// 8 MiB to 128 KiB on a 9 MiB budget).
+#[test]
+fn make_room_keeps_evicting_while_each_pass_frees_bytes() {
+    let manager = BufferManager::with_budget(9 * MIB);
+    let halver = Halver::new(&manager, 8 * MIB, false);
+    let _registered = Registered::new(&manager, halver.clone());
+    let needed = 9 * MIB - 128 * 1024;
+    let made = manager.make_room(needed);
+    assert!(
+        made,
+        "six halvings make the room; the consumer was called {} times",
+        halver.calls.load(Ordering::SeqCst)
+    );
+    assert!(
+        halver.calls.load(Ordering::SeqCst) >= 6,
+        "called {} times",
+        halver.calls.load(Ordering::SeqCst)
+    );
+    assert!(halver.memory_usage() <= 128 * 1024);
+    let mut grant = manager.empty_grant(MemoryRegion::ExecutionBuffers);
+    assert!(grant.try_grow(needed), "the bytes fit now");
+}
+
+/// A consumer that reports freed bytes but never lowers the reservation ends the attempt:
+/// `make_room` returns false, and returns at all.
+#[test]
+fn make_room_ends_when_freed_bytes_do_not_lower_the_reservation() {
+    let manager = BufferManager::with_budget(9 * MIB);
+    let liar = Halver::new(&manager, 8 * MIB, true);
+    let _registered = Registered::new(&manager, liar.clone());
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let asking = Arc::clone(&manager);
+    let asker = std::thread::spawn(move || {
+        let _ = sender.send(asking.make_room(4 * MIB));
+    });
+    let made = receiver
+        .recv_timeout(std::time::Duration::from_secs(30))
+        .expect("make_room returns");
+    asker.join().unwrap();
+    assert!(!made, "nothing was freed");
+    assert_eq!(manager.allocated(), 8 * MIB);
+    assert!(liar.calls.load(Ordering::SeqCst) >= 1);
+}

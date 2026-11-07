@@ -51,7 +51,7 @@ typedef enum {
 typedef enum {
     GRAFEO_ISOLATION_READ_COMMITTED = 0,
     GRAFEO_ISOLATION_SNAPSHOT       = 1,
-    GRAFEO_ISOLATION_SERIALIZABLE   = 2
+    GRAFEO_ISOLATION_SERIALIZABLE   = 2  /* refused for now: snapshot isolation is the strongest level */
 } GrafeoIsolationLevel;
 
 typedef enum {
@@ -70,6 +70,7 @@ typedef struct GrafeoNode        GrafeoNode;
 typedef struct GrafeoEdge        GrafeoEdge;
 typedef struct GrafeoStream      GrafeoStream;
 typedef struct GrafeoAsOf       GrafeoAsOf;
+typedef struct GrafeoSession    GrafeoSession;
 
 /* ---- Error handling ------------------------------------------------------ */
 
@@ -90,6 +91,20 @@ void        grafeo_clear_error(void);
 #endif
 
 /* ---- Lifecycle ----------------------------------------------------------- */
+
+/* A database handle lives from grafeo_open* to grafeo_free_database:
+     - grafeo_close flushes pending writes and releases the file, and
+       reports a failure through its status and grafeo_last_error(). Calling
+       it again does nothing and returns GRAFEO_OK; every other call on the
+       handle afterwards returns GRAFEO_ERROR_DATABASE.
+     - grafeo_free_database frees the handle, closing the database first if
+       it is still open (an error there is not reported: call grafeo_close
+       first to see it). A graph handle (grafeo_graph) keeps the database
+       open until it is freed too.
+     - Call grafeo_free_database exactly once per handle, and use no handle
+       after it: the memory is gone, so a second call, or any call after
+       it, is undefined behavior, as with free(). NULL is accepted and
+       ignored by both. */
 
 GrafeoDatabase* grafeo_open_memory(void);
 GrafeoDatabase* grafeo_open(const char* path);
@@ -364,6 +379,32 @@ char*        grafeo_changes_between(GrafeoDatabase* db, uint64_t start_epoch, ui
 GrafeoStatus grafeo_node_count(GrafeoDatabase* db, size_t* out_count);
 GrafeoStatus grafeo_edge_count(GrafeoDatabase* db, size_t* out_count);
 
+/* ---- Sessions (0.6.2+) --------------------------------------------------- */
+/* A session's flags bind every statement run through it: auto-commit ones,
+ * its transactions (used and freed as those of grafeo_begin_transaction) and
+ * its streams. The flags are independent: a read-only session keeps file
+ * access unless GRAFEO_SESSION_NO_EXTERNAL_ACCESS is set too. 0 runs as
+ * grafeo_execute does. An external-access refusal is the permission-denied
+ * error (GQLSTATUS class 42) and names external access. */
+
+#define GRAFEO_SESSION_READ_ONLY           1u  /* refuses writes */
+#define GRAFEO_SESSION_NO_EXTERNAL_ACCESS  2u  /* refuses LOAD DATA, LOAD CSV, the load procedures, SPARQL LOAD */
+
+/* Opens a session. NULL, with the error set, for a NULL database or a flag
+ * bit no GRAFEO_SESSION_* names (never ignored). Free with grafeo_free_session. */
+GrafeoSession*     grafeo_session_open(GrafeoDatabase* db, uint32_t flags);
+GrafeoResult*      grafeo_session_execute(GrafeoSession* session, const char* query);
+GrafeoResult*      grafeo_session_execute_with_params(GrafeoSession* session, const char* query, const char* params_json);
+/* Execute in a specific language on the session; params_json may be NULL. */
+GrafeoResult*      grafeo_session_execute_language(GrafeoSession* session, const char* language, const char* query, const char* params_json);
+GrafeoTransaction* grafeo_session_begin_transaction(GrafeoSession* session);
+GrafeoStream*      grafeo_session_stream_open(GrafeoSession* session, const char* query);
+/* Closes the session: its statements fail from now on; other sessions and the
+ * database are unaffected. GRAFEO_ERROR_NULL_POINTER for NULL. */
+GrafeoStatus       grafeo_session_close(GrafeoSession* session);
+/* Frees a session (closing it first). Safe to call on NULL. */
+void               grafeo_free_session(GrafeoSession* session);
+
 /* ---- Transactions -------------------------------------------------------- */
 
 GrafeoTransaction* grafeo_begin_transaction(GrafeoDatabase* db);
@@ -379,6 +420,7 @@ void               grafeo_free_transaction(GrafeoTransaction* tx);
 /* ---- Admin --------------------------------------------------------------- */
 
 char*        grafeo_info(GrafeoDatabase* db);
+/* Needs the `storage` feature (in the default and `full` builds). */
 GrafeoStatus grafeo_save(GrafeoDatabase* db, const char* path);
 GrafeoStatus grafeo_wal_checkpoint(GrafeoDatabase* db);
 /* Automatic checkpoints: every interval_ms milliseconds and once the WAL holds
@@ -387,6 +429,26 @@ GrafeoStatus grafeo_set_checkpoint_triggers(GrafeoDatabase* db, uint64_t interva
 /* How the automatic checkpoints fare, as JSON. Free with grafeo_free_string. */
 char*        grafeo_checkpoint_status(GrafeoDatabase* db);
 GrafeoStatus grafeo_compact(GrafeoDatabase* db);
+/* Clear all cached query plans: the next statements are parsed and planned
+ * again. DDL clears them by itself. */
+GrafeoStatus grafeo_clear_plan_cache(GrafeoDatabase* db);
+
+/* ---- Backup and restore -------------------------------------------------- */
+/* Need the `storage` feature (in the default and `full` builds). */
+
+/* A full backup of the database into backup_dir. */
+GrafeoStatus grafeo_backup_full(GrafeoDatabase* db, const char* backup_dir);
+/* An incremental backup into backup_dir: the WAL records since the last backup. */
+GrafeoStatus grafeo_backup_incremental(GrafeoDatabase* db, const char* backup_dir);
+/* Release the backup cursor: the next backup must be a full one, and
+ * checkpoints then keep only the WAL a reopen needs. Writes 1 to
+ * *out_released when there was a cursor to release, 0 when there was none
+ * (out_released may be NULL). */
+GrafeoStatus grafeo_release_backup_cursor(GrafeoDatabase* db, int32_t* out_released);
+/* Restore the database at epoch from the backup chain in backup_dir into a new
+ * database file at output_path. An epoch past the end of the chain restores
+ * the latest state the chain holds. */
+GrafeoStatus grafeo_restore_to_epoch(const char* backup_dir, uint64_t epoch, const char* output_path);
 
 /* ---- Memory management --------------------------------------------------- */
 

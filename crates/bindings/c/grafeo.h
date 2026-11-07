@@ -429,6 +429,26 @@ GrafeoStatus grafeo_set_checkpoint_triggers(GrafeoDatabase* db, uint64_t interva
 /* How the automatic checkpoints fare, as JSON. Free with grafeo_free_string. */
 char*        grafeo_checkpoint_status(GrafeoDatabase* db);
 GrafeoStatus grafeo_compact(GrafeoDatabase* db);
+/* Clear all cached query plans: the next statements are parsed and planned
+ * again. DDL clears them by itself. */
+GrafeoStatus grafeo_clear_plan_cache(GrafeoDatabase* db);
+
+/* ---- Backup and restore -------------------------------------------------- */
+/* Need the `storage` feature (in the default and `full` builds). */
+
+/* A full backup of the database into backup_dir. */
+GrafeoStatus grafeo_backup_full(GrafeoDatabase* db, const char* backup_dir);
+/* An incremental backup into backup_dir: the WAL records since the last backup. */
+GrafeoStatus grafeo_backup_incremental(GrafeoDatabase* db, const char* backup_dir);
+/* Release the backup cursor: the next backup must be a full one, and
+ * checkpoints then keep only the WAL a reopen needs. Writes 1 to
+ * *out_released when there was a cursor to release, 0 when there was none
+ * (out_released may be NULL). */
+GrafeoStatus grafeo_release_backup_cursor(GrafeoDatabase* db, int32_t* out_released);
+/* Restore the database at epoch from the backup chain in backup_dir into a new
+ * database file at output_path. An epoch past the end of the chain restores
+ * the latest state the chain holds. */
+GrafeoStatus grafeo_restore_to_epoch(const char* backup_dir, uint64_t epoch, const char* output_path);
 
 /* ---- Memory management --------------------------------------------------- */
 

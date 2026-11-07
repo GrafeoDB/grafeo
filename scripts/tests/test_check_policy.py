@@ -2118,3 +2118,147 @@ def test_t7_two_slashes_inside_a_string_hide_no_module(tmp_path: Path) -> None:
         )
         == []
     )
+
+
+# ------------------------------------------------- T13: the C header, its Go copy, the Go import list
+
+C_SRC = "crates/bindings/c/src/lib.rs"
+C_HEADER = "crates/bindings/c/grafeo.h"
+GO_HEADER = "crates/bindings/go/grafeo.h"
+GO_DEF = "crates/bindings/go/grafeo_c.def"
+
+C_EXPORTS = """#[unsafe(no_mangle)]
+pub extern "C" fn grafeo_open(path: *const c_char) -> *mut GrafeoDatabase {
+    todo!()
+}
+
+/// Not an export: no `no_mangle`.
+pub extern "C" fn grafeo_helper() {}
+
+macro_rules! counter {
+    ($(#[$doc:meta])* $name:ident, $field:ident) => {
+        $(#[$doc])*
+        #[unsafe(no_mangle)]
+        pub extern "C" fn $name(result: *const GrafeoResult) -> u64 {
+            0
+        }
+    };
+}
+
+counter!(
+    /// Nodes made.
+    grafeo_result_nodes_created,
+    nodes_created
+);
+"""
+
+HEADER = """#ifndef GRAFEO_H
+#define GRAFEO_H
+typedef struct GrafeoDatabase GrafeoDatabase;
+GrafeoDatabase* grafeo_open(const char* path);
+uint64_t grafeo_result_nodes_created(const GrafeoResult* result);
+#endif
+"""
+
+DEF = """;
+; Definition file of grafeo_c.dll
+LIBRARY grafeo_c.dll
+EXPORTS
+grafeo_open
+grafeo_result_nodes_created
+"""
+
+
+def t13_found(tmp_path: Path, files: dict[str, str]) -> list[tuple[str | None, str]]:
+    tree = {C_SRC: C_EXPORTS, C_HEADER: HEADER, GO_HEADER: HEADER, GO_DEF: DEF}
+    tree.update(files)
+    for rel, text in tree.items():
+        if text is not None:
+            write_lf(tmp_path, rel, text)
+    present = sorted(rel for rel, text in tree.items() if text is not None)
+    return [
+        (f.path, f.message) for f in check_policy.c_header_findings(tmp_path, present)
+    ]
+
+
+def test_t13_headers_and_import_list_that_agree_report_nothing(tmp_path: Path) -> None:
+    assert t13_found(tmp_path, {}) == []
+
+
+def test_t13_a_go_header_that_differs_from_the_c_header_is_a_finding(
+    tmp_path: Path,
+) -> None:
+    changed = HEADER.replace("#endif", "/* a note only in Go's copy */\n#endif")
+    found = t13_found(tmp_path, {GO_HEADER: changed})
+    assert [path for path, _ in found] == [GO_HEADER]
+    assert C_HEADER in found[0][1], "names the header it must equal"
+
+
+def test_t13_line_endings_alone_are_no_difference(tmp_path: Path) -> None:
+    crlf = HEADER.replace("\n", "\r\n")
+    write_lf(tmp_path, GO_HEADER, "")
+    (tmp_path / GO_HEADER).write_bytes(crlf.encode())
+    for rel, text in {C_SRC: C_EXPORTS, C_HEADER: HEADER, GO_DEF: DEF}.items():
+        write_lf(tmp_path, rel, text)
+    present = sorted([C_SRC, C_HEADER, GO_HEADER, GO_DEF])
+    assert check_policy.c_header_findings(tmp_path, present) == []
+
+
+def test_t13_an_export_the_header_does_not_declare_is_a_finding(tmp_path: Path) -> None:
+    source = C_EXPORTS + (
+        '\n#[unsafe(no_mangle)]\npub extern "C" fn grafeo_backup_full(db: *mut GrafeoDatabase) '
+        "-> i32 {\n    0\n}\n"
+    )
+    found = t13_found(tmp_path, {C_SRC: source, GO_DEF: DEF + "grafeo_backup_full\n"})
+    assert len(found) == 1, found
+    assert found[0][0] == C_HEADER and "grafeo_backup_full" in found[0][1]
+
+
+def test_t13_an_export_made_by_a_macro_counts_as_an_export(tmp_path: Path) -> None:
+    without = HEADER.replace(
+        "uint64_t grafeo_result_nodes_created(const GrafeoResult* result);\n", ""
+    )
+    found = t13_found(tmp_path, {C_HEADER: without, GO_HEADER: without})
+    assert [
+        (path, "grafeo_result_nodes_created" in message) for path, message in found
+    ] == [(C_HEADER, True)]
+
+
+def test_t13_a_declaration_with_no_export_is_a_finding(tmp_path: Path) -> None:
+    extra = HEADER.replace(
+        "#endif", "int32_t grafeo_close(GrafeoDatabase* db);\n#endif"
+    )
+    found = t13_found(tmp_path, {C_HEADER: extra, GO_HEADER: extra})
+    assert len(found) == 1, found
+    assert found[0][0] == C_HEADER and "grafeo_close" in found[0][1]
+
+
+def test_t13_a_function_without_no_mangle_is_no_export(tmp_path: Path) -> None:
+    extra = HEADER.replace("#endif", "void grafeo_helper(void);\n#endif")
+    found = t13_found(tmp_path, {C_HEADER: extra, GO_HEADER: extra})
+    assert [path for path, _ in found] == [C_HEADER]
+    assert "grafeo_helper" in found[0][1]
+
+
+def test_t13_the_go_import_list_names_exactly_the_exports(tmp_path: Path) -> None:
+    missing = DEF.replace("grafeo_result_nodes_created\n", "")
+    found = t13_found(tmp_path, {GO_DEF: missing})
+    assert [
+        (path, "grafeo_result_nodes_created" in message) for path, message in found
+    ] == [(GO_DEF, True)]
+    stale = DEF + "grafeo_gone\n"
+    found = t13_found(tmp_path, {GO_DEF: stale})
+    assert [(path, "grafeo_gone" in message) for path, message in found] == [
+        (GO_DEF, True)
+    ]
+
+
+def test_t13_a_declaration_inside_a_comment_declares_nothing(tmp_path: Path) -> None:
+    commented = HEADER.replace(
+        "#endif", "/* call grafeo_close(db) before grafeo_free_database(db) */\n#endif"
+    )
+    assert t13_found(tmp_path, {C_HEADER: commented, GO_HEADER: commented}) == []
+
+
+def test_t13_has_a_hint() -> None:
+    assert "T13" in check_policy.HINTS

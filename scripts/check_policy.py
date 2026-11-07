@@ -223,6 +223,9 @@ HINTS = {
     "T12": "gate a binding's code on the capability it needs (`rdf-model`, `sparql`, "
     "`vector-index`, ...), not on a profile or group: every profile that holds the "
     "capability then compiles it",
+    "T13": "copy crates/bindings/c/grafeo.h to crates/bindings/go/grafeo.h; declare each "
+    "export in the header; regenerate crates/bindings/go/grafeo_c.def and libgrafeo_c.dll.a "
+    "from the built grafeo_c.dll (gendef, then dlltool)",
     "D1": 'add reason = "..." naming the bound or invariant that makes it safe',
     "D2": "em or en dash; rewrite with a comma, colon or parentheses",
     "D3": "public text must stand on its own; restate the content or link a public issue",
@@ -1575,6 +1578,109 @@ def binding_profile_cfg_findings(root: Path, files: list[str]) -> list[Finding]:
     return findings
 
 
+C_SOURCES = "crates/bindings/c/src/"
+C_HEADER = "crates/bindings/c/grafeo.h"
+GO_HEADER = "crates/bindings/go/grafeo.h"
+GO_IMPORTS = "crates/bindings/go/grafeo_c.def"
+
+# A function grafeo-c exports: `#[unsafe(no_mangle)]`, other attributes, then the `extern "C"` fn.
+C_EXPORT = re.compile(
+    r'#\[unsafe\(no_mangle\)\]\s*(?:#\[[^\]]*\]\s*)*pub\s+(?:unsafe\s+)?extern\s+"C"\s+fn\s+(\w+)'
+)
+# A `macro_rules!` whose body exports the fn it is given (`fn $name`).
+C_EXPORTING_MACRO = re.compile(r"macro_rules!\s*(\w+)\s*\{")
+C_DECLARATION = re.compile(r"\b(grafeo_\w+)\s*\(")
+C_COMMENT = re.compile(r"/\*.*?\*/|//[^\n]*", re.S)
+
+
+def c_exports(root: Path, files: list[str]) -> set[str]:
+    """The functions grafeo-c exports: each `#[unsafe(no_mangle)]` fn, and the name an exporting
+    macro is invoked with (its first `grafeo_` identifier)."""
+    exports: set[str] = set()
+    sources = [
+        text
+        for rel in files
+        if rel.startswith(C_SOURCES) and rel.endswith(".rs")
+        if (text := read_text(root / rel)) is not None
+    ]
+    macros: set[str] = set()
+    for text in sources:
+        exports.update(C_EXPORT.findall(text))
+        for match in C_EXPORTING_MACRO.finditer(text):
+            # The macro's body: up to the next `macro_rules!`, or the end of the file.
+            body_end = text.find("macro_rules!", match.end())
+            body = text[match.end() : body_end if body_end >= 0 else len(text)]
+            if "no_mangle" in body and re.search(r"\bfn\s+\$\w+", body):
+                macros.add(match.group(1))
+    for text in sources:
+        for name in macros:
+            for call in re.finditer(rf"\b{re.escape(name)}!\s*\(", text):
+                arguments = text[call.end() :]
+                code = "\n".join(
+                    line
+                    for line in arguments.splitlines()
+                    if not line.lstrip().startswith("//")
+                )
+                found = re.search(r"\bgrafeo_\w+", code)
+                if found:
+                    exports.add(found.group(0))
+    return exports
+
+
+def c_header_findings(root: Path, files: list[str]) -> list[Finding]:
+    """T13: grafeo-c's header, its Go copy and the Go import list agree with what grafeo-c
+    exports. The Go header equals the C header (line endings aside); every export is declared
+    and every declaration exported; `grafeo_c.def` lists exactly the exports, which the Go
+    binding's Windows import library is built from."""
+    present = set(files)
+    findings: list[Finding] = []
+    header = read_text(root / C_HEADER) if C_HEADER in present else None
+    if header is not None and GO_HEADER in present:
+        go_header = read_text(root / GO_HEADER)
+        if go_header is not None and go_header.replace("\r\n", "\n") != header.replace(
+            "\r\n", "\n"
+        ):
+            findings.append(finding("T13", GO_HEADER, None, f"differs from {C_HEADER}"))
+    exports = c_exports(root, files)
+    if header is not None:
+        declared = set(C_DECLARATION.findall(C_COMMENT.sub("", header)))
+        for name in sorted(exports - declared):
+            findings.append(
+                finding("T13", C_HEADER, None, f"`{name}` is exported but not declared")
+            )
+        for name in sorted(declared - exports):
+            findings.append(
+                finding("T13", C_HEADER, None, f"`{name}` is declared but not exported")
+            )
+    imports_text = read_text(root / GO_IMPORTS) if GO_IMPORTS in present else None
+    if imports_text is not None:
+        listed: set[str] = set()
+        in_exports = False
+        for raw in imports_text.splitlines():
+            line = raw.strip()
+            if not line or line.startswith(";"):
+                continue
+            if line == "EXPORTS":
+                in_exports = True
+                continue
+            if in_exports:
+                listed.add(line.split()[0])
+        for name in sorted(exports - listed):
+            findings.append(
+                finding(
+                    "T13",
+                    GO_IMPORTS,
+                    None,
+                    f"`{name}` is exported but not in the import list",
+                )
+            )
+        for name in sorted(listed - exports):
+            findings.append(
+                finding("T13", GO_IMPORTS, None, f"`{name}` is listed but not exported")
+            )
+    return findings
+
+
 def tree_findings(root: Path, metadata_arg: str | None) -> list[Finding]:
     files = git(root, "ls-files").splitlines()
     findings = toolchain_findings(root) + text_findings(root, files)
@@ -1583,6 +1689,7 @@ def tree_findings(root: Path, metadata_arg: str | None) -> list[Finding]:
     findings += node_package_findings(root, files)
     findings += binding_profile_cfg_findings(root, files)
     findings += xfail_findings(root, files)
+    findings += c_header_findings(root, files)
     if metadata_arg != "none" and (root / "Cargo.toml").exists():
         if metadata_arg:
             metadata = json.loads(Path(metadata_arg).read_text(encoding="utf-8"))

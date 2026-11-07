@@ -71,6 +71,7 @@ grafeo_free_graph
 grafeo_free_node
 grafeo_free_node_ids
 grafeo_free_result
+grafeo_free_session
 grafeo_free_string
 grafeo_free_transaction
 grafeo_free_vector_results
@@ -145,6 +146,13 @@ grafeo_result_warning_kind
 grafeo_result_warning_message
 grafeo_rollback
 grafeo_save
+grafeo_session_begin_transaction
+grafeo_session_close
+grafeo_session_execute
+grafeo_session_execute_language
+grafeo_session_execute_with_params
+grafeo_session_open
+grafeo_session_stream_open
 grafeo_set_cdc_enabled
 grafeo_set_checkpoint_triggers
 grafeo_set_edge_property

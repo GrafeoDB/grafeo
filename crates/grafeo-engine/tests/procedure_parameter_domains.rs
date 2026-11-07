@@ -598,8 +598,7 @@ fn every_string_default_lies_in_its_domain() {
             checked += 1;
             let holds = match p.domain {
                 Domain::OfType => true,
-                Domain::OneCharacter => default.chars().count() == 1,
-                Domain::OneOf(words) => words.contains(&default.as_str()),
+                Domain::OneCharacter | Domain::OneOf(_) => p.domain.admits_text(default),
                 other => {
                     wrong.push(format!(
                         "{}.{}: a string parameter with the domain {other:?}",
@@ -623,27 +622,43 @@ fn every_string_default_lies_in_its_domain() {
     assert!(wrong.is_empty(), "{}", wrong.join("\n"));
 }
 
-/// A load called with `projection` in its map, a value or null, is refused with 22023 naming the
-/// procedure and `projection`, before any other argument is checked (the call below omits the
-/// required `path`, which would be named otherwise).
+/// A load called with `projection` in its map, a value or null, written in the call or given
+/// as a parameter's map, is refused with 22023 naming the procedure and `projection`, before
+/// any other argument is checked (the calls below omit the required `path`, which would be
+/// named otherwise).
 #[test]
 fn a_load_refuses_a_projection_before_its_arguments() {
     let db = GrafeoDB::new_in_memory();
     let mut wrong = Vec::new();
     for load in ["grafeo.load_nodes_csv", "grafeo.load_edges_csv"] {
-        for value in ["'people'", "null"] {
-            let call = format!("CALL {load}({{projection: {value}}})");
-            match db.execute(&call) {
-                Ok(_) => wrong.push(format!("{call}: ran")),
-                Err(error) => {
-                    let text = error.to_string();
-                    let status = GqlStatus::from(&error).as_str().to_string();
-                    if status != "22023"
-                        || !text.contains(load.trim_start_matches("grafeo."))
-                        || !text.contains("projection")
-                        || text.contains("'path'")
-                    {
-                        wrong.push(format!("{call}: {status} {text}"));
+        for (value, given) in [("'people'", Value::from("people")), ("null", Value::Null)] {
+            let written = format!("CALL {load}({{projection: {value}}})");
+            let options = HashMap::from([(
+                "opts".to_string(),
+                Value::Map(std::sync::Arc::new(
+                    [("projection".into(), given)].into_iter().collect(),
+                )),
+            )]);
+            let in_a_parameter = format!("CALL {load}($opts)");
+            for (call, result) in [
+                (written.clone(), db.execute(&written)),
+                (
+                    format!("{in_a_parameter} with projection {value}"),
+                    db.execute_with_params(&in_a_parameter, options),
+                ),
+            ] {
+                match result {
+                    Ok(_) => wrong.push(format!("{call}: ran")),
+                    Err(error) => {
+                        let text = error.to_string();
+                        let status = GqlStatus::from(&error).as_str().to_string();
+                        if status != "22023"
+                            || !text.contains(load.trim_start_matches("grafeo."))
+                            || !text.contains("projection")
+                            || text.contains("'path'")
+                        {
+                            wrong.push(format!("{call}: {status} {text}"));
+                        }
                     }
                 }
             }

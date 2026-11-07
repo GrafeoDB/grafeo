@@ -213,8 +213,7 @@ fn every_far_end_form_answers_as_the_plain_plan() {
                 }
                 match plan(session, Language::Sql, &text) {
                     Ok(plan) if starts_at_the_far_end(&plan) => wrong.push(format!(
-                        "index {index}, {name}, {far}: the plan starts at the far end
-{plan}"
+                        "index {index}, {name}, {far}: the plan starts at the far end\n{plan}"
                     )),
                     Ok(_) => {}
                     Err(error) => {
@@ -224,14 +223,7 @@ fn every_far_end_form_answers_as_the_plain_plan() {
             }
         }
     }
-    assert!(
-        wrong.is_empty(),
-        "{}",
-        wrong.join(
-            "
-"
-        )
-    );
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
 }
 
 /// GQL and Cypher keep the indexed turn: a string and a number are unequal there, so reading

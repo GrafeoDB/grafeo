@@ -172,10 +172,9 @@ fn the_load_procedures_write_and_read_outside() {
     let db = GrafeoDB::new_in_memory();
     let listed = listing(&db);
     for load in ["grafeo.load_nodes_csv", "grafeo.load_edges_csv"] {
-        if let Some((writes, access)) = listed.get(load) {
-            assert!(*writes, "{load} writes");
-            assert_eq!(access, "reads", "{load} reads a file");
-        }
+        let (writes, access) = &listed[load];
+        assert!(*writes, "{load} writes");
+        assert_eq!(access, "reads", "{load} reads a file");
     }
     assert_eq!(listed["grafeo.labels"], (false, "none".to_string()));
 }

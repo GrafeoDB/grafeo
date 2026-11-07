@@ -978,7 +978,8 @@ impl super::Planner {
         // Look up the procedure
         let procedure = registry.get(&call.name).ok_or_else(|| {
             let name = call.name.join(".");
-            // One other builds have is not a misspelling: say which feature brings it.
+            // A procedure that builds with more features have is no misspelling: the error
+            // names the feature that brings it.
             grafeo_common::utils::error::Error::from(
                 match procedures::missing_feature(&call.name) {
                     Some(feature) => grafeo_common::utils::error::QueryError::unsupported(format!(

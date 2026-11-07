@@ -461,3 +461,4 @@ EM2|gql 2ece2d5589 A null in a property map is an equality with null, which find
 EM3|sql 20233fc7fc A null in a property map is an equality with null, which finds nothing (ISO/IEC 39075 16.3 SR 21); 0.6.1 found the elements without the key.
 EN7|gql 8726b929ab A MERGE with a null entry matches what it inserted, as an insert stores no null, for a null literal and a null parameter; 0.6.1 inserted the path or the edge again for a null parameter.
 EN8|gql 2418e3ef49 A MERGE with a null entry matches what it inserted, as an insert stores no null, for a null literal and a null parameter; 0.6.1 inserted the path or the edge again for a null parameter.
+BS2|gql b1583e0ac6 CALL grafeo.procedures() lists whether each procedure writes the graph and what it reaches outside the database, so the refused YIELD names the two new columns.

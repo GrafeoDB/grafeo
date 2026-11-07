@@ -7,6 +7,8 @@ import pytest
 
 grafeo = pytest.importorskip("grafeo")
 
+pytestmark = pytest.mark.requires("gql")
+
 
 def test_a_stored_procedure_runs_its_body():
     db = grafeo.GrafeoDB()

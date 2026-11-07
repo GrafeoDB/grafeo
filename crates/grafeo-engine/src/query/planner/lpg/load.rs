@@ -3,11 +3,12 @@
 //! procedures whose arguments `CALL` prepares as every procedure's, planned
 //! with the statement's writer.
 
+use grafeo_common::types::Value;
 use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind, Result};
 
 use super::Operator;
 use crate::loader::{LoadCall, LoadCallOperator, REPORT_COLUMNS};
-use crate::query::plan::{CallProcedureOp, LogicalExpression};
+use crate::query::plan::CallProcedureOp;
 
 /// Whether `call` is a load procedure.
 pub(super) fn is_load(call: &CallProcedureOp) -> bool {
@@ -27,18 +28,19 @@ impl super::Planner {
             .get(&call.name)
             .ok_or_else(|| Error::Internal(format!("{} is not registered", call.name.join("."))))?;
         let procedure = format!("grafeo.{}", load.name());
+        let values =
+            self.procedure_argument_values(&procedure, &call.arguments, load.parameters())?;
         // A load writes into the graph the statement reads: it reads no projection, so naming
-        // one (with a value or null) is refused rather than ignored.
-        if let [LogicalExpression::Map(entries)] = call.arguments.as_slice()
-            && entries.iter().any(|(key, _)| key == "projection")
+        // one (with a value or null, in a literal map or a parameter's) is refused rather than
+        // ignored, before its other arguments are checked.
+        if let [Value::Map(entries)] = values.as_slice()
+            && entries.keys().any(|key| key.as_str() == "projection")
         {
             return Err(Error::from(QueryError::new(
                 QueryErrorKind::InvalidParameterValue,
                 format!("{procedure} takes no 'projection': it loads into the graph it runs on"),
             )));
         }
-        let values =
-            self.procedure_argument_values(&procedure, &call.arguments, load.parameters())?;
         let params = crate::procedures::evaluate_arguments(&procedure, &values, load.parameters())?;
         let load = LoadCall::from_prepared(&procedure, &params)?;
         let (yielded, columns) = match &call.yield_items {

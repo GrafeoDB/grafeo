@@ -1536,7 +1536,7 @@ CFG_FEATURE = re.compile(r'feature\s*=\s*"([A-Za-z0-9_-]+)"')
 def cfg_conditions(text: str) -> list[tuple[int, str]]:
     """Each `cfg(...)`, `cfg!(...)` and `cfg_attr(...)` of Rust code, comments and the contents
     of string and char literals left out: its line and its parenthesized text, which may span
-    lines."""
+    lines, with its comments blanked (a feature name stays, as a string literal holds it)."""
     code = rust_code(text, literals=True)
     found = []
     for start in CFG_START.finditer(code):
@@ -1549,7 +1549,7 @@ def cfg_conditions(text: str) -> list[tuple[int, str]]:
                 if depth == 0:
                     break
         line = code.count("\n", 0, start.start()) + 1
-        found.append((line, text[start.start() : end + 1]))
+        found.append((line, rust_code(text[start.start() : end + 1])))
     return found
 
 

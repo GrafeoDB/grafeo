@@ -28,6 +28,7 @@ use smallvec::{SmallVec, smallvec};
 use super::bitset::Bitset;
 use super::column::{ColdRows, ColumnRead, HotRows, HotValues};
 use super::index::MaybeEqual;
+use super::slots::GroupRows;
 use super::{Inner, LabelIds, ROWS_PER_GROUP, Read};
 use crate::codec::column_chunk::{DictView, ZoneMap, bits_among};
 use crate::graph::traits::KeyColumnGroup;
@@ -652,15 +653,19 @@ fn words_to_read(within: Option<&[&Bitset]>, words: Range<usize>, mut read: impl
     }
 }
 
-/// The bits of word `word` of `values` whose key is among `targets`, sorted. A column's vector ends
-/// at its highest row with a value, so the word may be short.
+/// The bits of word `word` of `values` whose key is among `targets`, sorted. A column's values
+/// start at a vector and end at its highest row with a value, so a word below the start holds
+/// none and the last word may be short.
 fn among<T: Copy, K: Copy + Ord>(
-    values: &[T],
+    values: &GroupRows<T>,
     word: usize,
     targets: &[K],
     key: impl Fn(T) -> K,
 ) -> u64 {
-    let Some(rest) = values.get(word * 64..) else {
+    let Some(rest) = (word * 64)
+        .checked_sub(values.first_row())
+        .and_then(|from| values.as_slice().get(from..))
+    else {
         return 0;
     };
     bits_among(&rest[..rest.len().min(64)], targets, key)

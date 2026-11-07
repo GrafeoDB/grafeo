@@ -949,9 +949,14 @@ impl Inner {
         }
         for (index, group) in &self.edges {
             let base = index * ROWS_PER_GROUP;
-            for (row, &dst) in group.dst.iter().enumerate() {
+            let first = group.dst.first_row();
+            for (offset, &dst) in group.dst.as_slice().iter().enumerate() {
+                let row = first + offset;
                 if dst == raw && group.versions.visible(row, read) {
-                    seen(NodeId::new(group.src[row]), EdgeId::new(base + row as u64));
+                    seen(
+                        NodeId::new(*group.src.at(row)),
+                        EdgeId::new(base + row as u64),
+                    );
                 }
             }
         }

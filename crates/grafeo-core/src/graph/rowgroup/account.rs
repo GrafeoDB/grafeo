@@ -803,7 +803,7 @@ mod tests {
 
     use grafeo_common::memory::buffer::{BufferManager, MemoryRegion};
     use grafeo_common::storage::{ChunkCaps, ImageSource, MemoryImage, SectionType};
-    use grafeo_common::types::{NodeId, ReadView, Value};
+    use grafeo_common::types::{EdgeId, NodeId, ReadView, Value};
 
     use crate::graph::conformance::{Tx, people};
     use crate::graph::rowgroup::RowGroupStore;
@@ -834,6 +834,124 @@ mod tests {
         let manager = BufferManager::with_budget(1 << 30);
         store.attach_memory(Arc::clone(&manager));
         (store, manager)
+    }
+
+    /// Nodes `count` named `who`, each with a string and an integer, and an
+    /// edge between each two in a row: the nodes and the edges.
+    fn write_chain(
+        store: &RowGroupStore,
+        id: u64,
+        who: &str,
+        count: i64,
+    ) -> (Vec<NodeId>, Vec<EdgeId>) {
+        let mut tx = Tx::begin(store, id);
+        let nodes: Vec<NodeId> = (0..count)
+            .map(|i| {
+                tx.create_node(
+                    &["Person"],
+                    &[
+                        ("name", Value::from(format!("{who} {i}").as_str())),
+                        ("i", Value::Int64(i)),
+                    ],
+                )
+                .unwrap()
+            })
+            .collect();
+        let edges = nodes
+            .windows(2)
+            .map(|pair| {
+                tx.create_edge(pair[0], pair[1], "KNOWS", &[("w", Value::Int64(1))])
+                    .unwrap()
+            })
+            .collect();
+        tx.commit().unwrap();
+        (nodes, edges)
+    }
+
+    /// A clear and a rewrite of the same rows: once the collect takes the old
+    /// rows out, the slots below the new ones go back (edge ends, hot values,
+    /// adjacency offsets, each at least one vector of rows), and the account
+    /// follows the walk.
+    #[test]
+    fn a_dead_head_goes_back_at_the_collect_and_the_account_follows() {
+        const ROWS: i64 = 2_100;
+        const VECTOR: usize = 2_048;
+        let (store, manager) = attached();
+        let (old, old_edges) = write_chain(&store, 10, "Alix", ROWS);
+        let (new, _) = write_chain(&store, 11, "Gus", ROWS);
+        let both = store.memory();
+        // The chain's edges, then its nodes: a detach delete would read the
+        // whole store's image for each node.
+        let mut tx = Tx::begin(&store, 12);
+        for edge in old_edges {
+            tx.delete_edge(edge).unwrap();
+        }
+        for node in &old {
+            tx.delete_node(*node).unwrap();
+        }
+        tx.commit().unwrap();
+        store.collect(store.current_epoch());
+        assert_counted(&store, "the collect that trims");
+        assert_granted(&store, &manager, "after the trim");
+        let after = store.memory();
+        // A slot of an edge's ends, of a hot integer or string, of an offset.
+        let freed = [
+            (
+                "edge ends",
+                both.edge_tables_bytes,
+                after.edge_tables_bytes,
+                VECTOR * 20,
+            ),
+            (
+                "node values",
+                both.node_columns_bytes,
+                after.node_columns_bytes,
+                VECTOR * 16,
+            ),
+            (
+                "edge values",
+                both.edge_columns_bytes,
+                after.edge_columns_bytes,
+                VECTOR * 8,
+            ),
+            (
+                "outgoing",
+                both.outgoing_bytes,
+                after.outgoing_bytes,
+                VECTOR * 8,
+            ),
+            (
+                "incoming",
+                both.incoming_bytes,
+                after.incoming_bytes,
+                VECTOR * 8,
+            ),
+        ];
+        for (what, before, after, slots) in freed {
+            assert!(
+                after + slots <= before,
+                "{what}: {after} after the trim, {before} with both chains"
+            );
+        }
+        assert_eq!(new.len(), old.len());
+        let names: Vec<Value> = new
+            .iter()
+            .take(3)
+            .map(|node| {
+                store
+                    .node_property(*node, "name", ReadView::latest())
+                    .unwrap()
+                    .unwrap_or(Value::Null)
+            })
+            .collect();
+        assert_eq!(
+            names,
+            [
+                Value::from("Gus 0"),
+                Value::from("Gus 1"),
+                Value::from("Gus 2")
+            ]
+        );
     }
 
     /// Every kind of write, its commit, its rollback and the collect keep the

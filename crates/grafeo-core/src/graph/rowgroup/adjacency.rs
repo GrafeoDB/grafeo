@@ -14,6 +14,7 @@
 use grafeo_common::utils::hash::{FxHashMap, FxHashSet};
 
 use super::bitset::Bitset;
+use super::slots::vector_start;
 
 /// The longest run compared entry by entry along a delta, whose comparisons take far
 /// less than a search of the run.
@@ -118,8 +119,11 @@ fn gallop(sorted: &[Adjacent], from: usize, other: u64) -> (usize, usize) {
 /// One direction of a node row group's adjacency.
 #[derive(Debug, Default)]
 pub(super) struct Adjacency {
-    /// Row `r` (below `offsets.len() - 1`) has the sorted list
-    /// `sorted[offsets[r]..offsets[r + 1]]`.
+    /// The row `offsets` starts at: the first row of the vector of the
+    /// lowest row with a sorted list, so the rows below cost nothing.
+    first_row: usize,
+    /// Row `first_row + i` (for `i` below `offsets.len() - 1`) has the
+    /// sorted list `sorted[offsets[i]..offsets[i + 1]]`.
     offsets: Vec<usize>,
     sorted: Vec<Adjacent>,
     /// Edges taken out of the sorted lists since they were built.
@@ -143,7 +147,10 @@ fn list_bytes(list: &Vec<Adjacent>) -> usize {
 impl Adjacency {
     /// The row's sorted list, removed edges included.
     fn sorted_of(&self, row: usize) -> &[Adjacent] {
-        match (self.offsets.get(row), self.offsets.get(row + 1)) {
+        let Some(at) = row.checked_sub(self.first_row) else {
+            return &[];
+        };
+        match (self.offsets.get(at), self.offsets.get(at + 1)) {
             (Some(start), Some(end)) => &self.sorted[*start..*end],
             _ => &[],
         }
@@ -238,9 +245,11 @@ impl Adjacency {
 
     pub(super) fn push_sorted(&mut self, row: usize, list: &[Adjacent]) {
         if self.offsets.is_empty() {
+            self.first_row = vector_start(row);
             self.offsets.push(0);
         }
-        while self.offsets.len() <= row {
+        debug_assert!(row >= self.first_row, "a load sets rows ascending");
+        while self.first_row + self.offsets.len() <= row {
             self.offsets.push(self.sorted.len());
         }
         self.sorted.extend_from_slice(list);
@@ -267,7 +276,7 @@ impl Adjacency {
             .windows(2)
             .enumerate()
             .filter(|(_, ends)| ends[0] < ends[1])
-            .map(|(row, ends)| (row, &self.sorted[ends[0]..ends[1]]))
+            .map(|(at, ends)| (self.first_row + at, &self.sorted[ends[0]..ends[1]]))
     }
 
     /// The entries of the sorted lists.
@@ -318,6 +327,17 @@ impl Adjacency {
         }
     }
 
+    /// Merges once the removed edges are more than half the sorted lists (at
+    /// least [`MERGE_MIN`]), as a push merges a delta that large: a deleted
+    /// edge's entry leaves the lists then, so a clear gives its entries back
+    /// at the collect that unlinks them, not at some later push. The collect
+    /// calls it, never a commit or a rollback.
+    pub(super) fn merge_if_removed_dominate(&mut self) {
+        if self.removed.len() > MERGE_MIN.max(self.sorted.len() / 2) {
+            self.merge();
+        }
+    }
+
     /// Takes every edge out of the row's adjacency.
     pub(super) fn clear(&mut self, row: usize) {
         if let Some(list) = self.delta.remove(&row) {
@@ -340,16 +360,33 @@ impl Adjacency {
     }
 
     /// Merges the delta into the sorted lists and drops the removed edges.
+    /// The offsets start again at the vector of the lowest row left with a
+    /// list, so the rows below a dead head give their offsets back.
     pub(super) fn merge(&mut self) {
-        let rows = self
-            .offsets
-            .len()
-            .saturating_sub(1)
-            .max(self.delta.keys().max().map_or(0, |row| row + 1));
-        let mut offsets = Vec::with_capacity(rows + 1);
-        let mut sorted = Vec::with_capacity(self.sorted.len() + self.delta_len);
-        offsets.push(0);
-        for row in 0..rows {
+        let held = (!self.offsets.is_empty())
+            .then(|| (self.first_row, self.first_row + self.offsets.len() - 1));
+        let added = self
+            .delta
+            .keys()
+            .fold(None, |range: Option<(usize, usize)>, &row| {
+                Some(range.map_or((row, row + 1), |(low, high)| {
+                    (low.min(row), high.max(row + 1))
+                }))
+            });
+        let (low, high) = match (held, added) {
+            (Some((a, b)), Some((c, d))) => (a.min(c), b.max(d)),
+            (Some(range), None) | (None, Some(range)) => range,
+            (None, None) => (0, 0),
+        };
+        let mut offsets = Vec::new();
+        let mut first_row = 0;
+        // The removed edges are entries of the sorted lists (`remove` and `clear` take only
+        // those), so the merged lists hold exactly the rest and the delta.
+        let mut sorted = Vec::with_capacity(
+            self.sorted.len().saturating_sub(self.removed.len()) + self.delta_len,
+        );
+        for row in low..high {
+            let before = sorted.len();
             let mut added = self.delta.remove(&row).unwrap_or_default();
             added.sort_unstable();
             let mut kept = self
@@ -368,15 +405,56 @@ impl Adjacency {
                 };
                 sorted.extend(next);
             }
+            if offsets.is_empty() {
+                if sorted.len() == before {
+                    // Below the lowest row with a list: no offset yet.
+                    continue;
+                }
+                first_row = vector_start(row);
+                // The rows of its vector below it have empty lists.
+                offsets.resize(row - first_row + 1, 0);
+            }
             offsets.push(sorted.len());
         }
+        offsets.shrink_to_fit();
+        self.first_row = first_row;
         self.offsets = offsets;
         self.sorted = sorted;
-        self.removed.clear();
-        self.delta.clear();
+        // New, empty: a clear would keep the room the removed edges and the delta took.
+        self.removed = FxHashSet::default();
+        self.delta = FxHashMap::default();
         self.delta_rows = Bitset::default();
         self.delta_len = 0;
         self.delta_bytes = 0;
+    }
+
+    /// Gives back the offsets of the rows below `row` (a multiple of
+    /// [`VECTOR_ROWS`](super::versions::VECTOR_ROWS)), whose lists are empty
+    /// or removed: their sorted entries go at the next merge, as a removed
+    /// edge's do. Returns the heap bytes freed.
+    pub(super) fn trim_front(&mut self, row: usize) -> usize {
+        let cut = row
+            .saturating_sub(self.first_row)
+            .min(self.offsets.len().saturating_sub(1));
+        if cut == 0 {
+            return 0;
+        }
+        let before = self.offsets.capacity();
+        let mut kept = Vec::with_capacity(self.offsets.len() - cut);
+        kept.extend(self.offsets.drain(cut..));
+        self.offsets = kept;
+        self.first_row += cut;
+        (before - self.offsets.capacity()) * std::mem::size_of::<usize>()
+    }
+
+    /// Gives back the offsets of the rows below `head` when they are due
+    /// (see [`trims`](super::slots::trims)); returns the heap bytes freed.
+    pub(super) fn trim_dead_head(&mut self, head: usize) -> usize {
+        if super::slots::trims(self.first_row, head) {
+            self.trim_front(head)
+        } else {
+            0
+        }
     }
 
     /// The heap bytes it holds: its offsets, sorted lists, removed edges,

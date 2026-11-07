@@ -40,6 +40,7 @@ use std::sync::atomic::Ordering;
 
 use grafeo_common::change::Table;
 use grafeo_common::types::EpochId;
+use grafeo_common::utils::hash::FxHashSet;
 
 use super::account::{LINES, Line, Lines, add_lines};
 use super::updates::VECTORS;
@@ -239,6 +240,22 @@ impl Inner {
             group.listed = mask;
             self.account.moved(&held, &group.lines());
         }
+        // The rows taken out may leave a dead head: its slots go back, now
+        // that the collected edges are unlinked (which reads their ends).
+        for index in &edges {
+            if let Some(group) = self.edges.get_mut(index) {
+                let held = group.lines();
+                group.trim_head();
+                self.account.moved(&held, &group.lines());
+            }
+        }
+        for index in &nodes {
+            if let Some(group) = self.nodes.get_mut(index) {
+                let held = group.lines();
+                group.trim_head();
+                self.account.moved(&held, &group.lines());
+            }
+        }
         // A row group left without rows leaves the account with what it
         // holds, by its walk, and with its columns.
         let mut dropped: Lines = [0; LINES];
@@ -302,9 +319,16 @@ impl Inner {
                 values += group.label_updates.collect(horizon);
             }
         }
-        // A row group without rows goes whole, as a load would not make it.
+        // A row group without rows goes whole, as a load would not make it;
+        // the others give back the slots of a dead head.
         self.edges.retain(|_, group| !group.versions.is_empty());
         self.nodes.retain(|_, group| !group.versions.is_empty());
+        for group in self.edges.values_mut() {
+            group.trim_head();
+        }
+        for group in self.nodes.values_mut() {
+            group.trim_head();
+        }
         self.relist();
         Collected { rows, values }
     }
@@ -329,23 +353,38 @@ impl Inner {
     /// Takes the adjacency entries of the collected edge rows `edges` out
     /// of their nodes' rows; the edge rows still hold their ends.
     fn unlink_edges(&mut self, edges: &[u64]) {
+        let line = |outgoing: bool| {
+            if outgoing {
+                Line::Outgoing
+            } else {
+                Line::Incoming
+            }
+        };
+        // The adjacencies the edges leave, each merged once at the end when
+        // their removed edges are most of their lists.
+        let mut touched: FxHashSet<(u64, bool)> = FxHashSet::default();
         for edge in edges {
             let (group, row) = locate(*edge);
             let (src, dst, _) = self.edges[&group].ends(row);
             for (node, _, outgoing) in self.kept_ends(src, dst) {
-                let (group, row) = locate(node);
-                if let Some(group) = self.nodes.get_mut(&group) {
+                let (index, row) = locate(node);
+                if let Some(group) = self.nodes.get_mut(&index) {
                     let adjacency = group.adjacency_mut(outgoing);
                     let held = adjacency.counted_bytes();
                     adjacency.remove(row, *edge);
-                    let line = if outgoing {
-                        Line::Outgoing
-                    } else {
-                        Line::Incoming
-                    };
                     self.account
-                        .moved_line(line, held, adjacency.counted_bytes());
+                        .moved_line(line(outgoing), held, adjacency.counted_bytes());
+                    touched.insert((index, outgoing));
                 }
+            }
+        }
+        for (index, outgoing) in touched {
+            if let Some(group) = self.nodes.get_mut(&index) {
+                let adjacency = group.adjacency_mut(outgoing);
+                let held = adjacency.counted_bytes();
+                adjacency.merge_if_removed_dominate();
+                self.account
+                    .moved_line(line(outgoing), held, adjacency.counted_bytes());
             }
         }
     }

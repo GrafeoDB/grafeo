@@ -71,6 +71,7 @@ mod key_column;
 mod load;
 mod read;
 pub mod section;
+mod slots;
 mod spill;
 mod updates;
 mod versions;
@@ -361,6 +362,24 @@ impl NodeGroup {
         self.versions.get(row)
     }
 
+    /// Gives back the slots below the group's first vector with a row in any
+    /// version, in each structure where they are due (see
+    /// [`trims`](slots::trims)): no reader sees a row below it. Called by the
+    /// collect, after the rows it collected are taken out.
+    fn trim_head(&mut self) {
+        // The lists of the rows the collect took out leave once they are
+        // most of the lists, which also starts the offsets at the lowest
+        // row left with a list.
+        self.outgoing.merge_if_removed_dominate();
+        self.incoming.merge_if_removed_dominate();
+        let Some(head) = self.versions.first_vector_row() else {
+            return;
+        };
+        self.columns.trim_dead_head(head);
+        self.outgoing.trim_dead_head(head);
+        self.incoming.trim_dead_head(head);
+    }
+
     /// The row's newest label ids, ascending.
     fn labels_of(&self, row: usize) -> Vec<u32> {
         label_ids(&self.labels, row)
@@ -462,9 +481,11 @@ impl NodeGroup {
 #[derive(Debug, Default)]
 struct EdgeGroup {
     versions: Versions,
-    src: Vec<u64>,
-    dst: Vec<u64>,
-    edge_type: Vec<u32>,
+    /// The rows' ends and types, from the vector of the group's first row
+    /// (see [`GroupRows`](slots::GroupRows)).
+    src: slots::GroupRows<u64>,
+    dst: slots::GroupRows<u64>,
+    edge_type: slots::GroupRows<u32>,
     columns: Columns,
     /// The vectors the store lists, a bit each (`collect`).
     listed: u32,
@@ -479,14 +500,17 @@ impl EdgeGroup {
 
     /// The row's source, target and type id; the row exists.
     fn ends(&self, row: usize) -> (u64, u64, u32) {
-        (self.src[row], self.dst[row], self.edge_type[row])
+        (
+            *self.src.at(row),
+            *self.dst.at(row),
+            *self.edge_type.at(row),
+        )
     }
 
     /// The heap bytes of its rows' ends and types: the one figure of their
     /// size the walk and the account read.
     fn ends_bytes(&self) -> usize {
-        (self.src.capacity() + self.dst.capacity()) * std::mem::size_of::<u64>()
-            + self.edge_type.capacity() * std::mem::size_of::<u32>()
+        self.src.heap_bytes() + self.dst.heap_bytes() + self.edge_type.heap_bytes()
     }
 
     /// What it holds, line by line, as the account counts it (see
@@ -539,12 +563,23 @@ impl EdgeGroup {
     }
 
     fn set_ends(&mut self, row: usize, src: u64, dst: u64, edge_type: u32) {
-        grow(&mut self.src, row, 0);
-        grow(&mut self.dst, row, 0);
-        grow(&mut self.edge_type, row, 0);
-        self.src[row] = src;
-        self.dst[row] = dst;
-        self.edge_type[row] = edge_type;
+        self.src.put(row, src, 0);
+        self.dst.put(row, dst, 0);
+        self.edge_type.put(row, edge_type, 0);
+    }
+
+    /// Gives back the slots below the group's first vector with a row in any
+    /// version, in each structure where they are due (see
+    /// [`trims`](slots::trims)): no reader sees a row below it. Called by the
+    /// collect, after the rows it collected are taken out and unlinked.
+    fn trim_head(&mut self) {
+        let Some(head) = self.versions.first_vector_row() else {
+            return;
+        };
+        self.src.trim_dead_head(head);
+        self.dst.trim_dead_head(head);
+        self.edge_type.trim_dead_head(head);
+        self.columns.trim_dead_head(head);
     }
 
     fn remove(&mut self, row: usize) {
@@ -1322,14 +1357,17 @@ impl Inner {
     /// every edge row group.
     fn incoming_by_scan(&self, node: u64) -> impl Iterator<Item = Adjacent> + '_ {
         self.edges.iter().flat_map(move |(index, group)| {
+            let first = group.dst.first_row();
             group
                 .dst
+                .as_slice()
                 .iter()
                 .enumerate()
+                .map(move |(offset, dst)| (first + offset, dst))
                 .filter(move |(row, dst)| **dst == node && group.versions.exists(*row))
                 .map(move |(row, _)| Adjacent {
-                    edge_type: group.edge_type[row],
-                    other: group.src[row],
+                    edge_type: *group.edge_type.at(row),
+                    other: *group.src.at(row),
                     edge: index * ROWS_PER_GROUP + row as u64,
                 })
         })

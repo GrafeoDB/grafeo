@@ -676,6 +676,19 @@ impl Versions {
         self.recount_vector(index, before);
     }
 
+    /// The first row of the first vector that holds a row in any version
+    /// (created, pending or deleted and not collected), `None` for none: no
+    /// reader can see a row below it.
+    pub(super) fn first_vector_row(&self) -> Option<usize> {
+        self.vectors
+            .iter()
+            .position(|vector| match vector {
+                Vector::Flat(exists) => !exists.is_empty(),
+                Vector::Stamped(stamped) => !stamped.exists.is_empty(),
+            })
+            .map(|index| index * VECTOR_ROWS)
+    }
+
     /// The rows that exist, ascending, each with its version.
     pub(super) fn rows(&self) -> impl Iterator<Item = (usize, RowVersion)> + '_ {
         self.vectors.iter().enumerate().flat_map(|(index, vector)| {

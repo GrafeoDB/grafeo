@@ -122,6 +122,7 @@ impl RowGroupStore {
                 group.outgoing.merge();
                 group.incoming.merge();
             }
+            group.trim_head();
             let moved = group.lines();
             inner.account.moved(&held, &moved);
             inner.settle_tight();
@@ -149,6 +150,7 @@ impl RowGroupStore {
             let compressed = group
                 .columns
                 .install_compressed(plan, self.memory_manager(), &thaws);
+            group.trim_head();
             let moved = group.lines();
             inner.account.moved(&held, &moved);
             inner.settle_tight();

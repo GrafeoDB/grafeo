@@ -31,6 +31,7 @@ use parking_lot::Mutex;
 use super::Read;
 use super::account::{ThawSink, granted_chunk};
 use super::bitset::Bitset;
+use super::slots::GroupRows;
 use super::updates::Updates;
 use super::versions::VECTOR_ROWS;
 use crate::codec::column_chunk::{
@@ -42,51 +43,42 @@ use crate::codec::column_chunk::{
 /// stays small to encode and its zone map tight.
 const SPILL_CHUNK_ROWS: usize = VECTOR_ROWS;
 
-/// The values of a column's rows, by row.
+/// The values of a column's rows, by row, from the vector of the group's
+/// first row with a value (see [`GroupRows`]).
 #[derive(Debug, Clone)]
 enum Data {
-    Int64(Vec<i64>),
-    Float64(Vec<f64>),
+    Int64(GroupRows<i64>),
+    Float64(GroupRows<f64>),
     Bool(Bitset),
-    String(Vec<ArcStr>),
+    String(GroupRows<ArcStr>),
     /// Values of any type, once the rows' types differ.
-    Values(Vec<Value>),
+    Values(GroupRows<Value>),
 }
 
 impl Data {
     /// An empty column for values like `value`.
     fn for_value(value: &Value) -> Self {
         match value {
-            Value::Int64(_) => Self::Int64(Vec::new()),
-            Value::Float64(_) => Self::Float64(Vec::new()),
+            Value::Int64(_) => Self::Int64(GroupRows::default()),
+            Value::Float64(_) => Self::Float64(GroupRows::default()),
             Value::Bool(_) => Self::Bool(Bitset::default()),
-            Value::String(_) => Self::String(Vec::new()),
-            _ => Self::Values(Vec::new()),
+            Value::String(_) => Self::String(GroupRows::default()),
+            _ => Self::Values(GroupRows::default()),
         }
     }
 
     /// Writes `value` at `row` when it is of this column's type; returns
-    /// whether it was. The vectors grow through [`grow_rows`]; what they
+    /// whether it was. The vectors grow through [`GroupRows::put`]; what they
     /// hold is read through [`heap_bytes`](Self::heap_bytes).
     fn put(&mut self, row: usize, value: &Value) -> bool {
         match (self, value) {
-            (Self::Int64(values), Value::Int64(v)) => {
-                grow_rows(values, row, 0);
-                values[row] = *v;
-            }
-            (Self::Float64(values), Value::Float64(v)) => {
-                grow_rows(values, row, 0.0);
-                values[row] = *v;
-            }
+            (Self::Int64(values), Value::Int64(v)) => values.put(row, *v, 0),
+            (Self::Float64(values), Value::Float64(v)) => values.put(row, *v, 0.0),
             (Self::Bool(bits), Value::Bool(v)) => bits.put(row, *v),
             (Self::String(values), Value::String(v)) => {
-                grow_rows(values, row, ArcStr::default());
-                values[row] = v.clone();
+                values.put(row, v.clone(), ArcStr::default());
             }
-            (Self::Values(values), v) => {
-                grow_rows(values, row, Value::Null);
-                values[row] = v.clone();
-            }
+            (Self::Values(values), v) => values.put(row, v.clone(), Value::Null),
             _ => return false,
         }
         true
@@ -95,11 +87,11 @@ impl Data {
     /// The value at `row`, which the column holds.
     fn get(&self, row: usize) -> Value {
         match self {
-            Self::Int64(values) => Value::Int64(values[row]),
-            Self::Float64(values) => Value::Float64(values[row]),
+            Self::Int64(values) => Value::Int64(*values.at(row)),
+            Self::Float64(values) => Value::Float64(*values.at(row)),
             Self::Bool(bits) => Value::Bool(bits.get(row)),
-            Self::String(values) => Value::String(values[row].clone()),
-            Self::Values(values) => values[row].clone(),
+            Self::String(values) => Value::String(values.at(row).clone()),
+            Self::Values(values) => values.at(row).clone(),
         }
     }
 
@@ -139,8 +131,12 @@ impl Data {
     fn payload_bytes(&self) -> usize {
         match self {
             Self::Int64(_) | Self::Float64(_) | Self::Bool(_) => 0,
-            Self::String(values) => values.iter().map(|value| value.len()).sum(),
-            Self::Values(values) => values.iter().map(Value::estimated_size_bytes).sum(),
+            Self::String(values) => values.as_slice().iter().map(|value| value.len()).sum(),
+            Self::Values(values) => values
+                .as_slice()
+                .iter()
+                .map(Value::estimated_size_bytes)
+                .sum(),
         }
     }
 
@@ -148,21 +144,12 @@ impl Data {
     /// figure of their size both the walk and the account read.
     fn heap_bytes(&self) -> usize {
         match self {
-            Self::Int64(values) => values.capacity() * std::mem::size_of::<i64>(),
-            Self::Float64(values) => values.capacity() * std::mem::size_of::<f64>(),
+            Self::Int64(values) => values.heap_bytes(),
+            Self::Float64(values) => values.heap_bytes(),
             Self::Bool(bits) => bits.heap_bytes(),
-            Self::String(values) => values.capacity() * std::mem::size_of::<ArcStr>(),
-            Self::Values(values) => values.capacity() * std::mem::size_of::<Value>(),
+            Self::String(values) => values.heap_bytes(),
+            Self::Values(values) => values.heap_bytes(),
         }
-    }
-}
-
-/// Grows `values` so `row` is in it, with `filler` in the rows it adds:
-/// the one place a column's vectors grow, whose capacity
-/// [`Data::heap_bytes`] reads.
-fn grow_rows<T: Clone>(values: &mut Vec<T>, row: usize, filler: T) {
-    if row >= values.len() {
-        values.resize(row + 1, filler);
     }
 }
 
@@ -291,10 +278,9 @@ impl Hot {
             } else {
                 // Another type: every row's value moves to a column of any
                 // values.
-                let mut values = Vec::new();
+                let mut values = GroupRows::default();
                 for present in self.present.rows() {
-                    grow_rows(&mut values, present, Value::Null);
-                    values[present] = self.data.get(present);
+                    values.put(present, self.data.get(present), Value::Null);
                 }
                 self.data = Data::Values(values);
             }
@@ -335,6 +321,18 @@ impl Hot {
         self.get(row)
     }
 
+    /// Gives back the value slots below `head` when they are due (see
+    /// [`trims`](super::slots::trims)); the presence bits stay.
+    fn trim_dead_head(&mut self, head: usize) -> usize {
+        match &mut self.data {
+            Data::Int64(values) => values.trim_dead_head(head),
+            Data::Float64(values) => values.trim_dead_head(head),
+            Data::Bool(_) => 0,
+            Data::String(values) => values.trim_dead_head(head),
+            Data::Values(values) => values.trim_dead_head(head),
+        }
+    }
+
     /// The heap bytes of its presence bits, its values and what they hold,
     /// with its bounds' values (the update chains are counted with the
     /// versions): a walk of every value, for the oracle.
@@ -359,7 +357,7 @@ impl Hot {
         let mut hot = Self {
             present: Bitset::default(),
             // Typed by its first value (see `set`), as a written column is.
-            data: Data::Int64(Vec::new()),
+            data: Data::Int64(GroupRows::default()),
             payload: 0,
             updates: Updates::default(),
             bound: Bound::Empty,
@@ -439,11 +437,11 @@ pub(super) enum ColumnRead<'a> {
 /// A hot column's values, as far as they compare by their kind.
 pub(super) enum HotValues<'a> {
     /// Integers by row: only the rows with a value mean anything.
-    Int64(&'a [i64]),
+    Int64(&'a GroupRows<i64>),
     /// Floats by row: only the rows with a value mean anything.
-    Float64(&'a [f64]),
+    Float64(&'a GroupRows<f64>),
     /// Strings by row: only the rows with a value mean anything.
-    String(&'a [ArcStr]),
+    String(&'a GroupRows<ArcStr>),
     /// Anything else: read a row with [`HotRows::get`].
     Other,
 }
@@ -1536,6 +1534,24 @@ impl Columns {
 
     /// Takes every value at `row` out, with what any chain kept of it. A
     /// cold column without a value at the row stays cold.
+    /// Gives back each hot column's value slots below `head`, the row
+    /// group's first vector with a row in any version, when they are due (see
+    /// [`trims`](super::slots::trims)). A cold column holds only the chunks of
+    /// its rows and stays as it is. Returns the heap bytes freed.
+    pub(super) fn trim_dead_head(&mut self, head: usize) -> usize {
+        let mut freed = 0;
+        for column in self.by_key.values_mut() {
+            if column.hot.get().is_none() {
+                continue;
+            }
+            let (hot, before) = column.hot_counted();
+            freed += hot.trim_dead_head(head);
+            let (_, after) = column.hot_counted();
+            self.counted.moved(before, after);
+        }
+        freed
+    }
+
     pub(super) fn clear_row(&mut self, row: usize) {
         for column in self.by_key.values_mut() {
             if column.is_cold() && !column.has_value(row) {

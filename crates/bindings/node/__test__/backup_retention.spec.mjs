@@ -13,7 +13,10 @@ import { join } from 'node:path'
 import { describe, it, expect } from 'vitest'
 import { GrafeoDB } from '../grafeo.js'
 
-const LIMIT = 256 * 1024
+// A batch writes about 35 KB of WAL, so each checkpoint's segment alone passes this limit: the
+// chain breaks after the first round, whatever the disk's speed, and three rounds leave room.
+const LIMIT = 16 * 1024
+const ROUNDS = 3
 
 async function writeBatch(db, start) {
   await db.execute(
@@ -36,7 +39,7 @@ describe('backup retention', () => {
     const backups = join(dir, 'backups')
     const db = GrafeoDB.create(join(dir, 'db.grafeo'), { walRetentionLimit: LIMIT })
     db.backupFull(backups)
-    for (let round = 0; round < 30; round++) {
+    for (let round = 0; round < ROUNDS; round++) {
       await writeBatch(db, round * 100)
       db.walCheckpoint()
     }

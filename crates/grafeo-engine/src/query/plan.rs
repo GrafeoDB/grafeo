@@ -1489,10 +1489,9 @@ impl LogicalOperator {
                 bound.insert(join.column.clone());
                 return Some(bound);
             }
-            Self::Except(op) => return op.left.bound_variables(imports),
-            Self::Intersect(op) => return op.left.bound_variables(imports),
-            Self::Otherwise(op) => return op.left.bound_variables(imports),
-            Self::Union(union) => return union.inputs.first()?.bound_variables(imports),
+            Self::Union(_) | Self::Except(_) | Self::Intersect(_) | Self::Otherwise(_) => {
+                return self.set_operation_columns()?.bound_variables(imports);
+            }
             Self::MultiWayJoin(join) => {
                 for input in &join.inputs {
                     bound.extend(input.bound_variables(imports)?);
@@ -1545,12 +1544,26 @@ impl LogicalOperator {
             Self::Limit(limit) => limit.input.add_returned_variables(bound),
             Self::Skip(skip) => skip.input.add_returned_variables(bound),
             Self::Distinct(distinct) => distinct.input.add_returned_variables(bound),
-            // The branches of a UNION return the same names.
-            Self::Union(union) => union
-                .inputs
-                .first()
-                .map_or(Some(()), |first| first.add_returned_variables(bound)),
+            // The branches of a set operation return the same names.
+            Self::Union(_) | Self::Except(_) | Self::Intersect(_) | Self::Otherwise(_) => self
+                .set_operation_columns()
+                .map_or(Some(()), |branch| branch.add_returned_variables(bound)),
             _ => Some(()),
+        }
+    }
+
+    /// The branch whose columns a set operation returns: the first input of a `UNION`, the left
+    /// side of `EXCEPT`, `INTERSECT` and `OTHERWISE` (the translators check that the branches
+    /// agree, `check_branch_columns`). `None` for any other operator, and for a `UNION` without
+    /// inputs.
+    #[must_use]
+    pub(crate) fn set_operation_columns(&self) -> Option<&LogicalOperator> {
+        match self {
+            Self::Union(union) => union.inputs.first(),
+            Self::Except(op) => Some(&op.left),
+            Self::Intersect(op) => Some(&op.left),
+            Self::Otherwise(op) => Some(&op.left),
+            _ => None,
         }
     }
 }

@@ -36,6 +36,7 @@ mod bound_edges;
 mod builtin_function_calls;
 mod bulk_selector_plans;
 mod bulk_writes;
+mod call_body_set_operations;
 mod call_procedures;
 mod call_subquery_imports;
 mod catalog_v2;

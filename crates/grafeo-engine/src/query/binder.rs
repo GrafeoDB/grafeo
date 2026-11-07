@@ -1323,16 +1323,16 @@ impl Binder {
             }
             LogicalOperator::Limit(l) => Self::register_subplan_columns(&l.input, ctx),
             LogicalOperator::Skip(s) => Self::register_subplan_columns(&s.input, ctx),
-            // The branches of a UNION return the same columns.
-            LogicalOperator::Union(u) => {
-                if let Some(first) = u.inputs.first() {
-                    Self::register_subplan_columns(first, ctx);
-                }
-            }
             LogicalOperator::Distinct(d) => Self::register_subplan_columns(&d.input, ctx),
-            // The branches of an OTHERWISE return the same columns.
-            LogicalOperator::Otherwise(otherwise) => {
-                Self::register_subplan_columns(&otherwise.left, ctx);
+            // The branches of a set operation return the same columns (the translators check
+            // them).
+            LogicalOperator::Union(_)
+            | LogicalOperator::Except(_)
+            | LogicalOperator::Intersect(_)
+            | LogicalOperator::Otherwise(_) => {
+                if let Some(branch) = plan.set_operation_columns() {
+                    Self::register_subplan_columns(branch, ctx);
+                }
             }
             // A procedure call in a query returns the columns it yields, also
             // under the `WHERE` that follows its `YIELD`.
@@ -3958,7 +3958,6 @@ mod tests {
     #[test]
     fn test_bind_except_intersect_otherwise_walk_both_sides() {
         use crate::query::plan::{ExceptOp, IntersectOp, OtherwiseOp};
-
         for op in [
             LogicalOperator::Except(ExceptOp {
                 left: Box::new(LogicalOperator::NodeScan(NodeScanOp {

@@ -28,7 +28,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use grafeo_common::types::Value;
 use grafeo_engine::GrafeoDB;
-use grafeo_engine::procedures::BuiltinProcedures;
+use grafeo_engine::procedures::{BuiltinProcedures, ExternalAccess};
 
 /// How a procedure's answer compares across insertion orders.
 enum Across {
@@ -203,6 +203,10 @@ fn calls() -> Vec<(String, String)> {
     let mut found: Vec<(String, String)> = BuiltinProcedures::new()
         .list()
         .into_iter()
+        // A procedure that reaches outside reads a file and writes the graph: it has no
+        // argument here and no answer to compare, and the external-access and loader tests
+        // cover it.
+        .filter(|info| info.external_access == ExternalAccess::None)
         .map(|info| {
             let entries: Vec<String> = info
                 .parameters

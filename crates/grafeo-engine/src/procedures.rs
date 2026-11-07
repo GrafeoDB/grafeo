@@ -15,11 +15,19 @@
 //! - Vector and text search (`grafeo.search.vector`, `grafeo.search.mmr`,
 //!   `grafeo.search.text`): implemented directly, require
 //!   [`ProcedureContext::lpg_store`].
+//! - The loads (`grafeo.load_nodes_csv`, `grafeo.load_edges_csv`, see
+//!   [`crate::loader`]): registered for their parameters and access, planned
+//!   with the statement's writer.
+//!
+//! The registry is in every build; the graph algorithms need `algos`.
+//! Each procedure states whether it reaches outside the database
+//! ([`Procedure::external_access`]), which a session without external access
+//! refuses.
 
 use std::sync::Arc;
 
-#[cfg(feature = "vector-index")]
 use grafeo_adapters::plugins::Domain;
+#[cfg(feature = "algos")]
 use grafeo_adapters::plugins::algorithms::{
     ArticulationPointsAlgorithm, BellmanFordAlgorithm, BetweennessCentralityAlgorithm,
     BfsAlgorithm, BridgesAlgorithm, ClosenessCentralityAlgorithm, ClusteringCoefficientAlgorithm,
@@ -32,6 +40,8 @@ use grafeo_adapters::plugins::algorithms::{
 use grafeo_adapters::plugins::{
     AlgorithmResult, ParameterDef, ParameterType, Parameters, Prepared, prepare,
 };
+
+pub use crate::auth::ExternalAccess;
 use grafeo_common::types::{ReadView, Value};
 use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind, Result};
 use grafeo_core::graph::GraphStore;
@@ -56,6 +66,12 @@ pub trait Procedure: Send + Sync {
 
     /// Returns parameter definitions (name, type, required, default).
     fn parameters(&self) -> &[ParameterDef];
+
+    /// Whether the procedure reads or writes anything outside the database (a file, a URL, a
+    /// model), which a session without external access refuses before the call is planned (see
+    /// [`Identity::with_external_access`](crate::auth::Identity::with_external_access)). Every
+    /// procedure states it: one added later is never let through by a default.
+    fn external_access(&self) -> ExternalAccess;
 
     /// Returns the canonical output column names in order, for a call with
     /// the parameters' defaults (as `grafeo.procedures()` lists them).
@@ -166,10 +182,12 @@ impl<'a> ProcedureContext<'a> {
 /// Adapter that presents a [`GraphAlgorithm`] as a [`Procedure`], with
 /// canonical output column names (e.g., `score` instead of `pagerank`, see
 /// [`canonical_output_columns`]).
+#[cfg(feature = "algos")]
 pub struct GraphAlgorithmProcedure {
     inner: Arc<dyn GraphAlgorithm>,
 }
 
+#[cfg(feature = "algos")]
 impl GraphAlgorithmProcedure {
     /// Wraps a graph algorithm as a procedure.
     pub fn new(algorithm: Arc<dyn GraphAlgorithm>) -> Self {
@@ -177,7 +195,12 @@ impl GraphAlgorithmProcedure {
     }
 }
 
+#[cfg(feature = "algos")]
 impl Procedure for GraphAlgorithmProcedure {
+    fn external_access(&self) -> ExternalAccess {
+        ExternalAccess::None
+    }
+
     fn name(&self) -> &str {
         self.inner.name()
     }
@@ -213,6 +236,10 @@ impl Procedure for GraphAlgorithmProcedure {
 struct LabelsProcedure;
 
 impl Procedure for LabelsProcedure {
+    fn external_access(&self) -> ExternalAccess {
+        ExternalAccess::None
+    }
+
     fn name(&self) -> &str {
         "labels"
     }
@@ -243,6 +270,10 @@ impl Procedure for LabelsProcedure {
 struct RelationshipTypesProcedure;
 
 impl Procedure for RelationshipTypesProcedure {
+    fn external_access(&self) -> ExternalAccess {
+        ExternalAccess::None
+    }
+
     fn name(&self) -> &str {
         "relationshipTypes"
     }
@@ -273,6 +304,10 @@ impl Procedure for RelationshipTypesProcedure {
 struct PropertyKeysProcedure;
 
 impl Procedure for PropertyKeysProcedure {
+    fn external_access(&self) -> ExternalAccess {
+        ExternalAccess::None
+    }
+
     fn name(&self) -> &str {
         "propertyKeys"
     }
@@ -407,6 +442,10 @@ impl SearchVectorProcedure {
 
 #[cfg(feature = "vector-index")]
 impl Procedure for SearchVectorProcedure {
+    fn external_access(&self) -> ExternalAccess {
+        ExternalAccess::None
+    }
+
     fn name(&self) -> &str {
         "search.vector"
     }
@@ -526,6 +565,10 @@ impl SearchMmrProcedure {
 
 #[cfg(feature = "vector-index")]
 impl Procedure for SearchMmrProcedure {
+    fn external_access(&self) -> ExternalAccess {
+        ExternalAccess::None
+    }
+
     fn name(&self) -> &str {
         "search.mmr"
     }
@@ -658,6 +701,10 @@ impl SearchTextProcedure {
 
 #[cfg(feature = "text-index")]
 impl Procedure for SearchTextProcedure {
+    fn external_access(&self) -> ExternalAccess {
+        ExternalAccess::None
+    }
+
     fn name(&self) -> &str {
         "search.text"
     }
@@ -724,8 +771,38 @@ impl BuiltinProcedures {
     #[must_use]
     pub fn new() -> Self {
         let mut procedures: HashMap<String, Arc<dyn Procedure>> = HashMap::new();
+        #[cfg(feature = "algos")]
+        Self::register_algorithms(&mut procedures);
 
-        // Graph algorithms, wrapped via the adapter.
+        // Catalog introspection
+        let mut register = |proc: Arc<dyn Procedure>| {
+            procedures.insert(proc.name().to_string(), proc);
+        };
+        register(Arc::new(LabelsProcedure));
+        register(Arc::new(RelationshipTypesProcedure));
+        register(Arc::new(PropertyKeysProcedure));
+
+        // The loads, which read a file.
+        register(Arc::new(crate::loader::LoadProcedure::nodes()));
+        register(Arc::new(crate::loader::LoadProcedure::edges()));
+
+        // Search procedures (feature-gated).
+        #[cfg(feature = "vector-index")]
+        {
+            register(Arc::new(SearchVectorProcedure::new()));
+            register(Arc::new(SearchMmrProcedure::new()));
+        }
+        #[cfg(feature = "text-index")]
+        {
+            register(Arc::new(SearchTextProcedure::new()));
+        }
+
+        Self { procedures }
+    }
+
+    /// The graph algorithms, each wrapped as a procedure.
+    #[cfg(feature = "algos")]
+    fn register_algorithms(procedures: &mut HashMap<String, Arc<dyn Procedure>>) {
         let mut register_algo = |algo: Arc<dyn GraphAlgorithm>| {
             let proc = Arc::new(GraphAlgorithmProcedure::new(algo));
             procedures.insert(proc.name().to_string(), proc);
@@ -776,27 +853,6 @@ impl BuiltinProcedures {
 
         // Pattern matching
         register_algo(Arc::new(SubgraphIsomorphismAlgorithm));
-
-        // Catalog introspection
-        let mut register = |proc: Arc<dyn Procedure>| {
-            procedures.insert(proc.name().to_string(), proc);
-        };
-        register(Arc::new(LabelsProcedure));
-        register(Arc::new(RelationshipTypesProcedure));
-        register(Arc::new(PropertyKeysProcedure));
-
-        // Search procedures (feature-gated).
-        #[cfg(feature = "vector-index")]
-        {
-            register(Arc::new(SearchVectorProcedure::new()));
-            register(Arc::new(SearchMmrProcedure::new()));
-        }
-        #[cfg(feature = "text-index")]
-        {
-            register(Arc::new(SearchTextProcedure::new()));
-        }
-
-        Self { procedures }
     }
 
     /// Resolves a dotted procedure name to its implementation.
@@ -817,6 +873,7 @@ impl BuiltinProcedures {
                 description: proc.description().to_string(),
                 parameters: proc.parameters().to_vec(),
                 output_columns: proc.output_columns(),
+                external_access: proc.external_access(),
             })
             .collect();
         result.sort_by(|a, b| a.name.cmp(&b.name));
@@ -830,6 +887,13 @@ impl Default for BuiltinProcedures {
     }
 }
 
+/// The registry `CALL` resolves procedures in, and the external-access check reads: built
+/// once.
+pub(crate) fn registry() -> &'static BuiltinProcedures {
+    static PROCEDURES: std::sync::OnceLock<BuiltinProcedures> = std::sync::OnceLock::new();
+    PROCEDURES.get_or_init(BuiltinProcedures::new)
+}
+
 /// Metadata about a registered procedure.
 pub struct ProcedureInfo {
     /// Qualified name (e.g., `"grafeo.pagerank"`).
@@ -840,6 +904,8 @@ pub struct ProcedureInfo {
     pub parameters: Vec<ParameterDef>,
     /// Output column names.
     pub output_columns: Vec<String>,
+    /// Whether it reaches outside the database (see [`Procedure::external_access`]).
+    pub external_access: ExternalAccess,
 }
 
 /// Resolves a dotted procedure name to its lookup key.
@@ -851,7 +917,7 @@ pub struct ProcedureInfo {
 /// - `CALL pagerank()` / `CALL grafeo.pagerank()` → `"pagerank"`
 /// - `CALL db.labels()` / `CALL grafeo.labels()` → `"labels"`
 /// - `CALL grafeo.search.vector(...)` → `"search.vector"`
-fn resolve_name(parts: &[String]) -> String {
+pub(crate) fn resolve_name(parts: &[String]) -> String {
     let slice = match parts {
         [ns, rest @ ..]
             if (ns.eq_ignore_ascii_case("grafeo") || ns.eq_ignore_ascii_case("db"))
@@ -871,6 +937,7 @@ fn resolve_name(parts: &[String]) -> String {
 /// the columns each algorithm's `execute()` gives for those parameters, in
 /// order: `dijkstra` to a `target` gives the one path, `kcore` with a `k`
 /// the members of that core, a normalized `degree_centrality` one score.
+#[cfg(feature = "algos")]
 #[must_use]
 pub fn canonical_output_columns(algo: &dyn GraphAlgorithm, params: &Parameters) -> Vec<String> {
     match algo.name() {
@@ -1017,13 +1084,7 @@ pub fn evaluate_arguments(
                     parameter_names(param_defs)
                 ))));
             }
-            set_parameter(
-                &mut params,
-                procedure,
-                key.as_str(),
-                def.map(|def| def.param_type),
-                value,
-            )?;
+            set_parameter(&mut params, procedure, key.as_str(), def, value)?;
         }
         return params.prepared(procedure, param_defs);
     }
@@ -1037,13 +1098,7 @@ pub fn evaluate_arguments(
         ))));
     }
     for (def, value) in param_defs.iter().zip(args) {
-        set_parameter(
-            &mut params,
-            procedure,
-            &def.name,
-            Some(def.param_type),
-            value,
-        )?;
+        set_parameter(&mut params, procedure, &def.name, Some(def), value)?;
     }
     params.prepared(procedure, param_defs)
 }
@@ -1061,16 +1116,21 @@ fn parameter_names(param_defs: &[ParameterDef]) -> String {
         .join(", ")
 }
 
-/// Sets parameter `name` to `value`, which must suit `expected` (any value a
-/// parameter can hold when `None`).
+/// Sets parameter `name`, which `def` defines, to `value`, which must suit its
+/// type (any value a parameter can hold for a key every call takes, `def`
+/// `None`). One value for a list that declares it takes one
+/// ([`Domain::ListOrOne`](grafeo_adapters::plugins::Domain::ListOrOne)) is
+/// set as it is, and [`prepare`] makes it a list of one.
 fn set_parameter(
     params: &mut Parameters,
     procedure: &str,
     name: &str,
-    expected: Option<ParameterType>,
+    def: Option<&ParameterDef>,
     value: &Value,
 ) -> Result<()> {
     use ParameterType as Type;
+    let expected = def.map(|def| def.param_type);
+    let one_is_a_list = def.is_some_and(|def| def.domain == Domain::ListOrOne);
     match (expected, value) {
         (_, Value::Null) => params.set_null(name),
         (Some(Type::Integer | Type::NodeId) | None, Value::Int64(v)) => params.set_int(name, *v),
@@ -1087,6 +1147,10 @@ fn set_parameter(
                 .map(|f| Value::Float64(f64::from(*f)))
                 .collect(),
         ),
+        (Some(Type::Map), Value::Map(entries)) => params.set_map(name, Arc::clone(entries)),
+        (Some(Type::List), value) if one_is_a_list => {
+            return set_parameter(params, procedure, name, None, value);
+        }
         (expected, value) => {
             let wanted = match expected {
                 Some(Type::Integer) => "an integer",
@@ -1095,6 +1159,7 @@ fn set_parameter(
                 Some(Type::String) => "a string",
                 Some(Type::Boolean) => "a boolean",
                 Some(Type::List) => "a list",
+                Some(Type::Map) => "a map",
                 None => "a number, string, boolean or list",
             };
             return Err(Error::from(QueryError::new(
@@ -1124,12 +1189,22 @@ pub fn procedures_result(registry: &BuiltinProcedures) -> AlgorithmResult {
             .parameters
             .iter()
             .map(|p| {
+                // The values the argument allows, after the type and before the default (which
+                // readers take as the text after `default=`): what an invalid parameter value
+                // (22023) names.
+                let domain = match p.domain {
+                    Domain::OfType => String::new(),
+                    domain => format!(", {}", domain.describe(None)),
+                };
                 if p.required {
-                    format!("{} ({:?})", p.name, p.param_type)
+                    format!("{} ({:?}{domain})", p.name, p.param_type)
                 } else if let Some(ref default) = p.default {
-                    format!("{} ({:?}, default={})", p.name, p.param_type, default)
+                    format!(
+                        "{} ({:?}{domain}, default={})",
+                        p.name, p.param_type, default
+                    )
                 } else {
-                    format!("{} ({:?}, optional)", p.name, p.param_type)
+                    format!("{} ({:?}{domain}, optional)", p.name, p.param_type)
                 }
             })
             .collect::<Vec<_>>()

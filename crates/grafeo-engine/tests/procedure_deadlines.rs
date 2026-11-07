@@ -24,7 +24,7 @@ use std::time::{Duration, Instant};
 use grafeo_common::types::Value;
 use grafeo_common::utils::error::{Error, QueryErrorKind};
 use grafeo_core::execution::deadline;
-use grafeo_engine::procedures::BuiltinProcedures;
+use grafeo_engine::procedures::{BuiltinProcedures, ExternalAccess};
 use grafeo_engine::{Config, GrafeoDB};
 
 /// What a procedure does under the probe.
@@ -161,11 +161,16 @@ fn argument(procedure: &str, parameter: &str, required: bool) -> Option<&'static
     })
 }
 
-/// Every procedure of the catalogue with its call, in the map form, and its row.
+/// Every procedure of the catalogue that stays inside the database, with its call, in the map
+/// form, and its row.
 fn calls() -> Vec<(String, String, Row)> {
     let mut found: Vec<(String, String, Row)> = BuiltinProcedures::new()
         .list()
         .into_iter()
+        // A procedure that reaches outside reads a file and writes the graph: it has no
+        // argument here and no answer to compare, and the external-access and loader tests
+        // cover it.
+        .filter(|info| info.external_access == ExternalAccess::None)
         .map(|info| {
             let entries: Vec<String> = info
                 .parameters

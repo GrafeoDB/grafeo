@@ -2,7 +2,6 @@
 //!
 //! Executes physical plans and produces results.
 
-#[cfg(feature = "algos")]
 pub mod procedure_call;
 #[cfg(feature = "gql")]
 pub mod stream;

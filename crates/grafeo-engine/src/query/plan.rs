@@ -8,6 +8,8 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 use grafeo_common::types::Value;
+
+use crate::auth::ExternalAccess;
 pub use grafeo_core::execution::operators::BuiltinFunction;
 
 #[cfg(any(feature = "sparql", feature = "triple-store"))]
@@ -467,7 +469,221 @@ pub enum LogicalOperator {
     LoadData(LoadDataOp),
 }
 
+/// Something a statement reaches outside the database with (a file it loads, a procedure that
+/// reads or writes outside), which a session without external access refuses (see
+/// [`Identity::with_external_access`](crate::auth::Identity::with_external_access)).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutsideReach {
+    /// What reaches outside, as the refusal names it: `LOAD DATA FROM 'people.csv'`, a
+    /// procedure's name.
+    pub what: String,
+    /// How it reaches outside.
+    pub how: ExternalAccess,
+}
+
 impl LogicalOperator {
+    /// The first part of this plan that reaches outside the database, if any: a `LOAD DATA` (and
+    /// Cypher's `LOAD CSV`), a SPARQL `LOAD`, or a procedure call `call` answers for (a built-in
+    /// procedure by its declared access, a stored one by its body), in this operator, its
+    /// expressions, the subqueries inside them and the operators below. It reads the plan only:
+    /// no argument needs a value.
+    ///
+    /// Every operator and every expression is matched by name, so a new one states what it
+    /// reaches before it compiles.
+    pub fn reaches_outside(
+        &self,
+        call: &mut dyn FnMut(&CallProcedureOp) -> Option<OutsideReach>,
+    ) -> Option<OutsideReach> {
+        let own = match self {
+            Self::LoadData(op) => Some(OutsideReach {
+                what: format!("LOAD DATA FROM '{}'", op.path),
+                how: ExternalAccess::Reads,
+            }),
+            Self::LoadGraph(op) => Some(OutsideReach {
+                what: format!("LOAD <{}>", op.source),
+                how: ExternalAccess::Reads,
+            }),
+            Self::CallProcedure(op) => call(op),
+            Self::NodeScan(_)
+            | Self::EdgeScan(_)
+            | Self::Expand(_)
+            | Self::Join(_)
+            | Self::LeftJoin(_)
+            | Self::AntiJoin(_)
+            | Self::MarkJoin(_)
+            | Self::MultiWayJoin(_)
+            | Self::Aggregate(_)
+            | Self::HorizontalAggregate(_)
+            | Self::Filter(_)
+            | Self::Project(_)
+            | Self::Limit(_)
+            | Self::Skip(_)
+            | Self::Sort(_)
+            | Self::Distinct(_)
+            | Self::Create(_)
+            | Self::CreateNode(_)
+            | Self::CreateEdge(_)
+            | Self::DeleteNode(_)
+            | Self::DeleteEdge(_)
+            | Self::SetProperty(_)
+            | Self::AddLabel(_)
+            | Self::RemoveLabel(_)
+            | Self::InNamedGraph(_)
+            | Self::TripleScan(_)
+            | Self::Union(_)
+            | Self::Except(_)
+            | Self::Intersect(_)
+            | Self::Otherwise(_)
+            | Self::Apply(_)
+            | Self::ParameterScan(_)
+            | Self::DelimScan(_)
+            | Self::Empty
+            | Self::Return(_)
+            | Self::Bind(_)
+            | Self::Unwind(_)
+            | Self::MapCollect(_)
+            | Self::Merge(_)
+            | Self::MergeRelationship(_)
+            | Self::ShortestPath(_)
+            | Self::PropertyPath(_)
+            | Self::NamedGraphs(_)
+            | Self::RowValues(_)
+            | Self::InsertTriple(_)
+            | Self::DeleteTriple(_)
+            | Self::Modify(_)
+            | Self::ClearGraph(_)
+            | Self::CreateGraph(_)
+            | Self::DropGraph(_)
+            | Self::CopyGraph(_)
+            | Self::MoveGraph(_)
+            | Self::AddGraph(_)
+            | Self::Construct(_)
+            | Self::VectorScan(_)
+            | Self::VectorJoin(_)
+            | Self::TextScan(_)
+            | Self::CreatePropertyGraph(_)
+            | Self::DropPropertyGraph(_) => None,
+        };
+        own.or_else(|| {
+            self.expressions()
+                .into_iter()
+                .find_map(|expression| expression.reaches_outside(call))
+        })
+        .or_else(|| {
+            self.children()
+                .into_iter()
+                .find_map(|child| child.reaches_outside(call))
+        })
+    }
+
+    /// The expressions this operator evaluates itself (not those of the operators below, see
+    /// [`children`](Self::children)): its predicates, projections, keys, property values and
+    /// arguments.
+    #[must_use]
+    pub fn expressions(&self) -> Vec<&LogicalExpression> {
+        fn values(properties: &[(String, LogicalExpression)]) -> Vec<&LogicalExpression> {
+            properties.iter().map(|(_, value)| value).collect()
+        }
+        match self {
+            Self::Join(op) => op
+                .conditions
+                .iter()
+                .flat_map(|condition| [&condition.left, &condition.right])
+                .collect(),
+            Self::MultiWayJoin(op) => op
+                .conditions
+                .iter()
+                .flat_map(|condition| [&condition.left, &condition.right])
+                .collect(),
+            Self::LeftJoin(op) => op.condition.iter().collect(),
+            Self::Aggregate(op) => op
+                .group_by
+                .iter()
+                .chain(op.aggregates.iter().flat_map(|aggregate| {
+                    aggregate
+                        .expression
+                        .iter()
+                        .chain(aggregate.expression2.iter())
+                }))
+                .chain(op.having.iter())
+                .collect(),
+            Self::Filter(op) => vec![&op.predicate],
+            Self::Project(op) => op
+                .projections
+                .iter()
+                .map(|projection| &projection.expression)
+                .collect(),
+            Self::Sort(op) => op.keys.iter().map(|key| &key.expression).collect(),
+            Self::Create(op) => op.property_values().collect(),
+            Self::CreateNode(op) => values(&op.properties),
+            Self::CreateEdge(op) => values(&op.properties),
+            Self::SetProperty(op) => values(&op.properties),
+            Self::Return(op) => op.items.iter().map(|item| &item.expression).collect(),
+            Self::Bind(op) => vec![&op.expression],
+            Self::Unwind(op) => vec![&op.expression],
+            Self::Merge(op) => values(&op.match_properties)
+                .into_iter()
+                .chain(values(&op.on_create))
+                .chain(values(&op.on_match))
+                .collect(),
+            Self::MergeRelationship(op) => values(&op.match_properties)
+                .into_iter()
+                .chain(values(&op.on_create))
+                .chain(values(&op.on_match))
+                .collect(),
+            Self::ShortestPath(op) => op
+                .edge_condition
+                .iter()
+                .map(|condition| &condition.predicate)
+                .collect(),
+            Self::VectorScan(op) => vec![&op.query_vector],
+            Self::VectorJoin(op) => vec![&op.query_vector],
+            Self::TextScan(op) => vec![&op.query],
+            Self::CallProcedure(op) => op.arguments.iter().collect(),
+            Self::NodeScan(_)
+            | Self::EdgeScan(_)
+            | Self::Expand(_)
+            | Self::AntiJoin(_)
+            | Self::MarkJoin(_)
+            | Self::HorizontalAggregate(_)
+            | Self::Limit(_)
+            | Self::Skip(_)
+            | Self::Distinct(_)
+            | Self::DeleteNode(_)
+            | Self::DeleteEdge(_)
+            | Self::AddLabel(_)
+            | Self::RemoveLabel(_)
+            | Self::InNamedGraph(_)
+            | Self::TripleScan(_)
+            | Self::Union(_)
+            | Self::Except(_)
+            | Self::Intersect(_)
+            | Self::Otherwise(_)
+            | Self::Apply(_)
+            | Self::ParameterScan(_)
+            | Self::DelimScan(_)
+            | Self::Empty
+            | Self::MapCollect(_)
+            | Self::PropertyPath(_)
+            | Self::NamedGraphs(_)
+            | Self::RowValues(_)
+            | Self::InsertTriple(_)
+            | Self::DeleteTriple(_)
+            | Self::Modify(_)
+            | Self::ClearGraph(_)
+            | Self::CreateGraph(_)
+            | Self::DropGraph(_)
+            | Self::LoadGraph(_)
+            | Self::CopyGraph(_)
+            | Self::MoveGraph(_)
+            | Self::AddGraph(_)
+            | Self::Construct(_)
+            | Self::CreatePropertyGraph(_)
+            | Self::DropPropertyGraph(_)
+            | Self::LoadData(_) => Vec::new(),
+        }
+    }
+
     /// Returns `true` if this operator or any of its children perform mutations.
     #[must_use]
     pub fn has_mutations(&self) -> bool {
@@ -3684,8 +3900,7 @@ impl CallProcedureOp {
     /// [`crate::loader`]); every other one reads.
     #[must_use]
     pub fn writes(&self) -> bool {
-        let name = self.name.join(".");
-        name == crate::loader::NODES_PROCEDURE || name == crate::loader::EDGES_PROCEDURE
+        crate::loader::is_load(&self.name)
     }
 }
 
@@ -3902,6 +4117,94 @@ pub enum LogicalExpression {
 }
 
 impl LogicalExpression {
+    /// The first subquery inside this expression that reaches outside the database (see
+    /// [`LogicalOperator::reaches_outside`]), if any.
+    pub fn reaches_outside(
+        &self,
+        call: &mut dyn FnMut(&CallProcedureOp) -> Option<OutsideReach>,
+    ) -> Option<OutsideReach> {
+        let mut first = |expressions: &mut dyn Iterator<Item = &LogicalExpression>| {
+            for expression in expressions {
+                if let Some(reach) = expression.reaches_outside(call) {
+                    return Some(reach);
+                }
+            }
+            None
+        };
+        match self {
+            Self::ExistsSubquery(plan) | Self::CountSubquery(plan) | Self::ValueSubquery(plan) => {
+                plan.reaches_outside(call)
+            }
+            Self::PatternComprehension {
+                subplan,
+                projection,
+            } => subplan
+                .reaches_outside(call)
+                .or_else(|| projection.reaches_outside(call)),
+            Self::Binary { left, right, .. } => first(&mut [&**left, &**right].into_iter()),
+            Self::Unary { operand, .. } => operand.reaches_outside(call),
+            Self::FunctionCall { args, .. } | Self::SparqlCall { args, .. } => {
+                first(&mut args.iter())
+            }
+            Self::List(items) => first(&mut items.iter()),
+            Self::Map(entries) => first(&mut entries.iter().map(|(_, value)| value)),
+            Self::IndexAccess { base, index } => first(&mut [&**base, &**index].into_iter()),
+            Self::MapAccess { base, .. } => base.reaches_outside(call),
+            Self::SliceAccess { base, start, end } => first(
+                &mut std::iter::once(&**base)
+                    .chain(start.as_deref())
+                    .chain(end.as_deref()),
+            ),
+            Self::Case {
+                operand,
+                when_clauses,
+                else_clause,
+            } => first(
+                &mut operand
+                    .as_deref()
+                    .into_iter()
+                    .chain(when_clauses.iter().flat_map(|(when, then)| [when, then]))
+                    .chain(else_clause.as_deref()),
+            ),
+            Self::ListComprehension {
+                list_expr,
+                filter_expr,
+                map_expr,
+                ..
+            } => first(
+                &mut [&**list_expr, &**map_expr]
+                    .into_iter()
+                    .chain(filter_expr.as_deref()),
+            ),
+            Self::ListPredicate {
+                list_expr,
+                predicate,
+                ..
+            } => first(&mut [&**list_expr, &**predicate].into_iter()),
+            Self::MapProjection { entries, .. } => {
+                first(&mut entries.iter().filter_map(|entry| match entry {
+                    MapProjectionEntry::LiteralEntry(_, value) => Some(value),
+                    MapProjectionEntry::PropertySelector(_) | MapProjectionEntry::AllProperties => {
+                        None
+                    }
+                }))
+            }
+            Self::Reduce {
+                initial,
+                list,
+                expression,
+                ..
+            } => first(&mut [&**initial, &**list, &**expression].into_iter()),
+            Self::Literal(_)
+            | Self::Variable(_)
+            | Self::Property { .. }
+            | Self::Parameter(_)
+            | Self::Labels(_)
+            | Self::Type(_)
+            | Self::Id(_) => None,
+        }
+    }
+
     /// The `AND` of `conjuncts`, or `None` when there are none.
     ///
     /// See [`Self::balanced`]: an `AND` of any number of conjuncts stays

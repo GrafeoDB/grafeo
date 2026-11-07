@@ -49,7 +49,6 @@ pub mod loader;
 pub mod memory_usage;
 #[cfg(feature = "metrics")]
 pub mod metrics;
-#[cfg(feature = "algos")]
 pub mod procedures;
 pub mod query;
 pub mod session;

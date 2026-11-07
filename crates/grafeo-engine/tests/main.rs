@@ -129,6 +129,7 @@ mod exists_delim_join;
 mod exists_mark_join;
 mod explain_plans_physically;
 mod expression_and_projection;
+mod external_access;
 mod factorized_aggregates_match_the_regular_path;
 mod factorized_aggregation_test;
 mod factorized_filter_test;

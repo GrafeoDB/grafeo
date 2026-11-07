@@ -10,7 +10,6 @@ use super::{
     RemoveLabelOp, RemoveLabelOperator, Result, SetPropertyOp, SetPropertyOperator, ShortestPathOp,
     ShortestPathOperator, UnaryOp, UnwindOp, UnwindOperator, Value,
 };
-#[cfg(feature = "algos")]
 use super::{CallProcedureOp, StaticResultOperator};
 use crate::query::plan::{Callee, PathMode, PathSelection};
 use grafeo_common::utils::error::{QueryError, QueryErrorKind};
@@ -947,15 +946,13 @@ impl super::Planner {
     }
 
     /// Plans a CALL procedure operator.
-    #[cfg(feature = "algos")]
     pub(super) fn plan_call_procedure(
         &self,
         call: &CallProcedureOp,
     ) -> Result<(Box<dyn Operator>, Vec<String>)> {
-        use crate::procedures::{self, BuiltinProcedures};
+        use crate::procedures;
 
-        static PROCEDURES: std::sync::OnceLock<BuiltinProcedures> = std::sync::OnceLock::new();
-        let registry = PROCEDURES.get_or_init(BuiltinProcedures::new);
+        let registry = procedures::registry();
 
         // Special case: grafeo.procedures() lists all procedures
         let resolved_name = call.name.join(".");
@@ -965,7 +962,7 @@ impl super::Planner {
         }
 
         // Check user-defined procedures first (requires GQL for body re-parsing)
-        #[cfg(feature = "gql")]
+        #[cfg(stored_procedures)]
         if let Some(catalog) = &self.catalog {
             let proc_name = if call.name.len() == 1 {
                 &call.name[0]
@@ -1056,8 +1053,7 @@ impl super::Planner {
     /// [`constant_argument`](Self::constant_argument)). One map argument
     /// keeps its keys: it names the parameters (see
     /// [`evaluate_arguments`](crate::procedures::evaluate_arguments)).
-    #[cfg(feature = "algos")]
-    fn procedure_argument_values(
+    pub(super) fn procedure_argument_values(
         &self,
         procedure: &str,
         arguments: &[LogicalExpression],
@@ -1091,7 +1087,6 @@ impl super::Planner {
     /// (a variable an earlier clause binds) or the graph (a subquery) is an
     /// error, as is a parameter nobody supplied. An expression that gives no
     /// value is a null, which takes an optional parameter's default.
-    #[cfg(feature = "algos")]
     fn constant_argument(
         &self,
         procedure: &str,
@@ -1141,7 +1136,6 @@ impl super::Planner {
     /// The store a procedure reads: the projection its `projection` argument
     /// names (`CALL grafeo.pagerank({projection: 'p'})`), else the planner's
     /// store, the selected graph. Projection names are database-wide.
-    #[cfg(feature = "algos")]
     fn procedure_store(
         &self,
         params: &grafeo_adapters::plugins::Parameters,
@@ -1162,7 +1156,6 @@ impl super::Planner {
     }
 
     /// Plans a static result set (e.g., from `grafeo.procedures()`).
-    #[cfg(feature = "algos")]
     pub(super) fn plan_static_result(
         &self,
         result: grafeo_adapters::plugins::AlgorithmResult,
@@ -1822,7 +1815,6 @@ fn read_before_writing(op: Box<dyn Operator>, input: &LogicalOperator) -> Box<dy
 }
 
 /// What keeps an expression from being a constant.
-#[cfg(feature = "algos")]
 enum NonConstant {
     /// It reads this variable of the row.
     Row(String),
@@ -1836,7 +1828,6 @@ enum NonConstant {
 /// any. The variables a list comprehension, a list predicate or a reduce
 /// binds (`local`) are not row variables: `[x IN [1, 2] | x * 2]` is a
 /// constant.
-#[cfg(feature = "algos")]
 fn first_non_constant(
     expression: &LogicalExpression,
     local: &mut Vec<String>,
@@ -1989,7 +1980,6 @@ fn starts_from_the_left_row(
 /// `error`, an argument's evaluation error, with the argument and the
 /// procedure named after its message; its kind, and so its GQLSTATUS,
 /// stays as it was.
-#[cfg(feature = "algos")]
 fn naming_the_argument(error: Error, argument: &str, procedure: &str) -> Error {
     let prefix = |message: &str| format!("{message} (argument '{argument}' of {procedure})");
     match error {

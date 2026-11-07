@@ -108,7 +108,6 @@ pub(crate) mod seek;
 pub(crate) mod subquery;
 pub(crate) mod value_join;
 
-#[cfg(feature = "algos")]
 use crate::query::plan::CallProcedureOp;
 #[cfg(feature = "text-index")]
 use crate::query::plan::TextScanOp;
@@ -1087,14 +1086,7 @@ impl Planner {
             LogicalOperator::CallProcedure(call) if load::is_load(call) => {
                 self.plan_load_call(call)
             }
-            #[cfg(feature = "algos")]
             LogicalOperator::CallProcedure(call) => self.plan_call_procedure(call),
-            #[cfg(not(feature = "algos"))]
-            LogicalOperator::CallProcedure(_) => Err(grafeo_common::utils::error::Error::from(
-                grafeo_common::utils::error::QueryError::unsupported(
-                    "this build has no procedures (the `algos` feature)",
-                ),
-            )),
             LogicalOperator::ParameterScan(param_scan) => self.plan_parameter_scan(param_scan),
             LogicalOperator::DelimScan(scan) => self.plan_delim_scan(scan),
             LogicalOperator::MultiWayJoin(mwj) => self.plan_multi_way_join(mwj),
@@ -1425,14 +1417,12 @@ impl Planner {
 }
 
 /// An operator that yields a static set of rows (for `grafeo.procedures()` etc.).
-#[cfg(feature = "algos")]
 struct StaticResultOperator {
     rows: Vec<Vec<Value>>,
     column_indices: Vec<usize>,
     row_index: usize,
 }
 
-#[cfg(feature = "algos")]
 impl Operator for StaticResultOperator {
     fn next(&mut self) -> grafeo_core::execution::operators::OperatorResult {
         use grafeo_core::execution::DataChunk;
@@ -3865,7 +3855,6 @@ mod tests {
 
     // ==================== StaticResultOperator ====================
 
-    #[cfg(feature = "algos")]
     #[test]
     fn test_static_result_operator_emits_rows_and_resets() {
         use grafeo_common::types::Value;

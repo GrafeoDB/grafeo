@@ -79,6 +79,7 @@ fn sample(procedure: &str, parameter: &ParameterDef, node: i64) -> String {
         ParameterType::Boolean => "true".to_string(),
         ParameterType::NodeId => node.to_string(),
         ParameterType::List => "[1.0, 0.0]".to_string(),
+        ParameterType::Map => "{}".to_string(),
     }
 }
 
@@ -196,6 +197,7 @@ fn set(params: &mut Parameters, parameter: &ParameterDef, value: &str) {
         ParameterType::List => {
             params.set_list(name, vec![Value::Float64(1.0), Value::Float64(0.0)]);
         }
+        ParameterType::Map => params.set_map(name, std::sync::Arc::default()),
     }
 }
 
@@ -230,9 +232,15 @@ const NEEDS_THE_STORE: [&str; 3] = [
     "grafeo.search.text",
 ];
 
-/// Whether the direct-execute rows leave `name` out (see [`NEEDS_THE_STORE`]).
-fn needs_the_store(name: &str) -> bool {
-    NEEDS_THE_STORE.contains(&name)
+/// The procedures a direct execute does not run: they are planned with the statement's writer, so
+/// `Procedure::execute` refuses them by design and names the CALL and the API call instead.
+/// Their arguments are covered through `CALL` and in the external-access and loader tests.
+const PLANNED_WITH_THE_WRITER: [&str; 2] = ["grafeo.load_nodes_csv", "grafeo.load_edges_csv"];
+
+/// Whether the direct-execute rows leave `name` out (see [`NEEDS_THE_STORE`] and
+/// [`PLANNED_WITH_THE_WRITER`]).
+fn left_out_of_direct_execute(name: &str) -> bool {
+    NEEDS_THE_STORE.contains(&name) || PLANNED_WITH_THE_WRITER.contains(&name)
 }
 
 fn direct(db: &GrafeoDB, name: &str, params: &Parameters) -> Result<Vec<Vec<Value>>, Error> {
@@ -252,7 +260,7 @@ fn the_procedures_left_out_of_direct_execute_are_registered() {
         .into_iter()
         .map(|procedure| procedure.name)
         .collect();
-    for name in NEEDS_THE_STORE {
+    for name in NEEDS_THE_STORE.into_iter().chain(PLANNED_WITH_THE_WRITER) {
         assert!(
             registered.iter().any(|registered| registered == name),
             "{name} is not registered: {registered:?}"
@@ -271,7 +279,7 @@ fn a_direct_execute_without_optional_arguments_gives_what_call_gives() {
     let (db, node) = graph();
     let mut wrong = Vec::new();
     for procedure in BuiltinProcedures::new().list() {
-        if needs_the_store(&procedure.name) {
+        if left_out_of_direct_execute(&procedure.name) {
             continue;
         }
         let given: Vec<String> = procedure
@@ -303,7 +311,9 @@ fn a_direct_execute_without_optional_arguments_gives_what_call_gives() {
 /// as 3 (`None` for a parameter that is not a number, or a domain every number is inside).
 fn outside(domain: Domain, param_type: ParameterType) -> Option<(i64, f64)> {
     let value = match domain {
-        Domain::OfType => return None,
+        Domain::OfType | Domain::OneCharacter | Domain::OneOf(_) | Domain::ListOrOne => {
+            return None;
+        }
         Domain::NonNegative => (-1, -1.0),
         Domain::Positive => (0, 0.0),
         Domain::Unit => (2, 2.0),
@@ -320,7 +330,7 @@ fn a_direct_execute_refuses_a_missing_null_or_out_of_domain_argument() {
     let mut wrong = Vec::new();
     let mut refused = 0;
     for procedure in BuiltinProcedures::new().list() {
-        if needs_the_store(&procedure.name) {
+        if left_out_of_direct_execute(&procedure.name) {
             continue;
         }
         let mut cases: Vec<(String, Parameters, String)> = Vec::new();
@@ -380,7 +390,7 @@ fn a_direct_execute_refuses_a_missing_null_or_out_of_domain_argument() {
     let expected: usize = BuiltinProcedures::new()
         .list()
         .iter()
-        .filter(|procedure| !needs_the_store(&procedure.name))
+        .filter(|procedure| !left_out_of_direct_execute(&procedure.name))
         .map(|procedure| {
             let required = procedure.parameters.iter().filter(|p| p.required).count();
             let bounded = procedure

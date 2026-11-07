@@ -34,6 +34,7 @@ SAMPLES = {
     "String": ("'Doc'", "Doc"),
     "Boolean": ("true", True),
     "List": ("[1.0, 0.0]", [1.0, 0.0]),
+    "Map": ("{label: 'Doc', property: 'name', column: 'name'}", {"label": "Doc"}),
 }
 
 
@@ -46,8 +47,8 @@ def graph():
 
 def catalogue():
     """`[(procedure, [(parameter, type, required)])]`, each in its order, from
-    `grafeo.procedures()`: a required parameter is listed as `name (Type)`, an optional one with
-    its default or `optional`."""
+    `grafeo.procedures()`: an optional parameter is listed with its default or `optional`, and any
+    other parameter is required, a domain after its type included (`labels (List, a list, ...)`)."""
     db = grafeo.GrafeoDB()
     found = []
     for row in db.execute(
@@ -55,30 +56,39 @@ def catalogue():
     ):
         name, parameters = list(row.values())
         parsed = [
-            (parameter, kind, not rest)
+            (parameter, kind, "default=" not in rest and "optional" not in rest)
             for parameter, kind, rest in re.findall(r"(\w+) \((\w+)((?:, [^)]*)?)\)", parameters)
         ]
         found.append((name, parsed))
     return found
 
 
-def text(kind, node):
-    return str(node) if kind == "NodeId" else SAMPLES[kind][0]
+# A sample a parameter's own domain takes where the kind's sample is outside it: the load
+# procedures take a list of label names, not of numbers.
+SAMPLES_BY_NAME = {"labels": ("['Doc']", ["Doc"])}
 
 
-def value(kind, node):
-    return node if kind == "NodeId" else SAMPLES[kind][1]
+def sample(parameter, kind):
+    return SAMPLES_BY_NAME.get(parameter, SAMPLES.get(kind))
+
+
+def text(parameter, kind, node):
+    return str(node) if kind == "NodeId" else sample(parameter, kind)[0]
+
+
+def value(parameter, kind, node):
+    return node if kind == "NodeId" else sample(parameter, kind)[1]
 
 
 def calls_without(procedure, parameters, missing, node):
     names = [p for p, _, _ in parameters]
     at = names.index(missing)
     last = max(i for i, (_, _, required) in enumerate(parameters) if required)
-    before = [text(kind, node) for _, kind, _ in parameters[:at]]
+    before = [text(p, kind, node) for p, kind, _ in parameters[:at]]
     with_null = [
-        "null" if p == missing else text(kind, node) for p, kind, _ in parameters[: last + 1]
+        "null" if p == missing else text(p, kind, node) for p, kind, _ in parameters[: last + 1]
     ]
-    others = [f"{p}: {text(kind, node)}" for p, kind, required in parameters if required]
+    others = [f"{p}: {text(p, kind, node)}" for p, kind, required in parameters if required]
     others = [o for o in others if not o.startswith(f"{missing}:")]
     return [
         f"CALL {procedure}({', '.join(before)})",
@@ -102,6 +112,11 @@ def test_the_catalogue_lists_required_parameters():
         "grafeo.subgraph_isomorphism.pattern_edges",
         "grafeo.bfs.start",
         "grafeo.max_flow.sink",
+        # A domain after the type keeps a parameter required: the loads' labels, path and ends.
+        "grafeo.load_nodes_csv.path",
+        "grafeo.load_nodes_csv.labels",
+        "grafeo.load_edges_csv.source",
+        "grafeo.load_edges_csv.target",
     ]
     if "vector-index" in grafeo.features():
         expected.append("grafeo.search.vector.label")
@@ -146,7 +161,7 @@ def test_the_bridge_refuses_a_none_for_a_required_argument(procedure, parameters
     assert missing in signature.parameters, (bridge_of(procedure), missing, signature)
     kinds = {p: kind for p, kind, _ in parameters}
     arguments = {
-        p: value(kinds[p], node)
+        p: value(p, kinds[p], node)
         for p, parameter in signature.parameters.items()
         if parameter.default is inspect.Parameter.empty and p in kinds
     }
@@ -275,11 +290,12 @@ def declared():
         "CALL grafeo.procedures() YIELD name, parameters RETURN name, parameters"
     ):
         name, parameters = list(row.values())
+        # Each entry is `name (Type[, domain][, default=value | , optional])`. A domain may hold
+        # commas and a default may be a comma (`delimiter (String, one ASCII character,
+        # default=,)`), so the default is everything after `default=`.
         found[name.removeprefix("grafeo.")] = {
-            parameter: (kind, default or None)
-            for parameter, kind, default in re.findall(
-                r"(\w+) \((\w+)(?:, default=([^)]*))?(?:, optional)?\)", parameters
-            )
+            parameter: (kind, rest.split("default=", 1)[1] if "default=" in rest else None)
+            for parameter, kind, rest in re.findall(r"(\w+) \((\w+)((?:, [^)]*)?)\)", parameters)
         }
     return found
 
@@ -328,7 +344,7 @@ def test_an_optional_bridge_parameter_defaults_to_none_and_none_is_the_default(b
     assert signature.parameters[parameter].default is None, (bridge, parameter, signature)
     kinds = DECLARED[bridge]
     required = {
-        name: value(kinds[name][0], node)
+        name: value(name, kinds[name][0], node)
         for name, spec in signature.parameters.items()
         if spec.default is inspect.Parameter.empty and name in kinds
     }

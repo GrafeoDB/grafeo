@@ -4219,6 +4219,7 @@ impl Session {
         // The graph a `USE g` focuses the statement on, from here to its end.
         let mut _focus = None;
         let optimized_plan = if let Some(plan) = cached {
+            self.check_external_access(&plan)?;
             _focus = self.focus_statement(plan.graph.as_deref())?;
             check_writes(&plan)?;
             Self::fill_prepared(plan, params)?
@@ -4229,7 +4230,10 @@ impl Session {
             let parsed = params.and_then(|_| self.plan_cache().get_parsed(&cache_key));
             let bound_by_value = parsed.is_some();
             let mut logical_plan = match parsed {
-                Some(plan) => plan,
+                Some(plan) => {
+                    self.check_external_access(&plan)?;
+                    plan
+                }
                 None => match gql::translate_full(query)? {
                     gql::GqlTranslationResult::SessionCommand(cmd) => {
                         return self.execute_session_command(cmd);
@@ -4238,7 +4242,7 @@ impl Session {
                         self.check_schema_command(&cmd)?;
                         return self.execute_schema_command(cmd);
                     }
-                    gql::GqlTranslationResult::Plan(plan) => self.translated(plan),
+                    gql::GqlTranslationResult::Plan(plan) => self.translated(plan)?,
                 },
             };
             _focus = self.focus_statement(logical_plan.graph.as_deref())?;
@@ -4425,6 +4429,7 @@ impl Session {
                 ));
             }
             gql::GqlTranslationResult::Plan(plan) => {
+                let plan = self.translated(plan)?;
                 if self.plan_writes(&plan.root) {
                     return Err(grafeo_common::utils::error::Error::from(
                         grafeo_common::utils::error::QueryError::new(
@@ -4436,7 +4441,7 @@ impl Session {
                 if !self.identity.can_admin() {
                     self.require_permission(crate::auth::StatementKind::Read)?;
                 }
-                self.translated(plan)
+                plan
             }
         };
         // The stream keeps the store it is planned on: the graph a `USE g`
@@ -4668,6 +4673,7 @@ impl Session {
         let cache_key = self.plan_cache_key(query, QueryLanguage::Cypher);
         let cached = self.cached_plan(&cache_key, params);
         let optimized_plan = if let Some(plan) = cached {
+            self.check_external_access(&plan)?;
             Self::fill_prepared(plan, params)?
         } else {
             // A statement that binds by value keeps its parsed plan (see
@@ -4675,7 +4681,10 @@ impl Session {
             let parsed = params.and_then(|_| self.plan_cache().get_parsed(&cache_key));
             let bound_by_value = parsed.is_some();
             let mut logical_plan = match parsed {
-                Some(plan) => plan,
+                Some(plan) => {
+                    self.check_external_access(&plan)?;
+                    plan
+                }
                 // Schema DDL and SHOW commands run before the normal query path.
                 None => match cypher::translate_full(query)? {
                     cypher::CypherTranslationResult::SchemaCommand(cmd) => {
@@ -4691,7 +4700,7 @@ impl Session {
                     cypher::CypherTranslationResult::ShowCurrentGraphType => {
                         return self.execute_show_current_graph_type();
                     }
-                    cypher::CypherTranslationResult::Plan(plan) => self.translated(plan),
+                    cypher::CypherTranslationResult::Plan(plan) => self.translated(plan)?,
                 },
             };
 
@@ -4809,7 +4818,7 @@ impl Session {
         let start_time = Instant::now();
 
         // Parse and translate the query to a logical plan
-        let mut logical_plan = self.translated(gremlin::translate(query)?);
+        let mut logical_plan = self.translated(gremlin::translate(query)?)?;
 
         // No parameters are supplied, so one the query uses is missing.
         substitute_params(&mut logical_plan, &std::collections::HashMap::new())?;
@@ -4891,7 +4900,7 @@ impl Session {
         let start_time = Instant::now();
 
         // Parse and translate the query to a logical plan
-        let mut logical_plan = self.translated(gremlin::translate(query)?);
+        let mut logical_plan = self.translated(gremlin::translate(query)?)?;
 
         // Substitute parameters
         substitute_params(&mut logical_plan, &params)?;
@@ -4977,7 +4986,7 @@ impl Session {
         #[cfg(feature = "metrics")]
         let start_time = Instant::now();
 
-        let mut logical_plan = self.translated(graphql::translate(query)?);
+        let mut logical_plan = self.translated(graphql::translate(query)?)?;
 
         // Substitute default parameter values from variable declarations; a
         // variable without a default is missing.
@@ -5046,7 +5055,7 @@ impl Session {
         let start_time = Instant::now();
 
         // Parse and translate the query to a logical plan
-        let mut logical_plan = self.translated(graphql::translate(query)?);
+        let mut logical_plan = self.translated(graphql::translate(query)?)?;
 
         // Merge default params with caller-supplied params
         if !logical_plan.default_params.is_empty() {
@@ -5144,6 +5153,7 @@ impl Session {
         let cache_key = self.plan_cache_key(query, QueryLanguage::SqlPgq);
         let cached = self.cached_plan(&cache_key, params);
         let optimized_plan = if let Some(plan) = cached {
+            self.check_external_access(&plan)?;
             Self::fill_prepared(plan, params)?
         } else {
             // A statement that binds by value keeps its parsed plan (see
@@ -5151,10 +5161,13 @@ impl Session {
             let parsed = params.and_then(|_| self.plan_cache().get_parsed(&cache_key));
             let bound_by_value = parsed.is_some();
             let mut logical_plan = match parsed {
-                Some(plan) => plan,
+                Some(plan) => {
+                    self.check_external_access(&plan)?;
+                    plan
+                }
                 None => {
                     // Parse and translate
-                    let logical_plan = self.translated(sql_pgq::translate(query)?);
+                    let logical_plan = self.translated(sql_pgq::translate(query)?)?;
 
                     // Property graph DDL is a standalone change of its own (see
                     // `create_property_graph`), outside the query pipeline.
@@ -6922,13 +6935,100 @@ impl Session {
     }
 
     /// `plan`, translated for a statement now (the warning probe's
-    /// translate stage adds its notice).
+    /// translate stage adds its notice), once this session may run what it
+    /// reaches outside the database (see
+    /// [`check_external_access`](Self::check_external_access)): the first
+    /// check of every statement, before its graph, its role, a read-only
+    /// transaction and its arguments.
+    ///
+    /// # Errors
+    ///
+    /// The refusal of a plan that reaches outside on a session without
+    /// external access.
     #[cfg(query_language)]
     #[inline]
-    fn translated(&self, plan: crate::query::plan::LogicalPlan) -> crate::query::plan::LogicalPlan {
+    fn translated(
+        &self,
+        plan: crate::query::plan::LogicalPlan,
+    ) -> Result<crate::query::plan::LogicalPlan> {
+        self.check_external_access(&plan)?;
         #[cfg(feature = "testing-warning-probe")]
         let plan = self.probe_translation(plan);
-        plan
+        Ok(plan)
+    }
+
+    /// Fails when `plan` reaches outside the database (see
+    /// [`LogicalOperator::reaches_outside`](crate::query::plan::LogicalOperator::reaches_outside))
+    /// and this session's identity has no external access
+    /// ([`Identity::with_external_access`](crate::auth::Identity::with_external_access)):
+    /// with the permission-denied error of a role denial, naming what reaches
+    /// outside. It reads the plan only, so `EXPLAIN` and a plan whose
+    /// parameters have no values yet are judged too. A session with access
+    /// walks nothing.
+    #[cfg(query_language)]
+    fn check_external_access(&self, plan: &crate::query::plan::LogicalPlan) -> Result<()> {
+        if self.identity.can_access_external() {
+            return Ok(());
+        }
+        match plan
+            .root
+            .reaches_outside(&mut |call| self.call_reaches_outside(call, 0))
+        {
+            None => Ok(()),
+            Some(reach) => Err(grafeo_common::utils::error::Error::from(
+                grafeo_common::utils::error::QueryError::new(
+                    grafeo_common::utils::error::QueryErrorKind::Semantic,
+                    format!(
+                        "permission denied: {}",
+                        crate::auth::external_access_denied(&reach.what, reach.how)
+                    ),
+                ),
+            )),
+        }
+    }
+
+    /// What the procedure `call` calls reaches outside the database, resolved
+    /// as the planner resolves it: a load procedure, else a stored procedure
+    /// by its body (and the procedures that calls, a call nested deeper than
+    /// any that runs taken to reach outside), else the built-in procedure by
+    /// the access it states. An unknown name reaches nothing: planning
+    /// refuses it.
+    #[cfg(query_language)]
+    fn call_reaches_outside(
+        &self,
+        call: &crate::query::plan::CallProcedureOp,
+        depth: u8,
+    ) -> Option<crate::query::plan::OutsideReach> {
+        use crate::procedures::ExternalAccess;
+        use crate::query::plan::OutsideReach;
+
+        #[cfg(stored_procedures)]
+        if !call.writes()
+            // The planner looks a stored procedure up by its last name part.
+            && let Some(name) = call.name.last()
+            && let Some(procedure) = self.effective_catalog().get_procedure(name)
+        {
+            if depth >= crate::query::executor::user_procedure::MAX_CALL_DEPTH {
+                return Some(OutsideReach {
+                    what: format!("procedure '{}'", procedure.name),
+                    how: ExternalAccess::Reads,
+                });
+            }
+            // A body that does not translate fails when the call is planned.
+            let body = crate::query::translators::gql::translate(&procedure.body).ok()?;
+            return body
+                .root
+                .reaches_outside(&mut |inner| self.call_reaches_outside(inner, depth + 1));
+        }
+        let _ = depth;
+        let procedure = crate::procedures::registry().get(&call.name)?;
+        match procedure.external_access() {
+            ExternalAccess::None => None,
+            how => Some(OutsideReach {
+                what: format!("grafeo.{}", procedure.name()),
+                how,
+            }),
+        }
     }
 
     /// What the statement being run writes through and what checks its

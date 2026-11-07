@@ -63,19 +63,20 @@ pub struct ParameterDef {
     pub required: bool,
     /// Default value (if any).
     pub default: Option<String>,
-    /// The values a numeric parameter allows beyond its type, which every call is checked
-    /// against (see [`prepare`]); [`Domain::OfType`] for a string, a boolean, a node id
-    /// or a list.
+    /// The values the parameter allows beyond its type, which every call is checked against
+    /// (see [`prepare`]): a numeric range, a string's length or choices, or a list that takes
+    /// one value as a list of one; [`Domain::OfType`] for nothing beyond the type.
     pub domain: Domain,
 }
 
-/// The values a number a procedure reads may take, beyond its type: a numeric argument, or an
-/// edge property it reads as a weight, a capacity or a cost. A float must also be finite. A value
-/// outside is refused with "invalid parameter value" (22023) before it is used.
+/// The values an argument may take, beyond its type: a numeric argument, or an edge property a
+/// procedure reads as a weight, a capacity or a cost (a float must also be finite), a string of one
+/// character or of a few choices, a list that also takes one value. A value outside is refused
+/// with "invalid parameter value" (22023) before it is used.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Domain {
-    /// Nothing beyond its type: a string, a boolean, a node id or a list, which the procedure
-    /// reads itself; for a number, any finite one.
+    /// Nothing beyond its type: a string, a boolean, a node id, a list or a map, which the
+    /// procedure reads itself; for a number, any finite one.
     OfType,
     /// Zero or more.
     NonNegative,
@@ -85,21 +86,51 @@ pub enum Domain {
     Unit,
     /// At least the value of the parameter named, as the call gives it or by its default.
     AtLeast(&'static str),
+    /// A string of one ASCII character, such as a field delimiter.
+    OneCharacter,
+    /// A string that is one of these, such as `'error'` or `'skip'`.
+    OneOf(&'static [&'static str]),
+    /// A list that also takes one value, as a list of one: [`prepare`] makes the label `'Person'`
+    /// the list `['Person']`. Declared on the parameter that reads it so, never taken for granted:
+    /// one string where a vector is wanted stays a type error.
+    ListOrOne,
 }
 
 impl Domain {
-    /// Whether `value` lies inside, apart from the floor of an
+    /// Whether the number `value` lies inside, apart from the floor of an
     /// [`AtLeast`](Self::AtLeast): [`prepare`] compares a value with the
-    /// parameter it names exactly, an integer as an integer.
+    /// parameter it names exactly, an integer as an integer. A domain of
+    /// strings or lists bounds no number.
     #[must_use]
     pub fn admits(self, value: f64) -> bool {
         value.is_finite()
             && match self {
-                Self::OfType | Self::AtLeast(_) => true,
+                Self::OfType
+                | Self::AtLeast(_)
+                | Self::OneCharacter
+                | Self::OneOf(_)
+                | Self::ListOrOne => true,
                 Self::NonNegative => value >= 0.0,
                 Self::Positive => value > 0.0,
                 Self::Unit => (0.0..=1.0).contains(&value),
             }
+    }
+
+    /// Whether the string `value` lies inside: one ASCII character for
+    /// [`OneCharacter`](Self::OneCharacter), one of the choices for
+    /// [`OneOf`](Self::OneOf); any string for the other domains.
+    #[must_use]
+    pub fn admits_text(self, value: &str) -> bool {
+        match self {
+            Self::OneCharacter => value.len() == 1 && value.is_ascii(),
+            Self::OneOf(choices) => choices.contains(&value),
+            Self::OfType
+            | Self::NonNegative
+            | Self::Positive
+            | Self::Unit
+            | Self::AtLeast(_)
+            | Self::ListOrOne => true,
+        }
     }
 
     /// The values it allows, for an error, with `floor` the value of the
@@ -116,6 +147,16 @@ impl Domain {
                 Some(floor) => format!("a finite number of at least '{other}' ({floor})"),
                 None => format!("a finite number of at least '{other}'"),
             },
+            Self::OneCharacter => "one ASCII character".to_string(),
+            Self::OneOf(choices) => format!(
+                "one of {}",
+                choices
+                    .iter()
+                    .map(|choice| format!("'{choice}'"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            Self::ListOrOne => "a list, or one value as a list of one".to_string(),
         }
     }
 }
@@ -144,8 +185,9 @@ impl std::ops::Deref for Prepared {
 /// parameter value" (22023) naming `procedure`, the parameter and its type; so is an argument
 /// outside the domain its definition declares, naming the values it allows and the value. A
 /// domain that names another parameter (`fetch_k` at least `k`) reads that one as given, or else
-/// its default. Each optional parameter without a value then takes the default its definition
-/// declares, the one `CALL grafeo.procedures()` lists; one that declares none stays without.
+/// its default. One value for a parameter of [`Domain::ListOrOne`] becomes a list of one. Each
+/// optional parameter without a value then takes the default its definition declares, the one
+/// `CALL grafeo.procedures()` lists; one that declares none stays without.
 ///
 /// # Errors
 ///
@@ -159,6 +201,26 @@ pub fn prepare(procedure: &str, defs: &[ParameterDef], params: &Parameters) -> R
 /// The check of [`prepare`]: a required parameter without a value, then an argument outside its
 /// domain.
 fn check_parameters(procedure: &str, defs: &[ParameterDef], params: &Parameters) -> Result<()> {
+    check_required(procedure, defs, params)?;
+    for def in defs {
+        if let Some(value) = params.get_string(&def.name)
+            && !def.domain.admits_text(value)
+        {
+            return Err(Error::from(QueryError::new(
+                QueryErrorKind::InvalidParameterValue,
+                format!(
+                    "argument '{}' of {procedure} must be {}, got '{value}'",
+                    def.name,
+                    def.domain.describe(None),
+                ),
+            )));
+        }
+    }
+    check_numbers(procedure, defs, params)
+}
+
+/// A required parameter without a value, left out or given null.
+fn check_required(procedure: &str, defs: &[ParameterDef], params: &Parameters) -> Result<()> {
     if let Some(def) = defs
         .iter()
         .find(|def| def.required && !params.has_value(&def.name))
@@ -177,6 +239,11 @@ fn check_parameters(procedure: &str, defs: &[ParameterDef], params: &Parameters)
             ),
         )));
     }
+    Ok(())
+}
+
+/// A numeric argument outside its domain.
+fn check_numbers(procedure: &str, defs: &[ParameterDef], params: &Parameters) -> Result<()> {
     for def in defs {
         let Some(value) = params.number(&def.name) else {
             continue;
@@ -244,6 +311,18 @@ fn number_text(value: &grafeo_common::types::Value) -> String {
     }
 }
 
+/// The widening of [`prepare`]: one value for a parameter of [`Domain::ListOrOne`] becomes a
+/// list of one.
+fn widen_lists(defs: &[ParameterDef], params: &mut Parameters) {
+    for def in defs.iter().filter(|def| def.domain == Domain::ListOrOne) {
+        if let Some(value) = params.values.get_mut(&def.name)
+            && let Some(one) = value.as_one_value()
+        {
+            *value = ParameterValue::List(vec![one]);
+        }
+    }
+}
+
 /// The defaults of [`prepare`]: each optional parameter of `defs` without a value in `params`
 /// takes the default its definition declares.
 fn apply_defaults(defs: &[ParameterDef], params: &mut Parameters) -> Result<()> {
@@ -272,7 +351,7 @@ fn apply_defaults(defs: &[ParameterDef], params: &mut Parameters) -> Result<()> 
                 params.set_string(name, default);
                 Some(())
             }
-            ParameterType::List => None,
+            ParameterType::List | ParameterType::Map => None,
         };
         if parsed.is_none() {
             return Err(Error::Internal(format!(
@@ -299,11 +378,14 @@ pub enum ParameterType {
     NodeId,
     /// List of arbitrary values (for vector queries, multi-value filters, etc.).
     List,
+    /// A map of keys to values (the column types of a file, an edge end's key), which the
+    /// procedure reads itself.
+    Map,
 }
 
 impl ParameterType {
-    /// The type's name in an error: `INTEGER`, `FLOAT`, `STRING`, `BOOLEAN`, `NODE ID` or
-    /// `LIST`.
+    /// The type's name in an error: `INTEGER`, `FLOAT`, `STRING`, `BOOLEAN`, `NODE ID`, `LIST`
+    /// or `MAP`.
     #[must_use]
     pub const fn name(self) -> &'static str {
         match self {
@@ -313,6 +395,7 @@ impl ParameterType {
             Self::Boolean => "BOOLEAN",
             Self::NodeId => "NODE ID",
             Self::List => "LIST",
+            Self::Map => "MAP",
         }
     }
 }
@@ -361,6 +444,20 @@ impl Parameters {
         self.values.insert(name.into(), ParameterValue::List(value));
     }
 
+    /// Sets a map parameter.
+    pub fn set_map(
+        &mut self,
+        name: impl Into<String>,
+        value: std::sync::Arc<
+            std::collections::BTreeMap<
+                grafeo_common::types::PropertyKey,
+                grafeo_common::types::Value,
+            >,
+        >,
+    ) {
+        self.values.insert(name.into(), ParameterValue::Map(value));
+    }
+
     /// Records that the call gave `name` a null: an optional parameter keeps its default, and
     /// [`prepare`] refuses a required one as given null.
     pub fn set_null(&mut self, name: impl Into<String>) {
@@ -375,6 +472,7 @@ impl Parameters {
     /// The errors of [`prepare`].
     pub fn prepared(mut self, procedure: &str, defs: &[ParameterDef]) -> Result<Prepared> {
         check_parameters(procedure, defs, &self)?;
+        widen_lists(defs, &mut self);
         apply_defaults(defs, &mut self)?;
         Ok(Prepared(self))
     }
@@ -508,6 +606,19 @@ impl Parameters {
             _ => None,
         }
     }
+
+    /// Gets a map parameter.
+    pub fn get_map(
+        &self,
+        name: &str,
+    ) -> Option<
+        &std::collections::BTreeMap<grafeo_common::types::PropertyKey, grafeo_common::types::Value>,
+    > {
+        match self.values.get(name) {
+            Some(ParameterValue::Map(v)) => Some(v),
+            _ => None,
+        }
+    }
 }
 
 impl Default for Parameters {
@@ -534,6 +645,30 @@ enum ParameterValue {
     String(String),
     Boolean(bool),
     List(Vec<grafeo_common::types::Value>),
+    Map(
+        std::sync::Arc<
+            std::collections::BTreeMap<
+                grafeo_common::types::PropertyKey,
+                grafeo_common::types::Value,
+            >,
+        >,
+    ),
+}
+
+impl ParameterValue {
+    /// One value as a list's element: `None` for a list, which needs no widening, and a null,
+    /// which is no value.
+    fn as_one_value(&self) -> Option<grafeo_common::types::Value> {
+        use grafeo_common::types::Value;
+        Some(match self {
+            Self::Null | Self::List(_) => return None,
+            Self::Integer(v) => Value::Int64(*v),
+            Self::Float(v) => Value::Float64(*v),
+            Self::String(v) => Value::from(v.as_str()),
+            Self::Boolean(v) => Value::Bool(*v),
+            Self::Map(v) => Value::Map(std::sync::Arc::clone(v)),
+        })
+    }
 }
 
 /// Result of an algorithm execution.

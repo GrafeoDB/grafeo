@@ -83,8 +83,8 @@ PROCEDURES = (
     sorted(
         row["name"]
         for row in database().execute("CALL grafeo.procedures()")
-        # Search needs an index, and reads no adjacency.
-        if not row["name"].startswith("grafeo.search.")
+        # Search needs an index, and reads no adjacency; a load reads a file and writes.
+        if not row["name"].startswith(("grafeo.search.", "grafeo.load_"))
     )
     if RUNS
     else []

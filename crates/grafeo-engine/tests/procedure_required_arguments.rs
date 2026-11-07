@@ -44,6 +44,7 @@ fn sample(parameter: &ParameterDef, node: i64) -> String {
         ParameterType::Boolean => "true".to_string(),
         ParameterType::NodeId => node.to_string(),
         ParameterType::List => "[1.0, 0.0]".to_string(),
+        ParameterType::Map => "{}".to_string(),
     }
 }
 

@@ -3469,4 +3469,11 @@ case("EL13", "UNWIND [1, 2] AS x RETURN x NEXT CALL grafeo.labels() YIELD label 
 ordered("EL14", "CALL grafeo.labels() YIELD label RETURN label ORDER BY label LIMIT $k", GQL, params={"k": 1})
 ordered("EL15", "CALL grafeo.pagerank() YIELD node_id, score ORDER BY score DESC LIMIT $n", SQL, params={"n": 1})
 
+# EM: a property map is a list of equalities (ISO 16.3 SR 21 h iii), so a literal NULL in it is
+#     unknown and finds nothing, in GQL and Cypher (EM1, EM2: a node and an edge) and SQL/PGQ
+#     (EM3). In 0.6.1 it found the elements without the key (Jules and Mia; every KNOWS edge).
+case("EM1", "MATCH (n:Person {w: NULL}) RETURN n.name AS n", BOTH)
+case("EM2", "MATCH (a)-[e:KNOWS {years: NULL}]->(b) RETURN a.name AS a", BOTH)
+case("EM3", "SELECT n FROM GRAPH_TABLE (MATCH (p:Person {w: NULL}) COLUMNS (p.name AS n))", SQL)
+
 # fmt: on

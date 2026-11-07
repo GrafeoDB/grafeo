@@ -890,10 +890,9 @@ impl CypherTranslator {
 
     /// Builds a predicate expression for property filters like {name: 'Alix', city: 'NYC'}.
     ///
-    /// When a pattern property is null (e.g., `{key: null}`), we emit `IS NULL`
-    /// instead of equality, because `null = null` is `null` (falsy) in
-    /// three-valued logic but a null property pattern should match absent or
-    /// null-valued properties.
+    /// Each entry is an equality, as in openCypher and ISO GQL: `{key: null}`
+    /// compares the property with null, which is unknown, so it matches
+    /// nothing (not the elements without the key).
     fn build_property_predicate(
         &self,
         variable: &str,
@@ -906,19 +905,14 @@ impl CypherTranslator {
                     variable: variable.to_string(),
                     property: prop_name.clone(),
                 };
+                // An entry is the equality `variable.property = value` (ISO/IEC 39075 16.3
+                // SR 21 h iii), so a null value finds nothing: it never meant "the key is absent".
                 let right = self.translate_expression(prop_value)?;
-                if matches!(right, LogicalExpression::Literal(Value::Null)) {
-                    Ok(LogicalExpression::Unary {
-                        op: UnaryOp::IsNull,
-                        operand: Box::new(left),
-                    })
-                } else {
-                    Ok(LogicalExpression::Binary {
-                        left: Box::new(left),
-                        op: BinaryOp::Eq,
-                        right: Box::new(right),
-                    })
-                }
+                Ok(LogicalExpression::Binary {
+                    left: Box::new(left),
+                    op: BinaryOp::Eq,
+                    right: Box::new(right),
+                })
             })
             .collect::<Result<Vec<_>>>()?;
 
@@ -1918,13 +1912,21 @@ impl CypherTranslator {
                 .collect(),
             span: None,
         };
-        let matched = branch(
-            vec![ast::Clause::Match(ast::MatchClause {
-                patterns: vec![named(path)],
+        // A null in a MERGE pattern matches an absent or null property, as the MERGE operators
+        // match it; a pattern's property map compares by equality, which a null never meets, so
+        // those entries become `IS NULL` conditions of the match.
+        let (matching, null_keys) = without_null_properties(path);
+        let mut match_clauses = vec![ast::Clause::Match(ast::MatchClause {
+            patterns: vec![named(matching)],
+            span: None,
+        })];
+        if let Some(predicate) = null_keys {
+            match_clauses.push(ast::Clause::Where(ast::WhereClause {
+                predicate,
                 span: None,
-            })],
-            merge_clause.on_match.as_ref(),
-        );
+            }));
+        }
+        let matched = branch(match_clauses, merge_clause.on_match.as_ref());
         // CREATE binds no path: the path variable is matched through the
         // elements it just created, every one of them bound.
         let mut create_clauses = vec![ast::Clause::Create(ast::CreateClause {
@@ -4086,6 +4088,46 @@ fn sum_of_no_values_is_zero(column: LogicalExpression) -> LogicalExpression {
         BuiltinFunction::Coalesce,
         vec![column, LogicalExpression::Literal(Value::Int64(0))],
     )
+}
+
+/// `path` without the entries of its property maps whose value is the literal `null`, and the
+/// conjunction of `variable.key IS NULL` for each (`None` when there are none). Every element
+/// of `path` has a name.
+fn without_null_properties(
+    mut path: ast::PathPattern,
+) -> (ast::PathPattern, Option<ast::Expression>) {
+    let mut conditions = Vec::new();
+    let mut take = |variable: Option<&String>, properties: &mut Vec<(String, ast::Expression)>| {
+        let Some(variable) = variable else {
+            return;
+        };
+        properties.retain(|(key, value)| {
+            if !matches!(value, ast::Expression::Literal(ast::Literal::Null)) {
+                return true;
+            }
+            conditions.push(ast::Expression::Unary {
+                op: ast::UnaryOp::IsNull,
+                operand: Box::new(ast::Expression::PropertyAccess {
+                    base: Box::new(ast::Expression::Variable(variable.clone())),
+                    property: key.clone(),
+                }),
+            });
+            false
+        });
+    };
+    take(path.start.variable.as_ref(), &mut path.start.properties);
+    for rel in &mut path.chain {
+        take(rel.variable.as_ref(), &mut rel.properties);
+        take(rel.target.variable.as_ref(), &mut rel.target.properties);
+    }
+    let predicate = conditions
+        .into_iter()
+        .reduce(|left, right| ast::Expression::Binary {
+            left: Box::new(left),
+            op: ast::BinaryOp::And,
+            right: Box::new(right),
+        });
+    (path, predicate)
 }
 
 #[cfg(test)]

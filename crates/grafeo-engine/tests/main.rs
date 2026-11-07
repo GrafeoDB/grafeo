@@ -227,6 +227,7 @@ mod node_edges;
 mod node_key_claims;
 mod node_seek;
 mod null_and_coercion;
+mod null_in_property_maps;
 mod null_inside_values;
 mod numeric_errors;
 mod online_backup;

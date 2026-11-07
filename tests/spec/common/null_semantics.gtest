@@ -389,21 +389,21 @@ tests:
       empty: true
     note: "id exists and is 'r1', not null, so no match"
 
-  - name: match_null_property_pattern_matches_null_value
+  - name: a_null_in_a_property_map_finds_nothing_over_a_null_property
     setup:
       - "INSERT (:Rec {id: null, b: 'x'})"
     query: "MATCH (n:Rec {id: null, b: 'x'}) RETURN n.b AS b"
     expect:
-      rows:
-        - [x]
+      empty: true
+    note: "ISO/IEC 39075 16.3: the map is an equality per key, and an equality with null is unknown"
 
-  - name: match_null_property_pattern_matches_missing_key
+  - name: a_null_in_a_property_map_finds_nothing_over_a_missing_key
     setup:
       - "INSERT (:Rec {b: 'x'})"
     query: "MATCH (n:Rec {id: null, b: 'x'}) RETURN n.b AS b"
     expect:
-      rows:
-        - [x]
+      empty: true
+    note: "ISO/IEC 39075 16.3: a missing key reads as null, and an equality with null is unknown"
 
   - name: merge_with_null_key_creates_then_matches
     statements:

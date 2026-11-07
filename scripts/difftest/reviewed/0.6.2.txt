@@ -454,3 +454,8 @@ EL12|gql a7c82952ef A statement that starts with a procedure call goes on with a
 EL13|gql 23b6445aad After NEXT, a procedure call reads the whole working table and its RETURN gives only what it names (ISO/IEC 39075 9.2 GR 3, 15.1); 0.6.1 kept the earlier statement's columns and grouped by them.
 EL14|gql b6e30ed9cb LIMIT after a procedure call takes a parameter, as every other LIMIT; 0.6.1 ignored it and returned every row.
 EL15|sql b9ec06a025 LIMIT after a procedure call takes a parameter, as every other LIMIT; 0.6.1 ignored it and returned every row.
+EM1|cypher 20233fc7fc A null in a property map is an equality with null, which finds nothing (ISO/IEC 39075 16.3 SR 21); 0.6.1 found the elements without the key.
+EM1|gql 20233fc7fc A null in a property map is an equality with null, which finds nothing (ISO/IEC 39075 16.3 SR 21); 0.6.1 found the elements without the key.
+EM2|cypher 2ece2d5589 A null in a property map is an equality with null, which finds nothing (ISO/IEC 39075 16.3 SR 21); 0.6.1 found the elements without the key.
+EM2|gql 2ece2d5589 A null in a property map is an equality with null, which finds nothing (ISO/IEC 39075 16.3 SR 21); 0.6.1 found the elements without the key.
+EM3|sql 20233fc7fc A null in a property map is an equality with null, which finds nothing (ISO/IEC 39075 16.3 SR 21); 0.6.1 found the elements without the key.

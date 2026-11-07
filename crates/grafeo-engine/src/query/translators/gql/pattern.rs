@@ -464,19 +464,14 @@ impl GqlTranslator {
                     variable: variable.to_string(),
                     property: prop_name.clone(),
                 };
+                // An entry is the equality `variable.property = value` (ISO/IEC 39075 16.3
+                // SR 21 h iii), so a null value finds nothing: it never meant "the key is absent".
                 let right = self.translate_expression(prop_value)?;
-                if matches!(right, LogicalExpression::Literal(Value::Null)) {
-                    Ok(LogicalExpression::Unary {
-                        op: UnaryOp::IsNull,
-                        operand: Box::new(left),
-                    })
-                } else {
-                    Ok(LogicalExpression::Binary {
-                        left: Box::new(left),
-                        op: BinaryOp::Eq,
-                        right: Box::new(right),
-                    })
-                }
+                Ok(LogicalExpression::Binary {
+                    left: Box::new(left),
+                    op: BinaryOp::Eq,
+                    right: Box::new(right),
+                })
             })
             .collect::<Result<Vec<_>>>()?;
 

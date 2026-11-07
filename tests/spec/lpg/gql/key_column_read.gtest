@@ -72,6 +72,29 @@ tests:
     expect:
       empty: true
 
+  # A map is a list of equalities (ISO/IEC 39075 16.3 SR 21 h iii): k = NULL is unknown, so the
+  # null finds no node, Hans (who has no k) included.
+  - name: integers_by_null
+    setup:
+      - "INSERT (:L {name: 'Alix', k: 1}), (:L {name: 'Gus', k: 2}), (:L {name: 'Mia', k: 2}), (:L {name: 'Jules', k: 3}), (:L {name: 'Hans'}), (:M {name: 'Butch', k: 2})"
+    query: "MATCH (n:L {k: NULL}) RETURN n.name"
+    expect:
+      empty: true
+
+  - name: integers_by_null_beside_a_matching_key
+    setup:
+      - "INSERT (:L {name: 'Alix', k: 1}), (:L {name: 'Gus', k: 2}), (:L {name: 'Mia', k: 2}), (:L {name: 'Jules', k: 3}), (:L {name: 'Hans'}), (:M {name: 'Butch', k: 2})"
+    query: "MATCH (n:L {name: 'Hans', k: NULL}) RETURN n.name"
+    expect:
+      empty: true
+
+  - name: integers_by_null_where
+    setup:
+      - "INSERT (:L {name: 'Alix', k: 1}), (:L {name: 'Gus', k: 2}), (:L {name: 'Mia', k: 2}), (:L {name: 'Jules', k: 3}), (:L {name: 'Hans'}), (:M {name: 'Butch', k: 2})"
+    query: "MATCH (n:L) WHERE n.k = NULL RETURN n.name"
+    expect:
+      empty: true
+
   - name: integers_in
     setup:
       - "INSERT (:L {name: 'Alix', k: 1}), (:L {name: 'Gus', k: 2}), (:L {name: 'Mia', k: 2}), (:L {name: 'Jules', k: 3}), (:L {name: 'Hans'}), (:M {name: 'Butch', k: 2})"

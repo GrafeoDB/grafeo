@@ -17,12 +17,18 @@ use grafeo_common::types::Value;
 use grafeo_engine::GrafeoDB;
 
 /// A seeded graph of `nodes` nodes and `nodes * degree` edges, each with a weight `w` from 1 to
-/// 9, on a ring (so every node is reached) plus seeded chords.
+/// 9, on a ring (so every node is reached) plus seeded chords. Two statements, two commits: the
+/// nodes, then the edges from one list (a commit per node, edge and weight took minutes).
 fn graph(nodes: usize, degree: usize) -> GrafeoDB {
     let db = GrafeoDB::new_in_memory();
-    let ids: Vec<_> = (0..nodes)
-        .map(|_| db.create_node(&["V"]).expect("a node"))
-        .collect();
+    db.execute(&format!(
+        "UNWIND range(0, {}) AS i INSERT (:V {{i: i}})",
+        nodes - 1
+    ))
+    .expect("the nodes");
+    db.execute("CREATE INDEX v_i FOR (n:V) ON (n.i)")
+        .expect("an index on the node number");
+    let number = |index: usize| Value::Int64(i64::try_from(index).expect("a small index"));
     let mut state: u64 = 0x5EED_0A16_0B1E;
     let mut next = |bound: usize| {
         state ^= state << 13;
@@ -30,19 +36,23 @@ fn graph(nodes: usize, degree: usize) -> GrafeoDB {
         state ^= state << 17;
         usize::try_from(state % bound as u64).expect("below the bound")
     };
-    for (index, &from) in ids.iter().enumerate() {
+    let mut edges = Vec::with_capacity(nodes * degree);
+    for index in 0..nodes {
         for hop in 0..degree {
             let to = if hop == 0 {
-                ids[(index + 1) % nodes]
+                (index + 1) % nodes
             } else {
-                ids[next(nodes)]
+                next(nodes)
             };
-            let edge = db.create_edge(from, to, "E").expect("an edge");
-            let weight = i64::try_from(1 + next(9)).expect("a small weight");
-            db.set_edge_property(edge, "w", Value::Int64(weight))
-                .expect("a weight");
+            let weight = number(1 + next(9));
+            edges.push(Value::List(vec![number(index), number(to), weight].into()));
         }
     }
+    db.execute_with_params(
+        "UNWIND $edges AS e MATCH (a:V {i: e[0]}), (b:V {i: e[1]}) INSERT (a)-[:E {w: e[2]}]->(b)",
+        std::collections::HashMap::from([("edges".to_string(), Value::List(edges.into()))]),
+    )
+    .expect("the edges");
     db
 }
 

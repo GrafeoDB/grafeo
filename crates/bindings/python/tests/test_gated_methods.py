@@ -26,7 +26,7 @@ def classes():
         "Transaction": type(db.begin_transaction()),
         "QueryResult": type(db.execute("RETURN 1 AS v")),
     }
-    for name in ["GraphHandle", "Node", "Edge", "ResultStream", "AsOfView", "Value"]:
+    for name in ["GraphHandle", "Node", "Edge", "ResultStream", "AsOfView", "Value", "Session"]:
         found[name] = getattr(grafeo, name, None) or getattr(native, name)
     return found
 

@@ -49,6 +49,7 @@ mod graph;
 mod graph_handle;
 mod quantization;
 mod query;
+mod session;
 mod stream;
 mod time_travel;
 mod types;
@@ -161,6 +162,7 @@ fn grafeo(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyQueryResult>()?;
     m.add_class::<warning::PyQueryWarning>()?;
     m.add_class::<PyResultStream>()?;
+    m.add_class::<session::PySession>()?;
     m.add_class::<time_travel::PyAsOfView>()?;
     m.add_class::<AsyncQueryResult>()?;
     m.add_class::<AsyncQueryResultIter>()?;

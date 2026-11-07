@@ -21,6 +21,7 @@ mod database;
 mod error;
 mod graph;
 mod query;
+mod session;
 mod stream;
 mod time_travel;
 mod transaction;

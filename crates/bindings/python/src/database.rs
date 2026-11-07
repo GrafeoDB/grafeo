@@ -2777,6 +2777,25 @@ impl PyGrafeoDB {
         PyTransaction::begin(self.inner.clone(), session, level_str.as_deref())
     }
 
+    /// Open a session whose limits bind every statement run through it: its
+    /// `execute` methods, its transactions and its lazy results.
+    ///
+    /// `read_only=True` refuses writes. `external_access=False` refuses every
+    /// statement that reads or writes outside the database (`LOAD DATA`,
+    /// `LOAD CSV`, the load procedures, SPARQL `LOAD`) before any file is
+    /// opened, with a `GrafeoError` of GQLSTATUS class 42 that names external
+    /// access. The two are independent: `read_only=True` keeps file access
+    /// unless `external_access=False` is passed too. With the defaults the
+    /// session runs as `db.execute` does.
+    ///
+    /// Example:
+    ///     with db.session(read_only=True, external_access=False) as session:
+    ///         session.execute("MATCH (p:Person) RETURN p.name")
+    #[pyo3(signature = (*, read_only=false, external_access=true))]
+    fn session(&self, read_only: bool, external_access: bool) -> crate::session::PySession {
+        crate::session::PySession::open(Arc::clone(&self.inner), read_only, external_access)
+    }
+
     /// Begin a transaction with an explicit CDC override.
     ///
     /// When ``cdc_enabled`` is ``True``, mutations in this transaction are
@@ -4389,7 +4408,9 @@ impl PyGrafeoDB {
 }
 
 /// Extract isolation level from either a string or an `IsolationLevel` enum value.
-fn extract_isolation_level(value: Option<&Bound<'_, PyAny>>) -> PyResult<Option<String>> {
+pub(crate) fn extract_isolation_level(
+    value: Option<&Bound<'_, PyAny>>,
+) -> PyResult<Option<String>> {
     match value {
         None => Ok(None),
         Some(v) => {

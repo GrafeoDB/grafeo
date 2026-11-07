@@ -70,6 +70,7 @@ typedef struct GrafeoNode        GrafeoNode;
 typedef struct GrafeoEdge        GrafeoEdge;
 typedef struct GrafeoStream      GrafeoStream;
 typedef struct GrafeoAsOf       GrafeoAsOf;
+typedef struct GrafeoSession    GrafeoSession;
 
 /* ---- Error handling ------------------------------------------------------ */
 
@@ -376,6 +377,32 @@ char*        grafeo_changes_between(GrafeoDatabase* db, uint64_t start_epoch, ui
 
 GrafeoStatus grafeo_node_count(GrafeoDatabase* db, size_t* out_count);
 GrafeoStatus grafeo_edge_count(GrafeoDatabase* db, size_t* out_count);
+
+/* ---- Sessions (0.6.2+) --------------------------------------------------- */
+/* A session's flags bind every statement run through it: auto-commit ones,
+ * its transactions (used and freed as those of grafeo_begin_transaction) and
+ * its streams. The flags are independent: a read-only session keeps file
+ * access unless GRAFEO_SESSION_NO_EXTERNAL_ACCESS is set too. 0 runs as
+ * grafeo_execute does. An external-access refusal is the permission-denied
+ * error (GQLSTATUS class 42) and names external access. */
+
+#define GRAFEO_SESSION_READ_ONLY           1u  /* refuses writes */
+#define GRAFEO_SESSION_NO_EXTERNAL_ACCESS  2u  /* refuses LOAD DATA, LOAD CSV, the load procedures, SPARQL LOAD */
+
+/* Opens a session. NULL, with the error set, for a NULL database or a flag
+ * bit no GRAFEO_SESSION_* names (never ignored). Free with grafeo_free_session. */
+GrafeoSession*     grafeo_session_open(GrafeoDatabase* db, uint32_t flags);
+GrafeoResult*      grafeo_session_execute(GrafeoSession* session, const char* query);
+GrafeoResult*      grafeo_session_execute_with_params(GrafeoSession* session, const char* query, const char* params_json);
+/* Execute in a specific language on the session; params_json may be NULL. */
+GrafeoResult*      grafeo_session_execute_language(GrafeoSession* session, const char* language, const char* query, const char* params_json);
+GrafeoTransaction* grafeo_session_begin_transaction(GrafeoSession* session);
+GrafeoStream*      grafeo_session_stream_open(GrafeoSession* session, const char* query);
+/* Closes the session: its statements fail from now on; other sessions and the
+ * database are unaffected. GRAFEO_ERROR_NULL_POINTER for NULL. */
+GrafeoStatus       grafeo_session_close(GrafeoSession* session);
+/* Frees a session (closing it first). Safe to call on NULL. */
+void               grafeo_free_session(GrafeoSession* session);
 
 /* ---- Transactions -------------------------------------------------------- */
 

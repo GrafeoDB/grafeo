@@ -4386,6 +4386,28 @@ impl Session {
         ResultStream::new(plan, guard)
     }
 
+    /// [`execute_streaming`](Self::execute_streaming) as a stream that owns
+    /// what it reads, as [`GrafeoDB::execute_streaming`](crate::GrafeoDB::execute_streaming)
+    /// gives: for a caller that keeps the stream past this borrow of the
+    /// session (a binding's stream handle). The session's permissions, its
+    /// external access included, apply as they do to `execute`.
+    ///
+    /// # Stability: Experimental
+    ///
+    /// New in 0.6.2. It may change or be removed in any release, with a
+    /// CHANGELOG entry: see <https://grafeo.dev/stability/>.
+    ///
+    /// # Errors
+    ///
+    /// As [`execute_streaming`](Self::execute_streaming).
+    #[cfg(feature = "gql")]
+    pub fn execute_streaming_owned(
+        &self,
+        query: &str,
+    ) -> Result<crate::query::executor::stream::OwnedResultStream> {
+        crate::query::executor::stream::OwnedResultStream::new(self.build_streaming_plan(query)?)
+    }
+
     /// Builds a pull-based physical pipeline for streaming, returning the
     /// root operator and metadata needed to wrap it in a `ResultStream` or
     /// `OwnedResultStream`. The stream holds its committed snapshot pin;

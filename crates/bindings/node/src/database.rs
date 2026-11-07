@@ -645,6 +645,21 @@ impl JsGrafeoDB {
         Transaction::new(self.inner.clone(), isolation_level.as_deref())
     }
 
+    /// Open a session whose limits bind every statement run through it: its
+    /// `execute` methods, its transactions and its streams.
+    ///
+    /// `readOnly: true` refuses writes. `externalAccess: false` refuses every
+    /// statement that reads or writes outside the database (`LOAD DATA`,
+    /// `LOAD CSV`, the load procedures, SPARQL `LOAD`) before any file is
+    /// opened, with an error of GQLSTATUS class 42 that names external
+    /// access. The two are independent: `readOnly: true` keeps file access
+    /// unless `externalAccess: false` is passed too. With no options the
+    /// session runs as `db.execute` does. An unknown option is an error.
+    #[napi(ts_args_type = "options?: { readOnly?: boolean; externalAccess?: boolean }")]
+    pub fn session(&self, options: Option<Object<'_>>) -> Result<crate::session::JsSession> {
+        crate::session::JsSession::open(Arc::clone(&self.inner), options.as_ref())
+    }
+
     /// Create a vector similarity index on a node property.
     #[napi(js_name = "createVectorIndex")]
     #[allow(clippy::too_many_arguments)]

@@ -1897,7 +1897,7 @@ pub extern "C" fn grafeo_edge_count(
 /// The handle of the transaction `session` began. It ends with
 /// `grafeo_commit` or `grafeo_rollback`, never with a statement, so the
 /// session refuses `START TRANSACTION`, `COMMIT` and `ROLLBACK`.
-fn new_transaction(mut session: grafeo_engine::session::Session) -> GrafeoTransaction {
+pub(crate) fn new_transaction(mut session: grafeo_engine::session::Session) -> GrafeoTransaction {
     session.refuse_transaction_statements();
     GrafeoTransaction {
         session: parking_lot::Mutex::new(Some(session)),

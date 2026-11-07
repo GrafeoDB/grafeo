@@ -86,10 +86,19 @@ pub extern "C" fn grafeo_stream_open(
             return std::ptr::null_mut();
         }
     };
+    stream_handle(&db.inner, stream)
+}
+
+/// The handle of `stream`, which reads `database`: what `grafeo_stream_open` and
+/// `grafeo_session_stream_open` return.
+pub(crate) fn stream_handle(
+    database: &Arc<RwLock<GrafeoDB>>,
+    stream: OwnedResultStream,
+) -> *mut GrafeoStream {
     let columns = stream.columns().to_vec();
     let warnings = stream.warning_sink();
     let handle = Box::new(GrafeoStream {
-        _database: Arc::clone(&db.inner),
+        _database: Arc::clone(database),
         columns,
         iter: Mutex::new(Some(stream.into_row_iter())),
         warnings,

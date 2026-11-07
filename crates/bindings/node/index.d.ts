@@ -209,6 +209,19 @@ export declare class GrafeoDB {
    * snapshot isolation is the strongest level until queries record their reads).
    */
   beginTransaction(isolationLevel?: string | undefined | null): Transaction
+  /**
+   * Open a session whose limits bind every statement run through it: its
+   * `execute` methods, its transactions and its streams.
+   *
+   * `readOnly: true` refuses writes. `externalAccess: false` refuses every
+   * statement that reads or writes outside the database (`LOAD DATA`,
+   * `LOAD CSV`, the load procedures, SPARQL `LOAD`) before any file is
+   * opened, with an error of GQLSTATUS class 42 that names external
+   * access. The two are independent: `readOnly: true` keeps file access
+   * unless `externalAccess: false` is passed too. With no options the
+   * session runs as `db.execute` does. An unknown option is an error.
+   */
+  session(options?: { readOnly?: boolean; externalAccess?: boolean }): JsSession
   /** Create a vector similarity index on a node property. */
   createVectorIndex(label: string, property: string, dimensions?: number | undefined | null, metric?: string | undefined | null, m?: number | undefined | null, efConstruction?: number | undefined | null, quantization?: string | undefined | null): Promise<void>
   /** Bulk-insert nodes with vector properties. */
@@ -734,6 +747,47 @@ export declare class ResultStream {
   close(): Promise<void>
 }
 export type JsResultStream = ResultStream
+
+/**
+ * A session on a database: its statements run with the limits it was opened with.
+ *
+ * `readOnly` refuses writes. `externalAccess: false` refuses every statement that reads or
+ * writes outside the database (`LOAD DATA`, `LOAD CSV`, the load procedures, SPARQL `LOAD`),
+ * before any file is opened. The two are independent: `readOnly: true` keeps file access.
+ * Nothing run on the session can lift a limit. `close()` it when done.
+ */
+export declare class Session {
+  /** Execute a GQL statement on the session. Returns a Promise<QueryResult>. */
+  execute(query: string, params?: any | undefined | null): Promise<QueryResult>
+  /** Execute a statement in a named language (e.g. `"graphql-rdf"`) on the session. */
+  executeLanguage(language: string, query: string, params?: any | undefined | null): Promise<QueryResult>
+  /**
+   * Run a read-only GQL query on the session and return an async cursor, as
+   * `GrafeoDB.executeStream` does.
+   */
+  executeStream(query: string): Promise<JsResultStream>
+  /**
+   * Begin a transaction with the session's limits, used as one from
+   * `GrafeoDB.beginTransaction` (the isolation level as there).
+   */
+  beginTransaction(isolationLevel?: string | undefined | null): Transaction
+  /**
+   * Close the session: its statements fail from now on; the database and other sessions are
+   * unaffected. Closing a closed session does nothing.
+   */
+  close(): void
+  /** Execute a Cypher statement on the session. */
+  executeCypher(query: string, params?: any | undefined | null): Promise<QueryResult>
+  /** Execute a SQL/PGQ statement on the session. */
+  executeSql(query: string, params?: any | undefined | null): Promise<QueryResult>
+  /** Execute a Gremlin statement on the session. */
+  executeGremlin(query: string, params?: any | undefined | null): Promise<QueryResult>
+  /** Execute a GraphQL statement on the session. */
+  executeGraphql(query: string, params?: any | undefined | null): Promise<QueryResult>
+  /** Execute a SPARQL statement on the session. */
+  executeSparql(query: string, params?: any | undefined | null): Promise<QueryResult>
+}
+export type JsSession = Session
 
 /**
  * A database transaction with explicit commit/rollback.

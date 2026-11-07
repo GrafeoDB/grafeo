@@ -1851,3 +1851,65 @@ tests:
       rows:
         - ["urn:a"]
         - ["urn:b"]
+
+  # Above an aggregation the row is gone (the design of EXISTS per row): a filter over a grouped
+  # sub-SELECT reads `?o` as unbound, though the outer row binds it.
+  - name: a_filter_above_an_aggregation_reads_no_row_value
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k BIND(:z AS ?o) FILTER EXISTS { SELECT (COUNT(*) AS ?n) WHERE { ?x :p ?y } HAVING (!BOUND(?o)) } }"
+    expect:
+      rows:
+        - ["urn:a"]
+        - ["urn:b"]
+
+  - name: a_filter_above_an_aggregation_reads_no_row_value_not
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k BIND(:z AS ?o) FILTER NOT EXISTS { SELECT (COUNT(*) AS ?n) WHERE { ?x :p ?y } HAVING (!BOUND(?o)) } }"
+    expect:
+      empty: true
+
+  # The row joins every group, so `?x` is the row's in each inner row, also where the OPTIONAL left
+  # it out: ORDER BY ?x ?y then puts :a first, and LIMIT 1 keeps it, not :b.
+  - name: order_by_a_row_variable_in_a_sub_select_reads_the_row
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k BIND(:c AS ?x) FILTER EXISTS { { SELECT ?y WHERE { ?y :t :k OPTIONAL { ?y :p ?x } } ORDER BY ?x ?y LIMIT 1 } FILTER(?y = :b) } }"
+    expect:
+      empty: true
+
+  - name: order_by_a_row_variable_in_a_sub_select_reads_the_row_kept
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k BIND(:c AS ?x) FILTER EXISTS { { SELECT ?y WHERE { ?y :t :k OPTIONAL { ?y :p ?x } } ORDER BY ?x ?y LIMIT 1 } FILTER(?y = :a) } }"
+    expect:
+      rows:
+        - ["urn:a"]
+        - ["urn:b"]
+
+  # An EXISTS mark inside a per-row EXISTS runs again for each outer row: no answer of the row
+  # before carries over, whichever row comes first.
+  - name: a_mark_inside_a_per_row_exists_reads_each_row
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { VALUES ?s { :a :b } FILTER EXISTS { BIND(EXISTS { ?s :p ?o } AS ?w) FILTER(?w) } }"
+    expect:
+      rows:
+        - ["urn:a"]
+
+  - name: a_mark_inside_a_per_row_exists_reads_each_row_reversed
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { VALUES ?s { :b :a } FILTER EXISTS { BIND(EXISTS { ?s :p ?o } AS ?w) FILTER(?w) } }"
+    expect:
+      rows:
+        - ["urn:a"]
+
+  - name: a_mark_inside_a_per_row_exists_reads_each_row_negated
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { VALUES ?s { :a :b } FILTER EXISTS { BIND(NOT EXISTS { ?s :p ?o } AS ?w) FILTER(?w) } }"
+    expect:
+      rows:
+        - ["urn:b"]

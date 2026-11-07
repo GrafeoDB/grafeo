@@ -1115,11 +1115,12 @@ impl RdfPlanner {
         // Convert logical expression to filter expression
         let filter_expr = convert_filter_expression(&predicate)?;
 
+        // Above an aggregation the row is gone, as for a projection or a sort.
         let predicate = RdfExpressionPredicate::new(
             filter_expr,
             variable_columns,
             Arc::clone(&self.terms),
-            self.expression_context(),
+            self.expression_context_over(&filter.input),
         );
 
         let operator: Box<dyn Operator> =
@@ -1513,6 +1514,17 @@ impl RdfPlanner {
             // orders nothing.
             let column = match expression {
                 LogicalExpression::Variable(name) => match variable_columns.get(name) {
+                    // The row's value where its own column is unbound, as a
+                    // projection reads it.
+                    Some(_) if context.row_value(name).is_some() => {
+                        projections.push(RdfProjectExpr::Evaluated {
+                            expr: convert_filter_expression(expression)?,
+                            variable_columns: variable_columns.clone(),
+                            output: EvaluatedOutput::Term,
+                        });
+                        output_types.push(LogicalType::Any);
+                        projections.len() - 1
+                    }
                     Some(&column) => column,
                     None => {
                         projections.push(RdfProjectExpr::Constant(

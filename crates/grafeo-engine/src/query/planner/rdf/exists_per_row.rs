@@ -91,6 +91,13 @@ pub(super) struct ExistsPerRow {
 }
 
 impl ExistsPerRow {
+    /// Forgets the answers, for a plan run again: the rows around it may
+    /// differ. The plans of the pattern stay, as they depend only on which
+    /// names a row binds.
+    pub(super) fn reset(&mut self) {
+        self.answers.clear();
+    }
+
     /// The test of `subquery` for rows of `left` and, in a join's pair, then `right`.
     pub(super) fn new(
         parts: RowPlanParts,

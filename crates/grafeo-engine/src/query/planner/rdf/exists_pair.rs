@@ -35,13 +35,14 @@ pub(super) struct ExistsTest {
     keys: Vec<(Option<usize>, Option<usize>)>,
     /// The column of each of those variables in the subquery's rows.
     subquery_columns: Vec<usize>,
-    /// The subquery, until it ran, then its rows.
+    /// The subquery, and its rows once it ran.
     state: parking_lot::Mutex<State>,
 }
 
-enum State {
-    NotRun(Box<dyn Operator>),
-    Ran(Matches),
+struct State {
+    subquery: Box<dyn Operator>,
+    /// The subquery's rows, `None` until it runs (again after a reset).
+    matches: Option<Matches>,
 }
 
 /// The subquery's rows on the shared variables: those with every variable
@@ -91,8 +92,19 @@ impl ExistsTest {
             negated,
             keys,
             subquery_columns,
-            state: parking_lot::Mutex::new(State::NotRun(subquery)),
+            state: parking_lot::Mutex::new(State {
+                subquery,
+                matches: None,
+            }),
         }
+    }
+
+    /// Runs the subquery again at the next test: a reset of the plan above
+    /// may give it other rows.
+    fn reset(&mut self) {
+        let state = self.state.get_mut();
+        state.subquery.reset();
+        state.matches = None;
     }
 
     fn holds(
@@ -111,9 +123,10 @@ impl ExistsTest {
             })
             .collect();
         let mut state = self.state.lock();
-        if let State::NotRun(subquery) = &mut *state {
+        let state = &mut *state;
+        if state.matches.is_none() {
             let mut matches = Matches::default();
-            while let Some(chunk) = subquery.next()? {
+            while let Some(chunk) = state.subquery.next()? {
                 for row in chunk.selected_indices() {
                     let values: Vec<Option<i64>> = self
                         .subquery_columns
@@ -128,11 +141,9 @@ impl ExistsTest {
                     }
                 }
             }
-            *state = State::Ran(matches);
+            state.matches = Some(matches);
         }
-        let State::Ran(matches) = &*state else {
-            unreachable!("the subquery ran above");
-        };
+        let matches = state.matches.as_ref().expect("the subquery ran above");
         Ok(matches.contains(&key) != self.negated)
     }
 }
@@ -144,8 +155,9 @@ pub(super) struct RowCheck {
     keys: Vec<(usize, usize)>,
     /// The conjuncts, over the row followed by the subquery's row.
     check: Box<dyn JoinCondition>,
-    /// The subquery, until it ran.
-    subquery: Option<Box<dyn Operator>>,
+    subquery: Box<dyn Operator>,
+    /// Whether the subquery ran (since the last reset), filling the fields below.
+    ran: bool,
     chunks: Vec<DataChunk>,
     /// By key, each row of the subquery as its chunk and its row there.
     rows: FxHashMap<Vec<Option<i64>>, Vec<(usize, usize)>>,
@@ -162,15 +174,27 @@ impl RowCheck {
         Self {
             keys,
             check,
-            subquery: Some(subquery),
+            subquery,
+            ran: false,
             chunks: Vec::new(),
             rows: FxHashMap::default(),
             partly_bound: false,
         }
     }
 
-    fn run(&mut self, mut subquery: Box<dyn Operator>) -> Result<(), OperatorError> {
-        while let Some(chunk) = subquery.next()? {
+    /// Runs the subquery again at the next test: a reset of the plan above
+    /// may give it other rows.
+    fn reset(&mut self) {
+        self.subquery.reset();
+        self.ran = false;
+        self.chunks.clear();
+        self.rows.clear();
+        self.partly_bound = false;
+    }
+
+    fn run(&mut self) -> Result<(), OperatorError> {
+        self.ran = true;
+        while let Some(chunk) = self.subquery.next()? {
             let at = self.chunks.len();
             for row in chunk.selected_indices() {
                 let key: Vec<Option<i64>> = self
@@ -203,8 +227,8 @@ impl RowCheck {
     }
 
     fn holds(&mut self, input: &DataChunk, row: usize) -> Result<bool, OperatorError> {
-        if let Some(subquery) = self.subquery.take() {
-            self.run(subquery)?;
+        if !self.ran {
+            self.run()?;
         }
         let key: Vec<Option<i64>> = self
             .keys
@@ -238,6 +262,17 @@ pub(super) enum MarkTest {
     PerRow(RowCheck),
     /// By running the pattern for the row.
     EachRow(Box<ExistsPerRow>),
+}
+
+impl MarkTest {
+    /// Forgets what the test learned from its subquery, for a plan run again.
+    fn reset(&mut self) {
+        match self {
+            Self::Lookup(test) => test.reset(),
+            Self::PerRow(test) => test.reset(),
+            Self::EachRow(test) => test.reset(),
+        }
+    }
 }
 
 /// Every row of its input with a column more: whether an `EXISTS` holds for it, as a boolean term.
@@ -277,6 +312,7 @@ impl Operator for ExistsMarkOperator {
 
     fn reset(&mut self) {
         self.child.reset();
+        self.test.reset();
     }
 
     fn name(&self) -> &'static str {
@@ -395,5 +431,112 @@ impl JoinCondition for ExistsPairCondition {
             }
         }
         Ok(true)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use grafeo_common::types::LogicalType;
+
+    /// A subquery of one column whose rows are whatever `ids` holds when it
+    /// runs: a reset runs it again.
+    struct Rows {
+        ids: Arc<parking_lot::Mutex<Vec<i64>>>,
+        done: bool,
+    }
+
+    impl Operator for Rows {
+        fn next(&mut self) -> Result<Option<DataChunk>, OperatorError> {
+            if self.done {
+                return Ok(None);
+            }
+            self.done = true;
+            Ok(Some(ids_chunk(&self.ids.lock())))
+        }
+
+        fn reset(&mut self) {
+            self.done = false;
+        }
+
+        fn name(&self) -> &'static str {
+            "Rows"
+        }
+
+        fn into_any(self: Box<Self>) -> Box<dyn std::any::Any + Send> {
+            self
+        }
+    }
+
+    fn ids_chunk(ids: &[i64]) -> DataChunk {
+        let mut chunk = DataChunk::with_capacity(&[LogicalType::Int64], ids.len());
+        for &id in ids {
+            chunk
+                .column_mut(0)
+                .expect("one column")
+                .push_value(Value::Int64(id));
+        }
+        chunk.set_count(ids.len());
+        chunk
+    }
+
+    /// Every pair joins: the test is the key's lookup alone.
+    struct Always;
+
+    impl JoinCondition for Always {
+        fn evaluate(
+            &self,
+            _left_chunk: &DataChunk,
+            _left_row: usize,
+            _right_chunk: &DataChunk,
+            _right_row: usize,
+        ) -> Result<bool, OperatorError> {
+            Ok(true)
+        }
+    }
+
+    /// Whether `test` holds for a row whose one shared variable is `id`.
+    fn holds(test: &mut MarkTest, id: i64) -> bool {
+        let row = ids_chunk(&[id]);
+        match test {
+            MarkTest::Lookup(test) => test.holds(&row, 0, &row, 0).unwrap(),
+            MarkTest::PerRow(test) => test.holds(&row, 0).unwrap(),
+            MarkTest::EachRow(_) => unreachable!("not built here"),
+        }
+    }
+
+    /// A test keeps its subquery's rows between rows, and runs the subquery
+    /// again after a reset: a plan run again may give it other rows.
+    #[test]
+    fn a_reset_runs_the_subquery_again() {
+        for lookup in [true, false] {
+            let ids = Arc::new(parking_lot::Mutex::new(vec![1]));
+            let subquery = Box::new(Rows {
+                ids: Arc::clone(&ids),
+                done: false,
+            });
+            let mut test = if lookup {
+                MarkTest::Lookup(ExistsTest::new(
+                    subquery,
+                    false,
+                    vec![(Some(0), None)],
+                    vec![0],
+                ))
+            } else {
+                MarkTest::PerRow(RowCheck::new(subquery, vec![(0, 0)], Box::new(Always)))
+            };
+            assert!(holds(&mut test, 1), "lookup {lookup}: the first run");
+            assert!(!holds(&mut test, 2), "lookup {lookup}: the first run");
+
+            *ids.lock() = vec![2];
+            assert!(!holds(&mut test, 2), "lookup {lookup}: kept until a reset");
+
+            test.reset();
+            assert!(holds(&mut test, 2), "lookup {lookup}: run again");
+            assert!(
+                !holds(&mut test, 1),
+                "lookup {lookup}: the old rows are gone"
+            );
+        }
     }
 }

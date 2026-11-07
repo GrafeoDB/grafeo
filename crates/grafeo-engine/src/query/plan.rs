@@ -1282,10 +1282,11 @@ impl LogicalOperator {
                     bound.extend(input.bound_variables(imports)?);
                 }
             }
+            // The row an EXISTS runs for: its names are its columns.
+            Self::RowValues(values) => bound.extend(values.names.iter().cloned()),
             // RDF and graph management plans have no node patterns to close.
             Self::PropertyPath(_)
             | Self::NamedGraphs(_)
-            | Self::RowValues(_)
             | Self::TripleScan(_)
             | Self::Construct(_)
             | Self::InsertTriple(_)
@@ -6282,6 +6283,18 @@ mod tests {
             Some(HashSet::from(["a".to_string(), "b".to_string()]))
         );
         assert_eq!(call(vec![item("*")]).bound_variables(None), None);
+    }
+
+    /// The row an `EXISTS` runs for binds its names: its columns are known.
+    #[test]
+    fn bound_variables_of_a_row() {
+        let row = LogicalOperator::RowValues(RowValuesOp {
+            names: vec!["s".into(), "o".into()],
+        });
+        assert_eq!(
+            row.bound_variables(None),
+            Some(HashSet::from(["s".to_string(), "o".to_string()]))
+        );
     }
 }
 

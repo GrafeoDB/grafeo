@@ -189,6 +189,7 @@ def test_persona_ravi_mmr_starts_at_the_nearest_and_spreads(db):
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.requires("vector-index")
 def test_persona_ravi_searches_before_creating_the_index():
     db = make_db()
     with pytest.raises(grafeo.GrafeoError, match="no vector index on :Doc\\(emb\\); create one"):
@@ -219,6 +220,7 @@ def test_persona_ravi_k_of_zero_gives_nothing(db):
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.requires("vector-index")
 def test_persona_ravi_compares_two_embedding_runs():
     db = make_db(history_retention="forever")
     db.create_vector_index("Doc", "emb", dimensions=4, metric="cosine")

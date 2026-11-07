@@ -15,6 +15,8 @@ import math
 import pytest
 from grafeo import GrafeoDB
 
+pytestmark = pytest.mark.requires("vector-index")
+
 DIMENSIONS = 8
 ORIGINALS = 1200
 COPIES = 3

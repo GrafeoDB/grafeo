@@ -17,7 +17,10 @@ try:
 except ImportError:
     GRAFEO_AVAILABLE = False
 
-pytestmark = pytest.mark.skipif(not GRAFEO_AVAILABLE, reason="Grafeo Python bindings not installed")
+pytestmark = [
+    pytest.mark.skipif(not GRAFEO_AVAILABLE, reason="Grafeo Python bindings not installed"),
+    pytest.mark.requires("vector-index"),
+]
 
 WRONG_SIZE = "has a vector index of 3 dimensions, got a vector of 2"
 

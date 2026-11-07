@@ -9,6 +9,8 @@ one.
 import pytest
 from grafeo import GrafeoDB, GrafeoError
 
+pytestmark = pytest.mark.requires("text-index")
+
 QUERY = "MATCH (d:Doc) WHERE text_match(d.body, 'canals') RETURN d.title AS t"
 
 

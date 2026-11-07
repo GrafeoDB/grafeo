@@ -42,8 +42,32 @@ def self_contained():
                 line for line in block.splitlines() if line.strip() and not line.startswith("#")
             ]
             if code and re.match(r"(import grafeo|from grafeo import)", code[0]):
-                found.append(pytest.param(block, id=f"{name}-{index}"))
+                marks = (
+                    [pytest.mark.requires(*sorted(needs))] if (needs := features_of(block)) else []
+                )
+                found.append(pytest.param(block, id=f"{name}-{index}", marks=marks))
     return found
+
+
+# What a block calls that a build may leave out, and the feature it needs.
+FEATURE_CALLS = {
+    "create_vector_index": "vector-index",
+    "vector_search": "vector-index",
+    "mmr_search": "vector-index",
+    "create_text_index": "text-index",
+    "text_search": "text-index",
+    "hybrid_search": "hybrid-search",
+    ".algorithms": "algos",
+    "begin_transaction_with_cdc": "cdc",
+    "execute_sparql": "sparql",
+    "CREATE VECTOR INDEX": "vector-index",
+    "CREATE TEXT INDEX": "text-index",
+    "CALL grafeo.": "algos",
+}
+
+
+def features_of(block):
+    return {feature for call, feature in FEATURE_CALLS.items() if call in block}
 
 
 def run(code, cwd):

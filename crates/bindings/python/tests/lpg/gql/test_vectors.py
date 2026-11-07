@@ -215,34 +215,40 @@ class TestVectorFunction:
 class TestCreateVectorIndex:
     """Test create_vector_index() method."""
 
+    @pytest.mark.requires("vector-index")
     def test_create_vector_index_basic(self, db):
         """Basic vector index creation should succeed."""
         db.create_node(["Doc"], {"embedding": [1.0, 0.0, 0.0]})
         db.create_node(["Doc"], {"embedding": [0.0, 1.0, 0.0]})
         db.create_vector_index("Doc", "embedding")
 
+    @pytest.mark.requires("vector-index")
     def test_create_vector_index_with_metric(self, db):
         """Vector index with explicit metric should succeed."""
         db.create_node(["Doc"], {"embedding": [1.0, 0.0, 0.0]})
         db.create_vector_index("Doc", "embedding", metric="euclidean")
 
+    @pytest.mark.requires("vector-index")
     def test_create_vector_index_with_dimensions(self, db):
         """Vector index with explicit dimensions should succeed."""
         db.create_node(["Doc"], {"embedding": [1.0, 0.0, 0.0]})
         db.create_vector_index("Doc", "embedding", dimensions=3)
 
+    @pytest.mark.requires("vector-index")
     def test_create_vector_index_no_vectors_fails(self, db):
         """Creating index on nodes without vectors should fail."""
         db.create_node(["Doc"], {"name": "no embedding"})
         with pytest.raises(RuntimeError, match="No vector properties"):
             db.create_vector_index("Doc", "embedding")
 
+    @pytest.mark.requires("vector-index")
     def test_create_vector_index_dimension_mismatch_fails(self, db):
         """Dimension mismatch should fail."""
         db.create_node(["Doc"], {"embedding": [1.0, 0.0, 0.0]})
         with pytest.raises(RuntimeError, match="dimension mismatch"):
             db.create_vector_index("Doc", "embedding", dimensions=5)
 
+    @pytest.mark.requires("vector-index")
     def test_create_vector_index_invalid_metric_fails(self, db):
         """Invalid metric should fail."""
         db.create_node(["Doc"], {"embedding": [1.0, 0.0, 0.0]})
@@ -254,18 +260,21 @@ class TestCreateVectorIndex:
         with pytest.raises(RuntimeError, match="vector"):
             db.execute("CREATE VECTOR INDEX idx ON :Doc(embedding)")
 
+    @pytest.mark.requires("vector-index")
     def test_create_vector_index_with_m(self, db):
         """Vector index with custom m parameter should succeed."""
         db.create_node(["Doc"], {"embedding": [1.0, 0.0, 0.0]})
         db.create_node(["Doc"], {"embedding": [0.0, 1.0, 0.0]})
         db.create_vector_index("Doc", "embedding", m=32)
 
+    @pytest.mark.requires("vector-index")
     def test_create_vector_index_with_ef_construction(self, db):
         """Vector index with custom ef_construction should succeed."""
         db.create_node(["Doc"], {"embedding": [1.0, 0.0, 0.0]})
         db.create_node(["Doc"], {"embedding": [0.0, 1.0, 0.0]})
         db.create_vector_index("Doc", "embedding", ef_construction=200)
 
+    @pytest.mark.requires("vector-index")
     def test_create_vector_index_all_tuning_params(self, db):
         """Vector index with all tuning parameters should succeed."""
         db.create_node(["Doc"], {"embedding": [1.0, 0.0, 0.0]})
@@ -273,6 +282,7 @@ class TestCreateVectorIndex:
         db.create_vector_index("Doc", "embedding", metric="cosine", m=32, ef_construction=256)
 
 
+@pytest.mark.requires("vector-index")
 class TestVectorSearch:
     """Test vector_search() method."""
 
@@ -372,6 +382,7 @@ class TestBatchCreateNodes:
         assert emb is not None
         assert len(emb) == 2
 
+    @pytest.mark.requires("vector-index")
     def test_batch_create_nodes_indexable(self, db):
         """Batch-inserted nodes should be indexable and searchable."""
         vectors = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
@@ -389,6 +400,7 @@ class TestBatchCreateNodes:
         assert len(ids) == 0
 
 
+@pytest.mark.requires("vector-index")
 class TestBatchVectorSearch:
     """Test batch_vector_search() method."""
 

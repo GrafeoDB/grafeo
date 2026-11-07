@@ -237,6 +237,7 @@ class TestStorageSize:
 
 
 class TestBYOV:
+    @pytest.mark.requires("vector-index")
     def test_384_dim_vectors(self):
         """Insert 384-dim vectors as list[float], create index, search."""
         db = GrafeoDB()
@@ -259,6 +260,7 @@ class TestBYOV:
         for j in range(len(results) - 1):
             assert results[j][1] <= results[j + 1][1], "results should be sorted"
 
+    @pytest.mark.requires("vector-index")
     def test_batch_create_vectors(self):
         """batch_create_nodes with 100 384-dim vectors."""
         db = GrafeoDB()
@@ -348,6 +350,7 @@ class TestBulkImport:
 # ============================================================================
 
 
+@pytest.mark.requires("vector-index")
 class TestConcurrency:
     def test_threaded_vector_search(self):
         """4 threads doing vector_search simultaneously."""

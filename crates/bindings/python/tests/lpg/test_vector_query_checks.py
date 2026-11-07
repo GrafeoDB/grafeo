@@ -125,6 +125,7 @@ def test_vector_index_arguments_are_invalid_values(docs):
     )
 
 
+@pytest.mark.requires("vector-index")
 def test_removing_a_vector_keeps_the_others_findable():
     db = grafeo.GrafeoDB()
     ids = [db.create_node(["Item"], {"embedding": [1.0, i / 100, 0.0, 0.0]}).id for i in range(8)]

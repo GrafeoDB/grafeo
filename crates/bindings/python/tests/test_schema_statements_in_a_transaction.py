@@ -141,7 +141,25 @@ def catalogs(kind):
     return before, after
 
 
-@pytest.mark.parametrize("kind", KINDS)
+# The kinds a build may leave out, and the feature each needs: stored procedures need the
+# procedures (algos).
+KIND_FEATURES = {
+    "create_text_index": "text-index",
+    "drop_text_index": "text-index",
+    "create_vector_index": "vector-index",
+    "drop_vector_index": "vector-index",
+    "create_procedure": "algos",
+    "drop_procedure": "algos",
+}
+KIND_CASES = [
+    pytest.param(kind, marks=pytest.mark.requires(KIND_FEATURES[kind]))
+    if kind in KIND_FEATURES
+    else kind
+    for kind in KINDS
+]
+
+
+@pytest.mark.parametrize("kind", KIND_CASES)
 def test_a_rollback_undoes_it(kind):
     before, _ = catalogs(kind)
     db = prepared(kind)
@@ -151,7 +169,7 @@ def test_a_rollback_undoes_it(kind):
     assert catalog(db, KINDS[kind][3]) == before
 
 
-@pytest.mark.parametrize("kind", KINDS)
+@pytest.mark.parametrize("kind", KIND_CASES)
 def test_a_rollback_to_a_savepoint_undoes_it(kind):
     before, _ = catalogs(kind)
     db = prepared(kind)
@@ -163,7 +181,7 @@ def test_a_rollback_to_a_savepoint_undoes_it(kind):
     assert catalog(db, KINDS[kind][3]) == before
 
 
-@pytest.mark.parametrize("kind", KINDS)
+@pytest.mark.parametrize("kind", KIND_CASES)
 def test_another_session_does_not_see_it_before_the_commit(kind):
     before, _ = catalogs(kind)
     db = prepared(kind)
@@ -175,7 +193,7 @@ def test_another_session_does_not_see_it_before_the_commit(kind):
         tx.rollback()
 
 
-@pytest.mark.parametrize("kind", KINDS)
+@pytest.mark.parametrize("kind", KIND_CASES)
 def test_a_commit_keeps_it(kind):
     _, after = catalogs(kind)
     db = prepared(kind)
@@ -185,7 +203,7 @@ def test_a_commit_keeps_it(kind):
     assert catalog(db, KINDS[kind][3]) == after
 
 
-@pytest.mark.parametrize("kind", KINDS)
+@pytest.mark.parametrize("kind", KIND_CASES)
 def test_a_rollback_holds_after_a_reopen(kind, tmp_path):
     before, _ = catalogs(kind)
     path = tmp_path / "rolled_back.grafeo"
@@ -199,7 +217,7 @@ def test_a_rollback_holds_after_a_reopen(kind, tmp_path):
     db.close()
 
 
-@pytest.mark.parametrize("kind", KINDS)
+@pytest.mark.parametrize("kind", KIND_CASES)
 def test_a_commit_holds_after_a_reopen(kind, tmp_path):
     _, after = catalogs(kind)
     path = tmp_path / "committed.grafeo"

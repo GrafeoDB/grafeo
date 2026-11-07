@@ -12,6 +12,10 @@ import json
 import grafeo
 import pytest
 
+# The procedures are listed at import: in a build without algos or gql the list stays empty, so
+# the module is collected and skipped rather than failing.
+RUNS = hasattr(grafeo.GrafeoDB(), "algorithms") and "gql" in grafeo.features()
+
 pytestmark = [
     pytest.mark.skipif(
         not hasattr(grafeo.GrafeoDB(), "algorithms"),
@@ -57,7 +61,7 @@ def ids_by_name(reader):
     return {row["name"]: row["node"] for row in rows}
 
 
-IDS = ids_by_name(database(*BEFORE))
+IDS = ids_by_name(database(*BEFORE)) if RUNS else {}
 
 
 def arguments_of(name):
@@ -75,11 +79,15 @@ def arguments_of(name):
     }.get(name, "")
 
 
-PROCEDURES = sorted(
-    row["name"]
-    for row in database().execute("CALL grafeo.procedures()")
-    # Search needs an index, and reads no adjacency.
-    if not row["name"].startswith("grafeo.search.")
+PROCEDURES = (
+    sorted(
+        row["name"]
+        for row in database().execute("CALL grafeo.procedures()")
+        # Search needs an index, and reads no adjacency.
+        if not row["name"].startswith("grafeo.search.")
+    )
+    if RUNS
+    else []
 )
 
 

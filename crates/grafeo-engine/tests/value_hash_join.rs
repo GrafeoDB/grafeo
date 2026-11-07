@@ -952,7 +952,7 @@ fn an_index_search_shows_no_label_first() {
 
 /// A range of constants on a scan without input runs as a range scan, with
 /// or without an index, and `EXPLAIN` says so; with an equality of a
-/// constant beside it, the label-first scan runs.
+/// constant beside it, the equality's key column is read instead.
 #[test]
 fn a_range_without_an_index_shows_the_range_scan() {
     let db = files();

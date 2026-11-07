@@ -110,12 +110,15 @@ Production operations. In the engine this enables observability and the async st
 
 | Deprecated name | Use instead | Notes |
 | --- | --- | --- |
-| `embedded` | `lpg` + `ai` + `algos` + `parallel` + `arrow-export` | Currently still the default of the facade and the Python, Node.js and C bindings. `lpg` adds Cypher, Gremlin, SQL/PGQ and the rest of `storage` |
+| `embedded` | `lpg` + `ai` + `algos` + `parallel` + `arrow-export` | Currently still the default of the facade and the Python, Node.js and C bindings. `lpg` adds Cypher, Gremlin, SQL/PGQ and the rest of `storage`. In the Rust facade, `embedded` has **no write-ahead log** (see below); the bindings' `embedded` includes it |
 | `browser` | `edge` | Currently still the default of the WASM binding |
 | `server` | `lpg` + `rdf` + `ai` + `algos` + `parallel` + `arrow-export` + `async-storage` + `tracing` | `enterprise` without `metrics`; no bulk import |
 | `full` | same as `server` | In the facade, `full` is an alias of `server`. The bindings' `full` is all languages, `ai`, `algos` and the RDF triple store |
 
 The binding defaults move to persona names before the aliases are removed, so depending on `grafeo` without features keeps working.
+
+!!! warning "The Rust facade's default has no write-ahead log"
+    `grafeo` with its default features (`embedded`) writes a database file but logs no commits: a commit reaches the file only at a checkpoint (`close()`, dropping the database, or `wal_checkpoint()`), so **a process that crashes loses every commit since the last checkpoint**. Add the `wal` feature, or use `lpg`, which includes it. The Python, Node.js, C, C#, Dart and Go packages include the write-ahead log. The Rust default includes it from 0.7.0 ([#468](https://github.com/GrafeoDB/grafeo/issues/468)).
 
 ## Ecosystem Matrix
 

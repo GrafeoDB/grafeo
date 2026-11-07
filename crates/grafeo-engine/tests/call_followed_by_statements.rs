@@ -7,14 +7,14 @@
 //! cargo test -p grafeo-engine --all-features --test main call_followed_by_statements::
 //! ```
 
-#![cfg(all(feature = "gql", feature = "algos"))]
+#![cfg(feature = "gql")]
 
 use grafeo_common::utils::gqlstatus::GqlStatus;
 use grafeo_engine::GrafeoDB;
-use grafeo_engine::procedures::BuiltinProcedures;
 
 /// One statement of each kind that may follow a call, none naming the yielded column except
 /// through `{col}`.
+#[cfg(feature = "algos")]
 const FOLLOWERS: [&str; 9] = [
     "MATCH (n) RETURN count(*) AS c",
     "OPTIONAL MATCH (n) RETURN count(*) AS c",
@@ -30,8 +30,12 @@ const FOLLOWERS: [&str; 9] = [
 /// Every registered procedure that yields a column, followed by every kind of statement, parses:
 /// the plan is given, or the statement fails for another reason (an argument, under the
 /// argument rules), never with a syntax error. A procedure added later is covered with no change.
+/// The algorithms give the registry most of its procedures.
+#[cfg(feature = "algos")]
 #[test]
 fn every_statement_kind_may_follow_every_procedure() {
+    use grafeo_engine::procedures::BuiltinProcedures;
+
     let db = GrafeoDB::new_in_memory();
     db.execute("INSERT (:P {name: 'Alix'})-[:K]->(:P {name: 'Gus'})")
         .unwrap();

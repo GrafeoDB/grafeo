@@ -87,6 +87,14 @@ tests:
       rows:
         - [4]
 
+  - name: filter_after_call_removes_rows
+    setup:
+      - "INSERT (:P {name: 'Alix'})-[:K]->(:P {name: 'Gus'})-[:K]->(:P {name: 'Vincent'}), (:Q {name: 'Mia'})"
+    query: "CALL grafeo.pagerank() YIELD node_id, score FILTER score < 0 RETURN count(*) AS c"
+    expect:
+      rows:
+        - [0]
+
   - name: let_after_call
     setup:
       - "INSERT (:P {name: 'Alix'})-[:K]->(:P {name: 'Gus'})-[:K]->(:P {name: 'Vincent'}), (:Q {name: 'Mia'})"

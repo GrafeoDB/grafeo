@@ -58,15 +58,21 @@ fn social() -> GrafeoDB {
     db
 }
 
-/// Two pairs of branches: every person against those who know someone, and a person per
-/// outgoing edge (Alix twice) against the same, so the ALL forms see duplicates.
-const BRANCHES: [(&str, &str); 2] = [
+/// Three pairs of branches: every person against those who know someone; a person per
+/// outgoing edge (Alix twice) against the same, so the ALL forms see duplicates; and an empty
+/// left (no person works at a person) against those who know someone, so OTHERWISE runs its
+/// right side.
+const BRANCHES: [(&str, &str); 3] = [
     (
         "MATCH (n:Person) RETURN n AS v",
         "MATCH (n:Person)-[:KNOWS]->() RETURN n AS v",
     ),
     (
         "MATCH (n:Person)-[]->() RETURN n AS v",
+        "MATCH (n:Person)-[:KNOWS]->() RETURN n AS v",
+    ),
+    (
+        "MATCH (n:Person)-[:WORKS_AT]->(:Person) RETURN n AS v",
         "MATCH (n:Person)-[:KNOWS]->() RETURN n AS v",
     ),
 ];

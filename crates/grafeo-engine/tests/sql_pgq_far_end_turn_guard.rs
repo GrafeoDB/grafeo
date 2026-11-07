@@ -340,3 +340,77 @@ fn every_key_read_raises_exactly_when_the_scan_does() {
         wrong.join("\n")
     );
 }
+
+/// An `IN` list holding a value of another kind raises 22G04 under SQL/PGQ whatever the order of
+/// its items: a match earlier in the list does not end the comparison before the later items'
+/// kinds are seen. For a short list (compared item by item) and a list of 16 or more items (a
+/// set), with and without a null item, with the key indexed or not, under every rule set, for a
+/// property and for a literal on the left. Controls: lists of one kind answer, a null item alone
+/// is unknown.
+#[test]
+fn an_in_list_mixing_kinds_raises_in_either_order() {
+    let ints = |from: i64| (from..from + 16).map(|i| i.to_string()).collect::<Vec<_>>();
+    let set = |items: Vec<String>| format!("[{}]", items.join(", "));
+    let with_string_last = set([ints(1), vec!["'a'".to_string()]].concat());
+    let with_string_first = set([vec!["'a'".to_string()], ints(1)].concat());
+    let with_string_and_null = set([ints(1), vec!["null".to_string(), "'a'".to_string()]].concat());
+    let mixed: Vec<String> = vec![
+        "[1, 'a']".to_string(),
+        "['a', 1]".to_string(),
+        "[1, null, 'a']".to_string(),
+        "['a', null, 1]".to_string(),
+        "[null, 1, 'a']".to_string(),
+        with_string_last,
+        with_string_first,
+        with_string_and_null,
+    ];
+    let answers: Vec<(String, bool)> = vec![
+        ("[1, 2]".to_string(), true),
+        ("[2, null]".to_string(), false),
+        (set(ints(1)), true),
+        (set([ints(2), vec!["null".to_string()]].concat()), false),
+    ];
+    let mut wrong = Vec::new();
+    for index in [false, true] {
+        let db = GrafeoDB::new_in_memory();
+        db.execute("INSERT (:One {k: 1, name: 'Alix'})").unwrap();
+        if index {
+            db.execute("CREATE INDEX by_one FOR (n:One) ON (n.k)")
+                .unwrap();
+        }
+        for left in ["n.k", "1"] {
+            let text = |list: &str| {
+                format!(
+                    "SELECT * FROM GRAPH_TABLE (MATCH (n:One) WHERE {left} IN {list} \
+                     COLUMNS (n.name AS a))"
+                )
+            };
+            for (name, session) in sessions(&db) {
+                for list in &mixed {
+                    let query = text(list);
+                    match outcome(&session, &query) {
+                        Err(status) if status == "22G04" => {}
+                        other => wrong.push(format!(
+                            "index {index}, {name}, {query}: {other:?}, want 22G04"
+                        )),
+                    }
+                }
+                for (list, found) in &answers {
+                    let query = text(list);
+                    let want = if *found {
+                        vec!["Alix".to_string()]
+                    } else {
+                        Vec::new()
+                    };
+                    match outcome(&session, &query) {
+                        Ok(got) if got == want => {}
+                        other => wrong.push(format!(
+                            "index {index}, {name}, {query}: {other:?}, want {want:?}"
+                        )),
+                    }
+                }
+            }
+        }
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}

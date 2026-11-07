@@ -2696,7 +2696,11 @@ impl ExpressionPredicate {
             (OperandKind::Unknown, _) | (_, FilterExpression::List(_)) => LogicalType::Any,
             _ => self.shape(right, chunk, row),
         };
+        // SQL/PGQ compares the needle with every item (`= ANY`), so an item of another kind raises
+        // wherever it stands; a match found before it waits for the end of the list.
+        let compares_every_item = self.session_context.language == StatementLanguage::SqlPgq;
         let mut has_null = false;
+        let mut found = false;
         for (position, item) in items.iter().enumerate() {
             if item.is_null() {
                 has_null = true;
@@ -2726,12 +2730,15 @@ impl ExpressionPredicate {
                 continue;
             }
             match self.equals(left, item) {
+                Some(true) if compares_every_item => found = true,
                 Some(true) => return Some(Value::Bool(true)),
                 None => has_null = true,
                 Some(false) => {}
             }
         }
-        if has_null {
+        if found {
+            Some(Value::Bool(true))
+        } else if has_null {
             Some(Value::Null) // no match but NULLs present: UNKNOWN
         } else {
             Some(Value::Bool(false))

@@ -96,6 +96,7 @@ Queries that ran in 0.6.1 and now fail or behave differently.
 - **Go and C# bindings**: a database, transaction, graph, stream or point-in-time view could be freed by the garbage collector while a call on it was still running, which could crash the process (for example on the last `Next` of a stream in Go); every native call now keeps its handle alive. In C#, an async call on a database disposed meanwhile throws `ObjectDisposedException`.
 - **WASM `importRdf`** is in every build with the RDF store, the `full` package (`@grafeo-db/wasm`) included; it was missing there.
 - **Vector search with a filter on a quantized index** could return fewer than `k` results, or none, when the allowed nodes lay far from the query; it now searches among the allowed nodes.
+- **Opening and closing without writes leaves the file unchanged**: `close()` checkpoints only when something changed since the last checkpoint, so a database opened only for reads keeps its file byte for byte (its header was rewritten on every close).
 
 ### Contributors
 

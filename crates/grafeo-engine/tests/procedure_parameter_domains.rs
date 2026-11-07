@@ -531,3 +531,50 @@ fn louvain_at_resolution_zero_keeps_each_component_whole() {
     assert_eq!(community["Mia"], community["Butch"]);
     assert_ne!(community["Alix"], community["Jules"], "{community:?}");
 }
+
+/// One session runs a parameterized CALL again and again, by position and by name: each run reads its
+/// own `$d`, not the one the cached plan first saw, and a later value outside the domain is refused.
+#[test]
+fn a_cached_call_reads_each_runs_parameter() {
+    let db = graph();
+    let session = db.session();
+    for call in [
+        "grafeo.pagerank($d, 50)",
+        "grafeo.pagerank({damping: $d, max_iterations: 50})",
+    ] {
+        let query =
+            format!("CALL {call} YIELD node_id, score RETURN node_id, score ORDER BY node_id");
+        let run = |d: f64| {
+            session.execute_with_params(
+                &query,
+                HashMap::from([("d".to_string(), Value::Float64(d))]),
+            )
+        };
+        let scores = |d: f64| -> Vec<f64> {
+            run(d)
+                .unwrap_or_else(|error| panic!("{call} with {d}: {error}"))
+                .rows()
+                .iter()
+                .map(|row| row[1].as_float64().unwrap())
+                .collect()
+        };
+        let even = scores(0.0);
+        let damped = scores(0.85);
+        assert_ne!(
+            even, damped,
+            "{call}: the second run read the first one's $d"
+        );
+        assert_eq!(scores(0.0), even, "{call}");
+        assert_eq!(
+            damped,
+            self::scores(&db, "0.85, 50", HashMap::new()),
+            "{call}: the cached plan answers as a fresh one"
+        );
+        let error = run(2.0).expect_err("2.0 lies outside [0, 1]");
+        assert_eq!(
+            GqlStatus::from(&error).as_str(),
+            INVALID_PARAMETER_VALUE,
+            "{call}: {error}"
+        );
+    }
+}

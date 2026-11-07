@@ -286,7 +286,18 @@ LIMIT 10
 CALL grafeo.pagerank() YIELD node_id, score
 WHERE score > 0.5
 RETURN node_id, score
+
+-- Go on from the yielded rows, as from any other clause
+CALL grafeo.pagerank() YIELD node_id, score
+MATCH (n) WHERE id(n) = node_id
+RETURN n.name, score
+ORDER BY score DESC
+LIMIT 3
 ```
+
+After `NEXT`, a call runs for every row the statement before returns: its `RETURN` reads them all, and the
+earlier columns stay readable: `UNWIND [1, 2] AS x RETURN x NEXT CALL grafeo.labels() YIELD label RETURN x, label`
+gives each `x` with each label.
 
 ### Inline Subquery CALL
 

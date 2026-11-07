@@ -535,7 +535,7 @@ impl<'a> Parser<'a> {
                     // CALL [(scope)] { subquery } RETURN ... : treat as a query
                     self.parse_query().map(Statement::Query)
                 } else {
-                    self.parse_call_statement().map(Statement::Call)
+                    self.parse_leading_procedure_call()
                 }
             }
             _ if self.is_identifier() => {
@@ -630,15 +630,41 @@ impl<'a> Parser<'a> {
     /// ```text
     /// CALL name.space(args) [YIELD field [AS alias], ...]
     /// ```
-    fn parse_call_statement(&mut self) -> Result<CallStatement> {
-        self.parse_procedure_call(true)
+    /// Parses a statement that starts with a named procedure call: the call
+    /// alone (`CALL grafeo.labels() YIELD label`) is a call statement, and a
+    /// call that clauses follow (`... YIELD rows MATCH (n) RETURN n`, a
+    /// `RETURN`, a `FILTER`, another `CALL`) is the first clause of a linear
+    /// query (ISO/IEC 39075 14.3), which reads its rows as every clause reads
+    /// the rows before it.
+    fn parse_leading_procedure_call(&mut self) -> Result<Statement> {
+        let span_start = self.current.span.start;
+        let call = self.parse_procedure_call()?;
+        if self.ends_a_statement() {
+            return Ok(Statement::Call(call));
+        }
+        self.parse_query_after(span_start, vec![QueryClause::CallProcedure(call)])
+            .map(Statement::Query)
     }
 
-    /// Parses `CALL name(args) [YIELD ... [WHERE ...]]`, and with
-    /// `with_return` the `RETURN` a statement-level call may end with. A call
-    /// inside a query leaves its `RETURN` to the query, which goes on after
-    /// it.
-    fn parse_procedure_call(&mut self, with_return: bool) -> Result<CallStatement> {
+    /// Whether the current token ends the statement before it: the end of the
+    /// input or of a subquery, a `;`, `NEXT`, or a set operator.
+    fn ends_a_statement(&self) -> bool {
+        matches!(
+            self.current.kind,
+            TokenKind::Eof
+                | TokenKind::Semicolon
+                | TokenKind::RBrace
+                | TokenKind::RParen
+                | TokenKind::Union
+                | TokenKind::Except
+                | TokenKind::Intersect
+                | TokenKind::Otherwise
+        ) || (self.is_identifier() && self.get_identifier_name().eq_ignore_ascii_case("NEXT"))
+    }
+
+    /// Parses `CALL name(args) [YIELD ... [WHERE ...]]`. What follows it (a
+    /// `RETURN`, another clause) belongs to the query it starts or is part of.
+    fn parse_procedure_call(&mut self) -> Result<CallStatement> {
         let span_start = self.current.span.start;
         self.expect(TokenKind::Call)?;
 
@@ -684,20 +710,12 @@ impl<'a> Parser<'a> {
             None
         };
 
-        // Parse optional RETURN clause (only valid after YIELD)
-        let return_clause =
-            if with_return && yield_items.is_some() && self.current.kind == TokenKind::Return {
-                Some(self.parse_return_clause()?)
-            } else {
-                None
-            };
-
         Ok(CallStatement {
             procedure_name: name_parts,
             arguments,
             yield_items,
             where_clause,
-            return_clause,
+            return_clause: None,
             span: Some(SourceSpan::new(span_start, self.current.span.start, 1, 1)),
         })
     }
@@ -922,8 +940,17 @@ impl<'a> Parser<'a> {
     /// rows the ones before it leave; the result statement (RETURN, FINISH or
     /// SELECT) may be left out when the statement modifies data.
     fn parse_query(&mut self) -> Result<QueryStatement> {
-        let span_start = self.current.span.start;
+        self.parse_query_after(self.current.span.start, Vec::new())
+    }
 
+    /// Parses the rest of a query whose first clauses `ordered_clauses` are,
+    /// from `span_start` (a leading procedure call, see
+    /// [`parse_leading_procedure_call`](Self::parse_leading_procedure_call)).
+    fn parse_query_after(
+        &mut self,
+        span_start: usize,
+        mut ordered_clauses: Vec<QueryClause>,
+    ) -> Result<QueryStatement> {
         let mut match_clauses = Vec::new();
         let mut unwind_clauses = Vec::new();
         let mut merge_clauses = Vec::new();
@@ -932,7 +959,6 @@ impl<'a> Parser<'a> {
         let mut set_clauses = Vec::new();
         let mut remove_clauses = Vec::new();
         let mut with_clauses = Vec::new();
-        let mut ordered_clauses = Vec::new();
 
         loop {
             match self.current.kind {
@@ -951,7 +977,7 @@ impl<'a> Parser<'a> {
                             ordered_clauses.push(self.parse_inline_call(true)?);
                         } else {
                             // OPTIONAL CALL procedure(...)
-                            let call = self.parse_procedure_call(false)?;
+                            let call = self.parse_procedure_call()?;
                             ordered_clauses.push(Self::optional_procedure_call(call));
                         }
                     } else {
@@ -996,7 +1022,7 @@ impl<'a> Parser<'a> {
                     if matches!(self.peek_kind(), TokenKind::LBrace | TokenKind::LParen) {
                         ordered_clauses.push(self.parse_inline_call(false)?);
                     } else {
-                        let call = self.parse_procedure_call(false)?;
+                        let call = self.parse_procedure_call()?;
                         ordered_clauses.push(QueryClause::CallProcedure(call));
                     }
                 }

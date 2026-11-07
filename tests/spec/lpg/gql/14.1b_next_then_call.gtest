@@ -1,0 +1,135 @@
+# After NEXT, a procedure call reads the working table the statement before it gave (ISO/IEC
+# 39075 9.2 GR 3): each incoming record meets each row the procedure yields, and the incoming
+# fields stay in scope (9.2 SR 12c). The RETURN that follows returns only what it names, and an
+# aggregate runs over the whole working table, not per incoming record. The expected answers are
+# those of the same statement without NEXT (UNWIND ... CALL ... RETURN), which already answers.
+#
+# Alix knows Gus knows Vincent, and Mia stands apart: labels P and Q, one edge type K.
+
+meta:
+  language: gql
+  model: lpg
+  section: "9.2"
+  title: A procedure call after NEXT
+  dataset: empty
+  requires: [algos]
+
+tests:
+
+  - name: an_aggregate_over_the_whole_table
+    setup:
+      - "INSERT (:P {name: 'Alix'})-[:K]->(:P {name: 'Gus'})-[:K]->(:P {name: 'Vincent'}), (:Q {name: 'Mia'})"
+    query: "UNWIND [1, 2] AS x RETURN x NEXT CALL grafeo.labels() YIELD label RETURN count(label) AS c"
+    expect:
+      columns: [c]
+      rows:
+        - [4]
+
+  - name: count_star_over_the_whole_table
+    setup:
+      - "INSERT (:P {name: 'Alix'})-[:K]->(:P {name: 'Gus'})-[:K]->(:P {name: 'Vincent'}), (:Q {name: 'Mia'})"
+    query: "UNWIND [1, 2] AS x RETURN x NEXT CALL grafeo.labels() YIELD label RETURN count(*) AS c"
+    expect:
+      columns: [c]
+      rows:
+        - [4]
+
+  - name: collect_over_the_whole_table
+    setup:
+      - "INSERT (:P {name: 'Alix'})-[:K]->(:P {name: 'Gus'})-[:K]->(:P {name: 'Vincent'}), (:Q {name: 'Mia'})"
+    query: "UNWIND [1, 2] AS x RETURN x NEXT CALL grafeo.relationshipTypes() YIELD relationshipType RETURN collect(relationshipType) AS t"
+    expect:
+      columns: [t]
+      rows:
+        - [[K, K]]
+
+  - name: an_aggregate_of_another_procedure
+    setup:
+      - "INSERT (:P {name: 'Alix'})-[:K]->(:P {name: 'Gus'})-[:K]->(:P {name: 'Vincent'}), (:Q {name: 'Mia'})"
+    query: "UNWIND [1, 2] AS x RETURN x NEXT CALL grafeo.pagerank() YIELD node_id RETURN count(node_id) AS c"
+    expect:
+      columns: [c]
+      rows:
+        - [8]
+
+  - name: an_aggregate_after_a_match
+    setup:
+      - "INSERT (:P {name: 'Alix'})-[:K]->(:P {name: 'Gus'})-[:K]->(:P {name: 'Vincent'}), (:Q {name: 'Mia'})"
+    query: "MATCH (n:P) RETURN n.name AS who NEXT CALL grafeo.labels() YIELD label RETURN count(*) AS c"
+    expect:
+      columns: [c]
+      rows:
+        - [6]
+
+  - name: a_plain_return_returns_what_it_names
+    setup:
+      - "INSERT (:P {name: 'Alix'})-[:K]->(:P {name: 'Gus'})-[:K]->(:P {name: 'Vincent'}), (:Q {name: 'Mia'})"
+    query: "UNWIND [1, 2] AS x RETURN x NEXT CALL grafeo.labels() YIELD label RETURN label ORDER BY label"
+    expect:
+      columns: [label]
+      ordered: true
+      rows:
+        - [P]
+        - [P]
+        - [Q]
+        - [Q]
+
+  - name: a_distinct_return
+    setup:
+      - "INSERT (:P {name: 'Alix'})-[:K]->(:P {name: 'Gus'})-[:K]->(:P {name: 'Vincent'}), (:Q {name: 'Mia'})"
+    query: "UNWIND [1, 2] AS x RETURN x NEXT CALL grafeo.labels() YIELD label RETURN DISTINCT label ORDER BY label"
+    expect:
+      columns: [label]
+      ordered: true
+      rows:
+        - [P]
+        - [Q]
+
+  - name: the_incoming_field_stays_in_scope
+    setup:
+      - "INSERT (:P {name: 'Alix'})-[:K]->(:P {name: 'Gus'})-[:K]->(:P {name: 'Vincent'}), (:Q {name: 'Mia'})"
+    query: "UNWIND [1, 2] AS x RETURN x NEXT CALL grafeo.labels() YIELD label RETURN label, x ORDER BY label, x"
+    expect:
+      columns: [label, x]
+      ordered: true
+      rows:
+        - [P, 1]
+        - [P, 2]
+        - [Q, 1]
+        - [Q, 2]
+
+  - name: a_match_after_the_call
+    setup:
+      - "INSERT (:P {name: 'Alix'})-[:K]->(:P {name: 'Gus'})-[:K]->(:P {name: 'Vincent'}), (:Q {name: 'Mia'})"
+    query: "UNWIND [1, 2] AS x RETURN x NEXT CALL grafeo.labels() YIELD label MATCH (n:Q) RETURN count(*) AS c"
+    expect:
+      columns: [c]
+      rows:
+        - [4]
+
+  - name: a_filter_after_the_call
+    setup:
+      - "INSERT (:P {name: 'Alix'})-[:K]->(:P {name: 'Gus'})-[:K]->(:P {name: 'Vincent'}), (:Q {name: 'Mia'})"
+    query: "UNWIND [1, 2] AS x RETURN x NEXT CALL grafeo.labels() YIELD label FILTER label = 'P' RETURN count(*) AS c"
+    expect:
+      columns: [c]
+      rows:
+        - [2]
+
+  - name: the_linear_form_answers_alike
+    setup:
+      - "INSERT (:P {name: 'Alix'})-[:K]->(:P {name: 'Gus'})-[:K]->(:P {name: 'Vincent'}), (:Q {name: 'Mia'})"
+    query: "UNWIND [1, 2] AS x CALL grafeo.labels() YIELD label RETURN count(label) AS c"
+    expect:
+      columns: [c]
+      rows:
+        - [4]
+
+  - name: next_then_match_stays
+    setup:
+      - "INSERT (:P {name: 'Alix'})-[:K]->(:P {name: 'Gus'})-[:K]->(:P {name: 'Vincent'}), (:Q {name: 'Mia'})"
+    query: "UNWIND [1, 2] AS x RETURN x NEXT MATCH (m:Q) RETURN count(*) AS c"
+    expect:
+      columns: [c]
+      rows:
+        - [2]

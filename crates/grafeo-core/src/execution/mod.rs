@@ -37,7 +37,8 @@ pub mod profile;
 pub mod selection;
 pub mod sink;
 pub mod source;
-#[cfg(feature = "spill")]
+// Always built: its account bounds the vector columns' spill too; the
+// operators' spill files need the `spill` feature.
 pub mod spill;
 pub mod vector;
 

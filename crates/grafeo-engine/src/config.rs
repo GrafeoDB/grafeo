@@ -220,6 +220,44 @@ pub enum HistoryRetention {
     Forever,
 }
 
+/// The cap of everything one open spills to disk at once: sorts' runs,
+/// aggregates' partitions and vector indexes' embedding columns together.
+///
+/// A spill past it is refused with `GRAFEO-S001`, naming the spill limit. Per
+/// open, never stored in the database file. Whatever the cap, a spill that
+/// would leave less free space on the spill volume than the database needs
+/// for its next checkpoint is refused too. An open without a spill directory
+/// (in memory without [`Config::with_spill_path`], or encrypted) spills
+/// nothing, and the setting does nothing there.
+///
+/// # Examples
+///
+/// ```
+/// use grafeo_engine::{Config, SpillLimit};
+///
+/// assert_eq!(Config::in_memory().spill_limit(), SpillLimit::Default);
+/// assert_eq!(
+///     Config::in_memory().with_spill_limit(1 << 30).spill_limit(),
+///     SpillLimit::Bytes(1 << 30)
+/// );
+/// assert_eq!(
+///     Config::in_memory().with_unlimited_spill().spill_limit(),
+///     SpillLimit::Unlimited
+/// );
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum SpillLimit {
+    /// Half the spill volume's free space when the database opens; the
+    /// memory limit when that cannot be read (with a warning).
+    #[default]
+    Default,
+    /// At most this many bytes (0: nothing spills).
+    Bytes(u64),
+    /// No cap: the room for the next checkpoint alone bounds.
+    Unlimited,
+}
+
 /// WAL durability mode controlling the trade-off between safety and speed.
 ///
 /// This enum lives in config so that `Config` can always carry the desired
@@ -324,6 +362,8 @@ impl Default for DurabilityMode {
 pub enum ConfigError {
     /// Memory limit must be greater than zero.
     ZeroMemoryLimit,
+    /// [`Config::with_query_memory_limit`] must be greater than zero.
+    ZeroQueryMemoryLimit,
     /// Thread count must be greater than zero.
     ZeroThreads,
     /// `DurabilityMode::Adaptive` needs an interval greater than zero.
@@ -390,6 +430,9 @@ impl fmt::Display for ConfigError {
         match self {
             Self::ZeroMemoryLimit => write!(f, "memory_limit must be greater than zero"),
             Self::MemoryFractionNotFinite => write!(f, "memory_fraction must be a finite number"),
+            Self::ZeroQueryMemoryLimit => {
+                write!(f, "query_memory_limit must be greater than zero")
+            }
             Self::ZeroThreads => write!(f, "threads must be greater than zero"),
             Self::ZeroAdaptiveFlushInterval => write!(
                 f,
@@ -825,6 +868,14 @@ pub struct Config {
     /// `memory_fraction`'s bytes, taken of the memory detected when the database opened, so
     /// [`memory_limit`](Self::memory_limit) reads the figure the open's budget has.
     memory_fraction_bytes: Option<usize>,
+
+    /// The cap of what the open spills ([`with_spill_limit`](Self::with_spill_limit),
+    /// [`with_unlimited_spill`](Self::with_unlimited_spill)): per open, never stored.
+    spill_limit: SpillLimit,
+
+    /// The memory one query's operators may hold
+    /// ([`with_query_memory_limit`](Self::with_query_memory_limit)): per open, never stored.
+    query_memory_limit: Option<usize>,
 }
 
 /// The settings of a [`Config`] a database file can store, as a set: a
@@ -965,6 +1016,8 @@ impl Default for Config {
             memory_limit: None,
             memory_fraction: None,
             memory_fraction_bytes: None,
+            spill_limit: SpillLimit::Default,
+            query_memory_limit: None,
             spill_path: None,
             threads: num_cpus::get(),
             wal_enabled: true,
@@ -1166,6 +1219,37 @@ impl Config {
     pub fn with_spill_path(mut self, path: impl Into<PathBuf>) -> Self {
         self.spill_path = Some(path.into());
         self.set.insert(SetFields::SPILL_PATH);
+        self
+    }
+
+    /// Caps what the open spills to disk at once at `bytes`, all its spills
+    /// together (see [`SpillLimit`]); 0 spills nothing. Per open, never
+    /// stored. Of this and [`with_unlimited_spill`](Self::with_unlimited_spill),
+    /// the later call wins.
+    #[must_use]
+    pub fn with_spill_limit(mut self, bytes: u64) -> Self {
+        self.spill_limit = SpillLimit::Bytes(bytes);
+        self
+    }
+
+    /// Lifts the cap of what the open spills (see [`SpillLimit`]): the room
+    /// the database keeps for its next checkpoint still bounds. Per open,
+    /// never stored. Of this and [`with_spill_limit`](Self::with_spill_limit),
+    /// the later call wins.
+    #[must_use]
+    pub fn with_unlimited_spill(mut self) -> Self {
+        self.spill_limit = SpillLimit::Unlimited;
+        self
+    }
+
+    /// Caps the memory one query's operators (sorts, aggregates) may hold at
+    /// `bytes`; past it they spill, or fail with `GRAFEO-S001` without a
+    /// spill directory. Per open, never stored; 0 fails
+    /// [`validate`](Self::validate). Not enforced yet: operators take their
+    /// grants against it in a later patch of this release.
+    #[must_use]
+    pub fn with_query_memory_limit(mut self, bytes: usize) -> Self {
+        self.query_memory_limit = Some(bytes);
         self
     }
 
@@ -1612,6 +1696,19 @@ impl Config {
         self.spill_path.as_deref()
     }
 
+    /// The cap of what the open spills (see [`SpillLimit`]).
+    #[must_use]
+    pub fn spill_limit(&self) -> SpillLimit {
+        self.spill_limit
+    }
+
+    /// The memory one query's operators may hold; `None` for the memory
+    /// limit.
+    #[must_use]
+    pub fn query_memory_limit(&self) -> Option<usize> {
+        self.query_memory_limit
+    }
+
     /// The number of worker threads, which has no effect.
     #[must_use]
     #[deprecated(
@@ -1821,6 +1918,9 @@ impl Config {
             && limit == 0
         {
             return Err(ConfigError::ZeroMemoryLimit);
+        }
+        if self.query_memory_limit == Some(0) {
+            return Err(ConfigError::ZeroQueryMemoryLimit);
         }
         if let Some(fraction) = self.memory_fraction {
             if fraction.is_infinite() {
@@ -2532,6 +2632,9 @@ mod tests {
                 .with_max_epochs(19)
                 .with_max_events(88),
         );
+        let config = config
+            .with_spill_limit(88 << 20)
+            .with_query_memory_limit(19 << 20);
         #[cfg(feature = "encryption")]
         let config = config.with_encryption(EncryptionConfig::new(std::sync::Arc::new(
             grafeo_common::encryption::KeyChain::new([3; 32]),
@@ -2577,7 +2680,20 @@ mod tests {
             set: _,
             memory_fraction,
             memory_fraction_bytes,
+            spill_limit,
+            query_memory_limit,
         } = config;
+
+        assert_eq!(
+            spill_limit,
+            SpillLimit::Bytes(88 << 20),
+            "with_spill_limit sets the cap"
+        );
+        assert_eq!(
+            query_memory_limit,
+            Some(19 << 20),
+            "with_query_memory_limit sets the limit"
+        );
 
         assert_eq!(
             wal_segment_size,

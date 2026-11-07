@@ -44,6 +44,8 @@ use grafeo_common::storage::SectionType;
 #[cfg(all(feature = "wal", feature = "vector-index"))]
 use grafeo_common::types::PropertyKey;
 #[cfg(all(feature = "wal", feature = "vector-index"))]
+use grafeo_core::execution::spill::{SpillAccount, SpillOwner, SpillReservation};
+#[cfg(all(feature = "wal", feature = "vector-index"))]
 use grafeo_core::graph::rowgroup::ColumnSpill;
 use grafeo_core::graph::rowgroup::RowGroupStore;
 #[cfg(all(feature = "wal", feature = "vector-index"))]
@@ -59,19 +61,23 @@ use super::spill_directory::SpillDirectory;
 #[cfg(all(feature = "wal", feature = "vector-index"))]
 pub(super) struct ColumnSpillFiles {
     directory: Arc<SpillDirectory>,
+    /// The open's spill account: each file reserves its bytes there before
+    /// it is written, and gives them back when it is removed.
+    account: Option<Arc<SpillAccount>>,
 }
 
 #[cfg(all(feature = "wal", feature = "vector-index"))]
 impl ColumnSpillFiles {
-    /// Spill files in `directory`, created when the first one is written.
-    pub(super) fn new(directory: Arc<SpillDirectory>) -> Self {
-        Self { directory }
+    /// Spill files in `directory`, created when the first one is written,
+    /// reserving their bytes in `account`.
+    pub(super) fn new(directory: Arc<SpillDirectory>, account: Option<Arc<SpillAccount>>) -> Self {
+        Self { directory, account }
     }
 
-    /// Spill files in a directory of their own at `path` (tests).
+    /// Spill files in a directory of their own at `path`, unbounded (tests).
     #[cfg(test)]
     pub(super) fn in_dir(path: impl Into<PathBuf>) -> Self {
-        Self::new(Arc::new(SpillDirectory::at(path.into())))
+        Self::new(Arc::new(SpillDirectory::at(path.into())), None)
     }
 
     /// The directory the files go to.
@@ -84,6 +90,15 @@ impl ColumnSpillFiles {
 impl ColumnSpill for ColumnSpillFiles {
     fn write(&self, bytes: &[u8]) -> io::Result<Bytes> {
         static NEXT: AtomicU64 = AtomicU64::new(0);
+        // Reserved before anything is written: a refusal writes nothing.
+        let reservation = match &self.account {
+            Some(account) => Some(
+                account
+                    .reserve(SpillOwner::VectorColumns, bytes.len() as u64, true)
+                    .map_err(grafeo_core::execution::spill::refused)?,
+            ),
+            None => None,
+        };
         // Created on the first spill; refused once the database is closed.
         self.directory.create()?;
         // As a vector cache file's name: the process id keeps processes
@@ -98,12 +113,26 @@ impl ColumnSpill for ColumnSpillFiles {
             Ok(map) => Ok(Bytes::from_owner(SpillMapping {
                 map: Some(map),
                 path,
+                _reservation: reservation,
             })),
             Err(error) => {
                 remove_written(&path);
                 Err(io::Error::other(error.to_string()))
             }
         }
+    }
+}
+
+/// The spill account's refusal a column spill's error carries.
+#[cfg(all(feature = "wal", feature = "vector-index"))]
+fn spill_refusal(
+    error: &grafeo_common::utils::error::Error,
+) -> Option<grafeo_common::utils::error::LimitRefusal> {
+    match error {
+        grafeo_common::utils::error::Error::Io(error) => {
+            grafeo_core::execution::spill::refusal_of(error).cloned()
+        }
+        _ => None,
     }
 }
 
@@ -126,6 +155,9 @@ struct SpillMapping {
     /// `None` only while dropping (the mapping goes before the file).
     map: Option<MmapSection>,
     path: PathBuf,
+    /// The file's bytes in the spill account, given back after the file is
+    /// removed (the field drops after `drop` ran).
+    _reservation: Option<SpillReservation>,
 }
 
 #[cfg(all(feature = "wal", feature = "vector-index"))]
@@ -289,6 +321,19 @@ impl MemoryConsumer for RowGroupVectorConsumer {
                 }
                 match graph.spill_node_property_column(&property, files) {
                     Ok(report) => freed += report.freed_bytes,
+                    // The spill account refused: the columns after this one
+                    // would be refused too, and this one stays in memory.
+                    Err(error) if let Some(refusal) = spill_refusal(&error) => {
+                        grafeo_common::grafeo_warn!(
+                            "the vector column {} stays in memory: {refusal}",
+                            property.as_str()
+                        );
+                        return if freed > 0 {
+                            Ok(freed)
+                        } else {
+                            Err(SpillError::Refused(Box::new(refusal)))
+                        };
+                    }
                     // Continue: what spilled so far counts, and this column
                     // keeps what did not spill on the heap.
                     Err(error) => grafeo_common::grafeo_warn!(
@@ -451,14 +496,18 @@ pub(super) fn register_row_group_consumers(
     #[cfg(all(feature = "wal", feature = "vector-index"))] vector_cache: Option<
         Arc<SpillDirectory>,
     >,
+    #[cfg(all(feature = "wal", feature = "vector-index"))] spill_account: Option<Arc<SpillAccount>>,
     #[cfg(all(feature = "wal", feature = "vector-index"))] horizon: Option<CollectHorizon>,
 ) {
     buffer_manager.register_consumer(Arc::new(RowGroupStoreConsumer::new(root)));
     root.unregister_on_drop(buffer_manager, "section:LpgStore");
     #[cfg(all(feature = "wal", feature = "vector-index"))]
     buffer_manager.register_consumer(Arc::new(
-        RowGroupVectorConsumer::new(root, vector_cache.map(ColumnSpillFiles::new))
-            .collecting_at(horizon),
+        RowGroupVectorConsumer::new(
+            root,
+            vector_cache.map(|directory| ColumnSpillFiles::new(directory, spill_account)),
+        )
+        .collecting_at(horizon),
     ));
     #[cfg(all(feature = "vector-index", not(feature = "wal")))]
     buffer_manager.register_consumer(Arc::new(RowGroupVectorConsumer::new(root)));

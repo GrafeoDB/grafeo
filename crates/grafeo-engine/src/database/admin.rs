@@ -227,6 +227,7 @@ impl super::GrafeoDB {
             };
         }
 
+        usage.spill = self.spill_memory();
         usage.compute_total();
         usage
     }
@@ -713,6 +714,28 @@ impl super::GrafeoDB {
     // =========================================================================
     // ADMIN API: Change Data Capture
     // =========================================================================
+
+    /// What the open has spilled, from its spill account: no walk.
+    fn spill_memory(&self) -> crate::memory_usage::SpillMemory {
+        use grafeo_core::execution::spill::{SpillCap, SpillOwner};
+
+        let mut spill = crate::memory_usage::SpillMemory::default();
+        match &self.spill_account {
+            Some(account) => {
+                spill.total_bytes = account.used();
+                spill.limit_bytes = match account.cap() {
+                    SpillCap::Bytes(bytes) => Some(bytes),
+                    SpillCap::Unlimited => None,
+                };
+                spill.sort_bytes = account.used_by(SpillOwner::Sort);
+                spill.aggregate_bytes = account.used_by(SpillOwner::Aggregate);
+                spill.vector_column_bytes = account.used_by(SpillOwner::VectorColumns);
+            }
+            // No spill directory: nothing spills.
+            None => spill.limit_bytes = Some(0),
+        }
+        spill
+    }
 
     /// The database's change log, for tests and explicit checks of its
     /// memory account (`CdcLog::account_mismatches`).

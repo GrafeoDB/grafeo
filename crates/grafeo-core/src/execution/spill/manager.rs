@@ -1,9 +1,15 @@
 //! Spill manager for file lifecycle management.
 
+use super::account::{SpillAccount, SpillOwner};
 use super::file::SpillFile;
 use parking_lot::Mutex;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+/// The bytes a spill file reserves at a time: its first ones when it is
+/// created, then as its writes pass what it holds.
+pub const SPILL_FILE_STEP: u64 = 1 << 20;
 
 /// Manages spill file lifecycle for out-of-core processing.
 ///
@@ -33,6 +39,8 @@ pub struct SpillManager {
     /// Whether this manager created `spill_dir` (on its first spill file);
     /// a directory that was already there is never removed.
     dir_created: AtomicBool,
+    /// The account its files reserve their bytes in (`None`: unbounded).
+    account: Option<Arc<SpillAccount>>,
 }
 
 impl SpillManager {
@@ -57,7 +65,22 @@ impl SpillManager {
             owns_dir: false,
             dir_ready: AtomicBool::new(false),
             dir_created: AtomicBool::new(false),
+            account: None,
         })
+    }
+
+    /// Reserves the bytes of its files in `account` before they are
+    /// written: a write past the account's cap or room is refused.
+    #[must_use]
+    pub fn with_account(mut self, account: Arc<SpillAccount>) -> Self {
+        self.account = Some(account);
+        self
+    }
+
+    /// The account its files reserve in.
+    #[must_use]
+    pub fn account(&self) -> Option<&Arc<SpillAccount>> {
+        self.account.as_ref()
     }
 
     /// Marks the spill directory as owned by this manager so that `Drop`
@@ -90,15 +113,27 @@ impl SpillManager {
         &self.spill_dir
     }
 
-    /// Creates a new spill file with the given prefix, and the spill
-    /// directory with the first one.
+    /// Creates a new spill file of `owner` with the given prefix, and the
+    /// spill directory with the first one. With an account, the file first
+    /// reserves its first [`SPILL_FILE_STEP`] bytes there (probing the free
+    /// space), and holds the reservation as it grows.
     ///
     /// The file name format is: `{prefix}_{file_id}.spill`
     ///
     /// # Errors
     ///
-    /// Returns an error if the directory or the file cannot be created.
-    pub fn create_file(&self, prefix: &str) -> std::io::Result<SpillFile> {
+    /// Returns an error if the directory or the file cannot be created, or
+    /// the account refuses (an error of kind `StorageFull` carrying the
+    /// refusal; nothing is created then).
+    pub fn create_file(&self, owner: SpillOwner, prefix: &str) -> std::io::Result<SpillFile> {
+        let reservation = match &self.account {
+            Some(account) => Some(
+                account
+                    .reserve(owner, SPILL_FILE_STEP, true)
+                    .map_err(super::refused)?,
+            ),
+            None => None,
+        };
         if !self.dir_ready.load(Ordering::Acquire) {
             if let Some(parent) = self.spill_dir.parent() {
                 std::fs::create_dir_all(parent)?;
@@ -120,7 +155,11 @@ impl SpillManager {
         // Track the file for cleanup
         self.active_files.lock().push(file_path.clone());
 
-        SpillFile::new(file_path)
+        let file = SpillFile::new(file_path)?;
+        Ok(match reservation {
+            Some(reservation) => file.with_reservation(reservation),
+            None => file,
+        })
     }
 
     /// Registers bytes spilled to disk.
@@ -227,9 +266,9 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let manager = SpillManager::new(temp_dir.path()).unwrap();
 
-        let file1 = manager.create_file("sort").unwrap();
-        let file2 = manager.create_file("sort").unwrap();
-        let file3 = manager.create_file("agg").unwrap();
+        let file1 = manager.create_file(SpillOwner::Sort, "sort").unwrap();
+        let file2 = manager.create_file(SpillOwner::Sort, "sort").unwrap();
+        let file3 = manager.create_file(SpillOwner::Sort, "agg").unwrap();
 
         assert_eq!(manager.active_file_count(), 3);
 
@@ -246,8 +285,8 @@ mod tests {
         let manager = SpillManager::new(temp_dir.path()).unwrap();
 
         // Create some files
-        let _file1 = manager.create_file("test").unwrap();
-        let _file2 = manager.create_file("test").unwrap();
+        let _file1 = manager.create_file(SpillOwner::Sort, "test").unwrap();
+        let _file2 = manager.create_file(SpillOwner::Sort, "test").unwrap();
         assert_eq!(manager.active_file_count(), 2);
 
         // Cleanup should remove all files
@@ -275,7 +314,7 @@ mod tests {
 
         let file_path = {
             let manager = SpillManager::new(&temp_path).unwrap();
-            let file = manager.create_file("test").unwrap();
+            let file = manager.create_file(SpillOwner::Sort, "test").unwrap();
             file.path().to_path_buf()
         };
 
@@ -293,7 +332,7 @@ mod tests {
 
         {
             let manager = SpillManager::new(&dir_path).unwrap();
-            let _file = manager.create_file("sort").unwrap();
+            let _file = manager.create_file(SpillOwner::Sort, "sort").unwrap();
         }
 
         assert!(
@@ -313,10 +352,10 @@ mod tests {
         assert!(!query_dir.exists(), "new must not create the directory");
         assert!(!temp_dir.path().join("base").exists());
 
-        let file = manager.create_file("sort").unwrap();
+        let file = manager.create_file(SpillOwner::Sort, "sort").unwrap();
         assert!(query_dir.is_dir());
         assert!(file.path().starts_with(&query_dir));
-        let _second = manager.create_file("sort").unwrap();
+        let _second = manager.create_file(SpillOwner::Sort, "sort").unwrap();
         assert_eq!(manager.active_file_count(), 2);
     }
 
@@ -342,8 +381,8 @@ mod tests {
         std::fs::create_dir(&query_dir).unwrap();
         {
             let manager = SpillManager::new(&query_dir).unwrap().with_owned_dir();
-            let _file = manager.create_file("sort").unwrap();
-            let _second = manager.create_file("sort").unwrap();
+            let _file = manager.create_file(SpillOwner::Sort, "sort").unwrap();
+            let _second = manager.create_file(SpillOwner::Sort, "sort").unwrap();
         }
         assert!(
             query_dir.is_dir(),
@@ -361,7 +400,7 @@ mod tests {
 
         {
             let manager = SpillManager::new(&query_dir).unwrap().with_owned_dir();
-            let _file = manager.create_file("sort").unwrap();
+            let _file = manager.create_file(SpillOwner::Sort, "sort").unwrap();
             assert!(query_dir.exists());
         }
 
@@ -419,7 +458,7 @@ mod tests {
         };
         {
             let manager = SpillManager::new(&relative).unwrap().with_owned_dir();
-            let file = manager.create_file("sort").unwrap();
+            let file = manager.create_file(SpillOwner::Sort, "sort").unwrap();
             cleanup.created = manager.dir_created.load(Ordering::Acquire);
             assert!(
                 cleanup.created,
@@ -444,7 +483,7 @@ mod tests {
 
         let stray_file = {
             let manager = SpillManager::new(&query_dir).unwrap().with_owned_dir();
-            let _file = manager.create_file("sort").unwrap();
+            let _file = manager.create_file(SpillOwner::Sort, "sort").unwrap();
             let stray = query_dir.join("not_tracked.dat");
             std::fs::write(&stray, b"keep me").unwrap();
             stray

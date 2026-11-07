@@ -133,7 +133,9 @@ impl ExternalSort {
         }
 
         let row_count = rows.len();
-        let mut spill_file = self.manager.create_file("sort_run")?;
+        let mut spill_file = self
+            .manager
+            .create_file(super::SpillOwner::Sort, "sort_run")?;
 
         // Write row count header
         spill_file.write_u64_le(row_count as u64)?;

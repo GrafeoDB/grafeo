@@ -58,6 +58,8 @@ impl Session {
             max_property_size: cfg.max_property_size,
             #[cfg(feature = "spill")]
             buffer_manager: cfg.buffer_manager,
+            #[cfg(feature = "spill")]
+            spill_account: cfg.spill_account,
             commit_counter: cfg.commit_counter,
             gc_interval: cfg.gc_interval,
             active_streams: Arc::new(AtomicUsize::new(0)),

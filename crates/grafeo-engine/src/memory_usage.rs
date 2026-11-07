@@ -68,6 +68,38 @@ pub struct MemoryUsage {
     /// Change data capture log (only populated when the `cdc` feature is enabled).
     #[serde(default, skip_serializing_if = "CdcMemory::is_empty")]
     pub cdc: CdcMemory,
+    /// What the open has spilled to disk, against its spill limit. Disk, not
+    /// memory: not part of `total_bytes`.
+    #[serde(default)]
+    pub spill: SpillMemory,
+}
+
+/// What an open has spilled to disk, by who spilled it, and its cap
+/// ([`Config::with_spill_limit`](crate::config::Config::with_spill_limit)).
+///
+/// ```compile_fail,E0639
+/// use grafeo_engine::memory_usage::SpillMemory;
+///
+/// let spill = SpillMemory {
+///     total_bytes: 88,
+///     ..SpillMemory::default()
+/// };
+/// ```
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct SpillMemory {
+    /// The bytes spilled now, all spills together.
+    pub total_bytes: u64,
+    /// The spill limit; `None` when unlimited (the room for the next
+    /// checkpoint still bounds), `Some(0)` for an open that spills nothing
+    /// (no spill directory: in memory without a spill path, or encrypted).
+    pub limit_bytes: Option<u64>,
+    /// Sorts' runs.
+    pub sort_bytes: u64,
+    /// Aggregates' partitions.
+    pub aggregate_bytes: u64,
+    /// Vector indexes' spilled embedding columns.
+    pub vector_column_bytes: u64,
 }
 
 impl MemoryUsage {

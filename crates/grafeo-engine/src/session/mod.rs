@@ -392,6 +392,9 @@ pub(crate) struct SessionConfig {
     /// Buffer manager for memory-aware query execution.
     #[cfg(feature = "spill")]
     pub buffer_manager: Option<Arc<grafeo_common::memory::buffer::BufferManager>>,
+    /// The open's spill account, which bounds the queries' spill files.
+    #[cfg(feature = "spill")]
+    pub spill_account: Option<Arc<grafeo_core::execution::spill::SpillAccount>>,
     pub commit_counter: Arc<AtomicUsize>,
     pub gc_interval: usize,
     /// When true, the session permanently blocks all mutations.
@@ -465,6 +468,9 @@ pub struct Session {
     /// Buffer manager for memory-aware execution (spill decisions).
     #[cfg(feature = "spill")]
     buffer_manager: Option<Arc<grafeo_common::memory::buffer::BufferManager>>,
+    /// The open's spill account, which bounds the queries' spill files.
+    #[cfg(feature = "spill")]
+    spill_account: Option<Arc<grafeo_core::execution::spill::SpillAccount>>,
     /// Shared commit counter for triggering auto-GC.
     commit_counter: Arc<AtomicUsize>,
     /// GC every N commits (0 = disabled).
@@ -599,6 +605,8 @@ impl Session {
             max_property_size: cfg.max_property_size,
             #[cfg(feature = "spill")]
             buffer_manager: cfg.buffer_manager,
+            #[cfg(feature = "spill")]
+            spill_account: cfg.spill_account,
             commit_counter: cfg.commit_counter,
             gc_interval: cfg.gc_interval,
             #[cfg(feature = "wal")]
@@ -786,6 +794,8 @@ impl Session {
             max_property_size: cfg.max_property_size,
             #[cfg(feature = "spill")]
             buffer_manager: cfg.buffer_manager,
+            #[cfg(feature = "spill")]
+            spill_account: cfg.spill_account,
             commit_counter: cfg.commit_counter,
             gc_interval: cfg.gc_interval,
             #[cfg(feature = "wal")]
@@ -6644,11 +6654,14 @@ impl Session {
         // query spills (see `SpillManager::create_file`).
         let query_id = NEXT_QUERY_DIR.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let query_dir = spill_path.join(format!("query_{query_id}"));
-        let sm = std::sync::Arc::new(
-            grafeo_core::execution::SpillManager::new(&query_dir)
-                .ok()?
-                .with_owned_dir(),
-        );
+        let mut manager = grafeo_core::execution::SpillManager::new(&query_dir)
+            .ok()?
+            .with_owned_dir();
+        // The open's spill account bounds the query's files with the rest.
+        if let Some(account) = &self.spill_account {
+            manager = manager.with_account(std::sync::Arc::clone(account));
+        }
+        let sm = std::sync::Arc::new(manager);
         Some(grafeo_core::execution::OperatorMemoryContext::new(
             std::sync::Arc::clone(bm),
             sm,

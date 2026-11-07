@@ -392,6 +392,7 @@ mod sparql_update_group_algebra;
 mod sparql_w3c_execution_tests;
 mod sparql_zero_length_paths;
 mod spec_compliance;
+mod spill_budget;
 mod spill_directory;
 mod spilled_embedding_changes;
 mod sql_pgq;

@@ -68,6 +68,7 @@ mod search;
 #[cfg(any(feature = "triple-store", test))]
 pub(crate) mod section_consumer;
 mod sections;
+mod spill_budget;
 // The history's time index in the file (H2c).
 mod time_index_section;
 // Time travel: reads at an earlier epoch or time (H2c).
@@ -236,6 +237,9 @@ pub struct GrafeoDB {
     /// Where spilled vector columns write their cache files.
     #[cfg(all(feature = "vector-index", feature = "wal"))]
     vector_cache: Option<Arc<spill_directory::SpillDirectory>>,
+    /// What the open spills, against its cap and room (see `spill_budget`);
+    /// `None` without a spill directory.
+    pub(super) spill_account: Option<Arc<grafeo_core::execution::spill::SpillAccount>>,
     /// External read-only graph store (when using with_store() or with_read_store()).
     /// When set, sessions route queries through this store instead of the built-in
     /// row-group store.
@@ -813,6 +817,11 @@ impl GrafeoDB {
                 _ => return Err(not_a_database(db_path)),
             };
 
+            // What earlier opens and crashed queries left in this open's
+            // spill directory goes, under the exclusive lock, before the
+            // spill account measures the volume.
+            spill_directory::remove_leftovers(&spill_layout);
+
             // A 0.6.0-beta.1 file's RDF sections are written in the current
             // version right after the load, once a copy of the file is kept.
             #[cfg(feature = "triple-store")]
@@ -907,6 +916,20 @@ impl GrafeoDB {
         #[cfg(feature = "grafeo-file")]
         drop(create_lock);
 
+        // Without the single file there is no exclusive lock to remove them
+        // under earlier: they go here.
+        #[cfg(not(feature = "grafeo-file"))]
+        spill_directory::remove_leftovers(&spill_layout);
+
+        // The spill account, measured after the leftovers went.
+        let spill_account = spill_budget::open_account(
+            config.spill_limit(),
+            spill_layout.root.as_deref(),
+            budget,
+            #[cfg(feature = "grafeo-file")]
+            file_manager.as_ref(),
+        );
+
         // The WAL is the sidecar directory of the database file. It opens once
         // the open has replayed (and, if need be, retired) what the sidecar
         // held: see `open_wal` below. A read-only open, and one with
@@ -980,6 +1003,7 @@ impl GrafeoDB {
             _spill_root: spill_layout.root_guard.clone(),
             #[cfg(all(feature = "vector-index", feature = "wal"))]
             vector_cache: spill_layout.vector_cache.clone(),
+            spill_account,
             external_read_store: None,
             external_write_store: None,
             #[cfg(feature = "metrics")]
@@ -1066,12 +1090,6 @@ impl GrafeoDB {
         {
             *db.checkpoint_triggers.lock() = db.config.checkpoint_triggers();
             db.start_checkpoint_timer();
-        }
-
-        // A spill cache is never data: what a previous read-write open (or a
-        // crash) left of it goes, under this open's exclusive lock.
-        if let Some(ref stale) = spill_layout.stale_cache {
-            spill_directory::remove_stale_cache(stale);
         }
 
         // Phase 8a: apply per-section ForceDisk overrides. Each section
@@ -1227,6 +1245,7 @@ impl GrafeoDB {
             _spill_root: None,
             #[cfg(all(feature = "vector-index", feature = "wal"))]
             vector_cache: None,
+            spill_account: None,
             external_read_store: Some(Arc::clone(&store) as Arc<dyn GraphStore>),
             external_write_store: Some(Arc::clone(&store)),
             #[cfg(feature = "metrics")]
@@ -1348,6 +1367,7 @@ impl GrafeoDB {
             _spill_root: None,
             #[cfg(all(feature = "vector-index", feature = "wal"))]
             vector_cache: None,
+            spill_account: None,
             external_read_store: Some(store),
             external_write_store: None,
             #[cfg(feature = "metrics")]
@@ -2283,6 +2303,8 @@ impl GrafeoDB {
             path_search_budget: self.config.path_search_budget(),
             #[cfg(feature = "spill")]
             buffer_manager: Some(Arc::clone(&self.buffer_manager)),
+            #[cfg(feature = "spill")]
+            spill_account: self.spill_account.clone(),
             commit_counter: Arc::clone(&self.commit_counter),
             gc_interval: self.config.gc_interval(),
             read_only: self.read_only || force_read_only,
@@ -3197,6 +3219,8 @@ impl GrafeoDB {
                 store,
                 #[cfg(all(feature = "wal", feature = "vector-index"))]
                 self.vector_cache.clone(),
+                #[cfg(all(feature = "wal", feature = "vector-index"))]
+                self.spill_account.clone(),
                 #[cfg(all(feature = "wal", feature = "vector-index"))]
                 Some({
                     let manager = Arc::clone(&self.transaction_manager);

@@ -601,6 +601,14 @@ impl GrafeoFileManager {
         self.checkpoint_headroom.store(bytes, Ordering::Relaxed);
     }
 
+    /// The free space, in bytes, a checkpoint leaves for the WAL beyond the
+    /// size of the file (see
+    /// [`set_checkpoint_headroom`](Self::set_checkpoint_headroom)).
+    #[must_use]
+    pub fn checkpoint_headroom(&self) -> u64 {
+        self.checkpoint_headroom.load(Ordering::Relaxed)
+    }
+
     /// Checks, before a checkpoint starts, that the disk holding the file
     /// has the free space it may need (see
     /// [`write_checkpoint`](Self::write_checkpoint), which checks again

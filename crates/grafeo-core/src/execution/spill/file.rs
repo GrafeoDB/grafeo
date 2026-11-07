@@ -21,6 +21,9 @@ pub struct SpillFile {
     writer: Option<BufWriter<File>>,
     /// Total bytes written to this file.
     bytes_written: u64,
+    /// Its bytes in the spill account, reserved before they are written
+    /// and given back when the file is deleted or dropped.
+    reservation: Option<super::SpillReservation>,
 }
 
 impl SpillFile {
@@ -37,7 +40,16 @@ impl SpillFile {
             path,
             writer: Some(writer),
             bytes_written: 0,
+            reservation: None,
         })
+    }
+
+    /// Reserves its writes in `reservation`'s account, growing it a
+    /// [`SPILL_FILE_STEP`](super::SPILL_FILE_STEP) or more at a time.
+    #[must_use]
+    pub fn with_reservation(mut self, reservation: super::SpillReservation) -> Self {
+        self.reservation = Some(reservation);
+        self
     }
 
     /// Returns the path to this spill file.
@@ -52,17 +64,26 @@ impl SpillFile {
         self.bytes_written
     }
 
-    /// Writes raw bytes to the file.
+    /// Writes raw bytes to the file, reserving them first when it holds a
+    /// reservation.
     ///
     /// # Errors
     ///
-    /// Returns an error if the write fails.
+    /// Returns an error if the write fails, or the spill account refuses
+    /// (kind `StorageFull`, carrying the refusal; nothing is written then).
     pub fn write_all(&mut self, data: &[u8]) -> std::io::Result<()> {
         let writer = self
             .writer
             .as_mut()
             .ok_or_else(|| std::io::Error::other("Write phase ended"))?;
 
+        if let Some(reservation) = &mut self.reservation {
+            let after = self.bytes_written + data.len() as u64;
+            if after > reservation.bytes() {
+                let more = (after - reservation.bytes()).max(super::SPILL_FILE_STEP);
+                reservation.grow(more).map_err(super::refused)?;
+            }
+        }
         writer.write_all(data)?;
         self.bytes_written += data.len() as u64;
         Ok(())
@@ -108,6 +129,10 @@ impl SpillFile {
     pub fn finish_write(&mut self) -> std::io::Result<()> {
         if let Some(mut writer) = self.writer.take() {
             writer.flush()?;
+        }
+        // What it reserved past its length goes back.
+        if let Some(reservation) = &mut self.reservation {
+            reservation.trim_to(self.bytes_written);
         }
         Ok(())
     }

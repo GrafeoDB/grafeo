@@ -300,6 +300,50 @@ pub(crate) fn remove_stale_cache(cache: &Path) {
     }
 }
 
+/// Removes what earlier opens left in a read-write open's own spill
+/// directory (`<file>.spill`, under the exclusive lock the caller holds):
+/// the vector cache ([`remove_stale_cache`]) and the directory of every
+/// query that spilled when it crashed (`query_*`). Nothing for another
+/// layout: a shared spill path holds other opens' directories, and a
+/// read-only open's is new. Runs before the spill account measures the free
+/// space, so leftovers neither stay nor shrink the default cap.
+pub(crate) fn remove_leftovers(layout: &SpillLayout) {
+    let Some(cache) = &layout.stale_cache else {
+        return;
+    };
+    if let Some(root) = cache.parent() {
+        remove_query_directories(root);
+    }
+    remove_stale_cache(cache);
+}
+
+/// Removes the `query_*` directories under `root` (a link there goes, not
+/// followed).
+fn remove_query_directories(root: &Path) {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if !entry.file_name().to_string_lossy().starts_with("query_") {
+            continue;
+        }
+        let path = entry.path();
+        let removed = match entry.file_type() {
+            Ok(kind) if kind.is_symlink() => {
+                std::fs::remove_file(&path).or_else(|_| std::fs::remove_dir(&path))
+            }
+            Ok(kind) if kind.is_dir() => std::fs::remove_dir_all(&path),
+            _ => continue,
+        };
+        if let Err(error) = removed {
+            grafeo_common::grafeo_warn!(
+                "could not remove the crashed query's spill directory {}: {error}",
+                path.display()
+            );
+        }
+    }
+}
+
 /// `grafeo-<name>-<pid>-<random><suffix>`: the process id keeps processes
 /// apart, the random part opens of one process (and guessers).
 fn unique_name(name: &str, suffix: &str) -> String {

@@ -20,6 +20,10 @@ pub enum SpillError {
     /// Insufficient disk space.
     #[error("insufficient disk space for spill")]
     InsufficientDiskSpace,
+    /// The spill account refused the spill (its cap, or the room the
+    /// database keeps for its next checkpoint): nothing was written.
+    #[error("spill refused: {0}")]
+    Refused(Box<crate::utils::error::LimitRefusal>),
 }
 
 /// Trait for subsystems that consume managed memory.

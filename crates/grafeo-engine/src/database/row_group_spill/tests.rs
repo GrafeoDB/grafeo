@@ -315,6 +315,8 @@ fn the_registered_consumers_report_the_store_and_its_indexes() {
         None,
         #[cfg(feature = "vector-index")]
         None,
+        #[cfg(feature = "vector-index")]
+        None,
     );
     let tiers = manager.snapshot_consumer_tiers();
     let tier = |name: &str| {
@@ -463,6 +465,7 @@ mod consumers {
             Some(std::sync::Arc::new(
                 crate::database::spill_directory::SpillDirectory::at(dir.path().join("cache")),
             )),
+            None,
             None,
         );
         let names: Vec<String> = manager

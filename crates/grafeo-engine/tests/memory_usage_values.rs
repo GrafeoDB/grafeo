@@ -103,7 +103,7 @@ fn assert_sums(usage: &MemoryUsage, what: &str) {
             + usage.cdc.total_bytes
             + usage.buffer_manager.execution_buffers_bytes
             + usage.buffer_manager.spill_staging_bytes,
-        "{what}: the total counts each byte once: the components, and of the buffer manager          only the regions no component reports"
+        "{what}: the total counts each byte once: the components, and of the buffer manager only the regions no component reports"
     );
 }
 

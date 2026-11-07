@@ -165,7 +165,7 @@ fn a_reopened_database_and_a_thaw_are_counted() {
 fn people() -> GrafeoDB {
     let db = GrafeoDB::new_in_memory();
     db.execute(
-        "UNWIND range(1, 2000) AS i          INSERT (:Person {i: i, name: 'person ' || CAST(i AS STRING)})",
+        "UNWIND range(1, 2000) AS i INSERT (:Person {i: i, name: 'person ' || CAST(i AS STRING)})",
     )
     .unwrap();
     db

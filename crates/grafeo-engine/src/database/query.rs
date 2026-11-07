@@ -87,7 +87,9 @@ impl super::GrafeoDB {
         // defensive no-op today).
         *self.current_graph.write() = session.current_graph();
         *self.current_schema.write() = session.current_schema();
-        OwnedResultStream::new(plan)
+        // The session ends here, and with it any transaction of its own: no
+        // commit or rollback can meet the stream.
+        OwnedResultStream::new(plan, None)
     }
 
     /// Executes a GQL query with visibility at the specified epoch.

@@ -81,6 +81,11 @@ pub(crate) struct ImmediateRecorder {
     entries: parking_lot::Mutex<(ChangeSet, Option<GraphSlot>)>,
     /// Whether the running call applied a write it could not record.
     lost: AtomicBool,
+    /// Whether the running call applied a write, kept or not: without the
+    /// entries, the one sign that it changed something, which the interval
+    /// checkpoint of a file database needs.
+    #[cfg(feature = "grafeo-file")]
+    applied: AtomicBool,
 }
 
 impl ImmediateRecorder {
@@ -92,6 +97,8 @@ impl ImmediateRecorder {
             keep: AtomicBool::new(false),
             entries: parking_lot::Mutex::new((ChangeSet::new(), None)),
             lost: AtomicBool::new(false),
+            #[cfg(feature = "grafeo-file")]
+            applied: AtomicBool::new(false),
         }
     }
 
@@ -100,6 +107,8 @@ impl ImmediateRecorder {
     fn start(&self, epoch: EpochId, graph: Option<&str>, keep: bool) -> Result<()> {
         self.epoch.store(epoch.as_u64(), Ordering::Release);
         self.keep.store(keep, Ordering::Release);
+        #[cfg(feature = "grafeo-file")]
+        self.applied.store(false, Ordering::Release);
         if keep {
             let mut entries = self.entries.lock();
             let mut set = ChangeSet::new();
@@ -115,6 +124,13 @@ impl ImmediateRecorder {
     /// The running call's entries, taken out (none when it kept none), or
     /// `None` when it applied a write it could not record: its log group
     /// would miss that write.
+    /// Whether the running call applied a write since it started (kept or
+    /// not), and starts over.
+    #[cfg(feature = "grafeo-file")]
+    fn take_applied(&self) -> bool {
+        self.applied.swap(false, Ordering::AcqRel)
+    }
+
     fn finish(&self) -> Option<ChangeSet> {
         let lost = self.lost.swap(false, Ordering::AcqRel);
         if !self.keep.swap(false, Ordering::AcqRel) {
@@ -141,6 +157,13 @@ impl WriteClaims for ImmediateRecorder {
 }
 
 impl ChangeRecorder for ImmediateRecorder {
+    /// A call that keeps no entries commits each write at once, with no entry
+    /// to show it changed something: this notes it.
+    fn committed(&self) {
+        #[cfg(feature = "grafeo-file")]
+        self.applied.store(true, Ordering::Release);
+    }
+
     fn writer(&self) -> Writer {
         Writer::Immediate {
             epoch: EpochId::new(self.epoch.load(Ordering::Acquire)),
@@ -436,6 +459,8 @@ impl GrafeoDB {
             writer,
         } = call;
         drop(writer);
+        #[cfg(feature = "grafeo-file")]
+        let applied = self.immediate_recorder().take_applied();
         // A write the call could not record is applied at an epoch nobody
         // reads: published, a read would see what the log misses, so the
         // epoch is not published, as for a group the log did not take. The
@@ -447,11 +472,14 @@ impl GrafeoDB {
             )));
         };
         // A call that changed nothing (a removal of what is not there) is no
-        // committed change, as the WAL logs no group for it.
+        // committed change, as the WAL logs no group for it. A call that keeps
+        // no entries (no WAL and no change data capture) has an empty change
+        // set either way: what it applied tells, so the interval checkpoint,
+        // the only way its writes reach the file, sees them.
         #[cfg(feature = "grafeo-file")]
         let commits = {
             let mut commits = commits;
-            if !changes.is_empty() {
+            if applied || !changes.is_empty() {
                 commits.changed(&self.transaction_manager);
             }
             commits

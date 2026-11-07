@@ -60,7 +60,7 @@ impl Session {
             buffer_manager: cfg.buffer_manager,
             commit_counter: cfg.commit_counter,
             gc_interval: cfg.gc_interval,
-            active_streams: AtomicUsize::new(0),
+            active_streams: Arc::new(AtomicUsize::new(0)),
             #[cfg(feature = "wal")]
             wal: None,
             #[cfg(feature = "cdc")]

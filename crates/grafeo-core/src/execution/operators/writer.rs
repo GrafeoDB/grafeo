@@ -1425,8 +1425,11 @@ fn record_applied(
         }
         Applied::Unchanged => false,
         // Committed at once without a before-image (an immediate write whose
-        // entries nothing reads): nothing to record.
-        Applied::Committed => true,
+        // entries nothing reads): nothing to record, only that it changed.
+        Applied::Committed => {
+            recording.recorder.committed();
+            true
+        }
     };
     if changed {
         grafeo_common::testing::commit_hook::run_after_data_write()

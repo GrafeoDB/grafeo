@@ -28,7 +28,7 @@ env:
 #
 # 4. Shipped profile (grafeo-engine's "full" plus "arrow-export", which the
 #    packages' default "embedded" adds): the Rust side of what the Python
-#    package builds, and of the Node.js package without "parquet-import".
+#    and Node.js packages build.
 #    Profile 1 turns on features these packages leave
 #    out, which can compile a path of theirs out, so clippy and rustdoc for
 #    grafeo-core and grafeo-engine, and the grafeo-engine tests, run once more
@@ -466,8 +466,7 @@ jobs:
           CARGO_PROFILE_DEV_DEBUG: line-tables-only
 
   # The shipped profile (4 above): grafeo-engine's `full` features plus
-  # `arrow-export`, which the Python package builds; the Node.js package builds
-  # the same set without `parquet-import`, so this job tests a superset of it.
+  # `arrow-export`, which the Python and Node.js packages build.
   # A feature added to a binding's manifest goes into grafeo-engine's `full`
   # too, or into this job's feature list. --all-features turns on more and can so
   # leave out code these packages run: this job lints and

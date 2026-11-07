@@ -250,6 +250,11 @@ pub trait ChangeRecorder: WriteClaims {
         version: PendingVersion,
     ) -> Result<(), OperatorError>;
 
+    /// Notes a write the store committed at once without a before-image
+    /// ([`Applied::Committed`](crate::graph::apply::Applied::Committed)): nothing to
+    /// record, but something changed. The default does nothing.
+    fn committed(&self) {}
+
     /// Whether this recorder takes bulk writes (see
     /// [`GraphWriter::create_nodes`] and [`GraphWriter::create_edges`]), and
     /// what it does with their rows. `None`, the default, for one that takes

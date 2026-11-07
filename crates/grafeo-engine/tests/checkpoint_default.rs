@@ -405,29 +405,46 @@ fn is_constant(right: &str) -> bool {
 }
 
 /// The `Instant` additions of one source text that add something other than a constant, as
-/// `line: text`: `Instant::now() + x`, or `now + x` for a variable named `now`.
+/// `line: text` of the line the addition starts on: `Instant::now() + x`, or `now + x` for a
+/// variable named `now`. The code lines are read as one, each trimmed and joined by a space, so
+/// an addition rustfmt breaks before its `+` is found too.
 fn unchecked_additions(text: &str) -> Vec<String> {
-    let mut found = Vec::new();
-    for (number, line) in text.lines().enumerate() {
-        if line.trim_start().starts_with("//") {
+    let lines: Vec<&str> = text.lines().collect();
+    // The code lines joined, with where each starts in the joined text.
+    let mut code = String::new();
+    let mut starts: Vec<(usize, usize)> = Vec::new();
+    for (number, line) in lines.iter().enumerate() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with("//") {
             continue;
         }
-        for needle in ["Instant::now() +", "now +"] {
-            let mut from = 0;
-            while let Some(at) = line[from..].find(needle).map(|at| at + from) {
-                from = at + needle.len();
-                let before = line[..at].chars().next_back();
-                let word = needle == "now +"
-                    && before
-                        .is_some_and(|c| c.is_alphanumeric() || c == '_' || c == '.' || c == ':');
-                if word || is_constant(&line[from..]) {
-                    continue;
-                }
-                found.push(format!("{}: {}", number + 1, line.trim()));
+        if !code.is_empty() {
+            code.push(' ');
+        }
+        starts.push((code.len(), number));
+        code.push_str(line);
+    }
+    let line_at = |at: usize| {
+        let index = starts.partition_point(|&(start, _)| start <= at) - 1;
+        starts[index].1
+    };
+    let mut found = Vec::new();
+    for needle in ["Instant::now() +", "now +"] {
+        let mut from = 0;
+        while let Some(at) = code[from..].find(needle).map(|at| at + from) {
+            from = at + needle.len();
+            let before = code[..at].chars().next_back();
+            let word = needle == "now +"
+                && before.is_some_and(|c| c.is_alphanumeric() || c == '_' || c == '.' || c == ':');
+            if word || is_constant(code[from..].trim_start()) {
+                continue;
             }
+            let number = line_at(at);
+            found.push((number, format!("{}: {}", number + 1, lines[number].trim())));
         }
     }
-    found
+    found.sort();
+    found.into_iter().map(|(_, finding)| finding).collect()
 }
 
 /// The scan itself finds what it must: an interval, a timeout or a backoff added to an `Instant`
@@ -442,14 +459,20 @@ let e = now.checked_add(interval);
 let f = std::time::Instant::now() + std::time::Duration::from_millis(1_500);
 let g = snow + 1;
 // let h = now + interval;
-let i = state.now + 1;";
+let i = state.now + 1;
+let j = Instant::now()
+    + timeout;
+let k = now
+    + Duration::from_secs(10);";
     let found = unchecked_additions(text);
     assert_eq!(
         found,
         [
             "1: let a = Instant::now() + interval;",
-            "2: let b = now + interval.max(pause);"
-        ]
+            "2: let b = now + interval.max(pause);",
+            "10: let j = Instant::now()",
+        ],
+        "an addition broken before its `+` is found on the line it starts"
     );
 }
 

@@ -64,6 +64,28 @@ impl Drop for StreamGuard<'_> {
     }
 }
 
+/// [`StreamGuard`] for a stream that outlives the borrow of its session (an
+/// [`OwnedResultStream`]): it shares the session's counter, so a commit or a
+/// rollback of the session's transaction waits for this stream too.
+pub(crate) struct OwnedStreamGuard {
+    counter: Arc<AtomicUsize>,
+}
+
+impl OwnedStreamGuard {
+    pub(crate) fn new(counter: &Arc<AtomicUsize>) -> Self {
+        counter.fetch_add(1, Ordering::AcqRel);
+        Self {
+            counter: Arc::clone(counter),
+        }
+    }
+}
+
+impl Drop for OwnedStreamGuard {
+    fn drop(&mut self) {
+        self.counter.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
 /// Lazy, chunk-based result stream bound to a session's lifetime.
 ///
 /// Created by [`Session::execute_streaming`](crate::Session::execute_streaming).
@@ -273,6 +295,10 @@ pub struct OwnedResultStream {
     /// The stream's committed snapshot pin, including a historical override.
     _pin: Option<ReadPin>,
     warnings: Arc<WarningSink>,
+    /// The session's active-stream count while the stream is open, when a
+    /// session's transaction may be reading through it: let go of when the
+    /// stream is read to the end or dropped.
+    _guard: Option<OwnedStreamGuard>,
 }
 
 impl std::fmt::Debug for OwnedResultStream {
@@ -288,13 +314,14 @@ impl std::fmt::Debug for OwnedResultStream {
 
 impl OwnedResultStream {
     /// Opens an owned streaming result, failing closed if the schema is not
-    /// unique (see [`ResultStream::new`]).
+    /// unique (see [`ResultStream::new`]). `guard` counts the stream among its
+    /// session's active streams, `None` for a session nothing else uses.
     ///
     /// # Errors
     ///
     /// Returns [`QueryErrorKind::Semantic`](grafeo_common::utils::error::QueryErrorKind)
     /// if `columns` contains a repeated column name.
-    pub(crate) fn new(plan: StreamPlan) -> Result<Self> {
+    pub(crate) fn new(plan: StreamPlan, guard: Option<OwnedStreamGuard>) -> Result<Self> {
         QueryResult::validate_unique_columns(&plan.columns)?;
         let len = plan.columns.len();
         Ok(Self {
@@ -305,6 +332,7 @@ impl OwnedResultStream {
             exhausted: false,
             _pin: plan.pin,
             warnings: plan.warnings,
+            _guard: guard,
         })
     }
 
@@ -352,6 +380,8 @@ impl OwnedResultStream {
             }
             Ok(None) => {
                 self.exhausted = true;
+                // Read to the end: it reads the transaction no more.
+                self._guard = None;
                 Ok(None)
             }
             Err(err) => Err(super::convert_operator_error(err)),

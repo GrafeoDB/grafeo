@@ -5,8 +5,8 @@ use std::sync::Arc;
 
 use grafeo_engine::auth::{Identity, Role};
 use grafeo_engine::database::GrafeoDB;
-use napi::JsString;
 use napi::bindgen_prelude::*;
+use napi::{JsString, JsValue, ValueType};
 use napi_derive::napi;
 use parking_lot::{Mutex, RwLock};
 
@@ -29,8 +29,14 @@ pub struct JsSession {
     db: Arc<RwLock<GrafeoDB>>,
     /// What the session may do: each transaction it begins gets the same.
     identity: Identity,
-    /// The session's statements run here; `None` once closed.
-    session: Arc<Mutex<Option<grafeo_engine::session::Session>>>,
+    /// The session's statements run here; `None` once closed. The lock is
+    /// held only to take a handle out or to close, never across a statement,
+    /// so a call on the JavaScript thread never waits for a running query; a
+    /// statement running when the session closes finishes on its handle.
+    session: Arc<Mutex<Option<Arc<grafeo_engine::session::Session>>>>,
+    /// Held for each statement, on the worker thread that runs it: the
+    /// session's statements run one at a time, as on one engine session.
+    statements: Arc<Mutex<()>>,
 }
 
 /// The error of a statement on a closed session.
@@ -39,6 +45,11 @@ fn closed() -> napi::Error {
 }
 
 impl JsSession {
+    /// A handle on the open session, or the closed-session error.
+    fn handle(&self) -> Result<Arc<grafeo_engine::session::Session>> {
+        self.session.lock().clone().ok_or_else(closed)
+    }
+
     /// A session on `db` with the limits of `options` (`{ readOnly, externalAccess }`, either
     /// optional); an unknown key, or a value that is not a boolean, is an error.
     pub(crate) fn open(db: Arc<RwLock<GrafeoDB>>, options: Option<&Object<'_>>) -> Result<Self> {
@@ -48,11 +59,20 @@ impl JsSession {
             for i in 0..keys.get_array_length()? {
                 let key: JsString = keys.get_element(i)?;
                 let key = key.into_utf8()?.into_owned()?;
-                let value: Option<bool> = options.get_named_property(&key).map_err(|_| {
-                    NodeGrafeoError::InvalidArgument(format!(
-                        "session option {key} must be a boolean"
-                    ))
-                })?;
+                // A key set to `undefined` is left out, as TypeScript's
+                // optional fields are; `null` and every other non-boolean is
+                // refused, never read as the default.
+                let value: Unknown<'_> = options.get_named_property(&key)?;
+                let value = match value.get_type()? {
+                    ValueType::Undefined => None,
+                    ValueType::Boolean => Some(value.coerce_to_bool()?),
+                    _ => {
+                        return Err(NodeGrafeoError::InvalidArgument(format!(
+                            "session option {key} must be a boolean"
+                        ))
+                        .into());
+                    }
+                };
                 match key.as_str() {
                     "readOnly" => read_only = value.unwrap_or(false),
                     "externalAccess" => external_access = value.unwrap_or(true),
@@ -77,7 +97,8 @@ impl JsSession {
         Ok(Self {
             db,
             identity,
-            session: Arc::new(Mutex::new(Some(session))),
+            session: Arc::new(Mutex::new(Some(Arc::new(session)))),
+            statements: Arc::new(Mutex::new(())),
         })
     }
 
@@ -88,12 +109,13 @@ impl JsSession {
         params: Option<types::Params>,
     ) -> Result<QueryResult> {
         let params = params.map(types::Params::into_map).transpose()?;
-        let session = Arc::clone(&self.session);
-        let result = tokio::task::spawn_blocking(move || match session.lock().as_ref() {
-            Some(session) => session
+        let session = self.handle()?;
+        let statements = Arc::clone(&self.statements);
+        let result = tokio::task::spawn_blocking(move || {
+            let _statement = statements.lock();
+            session
                 .execute_language(&query, language, params)
-                .map_err(|error| napi::Error::from(NodeGrafeoError::from(error))),
-            None => Err(closed()),
+                .map_err(|error| napi::Error::from(NodeGrafeoError::from(error)))
         })
         .await
         .map_err(|e| napi::Error::from_reason(e.to_string()))??;
@@ -122,12 +144,13 @@ impl JsSession {
         #[napi(ts_arg_type = "any | undefined | null")] params: Option<types::Params>,
     ) -> Result<QueryResult> {
         let params = params.map(types::Params::into_map).transpose()?;
-        let session = Arc::clone(&self.session);
-        let result = tokio::task::spawn_blocking(move || match session.lock().as_ref() {
-            Some(session) => session
+        let session = self.handle()?;
+        let statements = Arc::clone(&self.statements);
+        let result = tokio::task::spawn_blocking(move || {
+            let _statement = statements.lock();
+            session
                 .execute_language(&query, &language, params)
-                .map_err(|error| napi::Error::from(NodeGrafeoError::from(error))),
-            None => Err(closed()),
+                .map_err(|error| napi::Error::from(NodeGrafeoError::from(error)))
         })
         .await
         .map_err(|e| napi::Error::from_reason(e.to_string()))??;
@@ -138,12 +161,13 @@ impl JsSession {
     /// `GrafeoDB.executeStream` does.
     #[napi(js_name = "executeStream")]
     pub async fn execute_stream(&self, query: String) -> Result<crate::stream::JsResultStream> {
-        let session = Arc::clone(&self.session);
-        let stream = tokio::task::spawn_blocking(move || match session.lock().as_ref() {
-            Some(session) => session
+        let session = self.handle()?;
+        let statements = Arc::clone(&self.statements);
+        let stream = tokio::task::spawn_blocking(move || {
+            let _statement = statements.lock();
+            session
                 .execute_streaming_owned(&query)
-                .map_err(|error| napi::Error::from(NodeGrafeoError::from(error))),
-            None => Err(closed()),
+                .map_err(|error| napi::Error::from(NodeGrafeoError::from(error)))
         })
         .await
         .map_err(|e| napi::Error::from_reason(e.to_string()))??;
@@ -157,15 +181,14 @@ impl JsSession {
     /// `GrafeoDB.beginTransaction` (the isolation level as there).
     #[napi(js_name = "beginTransaction")]
     pub fn begin_transaction(&self, isolation_level: Option<String>) -> Result<Transaction> {
-        if self.session.lock().is_none() {
-            return Err(closed());
-        }
+        self.handle()?;
         let session = self.db.read().session_with_identity(self.identity.clone());
         Transaction::begin(Arc::clone(&self.db), session, isolation_level.as_deref())
     }
 
-    /// Close the session: its statements fail from now on; the database and other sessions are
-    /// unaffected. Closing a closed session does nothing.
+    /// Close the session: statements called from now on fail; one already called finishes. The
+    /// database and other sessions are unaffected. Closing a closed session does nothing, and
+    /// closing never waits for a running statement.
     #[napi]
     pub fn close(&self) {
         drop(self.session.lock().take());

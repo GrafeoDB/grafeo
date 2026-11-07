@@ -179,3 +179,63 @@ fn the_setter_refuses_what_never_checkpoints() {
     std::thread::sleep(Duration::from_millis(400));
     assert_eq!(reader.checkpoint_status().failures, 0);
 }
+
+const DIRECT_PATH: &str = "GRAFEO_CHECKPOINT_TRIGGERS_DIRECT_PATH";
+const DIRECT_CASE: &str = "GRAFEO_CHECKPOINT_TRIGGERS_DIRECT_CASE";
+
+/// Writes through `case`'s API on a database without a WAL whose interval is short, waits well
+/// past the interval, and ends with no close, as a crash does.
+#[test]
+fn walless_interval_child() {
+    let (Some(path), Some(case)) = (std::env::var_os(DIRECT_PATH), std::env::var_os(DIRECT_CASE))
+    else {
+        return;
+    };
+    let db = GrafeoDB::with_config(
+        Config::persistent(Path::new(&path))
+            .without_wal()
+            .with_checkpoint_interval(Duration::from_millis(200)),
+    )
+    .unwrap();
+    match case.to_str().unwrap() {
+        "direct" => {
+            let alix = db.create_node(&["Person"]).unwrap();
+            let gus = db.create_node(&["Person"]).unwrap();
+            db.set_node_property(alix, "name", Value::from("Alix"))
+                .unwrap();
+            db.set_node_property(gus, "name", Value::from("Gus"))
+                .unwrap();
+            db.create_edge(alix, gus, "KNOWS").unwrap();
+        }
+        "statement" => {
+            db.execute("INSERT (:Person {name: 'Alix'})-[:KNOWS]->(:Person {name: 'Gus'})")
+                .unwrap();
+        }
+        other => panic!("no case {other}"),
+    }
+    std::thread::sleep(Duration::from_millis(1500));
+    std::process::exit(0);
+}
+
+/// Without a WAL the interval checkpoint is what keeps the writes: direct API writes mark the
+/// database changed as statements do, so the next interval checkpoints them and a crash after
+/// it keeps them.
+#[test]
+fn an_interval_checkpoints_direct_writes_without_a_wal() {
+    for case in ["statement", "direct"] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("walless.grafeo");
+        let mut child = grafeo_common::child_test!("walless_interval_child");
+        child.env(DIRECT_PATH, &path).env(DIRECT_CASE, case);
+        let status = grafeo_common::testing::child_process::run(&mut child).unwrap();
+        assert!(status.success(), "{case}: the child failed");
+        let db = GrafeoDB::with_config(Config::persistent(&path).without_wal()).unwrap();
+        let knows = db
+            .execute("MATCH (a:Person {name: 'Alix'})-[:KNOWS]->(g:Person {name: 'Gus'}) RETURN g")
+            .unwrap()
+            .rows()
+            .len();
+        assert_eq!(knows, 1, "{case}: the writes survived the crash");
+        db.close().unwrap();
+    }
+}

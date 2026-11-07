@@ -526,8 +526,9 @@ pub struct Session {
     changes: parking_lot::Mutex<Option<Arc<crate::transaction::TransactionChanges>>>,
     /// Count of active `ResultStream`s pinned to this session. Commit and
     /// rollback block while any streams are outstanding so mid-iteration
-    /// snapshots are not invalidated.
-    active_streams: AtomicUsize,
+    /// snapshots are not invalidated. Shared with the owned streams, which
+    /// outlive the borrow of the session.
+    active_streams: Arc<AtomicUsize>,
     /// Shared metrics registry (populated when the `metrics` feature is enabled).
     #[cfg(feature = "metrics")]
     pub(crate) metrics: Option<Arc<crate::metrics::MetricsRegistry>>,
@@ -618,7 +619,7 @@ impl Session {
             last_commit_epoch: parking_lot::Mutex::new(None),
             transaction_statements: TransactionStatements::Allowed,
             changes: parking_lot::Mutex::new(None),
-            active_streams: AtomicUsize::new(0),
+            active_streams: Arc::new(AtomicUsize::new(0)),
             #[cfg(feature = "metrics")]
             metrics: None,
             #[cfg(feature = "metrics")]
@@ -804,7 +805,7 @@ impl Session {
             last_commit_epoch: parking_lot::Mutex::new(None),
             transaction_statements: TransactionStatements::Allowed,
             changes: parking_lot::Mutex::new(None),
-            active_streams: AtomicUsize::new(0),
+            active_streams: Arc::new(AtomicUsize::new(0)),
             #[cfg(feature = "metrics")]
             metrics: None,
             #[cfg(feature = "metrics")]
@@ -4391,7 +4392,8 @@ impl Session {
     /// what it reads, as [`GrafeoDB::execute_streaming`](crate::GrafeoDB::execute_streaming)
     /// gives: for a caller that keeps the stream past this borrow of the
     /// session (a binding's stream handle). The session's permissions, its
-    /// external access included, apply as they do to `execute`.
+    /// external access included, apply as they do to `execute`, and its
+    /// transaction cannot commit or roll back while the stream is open.
     ///
     /// # Stability: Experimental
     ///
@@ -4406,7 +4408,10 @@ impl Session {
         &self,
         query: &str,
     ) -> Result<crate::query::executor::stream::OwnedResultStream> {
-        crate::query::executor::stream::OwnedResultStream::new(self.build_streaming_plan(query)?)
+        use crate::query::executor::stream::{OwnedResultStream, OwnedStreamGuard};
+
+        let plan = self.build_streaming_plan(query)?;
+        OwnedResultStream::new(plan, Some(OwnedStreamGuard::new(&self.active_streams)))
     }
 
     /// Builds a pull-based physical pipeline for streaming, returning the

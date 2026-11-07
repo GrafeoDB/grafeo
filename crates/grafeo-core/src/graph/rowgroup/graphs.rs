@@ -403,11 +403,11 @@ impl RowGroupStore {
     /// and next graph id. What a graph held before is replaced; a graph
     /// the section does not name keeps its data. The graphs keep the
     /// adjacency this store keeps, whatever the section holds (see
-    /// [`read_lpg_section_with_backward_edges`]).
+    /// [`read_lpg_section_with_backward_edges`](super::section::read_lpg_section_with_backward_edges)).
     ///
     /// # Errors
     ///
-    /// As [`read_lpg_section_with_backward_edges`], and
+    /// As [`read_lpg_section_with_backward_edges`](super::section::read_lpg_section_with_backward_edges), and
     /// [`Error::Corruption`] for a default graph with a name or a name two
     /// graphs share. Nothing changed then.
     pub fn read_section(&self, source: &dyn SectionSource) -> Result<()> {

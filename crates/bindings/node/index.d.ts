@@ -868,6 +868,21 @@ export interface CsvImportOptions {
   headers?: boolean
 }
 
+/**
+ * Returns the features this package was built with, as Python's
+ * `grafeo.features()` lists them: the query languages (`gql`, `cypher`,
+ * `sparql`, `gremlin`, `graphql`, `sql-pgq`) and the optional capabilities
+ * (`algos`, `vector-index`, `text-index`, `hybrid-search`, `cdc`,
+ * `triple-store`, `shacl`, `embed`, `arrow-export`, `jsonl-import`,
+ * `parquet-import`, `metrics`). Profiles such as `full` are not listed, only
+ * what they enable.
+ *
+ * ```ts
+ * if (!features().includes('cypher')) throw new Error('this build has no Cypher')
+ * ```
+ */
+export declare function features(): Array<string>
+
 /** Options for JSON Lines import. */
 export interface JsonlImportOptions {
   /** Label to assign to created nodes (default: "Row") */

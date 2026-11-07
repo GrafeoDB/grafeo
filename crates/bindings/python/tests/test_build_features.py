@@ -37,15 +37,25 @@ def test_features_match_the_api_of_this_build():
 
 def test_requires_marks_know_every_feature_the_build_can_report():
     # conftest's `requires` mark refuses a name outside KNOWN_FEATURES, so the set
-    # must hold exactly the names features() can report: read them from its source.
+    # must hold exactly the names features() can report: the pairs of the shared
+    # `reported_features!` macro in bindings-common, which features() calls.
     from tests.conftest import KNOWN_FEATURES
 
-    source = (Path(__file__).parent.parent / "src" / "lib.rs").read_text(encoding="utf-8")
-    body = source[source.index("fn features()") :]
+    bindings = Path(__file__).parent.parent.parent
+    source = (bindings / "common" / "src" / "lib.rs").read_text(encoding="utf-8")
+    body = source[source.index("macro_rules! reported_features") :]
     body = body[: body.index(".into_iter()")]
     reported = set(re.findall(r'\("([a-z-]+)", cfg!\(feature = "\1"\)\)', body))
     assert len(reported) >= 15, reported
     assert reported == KNOWN_FEATURES
+
+
+def test_features_is_the_shared_list():
+    # Python's features() is the macro every binding calls, so it lists what Node's does.
+    source = (Path(__file__).parent.parent / "src" / "lib.rs").read_text(encoding="utf-8")
+    body = source[source.index("fn features()") :]
+    body = body[: body.index("\n}\n")]
+    assert "grafeo_bindings_common::reported_features!()" in body, body
 
 
 def test_features_are_exported_from_the_package():

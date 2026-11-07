@@ -93,29 +93,8 @@ fn simd_support() -> &'static str {
 ///         raise RuntimeError("this grafeo build has no Cypher support")
 #[pyfunction]
 fn features() -> Vec<&'static str> {
-    [
-        ("gql", cfg!(feature = "gql")),
-        ("cypher", cfg!(feature = "cypher")),
-        ("sparql", cfg!(feature = "sparql")),
-        ("gremlin", cfg!(feature = "gremlin")),
-        ("graphql", cfg!(feature = "graphql")),
-        ("sql-pgq", cfg!(feature = "sql-pgq")),
-        ("algos", cfg!(feature = "algos")),
-        ("vector-index", cfg!(feature = "vector-index")),
-        ("text-index", cfg!(feature = "text-index")),
-        ("hybrid-search", cfg!(feature = "hybrid-search")),
-        ("cdc", cfg!(feature = "cdc")),
-        ("triple-store", cfg!(feature = "triple-store")),
-        ("shacl", cfg!(feature = "shacl")),
-        ("embed", cfg!(feature = "embed")),
-        ("arrow-export", cfg!(feature = "arrow-export")),
-        ("jsonl-import", cfg!(feature = "jsonl-import")),
-        ("parquet-import", cfg!(feature = "parquet-import")),
-        ("metrics", cfg!(feature = "metrics")),
-    ]
-    .into_iter()
-    .filter_map(|(name, enabled)| enabled.then_some(name))
-    .collect()
+    // The list Node.js's `features()` reports too.
+    grafeo_bindings_common::reported_features!()
 }
 
 /// Describes this build, for run metadata and for checking an installed wheel.

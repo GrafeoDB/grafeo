@@ -847,5 +847,6 @@ module.exports.QueryResult = nativeBinding.QueryResult
 module.exports.ResultStream = nativeBinding.ResultStream
 module.exports.JsResultStream = nativeBinding.JsResultStream
 module.exports.Transaction = nativeBinding.Transaction
+module.exports.features = nativeBinding.features
 module.exports.simdSupport = nativeBinding.simdSupport
 module.exports.version = nativeBinding.version

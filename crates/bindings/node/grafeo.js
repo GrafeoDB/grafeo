@@ -48,5 +48,6 @@ module.exports.QueryResult = wrapped.QueryResult
 module.exports.ResultStream = wrapped.ResultStream
 module.exports.JsResultStream = wrapped.JsResultStream
 module.exports.Transaction = wrapped.Transaction
+module.exports.features = wrapped.features
 module.exports.simdSupport = wrapped.simdSupport
 module.exports.version = wrapped.version

@@ -394,6 +394,7 @@ mod sql_pgq;
 mod sql_pgq_call_coverage;
 mod sql_pgq_coverage_extended;
 mod sql_pgq_entity_comparisons;
+mod sql_pgq_far_end_turn_guard;
 mod sql_pgq_label_expressions_and_quantifiers;
 mod sql_pgq_lookups_across_kinds;
 mod sql_pgq_outer_aliases_and_keyword_parameters;

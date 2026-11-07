@@ -4264,7 +4264,8 @@ impl Session {
 
                 // Optimize the plan
                 let active = self.active_store();
-                let optimizer = self.optimizer_for(&active);
+                let optimizer =
+                    self.optimizer_for(&active, crate::query::processor::QueryLanguage::Gql);
                 let plan = optimizer.optimize(logical_plan)?;
 
                 // Cache the optimized plan for future use
@@ -4484,7 +4485,8 @@ impl Session {
             let mut binder = Binder::new();
             let _binding_context = binder.bind(&logical_plan)?;
             let active = self.active_store();
-            let optimizer = self.optimizer_for(&active);
+            let optimizer =
+                self.optimizer_for(&active, crate::query::processor::QueryLanguage::Gql);
             let plan = optimizer.optimize(logical_plan)?;
             self.plan_cache().put_optimized(cache_key, plan.clone());
             plan
@@ -4748,7 +4750,8 @@ impl Session {
 
                 // Optimize the plan
                 let active = self.active_store();
-                let optimizer = self.optimizer_for(&active);
+                let optimizer =
+                    self.optimizer_for(&active, crate::query::processor::QueryLanguage::Cypher);
                 let plan = optimizer.optimize(logical_plan)?;
 
                 // Cache the optimized plan
@@ -4851,7 +4854,8 @@ impl Session {
 
         // Optimize the plan
         let active = self.active_store();
-        let optimizer = self.optimizer_for(&active);
+        let optimizer =
+            self.optimizer_for(&active, crate::query::processor::QueryLanguage::Gremlin);
         let optimized_plan = optimizer.optimize(logical_plan)?;
 
         let writes = self.plan_write_kinds(&optimized_plan.root);
@@ -4933,7 +4937,8 @@ impl Session {
 
         // Optimize the plan
         let active = self.active_store();
-        let optimizer = self.optimizer_for(&active);
+        let optimizer =
+            self.optimizer_for(&active, crate::query::processor::QueryLanguage::Gremlin);
         let optimized_plan = optimizer.optimize(logical_plan)?;
 
         let writes = self.plan_write_kinds(&optimized_plan.root);
@@ -5019,7 +5024,8 @@ impl Session {
         let _binding_context = binder.bind(&logical_plan)?;
 
         let active = self.active_store();
-        let optimizer = self.optimizer_for(&active);
+        let optimizer =
+            self.optimizer_for(&active, crate::query::processor::QueryLanguage::GraphQL);
         let optimized_plan = optimizer.optimize(logical_plan)?;
         let writes = self.plan_write_kinds(&optimized_plan.root);
         let has_mutations = writes.any;
@@ -5094,7 +5100,8 @@ impl Session {
 
         // Optimize the plan
         let active = self.active_store();
-        let optimizer = self.optimizer_for(&active);
+        let optimizer =
+            self.optimizer_for(&active, crate::query::processor::QueryLanguage::GraphQL);
         let optimized_plan = optimizer.optimize(logical_plan)?;
 
         let writes = self.plan_write_kinds(&optimized_plan.root);
@@ -5166,7 +5173,7 @@ impl Session {
             binder::Binder, plan::LogicalOperator, processor::QueryLanguage, translators::sql_pgq,
         };
 
-        #[cfg(feature = "metrics")]
+        // For a PROFILE's total time, and the query metrics.
         let start_time = Instant::now();
 
         // A statement without parameters whose optimized plan is cached
@@ -5228,7 +5235,8 @@ impl Session {
                 let mut binder = Binder::new();
                 let _binding_context = binder.bind(&logical_plan)?;
                 let active = self.statement_store(logical_plan.graph.as_deref())?;
-                let optimizer = self.optimizer_for(&active);
+                let optimizer =
+                    self.optimizer_for(&active, crate::query::processor::QueryLanguage::SqlPgq);
                 let plan = optimizer.optimize(logical_plan)?;
                 self.plan_cache().put_optimized(cache_key, plan.clone());
                 plan
@@ -5237,6 +5245,14 @@ impl Session {
 
         // `GRAPH_TABLE (g ...)` reads the graph g, else the current graph.
         let active = self.statement_store(optimized_plan.graph.as_deref())?;
+        if let Some(answer) = self.explain_or_profile(
+            &optimized_plan,
+            &active,
+            grafeo_common::types::StatementLanguage::SqlPgq,
+            start_time,
+        ) {
+            return answer;
+        }
         let writes = self.plan_write_kinds(&optimized_plan.root);
         let has_mutations = writes.any;
         if has_mutations {
@@ -6774,10 +6790,15 @@ impl Session {
 
     /// An optimizer for this session's queries on `store`.
     #[cfg(lpg_language)]
-    fn optimizer_for(&self, store: &Arc<dyn GraphStore>) -> crate::query::optimizer::Optimizer {
+    fn optimizer_for(
+        &self,
+        store: &Arc<dyn GraphStore>,
+        language: crate::query::processor::QueryLanguage,
+    ) -> crate::query::optimizer::Optimizer {
         crate::query::optimizer::Optimizer::from_graph_store(store.as_ref())
             .with_rules(self.plan_options.rules)
             .with_degree_samples_from(Arc::clone(store))
+            .with_equal_across_kinds(language.equal_across_kinds())
     }
 
     #[cfg(any(feature = "gql", feature = "gremlin"))]

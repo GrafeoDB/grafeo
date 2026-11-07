@@ -2637,6 +2637,16 @@ impl ExpressionPredicate {
             ),
             _ => false,
         };
+        if answers
+            && self.session_context.language == StatementLanguage::SqlPgq
+            && !set
+                .kinds()
+                .within(super::value_utils::ValueKinds::of(&left))
+        {
+            // SQL/PGQ compares the needle with every item, and one of another kind is not
+            // comparable (22G04): the walk finds it and raises.
+            return self.walk_in_list(needle, &left, list, items, chunk, row);
+        }
         if answers {
             Some(set.answer(&left, |item| self.equals(&left, item) == Some(true)))
         } else {
@@ -2703,7 +2713,15 @@ impl ExpressionPredicate {
                     }),
                 _ => OperandKind::of_item(&list_shape, position),
             };
-            // An item of the other kind is not equal to it, in both languages.
+            // SQL/PGQ's `IN` is `= ANY` (ISO/IEC 9075-2 8.4): an item of another kind is not
+            // comparable with the needle (22G04), as for `=`.
+            if self.session_context.language == StatementLanguage::SqlPgq
+                && (needle_kind.apart_from(item_kind)
+                    || super::value_utils::of_two_kinds(left, item))
+            {
+                return self.fail(not_comparable(left, needle_kind, item, item_kind));
+            }
+            // An item of the other kind is not equal to it, in GQL and Cypher.
             if needle_kind.apart_from(item_kind) {
                 continue;
             }

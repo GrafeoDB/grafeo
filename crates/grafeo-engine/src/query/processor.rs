@@ -54,6 +54,20 @@ pub enum QueryLanguage {
 }
 
 impl QueryLanguage {
+    /// What this language's `=` gives two values of two kinds: an error in SQL/PGQ (its
+    /// comparands must be comparable, ISO/IEC 9075-2 8.2), false in the others.
+    #[must_use]
+    pub const fn equal_across_kinds(
+        &self,
+    ) -> grafeo_core::execution::operators::value_utils::EqualAcrossKinds {
+        use grafeo_core::execution::operators::value_utils::EqualAcrossKinds;
+        #[cfg(feature = "sql-pgq")]
+        if matches!(self, Self::SqlPgq) {
+            return EqualAcrossKinds::Raises;
+        }
+        EqualAcrossKinds::False
+    }
+
     /// Returns whether this language targets LPG (vs RDF).
     #[must_use]
     pub const fn is_lpg(&self) -> bool {

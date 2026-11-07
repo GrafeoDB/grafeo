@@ -50,6 +50,7 @@ use crate::query::planner::lpg::seek;
 use grafeo_common::grafeo_debug_span;
 use grafeo_common::utils::error::Result;
 use grafeo_core::execution::operators::Volatility;
+use grafeo_core::execution::operators::value_utils::EqualAcrossKinds;
 use std::collections::{HashMap, HashSet};
 
 /// Information about a join condition for join reordering.
@@ -89,6 +90,9 @@ pub struct Optimizer {
     cyclic_joins: CyclicJoins,
     /// The rules this optimizer applies (see [`PlannerRules`]).
     rules: PlannerRules,
+    /// What the statement's `=` gives two values of two kinds (see
+    /// [`with_equal_across_kinds`](Self::with_equal_across_kinds)).
+    equal_across_kinds: EqualAcrossKinds,
     /// The node properties with a property index: a filter on one of them
     /// pins a node like `id()` does (see `start_at_the_sought_end`).
     indexed_properties: HashSet<String>,
@@ -145,6 +149,7 @@ impl Optimizer {
             card_estimator: CardinalityEstimator::new(),
             cyclic_joins: CyclicJoins::Binary,
             rules: PlannerRules::all(),
+            equal_across_kinds: EqualAcrossKinds::False,
             indexed_properties: HashSet::new(),
             label_indexes: HashMap::new(),
             incoming_edges: IncomingEdges::Kept,
@@ -226,6 +231,7 @@ impl Optimizer {
             card_estimator: estimator,
             cyclic_joins: CyclicJoins::MultiWay,
             rules: PlannerRules::all(),
+            equal_across_kinds: EqualAcrossKinds::False,
             indexed_properties: HashSet::new(),
             label_indexes: HashMap::new(),
             incoming_edges: IncomingEdges::NotKept,
@@ -295,6 +301,7 @@ impl Optimizer {
             card_estimator: estimator.with_hop_degrees(degrees),
             cyclic_joins: CyclicJoins::Binary,
             rules: PlannerRules::all(),
+            equal_across_kinds: EqualAcrossKinds::False,
             indexed_properties: HashSet::new(),
             label_indexes: HashMap::new(),
             incoming_edges: IncomingEdges::Kept,
@@ -319,6 +326,23 @@ impl Optimizer {
             degrees.sample_from(store);
         }
         self
+    }
+
+    /// Plans for a statement whose `=` gives `rule` for two values of two kinds: under
+    /// [`EqualAcrossKinds::Raises`] (SQL/PGQ), every row a filter compares must reach that
+    /// filter, so no rewrite may decide a row by a key read that leaves values of another kind
+    /// out: no hop turns at its far end, and no far end is found by its key first. GQL and
+    /// Cypher plan as before.
+    #[must_use]
+    pub fn with_equal_across_kinds(mut self, rule: EqualAcrossKinds) -> Self {
+        self.equal_across_kinds = rule;
+        self
+    }
+
+    /// Whether a rewrite may decide a row by a key read: not when the statement's `=` raises
+    /// across kinds (see [`with_equal_across_kinds`](Self::with_equal_across_kinds)).
+    fn key_reads_decide_rows(&self) -> bool {
+        self.equal_across_kinds != EqualAcrossKinds::Raises
     }
 
     /// Applies only the rules that `rules` turns on.
@@ -1933,7 +1957,8 @@ impl Optimizer {
         scan: &NodeScanOp,
     ) -> Option<(ExpandDirection, HashSet<String>)> {
         let (source, target) = (&expand.from_variable, &expand.to_variable);
-        if expand.is_variable_length()
+        if !self.key_reads_decide_rows()
+            || expand.is_variable_length()
             || expand.path_alias.is_some()
             || source == target
             || scan.variable != *source

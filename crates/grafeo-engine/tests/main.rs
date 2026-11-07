@@ -206,6 +206,7 @@ mod list_concatenation;
 mod lpg_graph_isolation;
 mod lpg_repeated_variables;
 mod memory_account;
+mod memory_account_against_the_process;
 mod memory_leak_detection;
 mod memory_limit_enforcement;
 mod memory_usage_values;

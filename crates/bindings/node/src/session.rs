@@ -34,9 +34,74 @@ pub struct JsSession {
     /// so a call on the JavaScript thread never waits for a running query; a
     /// statement running when the session closes finishes on its handle.
     session: Arc<Mutex<Option<Arc<grafeo_engine::session::Session>>>>,
-    /// Held for each statement, on the worker thread that runs it: the
-    /// session's statements run one at a time, as on one engine session.
-    statements: Arc<Mutex<()>>,
+    /// The session's statement slot: its statements run one at a time, as on
+    /// one engine session, and none runs while one of its streams is open.
+    statements: Arc<Statements>,
+}
+
+/// Who holds a session's statement slot.
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+enum Slot {
+    #[default]
+    Free,
+    /// A statement, on the worker thread that runs it.
+    Statement,
+    /// A stream, from its open until it is read to the end, closed or dropped.
+    Stream,
+}
+
+/// A session's statement slot (see [`StatementPermit`]).
+#[derive(Default)]
+pub(crate) struct Statements {
+    slot: Mutex<Slot>,
+    freed: parking_lot::Condvar,
+}
+
+impl Statements {
+    /// Takes the slot for a statement: waits for a running statement, and
+    /// fails at once while a stream of the session is open, since that stream
+    /// may never be read on.
+    fn acquire(self: &Arc<Self>) -> Result<StatementPermit> {
+        let mut slot = self.slot.lock();
+        loop {
+            match *slot {
+                Slot::Free => break,
+                Slot::Statement => self.freed.wait(&mut slot),
+                Slot::Stream => {
+                    return Err(NodeGrafeoError::Database(
+                        "a stream of this session is still open: read it to the end or close \
+                         it first"
+                            .into(),
+                    )
+                    .into());
+                }
+            }
+        }
+        *slot = Slot::Statement;
+        Ok(StatementPermit {
+            statements: Arc::clone(self),
+        })
+    }
+}
+
+/// The session's statement slot, held: freed when dropped.
+pub(crate) struct StatementPermit {
+    statements: Arc<Statements>,
+}
+
+impl StatementPermit {
+    /// The permit, held from now on by a stream.
+    fn into_stream(self) -> Self {
+        *self.statements.slot.lock() = Slot::Stream;
+        self
+    }
+}
+
+impl Drop for StatementPermit {
+    fn drop(&mut self) {
+        *self.statements.slot.lock() = Slot::Free;
+        self.statements.freed.notify_all();
+    }
 }
 
 /// The error of a statement on a closed session.
@@ -98,7 +163,7 @@ impl JsSession {
             db,
             identity,
             session: Arc::new(Mutex::new(Some(Arc::new(session)))),
-            statements: Arc::new(Mutex::new(())),
+            statements: Arc::new(Statements::default()),
         })
     }
 
@@ -112,7 +177,7 @@ impl JsSession {
         let session = self.handle()?;
         let statements = Arc::clone(&self.statements);
         let result = tokio::task::spawn_blocking(move || {
-            let _statement = statements.lock();
+            let _permit = statements.acquire()?;
             session
                 .execute_language(&query, language, params)
                 .map_err(|error| napi::Error::from(NodeGrafeoError::from(error)))
@@ -147,7 +212,7 @@ impl JsSession {
         let session = self.handle()?;
         let statements = Arc::clone(&self.statements);
         let result = tokio::task::spawn_blocking(move || {
-            let _statement = statements.lock();
+            let _permit = statements.acquire()?;
             session
                 .execute_language(&query, &language, params)
                 .map_err(|error| napi::Error::from(NodeGrafeoError::from(error)))
@@ -163,17 +228,19 @@ impl JsSession {
     pub async fn execute_stream(&self, query: String) -> Result<crate::stream::JsResultStream> {
         let session = self.handle()?;
         let statements = Arc::clone(&self.statements);
-        let stream = tokio::task::spawn_blocking(move || {
-            let _statement = statements.lock();
-            session
+        let (stream, permit) = tokio::task::spawn_blocking(move || {
+            let permit = statements.acquire()?;
+            let stream = session
                 .execute_streaming_owned(&query)
-                .map_err(|error| napi::Error::from(NodeGrafeoError::from(error)))
+                .map_err(|error| napi::Error::from(NodeGrafeoError::from(error)))?;
+            Ok::<_, napi::Error>((stream, permit.into_stream()))
         })
         .await
         .map_err(|e| napi::Error::from_reason(e.to_string()))??;
-        Ok(crate::stream::JsResultStream::new(
+        Ok(crate::stream::JsResultStream::holding(
             Arc::clone(&self.db),
             stream,
+            permit,
         ))
     }
 

@@ -6,7 +6,8 @@
 //! - `file:///abs/path` and `file://localhost/abs/path` name `/abs/path`; on Windows
 //!   `file:///C:/data/x.csv` names `C:/data/x.csv`. `file:/abs/path` (no authority) names the
 //!   same.
-//! - Any other host is refused: only local files are read.
+//! - Any other host is refused: only local files are read. So is a path that names a network
+//!   share (`file:////server/share`), and a `file:` URL whose path is not absolute.
 //! - `%XX` escapes in the path are decoded (`%20` is a space).
 
 use std::path::PathBuf;
@@ -29,6 +30,22 @@ pub enum FileUrlError {
     /// The path holds a `%` escape that is not two hex digits, or escapes that are not UTF-8.
     #[error("the file URL '{url}' holds an escape that is not a UTF-8 character")]
     InvalidEscape {
+        /// The URL as given.
+        url: String,
+    },
+    /// The path names a network share (`//server/share`, `\\server\share`), which is another
+    /// host however the URL spells it.
+    #[error("the file URL '{url}' names a network path: only local files are read")]
+    NetworkPath {
+        /// The URL as given.
+        url: String,
+    },
+    /// The URL's path is not absolute (`file:data.csv`): a file URL names an absolute path.
+    #[error(
+        "the file URL '{url}' names no absolute path: write file:///path, or give a relative \
+         path without file:"
+    )]
+    NotAbsolute {
         /// The URL as given.
         url: String,
     },
@@ -65,7 +82,19 @@ pub fn local_path(name: &str) -> Result<PathBuf, FileUrlError> {
     let decoded = decode(path).ok_or_else(|| FileUrlError::InvalidEscape {
         url: name.to_string(),
     })?;
-    Ok(PathBuf::from(without_drive_slash(decoded)))
+    // `file:////server/share` and `file://localhost//server/share` leave a path that a
+    // system opens as a share on another host.
+    if decoded.starts_with("//") || decoded.starts_with('\\') || decoded.starts_with("/\\") {
+        return Err(FileUrlError::NetworkPath {
+            url: name.to_string(),
+        });
+    }
+    if !decoded.starts_with('/') && !starts_with_drive(&decoded) {
+        return Err(FileUrlError::NotAbsolute {
+            url: name.to_string(),
+        });
+    }
+    Ok(PathBuf::from(as_local(decoded)))
 }
 
 /// What follows `file:` (the scheme matched without regard to case), `None` for a plain path.
@@ -96,22 +125,28 @@ fn decode(path: &str) -> Option<String> {
     String::from_utf8(out).ok()
 }
 
-/// On Windows, `/C:/x` (a URL path with a drive) as the path `C:/x`; elsewhere unchanged.
-fn without_drive_slash(path: String) -> String {
-    if cfg!(windows) && starts_with_drive_slash(&path) {
-        path[1..].to_string()
+/// On Windows, a URL path with a drive (`/C:/x`, `/C|/x`, `C|/x`) as the path `C:/x`;
+/// elsewhere unchanged.
+fn as_local(path: String) -> String {
+    if !cfg!(windows) {
+        return path;
+    }
+    let drive = path.strip_prefix('/').unwrap_or(&path);
+    if starts_with_drive(drive) {
+        let mut local = String::with_capacity(drive.len());
+        local.push_str(&drive[..1]);
+        local.push(':');
+        local.push_str(&drive[2..]);
+        local
     } else {
         path
     }
 }
 
-/// Whether `path` reads `/X:` or `/X|` for a drive letter `X`.
-fn starts_with_drive_slash(path: &str) -> bool {
-    let bytes = path.as_bytes();
-    bytes.len() >= 3
-        && bytes[0] == b'/'
-        && bytes[1].is_ascii_alphabetic()
-        && (bytes[2] == b':' || bytes[2] == b'|')
+/// Whether `path` reads `X:` or `X|` for a drive letter `X`, or the same after one `/`.
+fn starts_with_drive(path: &str) -> bool {
+    let bytes = path.strip_prefix('/').unwrap_or(path).as_bytes();
+    bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && (bytes[1] == b':' || bytes[1] == b'|')
 }
 
 #[cfg(test)]
@@ -179,5 +214,48 @@ mod tests {
             "/C:/data/people.csv"
         };
         assert_eq!(path("file:///C:/data/people.csv"), expected);
+        let piped = if cfg!(windows) {
+            "C:/data/people.csv"
+        } else {
+            "/C|/data/people.csv"
+        };
+        assert_eq!(
+            path("file:///C|/data/people.csv"),
+            piped,
+            "the old `|` drive form"
+        );
+    }
+
+    #[test]
+    fn a_network_path_is_refused_however_the_url_spells_it() {
+        for url in [
+            "file:////server/share/people.csv",
+            "file://localhost//server/share/people.csv",
+            "file:///%5C%5Cserver%5Cshare%5Cpeople.csv",
+        ] {
+            assert!(
+                matches!(local_path(url), Err(FileUrlError::NetworkPath { .. })),
+                "{url}: {:?}",
+                local_path(url)
+            );
+        }
+    }
+
+    #[test]
+    fn a_url_without_an_absolute_path_is_refused() {
+        for url in [
+            "file:people.csv",
+            "file:data/people.csv",
+            "file://localhost",
+        ] {
+            assert!(
+                matches!(local_path(url), Err(FileUrlError::NotAbsolute { .. })),
+                "{url}: {:?}",
+                local_path(url)
+            );
+        }
+        // A drive is absolute on Windows, in either spelling.
+        assert!(local_path("file:C:/data/people.csv").is_ok());
+        assert!(local_path("file:C|/data/people.csv").is_ok());
     }
 }

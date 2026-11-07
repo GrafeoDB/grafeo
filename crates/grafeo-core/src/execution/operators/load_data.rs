@@ -361,8 +361,15 @@ impl Operator for LoadDataOperator {
 /// The local file `path` names: a path as given, or a `file:` URL's (RFC 8089, see
 /// [`grafeo_common::utils::file_url`]).
 fn local_file(path: &str) -> Result<std::path::PathBuf, OperatorError> {
-    grafeo_common::utils::file_url::local_path(path)
-        .map_err(|error| OperatorError::Execution(error.to_string()))
+    use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind};
+
+    // An invalid parameter value (22023) naming the path, as the load procedures report it.
+    grafeo_common::utils::file_url::local_path(path).map_err(|error| {
+        OperatorError::Wrapped(Box::new(Error::from(QueryError::new(
+            QueryErrorKind::InvalidParameterValue,
+            format!("the path names no local file: {error}"),
+        ))))
+    })
 }
 
 /// Returns a human-readable format name.

@@ -59,6 +59,9 @@ pub struct JsResultStream {
     /// Where the statement raises its warnings, read without the iterator's
     /// lock.
     warnings: Arc<grafeo_common::utils::warning::WarningSink>,
+    /// A session stream's hold on its session's statement slot, let go of
+    /// when the stream is read to the end or closed (or dropped).
+    permit: Arc<Mutex<Option<crate::session::StatementPermit>>>,
 }
 
 impl JsResultStream {
@@ -70,7 +73,20 @@ impl JsResultStream {
             columns,
             iter: Arc::new(Mutex::new(Some(stream.into_row_iter()))),
             warnings,
+            permit: Arc::new(Mutex::new(None)),
         }
+    }
+
+    /// A stream of a session, holding the session's statement slot until it
+    /// is read to the end or closed.
+    pub(crate) fn holding(
+        database: Arc<RwLock<GrafeoDB>>,
+        stream: OwnedResultStream,
+        permit: crate::session::StatementPermit,
+    ) -> Self {
+        let stream = Self::new(database, stream);
+        *stream.permit.lock() = Some(permit);
+        stream
     }
 }
 
@@ -106,6 +122,7 @@ impl JsResultStream {
     pub async fn next(&self) -> Result<Option<JsonWithTerms>> {
         let iter = Arc::clone(&self.iter);
         let columns = Arc::clone(&self.columns);
+        let permit = Arc::clone(&self.permit);
 
         tokio::task::spawn_blocking(move || -> Result<Option<JsonWithTerms>> {
             let mut guard = iter.lock();
@@ -123,10 +140,12 @@ impl JsResultStream {
                 }
                 Some(Err(err)) => {
                     *guard = None;
+                    drop(permit.lock().take());
                     Err(NodeGrafeoError::from(err).into())
                 }
                 None => {
                     *guard = None;
+                    drop(permit.lock().take());
                     Ok(None)
                 }
             }
@@ -145,8 +164,10 @@ impl JsResultStream {
     #[napi]
     pub async fn close(&self) -> Result<()> {
         let iter = Arc::clone(&self.iter);
+        let permit = Arc::clone(&self.permit);
         tokio::task::spawn_blocking(move || {
             *iter.lock() = None;
+            drop(permit.lock().take());
         })
         .await
         .map_err(|e| napi::Error::from_reason(e.to_string()))

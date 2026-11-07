@@ -22,7 +22,7 @@ use grafeo_common::types::{LogicalType, Value};
 use grafeo_common::utils::error::{Error, QueryError, Result};
 use grafeo_core::execution::operators::Operator;
 use grafeo_core::execution::{DataChunk, deadline};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use std::sync::Arc;
 
@@ -69,14 +69,23 @@ impl Drop for StreamGuard<'_> {
 /// rollback of the session's transaction waits for this stream too.
 pub(crate) struct OwnedStreamGuard {
     counter: Arc<AtomicUsize>,
+    /// Set when the session ended (dropped) and rolled its transaction back
+    /// under the stream: the stream reads nothing more.
+    session_ended: Arc<AtomicBool>,
 }
 
 impl OwnedStreamGuard {
-    pub(crate) fn new(counter: &Arc<AtomicUsize>) -> Self {
+    pub(crate) fn new(counter: &Arc<AtomicUsize>, session_ended: &Arc<AtomicBool>) -> Self {
         counter.fetch_add(1, Ordering::AcqRel);
         Self {
             counter: Arc::clone(counter),
+            session_ended: Arc::clone(session_ended),
         }
+    }
+
+    /// Whether the session that opened the stream ended.
+    fn session_ended(&self) -> bool {
+        self.session_ended.load(Ordering::Acquire)
     }
 }
 
@@ -369,6 +378,21 @@ impl OwnedResultStream {
     pub fn next_chunk(&mut self) -> Result<Option<DataChunk>> {
         if self.exhausted {
             return Ok(None);
+        }
+        if self
+            ._guard
+            .as_ref()
+            .is_some_and(OwnedStreamGuard::session_ended)
+        {
+            self.exhausted = true;
+            self._guard = None;
+            return Err(Error::Transaction(
+                grafeo_common::utils::error::TransactionError::InvalidState(
+                    "the session that opened this stream ended, and its transaction was rolled \
+                     back: the stream reads no more"
+                        .to_string(),
+                ),
+            ));
         }
         check_deadline(self.deadline)?;
         // The operators check the deadline in their own loops too.

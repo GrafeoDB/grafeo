@@ -529,6 +529,9 @@ pub struct Session {
     /// snapshots are not invalidated. Shared with the owned streams, which
     /// outlive the borrow of the session.
     active_streams: Arc<AtomicUsize>,
+    /// Set when the session is dropped: an owned stream still open then
+    /// fails on its next pull, as the drop rolled its transaction back.
+    ended: Arc<std::sync::atomic::AtomicBool>,
     /// Shared metrics registry (populated when the `metrics` feature is enabled).
     #[cfg(feature = "metrics")]
     pub(crate) metrics: Option<Arc<crate::metrics::MetricsRegistry>>,
@@ -620,6 +623,7 @@ impl Session {
             transaction_statements: TransactionStatements::Allowed,
             changes: parking_lot::Mutex::new(None),
             active_streams: Arc::new(AtomicUsize::new(0)),
+            ended: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             #[cfg(feature = "metrics")]
             metrics: None,
             #[cfg(feature = "metrics")]
@@ -806,6 +810,7 @@ impl Session {
             transaction_statements: TransactionStatements::Allowed,
             changes: parking_lot::Mutex::new(None),
             active_streams: Arc::new(AtomicUsize::new(0)),
+            ended: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             #[cfg(feature = "metrics")]
             metrics: None,
             #[cfg(feature = "metrics")]
@@ -4395,7 +4400,10 @@ impl Session {
         use crate::query::executor::stream::{OwnedResultStream, OwnedStreamGuard};
 
         let plan = self.build_streaming_plan(query)?;
-        OwnedResultStream::new(plan, Some(OwnedStreamGuard::new(&self.active_streams)))
+        OwnedResultStream::new(
+            plan,
+            Some(OwnedStreamGuard::new(&self.active_streams, &self.ended)),
+        )
     }
 
     /// Builds a pull-based physical pipeline for streaming, returning the
@@ -5822,8 +5830,15 @@ impl Session {
 
     /// Core rollback logic, usable from both `&mut self` and `&self` paths.
     fn rollback_inner(&self) -> Result<()> {
-        let _span = grafeo_debug_span!("grafeo::tx::rollback");
         self.check_no_active_streams("rollback")?;
+        self.rollback_regardless_of_streams()
+    }
+
+    /// [`rollback_inner`](Self::rollback_inner) without the open-stream
+    /// check: for the session's drop, after which an open owned stream fails
+    /// on its next pull.
+    fn rollback_regardless_of_streams(&self) -> Result<()> {
+        let _span = grafeo_debug_span!("grafeo::tx::rollback");
         // Nested transaction: rollback to the auto-savepoint.
         {
             let mut depth = self.transaction_nesting_depth.lock();
@@ -7845,8 +7860,14 @@ impl Drop for Session {
     fn drop(&mut self) {
         // Auto-rollback any active transaction to prevent leaked MVCC state,
         // dangling write locks, and uncommitted versions lingering in the store.
-        if self.in_transaction() {
-            let _ = self.rollback_inner();
+        // An owned stream still open reads the transaction no more: it fails
+        // on its next pull, so the rollback goes ahead under it. A nested
+        // transaction rolls back level by level, so every level goes.
+        self.ended.store(true, std::sync::atomic::Ordering::Release);
+        while self.in_transaction() {
+            if self.rollback_regardless_of_streams().is_err() {
+                break;
+            }
         }
 
         #[cfg(feature = "metrics")]

@@ -466,3 +466,62 @@ fn an_open_stream_holds_off_the_transactions_end() {
     assert_eq!(rows.len(), 5);
     assert_eq!(session.execute(READ).unwrap().rows().len(), 5);
 }
+
+/// A session dropped under an open owned stream ends: its transaction, every nested level
+/// included, rolls back (a new session sees none of its writes, and the write it held no longer
+/// conflicts), and the stream's next pull fails with the ended-session error; dropping the
+/// stream afterwards is fine.
+#[cfg(feature = "gql")]
+#[test]
+fn dropping_the_session_under_an_open_owned_stream_rolls_its_transaction_back() {
+    const READ: &str = "MATCH (p:Person) RETURN p.name";
+    for levels in [1, 2] {
+        let what = format!("{levels} transaction level(s)");
+        let db = GrafeoDB::new_in_memory();
+        seed_people(&db);
+        let mut session = db.session();
+        for _ in 0..levels {
+            session.begin_transaction().unwrap();
+        }
+        let mut stream = session.execute_streaming_owned(READ).unwrap();
+        assert!(
+            stream.next_chunk().unwrap().is_some(),
+            "{what}: a first chunk"
+        );
+        session
+            .execute("INSERT (:Person {name: 'Butch'})")
+            .unwrap_or_else(|error| panic!("{what}: the insert: {error}"));
+        session
+            .execute("MATCH (p:Person {name: 'Alix'}) SET p.age = 1")
+            .unwrap_or_else(|error| panic!("{what}: the update: {error}"));
+        drop(session);
+
+        let butch = db
+            .session()
+            .execute("MATCH (p:Person {name: 'Butch'}) RETURN p")
+            .unwrap()
+            .rows()
+            .len();
+        assert_eq!(
+            butch, 0,
+            "{what}: the dropped session's insert is rolled back"
+        );
+        db.session()
+            .execute("MATCH (p:Person {name: 'Alix'}) SET p.age = 2")
+            .unwrap_or_else(|error| {
+                panic!("{what}: the dropped session's write on Alix still conflicts: {error}")
+            });
+        db.gc();
+
+        let error = stream
+            .next_chunk()
+            .expect_err("the stream of an ended session reads no more");
+        assert!(
+            error
+                .to_string()
+                .contains("the session that opened this stream ended"),
+            "{what}: {error}"
+        );
+        drop(stream);
+    }
+}

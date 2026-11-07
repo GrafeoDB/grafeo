@@ -772,8 +772,9 @@ export declare class Session {
    */
   beginTransaction(isolationLevel?: string | undefined | null): Transaction
   /**
-   * Close the session: its statements fail from now on; the database and other sessions are
-   * unaffected. Closing a closed session does nothing.
+   * Close the session: statements called from now on fail; one already called finishes. The
+   * database and other sessions are unaffected. Closing a closed session does nothing, and
+   * closing never waits for a running statement.
    */
   close(): void
   /** Execute a Cypher statement on the session. */

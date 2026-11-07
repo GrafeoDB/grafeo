@@ -61,6 +61,7 @@ impl Session {
             commit_counter: cfg.commit_counter,
             gc_interval: cfg.gc_interval,
             active_streams: Arc::new(AtomicUsize::new(0)),
+            ended: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             #[cfg(feature = "wal")]
             wal: None,
             #[cfg(feature = "cdc")]

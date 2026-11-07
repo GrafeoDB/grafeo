@@ -12,7 +12,7 @@ Grafeo manages memory through a unified buffer manager, arena allocators for que
 
 ## Buffer Manager
 
-The buffer manager controls a single memory budget shared across all operations. By default it claims 75% of system RAM (falling back to 1 GB if detection fails).
+The buffer manager controls a single memory budget shared across all operations. By default it claims 75% of the memory the process may use: the smaller of the machine's memory and any limit set on the process from outside (a cgroup level on Linux, at the process's own cgroup or any parent; a job object on Windows). When neither can be read the figure is 1 GiB, a 768 MiB budget, and the open logs a warning. In the browser (WebAssembly) the figure is a fixed 1 GiB by design, a 768 MiB budget, with no warning: a tab's real ceiling depends on the browser and the device. `Config::with_memory_fraction` takes another share of the same figure, detected at each open and never stored in the file. `Config::with_memory_limit` sets bytes: a database file stores the limit given when it is created, or later through `set_stored_config`; a limit given at a later open applies to that open only.
 
 Memory is tracked across four regions that share the unified budget:
 

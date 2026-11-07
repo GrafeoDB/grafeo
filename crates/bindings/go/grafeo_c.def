@@ -71,6 +71,7 @@ grafeo_free_graph
 grafeo_free_node
 grafeo_free_node_ids
 grafeo_free_result
+grafeo_free_session
 grafeo_free_string
 grafeo_free_transaction
 grafeo_free_vector_results
@@ -119,6 +120,7 @@ grafeo_open_read_only
 grafeo_open_single_file
 grafeo_open_with_history
 grafeo_rebuild_vector_index
+grafeo_release_backup_cursor
 grafeo_remove_edge_property
 grafeo_remove_node_label
 grafeo_remove_node_property
@@ -138,8 +140,19 @@ grafeo_result_nodes_json
 grafeo_result_properties_set
 grafeo_result_row_count
 grafeo_result_rows_scanned
+grafeo_result_warning_code
+grafeo_result_warning_count
+grafeo_result_warning_kind
+grafeo_result_warning_message
 grafeo_rollback
 grafeo_save
+grafeo_session_begin_transaction
+grafeo_session_close
+grafeo_session_execute
+grafeo_session_execute_language
+grafeo_session_execute_with_params
+grafeo_session_open
+grafeo_session_stream_open
 grafeo_set_cdc_enabled
 grafeo_set_checkpoint_triggers
 grafeo_set_edge_property
@@ -149,6 +162,10 @@ grafeo_stream_columns_json
 grafeo_stream_free
 grafeo_stream_next_row_json
 grafeo_stream_open
+grafeo_stream_warning_code
+grafeo_stream_warning_count
+grafeo_stream_warning_kind
+grafeo_stream_warning_message
 grafeo_transaction_execute
 grafeo_transaction_execute_language
 grafeo_transaction_execute_with_params

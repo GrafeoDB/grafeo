@@ -159,10 +159,19 @@ pub struct AsyncQueryResult {
     column_types: Vec<LogicalType>,
     nodes: Vec<PyNode>,
     edges: Vec<PyEdge>,
+    warnings: Vec<grafeo_bindings_common::warning::Warning>,
 }
 
 #[pymethods]
 impl AsyncQueryResult {
+    /// The warnings the statement raised, ordered by code (see
+    /// `QueryResult.warnings`); each was also raised through `warnings.warn`
+    /// when the coroutine finished.
+    #[getter]
+    fn warnings(&self) -> Vec<crate::warning::PyQueryWarning> {
+        crate::warning::to_py(&self.warnings)
+    }
+
     /// Get all nodes from the result.
     fn nodes(&self) -> Vec<PyNode> {
         self.nodes.clone()
@@ -319,6 +328,11 @@ pub struct PyGrafeoDB {
 
 impl PyGrafeoDB {
     /// Converts an optional Python dict of property filters to a Rust HashMap.
+    #[cfg(any(
+        feature = "vector-index",
+        feature = "text-index",
+        feature = "hybrid-search"
+    ))]
     fn convert_filters(
         filters: Option<&Bound<'_, pyo3::types::PyDict>>,
     ) -> PyResult<Option<HashMap<String, Value>>> {
@@ -416,13 +430,14 @@ impl PyGrafeoDB {
         params: Option<&Bound<'_, pyo3::types::PyDict>>,
     ) -> PyResult<PyQueryResult> {
         let params = crate::direct::params(params)?;
-        without_gil(py, || {
+        let result = without_gil(py, || {
             let result = self
                 .inner
                 .read()
                 .execute_language(query, language, params)?;
             Ok(crate::direct::query_result(result))
-        })
+        });
+        crate::direct::surfaced(py, result)
     }
 }
 
@@ -505,6 +520,21 @@ impl PyGrafeoDB {
     ///
     /// query_timeout is how many seconds a query may run before it fails
     /// (30 by default); None or math.inf runs queries without a limit.
+    ///
+    /// wal_retention_limit is how many bytes of WAL a checkpoint keeps at
+    /// most for the next incremental backup (1 GiB by default). Past it,
+    /// the oldest part goes and the next incremental backup fails, asking
+    /// for a full backup. For this open only.
+    ///
+    /// checkpoint_wal_size is how many bytes of WAL past the last checkpoint
+    /// make the database checkpoint by itself, on a background thread: 256
+    /// MiB by default, at least 1 MiB. None turns automatic checkpoints off:
+    /// the WAL then grows until close or wal_checkpoint(). For this open only.
+    ///
+    /// wal_segment_size is the size a WAL file grows to before the log goes
+    /// on in a new one: 64 MiB by default, from 1 MiB to 1 GiB. A checkpoint
+    /// removes whole files and keeps one segment of free disk space for the
+    /// WAL. For this open only.
     #[new]
     #[pyo3(signature = (
         path=None,
@@ -514,7 +544,10 @@ impl PyGrafeoDB {
         shuffle_unordered=false,
         wal_salvage=false,
         history_retention=None,
-        query_timeout=default_query_timeout()
+        query_timeout=default_query_timeout(),
+        wal_retention_limit=None,
+        checkpoint_wal_size=Some(grafeo_engine::config::DEFAULT_CHECKPOINT_WAL_SIZE),
+        wal_segment_size=None
     ))]
     #[allow(
         clippy::too_many_arguments,
@@ -528,6 +561,9 @@ impl PyGrafeoDB {
         wal_salvage: bool,
         history_retention: Option<&Bound<'_, PyAny>>,
         query_timeout: Option<f64>,
+        wal_retention_limit: Option<u64>,
+        checkpoint_wal_size: Option<u64>,
+        wal_segment_size: Option<u64>,
         py: Python<'_>,
     ) -> PyResult<Self> {
         let mut config = if let Some(p) = path {
@@ -545,6 +581,16 @@ impl PyGrafeoDB {
         if let Some(retention) = history_retention {
             config =
                 config.with_history_retention(crate::time_travel::history_retention(retention)?);
+        }
+        if let Some(bytes) = wal_retention_limit {
+            config = config.with_wal_retention_limit(bytes);
+        }
+        config = match checkpoint_wal_size {
+            Some(bytes) => config.with_checkpoint_wal_size(bytes),
+            None => config.without_checkpoint_wal_size(),
+        };
+        if let Some(bytes) = wal_segment_size {
+            config = config.with_wal_segment_size(bytes);
         }
         config = match query_timeout.map(|seconds| timeout_seconds(seconds, "query_timeout")) {
             Some(Some(timeout)) => config.with_query_timeout(timeout?),
@@ -656,13 +702,14 @@ impl PyGrafeoDB {
         };
         let timeout = timeout_seconds(seconds, "timeout").transpose()?;
         let params = crate::direct::params(params)?;
-        without_gil(py, || {
+        let result = without_gil(py, || {
             let result = self
                 .inner
                 .read()
                 .execute_language_with_timeout(query, "gql", params, timeout)?;
             Ok(crate::direct::query_result(result))
-        })
+        });
+        crate::direct::surfaced(py, result)
     }
 
     /// Runs a read-only GQL query and returns a lazy iterator.
@@ -689,10 +736,9 @@ impl PyGrafeoDB {
         // Sync graph/schema state is not needed: execute_streaming rejects the
         // session commands that would change them.
         let stream = self.released(py, |db| Ok(db.execute_streaming(query)?))?;
-        Ok(crate::stream::PyResultStream::new(
-            Arc::clone(&self.inner),
-            stream,
-        ))
+        let mut stream = crate::stream::PyResultStream::new(Arc::clone(&self.inner), stream);
+        stream.warn_new(py)?;
+        Ok(stream)
     }
 
     /// Execute a GQL query at a specific historical epoch.
@@ -712,14 +758,15 @@ impl PyGrafeoDB {
         py: Python<'_>,
     ) -> PyResult<PyQueryResult> {
         let params = crate::direct::params(params)?;
-        self.released(py, |db| {
+        let result = self.released(py, |db| {
             let result = db.session().execute_at_epoch_with_params(
                 query,
                 grafeo_common::types::EpochId::new(epoch),
                 params,
             )?;
             Ok(crate::direct::query_result(result))
-        })
+        });
+        crate::direct::surfaced(py, result)
     }
 
     /// A read-only view of the database as it was at `point`: an `int`
@@ -761,13 +808,14 @@ impl PyGrafeoDB {
     ) -> PyResult<PyQueryResult> {
         let point = crate::time_travel::time_point(point)?;
         let params = crate::direct::params(params)?;
-        self.released(py, |db| {
+        let result = self.released(py, |db| {
             let epoch = db.epoch_as_of(point)?;
             let result = db
                 .session()
                 .execute_at_epoch_with_params(query, epoch, params)?;
             Ok(crate::direct::query_result(result))
-        })
+        });
+        crate::direct::surfaced(py, result)
     }
 
     /// The epoch a read as of `point` reads at (see `as_of`): the epoch
@@ -870,12 +918,15 @@ impl PyGrafeoDB {
             );
             let columns = std::mem::take(&mut result.columns);
             let column_types = std::mem::take(&mut result.column_types);
+            let warnings = grafeo_bindings_common::warning::of_result(&result);
+            Python::attach(|py| crate::warning::raise(py, &warnings))?;
             Ok(AsyncQueryResult {
                 columns,
                 rows: result.into_rows(),
                 column_types,
                 nodes,
                 edges,
+                warnings,
             })
         })
     }
@@ -1700,6 +1751,9 @@ impl PyGrafeoDB {
     ///
     /// Example:
     ///     removed = db.drop_vector_index("Doc", "embedding")
+    ///
+    /// Needs the `vector-index` feature (in the default and `full` builds).
+    #[cfg(feature = "vector-index")]
     fn drop_vector_index(&self, label: &str, property: &str) -> PyResult<bool> {
         let db = self.inner.read();
         Ok(db
@@ -1727,6 +1781,9 @@ impl PyGrafeoDB {
     ///
     /// Example:
     ///     db.rebuild_vector_index("Doc", "embedding")
+    ///
+    /// Needs the `vector-index` feature (in the default and `full` builds).
+    #[cfg(feature = "vector-index")]
     fn rebuild_vector_index(&self, label: &str, property: &str, py: Python<'_>) -> PyResult<()> {
         self.released(py, |db| Ok(db.rebuild_vector_index(label, property)?))
     }
@@ -1755,6 +1812,9 @@ impl PyGrafeoDB {
     ///
     ///     # With property filters (only search among user_id=42 nodes):
     ///     results = db.vector_search("Doc", "embedding", query, k=10, filters={"user_id": 42})
+    ///
+    /// Needs the `vector-index` feature (in the default and `full` builds).
+    #[cfg(feature = "vector-index")]
     #[pyo3(signature = (label, property, query, k, ef=None, filters=None))]
     fn vector_search(
         &self,
@@ -2218,6 +2278,9 @@ impl PyGrafeoDB {
     ///
     /// Example:
     ///     results = db.batch_vector_search("Doc", "embedding", [[1.0, 0.0], [0.0, 1.0]], k=5)
+    ///
+    /// Needs the `vector-index` feature (in the default and `full` builds).
+    #[cfg(feature = "vector-index")]
     #[pyo3(signature = (label, property, queries, k, ef=None, filters=None))]
     fn batch_vector_search(
         &self,
@@ -2272,6 +2335,9 @@ impl PyGrafeoDB {
     ///     results = db.mmr_search("Doc", "embedding", [1.0, 0.0, 0.0], k=4, lambda_mult=0.5)
     ///     for node_id, distance in results:
     ///         print(f"Node {node_id}: distance={distance:.4f}")
+    ///
+    /// Needs the `vector-index` feature (in the default and `full` builds).
+    #[cfg(feature = "vector-index")]
     #[pyo3(signature = (label, property, query, k, fetch_k=None, lambda_mult=None, ef=None, filters=None))]
     #[allow(clippy::too_many_arguments)]
     fn mmr_search(
@@ -2709,6 +2775,25 @@ impl PyGrafeoDB {
         let level_str = extract_isolation_level(isolation_level)?;
         let session = self.inner.read().session();
         PyTransaction::begin(self.inner.clone(), session, level_str.as_deref())
+    }
+
+    /// Open a session whose limits bind every statement run through it: its
+    /// `execute` methods, its transactions and its lazy results.
+    ///
+    /// `read_only=True` refuses writes. `external_access=False` refuses every
+    /// statement that reads or writes outside the database (`LOAD DATA`,
+    /// `LOAD CSV`, the load procedures, SPARQL `LOAD`) before any file is
+    /// opened, with a `GrafeoError` of GQLSTATUS class 42 that names external
+    /// access. The two are independent: `read_only=True` keeps file access
+    /// unless `external_access=False` is passed too. With the defaults the
+    /// session runs as `db.execute` does.
+    ///
+    /// Example:
+    ///     with db.session(read_only=True, external_access=False) as session:
+    ///         session.execute("MATCH (p:Person) RETURN p.name")
+    #[pyo3(signature = (*, read_only=false, external_access=true))]
+    fn session(&self, read_only: bool, external_access: bool) -> crate::session::PySession {
+        crate::session::PySession::open(Arc::clone(&self.inner), read_only, external_access)
     }
 
     /// Begin a transaction with an explicit CDC override.
@@ -3165,7 +3250,8 @@ impl PyGrafeoDB {
     /// Sets when the database checkpoints by itself: every
     /// `interval_secs` seconds, and once the WAL holds `wal_bytes` bytes
     /// since the last checkpoint. Leave both out to turn automatic
-    /// checkpoints off (the default). For this open only.
+    /// checkpoints off. For this open only.
+    /// A file database opens with a WAL size of 256 MiB (at least 1 MiB) and no interval.
     ///
     /// Raises for a database in memory or opened read-only, which never
     /// checkpoint, and for a zero value.
@@ -3251,6 +3337,9 @@ impl PyGrafeoDB {
     ///     db = GrafeoDB()  # in-memory
     ///     db.create_node(["Person"], {"name": "Alix"})
     ///     db.save("./mydb")  # save to file
+    ///
+    /// Needs the `storage` feature (in the default and `full` builds).
+    #[cfg(feature = "storage")]
     fn save(&self, path: String, py: Python<'_>) -> PyResult<()> {
         self.released(py, |db| Ok(db.save(path)?))
     }
@@ -3264,6 +3353,9 @@ impl PyGrafeoDB {
     /// Example:
     ///     db = GrafeoDB("./mydb.grafeo")
     ///     db.backup_full("./backups/mydb")
+    ///
+    /// Needs the `storage` feature (in the default and `full` builds).
+    #[cfg(feature = "storage")]
     fn backup_full(&self, backup_dir: String, py: Python<'_>) -> PyResult<()> {
         self.released(py, |db| {
             db.backup_full(std::path::Path::new(&backup_dir))?;
@@ -3277,11 +3369,30 @@ impl PyGrafeoDB {
     ///
     /// Example:
     ///     db.backup_incremental("./backups/mydb")
+    ///
+    /// Needs the `storage` feature (in the default and `full` builds).
+    #[cfg(feature = "storage")]
     fn backup_incremental(&self, backup_dir: String, py: Python<'_>) -> PyResult<()> {
         self.released(py, |db| {
             db.backup_incremental(std::path::Path::new(&backup_dir))?;
             Ok(())
         })
+    }
+
+    /// Releases the backup cursor: the next backup must be a full one.
+    ///
+    /// After a full backup, checkpoints keep the WAL the next incremental
+    /// backup copies (up to wal_retention_limit). When you stop taking
+    /// incremental backups, release the cursor so checkpoints keep only
+    /// what a reopen needs. Returns whether there was a cursor to release.
+    ///
+    /// Example:
+    ///     db.release_backup_cursor()
+    ///
+    /// Needs the `storage` feature (in the default and `full` builds).
+    #[cfg(feature = "storage")]
+    fn release_backup_cursor(&self, py: Python<'_>) -> PyResult<bool> {
+        self.released(py, |db| Ok(db.release_backup_cursor()?))
     }
 
     /// Restores a database to a specific epoch from a backup chain.
@@ -3291,6 +3402,9 @@ impl PyGrafeoDB {
     ///
     /// Example:
     ///     GrafeoDB.restore_to_epoch("./backups/mydb", 500, "./restored.grafeo")
+    ///
+    /// Needs the `storage` feature (in the default and `full` builds).
+    #[cfg(feature = "storage")]
     #[staticmethod]
     fn restore_to_epoch(
         backup_dir: String,
@@ -3332,6 +3446,9 @@ impl PyGrafeoDB {
     /// Example:
     ///     db = GrafeoDB.open_in_memory("./mydb")
     ///     db.create_node(...)  # doesn't affect file
+    ///
+    /// Needs the `storage` feature (in the default and `full` builds).
+    #[cfg(feature = "storage")]
     #[staticmethod]
     fn open_in_memory(path: String, py: Python<'_>) -> PyResult<Self> {
         let db = without_gil(py, move || {
@@ -4291,7 +4408,9 @@ impl PyGrafeoDB {
 }
 
 /// Extract isolation level from either a string or an `IsolationLevel` enum value.
-fn extract_isolation_level(value: Option<&Bound<'_, PyAny>>) -> PyResult<Option<String>> {
+pub(crate) fn extract_isolation_level(
+    value: Option<&Bound<'_, PyAny>>,
+) -> PyResult<Option<String>> {
     match value {
         None => Ok(None),
         Some(v) => {
@@ -4424,9 +4543,10 @@ impl PyTransaction {
                 .map(|session| crate::direct::run(session, language, query, params))
                 .transpose()
         })?;
-        result.ok_or_else(|| {
+        let result = result.ok_or_else(|| {
             pyo3::exceptions::PyRuntimeError::new_err("Transaction session not available")
-        })
+        });
+        crate::direct::surfaced(py, result)
     }
 
     /// Begins a transaction on `session` with an optional isolation level.

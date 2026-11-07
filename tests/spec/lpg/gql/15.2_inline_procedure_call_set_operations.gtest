@@ -1,0 +1,138 @@
+# A CALL { } body combined by INTERSECT or EXCEPT, with or without ALL, passes the combined
+# columns on to each outer row, as UNION and OTHERWISE do (ISO/IEC 39075 14.2 SR 10, 15.2 SR 10
+# and 11). A node or edge the body returns is still that element after the CALL: a property read,
+# a MATCH from it and a MERGE on it see the element itself, and duplicates are decided by
+# identity (14.2 GR 2).
+#
+# Alix knows Gus (since 2020), Gus knows Vincent (since 2021), Alix works at Grafeo OSS (since
+# 2019).
+
+meta:
+  language: gql
+  model: lpg
+  section: "15.2"
+  title: Set operations in inline procedure calls
+  dataset: social_network
+  iso: [GQ03, GQ04, GQ05, GQ06, GQ07]
+
+tests:
+
+  - name: intersect_of_nodes
+    query: "CALL { MATCH (n:Person) RETURN n AS v INTERSECT MATCH (n:Person)-[:KNOWS]->() RETURN n AS v } RETURN v.name AS a"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+
+  - name: except_of_nodes
+    query: "CALL { MATCH (n:Person) RETURN n AS v EXCEPT MATCH (n:Person)-[:KNOWS]->() RETURN n AS v } RETURN v.name AS a"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: intersect_all_of_nodes
+    query: "CALL { MATCH (n:Person)-[]->() RETURN n AS v INTERSECT ALL MATCH (n:Person)-[]->() RETURN n AS v } RETURN v.name AS a"
+    expect:
+      rows:
+        - [Alix]
+        - [Alix]
+        - [Gus]
+
+  - name: except_all_of_nodes
+    query: "CALL { MATCH (n:Person)-[]->() RETURN n AS v EXCEPT ALL MATCH (n:Person)-[:KNOWS]->() RETURN n AS v } RETURN v.name AS a"
+    expect:
+      rows:
+        - [Alix]
+
+  - name: intersect_of_nodes_then_a_match_from_them
+    query: "CALL { MATCH (n:Person) RETURN n AS v INTERSECT MATCH (n:Person)-[:KNOWS]->() RETURN n AS v } MATCH (v)-[:KNOWS]->(b) RETURN v.name AS a, b.name AS b"
+    expect:
+      rows:
+        - [Alix, Gus]
+        - [Gus, Vincent]
+
+  - name: equal_looking_nodes_are_two_rows
+    setup:
+      - "INSERT (:T {k: 1}), (:T {k: 1})"
+    query: "CALL { MATCH (n:T) RETURN n AS v INTERSECT MATCH (n:T) RETURN n AS v } RETURN count(*) AS c"
+    expect:
+      rows:
+        - [2]
+
+  - name: intersect_of_edges
+    query: "CALL { MATCH ()-[r]->() RETURN r AS e INTERSECT MATCH ()-[r:KNOWS]->() RETURN r AS e } RETURN e.since AS s"
+    expect:
+      rows:
+        - [2020]
+        - [2021]
+
+  - name: except_of_edges
+    query: "CALL { MATCH ()-[r]->() RETURN r AS e EXCEPT MATCH ()-[r:WORKS_AT]->() RETURN r AS e } RETURN e.since AS s"
+    expect:
+      rows:
+        - [2020]
+        - [2021]
+
+  - name: intersect_of_scalars_matches_nulls
+    query: "CALL { UNWIND [1, null, 2] AS x RETURN x INTERSECT UNWIND [null, 2] AS x RETURN x } RETURN x"
+    expect:
+      rows:
+        - [null]
+        - [2]
+
+  - name: correlated_intersect_runs_per_outer_row
+    query: "MATCH (a:Person {name: 'Alix'}) CALL (a) { MATCH (a)-[:KNOWS]->(b) RETURN b AS v INTERSECT MATCH (b:Person) RETURN b AS v } RETURN v.name AS a"
+    expect:
+      rows:
+        - [Gus]
+
+  - name: correlated_except_resets_for_each_outer_row
+    query: "MATCH (a:Person) CALL (a) { MATCH (a)-[]->(b) RETURN b AS v EXCEPT MATCH (b:Company) RETURN b AS v } RETURN a.name AS a, v.name AS b"
+    expect:
+      rows:
+        - [Alix, Gus]
+        - [Gus, Vincent]
+
+  - name: otherwise_body_then_a_match
+    query: "CALL { MATCH (n:Person {name: 'Alix'}) RETURN n AS v OTHERWISE MATCH (n:Company) RETURN n AS v } MATCH (v)-[:KNOWS]->(b) RETURN b.name AS b"
+    expect:
+      rows:
+        - [Gus]
+
+  - name: otherwise_body_then_a_merge
+    query: "CALL { MATCH (n:Person {name: 'Alix'}) RETURN n AS v OTHERWISE MATCH (n:Company) RETURN n AS v } MERGE (v)-[:TAGGED]->(:Tag {name: 't'}) RETURN v.name AS a"
+    expect:
+      rows:
+        - [Alix]
+
+  - name: explain_of_an_intersect_body
+    query: "EXPLAIN CALL { MATCH (n:Person) RETURN n AS v INTERSECT MATCH (n:Person)-[:KNOWS]->() RETURN n AS v } RETURN v.name AS a"
+    expect:
+      count: 1
+
+  - name: mixed_operators_apply_left_to_right
+    query: "MATCH (a:Person {name: 'Alix'}) CALL (a) { RETURN 1 AS x UNION ALL RETURN 2 AS x EXCEPT RETURN 3 AS x } RETURN x"
+    expect:
+      rows:
+        - [1]
+        - [2]
+
+  # A CALL without a scope clause receives the outer record, so a WITH inside the body projects
+  # the body's table and keeps v (9.2 SR 12 a); at top level v lives only in the table, so the
+  # same WITH drops it.
+  - name: a_with_inside_an_implicit_call_keeps_the_outer_variable
+    query: "MATCH (v:Person {name: 'Alix'}) CALL { WITH 1 AS k RETURN v.name AS w } RETURN w"
+    expect:
+      rows:
+        - [Alix]
+
+  - name: a_with_inside_an_implicit_call_after_an_otherwise_body
+    query: "CALL { MATCH (n:Person {name: 'Alix'}) RETURN n AS v OTHERWISE MATCH (n:Company) RETURN n AS v } CALL { WITH 1 AS k RETURN v.name AS w } RETURN w"
+    expect:
+      rows:
+        - [Alix]
+
+  - name: a_with_at_top_level_drops_the_variable
+    query: "MATCH (v:Person) WITH 1 AS k RETURN v.name"
+    expect:
+      error: "Undefined variable 'v'"

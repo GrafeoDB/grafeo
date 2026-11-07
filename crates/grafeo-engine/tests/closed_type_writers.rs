@@ -1130,20 +1130,16 @@ fn a_write_in_progress_fails_after_the_type_lost_its_property() {
     writer
         .execute("INSERT (:Held {name: 'Gus', extra: 2})")
         .unwrap();
-    let changed = session.execute("ALTER NODE TYPE Held DROP PROPERTY extra");
-    if changed.is_ok() {
-        assert!(writer.commit().is_err(), "the value is no longer declared");
-        let read = session
-            .execute("MATCH (a:Held {name: 'Gus'}) RETURN a")
-            .unwrap();
-        assert_eq!(read.row_count(), 0);
-    } else {
-        writer.commit().unwrap();
-        let read = session
-            .execute("MATCH (a:Held {name: 'Gus'}) RETURN a.extra")
-            .unwrap();
-        assert_eq!(read.rows()[0][0], Value::Int64(2));
-    }
+    // Decided (#728 review): the change goes through, as the writer's value is not data yet, and the
+    // writer's commit checks its writes against the type as it stands then.
+    session
+        .execute("ALTER NODE TYPE Held DROP PROPERTY extra")
+        .unwrap();
+    assert!(writer.commit().is_err(), "the value is no longer declared");
+    let read = session
+        .execute("MATCH (a:Held {name: 'Gus'}) RETURN a")
+        .unwrap();
+    assert_eq!(read.row_count(), 0);
 }
 
 /// A change inside a transaction that rolls back changes nothing, and one refused there leaves the

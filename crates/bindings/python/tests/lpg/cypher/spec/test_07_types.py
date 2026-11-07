@@ -2,9 +2,10 @@
 
 Covers: Integer, Float, String, Boolean, Null, List, Map, Date, Time,
 DateTime, Duration, Path, Node, Relationship. Spatial types (Point) are
-marked xfail as they are not implemented.
+strict xfails until #534 adds them.
 """
 
+import grafeo
 import pytest
 
 # =============================================================================
@@ -163,15 +164,23 @@ class TestGraphElementTypes:
 
 
 class TestSpatialTypes:
-    """Point types: not implemented."""
+    """Point types: not implemented yet (#534)."""
 
-    @pytest.mark.xfail(reason="Spatial Point type not implemented")
+    @pytest.mark.xfail(
+        strict=True,
+        raises=grafeo.GrafeoError,
+        reason="spec: #534 (point values and distance); issue: #534",
+    )
     def test_point_2d_cartesian(self, db):
         db.create_node(["N"], {"v": 1})
         result = list(db.execute_cypher("MATCH (n:N) RETURN point({x: 1.0, y: 2.0}) AS r"))
         assert result[0]["r"] is not None
 
-    @pytest.mark.xfail(reason="Spatial Point type not implemented")
+    @pytest.mark.xfail(
+        strict=True,
+        raises=grafeo.GrafeoError,
+        reason="spec: #534 (point values and distance); issue: #534",
+    )
     def test_point_wgs84(self, db):
         db.create_node(["N"], {"v": 1})
         result = list(
@@ -179,7 +188,11 @@ class TestSpatialTypes:
         )
         assert result[0]["r"] is not None
 
-    @pytest.mark.xfail(reason="Spatial Point type not implemented")
+    @pytest.mark.xfail(
+        strict=True,
+        raises=grafeo.GrafeoError,
+        reason="spec: #534 (point values and distance); issue: #534",
+    )
     def test_point_3d(self, db):
         db.create_node(["N"], {"v": 1})
         result = list(db.execute_cypher("MATCH (n:N) RETURN point({x: 1.0, y: 2.0, z: 3.0}) AS r"))

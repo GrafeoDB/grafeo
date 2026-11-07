@@ -72,6 +72,29 @@ tests:
     expect:
       empty: true
 
+  # A map is a list of equalities (ISO/IEC 39075 16.3 SR 21 h iii): k = NULL is unknown, so the
+  # null finds no node, Hans (who has no k) included.
+  - name: integers_by_null
+    setup:
+      - "INSERT (:L {name: 'Alix', k: 1}), (:L {name: 'Gus', k: 2}), (:L {name: 'Mia', k: 2}), (:L {name: 'Jules', k: 3}), (:L {name: 'Hans'}), (:M {name: 'Butch', k: 2})"
+    query: "MATCH (n:L {k: NULL}) RETURN n.name"
+    expect:
+      empty: true
+
+  - name: integers_by_null_beside_a_matching_key
+    setup:
+      - "INSERT (:L {name: 'Alix', k: 1}), (:L {name: 'Gus', k: 2}), (:L {name: 'Mia', k: 2}), (:L {name: 'Jules', k: 3}), (:L {name: 'Hans'}), (:M {name: 'Butch', k: 2})"
+    query: "MATCH (n:L {name: 'Hans', k: NULL}) RETURN n.name"
+    expect:
+      empty: true
+
+  - name: integers_by_null_where
+    setup:
+      - "INSERT (:L {name: 'Alix', k: 1}), (:L {name: 'Gus', k: 2}), (:L {name: 'Mia', k: 2}), (:L {name: 'Jules', k: 3}), (:L {name: 'Hans'}), (:M {name: 'Butch', k: 2})"
+    query: "MATCH (n:L) WHERE n.k = NULL RETURN n.name"
+    expect:
+      empty: true
+
   - name: integers_in
     setup:
       - "INSERT (:L {name: 'Alix', k: 1}), (:L {name: 'Gus', k: 2}), (:L {name: 'Mia', k: 2}), (:L {name: 'Jules', k: 3}), (:L {name: 'Hans'}), (:M {name: 'Butch', k: 2})"
@@ -613,22 +636,14 @@ tests:
       - "INSERT (:L {name: 'Alix', k: '42'}), (:L {name: 'Gus', k: '042'}), (:L {name: 'Mia', k: '+42'}), (:L {name: 'Jules', k: '42.0'}), (:L {name: 'Vincent', k: '4.2e1'}), (:L {name: 'Butch', k: ' 42'}), (:L {name: 'Django', k: 'nan'}), (:L {name: 'Hans', k: 'inf'}), (:L {name: 'Shosanna', k: ''}), (:L {name: 'Lucas', k: 'abc'}), (:L {name: 'Marcus', k: '0'}), (:L {name: 'Harm', k: '-0'})"
     query: "MATCH (n:L {k: 42}) RETURN n.name"
     expect:
-      rows:
-        - ["Alix"]
-        - ["Gus"]
-        - ["Mia"]
+      empty: true
 
   - name: a_string_by_a_float
     setup:
       - "INSERT (:L {name: 'Alix', k: '42'}), (:L {name: 'Gus', k: '042'}), (:L {name: 'Mia', k: '+42'}), (:L {name: 'Jules', k: '42.0'}), (:L {name: 'Vincent', k: '4.2e1'}), (:L {name: 'Butch', k: ' 42'}), (:L {name: 'Django', k: 'nan'}), (:L {name: 'Hans', k: 'inf'}), (:L {name: 'Shosanna', k: ''}), (:L {name: 'Lucas', k: 'abc'}), (:L {name: 'Marcus', k: '0'}), (:L {name: 'Harm', k: '-0'})"
     query: "MATCH (n:L {k: 42.0e0}) RETURN n.name"
     expect:
-      rows:
-        - ["Alix"]
-        - ["Gus"]
-        - ["Mia"]
-        - ["Jules"]
-        - ["Vincent"]
+      empty: true
 
   - name: a_string_by_a_string
     setup:
@@ -658,29 +673,21 @@ tests:
       - "INSERT (:L {name: 'Alix', k: '42'}), (:L {name: 'Gus', k: '042'}), (:L {name: 'Mia', k: '+42'}), (:L {name: 'Jules', k: '42.0'}), (:L {name: 'Vincent', k: '4.2e1'}), (:L {name: 'Butch', k: ' 42'}), (:L {name: 'Django', k: 'nan'}), (:L {name: 'Hans', k: 'inf'}), (:L {name: 'Shosanna', k: ''}), (:L {name: 'Lucas', k: 'abc'}), (:L {name: 'Marcus', k: '0'}), (:L {name: 'Harm', k: '-0'})"
     query: "MATCH (n:L) WHERE n.k IN [42, 0] RETURN n.name"
     expect:
-      rows:
-        - ["Alix"]
-        - ["Gus"]
-        - ["Marcus"]
-        - ["Harm"]
-        - ["Mia"]
+      empty: true
 
   - name: a_string_by_zero
     setup:
       - "INSERT (:L {name: 'Alix', k: '42'}), (:L {name: 'Gus', k: '042'}), (:L {name: 'Mia', k: '+42'}), (:L {name: 'Jules', k: '42.0'}), (:L {name: 'Vincent', k: '4.2e1'}), (:L {name: 'Butch', k: ' 42'}), (:L {name: 'Django', k: 'nan'}), (:L {name: 'Hans', k: 'inf'}), (:L {name: 'Shosanna', k: ''}), (:L {name: 'Lucas', k: 'abc'}), (:L {name: 'Marcus', k: '0'}), (:L {name: 'Harm', k: '-0'})"
     query: "MATCH (n:L {k: 0}) RETURN n.name"
     expect:
-      rows:
-        - ["Harm"]
-        - ["Marcus"]
+      empty: true
 
   - name: a_string_by_infinity
     setup:
       - "INSERT (:L {name: 'Alix', k: '42'}), (:L {name: 'Gus', k: '042'}), (:L {name: 'Mia', k: '+42'}), (:L {name: 'Jules', k: '42.0'}), (:L {name: 'Vincent', k: '4.2e1'}), (:L {name: 'Butch', k: ' 42'}), (:L {name: 'Django', k: 'nan'}), (:L {name: 'Hans', k: 'inf'}), (:L {name: 'Shosanna', k: ''}), (:L {name: 'Lucas', k: 'abc'}), (:L {name: 'Marcus', k: '0'}), (:L {name: 'Harm', k: '-0'})"
     query: "MATCH (n:L {k: Infinity}) RETURN n.name"
     expect:
-      rows:
-        - ["Hans"]
+      empty: true
 
   - name: a_string_by_nan
     setup:
@@ -778,10 +785,7 @@ tests:
       - "INSERT (:L {name: 'Alix', k: '42'}), (:L {name: 'Gus', k: '042'}), (:L {name: 'Mia', k: '+42'}), (:L {name: 'Jules', k: '42.0'}), (:L {name: 'Vincent', k: '4.2e1'}), (:L {name: 'Butch', k: ' 42'}), (:L {name: 'Django', k: 'nan'}), (:L {name: 'Hans', k: 'inf'}), (:L {name: 'Shosanna', k: ''}), (:L {name: 'Lucas', k: 'abc'}), (:L {name: 'Marcus', k: '0'}), (:L {name: 'Harm', k: '-0'})"
     query: "MATCH (n:L {k: 42}) RETURN n.name LIMIT 2"
     expect:
-      ordered: true
-      rows:
-        - ["Alix"]
-        - ["Gus"]
+      empty: true
 
   - name: limit_skips_the_first
     setup:
@@ -1030,22 +1034,23 @@ tests:
       - "INSERT (:Few {k: '042'}), (:Few {k: 42}), (:Few {k: '42.0'}), (:Many {k: 42})"
     query: "MATCH (n:Few) WHERE n.k IN [42, 7, 8] RETURN n.k"
     expect:
-      count: 2
+      rows:
+        - [42]
 
-  # A key text ending in another digit, and in the same one.
+  # A number key finds no text, whatever the text spells.
   - name: number_key_over_text_with_another_last_digit
     setup:
       - "INSERT (:T {k: '41'}), (:T {k: '42'}), (:T {k: '042'}), (:T {k: '+42'}), (:T {k: '-42'}), (:T {k: '42 '}), (:T {k: ''}), (:T {k: 'a2'})"
     query: "MATCH (n:T {k: 42}) RETURN n.k"
     expect:
-      count: 3
+      empty: true
 
   - name: negative_key_over_text_with_its_last_digit
     setup:
       - "INSERT (:T {k: '-7'}), (:T {k: '7'}), (:T {k: '-07'}), (:T {k: '-8'})"
     query: "MATCH (n:T {k: -7}) RETURN n.k"
     expect:
-      count: 2
+      empty: true
 
   - name: union_of_a_label_with_no_node
     setup:

@@ -73,6 +73,7 @@ class TestBatchCreateNodesWithProps:
         )
         assert len(ids) == 2
 
+    @pytest.mark.requires("vector-index")
     def test_vector_auto_indexed(self, db):
         """Vectors in batch-created nodes are auto-inserted into matching indexes."""
         db.create_vector_index("Doc", "emb", dimensions=3, metric="cosine")
@@ -139,6 +140,7 @@ class TestPropertyIndexes:
 # =============================================================================
 
 
+@pytest.mark.requires("vector-index")
 class TestVectorSearchOperatorFilters:
     @pytest.fixture
     def memory_db(self, db):

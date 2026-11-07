@@ -230,6 +230,16 @@ def assert_gql_status(exc: Exception, expected_status: str) -> None:
     )
 
 
+def assert_warnings(result, expected_codes: list[str]) -> None:
+    """Assert that the codes of the result's warnings are *expected_codes*, in
+    the result's order (by code)."""
+    actual = [warning.code for warning in result.warnings]
+    assert actual == expected_codes, (
+        f"Warning mismatch: got {actual}, expected {expected_codes} "
+        f"({[warning.message for warning in result.warnings]})"
+    )
+
+
 def assert_columns(result, expected_columns: list[str]) -> None:
     """Assert that result column names match *expected_columns* exactly."""
     actual = list(result.columns)

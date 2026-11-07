@@ -131,6 +131,13 @@ pub(super) struct Adjacency {
     delta_rows: Bitset,
     /// The entries in `delta`.
     delta_len: usize,
+    /// The heap bytes of the lists in `delta`, kept as they change.
+    delta_bytes: usize,
+}
+
+/// The heap bytes of a list of adjacency entries.
+fn list_bytes(list: &Vec<Adjacent>) -> usize {
+    list.capacity() * std::mem::size_of::<Adjacent>()
 }
 
 impl Adjacency {
@@ -223,6 +230,12 @@ impl Adjacency {
     /// Sets the sorted list of `row`, after the rows set before it, as a
     /// load reads them chunk by chunk: rows ascending, each list sorted,
     /// nothing in the delta.
+    /// The heap bytes of the rows' offsets into the sorted lists: the one
+    /// figure of the offsets' size the walk and the account read.
+    fn offsets_bytes(&self) -> usize {
+        self.offsets.capacity() * std::mem::size_of::<usize>()
+    }
+
     pub(super) fn push_sorted(&mut self, row: usize, list: &[Adjacent]) {
         if self.offsets.is_empty() {
             self.offsets.push(0);
@@ -271,7 +284,10 @@ impl Adjacency {
 
     /// Adds an edge to the row's delta.
     pub(super) fn push(&mut self, row: usize, adjacent: Adjacent) {
-        self.delta.entry(row).or_default().push(adjacent);
+        let list = self.delta.entry(row).or_default();
+        let before = list_bytes(list);
+        list.push(adjacent);
+        self.delta_bytes += list_bytes(list) - before;
         self.delta_rows.set(row);
         self.delta_len += 1;
         if self.delta_len > MERGE_MIN.max(self.sorted.len() / 2) {
@@ -287,6 +303,7 @@ impl Adjacency {
             list.remove(index);
             self.delta_len -= 1;
             if list.is_empty() {
+                self.delta_bytes = super::sub_count(self.delta_bytes, list_bytes(list));
                 self.delta.remove(&row);
                 self.delta_rows.clear(row);
             }
@@ -305,6 +322,7 @@ impl Adjacency {
     pub(super) fn clear(&mut self, row: usize) {
         if let Some(list) = self.delta.remove(&row) {
             self.delta_len -= list.len();
+            self.delta_bytes = super::sub_count(self.delta_bytes, list_bytes(&list));
             self.delta_rows.clear(row);
         }
         let sorted: Vec<u64> = self
@@ -358,17 +376,39 @@ impl Adjacency {
         self.delta.clear();
         self.delta_rows = Bitset::default();
         self.delta_len = 0;
+        self.delta_bytes = 0;
     }
 
+    /// The heap bytes it holds: its offsets, sorted lists, removed edges,
+    /// the delta's lists, map and rows. A walk of the delta's lists, for
+    /// the oracle.
     pub(super) fn heap_bytes(&self) -> usize {
-        self.offsets.capacity() * std::mem::size_of::<usize>()
-            + (self.sorted.capacity() + self.delta_len) * std::mem::size_of::<Adjacent>()
+        self.fixed_bytes() + self.delta.values().map(list_bytes).sum::<usize>()
+    }
+
+    /// [`heap_bytes`](Self::heap_bytes) from what it keeps as the delta
+    /// changes: a few loads.
+    pub(super) fn counted_bytes(&self) -> usize {
+        self.fixed_bytes() + self.delta_bytes
+    }
+
+    /// Sets its count to what the delta's lists take: after a load that
+    /// built it without counting.
+    pub(super) fn retally(&mut self) {
+        self.delta_bytes = self.delta.values().map(list_bytes).sum();
+    }
+
+    /// Its heap bytes but the delta's lists.
+    fn fixed_bytes(&self) -> usize {
+        self.offsets_bytes()
+            + self.sorted.capacity() * std::mem::size_of::<Adjacent>()
             + self.removed.capacity() * std::mem::size_of::<u64>()
             // The table's allocation, not its capacity: a removed row's slot
             // may stay a tombstone, which takes capacity depending on where
             // the map's random hash put the row, so two adjacencies that
             // took the same pushes and removes would report different sizes.
             + self.delta.allocation_size()
+            + self.delta_rows.heap_bytes()
     }
 }
 

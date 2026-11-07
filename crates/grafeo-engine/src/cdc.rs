@@ -125,8 +125,11 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
-use grafeo_common::memory::buffer::{MemoryConsumer, MemoryRegion, priorities};
+use grafeo_common::memory::buffer::{
+    BufferManager, GRANT_STEP, MemoryConsumer, MemoryGrant, MemoryRegion, priorities,
+};
 use grafeo_common::types::{EdgeId, EpochId, HlcClock, HlcTimestamp, NodeId, Value};
 use hashbrown::HashMap as HbHashMap;
 use parking_lot::RwLock;
@@ -352,17 +355,47 @@ pub struct CdcLog {
     events: RwLock<HbHashMap<(Option<String>, EntityId), Vec<ChangeEvent>>>,
     clock: Arc<HlcClock>,
     retention: CdcRetentionConfig,
+    /// What [`heap_memory_bytes`](Self::heap_memory_bytes) walks, kept as
+    /// events come and go, under the events' write lock (one writer: a load
+    /// and a store, no read-modify-write).
+    counted: AtomicUsize,
+    /// The events the log holds, kept alike.
+    held_events: AtomicUsize,
+    /// The grant of the counted bytes, once a database attaches its memory.
+    memory: LogMemory,
+}
+
+/// The grant of a CDC log and the manager it comes from.
+#[derive(Default)]
+struct LogMemory {
+    manager: std::sync::OnceLock<Arc<BufferManager>>,
+    grant: parking_lot::Mutex<Option<MemoryGrant>>,
+    /// The grant's size, read without its lock.
+    granted: AtomicUsize,
+}
+
+impl std::fmt::Debug for LogMemory {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LogMemory")
+            .field("granted", &self.granted.load(Ordering::Relaxed))
+            .finish_non_exhaustive()
+    }
+}
+
+/// The bytes an entity's entry takes besides its events: the walk's
+/// overhead per entry.
+const ENTRY_BYTES: usize = std::mem::size_of::<(EntityId, Vec<ChangeEvent>)>() + 8;
+
+/// The bytes the room of `events` takes.
+fn events_bytes(events: &Vec<ChangeEvent>) -> usize {
+    events.capacity() * std::mem::size_of::<ChangeEvent>()
 }
 
 impl CdcLog {
     /// Creates a new empty CDC log with a fresh HLC clock and default retention.
     #[must_use]
     pub fn new() -> Self {
-        Self {
-            events: RwLock::new(HbHashMap::new()),
-            clock: Arc::new(HlcClock::new()),
-            retention: CdcRetentionConfig::default(),
-        }
+        Self::with_retention(CdcRetentionConfig::default())
     }
 
     /// Creates a new CDC log with the given retention config.
@@ -372,6 +405,9 @@ impl CdcLog {
             events: RwLock::new(HbHashMap::new()),
             clock: Arc::new(HlcClock::new()),
             retention,
+            counted: AtomicUsize::new(0),
+            held_events: AtomicUsize::new(0),
+            memory: LogMemory::default(),
         }
     }
 
@@ -385,24 +421,115 @@ impl CdcLog {
         &self.clock
     }
 
+    /// Takes the grant of the log's bytes from `manager` from now on. A log
+    /// keeps the first manager it gets.
+    pub fn attach_memory(&self, manager: Arc<BufferManager>) {
+        if self.memory.manager.set(manager).is_ok() {
+            self.settle();
+        }
+    }
+
+    /// Brings the grant to the counted bytes, forced (a commit, which must
+    /// not fail, records the events): two loads and a compare while it is
+    /// within two steps above them.
+    fn settle(&self) {
+        let Some(manager) = self.memory.manager.get() else {
+            return;
+        };
+        let counted = self.counted.load(Ordering::Relaxed);
+        let granted = self.memory.granted.load(Ordering::Relaxed);
+        if counted <= granted && granted - counted < 2 * GRANT_STEP {
+            return;
+        }
+        let mut grant = self.memory.grant.lock();
+        manager.settle_forced(&mut grant, MemoryRegion::ExecutionBuffers, counted);
+        self.memory.granted.store(
+            grant.as_ref().map_or(0, MemoryGrant::size),
+            Ordering::Relaxed,
+        );
+    }
+
+    /// Pushes `event` under `guard`, counting what it grew.
+    fn push(
+        &self,
+        guard: &mut HbHashMap<(Option<String>, EntityId), Vec<ChangeEvent>>,
+        event: ChangeEvent,
+    ) {
+        let mut grown = 0;
+        let events = match guard.entry((event.graph.clone(), event.entity_id)) {
+            hashbrown::hash_map::Entry::Occupied(entry) => entry.into_mut(),
+            hashbrown::hash_map::Entry::Vacant(entry) => {
+                grown += ENTRY_BYTES;
+                entry.insert(Vec::new())
+            }
+        };
+        let before = events_bytes(events);
+        events.push(event);
+        grown += events_bytes(events) - before;
+        // One writer, under the events' write lock: a load and a store.
+        self.counted.store(
+            self.counted.load(Ordering::Relaxed) + grown,
+            Ordering::Relaxed,
+        );
+        self.held_events.store(
+            self.held_events.load(Ordering::Relaxed) + 1,
+            Ordering::Relaxed,
+        );
+    }
+
     /// Records a change event.
     pub fn record(&self, event: ChangeEvent) {
-        self.events
-            .write()
-            .entry((event.graph.clone(), event.entity_id))
-            .or_default()
-            .push(event);
+        self.push(&mut self.events.write(), event);
+        self.settle();
     }
 
     /// Records a batch of change events with a single write-lock acquisition.
     pub fn record_batch(&self, events: impl IntoIterator<Item = ChangeEvent>) {
-        let mut guard = self.events.write();
-        for event in events {
-            guard
-                .entry((event.graph.clone(), event.entity_id))
-                .or_default()
-                .push(event);
+        {
+            let mut guard = self.events.write();
+            for event in events {
+                self.push(&mut guard, event);
+            }
         }
+        self.settle();
+    }
+
+    /// The events whose count differs from the walk, as the line's name with
+    /// the counted and the walked bytes: empty when the count is right. For
+    /// tests and explicit checks: it walks every entity.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn account_mismatches(&self) -> Vec<(String, usize, usize)> {
+        let (walked, _, events) = self.heap_memory_bytes();
+        let mut mismatches = Vec::new();
+        let counted = self.counted.load(Ordering::Relaxed);
+        if counted != walked {
+            mismatches.push(("bytes".to_string(), counted, walked));
+        }
+        let held = self.held_events.load(Ordering::Relaxed);
+        if held != events {
+            mismatches.push(("events".to_string(), held, events));
+        }
+        mismatches
+    }
+
+    /// The bytes of the log's grant in the buffer manager's execution
+    /// buffers: none before a database attaches its memory.
+    #[must_use]
+    pub fn granted_bytes(&self) -> usize {
+        self.memory.granted.load(Ordering::Relaxed)
+    }
+
+    /// [`heap_memory_bytes`](Self::heap_memory_bytes) as the log counts it,
+    /// without a walk: `(bytes, entities, events)`.
+    #[must_use]
+    pub fn counted_memory_bytes(&self) -> (usize, usize, usize) {
+        let entities = self.events.read().len();
+        (
+            self.counted.load(Ordering::Relaxed),
+            entities,
+            self.held_events.load(Ordering::Relaxed),
+        )
     }
 
     /// Records a node creation.
@@ -691,6 +818,7 @@ impl CdcLog {
             event_count += events.len();
             bytes += entry_overhead + events.capacity() * event_size;
         }
+        debug_assert_eq!(entry_overhead, ENTRY_BYTES);
         (bytes, entity_count, event_count)
     }
 
@@ -699,11 +827,23 @@ impl CdcLog {
     /// Entities whose entire history falls below the threshold are removed
     /// from the map entirely.
     pub fn prune_before(&self, min_epoch: EpochId) {
-        let mut guard = self.events.write();
-        guard.retain(|_, events| {
-            events.retain(|e| e.epoch >= min_epoch);
-            !events.is_empty()
-        });
+        {
+            let mut guard = self.events.write();
+            let (mut bytes, mut held) = (0, 0);
+            guard.retain(|_, events| {
+                events.retain(|e| e.epoch >= min_epoch);
+                let kept = !events.is_empty();
+                if kept {
+                    bytes += ENTRY_BYTES + events_bytes(events);
+                    held += events.len();
+                }
+                kept
+            });
+            // Every entity was visited: counted again with them.
+            self.counted.store(bytes, Ordering::Relaxed);
+            self.held_events.store(held, Ordering::Relaxed);
+        }
+        self.settle();
     }
 
     /// Prunes the oldest events to stay within `max_events`, if configured.
@@ -771,8 +911,9 @@ impl MemoryConsumer for CdcLog {
         "cdc_log"
     }
 
+    /// The bytes the log counts, without a walk.
     fn memory_usage(&self) -> usize {
-        self.approximate_memory_bytes()
+        self.counted.load(Ordering::Relaxed)
     }
 
     fn eviction_priority(&self) -> u8 {
@@ -787,7 +928,7 @@ impl MemoryConsumer for CdcLog {
     }
 
     fn evict(&self, target_bytes: usize) -> usize {
-        let before = self.approximate_memory_bytes();
+        let before = self.counted.load(Ordering::Relaxed);
         if before == 0 {
             return 0;
         }
@@ -813,7 +954,11 @@ impl MemoryConsumer for CdcLog {
         let cutoff = epochs[cutoff_idx];
         self.prune_before(EpochId::new(cutoff.as_u64() + 1));
 
-        before.saturating_sub(self.approximate_memory_bytes())
+        before.saturating_sub(self.counted.load(Ordering::Relaxed))
+    }
+
+    fn can_evict(&self) -> bool {
+        true
     }
 
     fn can_spill(&self) -> bool {

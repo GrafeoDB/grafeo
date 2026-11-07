@@ -51,10 +51,10 @@ pub(crate) enum Applying<'a> {
     /// text indexes it puts are kept in `unbuilt`, built from the data once
     /// the whole WAL is replayed. A snapshot's catalog applies the same way.
     #[cfg_attr(
-        not(feature = "wal"),
+        not(any(feature = "wal", feature = "triple-store")),
         expect(
             dead_code,
-            reason = "only a WAL is replayed, and a build without it has none"
+            reason = "WAL replay and a transaction's RDF graph ops apply this way; neither is built"
         )
     )]
     Replay {
@@ -161,6 +161,14 @@ pub(crate) fn hold(manager: &TransactionManager, writes_too: bool) -> Result<Com
         held
     } else {
         manager.hold_commits_for_change()?
+    };
+    // A standalone change cannot tell here whether it will change anything:
+    // it counts, as the hold is released.
+    #[cfg(feature = "grafeo-file")]
+    let held = {
+        let mut held = held;
+        held.changed(manager);
+        held
     };
     // Tests start a checkpoint or `close()` here, which must wait.
     #[cfg(feature = "testing-statement-injection")]

@@ -1,0 +1,144 @@
+# A set operation inside a CALL { } subquery yields its columns to the statement around it, for
+# INTERSECT and EXCEPT as for UNION and OTHERWISE (ISO/IEC 39075 14.2, 15.2): the subquery's
+# result is the composite query's result. UNION, UNION ALL and OTHERWISE, in GQL and in Cypher,
+# are the controls that already answer.
+#
+# Alix knows Gus knows Vincent, and Mia stands apart.
+
+meta:
+  language: gql
+  model: lpg
+  section: "14.2"
+  title: Set operations in CALL subqueries
+  dataset: empty
+  iso: [GQ03, GQ04, GQ05, GQ06, GQ07]
+
+tests:
+
+  - name: intersect_in_a_call
+    setup:
+      - "INSERT (:P {name: 'Alix'})-[:K]->(:P {name: 'Gus'})-[:K]->(:P {name: 'Vincent'}), (:Q {name: 'Mia'})"
+    query: "CALL { MATCH (n:P) RETURN n.name AS a INTERSECT MATCH (n:P {name: 'Alix'}) RETURN n.name AS a } RETURN a"
+    expect:
+      rows:
+        - [Alix]
+
+  - name: except_in_a_call
+    setup:
+      - "INSERT (:P {name: 'Alix'})-[:K]->(:P {name: 'Gus'})-[:K]->(:P {name: 'Vincent'}), (:Q {name: 'Mia'})"
+    query: "CALL { MATCH (n:P) RETURN n.name AS a EXCEPT MATCH (n:P {name: 'Alix'}) RETURN n.name AS a } RETURN a ORDER BY a"
+    expect:
+      ordered: true
+      rows:
+        - [Gus]
+        - [Vincent]
+
+  - name: intersect_all_in_a_call
+    setup:
+      - "INSERT (:P {name: 'Alix'})-[:K]->(:P {name: 'Gus'})-[:K]->(:P {name: 'Vincent'}), (:Q {name: 'Mia'})"
+    query: "CALL { MATCH (n:P) RETURN n.name AS a INTERSECT ALL MATCH (n:P {name: 'Alix'}) RETURN n.name AS a } RETURN a"
+    expect:
+      rows:
+        - [Alix]
+
+  - name: except_all_in_a_call
+    setup:
+      - "INSERT (:P {name: 'Alix'})-[:K]->(:P {name: 'Gus'})-[:K]->(:P {name: 'Vincent'}), (:Q {name: 'Mia'})"
+    query: "CALL { MATCH (n:P) RETURN n.name AS a EXCEPT ALL MATCH (n:P {name: 'Alix'}) RETURN n.name AS a } RETURN a ORDER BY a"
+    expect:
+      ordered: true
+      rows:
+        - [Gus]
+        - [Vincent]
+
+  - name: intersect_distinct_in_a_call
+    setup:
+      - "INSERT (:P {name: 'Alix'})-[:K]->(:P {name: 'Gus'})-[:K]->(:P {name: 'Vincent'}), (:Q {name: 'Mia'})"
+    query: "CALL { MATCH (n:P) RETURN n.name AS a INTERSECT DISTINCT MATCH (n:P {name: 'Alix'}) RETURN n.name AS a } RETURN a"
+    expect:
+      rows:
+        - [Alix]
+
+  - name: two_excepts_in_a_call
+    setup:
+      - "INSERT (:P {name: 'Alix'})-[:K]->(:P {name: 'Gus'})-[:K]->(:P {name: 'Vincent'}), (:Q {name: 'Mia'})"
+    query: "CALL { MATCH (n:P) RETURN n.name AS a EXCEPT MATCH (n:P {name: 'Alix'}) RETURN n.name AS a EXCEPT MATCH (n:P {name: 'Gus'}) RETURN n.name AS a } RETURN a"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: an_empty_intersect_in_a_call
+    setup:
+      - "INSERT (:P {name: 'Alix'})-[:K]->(:P {name: 'Gus'})-[:K]->(:P {name: 'Vincent'}), (:Q {name: 'Mia'})"
+    query: "CALL { MATCH (n:P) RETURN n.name AS a INTERSECT MATCH (n:Q) RETURN n.name AS a } RETURN count(a) AS c"
+    expect:
+      rows:
+        - [0]
+
+  - name: intersect_in_a_call_after_a_match
+    setup:
+      - "INSERT (:P {name: 'Alix'})-[:K]->(:P {name: 'Gus'})-[:K]->(:P {name: 'Vincent'}), (:Q {name: 'Mia'})"
+    query: "MATCH (m:Q) CALL { MATCH (n:P) RETURN n.name AS a INTERSECT MATCH (n:P {name: 'Alix'}) RETURN n.name AS a } RETURN m.name AS m, a"
+    expect:
+      rows:
+        - [Mia, Alix]
+
+  - name: except_in_a_call_then_filter
+    setup:
+      - "INSERT (:P {name: 'Alix'})-[:K]->(:P {name: 'Gus'})-[:K]->(:P {name: 'Vincent'}), (:Q {name: 'Mia'})"
+    query: "CALL { MATCH (n:P) RETURN n.name AS a EXCEPT MATCH (n:P {name: 'Alix'}) RETURN n.name AS a } FILTER a <> 'Gus' RETURN a"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: intersect_in_a_nested_call
+    setup:
+      - "INSERT (:P {name: 'Alix'})-[:K]->(:P {name: 'Gus'})-[:K]->(:P {name: 'Vincent'}), (:Q {name: 'Mia'})"
+    query: "CALL { CALL { MATCH (n:P) RETURN n.name AS a INTERSECT MATCH (n:P {name: 'Alix'}) RETURN n.name AS a } RETURN a } RETURN a"
+    expect:
+      rows:
+        - [Alix]
+
+  - name: union_in_a_call_control
+    setup:
+      - "INSERT (:P {name: 'Alix'})-[:K]->(:P {name: 'Gus'})-[:K]->(:P {name: 'Vincent'}), (:Q {name: 'Mia'})"
+    query: "CALL { MATCH (n:P) RETURN n.name AS a UNION MATCH (n:P {name: 'Alix'}) RETURN n.name AS a } RETURN count(a) AS c"
+    expect:
+      rows:
+        - [3]
+
+  - name: union_all_in_a_call_control
+    setup:
+      - "INSERT (:P {name: 'Alix'})-[:K]->(:P {name: 'Gus'})-[:K]->(:P {name: 'Vincent'}), (:Q {name: 'Mia'})"
+    query: "CALL { MATCH (n:P) RETURN n.name AS a UNION ALL MATCH (n:P {name: 'Alix'}) RETURN n.name AS a } RETURN count(a) AS c"
+    expect:
+      rows:
+        - [4]
+
+  - name: otherwise_in_a_call_control
+    setup:
+      - "INSERT (:P {name: 'Alix'})-[:K]->(:P {name: 'Gus'})-[:K]->(:P {name: 'Vincent'}), (:Q {name: 'Mia'})"
+    query: "CALL { MATCH (n:P) RETURN n.name AS a OTHERWISE MATCH (n:P {name: 'Alix'}) RETURN n.name AS a } RETURN count(a) AS c"
+    expect:
+      rows:
+        - [3]
+
+  - name: cypher_union_in_a_call_control
+    language: cypher
+    requires: [cypher]
+    setup:
+      - "CREATE (:P {name: 'Alix'})-[:K]->(:P {name: 'Gus'})-[:K]->(:P {name: 'Vincent'}), (:Q {name: 'Mia'})"
+    query: "CALL { MATCH (n:P) RETURN n.name AS a UNION MATCH (n:P {name: 'Alix'}) RETURN n.name AS a } RETURN count(a) AS c"
+    expect:
+      rows:
+        - [3]
+
+  - name: cypher_union_all_in_a_call_control
+    language: cypher
+    requires: [cypher]
+    setup:
+      - "CREATE (:P {name: 'Alix'})-[:K]->(:P {name: 'Gus'})-[:K]->(:P {name: 'Vincent'}), (:Q {name: 'Mia'})"
+    query: "CALL { MATCH (n:P) RETURN n.name AS a UNION ALL MATCH (n:P {name: 'Alix'}) RETURN n.name AS a } RETURN count(a) AS c"
+    expect:
+      rows:
+        - [4]

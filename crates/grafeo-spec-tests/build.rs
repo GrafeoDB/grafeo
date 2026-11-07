@@ -3,19 +3,24 @@
 //! Each test case in a .gtest file becomes a `#[test]` function in the
 //! generated output, enabling `cargo test`, IDE integration, and filtering.
 
-use std::collections::HashMap;
 use std::fmt::Write as FmtWrite;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 fn main() {
-    let spec_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .unwrap()
         .parent()
         .unwrap()
-        .join("tests")
-        .join("spec");
+        .to_path_buf();
+    // The cases to generate: `tests/spec`, or the directory `GRAFEO_SPEC_ROOT` names (the
+    // runner probes, `tests/spec-probes/...`), relative to the repository or absolute.
+    println!("cargo:rerun-if-env-changed=GRAFEO_SPEC_ROOT");
+    let spec_dir = match std::env::var_os("GRAFEO_SPEC_ROOT") {
+        Some(root) => repo.join(root),
+        None => repo.join("tests").join("spec"),
+    };
 
     let out_dir = std::env::var("OUT_DIR").unwrap();
     let out_path = PathBuf::from(&out_dir).join("spec_tests.rs");
@@ -60,682 +65,14 @@ fn main() {
 }
 
 // ---------------------------------------------------------------------------
-// .gtest parser
+// .gtest parser (shared with the library)
 // ---------------------------------------------------------------------------
 
-#[derive(Debug)]
-struct GtestFile {
-    meta: Meta,
-    tests: Vec<TestCase>,
-}
-
-#[derive(Debug, Default)]
-struct Meta {
-    language: String,
-    model: String,
-    section: String,
-    title: String,
-    dataset: String,
-    requires: Vec<String>,
-    tags: Vec<String>,
-    iso: Vec<String>,
-}
-
-#[derive(Debug)]
-struct TestCase {
-    name: String,
-    query: Option<String>,
-    statements: Vec<String>,
-    setup: Vec<String>,
-    params: HashMap<String, ParamText>,
-    tags: Vec<String>,
-    requires: Vec<String>,
-    iso: Vec<String>,
-    language: Option<String>,
-    dataset: Option<String>,
-    skip: Option<String>,
-    expect: Expect,
-    variants: HashMap<String, String>,
-}
-
-/// A parameter value as the .gtest file writes it. Whether it was quoted
-/// decides its type, so the quotes are not simply dropped: see
-/// `param_value_code` for the rule every runner follows.
-#[derive(Debug)]
-enum ParamText {
-    /// Written in quotes: a string, whatever it reads like. Holds the text
-    /// without the quotes, YAML-level escapes resolved.
-    Quoted(String),
-    /// Written bare: JSON, a number, a boolean or a string.
-    Bare(String),
-}
-
-#[derive(Debug, Default)]
-struct Expect {
-    rows: Vec<Vec<String>>,
-    ordered: bool,
-    count: Option<usize>,
-    empty: bool,
-    error: Option<String>,
-    /// The GQLSTATUS the error must have (`22012`), alone or next to `error`.
-    gql_status: Option<String>,
-    hash: Option<String>,
-    precision: Option<u32>,
-    columns: Vec<String>,
-    /// Rows of RDF terms in N-Triples form, each cell compared as the exact
-    /// term (kind, lexical form, datatype and language); see `assert_terms`.
-    terms: Vec<Vec<String>>,
-}
+include!("src/gtest.rs");
 
 fn parse_gtest_file(path: &Path) -> Result<GtestFile, String> {
     let content = fs::read_to_string(path).map_err(|e| format!("read error: {e}"))?;
-
-    let lines: Vec<&str> = content.lines().collect();
-    let mut idx = 0;
-
-    // Skip leading comments and blank lines
-    while idx < lines.len() {
-        let trimmed = lines[idx].trim();
-        if trimmed.is_empty() || trimmed.starts_with('#') {
-            idx += 1;
-        } else {
-            break;
-        }
-    }
-
-    // Parse meta block
-    let meta = parse_meta(&lines, &mut idx)?;
-
-    // Parse tests list
-    let tests = parse_tests(&lines, &mut idx)?;
-
-    Ok(GtestFile { meta, tests })
-}
-
-fn parse_meta(lines: &[&str], idx: &mut usize) -> Result<Meta, String> {
-    let mut meta = Meta::default();
-
-    // Expect "meta:"
-    skip_blank_and_comments(lines, idx);
-    if *idx >= lines.len() || lines[*idx].trim() != "meta:" {
-        return Err(format!(
-            "Expected 'meta:' at line {}, found: '{}'",
-            *idx + 1,
-            lines.get(*idx).unwrap_or(&"<EOF>")
-        ));
-    }
-    *idx += 1;
-
-    // Parse meta fields (indented key: value pairs)
-    while *idx < lines.len() {
-        let line = lines[*idx];
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with('#') {
-            *idx += 1;
-            continue;
-        }
-        // If not indented, we've left the meta block
-        if !line.starts_with(' ') && !line.starts_with('\t') {
-            break;
-        }
-        if let Some((key, value)) = parse_kv(trimmed) {
-            match key {
-                "language" => meta.language = value.to_string(),
-                "model" => meta.model = value.to_string(),
-                "section" => meta.section = unquote(value),
-                "title" => meta.title = value.to_string(),
-                "dataset" => meta.dataset = value.to_string(),
-                "requires" => meta.requires = parse_yaml_list(value),
-                "tags" => meta.tags = parse_yaml_list(value),
-                "iso" => meta.iso = parse_yaml_list(value),
-                _ => {} // ignore unknown keys
-            }
-        }
-        *idx += 1;
-    }
-
-    // Default language
-    if meta.language.is_empty() {
-        meta.language = "gql".to_string();
-    }
-    if meta.dataset.is_empty() {
-        meta.dataset = "empty".to_string();
-    }
-
-    Ok(meta)
-}
-
-fn parse_tests(lines: &[&str], idx: &mut usize) -> Result<Vec<TestCase>, String> {
-    let mut tests = Vec::new();
-
-    skip_blank_and_comments(lines, idx);
-
-    // Expect "tests:"
-    if *idx >= lines.len() || lines[*idx].trim() != "tests:" {
-        return Err(format!(
-            "Expected 'tests:' at line {}, found: '{}'",
-            *idx + 1,
-            lines.get(*idx).unwrap_or(&"<EOF>")
-        ));
-    }
-    *idx += 1;
-
-    // Parse list of test cases
-    while *idx < lines.len() {
-        skip_blank_and_comments(lines, idx);
-        if *idx >= lines.len() {
-            break;
-        }
-
-        let trimmed = lines[*idx].trim();
-
-        // Each test starts with "- name: <test_name>"
-        if trimmed.starts_with("- name:") {
-            let test = parse_single_test(lines, idx)?;
-            tests.push(test);
-        } else {
-            break;
-        }
-    }
-
-    Ok(tests)
-}
-
-fn parse_single_test(lines: &[&str], idx: &mut usize) -> Result<TestCase, String> {
-    let mut tc = TestCase {
-        name: String::new(),
-        query: None,
-        statements: Vec::new(),
-        setup: Vec::new(),
-        params: HashMap::new(),
-        tags: Vec::new(),
-        requires: Vec::new(),
-        iso: Vec::new(),
-        language: None,
-        dataset: None,
-        skip: None,
-        expect: Expect::default(),
-        variants: HashMap::new(),
-    };
-
-    // First line: "- name: xxx"
-    let first = lines[*idx].trim();
-    if let Some((_, name)) = parse_kv(&first[2..]) {
-        // strip leading "- "
-        tc.name = unquote(name.trim());
-    }
-    *idx += 1;
-
-    // Parse remaining fields until next "- name:" or end
-    while *idx < lines.len() {
-        let line = lines[*idx];
-        let trimmed = line.trim();
-
-        // Skip comments
-        if trimmed.starts_with('#') {
-            *idx += 1;
-            continue;
-        }
-
-        // End of this test: next test item or end of list
-        if trimmed.starts_with("- name:") {
-            break;
-        }
-
-        // Blank lines are OK
-        if trimmed.is_empty() {
-            *idx += 1;
-            continue;
-        }
-
-        if let Some((key, value)) = parse_kv(trimmed) {
-            match key {
-                "query" => {
-                    if value == "|" {
-                        tc.query = Some(parse_block_scalar(lines, idx));
-                    } else {
-                        tc.query = Some(unquote(value));
-                        *idx += 1;
-                    }
-                }
-                "skip" => {
-                    tc.skip = Some(unquote(value));
-                    *idx += 1;
-                }
-                "setup" => {
-                    *idx += 1;
-                    tc.setup = parse_string_list(lines, idx);
-                }
-                "statements" => {
-                    *idx += 1;
-                    tc.statements = parse_string_list(lines, idx);
-                }
-                "tags" => {
-                    tc.tags = parse_yaml_list(value);
-                    *idx += 1;
-                }
-                "requires" => {
-                    tc.requires = parse_yaml_list(value);
-                    *idx += 1;
-                }
-                "iso" => {
-                    tc.iso = parse_yaml_list(value);
-                    *idx += 1;
-                }
-                "language" => {
-                    tc.language = Some(unquote(value));
-                    *idx += 1;
-                }
-                "dataset" => {
-                    tc.dataset = Some(unquote(value));
-                    *idx += 1;
-                }
-                "params" => {
-                    *idx += 1;
-                    tc.params =
-                        parse_params(lines, idx).map_err(|e| format!("test '{}': {e}", tc.name))?;
-                }
-                "expect" => {
-                    *idx += 1;
-                    tc.expect = parse_expect(lines, idx)?;
-                }
-                "variants" => {
-                    *idx += 1;
-                    tc.variants = parse_variants(lines, idx);
-                }
-                _ => {
-                    *idx += 1;
-                }
-            }
-        } else {
-            *idx += 1;
-        }
-    }
-
-    Ok(tc)
-}
-
-fn parse_expect(lines: &[&str], idx: &mut usize) -> Result<Expect, String> {
-    let mut expect = Expect::default();
-    // The indent of the expectation's own keys: a line indented less is the
-    // test's next key (a `skip:`, `params:` or `note:` after `expect:`).
-    let mut child_indent: Option<usize> = None;
-
-    while *idx < lines.len() {
-        let trimmed = lines[*idx].trim();
-
-        if trimmed.is_empty() || trimmed.starts_with('#') {
-            *idx += 1;
-            continue;
-        }
-
-        // End if we hit a non-indented line or next test
-        if trimmed.starts_with("- name:") {
-            break;
-        }
-        let indent = lines[*idx].len() - lines[*idx].trim_start().len();
-        if indent < *child_indent.get_or_insert(indent) {
-            break;
-        }
-
-        // Check if we're at a peer-level key (not indented enough for expect)
-        if !lines[*idx].starts_with(' ') && !lines[*idx].starts_with('\t') {
-            break;
-        }
-
-        if let Some((key, value)) = parse_kv(trimmed) {
-            match key {
-                "ordered" => {
-                    expect.ordered = value == "true";
-                    *idx += 1;
-                }
-                "count" => {
-                    expect.count = value.parse().ok();
-                    *idx += 1;
-                }
-                "empty" => {
-                    expect.empty = value == "true";
-                    *idx += 1;
-                }
-                "error" => {
-                    expect.error = Some(unquote(value));
-                    *idx += 1;
-                }
-                "gql_status" => {
-                    expect.gql_status = Some(unquote(value));
-                    *idx += 1;
-                }
-                "hash" => {
-                    expect.hash = Some(unquote(value));
-                    *idx += 1;
-                }
-                "precision" => {
-                    expect.precision = value.parse().ok();
-                    *idx += 1;
-                }
-                "columns" => {
-                    expect.columns = parse_yaml_list(value);
-                    *idx += 1;
-                }
-                "rows" => {
-                    *idx += 1;
-                    expect.rows = parse_rows(lines, idx);
-                }
-                "terms" => {
-                    *idx += 1;
-                    expect.terms = parse_rows(lines, idx);
-                }
-                // A key no runner reads would leave a test that checks
-                // nothing and passes.
-                other => return Err(format!("unknown expect key '{other}'")),
-            }
-        } else {
-            // Could be a continuation or unknown
-            break;
-        }
-    }
-
-    Ok(expect)
-}
-
-fn parse_rows(lines: &[&str], idx: &mut usize) -> Vec<Vec<String>> {
-    let mut rows = Vec::new();
-
-    while *idx < lines.len() {
-        let trimmed = lines[*idx].trim();
-
-        if trimmed.is_empty() || trimmed.starts_with('#') {
-            *idx += 1;
-            continue;
-        }
-
-        // A row line starts with "- ["
-        if trimmed.starts_with("- [") {
-            let inner = &trimmed[2..]; // strip "- "
-            let values = parse_yaml_inline_list(inner);
-            rows.push(values);
-            *idx += 1;
-        } else {
-            break;
-        }
-    }
-
-    rows
-}
-
-fn parse_string_list(lines: &[&str], idx: &mut usize) -> Vec<String> {
-    let mut items = Vec::new();
-
-    while *idx < lines.len() {
-        let trimmed = lines[*idx].trim();
-
-        if trimmed.is_empty() || trimmed.starts_with('#') {
-            *idx += 1;
-            continue;
-        }
-
-        if let Some(value) = trimmed.strip_prefix("- ") {
-            if value == "|" {
-                items.push(parse_block_scalar(lines, idx));
-            } else {
-                items.push(unquote(value));
-                *idx += 1;
-            }
-        } else {
-            break;
-        }
-    }
-
-    items
-}
-
-/// Parses the `params` map. A block scalar (`|`, `>` and their variants) is
-/// an error: a param is written on one line, and its lines would otherwise
-/// be read as more params (`Amsterdam: 3` as a param `Amsterdam`).
-fn parse_params(lines: &[&str], idx: &mut usize) -> Result<HashMap<String, ParamText>, String> {
-    let mut params = HashMap::new();
-
-    while *idx < lines.len() {
-        let trimmed = lines[*idx].trim();
-        if trimmed.is_empty() || trimmed.starts_with('#') {
-            *idx += 1;
-            continue;
-        }
-
-        if let Some((key, value)) = parse_kv(trimmed) {
-            // Check indent level: params entries are deeply nested (indent >= 6)
-            let indent = lines[*idx].len() - lines[*idx].trim_start().len();
-            if indent >= 6 {
-                // Still in params
-                if is_block_scalar_indicator(value) {
-                    return Err(format!(
-                        "param '{key}' at line {} is a block scalar (`{value}`), which params do \
-                         not support: write the value on one line, as JSON for a list or map",
-                        *idx + 1
-                    ));
-                }
-                let text = if is_quoted(value) {
-                    ParamText::Quoted(unquote(value))
-                } else {
-                    ParamText::Bare(value.to_string())
-                };
-                params.insert(key.to_string(), text);
-                *idx += 1;
-            } else {
-                break;
-            }
-        } else {
-            break;
-        }
-    }
-
-    Ok(params)
-}
-
-/// `|` or `>`, with an optional chomping indicator (`+`, `-`) and
-/// indentation digit: the value of a YAML block scalar starts on the next
-/// line.
-fn is_block_scalar_indicator(value: &str) -> bool {
-    let mut chars = value.chars();
-    matches!(chars.next(), Some('|' | '>'))
-        && chars.all(|c| c == '+' || c == '-' || c.is_ascii_digit())
-}
-
-fn parse_variants(lines: &[&str], idx: &mut usize) -> HashMap<String, String> {
-    let mut variants = HashMap::new();
-
-    while *idx < lines.len() {
-        let trimmed = lines[*idx].trim();
-        if trimmed.is_empty() || trimmed.starts_with('#') {
-            *idx += 1;
-            continue;
-        }
-
-        if let Some((key, value)) = parse_kv(trimmed) {
-            let indent = lines[*idx].len() - lines[*idx].trim_start().len();
-            if indent >= 6 {
-                if value == "|" {
-                    variants.insert(key.to_string(), parse_block_scalar(lines, idx));
-                } else {
-                    variants.insert(key.to_string(), unquote(value));
-                    *idx += 1;
-                }
-            } else {
-                break;
-            }
-        } else {
-            break;
-        }
-    }
-
-    variants
-}
-
-// ---------------------------------------------------------------------------
-// YAML primitives
-// ---------------------------------------------------------------------------
-
-fn parse_kv(s: &str) -> Option<(&str, &str)> {
-    // Find first colon not inside quotes
-    let mut in_single = false;
-    let mut in_double = false;
-    for (i, c) in s.char_indices() {
-        match c {
-            '\'' if !in_double => in_single = !in_single,
-            '"' if !in_single => in_double = !in_double,
-            ':' if !in_single && !in_double => {
-                let key = s[..i].trim();
-                let value = s[i + 1..].trim();
-                if !key.is_empty() {
-                    return Some((key, value));
-                }
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
-/// Whether `s` is written in single or double quotes.
-fn is_quoted(s: &str) -> bool {
-    let s = s.trim();
-    s.len() >= 2
-        && ((s.starts_with('"') && s.ends_with('"')) || (s.starts_with('\'') && s.ends_with('\'')))
-}
-
-fn unquote(s: &str) -> String {
-    let s = s.trim();
-    if is_quoted(s) {
-        let inner = &s[1..s.len() - 1];
-        // Only unescape YAML-level escapes (quotes and backslashes).
-        // Do NOT process \n or \t here: those are GQL string escapes
-        // that the GQL parser handles via unescape_string().
-        inner
-            .replace("\\\\", "\x00")
-            .replace("\\\"", "\"")
-            .replace("\\'", "'")
-            .replace('\x00', "\\")
-    } else {
-        s.to_string()
-    }
-}
-
-fn parse_yaml_list(s: &str) -> Vec<String> {
-    let s = s.trim();
-    if s == "[]" || s.is_empty() {
-        return Vec::new();
-    }
-    if s.starts_with('[') && s.ends_with(']') {
-        let inner = &s[1..s.len() - 1];
-        inner
-            .split(',')
-            .map(|v| unquote(v.trim()))
-            .filter(|v| !v.is_empty())
-            .collect()
-    } else {
-        vec![unquote(s)]
-    }
-}
-
-fn parse_yaml_inline_list(s: &str) -> Vec<String> {
-    let s = s.trim();
-    if !s.starts_with('[') || !s.ends_with(']') {
-        return vec![unquote(s)];
-    }
-    let inner = &s[1..s.len() - 1];
-
-    // Split by commas, but respect nested brackets and quotes
-    let mut items = Vec::new();
-    let mut current = String::new();
-    let mut depth = 0;
-    let mut in_single = false;
-    let mut in_double = false;
-
-    for c in inner.chars() {
-        match c {
-            '\'' if !in_double && depth == 0 => {
-                in_single = !in_single;
-                current.push(c);
-            }
-            '"' if !in_single && depth == 0 => {
-                in_double = !in_double;
-                current.push(c);
-            }
-            '[' | '{' if !in_single && !in_double => {
-                depth += 1;
-                current.push(c);
-            }
-            ']' | '}' if !in_single && !in_double => {
-                depth -= 1;
-                current.push(c);
-            }
-            ',' if depth == 0 && !in_single && !in_double => {
-                items.push(unquote(current.trim()));
-                current.clear();
-            }
-            _ => current.push(c),
-        }
-    }
-    let last = current.trim();
-    if !last.is_empty() {
-        items.push(unquote(last));
-    }
-
-    items
-}
-
-fn parse_block_scalar(lines: &[&str], idx: &mut usize) -> String {
-    // Current line ends with "|", advance past it
-    *idx += 1;
-
-    // Determine indent of block content
-    let block_indent = if *idx < lines.len() {
-        let line = lines[*idx];
-        line.len() - line.trim_start().len()
-    } else {
-        return String::new();
-    };
-
-    let mut result = String::new();
-    while *idx < lines.len() {
-        let line = lines[*idx];
-        let trimmed = line.trim();
-
-        if trimmed.is_empty() {
-            result.push('\n');
-            *idx += 1;
-            continue;
-        }
-
-        let current_indent = line.len() - line.trim_start().len();
-        if current_indent < block_indent {
-            break;
-        }
-
-        if !result.is_empty() {
-            result.push('\n');
-        }
-        // Strip the block indent
-        if line.len() >= block_indent {
-            result.push_str(&line[block_indent..]);
-        } else {
-            result.push_str(trimmed);
-        }
-        *idx += 1;
-    }
-
-    result.trim_end().to_string()
-}
-
-fn skip_blank_and_comments(lines: &[&str], idx: &mut usize) {
-    while *idx < lines.len() {
-        let trimmed = lines[*idx].trim();
-        if trimmed.is_empty() || trimmed.starts_with('#') {
-            *idx += 1;
-        } else {
-            break;
-        }
-    }
+    parse_gtest_text(&path.to_string_lossy(), &content)
 }
 
 fn walk_dir(dir: &Path) -> Vec<PathBuf> {
@@ -914,11 +251,8 @@ fn generate_single_test(output: &mut String, spec: &TestSpec<'_>) {
     let fn_name = spec.fn_name;
     let file = spec.file;
     let tc = spec.tc;
-    let query_override = spec.query_override;
-    let lang_override = spec.lang_override;
-    let rel_path = spec.rel_path;
-    let db_source = spec.db_source;
-    let language = lang_override
+    let language = spec
+        .lang_override
         .or(tc.language.as_deref())
         .unwrap_or(&file.meta.language);
     let model = &file.meta.model;
@@ -996,6 +330,48 @@ fn generate_single_test(output: &mut String, spec: &TestSpec<'_>) {
         writeln!(output, "    #[ignore = {reason:?}]").unwrap();
     }
     writeln!(output, "    fn {fn_name}() {{").unwrap();
+    let mut body = String::new();
+    generate_body(&mut body, spec, language, model);
+    match &tc.xfail {
+        // Passes as the expected failure only on a `SpecFailure`; a pass is an XPASS, and any
+        // other panic goes on (see `run_xfail`).
+        Some(xfail) => {
+            writeln!(
+                output,
+                "        if let Err(message) = run_xfail(\"{}\", \"{}\", || {{",
+                escape_rust_string(&xfail.spec),
+                escape_rust_string(&xfail.issue)
+            )
+            .unwrap();
+            output.push_str(&body);
+            writeln!(output, "        }}) {{").unwrap();
+            writeln!(output, "            panic!(\"{{message}}\");").unwrap();
+            writeln!(output, "        }}").unwrap();
+        }
+        None => output.push_str(&body),
+    }
+    writeln!(output, "    }}").unwrap();
+    writeln!(output).unwrap();
+}
+
+/// The statements and assertions of one generated test.
+fn generate_body(output: &mut String, spec: &TestSpec<'_>, language: &str, model: &str) {
+    let file = spec.file;
+    let tc = spec.tc;
+    let query_override = spec.query_override;
+    let rel_path = spec.rel_path;
+    let db_source = spec.db_source;
+
+    // A probe of the runner: it fails as the runner itself fails, which no `xfail:` may take
+    // for the expected failure.
+    if tc.probe == Some(Probe::RunnerError) {
+        writeln!(
+            output,
+            "        panic!(\"runner error probe: the runner fails, not the case\");"
+        )
+        .unwrap();
+        return;
+    }
 
     // Create DB and load dataset. The persistent variant exercises the
     // WAL-wrapped store path that `GrafeoDB::open()` always produces, so
@@ -1060,8 +436,6 @@ fn generate_single_test(output: &mut String, spec: &TestSpec<'_>) {
             tc.name, rel_path
         )
         .unwrap();
-        writeln!(output, "    }}").unwrap();
-        writeln!(output).unwrap();
         return;
     };
 
@@ -1082,7 +456,7 @@ fn generate_single_test(output: &mut String, spec: &TestSpec<'_>) {
             if has_params {
                 writeln!(
                     output,
-                    "        execute_query_result_with_params(&db, \"{}\", \"{}\", \"{}\", params.as_ref().expect(\"params\").clone()).expect(\"setup statement failed\");",
+                    "        run_statement_with_params(&db, \"{}\", \"{}\", \"{}\", &params);",
                     escape_rust_string(language),
                     escape_rust_string(model),
                     escape_rust_string(q),
@@ -1103,9 +477,6 @@ fn generate_single_test(output: &mut String, spec: &TestSpec<'_>) {
         let last = &queries[queries.len() - 1];
         generate_execute_and_assert(output, last, language, model, tc, has_params);
     }
-
-    writeln!(output, "    }}").unwrap();
-    writeln!(output).unwrap();
 }
 
 /// Emits `params`: the test's parameters, or the error a binding gives for
@@ -1495,7 +866,7 @@ fn generate_execute_and_assert(
     if has_params {
         writeln!(
             output,
-            "        let result = execute_query_result_with_params(&db, \"{}\", \"{}\", \"{}\", params.expect(\"params\")).expect(\"query failed\");",
+            "        let result = run_statement_with_params(&db, \"{}\", \"{}\", \"{}\", &params);",
             escape_rust_string(language),
             escape_rust_string(model),
             escape_rust_string(query)
@@ -1504,13 +875,27 @@ fn generate_execute_and_assert(
     } else {
         writeln!(
             output,
-            "        let result = execute_query_result(&db, \"{}\", \"{}\", \"{}\").expect(\"query failed\");",
+            "        let result = statement_result(execute_query_result(&db, \"{0}\", \"{1}\", \"{2}\"), \"{2}\");",
             escape_rust_string(language),
             escape_rust_string(model),
             escape_rust_string(query)
         )
         .unwrap();
     }
+
+    // The warnings, also when none are expected: a statement that raises one
+    // it should not fails here.
+    let warnings: Vec<String> = expect
+        .warnings
+        .iter()
+        .map(|code| format!("\"{}\"", escape_rust_string(code)))
+        .collect();
+    writeln!(
+        output,
+        "        assert_warnings(&result, &[{}]);",
+        warnings.join(", ")
+    )
+    .unwrap();
 
     // Column assertion (checked before value assertions)
     if !expect.columns.is_empty() {
@@ -1529,21 +914,13 @@ fn generate_execute_and_assert(
 
     // Empty check
     if expect.empty {
-        writeln!(
-            output,
-            "        assert_eq!(result.row_count(), 0, \"Expected empty result\");"
-        )
-        .unwrap();
+        writeln!(output, "        assert_row_count(&result, 0);").unwrap();
         return;
     }
 
     // Count check
     if let Some(count) = expect.count {
-        writeln!(
-            output,
-            "        assert_eq!(result.row_count(), {count}, \"Expected {count} row(s)\");"
-        )
-        .unwrap();
+        writeln!(output, "        assert_row_count(&result, {count});").unwrap();
         return;
     }
 

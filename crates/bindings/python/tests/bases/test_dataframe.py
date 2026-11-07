@@ -201,7 +201,9 @@ class TestEdgesDf:
 # --- nodes_df() and edges_df() with and without pyarrow ---
 
 
-@pytest.fixture(params=["arrow", "fallback"])
+@pytest.fixture(
+    params=[pytest.param("arrow", marks=pytest.mark.requires("arrow-export")), "fallback"]
+)
 def dataframe_path(request, monkeypatch):
     """Runs a test through both paths of nodes_df() and edges_df(): the Arrow
     fast path (pyarrow importable) and the fallback (pyarrow not importable)."""
@@ -320,6 +322,7 @@ def typed_db():
     return db
 
 
+@pytest.mark.requires("arrow-export")
 class TestTypedArrowExport:
     """The Arrow export keeps lists, maps and durations as Arrow lists and
     structs, so pyarrow and polars read the values the query returns."""
@@ -421,12 +424,14 @@ class TestStructuralNames:
         )
         assert edge["_note"] == "met in Paris"
 
+    @pytest.mark.requires("arrow-export")
     def test_nodes_to_arrow(self, structural_names_db):
         pytest.importorskip("pyarrow")
         table = structural_names_db.nodes_to_arrow()
         assert str(table.schema.field("_id").type) == "uint64"
         self.check_nodes(table.to_pylist())
 
+    @pytest.mark.requires("arrow-export")
     def test_edges_to_arrow(self, structural_names_db):
         pytest.importorskip("pyarrow")
         table = structural_names_db.edges_to_arrow()
@@ -434,10 +439,12 @@ class TestStructuralNames:
             assert str(table.schema.field(column).type) == "uint64", column
         self.check_edges(table.to_pylist())
 
+    @pytest.mark.requires("arrow-export")
     def test_nodes_to_polars(self, structural_names_db):
         pytest.importorskip("polars")
         self.check_nodes(structural_names_db.nodes_to_polars().to_dicts())
 
+    @pytest.mark.requires("arrow-export")
     def test_edges_to_polars(self, structural_names_db):
         pytest.importorskip("polars")
         self.check_edges(structural_names_db.edges_to_polars().to_dicts())
@@ -495,6 +502,7 @@ class TestStructuralNames:
         )
         assert result.to_polars().to_dicts() == [{"id": 7, "source": "crm", "_id": "x"}]
 
+    @pytest.mark.requires("arrow-export")
     def test_to_arrow_of_property_columns(self, structural_names_db):
         pytest.importorskip("pyarrow")
         result = structural_names_db.execute(

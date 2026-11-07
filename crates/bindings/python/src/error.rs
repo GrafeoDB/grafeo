@@ -9,8 +9,9 @@
 //! `RuntimeError` continues to work. New code can catch `GrafeoError`
 //! specifically and inspect `e.error_code` / `e.is_retryable`. A write to a
 //! closed database raises `DatabaseClosedError`, a damaged database file
-//! `GrafeoCorruptionError`, and a database file another handle or process
-//! holds `GrafeoLockedError`, all subclasses of `GrafeoError`.
+//! `GrafeoCorruptionError`, a database file another handle or process
+//! holds `GrafeoLockedError`, and a statement the session may not run
+//! `GrafeoPermissionError`, all subclasses of `GrafeoError`.
 
 use grafeo_common::utils::GqlStatus;
 use grafeo_common::utils::error::ErrorCode;
@@ -45,6 +46,13 @@ create_exception!(
     GrafeoLockedError,
     GrafeoError,
     "Raised when a database file is open elsewhere (error code GRAFEO-S004, GQLSTATUS 08000): in another handle of this process, which must be closed first, or in another process. The message says which."
+);
+
+create_exception!(
+    grafeo,
+    GrafeoPermissionError,
+    GrafeoError,
+    "Raised when the session may not run the statement (GQLSTATUS 42501): a write its role or graph grants refuse (error code GRAFEO-Q007), or a statement that reaches outside the database on a session without external access (GRAFEO-Q008)."
 );
 
 /// Grafeo errors that translate to Python exceptions.
@@ -174,7 +182,8 @@ impl From<PyGrafeoError> for PyErr {
     }
 }
 
-/// Builds a `GrafeoError` with `error_code`, `gql_status` and `is_retryable`
+/// Builds a `GrafeoError` (a `GrafeoPermissionError` for a refused
+/// permission) with `error_code`, `gql_status` and `is_retryable`
 /// attributes always populated. If the upstream error did not carry a
 /// specific code, the generic `Internal` code and its status `22000` are used
 /// (as the database reports an internal error), so that callers can rely on
@@ -185,7 +194,12 @@ fn build_grafeo_error(
     gql_status: Option<GqlStatus>,
 ) -> PyErr {
     Python::attach(|py| {
-        let err = GrafeoError::new_err(message);
+        let err = match code {
+            Some(ErrorCode::QueryPermissionDenied | ErrorCode::QueryExternalAccessDenied) => {
+                GrafeoPermissionError::new_err(message)
+            }
+            _ => GrafeoError::new_err(message),
+        };
         set_code(
             &err,
             py,

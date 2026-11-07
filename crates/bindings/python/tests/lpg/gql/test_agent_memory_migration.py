@@ -97,6 +97,7 @@ class TestPersistence:
         prague = sorted(node for node, _ in db.text_search("Memory", "note", "prague", k=100))
         return nearest, prague
 
+    @pytest.mark.requires("text-index", "vector-index")
     def test_search_indexes_survive_close_and_reopen(self):
         """The vector and text indexes are in the file (#401): a reopen and a
         read-only open find the same nodes without creating them again."""
@@ -116,6 +117,7 @@ class TestPersistence:
                 assert self._searches(db) == before, open_db.__name__
                 db.close()
 
+    @pytest.mark.requires("text-index", "vector-index")
     def test_search_indexes_survive_a_process_that_exits_without_closing(self):
         """A process that creates the indexes and exits without closing leaves
         them in its WAL, which the reopen replays (#401)."""
@@ -235,6 +237,7 @@ class TestStorageSize:
 
 
 class TestBYOV:
+    @pytest.mark.requires("vector-index")
     def test_384_dim_vectors(self):
         """Insert 384-dim vectors as list[float], create index, search."""
         db = GrafeoDB()
@@ -257,6 +260,7 @@ class TestBYOV:
         for j in range(len(results) - 1):
             assert results[j][1] <= results[j + 1][1], "results should be sorted"
 
+    @pytest.mark.requires("vector-index")
     def test_batch_create_vectors(self):
         """batch_create_nodes with 100 384-dim vectors."""
         db = GrafeoDB()
@@ -268,6 +272,7 @@ class TestBYOV:
         results = db.vector_search("Memory", "embedding", random_384d_vector(0), k=10)
         assert len(results) == 10
 
+    @pytest.mark.requires("text-index", "hybrid-search")
     def test_hybrid_search(self):
         """Combined text + vector search for agent memory retrieval."""
         db = GrafeoDB()
@@ -345,6 +350,7 @@ class TestBulkImport:
 # ============================================================================
 
 
+@pytest.mark.requires("vector-index")
 class TestConcurrency:
     def test_threaded_vector_search(self):
         """4 threads doing vector_search simultaneously."""

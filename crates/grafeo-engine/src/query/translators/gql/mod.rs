@@ -83,6 +83,7 @@ pub fn translate_full(query: &str) -> Result<GqlTranslationResult> {
     match translator.translate_statement_full(&statement)? {
         GqlTranslationResult::Plan(mut plan) => {
             plan.graph = graph;
+            plan.warnings = translator.warnings.get();
             Ok(GqlTranslationResult::Plan(
                 crate::query::limits::check_plan_depth(plan)?,
             ))
@@ -116,6 +117,8 @@ struct GqlTranslator {
     /// path that edge walks (`nodes(k)` of `-[k]->{1,3}`), as SQL/PGQ reads
     /// it (see [`GqlTranslator::group_path_call`]).
     group_variables_as_paths: bool,
+    /// The warnings the translation found, which the plan carries.
+    warnings: std::cell::Cell<grafeo_common::utils::warning::WarningSet>,
 }
 
 /// The rows a query passes to the one after `NEXT`: its final `RETURN` as a
@@ -621,7 +624,15 @@ impl GqlTranslator {
             call_imports: CallImports::default(),
             sort_scope: std::cell::RefCell::new(None),
             group_variables_as_paths: false,
+            warnings: std::cell::Cell::default(),
         }
+    }
+
+    /// Records that the statement wrote a form `warning` names.
+    fn warn(&self, warning: grafeo_common::utils::warning::Warning) {
+        let mut warnings = self.warnings.get();
+        warnings.insert(warning);
+        self.warnings.set(warnings);
     }
 
     /// A name for an anonymous element, one the statement does not spell.
@@ -688,7 +699,10 @@ impl GqlTranslator {
         let left_plan = self.translate_statement(left)?;
         // NEXT: the statement after it reads the rows the one before returns,
         // as a query reads the rows of a WITH; a lone INSERT or DELETE writes
-        // for each, and a procedure call runs for each. After one without a
+        // for each. A procedure call that clauses follow is a query (its
+        // RETURN reads the whole table); a lone one runs for each row and
+        // returns its working table, the incoming columns and its own
+        // (ISO/IEC 39075 15.1 GR 3 and 4). After one without a
         // result (no RETURN, or FINISH) it reads one empty row, as at the
         // start of a statement: the one before runs once, for its writes,
         // and nothing it binds is a variable after it.
@@ -752,152 +766,6 @@ impl GqlTranslator {
         if let Some(where_clause) = &call.where_clause {
             let predicate = self.translate_expression(&where_clause.expression)?;
             plan = wrap_filter(plan, predicate);
-        }
-
-        // Apply RETURN clause (with ORDER BY, SKIP, LIMIT)
-        // Order: RETURN first (closest to input), then Sort, Skip, Limit wrap it.
-        // This ensures RETURN aliases are visible to ORDER BY in the binder.
-        if let Some(return_clause) = &call.return_clause {
-            // Check if RETURN contains aggregate functions (e.g. count(label))
-            let has_aggregates = !return_clause.items.is_empty()
-                && return_clause
-                    .items
-                    .iter()
-                    .any(|item| contains_aggregate(&item.expression));
-
-            // GROUP BY makes one row per group, also without an aggregate
-            let groups_rows = !return_clause.items.is_empty() && !return_clause.group_by.is_empty();
-            if has_aggregates || groups_rows {
-                let (aggregates, auto_group_by, mut post_return) = self
-                    .extract_aggregates_and_groups(
-                        &return_clause.items,
-                        !return_clause.group_by.is_empty(),
-                        &mut plan,
-                    )?;
-                // Explicit GROUP BY wins over the keys implied by the items.
-                let (group_by, imports_read) = if return_clause.group_by.is_empty() {
-                    let imports_read = super::common::resolve_implicitly_grouped(
-                        "RETURN",
-                        post_return.as_deref_mut().unwrap_or_default(),
-                        &auto_group_by,
-                        &aggregates,
-                        &self.call_imports,
-                    )?;
-                    (auto_group_by, imports_read)
-                } else {
-                    let keys = self.translate_group_by(
-                        &return_clause.group_by,
-                        &return_clause.items,
-                        &plan,
-                    )?;
-                    let imports_read = self.resolve_grouped_items(
-                        &return_clause.items,
-                        post_return.as_deref_mut().unwrap_or_default(),
-                        &keys,
-                        &aggregates,
-                    )?;
-                    (keys, imports_read)
-                };
-
-                plan = super::common::with_imports(
-                    LogicalOperator::Aggregate(AggregateOp {
-                        group_by,
-                        aggregates,
-                        input: Box::new(plan),
-                        having: None,
-                    }),
-                    imports_read,
-                    true,
-                );
-
-                if let Some(return_items) = post_return {
-                    plan = wrap_return(plan, return_items, return_clause.distinct);
-                }
-
-                // An ORDER BY after an aggregating RETURN reads its columns
-                // (see `sort`).
-                if let Some(order_by) = &return_clause.order_by {
-                    let keys =
-                        self.projected_sort_keys(order_by, &return_clause.items, "RETURN", true)?;
-                    plan = wrap_sort(plan, keys);
-                }
-
-                // Apply SKIP
-                if let Some(skip_expr) = &return_clause.skip
-                    && let ast::Expression::Literal(ast::Literal::Integer(n)) = skip_expr
-                {
-                    // reason: SKIP/LIMIT literals are non-negative in practice
-                    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-                    let count = *n as usize;
-                    plan = wrap_skip(plan, count);
-                }
-
-                // Apply LIMIT
-                if let Some(limit_expr) = &return_clause.limit
-                    && let ast::Expression::Literal(ast::Literal::Integer(n)) = limit_expr
-                {
-                    // reason: SKIP/LIMIT literals are non-negative in practice
-                    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-                    let count = *n as usize;
-                    plan = wrap_limit(plan, count);
-                }
-            } else if !return_clause.items.is_empty() {
-                let return_items = return_clause
-                    .items
-                    .iter()
-                    .map(|item| {
-                        Ok(ReturnItem {
-                            expression: self.translate_expression(&item.expression)?,
-                            alias: item.alias.clone(),
-                        })
-                    })
-                    .collect::<Result<Vec<_>>>()?;
-
-                plan = wrap_return(plan, return_items, return_clause.distinct);
-            }
-
-            // Apply ORDER BY/SKIP/LIMIT for non-aggregate CALL queries.
-            // Aggregate CALL queries handle these inside their own branch
-            // with aggregate-aware ORDER BY rewriting.
-            if !has_aggregates {
-                if let Some(order_by) = &return_clause.order_by {
-                    // With DISTINCT, ORDER BY reads only what the RETURN
-                    // returns (see `sort`).
-                    let keys = if return_clause.distinct && !return_clause.items.is_empty() {
-                        self.projected_sort_keys(order_by, &return_clause.items, "RETURN", false)?
-                    } else {
-                        order_by
-                            .items
-                            .iter()
-                            .map(|item| {
-                                Ok(sort_key(item, self.translate_expression(&item.expression)?))
-                            })
-                            .collect::<Result<Vec<_>>>()?
-                    };
-
-                    plan = wrap_sort(plan, keys);
-                }
-
-                if let Some(skip_expr) = &return_clause.skip
-                    && let ast::Expression::Literal(ast::Literal::Integer(n)) = skip_expr
-                {
-                    // reason: SKIP/LIMIT literals are non-negative in practice
-                    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-                    let count = *n as usize;
-                    plan = wrap_skip(plan, count);
-                }
-            }
-
-            // Apply LIMIT (non-aggregate path)
-            if !has_aggregates
-                && let Some(limit_expr) = &return_clause.limit
-                && let ast::Expression::Literal(ast::Literal::Integer(n)) = limit_expr
-            {
-                // reason: SKIP/LIMIT literals are non-negative in practice
-                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-                let count = *n as usize;
-                plan = wrap_limit(plan, count);
-            }
         }
 
         Ok(LogicalPlan::new(plan))

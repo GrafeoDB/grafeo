@@ -230,6 +230,42 @@ pub enum DataOp {
 }
 
 impl DataOp {
+    /// About the heap bytes of the values the op carries: what a store's
+    /// admission keeps headroom for before it applies the op. Shallow, so it
+    /// costs the same for any value: a string, bytes or a vector by their
+    /// length, a list or a map by its entries (not what each holds besides).
+    #[must_use]
+    pub fn payload_bytes(&self) -> usize {
+        fn shallow(value: &Value) -> usize {
+            match value {
+                Value::String(text) => text.len(),
+                Value::Bytes(bytes) => bytes.len(),
+                Value::Vector(vector) => vector.len() * size_of::<f32>(),
+                Value::List(items) => items.len() * size_of::<Value>(),
+                Value::Map(entries) => {
+                    entries.len() * (size_of::<Value>() + size_of::<PropertyKey>())
+                }
+                _ => 0,
+            }
+        }
+        match self {
+            Self::CreateNode { properties, .. } | Self::CreateEdge { properties, .. } => {
+                properties.iter().map(|(_, value)| shallow(value)).sum()
+            }
+            Self::SetNodeProperty { value, .. } | Self::SetEdgeProperty { value, .. } => {
+                shallow(value)
+            }
+            Self::DeleteNode { .. }
+            | Self::DeleteEdge { .. }
+            | Self::RemoveNodeProperty { .. }
+            | Self::RemoveEdgeProperty { .. }
+            | Self::AddNodeLabel { .. }
+            | Self::RemoveNodeLabel { .. }
+            | Self::InsertTriple { .. }
+            | Self::DeleteTriple { .. } => 0,
+        }
+    }
+
     /// The model of the graphs the op applies to: triples to RDF graphs,
     /// every other op to labeled property graphs.
     #[must_use]
@@ -2583,5 +2619,82 @@ mod tests {
             index: IndexKeyRecord::Property { key: "city".into() },
         };
         assert_eq!(dropped.kind(), 7);
+    }
+}
+
+#[cfg(test)]
+mod catalogue {
+    //! Class test 0: the catalogue of this file's enums (`tests/catalogue/`), as the class tests
+    //! read it.
+
+    use super::{DataOp, RdfGraphOp, StandaloneOp};
+
+    /// Takes the variant list once: an exhaustive match, which fails to compile when the enum gains a
+    /// variant this list does not name, and the names, which the test holds to the checked-in file.
+    macro_rules! catalogue {
+        ($name_of:ident, $names:ident, $enum:ident: $($variant:ident),+ $(,)?) => {
+            fn $name_of(value: &$enum) -> &'static str {
+                match value {
+                    $($enum::$variant { .. } => stringify!($variant),)+
+                }
+            }
+            const $names: &[&str] = &[$(stringify!($variant)),+];
+        };
+    }
+
+    /// The names a catalogue file lists: one per line, `#` lines and blank lines aside.
+    fn listed(file: &str) -> Vec<&str> {
+        file.lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+            .collect()
+    }
+
+    catalogue!(
+        data_op_name,
+        DATA_OP_NAMES,
+        DataOp: CreateNode, DeleteNode, CreateEdge, DeleteEdge, SetNodeProperty, RemoveNodeProperty, SetEdgeProperty, RemoveEdgeProperty, AddNodeLabel, RemoveNodeLabel, InsertTriple, DeleteTriple
+    );
+
+    #[test]
+    fn data_op_catalogue_names_every_variant() {
+        std::hint::black_box(data_op_name as fn(&DataOp) -> &'static str);
+        let file = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tests/catalogue/data_op.txt"
+        ));
+        assert_eq!(listed(file), DATA_OP_NAMES);
+    }
+
+    catalogue!(
+        standalone_op_name,
+        STANDALONE_OP_NAMES,
+        StandaloneOp: CreateGraph, DropGraph, PutCatalog, DropCatalog, RdfGraph
+    );
+
+    #[test]
+    fn standalone_op_catalogue_names_every_variant() {
+        std::hint::black_box(standalone_op_name as fn(&StandaloneOp) -> &'static str);
+        let file = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tests/catalogue/standalone_op.txt"
+        ));
+        assert_eq!(listed(file), STANDALONE_OP_NAMES);
+    }
+
+    catalogue!(
+        rdf_graph_op_name,
+        RDF_GRAPH_OP_NAMES,
+        RdfGraphOp: Create, Drop, Clear, Copy, Move, Add
+    );
+
+    #[test]
+    fn rdf_graph_op_catalogue_names_every_variant() {
+        std::hint::black_box(rdf_graph_op_name as fn(&RdfGraphOp) -> &'static str);
+        let file = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tests/catalogue/rdf_graph_op.txt"
+        ));
+        assert_eq!(listed(file), RDF_GRAPH_OP_NAMES);
     }
 }

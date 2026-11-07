@@ -28,6 +28,9 @@ import { readFileSync } from 'fs'
  * @property {string|null} hash
  * @property {number|null} precision
  * @property {string[]} columns
+ * @property {string[]} warnings The codes of the warnings the statement raises,
+ *   in the result's order (by code): none without the key, so every test that
+ *   runs to a result also checks that it raises no other warning.
  */
 
 /**
@@ -40,6 +43,9 @@ import { readFileSync } from 'fs'
  *   quotes included: whether it was quoted decides its type (see `paramValue`).
  * @property {string[]} tags
  * @property {string|null} skip
+ * @property {{spec: string, issue: string}|null} xfail The spec and the issue a case expected
+ *   to fail is held against (`xfail:`)
+ * @property {string|null} probe A runner probe (`probe:`), only under `spec-probes`
  * @property {Expect} expect
  * @property {Object<string,string>} variants
  */
@@ -127,7 +133,56 @@ export function parseGtestFile(filePath) {
   const meta = parseMeta(ctx)
   skipBlankAndComments(ctx)
   const tests = parseTests(ctx)
+  for (const tc of tests) checkMarks(tc, filePath)
   return { meta, tests }
+}
+
+/** The runner probes a `probe:` key may name. */
+const PROBES = new Set(['runner_error'])
+
+/**
+ * The rules of the marks, as every runner checks them: an `xfail:` names its spec and its
+ * issue, a case is never both `skip:` and `xfail:`, and `probe:` is for the runner probes only,
+ * in a file under a `spec-probes` directory.
+ */
+function checkMarks(tc, filePath) {
+  if (tc.xfail != null) {
+    for (const key of ['spec', 'issue']) {
+      if (!tc.xfail[key]?.trim()) throw new Error(`test '${tc.name}': an xfail names its \`${key}:\``)
+    }
+  }
+  if (tc.skip != null && tc.xfail != null) {
+    throw new Error(`test '${tc.name}': a case is either skipped or expected to fail, not both`)
+  }
+  if (tc.probe != null) {
+    if (!filePath.split(/[\\/]/).includes('spec-probes')) {
+      throw new Error(
+        `test '${tc.name}': \`probe:\` is for the runner probes only, under a \`spec-probes\` directory, not in ${filePath}`,
+      )
+    }
+    if (!PROBES.has(tc.probe)) throw new Error(`test '${tc.name}': unknown probe '${tc.probe}' (known: runner_error)`)
+  }
+}
+
+/** The `spec:` and `issue:` under an `xfail:` at `ctx.lines[ctx.idx]`, checked by `checkMarks`. */
+function parseXfail(ctx) {
+  const indent = (line) => line.length - line.trimStart().length
+  const own = indent(ctx.lines[ctx.idx])
+  ctx.idx++
+  const xfail = { spec: '', issue: '' }
+  while (ctx.idx < ctx.lines.length) {
+    const line = ctx.lines[ctx.idx]
+    const trimmed = line.trim()
+    if (!trimmed || trimmed.startsWith('#')) { ctx.idx++; continue }
+    if (indent(line) <= own) break
+    const kv = parseKV(trimmed)
+    if (!kv || (kv[0] !== 'spec' && kv[0] !== 'issue')) {
+      throw new Error(`unknown xfail key at line ${ctx.idx + 1}: '${trimmed}'`)
+    }
+    xfail[kv[0]] = unquote(kv[1])
+    ctx.idx++
+  }
+  return xfail
 }
 
 // ---------------------------------------------------------------------------
@@ -186,7 +241,7 @@ function parseTests(ctx) {
 function parseSingleTest(ctx) {
   const tc = {
     name: '', query: null, statements: [], setup: [],
-    params: {}, tags: [], skip: null, language: null,
+    params: {}, tags: [], skip: null, xfail: null, probe: null, language: null,
     expect: makeExpect(), variants: {}, requires: [],
   }
 
@@ -213,6 +268,10 @@ function parseSingleTest(ctx) {
         break
       case 'skip':
         tc.skip = unquote(value); ctx.idx++; break
+      case 'xfail':
+        tc.xfail = parseXfail(ctx); break
+      case 'probe':
+        tc.probe = unquote(value); ctx.idx++; break
       case 'setup':
         ctx.idx++; tc.setup = parseStringList(ctx); break
       case 'statements':
@@ -243,7 +302,7 @@ function parseSingleTest(ctx) {
 // ---------------------------------------------------------------------------
 
 function makeExpect() {
-  return { rows: [], ordered: false, count: null, empty: false, error: null, gqlStatus: null, hash: null, precision: null, columns: [], terms: [] }
+  return { rows: [], ordered: false, count: null, empty: false, error: null, gqlStatus: null, hash: null, precision: null, columns: [], terms: [], warnings: [] }
 }
 
 function parseExpectBlock(ctx) {
@@ -274,6 +333,7 @@ function parseExpectBlock(ctx) {
       case 'hash': expect.hash = unquote(value); ctx.idx++; break
       case 'precision': expect.precision = parseInt(value, 10); ctx.idx++; break
       case 'columns': expect.columns = parseYamlList(value); ctx.idx++; break
+      case 'warnings': expect.warnings = parseYamlList(value); ctx.idx++; break
       case 'rows': ctx.idx++; expect.rows = parseRows(ctx); break
       case 'terms': ctx.idx++; expect.terms = parseRows(ctx); break
       // A key no runner reads would leave a test that checks nothing.

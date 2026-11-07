@@ -27,6 +27,16 @@ const REACHED_READS_PER_PLAN: u64 = 8_192;
 /// search's, so that they leave its plan as it was. A placeholder until measured.
 const TURN_READS_PER_PLAN: u64 = 1_024;
 
+/// What a read of a far key's candidates found (see [`HopDegrees::candidates_of`]).
+pub(super) enum Candidates {
+    /// At most the limit: the nodes, and the entries their lists hold.
+    Few { nodes: usize, entries: usize },
+    /// More than the limit.
+    Many,
+    /// A store that cannot say.
+    Unknown,
+}
+
 /// The counts a hop's degree derives from, and the store that samples it.
 pub struct HopDegrees {
     /// The store's counts, shared, so a plan with no hop pays no copy of them.
@@ -123,6 +133,70 @@ impl HopDegrees {
         degree
     }
 
+    /// Whether the store can read an equality's key from the key's column, and so without a row.
+    pub(super) fn reads_key_columns(&self) -> bool {
+        self.sampler
+            .get()
+            .is_some_and(|store| store.reads_key_columns())
+    }
+
+    /// The nodes with `labels` the index that serves them on `key` may find equal to `value`, and
+    /// the entries their lists of `types` hold in `direction`, read up to `limit` candidates.
+    /// Candidates may include values `=` tells apart, and entries removed ones, so it reads high.
+    pub(super) fn candidates_of(
+        &self,
+        labels: &[&str],
+        key: &str,
+        value: &grafeo_common::types::Value,
+        limit: usize,
+        types: &[&str],
+        direction: Direction,
+    ) -> Candidates {
+        let Some(store) = self.sampler.get() else {
+            return Candidates::Unknown;
+        };
+        let latest = grafeo_common::types::ReadView::latest();
+        let nodes = match store.find_few_indexed_maybe_equal(labels, key, value, limit, latest) {
+            Ok(Some(nodes)) => nodes,
+            Ok(None) => return Candidates::Many,
+            Err(_) => return Candidates::Unknown,
+        };
+        let types: Vec<grafeo_common::types::ArcStr> =
+            types.iter().map(|name| (*name).into()).collect();
+        let mut entries = 0;
+        for node in &nodes {
+            let Some(listed) = store.edge_entries_at_most(*node, direction, &types, latest) else {
+                return Candidates::Unknown;
+            };
+            entries += listed;
+        }
+        Candidates::Few {
+            nodes: nodes.len(),
+            entries,
+        }
+    }
+
+    /// The largest degree over `types` in `direction` a sample of the rarest of `labels` saw, by
+    /// type, added up: a start's list is at most this long, but for one the sample missed. `None`
+    /// without a label or a sample.
+    pub(super) fn sampled_max_degree(
+        &self,
+        labels: &[&str],
+        types: &[&str],
+        direction: Direction,
+    ) -> Option<f64> {
+        let store = self.sampler.get()?;
+        let label = labels
+            .iter()
+            .copied()
+            .min_by_key(|label| self.nodes_of(label).unwrap_or(0))?;
+        let mut max = 0.0;
+        for edge_type in types {
+            max += store.sampled_max_degree(label, edge_type, direction)?;
+        }
+        (!types.is_empty()).then_some(max)
+    }
+
     /// How many distinct values the store's index for `labels` and `key` holds.
     pub(super) fn distinct_values(&self, labels: &[&str], key: &str) -> Option<u64> {
         self.sampler.get()?.indexed_distinct_values(labels, key)
@@ -135,14 +209,21 @@ impl HopDegrees {
         })
     }
 
-    /// The degree from a node with `labels` by the counts (see [`Self::of`]).
-    pub(super) fn counted_degree(
+    /// The degree from a node with `labels` as the turn prices a start's list: by a sample of the
+    /// label where the store samples, else by the counts (see [`Self::of`]). The counts read high
+    /// for a small label of a type other labels hold most edges of.
+    pub(super) fn start_degree(
         &self,
         labels: &[&str],
         types: &[&str],
         direction: Direction,
     ) -> Option<f64> {
-        self.degree(None, labels, types, direction)
+        self.degree(
+            self.sampler.get().map(AsRef::as_ref),
+            labels,
+            types,
+            direction,
+        )
     }
 
     /// The nodes with `label`, as counted.

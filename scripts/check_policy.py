@@ -26,6 +26,13 @@ Add `--json` for machine-readable output. Exit code 1 when an error is found.
         `[[test]]` entry with a comment saying why, not both
     T8  the Node.js package's platform folders, its `napi` targets and the release's build
         matrix name the same platforms, and its manifest lists no platform packages
+    T9  every expected failure (a gtest `xfail:`, a strict pytest xfail mark, a Rust
+        `xfail(...)`) names its spec and an issue: `#N`, or `fix in X.Y.Z` not below the
+        release CHANGELOG.md's first `## [X.Y.Z]` heading names
+    T10 per build: the facade's profiles, the CLI and the bindings reach no tokio, and the WAL
+        no crossbeam, but through the crates allowed to depend on them (cargo tree)
+    T11 per binding build (its default and each profile): no engine feature is compiled whose
+        same-name feature of the binding is off (cargo tree)
     D1  an added #[allow(...)] states a reason = "..."
     D2  no em or en dashes in added Markdown lines or code comments
     D3  no added references to private planning notes; no internal phase wording in docs
@@ -34,6 +41,8 @@ Add `--json` for machine-readable output. Exit code 1 when an error is found.
         code (the stores themselves, STORES, implement the traits; test modules are not library
         code)
     D6  no `let _ =` in WAL, replay and recovery code (errors must propagate)
+    D7  no added text addressed to the project's private workflow: its session roles, its
+        inbox, its private design and decision notes
     W1  warning: new feature cfg in grafeo-core or grafeo-engine (features add modules)
     P1  pull requests target release/*; main only receives release branches
     P2  contributor pull requests link a planned issue (milestone, help wanted, good first issue)
@@ -55,6 +64,7 @@ Standard library only (Python 3.11+). Tests: scripts/tests/test_check_policy.py.
 from __future__ import annotations
 
 import argparse
+import ast
 import json
 import os
 import re
@@ -76,6 +86,18 @@ PRIVATE_ALLOWED = {
 }
 INTERNAL_PHRASES = re.compile(
     r"\bPhase [0-9]|consolidated plan|internal roadmap", re.IGNORECASE
+)
+# Text addressed to the private workflow (D7): its session roles by name, its inbox, and its
+# design and decision notes. The roles match as names only ("the Architect", "Review's", "by
+# Review"), so ordinary words stay free: "a PR review", `review_threads`, "Review the plan",
+# "the architecture", "an engineer".
+WORKFLOW_TEXT = re.compile(
+    r"\b(?:Architect|Orchestrator|git Manager)(?:'s)?\b"
+    r"|\bthe Engineer(?:'s)?\b|\(Engineer\b|\bEngineer's\b"
+    r"|\bReview(?:'s| Expert| session)\b|\b(?:by|from|for|with) Review\b|\(Review\b"
+    r"|\bthe review's\b"
+    r"|\binbox\b"
+    r"|[\w.-]+-design\.md\b|\bdecisions\.md\b|\bquestions-pending\.md\b"
 )
 ALLOW_ATTRIBUTE = re.compile(r"#!?\[\s*(?:cfg_attr\s*\(.*?,\s*)?allow\s*\(")
 IGNORE_ATTRIBUTE = re.compile(r"#\[\s*ignore\b")
@@ -137,6 +159,51 @@ BOUNDARIES: dict[str, dict[str, set[str]]] = {
     },
 }
 
+# T10: per build, a crate it must not reach, and the crates allowed to depend on that one directly
+# (a binding's own async API). `None`: the package's default features.
+RUNTIME_RULES: list[tuple[str, str | None, str, frozenset[str]]] = [
+    ("grafeo", "embedded", "tokio", frozenset()),
+    ("grafeo", "edge", "tokio", frozenset()),
+    ("grafeo", "lpg", "tokio", frozenset()),
+    ("grafeo", "rdf", "tokio", frozenset()),
+    ("grafeo", "analytics", "tokio", frozenset()),
+    ("grafeo", "ai", "tokio", frozenset()),
+    ("grafeo", "browser", "tokio", frozenset()),
+    ("grafeo-cli", None, "tokio", frozenset()),
+    ("grafeo-c", None, "tokio", frozenset()),
+    (
+        "grafeo-python",
+        None,
+        "tokio",
+        frozenset({"grafeo-python", "pyo3-async-runtimes"}),
+    ),
+    ("grafeo-node", None, "tokio", frozenset({"grafeo-node", "napi"})),
+    ("grafeo-storage", "wal", "tokio", frozenset()),
+    ("grafeo-storage", "wal", "crossbeam", frozenset()),
+]
+
+# A build that must reach tokio: without it a renamed crate or another cargo output would let
+# every rule above pass by reading nothing.
+RUNTIME_CONTROL = ("grafeo", "async-storage", "tokio")
+
+# T11: every binding crate that depends on the engine, with its default build (`None`) and each
+# profile its manifest defines.
+_BINDING_PROFILES = ("lpg", "rdf", "ai", "analytics", "edge", "embedded", "full")
+PROFILE_BUILDS: list[tuple[str, str | None]] = [
+    (package, features)
+    for package, profiles in (
+        ("grafeo-c", _BINDING_PROFILES),
+        ("grafeo-node", _BINDING_PROFILES),
+        ("grafeo-python", _BINDING_PROFILES),
+        ("grafeo-wasm", ("lpg", "rdf", "ai", "analytics", "edge", "full")),
+    )
+    for features in (None, *profiles)
+]
+
+# A build that must compile an engine feature and report it: without it another cargo output
+# would let every build above pass by reading nothing.
+PROFILE_CONTROL = ("grafeo-python", "full", "vector-index")
+
 HINTS = {
     "T2": "bump the pin together with rust-toolchain.toml (or rust-version for the MSRV job)",
     "T3": "restate what matters inline or link a public issue",
@@ -145,12 +212,28 @@ HINTS = {
     "T6": "an experimental item has a `# Stability: Experimental` section and a row in docs/stability.md; a module the facade exports has a `# Stability` section",
     "T7": "declare a test file with `mod name;` in tests/main.rs; a separate `[[test]]` entry has a comment above it saying why it cannot be there",
     "T8": "a platform needs its target in `napi.targets`, in the build matrix of release.yml, and a folder under npm/; the release adds the platform packages to the manifest (scripts/node-platform-deps.sh)",
+    "T9": "an expected failure names its spec and an issue (`#N`, or `fix in X.Y.Z` for "
+    "the release being made or a later one); a pytest mark is `strict=True` with `raises=` "
+    'and `reason="spec: <ref>; issue: <issue>"`',
+    "T11": "a binding's profile lists the features it compiles: turn the dependency's default "
+    "features off and forward each feature the profile needs",
+    "T10": "tokio belongs to `async-storage` and `server` (and a binding's own async API); "
+    "make the dependency optional behind those features, or name the binding's edge in "
+    "RUNTIME_RULES",
+    "T12": "gate a binding's code on the capability it needs (`rdf-model`, `sparql`, "
+    "`vector-index`, ...), not on a profile or group: every profile that holds the "
+    "capability then compiles it",
+    "T13": "copy crates/bindings/c/grafeo.h to crates/bindings/go/grafeo.h; declare each "
+    "export in the header; regenerate crates/bindings/go/grafeo_c.def and libgrafeo_c.dll.a "
+    "from the built grafeo_c.dll (gendef, then dlltool)",
     "D1": 'add reason = "..." naming the bound or invariant that makes it safe',
     "D2": "em or en dash; rewrite with a comma, colon or parentheses",
     "D3": "public text must stand on its own; restate the content or link a public issue",
     "D4": "crash-injection tests must run in CI; make it fast enough instead of ignoring it",
     "D5": "cross-cutting concerns derive from the transaction change set, not from store wrappers (only the store RowGroupStore implements the store traits)",
     "D6": "replay and recovery must propagate errors; handle or return the result",
+    "D7": "public text must not address the private workflow; state the rule or the date "
+    "itself, or link a public issue",
     "W1": "features should add modules, not fork core types",
     "P1": "open the pull request against the current release/<milestone> branch",
     "P2": 'link a planned issue with "Fixes #N" (it needs a milestone, or the "help wanted" '
@@ -351,6 +434,187 @@ def boundary_findings(metadata: dict) -> list[Finding]:
     return findings
 
 
+def inverse_chains(text: str, root_package: str) -> dict[str, list[str]]:
+    """From `cargo tree -i CRATE --prefix depth --format {p}` of `root_package`: each crate that
+    depends on CRATE directly, with one chain from `root_package` down to CRATE through it."""
+    chains: dict[str, list[str]] = {}
+    stack: list[str] = []
+    for line in text.splitlines():
+        match = re.match(r"(\d+)(\S+)", line)
+        if not match:
+            continue
+        depth, name = int(match.group(1)), match.group(2)
+        del stack[depth:]
+        stack.append(name)
+        if depth == 0:
+            continue
+        chain = list(reversed(stack))
+        known = chains.get(stack[1])
+        if known is None or (known[0] != root_package and chain[0] == root_package):
+            chains[stack[1]] = chain
+    return chains
+
+
+def cargo_tree_inverse(
+    root: Path, package: str, features: str | None, crate: str
+) -> str | None:
+    """`cargo tree -i crate` of `package` with `features` (`None`: its defaults), normal and build
+    edges; `None` when the build does not reach `crate`."""
+    args = ["cargo", "tree", "--locked", "-p", package, "-e", "normal,build"]
+    if features is not None:
+        args += ["--no-default-features", "--features", features]
+    args += ["-i", crate, "--prefix", "depth", "--format", "{p}"]
+    result = subprocess.run(
+        args, cwd=root, capture_output=True, text=True, encoding="utf-8"
+    )
+    if result.returncode != 0:
+        if "did not match any packages" in result.stderr:
+            return None
+        raise SystemExit(f"{' '.join(args)} failed: {result.stderr.strip()}")
+    return result.stdout if result.stdout.strip() else None
+
+
+def runtime_findings(tree) -> list[Finding]:
+    """T10: no build of RUNTIME_RULES reaches its crate but through an allowed direct dependent.
+    `tree(package, features, crate)` is the output of `cargo_tree_inverse`."""
+    findings: list[Finding] = []
+    package, features, crate = RUNTIME_CONTROL
+    if not tree(package, features, crate):
+        findings.append(
+            Finding(
+                "T10",
+                "Cargo.toml",
+                None,
+                f"{package} with --features {features} reaches no {crate}: the check reads "
+                "nothing; update RUNTIME_CONTROL",
+            )
+        )
+    for package, features, crate, allowed in RUNTIME_RULES:
+        text = tree(package, features, crate)
+        if not text:
+            continue
+        build = f"--features {features}" if features else "its default features"
+        for dependent, chain in sorted(inverse_chains(text, package).items()):
+            if dependent not in allowed:
+                findings.append(
+                    Finding(
+                        "T10",
+                        "Cargo.toml",
+                        None,
+                        f"{package} with {build} reaches {crate} through {' -> '.join(chain)}",
+                    )
+                )
+    return findings
+
+
+def reportable_features(manifest: str) -> set[str]:
+    """The features of a binding's manifest that forward the engine feature of their own name
+    (`gql = ["grafeo-engine/gql"]`): the ones a build can be judged by. Groups, profiles and
+    features of another name do not count."""
+    features = tomllib.loads(manifest).get("features", {})
+    return {
+        name for name, enables in features.items() if f"grafeo-engine/{name}" in enables
+    }
+
+
+def compiled_features(text: str, package: str) -> tuple[dict[str, list[str]], set[str]]:
+    """From `cargo tree -e features -i grafeo-engine --prefix depth` of `package`: each engine
+    feature compiled, with the features that enable it directly (`crate/feature`, in cargo's
+    order), and the features of `package` that are on."""
+    pattern = re.compile(r'^(\d+)(\S+) feature "([^"]+)"')
+    engine: dict[str, list[str]] = {}
+    own: set[str] = set()
+    current: str | None = None
+    for line in text.splitlines():
+        match = pattern.match(line)
+        if not match:
+            # A package line: an engine feature's enablers end at a line of its own depth.
+            if line[:1].isdigit() and int(re.match(r"\d+", line).group()) <= 1:
+                current = None
+            continue
+        depth, crate, feature = int(match.group(1)), match.group(2), match.group(3)
+        if crate == package:
+            own.add(feature)
+        if depth == 1 and crate == "grafeo-engine":
+            current = feature
+            engine.setdefault(feature, [])
+        elif depth == 1:
+            current = None
+        elif depth == 2 and current is not None:
+            enabler = f"{crate}/{feature}"
+            if enabler not in engine[current]:
+                engine[current].append(enabler)
+    return engine, own
+
+
+def profile_findings(tree, manifests: dict[str, str]) -> list[Finding]:
+    """T11: no build of PROFILE_BUILDS compiles an engine feature whose same-name feature of the
+    binding is off. `tree(package, features)` is the build's `cargo tree` output (`None`: no tree
+    to judge); `manifests` holds each binding's Cargo.toml text."""
+    findings: list[Finding] = []
+    package, features, feature = PROFILE_CONTROL
+    text = tree(package, features)
+    engine, own = compiled_features(text, package) if text else ({}, set())
+    if feature not in engine or feature not in own:
+        findings.append(
+            Finding(
+                "T11",
+                "Cargo.toml",
+                None,
+                f"{package} with --features {features} compiles no engine {feature}: the check "
+                "reads nothing; update PROFILE_CONTROL",
+            )
+        )
+    for package, features in PROFILE_BUILDS:
+        text = tree(package, features)
+        manifest = manifests.get(package)
+        if not text or manifest is None:
+            continue
+        engine, own = compiled_features(text, package)
+        build = f"--features {features}" if features else "its default features"
+        for name in sorted(engine.keys() & reportable_features(manifest)):
+            if name in own:
+                continue
+            findings.append(
+                Finding(
+                    "T11",
+                    "Cargo.toml",
+                    None,
+                    f"{package} with {build} compiles the engine's {name}, which its own {name} "
+                    f"feature leaves off: enabled by {', '.join(engine[name])}",
+                )
+            )
+    return findings
+
+
+def cargo_tree_features(root: Path, package: str, features: str | None) -> str | None:
+    """`cargo tree -e features -i grafeo-engine` of `package` with `features` (`None`: its
+    defaults); `None` when the build does not reach the engine."""
+    args = ["cargo", "tree", "--locked", "-p", package, "-e", "features"]
+    if features is not None:
+        args += ["--no-default-features", "--features", features]
+    args += ["-i", "grafeo-engine", "--prefix", "depth"]
+    result = subprocess.run(
+        args, cwd=root, capture_output=True, text=True, encoding="utf-8"
+    )
+    if result.returncode != 0:
+        if "did not match any packages" in result.stderr:
+            return None
+        raise SystemExit(f"{' '.join(args)} failed: {result.stderr.strip()}")
+    return result.stdout if result.stdout.strip() else None
+
+
+def binding_manifests(root: Path) -> dict[str, str]:
+    """Each binding crate's Cargo.toml text, by package name."""
+    manifests: dict[str, str] = {}
+    for manifest in sorted(root.glob("crates/bindings/*/Cargo.toml")):
+        text = manifest.read_text(encoding="utf-8")
+        name = tomllib.loads(text).get("package", {}).get("name")
+        if name:
+            manifests[name] = text
+    return manifests
+
+
 def cargo_metadata(root: Path) -> dict:
     result = subprocess.run(
         ["cargo", "metadata", "--format-version", "1", "--all-features", "--locked"],
@@ -410,23 +674,69 @@ def rust_version_findings(root: Path, metadata: dict) -> list[Finding]:
 # ------------------------------------------------------------------ test binaries
 
 #: A file module of `tests/main.rs`.
-TEST_MODULE = re.compile(r"^\s*(?:pub(?:\([^)]*\))?\s+)?mod\s+(\w+)\s*;", re.MULTILINE)
+# A `mod name;` declaration, at the start of a line or after another item on it.
+TEST_MODULE = re.compile(
+    r"(?:^|[;{}])\s*(?:pub(?:\([^)]*\))?\s+)?mod\s+(\w+)\s*;", re.MULTILINE
+)
 TEST_TARGET_HEADER = re.compile(r"^\s*\[\[\s*test\s*\]\]")
-RUST_COMMENT_TOKEN = re.compile(r"(//[^\n]*|/\*|\*/)")
+RUST_RAW_STRING = re.compile(r'b?r(#*)"')
+RUST_CHAR = re.compile(r"'(\\u\{[0-9a-fA-F]+\}|\\.|[^\\'\n])'")
 
 
-def without_rust_comments(text: str) -> str:
-    """Rust source with its comments taken out; block comments nest."""
-    kept = []
-    depth = 0
-    for part in RUST_COMMENT_TOKEN.split(text):
-        if part == "/*":
-            depth += 1
-        elif part == "*/":
-            depth = max(depth - 1, 0)
-        elif depth == 0 and not part.startswith("//"):
-            kept.append(part)
-    return "".join(kept)
+def rust_code(text: str, literals: bool = False) -> str:
+    """Rust source with its comments blanked, and with `literals` the contents of its string and
+    char literals too: the same length and the same lines, so a position found in it is the
+    source's. Block comments nest; a `//` or `/*` inside a literal starts no comment."""
+    out = list(text)
+    size = len(text)
+
+    def blank(start: int, end: int) -> None:
+        for at in range(start, min(end, size)):
+            if out[at] != "\n":
+                out[at] = " "
+
+    def starts_a_word(at: int) -> bool:
+        return at == 0 or not (text[at - 1].isalnum() or text[at - 1] == "_")
+
+    at = 0
+    while at < size:
+        if text.startswith("//", at):
+            end = text.find("\n", at)
+            end = size if end < 0 else end
+            blank(at, end)
+            at = end
+        elif text.startswith("/*", at):
+            depth, end = 1, at + 2
+            while end < size and depth:
+                if text.startswith("/*", end):
+                    depth, end = depth + 1, end + 2
+                elif text.startswith("*/", end):
+                    depth, end = depth - 1, end + 2
+                else:
+                    end += 1
+            blank(at, end)
+            at = end
+        elif (raw := RUST_RAW_STRING.match(text, at)) and starts_a_word(at):
+            close = '"' + raw.group(1)
+            end = text.find(close, raw.end())
+            end = size if end < 0 else end
+            if literals:
+                blank(raw.end(), end)
+            at = end + len(close)
+        elif text[at] == '"':
+            end = at + 1
+            while end < size and text[end] != '"':
+                end += 2 if text[end] == "\\" else 1
+            if literals:
+                blank(at + 1, end)
+            at = end + 1
+        elif text[at] == "'" and (char := RUST_CHAR.match(text, at)):
+            if literals:
+                blank(at + 1, char.end() - 1)
+            at = char.end()
+        else:
+            at += 1
+    return "".join(out)
 
 
 def test_binary_findings(root: Path, files: list[str]) -> list[Finding]:
@@ -459,7 +769,7 @@ def test_binary_findings(root: Path, files: list[str]) -> list[Finding]:
             if "tests/main.rs" in targets
             else ""
         )
-        modules = set(TEST_MODULE.findall(without_rust_comments(main)))
+        modules = set(TEST_MODULE.findall(rust_code(main, literals=True)))
         for name in sorted(test_files):
             is_target = f"tests/{name}" in targets
             is_module = name.removesuffix(".rs") in modules
@@ -571,6 +881,287 @@ def node_package_findings(root: Path, files: list[str]) -> list[Finding]:
                     f"its name is not @grafeo-db/js-{folder}",
                 )
             )
+    return findings
+
+
+# ------------------------------------------------------------------- T9: expected failures
+
+#: `issue` of an expected failure: a GitHub issue, or the release that fixes it.
+T9_ISSUE = re.compile(r"#[1-9][0-9]*|fix in (\d+)\.(\d+)\.(\d+)")
+#: The first release heading of CHANGELOG.md, `## [X.Y.Z]` (not `## [Unreleased]`).
+T9_RELEASE_HEADING = re.compile(r"^## \[(\d+)\.(\d+)\.(\d+)\]", re.MULTILINE)
+#: A pytest mark's reason: `spec: <ref>; issue: <issue>`.
+T9_PYTEST_REASON = re.compile(r"spec:(?P<spec>[^;]*);\s*issue:(?P<issue>.*)")
+#: A Rust literal the call scanner steps over whole: a raw string, a string, a char.
+RUST_LITERAL = re.compile(
+    r'r(#*)"(?:.|\n)*?"\1|"(?:[^"\\]|\\.|\n)*"|\'(?:\\.|[^\\\'\n])\''
+)
+
+Release = tuple[int, int, int]
+
+
+def release_floor(root: Path) -> Release | None:
+    """The release being made: the first `## [X.Y.Z]` heading of CHANGELOG.md."""
+    match = T9_RELEASE_HEADING.search(read_text(root / "CHANGELOG.md") or "")
+    if not match:
+        return None
+    major, minor, patch = (int(part) for part in match.groups())
+    return major, minor, patch
+
+
+def issue_problem(issue: str, floor: Release | None) -> str | None:
+    """Why `issue` is not a valid `issue`, or None: `#N`, or `fix in X.Y.Z` not below
+    `floor` (not judged without one)."""
+    issue = issue.strip()
+    match = T9_ISSUE.fullmatch(issue)
+    if not match:
+        return f"`{issue}` is neither `#N` nor `fix in X.Y.Z`"
+    if match.group(1) is not None and floor is not None:
+        major, minor, patch = (int(part) for part in match.groups())
+        if (major, minor, patch) < floor:
+            release = ".".join(map(str, floor))
+            return f"`{issue}` names a release before {release}, the one being made"
+    return None
+
+
+def unquoted(value: str) -> str:
+    value = value.strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+        return value[1:-1]
+    return value
+
+
+def gtest_xfail_findings(rel: str, text: str, floor: Release | None) -> list[Finding]:
+    """T9 for a .gtest file: each `xfail:` key has a non-empty `spec:` and a valid `issue:`."""
+    findings = []
+    lines = text.splitlines()
+    for index, line in enumerate(lines):
+        if line.strip() != "xfail:":
+            continue
+        indent = len(line) - len(line.lstrip())
+        keys: dict[str, tuple[int, str]] = {}
+        for below in range(index + 1, len(lines)):
+            child = lines[below]
+            if not child.strip() or child.lstrip().startswith("#"):
+                continue
+            if len(child) - len(child.lstrip()) <= indent:
+                break
+            key, _, value = child.strip().partition(":")
+            keys[key.strip()] = (below + 1, unquoted(value))
+        for key in ("spec", "issue"):
+            if key not in keys:
+                findings.append(
+                    finding("T9", rel, index + 1, f"the xfail has no `{key}:`")
+                )
+        if "spec" in keys and not keys["spec"][1].strip():
+            findings.append(
+                finding("T9", rel, keys["spec"][0], "the xfail's `spec:` is empty")
+            )
+        if "issue" in keys:
+            problem = issue_problem(keys["issue"][1], floor)
+            if problem:
+                findings.append(finding("T9", rel, keys["issue"][0], problem))
+    return findings
+
+
+def dotted_name(node: ast.expr) -> str:
+    """`pytest.mark.xfail` for the expression that names it; empty for any other."""
+    parts = []
+    while isinstance(node, ast.Attribute):
+        parts.append(node.attr)
+        node = node.value
+    if not isinstance(node, ast.Name):
+        return ""
+    parts.append(node.id)
+    return ".".join(reversed(parts))
+
+
+def pytest_mark_problem(call: ast.Call) -> tuple[int, str] | None:
+    """The line and the problem of an xfail mark's arguments, or None (the issue aside)."""
+    keywords = {keyword.arg: keyword for keyword in call.keywords if keyword.arg}
+    strict = keywords.get("strict")
+    is_strict = (
+        strict is not None
+        and isinstance(strict.value, ast.Constant)
+        and strict.value.value is True
+    )
+    if not is_strict or "raises" not in keywords:
+        return call.lineno, "the xfail mark needs `strict=True` and `raises=`"
+    reason = keywords.get("reason")
+    if reason is None or not (
+        isinstance(reason.value, ast.Constant) and isinstance(reason.value.value, str)
+    ):
+        return call.lineno, "the xfail mark needs a literal `reason=`"
+    return None
+
+
+def pytest_xfail_findings(rel: str, text: str, floor: Release | None) -> list[Finding]:
+    """T9 for a Python file: each xfail mark is strict, names the error it expects and has a
+    `spec: <ref>; issue: <issue>` reason; an imperative `pytest.xfail()` is never strict."""
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return []
+    findings = []
+    called: set[int] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        called.add(id(node.func))
+        name = dotted_name(node.func)
+        if name == "pytest.xfail":
+            detail = "`pytest.xfail()` is never strict; mark the test instead"
+            findings.append(finding("T9", rel, node.lineno, detail))
+            continue
+        if name != "pytest.mark.xfail":
+            continue
+        problem = pytest_mark_problem(node)
+        if problem:
+            findings.append(finding("T9", rel, problem[0], problem[1]))
+            continue
+        reason = next(
+            keyword.value for keyword in node.keywords if keyword.arg == "reason"
+        )
+        assert isinstance(reason, ast.Constant) and isinstance(reason.value, str)
+        match = T9_PYTEST_REASON.fullmatch(reason.value.strip())
+        if not match:
+            detail = "the reason is not `spec: <ref>; issue: <issue>`"
+        elif not match.group("spec").strip():
+            detail = "the reason's spec is empty"
+        else:
+            detail = issue_problem(match.group("issue"), floor) or ""
+        if detail:
+            findings.append(finding("T9", rel, reason.lineno, detail))
+    # A mark used without arguments (`@pytest.mark.xfail`) is not strict.
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Attribute)
+            and id(node) not in called
+            and dotted_name(node) == "pytest.mark.xfail"
+        ):
+            detail = "the xfail mark needs `strict=True` and `raises=`"
+            findings.append(finding("T9", rel, node.lineno, detail))
+    return findings
+
+
+def rust_calls(text: str, name: str) -> list[tuple[int, list[tuple[int, str]]]]:
+    """The calls `name(...)` in Rust source outside comments and literals, each as its line
+    and its top-level arguments (line, text); `fn name(` and `x.name(` are not calls."""
+    call_start = re.compile(rf"(?<![\w.]){re.escape(name)}\s*\(")
+    calls = []
+    i, line, n = 0, 1, len(text)
+    while i < n:
+        if literal := RUST_LITERAL.match(text, i):
+            line += literal.group().count("\n")
+            i = literal.end()
+        elif text.startswith("//", i):
+            end = text.find("\n", i)
+            i = n if end < 0 else end
+        elif text.startswith("/*", i):
+            depth, i = 1, i + 2
+            while i < n and depth:
+                if text.startswith("/*", i):
+                    depth, i = depth + 1, i + 2
+                elif text.startswith("*/", i):
+                    depth, i = depth - 1, i + 2
+                else:
+                    line += text[i] == "\n"
+                    i += 1
+        elif (call := call_start.match(text, i)) and not re.search(
+            r"\bfn\s+$", text[max(0, i - 8) : i]
+        ):
+            calls.append((line, []))
+            i, line = rust_arguments(text, call.end(), line, calls[-1][1])
+        else:
+            line += text[i] == "\n"
+            i += 1
+    return calls
+
+
+def rust_arguments(
+    text: str, i: int, line: int, args: list[tuple[int, str]]
+) -> tuple[int, int]:
+    """Collects into `args` the top-level arguments of the call whose `(` ends before `i`;
+    the position after its `)` and the line there."""
+    depth, start, start_line = 0, i, line
+    while i < len(text):
+        if literal := RUST_LITERAL.match(text, i):
+            line += literal.group().count("\n")
+            i = literal.end()
+            continue
+        c = text[i]
+        if c in ",)" and not depth:
+            arg = text[start:i]
+            lead = arg[: len(arg) - len(arg.lstrip())]
+            if arg.strip():
+                args.append((start_line + lead.count("\n"), arg.strip()))
+            if c == ")":
+                return i + 1, line
+            start, start_line = i + 1, line
+        elif c in "([{":
+            depth += 1
+        elif c in ")]}":
+            depth -= 1
+        line += c == "\n"
+        i += 1
+    return i, line
+
+
+def rust_xfail_findings(rel: str, text: str, floor: Release | None) -> list[Finding]:
+    """T9 for a Rust file: each `xfail(spec, issue, ..)` call names a non-empty spec and a
+    valid issue, both as string literals."""
+    findings = []
+    for call_line, args in rust_calls(text, "xfail"):
+        if len(args) < 2:
+            findings.append(
+                finding("T9", rel, call_line, "the xfail names no spec and issue")
+            )
+            continue
+        for (line, arg), what in zip(args[:2], ("spec", "issue"), strict=True):
+            literal = re.fullmatch(r'"((?:[^"\\]|\\.)*)"', arg)
+            if not literal:
+                detail = f"the xfail's {what} is not a string literal"
+            elif what == "spec":
+                detail = "" if literal.group(1).strip() else "the xfail's spec is empty"
+            else:
+                detail = issue_problem(literal.group(1), floor) or ""
+            if detail:
+                findings.append(finding("T9", rel, line, detail))
+    return findings
+
+
+def xfail_findings(root: Path, files: list[str]) -> list[Finding]:
+    """T9: every expected failure (a gtest `xfail:`, a pytest xfail mark, a Rust `xfail(...)`)
+    names the spec it is held against and a valid issue: `#N`, or `fix in X.Y.Z` not below
+    the release being made, the first `## [X.Y.Z]` heading of CHANGELOG.md. Without that
+    heading a `fix in X.Y.Z` cannot be judged, which is a finding of its own."""
+    floor = release_floor(root)
+    findings = []
+    placeholder = False
+    forms: list[
+        tuple[str, Callable[[str, str, Release | None], list[Finding]], str]
+    ] = [
+        (".gtest", gtest_xfail_findings, "xfail:"),
+        (".py", pytest_xfail_findings, "xfail"),
+        (".rs", rust_xfail_findings, "xfail("),
+    ]
+    for rel in files:
+        # The gtest harness's own fixtures, some refused on purpose (an xfail without an
+        # issue): the spec suite is judged, not them. A whole path component, as the
+        # runners' `probe:` key matches it.
+        if "spec-probes" in rel.split("/"):
+            continue
+        for suffix, check, needle in forms:
+            if rel.endswith(suffix):
+                text = read_text(root / rel)
+                if text and needle in text:
+                    findings += check(rel, text, floor)
+                    placeholder = placeholder or "fix in " in text
+    if floor is None and placeholder:
+        detail = (
+            "no `## [X.Y.Z]` heading names the release a `fix in X.Y.Z` is judged by"
+        )
+        findings.append(finding("T9", "CHANGELOG.md", None, detail))
     return findings
 
 
@@ -917,12 +1508,198 @@ def text_findings(root: Path, files: list[str]) -> list[Finding]:
     return findings
 
 
+# The binding features that are profiles or groups of capabilities, never one capability.
+PROFILE_FEATURES = frozenset(
+    {
+        "lpg",
+        "rdf",
+        "ai",
+        "analytics",
+        "edge",
+        "browser",
+        "full",
+        "languages",
+        "embedded",
+        "server",
+    }
+)
+BINDING_SOURCES = (
+    "crates/bindings/python/src/",
+    "crates/bindings/node/src/",
+    "crates/bindings/c/src/",
+    "crates/bindings/wasm/src/",
+)
+CFG_START = re.compile(r"\bcfg(?:_attr)?!?\s*\(")
+CFG_FEATURE = re.compile(r'feature\s*=\s*"([A-Za-z0-9_-]+)"')
+
+
+def cfg_conditions(text: str) -> list[tuple[int, str]]:
+    """Each `cfg(...)`, `cfg!(...)` and `cfg_attr(...)` of Rust code, comments and the contents
+    of string and char literals left out: its line and its parenthesized text, which may span
+    lines, with its comments blanked (a feature name stays, as a string literal holds it)."""
+    code = rust_code(text, literals=True)
+    found = []
+    for start in CFG_START.finditer(code):
+        depth, end = 0, start.end() - 1
+        for end in range(start.end() - 1, len(code)):
+            if code[end] == "(":
+                depth += 1
+            elif code[end] == ")":
+                depth -= 1
+                if depth == 0:
+                    break
+        line = code.count("\n", 0, start.start()) + 1
+        found.append((line, rust_code(text[start.start() : end + 1])))
+    return found
+
+
+def binding_profile_cfg_findings(root: Path, files: list[str]) -> list[Finding]:
+    """T12: a binding's code gates on capability features, never on a profile or group.
+
+    A profile is a set of capabilities, and another profile can hold the same capability: code
+    gated on `rdf` is left out of a `full` build that has `rdf-model` through `sparql`, so
+    `full` lost `importRdf`. Gated on the capability, every profile that holds it compiles it.
+    """
+    findings = []
+    for rel in files:
+        if not rel.endswith(".rs") or not rel.startswith(BINDING_SOURCES):
+            continue
+        text = read_text(root / rel)
+        if text is None:
+            continue
+        for line, condition in cfg_conditions(text):
+            for name in CFG_FEATURE.findall(condition):
+                if name in PROFILE_FEATURES:
+                    findings.append(
+                        finding(
+                            "T12", rel, line, f"gates on the profile or group `{name}`"
+                        )
+                    )
+    return findings
+
+
+C_SOURCES = "crates/bindings/c/src/"
+C_HEADER = "crates/bindings/c/grafeo.h"
+GO_HEADER = "crates/bindings/go/grafeo.h"
+GO_IMPORTS = "crates/bindings/go/grafeo_c.def"
+
+# A function grafeo-c exports: `#[unsafe(no_mangle)]`, other attributes, then the `extern "C"` fn.
+C_EXPORT = re.compile(
+    r'#\[unsafe\(no_mangle\)\]\s*(?:#\[[^\]]*\]\s*)*pub\s+(?:unsafe\s+)?extern\s+"C"\s+fn\s+(\w+)'
+)
+# A `macro_rules!` whose body exports the fn it is given (`fn $name`).
+C_EXPORTING_MACRO = re.compile(r"macro_rules!\s*(\w+)\s*\{")
+C_DECLARATION = re.compile(r"\b(grafeo_\w+)\s*\(")
+C_COMMENT = re.compile(r"/\*.*?\*/|//[^\n]*", re.S)
+
+
+def c_exports(root: Path, files: list[str]) -> set[str]:
+    """The functions grafeo-c exports: each `#[unsafe(no_mangle)]` fn, and the name an exporting
+    macro is invoked with (its first `grafeo_` identifier)."""
+    exports: set[str] = set()
+    # Comments blanked, so a commented-out export is none.
+    sources = [
+        rust_code(text)
+        for rel in files
+        if rel.startswith(C_SOURCES) and rel.endswith(".rs")
+        if (text := read_text(root / rel)) is not None
+    ]
+    macros: set[str] = set()
+    for text in sources:
+        exports.update(C_EXPORT.findall(text))
+        for match in C_EXPORTING_MACRO.finditer(text):
+            # The macro's body: up to the next `macro_rules!`, or the end of the file.
+            body_end = text.find("macro_rules!", match.end())
+            body = text[match.end() : body_end if body_end >= 0 else len(text)]
+            if "no_mangle" in body and re.search(r"\bfn\s+\$\w+", body):
+                macros.add(match.group(1))
+    for text in sources:
+        for name in macros:
+            for call in re.finditer(rf"\b{re.escape(name)}!\s*\(", text):
+                arguments = text[call.end() :]
+                code = "\n".join(
+                    line
+                    for line in arguments.splitlines()
+                    if not line.lstrip().startswith("//")
+                )
+                found = re.search(r"\bgrafeo_\w+", code)
+                if found:
+                    exports.add(found.group(0))
+    return exports
+
+
+def c_header_findings(root: Path, files: list[str]) -> list[Finding]:
+    """T13: grafeo-c's header, its Go copy and the Go import list agree with what grafeo-c
+    exports. The Go header equals the C header (line endings aside); every export is declared
+    and every declaration exported; `grafeo_c.def` lists exactly the exports, which the Go
+    binding's Windows import library is built from."""
+    present = set(files)
+    findings: list[Finding] = []
+    # With grafeo-c's sources there, each file that must agree with them is there too.
+    if any(rel.startswith(C_SOURCES) for rel in files):
+        for required in (C_HEADER, GO_HEADER, GO_IMPORTS):
+            if required not in present:
+                findings.append(
+                    finding(
+                        "T13", required, None, "is missing; grafeo-c's exports need it"
+                    )
+                )
+    header = read_text(root / C_HEADER) if C_HEADER in present else None
+    if header is not None and GO_HEADER in present:
+        go_header = read_text(root / GO_HEADER)
+        if go_header is not None and go_header.replace("\r\n", "\n") != header.replace(
+            "\r\n", "\n"
+        ):
+            findings.append(finding("T13", GO_HEADER, None, f"differs from {C_HEADER}"))
+    exports = c_exports(root, files)
+    if header is not None:
+        declared = set(C_DECLARATION.findall(C_COMMENT.sub("", header)))
+        for name in sorted(exports - declared):
+            findings.append(
+                finding("T13", C_HEADER, None, f"`{name}` is exported but not declared")
+            )
+        for name in sorted(declared - exports):
+            findings.append(
+                finding("T13", C_HEADER, None, f"`{name}` is declared but not exported")
+            )
+    imports_text = read_text(root / GO_IMPORTS) if GO_IMPORTS in present else None
+    if imports_text is not None:
+        listed: set[str] = set()
+        in_exports = False
+        for raw in imports_text.splitlines():
+            line = raw.strip()
+            if not line or line.startswith(";"):
+                continue
+            if line == "EXPORTS":
+                in_exports = True
+                continue
+            if in_exports:
+                listed.add(line.split()[0])
+        for name in sorted(exports - listed):
+            findings.append(
+                finding(
+                    "T13",
+                    GO_IMPORTS,
+                    None,
+                    f"`{name}` is exported but not in the import list",
+                )
+            )
+        for name in sorted(listed - exports):
+            findings.append(
+                finding("T13", GO_IMPORTS, None, f"`{name}` is listed but not exported")
+            )
+    return findings
+
+
 def tree_findings(root: Path, metadata_arg: str | None) -> list[Finding]:
     files = git(root, "ls-files").splitlines()
     findings = toolchain_findings(root) + text_findings(root, files)
     findings += stability_findings(root, files)
     findings += test_binary_findings(root, files)
     findings += node_package_findings(root, files)
+    findings += binding_profile_cfg_findings(root, files)
+    findings += xfail_findings(root, files)
+    findings += c_header_findings(root, files)
     if metadata_arg != "none" and (root / "Cargo.toml").exists():
         if metadata_arg:
             metadata = json.loads(Path(metadata_arg).read_text(encoding="utf-8"))
@@ -930,6 +1707,15 @@ def tree_findings(root: Path, metadata_arg: str | None) -> list[Finding]:
             metadata = cargo_metadata(root)
         findings += boundary_findings(metadata)
         findings += rust_version_findings(root, metadata)
+        findings += runtime_findings(
+            lambda package, features, crate: cargo_tree_inverse(
+                root, package, features, crate
+            )
+        )
+        findings += profile_findings(
+            lambda package, features: cargo_tree_features(root, package, features),
+            binding_manifests(root),
+        )
     return findings
 
 
@@ -1024,6 +1810,8 @@ def diff_findings(
                 findings.append(
                     finding("D3", path, number, "internal planning wording")
                 )
+            if path not in PRIVATE_ALLOWED and WORKFLOW_TEXT.search(text):
+                findings.append(finding("D7", path, number))
             if suffix != ".rs":
                 continue
             if IGNORE_ATTRIBUTE.search(text) and is_crash_test(path, content):
@@ -1446,9 +2234,9 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--json", action="store_true", help="print findings as JSON")
     commands = parser.add_subparsers(dest="command", required=True)
-    tree = commands.add_parser("tree", help="whole-repository rules (T1 to T8)")
+    tree = commands.add_parser("tree", help="whole-repository rules (T1 to T10)")
     tree.add_argument(
-        "--metadata", help="cargo metadata JSON file, or 'none' to skip T1"
+        "--metadata", help="cargo metadata JSON file, or 'none' to skip T1, T5 and T10"
     )
     diff = commands.add_parser("diff", help="rules on added lines (D1 to D6, W1)")
     source = diff.add_mutually_exclusive_group()

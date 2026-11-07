@@ -482,12 +482,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "95832e849adfb21180ccb6826a99da14e5d266ae5c2e668e1602cf234f153797"
 
 [[package]]
-name = "byteorder"
-version = "1.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1fd0f2584146f6f2ef48085050886acf353beff7305ebd1ae69500e27c67f64b"
-
-[[package]]
 name = "bytes"
 version = "1.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -787,18 +781,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "console"
-version = "0.16.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e96a4956774c13c126a8b5af4daa79384f4d826534c95a02d76afb39e2ab64e3"
-dependencies = [
- "encode_unicode",
- "libc",
- "unicode-width",
- "windows-sys 0.61.2",
-]
-
-[[package]]
 name = "console_error_panic_hook"
 version = "0.1.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -932,9 +914,9 @@ dependencies = [
 
 [[package]]
 name = "crc32fast"
-version = "1.5.3"
+version = "1.5.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0ba106e844045ddc02c20768ac4b0b7cb45f2cc2ecbd833ac9f5dacb183c2055"
+checksum = "5f97d3416d5337d15c4b0d78c8c91df922ca143f57ec20e2d1c188333047ef04"
 dependencies = [
  "cfg-if",
 ]
@@ -1303,12 +1285,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0e9c71c2167ca323c882b99918929403426e2373ea17242ff5653e0d5e1058be"
 
 [[package]]
-name = "encode_unicode"
-version = "1.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "34aa73646ffb006b8f5147f3dc182bd4bcb190227ce861fc4a4844bf8e3cb2c0"
-
-[[package]]
 name = "encoding_rs"
 version = "0.8.44"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1611,7 +1587,6 @@ dependencies = [
 name = "grafeo"
 version = "0.6.1"
 dependencies = [
- "grafeo-adapters",
  "grafeo-common",
  "grafeo-core",
  "grafeo-engine",
@@ -1623,18 +1598,12 @@ dependencies = [
 name = "grafeo-adapters"
 version = "0.6.1"
 dependencies = [
- "bincode",
  "grafeo-common",
  "grafeo-core",
- "hashbrown 0.17.1",
  "parking_lot 0.13.0",
  "rayon",
- "serde",
  "serde_json",
- "smallvec",
  "tempfile",
- "thiserror",
- "tracing",
 ]
 
 [[package]]
@@ -1670,13 +1639,11 @@ dependencies = [
  "comfy-table",
  "grafeo-common",
  "grafeo-engine",
- "indicatif",
  "is-terminal",
  "rustyline",
  "serde",
  "serde_json",
  "tempfile",
- "thiserror",
  "tracing",
  "tracing-subscriber",
 ]
@@ -1690,7 +1657,6 @@ dependencies = [
  "argon2",
  "bincode",
  "bumpalo",
- "byteorder",
  "bytes",
  "codspeed-criterion-compat",
  "dashmap",
@@ -1699,6 +1665,7 @@ dependencies = [
  "hashbrown 0.17.1",
  "hkdf",
  "indexmap",
+ "libc",
  "num-bigint",
  "parking_lot 0.13.0",
  "proptest",
@@ -1709,6 +1676,7 @@ dependencies = [
  "thiserror",
  "tracing",
  "web-time",
+ "windows-sys 0.61.2",
  "zeroize",
 ]
 
@@ -1718,13 +1686,11 @@ version = "0.6.1"
 dependencies = [
  "arcstr",
  "bincode",
- "byteorder",
  "bytes",
  "codspeed-criterion-compat",
  "crc32fast",
  "crossbeam",
  "dashmap",
- "foldhash",
  "grafeo-common",
  "hashbrown 0.17.1",
  "indexmap",
@@ -1763,7 +1729,6 @@ dependencies = [
  "hf-hub",
  "indexmap",
  "md5",
- "memmap2",
  "ort",
  "parking_lot 0.13.0",
  "proptest",
@@ -1773,7 +1738,6 @@ dependencies = [
  "serde_json",
  "sha1",
  "sha2",
- "smallvec",
  "tempfile",
  "thiserror",
  "tokenizers",
@@ -1792,7 +1756,6 @@ dependencies = [
 name = "grafeo-node"
 version = "0.6.1"
 dependencies = [
- "grafeo-adapters",
  "grafeo-bindings-common",
  "grafeo-common",
  "grafeo-core",
@@ -1818,7 +1781,6 @@ dependencies = [
  "parking_lot 0.13.0",
  "pyo3",
  "pyo3-async-runtimes",
- "serde_json",
  "thiserror",
  "tokio",
 ]
@@ -1838,11 +1800,9 @@ name = "grafeo-storage"
 version = "0.6.1"
 dependencies = [
  "bincode",
- "byteorder",
  "bytes",
  "codspeed-criterion-compat",
  "crc32fast",
- "crossbeam",
  "fs2",
  "grafeo-common",
  "memmap2",
@@ -2282,19 +2242,6 @@ checksum = "cc4e190f5d26ca7051642629da2c52fc03bde85a03197c99408dcd291734c855"
 dependencies = [
  "equivalent",
  "hashbrown 0.17.1",
-]
-
-[[package]]
-name = "indicatif"
-version = "0.18.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9433806cd6b4ec1aba79c021c7e4c58fb4c3b9977c085062e611ac929998fb0c"
-dependencies = [
- "console",
- "portable-atomic",
- "unicode-width",
- "unit-prefix",
- "web-time",
 ]
 
 [[package]]
@@ -4731,12 +4678,6 @@ name = "unicode_categories"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39ec24b3121d976906ece63c9daad25b85969647682eee313cb5779fdd69e14e"
-
-[[package]]
-name = "unit-prefix"
-version = "0.5.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "81e544489bf3d8ef66c953931f56617f423cd4b5494be343d9b9d3dda037b9a3"
 
 [[package]]
 name = "universal-hash"

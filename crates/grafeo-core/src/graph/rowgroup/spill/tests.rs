@@ -647,6 +647,8 @@ fn a_spilled_column_is_read_by_key() {
     assert!(report.spilled_groups > 0, "{report:?}");
     spill(&store, &files);
     assert_eq!(store.spilled_node_property_columns().len(), 2);
+    let spilled = store.memory();
+    assert!(spilled.spilled_columns > 0, "{spilled:?}");
 
     let ranks_after: Vec<Vec<NodeId>> = keys
         .iter()
@@ -661,5 +663,20 @@ fn a_spilled_column_is_read_by_key() {
         store.spilled_node_property_columns().len(),
         2,
         "the reads thaw nothing"
+    );
+    // Per row group: a thawed chunk would leave the spill files and come back to the heap.
+    let read = store.memory();
+    assert_eq!(
+        (
+            read.spilled_columns,
+            read.node_spilled_bytes,
+            read.node_columns_bytes
+        ),
+        (
+            spilled.spilled_columns,
+            spilled.node_spilled_bytes,
+            spilled.node_columns_bytes
+        ),
+        "the reads thaw no row group"
     );
 }

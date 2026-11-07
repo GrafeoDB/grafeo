@@ -6,6 +6,7 @@ use grafeo_common::utils::hash::FxHashMap;
 use smallvec::SmallVec;
 
 use super::HashKey;
+use super::value_utils::ValueKinds;
 
 /// The fewest items a list needs to become a set: below this the walk is as cheap as building one.
 const MIN_ITEMS: usize = 16;
@@ -16,6 +17,8 @@ const MIN_ITEMS: usize = 16;
 pub struct InSet {
     items: FxHashMap<HashKey, SmallVec<[Value; 1]>>,
     holds_null: bool,
+    /// The kinds of the items that are not null.
+    kinds: ValueKinds,
 }
 
 impl InSet {
@@ -29,11 +32,13 @@ impl InSet {
         let mut set = Self {
             items: FxHashMap::default(),
             holds_null: false,
+            kinds: ValueKinds::default(),
         };
         for item in items {
             match item {
                 Value::Null => set.holds_null = true,
                 Value::Int64(_) | Value::Float64(_) | Value::String(_) | Value::Bool(_) => {
+                    set.kinds = set.kinds.union(ValueKinds::of(item));
                     let key = HashKey::for_equality(item)?;
                     set.items.entry(key).or_default().push((*item).clone());
                 }
@@ -41,6 +46,12 @@ impl InSet {
             }
         }
         Some(set)
+    }
+
+    /// The kinds of the items that are not null (see [`ValueKinds`]).
+    #[must_use]
+    pub fn kinds(&self) -> ValueKinds {
+        self.kinds
     }
 
     /// Whether `needle`, which is not null, is in the list: true for an item of its key that `equal`

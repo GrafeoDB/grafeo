@@ -15,19 +15,35 @@
 //! - Vector and text search (`grafeo.search.vector`, `grafeo.search.mmr`,
 //!   `grafeo.search.text`): implemented directly, require
 //!   [`ProcedureContext::lpg_store`].
+//! - The loads (`grafeo.load_nodes_csv`, `grafeo.load_edges_csv`, see
+//!   [`crate::loader`]): registered for their parameters and access, planned
+//!   with the statement's writer.
+//!
+//! The registry is in every build; the graph algorithms need `algos`.
+//! Each procedure states whether it writes the graph
+//! ([`Procedure::graph_access`]), which a read-only session refuses, and
+//! whether it reaches outside the database ([`Procedure::external_access`]),
+//! which a session without external access refuses. `grafeo.procedures()`
+//! lists both.
 
 use std::sync::Arc;
 
+use grafeo_adapters::plugins::Domain;
+#[cfg(feature = "algos")]
 use grafeo_adapters::plugins::algorithms::{
     ArticulationPointsAlgorithm, BellmanFordAlgorithm, BetweennessCentralityAlgorithm,
     BfsAlgorithm, BridgesAlgorithm, ClosenessCentralityAlgorithm, ClusteringCoefficientAlgorithm,
     ConnectedComponentsAlgorithm, DegreeCentralityAlgorithm, DfsAlgorithm, DijkstraAlgorithm,
-    FloydWarshallAlgorithm, GraphAlgorithm, KCoreAlgorithm, KruskalAlgorithm,
+    FloydWarshallAlgorithm, GraphAlgorithm, KCoreAlgorithm, KTrussAlgorithm, KruskalAlgorithm,
     LabelPropagationAlgorithm, LouvainAlgorithm, MaxFlowAlgorithm, MinCostFlowAlgorithm,
     PageRankAlgorithm, PrimAlgorithm, SsspAlgorithm, StronglyConnectedComponentsAlgorithm,
-    TopologicalSortAlgorithm,
+    SubgraphIsomorphismAlgorithm, TopologicalSortAlgorithm, TotalTrianglesAlgorithm,
 };
-use grafeo_adapters::plugins::{AlgorithmResult, ParameterDef, ParameterType, Parameters};
+use grafeo_adapters::plugins::{
+    AlgorithmResult, ParameterDef, ParameterType, Parameters, Prepared, prepare,
+};
+
+pub use crate::auth::ExternalAccess;
 use grafeo_common::types::{ReadView, Value};
 use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind, Result};
 use grafeo_core::graph::GraphStore;
@@ -35,6 +51,15 @@ use grafeo_core::graph::rowgroup::RowGroupStore;
 
 use crate::Snapshot;
 use hashbrown::HashMap;
+
+/// What a procedure does to the graph it is called on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum GraphAccess {
+    /// It only reads the graph.
+    Reads,
+    /// It writes the graph: a read-only session refuses the call.
+    Writes,
+}
 
 /// Unified interface for built-in procedures callable via `CALL`.
 ///
@@ -53,6 +78,17 @@ pub trait Procedure: Send + Sync {
     /// Returns parameter definitions (name, type, required, default).
     fn parameters(&self) -> &[ParameterDef];
 
+    /// Whether the procedure reads or writes anything outside the database (a file, a URL, a
+    /// model), which a session without external access refuses before the call is planned (see
+    /// [`Identity::with_external_access`](crate::auth::Identity::with_external_access)). Every
+    /// procedure states it: one added later is never let through by a default.
+    fn external_access(&self) -> ExternalAccess;
+
+    /// Whether the procedure writes the graph, which a read-only session refuses before the
+    /// call is planned (GRAFEO-Q007). Every procedure states it: one added later is never
+    /// taken for a read by a default.
+    fn graph_access(&self) -> GraphAccess;
+
     /// Returns the canonical output column names in order, for a call with
     /// the parameters' defaults (as `grafeo.procedures()` lists them).
     fn output_columns(&self) -> Vec<String>;
@@ -66,14 +102,36 @@ pub trait Procedure: Send + Sync {
         self.output_columns()
     }
 
-    /// Executes the procedure against the supplied context and parameters.
+    /// Runs the procedure against the supplied context with the arguments
+    /// `params`, prepared first (see [`prepare`]) and named as `CALL` names
+    /// it (`grafeo.<name>`): a required argument without a value, or one
+    /// outside its domain, is refused before any work, and an optional one
+    /// left out takes its declared default. `CALL` prepares its arguments
+    /// when it plans the statement (see [`evaluate_arguments`]) and runs
+    /// [`compute`](Self::compute) with them.
+    ///
+    /// Implement [`compute`](Self::compute), never this: an override would
+    /// skip the check.
     ///
     /// # Errors
     ///
-    /// Returns an error when required parameters are missing, types are
-    /// wrong, or the backing operation (graph algorithm, search index, or
-    /// catalog lookup) fails.
-    fn execute(&self, ctx: &ProcedureContext<'_>, params: &Parameters) -> Result<AlgorithmResult>;
+    /// The invalid parameter value of [`prepare`], and the errors of
+    /// [`compute`](Self::compute).
+    fn execute(&self, ctx: &ProcedureContext<'_>, params: &Parameters) -> Result<AlgorithmResult> {
+        let name = format!("grafeo.{}", self.name());
+        let prepared = prepare(&name, self.parameters(), params)?;
+        self.compute(ctx, &prepared)
+    }
+
+    /// The procedure's work against the supplied context, with arguments
+    /// [`prepare`] checked and completed: a required one has a value, and an
+    /// optional one that declares a default has it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the backing operation (graph algorithm, search
+    /// index, or catalog lookup) fails.
+    fn compute(&self, ctx: &ProcedureContext<'_>, params: &Prepared) -> Result<AlgorithmResult>;
 }
 
 /// Runtime context passed to [`Procedure::execute`].
@@ -140,10 +198,12 @@ impl<'a> ProcedureContext<'a> {
 /// Adapter that presents a [`GraphAlgorithm`] as a [`Procedure`], with
 /// canonical output column names (e.g., `score` instead of `pagerank`, see
 /// [`canonical_output_columns`]).
+#[cfg(feature = "algos")]
 pub struct GraphAlgorithmProcedure {
     inner: Arc<dyn GraphAlgorithm>,
 }
 
+#[cfg(feature = "algos")]
 impl GraphAlgorithmProcedure {
     /// Wraps a graph algorithm as a procedure.
     pub fn new(algorithm: Arc<dyn GraphAlgorithm>) -> Self {
@@ -151,7 +211,16 @@ impl GraphAlgorithmProcedure {
     }
 }
 
+#[cfg(feature = "algos")]
 impl Procedure for GraphAlgorithmProcedure {
+    fn external_access(&self) -> ExternalAccess {
+        ExternalAccess::None
+    }
+
+    fn graph_access(&self) -> GraphAccess {
+        GraphAccess::Reads
+    }
+
     fn name(&self) -> &str {
         self.inner.name()
     }
@@ -172,8 +241,10 @@ impl Procedure for GraphAlgorithmProcedure {
         canonical_output_columns(self.inner.as_ref(), params)
     }
 
-    fn execute(&self, ctx: &ProcedureContext<'_>, params: &Parameters) -> Result<AlgorithmResult> {
-        self.inner.execute(ctx.store(), ctx.view(), params)
+    fn compute(&self, ctx: &ProcedureContext<'_>, params: &Prepared) -> Result<AlgorithmResult> {
+        // The definitions are the algorithm's, so the arguments are its,
+        // prepared once.
+        self.inner.compute(ctx.store(), ctx.view(), params)
     }
 }
 
@@ -185,6 +256,14 @@ impl Procedure for GraphAlgorithmProcedure {
 struct LabelsProcedure;
 
 impl Procedure for LabelsProcedure {
+    fn external_access(&self) -> ExternalAccess {
+        ExternalAccess::None
+    }
+
+    fn graph_access(&self) -> GraphAccess {
+        GraphAccess::Reads
+    }
+
     fn name(&self) -> &str {
         "labels"
     }
@@ -201,7 +280,7 @@ impl Procedure for LabelsProcedure {
         vec!["label".into()]
     }
 
-    fn execute(&self, ctx: &ProcedureContext<'_>, _params: &Parameters) -> Result<AlgorithmResult> {
+    fn compute(&self, ctx: &ProcedureContext<'_>, _params: &Prepared) -> Result<AlgorithmResult> {
         let mut result = AlgorithmResult::new(vec!["label".into()]);
         for label in ctx.schema()?.labels {
             result.rows.push(vec![Value::String(label.name.into())]);
@@ -215,6 +294,14 @@ impl Procedure for LabelsProcedure {
 struct RelationshipTypesProcedure;
 
 impl Procedure for RelationshipTypesProcedure {
+    fn external_access(&self) -> ExternalAccess {
+        ExternalAccess::None
+    }
+
+    fn graph_access(&self) -> GraphAccess {
+        GraphAccess::Reads
+    }
+
     fn name(&self) -> &str {
         "relationshipTypes"
     }
@@ -231,7 +318,7 @@ impl Procedure for RelationshipTypesProcedure {
         vec!["relationshipType".into()]
     }
 
-    fn execute(&self, ctx: &ProcedureContext<'_>, _params: &Parameters) -> Result<AlgorithmResult> {
+    fn compute(&self, ctx: &ProcedureContext<'_>, _params: &Prepared) -> Result<AlgorithmResult> {
         let mut result = AlgorithmResult::new(vec!["relationshipType".into()]);
         for edge_type in ctx.schema()?.edge_types {
             result.rows.push(vec![Value::String(edge_type.name.into())]);
@@ -245,6 +332,14 @@ impl Procedure for RelationshipTypesProcedure {
 struct PropertyKeysProcedure;
 
 impl Procedure for PropertyKeysProcedure {
+    fn external_access(&self) -> ExternalAccess {
+        ExternalAccess::None
+    }
+
+    fn graph_access(&self) -> GraphAccess {
+        GraphAccess::Reads
+    }
+
     fn name(&self) -> &str {
         "propertyKeys"
     }
@@ -261,7 +356,7 @@ impl Procedure for PropertyKeysProcedure {
         vec!["propertyKey".into()]
     }
 
-    fn execute(&self, ctx: &ProcedureContext<'_>, _params: &Parameters) -> Result<AlgorithmResult> {
+    fn compute(&self, ctx: &ProcedureContext<'_>, _params: &Prepared) -> Result<AlgorithmResult> {
         let mut result = AlgorithmResult::new(vec!["propertyKey".into()]);
         for key in ctx.schema()?.property_keys {
             result.rows.push(vec![Value::String(key.into())]);
@@ -306,11 +401,17 @@ fn coerce_params_to_vector(params: &Parameters, key: &str) -> Result<Vec<f32>> {
     )))
 }
 
-/// Converts a `k` parameter (signed, user-supplied) to an unsigned limit.
-/// Negative values clamp to 0 so they can't silently flip via cast.
+/// The `k` parameter as a limit, its declared default (10) when the call
+/// leaves it out, which [`prepare`] fills in.
+///
+/// # Errors
+///
+/// An invalid parameter value for a negative `k`, which its domain refuses
+/// before the procedure runs (see [`prepare`]), and an internal error when
+/// `params` were not prepared.
 #[cfg(any(feature = "vector-index", feature = "text-index"))]
-fn k_limit(params: &Parameters, default: i64) -> usize {
-    usize::try_from(params.get_int("k").unwrap_or(default).max(0)).unwrap_or(0)
+fn k_limit(params: &Parameters) -> Result<usize> {
+    params.required_count("k")
 }
 
 /// Converts a NodeId into a `Value::Int64`.
@@ -339,6 +440,7 @@ impl SearchVectorProcedure {
                     param_type: ParameterType::String,
                     required: true,
                     default: None,
+                    domain: Domain::OfType,
                     description: "Node label that was vector-indexed".into(),
                 },
                 ParameterDef {
@@ -346,6 +448,7 @@ impl SearchVectorProcedure {
                     param_type: ParameterType::String,
                     required: true,
                     default: None,
+                    domain: Domain::OfType,
                     description: "Property name holding the embedding".into(),
                 },
                 ParameterDef {
@@ -353,6 +456,7 @@ impl SearchVectorProcedure {
                     param_type: ParameterType::List,
                     required: true,
                     default: None,
+                    domain: Domain::OfType,
                     description: "Query vector as a list of floats".into(),
                 },
                 ParameterDef {
@@ -360,6 +464,7 @@ impl SearchVectorProcedure {
                     param_type: ParameterType::Integer,
                     required: false,
                     default: Some("10".into()),
+                    domain: Domain::NonNegative,
                     description: "Number of nearest neighbors to return".into(),
                 },
             ],
@@ -369,6 +474,14 @@ impl SearchVectorProcedure {
 
 #[cfg(feature = "vector-index")]
 impl Procedure for SearchVectorProcedure {
+    fn external_access(&self) -> ExternalAccess {
+        ExternalAccess::None
+    }
+
+    fn graph_access(&self) -> GraphAccess {
+        GraphAccess::Reads
+    }
+
     fn name(&self) -> &str {
         "search.vector"
     }
@@ -385,20 +498,12 @@ impl Procedure for SearchVectorProcedure {
         vec!["node_id".into(), "distance".into()]
     }
 
-    fn execute(&self, ctx: &ProcedureContext<'_>, params: &Parameters) -> Result<AlgorithmResult> {
+    fn compute(&self, ctx: &ProcedureContext<'_>, params: &Prepared) -> Result<AlgorithmResult> {
         let lpg = require_lpg_store(ctx, "CALL grafeo.search.vector")?;
-        let label = params.get_string("label").ok_or_else(|| {
-            grafeo_common::utils::error::Error::InvalidValue(
-                "CALL grafeo.search.vector: missing required parameter 'label'".into(),
-            )
-        })?;
-        let property = params.get_string("property").ok_or_else(|| {
-            grafeo_common::utils::error::Error::InvalidValue(
-                "CALL grafeo.search.vector: missing required parameter 'property'".into(),
-            )
-        })?;
+        let label = params.required_string("label")?;
+        let property = params.required_string("property")?;
         let query = coerce_params_to_vector(params, "query")?;
-        let k = k_limit(params, 10);
+        let k = k_limit(params)?;
 
         let missing = || {
             grafeo_common::utils::error::Error::InvalidValue(format!(
@@ -414,7 +519,7 @@ impl Procedure for SearchVectorProcedure {
             allowed: None,
         };
         let results = lpg
-            .vector_index_search_at(label, property, &query, search, ctx.view())
+            .vector_index_search_at(label, property, &query, search, ctx.view())?
             .ok_or_else(missing)?;
 
         let mut result = AlgorithmResult::new(vec!["node_id".into(), "distance".into()]);
@@ -446,6 +551,7 @@ impl SearchMmrProcedure {
                     param_type: ParameterType::String,
                     required: true,
                     default: None,
+                    domain: Domain::OfType,
                     description: "Node label that was vector-indexed".into(),
                 },
                 ParameterDef {
@@ -453,6 +559,7 @@ impl SearchMmrProcedure {
                     param_type: ParameterType::String,
                     required: true,
                     default: None,
+                    domain: Domain::OfType,
                     description: "Property name holding the embedding".into(),
                 },
                 ParameterDef {
@@ -460,6 +567,7 @@ impl SearchMmrProcedure {
                     param_type: ParameterType::List,
                     required: true,
                     default: None,
+                    domain: Domain::OfType,
                     description: "Query vector as a list of floats".into(),
                 },
                 ParameterDef {
@@ -467,6 +575,7 @@ impl SearchMmrProcedure {
                     param_type: ParameterType::Integer,
                     required: false,
                     default: Some("10".into()),
+                    domain: Domain::NonNegative,
                     description: "Number of diverse results to return".into(),
                 },
                 ParameterDef {
@@ -474,6 +583,7 @@ impl SearchMmrProcedure {
                     param_type: ParameterType::Integer,
                     required: false,
                     default: None,
+                    domain: Domain::AtLeast("k"),
                     description: "Initial HNSW candidate count (default: 4*k)".into(),
                 },
                 ParameterDef {
@@ -481,6 +591,7 @@ impl SearchMmrProcedure {
                     param_type: ParameterType::Float,
                     required: false,
                     default: Some("0.5".into()),
+                    domain: Domain::Unit,
                     description: "Relevance vs diversity in [0, 1]".into(),
                 },
             ],
@@ -490,6 +601,14 @@ impl SearchMmrProcedure {
 
 #[cfg(feature = "vector-index")]
 impl Procedure for SearchMmrProcedure {
+    fn external_access(&self) -> ExternalAccess {
+        ExternalAccess::None
+    }
+
+    fn graph_access(&self) -> GraphAccess {
+        GraphAccess::Reads
+    }
+
     fn name(&self) -> &str {
         "search.mmr"
     }
@@ -506,32 +625,22 @@ impl Procedure for SearchMmrProcedure {
         vec!["node_id".into(), "distance".into()]
     }
 
-    fn execute(&self, ctx: &ProcedureContext<'_>, params: &Parameters) -> Result<AlgorithmResult> {
+    fn compute(&self, ctx: &ProcedureContext<'_>, params: &Prepared) -> Result<AlgorithmResult> {
         use grafeo_core::index::vector::mmr_select;
 
         let lpg = require_lpg_store(ctx, "CALL grafeo.search.mmr")?;
-        let label = params.get_string("label").ok_or_else(|| {
-            grafeo_common::utils::error::Error::InvalidValue(
-                "CALL grafeo.search.mmr: missing required parameter 'label'".into(),
-            )
-        })?;
-        let property = params.get_string("property").ok_or_else(|| {
-            grafeo_common::utils::error::Error::InvalidValue(
-                "CALL grafeo.search.mmr: missing required parameter 'property'".into(),
-            )
-        })?;
+        let label = params.required_string("label")?;
+        let property = params.required_string("property")?;
         let query = coerce_params_to_vector(params, "query")?;
-        let k = k_limit(params, 10);
+        let k = k_limit(params)?;
         let fetch_k = params
-            .get_int("fetch_k")
-            .map_or(k.saturating_mul(4).max(k), |v| {
-                usize::try_from(v.max(0)).unwrap_or(0)
-            });
+            .get_count("fetch_k")?
+            .unwrap_or_else(|| k.saturating_mul(4));
         #[allow(
             clippy::cast_possible_truncation,
             reason = "lambda is a unit-interval weighting factor; f32 precision is sufficient"
         )]
-        let lambda = params.get_float("lambda").unwrap_or(0.5) as f32;
+        let lambda = params.required_float("lambda")? as f32;
 
         let missing = || {
             grafeo_common::utils::error::Error::InvalidValue(format!(
@@ -548,7 +657,7 @@ impl Procedure for SearchMmrProcedure {
             allowed: None,
         };
         let initial = lpg
-            .vector_index_search_at(label, property, &query, search, view)
+            .vector_index_search_at(label, property, &query, search, view)?
             .ok_or_else(missing)?;
         if initial.is_empty() {
             return Ok(AlgorithmResult::new(vec![
@@ -598,6 +707,7 @@ impl SearchTextProcedure {
                     param_type: ParameterType::String,
                     required: true,
                     default: None,
+                    domain: Domain::OfType,
                     description: "Node label that was text-indexed".into(),
                 },
                 ParameterDef {
@@ -605,6 +715,7 @@ impl SearchTextProcedure {
                     param_type: ParameterType::String,
                     required: true,
                     default: None,
+                    domain: Domain::OfType,
                     description: "Property holding the indexed text".into(),
                 },
                 ParameterDef {
@@ -612,6 +723,7 @@ impl SearchTextProcedure {
                     param_type: ParameterType::String,
                     required: true,
                     default: None,
+                    domain: Domain::OfType,
                     description: "Text query for BM25 scoring".into(),
                 },
                 ParameterDef {
@@ -619,6 +731,7 @@ impl SearchTextProcedure {
                     param_type: ParameterType::Integer,
                     required: false,
                     default: Some("10".into()),
+                    domain: Domain::NonNegative,
                     description: "Number of top results to return".into(),
                 },
             ],
@@ -628,6 +741,14 @@ impl SearchTextProcedure {
 
 #[cfg(feature = "text-index")]
 impl Procedure for SearchTextProcedure {
+    fn external_access(&self) -> ExternalAccess {
+        ExternalAccess::None
+    }
+
+    fn graph_access(&self) -> GraphAccess {
+        GraphAccess::Reads
+    }
+
     fn name(&self) -> &str {
         "search.text"
     }
@@ -644,7 +765,7 @@ impl Procedure for SearchTextProcedure {
         vec!["node_id".into(), "score".into()]
     }
 
-    fn execute(&self, ctx: &ProcedureContext<'_>, params: &Parameters) -> Result<AlgorithmResult> {
+    fn compute(&self, ctx: &ProcedureContext<'_>, params: &Prepared) -> Result<AlgorithmResult> {
         let lpg = ctx.lpg_store.ok_or_else(|| {
             grafeo_common::utils::error::Error::from(
                 grafeo_common::utils::error::QueryError::unsupported(
@@ -652,22 +773,10 @@ impl Procedure for SearchTextProcedure {
                 ),
             )
         })?;
-        let label = params.get_string("label").ok_or_else(|| {
-            grafeo_common::utils::error::Error::InvalidValue(
-                "CALL grafeo.search.text: missing required parameter 'label'".into(),
-            )
-        })?;
-        let property = params.get_string("property").ok_or_else(|| {
-            grafeo_common::utils::error::Error::InvalidValue(
-                "CALL grafeo.search.text: missing required parameter 'property'".into(),
-            )
-        })?;
-        let query = params.get_string("query").ok_or_else(|| {
-            grafeo_common::utils::error::Error::InvalidValue(
-                "CALL grafeo.search.text: missing required parameter 'query'".into(),
-            )
-        })?;
-        let k = k_limit(params, 10);
+        let label = params.required_string("label")?;
+        let property = params.required_string("property")?;
+        let query = params.required_string("query")?;
+        let k = k_limit(params)?;
 
         let search = grafeo_core::graph::rowgroup::IndexSearch {
             k,
@@ -675,7 +784,7 @@ impl Procedure for SearchTextProcedure {
             allowed: None,
         };
         let results = lpg
-            .text_index_search_at(label, property, query, search, ctx.view())
+            .text_index_search_at(label, property, query, search, ctx.view())?
             .ok_or_else(|| {
                 grafeo_common::utils::error::Error::InvalidValue(format!(
                     "there is no text index on :{label}({property}); create one first"
@@ -706,8 +815,38 @@ impl BuiltinProcedures {
     #[must_use]
     pub fn new() -> Self {
         let mut procedures: HashMap<String, Arc<dyn Procedure>> = HashMap::new();
+        #[cfg(feature = "algos")]
+        Self::register_algorithms(&mut procedures);
 
-        // Graph algorithms, wrapped via the adapter.
+        // Catalog introspection
+        let mut register = |proc: Arc<dyn Procedure>| {
+            procedures.insert(proc.name().to_string(), proc);
+        };
+        register(Arc::new(LabelsProcedure));
+        register(Arc::new(RelationshipTypesProcedure));
+        register(Arc::new(PropertyKeysProcedure));
+
+        // The loads, which read a file.
+        register(Arc::new(crate::loader::LoadProcedure::nodes()));
+        register(Arc::new(crate::loader::LoadProcedure::edges()));
+
+        // Search procedures (feature-gated).
+        #[cfg(feature = "vector-index")]
+        {
+            register(Arc::new(SearchVectorProcedure::new()));
+            register(Arc::new(SearchMmrProcedure::new()));
+        }
+        #[cfg(feature = "text-index")]
+        {
+            register(Arc::new(SearchTextProcedure::new()));
+        }
+
+        Self { procedures }
+    }
+
+    /// The graph algorithms, each wrapped as a procedure.
+    #[cfg(feature = "algos")]
+    fn register_algorithms(procedures: &mut HashMap<String, Arc<dyn Procedure>>) {
         let mut register_algo = |algo: Arc<dyn GraphAlgorithm>| {
             let proc = Arc::new(GraphAlgorithmProcedure::new(algo));
             procedures.insert(proc.name().to_string(), proc);
@@ -736,6 +875,7 @@ impl BuiltinProcedures {
 
         // Clustering
         register_algo(Arc::new(ClusteringCoefficientAlgorithm));
+        register_algo(Arc::new(TotalTrianglesAlgorithm));
 
         // Community
         register_algo(Arc::new(LabelPropagationAlgorithm));
@@ -753,27 +893,10 @@ impl BuiltinProcedures {
         register_algo(Arc::new(ArticulationPointsAlgorithm));
         register_algo(Arc::new(BridgesAlgorithm));
         register_algo(Arc::new(KCoreAlgorithm));
+        register_algo(Arc::new(KTrussAlgorithm));
 
-        // Catalog introspection
-        let mut register = |proc: Arc<dyn Procedure>| {
-            procedures.insert(proc.name().to_string(), proc);
-        };
-        register(Arc::new(LabelsProcedure));
-        register(Arc::new(RelationshipTypesProcedure));
-        register(Arc::new(PropertyKeysProcedure));
-
-        // Search procedures (feature-gated).
-        #[cfg(feature = "vector-index")]
-        {
-            register(Arc::new(SearchVectorProcedure::new()));
-            register(Arc::new(SearchMmrProcedure::new()));
-        }
-        #[cfg(feature = "text-index")]
-        {
-            register(Arc::new(SearchTextProcedure::new()));
-        }
-
-        Self { procedures }
+        // Pattern matching
+        register_algo(Arc::new(SubgraphIsomorphismAlgorithm));
     }
 
     /// Resolves a dotted procedure name to its implementation.
@@ -794,6 +917,8 @@ impl BuiltinProcedures {
                 description: proc.description().to_string(),
                 parameters: proc.parameters().to_vec(),
                 output_columns: proc.output_columns(),
+                writes: proc.graph_access() == GraphAccess::Writes,
+                external_access: proc.external_access(),
             })
             .collect();
         result.sort_by(|a, b| a.name.cmp(&b.name));
@@ -807,6 +932,13 @@ impl Default for BuiltinProcedures {
     }
 }
 
+/// The registry `CALL` resolves procedures in, and the external-access check reads: built
+/// once.
+pub(crate) fn registry() -> &'static BuiltinProcedures {
+    static PROCEDURES: std::sync::OnceLock<BuiltinProcedures> = std::sync::OnceLock::new();
+    PROCEDURES.get_or_init(BuiltinProcedures::new)
+}
+
 /// Metadata about a registered procedure.
 pub struct ProcedureInfo {
     /// Qualified name (e.g., `"grafeo.pagerank"`).
@@ -817,6 +949,10 @@ pub struct ProcedureInfo {
     pub parameters: Vec<ParameterDef>,
     /// Output column names.
     pub output_columns: Vec<String>,
+    /// Whether it writes the graph (see [`Procedure::graph_access`]).
+    pub writes: bool,
+    /// Whether it reaches outside the database (see [`Procedure::external_access`]).
+    pub external_access: ExternalAccess,
 }
 
 /// Resolves a dotted procedure name to its lookup key.
@@ -828,7 +964,7 @@ pub struct ProcedureInfo {
 /// - `CALL pagerank()` / `CALL grafeo.pagerank()` → `"pagerank"`
 /// - `CALL db.labels()` / `CALL grafeo.labels()` → `"labels"`
 /// - `CALL grafeo.search.vector(...)` → `"search.vector"`
-fn resolve_name(parts: &[String]) -> String {
+pub(crate) fn resolve_name(parts: &[String]) -> String {
     let slice = match parts {
         [ns, rest @ ..]
             if (ns.eq_ignore_ascii_case("grafeo") || ns.eq_ignore_ascii_case("db"))
@@ -848,6 +984,7 @@ fn resolve_name(parts: &[String]) -> String {
 /// the columns each algorithm's `execute()` gives for those parameters, in
 /// order: `dijkstra` to a `target` gives the one path, `kcore` with a `k`
 /// the members of that core, a normalized `degree_centrality` one score.
+#[cfg(feature = "algos")]
 #[must_use]
 pub fn canonical_output_columns(algo: &dyn GraphAlgorithm, params: &Parameters) -> Vec<String> {
     match algo.name() {
@@ -858,6 +995,7 @@ pub fn canonical_output_columns(algo: &dyn GraphAlgorithm, params: &Parameters) 
             "path".into(),
         ],
         "kcore" if params.get_int("k").is_some() => vec!["node_id".into(), "in_k_core".into()],
+        "ktruss" if params.get_int("k").is_some() => vec!["source".into(), "target".into()],
         "degree_centrality" if params.get_bool("normalized") == Some(true) => {
             vec!["node_id".into(), "centrality".into()]
         }
@@ -919,8 +1057,21 @@ pub fn canonical_output_columns(algo: &dyn GraphAlgorithm, params: &Parameters) 
         "articulation_points" => vec!["node_id".into()],
         "bridges" => vec!["source".into(), "target".into()],
         "kcore" => vec!["node_id".into(), "core_number".into(), "max_core".into()],
+        "ktruss" => vec!["source".into(), "target".into(), "truss_number".into()],
+        "total_triangles" => vec!["total_triangles".into()],
+        "subgraph_isomorphism" => vec!["count".into()],
         _ => vec!["node_id".into(), "value".into()],
     }
+}
+
+/// The error of a YIELD item that names no column of the procedure, listing the columns it has:
+/// an invalid reference (a mistake in the query text), raised when the call is planned.
+#[must_use]
+pub fn no_such_yield_column(field: &str, columns: &[String]) -> Error {
+    Error::from(QueryError::invalid_reference(format!(
+        "YIELD column '{field}' is no column of the procedure (it has: {})",
+        columns.join(", ")
+    )))
 }
 
 /// The name an error gives positional argument `index` of a call: its
@@ -946,16 +1097,20 @@ const PASS_THROUGH_KEYS: &[&str] = &["projection"];
 ///    of `param_defs`.
 ///
 /// Each value must suit its parameter's type: an integer passes for a float
-/// and a vector for a list. A null leaves the parameter out, so an optional
-/// one keeps its default and a required one fails as missing when the
-/// procedure runs. A map key that names no parameter passes through only as
-/// one of the keys every call takes (`projection`), with the type of its
-/// value.
+/// and a vector for a list. The arguments are then prepared (see
+/// [`prepare`]), once, when the statement is planned: a value outside its
+/// domain is refused, a required parameter left out or given null is refused
+/// naming it, and an optional one without a value takes its declared
+/// default (a null is no value). A map key that names no
+/// parameter passes through only as one of the keys every call takes
+/// (`projection`), with the type of its value.
 ///
 /// # Errors
 ///
 /// Returns a semantic error naming the argument and `procedure` when a value
-/// does not suit its parameter: such a value never falls back to the
+/// does not suit its parameter's type, and an invalid parameter value when a
+/// required parameter has none or a value lies outside its domain: such a
+/// value never falls back to the
 /// parameter's default. Returns an invalid reference naming the parameters
 /// for a map key that names none of them (`{dampingg: 0.5}`), and for more
 /// positional values than the procedure has parameters: a mistyped or
@@ -964,7 +1119,7 @@ pub fn evaluate_arguments(
     procedure: &str,
     args: &[Value],
     param_defs: &[ParameterDef],
-) -> Result<Parameters> {
+) -> Result<Prepared> {
     let mut params = Parameters::new();
 
     if let [Value::Map(entries)] = args {
@@ -976,15 +1131,9 @@ pub fn evaluate_arguments(
                     parameter_names(param_defs)
                 ))));
             }
-            set_parameter(
-                &mut params,
-                procedure,
-                key.as_str(),
-                def.map(|def| def.param_type),
-                value,
-            )?;
+            set_parameter(&mut params, procedure, key.as_str(), def, value)?;
         }
-        return Ok(params);
+        return params.prepared(procedure, param_defs);
     }
 
     if args.len() > param_defs.len() {
@@ -996,16 +1145,9 @@ pub fn evaluate_arguments(
         ))));
     }
     for (def, value) in param_defs.iter().zip(args) {
-        set_parameter(
-            &mut params,
-            procedure,
-            &def.name,
-            Some(def.param_type),
-            value,
-        )?;
+        set_parameter(&mut params, procedure, &def.name, Some(def), value)?;
     }
-
-    Ok(params)
+    params.prepared(procedure, param_defs)
 }
 
 /// The names of `param_defs`, for an error: `none` for a procedure without
@@ -1021,18 +1163,23 @@ fn parameter_names(param_defs: &[ParameterDef]) -> String {
         .join(", ")
 }
 
-/// Sets parameter `name` to `value`, which must suit `expected` (any value a
-/// parameter can hold when `None`).
+/// Sets parameter `name`, which `def` defines, to `value`, which must suit its
+/// type (any value a parameter can hold for a key every call takes, `def`
+/// `None`). One value for a list that declares it takes one
+/// ([`Domain::ListOrOne`](grafeo_adapters::plugins::Domain::ListOrOne)) is
+/// set as it is, and [`prepare`] makes it a list of one.
 fn set_parameter(
     params: &mut Parameters,
     procedure: &str,
     name: &str,
-    expected: Option<ParameterType>,
+    def: Option<&ParameterDef>,
     value: &Value,
 ) -> Result<()> {
     use ParameterType as Type;
+    let expected = def.map(|def| def.param_type);
+    let one_is_a_list = def.is_some_and(|def| def.domain == Domain::ListOrOne);
     match (expected, value) {
-        (_, Value::Null) => {}
+        (_, Value::Null) => params.set_null(name),
         (Some(Type::Integer | Type::NodeId) | None, Value::Int64(v)) => params.set_int(name, *v),
         (Some(Type::Float), Value::Int64(v)) => params.set_float(name, *v as f64),
         (Some(Type::Float) | None, Value::Float64(v)) => params.set_float(name, *v),
@@ -1047,6 +1194,10 @@ fn set_parameter(
                 .map(|f| Value::Float64(f64::from(*f)))
                 .collect(),
         ),
+        (Some(Type::Map), Value::Map(entries)) => params.set_map(name, Arc::clone(entries)),
+        (Some(Type::List), value) if one_is_a_list => {
+            return set_parameter(params, procedure, name, None, value);
+        }
         (expected, value) => {
             let wanted = match expected {
                 Some(Type::Integer) => "an integer",
@@ -1055,6 +1206,7 @@ fn set_parameter(
                 Some(Type::String) => "a string",
                 Some(Type::Boolean) => "a boolean",
                 Some(Type::List) => "a list",
+                Some(Type::Map) => "a map",
                 None => "a number, string, boolean or list",
             };
             return Err(Error::from(QueryError::new(
@@ -1069,7 +1221,9 @@ fn set_parameter(
     Ok(())
 }
 
-/// Builds a `grafeo.procedures()` result listing all registered procedures.
+/// Builds a `grafeo.procedures()` result listing all registered procedures: name, description,
+/// parameters, output columns, whether it writes the graph (`writes`, a BOOLEAN) and what it
+/// reaches outside the database (`external_access`: 'none', 'reads' or 'writes').
 #[must_use]
 pub fn procedures_result(registry: &BuiltinProcedures) -> AlgorithmResult {
     let procedures = registry.list();
@@ -1078,18 +1232,30 @@ pub fn procedures_result(registry: &BuiltinProcedures) -> AlgorithmResult {
         "description".into(),
         "parameters".into(),
         "output_columns".into(),
+        "writes".into(),
+        "external_access".into(),
     ]);
     for proc in procedures {
         let param_desc: String = proc
             .parameters
             .iter()
             .map(|p| {
+                // The values the argument allows, after the type and before the default (which
+                // readers take as the text after `default=`): what an invalid parameter value
+                // (22023) names.
+                let domain = match p.domain {
+                    Domain::OfType => String::new(),
+                    domain => format!(", {}", domain.describe(None)),
+                };
                 if p.required {
-                    format!("{} ({:?})", p.name, p.param_type)
+                    format!("{} ({:?}{domain})", p.name, p.param_type)
                 } else if let Some(ref default) = p.default {
-                    format!("{} ({:?}, default={})", p.name, p.param_type, default)
+                    format!(
+                        "{} ({:?}{domain}, default={})",
+                        p.name, p.param_type, default
+                    )
                 } else {
-                    format!("{} ({:?}, optional)", p.name, p.param_type)
+                    format!("{} ({:?}{domain}, optional)", p.name, p.param_type)
                 }
             })
             .collect::<Vec<_>>()
@@ -1102,14 +1268,95 @@ pub fn procedures_result(registry: &BuiltinProcedures) -> AlgorithmResult {
             Value::from(proc.description.as_str()),
             Value::from(param_desc.as_str()),
             Value::from(columns_desc.as_str()),
+            Value::Bool(proc.writes),
+            Value::from(proc.external_access.name()),
         ]);
     }
     result
 }
 
+/// The procedures a build leaves out unless it has a feature: the feature, and the names it
+/// registers. A call of one in a build without it is told so (see [`missing_feature`]), not
+/// taken for a misspelt name. A test holds this table to the registry of a build with every
+/// feature.
+const FEATURE_GATED: &[(&str, &[&str])] = &[
+    (
+        "algos",
+        &[
+            "articulation_points",
+            "bellman_ford",
+            "betweenness_centrality",
+            "bfs",
+            "bridges",
+            "closeness_centrality",
+            "clustering_coefficient",
+            "connected_components",
+            "degree_centrality",
+            "dfs",
+            "dijkstra",
+            "floyd_warshall",
+            "kcore",
+            "kruskal",
+            "ktruss",
+            "label_propagation",
+            "louvain",
+            "max_flow",
+            "min_cost_max_flow",
+            "pagerank",
+            "prim",
+            "sssp",
+            "strongly_connected_components",
+            "subgraph_isomorphism",
+            "topological_sort",
+            "total_triangles",
+        ],
+    ),
+    ("vector-index", &["search.mmr", "search.vector"]),
+    ("text-index", &["search.text"]),
+];
+
+/// The feature a build needs for the procedure `name` (dotted, as a call writes it) when this
+/// build leaves it out: `None` for a procedure it has, or a name no build has.
+#[must_use]
+pub fn missing_feature(name: &[String]) -> Option<&'static str> {
+    let key = resolve_name(name);
+    if registry().procedures.contains_key(&key) {
+        return None;
+    }
+    FEATURE_GATED
+        .iter()
+        .find(|(_, names)| names.contains(&key.as_str()))
+        .map(|(feature, _)| *feature)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// With every feature, the registry holds every gated name and nothing gated beyond them:
+    /// a procedure added behind a feature is told apart from a misspelt name once it is listed.
+    #[cfg(all(feature = "algos", feature = "vector-index", feature = "text-index"))]
+    #[test]
+    fn every_feature_gated_procedure_is_listed() {
+        const IN_EVERY_BUILD: &[&str] = &[
+            "labels",
+            "load_edges_csv",
+            "load_nodes_csv",
+            "propertyKeys",
+            "relationshipTypes",
+        ];
+        let mut registered: Vec<&str> = registry().procedures.keys().map(String::as_str).collect();
+        registered.sort_unstable();
+        let mut listed: Vec<&str> = FEATURE_GATED
+            .iter()
+            .flat_map(|(_, names)| names.iter().copied())
+            .chain(IN_EVERY_BUILD.iter().copied())
+            .collect();
+        listed.sort_unstable();
+        assert_eq!(registered, listed);
+        assert_eq!(missing_feature(&["grafeo".into(), "pagerank".into()]), None);
+        assert_eq!(missing_feature(&["grafeo".into(), "no_such".into()]), None);
+    }
 
     #[test]
     fn test_registry_has_all_algorithms() {
@@ -1158,6 +1405,7 @@ mod tests {
             param_type,
             required,
             default: None,
+            domain: Domain::OfType,
             description: String::new(),
         }
     }
@@ -1409,11 +1657,11 @@ mod tests {
         fn parameters(&self) -> &[ParameterDef] {
             &[]
         }
-        fn execute(
+        fn compute(
             &self,
             _store: &dyn grafeo_core::graph::GraphStore,
             _view: grafeo_common::types::ReadView,
-            _params: &Parameters,
+            _params: &Prepared,
         ) -> Result<AlgorithmResult> {
             Ok(AlgorithmResult::new(vec!["node_id".into(), "value".into()]))
         }
@@ -1514,7 +1762,14 @@ mod tests {
         let result = procedures_result(&registry);
         assert_eq!(
             result.columns,
-            vec!["name", "description", "parameters", "output_columns"],
+            vec![
+                "name",
+                "description",
+                "parameters",
+                "output_columns",
+                "writes",
+                "external_access"
+            ],
             "column shape is part of the public CALL grafeo.procedures() contract"
         );
         assert!(!result.rows.is_empty(), "result.rows is empty");
@@ -1719,22 +1974,40 @@ mod tests {
         }
     }
 
-    #[cfg(any(feature = "vector-index", feature = "text-index"))]
+    /// `k` left out takes the default search.vector declares (10), which `prepare` fills in; a
+    /// `k` read from parameters nobody prepared is an error, never a default of k_limit's own.
+    #[cfg(feature = "vector-index")]
     #[test]
-    fn k_limit_returns_default_when_missing() {
-        let params = Parameters::new();
-        assert_eq!(k_limit(&params, 7), 7);
+    fn k_limit_reads_the_declared_default_when_k_is_left_out() {
+        let procedure = SearchVectorProcedure::new();
+        let mut params = Parameters::new();
+        params.set_string("label", "Doc");
+        params.set_string("property", "emb");
+        params.set_list("query", vec![Value::Float64(0.5)]);
+        let prepared = prepare("grafeo.search.vector", procedure.parameters(), &params).unwrap();
+        assert_eq!(k_limit(&prepared).ok(), Some(10));
+        assert!(k_limit(&Parameters::new()).is_err());
     }
 
+    /// A negative `k` lies outside its domain (`k >= 0`) and is refused with 22023 naming the
+    /// argument (0.6.2), where it clamped to 0 before; it never flips to a huge count. Zero stays
+    /// a valid count.
     #[cfg(any(feature = "vector-index", feature = "text-index"))]
     #[test]
-    fn k_limit_clamps_negative_to_zero() {
-        // A negative `k` must clamp to 0 (not flip to a huge usize via
-        // bit-cast), so a caller that passes -1 gets "no results" instead
-        // of scanning the entire index.
+    fn k_limit_refuses_a_negative_k() {
         let mut params = Parameters::new();
-        params.set_int("k", -5);
-        assert_eq!(k_limit(&params, 10), 0);
+        for k in [-5, -1, i64::MIN] {
+            params.set_int("k", k);
+            let error = k_limit(&params).expect_err("a negative k");
+            assert_eq!(
+                grafeo_common::utils::gqlstatus::GqlStatus::from(&error).as_str(),
+                "22023",
+                "k = {k}: {error}"
+            );
+            assert!(error.to_string().contains("'k'"), "k = {k}: {error}");
+        }
+        params.set_int("k", 0);
+        assert_eq!(k_limit(&params).ok(), Some(0));
     }
 
     #[cfg(any(feature = "vector-index", feature = "text-index"))]
@@ -1742,7 +2015,7 @@ mod tests {
     fn k_limit_passes_through_positive_value() {
         let mut params = Parameters::new();
         params.set_int("k", 25);
-        assert_eq!(k_limit(&params, 10), 25);
+        assert_eq!(k_limit(&params).ok(), Some(25));
     }
 
     /// Every graph algorithm, called in each shape its arguments give, names

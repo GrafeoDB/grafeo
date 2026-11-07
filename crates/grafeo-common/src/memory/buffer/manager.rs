@@ -1,17 +1,16 @@
 //! Unified buffer manager implementation.
 
-use super::consumer::MemoryConsumer;
-use super::grant::{GrantReleaser, MemoryGrant};
+use super::consumer::{ConsumerStats, MemoryConsumer};
+use super::grant::{GRANT_STEP, GrantReleaser, MemoryGrant};
 use super::region::MemoryRegion;
 use super::stats::{BufferStats, PressureLevel};
+use crate::memory::system::detect_memory;
+use crate::utils::error::{LimitBound, LimitRefusal};
 use parking_lot::RwLock;
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-
-/// Default memory budget as a fraction of system memory.
-const DEFAULT_MEMORY_FRACTION: f64 = 0.75;
 
 /// Configuration for the buffer manager.
 #[derive(Debug, Clone)]
@@ -22,7 +21,7 @@ pub struct BufferManagerConfig {
     pub soft_limit_fraction: f64,
     /// Eviction threshold (default: 85%).
     pub evict_limit_fraction: f64,
-    /// Hard limit threshold (default: 95%).
+    /// Hard limit threshold, where reservations are refused (default: 100%, the budget).
     pub hard_limit_fraction: f64,
     /// Enable background eviction thread.
     pub background_eviction: bool,
@@ -31,60 +30,13 @@ pub struct BufferManagerConfig {
 }
 
 impl BufferManagerConfig {
-    /// Detects system memory size.
-    ///
-    /// Returns a conservative estimate if detection fails.
+    /// The memory this process may use, in bytes: [`detect_memory`]'s figure (the smaller of
+    /// the machine's memory and every limit set on the process, or
+    /// [`FALLBACK_SYSTEM_MEMORY`](crate::memory::FALLBACK_SYSTEM_MEMORY) when nothing can be
+    /// read).
     #[must_use]
     pub fn detect_system_memory() -> usize {
-        // Under Miri, file I/O is blocked by isolation: use fallback directly
-        #[cfg(miri)]
-        {
-            return Self::fallback_system_memory();
-        }
-
-        // Try to detect system memory
-        // On failure, return a conservative 1GB default
-        #[cfg(not(miri))]
-        {
-            #[cfg(target_os = "windows")]
-            {
-                // Windows: Use GetPhysicallyInstalledSystemMemory or GlobalMemoryStatusEx
-                // For now, use a fallback
-                Self::fallback_system_memory()
-            }
-
-            #[cfg(target_os = "linux")]
-            {
-                // Linux: Read from /proc/meminfo
-                if let Ok(contents) = std::fs::read_to_string("/proc/meminfo") {
-                    for line in contents.lines() {
-                        if line.starts_with("MemTotal:")
-                            && let Some(kb_str) = line.split_whitespace().nth(1)
-                            && let Ok(kb) = kb_str.parse::<usize>()
-                        {
-                            return kb * 1024;
-                        }
-                    }
-                }
-                Self::fallback_system_memory()
-            }
-
-            #[cfg(target_os = "macos")]
-            {
-                // macOS: Use sysctl
-                Self::fallback_system_memory()
-            }
-
-            #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
-            {
-                Self::fallback_system_memory()
-            }
-        }
-    }
-
-    fn fallback_system_memory() -> usize {
-        // Default to 1GB if detection fails
-        1024 * 1024 * 1024
+        detect_memory().bytes
     }
 
     /// Creates a config with the given budget.
@@ -92,24 +44,22 @@ impl BufferManagerConfig {
     pub fn with_budget(budget: usize) -> Self {
         Self {
             budget,
-            ..Default::default()
+            soft_limit_fraction: 0.70,
+            evict_limit_fraction: 0.85,
+            // The limit means what it says: reservations are refused at the budget itself,
+            // and the levels below it evict and spill first.
+            hard_limit_fraction: 1.0,
+            background_eviction: false, // Disabled by default for simplicity
+            spill_path: None,
         }
     }
 }
 
 impl Default for BufferManagerConfig {
+    /// The default budget: [`DEFAULT_MEMORY_FRACTION`](crate::memory::DEFAULT_MEMORY_FRACTION)
+    /// of the memory this process may use.
     fn default() -> Self {
-        let system_memory = Self::detect_system_memory();
-        Self {
-            // reason: memory fraction (0.0..1.0) of a positive usize is always a valid positive usize
-            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-            budget: (system_memory as f64 * DEFAULT_MEMORY_FRACTION) as usize,
-            soft_limit_fraction: 0.70,
-            evict_limit_fraction: 0.85,
-            hard_limit_fraction: 0.95,
-            background_eviction: false, // Disabled by default for simplicity
-            spill_path: None,
-        }
+        Self::with_budget(detect_memory().default_budget())
     }
 }
 
@@ -219,6 +169,90 @@ impl BufferManager {
         ))
     }
 
+    /// An empty grant of `region`, for a part to grow with [`MemoryGrant::try_grow`].
+    #[must_use]
+    pub fn empty_grant(self: &Arc<Self>, region: MemoryRegion) -> MemoryGrant {
+        MemoryGrant::new(Arc::clone(self) as Arc<dyn GrantReleaser>, 0, region)
+    }
+
+    /// A grant of `size` whatever the limit, for memory that is held already or must be
+    /// (a cold chunk at load, replay).
+    #[must_use]
+    pub fn reserve_forced(self: &Arc<Self>, size: usize, region: MemoryRegion) -> MemoryGrant {
+        self.reserve_forced_raw(size, region);
+        MemoryGrant::new(Arc::clone(self) as Arc<dyn GrantReleaser>, size, region)
+    }
+
+    /// Brings `grant` (an empty one of `region` from this manager when it is `None`) to cover
+    /// `counted` bytes whatever the limit, for memory a part holds already (a commit's, a read's,
+    /// a load's): it grows to the step at or above `counted` when short, and gives back what it
+    /// holds two steps past `counted`, so `counted <= size < counted + 2 * GRANT_STEP`. A
+    /// compare while it is within that bound; an atomic only when it crosses a step.
+    pub fn settle_forced(
+        self: &Arc<Self>,
+        grant: &mut Option<MemoryGrant>,
+        region: MemoryRegion,
+        counted: usize,
+    ) {
+        let step = |bytes: usize| {
+            bytes
+                .checked_next_multiple_of(GRANT_STEP)
+                .unwrap_or(usize::MAX)
+        };
+        let held = grant.as_ref().map_or(0, MemoryGrant::size);
+        if held < counted {
+            grant
+                .get_or_insert_with(|| self.empty_grant(region))
+                .grow_forced(step(counted).saturating_sub(held));
+        } else if held - counted >= 2 * GRANT_STEP
+            && let Some(grant) = grant.as_mut()
+        {
+            grant.shrink(held.saturating_sub(step(counted.saturating_add(GRANT_STEP))));
+        }
+    }
+
+    /// Runs the eviction cycle until `needed` more bytes fit under the hard limit, or until a
+    /// pass leaves the reserved bytes no lower (it freed nothing, or what it reports freed
+    /// was not given back); whether they fit. A pass's eviction asks each consumer for at most
+    /// half of what it holds (a spill after it may free more), so it may take several. Consumers
+    /// take their own locks while they evict or spill, so a caller holds no store lock.
+    pub fn make_room(&self, needed: usize) -> bool {
+        let mut allocated = self.allocated.load(Ordering::Relaxed);
+        loop {
+            let over = allocated
+                .saturating_add(needed)
+                .saturating_sub(self.hard_limit);
+            if over == 0 {
+                return true;
+            }
+            let freed = self.run_eviction_internal(over);
+            let now = self.allocated.load(Ordering::Relaxed);
+            if freed == 0 || now >= allocated {
+                return false;
+            }
+            allocated = now;
+        }
+    }
+
+    /// The line past which reservations are refused.
+    #[must_use]
+    pub fn hard_limit(&self) -> usize {
+        self.hard_limit
+    }
+
+    /// The refusal of `requested` more bytes against `bound`, with this moment's figures: the
+    /// bytes reserved and the budget.
+    #[must_use]
+    pub fn refusal(&self, bound: LimitBound, requested: usize) -> LimitRefusal {
+        let bytes = |value: usize| u64::try_from(value).unwrap_or(u64::MAX);
+        LimitRefusal::Memory {
+            bound,
+            requested: bytes(requested),
+            used: bytes(self.allocated.load(Ordering::Relaxed)),
+            limit: bytes(self.config.budget),
+        }
+    }
+
     /// Reserves bytes without separating the limit check from the increment.
     fn reserve_bytes(&self, size: usize) -> bool {
         self.allocated
@@ -235,6 +269,18 @@ impl BufferManager {
     pub fn pressure_level(&self) -> PressureLevel {
         let current = self.allocated.load(Ordering::Relaxed);
         self.compute_pressure_level(current)
+    }
+
+    /// The statistics of each registered consumer, in registration order:
+    /// what it reports holding, its region and priority, and whether it can
+    /// spill or evict. Asks each consumer for its usage.
+    #[must_use]
+    pub fn consumer_stats(&self) -> Vec<ConsumerStats> {
+        self.consumers
+            .read()
+            .iter()
+            .map(|consumer| ConsumerStats::from_consumer(consumer.as_ref()))
+            .collect()
     }
 
     /// Returns current buffer statistics.
@@ -559,6 +605,10 @@ impl BufferManager {
             if force_ram.contains(consumer.name()) {
                 continue;
             }
+            // A consumer that cannot evict reports what it holds and frees nothing here.
+            if !consumer.can_evict() {
+                continue;
+            }
 
             let remaining = to_free - total_freed;
             let consumer_usage = consumer.memory_usage();
@@ -618,6 +668,19 @@ impl GrantReleaser for BufferManager {
         self.region_allocated[region.index()].fetch_add(size, Ordering::Relaxed);
         true
     }
+
+    fn try_reserve_raw(&self, size: usize, region: MemoryRegion) -> bool {
+        if !self.reserve_bytes(size) {
+            return false;
+        }
+        self.region_allocated[region.index()].fetch_add(size, Ordering::Relaxed);
+        true
+    }
+
+    fn reserve_forced_raw(&self, size: usize, region: MemoryRegion) {
+        self.allocated.fetch_add(size, Ordering::Relaxed);
+        self.region_allocated[region.index()].fetch_add(size, Ordering::Relaxed);
+    }
 }
 
 impl Drop for BufferManager {
@@ -675,6 +738,10 @@ mod tests {
             self.usage.fetch_sub(to_evict, Ordering::Relaxed);
             self.evicted.fetch_add(to_evict, Ordering::Relaxed);
             to_evict
+        }
+
+        fn can_evict(&self) -> bool {
+            true
         }
 
         fn current_tier(&self) -> super::super::tiered::StorageTier {
@@ -1028,6 +1095,10 @@ mod tests {
             self.usage.fetch_sub(to_evict, Ordering::Relaxed);
             self.evicted.fetch_add(to_evict, Ordering::Relaxed);
             to_evict
+        }
+
+        fn can_evict(&self) -> bool {
+            true
         }
 
         fn can_spill(&self) -> bool {

@@ -1,0 +1,250 @@
+# A null inside a list or a record: `=` is True when every pair is True, False when the lengths
+# differ or some pair is False, Unknown otherwise (ISO/IEC 39075 19.3 General Rule 2 b ii, iii), at
+# any depth. Unknown and its negation both drop a row; a key with a null meets nothing in IN, a join
+# or a lookup; DISTINCT and grouping keep nulls together. Generated with null_inside_values.rs.
+
+meta:
+  language: gql
+  model: lpg
+  title: A null inside a list or a record
+  dataset: empty
+  requires: [cypher]
+
+tests:
+
+  - name: gql_lnull_against_lnull
+    query: "RETURN [null] = [null] AS eq, [null] <> [null] AS ne"
+    expect:
+      rows:
+        - [null, null]
+
+  - name: cypher_lnull_against_lnull
+    language: cypher
+    query: "RETURN [null] = [null] AS eq, [null] <> [null] AS ne"
+    expect:
+      rows:
+        - [null, null]
+
+  - name: gql_l1_against_lnull
+    query: "RETURN [1] = [null] AS eq, [1] <> [null] AS ne"
+    expect:
+      rows:
+        - [null, null]
+
+  - name: cypher_l1_against_lnull
+    language: cypher
+    query: "RETURN [1] = [null] AS eq, [1] <> [null] AS ne"
+    expect:
+      rows:
+        - [null, null]
+
+  - name: gql_l1_null_against_l1_2
+    query: "RETURN [1, null] = [1, 2] AS eq, [1, null] <> [1, 2] AS ne"
+    expect:
+      rows:
+        - [null, null]
+
+  - name: cypher_l1_null_against_l1_2
+    language: cypher
+    query: "RETURN [1, null] = [1, 2] AS eq, [1, null] <> [1, 2] AS ne"
+    expect:
+      rows:
+        - [null, null]
+
+  - name: gql_l1_2_against_lnull_3
+    query: "RETURN [1, 2] = [null, 3] AS eq, [1, 2] <> [null, 3] AS ne"
+    expect:
+      rows:
+        - [false, true]
+
+  - name: cypher_l1_2_against_lnull_3
+    language: cypher
+    query: "RETURN [1, 2] = [null, 3] AS eq, [1, 2] <> [null, 3] AS ne"
+    expect:
+      rows:
+        - [false, true]
+
+  - name: gql_l1_against_l1_null
+    query: "RETURN [1] = [1, null] AS eq, [1] <> [1, null] AS ne"
+    expect:
+      rows:
+        - [false, true]
+
+  - name: cypher_l1_against_l1_null
+    language: cypher
+    query: "RETURN [1] = [1, null] AS eq, [1] <> [1, null] AS ne"
+    expect:
+      rows:
+        - [false, true]
+
+  - name: gql_l_against_l
+    query: "RETURN [] = [] AS eq, [] <> [] AS ne"
+    expect:
+      rows:
+        - [true, false]
+
+  - name: cypher_l_against_l
+    language: cypher
+    query: "RETURN [] = [] AS eq, [] <> [] AS ne"
+    expect:
+      rows:
+        - [true, false]
+
+  - name: gql_ma_1_against_ma_null
+    query: "RETURN {a: 1} = {a: null} AS eq, {a: 1} <> {a: null} AS ne"
+    expect:
+      rows:
+        - [null, null]
+
+  - name: cypher_ma_1_against_ma_null
+    language: cypher
+    query: "RETURN {a: 1} = {a: null} AS eq, {a: 1} <> {a: null} AS ne"
+    expect:
+      rows:
+        - [null, null]
+
+  - name: gql_ma_1_b_null_against_ma_2_b_null
+    query: "RETURN {a: 1, b: null} = {a: 2, b: null} AS eq, {a: 1, b: null} <> {a: 2, b: null} AS ne"
+    expect:
+      rows:
+        - [false, true]
+
+  - name: cypher_ma_1_b_null_against_ma_2_b_null
+    language: cypher
+    query: "RETURN {a: 1, b: null} = {a: 2, b: null} AS eq, {a: 1, b: null} <> {a: 2, b: null} AS ne"
+    expect:
+      rows:
+        - [false, true]
+
+  - name: gql_llnull_against_llnull
+    query: "RETURN [[null]] = [[null]] AS eq, [[null]] <> [[null]] AS ne"
+    expect:
+      rows:
+        - [null, null]
+
+  - name: cypher_llnull_against_llnull
+    language: cypher
+    query: "RETURN [[null]] = [[null]] AS eq, [[null]] <> [[null]] AS ne"
+    expect:
+      rows:
+        - [null, null]
+
+  - name: gql_ll1_null_against_ll2_null
+    query: "RETURN [[1, null]] = [[2, null]] AS eq, [[1, null]] <> [[2, null]] AS ne"
+    expect:
+      rows:
+        - [false, true]
+
+  - name: cypher_ll1_null_against_ll2_null
+    language: cypher
+    query: "RETURN [[1, null]] = [[2, null]] AS eq, [[1, null]] <> [[2, null]] AS ne"
+    expect:
+      rows:
+        - [false, true]
+
+  - name: gql_ma_lnull_against_ma_lnull
+    query: "RETURN {a: [null]} = {a: [null]} AS eq, {a: [null]} <> {a: [null]} AS ne"
+    expect:
+      rows:
+        - [null, null]
+
+  - name: cypher_ma_lnull_against_ma_lnull
+    language: cypher
+    query: "RETURN {a: [null]} = {a: [null]} AS eq, {a: [null]} <> {a: [null]} AS ne"
+    expect:
+      rows:
+        - [null, null]
+
+  - name: gql_lma_null_against_lma_1
+    query: "RETURN [{a: null}] = [{a: 1}] AS eq, [{a: null}] <> [{a: 1}] AS ne"
+    expect:
+      rows:
+        - [null, null]
+
+  - name: cypher_lma_null_against_lma_1
+    language: cypher
+    query: "RETURN [{a: null}] = [{a: 1}] AS eq, [{a: null}] <> [{a: 1}] AS ne"
+    expect:
+      rows:
+        - [null, null]
+
+  - name: gql_not_of_unknown_drops_the_row
+    setup:
+      - "INSERT (:A {k: [null], name: 'Alix'}), (:B {k: [null], name: 'Gus'}), (:A {k: [1], name: 'Jules'}), (:B {k: [1], name: 'Hans'})"
+    query: "MATCH (n:A) WHERE NOT (n.k = [null]) RETURN n.name AS n"
+    expect:
+      empty: true
+
+  - name: cypher_not_of_unknown_drops_the_row
+    language: cypher
+    setup:
+      - "CREATE (:A {k: [null], name: 'Alix'}), (:B {k: [null], name: 'Gus'}), (:A {k: [1], name: 'Jules'}), (:B {k: [1], name: 'Hans'})"
+    query: "MATCH (n:A) WHERE NOT (n.k = [null]) RETURN n.name AS n"
+    expect:
+      empty: true
+
+  - name: gql_a_null_key_finds_nothing
+    setup:
+      - "INSERT (:A {k: [null], name: 'Alix'}), (:B {k: [null], name: 'Gus'}), (:A {k: [1], name: 'Jules'}), (:B {k: [1], name: 'Hans'})"
+    query: "MATCH (n:A {k: [null]}) RETURN n.name AS n"
+    expect:
+      empty: true
+
+  - name: cypher_a_null_key_finds_nothing
+    language: cypher
+    setup:
+      - "CREATE (:A {k: [null], name: 'Alix'}), (:B {k: [null], name: 'Gus'}), (:A {k: [1], name: 'Jules'}), (:B {k: [1], name: 'Hans'})"
+    query: "MATCH (n:A {k: [null]}) RETURN n.name AS n"
+    expect:
+      empty: true
+
+  - name: gql_a_join_on_a_null_key_meets_nothing
+    setup:
+      - "INSERT (:A {k: [null], name: 'Alix'}), (:B {k: [null], name: 'Gus'}), (:A {k: [1], name: 'Jules'}), (:B {k: [1], name: 'Hans'})"
+    query: "MATCH (a:A), (b:B) WHERE a.k = b.k RETURN a.name AS n"
+    expect:
+      rows:
+        - ["Jules"]
+
+  - name: cypher_a_join_on_a_null_key_meets_nothing
+    language: cypher
+    setup:
+      - "CREATE (:A {k: [null], name: 'Alix'}), (:B {k: [null], name: 'Gus'}), (:A {k: [1], name: 'Jules'}), (:B {k: [1], name: 'Hans'})"
+    query: "MATCH (a:A), (b:B) WHERE a.k = b.k RETURN a.name AS n"
+    expect:
+      rows:
+        - ["Jules"]
+
+  - name: gql_in_with_a_null_inside
+    setup:
+      - "INSERT (:A {k: [null], name: 'Alix'}), (:B {k: [null], name: 'Gus'}), (:A {k: [1], name: 'Jules'}), (:B {k: [1], name: 'Hans'})"
+    query: "RETURN [null] IN [[null]] AS r"
+    expect:
+      rows:
+        - [null]
+
+  - name: cypher_in_with_a_null_inside
+    language: cypher
+    setup:
+      - "CREATE (:A {k: [null], name: 'Alix'}), (:B {k: [null], name: 'Gus'}), (:A {k: [1], name: 'Jules'}), (:B {k: [1], name: 'Hans'})"
+    query: "RETURN [null] IN [[null]] AS r"
+    expect:
+      rows:
+        - [null]
+
+  - name: gql_distinct_keeps_nulls_together
+    setup:
+      - "INSERT (:A {k: [null], name: 'Alix'}), (:B {k: [null], name: 'Gus'}), (:A {k: [1], name: 'Jules'}), (:B {k: [1], name: 'Hans'})"
+    query: "UNWIND [[null], [null]] AS x RETURN count(DISTINCT x) AS c"
+    expect:
+      rows:
+        - [1]
+
+  - name: cypher_distinct_keeps_nulls_together
+    language: cypher
+    setup:
+      - "CREATE (:A {k: [null], name: 'Alix'}), (:B {k: [null], name: 'Gus'}), (:A {k: [1], name: 'Jules'}), (:B {k: [1], name: 'Hans'})"
+    query: "UNWIND [[null], [null]] AS x RETURN count(DISTINCT x) AS c"
+    expect:
+      rows:
+        - [1]

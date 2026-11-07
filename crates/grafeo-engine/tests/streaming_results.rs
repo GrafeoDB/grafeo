@@ -381,3 +381,174 @@ fn owned_stream_next_chunk_exhaustion_is_idempotent() {
             .is_none()
     );
 }
+
+/// An open stream reads the transaction, so COMMIT and ROLLBACK wait for it: refused while it is
+/// open, whichever kind of stream (the borrowed one and the owned one the bindings use) and
+/// whichever form (the method, the statement). Dropped or read to the end, the stream lets the
+/// transaction end. Outside a transaction an owned stream reads as before.
+#[test]
+fn an_open_stream_holds_off_the_transactions_end() {
+    const READ: &str = "MATCH (p:Person) RETURN p.name";
+    let refused = |result: grafeo_common::utils::error::Result<()>, what: &str| {
+        let error = result.expect_err(what);
+        assert!(
+            error
+                .to_string()
+                .contains("while streaming results are active"),
+            "{what}: {error}"
+        );
+    };
+
+    // The borrowed stream, through the statement forms (the methods need the session itself).
+    for end in ["COMMIT", "ROLLBACK"] {
+        let db = GrafeoDB::new_in_memory();
+        seed_people(&db);
+        let mut session = db.session();
+        session.begin_transaction().unwrap();
+        {
+            let _stream = session.execute_streaming(READ).unwrap();
+            refused(
+                session.execute(end).map(|_| ()),
+                &format!("borrowed, {end}"),
+            );
+        }
+        session.rollback().unwrap();
+    }
+
+    // The owned stream, through the methods and the statements.
+    for (end, by_statement) in [
+        ("commit", false),
+        ("rollback", false),
+        ("COMMIT", true),
+        ("ROLLBACK", true),
+    ] {
+        let db = GrafeoDB::new_in_memory();
+        seed_people(&db);
+        let mut session = db.session();
+        session.begin_transaction().unwrap();
+        let mut stream = session.execute_streaming_owned(READ).unwrap();
+        let _first = stream.next_chunk().unwrap();
+        let attempt = |session: &mut grafeo_engine::session::Session| {
+            if by_statement {
+                session.execute(end).map(|_| ())
+            } else if end == "commit" {
+                session.commit()
+            } else {
+                session.rollback()
+            }
+        };
+        refused(attempt(&mut session), &format!("owned, {end}"));
+        drop(stream);
+        attempt(&mut session).unwrap_or_else(|error| panic!("owned, {end}, dropped: {error}"));
+    }
+
+    // An owned stream read to the end no longer holds the transaction.
+    let db = GrafeoDB::new_in_memory();
+    seed_people(&db);
+    let mut session = db.session();
+    session.begin_transaction().unwrap();
+    let mut stream = session.execute_streaming_owned(READ).unwrap();
+    while stream.next_chunk().unwrap().is_some() {}
+    session
+        .commit()
+        .unwrap_or_else(|error| panic!("an exhausted stream: {error}"));
+    drop(stream);
+
+    // Outside a transaction an owned stream reads all rows, and the session goes on.
+    let db = GrafeoDB::new_in_memory();
+    seed_people(&db);
+    let session = db.session();
+    let stream = session.execute_streaming_owned(READ).unwrap();
+    let rows = stream
+        .into_row_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(rows.len(), 5);
+    assert_eq!(session.execute(READ).unwrap().rows().len(), 5);
+}
+
+/// A session dropped under an open owned stream ends: its transaction, every nested level
+/// included, rolls back (a new session sees none of its writes, and the write it held no longer
+/// conflicts), and the stream's next pull fails with the ended-session error; dropping the
+/// stream afterwards is fine.
+#[cfg(feature = "gql")]
+#[test]
+fn dropping_the_session_under_an_open_owned_stream_rolls_its_transaction_back() {
+    const READ: &str = "MATCH (p:Person) RETURN p.name";
+    for levels in [1, 2] {
+        let what = format!("{levels} transaction level(s)");
+        let db = GrafeoDB::new_in_memory();
+        seed_people(&db);
+        let mut session = db.session();
+        for _ in 0..levels {
+            session.begin_transaction().unwrap();
+        }
+        let mut stream = session.execute_streaming_owned(READ).unwrap();
+        assert!(
+            stream.next_chunk().unwrap().is_some(),
+            "{what}: a first chunk"
+        );
+        session
+            .execute("INSERT (:Person {name: 'Butch'})")
+            .unwrap_or_else(|error| panic!("{what}: the insert: {error}"));
+        session
+            .execute("MATCH (p:Person {name: 'Alix'}) SET p.age = 1")
+            .unwrap_or_else(|error| panic!("{what}: the update: {error}"));
+        drop(session);
+
+        let butch = db
+            .session()
+            .execute("MATCH (p:Person {name: 'Butch'}) RETURN p")
+            .unwrap()
+            .rows()
+            .len();
+        assert_eq!(
+            butch, 0,
+            "{what}: the dropped session's insert is rolled back"
+        );
+        db.session()
+            .execute("MATCH (p:Person {name: 'Alix'}) SET p.age = 2")
+            .unwrap_or_else(|error| {
+                panic!("{what}: the dropped session's write on Alix still conflicts: {error}")
+            });
+        db.gc();
+
+        let error = stream
+            .next_chunk()
+            .expect_err("the stream of an ended session reads no more");
+        assert!(
+            error
+                .to_string()
+                .contains("the session that opened this stream ended"),
+            "{what}: {error}"
+        );
+        drop(stream);
+    }
+}
+
+/// Outside a transaction a session's owned stream outlives the session: dropped at once (as a
+/// binding's temporary session is) or after a first pull, the stream reads every row to its end.
+#[cfg(feature = "gql")]
+#[test]
+fn an_owned_stream_outside_a_transaction_reads_on_after_its_session_drops() {
+    const READ: &str = "MATCH (p:Person) RETURN p.name";
+    for pulled_first in [false, true] {
+        let db = GrafeoDB::new_in_memory();
+        seed_people(&db);
+        let session = db.session();
+        let mut stream = session.execute_streaming_owned(READ).unwrap();
+        let mut rows = 0;
+        if pulled_first {
+            let chunk = stream.next_chunk().unwrap().expect("a first chunk");
+            rows += chunk.len();
+        }
+        drop(session);
+        while let Some(chunk) = stream
+            .next_chunk()
+            .unwrap_or_else(|error| panic!("pulled first {pulled_first}: {error}"))
+        {
+            rows += chunk.len();
+        }
+        assert_eq!(rows, 5, "pulled first {pulled_first}: every row");
+    }
+}

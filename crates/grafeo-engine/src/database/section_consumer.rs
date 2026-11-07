@@ -17,10 +17,11 @@ use grafeo_common::storage::Section;
 /// priority (evict last). Index sections (Vector, Text, RdfRing, PropertyIndex)
 /// use [`INDEX_BUFFERS`](priorities::INDEX_BUFFERS) priority (evict before data).
 ///
-/// Currently, `evict()` returns 0 because sections cannot release memory
-/// without a full checkpoint + mmap cycle. The [`can_spill`](MemoryConsumer::can_spill)
-/// method returns `true` for mmap-able index sections, signaling that future
-/// tiered storage support will enable actual spilling.
+/// `evict()` returns 0: a section cannot release memory in place. The
+/// [`can_spill`](MemoryConsumer::can_spill) method answers whether a spill
+/// can run: for a mappable index section with a spill directory. The
+/// database registers its sections (the RDF store and ring) without one,
+/// as neither frees memory by a spill yet.
 ///
 /// The consumer is generic over the section's type: a `dyn Section` keeps
 /// every method of the trait linked through its vtable, so a build that never
@@ -51,8 +52,9 @@ impl<S: Section + ?Sized> SectionConsumer<S> {
     /// - Index sections (types 10+): `INDEX_BUFFERS` priority, `IndexBuffers` region
     ///
     /// Calling `spill()` on a consumer constructed via `new` returns
-    /// [`SpillError::NoSpillDirectory`]. Use [`with_spill`](Self::with_spill)
-    /// to enable disk-backed eviction.
+    /// [`SpillError::NoSpillDirectory`], and `can_spill()` is false. The RDF
+    /// sections take one (the row-group store has consumers of its own, in
+    /// `row_group_spill`).
     pub fn new(section: Arc<S>) -> Self {
         Self::build(section, None)
     }
@@ -64,11 +66,10 @@ impl<S: Section + ?Sized> SectionConsumer<S> {
     /// `<spill_path>/<SectionType>_<n>.spill`, the file is mmapped, and
     /// the resulting [`PageFetcher`](grafeo_common::storage::PageFetcher)
     /// is handed to [`Section::swap_to_mmap`] for the section to consume.
-    // Only consumed by the `ring-index` registration path today; other
-    // section consumer types use specialized constructors (VectorIndex,
-    // TextIndex). Allow dead_code under feature combinations
-    // that don't include ring-index.
-    #[cfg_attr(not(feature = "ring-index"), allow(dead_code))]
+    // Tests only: no section the database registers frees memory by a
+    // spill yet (the ring's `swap_to_mmap` copies its bytes back onto the
+    // heap).
+    #[cfg(test)]
     pub fn with_spill(section: Arc<S>, spill_path: PathBuf) -> Self {
         Self::build(section, Some(spill_path))
     }
@@ -177,10 +178,10 @@ impl<S: Section + ?Sized> MemoryConsumer for SectionConsumer<S> {
     }
 
     fn can_spill(&self) -> bool {
-        // Index sections with mmap support can be spilled to the container
-        // and served via memory-mapped I/O. Data sections require full
-        // deserialization and cannot be mmap'd (yet).
-        self.mmap_able
+        // A spill needs a mappable index section and a directory to spill
+        // into; data sections require full deserialization and cannot be
+        // mapped (yet).
+        self.mmap_able && self.spill_path.is_some()
     }
 
     fn spill(&self, _target_bytes: usize) -> Result<usize, SpillError> {
@@ -458,6 +459,11 @@ mod tests {
         assert_eq!(consumer.memory_usage(), 4096);
         assert_eq!(consumer.eviction_priority(), priorities::INDEX_BUFFERS);
         assert_eq!(consumer.region(), MemoryRegion::IndexBuffers);
+        // No spill directory: no spill.
+        assert!(!consumer.can_spill());
+        let dir = tempfile::tempdir().unwrap();
+        let section = Arc::new(FakeSection::new(SectionType::VectorStore, 4096));
+        let consumer = SectionConsumer::with_spill(section, dir.path().to_path_buf());
         assert!(consumer.can_spill());
     }
 
@@ -496,7 +502,8 @@ mod tests {
         let consumer = SectionConsumer::new(section);
 
         assert_eq!(consumer.eviction_priority(), priorities::INDEX_BUFFERS);
-        assert!(consumer.can_spill());
+        // As the database registers it: without a spill directory.
+        assert!(!consumer.can_spill());
     }
 
     #[test]
@@ -507,7 +514,7 @@ mod tests {
         assert_eq!(consumer.name(), "section:PropertyIndex");
         assert_eq!(consumer.eviction_priority(), priorities::INDEX_BUFFERS);
         assert_eq!(consumer.region(), MemoryRegion::IndexBuffers);
-        assert!(consumer.can_spill());
+        assert!(!consumer.can_spill(), "no spill directory");
     }
 
     #[test]

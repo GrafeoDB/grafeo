@@ -23,7 +23,7 @@ Reads work the same in either tier. The on-disk path serves through the OS page 
 
 ## Default behavior (`Auto`)
 
-By default every section is `TierOverride::Auto`. The buffer manager tracks a unified budget (default 75% of system RAM) and reacts to four pressure levels:
+By default every section is `TierOverride::Auto`. The buffer manager tracks a unified budget (default 75% of the memory the process may use) and reacts to four pressure levels:
 
 | Level | Allocated | Action |
 | ----- | --------- | ------ |

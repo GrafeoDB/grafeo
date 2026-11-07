@@ -28,6 +28,12 @@ public sealed class Expect
     public int? Precision { get; set; }
     public List<string> Columns { get; set; } = [];
 
+    /// <summary>
+    /// The codes of the warnings the statement raises, in the result's order (by code): none
+    /// without the key, so every test that runs to a result also checks that it raises no other.
+    /// </summary>
+    public List<string> Warnings { get; set; } = [];
+
     /// <summary>Rows of RDF terms in N-Triples form, each cell compared as the exact term.</summary>
     public List<List<string>> Terms { get; set; } = [];
 
@@ -50,10 +56,24 @@ public sealed class TestCase
     public List<string> Tags { get; set; } = [];
     public List<string> Requires { get; set; } = [];
     public string? Skip { get; set; }
+    /// <summary>The spec and the issue of a case expected to fail (<c>xfail:</c>), null otherwise.</summary>
+    public Xfail? Xfail { get; set; }
+    /// <summary>A runner probe (<c>probe:</c>), only in a file under a spec-probes directory.</summary>
+    public string? Probe { get; set; }
     public string? Language { get; set; }
     public string? Dataset { get; set; }
     public Expect Expect { get; set; } = new();
     public Dictionary<string, string> Variants { get; set; } = new();
+}
+
+/// <summary>
+/// The spec a case's expected result is held against and the issue that fixes it
+/// (<c>#N</c> or <c>fix in X.Y.Z</c>).
+/// </summary>
+public sealed class Xfail
+{
+    public string Spec { get; set; } = "";
+    public string Issue { get; set; } = "";
 }
 
 /// <summary>Top-level structure of a parsed .gtest file.</summary>

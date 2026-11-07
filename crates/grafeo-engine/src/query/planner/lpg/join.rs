@@ -650,6 +650,18 @@ fn subquery_output(subplan: &LogicalOperator) -> Option<LogicalOperator> {
             left: Box::new(subquery_output(&otherwise.left)?),
             right: Box::new(subquery_output(&otherwise.right)?),
         })),
+        // An EXCEPT or INTERSECT of such subqueries passes on what its left branch returns,
+        // comparing the elements themselves.
+        LogicalOperator::Except(except) => Some(LogicalOperator::Except(ExceptOp {
+            left: Box::new(subquery_output(&except.left)?),
+            right: Box::new(subquery_output(&except.right)?),
+            all: except.all,
+        })),
+        LogicalOperator::Intersect(intersect) => Some(LogicalOperator::Intersect(IntersectOp {
+            left: Box::new(subquery_output(&intersect.left)?),
+            right: Box::new(subquery_output(&intersect.right)?),
+            all: intersect.all,
+        })),
         _ => None,
     }
 }

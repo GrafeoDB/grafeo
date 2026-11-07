@@ -179,7 +179,8 @@ tests:
       count: 2
 
   - name: prim_with_start_node
-    # Prim starting from node 1 (Berlin) in a 3-node graph
+    # Prim from node 1 (Berlin) spans the whole 3-node graph, edges in either direction: 2 edges
+    # (0.6.1 followed only outgoing edges and gave 1)
     setup:
       - "INSERT (:City {name: 'Amsterdam'})"
       - "INSERT (:City {name: 'Berlin'})"
@@ -189,7 +190,22 @@ tests:
       - "MATCH (a:City {name: 'Amsterdam'}), (b:City {name: 'Paris'}) INSERT (a)-[:ROUTE {km: 500}]->(b)"
     query: "CALL grafeo.prim({weight: 'km', start: 1})"
     expect:
-      count: 1
+      count: 2
+
+  - name: prim_with_start_node_total
+    # The tree from Berlin is the minimum one, 650 + 500 (networkx: 1150)
+    setup:
+      - "INSERT (:City {name: 'Amsterdam'})"
+      - "INSERT (:City {name: 'Berlin'})"
+      - "INSERT (:City {name: 'Paris'})"
+      - "MATCH (a:City {name: 'Amsterdam'}), (b:City {name: 'Berlin'}) INSERT (a)-[:ROUTE {km: 650}]->(b)"
+      - "MATCH (a:City {name: 'Berlin'}), (b:City {name: 'Paris'}) INSERT (a)-[:ROUTE {km: 1050}]->(b)"
+      - "MATCH (a:City {name: 'Amsterdam'}), (b:City {name: 'Paris'}) INSERT (a)-[:ROUTE {km: 500}]->(b)"
+    query: "CALL grafeo.prim({weight: 'km', start: 1}) YIELD weight RETURN sum(weight) AS total"
+    expect:
+      precision: 9
+      rows:
+        - [1150.0]
 
   - name: prim_single_node
     setup:

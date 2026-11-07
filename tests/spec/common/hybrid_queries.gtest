@@ -230,6 +230,22 @@ tests:
         - [a]
         - [b]
 
+  # The same in GQL: a MATCH follows the leading CALL.
+  - name: text_search_procedure_tie_keeps_lowest_ids_in_gql
+    requires: [text-index, algos]
+    setup:
+      - "INSERT (:Doc {t: 'a', body: 'graph canals'})"
+      - "INSERT (:Doc {t: 'b', body: 'graph canals'})"
+      - "INSERT (:Doc {t: 'c', body: 'graph canals'})"
+      - "INSERT (:Doc {t: 'd', body: 'bridges'})"
+      - "CREATE INDEX doc_body FOR (d:Doc) ON (d.body) USING TEXT"
+    query: "CALL grafeo.search.text('Doc', 'body', 'canals', 2) YIELD node_id MATCH (d:Doc) WHERE id(d) = node_id RETURN d.t"
+    expect:
+      ordered: true
+      rows:
+        - [a]
+        - [b]
+
   # ---------------------------------------------------------------------------
   # #347: ORDER BY text_score(...) LIMIT returns the node itself (it gave a
   # bare id), in score order, in GQL and Cypher.

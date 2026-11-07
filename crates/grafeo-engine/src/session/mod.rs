@@ -16,6 +16,10 @@ mod planning;
 mod prepared;
 #[cfg(feature = "triple-store")]
 mod rdf;
+#[cfg(feature = "testing-warning-probe")]
+mod warning_probe;
+#[cfg(feature = "testing-warning-probe")]
+pub use warning_probe::ProbeStage;
 
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
@@ -522,8 +526,12 @@ pub struct Session {
     changes: parking_lot::Mutex<Option<Arc<crate::transaction::TransactionChanges>>>,
     /// Count of active `ResultStream`s pinned to this session. Commit and
     /// rollback block while any streams are outstanding so mid-iteration
-    /// snapshots are not invalidated.
-    active_streams: AtomicUsize,
+    /// snapshots are not invalidated. Shared with the owned streams, which
+    /// outlive the borrow of the session.
+    active_streams: Arc<AtomicUsize>,
+    /// Set when the session is dropped: an owned stream still open then
+    /// fails on its next pull, as the drop rolled its transaction back.
+    ended: Arc<std::sync::atomic::AtomicBool>,
     /// Shared metrics registry (populated when the `metrics` feature is enabled).
     #[cfg(feature = "metrics")]
     pub(crate) metrics: Option<Arc<crate::metrics::MetricsRegistry>>,
@@ -537,6 +545,9 @@ pub struct Session {
             std::collections::HashMap<String, Arc<grafeo_core::graph::GraphProjection>>,
         >,
     >,
+    /// The warning probe the tests set (see [`ProbeStage`]).
+    #[cfg(feature = "testing-warning-probe")]
+    warning_probe: parking_lot::Mutex<Option<ProbeStage>>,
 }
 
 /// A savepoint: its name, and how far the transaction's changes reached
@@ -611,13 +622,16 @@ impl Session {
             last_commit_epoch: parking_lot::Mutex::new(None),
             transaction_statements: TransactionStatements::Allowed,
             changes: parking_lot::Mutex::new(None),
-            active_streams: AtomicUsize::new(0),
+            active_streams: Arc::new(AtomicUsize::new(0)),
+            ended: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             #[cfg(feature = "metrics")]
             metrics: None,
             #[cfg(feature = "metrics")]
             tx_start_time: parking_lot::Mutex::new(None),
             #[cfg(lpg_language)]
             projections: cfg.projections,
+            #[cfg(feature = "testing-warning-probe")]
+            warning_probe: parking_lot::Mutex::new(None),
         }
     }
 
@@ -795,13 +809,16 @@ impl Session {
             last_commit_epoch: parking_lot::Mutex::new(None),
             transaction_statements: TransactionStatements::Allowed,
             changes: parking_lot::Mutex::new(None),
-            active_streams: AtomicUsize::new(0),
+            active_streams: Arc::new(AtomicUsize::new(0)),
+            ended: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             #[cfg(feature = "metrics")]
             metrics: None,
             #[cfg(feature = "metrics")]
             tx_start_time: parking_lot::Mutex::new(None),
             #[cfg(lpg_language)]
             projections: cfg.projections,
+            #[cfg(feature = "testing-warning-probe")]
+            warning_probe: parking_lot::Mutex::new(None),
         })
     }
 
@@ -934,6 +951,12 @@ impl Session {
                 continue;
             }
             let kind = if is_edge { "EDGE" } else { "NODE" };
+            // Named as a statement in the schema writes them: the graph type lists only types of
+            // its own schema, which is the one the type is dropped in.
+            let (graph_type, graph) = (
+                crate::catalog::unqualified(&graph_type),
+                crate::catalog::unqualified(&graph),
+            );
             return Err(Error::from(QueryError::new(
                 QueryErrorKind::Semantic,
                 format!(
@@ -1062,13 +1085,16 @@ impl Session {
         *self.time_zone.lock() = Some(zone);
     }
 
-    /// How this session compares a zoned datetime or time with a local one:
-    /// openCypher keeps the types apart, GQL and SQL/PGQ read the local one
-    /// at the session time zone (UTC without one).
+    /// How this session compares a zoned datetime or time with a local one in a statement of
+    /// `language`: openCypher keeps the types apart, the others read the local one at the
+    /// session time zone (UTC without one).
     #[cfg(lpg_language)]
-    fn temporal_comparison(&self, open_cypher: bool) -> grafeo_common::types::TemporalComparison {
+    fn temporal_comparison(
+        &self,
+        language: grafeo_common::types::StatementLanguage,
+    ) -> grafeo_common::types::TemporalComparison {
         use grafeo_common::types::TemporalComparison;
-        if open_cypher {
+        if language == grafeo_common::types::StatementLanguage::Cypher {
             return TemporalComparison::TypesApart;
         }
         let offset = self
@@ -1197,12 +1223,8 @@ impl Session {
         if self.identity.can_admin() {
             return Ok(());
         }
-        crate::auth::check_permission(&self.identity, kind).map_err(|denied| {
-            grafeo_common::utils::error::Error::from(grafeo_common::utils::error::QueryError::new(
-                grafeo_common::utils::error::QueryErrorKind::Semantic,
-                denied.to_string(),
-            ))
-        })
+        crate::auth::check_permission(&self.identity, kind)
+            .map_err(grafeo_common::utils::error::Error::from)
     }
 
     /// Fails when this session may not write: its role is read-only, or a
@@ -1248,13 +1270,10 @@ impl Session {
                         .identity
                         .can_access_graph(name, crate::auth::Role::ReadWrite) =>
                 {
-                    return Err(Error::from(QueryError::new(
-                        QueryErrorKind::Semantic,
-                        format!(
-                            "permission denied: no grant for graph '{name}' (user: {})",
-                            self.identity.user_id()
-                        ),
-                    )));
+                    return Err(Error::from(QueryError::permission_denied(format!(
+                        "no grant for graph '{name}' (user: {})",
+                        self.identity.user_id()
+                    ))));
                 }
                 _ => {}
             }
@@ -1467,13 +1486,10 @@ impl Session {
                         .identity
                         .can_access_graph(&name, crate::auth::Role::ReadOnly)
                 {
-                    return Err(Error::from(QueryError::new(
-                        QueryErrorKind::Semantic,
-                        format!(
-                            "permission denied: no grant for graph '{name}' (user: {})",
-                            self.identity.user_id()
-                        ),
-                    )));
+                    return Err(Error::from(QueryError::permission_denied(format!(
+                        "no grant for graph '{name}' (user: {})",
+                        self.identity.user_id()
+                    ))));
                 }
                 // Verify graph exists (resolve within current schema)
                 let effective_key = self.effective_graph_key(&name);
@@ -1497,13 +1513,10 @@ impl Session {
                         .identity
                         .can_access_graph(&name, crate::auth::Role::ReadOnly)
                 {
-                    return Err(Error::from(QueryError::new(
-                        QueryErrorKind::Semantic,
-                        format!(
-                            "permission denied: no grant for graph '{name}' (user: {})",
-                            self.identity.user_id()
-                        ),
-                    )));
+                    return Err(Error::from(QueryError::permission_denied(format!(
+                        "no grant for graph '{name}' (user: {})",
+                        self.identity.user_id()
+                    ))));
                 }
                 let effective_key = self.effective_graph_key(&name);
                 if !name.eq_ignore_ascii_case("default")
@@ -1761,7 +1774,7 @@ impl Session {
     /// error when the user may not read it.
     #[cfg(feature = "sql-pgq")]
     fn statement_store(&self, graph: Option<&str>) -> Result<Arc<dyn GraphStore>> {
-        use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind};
+        use grafeo_common::utils::error::{Error, QueryError};
 
         let Some(name) = graph else {
             return Ok(self.active_store());
@@ -1771,13 +1784,10 @@ impl Session {
                 .identity
                 .can_access_graph(name, crate::auth::Role::ReadOnly)
         {
-            return Err(Error::from(QueryError::new(
-                QueryErrorKind::Semantic,
-                format!(
-                    "permission denied: no grant for graph '{name}' (user: {})",
-                    self.identity.user_id()
-                ),
-            )));
+            return Err(Error::from(QueryError::permission_denied(format!(
+                "no grant for graph '{name}' (user: {})",
+                self.identity.user_id()
+            ))));
         }
         let key = self.effective_graph_key(name);
         if self.named_graph(&key).is_some() {
@@ -2085,6 +2095,7 @@ impl Session {
             counters: Default::default(),
             profile: None,
             kind: crate::database::ResultKind::Rows,
+            warnings: Vec::new(),
         }
     }
 
@@ -3284,23 +3295,29 @@ impl Session {
                     def.allowed_node_types.clone(),
                     def.allowed_edge_types.clone(),
                 );
+                // A type is named as the graph type lists it: by its key in the current
+                // schema, as CREATE GRAPH TYPE lists its types.
                 for alt in &stmt.alterations {
                     match alt {
                         GraphTypeAlteration::AddNodeType(name) => {
-                            if !def.allowed_node_types.contains(name) {
-                                def.allowed_node_types.push(name.clone());
+                            let key = self.effective_type_key(name);
+                            if !def.allowed_node_types.contains(&key) {
+                                def.allowed_node_types.push(key);
                             }
                         }
                         GraphTypeAlteration::DropNodeType(name) => {
-                            def.allowed_node_types.retain(|t| t != name);
+                            let key = self.effective_type_key(name);
+                            def.allowed_node_types.retain(|t| *t != key);
                         }
                         GraphTypeAlteration::AddEdgeType(name) => {
-                            if !def.allowed_edge_types.contains(name) {
-                                def.allowed_edge_types.push(name.clone());
+                            let key = self.effective_type_key(name);
+                            if !def.allowed_edge_types.contains(&key) {
+                                def.allowed_edge_types.push(key);
                             }
                         }
                         GraphTypeAlteration::DropEdgeType(name) => {
-                            def.allowed_edge_types.retain(|t| t != name);
+                            let key = self.effective_type_key(name);
+                            def.allowed_edge_types.retain(|t| *t != key);
                         }
                     }
                 }
@@ -4192,6 +4209,7 @@ impl Session {
         // The graph a `USE g` focuses the statement on, from here to its end.
         let mut _focus = None;
         let optimized_plan = if let Some(plan) = cached {
+            self.check_external_access(&plan)?;
             _focus = self.focus_statement(plan.graph.as_deref())?;
             check_writes(&plan)?;
             Self::fill_prepared(plan, params)?
@@ -4202,7 +4220,10 @@ impl Session {
             let parsed = params.and_then(|_| self.plan_cache().get_parsed(&cache_key));
             let bound_by_value = parsed.is_some();
             let mut logical_plan = match parsed {
-                Some(plan) => plan,
+                Some(plan) => {
+                    self.check_external_access(&plan)?;
+                    plan
+                }
                 None => match gql::translate_full(query)? {
                     gql::GqlTranslationResult::SessionCommand(cmd) => {
                         return self.execute_session_command(cmd);
@@ -4211,7 +4232,7 @@ impl Session {
                         self.check_schema_command(&cmd)?;
                         return self.execute_schema_command(cmd);
                     }
-                    gql::GqlTranslationResult::Plan(plan) => plan,
+                    gql::GqlTranslationResult::Plan(plan) => self.translated(plan)?,
                 },
             };
             _focus = self.focus_statement(logical_plan.graph.as_deref())?;
@@ -4233,7 +4254,8 @@ impl Session {
 
                 // Optimize the plan
                 let active = self.active_store();
-                let optimizer = self.optimizer_for(&active);
+                let optimizer =
+                    self.optimizer_for(&active, crate::query::processor::QueryLanguage::Gql);
                 let plan = optimizer.optimize(logical_plan)?;
 
                 // Cache the optimized plan for future use
@@ -4246,7 +4268,12 @@ impl Session {
         // Resolve the active store for query execution
         let active = self.active_store();
 
-        if let Some(answer) = self.explain_or_profile(&optimized_plan, &active, false, start_time) {
+        if let Some(answer) = self.explain_or_profile(
+            &optimized_plan,
+            &active,
+            grafeo_common::types::StatementLanguage::Gql,
+            start_time,
+        ) {
             return answer;
         }
 
@@ -4268,15 +4295,12 @@ impl Session {
                 viewing_epoch,
                 transaction_id,
                 read_only,
-                false,
+                grafeo_common::types::StatementLanguage::Gql,
             )?;
             let physical_plan = planner.plan(&optimized_plan)?;
 
             // Execute the plan via push-based pipeline when possible
-            let executor = self
-                .make_executor(physical_plan.columns.clone())
-                .with_write_counter(planner.write_counter())
-                .with_read_counter(planner.read_counter());
+            let executor = self.make_executor(&planner, physical_plan.columns.clone());
             let (mut source, push_ops) = {
                 #[cfg(feature = "spill")]
                 {
@@ -4348,9 +4372,38 @@ impl Session {
     ) -> Result<crate::query::executor::stream::ResultStream<'_>> {
         use crate::query::executor::stream::{ResultStream, StreamGuard};
 
-        let (source, columns, deadline, pin) = self.build_streaming_plan(query)?;
+        let plan = self.build_streaming_plan(query)?;
         let guard = StreamGuard::new(&self.active_streams);
-        ResultStream::new(source, columns, deadline, guard, pin)
+        ResultStream::new(plan, guard)
+    }
+
+    /// [`execute_streaming`](Self::execute_streaming) as a stream that owns
+    /// what it reads, as [`GrafeoDB::execute_streaming`](crate::GrafeoDB::execute_streaming)
+    /// gives: for a caller that keeps the stream past this borrow of the
+    /// session (a binding's stream handle). The session's permissions, its
+    /// external access included, apply as they do to `execute`, and its
+    /// transaction cannot commit or roll back while the stream is open.
+    ///
+    /// # Stability: Experimental
+    ///
+    /// New in 0.6.2. It may change or be removed in any release, with a
+    /// CHANGELOG entry: see <https://grafeo.dev/stability/>.
+    ///
+    /// # Errors
+    ///
+    /// As [`execute_streaming`](Self::execute_streaming).
+    #[cfg(feature = "gql")]
+    pub fn execute_streaming_owned(
+        &self,
+        query: &str,
+    ) -> Result<crate::query::executor::stream::OwnedResultStream> {
+        use crate::query::executor::stream::{OwnedResultStream, OwnedStreamGuard};
+
+        let plan = self.build_streaming_plan(query)?;
+        OwnedResultStream::new(
+            plan,
+            Some(OwnedStreamGuard::new(&self.active_streams, &self.ended)),
+        )
     }
 
     /// Builds a pull-based physical pipeline for streaming, returning the
@@ -4365,12 +4418,7 @@ impl Session {
     pub(crate) fn build_streaming_plan(
         &self,
         query: &str,
-    ) -> Result<(
-        Box<dyn grafeo_core::execution::operators::Operator>,
-        Vec<String>,
-        Option<Instant>,
-        Option<crate::transaction::ReadPin>,
-    )> {
+    ) -> Result<crate::query::executor::stream::StreamPlan> {
         use crate::query::{binder::Binder, processor::QueryLanguage, translators::gql};
 
         self.require_lpg("GQL")?;
@@ -4401,6 +4449,7 @@ impl Session {
                 ));
             }
             gql::GqlTranslationResult::Plan(plan) => {
+                let plan = self.translated(plan)?;
                 if self.plan_writes(&plan.root) {
                     return Err(grafeo_common::utils::error::Error::from(
                         grafeo_common::utils::error::QueryError::new(
@@ -4433,7 +4482,8 @@ impl Session {
             let mut binder = Binder::new();
             let _binding_context = binder.bind(&logical_plan)?;
             let active = self.active_store();
-            let optimizer = self.optimizer_for(&active);
+            let optimizer =
+                self.optimizer_for(&active, crate::query::processor::QueryLanguage::Gql);
             let plan = optimizer.optimize(logical_plan)?;
             self.plan_cache().put_optimized(cache_key, plan.clone());
             plan
@@ -4469,11 +4519,12 @@ impl Session {
                 viewing_epoch,
                 transaction_id,
                 !has_active_tx,
-                false,
+                grafeo_common::types::StatementLanguage::Gql,
             )?
             .for_streaming();
         let physical_plan = planner.plan(&optimized_plan)?;
         let columns = physical_plan.columns.clone();
+        let warnings = planner.warnings();
 
         // Streaming only supports the pure pull path. Reject plans that would
         // require push operators (Sort, Aggregate, Distinct, etc.) so we never
@@ -4504,7 +4555,13 @@ impl Session {
             ));
         }
 
-        Ok((source, columns, self.query_deadline(), pin))
+        Ok(crate::query::executor::stream::StreamPlan {
+            operator: source,
+            columns,
+            deadline: self.query_deadline(),
+            pin,
+            warnings,
+        })
     }
 
     /// Executes a GQL query with visibility at the specified epoch.
@@ -4637,6 +4694,7 @@ impl Session {
         let cache_key = self.plan_cache_key(query, QueryLanguage::Cypher);
         let cached = self.cached_plan(&cache_key, params);
         let optimized_plan = if let Some(plan) = cached {
+            self.check_external_access(&plan)?;
             Self::fill_prepared(plan, params)?
         } else {
             // A statement that binds by value keeps its parsed plan (see
@@ -4644,7 +4702,10 @@ impl Session {
             let parsed = params.and_then(|_| self.plan_cache().get_parsed(&cache_key));
             let bound_by_value = parsed.is_some();
             let mut logical_plan = match parsed {
-                Some(plan) => plan,
+                Some(plan) => {
+                    self.check_external_access(&plan)?;
+                    plan
+                }
                 // Schema DDL and SHOW commands run before the normal query path.
                 None => match cypher::translate_full(query)? {
                     cypher::CypherTranslationResult::SchemaCommand(cmd) => {
@@ -4660,7 +4721,7 @@ impl Session {
                     cypher::CypherTranslationResult::ShowCurrentGraphType => {
                         return self.execute_show_current_graph_type();
                     }
-                    cypher::CypherTranslationResult::Plan(plan) => plan,
+                    cypher::CypherTranslationResult::Plan(plan) => self.translated(plan)?,
                 },
             };
 
@@ -4686,7 +4747,8 @@ impl Session {
 
                 // Optimize the plan
                 let active = self.active_store();
-                let optimizer = self.optimizer_for(&active);
+                let optimizer =
+                    self.optimizer_for(&active, crate::query::processor::QueryLanguage::Cypher);
                 let plan = optimizer.optimize(logical_plan)?;
 
                 // Cache the optimized plan
@@ -4704,7 +4766,12 @@ impl Session {
         // Resolve the active store for query execution
         let active = self.active_store();
 
-        if let Some(answer) = self.explain_or_profile(&optimized_plan, &active, true, start_time) {
+        if let Some(answer) = self.explain_or_profile(
+            &optimized_plan,
+            &active,
+            grafeo_common::types::StatementLanguage::Cypher,
+            start_time,
+        ) {
             return answer;
         }
 
@@ -4719,15 +4786,12 @@ impl Session {
                 Arc::clone(&active),
                 viewing_epoch,
                 transaction_id,
-                true,
+                grafeo_common::types::StatementLanguage::Cypher,
             )?;
             let mut physical_plan = planner.plan(&optimized_plan)?;
 
             // Execute the plan
-            let executor = self
-                .make_executor(physical_plan.columns.clone())
-                .with_write_counter(planner.write_counter())
-                .with_read_counter(planner.read_counter());
+            let executor = self.make_executor(&planner, physical_plan.columns.clone());
             executor.execute(physical_plan.operator.as_mut())
         });
 
@@ -4776,7 +4840,7 @@ impl Session {
         let start_time = Instant::now();
 
         // Parse and translate the query to a logical plan
-        let mut logical_plan = gremlin::translate(query)?;
+        let mut logical_plan = self.translated(gremlin::translate(query)?)?;
 
         // No parameters are supplied, so one the query uses is missing.
         substitute_params(&mut logical_plan, &std::collections::HashMap::new())?;
@@ -4787,7 +4851,8 @@ impl Session {
 
         // Optimize the plan
         let active = self.active_store();
-        let optimizer = self.optimizer_for(&active);
+        let optimizer =
+            self.optimizer_for(&active, crate::query::processor::QueryLanguage::Gremlin);
         let optimized_plan = optimizer.optimize(logical_plan)?;
 
         let writes = self.plan_write_kinds(&optimized_plan.root);
@@ -4795,7 +4860,12 @@ impl Session {
         if has_mutations {
             self.require_permission(crate::auth::StatementKind::Write)?;
         }
-        if let Some(answer) = self.explain_or_profile(&optimized_plan, &active, false, start_time) {
+        if let Some(answer) = self.explain_or_profile(
+            &optimized_plan,
+            &active,
+            grafeo_common::types::StatementLanguage::Gremlin,
+            start_time,
+        ) {
             return answer;
         }
 
@@ -4808,15 +4878,12 @@ impl Session {
                 Arc::clone(&active),
                 viewing_epoch,
                 transaction_id,
-                false,
+                grafeo_common::types::StatementLanguage::Gremlin,
             )?;
             let mut physical_plan = planner.plan(&optimized_plan)?;
 
             // Execute the plan
-            let executor = self
-                .make_executor(physical_plan.columns.clone())
-                .with_write_counter(planner.write_counter())
-                .with_read_counter(planner.read_counter());
+            let executor = self.make_executor(&planner, physical_plan.columns.clone());
             executor.execute(physical_plan.operator.as_mut())
         });
 
@@ -4856,7 +4923,7 @@ impl Session {
         let start_time = Instant::now();
 
         // Parse and translate the query to a logical plan
-        let mut logical_plan = gremlin::translate(query)?;
+        let mut logical_plan = self.translated(gremlin::translate(query)?)?;
 
         // Substitute parameters
         substitute_params(&mut logical_plan, &params)?;
@@ -4867,7 +4934,8 @@ impl Session {
 
         // Optimize the plan
         let active = self.active_store();
-        let optimizer = self.optimizer_for(&active);
+        let optimizer =
+            self.optimizer_for(&active, crate::query::processor::QueryLanguage::Gremlin);
         let optimized_plan = optimizer.optimize(logical_plan)?;
 
         let writes = self.plan_write_kinds(&optimized_plan.root);
@@ -4875,7 +4943,12 @@ impl Session {
         if has_mutations {
             self.require_permission(crate::auth::StatementKind::Write)?;
         }
-        if let Some(answer) = self.explain_or_profile(&optimized_plan, &active, false, start_time) {
+        if let Some(answer) = self.explain_or_profile(
+            &optimized_plan,
+            &active,
+            grafeo_common::types::StatementLanguage::Gremlin,
+            start_time,
+        ) {
             return answer;
         }
 
@@ -4885,13 +4958,10 @@ impl Session {
                 Arc::clone(&active),
                 viewing_epoch,
                 transaction_id,
-                false,
+                grafeo_common::types::StatementLanguage::Gremlin,
             )?;
             let mut physical_plan = planner.plan(&optimized_plan)?;
-            let executor = self
-                .make_executor(physical_plan.columns.clone())
-                .with_write_counter(planner.write_counter())
-                .with_read_counter(planner.read_counter());
+            let executor = self.make_executor(&planner, physical_plan.columns.clone());
             executor.execute(physical_plan.operator.as_mut())
         });
 
@@ -4940,7 +5010,7 @@ impl Session {
         #[cfg(feature = "metrics")]
         let start_time = Instant::now();
 
-        let mut logical_plan = graphql::translate(query)?;
+        let mut logical_plan = self.translated(graphql::translate(query)?)?;
 
         // Substitute default parameter values from variable declarations; a
         // variable without a default is missing.
@@ -4951,7 +5021,8 @@ impl Session {
         let _binding_context = binder.bind(&logical_plan)?;
 
         let active = self.active_store();
-        let optimizer = self.optimizer_for(&active);
+        let optimizer =
+            self.optimizer_for(&active, crate::query::processor::QueryLanguage::GraphQL);
         let optimized_plan = optimizer.optimize(logical_plan)?;
         let writes = self.plan_write_kinds(&optimized_plan.root);
         let has_mutations = writes.any;
@@ -4965,13 +5036,10 @@ impl Session {
                 Arc::clone(&active),
                 viewing_epoch,
                 transaction_id,
-                false,
+                grafeo_common::types::StatementLanguage::GraphQl,
             )?;
             let mut physical_plan = planner.plan(&optimized_plan)?;
-            let executor = self
-                .make_executor(physical_plan.columns.clone())
-                .with_write_counter(planner.write_counter())
-                .with_read_counter(planner.read_counter());
+            let executor = self.make_executor(&planner, physical_plan.columns.clone());
             executor.execute(physical_plan.operator.as_mut())
         });
 
@@ -5012,7 +5080,7 @@ impl Session {
         let start_time = Instant::now();
 
         // Parse and translate the query to a logical plan
-        let mut logical_plan = graphql::translate(query)?;
+        let mut logical_plan = self.translated(graphql::translate(query)?)?;
 
         // Merge default params with caller-supplied params
         if !logical_plan.default_params.is_empty() {
@@ -5029,7 +5097,8 @@ impl Session {
 
         // Optimize the plan
         let active = self.active_store();
-        let optimizer = self.optimizer_for(&active);
+        let optimizer =
+            self.optimizer_for(&active, crate::query::processor::QueryLanguage::GraphQL);
         let optimized_plan = optimizer.optimize(logical_plan)?;
 
         let writes = self.plan_write_kinds(&optimized_plan.root);
@@ -5044,13 +5113,10 @@ impl Session {
                 Arc::clone(&active),
                 viewing_epoch,
                 transaction_id,
-                false,
+                grafeo_common::types::StatementLanguage::GraphQl,
             )?;
             let mut physical_plan = planner.plan(&optimized_plan)?;
-            let executor = self
-                .make_executor(physical_plan.columns.clone())
-                .with_write_counter(planner.write_counter())
-                .with_read_counter(planner.read_counter());
+            let executor = self.make_executor(&planner, physical_plan.columns.clone());
             executor.execute(physical_plan.operator.as_mut())
         });
 
@@ -5104,7 +5170,7 @@ impl Session {
             binder::Binder, plan::LogicalOperator, processor::QueryLanguage, translators::sql_pgq,
         };
 
-        #[cfg(feature = "metrics")]
+        // For a PROFILE's total time, and the query metrics.
         let start_time = Instant::now();
 
         // A statement without parameters whose optimized plan is cached
@@ -5113,6 +5179,7 @@ impl Session {
         let cache_key = self.plan_cache_key(query, QueryLanguage::SqlPgq);
         let cached = self.cached_plan(&cache_key, params);
         let optimized_plan = if let Some(plan) = cached {
+            self.check_external_access(&plan)?;
             Self::fill_prepared(plan, params)?
         } else {
             // A statement that binds by value keeps its parsed plan (see
@@ -5120,10 +5187,13 @@ impl Session {
             let parsed = params.and_then(|_| self.plan_cache().get_parsed(&cache_key));
             let bound_by_value = parsed.is_some();
             let mut logical_plan = match parsed {
-                Some(plan) => plan,
+                Some(plan) => {
+                    self.check_external_access(&plan)?;
+                    plan
+                }
                 None => {
                     // Parse and translate
-                    let logical_plan = sql_pgq::translate(query)?;
+                    let logical_plan = self.translated(sql_pgq::translate(query)?)?;
 
                     // Property graph DDL is a standalone change of its own (see
                     // `create_property_graph`), outside the query pipeline.
@@ -5162,7 +5232,8 @@ impl Session {
                 let mut binder = Binder::new();
                 let _binding_context = binder.bind(&logical_plan)?;
                 let active = self.statement_store(logical_plan.graph.as_deref())?;
-                let optimizer = self.optimizer_for(&active);
+                let optimizer =
+                    self.optimizer_for(&active, crate::query::processor::QueryLanguage::SqlPgq);
                 let plan = optimizer.optimize(logical_plan)?;
                 self.plan_cache().put_optimized(cache_key, plan.clone());
                 plan
@@ -5171,6 +5242,14 @@ impl Session {
 
         // `GRAPH_TABLE (g ...)` reads the graph g, else the current graph.
         let active = self.statement_store(optimized_plan.graph.as_deref())?;
+        if let Some(answer) = self.explain_or_profile(
+            &optimized_plan,
+            &active,
+            grafeo_common::types::StatementLanguage::SqlPgq,
+            start_time,
+        ) {
+            return answer;
+        }
         let writes = self.plan_write_kinds(&optimized_plan.root);
         let has_mutations = writes.any;
         if has_mutations {
@@ -5183,13 +5262,10 @@ impl Session {
                 Arc::clone(&active),
                 viewing_epoch,
                 transaction_id,
-                false,
+                grafeo_common::types::StatementLanguage::SqlPgq,
             )?;
             let mut physical_plan = planner.plan(&optimized_plan)?;
-            let executor = self
-                .make_executor(physical_plan.columns.clone())
-                .with_write_counter(planner.write_counter())
-                .with_read_counter(planner.read_counter());
+            let executor = self.make_executor(&planner, physical_plan.columns.clone());
             executor.execute(physical_plan.operator.as_mut())
         });
 
@@ -5504,6 +5580,17 @@ impl Session {
             }
         };
         let commit_epoch = commit.epoch();
+        // A committed change, for the checkpointer, is what the WAL records
+        // (a read, or a write that matched nothing, is none).
+        #[cfg(feature = "grafeo-file")]
+        let commit = {
+            let mut commit = commit;
+            commit.set_changed(crate::transaction::TransactionChanges::records_a_change(
+                changes.as_deref(),
+                &schema,
+            ));
+            commit
+        };
 
         #[cfg(feature = "testing-statement-injection")]
         grafeo_common::testing::commit_hook::run_after_commit_epoch();
@@ -5743,8 +5830,15 @@ impl Session {
 
     /// Core rollback logic, usable from both `&mut self` and `&self` paths.
     fn rollback_inner(&self) -> Result<()> {
-        let _span = grafeo_debug_span!("grafeo::tx::rollback");
         self.check_no_active_streams("rollback")?;
+        self.rollback_regardless_of_streams()
+    }
+
+    /// [`rollback_inner`](Self::rollback_inner) without the open-stream
+    /// check: for the session's drop, after which an open owned stream fails
+    /// on its next pull.
+    fn rollback_regardless_of_streams(&self) -> Result<()> {
+        let _span = grafeo_debug_span!("grafeo::tx::rollback");
         // Nested transaction: rollback to the auto-savepoint.
         {
             let mut depth = self.transaction_nesting_depth.lock();
@@ -6510,15 +6604,26 @@ impl Session {
     #[must_use]
     #[cfg(query_language)]
     fn query_deadline(&self) -> Option<Instant> {
-        self.query_timeout.map(|d| Instant::now() + d)
+        crate::config::Config::deadline_after(self.query_timeout)
     }
 
     /// Creates an executor with deadline and timeout duration configured.
     #[cfg(query_language)]
-    fn make_executor(&self, columns: Vec<String>) -> Executor {
+    fn executor_with_deadline(&self, columns: Vec<String>) -> Executor {
         Executor::with_columns(columns)
             .with_deadline(self.query_deadline())
             .with_timeout_duration(self.query_timeout)
+    }
+
+    /// The executor of a plan `planner` built: with the deadline and the
+    /// timeout, and reporting the planner's write and read counters and the
+    /// statement's warnings.
+    #[cfg(lpg_language)]
+    fn make_executor(&self, planner: &crate::query::Planner, columns: Vec<String>) -> Executor {
+        self.executor_with_deadline(columns)
+            .with_write_counter(planner.write_counter())
+            .with_read_counter(planner.read_counter())
+            .with_warnings(planner.warnings())
     }
 
     /// Creates a per-query `OperatorMemoryContext` for memory-aware spilling.
@@ -6608,6 +6713,17 @@ impl Session {
         Option<TransactionId>,
         Option<crate::transaction::ReadPin>,
     )> {
+        let (epoch, transaction_id, historical) = self.statement_epoch();
+        if historical {
+            let pin = self.transaction_manager.pin_read_at(epoch)?;
+            return Ok((pin.epoch(), None, Some(pin)));
+        }
+        Ok((epoch, transaction_id, None))
+    }
+
+    /// The epoch a statement reads at, its transaction, and whether the epoch is a historical
+    /// override, which a statement that reads pins (see `get_transaction_context`).
+    fn statement_epoch(&self) -> (EpochId, Option<TransactionId>, bool) {
         let viewing = *self.viewing_epoch_override.lock();
         let transaction = *self.current_transaction.lock();
         // A historical override reads committed data, excluding pending
@@ -6616,8 +6732,7 @@ impl Session {
             let epoch = transaction
                 .and_then(|transaction_id| self.transaction_manager.start_epoch(transaction_id))
                 .map_or(epoch, |start| epoch.min(start));
-            let pin = self.transaction_manager.pin_read_at(epoch)?;
-            return Ok((pin.epoch(), None, Some(pin)));
+            return (epoch, None, true);
         }
 
         if let Some(transaction_id) = transaction {
@@ -6625,9 +6740,9 @@ impl Session {
                 .transaction_manager
                 .start_epoch(transaction_id)
                 .unwrap_or_else(|| self.transaction_manager.current_epoch());
-            Ok((epoch, Some(transaction_id), None))
+            (epoch, Some(transaction_id), false)
         } else {
-            Ok((self.transaction_manager.current_epoch(), None, None))
+            (self.transaction_manager.current_epoch(), None, false)
         }
     }
 
@@ -6679,16 +6794,50 @@ impl Session {
 
     /// An optimizer for this session's queries on `store`.
     #[cfg(lpg_language)]
-    fn optimizer_for(&self, store: &Arc<dyn GraphStore>) -> crate::query::optimizer::Optimizer {
+    fn optimizer_for(
+        &self,
+        store: &Arc<dyn GraphStore>,
+        language: crate::query::processor::QueryLanguage,
+    ) -> crate::query::optimizer::Optimizer {
         crate::query::optimizer::Optimizer::from_graph_store(store.as_ref())
             .with_rules(self.plan_options.rules)
             .with_degree_samples_from(Arc::clone(store))
+            .with_equal_across_kinds(language.equal_across_kinds())
+    }
+
+    #[cfg(any(feature = "gql", feature = "gremlin"))]
+    /// Plans `plan` physically and drops the operators without running them, so `EXPLAIN` refuses
+    /// what planning refuses (a procedure's arguments, a `YIELD` column) as the statement would.
+    /// It plans in a read context at the session's snapshot: it begins no transaction, also for
+    /// a write, and planning has no side effects. It pins no epoch either, since planning reads
+    /// no versioned rows, so an `EXPLAIN` at a historical epoch collection has passed still
+    /// plans. A plan that still names a parameter no value fills (`EXPLAIN` given no values) is
+    /// not planned: it is no statement that can run, and what it would refuse depends on the
+    /// values.
+    ///
+    /// # Errors
+    ///
+    /// The error planning the statement gives.
+    fn plan_and_drop(
+        &self,
+        plan: &crate::query::plan::LogicalPlan,
+        active: &Arc<dyn GraphStore>,
+        language: grafeo_common::types::StatementLanguage,
+    ) -> Result<()> {
+        if crate::query::processor::has_unresolved_parameters(plan) {
+            return Ok(());
+        }
+        let (viewing_epoch, transaction_id, _historical) = self.statement_epoch();
+        let mut planning = self.statement_planning(viewing_epoch, transaction_id, false, language);
+        planning.session.plan_only = true;
+        drop(planning.planner(Arc::clone(active))?.plan(plan)?);
+        Ok(())
     }
 
     /// What an `EXPLAIN` (the plan, with its pushdown hints) or a `PROFILE`
     /// (a run of `plan` that returns its operator tree) of `plan` answers, or
     /// `None` for a plan that runs as usual. Every language that takes the
-    /// prefixes answers them here. `open_cypher` is the planner's mode (see
+    /// prefixes answers them here. `language` is the statement's (see
     /// [`create_planner_for_store`](Self::create_planner_for_store)), and
     /// `started` when the statement began, for the profile's total time.
     #[cfg(any(feature = "gql", feature = "gremlin"))]
@@ -6696,13 +6845,14 @@ impl Session {
         &self,
         plan: &crate::query::plan::LogicalPlan,
         active: &Arc<dyn GraphStore>,
-        open_cypher: bool,
+        language: grafeo_common::types::StatementLanguage,
         started: Instant,
     ) -> Option<Result<QueryResult>> {
         if plan.explain {
             use crate::query::processor::{annotate_pushdown_hints, explain_result};
             return Some(
                 self.check_graph_access(self.plan_write_kinds(&plan.root))
+                    .and_then(|()| self.plan_and_drop(plan, active, language))
                     .map(|()| {
                         let mut plan = plan.clone();
                         annotate_pushdown_hints(
@@ -6724,20 +6874,17 @@ impl Session {
                 Arc::clone(active),
                 viewing_epoch,
                 transaction_id,
-                open_cypher,
+                language,
             )?;
             let (mut physical_plan, entries) = planner.plan_profiled(plan)?;
-            let executor = self
-                .make_executor(physical_plan.columns.clone())
-                .with_write_counter(planner.write_counter())
-                .with_read_counter(planner.read_counter());
+            let executor = self.make_executor(&planner, physical_plan.columns.clone());
             let _result = executor.execute(physical_plan.operator.as_mut())?;
             let total_time_ms = started.elapsed().as_secs_f64() * 1000.0;
             let profile_tree = crate::query::profile::build_profile_tree(&plan.root, entries)?;
-            Ok(crate::query::profile::profile_result(
-                &profile_tree,
-                total_time_ms,
-            ))
+            Ok(
+                crate::query::profile::profile_result(&profile_tree, total_time_ms)
+                    .with_warnings(planner.warnings().raised()),
+            )
         }))
     }
 
@@ -6751,14 +6898,14 @@ impl Session {
         store: Arc<dyn GraphStore>,
         viewing_epoch: EpochId,
         transaction_id: Option<TransactionId>,
-        open_cypher: bool,
+        language: grafeo_common::types::StatementLanguage,
     ) -> Result<crate::query::Planner> {
         self.create_planner_for_store_with_read_only(
             store,
             viewing_epoch,
             transaction_id,
             false,
-            open_cypher,
+            language,
         )
     }
 
@@ -6776,9 +6923,9 @@ impl Session {
         viewing_epoch: EpochId,
         transaction_id: Option<TransactionId>,
         read_only: bool,
-        open_cypher: bool,
+        language: grafeo_common::types::StatementLanguage,
     ) -> Result<crate::query::Planner> {
-        self.statement_planning(viewing_epoch, transaction_id, read_only, open_cypher)
+        self.statement_planning(viewing_epoch, transaction_id, read_only, language)
             .planner(store)
     }
 
@@ -6791,9 +6938,9 @@ impl Session {
         viewing_epoch: EpochId,
         transaction_id: Option<TransactionId>,
         read_only: bool,
-        open_cypher: bool,
+        language: grafeo_common::types::StatementLanguage,
     ) -> StatementPlanning {
-        let temporal_comparison = self.temporal_comparison(open_cypher);
+        let temporal_comparison = self.temporal_comparison(language);
         StatementPlanning {
             session: SessionPlanning {
                 access: self.graph_access(transaction_id.is_some()),
@@ -6804,23 +6951,126 @@ impl Session {
                 // A body is GQL: only an openCypher statement compares
                 // otherwise.
                 #[cfg(stored_procedures)]
-                gql_temporal_comparison: if open_cypher {
-                    self.temporal_comparison(false)
-                } else {
-                    temporal_comparison
-                },
+                gql_temporal_comparison: self
+                    .temporal_comparison(grafeo_common::types::StatementLanguage::Gql),
                 #[cfg(stored_procedures)]
                 call_depth: 0,
                 viewing_epoch,
                 transaction_id,
                 read_only,
+                plan_only: false,
             },
             schema: self.current_schema(),
             graph: self.effective_graph(),
             home_schema: self.home_schema.clone(),
             home_graph: self.home_graph.clone(),
             temporal_comparison,
+            language,
             statement_clock: grafeo_core::execution::operators::StatementClock::now(),
+            warnings: self.statement_warnings(),
+        }
+    }
+
+    /// Where a statement raises its warnings, made with its planner (the
+    /// warning probe's run stage raises into it).
+    #[cfg(query_language)]
+    fn statement_warnings(&self) -> Arc<grafeo_common::utils::warning::WarningSink> {
+        let sink = Arc::new(grafeo_common::utils::warning::WarningSink::new());
+        #[cfg(feature = "testing-warning-probe")]
+        self.probe_run(&sink);
+        sink
+    }
+
+    /// `plan`, translated for a statement now (the warning probe's
+    /// translate stage adds its notice), once this session may run what it
+    /// reaches outside the database (see
+    /// [`check_external_access`](Self::check_external_access)): the first
+    /// check of every statement, before its graph, its role, a read-only
+    /// transaction and its arguments.
+    ///
+    /// # Errors
+    ///
+    /// The refusal of a plan that reaches outside on a session without
+    /// external access.
+    #[cfg(query_language)]
+    #[inline]
+    fn translated(
+        &self,
+        plan: crate::query::plan::LogicalPlan,
+    ) -> Result<crate::query::plan::LogicalPlan> {
+        self.check_external_access(&plan)?;
+        #[cfg(feature = "testing-warning-probe")]
+        let plan = self.probe_translation(plan);
+        Ok(plan)
+    }
+
+    /// Fails when `plan` reaches outside the database (see
+    /// [`LogicalOperator::reaches_outside`](crate::query::plan::LogicalOperator::reaches_outside))
+    /// and this session's identity has no external access
+    /// ([`Identity::with_external_access`](crate::auth::Identity::with_external_access)):
+    /// with `GRAFEO-Q008` (GQLSTATUS 42501, as a role's refusal), naming what
+    /// reaches outside. It reads the plan only, so `EXPLAIN` and a plan whose
+    /// parameters have no values yet are judged too. A session with access
+    /// walks nothing.
+    #[cfg(query_language)]
+    fn check_external_access(&self, plan: &crate::query::plan::LogicalPlan) -> Result<()> {
+        if self.identity.can_access_external() {
+            return Ok(());
+        }
+        match plan
+            .root
+            .reaches_outside(&mut |call| self.call_reaches_outside(call, 0))
+        {
+            None => Ok(()),
+            Some(reach) => Err(grafeo_common::utils::error::Error::from(
+                grafeo_common::utils::error::QueryError::external_access_denied(
+                    crate::auth::external_access_denied(&reach.what, reach.how),
+                ),
+            )),
+        }
+    }
+
+    /// What the procedure `call` calls reaches outside the database, resolved
+    /// as the planner resolves it: a load procedure, else a stored procedure
+    /// by its body (and the procedures that calls, a call nested deeper than
+    /// any that runs taken to reach outside), else the built-in procedure by
+    /// the access it states. An unknown name reaches nothing: planning
+    /// refuses it.
+    #[cfg(query_language)]
+    fn call_reaches_outside(
+        &self,
+        call: &crate::query::plan::CallProcedureOp,
+        depth: u8,
+    ) -> Option<crate::query::plan::OutsideReach> {
+        use crate::procedures::ExternalAccess;
+        use crate::query::plan::OutsideReach;
+
+        #[cfg(stored_procedures)]
+        if !call.writes()
+            // The planner looks a stored procedure up by its last name part.
+            && let Some(name) = call.name.last()
+            && let Some(procedure) = self.effective_catalog().get_procedure(name)
+        {
+            if depth >= crate::query::executor::user_procedure::MAX_CALL_DEPTH {
+                return Some(OutsideReach {
+                    what: format!("procedure '{}'", procedure.name),
+                    how: ExternalAccess::Reads,
+                });
+            }
+            // A body that does not translate fails when the call is planned.
+            let body = crate::query::translators::gql::translate(&procedure.body).ok()?;
+            return body
+                .root
+                .reaches_outside(&mut |inner| self.call_reaches_outside(inner, depth + 1));
+        }
+        let _ = depth;
+        let procedure = crate::procedures::registry().get(&call.name)?;
+        match procedure.external_access() {
+            ExternalAccess::None => None,
+            how => Some(OutsideReach {
+                what: format!("grafeo.{}", procedure.name()),
+                how,
+            }),
         }
     }
 
@@ -7610,8 +7860,18 @@ impl Drop for Session {
     fn drop(&mut self) {
         // Auto-rollback any active transaction to prevent leaked MVCC state,
         // dangling write locks, and uncommitted versions lingering in the store.
+        // With a transaction open, an owned stream still open reads it no
+        // more: it fails on its next pull, so the rollback goes ahead under
+        // it. A nested transaction rolls back level by level, so every level
+        // goes. Without one, a stream holds its own snapshot pin and reads on
+        // after the session is gone (a binding's lazy stream does).
         if self.in_transaction() {
-            let _ = self.rollback_inner();
+            self.ended.store(true, std::sync::atomic::Ordering::Release);
+        }
+        while self.in_transaction() {
+            if self.rollback_regardless_of_streams().is_err() {
+                break;
+            }
         }
 
         #[cfg(feature = "metrics")]

@@ -29,13 +29,17 @@ use grafeo_common::change::{
     Before, BulkRange, Change, ChangeMark, DataOp, Entity, Labels, PendingVersion, Properties,
     Table,
 };
+use grafeo_common::memory::buffer::BufferManager;
 use grafeo_common::types::{ArcStr, EdgeId, EpochId, NodeId, PropertyKey, TransactionId, Value};
+use grafeo_common::utils::error::LimitBound;
 
+use super::account::{Line, Needed};
 use super::checkpoint::Marks;
 use super::column::Columns;
 use super::versions::VECTOR_ROWS;
 use super::{
-    ABSENT, Adjacent, Inner, PENDING, ROWS_PER_GROUP, Read, RowGroupStore, kept_label_ids, locate,
+    ABSENT, Adjacent, Inner, PENDING, ROWS_PER_GROUP, Read, RowGroupStore, Touched, kept_label_ids,
+    locate,
 };
 use crate::graph::apply::{Applied, ApplyError, BackendTransaction, GraphBackend, Writer};
 
@@ -91,6 +95,12 @@ impl Mode {
 
     fn stamped(self) -> bool {
         self.epoch.is_some()
+    }
+
+    /// Whether the memory limit may refuse the write: a transaction's or an
+    /// immediate one. Replay never refuses (the log holds what committed).
+    fn refusable(self) -> bool {
+        !matches!(self.writer, Writer::Replay { .. })
     }
 
     /// Whether a value or label write of a row created by `created` keeps
@@ -250,23 +260,57 @@ fn refuse_triple(op: &DataOp) -> ApplyError {
 impl Inner {
     /// Label ids for `labels`, ascending without repeats, created as needed.
     fn label_ids_for(&mut self, labels: &Labels) -> Vec<u32> {
+        let mut grown = 0;
         let mut ids: Vec<u32> = labels
             .iter()
-            .map(|label| self.labels.get_or_create(label))
+            .map(|label| {
+                let (id, bytes) = self.labels.get_or_create_counted(label);
+                grown += bytes;
+                id
+            })
             .collect();
+        self.account.grown(Line::Labels, grown);
         ids.sort_unstable();
         ids.dedup();
         ids
     }
 
+    /// The id of key `name`, created as needed; a new name is counted.
+    fn key_id_for(&mut self, name: &str) -> u32 {
+        let (id, grown) = self.keys.get_or_create_counted(name);
+        self.account.grown(Line::Keys, grown);
+        id
+    }
+
+    /// Moves label id `label`'s count by `delta`, counting what its list grew
+    /// by.
+    fn count_label(&mut self, label: u32, delta: i64) {
+        let grown = self.counts.label(label, delta);
+        self.account.grown(Line::Labels, grown);
+    }
+
+    /// Moves edge type id `edge_type`'s count by `delta`, counting what its
+    /// list grew by.
+    fn count_edge_type(&mut self, edge_type: u32, delta: i64) {
+        let grown = self.counts.edge_type(edge_type, delta);
+        self.account.grown(Line::EdgeTypes, grown);
+    }
+
     /// Key ids for `properties`, created as needed; a null is no value
     /// (#412 decision Q8), so it is left out.
     fn key_ids_for<'a>(&mut self, properties: &'a Properties) -> Vec<(u32, &'a Value)> {
-        properties
+        let mut grown = 0;
+        let ids = properties
             .iter()
             .filter(|(_, value)| !value.is_null())
-            .map(|(key, value)| (self.keys.get_or_create(key.as_str()), value))
-            .collect()
+            .map(|(key, value)| {
+                let (id, bytes) = self.keys.get_or_create_counted(key.as_str());
+                grown += bytes;
+                (id, value)
+            })
+            .collect();
+        self.account.grown(Line::Keys, grown);
+        ids
     }
 
     /// The ids of label names the dictionary holds (it forgets none).
@@ -305,12 +349,14 @@ impl Inner {
         group.marks.rows |= mode.stamped();
         group.set_labels(row, &label_ids);
         for (key, value) in values {
-            group.columns.set(key, row, value);
+            if group.columns.set(key, row, value) {
+                self.account.column_made(Table::Nodes, key);
+            }
         }
         if mode.stamped() {
             self.counts.nodes += 1;
             for label in &label_ids {
-                self.counts.label(*label, 1);
+                self.count_label(*label, 1);
             }
         }
         if !self.indexes.is_empty() {
@@ -337,7 +383,8 @@ impl Inner {
                 return Err(ApplyError::Missing(Entity::Node(end)));
             }
         }
-        let type_id = self.edge_types.get_or_create(edge_type);
+        let (type_id, grown) = self.edge_types.get_or_create_counted(edge_type);
+        self.account.grown(Line::EdgeTypes, grown);
         let values = self.key_ids_for(properties);
         let (group, row) = locate(raw);
         let group = self.edges.entry(group).or_default();
@@ -345,7 +392,9 @@ impl Inner {
         group.marks.rows |= mode.stamped();
         group.set_ends(row, src.as_u64(), dst.as_u64(), type_id);
         for (key, value) in values {
-            group.columns.set(key, row, value);
+            if group.columns.set(key, row, value) {
+                self.account.column_made(Table::Edges, key);
+            }
         }
         for (node, other, outgoing) in self.kept_ends(src.as_u64(), dst.as_u64()) {
             let (group, row) = locate(node);
@@ -367,7 +416,7 @@ impl Inner {
         }
         if mode.stamped() {
             self.counts.edges += 1;
-            self.counts.edge_type(type_id, 1);
+            self.count_edge_type(type_id, 1);
         }
         Ok(mode.applied(|| Before::Absent, PendingVersion::Created))
     }
@@ -402,7 +451,7 @@ impl Inner {
         if mode.stamped() {
             self.counts.nodes -= 1;
             for label in labels {
-                self.counts.label(label, -1);
+                self.count_label(label, -1);
             }
         }
         Ok(mode.applied(
@@ -435,7 +484,7 @@ impl Inner {
         group.versions.set_deleted(row, mode.stamp);
         if mode.stamped() {
             self.counts.edges -= 1;
-            self.counts.edge_type(type_id, -1);
+            self.count_edge_type(type_id, -1);
             self.mark_op(&DataOp::DeleteEdge { id });
         }
         Ok(mode.applied(
@@ -482,16 +531,10 @@ impl Inner {
     }
 }
 
-impl GraphBackend for RowGroupStore {
-    fn reserve_node_ids(&self, count: u64) -> Result<Range<u64>, ApplyError> {
-        reserve(&self.next_node_id, count, "node")
-    }
-
-    fn reserve_edge_ids(&self, count: u64) -> Result<Range<u64>, ApplyError> {
-        reserve(&self.next_edge_id, count, "edge")
-    }
-
-    fn apply(&self, op: &DataOp, writer: Writer) -> Result<Applied, ApplyError> {
+impl RowGroupStore {
+    /// Applies `op` as `writer` once: admitted first (a refusal changes
+    /// nothing), counted, and the account settled after.
+    fn apply_once(&self, op: &DataOp, writer: Writer) -> Result<Applied, ApplyError> {
         let mode = Mode::of(writer, self.keeps_history())?;
         self.refuse_if_dropped()?;
         // The next id is one past the largest: the last id has none, so it
@@ -513,27 +556,47 @@ impl GraphBackend for RowGroupStore {
         }
         let applied = {
             let mut inner = self.inner.write();
-            let applied = inner.apply_op(op, mode);
-            // Listed also when the op failed: one that failed halfway may
-            // have stamped its vector, and a vector listed with nothing in
-            // it leaves the list at the next collect.
-            if !matches!(applied, Ok(Applied::Unchanged)) {
-                if let Some((table, raw)) = mode.lists(op) {
-                    if inner.list(table, raw) {
-                        self.note_listed();
+            // Admitted before any change, so a refusal changes nothing.
+            if mode.refusable() {
+                let payload = op.payload_bytes();
+                let thaw = inner.thaw_bytes(op);
+                let indexes = inner.may_grow_indexes(op);
+                inner
+                    .account
+                    .admit(payload, thaw, indexes)
+                    .map_err(|Needed(bytes)| ApplyError::Memory(bytes))?;
+            }
+            // Counted when the bracket closes: at the commit or the rollback
+            // of a transaction's writes, at once for a write stamped at once.
+            inner.touch(Touched::of(op));
+            let applied = {
+                let inner = &mut *inner;
+                let applied = inner.apply_op(op, mode);
+                // Listed also when the op failed: one that failed halfway may
+                // have stamped its vector, and a vector listed with nothing in
+                // it leaves the list at the next collect.
+                if !matches!(applied, Ok(Applied::Unchanged)) {
+                    if let Some((table, raw)) = mode.lists(op) {
+                        if inner.list(table, raw) {
+                            self.note_listed();
+                        }
+                        // Stamped at once: what it kept or stamped waits for a
+                        // reader before its epoch alone.
+                        if mode.stamped() {
+                            self.note_settled(1);
+                        }
                     }
-                    // Stamped at once: what it kept or stamped waits for a
-                    // reader before its epoch alone.
-                    if mode.stamped() {
-                        self.note_settled(1);
+                    // Stamped at once, readers see it now: the writes mark what
+                    // they change for the next checkpoint as they apply it; one
+                    // that failed halfway marks all its op names.
+                    if mode.stamped() && applied.is_err() {
+                        inner.mark_op(op);
                     }
                 }
-                // Stamped at once, readers see it now: the writes mark what
-                // they change for the next checkpoint as they apply it; one
-                // that failed halfway marks all its op names.
-                if mode.stamped() && applied.is_err() {
-                    inner.mark_op(op);
-                }
+                applied
+            };
+            if mode.stamped() {
+                inner.close_bracket();
             }
             let applied = applied?;
             // Under the lock: a reader that holds it finds the counts and
@@ -555,6 +618,50 @@ impl GraphBackend for RowGroupStore {
             _ => {}
         }
         Ok(applied)
+    }
+}
+
+/// The refusal of `needed` more bytes against the memory limit.
+fn memory_refused(manager: &BufferManager, needed: usize) -> ApplyError {
+    ApplyError::Limit(Box::new(manager.refusal(LimitBound::MemoryLimit, needed)))
+}
+
+/// The table of `entity`.
+fn table_of(entity: Entity) -> Table {
+    match entity {
+        Entity::Node(_) => Table::Nodes,
+        Entity::Edge(_) => Table::Edges,
+    }
+}
+
+impl GraphBackend for RowGroupStore {
+    fn reserve_node_ids(&self, count: u64) -> Result<Range<u64>, ApplyError> {
+        reserve(&self.next_node_id, count, "node")
+    }
+
+    fn reserve_edge_ids(&self, count: u64) -> Result<Range<u64>, ApplyError> {
+        reserve(&self.next_edge_id, count, "edge")
+    }
+
+    /// Applies `op` once; when the memory limit refuses it before any
+    /// change, frees what it can outside the store's lock and applies it once
+    /// more (see `account`).
+    fn apply(&self, op: &DataOp, writer: Writer) -> Result<Applied, ApplyError> {
+        match self.apply_once(op, writer) {
+            Err(ApplyError::Memory(needed)) => {
+                let Some(manager) = self.memory_manager() else {
+                    return Err(ApplyError::Memory(needed));
+                };
+                if !manager.make_room(needed) {
+                    return Err(memory_refused(manager, needed));
+                }
+                match self.apply_once(op, writer) {
+                    Err(ApplyError::Memory(needed)) => Err(memory_refused(manager, needed)),
+                    applied => applied,
+                }
+            }
+            applied => applied,
+        }
     }
 
     /// The row-group store's pending versions need no opening: the handle
@@ -580,6 +687,18 @@ impl GraphBackend for RowGroupStore {
         let at = epoch.as_u64();
         {
             let mut inner = self.inner.write();
+            // The writes' bracket closes first. A commit stamps the versions
+            // its writes made, in place, and grows no part but the counts'
+            // lists and the checkpoint marks, which it counts where they grow:
+            // it needs no bracket (a debug build checks it brackets to the
+            // same).
+            inner.close_bracket();
+            #[cfg(debug_assertions)]
+            let entries: Vec<&Change> = entries.collect();
+            #[cfg(debug_assertions)]
+            let check = inner.commit_check(&entries);
+            #[cfg(debug_assertions)]
+            let entries = &mut entries.iter().copied();
             let mut settled = 0;
             let mut stamped = Ok(());
             for change in entries {
@@ -588,7 +707,9 @@ impl GraphBackend for RowGroupStore {
                     Change::Data { op, before, .. } => {
                         settled += 1;
                         stamped = inner.stamp_op(op, before, pending, at);
-                        inner.mark_op(op);
+                        let (nodes, edges) = inner.mark_op(op);
+                        inner.account.grown(Line::NodeTables, nodes);
+                        inner.account.grown(Line::EdgeTables, edges);
                     }
                     Change::Bulk(range) => {
                         settled += bulk_vectors(range);
@@ -600,6 +721,9 @@ impl GraphBackend for RowGroupStore {
                     break;
                 }
             }
+            #[cfg(debug_assertions)]
+            inner.check_commit(&check);
+            inner.settle();
             // Counted also when a stamp failed halfway: what it stamped
             // waits for the collect like the rest.
             self.note_settled(settled);
@@ -658,6 +782,7 @@ impl RowGroupStore {
     ) -> Result<(), ApplyError> {
         let pending = pending_stamp(transaction)?;
         let mut inner = self.inner.write();
+        let mut undone = Ok(());
         while let Some(change) = entries.next_back() {
             match change {
                 Change::Data {
@@ -665,11 +790,18 @@ impl RowGroupStore {
                     before,
                     version,
                     ..
-                } => inner.undo_op(op, before, *version, pending)?,
+                } => {
+                    inner.touch(Touched::of(op));
+                    undone = inner.undo_op(op, before, *version, pending);
+                }
                 Change::Bulk(range) => inner.undo_bulk(range, pending),
             }
+            if undone.is_err() {
+                break;
+            }
         }
-        Ok(())
+        inner.close_bracket();
+        undone
     }
 }
 
@@ -723,7 +855,7 @@ impl Inner {
             _ => mode.writer.no_op(ApplyError::Missing(entity)),
         };
         let key = match value {
-            Some(_) => self.keys.get_or_create(key.as_str()),
+            Some(_) => self.key_id_for(key.as_str()),
             None => match self.keys.get_id(key.as_str()) {
                 Some(key) => key,
                 None => return absent(),
@@ -743,7 +875,10 @@ impl Inner {
         if value.is_none() && old.is_none() {
             return absent();
         }
-        let version = columns.write(key, row, value, mode.keeps(created));
+        let (version, made) = columns.write(key, row, value, mode.keeps(created));
+        if made {
+            self.account.column_made(table_of(entity), key);
+        }
         if let (true, Entity::Node(id)) = (indexed, entity) {
             self.index_value(id.as_u64(), key, old.as_ref());
         }
@@ -763,7 +898,9 @@ impl Inner {
             return mode.writer.unseen(Entity::Node(id));
         }
         let label_id = if add {
-            self.labels.get_or_create(label)
+            let (id, grown) = self.labels.get_or_create_counted(label);
+            self.account.grown(Line::Labels, grown);
+            id
         } else {
             match self.label_id(label) {
                 Some(label_id) => label_id,
@@ -808,10 +945,10 @@ impl Inner {
             }
             None => PendingVersion::Created,
         };
-        group.labels.entry(label_id).or_default().put(row, add);
+        group.put_label(label_id, row, add);
         if mode.stamped() {
             group.marks.labels.mark(label_id, row);
-            self.counts.label(label_id, if add { 1 } else { -1 });
+            self.count_label(label_id, if add { 1 } else { -1 });
         }
         if !self.indexes.is_empty() {
             self.index_labels(raw, Some(label.as_str()));
@@ -862,7 +999,7 @@ impl Inner {
                 }
                 self.counts.nodes += 1;
                 for label in label_ids {
-                    self.counts.label(label, 1);
+                    self.count_label(label, 1);
                 }
             }
             DataOp::DeleteNode { id } => {
@@ -879,7 +1016,7 @@ impl Inner {
                 group.versions.set_deleted(row, at);
                 self.counts.nodes -= 1;
                 for label in label_ids {
-                    self.counts.label(label, -1);
+                    self.count_label(label, -1);
                 }
             }
             DataOp::CreateEdge { id, .. } => {
@@ -895,7 +1032,7 @@ impl Inner {
                     return Err(not_pending(Entity::Edge(*id), "create"));
                 }
                 self.counts.edges += 1;
-                self.counts.edge_type(type_id, 1);
+                self.count_edge_type(type_id, 1);
             }
             DataOp::DeleteEdge { id } => {
                 let (group, row) = self
@@ -907,7 +1044,7 @@ impl Inner {
                 }
                 group.versions.set_deleted(row, at);
                 self.counts.edges -= 1;
-                self.counts.edge_type(type_id, -1);
+                self.count_edge_type(type_id, -1);
             }
             DataOp::AddNodeLabel { id, label } | DataOp::RemoveNodeLabel { id, label } => {
                 let label_id = self.label_id(label).ok_or_else(|| {
@@ -925,7 +1062,7 @@ impl Inner {
                 } else {
                     -1
                 };
-                self.counts.label(label_id, delta);
+                self.count_label(label_id, delta);
             }
             DataOp::SetNodeProperty { id, key, .. } | DataOp::RemoveNodeProperty { id, key } => {
                 self.stamp_value(Entity::Node(*id), key, pending, at)?;
@@ -958,6 +1095,12 @@ impl Inner {
             usize::try_from(start).expect("a row below 65,536")
                 ..usize::try_from(end).expect("a row count up to 65,536")
         };
+        // What the counts' lists grew by, counted after the groups' loop.
+        let mut grown = 0;
+        let line = match range.table {
+            Table::Nodes => Line::Labels,
+            Table::Edges => Line::EdgeTypes,
+        };
         match range.table {
             Table::Nodes => {
                 for (index, group) in self.nodes.range_mut(first..=last) {
@@ -968,7 +1111,7 @@ impl Inner {
                         let labeled: usize =
                             runs.iter().map(|run| members.count_in(run.clone())).sum();
                         if labeled > 0 {
-                            self.counts.label(
+                            grown += self.counts.label(
                                 *label,
                                 i64::try_from(labeled).expect("rows of a row group"),
                             );
@@ -981,12 +1124,13 @@ impl Inner {
                     for run in group.versions.commit_created(rows_in(*index), pending, at) {
                         for row in run {
                             self.counts.edges += 1;
-                            self.counts.edge_type(group.ends(row).2, 1);
+                            grown += self.counts.edge_type(group.ends(row).2, 1);
                         }
                     }
                 }
             }
         }
+        self.account.grown(line, grown);
     }
 
     /// Takes a node row out whole, and first out of every index.
@@ -1153,14 +1297,24 @@ impl Inner {
                         .node(raw)
                         .is_some_and(|(group, row)| group.version(row).created == pending)
                     {
+                        self.touch(Touched::Groups {
+                            nodes: [Some(locate(raw).0), None],
+                            edge: None,
+                        });
                         self.remove_node_row(raw);
                     }
                 }
                 Table::Edges => {
-                    if self
+                    let ends = self
                         .edge(raw)
-                        .is_some_and(|(group, row)| group.version(row).created == pending)
-                    {
+                        .filter(|(group, row)| group.version(*row).created == pending)
+                        .map(|(group, row)| group.ends(row));
+                    if let Some((src, dst, _)) = ends {
+                        let (src, dst) = (locate(src).0, locate(dst).0);
+                        self.touch(Touched::Groups {
+                            nodes: [Some(src), (dst != src).then_some(dst)],
+                            edge: Some(locate(raw).0),
+                        });
                         self.remove_edge_row(raw);
                     }
                 }

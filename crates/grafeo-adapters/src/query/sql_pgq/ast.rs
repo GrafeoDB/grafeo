@@ -24,8 +24,20 @@ pub enum Statement {
     CreatePropertyGraph(CreatePropertyGraphStatement),
     /// A `DROP PROPERTY GRAPH` DDL statement.
     DropPropertyGraph(DropPropertyGraphStatement),
-    /// A `CALL procedure(args)` statement (SQL:2003+).
-    Call(CallStatement),
+    /// A `CALL procedure(args)` statement (SQL:2003+), with the ORDER BY and
+    /// LIMIT SQL/PGQ allows after its YIELD.
+    Call(CallQuery),
+}
+
+/// A SQL/PGQ procedure call, and the ordering and limit of its yielded rows.
+#[derive(Debug, Clone)]
+pub struct CallQuery {
+    /// The call: name, arguments, YIELD and the WHERE after it.
+    pub call: CallStatement,
+    /// `ORDER BY` of the yielded rows.
+    pub order_by: Option<OrderByClause>,
+    /// `LIMIT`: a number or a parameter.
+    pub limit: Option<RowCount>,
 }
 
 /// The kind of set operation.

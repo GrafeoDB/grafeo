@@ -22,13 +22,9 @@ indexmap.workspace = true
 dashmap.workspace = true
 arcstr.workspace = true
 
-# Hashing
-foldhash.workspace = true
-
 # Serialization
 serde.workspace = true
 serde_json = { version = "1", optional = true, features = ["arbitrary_precision"] }
-byteorder.workspace = true
 bytes.workspace = true
 bincode.workspace = true
 
@@ -71,6 +67,7 @@ parallel = ["rayon", "crossbeam"]  # Morsel-driven parallelism (rayon, crossbeam
 spill = []                         # Disk spilling for out-of-core execution (sync only, async in grafeo-engine)
 mmap = []                          # File-backed vector storage (MmapStorage)
 triple-store = []  # Enable RDF triple store model
+testing-deadline-probe = []  # Test only: `deadline::expire_after_polls` lets every ticker's deadline pass after N clock reads; in no default and no profile
 rdf = ["triple-store"]  # Deprecated: use triple-store
 tiered-storage = []  # Deprecated since 0.6.0: enables nothing (the row-group store replaced LpgStore, which it shaped); removed in 0.7.0
 temporal = []  # Deprecated since 0.6.0: enables nothing (a database's history retention, Config::with_history_retention, replaces it); removed in 0.7.0
@@ -87,7 +84,6 @@ jsonl-import = ["serde_json"]   # JSON Lines file import (LOAD DATA ... FORMAT J
 parquet-import = ["parquet"]  # Apache Parquet file import (LOAD DATA ... FORMAT PARQUET)
 
 # Convenience groups
-ai = ["vector-index", "text-index", "hybrid-search"]  # All AI/RAG search features
 
 # The conformance suite of the store contract, for a store of one's own (graph::conformance)
 conformance = []

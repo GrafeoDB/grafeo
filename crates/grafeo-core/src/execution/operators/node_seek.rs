@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use grafeo_common::types::{LogicalType, NodeId, ReadView, Value};
 
+use super::value_utils::{EqualAcrossKinds, ValueKinds};
 use super::{ExpressionPredicate, Operator, OperatorError, OperatorResult, ReadCounter};
 use crate::execution::DataChunk;
 use crate::graph::GraphStore;
@@ -44,6 +45,8 @@ pub struct NodeSeekOperator {
     label: Option<String>,
     /// The labels whose indexes together hold every result; none: the key's on every label.
     index_labels: Vec<String>,
+    /// What the statement's `=` gives across kinds, which decides whether an index answers.
+    equal: EqualAcrossKinds,
     /// Who reads: the seek finds the nodes this view sees.
     view: ReadView,
     chunk_capacity: usize,
@@ -61,7 +64,8 @@ pub struct NodeSeekOperator {
 /// The nodes whose `property` may be equal to `value` under `=`, through the indexes on `labels`
 /// (one read each: a node with two of them comes twice), or with no label the index on every
 /// label. The caller's labels hold every result, and it checks them. `None` when one of the
-/// indexes is not there.
+/// indexes is not there, or cannot answer as a statement whose `=` gives `equal` across kinds
+/// compares (see [`find_indexed_as_compared`]).
 ///
 /// # Errors
 ///
@@ -72,20 +76,49 @@ pub fn find_through_label_indexes(
     property: &str,
     value: &Value,
     view: ReadView,
+    equal: EqualAcrossKinds,
 ) -> grafeo_common::utils::error::Result<Option<Vec<NodeId>>> {
     let Some((first, rest)) = labels.split_first() else {
-        return store.find_nodes_maybe_equal(property, value, view);
+        return find_indexed_as_compared(store, &[], property, value, view, equal);
     };
-    let Some(mut found) = store.find_indexed_maybe_equal(&[first], property, value, view)? else {
+    let Some(mut found) = find_indexed_as_compared(store, &[first], property, value, view, equal)?
+    else {
         return Ok(None);
     };
     for label in rest {
-        match store.find_indexed_maybe_equal(&[label], property, value, view)? {
+        match find_indexed_as_compared(store, &[label], property, value, view, equal)? {
             Some(nodes) => found.extend(nodes),
             None => return Ok(None),
         }
     }
     Ok(Some(found))
+}
+
+/// [`GraphStore::find_indexed_maybe_equal`] for a statement whose `=` gives `equal` across
+/// kinds: where `=` raises (SQL/PGQ), only an index that has held no value of another kind than
+/// `value`'s answers, as only the values themselves can say whether the statement raises; `None`
+/// otherwise, for the caller to read them.
+///
+/// # Errors
+///
+/// The error of a read the store cannot do.
+pub fn find_indexed_as_compared(
+    store: &dyn GraphStore,
+    labels: &[&str],
+    property: &str,
+    value: &Value,
+    view: ReadView,
+    equal: EqualAcrossKinds,
+) -> grafeo_common::utils::error::Result<Option<Vec<NodeId>>> {
+    if equal == EqualAcrossKinds::Raises
+        && !value.is_null()
+        && !store
+            .index_kinds(labels, property)
+            .is_some_and(|held| held.within(ValueKinds::of(value)))
+    {
+        return Ok(None);
+    }
+    store.find_indexed_maybe_equal(labels, property, value, view)
 }
 
 impl NodeSeekOperator {
@@ -108,6 +141,7 @@ impl NodeSeekOperator {
             list: false,
             label,
             index_labels: Vec::new(),
+            equal: EqualAcrossKinds::False,
             view,
             chunk_capacity: 2048,
             current_input: None,
@@ -124,6 +158,14 @@ impl NodeSeekOperator {
     #[must_use]
     pub fn with_index_labels(mut self, labels: Vec<String>) -> Self {
         self.index_labels = labels;
+        self
+    }
+
+    /// Reads an index only where it answers as a statement whose `=` gives `equal` across kinds
+    /// compares (see [`find_indexed_as_compared`]).
+    #[must_use]
+    pub fn with_equal_across_kinds(mut self, equal: EqualAcrossKinds) -> Self {
+        self.equal = equal;
         self
     }
 
@@ -167,6 +209,7 @@ impl NodeSeekOperator {
                         property,
                         key,
                         self.view,
+                        self.equal,
                     )? {
                         Some(nodes) => found.extend(nodes),
                         // The store cannot look the key up: every node is a
@@ -289,14 +332,13 @@ impl Operator for NodeSeekOperator {
 
 /// The node IDs `=` finds equal to a key, as the filter `id(n) = key`
 /// compares an ID (an integer) with it: the integer itself, a float of
-/// exactly its value, a whole decimal of its value, or a string that parses
-/// as it.
+/// exactly its value, or a whole decimal of its value. A string is not a
+/// number, so it finds none.
 pub(super) fn node_ids(key: &Value) -> Vec<NodeId> {
     let id = match key {
         Value::Int64(id) => Some(*id),
         Value::Float64(f) => exact_integer(*f),
         Value::Decimal(d) if d.floor() == *d => d.trunc_to_i64(),
-        Value::String(s) => s.parse::<i64>().ok(),
         _ => None,
     };
     id.and_then(|id| u64::try_from(id).ok())
@@ -385,10 +427,12 @@ mod tests {
         store.set_node_property(other, "id", Value::Int64(7));
 
         let id = || SeekKey::Property("id".to_string());
-        let all = vec![as_int, as_float, as_string];
-        assert_eq!(seek(&store, id(), Value::Int64(42), None), all);
-        assert_eq!(seek(&store, id(), Value::Float64(42.0), None), all);
-        assert_eq!(seek(&store, id(), Value::from("42"), None), all);
+        // The numbers of one value; the string is text, not a number.
+        let numbers = vec![as_int, as_float];
+        assert_eq!(seek(&store, id(), Value::Int64(42), None), numbers);
+        assert_eq!(seek(&store, id(), Value::Float64(42.0), None), numbers);
+        assert_eq!(seek(&store, id(), Value::from("42"), None), vec![as_string]);
+        assert_eq!(seek(&store, id(), Value::from("042"), None), []);
         assert_eq!(seek(&store, id(), Value::Float64(f64::NAN), None), []);
         assert_eq!(seek(&store, id(), Value::Null, None), []);
     }

@@ -85,11 +85,6 @@ hooks:
 plugins:
   - search:
       separator: '[\s\-,:!=\[\]()"`/]+|\.(?!\d)|&[lg]t;|(?!\b)(?=[A-Z][a-z])'
-  - marimo:
-      enabled: true
-      display_code: true
-      display_output: true
-      is_reactive: true
   - minify:
       minify_html: true
   - git-revision-date-localized:

@@ -1,0 +1,112 @@
+# A range on a key holding temporal values answers as the filter it stands for, under Cypher's
+# rule (openCypher): a zoned and a local value of one kind do not compare, so they give no row,
+# and a time, a date and a list of datetimes sit beside them. The file is Cypher, so the setup
+# stores Cypher's own temporal values. The expected rows are the range read's answers, which
+# range_temporal_rules.rs checks against the same filter with the range read turned off. The
+# GQL twin is lpg/gql/range_column_read_temporal.gtest.
+
+meta:
+  language: cypher
+  model: lpg
+  title: Read of a temporal range on a key (Cypher)
+  dataset: empty
+  requires: [cypher]
+
+tests:
+
+  - name: temporal_above_a_zoned_datetime
+    setup:
+      - "CREATE (:L {name: 'Alix', k: datetime('2024-01-01T10:00:00+02:00')}), (:L {name: 'Gus', k: localdatetime('2024-01-01T10:00:00')}), (:L {name: 'Mia', k: datetime('2024-01-01T07:30:00Z')}), (:L {name: 'Vincent', k: time('10:00:00+02:00')}), (:L {name: 'Shosanna', k: localtime('10:00:00')}), (:L {name: 'Jules', k: date('2024-01-01')}), (:L {name: 'Butch', k: [datetime('2024-01-01T10:00:00+02:00')]}), (:L {name: 'Hans'}), (:M {name: 'Django', k: datetime('2024-01-01T10:00:00+02:00')})"
+    query: "MATCH (n:L) WHERE n.k > datetime('2024-01-01T08:00:00Z') RETURN n.name ORDER BY n.name"
+    expect:
+      empty: true
+
+  - name: temporal_up_to_a_zoned_datetime
+    setup:
+      - "CREATE (:L {name: 'Alix', k: datetime('2024-01-01T10:00:00+02:00')}), (:L {name: 'Gus', k: localdatetime('2024-01-01T10:00:00')}), (:L {name: 'Mia', k: datetime('2024-01-01T07:30:00Z')}), (:L {name: 'Vincent', k: time('10:00:00+02:00')}), (:L {name: 'Shosanna', k: localtime('10:00:00')}), (:L {name: 'Jules', k: date('2024-01-01')}), (:L {name: 'Butch', k: [datetime('2024-01-01T10:00:00+02:00')]}), (:L {name: 'Hans'}), (:M {name: 'Django', k: datetime('2024-01-01T10:00:00+02:00')})"
+    query: "MATCH (n:L) WHERE n.k <= datetime('2024-01-01T08:00:00Z') RETURN n.name ORDER BY n.name"
+    expect:
+      ordered: true
+      rows:
+        - ["Alix"]
+        - ["Mia"]
+
+  - name: temporal_above_a_local_datetime
+    setup:
+      - "CREATE (:L {name: 'Alix', k: datetime('2024-01-01T10:00:00+02:00')}), (:L {name: 'Gus', k: localdatetime('2024-01-01T10:00:00')}), (:L {name: 'Mia', k: datetime('2024-01-01T07:30:00Z')}), (:L {name: 'Vincent', k: time('10:00:00+02:00')}), (:L {name: 'Shosanna', k: localtime('10:00:00')}), (:L {name: 'Jules', k: date('2024-01-01')}), (:L {name: 'Butch', k: [datetime('2024-01-01T10:00:00+02:00')]}), (:L {name: 'Hans'}), (:M {name: 'Django', k: datetime('2024-01-01T10:00:00+02:00')})"
+    query: "MATCH (n:L) WHERE n.k > localdatetime('2024-01-01T09:00:00') RETURN n.name ORDER BY n.name"
+    expect:
+      ordered: true
+      rows:
+        - ["Gus"]
+
+  - name: temporal_up_to_a_local_datetime
+    setup:
+      - "CREATE (:L {name: 'Alix', k: datetime('2024-01-01T10:00:00+02:00')}), (:L {name: 'Gus', k: localdatetime('2024-01-01T10:00:00')}), (:L {name: 'Mia', k: datetime('2024-01-01T07:30:00Z')}), (:L {name: 'Vincent', k: time('10:00:00+02:00')}), (:L {name: 'Shosanna', k: localtime('10:00:00')}), (:L {name: 'Jules', k: date('2024-01-01')}), (:L {name: 'Butch', k: [datetime('2024-01-01T10:00:00+02:00')]}), (:L {name: 'Hans'}), (:M {name: 'Django', k: datetime('2024-01-01T10:00:00+02:00')})"
+    query: "MATCH (n:L) WHERE n.k <= localdatetime('2024-01-01T09:00:00') RETURN n.name ORDER BY n.name"
+    expect:
+      empty: true
+
+  - name: temporal_above_a_zoned_time
+    setup:
+      - "CREATE (:L {name: 'Alix', k: datetime('2024-01-01T10:00:00+02:00')}), (:L {name: 'Gus', k: localdatetime('2024-01-01T10:00:00')}), (:L {name: 'Mia', k: datetime('2024-01-01T07:30:00Z')}), (:L {name: 'Vincent', k: time('10:00:00+02:00')}), (:L {name: 'Shosanna', k: localtime('10:00:00')}), (:L {name: 'Jules', k: date('2024-01-01')}), (:L {name: 'Butch', k: [datetime('2024-01-01T10:00:00+02:00')]}), (:L {name: 'Hans'}), (:M {name: 'Django', k: datetime('2024-01-01T10:00:00+02:00')})"
+    query: "MATCH (n:L) WHERE n.k > time('09:00:00+02:00') RETURN n.name ORDER BY n.name"
+    expect:
+      ordered: true
+      rows:
+        - ["Vincent"]
+
+  - name: temporal_up_to_a_zoned_time
+    setup:
+      - "CREATE (:L {name: 'Alix', k: datetime('2024-01-01T10:00:00+02:00')}), (:L {name: 'Gus', k: localdatetime('2024-01-01T10:00:00')}), (:L {name: 'Mia', k: datetime('2024-01-01T07:30:00Z')}), (:L {name: 'Vincent', k: time('10:00:00+02:00')}), (:L {name: 'Shosanna', k: localtime('10:00:00')}), (:L {name: 'Jules', k: date('2024-01-01')}), (:L {name: 'Butch', k: [datetime('2024-01-01T10:00:00+02:00')]}), (:L {name: 'Hans'}), (:M {name: 'Django', k: datetime('2024-01-01T10:00:00+02:00')})"
+    query: "MATCH (n:L) WHERE n.k <= time('09:00:00+02:00') RETURN n.name ORDER BY n.name"
+    expect:
+      empty: true
+
+  - name: temporal_above_a_local_time
+    setup:
+      - "CREATE (:L {name: 'Alix', k: datetime('2024-01-01T10:00:00+02:00')}), (:L {name: 'Gus', k: localdatetime('2024-01-01T10:00:00')}), (:L {name: 'Mia', k: datetime('2024-01-01T07:30:00Z')}), (:L {name: 'Vincent', k: time('10:00:00+02:00')}), (:L {name: 'Shosanna', k: localtime('10:00:00')}), (:L {name: 'Jules', k: date('2024-01-01')}), (:L {name: 'Butch', k: [datetime('2024-01-01T10:00:00+02:00')]}), (:L {name: 'Hans'}), (:M {name: 'Django', k: datetime('2024-01-01T10:00:00+02:00')})"
+    query: "MATCH (n:L) WHERE n.k > localtime('09:00:00') RETURN n.name ORDER BY n.name"
+    expect:
+      ordered: true
+      rows:
+        - ["Shosanna"]
+
+  - name: temporal_up_to_a_local_time
+    setup:
+      - "CREATE (:L {name: 'Alix', k: datetime('2024-01-01T10:00:00+02:00')}), (:L {name: 'Gus', k: localdatetime('2024-01-01T10:00:00')}), (:L {name: 'Mia', k: datetime('2024-01-01T07:30:00Z')}), (:L {name: 'Vincent', k: time('10:00:00+02:00')}), (:L {name: 'Shosanna', k: localtime('10:00:00')}), (:L {name: 'Jules', k: date('2024-01-01')}), (:L {name: 'Butch', k: [datetime('2024-01-01T10:00:00+02:00')]}), (:L {name: 'Hans'}), (:M {name: 'Django', k: datetime('2024-01-01T10:00:00+02:00')})"
+    query: "MATCH (n:L) WHERE n.k <= localtime('09:00:00') RETURN n.name ORDER BY n.name"
+    expect:
+      empty: true
+
+  - name: temporal_above_a_date
+    setup:
+      - "CREATE (:L {name: 'Alix', k: datetime('2024-01-01T10:00:00+02:00')}), (:L {name: 'Gus', k: localdatetime('2024-01-01T10:00:00')}), (:L {name: 'Mia', k: datetime('2024-01-01T07:30:00Z')}), (:L {name: 'Vincent', k: time('10:00:00+02:00')}), (:L {name: 'Shosanna', k: localtime('10:00:00')}), (:L {name: 'Jules', k: date('2024-01-01')}), (:L {name: 'Butch', k: [datetime('2024-01-01T10:00:00+02:00')]}), (:L {name: 'Hans'}), (:M {name: 'Django', k: datetime('2024-01-01T10:00:00+02:00')})"
+    query: "MATCH (n:L) WHERE n.k > date('2023-12-31') RETURN n.name ORDER BY n.name"
+    expect:
+      ordered: true
+      rows:
+        - ["Jules"]
+
+  - name: temporal_up_to_a_date
+    setup:
+      - "CREATE (:L {name: 'Alix', k: datetime('2024-01-01T10:00:00+02:00')}), (:L {name: 'Gus', k: localdatetime('2024-01-01T10:00:00')}), (:L {name: 'Mia', k: datetime('2024-01-01T07:30:00Z')}), (:L {name: 'Vincent', k: time('10:00:00+02:00')}), (:L {name: 'Shosanna', k: localtime('10:00:00')}), (:L {name: 'Jules', k: date('2024-01-01')}), (:L {name: 'Butch', k: [datetime('2024-01-01T10:00:00+02:00')]}), (:L {name: 'Hans'}), (:M {name: 'Django', k: datetime('2024-01-01T10:00:00+02:00')})"
+    query: "MATCH (n:L) WHERE n.k <= date('2023-12-31') RETURN n.name ORDER BY n.name"
+    expect:
+      empty: true
+
+  - name: temporal_above_a_list
+    setup:
+      - "CREATE (:L {name: 'Alix', k: datetime('2024-01-01T10:00:00+02:00')}), (:L {name: 'Gus', k: localdatetime('2024-01-01T10:00:00')}), (:L {name: 'Mia', k: datetime('2024-01-01T07:30:00Z')}), (:L {name: 'Vincent', k: time('10:00:00+02:00')}), (:L {name: 'Shosanna', k: localtime('10:00:00')}), (:L {name: 'Jules', k: date('2024-01-01')}), (:L {name: 'Butch', k: [datetime('2024-01-01T10:00:00+02:00')]}), (:L {name: 'Hans'}), (:M {name: 'Django', k: datetime('2024-01-01T10:00:00+02:00')})"
+    query: "MATCH (n:L) WHERE n.k > [datetime('2024-01-01T09:00:00+02:00')] RETURN n.name ORDER BY n.name"
+    expect:
+      ordered: true
+      rows:
+        - ["Butch"]
+
+  - name: temporal_up_to_a_list
+    setup:
+      - "CREATE (:L {name: 'Alix', k: datetime('2024-01-01T10:00:00+02:00')}), (:L {name: 'Gus', k: localdatetime('2024-01-01T10:00:00')}), (:L {name: 'Mia', k: datetime('2024-01-01T07:30:00Z')}), (:L {name: 'Vincent', k: time('10:00:00+02:00')}), (:L {name: 'Shosanna', k: localtime('10:00:00')}), (:L {name: 'Jules', k: date('2024-01-01')}), (:L {name: 'Butch', k: [datetime('2024-01-01T10:00:00+02:00')]}), (:L {name: 'Hans'}), (:M {name: 'Django', k: datetime('2024-01-01T10:00:00+02:00')})"
+    query: "MATCH (n:L) WHERE n.k <= [datetime('2024-01-01T09:00:00+02:00')] RETURN n.name ORDER BY n.name"
+    expect:
+      empty: true

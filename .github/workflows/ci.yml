@@ -27,8 +27,9 @@ env:
 #    Used by: python-test, node-test, go-test.
 #
 # 4. Shipped profile (grafeo-engine's "full" plus "arrow-export", which the
-#    packages' default "embedded" adds): the Rust side of what the Python and
-#    Node.js packages build. Profile 1 turns on features these packages leave
+#    packages' default "embedded" adds): the Rust side of what the Python
+#    and Node.js packages build.
+#    Profile 1 turns on features these packages leave
 #    out, which can compile a path of theirs out, so clippy and rustdoc for
 #    grafeo-core and grafeo-engine, and the grafeo-engine tests, run once more
 #    with exactly these features (the feature matrix already runs grafeo-core's
@@ -464,8 +465,10 @@ jobs:
           SCCACHE_GHA_ENABLED: "true"
           CARGO_PROFILE_DEV_DEBUG: line-tables-only
 
-  # The shipped profile (4 above): grafeo-engine's `full` features, which the
-  # Python and Node.js packages build. --all-features turns on more and can so
+  # The shipped profile (4 above): grafeo-engine's `full` features plus
+  # `arrow-export`, which the Python and Node.js packages build.
+  # A feature added to a binding's manifest goes into grafeo-engine's `full`
+  # too, or into this job's feature list. --all-features turns on more and can so
   # leave out code these packages run: this job lints and
   # documents it, and runs the engine's tests (rust-feature-matrix already runs
   # grafeo-core's tests with this set). One OS and a debug build, as the code differs by
@@ -683,9 +686,10 @@ jobs:
           - profile: enterprise
             features: "--features tracing"
             engine_features: "--features metrics,tracing,async-storage"
+            engine_test: "--features gql,wal,grafeo-file,tracing,testing-crash-injection --test storage_events"
           # Full: all features combined (`full` is a deprecated alias, removed in 0.7.0 per #468; use persona combos)
           - profile: full
-            features: "--features languages,triple-store,algos,parallel,vector-index,text-index,hybrid-search,spill,mmap,regex,jsonl-import,parquet-import"
+            features: "--features gql,cypher,sparql,gremlin,graphql,sql-pgq,triple-store,algos,parallel,vector-index,text-index,hybrid-search,spill,mmap,regex,jsonl-import,parquet-import"
             engine_features: "--features full"
     steps:
       - uses: actions/checkout@v7
@@ -726,14 +730,25 @@ jobs:
       # Library-only build for the engine crate: its integration tests assume
       # all features are available and need incremental cfg-gating (tracked).
       # Full test coverage runs under --all-features in the rust-test job.
-      # Uses engine_features when the profile name differs from foundation features
-      # (e.g. "embedded" and "browser" are engine-level profile names).
+      # Uses engine_features when the engine needs other features than the foundation
+      # crates (e.g. the engine's own `full`, or `wal` and `grafeo-file`).
       - name: Build engine + facade (${{ matrix.profile }})
         run: >
           cargo build --lib
           -p grafeo-engine
           -p grafeo
           --no-default-features ${{ matrix.engine_features || matrix.features }}
+        env:
+          RUSTC_WRAPPER: sccache
+
+      # An engine test built with only the profile's features, for profiles
+      # whose behavior depends on what the profile itself enables.
+      - name: Test engine profile (${{ matrix.profile }})
+        if: matrix.engine_test
+        run: >
+          cargo test
+          -p grafeo-engine
+          --no-default-features ${{ matrix.engine_test }}
         env:
           RUSTC_WRAPPER: sccache
 
@@ -894,9 +909,59 @@ jobs:
           GRAFEO_RELEASE_BUILD: "1"
         run: pytest crates/bindings/python/tests/ -v --ignore=crates/bindings/python/tests/benchmark_phases.py
 
+  # Python tests on a reduced build: the wheel with the `lpg` profile (GQL, Cypher, Gremlin and
+  # SQL/PGQ with storage; no algorithms, no vector or text index, no RDF) runs the whole suite,
+  # which must pass or skip. A test that assumes a feature the build lacks (an expectation without
+  # its feature check, or a catalogue read at import) fails here instead of in a user's build.
+  python-test-lpg:
+    name: Python Test (lpg profile)
+    needs: [python-spec]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@1.99.0
+
+      - name: Cache cargo registry
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-python-lpg-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-python-lpg-
+
+      # --features replaces pyproject.toml's list, so the PyO3 features are named again.
+      - name: Build the lpg wheel
+        uses: PyO3/maturin-action@v1
+        with:
+          command: build
+          args: --release --out dist -m crates/bindings/python/Cargo.toml --no-default-features --features pyo3/extension-module,pyo3/abi3-py312,lpg
+          sccache: 'true'
+
+      - name: Install Python package and test dependencies
+        shell: bash
+        run: |
+          uv pip install --system dist/*.whl
+          uv pip install --system pytest pytest-asyncio networkx numpy scipy solvor pandas pyarrow polars
+
+      - name: Run Python tests
+        run: pytest crates/bindings/python/tests/ -v --ignore=crates/bindings/python/tests/benchmark_phases.py
+
   # Node.js tests
   # Default profile: napi-rs builds grafeo-node with its crate-level default
-  # features, which pull in "full" (all languages + AI) via grafeo-engine.
+  # features, its `embedded` profile.
   node-test:
     name: Node.js Test (${{ matrix.os }}, Node ${{ matrix.node }})
     needs: [node-spec]
@@ -1342,7 +1407,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: crate-ci/typos@v1.51.1
+      - uses: crate-ci/typos@v1.52.0
 
   # The manifest of @grafeo-db/js as a release publishes it: the repository's leaves out
   # its platform packages, so a mistake in adding them would ship a package with no
@@ -1411,6 +1476,7 @@ jobs:
       - rust-feature-matrix
       - miri
       - python-test
+      - python-test-lpg
       - node-test
       - go-test
       - csharp-test

@@ -1,0 +1,193 @@
+# A SQL/PGQ equality answers alike, its 22G04 included, with and without an index (GA04 step b,
+# 2026-11-06): a structure answers only when it holds no value of another kind. Generated with
+# sql_pgq_lookups_across_kinds.rs, which also runs each plan, reopened, in a transaction and over
+# row groups. The setup runs in GQL (the file's language), each query in SQL/PGQ.
+
+meta:
+  language: gql
+  model: lpg
+  section: "8.2"
+  title: Equality across kinds through each structure
+  dataset: empty
+  requires: [sql-pgq]
+
+tests:
+
+  - name: numbers_only_finds_its_rows
+    language: sql-pgq
+    setup:
+      - "INSERT (:L {row: 0, k: 1}), (:L {row: 1, k: 5}), (:L {row: 2, k: 5}), (:L {row: 3, k: 2.5}), (:L {row: 4}), (:Other {row: -1, k: 'x'})"
+    query: "SELECT * FROM GRAPH_TABLE (MATCH (n:L) WHERE n.k = 5 COLUMNS (n.row AS row))"
+    expect:
+      rows:
+        - [1]
+        - [2]
+
+  - name: numbers_only_finds_its_rows_with_an_index
+    language: sql-pgq
+    setup:
+      - "INSERT (:L {row: 0, k: 1}), (:L {row: 1, k: 5}), (:L {row: 2, k: 5}), (:L {row: 3, k: 2.5}), (:L {row: 4}), (:Other {row: -1, k: 'x'})"
+      - "CREATE INDEX on_k FOR (n:L) ON (n.k)"
+    query: "SELECT * FROM GRAPH_TABLE (MATCH (n:L) WHERE n.k = 5 COLUMNS (n.row AS row))"
+    expect:
+      rows:
+        - [1]
+        - [2]
+
+  - name: numbers_only_a_float_probe
+    language: sql-pgq
+    setup:
+      - "INSERT (:L {row: 0, k: 1}), (:L {row: 1, k: 5}), (:L {row: 2, k: 5}), (:L {row: 3, k: 2.5}), (:L {row: 4}), (:Other {row: -1, k: 'x'})"
+    query: "SELECT * FROM GRAPH_TABLE (MATCH (n:L) WHERE n.k = 2.5 COLUMNS (n.row AS row))"
+    expect:
+      rows:
+        - [3]
+
+  - name: numbers_only_a_float_probe_with_an_index
+    language: sql-pgq
+    setup:
+      - "INSERT (:L {row: 0, k: 1}), (:L {row: 1, k: 5}), (:L {row: 2, k: 5}), (:L {row: 3, k: 2.5}), (:L {row: 4}), (:Other {row: -1, k: 'x'})"
+      - "CREATE INDEX on_k FOR (n:L) ON (n.k)"
+    query: "SELECT * FROM GRAPH_TABLE (MATCH (n:L) WHERE n.k = 2.5 COLUMNS (n.row AS row))"
+    expect:
+      rows:
+        - [3]
+
+  - name: numbers_only_a_string_probe_raises
+    language: sql-pgq
+    setup:
+      - "INSERT (:L {row: 0, k: 1}), (:L {row: 1, k: 5}), (:L {row: 2, k: 5}), (:L {row: 3, k: 2.5}), (:L {row: 4}), (:Other {row: -1, k: 'x'})"
+    query: "SELECT * FROM GRAPH_TABLE (MATCH (n:L) WHERE n.k = 'x' COLUMNS (n.row AS row))"
+    expect:
+      gql_status: "22G04"
+
+  - name: numbers_only_a_string_probe_raises_with_an_index
+    language: sql-pgq
+    setup:
+      - "INSERT (:L {row: 0, k: 1}), (:L {row: 1, k: 5}), (:L {row: 2, k: 5}), (:L {row: 3, k: 2.5}), (:L {row: 4}), (:Other {row: -1, k: 'x'})"
+      - "CREATE INDEX on_k FOR (n:L) ON (n.k)"
+    query: "SELECT * FROM GRAPH_TABLE (MATCH (n:L) WHERE n.k = 'x' COLUMNS (n.row AS row))"
+    expect:
+      gql_status: "22G04"
+
+  - name: a_string_among_numbers_raises
+    language: sql-pgq
+    setup:
+      - "INSERT (:L {row: 0, k: 1}), (:L {row: 1, k: 5}), (:L {row: 2, k: 5}), (:L {row: 3, k: 2.5}), (:L {row: 4}), (:Other {row: -1, k: 'x'})"
+      - "INSERT (:L {row: 5, k: 'x'})"
+    query: "SELECT * FROM GRAPH_TABLE (MATCH (n:L) WHERE n.k = 5 COLUMNS (n.row AS row))"
+    expect:
+      gql_status: "22G04"
+
+  - name: a_string_among_numbers_raises_with_an_index
+    language: sql-pgq
+    setup:
+      - "INSERT (:L {row: 0, k: 1}), (:L {row: 1, k: 5}), (:L {row: 2, k: 5}), (:L {row: 3, k: 2.5}), (:L {row: 4}), (:Other {row: -1, k: 'x'})"
+      - "INSERT (:L {row: 5, k: 'x'})"
+      - "CREATE INDEX on_k FOR (n:L) ON (n.k)"
+    query: "SELECT * FROM GRAPH_TABLE (MATCH (n:L) WHERE n.k = 5 COLUMNS (n.row AS row))"
+    expect:
+      gql_status: "22G04"
+
+  - name: a_string_among_numbers_a_string_probe_raises
+    language: sql-pgq
+    setup:
+      - "INSERT (:L {row: 0, k: 1}), (:L {row: 1, k: 5}), (:L {row: 2, k: 5}), (:L {row: 3, k: 2.5}), (:L {row: 4}), (:Other {row: -1, k: 'x'})"
+      - "INSERT (:L {row: 5, k: 'x'})"
+    query: "SELECT * FROM GRAPH_TABLE (MATCH (n:L) WHERE n.k = 'x' COLUMNS (n.row AS row))"
+    expect:
+      gql_status: "22G04"
+
+  - name: a_string_among_numbers_a_string_probe_raises_with_an_index
+    language: sql-pgq
+    setup:
+      - "INSERT (:L {row: 0, k: 1}), (:L {row: 1, k: 5}), (:L {row: 2, k: 5}), (:L {row: 3, k: 2.5}), (:L {row: 4}), (:Other {row: -1, k: 'x'})"
+      - "INSERT (:L {row: 5, k: 'x'})"
+      - "CREATE INDEX on_k FOR (n:L) ON (n.k)"
+    query: "SELECT * FROM GRAPH_TABLE (MATCH (n:L) WHERE n.k = 'x' COLUMNS (n.row AS row))"
+    expect:
+      gql_status: "22G04"
+
+  - name: strings_only_finds_its_rows
+    language: sql-pgq
+    setup:
+      - "INSERT (:L {row: 0, k: 'a'}), (:L {row: 1, k: 'b'}), (:L {row: 2, k: 'a'})"
+    query: "SELECT * FROM GRAPH_TABLE (MATCH (n:L) WHERE n.k = 'a' COLUMNS (n.row AS row))"
+    expect:
+      rows:
+        - [0]
+        - [2]
+
+  - name: strings_only_finds_its_rows_with_an_index
+    language: sql-pgq
+    setup:
+      - "INSERT (:L {row: 0, k: 'a'}), (:L {row: 1, k: 'b'}), (:L {row: 2, k: 'a'})"
+      - "CREATE INDEX on_k FOR (n:L) ON (n.k)"
+    query: "SELECT * FROM GRAPH_TABLE (MATCH (n:L) WHERE n.k = 'a' COLUMNS (n.row AS row))"
+    expect:
+      rows:
+        - [0]
+        - [2]
+
+  - name: strings_only_a_number_probe_raises
+    language: sql-pgq
+    setup:
+      - "INSERT (:L {row: 0, k: 'a'}), (:L {row: 1, k: 'b'})"
+    query: "SELECT * FROM GRAPH_TABLE (MATCH (n:L) WHERE n.k = 5 COLUMNS (n.row AS row))"
+    expect:
+      gql_status: "22G04"
+
+  - name: strings_only_a_number_probe_raises_with_an_index
+    language: sql-pgq
+    setup:
+      - "INSERT (:L {row: 0, k: 'a'}), (:L {row: 1, k: 'b'})"
+      - "CREATE INDEX on_k FOR (n:L) ON (n.k)"
+    query: "SELECT * FROM GRAPH_TABLE (MATCH (n:L) WHERE n.k = 5 COLUMNS (n.row AS row))"
+    expect:
+      gql_status: "22G04"
+
+  - name: the_string_deleted_finds_its_rows
+    language: sql-pgq
+    setup:
+      - "INSERT (:L {row: 0, k: 1}), (:L {row: 1, k: 5}), (:L {row: 2, k: 5}), (:L {row: 3, k: 2.5}), (:L {row: 4}), (:Other {row: -1, k: 'x'})"
+      - "INSERT (:L {row: 5, k: 'x'})"
+      - "MATCH (n:L {row: 5}) DELETE n"
+    query: "SELECT * FROM GRAPH_TABLE (MATCH (n:L) WHERE n.k = 5 COLUMNS (n.row AS row))"
+    expect:
+      rows:
+        - [1]
+        - [2]
+
+  - name: the_string_deleted_finds_its_rows_with_an_index
+    language: sql-pgq
+    setup:
+      - "INSERT (:L {row: 0, k: 1}), (:L {row: 1, k: 5}), (:L {row: 2, k: 5}), (:L {row: 3, k: 2.5}), (:L {row: 4}), (:Other {row: -1, k: 'x'})"
+      - "INSERT (:L {row: 5, k: 'x'})"
+      - "MATCH (n:L {row: 5}) DELETE n"
+      - "CREATE INDEX on_k FOR (n:L) ON (n.k)"
+    query: "SELECT * FROM GRAPH_TABLE (MATCH (n:L) WHERE n.k = 5 COLUMNS (n.row AS row))"
+    expect:
+      rows:
+        - [1]
+        - [2]
+
+  - name: one_of_two_strings_deleted_raises
+    language: sql-pgq
+    setup:
+      - "INSERT (:L {row: 0, k: 1}), (:L {row: 1, k: 5}), (:L {row: 2, k: 5}), (:L {row: 3, k: 2.5}), (:L {row: 4}), (:Other {row: -1, k: 'x'})"
+      - "INSERT (:L {row: 5, k: 'x'}), (:L {row: 6, k: 'y'})"
+      - "MATCH (n:L {row: 5}) DELETE n"
+    query: "SELECT * FROM GRAPH_TABLE (MATCH (n:L) WHERE n.k = 5 COLUMNS (n.row AS row))"
+    expect:
+      gql_status: "22G04"
+
+  - name: one_of_two_strings_deleted_raises_with_an_index
+    language: sql-pgq
+    setup:
+      - "INSERT (:L {row: 0, k: 1}), (:L {row: 1, k: 5}), (:L {row: 2, k: 5}), (:L {row: 3, k: 2.5}), (:L {row: 4}), (:Other {row: -1, k: 'x'})"
+      - "INSERT (:L {row: 5, k: 'x'}), (:L {row: 6, k: 'y'})"
+      - "MATCH (n:L {row: 5}) DELETE n"
+      - "CREATE INDEX on_k FOR (n:L) ON (n.k)"
+    query: "SELECT * FROM GRAPH_TABLE (MATCH (n:L) WHERE n.k = 5 COLUMNS (n.row AS row))"
+    expect:
+      gql_status: "22G04"

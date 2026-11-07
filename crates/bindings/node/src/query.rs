@@ -28,6 +28,39 @@ pub struct WriteCounters {
     pub labels_removed: i64,
 }
 
+/// A warning a statement raised: a deprecated form it wrote or ran, or a
+/// notice.
+///
+/// # Stability: Experimental
+///
+/// New in 0.6.2: new warnings and kinds may be added in any release. See <https://grafeo.dev/stability/>.
+#[napi(object)]
+pub struct QueryWarning {
+    /// Its GQLSTATUS code, of class `01` (for example `01X01`).
+    pub code: String,
+    /// `deprecation` or `notice`.
+    pub kind: String,
+    /// What it says, naming the replacement of a deprecated form.
+    pub message: String,
+}
+
+impl From<&grafeo_bindings_common::warning::Warning> for QueryWarning {
+    fn from(warning: &grafeo_bindings_common::warning::Warning) -> Self {
+        Self {
+            code: warning.code.clone(),
+            kind: warning.kind.to_string(),
+            message: warning.message.clone(),
+        }
+    }
+}
+
+/// `warnings` as JavaScript objects, in their order.
+pub(crate) fn js_warnings(
+    warnings: &[grafeo_bindings_common::warning::Warning],
+) -> Vec<QueryWarning> {
+    warnings.iter().map(QueryWarning::from).collect()
+}
+
 /// Results from a query - access rows, nodes, and edges.
 #[napi]
 pub struct QueryResult {
@@ -40,6 +73,7 @@ pub struct QueryResult {
     pub(crate) counters: grafeo_engine::database::WriteCounters,
     pub(crate) profile: Option<grafeo_engine::database::QueryProfile>,
     pub(crate) kind: grafeo_engine::database::ResultKind,
+    pub(crate) warnings: Vec<grafeo_bindings_common::warning::Warning>,
 }
 
 /// The operators of a `PROFILE` statement as a tree.
@@ -99,6 +133,17 @@ impl QueryResult {
     #[napi(getter)]
     pub fn columns(&self) -> Vec<String> {
         self.columns.clone()
+    }
+
+    /// The warnings the statement raised, ordered by code: a deprecated form
+    /// it wrote or ran, or a notice; empty when there were none.
+    ///
+    /// # Stability: Experimental
+    ///
+    /// New in 0.6.2. See <https://grafeo.dev/stability/>.
+    #[napi(getter)]
+    pub fn warnings(&self) -> Vec<QueryWarning> {
+        js_warnings(&self.warnings)
     }
 
     /// Get number of rows.
@@ -348,6 +393,7 @@ impl QueryResult {
             counters: grafeo_engine::database::WriteCounters::default(),
             profile: None,
             kind: grafeo_engine::database::ResultKind::Rows,
+            warnings: Vec::new(),
         }
     }
 
@@ -369,6 +415,7 @@ impl QueryResult {
             counters: grafeo_engine::database::WriteCounters::default(),
             profile: None,
             kind: grafeo_engine::database::ResultKind::Rows,
+            warnings: Vec::new(),
         }
     }
 
@@ -379,6 +426,16 @@ impl QueryResult {
         profile: Option<grafeo_engine::database::QueryProfile>,
     ) -> Self {
         self.profile = profile;
+        self
+    }
+
+    /// Sets the warnings the statement raised.
+    #[must_use]
+    pub(crate) fn with_warnings(
+        mut self,
+        warnings: Vec<grafeo_bindings_common::warning::Warning>,
+    ) -> Self {
+        self.warnings = warnings;
         self
     }
 
@@ -410,6 +467,7 @@ impl QueryResult {
             counters: grafeo_engine::database::WriteCounters::default(),
             profile: None,
             kind: grafeo_engine::database::ResultKind::Rows,
+            warnings: Vec::new(),
         }
     }
 }

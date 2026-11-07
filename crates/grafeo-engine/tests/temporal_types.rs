@@ -190,8 +190,12 @@ fn gql_datetime_typed_literal() {
         .execute("MATCH (p:Person) RETURN DATETIME '2024-03-15T14:30:00Z' AS dt LIMIT 1")
         .unwrap();
     let row = &result.rows()[0];
-    let ts = row[0].as_timestamp().expect("expected Timestamp value");
-    let date = ts.to_date();
+    // `Z` is the displacement +00:00: the literal is a zoned datetime at that offset.
+    let Value::ZonedDatetime(zoned) = &row[0] else {
+        panic!("expected a zoned datetime, got {:?}", row[0]);
+    };
+    assert_eq!(zoned.offset_seconds(), 0);
+    let date = zoned.to_local_date();
     assert_eq!(date.year(), 2024);
     assert_eq!(date.month(), 3);
     assert_eq!(date.day(), 15);

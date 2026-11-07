@@ -5,6 +5,8 @@ Tests graph algorithms with GraphQL for setup/verification.
 
 import random
 
+import pytest
+
 from tests.bases.test_algorithms import BaseAlgorithmsTest
 
 
@@ -35,6 +37,7 @@ class TestGraphQLAlgorithms(BaseAlgorithmsTest):
         return {"node_ids": node_ids, "edge_count": len(edges)}
 
 
+@pytest.mark.requires("algos")
 class TestGraphQLAlgorithmVerification:
     """Tests that verify algorithm results (uses Python API only)."""
 

@@ -45,6 +45,12 @@ pub trait MemoryConsumer: Send + Sync {
     /// Returns the number of bytes actually freed.
     fn evict(&self, target_bytes: usize) -> usize;
 
+    /// Whether [`evict`](Self::evict) can free memory; the eviction cycle asks only consumers
+    /// that can. A consumer that only reports what it holds keeps the default, `false`.
+    fn can_evict(&self) -> bool {
+        false
+    }
+
     /// Returns whether this consumer supports spilling to disk.
     fn can_spill(&self) -> bool {
         false
@@ -128,6 +134,8 @@ pub struct ConsumerStats {
     pub priority: u8,
     /// Whether spilling is supported.
     pub can_spill: bool,
+    /// Whether eviction can free memory.
+    pub can_evict: bool,
 }
 
 impl ConsumerStats {
@@ -139,6 +147,7 @@ impl ConsumerStats {
             usage_bytes: consumer.memory_usage(),
             priority: consumer.eviction_priority(),
             can_spill: consumer.can_spill(),
+            can_evict: consumer.can_evict(),
         }
     }
 }
@@ -188,6 +197,10 @@ mod tests {
             let to_evict = target_bytes.min(current);
             self.usage.fetch_sub(to_evict, Ordering::Relaxed);
             to_evict
+        }
+
+        fn can_evict(&self) -> bool {
+            true
         }
 
         fn current_tier(&self) -> super::super::tiered::StorageTier {

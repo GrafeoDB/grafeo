@@ -187,8 +187,14 @@ fn the_answers_are_those_of_equals() {
     };
     for (needle, item, wanted) in [
         ("1", "1.0", true),
-        ("5", "'05'", true),
-        ("'05'", "5", true),
+        // A string equals no number, whatever it spells.
+        ("5", "'05'", false),
+        ("'05'", "5", false),
+        ("5", "'5'", false),
+        ("'5'", "5", false),
+        ("42", "'4.2e1'", false),
+        ("true", "'true'", false),
+        ("'05'", "'05'", true),
         ("0.0e0", "-0.0e0", true),
         ("NaN", "NaN", false),
         ("9007199254740993", "9007199254740992", false),

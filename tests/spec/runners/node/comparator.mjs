@@ -5,6 +5,7 @@
  * the Node.js runner validates results identically to the Rust runner.
  */
 
+import { SpecFailure } from './xfail.mjs'
 import { createHash } from 'crypto'
 
 /**
@@ -116,7 +117,7 @@ export function assertRowsSorted(result, expected) {
   const sortedExpected = [...expected].sort((a, b) => a.join('|').localeCompare(b.join('|')))
 
   if (sortedActual.length !== sortedExpected.length) {
-    throw new Error(
+    throw new SpecFailure(
       `Row count mismatch: got ${sortedActual.length}, expected ${sortedExpected.length}\n` +
       `Actual: ${JSON.stringify(sortedActual)}\nExpected: ${JSON.stringify(sortedExpected)}`
     )
@@ -124,7 +125,7 @@ export function assertRowsSorted(result, expected) {
   for (let i = 0; i < sortedActual.length; i++) {
     for (let j = 0; j < sortedActual[i].length; j++) {
       if (sortedActual[i][j] !== sortedExpected[i][j]) {
-        throw new Error(
+        throw new SpecFailure(
           `Mismatch at sorted row ${i}, col ${j}: got '${sortedActual[i][j]}', expected '${sortedExpected[i][j]}'\n` +
           `Actual row: ${JSON.stringify(sortedActual[i])}\nExpected row: ${JSON.stringify(sortedExpected[i])}`
         )
@@ -141,7 +142,7 @@ export function assertRowsWithPrecision(result, expected, precision) {
   const actual = resultToRows(result)
   const tolerance = Math.pow(10, -precision)
   if (actual.length !== expected.length) {
-    throw new Error(
+    throw new SpecFailure(
       `Row count mismatch: got ${actual.length}, expected ${expected.length}`
     )
   }
@@ -153,12 +154,12 @@ export function assertRowsWithPrecision(result, expected, precision) {
       const ef = parseFloat(e)
       if (!isNaN(af) && !isNaN(ef)) {
         if (Math.abs(af - ef) >= tolerance) {
-          throw new Error(
+          throw new SpecFailure(
             `Float mismatch at row ${i}, col ${j}: got ${af}, expected ${ef} (tolerance ${tolerance})`
           )
         }
       } else if (a !== e) {
-        throw new Error(
+        throw new SpecFailure(
           `Mismatch at row ${i}, col ${j}: got '${a}', expected '${e}'`
         )
       }
@@ -180,7 +181,7 @@ export function assertHash(result, expectedHash) {
   }
   const actualHash = hasher.digest('hex')
   if (actualHash !== expectedHash) {
-    throw new Error(
+    throw new SpecFailure(
       `Hash mismatch: got '${actualHash}', expected '${expectedHash}'\nRows: ${JSON.stringify(rows)}`
     )
   }
@@ -192,7 +193,7 @@ export function assertHash(result, expectedHash) {
 export function assertRowsOrdered(result, expected) {
   const actual = resultToRows(result)
   if (actual.length !== expected.length) {
-    throw new Error(
+    throw new SpecFailure(
       `Row count mismatch: got ${actual.length}, expected ${expected.length}\n` +
       `Actual: ${JSON.stringify(actual)}\nExpected: ${JSON.stringify(expected)}`
     )
@@ -200,7 +201,7 @@ export function assertRowsOrdered(result, expected) {
   for (let i = 0; i < actual.length; i++) {
     for (let j = 0; j < actual[i].length; j++) {
       if (actual[i][j] !== expected[i][j]) {
-        throw new Error(
+        throw new SpecFailure(
           `Mismatch at row ${i}, col ${j}: got '${actual[i][j]}', expected '${expected[i][j]}'\n` +
           `Actual row: ${JSON.stringify(actual[i])}\nExpected row: ${JSON.stringify(expected[i])}`
         )
@@ -227,10 +228,10 @@ export function describeError(expect) {
 export function assertGqlStatus(err, expected) {
   const status = err == null ? undefined : err.gqlStatus
   if (status == null) {
-    throw new Error(`Error '${err?.message ?? String(err)}' has no GQLSTATUS`)
+    throw new SpecFailure(`Error '${err?.message ?? String(err)}' has no GQLSTATUS`)
   }
   if (String(status) !== expected) {
-    throw new Error(`Error '${err.message}' has GQLSTATUS ${status}, expected ${expected}`)
+    throw new SpecFailure(`Error '${err.message}' has GQLSTATUS ${status}, expected ${expected}`)
   }
 }
 
@@ -269,7 +270,7 @@ export function termToString(val) {
       return `"${text}"^^<${datatype}>`
     }
     default:
-      throw new Error(`a terms: expectation got a value that is not an RDF term: ${JSON.stringify(val)}`)
+      throw new SpecFailure(`a terms: expectation got a value that is not an RDF term: ${JSON.stringify(val)}`)
   }
 }
 
@@ -316,7 +317,7 @@ export function assertTerms(result, expected, ordered) {
     exp = exp.map(key).sort()
   }
   if (JSON.stringify(got) !== JSON.stringify(exp)) {
-    throw new Error(`terms differ\nactual:   ${JSON.stringify(actual)}\nexpected: ${JSON.stringify(want)}`)
+    throw new SpecFailure(`terms differ\nactual:   ${JSON.stringify(actual)}\nexpected: ${JSON.stringify(want)}`)
   }
   if (ordered) {
     const pairs = new Map()
@@ -325,8 +326,8 @@ export function assertTerms(result, expected, ordered) {
       row.forEach((a, j) => {
         if (!a.startsWith('_:')) return
         const e = want[i][j]
-        if ((pairs.get(e) ?? a) !== a) throw new Error(`${e} names two blank nodes\nactual: ${JSON.stringify(actual)}`)
-        if ((back.get(a) ?? e) !== e) throw new Error(`blank node ${a} has two names\nactual: ${JSON.stringify(actual)}`)
+        if ((pairs.get(e) ?? a) !== a) throw new SpecFailure(`${e} names two blank nodes\nactual: ${JSON.stringify(actual)}`)
+        if ((back.get(a) ?? e) !== e) throw new SpecFailure(`blank node ${a} has two names\nactual: ${JSON.stringify(actual)}`)
         pairs.set(e, a)
         back.set(a, e)
       })

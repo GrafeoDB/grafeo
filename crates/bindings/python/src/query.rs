@@ -38,10 +38,21 @@ pub struct PyQueryResult {
     pub(crate) profile: Option<grafeo_engine::database::QueryProfile>,
     /// What the result holds.
     pub(crate) kind: grafeo_engine::database::ResultKind,
+    /// The warnings the statement raised, ordered by code.
+    pub(crate) warnings: Vec<grafeo_bindings_common::warning::Warning>,
 }
 
 #[pymethods]
 impl PyQueryResult {
+    /// The warnings the statement raised, ordered by code: a deprecated form
+    /// it wrote or ran, or a notice. Each one was also raised through
+    /// `warnings.warn` when the result was returned. Empty when there were
+    /// none.
+    #[getter]
+    fn warnings(&self) -> Vec<crate::warning::PyQueryWarning> {
+        crate::warning::to_py(&self.warnings)
+    }
+
     /// What the result holds: `"rows"` (SPARQL SELECT and updates, and every
     /// other language), `"boolean"` (SPARQL ASK: one row with a `boolean`
     /// column, see `boolean`) or `"graph"` (SPARQL CONSTRUCT and DESCRIBE:
@@ -482,6 +493,7 @@ impl PyQueryResult {
             counters: grafeo_engine::database::WriteCounters::default(),
             profile: None,
             kind: grafeo_engine::database::ResultKind::Rows,
+            warnings: Vec::new(),
         }
     }
 
@@ -503,6 +515,7 @@ impl PyQueryResult {
             counters: grafeo_engine::database::WriteCounters::default(),
             profile: None,
             kind: grafeo_engine::database::ResultKind::Rows,
+            warnings: Vec::new(),
         }
     }
 
@@ -567,6 +580,7 @@ impl PyQueryResult {
             counters: grafeo_engine::database::WriteCounters::default(),
             profile: None,
             kind: grafeo_engine::database::ResultKind::Rows,
+            warnings: Vec::new(),
         }
     }
 

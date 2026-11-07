@@ -7,6 +7,7 @@ use super::sink::TripleSink;
 use super::term::{Term, unescape_iri};
 use super::triple::{Triple, TriplePattern};
 use grafeo_common::change::RdfGraphOp;
+use grafeo_common::memory::buffer::{BufferManager, MemoryGrant, MemoryRegion};
 use grafeo_common::storage::log_record::RdfGraphTarget;
 use grafeo_common::types::TransactionId;
 use grafeo_common::types::rdf::UnsupportedTermKind;
@@ -23,8 +24,47 @@ mod path_lookup_tests {
     use super::*;
     use crate::execution::operators::OperatorError;
 
+    /// A store with no object index walks every triple for an object, and the deadline holds over
+    /// the triples it rejects: past the first clock read, which comes at the first unit, the
+    /// second comes 1,024 units later, inside the 2,048 rejected triples.
     #[test]
-    fn path_lookup_polls_rejected_index_candidates() {
+    fn path_lookup_polls_rejected_candidates() {
+        let store = RdfStore::with_config(RdfStoreConfig {
+            index_objects: false,
+            ..RdfStoreConfig::default()
+        });
+        for n in 0..2_048 {
+            store.insert(Triple::new(
+                Term::iri("s"),
+                Term::iri("p"),
+                Term::literal(n.to_string()),
+            ));
+        }
+        store.insert(Triple::new(
+            Term::iri("t"),
+            Term::iri("p"),
+            Term::literal("held elsewhere"),
+        ));
+        let pattern = TriplePattern {
+            subject: None,
+            predicate: None,
+            object: Some(Term::literal("held elsewhere")),
+        };
+        let mut budget = PathBudget::new(4096, None);
+        budget.expire_after_polls(1);
+        let mut visits = 0;
+        let result = store.visit_matches_with_pending(&pattern, None, &mut budget, &mut |_, _| {
+            visits += 1;
+            Ok(())
+        });
+        assert!(matches!(result, Err(OperatorError::Timeout)));
+        assert!(visits <= 1, "{visits}");
+    }
+
+    /// Both ends and the predicate bound is one lookup, however long the list of the subject and
+    /// predicate: it polls nothing to reject, held or not.
+    #[test]
+    fn path_lookup_of_a_whole_triple_reads_no_list() {
         let store = RdfStore::new();
         for n in 0..64 {
             store.insert(Triple::new(
@@ -33,20 +73,28 @@ mod path_lookup_tests {
                 Term::literal(n.to_string()),
             ));
         }
-        let pattern = TriplePattern {
-            subject: Some(Term::iri("s")),
-            predicate: Some(Term::iri("p")),
-            object: Some(Term::literal("missing")),
-        };
-        let mut budget = PathBudget::new(4096, None);
-        budget.expire_after_polls(8);
-        let mut visits = 0;
-        let result = store.visit_matches_with_pending(&pattern, None, &mut budget, &mut |_, _| {
-            visits += 1;
-            Ok(())
-        });
-        assert!(matches!(result, Err(OperatorError::Timeout)));
-        assert_eq!(visits, 0);
+        store.insert(Triple::new(
+            Term::iri("t"),
+            Term::iri("p"),
+            Term::literal("held elsewhere"),
+        ));
+        for (object, wanted) in [("7", 1), ("held elsewhere", 0), ("in no triple", 0)] {
+            let pattern = TriplePattern {
+                subject: Some(Term::iri("s")),
+                predicate: Some(Term::iri("p")),
+                object: Some(Term::literal(object)),
+            };
+            let mut budget = PathBudget::new(4096, None);
+            budget.expire_after_polls(8);
+            let mut visits = 0;
+            store
+                .visit_matches_with_pending(&pattern, None, &mut budget, &mut |_, _| {
+                    visits += 1;
+                    Ok(())
+                })
+                .unwrap();
+            assert_eq!(visits, wanted, "{object}");
+        }
     }
 
     #[test]
@@ -57,7 +105,8 @@ mod path_lookup_tests {
     fn path_lookup_polls_rejected_pending_operations() {
         let store = RdfStore::new();
         let tx = TransactionId::new(1);
-        for n in 0..64 {
+        // Past 1,024 units, so the second clock read comes inside the rejected operations.
+        for n in 0..2_048 {
             store.insert_in_transaction(
                 tx,
                 Triple::new(
@@ -68,7 +117,7 @@ mod path_lookup_tests {
             );
         }
         let mut budget = PathBudget::new(4096, None);
-        budget.expire_after_polls(8);
+        budget.expire_after_polls(1);
         let result = store.visit_matches_with_pending(
             &TriplePattern::with_predicate(Term::iri("p")),
             Some(tx),
@@ -294,6 +343,20 @@ pub struct RdfStore {
     /// Whether the Ring is stale (triples changed since last build).
     #[cfg(feature = "ring-index")]
     ring_stale: std::sync::atomic::AtomicBool,
+    /// The heap bytes of this graph's triples and indexes (not its named
+    /// graphs'), kept by the writes as they change (see
+    /// [`counted_memory_bytes`](Self::counted_memory_bytes)): what
+    /// [`heap_memory_bytes`](Self::heap_memory_bytes) walks.
+    counted: std::sync::atomic::AtomicUsize,
+    /// The buffer manager of the dataset, which its named graphs share.
+    memory: Arc<std::sync::OnceLock<Arc<BufferManager>>>,
+    /// The grant of what this graph holds, settled after each change
+    /// (forced: the RDF store changes at a commit, a load or a replay, which
+    /// must not fail).
+    grant: parking_lot::Mutex<Option<MemoryGrant>>,
+    /// Whether this graph counts the dataset's dictionary: the default
+    /// graph's does, its named graphs share it.
+    owns_dictionary: bool,
 }
 
 impl RdfStore {
@@ -347,8 +410,180 @@ impl RdfStore {
             ring: RwLock::new(None),
             #[cfg(feature = "ring-index")]
             ring_stale: std::sync::atomic::AtomicBool::new(false),
+            counted: std::sync::atomic::AtomicUsize::new(0),
+            memory: Arc::new(std::sync::OnceLock::new()),
+            grant: parking_lot::Mutex::new(None),
+            owns_dictionary: true,
             config,
         }
+        .counting_from_its_walk()
+    }
+
+    /// The store, its count set from a walk of what it holds: what a new
+    /// store's empty maps take.
+    fn counting_from_its_walk(self) -> Self {
+        self.counted
+            .store(self.own_walk_bytes(), std::sync::atomic::Ordering::Relaxed);
+        self
+    }
+
+    /// Takes the memory the dataset holds from `manager` from now on: the
+    /// grants of the default graph and its named graphs cover what they
+    /// count. A dataset keeps the first manager it gets.
+    pub fn attach_memory(&self, manager: Arc<BufferManager>) {
+        if self.memory.set(manager).is_err() {
+            return;
+        }
+        self.settle();
+        for graph in self.named_graphs.read().values() {
+            graph.settle();
+        }
+    }
+
+    /// Adds `bytes`, a difference (wrapping), to this graph's count.
+    fn count(&self, bytes: usize) {
+        if bytes != 0 {
+            self.counted
+                .fetch_add(bytes, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    /// The bytes this graph holds as it counts them: its triples and
+    /// indexes, its ring, and the dictionary when it owns it.
+    fn counted_total(&self) -> usize {
+        let counted = self.counted.load(std::sync::atomic::Ordering::Relaxed);
+        let sane = isize::try_from(counted).is_ok();
+        debug_assert!(sane, "an RDF graph's count drifted: {counted}");
+        let counted = if sane { counted } else { 0 };
+        counted + self.ring_bytes() + self.dictionary_bytes()
+    }
+
+    /// The bytes of the dictionary this graph counts: the dataset's for the
+    /// default graph, none for a named graph.
+    fn dictionary_bytes(&self) -> usize {
+        if self.owns_dictionary {
+            self.dictionary.heap_bytes()
+        } else {
+            0
+        }
+    }
+
+    /// The bytes of this graph's ring.
+    fn ring_bytes(&self) -> usize {
+        #[cfg(feature = "ring-index")]
+        {
+            self.ring.read().as_ref().map_or(0, |ring| {
+                ring.len() * std::mem::size_of::<(u32, u32, u32)>()
+            })
+        }
+        #[cfg(not(feature = "ring-index"))]
+        0
+    }
+
+    /// Brings this graph's grant to what it counts, forced (see
+    /// [`BufferManager::settle_forced`]).
+    fn settle(&self) {
+        if let Some(manager) = self.memory.get() {
+            let counted = self.counted_total();
+            manager.settle_forced(&mut self.grant.lock(), MemoryRegion::GraphStorage, counted);
+        }
+    }
+
+    /// The heap bytes of this graph's triples and indexes by a walk of every
+    /// index entry: the oracle of its count.
+    fn own_walk_bytes(&self) -> usize {
+        use std::mem::size_of;
+
+        let triples = self.triples.read();
+        let held = triples.capacity() * (size_of::<Held>() + size_of::<u64>())
+            + triples.len() * size_of::<Triple>();
+        drop(triples);
+        held + index_walk_bytes(&self.subject_index.read())
+            + index_walk_bytes(&self.predicate_index.read())
+            + self
+                .object_index
+                .read()
+                .as_ref()
+                .map_or(0, index_walk_bytes)
+            + index_walk_bytes(&self.sp_index.read())
+            + index_walk_bytes(&self.po_index.read())
+            + index_walk_bytes(&self.os_index.read())
+    }
+
+    /// The bytes the grant of this graph and of its named graphs hold, or
+    /// what they count without a manager: what the buffer manager sees of the
+    /// dataset, without a walk.
+    #[must_use]
+    pub fn granted_bytes(&self) -> usize {
+        let own = if self.memory.get().is_some() {
+            self.grant.lock().as_ref().map_or(0, MemoryGrant::size)
+        } else {
+            self.counted_total()
+        };
+        own + self
+            .named_graphs
+            .read()
+            .values()
+            .map(|graph| graph.granted_bytes())
+            .sum::<usize>()
+    }
+
+    /// The bytes this graph and its named graphs count (triples, indexes,
+    /// rings and the dictionary), without a walk.
+    #[must_use]
+    pub fn counted_bytes(&self) -> usize {
+        self.counted_total()
+            + self
+                .named_graphs
+                .read()
+                .values()
+                .map(|graph| graph.counted_bytes())
+                .sum::<usize>()
+    }
+
+    /// The graphs whose count differs from their walk, each as its name
+    /// (empty for the default graph) with the counted and the walked bytes of
+    /// its triples and indexes: empty when the count is right. For tests and
+    /// explicit checks: it walks every index.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn account_mismatches(&self) -> Vec<(String, usize, usize)> {
+        let mut mismatches = Vec::new();
+        let mut check = |name: &str, graph: &RdfStore| {
+            let counted = graph.counted.load(std::sync::atomic::Ordering::Relaxed);
+            let walked = graph.own_walk_bytes();
+            if counted != walked {
+                mismatches.push((name.to_string(), counted, walked));
+            }
+        };
+        check("", self);
+        for (name, graph) in self.named_graphs.read().iter() {
+            check(name, graph);
+        }
+        mismatches
+    }
+
+    /// [`heap_memory_bytes`](Self::heap_memory_bytes) as the writes count it,
+    /// without a walk: what the engine reports.
+    #[must_use]
+    pub fn counted_memory_bytes(&self) -> (usize, usize, usize, usize, usize) {
+        let named = self.named_graphs.read();
+        let mut triples = self.len();
+        let mut triples_and_indexes = self.counted.load(std::sync::atomic::Ordering::Relaxed);
+        let mut ring = self.ring_bytes();
+        for graph in named.values() {
+            let (graph_triples, graph_bytes, _, graph_ring, _) = graph.counted_memory_bytes();
+            triples += graph_triples;
+            triples_and_indexes += graph_bytes;
+            ring += graph_ring;
+        }
+        (
+            triples,
+            triples_and_indexes,
+            self.dictionary_bytes(),
+            ring,
+            named.len(),
+        )
     }
 
     /// The term dictionary of the dataset (shared by its named graphs).
@@ -461,6 +696,7 @@ impl RdfStore {
         let mut new_triples = Vec::with_capacity(triples.size_hint().0);
         {
             let mut primary = self.triples.write();
+            let before = primary.capacity();
             primary.reserve(triples.size_hint().0);
             for arc in triples {
                 let inserted = primary.insert(Held(Arc::clone(&arc)));
@@ -469,14 +705,23 @@ impl RdfStore {
                     new_triples.push(arc);
                 }
             }
+            self.count(
+                primary
+                    .capacity()
+                    .wrapping_sub(before)
+                    .wrapping_mul(std::mem::size_of::<Held>() + std::mem::size_of::<u64>())
+                    .wrapping_add(new_triples.len() * std::mem::size_of::<Triple>()),
+            );
         }
 
         if new_triples.is_empty() {
+            self.settle();
             return 0;
         }
 
         self.index_new(&new_triples);
         self.note_changes(new_triples.len());
+        self.settle();
         new_triples.len()
     }
 
@@ -486,26 +731,38 @@ impl RdfStore {
     /// of a few triples, builds them in turn.
     fn index_new(&self, triples: &[Arc<Triple>]) {
         let subjects = || {
-            index_by(&mut self.subject_index.write(), triples, |ids| ids[0]);
+            self.count(index_by(&mut self.subject_index.write(), triples, |ids| {
+                ids[0]
+            }));
         };
         let predicates = || {
-            index_by(&mut self.predicate_index.write(), triples, |ids| ids[1]);
+            self.count(index_by(
+                &mut self.predicate_index.write(),
+                triples,
+                |ids| ids[1],
+            ));
         };
         let objects = || {
             if self.config.index_objects
                 && let Some(index) = self.object_index.write().as_mut()
             {
-                index_by(index, triples, |ids| ids[2]);
+                self.count(index_by(index, triples, |ids| ids[2]));
             }
         };
         let subject_predicates = || {
-            index_by(&mut self.sp_index.write(), triples, |ids| (ids[0], ids[1]));
+            self.count(index_by(&mut self.sp_index.write(), triples, |ids| {
+                (ids[0], ids[1])
+            }));
         };
         let predicate_objects = || {
-            index_by(&mut self.po_index.write(), triples, |ids| (ids[1], ids[2]));
+            self.count(index_by(&mut self.po_index.write(), triples, |ids| {
+                (ids[1], ids[2])
+            }));
         };
         let object_subjects = || {
-            index_by(&mut self.os_index.write(), triples, |ids| (ids[2], ids[0]));
+            self.count(index_by(&mut self.os_index.write(), triples, |ids| {
+                (ids[2], ids[0])
+            }));
         };
         #[cfg(feature = "parallel")]
         if triples.len() >= PARALLEL_INDEX_MIN {
@@ -534,21 +791,45 @@ impl RdfStore {
         let Some(ids) = self.keys_of(triple) else {
             return false;
         };
-        if !self.triples.write().remove(&ids) {
-            return false;
+        {
+            let mut primary = self.triples.write();
+            let before = primary.capacity();
+            if !primary.remove(&ids) {
+                return false;
+            }
+            self.count(
+                primary
+                    .capacity()
+                    .wrapping_sub(before)
+                    .wrapping_mul(std::mem::size_of::<Held>() + std::mem::size_of::<u64>())
+                    .wrapping_sub(std::mem::size_of::<Triple>()),
+            );
         }
         let [subject, predicate, object] = ids;
-        unindex(&mut self.subject_index.write(), &subject, &ids);
-        unindex(&mut self.predicate_index.write(), &predicate, &ids);
+        self.count(unindex(&mut self.subject_index.write(), &subject, &ids));
+        self.count(unindex(&mut self.predicate_index.write(), &predicate, &ids));
         if self.config.index_objects
             && let Some(index) = self.object_index.write().as_mut()
         {
-            unindex(index, &object, &ids);
+            self.count(unindex(index, &object, &ids));
         }
-        unindex(&mut self.sp_index.write(), &(subject, predicate), &ids);
-        unindex(&mut self.po_index.write(), &(predicate, object), &ids);
-        unindex(&mut self.os_index.write(), &(object, subject), &ids);
+        self.count(unindex(
+            &mut self.sp_index.write(),
+            &(subject, predicate),
+            &ids,
+        ));
+        self.count(unindex(
+            &mut self.po_index.write(),
+            &(predicate, object),
+            &ids,
+        ));
+        self.count(unindex(
+            &mut self.os_index.write(),
+            &(object, subject),
+            &ids,
+        ));
         self.note_changes(1);
+        self.settle();
         true
     }
 
@@ -603,50 +884,16 @@ impl RdfStore {
         let triple_payload_bytes = triples.len() * size_of::<Triple>();
         drop(triples);
 
-        let index_entry = size_of::<(Key, Vec<Arc<Triple>>)>();
-        let composite_entry = size_of::<((Key, Key), Vec<Arc<Triple>>)>();
-
-        let subject_bytes = {
-            let g = self.subject_index.read();
-            g.capacity() * index_entry
-                + g.values()
-                    .map(|v| v.capacity() * size_of::<Arc<Triple>>())
-                    .sum::<usize>()
-        };
-        let predicate_bytes = {
-            let g = self.predicate_index.read();
-            g.capacity() * index_entry
-                + g.values()
-                    .map(|v| v.capacity() * size_of::<Arc<Triple>>())
-                    .sum::<usize>()
-        };
-        let object_bytes = self.object_index.read().as_ref().map_or(0, |g| {
-            g.capacity() * index_entry
-                + g.values()
-                    .map(|v| v.capacity() * size_of::<Arc<Triple>>())
-                    .sum::<usize>()
-        });
-        let sp_bytes = {
-            let g = self.sp_index.read();
-            g.capacity() * composite_entry
-                + g.values()
-                    .map(|v| v.capacity() * size_of::<Arc<Triple>>())
-                    .sum::<usize>()
-        };
-        let po_bytes = {
-            let g = self.po_index.read();
-            g.capacity() * composite_entry
-                + g.values()
-                    .map(|v| v.capacity() * size_of::<Arc<Triple>>())
-                    .sum::<usize>()
-        };
-        let os_bytes = {
-            let g = self.os_index.read();
-            g.capacity() * composite_entry
-                + g.values()
-                    .map(|v| v.capacity() * size_of::<Arc<Triple>>())
-                    .sum::<usize>()
-        };
+        let subject_bytes = index_walk_bytes(&self.subject_index.read());
+        let predicate_bytes = index_walk_bytes(&self.predicate_index.read());
+        let object_bytes = self
+            .object_index
+            .read()
+            .as_ref()
+            .map_or(0, index_walk_bytes);
+        let sp_bytes = index_walk_bytes(&self.sp_index.read());
+        let po_bytes = index_walk_bytes(&self.po_index.read());
+        let os_bytes = index_walk_bytes(&self.os_index.read());
 
         let mut triples_and_indexes = triple_arc_bytes
             + triple_payload_bytes
@@ -862,7 +1109,7 @@ impl RdfStore {
                 && let Some(ops) = buffer.buffers.get(&tx)
             {
                 for op in ops {
-                    budget.check()?;
+                    budget.tick()?;
                     let (triple, present) = match op {
                         PendingOp::Insert(triple) => (triple, true),
                         PendingOp::Delete(triple) => (triple, false),
@@ -887,7 +1134,7 @@ impl RdfStore {
                 visit(triple, budget)
             })?;
             for (triple, present) in &net {
-                budget.check()?;
+                budget.tick()?;
                 if *present {
                     visit(triple, budget)?;
                 }
@@ -913,7 +1160,15 @@ impl RdfStore {
             return Ok(());
         };
         match keys {
-            [Some(s), Some(p), _] => {
+            // One lookup, however long the list of the subject and predicate.
+            [Some(s), Some(p), Some(o)] => {
+                let triples = budget.read(&self.triples)?;
+                match triples.get(&[s, p, o]) {
+                    Some(held) => visit(&held.0, budget),
+                    None => Ok(()),
+                }
+            }
+            [Some(s), Some(p), None] => {
                 let index = budget.read(&self.sp_index)?;
                 Self::visit_path_candidates(
                     index.get(&(s, p)).into_iter().flatten(),
@@ -999,7 +1254,7 @@ impl RdfStore {
         ) -> Result<(), crate::execution::operators::OperatorError>,
     ) -> Result<(), crate::execution::operators::OperatorError> {
         for triple in candidates {
-            budget.check()?; // Rejected candidates must still obey the deadline.
+            budget.tick()?; // Rejected candidates must still obey the deadline.
             if pattern.matches(triple) {
                 visit(triple, budget)?;
             }
@@ -1023,7 +1278,7 @@ impl RdfStore {
         match names {
             Some(names) => {
                 for name in names {
-                    budget.check()?;
+                    budget.tick()?;
                     if let Some(store) = graphs.get(name) {
                         visit(name, store, budget)?;
                     }
@@ -1031,7 +1286,7 @@ impl RdfStore {
             }
             None => {
                 for (name, store) in graphs.iter() {
-                    budget.check()?;
+                    budget.tick()?;
                     visit(name, store, budget)?;
                 }
             }
@@ -1119,6 +1374,10 @@ impl RdfStore {
         self.po_index.write().clear();
         self.os_index.write().clear();
         self.note_changes(usize::MAX);
+        // Every entry went: counted again by a walk of the emptied maps.
+        self.counted
+            .store(self.own_walk_bytes(), std::sync::atomic::Ordering::Relaxed);
+        self.settle();
     }
 
     /// Returns store statistics.
@@ -1229,6 +1488,8 @@ impl RdfStore {
         *self.ring.write() = ring.map(Arc::new);
         self.ring_stale
             .store(false, std::sync::atomic::Ordering::Relaxed);
+        drop(triples);
+        self.settle();
     }
 
     /// Sets the Ring Index directly (used during container deserialization).
@@ -1237,6 +1498,7 @@ impl RdfStore {
         *self.ring.write() = Some(Arc::new(ring));
         self.ring_stale
             .store(false, std::sync::atomic::Ordering::Relaxed);
+        self.settle();
     }
 
     // =========================================================================
@@ -1299,6 +1561,10 @@ impl RdfStore {
         *self.po_index.write() = po_idx;
         *self.os_index.write() = os_idx;
 
+        // Every index was built anew: counted by a walk of what the load built.
+        self.counted
+            .store(self.own_walk_bytes(), std::sync::atomic::Ordering::Relaxed);
+
         // Cache the freshly-computed statistics from the bulk load pass.
         *self.statistics_cache.write() = Some(Arc::new(stats.clone()));
         // The statistics count what the load left: no change since.
@@ -1319,6 +1585,7 @@ impl RdfStore {
             self.ring_stale
                 .store(false, std::sync::atomic::Ordering::Relaxed);
         }
+        self.settle();
 
         BulkLoadResult {
             triple_count: count,
@@ -1461,6 +1728,9 @@ impl RdfStore {
     fn named_graph_store(&self) -> RdfStore {
         let mut store = RdfStore::with_config(self.named_graph_config());
         store.dictionary = Arc::clone(&self.dictionary);
+        store.memory = Arc::clone(&self.memory);
+        store.owns_dictionary = false;
+        store.settle();
         store
     }
 
@@ -2135,24 +2405,56 @@ fn index_by<K: Eq + std::hash::Hash>(
     index: &mut Index<K>,
     triples: &[Arc<Triple>],
     key: impl Fn(&[Key; 3]) -> K,
-) {
+) -> usize {
+    let entries = index.capacity();
+    let mut lists = 0_usize;
     for triple in triples {
-        index
-            .entry(key(triple.raw_ids()))
-            .or_default()
-            .push(Arc::clone(triple));
+        let list = index.entry(key(triple.raw_ids())).or_default();
+        let before = list.capacity();
+        list.push(Arc::clone(triple));
+        lists += list.capacity() - before;
     }
+    // Differences, wrapping: a map's capacity can move either way.
+    index
+        .capacity()
+        .wrapping_sub(entries)
+        .wrapping_mul(index_entry_bytes::<K>())
+        .wrapping_add(lists * std::mem::size_of::<Arc<Triple>>())
+}
+
+/// The bytes a slot of an index takes: its key and its list.
+const fn index_entry_bytes<K>() -> usize {
+    std::mem::size_of::<(K, Vec<Arc<Triple>>)>()
+}
+
+/// The heap bytes of `index` by a walk of its lists: its slots and every
+/// list's room.
+fn index_walk_bytes<K>(index: &Index<K>) -> usize {
+    index.capacity() * index_entry_bytes::<K>()
+        + index
+            .values()
+            .map(|list| list.capacity() * std::mem::size_of::<Arc<Triple>>())
+            .sum::<usize>()
 }
 
 /// Takes the triple of ids `ids` out of the entry of `index` that `key`
 /// names, and the entry with it once empty.
-fn unindex<K: Eq + std::hash::Hash>(index: &mut Index<K>, key: &K, ids: &[Key; 3]) {
+fn unindex<K: Eq + std::hash::Hash>(index: &mut Index<K>, key: &K, ids: &[Key; 3]) -> usize {
+    let entries = index.capacity();
+    let mut freed = 0;
     if let Some(triples) = index.get_mut(key) {
         triples.retain(|triple| triple.raw_ids() != ids);
         if triples.is_empty() {
+            freed = triples.capacity() * std::mem::size_of::<Arc<Triple>>();
             index.remove(key);
         }
     }
+    // Differences, wrapping: a removal can lower the map's capacity.
+    index
+        .capacity()
+        .wrapping_sub(entries)
+        .wrapping_mul(index_entry_bytes::<K>())
+        .wrapping_sub(freed)
 }
 
 /// The statistics of `triples`: per predicate its triples and distinct

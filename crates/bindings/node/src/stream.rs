@@ -56,16 +56,37 @@ pub struct JsResultStream {
     /// Behind a `Mutex` because napi's async runtime can park tasks across
     /// threads, and `OwnedRowIterator` is not `Sync`.
     iter: Arc<Mutex<Option<OwnedRowIterator>>>,
+    /// Where the statement raises its warnings, read without the iterator's
+    /// lock.
+    warnings: Arc<grafeo_common::utils::warning::WarningSink>,
+    /// A session stream's hold on its session's statement slot, let go of
+    /// when the stream is read to the end or closed (or dropped).
+    permit: Arc<Mutex<Option<crate::session::StatementPermit>>>,
 }
 
 impl JsResultStream {
     pub(crate) fn new(database: Arc<RwLock<GrafeoDB>>, stream: OwnedResultStream) -> Self {
         let columns = Arc::new(stream.columns().to_vec());
+        let warnings = stream.warning_sink();
         Self {
             _database: database,
             columns,
             iter: Arc::new(Mutex::new(Some(stream.into_row_iter()))),
+            warnings,
+            permit: Arc::new(Mutex::new(None)),
         }
+    }
+
+    /// A stream of a session, holding the session's statement slot until it
+    /// is read to the end or closed.
+    pub(crate) fn holding(
+        database: Arc<RwLock<GrafeoDB>>,
+        stream: OwnedResultStream,
+        permit: crate::session::StatementPermit,
+    ) -> Self {
+        let stream = Self::new(database, stream);
+        *stream.permit.lock() = Some(permit);
+        stream
     }
 }
 
@@ -75,6 +96,18 @@ impl JsResultStream {
     #[napi(getter)]
     pub fn columns(&self) -> Vec<String> {
         (*self.columns).clone()
+    }
+
+    /// The warnings the statement raised so far, ordered by code: its
+    /// translation's from the start, its run's as the rows that raise them
+    /// are pulled, all of them once `next()` returned `null`.
+    ///
+    /// # Stability: Experimental
+    ///
+    /// New in 0.6.2. See <https://grafeo.dev/stability/>.
+    #[napi(getter)]
+    pub fn warnings(&self) -> Vec<crate::query::QueryWarning> {
+        crate::query::js_warnings(&grafeo_bindings_common::warning::of_sink(&self.warnings))
     }
 
     /// Pulls the next row as a plain object, or `null` when the stream is
@@ -89,6 +122,7 @@ impl JsResultStream {
     pub async fn next(&self) -> Result<Option<JsonWithTerms>> {
         let iter = Arc::clone(&self.iter);
         let columns = Arc::clone(&self.columns);
+        let permit = Arc::clone(&self.permit);
 
         tokio::task::spawn_blocking(move || -> Result<Option<JsonWithTerms>> {
             let mut guard = iter.lock();
@@ -106,10 +140,12 @@ impl JsResultStream {
                 }
                 Some(Err(err)) => {
                     *guard = None;
+                    drop(permit.lock().take());
                     Err(NodeGrafeoError::from(err).into())
                 }
                 None => {
                     *guard = None;
+                    drop(permit.lock().take());
                     Ok(None)
                 }
             }
@@ -128,8 +164,10 @@ impl JsResultStream {
     #[napi]
     pub async fn close(&self) -> Result<()> {
         let iter = Arc::clone(&self.iter);
+        let permit = Arc::clone(&self.permit);
         tokio::task::spawn_blocking(move || {
             *iter.lock() = None;
+            drop(permit.lock().take());
         })
         .await
         .map_err(|e| napi::Error::from_reason(e.to_string()))

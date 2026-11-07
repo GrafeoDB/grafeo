@@ -19,11 +19,9 @@ thiserror.workspace = true
 serde.workspace = true
 bincode.workspace = true
 bytes.workspace = true
-byteorder.workspace = true
 
 # Concurrency
 parking_lot.workspace = true
-crossbeam = { workspace = true, optional = true }
 
 # Checksums (always needed for section directory CRC)
 crc32fast.workspace = true
@@ -50,8 +48,8 @@ required-features = ["wal"]
 
 [features]
 default = ["wal"]
-wal = ["memmap2", "tokio", "crossbeam"]
-async-storage = ["wal"]  # Deprecated since 0.6.1 with the engine feature of the same name; removed in 0.7.0
+wal = ["memmap2"]
+async-storage = ["wal", "tokio"]  # Deprecated since 0.6.1 with the engine feature of the same name; removed in 0.7.0
 grafeo-file = ["wal", "fs2"]
 tracing = ["dep:tracing", "grafeo-common/tracing"]
 testing-crash-injection = ["grafeo-common/testing-crash-injection"]

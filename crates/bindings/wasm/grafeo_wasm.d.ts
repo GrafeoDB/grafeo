@@ -82,6 +82,22 @@ export interface RawResult {
   boolean?: boolean;
   executionTimeMs?: number;
   counters: WriteCounters;
+  /**
+   * The warnings the statement raised, ordered by code: a deprecated form it
+   * wrote or ran, or a notice; empty when there were none. Experimental, new
+   * in 0.6.2.
+   */
+  warnings: QueryWarning[];
+}
+
+/** A warning a statement raised (see `RawResult.warnings`). */
+export interface QueryWarning {
+  /** Its GQLSTATUS code, of class `01` (for example `01X01`). */
+  code: string;
+  /** `'deprecation'` or `'notice'`. */
+  kind: string;
+  /** What it says, naming the replacement of a deprecated form. */
+  message: string;
 }
 
 /** What an upsert did with its rows. */

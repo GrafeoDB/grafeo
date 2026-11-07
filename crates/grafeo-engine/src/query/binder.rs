@@ -7,7 +7,7 @@
 //!
 //! Better to catch these errors early than waste time executing a broken query.
 
-use crate::query::plan::{AggregateFunction, BuiltinFunction, Callee};
+use crate::query::plan::{AggregateFunction, BuiltinFunction, Callee, NamedGraph};
 use crate::query::plan::{
     CreateElement, ExpandOp, FilterOp, LogicalExpression, LogicalOperator, LogicalPlan, NodeScanOp,
     Projection, ReturnItem, ReturnOp, TripleScanOp,
@@ -319,7 +319,23 @@ impl Binder {
                 }
                 Ok(())
             }
-            LogicalOperator::InNamedGraph(graph) => self.bind_operator(&graph.input),
+            LogicalOperator::InNamedGraph(graph) => {
+                self.bind_operator(&graph.input)?;
+                if let NamedGraph::Variable(variable) = &graph.graph
+                    && !self.context.contains(variable)
+                {
+                    self.context.add_variable(
+                        variable.clone(),
+                        VariableInfo {
+                            name: variable.clone(),
+                            data_type: LogicalType::Any,
+                            is_node: false,
+                            is_edge: false,
+                        },
+                    );
+                }
+                Ok(())
+            }
             LogicalOperator::Limit(limit) => self.bind_operator(&limit.input),
             LogicalOperator::Skip(skip) => self.bind_operator(&skip.input),
             LogicalOperator::Sort(sort) => {
@@ -466,6 +482,8 @@ impl Binder {
 
             // RDF/SPARQL operators
             LogicalOperator::TripleScan(scan) => self.bind_triple_scan(scan),
+            // Made while planning an `EXISTS`, after binding.
+            LogicalOperator::RowValues(_) => Ok(()),
             LogicalOperator::NamedGraphs(graphs) => {
                 if !self.context.contains(&graphs.variable) {
                     self.context.add_variable(
@@ -1289,19 +1307,32 @@ impl Binder {
                 }
             }
             LogicalOperator::Sort(s) => Self::register_subplan_columns(&s.input, ctx),
-            LogicalOperator::InNamedGraph(g) => Self::register_subplan_columns(&g.input, ctx),
-            LogicalOperator::Limit(l) => Self::register_subplan_columns(&l.input, ctx),
-            LogicalOperator::Skip(s) => Self::register_subplan_columns(&s.input, ctx),
-            // The branches of a UNION return the same columns.
-            LogicalOperator::Union(u) => {
-                if let Some(first) = u.inputs.first() {
-                    Self::register_subplan_columns(first, ctx);
+            LogicalOperator::InNamedGraph(g) => {
+                Self::register_subplan_columns(&g.input, ctx);
+                if let NamedGraph::Variable(variable) = &g.graph {
+                    ctx.add_variable(
+                        variable.clone(),
+                        VariableInfo {
+                            name: variable.clone(),
+                            data_type: LogicalType::Any,
+                            is_node: false,
+                            is_edge: false,
+                        },
+                    );
                 }
             }
+            LogicalOperator::Limit(l) => Self::register_subplan_columns(&l.input, ctx),
+            LogicalOperator::Skip(s) => Self::register_subplan_columns(&s.input, ctx),
             LogicalOperator::Distinct(d) => Self::register_subplan_columns(&d.input, ctx),
-            // The branches of an OTHERWISE return the same columns.
-            LogicalOperator::Otherwise(otherwise) => {
-                Self::register_subplan_columns(&otherwise.left, ctx);
+            // The branches of a set operation return the same columns (the translators check
+            // them).
+            LogicalOperator::Union(_)
+            | LogicalOperator::Except(_)
+            | LogicalOperator::Intersect(_)
+            | LogicalOperator::Otherwise(_) => {
+                if let Some(branch) = plan.set_operation_columns() {
+                    Self::register_subplan_columns(branch, ctx);
+                }
             }
             // A procedure call in a query returns the columns it yields, also
             // under the `WHERE` that follows its `YIELD`.
@@ -3927,7 +3958,6 @@ mod tests {
     #[test]
     fn test_bind_except_intersect_otherwise_walk_both_sides() {
         use crate::query::plan::{ExceptOp, IntersectOp, OtherwiseOp};
-
         for op in [
             LogicalOperator::Except(ExceptOp {
                 left: Box::new(LogicalOperator::NodeScan(NodeScanOp {

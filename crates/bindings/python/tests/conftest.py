@@ -23,6 +23,32 @@ try:
 except ImportError:
     GRAFEO_AVAILABLE = False
 
+# The names grafeo.features() can report: a `requires` mark naming another is a typo.
+KNOWN_FEATURES = frozenset(
+    {
+        "algos",
+        "arrow-export",
+        "cdc",
+        "cypher",
+        "embed",
+        "gql",
+        "graphql",
+        "gremlin",
+        "hybrid-search",
+        "jsonl-import",
+        "metrics",
+        "parquet-import",
+        "shacl",
+        "sparql",
+        "sql-pgq",
+        "storage",
+        "text-index",
+        "triple-store",
+        "vector-index",
+    }
+)
+BUILD_FEATURES = frozenset(grafeo.features()) if GRAFEO_AVAILABLE else frozenset()
+
 
 # Import fixtures from fixtures module
 try:
@@ -138,3 +164,24 @@ def pytest_configure(config):
     config.addinivalue_line("markers", "gremlin: marks tests requiring Gremlin support")
     config.addinivalue_line("markers", "graphql: marks tests requiring GraphQL support")
     config.addinivalue_line("markers", "sparql: marks tests requiring SPARQL support")
+    config.addinivalue_line(
+        "markers",
+        "requires(*features): skip unless the build has every feature named, "
+        "as grafeo.features() reports them",
+    )
+
+
+def pytest_collection_modifyitems(config, items):
+    """Skips a test marked `requires(...)` when this build lacks a feature it names."""
+    for item in items:
+        for mark in item.iter_markers(name="requires"):
+            unknown = set(mark.args) - KNOWN_FEATURES
+            if unknown or not mark.args:
+                raise pytest.UsageError(
+                    f"{item.nodeid}: requires() names no known feature: {sorted(unknown)}"
+                )
+            missing = [name for name in mark.args if name not in BUILD_FEATURES]
+            if missing:
+                item.add_marker(
+                    pytest.mark.skip(reason=f"grafeo built without {', '.join(missing)}")
+                )

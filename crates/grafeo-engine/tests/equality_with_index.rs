@@ -1,9 +1,9 @@
 //! `=` finds the same rows with and without a property index, whatever plan
 //! runs it (#535).
 //!
-//! The filter's `=` is lenient across kinds: a number equals a string it
-//! parses as (`'042' = 42`), an integer, a float and a decimal of one value
-//! are equal, and lists compare element by element. Numbers compare exactly
+//! The filter's `=`: an integer, a float and a decimal of one value are
+//! equal, a string equals no number whatever it spells (`'042' <> 42`, ISO/IEC
+//! 39075 19.3), and lists compare element by element. Numbers compare exactly
 //! (IEEE for floats: `0.1e0 + 0.2e0 <> 0.3e0`, `-0.0e0 = 0.0e0`, NaN equals
 //! nothing). A property index finds values by
 //! exact value, so every plan that looks a key up in it (the lookup of a
@@ -225,7 +225,8 @@ fn equality_finds_the_same_rows_with_and_without_an_index_in_every_plan() {
 fn the_reported_rows_are_found_with_an_index() {
     // The reproduction of #535: '42.0' and 0.1 + 0.2, keys from the row. The
     // float sum 0.1e0 + 0.2e0 is 0.30000000000000004, which `=` tells from
-    // 0.3e0; the exact decimal sum 0.1 + 0.2 is 0.3.
+    // 0.3e0; the exact decimal sum 0.1 + 0.2 is 0.3; the string '42.0' equals
+    // no number.
     for indexed in [false, true] {
         let db = GrafeoDB::new_in_memory();
         db.execute(
@@ -241,7 +242,14 @@ fn the_reported_rows_are_found_with_an_index() {
             "UNWIND [42.0e0, 0.3e0] AS key MATCH (d:Doc) WHERE d.p = key RETURN d.k",
             None,
         );
-        assert_eq!(found, BTreeSet::from([3, 88]), "indexed: {indexed}");
+        assert_eq!(found, BTreeSet::from([88]), "indexed: {indexed}");
+        let text = keys(
+            &db,
+            "UNWIND ['42.0', 0.3e0] AS key MATCH (d:Doc) WHERE d.p = key RETURN d.k",
+            None,
+        );
+        // '42.0' finds the stored string only; 0.3e0 still finds the decimal.
+        assert_eq!(text, BTreeSet::from([3, 88]), "indexed: {indexed}");
     }
 }
 
@@ -309,7 +317,8 @@ fn id_finds_the_node_its_key_equals() {
         seek
     };
     assert_eq!(k_of(&third.to_string()), BTreeSet::from([2]));
-    assert_eq!(k_of(&format!("'{third}'")), BTreeSet::from([2]));
+    // A string equals no number, an id included (GA04).
+    assert_eq!(k_of(&format!("'{third}'")), BTreeSet::new());
     assert_eq!(k_of(&format!("{third}.0")), BTreeSet::from([2]));
     assert_eq!(k_of(&format!("'{third}x'")), BTreeSet::new());
     assert_eq!(k_of("NULL"), BTreeSet::new());

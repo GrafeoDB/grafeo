@@ -66,6 +66,8 @@ pub struct GrafeoResult {
     pub(crate) counters: grafeo_engine::database::WriteCounters,
     /// What the result holds (see `grafeo_result_kind`).
     pub(crate) kind: grafeo_engine::database::ResultKind,
+    /// The warnings the statement raised (see `grafeo_result_warning_count`).
+    pub(crate) warnings: Vec<crate::warning::CWarning>,
 }
 
 /// Structured node returned by CRUD operations.

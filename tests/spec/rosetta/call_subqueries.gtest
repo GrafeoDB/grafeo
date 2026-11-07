@@ -393,6 +393,7 @@ tests:
   # RETURN * returns the subquery's own p: two labels times five people.
   - name: return_star_after_a_procedure_call
     variants:
+      gql: "CALL db.labels() YIELD label CALL { WITH label MATCH (p:Person) RETURN * } RETURN count(*) AS c"
       cypher: "CALL db.labels() YIELD label CALL { WITH label MATCH (p:Person) RETURN * } RETURN count(*) AS c"
     expect:
       rows:

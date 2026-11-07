@@ -13,10 +13,10 @@ crate-type = ["cdylib", "staticlib"]
 doc = false
 
 [dependencies]
-grafeo-engine = { path = "../../grafeo-engine" }
+grafeo-engine = { path = "../../grafeo-engine", default-features = false }
 grafeo-core = { path = "../../grafeo-core" }
 grafeo-common = { path = "../../grafeo-common" }
-grafeo-bindings-common = { path = "../common" }
+grafeo-bindings-common = { path = "../common", default-features = false }
 
 serde_json = { version = "1.0", features = ["preserve_order", "arbitrary_precision"] }
 parking_lot.workspace = true
@@ -32,23 +32,23 @@ sql-pgq = ["grafeo-engine/sql-pgq"]
 vector-index = ["grafeo-engine/vector-index"]
 text-index = ["grafeo-engine/text-index"]
 hybrid-search = ["grafeo-engine/hybrid-search"]
-cdc = ["grafeo-engine/cdc"]
+cdc = ["grafeo-engine/cdc", "grafeo-bindings-common/cdc"]
 algos = ["grafeo-engine/algos"]
 triple-store = ["grafeo-engine/triple-store", "grafeo-engine/regex"]
 compact-store = []  # Deprecated since 0.6.0: enables nothing (a build that opens files reads a compacted 0.5.x one); removed in 0.7.0
 jsonl-import = ["grafeo-engine/jsonl-import"]
 parquet-import = ["grafeo-engine/parquet-import"]
 languages = ["gql", "cypher", "sparql", "gremlin", "graphql", "sql-pgq"]
-ai = ["vector-index", "text-index", "hybrid-search", "cdc"]
+ai = ["gql", "vector-index", "text-index", "hybrid-search", "cdc"]
 storage = ["grafeo-engine/storage"]
 # Persona-based profiles
 lpg = ["gql", "cypher", "gremlin", "sql-pgq", "storage", "grafeo-engine/regex"]
 rdf = ["triple-store", "gql", "sparql", "graphql", "storage", "grafeo-engine/regex"]
-analytics = ["algos", "vector-index", "text-index", "hybrid-search", "jsonl-import", "parquet-import"]
+analytics = ["gql", "algos", "vector-index", "text-index", "hybrid-search", "jsonl-import", "parquet-import"]
 edge = ["gql", "grafeo-engine/regex-lite"]
 # Deployment-based profiles (deprecated)
-embedded = ["gql", "ai", "algos", "grafeo-engine/parallel", "grafeo-engine/regex", "grafeo-engine/grafeo-file"]
-full = ["languages", "ai", "algos", "triple-store"]
+embedded = ["gql", "storage", "ai", "algos", "grafeo-engine/parallel", "grafeo-engine/regex", "grafeo-engine/grafeo-file"]
+full = ["languages", "ai", "algos", "triple-store", "storage", "grafeo-engine/parallel"]
 
 [lints]
 workspace = true

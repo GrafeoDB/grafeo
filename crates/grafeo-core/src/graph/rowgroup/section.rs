@@ -2400,13 +2400,28 @@ pub fn read_lpg_section(source: &dyn SectionSource) -> Result<(u32, Vec<LoadedGr
 /// # Errors
 ///
 /// As [`read_lpg_section`].
+pub fn read_lpg_section_with_backward_edges(
+    source: &dyn SectionSource,
+    backward_edges: bool,
+) -> Result<(u32, Vec<LoadedGraph>)> {
+    read_lpg_section_into(source, backward_edges, None)
+}
+
+/// Reads an `LPG_STORE` section of version 4 as
+/// [`read_lpg_section_with_backward_edges`] does, the bytes of each chunk
+/// it keeps cold holding a grant from `memory` for as long as they live.
+///
+/// # Errors
+///
+/// As [`read_lpg_section`].
 #[expect(
     clippy::too_many_lines,
     reason = "one pass over the chunks, a check per kind"
 )]
-pub fn read_lpg_section_with_backward_edges(
+pub(super) fn read_lpg_section_into(
     source: &dyn SectionSource,
     backward_edges: bool,
+    memory: Option<&std::sync::Arc<grafeo_common::memory::buffer::BufferManager>>,
 ) -> Result<(u32, Vec<LoadedGraph>)> {
     if source.section_version() != LPG_SECTION_VERSION {
         return Err(Error::Serialization(format!(
@@ -2638,6 +2653,12 @@ pub fn read_lpg_section_with_backward_edges(
                     }
                 }
                 if cold {
+                    let table = if node_table {
+                        grafeo_common::change::Table::Nodes
+                    } else {
+                        grafeo_common::change::Table::Edges
+                    };
+                    let thaws = graph.inner.account.sink(table);
                     let columns = if node_table {
                         graph
                             .inner
@@ -2655,12 +2676,13 @@ pub fn read_lpg_section_with_backward_edges(
                     let Some(columns) = columns else {
                         return Err(refuse(format!("group {group} holds no rows")));
                     };
-                    columns.add_cold(
+                    columns.add_cold_reporting(
                         chunk.column_id,
                         first_row,
                         chunk.row_count,
                         chunk.codec,
-                        bytes,
+                        super::account::granted_chunk(bytes, memory),
+                        Some(thaws),
                     );
                 }
             }
@@ -3036,6 +3058,9 @@ pub fn read_lpg_section_with_backward_edges(
         if !graph.inner.listed.is_empty() {
             store.note_listed();
         }
+        // The load bypasses `apply`: its account is one walk of what it
+        // loaded (C22).
+        graph.inner.recount();
         *store.inner.write() = graph.inner;
         store
             .next_node_id
@@ -3214,8 +3239,10 @@ impl Section for RowGroupStoreSection {
         self.dirty.store(false, Ordering::Release);
     }
 
+    /// The bytes the store's grants hold, its named graphs' with it: what the
+    /// account counts, without a walk.
     fn memory_usage(&self) -> usize {
-        self.store.heap_bytes()
+        self.store.granted_bytes()
     }
 }
 

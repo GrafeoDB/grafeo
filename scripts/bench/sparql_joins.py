@@ -163,7 +163,7 @@ def paired_ms(first, second, runs=PAIR_RUNS):
     second()
     times = ([], [])
     for _ in range(runs):
-        for func, out in zip((first, second), times):
+        for func, out in zip((first, second), times, strict=True):
             start = time.perf_counter()
             func()
             out.append((time.perf_counter() - start) * 1000)
@@ -402,7 +402,7 @@ def run():
     def pair(names, queries, want):
         first = checked(names[0], queries[0], want[0])
         second = checked(names[1], queries[1], want[1])
-        for name, ms in zip(names, paired_ms(first, second)):
+        for name, ms in zip(names, paired_ms(first, second), strict=True):
             results[name] = {"ms": ms}
 
     quarter = len(range(0, SUBJECTS - 1, 4))

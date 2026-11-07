@@ -23,7 +23,7 @@
 //! | A FIRST frame whose `synced_lsn` lies past its own position | any | damage |
 //! | A whole frame (checksum right) with a flag of a later release | any | refused: the WAL needs a newer version, also with salvage |
 //! | A segment header of a later version or with an incompatible flag of a later release | any | refused: the WAL needs a newer version, also with salvage |
-//! | A segment shorter than its header, or zeros from its first byte to its last | newest segment | cut off while it was created: removed by the cut |
+//! | A segment shorter than its header, or zeros from its first byte to its last | newest segment | refused as damage: a segment gets its name only once its header is synced (#725), so it was emptied, or left by a release before 0.6.2 that crashed while creating it; `salvage` sets it aside |
 //! | A header of zeros with other bytes behind it | any | refused: the header is damaged (it is synced before any frame) |
 //!
 //! With `salvage`, damage and gaps end the scan at the last complete group
@@ -36,6 +36,12 @@
 //! it is read once; a larger group is checked frame by frame and read again
 //! frame by frame when its payloads are asked for. The scan holds one frame
 //! plus that buffer.
+//!
+//! [`WalScan::open_regions`] scans segments that are regions of larger
+//! files, one after another (an incremental backup holds its segments so),
+//! with the same checks: each region's length is a hard end that no read
+//! passes (#673). Such a scan has nothing to cut: it never salvages, and
+//! [`ScanEnd::cut_torn_tail`] refuses it.
 
 #![deny(clippy::let_underscore_must_use)]
 
@@ -143,28 +149,35 @@ pub struct ScanEnd {
     pub end_lsn: u64,
     /// What follows that end, if anything.
     pub tail: Option<Tail>,
-    /// The newest segment, when its header was cut off while it was created:
-    /// it holds no frame, and the cut removes it.
-    pub unfinished_segment: Option<PathBuf>,
     /// Entries of the WAL directory that are neither segments nor known
     /// files. They are reported and never deleted.
     pub unknown_files: Vec<PathBuf>,
     dir: PathBuf,
+    /// The scan read regions of files ([`WalScan::open_regions`]): there is
+    /// no WAL directory to cut.
+    regions: bool,
 }
 
 impl ScanEnd {
     /// Cuts what follows the last complete group, for a read-write open: a
-    /// torn tail is truncated, salvaged damage is copied and moved into a
-    /// new `damaged-<lsn>/` directory first, and an unfinished newest
-    /// segment is removed. Each step is synced; a crash in between leaves a
-    /// log that scans to the same end again, and bytes set aside stay where
-    /// they were put.
+    /// torn tail is truncated, and salvaged damage (an emptied newest
+    /// segment included) is copied and moved into a new `damaged-<lsn>/`
+    /// directory first. Each step is synced; a crash in between leaves a log
+    /// that scans to the same end again, and bytes set aside stay where they
+    /// were put.
     ///
     /// # Errors
     ///
     /// Returns [`WalError::Io`] when a file cannot be truncated, copied,
-    /// moved, removed or synced.
+    /// moved, removed or synced, and [`WalError::RegionSource`] for a scan
+    /// of regions ([`WalScan::open_regions`]), whose files are not a WAL.
     pub fn cut_torn_tail(&self) -> Result<(), WalError> {
+        if self.regions {
+            return Err(WalError::RegionSource {
+                path: self.dir.clone(),
+                reason: "a scan of regions of files has no torn tail to cut".to_string(),
+            });
+        }
         if let Some(tail) = &self.tail {
             if tail.kind == TailKind::Damaged {
                 set_aside(&self.dir, tail)?;
@@ -173,24 +186,13 @@ impl ScanEnd {
                 truncate_segment(segment, tail.offset)?;
             }
         }
-        if let Some(path) = &self.unfinished_segment {
-            maybe_crash("wal:before_remove_unfinished");
-            maybe_fail("wal:truncate").map_err(|error| WalError::injected(path, error))?;
-            match std::fs::remove_file(path) {
-                Ok(()) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(source) => return Err(WalError::io(path, source)),
-            }
-            maybe_crash("wal:after_remove_unfinished");
-            sync_directory(&self.dir)?;
-        }
         Ok(())
     }
 
     /// Whether the scan found nothing to cut.
     #[must_use]
     pub fn is_clean(&self) -> bool {
-        self.tail.is_none() && self.unfinished_segment.is_none()
+        self.tail.is_none()
     }
 }
 
@@ -279,9 +281,65 @@ fn is_known_entry(path: &Path) -> bool {
         .is_some_and(|name| name == super::BACKUP_CURSOR_FILE || name.starts_with("damaged-"))
 }
 
+/// Where the bytes of one segment lie: a segment file of a WAL directory,
+/// or a region of a larger file (an incremental backup holds its segments
+/// one after another).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SegmentSource {
+    /// The file.
+    pub path: PathBuf,
+    /// Where the segment starts in the file: 0 for a segment file.
+    pub base: u64,
+    /// How long the segment is, a hard end no read passes. `None` for a
+    /// segment file: the file's current end at each read.
+    pub length: Option<u64>,
+}
+
+impl SegmentSource {
+    /// The segment file at `path`.
+    #[must_use]
+    pub fn file(path: impl Into<PathBuf>) -> Self {
+        Self {
+            path: path.into(),
+            base: 0,
+            length: None,
+        }
+    }
+
+    /// The `length` bytes of the file at `path` from `base` on.
+    #[must_use]
+    pub fn region(path: impl Into<PathBuf>, base: u64, length: u64) -> Self {
+        Self {
+            path: path.into(),
+            base,
+            length: Some(length),
+        }
+    }
+
+    /// The file, at `offset` bytes into the segment, and how many bytes of
+    /// the segment follow there.
+    fn open_at(&self, offset: u64) -> Result<(File, u64), WalError> {
+        let io = |source| WalError::io(&self.path, source);
+        let mut file = File::open(&self.path).map_err(io)?;
+        let length = match self.length {
+            Some(length) => length,
+            None => file.metadata().map_err(io)?.len(),
+        };
+        let start = self.base.checked_add(offset).ok_or(WalError::LsnOverflow)?;
+        file.seek(SeekFrom::Start(start)).map_err(io)?;
+        Ok((file, length.saturating_sub(offset)))
+    }
+
+    /// The offset in the file of the byte `offset` bytes into the segment,
+    /// for messages.
+    fn file_offset(&self, offset: u64) -> u64 {
+        self.base.saturating_add(offset)
+    }
+}
+
 /// A segment the scan reads.
 struct ScanSegment {
-    path: PathBuf,
+    source: SegmentSource,
     first_lsn: u64,
     /// The end of the segment as its length says.
     end_lsn: u64,
@@ -330,8 +388,9 @@ pub struct WalScan {
     /// Where the scan starts: the checkpoint LSN, where a group must start.
     start_lsn: u64,
     ending: Option<Ending>,
-    unfinished_segment: Option<PathBuf>,
     unknown_files: Vec<PathBuf>,
+    /// The segments are regions of files ([`open_regions`](Self::open_regions)).
+    regions: bool,
 }
 
 impl WalScan {
@@ -368,8 +427,8 @@ impl WalScan {
             position: from_lsn,
             start_lsn: from_lsn,
             ending: None,
-            unfinished_segment: None,
             unknown_files: Vec::new(),
+            regions: false,
         };
         let listing = match list_wal_directory(&scan.dir) {
             Ok(listing) => listing,
@@ -385,6 +444,8 @@ impl WalScan {
             .collect();
         let newest = listing.segments.len().checked_sub(1);
         let mut used = Vec::new();
+        // A newest segment that was emptied, which salvage sets aside.
+        let mut emptied: Option<(PathBuf, String)> = None;
         for (index, (first_lsn, path)) in listing.segments.into_iter().enumerate() {
             let (bytes, length) = read_header_bytes(&path)?;
             if header_is_blank(&bytes) {
@@ -396,7 +457,20 @@ impl WalScan {
                     });
                 }
                 if is_unfinished_segment(&path)? {
-                    scan.unfinished_segment = Some(path);
+                    // The writer gives a segment its name only once its
+                    // header is synced (#725), the first one included, so a
+                    // blank one was emptied, and its groups are lost. A
+                    // release before 0.6.2 could leave one when it crashed
+                    // while creating it: salvage sets it aside.
+                    let reason = "the newest segment has no complete header: a segment gets \
+                                  its name only once its header is synced, so it was emptied, \
+                                  or left by a release before 0.6.2 that crashed while \
+                                  creating it; open with wal_salvage to set it aside"
+                        .to_string();
+                    if !options.salvage {
+                        return Err(WalError::SegmentHeader { path, reason });
+                    }
+                    emptied = Some((path, reason));
                     continue;
                 }
                 return Err(WalError::SegmentHeader {
@@ -422,26 +496,167 @@ impl WalScan {
                     &path,
                 )?;
                 used.push(ScanSegment {
-                    path,
+                    source: SegmentSource::file(path),
                     first_lsn,
                     end_lsn,
                     cipher,
                 });
             }
         }
+        scan.chain(used, emptied)
+    }
+
+    /// Opens a scan of `segments` from `options.from_lsn`: segments that
+    /// are regions of files, in log order ([`SegmentSource::region`]), as an
+    /// incremental backup holds them one after another. Each region's
+    /// header gives its first LSN. A region whose log the regions before it
+    /// already hold whole is skipped: a backup retried after a failed one
+    /// copies the same segments again. The checks of [`open`](Self::open)
+    /// follow: the header, the
+    /// database, the key, and that the segments from `from_lsn` on form one
+    /// chain. A region's length is a hard end: no read passes into the
+    /// bytes after it.
+    ///
+    /// Such a scan never salvages, and its [`ScanEnd::cut_torn_tail`]
+    /// refuses: a torn tail is for the caller to report.
+    ///
+    /// # Errors
+    ///
+    /// - [`WalError::RegionSource`] for `options.salvage`, a region shorter
+    ///   than a segment header, or a region that overlaps the log of the
+    ///   regions before it only in part.
+    /// - The errors of [`open`](Self::open) for a header, a database, a key
+    ///   or a chain that does not fit, and [`WalError::Io`] when a file
+    ///   cannot be read.
+    pub fn open_regions(
+        segments: Vec<SegmentSource>,
+        options: ScanOptions,
+    ) -> Result<Self, WalError> {
+        let from_lsn = options.from_lsn;
+        let dir = segments
+            .first()
+            .map(|source| source.path.clone())
+            .unwrap_or_default();
+        if options.salvage {
+            return Err(WalError::RegionSource {
+                path: dir,
+                reason: "a scan of regions does not salvage".to_string(),
+            });
+        }
+        let scan = Self {
+            dir,
+            database_id: options.database_id,
+            salvage: false,
+            group_buffer_bytes: options.group_buffer_bytes,
+            segments: Vec::new(),
+            beyond_gap: None,
+            index: 0,
+            reader: None,
+            position: from_lsn,
+            start_lsn: from_lsn,
+            ending: None,
+            unknown_files: Vec::new(),
+            regions: true,
+        };
+        let mut used = Vec::new();
+        // Where the log the regions so far hold ends.
+        let mut covered: Option<u64> = None;
+        for source in segments {
+            let length = source.length.unwrap_or(0);
+            if length < SEGMENT_HEADER_BYTES as u64 {
+                return Err(WalError::RegionSource {
+                    path: source.path,
+                    reason: format!(
+                        "the segment at offset {} holds {length} bytes, fewer than a segment \
+                         header",
+                        source.base
+                    ),
+                });
+            }
+            let (file, _) = source.open_at(0)?;
+            let mut bytes = Vec::with_capacity(SEGMENT_HEADER_BYTES);
+            file.take(SEGMENT_HEADER_BYTES as u64)
+                .read_to_end(&mut bytes)
+                .map_err(|error| WalError::io(&source.path, error))?;
+            let header = SegmentHeader::decode(&bytes, &source.path)?;
+            let first_lsn = header.first_lsn;
+            check_identity(&header, first_lsn, options.database_id, &source.path)?;
+            let end_lsn = first_lsn
+                .checked_add(length - SEGMENT_HEADER_BYTES as u64)
+                .ok_or(WalError::LsnOverflow)?;
+            if let Some(covered_end) = covered
+                && first_lsn < covered_end
+            {
+                // A sealed segment never changes, so a later backup that
+                // copied the log from the same cursor again (a retry after
+                // a failed one) holds the same segments: the copy read first
+                // stands. One that reaches past them is no such copy.
+                if end_lsn <= covered_end {
+                    continue;
+                }
+                return Err(WalError::RegionSource {
+                    path: source.path,
+                    reason: format!(
+                        "the segment at offset {} holds LSN {first_lsn} to {end_lsn}, which \
+                         overlaps the log the segments before it hold (to {covered_end}) only \
+                         in part",
+                        source.base
+                    ),
+                });
+            }
+            covered = Some(covered.map_or(end_lsn, |covered_end| covered_end.max(end_lsn)));
+            if end_lsn > from_lsn || first_lsn >= from_lsn {
+                let cipher = segment_cipher(
+                    options.cipher_for_salt.as_ref(),
+                    &header,
+                    &stored_key_check_aad(&bytes),
+                    &source.path,
+                )?;
+                used.push(ScanSegment {
+                    source,
+                    first_lsn,
+                    end_lsn,
+                    cipher,
+                });
+            }
+        }
+        scan.chain(used, None)
+    }
+
+    /// Takes `used`, the segments from the scan's start on, after the
+    /// checks of their gap: refused, or with salvage the segments after it
+    /// set aside, with `emptied`, an emptied newest segment salvage sets
+    /// aside too.
+    fn chain(
+        mut self,
+        mut used: Vec<ScanSegment>,
+        emptied: Option<(PathBuf, String)>,
+    ) -> Result<Self, WalError> {
+        let from_lsn = self.start_lsn;
         if let Some((keep, reason)) = find_gap(&used, from_lsn) {
-            if !options.salvage {
+            if !self.salvage {
                 return Err(WalError::Gap { reason });
             }
-            let beyond = used.drain(keep..).map(|segment| segment.path).collect();
-            scan.beyond_gap = Some((beyond, reason));
+            let beyond = used
+                .drain(keep..)
+                .map(|segment| segment.source.path)
+                .collect();
+            self.beyond_gap = Some((beyond, reason));
+        }
+        // Salvage sets an emptied newest segment aside with what follows a
+        // gap, if any.
+        if let Some((path, reason)) = emptied {
+            match &mut self.beyond_gap {
+                Some((beyond, _)) => beyond.push(path),
+                None => self.beyond_gap = Some((vec![path], reason)),
+            }
         }
         if let Some(first) = used.first() {
-            scan.position = from_lsn.max(first.first_lsn);
+            self.position = from_lsn.max(first.first_lsn);
         }
-        scan.start_lsn = scan.position;
-        scan.segments = used;
-        Ok(scan)
+        self.start_lsn = self.position;
+        self.segments = used;
+        Ok(self)
     }
 
     /// The next complete group, or `None` at the end of the log (see
@@ -524,9 +739,10 @@ impl WalScan {
     /// The error for a whole frame at `lsn` in the current segment that sets
     /// a flag of a later release.
     fn unsupported(&self, lsn: u64, reason: String) -> WalError {
+        let source = &self.segments[self.index].source;
         WalError::UnsupportedFrame {
-            path: self.segments[self.index].path.clone(),
-            offset: self.offset_of(lsn),
+            path: source.path.clone(),
+            offset: source.file_offset(self.offset_of(lsn)),
             lsn,
             reason,
         }
@@ -546,9 +762,9 @@ impl WalScan {
         Ok(ScanEnd {
             end_lsn: ending.end_lsn,
             tail: ending.tail,
-            unfinished_segment: self.unfinished_segment.take(),
             unknown_files: std::mem::take(&mut self.unknown_files),
             dir: self.dir,
+            regions: self.regions,
         })
     }
 
@@ -562,7 +778,7 @@ impl WalScan {
             return Ok(false);
         };
         let offset = SEGMENT_HEADER_BYTES as u64 + (self.position - segment.first_lsn);
-        self.reader = Some(SegmentReader::open(&segment.path, offset)?);
+        self.reader = Some(SegmentReader::open(&segment.source, offset)?);
         Ok(true)
     }
 
@@ -579,7 +795,7 @@ impl WalScan {
             .expect("a frame is read from an open segment");
         read_frame_from(
             reader,
-            &segment.path,
+            &segment.source.path,
             self.position,
             segment.cipher.as_deref(),
             self.database_id,
@@ -679,7 +895,7 @@ impl WalScan {
         let source = if large {
             let segment = &self.segments[self.index];
             GroupSource::Reread(Reread {
-                path: segment.path.clone(),
+                source: segment.source.clone(),
                 offset: group_offset,
                 lsn: group_start,
                 cipher: segment.cipher.clone(),
@@ -740,16 +956,17 @@ impl WalScan {
     ) -> Result<Option<GroupFrames>, WalError> {
         let bad_offset = self.offset_of(bad_lsn);
         if !self.salvage {
+            let source = &self.segments[self.index].source;
             return Err(WalError::Damaged {
-                path: self.segments[self.index].path.clone(),
-                offset: bad_offset,
+                path: source.path.clone(),
+                offset: source.file_offset(bad_offset),
                 lsn: bad_lsn,
                 reason,
             });
         }
         let mut set_aside: Vec<PathBuf> = self.segments[self.index + 1..]
             .iter()
-            .map(|segment| segment.path.clone())
+            .map(|segment| segment.source.path.clone())
             .collect();
         if let Some((beyond, _)) = self.beyond_gap.take() {
             set_aside.extend(beyond);
@@ -777,7 +994,7 @@ impl WalScan {
             end_lsn: group_start,
             tail: Some(Tail {
                 kind,
-                segment: Some(self.segments[self.index].path.clone()),
+                segment: Some(self.segments[self.index].source.path.clone()),
                 offset,
                 lsn: group_start,
                 reason,
@@ -792,7 +1009,7 @@ impl WalScan {
         let tail = self.beyond_gap.take().map(|(set_aside, reason)| {
             let (segment, offset) = match self.segments.last() {
                 Some(segment) => (
-                    Some(segment.path.clone()),
+                    Some(segment.source.path.clone()),
                     SEGMENT_HEADER_BYTES as u64 + (self.position - segment.first_lsn),
                 ),
                 None => (None, 0),
@@ -824,16 +1041,21 @@ impl WalScan {
     fn later_synced_group(&self, bad_lsn: u64) -> Result<Option<(u64, u64)>, WalError> {
         const WINDOW: usize = 1 << 20;
         let segment = &self.segments[self.index];
-        let path = &segment.path;
+        let path = &segment.source.path;
         let io = |source| WalError::io(path, source);
-        let mut file = File::open(path).map_err(io)?;
-        let length = file.metadata().map_err(io)?.len();
+        // The segment's bytes end at `length`: a region's next segment
+        // follows it in the file, and no read passes into it.
+        let (mut file, length) = segment.source.open_at(0)?;
+        let base = segment.source.base;
         let header_bytes = FRAME_HEADER_BYTES as u64;
         let mut window = vec![0u8; WINDOW + FRAME_HEADER_BYTES];
         let mut payload = Vec::new();
         let mut candidate = self.offset_of(bad_lsn) + 1;
         while candidate + header_bytes <= length {
-            let available = read_at(&mut file, candidate, &mut window).map_err(io)?;
+            let in_segment = usize::try_from(length - candidate).unwrap_or(usize::MAX);
+            let wanted = window.len().min(in_segment);
+            let available =
+                read_at(&mut file, base + candidate, &mut window[..wanted]).map_err(io)?;
             let mut examined = 0;
             let mut next = None;
             while examined < WINDOW && examined + FRAME_HEADER_BYTES <= available {
@@ -856,7 +1078,7 @@ impl WalScan {
                 {
                     continue;
                 }
-                read_payload_at(&mut file, at + header_bytes, declared, &mut payload)
+                read_payload_at(&mut file, base + at + header_bytes, declared, &mut payload)
                     .map_err(io)?;
                 if !FrameHeader::stored_checksum_matches(bytes, &payload) {
                     continue;
@@ -866,7 +1088,7 @@ impl WalScan {
                     Err(reason) => {
                         return Err(WalError::UnsupportedFrame {
                             path: path.clone(),
-                            offset: at,
+                            offset: base + at,
                             lsn,
                             reason,
                         });
@@ -904,7 +1126,7 @@ fn find_gap(segments: &[ScanSegment], from_lsn: u64) -> Option<(usize, String)> 
             format!(
                 "the log after the checkpoint at LSN {from_lsn} is missing: the first segment {} \
                  starts at LSN {}",
-                first.path.display(),
+                first.source.path.display(),
                 first.first_lsn
             ),
         ));
@@ -915,9 +1137,9 @@ fn find_gap(segments: &[ScanSegment], from_lsn: u64) -> Option<(usize, String)> 
                 index + 1,
                 format!(
                     "the segment {} ends at LSN {}, but the next segment {} starts at LSN {}",
-                    pair[0].path.display(),
+                    pair[0].source.path.display(),
                     pair[0].end_lsn,
-                    pair[1].path.display(),
+                    pair[1].source.path.display(),
                     pair[1].first_lsn
                 ),
             )
@@ -991,14 +1213,13 @@ struct SegmentReader {
 }
 
 impl SegmentReader {
-    fn open(path: &Path, offset: u64) -> Result<Self, WalError> {
-        let io = |source| WalError::io(path, source);
-        let mut file = File::open(path).map_err(io)?;
-        let length = file.metadata().map_err(io)?.len();
-        file.seek(SeekFrom::Start(offset)).map_err(io)?;
+    /// Reads `source` from `offset` bytes into the segment on: never past
+    /// its end, which every frame read checks against `remaining` first.
+    fn open(source: &SegmentSource, offset: u64) -> Result<Self, WalError> {
+        let (file, remaining) = source.open_at(offset)?;
         Ok(Self {
             reader: BufReader::with_capacity(64 * 1024, file),
-            remaining: length.saturating_sub(offset),
+            remaining,
         })
     }
 
@@ -1093,8 +1314,8 @@ enum GroupSource {
 
 /// A large group read again from its segment.
 struct Reread {
-    path: PathBuf,
-    /// The file offset of the next frame.
+    source: SegmentSource,
+    /// The offset of the next frame in the segment.
     offset: u64,
     /// The log position of the next frame.
     lsn: u64,
@@ -1114,18 +1335,18 @@ impl Reread {
         payload: &mut Vec<u8>,
     ) -> Result<(), WalError> {
         if self.reader.is_none() {
-            self.reader = Some(SegmentReader::open(&self.path, self.offset)?);
+            self.reader = Some(SegmentReader::open(&self.source, self.offset)?);
         }
         let reader = self.reader.as_mut().expect("the reader was just opened");
         let changed = |reason: String| WalError::Damaged {
-            path: self.path.clone(),
-            offset: self.offset,
+            path: self.source.path.clone(),
+            offset: self.source.file_offset(self.offset),
             lsn: self.lsn,
             reason: format!("the group changed since it was scanned: {reason}"),
         };
         let header = match read_frame_from(
             reader,
-            &self.path,
+            &self.source.path,
             self.lsn,
             self.cipher.as_deref(),
             self.database_id,
@@ -1844,27 +2065,63 @@ mod tests {
         );
     }
 
+    /// A newest segment emptied (no bytes, a header of zeros, or its magic
+    /// alone) where the previous segment ends is damage: since 0.6.2 a writer
+    /// never leaves one (#725). Without salvage the scan refuses it, naming the
+    /// file and `wal_salvage`; with salvage the scan ends where the previous
+    /// segment ends, the cut moves the file whole into a `damaged-*`
+    /// directory, and the log then scans clean and is written on.
     #[test]
-    fn a_segment_cut_off_while_it_was_created_is_removed_by_the_cut() {
+    fn an_emptied_newest_segment_is_refused_and_salvage_sets_it_aside() {
         for contents in [Vec::new(), vec![0u8; 128], b"GRAFWAL\0".to_vec()] {
             let dir = tempfile::tempdir().unwrap();
             let wal = Wal::open(dir.path(), writer_options(0)).unwrap();
             let end = write_group(&wal, 1, &["Alix"]);
             drop(wal);
-            let unfinished = segment_path(dir.path(), end.end_lsn);
-            std::fs::write(&unfinished, &contents).unwrap();
-            let (groups, scanned) = scan_all(dir.path(), ScanOptions::new(DATABASE, 0)).unwrap();
-            assert_eq!(groups, [group(1, &["Alix"])]);
-            assert_eq!(scanned.end_lsn, end.end_lsn);
-            assert_eq!(
-                scanned.unfinished_segment.as_deref(),
-                Some(unfinished.as_path())
+            let emptied = segment_path(dir.path(), end.end_lsn);
+            std::fs::write(&emptied, &contents).unwrap();
+            let what = format!("{} bytes", contents.len());
+
+            let error = scan_all(dir.path(), ScanOptions::new(DATABASE, 0)).unwrap_err();
+            let message = error.to_string();
+            assert!(
+                matches!(&error, WalError::SegmentHeader { path, .. } if path == &emptied),
+                "{what}: {message}"
             );
-            assert!(scanned.tail.is_none());
+            assert!(message.contains("wal_salvage"), "{what}: {message}");
+            assert_eq!(std::fs::read(&emptied).unwrap(), contents, "{what}: kept");
+
+            let salvage = ScanOptions {
+                salvage: true,
+                ..ScanOptions::new(DATABASE, 0)
+            };
+            let (groups, scanned) = scan_all(dir.path(), salvage).unwrap();
+            assert_eq!(groups, [group(1, &["Alix"])], "{what}");
+            assert_eq!(scanned.end_lsn, end.end_lsn, "{what}");
+            let tail = scanned.tail.as_ref().expect("a damaged tail");
+            assert_eq!(tail.kind, TailKind::Damaged, "{what}");
+            assert_eq!(tail.lsn, end.end_lsn, "{what}");
+            assert_eq!(tail.set_aside, std::slice::from_ref(&emptied), "{what}");
             scanned.cut_torn_tail().unwrap();
-            assert!(!unfinished.exists());
+            assert!(!emptied.exists(), "{what}: moved");
+            let kept = dir
+                .path()
+                .join(format!("damaged-{:020}", end.end_lsn))
+                .join(emptied.file_name().unwrap());
+            assert_eq!(
+                std::fs::read(&kept).unwrap(),
+                contents,
+                "{what}: kept whole"
+            );
+
+            let (groups, scanned) = scan_all(dir.path(), ScanOptions::new(DATABASE, 0)).unwrap();
+            assert_eq!(groups, [group(1, &["Alix"])], "{what}");
+            assert!(scanned.is_clean(), "{what}: {scanned:?}");
             let wal = Wal::open(dir.path(), writer_options(end.end_lsn)).unwrap();
             write_group(&wal, 2, &["Gus"]);
+            drop(wal);
+            let (groups, _) = scan_all(dir.path(), ScanOptions::new(DATABASE, 0)).unwrap();
+            assert_eq!(groups, [group(1, &["Alix"]), group(2, &["Gus"])], "{what}");
         }
         // An unfinished header before a later segment is damage, not a crash
         // during creation.

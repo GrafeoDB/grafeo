@@ -30,7 +30,11 @@ mod cdc;
 mod edges;
 mod error;
 mod graph;
+mod session;
+#[cfg(test)]
+mod session_tests;
 mod stream;
 mod time_travel;
 mod types;
 mod upsert;
+mod warning;

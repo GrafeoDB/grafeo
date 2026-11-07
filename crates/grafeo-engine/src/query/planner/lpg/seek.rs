@@ -764,6 +764,7 @@ impl super::Planner {
             self.read_view(),
         )
         .with_index_labels(index_labels)
+        .with_equal_across_kinds(self.equal_across_kinds())
         .with_read_counter(self.read_counter());
         if seek.list {
             rows = rows.with_list_key();

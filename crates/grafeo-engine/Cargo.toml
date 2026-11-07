@@ -20,7 +20,6 @@ thiserror.workspace = true
 
 # Data structures
 arcstr.workspace = true
-smallvec.workspace = true
 hashbrown.workspace = true
 indexmap.workspace = true
 
@@ -58,9 +57,6 @@ tokenizers = { version = "0.23", optional = true, default-features = false, feat
 hf-hub = { version = "1.0", optional = true, features = ["blocking"] }
 crc32fast = { workspace = true, optional = true }
 
-# Memory-mapped files (optional, for file-backed vector storage)
-memmap2 = { workspace = true, optional = true }
-
 # Refcounted byte slices for mmap-backed column storage (Phase 3c)
 bytes.workspace = true
 
@@ -93,7 +89,7 @@ async-storage = ["dep:grafeo-storage", "grafeo-storage/async-storage", "dep:toki
 grafeo-file = ["dep:grafeo-storage", "grafeo-storage/grafeo-file", "dep:crc32fast"]  # Single-file .grafeo format
 encryption = ["dep:grafeo-storage", "grafeo-common/encryption", "grafeo-storage/encryption"]  # AES-256-GCM encryption at rest
 spill = ["grafeo-core/spill"]  # Disk spilling for out-of-core execution
-mmap = ["grafeo-core/mmap", "dep:memmap2"]  # File-backed vector storage
+mmap = ["grafeo-core/mmap"]  # File-backed vector storage
 temporal = []  # Deprecated since 0.6.0: enables nothing (a database's history retention, Config::with_history_retention, replaces it); removed in 0.7.0
 compact-store = []  # Deprecated since 0.6.0: enables nothing (a build that opens files reads a compacted 0.5.x one); removed in 0.7.0
 # Convenience groups
@@ -102,9 +98,6 @@ ai = ["vector-index", "text-index", "hybrid-search", "cdc"]  # All AI/RAG featur
 storage = ["wal", "grafeo-file", "spill", "mmap"]  # Persistent storage (WAL, single-file, disk spill, mmap)
 
 # Named profiles (ecosystem-aligned)
-embedded = ["gql", "ai", "algos", "parallel", "regex", "jsonl-import", "grafeo-file", "arrow-export"]  # Python libs, MCP, in-process
-browser = ["gql", "regex-lite"]  # WASM / grafeo-web
-server = ["full", "async-storage", "metrics", "tracing"]  # grafeo-server
 full = ["languages", "ai", "triple-store", "regex", "parallel", "algos", "storage", "jsonl-import", "parquet-import"]
 
 # Data import
@@ -118,7 +111,7 @@ hybrid-search = ["grafeo-core/hybrid-search", "text-index", "vector-index"]  # C
 cdc = []  # Change data capture with history API
 metrics = []  # Lock-free query, transaction, and session metrics
 embed = ["ort", "tokenizers", "hf-hub"]  # ONNX embedding generation (opt-in, adds ~17MB)
-tracing = ["dep:tracing", "grafeo-common/tracing", "grafeo-adapters/tracing"]  # Observability spans and events
+tracing = ["dep:tracing", "grafeo-common/tracing", "grafeo-storage?/tracing"]  # Observability spans and events
 
 # Data export
 arrow-export = ["dep:arrow-schema", "dep:arrow-array", "dep:arrow-ipc"]  # Arrow IPC zero-copy export
@@ -126,6 +119,8 @@ arrow-export = ["dep:arrow-schema", "dep:arrow-array", "dep:arrow-ipc"]  # Arrow
 # Testing utilities (zero overhead when disabled)
 testing-crash-injection = ["dep:grafeo-storage", "grafeo-common/testing-crash-injection", "grafeo-storage/testing-crash-injection"]  # Crash injection for recovery testing
 testing-statement-injection = ["grafeo-common/testing-statement-injection"]  # Failure injection at statement / commit entry for rollback atomicity tests, and a hook inside commit
+testing-warning-probe = ["grafeo-common/testing-warning-probe"]  # `Session::set_warning_probe`, which raises the 01Z99 notice at translation or at run time for the warning channel's tests
+testing-deadline-probe = ["grafeo-core/testing-deadline-probe", "grafeo-adapters/testing-deadline-probe"]  # Test only: a deadline that passes after N clock reads in procedures and paths
 
 [lints]
 workspace = true
@@ -149,6 +144,11 @@ harness = false
 [[bench]]
 name = "topk_e2e"
 harness = false
+
+[[bench]]
+name = "algorithms_bench"
+harness = false
+required-features = ["algos", "gql", "vector-index"]
 
 [[bench]]
 name = "write_path_bench"
@@ -204,6 +204,19 @@ path = "tests/path_search_budget.rs"
 [[test]]
 name = "typed_read_allocations"
 path = "tests/typed_read_allocations.rs"
+
+# Installs the global tracing subscriber. CI also runs it with only these features, where a crate
+# whose tracing feature the engine does not turn on loses its events (all features would hide it).
+[[test]]
+name = "storage_events"
+path = "tests/storage_events.rs"
+required-features = ["gql", "wal", "grafeo-file", "tracing", "testing-crash-injection"]
+
+# Counts allocated bytes with its own global allocator.
+[[test]]
+name = "turn_sample_allocations"
+path = "tests/turn_sample_allocations.rs"
+required-features = ["gql", "grafeo-file"]
 
 # Counts allocations with its own global allocator.
 [[test]]

@@ -17,6 +17,7 @@
 //! Compression changes how the store holds its values, not what any reader
 //! at any view reads, so it marks nothing for the next checkpoint.
 
+use grafeo_common::change::Table;
 use grafeo_common::utils::error::Result;
 use parking_lot::RwLockUpgradableReadGuard;
 
@@ -107,15 +108,24 @@ impl RowGroupStore {
             }
             let rows = group.versions.rows().count();
             let mut inner = RwLockUpgradableReadGuard::upgrade(inner);
+            // Counted on its own: the writes' bracket closes first.
+            inner.close_bracket();
+            let thaws = inner.account.sink(Table::Nodes);
             let Some(group) = inner.nodes.get_mut(&index) else {
                 continue;
             };
-            let compressed = group.columns.install_compressed(plan)?;
+            let held = group.lines();
+            let compressed = group
+                .columns
+                .install_compressed(plan, self.memory_manager(), &thaws);
             if merge {
                 group.outgoing.merge();
                 group.incoming.merge();
             }
-            report.count(&compressed, rows);
+            let moved = group.lines();
+            inner.account.moved(&held, &moved);
+            inner.settle_tight();
+            report.count(&compressed?, rows);
         }
         for index in edges {
             let inner = self.inner.upgradable_read();
@@ -129,11 +139,20 @@ impl RowGroupStore {
             }
             let rows = group.versions.rows().count();
             let mut inner = RwLockUpgradableReadGuard::upgrade(inner);
+            // Counted on its own: the writes' bracket closes first.
+            inner.close_bracket();
+            let thaws = inner.account.sink(Table::Edges);
             let Some(group) = inner.edges.get_mut(&index) else {
                 continue;
             };
-            let compressed = group.columns.install_compressed(plan)?;
-            report.count(&compressed, rows);
+            let held = group.lines();
+            let compressed = group
+                .columns
+                .install_compressed(plan, self.memory_manager(), &thaws);
+            let moved = group.lines();
+            inner.account.moved(&held, &moved);
+            inner.settle_tight();
+            report.count(&compressed?, rows);
         }
         Ok(report)
     }

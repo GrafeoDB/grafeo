@@ -21,6 +21,7 @@ mod database;
 mod error;
 mod graph;
 mod query;
+mod session;
 mod stream;
 mod time_travel;
 mod transaction;
@@ -36,4 +37,24 @@ pub fn simd_support() -> String {
 #[napi]
 pub fn version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
+}
+
+/// Returns the features this package was built with, as Python's
+/// `grafeo.features()` lists them: the query languages (`gql`, `cypher`,
+/// `sparql`, `gremlin`, `graphql`, `sql-pgq`) and the optional capabilities
+/// (`algos`, `vector-index`, `text-index`, `hybrid-search`, `cdc`,
+/// `triple-store`, `shacl`, `embed`, `arrow-export`, `jsonl-import`,
+/// `parquet-import`, `metrics`, and `storage`: persistence, the WAL and
+/// `.grafeo` files). Profiles such as `full` are not listed, only what they
+/// enable. A method that needs a feature exists only in a build with it.
+///
+/// ```ts
+/// if (!features().includes('cypher')) throw new Error('this build has no Cypher')
+/// ```
+#[napi]
+pub fn features() -> Vec<String> {
+    grafeo_bindings_common::reported_features!()
+        .into_iter()
+        .map(str::to_string)
+        .collect()
 }

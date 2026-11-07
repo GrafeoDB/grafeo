@@ -16,7 +16,8 @@ def wait_until(condition, what):
 def test_triggers_set_on_an_open_database_checkpoint_and_read_back(tmp_path):
     db = GrafeoDB(str(tmp_path / "amsterdam.grafeo"))
     status = db.checkpoint_status()
-    assert (status["interval_secs"], status["wal_bytes"]) == (None, None)
+    # The default: by WAL size, 256 MiB.
+    assert (status["interval_secs"], status["wal_bytes"]) == (None, 256 * 1024 * 1024)
     assert status["failures"] == 0
     assert status["stopped"] is False
 
@@ -38,7 +39,7 @@ def test_triggers_set_on_an_open_database_checkpoint_and_read_back(tmp_path):
 def test_triggers_are_refused_where_nothing_checkpoints():
     db = GrafeoDB()
     with pytest.raises(Exception, match="nothing to checkpoint"):
-        db.set_checkpoint_triggers(wal_bytes=1024)
+        db.set_checkpoint_triggers(wal_bytes=1024 * 1024)
 
 
 def test_a_zero_trigger_is_refused(tmp_path):

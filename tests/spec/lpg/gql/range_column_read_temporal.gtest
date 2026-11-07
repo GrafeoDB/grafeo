@@ -1,0 +1,123 @@
+# A range on a key holding temporal values answers as the filter it stands for, under GQL's
+# rule: a datetime with an offset and one without compare as instants, and other kinds (a time,
+# a date, a list of datetimes) order by kind. The expected rows are the range read's answers,
+# which range_temporal_rules.rs checks against the same filter with the range read turned off;
+# here every runner reads the stored temporal values back through it. The Cypher twin is
+# lpg/cypher/range_column_read_temporal.gtest.
+
+meta:
+  language: gql
+  model: lpg
+  title: Read of a temporal range on a key (GQL)
+  dataset: empty
+
+tests:
+
+  - name: temporal_above_an_offset_datetime
+    setup:
+      - "INSERT (:L {name: 'Alix', k: DATETIME '2024-01-01T10:00:00+02:00'}), (:L {name: 'Gus', k: DATETIME '2024-01-01T10:00:00'}), (:L {name: 'Mia', k: DATETIME '2024-01-01T07:30:00Z'}), (:L {name: 'Vincent', k: TIME '10:00:00+02:00'}), (:L {name: 'Jules', k: DATE '2024-01-01'}), (:L {name: 'Butch', k: [DATETIME '2024-01-01T10:00:00+02:00']}), (:L {name: 'Hans'}), (:M {name: 'Django', k: DATETIME '2024-01-01T10:00:00+02:00'})"
+    query: "MATCH (n:L) WHERE n.k > DATETIME '2024-01-01T08:00:00+00:00' RETURN n.name ORDER BY n.name"
+    expect:
+      ordered: true
+      rows:
+        - ["Gus"]
+        - ["Jules"]
+        - ["Vincent"]
+
+  - name: temporal_up_to_an_offset_datetime
+    setup:
+      - "INSERT (:L {name: 'Alix', k: DATETIME '2024-01-01T10:00:00+02:00'}), (:L {name: 'Gus', k: DATETIME '2024-01-01T10:00:00'}), (:L {name: 'Mia', k: DATETIME '2024-01-01T07:30:00Z'}), (:L {name: 'Vincent', k: TIME '10:00:00+02:00'}), (:L {name: 'Jules', k: DATE '2024-01-01'}), (:L {name: 'Butch', k: [DATETIME '2024-01-01T10:00:00+02:00']}), (:L {name: 'Hans'}), (:M {name: 'Django', k: DATETIME '2024-01-01T10:00:00+02:00'})"
+    query: "MATCH (n:L) WHERE n.k <= DATETIME '2024-01-01T08:00:00+00:00' RETURN n.name ORDER BY n.name"
+    expect:
+      ordered: true
+      rows:
+        - ["Alix"]
+        - ["Butch"]
+        - ["Mia"]
+
+  - name: temporal_above_a_plain_datetime
+    setup:
+      - "INSERT (:L {name: 'Alix', k: DATETIME '2024-01-01T10:00:00+02:00'}), (:L {name: 'Gus', k: DATETIME '2024-01-01T10:00:00'}), (:L {name: 'Mia', k: DATETIME '2024-01-01T07:30:00Z'}), (:L {name: 'Vincent', k: TIME '10:00:00+02:00'}), (:L {name: 'Jules', k: DATE '2024-01-01'}), (:L {name: 'Butch', k: [DATETIME '2024-01-01T10:00:00+02:00']}), (:L {name: 'Hans'}), (:M {name: 'Django', k: DATETIME '2024-01-01T10:00:00+02:00'})"
+    query: "MATCH (n:L) WHERE n.k > DATETIME '2024-01-01T09:00:00' RETURN n.name ORDER BY n.name"
+    expect:
+      ordered: true
+      rows:
+        - ["Gus"]
+        - ["Jules"]
+        - ["Vincent"]
+
+  - name: temporal_up_to_a_plain_datetime
+    setup:
+      - "INSERT (:L {name: 'Alix', k: DATETIME '2024-01-01T10:00:00+02:00'}), (:L {name: 'Gus', k: DATETIME '2024-01-01T10:00:00'}), (:L {name: 'Mia', k: DATETIME '2024-01-01T07:30:00Z'}), (:L {name: 'Vincent', k: TIME '10:00:00+02:00'}), (:L {name: 'Jules', k: DATE '2024-01-01'}), (:L {name: 'Butch', k: [DATETIME '2024-01-01T10:00:00+02:00']}), (:L {name: 'Hans'}), (:M {name: 'Django', k: DATETIME '2024-01-01T10:00:00+02:00'})"
+    query: "MATCH (n:L) WHERE n.k <= DATETIME '2024-01-01T09:00:00' RETURN n.name ORDER BY n.name"
+    expect:
+      ordered: true
+      rows:
+        - ["Alix"]
+        - ["Butch"]
+        - ["Mia"]
+
+  - name: temporal_above_an_offset_time
+    setup:
+      - "INSERT (:L {name: 'Alix', k: DATETIME '2024-01-01T10:00:00+02:00'}), (:L {name: 'Gus', k: DATETIME '2024-01-01T10:00:00'}), (:L {name: 'Mia', k: DATETIME '2024-01-01T07:30:00Z'}), (:L {name: 'Vincent', k: TIME '10:00:00+02:00'}), (:L {name: 'Jules', k: DATE '2024-01-01'}), (:L {name: 'Butch', k: [DATETIME '2024-01-01T10:00:00+02:00']}), (:L {name: 'Hans'}), (:M {name: 'Django', k: DATETIME '2024-01-01T10:00:00+02:00'})"
+    query: "MATCH (n:L) WHERE n.k > TIME '09:00:00+02:00' RETURN n.name ORDER BY n.name"
+    expect:
+      ordered: true
+      rows:
+        - ["Vincent"]
+
+  - name: temporal_up_to_an_offset_time
+    setup:
+      - "INSERT (:L {name: 'Alix', k: DATETIME '2024-01-01T10:00:00+02:00'}), (:L {name: 'Gus', k: DATETIME '2024-01-01T10:00:00'}), (:L {name: 'Mia', k: DATETIME '2024-01-01T07:30:00Z'}), (:L {name: 'Vincent', k: TIME '10:00:00+02:00'}), (:L {name: 'Jules', k: DATE '2024-01-01'}), (:L {name: 'Butch', k: [DATETIME '2024-01-01T10:00:00+02:00']}), (:L {name: 'Hans'}), (:M {name: 'Django', k: DATETIME '2024-01-01T10:00:00+02:00'})"
+    query: "MATCH (n:L) WHERE n.k <= TIME '09:00:00+02:00' RETURN n.name ORDER BY n.name"
+    expect:
+      ordered: true
+      rows:
+        - ["Alix"]
+        - ["Butch"]
+        - ["Gus"]
+        - ["Jules"]
+        - ["Mia"]
+
+  - name: temporal_above_a_date
+    setup:
+      - "INSERT (:L {name: 'Alix', k: DATETIME '2024-01-01T10:00:00+02:00'}), (:L {name: 'Gus', k: DATETIME '2024-01-01T10:00:00'}), (:L {name: 'Mia', k: DATETIME '2024-01-01T07:30:00Z'}), (:L {name: 'Vincent', k: TIME '10:00:00+02:00'}), (:L {name: 'Jules', k: DATE '2024-01-01'}), (:L {name: 'Butch', k: [DATETIME '2024-01-01T10:00:00+02:00']}), (:L {name: 'Hans'}), (:M {name: 'Django', k: DATETIME '2024-01-01T10:00:00+02:00'})"
+    query: "MATCH (n:L) WHERE n.k > DATE '2023-12-31' RETURN n.name ORDER BY n.name"
+    expect:
+      ordered: true
+      rows:
+        - ["Jules"]
+        - ["Vincent"]
+
+  - name: temporal_up_to_a_date
+    setup:
+      - "INSERT (:L {name: 'Alix', k: DATETIME '2024-01-01T10:00:00+02:00'}), (:L {name: 'Gus', k: DATETIME '2024-01-01T10:00:00'}), (:L {name: 'Mia', k: DATETIME '2024-01-01T07:30:00Z'}), (:L {name: 'Vincent', k: TIME '10:00:00+02:00'}), (:L {name: 'Jules', k: DATE '2024-01-01'}), (:L {name: 'Butch', k: [DATETIME '2024-01-01T10:00:00+02:00']}), (:L {name: 'Hans'}), (:M {name: 'Django', k: DATETIME '2024-01-01T10:00:00+02:00'})"
+    query: "MATCH (n:L) WHERE n.k <= DATE '2023-12-31' RETURN n.name ORDER BY n.name"
+    expect:
+      ordered: true
+      rows:
+        - ["Alix"]
+        - ["Butch"]
+        - ["Gus"]
+        - ["Mia"]
+
+  - name: temporal_above_a_list
+    setup:
+      - "INSERT (:L {name: 'Alix', k: DATETIME '2024-01-01T10:00:00+02:00'}), (:L {name: 'Gus', k: DATETIME '2024-01-01T10:00:00'}), (:L {name: 'Mia', k: DATETIME '2024-01-01T07:30:00Z'}), (:L {name: 'Vincent', k: TIME '10:00:00+02:00'}), (:L {name: 'Jules', k: DATE '2024-01-01'}), (:L {name: 'Butch', k: [DATETIME '2024-01-01T10:00:00+02:00']}), (:L {name: 'Hans'}), (:M {name: 'Django', k: DATETIME '2024-01-01T10:00:00+02:00'})"
+    query: "MATCH (n:L) WHERE n.k > [DATETIME '2024-01-01T09:00:00+02:00'] RETURN n.name ORDER BY n.name"
+    expect:
+      ordered: true
+      rows:
+        - ["Alix"]
+        - ["Butch"]
+        - ["Gus"]
+        - ["Jules"]
+        - ["Mia"]
+        - ["Vincent"]
+
+  - name: temporal_up_to_a_list
+    setup:
+      - "INSERT (:L {name: 'Alix', k: DATETIME '2024-01-01T10:00:00+02:00'}), (:L {name: 'Gus', k: DATETIME '2024-01-01T10:00:00'}), (:L {name: 'Mia', k: DATETIME '2024-01-01T07:30:00Z'}), (:L {name: 'Vincent', k: TIME '10:00:00+02:00'}), (:L {name: 'Jules', k: DATE '2024-01-01'}), (:L {name: 'Butch', k: [DATETIME '2024-01-01T10:00:00+02:00']}), (:L {name: 'Hans'}), (:M {name: 'Django', k: DATETIME '2024-01-01T10:00:00+02:00'})"
+    query: "MATCH (n:L) WHERE n.k <= [DATETIME '2024-01-01T09:00:00+02:00'] RETURN n.name ORDER BY n.name"
+    expect:
+      empty: true

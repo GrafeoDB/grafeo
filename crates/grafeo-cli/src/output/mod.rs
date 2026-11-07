@@ -329,6 +329,15 @@ pub fn status(msg: &str, quiet: bool) {
     }
 }
 
+/// Print each warning a statement raised to stderr as `warning <code>:
+/// <message>`, in every format and also when quiet: a warning is neither
+/// progress nor status, and stdout stays the rows the format writes.
+pub fn warnings(warnings: &[grafeo_engine::database::QueryWarning]) {
+    for warning in warnings {
+        eprintln!("warning {}: {}", warning.code.as_str(), warning.message);
+    }
+}
+
 /// Print a success message.
 pub fn success(msg: &str, quiet: bool) {
     if !quiet {

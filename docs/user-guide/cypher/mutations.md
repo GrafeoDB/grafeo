@@ -263,7 +263,7 @@ RETURN row.name
 ```
 
 !!! note "File path restrictions"
-    LOAD CSV reads from the local filesystem only. You can specify a relative path (e.g., `'data/people.csv'`) or a `file://` URI (e.g., `'file:///data/people.csv'`). Remote URLs such as `http://` or `https://` are not supported. The `file://` prefix is stripped before opening the file, so both `'data/file.csv'` and `'file:///data/file.csv'` resolve to the same local path.
+    LOAD CSV reads from the local filesystem only. You can give a path, relative to the working directory or absolute (e.g., `'data/people.csv'`, `'/srv/data/people.csv'`), or a `file:` URL as RFC 8089 reads it: `'file:///srv/data/people.csv'` and `'file://localhost/srv/data/people.csv'` both name `/srv/data/people.csv`, and on Windows `'file:///C:/data/people.csv'` names `C:/data/people.csv`. A URL always names an absolute path; `%20` in it is a space. A `file:` URL with another host, and remote URLs such as `http://` or `https://`, are refused.
 
 A quoted field may hold line breaks, also in the header, and is read as one value. A quote that is never closed fails with the line it opens on.
 

@@ -266,6 +266,7 @@ pub fn profile_result(root: &ProfileNode, total_time_ms: f64) -> QueryResult {
             total_time_ms,
         }),
         kind: crate::database::ResultKind::Rows,
+        warnings: Vec::new(),
     }
 }
 

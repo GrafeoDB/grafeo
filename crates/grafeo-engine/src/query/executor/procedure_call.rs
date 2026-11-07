@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use grafeo_adapters::plugins::{AlgorithmResult, Parameters};
+use grafeo_adapters::plugins::{AlgorithmResult, Prepared};
 use grafeo_common::types::{LogicalType, ReadView, Value};
 use grafeo_core::execution::DataChunk;
 use grafeo_core::execution::operators::{Operator, OperatorError, OperatorResult};
@@ -25,7 +25,8 @@ pub struct ProcedureCallOperator {
     /// for the call.
     snapshot: crate::Snapshot,
     procedure: Arc<dyn Procedure>,
-    params: Parameters,
+    /// The call's arguments, prepared when the statement was planned.
+    params: Prepared,
     /// Optional LPG store handle, required by search procedures that reach
     /// the HNSW / BM25 indexes rather than the raw graph store.
     lpg_store: Option<Arc<grafeo_core::graph::rowgroup::RowGroupStore>>,
@@ -35,6 +36,9 @@ pub struct ProcedureCallOperator {
     /// for PageRank, even though the algorithm internally names it `"pagerank"`).
     /// Used to remap procedure result columns for YIELD matching.
     canonical_columns: Vec<String>,
+    /// Where the calling statement raises its warnings, which the
+    /// procedure's run adds to.
+    warnings: Option<Arc<grafeo_common::utils::warning::WarningSink>>,
     /// Cached procedure result (populated on first next()).
     result: Option<AlgorithmResult>,
     /// Current row position in the cached result.
@@ -53,7 +57,7 @@ impl ProcedureCallOperator {
     pub fn new(
         store: Arc<dyn GraphStore>,
         procedure: Arc<dyn Procedure>,
-        params: Parameters,
+        params: Prepared,
         yield_columns: Option<Vec<(String, Option<String>)>>,
         canonical_columns: Vec<String>,
         view: ReadView,
@@ -65,6 +69,7 @@ impl ProcedureCallOperator {
             lpg_store: None,
             yield_columns,
             canonical_columns,
+            warnings: None,
             result: None,
             row_index: 0,
             output_columns: Vec::new(),
@@ -83,6 +88,13 @@ impl ProcedureCallOperator {
         self
     }
 
+    /// Raises the procedure's warnings into `sink`, the calling statement's.
+    #[must_use]
+    pub fn with_warnings(mut self, sink: Arc<grafeo_common::utils::warning::WarningSink>) -> Self {
+        self.warnings = Some(sink);
+        self
+    }
+
     /// Executes the procedure and resolves YIELD column mapping.
     fn execute_algorithm(&mut self) -> Result<(), OperatorError> {
         let ctx = match self.lpg_store.as_deref() {
@@ -91,11 +103,14 @@ impl ProcedureCallOperator {
         };
         let result = self
             .procedure
-            .execute(&ctx, &self.params)
+            .compute(&ctx, &self.params)
             // The procedure's error keeps its code: a mistake in the
             // arguments stays one (a query vector the index cannot measure,
             // #593), with the procedure's own message.
             .map_err(OperatorError::from)?;
+        if let Some(sink) = &self.warnings {
+            sink.raise_all(result.warnings);
+        }
 
         // Use canonical column names if available (same length as result columns),
         // otherwise fall back to the algorithm's own column names.
@@ -112,14 +127,11 @@ impl ProcedureCallOperator {
                     .iter()
                     .position(|c| c == field_name)
                     .ok_or_else(|| {
-                        // A mistake in the query text: the procedure has no
-                        // such column.
-                        OperatorError::from(grafeo_common::utils::error::Error::from(
-                            grafeo_common::utils::error::QueryError::invalid_reference(format!(
-                                "YIELD column '{}' is no column of the procedure (it has: {})",
-                                field_name,
-                                display_columns.join(", ")
-                            )),
+                        // A mistake in the query text, which planning refuses for the columns
+                        // the procedure declares; here for a result of another shape.
+                        OperatorError::from(crate::procedures::no_such_yield_column(
+                            field_name,
+                            display_columns,
                         ))
                     })?;
                 self.column_indices.push(idx);

@@ -41,6 +41,7 @@ func endedError(message string) error {
 
 // BeginTransaction starts a new transaction with default isolation (snapshot).
 func (db *Database) BeginTransaction() (*Transaction, error) {
+	defer runtime.KeepAlive(db)
 	runtime.LockOSThread()
 	h := C.grafeo_begin_transaction(db.handle)
 	if h == nil {
@@ -56,6 +57,7 @@ func (db *Database) BeginTransaction() (*Transaction, error) {
 
 // BeginTransactionWith starts a transaction with a specific isolation level.
 func (db *Database) BeginTransactionWith(level IsolationLevel) (*Transaction, error) {
+	defer runtime.KeepAlive(db)
 	runtime.LockOSThread()
 	h := C.grafeo_begin_transaction_with_isolation(db.handle, C.GrafeoIsolationLevel(level))
 	if h == nil {
@@ -71,6 +73,7 @@ func (db *Database) BeginTransactionWith(level IsolationLevel) (*Transaction, er
 
 // Execute runs a query within this transaction.
 func (tx *Transaction) Execute(query string) (*QueryResult, error) {
+	defer runtime.KeepAlive(tx)
 	if tx.handle == nil {
 		return nil, endedError("Transaction is no longer active")
 	}
@@ -78,7 +81,6 @@ func (tx *Transaction) Execute(query string) (*QueryResult, error) {
 	defer C.free(unsafe.Pointer(cQuery))
 	runtime.LockOSThread()
 	r := C.grafeo_transaction_execute(tx.handle, cQuery)
-	runtime.KeepAlive(tx)
 	if r == nil {
 		err := lastError()
 		runtime.UnlockOSThread()
@@ -91,6 +93,7 @@ func (tx *Transaction) Execute(query string) (*QueryResult, error) {
 
 // ExecuteWithParams runs a query with JSON parameters within this transaction.
 func (tx *Transaction) ExecuteWithParams(query string, paramsJSON string) (*QueryResult, error) {
+	defer runtime.KeepAlive(tx)
 	if tx.handle == nil {
 		return nil, endedError("Transaction is no longer active")
 	}
@@ -100,7 +103,6 @@ func (tx *Transaction) ExecuteWithParams(query string, paramsJSON string) (*Quer
 	defer C.free(unsafe.Pointer(cParams))
 	runtime.LockOSThread()
 	r := C.grafeo_transaction_execute_with_params(tx.handle, cQuery, cParams)
-	runtime.KeepAlive(tx)
 	if r == nil {
 		err := lastError()
 		runtime.UnlockOSThread()
@@ -115,6 +117,7 @@ func (tx *Transaction) ExecuteWithParams(query string, paramsJSON string) (*Quer
 // language is one of: "gql", "cypher", "gremlin", "graphql", "sparql", "sql".
 // Pass "" for paramsJSON if no parameters are needed.
 func (tx *Transaction) ExecuteLanguage(language, query, paramsJSON string) (*QueryResult, error) {
+	defer runtime.KeepAlive(tx)
 	if tx.handle == nil {
 		return nil, endedError("Transaction is no longer active")
 	}
@@ -129,7 +132,6 @@ func (tx *Transaction) ExecuteLanguage(language, query, paramsJSON string) (*Que
 	}
 	runtime.LockOSThread()
 	r := C.grafeo_transaction_execute_language(tx.handle, cLang, cQuery, cParams)
-	runtime.KeepAlive(tx)
 	if r == nil {
 		err := lastError()
 		runtime.UnlockOSThread()
@@ -144,6 +146,7 @@ func (tx *Transaction) ExecuteLanguage(language, query, paramsJSON string) (*Que
 // GQLSTATUS 40000) ends the transaction all the same. Either way the C
 // transaction is freed: a later call gives the error the C layer gives.
 func (tx *Transaction) Commit() error {
+	defer runtime.KeepAlive(tx)
 	switch tx.ended {
 	case transactionCommitted:
 		return endedError("Transaction already committed")
@@ -169,6 +172,7 @@ func (tx *Transaction) Commit() error {
 // nothing and returns nil: a commit that fails ends the transaction, so a
 // deferred or error-path Rollback does not hide the commit's error.
 func (tx *Transaction) Rollback() error {
+	defer runtime.KeepAlive(tx)
 	switch tx.ended {
 	case transactionCommitted:
 		return endedError("Transaction already committed")
@@ -183,7 +187,6 @@ func (tx *Transaction) Rollback() error {
 	if err == nil {
 		tx.end(transactionRolledBack)
 	}
-	runtime.KeepAlive(tx)
 	return err
 }
 
@@ -198,6 +201,7 @@ func (tx *Transaction) end(how transactionEnd) {
 // free is the GC finalizer: it rolls back a transaction left open and frees
 // its C transaction.
 func (tx *Transaction) free() {
+	defer runtime.KeepAlive(tx)
 	if tx.handle != nil {
 		C.grafeo_free_transaction(tx.handle)
 		tx.handle = nil

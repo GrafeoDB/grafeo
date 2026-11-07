@@ -134,7 +134,8 @@ describe.skipIf(!available)('persona Lea (WASM, edge build)', () => {
 
   it.skipIf(!edge).each([
     ['a vector index', () => new Database().execute('CREATE VECTOR INDEX idx ON :Note(emb) DIMENSION 3'), 'vector indexes'],
-    ['a procedure', () => new Database().execute("CALL grafeo.search.vector('Note', 'emb', [1.0, 0.0, 0.0], 1)"), 'procedures'],
+    // The edge build has procedures (grafeo.procedures(), the schema ones), but not vector search.
+    ['vector search', () => new Database().execute("CALL grafeo.search.vector('Note', 'emb', [1.0, 0.0, 0.0], 1)"), 'not in this build'],
   ])('is told the edge build has no %s', (_what, call, words) => {
     const error = thrown(call)
     expect(error.gqlStatus).toBe('42000')

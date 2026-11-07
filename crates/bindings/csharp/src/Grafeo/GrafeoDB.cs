@@ -628,7 +628,8 @@ public sealed class GrafeoDB : IGrafeoDB, IDisposable, IAsyncDisposable
     /// <summary>
     /// Set when the database checkpoints by itself: every <paramref name="interval"/>, and once
     /// the WAL holds <paramref name="walBytes"/> bytes since the last checkpoint. Leave both null
-    /// to turn automatic checkpoints off (the default). For this open only.
+    /// to turn automatic checkpoints off. For this open only.
+    /// A file database opens with a WAL size of 256 MiB (at least 1 MiB) and no interval.
     /// </summary>
     public void SetCheckpointTriggers(TimeSpan? interval = null, ulong? walBytes = null)
     {
@@ -782,6 +783,18 @@ public sealed class GrafeoDB : IGrafeoDB, IDisposable, IAsyncDisposable
     {
         ThrowIfDisposed();
         GrafeoException.ThrowIfFailed(NativeMethods.grafeo_backup_incremental(Handle, path));
+    }
+
+    /// <summary>
+    /// Release the backup cursor: the next backup must be a full one, and
+    /// checkpoints then keep only the WAL a reopen needs. Returns whether
+    /// there was a cursor to release.
+    /// </summary>
+    public bool ReleaseBackupCursor()
+    {
+        ThrowIfDisposed();
+        GrafeoException.ThrowIfFailed(NativeMethods.grafeo_release_backup_cursor(Handle, out var released));
+        return released != 0;
     }
 
     /// <summary>
@@ -1039,7 +1052,7 @@ public sealed class GrafeoDB : IGrafeoDB, IDisposable, IAsyncDisposable
     // =========================================================================
 
     private Task<QueryResult> ExecuteLanguageAsync(
-        Func<nint, string, nint> nativeMethod,
+        Func<DatabaseHandle, string, nint> nativeMethod,
         string query,
         CancellationToken ct)
     {
@@ -1056,12 +1069,12 @@ public sealed class GrafeoDB : IGrafeoDB, IDisposable, IAsyncDisposable
     }
 
     /// <summary>Get the raw handle, checking for disposal first.</summary>
-    private nint Handle
+    private DatabaseHandle Handle
     {
         get
         {
             ThrowIfDisposed();
-            return _handle.DangerousGetHandle();
+            return _handle;
         }
     }
 
@@ -1100,6 +1113,11 @@ public sealed class GrafeoDB : IGrafeoDB, IDisposable, IAsyncDisposable
             return new QueryResult(columns, rows, nodes, edges, executionTimeMs, rowsScanned)
             {
                 Kind = (ResultKind)NativeMethods.grafeo_result_kind(resultPtr),
+                Warnings = ReadWarnings(
+                    NativeMethods.grafeo_result_warning_count(resultPtr),
+                    index => NativeMethods.grafeo_result_warning_code(resultPtr, index),
+                    index => NativeMethods.grafeo_result_warning_kind(resultPtr, index),
+                    index => NativeMethods.grafeo_result_warning_message(resultPtr, index)),
                 Counters = new WriteCounters(
                     (long)NativeMethods.grafeo_result_nodes_created(resultPtr),
                     (long)NativeMethods.grafeo_result_nodes_deleted(resultPtr),
@@ -1114,6 +1132,24 @@ public sealed class GrafeoDB : IGrafeoDB, IDisposable, IAsyncDisposable
         {
             NativeMethods.grafeo_free_result(resultPtr);
         }
+    }
+
+    /// <summary>The warnings a native result or stream holds, through its accessors.</summary>
+    internal static IReadOnlyList<QueryWarning> ReadWarnings(
+        nuint count,
+        Func<nuint, nint> code,
+        Func<nuint, nint> kind,
+        Func<nuint, nint> message)
+    {
+        var warnings = new List<QueryWarning>((int)count);
+        for (nuint index = 0; index < count; index++)
+        {
+            warnings.Add(new QueryWarning(
+                Marshal.PtrToStringUTF8(code(index)) ?? "",
+                Marshal.PtrToStringUTF8(kind(index)) ?? "",
+                Marshal.PtrToStringUTF8(message(index)) ?? ""));
+        }
+        return warnings;
     }
 
     /// <summary>Read a node from a native GrafeoNode pointer.</summary>

@@ -53,6 +53,8 @@ let db = GrafeoDB::with_config(Config::persistent("my_graph.grafeo").with_wal_sa
 
 Nothing is deleted: what the open did not replay is kept in `<file>.wal.damaged` (`<file>.wal.damaged-2` and so on for later salvages). The setting applies to that open only; the database file does not store it.
 
+A WAL segment gets its name only once its header is on disk, so an empty or headerless newest segment right after another segment counts as damage too: it was emptied, and the commits it held are lost. One case is not damage: a release before 0.6.2 that crashed while it started a new segment left such a file. Reopen that database once with salvage, which sets the empty file aside; nothing is lost.
+
 ## Checkpointing
 
 Checkpoints merge WAL changes into the database file:
@@ -64,28 +66,43 @@ db.wal_checkpoint()
 
 ### Automatic checkpoints
 
-A database checkpoints when asked and at `close()`. It can also checkpoint by itself, which bounds the WAL and the time a reopen replays it: every given interval, and once the WAL holds a given number of bytes since the last checkpoint (checked every 100 ms). Both are off by default. They apply to the open database only: the file does not store them.
+A database checkpoints when asked, at `close()`, and by itself, which bounds the WAL on disk and the time a reopen replays it. Since 0.6.2 a file database checkpoints by itself once its WAL holds 256 MiB past the last checkpoint: the commit that takes the WAL past it wakes a background thread, which checkpoints while commits go on. A database that is not written to does no work, except once at open when the WAL it replays is already past the size. It can also checkpoint every given interval, which is off by default; an interval that passes with no change since the last checkpoint writes nothing.
+
+The size is at least 1 MiB. Turning it off (`checkpoint_wal_size=None` in Python, `checkpointWalSize: null` in Node.js, `Config::without_checkpoint_wal_size()` in Rust) lets the WAL grow until `close()` or a manual checkpoint. These settings apply to the open database only: the file does not store them.
+
+Each line below is an alternative: the triggers set last are the ones in force.
 
 ```python
+# At open: a smaller size, or none
+db = grafeo.GrafeoDB("./mydb.grafeo", checkpoint_wal_size=64 * 1024 * 1024)
+db = grafeo.GrafeoDB("./mydb.grafeo", checkpoint_wal_size=None)  # off
+
+# On an open database: an interval and a size, or no automatic checkpoints
 db.set_checkpoint_triggers(interval_secs=300, wal_bytes=64 * 1024 * 1024)
-db.set_checkpoint_triggers()  # off again
+db.set_checkpoint_triggers()
 ```
 
 ```javascript
+// At open
+const db = GrafeoDB.create('./mydb.grafeo', { checkpointWalSize: 64 * 1024 * 1024 });
+// Or on an open database
 db.setCheckpointTriggers({ intervalMs: 300_000, walBytes: 64 * 1024 * 1024 });
 ```
 
 ```rust
+// At open
 let config = Config::persistent("my_graph.grafeo")
     .with_checkpoint_interval(Duration::from_secs(300))
     .with_checkpoint_wal_size(64 * 1024 * 1024);
-// or on an open database:
+// Or on an open database
 db.set_checkpoint_triggers(CheckpointTriggers::none().with_wal_bytes(64 * 1024 * 1024))?;
 ```
 
+The WAL is a series of files, segments, of 64 MiB each by default. A checkpoint removes whole segments, and it needs room on the disk for the file it may write again plus one segment, or it does not start: it fails with an I/O error that names how much room it needs and how much the disk has, and changes nothing. Smaller segments free the disk sooner and need less room: set them from 1 MiB to 1 GiB with `wal_segment_size` (Python), `walSegmentSize` (Node.js) or `Config::with_wal_segment_size` (Rust). A WAL written with one segment size reopens with another: the files it holds keep their size, and new ones get the new size.
+
 C has `grafeo_set_checkpoint_triggers(db, interval_ms, wal_bytes)` (0 turns a trigger off), Go `SetCheckpointTriggers`, C# `SetCheckpointTriggers` and Dart `setCheckpointTriggers`. An in-memory or read-only database refuses them.
 
-A failed automatic checkpoint is logged as a warning and retried after a pause that doubles from one second to five minutes; the WAL keeps the commits meanwhile. `checkpoint_status()` (`checkpointStatus()`, `grafeo_checkpoint_status`, `CheckpointStatus`) reports the triggers, the last checkpoint, the automatic checkpoints that failed since the last that succeeded with the last error, and whether they stopped (after a commit that did not complete, none can succeed until the database is reopened):
+A failed automatic checkpoint is logged as a warning, and the WAL keeps the commits meanwhile. A checkpoint the WAL size started is tried again once the WAL has grown by one more segment, so a full disk with no writes costs nothing. One the interval started is tried again after a pause that doubles from one second to five minutes. `checkpoint_status()` (`checkpointStatus()`, `grafeo_checkpoint_status`, `CheckpointStatus`) reports the triggers, the last checkpoint, the automatic checkpoints that failed since the last that succeeded with the last error, and whether they stopped (after a commit that did not complete, none can succeed until the database is reopened):
 
 ```python
 status = db.checkpoint_status()

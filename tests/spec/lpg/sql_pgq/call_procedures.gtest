@@ -1,0 +1,75 @@
+# A procedure call in SQL/PGQ: CALL name(...) YIELD ... with an optional ORDER BY and LIMIT,
+# read as for SELECT. The LIMIT is an integer or a parameter; a parameter takes each call's
+# value, and a negative or fractional count is refused as for SELECT.
+
+meta:
+  language: sql-pgq
+  model: lpg
+  section: "4.39"
+  title: Procedure calls
+  dataset: social_network
+  requires: [algos]
+
+tests:
+
+  - name: a_literal_limit
+    query: "CALL grafeo.pagerank() YIELD node_id, score ORDER BY score DESC LIMIT 2"
+    expect:
+      count: 2
+
+  - name: a_limit_parameter
+    query: "CALL grafeo.pagerank() YIELD node_id, score ORDER BY score DESC LIMIT $n"
+    params:
+      n: 1
+    expect:
+      count: 1
+
+  - name: a_larger_limit_parameter
+    query: "CALL grafeo.pagerank() YIELD node_id, score ORDER BY score DESC LIMIT $n"
+    params:
+      n: 3
+    expect:
+      count: 3
+
+  - name: a_limit_parameter_without_order_by
+    query: "CALL grafeo.pagerank() YIELD node_id LIMIT $n"
+    params:
+      n: 1
+    expect:
+      count: 1
+
+  - name: a_limit_parameter_without_a_value
+    query: "CALL grafeo.pagerank() YIELD node_id LIMIT $n"
+    expect:
+      error: "Missing parameter for LIMIT: $n"
+
+  - name: a_negative_limit_parameter
+    query: "CALL grafeo.pagerank() YIELD node_id LIMIT $n"
+    params:
+      n: -1
+    expect:
+      error: "LIMIT must be non-negative"
+
+  - name: a_negative_limit
+    query: "CALL grafeo.pagerank() YIELD node_id LIMIT -1"
+    expect:
+      error: "Expected integer"
+      gql_status: "42001"
+
+  - name: a_fractional_limit
+    query: "CALL grafeo.pagerank() YIELD node_id LIMIT 1.5"
+    expect:
+      error: "Expected integer"
+      gql_status: "42001"
+
+  - name: a_string_limit
+    query: "CALL grafeo.pagerank() YIELD node_id LIMIT 'x'"
+    expect:
+      error: "Expected integer"
+      gql_status: "42001"
+
+  - name: the_select_form_refuses_alike
+    query: "SELECT * FROM GRAPH_TABLE (MATCH (n:Person) COLUMNS (n.name AS name)) LIMIT -1"
+    expect:
+      error: "Expected integer"
+      gql_status: "42001"

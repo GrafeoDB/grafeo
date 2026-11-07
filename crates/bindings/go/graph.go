@@ -20,6 +20,7 @@ type Graph struct {
 // Graph returns a handle on the named graph of the current schema; an error when it does
 // not exist.
 func (db *Database) Graph(name string) (*Graph, error) {
+	defer runtime.KeepAlive(db)
 	cName := C.CString(name)
 	defer C.free(unsafe.Pointer(cName))
 	runtime.LockOSThread()
@@ -37,6 +38,7 @@ func (db *Database) Graph(name string) (*Graph, error) {
 
 // Close frees the handle; calling it again does nothing.
 func (g *Graph) Close() {
+	defer runtime.KeepAlive(g)
 	if g.handle != nil {
 		C.grafeo_free_graph(g.handle)
 		g.handle = nil
@@ -59,6 +61,7 @@ func (g *Graph) result(call func() *C.GrafeoResult) (*QueryResult, error) {
 
 // Execute runs a GQL query in the graph.
 func (g *Graph) Execute(query string) (*QueryResult, error) {
+	defer runtime.KeepAlive(g)
 	cQuery := C.CString(query)
 	defer C.free(unsafe.Pointer(cQuery))
 	return g.result(func() *C.GrafeoResult { return C.grafeo_graph_execute(g.handle, cQuery) })
@@ -72,6 +75,7 @@ func (g *Graph) ExecuteParams(query string, params map[string]any) (*QueryResult
 // ExecuteLanguage runs a query in a query language ("gql", "cypher", ...) with parameters
 // (nil for none) in the graph.
 func (g *Graph) ExecuteLanguage(language, query string, params map[string]any) (*QueryResult, error) {
+	defer runtime.KeepAlive(g)
 	cQuery := C.CString(query)
 	defer C.free(unsafe.Pointer(cQuery))
 	cLanguage := C.CString(language)
@@ -115,6 +119,7 @@ func (g *Graph) flag(call func() C.int32_t) (bool, error) {
 
 // CreateNode creates a node with labels and optional properties in the graph.
 func (g *Graph) CreateNode(labels []string, properties map[string]any) (*Node, error) {
+	defer runtime.KeepAlive(g)
 	if labels == nil {
 		labels = []string{}
 	}
@@ -142,6 +147,7 @@ func (g *Graph) CreateNode(labels []string, properties map[string]any) (*Node, e
 
 // CreateEdge creates an edge with optional properties in the graph.
 func (g *Graph) CreateEdge(sourceID, targetID uint64, edgeType string, properties map[string]any) (*Edge, error) {
+	defer runtime.KeepAlive(g)
 	cType := C.CString(edgeType)
 	defer C.free(unsafe.Pointer(cType))
 	var cProps *C.char
@@ -166,6 +172,7 @@ func (g *Graph) CreateEdge(sourceID, targetID uint64, edgeType string, propertie
 
 // GetNode returns a node of the graph: ErrNotFound when it does not exist.
 func (g *Graph) GetNode(id uint64) (*Node, error) {
+	defer runtime.KeepAlive(g)
 	var cNode *C.GrafeoNode
 	if err := lockAndCheckStatus(func() C.GrafeoStatus {
 		return C.grafeo_graph_get_node(g.handle, C.uint64_t(id), &cNode)
@@ -180,6 +187,7 @@ func (g *Graph) GetNode(id uint64) (*Node, error) {
 
 // GetEdge returns an edge of the graph: ErrNotFound when it does not exist.
 func (g *Graph) GetEdge(id uint64) (*Edge, error) {
+	defer runtime.KeepAlive(g)
 	var cEdge *C.GrafeoEdge
 	if err := lockAndCheckStatus(func() C.GrafeoStatus {
 		return C.grafeo_graph_get_edge(g.handle, C.uint64_t(id), &cEdge)
@@ -206,6 +214,7 @@ func (g *Graph) setProperty(key string, value any, call func(cKey, cValue *C.cha
 
 // SetNodeProperty sets a property of a node of the graph.
 func (g *Graph) SetNodeProperty(id uint64, key string, value any) error {
+	defer runtime.KeepAlive(g)
 	return g.setProperty(key, value, func(cKey, cValue *C.char) C.GrafeoStatus {
 		return C.grafeo_graph_set_node_property(g.handle, C.uint64_t(id), cKey, cValue)
 	})
@@ -213,6 +222,7 @@ func (g *Graph) SetNodeProperty(id uint64, key string, value any) error {
 
 // SetEdgeProperty sets a property of an edge of the graph.
 func (g *Graph) SetEdgeProperty(id uint64, key string, value any) error {
+	defer runtime.KeepAlive(g)
 	return g.setProperty(key, value, func(cKey, cValue *C.char) C.GrafeoStatus {
 		return C.grafeo_graph_set_edge_property(g.handle, C.uint64_t(id), cKey, cValue)
 	})
@@ -226,6 +236,7 @@ func (g *Graph) named(name string, call func(cName *C.char) C.int32_t) (bool, er
 
 // RemoveNodeProperty removes a property of a node of the graph; whether it was there.
 func (g *Graph) RemoveNodeProperty(id uint64, key string) (bool, error) {
+	defer runtime.KeepAlive(g)
 	return g.named(key, func(cKey *C.char) C.int32_t {
 		return C.grafeo_graph_remove_node_property(g.handle, C.uint64_t(id), cKey)
 	})
@@ -233,6 +244,7 @@ func (g *Graph) RemoveNodeProperty(id uint64, key string) (bool, error) {
 
 // RemoveEdgeProperty removes a property of an edge of the graph; whether it was there.
 func (g *Graph) RemoveEdgeProperty(id uint64, key string) (bool, error) {
+	defer runtime.KeepAlive(g)
 	return g.named(key, func(cKey *C.char) C.int32_t {
 		return C.grafeo_graph_remove_edge_property(g.handle, C.uint64_t(id), cKey)
 	})
@@ -240,6 +252,7 @@ func (g *Graph) RemoveEdgeProperty(id uint64, key string) (bool, error) {
 
 // AddNodeLabel adds a label to a node of the graph; false if it had it.
 func (g *Graph) AddNodeLabel(id uint64, label string) (bool, error) {
+	defer runtime.KeepAlive(g)
 	return g.named(label, func(cLabel *C.char) C.int32_t {
 		return C.grafeo_graph_add_node_label(g.handle, C.uint64_t(id), cLabel)
 	})
@@ -247,6 +260,7 @@ func (g *Graph) AddNodeLabel(id uint64, label string) (bool, error) {
 
 // RemoveNodeLabel removes a label from a node of the graph; whether it had it.
 func (g *Graph) RemoveNodeLabel(id uint64, label string) (bool, error) {
+	defer runtime.KeepAlive(g)
 	return g.named(label, func(cLabel *C.char) C.int32_t {
 		return C.grafeo_graph_remove_node_label(g.handle, C.uint64_t(id), cLabel)
 	})
@@ -254,21 +268,25 @@ func (g *Graph) RemoveNodeLabel(id uint64, label string) (bool, error) {
 
 // DeleteNode deletes a node of the graph (one with edges fails); whether it existed.
 func (g *Graph) DeleteNode(id uint64) (bool, error) {
+	defer runtime.KeepAlive(g)
 	return g.flag(func() C.int32_t { return C.grafeo_graph_delete_node(g.handle, C.uint64_t(id)) })
 }
 
 // DetachDeleteNode deletes a node of the graph with all its edges; whether it existed.
 func (g *Graph) DetachDeleteNode(id uint64) (bool, error) {
+	defer runtime.KeepAlive(g)
 	return g.flag(func() C.int32_t { return C.grafeo_graph_detach_delete_node(g.handle, C.uint64_t(id)) })
 }
 
 // DeleteEdge deletes an edge of the graph; whether it existed.
 func (g *Graph) DeleteEdge(id uint64) (bool, error) {
+	defer runtime.KeepAlive(g)
 	return g.flag(func() C.int32_t { return C.grafeo_graph_delete_edge(g.handle, C.uint64_t(id)) })
 }
 
 // BatchCreateNodesWithProps is Database.BatchCreateNodesWithProps in the graph.
 func (g *Graph) BatchCreateNodesWithProps(labels []string, rows []map[string]any) ([]uint64, error) {
+	defer runtime.KeepAlive(g)
 	cLabels, cRows, err := nodeRows(labels, rows)
 	if err != nil {
 		return nil, err
@@ -282,6 +300,7 @@ func (g *Graph) BatchCreateNodesWithProps(labels []string, rows []map[string]any
 
 // BatchCreateEdges is Database.BatchCreateEdges in the graph.
 func (g *Graph) BatchCreateEdges(edges []BatchEdge) ([]uint64, error) {
+	defer runtime.KeepAlive(g)
 	if edges == nil {
 		edges = []BatchEdge{}
 	}
@@ -297,6 +316,7 @@ func (g *Graph) BatchCreateEdges(edges []BatchEdge) ([]uint64, error) {
 
 // UpsertNodes is Database.UpsertNodes in the graph.
 func (g *Graph) UpsertNodes(labels []string, rows []map[string]any, options *UpsertNodesOptions) (*UpsertSummary, error) {
+	defer runtime.KeepAlive(g)
 	return upsertNodes(labels, rows, options, func(cLabels, cRows, cOptions *C.char, out **C.char) C.GrafeoStatus {
 		return C.grafeo_graph_upsert_nodes(g.handle, cLabels, cRows, cOptions, out)
 	})
@@ -304,6 +324,7 @@ func (g *Graph) UpsertNodes(labels []string, rows []map[string]any, options *Ups
 
 // UpsertEdges is Database.UpsertEdges in the graph.
 func (g *Graph) UpsertEdges(edgeType string, rows []map[string]any, options *UpsertEdgesOptions) (*UpsertSummary, error) {
+	defer runtime.KeepAlive(g)
 	return upsertEdges(edgeType, rows, options, func(cType, cRows, cOptions *C.char, out **C.char) C.GrafeoStatus {
 		return C.grafeo_graph_upsert_edges(g.handle, cType, cRows, cOptions, out)
 	})

@@ -1,0 +1,21 @@
+# The runner's own code fails with its ordinary error (not an assertion): an xfail does
+# not absorb it, so the run fails. The `probe` key is accepted only under spec-probes.
+
+meta:
+  language: gql
+  model: lpg
+  section: probes
+  title: "xfail probe: the runner fails"
+  dataset: empty
+
+tests:
+
+  - name: probe_runner_error
+    xfail:
+      spec: "harness probe: a runner error is no expected failure"
+      issue: "fix in 0.6.2"
+    query: "RETURN 1 AS v"
+    probe: runner_error
+    expect:
+      rows:
+        - [1]

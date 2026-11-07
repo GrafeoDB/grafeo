@@ -20,6 +20,37 @@ type QueryResult struct {
 	// Kind tells what the result holds: rows, one boolean (SPARQL ASK) or an
 	// RDF graph (SPARQL CONSTRUCT and DESCRIBE).
 	Kind ResultKind
+	// Warnings lists the warnings the statement raised, ordered by code: a
+	// deprecated form it wrote or ran, or a notice; empty when there were
+	// none. Experimental (0.6.2+).
+	Warnings []QueryWarning
+}
+
+// QueryWarning is a warning a statement raised.
+//
+// Experimental (0.6.2+): new warnings and kinds may be added in any release.
+type QueryWarning struct {
+	// Code is its GQLSTATUS code, of class 01 (for example "01X01").
+	Code string
+	// Kind is "deprecation" or "notice".
+	Kind string
+	// Message names the replacement of a deprecated form.
+	Message string
+}
+
+// warningsOf reads the warnings of a C result.
+func warningsOf(r *C.GrafeoResult) []QueryWarning {
+	count := int(C.grafeo_result_warning_count(r))
+	warnings := make([]QueryWarning, 0, count)
+	for i := 0; i < count; i++ {
+		index := C.size_t(i)
+		warnings = append(warnings, QueryWarning{
+			Code:    C.GoString(C.grafeo_result_warning_code(r, index)),
+			Kind:    C.GoString(C.grafeo_result_warning_kind(r, index)),
+			Message: C.GoString(C.grafeo_result_warning_message(r, index)),
+		})
+	}
+	return warnings
 }
 
 // Boolean returns the answer of a SPARQL ASK; false and not ok for any other
@@ -120,7 +151,7 @@ func WithEf(ef int) SearchOption {
 func parseResult(r *C.GrafeoResult) (*QueryResult, error) {
 	jsonPtr := C.grafeo_result_json(r)
 	if jsonPtr == nil {
-		return &QueryResult{Counters: countersOf(r)}, nil
+		return &QueryResult{Counters: countersOf(r), Warnings: warningsOf(r)}, nil
 	}
 	jsonStr := C.GoString(jsonPtr)
 
@@ -151,6 +182,7 @@ func parseResult(r *C.GrafeoResult) (*QueryResult, error) {
 		RowsScanned:     uint64(C.grafeo_result_rows_scanned(r)),
 		Counters:        countersOf(r),
 		Kind:            ResultKind(C.grafeo_result_kind(r)),
+		Warnings:        warningsOf(r),
 	}, nil
 }
 

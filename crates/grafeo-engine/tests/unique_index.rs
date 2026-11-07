@@ -1125,6 +1125,50 @@ fn a_rule_refuses_alike_with_its_index_and_without() {
     );
 }
 
+/// A string and a number are two values to the rule, whatever the string spells; two numbers of
+/// one value, and two lists of such numbers, are one.
+#[test]
+fn a_string_and_a_number_are_two_values_to_a_rule() {
+    let literal = |text: &str| -> Value {
+        GrafeoDB::new_in_memory()
+            .execute(&format!("RETURN {text} AS v"))
+            .unwrap()
+            .rows()[0][0]
+            .clone()
+    };
+    let mut wrong = Vec::new();
+    for index in [Index::TheRules, Index::MadeFirst, Index::Dropped] {
+        let verdicts = verdicts_on_value_pairs(index);
+        let held = |first: &str, second: &str| -> String {
+            let (first, second) = (literal(first), literal(second));
+            let line = verdicts
+                .iter()
+                .find(|verdict| verdict.starts_with(&format!("{first:?} then {second:?}: ")))
+                .unwrap_or_else(|| panic!("{first:?} then {second:?}"));
+            line.rsplit("; ").next().unwrap().to_string()
+        };
+        for (first, second, count) in [
+            ("'042'", "42", "2 held"),
+            ("42", "'042'", "2 held"),
+            ("'1'", "1", "2 held"),
+            ("'1.0'", "1.0", "2 held"),
+            ("'true'", "true", "2 held"),
+            ("['1']", "[1]", "2 held"),
+            ("1", "1.0", "1 held"),
+            ("[1]", "[1.0]", "1 held"),
+            ("0.0e0", "-0.0e0", "1 held"),
+        ] {
+            let found = held(first, second);
+            if found != count {
+                wrong.push(format!(
+                    "{index:?}: {first} then {second}: {found}, want {count}"
+                ));
+            }
+        }
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
+
 /// What no reading of `=` can move, whatever the index.
 #[test]
 fn the_plain_verdicts_hold() {

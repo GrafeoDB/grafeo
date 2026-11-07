@@ -46,18 +46,21 @@ def ids(results):
     return {node_id for node_id, _ in results}
 
 
+@pytest.mark.requires("vector-index")
 def test_control_vector_index_and_search_on_the_default_graph(docs):
     db, default_docs, _ = docs
     db.create_vector_index("Doc", "emb", dimensions=3, metric="cosine")
     assert ids(db.vector_search("Doc", "emb", [1.0, 0.0, 0.0], 5)) == default_docs
 
 
+@pytest.mark.requires("text-index")
 def test_control_text_index_and_search_on_the_default_graph(docs):
     db, default_docs, _ = docs
     db.create_text_index("Doc", "body")
     assert ids(db.text_search("Doc", "body", "notes", 5)) == default_docs
 
 
+@pytest.mark.requires("vector-index")
 def test_vector_index_and_search_follow_the_selected_graph(docs):
     db, default_docs, archive_docs = docs
     db.set_graph(ARCHIVE)
@@ -71,6 +74,7 @@ def test_vector_index_and_search_follow_the_selected_graph(docs):
         db.vector_search("Doc", "emb", [1.0, 0.0, 0.0], 5)
 
 
+@pytest.mark.requires("text-index")
 def test_text_index_and_search_follow_the_selected_graph(docs):
     db, default_docs, archive_docs = docs
     db.set_graph(ARCHIVE)
@@ -84,6 +88,7 @@ def test_text_index_and_search_follow_the_selected_graph(docs):
         db.text_search("Doc", "body", "notes", 5)
 
 
+@pytest.mark.requires("vector-index")
 def test_drop_vector_index_follows_the_selected_graph(docs):
     db, default_docs, _ = docs
     db.create_vector_index("Doc", "emb", dimensions=3, metric="cosine")

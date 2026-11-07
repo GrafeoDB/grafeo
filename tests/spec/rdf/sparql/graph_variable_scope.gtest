@@ -1,0 +1,163 @@
+# GRAPH ?g { P } evaluates P in each named graph, then joins ?g (SPARQL 1.1 18.6): inside P, ?g is free.
+# An EXISTS, a NOT EXISTS, an OPTIONAL's right side and a MINUS see it unbound; a nested GRAPH ?g on a
+# join or union path binds it and keeps the graph at hand. Generated from sparql_graph_variable_scope.rs;
+# rdflib gives the same answers but for the MINUS pair inside EXISTS, where grafeo follows the SPARQL 1.2
+# draft's EXISTS by decision (the user, 2026-11-05) and rdflib SPARQL 1.1.
+
+meta:
+  language: sparql
+  model: rdf
+  section: "18.6"
+  title: The variable of GRAPH inside its pattern
+  dataset: empty
+  requires: [sparql, rdf]
+
+tests:
+
+  - name: exists
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :c :q 9 . GRAPH <urn:g1> { :a :p 1 . :b :p 2 . :b :q 3 . :c :p 4 . :x :in <urn:g1> } GRAPH <urn:g2> { :a :q 5 . :d :p 6 . :y :in <urn:g1> . :z :in <urn:g2> } }"
+    query: "PREFIX : <urn:> SELECT ?g ?s WHERE { GRAPH ?g { ?s :p ?o FILTER(EXISTS { GRAPH ?g { ?s :q ?x } }) } }"
+    expect:
+      rows:
+        - ["urn:g1", "urn:a"]
+        - ["urn:g1", "urn:b"]
+
+  - name: not_exists
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :c :q 9 . GRAPH <urn:g1> { :a :p 1 . :b :p 2 . :b :q 3 . :c :p 4 . :x :in <urn:g1> } GRAPH <urn:g2> { :a :q 5 . :d :p 6 . :y :in <urn:g1> . :z :in <urn:g2> } }"
+    query: "PREFIX : <urn:> SELECT ?g ?s WHERE { GRAPH ?g { ?s :p ?o FILTER(NOT EXISTS { GRAPH ?g { ?s :q ?x } }) } }"
+    expect:
+      rows:
+        - ["urn:g1", "urn:c"]
+        - ["urn:g2", "urn:d"]
+
+  - name: optional
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :c :q 9 . GRAPH <urn:g1> { :a :p 1 . :b :p 2 . :b :q 3 . :c :p 4 . :x :in <urn:g1> } GRAPH <urn:g2> { :a :q 5 . :d :p 6 . :y :in <urn:g1> . :z :in <urn:g2> } }"
+    query: "PREFIX : <urn:> SELECT ?g ?s ?x WHERE { GRAPH ?g { ?s :p ?o OPTIONAL { GRAPH ?g { ?s :q ?x } } } }"
+    expect:
+      rows:
+        - ["urn:g1", "urn:b", 3]
+        - ["urn:g1", "urn:c", null]
+        - ["urn:g2", "urn:d", null]
+
+  - name: minus
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :c :q 9 . GRAPH <urn:g1> { :a :p 1 . :b :p 2 . :b :q 3 . :c :p 4 . :x :in <urn:g1> } GRAPH <urn:g2> { :a :q 5 . :d :p 6 . :y :in <urn:g1> . :z :in <urn:g2> } }"
+    query: "PREFIX : <urn:> SELECT ?g ?s WHERE { GRAPH ?g { ?s :p ?o MINUS { GRAPH ?g { ?s :q ?x } } } }"
+    expect:
+      rows:
+        - ["urn:g1", "urn:c"]
+        - ["urn:g2", "urn:d"]
+
+  - name: join
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :c :q 9 . GRAPH <urn:g1> { :a :p 1 . :b :p 2 . :b :q 3 . :c :p 4 . :x :in <urn:g1> } GRAPH <urn:g2> { :a :q 5 . :d :p 6 . :y :in <urn:g1> . :z :in <urn:g2> } }"
+    query: "PREFIX : <urn:> SELECT ?g ?s ?x WHERE { GRAPH ?g { ?s :p ?o . GRAPH ?g { ?s :q ?x } } }"
+    expect:
+      rows:
+        - ["urn:g1", "urn:b", 3]
+
+  - name: union
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :c :q 9 . GRAPH <urn:g1> { :a :p 1 . :b :p 2 . :b :q 3 . :c :p 4 . :x :in <urn:g1> } GRAPH <urn:g2> { :a :q 5 . :d :p 6 . :y :in <urn:g1> . :z :in <urn:g2> } }"
+    query: "PREFIX : <urn:> SELECT ?g ?s WHERE { GRAPH ?g { { ?s :p 1 } UNION { GRAPH ?g { ?s :q ?x } } } }"
+    expect:
+      rows:
+        - ["urn:g1", "urn:a"]
+        - ["urn:g1", "urn:b"]
+        - ["urn:g2", "urn:a"]
+
+  - name: filter_on_g
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :c :q 9 . GRAPH <urn:g1> { :a :p 1 . :b :p 2 . :b :q 3 . :c :p 4 . :x :in <urn:g1> } GRAPH <urn:g2> { :a :q 5 . :d :p 6 . :y :in <urn:g1> . :z :in <urn:g2> } }"
+    query: "PREFIX : <urn:> SELECT ?g ?s WHERE { GRAPH ?g { ?s :p ?o FILTER(?g = <urn:g1>) } }"
+    expect:
+      empty: true
+
+  - name: g_as_a_term
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :c :q 9 . GRAPH <urn:g1> { :a :p 1 . :b :p 2 . :b :q 3 . :c :p 4 . :x :in <urn:g1> } GRAPH <urn:g2> { :a :q 5 . :d :p 6 . :y :in <urn:g1> . :z :in <urn:g2> } }"
+    query: "PREFIX : <urn:> SELECT ?g ?s WHERE { GRAPH ?g { ?s :in ?g } }"
+    expect:
+      rows:
+        - ["urn:g1", "urn:x"]
+        - ["urn:g2", "urn:z"]
+
+  - name: bound_g
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :c :q 9 . GRAPH <urn:g1> { :a :p 1 . :b :p 2 . :b :q 3 . :c :p 4 . :x :in <urn:g1> } GRAPH <urn:g2> { :a :q 5 . :d :p 6 . :y :in <urn:g1> . :z :in <urn:g2> } }"
+    query: "PREFIX : <urn:> SELECT ?g ?s WHERE { GRAPH ?g { ?s :p ?o FILTER(BOUND(?g)) } }"
+    expect:
+      empty: true
+
+  - name: not_bound_g
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :c :q 9 . GRAPH <urn:g1> { :a :p 1 . :b :p 2 . :b :q 3 . :c :p 4 . :x :in <urn:g1> } GRAPH <urn:g2> { :a :q 5 . :d :p 6 . :y :in <urn:g1> . :z :in <urn:g2> } }"
+    query: "PREFIX : <urn:> SELECT ?g ?s WHERE { GRAPH ?g { ?s :p ?o FILTER(!BOUND(?g)) } }"
+    expect:
+      rows:
+        - ["urn:g1", "urn:a"]
+        - ["urn:g1", "urn:b"]
+        - ["urn:g1", "urn:c"]
+        - ["urn:g2", "urn:d"]
+
+  - name: minus_shares_nothing
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :c :q 9 . GRAPH <urn:g1> { :a :p 1 . :b :p 2 . :b :q 3 . :c :p 4 . :x :in <urn:g1> } GRAPH <urn:g2> { :a :q 5 . :d :p 6 . :y :in <urn:g1> . :z :in <urn:g2> } }"
+    query: "PREFIX : <urn:> SELECT ?g ?s WHERE { GRAPH ?g { ?s :in ?g MINUS { ?x :q ?y } } }"
+    expect:
+      rows:
+        - ["urn:g1", "urn:x"]
+        - ["urn:g2", "urn:z"]
+
+  - name: sub_select_in_a_term_pattern
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :c :q 9 . GRAPH <urn:g1> { :a :p 1 . :b :p 2 . :b :q 3 . :c :p 4 . :x :in <urn:g1> } GRAPH <urn:g2> { :a :q 5 . :d :p 6 . :y :in <urn:g1> . :z :in <urn:g2> } }"
+    query: "PREFIX : <urn:> SELECT ?g ?s WHERE { GRAPH ?g { ?s :in ?g { SELECT ?s WHERE { ?s :in ?h } } } }"
+    expect:
+      rows:
+        - ["urn:g1", "urn:x"]
+        - ["urn:g2", "urn:z"]
+
+  - name: nested_graph_h
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :c :q 9 . GRAPH <urn:g1> { :a :p 1 . :b :p 2 . :b :q 3 . :c :p 4 . :x :in <urn:g1> } GRAPH <urn:g2> { :a :q 5 . :d :p 6 . :y :in <urn:g1> . :z :in <urn:g2> } }"
+    query: "PREFIX : <urn:> SELECT ?g ?h ?s WHERE { GRAPH ?g { ?s :in ?g . GRAPH ?h { ?s :in ?h } } }"
+    expect:
+      rows:
+        - ["urn:g1", "urn:g1", "urn:x"]
+        - ["urn:g2", "urn:g2", "urn:z"]
+
+  - name: from_named_term_pattern
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :c :q 9 . GRAPH <urn:g1> { :a :p 1 . :b :p 2 . :b :q 3 . :c :p 4 . :x :in <urn:g1> } GRAPH <urn:g2> { :a :q 5 . :d :p 6 . :y :in <urn:g1> . :z :in <urn:g2> } }"
+    query: "PREFIX : <urn:> SELECT ?g ?s FROM NAMED <urn:g2> WHERE { GRAPH ?g { ?s :in ?g } }"
+    expect:
+      rows:
+        - ["urn:g2", "urn:z"]
+
+  - name: from_named
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :c :q 9 . GRAPH <urn:g1> { :a :p 1 . :b :p 2 . :b :q 3 . :c :p 4 . :x :in <urn:g1> } GRAPH <urn:g2> { :a :q 5 . :d :p 6 . :y :in <urn:g1> . :z :in <urn:g2> } }"
+    query: "PREFIX : <urn:> SELECT ?g ?s FROM NAMED <urn:g1> WHERE { GRAPH ?g { ?s :p ?o FILTER(EXISTS { GRAPH ?g { ?s :q ?x } }) } }"
+    expect:
+      rows:
+        - ["urn:g1", "urn:b"]
+
+  - name: exists_minus_shares_nothing
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :c :q 9 . GRAPH <urn:g1> { :a :p 1 . :b :p 2 . :b :q 3 . :c :p 4 . :x :in <urn:g1> } GRAPH <urn:g2> { :a :q 5 . :d :p 6 . :y :in <urn:g1> . :z :in <urn:g2> } }"
+    query: "PREFIX : <urn:> SELECT ?g ?s WHERE { GRAPH ?g { ?s :in ?g FILTER(EXISTS { MINUS { ?x :q ?y } }) } }"
+    expect:
+      empty: true
+
+  - name: not_exists_minus_shares_nothing
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :c :q 9 . GRAPH <urn:g1> { :a :p 1 . :b :p 2 . :b :q 3 . :c :p 4 . :x :in <urn:g1> } GRAPH <urn:g2> { :a :q 5 . :d :p 6 . :y :in <urn:g1> . :z :in <urn:g2> } }"
+    query: "PREFIX : <urn:> SELECT ?g ?s WHERE { GRAPH ?g { ?s :in ?g FILTER(NOT EXISTS { MINUS { ?x :q ?y } }) } }"
+    expect:
+      rows:
+        - ["urn:g1", "urn:x"]
+        - ["urn:g2", "urn:z"]

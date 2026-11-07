@@ -172,8 +172,10 @@ pub enum CompositeOp {
 /// CALL procedure_name(args)
 ///   [YIELD field [AS alias], ...]
 ///   [WHERE predicate]
-///   [RETURN expr [AS alias], ... [ORDER BY ...] [SKIP n] [LIMIT n]]
 /// ```
+///
+/// A call that other clauses follow, a `RETURN` among them, is the first
+/// clause of a query ([`QueryClause::CallProcedure`]).
 #[derive(Debug, Clone)]
 pub struct CallStatement {
     /// Qualified procedure name, e.g. `["grafeo", "pagerank"]`.
@@ -184,8 +186,6 @@ pub struct CallStatement {
     pub yield_items: Option<Vec<YieldItem>>,
     /// Optional WHERE clause filtering yielded rows.
     pub where_clause: Option<WhereClause>,
-    /// Optional RETURN clause with projection, ORDER BY, SKIP, LIMIT.
-    pub return_clause: Option<ReturnClause>,
     /// Source span.
     pub span: Option<SourceSpan>,
 }

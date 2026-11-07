@@ -2,8 +2,7 @@
 #
 # Covers: FROM clause (specifying default graph), FROM NAMED clause (specifying
 # named graphs), combined FROM + FROM NAMED, and edge cases around dataset
-# restriction. FROM and FROM NAMED are parsed but not yet enforced at execution
-# level, so most tests are marked skip.
+# restriction. from_without_from_named.gtest holds GRAPH under FROM alone.
 
 meta:
   language: sparql

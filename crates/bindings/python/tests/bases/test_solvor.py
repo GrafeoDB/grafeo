@@ -24,6 +24,7 @@ except ImportError:
     SOLVOR_AVAILABLE = False
 
 
+@pytest.mark.requires("algos")
 class BaseSolvORComparisonTest(ABC):
     """Abstract base class for solvOR plugin comparison tests.
 
@@ -164,6 +165,7 @@ class BaseSolvORComparisonTest(ABC):
             )
 
 
+@pytest.mark.requires("algos")
 class BaseSolvORBenchmarkTest(ABC):
     """Abstract base class for solvOR plugin performance comparison.
 

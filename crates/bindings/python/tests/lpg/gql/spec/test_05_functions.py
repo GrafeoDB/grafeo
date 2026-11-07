@@ -6,8 +6,6 @@ type conversion functions.
 
 import math
 
-import pytest
-
 # =============================================================================
 # Aggregation Functions
 # =============================================================================
@@ -613,9 +611,9 @@ class TestGraphElementFunctions:
             )
         )
         assert result == [{"src_ok": True, "dst_ok": True, "src_id": True}]
-        # GQL makes a node and a number not comparable (22G04)
-        with pytest.raises(Exception, match="22G04|not comparable"):
-            list(db.execute("MATCH (s)-[r:KNOWS]->(t) RETURN startNode(r) = id(s) AS bad"))
+        # A node equals no number, its id included (GA04): false, not an error
+        result = list(db.execute("MATCH (s)-[r:KNOWS]->(t) RETURN startNode(r) = id(s) AS bad"))
+        assert result == [{"bad": False}]
 
 
 # =============================================================================

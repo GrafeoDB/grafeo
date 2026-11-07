@@ -60,7 +60,8 @@ impl Session {
             buffer_manager: cfg.buffer_manager,
             commit_counter: cfg.commit_counter,
             gc_interval: cfg.gc_interval,
-            active_streams: AtomicUsize::new(0),
+            active_streams: Arc::new(AtomicUsize::new(0)),
+            ended: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             #[cfg(feature = "wal")]
             wal: None,
             #[cfg(feature = "cdc")]
@@ -88,6 +89,8 @@ impl Session {
             tx_start_time: parking_lot::Mutex::new(None),
             #[cfg(lpg_language)]
             projections: cfg.projections,
+            #[cfg(feature = "testing-warning-probe")]
+            warning_probe: parking_lot::Mutex::new(None),
         }
     }
 }

@@ -1,5 +1,6 @@
 """A node deleted with its edges is one change (#465)."""
 
+import pytest
 from grafeo import GrafeoDB
 
 
@@ -21,6 +22,7 @@ def test_detach_delete_node_removes_the_node_with_its_edges():
     assert db.detach_delete_node(gus.id) is False
 
 
+@pytest.mark.requires("cdc")
 def test_the_edge_events_name_the_node():
     db = GrafeoDB(cdc=True)
     gus, edges = people(db)

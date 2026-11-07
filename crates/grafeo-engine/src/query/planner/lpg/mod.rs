@@ -108,7 +108,6 @@ pub(crate) mod seek;
 pub(crate) mod subquery;
 pub(crate) mod value_join;
 
-#[cfg(feature = "algos")]
 use crate::query::plan::CallProcedureOp;
 #[cfg(feature = "text-index")]
 use crate::query::plan::TextScanOp;
@@ -540,6 +539,14 @@ impl Planner {
         Arc::clone(&self.read_counter)
     }
 
+    /// Where the statement's warnings go: those the translation of a plan
+    /// this planner plans found, and those its run raises, a stored
+    /// procedure's body included.
+    #[must_use]
+    pub fn warnings(&self) -> Arc<grafeo_common::utils::warning::WarningSink> {
+        Arc::clone(&self.session_context.warnings)
+    }
+
     /// Counts the reads into `counter` instead of a counter of its own, so
     /// the reads of a stored procedure's body count for the statement that
     /// calls it.
@@ -907,6 +914,9 @@ impl Planner {
         let _span = grafeo_debug_span!("grafeo::query::plan");
         self.take_plan_names(logical_plan);
         self.find_reachability_expands(&logical_plan.root);
+        self.session_context
+            .warnings
+            .raise_all(logical_plan.warnings);
         let (operator, columns) = self.plan_operator(&logical_plan.root)?;
         let operator = self.shuffled_root(logical_plan, operator);
         Ok(PhysicalPlan { operator, columns })
@@ -930,6 +940,9 @@ impl Planner {
         self.profile_entries.borrow_mut().clear();
         self.take_plan_names(logical_plan);
         self.find_reachability_expands(&logical_plan.root);
+        self.session_context
+            .warnings
+            .raise_all(logical_plan.warnings);
 
         let result = self.plan_operator(&logical_plan.root);
 
@@ -1073,14 +1086,7 @@ impl Planner {
             LogicalOperator::CallProcedure(call) if load::is_load(call) => {
                 self.plan_load_call(call)
             }
-            #[cfg(feature = "algos")]
             LogicalOperator::CallProcedure(call) => self.plan_call_procedure(call),
-            #[cfg(not(feature = "algos"))]
-            LogicalOperator::CallProcedure(_) => Err(grafeo_common::utils::error::Error::from(
-                grafeo_common::utils::error::QueryError::unsupported(
-                    "this build has no procedures (the `algos` feature)",
-                ),
-            )),
             LogicalOperator::ParameterScan(param_scan) => self.plan_parameter_scan(param_scan),
             LogicalOperator::DelimScan(scan) => self.plan_delim_scan(scan),
             LogicalOperator::MultiWayJoin(mwj) => self.plan_multi_way_join(mwj),
@@ -1297,17 +1303,10 @@ impl Planner {
             VectorMetric::Manhattan => DistanceMetric::Manhattan,
         });
 
-        // Top-k mode uses HNSW when available; threshold/unbounded mode
-        // bounds k to the label's node count so we don't feed usize::MAX
-        // into HNSW (which degrades to full traversal and risks overflow
-        // in quantized rescore paths even with saturating_mul).
-        let k = match scan.k {
-            Some(k) => k,
-            None => match scan.label.as_ref() {
-                None => self.store.node_count(self.read_view())?,
-                Some(label) => self.store.nodes_by_label_count(label, self.read_view())?,
-            },
-        };
+        // Top-k mode uses HNSW when available; a threshold scan has no k, and
+        // the operator bounds it by the label's node count when it first runs,
+        // at its own view: planning reads nothing (`EXPLAIN` plans at any epoch).
+        let k = scan.k;
 
         // A query vector the index cannot measure is an error that names the
         // index (#593), whichever metric the predicate asks for: a search of
@@ -1418,14 +1417,12 @@ impl Planner {
 }
 
 /// An operator that yields a static set of rows (for `grafeo.procedures()` etc.).
-#[cfg(feature = "algos")]
 struct StaticResultOperator {
     rows: Vec<Vec<Value>>,
     column_indices: Vec<usize>,
     row_index: usize,
 }
 
-#[cfg(feature = "algos")]
 impl Operator for StaticResultOperator {
     fn next(&mut self) -> grafeo_core::execution::operators::OperatorResult {
         use grafeo_core::execution::DataChunk;
@@ -3858,7 +3855,6 @@ mod tests {
 
     // ==================== StaticResultOperator ====================
 
-    #[cfg(feature = "algos")]
     #[test]
     fn test_static_result_operator_emits_rows_and_resets() {
         use grafeo_common::types::Value;

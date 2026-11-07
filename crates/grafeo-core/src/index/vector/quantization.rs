@@ -939,40 +939,6 @@ impl ProductQuantizer {
 }
 
 // ============================================================================
-// SIMD-Accelerated Hamming Distance
-// ============================================================================
-
-/// Computes hamming distance with SIMD acceleration (if available).
-///
-/// On x86_64 with popcnt instruction, this is significantly faster than
-/// the scalar implementation.
-#[cfg(target_arch = "x86_64")]
-#[must_use]
-pub fn hamming_distance_simd(a: &[u64], b: &[u64]) -> u32 {
-    // Use popcnt instruction if available (almost all modern CPUs)
-    a.iter()
-        .zip(b)
-        .map(|(&x, &y)| {
-            let xor = x ^ y;
-            // Safety: popcnt is available on virtually all x86_64 CPUs since Nehalem (2008).
-            // This is a well-understood CPU intrinsic with no memory safety implications.
-            // reason: bit-level reinterpretation for popcount, and popcount result fits u32
-            #[allow(unsafe_code, clippy::cast_possible_wrap, clippy::cast_sign_loss)]
-            unsafe {
-                std::arch::x86_64::_popcnt64(xor as i64) as u32
-            }
-        })
-        .sum()
-}
-
-/// Fallback scalar implementation.
-#[cfg(not(target_arch = "x86_64"))]
-#[must_use]
-pub fn hamming_distance_simd(a: &[u64], b: &[u64]) -> u32 {
-    BinaryQuantizer::hamming_distance(a, b)
-}
-
-// ============================================================================
 // Tests
 // ============================================================================
 
@@ -1202,19 +1168,6 @@ mod tests {
         assert_eq!(BinaryQuantizer::bytes_needed(64), 8);
         assert_eq!(BinaryQuantizer::bytes_needed(128), 16);
         assert_eq!(BinaryQuantizer::bytes_needed(1536), 192); // vs 6144 for f32
-    }
-
-    // ========================================================================
-    // SIMD Tests
-    // ========================================================================
-
-    #[test]
-    fn test_hamming_distance_simd() {
-        let a = vec![0xFFFF_FFFF_FFFF_FFFFu64, 0x0000_0000_0000_0000];
-        let b = vec![0x0000_0000_0000_0000u64, 0xFFFF_FFFF_FFFF_FFFF];
-
-        let dist = hamming_distance_simd(&a, &b);
-        assert_eq!(dist, 128); // All 128 bits differ
     }
 
     // ========================================================================

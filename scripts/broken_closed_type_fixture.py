@@ -13,7 +13,8 @@ from pathlib import Path
 
 import grafeo
 
-assert grafeo.__version__ == "0.6.1", grafeo.__version__
+if grafeo.__version__ != "0.6.1":
+    raise RuntimeError(f"run with the 0.6.1 wheel, not {grafeo.__version__}")
 OUT = Path("crates/grafeo-engine/tests/fixtures/closed_type_broken/0.6.1.grafeo")
 OUT.parent.mkdir(parents=True, exist_ok=True)
 OUT.unlink(missing_ok=True)

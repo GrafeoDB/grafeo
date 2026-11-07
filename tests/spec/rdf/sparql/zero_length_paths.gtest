@@ -1,0 +1,439 @@
+# The zero-length step of a property path (SPARQL 1.1 sec 18.4): term to term, a variable and a term, and two
+# variables, which read each node of the active graph. Generated with sparql_zero_length_paths.rs.
+
+meta:
+  language: sparql
+  model: rdf
+  section: "18.4"
+  title: Zero-length steps of property paths
+  dataset: empty
+  requires: [sparql, rdf]
+
+tests:
+
+  - name: one_var_at_object
+    setup:
+      - "INSERT DATA { <urn:a> <urn:q> <urn:b> . <urn:b> <urn:q> <urn:c> . <urn:e> <urn:q> <urn:a> . <urn:d> <urn:p> 1 . GRAPH <urn:g> { <urn:z> <urn:q> <urn:a> . <urn:d> <urn:p> 2 . } }"
+    query: "SELECT ?s WHERE { ?s <urn:q>? <urn:a> }"
+    expect:
+      rows:
+        - ["urn:a"]
+        - ["urn:e"]
+
+  - name: one_var_at_object_not_a_subject
+    setup:
+      - "INSERT DATA { <urn:a> <urn:q> <urn:b> . <urn:b> <urn:q> <urn:c> . <urn:e> <urn:q> <urn:a> . <urn:d> <urn:p> 1 . GRAPH <urn:g> { <urn:z> <urn:q> <urn:a> . <urn:d> <urn:p> 2 . } }"
+    query: "SELECT ?s WHERE { ?s <urn:q>? <urn:b> }"
+    expect:
+      rows:
+        - ["urn:a"]
+        - ["urn:b"]
+
+  - name: one_var_at_object_no_edge
+    setup:
+      - "INSERT DATA { <urn:a> <urn:q> <urn:b> . <urn:b> <urn:q> <urn:c> . <urn:e> <urn:q> <urn:a> . <urn:d> <urn:p> 1 . GRAPH <urn:g> { <urn:z> <urn:q> <urn:a> . <urn:d> <urn:p> 2 . } }"
+    query: "SELECT ?s WHERE { ?s <urn:q>? <urn:d> }"
+    expect:
+      rows:
+        - ["urn:d"]
+
+  - name: one_var_at_object_not_in_the_graph
+    setup:
+      - "INSERT DATA { <urn:a> <urn:q> <urn:b> . <urn:b> <urn:q> <urn:c> . <urn:e> <urn:q> <urn:a> . <urn:d> <urn:p> 1 . GRAPH <urn:g> { <urn:z> <urn:q> <urn:a> . <urn:d> <urn:p> 2 . } }"
+    query: "SELECT ?s WHERE { ?s <urn:q>? <urn:nothing> }"
+    expect:
+      rows:
+        - ["urn:nothing"]
+
+  - name: one_var_at_subject
+    setup:
+      - "INSERT DATA { <urn:a> <urn:q> <urn:b> . <urn:b> <urn:q> <urn:c> . <urn:e> <urn:q> <urn:a> . <urn:d> <urn:p> 1 . GRAPH <urn:g> { <urn:z> <urn:q> <urn:a> . <urn:d> <urn:p> 2 . } }"
+    query: "SELECT ?o WHERE { <urn:a> <urn:q>? ?o }"
+    expect:
+      rows:
+        - ["urn:a"]
+        - ["urn:b"]
+
+  - name: one_var_at_subject_not_in_the_graph
+    setup:
+      - "INSERT DATA { <urn:a> <urn:q> <urn:b> . <urn:b> <urn:q> <urn:c> . <urn:e> <urn:q> <urn:a> . <urn:d> <urn:p> 1 . GRAPH <urn:g> { <urn:z> <urn:q> <urn:a> . <urn:d> <urn:p> 2 . } }"
+    query: "SELECT ?o WHERE { <urn:nothing> <urn:q>? ?o }"
+    expect:
+      rows:
+        - ["urn:nothing"]
+
+  - name: two_terms_same
+    setup:
+      - "INSERT DATA { <urn:a> <urn:q> <urn:b> . <urn:b> <urn:q> <urn:c> . <urn:e> <urn:q> <urn:a> . <urn:d> <urn:p> 1 . GRAPH <urn:g> { <urn:z> <urn:q> <urn:a> . <urn:d> <urn:p> 2 . } }"
+    query: "ASK { <urn:a> <urn:q>? <urn:a> }"
+    expect:
+      rows:
+        - [true]
+
+  - name: two_terms_same_no_edge_at_all
+    setup:
+      - "INSERT DATA { <urn:a> <urn:q> <urn:b> . <urn:b> <urn:q> <urn:c> . <urn:e> <urn:q> <urn:a> . <urn:d> <urn:p> 1 . GRAPH <urn:g> { <urn:z> <urn:q> <urn:a> . <urn:d> <urn:p> 2 . } }"
+    query: "ASK { <urn:d> <urn:q>? <urn:d> }"
+    expect:
+      rows:
+        - [true]
+
+  - name: two_terms_same_not_in_the_graph
+    setup:
+      - "INSERT DATA { <urn:a> <urn:q> <urn:b> . <urn:b> <urn:q> <urn:c> . <urn:e> <urn:q> <urn:a> . <urn:d> <urn:p> 1 . GRAPH <urn:g> { <urn:z> <urn:q> <urn:a> . <urn:d> <urn:p> 2 . } }"
+    query: "ASK { <urn:nothing> <urn:q>? <urn:nothing> }"
+    expect:
+      rows:
+        - [true]
+
+  - name: two_terms_edge
+    setup:
+      - "INSERT DATA { <urn:a> <urn:q> <urn:b> . <urn:b> <urn:q> <urn:c> . <urn:e> <urn:q> <urn:a> . <urn:d> <urn:p> 1 . GRAPH <urn:g> { <urn:z> <urn:q> <urn:a> . <urn:d> <urn:p> 2 . } }"
+    query: "ASK { <urn:a> <urn:q>? <urn:b> }"
+    expect:
+      rows:
+        - [true]
+
+  - name: two_terms_neither
+    setup:
+      - "INSERT DATA { <urn:a> <urn:q> <urn:b> . <urn:b> <urn:q> <urn:c> . <urn:e> <urn:q> <urn:a> . <urn:d> <urn:p> 1 . GRAPH <urn:g> { <urn:z> <urn:q> <urn:a> . <urn:d> <urn:p> 2 . } }"
+    query: "ASK { <urn:a> <urn:q>? <urn:c> }"
+    expect:
+      rows:
+        - [false]
+
+  - name: two_vars
+    setup:
+      - "INSERT DATA { <urn:a> <urn:q> <urn:b> . <urn:b> <urn:q> <urn:c> . <urn:e> <urn:q> <urn:a> . <urn:d> <urn:p> 1 . GRAPH <urn:g> { <urn:z> <urn:q> <urn:a> . <urn:d> <urn:p> 2 . } }"
+    query: "SELECT ?s ?o WHERE { ?s <urn:q>? ?o }"
+    expect:
+      rows:
+        - [1, 1]
+        - ["urn:a", "urn:a"]
+        - ["urn:a", "urn:b"]
+        - ["urn:b", "urn:b"]
+        - ["urn:b", "urn:c"]
+        - ["urn:c", "urn:c"]
+        - ["urn:d", "urn:d"]
+        - ["urn:e", "urn:a"]
+        - ["urn:e", "urn:e"]
+
+  - name: two_vars_same
+    setup:
+      - "INSERT DATA { <urn:a> <urn:q> <urn:b> . <urn:b> <urn:q> <urn:c> . <urn:e> <urn:q> <urn:a> . <urn:d> <urn:p> 1 . GRAPH <urn:g> { <urn:z> <urn:q> <urn:a> . <urn:d> <urn:p> 2 . } }"
+    query: "SELECT ?s WHERE { ?s <urn:q>? ?s }"
+    expect:
+      rows:
+        - [1]
+        - ["urn:a"]
+        - ["urn:b"]
+        - ["urn:c"]
+        - ["urn:d"]
+        - ["urn:e"]
+
+  - name: two_vars_in_a_graph
+    setup:
+      - "INSERT DATA { <urn:a> <urn:q> <urn:b> . <urn:b> <urn:q> <urn:c> . <urn:e> <urn:q> <urn:a> . <urn:d> <urn:p> 1 . GRAPH <urn:g> { <urn:z> <urn:q> <urn:a> . <urn:d> <urn:p> 2 . } }"
+    query: "SELECT ?s ?o WHERE { GRAPH <urn:g> { ?s <urn:q>? ?o } }"
+    expect:
+      rows:
+        - [2, 2]
+        - ["urn:a", "urn:a"]
+        - ["urn:d", "urn:d"]
+        - ["urn:z", "urn:a"]
+        - ["urn:z", "urn:z"]
+
+  - name: one_var_in_a_graph
+    setup:
+      - "INSERT DATA { <urn:a> <urn:q> <urn:b> . <urn:b> <urn:q> <urn:c> . <urn:e> <urn:q> <urn:a> . <urn:d> <urn:p> 1 . GRAPH <urn:g> { <urn:z> <urn:q> <urn:a> . <urn:d> <urn:p> 2 . } }"
+    query: "SELECT ?s WHERE { GRAPH <urn:g> { ?s <urn:q>? <urn:a> } }"
+    expect:
+      rows:
+        - ["urn:a"]
+        - ["urn:z"]
+
+  - name: two_terms_in_a_graph
+    setup:
+      - "INSERT DATA { <urn:a> <urn:q> <urn:b> . <urn:b> <urn:q> <urn:c> . <urn:e> <urn:q> <urn:a> . <urn:d> <urn:p> 1 . GRAPH <urn:g> { <urn:z> <urn:q> <urn:a> . <urn:d> <urn:p> 2 . } }"
+    query: "ASK { GRAPH <urn:g> { <urn:b> <urn:q>? <urn:b> } }"
+    expect:
+      rows:
+        - [true]
+
+  - name: star_one_var_at_object
+    setup:
+      - "INSERT DATA { <urn:a> <urn:q> <urn:b> . <urn:b> <urn:q> <urn:c> . <urn:e> <urn:q> <urn:a> . <urn:d> <urn:p> 1 . GRAPH <urn:g> { <urn:z> <urn:q> <urn:a> . <urn:d> <urn:p> 2 . } }"
+    query: "SELECT ?s WHERE { ?s <urn:q>* <urn:a> }"
+    expect:
+      rows:
+        - ["urn:a"]
+        - ["urn:e"]
+
+  - name: star_one_var_at_subject
+    setup:
+      - "INSERT DATA { <urn:a> <urn:q> <urn:b> . <urn:b> <urn:q> <urn:c> . <urn:e> <urn:q> <urn:a> . <urn:d> <urn:p> 1 . GRAPH <urn:g> { <urn:z> <urn:q> <urn:a> . <urn:d> <urn:p> 2 . } }"
+    query: "SELECT ?o WHERE { <urn:a> <urn:q>* ?o }"
+    expect:
+      rows:
+        - ["urn:a"]
+        - ["urn:b"]
+        - ["urn:c"]
+
+  - name: star_two_terms_same
+    setup:
+      - "INSERT DATA { <urn:a> <urn:q> <urn:b> . <urn:b> <urn:q> <urn:c> . <urn:e> <urn:q> <urn:a> . <urn:d> <urn:p> 1 . GRAPH <urn:g> { <urn:z> <urn:q> <urn:a> . <urn:d> <urn:p> 2 . } }"
+    query: "ASK { <urn:d> <urn:q>* <urn:d> }"
+    expect:
+      rows:
+        - [true]
+
+  - name: star_two_terms_not_in_the_graph
+    setup:
+      - "INSERT DATA { <urn:a> <urn:q> <urn:b> . <urn:b> <urn:q> <urn:c> . <urn:e> <urn:q> <urn:a> . <urn:d> <urn:p> 1 . GRAPH <urn:g> { <urn:z> <urn:q> <urn:a> . <urn:d> <urn:p> 2 . } }"
+    query: "ASK { <urn:nothing> <urn:q>* <urn:nothing> }"
+    expect:
+      rows:
+        - [true]
+
+  - name: star_two_vars
+    setup:
+      - "INSERT DATA { <urn:a> <urn:q> <urn:b> . <urn:b> <urn:q> <urn:c> . <urn:e> <urn:q> <urn:a> . <urn:d> <urn:p> 1 . GRAPH <urn:g> { <urn:z> <urn:q> <urn:a> . <urn:d> <urn:p> 2 . } }"
+    query: "SELECT ?s ?o WHERE { ?s <urn:q>* ?o }"
+    expect:
+      rows:
+        - [1, 1]
+        - ["urn:a", "urn:a"]
+        - ["urn:a", "urn:b"]
+        - ["urn:a", "urn:c"]
+        - ["urn:b", "urn:b"]
+        - ["urn:b", "urn:c"]
+        - ["urn:c", "urn:c"]
+        - ["urn:d", "urn:d"]
+        - ["urn:e", "urn:a"]
+        - ["urn:e", "urn:b"]
+        - ["urn:e", "urn:c"]
+        - ["urn:e", "urn:e"]
+
+  - name: plus_two_terms_same
+    setup:
+      - "INSERT DATA { <urn:a> <urn:q> <urn:b> . <urn:b> <urn:q> <urn:c> . <urn:e> <urn:q> <urn:a> . <urn:d> <urn:p> 1 . GRAPH <urn:g> { <urn:z> <urn:q> <urn:a> . <urn:d> <urn:p> 2 . } }"
+    query: "ASK { <urn:a> <urn:q>+ <urn:a> }"
+    expect:
+      rows:
+        - [false]
+
+  - name: plus_two_vars
+    setup:
+      - "INSERT DATA { <urn:a> <urn:q> <urn:b> . <urn:b> <urn:q> <urn:c> . <urn:e> <urn:q> <urn:a> . <urn:d> <urn:p> 1 . GRAPH <urn:g> { <urn:z> <urn:q> <urn:a> . <urn:d> <urn:p> 2 . } }"
+    query: "SELECT ?s ?o WHERE { ?s <urn:q>+ ?o }"
+    expect:
+      rows:
+        - ["urn:a", "urn:b"]
+        - ["urn:a", "urn:c"]
+        - ["urn:b", "urn:c"]
+        - ["urn:e", "urn:a"]
+        - ["urn:e", "urn:b"]
+        - ["urn:e", "urn:c"]
+
+  - name: sequence_from_a_term
+    setup:
+      - "INSERT DATA { <urn:a> <urn:q> <urn:b> . <urn:b> <urn:q> <urn:c> . <urn:e> <urn:q> <urn:a> . <urn:d> <urn:p> 1 . GRAPH <urn:g> { <urn:z> <urn:q> <urn:a> . <urn:a> <urn:q> <urn:d> } }"
+    query: "SELECT ?o WHERE { <urn:a> (<urn:q>/<urn:q>)? ?o }"
+    expect:
+      rows:
+        - ["urn:a"]
+        - ["urn:c"]
+
+  - name: sequence_to_a_term
+    setup:
+      - "INSERT DATA { <urn:a> <urn:q> <urn:b> . <urn:b> <urn:q> <urn:c> . <urn:e> <urn:q> <urn:a> . <urn:d> <urn:p> 1 . GRAPH <urn:g> { <urn:z> <urn:q> <urn:a> . <urn:a> <urn:q> <urn:d> } }"
+    query: "SELECT ?s WHERE { ?s (<urn:q>/<urn:q>)? <urn:c> }"
+    expect:
+      rows:
+        - ["urn:a"]
+        - ["urn:c"]
+
+  - name: sequence_to_a_term_with_no_path
+    setup:
+      - "INSERT DATA { <urn:a> <urn:q> <urn:b> . <urn:b> <urn:q> <urn:c> . <urn:e> <urn:q> <urn:a> . <urn:d> <urn:p> 1 . GRAPH <urn:g> { <urn:z> <urn:q> <urn:a> . <urn:a> <urn:q> <urn:d> } }"
+    query: "SELECT ?s WHERE { ?s (<urn:q>/<urn:q>)? <urn:d> }"
+    expect:
+      rows:
+        - ["urn:d"]
+
+  - name: sequence_two_terms_same
+    setup:
+      - "INSERT DATA { <urn:a> <urn:q> <urn:b> . <urn:b> <urn:q> <urn:c> . <urn:e> <urn:q> <urn:a> . <urn:d> <urn:p> 1 . GRAPH <urn:g> { <urn:z> <urn:q> <urn:a> . <urn:a> <urn:q> <urn:d> } }"
+    query: "ASK { <urn:d> (<urn:q>/<urn:q>)? <urn:d> }"
+    expect:
+      rows:
+        - [true]
+
+  - name: sequence_two_terms_a_path
+    setup:
+      - "INSERT DATA { <urn:a> <urn:q> <urn:b> . <urn:b> <urn:q> <urn:c> . <urn:e> <urn:q> <urn:a> . <urn:d> <urn:p> 1 . GRAPH <urn:g> { <urn:z> <urn:q> <urn:a> . <urn:a> <urn:q> <urn:d> } }"
+    query: "ASK { <urn:a> (<urn:q>/<urn:q>)? <urn:c> }"
+    expect:
+      rows:
+        - [true]
+
+  - name: sequence_two_terms_one_step_is_not_enough
+    setup:
+      - "INSERT DATA { <urn:a> <urn:q> <urn:b> . <urn:b> <urn:q> <urn:c> . <urn:e> <urn:q> <urn:a> . <urn:d> <urn:p> 1 . GRAPH <urn:g> { <urn:z> <urn:q> <urn:a> . <urn:a> <urn:q> <urn:d> } }"
+    query: "ASK { <urn:a> (<urn:q>/<urn:q>)? <urn:b> }"
+    expect:
+      rows:
+        - [false]
+
+  - name: sequence_two_variables
+    setup:
+      - "INSERT DATA { <urn:a> <urn:q> <urn:b> . <urn:b> <urn:q> <urn:c> . <urn:e> <urn:q> <urn:a> . <urn:d> <urn:p> 1 . GRAPH <urn:g> { <urn:z> <urn:q> <urn:a> . <urn:a> <urn:q> <urn:d> } }"
+    query: "SELECT ?s ?o WHERE { ?s (<urn:q>/<urn:q>)? ?o }"
+    expect:
+      rows:
+        - [1, 1]
+        - ["urn:a", "urn:a"]
+        - ["urn:a", "urn:c"]
+        - ["urn:b", "urn:b"]
+        - ["urn:c", "urn:c"]
+        - ["urn:d", "urn:d"]
+        - ["urn:e", "urn:b"]
+        - ["urn:e", "urn:e"]
+
+  - name: alternative_from_a_term
+    setup:
+      - "INSERT DATA { <urn:a> <urn:q> <urn:b> . <urn:b> <urn:q> <urn:c> . <urn:e> <urn:q> <urn:a> . <urn:d> <urn:p> 1 . GRAPH <urn:g> { <urn:z> <urn:q> <urn:a> . <urn:a> <urn:q> <urn:d> } }"
+    query: "SELECT ?o WHERE { <urn:d> (<urn:q>|<urn:p>)? ?o }"
+    expect:
+      rows:
+        - [1]
+        - ["urn:d"]
+
+  - name: alternative_to_a_term
+    setup:
+      - "INSERT DATA { <urn:a> <urn:q> <urn:b> . <urn:b> <urn:q> <urn:c> . <urn:e> <urn:q> <urn:a> . <urn:d> <urn:p> 1 . GRAPH <urn:g> { <urn:z> <urn:q> <urn:a> . <urn:a> <urn:q> <urn:d> } }"
+    query: "SELECT ?s WHERE { ?s (<urn:q>|<urn:p>)? <urn:a> }"
+    expect:
+      rows:
+        - ["urn:a"]
+        - ["urn:e"]
+
+  - name: alternative_two_terms_same
+    setup:
+      - "INSERT DATA { <urn:a> <urn:q> <urn:b> . <urn:b> <urn:q> <urn:c> . <urn:e> <urn:q> <urn:a> . <urn:d> <urn:p> 1 . GRAPH <urn:g> { <urn:z> <urn:q> <urn:a> . <urn:a> <urn:q> <urn:d> } }"
+    query: "ASK { <urn:c> (<urn:q>|<urn:p>)? <urn:c> }"
+    expect:
+      rows:
+        - [true]
+
+  - name: alternative_two_variables
+    setup:
+      - "INSERT DATA { <urn:a> <urn:q> <urn:b> . <urn:b> <urn:q> <urn:c> . <urn:e> <urn:q> <urn:a> . <urn:d> <urn:p> 1 . GRAPH <urn:g> { <urn:z> <urn:q> <urn:a> . <urn:a> <urn:q> <urn:d> } }"
+    query: "SELECT ?s ?o WHERE { ?s (<urn:q>|<urn:p>)? ?o }"
+    expect:
+      rows:
+        - [1, 1]
+        - ["urn:a", "urn:a"]
+        - ["urn:a", "urn:b"]
+        - ["urn:b", "urn:b"]
+        - ["urn:b", "urn:c"]
+        - ["urn:c", "urn:c"]
+        - ["urn:d", 1]
+        - ["urn:d", "urn:d"]
+        - ["urn:e", "urn:a"]
+        - ["urn:e", "urn:e"]
+
+  - name: inverse_from_a_term
+    setup:
+      - "INSERT DATA { <urn:a> <urn:q> <urn:b> . <urn:b> <urn:q> <urn:c> . <urn:e> <urn:q> <urn:a> . <urn:d> <urn:p> 1 . GRAPH <urn:g> { <urn:z> <urn:q> <urn:a> . <urn:a> <urn:q> <urn:d> } }"
+    query: "SELECT ?o WHERE { <urn:a> ^<urn:q>? ?o }"
+    expect:
+      rows:
+        - ["urn:a"]
+        - ["urn:e"]
+
+  - name: inverse_to_a_term
+    setup:
+      - "INSERT DATA { <urn:a> <urn:q> <urn:b> . <urn:b> <urn:q> <urn:c> . <urn:e> <urn:q> <urn:a> . <urn:d> <urn:p> 1 . GRAPH <urn:g> { <urn:z> <urn:q> <urn:a> . <urn:a> <urn:q> <urn:d> } }"
+    query: "SELECT ?s WHERE { ?s ^<urn:q>? <urn:a> }"
+    expect:
+      rows:
+        - ["urn:a"]
+        - ["urn:b"]
+
+  - name: inverse_two_terms_same
+    setup:
+      - "INSERT DATA { <urn:a> <urn:q> <urn:b> . <urn:b> <urn:q> <urn:c> . <urn:e> <urn:q> <urn:a> . <urn:d> <urn:p> 1 . GRAPH <urn:g> { <urn:z> <urn:q> <urn:a> . <urn:a> <urn:q> <urn:d> } }"
+    query: "ASK { <urn:d> ^<urn:q>? <urn:d> }"
+    expect:
+      rows:
+        - [true]
+
+  - name: inverse_two_variables
+    setup:
+      - "INSERT DATA { <urn:a> <urn:q> <urn:b> . <urn:b> <urn:q> <urn:c> . <urn:e> <urn:q> <urn:a> . <urn:d> <urn:p> 1 . GRAPH <urn:g> { <urn:z> <urn:q> <urn:a> . <urn:a> <urn:q> <urn:d> } }"
+    query: "SELECT ?s ?o WHERE { ?s ^<urn:q>? ?o }"
+    expect:
+      rows:
+        - [1, 1]
+        - ["urn:a", "urn:a"]
+        - ["urn:a", "urn:e"]
+        - ["urn:b", "urn:a"]
+        - ["urn:b", "urn:b"]
+        - ["urn:c", "urn:b"]
+        - ["urn:c", "urn:c"]
+        - ["urn:d", "urn:d"]
+        - ["urn:e", "urn:e"]
+
+  - name: sequence_in_a_named_graph
+    setup:
+      - "INSERT DATA { <urn:a> <urn:q> <urn:b> . <urn:b> <urn:q> <urn:c> . <urn:e> <urn:q> <urn:a> . <urn:d> <urn:p> 1 . GRAPH <urn:g> { <urn:z> <urn:q> <urn:a> . <urn:a> <urn:q> <urn:d> } }"
+    query: "SELECT ?o WHERE { GRAPH <urn:g> { <urn:z> (<urn:q>/<urn:q>)? ?o } }"
+    expect:
+      rows:
+        - ["urn:d"]
+        - ["urn:z"]
+
+  - name: sequence_in_each_graph
+    setup:
+      - "INSERT DATA { <urn:a> <urn:q> <urn:b> . <urn:b> <urn:q> <urn:c> . <urn:e> <urn:q> <urn:a> . <urn:d> <urn:p> 1 . GRAPH <urn:g> { <urn:z> <urn:q> <urn:a> . <urn:a> <urn:q> <urn:d> } }"
+    query: "SELECT ?g ?o WHERE { GRAPH ?g { <urn:z> (<urn:q>/<urn:q>)? ?o } }"
+    expect:
+      rows:
+        - ["urn:g", "urn:d"]
+        - ["urn:g", "urn:z"]
+
+  - name: alternative_in_a_named_graph
+    setup:
+      - "INSERT DATA { <urn:a> <urn:q> <urn:b> . <urn:b> <urn:q> <urn:c> . <urn:e> <urn:q> <urn:a> . <urn:d> <urn:p> 1 . GRAPH <urn:g> { <urn:z> <urn:q> <urn:a> . <urn:a> <urn:q> <urn:d> } }"
+    query: "SELECT ?o WHERE { GRAPH <urn:g> { <urn:a> (<urn:q>|<urn:p>)? ?o } }"
+    expect:
+      rows:
+        - ["urn:a"]
+        - ["urn:d"]
+
+  - name: inverse_in_a_named_graph
+    setup:
+      - "INSERT DATA { <urn:a> <urn:q> <urn:b> . <urn:b> <urn:q> <urn:c> . <urn:e> <urn:q> <urn:a> . <urn:d> <urn:p> 1 . GRAPH <urn:g> { <urn:z> <urn:q> <urn:a> . <urn:a> <urn:q> <urn:d> } }"
+    query: "SELECT ?o WHERE { GRAPH <urn:g> { <urn:a> ^<urn:q>? ?o } }"
+    expect:
+      rows:
+        - ["urn:a"]
+        - ["urn:z"]
+
+  - name: sequence_after_a_triple
+    setup:
+      - "INSERT DATA { <urn:a> <urn:q> <urn:b> . <urn:b> <urn:q> <urn:c> . <urn:e> <urn:q> <urn:a> . <urn:d> <urn:p> 1 . GRAPH <urn:g> { <urn:z> <urn:q> <urn:a> . <urn:a> <urn:q> <urn:d> } }"
+    query: "SELECT ?s ?o WHERE { ?s <urn:q> <urn:c> . ?s (<urn:q>/<urn:q>)? ?o }"
+    expect:
+      rows:
+        - ["urn:b", "urn:b"]
+
+  - name: nested_in_a_sequence
+    setup:
+      - "INSERT DATA { <urn:a> <urn:q> <urn:b> . <urn:b> <urn:q> <urn:c> . <urn:e> <urn:q> <urn:a> . <urn:d> <urn:p> 1 . GRAPH <urn:g> { <urn:z> <urn:q> <urn:a> . <urn:a> <urn:q> <urn:d> } }"
+    query: "SELECT ?o WHERE { <urn:e> <urn:q>/(<urn:q>/<urn:q>)? ?o }"
+    expect:
+      rows:
+        - ["urn:a"]
+        - ["urn:c"]

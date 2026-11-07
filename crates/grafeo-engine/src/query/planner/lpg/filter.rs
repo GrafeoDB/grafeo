@@ -1285,6 +1285,7 @@ impl super::Planner {
                 property,
                 &probe,
                 self.read_view(),
+                self.equal_across_kinds(),
             )?
             else {
                 return Ok(None);
@@ -1294,6 +1295,20 @@ impl super::Planner {
         found.sort_unstable();
         found.dedup();
         Ok(Some(found))
+    }
+
+    /// What the statement's `=` gives two values of two kinds: an error in SQL/PGQ, false in GQL
+    /// and Cypher. A read by key answers as the scan's filter would (see
+    /// [`EqualAcrossKinds`](grafeo_core::execution::operators::value_utils::EqualAcrossKinds)).
+    pub(super) fn equal_across_kinds(
+        &self,
+    ) -> grafeo_core::execution::operators::value_utils::EqualAcrossKinds {
+        use grafeo_core::execution::operators::value_utils::EqualAcrossKinds;
+        if self.session_context.language == grafeo_common::types::StatementLanguage::SqlPgq {
+            EqualAcrossKinds::Raises
+        } else {
+            EqualAcrossKinds::False
+        }
     }
 
     /// Whether a rule lets a filter's equality on a key read other than its scan.
@@ -1396,7 +1411,8 @@ impl super::Planner {
             values: probes.clone(),
             label: label.map(ToString::to_string),
         });
-        let query = KeyColumnQuery::new(required, one_of, &except, property, probes);
+        let query = KeyColumnQuery::new(required, one_of, &except, property, probes)
+            .with_equal_across_kinds(self.equal_across_kinds());
         let mut scan = KeyColumnScanOperator::new(
             Arc::clone(&self.store) as Arc<dyn GraphStore>,
             query,
@@ -1415,13 +1431,34 @@ impl super::Planner {
     /// at UTC against a zoned one, which is the query's reading only in a GQL
     /// session without a time zone, and order a time without an offset
     /// against one with an offset by more than its instant, so a time is
-    /// never left to them.
+    /// never left to them. The same holds for a time or datetime inside a
+    /// list, a map or a path, whose elements they compare the same way.
     fn store_orders_like_query(&self, value: &Value) -> bool {
+        // SQL/PGQ raises for two kinds, which only its filter meets.
+        if self.session_context.language == grafeo_common::types::StatementLanguage::SqlPgq {
+            return false;
+        }
+        self.store_orders_elements_like_query(value)
+    }
+
+    /// [`store_orders_like_query`](Self::store_orders_like_query) for
+    /// `value` and every value it holds.
+    fn store_orders_elements_like_query(&self, value: &Value) -> bool {
         match value {
             Value::Time(_) => false,
             Value::Timestamp(_) | Value::ZonedDatetime(_) => {
                 self.session_context.temporal_comparison == TemporalComparison::default()
             }
+            Value::List(items) => items
+                .iter()
+                .all(|item| self.store_orders_elements_like_query(item)),
+            Value::Map(entries) => entries
+                .values()
+                .all(|entry| self.store_orders_elements_like_query(entry)),
+            Value::Path { nodes, edges } => nodes
+                .iter()
+                .chain(edges.iter())
+                .all(|element| self.store_orders_elements_like_query(element)),
             _ => true,
         }
     }
@@ -1446,13 +1483,23 @@ impl super::Planner {
         property: &str,
         bounds: RangeBounds<'_>,
     ) -> Result<Option<(Box<dyn Operator>, Vec<String>)>> {
+        // The statement's rule for two kinds: ISO GQL orders them, openCypher does not.
+        let across_kinds = if self.session_context.language.follows_opencypher() {
+            grafeo_core::execution::operators::value_utils::AcrossKinds::Apart
+        } else {
+            grafeo_core::execution::operators::value_utils::AcrossKinds::Ordered
+        };
+        let range = grafeo_core::graph::ValueRange::new(
+            bounds.min,
+            bounds.max,
+            bounds.min_inclusive,
+            bounds.max_inclusive,
+            across_kinds,
+        );
         let mut op = RangeScanOperator::new(
             Arc::clone(&self.store),
             property.to_string(),
-            bounds.min.cloned(),
-            bounds.max.cloned(),
-            bounds.min_inclusive,
-            bounds.max_inclusive,
+            range,
             2048,
             self.read_view(),
         )

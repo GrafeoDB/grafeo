@@ -1145,3 +1145,48 @@ mod tests {
         assert_eq!(Constraint::parse("check"), None);
     }
 }
+
+#[cfg(test)]
+mod catalogue {
+    //! Class test 0: the catalogue of this file's enums (`tests/catalogue/`), as the class tests
+    //! read it.
+
+    use super::WalRecord;
+
+    /// Takes the variant list once: an exhaustive match, which fails to compile when the enum gains a
+    /// variant this list does not name, and the names, which the test holds to the checked-in file.
+    macro_rules! catalogue {
+        ($name_of:ident, $names:ident, $enum:ident: $($variant:ident),+ $(,)?) => {
+            fn $name_of(value: &$enum) -> &'static str {
+                match value {
+                    $($enum::$variant { .. } => stringify!($variant),)+
+                }
+            }
+            const $names: &[&str] = &[$(stringify!($variant)),+];
+        };
+    }
+
+    /// The names a catalogue file lists: one per line, `#` lines and blank lines aside.
+    fn listed(file: &str) -> Vec<&str> {
+        file.lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+            .collect()
+    }
+
+    catalogue!(
+        wal_record_name,
+        WAL_RECORD_NAMES,
+        WalRecord: CreateNode, DeleteNode, CreateEdge, DeleteEdge, SetNodeProperty, SetEdgeProperty, RemoveNodeProperty, RemoveEdgeProperty, AddNodeLabel, RemoveNodeLabel, CreateNodeType, DropNodeType, CreateEdgeType, DropEdgeType, CreateIndex, DropIndex, CreateConstraint, DropConstraint, CreateGraphType, DropGraphType, CreateSchema, DropSchema, AlterNodeType, AlterEdgeType, AlterGraphType, CreateProcedure, DropProcedure, CreateNamedGraph, DropNamedGraph, SwitchGraph, InsertRdfTriple, DeleteRdfTriple, ClearRdfGraph, CreateRdfGraph, DropRdfGraph, TransactionCommit, TransactionAbort, Checkpoint, EpochAdvance, Standalone
+    );
+
+    #[test]
+    fn wal_record_catalogue_names_every_variant() {
+        std::hint::black_box(wal_record_name as fn(&WalRecord) -> &'static str);
+        let file = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tests/catalogue/wal_record.txt"
+        ));
+        assert_eq!(listed(file), WAL_RECORD_NAMES);
+    }
+}

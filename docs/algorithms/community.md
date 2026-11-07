@@ -37,7 +37,7 @@ of their smallest node id. Edge direction is ignored.
 Semi-supervised community detection.
 
 ```python
-algs = db.algorithms()
+algs = db.algorithms
 communities = algs.label_propagation()
 ```
 
@@ -46,12 +46,10 @@ communities = algs.label_propagation()
 Find disconnected subgraphs.
 
 ```python
-algs = db.algorithms()
-components = algs.connected_components()
+algs = db.algorithms
+components = algs.connected_components()  # node ID to component ID
 
-print(f"Found {len(components)} components")
-for i, comp in enumerate(components):
-    print(f"Component {i}: {len(comp)} nodes")
+print(f"Found {len(set(components.values()))} components")
 ```
 
 ## Strongly Connected Components
@@ -59,17 +57,18 @@ for i, comp in enumerate(components):
 For directed graphs.
 
 ```python
-algs = db.algorithms()
+algs = db.algorithms
 sccs = algs.strongly_connected_components()
 ```
 
 ## Weakly Connected Components
 
-For directed graphs, ignoring edge direction.
+For directed graphs, ignoring edge direction: `connected_components()` treats
+the graph as undirected, so its components are the weakly connected ones.
 
 ```python
-algs = db.algorithms()
-wccs = algs.weakly_connected_components()
+algs = db.algorithms
+wccs = algs.connected_components()
 ```
 
 ## Triangle Count
@@ -77,8 +76,8 @@ wccs = algs.weakly_connected_components()
 Count triangles for clustering analysis.
 
 ```python
-algs = db.algorithms()
-triangles = algs.triangles()
+algs = db.algorithms
+triangles = algs.total_triangles()
 print(f"Total triangles: {triangles}")
 ```
 
@@ -87,7 +86,7 @@ print(f"Total triangles: {triangles}")
 Bayesian community detection using the degree-corrected stochastic block model. Minimizes the description length (MDL) of the graph under the generative model, making it more principled than modularity-based methods for graphs with heterogeneous degree distributions.
 
 ```python
-algs = db.algorithms()
+algs = db.algorithms
 
 # Auto-detect optimal number of blocks
 result = algs.stochastic_block_partition()

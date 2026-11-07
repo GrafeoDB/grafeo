@@ -44,6 +44,12 @@ QueryResult buildResult(GrafeoBindings bindings, Pointer<Void> resultPtr) {
       executionTimeMs: bindings.grafeoResultExecutionTimeMs(resultPtr),
       rowsScanned: bindings.grafeoResultRowsScanned(resultPtr),
       kind: ResultKind.of(bindings.grafeoResultKind(resultPtr)),
+      warnings: readWarnings(
+        bindings.grafeoResultWarningCount(resultPtr),
+        (index) => bindings.grafeoResultWarningCode(resultPtr, index),
+        (index) => bindings.grafeoResultWarningKind(resultPtr, index),
+        (index) => bindings.grafeoResultWarningMessage(resultPtr, index),
+      ),
       counters: WriteCounters(
         nodesCreated: bindings.grafeoResultNodesCreated(resultPtr),
         nodesDeleted: bindings.grafeoResultNodesDeleted(resultPtr),

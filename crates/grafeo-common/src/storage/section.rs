@@ -1618,3 +1618,48 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod catalogue {
+    //! Class test 0: the catalogue of this file's enums (`tests/catalogue/`), as the class tests
+    //! read it.
+
+    use super::SectionType;
+
+    /// Takes the variant list once: an exhaustive match, which fails to compile when the enum gains a
+    /// variant this list does not name, and the names, which the test holds to the checked-in file.
+    macro_rules! catalogue {
+        ($name_of:ident, $names:ident, $enum:ident: $($variant:ident),+ $(,)?) => {
+            fn $name_of(value: &$enum) -> &'static str {
+                match value {
+                    $($enum::$variant { .. } => stringify!($variant),)+
+                }
+            }
+            const $names: &[&str] = &[$(stringify!($variant)),+];
+        };
+    }
+
+    /// The names a catalogue file lists: one per line, `#` lines and blank lines aside.
+    fn listed(file: &str) -> Vec<&str> {
+        file.lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+            .collect()
+    }
+
+    catalogue!(
+        section_type_name,
+        SECTION_TYPE_NAMES,
+        SectionType: Catalog, LpgStore, RdfStore, CompactStore, OverlayDeletions, TimeIndex, VectorStore, TextIndex, RdfRing, PropertyIndex
+    );
+
+    #[test]
+    fn section_type_catalogue_names_every_variant() {
+        std::hint::black_box(section_type_name as fn(&SectionType) -> &'static str);
+        let file = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tests/catalogue/section_type.txt"
+        ));
+        assert_eq!(listed(file), SECTION_TYPE_NAMES);
+    }
+}

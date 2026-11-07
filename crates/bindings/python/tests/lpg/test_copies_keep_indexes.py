@@ -43,6 +43,7 @@ def test_reopening_a_file_keeps_indexes_and_constraints(tmp_path):
     db.close()
 
 
+@pytest.mark.requires("text-index", "vector-index")
 def test_to_memory_keeps_vector_and_text_indexes():
     db = GrafeoDB()
     db.create_node(["Doc"], {"emb": [1.0, 0.0, 0.0], "body": "rust graph database"})

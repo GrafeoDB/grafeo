@@ -12,4 +12,5 @@
 //! is a `[[test]]` entry in `Cargo.toml` instead, with a comment saying why.
 
 mod cli_runs;
+mod cli_warnings;
 mod commands;

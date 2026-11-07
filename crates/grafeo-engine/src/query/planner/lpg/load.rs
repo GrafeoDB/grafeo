@@ -1,47 +1,48 @@
 //! The load procedures, `CALL grafeo.load_nodes_csv({...})` and
-//! `grafeo.load_edges_csv({...})` (see [`crate::loader`]): planned with the
-//! statement's writer, in any build (the other procedures need `algos`).
+//! `grafeo.load_edges_csv({...})` (see [`crate::loader`]): registered
+//! procedures whose arguments `CALL` prepares as every procedure's, planned
+//! with the statement's writer.
 
-use std::collections::BTreeMap;
-
-use grafeo_common::types::{PropertyKey, Value};
+use grafeo_common::types::Value;
 use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind, Result};
 
 use super::Operator;
 use crate::loader::{LoadCall, LoadCallOperator, REPORT_COLUMNS};
-use crate::query::plan::{CallProcedureOp, LogicalExpression};
+use crate::query::plan::CallProcedureOp;
 
 /// Whether `call` is a load procedure.
 pub(super) fn is_load(call: &CallProcedureOp) -> bool {
-    call.writes()
+    crate::loader::is_load(&call.name)
 }
 
 impl super::Planner {
-    /// Plans a load procedure: its one map argument, constant, read as the
-    /// load's options; its YIELD names columns of the report.
+    /// Plans a load procedure: its arguments, constants, prepared for its
+    /// parameters (in the map or the positional form, see
+    /// [`evaluate_arguments`](crate::procedures::evaluate_arguments)) and read
+    /// as the load; its YIELD names columns of the report.
     pub(super) fn plan_load_call(
         &self,
         call: &CallProcedureOp,
     ) -> Result<(Box<dyn Operator>, Vec<String>)> {
-        let procedure = call.name.join(".");
-        let semantic =
-            |message: String| Error::from(QueryError::new(QueryErrorKind::Semantic, message));
-        let options = match call.arguments.as_slice() {
-            [argument] => match constant(argument) {
-                Some(Value::Map(options)) => options,
-                _ => {
-                    return Err(semantic(format!(
-                        "{procedure} takes one map of constant options"
-                    )));
-                }
-            },
-            _ => {
-                return Err(semantic(format!(
-                    "{procedure} takes one map of options, such as {{path: 'nodes.csv'}}"
-                )));
-            }
-        };
-        let load = LoadCall::from_options(&procedure, &options)?;
+        let load = crate::procedures::registry()
+            .get(&call.name)
+            .ok_or_else(|| Error::Internal(format!("{} is not registered", call.name.join("."))))?;
+        let procedure = format!("grafeo.{}", load.name());
+        let values =
+            self.procedure_argument_values(&procedure, &call.arguments, load.parameters())?;
+        // A load writes into the graph the statement reads: it reads no projection, so naming
+        // one (with a value or null, in a literal map or a parameter's) is refused rather than
+        // ignored, before its other arguments are checked.
+        if let [Value::Map(entries)] = values.as_slice()
+            && entries.keys().any(|key| key.as_str() == "projection")
+        {
+            return Err(Error::from(QueryError::new(
+                QueryErrorKind::InvalidParameterValue,
+                format!("{procedure} takes no 'projection': it loads into the graph it runs on"),
+            )));
+        }
+        let params = crate::procedures::evaluate_arguments(&procedure, &values, load.parameters())?;
+        let load = LoadCall::from_prepared(&procedure, &params)?;
         let (yielded, columns) = match &call.yield_items {
             None => (
                 (0..REPORT_COLUMNS.len()).collect(),
@@ -76,28 +77,5 @@ impl super::Planner {
         }
         let operator = LoadCallOperator::new(load, self.graph_writer()?, yielded);
         Ok((Box::new(operator), columns))
-    }
-}
-
-/// The value of a constant argument: a literal, or a list or map of them
-/// (parameters are literals by the time a plan is made).
-fn constant(expression: &LogicalExpression) -> Option<Value> {
-    match expression {
-        LogicalExpression::Literal(value) => Some(value.clone()),
-        LogicalExpression::List(items) => Some(Value::List(
-            items
-                .iter()
-                .map(constant)
-                .collect::<Option<Vec<_>>>()?
-                .into(),
-        )),
-        LogicalExpression::Map(entries) => {
-            let mut map = BTreeMap::new();
-            for (key, value) in entries {
-                map.insert(PropertyKey::new(key.as_str()), constant(value)?);
-            }
-            Some(Value::Map(std::sync::Arc::new(map)))
-        }
-        _ => None,
     }
 }

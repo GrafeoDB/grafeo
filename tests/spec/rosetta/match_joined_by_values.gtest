@@ -40,20 +40,18 @@ tests:
       rows:
         - [main, Alix]
 
-  - name: numeric_strings_meet_numbers
+  # A string meets no number, whatever it spells (GA04); 5 meets 5.0.
+  - name: numeric_strings_meet_no_numbers
     setup:
       - "INSERT (:File {name: 'main', k: 5}), (:File {name: 'lib', k: 5.0})"
-      - "INSERT (:TypeDefinition {name: 'Alix', k: '5'}), (:TypeDefinition {name: 'Gus', k: '5.0'}), (:TypeDefinition {name: 'Vincent', k: '05'}), (:TypeDefinition {name: 'Jules', k: 'five'})"
+      - "INSERT (:TypeDefinition {name: 'Alix', k: '5'}), (:TypeDefinition {name: 'Gus', k: '5.0'}), (:TypeDefinition {name: 'Vincent', k: '05'}), (:TypeDefinition {name: 'Jules', k: 'five'}), (:TypeDefinition {name: 'Mia', k: 5})"
     variants:
       gql: "MATCH (f:File) MATCH (t:TypeDefinition) WHERE t.k = f.k RETURN f.name AS file, t.name AS type"
       cypher: "MATCH (f:File) MATCH (t:TypeDefinition) WHERE t.k = f.k RETURN f.name AS file, t.name AS type"
     expect:
       rows:
-        - [main, Alix]
-        - [main, Vincent]
-        - [lib, Alix]
-        - [lib, Gus]
-        - [lib, Vincent]
+        - [main, Mia]
+        - [lib, Mia]
 
   - name: two_keys_must_both_match
     setup:

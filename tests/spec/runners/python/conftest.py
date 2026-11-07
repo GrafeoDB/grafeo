@@ -7,11 +7,18 @@ pytest test items.
 Each test case gets a **fresh** ``GrafeoDB()`` instance, loads the declared
 dataset, runs setup queries, executes the query, and asserts the expected
 result.
+
+A case marked ``xfail:`` passes as an expected failure only when it fails the way a spec case
+fails, on an assertion or on an error the binding raises (``EXPECTED_FAILURES``); a case that
+passes fails the run (XPASS, naming the spec and the issue), and any other error is a fault of
+the runner and fails it as it is.
 """
 
 from __future__ import annotations
 
+import os
 import sys
+import warnings
 from pathlib import Path
 
 import pytest
@@ -33,6 +40,7 @@ from comparator import (
     assert_rows_sorted,
     assert_rows_with_precision,
     assert_terms,
+    assert_warnings,
 )
 from parser import GtestFile, TestCase, coerce_params, parse_gtest_file
 
@@ -67,6 +75,35 @@ def _get_compiled_features() -> set:
 
 # Repo root: tests/spec/runners/python/conftest.py -> five .parent calls
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent.parent
+
+#: The failures of a spec case: an assertion of the comparator, a ``pytest.fail`` of this
+#: runner's checks, and an error the binding raises. The only ones an ``xfail:`` absorbs.
+EXPECTED_FAILURES = (AssertionError, pytest.fail.Exception, grafeo.GrafeoError)
+
+
+class RunnerFault(Exception):
+    """The runner could not run the case at all (its dataset is missing, it has no query): a
+    fault of the gtest or the runner, which fails the case even when it is marked ``xfail:``."""
+
+
+#: The run's counts for the ``gtest summary`` line: the cases skipped by ``skip:`` and the
+#: ones that failed as expected.
+SUMMARY_KEY = pytest.StashKey[dict]()
+
+
+def summary_of(config) -> dict:
+    """The run's counts (``SUMMARY_KEY``), started at zero."""
+    return config.stash.setdefault(SUMMARY_KEY, {"skipped": 0, "xfailed": 0})
+
+
+def spec_root() -> Path | None:
+    """The directory ``GRAFEO_SPEC_ROOT`` names (the runner probes), relative to the
+    repository or absolute; ``None`` when unset, and the run reads ``tests/spec``."""
+    root = os.environ.get("GRAFEO_SPEC_ROOT")
+    if not root:
+        return None
+    path = Path(root)
+    return path if path.is_absolute() else _REPO_ROOT / path
 
 
 # ---------------------------------------------------------------------------
@@ -147,11 +184,36 @@ class GtestItem(pytest.Item):
 
     def runtest(self):
         tc = self.test_case
-        meta = self.gtest_file.meta
+        summary = summary_of(self.config)
 
         # Skip if test has a skip field
         if tc.skip is not None:
+            summary["skipped"] += 1
             pytest.skip(f"skipped in .gtest: {tc.skip}")
+
+        if tc.xfail is None:
+            self._run_case()
+            return
+        try:
+            self._run_case()
+        except EXPECTED_FAILURES:
+            # The expected failure: the case passes, and the summary line counts it, as the
+            # other runners do (no `pytest.xfail()`, which is never strict).
+            summary["xfailed"] += 1
+            return
+        pytest.fail(
+            f"XPASS: the case passes, but it is marked xfail against {tc.xfail.spec} "
+            f"({tc.xfail.issue}); take the mark off"
+        )
+
+    def _run_case(self):
+        tc = self.test_case
+        meta = self.gtest_file.meta
+
+        # A probe of the runner: it fails as the runner itself fails, which no `xfail:`
+        # may take for the expected failure.
+        if tc.probe == "runner_error":
+            raise RuntimeError("runner error probe: the runner fails, not the case")
 
         # Determine language: per-test override > rosetta variant > file meta
         language = self.variant_lang or tc.language or meta.language or "gql"
@@ -195,8 +257,9 @@ class GtestItem(pytest.Item):
         elif query or tc.expect.error is not None or tc.expect.gql_status is not None:
             queries = [query or ""]
         else:
-            pytest.fail(f"No query or statements in test '{tc.name}' in {self.path}")
-            return  # unreachable, but keeps linters happy
+            raise RunnerFault(
+                f"No query or statements in test '{tc.name}' in {self.path}"
+            )
 
         expect = tc.expect
 
@@ -217,6 +280,9 @@ class GtestItem(pytest.Item):
 
         # Last query: capture result (with params if present)
         result = _execute(db, language, queries[-1], params)
+
+        # The warnings, also when none are expected
+        assert_warnings(result, expect.warnings)
 
         # Column assertion (checked before value assertions)
         if expect.columns:
@@ -290,7 +356,7 @@ def _load_dataset(db, dataset_name: str) -> None:
     """Load a .setup dataset file into the database using GQL."""
     dataset_path = _REPO_ROOT / "tests" / "spec" / "datasets" / f"{dataset_name}.setup"
     if not dataset_path.exists():
-        pytest.fail(f"Dataset file not found: {dataset_path}")
+        raise RunnerFault(f"Dataset file not found: {dataset_path}")
 
     content = dataset_path.read_text(encoding="utf-8")
     for line in content.splitlines():
@@ -311,6 +377,16 @@ def _describe(expected_substr: str | None, expected_status: str | None) -> str:
 
 
 def _execute(db, language: str, query: str, params=None):
+    """Execute a query in the specified language, returning the QueryResult.
+
+    The binding also raises each warning through ``warnings.warn``; the runner
+    checks them on ``result.warnings``, so it does not show them twice."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        return _execute_quietly(db, language, query, params)
+
+
+def _execute_quietly(db, language: str, query: str, params=None):
     """Execute a query in the specified language, returning the QueryResult."""
     method_name = _LANGUAGE_METHODS.get(language)
     if method_name is not None:

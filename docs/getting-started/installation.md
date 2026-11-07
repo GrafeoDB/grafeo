@@ -182,11 +182,14 @@ grafeo = { version = "0.6", default-features = false, features = ["gql"] }
 grafeo = { version = "0.6", features = ["embed"] }
 ```
 
-`GrafeoDB::open(path)` works with the default features, but they have no write-ahead log: commits reach the file when the database checkpoints (`close()`, dropping it, or `wal_checkpoint()`), and a process that crashes loses the commits since. For commits that survive a crash, add the `wal` feature (also in the `storage` group and the `lpg` profile):
+!!! warning "The default features have no write-ahead log"
+    `GrafeoDB::open(path)` works with the default features, but they have no write-ahead log: commits reach the file only when the database checkpoints (`close()`, dropping it, or `wal_checkpoint()`). **A process that crashes loses every commit since the last checkpoint.** For commits that survive a crash, add the `wal` feature (also in the `storage` group and the `lpg` profile):
 
-```toml
-grafeo = { version = "0.6", features = ["wal"] }
-```
+    ```toml
+    grafeo = { version = "0.6", features = ["wal"] }
+    ```
+
+    This is the Rust crate only: the Python, Node.js, C, C#, Dart and Go packages include the write-ahead log. The Rust default includes it from 0.7.0 ([#468](https://github.com/GrafeoDB/grafeo/issues/468)).
 
 #### Persona Profiles
 

@@ -60,8 +60,8 @@ compact-store = []  # Deprecated since 0.6.0: enables nothing (a build that open
 # Persona-based profiles
 lpg = ["lpg-model", "gql", "cypher", "gremlin", "sql-pgq", "direct-api"]  # Graph App Developer; every WASM build uses regex-lite (the full regex is 160 KB gzipped for a 2x faster regex step)
 rdf = ["rdf-model", "gql", "sparql", "graphql", "grafeo-engine/regex-lite"]  # Knowledge Engineer
-ai = ["vector-index", "text-index", "hybrid-search"]  # AI/Agent Developer
-analytics = ["ai", "algos"]  # Data Scientist (ai search + graph algorithms)
+ai = ["gql", "vector-index", "text-index", "hybrid-search"]  # AI/Agent Developer
+analytics = ["gql", "ai", "algos"]  # Data Scientist (ai search + graph algorithms)
 edge = ["lpg-model", "gql", "grafeo-engine/regex-lite"]  # Frontend/Edge
 # Deployment-based profiles (deprecated)
 browser = ["edge"]  # Deprecated: use edge

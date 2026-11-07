@@ -1,7 +1,7 @@
 """Cypher spec: Administration and Schema (openCypher 9 sec 8, 9).
 
-Covers: CREATE/DROP INDEX, CREATE/DROP CONSTRAINT, SHOW commands,
-EXPLAIN, PROFILE. The xfail cases are not implemented yet.
+Covers: CREATE/DROP INDEX, CREATE/DROP CONSTRAINT, SHOW INDEXES and
+SHOW CONSTRAINTS, EXPLAIN, PROFILE.
 """
 
 import pytest
@@ -95,7 +95,7 @@ class TestConstraint:
 
 
 class TestShowCommands:
-    """SHOW INDEXES, SHOW CONSTRAINTS, etc. (not implemented)."""
+    """SHOW INDEXES and SHOW CONSTRAINTS."""
 
     def test_show_indexes(self, db):
         result = list(db.execute_cypher("SHOW INDEXES"))
@@ -103,16 +103,6 @@ class TestShowCommands:
 
     def test_show_constraints(self, db):
         result = list(db.execute_cypher("SHOW CONSTRAINTS"))
-        assert isinstance(result, list)
-
-    @pytest.mark.xfail(reason="SHOW commands not implemented")
-    def test_show_procedures(self, db):
-        result = list(db.execute_cypher("SHOW PROCEDURES"))
-        assert isinstance(result, list)
-
-    @pytest.mark.xfail(reason="SHOW commands not implemented")
-    def test_show_functions(self, db):
-        result = list(db.execute_cypher("SHOW FUNCTIONS"))
         assert isinstance(result, list)
 
 

@@ -38,6 +38,22 @@
 //! # Ok::<(), grafeo::Error>(())
 //! ```
 //!
+//! ## Durability: the default features have no write-ahead log
+//!
+//! [`GrafeoDB::open`] writes a database file with the default features
+//! (`embedded`), but they include no write-ahead log: a commit reaches the file
+//! only when the database checkpoints (at `close()`, when it is dropped, or at
+//! `wal_checkpoint()`). **A process that crashes loses every commit since the
+//! last checkpoint.** For commits that survive a crash, enable the `wal`
+//! feature, or the `lpg` profile, which includes it:
+//!
+//! ```toml
+//! grafeo = { version = "0.6", features = ["wal"] }
+//! ```
+//!
+//! The default profile includes the write-ahead log from 0.7.0
+//! ([#468](https://github.com/GrafeoDB/grafeo/issues/468)).
+//!
 //! ## Stability
 //!
 //! Everything this crate exports is stable unless its documentation has a
@@ -118,6 +134,8 @@ pub use grafeo_engine::session;
 // Re-export query results
 pub use grafeo_engine::database::QueryResult;
 pub use grafeo_engine::database::ResultKind;
+// The warnings a result carries (`QueryResult::warnings`)
+pub use grafeo_engine::database::{QueryWarning, WarningKind};
 
 // Re-export MemoryUsage, ProjectionSpec at top level for convenience
 pub use grafeo_engine::MemoryUsage;
@@ -136,7 +154,7 @@ pub use grafeo_common::utils::error::{Error, Result};
 /// (the read side only), with the types their methods take. The built-in
 /// [`RowGroupStore`](store::RowGroupStore) is a store to delegate to.
 ///
-/// With the `conformance` feature, [`conformance_suite!`](store::conformance_suite)
+/// With the `conformance` feature, the `store::conformance_suite!` macro
 /// runs the suite the built-in store passes against a store of one's own,
 /// one test per case. See <https://grafeo.dev/user-guide/extending/storage-backends/>.
 ///

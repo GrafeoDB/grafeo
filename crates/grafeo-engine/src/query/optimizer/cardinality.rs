@@ -394,7 +394,7 @@ impl ColumnStats {
         }
 
         // Sort values for histogram building
-        values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        values.sort_by(f64::total_cmp);
 
         let min = values.first().copied();
         let max = values.last().copied();

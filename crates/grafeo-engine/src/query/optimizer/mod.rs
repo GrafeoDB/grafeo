@@ -24,6 +24,9 @@ pub(crate) use pinned_far_end::far_end_variable;
 #[cfg(feature = "triple-store")]
 mod rdf_order;
 mod rules;
+// A sameTerm between RDF columns only exists where SPARQL or the triple store does.
+#[cfg(any(feature = "sparql", feature = "triple-store"))]
+mod same_term;
 mod scanned_labels;
 mod turn_cost;
 pub(crate) use cycles::{close_cycles, plan_names};
@@ -47,6 +50,7 @@ use crate::query::planner::lpg::seek;
 use grafeo_common::grafeo_debug_span;
 use grafeo_common::utils::error::Result;
 use grafeo_core::execution::operators::Volatility;
+use grafeo_core::execution::operators::value_utils::EqualAcrossKinds;
 use std::collections::{HashMap, HashSet};
 
 /// Information about a join condition for join reordering.
@@ -86,6 +90,9 @@ pub struct Optimizer {
     cyclic_joins: CyclicJoins,
     /// The rules this optimizer applies (see [`PlannerRules`]).
     rules: PlannerRules,
+    /// What the statement's `=` gives two values of two kinds (see
+    /// [`with_equal_across_kinds`](Self::with_equal_across_kinds)).
+    equal_across_kinds: EqualAcrossKinds,
     /// The node properties with a property index: a filter on one of them
     /// pins a node like `id()` does (see `start_at_the_sought_end`).
     indexed_properties: HashSet<String>,
@@ -142,6 +149,7 @@ impl Optimizer {
             card_estimator: CardinalityEstimator::new(),
             cyclic_joins: CyclicJoins::Binary,
             rules: PlannerRules::all(),
+            equal_across_kinds: EqualAcrossKinds::False,
             indexed_properties: HashSet::new(),
             label_indexes: HashMap::new(),
             incoming_edges: IncomingEdges::Kept,
@@ -223,6 +231,7 @@ impl Optimizer {
             card_estimator: estimator,
             cyclic_joins: CyclicJoins::MultiWay,
             rules: PlannerRules::all(),
+            equal_across_kinds: EqualAcrossKinds::False,
             indexed_properties: HashSet::new(),
             label_indexes: HashMap::new(),
             incoming_edges: IncomingEdges::NotKept,
@@ -292,6 +301,7 @@ impl Optimizer {
             card_estimator: estimator.with_hop_degrees(degrees),
             cyclic_joins: CyclicJoins::Binary,
             rules: PlannerRules::all(),
+            equal_across_kinds: EqualAcrossKinds::False,
             indexed_properties: HashSet::new(),
             label_indexes: HashMap::new(),
             incoming_edges: IncomingEdges::Kept,
@@ -316,6 +326,23 @@ impl Optimizer {
             degrees.sample_from(store);
         }
         self
+    }
+
+    /// Plans for a statement whose `=` gives `rule` for two values of two kinds: under
+    /// [`EqualAcrossKinds::Raises`] (SQL/PGQ), every row a filter compares must reach that
+    /// filter, so no rewrite may decide a row by a key read that leaves values of another kind
+    /// out: no hop turns at its far end, and no far end is found by its key first. GQL and
+    /// Cypher plan as before.
+    #[must_use]
+    pub fn with_equal_across_kinds(mut self, rule: EqualAcrossKinds) -> Self {
+        self.equal_across_kinds = rule;
+        self
+    }
+
+    /// Whether a rewrite may decide a row by a key read: not when the statement's `=` raises
+    /// across kinds (see [`with_equal_across_kinds`](Self::with_equal_across_kinds)).
+    fn key_reads_decide_rows(&self) -> bool {
+        self.equal_across_kinds != EqualAcrossKinds::Raises
     }
 
     /// Applies only the rules that `rules` turns on.
@@ -391,6 +418,14 @@ impl Optimizer {
         // An EXISTS over the rows' variables runs once over their distinct
         // values (before the cycles: an expand into a shared variable is one).
         let root = delim::decorrelate_exists(plan.root);
+        // A `sameTerm` between two RDF columns is enforced where they first meet: a scan's
+        // repeated variable or a join key, not a filter above the join.
+        #[cfg(any(feature = "sparql", feature = "triple-store"))]
+        let root = if any_operator(&root, &|op| matches!(op, LogicalOperator::TripleScan(_))) {
+            same_term::push_same_term(root)
+        } else {
+            root
+        };
         // A plan that follows no edge has no cycle and nothing for the hop passes.
         let follows_edges = any_operator(&root, &|op| matches!(op, LogicalOperator::Expand(_)));
         // Correctness first: a pattern through a node or edge that was bound
@@ -458,6 +493,7 @@ impl Optimizer {
             graph: plan.graph,
             result_kind: plan.result_kind,
             count_clauses: plan.count_clauses,
+            warnings: plan.warnings,
         })
     }
 
@@ -1897,11 +1933,11 @@ impl Optimizer {
     /// The direction of `expand` started at its target, and the variables
     /// of the rows its source's scan runs for, when turning it seeks the
     /// target and keeps every row: `written` (the conjuncts of the filters
-    /// above it) pins the target by a key (see [`seek::pins`]). A source that
-    /// reads every node, with no label and no key in `checked` (the conjuncts of
-    /// the checks between it and the scan of its source), always turns: released
-    /// behaviour, and a walk back reads each edge into the found nodes at most
-    /// once. Another turns when it costs less (see [`Self::turn_wins`]).
+    /// above it) pins the target by a key (see [`seek::pins`]). A source with no
+    /// label and nothing in `checked` (the conjuncts of the checks between it and
+    /// the scan of its source) always turns: it reads every node's list, and a
+    /// walk back reads each edge into the found nodes at most once. Another turns
+    /// when it costs less (see [`Self::turn_wins`]).
     ///
     /// The expand is a single hop without a named path (a path, or the list
     /// of a quantified edge, would come out reversed). The checks move above
@@ -1921,7 +1957,8 @@ impl Optimizer {
         scan: &NodeScanOp,
     ) -> Option<(ExpandDirection, HashSet<String>)> {
         let (source, target) = (&expand.from_variable, &expand.to_variable);
-        if expand.is_variable_length()
+        if !self.key_reads_decide_rows()
+            || expand.is_variable_length()
             || expand.path_alias.is_some()
             || source == target
             || scan.variable != *source
@@ -1953,7 +1990,6 @@ impl Optimizer {
             source_labels.require(label);
         }
         let target_labels = seek::LookupLabels::of_conjuncts(written, target);
-        let source_index = |property: &str| self.index_serves(&source_labels, property);
         let target_index = |property: &str| self.index_serves(&target_labels, property);
         let checks_hold_after = checked.iter().all(|check| {
             movable_variables(check).is_some_and(|vars| {
@@ -1961,10 +1997,8 @@ impl Optimizer {
                     .all(|var| var == source || input_vars.contains(var))
             })
         });
-        let reads_every_node = scan.label.is_none()
-            && !checked
-                .iter()
-                .any(|check| seek::pins(check, source, source_index, &input_vars));
+        // Nothing narrows the source: it reads every node's list, which holds all the far end's.
+        let reads_every_node = scan.label.is_none() && checked.is_empty();
         let sought = written
             .iter()
             .any(|conjunct| seek::pins(conjunct, target, target_index, &input_vars));
@@ -4619,21 +4653,16 @@ mod tests {
             }
         }
 
-        /// The conjuncts on the target alone go with the seek; a check of
-        /// the source and a conjunct that reads both filter the rows the
-        /// turned expand makes, the source's first, as they ran before.
+        /// The conjuncts on the target alone go with the seek, and one that reads both ends filters
+        /// the rows the turned expand makes. A check of the source asks for a comparison, which needs
+        /// counts: `far_end_turn::a_check_of_the_source_filters_after_the_turn` has that one.
         #[test]
         fn the_other_conjuncts_filter_after_the_turned_expand() {
-            let on_source = equals(
-                property("src", "k"),
-                LogicalExpression::Literal(Value::Int64(88)),
-            );
             let across = compare(property("tgt", "k"), BinaryOp::Gt, property("src", "k"));
             let plan = returned(filter(
                 and(vec![
                     in_ids("tgt"),
                     across.clone(),
-                    on_source.clone(),
                     has_label("tgt", "Person"),
                 ]),
                 expand(
@@ -4644,7 +4673,7 @@ mod tests {
                 ),
             ));
             let expected = returned(filter(
-                and(vec![on_source, across]),
+                across,
                 expand(
                     "tgt",
                     "src",

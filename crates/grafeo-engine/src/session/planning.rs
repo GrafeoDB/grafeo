@@ -11,7 +11,7 @@
 use std::sync::Arc;
 
 use grafeo_common::types::{EpochId, TransactionId};
-use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind, Result};
+use grafeo_common::utils::error::{Error, QueryError, Result};
 use grafeo_core::execution::operators::Recording;
 use grafeo_core::graph::GraphBackend;
 use grafeo_core::graph::GraphStore;
@@ -193,13 +193,10 @@ pub(super) fn check_focus(
         return Ok(());
     }
     if identity.has_grants() && !identity.can_access_graph(name, Role::ReadOnly) {
-        return Err(Error::from(QueryError::new(
-            QueryErrorKind::Semantic,
-            format!(
-                "permission denied: no grant for graph '{name}' (user: {})",
-                identity.user_id()
-            ),
-        )));
+        return Err(Error::from(QueryError::permission_denied(format!(
+            "no grant for graph '{name}' (user: {})",
+            identity.user_id()
+        ))));
     }
     let key = super::graph_storage_key(schema, Some(name));
     if key.is_some_and(|key| stores.named_graph(&key).is_none()) {
@@ -235,13 +232,10 @@ pub(super) fn check_graph_grant(
     if identity.can_access_graph(graph, role) {
         return Ok(());
     }
-    Err(Error::from(QueryError::new(
-        QueryErrorKind::Semantic,
-        format!(
-            "permission denied: no {access} grant for graph '{graph}' (user: {})",
-            identity.user_id()
-        ),
-    )))
+    Err(Error::from(QueryError::permission_denied(format!(
+        "no {access} grant for graph '{graph}' (user: {})",
+        identity.user_id()
+    ))))
 }
 
 /// The part of a statement's planning that is the session's, the same for
@@ -278,6 +272,10 @@ pub(crate) struct SessionPlanning {
     /// Whether the statement's operators read as a committed reader (see
     /// `Planner::with_read_only`).
     pub(super) read_only: bool,
+    /// Whether the plan is only built, never run (`EXPLAIN`): outside a transaction its writers
+    /// write through a plan-only recording, which refuses every write, so no transaction is
+    /// begun to build them.
+    pub(super) plan_only: bool,
 }
 
 /// How the planner of one statement is built: the session's part (see
@@ -299,9 +297,13 @@ pub(crate) struct StatementPlanning {
     /// How the statement compares a zoned datetime or time with a local
     /// one, which depends on its language.
     pub(super) temporal_comparison: grafeo_common::types::TemporalComparison,
+    /// The statement's language, whose value rules apply (a stored procedure's body is GQL).
+    pub(super) language: grafeo_common::types::StatementLanguage,
     /// One instant for the statement, which every clock function reads, a
     /// body's included.
     pub(super) statement_clock: grafeo_core::execution::operators::StatementClock,
+    /// Where the statement raises its warnings, a body's included.
+    pub(super) warnings: Arc<grafeo_common::utils::warning::WarningSink>,
 }
 
 #[cfg(lpg_language)]
@@ -328,7 +330,9 @@ impl StatementPlanning {
             home_schema,
             home_graph,
             temporal_comparison,
+            language,
             statement_clock,
+            warnings,
         } = self;
         let access = &session.access;
         let (viewing_epoch, transaction_id) = (session.viewing_epoch, session.transaction_id);
@@ -338,10 +342,15 @@ impl StatementPlanning {
         // The graph the writes land in: the statement's, or the default
         // graph when no graph of that name exists.
         let written = access.stores.written_key(key.clone());
-        let recording = if transaction_id.is_some() && write_store.is_some() {
-            access.recording(written.as_deref())?
-        } else {
-            None
+        let recording = match &write_store {
+            Some(_) if transaction_id.is_some() => access.recording(written.as_deref())?,
+            Some(target) if session.plan_only => {
+                Some(grafeo_core::execution::operators::Recording::plan_only(
+                    Arc::clone(target),
+                    viewing_epoch,
+                ))
+            }
+            _ => None,
         };
         // The graph's built-in store, which the query reads, so CALL
         // grafeo.search.* procedures reach its HNSW / BM25 indexes (#677);
@@ -371,11 +380,13 @@ impl StatementPlanning {
             home_schema,
             home_graph,
             temporal_comparison,
+            language,
             statement_clock,
             db_info: LazyValue::new(move || {
                 super::Session::build_info_value(&*info_store, info_view)
             }),
             schema_info: LazyValue::new(move || super::Session::build_schema_value(&*schema_store)),
+            warnings,
         };
 
         let planner = Planner::with_context(
@@ -454,7 +465,7 @@ impl SessionPlanning {
 
         if self.call_depth >= MAX_CALL_DEPTH {
             return Err(Error::from(QueryError::new(
-                QueryErrorKind::Semantic,
+                grafeo_common::utils::error::QueryErrorKind::Semantic,
                 format!(
                     "procedure '{procedure}' is called more than {MAX_CALL_DEPTH} calls deep: \
                      does a procedure call itself?"
@@ -483,7 +494,9 @@ impl SessionPlanning {
             home_schema: caller.home_schema.clone(),
             home_graph: caller.home_graph.clone(),
             temporal_comparison: self.gql_temporal_comparison,
+            language: grafeo_common::types::StatementLanguage::Gql,
             statement_clock: caller.statement_clock,
+            warnings: Arc::clone(&caller.warnings),
         })
     }
 }

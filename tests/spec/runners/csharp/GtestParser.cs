@@ -28,7 +28,62 @@ public static class GtestParser
     public static GtestFile ParseFile(string path)
     {
         var content = File.ReadAllText(path);
-        return Parse(content);
+        var file = Parse(content);
+        foreach (var tc in file.Tests)
+            CheckMarks(tc, path);
+        return file;
+    }
+
+    /// <summary>
+    /// The rules of the marks, as every runner checks them: an <c>xfail:</c> names its spec and
+    /// its issue, a case is never both <c>skip:</c> and <c>xfail:</c>, and <c>probe:</c> is for
+    /// the runner probes only, in a file under a <c>spec-probes</c> directory.
+    /// </summary>
+    private static void CheckMarks(TestCase tc, string path)
+    {
+        if (tc.Xfail is not null)
+        {
+            if (string.IsNullOrWhiteSpace(tc.Xfail.Spec))
+                throw new FormatException($"test '{tc.Name}': an xfail names its `spec:`");
+            if (string.IsNullOrWhiteSpace(tc.Xfail.Issue))
+                throw new FormatException($"test '{tc.Name}': an xfail names its `issue:`");
+        }
+        if (tc.Skip is not null && tc.Xfail is not null)
+            throw new FormatException(
+                $"test '{tc.Name}': a case is either skipped or expected to fail, not both");
+        if (tc.Probe is not null)
+        {
+            if (!path.Split('/', '\\').Contains("spec-probes"))
+                throw new FormatException(
+                    $"test '{tc.Name}': `probe:` is for the runner probes only, under a `spec-probes` directory, not in {path}");
+            if (tc.Probe != "runner_error")
+                throw new FormatException($"test '{tc.Name}': unknown probe '{tc.Probe}' (known: runner_error)");
+        }
+    }
+
+    /// <summary>The <c>spec:</c> and <c>issue:</c> under an <c>xfail:</c> at the current line.</summary>
+    private static Xfail ParseXfail(ParseContext ctx)
+    {
+        static int Indent(string line) => line.Length - line.TrimStart().Length;
+        var own = Indent(ctx.Lines[ctx.Idx]);
+        ctx.Idx++;
+        var xfail = new Xfail();
+        while (!ctx.AtEnd)
+        {
+            var line = ctx.Lines[ctx.Idx];
+            var trimmed = line.Trim();
+            if (trimmed.Length == 0 || trimmed.StartsWith('#')) { ctx.Idx++; continue; }
+            if (Indent(line) <= own) break;
+            var kv = ParseKV(trimmed);
+            switch (kv?.Key)
+            {
+                case "spec": xfail.Spec = Unquote(kv.Value.Value); break;
+                case "issue": xfail.Issue = Unquote(kv.Value.Value); break;
+                default: throw new FormatException($"unknown xfail key at line {ctx.Idx + 1}: '{trimmed}'");
+            }
+            ctx.Idx++;
+        }
+        return xfail;
     }
 
     /// <summary>Parse .gtest content.</summary>
@@ -144,6 +199,10 @@ public static class GtestParser
                     break;
                 case "skip":
                     tc.Skip = Unquote(value); ctx.Idx++; break;
+                case "xfail":
+                    tc.Xfail = ParseXfail(ctx); break;
+                case "probe":
+                    tc.Probe = Unquote(value); ctx.Idx++; break;
                 case "language":
                     tc.Language = Unquote(value); ctx.Idx++; break;
                 case "dataset":
@@ -218,6 +277,8 @@ public static class GtestParser
                     ctx.Idx++; break;
                 case "columns":
                     expect.Columns = ParseYamlList(value); ctx.Idx++; break;
+                case "warnings":
+                    expect.Warnings = ParseYamlList(value); ctx.Idx++; break;
                 case "rows":
                     ctx.Idx++; expect.Rows = ParseRows(ctx); break;
                 case "terms":

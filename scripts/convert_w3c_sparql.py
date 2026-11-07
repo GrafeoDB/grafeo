@@ -22,7 +22,6 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
-from typing import Optional
 
 try:
     from rdflib import Graph, Namespace, URIRef
@@ -203,7 +202,7 @@ def generate_gtest(tests: list[dict], section: str, title: str) -> str:
     return "\n".join(lines)
 
 
-def turtle_to_insert_data(turtle_content: str) -> Optional[str]:
+def turtle_to_insert_data(turtle_content: str) -> str | None:
     """Convert Turtle/N-Triples data to a SPARQL INSERT DATA statement."""
     # Simple approach: wrap in INSERT DATA { ... }
     # This works for N-Triples but may need prefix handling for Turtle

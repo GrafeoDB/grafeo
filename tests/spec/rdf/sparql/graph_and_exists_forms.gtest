@@ -440,3 +440,231 @@ tests:
     expect:
       rows:
         - [1]
+
+  - name: sub_select_count_of_a_listed_graph_with_no_triples
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:b> <urn:q> 2 . GRAPH <urn:g1> { <urn:c> <urn:p> 4 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT ?g ?c FROM NAMED <urn:nograph> WHERE { GRAPH ?g { { SELECT (COUNT(*) AS ?c) WHERE { ?s ?p ?o } } } }"
+    expect:
+      rows:
+        - ["urn:nograph", 0]
+
+  - name: sub_select_from_named
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:b> <urn:q> 2 . GRAPH <urn:g1> { <urn:c> <urn:p> 4 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT ?g ?s FROM NAMED <urn:g2> WHERE { GRAPH ?g { { SELECT ?s WHERE { ?s <urn:p> ?o } } } }"
+    expect:
+      rows:
+        - ["urn:g2", "urn:d"]
+        - ["urn:g2", "urn:e"]
+
+  - name: sub_select_binds_the_graph
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:b> <urn:q> 2 . GRAPH <urn:g1> { <urn:c> <urn:p> 4 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT ?g ?s WHERE { GRAPH ?g { { SELECT ?s WHERE { ?s <urn:p> ?o } } } }"
+    expect:
+      rows:
+        - ["urn:g1", "urn:c"]
+        - ["urn:g2", "urn:d"]
+        - ["urn:g2", "urn:e"]
+
+  - name: sub_select_aggregate_per_graph
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:b> <urn:q> 2 . GRAPH <urn:g1> { <urn:c> <urn:p> 4 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT ?g ?c WHERE { GRAPH ?g { { SELECT (COUNT(*) AS ?c) WHERE { ?s ?p ?o } } } }"
+    expect:
+      rows:
+        - ["urn:g1", 1]
+        - ["urn:g2", 2]
+
+  - name: sub_select_limit_per_graph
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:b> <urn:q> 2 . GRAPH <urn:g1> { <urn:c> <urn:p> 4 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT ?g ?s WHERE { GRAPH ?g { { SELECT ?s WHERE { ?s <urn:p> ?o } ORDER BY ?s LIMIT 1 } } }"
+    expect:
+      rows:
+        - ["urn:g1", "urn:c"]
+        - ["urn:g2", "urn:d"]
+
+  - name: sub_select_in_a_named_graph
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:b> <urn:q> 2 . GRAPH <urn:g1> { <urn:c> <urn:p> 4 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT ?s WHERE { GRAPH <urn:g1> { { SELECT ?s WHERE { ?s <urn:p> ?o } } } }"
+    expect:
+      rows:
+        - ["urn:c"]
+
+  - name: sub_select_in_no_graph
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:b> <urn:q> 2 . GRAPH <urn:g1> { <urn:c> <urn:p> 4 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT ?s WHERE { GRAPH <urn:nograph> { { SELECT ?s WHERE { ?s <urn:p> ?o } } } }"
+    expect:
+      empty: true
+
+  - name: sub_select_with_the_graph_fixed
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:b> <urn:q> 2 . GRAPH <urn:g1> { <urn:c> <urn:p> 4 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT ?g ?s WHERE { VALUES ?g { <urn:g1> } GRAPH ?g { { SELECT ?s WHERE { ?s <urn:p> ?o } } } }"
+    expect:
+      rows:
+        - ["urn:g1", "urn:c"]
+
+  - name: sub_select_beside_a_triple
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:b> <urn:q> 2 . GRAPH <urn:g1> { <urn:c> <urn:p> 4 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT ?g ?s ?v WHERE { GRAPH ?g { ?s <urn:p> ?v { SELECT ?s WHERE { ?s <urn:p> ?o } } } }"
+    expect:
+      rows:
+        - ["urn:g1", "urn:c", 4]
+        - ["urn:g2", "urn:d", 5]
+        - ["urn:g2", "urn:e", 6]
+
+  - name: bind_exists_true
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:b> <urn:q> 2 . GRAPH <urn:g1> { <urn:c> <urn:p> 4 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT ?w WHERE { BIND(EXISTS { <urn:a> <urn:p> ?o } AS ?w) }"
+    expect:
+      rows:
+        - [true]
+
+  - name: bind_exists_false
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:b> <urn:q> 2 . GRAPH <urn:g1> { <urn:c> <urn:p> 4 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT ?w WHERE { BIND(EXISTS { <urn:a> <urn:q> ?o } AS ?w) }"
+    expect:
+      rows:
+        - [false]
+
+  - name: bind_not_exists
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:b> <urn:q> 2 . GRAPH <urn:g1> { <urn:c> <urn:p> 4 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT ?w WHERE { BIND(NOT EXISTS { <urn:a> <urn:q> ?o } AS ?w) }"
+    expect:
+      rows:
+        - [true]
+
+  - name: bind_exists_per_row
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:b> <urn:q> 2 . GRAPH <urn:g1> { <urn:c> <urn:p> 4 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT ?s ?w WHERE { ?s ?p ?v BIND(EXISTS { ?s <urn:p> ?o } AS ?w) }"
+    expect:
+      rows:
+        - ["urn:a", true]
+        - ["urn:b", false]
+
+  - name: project_exists
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:b> <urn:q> 2 . GRAPH <urn:g1> { <urn:c> <urn:p> 4 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT (EXISTS { <urn:a> <urn:p> ?o } AS ?w) WHERE { }"
+    expect:
+      rows:
+        - [true]
+
+  - name: project_exists_per_row
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:b> <urn:q> 2 . GRAPH <urn:g1> { <urn:c> <urn:p> 4 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT ?s (EXISTS { ?s <urn:p> ?o } AS ?w) WHERE { ?s ?p ?v }"
+    expect:
+      rows:
+        - ["urn:a", true]
+        - ["urn:b", false]
+
+  - name: project_not_exists
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:b> <urn:q> 2 . GRAPH <urn:g1> { <urn:c> <urn:p> 4 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT ?s (NOT EXISTS { ?s <urn:p> ?o } AS ?w) WHERE { ?s ?p ?v }"
+    expect:
+      rows:
+        - ["urn:a", false]
+        - ["urn:b", true]
+
+  - name: exists_inside_a_function
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:b> <urn:q> 2 . GRAPH <urn:g1> { <urn:c> <urn:p> 4 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT ?s (IF(EXISTS { ?s <urn:p> ?o }, 1, 0) AS ?w) WHERE { ?s ?p ?v }"
+    expect:
+      rows:
+        - ["urn:a", 1]
+        - ["urn:b", 0]
+
+  - name: bound_exists_in_a_filter
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:b> <urn:q> 2 . GRAPH <urn:g1> { <urn:c> <urn:p> 4 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT ?s WHERE { ?s ?p ?v BIND(EXISTS { ?s <urn:p> ?o } AS ?w) FILTER(?w) }"
+    expect:
+      rows:
+        - ["urn:a"]
+
+  - name: exists_inside_each_graph_bind
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:b> <urn:q> 2 . GRAPH <urn:g1> { <urn:c> <urn:p> 4 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT ?g ?s ?w WHERE { GRAPH ?g { ?s <urn:p> ?o BIND(EXISTS { ?s <urn:p> 4 } AS ?w) } }"
+    expect:
+      rows:
+        - ["urn:g1", "urn:c", true]
+        - ["urn:g2", "urn:d", false]
+        - ["urn:g2", "urn:e", false]
+
+  - name: exists_inside_each_graph_filter
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:b> <urn:q> 2 . GRAPH <urn:g1> { <urn:c> <urn:p> 4 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT ?g ?s WHERE { GRAPH ?g { ?s <urn:p> ?o FILTER(EXISTS { ?s <urn:p> 4 }) } }"
+    expect:
+      rows:
+        - ["urn:g1", "urn:c"]
+
+  - name: exists_inside_a_graph
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:b> <urn:q> 2 . GRAPH <urn:g1> { <urn:c> <urn:p> 4 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT ?g ?w WHERE { GRAPH ?g { <urn:c> ?p ?v BIND(EXISTS { <urn:c> <urn:p> ?o } AS ?w) } }"
+    expect:
+      rows:
+        - ["urn:g1", true]
+
+  - name: update_binds_exists
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:b> <urn:q> 2 . GRAPH <urn:g1> { <urn:c> <urn:p> 4 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:e> <urn:p> 6 } }"
+      - "INSERT { <urn:t> <urn:p> ?w } WHERE { BIND(EXISTS { <urn:a> <urn:p> ?o } AS ?w) }"
+    query: "SELECT ?v WHERE { <urn:t> <urn:p> ?v }"
+    expect:
+      rows:
+        - [true]
+
+  - name: update_sub_select_binds_the_graph
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:b> <urn:q> 2 . GRAPH <urn:g1> { <urn:c> <urn:p> 4 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:e> <urn:p> 6 } }"
+      - "INSERT { <urn:t> <urn:from> ?g } WHERE { GRAPH ?g { { SELECT ?s WHERE { ?s <urn:p> 4 } } } }"
+    query: "SELECT ?v WHERE { <urn:t> <urn:from> ?v }"
+    expect:
+      rows:
+        - ["urn:g1"]
+
+  - name: update_filters_on_exists_inside_a_graph
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:b> <urn:q> 2 . GRAPH <urn:g1> { <urn:c> <urn:p> 4 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:e> <urn:p> 6 } }"
+      - "INSERT { <urn:t> <urn:from> ?g } WHERE { GRAPH ?g { ?s <urn:p> ?o FILTER(EXISTS { ?s <urn:p> 4 }) } }"
+    query: "SELECT ?v WHERE { <urn:t> <urn:from> ?v }"
+    expect:
+      rows:
+        - ["urn:g1"]
+
+  - name: update_binds_exists_inside_a_graph
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:b> <urn:q> 2 . GRAPH <urn:g1> { <urn:c> <urn:p> 4 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:e> <urn:p> 6 } }"
+      - "INSERT { ?s <urn:w> ?w } WHERE { GRAPH ?g { ?s <urn:p> ?o BIND(EXISTS { ?s <urn:p> 4 } AS ?w) } }"
+    query: "SELECT ?s ?v WHERE { ?s <urn:w> ?v }"
+    expect:
+      rows:
+        - ["urn:c", true]
+        - ["urn:d", false]
+        - ["urn:e", false]
+
+  - name: exists_in_order_by
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:b> <urn:q> 2 . GRAPH <urn:g1> { <urn:c> <urn:p> 4 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT ?s WHERE { ?s ?p ?v } ORDER BY (EXISTS { ?s <urn:p> ?o })"
+    expect:
+      ordered: true
+      rows:
+        - ["urn:b"]
+        - ["urn:a"]

@@ -12,9 +12,22 @@ pub trait GrantReleaser: Send + Sync {
     /// Releases memory back to the manager.
     fn release(&self, size: usize, region: MemoryRegion);
 
-    /// Tries to allocate additional memory (for resize operations).
+    /// Tries to allocate additional memory (for resize operations), running the eviction
+    /// cycle when it does not fit.
     fn try_allocate_raw(&self, size: usize, region: MemoryRegion) -> bool;
+
+    /// Reserves `size` without running eviction: refuses past the hard limit. Safe under any
+    /// lock.
+    fn try_reserve_raw(&self, size: usize, region: MemoryRegion) -> bool;
+
+    /// Reserves `size` whatever the limit (replay, load, commit, rollback: work that must not
+    /// fail).
+    fn reserve_forced_raw(&self, size: usize, region: MemoryRegion);
 }
+
+/// The working step a part's grant grows and shrinks by, so a growing part takes one
+/// reservation per step rather than per allocation: an internal buffer size, not a setting.
+pub const GRANT_STEP: usize = 1 << 20;
 
 /// RAII wrapper for memory allocations.
 ///
@@ -81,6 +94,39 @@ impl MemoryGrant {
             }
             std::cmp::Ordering::Equal => true,
         }
+    }
+
+    /// Grows the grant by `bytes` if the hard limit allows; whether it did. Runs no eviction,
+    /// so it is safe under any lock: the reservation, the region's count and the grant's size
+    /// move together, or none of them.
+    pub fn try_grow(&mut self, bytes: usize) -> bool {
+        if bytes == 0 {
+            return true;
+        }
+        if !self.releaser.try_reserve_raw(bytes, self.region) {
+            return false;
+        }
+        self.size.fetch_add(bytes, Ordering::Relaxed);
+        true
+    }
+
+    /// Grows the grant by `bytes` whatever the limit, for work that must not fail.
+    pub fn grow_forced(&mut self, bytes: usize) {
+        if bytes == 0 {
+            return;
+        }
+        self.releaser.reserve_forced_raw(bytes, self.region);
+        self.size.fetch_add(bytes, Ordering::Relaxed);
+    }
+
+    /// Returns `bytes` of the grant (at most its size) to the manager.
+    pub fn shrink(&mut self, bytes: usize) {
+        let returned = bytes.min(self.size.load(Ordering::Relaxed));
+        if returned == 0 {
+            return;
+        }
+        self.releaser.release(returned, self.region);
+        self.size.fetch_sub(returned, Ordering::Relaxed);
     }
 
     /// Splits off a portion of this grant into a new grant.
@@ -231,6 +277,15 @@ mod tests {
         fn try_allocate_raw(&self, size: usize, _region: MemoryRegion) -> bool {
             self.allocated.fetch_add(size, Ordering::Relaxed);
             true
+        }
+
+        fn try_reserve_raw(&self, size: usize, _region: MemoryRegion) -> bool {
+            self.allocated.fetch_add(size, Ordering::Relaxed);
+            true
+        }
+
+        fn reserve_forced_raw(&self, size: usize, _region: MemoryRegion) {
+            self.allocated.fetch_add(size, Ordering::Relaxed);
         }
     }
 

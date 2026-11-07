@@ -70,12 +70,28 @@ pub(crate) fn query_result(mut result: QueryResult) -> PyQueryResult {
     let counters = result.counters;
     let profile = result.profile.take();
     let kind = result.kind;
+    let warnings = grafeo_bindings_common::warning::of_result(&result);
     let mut query_result =
         PyQueryResult::with_metrics(columns, result.into_rows(), execution_time, rows_scanned);
     query_result.counters = counters;
     query_result.profile = profile;
     query_result.kind = kind;
+    query_result.warnings = warnings;
     query_result
+}
+
+/// `result`, once its warnings are raised through `warnings.warn` (with the
+/// GIL, after the statement ran without it).
+///
+/// # Errors
+///
+/// The error of the statement, or a warning a filter turned into an
+/// exception: the statement has run then, and a write outside a
+/// transaction has committed.
+pub(crate) fn surfaced(py: Python<'_>, result: PyResult<PyQueryResult>) -> PyResult<PyQueryResult> {
+    let result = result?;
+    crate::warning::raise(py, &result.warnings)?;
+    Ok(result)
 }
 
 /// Runs a query in `language` in the session, with parameters converted by

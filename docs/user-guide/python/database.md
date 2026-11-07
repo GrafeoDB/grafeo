@@ -312,6 +312,20 @@ An incremental backup needs a full backup in its directory, and continues from t
 
 An incremental backup goes to the directory of the last full backup: one to another directory fails with an error naming it, also when a schema statement or graph command came between the two. Backups of one database run one at a time, also to different directories, and a backup directory that another process uses gives a busy error. A backup is on disk before the database lets go of the log it covers. A restore leaves either a complete database or nothing at its output path, so a failed restore can be retried to the same path.
 
+### How Much Log a Backup Keeps
+
+After a backup, every checkpoint keeps the write-ahead log from where that backup ended, so the next incremental backup can copy it. The log kept this way is limited to 1 GiB beyond the last checkpoint by default, so a schedule that stops taking incremental backups cannot fill the disk. Past the limit, a checkpoint removes the oldest part of the log and logs a warning once. The next incremental backup then fails with [`GRAFEO-S005`](../error-codes.md#storage-s) (the backup chain is broken), and a full backup starts a new chain. Raise the limit when more than that is written between two incremental backups:
+
+```python
+db = grafeo.GrafeoDB("./mydb.grafeo", wal_retention_limit=4 * 1024**3)  # 4 GiB
+```
+
+When you stop taking incremental backups, release the cursor, and checkpoints keep only the log a reopen needs. The next backup must then be a full one:
+
+```python
+db.release_backup_cursor()
+```
+
 ## Persistence
 
 ```python

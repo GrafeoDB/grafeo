@@ -97,7 +97,7 @@ class TestPersistence:
         prague = sorted(node for node, _ in db.text_search("Memory", "note", "prague", k=100))
         return nearest, prague
 
-    @pytest.mark.requires("text-index")
+    @pytest.mark.requires("text-index", "vector-index")
     def test_search_indexes_survive_close_and_reopen(self):
         """The vector and text indexes are in the file (#401): a reopen and a
         read-only open find the same nodes without creating them again."""
@@ -117,7 +117,7 @@ class TestPersistence:
                 assert self._searches(db) == before, open_db.__name__
                 db.close()
 
-    @pytest.mark.requires("text-index")
+    @pytest.mark.requires("text-index", "vector-index")
     def test_search_indexes_survive_a_process_that_exits_without_closing(self):
         """A process that creates the indexes and exits without closing leaves
         them in its WAL, which the reopen replays (#401)."""

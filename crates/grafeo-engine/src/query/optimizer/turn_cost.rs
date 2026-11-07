@@ -334,7 +334,6 @@ fn unlabelled_with_an_unindexed_pin(optimizer: &Optimizer, candidate: &TurnCandi
         })
 }
 
-/// Whether the value of `pin` reads no row, so a hop can find its nodes once.
 /// Whether `check` compares a key of `variable` with a value no row gives, by `<`, `<=`, `>` or
 /// `>=` (`a.age > 90`, `$low <= a.age`), which a filter over a scan reads from the key's column.
 fn compares_a_key_with_a_constant(check: &LogicalExpression, variable: &str) -> bool {
@@ -357,6 +356,7 @@ fn compares_a_key_with_a_constant(check: &LogicalExpression, variable: &str) -> 
     (is_key(left) && is_constant(right)) || (is_constant(left) && is_key(right))
 }
 
+/// Whether the value of `pin` reads no row, so a hop can find its nodes once.
 fn reads_no_row(pin: &SeekChoice<'_>) -> bool {
     matches!(
         pin.value,

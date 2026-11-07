@@ -579,9 +579,6 @@ impl Inner {
         Some(found)
     }
 
-    /// [`maybe_equal`](Self::maybe_equal) at `read`: the candidates whose
-    /// value as `read` sees it the index that serves `labels` finds for `key`,
-    /// ascending. `None` without one.
     /// The kinds the index a lookup of `property` among nodes with each of `labels` reads has
     /// held (see [`maybe_equal_at`](Self::maybe_equal_at)); `None` without one.
     pub(super) fn index_kinds(
@@ -594,6 +591,9 @@ impl Inner {
             .map(PropertyIndex::kinds)
     }
 
+    /// [`maybe_equal`](Self::maybe_equal) at `read`: the candidates whose
+    /// value as `read` sees it the index that serves `labels` finds for `key`,
+    /// ascending. `None` without one.
     pub(super) fn maybe_equal_at(
         &self,
         labels: &[&str],

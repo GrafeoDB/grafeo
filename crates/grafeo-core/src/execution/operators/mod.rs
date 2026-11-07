@@ -564,6 +564,7 @@ impl OperatorError {
 
     /// An operand of a kind its operator does not take, found as the statement
     /// runs (GQLSTATUS 22G12); `message` names the operator and the operands.
+    #[must_use]
     pub fn wrong_kind(message: impl Into<String>) -> Self {
         Self::query_data(
             grafeo_common::utils::error::QueryErrorKind::WrongKind,

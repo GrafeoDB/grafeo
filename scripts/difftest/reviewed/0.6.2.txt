@@ -462,3 +462,6 @@ EM3|sql 20233fc7fc A null in a property map is an equality with null, which find
 EN7|gql 8726b929ab A MERGE with a null entry matches what it inserted, as an insert stores no null, for a null literal and a null parameter; 0.6.1 inserted the path or the edge again for a null parameter.
 EN8|gql 2418e3ef49 A MERGE with a null entry matches what it inserted, as an insert stores no null, for a null literal and a null parameter; 0.6.1 inserted the path or the edge again for a null parameter.
 BS2|gql b1583e0ac6 CALL grafeo.procedures() lists whether each procedure writes the graph and what it reaches outside the database, so the refused YIELD names the two new columns.
+EO1|gql 8aad4aa193 A DATETIME literal with a time zone displacement is a zoned datetime that keeps it, Z as +00:00 (ISO/IEC 39075 21.2 SR 65); 0.6.1 made it the UTC time without its offset.
+EO2|gql dae2be3ad5 A DATETIME literal with a time zone displacement is a zoned datetime that keeps it, Z as +00:00 (ISO/IEC 39075 21.2 SR 65); 0.6.1 made it the UTC time without its offset.
+EO3|gql db79b9081c A DATETIME literal with a time zone displacement is a zoned datetime that keeps it, Z as +00:00 (ISO/IEC 39075 21.2 SR 65); 0.6.1 made it the UTC time without its offset.

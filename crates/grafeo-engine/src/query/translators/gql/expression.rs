@@ -323,13 +323,22 @@ impl GqlTranslator {
             ast::Literal::Duration(s) => grafeo_common::types::Duration::parse(s)
                 .map_or_else(|| Value::String(s.clone().into()), Value::Duration),
             ast::Literal::Datetime(s) => {
-                // Try full ISO datetime: YYYY-MM-DDTHH:MM:SS[.fff][Z|+HH:MM]
+                // An ISO datetime, YYYY-MM-DDTHH:MM:SS[.fff][Z|+HH:MM]: with a time zone
+                // displacement (`Z` is +00:00) a zoned datetime that keeps it, without one a
+                // local datetime (ISO/IEC 39075 21.2 Syntax Rule 65, General Rule 15).
                 if let Some(pos) = s.find('T') {
                     if let (Some(d), Some(t)) = (
                         grafeo_common::types::Date::parse(&s[..pos]),
                         grafeo_common::types::Time::parse(&s[pos + 1..]),
                     ) {
-                        Value::Timestamp(grafeo_common::types::Timestamp::from_date_time(d, t))
+                        grafeo_common::types::ZonedDatetime::from_date_time(d, t).map_or_else(
+                            || {
+                                Value::Timestamp(grafeo_common::types::Timestamp::from_date_time(
+                                    d, t,
+                                ))
+                            },
+                            Value::ZonedDatetime,
+                        )
                     } else {
                         Value::String(s.clone().into())
                     }

@@ -424,6 +424,7 @@ mod subquery_filters;
 mod subquery_integration;
 mod temporal_components;
 mod temporal_grouping_spill;
+mod temporal_literals;
 mod temporal_properties;
 mod temporal_types;
 mod text_index_mutations;

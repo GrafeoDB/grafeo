@@ -3501,4 +3501,17 @@ for case_id, query, languages, params in [
 ]:
     case(case_id, query, languages, "merge_nulls", params=params)
 
+# EO: a GQL DATETIME literal with a time zone displacement is a zoned datetime that keeps it
+#     (ISO/IEC 39075 21.2 SR 65), `Z` as +00:00 (EO1 to EO3); one without stays local (EO4), and
+#     a zoned literal equals a local datetime at the same UTC instant without a session time
+#     zone (EO5). In 0.6.1 the literal became the UTC time without its offset.
+for case_id, query in [
+    ("EO1", "RETURN DATETIME '2024-01-01T10:00:00+01:00' AS d"),
+    ("EO2", "RETURN DATETIME '2024-01-01T10:00:00Z' AS d"),
+    ("EO3", "RETURN hour(DATETIME '2024-03-15T00:30:00+01:00') AS h, DATETIME '2024-03-15T00:30:00+01:00' IS TYPED ZONED DATETIME AS zoned"),
+    ("EO4", "RETURN DATETIME '2024-01-01T10:00:00' AS d"),
+    ("EO5", "RETURN DATETIME '2024-01-01T10:00:00Z' = datetime('2024-01-01T10:00:00') AS same"),
+]:
+    case(case_id, query, GQL)
+
 # fmt: on

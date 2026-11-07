@@ -54,6 +54,7 @@ impl FlushContext {
 }
 
 /// Result of a flush operation.
+#[derive(Debug, Default)]
 pub(super) struct FlushResult {
     /// Number of sections written to the container.
     pub sections_written: usize,

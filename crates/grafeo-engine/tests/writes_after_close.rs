@@ -271,6 +271,11 @@ fn an_in_memory_database_still_takes_writes_after_close() {
     assert_eq!(db.node_count().unwrap(), 3);
 }
 
+/// How long a test waits for `close()` to reach its final checkpoint: a close with nothing new
+/// writes none, so a missing change fails the test instead of hanging it.
+#[cfg(feature = "testing-statement-injection")]
+const CHECKPOINT_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// The race `close()` used to lose: work that waits for the final checkpoint
 /// (which holds commits off) and runs once it is written. A transaction that
 /// wrote before `close()` and commits meanwhile fails, instead of landing in
@@ -299,7 +304,9 @@ fn a_commit_waiting_for_the_final_checkpoint_fails() {
     });
     db.close().unwrap();
 
-    let (commit, finished) = started.recv().expect("close() checkpointed");
+    let (commit, finished) = started
+        .recv_timeout(CHECKPOINT_WAIT)
+        .expect("close() checkpointed");
     assert!(!finished, "the commit waits for the final checkpoint");
     assert_closed(&commit.join().expect_err("the commit fails"));
     drop(db);
@@ -320,6 +327,8 @@ fn a_direct_write_waiting_for_the_final_checkpoint_fails() {
     database_with_alix(&path);
 
     let db = Arc::new(open(&path));
+    // A change since the open, so close() has something new and checkpoints.
+    db.execute("INSERT (:Person {name: 'Vincent'})").unwrap();
     let writer = Arc::clone(&db);
     let (sender, started) = mpsc::channel();
     during_next_checkpoint(move || {
@@ -334,12 +343,17 @@ fn a_direct_write_waiting_for_the_final_checkpoint_fails() {
     });
     db.close().unwrap();
 
-    let (write, finished) = started.recv().expect("close() checkpointed");
+    let (write, finished) = started
+        .recv_timeout(CHECKPOINT_WAIT)
+        .expect("close() checkpointed");
     assert!(!finished, "the write waits for the final checkpoint");
     assert_closed(&write.join().expect_err("the write fails"));
-    assert_eq!(db.node_count().unwrap(), 1, "nothing was created");
+    assert_eq!(db.node_count().unwrap(), 2, "nothing was created");
     drop(db);
-    assert_eq!(people_after_reopen(&path), vec![Value::from("Alix")]);
+    assert_eq!(
+        people_after_reopen(&path),
+        vec![Value::from("Alix"), Value::from("Vincent")]
+    );
 }
 
 /// A schema change or a graph command that waits for the final checkpoint
@@ -365,6 +379,8 @@ fn a_schema_change_waiting_for_the_final_checkpoint_fails() {
         database_with_alix(&path);
 
         let db = Arc::new(open(&path));
+        // A change since the open, so close() has something new and checkpoints.
+        db.execute("INSERT (:Person {name: 'Vincent'})").unwrap();
         let writer = Arc::clone(&db);
         let (sender, started) = mpsc::channel();
         during_next_checkpoint(move || {
@@ -379,7 +395,9 @@ fn a_schema_change_waiting_for_the_final_checkpoint_fails() {
         });
         db.close().unwrap();
 
-        let (write, finished) = started.recv().expect("close() checkpointed");
+        let (write, finished) = started
+            .recv_timeout(CHECKPOINT_WAIT)
+            .expect("close() checkpointed");
         assert!(!finished, "{statement}: waits for the final checkpoint");
         assert_closed(&write.join().expect_err("the statement fails"));
         drop(db);
@@ -395,6 +413,11 @@ fn a_schema_change_waiting_for_the_final_checkpoint_fails() {
         assert!(
             reopened.graph("berlin").is_err(),
             "{statement}: no graph in the file"
+        );
+        assert_eq!(
+            people(&reopened),
+            vec![Value::from("Alix"), Value::from("Vincent")],
+            "{statement}: the change before close() is in the file"
         );
         reopened.close().unwrap();
     }

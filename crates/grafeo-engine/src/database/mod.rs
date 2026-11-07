@@ -2912,7 +2912,34 @@ impl GrafeoDB {
             if let Some(ref wal) = self.wal {
                 wal.sync()?;
             }
-            let flush_result = self.checkpoint_to_file(fm)?;
+            // A close with nothing new leaves the file as it is: no change
+            // committed since the last checkpoint (none since the open, when
+            // none ran), no log record past the image and no transaction
+            // still open (the final checkpoint holds its commit off). A
+            // checkpoint would rewrite the header and, under copy-on-write,
+            // the whole image. A database with a backup chain checkpoints
+            // still: its checkpoint releases the log segments the chain no
+            // longer needs. The question is asked with commits held off, so a
+            // commit that began before `close_for_writes` above has completed
+            // and is counted; the hold stays until the file is closed.
+            let held = self.transaction_manager.hold_commits()?;
+            #[cfg(feature = "wal")]
+            let log_ahead = self
+                .wal
+                .as_ref()
+                .is_some_and(|wal| wal.end_lsn() > self.checkpoint_lsn());
+            #[cfg(not(feature = "wal"))]
+            let log_ahead = false;
+            let nothing_new = !log_ahead
+                && !self.transaction_manager.changed_since_checkpoint()
+                && self.transaction_manager.active_count() == 0
+                && !Self::backup_chain_needs_wal(fm);
+            let (flush_result, _held) = if nothing_new {
+                (flush::FlushResult::default(), Some(held))
+            } else {
+                drop(held);
+                (self.checkpoint_to_file(fm)?, None)
+            };
 
             // Release WAL file handles before removing sidecar directory.
             // On Windows, open handles prevent directory deletion.

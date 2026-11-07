@@ -1396,3 +1396,46 @@ mod hooks {
         assert_eq!(db.wal().unwrap().end_lsn(), end, "the WAL did not grow");
     }
 }
+
+/// An open and close with no writes leaves the file's bytes as they were: the close
+/// checkpoints only past the change count, and the open writes nothing. Five reads between them
+/// change nothing either. Run with the defaults, and with `Sync` durability and history kept.
+#[test]
+fn an_open_and_close_with_no_writes_leaves_the_file_unchanged() {
+    use grafeo_engine::config::{DurabilityMode, HistoryRetention};
+    let configs: [(&str, fn(&std::path::Path) -> grafeo_engine::Config); 2] = [
+        ("defaults", |path| grafeo_engine::Config::persistent(path)),
+        ("sync, history kept", |path| {
+            grafeo_engine::Config::persistent(path)
+                .with_wal_durability(DurabilityMode::Sync)
+                .with_history_retention(HistoryRetention::Forever)
+        }),
+    ];
+    for (name, config) in configs {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("untouched.grafeo");
+        {
+            let db = grafeo_engine::GrafeoDB::with_config(config(&path)).unwrap();
+            db.execute("INSERT (:City {name: 'Edam'})").unwrap();
+            db.close().unwrap();
+        }
+        let bytes = std::fs::read(&path).unwrap();
+        let db = grafeo_engine::GrafeoDB::with_config(config(&path)).unwrap();
+        db.close().unwrap();
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            bytes,
+            "{name}: an open and close"
+        );
+        let db = grafeo_engine::GrafeoDB::with_config(config(&path)).unwrap();
+        for _ in 0..5 {
+            db.execute("MATCH (c:City) RETURN c").unwrap();
+        }
+        db.close().unwrap();
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            bytes,
+            "{name}: five reads between"
+        );
+    }
+}

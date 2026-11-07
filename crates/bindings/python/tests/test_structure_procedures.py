@@ -12,10 +12,13 @@ import itertools
 import grafeo
 import pytest
 
-pytestmark = pytest.mark.skipif(
-    not hasattr(grafeo.GrafeoDB(), "algorithms"),
-    reason="grafeo built without algos feature",
-)
+pytestmark = [
+    pytest.mark.skipif(
+        not hasattr(grafeo.GrafeoDB(), "algorithms"),
+        reason="grafeo built without algos feature",
+    ),
+    pytest.mark.skipif("gql" not in grafeo.features(), reason="grafeo built without gql feature"),
+]
 
 INVALID_PARAMETER_VALUE = "22023"
 

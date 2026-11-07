@@ -4,10 +4,13 @@ raises 22000 naming the cycle; `is_dag()` is the check to make first (the ruling
 import grafeo
 import pytest
 
-pytestmark = pytest.mark.skipif(
-    not hasattr(grafeo.GrafeoDB(), "algorithms"),
-    reason="grafeo built without algos feature",
-)
+pytestmark = [
+    pytest.mark.skipif(
+        not hasattr(grafeo.GrafeoDB(), "algorithms"),
+        reason="grafeo built without algos feature",
+    ),
+    pytest.mark.skipif("gql" not in grafeo.features(), reason="grafeo built without gql feature"),
+]
 
 CYCLIC = [
     (4, [(0, 1), (1, 2), (2, 0), (2, 3)]),

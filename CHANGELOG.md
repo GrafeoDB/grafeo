@@ -38,6 +38,8 @@ Queries that ran in 0.6.1 and now fail or behave differently.
 - **A WAL with an empty segment**, which a crash in 0.6.1 could leave while starting one, is refused at open with an error naming `wal_salvage`: reopen it once with `wal_salvage`, which sets the empty file aside and loses no commit (#725).
 - **Incremental backups that cannot continue their chain** fail with `GRAFEO-S005`, naming the cause: no backup cursor, a chain behind the cursor, or log that was removed. Some of these raised an invalid-input error. A new full backup starts a new chain (#673).
 - **Automatic checkpoints are on**: a file database checkpoints by itself once its WAL holds 256 MiB past the last checkpoint, on a background thread that starts when it first has work; turn it off with `checkpoint_wal_size=None` (Python), `checkpointWalSize: null` (Node.js) or `Config::without_checkpoint_wal_size()`. The WAL's segment size is a setting (`wal_segment_size`, 1 MiB to 1 GiB, 64 MiB by default), and a checkpoint size below 1 MiB is refused.
+- **The default memory limit follows the process's real ceiling** ([#751](https://github.com/GrafeoDB/grafeo/issues/751)): 75% of the smaller of the machine's memory and any cgroup (Linux, at the process's cgroup or a parent) or job-object (Windows) limit. Windows and macOS now read their memory instead of assuming 1 GiB; WASM keeps 768 MiB.
+- **`Config::with_memory_fraction` applies per open**: it is taken of the memory detected when the database opens, and a database file no longer stores its bytes; `with_memory_limit` is stored as before.
 
 ### Added
 

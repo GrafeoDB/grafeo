@@ -493,26 +493,42 @@ mod tests {
             }
         }
 
-        const KINDS: [QueryErrorKind; 17] = [
-            QueryErrorKind::Lexer,
-            QueryErrorKind::Syntax,
-            QueryErrorKind::Semantic,
-            QueryErrorKind::InvalidReference,
-            QueryErrorKind::Optimization,
-            QueryErrorKind::Unsupported,
-            QueryErrorKind::Execution,
-            QueryErrorKind::Timeout,
-            QueryErrorKind::NumericOutOfRange,
-            QueryErrorKind::InvalidCharacterValueForCast,
-            QueryErrorKind::DivisionByZero,
-            QueryErrorKind::NegativeLimit,
-            QueryErrorKind::InvalidValueType,
-            QueryErrorKind::WrongKind,
-            QueryErrorKind::InvalidTimeZoneDisplacement,
-            QueryErrorKind::ValuesNotComparable,
-            QueryErrorKind::InvalidParameterValue,
-        ];
-        for kind in KINDS {
+        /// The kind after `kind` (the first after `None`), by an exhaustive match: a kind added
+        /// to `QueryErrorKind` fails to compile here until it has its place, so the loop below
+        /// reaches every kind.
+        fn next(kind: Option<QueryErrorKind>) -> Option<QueryErrorKind> {
+            use QueryErrorKind as K;
+            match kind {
+                None => Some(K::Lexer),
+                Some(K::Lexer) => Some(K::Syntax),
+                Some(K::Syntax) => Some(K::Semantic),
+                Some(K::Semantic) => Some(K::InvalidReference),
+                Some(K::InvalidReference) => Some(K::Optimization),
+                Some(K::Optimization) => Some(K::Unsupported),
+                Some(K::Unsupported) => Some(K::Execution),
+                Some(K::Execution) => Some(K::Timeout),
+                Some(K::Timeout) => Some(K::NumericOutOfRange),
+                Some(K::NumericOutOfRange) => Some(K::InvalidCharacterValueForCast),
+                Some(K::InvalidCharacterValueForCast) => Some(K::DivisionByZero),
+                Some(K::DivisionByZero) => Some(K::NegativeLimit),
+                Some(K::NegativeLimit) => Some(K::InvalidValueType),
+                Some(K::InvalidValueType) => Some(K::WrongKind),
+                Some(K::WrongKind) => Some(K::InvalidTimeZoneDisplacement),
+                Some(K::InvalidTimeZoneDisplacement) => Some(K::ValuesNotComparable),
+                Some(K::ValuesNotComparable) => Some(K::InvalidParameterValue),
+                Some(K::InvalidParameterValue) => None,
+            }
+        }
+
+        let mut kinds = Vec::new();
+        let mut at = next(None);
+        while let Some(kind) = at {
+            assert!(!kinds.contains(&kind), "{kind:?} twice: `next` loops");
+            kinds.push(kind);
+            at = next(Some(kind));
+        }
+        assert_eq!(kinds.len(), 17, "{kinds:?}");
+        for kind in kinds {
             let (status, code) = decided(kind);
             let error = QueryError::new(kind, "message");
             assert_eq!(error.error_code(), code, "{kind:?}");

@@ -924,7 +924,7 @@ mod tests {
         session.begin_transaction().unwrap();
         for change in [
             "CREATE (:File {i: 100, k: 5.0}), (:TypeDefinition {i: 100, k: 5}), \
-             (:TypeDefinition {i: 101, k: '5'})",
+             (:TypeDefinition {i: 102, k: '5'})",
             "MATCH (t:TypeDefinition) WHERE t.i % 4 = 1 REMOVE t:TypeDefinition",
             "MATCH (f:File) WHERE f.i % 5 = 2 SET f.k = 1000",
             "MATCH (f:File) WHERE f.i % 6 = 3 REMOVE f:File SET f:Draft",
@@ -945,11 +945,20 @@ mod tests {
                     .contains(&vec![Value::Int64(100), Value::Int64(100)]),
                 "{language}"
             );
-            // A string equals no number (GA04).
+            // A string equals no number (GA04): the node with the string key is still a
+            // TypeDefinition, so the join meets it and leaves it out.
+            let typed = session
+                .execute_language(
+                    "MATCH (t:TypeDefinition) WHERE t.i = 102 RETURN t.k",
+                    language,
+                    None,
+                )
+                .unwrap();
+            assert_eq!(typed.rows(), [vec![Value::from("5")]], "{language}");
             assert!(
                 !joined
                     .rows()
-                    .contains(&vec![Value::Int64(100), Value::Int64(101)]),
+                    .contains(&vec![Value::Int64(100), Value::Int64(102)]),
                 "{language}"
             );
         }

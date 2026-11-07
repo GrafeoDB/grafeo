@@ -1891,3 +1891,50 @@ def test_t11_every_binding_and_every_profile_it_defines_is_checked() -> None:
     assert len({package for package, _ in expected}) >= 4, expected
     assert set(check_policy.PROFILE_BUILDS) == expected
     assert check_policy.PROFILE_CONTROL[:2] in expected
+
+
+def test_t10_every_facade_profile_without_async_io_has_a_rule() -> None:
+    """Each persona and deployment profile of the facade that does not turn on
+    `async-storage` (directly or through another feature) is a T10 build: a tokio
+    dependency added to it must not pass unseen. The async ones (enterprise, server
+    and what builds on them) are left out, as tokio is theirs."""
+    import tomllib
+
+    root = Path(__file__).resolve().parents[2]
+    manifest = tomllib.loads(
+        (root / "crates/grafeo/Cargo.toml").read_text(encoding="utf-8")
+    )
+    table = manifest["features"]
+
+    def turns_on(feature: str, seen: set[str]) -> set[str]:
+        for item in table.get(feature, []):
+            if "/" not in item and item not in seen:
+                seen.add(item)
+                turns_on(item, seen)
+        return seen
+
+    names = [
+        "lpg",
+        "rdf",
+        "analytics",
+        "ai",
+        "edge",
+        "enterprise",
+        "embedded",
+        "browser",
+        "server",
+        "full",
+    ]
+    profiles = [name for name in names if name in table]
+    assert len(profiles) >= 8, profiles
+    without_async = {
+        name for name in profiles if "async-storage" not in turns_on(name, set())
+    }
+    assert {"lpg", "edge", "embedded"} <= without_async
+    assert "enterprise" not in without_async
+    ruled = {
+        features
+        for package, features, crate, _ in check_policy.RUNTIME_RULES
+        if package == "grafeo" and crate == "tokio"
+    }
+    assert sorted(without_async - ruled) == []

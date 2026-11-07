@@ -165,6 +165,10 @@ RUNTIME_RULES: list[tuple[str, str | None, str, frozenset[str]]] = [
     ("grafeo", "embedded", "tokio", frozenset()),
     ("grafeo", "edge", "tokio", frozenset()),
     ("grafeo", "lpg", "tokio", frozenset()),
+    ("grafeo", "rdf", "tokio", frozenset()),
+    ("grafeo", "analytics", "tokio", frozenset()),
+    ("grafeo", "ai", "tokio", frozenset()),
+    ("grafeo", "browser", "tokio", frozenset()),
     ("grafeo-cli", None, "tokio", frozenset()),
     ("grafeo-c", None, "tokio", frozenset()),
     (

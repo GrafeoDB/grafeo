@@ -213,9 +213,9 @@ impl BufferManager {
 
     /// Runs the eviction cycle until `needed` more bytes fit under the hard limit, or until a
     /// pass leaves the reserved bytes no lower (it freed nothing, or what it reports freed
-    /// was not given back); whether they fit. Each pass asks every consumer for at most half
-    /// of what it holds, so it may take several. Consumers take their own locks while they
-    /// evict or spill, so a caller holds no store lock.
+    /// was not given back); whether they fit. A pass's eviction asks each consumer for at most
+    /// half of what it holds (a spill after it may free more), so it may take several. Consumers
+    /// take their own locks while they evict or spill, so a caller holds no store lock.
     pub fn make_room(&self, needed: usize) -> bool {
         let mut allocated = self.allocated.load(Ordering::Relaxed);
         loop {

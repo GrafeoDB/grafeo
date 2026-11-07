@@ -525,3 +525,30 @@ fn dropping_the_session_under_an_open_owned_stream_rolls_its_transaction_back() 
         drop(stream);
     }
 }
+
+/// Outside a transaction a session's owned stream outlives the session: dropped at once (as a
+/// binding's temporary session is) or after a first pull, the stream reads every row to its end.
+#[cfg(feature = "gql")]
+#[test]
+fn an_owned_stream_outside_a_transaction_reads_on_after_its_session_drops() {
+    const READ: &str = "MATCH (p:Person) RETURN p.name";
+    for pulled_first in [false, true] {
+        let db = GrafeoDB::new_in_memory();
+        seed_people(&db);
+        let session = db.session();
+        let mut stream = session.execute_streaming_owned(READ).unwrap();
+        let mut rows = 0;
+        if pulled_first {
+            let chunk = stream.next_chunk().unwrap().expect("a first chunk");
+            rows += chunk.len();
+        }
+        drop(session);
+        while let Some(chunk) = stream
+            .next_chunk()
+            .unwrap_or_else(|error| panic!("pulled first {pulled_first}: {error}"))
+        {
+            rows += chunk.len();
+        }
+        assert_eq!(rows, 5, "pulled first {pulled_first}: every row");
+    }
+}

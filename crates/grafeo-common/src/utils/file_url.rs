@@ -57,7 +57,8 @@ pub enum FileUrlError {
 /// # Errors
 ///
 /// [`FileUrlError::RemoteHost`] for a URL of another host, [`FileUrlError::InvalidEscape`] for
-/// a path whose escapes do not decode.
+/// a path whose escapes do not decode, [`FileUrlError::NetworkPath`] for a path that names a
+/// network share, and [`FileUrlError::NotAbsolute`] for a URL whose path is not absolute.
 pub fn local_path(name: &str) -> Result<PathBuf, FileUrlError> {
     let Some(rest) = strip_scheme(name) else {
         return Ok(PathBuf::from(name));

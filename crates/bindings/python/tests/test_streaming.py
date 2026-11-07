@@ -155,3 +155,20 @@ def test_concurrent_iteration_does_not_deadlock(people_db):
     # Sanity cap: two threads of 2k rows should finish in far under 30s;
     # blowing past that points at GIL starvation even without strict timing.
     assert elapsed < 20.0, f"concurrent iteration took {elapsed:.2f}s"
+
+
+def test_a_lazy_stream_of_a_temporary_session_reads_every_row(people_db):
+    """The session goes when the expression ends; outside a transaction its stream reads on."""
+    rows = list(people_db.session().execute_lazy("MATCH (p:Person) RETURN p.name"))
+    assert sorted(row["p.name"] for row in rows) == ["Alix", "Gus", "Jules", "Mia", "Vincent"]
+
+
+def test_a_lazy_stream_reads_on_after_its_session_closes(people_db):
+    """Closing the session ends its statements, not a stream it opened outside a transaction."""
+    session = people_db.session()
+    stream = session.execute_lazy("MATCH (p:Person) RETURN p.name")
+    first = next(iter(stream))
+    session.close()
+    rest = list(stream)
+    names = sorted([first["p.name"], *(row["p.name"] for row in rest)])
+    assert names == ["Alix", "Gus", "Jules", "Mia", "Vincent"]

@@ -227,3 +227,21 @@ describe('a session stream holds its statement slot', () => {
     }
   })
 })
+
+describe('a session stream outside a transaction outlives the session', () => {
+  it('reads every row after session.close()', async () => {
+    const db = seedPeople()
+    try {
+      const session = db.session()
+      const stream = await session.executeStream('MATCH (p:Person) RETURN p.name AS name')
+      const first = await stream.next()
+      expect(first).not.toBe(null)
+      session.close()
+      const rest = await drainStream(stream)
+      const names = [first, ...rest].map((row) => row.name).sort()
+      expect(names).toEqual(['Alix', 'Gus', 'Jules', 'Mia', 'Vincent'])
+    } finally {
+      db.close()
+    }
+  })
+})

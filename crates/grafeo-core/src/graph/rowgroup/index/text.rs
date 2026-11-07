@@ -324,6 +324,10 @@ impl RowGroupStore {
     }
 
     /// Retrieves the text index for a label and a property.
+    ///
+    /// The handle is for reads (searches, lengths, statistics). Write through the store, which
+    /// counts what the index holds: an insert or a removal made through the handle leaves the
+    /// store's memory account stale.
     #[must_use]
     pub fn get_text_index(
         &self,

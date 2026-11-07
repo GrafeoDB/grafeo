@@ -2262,3 +2262,26 @@ def test_t13_a_declaration_inside_a_comment_declares_nothing(tmp_path: Path) -> 
 
 def test_t13_has_a_hint() -> None:
     assert "T13" in check_policy.HINTS
+
+
+@pytest.mark.parametrize(
+    "commented",
+    [
+        '// #[unsafe(no_mangle)]\n// pub extern "C" fn grafeo_old() {}\n',
+        '/*\n#[unsafe(no_mangle)]\npub extern "C" fn grafeo_old() {}\n*/\n',
+        '/// #[unsafe(no_mangle)] pub extern "C" fn grafeo_old() {}\n',
+    ],
+    ids=["line", "block", "doc"],
+)
+def test_t13_a_commented_out_export_is_no_export(
+    tmp_path: Path, commented: str
+) -> None:
+    assert t13_found(tmp_path, {C_SRC: C_EXPORTS + commented}) == []
+
+
+@pytest.mark.parametrize("missing", [C_HEADER, GO_HEADER, GO_DEF])
+def test_t13_a_missing_header_or_import_list_is_a_finding(
+    tmp_path: Path, missing: str
+) -> None:
+    found = t13_found(tmp_path, {missing: None})
+    assert [path for path, _ in found] == [missing], found

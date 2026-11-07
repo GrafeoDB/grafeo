@@ -7860,10 +7860,14 @@ impl Drop for Session {
     fn drop(&mut self) {
         // Auto-rollback any active transaction to prevent leaked MVCC state,
         // dangling write locks, and uncommitted versions lingering in the store.
-        // An owned stream still open reads the transaction no more: it fails
-        // on its next pull, so the rollback goes ahead under it. A nested
-        // transaction rolls back level by level, so every level goes.
-        self.ended.store(true, std::sync::atomic::Ordering::Release);
+        // With a transaction open, an owned stream still open reads it no
+        // more: it fails on its next pull, so the rollback goes ahead under
+        // it. A nested transaction rolls back level by level, so every level
+        // goes. Without one, a stream holds its own snapshot pin and reads on
+        // after the session is gone (a binding's lazy stream does).
+        if self.in_transaction() {
+            self.ended.store(true, std::sync::atomic::Ordering::Release);
+        }
         while self.in_transaction() {
             if self.rollback_regardless_of_streams().is_err() {
                 break;

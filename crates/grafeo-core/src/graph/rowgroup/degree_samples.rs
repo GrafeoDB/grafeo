@@ -138,8 +138,11 @@ impl DegreeSamples {
 
     /// Brings the grant to the counted bytes.
     fn settle(&self) {
+        // Read under the grant's lock, so a settle that read an older count cannot shrink
+        // what a newer one just grew.
+        let mut grant = self.grant.lock();
         let counted = self.counted_bytes();
-        if let Some(grant) = self.grant.lock().as_mut() {
+        if let Some(grant) = grant.as_mut() {
             let held = grant.size();
             if held < counted {
                 grant.grow_forced(counted - held);

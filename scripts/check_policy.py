@@ -1597,8 +1597,9 @@ def c_exports(root: Path, files: list[str]) -> set[str]:
     """The functions grafeo-c exports: each `#[unsafe(no_mangle)]` fn, and the name an exporting
     macro is invoked with (its first `grafeo_` identifier)."""
     exports: set[str] = set()
+    # Comments blanked, so a commented-out export is none.
     sources = [
-        text
+        rust_code(text)
         for rel in files
         if rel.startswith(C_SOURCES) and rel.endswith(".rs")
         if (text := read_text(root / rel)) is not None
@@ -1634,6 +1635,15 @@ def c_header_findings(root: Path, files: list[str]) -> list[Finding]:
     binding's Windows import library is built from."""
     present = set(files)
     findings: list[Finding] = []
+    # With grafeo-c's sources there, each file that must agree with them is there too.
+    if any(rel.startswith(C_SOURCES) for rel in files):
+        for required in (C_HEADER, GO_HEADER, GO_IMPORTS):
+            if required not in present:
+                findings.append(
+                    finding(
+                        "T13", required, None, "is missing; grafeo-c's exports need it"
+                    )
+                )
     header = read_text(root / C_HEADER) if C_HEADER in present else None
     if header is not None and GO_HEADER in present:
         go_header = read_text(root / GO_HEADER)

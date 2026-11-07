@@ -200,18 +200,12 @@ fn walless_interval_child() {
             .with_checkpoint_interval(Duration::from_millis(200)),
     )
     .unwrap();
-    // The file's creation is a checkpoint, stamped in whole seconds: the writes start in a later
-    // second, so a checkpoint stamped after that one came after them.
-    let created = db.checkpoint_status().last_checkpoint;
     let now = || {
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs()
     };
-    while created.is_some_and(|stamp| now() <= stamp) {
-        std::thread::sleep(Duration::from_millis(10));
-    }
     match case.to_str().unwrap() {
         "direct" => {
             let alix = db.create_node(&["Person"]).unwrap();
@@ -228,13 +222,21 @@ fn walless_interval_child() {
         }
         other => panic!("no case {other}"),
     }
-    // Waits for the interval's checkpoint, then exits without closing: a crash.
+    // Checkpoints are stamped in whole seconds: one stamped after the second in which the writes
+    // ended came after all of them. A marker write each round keeps the database changed, so the
+    // interval keeps checkpointing until one is that late; then exits without closing: a crash.
+    let written = now();
     let deadline = std::time::Instant::now() + Duration::from_secs(30);
-    while db.checkpoint_status().last_checkpoint <= created {
+    while db
+        .checkpoint_status()
+        .last_checkpoint
+        .is_none_or(|stamp| stamp <= written)
+    {
         if std::time::Instant::now() > deadline {
             std::process::exit(NO_INTERVAL_CHECKPOINT);
         }
-        std::thread::sleep(Duration::from_millis(10));
+        db.create_node(&["Marker"]).unwrap();
+        std::thread::sleep(Duration::from_millis(50));
     }
     std::process::exit(0);
 }

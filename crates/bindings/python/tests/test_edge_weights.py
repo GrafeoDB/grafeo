@@ -66,6 +66,7 @@ def test_a_weight_of_another_kind_is_refused(name, call, negative):
             call(db.algorithms, a, d)
         assert raised.value.gql_status == WRONG_KIND, (name, value, str(raised.value))
         assert "edge" in str(raised.value), str(raised.value)
+        assert "'w'" in str(raised.value), str(raised.value)
 
 
 @pytest.mark.parametrize(("name", "call", "negative"), CALLS)
@@ -75,6 +76,7 @@ def test_a_weight_outside_the_domain_is_refused(name, call, negative):
         with pytest.raises(grafeo.GrafeoError) as raised:
             call(db.algorithms, a, d)
         assert raised.value.gql_status == INVALID_PARAMETER_VALUE, (name, value)
+        assert "edge" in str(raised.value) and "'w'" in str(raised.value), str(raised.value)
     db, a, d = probe(-2)
     if negative:
         call(db.algorithms, a, d)
@@ -105,3 +107,16 @@ def test_min_cost_max_flow_refuses_a_negative_cycle():
     with pytest.raises(grafeo.GrafeoError) as raised:
         db.algorithms.min_cost_max_flow(ids[0], ids[3], "c", "k")
     assert raised.value.gql_status == INVALID_PARAMETER_VALUE
+
+
+# The value an algorithm takes for an edge without the probed property: 1 for a weight or a
+# capacity, 0 for a cost.
+MISSING_AS = {"min_cost_cost": 0}
+
+
+@pytest.mark.parametrize(("name", "call", "negative"), CALLS)
+def test_a_missing_weight_is_the_default(name, call, negative):
+    db, a, d = graph()
+    db.execute("MATCH ()-[e:E {first: true}]->() REMOVE e.w")
+    explicit_db, ea, ed = probe(MISSING_AS.get(name, 1))
+    assert call(db.algorithms, a, d) == call(explicit_db.algorithms, ea, ed), name

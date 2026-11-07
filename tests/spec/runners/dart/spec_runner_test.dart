@@ -42,8 +42,8 @@ Directory _resolveRepoRoot() {
 Directory _resolveSpecDir() {
   final root = Platform.environment['GRAFEO_SPEC_ROOT'];
   if (root == null || root.isEmpty) return Directory('${_repoRoot.path}/tests/spec');
-  final isAbsolute = root.startsWith('/') || RegExp(r'^[A-Za-z]:[\\/]').hasMatch(root);
-  return Directory(isAbsolute ? root : '${_repoRoot.path}/$root');
+  // `Directory.isAbsolute` knows every form of a root, a UNC one (`\\server\share`) included.
+  return Directory(Directory(root).isAbsolute ? root : '${_repoRoot.path}/$root');
 }
 
 // =============================================================================
@@ -210,7 +210,7 @@ Map<String, dynamic>? _coerceParams(Map<String, String>? raw) {
 void _loadDataset(GrafeoDB db, String datasetName) {
   final setupFile = File('${_datasetsDir.path}/$datasetName.setup');
   if (!setupFile.existsSync()) {
-    fail('Dataset file not found: ${setupFile.path}');
+    throw _RunnerFault('Dataset file not found: ${setupFile.path}');
   }
   final content = setupFile.readAsStringSync();
   for (final line in content.split(RegExp(r'\r?\n'))) {
@@ -1291,6 +1291,17 @@ var _xfailed = 0;
 /// on.
 bool _isExpectedFailure(Object failure) => failure is TestFailure || failure is GrafeoException;
 
+/// The runner could not run the case at all (its dataset is missing, it has no query): a fault
+/// of the gtest or the runner, which fails the case even when it is marked `xfail:`.
+class _RunnerFault implements Exception {
+  _RunnerFault(this.message);
+
+  final String message;
+
+  @override
+  String toString() => 'runner fault: $message';
+}
+
 /// Runs [run], the case [tc]: as it is without an `xfail:`; with one, a spec failure is the
 /// expected failure, a pass an XPASS, and any other error goes on.
 void _runMarked(_TestCase tc, void Function() run) {
@@ -1335,7 +1346,7 @@ void _runTestCase(GrafeoDB db, _TestCase tc, String language,
           ? [tc.query!]
           : <String>[];
   if (queries.isEmpty) {
-    fail("No query or statements in test '${tc.name}'");
+    throw _RunnerFault("No query or statements in test '${tc.name}'");
   }
 
   // Error case

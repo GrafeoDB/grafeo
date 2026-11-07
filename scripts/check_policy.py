@@ -671,23 +671,69 @@ def rust_version_findings(root: Path, metadata: dict) -> list[Finding]:
 # ------------------------------------------------------------------ test binaries
 
 #: A file module of `tests/main.rs`.
-TEST_MODULE = re.compile(r"^\s*(?:pub(?:\([^)]*\))?\s+)?mod\s+(\w+)\s*;", re.MULTILINE)
+# A `mod name;` declaration, at the start of a line or after another item on it.
+TEST_MODULE = re.compile(
+    r"(?:^|[;{}])\s*(?:pub(?:\([^)]*\))?\s+)?mod\s+(\w+)\s*;", re.MULTILINE
+)
 TEST_TARGET_HEADER = re.compile(r"^\s*\[\[\s*test\s*\]\]")
-RUST_COMMENT_TOKEN = re.compile(r"(//[^\n]*|/\*|\*/)")
+RUST_RAW_STRING = re.compile(r'b?r(#*)"')
+RUST_CHAR = re.compile(r"'(\\u\{[0-9a-fA-F]+\}|\\.|[^\\'\n])'")
 
 
-def without_rust_comments(text: str) -> str:
-    """Rust source with its comments taken out; block comments nest."""
-    kept = []
-    depth = 0
-    for part in RUST_COMMENT_TOKEN.split(text):
-        if part == "/*":
-            depth += 1
-        elif part == "*/":
-            depth = max(depth - 1, 0)
-        elif depth == 0 and not part.startswith("//"):
-            kept.append(part)
-    return "".join(kept)
+def rust_code(text: str, literals: bool = False) -> str:
+    """Rust source with its comments blanked, and with `literals` the contents of its string and
+    char literals too: the same length and the same lines, so a position found in it is the
+    source's. Block comments nest; a `//` or `/*` inside a literal starts no comment."""
+    out = list(text)
+    size = len(text)
+
+    def blank(start: int, end: int) -> None:
+        for at in range(start, min(end, size)):
+            if out[at] != "\n":
+                out[at] = " "
+
+    def starts_a_word(at: int) -> bool:
+        return at == 0 or not (text[at - 1].isalnum() or text[at - 1] == "_")
+
+    at = 0
+    while at < size:
+        if text.startswith("//", at):
+            end = text.find("\n", at)
+            end = size if end < 0 else end
+            blank(at, end)
+            at = end
+        elif text.startswith("/*", at):
+            depth, end = 1, at + 2
+            while end < size and depth:
+                if text.startswith("/*", end):
+                    depth, end = depth + 1, end + 2
+                elif text.startswith("*/", end):
+                    depth, end = depth - 1, end + 2
+                else:
+                    end += 1
+            blank(at, end)
+            at = end
+        elif (raw := RUST_RAW_STRING.match(text, at)) and starts_a_word(at):
+            close = '"' + raw.group(1)
+            end = text.find(close, raw.end())
+            end = size if end < 0 else end
+            if literals:
+                blank(raw.end(), end)
+            at = end + len(close)
+        elif text[at] == '"':
+            end = at + 1
+            while end < size and text[end] != '"':
+                end += 2 if text[end] == "\\" else 1
+            if literals:
+                blank(at + 1, end)
+            at = end + 1
+        elif text[at] == "'" and (char := RUST_CHAR.match(text, at)):
+            if literals:
+                blank(at + 1, char.end() - 1)
+            at = char.end()
+        else:
+            at += 1
+    return "".join(out)
 
 
 def test_binary_findings(root: Path, files: list[str]) -> list[Finding]:
@@ -720,7 +766,7 @@ def test_binary_findings(root: Path, files: list[str]) -> list[Finding]:
             if "tests/main.rs" in targets
             else ""
         )
-        modules = set(TEST_MODULE.findall(without_rust_comments(main)))
+        modules = set(TEST_MODULE.findall(rust_code(main, literals=True)))
         for name in sorted(test_files):
             is_target = f"tests/{name}" in targets
             is_module = name.removesuffix(".rs") in modules
@@ -1485,9 +1531,10 @@ CFG_FEATURE = re.compile(r'feature\s*=\s*"([A-Za-z0-9_-]+)"')
 
 
 def cfg_conditions(text: str) -> list[tuple[int, str]]:
-    """Each `cfg(...)`, `cfg!(...)` and `cfg_attr(...)` of Rust code, comments left out:
-    its line and its parenthesized text, which may span lines."""
-    code = without_rust_comments(text)
+    """Each `cfg(...)`, `cfg!(...)` and `cfg_attr(...)` of Rust code, comments and the contents
+    of string and char literals left out: its line and its parenthesized text, which may span
+    lines."""
+    code = rust_code(text, literals=True)
     found = []
     for start in CFG_START.finditer(code):
         depth, end = 0, start.end() - 1
@@ -1499,7 +1546,7 @@ def cfg_conditions(text: str) -> list[tuple[int, str]]:
                 if depth == 0:
                     break
         line = code.count("\n", 0, start.start()) + 1
-        found.append((line, code[start.start() : end + 1]))
+        found.append((line, text[start.start() : end + 1]))
     return found
 
 

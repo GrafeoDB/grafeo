@@ -1,0 +1,19 @@
+# A runner fault in a case marked xfail is a fault, not an expected failure: the case has no
+# query, so the run fails and counts no xfail.
+
+meta:
+  language: gql
+  model: lpg
+  section: probes
+  title: "xfail probe: a case without a query is a fault"
+  dataset: empty
+
+tests:
+
+  - name: probe_fault_no_query
+    xfail:
+      spec: "harness probe: a runner fault is no expected failure"
+      issue: "fix in 0.6.2"
+    expect:
+      rows:
+        - [1]

@@ -651,7 +651,7 @@ func loadDataset(t specT, db *grafeo.Database, datasetName string, datasetsDir s
 	setupPath := filepath.Join(datasetsDir, datasetName+".setup")
 	f, err := os.Open(setupPath)
 	if err != nil {
-		t.Fatalf("Dataset file not found: %s", setupPath)
+		fault(t, "Dataset file not found: %s", setupPath)
 	}
 	defer f.Close()
 
@@ -1464,6 +1464,18 @@ func (x *xfailT) Skipf(format string, args ...any) {
 	x.t.Skipf(format, args...)
 }
 
+// fault fails the test as a fault of the runner, which no `xfail:` absorbs: a case it cannot
+// run at all (its dataset is missing, it has no query). In a marked case it fails the test
+// itself, not the case.
+func fault(t specT, format string, args ...any) {
+	t.Helper()
+	if marked, ok := t.(*xfailT); ok {
+		marked.t.Helper()
+		marked.t.Fatalf(format, args...)
+	}
+	t.Fatalf(format, args...)
+}
+
 // runXfail runs a marked case: true when it stopped with a specFailure (the expected failure),
 // false when it passed. Any other panic, a fault of the runner, goes on as it is.
 func runXfail(run func()) (failed bool) {
@@ -1566,7 +1578,7 @@ func runCase(t specT, gf *GtestFile, tc TestCase, variantLang, variantQuery stri
 		// Allow empty-string queries for error tests (e.g. empty input)
 		queries = []string{query}
 	} else {
-		t.Fatalf("No query or statements in test %q", tc.Name)
+		fault(t, "No query or statements in test %q", tc.Name)
 	}
 
 	exp := tc.Expect

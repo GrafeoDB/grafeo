@@ -578,3 +578,76 @@ fn a_cached_call_reads_each_runs_parameter() {
         );
     }
 }
+
+/// Every string parameter's declared default lies in its domain (one character for a delimiter,
+/// one of the listed words for `missing`), as the numeric ones do: prepare applies the defaults
+/// before the domain check, so a default outside it would fail every call that leaves it out.
+#[test]
+fn every_string_default_lies_in_its_domain() {
+    use grafeo_adapters::plugins::Domain;
+    let mut wrong = Vec::new();
+    let mut checked = 0;
+    for info in BuiltinProcedures::new().list() {
+        for p in &info.parameters {
+            if format!("{:?}", p.param_type) != "String" {
+                continue;
+            }
+            let Some(default) = &p.default else {
+                continue;
+            };
+            checked += 1;
+            let holds = match p.domain {
+                Domain::OfType => true,
+                Domain::OneCharacter => default.chars().count() == 1,
+                Domain::OneOf(words) => words.contains(&default.as_str()),
+                other => {
+                    wrong.push(format!(
+                        "{}.{}: a string parameter with the domain {other:?}",
+                        info.name, p.name
+                    ));
+                    continue;
+                }
+            };
+            if !holds {
+                wrong.push(format!(
+                    "{}.{}: the default {default:?} lies outside {:?}",
+                    info.name, p.name, p.domain
+                ));
+            }
+        }
+    }
+    assert!(
+        checked >= 2,
+        "the loads' delimiter and missing: {checked} checked"
+    );
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
+
+/// A load called with `projection` in its map, a value or null, is refused with 22023 naming the
+/// procedure and `projection`, before any other argument is checked (the call below omits the
+/// required `path`, which would be named otherwise).
+#[test]
+fn a_load_refuses_a_projection_before_its_arguments() {
+    let db = GrafeoDB::new_in_memory();
+    let mut wrong = Vec::new();
+    for load in ["grafeo.load_nodes_csv", "grafeo.load_edges_csv"] {
+        for value in ["'people'", "null"] {
+            let call = format!("CALL {load}({{projection: {value}}})");
+            match db.execute(&call) {
+                Ok(_) => wrong.push(format!("{call}: ran")),
+                Err(error) => {
+                    let text = error.to_string();
+                    let status = GqlStatus::from(&error).as_str().to_string();
+                    if status != "22023"
+                        || !text.contains(load.trim_start_matches("grafeo."))
+                        || !text.contains("projection")
+                        || text.contains("'path'")
+                    {
+                        wrong.push(format!("{call}: {status} {text}"));
+                    }
+                }
+            }
+        }
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}

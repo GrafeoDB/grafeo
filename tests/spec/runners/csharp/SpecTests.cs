@@ -116,6 +116,13 @@ public class SpecTests : IDisposable, IClassFixture<GtestSummary>
     private static bool IsExpectedFailure(Exception failure) =>
         failure is XunitException or GrafeoException;
 
+    /// <summary>
+    /// The runner could not run the case at all (its dataset is missing, it has no query): a
+    /// fault of the gtest or the runner, which fails the case even when it is marked
+    /// <c>xfail:</c>.
+    /// </summary>
+    private sealed class RunnerFault(string message) : Exception(message);
+
     /// <summary>One case: its availability checks, dataset, setup, statements and checks.</summary>
     private void RunCase(GtestFile gtestFile, TestCase tc, string? variantLang, string? variantQuery)
     {
@@ -176,7 +183,8 @@ public class SpecTests : IDisposable, IClassFixture<GtestSummary>
                 ? tc.Statements
                 : query is not null ? new List<string> { query } : [];
 
-            Assert.True(queries.Count > 0, $"No query or statements in test '{tc.Name}'");
+            if (queries.Count == 0)
+                throw new RunnerFault($"No query or statements in test '{tc.Name}'");
 
             // Coerce params (only applied to the last query)
             var parameters = CoerceParams(tc.Params);
@@ -468,7 +476,8 @@ public class SpecTests : IDisposable, IClassFixture<GtestSummary>
     private static void LoadDataset(GrafeoDB db, string datasetName)
     {
         var setupPath = Path.Combine(DatasetsDir, $"{datasetName}.setup");
-        Assert.True(File.Exists(setupPath), $"Dataset file not found: {setupPath}");
+        if (!File.Exists(setupPath))
+            throw new RunnerFault($"Dataset file not found: {setupPath}");
 
         var content = File.ReadAllText(setupPath);
         foreach (var line in content.Split('\n'))

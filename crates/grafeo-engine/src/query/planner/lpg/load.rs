@@ -3,11 +3,11 @@
 //! procedures whose arguments `CALL` prepares as every procedure's, planned
 //! with the statement's writer.
 
-use grafeo_common::utils::error::{Error, QueryError, Result};
+use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind, Result};
 
 use super::Operator;
 use crate::loader::{LoadCall, LoadCallOperator, REPORT_COLUMNS};
-use crate::query::plan::CallProcedureOp;
+use crate::query::plan::{CallProcedureOp, LogicalExpression};
 
 /// Whether `call` is a load procedure.
 pub(super) fn is_load(call: &CallProcedureOp) -> bool {
@@ -27,6 +27,16 @@ impl super::Planner {
             .get(&call.name)
             .ok_or_else(|| Error::Internal(format!("{} is not registered", call.name.join("."))))?;
         let procedure = format!("grafeo.{}", load.name());
+        // A load writes into the graph the statement reads: it reads no projection, so naming
+        // one (with a value or null) is refused rather than ignored.
+        if let [LogicalExpression::Map(entries)] = call.arguments.as_slice()
+            && entries.iter().any(|(key, _)| key == "projection")
+        {
+            return Err(Error::from(QueryError::new(
+                QueryErrorKind::InvalidParameterValue,
+                format!("{procedure} takes no 'projection': it loads into the graph it runs on"),
+            )));
+        }
         let values =
             self.procedure_argument_values(&procedure, &call.arguments, load.parameters())?;
         let params = crate::procedures::evaluate_arguments(&procedure, &values, load.parameters())?;

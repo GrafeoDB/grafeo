@@ -186,8 +186,9 @@ impl std::ops::Deref for Prepared {
 /// outside the domain its definition declares, naming the values it allows and the value. A
 /// domain that names another parameter (`fetch_k` at least `k`) reads that one as given, or else
 /// its default. One value for a parameter of [`Domain::ListOrOne`] becomes a list of one. Each
-/// optional parameter without a value then takes the default its definition declares, the one
-/// `CALL grafeo.procedures()` lists; one that declares none stays without.
+/// optional parameter without a value takes the default its definition declares, the one
+/// `CALL grafeo.procedures()` lists (one that declares none stays without), and is held to its
+/// domain as a given value is.
 ///
 /// # Errors
 ///
@@ -198,10 +199,9 @@ pub fn prepare(procedure: &str, defs: &[ParameterDef], params: &Parameters) -> R
     params.clone().prepared(procedure, defs)
 }
 
-/// The check of [`prepare`]: a required parameter without a value, then an argument outside its
-/// domain.
-fn check_parameters(procedure: &str, defs: &[ParameterDef], params: &Parameters) -> Result<()> {
-    check_required(procedure, defs, params)?;
+/// The domain check of [`prepare`]: an argument outside its domain, a string's then a number's,
+/// the defaults included.
+fn check_domains(procedure: &str, defs: &[ParameterDef], params: &Parameters) -> Result<()> {
     for def in defs {
         if let Some(value) = params.get_string(&def.name)
             && !def.domain.admits_text(value)
@@ -471,9 +471,11 @@ impl Parameters {
     ///
     /// The errors of [`prepare`].
     pub fn prepared(mut self, procedure: &str, defs: &[ParameterDef]) -> Result<Prepared> {
-        check_parameters(procedure, defs, &self)?;
+        check_required(procedure, defs, &self)?;
         widen_lists(defs, &mut self);
         apply_defaults(defs, &mut self)?;
+        // After the defaults, so a declared default is held to its domain like a given value.
+        check_domains(procedure, defs, &self)?;
         Ok(Prepared(self))
     }
 

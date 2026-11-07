@@ -1346,7 +1346,7 @@ impl Database {
     /// // { triples: 3 }
     /// ```
     ///
-    /// Requires the `rdf` feature flag.
+    /// Requires the `rdf-model` feature (in the `rdf`, `sparql` and `full` builds).
     ///
     /// # Errors
     ///

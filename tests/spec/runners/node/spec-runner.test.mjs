@@ -204,10 +204,14 @@ for (const filePath of gtestFiles) {
                 if (!isAvailable(db, req)) return ctx.skip()
               }
               const effectiveDataset = tc.dataset || meta.dataset
-              if (effectiveDataset && effectiveDataset !== 'empty') {
-                await loadDataset(db, effectiveDataset)
-              }
-              await runMarked(tc, () => runTestCase(db, { ...tc, query }, lang, meta.language || 'gql'))
+              // The dataset loads inside the case, as in the other runners: a binding error there
+              // is the case's failure, which an `xfail:` absorbs; a missing file is the runner's.
+              await runMarked(tc, async () => {
+                if (effectiveDataset && effectiveDataset !== 'empty') {
+                  await loadDataset(db, effectiveDataset)
+                }
+                await runTestCase(db, { ...tc, query }, lang, meta.language || 'gql')
+              })
             } finally {
               db.close()
             }
@@ -241,11 +245,14 @@ for (const filePath of gtestFiles) {
 
           // Load dataset (per-test override takes priority)
           const effectiveDataset = tc.dataset || meta.dataset
-          if (effectiveDataset && effectiveDataset !== 'empty') {
-            await loadDataset(db, effectiveDataset)
-          }
-
-          await runMarked(tc, () => runTestCase(db, tc, tc.language || meta.language, meta.language || 'gql'))
+          // The dataset loads inside the case, as in the other runners: a binding error there
+          // is the case's failure, which an `xfail:` absorbs; a missing file is the runner's.
+          await runMarked(tc, async () => {
+            if (effectiveDataset && effectiveDataset !== 'empty') {
+              await loadDataset(db, effectiveDataset)
+            }
+            await runTestCase(db, tc, tc.language || meta.language, meta.language || 'gql')
+          })
         } finally {
           db.close()
         }

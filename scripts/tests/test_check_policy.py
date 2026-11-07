@@ -2051,3 +2051,70 @@ def test_t12_leaves_other_code_alone(tmp_path: Path, rel: str) -> None:
     binding's compiled surface."""
     text = '#[cfg(feature = "full")]\nfn a() {}\n'
     assert profile_cfg_findings(tmp_path, rel, text) == []
+
+
+# ------------------------------------------------- T12 and T7: the shared Rust scanner
+
+
+@pytest.mark.parametrize(
+    "literal",
+    [
+        'let s = "#[cfg(feature = \\"rdf\\")]";\n',
+        'let s = r#"#[cfg(feature = "rdf")]"#;\n',
+        'let s = b"#[cfg(feature = \\"rdf\\")]";\n',
+        'let s = br#"#[cfg(feature = "rdf")]"#;\n',
+    ],
+    ids=["normal", "raw", "byte", "raw-byte"],
+)
+def test_t12_a_gate_inside_a_string_literal_is_no_finding(
+    tmp_path: Path, literal: str
+) -> None:
+    assert profile_cfg_findings(tmp_path, WASM_LIB, "fn a() {}\n" + literal) == []
+
+
+def test_t12_two_slashes_inside_a_string_start_no_comment(tmp_path: Path) -> None:
+    text = 'let url = "https://grafeo.dev"; #[cfg(feature = "full")]\nfn a() {}\n'
+    assert profile_cfg_findings(tmp_path, WASM_LIB, text) == [
+        (WASM_LIB, 1, "gates on the profile or group `full`")
+    ]
+
+
+def test_t12_a_finding_after_a_block_comment_names_its_line(tmp_path: Path) -> None:
+    text = '/*\n a note\n over lines\n*/\n#[cfg(feature = "rdf")]\nfn a() {}\n'
+    assert profile_cfg_findings(tmp_path, WASM_LIB, text) == [
+        (WASM_LIB, 5, "gates on the profile or group `rdf`")
+    ]
+
+
+def test_t12_a_string_over_lines_keeps_the_line_count(tmp_path: Path) -> None:
+    text = 'let s = "one\ntwo\nthree";\n#[cfg(feature = "edge")]\nfn a() {}\n'
+    assert profile_cfg_findings(tmp_path, WASM_LIB, text) == [
+        (WASM_LIB, 4, "gates on the profile or group `edge`")
+    ]
+
+
+def test_t7_a_module_inside_a_string_builds_nothing(tmp_path: Path) -> None:
+    assert t7_found(
+        tmp_path,
+        {
+            "crates/grafeo-core/Cargo.toml": MAIN_ONLY,
+            "crates/grafeo-core/tests/main.rs": 'const S: &str = "mod a_file;";\n',
+            "crates/grafeo-core/tests/a_file.rs": "",
+        },
+    ) == [("crates/grafeo-core/tests/a_file.rs", "this test file is never built")]
+
+
+def test_t7_two_slashes_inside_a_string_hide_no_module(tmp_path: Path) -> None:
+    assert (
+        t7_found(
+            tmp_path,
+            {
+                "crates/grafeo-core/Cargo.toml": MAIN_ONLY,
+                "crates/grafeo-core/tests/main.rs": (
+                    'const URL: &str = "https://grafeo.dev"; mod a_file;\n'
+                ),
+                "crates/grafeo-core/tests/a_file.rs": "",
+            },
+        )
+        == []
+    )

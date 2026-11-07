@@ -67,7 +67,10 @@ def test_a_runner_error_fails_the_run_with_the_runners_own_error(runner):
     [
         ("parse_skip_and_xfail", "probe_skip_and_xfail"),
         ("parse_xfail_without_issue", "probe_xfail_without_issue"),
-        ("runner_error_outside", "runner_error.gtest"),
+        (
+            "runner_error_outside",
+            "runner_error.gtest: `probe:` only under `spec-probes`",
+        ),
     ],
 )
 def test_a_parse_refusal_fails_the_run_and_names_the_case_or_file(runner, probe, named):
@@ -96,16 +99,20 @@ def gtest_cases(text: str) -> dict[str, str]:
 
 def test_the_fixtures_hold_the_cases_the_judge_expects():
     root = probes.PROBES
-    found = {path.parent.name: path for path in root.glob("*/*.gtest")}
-    assert sorted(found) == sorted(
-        [
-            "assertion",
-            "parse_skip_and_xfail",
-            "parse_xfail_without_issue",
-            "runner_error",
-            "xpass",
-        ]
+    # Every file under the probes, so a second file in one directory is seen too.
+    every = sorted(
+        path.relative_to(root).as_posix() for path in root.rglob("*") if path.is_file()
     )
+    assert every == [
+        "assertion/assertion.gtest",
+        "parse_skip_and_xfail/parse_skip_and_xfail.gtest",
+        "parse_xfail_without_issue/parse_xfail_without_issue.gtest",
+        "runner_error/runner_error.gtest",
+        "runner_fault/missing_dataset.gtest",
+        "runner_fault/no_query.gtest",
+        "xpass/xpass.gtest",
+    ]
+    found = {path.stem: path for path in root.glob("*/*.gtest")}
     texts = {name: path.read_bytes().decode() for name, path in found.items()}
     assert all("\r" not in text for text in texts.values())
     assert sorted(gtest_cases(texts["assertion"])) == [
@@ -126,3 +133,35 @@ def test_the_fixtures_hold_the_cases_the_judge_expects():
     # Only the runner_error probe uses the probe-only key.
     keyed = [name for name, text in texts.items() if "\n    probe: " in text]
     assert keyed == ["runner_error"]
+    fault = gtest_cases(texts["missing_dataset"])["probe_fault_missing_dataset"]
+    assert "xfail:" in fault and "no_such_dataset" in texts["missing_dataset"]
+    no_query = gtest_cases(texts["no_query"])["probe_fault_no_query"]
+    assert "xfail:" in no_query and "query:" not in no_query
+
+
+@pytest.mark.parametrize("runner", RUNNERS)
+def test_a_runner_fault_in_an_xfail_case_fails_the_run_and_names_each_case(runner):
+    """A missing dataset or a missing query in a case marked xfail is a fault of the run,
+    never an expected failure: the run fails, counts no xfail, and names each faulty case."""
+    both = "probe_fault_missing_dataset failed; probe_fault_no_query failed"
+    assert probes.judge("runner_fault", runner, 1, both) == []
+    assert probes.judge("runner_fault", runner, 0, both) != []
+    counted = both + "\ngtest summary: skipped=0 xfailed=1"
+    assert probes.judge("runner_fault", runner, 1, counted) != []
+    assert (
+        probes.judge("runner_fault", runner, 1, "probe_fault_missing_dataset failed")
+        != []
+    )
+
+
+@pytest.mark.parametrize("runner", RUNNERS)
+def test_outside_spec_probes_only_the_probe_diagnostic_passes(runner):
+    """Outside spec-probes the `probe:` key is refused by the parser, saying so; the runner's
+    ordinary error for the probe is no pass."""
+    diagnostic = (
+        "runner_error.gtest: test 'probe_runner_error': `probe:` is for the runner probes only, "
+        "under a `spec-probes` directory"
+    )
+    assert probes.judge("runner_error_outside", runner, 1, diagnostic) == []
+    ordinary = f"runner_error.gtest: {probes.RUNNER_ERRORS[runner]}: probe failed"
+    assert probes.judge("runner_error_outside", runner, 1, ordinary) != []

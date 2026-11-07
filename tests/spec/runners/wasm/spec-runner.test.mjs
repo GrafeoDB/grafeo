@@ -227,11 +227,15 @@ for (const filePath of gtestFiles) {
                 if (!isAvailable(db, req)) return ctx.skip()
               }
               const effectiveDataset = tc.dataset || meta.dataset
-              if (effectiveDataset && effectiveDataset !== 'empty') {
-                loadDataset(db, effectiveDataset)
-              }
+              // The dataset loads inside the case, as in the other runners: a binding error there
+              // is the case's failure, which an `xfail:` absorbs; a missing file is the runner's.
               try {
-                runMarkedSync(tc, () => runTestCase(db, { ...tc, query }, lang, meta.language || 'gql'))
+                runMarkedSync(tc, () => {
+                  if (effectiveDataset && effectiveDataset !== 'empty') {
+                    loadDataset(db, effectiveDataset)
+                  }
+                  runTestCase(db, { ...tc, query }, lang, meta.language || 'gql')
+                })
               } catch (err) {
                 if (err instanceof WebAssembly.RuntimeError) return ctx.skip()
                 throw err
@@ -269,12 +273,15 @@ for (const filePath of gtestFiles) {
 
           // Load dataset (per-test override takes priority)
           const effectiveDataset = tc.dataset || meta.dataset
-          if (effectiveDataset && effectiveDataset !== 'empty') {
-            loadDataset(db, effectiveDataset)
-          }
-
+          // The dataset loads inside the case, as in the other runners: a binding error there
+          // is the case's failure, which an `xfail:` absorbs; a missing file is the runner's.
           try {
-            runMarkedSync(tc, () => runTestCase(db, tc, tc.language || meta.language, meta.language || 'gql'))
+            runMarkedSync(tc, () => {
+              if (effectiveDataset && effectiveDataset !== 'empty') {
+                loadDataset(db, effectiveDataset)
+              }
+              runTestCase(db, tc, tc.language || meta.language, meta.language || 'gql')
+            })
           } catch (err) {
             // WASM panics (e.g. rand(), SystemTime) surface as RuntimeError: unreachable
             if (err instanceof WebAssembly.RuntimeError) return ctx.skip()

@@ -130,7 +130,11 @@ def judge(probe: str, runner: str, code: int, output: str) -> list[str]:
         "runner_error": [RUNNER_ERRORS[runner]],
         "parse_skip_and_xfail": ["probe_skip_and_xfail"],
         "parse_xfail_without_issue": ["probe_xfail_without_issue"],
-        "runner_error_outside": ["runner_error.gtest"],
+        # A case the runner cannot run (no dataset, no query) fails as a fault, xfail or not.
+        "runner_fault": ["probe_fault_missing_dataset", "probe_fault_no_query"],
+        # The parser's own refusal of the key, which names `probe:` and `spec-probes`, not a
+        # runner that ran the probe and failed with its ordinary error.
+        "runner_error_outside": ["runner_error.gtest", "`probe:`", "`spec-probes`"],
     }[probe]
     problems += [
         f"the output does not say {text!r}" for text in expected if text not in output
@@ -172,6 +176,7 @@ def main(argv: list[str]) -> int:
             "parse_skip_and_xfail",
             "parse_xfail_without_issue",
             "runner_error",
+            "runner_fault",
             "xpass",
         ]
     )

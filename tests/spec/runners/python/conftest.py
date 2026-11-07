@@ -80,6 +80,12 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent.parent
 #: runner's checks, and an error the binding raises. The only ones an ``xfail:`` absorbs.
 EXPECTED_FAILURES = (AssertionError, pytest.fail.Exception, grafeo.GrafeoError)
 
+
+class RunnerFault(Exception):
+    """The runner could not run the case at all (its dataset is missing, it has no query): a
+    fault of the gtest or the runner, which fails the case even when it is marked ``xfail:``."""
+
+
 #: The run's counts for the ``gtest summary`` line: the cases skipped by ``skip:`` and the
 #: ones that failed as expected.
 SUMMARY_KEY = pytest.StashKey[dict]()
@@ -251,8 +257,9 @@ class GtestItem(pytest.Item):
         elif query or tc.expect.error is not None or tc.expect.gql_status is not None:
             queries = [query or ""]
         else:
-            pytest.fail(f"No query or statements in test '{tc.name}' in {self.path}")
-            return  # unreachable, but keeps linters happy
+            raise RunnerFault(
+                f"No query or statements in test '{tc.name}' in {self.path}"
+            )
 
         expect = tc.expect
 
@@ -349,7 +356,7 @@ def _load_dataset(db, dataset_name: str) -> None:
     """Load a .setup dataset file into the database using GQL."""
     dataset_path = _REPO_ROOT / "tests" / "spec" / "datasets" / f"{dataset_name}.setup"
     if not dataset_path.exists():
-        pytest.fail(f"Dataset file not found: {dataset_path}")
+        raise RunnerFault(f"Dataset file not found: {dataset_path}")
 
     content = dataset_path.read_text(encoding="utf-8")
     for line in content.splitlines():

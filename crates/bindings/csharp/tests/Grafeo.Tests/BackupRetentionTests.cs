@@ -34,7 +34,16 @@ public sealed class BackupRetentionTests
         }
         finally
         {
-            Directory.Delete(dir, recursive: true);
+            Cleanup(dir);
+        }
+    }
+
+    private static void Cleanup(string dir)
+    {
+        try { Directory.Delete(dir, recursive: true); }
+        catch (IOException)
+        {
+            // Best-effort cleanup in tests.
         }
     }
 }

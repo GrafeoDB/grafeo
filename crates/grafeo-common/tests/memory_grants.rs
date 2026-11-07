@@ -170,13 +170,38 @@ impl MemoryConsumer for Holder {
     }
 }
 
+/// A consumer registered with its manager for one test, unregistered when it drops. A test
+/// consumer holds a grant of the manager, whose releaser is the manager itself, and the manager
+/// holds the registered consumer: without the unregistration each keeps the other alive.
+struct Registered {
+    manager: Arc<BufferManager>,
+    name: String,
+}
+
+impl Registered {
+    fn new(manager: &Arc<BufferManager>, consumer: Arc<dyn MemoryConsumer>) -> Self {
+        let name = consumer.name().to_string();
+        manager.register_consumer(consumer);
+        Self {
+            manager: Arc::clone(manager),
+            name,
+        }
+    }
+}
+
+impl Drop for Registered {
+    fn drop(&mut self) {
+        self.manager.unregister_consumer(&self.name);
+    }
+}
+
 /// Growth runs no eviction: not past the old 95% line, not past the limit, whatever the
 /// consumers hold.
 #[test]
 fn growth_never_runs_eviction() {
     let manager = BufferManager::with_budget(8 * MIB);
     let holder = Holder::new(&manager, "cache", 6 * MIB, true);
-    manager.register_consumer(holder.clone());
+    let _registered = Registered::new(&manager, holder.clone());
     let mut grant = manager.empty_grant(MemoryRegion::ExecutionBuffers);
     assert!(
         grant.try_grow(MIB + MIB / 2),
@@ -191,7 +216,7 @@ fn growth_never_runs_eviction() {
 fn make_room_evicts_until_the_bytes_fit() {
     let manager = BufferManager::with_budget(8 * MIB);
     let holder = Holder::new(&manager, "cache", 7 * MIB, true);
-    manager.register_consumer(holder.clone());
+    let _registered = Registered::new(&manager, holder.clone());
     let mut grant = manager.empty_grant(MemoryRegion::ExecutionBuffers);
     assert!(!grant.try_grow(2 * MIB));
     assert!(
@@ -207,7 +232,7 @@ fn make_room_evicts_until_the_bytes_fit() {
 fn make_room_says_when_nothing_frees_enough() {
     let manager = BufferManager::with_budget(8 * MIB);
     let pinned = Holder::new(&manager, "pinned", 7 * MIB, false);
-    manager.register_consumer(pinned.clone());
+    let _registered = Registered::new(&manager, pinned.clone());
     assert!(!manager.make_room(2 * MIB));
     assert_eq!(
         pinned.evictions(),
@@ -226,8 +251,8 @@ fn eviction_skips_a_consumer_that_cannot_evict_and_reaches_one_that_can() {
     let manager = BufferManager::with_budget(8 * MIB);
     let pinned = Holder::new(&manager, "pinned", 3 * MIB, false);
     let cache = Holder::new(&manager, "cache", 4 * MIB, true);
-    manager.register_consumer(pinned.clone());
-    manager.register_consumer(cache.clone());
+    let _pinned = Registered::new(&manager, pinned.clone());
+    let _cache = Registered::new(&manager, cache.clone());
     assert!(manager.make_room(3 * MIB));
     assert_eq!(pinned.evictions(), 0);
     assert_eq!(cache.evictions(), 1);

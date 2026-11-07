@@ -4,7 +4,9 @@ All notable changes to Grafeo, for future reference (and enjoyment).
 
 ## [0.6.2] - Unreleased
 
-### Gotta need for speed
+Correctness release: comparisons, nulls and operands of the wrong kind follow ISO GQL and openCypher more closely, a refused permission has its own code, a session can be kept from reading local files, and a graph cleared and written back keeps its size. Results that change on upgrade: a string never equals a number, `{k: NULL}` in a pattern finds nothing, an operator given a value of the wrong kind raises 22G12 where it answered null, and a file database checkpoints by itself (Changed lists each). Plus join orders from sampled degrees, cycles closed by intersection and lookups that need no index.
+
+### Performance
 
 - **Planner**: comma patterns pick their join order from sampled degrees, cycles close by lookup or intersection, and same-type chains up to 6 hops count without listing paths. Common queries stay at their speed; the first plan of a comma pattern costs a little more.
 - **Pinned far nodes and `IN`**: a hop to a pinned node starts at that end when it costs less, a key on several nodes reads the shorter side, and a long constant `IN` list is a set.
@@ -43,6 +45,7 @@ Queries that ran in 0.6.1 and now fail or behave differently.
 - **`file:` URLs follow RFC 8089**: in `LOAD CSV`, `LOAD DATA` and the load procedures, `file:///srv/data.csv` and `file://localhost/srv/data.csv` name the absolute path `/srv/data.csv` (`file:///` was stripped and the rest read as a relative path), and a `file:` URL with another host is refused.
 - **Permission refusals have their own codes**: GQLSTATUS `42501`, with `GRAFEO-Q007` for a write, DDL or writing procedure that the session's role or graph grants refuse and `GRAFEO-Q008` for a statement that reaches outside the database on a session without external access; both were `GRAFEO-Q002` with `42000`. Python raises `GrafeoPermissionError`, a subclass of `GrafeoError`.
 - **`memory_usage()` reports what the store holds**: its store, index, version and string-pool figures are the counted bytes, kept as each write grows them, instead of estimates.
+- **A negative `SKIP` or `LIMIT` after a GQL `CALL`** raises 22G02, as in every other `RETURN`; 0.6.1 ignored the count.
 - **`TierOverride::ForceDisk` is refused on sections that cannot spill**: only `VectorStore` can move to disk, so `ForceDisk` on another section (`TextIndex`, `PropertyIndex`, `LpgStore`, `RdfRing`, `CompactStore` and the rest) now fails `Config::validate`, where it was accepted and did nothing.
 
 ### Added
@@ -50,7 +53,7 @@ Queries that ran in 0.6.1 and now fail or behave differently.
 - **Graph procedures**: `CALL grafeo.ktruss()` and `grafeo.ktruss(k)`, `grafeo.total_triangles()` and `grafeo.subgraph_isomorphism(pattern_edges, pattern_nodes)`, and the Python methods `ktruss(k=None)` and `subgraph_isomorphism_count(pattern_edges, pattern_nodes)`.
 - **Query warnings**: a statement that uses a deprecated form or has something worth knowing returns its rows with warnings, each with a GQLSTATUS code (class 01), a kind and a message. They are on `QueryResult::warnings` and on streaming results, in every binding (Python also raises them through `warnings.warn`), and the CLI prints them on stderr. Experimental.
 - **SQL/PGQ `||`** concatenates strings and lists.
-- **Procedures in every build**: `CALL grafeo.procedures()` and the CSV load procedures are listed in every build, with each argument's type, default and allowed values where it declares them.
+- **Procedures in every build**: `CALL grafeo.procedures()` and the CSV load procedures are listed in every build, with each argument's type, default and allowed values where it declares them. A call of a procedure this build leaves out fails with `GRAFEO-Q004`, naming the feature that brings it, instead of as an unknown name.
 - **Sessions without external access**: `Identity::with_external_access(false)` refuses every statement that reads or writes outside the database, such as the CSV loads, before it runs.
 - **Sessions in the bindings**: `db.session(read_only=..., external_access=...)` in Python, `db.session({ readOnly, externalAccess })` in Node.js and `grafeo_session_open` in C run queries with those limits; `external_access=False` refuses every statement that reads or writes outside the database.
 - **The procedure listing says what each procedure does**: `CALL grafeo.procedures()` lists whether it writes the graph (`writes`, a BOOLEAN) and what it reaches outside the database (`external_access`: `'none'`, `'reads'` or `'writes'`).
@@ -88,7 +91,7 @@ Queries that ran in 0.6.1 and now fail or behave differently.
 - **`grafeo.topological_sort`** gives the same order on every run (the lexicographically smallest by node id).
 - **GQL statements after `CALL ... YIELD`**: a statement that starts with a procedure call goes on with any clause, `MATCH`, `OPTIONAL MATCH`, `FILTER`, `LET`, `FOR`, `ORDER BY`, another `CALL`, `SET` or `INSERT`, as ISO GQL allows (14.3); only `RETURN` was accepted, and a following `MATCH` was a syntax error.
 - **GQL `NEXT` then `CALL`**: a procedure call after `NEXT` kept the earlier statement's columns, grouping the result by them; it now returns only its own columns, and the incoming fields stay in scope.
-- **`SKIP` and `LIMIT` after a GQL `CALL`**: `SKIP $n` and `LIMIT $n` in the `RETURN` after a procedure call take effect (they were ignored), and a negative count raises 22G02 as in every other `RETURN`.
+- **`SKIP` and `LIMIT` after a GQL `CALL`**: `SKIP $n` and `LIMIT $n` in the `RETURN` after a procedure call take effect; they were ignored.
 - **`HAVING` and `FINISH` after a GQL `CALL`** are accepted; they were a syntax error.
 - **SQL/PGQ `CALL ... LIMIT $n`** takes its limit; it was ignored.
 - **Stored procedures** run in builds without the graph algorithms (the `lpg` and `edge` profiles, the CLI): `CREATE PROCEDURE` succeeded there and its `CALL` said the procedure was unknown.

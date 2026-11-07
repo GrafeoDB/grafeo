@@ -5,6 +5,7 @@ use super::grant::{GrantReleaser, MemoryGrant};
 use super::region::MemoryRegion;
 use super::stats::{BufferStats, PressureLevel};
 use crate::memory::system::detect_memory;
+use crate::utils::error::{LimitBound, LimitRefusal};
 use parking_lot::RwLock;
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -20,7 +21,7 @@ pub struct BufferManagerConfig {
     pub soft_limit_fraction: f64,
     /// Eviction threshold (default: 85%).
     pub evict_limit_fraction: f64,
-    /// Hard limit threshold (default: 95%).
+    /// Hard limit threshold, where reservations are refused (default: 100%, the budget).
     pub hard_limit_fraction: f64,
     /// Enable background eviction thread.
     pub background_eviction: bool,
@@ -45,7 +46,9 @@ impl BufferManagerConfig {
             budget,
             soft_limit_fraction: 0.70,
             evict_limit_fraction: 0.85,
-            hard_limit_fraction: 0.95,
+            // The limit means what it says: reservations are refused at the budget itself,
+            // and the levels below it evict and spill first.
+            hard_limit_fraction: 1.0,
             background_eviction: false, // Disabled by default for simplicity
             spill_path: None,
         }
@@ -164,6 +167,65 @@ impl BufferManager {
             size,
             region,
         ))
+    }
+
+    /// An empty grant of `region`, for a part to grow with [`MemoryGrant::try_grow`].
+    #[must_use]
+    pub fn empty_grant(self: &Arc<Self>, region: MemoryRegion) -> MemoryGrant {
+        MemoryGrant::new(Arc::clone(self) as Arc<dyn GrantReleaser>, 0, region)
+    }
+
+    /// A grant of `size` whatever the limit, for memory that is held already or must be
+    /// (a cold chunk at load, replay).
+    #[must_use]
+    pub fn reserve_forced(self: &Arc<Self>, size: usize, region: MemoryRegion) -> MemoryGrant {
+        self.reserve_forced_raw(size, region);
+        MemoryGrant::new(Arc::clone(self) as Arc<dyn GrantReleaser>, size, region)
+    }
+
+    /// Runs the eviction cycle until `needed` more bytes fit under the hard limit, or until a
+    /// pass frees nothing; whether they fit. Consumers take their own locks while they evict
+    /// or spill, so a caller holds no store lock.
+    pub fn make_room(&self, needed: usize) -> bool {
+        // Each pass asks every consumer for at most half of what it holds, so a few passes
+        // reach what one cannot; a pass that frees nothing ends the attempt.
+        const PASSES: usize = 4;
+        for _ in 0..PASSES {
+            let over = self
+                .allocated
+                .load(Ordering::Relaxed)
+                .saturating_add(needed)
+                .saturating_sub(self.hard_limit);
+            if over == 0 {
+                return true;
+            }
+            if self.run_eviction_internal(over) == 0 {
+                return false;
+            }
+        }
+        self.allocated
+            .load(Ordering::Relaxed)
+            .saturating_add(needed)
+            <= self.hard_limit
+    }
+
+    /// The line past which reservations are refused.
+    #[must_use]
+    pub fn hard_limit(&self) -> usize {
+        self.hard_limit
+    }
+
+    /// The refusal of `requested` more bytes against `bound`, with this moment's figures: the
+    /// bytes reserved and the budget.
+    #[must_use]
+    pub fn refusal(&self, bound: LimitBound, requested: usize) -> LimitRefusal {
+        let bytes = |value: usize| u64::try_from(value).unwrap_or(u64::MAX);
+        LimitRefusal::Memory {
+            bound,
+            requested: bytes(requested),
+            used: bytes(self.allocated.load(Ordering::Relaxed)),
+            limit: bytes(self.config.budget),
+        }
     }
 
     /// Reserves bytes without separating the limit check from the increment.
@@ -506,6 +568,10 @@ impl BufferManager {
             if force_ram.contains(consumer.name()) {
                 continue;
             }
+            // A consumer that cannot evict reports what it holds and frees nothing here.
+            if !consumer.can_evict() {
+                continue;
+            }
 
             let remaining = to_free - total_freed;
             let consumer_usage = consumer.memory_usage();
@@ -565,6 +631,19 @@ impl GrantReleaser for BufferManager {
         self.region_allocated[region.index()].fetch_add(size, Ordering::Relaxed);
         true
     }
+
+    fn try_reserve_raw(&self, size: usize, region: MemoryRegion) -> bool {
+        if !self.reserve_bytes(size) {
+            return false;
+        }
+        self.region_allocated[region.index()].fetch_add(size, Ordering::Relaxed);
+        true
+    }
+
+    fn reserve_forced_raw(&self, size: usize, region: MemoryRegion) {
+        self.allocated.fetch_add(size, Ordering::Relaxed);
+        self.region_allocated[region.index()].fetch_add(size, Ordering::Relaxed);
+    }
 }
 
 impl Drop for BufferManager {
@@ -622,6 +701,10 @@ mod tests {
             self.usage.fetch_sub(to_evict, Ordering::Relaxed);
             self.evicted.fetch_add(to_evict, Ordering::Relaxed);
             to_evict
+        }
+
+        fn can_evict(&self) -> bool {
+            true
         }
 
         fn current_tier(&self) -> super::super::tiered::StorageTier {
@@ -975,6 +1058,10 @@ mod tests {
             self.usage.fetch_sub(to_evict, Ordering::Relaxed);
             self.evicted.fetch_add(to_evict, Ordering::Relaxed);
             to_evict
+        }
+
+        fn can_evict(&self) -> bool {
+            true
         }
 
         fn can_spill(&self) -> bool {

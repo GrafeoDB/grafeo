@@ -13,9 +13,10 @@ pub enum PressureLevel {
     Normal,
     /// 70-85% used - Begin evicting cold data proactively.
     Moderate,
-    /// 85-95% used - Aggressive eviction, trigger spilling.
+    /// 85% used up to the hard limit - Aggressive eviction, trigger spilling.
     High,
-    /// > 95% used - Critical, block new allocations until memory freed.
+    /// At the hard limit (by default the budget) - Critical, new reservations are refused
+    /// until memory is freed.
     Critical,
 }
 

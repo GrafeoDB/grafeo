@@ -22,8 +22,8 @@ pub mod usage;
 
 pub use arena::{AllocError, Arena, ArenaAllocator};
 pub use buffer::{
-    BufferManager, BufferManagerConfig, BufferStats, MemoryConsumer, MemoryGrant, MemoryRegion,
-    PressureLevel, StorageTier,
+    BufferManager, BufferManagerConfig, BufferStats, GRANT_STEP, MemoryConsumer, MemoryGrant,
+    MemoryRegion, PressureLevel, StorageTier,
 };
 pub use bump::BumpAllocator;
 pub use pool::ObjectPool;

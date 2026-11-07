@@ -303,6 +303,18 @@ impl fmt::Display for Corruption {
 }
 
 impl Error {
+    /// The refusal inside a [`StorageError::LimitReached`], for tests and bindings.
+    #[must_use]
+    pub fn limit_refusal(&self) -> Option<&LimitRefusal> {
+        match self {
+            Error::Storage(storage) => match &**storage {
+                StorageError::LimitReached(refusal) => Some(refusal),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
     /// A [`TypeMismatch`]: `expected` was wanted, `found` was given.
     #[must_use]
     pub fn type_mismatch(expected: impl Into<String>, found: impl Into<String>) -> Self {
@@ -634,6 +646,9 @@ pub enum StorageError {
     /// An incremental backup cannot continue its chain (what is missing
     /// follows): only a new full backup helps, not a retry.
     BackupChainBroken(String),
+
+    /// One of the database's bounds refused memory or spill space; nothing changed.
+    LimitReached(Box<LimitRefusal>),
 }
 
 impl StorageError {
@@ -641,7 +656,7 @@ impl StorageError {
     #[must_use]
     pub const fn error_code(&self) -> ErrorCode {
         match self {
-            Self::Full => ErrorCode::StorageFull,
+            Self::Full | Self::LimitReached(_) => ErrorCode::StorageFull,
             Self::InvalidWalEntry(_) | Self::CheckpointFailed(_) => ErrorCode::StorageCorrupted,
             Self::RecoveryFailed(_) => ErrorCode::StorageRecoveryFailed,
             Self::Locked(_) => ErrorCode::DatabaseLocked,
@@ -659,6 +674,7 @@ impl fmt::Display for StorageError {
             StorageError::CheckpointFailed(msg) => write!(f, "Checkpoint failed: {msg}"),
             StorageError::Locked(msg) => write!(f, "Database locked: {msg}"),
             StorageError::BackupChainBroken(msg) => write!(f, "Backup chain broken: {msg}"),
+            StorageError::LimitReached(refusal) => write!(f, "{refusal}"),
         }
     }
 }
@@ -668,6 +684,149 @@ impl std::error::Error for StorageError {}
 impl From<StorageError> for Error {
     fn from(e: StorageError) -> Self {
         Error::Storage(Box::new(e))
+    }
+}
+
+/// Which of the database's bounds refused a reservation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum LimitBound {
+    /// The database's memory limit.
+    MemoryLimit,
+    /// The memory one query may hold.
+    QueryMemoryLimit,
+    /// The disk space spilled queries may hold.
+    SpillLimit,
+    /// The free space the database keeps on the spill volume for its next checkpoint.
+    CheckpointRoom,
+}
+
+impl LimitBound {
+    /// The bound's name in messages: "memory limit", "query memory limit", "spill limit",
+    /// "checkpoint room".
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::MemoryLimit => "memory limit",
+            Self::QueryMemoryLimit => "query memory limit",
+            Self::SpillLimit => "spill limit",
+            Self::CheckpointRoom => "checkpoint room",
+        }
+    }
+
+    /// The setting that moves the bound, with the bindings' names.
+    #[must_use]
+    pub const fn setting(self) -> &'static str {
+        match self {
+            Self::MemoryLimit => {
+                "Config::with_memory_limit (Python memory_limit, Node memoryLimit)"
+            }
+            Self::QueryMemoryLimit => {
+                "Config::with_query_memory_limit (Python query_memory_limit, Node queryMemoryLimit)"
+            }
+            Self::SpillLimit => "Config::with_spill_limit (Python spill_limit, Node spillLimit)",
+            Self::CheckpointRoom => "Config::with_spill_path",
+        }
+    }
+}
+
+/// A reservation one of the database's bounds refused: nothing changed. Figures are bytes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum LimitRefusal {
+    /// The memory limit or the query memory limit refused `requested` more bytes, with `used`
+    /// of `limit` in use.
+    Memory {
+        /// [`LimitBound::MemoryLimit`] or [`LimitBound::QueryMemoryLimit`].
+        bound: LimitBound,
+        /// The bytes asked for.
+        requested: u64,
+        /// The bytes in use under the bound.
+        used: u64,
+        /// The bound as set.
+        limit: u64,
+    },
+    /// The spill limit refused `requested` more bytes, with `used` of `limit` spilled.
+    Spill {
+        /// The bytes asked for.
+        requested: u64,
+        /// The bytes spilled.
+        used: u64,
+        /// The spill limit.
+        limit: u64,
+    },
+    /// Spilling `requested` more bytes would leave less than `needed` of the `free` bytes on
+    /// `volume` for the next checkpoint.
+    Room {
+        /// The bytes asked for.
+        requested: u64,
+        /// The free bytes on the volume.
+        free: u64,
+        /// The free bytes the database needs for its next checkpoint.
+        needed: u64,
+        /// The spill volume (the spill directory).
+        volume: std::path::PathBuf,
+    },
+}
+
+impl LimitRefusal {
+    /// The bound that refused.
+    #[must_use]
+    pub fn bound(&self) -> LimitBound {
+        match self {
+            Self::Memory { bound, .. } => *bound,
+            Self::Spill { .. } => LimitBound::SpillLimit,
+            Self::Room { .. } => LimitBound::CheckpointRoom,
+        }
+    }
+}
+
+impl fmt::Display for LimitRefusal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Memory {
+                bound,
+                requested,
+                used,
+                limit,
+            } => write!(
+                f,
+                "the statement needs {requested} more bytes: {used} bytes of the {} of {limit} \
+                 are in use; raise it with {}",
+                bound.name(),
+                bound.setting()
+            ),
+            Self::Spill {
+                requested,
+                used,
+                limit,
+            } => write!(
+                f,
+                "spilling {requested} more bytes would pass the spill limit of {limit} bytes \
+                 ({used} spilled); raise it with {}",
+                LimitBound::SpillLimit.setting()
+            ),
+            Self::Room {
+                requested,
+                free,
+                needed,
+                volume,
+            } => write!(
+                f,
+                "spilling {requested} more bytes would leave {} bytes free on {}, and the \
+                 database needs {needed} for its next checkpoint",
+                free.saturating_sub(*requested),
+                volume.display()
+            ),
+        }
+    }
+}
+
+impl std::error::Error for LimitRefusal {}
+
+impl From<LimitRefusal> for Error {
+    fn from(refusal: LimitRefusal) -> Self {
+        Error::from(StorageError::LimitReached(Box::new(refusal)))
     }
 }
 

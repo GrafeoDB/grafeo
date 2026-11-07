@@ -816,6 +816,10 @@ impl MemoryConsumer for CdcLog {
         before.saturating_sub(self.approximate_memory_bytes())
     }
 
+    fn can_evict(&self) -> bool {
+        true
+    }
+
     fn can_spill(&self) -> bool {
         // CDC events are transient metadata: eviction (pruning) is sufficient.
         // No disk spill needed.

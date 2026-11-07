@@ -145,9 +145,12 @@ echo "  Gzip:   $(( GZ_SIZE / 1024 )) KB"
 # paths), full reached 1591 KB in 0.6.0. The generic code (sorts, hash maps,
 # serde) is most of what is left; it shrinks by sharing paths, not by gates.
 # 0.6.2's planner rules took lite from 1170 KB to 1249 KB, so its limits rose.
+# 0.6.2 also adds external access, CALL with the procedure registry in every
+# build, and importRdf in the full package: full measured 1973 KB before
+# external access, so its limit is 2048 KB.
 if [[ "$FEATURES" == *"full"* ]]; then
     WARN_THRESHOLD=1835008   # 1.75 MB
-    FAIL_THRESHOLD=1992294   # 1.9 MB
+    FAIL_THRESHOLD=2097152   # 2048 KB
     LABEL="full profile"
 else
     WARN_THRESHOLD=1363149   # 1.3 MB

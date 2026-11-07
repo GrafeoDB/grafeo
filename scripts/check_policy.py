@@ -220,6 +220,9 @@ HINTS = {
     "T10": "tokio belongs to `async-storage` and `server` (and a binding's own async API); "
     "make the dependency optional behind those features, or name the binding's edge in "
     "RUNTIME_RULES",
+    "T12": "gate a binding's code on the capability it needs (`rdf-model`, `sparql`, "
+    "`vector-index`, ...), not on a profile or group: every profile that holds the "
+    "capability then compiles it",
     "D1": 'add reason = "..." naming the bound or invariant that makes it safe',
     "D2": "em or en dash; rewrite with a comma, colon or parentheses",
     "D3": "public text must stand on its own; restate the content or link a public issue",
@@ -1456,12 +1459,82 @@ def text_findings(root: Path, files: list[str]) -> list[Finding]:
     return findings
 
 
+# The binding features that are profiles or groups of capabilities, never one capability.
+PROFILE_FEATURES = frozenset(
+    {
+        "lpg",
+        "rdf",
+        "ai",
+        "analytics",
+        "edge",
+        "browser",
+        "full",
+        "languages",
+        "embedded",
+        "server",
+    }
+)
+BINDING_SOURCES = (
+    "crates/bindings/python/src/",
+    "crates/bindings/node/src/",
+    "crates/bindings/c/src/",
+    "crates/bindings/wasm/src/",
+)
+CFG_START = re.compile(r"\bcfg(?:_attr)?!?\s*\(")
+CFG_FEATURE = re.compile(r'feature\s*=\s*"([A-Za-z0-9_-]+)"')
+
+
+def cfg_conditions(text: str) -> list[tuple[int, str]]:
+    """Each `cfg(...)`, `cfg!(...)` and `cfg_attr(...)` of Rust code, comments left out:
+    its line and its parenthesized text, which may span lines."""
+    code = without_rust_comments(text)
+    found = []
+    for start in CFG_START.finditer(code):
+        depth, end = 0, start.end() - 1
+        for end in range(start.end() - 1, len(code)):
+            if code[end] == "(":
+                depth += 1
+            elif code[end] == ")":
+                depth -= 1
+                if depth == 0:
+                    break
+        line = code.count("\n", 0, start.start()) + 1
+        found.append((line, code[start.start() : end + 1]))
+    return found
+
+
+def binding_profile_cfg_findings(root: Path, files: list[str]) -> list[Finding]:
+    """T12: a binding's code gates on capability features, never on a profile or group.
+
+    A profile is a set of capabilities, and another profile can hold the same capability: code
+    gated on `rdf` is left out of a `full` build that has `rdf-model` through `sparql`, so
+    `full` lost `importRdf`. Gated on the capability, every profile that holds it compiles it.
+    """
+    findings = []
+    for rel in files:
+        if not rel.endswith(".rs") or not rel.startswith(BINDING_SOURCES):
+            continue
+        text = read_text(root / rel)
+        if text is None:
+            continue
+        for line, condition in cfg_conditions(text):
+            for name in CFG_FEATURE.findall(condition):
+                if name in PROFILE_FEATURES:
+                    findings.append(
+                        finding(
+                            "T12", rel, line, f"gates on the profile or group `{name}`"
+                        )
+                    )
+    return findings
+
+
 def tree_findings(root: Path, metadata_arg: str | None) -> list[Finding]:
     files = git(root, "ls-files").splitlines()
     findings = toolchain_findings(root) + text_findings(root, files)
     findings += stability_findings(root, files)
     findings += test_binary_findings(root, files)
     findings += node_package_findings(root, files)
+    findings += binding_profile_cfg_findings(root, files)
     findings += xfail_findings(root, files)
     if metadata_arg != "none" and (root / "Cargo.toml").exists():
         if metadata_arg:

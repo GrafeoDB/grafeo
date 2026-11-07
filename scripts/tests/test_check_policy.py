@@ -1938,3 +1938,116 @@ def test_t10_every_facade_profile_without_async_io_has_a_rule() -> None:
         if package == "grafeo" and crate == "tokio"
     }
     assert sorted(without_async - ruled) == []
+
+
+# --------------------------------------------------------------------- T12
+
+
+def profile_cfg_findings(
+    repo: Path, rel: str, text: str
+) -> list[tuple[str, int | None, str]]:
+    write(repo, rel, text)
+    return [
+        (f.path, f.line, f.message.split(";")[0])
+        for f in check_policy.binding_profile_cfg_findings(repo, [rel])
+    ]
+
+
+WASM_LIB = "crates/bindings/wasm/src/lib.rs"
+
+
+def test_t12_a_capability_gate_reports_nothing(tmp_path: Path) -> None:
+    text = (
+        '#[cfg(feature = "rdf-model")]\n'
+        "fn import_rdf() {}\n"
+        '#[cfg(all(feature = "sparql", feature = "vector-index"))]\n'
+        "fn search() {}\n"
+        'const LPG: bool = cfg!(feature = "lpg-model");\n'
+    )
+    assert profile_cfg_findings(tmp_path, WASM_LIB, text) == []
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "lpg",
+        "rdf",
+        "ai",
+        "analytics",
+        "edge",
+        "browser",
+        "full",
+        "languages",
+        "embedded",
+        "server",
+    ],
+)
+def test_t12_every_profile_and_group_is_named(tmp_path: Path, name: str) -> None:
+    text = f'fn a() {{}}\n#[cfg(feature = "{name}")]\nfn b() {{}}\n'
+    assert profile_cfg_findings(tmp_path, WASM_LIB, text) == [
+        (WASM_LIB, 2, f"gates on the profile or group `{name}`")
+    ]
+
+
+def test_t12_every_form_of_cfg_is_read(tmp_path: Path) -> None:
+    text = (
+        '#[cfg(any(feature = "gql", feature = "rdf"))]\n'
+        'let on = cfg!(feature = "full");\n'
+        '#[cfg_attr(feature = "ai", allow(unused))]\n'
+        '#![cfg(not(feature = "edge"))]\n'
+    )
+    assert [line for _, line, _ in profile_cfg_findings(tmp_path, WASM_LIB, text)] == [
+        1,
+        2,
+        3,
+        4,
+    ]
+
+
+def test_t12_a_condition_over_several_lines_is_read_at_its_start(
+    tmp_path: Path,
+) -> None:
+    text = 'fn a() {}\n#[cfg(all(\n    feature = "gql",\n    feature = "languages",\n))]\nfn b() {}\n'
+    assert profile_cfg_findings(tmp_path, WASM_LIB, text) == [
+        (WASM_LIB, 2, "gates on the profile or group `languages`")
+    ]
+
+
+def test_t12_comments_and_strings_outside_cfg_are_not_gates(tmp_path: Path) -> None:
+    text = (
+        '// #[cfg(feature = "rdf")] was the old gate\n'
+        '/* cfg(feature = "full") */\n'
+        'let note = "feature = \\"rdf\\"";\n'
+        "fn configure() {}\n"
+    )
+    assert profile_cfg_findings(tmp_path, WASM_LIB, text) == []
+
+
+@pytest.mark.parametrize(
+    "rel",
+    [
+        "crates/bindings/python/src/database.rs",
+        "crates/bindings/node/src/database.rs",
+        "crates/bindings/c/src/database.rs",
+        "crates/bindings/wasm/src/lib.rs",
+    ],
+)
+def test_t12_covers_each_binding(tmp_path: Path, rel: str) -> None:
+    text = '#[cfg(feature = "rdf")]\nfn a() {}\n'
+    assert len(profile_cfg_findings(tmp_path, rel, text)) == 1
+
+
+@pytest.mark.parametrize(
+    "rel",
+    [
+        "crates/grafeo/src/lib.rs",
+        "crates/grafeo-engine/src/database/mod.rs",
+        "crates/bindings/wasm/tests/web.rs",
+        "crates/bindings/python/build.rs",
+    ],
+)
+def test_t12_leaves_other_code_alone(tmp_path: Path, rel: str) -> None:
+    """The facade and the engine define the profiles; tests and build scripts are not a
+    binding's compiled surface."""
+    text = '#[cfg(feature = "full")]\nfn a() {}\n'
+    assert profile_cfg_findings(tmp_path, rel, text) == []

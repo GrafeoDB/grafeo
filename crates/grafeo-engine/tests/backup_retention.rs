@@ -20,7 +20,7 @@
 //! cargo test -p grafeo-engine --all-features --test main backup_retention::
 //! ```
 
-#![cfg(all(feature = "wal", feature = "grafeo-file"))]
+#![cfg(all(feature = "gql", feature = "wal", feature = "grafeo-file"))]
 
 use std::path::{Path, PathBuf};
 

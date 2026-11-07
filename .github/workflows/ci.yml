@@ -683,6 +683,7 @@ jobs:
           - profile: enterprise
             features: "--features tracing"
             engine_features: "--features metrics,tracing,async-storage"
+            engine_test: "--features gql,wal,grafeo-file,tracing,testing-crash-injection --test storage_events"
           # Full: all features combined (`full` is a deprecated alias, removed in 0.7.0 per #468; use persona combos)
           - profile: full
             features: "--features languages,triple-store,algos,parallel,vector-index,text-index,hybrid-search,spill,mmap,regex,jsonl-import,parquet-import"
@@ -734,6 +735,17 @@ jobs:
           -p grafeo-engine
           -p grafeo
           --no-default-features ${{ matrix.engine_features || matrix.features }}
+        env:
+          RUSTC_WRAPPER: sccache
+
+      # An engine test built with only the profile's features, for profiles
+      # whose behavior depends on what the profile itself enables.
+      - name: Test engine profile (${{ matrix.profile }})
+        if: matrix.engine_test
+        run: >
+          cargo test
+          -p grafeo-engine
+          --no-default-features ${{ matrix.engine_test }}
         env:
           RUSTC_WRAPPER: sccache
 

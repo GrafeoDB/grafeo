@@ -1842,7 +1842,6 @@ dependencies = [
  "bytes",
  "codspeed-criterion-compat",
  "crc32fast",
- "crossbeam",
  "fs2",
  "grafeo-common",
  "memmap2",

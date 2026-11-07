@@ -1630,3 +1630,89 @@ def test_t9_the_repository_is_in_step() -> None:
         ["git", "ls-files"], cwd=root, capture_output=True, text=True, check=True
     ).stdout.splitlines()
     assert check_policy.xfail_findings(root, files) == []
+
+
+# ------------------------------------------------------------------ T10
+
+STORAGE_TOKIO = """0tokio v1.54.1
+1grafeo-storage v0.6.1 (/repo/crates/grafeo-storage)
+2grafeo-engine v0.6.1 (/repo/crates/grafeo-engine)
+3grafeo v0.6.1 (/repo/crates/grafeo)
+"""
+
+PYTHON_TOKIO = """0tokio v1.54.1
+1grafeo-python v0.6.1 (/repo/crates/bindings/python)
+1pyo3-async-runtimes v0.30.0
+2grafeo-python v0.6.1 (/repo/crates/bindings/python) (*)
+1grafeo-storage v0.6.1 (/repo/crates/grafeo-storage)
+2grafeo-engine v0.6.1 (/repo/crates/grafeo-engine)
+3grafeo-python v0.6.1 (/repo/crates/bindings/python) (*)
+"""
+
+
+def runtime(trees: dict) -> list[str]:
+    """T10 messages with `trees[(package, features, crate)]` as cargo's output, a reached control
+    unless the key says otherwise."""
+    control = check_policy.RUNTIME_CONTROL
+    trees = {control: STORAGE_TOKIO, **trees}
+    return [
+        f"{f.rule} {f.message}"
+        for f in check_policy.runtime_findings(
+            lambda package, features, crate: trees.get((package, features, crate))
+        )
+    ]
+
+
+def test_t10_inverse_chains_name_each_direct_dependent_with_a_path_from_the_root() -> (
+    None
+):
+    assert check_policy.inverse_chains(PYTHON_TOKIO, "grafeo-python") == {
+        "grafeo-python": ["grafeo-python", "tokio"],
+        "pyo3-async-runtimes": ["grafeo-python", "pyo3-async-runtimes", "tokio"],
+        "grafeo-storage": ["grafeo-python", "grafeo-engine", "grafeo-storage", "tokio"],
+    }
+
+
+def test_t10_clean_builds_pass() -> None:
+    assert runtime({}) == []
+
+
+def test_t10_the_wal_reaching_tokio_in_the_embedded_profile_names_the_path() -> None:
+    assert runtime({("grafeo", "embedded", "tokio"): STORAGE_TOKIO}) == [
+        "T10 grafeo with --features embedded reaches tokio through "
+        "grafeo -> grafeo-engine -> grafeo-storage -> tokio",
+    ]
+
+
+def test_t10_a_binding_may_depend_on_tokio_itself_but_not_through_storage() -> None:
+    assert runtime({("grafeo-python", None, "tokio"): PYTHON_TOKIO}) == [
+        "T10 grafeo-python with its default features reaches tokio through "
+        "grafeo-python -> grafeo-engine -> grafeo-storage -> tokio",
+    ]
+
+
+def test_t10_a_control_that_reaches_nothing_is_an_error() -> None:
+    assert runtime({check_policy.RUNTIME_CONTROL: None}) == [
+        "T10 grafeo with --features async-storage reaches no tokio: the check reads nothing; "
+        "update RUNTIME_CONTROL",
+    ]
+
+
+def test_t10_every_rule_names_a_workspace_crate_and_its_features() -> None:
+    import re
+
+    root = Path(__file__).resolve().parents[2]
+    for package, features, _, _ in check_policy.RUNTIME_RULES:
+        manifests = [
+            path
+            for path in root.glob("crates/**/Cargo.toml")
+            if re.search(
+                r'\[package\]\s+name = "' + re.escape(package) + '"',
+                path.read_text(encoding="utf-8"),
+            )
+        ]
+        assert manifests, package
+        if features is not None:
+            text = manifests[0].read_text(encoding="utf-8")
+            for feature in features.split(","):
+                assert f"\n{feature} = " in text, (package, feature)

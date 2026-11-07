@@ -29,6 +29,8 @@ Add `--json` for machine-readable output. Exit code 1 when an error is found.
     T9  every expected failure (a gtest `xfail:`, a strict pytest xfail mark, a Rust
         `xfail(...)`) names its spec and an issue: `#N`, or `fix in X.Y.Z` not below the
         release CHANGELOG.md's first `## [X.Y.Z]` heading names
+    T10 per build: the facade's profiles, the CLI and the bindings reach no tokio, and the WAL
+        no crossbeam, but through the crates allowed to depend on them (cargo tree)
     D1  an added #[allow(...)] states a reason = "..."
     D2  no em or en dashes in added Markdown lines or code comments
     D3  no added references to private planning notes; no internal phase wording in docs
@@ -155,6 +157,29 @@ BOUNDARIES: dict[str, dict[str, set[str]]] = {
     },
 }
 
+# T10: per build, a crate it must not reach, and the crates allowed to depend on that one directly
+# (a binding's own async API). `None`: the package's default features.
+RUNTIME_RULES: list[tuple[str, str | None, str, frozenset[str]]] = [
+    ("grafeo", "embedded", "tokio", frozenset()),
+    ("grafeo", "edge", "tokio", frozenset()),
+    ("grafeo", "lpg", "tokio", frozenset()),
+    ("grafeo-cli", None, "tokio", frozenset()),
+    ("grafeo-c", None, "tokio", frozenset()),
+    (
+        "grafeo-python",
+        None,
+        "tokio",
+        frozenset({"grafeo-python", "pyo3-async-runtimes"}),
+    ),
+    ("grafeo-node", None, "tokio", frozenset({"grafeo-node", "napi"})),
+    ("grafeo-storage", "wal", "tokio", frozenset()),
+    ("grafeo-storage", "wal", "crossbeam", frozenset()),
+]
+
+# A build that must reach tokio: without it a renamed crate or another cargo output would let
+# every rule above pass by reading nothing.
+RUNTIME_CONTROL = ("grafeo", "async-storage", "tokio")
+
 HINTS = {
     "T2": "bump the pin together with rust-toolchain.toml (or rust-version for the MSRV job)",
     "T3": "restate what matters inline or link a public issue",
@@ -166,6 +191,9 @@ HINTS = {
     "T9": "an expected failure names its spec and an issue (`#N`, or `fix in X.Y.Z` for "
     "the release being made or a later one); a pytest mark is `strict=True` with `raises=` "
     'and `reason="spec: <ref>; issue: <issue>"`',
+    "T10": "tokio belongs to `async-storage` and `server` (and a binding's own async API); "
+    "make the dependency optional behind those features, or name the binding's edge in "
+    "RUNTIME_RULES",
     "D1": 'add reason = "..." naming the bound or invariant that makes it safe',
     "D2": "em or en dash; rewrite with a comma, colon or parentheses",
     "D3": "public text must stand on its own; restate the content or link a public issue",
@@ -369,6 +397,79 @@ def boundary_findings(metadata: dict) -> list[Finding]:
                         "Cargo.toml",
                         None,
                         f"{crate} reaches {target} through {' -> '.join(reversed(chain))}",
+                    )
+                )
+    return findings
+
+
+def inverse_chains(text: str, root_package: str) -> dict[str, list[str]]:
+    """From `cargo tree -i CRATE --prefix depth --format {p}` of `root_package`: each crate that
+    depends on CRATE directly, with one chain from `root_package` down to CRATE through it."""
+    chains: dict[str, list[str]] = {}
+    stack: list[str] = []
+    for line in text.splitlines():
+        match = re.match(r"(\d+)(\S+)", line)
+        if not match:
+            continue
+        depth, name = int(match.group(1)), match.group(2)
+        del stack[depth:]
+        stack.append(name)
+        if depth == 0:
+            continue
+        chain = list(reversed(stack))
+        known = chains.get(stack[1])
+        if known is None or (known[0] != root_package and chain[0] == root_package):
+            chains[stack[1]] = chain
+    return chains
+
+
+def cargo_tree_inverse(
+    root: Path, package: str, features: str | None, crate: str
+) -> str | None:
+    """`cargo tree -i crate` of `package` with `features` (`None`: its defaults), normal and build
+    edges; `None` when the build does not reach `crate`."""
+    args = ["cargo", "tree", "--locked", "-p", package, "-e", "normal,build"]
+    if features is not None:
+        args += ["--no-default-features", "--features", features]
+    args += ["-i", crate, "--prefix", "depth", "--format", "{p}"]
+    result = subprocess.run(
+        args, cwd=root, capture_output=True, text=True, encoding="utf-8"
+    )
+    if result.returncode != 0:
+        if "did not match any packages" in result.stderr:
+            return None
+        raise SystemExit(f"{' '.join(args)} failed: {result.stderr.strip()}")
+    return result.stdout if result.stdout.strip() else None
+
+
+def runtime_findings(tree) -> list[Finding]:
+    """T10: no build of RUNTIME_RULES reaches its crate but through an allowed direct dependent.
+    `tree(package, features, crate)` is the output of `cargo_tree_inverse`."""
+    findings: list[Finding] = []
+    package, features, crate = RUNTIME_CONTROL
+    if not tree(package, features, crate):
+        findings.append(
+            Finding(
+                "T10",
+                "Cargo.toml",
+                None,
+                f"{package} with --features {features} reaches no {crate}: the check reads "
+                "nothing; update RUNTIME_CONTROL",
+            )
+        )
+    for package, features, crate, allowed in RUNTIME_RULES:
+        text = tree(package, features, crate)
+        if not text:
+            continue
+        build = f"--features {features}" if features else "its default features"
+        for dependent, chain in sorted(inverse_chains(text, package).items()):
+            if dependent not in allowed:
+                findings.append(
+                    Finding(
+                        "T10",
+                        "Cargo.toml",
+                        None,
+                        f"{package} with {build} reaches {crate} through {' -> '.join(chain)}",
                     )
                 )
     return findings
@@ -1230,6 +1331,11 @@ def tree_findings(root: Path, metadata_arg: str | None) -> list[Finding]:
             metadata = cargo_metadata(root)
         findings += boundary_findings(metadata)
         findings += rust_version_findings(root, metadata)
+        findings += runtime_findings(
+            lambda package, features, crate: cargo_tree_inverse(
+                root, package, features, crate
+            )
+        )
     return findings
 
 
@@ -1748,9 +1854,9 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--json", action="store_true", help="print findings as JSON")
     commands = parser.add_subparsers(dest="command", required=True)
-    tree = commands.add_parser("tree", help="whole-repository rules (T1 to T8)")
+    tree = commands.add_parser("tree", help="whole-repository rules (T1 to T10)")
     tree.add_argument(
-        "--metadata", help="cargo metadata JSON file, or 'none' to skip T1"
+        "--metadata", help="cargo metadata JSON file, or 'none' to skip T1, T5 and T10"
     )
     diff = commands.add_parser("diff", help="rules on added lines (D1 to D6, W1)")
     source = diff.add_mutually_exclusive_group()

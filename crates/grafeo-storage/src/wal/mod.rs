@@ -34,7 +34,8 @@
 //! # }
 //! ```
 //!
-//! Choose [`WalManager`] for sync code, [`AsyncWalManager`] for async.
+//! Choose [`WalManager`] for sync code, and `AsyncWalManager` (with the
+//! `async-storage` feature, deprecated since 0.6.1) for async.
 //!
 //! ## WAL v2
 //!
@@ -58,6 +59,7 @@
 /// the log position up to which backups hold the WAL.
 pub const BACKUP_CURSOR_FILE: &str = "backup_cursor.meta";
 
+#[cfg(feature = "async-storage")]
 mod async_log;
 #[cfg(feature = "async-storage")]
 mod async_typed;
@@ -73,6 +75,7 @@ mod segment;
 mod typed;
 mod writer;
 
+#[cfg(feature = "async-storage")]
 pub use async_log::AsyncWalManager;
 #[cfg(feature = "async-storage")]
 pub use async_typed::{AsyncLpgWal, AsyncTypedWal};

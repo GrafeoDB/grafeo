@@ -325,8 +325,15 @@ impl Lazy {
 impl CheckpointTimer {
     /// Arms the checkpointer for `triggers`, at least one of which can fire:
     /// an interval, or a WAL size with `job.log` set. No thread starts unless
-    /// the log is already past the size mark.
-    pub(super) fn arm(triggers: CheckpointTriggers, job: Job, shared: Shared) -> Self {
+    /// work already waits: a log past the size mark, or, with an interval,
+    /// changes since the last checkpoint (the log past the checkpoint's
+    /// position, or, without a log, `changed`: a commit since it).
+    pub(super) fn arm(
+        triggers: CheckpointTriggers,
+        job: Job,
+        shared: Shared,
+        changed: bool,
+    ) -> Self {
         let signal = Arc::new(Signal::default());
         let lazy = Arc::new(Lazy {
             signal,
@@ -354,10 +361,10 @@ impl CheckpointTimer {
         // Work already waiting starts the thread at once: a log past the size
         // mark, or, with an interval, changes since the last checkpoint.
         let unflushed = triggers.interval.is_some()
-            && job
-                .log
-                .as_deref()
-                .is_some_and(|log| log.end_lsn() > log.checkpoint_lsn());
+            && match job.log.as_deref() {
+                Some(log) => log.end_lsn() > log.checkpoint_lsn(),
+                None => changed,
+            };
         let past = match (&job.log, mark) {
             (Some(log), Some(mark)) => log.arm_wake(mark),
             _ => false,
@@ -696,7 +703,8 @@ mod tests {
             #[cfg(feature = "testing-crash-injection")]
             gate: Arc::clone(&shared.gate),
         };
-        let timer = CheckpointTimer::arm(triggers, job(log, failing, hopeless), thread_shared);
+        let timer =
+            CheckpointTimer::arm(triggers, job(log, failing, hopeless), thread_shared, false);
         (timer, shared)
     }
 

@@ -484,6 +484,144 @@ mod hooks {
         db.close().unwrap();
     }
 
+    /// Arming an interval on a database that already holds a committed change starts the thread
+    /// at once, with no further commit, and it checkpoints. Without a WAL too: there the change
+    /// lives in memory until a checkpoint writes the file, and no WAL size shows it.
+    #[test]
+    fn arming_an_interval_after_a_change_starts_the_thread_at_once() {
+        for (name, wal) in [("leiden.grafeo", true), ("gouda.grafeo", false)] {
+            let dir = tempfile::tempdir().unwrap();
+            let db = open(&dir.path().join(name), |config| {
+                let config = config.without_checkpoint_wal_size();
+                if wal { config } else { config.without_wal() }
+            });
+            write(&db, 1024);
+            std::thread::sleep(Duration::from_millis(300));
+            let before = counts(&db);
+            assert_eq!(
+                (before.starts, before.attempts),
+                (0, 0),
+                "wal {wal}, no trigger yet: {before:?}"
+            );
+            db.set_checkpoint_triggers(
+                CheckpointTriggers::none().with_interval(Duration::from_millis(100)),
+            )
+            .unwrap();
+            wait_until("the checkpoint of the armed interval", || {
+                counts(&db).attempts >= 1
+            });
+            assert_eq!(counts(&db).starts, 1, "wal {wal}: {:?}", counts(&db));
+            db.close().unwrap();
+        }
+    }
+
+    const REPLAY_PATH_VAR: &str = "GRAFEO_CHECKPOINT_REPLAY_PATH";
+
+    /// The child: four small commits with automatic checkpoints off, then it ends as a crash does
+    /// (no close, the database alive), so the WAL keeps them, far below any size mark.
+    #[test]
+    fn a_small_wal_child() {
+        let Some(path) = std::env::var_os(REPLAY_PATH_VAR) else {
+            return;
+        };
+        let db = open(&PathBuf::from(path), Config::without_checkpoint_wal_size);
+        for _ in 0..4 {
+            write(&db, 1024);
+        }
+        assert!(wal_bytes(&db) >= 4 * 1024, "{}", wal_bytes(&db));
+        std::process::exit(0);
+    }
+
+    /// Changes an open replays from the WAL are changes the last checkpoint does not hold: an
+    /// interval, set at open or armed afterwards, starts the thread without a new commit and
+    /// checkpoints them.
+    #[test]
+    fn a_replayed_wal_gives_an_interval_work() {
+        let interval = Duration::from_millis(100);
+        for armed_later in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("haarlem.grafeo");
+            let mut child = grafeo_common::child_test!("a_small_wal_child");
+            child.env(REPLAY_PATH_VAR, &path);
+            let status = grafeo_common::testing::child_process::run(&mut child).unwrap();
+            assert!(status.success(), "the child failed");
+
+            let db = open(&path, |config| {
+                let config = config.without_checkpoint_wal_size();
+                if armed_later {
+                    config
+                } else {
+                    config.with_checkpoint_interval(interval)
+                }
+            });
+            assert_eq!(blobs(&db), 4, "every commit of the WAL");
+            if armed_later {
+                std::thread::sleep(Duration::from_millis(300));
+                let before = counts(&db);
+                assert_eq!((before.starts, before.attempts), (0, 0), "{before:?}");
+                assert!(wal_bytes(&db) >= 4 * 1024, "{}", wal_bytes(&db));
+                db.set_checkpoint_triggers(CheckpointTriggers::none().with_interval(interval))
+                    .unwrap();
+            }
+            wait_until("the interval checkpoint of the replayed changes", || {
+                counts(&db).attempts >= 1 && wal_bytes(&db) < 1024
+            });
+            assert_eq!(
+                counts(&db).starts,
+                1,
+                "armed later {armed_later}: {:?}",
+                counts(&db)
+            );
+            db.close().unwrap();
+        }
+    }
+
+    /// An interval armed on a database with no change since its last checkpoint has no work: no
+    /// thread starts and nothing checkpoints however many intervals pass, with or without a WAL,
+    /// for a reopened database and for a new one that was never checkpointed. The first commit
+    /// then starts it.
+    #[test]
+    fn an_unchanged_database_arming_an_interval_starts_nothing() {
+        let rows = [
+            ("utrecht.grafeo", true, false),
+            ("breda.grafeo", false, false),
+            ("tilburg.grafeo", true, true),
+            ("venlo.grafeo", false, true),
+        ];
+        for (name, wal, new) in rows {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join(name);
+            let config = move |config: Config| {
+                let config = config.without_checkpoint_wal_size();
+                if wal { config } else { config.without_wal() }
+            };
+            if !new {
+                let db = open(&path, config);
+                write(&db, 1024);
+                db.close().unwrap();
+            }
+            let db = open(&path, config);
+            assert_eq!(blobs(&db), i64::from(!new), "wal {wal}, new {new}");
+            db.set_checkpoint_triggers(
+                CheckpointTriggers::none().with_interval(Duration::from_millis(100)),
+            )
+            .unwrap();
+            std::thread::sleep(Duration::from_millis(600));
+            let idle = counts(&db);
+            assert_eq!(
+                (idle.starts, idle.attempts),
+                (0, 0),
+                "wal {wal}, new {new}, unchanged: {idle:?}"
+            );
+            write(&db, 1024);
+            wait_until("the interval checkpoint of the first change", || {
+                counts(&db).attempts >= 1
+            });
+            assert_eq!(counts(&db).starts, 1, "wal {wal}: {:?}", counts(&db));
+            db.close().unwrap();
+        }
+    }
+
     /// `set_checkpoint_triggers` on an idle database starts nothing while the WAL is below the new
     /// mark; a mark the WAL is already past starts the thread, which checkpoints at once. Both
     /// marks keep to the setter's 1 MiB floor.

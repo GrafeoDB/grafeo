@@ -3379,7 +3379,11 @@ impl GrafeoDB {
             // Armed, not started: the thread starts the first time it has work
             // (see `CheckpointTimer`).
             let without_log = job.log.is_none();
-            let timer = checkpoint_timer::CheckpointTimer::arm(triggers, job, shared);
+            // Without a WAL, the interval's work is a commit since the last
+            // checkpoint: one read at arming, never on the commit path.
+            let changed = without_log
+                && self.transaction_manager.current_epoch().as_u64() > fm.active_header().epoch;
+            let timer = checkpoint_timer::CheckpointTimer::arm(triggers, job, shared, changed);
             if without_log && triggers.interval.is_some() {
                 // No WAL group to cross: the first commit starts the interval.
                 self.transaction_manager

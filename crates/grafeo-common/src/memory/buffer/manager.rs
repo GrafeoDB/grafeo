@@ -655,7 +655,7 @@ impl BufferManager {
                 }
                 // A consumer that can free nothing under pressure is not
                 // asked (its spill would write and free nothing).
-                if !consumer.can_spill() || consumer.spillable_bytes(SpillCause::Pressure) == 0 {
+                if !consumer.can_spill() {
                     continue;
                 }
                 let remaining = to_free - total_freed;

@@ -84,8 +84,8 @@ concatenation and `CAST ... AS STRING` write the infinities as `Infinity` and
 | `TIME` | `TIME 'HH:MM:SS'` | `TIME '14:30:00'` |
 | `DATETIME` | `DATETIME 'ISO8601'` | `DATETIME '2024-01-15T14:30:00Z'` |
 | `DURATION` | `DURATION 'ISO8601'` | `DURATION 'P1Y2M3D'` |
-| `ZONED DATETIME` | `ZONED DATETIME 'ISO8601+offset'` | `ZONED DATETIME '2024-01-15T14:30:00+05:30'` |
-| `ZONED TIME` | `ZONED TIME 'HH:MM:SS+offset'` | `ZONED TIME '14:30:00+05:30'` |
+
+A `DATETIME '...'` with a UTC offset or `Z` is a ZONED DATETIME; without one it is a local datetime. The deprecated `ZONED DATETIME '...'` and `ZONED TIME '...'` forms still work until 0.7: see [Deprecations](../../upgrading/deprecations.md).
 
 ```sql
 -- Date
@@ -97,17 +97,11 @@ RETURN TIME '14:30:00'
 -- Datetime (with or without timezone designator)
 RETURN DATETIME '2024-01-15T14:30:00Z'
 RETURN DATETIME '2024-01-15T14:30:00'
+RETURN DATETIME '2024-01-15T14:30:00+05:30'   -- a zoned datetime
 
 -- Duration (ISO 8601)
 RETURN DURATION 'P1Y2M3D'     -- 1 year, 2 months, 3 days
 RETURN DURATION 'PT12H30M'    -- 12 hours, 30 minutes
-
--- Zoned datetime (fixed UTC offset)
-RETURN ZONED DATETIME '2024-01-15T14:30:00+05:30'
-RETURN ZONED DATETIME '2024-01-15T14:30:00Z'
-
--- Zoned time
-RETURN ZONED TIME '14:30:00-04:00'
 ```
 
 See [Temporal Functions](functions-temporal.md) for constructors, extraction and arithmetic.

@@ -115,18 +115,15 @@ RETURN DATE '2024-01-15'
 -- Time literal
 RETURN TIME '14:30:00'
 
--- Datetime literal
+-- Datetime literal (with or without UTC offset: with one, it is a zoned datetime)
 RETURN DATETIME '2024-01-15T14:30:00Z'
+RETURN DATETIME '2024-01-15T14:30:00+05:30'
 
 -- Duration literal
 RETURN DURATION 'P1Y2M3D'
-
--- Zoned datetime literal (with UTC offset)
-RETURN ZONED DATETIME '2024-01-15T14:30:00+05:30'
-
--- Zoned time literal (with UTC offset)
-RETURN ZONED TIME '14:30:00+05:30'
 ```
+
+The deprecated `ZONED DATETIME '...'` and `ZONED TIME '...'` forms still work until 0.7: see [Deprecations](../../upgrading/deprecations.md).
 
 ## Zoned Temporals
 

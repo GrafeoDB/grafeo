@@ -173,10 +173,7 @@ class ResultStream implements Finalizable {
 
   void _checkOpen() {
     if (_closed) {
-      throw DatabaseException(
-        'ResultStream is closed',
-        GrafeoStatus.database,
-      );
+      throw DatabaseException('ResultStream is closed', GrafeoStatus.database);
     }
   }
 }

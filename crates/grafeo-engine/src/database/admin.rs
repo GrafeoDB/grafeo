@@ -229,6 +229,10 @@ impl super::GrafeoDB {
         }
 
         usage.limit_bytes = self.buffer_manager.hard_limit();
+        usage.query_limit_bytes = self
+            .config
+            .query_memory_limit()
+            .map_or(usage.limit_bytes, |query| query.min(usage.limit_bytes));
         usage.spill = self.spill_memory();
         usage.compute_total();
         usage

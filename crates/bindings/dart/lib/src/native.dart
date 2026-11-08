@@ -146,9 +146,12 @@ List<int> takeIds(
 List<NodeEdge> nodeEdges(
   GrafeoBindings bindings,
   List<String>? edgeTypes,
-  int Function(Pointer<Utf8> edgeTypes, Pointer<Pointer<Uint64>> neighbors,
-          Pointer<Pointer<Uint64>> edges, Pointer<IntPtr> count)
-      call,
+  int Function(
+    Pointer<Utf8> edgeTypes,
+    Pointer<Pointer<Uint64>> neighbors,
+    Pointer<Pointer<Uint64>> edges,
+    Pointer<IntPtr> count,
+  ) call,
 ) {
   final types =
       edgeTypes == null || edgeTypes.isEmpty ? null : jsonEncode(edgeTypes);
@@ -228,9 +231,12 @@ List<int> batchNodes(
   GrafeoBindings bindings,
   List<String> labels,
   List<Map<String, dynamic>> rows,
-  int Function(Pointer<Utf8> labels, Pointer<Utf8> rows,
-          Pointer<Pointer<Uint64>> ids, Pointer<IntPtr> count)
-      call,
+  int Function(
+    Pointer<Utf8> labels,
+    Pointer<Utf8> rows,
+    Pointer<Pointer<Uint64>> ids,
+    Pointer<IntPtr> count,
+  ) call,
 ) =>
     withNativeStrings([jsonEncode(labels), _rows(rows)], (p) {
       return takeIds(bindings, (ids, count) => call(p[0], p[1], ids, count));
@@ -240,9 +246,11 @@ List<int> batchNodes(
 List<int> batchEdges(
   GrafeoBindings bindings,
   List<BatchEdge> edges,
-  int Function(Pointer<Utf8> edges, Pointer<Pointer<Uint64>> ids,
-          Pointer<IntPtr> count)
-      call,
+  int Function(
+    Pointer<Utf8> edges,
+    Pointer<Pointer<Uint64>> ids,
+    Pointer<IntPtr> count,
+  ) call,
 ) =>
     withNativeStrings([_edges(edges)], (p) {
       return takeIds(bindings, (ids, count) => call(p[0], ids, count));
@@ -255,9 +263,12 @@ UpsertSummary upsertNodes(
   List<Map<String, dynamic>> rows,
   String? key,
   bool replace,
-  int Function(Pointer<Utf8> labels, Pointer<Utf8> rows, Pointer<Utf8> options,
-          Pointer<Pointer<Utf8>> json)
-      call,
+  int Function(
+    Pointer<Utf8> labels,
+    Pointer<Utf8> rows,
+    Pointer<Utf8> options,
+    Pointer<Pointer<Utf8>> json,
+  ) call,
 ) {
   final options = jsonEncode({if (key != null) 'key': key, 'replace': replace});
   return withNativeStrings([jsonEncode(labels), _rows(rows), options], (p) {
@@ -271,9 +282,12 @@ UpsertSummary upsertEdges(
   String edgeType,
   List<Map<String, dynamic>> rows,
   Map<String, Object?> options,
-  int Function(Pointer<Utf8> edgeType, Pointer<Utf8> rows,
-          Pointer<Utf8> options, Pointer<Pointer<Utf8>> json)
-      call,
+  int Function(
+    Pointer<Utf8> edgeType,
+    Pointer<Utf8> rows,
+    Pointer<Utf8> options,
+    Pointer<Pointer<Utf8>> json,
+  ) call,
 ) {
   final optionsJson = jsonEncode({
     for (final entry in options.entries)

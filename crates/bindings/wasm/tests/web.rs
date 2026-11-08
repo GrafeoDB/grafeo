@@ -111,7 +111,7 @@ fn test_snapshot_roundtrip() {
     assert!(!snapshot.is_empty(), "a snapshot holds the node");
 
     // Import into new database
-    let restored = Database::import_snapshot(&snapshot).expect("import");
+    let restored = Database::import_snapshot(&snapshot, None).expect("import");
     assert_eq!(restored.node_count().unwrap(), 1);
 }
 
@@ -429,7 +429,7 @@ fn test_import_lpg_snapshot_roundtrip() {
 
     // Export and re-import
     let snapshot = db.export_snapshot().expect("export");
-    let restored = Database::import_snapshot(&snapshot).expect("restore");
+    let restored = Database::import_snapshot(&snapshot, None).expect("restore");
 
     assert_eq!(restored.node_count().unwrap(), 2);
     assert_eq!(restored.edge_count().unwrap(), 1);
@@ -590,7 +590,7 @@ fn test_signed_snapshot_roundtrip() {
     // Signed format is distinguishable from raw-unsigned.
     assert_eq!(&signed[..4], b"GSN1");
 
-    let restored = Database::import_snapshot_signed(&signed, key).expect("restore");
+    let restored = Database::import_snapshot_signed(&signed, key, None).expect("restore");
     assert_eq!(restored.node_count().unwrap(), 2);
 }
 
@@ -605,7 +605,7 @@ fn test_wasm_import_tampered_snapshot() {
     let mid = signed.len() / 2;
     signed[mid] ^= 0x01;
 
-    assert!(Database::import_snapshot_signed(&signed, key).is_err());
+    assert!(Database::import_snapshot_signed(&signed, key, None).is_err());
 }
 
 #[wasm_bindgen_test]
@@ -615,15 +615,15 @@ fn test_wasm_import_wrong_key_rejected() {
     let signed = db.export_snapshot_signed(b"key-a").expect("export signed");
 
     assert!(
-        Database::import_snapshot_signed(&signed, b"key-b").is_err(),
+        Database::import_snapshot_signed(&signed, b"key-b", None).is_err(),
         "wrong key must not verify"
     );
 }
 
 #[wasm_bindgen_test]
 fn test_wasm_import_empty_snapshot() {
-    assert!(Database::import_snapshot(b"").is_err());
-    assert!(Database::import_snapshot_signed(b"", b"k").is_err());
+    assert!(Database::import_snapshot(b"", None).is_err());
+    assert!(Database::import_snapshot_signed(b"", b"k", None).is_err());
 }
 
 #[wasm_bindgen_test]
@@ -632,7 +632,7 @@ fn test_signed_snapshot_rejected_by_unsigned_import() {
     db.execute("CREATE (:T)").expect("insert");
     let signed = db.export_snapshot_signed(b"k").expect("export signed");
 
-    assert!(Database::import_snapshot(&signed).is_err());
+    assert!(Database::import_snapshot(&signed, None).is_err());
 }
 
 #[wasm_bindgen_test]

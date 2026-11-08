@@ -107,6 +107,7 @@ grafeo_is_cdc_enabled
 grafeo_last_error
 grafeo_last_error_gql_status
 grafeo_list_projections
+grafeo_memory_usage_json
 grafeo_mmr_search
 grafeo_node_count
 grafeo_node_history
@@ -118,7 +119,15 @@ grafeo_open
 grafeo_open_memory
 grafeo_open_read_only
 grafeo_open_single_file
+grafeo_open_warnings
 grafeo_open_with_history
+grafeo_open_with_options
+grafeo_options_free
+grafeo_options_new
+grafeo_options_set_memory_limit
+grafeo_options_set_query_memory_limit
+grafeo_options_set_spill_limit
+grafeo_options_set_unlimited_spill
 grafeo_rebuild_vector_index
 grafeo_release_backup_cursor
 grafeo_remove_edge_property

@@ -50,6 +50,43 @@ export interface Literal {
   equals(other: RdfTermLike | null | undefined): boolean
 }
 
+/** What may spill to disk and what has: `limitBytes` is `null` for no limit. */
+export interface SpillUsage {
+  totalBytes: number
+  limitBytes: number | null
+  sortBytes: number
+  aggregateBytes: number
+  vectorColumnBytes: number
+}
+
+/**
+ * The bytes a database holds, as its accounts count them, and its limits:
+ * `limitBytes` is the memory limit, `queryLimitBytes` what one statement may
+ * hold. The parts' keys follow the storage engine and may change in any
+ * release.
+ */
+export interface MemoryUsage {
+  totalBytes: number
+  limitBytes: number
+  queryLimitBytes: number
+  store: Record<string, number>
+  indexes: Record<string, any>
+  mvcc: Record<string, number>
+  caches: Record<string, number>
+  stringPool: Record<string, number>
+  bufferManager: Record<string, number>
+  rdf?: Record<string, number>
+  cdc?: Record<string, number>
+  spill: SpillUsage
+}
+
+/** What an open had to say, such as `MEMORY_LIMIT_PASSED`. */
+export interface OpenWarning {
+  code: string
+  message: string
+  context: string | null
+}
+
 /** An RDF term, as SPARQL results hold them and parameters take them. */
 export type RdfTerm = NamedNode | BlankNode | Literal
 

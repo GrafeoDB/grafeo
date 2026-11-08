@@ -76,7 +76,11 @@ class UpsertSummary {
   final List<int> skippedRows;
 
   const UpsertSummary(
-      this.created, this.updated, this.skipped, this.skippedRows);
+    this.created,
+    this.updated,
+    this.skipped,
+    this.skippedRows,
+  );
 
   @override
   String toString() =>

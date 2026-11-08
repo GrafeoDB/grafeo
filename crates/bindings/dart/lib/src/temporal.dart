@@ -82,7 +82,10 @@ final class GrafeoDate {
     if (numbers.contains(null)) return null;
     try {
       return GrafeoDate(
-          negative ? -numbers[0]! : numbers[0]!, numbers[1]!, numbers[2]!);
+        negative ? -numbers[0]! : numbers[0]!,
+        numbers[1]!,
+        numbers[2]!,
+      );
     } on ArgumentError {
       return null;
     }
@@ -128,8 +131,13 @@ final class GrafeoTime {
   /// than a day, or none for a local time.
   ///
   /// Throws an [ArgumentError] when a part is out of its range.
-  GrafeoTime(this.hour, this.minute, this.second,
-      {this.nanosecond = 0, this.offset}) {
+  GrafeoTime(
+    this.hour,
+    this.minute,
+    this.second, {
+    this.nanosecond = 0,
+    this.offset,
+  }) {
     if (hour < 0 ||
         hour > 23 ||
         minute < 0 ||
@@ -139,7 +147,8 @@ final class GrafeoTime {
         nanosecond < 0 ||
         nanosecond >= _nanosPerSecond) {
       throw ArgumentError(
-          '$hour:$minute:$second.$nanosecond is not a time of day');
+        '$hour:$minute:$second.$nanosecond is not a time of day',
+      );
     }
     final o = offset;
     if (o != null &&
@@ -173,10 +182,13 @@ final class GrafeoTime {
       nanos = int.parse('${fraction}000000000'.substring(0, 9));
     }
     try {
-      return GrafeoTime(hms[0]!, hms[1]!, hms.length == 3 ? hms[2]! : 0,
-          nanosecond: nanos,
-          offset:
-              offsetSeconds == null ? null : Duration(seconds: offsetSeconds));
+      return GrafeoTime(
+        hms[0]!,
+        hms[1]!,
+        hms.length == 3 ? hms[2]! : 0,
+        nanosecond: nanos,
+        offset: offsetSeconds == null ? null : Duration(seconds: offsetSeconds),
+      );
     } on ArgumentError {
       return null;
     }
@@ -202,7 +214,8 @@ final class GrafeoTime {
     final out = StringBuffer('${_two(hour)}:${_two(minute)}:${_two(second)}');
     if (nanosecond != 0) {
       out.write(
-          '.${nanosecond.toString().padLeft(9, '0').replaceFirst(RegExp(r'0+$'), '')}');
+        '.${nanosecond.toString().padLeft(9, '0').replaceFirst(RegExp(r'0+$'), '')}',
+      );
     }
     final o = offset;
     if (o != null) out.write(_offsetText(o.inSeconds));
@@ -422,7 +435,8 @@ final class GrafeoZonedDateTime {
     if (offset.inMicroseconds % Duration.microsecondsPerMinute != 0 ||
         offset.inSeconds.abs() >= _secondsPerDay) {
       throw ArgumentError(
-          'an offset of $offset is not whole minutes within a day');
+        'an offset of $offset is not whole minutes within a day',
+      );
     }
   }
 
@@ -441,8 +455,16 @@ final class GrafeoZonedDateTime {
     final time = GrafeoTime.tryParse(text.substring(t + 1));
     final offset = time?.offset;
     if (date == null || time == null || offset == null) return null;
-    final wallClock = DateTime.utc(date.year, date.month, date.day, time.hour,
-        time.minute, time.second, 0, time.nanosecond ~/ 1000);
+    final wallClock = DateTime.utc(
+      date.year,
+      date.month,
+      date.day,
+      time.hour,
+      time.minute,
+      time.second,
+      0,
+      time.nanosecond ~/ 1000,
+    );
     return GrafeoZonedDateTime(wallClock.subtract(offset), offset);
   }
 

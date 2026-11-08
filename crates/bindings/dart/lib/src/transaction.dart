@@ -65,10 +65,7 @@ class Transaction implements Finalizable {
   }
 
   /// Execute a parameterized GQL query within this transaction.
-  QueryResult executeWithParams(
-    String query,
-    Map<String, dynamic> params,
-  ) {
+  QueryResult executeWithParams(String query, Map<String, dynamic> params) {
     _checkActive();
     final queryPtr = query.toNativeUtf8(allocator: malloc);
     final paramsJson = encodeParams(params);
@@ -131,8 +128,11 @@ class Transaction implements Finalizable {
     _handle = nullptr;
     if (status != GrafeoStatus.ok.code) {
       _commitFailed = true;
-      throw classifyError(status, lastError(_bindings),
-          gqlStatus: lastGqlStatus(_bindings));
+      throw classifyError(
+        status,
+        lastError(_bindings),
+        gqlStatus: lastGqlStatus(_bindings),
+      );
     }
   }
 
@@ -149,8 +149,11 @@ class Transaction implements Finalizable {
     _bindings.grafeoFreeTransaction(_handle);
     _handle = nullptr;
     if (status != GrafeoStatus.ok.code) {
-      throw classifyError(status, lastError(_bindings),
-          gqlStatus: lastGqlStatus(_bindings));
+      throw classifyError(
+        status,
+        lastError(_bindings),
+        gqlStatus: lastGqlStatus(_bindings),
+      );
     }
   }
 

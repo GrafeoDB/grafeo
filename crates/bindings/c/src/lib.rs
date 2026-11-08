@@ -30,6 +30,9 @@ mod cdc;
 mod edges;
 mod error;
 mod graph;
+#[cfg(test)]
+mod memory_options_tests;
+mod options;
 mod session;
 #[cfg(test)]
 mod session_tests;

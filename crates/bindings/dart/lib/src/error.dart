@@ -81,18 +81,27 @@ class DatabaseException extends GrafeoException {
 /// Map a C status code and error message to a typed Dart exception.
 ///
 /// Mirrors `grafeo-bindings-common::error::classify_error`.
-GrafeoException classifyError(int statusCode, String message,
-    {String? gqlStatus}) {
+GrafeoException classifyError(
+  int statusCode,
+  String message, {
+  String? gqlStatus,
+}) {
   final status = GrafeoStatus.fromCode(statusCode);
   return switch (status) {
     GrafeoStatus.query => QueryException(message, status, gqlStatus: gqlStatus),
-    GrafeoStatus.transaction =>
-      TransactionException(message, status, gqlStatus: gqlStatus),
+    GrafeoStatus.transaction => TransactionException(
+        message,
+        status,
+        gqlStatus: gqlStatus,
+      ),
     GrafeoStatus.storage ||
     GrafeoStatus.io =>
       StorageException(message, status, gqlStatus: gqlStatus),
-    GrafeoStatus.serialization =>
-      SerializationException(message, status, gqlStatus: gqlStatus),
+    GrafeoStatus.serialization => SerializationException(
+        message,
+        status,
+        gqlStatus: gqlStatus,
+      ),
     _ => DatabaseException(message, status, gqlStatus: gqlStatus),
   };
 }
@@ -118,8 +127,11 @@ String? lastGqlStatus(GrafeoBindings bindings) {
 
 /// Throw a [GrafeoException] for a failed FFI call that returned a status code.
 Never throwStatus(GrafeoBindings bindings, int statusCode) {
-  throw classifyError(statusCode, lastError(bindings),
-      gqlStatus: lastGqlStatus(bindings));
+  throw classifyError(
+    statusCode,
+    lastError(bindings),
+    gqlStatus: lastGqlStatus(bindings),
+  );
 }
 
 /// Throw a [GrafeoException] for a failed FFI call that returned null.

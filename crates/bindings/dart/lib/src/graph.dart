@@ -59,15 +59,17 @@ class GrafeoGraph implements Finalizable {
   // ===========================================================================
 
   /// Execute a GQL query in the graph.
-  QueryResult execute(String query) => withNativeStrings(
-      [query], (p) => _result(_bindings.grafeoGraphExecute(_open, p[0])));
+  QueryResult execute(String query) => withNativeStrings([
+        query,
+      ], (p) => _result(_bindings.grafeoGraphExecute(_open, p[0])));
 
   /// Execute a GQL query with parameters in the graph.
   QueryResult executeWithParams(String query, Map<String, dynamic> params) =>
       withNativeStrings(
-          [query, encodeParams(params)],
-          (p) => _result(
-              _bindings.grafeoGraphExecuteWithParams(_open, p[0], p[1])));
+        [query, encodeParams(params)],
+        (p) =>
+            _result(_bindings.grafeoGraphExecuteWithParams(_open, p[0], p[1])),
+      );
 
   /// Execute a query in the given [language] (`"gql"`, `"cypher"`, ...) with
   /// optional [params] in the graph.
@@ -77,9 +79,10 @@ class GrafeoGraph implements Finalizable {
     Map<String, dynamic>? params,
   }) =>
       withNativeStrings(
-          [language, query, params == null ? null : encodeParams(params)],
-          (p) => _result(
-              _bindings.grafeoGraphExecuteLanguage(_open, p[0], p[1], p[2])));
+        [language, query, params == null ? null : encodeParams(params)],
+        (p) => _result(
+            _bindings.grafeoGraphExecuteLanguage(_open, p[0], p[1], p[2])),
+      );
 
   // ===========================================================================
   // Nodes and edges
@@ -88,9 +91,12 @@ class GrafeoGraph implements Finalizable {
   /// Create a node with [labels] and [properties]. Returns the new node ID.
   int createNode(List<String> labels, Map<String, dynamic> properties) =>
       withNativeStrings(
-          [jsonEncode(labels), encodeParams(properties)],
-          (p) => createdId(
-              _bindings, _bindings.grafeoGraphCreateNode(_open, p[0], p[1])));
+        [jsonEncode(labels), encodeParams(properties)],
+        (p) => createdId(
+          _bindings,
+          _bindings.grafeoGraphCreateNode(_open, p[0], p[1]),
+        ),
+      );
 
   /// Create an edge from [sourceId] to [targetId]. Returns the new edge ID.
   int createEdge(
@@ -100,19 +106,25 @@ class GrafeoGraph implements Finalizable {
     Map<String, dynamic> properties,
   ) =>
       withNativeStrings(
-          [type, encodeParams(properties)],
-          (p) => createdId(
-              _bindings,
-              _bindings.grafeoGraphCreateEdge(
-                  _open, sourceId, targetId, p[0], p[1])));
+        [type, encodeParams(properties)],
+        (p) => createdId(
+          _bindings,
+          _bindings.grafeoGraphCreateEdge(
+              _open, sourceId, targetId, p[0], p[1]),
+        ),
+      );
 
   /// Get a node by [id], or null when it does not exist.
   Node? getNode(int id) => takeNodeOrNull(
-      _bindings, (out) => _bindings.grafeoGraphGetNode(_open, id, out));
+        _bindings,
+        (out) => _bindings.grafeoGraphGetNode(_open, id, out),
+      );
 
   /// Get an edge by [id], or null when it does not exist.
   Edge? getEdge(int id) => takeEdgeOrNull(
-      _bindings, (out) => _bindings.grafeoGraphGetEdge(_open, id, out));
+        _bindings,
+        (out) => _bindings.grafeoGraphGetEdge(_open, id, out),
+      );
 
   /// [GrafeoDB.getNodeEdges] in the graph.
   List<NodeEdge> getNodeEdges(
@@ -121,50 +133,74 @@ class GrafeoGraph implements Finalizable {
     List<String>? edgeTypes,
   }) =>
       nodeEdges(
-          _bindings,
-          edgeTypes,
-          (types, neighbors, edges, count) => _bindings.grafeoGraphGetNodeEdges(
-              _open, id, direction.code, types, neighbors, edges, count));
+        _bindings,
+        edgeTypes,
+        (types, neighbors, edges, count) => _bindings.grafeoGraphGetNodeEdges(
+          _open,
+          id,
+          direction.code,
+          types,
+          neighbors,
+          edges,
+          count,
+        ),
+      );
 
   /// Set a property on node [id].
   void setNodeProperty(int id, String key, dynamic value) =>
       withNativeStrings([key, encodeValue(value)], (p) {
-        final status =
-            _bindings.grafeoGraphSetNodeProperty(_open, id, p[0], p[1]);
+        final status = _bindings.grafeoGraphSetNodeProperty(
+          _open,
+          id,
+          p[0],
+          p[1],
+        );
         if (status != GrafeoStatus.ok.code) throwStatus(_bindings, status);
       });
 
   /// Set a property on edge [id].
   void setEdgeProperty(int id, String key, dynamic value) =>
       withNativeStrings([key, encodeValue(value)], (p) {
-        final status =
-            _bindings.grafeoGraphSetEdgeProperty(_open, id, p[0], p[1]);
+        final status = _bindings.grafeoGraphSetEdgeProperty(
+          _open,
+          id,
+          p[0],
+          p[1],
+        );
         if (status != GrafeoStatus.ok.code) throwStatus(_bindings, status);
       });
 
   /// Remove a property from node [id]; whether it was there.
   bool removeNodeProperty(int id, String key) => withNativeStrings(
-      [key],
-      (p) => flag(
-          _bindings, _bindings.grafeoGraphRemoveNodeProperty(_open, id, p[0])));
+        [key],
+        (p) => flag(
+          _bindings,
+          _bindings.grafeoGraphRemoveNodeProperty(_open, id, p[0]),
+        ),
+      );
 
   /// Remove a property from edge [id]; whether it was there.
   bool removeEdgeProperty(int id, String key) => withNativeStrings(
-      [key],
-      (p) => flag(
-          _bindings, _bindings.grafeoGraphRemoveEdgeProperty(_open, id, p[0])));
+        [key],
+        (p) => flag(
+          _bindings,
+          _bindings.grafeoGraphRemoveEdgeProperty(_open, id, p[0]),
+        ),
+      );
 
   /// Add a label to node [id]; false if it had it.
   bool addNodeLabel(int id, String label) => withNativeStrings(
-      [label],
-      (p) =>
-          flag(_bindings, _bindings.grafeoGraphAddNodeLabel(_open, id, p[0])));
+        [label],
+        (p) =>
+            flag(_bindings, _bindings.grafeoGraphAddNodeLabel(_open, id, p[0])),
+      );
 
   /// Remove a label from node [id]; whether it had it.
   bool removeNodeLabel(int id, String label) => withNativeStrings(
-      [label],
-      (p) => flag(
-          _bindings, _bindings.grafeoGraphRemoveNodeLabel(_open, id, p[0])));
+        [label],
+        (p) => flag(
+            _bindings, _bindings.grafeoGraphRemoveNodeLabel(_open, id, p[0])),
+      );
 
   /// Delete node [id] (one with edges throws); whether it existed.
   bool deleteNode(int id) =>
@@ -189,19 +225,21 @@ class GrafeoGraph implements Finalizable {
     List<Map<String, dynamic>> rows,
   ) =>
       batchNodes(
-          _bindings,
-          labels,
-          rows,
-          (labels, rows, ids, count) =>
-              _bindings.grafeoGraphBatchCreateNodesWithProps(
-                  _open, labels, rows, ids, count));
+        _bindings,
+        labels,
+        rows,
+        (labels, rows, ids, count) =>
+            _bindings.grafeoGraphBatchCreateNodesWithProps(
+                _open, labels, rows, ids, count),
+      );
 
   /// [GrafeoDB.batchCreateEdges] in the graph.
   List<int> batchCreateEdges(List<BatchEdge> edges) => batchEdges(
-      _bindings,
-      edges,
-      (edges, ids, count) =>
-          _bindings.grafeoGraphBatchCreateEdges(_open, edges, ids, count));
+        _bindings,
+        edges,
+        (edges, ids, count) =>
+            _bindings.grafeoGraphBatchCreateEdges(_open, edges, ids, count),
+      );
 
   /// [GrafeoDB.upsertNodes] in the graph.
   UpsertSummary upsertNodes(
@@ -211,13 +249,14 @@ class GrafeoGraph implements Finalizable {
     bool replace = false,
   }) =>
       native.upsertNodes(
-          _bindings,
-          labels,
-          rows,
-          key,
-          replace,
-          (labels, rows, options, json) => _bindings.grafeoGraphUpsertNodes(
-              _open, labels, rows, options, json));
+        _bindings,
+        labels,
+        rows,
+        key,
+        replace,
+        (labels, rows, options, json) => _bindings.grafeoGraphUpsertNodes(
+            _open, labels, rows, options, json),
+      );
 
   /// [GrafeoDB.upsertEdges] in the graph.
   UpsertSummary upsertEdges(
@@ -231,17 +270,18 @@ class GrafeoGraph implements Finalizable {
     bool replace = false,
   }) =>
       native.upsertEdges(
-          _bindings,
-          edgeType,
-          rows,
-          {
-            'key': key,
-            'endpoint_key': endpointKey,
-            'endpoint_labels': endpointLabels,
-            'src_field': sourceField,
-            'dst_field': targetField,
-            'replace': replace,
-          },
-          (edgeType, rows, options, json) => _bindings.grafeoGraphUpsertEdges(
-              _open, edgeType, rows, options, json));
+        _bindings,
+        edgeType,
+        rows,
+        {
+          'key': key,
+          'endpoint_key': endpointKey,
+          'endpoint_labels': endpointLabels,
+          'src_field': sourceField,
+          'dst_field': targetField,
+          'replace': replace,
+        },
+        (edgeType, rows, options, json) => _bindings.grafeoGraphUpsertEdges(
+            _open, edgeType, rows, options, json),
+      );
 }

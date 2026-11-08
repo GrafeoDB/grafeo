@@ -370,11 +370,29 @@ impl PyGrafeoDB {
         .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("Arrow export failed: {e}")))
     }
 
-    /// Warns of the types whose rules no longer reach graphs not bound to their graph type,
-    /// which a build without a log would otherwise not tell (see
-    /// `GrafeoDB::graph_type_scope_warnings`).
-    fn warning_of_graph_type_scope(self, py: Python<'_>) -> PyResult<Self> {
-        let warnings = self.inner.read().graph_type_scope_warnings();
+    /// Warns of what the open found, each a `UserWarning` led by its code, which a build
+    /// without a log would otherwise not tell (see `GrafeoDB::open_warnings`):
+    /// MEMORY_LIMIT_PASSED for data past the memory limit, MEMORY_DETECTION_FALLBACK, and
+    /// GRAPH_TYPE_NOT_BOUND for the types whose rules no longer reach graphs not bound to their
+    /// graph type (also for an open the engine does not list them for).
+    fn warning_of_open(self, py: Python<'_>) -> PyResult<Self> {
+        let warnings = {
+            let db = self.inner.read();
+            let mut warnings: Vec<(String, String)> = db
+                .open_warnings()
+                .iter()
+                .map(|warning| (warning.code().to_string(), warning.to_string()))
+                .collect();
+            for warning in db.graph_type_scope_warnings() {
+                if !warnings
+                    .iter()
+                    .any(|(code, message)| *code == warning.code && *message == warning.message)
+                {
+                    warnings.push((warning.code, warning.message));
+                }
+            }
+            warnings
+        };
         warn_of(py, warnings)?;
         Ok(self)
     }
@@ -468,14 +486,11 @@ fn timeout_seconds(seconds: f64, what: &str) -> Option<PyResult<std::time::Durat
     )
 }
 
-/// Raises each of `warnings` as a `UserWarning`, its code leading the message, so a filter
-/// can name it.
-fn warn_of(
-    py: Python<'_>,
-    warnings: impl IntoIterator<Item = grafeo_engine::admin::ValidationWarning>,
-) -> PyResult<()> {
-    for warning in warnings {
-        let message = std::ffi::CString::new(format!("{}: {}", warning.code, warning.message))
+/// Raises each of `warnings`, a code and a message, as a `UserWarning`, its code leading the
+/// message, so a filter can name it.
+fn warn_of(py: Python<'_>, warnings: impl IntoIterator<Item = (String, String)>) -> PyResult<()> {
+    for (code, text) in warnings {
+        let message = std::ffi::CString::new(format!("{code}: {text}"))
             .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
         PyErr::warn(
             py,
@@ -535,6 +550,22 @@ impl PyGrafeoDB {
     /// on in a new one: 64 MiB by default, from 1 MiB to 1 GiB. A checkpoint
     /// removes whole files and keeps one segment of free disk space for the
     /// WAL. For this open only.
+    ///
+    /// memory_limit is how many bytes the database may hold: by default 75%
+    /// of the memory the process may use (a container's limit included).
+    /// A write past it raises GrafeoError GRAFEO-S001 and changes nothing;
+    /// reads keep working. A file opened over it opens, reads, and warns
+    /// with MEMORY_LIMIT_PASSED. A database file stores an explicit limit.
+    ///
+    /// query_memory_limit is how many bytes one statement's sorts, joins and
+    /// aggregates may hold, never more than memory_limit (its default). Past
+    /// it they spill to disk where they can, else the statement raises
+    /// GRAFEO-S001. For this open only.
+    ///
+    /// spill_limit is how many bytes may spill to disk (0: nothing spills),
+    /// half the spill volume's free space by default; unlimited_spill=True
+    /// lifts it (and wins over spill_limit). An in-memory database spills
+    /// nothing. For this open only.
     #[new]
     #[pyo3(signature = (
         path=None,
@@ -547,10 +578,15 @@ impl PyGrafeoDB {
         query_timeout=default_query_timeout(),
         wal_retention_limit=None,
         checkpoint_wal_size=Some(grafeo_engine::config::DEFAULT_CHECKPOINT_WAL_SIZE),
-        wal_segment_size=None
+        wal_segment_size=None,
+        memory_limit=None,
+        query_memory_limit=None,
+        spill_limit=None,
+        unlimited_spill=false
     ))]
     #[allow(
         clippy::too_many_arguments,
+        clippy::fn_params_excessive_bools,
         reason = "each argument is one keyword option of the Python constructor"
     )]
     fn new(
@@ -564,6 +600,10 @@ impl PyGrafeoDB {
         wal_retention_limit: Option<u64>,
         checkpoint_wal_size: Option<u64>,
         wal_segment_size: Option<u64>,
+        memory_limit: Option<usize>,
+        query_memory_limit: Option<usize>,
+        spill_limit: Option<u64>,
+        unlimited_spill: bool,
         py: Python<'_>,
     ) -> PyResult<Self> {
         let mut config = if let Some(p) = path {
@@ -592,6 +632,17 @@ impl PyGrafeoDB {
         if let Some(bytes) = wal_segment_size {
             config = config.with_wal_segment_size(bytes);
         }
+        if let Some(bytes) = memory_limit {
+            config = config.with_memory_limit(bytes);
+        }
+        if let Some(bytes) = query_memory_limit {
+            config = config.with_query_memory_limit(bytes);
+        }
+        if unlimited_spill {
+            config = config.with_unlimited_spill();
+        } else if let Some(bytes) = spill_limit {
+            config = config.with_spill_limit(bytes);
+        }
         config = match query_timeout.map(|seconds| timeout_seconds(seconds, "query_timeout")) {
             Some(Some(timeout)) => config.with_query_timeout(timeout?),
             Some(None) | None => config.without_query_timeout(),
@@ -610,7 +661,7 @@ impl PyGrafeoDB {
             }
         }
 
-        Self::open_with(py, config)?.warning_of_graph_type_scope(py)
+        Self::open_with(py, config)?.warning_of_open(py)
     }
 
     /// Returns the current storage tier of every registered section.
@@ -656,7 +707,7 @@ impl PyGrafeoDB {
     /// Open an existing database.
     #[staticmethod]
     fn open(path: String, py: Python<'_>) -> PyResult<Self> {
-        Self::open_with(py, Config::persistent(path))?.warning_of_graph_type_scope(py)
+        Self::open_with(py, Config::persistent(path))?.warning_of_open(py)
     }
 
     /// Open an existing database in read-only mode.
@@ -675,7 +726,7 @@ impl PyGrafeoDB {
     ///     result = db.execute("MATCH (n) RETURN n LIMIT 10")
     #[staticmethod]
     fn open_read_only(path: String, py: Python<'_>) -> PyResult<Self> {
-        Self::open_with(py, Config::read_only(path))?.warning_of_graph_type_scope(py)
+        Self::open_with(py, Config::read_only(path))?.warning_of_open(py)
     }
 
     /// Runs a GQL query and returns the results.
@@ -2905,12 +2956,14 @@ impl PyGrafeoDB {
 
     /// Returns a hierarchical memory usage breakdown.
     ///
-    /// Walks all internal structures (store, indexes, MVCC chains, caches,
-    /// string pools, buffer manager) and returns estimated heap bytes.
+    /// The bytes the database holds, as its accounts count them as each
+    /// write grows them, and the limits it holds to.
     ///
     /// Returns:
-    ///     dict with keys: total_bytes, store, indexes, mvcc, caches,
-    ///     string_pool, buffer_manager (each a nested dict)
+    ///     dict with keys: total_bytes, limit_bytes (the memory limit),
+    ///     query_limit_bytes (what one statement may hold), store, indexes,
+    ///     mvcc, caches, string_pool, buffer_manager, rdf, cdc and spill
+    ///     (each a nested dict; spill's limit_bytes is None for no limit)
     ///
     /// Example:
     ///     usage = db.memory_usage()
@@ -3025,14 +3078,45 @@ impl PyGrafeoDB {
             usage.buffer_manager.spill_staging_bytes,
         )?;
 
+        buffer_mgr.set_item("hard_limit_bytes", usage.buffer_manager.hard_limit_bytes)?;
+
+        let rdf = pyo3::types::PyDict::new(py);
+        rdf.set_item("total_bytes", usage.rdf.total_bytes)?;
+        rdf.set_item("triple_count", usage.rdf.triple_count)?;
+        rdf.set_item(
+            "triples_and_indexes_bytes",
+            usage.rdf.triples_and_indexes_bytes,
+        )?;
+        rdf.set_item("term_dictionary_bytes", usage.rdf.term_dictionary_bytes)?;
+        rdf.set_item("ring_index_bytes", usage.rdf.ring_index_bytes)?;
+        rdf.set_item("named_graph_count", usage.rdf.named_graph_count)?;
+
+        let cdc = pyo3::types::PyDict::new(py);
+        cdc.set_item("total_bytes", usage.cdc.total_bytes)?;
+        cdc.set_item("entity_count", usage.cdc.entity_count)?;
+        cdc.set_item("event_count", usage.cdc.event_count)?;
+        cdc.set_item("granted_bytes", usage.cdc.granted_bytes)?;
+
+        let spill = pyo3::types::PyDict::new(py);
+        spill.set_item("total_bytes", usage.spill.total_bytes)?;
+        spill.set_item("limit_bytes", usage.spill.limit_bytes)?;
+        spill.set_item("sort_bytes", usage.spill.sort_bytes)?;
+        spill.set_item("aggregate_bytes", usage.spill.aggregate_bytes)?;
+        spill.set_item("vector_column_bytes", usage.spill.vector_column_bytes)?;
+
         let dict = pyo3::types::PyDict::new(py);
         dict.set_item("total_bytes", usage.total_bytes)?;
+        dict.set_item("limit_bytes", usage.limit_bytes)?;
+        dict.set_item("query_limit_bytes", usage.query_limit_bytes)?;
         dict.set_item("store", store)?;
         dict.set_item("indexes", indexes)?;
         dict.set_item("mvcc", mvcc)?;
         dict.set_item("caches", caches)?;
         dict.set_item("string_pool", string_pool)?;
         dict.set_item("buffer_manager", buffer_mgr)?;
+        dict.set_item("rdf", rdf)?;
+        dict.set_item("cdc", cdc)?;
+        dict.set_item("spill", spill)?;
 
         Ok(dict.into())
     }
@@ -3208,7 +3292,8 @@ impl PyGrafeoDB {
             result
                 .warnings
                 .into_iter()
-                .filter(|warning| warning.code == "GRAPH_TYPE_NOT_BOUND"),
+                .filter(|warning| warning.code == "GRAPH_TYPE_NOT_BOUND")
+                .map(|warning| (warning.code, warning.message)),
         )?;
 
         let errors = pyo3::types::PyList::empty(py);
@@ -3458,7 +3543,7 @@ impl PyGrafeoDB {
         Self {
             inner: Arc::new(RwLock::new(db)),
         }
-        .warning_of_graph_type_scope(py)
+        .warning_of_open(py)
     }
 
     /// Returns true if this database is backed by a file (persistent).

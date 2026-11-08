@@ -57,6 +57,9 @@ pub struct MemoryUsage {
     /// refused with `GRAFEO-S001`.
     #[serde(default)]
     pub limit_bytes: usize,
+    /// LOCAL SHIM for patch 9: the effective query memory limit.
+    #[serde(default)]
+    pub query_limit_bytes: usize,
     /// Graph storage (nodes, edges, properties).
     pub store: StoreMemory,
     /// Index structures.

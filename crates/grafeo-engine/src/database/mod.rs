@@ -2358,6 +2358,8 @@ impl GrafeoDB {
             buffer_manager: Some(Arc::clone(&self.buffer_manager)),
             #[cfg(feature = "spill")]
             spill_account: self.spill_account.clone(),
+            #[cfg(feature = "spill")]
+            query_memory_limit: self.config.query_memory_limit(),
             commit_counter: Arc::clone(&self.commit_counter),
             gc_interval: self.config.gc_interval(),
             read_only: self.read_only || force_read_only,
@@ -2505,6 +2507,41 @@ impl GrafeoDB {
     #[must_use]
     pub fn config(&self) -> &Config {
         &self.config
+    }
+
+    /// Creates a per-query `OperatorMemoryContext` for one statement: the
+    /// buffer manager, the open's spill account when the open has a spill
+    /// path, and the query memory limit the statement's operators are bounded
+    /// by (patch 9, #751).
+    #[cfg(feature = "spill")]
+    pub(crate) fn operator_memory_context(
+        &self,
+    ) -> Option<grafeo_core::execution::OperatorMemoryContext> {
+        static NEXT_QUERY_DIR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let bm = &self.buffer_manager;
+        let query_limit = self
+            .config
+            .query_memory_limit()
+            .map_or_else(|| bm.budget(), |query| query.min(bm.budget()));
+        let spill_manager = bm.config().spill_path.as_ref().and_then(|spill_path| {
+            let query_id = NEXT_QUERY_DIR.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let mut manager = grafeo_core::execution::SpillManager::new(
+                spill_path.join(format!("query_{query_id}")),
+            )
+            .ok()?
+            .with_owned_dir();
+            if let Some(account) = &self.spill_account {
+                manager = manager.with_account(std::sync::Arc::clone(account));
+            }
+            Some(std::sync::Arc::new(manager))
+        });
+        Some(
+            grafeo_core::execution::OperatorMemoryContext::new(
+                std::sync::Arc::clone(bm),
+                spill_manager,
+            )
+            .with_query_limit(query_limit),
+        )
     }
 
     /// The deadline of a statement that starts now under the database's query timeout

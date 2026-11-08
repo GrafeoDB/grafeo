@@ -57,7 +57,9 @@ pub struct MemoryUsage {
     /// refused with `GRAFEO-S001`.
     #[serde(default)]
     pub limit_bytes: usize,
-    /// LOCAL SHIM for patch 9: the effective query memory limit.
+    /// What one statement's operators may hold, in bytes: the query memory
+    /// limit set ([`Config::with_query_memory_limit`](crate::config::Config::with_query_memory_limit)),
+    /// never above `limit_bytes`; the global limit when none is set.
     #[serde(default)]
     pub query_limit_bytes: usize,
     /// Graph storage (nodes, edges, properties).

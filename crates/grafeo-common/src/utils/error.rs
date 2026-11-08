@@ -822,7 +822,7 @@ impl fmt::Display for LimitRefusal {
             } => write!(
                 f,
                 "spilling {requested} more bytes would leave {} bytes free on {}, and the \
-                 database needs {needed} for its next checkpoint",
+                 database's checkpoint room needs {needed} bytes for its next checkpoint",
                 free.saturating_sub(*requested),
                 volume.display()
             ),

@@ -1757,6 +1757,8 @@ pub(super) fn read_first_after_a_write(
     input: &LogicalOperator,
 ) -> Box<dyn Operator> {
     if super::after_write::writes_pending(input) {
+        #[cfg(feature = "spill")]
+        let _ = grafeo_core::execution::capture_operator_memory(false);
         Box::new(EagerOperator::new(op))
     } else {
         op
@@ -1817,6 +1819,8 @@ fn read_before_writing(op: Box<dyn Operator>, input: &LogicalOperator) -> Box<dy
     if super::after_write::read_in_one_pass(input) {
         op
     } else {
+        #[cfg(feature = "spill")]
+        let _ = grafeo_core::execution::capture_operator_memory(false);
         Box::new(EagerOperator::new(op))
     }
 }

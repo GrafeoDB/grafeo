@@ -22,17 +22,19 @@ impl Session {
             .buffer_manager
             .as_ref()
             .map_or(budget, |bm| budget.min(bm.available()));
-        crate::query::planner::rdf::RdfPlanner::new(Arc::clone(&self.rdf_store))
+        let planner = crate::query::planner::rdf::RdfPlanner::new(Arc::clone(&self.rdf_store))
             .with_shuffle_unordered(self.plan_options.shuffle_unordered)
             .with_writer(self.rdf_writer())
             .with_path_search_budget(budget)
             .with_deadline(deadline)
-            .with_warnings(self.statement_warnings())
-            .with_exists_run_once(
-                self.plan_options
-                    .rules
-                    .has(crate::query::optimizer::PlannerRule::ExistsRunOnce),
-            )
+            .with_warnings(self.statement_warnings());
+        #[cfg(feature = "spill")]
+        let planner = planner.with_operator_memory(self.make_operator_memory_context());
+        planner.with_exists_run_once(
+            self.plan_options
+                .rules
+                .has(crate::query::optimizer::PlannerRule::ExistsRunOnce),
+        )
     }
 
     /// Executes a GraphQL query against the RDF store.

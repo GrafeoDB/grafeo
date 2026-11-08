@@ -47,9 +47,12 @@ pub use collector::{
     Collector, CollectorStats, CountCollector, LimitCollector, MaterializeCollector,
     PartitionCollector, StatsCollector,
 };
-#[cfg(feature = "spill")]
-pub use memory::OperatorMemoryContext;
 pub use memory::{ExecutionMemoryContext, ExecutionMemoryContextBuilder};
+#[cfg(feature = "spill")]
+pub use memory::{
+    MemoryScope, OperatorMemoryContext, capture as capture_operator_memory,
+    current as current_operator_memory, enter as enter_operator_memory,
+};
 #[cfg(feature = "parallel")]
 pub use parallel::{
     CloneableOperatorFactory, MorselScheduler, ParallelPipeline, ParallelPipelineConfig,

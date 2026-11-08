@@ -92,7 +92,8 @@ pub fn convert_to_pipeline_with_memory(
     root: Box<dyn Operator>,
     memory_ctx: Option<super::memory::OperatorMemoryContext>,
 ) -> (Box<dyn Operator>, Vec<Box<dyn PushOperator>>) {
-    let Some(ctx) = memory_ctx else {
+    // The statement's context, passed or ambient from its planning (patch 9).
+    let Some(ctx) = memory_ctx.or_else(super::memory::current) else {
         return convert_to_pipeline(root);
     };
     let mut push_ops: Vec<Box<dyn PushOperator>> = Vec::new();
@@ -433,7 +434,7 @@ mod tests {
         let temp_dir = tempfile::TempDir::new().unwrap();
         let context = OperatorMemoryContext::new(
             BufferManager::with_budget(1024 * 1024),
-            Arc::new(SpillManager::new(temp_dir.path()).unwrap()),
+            Some(Arc::new(SpillManager::new(temp_dir.path()).unwrap())),
         );
         let (source, push_ops) =
             convert_to_pipeline_with_memory(nodes_sorted_by_a_dropped_key(), Some(context));

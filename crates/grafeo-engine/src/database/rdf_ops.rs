@@ -100,6 +100,8 @@ impl GrafeoDB {
             let planner = RdfPlanner::new(Arc::clone(&self.rdf_store))
                 .with_shuffle_unordered(self.config.shuffle_unordered())
                 .with_path_search_budget(path_budget);
+            #[cfg(feature = "spill")]
+            let planner = planner.with_operator_memory(self.operator_memory_context());
             let (_, entries) = planner.plan_profiled(&optimized_plan)?;
             use crate::query::processor::physical_explain_result;
             return physical_explain_result(&optimized_plan, entries);

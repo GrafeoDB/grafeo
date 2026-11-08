@@ -395,6 +395,9 @@ pub(crate) struct SessionConfig {
     /// The open's spill account, which bounds the queries' spill files.
     #[cfg(feature = "spill")]
     pub spill_account: Option<Arc<grafeo_core::execution::spill::SpillAccount>>,
+    /// What one statement's operators may hold (`Config::with_query_memory_limit`).
+    #[cfg(feature = "spill")]
+    pub query_memory_limit: Option<usize>,
     pub commit_counter: Arc<AtomicUsize>,
     pub gc_interval: usize,
     /// When true, the session permanently blocks all mutations.
@@ -471,6 +474,9 @@ pub struct Session {
     /// The open's spill account, which bounds the queries' spill files.
     #[cfg(feature = "spill")]
     spill_account: Option<Arc<grafeo_core::execution::spill::SpillAccount>>,
+    /// What one statement's operators may hold, per open (None: the global limit).
+    #[cfg(feature = "spill")]
+    query_memory_limit: Option<usize>,
     /// Shared commit counter for triggering auto-GC.
     commit_counter: Arc<AtomicUsize>,
     /// GC every N commits (0 = disabled).
@@ -607,6 +613,8 @@ impl Session {
             buffer_manager: cfg.buffer_manager,
             #[cfg(feature = "spill")]
             spill_account: cfg.spill_account,
+            #[cfg(feature = "spill")]
+            query_memory_limit: cfg.query_memory_limit,
             commit_counter: cfg.commit_counter,
             gc_interval: cfg.gc_interval,
             #[cfg(feature = "wal")]
@@ -796,6 +804,8 @@ impl Session {
             buffer_manager: cfg.buffer_manager,
             #[cfg(feature = "spill")]
             spill_account: cfg.spill_account,
+            #[cfg(feature = "spill")]
+            query_memory_limit: cfg.query_memory_limit,
             commit_counter: cfg.commit_counter,
             gc_interval: cfg.gc_interval,
             #[cfg(feature = "wal")]
@@ -6652,12 +6662,15 @@ impl Session {
             .with_warnings(planner.warnings())
     }
 
-    /// Creates a per-query `OperatorMemoryContext` for memory-aware spilling.
+    /// Creates a per-query `OperatorMemoryContext`: the buffer manager, the
+    /// open's spill account when the open has a spill path (a per-query
+    /// subdirectory), and the query memory limit the statement's operators
+    /// are bounded by (the configured one, never above the global limit).
     ///
-    /// Returns `None` if the buffer manager is not configured or has no spill path,
-    /// in which case operators will use row-count fallback thresholds.
+    /// Returns `None` only when the database has no buffer manager, in which
+    /// case its operators run without a budget.
     #[cfg(feature = "spill")]
-    fn make_operator_memory_context(
+    pub(crate) fn make_operator_memory_context(
         &self,
     ) -> Option<grafeo_core::execution::OperatorMemoryContext> {
         // Numbers the per-query spill directories. Not the commit counter: that
@@ -6665,23 +6678,31 @@ impl Session {
         static NEXT_QUERY_DIR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
         let bm = self.buffer_manager.as_ref()?;
-        let spill_path = bm.config().spill_path.as_ref()?;
+        let query_limit = self
+            .query_memory_limit
+            .map_or_else(|| bm.budget(), |query| query.min(bm.budget()));
         // Per-query isolation: a unique subdirectory, created only if the
-        // query spills (see `SpillManager::create_file`).
-        let query_id = NEXT_QUERY_DIR.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let query_dir = spill_path.join(format!("query_{query_id}"));
-        let mut manager = grafeo_core::execution::SpillManager::new(&query_dir)
-            .ok()?
-            .with_owned_dir();
-        // The open's spill account bounds the query's files with the rest.
-        if let Some(account) = &self.spill_account {
-            manager = manager.with_account(std::sync::Arc::clone(account));
-        }
-        let sm = std::sync::Arc::new(manager);
-        Some(grafeo_core::execution::OperatorMemoryContext::new(
-            std::sync::Arc::clone(bm),
-            sm,
-        ))
+        // query spills (see `SpillManager::create_file`). No spill path: no
+        // manager, and the operators cannot spill.
+        let spill_manager = bm.config().spill_path.as_ref().and_then(|spill_path| {
+            let query_id = NEXT_QUERY_DIR.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let query_dir = spill_path.join(format!("query_{query_id}"));
+            let mut manager = grafeo_core::execution::SpillManager::new(&query_dir)
+                .ok()?
+                .with_owned_dir();
+            // The open's spill account bounds the query's files with the rest.
+            if let Some(account) = &self.spill_account {
+                manager = manager.with_account(std::sync::Arc::clone(account));
+            }
+            Some(std::sync::Arc::new(manager))
+        });
+        Some(
+            grafeo_core::execution::OperatorMemoryContext::new(
+                std::sync::Arc::clone(bm),
+                spill_manager,
+            )
+            .with_query_limit(query_limit),
+        )
     }
 
     /// Records query metrics for any language.
@@ -6859,7 +6880,10 @@ impl Session {
         let (viewing_epoch, transaction_id, _historical) = self.statement_epoch();
         let mut planning = self.statement_planning(viewing_epoch, transaction_id, false, language);
         planning.session.plan_only = true;
-        drop(planning.planner(Arc::clone(active))?.plan(plan)?);
+        let planner = planning.planner(Arc::clone(active))?;
+        #[cfg(feature = "spill")]
+        let planner = planner.with_operator_memory(self.make_operator_memory_context());
+        drop(planner.plan(plan)?);
         Ok(())
     }
 
@@ -6954,8 +6978,12 @@ impl Session {
         read_only: bool,
         language: grafeo_common::types::StatementLanguage,
     ) -> Result<crate::query::Planner> {
-        self.statement_planning(viewing_epoch, transaction_id, read_only, language)
-            .planner(store)
+        let planner = self
+            .statement_planning(viewing_epoch, transaction_id, read_only, language)
+            .planner(store)?;
+        #[cfg(feature = "spill")]
+        let planner = planner.with_operator_memory(self.make_operator_memory_context());
+        Ok(planner)
     }
 
     /// How the planner of the statement being run is built (see

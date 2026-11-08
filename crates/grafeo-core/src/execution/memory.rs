@@ -1,6 +1,8 @@
 //! Execution memory context for memory-aware query execution.
 
 use grafeo_common::memory::buffer::{BufferManager, MemoryGrant, MemoryRegion, PressureLevel};
+use grafeo_common::utils::error::{Error, LimitBound};
+use std::cell::RefCell;
 use std::sync::Arc;
 
 /// Default chunk size for execution buffers.
@@ -173,8 +175,12 @@ impl ExecutionMemoryContextBuilder {
 pub struct OperatorMemoryContext {
     /// The buffer manager for pressure queries and consumer registration.
     buffer_manager: Arc<BufferManager>,
-    /// Per-query spill manager for creating spill files.
-    spill_manager: Arc<super::spill::SpillManager>,
+    /// Per-query spill manager for creating spill files (`None`: this open
+    /// has no spill path, so its operators cannot spill).
+    spill_manager: Option<Arc<super::spill::SpillManager>>,
+    /// What one statement's operators may hold: the query memory limit, never
+    /// above the buffer manager's budget.
+    query_limit: usize,
 }
 
 #[cfg(feature = "spill")]
@@ -183,12 +189,58 @@ impl OperatorMemoryContext {
     #[must_use]
     pub fn new(
         buffer_manager: Arc<BufferManager>,
-        spill_manager: Arc<super::spill::SpillManager>,
+        spill_manager: Option<Arc<super::spill::SpillManager>>,
     ) -> Self {
+        let query_limit = buffer_manager.budget();
         Self {
             buffer_manager,
             spill_manager,
+            query_limit,
         }
+    }
+
+    /// Sets the query memory limit this context bounds its operators by.
+    #[must_use]
+    pub fn with_query_limit(mut self, limit: usize) -> Self {
+        self.query_limit = limit.min(self.buffer_manager.budget());
+        self
+    }
+
+    /// The query memory limit: what one statement's operators may hold.
+    #[must_use]
+    pub fn query_limit(&self) -> usize {
+        self.query_limit
+    }
+
+    /// Grows `grant` to cover `counted` bytes, bounded by the query memory
+    /// limit: over it the refusal names the limit and its setting. The grant
+    /// itself stays under the buffer manager's budget.
+    ///
+    /// # Errors
+    ///
+    /// [`LimitBound::QueryMemoryLimit`] when `counted` passes the query
+    /// limit, or the buffer manager's refusal when the budget itself is out.
+    pub fn grow(&self, grant: &mut Option<MemoryGrant>, counted: usize) -> Result<(), Error> {
+        if counted > self.query_limit {
+            return Err(self
+                .buffer_manager
+                .refusal(LimitBound::QueryMemoryLimit, counted)
+                .into());
+        }
+        let step = self.buffer_manager.grant_step();
+        let wanted = counted.checked_next_multiple_of(step).unwrap_or(usize::MAX);
+        let held = grant.as_ref().map_or(0, MemoryGrant::size);
+        if held < wanted {
+            let grant = grant.get_or_insert_with(|| {
+                self.buffer_manager
+                    .empty_grant(MemoryRegion::ExecutionBuffers)
+            });
+            if !grant.try_grow(wanted - held) {
+                let refusal = self.buffer_manager.refusal(LimitBound::MemoryLimit, wanted);
+                return Err(refusal.into());
+            }
+        }
+        Ok(())
     }
 
     /// Returns the current pressure level.
@@ -222,10 +274,65 @@ impl OperatorMemoryContext {
         &self.buffer_manager
     }
 
-    /// Returns a reference to the spill manager.
+    /// Returns the spill manager, when this open has a spill path.
     #[must_use]
-    pub fn spill_manager(&self) -> &Arc<super::spill::SpillManager> {
-        &self.spill_manager
+    pub fn spill_manager(&self) -> Option<&Arc<super::spill::SpillManager>> {
+        self.spill_manager.as_ref()
+    }
+}
+
+#[cfg(feature = "spill")]
+thread_local! {
+    /// The operator memory context of the statement this thread plans and
+    /// converts, if it has one (see [`enter`]).
+    static OPERATOR_MEMORY: RefCell<Option<OperatorMemoryContext>> = const { RefCell::new(None) };
+}
+
+/// Sets the running statement's operator memory context on this thread until
+/// the returned scope drops, which restores the one before. Operators built
+/// while the scope lives capture it at construction (see [`current`]).
+#[cfg(feature = "spill")]
+pub fn enter(ctx: OperatorMemoryContext) -> MemoryScope {
+    let previous = OPERATOR_MEMORY.with(|cell| cell.replace(Some(ctx)));
+    MemoryScope { previous }
+}
+
+/// The running statement's operator memory context on this thread, for an
+/// operator built while its statement is planned (see [`enter`]).
+#[cfg(feature = "spill")]
+#[must_use]
+pub fn current() -> Option<OperatorMemoryContext> {
+    OPERATOR_MEMORY.with(|cell| cell.borrow().clone())
+}
+
+/// What an operator built now captures: the ambient scope's context (the
+/// statement being planned and converted), or `None` when the site passes the
+/// explicit unbudgeted marker (`unbudgeted`) because it really has no
+/// statement (the dead `QueryProcessor` entry point, deleted in 0.6.3). In
+/// debug builds a materializing operator built with neither fails loudly
+/// instead of silently getting no budget (patch 9, #751).
+#[cfg(feature = "spill")]
+pub fn capture(unbudgeted: bool) -> Option<OperatorMemoryContext> {
+    let current = current();
+    debug_assert!(
+        unbudgeted || current.is_some(),
+        "a materializing operator built outside a statement's planning scope"
+    );
+    current
+}
+
+/// The operator memory context [`enter`] set, until it drops.
+#[cfg(feature = "spill")]
+#[must_use = "the context holds only while the scope lives"]
+pub struct MemoryScope {
+    /// The context before [`enter`], restored on drop.
+    previous: Option<OperatorMemoryContext>,
+}
+
+#[cfg(feature = "spill")]
+impl Drop for MemoryScope {
+    fn drop(&mut self) {
+        OPERATOR_MEMORY.with(|cell| cell.replace(self.previous.take()));
     }
 }
 

@@ -143,6 +143,10 @@ pub struct RdfPlanner {
     exists_run_once: bool,
     /// The routes of the `EXISTS` tests of the operator being planned, which its PROFILE line names.
     exists_routes: std::cell::RefCell<Vec<&'static str>>,
+    /// The statement's operator memory context, set as the ambient scope while
+    /// this planner plans and converts one statement (patch 9, #751).
+    #[cfg(feature = "spill")]
+    operator_memory: Option<grafeo_core::execution::OperatorMemoryContext>,
 }
 
 impl RdfPlanner {
@@ -169,6 +173,11 @@ impl RdfPlanner {
             row: None,
             exists_run_once: true,
             exists_routes: std::cell::RefCell::new(Vec::new()),
+            #[cfg(feature = "spill")]
+            operator_memory: Some(grafeo_core::execution::OperatorMemoryContext::new(
+                grafeo_common::memory::buffer::BufferManager::with_budget(1 << 40),
+                None,
+            )),
         }
     }
 
@@ -193,6 +202,11 @@ impl RdfPlanner {
             row: Some(row),
             exists_run_once: false,
             exists_routes: std::cell::RefCell::new(Vec::new()),
+            #[cfg(feature = "spill")]
+            operator_memory: Some(grafeo_core::execution::OperatorMemoryContext::new(
+                grafeo_common::memory::buffer::BufferManager::with_budget(1 << 40),
+                None,
+            )),
         }
     }
 
@@ -300,6 +314,18 @@ impl RdfPlanner {
         self
     }
 
+    /// Sets the statement's operator memory context, entered as the ambient
+    /// scope while this planner plans one statement (patch 9, #751).
+    #[cfg(feature = "spill")]
+    #[must_use]
+    pub fn with_operator_memory(
+        mut self,
+        ctx: Option<grafeo_core::execution::OperatorMemoryContext>,
+    ) -> Self {
+        self.operator_memory = ctx;
+        self
+    }
+
     /// Sets the memory one native property-path traversal may retain.
     #[must_use]
     pub fn with_path_search_budget(mut self, bytes: usize) -> Self {
@@ -346,6 +372,11 @@ impl RdfPlanner {
     ///
     /// Returns an error if planning fails.
     pub fn plan(&self, logical_plan: &LogicalPlan) -> Result<PhysicalPlan> {
+        #[cfg(feature = "spill")]
+        let _memory_scope = self
+            .operator_memory
+            .clone()
+            .map(grafeo_core::execution::enter_operator_memory);
         self.warnings.raise_all(logical_plan.warnings);
         let (operator, columns, types) =
             self.without_hidden_columns(self.plan_operator(&logical_plan.root)?);
@@ -375,6 +406,11 @@ impl RdfPlanner {
     ) -> Result<(PhysicalPlan, Vec<crate::query::profile::ProfileEntry>)> {
         self.profiling.set(true);
         self.profile_entries.borrow_mut().clear();
+        #[cfg(feature = "spill")]
+        let _memory_scope = self
+            .operator_memory
+            .clone()
+            .map(grafeo_core::execution::enter_operator_memory);
         self.warnings.raise_all(logical_plan.warnings);
 
         let result = self.plan_operator(&logical_plan.root);

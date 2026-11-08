@@ -37,7 +37,7 @@ tests:
       - "CREATE NODE TYPE Event (begins ZONED DATETIME)"
     query: "INSERT (:Event {begins: datetime('2026-10-05T10:30:00')})"
     expect:
-      error: "property 'begins' on :Event expects ZONED DATETIME, got LOCAL DATETIME '2026-10-05T10:30:00'"
+      error: "property 'begins' on :Event expects ZONED DATETIME, got DATETIME '2026-10-05T10:30:00'"
       gql_status: "G2000"
 
   - name: a_zoned_datetime_is_not_a_local_one
@@ -45,7 +45,7 @@ tests:
       - "CREATE NODE TYPE Event (departs LOCAL DATETIME)"
     query: "INSERT (:Event {departs: zoned_datetime('2026-10-05T10:30:00+02:00')})"
     expect:
-      error: "property 'departs' on :Event expects LOCAL DATETIME, got ZONED DATETIME '2026-10-05T10:30:00+02:00'"
+      error: "property 'departs' on :Event expects LOCAL DATETIME, got DATETIME '2026-10-05T10:30:00+02:00'"
       gql_status: "G2000"
 
   - name: a_list_holds_its_element_type

@@ -1,7 +1,9 @@
 //! Execution memory context for memory-aware query execution.
 
 use grafeo_common::memory::buffer::{BufferManager, MemoryGrant, MemoryRegion, PressureLevel};
+#[cfg(feature = "spill")]
 use grafeo_common::utils::error::{Error, LimitBound};
+#[cfg(feature = "spill")]
 use std::cell::RefCell;
 use std::sync::Arc;
 

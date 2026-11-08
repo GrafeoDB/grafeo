@@ -488,7 +488,7 @@ pub fn read_zone_map(bytes: &[u8], codec: u8, row_count: u32) -> Result<Option<Z
     }
     let start = pos;
     read_zone_map_body(codec, bytes, &mut pos)
-        .map(Some)
+        .map(|zone_map| Some(zone_map.into_owned()))
         .map_err(|error| corrupt(start, format!("zone map: {error}")))
 }
 
@@ -1224,32 +1224,73 @@ fn checked_u8(length: usize) -> Result<u8> {
         })
 }
 
+/// A zone map read from a chunk's bytes, its string bounds borrowed from
+/// them: a decode that only moves past the zone map drops it with no
+/// allocation, and [`read_zone_map`] owns the result.
+enum ZoneMapRef<'a> {
+    Values(Value, Value),
+    Strings(StringZoneMapRef<'a>),
+}
+
+/// The string bounds of a [`ZoneMapRef`], borrowed from the chunk's bytes.
+struct StringZoneMapRef<'a> {
+    min: &'a [u8],
+    min_exact: bool,
+    max: &'a [u8],
+    max_exact: bool,
+    min_len: u32,
+    max_len: u32,
+}
+
+impl ZoneMapRef<'_> {
+    /// The owned zone map of the borrowed one.
+    fn into_owned(self) -> ZoneMap {
+        match self {
+            ZoneMapRef::Values(min, max) => ZoneMap::Values(min, max),
+            ZoneMapRef::Strings(strings) => ZoneMap::Strings(StringZoneMap {
+                min: strings.min.to_vec(),
+                min_exact: strings.min_exact,
+                max: strings.max.to_vec(),
+                max_exact: strings.max_exact,
+                min_len: strings.min_len,
+                max_len: strings.max_len,
+            }),
+        }
+    }
+}
+
 /// Reads the zone map of a `codec` chunk at `pos` in `bytes`, moving `pos`
 /// past it, refusing a bound longer than [`STRING_ZONE_PREFIX`] and unknown
-/// string zone map flags. A decode then compares its bytes with the values'.
-fn read_zone_map_body(
+/// string zone map flags. The string bounds borrow `bytes`, so a decode that
+/// only advances past the zone map allocates nothing. A checked decode then
+/// compares its bytes with the values'.
+fn read_zone_map_body<'a>(
     codec: ChunkCodec,
-    bytes: &[u8],
+    bytes: &'a [u8],
     pos: &mut usize,
-) -> std::result::Result<ZoneMap, String> {
+) -> std::result::Result<ZoneMapRef<'a>, String> {
     if codec != ChunkCodec::Dict {
         let min = decode_value(bytes, pos).map_err(|error| error.to_string())?;
         let max = decode_value(bytes, pos).map_err(|error| error.to_string())?;
-        return Ok(ZoneMap::Values(min, max));
+        return Ok(ZoneMapRef::Values(min, max));
     }
-    let mut read_bound = |bound: &str| {
+    fn bound<'a>(
+        name: &str,
+        bytes: &'a [u8],
+        pos: &mut usize,
+    ) -> std::result::Result<&'a [u8], String> {
         let length = usize::from(*bytes.get(*pos).ok_or("truncated string zone map")?);
         if length > STRING_ZONE_PREFIX {
             return Err(format!(
-                "a {bound} of {length} bytes, past {STRING_ZONE_PREFIX}"
+                "a {name} of {length} bytes, past {STRING_ZONE_PREFIX}"
             ));
         }
         let start = *pos + 1;
         *pos = end_of(bytes, start, length).ok_or("truncated string zone map")?;
-        Ok(bytes[start..*pos].to_vec())
-    };
-    let min = read_bound("minimum")?;
-    let max = read_bound("maximum")?;
+        Ok(&bytes[start..*pos])
+    }
+    let min = bound("minimum", bytes, pos)?;
+    let max = bound("maximum", bytes, pos)?;
     let flags = *bytes.get(*pos).ok_or("truncated string zone map")?;
     if flags & !(MIN_EXACT | MAX_EXACT) != 0 {
         return Err(format!("unknown string zone map flags {flags:#04x}"));
@@ -1261,7 +1302,7 @@ fn read_zone_map_body(
         length.copy_from_slice(&bytes[at..at + 4]);
         u32::from_le_bytes(length)
     };
-    Ok(ZoneMap::Strings(StringZoneMap {
+    Ok(ZoneMapRef::Strings(StringZoneMapRef {
         min,
         min_exact: flags & MIN_EXACT != 0,
         max,

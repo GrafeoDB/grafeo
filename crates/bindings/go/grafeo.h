@@ -71,6 +71,7 @@ typedef struct GrafeoEdge        GrafeoEdge;
 typedef struct GrafeoStream      GrafeoStream;
 typedef struct GrafeoAsOf       GrafeoAsOf;
 typedef struct GrafeoSession    GrafeoSession;
+typedef struct GrafeoOptions    GrafeoOptions;
 
 /* ---- Error handling ------------------------------------------------------ */
 
@@ -114,6 +115,29 @@ GrafeoDatabase* grafeo_open_single_file(const char* path);
 GrafeoStatus    grafeo_close(GrafeoDatabase* db);
 void            grafeo_free_database(GrafeoDatabase* db);
 const char*     grafeo_version(void);
+
+/* ---- Open options -------------------------------------------------------- */
+
+/* The memory and spill settings a database opens with. Unset means the default:
+   75% of the memory the process may use for the memory limit, the memory limit
+   for the query memory limit, half the spill volume's free space for the spill
+   limit. A write past the memory limit fails with GRAFEO-S001.
+     - grafeo_options_new returns an object to free with grafeo_options_free
+       (NULL is ignored); it may open several databases and be freed once the
+       open returns.
+     - The memory and query memory limits must be above zero (another status
+       otherwise); a spill limit of 0 means nothing spills, and unlimited
+       spill, once set, wins over a spill limit. An in-memory database spills
+       nothing whatever the settings.
+     - grafeo_open_with_options opens in memory when path is NULL, else the
+       file at path; NULL options are the defaults. */
+GrafeoOptions*  grafeo_options_new(void);
+void            grafeo_options_free(GrafeoOptions* options);
+GrafeoStatus    grafeo_options_set_memory_limit(GrafeoOptions* options, uint64_t bytes);
+GrafeoStatus    grafeo_options_set_query_memory_limit(GrafeoOptions* options, uint64_t bytes);
+GrafeoStatus    grafeo_options_set_spill_limit(GrafeoOptions* options, uint64_t bytes);
+GrafeoStatus    grafeo_options_set_unlimited_spill(GrafeoOptions* options);
+GrafeoDatabase* grafeo_open_with_options(const char* path, const GrafeoOptions* options);
 
 /* ---- Change Data Capture ------------------------------------------------- */
 
@@ -420,6 +444,14 @@ void               grafeo_free_transaction(GrafeoTransaction* tx);
 /* ---- Admin --------------------------------------------------------------- */
 
 char*        grafeo_info(GrafeoDatabase* db);
+/* The memory report as JSON: total_bytes, limit_bytes, query_limit_bytes, the
+   parts, and spill (limit_bytes null for no limit). Free with grafeo_free_string. */
+char*        grafeo_memory_usage_json(GrafeoDatabase* db);
+/* What the open had to say, as a JSON list of {code, message, context}:
+   MEMORY_LIMIT_PASSED (reads work, writes that need memory fail with
+   GRAFEO-S001), MEMORY_DETECTION_FALLBACK, GRAPH_TYPE_NOT_BOUND. Free with
+   grafeo_free_string. */
+char*        grafeo_open_warnings(GrafeoDatabase* db);
 /* Needs the `storage` feature (in the default and `full` builds). */
 GrafeoStatus grafeo_save(GrafeoDatabase* db, const char* path);
 GrafeoStatus grafeo_wal_checkpoint(GrafeoDatabase* db);

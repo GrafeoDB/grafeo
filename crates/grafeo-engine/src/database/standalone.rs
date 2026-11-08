@@ -429,6 +429,17 @@ pub(crate) fn commit<S: RootStore>(
             describe(op)
         ))));
     }
+    // The index builds' memory is reserved before anything is logged: one
+    // past the memory limit is refused (S001) and changes nothing. The
+    // grant is held until the indexes are in; their store counts them then.
+    let mut change = change;
+    let _reserved = (
+        match store {
+            Some(store) => reserve_index_builds(&change, store)?,
+            None => None,
+        },
+        change.take_reserved(),
+    );
     #[cfg(feature = "wal")]
     if let Some(wal) = wal {
         log(wal, &change, manager)?;
@@ -440,6 +451,61 @@ pub(crate) fn commit<S: RootStore>(
         }
     }
     Ok(())
+}
+
+/// About the heap bytes an index takes per node it holds, for a property
+/// index the build of which runs at the apply: its value, the node's id and
+/// the map's slot.
+const PROPERTY_INDEX_BYTES_PER_NODE: usize = 64;
+
+/// A grant of what the property index builds of `change` take, from the
+/// nodes of their graph (they build at the apply; a vector or text index
+/// was built while the statement checked the change, and its reservation
+/// came with it). `None` without a buffer manager or such a build.
+///
+/// # Errors
+///
+/// The memory limit's refusal (`GRAFEO-S001`), after the buffer manager made
+/// what room it could.
+fn reserve_index_builds<S: RootStore>(
+    change: &StandaloneChange,
+    store: &Arc<S>,
+) -> Result<Option<grafeo_common::memory::buffer::MemoryGrant>> {
+    use grafeo_common::memory::buffer::MemoryRegion;
+    use grafeo_common::utils::error::LimitBound;
+
+    let Some(manager) = store.memory_manager_of() else {
+        return Ok(None);
+    };
+    let mut bytes = 0_usize;
+    for (op, built) in change.entries() {
+        let graph = match (op, built) {
+            (_, Some(_)) => continue,
+            (StandaloneOp::PutCatalog(CatalogRecord::Index(record)), None)
+                if matches!(record.index, IndexKindRecord::Property { .. }) =>
+            {
+                record.graph.as_deref()
+            }
+            (StandaloneOp::PutCatalog(CatalogRecord::LabelIndex(record)), None) => {
+                record.graph.as_deref()
+            }
+            _ => continue,
+        };
+        bytes = bytes.saturating_add(graph_store(store, graph).map_or(0, |target| {
+            target
+                .nodes_held()
+                .saturating_mul(PROPERTY_INDEX_BYTES_PER_NODE)
+        }));
+    }
+    if bytes == 0 {
+        return Ok(None);
+    }
+    let mut grant = manager.empty_grant(MemoryRegion::IndexBuffers);
+    if grant.try_grow(bytes) || (manager.make_room(bytes) && grant.try_grow(bytes)) {
+        Ok(Some(grant))
+    } else {
+        Err(manager.refusal(LimitBound::MemoryLimit, bytes).into())
+    }
 }
 
 /// Whether `op` changes nothing but the catalog (a schema, a type, a graph

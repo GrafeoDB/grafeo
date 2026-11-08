@@ -582,7 +582,8 @@ pub struct Config {
     )]
     pub path: Option<PathBuf>,
 
-    /// Memory limit in bytes (None for unlimited).
+    /// Memory limit in bytes (`None`: three quarters of the detected memory, see
+    /// [`memory_limit`](Self::memory_limit)).
     #[deprecated(
         since = "0.6.0",
         note = "read it with `Config::memory_limit()` and set it with its builder; private in 0.7.0"
@@ -1081,16 +1082,22 @@ impl Config {
         }
     }
 
-    /// Sets the memory limit, in bytes.
+    /// Sets the memory limit, in bytes: a hard limit on what the database's
+    /// structures hold (the store, its indexes, RDF, change sets, query
+    /// operators).
     ///
-    /// Today it bounds the memory that can spill or fail: query operators
-    /// spill to disk at it, the vector cache stays within it, and each path
-    /// search may hold a quarter of it (a search that needs more fails with
-    /// an error). Writes to the graph store are not bounded by it yet, so a
-    /// database can grow past it: see
-    /// [#398](https://github.com/GrafeoDB/grafeo/issues/398), which makes it
-    /// a hard limit (spill first, then fail the statement with an error
-    /// naming the bytes used and the limit).
+    /// Below it, the buffer manager evicts and spills (the indexed vector
+    /// store's embedding columns, query operators with a spill directory);
+    /// each path search may hold a
+    /// quarter of it. A write that would pass it is refused before it
+    /// changes anything, with `GRAFEO-S001` naming the bytes used and the
+    /// limit; reads go on, and an open that reaches or exceeds the limit holds
+    /// succeeds with a warning ([`GrafeoDB::open_warnings`](crate::GrafeoDB::open_warnings)).
+    /// The limit bounds what the database's structures hold, and the
+    /// process's private memory runs about a third above it (allocator
+    /// bookkeeping, partial pages, thread stacks and caches it does not
+    /// count), so leave that margin, for example a 2.5 GiB limit for a 4 GiB
+    /// container (see [what the limit counts](https://grafeo.dev/architecture/memory/#what-the-limit-counts)).
     #[must_use]
     pub fn with_memory_limit(mut self, limit: usize) -> Self {
         self.memory_limit = Some(limit);

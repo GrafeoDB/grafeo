@@ -295,6 +295,9 @@ pub struct SpillableSortPushOperator {
     spill_state: Option<std::sync::Arc<super::spill_state::OperatorSpillState>>,
     /// Running total of estimated buffer memory in bytes (incremental tracking).
     estimated_bytes: usize,
+    /// The grant of the buffer's bytes, grown per chunk against the statement's
+    /// query memory limit (patch 9, #751).
+    grant: Option<grafeo_common::memory::buffer::MemoryGrant>,
 }
 
 #[cfg(feature = "spill")]
@@ -314,6 +317,7 @@ impl SpillableSortPushOperator {
             external_sort: None,
             spill_threshold: DEFAULT_SPILL_THRESHOLD,
             memory_ctx: None,
+            grant: None,
             spill_state: None,
             estimated_bytes: 0,
         }
@@ -332,6 +336,7 @@ impl SpillableSortPushOperator {
             external_sort: None,
             spill_threshold: threshold,
             memory_ctx: None,
+            grant: None,
             spill_state: None,
             estimated_bytes: 0,
         }
@@ -363,6 +368,7 @@ impl SpillableSortPushOperator {
             external_sort: None,
             spill_threshold: DEFAULT_SPILL_THRESHOLD,
             memory_ctx: Some(ctx),
+            grant: None,
             spill_state: Some(state),
             estimated_bytes: 0,
         }
@@ -423,15 +429,21 @@ impl SpillableSortPushOperator {
             self.buffer.len() >= self.spill_threshold
         };
 
-        if !should_spill {
-            return Ok(());
+        if should_spill {
+            self.spill_buffer()?;
         }
+        Ok(())
+    }
 
+    /// Spills the buffer as one sorted run, when a spill manager is configured.
+    ///
+    /// Without one it does nothing (the caller's limit check then refuses).
+    fn spill_buffer(&mut self) -> Result<(), OperatorError> {
         // Get SpillManager: prefer memory_ctx, fall back to self.spill_manager
         let manager = self
             .memory_ctx
             .as_ref()
-            .map(|c| std::sync::Arc::clone(c.spill_manager()))
+            .and_then(|c| c.spill_manager().cloned())
             .or_else(|| self.spill_manager.clone());
 
         let Some(manager) = manager else {
@@ -478,8 +490,9 @@ impl SpillableSortPushOperator {
                 .map_err(crate::execution::spill::spill_error)?;
         }
 
-        // Reset memory tracking after spill
+        // Reset memory tracking after spill; the grant goes with the buffer.
         self.estimated_bytes = 0;
+        self.grant = None;
         if let Some(ref state) = self.spill_state {
             state.set_usage(0);
         }
@@ -529,6 +542,34 @@ impl PushOperator for SpillableSortPushOperator {
         // Update memory consumer usage
         if let Some(ref state) = self.spill_state {
             state.set_usage(self.estimated_bytes);
+        }
+
+        // The statement's query memory limit bounds the buffer: grow the grant
+        // per chunk. Over it, spill first (the spill resets the estimate and
+        // the grant goes with it); what cannot spill refuses, naming the
+        // query limit (patch 9, #751).
+        let over_limit = self
+            .memory_ctx
+            .clone()
+            .map(|ctx| ctx.grow(&mut self.grant, self.estimated_bytes));
+        if let Some(Err(error)) = over_limit {
+            // Over the query limit the buffer spills whatever it holds
+            // (the minimum-buffer guard is only for pressure noise); what
+            // cannot spill refuses, naming the query limit.
+            let can_spill = self
+                .memory_ctx
+                .as_ref()
+                .and_then(|c| c.spill_manager().cloned())
+                .or_else(|| self.spill_manager.clone())
+                .is_some();
+            if can_spill {
+                self.spill_buffer()?;
+            }
+            if self.estimated_bytes == 0 {
+                self.grant = None;
+            } else {
+                return Err(OperatorError::Wrapped(Box::new(error)));
+            }
         }
 
         // Check if we should spill

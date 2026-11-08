@@ -124,8 +124,9 @@ class AsOfView implements Finalizable {
   /// Execute a GQL query, with optional [params], as the database was at the
   /// view's epoch.
   QueryResult execute(String query, {Map<String, dynamic>? params}) =>
-      withNativeStrings([query, params == null ? null : encodeParams(params)],
-          (p) {
+      withNativeStrings([query, params == null ? null : encodeParams(params)], (
+        p,
+      ) {
         final resultPtr = _bindings.grafeoAsOfExecute(_open, p[0], p[1]);
         if (resultPtr == nullptr) throwLastError(_bindings);
         return buildResult(_bindings, resultPtr);
@@ -134,12 +135,16 @@ class AsOfView implements Finalizable {
   /// The node [id] as it was at the view's epoch, or null when it did not
   /// exist then.
   Node? getNode(int id) => takeNodeOrNull(
-      _bindings, (out) => _bindings.grafeoAsOfGetNode(_open, id, out));
+        _bindings,
+        (out) => _bindings.grafeoAsOfGetNode(_open, id, out),
+      );
 
   /// The edge [id] as it was at the view's epoch, or null when it did not
   /// exist then.
   Edge? getEdge(int id) => takeEdgeOrNull(
-      _bindings, (out) => _bindings.grafeoAsOfGetEdge(_open, id, out));
+        _bindings,
+        (out) => _bindings.grafeoAsOfGetEdge(_open, id, out),
+      );
 
   /// Node [id]'s value of [key] as it was at the view's epoch, or null when
   /// the node or the property did not exist then.

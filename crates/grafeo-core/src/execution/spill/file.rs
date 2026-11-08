@@ -177,7 +177,8 @@ impl SpillFile {
     /// Consumes the SpillFile handle. A file its manager tracks leaves the
     /// manager's list; one that cannot be removed stays there with its
     /// reservation, which the manager gives back when its cleanup removes
-    /// the file (its bytes are still on disk until then).
+    /// the file (its bytes are still on disk until then). A file already
+    /// gone (its manager's cleanup removed it) counts as removed.
     ///
     /// # Errors
     ///
@@ -185,7 +186,10 @@ impl SpillFile {
     pub fn delete(mut self) -> std::io::Result<()> {
         // Close the writer first
         self.writer = None;
-        let removed = std::fs::remove_file(&self.path);
+        let removed = match std::fs::remove_file(&self.path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            removed => removed,
+        };
         if removed.is_ok() {
             self.reservation = None;
             if let Some(files) = &self.tracked {
@@ -200,11 +204,14 @@ impl SpillFile {
 impl Drop for SpillFile {
     /// A file dropped while still on disk (not deleted, or its removal
     /// failed) hands its reservation to its manager, which gives it back
-    /// once its cleanup removes the file.
+    /// once its cleanup removes the file. One its manager's cleanup removed
+    /// already gives its reservation back instead.
     fn drop(&mut self) {
         if let Some(files) = &self.tracked
             && let Some(mut reservation) = self.reservation.take()
         {
+            // Closed first, so the check for a removed path sees no handle.
+            self.writer = None;
             // What it reserved past its length was never written.
             reservation.trim_to(self.bytes_written);
             files.keep(&self.path, reservation);

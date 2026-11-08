@@ -201,6 +201,81 @@ pub struct CreateOptions {
     /// files and keeps one segment of free disk space for the WAL. For this
     /// open only.
     pub wal_segment_size: Option<i64>,
+    /// How many bytes the database may hold: by default 75% of the memory
+    /// the process may use (a container's limit included). A write past it
+    /// throws `GRAFEO-S001` and changes nothing; reads keep working. A file
+    /// opened over it opens, reads and lists `MEMORY_LIMIT_PASSED` in
+    /// `openWarnings()`. A database file stores an explicit limit.
+    pub memory_limit: Option<i64>,
+    /// How many bytes one statement's sorts, joins and aggregates may hold,
+    /// never more than `memoryLimit` (its default). Past it they spill to
+    /// disk where they can, else the statement throws `GRAFEO-S001`. For
+    /// this open only.
+    pub query_memory_limit: Option<i64>,
+    /// How many bytes may spill to disk (0: nothing spills), half the spill
+    /// volume's free space by default. An in-memory database spills
+    /// nothing. For this open only.
+    pub spill_limit: Option<i64>,
+    /// Lift the spill limit (default `false`); it wins over `spillLimit`.
+    /// For this open only.
+    pub unlimited_spill: Option<bool>,
+}
+
+/// The memory settings of `options`, on `config`.
+fn memory_settings(mut config: Config, options: &CreateOptions) -> Result<Config> {
+    let positive = |bytes: i64, what: &str| -> Result<usize> {
+        usize::try_from(size_option(bytes, what)?)
+            .ok()
+            .filter(|bytes| *bytes > 0)
+            .ok_or_else(|| {
+                NodeGrafeoError::InvalidArgument(format!(
+                    "{what} must be a positive number of bytes: {bytes}"
+                ))
+                .into()
+            })
+    };
+    if let Some(bytes) = options.memory_limit {
+        config = config.with_memory_limit(positive(bytes, "memoryLimit")?);
+    }
+    if let Some(bytes) = options.query_memory_limit {
+        config = config.with_query_memory_limit(positive(bytes, "queryMemoryLimit")?);
+    }
+    if options.unlimited_spill.unwrap_or(false) {
+        config = config.with_unlimited_spill();
+    } else if let Some(bytes) = options.spill_limit {
+        config = config.with_spill_limit(size_option(bytes, "spillLimit")?);
+    }
+    Ok(config)
+}
+
+/// `value` with each object key in camelCase, as the rest of the API names fields:
+/// `limit_bytes` becomes `limitBytes`.
+fn camel_case_keys(value: serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Object(map) => serde_json::Value::Object(
+            map.into_iter()
+                .map(|(key, value)| {
+                    let mut camel = String::with_capacity(key.len());
+                    let mut upper = false;
+                    for c in key.chars() {
+                        if c == '_' {
+                            upper = true;
+                        } else if upper {
+                            camel.extend(c.to_uppercase());
+                            upper = false;
+                        } else {
+                            camel.push(c);
+                        }
+                    }
+                    (camel, camel_case_keys(value))
+                })
+                .collect(),
+        ),
+        serde_json::Value::Array(items) => {
+            serde_json::Value::Array(items.into_iter().map(camel_case_keys).collect())
+        }
+        other => other,
+    }
 }
 
 /// A size in bytes from the option `what`: an error for a negative number.
@@ -254,6 +329,9 @@ impl JsGrafeoDB {
             .and_then(|options| options.shuffle_unordered)
             .unwrap_or(false);
         let mut config = config.with_shuffle_unordered(shuffle_unordered);
+        if let Some(options) = &options {
+            config = memory_settings(config, options)?;
+        }
         let (
             wal_salvage,
             history_retention,
@@ -767,6 +845,52 @@ impl JsGrafeoDB {
         let node_id = validate_node_id(id)?;
         let db = self.inner.read();
         Ok(db.get_node_labels(node_id).map_err(NodeGrafeoError::from)?)
+    }
+
+    /// The bytes the database holds, as its accounts count them, and the
+    /// limits it holds to: `totalBytes`, `limitBytes` (the memory limit),
+    /// `queryLimitBytes` (what one statement may hold), the parts, and
+    /// `spill` (`limitBytes` is `null` for no limit).
+    ///
+    /// # Stability: Experimental
+    ///
+    /// The call is stable; the keys and what each one counts follow the
+    /// storage engine and may change in any release.
+    #[napi(js_name = "memoryUsage", ts_return_type = "MemoryUsage")]
+    pub fn memory_usage(&self) -> Result<serde_json::Value> {
+        let usage = self.inner.read().memory_usage();
+        let value =
+            serde_json::to_value(&usage).map_err(|e| NodeGrafeoError::Database(e.to_string()))?;
+        Ok(camel_case_keys(value))
+    }
+
+    /// What the open had to say: `{ code, message, context }` for each,
+    /// `MEMORY_LIMIT_PASSED` when the data passes the memory limit (reads
+    /// work, writes that need memory throw `GRAFEO-S001`),
+    /// `MEMORY_DETECTION_FALLBACK` and `GRAPH_TYPE_NOT_BOUND`. Empty for a
+    /// clean open.
+    #[napi(js_name = "openWarnings", ts_return_type = "Array<OpenWarning>")]
+    pub fn open_warnings(&self) -> serde_json::Value {
+        let warnings = self
+            .inner
+            .read()
+            .open_warnings()
+            .iter()
+            .map(|warning| {
+                let context = match warning {
+                    grafeo_engine::admin::OpenWarning::GraphTypeScope { context, .. } => {
+                        context.clone()
+                    }
+                    _ => None,
+                };
+                serde_json::json!({
+                    "code": warning.code(),
+                    "message": warning.to_string(),
+                    "context": context,
+                })
+            })
+            .collect();
+        serde_json::Value::Array(warnings)
     }
 
     /// Returns high-level database information as a JSON object.

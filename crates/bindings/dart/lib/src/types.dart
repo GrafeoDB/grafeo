@@ -199,8 +199,15 @@ class WriteCounters {
       other.labelsRemoved == labelsRemoved;
 
   @override
-  int get hashCode => Object.hash(nodesCreated, nodesDeleted, edgesCreated,
-      edgesDeleted, propertiesSet, labelsAdded, labelsRemoved);
+  int get hashCode => Object.hash(
+        nodesCreated,
+        nodesDeleted,
+        edgesCreated,
+        edgesDeleted,
+        propertiesSet,
+        labelsAdded,
+        labelsRemoved,
+      );
 
   @override
   String toString() => 'WriteCounters(nodes +$nodesCreated -$nodesDeleted, '
@@ -259,10 +266,14 @@ final class GrafeoDecimal {
     final body =
         text.startsWith('-') || text.startsWith('+') ? text.substring(1) : text;
     final point = body.indexOf('.');
-    final integer = (point < 0 ? body : body.substring(0, point))
-        .replaceFirst(RegExp('^0+'), '');
-    final fraction = (point < 0 ? '' : body.substring(point + 1))
-        .replaceFirst(RegExp(r'0+$'), '');
+    final integer = (point < 0 ? body : body.substring(0, point)).replaceFirst(
+      RegExp('^0+'),
+      '',
+    );
+    final fraction = (point < 0 ? '' : body.substring(point + 1)).replaceFirst(
+      RegExp(r'0+$'),
+      '',
+    );
     if (integer.isEmpty && fraction.isEmpty) return '0';
     return '${negative ? '-' : ''}$integer.$fraction';
   }
@@ -311,7 +322,9 @@ final class RdfTerm {
   /// A term of [type] with [value]; a literal may have a [language] tag or a
   /// [datatype] (with a tag, the datatype is `rdf:langString`).
   RdfTerm(this.type, this.value, {String? language, String? datatype})
-      : language = type == RdfTermType.literal && language != null && language.isNotEmpty
+      : language = type == RdfTermType.literal &&
+                language != null &&
+                language.isNotEmpty
             ? language.toLowerCase()
             : null,
         datatype = type != RdfTermType.literal ||
@@ -389,9 +402,11 @@ final class RdfTerm {
     return switch (type) {
       'uri' when term.length == 2 => RdfTerm.iri(value),
       'bnode' when term.length == 2 => RdfTerm.blankNode(value),
-      'literal' when language is String && datatype == null && term.length == 3 =>
+      'literal'
+          when language is String && datatype == null && term.length == 3 =>
         RdfTerm.literal(value, language: language),
-      'literal' when datatype is String && language == null && term.length == 3 =>
+      'literal'
+          when datatype is String && language == null && term.length == 3 =>
         RdfTerm.literal(value, datatype: datatype),
       'literal' when term.length == 2 => RdfTerm.literal(value),
       _ => null,

@@ -50,6 +50,43 @@ export interface Literal {
   equals(other: RdfTermLike | null | undefined): boolean
 }
 
+/** What may spill to disk and what has: `limitBytes` is `null` for no limit. */
+export interface SpillUsage {
+  totalBytes: number
+  limitBytes: number | null
+  sortBytes: number
+  aggregateBytes: number
+  vectorColumnBytes: number
+}
+
+/**
+ * The bytes a database holds, as its accounts count them, and its limits:
+ * `limitBytes` is the memory limit, `queryLimitBytes` what one statement may
+ * hold. The parts' keys follow the storage engine and may change in any
+ * release.
+ */
+export interface MemoryUsage {
+  totalBytes: number
+  limitBytes: number
+  queryLimitBytes: number
+  store: Record<string, number>
+  indexes: Record<string, any>
+  mvcc: Record<string, number>
+  caches: Record<string, number>
+  stringPool: Record<string, number>
+  bufferManager: Record<string, number>
+  rdf?: Record<string, number>
+  cdc?: Record<string, number>
+  spill: SpillUsage
+}
+
+/** What an open had to say, such as `MEMORY_LIMIT_PASSED`. */
+export interface OpenWarning {
+  code: string
+  message: string
+  context: string | null
+}
+
 /** An RDF term, as SPARQL results hold them and parameters take them. */
 export type RdfTerm = NamedNode | BlankNode | Literal
 
@@ -236,6 +273,26 @@ export declare class GrafeoDB {
   removeNodeLabel(id: number, label: string): boolean
   /** Get all labels for a node. Returns null if the node doesn't exist. */
   getNodeLabels(id: number): Array<string> | null
+  /**
+   * The bytes the database holds, as its accounts count them, and the
+   * limits it holds to: `totalBytes`, `limitBytes` (the memory limit),
+   * `queryLimitBytes` (what one statement may hold), the parts, and
+   * `spill` (`limitBytes` is `null` for no limit).
+   *
+   * # Stability: Experimental
+   *
+   * The call is stable; the keys and what each one counts follow the
+   * storage engine and may change in any release.
+   */
+  memoryUsage(): MemoryUsage
+  /**
+   * What the open had to say: `{ code, message, context }` for each,
+   * `MEMORY_LIMIT_PASSED` when the data passes the memory limit (reads
+   * work, writes that need memory throw `GRAFEO-S001`),
+   * `MEMORY_DETECTION_FALLBACK` and `GRAPH_TYPE_NOT_BOUND`. Empty for a
+   * clean open.
+   */
+  openWarnings(): Array<OpenWarning>
   /** Returns high-level database information as a JSON object. */
   info(): any
   /**
@@ -451,16 +508,6 @@ export declare class GrafeoDB {
   nodeHistorySince(nodeId: number, sinceEpoch: number): Promise<Array<any>>
   /** Returns all change events across entities in an epoch range. */
   changesBetween(startEpoch: number, endEpoch: number): Promise<Array<any>>
-  /** Execute a Cypher query. */
-  executeCypher(query: string, params?: any | undefined | null): Promise<QueryResult>
-  /** Execute a SQL/PGQ query (SQL:2023 GRAPH_TABLE). */
-  executeSql(query: string, params?: any | undefined | null): Promise<QueryResult>
-  /** Execute a Gremlin query. */
-  executeGremlin(query: string, params?: any | undefined | null): Promise<QueryResult>
-  /** Execute a GraphQL query. */
-  executeGraphql(query: string, params?: any | undefined | null): Promise<QueryResult>
-  /** Execute a SPARQL query against the RDF triple store. */
-  executeSparql(query: string, params?: any | undefined | null): Promise<QueryResult>
   /** Execute a query in a named language (e.g. `"graphql-rdf"`). */
   executeLanguage(language: string, query: string, params?: any | undefined | null): Promise<QueryResult>
   /**
@@ -777,16 +824,6 @@ export declare class Session {
    * closing never waits for a running statement.
    */
   close(): void
-  /** Execute a Cypher statement on the session. */
-  executeCypher(query: string, params?: any | undefined | null): Promise<QueryResult>
-  /** Execute a SQL/PGQ statement on the session. */
-  executeSql(query: string, params?: any | undefined | null): Promise<QueryResult>
-  /** Execute a Gremlin statement on the session. */
-  executeGremlin(query: string, params?: any | undefined | null): Promise<QueryResult>
-  /** Execute a GraphQL statement on the session. */
-  executeGraphql(query: string, params?: any | undefined | null): Promise<QueryResult>
-  /** Execute a SPARQL statement on the session. */
-  executeSparql(query: string, params?: any | undefined | null): Promise<QueryResult>
 }
 export type JsSession = Session
 
@@ -828,16 +865,6 @@ export declare class Transaction {
   rollback(): void
   /** Whether the transaction is still active. */
   get isActive(): boolean
-  /** Execute a Cypher query within this transaction. */
-  executeCypher(query: string, params?: any | undefined | null): Promise<QueryResult>
-  /** Execute a SQL/PGQ query (SQL:2023 GRAPH_TABLE) within this transaction. */
-  executeSql(query: string, params?: any | undefined | null): Promise<QueryResult>
-  /** Execute a Gremlin query within this transaction. */
-  executeGremlin(query: string, params?: any | undefined | null): Promise<QueryResult>
-  /** Execute a GraphQL query within this transaction. */
-  executeGraphql(query: string, params?: any | undefined | null): Promise<QueryResult>
-  /** Execute a SPARQL query within this transaction. */
-  executeSparql(query: string, params?: any | undefined | null): Promise<QueryResult>
 }
 
 /** An edge for `batchCreateEdges`. */
@@ -929,6 +956,32 @@ export interface CreateOptions {
    * open only.
    */
   walSegmentSize?: number
+  /**
+   * How many bytes the database may hold: by default 75% of the memory
+   * the process may use (a container's limit included). A write past it
+   * throws `GRAFEO-S001` and changes nothing; reads keep working. A file
+   * opened over it opens, reads and lists `MEMORY_LIMIT_PASSED` in
+   * `openWarnings()`. A database file stores an explicit limit.
+   */
+  memoryLimit?: number
+  /**
+   * How many bytes one statement's sorts, joins and aggregates may hold,
+   * never more than `memoryLimit` (its default). Past it they spill to
+   * disk where they can, else the statement throws `GRAFEO-S001`. For
+   * this open only.
+   */
+  queryMemoryLimit?: number
+  /**
+   * How many bytes may spill to disk (0: nothing spills), half the spill
+   * volume's free space by default. An in-memory database spills
+   * nothing. For this open only.
+   */
+  spillLimit?: number
+  /**
+   * Lift the spill limit (default `false`); it wins over `spillLimit`.
+   * For this open only.
+   */
+  unlimitedSpill?: boolean
 }
 
 /** Options for CSV import. */

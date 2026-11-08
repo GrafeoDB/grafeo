@@ -196,10 +196,10 @@ fn a_spill_file_lives_as_long_as_a_chunk_reads_it() {
     let ids = items(&database, None, 3_000);
     let before = database.root.memory();
 
-    let report = database
+    let (report, result) = database
         .root
-        .spill_node_property_column(&embedding(), &files)
-        .unwrap();
+        .spill_node_property_column(&embedding(), &files);
+    result.unwrap();
     assert_eq!(report.spilled_groups, 1, "{report:?}");
     let spilled = files_in(files.directory());
     assert_eq!(spilled.len(), 1, "{spilled:?}");
@@ -238,6 +238,7 @@ fn a_spill_file_lives_as_long_as_a_chunk_reads_it() {
     database
         .root
         .spill_node_property_column(&embedding(), &files)
+        .1
         .unwrap();
     assert_eq!(files_in(files.directory()).len(), 1);
     assert!(
@@ -253,6 +254,7 @@ fn a_spill_file_lives_as_long_as_a_chunk_reads_it() {
     database
         .root
         .spill_node_property_column(&embedding(), &files)
+        .1
         .unwrap();
     assert_eq!(files_in(files.directory()).len(), 1);
     drop(database);
@@ -275,7 +277,8 @@ fn a_failed_spill_file_leaves_nothing_behind() {
     assert!(matches!(
         database
             .root
-            .spill_node_property_column(&embedding(), &files),
+            .spill_node_property_column(&embedding(), &files)
+            .1,
         Err(Error::Io(_))
     ));
     assert_eq!(database.root.memory(), before);
@@ -452,12 +455,25 @@ mod consumers {
     }
 
     /// Under memory pressure the buffer manager asks the consumers to spill,
-    /// and the row-group store's embeddings go to their files; its reload
-    /// brings them back once the pressure is gone.
+    /// and the row-group store's embeddings go to their files, but for each
+    /// graph's newest row group; its reload brings them back once the
+    /// pressure is gone. The root gets a second row group (a few items past
+    /// the first group's ids), so its first group spills; the graph trips
+    /// holds one group, its newest, which stays.
     #[test]
     fn memory_pressure_spills_the_embeddings_and_a_reload_brings_them_back() {
+        use grafeo_core::graph::apply::GraphBackend;
+
+        /// The rows of a row group.
+        const ROW_GROUP: u64 = 65_536;
+
         let dir = tempfile::tempdir().unwrap();
         let (database, ids) = indexed();
+        let next = database.root.reserve_node_ids(0).unwrap().start;
+        database.root.reserve_node_ids(ROW_GROUP - next).unwrap();
+        let newest = items(&database, None, 5);
+        assert!(newest.iter().all(|id| id.as_u64() >= ROW_GROUP));
+        assert_eq!(database.root.append_node_group(), Some(1));
         let manager = BufferManager::with_budget(1 << 20);
         register_row_group_consumers(
             &manager,
@@ -484,7 +500,18 @@ mod consumers {
             [embedding()],
             "the pressure spilled the root's embeddings"
         );
-        assert_eq!(files_in(&dir.path().join("cache")).len(), 2);
+        assert_eq!(
+            database
+                .store(Some("trips"))
+                .spilled_node_property_columns(),
+            Vec::<PropertyKey>::new(),
+            "the newest group of trips stays"
+        );
+        assert_eq!(
+            files_in(&dir.path().join("cache")).len(),
+            1,
+            "a file for the root's first group, none for its newest or for trips"
+        );
         drop(grant);
 
         assert!(manager.reload_eligible(1.0) >= 1);
@@ -505,14 +532,12 @@ mod consumers {
         let dir = tempfile::tempdir().unwrap();
         // What the small graph's column takes, measured on a copy.
         let (copy, _) = indexed();
-        let small = copy
-            .store(Some("trips"))
-            .spill_node_property_column(
-                &embedding(),
-                &ColumnSpillFiles::in_dir(dir.path().join("measure")),
-            )
-            .unwrap()
-            .file_bytes;
+        let (small_report, result) = copy.store(Some("trips")).spill_node_property_column(
+            &embedding(),
+            &ColumnSpillFiles::in_dir(dir.path().join("measure")),
+        );
+        result.unwrap();
+        let small = small_report.file_bytes;
         drop(copy);
         assert!(small > 0);
 
@@ -670,6 +695,7 @@ mod file {
             .database
             .root
             .spill_node_property_column(&embedding(), &files)
+            .1
             .unwrap();
         let spilled = created.database.root.memory();
         created.checkpoint().unwrap();
@@ -746,11 +772,11 @@ fn a_crash_while_a_column_is_spilled_reopens_from_the_last_checkpoint() {
         database.checkpoint().unwrap();
         let first_iteration = database.fm.active_header().iteration;
         let files = ColumnSpillFiles::in_dir(cache(&path));
-        let report = database
+        let (report, result) = database
             .database
             .root
-            .spill_node_property_column(&embedding(), &files)
-            .unwrap();
+            .spill_node_property_column(&embedding(), &files);
+        result.unwrap();
         assert_eq!(report.spilled_groups, 1, "point {point} ({name})");
         // A write that leaves the embeddings spilled.
         let mut mia = NodeId::new(0);

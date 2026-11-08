@@ -128,7 +128,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use grafeo_common::memory::buffer::{
-    BufferManager, GRANT_STEP, MemoryConsumer, MemoryGrant, MemoryRegion, priorities,
+    BufferManager, MemoryConsumer, MemoryGrant, MemoryRegion, priorities,
 };
 use grafeo_common::types::{EdgeId, EpochId, HlcClock, HlcTimestamp, NodeId, Value};
 use hashbrown::HashMap as HbHashMap;
@@ -383,8 +383,15 @@ impl std::fmt::Debug for LogMemory {
 }
 
 /// The bytes an entity's entry takes besides its events: the walk's
-/// overhead per entry.
-const ENTRY_BYTES: usize = std::mem::size_of::<(EntityId, Vec<ChangeEvent>)>() + 8;
+/// overhead per entry, the full key and value inline plus the control byte.
+const ENTRY_BYTES: usize = std::mem::size_of::<(Option<String>, EntityId, Vec<ChangeEvent>)>() + 8;
+
+/// The heap bytes an entry's key owns besides its inline slot: the graph
+/// name's string, cloned into the key when the entry is created (the event
+/// keeps its own copy, counted in [`event_heap_bytes`]).
+fn key_heap_bytes(key: &(Option<String>, EntityId)) -> usize {
+    key.0.as_ref().map_or(0, String::capacity)
+}
 
 /// The bytes the room of `events` takes, without what each event owns.
 fn room_bytes(events: &Vec<ChangeEvent>) -> usize {
@@ -430,11 +437,9 @@ fn event_heap_bytes(event: &ChangeEvent) -> usize {
         + properties(&event.after)
 }
 
-/// `bytes` rounded up to the grant step.
-fn step_above(bytes: usize) -> usize {
-    bytes
-        .checked_next_multiple_of(GRANT_STEP)
-        .unwrap_or(usize::MAX)
+/// `bytes` rounded up to the grant step `step`.
+fn step_above(bytes: usize, step: usize) -> usize {
+    bytes.checked_next_multiple_of(step).unwrap_or(usize::MAX)
 }
 
 impl CdcLog {
@@ -484,7 +489,7 @@ impl CdcLog {
         };
         let counted = self.counted.load(Ordering::Relaxed);
         let granted = self.memory.granted.load(Ordering::Relaxed);
-        if counted <= granted && granted - counted < 2 * GRANT_STEP {
+        if counted <= granted && granted - counted < 2 * manager.grant_step() {
             return;
         }
         let mut grant = self.memory.grant.lock();
@@ -513,7 +518,7 @@ impl CdcLog {
         if held < counted {
             manager.settle_forced(&mut grant, MemoryRegion::ExecutionBuffers, counted);
         } else if let Some(grant) = grant.as_mut() {
-            given_back = held.saturating_sub(step_above(counted));
+            given_back = held.saturating_sub(step_above(counted, manager.grant_step()));
             grant.shrink(given_back);
         }
         self.memory.granted.store(
@@ -533,7 +538,7 @@ impl CdcLog {
         let events = match guard.entry((event.graph.clone(), event.entity_id)) {
             hashbrown::hash_map::Entry::Occupied(entry) => entry.into_mut(),
             hashbrown::hash_map::Entry::Vacant(entry) => {
-                grown += ENTRY_BYTES;
+                grown += ENTRY_BYTES + key_heap_bytes(entry.key());
                 entry.insert(Vec::new())
             }
         };
@@ -882,11 +887,12 @@ impl CdcLog {
         let entity_count = guard.len();
         let mut event_count = 0usize;
         let mut bytes = 0usize;
-        let entry_overhead = std::mem::size_of::<(EntityId, Vec<ChangeEvent>)>() + 8;
+        let entry_overhead = ENTRY_BYTES;
         let event_size = std::mem::size_of::<ChangeEvent>();
-        for events in guard.values() {
+        for (key, events) in guard.iter() {
             event_count += events.len();
             bytes += entry_overhead
+                + key_heap_bytes(key)
                 + events.capacity() * event_size
                 + events.iter().map(event_heap_bytes).sum::<usize>();
         }
@@ -909,14 +915,14 @@ impl CdcLog {
     fn prune(&self, min_epoch: EpochId) {
         let mut guard = self.events.write();
         let (mut bytes, mut held) = (0, 0);
-        guard.retain(|_, events| {
+        guard.retain(|key, events| {
             events.retain(|e| e.epoch >= min_epoch);
             let kept = !events.is_empty();
             if kept {
                 if events.capacity() > 2 * events.len() {
                     events.shrink_to_fit();
                 }
-                bytes += ENTRY_BYTES + events_bytes(events);
+                bytes += ENTRY_BYTES + key_heap_bytes(key) + events_bytes(events);
                 held += events.len();
             }
             kept
@@ -1772,7 +1778,10 @@ mod tests {
         }
         let granted = log.granted_bytes();
         let counted = log.counted_memory_bytes().0;
-        assert!(granted >= counted && counted > 2 * GRANT_STEP, "{counted}");
+        assert!(
+            granted >= counted && counted > 2 * manager.grant_step(),
+            "{counted}"
+        );
 
         // The eviction removes an event per 256 bytes asked for: the 30
         // oldest go, the 10 newest (about 640 KiB) stay.
@@ -1782,7 +1791,8 @@ mod tests {
         assert_eq!(freed, granted - log.granted_bytes());
         assert!(freed > 0);
         assert!(
-            log.granted_bytes() >= counted && log.granted_bytes() <= step_above(counted),
+            log.granted_bytes() >= counted
+                && log.granted_bytes() <= step_above(counted, manager.grant_step()),
             "granted {} for {counted}",
             log.granted_bytes()
         );

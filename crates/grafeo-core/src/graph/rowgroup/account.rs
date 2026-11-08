@@ -23,20 +23,21 @@
 //! no reader running, the account of each line equals its walk.
 //!
 //! Admission ([`StoreAccount::admit`]) keeps headroom in the grants before
-//! an op that may be refused, and is forced in this release: it grows the
-//! grants whatever the limit, so no write is refused yet.
+//! an op that may be refused: when the memory limit does not fit it, the op
+//! is refused before it changes anything, and the store frees what it can
+//! outside its lock and tries it once more (`RowGroupStore::apply`).
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use bytes::Bytes;
 use grafeo_common::change::Table;
-use grafeo_common::memory::buffer::{BufferManager, GRANT_STEP, MemoryGrant, MemoryRegion};
+use grafeo_common::memory::buffer::{BufferManager, MemoryGrant, MemoryRegion};
 use parking_lot::Mutex;
 
 /// Whether admission refuses an op whose bytes the memory limit does not
-/// fit. Off in this release: the grants grow whatever the limit.
-const ADMISSION_REFUSES: bool = false;
+/// fit (otherwise the grants grow whatever the limit).
+const ADMISSION_REFUSES: bool = true;
 
 /// The lines of the account: the byte fields of
 /// [`RowGroupMemory`](super::RowGroupMemory) the walk reports, with the
@@ -281,6 +282,42 @@ pub(super) struct Thaws {
     manager: Attached,
     /// The grant of the bytes the thaws gained since the last fold.
     grant: Mutex<Option<MemoryGrant>>,
+    /// While above 0, a read's thaw takes its grant whatever the limit
+    /// (`RowGroupStore::with_unrefused`: the index rebuilds at open).
+    unrefused: AtomicUsize,
+}
+
+/// The grant a read's thaw asks for (see [`ThawSink::grant_thaw`]).
+pub(super) enum ThawGrant {
+    /// No buffer manager: nothing to grant.
+    Unbounded,
+    /// The bytes, granted.
+    Granted(MemoryGrant),
+    /// The memory limit has no room for them: the read decodes the chunk it
+    /// needs instead of the column.
+    Refused,
+}
+
+impl ThawGrant {
+    /// The grant, when one was taken.
+    pub(super) fn into_grant(self) -> Option<MemoryGrant> {
+        match self {
+            Self::Granted(grant) => Some(grant),
+            Self::Unbounded | Self::Refused => None,
+        }
+    }
+}
+
+/// Holds a store's reads' thaws unrefused while it lives (see
+/// `RowGroupStore::with_unrefused`).
+pub(super) struct Unrefused(Vec<Arc<Thaws>>);
+
+impl Drop for Unrefused {
+    fn drop(&mut self) {
+        for thaws in &self.0 {
+            thaws.unrefused.fetch_sub(1, Ordering::AcqRel);
+        }
+    }
 }
 
 /// Where a cold column reports its thaw: its store's thaws, and its table.
@@ -291,10 +328,38 @@ pub(super) struct ThawSink {
 }
 
 impl ThawSink {
+    /// The grant of `bytes` a read's thaw needs: refused when the memory
+    /// limit has no room for them (no eviction runs under the store's
+    /// lock), granted whatever the limit while the store is
+    /// [unrefused](Unrefused).
+    pub(super) fn grant_thaw(&self, bytes: usize) -> ThawGrant {
+        let Some(manager) = self.thaws.manager.get() else {
+            return ThawGrant::Unbounded;
+        };
+        if self.thaws.unrefused.load(Ordering::Acquire) > 0 {
+            return ThawGrant::Granted(manager.reserve_forced(bytes, MemoryRegion::GraphStorage));
+        }
+        let mut grant = manager.empty_grant(MemoryRegion::GraphStorage);
+        if grant.try_grow(bytes) {
+            ThawGrant::Granted(grant)
+        } else {
+            ThawGrant::Refused
+        }
+    }
+
     /// Reports a thaw: the column gained `hot` decoded bytes and freed
     /// `meta` bytes of chunk metadata and `chunks` bytes of chunks. The
-    /// decoded bytes take a grant at once, whatever the limit.
-    pub(super) fn thawed(&self, hot: usize, meta: usize, chunks: usize) {
+    /// decoded bytes hold `granted` (a read's, from
+    /// [`grant_thaw`](Self::grant_thaw)), brought to `hot`, or a grant
+    /// taken at once whatever the limit (a write's, which its admission
+    /// covered).
+    pub(super) fn thawed(
+        &self,
+        hot: usize,
+        meta: usize,
+        chunks: usize,
+        granted: Option<MemoryGrant>,
+    ) {
         let index = table_index(self.table);
         self.thaws.gained[index].fetch_add(hot, Ordering::Relaxed);
         self.thaws.freed_meta[index].fetch_add(meta, Ordering::Relaxed);
@@ -303,7 +368,18 @@ impl ThawSink {
         if hot > 0
             && let Some(manager) = self.thaws.manager.get()
         {
-            let grant = manager.reserve_forced(hot, MemoryRegion::GraphStorage);
+            let grant = match granted {
+                Some(mut grant) => {
+                    let size = grant.size();
+                    if size < hot {
+                        grant.grow_forced(hot - size);
+                    } else {
+                        grant.shrink(size - hot);
+                    }
+                    grant
+                }
+                None => manager.reserve_forced(hot, MemoryRegion::GraphStorage),
+            };
             let mut held = self.thaws.grant.lock();
             match held.as_mut() {
                 Some(held) => held.merge(grant),
@@ -384,11 +460,10 @@ pub(super) struct StoreAccount {
     headroom: [usize; 2],
 }
 
-/// The step of the grants at or above `bytes`, saturating.
-fn step_above(bytes: usize) -> usize {
-    bytes
-        .checked_next_multiple_of(GRANT_STEP)
-        .unwrap_or(usize::MAX)
+/// The multiple of `step` (the manager's grant step) at or above `bytes`,
+/// saturating.
+fn step_above(bytes: usize, step: usize) -> usize {
+    bytes.checked_next_multiple_of(step).unwrap_or(usize::MAX)
 }
 
 /// `bytes`, a total of counted lines, which no store reaches past
@@ -416,6 +491,24 @@ impl StoreAccount {
 
     /// Where a cold column of `table` reports its thaw.
     #[must_use]
+    /// Holds this store's reads' thaws unrefused (with `others`, its named
+    /// graphs') until the guard drops.
+    pub(super) fn unrefused(&self, others: impl IntoIterator<Item = Arc<Thaws>>) -> Unrefused {
+        let all: Vec<Arc<Thaws>> = std::iter::once(Arc::clone(&self.thaws))
+            .chain(others)
+            .collect();
+        for thaws in &all {
+            thaws.unrefused.fetch_add(1, Ordering::AcqRel);
+        }
+        Unrefused(all)
+    }
+
+    /// The thaws of this store, for a guard of its root's
+    /// ([`unrefused`](Self::unrefused)).
+    pub(super) fn thaws(&self) -> Arc<Thaws> {
+        Arc::clone(&self.thaws)
+    }
+
     pub(super) fn sink(&self, table: Table) -> ThawSink {
         ThawSink {
             thaws: Arc::clone(&self.thaws),
@@ -587,9 +680,9 @@ impl StoreAccount {
     /// (`indexes`): keeps a step and that much headroom, past what it counts
     /// and what the ops admitted since the last settle carry, in each grant
     /// the op may grow, growing a short grant to the next step. Two compares
-    /// when the grants have room. The grants grow forced in this release (see
-    /// the module docs); when admission refuses, it gives back what it grew
-    /// for the op, nothing changed, and the op needs the returned bytes.
+    /// when the grants have room. When admission refuses, it gives back what
+    /// it grew for the op, nothing changed, and the op needs the returned
+    /// bytes.
     pub(super) fn admit(
         &mut self,
         payload: usize,
@@ -604,6 +697,7 @@ impl StoreAccount {
         let Some(Manager(manager)) = &self.manager else {
             return Ok(());
         };
+        let step = manager.grant_step();
         let [storage, index, _] = self.totals;
         let wants = [
             (MemoryRegion::GraphStorage, storage, need),
@@ -620,7 +714,7 @@ impl StoreAccount {
             }
             let wanted = sane(counted)
                 .saturating_add(self.pending[place])
-                .saturating_add(GRANT_STEP)
+                .saturating_add(step)
                 .saturating_add(op);
             let grant = match place {
                 0 => &mut self.storage,
@@ -630,7 +724,7 @@ impl StoreAccount {
             if held >= wanted {
                 continue;
             }
-            let grow = step_above(wanted).saturating_sub(held);
+            let grow = step_above(wanted, step).saturating_sub(held);
             let grant = grant.get_or_insert_with(|| manager.empty_grant(region));
             if ADMISSION_REFUSES && !grant.try_grow(grow) {
                 // A refusal changes nothing: what this admission grew goes back.
@@ -679,6 +773,7 @@ impl StoreAccount {
         let Some(Manager(manager)) = &self.manager else {
             return;
         };
+        let step = manager.grant_step();
         let [storage, index, _] = self.totals;
         for (place, (region, counted)) in [
             (MemoryRegion::GraphStorage, storage),
@@ -697,18 +792,16 @@ impl StoreAccount {
             if held < counted {
                 grant
                     .get_or_insert_with(|| manager.empty_grant(region))
-                    .grow_forced(step_above(counted).saturating_sub(held));
+                    .grow_forced(step_above(counted, step).saturating_sub(held));
                 continue;
             }
             let (bound, kept) = if slack {
                 (
-                    counted
-                        .saturating_add(2 * GRANT_STEP)
-                        .saturating_add(headroom),
-                    step_above(counted.saturating_add(GRANT_STEP).saturating_add(headroom)),
+                    counted.saturating_add(2 * step).saturating_add(headroom),
+                    step_above(counted.saturating_add(step).saturating_add(headroom), step),
                 )
             } else {
-                let kept = step_above(counted);
+                let kept = step_above(counted, step);
                 (kept.saturating_add(1), kept)
             };
             if held >= bound

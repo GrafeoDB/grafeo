@@ -231,3 +231,60 @@ fn a_stored_zoned_literal_keeps_its_offset_through_a_reopen() {
     read(&db, "reopened");
     db.close().unwrap();
 }
+
+/// The catalog's error text writes a datetime as the query writes it: the `DATETIME '...'`
+/// in a G2000 message reads back as the same value, offset kept (ISO/IEC 39075 21.2 SR 65).
+#[test]
+fn the_catalog_error_text_reads_back_as_the_same_value() {
+    let db = GrafeoDB::new_in_memory();
+    // A local value is refused by a ZONED DATETIME property and the other way round, so each
+    // case writes into the type that refuses it.
+    db.execute("CREATE NODE TYPE Local (at LOCAL DATETIME)")
+        .unwrap();
+    db.execute("CREATE NODE TYPE Zoned (at ZONED DATETIME)")
+        .unwrap();
+    let local = |text: &str| row(&db, &format!("RETURN DATETIME '{text}'"))[0].clone();
+    let cases: [(&str, &str, Value); 5] = [
+        ("2026-10-05T10:30:00", "Zoned", local("2026-10-05T10:30:00")),
+        (
+            "2026-10-05T10:30:00.25",
+            "Zoned",
+            local("2026-10-05T10:30:00.25"),
+        ),
+        (
+            "2026-10-05T10:30:00+02:00",
+            "Local",
+            zoned("2026-10-05T10:30:00+02:00"),
+        ),
+        (
+            "2026-10-05T10:30:00Z",
+            "Local",
+            zoned("2026-10-05T10:30:00Z"),
+        ),
+        (
+            "2026-10-05T10:30:00-05:30",
+            "Local",
+            zoned("2026-10-05T10:30:00-05:30"),
+        ),
+    ];
+    for (text, label, want) in cases {
+        let error = db
+            .execute(&format!("INSERT (:{label} {{at: DATETIME '{text}'}})"))
+            .expect_err("the property type refuses the value");
+        let message = error.to_string();
+        let needle = "got DATETIME '";
+        let start = message.find(needle).unwrap_or_else(|| {
+            panic!("the message names the value as a query writes it: {message}")
+        }) + needle.len();
+        let end = message[start..]
+            .find('\'')
+            .map(|at| start + at)
+            .expect("the written text closes");
+        let written = &message[start..end];
+        assert_eq!(
+            row(&db, &format!("RETURN DATETIME '{written}'")),
+            vec![want.clone()],
+            "the message's text reads back as the value ({text})"
+        );
+    }
+}

@@ -49,6 +49,15 @@ pub trait ColumnSpill: Send + Sync {
     fn write(&self, bytes: &[u8]) -> std::io::Result<Bytes>;
 }
 
+/// The highest-numbered of `nodes` that holds a row.
+fn append_group(nodes: &std::collections::BTreeMap<u64, super::NodeGroup>) -> Option<u64> {
+    nodes
+        .iter()
+        .rev()
+        .find(|(_, group)| !group.versions.is_empty())
+        .map(|(number, _)| *number)
+}
+
 /// What a spill of a column did, over its row groups.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[non_exhaustive]
@@ -83,26 +92,76 @@ impl RowGroupStore {
     ///
     /// Returns the error of writing a file (as [`Error::Io`]) or of encoding
     /// a value; the row groups spilled before it stay spilled, the others
-    /// stay as they were.
+    /// stay as they were. The report comes back either way, so a caller can
+    /// count what the groups spilled before the error freed.
     pub fn spill_node_property_column(
         &self,
         key: &PropertyKey,
         spill: &dyn ColumnSpill,
-    ) -> Result<ColumnSpillReport> {
+    ) -> (ColumnSpillReport, Result<()>) {
+        self.spill_node_property_column_of(key, spill, false)
+    }
+
+    /// [`spill_node_property_column`](Self::spill_node_property_column) of
+    /// every row group but the newest ([`append_node_group`](Self::append_node_group)),
+    /// which the next creates write into: spilling it would make the next
+    /// write read the column back. What the memory limit spills (the vector
+    /// consumer).
+    ///
+    /// # Errors
+    ///
+    /// As [`spill_node_property_column`](Self::spill_node_property_column).
+    pub fn spill_node_property_column_but_newest(
+        &self,
+        key: &PropertyKey,
+        spill: &dyn ColumnSpill,
+    ) -> (ColumnSpillReport, Result<()>) {
+        self.spill_node_property_column_of(key, spill, true)
+    }
+
+    /// The highest-numbered node row group that holds rows: where this
+    /// store's next creates go. Each named graph has its own.
+    #[must_use]
+    pub fn append_node_group(&self) -> Option<u64> {
+        append_group(&self.inner.read().nodes)
+    }
+
+    /// The spill of `key`'s column, the newest group's kept when
+    /// `but_newest`. The report comes back with the error, so what the
+    /// groups spilled before it still counts.
+    fn spill_node_property_column_of(
+        &self,
+        key: &PropertyKey,
+        spill: &dyn ColumnSpill,
+        but_newest: bool,
+    ) -> (ColumnSpillReport, Result<()>) {
         let mut report = ColumnSpillReport::default();
         let (key, groups) = {
             let inner = self.inner.read();
             let Some(key) = inner.keys.get_id(key.as_str()) else {
-                return Ok(report);
+                return (report, Ok(()));
             };
-            (key, inner.nodes.keys().copied().collect::<Vec<u64>>())
+            let newest = but_newest.then(|| append_group(&inner.nodes)).flatten();
+            (
+                key,
+                inner
+                    .nodes
+                    .keys()
+                    .copied()
+                    .filter(|number| Some(*number) != newest)
+                    .collect::<Vec<u64>>(),
+            )
         };
         for number in groups {
             let inner = self.inner.upgradable_read();
             let Some(group) = inner.nodes.get(&number) else {
                 continue;
             };
-            let chunks = match group.columns.plan_spill(key)? {
+            let planned = match group.columns.plan_spill(key) {
+                Ok(planned) => planned,
+                Err(error) => return (report, Err(error)),
+            };
+            let chunks = match planned {
                 SpillPlan::Nothing => continue,
                 SpillPlan::Chained => {
                     report.kept_with_chains += 1;
@@ -114,28 +173,36 @@ impl RowGroupStore {
                 }
                 SpillPlan::Write(chunks) => chunks,
             };
-            let mapped = spill.write(&chunks.bytes).map_err(Error::Io)?;
+            let mapped = match spill.write(&chunks.bytes) {
+                Ok(mapped) => mapped,
+                Err(error) => return (report, Err(Error::Io(error))),
+            };
             let resident = chunks.resident;
             let file_bytes = chunks.bytes.len();
             let mut inner = RwLockUpgradableReadGuard::upgrade(inner);
             // Counted on its own: the writes' bracket closes first.
             inner.close_bracket();
             let thaws = inner.account.sink(grafeo_common::change::Table::Nodes);
-            let group = inner
-                .nodes
-                .get_mut(&number)
-                .ok_or_else(|| Error::Internal("a spilled row group is gone".to_string()))?;
+            let Some(group) = inner.nodes.get_mut(&number) else {
+                return (
+                    report,
+                    Err(Error::Internal("a spilled row group is gone".to_string())),
+                );
+            };
             let held = group.lines();
             let installed = group.columns.install_spill(key, chunks, &mapped, &thaws);
             let moved = group.lines();
             inner.account.moved(&held, &moved);
             inner.settle_tight();
-            let after = installed?;
+            let after = match installed {
+                Ok(after) => after,
+                Err(error) => return (report, Err(error)),
+            };
             report.spilled_groups += 1;
             report.file_bytes += file_bytes;
             report.freed_bytes += resident.saturating_sub(after);
         }
-        Ok(report)
+        (report, Ok(()))
     }
 
     /// The heap bytes a spill of the node property column of `key` would
@@ -145,14 +212,31 @@ impl RowGroupStore {
     /// group's column with update chains, or already spilled, counts none.
     #[must_use]
     pub fn node_property_column_spillable_bytes(&self, key: &PropertyKey) -> usize {
+        self.spillable_bytes_of(key, false)
+    }
+
+    /// [`node_property_column_spillable_bytes`](Self::node_property_column_spillable_bytes)
+    /// but the newest row group's: what
+    /// [`spill_node_property_column_but_newest`](Self::spill_node_property_column_but_newest)
+    /// frees.
+    #[must_use]
+    pub fn node_property_column_spillable_bytes_but_newest(&self, key: &PropertyKey) -> usize {
+        self.spillable_bytes_of(key, true)
+    }
+
+    /// The spillable bytes of `key`'s column, the newest group's left out
+    /// when `but_newest`.
+    fn spillable_bytes_of(&self, key: &PropertyKey, but_newest: bool) -> usize {
         let inner = self.inner.read();
         let Some(key) = inner.keys.get_id(key.as_str()) else {
             return 0;
         };
+        let newest = but_newest.then(|| append_group(&inner.nodes)).flatten();
         inner
             .nodes
-            .values()
-            .map(|group| group.columns.spillable_bytes(key))
+            .iter()
+            .filter(|(number, _)| Some(**number) != newest)
+            .map(|(_, group)| group.columns.spillable_bytes(key))
             .sum()
     }
 

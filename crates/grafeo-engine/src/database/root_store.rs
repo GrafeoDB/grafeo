@@ -36,6 +36,16 @@ pub(crate) trait RootStore: CatalogStore + LoadTarget + GraphBackend {
     /// Creates the property index on `key`, built from the data.
     fn create_property_index(&self, key: &str);
 
+    /// The buffer manager its memory comes from, once a database attached
+    /// it: an index build reserves its estimate there first.
+    fn memory_manager_of(
+        &self,
+    ) -> Option<std::sync::Arc<grafeo_common::memory::buffer::BufferManager>>;
+
+    /// The nodes it holds, counted without a scan (an index build's
+    /// estimate).
+    fn nodes_held(&self) -> usize;
+
     /// Drops the property index on `key`; `false` when there is none.
     fn drop_property_index(&self, key: &str) -> bool;
 
@@ -222,6 +232,16 @@ macro_rules! root_store_indexes {
 
 impl RootStore for RowGroupStore {
     root_store_indexes!();
+
+    fn memory_manager_of(
+        &self,
+    ) -> Option<std::sync::Arc<grafeo_common::memory::buffer::BufferManager>> {
+        self.memory_manager().cloned()
+    }
+
+    fn nodes_held(&self) -> usize {
+        self.nodes_counted()
+    }
 
     /// Loads the sections into the root (see
     /// `row_group_sections::load_row_group_sections`), which builds the

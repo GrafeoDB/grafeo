@@ -60,6 +60,8 @@ impl Session {
             buffer_manager: cfg.buffer_manager,
             #[cfg(feature = "spill")]
             spill_account: cfg.spill_account,
+            #[cfg(feature = "spill")]
+            query_memory_limit: cfg.query_memory_limit,
             commit_counter: cfg.commit_counter,
             gc_interval: cfg.gc_interval,
             active_streams: Arc::new(AtomicUsize::new(0)),

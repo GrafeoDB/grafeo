@@ -37,9 +37,7 @@ DynamicLibrary _load(String? path) {
   } else if (Platform.isLinux || Platform.isAndroid) {
     libraryName = 'libgrafeo_c.so';
   } else {
-    throw UnsupportedError(
-      'Unsupported platform: ${Platform.operatingSystem}',
-    );
+    throw UnsupportedError('Unsupported platform: ${Platform.operatingSystem}');
   }
 
   return DynamicLibrary.open(libraryName);

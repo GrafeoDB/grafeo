@@ -81,6 +81,34 @@ public sealed class GrafeoDB : IGrafeoDB, IDisposable, IAsyncDisposable
         return OpenWithHistory(path, history);
     }
 
+    /// <summary>
+    /// Open a database with <paramref name="options"/>: in memory when <paramref name="path"/>
+    /// is null, else the file at <paramref name="path"/>. Null options are the defaults. A
+    /// setting the database refuses (a zero memory limit) fails here with a
+    /// <see cref="GrafeoException"/>.
+    /// </summary>
+    public static GrafeoDB Open(string? path, GrafeoOptions? options)
+    {
+        var native = NativeMethods.grafeo_options_new();
+        if (native == nint.Zero)
+            throw GrafeoException.FromLastError();
+        try
+        {
+            options?.ApplyTo(native);
+            var ptr = NativeMethods.grafeo_open_with_options(path, native);
+            if (ptr == nint.Zero)
+                throw GrafeoException.FromLastError();
+
+            var handle = new DatabaseHandle();
+            Marshal.InitHandle(handle, ptr);
+            return new GrafeoDB(handle);
+        }
+        finally
+        {
+            NativeMethods.grafeo_options_free(native);
+        }
+    }
+
     private static GrafeoDB OpenWithHistory(string? path, HistoryRetention history)
     {
         var ptr = NativeMethods.grafeo_open_with_history(path, history.Kind, history.DurationMs);
@@ -601,6 +629,51 @@ public sealed class GrafeoDB : IGrafeoDB, IDisposable, IAsyncDisposable
         {
             var json = Marshal.PtrToStringUTF8(ptr)!;
             return ValueConverter.ParseObject(json);
+        }
+        finally
+        {
+            NativeMethods.grafeo_free_string(ptr);
+        }
+    }
+
+    /// <summary>
+    /// The bytes the database holds, as its accounts count them, and its limits:
+    /// <c>total_bytes</c>, <c>limit_bytes</c> (the memory limit), <c>query_limit_bytes</c>
+    /// (what one statement may hold), the parts, and <c>spill</c> (its <c>limit_bytes</c> is
+    /// null for no limit). The parts' keys follow the storage engine and may change in any
+    /// release.
+    /// </summary>
+    public IReadOnlyDictionary<string, object?> MemoryUsage()
+    {
+        ThrowIfDisposed();
+        var ptr = NativeMethods.grafeo_memory_usage_json(Handle);
+        if (ptr == nint.Zero)
+            throw GrafeoException.FromLastError();
+        try
+        {
+            return ValueConverter.ParseObject(Marshal.PtrToStringUTF8(ptr)!);
+        }
+        finally
+        {
+            NativeMethods.grafeo_free_string(ptr);
+        }
+    }
+
+    /// <summary>
+    /// What the open had to say, each with <c>code</c>, <c>message</c> and <c>context</c>:
+    /// <c>MEMORY_LIMIT_PASSED</c> when the data passes the memory limit (reads work, writes
+    /// that need memory fail with GRAFEO-S001), <c>MEMORY_DETECTION_FALLBACK</c> and
+    /// <c>GRAPH_TYPE_NOT_BOUND</c>. Empty for a clean open.
+    /// </summary>
+    public IReadOnlyList<IReadOnlyDictionary<string, object?>> OpenWarnings()
+    {
+        ThrowIfDisposed();
+        var ptr = NativeMethods.grafeo_open_warnings(Handle);
+        if (ptr == nint.Zero)
+            throw GrafeoException.FromLastError();
+        try
+        {
+            return ValueConverter.ParseRows(Marshal.PtrToStringUTF8(ptr)!);
         }
         finally
         {

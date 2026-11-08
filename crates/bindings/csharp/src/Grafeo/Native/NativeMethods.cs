@@ -25,6 +25,34 @@ internal static partial class NativeMethods
     [LibraryImport(LibName, StringMarshalling = StringMarshalling.Utf8)]
     internal static partial nint grafeo_open_read_only(string path);
 
+    /// <summary>A new open options object. Free with grafeo_options_free.</summary>
+    [LibraryImport(LibName)]
+    internal static partial nint grafeo_options_new();
+
+    /// <summary>Frees an open options object; null is ignored.</summary>
+    [LibraryImport(LibName)]
+    internal static partial void grafeo_options_free(nint options);
+
+    /// <summary>Sets the memory limit in bytes, above zero.</summary>
+    [LibraryImport(LibName)]
+    internal static partial int grafeo_options_set_memory_limit(nint options, ulong bytes);
+
+    /// <summary>Sets the query memory limit in bytes, above zero.</summary>
+    [LibraryImport(LibName)]
+    internal static partial int grafeo_options_set_query_memory_limit(nint options, ulong bytes);
+
+    /// <summary>Sets the spill limit in bytes; zero means nothing spills.</summary>
+    [LibraryImport(LibName)]
+    internal static partial int grafeo_options_set_spill_limit(nint options, ulong bytes);
+
+    /// <summary>Lifts the spill limit.</summary>
+    [LibraryImport(LibName)]
+    internal static partial int grafeo_options_set_unlimited_spill(nint options);
+
+    /// <summary>Open with options; a null path opens in memory, null options are the defaults. Returns null on error.</summary>
+    [LibraryImport(LibName, StringMarshalling = StringMarshalling.Utf8)]
+    internal static partial nint grafeo_open_with_options(string? path, nint options);
+
 
 
     /// <summary>Returns the library version string. The pointer is static, do NOT free.</summary>
@@ -444,6 +472,14 @@ internal static partial class NativeMethods
     /// <summary>Get database info as JSON. Caller must free with grafeo_free_string.</summary>
     [LibraryImport(LibName)]
     internal static partial nint grafeo_info(DatabaseHandle db);
+
+    /// <summary>The memory report as JSON. Caller must free with grafeo_free_string.</summary>
+    [LibraryImport(LibName)]
+    internal static partial nint grafeo_memory_usage_json(DatabaseHandle db);
+
+    /// <summary>The open's warnings as a JSON list. Caller must free with grafeo_free_string.</summary>
+    [LibraryImport(LibName)]
+    internal static partial nint grafeo_open_warnings(DatabaseHandle db);
 
     /// <summary>Save database to path.</summary>
     [LibraryImport(LibName, StringMarshalling = StringMarshalling.Utf8)]

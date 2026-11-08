@@ -238,6 +238,10 @@ pub struct Planner {
     /// Whether the rows are collected or streamed (a stream is shuffled per
     /// chunk).
     delivery: Delivery,
+    /// The statement's operator memory context, set as the ambient scope while
+    /// this planner plans and converts one statement (patch 9, #751).
+    #[cfg(feature = "spill")]
+    operator_memory: Option<grafeo_core::execution::OperatorMemoryContext>,
     /// Variables that hold scalar values (from UNWIND/FOR), not node/edge IDs.
     /// Used by plan_return to assign `LogicalType::Any` instead of `Node`.
     pub(super) scalar_columns: std::cell::RefCell<std::collections::HashSet<String>>,
@@ -357,6 +361,13 @@ impl Planner {
             hop_targets: std::cell::RefCell::new(std::collections::HashMap::new()),
             shuffle_unordered: false,
             delivery: Delivery::Collected,
+            #[cfg(feature = "spill")]
+            operator_memory: Some(grafeo_core::execution::OperatorMemoryContext::new(
+                grafeo_common::memory::buffer::BufferManager::new(
+                    grafeo_common::memory::buffer::BufferManagerConfig::default(),
+                ),
+                None,
+            )),
             scalar_columns: std::cell::RefCell::new(std::collections::HashSet::new()),
             edge_columns: std::cell::RefCell::new(std::collections::HashSet::new()),
             entity_list_columns: std::cell::RefCell::new(std::collections::HashMap::new()),
@@ -422,6 +433,13 @@ impl Planner {
             hop_targets: std::cell::RefCell::new(std::collections::HashMap::new()),
             shuffle_unordered: false,
             delivery: Delivery::Collected,
+            #[cfg(feature = "spill")]
+            operator_memory: Some(grafeo_core::execution::OperatorMemoryContext::new(
+                grafeo_common::memory::buffer::BufferManager::new(
+                    grafeo_common::memory::buffer::BufferManagerConfig::default(),
+                ),
+                None,
+            )),
             scalar_columns: std::cell::RefCell::new(std::collections::HashSet::new()),
             edge_columns: std::cell::RefCell::new(std::collections::HashSet::new()),
             entity_list_columns: std::cell::RefCell::new(std::collections::HashMap::new()),
@@ -655,6 +673,18 @@ impl Planner {
     #[must_use]
     pub fn with_shuffle_unordered(mut self, shuffle: bool) -> Self {
         self.shuffle_unordered = shuffle;
+        self
+    }
+
+    /// Sets the statement's operator memory context, entered as the ambient
+    /// scope while this planner plans one statement (patch 9, #751).
+    #[cfg(feature = "spill")]
+    #[must_use]
+    pub fn with_operator_memory(
+        mut self,
+        ctx: Option<grafeo_core::execution::OperatorMemoryContext>,
+    ) -> Self {
+        self.operator_memory = ctx;
         self
     }
 
@@ -912,6 +942,11 @@ impl Planner {
     /// or invalid expressions.
     pub fn plan(&self, logical_plan: &LogicalPlan) -> Result<PhysicalPlan> {
         let _span = grafeo_debug_span!("grafeo::query::plan");
+        #[cfg(feature = "spill")]
+        let _memory_scope = self
+            .operator_memory
+            .clone()
+            .map(grafeo_core::execution::enter_operator_memory);
         self.take_plan_names(logical_plan);
         self.find_reachability_expands(&logical_plan.root);
         self.session_context
@@ -938,6 +973,11 @@ impl Planner {
     ) -> Result<(PhysicalPlan, Vec<crate::query::profile::ProfileEntry>)> {
         self.profiling.set(true);
         self.profile_entries.borrow_mut().clear();
+        #[cfg(feature = "spill")]
+        let _memory_scope = self
+            .operator_memory
+            .clone()
+            .map(grafeo_core::execution::enter_operator_memory);
         self.take_plan_names(logical_plan);
         self.find_reachability_expands(&logical_plan.root);
         self.session_context

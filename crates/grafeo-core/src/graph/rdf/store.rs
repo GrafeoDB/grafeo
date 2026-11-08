@@ -226,7 +226,9 @@ struct TransactionBuffer {
 /// Configuration for the RDF store.
 #[derive(Debug, Clone)]
 pub struct RdfStoreConfig {
-    /// Initial capacity for triple storage.
+    /// Initial capacity of the indexes, in triples: 0 by default, so a
+    /// database that holds no RDF holds no index maps; they grow as
+    /// triples come.
     pub initial_capacity: usize,
     /// Whether to build object index (for reverse lookups).
     pub index_objects: bool,
@@ -235,7 +237,7 @@ pub struct RdfStoreConfig {
 impl Default for RdfStoreConfig {
     fn default() -> Self {
         Self {
-            initial_capacity: 1024,
+            initial_capacity: 0,
             index_objects: true,
         }
     }
@@ -478,6 +480,53 @@ impl RdfStore {
         }
         #[cfg(not(feature = "ring-index"))]
         0
+    }
+
+    /// About the heap bytes an insert of `triple` adds: the triple and its
+    /// slot in the set, an entry in each of the six indexes, and its terms'
+    /// text (the dictionary's). For the reservation a write takes before
+    /// the store changes at its commit (C7); the store's own count settles
+    /// what it really grew.
+    #[must_use]
+    pub fn insert_bytes_estimate(triple: &Triple) -> usize {
+        use std::mem::size_of;
+
+        let text = |term: &Term| match term {
+            Term::Iri(iri) => iri.as_str().len(),
+            Term::BlankNode(blank) => blank.id().len(),
+            Term::Literal(literal) => {
+                literal.value().len()
+                    + literal.datatype().len()
+                    + literal.language().map_or(0, str::len)
+            }
+            // A later kind of term: its text, as it is written.
+            other => other.to_string().len(),
+        };
+        let terms = text(triple.subject()) + text(triple.predicate()) + text(triple.object());
+        size_of::<Triple>()
+            + size_of::<Held>()
+            + size_of::<u64>()
+            + 3 * (index_entry_bytes::<Key>() + size_of::<Arc<Triple>>())
+            + 3 * (index_entry_bytes::<(Key, Key)>() + size_of::<Arc<Triple>>())
+            + terms
+    }
+
+    /// Takes `grant`, a write's reservation of what it inserts (see
+    /// [`insert_bytes_estimate`](Self::insert_bytes_estimate)), into this
+    /// graph's grant: the insert then grows the count within it, and the
+    /// next settle gives back what the estimate held past it.
+    pub fn adopt_grant(&self, grant: MemoryGrant) {
+        let mut held = self.grant.lock();
+        match held.as_mut() {
+            Some(held) => held.merge(grant),
+            None => *held = Some(grant),
+        }
+    }
+
+    /// The buffer manager of the dataset, once a database attached it.
+    #[must_use]
+    pub fn memory_manager(&self) -> Option<&Arc<BufferManager>> {
+        self.memory.get()
     }
 
     /// Brings this graph's grant to what it counts, forced (see
@@ -2912,9 +2961,10 @@ mod tests {
     #[test]
     fn named_graphs_start_without_preallocated_indexes() {
         let store = RdfStore::new();
-        assert!(
-            store.index_allocation_bytes() > 0,
-            "the default graph keeps its capacity"
+        assert_eq!(
+            store.index_allocation_bytes(),
+            0,
+            "the default graph starts without index maps too: they grow as triples come"
         );
         for index in 0..300 {
             store.create_graph(&format!("http://example.org/trips/{index}"));

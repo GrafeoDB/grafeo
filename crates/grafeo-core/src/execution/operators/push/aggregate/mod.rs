@@ -261,6 +261,9 @@ pub struct SpillableAggregatePushOperator {
     spill_state: Option<std::sync::Arc<super::spill_state::OperatorSpillState>>,
     /// Running total of estimated group memory in bytes (incremental tracking).
     estimated_bytes: usize,
+    /// The grant of the groups' bytes, grown per chunk against the statement's
+    /// query memory limit (patch 9, #751).
+    grant: Option<grafeo_common::memory::buffer::MemoryGrant>,
     /// The column types of the input chunks.
     input_types: ColumnTypes,
     /// How the keys read a local datetime against a zoned one (see
@@ -300,6 +303,7 @@ impl SpillableAggregatePushOperator {
             spill_threshold: DEFAULT_AGGREGATE_SPILL_THRESHOLD,
             using_partitioned: false,
             memory_ctx: None,
+            grant: None,
             spill_state: None,
             estimated_bytes: 0,
             input_types: ColumnTypes::default(),
@@ -337,6 +341,7 @@ impl SpillableAggregatePushOperator {
             spill_threshold: threshold,
             using_partitioned: true,
             memory_ctx: None,
+            grant: None,
             spill_state: None,
             estimated_bytes: 0,
             input_types: ColumnTypes::default(),
@@ -369,23 +374,28 @@ impl SpillableAggregatePushOperator {
         ctx.register_consumer(adapter);
 
         // Pre-create partitioned state using the spill manager from memory context
-        let partitioned = PartitionedState::new(
-            std::sync::Arc::clone(ctx.spill_manager()),
-            256,
-            serialize_group_state,
-            deserialize_group_state,
-        );
+        // (None: this open has no spill path, so the aggregate cannot spill).
+        let partitioned = ctx.spill_manager().map(|manager| {
+            PartitionedState::new(
+                std::sync::Arc::clone(manager),
+                256,
+                serialize_group_state,
+                deserialize_group_state,
+            )
+        });
+        let using_partitioned = partitioned.is_some();
 
         Self {
             group_by,
             aggregates,
             spill_manager: None,
-            partitioned_groups: Some(partitioned),
+            partitioned_groups: partitioned,
             groups: Groups::default(),
             global_state,
             spill_threshold: DEFAULT_AGGREGATE_SPILL_THRESHOLD,
-            using_partitioned: true,
+            using_partitioned,
             memory_ctx: Some(ctx),
+            grant: None,
             spill_state: Some(state),
             estimated_bytes: 0,
             input_types: ColumnTypes::default(),
@@ -443,6 +453,9 @@ impl SpillableAggregatePushOperator {
             partitioned
                 .spill_largest()
                 .map_err(crate::execution::spill::spill_error)?;
+            // Part of the state went to disk; release the grant, the next
+            // chunk re-grows it for what remains.
+            self.grant = None;
         }
 
         Ok(())
@@ -563,6 +576,30 @@ impl PushOperator for SpillableAggregatePushOperator {
             let acc_size = self.aggregates.len() * 64; // rough accumulator size
             self.estimated_bytes = group_count * (key_size + acc_size + 48);
             spill_state.set_usage(self.estimated_bytes);
+        }
+
+        // The statement's query memory limit bounds the groups: grow the grant
+        // per chunk. Over it, spill first; what cannot spill refuses, naming
+        // the query limit (patch 9, #751).
+        let over_limit = self
+            .memory_ctx
+            .clone()
+            .map(|ctx| ctx.grow(&mut self.grant, self.estimated_bytes));
+        if let Some(Err(error)) = over_limit {
+            let can_spill = self.spill_manager.is_some()
+                || self
+                    .memory_ctx
+                    .as_ref()
+                    .and_then(|c| c.spill_manager().cloned())
+                    .is_some();
+            if can_spill {
+                self.maybe_spill()?;
+            }
+            if self.estimated_bytes == 0 {
+                self.grant = None;
+            } else {
+                return Err(OperatorError::Wrapped(Box::new(error)));
+            }
         }
 
         // Check if we need to spill

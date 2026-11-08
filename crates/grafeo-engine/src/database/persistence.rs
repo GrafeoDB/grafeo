@@ -1073,17 +1073,63 @@ impl super::GrafeoDB {
     /// N-Triples term, or deserialization fails; and, naming the data and the
     /// feature, if it holds data this build cannot read.
     pub fn import_snapshot(data: &[u8]) -> Result<Self> {
+        Self::import_snapshot_with_config(data, crate::config::Config::in_memory())
+    }
+
+    /// Creates a new in-memory database with `config` (its memory limit among the settings)
+    /// from a binary snapshot, as [`import_snapshot`](Self::import_snapshot) does with the
+    /// defaults. The settings are the configuration's, never the snapshot's: a snapshot carries
+    /// data only.
+    ///
+    /// An import never refuses for memory: data past the memory limit opens, reads, and lists
+    /// `MEMORY_LIMIT_PASSED` in [`open_warnings`](Self::open_warnings), and writes that need
+    /// memory fail with `GRAFEO-S001` until the limit is raised.
+    ///
+    /// # Errors
+    ///
+    /// As [`import_snapshot`](Self::import_snapshot), and an invalid-input error
+    /// (`GRAFEO-V001`) for a configuration with a path: an import opens in memory, and a
+    /// database file opens with [`with_config`](Self::with_config) of
+    /// [`Config::persistent`](crate::config::Config::persistent).
+    pub fn import_snapshot_with_config(data: &[u8], config: crate::config::Config) -> Result<Self> {
+        if let Some(path) = config.path() {
+            return Err(Error::InvalidValue(format!(
+                "a snapshot import opens in memory, and the configuration names the file {}:                  open a database file with GrafeoDB::with_config(Config::persistent(path))",
+                path.display()
+            )));
+        }
         // Decoded, validated and refused (data this build cannot read)
         // before the database is created.
         let decoded = decode_snapshot(data, "import")?;
         refuse_unreadable_snapshot(&decoded, "import")?;
-        let db = Self::new_in_memory();
+        let mut db = Self::with_config(config)?;
         let root = db.lpg_store()?;
         // Restored from the snapshot as decoded: decoding it again would
         // cost as much as the rest of a small import.
         row_groups::restore_decoded(&db.snapshot_parts(&root), decoded)?;
+        // The open applied ForceDisk before the restore; the restored rows
+        // stay on disk only if the overrides are reapplied after it.
+        db.apply_force_disk_overrides();
         // The database continues at the snapshot's epoch.
         Self::continue_epochs(&root, &db.transaction_manager);
+        // What the open would say of the database as imported: its data, past the limit or not,
+        // came after the empty open's warnings.
+        let fallback = db
+            .open_warnings
+            .iter()
+            .find(|warning| {
+                matches!(
+                    warning,
+                    crate::admin::OpenWarning::MemoryDetectionFallback { .. }
+                )
+            })
+            .cloned();
+        db.open_warnings = db.open_warnings_after_open(fallback);
+        // As a normal open logs its warnings, an import logs the recalculated
+        // ones (MEMORY_LIMIT_PASSED among them).
+        for warning in &db.open_warnings {
+            grafeo_common::grafeo_warn!("{warning}");
+        }
         Ok(db)
     }
 
@@ -1521,6 +1567,74 @@ mod tests {
     use super::{
         SNAPSHOT_VERSION, Snapshot, SnapshotEdge, SnapshotIndexes, SnapshotNode, SnapshotSchema,
     };
+
+    /// An import with a configuration opens with its settings, the memory limit among them, and
+    /// with the snapshot's data.
+    #[test]
+    fn an_import_with_a_config_takes_its_limit_and_the_data() {
+        let source = GrafeoDB::new_in_memory();
+        source.execute("INSERT (:Person {name: 'Alix'})").unwrap();
+        let snapshot = source.export_snapshot().unwrap();
+        let limit = 48 * 1024 * 1024;
+        let db = GrafeoDB::import_snapshot_with_config(
+            &snapshot,
+            crate::config::Config::in_memory().with_memory_limit(limit),
+        )
+        .unwrap();
+        assert_eq!(db.memory_usage().limit_bytes, limit);
+        assert_eq!(db.node_count().unwrap(), 1);
+        let plain = GrafeoDB::import_snapshot(&snapshot).unwrap();
+        assert_eq!(
+            plain.memory_usage().limit_bytes,
+            GrafeoDB::new_in_memory().memory_usage().limit_bytes,
+            "without a configuration, the default"
+        );
+    }
+
+    /// A snapshot import opens in memory: a configuration with a path is refused, naming the
+    /// open of a file, never opened as an in-memory database in its place.
+    #[test]
+    fn an_import_with_a_pathed_config_is_refused() {
+        let snapshot = GrafeoDB::new_in_memory().export_snapshot().unwrap();
+        let error = GrafeoDB::import_snapshot_with_config(
+            &snapshot,
+            crate::config::Config::persistent("somewhere.grafeo"),
+        )
+        .err()
+        .expect("a path is refused");
+        assert_eq!(
+            error.error_code(),
+            grafeo_common::utils::error::ErrorCode::InvalidInput,
+            "{error}"
+        );
+        assert!(error.to_string().contains("in memory"), "{error}");
+    }
+
+    /// An import never refuses: data past the limit it is given opens, reads, and warns with
+    /// MEMORY_LIMIT_PASSED, as an open of a file over its limit does.
+    #[test]
+    fn an_import_over_its_limit_opens_reads_and_warns() {
+        let source = GrafeoDB::new_in_memory();
+        source
+            .execute(
+                "UNWIND range(1, 4096) AS i INSERT (:Fill {text: CAST(i AS STRING) || '                 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx                 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx                 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx                 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'})",
+            )
+            .unwrap();
+        let snapshot = source.export_snapshot().unwrap();
+        let db = GrafeoDB::import_snapshot_with_config(
+            &snapshot,
+            crate::config::Config::in_memory().with_memory_limit(1024 * 1024),
+        )
+        .expect("an import over its limit opens");
+        assert_eq!(db.node_count().unwrap(), 4096, "and holds every node");
+        assert!(
+            db.open_warnings()
+                .iter()
+                .any(|warning| warning.code() == "MEMORY_LIMIT_PASSED"),
+            "{:?}",
+            db.open_warnings()
+        );
+    }
 
     #[test]
     fn test_restore_snapshot_basic() {

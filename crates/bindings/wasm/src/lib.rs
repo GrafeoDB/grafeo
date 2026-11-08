@@ -46,6 +46,47 @@ pub(crate) fn js_error(message: &str) -> JsValue {
     JsError::new(message).into()
 }
 
+/// The memory limit `options.memoryLimit` sets, in bytes: `None` when the options or the key are
+/// left out, an error for a number that is not a positive whole number of bytes.
+fn memory_limit(options: Option<&js_sys::Object>) -> Result<Option<usize>, JsValue> {
+    let Some(options) = options else {
+        return Ok(None);
+    };
+    let limit = js_sys::Reflect::get(options, &JsValue::from_str("memoryLimit"))?;
+    if limit.is_undefined() || limit.is_null() {
+        return Ok(None);
+    }
+    match limit.as_f64() {
+        Some(bytes) if bytes >= 1.0 && bytes.fract() == 0.0 && bytes <= usize::MAX as f64 =>
+        {
+            #[allow(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                reason = "a whole number from 1 to usize::MAX, checked above"
+            )]
+            Ok(Some(bytes as usize))
+        }
+        _ => Err(js_error(
+            "memoryLimit must be a positive whole number of bytes",
+        )),
+    }
+}
+
+/// The in-memory configuration `options` set (`historyRetention`, `memoryLimit`), the defaults
+/// for `None`.
+fn in_memory_config(options: Option<&js_sys::Object>) -> Result<grafeo_engine::Config, JsValue> {
+    let mut config = grafeo_engine::Config::in_memory();
+    if let Some(options) = options
+        && let Some(retention) = time_travel::history_retention(options)?
+    {
+        config = config.with_history_retention(retention);
+    }
+    if let Some(bytes) = memory_limit(options)? {
+        config = config.with_memory_limit(bytes);
+    }
+    Ok(config)
+}
+
 /// A JS `Error` with `message` and the GQLSTATUS `status` as `gqlStatus`,
 /// for an error the binding raises itself about the state of the database
 /// or of the data it is given.
@@ -120,29 +161,23 @@ impl Database {
     /// Creates a new in-memory database. `options.historyRetention` sets
     /// how much history it keeps for time-travel reads (`asOf`): `'off'`
     /// (the default), `'forever'` or a number of milliseconds.
+    /// `options.memoryLimit` sets how many bytes it may hold (768 MiB by
+    /// default): a write past it throws `GRAFEO-S001` and changes nothing.
     ///
     /// ```js
-    /// const db = new Database({ historyRetention: 60 * 60 * 1000 });
+    /// const db = new Database({ historyRetention: 60 * 60 * 1000, memoryLimit: 256 * 1024 * 1024 });
     /// ```
     ///
     /// # Errors
     ///
-    /// Returns `JsError` for another `historyRetention`, or if the database
-    /// fails to initialise.
+    /// Returns `JsError` for another `historyRetention`, a `memoryLimit` that
+    /// is not a positive whole number, or if the database fails to
+    /// initialise.
     #[wasm_bindgen(constructor)]
     pub fn create(options: Option<js_sys::Object>) -> Result<Database, JsValue> {
         utils::set_panic_hook();
-        let retention = match &options {
-            Some(options) => time_travel::history_retention(options)?,
-            None => None,
-        };
-        let db = match retention {
-            Some(retention) => GrafeoDB::with_config(
-                grafeo_engine::Config::in_memory().with_history_retention(retention),
-            )
-            .map_err(database_error)?,
-            None => GrafeoDB::new_in_memory(),
-        };
+        let config = in_memory_config(options.as_ref())?;
+        let db = GrafeoDB::with_config(config).map_err(database_error)?;
         Ok(Database::from_engine(db))
     }
 
@@ -515,17 +550,25 @@ impl Database {
 
     /// Creates a database from a binary snapshot.
     ///
-    /// The `data` must have been produced by `exportSnapshot()`.
+    /// The `data` must have been produced by `exportSnapshot()`. `options`
+    /// take the constructor's keys (`historyRetention`, `memoryLimit`): the
+    /// database opens with them, or with the defaults, never with the
+    /// settings of the database that exported the snapshot. Data past the
+    /// memory limit opens and reads; writes that need memory throw
+    /// `GRAFEO-S001`.
     ///
     /// ```js
-    /// const db = Database.importSnapshot(bytes);
+    /// const db = Database.importSnapshot(bytes, { memoryLimit: 256 * 1024 * 1024 });
     /// ```
     ///
     /// # Errors
     ///
     /// Returns `JsError` if `data` is not a valid snapshot or deserialisation fails.
     #[wasm_bindgen(js_name = "importSnapshot")]
-    pub fn import_snapshot(data: &[u8]) -> Result<Database, JsValue> {
+    pub fn import_snapshot(
+        data: &[u8],
+        options: Option<js_sys::Object>,
+    ) -> Result<Database, JsValue> {
         utils::set_panic_hook();
         if data.len() > signed_snapshot::MAX_SNAPSHOT_BYTES {
             return Err(js_error(&format!(
@@ -539,7 +582,8 @@ impl Database {
                  Use importSnapshotSigned(data, key) to verify and restore it.",
             ));
         }
-        let inner = GrafeoDB::import_snapshot(data).map_err(database_error)?;
+        let config = in_memory_config(options.as_ref())?;
+        let inner = GrafeoDB::import_snapshot_with_config(data, config).map_err(database_error)?;
         Ok(Database::from_engine(inner))
     }
 
@@ -549,8 +593,10 @@ impl Database {
     /// constant time before deserialising. Rejects snapshots that are
     /// truncated, tagged with a different key, or missing the `GSN1` header.
     ///
+    /// `options` take the constructor's keys, as `importSnapshot`'s do.
+    ///
     /// ```js
-    /// const restored = Database.importSnapshotSigned(signed, key);
+    /// const restored = Database.importSnapshotSigned(signed, key, { memoryLimit: 256 * 1024 * 1024 });
     /// ```
     ///
     /// # Errors
@@ -559,7 +605,11 @@ impl Database {
     /// limit, the header is missing, the MAC does not verify, or
     /// deserialisation fails.
     #[wasm_bindgen(js_name = "importSnapshotSigned")]
-    pub fn import_snapshot_signed(data: &[u8], key: &[u8]) -> Result<Database, JsValue> {
+    pub fn import_snapshot_signed(
+        data: &[u8],
+        key: &[u8],
+        options: Option<js_sys::Object>,
+    ) -> Result<Database, JsValue> {
         utils::set_panic_hook();
         if key.is_empty() {
             return Err(js_error("importSnapshotSigned: key must not be empty"));
@@ -575,7 +625,9 @@ impl Database {
         let payload = signed_snapshot::unwrap(key, data).map_err(|message| {
             js_error_with_status(&message, &grafeo_common::utils::GqlStatus::DATA_EXCEPTION)
         })?;
-        let inner = GrafeoDB::import_snapshot(payload).map_err(database_error)?;
+        let config = in_memory_config(options.as_ref())?;
+        let inner =
+            GrafeoDB::import_snapshot_with_config(payload, config).map_err(database_error)?;
         Ok(Database::from_engine(inner))
     }
 
@@ -1397,9 +1449,12 @@ impl Database {
 
     /// Returns a hierarchical memory usage breakdown.
     ///
-    /// The returned object mirrors the engine's `MemoryUsage` struct with
-    /// `totalBytes`, `store`, `indexes`, `mvcc`, `caches`, `stringPool`,
-    /// and `bufferManager` sections.
+    /// The returned object mirrors the engine's `MemoryUsage` struct, with
+    /// its keys as the engine names them: `total_bytes`, `limit_bytes` (the
+    /// memory limit), `query_limit_bytes` (what one statement may hold), the
+    /// `store`, `indexes`, `mvcc`, `caches`, `string_pool` and
+    /// `buffer_manager` sections, `rdf` and `cdc` when they hold anything,
+    /// and `spill`.
     ///
     /// ```js
     /// const usage = db.memoryUsage();

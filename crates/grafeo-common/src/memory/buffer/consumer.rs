@@ -26,6 +26,20 @@ pub enum SpillError {
     Refused(Box<crate::utils::error::LimitRefusal>),
 }
 
+/// Why the buffer manager asks a consumer to spill. Closed: a new cause
+/// has to say what each consumer does for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpillCause {
+    /// A caller asked for it: a section forced to disk at open
+    /// (`TierOverride::ForceDisk`), or a spill by name. The consumer spills
+    /// all it can.
+    Explicit,
+    /// The eviction cycle makes room under the memory limit. A consumer
+    /// may keep what its next writes would read straight back (the newest
+    /// row group's vectors).
+    Pressure,
+}
+
 /// Trait for subsystems that consume managed memory.
 ///
 /// Memory consumers register with the buffer manager and participate
@@ -69,6 +83,25 @@ pub trait MemoryConsumer: Send + Sync {
     /// Returns an error if spilling fails or is not supported.
     fn spill(&self, _target_bytes: usize) -> Result<usize, SpillError> {
         Err(SpillError::NotSupported)
+    }
+
+    /// Spills for `cause` (see [`SpillCause`]); what the buffer manager
+    /// calls. The default spills as [`spill`](Self::spill) does, whatever
+    /// the cause.
+    ///
+    /// # Errors
+    ///
+    /// As [`spill`](Self::spill).
+    fn spill_for(&self, target_bytes: usize, cause: SpillCause) -> Result<usize, SpillError> {
+        let _ = cause;
+        self.spill(target_bytes)
+    }
+
+    /// The bytes a spill for `cause` would free; the default is
+    /// [`memory_usage`](Self::memory_usage), whatever the cause.
+    fn spillable_bytes(&self, cause: SpillCause) -> usize {
+        let _ = cause;
+        self.memory_usage()
     }
 
     /// Reloads spilled data from disk (called when memory becomes available).

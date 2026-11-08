@@ -2182,6 +2182,63 @@ pub extern "C" fn grafeo_clear_plan_cache(db: *mut GrafeoDatabase) -> GrafeoStat
     GrafeoStatus::Ok
 }
 
+/// The database's memory report as a JSON object: `total_bytes`, `limit_bytes` (the memory
+/// limit), `query_limit_bytes` (what one statement's operators may hold), the parts (`store`,
+/// `indexes`, `mvcc`, `caches`, `string_pool`, `buffer_manager`, and `rdf` and `cdc` when they
+/// hold anything) and `spill` (`total_bytes`, `limit_bytes` or null for no limit, and the bytes
+/// per owner). Caller must free with `grafeo_free_string`; NULL for a null database.
+#[unsafe(no_mangle)]
+pub extern "C" fn grafeo_memory_usage_json(db: *mut GrafeoDatabase) -> *mut c_char {
+    if db.is_null() {
+        set_last_error("Null database pointer");
+        return std::ptr::null_mut();
+    }
+    // SAFETY: Caller guarantees valid pointer.
+    let db = unsafe { &*db };
+    let usage = db.inner.read().memory_usage();
+    json_string(&serde_json::to_value(&usage).unwrap_or_default())
+}
+
+/// What the open had to say, as a JSON list of `{"code", "message", "context"}` objects (an
+/// empty list for a clean open): `MEMORY_LIMIT_PASSED` when the data passes the memory limit
+/// (reads work, writes that need memory fail with `GRAFEO-S001`),
+/// `MEMORY_DETECTION_FALLBACK` and `GRAPH_TYPE_NOT_BOUND`. Caller must free with
+/// `grafeo_free_string`; NULL for a null database.
+#[unsafe(no_mangle)]
+pub extern "C" fn grafeo_open_warnings(db: *mut GrafeoDatabase) -> *mut c_char {
+    if db.is_null() {
+        set_last_error("Null database pointer");
+        return std::ptr::null_mut();
+    }
+    // SAFETY: Caller guarantees valid pointer.
+    let db = unsafe { &*db };
+    let warnings: Vec<serde_json::Value> = db
+        .inner
+        .read()
+        .open_warnings()
+        .iter()
+        .map(|warning| {
+            let context = match warning {
+                grafeo_engine::admin::OpenWarning::GraphTypeScope { context, .. } => {
+                    context.clone()
+                }
+                _ => None,
+            };
+            serde_json::json!({
+                "code": warning.code(),
+                "message": warning.to_string(),
+                "context": context,
+            })
+        })
+        .collect();
+    json_string(&serde_json::Value::Array(warnings))
+}
+
+/// `value` as a C string the caller frees with `grafeo_free_string`.
+fn json_string(value: &serde_json::Value) -> *mut c_char {
+    CString::new(value.to_string()).map_or(std::ptr::null_mut(), CString::into_raw)
+}
+
 /// Get database info as a JSON string. Caller must free with `grafeo_free_string`.
 /// NULL on error (a read the store cannot do), with the error in
 /// `grafeo_last_error`.

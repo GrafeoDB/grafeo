@@ -451,6 +451,50 @@ fn vector_index_at(
     Ok(index)
 }
 
+/// About the heap bytes a text index takes per node it holds: its
+/// postings, its terms' share and the document's length.
+#[cfg(feature = "text-index")]
+pub(crate) const TEXT_INDEX_BYTES_PER_NODE: usize = 256;
+
+/// About the heap bytes a vector index of `dimensions` takes per node it
+/// holds: its copy of the vector and its graph's neighbours.
+#[cfg(feature = "vector-index")]
+pub(crate) fn vector_index_bytes_per_node(dimensions: Option<usize>) -> usize {
+    dimensions.map_or(1_024, |dimensions| {
+        dimensions.saturating_mul(4).saturating_add(256)
+    })
+}
+
+/// A grant of what an index build over the nodes of `label` in `store`
+/// takes, `per_node` bytes each, reserved before the build runs: `None`
+/// without a buffer manager.
+///
+/// # Errors
+///
+/// The memory limit's refusal (`GRAFEO-S001`), after the buffer manager made
+/// what room it could: nothing was built.
+#[cfg(any(feature = "vector-index", feature = "text-index"))]
+pub(crate) fn reserve_index_build(
+    store: &RowGroupStore,
+    label: &str,
+    per_node: usize,
+) -> Result<Option<grafeo_common::memory::buffer::MemoryGrant>> {
+    use grafeo_common::memory::buffer::MemoryRegion;
+    use grafeo_common::utils::error::LimitBound;
+
+    let Some(manager) = store.memory_manager() else {
+        return Ok(None);
+    };
+    let nodes = GraphStore::nodes_by_label_count(store, label, ReadView::latest())?;
+    let bytes = nodes.saturating_mul(per_node);
+    let mut grant = manager.empty_grant(MemoryRegion::IndexBuffers);
+    if grant.try_grow(bytes) || (manager.make_room(bytes) && grant.try_grow(bytes)) {
+        Ok(Some(grant))
+    } else {
+        Err(manager.refusal(LimitBound::MemoryLimit, bytes).into())
+    }
+}
+
 /// A text index of `property` on the nodes of `graph` that have `label`,
 /// with `options`, built from their text values, for `create_text_index`
 /// and `CREATE INDEX ... USING TEXT`.
@@ -839,6 +883,9 @@ impl super::GrafeoDB {
             let key = self.current_graph_key();
             let (graph, store) = self.index_target(key.as_deref())?;
             self.convert_vector_lists(&store, key.as_deref(), label, property, dimensions)?;
+            // Held until the index is in: the store counts it then.
+            let _reserved =
+                reserve_index_build(&store, label, vector_index_bytes_per_node(dimensions))?;
             let index = vector_index_from_data(
                 &*graph,
                 label,
@@ -1182,7 +1229,9 @@ impl super::GrafeoDB {
         self.check_index_change()?;
         // On the current graph, as the other direct calls (#677).
         let key = self.current_graph_key();
-        let (graph, _) = self.index_target(key.as_deref())?;
+        let (graph, store) = self.index_target(key.as_deref())?;
+        // Held until the index is in: the store counts it then.
+        let _reserved = reserve_index_build(&store, label, TEXT_INDEX_BYTES_PER_NODE)?;
         let index = text_index_from_data(&*graph, label, property, &options)?;
         let kind = text_index_kind(label, property, &options)?;
         let held = self.hold_for_standalone(false)?;

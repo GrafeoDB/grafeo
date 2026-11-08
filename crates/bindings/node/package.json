@@ -1,6 +1,6 @@
 {
   "name": "@grafeo-db/js",
-  "version": "0.6.1",
+  "version": "0.6.2",
   "description": "Node.js/TypeScript bindings for Grafeo - a high-performance embeddable graph database",
   "main": "grafeo.js",
   "types": "grafeo.d.ts",

@@ -203,8 +203,14 @@ impl SpillAccount {
             })?;
         if let Err(refusal) = self.check_room(bytes, new_file) {
             // A step the room refuses may leave room for what the write
-            // needs: the probe of a new file was just taken.
-            if bytes == at_least || self.check_room(at_least, false).is_err() {
+            // needs: the probe of a new file was just taken. When that is
+            // refused too, its refusal states what the write needs.
+            let refused = if bytes == at_least {
+                Some(refusal)
+            } else {
+                self.check_room(at_least, false).err()
+            };
+            if let Some(refusal) = refused {
                 self.used.fetch_sub(bytes, Ordering::AcqRel);
                 return Err(refusal);
             }
@@ -361,5 +367,25 @@ mod tests {
         // The volume no longer answers: the cap alone bounds.
         let _second = account.reserve(SpillOwner::Sort, 100, true).unwrap();
         assert_eq!(account.used(), 104);
+    }
+
+    /// When neither the step nor what the write needs leaves the room, the
+    /// refusal states what the write needs, not the step.
+    #[test]
+    fn a_refused_fallback_states_what_the_write_needs() {
+        let room = SpillRoom {
+            volume: PathBuf::from("rotterdam"),
+            probe: Box::new(|_: &Path| Ok(100)),
+            needed: Box::new(|| 50),
+        };
+        let account = SpillAccount::new(SpillCap::Unlimited, Some(room));
+        let refusal = account
+            .reserve_up_to(SpillOwner::Sort, 1_000, 80, true)
+            .expect_err("80 bytes leave 20 of the 50 needed");
+        assert!(
+            matches!(refusal, LimitRefusal::Room { requested: 80, .. }),
+            "{refusal:?}"
+        );
+        assert_eq!(account.used(), 0, "nothing counted");
     }
 }

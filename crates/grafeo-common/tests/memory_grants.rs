@@ -446,7 +446,7 @@ fn a_refusal_is_grafeo_s001_with_the_bound_the_bytes_and_the_setting() {
             },
             &[
                 "spilling 100 more bytes would leave 900 bytes free on spill-volume",
-                "the database needs 950 for its next checkpoint",
+                "the database's checkpoint room needs 950 bytes for its next checkpoint",
             ],
         ),
     ];

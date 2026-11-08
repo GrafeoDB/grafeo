@@ -108,10 +108,43 @@ export interface UpsertSummary {
   skippedRows: number[];
 }
 
-/** The options of `new Database(options)`. */
+/** The options of `new Database(options)` and `Database.importSnapshot(data, options)`. */
 export interface DatabaseOptions {
   /** `'off'` (the default), `'forever'` or how far back the history reaches, in milliseconds. */
   historyRetention?: 'off' | 'forever' | number;
+  /**
+   * How many bytes the database may hold, a positive whole number (768 MiB by default). A write
+   * past it throws `GRAFEO-S001` and changes nothing; reads keep working.
+   */
+  memoryLimit?: number;
+}
+
+/**
+ * The bytes a database holds, as its accounts count them, and its limits, with the engine's key
+ * names. The parts' keys follow the storage engine and may change in any release.
+ */
+export interface MemoryUsage {
+  total_bytes: number;
+  /** The memory limit. */
+  limit_bytes: number;
+  /** What one statement's operators may hold, never more than `limit_bytes`. */
+  query_limit_bytes: number;
+  store: Record<string, number>;
+  indexes: Record<string, unknown>;
+  mvcc: Record<string, number>;
+  caches: Record<string, number>;
+  string_pool: Record<string, number>;
+  buffer_manager: Record<string, number>;
+  rdf?: Record<string, number>;
+  cdc?: Record<string, number>;
+  /** What may spill and what has; an in-memory database spills nothing (`limit_bytes` 0). */
+  spill: {
+    total_bytes: number;
+    limit_bytes: number | null;
+    sort_bytes: number;
+    aggregate_bytes: number;
+    vector_column_bytes: number;
+  };
 }
 
 /**
@@ -177,8 +210,12 @@ export class Database {
   /**
    * Creates a new in-memory database. `historyRetention` sets how much history it keeps for
    * time-travel reads (`asOf`): `'off'` (the default), `'forever'` or a number of milliseconds.
+   * `memoryLimit` sets how many bytes it may hold.
    */
   constructor(options?: DatabaseOptions | null);
+
+  /** The bytes the database holds and its limits. */
+  memoryUsage(): MemoryUsage;
 
   /** The epoch of the last commit. */
   currentEpoch(): bigint;
@@ -311,16 +348,18 @@ export class Database {
   exportSnapshot(): Uint8Array;
 
   /**
-   * Creates a database from a binary snapshot.
+   * Creates a database from a binary snapshot, with `options` (the constructor's) or the
+   * defaults, never the settings of the database that exported it.
    *
    * @param data - Bytes previously produced by `exportSnapshot()`.
+   * @param options - The constructor's options, such as `memoryLimit`.
    *
    * @example
    * ```js
-   * const db = Database.importSnapshot(bytes);
+   * const db = Database.importSnapshot(bytes, { memoryLimit: 256 * 1024 * 1024 });
    * ```
    */
-  static importSnapshot(data: Uint8Array): Database;
+  static importSnapshot(data: Uint8Array, options?: DatabaseOptions | null): Database;
 
   /**
    * Returns schema information: the labels, edge types and property keys

@@ -1350,18 +1350,15 @@ fn type_mismatch(
 }
 
 /// A value as a query writes it, for an error message: `'Alix'`, `3`,
-/// `LOCAL DATETIME '2026-10-05T10:30:00'`, `[3]`.
+/// `DATETIME '2026-10-05T10:30:00'`, `DATETIME '2026-10-05T10:30:00+02:00'`, `[3]`.
+/// A datetime reads back as the same value (ISO/IEC 39075 21.2 Syntax Rule 65).
 fn value_text(value: &Value) -> String {
     match value {
         Value::String(text) => format!("'{}'", text.replace('\\', "\\\\").replace('\'', "\\'")),
-        // A LOCAL DATETIME has no zone: no `Z`, and no fraction of zero.
-        Value::Timestamp(timestamp) => {
-            let text = timestamp.to_string();
-            let text = text.strip_suffix('Z').unwrap_or(&text);
-            let text = text.strip_suffix(".000000").unwrap_or(text);
-            format!("LOCAL DATETIME '{text}'")
-        }
-        Value::ZonedDatetime(datetime) => format!("ZONED DATETIME '{datetime}'"),
+        // A local datetime writes no `Z` and no fraction of zero; a zoned one
+        // keeps its offset.
+        Value::Timestamp(timestamp) => format!("DATETIME '{}'", timestamp.to_local_text()),
+        Value::ZonedDatetime(datetime) => format!("DATETIME '{datetime}'"),
         Value::Date(date) => format!("DATE '{date}'"),
         Value::Time(time) => format!("TIME '{time}'"),
         Value::Duration(duration) => format!("DURATION '{duration}'"),

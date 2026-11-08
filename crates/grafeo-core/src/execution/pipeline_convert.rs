@@ -92,6 +92,8 @@ pub fn convert_to_pipeline_with_memory(
     root: Box<dyn Operator>,
     memory_ctx: Option<super::memory::OperatorMemoryContext>,
 ) -> (Box<dyn Operator>, Vec<Box<dyn PushOperator>>) {
+    // The statement's context, passed by the session; the ambient planning
+    // scope (patch 9) is captured by the pull operators at construction.
     let Some(ctx) = memory_ctx else {
         return convert_to_pipeline(root);
     };
@@ -433,7 +435,7 @@ mod tests {
         let temp_dir = tempfile::TempDir::new().unwrap();
         let context = OperatorMemoryContext::new(
             BufferManager::with_budget(1024 * 1024),
-            Arc::new(SpillManager::new(temp_dir.path()).unwrap()),
+            Some(Arc::new(SpillManager::new(temp_dir.path()).unwrap())),
         );
         let (source, push_ops) =
             convert_to_pipeline_with_memory(nodes_sorted_by_a_dropped_key(), Some(context));

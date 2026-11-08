@@ -18,6 +18,8 @@ The buffer manager controls a single memory budget shared across all operations.
 
 The memory limit bounds what the database's own structures hold: the store's tables, columns and versions, its indexes, the RDF store, the change data capture log, open transactions' change sets and the queries' operator buffers. Each counts the capacity it allocates, as it grows. The process uses more than that: the allocator's own bookkeeping and the free space it keeps, whole pages where the structures use part of one, and memory the database does not account for (thread stacks, the plan and query caches, the language runtime of a binding). Measured on Linux against the process's private memory (`Private_Clean + Private_Dirty` in `/proc/self/smaps_rollup`), the counted bytes were 72% of the growth for 100,000 nodes with eight integer properties, and 76% for 10,000 nodes with a 384-dimension vector and its index. So a process holding a database at a limit L grows to about 1.4 times L (1 / 0.72; 1.3 times in the vector case), roughly 40% more than the limit: leave that margin when choosing it. To keep the process under 4 GiB, for example, set a limit of about 2.5 GiB, which keeps some room beside that margin.
 
+At the limit, a statement that needs more memory than the database can free (by evicting or spilling what it can) fails with `GRAFEO-S001` and changes nothing; reads keep working. A database that already holds at or above the limit when it opens (a file written under a higher limit, or a limit lowered since) still opens: `open_warnings()` reports `MEMORY_LIMIT_PASSED`, and writes that need memory fail until the limit is raised.
+
 Memory is tracked across four regions that share the unified budget:
 
 | Region | Contents |
@@ -35,8 +37,8 @@ The buffer manager responds to memory pressure in stages:
 | ----- | --------- | ------ |
 | Normal | < 70% | No action |
 | Moderate | 70-85% | Proactive eviction of cold data |
-| High | 85-95% | Aggressive eviction, trigger spilling |
-| Critical | > 95% | Block new allocations |
+| High | 85-<100% | Aggressive eviction, trigger spilling |
+| Critical | 100% | Refuse what does not fit after eviction (`GRAFEO-S001`) |
 
 Eviction follows LRU (Least Recently Used) with priority hints: cached results are evicted first, then intermediate results, then active operator state.
 
@@ -74,6 +76,8 @@ Large operations can spill to disk when memory is exhausted. Spilling is trigger
 | Hash Join | Partition both sides by hash, spill partitions that don't fit, process spilled partitions later |
 | Aggregate | Partition by group key |
 | Sort | External merge sort: sort chunks in memory, write sorted runs to disk, merge runs |
+
+Under memory pressure, embedding columns spill by row group, and each graph's newest row group keeps its column in memory, since new rows go there. After an explicit spill (`TierOverride::ForceDisk` through `Config::with_section_tier`, or a spill asked for by name) the newest group is on disk too, and a write into it reads its column back into memory first, so at the memory limit it can be refused until a later release, which writes such rows without reading the spilled part back ([#713](https://github.com/GrafeoDB/grafeo/issues/713)).
 
 ### Configuration
 

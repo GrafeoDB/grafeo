@@ -699,6 +699,8 @@ impl super::Planner {
                     .with_temporal(self.session_context.temporal_comparison),
             )
         } else {
+            #[cfg(feature = "spill")]
+            let _ = grafeo_core::execution::capture_operator_memory(false);
             Box::new(
                 HashAggregateOperator::new(
                     input_op,

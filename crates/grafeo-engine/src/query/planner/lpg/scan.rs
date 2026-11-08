@@ -545,6 +545,8 @@ impl super::Planner {
             // `after_write`).
             if input_columns.contains(&scan.variable) {
                 if super::after_write::writes_pending(input) {
+                    #[cfg(feature = "spill")]
+                    let _ = grafeo_core::execution::capture_operator_memory(false);
                     input_op = Box::new(EagerOperator::new(input_op));
                 }
                 // If the second MATCH clause has a label constraint, enforce it

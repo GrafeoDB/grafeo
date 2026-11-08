@@ -1448,6 +1448,10 @@ fn store_refused(error: ApplyError) -> OperatorError {
             "Cannot delete node {} with connected edge(s). Use DETACH DELETE.",
             id.as_u64()
         )),
+        // The memory limit refused, before any change: `GRAFEO-S001`.
+        ApplyError::Limit(refusal) => {
+            OperatorError::Wrapped(Box::new(grafeo_common::utils::error::Error::from(*refusal)))
+        }
         other => OperatorError::Execution(other.to_string()),
     }
 }

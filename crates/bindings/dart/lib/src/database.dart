@@ -22,6 +22,67 @@ import 'transaction.dart';
 import 'types.dart';
 import 'value.dart';
 
+/// The memory and spill settings a database opens with, for
+/// [GrafeoDB.openWithOptions]. A null setting is the default: 75% of the
+/// memory the process may use for [memoryLimit], [memoryLimit] for
+/// [queryMemoryLimit], half the spill volume's free space for [spillLimit]. A
+/// write past the memory limit throws `GRAFEO-S001`. One object may open
+/// several databases.
+class GrafeoOptions {
+  /// How many bytes the database may hold; zero fails at the open.
+  final int? memoryLimit;
+
+  /// How many bytes one statement's sorts, joins and aggregates may hold,
+  /// never more than [memoryLimit]; zero fails at the open.
+  final int? queryMemoryLimit;
+
+  /// How many bytes may spill to disk; zero means nothing spills.
+  final int? spillLimit;
+
+  /// Lifts the spill limit; it wins over [spillLimit]. An in-memory database
+  /// spills nothing whatever the settings.
+  final bool unlimitedSpill;
+
+  const GrafeoOptions({
+    this.memoryLimit,
+    this.queryMemoryLimit,
+    this.spillLimit,
+    this.unlimitedSpill = false,
+  });
+
+  /// Sets these settings on the native options object [native].
+  void _applyTo(GrafeoBindings bindings, Pointer<Void> native) {
+    void check(int status) {
+      if (status != GrafeoStatus.ok.code) throwStatus(bindings, status);
+    }
+
+    final memory = memoryLimit;
+    if (memory != null) {
+      // A negative int would cross the unsigned FFI boundary as u64::MAX.
+      if (memory < 0) {
+        throw ArgumentError.value(memory, 'memoryLimit', 'must not be negative');
+      }
+      check(bindings.grafeoOptionsSetMemoryLimit(native, memory));
+    }
+    final query = queryMemoryLimit;
+    if (query != null) {
+      if (query < 0) {
+        throw ArgumentError.value(query, 'queryMemoryLimit', 'must not be negative');
+      }
+      check(bindings.grafeoOptionsSetQueryMemoryLimit(native, query));
+    }
+    final spill = spillLimit;
+    if (unlimitedSpill) {
+      check(bindings.grafeoOptionsSetUnlimitedSpill(native));
+    } else if (spill != null) {
+      if (spill < 0) {
+        throw ArgumentError.value(spill, 'spillLimit', 'must not be negative');
+      }
+      check(bindings.grafeoOptionsSetSpillLimit(native, spill));
+    }
+  }
+}
+
 /// A Grafeo graph database instance.
 ///
 /// Create with [GrafeoDB.memory] (in-memory) or [GrafeoDB.open] (persistent).
@@ -50,8 +111,10 @@ class GrafeoDB implements Finalizable {
 
   /// Create a new in-memory database, keeping [historyRetention] for
   /// time-travel reads (none by default).
-  static GrafeoDB memory(
-      {String? libraryPath, HistoryRetention? historyRetention}) {
+  static GrafeoDB memory({
+    String? libraryPath,
+    HistoryRetention? historyRetention,
+  }) {
     final lib = loadNativeLibrary(libraryPath);
     final bindings = GrafeoBindings(lib);
     if (historyRetention != null) {
@@ -64,8 +127,11 @@ class GrafeoDB implements Finalizable {
 
   /// Open a persistent database at [path]. A [historyRetention] sets how much
   /// history it keeps for time-travel reads; the file stores the setting.
-  static GrafeoDB open(String path,
-      {String? libraryPath, HistoryRetention? historyRetention}) {
+  static GrafeoDB open(
+    String path, {
+    String? libraryPath,
+    HistoryRetention? historyRetention,
+  }) {
     final lib = loadNativeLibrary(libraryPath);
     final bindings = GrafeoBindings(lib);
     if (historyRetention != null) {
@@ -81,11 +147,41 @@ class GrafeoDB implements Finalizable {
     }
   }
 
+  /// Open a database with [options]: in memory when [path] is null, else the
+  /// file at [path] (created when it does not exist). A setting the database
+  /// refuses (a zero memory limit) throws [GrafeoException] here.
+  static GrafeoDB openWithOptions(
+    String? path,
+    GrafeoOptions options, {
+    String? libraryPath,
+  }) {
+    final lib = loadNativeLibrary(libraryPath);
+    final bindings = GrafeoBindings(lib);
+    final native = bindings.grafeoOptionsNew();
+    if (native == nullptr) throwLastError(bindings);
+    try {
+      options._applyTo(bindings, native);
+      return withNativeStrings([path], (p) {
+        final ptr = bindings.grafeoOpenWithOptions(p[0], native);
+        if (ptr == nullptr) throwLastError(bindings);
+        return GrafeoDB._(ptr, bindings);
+      });
+    } finally {
+      bindings.grafeoOptionsFree(native);
+    }
+  }
+
   static GrafeoDB _openWithHistory(
-          GrafeoBindings bindings, String? path, HistoryRetention history) =>
+    GrafeoBindings bindings,
+    String? path,
+    HistoryRetention history,
+  ) =>
       withNativeStrings([path], (p) {
         final ptr = bindings.grafeoOpenWithHistory(
-            p[0], history.kind, history.durationMs);
+          p[0],
+          history.kind,
+          history.durationMs,
+        );
         if (ptr == nullptr) throwLastError(bindings);
         return GrafeoDB._(ptr, bindings);
       });
@@ -96,8 +192,10 @@ class GrafeoDB implements Finalizable {
   /// similar to DuckDB's `.duckdb` format. Since 0.6 every database is a
   /// single file, whatever the extension of its path, so this is the same
   /// as [open].
-  @Deprecated('Use GrafeoDB.open, which does the same since 0.6.0; '
-      'openSingleFile is removed in 0.7.0')
+  @Deprecated(
+    'Use GrafeoDB.open, which does the same since 0.6.0; '
+    'openSingleFile is removed in 0.7.0',
+  )
   static GrafeoDB openSingleFile(String path, {String? libraryPath}) =>
       open(path, libraryPath: libraryPath);
 
@@ -129,8 +227,11 @@ class GrafeoDB implements Finalizable {
     _bindings.grafeoFreeDatabase(_handle);
     _handle = nullptr;
     if (status != GrafeoStatus.ok.code) {
-      throw classifyError(status, lastError(_bindings),
-          gqlStatus: lastGqlStatus(_bindings));
+      throw classifyError(
+        status,
+        lastError(_bindings),
+        gqlStatus: lastGqlStatus(_bindings),
+      );
     }
   }
 
@@ -189,10 +290,7 @@ class GrafeoDB implements Finalizable {
   /// Parameters are JSON-encoded using the grafeo-bindings-common wire format.
   /// Temporal types (DateTime, Duration) are automatically encoded as
   /// `$timestamp_us`, `$duration`, etc.
-  QueryResult executeWithParams(
-    String query,
-    Map<String, dynamic> params,
-  ) {
+  QueryResult executeWithParams(String query, Map<String, dynamic> params) {
     _checkOpen();
     final queryPtr = query.toNativeUtf8(allocator: malloc);
     final paramsJson = encodeParams(params);
@@ -212,28 +310,20 @@ class GrafeoDB implements Finalizable {
   }
 
   /// Execute a Cypher query (requires `cypher` feature in grafeo-c).
-  QueryResult executeCypher(String query) => _executeLanguage(
-        query,
-        _bindings.grafeoExecuteCypher,
-      );
+  QueryResult executeCypher(String query) =>
+      _executeLanguage(query, _bindings.grafeoExecuteCypher);
 
   /// Execute a Gremlin query (requires `gremlin` feature in grafeo-c).
-  QueryResult executeGremlin(String query) => _executeLanguage(
-        query,
-        _bindings.grafeoExecuteGremlin,
-      );
+  QueryResult executeGremlin(String query) =>
+      _executeLanguage(query, _bindings.grafeoExecuteGremlin);
 
   /// Execute a GraphQL query (requires `graphql` feature in grafeo-c).
-  QueryResult executeGraphql(String query) => _executeLanguage(
-        query,
-        _bindings.grafeoExecuteGraphql,
-      );
+  QueryResult executeGraphql(String query) =>
+      _executeLanguage(query, _bindings.grafeoExecuteGraphql);
 
   /// Execute a SPARQL query (requires `sparql` feature in grafeo-c).
-  QueryResult executeSparql(String query) => _executeLanguage(
-        query,
-        _bindings.grafeoExecuteSparql,
-      );
+  QueryResult executeSparql(String query) =>
+      _executeLanguage(query, _bindings.grafeoExecuteSparql);
 
   /// Execute a Cypher query with parameters (requires `cypher` feature in grafeo-c).
   QueryResult executeCypherWithParams(
@@ -380,6 +470,40 @@ class GrafeoDB implements Finalizable {
   ///
   /// The C function allocates a string that must be freed with
   /// grafeo_free_string.
+  /// The bytes the database holds, as its accounts count them, and its
+  /// limits: `total_bytes`, `limit_bytes` (the memory limit),
+  /// `query_limit_bytes` (what one statement may hold), the parts, and
+  /// `spill` (its `limit_bytes` is null for no limit). The parts' keys follow
+  /// the storage engine and may change in any release.
+  Map<String, dynamic> memoryUsage() {
+    _checkOpen();
+    final ptr = _bindings.grafeoMemoryUsageJson(_handle);
+    if (ptr == nullptr) throwLastError(_bindings);
+    try {
+      return parseObject(ptr.toDartString());
+    } finally {
+      _bindings.grafeoFreeString(ptr);
+    }
+  }
+
+  /// What the open had to say, each with `code`, `message` and `context`:
+  /// `MEMORY_LIMIT_PASSED` when the data passes the memory limit (reads work,
+  /// writes that need memory throw `GRAFEO-S001`), `MEMORY_DETECTION_FALLBACK`
+  /// and `GRAPH_TYPE_NOT_BOUND`. Empty for a clean open.
+  List<Map<String, dynamic>> openWarnings() {
+    _checkOpen();
+    final ptr = _bindings.grafeoOpenWarnings(_handle);
+    if (ptr == nullptr) throwLastError(_bindings);
+    try {
+      return [
+        for (final warning in jsonDecode(ptr.toDartString()) as List)
+          Map<String, dynamic>.from(warning as Map),
+      ];
+    } finally {
+      _bindings.grafeoFreeString(ptr);
+    }
+  }
+
   Map<String, dynamic> info() {
     _checkOpen();
     final ptr = _bindings.grafeoInfo(_handle);
@@ -478,7 +602,9 @@ class GrafeoDB implements Finalizable {
   Node? getNode(int id) {
     _checkOpen();
     return takeNodeOrNull(
-        _bindings, (out) => _bindings.grafeoGetNode(_handle, id, out));
+      _bindings,
+      (out) => _bindings.grafeoGetNode(_handle, id, out),
+    );
   }
 
   /// Return the labels of node [id] without fetching the full node, or null
@@ -613,7 +739,9 @@ class GrafeoDB implements Finalizable {
   Edge? getEdge(int id) {
     _checkOpen();
     return takeEdgeOrNull(
-        _bindings, (out) => _bindings.grafeoGetEdge(_handle, id, out));
+      _bindings,
+      (out) => _bindings.grafeoGetEdge(_handle, id, out),
+    );
   }
 
   /// The committed edges of node [id] in [direction], without a query: only
@@ -626,10 +754,18 @@ class GrafeoDB implements Finalizable {
   }) {
     _checkOpen();
     return nodeEdges(
-        _bindings,
-        edgeTypes,
-        (types, neighbors, edges, count) => _bindings.grafeoGetNodeEdges(
-            _handle, id, direction.code, types, neighbors, edges, count));
+      _bindings,
+      edgeTypes,
+      (types, neighbors, edges, count) => _bindings.grafeoGetNodeEdges(
+        _handle,
+        id,
+        direction.code,
+        types,
+        neighbors,
+        edges,
+        count,
+      ),
+    );
   }
 
   /// Delete an edge by [id]. Returns true on success.
@@ -684,11 +820,17 @@ class GrafeoDB implements Finalizable {
   ) {
     _checkOpen();
     return batchNodes(
-        _bindings,
+      _bindings,
+      labels,
+      rows,
+      (labels, rows, ids, count) => _bindings.grafeoBatchCreateNodesWithProps(
+        _handle,
         labels,
         rows,
-        (labels, rows, ids, count) => _bindings.grafeoBatchCreateNodesWithProps(
-            _handle, labels, rows, ids, count));
+        ids,
+        count,
+      ),
+    );
   }
 
   /// Create the [edges] in one transaction: an edge to a missing node fails
@@ -696,10 +838,11 @@ class GrafeoDB implements Finalizable {
   List<int> batchCreateEdges(List<BatchEdge> edges) {
     _checkOpen();
     return batchEdges(
-        _bindings,
-        edges,
-        (edges, ids, count) =>
-            _bindings.grafeoBatchCreateEdges(_handle, edges, ids, count));
+      _bindings,
+      edges,
+      (edges, ids, count) =>
+          _bindings.grafeoBatchCreateEdges(_handle, edges, ids, count),
+    );
   }
 
   /// Create or update one node per row, matched by the [key] property
@@ -715,13 +858,14 @@ class GrafeoDB implements Finalizable {
   }) {
     _checkOpen();
     return native.upsertNodes(
-        _bindings,
-        labels,
-        rows,
-        key,
-        replace,
-        (labels, rows, options, json) =>
-            _bindings.grafeoUpsertNodes(_handle, labels, rows, options, json));
+      _bindings,
+      labels,
+      rows,
+      key,
+      replace,
+      (labels, rows, options, json) =>
+          _bindings.grafeoUpsertNodes(_handle, labels, rows, options, json),
+    );
   }
 
   /// Create or update one edge per row; each row names its endpoints in the
@@ -741,19 +885,20 @@ class GrafeoDB implements Finalizable {
   }) {
     _checkOpen();
     return native.upsertEdges(
-        _bindings,
-        edgeType,
-        rows,
-        {
-          'key': key,
-          'endpoint_key': endpointKey,
-          'endpoint_labels': endpointLabels,
-          'src_field': sourceField,
-          'dst_field': targetField,
-          'replace': replace,
-        },
-        (edgeType, rows, options, json) => _bindings.grafeoUpsertEdges(
-            _handle, edgeType, rows, options, json));
+      _bindings,
+      edgeType,
+      rows,
+      {
+        'key': key,
+        'endpoint_key': endpointKey,
+        'endpoint_labels': endpointLabels,
+        'src_field': sourceField,
+        'dst_field': targetField,
+        'replace': replace,
+      },
+      (edgeType, rows, options, json) =>
+          _bindings.grafeoUpsertEdges(_handle, edgeType, rows, options, json),
+    );
   }
 
   // ===========================================================================
@@ -772,8 +917,12 @@ class GrafeoDB implements Finalizable {
     _checkOpen();
     final out = malloc<Uint64>();
     try {
-      final status =
-          _bindings.grafeoEpochAsOf(_handle, point.kind, point.value, out);
+      final status = _bindings.grafeoEpochAsOf(
+        _handle,
+        point.kind,
+        point.value,
+        out,
+      );
       if (status != GrafeoStatus.ok.code) throwStatus(_bindings, status);
       return out.value;
     } finally {
@@ -793,16 +942,26 @@ class GrafeoDB implements Finalizable {
 
   /// Execute one GQL query, with optional [params], as the database was at
   /// [point]; a query that writes throws.
-  QueryResult executeAsOf(String query, TimePoint point,
-      {Map<String, dynamic>? params}) {
+  QueryResult executeAsOf(
+    String query,
+    TimePoint point, {
+    Map<String, dynamic>? params,
+  }) {
     _checkOpen();
     return withNativeStrings(
-        [query, params == null ? null : encodeParams(params)], (p) {
-      final resultPtr = _bindings.grafeoExecuteAsOf(
-          _handle, p[0], p[1], point.kind, point.value);
-      if (resultPtr == nullptr) throwLastError(_bindings);
-      return buildResult(_bindings, resultPtr);
-    });
+      [query, params == null ? null : encodeParams(params)],
+      (p) {
+        final resultPtr = _bindings.grafeoExecuteAsOf(
+          _handle,
+          p[0],
+          p[1],
+          point.kind,
+          point.value,
+        );
+        if (resultPtr == nullptr) throwLastError(_bindings);
+        return buildResult(_bindings, resultPtr);
+      },
+    );
   }
 
   // ===========================================================================
@@ -840,28 +999,38 @@ class GrafeoDB implements Finalizable {
   List<ChangeEvent> nodeHistory(int id) {
     _checkOpen();
     return parseEvents(
-        takeString(_bindings, _bindings.grafeoNodeHistory(_handle, id)));
+      takeString(_bindings, _bindings.grafeoNodeHistory(_handle, id)),
+    );
   }
 
   /// Every recorded change of edge [id], oldest first.
   List<ChangeEvent> edgeHistory(int id) {
     _checkOpen();
     return parseEvents(
-        takeString(_bindings, _bindings.grafeoEdgeHistory(_handle, id)));
+      takeString(_bindings, _bindings.grafeoEdgeHistory(_handle, id)),
+    );
   }
 
   /// The changes of node [id] from epoch [sinceEpoch] on.
   List<ChangeEvent> nodeHistorySince(int id, int sinceEpoch) {
     _checkOpen();
-    return parseEvents(takeString(
-        _bindings, _bindings.grafeoNodeHistorySince(_handle, id, sinceEpoch)));
+    return parseEvents(
+      takeString(
+        _bindings,
+        _bindings.grafeoNodeHistorySince(_handle, id, sinceEpoch),
+      ),
+    );
   }
 
   /// Every change in epochs [startEpoch] to [endEpoch], in commit order.
   List<ChangeEvent> changesBetween(int startEpoch, int endEpoch) {
     _checkOpen();
-    return parseEvents(takeString(_bindings,
-        _bindings.grafeoChangesBetween(_handle, startEpoch, endEpoch)));
+    return parseEvents(
+      takeString(
+        _bindings,
+        _bindings.grafeoChangesBetween(_handle, startEpoch, endEpoch),
+      ),
+    );
   }
 
   // ===========================================================================
@@ -1149,7 +1318,10 @@ class GrafeoDB implements Finalizable {
     final dimensions = queries.isEmpty ? 0 : queries.first.length;
     if (queries.any((q) => q.length != dimensions)) {
       throw ArgumentError.value(
-          queries, 'queries', 'every query needs the same dimension');
+        queries,
+        'queries',
+        'every query needs the same dimension',
+      );
     }
     final flat = malloc<Float>(queries.length * dimensions + 1);
     for (var i = 0; i < queries.length; i++) {
@@ -1159,11 +1331,25 @@ class GrafeoDB implements Finalizable {
     }
     try {
       return withNativeStrings(
-          [label, property, filters == null ? null : encodeParams(filters)],
-          (p) => parseVectorResults(takeJson(
-              _bindings,
-              (json) => _bindings.grafeoBatchVectorSearch(_handle, p[0], p[1],
-                  flat, queries.length, dimensions, k, ef, p[2], json))));
+        [label, property, filters == null ? null : encodeParams(filters)],
+        (p) => parseVectorResults(
+          takeJson(
+            _bindings,
+            (json) => _bindings.grafeoBatchVectorSearch(
+              _handle,
+              p[0],
+              p[1],
+              flat,
+              queries.length,
+              dimensions,
+              k,
+              ef,
+              p[2],
+              json,
+            ),
+          ),
+        ),
+      );
     } finally {
       malloc.free(flat);
     }
@@ -1264,7 +1450,10 @@ class GrafeoDB implements Finalizable {
       throw ArgumentError.value(walBytes, 'walBytes', 'must be positive');
     }
     final status = _bindings.grafeoSetCheckpointTriggers(
-        _handle, interval?.inMilliseconds ?? 0, walBytes ?? 0);
+      _handle,
+      interval?.inMilliseconds ?? 0,
+      walBytes ?? 0,
+    );
     if (status != GrafeoStatus.ok.code) throwStatus(_bindings, status);
   }
 

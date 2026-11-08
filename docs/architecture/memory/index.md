@@ -37,8 +37,8 @@ The buffer manager responds to memory pressure in stages:
 | ----- | --------- | ------ |
 | Normal | < 70% | No action |
 | Moderate | 70-85% | Proactive eviction of cold data |
-| High | 85-100% | Aggressive eviction, trigger spilling |
-| Limit | 100% | Refuse what does not fit after eviction (`GRAFEO-S001`) |
+| High | 85-<100% | Aggressive eviction, trigger spilling |
+| Critical | 100% | Refuse what does not fit after eviction (`GRAFEO-S001`) |
 
 Eviction follows LRU (Least Recently Used) with priority hints: cached results are evicted first, then intermediate results, then active operator state.
 

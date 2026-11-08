@@ -383,8 +383,8 @@ impl std::fmt::Debug for LogMemory {
 }
 
 /// The bytes an entity's entry takes besides its events: the walk's
-/// overhead per entry.
-const ENTRY_BYTES: usize = std::mem::size_of::<(EntityId, Vec<ChangeEvent>)>() + 8;
+/// overhead per entry, the full key and value inline plus the control byte.
+const ENTRY_BYTES: usize = std::mem::size_of::<(Option<String>, EntityId, Vec<ChangeEvent>)>() + 8;
 
 /// The heap bytes an entry's key owns besides its inline slot: the graph
 /// name's string, cloned into the key when the entry is created (the event
@@ -887,7 +887,7 @@ impl CdcLog {
         let entity_count = guard.len();
         let mut event_count = 0usize;
         let mut bytes = 0usize;
-        let entry_overhead = std::mem::size_of::<(EntityId, Vec<ChangeEvent>)>() + 8;
+        let entry_overhead = ENTRY_BYTES;
         let event_size = std::mem::size_of::<ChangeEvent>();
         for (key, events) in guard.iter() {
             event_count += events.len();

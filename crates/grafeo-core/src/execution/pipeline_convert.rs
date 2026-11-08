@@ -92,8 +92,9 @@ pub fn convert_to_pipeline_with_memory(
     root: Box<dyn Operator>,
     memory_ctx: Option<super::memory::OperatorMemoryContext>,
 ) -> (Box<dyn Operator>, Vec<Box<dyn PushOperator>>) {
-    // The statement's context, passed or ambient from its planning (patch 9).
-    let Some(ctx) = memory_ctx.or_else(super::memory::current) else {
+    // The statement's context, passed by the session; the ambient planning
+    // scope (patch 9) is captured by the pull operators at construction.
+    let Some(ctx) = memory_ctx else {
         return convert_to_pipeline(root);
     };
     let mut push_ops: Vec<Box<dyn PushOperator>> = Vec::new();

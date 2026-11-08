@@ -175,7 +175,9 @@ impl RdfPlanner {
             exists_routes: std::cell::RefCell::new(Vec::new()),
             #[cfg(feature = "spill")]
             operator_memory: Some(grafeo_core::execution::OperatorMemoryContext::new(
-                grafeo_common::memory::buffer::BufferManager::with_budget(1 << 40),
+                grafeo_common::memory::buffer::BufferManager::new(
+                    grafeo_common::memory::buffer::BufferManagerConfig::default(),
+                ),
                 None,
             )),
         }
@@ -204,7 +206,9 @@ impl RdfPlanner {
             exists_routes: std::cell::RefCell::new(Vec::new()),
             #[cfg(feature = "spill")]
             operator_memory: Some(grafeo_core::execution::OperatorMemoryContext::new(
-                grafeo_common::memory::buffer::BufferManager::with_budget(1 << 40),
+                grafeo_common::memory::buffer::BufferManager::new(
+                    grafeo_common::memory::buffer::BufferManagerConfig::default(),
+                ),
                 None,
             )),
         }

@@ -228,7 +228,12 @@ impl OperatorMemoryContext {
                 .into());
         }
         let step = self.buffer_manager.grant_step();
-        let wanted = counted.checked_next_multiple_of(step).unwrap_or(usize::MAX);
+        // Round up to the grant step, but never past the query limit: the
+        // reservation must not exceed the configured bound.
+        let wanted = counted
+            .checked_next_multiple_of(step)
+            .unwrap_or(usize::MAX)
+            .min(self.query_limit);
         let held = grant.as_ref().map_or(0, MemoryGrant::size);
         if held < wanted {
             let grant = grant.get_or_insert_with(|| {
@@ -294,7 +299,10 @@ thread_local! {
 #[cfg(feature = "spill")]
 pub fn enter(ctx: OperatorMemoryContext) -> MemoryScope {
     let previous = OPERATOR_MEMORY.with(|cell| cell.replace(Some(ctx)));
-    MemoryScope { previous }
+    MemoryScope {
+        previous,
+        _not_send: std::marker::PhantomData,
+    }
 }
 
 /// The running statement's operator memory context on this thread, for an
@@ -327,6 +335,9 @@ pub fn capture(unbudgeted: bool) -> Option<OperatorMemoryContext> {
 pub struct MemoryScope {
     /// The context before [`enter`], restored on drop.
     previous: Option<OperatorMemoryContext>,
+    /// Thread-local state restores on drop, so the scope must not move across
+    /// threads.
+    _not_send: std::marker::PhantomData<*const ()>,
 }
 
 #[cfg(feature = "spill")]

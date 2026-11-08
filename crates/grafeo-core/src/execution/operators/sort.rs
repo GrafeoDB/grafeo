@@ -302,6 +302,11 @@ impl Operator for SortOperator {
         self.sorted_rows.clear();
         self.sort_complete = false;
         self.output_position = 0;
+        // The materialized chunks went; the grant goes with them.
+        #[cfg(feature = "spill")]
+        {
+            self.grant = None;
+        }
     }
 
     fn name(&self) -> &'static str {

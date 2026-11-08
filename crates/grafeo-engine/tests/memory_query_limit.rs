@@ -23,7 +23,9 @@ fn assert_refused<T: std::fmt::Debug>(result: Result<T, Error>, bound: &str, set
     let text = error.to_string();
     assert_eq!(error.error_code().as_str(), "GRAFEO-S001", "{text}");
     assert!(text.contains(bound), "names the {bound}: {text}");
-    assert!(text.contains(setting), "names {setting}: {text}");
+    if !setting.is_empty() {
+        assert!(text.contains(setting), "names {setting}: {text}");
+    }
     assert!(
         text.chars().any(|c| c.is_ascii_digit()),
         "carries the numbers: {text}"

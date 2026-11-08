@@ -51,9 +51,10 @@ def test_a_write_past_the_limit_raises_and_changes_nothing():
     assert error.error_code == "GRAFEO-S001", str(error)
     assert "memory limit" in str(error), str(error)
     held = count(db, "Fill")
+    assert held > 0, "writes up to the limit succeeded"
     with pytest.raises(grafeo.GrafeoError):
         db.execute("UNWIND range(1, 1024) AS i INSERT (:Fill {text: '" + "x" * 1000 + "'})")
-    assert count(db, "Fill") == held
+    assert count(db, "Fill") == held, "the refused write changed nothing"
     assert count(db, "Fill") > 0, "reads work at the limit"
 
 

@@ -33,7 +33,7 @@ Temporal types are first-class values that can be stored as properties, used in 
 | `DATETIME` | `2024-01-15T14:30:00` | Local date and time |
 | `DURATION` | `P1Y2M3D` | ISO 8601 duration |
 
-A `DATETIME '...'` with a UTC offset or `Z` is a ZONED DATETIME; without one it is a local datetime. The deprecated `ZONED DATETIME '...'` and `ZONED TIME '...'` forms still work until 0.7: see [Deprecations](../upgrading/deprecations.md).
+A `DATETIME '...'` with a UTC offset or `Z` is a ZONED DATETIME; without one it is a local datetime. The deprecated `ZONED DATETIME '...'` and `ZONED TIME '...'` forms still work until 0.7 (write `TIME '...'` with a UTC offset for a zoned time): see [Deprecations](../upgrading/deprecations.md).
 
 ### Typed Literals
 

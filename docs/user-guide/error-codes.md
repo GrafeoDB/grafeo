@@ -98,13 +98,11 @@ GQLSTATUS says what kind of condition it is, as SQL's SQLSTATE does:
 | GQLSTATUS | Condition                      | Example                                          |
 | --------- | ------------------------------ | ------------------------------------------------ |
 | `22003`   | numeric value out of range     | `RETURN 9223372036854775807 + 1`, an integer `sum` past 64 bits, a decimal `sum` past 38 digits, `CAST(1.0e19 AS INT64)`, `toInteger(Infinity)` |
-| `22007`   | invalid datetime format        | a temporal literal whose text is not a date, time or datetime: `DATE '2024-13-01'`, `DATETIME '2024-01-15 14:30:00'` |
 | `22009`   | invalid time zone displacement value | `SESSION SET TIME ZONE 'Europe/Amsterdam'`: a time zone that is not a UTC offset, or one past 14 hours |
 | `22012`   | division by zero               | `RETURN 10 / 0`, `RETURN 10 % 0`                 |
 | `22018`   | invalid character value for cast | `CAST('Alix' AS INT64)`: text that spells no number, cast to an integer, a float or a decimal (`toInteger('Alix')` is null instead) |
 | `22023`   | invalid parameter value        | a procedure argument outside the values it allows, `CALL grafeo.pagerank(2.0)` (a damping above 1); an edge weight an algorithm cannot use, such as NaN, an infinity, or a negative weight for `grafeo.dijkstra`; a negative-cost cycle in `grafeo.min_cost_max_flow` |
 | `22G02`   | negative limit value           | `LIMIT $k` with `k = -1`                         |
-| `22G0H`   | invalid duration format        | a duration literal whose text is not an ISO 8601 duration: `DURATION '1 day'` |
 | `22G03`   | invalid value type             | `LIMIT $k` with `k = 'three'`, a procedure argument of another type |
 | `22G04`   | values not comparable          | two values a comparison cannot compare: a node and a number under `<` in GQL, and two values of different kinds in SQL/PGQ, `=` included |
 | `22G12`   | invalid value type             | an operator or a list index given an operand of a kind it does not take, found as the statement runs: `RETURN true + 1`, `RETURN -'a'`, `RETURN [1, 2, 3][1.5]` |

@@ -6,7 +6,7 @@
 //! cargo test -p grafeo-engine --all-features --test main spill_budget_queries::
 //! ```
 
-#![cfg(all(feature = "gql", feature = "grafeo-file"))]
+#![cfg(all(feature = "gql", feature = "grafeo-file", feature = "spill"))]
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

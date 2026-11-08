@@ -1107,6 +1107,9 @@ impl super::GrafeoDB {
         // Restored from the snapshot as decoded: decoding it again would
         // cost as much as the rest of a small import.
         row_groups::restore_decoded(&db.snapshot_parts(&root), decoded)?;
+        // The open applied ForceDisk before the restore; the restored rows
+        // stay on disk only if the overrides are reapplied after it.
+        db.apply_force_disk_overrides();
         // The database continues at the snapshot's epoch.
         Self::continue_epochs(&root, &db.transaction_manager);
         // What the open would say of the database as imported: its data, past the limit or not,
@@ -1122,6 +1125,11 @@ impl super::GrafeoDB {
             })
             .cloned();
         db.open_warnings = db.open_warnings_after_open(fallback);
+        // As a normal open logs its warnings, an import logs the recalculated
+        // ones (MEMORY_LIMIT_PASSED among them).
+        for warning in &db.open_warnings {
+            grafeo_common::grafeo_warn!("{warning}");
+        }
         Ok(db)
     }
 

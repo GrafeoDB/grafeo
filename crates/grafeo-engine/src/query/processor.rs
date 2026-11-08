@@ -316,11 +316,9 @@ impl QueryProcessor {
         language: QueryLanguage,
         params: Option<&QueryParams>,
     ) -> Result<QueryResult> {
-        // The old entry point (dead code D1, deleted in 0.6.3): it plans
-        // statements with no statement scope, so its materializing operators
-        // are built with the explicit unbudgeted marker.
-        #[cfg(feature = "spill")]
-        let _ = grafeo_core::execution::capture_operator_memory(true);
+        // The old entry point (dead code D1, deleted in 0.6.3): its planners
+        // carry the detected default budget, and its materializing operators
+        // are built unbudgeted by design.
         if language.is_lpg() {
             self.process_lpg(query, language, params)
         } else {

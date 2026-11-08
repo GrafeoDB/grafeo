@@ -1086,8 +1086,9 @@ impl Config {
     /// structures hold (the store, its indexes, RDF, change sets, query
     /// operators).
     ///
-    /// Below it, the buffer manager evicts and spills (vector columns, query
-    /// operators with a spill directory); each path search may hold a
+    /// Below it, the buffer manager evicts and spills (the indexed vector
+    /// store's embedding columns, query operators with a spill directory);
+    /// each path search may hold a
     /// quarter of it. A write that would pass it is refused before it
     /// changes anything, with `GRAFEO-S001` naming the bytes used and the
     /// limit; reads go on, and an open that reaches or exceeds the limit holds
@@ -1095,7 +1096,7 @@ impl Config {
     /// The limit bounds what the database's structures hold, and the
     /// process's private memory runs about a third above it (allocator
     /// bookkeeping, partial pages, thread stacks and caches it does not
-    /// count), so leave that margin, for example a 3 GiB limit for a 4 GiB
+    /// count), so leave that margin, for example a 2.5 GiB limit for a 4 GiB
     /// container (see [what the limit counts](https://grafeo.dev/architecture/memory/#what-the-limit-counts)).
     #[must_use]
     pub fn with_memory_limit(mut self, limit: usize) -> Self {

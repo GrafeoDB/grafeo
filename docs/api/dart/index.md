@@ -14,7 +14,7 @@ Add the package from [pub.dev](https://pub.dev/packages/grafeo):
 ```yaml
 # pubspec.yaml
 dependencies:
-  grafeo: ^0.5.39
+  grafeo: ^0.6.2
 ```
 
 ```bash
@@ -130,7 +130,7 @@ static String version({String? libraryPath})
 ```
 
 ```dart
-print(GrafeoDB.version()); // "0.5.39"
+print(GrafeoDB.version()); // "0.6.2"
 ```
 
 ### Query Execution

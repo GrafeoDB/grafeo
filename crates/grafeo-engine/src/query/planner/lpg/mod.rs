@@ -363,7 +363,9 @@ impl Planner {
             delivery: Delivery::Collected,
             #[cfg(feature = "spill")]
             operator_memory: Some(grafeo_core::execution::OperatorMemoryContext::new(
-                grafeo_common::memory::buffer::BufferManager::with_budget(1 << 40),
+                grafeo_common::memory::buffer::BufferManager::new(
+                    grafeo_common::memory::buffer::BufferManagerConfig::default(),
+                ),
                 None,
             )),
             scalar_columns: std::cell::RefCell::new(std::collections::HashSet::new()),
@@ -433,7 +435,9 @@ impl Planner {
             delivery: Delivery::Collected,
             #[cfg(feature = "spill")]
             operator_memory: Some(grafeo_core::execution::OperatorMemoryContext::new(
-                grafeo_common::memory::buffer::BufferManager::with_budget(1 << 40),
+                grafeo_common::memory::buffer::BufferManager::new(
+                    grafeo_common::memory::buffer::BufferManagerConfig::default(),
+                ),
                 None,
             )),
             scalar_columns: std::cell::RefCell::new(std::collections::HashSet::new()),

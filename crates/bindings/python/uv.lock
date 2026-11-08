@@ -1,5 +1,5 @@
 version = 1
-revision = 5
+revision = 3
 requires-python = ">=3.12"
 
 [[package]]
@@ -13,7 +13,7 @@ wheels = [
 
 [[package]]
 name = "grafeo"
-version = "0.6.1"
+version = "0.6.2"
 source = { editable = "." }
 dependencies = [
     { name = "solvor" },
@@ -47,15 +47,15 @@ provides-extras = ["arrow", "cli", "dev"]
 
 [[package]]
 name = "grafeo-cli"
-version = "0.6.1"
+version = "0.6.0"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/46/a1/2fc878bdc047bd3b5e6eeeb6a13ab1bf5c866e5a096f8f3cd03499156023/grafeo_cli-0.6.1.tar.gz", hash = "sha256:85f1e2c085a40624f61ed2baa22ae17b444b0083ec053f2195689f0be23bfb4e", size = 3250, upload-time = "2026-11-01T22:02:53.7Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/a4/14/486012bd229020244d4dc4f56ad7c4136bca9aa8510e4fd818a7de5bc8b2/grafeo_cli-0.6.0.tar.gz", hash = "sha256:3a8234345354fe8c10254f2eaf5d48da949545f309466ff362732ba85a10bb25", size = 3250, upload-time = "2026-10-23T17:42:50.127Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/50/c1/48e065399dc0431f3cbac65f37f8e360346fe14eff99e53bd65085376c93/grafeo_cli-0.6.1-py3-none-macosx_11_0_arm64.whl", hash = "sha256:85bc03f2dcffa0a42309b3bef628c10eb9fd9fdaba4f576215f3f3d74780dbd9", size = 5923354, upload-time = "2026-11-01T22:02:43.976Z" },
-    { url = "https://files.pythonhosted.org/packages/a6/80/0fce7aa1d4cc5933f23344622ce3425b95843553a056e2bf08dae53edc5c/grafeo_cli-0.6.1-py3-none-macosx_11_0_x86_64.whl", hash = "sha256:b2de4001d08906b083bf80ec1f65a299d38011543032aa1edbbff1c9d2a1cc71", size = 6422337, upload-time = "2026-11-01T22:02:46.007Z" },
-    { url = "https://files.pythonhosted.org/packages/6a/6e/ae4890ae03798bae83a47922f35c6444d57876ef403a6f0e5b726200233c/grafeo_cli-0.6.1-py3-none-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:142bebe7b3aa96b396d7db6e40c10d660c25d1919e290fbba9bd7a4b888cb11c", size = 6146646, upload-time = "2026-11-01T22:02:48.056Z" },
-    { url = "https://files.pythonhosted.org/packages/86/fd/046c6f89a96ed87fac2fe9d2300c602dc647c212fa62fdfa114f8b44411b/grafeo_cli-0.6.1-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:ca9f27f8a48ae40680365eda57ab1fd0654d0f38c39b2c1a877eb57d49510749", size = 6527923, upload-time = "2026-11-01T22:02:50.019Z" },
-    { url = "https://files.pythonhosted.org/packages/07/3f/be8807c70a7d58b12e837fbcc14fef7e9a025389cc68dc12f98ee620c3ca/grafeo_cli-0.6.1-py3-none-win_amd64.whl", hash = "sha256:ce46b8dde317519481b0e653fee783af856f78bce659026daf12a1cb81d43b78", size = 6300423, upload-time = "2026-11-01T22:02:52.157Z" },
+    { url = "https://files.pythonhosted.org/packages/ba/3b/48ce19e5c6ec5e67d07453fa31c758b1cf1d8e286d3994b3227e7fe20192/grafeo_cli-0.6.0-py3-none-macosx_11_0_arm64.whl", hash = "sha256:07bd5c8974319588016cee87752e620900bf32b693912455b40298cce46eba04", size = 5636504, upload-time = "2026-10-23T17:42:39.137Z" },
+    { url = "https://files.pythonhosted.org/packages/8d/41/aaabca6af18b4eb5f848183f5f54d7af4be00e7b77d13191476cb861d6a1/grafeo_cli-0.6.0-py3-none-macosx_11_0_x86_64.whl", hash = "sha256:69f75430fc4e8579cc3e447d82d7c40253e7108e9b232b233bc086b8a3d8d869", size = 6115655, upload-time = "2026-10-23T17:42:41.417Z" },
+    { url = "https://files.pythonhosted.org/packages/76/94/9b37c5619660366eb8a610af74e958255a5952bd550a05a0a560c8e491fc/grafeo_cli-0.6.0-py3-none-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:306f3fc2c79f25cb9a620054fc1fac792b41268329ccb80881fb085c34c1716d", size = 5862587, upload-time = "2026-10-23T17:42:44.051Z" },
+    { url = "https://files.pythonhosted.org/packages/18/f7/b47a27314a8638e3c567052cd6c187acf6cabead2ff834d74f0c3e2537cd/grafeo_cli-0.6.0-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:6da485fa3aab3779e9a0d9deddfdff7b3b8a87f88311eb52e28029f590d289a4", size = 6215671, upload-time = "2026-10-23T17:42:46.684Z" },
+    { url = "https://files.pythonhosted.org/packages/e3/4e/98b88ed5a6f0734a61b34c76da6c2c9637f5b69846a02ce6f430c67a8186/grafeo_cli-0.6.0-py3-none-win_amd64.whl", hash = "sha256:6c705097430212c79722125799b816dc8b9945fdc0ef7b84c1e5022d9effe64f", size = 5971272, upload-time = "2026-10-23T17:42:48.516Z" },
 ]
 
 [[package]]

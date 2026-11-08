@@ -490,8 +490,9 @@ impl SpillableSortPushOperator {
                 .map_err(crate::execution::spill::spill_error)?;
         }
 
-        // Reset memory tracking after spill
+        // Reset memory tracking after spill; the grant goes with the buffer.
         self.estimated_bytes = 0;
+        self.grant = None;
         if let Some(ref state) = self.spill_state {
             state.set_usage(0);
         }

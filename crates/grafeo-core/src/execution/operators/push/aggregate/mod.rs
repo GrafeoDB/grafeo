@@ -453,6 +453,9 @@ impl SpillableAggregatePushOperator {
             partitioned
                 .spill_largest()
                 .map_err(crate::execution::spill::spill_error)?;
+            // Part of the state went to disk; release the grant, the next
+            // chunk re-grows it for what remains.
+            self.grant = None;
         }
 
         Ok(())

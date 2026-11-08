@@ -85,7 +85,7 @@ concatenation and `CAST ... AS STRING` write the infinities as `Infinity` and
 | `DATETIME` | `DATETIME 'ISO8601'` | `DATETIME '2024-01-15T14:30:00Z'` |
 | `DURATION` | `DURATION 'ISO8601'` | `DURATION 'P1Y2M3D'` |
 
-A `DATETIME '...'` with a UTC offset or `Z` is a ZONED DATETIME; without one it is a local datetime. The deprecated `ZONED DATETIME '...'` and `ZONED TIME '...'` forms still work until 0.7: see [Deprecations](../../upgrading/deprecations.md).
+A `DATETIME '...'` with a UTC offset or `Z` is a ZONED DATETIME; without one it is a local datetime. The deprecated `ZONED DATETIME '...'` and `ZONED TIME '...'` forms still work until 0.7 (write `TIME '...'` with a UTC offset for a zoned time): see [Deprecations](../../upgrading/deprecations.md).
 
 ```sql
 -- Date

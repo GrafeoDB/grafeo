@@ -172,18 +172,6 @@ impl SpillLayout {
         let Some(derived) = derived else {
             return Self::none();
         };
-        // An open makes `<file>.spill` a directory; a link there is not one
-        // it left (in a shared directory another user can plant one), and
-        // spilling through it would write into whatever it points at. The
-        // open spills nothing instead.
-        if is_link(&derived) {
-            grafeo_common::grafeo_warn!(
-                "the spill directory {} is a link, not a directory an open made: this open \
-                 spills nothing",
-                derived.display()
-            );
-            return Self::none();
-        }
         if read_only {
             // Nothing in this build spills: no directory.
             if !cfg!(any(
@@ -213,6 +201,19 @@ impl SpillLayout {
                 vector_cache: Some(Arc::clone(&own)),
                 stale_cache: None,
             };
+        }
+        // A read-write open makes `<file>.spill` a directory; a link there is
+        // not one it left (in a shared directory another user can plant one),
+        // and spilling through it would write into whatever it points at. The
+        // open spills nothing instead. Read-only opens never reach this: they
+        // spill to their own private temp directory above.
+        if is_link(&derived) {
+            grafeo_common::grafeo_warn!(
+                "the spill directory {} is a link, not a directory an open made: this open \
+                 spills nothing",
+                derived.display()
+            );
+            return Self::none();
         }
         let cache = derived.join("cache");
         Self {

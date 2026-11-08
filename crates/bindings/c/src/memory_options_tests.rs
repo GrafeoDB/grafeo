@@ -239,6 +239,12 @@ fn an_open_over_the_limit_warns_and_reads() {
 #[test]
 fn a_clean_open_lists_no_warning() {
     let db = grafeo_open_memory();
-    assert_eq!(open_warning_codes(db), Vec::<String>::new());
+    // Automatic memory detection may legitimately record its fallback warning
+    // on hosts where detection is unavailable; every other warning is a bug.
+    let codes = open_warning_codes(db);
+    assert!(
+        codes.iter().all(|code| code == "MEMORY_DETECTION_FALLBACK"),
+        "{codes:?}"
+    );
     grafeo_free_database(db);
 }

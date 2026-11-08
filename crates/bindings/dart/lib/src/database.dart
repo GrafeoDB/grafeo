@@ -58,16 +58,26 @@ class GrafeoOptions {
 
     final memory = memoryLimit;
     if (memory != null) {
+      // A negative int would cross the unsigned FFI boundary as u64::MAX.
+      if (memory < 0) {
+        throw ArgumentError.value(memory, 'memoryLimit', 'must not be negative');
+      }
       check(bindings.grafeoOptionsSetMemoryLimit(native, memory));
     }
     final query = queryMemoryLimit;
     if (query != null) {
+      if (query < 0) {
+        throw ArgumentError.value(query, 'queryMemoryLimit', 'must not be negative');
+      }
       check(bindings.grafeoOptionsSetQueryMemoryLimit(native, query));
     }
     final spill = spillLimit;
     if (unlimitedSpill) {
       check(bindings.grafeoOptionsSetUnlimitedSpill(native));
     } else if (spill != null) {
+      if (spill < 0) {
+        throw ArgumentError.value(spill, 'spillLimit', 'must not be negative');
+      }
       check(bindings.grafeoOptionsSetSpillLimit(native, spill));
     }
   }

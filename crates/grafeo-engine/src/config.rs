@@ -1090,7 +1090,7 @@ impl Config {
     /// operators with a spill directory); each path search may hold a
     /// quarter of it. A write that would pass it is refused before it
     /// changes anything, with `GRAFEO-S001` naming the bytes used and the
-    /// limit; reads go on, and an open that finds more than the limit holds
+    /// limit; reads go on, and an open that reaches or exceeds the limit holds
     /// succeeds with a warning ([`GrafeoDB::open_warnings`](crate::GrafeoDB::open_warnings)).
     /// The limit bounds what the database's structures hold, and the
     /// process's private memory runs about a third above it (allocator

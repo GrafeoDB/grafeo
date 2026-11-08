@@ -92,12 +92,13 @@ impl RowGroupStore {
     ///
     /// Returns the error of writing a file (as [`Error::Io`]) or of encoding
     /// a value; the row groups spilled before it stay spilled, the others
-    /// stay as they were.
+    /// stay as they were. The report comes back either way, so a caller can
+    /// count what the groups spilled before the error freed.
     pub fn spill_node_property_column(
         &self,
         key: &PropertyKey,
         spill: &dyn ColumnSpill,
-    ) -> Result<ColumnSpillReport> {
+    ) -> (ColumnSpillReport, Result<()>) {
         self.spill_node_property_column_of(key, spill, false)
     }
 
@@ -114,7 +115,7 @@ impl RowGroupStore {
         &self,
         key: &PropertyKey,
         spill: &dyn ColumnSpill,
-    ) -> Result<ColumnSpillReport> {
+    ) -> (ColumnSpillReport, Result<()>) {
         self.spill_node_property_column_of(key, spill, true)
     }
 
@@ -126,18 +127,19 @@ impl RowGroupStore {
     }
 
     /// The spill of `key`'s column, the newest group's kept when
-    /// `but_newest`.
+    /// `but_newest`. The report comes back with the error, so what the
+    /// groups spilled before it still counts.
     fn spill_node_property_column_of(
         &self,
         key: &PropertyKey,
         spill: &dyn ColumnSpill,
         but_newest: bool,
-    ) -> Result<ColumnSpillReport> {
+    ) -> (ColumnSpillReport, Result<()>) {
         let mut report = ColumnSpillReport::default();
         let (key, groups) = {
             let inner = self.inner.read();
             let Some(key) = inner.keys.get_id(key.as_str()) else {
-                return Ok(report);
+                return (report, Ok(()));
             };
             let newest = but_newest.then(|| append_group(&inner.nodes)).flatten();
             (
@@ -155,7 +157,11 @@ impl RowGroupStore {
             let Some(group) = inner.nodes.get(&number) else {
                 continue;
             };
-            let chunks = match group.columns.plan_spill(key)? {
+            let planned = match group.columns.plan_spill(key) {
+                Ok(planned) => planned,
+                Err(error) => return (report, Err(error)),
+            };
+            let chunks = match planned {
                 SpillPlan::Nothing => continue,
                 SpillPlan::Chained => {
                     report.kept_with_chains += 1;
@@ -167,28 +173,36 @@ impl RowGroupStore {
                 }
                 SpillPlan::Write(chunks) => chunks,
             };
-            let mapped = spill.write(&chunks.bytes).map_err(Error::Io)?;
+            let mapped = match spill.write(&chunks.bytes) {
+                Ok(mapped) => mapped,
+                Err(error) => return (report, Err(Error::Io(error))),
+            };
             let resident = chunks.resident;
             let file_bytes = chunks.bytes.len();
             let mut inner = RwLockUpgradableReadGuard::upgrade(inner);
             // Counted on its own: the writes' bracket closes first.
             inner.close_bracket();
             let thaws = inner.account.sink(grafeo_common::change::Table::Nodes);
-            let group = inner
-                .nodes
-                .get_mut(&number)
-                .ok_or_else(|| Error::Internal("a spilled row group is gone".to_string()))?;
+            let Some(group) = inner.nodes.get_mut(&number) else {
+                return (
+                    report,
+                    Err(Error::Internal("a spilled row group is gone".to_string())),
+                );
+            };
             let held = group.lines();
             let installed = group.columns.install_spill(key, chunks, &mapped, &thaws);
             let moved = group.lines();
             inner.account.moved(&held, &moved);
             inner.settle_tight();
-            let after = installed?;
+            let after = match installed {
+                Ok(after) => after,
+                Err(error) => return (report, Err(error)),
+            };
             report.spilled_groups += 1;
             report.file_bytes += file_bytes;
             report.freed_bytes += resident.saturating_sub(after);
         }
-        Ok(report)
+        (report, Ok(()))
     }
 
     /// The heap bytes a spill of the node property column of `key` would

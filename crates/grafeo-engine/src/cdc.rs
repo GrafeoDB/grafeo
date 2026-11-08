@@ -386,6 +386,13 @@ impl std::fmt::Debug for LogMemory {
 /// overhead per entry.
 const ENTRY_BYTES: usize = std::mem::size_of::<(EntityId, Vec<ChangeEvent>)>() + 8;
 
+/// The heap bytes an entry's key owns besides its inline slot: the graph
+/// name's string, cloned into the key when the entry is created (the event
+/// keeps its own copy, counted in [`event_heap_bytes`]).
+fn key_heap_bytes(key: &(Option<String>, EntityId)) -> usize {
+    key.0.as_ref().map_or(0, String::capacity)
+}
+
 /// The bytes the room of `events` takes, without what each event owns.
 fn room_bytes(events: &Vec<ChangeEvent>) -> usize {
     events.capacity() * std::mem::size_of::<ChangeEvent>()
@@ -531,7 +538,7 @@ impl CdcLog {
         let events = match guard.entry((event.graph.clone(), event.entity_id)) {
             hashbrown::hash_map::Entry::Occupied(entry) => entry.into_mut(),
             hashbrown::hash_map::Entry::Vacant(entry) => {
-                grown += ENTRY_BYTES;
+                grown += ENTRY_BYTES + key_heap_bytes(entry.key());
                 entry.insert(Vec::new())
             }
         };
@@ -882,9 +889,10 @@ impl CdcLog {
         let mut bytes = 0usize;
         let entry_overhead = std::mem::size_of::<(EntityId, Vec<ChangeEvent>)>() + 8;
         let event_size = std::mem::size_of::<ChangeEvent>();
-        for events in guard.values() {
+        for (key, events) in guard.iter() {
             event_count += events.len();
             bytes += entry_overhead
+                + key_heap_bytes(key)
                 + events.capacity() * event_size
                 + events.iter().map(event_heap_bytes).sum::<usize>();
         }
@@ -907,14 +915,14 @@ impl CdcLog {
     fn prune(&self, min_epoch: EpochId) {
         let mut guard = self.events.write();
         let (mut bytes, mut held) = (0, 0);
-        guard.retain(|_, events| {
+        guard.retain(|key, events| {
             events.retain(|e| e.epoch >= min_epoch);
             let kept = !events.is_empty();
             if kept {
                 if events.capacity() > 2 * events.len() {
                     events.shrink_to_fit();
                 }
-                bytes += ENTRY_BYTES + events_bytes(events);
+                bytes += ENTRY_BYTES + key_heap_bytes(key) + events_bytes(events);
                 held += events.len();
             }
             kept

@@ -172,6 +172,18 @@ impl SpillLayout {
         let Some(derived) = derived else {
             return Self::none();
         };
+        // An open makes `<file>.spill` a directory; a link there is not one
+        // it left (in a shared directory another user can plant one), and
+        // spilling through it would write into whatever it points at. The
+        // open spills nothing instead.
+        if is_link(&derived) {
+            grafeo_common::grafeo_warn!(
+                "the spill directory {} is a link, not a directory an open made: this open \
+                 spills nothing",
+                derived.display()
+            );
+            return Self::none();
+        }
         if read_only {
             // Nothing in this build spills: no directory.
             if !cfg!(any(
@@ -555,8 +567,9 @@ mod tests {
     }
 
     /// A link planted at `<file>.spill` (another user of a shared directory
-    /// can make one) is not followed: the open removes no `query_*`
-    /// directory and no `cache/` from the directory it points at.
+    /// can make one) is not followed: the open takes no spill root at all,
+    /// so nothing spills through the link and the removal removes no
+    /// `query_*` directory and no `cache/` from the directory it points at.
     #[test]
     fn the_leftover_removal_does_not_follow_a_linked_spill_directory() {
         let dir = tempfile::tempdir().unwrap();
@@ -574,7 +587,12 @@ mod tests {
         assert!(is_link(&spill), "the spill path is a link");
 
         let layout = SpillLayout::for_open(None, Some(&database), false);
-        assert_eq!(layout.stale_cache, Some(spill.join("cache")));
+        assert!(
+            layout.root.is_none(),
+            "a linked spill root is refused, not followed: {:?}",
+            layout.root
+        );
+        assert!(layout.stale_cache.is_none());
         remove_leftovers(&layout);
         drop(layout);
         assert_eq!(

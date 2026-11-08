@@ -196,10 +196,10 @@ fn a_spill_file_lives_as_long_as_a_chunk_reads_it() {
     let ids = items(&database, None, 3_000);
     let before = database.root.memory();
 
-    let report = database
+    let (report, result) = database
         .root
-        .spill_node_property_column(&embedding(), &files)
-        .unwrap();
+        .spill_node_property_column(&embedding(), &files);
+    result.unwrap();
     assert_eq!(report.spilled_groups, 1, "{report:?}");
     let spilled = files_in(files.directory());
     assert_eq!(spilled.len(), 1, "{spilled:?}");
@@ -238,6 +238,7 @@ fn a_spill_file_lives_as_long_as_a_chunk_reads_it() {
     database
         .root
         .spill_node_property_column(&embedding(), &files)
+        .1
         .unwrap();
     assert_eq!(files_in(files.directory()).len(), 1);
     assert!(
@@ -253,6 +254,7 @@ fn a_spill_file_lives_as_long_as_a_chunk_reads_it() {
     database
         .root
         .spill_node_property_column(&embedding(), &files)
+        .1
         .unwrap();
     assert_eq!(files_in(files.directory()).len(), 1);
     drop(database);
@@ -275,7 +277,8 @@ fn a_failed_spill_file_leaves_nothing_behind() {
     assert!(matches!(
         database
             .root
-            .spill_node_property_column(&embedding(), &files),
+            .spill_node_property_column(&embedding(), &files)
+            .1,
         Err(Error::Io(_))
     ));
     assert_eq!(database.root.memory(), before);
@@ -529,14 +532,12 @@ mod consumers {
         let dir = tempfile::tempdir().unwrap();
         // What the small graph's column takes, measured on a copy.
         let (copy, _) = indexed();
-        let small = copy
-            .store(Some("trips"))
-            .spill_node_property_column(
-                &embedding(),
-                &ColumnSpillFiles::in_dir(dir.path().join("measure")),
-            )
-            .unwrap()
-            .file_bytes;
+        let (small_report, result) = copy.store(Some("trips")).spill_node_property_column(
+            &embedding(),
+            &ColumnSpillFiles::in_dir(dir.path().join("measure")),
+        );
+        result.unwrap();
+        let small = small_report.file_bytes;
         drop(copy);
         assert!(small > 0);
 
@@ -694,6 +695,7 @@ mod file {
             .database
             .root
             .spill_node_property_column(&embedding(), &files)
+            .1
             .unwrap();
         let spilled = created.database.root.memory();
         created.checkpoint().unwrap();
@@ -770,11 +772,11 @@ fn a_crash_while_a_column_is_spilled_reopens_from_the_last_checkpoint() {
         database.checkpoint().unwrap();
         let first_iteration = database.fm.active_header().iteration;
         let files = ColumnSpillFiles::in_dir(cache(&path));
-        let report = database
+        let (report, result) = database
             .database
             .root
-            .spill_node_property_column(&embedding(), &files)
-            .unwrap();
+            .spill_node_property_column(&embedding(), &files);
+        result.unwrap();
         assert_eq!(report.spilled_groups, 1, "point {point} ({name})");
         // A write that leaves the embeddings spilled.
         let mut mia = NodeId::new(0);

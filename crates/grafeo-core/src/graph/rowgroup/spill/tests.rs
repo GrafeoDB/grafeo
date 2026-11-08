@@ -127,9 +127,9 @@ fn items(store: &RowGroupStore) -> Vec<NodeId> {
 
 /// Spills the embeddings into `files`.
 fn spill(store: &RowGroupStore, files: &Files) -> ColumnSpillReport {
-    store
-        .spill_node_property_column(&embedding(), files)
-        .unwrap()
+    let (report, result) = store.spill_node_property_column(&embedding(), files);
+    result.unwrap();
+    report
 }
 
 /// Every item's embedding reads as written, and an item without one reads
@@ -210,9 +210,8 @@ fn the_newest_row_group_stays_in_memory_and_takes_its_writes() {
         "the newest group's column is not counted as freeable"
     );
     let files = Files::default();
-    let report = store
-        .spill_node_property_column_but_newest(&embedding(), &files)
-        .unwrap();
+    let (report, result) = store.spill_node_property_column_but_newest(&embedding(), &files);
+    result.unwrap();
     assert_eq!(report.spilled_groups, 1, "only the full group: {report:?}");
     assert_eq!(files.written(), 1);
     assert!(
@@ -261,23 +260,20 @@ fn a_column_without_point_views_stays_in_memory() {
     let store = RowGroupStore::new();
     items(&store);
     let files = Files::default();
-    let report = store
-        .spill_node_property_column(&PropertyKey::new("name"), &files)
-        .unwrap();
+    let (report, result) = store.spill_node_property_column(&PropertyKey::new("name"), &files);
+    result.unwrap();
     assert_eq!(report.kept_unsupported, 2, "{report:?}");
     assert_eq!((report.spilled_groups, files.written()), (0, 0));
-    let none = store
-        .spill_node_property_column(&PropertyKey::new("Butch"), &files)
-        .unwrap();
+    let (none, result) = store.spill_node_property_column(&PropertyKey::new("Butch"), &files);
+    result.unwrap();
     assert_eq!(none, ColumnSpillReport::default());
     assert_eq!(
         store.spilled_node_property_columns(),
         Vec::<PropertyKey>::new()
     );
 
-    let ranks = store
-        .spill_node_property_column(&PropertyKey::new("rank"), &files)
-        .unwrap();
+    let (ranks, result) = store.spill_node_property_column(&PropertyKey::new("rank"), &files);
+    result.unwrap();
     assert_eq!(ranks.spilled_groups, 2, "integers have point views");
     assert_eq!(
         store
@@ -297,9 +293,8 @@ fn the_spillable_bytes_count_only_what_a_spill_moves() {
     let loaded = read(&write(&store));
     let name = PropertyKey::new("name");
     assert_eq!(loaded.node_property_column_spillable_bytes(&name), 0);
-    let report = loaded
-        .spill_node_property_column(&name, &Files::default())
-        .unwrap();
+    let (report, result) = loaded.spill_node_property_column(&name, &Files::default());
+    result.unwrap();
     assert_eq!(report.freed_bytes, 0, "{report:?}");
     assert!(loaded.node_property_column_spillable_bytes(&embedding()) > 0);
 }
@@ -399,10 +394,15 @@ fn a_failed_write_changes_nothing_and_a_dropped_store_lets_go_of_its_files() {
     let files = Files::default();
     files.fail.store(true, Ordering::SeqCst);
     let before = store.memory();
-    match store.spill_node_property_column(&embedding(), &files) {
+    let (report, result) = store.spill_node_property_column(&embedding(), &files);
+    match result {
         Err(Error::Io(_)) => {}
         other => panic!("expected the write's error, got {other:?}"),
     }
+    assert_eq!(
+        report.freed_bytes, 0,
+        "nothing spilled before the failed write"
+    );
     assert_eq!(store.memory(), before);
     assert_embeddings(&store, &ids, "after the failed write");
 
@@ -421,9 +421,8 @@ fn a_collected_row_thaws_only_the_columns_it_held_a_value_in() {
     items(&store);
     let files = Files::default();
     spill(&store, &files);
-    let ranks = store
-        .spill_node_property_column(&PropertyKey::new("rank"), &files)
-        .unwrap();
+    let (ranks, result) = store.spill_node_property_column(&PropertyKey::new("rank"), &files);
+    result.unwrap();
     assert_eq!(ranks.spilled_groups, 2);
     // Node 3 has no embedding (3 % 7 == 3), but a rank.
     let mut tx = Tx::begin(&store, 10);
@@ -717,7 +716,8 @@ fn a_spilled_column_is_read_by_key() {
     assert_eq!(embeddings_before, [ids[11]]);
 
     let files = Files::default();
-    let report = store.spill_node_property_column(&rank, &files).unwrap();
+    let (report, result) = store.spill_node_property_column(&rank, &files);
+    result.unwrap();
     assert!(report.spilled_groups > 0, "{report:?}");
     spill(&store, &files);
     assert_eq!(store.spilled_node_property_columns().len(), 2);

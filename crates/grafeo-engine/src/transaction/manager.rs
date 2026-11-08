@@ -4212,19 +4212,25 @@ mod tests {
         mgr.commit(deleter).unwrap();
     }
 
-    /// The change set's grant covers it after the backends committed: the
-    /// commit still applies its triples, schema ops and change events from
-    /// it. The grant goes with the set.
+    /// The change set's grant covers it through the commit: the commit runs
+    /// the bound backends from the set (its triples, schema ops and change
+    /// events apply at the collect, still from the set). The grant goes with
+    /// the set.
     #[cfg(feature = "triple-store")]
     #[test]
     fn a_commit_keeps_the_change_set_grant_until_the_set_goes() {
         use grafeo_common::memory::buffer::BufferManager;
+        use grafeo_core::graph::GraphBackend;
         use grafeo_core::graph::rdf::{Term, Triple};
+        use grafeo_core::graph::rowgroup::RowGroupStore;
 
         let memory = BufferManager::with_budget(1 << 30);
         let manager = TransactionManager::new();
         manager.attach_memory(Arc::clone(&memory));
         let (_transaction, changes) = manager.begin_private().unwrap();
+        // A real backend bound to the set, so the commit runs one.
+        let store: Arc<dyn GraphBackend> = Arc::new(RowGroupStore::default());
+        changes.bind(None, store).unwrap();
         for i in 0..20_000 {
             changes
                 .record_triple(

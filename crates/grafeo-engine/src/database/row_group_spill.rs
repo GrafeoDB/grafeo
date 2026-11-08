@@ -341,7 +341,7 @@ impl MemoryConsumer for RowGroupVectorConsumer {
             // A row group already spilled is left as it is by the store, so
             // a column some group spilled still spills its other groups.
             for property in Self::indexed_properties(&graph) {
-                let spilled = match cause {
+                let (report, result) = match cause {
                     SpillCause::Explicit => graph.spill_node_property_column(&property, files),
                     // Each graph's newest row group stays: its next creates
                     // would read a spilled column back.
@@ -349,8 +349,11 @@ impl MemoryConsumer for RowGroupVectorConsumer {
                         graph.spill_node_property_column_but_newest(&property, files)
                     }
                 };
-                match spilled {
-                    Ok(report) => freed += report.freed_bytes,
+                // What spilled before an error counts too: the store returns
+                // its partial report with the error.
+                freed += report.freed_bytes;
+                match result {
+                    Ok(()) => {}
                     // The spill account refused: this column stays in memory,
                     // and a smaller one after it may still fit.
                     Err(error) if let Some(refusal) = spill_refusal(&error) => {

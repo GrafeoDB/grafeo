@@ -346,7 +346,7 @@ impl GrafeoDB {
         }));
         let used = self.buffer_manager.allocated();
         let limit = self.buffer_manager.hard_limit();
-        if used >= limit {
+        if used > limit {
             warnings.push(crate::admin::OpenWarning::OverMemoryLimit {
                 used: used as u64,
                 limit: limit as u64,

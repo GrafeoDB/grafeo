@@ -42,14 +42,18 @@ impl ActiveFiles {
     /// gone (a cleanup removed it while its file was still open) is no
     /// longer tracked, and its reservation goes back.
     pub(super) fn keep(&self, path: &Path, reservation: SpillReservation) {
+        // The check runs under the lock: a cleanup that removes the file
+        // between the check and the append would leave a reservation tracked
+        // for a path that no longer exists.
+        let mut files = self.0.lock();
         if std::fs::symlink_metadata(path)
             .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
         {
+            drop(files);
             self.removed(path);
             drop(reservation);
             return;
         }
-        let mut files = self.0.lock();
         match files.iter_mut().find(|file| file.path == path) {
             Some(file) => file.reservation = Some(reservation),
             None => files.push(ActiveFile {

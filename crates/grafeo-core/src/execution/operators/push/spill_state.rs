@@ -112,6 +112,10 @@ impl MemoryConsumer for OperatorConsumerAdapter {
         0
     }
 
+    fn can_evict(&self) -> bool {
+        true
+    }
+
     fn can_spill(&self) -> bool {
         true
     }

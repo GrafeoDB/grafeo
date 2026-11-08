@@ -19,7 +19,13 @@ impl Optimizer {
     /// The filter stays and decides, as over a node seek. Rows and columns are
     /// those of the plain plan, in its order, so an expand that does not take
     /// the hint is merely slower.
+    ///
+    /// Not under SQL/PGQ's `=`, which raises across kinds: the far end found by its key would
+    /// leave a reached value of another kind out of the filter that raises on it.
     pub(super) fn look_up_pinned_far_ends(&self, op: LogicalOperator) -> LogicalOperator {
+        if !self.key_reads_decide_rows() {
+            return op;
+        }
         self.pin_far_ends(op, false)
     }
 

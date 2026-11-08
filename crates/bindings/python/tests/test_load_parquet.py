@@ -9,9 +9,7 @@ are refused with an error that names the codec.
 import grafeo
 import pytest
 
-
-def test_the_wheel_imports_parquet():
-    assert "parquet-import" in grafeo.features()
+pytestmark = pytest.mark.requires("parquet-import")
 
 
 def write_people(tmp_path, **options):

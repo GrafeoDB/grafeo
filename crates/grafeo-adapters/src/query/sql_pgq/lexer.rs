@@ -180,6 +180,8 @@ pub enum TokenKind {
     Dot,
     /// |
     Pipe,
+    /// || (concatenation of strings and of lists)
+    Concat,
     /// $
     Dollar,
 
@@ -296,7 +298,14 @@ impl<'a> Lexer<'a> {
             ':' => TokenKind::Colon,
             ';' => TokenKind::Semicolon,
             ',' => TokenKind::Comma,
-            '|' => TokenKind::Pipe,
+            '|' => {
+                if self.current_char() == '|' {
+                    self.advance();
+                    TokenKind::Concat
+                } else {
+                    TokenKind::Pipe
+                }
+            }
             '$' => TokenKind::Dollar,
             '%' => TokenKind::Percent,
             '&' => TokenKind::Ampersand,

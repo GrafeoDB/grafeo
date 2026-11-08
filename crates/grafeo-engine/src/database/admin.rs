@@ -146,12 +146,14 @@ impl super::GrafeoDB {
 
     /// Returns a hierarchical memory usage breakdown.
     ///
-    /// Walks all internal structures (store, indexes, MVCC chains, caches,
-    /// string pools, buffer manager) and returns estimated heap bytes for each.
-    /// Safe to call concurrently with queries. On a database on a backend of
-    /// its own the store, its indexes and its versions are the backend's,
-    /// which the engine does not measure: they count as zero, and the rest
-    /// (caches, buffers, the catalog) is the engine's own.
+    /// The store, its indexes, its versions and its dictionaries come from
+    /// the store's account (counted as they grow, so the report takes time
+    /// independent of the store's size), the rest from the caches, string
+    /// pools and buffer manager, each as estimated heap bytes. Safe to call
+    /// concurrently with queries. On a database on a backend of its own the
+    /// store, its indexes and its versions are the backend's, which the
+    /// engine does not measure: they count as zero, and the rest (caches,
+    /// buffers, the catalog) is the engine's own.
     #[must_use]
     pub fn memory_usage(&self) -> crate::memory_usage::MemoryUsage {
         use crate::memory_usage::{BufferManagerMemory, CacheMemory, MemoryUsage};
@@ -159,7 +161,7 @@ impl super::GrafeoDB {
 
         let (store, indexes, mvcc, string_pool) = self
             .root_store()
-            .map(|store| store.memory_breakdown())
+            .map(|store| store.counted_breakdown())
             .unwrap_or_default();
 
         let (parsed_bytes, optimized_bytes, cached_plan_count) =
@@ -201,7 +203,7 @@ impl super::GrafeoDB {
                 term_dictionary_bytes,
                 ring_index_bytes,
                 named_graph_count,
-            ) = self.rdf_store.heap_memory_bytes();
+            ) = self.rdf_store.counted_memory_bytes();
             usage.rdf = RdfMemory {
                 triple_count,
                 triples_and_indexes_bytes,
@@ -216,14 +218,16 @@ impl super::GrafeoDB {
         #[cfg(feature = "cdc")]
         {
             use crate::memory_usage::CdcMemory;
-            let (total_bytes, entity_count, event_count) = self.cdc_log.heap_memory_bytes();
+            let (total_bytes, entity_count, event_count) = self.cdc_log.counted_memory_bytes();
             usage.cdc = CdcMemory {
                 total_bytes,
                 entity_count,
                 event_count,
+                granted_bytes: self.cdc_log.granted_bytes(),
             };
         }
 
+        usage.spill = self.spill_memory();
         usage.compute_total();
         usage
     }
@@ -285,13 +289,22 @@ impl super::GrafeoDB {
         Ok(file.saturating_add(wal))
     }
 
-    /// The total size of the files under `dir` (0 when it does not exist).
+    /// The total size of the files under `dir` (0 when it does not exist),
+    /// without the WAL segments still being created (`*.log.tmp`), which are
+    /// never part of the database.
     #[cfg(feature = "wal")]
     fn directory_size(dir: &Path) -> Result<usize> {
         let mut total = 0usize;
         if dir.is_dir() {
             for entry in std::fs::read_dir(dir)? {
                 let entry = entry?;
+                if entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(grafeo_storage::wal::is_segment_temp_file_name)
+                {
+                    continue;
+                }
                 // From the file itself: on Windows a listing's size is stale
                 // while the file is open (the active WAL segment).
                 let metadata = std::fs::metadata(entry.path())?;
@@ -547,16 +560,18 @@ impl super::GrafeoDB {
     ///
     /// # Errors
     ///
-    /// A zero interval or size, a database without a file (in memory) or
-    /// opened read-only, which never checkpoints, and the database-closed
-    /// error after `close()`.
+    /// A zero interval, a size below 1 MiB (the error an open gives for
+    /// such a `Config::with_checkpoint_wal_size`), a database without a file
+    /// (in memory) or opened read-only, which never checkpoints, and the
+    /// database-closed error after `close()`.
     pub fn set_checkpoint_triggers(
         &self,
         triggers: crate::admin::CheckpointTriggers,
     ) -> Result<()> {
-        if triggers.interval.is_some_and(|interval| interval.is_zero())
-            || triggers.wal_bytes == Some(0)
-        {
+        // The floor `Config::validate` applies at open, with its error.
+        crate::config::check_checkpoint_wal_size(triggers.wal_bytes)
+            .map_err(super::config_error)?;
+        if triggers.interval.is_some_and(|interval| interval.is_zero()) {
             return Err(grafeo_common::utils::error::Error::InvalidValue(
                 "a checkpoint trigger of zero would checkpoint without pause: leave it unset \
                  to turn it off"
@@ -699,6 +714,37 @@ impl super::GrafeoDB {
     // =========================================================================
     // ADMIN API: Change Data Capture
     // =========================================================================
+
+    /// What the open has spilled, from its spill account: no walk.
+    fn spill_memory(&self) -> crate::memory_usage::SpillMemory {
+        use grafeo_core::execution::spill::{SpillCap, SpillOwner};
+
+        let mut spill = crate::memory_usage::SpillMemory::default();
+        match &self.spill_account {
+            Some(account) => {
+                spill.total_bytes = account.used();
+                spill.limit_bytes = match account.cap() {
+                    SpillCap::Bytes(bytes) => Some(bytes),
+                    SpillCap::Unlimited => None,
+                };
+                spill.sort_bytes = account.used_by(SpillOwner::Sort);
+                spill.aggregate_bytes = account.used_by(SpillOwner::Aggregate);
+                spill.vector_column_bytes = account.used_by(SpillOwner::VectorColumns);
+            }
+            // No spill directory: nothing spills.
+            None => spill.limit_bytes = Some(0),
+        }
+        spill
+    }
+
+    /// The database's change log, for tests and explicit checks of its
+    /// memory account (`CdcLog::account_mismatches`).
+    #[doc(hidden)]
+    #[cfg(feature = "cdc")]
+    #[must_use]
+    pub fn cdc_log(&self) -> &std::sync::Arc<crate::cdc::CdcLog> {
+        &self.cdc_log
+    }
 
     /// Returns whether CDC is enabled by default for new sessions.
     #[cfg(feature = "cdc")]

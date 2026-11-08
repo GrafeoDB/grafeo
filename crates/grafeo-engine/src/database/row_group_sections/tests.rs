@@ -74,6 +74,8 @@ impl Database {
             wal: self.wal.clone(),
             #[cfg(feature = "wal")]
             wal_records_at_checkpoint: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            #[cfg(all(feature = "wal", feature = "grafeo-file"))]
+            wal_retention: Arc::default(),
         }
     }
 

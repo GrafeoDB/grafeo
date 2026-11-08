@@ -96,6 +96,34 @@ impl Bitset {
         count
     }
 
+    /// The rows of the set rows at `ranks`, ascending ranks among the set rows counted from 0, in
+    /// one pass over the words: a rank past the last set row gives none.
+    pub(super) fn rows_at_ranks(&self, ranks: &[u64]) -> Vec<usize> {
+        let mut found = Vec::with_capacity(ranks.len());
+        let mut ranks = ranks.iter().copied().peekable();
+        let mut before = 0_u64;
+        for (index, word) in self.words.iter().enumerate() {
+            let set = u64::from(word.count_ones());
+            while let Some(&rank) = ranks.peek() {
+                if rank >= before + set {
+                    break;
+                }
+                // The (rank - before)th set bit of the word.
+                let mut bits = *word;
+                for _ in 0..rank - before {
+                    bits &= bits - 1;
+                }
+                found.push(index * 64 + bits.trailing_zeros() as usize);
+                ranks.next();
+            }
+            if ranks.peek().is_none() {
+                break;
+            }
+            before += set;
+        }
+        found
+    }
+
     /// The rows set, ascending.
     pub(super) fn rows(&self) -> impl Iterator<Item = usize> + '_ {
         self.words.iter().enumerate().flat_map(|(index, word)| {

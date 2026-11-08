@@ -205,16 +205,23 @@ fn an_argument_that_reads_the_graph_is_an_error() {
     );
 }
 
+/// An argument of two kinds no operator joins fails the call with the operator's status, and names
+/// the argument.
 #[test]
-fn an_argument_that_cannot_be_evaluated_is_an_error() {
+fn an_argument_of_the_wrong_kind_fails_with_its_status() {
     let db = chain_and_branch();
     let error = db
         .execute("CALL grafeo.pagerank(1 - 'x') YIELD score")
         .expect_err("1 - 'x' has no value to run with");
+    assert_eq!(
+        grafeo_common::utils::GqlStatus::from(&error).as_str(),
+        "22G12",
+        "{error}"
+    );
     assert!(
         error
             .to_string()
-            .contains("Argument 'damping' of grafeo.pagerank cannot be evaluated"),
+            .contains("(argument 'damping' of grafeo.pagerank)"),
         "unexpected error: {error}"
     );
 }

@@ -41,6 +41,9 @@ pub(super) struct CheckpointSources {
     /// checkpoint sets (see `GrafeoDB::wal_status`).
     #[cfg(feature = "wal")]
     pub wal_records_at_checkpoint: Arc<std::sync::atomic::AtomicU64>,
+    /// How much WAL a checkpoint keeps for the backup cursor at most.
+    #[cfg(all(feature = "wal", feature = "grafeo-file"))]
+    pub wal_retention: Arc<super::wal_retention::WalRetention>,
 }
 
 impl CheckpointSources {

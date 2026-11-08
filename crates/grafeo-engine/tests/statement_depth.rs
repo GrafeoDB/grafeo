@@ -796,6 +796,45 @@ fn sparql_chains_of_any_length_run_on_a_small_stack() {
     assert_eq!(run(filter(" && ", |i| format!("?v != {i}"))), Ok(1));
 }
 
+/// A test per row plans while the row above it runs, so its plan's frames stand on the frames of the
+/// run: at each depth a nested test answers or is refused by the limit, and the stack holds. The body
+/// of each level runs per row, by a filter in a group of its own.
+#[cfg(feature = "sparql")]
+#[test]
+fn sparql_exists_per_row_nests_on_a_small_stack() {
+    let nested = |depth: usize| {
+        let group = "?s <http://ex/v> ?w { FILTER(BOUND(?s)) }";
+        let mut body = group.to_string();
+        for _ in 1..depth {
+            body = format!("{group} FILTER EXISTS {{ {body} }}");
+        }
+        format!("SELECT ?s WHERE {{ ?s <http://ex/v> ?v FILTER EXISTS {{ {body} }} }}")
+    };
+    let data =
+        "INSERT DATA { <http://ex/alix> <http://ex/v> 3 . <http://ex/gus> <http://ex/v> 19 }";
+    let mut answered = 0;
+    for depth in [1, 2, 4, 8, 16, 32, 64, 128, 256, 512] {
+        let statement = nested(depth);
+        let outcome = on_small_stack(move || {
+            let db = GrafeoDB::new_in_memory();
+            db.execute_sparql(data).map_err(|e| e.to_string())?;
+            let rows = execute(&db, Language::Sparql, &statement).map_err(|e| e.to_string())?;
+            Ok::<_, String>(rows.len())
+        });
+        match outcome {
+            Ok(rows) => {
+                assert_eq!(rows, 2, "depth {depth}");
+                answered = depth;
+            }
+            Err(error) => assert!(
+                error.contains("deep") || error.contains("depth") || error.contains("nest"),
+                "depth {depth}: {error}"
+            ),
+        }
+    }
+    assert!(answered >= 8, "answers to a depth of {answered}");
+}
+
 /// The node count and the sum of `v` of the persons after `statement`.
 fn persons_after(
     language: Language,

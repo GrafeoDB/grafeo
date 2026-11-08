@@ -11,11 +11,14 @@ import json
 
 import grafeo
 import pytest
-from grafeo import GrafeoDB
+
+# The procedures are listed at import: in a build without algos or gql the list stays empty, so
+# the module is collected and skipped rather than failing.
+RUNS = hasattr(grafeo.GrafeoDB(), "algorithms") and "gql" in grafeo.features()
 
 pytestmark = [
     pytest.mark.skipif(
-        not hasattr(GrafeoDB(), "algorithms"),
+        not hasattr(grafeo.GrafeoDB(), "algorithms"),
         reason="grafeo built without algos feature",
     ),
     pytest.mark.skipif("gql" not in grafeo.features(), reason="grafeo built without gql feature"),
@@ -29,21 +32,25 @@ BEFORE = [
     "MATCH (a:Person {name: 'Gus'}), (b:Person {name: 'Vincent'}) INSERT (a)-[:KNOWS {w: 1}]->(b)",
     "MATCH (a:Person {name: 'Vincent'}), (b:Person {name: 'Mia'}) INSERT (a)-[:KNOWS {w: 1}]->(b)",
 ]
-# Adds a node and an edge, and removes the edge that held the chain together.
+# Adds a node and two edges, and removes the edge that held the chain together. The new edges
+# close a triangle (Vincent, Mia, Butch) that has no directed cycle, so the triangle counts see the
+# change and a topological order still exists.
 CHANGE = [
     "INSERT (:Person {name: 'Butch'})",
     "MATCH (:Person {name: 'Gus'})-[e:KNOWS]->(:Person {name: 'Vincent'}) DELETE e",
     "MATCH (a:Person {name: 'Mia'}), (b:Person {name: 'Butch'}) INSERT (a)-[:KNOWS {w: 1}]->(b)",
+    "MATCH (a:Person {name: 'Vincent'}), (b:Person {name: 'Butch'}) "
+    "INSERT (a)-[:KNOWS {w: 1}]->(b)",
 ]
 EDGES_BEFORE = [("Alix", "Gus"), ("Gus", "Vincent"), ("Vincent", "Mia")]
-EDGES_AFTER = [("Alix", "Gus"), ("Vincent", "Mia"), ("Mia", "Butch")]
+EDGES_AFTER = [("Alix", "Gus"), ("Vincent", "Mia"), ("Mia", "Butch"), ("Vincent", "Butch")]
 
 # These list the catalog: the change adds no label, property or edge type.
 CATALOG = {"grafeo.labels", "grafeo.propertyKeys", "grafeo.relationshipTypes"}
 
 
 def database(*statements):
-    db = GrafeoDB()
+    db = grafeo.GrafeoDB()
     for statement in statements:
         db.execute(statement)
     return db
@@ -54,7 +61,7 @@ def ids_by_name(reader):
     return {row["name"]: row["node"] for row in rows}
 
 
-IDS = ids_by_name(database(*BEFORE))
+IDS = ids_by_name(database(*BEFORE)) if RUNS else {}
 
 
 def arguments_of(name):
@@ -67,14 +74,20 @@ def arguments_of(name):
         "grafeo.sssp": "'Alix'",
         "grafeo.max_flow": f"{alix}, {mia}",
         "grafeo.min_cost_max_flow": f"{alix}, {mia}",
+        # Its pattern is required: a triangle.
+        "grafeo.subgraph_isomorphism": "'0-1,1-2,2-0', 3",
     }.get(name, "")
 
 
-PROCEDURES = sorted(
-    row["name"]
-    for row in database().execute("CALL grafeo.procedures()")
-    # Search needs an index, and reads no adjacency.
-    if not row["name"].startswith("grafeo.search.")
+PROCEDURES = (
+    sorted(
+        row["name"]
+        for row in database().execute("CALL grafeo.procedures()")
+        # Search needs an index, and reads no adjacency; a load reads a file and writes.
+        if not row["name"].startswith(("grafeo.search.", "grafeo.load_"))
+    )
+    if RUNS
+    else []
 )
 
 

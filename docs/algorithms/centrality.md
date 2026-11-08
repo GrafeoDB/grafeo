@@ -18,7 +18,7 @@ Measures node importance based on incoming links.
 import grafeo
 
 db = grafeo.GrafeoDB()
-algs = db.algorithms()
+algs = db.algorithms
 
 scores = algs.pagerank()
 
@@ -37,7 +37,7 @@ for node_id, score in scores.items():
 Measures how often a node lies on shortest paths.
 
 ```python
-algs = db.algorithms()
+algs = db.algorithms
 scores = algs.betweenness_centrality()
 ```
 
@@ -52,7 +52,7 @@ scores = algs.betweenness_centrality()
 Measures average distance to all other nodes.
 
 ```python
-algs = db.algorithms()
+algs = db.algorithms
 scores = algs.closeness_centrality()
 ```
 
@@ -67,7 +67,7 @@ scores = algs.closeness_centrality()
 Simple count of connections.
 
 ```python
-algs = db.algorithms()
+algs = db.algorithms
 scores = algs.degree_centrality()
 ```
 
@@ -82,7 +82,7 @@ scores = algs.degree_centrality()
 Importance based on neighbor importance.
 
 ```python
-algs = db.algorithms()
+algs = db.algorithms
 scores = algs.eigenvector_centrality()
 ```
 

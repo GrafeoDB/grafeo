@@ -972,7 +972,7 @@ describe('automatic checkpoints (#426)', () => {
 
     let status = db.checkpointStatus()
     expect(status.intervalMs).toBeUndefined()
-    expect(status.walBytes).toBeUndefined()
+    expect(status.walBytes).toBe(256 * 1024 * 1024)
     expect(status.failures).toBe(0)
     expect(status.stopped).toBe(false)
 
@@ -996,7 +996,7 @@ describe('automatic checkpoints (#426)', () => {
 
   it('should refuse triggers where nothing checkpoints, and fractions', () => {
     const db = GrafeoDB.create()
-    expect(() => db.setCheckpointTriggers({ walBytes: 1024 })).toThrow(/nothing to checkpoint/)
+    expect(() => db.setCheckpointTriggers({ walBytes: 1024 * 1024 })).toThrow(/nothing to checkpoint/)
     expect(() => db.setCheckpointTriggers({ intervalMs: 1.5 })).toThrow(/whole number/)
   })
 })

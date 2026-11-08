@@ -1253,7 +1253,8 @@ class GrafeoDB implements Finalizable {
 
   /// Set when the database checkpoints by itself: every [interval], and once
   /// the WAL holds [walBytes] bytes since the last checkpoint. Leave both out
-  /// to turn automatic checkpoints off (the default). For this open only.
+  /// to turn automatic checkpoints off. For this open only.
+  /// A file database opens with a WAL size of 256 MiB (at least 1 MiB) and no interval.
   void setCheckpointTriggers({Duration? interval, int? walBytes}) {
     _checkOpen();
     if (interval != null && interval <= Duration.zero) {

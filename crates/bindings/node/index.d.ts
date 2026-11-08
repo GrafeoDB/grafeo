@@ -209,16 +209,21 @@ export declare class GrafeoDB {
    * snapshot isolation is the strongest level until queries record their reads).
    */
   beginTransaction(isolationLevel?: string | undefined | null): Transaction
+  /**
+   * Open a session whose limits bind every statement run through it: its
+   * `execute` methods, its transactions and its streams.
+   *
+   * `readOnly: true` refuses writes. `externalAccess: false` refuses every
+   * statement that reads or writes outside the database (`LOAD DATA`,
+   * `LOAD CSV`, the load procedures, SPARQL `LOAD`) before any file is
+   * opened, with an error of GQLSTATUS class 42 that names external
+   * access. The two are independent: `readOnly: true` keeps file access
+   * unless `externalAccess: false` is passed too. With no options the
+   * session runs as `db.execute` does. An unknown option is an error.
+   */
+  session(options?: { readOnly?: boolean; externalAccess?: boolean }): JsSession
   /** Create a vector similarity index on a node property. */
   createVectorIndex(label: string, property: string, dimensions?: number | undefined | null, metric?: string | undefined | null, m?: number | undefined | null, efConstruction?: number | undefined | null, quantization?: string | undefined | null): Promise<void>
-  /**
-   * Search for the k nearest neighbors of a query vector.
-   *
-   * Returns an array of [nodeId, distance] pairs sorted by distance
-   * ascending (lower = more similar). The distance scale depends on
-   * the metric configured at index creation.
-   */
-  vectorSearch(label: string, property: string, query: Array<number>, k: number, ef?: number | undefined | null, filters?: Record<string, any> | undefined | null): Promise<Array<Array<number>>>
   /** Bulk-insert nodes with vector properties. */
   batchCreateNodes(label: string, property: string, vectors: Array<Array<number>>): Promise<Array<number>>
   /** Remove a property from a node. Returns true if the property existed. */
@@ -252,7 +257,8 @@ export declare class GrafeoDB {
    * Sets when the database checkpoints by itself: every
    * `triggers.intervalMs` milliseconds, and once the WAL holds
    * `triggers.walBytes` bytes since the last checkpoint. Leave both out to
-   * turn automatic checkpoints off (the default). For this open only.
+   * turn automatic checkpoints off. For this open only.
+   * A file database opens with a WAL size of 256 MiB (at least 1 MiB) and no interval.
    * Throws for a database in memory or opened read-only, and for zero.
    */
   setCheckpointTriggers(triggers: CheckpointTriggers): void
@@ -267,24 +273,6 @@ export declare class GrafeoDB {
    * Flushes all pending WAL records to the main storage.
    */
   walCheckpoint(): void
-  /**
-   * Saves the database to a file path.
-   *
-   * If in-memory, creates a new persistent database at the given path.
-   * If file-backed, creates a copy at the new path.
-   * The copy is a single file, whatever the extension; fails if `path`
-   * exists. The original database remains unchanged.
-   */
-  save(path: string): void
-  /** Create a full backup of the database. */
-  backupFull(backupDir: string): void
-  /** Create an incremental backup (WAL records since last backup). */
-  backupIncremental(backupDir: string): void
-  /**
-   * Restore a database to a specific epoch from a backup chain. An epoch
-   * past the end of the chain restores the latest state the chain holds.
-   */
-  static restoreToEpoch(backupDir: string, epoch: number, outputPath: string): void
   /** Close the database. */
   close(): void
   /**
@@ -317,6 +305,16 @@ export declare class GrafeoDB {
   /** Returns the names of all graph projections. */
   listProjections(): Array<string>
   /**
+   * Search for the k nearest neighbors of a query vector.
+   *
+   * Returns an array of [nodeId, distance] pairs sorted by distance
+   * ascending (lower = more similar). The distance scale depends on
+   * the metric configured at index creation.
+   *
+   * Needs the `vector-index` feature (in the default and `full` builds).
+   */
+  vectorSearch(label: string, property: string, query: Array<number>, k: number, ef?: number | undefined | null, filters?: Record<string, any> | undefined | null): Promise<Array<Array<number>>>
+  /**
    * Drop a vector index for the given label and property.
    * Returns true if the index existed and was removed.
    */
@@ -342,6 +340,44 @@ export declare class GrafeoDB {
    * balance, not distance sorting.
    */
   mmrSearch(label: string, property: string, query: Array<number>, k: number, fetchK?: number | undefined | null, lambdaMult?: number | undefined | null, ef?: number | undefined | null, filters?: Record<string, any> | undefined | null): Promise<Array<Array<number>>>
+  /**
+   * Saves the database to a file path.
+   *
+   * If in-memory, creates a new persistent database at the given path.
+   * If file-backed, creates a copy at the new path.
+   * The copy is a single file, whatever the extension; fails if `path`
+   * exists. The original database remains unchanged.
+   *
+   * Needs the `storage` feature (in the default and `full` builds).
+   */
+  save(path: string): void
+  /**
+   * Create a full backup of the database.
+   *
+   * Needs the `storage` feature (in the default and `full` builds).
+   */
+  backupFull(backupDir: string): void
+  /**
+   * Create an incremental backup (WAL records since last backup).
+   *
+   * Needs the `storage` feature (in the default and `full` builds).
+   */
+  backupIncremental(backupDir: string): void
+  /**
+   * Release the backup cursor: the next backup must be a full one.
+   * Checkpoints then keep only the WAL a reopen needs. Returns whether
+   * there was a cursor to release.
+   *
+   * Needs the `storage` feature (in the default and `full` builds).
+   */
+  releaseBackupCursor(): boolean
+  /**
+   * Restore a database to a specific epoch from a backup chain. An epoch
+   * past the end of the chain restores the latest state the chain holds.
+   *
+   * Needs the `storage` feature (in the default and `full` builds).
+   */
+  static restoreToEpoch(backupDir: string, epoch: number, outputPath: string): void
   /**
    * Create a BM25 text index on a node property for full-text search.
    *
@@ -599,6 +635,15 @@ export declare class JsNode {
 export declare class QueryResult {
   /** Get column names. */
   get columns(): Array<string>
+  /**
+   * The warnings the statement raised, ordered by code: a deprecated form
+   * it wrote or ran, or a notice; empty when there were none.
+   *
+   * # Stability: Experimental
+   *
+   * New in 0.6.2. See <https://grafeo.dev/stability/>.
+   */
+  get warnings(): Array<QueryWarning>
   /** Get number of rows. */
   get length(): number
   /** Query execution time in milliseconds (if available). */
@@ -670,6 +715,16 @@ export declare class ResultStream {
   /** Column names in the order they appear in each row object. */
   get columns(): Array<string>
   /**
+   * The warnings the statement raised so far, ordered by code: its
+   * translation's from the start, its run's as the rows that raise them
+   * are pulled, all of them once `next()` returned `null`.
+   *
+   * # Stability: Experimental
+   *
+   * New in 0.6.2. See <https://grafeo.dev/stability/>.
+   */
+  get warnings(): Array<QueryWarning>
+  /**
    * Pulls the next row as a plain object, or `null` when the stream is
    * exhausted. Runs the Rust work on a blocking thread so the Node.js
    * event loop stays responsive.
@@ -692,6 +747,48 @@ export declare class ResultStream {
   close(): Promise<void>
 }
 export type JsResultStream = ResultStream
+
+/**
+ * A session on a database: its statements run with the limits it was opened with.
+ *
+ * `readOnly` refuses writes. `externalAccess: false` refuses every statement that reads or
+ * writes outside the database (`LOAD DATA`, `LOAD CSV`, the load procedures, SPARQL `LOAD`),
+ * before any file is opened. The two are independent: `readOnly: true` keeps file access.
+ * Nothing run on the session can lift a limit. `close()` it when done.
+ */
+export declare class Session {
+  /** Execute a GQL statement on the session. Returns a Promise<QueryResult>. */
+  execute(query: string, params?: any | undefined | null): Promise<QueryResult>
+  /** Execute a statement in a named language (e.g. `"graphql-rdf"`) on the session. */
+  executeLanguage(language: string, query: string, params?: any | undefined | null): Promise<QueryResult>
+  /**
+   * Run a read-only GQL query on the session and return an async cursor, as
+   * `GrafeoDB.executeStream` does.
+   */
+  executeStream(query: string): Promise<JsResultStream>
+  /**
+   * Begin a transaction with the session's limits, used as one from
+   * `GrafeoDB.beginTransaction` (the isolation level as there).
+   */
+  beginTransaction(isolationLevel?: string | undefined | null): Transaction
+  /**
+   * Close the session: statements called from now on fail; one already called finishes. The
+   * database and other sessions are unaffected. Closing a closed session does nothing, and
+   * closing never waits for a running statement.
+   */
+  close(): void
+  /** Execute a Cypher statement on the session. */
+  executeCypher(query: string, params?: any | undefined | null): Promise<QueryResult>
+  /** Execute a SQL/PGQ statement on the session. */
+  executeSql(query: string, params?: any | undefined | null): Promise<QueryResult>
+  /** Execute a Gremlin statement on the session. */
+  executeGremlin(query: string, params?: any | undefined | null): Promise<QueryResult>
+  /** Execute a GraphQL statement on the session. */
+  executeGraphql(query: string, params?: any | undefined | null): Promise<QueryResult>
+  /** Execute a SPARQL statement on the session. */
+  executeSparql(query: string, params?: any | undefined | null): Promise<QueryResult>
+}
+export type JsSession = Session
 
 /**
  * A database transaction with explicit commit/rollback.
@@ -811,6 +908,27 @@ export interface CreateOptions {
    * default); `null` or `Infinity` runs queries without a limit.
    */
   queryTimeout?: number | null
+  /**
+   * How many bytes of WAL a checkpoint keeps at most for the next
+   * incremental backup (1 GiB by default). Past it, the oldest part goes
+   * and the next incremental backup fails, asking for a full backup. For
+   * this open only.
+   */
+  walRetentionLimit?: number
+  /**
+   * How many bytes of WAL past the last checkpoint make the database
+   * checkpoint by itself, on a background thread: 256 MiB when left out,
+   * at least 1 MiB. `null` turns automatic checkpoints off: the WAL then
+   * grows until close or `walCheckpoint()`. For this open only.
+   */
+  checkpointWalSize?: number | null
+  /**
+   * The size a WAL file grows to before the log goes on in a new one:
+   * 64 MiB by default, from 1 MiB to 1 GiB. A checkpoint removes whole
+   * files and keeps one segment of free disk space for the WAL. For this
+   * open only.
+   */
+  walSegmentSize?: number
 }
 
 /** Options for CSV import. */
@@ -820,6 +938,22 @@ export interface CsvImportOptions {
   /** Whether the first row contains headers (default: true) */
   headers?: boolean
 }
+
+/**
+ * Returns the features this package was built with, as Python's
+ * `grafeo.features()` lists them: the query languages (`gql`, `cypher`,
+ * `sparql`, `gremlin`, `graphql`, `sql-pgq`) and the optional capabilities
+ * (`algos`, `vector-index`, `text-index`, `hybrid-search`, `cdc`,
+ * `triple-store`, `shacl`, `embed`, `arrow-export`, `jsonl-import`,
+ * `parquet-import`, `metrics`, and `storage`: persistence, the WAL and
+ * `.grafeo` files). Profiles such as `full` are not listed, only what they
+ * enable. A method that needs a feature exists only in a build with it.
+ *
+ * ```ts
+ * if (!features().includes('cypher')) throw new Error('this build has no Cypher')
+ * ```
+ */
+export declare function features(): Array<string>
 
 /** Options for JSON Lines import. */
 export interface JsonlImportOptions {
@@ -874,6 +1008,23 @@ export interface QueryProfile {
    * adds parsing, planning and the commit.
    */
   totalTimeMs: number
+}
+
+/**
+ * A warning a statement raised: a deprecated form it wrote or ran, or a
+ * notice.
+ *
+ * # Stability: Experimental
+ *
+ * New in 0.6.2: new warnings and kinds may be added in any release. See <https://grafeo.dev/stability/>.
+ */
+export interface QueryWarning {
+  /** Its GQLSTATUS code, of class `01` (for example `01X01`). */
+  code: string
+  /** `deprecation` or `notice`. */
+  kind: string
+  /** What it says, naming the replacement of a deprecated form. */
+  message: string
 }
 
 /** Returns the active SIMD instruction set for vector operations. */

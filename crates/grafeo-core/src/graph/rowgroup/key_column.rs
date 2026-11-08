@@ -17,19 +17,20 @@
 //! The answer is at the reader's view: visibility by the word of found rows, which is one `AND` in
 //! a vector without stamps, and a row a chain holds is read as the view sees it.
 
+use crate::execution::operators::value_utils::{EqualAcrossKinds, ValueKinds, holds_null};
 use std::ops::Range;
 use std::sync::OnceLock;
 
 use grafeo_common::types::{ArcStr, NodeId, Value};
-use grafeo_common::utils::error::Result;
+use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind, Result};
 use smallvec::{SmallVec, smallvec};
 
 use super::bitset::Bitset;
 use super::column::{ColdRows, ColumnRead, HotRows, HotValues};
 use super::index::MaybeEqual;
+use super::slots::GroupRows;
 use super::{Inner, LabelIds, ROWS_PER_GROUP, Read};
 use crate::codec::column_chunk::{DictView, ZoneMap, bits_among};
-use crate::execution::operators::value_utils::text_reads_as_number;
 use crate::graph::traits::KeyColumnGroup;
 
 /// The words of a row group's bits.
@@ -58,6 +59,8 @@ pub struct KeyColumnQuery {
     decoded: Option<DecodedChunk>,
     /// Its names as the store's ids, for the next group.
     ids: Option<ReadIds>,
+    /// What the statement's `=` gives across kinds.
+    equal: EqualAcrossKinds,
 }
 
 /// A read's names as a store's ids. An id is never given twice, so ids are kept once every name has
@@ -123,7 +126,24 @@ impl KeyColumnQuery {
             targets: Targets::new(values.into()),
             decoded: None,
             ids: None,
+            equal: EqualAcrossKinds::False,
         }
+    }
+
+    /// Reads as a statement whose `=` gives `equal` across kinds compares: where it raises
+    /// (SQL/PGQ), a row of the read's labels whose value is of another kind than the keys' fails
+    /// the read (22G04), as the scan's `=` would meet it, whatever the read finds.
+    #[must_use]
+    pub fn with_equal_across_kinds(mut self, equal: EqualAcrossKinds) -> Self {
+        self.equal = equal;
+        self
+    }
+
+    /// What the statement's `=` gives across kinds (see
+    /// [`with_equal_across_kinds`](Self::with_equal_across_kinds)).
+    #[must_use]
+    pub fn equal_across_kinds(&self) -> EqualAcrossKinds {
+        self.equal
     }
 
     /// The key it reads.
@@ -132,9 +152,18 @@ impl KeyColumnQuery {
         &self.property
     }
 
-    /// Reads the rows of the labels left out too, whose indexes the caller could not read.
+    /// Reads the rows of the labels left out too, whose indexes the caller could not read. Their
+    /// nodes were to come from the indexes, so a need of one of some labels takes them in: over
+    /// `n:A|B` with A's index read, the column read B's nodes only, and now reads A's as well.
     pub fn read_every_label(&mut self) {
-        self.except.clear();
+        let left_out = std::mem::take(&mut self.except);
+        if !self.one_of.is_empty() {
+            for label in left_out {
+                if !self.one_of.contains(&label) {
+                    self.one_of.push(label);
+                }
+            }
+        }
         self.ids = None;
     }
 
@@ -153,10 +182,8 @@ struct Targets {
     /// Whether every key is an integer or a float other than NaN, so an integer or float found
     /// is `=` the key, not only maybe.
     number_keys: bool,
-    /// Whether every key is a string: a stored string `=` one only when it has its bytes.
+    /// Whether every key is a string.
     string_keys: bool,
-    /// Whether a key is a float.
-    float_keys: bool,
     finders: OnceLock<Vec<MaybeEqual>>,
     forms: OnceLock<NumberForms>,
     strings: OnceLock<Vec<ArcStr>>,
@@ -170,14 +197,12 @@ struct NumberForms {
     /// The bits of the floats found, sorted: `=`'s two zeros are both among them, and a NaN is
     /// found as the index finds it, for the filter to refuse.
     floats: Vec<u64>,
-    /// The last digits of the integers, a bit per digit.
-    last_digits: u16,
 }
 
 impl Targets {
-    /// What finds `values`; `None` when `=` finds nothing equal to any (NULL).
+    /// What finds `values`; `None` when `=` finds nothing equal to any: each is or holds a null.
     fn new(mut values: Vec<Value>) -> Option<Self> {
-        values.retain(|value| !value.is_null());
+        values.retain(|value| !holds_null(value));
         if values.is_empty() {
             return None;
         }
@@ -187,14 +212,10 @@ impl Targets {
             _ => false,
         });
         let string_keys = values.iter().all(|value| matches!(value, Value::String(_)));
-        let float_keys = values
-            .iter()
-            .any(|value| matches!(value, Value::Float64(_)));
         Some(Self {
             values,
             number_keys,
             string_keys,
-            float_keys,
             finders: OnceLock::new(),
             forms: OnceLock::new(),
             strings: OnceLock::new(),
@@ -223,18 +244,12 @@ impl Targets {
             integers.dedup();
             floats.sort_unstable();
             floats.dedup();
-            let last_digits = integers.iter().fold(0, |digits, integer: &i64| {
-                digits | (1 << (integer.unsigned_abs() % 10))
-            });
-            NumberForms {
-                integers,
-                floats,
-                last_digits,
-            }
+            NumberForms { integers, floats }
         })
     }
 
-    /// The string keys, sorted.
+    /// The string keys, sorted: a stored string `=` a key only when it is one of them, by its
+    /// bytes, as no string equals a number.
     fn strings(&self) -> &[ArcStr] {
         self.strings.get_or_init(|| {
             let mut strings: Vec<ArcStr> = self
@@ -251,16 +266,87 @@ impl Targets {
         })
     }
 
-    /// Whether a found `value` is `=` a key, not only maybe.
+    /// The kinds of the keys.
+    fn kinds(&self) -> ValueKinds {
+        self.values
+            .iter()
+            .fold(ValueKinds::default(), |kinds, key| {
+                kinds.union(ValueKinds::of(key))
+            })
+    }
+
+    /// Whether every value of `column` in the rows of `span` is of the keys' one kind, by what
+    /// the column says of itself: a hot column of integers, floats or strings, and cold chunks
+    /// whose zone maps bound integers, floats or strings. Values a chain holds are not counted.
+    fn column_is_of_their_kind(
+        &self,
+        column: &ColumnRead<'_>,
+        span: &Range<usize>,
+    ) -> Result<bool> {
+        let keys = self.kinds();
+        if !keys.is_one() {
+            return Ok(false);
+        }
+        match column {
+            ColumnRead::Hot(hot) => Ok(match hot.values() {
+                HotValues::Int64(_) | HotValues::Float64(_) => keys == ValueKinds::NUMBERS,
+                HotValues::String(_) => keys == ValueKinds::STRINGS,
+                HotValues::Other => false,
+            }),
+            ColumnRead::Cold(chunks) => {
+                for chunk in chunks {
+                    let rows = chunk.rows();
+                    if rows.end <= span.start || rows.start >= span.end {
+                        continue;
+                    }
+                    let kinds = match chunk.zone_map()? {
+                        Some(ZoneMap::Values(Value::Int64(_) | Value::Float64(_), _)) => {
+                            ValueKinds::NUMBERS
+                        }
+                        Some(ZoneMap::Strings(_)) => ValueKinds::STRINGS,
+                        _ => return Ok(false),
+                    };
+                    if kinds != keys {
+                        return Ok(false);
+                    }
+                }
+                Ok(true)
+            }
+        }
+    }
+
+    /// The error of a key `=` a value of another kind meets, in a statement where that raises.
+    fn not_comparable(&self, found: &Value) -> Error {
+        let kind = ValueKinds::of(found);
+        let key = self
+            .values
+            .iter()
+            .find(|key| ValueKinds::of(key) != kind)
+            .or(self.values.first());
+        let message = match key {
+            Some(key) => format!(
+                "a value of type {} ({key}) cannot be compared with a value of type {} ({found})",
+                key.type_name(),
+                found.type_name()
+            ),
+            None => format!("a value of type {} ({found})", found.type_name()),
+        };
+        Error::from(QueryError::new(
+            QueryErrorKind::ValuesNotComparable,
+            message,
+        ))
+    }
+
+    /// Whether a found `value` is `=` a key, not only maybe: a string found is one of the keys.
     fn is_exact(&self, value: &Value) -> bool {
         match value {
             Value::Int64(_) | Value::Float64(_) => self.number_keys,
-            Value::String(_) => self.string_keys || self.number_keys,
+            Value::String(_) => true,
             _ => false,
         }
     }
 
-    /// Whether `text` is one of the keys, when every key is a string.
+    /// Whether `text` is one of the string keys.
     fn is_a_key(&self, text: &[u8]) -> bool {
         match self.strings() {
             [] => false,
@@ -275,59 +361,19 @@ impl Targets {
         }
     }
 
-    /// Whether `text` need not be read against number keys: with no float among them only text that
-    /// reads as an integer `=` one, and such text ends in that integer's last digit.
-    fn number_text_is_ruled_out(&self, text: &[u8]) -> bool {
-        !self.float_keys
-            && !text.last().is_some_and(|byte| {
-                byte.is_ascii_digit() && self.forms().last_digits & (1 << (byte - b'0')) != 0
-            })
-    }
-
-    /// Whether `text` `=` a key, when every key is an integer or a float, by the rules of `=` (see
-    /// `values_equal`): the integers found hold every key an integer `=`, and other number text
-    /// `=` only a float.
-    fn text_equals_a_number(&self, text: &str) -> bool {
-        if self.number_text_is_ruled_out(text.as_bytes()) {
-            return false;
-        }
-        text_reads_as_number(
-            text,
-            |integer| self.forms().integers.binary_search(&integer).is_ok(),
-            self.float_keys.then_some(|number: f64| {
-                self.values
-                    .iter()
-                    .any(|key| matches!(key, Value::Float64(float) if *float == number))
-            }),
-        )
-    }
-
-    /// Whether a dictionary's entry, by its bytes, is found.
-    fn entry_is_found(&self, entry: &[u8]) -> bool {
-        if self.string_keys {
-            return self.is_a_key(entry);
-        }
-        if self.number_keys && self.number_text_is_ruled_out(entry) {
-            return false;
-        }
-        std::str::from_utf8(entry).is_ok_and(|text| {
-            if self.number_keys {
-                self.text_equals_a_number(text)
-            } else {
-                self.finds(&Value::from(text))
-            }
-        })
-    }
-
     /// Whether the lookup finds `value`, as [`MaybeEqual::finds`] says.
     fn finds(&self, value: &Value) -> bool {
         match value {
             Value::Int64(value) => self.forms().integers.binary_search(value).is_ok(),
             Value::Float64(value) => self.forms().floats.binary_search(&value.to_bits()).is_ok(),
-            Value::String(text) if self.string_keys => self.is_a_key(text.as_bytes()),
-            Value::String(text) if self.number_keys => self.text_equals_a_number(text),
+            Value::String(text) => self.is_a_key(text.as_bytes()),
             _ => self.finders().iter().any(|find| find.finds(value)),
         }
+    }
+
+    /// Whether a dictionary's entry, a string by its bytes, is found.
+    fn entry_is_found(&self, entry: &[u8]) -> bool {
+        self.is_a_key(entry)
     }
 
     /// Whether a hot column is read a slice at a time: its values are read one by one, as strings
@@ -345,7 +391,7 @@ impl Targets {
                 .floats
                 .iter()
                 .any(|target| hot.might_equal(&Value::Float64(f64::from_bits(*target)))),
-            HotValues::String(_) => !self.string_keys || hot.might_hold_a_string_of(self.strings()),
+            HotValues::String(_) => hot.might_hold_a_string_of(self.strings()),
             HotValues::Other => true,
         }
     }
@@ -365,9 +411,7 @@ impl Targets {
                     target.is_nan() || (*min..=*max).contains(&target)
                 })
             }
-            ZoneMap::Strings(zone) => {
-                self.string_keys && !self.strings().iter().any(|string| zone.may_hold(string))
-            }
+            ZoneMap::Strings(zone) => !self.strings().iter().any(|string| zone.may_hold(string)),
             ZoneMap::Values(..) => false,
         }
     }
@@ -395,7 +439,7 @@ impl Targets {
                 *exact &= self.number_keys || found & to_compare == 0;
                 found
             }
-            HotValues::String(values) if self.string_keys => {
+            HotValues::String(values) => {
                 let mut found = 0;
                 let mut rows = to_compare;
                 while rows != 0 {
@@ -410,22 +454,7 @@ impl Targets {
                 }
                 found
             }
-            HotValues::String(values) if self.number_keys => {
-                let mut found = 0;
-                let mut rows = to_compare;
-                while rows != 0 {
-                    let bit = rows.trailing_zeros() as usize;
-                    rows &= rows - 1;
-                    if values
-                        .get(word * 64 + bit)
-                        .is_some_and(|value| self.text_equals_a_number(value))
-                    {
-                        found |= 1 << bit;
-                    }
-                }
-                found
-            }
-            HotValues::String(_) | HotValues::Other => {
+            HotValues::Other => {
                 let mut found = 0;
                 let mut rows = to_compare;
                 while rows != 0 {
@@ -550,15 +579,9 @@ impl Targets {
             }
             match &kept.values {
                 KeptValues::Dict(view) => {
-                    let mut found_any = false;
-                    answer.compared += view.find_codes(
-                        |word| chunk_scope(&scoped, first, word),
-                        |offset| {
-                            hit(offset);
-                            found_any = true;
-                        },
-                    );
-                    answer.exact &= self.string_keys || self.number_keys || !found_any;
+                    // An entry found is a string key, which is exactly `=`.
+                    answer.compared +=
+                        view.find_codes(|word| chunk_scope(&scoped, first, word), hit);
                 }
                 KeptValues::Decoded(values) => {
                     let from =
@@ -630,15 +653,19 @@ fn words_to_read(within: Option<&[&Bitset]>, words: Range<usize>, mut read: impl
     }
 }
 
-/// The bits of word `word` of `values` whose key is among `targets`, sorted. A column's vector ends
-/// at its highest row with a value, so the word may be short.
+/// The bits of word `word` of `values` whose key is among `targets`, sorted. A column's values
+/// start at a vector and end at its highest row with a value, so a word below the start holds
+/// none and the last word may be short.
 fn among<T: Copy, K: Copy + Ord>(
-    values: &[T],
+    values: &GroupRows<T>,
     word: usize,
     targets: &[K],
     key: impl Fn(T) -> K,
 ) -> u64 {
-    let Some(rest) = values.get(word * 64..) else {
+    let Some(rest) = (word * 64)
+        .checked_sub(values.first_row())
+        .and_then(|from| values.as_slice().get(from..))
+    else {
         return 0;
     };
     bits_among(&rest[..rest.len().min(64)], targets, key)
@@ -695,7 +722,9 @@ impl Inner {
             targets,
             decoded,
             ids,
+            equal,
         } = query;
+        let raises = *equal == EqualAcrossKinds::Raises;
         let Some(targets) = &*targets else {
             return Ok(answer);
         };
@@ -742,8 +771,10 @@ impl Inner {
             return Ok(answer);
         };
         // A hot column's bound covers every version a reader may see, chained ones too, so no read
-        // of it can find a value outside it.
+        // of it can find a value outside it. Where `=` raises across kinds, the values it holds are
+        // read all the same, below.
         if let ColumnRead::Hot(hot) = &column
+            && !raises
             && !targets.may_be_in(hot)
         {
             return Ok(answer);
@@ -797,6 +828,14 @@ impl Inner {
         } else {
             None
         };
+        // The rows the check of kinds reads, where `=` raises: those of the scope, and those whose
+        // labels a chain holds.
+        let kind_scope = raises.then(|| {
+            scope_rows.clone().map(|mut rows| {
+                rows.extend(label_chains.as_ref());
+                rows
+            })
+        });
         let mut cold_found = None;
         let may_find = match &column {
             ColumnRead::Hot(hot) => {
@@ -892,6 +931,49 @@ impl Inner {
                 }
             },
         );
+        // Where `=` raises across kinds, a row of the scope the view sees whose value is of another
+        // kind than the keys' fails the read, as the scan's `=` would meet it. A column of the
+        // keys' one kind has such a value only in a chain.
+        if let Some(kind_scope) = kind_scope {
+            let keys = targets.kinds();
+            let of_their_kind = targets.column_is_of_their_kind(&column, &span)?;
+            let mut met = None;
+            words_to_read(
+                kind_scope.as_deref(),
+                span.start / 64..span.end.div_ceil(64),
+                |word| {
+                    if met.is_some() {
+                        return;
+                    }
+                    let labels_chained = word_of(&label_chains, word);
+                    let mut rows = if of_their_kind {
+                        word_of(&value_chains, word) & (in_scope(word) | labels_chained)
+                    } else {
+                        in_scope(word) | labels_chained
+                    };
+                    while rows != 0 {
+                        let bit = rows.trailing_zeros() as usize;
+                        rows &= rows - 1;
+                        let row = word * 64 + bit;
+                        if !group.versions.visible(row, read)
+                            || (labels_chained & (1 << bit) != 0 && !labels_in_scope(row))
+                        {
+                            continue;
+                        }
+                        if let Some(value) = group.columns.get_at(key, row, read)
+                            && !value.is_null()
+                            && ValueKinds::of(&value) != keys
+                        {
+                            met = Some(value);
+                            return;
+                        }
+                    }
+                },
+            );
+            if let Some(found) = met {
+                return Err(targets.not_comparable(&found));
+            }
+        }
         Ok(answer)
     }
 }
@@ -1485,7 +1567,7 @@ mod tests {
         }
     }
 
-    /// The pins of a string key: its bytes against a string, as `=` says against a number.
+    /// The pins of a string key: its bytes against a string, and never a number, whatever it spells.
     #[test]
     fn a_string_key_against_each_kind() {
         let targets = |key: &str| Targets::new(vec![string(key)]).unwrap();
@@ -1493,13 +1575,13 @@ mod tests {
             ("042", string("42"), false),
             ("042", string("042"), true),
             ("42", string("042"), false),
-            ("042", Value::Int64(42), true),
-            ("42", Value::Int64(42), true),
+            ("042", Value::Int64(42), false),
+            ("42", Value::Int64(42), false),
             ("4.2e1", Value::Int64(42), false),
             ("42.0", Value::Int64(42), false),
-            ("4.2e1", Value::Float64(42.0), true),
-            ("42.0", Value::Float64(42.0), true),
-            ("42", Value::Float64(42.0), true),
+            ("4.2e1", Value::Float64(42.0), false),
+            ("42.0", Value::Float64(42.0), false),
+            ("42", Value::Float64(42.0), false),
             ("abc", Value::Int64(42), false),
             ("", string(""), true),
             ("", Value::Int64(0), false),

@@ -7,7 +7,7 @@
  * Reuses the parser and comparator from the Node.js runner.
  */
 
-import { describe, it, expect, vi } from 'vitest'
+import { afterAll, describe, it, expect, vi } from 'vitest'
 
 // A test that loads a dataset (the LDBC files) takes seconds through the binding,
 // close to vitest's 5 s default on a busy machine: give each test a minute.
@@ -16,6 +16,7 @@ import { readFileSync, readdirSync, statSync, existsSync } from 'fs'
 import { join, relative, resolve } from 'path'
 import { parseGtestFile, coerceParams } from '../node/parser.mjs'
 import { assertRowsSorted, assertRowsOrdered, assertRowsWithPrecision, assertHash, describeError, assertGqlStatus, assertTerms } from '../node/comparator.mjs'
+import { SpecFailure, runMarkedSync, runProbe, specRoot, summary, summaryLine } from '../node/xfail.mjs'
 
 // ---------------------------------------------------------------------------
 // Import WASM bindings. A package that does not load fails the run: it must not
@@ -33,6 +34,8 @@ initSync({ module: readFileSync(join(wasmPkgPath, 'grafeo_wasm_bg.wasm')) })
 // ---------------------------------------------------------------------------
 
 const SPEC_DIR = resolve(import.meta.dirname, '..', '..')
+// The .gtest files the run reads: tests/spec, or GRAFEO_SPEC_ROOT (the runner probes).
+const SPEC_ROOT = specRoot(SPEC_DIR)
 const DATASETS_DIR = join(SPEC_DIR, 'datasets')
 
 // ---------------------------------------------------------------------------
@@ -48,9 +51,11 @@ function wrapRawResult(rawResult) {
   // can be released before db.free() is called.
   const columns = [...rawResult.columns]
   const rows = rawResult.rows.map(row => [...row])
+  const warnings = rawResult.warnings.map(w => ({ code: w.code, kind: w.kind, message: w.message }))
 
   return {
     columns,
+    warnings,
     length: rows.length,
     toArray() {
       const arr = []
@@ -178,13 +183,17 @@ function isAvailable(db, requirement) {
 // Discover and register tests
 // ---------------------------------------------------------------------------
 
-const gtestFiles = findGtestFiles(SPEC_DIR)
+const gtestFiles = findGtestFiles(SPEC_ROOT)
+
+// One line with the run's skipped and expected-failure counts, written past vitest's
+// console capture, which keeps a passing run's logs back.
+afterAll(() => process.stdout.write(`${summaryLine()}\n`))
 
 for (const filePath of gtestFiles) {
   // Skip runner directories
   if (filePath.includes('runners')) continue
 
-  const relPath = relative(SPEC_DIR, filePath).replace(/\\/g, '/')
+  const relPath = relative(SPEC_ROOT, filePath).replace(/\\/g, '/')
   let parsed
 
   try {
@@ -206,7 +215,10 @@ for (const filePath of gtestFiles) {
       if (tc.variants && Object.keys(tc.variants).length > 0) {
         for (const [lang, query] of Object.entries(tc.variants)) {
           it(`${tc.name}_${lang}`, (ctx) => {
-            if (tc.skip) return ctx.skip()
+            if (tc.skip) {
+              summary.skipped++
+              return ctx.skip()
+            }
             const db = new Database()
             try {
               if (!isAvailable(db, lang)) return ctx.skip()
@@ -215,11 +227,15 @@ for (const filePath of gtestFiles) {
                 if (!isAvailable(db, req)) return ctx.skip()
               }
               const effectiveDataset = tc.dataset || meta.dataset
-              if (effectiveDataset && effectiveDataset !== 'empty') {
-                loadDataset(db, effectiveDataset)
-              }
+              // The dataset loads inside the case, as in the other runners: a binding error there
+              // is the case's failure, which an `xfail:` absorbs; a missing file is the runner's.
               try {
-                runTestCase(db, { ...tc, query }, lang, meta.language || 'gql')
+                runMarkedSync(tc, () => {
+                  if (effectiveDataset && effectiveDataset !== 'empty') {
+                    loadDataset(db, effectiveDataset)
+                  }
+                  runTestCase(db, { ...tc, query }, lang, meta.language || 'gql')
+                })
               } catch (err) {
                 if (err instanceof WebAssembly.RuntimeError) return ctx.skip()
                 throw err
@@ -234,7 +250,10 @@ for (const filePath of gtestFiles) {
 
       it(tc.name, (ctx) => {
         // Skip by field
-        if (tc.skip) return ctx.skip()
+        if (tc.skip) {
+          summary.skipped++
+          return ctx.skip()
+        }
 
         const db = new Database()
         try {
@@ -254,12 +273,15 @@ for (const filePath of gtestFiles) {
 
           // Load dataset (per-test override takes priority)
           const effectiveDataset = tc.dataset || meta.dataset
-          if (effectiveDataset && effectiveDataset !== 'empty') {
-            loadDataset(db, effectiveDataset)
-          }
-
+          // The dataset loads inside the case, as in the other runners: a binding error there
+          // is the case's failure, which an `xfail:` absorbs; a missing file is the runner's.
           try {
-            runTestCase(db, tc, tc.language || meta.language, meta.language || 'gql')
+            runMarkedSync(tc, () => {
+              if (effectiveDataset && effectiveDataset !== 'empty') {
+                loadDataset(db, effectiveDataset)
+              }
+              runTestCase(db, tc, tc.language || meta.language, meta.language || 'gql')
+            })
           } catch (err) {
             // WASM panics (e.g. rand(), SystemTime) surface as RuntimeError: unreachable
             if (err instanceof WebAssembly.RuntimeError) return ctx.skip()
@@ -275,6 +297,7 @@ for (const filePath of gtestFiles) {
 
 /** Execute a single test case and assert the expected result. */
 function runTestCase(db, tc, language, setupLanguage) {
+  runProbe(tc)
   // Run setup queries in the file's declared language (not the variant language)
   for (const setupQ of tc.setup) {
     executeQuery(db, setupLanguage || language, setupQ)
@@ -301,7 +324,7 @@ function runTestCase(db, tc, language, setupLanguage) {
       failure = err
     }
     if (failure === null) {
-      throw new Error(`Expected error ${describeError(exp)} but query succeeded`)
+      throw new SpecFailure(`Expected error ${describeError(exp)} but query succeeded`)
     }
     if (exp.error != null) expect(failure.message || String(failure)).toContain(exp.error)
     if (exp.gqlStatus != null) assertGqlStatus(failure, exp.gqlStatus)
@@ -317,6 +340,9 @@ function runTestCase(db, tc, language, setupLanguage) {
   // Wrap eagerly and release the WASM reference to avoid borrow conflicts on db.free()
   const result = wrapRawResult(rawResult)
   rawResult = null
+
+  // The warnings, also when none are expected
+  expect(result.warnings.map(w => w.code)).toEqual(exp.warnings)
 
   // Column assertion (checked before value assertions)
   if (exp.columns && exp.columns.length > 0) {

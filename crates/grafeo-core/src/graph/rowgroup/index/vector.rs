@@ -3,10 +3,11 @@
 //! searches at a view (see the parent module).
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use grafeo_common::types::{ArcStr, NodeId, PropertyKey, ReadView, Value};
 
-use super::super::{Inner, ROWS_PER_GROUP, Read, RowGroupStore};
+use super::super::{Inner, ROWS_PER_GROUP, Read, RowGroupStore, Touched};
 use super::IndexSearch;
 use super::key::{SearchKey, search_key};
 use crate::index::ranking::by_ascending_distance;
@@ -23,6 +24,27 @@ pub(super) struct VectorEntry {
     label: ArcStr,
     property: PropertyKey,
     index: Arc<VectorIndexKind>,
+    /// The index's heap bytes as the store's writes last left them (see
+    /// [`VectorIndexKind::counted_bytes`]).
+    counted: AtomicUsize,
+}
+
+impl VectorEntry {
+    /// The index's heap bytes as the writes keep them: one load.
+    pub(super) fn counted_bytes(&self) -> usize {
+        self.counted.load(Ordering::Relaxed)
+    }
+
+    /// The index's heap bytes by a walk of its topology: the oracle.
+    pub(super) fn walk_bytes(&self) -> usize {
+        self.index.heap_memory_bytes()
+    }
+
+    /// Notes what the index holds now, after a write to it.
+    fn note(&self) {
+        self.counted
+            .store(self.index.counted_bytes(), Ordering::Relaxed);
+    }
 }
 
 /// The vectors of one key as the store holds them now, the newest in
@@ -81,11 +103,13 @@ impl Inner {
             Some(vector) => {
                 if value_changed || !entry.index.contains(id) {
                     entry.index.insert(id, &vector, &vectors);
+                    entry.note();
                 }
             }
             None => {
                 if entry.index.contains(id) {
                     entry.index.remove(id, &vectors);
+                    entry.note();
                 }
             }
         }
@@ -119,6 +143,7 @@ impl Inner {
                 entry
                     .index
                     .remove(id, &self.newest_vectors(entry.property.as_str()));
+                entry.note();
             }
         }
     }
@@ -197,7 +222,7 @@ impl Inner {
         k: usize,
         metric: DistanceMetric,
         read: Read,
-    ) -> Vec<(NodeId, f64)> {
+    ) -> grafeo_common::utils::error::Result<Vec<(NodeId, f64)>> {
         if let Some(name) = label
             && let Some(entry) = self.indexes.vector.get(&search_key(name, property))
             && entry.index.config().metric == metric
@@ -207,14 +232,14 @@ impl Inner {
                 ef: Some(EF),
                 allowed: None,
             };
-            return self
-                .indexed_nearest(entry, query, search, read)
+            return Ok(self
+                .indexed_nearest(entry, query, search, read)?
                 .into_iter()
                 .map(|(id, distance)| (id, f64::from(distance)))
-                .collect();
+                .collect());
         }
         let vectors = self.scanned_vectors(label, property, read);
-        brute_force_knn(
+        Ok(brute_force_knn(
             vectors.iter().map(|(id, vector)| (*id, vector.as_ref())),
             query,
             k,
@@ -222,7 +247,7 @@ impl Inner {
         )
         .into_iter()
         .map(|(id, distance)| (id, f64::from(distance)))
-        .collect()
+        .collect())
     }
 
     /// The `search.k` nodes `read` sees nearest to `query`, through
@@ -239,7 +264,15 @@ impl Inner {
         query: &[f32],
         search: IndexSearch<'_>,
         read: Read,
-    ) -> Vec<(NodeId, f32)> {
+    ) -> grafeo_common::utils::error::Result<Vec<(NodeId, f32)>> {
+        // The running query's deadline, a unit of work per fetch, per node the index search
+        // expands, per candidate and per changed row.
+        let mut ticker = crate::execution::deadline::Ticker::new();
+        let timeout = |_| {
+            grafeo_common::utils::error::Error::from(
+                grafeo_common::utils::error::QueryError::timeout(),
+            )
+        };
         let IndexSearch { k, ef, allowed } = search;
         let key = self.keys.get_id(entry.property.as_str());
         let changed = self.changed_rows(key);
@@ -247,23 +280,19 @@ impl Inner {
         let size = entry.index.len();
         let mut fetch = k;
         let mut found = loop {
-            let nearest = match (allowed, ef) {
-                (Some(allowed), Some(ef)) => entry
-                    .index
-                    .search_with_ef_and_filter(query, fetch, ef, allowed, &vectors),
-                (Some(allowed), None) => entry
-                    .index
-                    .search_with_filter(query, fetch, allowed, &vectors),
-                (None, Some(ef)) => entry.index.search_with_ef(query, fetch, ef, &vectors),
-                (None, None) => entry.index.search(query, fetch, &vectors),
-            };
+            ticker.tick().map_err(timeout)?;
+            let nearest = entry
+                .index
+                .search_visiting(query, fetch, ef, allowed, &vectors, &mut || ticker.tick())
+                .map_err(timeout)?;
             let complete = nearest.len() < fetch || fetch >= size;
-            let kept: Vec<(NodeId, f32)> = nearest
-                .into_iter()
-                .filter(|(id, _)| {
-                    !changed.contains(&id.as_u64()) && self.node_visible(id.as_u64(), read)
-                })
-                .collect();
+            let mut kept: Vec<(NodeId, f32)> = Vec::with_capacity(nearest.len());
+            for (id, distance) in nearest {
+                ticker.tick().map_err(timeout)?;
+                if !changed.contains(&id.as_u64()) && self.node_visible(id.as_u64(), read) {
+                    kept.push((id, distance));
+                }
+            }
             if kept.len() >= k || complete {
                 break kept;
             }
@@ -271,12 +300,13 @@ impl Inner {
         };
         if changed.is_empty() {
             found.truncate(k);
-            return found;
+            return Ok(found);
         }
         let metric = entry.index.config().metric;
         let label = self.label_id(&entry.label);
         if let (Some(label), Some(key)) = (label, key) {
             for raw in changed {
+                ticker.tick().map_err(timeout)?;
                 if allowed.is_some_and(|allowed| !allowed.contains(&NodeId::new(raw))) {
                     continue;
                 }
@@ -289,7 +319,7 @@ impl Inner {
         }
         found.sort_by(by_ascending_distance);
         found.truncate(k);
-        found
+        Ok(found)
     }
 
     /// The nodes `read` sees within `threshold` of `query` by `metric`,
@@ -350,13 +380,17 @@ impl RowGroupStore {
         let entry = VectorEntry {
             label: ArcStr::from(label),
             property: PropertyKey::new(property),
+            counted: AtomicUsize::new(index.counted_bytes()),
             index,
         };
-        inner.reconcile_vectors(&entry);
-        inner
-            .indexes
-            .vector
-            .insert(SearchKey::new(label, property), entry);
+        inner.counting(Touched::none(), |inner| {
+            inner.reconcile_vectors(&entry);
+            inner
+                .indexes
+                .vector
+                .insert(SearchKey::new(label, property), entry);
+        });
+        inner.settle();
     }
 
     /// The nodes `view` sees nearest to `query`, nearest first, through the
@@ -369,7 +403,10 @@ impl RowGroupStore {
     ///
     /// The store's lock is held for the search, and no other lock is taken
     /// with it but the index's own, in the order the writes take them.
-    #[must_use]
+    ///
+    /// # Errors
+    ///
+    /// The timeout of a search past the running query's deadline.
     pub fn vector_index_search_at(
         &self,
         label: &str,
@@ -377,16 +414,23 @@ impl RowGroupStore {
         query: &[f32],
         search: IndexSearch<'_>,
         view: ReadView,
-    ) -> Option<Vec<(NodeId, f32)>> {
+    ) -> grafeo_common::utils::error::Result<Option<Vec<(NodeId, f32)>>> {
         let inner = self.inner.read();
-        let entry = inner.indexes.vector.get(&search_key(label, property))?;
-        Some(inner.indexed_nearest(entry, query, search, Read::view(view)))
+        let Some(entry) = inner.indexes.vector.get(&search_key(label, property)) else {
+            return Ok(None);
+        };
+        inner
+            .indexed_nearest(entry, query, search, Read::view(view))
+            .map(Some)
     }
 
     /// [`vector_index_search_at`](Self::vector_index_search_at) for each of
     /// `queries`, in their order, under one hold of the store's lock (in
     /// parallel with the `parallel` feature). `None` without the index.
-    #[must_use]
+    ///
+    /// # Errors
+    ///
+    /// The timeout of a search past the running query's deadline.
     pub fn vector_index_batch_search_at(
         &self,
         label: &str,
@@ -394,13 +438,18 @@ impl RowGroupStore {
         queries: &[Vec<f32>],
         search: IndexSearch<'_>,
         view: ReadView,
-    ) -> Option<Vec<Vec<(NodeId, f32)>>> {
+    ) -> grafeo_common::utils::error::Result<Option<Vec<Vec<(NodeId, f32)>>>> {
         let inner = self.inner.read();
-        let entry = inner.indexes.vector.get(&search_key(label, property))?;
+        let Some(entry) = inner.indexes.vector.get(&search_key(label, property)) else {
+            return Ok(None);
+        };
         let read = Read::view(view);
-        Some(crate::index::vector::batch::map(queries, |query| {
+        crate::index::vector::batch::map(queries, |query| {
             inner.indexed_nearest(entry, query, search, read)
-        }))
+        })
+        .into_iter()
+        .collect::<grafeo_common::utils::error::Result<Vec<_>>>()
+        .map(Some)
     }
 
     /// Node `id`'s vector of `property` as `view` sees it (any label), for
@@ -413,6 +462,10 @@ impl RowGroupStore {
     }
 
     /// Retrieves the vector index for a label and a property.
+    ///
+    /// The handle is for reads (searches, lengths, statistics). Write through the store, which
+    /// counts what the index holds: an insert or a removal made through the handle leaves the
+    /// store's memory account stale.
     #[must_use]
     pub fn get_vector_index(&self, label: &str, property: &str) -> Option<Arc<VectorIndexKind>> {
         self.inner
@@ -426,12 +479,37 @@ impl RowGroupStore {
     /// Removes the vector index for a label and a property. Returns `true`
     /// if the index existed and was removed.
     pub fn remove_vector_index(&self, label: &str, property: &str) -> bool {
+        let mut inner = self.inner.write();
+        let removed = inner.counting(Touched::none(), |inner| {
+            inner
+                .indexes
+                .vector
+                .remove(&search_key(label, property))
+                .is_some()
+        });
+        inner.settle();
+        removed
+    }
+
+    /// The vector indexes of this store as the account counts them: label,
+    /// property, heap bytes and vectors, without a walk.
+    pub(in crate::graph::rowgroup) fn vector_index_figures(
+        &self,
+    ) -> Vec<(String, String, usize, usize)> {
         self.inner
-            .write()
+            .read()
             .indexes
             .vector
-            .remove(&search_key(label, property))
-            .is_some()
+            .iter()
+            .map(|(key, entry)| {
+                (
+                    key.label.clone(),
+                    key.property.clone(),
+                    entry.counted_bytes(),
+                    entry.index.len(),
+                )
+            })
+            .collect()
     }
 
     /// Returns all vector indexes as `(label, property, index)`.

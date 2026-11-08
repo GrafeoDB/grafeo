@@ -49,9 +49,11 @@ mod graph;
 mod graph_handle;
 mod quantization;
 mod query;
+mod session;
 mod stream;
 mod time_travel;
 mod types;
+mod warning;
 
 #[cfg(feature = "algos")]
 use bridges::{PyAlgorithms, PyNetworkXAdapter, PySolvORAdapter};
@@ -81,10 +83,11 @@ fn simd_support() -> &'static str {
 /// `sparql`, `gremlin`, `graphql`, `sql-pgq`) and the optional capabilities
 /// (`algos`, `vector-index`, `text-index`, `hybrid-search`, `cdc`,
 /// `triple-store`, `shacl`, `embed`, `arrow-export`,
-/// `jsonl-import`, `parquet-import`, `metrics`). Groups and profiles such as
-/// `full` or `ai` are not listed, only the features they enable. Persistence
-/// (WAL and `.grafeo` files) is part of every build, and so is reading a
-/// database file compacted by 0.5.x.
+/// `jsonl-import`, `parquet-import`, `metrics`, and `storage`: persistence,
+/// the WAL and `.grafeo` files). Groups and profiles such as `full` or `ai`
+/// are not listed, only the features they enable. A method that needs a
+/// feature exists only in a build with it. Every build that opens files reads
+/// a database file compacted by 0.5.x.
 ///
 /// Example:
 ///     import grafeo
@@ -92,29 +95,8 @@ fn simd_support() -> &'static str {
 ///         raise RuntimeError("this grafeo build has no Cypher support")
 #[pyfunction]
 fn features() -> Vec<&'static str> {
-    [
-        ("gql", cfg!(feature = "gql")),
-        ("cypher", cfg!(feature = "cypher")),
-        ("sparql", cfg!(feature = "sparql")),
-        ("gremlin", cfg!(feature = "gremlin")),
-        ("graphql", cfg!(feature = "graphql")),
-        ("sql-pgq", cfg!(feature = "sql-pgq")),
-        ("algos", cfg!(feature = "algos")),
-        ("vector-index", cfg!(feature = "vector-index")),
-        ("text-index", cfg!(feature = "text-index")),
-        ("hybrid-search", cfg!(feature = "hybrid-search")),
-        ("cdc", cfg!(feature = "cdc")),
-        ("triple-store", cfg!(feature = "triple-store")),
-        ("shacl", cfg!(feature = "shacl")),
-        ("embed", cfg!(feature = "embed")),
-        ("arrow-export", cfg!(feature = "arrow-export")),
-        ("jsonl-import", cfg!(feature = "jsonl-import")),
-        ("parquet-import", cfg!(feature = "parquet-import")),
-        ("metrics", cfg!(feature = "metrics")),
-    ]
-    .into_iter()
-    .filter_map(|(name, enabled)| enabled.then_some(name))
-    .collect()
+    // The list Node.js's `features()` reports too.
+    grafeo_bindings_common::reported_features!()
 }
 
 /// Describes this build, for run metadata and for checking an installed wheel.
@@ -173,12 +155,18 @@ fn grafeo(m: &Bound<'_, PyModule>) -> PyResult<()> {
         "GrafeoLockedError",
         m.py().get_type::<crate::error::GrafeoLockedError>(),
     )?;
+    m.add(
+        "GrafeoPermissionError",
+        m.py().get_type::<crate::error::GrafeoPermissionError>(),
+    )?;
     m.add_class::<PyGrafeoDB>()?;
     m.add_class::<graph_handle::PyGraphHandle>()?;
     m.add_class::<PyNode>()?;
     m.add_class::<PyEdge>()?;
     m.add_class::<PyQueryResult>()?;
+    m.add_class::<warning::PyQueryWarning>()?;
     m.add_class::<PyResultStream>()?;
+    m.add_class::<session::PySession>()?;
     m.add_class::<time_travel::PyAsOfView>()?;
     m.add_class::<AsyncQueryResult>()?;
     m.add_class::<AsyncQueryResultIter>()?;

@@ -63,7 +63,7 @@ sequenceDiagram
 
 ### Memory
 
-1. **Buffer Manager** - Unified memory budget (75% of system RAM by default)
+1. **Buffer Manager** - Unified memory budget (75% of the memory the process may use by default)
 2. **Arena Allocator** - Epoch-based bulk allocation for query execution
 3. **Spill Manager** - Disk spilling for large operations
 

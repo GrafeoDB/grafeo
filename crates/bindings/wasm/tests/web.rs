@@ -1717,3 +1717,37 @@ fn test_typed_array_parameters_are_vectors() {
         assert_eq!(n.as_f64(), Some(3.0), "{kind}");
     }
 }
+
+/// Every build with the RDF model exports `importRdf`, `full` included: the binding gates it on
+/// the capability (`rdf-model`), not on the `rdf` profile, which `full` does not hold.
+#[cfg(feature = "rdf-model")]
+#[wasm_bindgen_test]
+fn a_build_with_the_rdf_model_imports_rdf() {
+    let db = Database::new().unwrap();
+    let data = to_js(&serde_json::json!({
+        "triples": [
+            {
+                "subject": "http://example.org/Alix",
+                "predicate": "http://example.org/knows",
+                "object": "http://example.org/Gus"
+            }
+        ]
+    }))
+    .unwrap();
+    let report = db.import_rdf(data).unwrap();
+    let triples = js_sys::Reflect::get(&report, &"triples".into()).unwrap();
+    assert_eq!(triples.as_f64(), Some(1.0), "one triple imported");
+    #[cfg(feature = "sparql")]
+    {
+        let rows = db
+            .execute_sparql(
+                "SELECT ?o WHERE { <http://example.org/Alix> <http://example.org/knows> ?o }",
+            )
+            .unwrap();
+        assert_eq!(
+            js_sys::Array::from(&rows).length(),
+            1,
+            "the triple reads back"
+        );
+    }
+}

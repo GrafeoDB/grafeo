@@ -313,12 +313,15 @@ impl Database {
     /// Executes a GQL query and returns raw columns, rows, and metadata.
     ///
     /// Returns `{ columns: string[], rows: any[][], executionTimeMs?: number,
-    /// counters, profile? }`, `profile` for a `PROFILE` statement only.
+    /// counters, warnings, profile? }`, `profile` for a `PROFILE` statement
+    /// only. `warnings` lists what the statement raised (`{ code, kind,
+    /// message }`, ordered by code), empty when nothing.
     ///
     /// # Stability: Experimental
     ///
-    /// The `profile` key only: new in 0.6.0, its operators and keys may still
-    /// change. The rest is stable. See <https://grafeo.dev/stability/>.
+    /// The `profile` key: new in 0.6.0, its operators and keys may still
+    /// change. The `warnings` key: new in 0.6.2, new warnings and kinds may
+    /// come. The rest is stable. See <https://grafeo.dev/stability/>.
     ///
     /// # Errors
     ///
@@ -1343,12 +1346,12 @@ impl Database {
     /// // { triples: 3 }
     /// ```
     ///
-    /// Requires the `rdf` feature flag.
+    /// Requires the `rdf-model` feature (in the `rdf`, `sparql` and `full` builds).
     ///
     /// # Errors
     ///
     /// Returns `JsError` if `data` cannot be deserialised as an RDF import payload.
-    #[cfg(feature = "rdf")]
+    #[cfg(feature = "rdf-model")]
     #[wasm_bindgen(js_name = "importRdf")]
     pub fn import_rdf(&self, data: JsValue) -> Result<JsValue, JsValue> {
         use grafeo_core::graph::rdf::Term;
@@ -1856,6 +1859,26 @@ fn raw_result_to_js(result: &grafeo_engine::database::QueryResult) -> Result<JsV
         &counters_to_js(&result.counters),
     );
 
+    // warnings: {code, kind, message}[], ordered by code
+    let warnings = grafeo_bindings_common::warning::of_result(result);
+    let js_warnings = Array::new_with_length(warnings.len() as u32);
+    for (i, warning) in warnings.iter().enumerate() {
+        let js_warning = js_sys::Object::new();
+        for (key, value) in [
+            ("code", warning.code.as_str()),
+            ("kind", warning.kind),
+            ("message", warning.message.as_str()),
+        ] {
+            let _ = js_sys::Reflect::set(
+                &js_warning,
+                &JsValue::from_str(key),
+                &JsValue::from_str(value),
+            );
+        }
+        js_warnings.set(i as u32, js_warning.into());
+    }
+    let _ = js_sys::Reflect::set(&obj, &JsValue::from_str("warnings"), &js_warnings);
+
     // profile?: {root, totalTimeMs}, for a PROFILE statement
     if let Some(profile) = result.profile() {
         let js_profile = js_sys::Object::new();
@@ -2083,14 +2106,14 @@ struct LpgEdgeSpec {
 }
 
 /// RDF batch import payload.
-#[cfg(feature = "rdf")]
+#[cfg(feature = "rdf-model")]
 #[derive(serde::Deserialize)]
 struct RdfImport {
     triples: Vec<RdfTripleSpec>,
 }
 
 /// A single RDF triple in an import.
-#[cfg(feature = "rdf")]
+#[cfg(feature = "rdf-model")]
 #[derive(serde::Deserialize)]
 struct RdfTripleSpec {
     subject: String,
@@ -2100,7 +2123,7 @@ struct RdfTripleSpec {
 
 /// The object position of an RDF triple: either a plain IRI string or a
 /// structured literal with optional datatype/language.
-#[cfg(feature = "rdf")]
+#[cfg(feature = "rdf-model")]
 #[derive(serde::Deserialize)]
 #[serde(untagged)]
 enum RdfObjectSpec {
@@ -2118,7 +2141,7 @@ enum RdfObjectSpec {
 
 /// Converts a string to an RDF [`Term`]: blank node if prefixed with `_:`,
 /// IRI otherwise.
-#[cfg(feature = "rdf")]
+#[cfg(feature = "rdf-model")]
 fn string_to_rdf_term(s: &str) -> grafeo_core::graph::rdf::Term {
     if let Some(id) = s.strip_prefix("_:") {
         grafeo_core::graph::rdf::Term::blank(id)
@@ -2758,7 +2781,7 @@ mod tests {
 
     // === RDF deserialization tests ===
 
-    #[cfg(feature = "rdf")]
+    #[cfg(feature = "rdf-model")]
     mod rdf_tests {
         use serde_json::json;
 

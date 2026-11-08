@@ -118,6 +118,8 @@ impl Database {
             rdf_store: Arc::clone(&self.rdf_store),
             wal: None,
             wal_records_at_checkpoint: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            #[cfg(all(feature = "wal", feature = "grafeo-file"))]
+            wal_retention: Arc::default(),
         }
     }
 }
@@ -313,6 +315,8 @@ fn the_registered_consumers_report_the_store_and_its_indexes() {
         None,
         #[cfg(feature = "vector-index")]
         None,
+        #[cfg(feature = "vector-index")]
+        None,
     );
     let tiers = manager.snapshot_consumer_tiers();
     let tier = |name: &str| {
@@ -462,6 +466,7 @@ mod consumers {
                 crate::database::spill_directory::SpillDirectory::at(dir.path().join("cache")),
             )),
             None,
+            None,
         );
         let names: Vec<String> = manager
             .snapshot_consumer_tiers()
@@ -489,6 +494,55 @@ mod consumers {
         );
         assert_eq!(files_in(&dir.path().join("cache")), Vec::<PathBuf>::new());
         assert_embeddings(&database.root, &ids, "reloaded");
+    }
+
+    /// A column the spill account refuses stays in memory, and the spill goes
+    /// on to the next: a smaller one may still fit.
+    #[test]
+    fn a_refused_column_does_not_stop_the_spill_of_the_next() {
+        use grafeo_core::execution::spill::{SpillAccount, SpillCap};
+
+        let dir = tempfile::tempdir().unwrap();
+        // What the small graph's column takes, measured on a copy.
+        let (copy, _) = indexed();
+        let small = copy
+            .store(Some("trips"))
+            .spill_node_property_column(
+                &embedding(),
+                &ColumnSpillFiles::in_dir(dir.path().join("measure")),
+            )
+            .unwrap()
+            .file_bytes;
+        drop(copy);
+        assert!(small > 0);
+
+        let (database, ids) = indexed();
+        let account = SpillAccount::new(SpillCap::Bytes(u64::try_from(small).unwrap()), None);
+        let consumer = RowGroupVectorConsumer::new(
+            &database.root,
+            Some(ColumnSpillFiles::new(
+                Arc::new(crate::database::spill_directory::SpillDirectory::at(
+                    dir.path().join("cache"),
+                )),
+                Some(account),
+            )),
+        );
+        let freed = consumer
+            .spill(usize::MAX)
+            .expect("the small column spilled");
+        assert!(freed > 0);
+        assert_eq!(
+            database.root.spilled_node_property_columns(),
+            Vec::<PropertyKey>::new(),
+            "the large column was refused"
+        );
+        assert_eq!(
+            database
+                .store(Some("trips"))
+                .spilled_node_property_columns(),
+            [embedding()]
+        );
+        assert_embeddings(&database.root, &ids, "kept in memory");
     }
 
     /// Without a spill directory the consumer does not spill.

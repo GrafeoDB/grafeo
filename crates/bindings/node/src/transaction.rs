@@ -178,6 +178,7 @@ impl Transaction {
         let scanned = result.rows_scanned;
         let counters = result.counters;
         let profile = result.profile.take();
+        let warnings = grafeo_bindings_common::warning::of_result(&result);
 
         Ok(QueryResult::with_metrics(
             columns,
@@ -188,7 +189,8 @@ impl Transaction {
             scanned,
         )
         .with_counters(counters)
-        .with_profile(profile))
+        .with_profile(profile)
+        .with_warnings(warnings))
     }
 
     pub(crate) fn new(db: Arc<RwLock<GrafeoDB>>, isolation_level: Option<&str>) -> Result<Self> {

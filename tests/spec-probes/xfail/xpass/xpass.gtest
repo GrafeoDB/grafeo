@@ -1,0 +1,20 @@
+# The case passes although it is expected to fail: the run fails, and its output says
+# XPASS with this spec and issue.
+
+meta:
+  language: gql
+  model: lpg
+  section: probes
+  title: "xfail probe: a case that passes"
+  dataset: empty
+
+tests:
+
+  - name: probe_xpass
+    xfail:
+      spec: "harness probe: XPASS names this spec"
+      issue: "fix in 0.6.2"
+    query: "RETURN 1 AS v"
+    expect:
+      rows:
+        - [1]

@@ -9,6 +9,7 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use fs2::FileExt;
@@ -22,6 +23,7 @@ use parking_lot::Mutex;
 
 use super::format::MAGIC;
 use super::holder::{self, OpenHere};
+use super::space::{InsufficientSpace, free_space};
 use super::v3::alloc::{PageAllocator, PageRun};
 use super::v3::directory::SkippedEntry;
 use super::v3::header::{
@@ -145,6 +147,12 @@ pub struct GrafeoFileManager {
     last_checkpoint: Mutex<Option<CheckpointStats>>,
     /// Encrypts and decrypts the images (`None` for a plain file).
     cipher: Option<ChunkCipher>,
+    /// The free space a checkpoint leaves for the WAL beyond the file's
+    /// size, in bytes (see [`set_checkpoint_headroom`](Self::set_checkpoint_headroom)).
+    checkpoint_headroom: AtomicU64,
+    /// The free-space probe failed once and said so: later failures skip
+    /// the check without another warning.
+    space_probe_warned: AtomicBool,
     /// Registers the file as open in this process while the manager lives,
     /// so a second open of it can say so (see [`holder`](super::holder)).
     _open_here: OpenHere,
@@ -256,6 +264,8 @@ impl GrafeoFileManager {
             checkpoint_lock: Mutex::new(()),
             last_checkpoint: Mutex::new(None),
             cipher,
+            checkpoint_headroom: AtomicU64::new(0),
+            space_probe_warned: AtomicBool::new(false),
             _open_here: open_here,
         })
     }
@@ -356,6 +366,8 @@ impl GrafeoFileManager {
             checkpoint_lock: Mutex::new(()),
             last_checkpoint: Mutex::new(None),
             cipher,
+            checkpoint_headroom: AtomicU64::new(0),
+            space_probe_warned: AtomicBool::new(false),
             _open_here: open_here,
         })
     }
@@ -399,17 +411,27 @@ impl GrafeoFileManager {
     ///
     /// # Errors
     ///
-    /// Returns an error if the manager is read-only, a section fails to
+    /// Returns an error if the manager is read-only, the disk has too little
+    /// free space ([`InsufficientSpace`], as an [`Error::Io`] of kind
+    /// [`StorageFull`](std::io::ErrorKind::StorageFull)), a section fails to
     /// serialize, repeats a section type or writes two chunks with one
     /// identity ([`ChunkMeta::identity`](grafeo_common::storage::ChunkMeta::identity))
     /// in one section, or a write or sync fails.
     ///
+    /// Before it writes anything it checks the free space of the disk: a
+    /// checkpoint may need the file's size again, plus the
+    /// [headroom](Self::set_checkpoint_headroom) the WAL keeps. With less,
+    /// it fails with [`InsufficientSpace`] and writes nothing. A probe that
+    /// fails skips the check (it warns once).
+    ///
     /// After a failure before the header write, the file holds no image newer
-    /// than before the call. After a failure at or after the header write,
-    /// the new header may be on disk: [`active_header`](Self::active_header)
-    /// and [`read_image`](Self::read_image) keep serving the previous image,
-    /// while a reopen may find the new one. The next checkpoint spares
-    /// the pages of both. The caller must therefore keep the WAL from the
+    /// than before the call, and it is cut back to its length before the
+    /// call, so a full disk gets back the room the partial image took. After
+    /// a failure at or after the header write, the new header may be on
+    /// disk: [`active_header`](Self::active_header) and
+    /// [`read_image`](Self::read_image) keep serving the previous image,
+    /// while a reopen may find the new one. The next checkpoint spares the
+    /// pages of both. The caller must therefore keep the WAL from the
     /// previous image's `checkpoint_lsn` until a later checkpoint succeeds.
     pub fn write_checkpoint(
         &self,
@@ -458,8 +480,13 @@ impl GrafeoFileManager {
                 "database header iteration {iteration} cannot be incremented"
             ))
         })?;
+        let length_before = file.metadata()?.len();
+        self.check_free_space(length_before)?;
 
-        let (root, runs, stats) = {
+        // Until the header is written, a failure cuts the file back to its
+        // length before the call: the new image's pages lie past it or in
+        // pages no image uses, and a full disk gets its room back (#726).
+        let written = (|| -> Result<_> {
             let file: &File = &file;
             // The active image's pages are among `spared`, so a chunk the
             // sections reuse is never written over.
@@ -493,13 +520,26 @@ impl GrafeoFileManager {
             }
             let stats = writer.stats();
             let (root, runs) = writer.finish()?;
-            (root, runs, stats)
+            maybe_crash("checkpoint:after_chunks");
+            maybe_fail("checkpoint:after_chunks")?;
+            file.sync_all()?;
+            maybe_crash("checkpoint:after_data_sync");
+            maybe_fail("checkpoint:after_data_sync")?;
+            Ok((root, runs, stats))
+        })();
+        let (root, runs, stats) = match written {
+            Ok(written) => written,
+            Err(error) => {
+                if let Err(cut) = file.set_len(length_before) {
+                    grafeo_warn!(
+                        "a failed checkpoint of {} could not cut the file back to \
+                         {length_before} bytes ({cut}): the next checkpoint does",
+                        self.path.display()
+                    );
+                }
+                return Err(error);
+            }
         };
-        maybe_crash("checkpoint:after_chunks");
-        maybe_fail("checkpoint:after_chunks")?;
-        file.sync_all()?;
-        maybe_crash("checkpoint:after_data_sync");
-        maybe_fail("checkpoint:after_data_sync")?;
 
         // From the header write on, a reopen may find the new image active:
         // a later checkpoint of this manager must spare its pages as well.
@@ -550,6 +590,68 @@ impl GrafeoFileManager {
         };
         *self.last_checkpoint.lock() = Some(stats);
         Ok(stats)
+    }
+
+    /// Sets the free space, in bytes, a checkpoint leaves for the WAL beyond
+    /// the size of the file: the engine sets one WAL segment of the
+    /// configured size, since a checkpoint starts a new segment and the log
+    /// grows on in it. 0 (the default, and a database without a WAL) checks
+    /// the file's size alone.
+    pub fn set_checkpoint_headroom(&self, bytes: u64) {
+        self.checkpoint_headroom.store(bytes, Ordering::Relaxed);
+    }
+
+    /// The free space, in bytes, a checkpoint leaves for the WAL beyond the
+    /// size of the file (see
+    /// [`set_checkpoint_headroom`](Self::set_checkpoint_headroom)).
+    #[must_use]
+    pub fn checkpoint_headroom(&self) -> u64 {
+        self.checkpoint_headroom.load(Ordering::Relaxed)
+    }
+
+    /// Checks, before a checkpoint starts, that the disk holding the file
+    /// has the free space it may need (see
+    /// [`write_checkpoint`](Self::write_checkpoint), which checks again
+    /// before it writes). A caller that changes anything for the checkpoint
+    /// first (a new WAL segment) checks here, so a refusal changes nothing.
+    ///
+    /// # Errors
+    ///
+    /// [`InsufficientSpace`] as an [`Error::Io`] of kind
+    /// [`StorageFull`](std::io::ErrorKind::StorageFull), and the error of
+    /// reading the file's length.
+    pub fn check_checkpoint_space(&self) -> Result<()> {
+        let length = self.file.lock().metadata()?.len();
+        self.check_free_space(length)
+    }
+
+    /// Fails with [`InsufficientSpace`] when the disk holding the file has
+    /// less free space than a checkpoint may need: `file_length` (a
+    /// copy-on-write checkpoint may write every page again) plus the
+    /// headroom. A probe that fails skips the check, with one warning per
+    /// manager: the check is a guard, and a full disk still fails the write.
+    fn check_free_space(&self, file_length: u64) -> Result<()> {
+        let headroom = self.checkpoint_headroom.load(Ordering::Relaxed);
+        let needed = file_length.saturating_add(headroom);
+        match free_space(&self.path) {
+            Ok(available) if available < needed => Err(Error::from(InsufficientSpace {
+                path: self.path.clone(),
+                needed,
+                headroom,
+                available,
+            })),
+            Ok(_) => Ok(()),
+            Err(error) => {
+                if !self.space_probe_warned.swap(true, Ordering::Relaxed) {
+                    grafeo_warn!(
+                        "cannot read the free disk space for {} ({error}): checkpoints go ahead \
+                         without the check",
+                        self.path.display()
+                    );
+                }
+                Ok(())
+            }
+        }
     }
 
     /// What the last checkpoint this manager completed wrote and took over

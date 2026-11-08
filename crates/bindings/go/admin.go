@@ -25,6 +25,7 @@ type DatabaseInfo struct {
 
 // Info returns high-level database information.
 func (db *Database) Info() (*DatabaseInfo, error) {
+	defer runtime.KeepAlive(db)
 	runtime.LockOSThread()
 	cInfo := C.grafeo_info(db.handle)
 	if cInfo == nil {
@@ -44,6 +45,7 @@ func (db *Database) Info() (*DatabaseInfo, error) {
 
 // Save persists the database to the given path.
 func (db *Database) Save(path string) error {
+	defer runtime.KeepAlive(db)
 	cPath := C.CString(path)
 	defer C.free(unsafe.Pointer(cPath))
 	return lockAndCheckStatus(func() C.GrafeoStatus {
@@ -74,6 +76,7 @@ type CheckpointStatus struct {
 // Zero turns a trigger off; both zero turn automatic checkpoints off (the
 // default). For this open only.
 func (db *Database) SetCheckpointTriggers(interval time.Duration, walBytes uint64) error {
+	defer runtime.KeepAlive(db)
 	return lockAndCheckStatus(func() C.GrafeoStatus {
 		return C.grafeo_set_checkpoint_triggers(db.handle, C.uint64_t(interval.Milliseconds()), C.uint64_t(walBytes))
 	})
@@ -81,6 +84,7 @@ func (db *Database) SetCheckpointTriggers(interval time.Duration, walBytes uint6
 
 // CheckpointStatus returns how the automatic checkpoints fare.
 func (db *Database) CheckpointStatus() (*CheckpointStatus, error) {
+	defer runtime.KeepAlive(db)
 	runtime.LockOSThread()
 	cStatus := C.grafeo_checkpoint_status(db.handle)
 	if cStatus == nil {
@@ -100,6 +104,7 @@ func (db *Database) CheckpointStatus() (*CheckpointStatus, error) {
 
 // WalCheckpoint triggers a WAL checkpoint.
 func (db *Database) WalCheckpoint() error {
+	defer runtime.KeepAlive(db)
 	return lockAndCheckStatus(func() C.GrafeoStatus {
 		return C.grafeo_wal_checkpoint(db.handle)
 	})

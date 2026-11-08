@@ -218,11 +218,12 @@ tests:
   # Equality across numeric types
   # ---------------------------------------------------------------------------
 
-  - name: a_decimal_equals_the_integer_float_and_string_of_its_value
+  # A string equals no number, whatever it spells (GA04).
+  - name: a_decimal_equals_the_integer_and_float_of_its_value_but_no_string
     query: "RETURN 2.00 = 2 AS int, 1.50 = 1.5e0 AS float, 1.50 = '1.5' AS text"
     expect:
       rows:
-        - [true, true, true]
+        - [true, true, false]
 
   - name: a_decimal_finds_an_integer_property_without_an_index
     setup:

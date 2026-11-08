@@ -176,3 +176,72 @@ describe('executeStream', () => {
     }
   })
 })
+
+describe('a session stream holds its statement slot', () => {
+  const OPEN = 'a stream of this session is still open: read it to the end or close it first'
+  const READ = 'MATCH (p:Person) RETURN p.name AS name'
+  const COUNT = 'MATCH (p:Person) RETURN count(p) AS n'
+
+  it('refuses a statement at once while the stream is open, and takes it after close()', async () => {
+    const db = seedPeople()
+    const session = db.session()
+    try {
+      const stream = await session.executeStream(READ)
+      expect(await stream.next()).not.toBe(null)
+      await expect(session.execute(COUNT)).rejects.toThrow(OPEN)
+      await stream.close()
+      const result = await session.execute(COUNT)
+      expect(result.toArray()[0].n).toBe(5)
+    } finally {
+      session.close()
+      db.close()
+    }
+  })
+
+  it('takes a statement once the stream is read to the end', async () => {
+    const db = seedPeople()
+    const session = db.session()
+    try {
+      const stream = await session.executeStream(READ)
+      expect((await drainStream(stream)).length).toBe(5)
+      const result = await session.execute(COUNT)
+      expect(result.toArray()[0].n).toBe(5)
+    } finally {
+      session.close()
+      db.close()
+    }
+  })
+
+  it('lets statements wait for statements', async () => {
+    const db = seedPeople()
+    const session = db.session()
+    try {
+      expect((await session.execute(COUNT)).toArray()[0].n).toBe(5)
+      expect((await session.execute(COUNT)).toArray()[0].n).toBe(5)
+      const [first, second] = await Promise.all([session.execute(COUNT), session.execute(COUNT)])
+      expect(first.toArray()[0].n).toBe(5)
+      expect(second.toArray()[0].n).toBe(5)
+    } finally {
+      session.close()
+      db.close()
+    }
+  })
+})
+
+describe('a session stream outside a transaction outlives the session', () => {
+  it('reads every row after session.close()', async () => {
+    const db = seedPeople()
+    try {
+      const session = db.session()
+      const stream = await session.executeStream('MATCH (p:Person) RETURN p.name AS name')
+      const first = await stream.next()
+      expect(first).not.toBe(null)
+      session.close()
+      const rest = await drainStream(stream)
+      const names = [first, ...rest].map((row) => row.name).sort()
+      expect(names).toEqual(['Alix', 'Gus', 'Jules', 'Mia', 'Vincent'])
+    } finally {
+      db.close()
+    }
+  })
+})

@@ -227,6 +227,11 @@ WHERE {
 pattern and no variables of it. A `NOT EXISTS` whose pattern shares no variable with the row drops the row when the
 pattern matches anywhere.
 
+`EXISTS` follows the definition in the SPARQL 1.2 draft: each group in the pattern starts from the row being tested, so
+a filter anywhere in it can read the row's values. A `BIND` or alias to a variable the row binds must agree with the
+row. That includes a variable a sub-SELECT does not project, so it is not hidden from the row, and a `MINUS` inside
+`EXISTS` compares through the row even when its two sides share no other variable.
+
 ## IN and NOT IN
 
 ```sparql

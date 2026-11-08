@@ -4,8 +4,9 @@
 //! but SPARQL), for the code only those use (the LPG planner), and the
 //! `rdf_language` cfg when it has the triple store and a language that
 //! queries it (SPARQL, GraphQL), for the code that processes those queries,
-//! and the `stored_procedures` cfg when it has GQL and the procedures
-//! (`algos`), for the code that runs a stored procedure's GQL body.
+//! and the `stored_procedures` cfg when it has GQL, for the code that runs a
+//! stored procedure's GQL body (`CREATE PROCEDURE` needs only GQL, and so does
+//! its `CALL`, whose procedure registry is in every build).
 
 fn main() {
     // What this prints depends only on the features: without this line Cargo
@@ -27,7 +28,7 @@ fn main() {
     if enabled("TRIPLE_STORE") && (enabled("SPARQL") || enabled("GRAPHQL")) {
         println!("cargo::rustc-cfg=rdf_language");
     }
-    if enabled("GQL") && enabled("ALGOS") {
+    if enabled("GQL") {
         println!("cargo::rustc-cfg=stored_procedures");
     }
 }

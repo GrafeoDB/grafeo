@@ -17,9 +17,11 @@
 //! `RowGroupVectorConsumer` reports the vector indexes of the root and every
 //! named graph: under memory pressure it spills each vector index's
 //! embedding column, and its reload brings every spilled column back.
-//! `RowGroupTextConsumer` reports the text indexes; the store's own memory
-//! is reported by a [`SectionConsumer`](super::section_consumer::SectionConsumer)
-//! of its section ([`register_row_group_consumers`]).
+//! `RowGroupTextConsumer` reports the text indexes; `RowGroupStoreConsumer`
+//! the store's own memory, as the grants of its account hold it
+//! ([`register_row_group_consumers`]). Each holds the root weakly: the
+//! store's grants hold the buffer manager, so a consumer that held the
+//! store would keep both alive past the database.
 
 #[cfg(all(feature = "wal", feature = "vector-index"))]
 use std::io;
@@ -27,27 +29,25 @@ use std::io;
 use std::path::Path;
 #[cfg(all(feature = "wal", feature = "vector-index"))]
 use std::path::PathBuf;
-use std::sync::Arc;
-#[cfg(any(feature = "vector-index", feature = "text-index"))]
-use std::sync::Weak;
 #[cfg(all(feature = "wal", feature = "vector-index"))]
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Weak};
 
 #[cfg(all(feature = "wal", feature = "vector-index"))]
 use bytes::Bytes;
 use grafeo_common::memory::buffer::BufferManager;
 #[cfg(feature = "vector-index")]
 use grafeo_common::memory::buffer::SpillError;
-#[cfg(any(feature = "vector-index", feature = "text-index"))]
 use grafeo_common::memory::buffer::{MemoryConsumer, MemoryRegion, priorities};
 #[cfg(all(feature = "wal", feature = "vector-index"))]
 use grafeo_common::storage::SectionType;
-#[cfg(all(feature = "wal", feature = "vector-index"))]
+#[cfg(feature = "vector-index")]
 use grafeo_common::types::PropertyKey;
+#[cfg(all(feature = "wal", feature = "vector-index"))]
+use grafeo_core::execution::spill::{SpillAccount, SpillOwner, SpillReservation};
 #[cfg(all(feature = "wal", feature = "vector-index"))]
 use grafeo_core::graph::rowgroup::ColumnSpill;
 use grafeo_core::graph::rowgroup::RowGroupStore;
-use grafeo_core::graph::rowgroup::section::RowGroupStoreSection;
 #[cfg(all(feature = "wal", feature = "vector-index"))]
 use grafeo_storage::container::{MmapSection, write_and_mmap_spill_file};
 
@@ -61,19 +61,23 @@ use super::spill_directory::SpillDirectory;
 #[cfg(all(feature = "wal", feature = "vector-index"))]
 pub(super) struct ColumnSpillFiles {
     directory: Arc<SpillDirectory>,
+    /// The open's spill account: each file reserves its bytes there before
+    /// it is written, and gives them back when it is removed.
+    account: Option<Arc<SpillAccount>>,
 }
 
 #[cfg(all(feature = "wal", feature = "vector-index"))]
 impl ColumnSpillFiles {
-    /// Spill files in `directory`, created when the first one is written.
-    pub(super) fn new(directory: Arc<SpillDirectory>) -> Self {
-        Self { directory }
+    /// Spill files in `directory`, created when the first one is written,
+    /// reserving their bytes in `account`.
+    pub(super) fn new(directory: Arc<SpillDirectory>, account: Option<Arc<SpillAccount>>) -> Self {
+        Self { directory, account }
     }
 
-    /// Spill files in a directory of their own at `path` (tests).
+    /// Spill files in a directory of their own at `path`, unbounded (tests).
     #[cfg(test)]
     pub(super) fn in_dir(path: impl Into<PathBuf>) -> Self {
-        Self::new(Arc::new(SpillDirectory::at(path.into())))
+        Self::new(Arc::new(SpillDirectory::at(path.into())), None)
     }
 
     /// The directory the files go to.
@@ -86,6 +90,15 @@ impl ColumnSpillFiles {
 impl ColumnSpill for ColumnSpillFiles {
     fn write(&self, bytes: &[u8]) -> io::Result<Bytes> {
         static NEXT: AtomicU64 = AtomicU64::new(0);
+        // Reserved before anything is written: a refusal writes nothing.
+        let reservation = match &self.account {
+            Some(account) => Some(
+                account
+                    .reserve(SpillOwner::VectorColumns, bytes.len() as u64, true)
+                    .map_err(grafeo_core::execution::spill::refused)?,
+            ),
+            None => None,
+        };
         // Created on the first spill; refused once the database is closed.
         self.directory.create()?;
         // As a vector cache file's name: the process id keeps processes
@@ -100,12 +113,26 @@ impl ColumnSpill for ColumnSpillFiles {
             Ok(map) => Ok(Bytes::from_owner(SpillMapping {
                 map: Some(map),
                 path,
+                _reservation: reservation,
             })),
             Err(error) => {
                 remove_written(&path);
                 Err(io::Error::other(error.to_string()))
             }
         }
+    }
+}
+
+/// The spill account's refusal a column spill's error carries.
+#[cfg(all(feature = "wal", feature = "vector-index"))]
+fn spill_refusal(
+    error: &grafeo_common::utils::error::Error,
+) -> Option<grafeo_common::utils::error::LimitRefusal> {
+    match error {
+        grafeo_common::utils::error::Error::Io(error) => {
+            grafeo_core::execution::spill::refusal_of(error).cloned()
+        }
+        _ => None,
     }
 }
 
@@ -128,6 +155,9 @@ struct SpillMapping {
     /// `None` only while dropping (the mapping goes before the file).
     map: Option<MmapSection>,
     path: PathBuf,
+    /// The file's bytes in the spill account, given back after the file is
+    /// removed (the field drops after `drop` ran).
+    _reservation: Option<SpillReservation>,
 }
 
 #[cfg(all(feature = "wal", feature = "vector-index"))]
@@ -214,7 +244,6 @@ impl RowGroupVectorConsumer {
 
     /// The embedding properties of a graph's vector indexes, each once, in
     /// order (indexes on two labels can share one property column).
-    #[cfg(all(feature = "wal", feature = "vector-index"))]
     fn indexed_properties(store: &RowGroupStore) -> Vec<PropertyKey> {
         let mut properties: Vec<PropertyKey> = store
             .vector_index_entries()
@@ -239,12 +268,21 @@ impl MemoryConsumer for RowGroupVectorConsumer {
         "section:VectorStore"
     }
 
+    /// What its spill frees: the heap bytes of the indexed embedding
+    /// columns that are not spilled yet. The indexes' graphs (the HNSW
+    /// topology) stay in memory through a spill, so they are not reported
+    /// here; the store's account counts them. Walks the row groups of each
+    /// indexed property: read on the eviction path, not by statements.
     fn memory_usage(&self) -> usize {
         self.root.upgrade().map_or(0, |root| {
             graphs(&root)
                 .iter()
-                .flat_map(|graph| graph.vector_index_entries())
-                .map(|(_, _, index)| index.heap_memory_bytes())
+                .map(|graph| {
+                    Self::indexed_properties(graph)
+                        .iter()
+                        .map(|property| graph.node_property_column_spillable_bytes(property))
+                        .sum::<usize>()
+                })
                 .sum()
         })
     }
@@ -271,6 +309,7 @@ impl MemoryConsumer for RowGroupVectorConsumer {
         let files = self.files.as_ref().ok_or(SpillError::NoSpillDirectory)?;
         let root = self.root()?;
         let mut freed = 0;
+        let mut refused = None;
         if let Some(horizon) = &self.horizon {
             // The root's collect covers every named graph's.
             root.gc_versions(horizon());
@@ -283,6 +322,15 @@ impl MemoryConsumer for RowGroupVectorConsumer {
                 }
                 match graph.spill_node_property_column(&property, files) {
                     Ok(report) => freed += report.freed_bytes,
+                    // The spill account refused: this column stays in memory,
+                    // and a smaller one after it may still fit.
+                    Err(error) if let Some(refusal) = spill_refusal(&error) => {
+                        grafeo_common::grafeo_warn!(
+                            "the vector column {} stays in memory: {refusal}",
+                            property.as_str()
+                        );
+                        refused.get_or_insert(refusal);
+                    }
                     // Continue: what spilled so far counts, and this column
                     // keeps what did not spill on the heap.
                     Err(error) => grafeo_common::grafeo_warn!(
@@ -292,7 +340,11 @@ impl MemoryConsumer for RowGroupVectorConsumer {
                 }
             }
         }
-        Ok(freed)
+        match refused {
+            // Nothing freed, and the account refused: the refusal is the answer.
+            Some(refusal) if freed == 0 => Err(SpillError::Refused(Box::new(refusal))),
+            _ => Ok(freed),
+        }
     }
 
     fn reload(&self) -> Result<(), SpillError> {
@@ -332,8 +384,12 @@ impl MemoryConsumer for RowGroupVectorConsumer {
     }
 }
 
-/// The memory consumer of the row-group store's text indexes: their memory
-/// (they do not spill).
+/// The memory consumer of the row-group store's text indexes: it reports
+/// the bytes of their inverted indexes (postings, terms and document
+/// lengths, as each index counts them). Those are built in memory from the
+/// indexed property and have no file form to read from, so the consumer
+/// can neither spill nor evict: it reports what they hold, for the buffer
+/// manager's figures.
 #[cfg(feature = "text-index")]
 pub(super) struct RowGroupTextConsumer {
     root: Weak<RowGroupStore>,
@@ -360,7 +416,7 @@ impl MemoryConsumer for RowGroupTextConsumer {
             graphs(&root)
                 .iter()
                 .flat_map(|graph| graph.text_index_entries())
-                .map(|(_, _, index)| index.read().heap_memory_bytes())
+                .map(|(_, _, index)| index.read().counted_bytes())
                 .sum()
         })
     }
@@ -386,24 +442,73 @@ impl MemoryConsumer for RowGroupTextConsumer {
     }
 }
 
+/// The memory consumer of the row-group store itself, its named graphs
+/// with it: the bytes the grants of their accounts hold, read without a
+/// walk. It cannot evict or spill (the store reports so until 0.6.3).
+pub(super) struct RowGroupStoreConsumer {
+    root: Weak<RowGroupStore>,
+}
+
+impl RowGroupStoreConsumer {
+    /// The consumer of `root` and its named graphs.
+    pub(super) fn new(root: &Arc<RowGroupStore>) -> Self {
+        Self {
+            root: Arc::downgrade(root),
+        }
+    }
+}
+
+impl MemoryConsumer for RowGroupStoreConsumer {
+    fn name(&self) -> &str {
+        "section:LpgStore"
+    }
+
+    fn memory_usage(&self) -> usize {
+        self.root.upgrade().map_or(0, |root| root.granted_bytes())
+    }
+
+    fn eviction_priority(&self) -> u8 {
+        priorities::GRAPH_STORAGE
+    }
+
+    fn region(&self) -> MemoryRegion {
+        MemoryRegion::GraphStorage
+    }
+
+    fn evict(&self, _target_bytes: usize) -> usize {
+        0
+    }
+
+    fn current_tier(&self) -> grafeo_common::memory::StorageTier {
+        if self.memory_usage() == 0 {
+            grafeo_common::memory::StorageTier::Uninitialized
+        } else {
+            grafeo_common::memory::StorageTier::InMemory
+        }
+    }
+}
+
 /// Registers the row-group store's memory consumers with `buffer_manager`:
-/// its section (the store's heap), its vector indexes, spilling their
-/// columns into `vector_cache` (`None`: no spill), and its text indexes.
+/// the store itself, its vector indexes, spilling their columns into
+/// `vector_cache` (`None`: no spill), and its text indexes.
 pub(super) fn register_row_group_consumers(
-    buffer_manager: &BufferManager,
+    buffer_manager: &Arc<BufferManager>,
     root: &Arc<RowGroupStore>,
     #[cfg(all(feature = "wal", feature = "vector-index"))] vector_cache: Option<
         Arc<SpillDirectory>,
     >,
+    #[cfg(all(feature = "wal", feature = "vector-index"))] spill_account: Option<Arc<SpillAccount>>,
     #[cfg(all(feature = "wal", feature = "vector-index"))] horizon: Option<CollectHorizon>,
 ) {
-    buffer_manager.register_consumer(Arc::new(super::section_consumer::SectionConsumer::new(
-        Arc::new(RowGroupStoreSection::new(Arc::clone(root))),
-    )));
+    buffer_manager.register_consumer(Arc::new(RowGroupStoreConsumer::new(root)));
+    root.unregister_on_drop(buffer_manager, "section:LpgStore");
     #[cfg(all(feature = "wal", feature = "vector-index"))]
     buffer_manager.register_consumer(Arc::new(
-        RowGroupVectorConsumer::new(root, vector_cache.map(ColumnSpillFiles::new))
-            .collecting_at(horizon),
+        RowGroupVectorConsumer::new(
+            root,
+            vector_cache.map(|directory| ColumnSpillFiles::new(directory, spill_account)),
+        )
+        .collecting_at(horizon),
     ));
     #[cfg(all(feature = "vector-index", not(feature = "wal")))]
     buffer_manager.register_consumer(Arc::new(RowGroupVectorConsumer::new(root)));

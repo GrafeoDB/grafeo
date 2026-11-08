@@ -1,7 +1,11 @@
 //! What the engine reads of a store to report on it (P7): the memory it
-//! holds by part, in its own terms ([`RowGroupStore::memory`]) and in
-//! `LpgStore`'s shape ([`RowGroupStore::memory_breakdown`]), its edges at an
-//! epoch, and every node and edge a committed reader sees now
+//! holds by part, as its account counts it
+//! ([`RowGroupStore::counted_breakdown`], what the engine reports, in time
+//! independent of the store's size) and by a walk of every part, in its own
+//! terms ([`RowGroupStore::memory`]) and in `LpgStore`'s shape
+//! ([`RowGroupStore::memory_breakdown`]): the walk is the account's oracle,
+//! for tests and explicit checks only. Besides, its edges at an epoch, and
+//! every node and edge a committed reader sees now
 //! ([`RowGroupStore::all_nodes`], [`RowGroupStore::all_edges`]).
 //!
 //! The engine reports one figure per database, so a root's figures cover
@@ -9,15 +13,14 @@
 //! `version_bytes` and `cold_columns`. The counts and the iterators are of
 //! the store alone, as `LpgStore`'s are.
 
-use std::mem::size_of;
 use std::sync::atomic::Ordering;
 
 use grafeo_common::memory::usage::{IndexMemory, MvccMemory, StoreMemory, StringPoolMemory};
 use grafeo_common::types::EpochId;
 use grafeo_common::utils::hash::FxHashSet;
 
-use super::bitset::Bitset;
-use super::{Inner, NodeGroup, ROWS_PER_GROUP, Read, RowGroupStore};
+use super::account::{LINES, Line, Lines};
+use super::{Inner, ROWS_PER_GROUP, Read, RowGroupStore};
 use crate::graph::lpg::{Edge, Node};
 
 /// The heap bytes a store holds, by part (an estimate, as `LpgStore`'s): a
@@ -33,10 +36,11 @@ pub struct RowGroupMemory {
     pub node_groups: usize,
     /// The row groups of the edge tables.
     pub edge_groups: usize,
-    /// The node row groups' entries in their tables.
+    /// The node row groups' entries in their tables, with their checkpoint
+    /// marks (what changed since the last checkpoint).
     pub node_tables_bytes: usize,
     /// The edge row groups' entries in their tables, with each row's
-    /// source, target and type.
+    /// source, target and type, and their checkpoint marks.
     pub edge_tables_bytes: usize,
     /// The node property columns: their decoded values and presence bits.
     pub node_columns_bytes: usize,
@@ -134,56 +138,50 @@ impl RowGroupMemory {
     }
 }
 
+/// The parts of [`RowGroupMemory`] that its lines give: the store's own
+/// figures but the counts of things and the degree samples.
+fn memory_of_lines(lines: &Lines) -> RowGroupMemory {
+    let line = |line: Line| lines[line.index()];
+    RowGroupMemory {
+        node_tables_bytes: line(Line::NodeTables),
+        edge_tables_bytes: line(Line::EdgeTables),
+        node_columns_bytes: line(Line::NodeColumns),
+        edge_columns_bytes: line(Line::EdgeColumns),
+        node_cold_bytes: line(Line::NodeCold).wrapping_add(line(Line::NodeColdChunks)),
+        edge_cold_bytes: line(Line::EdgeCold).wrapping_add(line(Line::EdgeColdChunks)),
+        node_versions_bytes: line(Line::NodeVersions),
+        edge_versions_bytes: line(Line::EdgeVersions),
+        outgoing_bytes: line(Line::Outgoing),
+        incoming_bytes: line(Line::Incoming),
+        label_bitmaps_bytes: line(Line::LabelBitmaps),
+        labels_bytes: line(Line::Labels),
+        edge_types_bytes: line(Line::EdgeTypes),
+        keys_bytes: line(Line::Keys),
+        ..RowGroupMemory::default()
+    }
+}
+
 impl Inner {
-    /// What this store holds, without its named graphs.
+    /// What this store holds, without its named graphs, by a walk of every
+    /// part: for tests and the account's oracle.
     fn memory(&self) -> RowGroupMemory {
         let mut memory = RowGroupMemory {
             graphs: 1,
             node_groups: self.nodes.len(),
             edge_groups: self.edges.len(),
-            labels_bytes: self.labels.heap_bytes()
-                + self.counts.labels.capacity() * size_of::<i64>(),
-            edge_types_bytes: self.edge_types.heap_bytes()
-                + self.counts.edge_types.capacity() * size_of::<i64>(),
-            keys_bytes: self.keys.heap_bytes(),
             label_count: self.labels.len(),
             edge_type_count: self.edge_types.len(),
-            ..RowGroupMemory::default()
+            ..memory_of_lines(&self.walk_lines())
         };
         let mut node_keys: FxHashSet<u32> = FxHashSet::default();
         for group in self.nodes.values() {
-            memory.node_tables_bytes += size_of::<u64>() + size_of::<NodeGroup>();
-            memory.node_versions_bytes += group.versions.heap_bytes()
-                + group.columns.updates_bytes()
-                + group.label_updates.heap_bytes(|ids| {
-                    if ids.spilled() {
-                        ids.capacity() * size_of::<u32>()
-                    } else {
-                        0
-                    }
-                });
-            memory.label_bitmaps_bytes +=
-                group.labels.values().map(Bitset::heap_bytes).sum::<usize>()
-                    + group.labels.capacity() * (size_of::<u32>() + size_of::<Bitset>());
-            memory.node_columns_bytes += group.columns.hot_bytes();
-            memory.node_cold_bytes += group.columns.cold_bytes();
             memory.node_spilled_bytes += group.columns.spilled_bytes();
             memory.cold_columns += group.columns.cold_count();
             memory.spilled_columns += group.columns.spilled_count();
-            memory.outgoing_bytes += group.outgoing.heap_bytes();
-            memory.incoming_bytes += group.incoming.heap_bytes();
             node_keys.extend(group.columns.keys());
         }
         let mut edge_keys: FxHashSet<u32> = FxHashSet::default();
         for group in self.edges.values() {
-            memory.edge_tables_bytes += size_of::<u64>()
-                + size_of::<super::EdgeGroup>()
-                + (group.src.capacity() + group.dst.capacity()) * size_of::<u64>()
-                + group.edge_type.capacity() * size_of::<u32>();
-            memory.edge_versions_bytes +=
-                group.versions.heap_bytes() + group.columns.updates_bytes();
-            memory.edge_columns_bytes += group.columns.hot_bytes();
-            memory.edge_cold_bytes += group.columns.cold_bytes();
             memory.edge_spilled_bytes += group.columns.spilled_bytes();
             memory.cold_columns += group.columns.cold_count();
             memory.spilled_columns += group.columns.spilled_count();
@@ -191,6 +189,44 @@ impl Inner {
         }
         memory.property_columns = node_keys.len() + edge_keys.len();
         memory
+    }
+
+    /// What this store holds, without its named graphs, as its account
+    /// counts it: a read of the account, in time independent of the
+    /// store's size. The spilled figures are not counted (they are off the
+    /// heap): 0.
+    fn counted_memory(&self) -> RowGroupMemory {
+        RowGroupMemory {
+            graphs: 1,
+            node_groups: self.nodes.len(),
+            edge_groups: self.edges.len(),
+            label_count: self.labels.len(),
+            edge_type_count: self.edge_types.len(),
+            property_columns: self
+                .account
+                .key_column_count(grafeo_common::change::Table::Nodes)
+                + self
+                    .account
+                    .key_column_count(grafeo_common::change::Table::Edges),
+            ..memory_of_lines(&self.account.report())
+        }
+    }
+
+    /// The lines of the account that differ from the walk's, with both
+    /// figures: none with no reader running (see `account`). For tests and
+    /// explicit checks.
+    fn account_mismatches(&self) -> Vec<(Line, usize, usize)> {
+        let (counted, walked) = (self.account.report(), self.walk_lines());
+        (0..LINES)
+            .filter(|index| counted[*index] != walked[*index])
+            .map(|index| {
+                (
+                    super::account::line_at(index),
+                    counted[index],
+                    walked[index],
+                )
+            })
+            .collect()
     }
 
     /// The node ids `read` sees, ascending.
@@ -226,9 +262,11 @@ impl Inner {
 
 impl RowGroupStore {
     /// The heap bytes it holds by part, with its named graphs' (an
-    /// estimate). Each store is read under its own lock, one after the
-    /// other, so a write meanwhile may leave the figures of two graphs from
-    /// different moments.
+    /// estimate), by a walk of every part: O(the store), for tests and
+    /// explicit checks of the account; what the engine reports is
+    /// [`counted_memory`](Self::counted_memory). Each store is read under
+    /// its own lock, one after the other, so a write meanwhile may leave the
+    /// figures of two graphs from different moments.
     #[must_use]
     pub fn memory(&self) -> RowGroupMemory {
         let mut memory = self.inner.read().memory();
@@ -242,23 +280,111 @@ impl RowGroupStore {
         memory
     }
 
-    /// [`memory`](Self::memory) in the shape of `LpgStore`'s
-    /// `memory_breakdown`, which the engine reports: the row groups and
-    /// their property columns (with the chunks still encoded and the key
-    /// dictionary) as the store, the adjacency and the label bitmaps as
-    /// the indexes, the version info as the MVCC overhead, the label and
-    /// edge type dictionaries as the string pool. The four totals add up to
-    /// [`heap_bytes`](Self::heap_bytes).
+    /// [`memory`](Self::memory) as the accounts of the store and its named
+    /// graphs count it: in time independent of the store's size (a read of
+    /// each graph's account). The spilled figures, off the heap, are 0.
+    #[must_use]
+    pub fn counted_memory(&self) -> RowGroupMemory {
+        let mut memory = self.inner.read().counted_memory();
+        memory.degree_samples_bytes = self.degree_samples.counted_bytes();
+        for name in self.graph_names() {
+            if let Some(graph) = self.graph(&name) {
+                memory.add(&graph.counted_memory());
+            }
+        }
+        memory
+    }
+
+    /// The bytes the grants of its account, its cold chunks and its degree
+    /// samples hold, with its named graphs': what the buffer manager sees of
+    /// the store, without a walk.
+    #[must_use]
+    pub fn granted_bytes(&self) -> usize {
+        let mut bytes = self.inner.read().account.granted() + self.degree_samples.counted_bytes();
+        for name in self.graph_names() {
+            if let Some(graph) = self.graph(&name) {
+                bytes += graph.granted_bytes();
+            }
+        }
+        bytes
+    }
+
+    /// The lines of the store's account (not its named graphs') that differ
+    /// from its walk, each as the line's name with the counted and the
+    /// walked bytes: empty with no reader running. For tests and explicit
+    /// checks: it walks every part.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn account_mismatches(&self) -> Vec<(String, usize, usize)> {
+        let mine = {
+            // The writes' open bracket closes first: their changes are counted.
+            let mut inner = self.inner.write();
+            inner.close_bracket();
+            inner.account_mismatches()
+        };
+        let mut mismatches: Vec<(String, usize, usize)> = mine
+            .into_iter()
+            .map(|(line, counted, walked)| (format!("{line:?}"), counted, walked))
+            .collect();
+        let samples = (
+            self.degree_samples.counted_bytes(),
+            self.degree_samples.memory_bytes(),
+        );
+        if samples.0 != samples.1 {
+            mismatches.push(("DegreeSamples".to_string(), samples.0, samples.1));
+        }
+        for name in self.graph_names() {
+            if let Some(graph) = self.graph(&name) {
+                mismatches.extend(
+                    graph
+                        .account_mismatches()
+                        .into_iter()
+                        .map(|(line, counted, walked)| (format!("{name}/{line}"), counted, walked)),
+                );
+            }
+        }
+        mismatches
+    }
+
+    /// The memory the store holds in the shape of `LpgStore`'s
+    /// `memory_breakdown`, which the engine reports, by a walk of every
+    /// part: O(the store), the oracle of
+    /// [`counted_breakdown`](Self::counted_breakdown), for tests and
+    /// explicit checks only. The row groups and their property columns (with
+    /// the chunks still encoded and the key dictionary) are the store, the
+    /// adjacency and the label bitmaps the indexes, the version info the
+    /// MVCC overhead, the label and edge type dictionaries the string pool.
+    /// The four totals add up to [`heap_bytes`](Self::heap_bytes) and the
+    /// indexes' bytes.
     ///
     /// The version chains count the rows' version info and the update
     /// chains of their values and labels; their depth is reported as one,
     /// as the update chains are counted in bytes and not per row. The
     /// property, vector and text indexes of every graph are counted with the
     /// indexes (a named graph's vector and text indexes named
-    /// `graph/label:property`), a property index as an estimate per entry.
+    /// `graph/label:property`).
     #[must_use]
     pub fn memory_breakdown(&self) -> (StoreMemory, IndexMemory, MvccMemory, StringPoolMemory) {
         let memory = self.memory();
+        self.breakdown_of(&memory, false)
+    }
+
+    /// [`memory_breakdown`](Self::memory_breakdown) as the accounts of the
+    /// store and its named graphs count it, in time independent of the
+    /// store's size: what the engine reports.
+    #[must_use]
+    pub fn counted_breakdown(&self) -> (StoreMemory, IndexMemory, MvccMemory, StringPoolMemory) {
+        let memory = self.counted_memory();
+        self.breakdown_of(&memory, true)
+    }
+
+    /// `memory` in the shape of `LpgStore`'s `memory_breakdown`, with the
+    /// indexes as their counts (`counted`) or their walks give them.
+    fn breakdown_of(
+        &self,
+        memory: &RowGroupMemory,
+        counted: bool,
+    ) -> (StoreMemory, IndexMemory, MvccMemory, StringPoolMemory) {
         // `#[non_exhaustive]` in grafeo-common: built field by field.
         let mut store = StoreMemory::default();
         store.nodes_bytes = memory.node_tables_bytes;
@@ -273,7 +399,7 @@ impl RowGroupStore {
         indexes.forward_adjacency_bytes = memory.outgoing_bytes;
         indexes.backward_adjacency_bytes = memory.incoming_bytes;
         indexes.label_index_bytes = memory.label_bitmaps_bytes + memory.degree_samples_bytes;
-        self.add_index_memory(&mut indexes);
+        self.add_index_memory(&mut indexes, counted);
         indexes.compute_total();
 
         let any_rows = memory.node_groups + memory.edge_groups > 0;
@@ -295,8 +421,9 @@ impl RowGroupStore {
     }
 
     /// Adds the property, vector and text indexes of this store and its
-    /// named graphs to `indexes`.
-    fn add_index_memory(&self, indexes: &mut IndexMemory) {
+    /// named graphs to `indexes`, as their counts (`counted`) or their walks
+    /// give them.
+    fn add_index_memory(&self, indexes: &mut IndexMemory, counted: bool) {
         let mut graphs: Vec<(String, std::sync::Arc<Self>)> = self
             .graph_names()
             .into_iter()
@@ -308,23 +435,17 @@ impl RowGroupStore {
                 .chain(graphs.iter().map(|(name, graph)| (name.as_str(), &**graph)))
         };
         for (_, store) in all() {
-            for key in store.property_index_keys() {
-                let entries = store.property_index_len(&key).unwrap_or(0);
-                // As LpgStore estimates it: a value and a set of ids per
-                // entry, and the map's own overhead.
-                indexes.property_index_bytes += entries
-                    * (size_of::<grafeo_common::types::HashableValue>()
-                        + size_of::<FxHashSet<grafeo_common::types::NodeId>>()
-                        + 32);
-            }
-            indexes.property_index_bytes += store.label_indexes_len()
-                * (size_of::<grafeo_common::types::HashableValue>()
-                    + size_of::<FxHashSet<grafeo_common::types::NodeId>>()
-                    + 32);
+            let inner = store.inner.read();
+            let [property, _, _] = if counted {
+                inner.indexes.counted_bytes()
+            } else {
+                inner.indexes.walk_bytes()
+            };
+            indexes.property_index_bytes += property;
         }
         #[cfg(any(feature = "vector-index", feature = "text-index"))]
         for (graph, store) in all() {
-            store.add_search_index_memory(graph, indexes);
+            store.add_search_index_memory(graph, indexes, counted);
         }
         indexes.vector_indexes.sort_by(|a, b| a.name.cmp(&b.name));
         indexes.text_indexes.sort_by(|a, b| a.name.cmp(&b.name));
@@ -336,7 +457,7 @@ impl RowGroupStore {
     /// holds `:`, `/` or a backquote is written in backquotes, as GQL writes
     /// such a name, so two indexes never show the same name.
     #[cfg(any(feature = "vector-index", feature = "text-index"))]
-    fn add_search_index_memory(&self, graph: &str, indexes: &mut IndexMemory) {
+    fn add_search_index_memory(&self, graph: &str, indexes: &mut IndexMemory, counted: bool) {
         let part = |name: &str| {
             if name.contains([':', '/', '`']) {
                 format!("`{}`", name.replace('`', "``"))
@@ -353,36 +474,62 @@ impl RowGroupStore {
             }
         };
         #[cfg(feature = "vector-index")]
-        for (label, property, index) in self.vector_index_entries() {
-            indexes
-                .vector_indexes
-                .push(grafeo_common::memory::NamedMemory {
-                    name: named(label, property),
-                    bytes: index.heap_memory_bytes(),
-                    item_count: index.len(),
-                });
+        if counted {
+            for (label, property, bytes, item_count) in self.vector_index_figures() {
+                indexes
+                    .vector_indexes
+                    .push(grafeo_common::memory::NamedMemory {
+                        name: named(label, property),
+                        bytes,
+                        item_count,
+                    });
+            }
+        } else {
+            for (label, property, index) in self.vector_index_entries() {
+                indexes
+                    .vector_indexes
+                    .push(grafeo_common::memory::NamedMemory {
+                        name: named(label, property),
+                        bytes: index.heap_memory_bytes(),
+                        item_count: index.len(),
+                    });
+            }
         }
         #[cfg(feature = "text-index")]
-        for (label, property, index) in self.text_index_entries() {
-            let index = index.read();
-            indexes
-                .text_indexes
-                .push(grafeo_common::memory::NamedMemory {
-                    name: named(label, property),
-                    bytes: index.heap_memory_bytes(),
-                    item_count: index.len(),
-                });
+        if counted {
+            for (label, property, bytes, item_count) in self.text_index_figures() {
+                indexes
+                    .text_indexes
+                    .push(grafeo_common::memory::NamedMemory {
+                        name: named(label, property),
+                        bytes,
+                        item_count,
+                    });
+            }
+        } else {
+            for (label, property, index) in self.text_index_entries() {
+                let index = index.read();
+                indexes
+                    .text_indexes
+                    .push(grafeo_common::memory::NamedMemory {
+                        name: named(label, property),
+                        bytes: index.heap_memory_bytes(),
+                        item_count: index.len(),
+                    });
+            }
         }
     }
 
     /// The heap bytes its row groups and dictionaries hold, with its named
-    /// graphs' (an estimate): [`memory`](Self::memory)'s total.
+    /// graphs' (an estimate): [`memory`](Self::memory)'s total, by a walk,
+    /// for tests and explicit checks.
     #[must_use]
     pub fn heap_bytes(&self) -> usize {
         self.memory().total_bytes()
     }
 
-    /// The heap bytes its rows' version info takes, with its named graphs'.
+    /// The heap bytes its rows' version info takes, with its named graphs',
+    /// by a walk, for tests and explicit checks.
     #[must_use]
     pub fn version_bytes(&self) -> usize {
         let memory = self.memory();
@@ -391,7 +538,7 @@ impl RowGroupStore {
 
     /// The property columns of its row groups, and of its named graphs',
     /// that still hold their chunks as a load left them, encoded: a column
-    /// decodes on its first use.
+    /// decodes on its first use. By a walk, for tests and explicit checks.
     #[must_use]
     pub fn cold_columns(&self) -> usize {
         self.memory().cold_columns

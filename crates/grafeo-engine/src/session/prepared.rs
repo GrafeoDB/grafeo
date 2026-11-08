@@ -69,7 +69,7 @@ impl Session {
     ) -> Result<LogicalPlan> {
         use crate::query::binder::Binder;
 
-        let optimizer = self.optimizer_for(store);
+        let optimizer = self.optimizer_for(store, key.language());
         let mut filled = plan.clone();
         fill_values(&mut filled, params)?;
         Binder::new().bind(&filled)?;

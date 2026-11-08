@@ -63,6 +63,7 @@ use parking_lot::RwLock;
 use rand::{RngExt, SeedableRng};
 use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// A neighbor entry in the HNSW graph.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -221,6 +222,22 @@ struct HnswNode {
     neighbors: Vec<Vec<NodeId>>,
 }
 
+/// The heap bytes of one neighbor list.
+fn list_bytes(list: &Vec<NodeId>) -> usize {
+    list.capacity() * std::mem::size_of::<NodeId>()
+}
+
+/// The heap bytes of a node's neighbor lists.
+fn node_bytes(node: &HnswNode) -> usize {
+    node.neighbors.capacity() * std::mem::size_of::<Vec<NodeId>>()
+        + node.neighbors.iter().map(list_bytes).sum::<usize>()
+}
+
+/// The heap bytes of a heap topology's map, without its nodes' lists.
+fn map_bytes(map: &HashMap<NodeId, HnswNode>) -> usize {
+    map.capacity() * (std::mem::size_of::<NodeId>() + std::mem::size_of::<HnswNode>() + 1)
+}
+
 /// Topology storage backend for [`HnswIndex`].
 ///
 /// Two variants: [`Heap`](Self::Heap) is the build/mutation-friendly
@@ -355,6 +372,12 @@ pub struct HnswIndex {
     /// The exact duplicates of the graph's vectors (see [`Duplicates`]).
     /// Locked after the topology, entry point and level.
     duplicates: RwLock<Duplicates>,
+    /// The heap bytes of the heap topology's neighbor lists, kept by the
+    /// writes, which hold the topology's write lock.
+    node_bytes: AtomicUsize,
+    /// What the index holds on the heap (see
+    /// [`counted_bytes`](Self::counted_bytes)), as the last write left it.
+    counted: AtomicUsize,
 }
 
 /// The exact duplicates of the graph's vectors: a vector equal, value for
@@ -378,6 +401,14 @@ struct Duplicates {
     by_hash: HashMap<u64, Vec<NodeId>>,
     /// The hash of each graph node's vector.
     hash_of: HashMap<NodeId, u64>,
+    /// The heap bytes of the id lists of `aliases` and `by_hash`, kept as
+    /// they change.
+    lists: usize,
+}
+
+/// The heap bytes of a list of ids.
+fn ids_bytes(ids: &Vec<NodeId>) -> usize {
+    ids.capacity() * std::mem::size_of::<NodeId>()
 }
 
 impl Duplicates {
@@ -400,7 +431,10 @@ impl Duplicates {
 
     /// Records graph node `id`, whose vector has `hash`.
     fn index_node(&mut self, id: NodeId, hash: u64) {
-        self.by_hash.entry(hash).or_default().push(id);
+        let nodes = self.by_hash.entry(hash).or_default();
+        let before = ids_bytes(nodes);
+        nodes.push(id);
+        self.lists += ids_bytes(nodes) - before;
         self.hash_of.insert(id, hash);
     }
 
@@ -411,6 +445,7 @@ impl Duplicates {
         {
             nodes.retain(|&node| node != id);
             if nodes.is_empty() {
+                self.lists = self.lists.saturating_sub(ids_bytes(nodes));
                 self.by_hash.remove(&hash);
             }
         }
@@ -419,8 +454,10 @@ impl Duplicates {
     /// Makes `id` an alias of graph node `representative`.
     fn add_alias(&mut self, representative: NodeId, id: NodeId) {
         let aliases = self.aliases.entry(representative).or_default();
+        let before = ids_bytes(aliases);
         let at = aliases.partition_point(|&alias| alias < id);
         aliases.insert(at, id);
+        self.lists += ids_bytes(aliases) - before;
         self.representative.insert(id, representative);
     }
 
@@ -432,6 +469,7 @@ impl Duplicates {
         if let Some(aliases) = self.aliases.get_mut(&representative) {
             aliases.retain(|&alias| alias != id);
             if aliases.is_empty() {
+                self.lists = self.lists.saturating_sub(ids_bytes(aliases));
                 self.aliases.remove(&representative);
             }
         }
@@ -442,12 +480,14 @@ impl Duplicates {
     /// representative of the others in its place and returns it.
     fn promote(&mut self, id: NodeId) -> Option<NodeId> {
         let mut aliases = self.aliases.remove(&id)?;
+        self.lists = self.lists.saturating_sub(ids_bytes(&aliases));
         let successor = aliases.remove(0);
         self.representative.remove(&successor);
         for &alias in &aliases {
             self.representative.insert(alias, successor);
         }
         if !aliases.is_empty() {
+            self.lists += ids_bytes(&aliases);
             self.aliases.insert(successor, aliases);
         }
         if let Some(hash) = self.hash_of.remove(&id) {
@@ -482,15 +522,26 @@ impl Duplicates {
         all
     }
 
-    /// Estimated heap bytes of the four maps and their id lists.
+    /// Estimated heap bytes of the four maps and their id lists: a walk of
+    /// every list, the oracle of [`counted_bytes`](Self::counted_bytes).
     fn heap_memory_bytes(&self) -> usize {
-        let id = std::mem::size_of::<NodeId>();
         let lists = self.aliases.values().chain(self.by_hash.values());
+        self.map_bytes() + lists.map(ids_bytes).sum::<usize>()
+    }
+
+    /// [`heap_memory_bytes`](Self::heap_memory_bytes), from the bytes of
+    /// the lists it keeps as they change.
+    fn counted_bytes(&self) -> usize {
+        self.map_bytes() + self.lists
+    }
+
+    /// The heap bytes of the four maps' slots.
+    fn map_bytes(&self) -> usize {
+        let id = std::mem::size_of::<NodeId>();
         self.representative.capacity() * (2 * id + 1)
             + self.aliases.capacity() * (id + std::mem::size_of::<Vec<NodeId>>() + 1)
             + self.by_hash.capacity() * (8 + std::mem::size_of::<Vec<NodeId>>() + 1)
             + self.hash_of.capacity() * (id + 8 + 1)
-            + lists.map(|list| list.capacity() * id).sum::<usize>()
     }
 }
 
@@ -563,6 +614,35 @@ fn reset_entry_point(
 /// default (100), so that a rebuild gives the same graph.
 const DEFAULT_SEED: u64 = 100;
 
+/// What a layer search measures against: the topology it walks, the vectors and the query.
+struct Probe<'a, A> {
+    nodes: &'a TopologyBackend,
+    accessor: &'a A,
+    query: &'a [f32],
+}
+
+impl<A> Clone for Probe<'_, A> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<A> Copy for Probe<'_, A> {}
+
+/// The visit of a search with no bound on its work, which never fails (see
+/// [`HnswIndex::search_visiting`]).
+pub(crate) fn no_visit() -> std::result::Result<(), std::convert::Infallible> {
+    Ok(())
+}
+
+/// The answer of a search whose visit cannot fail.
+pub(crate) fn infallible<T>(found: std::result::Result<T, std::convert::Infallible>) -> T {
+    match found {
+        Ok(found) => found,
+        Err(never) => match never {},
+    }
+}
+
 impl HnswIndex {
     /// Creates a new empty HNSW index with the given configuration.
     ///
@@ -581,27 +661,84 @@ impl HnswIndex {
     /// to avoid HashMap rehashing during bulk insertion.
     #[must_use]
     pub fn with_capacity(config: HnswConfig, capacity: usize) -> Self {
+        let nodes = TopologyBackend::with_capacity(capacity);
+        let counted = AtomicUsize::new(Self::topology_bytes(&nodes, 0));
         Self {
             config,
-            nodes: RwLock::new(TopologyBackend::with_capacity(capacity)),
+            nodes: RwLock::new(nodes),
             entry_point: RwLock::new(None),
             max_level: RwLock::new(0),
             rng: RwLock::new(rand::rngs::StdRng::seed_from_u64(DEFAULT_SEED)),
             duplicates: RwLock::new(Duplicates::default()),
+            node_bytes: AtomicUsize::new(0),
+            counted,
         }
     }
 
     /// Creates a new HNSW index with a fixed seed for reproducible results.
     #[must_use]
     pub fn with_seed(config: HnswConfig, seed: u64) -> Self {
+        let nodes = TopologyBackend::new_heap();
+        let counted = AtomicUsize::new(Self::topology_bytes(&nodes, 0));
         Self {
             config,
-            nodes: RwLock::new(TopologyBackend::new_heap()),
+            nodes: RwLock::new(nodes),
             entry_point: RwLock::new(None),
             max_level: RwLock::new(0),
             rng: RwLock::new(rand::rngs::StdRng::seed_from_u64(seed)),
             duplicates: RwLock::new(Duplicates::default()),
+            node_bytes: AtomicUsize::new(0),
+            counted,
         }
+    }
+
+    /// The heap bytes of `nodes`, a topology whose lists take `lists`
+    /// bytes, without the duplicates.
+    fn topology_bytes(nodes: &TopologyBackend, lists: usize) -> usize {
+        match nodes {
+            TopologyBackend::Heap(map) => map_bytes(map) + lists,
+            TopologyBackend::Mmap(_) => std::mem::size_of::<TopologyBackend>(),
+        }
+    }
+
+    /// Publishes what the index holds now, under the topology's lock:
+    /// `nodes`, its lists as counted, and `duplicate_bytes` of duplicates.
+    fn publish(&self, nodes: &TopologyBackend, duplicate_bytes: usize) {
+        let lists = self.node_bytes.load(Ordering::Relaxed);
+        // Differences add up to the lists' bytes, which never pass
+        // `isize::MAX`: a wrapped figure is a drift, taken as 0 rather than
+        // published as a huge one.
+        let sane = isize::try_from(lists).is_ok();
+        debug_assert!(sane, "the lists' count drifted: {lists}");
+        let lists = if sane { lists } else { 0 };
+        self.counted.store(
+            Self::topology_bytes(nodes, lists) + duplicate_bytes,
+            Ordering::Relaxed,
+        );
+    }
+
+    /// Counts the lists of a heap topology again, by a walk: after a write
+    /// that went through every list anyway (a removal, a restore).
+    fn recount_lists(&self, nodes: &TopologyBackend) {
+        let lists = match nodes {
+            TopologyBackend::Heap(map) => map.values().map(node_bytes).sum(),
+            TopologyBackend::Mmap(_) => 0,
+        };
+        self.node_bytes.store(lists, Ordering::Relaxed);
+    }
+
+    /// Adds `grown` (a difference, wrapping) to the bytes of the lists.
+    fn grow_lists(&self, grown: usize) {
+        let lists = self.node_bytes.load(Ordering::Relaxed);
+        self.node_bytes
+            .store(lists.wrapping_add(grown), Ordering::Relaxed);
+    }
+
+    /// The heap bytes the index holds, as [`heap_memory_bytes`](Self::heap_memory_bytes)
+    /// walks them, kept by the writes: one load.
+    #[must_use]
+    pub fn counted_bytes(&self) -> usize {
+        self.counted.load(Ordering::Relaxed)
     }
 
     /// Returns the index configuration.
@@ -678,6 +815,8 @@ impl HnswIndex {
         // A topology holds no duplicates: inserts after a restore find none
         // of the restored vectors' duplicates either.
         *self.duplicates.write() = Duplicates::default();
+        self.recount_lists(&backend);
+        self.publish(&backend, 0);
     }
 
     /// Hands the topology to `visitor`: the header, then every node in
@@ -746,6 +885,8 @@ impl HnswIndex {
         *self.entry_point.write() = entry_point;
         *self.max_level.write() = max_level;
         *self.duplicates.write() = Duplicates::default();
+        self.node_bytes.store(0, Ordering::Relaxed);
+        self.publish(&backend, 0);
     }
 
     /// Restores node `id` with its neighbor lists (layer 0 first), replacing
@@ -756,10 +897,13 @@ impl HnswIndex {
     /// Panics if the topology is mmap-backed: call
     /// [`begin_restore`](Self::begin_restore) first.
     pub fn restore_node(&self, id: NodeId, layers: Vec<Vec<NodeId>>) {
-        self.nodes
-            .write()
-            .as_heap_mut()
-            .insert(id, HnswNode { neighbors: layers });
+        let mut nodes = self.nodes.write();
+        let node = HnswNode { neighbors: layers };
+        let added = node_bytes(&node);
+        let replaced = nodes.as_heap_mut().insert(id, node);
+        self.grow_lists(added.wrapping_sub(replaced.as_ref().map_or(0, node_bytes)));
+        let duplicate_bytes = self.duplicates.read().counted_bytes();
+        self.publish(&nodes, duplicate_bytes);
     }
 
     /// The first neighbor reference, by node id and then level (and in list
@@ -832,6 +976,8 @@ impl HnswIndex {
         *self.entry_point.write() = entry_point;
         *self.max_level.write() = max_level;
         *self.duplicates.write() = Duplicates::default();
+        self.node_bytes.store(0, Ordering::Relaxed);
+        self.publish(&backend, 0);
     }
 
     /// Returns true if the backend is currently mmap-backed.
@@ -851,17 +997,7 @@ impl HnswIndex {
         self.duplicates.read().heap_memory_bytes()
             + match &*nodes {
                 TopologyBackend::Heap(map) => {
-                    let map_overhead = map.capacity()
-                        * (std::mem::size_of::<NodeId>() + std::mem::size_of::<HnswNode>() + 1);
-                    let mut node_bytes = 0usize;
-                    for node in map.values() {
-                        node_bytes +=
-                            node.neighbors.capacity() * std::mem::size_of::<Vec<NodeId>>();
-                        for layer in &node.neighbors {
-                            node_bytes += layer.capacity() * std::mem::size_of::<NodeId>();
-                        }
-                    }
-                    map_overhead + node_bytes
+                    map_bytes(map) + map.values().map(node_bytes).sum::<usize>()
                 }
                 TopologyBackend::Mmap(_) => std::mem::size_of::<TopologyBackend>(),
             }
@@ -906,9 +1042,11 @@ impl HnswIndex {
         let hash = vector_hash(vector);
         if let Some(representative) = duplicates.find(hash, vector, id, accessor) {
             duplicates.add_alias(representative, id);
+            self.publish(&nodes, duplicates.counted_bytes());
             return;
         }
         duplicates.index_node(id, hash);
+        let duplicate_bytes = duplicates.counted_bytes();
         drop(duplicates);
 
         let level = self.random_level();
@@ -939,9 +1077,11 @@ impl HnswIndex {
 
             // First insertion
             if entry_point.is_none() {
+                self.grow_lists(node_bytes(&node));
                 nodes_map.insert(id, node);
                 *entry_point = Some(id);
                 *max_level = level;
+                self.publish(&nodes, duplicate_bytes);
                 return;
             }
         }
@@ -949,13 +1089,24 @@ impl HnswIndex {
         let ep = entry_point.expect("entry_point confirmed Some above");
         let current_max_level = *max_level;
 
-        // Insert the new node so subsequent searches can find it.
+        // Insert the new node so subsequent searches can find it. What its
+        // lists and those it joins grow by is counted as they change.
+        let mut grown = node_bytes(&node);
         nodes.as_heap_mut().insert(id, node);
 
         // Search from top to the level above the new node's max layer.
         let mut current_ep = ep;
         for lc in (level + 1..=current_max_level).rev() {
-            current_ep = self.search_layer_single(&nodes, accessor, vector, current_ep, lc);
+            current_ep = infallible(self.search_layer_single(
+                &Probe {
+                    nodes: &nodes,
+                    accessor,
+                    query: vector,
+                },
+                current_ep,
+                lc,
+                &mut no_visit,
+            ));
         }
 
         // For each layer from the new node's max layer down to 0
@@ -967,14 +1118,17 @@ impl HnswIndex {
             };
 
             // Find ef_construction nearest neighbors at this layer
-            let neighbors = self.search_layer(
-                &nodes,
-                accessor,
-                vector,
+            let neighbors = infallible(self.search_layer(
+                &Probe {
+                    nodes: &nodes,
+                    accessor,
+                    query: vector,
+                },
                 current_ep,
                 self.config.ef_construction,
                 lc,
-            );
+                &mut no_visit,
+            ));
 
             // Select neighbors using diversity-aware heuristic
             let selected = self.select_neighbors_heuristic(accessor, &neighbors, m_max);
@@ -985,14 +1139,22 @@ impl HnswIndex {
             {
                 let nodes_map = nodes.as_heap_mut();
                 if let Some(new_node) = nodes_map.get_mut(&id) {
+                    let before = list_bytes(&new_node.neighbors[lc]);
                     new_node.neighbors[lc].clone_from(&selected);
+                    grown = grown
+                        .wrapping_add(list_bytes(&new_node.neighbors[lc]))
+                        .wrapping_sub(before);
                 }
 
                 for &neighbor_id in &selected {
                     if let Some(neighbor) = nodes_map.get_mut(&neighbor_id)
                         && neighbor.neighbors.len() > lc
                     {
+                        let before = list_bytes(&neighbor.neighbors[lc]);
                         neighbor.neighbors[lc].push(id);
+                        grown = grown
+                            .wrapping_add(list_bytes(&neighbor.neighbors[lc]))
+                            .wrapping_sub(before);
 
                         if neighbor.neighbors[lc].len() > m_max {
                             needs_pruning.push(neighbor_id);
@@ -1044,6 +1206,9 @@ impl HnswIndex {
                     if let Some(neighbor) = nodes_map.get_mut(&neighbor_id)
                         && neighbor.neighbors.len() > lc
                     {
+                        grown = grown
+                            .wrapping_add(list_bytes(&kept))
+                            .wrapping_sub(list_bytes(&neighbor.neighbors[lc]));
                         neighbor.neighbors[lc] = kept;
                     }
                 }
@@ -1060,6 +1225,8 @@ impl HnswIndex {
             *entry_point = Some(id);
             *max_level = level;
         }
+        self.grow_lists(grown);
+        self.publish(&nodes, duplicate_bytes);
     }
 
     /// Takes `id` out of the index: an alias leaves its representative's
@@ -1120,6 +1287,9 @@ impl HnswIndex {
         let Some(removed) = nodes_map.remove(&id) else {
             return false;
         };
+        // What the lists grow by, as a difference: the removed node's go, and
+        // the repair below adds links (dropping one keeps its list's room).
+        let mut grown = 0_usize.wrapping_sub(node_bytes(&removed));
 
         // The removed node's neighbors that are still nodes with that level.
         let bypasses: Vec<Vec<NodeId>> = removed
@@ -1176,9 +1346,24 @@ impl HnswIndex {
             } else {
                 &entry_source[..]
             };
-            self.reconnect_unreached(nodes_map, level, &bypasses[level], sources, accessor);
-            self.link_past(nodes_map, level, &bypasses[level], listed_by, accessor);
+            self.reconnect_unreached(
+                nodes_map,
+                level,
+                &bypasses[level],
+                sources,
+                accessor,
+                &mut grown,
+            );
+            self.link_past(
+                nodes_map,
+                level,
+                &bypasses[level],
+                listed_by,
+                accessor,
+                &mut grown,
+            );
         }
+        self.grow_lists(grown);
         true
     }
 
@@ -1222,6 +1407,7 @@ impl HnswIndex {
         bypasses: &[NodeId],
         sources: &[NodeId],
         accessor: &impl VectorAccessor,
+        grown: &mut usize,
     ) {
         let max_neighbors = self.max_neighbors(level);
         let mut reaches_all: FxHashSet<NodeId> = FxHashSet::default();
@@ -1263,7 +1449,11 @@ impl HnswIndex {
                 }
                 .unwrap_or(source);
                 if let Some(node) = nodes_map.get_mut(&host) {
+                    let before = list_bytes(&node.neighbors[level]);
                     node.neighbors[level].push(bypass);
+                    *grown = grown
+                        .wrapping_add(list_bytes(&node.neighbors[level]))
+                        .wrapping_sub(before);
                 }
                 walk.reach(bypass);
                 walk.run(nodes_map, level);
@@ -1284,6 +1474,7 @@ impl HnswIndex {
         bypasses: &[NodeId],
         in_neighbors: &[NodeId],
         accessor: &impl VectorAccessor,
+        grown: &mut usize,
     ) {
         let max_neighbors = self.max_neighbors(level);
         for &node_id in in_neighbors {
@@ -1324,7 +1515,11 @@ impl HnswIndex {
                 picks.push(nearest.id);
             }
             if let Some(node) = nodes_map.get_mut(&node_id) {
+                let before = list_bytes(&node.neighbors[level]);
                 node.neighbors[level].extend(picks);
+                *grown = grown
+                    .wrapping_add(list_bytes(&node.neighbors[level]))
+                    .wrapping_sub(before);
             }
         }
     }
@@ -1360,40 +1555,7 @@ impl HnswIndex {
         ef: usize,
         accessor: &impl VectorAccessor,
     ) -> Vec<(NodeId, f32)> {
-        if query.len() != self.config.dimensions {
-            return Vec::new();
-        }
-
-        let nodes = self.nodes.read();
-        let entry_point = self.entry_point.read();
-        let max_level = *self.max_level.read();
-
-        if entry_point.is_none() || nodes.is_empty() {
-            return Vec::new();
-        }
-
-        let ep = entry_point.expect("entry_point confirmed Some above");
-
-        // Greedy search from top layer to layer 1
-        let mut current_ep = ep;
-        for lc in (1..=max_level).rev() {
-            current_ep = self.search_layer_single(&nodes, accessor, query, current_ep, lc);
-        }
-
-        // Beam search at layer 0
-        let ef_search = ef.max(k);
-        let candidates = self.search_layer(&nodes, accessor, query, current_ep, ef_search, 0);
-
-        // Return top k, each node's exact duplicates with it: the results
-        // hold only nodes with a vector (#594)
-        let found = candidates
-            .into_iter()
-            .take(k)
-            .map(|n| (n.id, n.distance))
-            .collect();
-        let mut found = self.duplicates.read().expand(found);
-        found.truncate(k);
-        found
+        infallible(self.search_visiting(query, k, ef, None, accessor, &mut no_visit))
     }
 
     /// Searches for the k nearest neighbors with an allowlist filter.
@@ -1401,7 +1563,8 @@ impl HnswIndex {
     /// Only nodes in the `allowlist` can appear in results. The HNSW graph
     /// is still fully traversed for connectivity; the filter only restricts
     /// the result set. The search beam width (`ef`) is automatically scaled
-    /// based on the allowlist selectivity to maintain recall.
+    /// based on the allowlist selectivity to maintain recall (see
+    /// [`filtered_ef`](Self::filtered_ef)).
     ///
     /// Returns an empty vector if the allowlist is empty.
     #[must_use]
@@ -1412,10 +1575,19 @@ impl HnswIndex {
         allowlist: &HashSet<NodeId>,
         accessor: &impl VectorAccessor,
     ) -> Vec<(NodeId, f32)> {
-        if allowlist.is_empty() {
-            return Vec::new();
-        }
-        // Auto-scale ef based on selectivity ratio
+        self.search_with_ef_and_filter(
+            query,
+            k,
+            self.filtered_ef(k, allowlist),
+            allowlist,
+            accessor,
+        )
+    }
+
+    /// The beam width of a search among `allowlist` without one given: the configured `ef`,
+    /// scaled up by how few nodes the allowlist keeps, at most every node and at least `k`.
+    #[must_use]
+    pub fn filtered_ef(&self, k: usize, allowlist: &HashSet<NodeId>) -> usize {
         let total = self.nodes.read().len();
         let selectivity = if total == 0 {
             1.0
@@ -1427,7 +1599,7 @@ impl HnswIndex {
         let ef_scaled = ((self.config.ef as f64 / selectivity).ceil() as usize)
             .min(total)
             .max(k);
-        self.search_with_ef_and_filter(query, k, ef_scaled, allowlist, accessor)
+        ef_scaled
     }
 
     /// Searches with a custom ef (beam width) and an allowlist filter.
@@ -1447,25 +1619,69 @@ impl HnswIndex {
         allowlist: &HashSet<NodeId>,
         accessor: &impl VectorAccessor,
     ) -> Vec<(NodeId, f32)> {
-        if allowlist.is_empty() || query.len() != self.config.dimensions {
-            return Vec::new();
+        infallible(self.search_visiting(query, k, ef, Some(allowlist), accessor, &mut no_visit))
+    }
+
+    /// The search behind every `search` method: the `k` nearest nodes to `query` with beam width
+    /// `ef`, among `allowlist` when given, calling `visit` before each node it expands, so a
+    /// caller can bound the work (a query's deadline). The first error of `visit` ends the
+    /// search, which returns it. A query of another size than the configured `dimensions`, and an
+    /// empty allowlist, find nothing.
+    ///
+    /// # Errors
+    ///
+    /// The first error of `visit`.
+    pub fn search_visiting<E>(
+        &self,
+        query: &[f32],
+        k: usize,
+        ef: usize,
+        allowlist: Option<&HashSet<NodeId>>,
+        accessor: &impl VectorAccessor,
+        visit: &mut impl FnMut() -> std::result::Result<(), E>,
+    ) -> std::result::Result<Vec<(NodeId, f32)>, E> {
+        if query.len() != self.config.dimensions || allowlist.is_some_and(HashSet::is_empty) {
+            return Ok(Vec::new());
         }
 
         let nodes = self.nodes.read();
-        let entry_point = self.entry_point.read();
+        let entry_point = *self.entry_point.read();
         let max_level = *self.max_level.read();
 
-        if entry_point.is_none() || nodes.is_empty() {
-            return Vec::new();
+        let Some(ep) = entry_point else {
+            return Ok(Vec::new());
+        };
+        if nodes.is_empty() {
+            return Ok(Vec::new());
         }
 
-        let ep = entry_point.expect("entry_point confirmed Some above");
-
+        let probe = Probe {
+            nodes: &nodes,
+            accessor,
+            query,
+        };
         // Greedy search from top layer to layer 1
         let mut current_ep = ep;
         for lc in (1..=max_level).rev() {
-            current_ep = self.search_layer_single(&nodes, accessor, query, current_ep, lc);
+            current_ep = self.search_layer_single(&probe, current_ep, lc, visit)?;
         }
+        let ef_search = ef.max(k);
+
+        let Some(allowlist) = allowlist else {
+            // Beam search at layer 0
+            let candidates = self.search_layer(&probe, current_ep, ef_search, 0, visit)?;
+
+            // Return top k, each node's exact duplicates with it: the results
+            // hold only nodes with a vector (#594)
+            let found = candidates
+                .into_iter()
+                .take(k)
+                .map(|n| (n.id, n.distance))
+                .collect();
+            let mut found = self.duplicates.read().expand(found);
+            found.truncate(k);
+            return Ok(found);
+        };
 
         // An allowed duplicate is found through its representative, which
         // the search then takes as allowed too.
@@ -1483,9 +1699,8 @@ impl HnswIndex {
         };
 
         // Filtered beam search at layer 0
-        let ef_search = ef.max(k);
         let candidates =
-            self.search_layer_filtered(&nodes, accessor, query, current_ep, ef_search, 0, searched);
+            self.search_layer_filtered(&probe, current_ep, ef_search, 0, searched, visit)?;
 
         // Return top k allowed, each node's exact duplicates with it: the
         // results hold only nodes with a vector (#594)
@@ -1493,7 +1708,7 @@ impl HnswIndex {
         let mut found = duplicates.expand(found);
         found.retain(|(id, _)| allowlist.contains(id));
         found.truncate(k);
-        found
+        Ok(found)
     }
 
     /// Removes a vector from the index.
@@ -1514,14 +1729,16 @@ impl HnswIndex {
         let mut entry_point = self.entry_point.write();
         let mut max_level = self.max_level.write();
         let mut duplicates = self.duplicates.write();
-        self.take_out_entry(
+        let removed = self.take_out_entry(
             nodes.as_heap_mut(),
             &mut entry_point,
             &mut max_level,
             &mut duplicates,
             id,
             accessor,
-        )
+        );
+        self.publish(&nodes, duplicates.counted_bytes());
+        removed
     }
 
     /// Returns true if the index contains a vector with the given ID.
@@ -1541,21 +1758,31 @@ impl HnswIndex {
         level
     }
 
-    /// Single-element greedy search at a layer.
-    fn search_layer_single(
+    /// Single-element greedy search at a layer, calling `visit` before each node it expands.
+    // A function of its own, as the search's hot loop: inlined into its caller, the hashing of
+    // the visited set was no longer inlined in it (measured, about 30 percent more instructions
+    // a search).
+    #[inline(never)]
+    fn search_layer_single<A: VectorAccessor, E>(
         &self,
-        nodes: &TopologyBackend,
-        accessor: &impl VectorAccessor,
-        query: &[f32],
+        probe: &Probe<'_, A>,
         ep: NodeId,
         layer: usize,
-    ) -> NodeId {
+        visit: &mut impl FnMut() -> std::result::Result<(), E>,
+    ) -> std::result::Result<NodeId, E> {
+        let Probe {
+            nodes,
+            accessor,
+            query,
+        } = *probe;
         let mut current = ep;
+        visit()?;
         let mut current_dist = self.node_distance(accessor, query, ep);
 
         loop {
             let mut changed = false;
 
+            visit()?;
             if let Some(neighbors) = nodes.neighbors_at(current, layer) {
                 for neighbor in neighbors {
                     let dist = self.node_distance(accessor, query, neighbor);
@@ -1572,21 +1799,31 @@ impl HnswIndex {
             }
         }
 
-        current
+        Ok(current)
     }
 
-    /// Beam search at a layer, returning ef nearest neighbors.
-    fn search_layer(
+    /// Beam search at a layer, returning ef nearest neighbors, calling `visit` before each node
+    /// it expands.
+    // A function of its own, as the search's hot loop: inlined into its caller, the hashing of
+    // the visited set was no longer inlined in it (measured, about 30 percent more instructions
+    // a search).
+    #[inline(never)]
+    fn search_layer<A: VectorAccessor, E>(
         &self,
-        nodes: &TopologyBackend,
-        accessor: &impl VectorAccessor,
-        query: &[f32],
+        probe: &Probe<'_, A>,
         ep: NodeId,
         ef: usize,
         layer: usize,
-    ) -> Vec<Neighbor> {
+        visit: &mut impl FnMut() -> std::result::Result<(), E>,
+    ) -> std::result::Result<Vec<Neighbor>, E> {
+        let Probe {
+            nodes,
+            accessor,
+            query,
+        } = *probe;
         // A node without a vector is explored (its links lead on) but never
         // a result: the search reads no result twice to tell (#594).
+        visit()?;
         let ep_dist = self.distance_to(accessor, query, ep);
 
         // Min-heap of candidates to explore
@@ -1607,6 +1844,7 @@ impl HnswIndex {
         visited.insert(ep);
 
         while let Some(current) = candidates.pop() {
+            visit()?;
             // If the closest candidate is further than the furthest result, stop
             if let Some(furthest) = results.peek()
                 && current.distance > furthest.distance
@@ -1668,26 +1906,35 @@ impl HnswIndex {
             .collect();
         // Equal distances by ascending id, not in the heap's order
         result_vec.sort_by_key(|a| (OrderedFloat(a.distance), a.id));
-        result_vec
+        Ok(result_vec)
     }
 
-    /// Beam search at a layer with an allowlist filter on the result set.
+    /// Beam search at a layer with an allowlist filter on the result set, calling `visit` before
+    /// each node it expands.
     ///
     /// All nodes are visited for graph traversal (neighbor links followed),
     /// but only nodes in the `allowlist` can enter the result set. This
     /// preserves HNSW connectivity while restricting which nodes are returned.
-    #[allow(clippy::too_many_arguments)]
-    fn search_layer_filtered(
+    // A function of its own, as the search's hot loop: inlined into its caller, the hashing of
+    // the visited set was no longer inlined in it (measured, about 30 percent more instructions
+    // a search).
+    #[inline(never)]
+    fn search_layer_filtered<A: VectorAccessor, E>(
         &self,
-        nodes: &TopologyBackend,
-        accessor: &impl VectorAccessor,
-        query: &[f32],
+        probe: &Probe<'_, A>,
         ep: NodeId,
         ef: usize,
         layer: usize,
         allowlist: &HashSet<NodeId>,
-    ) -> Vec<Neighbor> {
+        visit: &mut impl FnMut() -> std::result::Result<(), E>,
+    ) -> std::result::Result<Vec<Neighbor>, E> {
+        let Probe {
+            nodes,
+            accessor,
+            query,
+        } = *probe;
         // A node without a vector is explored but never a result (#594).
+        visit()?;
         let ep_vector = self.distance_to(accessor, query, ep);
         let ep_dist = ep_vector.unwrap_or(f32::MAX);
 
@@ -1719,6 +1966,7 @@ impl HnswIndex {
         visited.insert(ep);
 
         while let Some(current) = candidates.pop() {
+            visit()?;
             // Terminate when best candidate is worse than worst in best_seen
             if let Some(furthest) = best_seen.peek()
                 && current.distance > furthest.distance
@@ -1784,7 +2032,7 @@ impl HnswIndex {
             .collect();
         // Equal distances by ascending id, not in the heap's order
         result_vec.sort_by_key(|a| (OrderedFloat(a.distance), a.id));
-        result_vec
+        Ok(result_vec)
     }
 
     /// Selects neighbors using diversity-aware heuristic (Vamana-style).

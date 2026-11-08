@@ -143,6 +143,7 @@ fn build_result_checked(
         edges_json: CString::new(edges_str).unwrap_or_default(),
         counters: result.counters,
         kind: result.kind,
+        warnings: crate::warning::c_warnings(&grafeo_bindings_common::warning::of_result(result)),
     })))
 }
 
@@ -1896,7 +1897,7 @@ pub extern "C" fn grafeo_edge_count(
 /// The handle of the transaction `session` began. It ends with
 /// `grafeo_commit` or `grafeo_rollback`, never with a statement, so the
 /// session refuses `START TRANSACTION`, `COMMIT` and `ROLLBACK`.
-fn new_transaction(mut session: grafeo_engine::session::Session) -> GrafeoTransaction {
+pub(crate) fn new_transaction(mut session: grafeo_engine::session::Session) -> GrafeoTransaction {
     session.refuse_transaction_statements();
     GrafeoTransaction {
         session: parking_lot::Mutex::new(Some(session)),
@@ -2213,6 +2214,9 @@ pub extern "C" fn grafeo_info(db: *mut GrafeoDatabase) -> *mut c_char {
 }
 
 /// Save database to a path. Caller provides a path string.
+///
+/// Needs the `storage` feature (in the default and `full` builds).
+#[cfg(feature = "storage")]
 #[unsafe(no_mangle)]
 pub extern "C" fn grafeo_save(db: *mut GrafeoDatabase, path: *const c_char) -> GrafeoStatus {
     let db = db_ref!(db);
@@ -2227,6 +2231,9 @@ pub extern "C" fn grafeo_save(db: *mut GrafeoDatabase, path: *const c_char) -> G
 }
 
 /// Create a full backup of the database.
+///
+/// Needs the `storage` feature (in the default and `full` builds).
+#[cfg(feature = "storage")]
 #[unsafe(no_mangle)]
 pub extern "C" fn grafeo_backup_full(
     db: *mut GrafeoDatabase,
@@ -2244,6 +2251,9 @@ pub extern "C" fn grafeo_backup_full(
 }
 
 /// Create an incremental backup (WAL records since last backup).
+///
+/// Needs the `storage` feature (in the default and `full` builds).
+#[cfg(feature = "storage")]
 #[unsafe(no_mangle)]
 pub extern "C" fn grafeo_backup_incremental(
     db: *mut GrafeoDatabase,
@@ -2264,8 +2274,36 @@ pub extern "C" fn grafeo_backup_incremental(
     }
 }
 
+/// Release the backup cursor: the next backup must be a full one, and
+/// checkpoints then keep only the WAL a reopen needs. Writes 1 to
+/// `out_released` when there was a cursor to release, 0 when there was none
+/// (`out_released` may be null).
+///
+/// Needs the `storage` feature (in the default and `full` builds).
+#[cfg(feature = "storage")]
+#[unsafe(no_mangle)]
+pub extern "C" fn grafeo_release_backup_cursor(
+    db: *mut GrafeoDatabase,
+    out_released: *mut i32,
+) -> GrafeoStatus {
+    let db = db_ref!(db);
+    match db.inner.read().release_backup_cursor() {
+        Ok(released) => {
+            if !out_released.is_null() {
+                // SAFETY: the caller passes null or a valid pointer to an i32.
+                unsafe { *out_released = i32::from(released) };
+            }
+            GrafeoStatus::Ok
+        }
+        Err(e) => set_error(&e),
+    }
+}
+
 /// Restore a database to a specific epoch from a backup chain. An epoch past
 /// the end of the chain restores the latest state the chain holds.
+///
+/// Needs the `storage` feature (in the default and `full` builds).
+#[cfg(feature = "storage")]
 #[unsafe(no_mangle)]
 pub extern "C" fn grafeo_restore_to_epoch(
     backup_dir: *const c_char,

@@ -28,6 +28,8 @@ pub(crate) mod catalog_records;
 pub(crate) mod catalog_section;
 #[cfg(feature = "grafeo-file")]
 mod checkpoint_timer;
+#[cfg(all(feature = "grafeo-file", feature = "testing-crash-injection"))]
+pub(crate) use checkpoint_timer::RearmGate;
 // What runs after each immediate call and commit: the version collect.
 pub(crate) mod collect;
 mod crud;
@@ -62,8 +64,11 @@ mod rdf_ops;
 #[cfg(feature = "wal")]
 mod schema_replay;
 mod search;
+// The consumers of the RDF sections, the only sections it wraps.
+#[cfg(any(feature = "triple-store", test))]
 pub(crate) mod section_consumer;
 mod sections;
+mod spill_budget;
 // The history's time index in the file (H2c).
 mod time_index_section;
 // Time travel: reads at an earlier epoch or time (H2c).
@@ -92,6 +97,8 @@ mod upsert;
 // The commit's WAL group, written from its change set.
 #[cfg(feature = "wal")]
 pub(crate) mod wal_log;
+#[cfg(all(feature = "wal", feature = "grafeo-file"))]
+mod wal_retention;
 
 use grafeo_common::grafeo_error;
 use std::sync::Arc;
@@ -102,6 +109,7 @@ use std::sync::atomic::AtomicUsize;
 use parking_lot::RwLock;
 
 use grafeo_common::memory::buffer::{BufferManager, BufferManagerConfig};
+use grafeo_common::memory::{DetectedMemory, MemorySource, detect_memory};
 use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind, Result};
 use grafeo_core::graph::GraphBackend;
 use grafeo_core::graph::GraphStore;
@@ -169,6 +177,10 @@ pub struct GrafeoDB {
     /// at the last checkpoint: the status reports the records after it.
     #[cfg(feature = "wal")]
     pub(super) wal_records_at_checkpoint: Arc<AtomicU64>,
+    /// How much WAL a checkpoint keeps for the backup cursor at most, and
+    /// the warnings it gave (see [`wal_retention`]).
+    #[cfg(all(feature = "wal", feature = "grafeo-file"))]
+    pub(super) wal_retention: Arc<wal_retention::WalRetention>,
     /// Query cache for parsed and optimized plans.
     pub(super) query_cache: Arc<QueryCache>,
     /// Shared commit counter for auto-GC across sessions.
@@ -203,6 +215,13 @@ pub struct GrafeoDB {
     /// [`checkpoint_status`](Self::checkpoint_status)).
     #[cfg(feature = "grafeo-file")]
     checkpoint_failures: Arc<checkpoint_timer::Failures>,
+    /// What the checkpoint thread did, for the test hook
+    /// `checkpoint_thread_counts`.
+    #[cfg(feature = "grafeo-file")]
+    checkpoint_counts: Arc<checkpoint_timer::Counts>,
+    /// The hold of the test hook `hold_checkpoint_rearm`.
+    #[cfg(all(feature = "grafeo-file", feature = "testing-crash-injection"))]
+    checkpoint_rearm_gate: Arc<checkpoint_timer::RearmGate>,
     /// Syncs the WAL in the background under `DurabilityMode::Adaptive`.
     /// Wrapped in Mutex because `close()` takes `&self` but stops it.
     #[cfg(feature = "wal")]
@@ -218,6 +237,9 @@ pub struct GrafeoDB {
     /// Where spilled vector columns write their cache files.
     #[cfg(all(feature = "vector-index", feature = "wal"))]
     vector_cache: Option<Arc<spill_directory::SpillDirectory>>,
+    /// What the open spills, against its cap and room (see `spill_budget`);
+    /// `None` without a spill directory.
+    pub(super) spill_account: Option<Arc<grafeo_core::execution::spill::SpillAccount>>,
     /// External read-only graph store (when using with_store() or with_read_store()).
     /// When set, sessions route queries through this store instead of the built-in
     /// row-group store.
@@ -513,17 +535,20 @@ impl GrafeoDB {
         let mut reads_a_0_5_database = false;
 
         // Create buffer manager with configured limits
+        let (budget, detected_memory) = memory_budget(&config);
+        let config = config.with_open_memory_budget(budget);
         let buffer_config = BufferManagerConfig {
-            budget: config.memory_limit().unwrap_or_else(|| {
-                // reason: product of system RAM and 0.75 is always a valid positive usize
-                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-                let b = (BufferManagerConfig::detect_system_memory() as f64 * 0.75) as usize;
-                b
-            }),
             spill_path: spill_layout.root.clone(),
-            ..BufferManagerConfig::default()
+            ..BufferManagerConfig::with_budget(budget)
         };
         let buffer_manager = BufferManager::new(buffer_config);
+        // The store's account takes its grants from the database's manager,
+        // from the load on: its cold chunks and its writes are counted there.
+        store.attach_memory(Arc::clone(&buffer_manager));
+        // So do the RDF store's and the change sets'.
+        #[cfg(feature = "triple-store")]
+        rdf_store.attach_memory(Arc::clone(&buffer_manager));
+        transaction_manager.attach_memory(Arc::clone(&buffer_manager));
 
         // Create catalog early so WAL replay can restore schema definitions
         let catalog = Arc::new(Catalog::new());
@@ -792,6 +817,11 @@ impl GrafeoDB {
                 _ => return Err(not_a_database(db_path)),
             };
 
+            // What earlier opens and crashed queries left in this open's
+            // spill directory goes, under the exclusive lock, before the
+            // spill account measures the volume.
+            spill_directory::remove_leftovers(&spill_layout);
+
             // A 0.6.0-beta.1 file's RDF sections are written in the current
             // version right after the load, once a copy of the file is kept.
             #[cfg(feature = "triple-store")]
@@ -886,6 +916,21 @@ impl GrafeoDB {
         #[cfg(feature = "grafeo-file")]
         drop(create_lock);
 
+        // Without the single file there is no exclusive lock to remove them
+        // under earlier: they go here.
+        #[cfg(not(feature = "grafeo-file"))]
+        spill_directory::remove_leftovers(&spill_layout);
+
+        // The spill account, measured after the leftovers went.
+        let spill_account = spill_budget::open_account(
+            config.spill_limit(),
+            spill_layout.root.as_deref(),
+            budget,
+            #[cfg(feature = "grafeo-file")]
+            file_manager.as_ref(),
+            is_read_only,
+        );
+
         // The WAL is the sidecar directory of the database file. It opens once
         // the open has replayed (and, if need be, retired) what the sidecar
         // held: see `open_wal` below. A read-only open, and one with
@@ -906,8 +951,14 @@ impl GrafeoDB {
 
         #[cfg(feature = "cdc")]
         let cdc_enabled_val = config.cdc_enabled();
+        #[cfg(all(feature = "wal", feature = "grafeo-file"))]
+        let wal_retention_limit = config.wal_retention_limit();
         #[cfg(feature = "cdc")]
-        let cdc_retention = config.cdc_retention().clone();
+        let cdc_log = {
+            let log = crate::cdc::CdcLog::with_retention(config.cdc_retention().clone());
+            log.attach_memory(Arc::clone(&buffer_manager));
+            Arc::new(log)
+        };
 
         let mut db = Self {
             config,
@@ -925,7 +976,7 @@ impl GrafeoDB {
             #[cfg(feature = "wal")]
             backup_lock: parking_lot::Mutex::new(()),
             #[cfg(feature = "cdc")]
-            cdc_log: Arc::new(crate::cdc::CdcLog::with_retention(cdc_retention)),
+            cdc_log,
             #[cfg(feature = "cdc")]
             cdc_enabled: std::sync::atomic::AtomicBool::new(cdc_enabled_val),
             #[cfg(feature = "embed")]
@@ -938,8 +989,14 @@ impl GrafeoDB {
             checkpoint_triggers: parking_lot::Mutex::new(crate::admin::CheckpointTriggers::none()),
             #[cfg(feature = "grafeo-file")]
             checkpoint_failures: Arc::default(),
+            #[cfg(feature = "grafeo-file")]
+            checkpoint_counts: Arc::default(),
+            #[cfg(all(feature = "grafeo-file", feature = "testing-crash-injection"))]
+            checkpoint_rearm_gate: Arc::default(),
             #[cfg(feature = "wal")]
             wal_records_at_checkpoint: Arc::new(AtomicU64::new(0)),
+            #[cfg(all(feature = "wal", feature = "grafeo-file"))]
+            wal_retention: Arc::new(wal_retention::WalRetention::new(wal_retention_limit)),
             #[cfg(feature = "wal")]
             wal_flusher: parking_lot::Mutex::new(wal_flusher),
             #[cfg(feature = "wal")]
@@ -947,6 +1004,7 @@ impl GrafeoDB {
             _spill_root: spill_layout.root_guard.clone(),
             #[cfg(all(feature = "vector-index", feature = "wal"))]
             vector_cache: spill_layout.vector_cache.clone(),
+            spill_account,
             external_read_store: None,
             external_write_store: None,
             #[cfg(feature = "metrics")]
@@ -1035,12 +1093,6 @@ impl GrafeoDB {
             db.start_checkpoint_timer();
         }
 
-        // A spill cache is never data: what a previous read-write open (or a
-        // crash) left of it goes, under this open's exclusive lock.
-        if let Some(ref stale) = spill_layout.stale_cache {
-            spill_directory::remove_stale_cache(stale);
-        }
-
         // Phase 8a: apply per-section ForceDisk overrides. Each section
         // type configured as ForceDisk triggers a targeted spill of its
         // matching consumer; sections with Auto/ForceRam are left alone.
@@ -1068,6 +1120,7 @@ impl GrafeoDB {
         }
 
         db.warn_of_types_scoped_to_their_graphs();
+        warn_of_undetected_memory(budget, detected_memory);
         Ok(db)
     }
 
@@ -1127,29 +1180,36 @@ impl GrafeoDB {
         let transaction_manager = Arc::new(TransactionManager::new());
         transaction_manager.sync_epoch(store.committed_epoch());
 
-        let buffer_config = BufferManagerConfig {
-            budget: config.memory_limit().unwrap_or_else(|| {
-                // reason: product of system RAM and 0.75 is always a valid positive usize
-                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-                let b = (BufferManagerConfig::detect_system_memory() as f64 * 0.75) as usize;
-                b
-            }),
-            spill_path: None,
-            ..BufferManagerConfig::default()
-        };
+        let (budget, detected_memory) = memory_budget(&config);
+        let config = config.with_open_memory_budget(budget);
+        warn_of_undetected_memory(budget, detected_memory);
+        let buffer_config = BufferManagerConfig::with_budget(budget);
         let buffer_manager = BufferManager::new(buffer_config);
+        transaction_manager.attach_memory(Arc::clone(&buffer_manager));
+        #[cfg(feature = "triple-store")]
+        let rdf_store = Arc::new(RdfStore::new());
+        #[cfg(feature = "triple-store")]
+        rdf_store.attach_memory(Arc::clone(&buffer_manager));
+        #[cfg(feature = "cdc")]
+        let cdc_log = Arc::new(crate::cdc::CdcLog::with_retention(
+            config.cdc_retention().clone(),
+        ));
+        #[cfg(feature = "cdc")]
+        cdc_log.attach_memory(Arc::clone(&buffer_manager));
 
         let query_cache = Arc::new(QueryCache::default());
 
         #[cfg(feature = "cdc")]
         let cdc_enabled_val = config.cdc_enabled();
+        #[cfg(all(feature = "wal", feature = "grafeo-file"))]
+        let wal_retention_limit = config.wal_retention_limit();
 
-        let db = Self {
+        let mut db = Self {
             config,
             store: None,
             catalog: Arc::new(Catalog::new()),
             #[cfg(feature = "triple-store")]
-            rdf_store: Arc::new(RdfStore::new()),
+            rdf_store,
             transaction_manager,
             buffer_manager,
             #[cfg(feature = "wal")]
@@ -1160,7 +1220,7 @@ impl GrafeoDB {
             #[cfg(feature = "wal")]
             backup_lock: parking_lot::Mutex::new(()),
             #[cfg(feature = "cdc")]
-            cdc_log: Arc::new(crate::cdc::CdcLog::new()),
+            cdc_log,
             #[cfg(feature = "cdc")]
             cdc_enabled: std::sync::atomic::AtomicBool::new(cdc_enabled_val),
             #[cfg(feature = "embed")]
@@ -1173,8 +1233,14 @@ impl GrafeoDB {
             checkpoint_triggers: parking_lot::Mutex::new(crate::admin::CheckpointTriggers::none()),
             #[cfg(feature = "grafeo-file")]
             checkpoint_failures: Arc::default(),
+            #[cfg(feature = "grafeo-file")]
+            checkpoint_counts: Arc::default(),
+            #[cfg(all(feature = "grafeo-file", feature = "testing-crash-injection"))]
+            checkpoint_rearm_gate: Arc::default(),
             #[cfg(feature = "wal")]
             wal_records_at_checkpoint: Arc::new(AtomicU64::new(0)),
+            #[cfg(all(feature = "wal", feature = "grafeo-file"))]
+            wal_retention: Arc::new(wal_retention::WalRetention::new(wal_retention_limit)),
             #[cfg(feature = "wal")]
             wal_flusher: parking_lot::Mutex::new(None),
             #[cfg(feature = "wal")]
@@ -1182,6 +1248,7 @@ impl GrafeoDB {
             _spill_root: None,
             #[cfg(all(feature = "vector-index", feature = "wal"))]
             vector_cache: None,
+            spill_account: None,
             external_read_store: Some(Arc::clone(&store) as Arc<dyn GraphStore>),
             external_write_store: Some(Arc::clone(&store)),
             #[cfg(feature = "metrics")]
@@ -1193,12 +1260,11 @@ impl GrafeoDB {
             projections: Arc::new(RwLock::new(std::collections::HashMap::new())),
             immediate_writes: std::sync::OnceLock::new(),
         };
+        // What it holds besides the backend (its RDF store and ring, its CDC
+        // log) reports to the buffer manager, as on the built-in store.
+        db.register_section_consumers();
         #[cfg(feature = "wal")]
-        let db = {
-            let mut db = db;
-            db.open_backend_wal(&store)?;
-            db
-        };
+        db.open_backend_wal(&store)?;
         Ok(db)
     }
 
@@ -1237,29 +1303,36 @@ impl GrafeoDB {
         let transaction_manager = Arc::new(TransactionManager::new());
         transaction_manager.sync_epoch(store.committed_epoch());
 
-        let buffer_config = BufferManagerConfig {
-            budget: config.memory_limit().unwrap_or_else(|| {
-                // reason: product of system RAM and 0.75 is always a valid positive usize
-                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-                let b = (BufferManagerConfig::detect_system_memory() as f64 * 0.75) as usize;
-                b
-            }),
-            spill_path: None,
-            ..BufferManagerConfig::default()
-        };
+        let (budget, detected_memory) = memory_budget(&config);
+        let config = config.with_open_memory_budget(budget);
+        warn_of_undetected_memory(budget, detected_memory);
+        let buffer_config = BufferManagerConfig::with_budget(budget);
         let buffer_manager = BufferManager::new(buffer_config);
+        transaction_manager.attach_memory(Arc::clone(&buffer_manager));
+        #[cfg(feature = "triple-store")]
+        let rdf_store = Arc::new(RdfStore::new());
+        #[cfg(feature = "triple-store")]
+        rdf_store.attach_memory(Arc::clone(&buffer_manager));
+        #[cfg(feature = "cdc")]
+        let cdc_log = Arc::new(crate::cdc::CdcLog::with_retention(
+            config.cdc_retention().clone(),
+        ));
+        #[cfg(feature = "cdc")]
+        cdc_log.attach_memory(Arc::clone(&buffer_manager));
 
         let query_cache = Arc::new(QueryCache::default());
 
         #[cfg(feature = "cdc")]
         let cdc_enabled_val = config.cdc_enabled();
+        #[cfg(all(feature = "wal", feature = "grafeo-file"))]
+        let wal_retention_limit = config.wal_retention_limit();
 
-        Ok(Self {
+        let mut db = Self {
             config,
             store: None,
             catalog: Arc::new(Catalog::new()),
             #[cfg(feature = "triple-store")]
-            rdf_store: Arc::new(RdfStore::new()),
+            rdf_store,
             transaction_manager,
             buffer_manager,
             #[cfg(feature = "wal")]
@@ -1270,7 +1343,7 @@ impl GrafeoDB {
             #[cfg(feature = "wal")]
             backup_lock: parking_lot::Mutex::new(()),
             #[cfg(feature = "cdc")]
-            cdc_log: Arc::new(crate::cdc::CdcLog::new()),
+            cdc_log,
             #[cfg(feature = "cdc")]
             cdc_enabled: std::sync::atomic::AtomicBool::new(cdc_enabled_val),
             #[cfg(feature = "embed")]
@@ -1283,8 +1356,14 @@ impl GrafeoDB {
             checkpoint_triggers: parking_lot::Mutex::new(crate::admin::CheckpointTriggers::none()),
             #[cfg(feature = "grafeo-file")]
             checkpoint_failures: Arc::default(),
+            #[cfg(feature = "grafeo-file")]
+            checkpoint_counts: Arc::default(),
+            #[cfg(all(feature = "grafeo-file", feature = "testing-crash-injection"))]
+            checkpoint_rearm_gate: Arc::default(),
             #[cfg(feature = "wal")]
             wal_records_at_checkpoint: Arc::new(AtomicU64::new(0)),
+            #[cfg(all(feature = "wal", feature = "grafeo-file"))]
+            wal_retention: Arc::new(wal_retention::WalRetention::new(wal_retention_limit)),
             #[cfg(feature = "wal")]
             wal_flusher: parking_lot::Mutex::new(None),
             #[cfg(feature = "wal")]
@@ -1292,6 +1371,7 @@ impl GrafeoDB {
             _spill_root: None,
             #[cfg(all(feature = "vector-index", feature = "wal"))]
             vector_cache: None,
+            spill_account: None,
             external_read_store: Some(store),
             external_write_store: None,
             #[cfg(feature = "metrics")]
@@ -1302,7 +1382,11 @@ impl GrafeoDB {
             read_only: true,
             projections: Arc::new(RwLock::new(std::collections::HashMap::new())),
             immediate_writes: std::sync::OnceLock::new(),
-        })
+        };
+        // What it holds besides the store reports to the buffer manager, as
+        // on the built-in store.
+        db.register_section_consumers();
+        Ok(db)
     }
 
     /// Compacts the database: writes a checkpoint of a persistent database
@@ -1399,6 +1483,9 @@ impl GrafeoDB {
     ) -> Result<()> {
         let path = fm.sidecar_wal_path();
         std::fs::create_dir_all(&path)?;
+        // A checkpoint starts a new WAL segment, and the log grows on in it:
+        // a checkpoint leaves room for one of the configured size (#726).
+        fm.set_checkpoint_headroom(self.config.wal_segment_size());
         self.open_wal_at(&path, fm.database_id(), keys, start_lsn)
     }
 
@@ -1438,6 +1525,7 @@ impl GrafeoDB {
                 path,
                 WalOptions {
                     durability,
+                    segment_bytes: self.config.wal_segment_size(),
                     cipher_for_salt: keys.wal_segment_ciphers(database_id),
                     ..WalOptions::new(database_id, start_lsn)
                 },
@@ -1637,7 +1725,7 @@ impl GrafeoDB {
                         && !target_store.load_edge(*id, *src, *dst, edge_type)?
                     {
                         grafeo_common::grafeo_warn!(
-                            "left out edge {} of the WAL {}: its graph holds no node at one of                              its ends",
+                            "left out edge {} of the WAL {}: its graph holds no node at one of its ends",
                             id.as_u64(),
                             wal.display()
                         );
@@ -2223,6 +2311,8 @@ impl GrafeoDB {
             path_search_budget: self.config.path_search_budget(),
             #[cfg(feature = "spill")]
             buffer_manager: Some(Arc::clone(&self.buffer_manager)),
+            #[cfg(feature = "spill")]
+            spill_account: self.spill_account.clone(),
             commit_counter: Arc::clone(&self.commit_counter),
             gc_interval: self.config.gc_interval(),
             read_only: self.read_only || force_read_only,
@@ -2370,6 +2460,14 @@ impl GrafeoDB {
     #[must_use]
     pub fn config(&self) -> &Config {
         &self.config
+    }
+
+    /// The deadline of a statement that starts now under the database's query timeout
+    /// ([`Config::query_timeout`]), as a query reckons it; `None` without a timeout. A binding's
+    /// algorithm call runs under it, so it stops as `execute` past its timeout does.
+    #[must_use]
+    pub fn query_deadline(&self) -> Option<grafeo_common::clock::Instant> {
+        Config::deadline_after(self.config.query_timeout())
     }
 
     /// Returns the graph data model of this database.
@@ -2804,8 +2902,11 @@ impl GrafeoDB {
         // Stop the periodic checkpoint timer first, before any early return,
         // so it does not race with the closed file manager.
         #[cfg(feature = "grafeo-file")]
-        if let Some(mut timer) = self.checkpoint_timer.lock().take() {
-            timer.stop();
+        {
+            if let Some(mut timer) = self.checkpoint_timer.lock().take() {
+                timer.stop();
+            }
+            self.transaction_manager.clear_first_commit_hook();
         }
 
         // Stop the WAL flusher before the WAL is synced and closed below; its
@@ -2872,7 +2973,34 @@ impl GrafeoDB {
             if let Some(ref wal) = self.wal {
                 wal.sync()?;
             }
-            let flush_result = self.checkpoint_to_file(fm)?;
+            // A close with nothing new leaves the file as it is: no change
+            // committed since the last checkpoint (none since the open, when
+            // none ran), no log record past the image and no transaction
+            // still open (the final checkpoint holds its commit off). A
+            // checkpoint would rewrite the header and, under copy-on-write,
+            // the whole image. A database with a backup chain checkpoints
+            // still: its checkpoint releases the log segments the chain no
+            // longer needs. The question is asked with commits held off, so a
+            // commit that began before `close_for_writes` above has completed
+            // and is counted; the hold stays until the file is closed.
+            let held = self.transaction_manager.hold_commits()?;
+            #[cfg(feature = "wal")]
+            let log_ahead = self
+                .wal
+                .as_ref()
+                .is_some_and(|wal| wal.end_lsn() > self.checkpoint_lsn());
+            #[cfg(not(feature = "wal"))]
+            let log_ahead = false;
+            let nothing_new = !log_ahead
+                && !self.transaction_manager.changed_since_checkpoint()
+                && self.transaction_manager.active_count() == 0
+                && !Self::backup_chain_needs_wal(fm);
+            let (flush_result, _held) = if nothing_new {
+                (flush::FlushResult::default(), Some(held))
+            } else {
+                drop(held);
+                (self.checkpoint_to_file(fm)?, None)
+            };
 
             // Release WAL file handles before removing sidecar directory.
             // On Windows, open handles prevent directory deletion.
@@ -2989,6 +3117,13 @@ impl GrafeoDB {
         // Checks the incomplete-commit and closed states again, under the
         // hold: they may have changed since.
         let held = self.transaction_manager.hold_commits_for_change()?;
+        // An import counts as a committed change as the hold is released.
+        #[cfg(feature = "grafeo-file")]
+        let held = {
+            let mut held = held;
+            held.changed(&self.transaction_manager);
+            held
+        };
         // Tests start a checkpoint or `close()` here, which must wait.
         #[cfg(feature = "testing-statement-injection")]
         grafeo_common::testing::commit_hook::run_during_held_change();
@@ -3093,6 +3228,8 @@ impl GrafeoDB {
                 #[cfg(all(feature = "wal", feature = "vector-index"))]
                 self.vector_cache.clone(),
                 #[cfg(all(feature = "wal", feature = "vector-index"))]
+                self.spill_account.clone(),
+                #[cfg(all(feature = "wal", feature = "vector-index"))]
                 Some({
                     let manager = Arc::clone(&self.transaction_manager);
                     Arc::new(move || manager.collect_horizon())
@@ -3100,29 +3237,28 @@ impl GrafeoDB {
             );
         }
 
-        // RDF store: only when data exists
+        // RDF store: always, as triples may come after the open; it
+        // reports what its account counts (none while empty).
         #[cfg(feature = "triple-store")]
-        if !self.rdf_store.is_empty() || self.rdf_store.graph_count() > 0 {
+        {
             let rdf = grafeo_core::graph::rdf::RdfStoreSection::new(Arc::clone(&self.rdf_store));
             self.buffer_manager.register_consumer(Arc::new(
                 section_consumer::SectionConsumer::new(Arc::new(rdf)),
             ));
         }
 
-        // Ring Index: only when Ring has been built
+        // Ring index: always too, as a ring may be built after the open; it
+        // reports none until then.
         #[cfg(feature = "ring-index")]
-        if self.rdf_store.ring().is_some() {
+        {
             let ring = grafeo_core::index::ring::RdfRingSection::new(Arc::clone(&self.rdf_store));
-            // Ring is the first index section to opt into spill wiring.
-            // The Ring's `swap_to_mmap` still returns `NotSupported` until
-            // its packed disk format lands, so a spill attempt today fails
-            // cleanly without leaking files; once the format is in place,
-            // no engine-side change is required to enable real eviction.
-            let consumer = match self.buffer_manager.config().spill_path.clone() {
-                Some(path) => section_consumer::SectionConsumer::with_spill(Arc::new(ring), path),
-                None => section_consumer::SectionConsumer::new(Arc::new(ring)),
-            };
-            self.buffer_manager.register_consumer(Arc::new(consumer));
+            // Without a spill directory: the ring's `swap_to_mmap` copies
+            // the mapped bytes back onto the heap, so a spill would free
+            // nothing. The consumer reports it cannot spill until the ring
+            // reads from a file.
+            self.buffer_manager.register_consumer(Arc::new(
+                section_consumer::SectionConsumer::new(Arc::new(ring)),
+            ));
         }
 
         // CDC log: register as memory consumer so the buffer manager can
@@ -3257,11 +3393,13 @@ impl GrafeoDB {
             wal: self.wal.clone(),
             #[cfg(feature = "wal")]
             wal_records_at_checkpoint: Arc::clone(&self.wal_records_at_checkpoint),
+            #[cfg(all(feature = "wal", feature = "grafeo-file"))]
+            wal_retention: Arc::clone(&self.wal_retention),
         })
     }
 
-    /// Starts the automatic checkpointer when a trigger is set, replacing a
-    /// running one.
+    /// Starts the automatic checkpointer when a trigger can fire (an
+    /// interval, or a WAL size with a WAL), replacing a running one.
     #[cfg(feature = "grafeo-file")]
     fn start_checkpoint_timer(&self) {
         // A closed database has released its file.
@@ -3274,48 +3412,100 @@ impl GrafeoDB {
     /// caller that holds the database open.
     #[cfg(feature = "grafeo-file")]
     fn restart_checkpoint_timer(&self) {
-        self.stop_checkpoint_timer();
+        // One lock from the stop to the start: two restarts at once cannot
+        // each start a thread, and the old thread, which clears the WAL's
+        // waker as it exits, is gone before the new one sets it. The thread
+        // and its checkpoints never take this lock.
+        let mut running = self.checkpoint_timer.lock();
+        if let Some(mut timer) = running.take() {
+            timer.stop();
+        }
+        self.transaction_manager.clear_first_commit_hook();
         let triggers = *self.checkpoint_triggers.lock();
+        // The WAL the size trigger watches: without one it never fires.
+        #[cfg(feature = "wal")]
+        let log: Option<Box<dyn checkpoint_timer::WatchedLog>> =
+            match (&self.file_manager, &self.wal) {
+                (Some(fm), Some(wal)) => Some(Box::new(WalWatch {
+                    wal: Arc::clone(wal),
+                    file_manager: Arc::clone(fm),
+                })),
+                _ => None,
+            };
+        #[cfg(not(feature = "wal"))]
+        let log: Option<Box<dyn checkpoint_timer::WatchedLog>> = None;
+        let can_fire =
+            triggers.interval.is_some() || (triggers.wal_bytes.is_some() && log.is_some());
         // A file opened read-only stays so. A database with a file has the
         // built-in store, which its checkpoints write.
         if let Some(fm) = &self.file_manager
-            && triggers.any()
+            && can_fire
             && !self.read_only
             && !fm.is_read_only()
             && let Ok(sources) = self.checkpoint_sources()
         {
-            let (checkpoint_fm, size_fm) = (Arc::clone(fm), Arc::clone(fm));
-            #[cfg(feature = "wal")]
-            let wal = self.wal.clone();
+            let checkpoint_fm = Arc::clone(fm);
             let transaction_manager = Arc::clone(&self.transaction_manager);
+            // Without a WAL, a commit with changes after the file's last
+            // checkpoint is the interval's work.
+            let changed: Option<Box<dyn Fn() -> bool + Send>> = if log.is_none() {
+                let changed_tm = Arc::clone(&self.transaction_manager);
+                Some(Box::new(move || changed_tm.changed_since_checkpoint()))
+            } else {
+                None
+            };
             let job = checkpoint_timer::Job {
                 checkpoint: Box::new(move || flush::flush(&checkpoint_fm, &sources).map(|_| ())),
-                wal_bytes: Box::new(move || {
-                    #[cfg(feature = "wal")]
-                    if let Some(wal) = &wal {
-                        return wal
-                            .end_lsn()
-                            .saturating_sub(size_fm.active_header().checkpoint_lsn);
-                    }
-                    let _ = &size_fm;
-                    0
-                }),
                 hopeless: Box::new(move || transaction_manager.has_incomplete_commit()),
+                log,
+                segment_bytes: self.config.wal_segment_size(),
+                changed,
             };
-            *self.checkpoint_timer.lock() = Some(checkpoint_timer::CheckpointTimer::start(
-                triggers,
-                job,
-                Arc::clone(&self.checkpoint_failures),
-            ));
+            let shared = checkpoint_timer::Shared {
+                failures: Arc::clone(&self.checkpoint_failures),
+                counts: Arc::clone(&self.checkpoint_counts),
+                #[cfg(feature = "testing-crash-injection")]
+                gate: Arc::clone(&self.checkpoint_rearm_gate),
+            };
+            // Armed, not started: the thread starts the first time it has work
+            // (see `CheckpointTimer`).
+            let without_log = job.log.is_none();
+            let timer = checkpoint_timer::CheckpointTimer::arm(triggers, job, shared);
+            // No WAL group to cross: the first commit with changes starts the
+            // interval, or the arming does when one came after the file's
+            // last checkpoint (one read at arming, never on the commit path).
+            if without_log && triggers.interval.is_some() {
+                #[cfg(feature = "testing-statement-injection")]
+                grafeo_common::testing::commit_hook::run_before_first_commit_arming();
+                let changed = self
+                    .transaction_manager
+                    .arm_first_commit_hook(timer.starter());
+                #[cfg(feature = "testing-statement-injection")]
+                grafeo_common::testing::commit_hook::run_after_first_commit_arming();
+                if changed {
+                    timer.start();
+                }
+            }
+            *running = Some(timer);
         }
     }
 
-    /// Stops the periodic checkpoint timer, if one is running.
-    #[cfg(feature = "grafeo-file")]
-    fn stop_checkpoint_timer(&self) {
-        let running = self.checkpoint_timer.lock().take();
-        if let Some(mut timer) = running {
-            timer.stop();
+    /// What the checkpoint thread did since the database opened: the times
+    /// it woke and the checkpoints it ran. For tests only.
+    #[cfg(all(feature = "grafeo-file", feature = "testing-crash-injection"))]
+    #[must_use]
+    pub fn checkpoint_thread_counts(&self) -> crate::admin::CheckpointThreadCounts {
+        self.checkpoint_counts.snapshot()
+    }
+
+    /// Holds the checkpoint thread after its next checkpoint, before it arms
+    /// the WAL mark that wakes it again, until the returned hold is dropped:
+    /// no commit wakes it meanwhile. For tests only.
+    #[cfg(all(feature = "grafeo-file", feature = "testing-crash-injection"))]
+    pub fn hold_checkpoint_rearm(&self) -> crate::admin::CheckpointRearmHold {
+        self.checkpoint_rearm_gate.hold();
+        crate::admin::CheckpointRearmHold {
+            gate: Arc::clone(&self.checkpoint_rearm_gate),
         }
     }
 
@@ -3461,10 +3651,18 @@ impl GrafeoDB {
     ///
     /// # Errors
     ///
-    /// Returns an error if no full backup exists; `GRAFEO-S005`
+    /// Returns an invalid-input error when the backup directory holds no full
+    /// backup yet; `GRAFEO-S005`
     /// ([`ErrorCode::BackupChainBroken`](grafeo_common::utils::error::ErrorCode::BackupChainBroken))
-    /// when the log the chain continues from was removed, which a new full
-    /// backup fixes; the database-closed error after `close()`; the
+    /// when the chain cannot continue, which a new full backup fixes, its
+    /// message naming the cause: the database has no backup cursor (none was
+    /// written, or [`release_backup_cursor`](Self::release_backup_cursor)
+    /// released it), the cursor is of the WAL format before 0.6.0, the chain
+    /// ends before the cursor, the WAL from the cursor on passed the
+    /// [retention limit](crate::Config::with_wal_retention_limit) and was
+    /// removed, the segment where the last backup ended was removed from
+    /// outside, or the WAL has a gap; the database-closed error after
+    /// `close()`; the
     /// unsupported error on a database on a backend of its own
     /// ([`with_store`](Self::with_store)), which has no full backup to
     /// follow.
@@ -3485,7 +3683,7 @@ impl GrafeoDB {
 
         let _destination = backup::lock_backup_directory(backup_dir, false)?;
         let current_epoch = self.transaction_manager.current_epoch();
-        backup::do_backup_incremental(backup_dir, wal, current_epoch)
+        backup::do_backup_incremental(backup_dir, wal, &self.wal_retention, current_epoch)
     }
 
     /// Waits for the previous backup before capturing any backup state.
@@ -3516,6 +3714,32 @@ impl GrafeoDB {
         self.wal
             .as_ref()
             .and_then(|wal| backup::read_backup_cursor(wal.dir()).ok().flatten())
+    }
+
+    /// Releases the backup cursor: the next backup must be a full one.
+    ///
+    /// After a full backup, every checkpoint keeps the WAL from where the
+    /// last backup ended, so the next incremental backup can copy it (up to
+    /// the [retention limit](crate::Config::with_wal_retention_limit)).
+    /// When you stop taking incremental backups, release the cursor, and
+    /// checkpoints keep only the WAL a reopen needs. An incremental backup
+    /// after the release fails with `GRAFEO-S005`
+    /// ([`ErrorCode::BackupChainBroken`](grafeo_common::utils::error::ErrorCode::BackupChainBroken)),
+    /// and a full backup starts a new chain. Returns whether there was a
+    /// cursor to release.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the cursor cannot be removed, and the
+    /// database-closed error after `close()`.
+    #[cfg(all(feature = "wal", feature = "grafeo-file"))]
+    pub fn release_backup_cursor(&self) -> Result<bool> {
+        let _open = self.hold_open()?;
+        let _backup = self.hold_backup();
+        match self.wal.as_ref() {
+            Some(wal) => backup::remove_backup_cursor(wal.dir()),
+            None => Ok(false),
+        }
     }
 
     /// Restores a database from a backup chain to a specific epoch.
@@ -3676,6 +3900,61 @@ fn wal_directories_are_no_longer_created(path: &std::path::Path) -> Error {
     ))
 }
 
+/// The WAL as the checkpoint thread's size trigger watches it.
+#[cfg(feature = "wal")]
+struct WalWatch {
+    wal: Arc<grafeo_storage::wal::Wal>,
+    file_manager: Arc<GrafeoFileManager>,
+}
+
+#[cfg(feature = "wal")]
+impl checkpoint_timer::WatchedLog for WalWatch {
+    fn checkpoint_lsn(&self) -> u64 {
+        self.file_manager.active_header().checkpoint_lsn
+    }
+
+    fn end_lsn(&self) -> u64 {
+        self.wal.end_lsn()
+    }
+
+    fn arm_wake(&self, lsn: u64) -> bool {
+        self.wal.arm_wake(lsn)
+    }
+
+    fn set_waker(&self, waker: Option<grafeo_storage::wal::Waker>) {
+        if waker.is_none() {
+            self.wal.disarm_wake();
+        }
+        self.wal.set_waker(waker);
+    }
+}
+
+/// The buffer budget of `config`: its memory limit, or its fraction (or the default share) of
+/// the memory detected now, with the detection when one ran, for the open to warn about.
+fn memory_budget(config: &Config) -> (usize, Option<DetectedMemory>) {
+    if let Some(limit) = config.explicit_memory_limit() {
+        return (limit, None);
+    }
+    let detected = detect_memory();
+    let budget = config.memory_fraction().map_or_else(
+        || detected.default_budget(),
+        |fraction| grafeo_common::memory::system::fraction_of(detected.bytes, fraction),
+    );
+    (budget, Some(detected))
+}
+
+/// Logs, where a build has a log, that the memory budget rests on the fallback figure because
+/// the memory this process may use could not be detected.
+fn warn_of_undetected_memory(budget: usize, detected: Option<DetectedMemory>) {
+    if detected.is_some_and(|detected| detected.source == MemorySource::Fallback) {
+        grafeo_common::grafeo_warn!(
+            "could not detect the memory this process may use: the memory limit is {} MiB, \
+             taken of a 1 GiB fallback; set it with Config::with_memory_limit",
+            budget >> 20
+        );
+    }
+}
+
 /// The error of a configuration [`Config::validate`] refuses: a setting the
 /// caller gave that does not fit is invalid input, and a graph model this
 /// build cannot run is unsupported.
@@ -3705,6 +3984,16 @@ impl Drop for GrafeoDB {
         if let Err(e) = self.close() {
             grafeo_error!("Error closing database: {}", e);
         }
+        // The RDF and CDC consumers hold their stores, whose grants hold the
+        // buffer manager: unregistered here, so the manager, and the spill
+        // directory it removes when it drops, go with the database.
+        #[cfg(feature = "triple-store")]
+        {
+            self.buffer_manager.unregister_consumer("section:RdfStore");
+            self.buffer_manager.unregister_consumer("section:RdfRing");
+        }
+        #[cfg(feature = "cdc")]
+        self.buffer_manager.unregister_consumer("cdc_log");
     }
 }
 
@@ -3739,6 +4028,7 @@ impl crate::admin::AdminService for GrafeoDB {
 // =========================================================================
 
 pub use crate::query::profile::{OperatorProfile, QueryProfile};
+pub use grafeo_common::utils::warning::{QueryWarning, WarningKind};
 pub use grafeo_core::execution::operators::WriteCounters;
 
 /// What a [`QueryResult`] holds.
@@ -3821,6 +4111,16 @@ pub struct QueryResult {
     pub profile: Option<QueryProfile>,
     /// What the result holds: rows, a SPARQL ASK boolean, or a SPARQL graph.
     pub kind: ResultKind,
+    /// The warnings the statement raised, each once, ordered by code: a
+    /// deprecated form it wrote or ran, or a notice (GQLSTATUS class `01`).
+    /// Empty when it raised none, and for a statement that failed, which
+    /// returns its error only.
+    ///
+    /// # Stability: Experimental
+    ///
+    /// New in 0.6.2: new warnings and kinds may be added in any release,
+    /// with a CHANGELOG entry. See <https://grafeo.dev/stability/>.
+    pub warnings: Vec<QueryWarning>,
 }
 
 impl QueryResult {
@@ -3874,6 +4174,7 @@ impl QueryResult {
             counters: Default::default(),
             profile: None,
             kind: ResultKind::Rows,
+            warnings: Vec::new(),
         }
     }
 
@@ -3892,6 +4193,7 @@ impl QueryResult {
             counters: Default::default(),
             profile: None,
             kind: ResultKind::Rows,
+            warnings: Vec::new(),
         }
     }
 
@@ -3915,6 +4217,7 @@ impl QueryResult {
             counters: Default::default(),
             profile: None,
             kind: ResultKind::Rows,
+            warnings: Vec::new(),
         })
     }
 
@@ -3940,6 +4243,7 @@ impl QueryResult {
             counters: Default::default(),
             profile: None,
             kind: ResultKind::Rows,
+            warnings: Vec::new(),
         })
     }
 
@@ -3966,6 +4270,7 @@ impl QueryResult {
             counters: Default::default(),
             profile: None,
             kind: ResultKind::Rows,
+            warnings: Vec::new(),
         })
     }
 
@@ -4041,6 +4346,28 @@ impl QueryResult {
             ));
         }
         T::from_value(&self.rows[0][0])
+    }
+
+    /// The warnings the statement raised (see [`warnings`](Self::warnings)).
+    ///
+    /// # Stability: Experimental
+    ///
+    /// New in 0.6.2. See <https://grafeo.dev/stability/>.
+    #[must_use]
+    pub fn warnings(&self) -> &[QueryWarning] {
+        &self.warnings
+    }
+
+    /// Returns the result with the statement's `warnings`, each once,
+    /// ordered by code.
+    #[cfg(any(lpg_language, rdf_language))]
+    #[must_use]
+    pub(crate) fn with_warnings(
+        mut self,
+        warnings: grafeo_common::utils::warning::WarningSet,
+    ) -> Self {
+        self.warnings = warnings.to_query_warnings();
+        self
     }
 
     /// Returns a slice of all result rows.

@@ -49,6 +49,7 @@ def test_a_csv_without_headers_numbers_its_columns(tmp_path):
     ]
 
 
+@pytest.mark.requires("jsonl-import")
 def test_jsonl_keys_of_later_lines_keep_their_types(tmp_path):
     path = write(tmp_path, "events.jsonl", '{"id": 1}\n{"id": 2, "geo.lat": 52.5, "tags": ["x"]}\n')
     db = grafeo.GrafeoDB()

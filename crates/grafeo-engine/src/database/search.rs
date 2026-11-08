@@ -158,7 +158,7 @@ impl super::GrafeoDB {
             allowed: allowlist.as_ref(),
         };
         store
-            .vector_index_search_at(label, property, query, search, view)
+            .vector_index_search_at(label, property, query, search, view)?
             .ok_or_else(|| no_vector_index(label, property))
     }
 
@@ -207,7 +207,7 @@ impl super::GrafeoDB {
             allowed: allowlist.as_ref(),
         };
         store
-            .vector_index_batch_search_at(label, property, queries, search, view)
+            .vector_index_batch_search_at(label, property, queries, search, view)?
             .ok_or_else(|| no_vector_index(label, property))
     }
 
@@ -272,7 +272,7 @@ impl super::GrafeoDB {
             allowed: allowlist.as_ref(),
         };
         let initial_results = store
-            .vector_index_search_at(label, property, query, search, view)
+            .vector_index_search_at(label, property, query, search, view)?
             .ok_or_else(|| no_vector_index(label, property))?;
 
         if initial_results.is_empty() {
@@ -337,7 +337,7 @@ impl super::GrafeoDB {
             allowed: allowlist.as_ref(),
         };
         store
-            .text_index_search_at(label, property, query, search, view)
+            .text_index_search_at(label, property, query, search, view)?
             .ok_or_else(|| {
                 Error::InvalidValue(format!(
                     "there is no text index on :{label}({property}); create one first"
@@ -441,7 +441,7 @@ impl super::GrafeoDB {
 
         // Text search
         if let Some(text_results) =
-            store.text_index_search_at(label, text_property, query_text, search, view)
+            store.text_index_search_at(label, text_property, query_text, search, view)?
             && !text_results.is_empty()
         {
             sources.push(text_results);
@@ -451,7 +451,7 @@ impl super::GrafeoDB {
         if let Some(query_vec) = query_vector
             && vector_config.is_some()
             && let Some(vector_results) =
-                store.vector_index_search_at(label, vector_property, query_vec, search, view)
+                store.vector_index_search_at(label, vector_property, query_vec, search, view)?
             && !vector_results.is_empty()
         {
             // Negate distances so that "closer = higher score", matching

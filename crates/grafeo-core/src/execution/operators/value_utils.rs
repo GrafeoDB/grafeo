@@ -6,7 +6,7 @@
 use std::cmp::Ordering;
 use std::collections::HashMap;
 
-use grafeo_common::types::{Decimal, TemporalComparison, Value};
+use grafeo_common::types::{TemporalComparison, Value};
 
 use super::sort::{NullOrder, SortDirection};
 
@@ -24,34 +24,11 @@ pub fn value_to_f64(value: &Value) -> Option<f64> {
     }
 }
 
-/// The order of two values when at least one is a decimal, by
-/// [`Value::compare_decimal`]. A string meeting a decimal compares as the
-/// number it reads as, as it does against an integer or a float (RDF stores
-/// numeric literals as strings): decimal text exactly, other number text
-/// (`'1e3'`) as its float.
-pub fn compare_with_decimal(a: &Value, b: &Value) -> Option<Ordering> {
-    let number = |text: &str| {
-        Decimal::parse(text).map(Value::Decimal).ok().or_else(|| {
-            text.parse::<f64>()
-                .ok()
-                .filter(|float| !float.is_nan())
-                .map(Value::Float64)
-        })
-    };
-    match (a, b) {
-        (Value::String(text), Value::Decimal(_)) => number(text)?.compare_decimal(b),
-        (Value::Decimal(_), Value::String(text)) => a.compare_decimal(&number(text)?),
-        _ => a.compare_decimal(b),
-    }
-}
-
-/// Compares two values with partial ordering (returns `None` for incomparable types).
-///
-/// Handles cross-type comparisons between Int64/Float64/String, including
-/// RDF numeric strings that need parsing before comparison.
+/// Compares two values with partial ordering (returns `None` for incomparable types): numbers by
+/// value, a decimal among them (see [`Value::compare_decimal`]).
 pub fn compare_values(a: &Value, b: &Value) -> Option<Ordering> {
     match (a, b) {
-        (Value::Decimal(_), _) | (_, Value::Decimal(_)) => compare_with_decimal(a, b),
+        (Value::Decimal(_), _) | (_, Value::Decimal(_)) => a.compare_decimal(b),
         (Value::Int64(a), Value::Int64(b)) => Some(a.cmp(b)),
         (Value::Float64(a), Value::Float64(b)) => a.partial_cmp(b),
         (Value::String(a), Value::String(b)) => {
@@ -66,13 +43,6 @@ pub fn compare_values(a: &Value, b: &Value) -> Option<Ordering> {
         (Value::Int64(a), Value::Float64(b)) => partial_cmp_int_float(*a, *b),
         (Value::Float64(a), Value::Int64(b)) => {
             partial_cmp_int_float(*b, *a).map(Ordering::reverse)
-        }
-        // String-to-numeric comparisons for RDF
-        (Value::String(s), Value::Int64(i)) => partial_cmp_text_int(s, *i),
-        (Value::String(s), Value::Float64(f)) => partial_cmp_text_float(s, *f),
-        (Value::Int64(i), Value::String(s)) => partial_cmp_text_int(s, *i).map(Ordering::reverse),
-        (Value::Float64(f), Value::String(s)) => {
-            partial_cmp_text_float(s, *f).map(Ordering::reverse)
         }
         (Value::Timestamp(a), Value::Timestamp(b)) => Some(a.cmp(b)),
         (Value::Date(a), Value::Date(b)) => Some(a.cmp(b)),
@@ -106,6 +76,9 @@ pub fn compare_values_total(a: &Value, b: &Value) -> Ordering {
     if by_type.is_ne() {
         return by_type;
     }
+    if let Some((a, b)) = sequences(a, b) {
+        return compare_sequences(a, b);
+    }
     match (a, b) {
         (Value::Bool(a), Value::Bool(b)) => a.cmp(b),
         // A decimal among the numbers; NaN after every decimal.
@@ -127,20 +100,6 @@ pub fn compare_values_total(a: &Value, b: &Value) -> Ordering {
         (Value::Duration(a), Value::Duration(b)) => {
             (a.months(), a.days(), a.nanos()).cmp(&(b.months(), b.days(), b.nanos()))
         }
-        (Value::List(a), Value::List(b)) => compare_sequences(a.iter(), b.iter()),
-        (
-            Value::Path {
-                nodes: a_nodes,
-                edges: a_edges,
-            },
-            Value::Path {
-                nodes: b_nodes,
-                edges: b_edges,
-            },
-        ) => compare_sequences(
-            path_elements(a_nodes, a_edges),
-            path_elements(b_nodes, b_edges),
-        ),
         (Value::Map(a), Value::Map(b)) => a
             .len()
             .cmp(&b.len())
@@ -162,6 +121,183 @@ pub fn compare_values_total(a: &Value, b: &Value) -> Ordering {
     }
 }
 
+/// Whether `a` and `b` are of two kinds, which `=` keeps apart and `<` orders by each
+/// language's rule: numbers are one kind, and a zoned and a local datetime or time are one too,
+/// compared as the statement's temporal mode reads them. A null is of no kind.
+#[must_use]
+pub fn of_two_kinds(a: &Value, b: &Value) -> bool {
+    match (kind_of(a), kind_of(b)) {
+        (Some(a), Some(b)) => a != b,
+        _ => false,
+    }
+}
+
+/// The kind of `value` that `=` keeps apart from the others (see [`of_two_kinds`]): its type's
+/// place in the order across types, a zoned and a local datetime one kind, and a zoned and a local
+/// time one; `None` for a null.
+fn kind_of(value: &Value) -> Option<u8> {
+    match type_rank(value) {
+        NULL_RANK => None,
+        LOCAL_DATETIME_RANK => Some(ZONED_DATETIME_RANK),
+        LOCAL_TIME_RANK => Some(ZONED_TIME_RANK),
+        rank => Some(rank),
+    }
+}
+
+/// A set of the kinds `=` keeps apart (see [`of_two_kinds`]), small enough to keep in one word: a
+/// structure that answers equalities keeps the kinds it has held, so a statement whose `=` raises
+/// across kinds reads it only when the probe's kind is the only one there.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ValueKinds(u32);
+
+impl ValueKinds {
+    /// Numbers: integers, floats and decimals, one kind.
+    pub const NUMBERS: Self = Self(1 << NUMBER_RANK);
+    /// Strings.
+    pub const STRINGS: Self = Self(1 << STRING_RANK);
+
+    /// The kind of `value`; no kind for a null.
+    #[must_use]
+    pub fn of(value: &Value) -> Self {
+        kind_of(value).map_or(Self(0), |kind| Self(1 << kind))
+    }
+
+    /// The kinds of both.
+    #[must_use]
+    pub const fn union(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+
+    /// Whether it holds exactly one kind.
+    #[must_use]
+    pub const fn is_one(self) -> bool {
+        self.0.is_power_of_two()
+    }
+
+    /// Whether it holds no kind but those of `other`.
+    #[must_use]
+    pub const fn within(self, other: Self) -> bool {
+        self.0 & !other.0 == 0
+    }
+
+    /// Its bits, which [`from_bits`](Self::from_bits) reads back: a set kept in an atomic word.
+    #[must_use]
+    pub const fn bits(self) -> u32 {
+        self.0
+    }
+
+    /// The set of [`bits`](Self::bits).
+    #[must_use]
+    pub const fn from_bits(bits: u32) -> Self {
+        Self(bits)
+    }
+}
+
+/// What `=` gives two values of two kinds (see [`of_two_kinds`]): a comparison rule, which each
+/// statement's language picks, as [`AcrossKinds`] is `<`'s.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum EqualAcrossKinds {
+    /// False (ISO GQL, openCypher).
+    #[default]
+    False,
+    /// The error values not comparable (22G04): SQL's comparands must be comparable (SQL/PGQ,
+    /// ISO/IEC 9075-2 8.2 Syntax Rule 3). An answer must not depend on the plan, so a structure
+    /// answers such an equality only when it holds no value of another kind than the probe's.
+    Raises,
+}
+
+/// How `<` orders two values of two kinds (see [`of_two_kinds`]): a comparison rule, which each
+/// statement's language picks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AcrossKinds {
+    /// By the order across kinds that ORDER BY, `min` and `max` use (ISO GQL).
+    Ordered,
+    /// Not at all: the comparison is unknown (openCypher).
+    Apart,
+}
+
+/// The order of two values of two kinds (see [`of_two_kinds`]) by `across`; `None`: unordered,
+/// and for two values of one kind, which their kind's own order compares.
+#[must_use]
+pub fn order_beyond_kind(a: &Value, b: &Value, across: AcrossKinds) -> Option<Ordering> {
+    match across {
+        AcrossKinds::Ordered if of_two_kinds(a, b) => Some(compare_values_total(a, b)),
+        _ => None,
+    }
+}
+
+/// Where a walk of two sequences ends (see [`walk_elements`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Walk<R> {
+    /// At a pair of elements that are not the same, with the answer the walk's caller gave it.
+    Decided(R),
+    /// Past the end of one: no pair differed, so the lengths decide, a prefix the lesser.
+    Lengths(Ordering),
+}
+
+/// Walks two sequences element by element to the first pair `decide` answers (`Some`; `None`
+/// passes a pair as the same), or else to the end of the shorter: the one walk by which `<`,
+/// `<=`, `>`, `>=` and ORDER BY compare two lists, and two paths (ISO/IEC 39075 19.3 General Rule
+/// 2 b iv: a path compares as its list of elements), so they cannot disagree.
+pub fn walk_elements<'a, R>(
+    a: impl IntoIterator<Item = &'a Value>,
+    b: impl IntoIterator<Item = &'a Value>,
+    mut decide: impl FnMut(&'a Value, &'a Value) -> Option<R>,
+) -> Walk<R> {
+    let mut b = b.into_iter();
+    for x in a {
+        let Some(y) = b.next() else {
+            return Walk::Lengths(Ordering::Greater);
+        };
+        if let Some(answer) = decide(x, y) {
+            return Walk::Decided(answer);
+        }
+    }
+    Walk::Lengths(if b.next().is_some() {
+        Ordering::Less
+    } else {
+        Ordering::Equal
+    })
+}
+
+/// The elements of two lists, or of two paths (their nodes and edges alternating from the first
+/// node), which [`walk_elements`] walks; `None` for any other pair.
+#[must_use]
+pub fn sequences<'a>(
+    a: &'a Value,
+    b: &'a Value,
+) -> Option<(
+    impl Iterator<Item = &'a Value> + use<'a>,
+    impl Iterator<Item = &'a Value> + use<'a>,
+)> {
+    match (a, b) {
+        (Value::List(a), Value::List(b)) => Some((path_elements(a, &[]), path_elements(b, &[]))),
+        (
+            Value::Path {
+                nodes: a_nodes,
+                edges: a_edges,
+            },
+            Value::Path {
+                nodes: b_nodes,
+                edges: b_edges,
+            },
+        ) => Some((
+            path_elements(a_nodes, a_edges),
+            path_elements(b_nodes, b_edges),
+        )),
+        _ => None,
+    }
+}
+
+/// The places in the order across types that [`kind_of`] names.
+const ZONED_DATETIME_RANK: u8 = 4;
+const LOCAL_DATETIME_RANK: u8 = 5;
+const ZONED_TIME_RANK: u8 = 7;
+const LOCAL_TIME_RANK: u8 = 8;
+const STRING_RANK: u8 = 11;
+const NUMBER_RANK: u8 = 15;
+const NULL_RANK: u8 = 16;
+
 /// The position of a value's type in the order across types.
 fn type_rank(value: &Value) -> u8 {
     match value {
@@ -169,18 +305,18 @@ fn type_rank(value: &Value) -> u8 {
         Value::List(_) => 1,
         Value::Path { .. } => 2,
         Value::Vector(_) => 3,
-        Value::ZonedDatetime(_) => 4,
-        Value::Timestamp(_) => 5,
+        Value::ZonedDatetime(_) => ZONED_DATETIME_RANK,
+        Value::Timestamp(_) => LOCAL_DATETIME_RANK,
         Value::Date(_) => 6,
-        Value::Time(time) if time.offset_seconds().is_some() => 7,
-        Value::Time(_) => 8,
+        Value::Time(time) if time.offset_seconds().is_some() => ZONED_TIME_RANK,
+        Value::Time(_) => LOCAL_TIME_RANK,
         Value::Duration(_) => 9,
         Value::Bytes(_) => 10,
-        Value::String(_) => 11,
+        Value::String(_) => STRING_RANK,
         Value::Bool(_) => 12,
         Value::GCounter(_) | Value::OnCounter { .. } => 13,
-        Value::Int64(_) | Value::Float64(_) | Value::Decimal(_) => 15,
-        Value::Null => 16,
+        Value::Int64(_) | Value::Float64(_) | Value::Decimal(_) => NUMBER_RANK,
+        Value::Null => NULL_RANK,
         // RDF terms: SPARQL results order them among themselves; next to other
         // types they take the place openCypher leaves for types it does not define.
         Value::RdfTerm(_) => 14,
@@ -228,60 +364,110 @@ pub fn int_equals_float(int: i64, float: f64) -> bool {
     compare_int_float(int, float).is_eq()
 }
 
-/// How `=` reads text against a number, the one place for its order: integer
-/// text exactly as that integer, by `integer`; other number text as the float
-/// it parses as, by `float`, and `None` when no float is compared, so such text
-/// equals nothing and is not parsed as one.
+/// The query's `=` of two values, with `temporal` as the statement reads a
+/// zoned against a local datetime or time (ISO/IEC 39075 19.3 General Rule 2):
+/// `Some(true)`, `Some(false)`, or `None` for Unknown. A null operand is
+/// Unknown. Two lists, maps or paths are False when their lengths or field
+/// names differ, else False when a pair of items is, else Unknown when a pair
+/// is, else True: `[null] = [null]` and `[1] = [null]` are Unknown,
+/// `[1, 2] = [null, 3]` is False. Other values compare by [`values_equal`].
 #[must_use]
-pub fn text_reads_as_number(
-    text: &str,
-    integer: impl FnOnce(i64) -> bool,
-    float: Option<impl FnOnce(f64) -> bool>,
-) -> bool {
-    match text.parse::<i64>() {
-        Ok(value) => integer(value),
-        Err(_) => float.is_some_and(|float| text.parse::<f64>().is_ok_and(float)),
+pub fn equals(left: &Value, right: &Value, temporal: TemporalComparison) -> Option<bool> {
+    let all = |pairs: &mut dyn Iterator<Item = (&Value, &Value)>| {
+        let mut unknown = false;
+        for (left, right) in pairs {
+            match equals(left, right, temporal) {
+                Some(false) => return Some(false),
+                None => unknown = true,
+                Some(true) => {}
+            }
+        }
+        (!unknown).then_some(true)
+    };
+    match (left, right) {
+        (Value::Null, _) | (_, Value::Null) => None,
+        (Value::List(a), Value::List(b)) => {
+            if a.len() == b.len() {
+                all(&mut a.iter().zip(b.iter()))
+            } else {
+                Some(false)
+            }
+        }
+        (Value::Map(a), Value::Map(b)) => {
+            if a.len() == b.len() && a.keys().zip(b.keys()).all(|(x, y)| x == y) {
+                all(&mut a.values().zip(b.values()))
+            } else {
+                Some(false)
+            }
+        }
+        (
+            Value::Path {
+                nodes: n1,
+                edges: e1,
+            },
+            Value::Path {
+                nodes: n2,
+                edges: e2,
+            },
+        ) => {
+            if n1.len() == n2.len() && e1.len() == e2.len() {
+                all(&mut n1.iter().zip(n2.iter()).chain(e1.iter().zip(e2.iter())))
+            } else {
+                Some(false)
+            }
+        }
+        _ => Some(values_equal(left, right, temporal)),
     }
 }
 
-/// Whether `=` finds a numeric string equal to a float (RDF stores numeric
-/// literals as strings): integer text exactly as that integer, so
-/// `'9007199254740993'` does not equal the float `2^53`; other number text
-/// as the float it parses as.
+/// Whether `value` is a null or holds one at any depth: `=` is never True for
+/// it, so a join, `IN` and an index lookup find nothing for it.
 #[must_use]
-pub fn text_equals_float(text: &str, float: f64) -> bool {
-    text_reads_as_number(
-        text,
-        |integer| int_equals_float(integer, float),
-        Some(|number| number == float),
-    )
+pub fn holds_null(value: &Value) -> bool {
+    match value {
+        Value::Null => true,
+        Value::List(items) => items.iter().any(holds_null),
+        Value::Map(map) => map.values().any(holds_null),
+        Value::Path { nodes, edges } => nodes.iter().chain(edges.iter()).any(holds_null),
+        _ => false,
+    }
 }
 
-/// Whether the query's `=` finds two values equal, with `temporal` as the
-/// statement reads a zoned against a local datetime or time. `=` gives
-/// UNKNOWN for a null operand before it gets here; here NULL equals NULL,
-/// as inside a list or map and for DISTINCT and GROUP BY.
+/// Whether `value` is a NaN or holds one at any depth, a vector's item too: `=` finds a NaN
+/// equal to nothing, so an index lookup finds at most the same bits, where the grouping form
+/// (UNIQUE, NODE KEY, `GROUP BY`) takes every NaN, of either sign and any payload, as one.
+#[must_use]
+pub fn holds_nan(value: &Value) -> bool {
+    match value {
+        Value::Float64(float) => float.is_nan(),
+        Value::Vector(items) => items.iter().any(|item| item.is_nan()),
+        Value::List(items) => items.iter().any(holds_nan),
+        Value::Map(map) => map.values().any(holds_nan),
+        Value::Path { nodes, edges } => nodes.iter().chain(edges.iter()).any(holds_nan),
+        _ => false,
+    }
+}
+
+/// Whether two values are equal with nulls not distinct, at the top and
+/// inside a list or map: the leaf of [`equals`], which decides Unknown above
+/// it, with `temporal` as there.
 ///
-/// Numbers compare by value (`5 = 5.0`, a decimal too). A string meets a
-/// number as the number it reads as, as RDF stores numeric literals as
-/// strings: against an integer only integer text (`'05' = 5` and
-/// `'+5' = 5`, but `'5.0' = 5` is false), against a float any number text
-/// (`'5.0' = 5.0`). Two strings, and the other values, compare as
-/// themselves; lists, maps and paths element by element.
+/// Numbers compare by value (`5 = 5.0`, a decimal too). Two values of
+/// different kinds are never equal (ISO/IEC 39075 19.3, and openCypher): a
+/// string is not the number it spells (`'5' = 5` is false). Two strings, and
+/// the other values, compare as themselves; lists, maps and paths element by
+/// element.
 ///
-/// Two places restate these rules without building a comparison per value, and
-/// must change with them: `MaybeEqual`'s probes (`graph/rowgroup/index/property.rs`),
-/// the values an index or a column read may find equal, and
-/// `Targets::text_equals_a_number` (`graph/rowgroup/key_column.rs`), a string
-/// against number keys. The test `text_against_number_keys_answers_as_values_equal`
-/// in `key_column.rs` holds the second to this function.
+/// `MaybeEqual`'s probes (`graph/rowgroup/index/property.rs`), the values an
+/// index or a column read may find equal, restate these rules without building
+/// a comparison per value, and must change with them.
 #[must_use]
 pub fn values_equal(left: &Value, right: &Value, temporal: TemporalComparison) -> bool {
     let equal = |left: &Value, right: &Value| values_equal(left, right, temporal);
     match (left, right) {
         (Value::Null, Value::Null) => true,
         (Value::Decimal(_), _) | (_, Value::Decimal(_)) => {
-            compare_with_decimal(left, right) == Some(Ordering::Equal)
+            left.compare_decimal(right) == Some(Ordering::Equal)
         }
         (Value::Bool(a), Value::Bool(b)) => a == b,
         (Value::Int64(a), Value::Int64(b)) => a == b,
@@ -290,13 +476,6 @@ pub fn values_equal(left: &Value, right: &Value, temporal: TemporalComparison) -
         (Value::String(a), Value::String(b)) => a == b,
         (Value::Int64(a), Value::Float64(b)) | (Value::Float64(b), Value::Int64(a)) => {
             int_equals_float(*a, *b)
-        }
-        // RDF stores numeric literals as strings; allow cross-type equality
-        (Value::String(s), Value::Int64(i)) | (Value::Int64(i), Value::String(s)) => {
-            s.parse::<i64>().is_ok_and(|n| n == *i)
-        }
-        (Value::String(s), Value::Float64(f)) | (Value::Float64(f), Value::String(s)) => {
-            text_equals_float(s, *f)
         }
         (Value::List(a), Value::List(b)) => {
             a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| equal(x, y))
@@ -344,26 +523,6 @@ pub fn partial_cmp_int_float(int: i64, float: f64) -> Option<Ordering> {
     (!float.is_nan()).then(|| compare_int_float(int, float))
 }
 
-/// The order of a numeric string and an integer (RDF stores numeric literals
-/// as strings): integer text exactly, other number text as its float.
-#[must_use]
-pub fn partial_cmp_text_int(text: &str, int: i64) -> Option<Ordering> {
-    match text.parse::<i64>() {
-        Ok(number) => Some(number.cmp(&int)),
-        Err(_) => partial_cmp_int_float(int, text.parse::<f64>().ok()?).map(Ordering::reverse),
-    }
-}
-
-/// The order of a numeric string and a float: integer text exactly, other
-/// number text as its float.
-#[must_use]
-pub fn partial_cmp_text_float(text: &str, float: f64) -> Option<Ordering> {
-    match text.parse::<i64>() {
-        Ok(number) => partial_cmp_int_float(number, float),
-        Err(_) => text.parse::<f64>().ok()?.partial_cmp(&float),
-    }
-}
-
 /// Compares an integer with a float exactly. Converting the integer to a
 /// float rounds above 2^53, which would make `2^53 + 1` equal to the float
 /// `2^53` while the integers `2^53` and `2^53 + 1` differ. NaN is after every
@@ -388,29 +547,20 @@ fn compare_int_float(int: i64, float: f64) -> Ordering {
         .then_with(|| whole.partial_cmp(&float).unwrap_or(Ordering::Equal))
 }
 
-/// Compares two sequences element by element; a prefix comes first.
+/// Compares two sequences element by element in the total order; a prefix comes first.
 fn compare_sequences<'a>(
     a: impl IntoIterator<Item = &'a Value>,
     b: impl IntoIterator<Item = &'a Value>,
 ) -> Ordering {
-    let mut b = b.into_iter();
-    for x in a {
-        let Some(y) = b.next() else {
-            return Ordering::Greater;
-        };
+    match walk_elements(a, b, |x, y| {
         let order = compare_values_total(x, y);
-        if order.is_ne() {
-            return order;
-        }
-    }
-    if b.next().is_some() {
-        Ordering::Less
-    } else {
-        Ordering::Equal
+        order.is_ne().then_some(order)
+    }) {
+        Walk::Decided(order) | Walk::Lengths(order) => order,
     }
 }
 
-/// The nodes and edges of a path, alternating from its first node.
+/// The nodes and edges of a path, alternating from its first node; a list's items with no edges.
 fn path_elements<'a>(nodes: &'a [Value], edges: &'a [Value]) -> impl Iterator<Item = &'a Value> {
     nodes
         .iter()

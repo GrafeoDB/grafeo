@@ -24,6 +24,7 @@ except ImportError:
     NETWORKX_AVAILABLE = False
 
 
+@pytest.mark.requires("algos")
 class BaseNetworkXComparisonTest(ABC):
     """Abstract base class for NetworkX comparison tests.
 
@@ -254,6 +255,7 @@ class BaseNetworkXComparisonTest(ABC):
             )
 
 
+@pytest.mark.requires("algos")
 class BaseNetworkXBenchmarkTest(ABC):
     """Abstract base class for NetworkX vs Grafeo performance comparison.
 

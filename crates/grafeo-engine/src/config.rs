@@ -220,6 +220,44 @@ pub enum HistoryRetention {
     Forever,
 }
 
+/// The cap of everything one open spills to disk at once: sorts' runs,
+/// aggregates' partitions and vector indexes' embedding columns together.
+///
+/// A spill past it is refused with `GRAFEO-S001`, naming the spill limit. Per
+/// open, never stored in the database file. Whatever the cap, a spill that
+/// would leave less free space on the spill volume than the database needs
+/// for its next checkpoint is refused too. An open without a spill directory
+/// (in memory without [`Config::with_spill_path`], or encrypted) spills
+/// nothing, and the setting does nothing there.
+///
+/// # Examples
+///
+/// ```
+/// use grafeo_engine::{Config, SpillLimit};
+///
+/// assert_eq!(Config::in_memory().spill_limit(), SpillLimit::Default);
+/// assert_eq!(
+///     Config::in_memory().with_spill_limit(1 << 30).spill_limit(),
+///     SpillLimit::Bytes(1 << 30)
+/// );
+/// assert_eq!(
+///     Config::in_memory().with_unlimited_spill().spill_limit(),
+///     SpillLimit::Unlimited
+/// );
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum SpillLimit {
+    /// Half the spill volume's free space when the database opens; the
+    /// memory limit when that cannot be read (with a warning).
+    #[default]
+    Default,
+    /// At most this many bytes (0: nothing spills).
+    Bytes(u64),
+    /// No cap: the room for the next checkpoint alone bounds.
+    Unlimited,
+}
+
 /// WAL durability mode controlling the trade-off between safety and speed.
 ///
 /// This enum lives in config so that `Config` can always carry the desired
@@ -324,6 +362,8 @@ impl Default for DurabilityMode {
 pub enum ConfigError {
     /// Memory limit must be greater than zero.
     ZeroMemoryLimit,
+    /// [`Config::with_query_memory_limit`] must be greater than zero.
+    ZeroQueryMemoryLimit,
     /// Thread count must be greater than zero.
     ZeroThreads,
     /// `DurabilityMode::Adaptive` needs an interval greater than zero.
@@ -345,13 +385,31 @@ pub enum ConfigError {
     /// [`TierOverride::ForceDisk`](grafeo_common::storage::TierOverride::ForceDisk)
     /// that cannot be moved to disk: the override would have no effect.
     ForceDiskOnUnspillableSection(grafeo_common::storage::SectionType),
+    /// `wal_segment_size` is outside [`MIN_WAL_SEGMENT_SIZE`] to
+    /// [`MAX_WAL_SEGMENT_SIZE`]; holds the size given.
+    WalSegmentSizeOutOfBounds(u64),
+    /// `checkpoint_wal_size` is below [`MIN_CHECKPOINT_WAL_SIZE`]: a smaller
+    /// one would checkpoint after nearly every commit. Holds the size given.
+    CheckpointWalSizeTooSmall(u64),
+    /// [`Config::with_memory_fraction`] was given an infinite fraction, which
+    /// would make the memory limit unbounded.
+    MemoryFractionNotFinite,
 }
 
-/// Whether a section of `section_type` can be moved to disk: only a section
-/// whose data can be mapped from a file can (the `mmap_able` flag of its
-/// directory entry).
+/// Whether a section of `section_type` can be moved to disk: whether its
+/// memory consumer really spills it, so that a disk tier override does what
+/// it says. Only the vector store does (its embedding columns go to spill
+/// files), in a build with `wal` and `vector-index`, whose consumer writes
+/// them; a mappable section whose consumer cannot spill (the text and
+/// property indexes, the RDF ring, which a spill would copy back onto the
+/// heap) or that has no consumer (the compact store, read only from older
+/// files) cannot.
 pub(crate) fn can_spill(section_type: grafeo_common::storage::SectionType) -> bool {
-    section_type.default_flags().mmap_able
+    cfg!(all(feature = "wal", feature = "vector-index"))
+        && matches!(
+            section_type,
+            grafeo_common::storage::SectionType::VectorStore
+        )
 }
 
 /// The section types that can be moved to disk, in section type order, as
@@ -365,7 +423,7 @@ fn spillable_sections() -> String {
     match names.split_last() {
         Some((last, [])) => last.clone(),
         Some((last, rest)) => format!("{} and {last}", rest.join(", ")),
-        None => String::new(),
+        None => "none in this build".to_string(),
     }
 }
 
@@ -373,6 +431,10 @@ impl fmt::Display for ConfigError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::ZeroMemoryLimit => write!(f, "memory_limit must be greater than zero"),
+            Self::MemoryFractionNotFinite => write!(f, "memory_fraction must be a finite number"),
+            Self::ZeroQueryMemoryLimit => {
+                write!(f, "query_memory_limit must be greater than zero")
+            }
             Self::ZeroThreads => write!(f, "threads must be greater than zero"),
             Self::ZeroAdaptiveFlushInterval => write!(
                 f,
@@ -405,11 +467,72 @@ impl fmt::Display for ConfigError {
                  tier override; the sections that can are {}",
                 spillable_sections()
             ),
+            Self::WalSegmentSizeOutOfBounds(bytes) => write!(
+                f,
+                "wal_segment_size must be between 1 MiB and 1 GiB, and {bytes} bytes is not"
+            ),
+            Self::CheckpointWalSizeTooSmall(0) => write!(
+                f,
+                "checkpoint_wal_size must be at least 1 MiB: zero would checkpoint after every \
+                 commit; turn automatic checkpoints off with \
+                 Config::without_checkpoint_wal_size() instead"
+            ),
+            Self::CheckpointWalSizeTooSmall(bytes) => write!(
+                f,
+                "checkpoint_wal_size must be at least 1 MiB, and {bytes} bytes is not; turn \
+                 automatic checkpoints off with Config::without_checkpoint_wal_size() instead"
+            ),
         }
     }
 }
 
+/// Refuses a `checkpoint_wal_size` below [`MIN_CHECKPOINT_WAL_SIZE`]: the one
+/// check of [`Config::validate`] and of `GrafeoDB::set_checkpoint_triggers`,
+/// so the floor is the same at open and on an open database. `None` (off)
+/// passes.
+///
+/// # Errors
+///
+/// [`ConfigError::CheckpointWalSizeTooSmall`].
+pub(crate) fn check_checkpoint_wal_size(bytes: Option<u64>) -> Result<(), ConfigError> {
+    match bytes {
+        Some(bytes) if bytes < MIN_CHECKPOINT_WAL_SIZE => {
+            Err(ConfigError::CheckpointWalSizeTooSmall(bytes))
+        }
+        _ => Ok(()),
+    }
+}
+
 impl std::error::Error for ConfigError {}
+
+/// How much WAL a checkpoint keeps at most beyond the log it covers for
+/// incremental backups, by default: 1 GiB (see
+/// [`Config::with_wal_retention_limit`]).
+pub const DEFAULT_WAL_RETENTION_LIMIT: u64 = 1 << 30;
+
+/// The WAL size past the last checkpoint at which a file database
+/// checkpoints by itself, by default: 256 MiB, four segments of the default
+/// size (see [`Config::with_checkpoint_wal_size`]).
+pub const DEFAULT_CHECKPOINT_WAL_SIZE: u64 = 256 << 20;
+
+/// The smallest `checkpoint_wal_size`: 1 MiB.
+pub const MIN_CHECKPOINT_WAL_SIZE: u64 = 1 << 20;
+
+/// The size a WAL segment grows to before the log goes on in a new one, by
+/// default: 64 MiB (see [`Config::with_wal_segment_size`]).
+pub const DEFAULT_WAL_SEGMENT_SIZE: u64 = 64 << 20;
+
+/// The smallest `wal_segment_size`: 1 MiB.
+pub const MIN_WAL_SEGMENT_SIZE: u64 = 1 << 20;
+
+/// The largest `wal_segment_size`: 1 GiB.
+pub const MAX_WAL_SEGMENT_SIZE: u64 = 1 << 30;
+
+#[cfg(feature = "wal")]
+const _: () = assert!(
+    DEFAULT_WAL_SEGMENT_SIZE == grafeo_storage::wal::DEFAULT_SEGMENT_BYTES,
+    "the engine's default segment size is the WAL's"
+);
 
 /// Database configuration.
 ///
@@ -726,12 +849,35 @@ pub struct Config {
     /// Checkpoint once the WAL holds this many bytes since the last
     /// checkpoint (see [`Config::with_checkpoint_wal_size`]).
     checkpoint_wal_size: Option<u64>,
+    /// The size a WAL segment grows to (see
+    /// [`Config::with_wal_segment_size`]).
+    wal_segment_size: u64,
+    /// The WAL a checkpoint keeps beyond its log position for a backup at
+    /// most, in bytes (see [`Config::with_wal_retention_limit`]).
+    wal_retention_limit: u64,
     /// How long the database keeps history (see
     /// [`Config::with_history_retention`]).
     history_retention: HistoryRetention,
     /// The settings a builder set: they win over the values a database file
     /// stores (see `GrafeoDB::open`), where a default does not.
     set: SetFields,
+
+    /// The memory limit as a share of the memory detected at open
+    /// ([`with_memory_fraction`](Self::with_memory_fraction)): per open, never stored. Set only
+    /// while `memory_limit` is `None`.
+    memory_fraction: Option<f64>,
+
+    /// `memory_fraction`'s bytes, taken of the memory detected when the database opened, so
+    /// [`memory_limit`](Self::memory_limit) reads the figure the open's budget has.
+    memory_fraction_bytes: Option<usize>,
+
+    /// The cap of what the open spills ([`with_spill_limit`](Self::with_spill_limit),
+    /// [`with_unlimited_spill`](Self::with_unlimited_spill)): per open, never stored.
+    spill_limit: SpillLimit,
+
+    /// The memory one query's operators may hold
+    /// ([`with_query_memory_limit`](Self::with_query_memory_limit)): per open, never stored.
+    query_memory_limit: Option<usize>,
 }
 
 /// The settings of a [`Config`] a database file can store, as a set: a
@@ -752,6 +898,10 @@ impl SetFields {
 
     fn insert(&mut self, field: Self) {
         self.0 |= field.0;
+    }
+
+    fn remove(&mut self, field: Self) {
+        self.0 &= !field.0;
     }
 
     #[cfg(feature = "grafeo-file")]
@@ -866,6 +1016,10 @@ impl Default for Config {
             graph_model: GraphModel::default(),
             path: None,
             memory_limit: None,
+            memory_fraction: None,
+            memory_fraction_bytes: None,
+            spill_limit: SpillLimit::Default,
+            query_memory_limit: None,
             spill_path: None,
             threads: num_cpus::get(),
             wal_enabled: true,
@@ -893,7 +1047,9 @@ impl Default for Config {
             #[cfg(feature = "encryption")]
             encryption: None,
             wal_salvage: false,
-            checkpoint_wal_size: None,
+            checkpoint_wal_size: Some(DEFAULT_CHECKPOINT_WAL_SIZE),
+            wal_segment_size: DEFAULT_WAL_SEGMENT_SIZE,
+            wal_retention_limit: DEFAULT_WAL_RETENTION_LIMIT,
             history_retention: HistoryRetention::Off,
             set: SetFields::default(),
         }
@@ -938,6 +1094,8 @@ impl Config {
     #[must_use]
     pub fn with_memory_limit(mut self, limit: usize) -> Self {
         self.memory_limit = Some(limit);
+        self.memory_fraction = None;
+        self.memory_fraction_bytes = None;
         self.set.insert(SetFields::MEMORY_LIMIT);
         self
     }
@@ -949,7 +1107,7 @@ impl Config {
     #[must_use]
     #[cfg(query_language)]
     pub(crate) fn path_search_budget(&self) -> usize {
-        self.memory_limit.map_or(
+        self.memory_limit().map_or(
             grafeo_core::execution::operators::DEFAULT_PATH_SEARCH_BUDGET,
             |limit| (limit / 4).max(1),
         )
@@ -1039,16 +1197,22 @@ impl Config {
         self
     }
 
-    /// Sets the memory budget as a fraction of system RAM.
+    /// Sets the memory limit to `fraction` of the memory this process may use, detected when
+    /// the database opens ([`detect_memory`](grafeo_common::memory::detect_memory): the smaller
+    /// of the machine's memory and a container's or job's limit).
+    ///
+    /// The share applies to this open only: a database file stores no limit for it, so a file
+    /// moved to a smaller machine does not carry another machine's bytes. An explicit
+    /// [`with_memory_limit`](Self::with_memory_limit) is stored, and the later of the two calls
+    /// wins. A fraction that is infinite, not above zero, or so small its share comes to no
+    /// byte fails [`validate`](Self::validate).
     #[must_use]
     pub fn with_memory_fraction(mut self, fraction: f64) -> Self {
-        use grafeo_common::memory::buffer::BufferManagerConfig;
-        let system_memory = BufferManagerConfig::detect_system_memory();
-        // reason: product of system RAM and a 0..1 fraction is always a valid positive usize
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let budget = (system_memory as f64 * fraction) as usize;
-        self.memory_limit = Some(budget);
-        self.set.insert(SetFields::MEMORY_LIMIT);
+        self.memory_limit = None;
+        self.memory_fraction = Some(fraction);
+        self.memory_fraction_bytes = None;
+        // An explicit limit set before is replaced: nothing is left to store.
+        self.set.remove(SetFields::MEMORY_LIMIT);
         self
     }
 
@@ -1057,6 +1221,37 @@ impl Config {
     pub fn with_spill_path(mut self, path: impl Into<PathBuf>) -> Self {
         self.spill_path = Some(path.into());
         self.set.insert(SetFields::SPILL_PATH);
+        self
+    }
+
+    /// Caps what the open spills to disk at once at `bytes`, all its spills
+    /// together (see [`SpillLimit`]); 0 spills nothing. Per open, never
+    /// stored. Of this and [`with_unlimited_spill`](Self::with_unlimited_spill),
+    /// the later call wins.
+    #[must_use]
+    pub fn with_spill_limit(mut self, bytes: u64) -> Self {
+        self.spill_limit = SpillLimit::Bytes(bytes);
+        self
+    }
+
+    /// Lifts the cap of what the open spills (see [`SpillLimit`]): the room
+    /// the database keeps for its next checkpoint still bounds. Per open,
+    /// never stored. Of this and [`with_spill_limit`](Self::with_spill_limit),
+    /// the later call wins.
+    #[must_use]
+    pub fn with_unlimited_spill(mut self) -> Self {
+        self.spill_limit = SpillLimit::Unlimited;
+        self
+    }
+
+    /// Caps the memory one query's operators (sorts, aggregates) may hold at
+    /// `bytes`; past it they spill, or fail with `GRAFEO-S001` without a
+    /// spill directory. Per open, never stored; 0 fails
+    /// [`validate`](Self::validate). Not enforced yet: operators take their
+    /// grants against it in a later patch of this release.
+    #[must_use]
+    pub fn with_query_memory_limit(mut self, bytes: usize) -> Self {
+        self.query_memory_limit = Some(bytes);
         self
     }
 
@@ -1302,9 +1497,9 @@ impl Config {
     /// tier, max_ram: None })`. Pass [`TierOverride::ForceDisk`] to spill the
     /// section at database open, [`TierOverride::ForceRam`] to declare it
     /// must stay in RAM (declarative only until Phase 8g), or
-    /// [`TierOverride::Auto`] (the default). Only `CompactStore`,
-    /// `VectorStore`, `TextIndex`, `RdfRing` and `PropertyIndex` can be
-    /// moved to disk: [`validate`](Self::validate) refuses `ForceDisk` for
+    /// [`TierOverride::Auto`] (the default). Only `VectorStore` can be
+    /// moved to disk (its embedding columns, in a build with `wal` and
+    /// `vector-index`): [`validate`](Self::validate) refuses `ForceDisk` for
     /// any other section.
     ///
     /// # Examples
@@ -1313,9 +1508,9 @@ impl Config {
     /// # use grafeo_engine::Config;
     /// use grafeo_common::storage::{SectionType, TierOverride};
     ///
-    /// // Force the LPG compact base to mmap mode at open.
-    /// let config = Config::in_memory()
-    ///     .with_section_tier(SectionType::CompactStore, TierOverride::ForceDisk);
+    /// // Spill the embedding columns of the vector indexes at open.
+    /// let config = Config::persistent("lyon.grafeo")
+    ///     .with_section_tier(SectionType::VectorStore, TierOverride::ForceDisk);
     /// ```
     ///
     /// [`TierOverride::ForceDisk`]: grafeo_common::storage::TierOverride::ForceDisk
@@ -1352,13 +1547,58 @@ impl Config {
     }
 
     /// Checkpoints once the WAL holds `bytes` since the last checkpoint,
-    /// which bounds the log a reopen replays (DuckDB's
-    /// `checkpoint_threshold` is 16 MiB). Off by default; see
-    /// [`CheckpointTriggers`](crate::admin::CheckpointTriggers). Without a
-    /// WAL it never fires.
+    /// which bounds the WAL on disk and the log a reopen replays: 256 MiB by
+    /// default ([`DEFAULT_CHECKPOINT_WAL_SIZE`]), at least 1 MiB
+    /// ([`validate`](Self::validate) refuses less). The checkpoint runs on a
+    /// background thread, which a commit that takes the WAL past the size
+    /// wakes; see [`CheckpointTriggers`](crate::admin::CheckpointTriggers).
+    /// Without a WAL it never fires.
     #[must_use]
     pub fn with_checkpoint_wal_size(mut self, bytes: u64) -> Self {
         self.checkpoint_wal_size = Some(bytes);
+        self
+    }
+
+    /// Turns automatic checkpoints by WAL size off: the WAL then grows until
+    /// the database closes or [`wal_checkpoint`](crate::GrafeoDB::wal_checkpoint)
+    /// runs, unless [`with_checkpoint_interval`](Self::with_checkpoint_interval)
+    /// sets an interval.
+    #[must_use]
+    pub fn without_checkpoint_wal_size(mut self) -> Self {
+        self.checkpoint_wal_size = None;
+        self
+    }
+
+    /// Sets the size, in bytes, a WAL segment grows to before the log goes on
+    /// in a new one: 64 MiB by default ([`DEFAULT_WAL_SEGMENT_SIZE`]), from
+    /// 1 MiB to 1 GiB ([`validate`](Self::validate) refuses other sizes).
+    /// A checkpoint removes whole segments and keeps one segment of free
+    /// disk space for the WAL to grow in, so smaller segments free the disk
+    /// sooner and need less room. A WAL written at one size reopens at
+    /// another: the segments it holds keep their size, and new ones get the
+    /// new one.
+    #[must_use]
+    pub fn with_wal_segment_size(mut self, bytes: u64) -> Self {
+        self.wal_segment_size = bytes;
+        self
+    }
+
+    /// Sets how much WAL, in bytes, a checkpoint keeps at most beyond the
+    /// log it covers for incremental backups: 1 GiB by default
+    /// ([`DEFAULT_WAL_RETENTION_LIMIT`]).
+    ///
+    /// A checkpoint keeps the WAL from where the last backup ended, so the
+    /// next incremental backup can copy it. When backups stop, that WAL
+    /// would grow until the disk is full: past this limit a checkpoint
+    /// removes the oldest segments, so the WAL kept stays within it, and
+    /// warns once. The next incremental backup then fails with
+    /// `GRAFEO-S005`
+    /// ([`ErrorCode::BackupChainBroken`](grafeo_common::utils::error::ErrorCode::BackupChainBroken)),
+    /// and a full backup starts a new chain. Raise it when more than this
+    /// much is written between two incremental backups.
+    #[must_use]
+    pub fn with_wal_retention_limit(mut self, bytes: u64) -> Self {
+        self.wal_retention_limit = bytes;
         self
     }
 
@@ -1409,17 +1649,66 @@ impl Config {
         self.path.as_deref()
     }
 
-    /// The memory limit in bytes, `None` for three quarters of the system's
-    /// RAM.
+    /// The memory limit in bytes: the one set, or
+    /// [`with_memory_fraction`](Self::with_memory_fraction)'s share of the memory detected (when
+    /// the database opened, for a database's own configuration; now, before an open); `None`
+    /// for the default, [`DEFAULT_MEMORY_FRACTION`](grafeo_common::memory::DEFAULT_MEMORY_FRACTION)
+    /// of the detected memory.
     #[must_use]
     pub fn memory_limit(&self) -> Option<usize> {
         self.memory_limit
+            .or(self.memory_fraction_bytes)
+            .or_else(|| {
+                self.memory_fraction.map(|fraction| {
+                    grafeo_common::memory::system::fraction_of(
+                        grafeo_common::memory::detect_memory().bytes,
+                        fraction,
+                    )
+                })
+            })
+    }
+
+    /// The memory limit set with [`with_memory_limit`](Self::with_memory_limit), the one a
+    /// database file stores; `None` for the default or a fraction.
+    #[must_use]
+    pub(crate) fn explicit_memory_limit(&self) -> Option<usize> {
+        self.memory_limit
+    }
+
+    /// The share of the detected memory set with
+    /// [`with_memory_fraction`](Self::with_memory_fraction), when no explicit limit replaced it.
+    #[must_use]
+    pub(crate) fn memory_fraction(&self) -> Option<f64> {
+        self.memory_fraction
+    }
+
+    /// The configuration with the bytes the open took for its fraction, read back by
+    /// [`memory_limit`](Self::memory_limit); unchanged without a fraction.
+    #[must_use]
+    pub(crate) fn with_open_memory_budget(mut self, bytes: usize) -> Self {
+        if self.memory_fraction.is_some() {
+            self.memory_fraction_bytes = Some(bytes);
+        }
+        self
     }
 
     /// The spill directory for out-of-core processing, when one is set.
     #[must_use]
     pub fn spill_path(&self) -> Option<&std::path::Path> {
         self.spill_path.as_deref()
+    }
+
+    /// The cap of what the open spills (see [`SpillLimit`]).
+    #[must_use]
+    pub fn spill_limit(&self) -> SpillLimit {
+        self.spill_limit
+    }
+
+    /// The memory one query's operators may hold; `None` for the memory
+    /// limit.
+    #[must_use]
+    pub fn query_memory_limit(&self) -> Option<usize> {
+        self.query_memory_limit
     }
 
     /// The number of worker threads, which has no effect.
@@ -1510,6 +1799,14 @@ impl Config {
         self.query_timeout
     }
 
+    /// The deadline of a statement that starts now under `timeout`, `None` for no limit: the one
+    /// reckoning of a query's deadline, a session's and the bindings' algorithm calls alike. A
+    /// timeout too long to reckon from now (`Duration::MAX`) is no limit too.
+    #[must_use]
+    pub fn deadline_after(timeout: Option<Duration>) -> Option<grafeo_common::clock::Instant> {
+        timeout.and_then(|limit| grafeo_common::clock::Instant::now().checked_add(limit))
+    }
+
     /// The largest property value in bytes, `None` for no limit.
     #[must_use]
     pub fn max_property_size(&self) -> Option<usize> {
@@ -1565,6 +1862,21 @@ impl Config {
         self.checkpoint_wal_size
     }
 
+    /// The size a WAL segment grows to (see
+    /// [`with_wal_segment_size`](Self::with_wal_segment_size)).
+    #[must_use]
+    pub fn wal_segment_size(&self) -> u64 {
+        self.wal_segment_size
+    }
+
+    /// How much WAL a checkpoint keeps at most beyond the log it covers for
+    /// incremental backups (see
+    /// [`with_wal_retention_limit`](Self::with_wal_retention_limit)).
+    #[must_use]
+    pub fn wal_retention_limit(&self) -> u64 {
+        self.wal_retention_limit
+    }
+
     /// How long the database keeps history (see
     /// [`with_history_retention`](Self::with_history_retention)).
     #[must_use]
@@ -1609,6 +1921,27 @@ impl Config {
         {
             return Err(ConfigError::ZeroMemoryLimit);
         }
+        if self.query_memory_limit == Some(0) {
+            return Err(ConfigError::ZeroQueryMemoryLimit);
+        }
+        if let Some(fraction) = self.memory_fraction {
+            if fraction.is_infinite() {
+                return Err(ConfigError::MemoryFractionNotFinite);
+            }
+            // NaN and fractions not above zero, and those whose share of the
+            // detected memory comes to no byte, as a zero limit.
+            if fraction.is_nan()
+                || fraction <= 0.0
+                || self.memory_fraction_bytes.unwrap_or_else(|| {
+                    grafeo_common::memory::system::fraction_of(
+                        grafeo_common::memory::detect_memory().bytes,
+                        fraction,
+                    )
+                }) == 0
+            {
+                return Err(ConfigError::ZeroMemoryLimit);
+            }
+        }
 
         if self.threads == 0 {
             return Err(ConfigError::ZeroThreads);
@@ -1628,6 +1961,13 @@ impl Config {
         }
 
         self.check_section_tiers()?;
+
+        if !(MIN_WAL_SEGMENT_SIZE..=MAX_WAL_SEGMENT_SIZE).contains(&self.wal_segment_size) {
+            return Err(ConfigError::WalSegmentSizeOutOfBounds(
+                self.wal_segment_size,
+            ));
+        }
+        check_checkpoint_wal_size(self.checkpoint_wal_size)?;
 
         #[cfg(feature = "encryption")]
         if self.encryption.is_some() {
@@ -2068,7 +2408,12 @@ mod tests {
     /// An encrypted database spills nothing to disk, so a section pinned to
     /// disk could not be honored: `TierOverride::ForceDisk` with encryption
     /// is invalid, while `Auto` and `ForceRam` are fine.
-    #[cfg(all(feature = "encryption", not(miri)))]
+    #[cfg(all(
+        feature = "encryption",
+        feature = "wal",
+        feature = "vector-index",
+        not(miri)
+    ))]
     #[test]
     #[allow(
         deprecated,
@@ -2081,8 +2426,8 @@ mod tests {
             grafeo_common::encryption::KeyChain::new([88; 32]),
         ));
         let config = Config::persistent("prague.grafeo")
-            .with_section_tier(SectionType::VectorStore, TierOverride::ForceRam)
-            .with_section_tier(SectionType::TextIndex, TierOverride::Auto)
+            .with_section_tier(SectionType::TextIndex, TierOverride::ForceRam)
+            .with_section_tier(SectionType::RdfRing, TierOverride::Auto)
             .with_encryption(encryption);
         assert_eq!(
             config.validate(),
@@ -2091,19 +2436,19 @@ mod tests {
         );
 
         let mut config =
-            config.with_section_tier(SectionType::CompactStore, TierOverride::ForceDisk);
+            config.with_section_tier(SectionType::VectorStore, TierOverride::ForceDisk);
         let error = config
             .validate()
             .expect_err("a section forced to disk on an encrypted database")
             .to_string();
         assert!(
-            error.contains("disk tier override") && error.contains("CompactStore"),
+            error.contains("disk tier override") && error.contains("VectorStore"),
             "the error names the override and the section: {error}"
         );
         assert_eq!(
             config.validate(),
             Err(ConfigError::EncryptionWithForceDisk(
-                SectionType::CompactStore
+                SectionType::VectorStore
             ))
         );
         config.encryption = None;
@@ -2123,6 +2468,13 @@ mod tests {
             SectionType::RdfStore,
             SectionType::OverlayDeletions,
             SectionType::TimeIndex,
+            // Mappable, but nothing moves them to disk: a disk override would do nothing. The
+            // compact store is only read from a 0.5 file and folded into row groups; the ring's
+            // swap copies its mapped bytes back onto the heap.
+            SectionType::TextIndex,
+            SectionType::PropertyIndex,
+            SectionType::CompactStore,
+            SectionType::RdfRing,
         ] {
             let config = Config::persistent("berlin.grafeo")
                 .with_section_tier(section_type, TierOverride::ForceDisk);
@@ -2131,12 +2483,16 @@ mod tests {
                 Err(ConfigError::ForceDiskOnUnspillableSection(section_type)),
                 "{section_type:?} cannot spill"
             );
+            let spillable = if cfg!(all(feature = "wal", feature = "vector-index")) {
+                "VectorStore"
+            } else {
+                "none in this build"
+            };
             assert_eq!(
                 ConfigError::ForceDiskOnUnspillableSection(section_type).to_string(),
                 format!(
                     "the {section_type:?} section cannot be moved to disk, so it takes no disk \
-                     tier override; the sections that can are CompactStore, VectorStore, \
-                     TextIndex, RdfRing and PropertyIndex"
+                     tier override; the sections that can are {spillable}"
                 )
             );
             for tier in [TierOverride::Auto, TierOverride::ForceRam] {
@@ -2146,16 +2502,18 @@ mod tests {
             }
         }
 
-        for section_type in [
-            SectionType::CompactStore,
-            SectionType::VectorStore,
-            SectionType::TextIndex,
-            SectionType::RdfRing,
-            SectionType::PropertyIndex,
-        ] {
-            let config = Config::persistent("berlin.grafeo")
-                .with_section_tier(section_type, TierOverride::ForceDisk);
-            assert_eq!(config.validate(), Ok(()), "{section_type:?} can spill");
+        let config = Config::persistent("berlin.grafeo")
+            .with_section_tier(SectionType::VectorStore, TierOverride::ForceDisk);
+        if cfg!(all(feature = "wal", feature = "vector-index")) {
+            assert_eq!(config.validate(), Ok(()), "the vector store spills");
+        } else {
+            // Nothing writes the embedding columns to disk in this build.
+            assert_eq!(
+                config.validate(),
+                Err(ConfigError::ForceDiskOnUnspillableSection(
+                    SectionType::VectorStore
+                ))
+            );
         }
     }
 
@@ -2179,6 +2537,77 @@ mod tests {
         assert!(config.spill_path().is_some());
         assert_eq!(config.query_timeout(), Some(Duration::from_mins(1)));
         assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn the_wal_sizes_have_their_defaults_and_bounds() {
+        let config = Config::persistent("lyon.grafeo");
+        assert_eq!(
+            config.checkpoint_wal_size(),
+            Some(DEFAULT_CHECKPOINT_WAL_SIZE)
+        );
+        assert_eq!(config.wal_segment_size(), DEFAULT_WAL_SEGMENT_SIZE);
+        assert_eq!(
+            Config::in_memory().checkpoint_wal_size(),
+            Some(DEFAULT_CHECKPOINT_WAL_SIZE),
+            "a setting; only a database with a WAL acts on it"
+        );
+        assert_eq!(
+            config
+                .clone()
+                .without_checkpoint_wal_size()
+                .checkpoint_wal_size(),
+            None
+        );
+        for (bytes, accepted) in [
+            (MIN_WAL_SEGMENT_SIZE - 1, false),
+            (MIN_WAL_SEGMENT_SIZE, true),
+            (MAX_WAL_SEGMENT_SIZE, true),
+            (MAX_WAL_SEGMENT_SIZE + 1, false),
+        ] {
+            assert_eq!(
+                config
+                    .clone()
+                    .with_wal_segment_size(bytes)
+                    .validate()
+                    .is_ok(),
+                accepted,
+                "{bytes}"
+            );
+        }
+        assert_eq!(
+            config
+                .clone()
+                .with_checkpoint_wal_size(MIN_CHECKPOINT_WAL_SIZE - 1)
+                .validate(),
+            Err(ConfigError::CheckpointWalSizeTooSmall(
+                MIN_CHECKPOINT_WAL_SIZE - 1
+            ))
+        );
+        assert!(
+            config
+                .with_checkpoint_wal_size(MIN_CHECKPOINT_WAL_SIZE)
+                .validate()
+                .is_ok()
+        );
+    }
+
+    /// The setter on an open database applies the same check, so its error
+    /// is the one an open gives; zero says why it is refused.
+    #[test]
+    fn the_checkpoint_size_floor_is_one_check() {
+        assert_eq!(check_checkpoint_wal_size(None), Ok(()));
+        assert_eq!(
+            check_checkpoint_wal_size(Some(MIN_CHECKPOINT_WAL_SIZE)),
+            Ok(())
+        );
+        let zero = check_checkpoint_wal_size(Some(0)).unwrap_err().to_string();
+        assert!(zero.contains("zero") && zero.contains("1 MiB"), "{zero}");
+        let small = check_checkpoint_wal_size(Some(19)).unwrap_err().to_string();
+        assert!(
+            small.contains("19 bytes") && small.contains("1 MiB"),
+            "{small}"
+        );
     }
 
     /// Every setting can be changed with a constructor or a `with_*` or
@@ -2208,6 +2637,8 @@ mod tests {
             .with_checkpoint_interval(Duration::from_secs(88))
             .with_checkpoint_wal_size(19 * 1024 * 1024)
             .with_history_retention(HistoryRetention::Duration(Duration::from_secs(88)))
+            .with_wal_retention_limit(19 * 1024 * 1024)
+            .with_wal_segment_size(3 * 1024 * 1024)
             .with_wal_salvage();
         #[expect(
             deprecated,
@@ -2223,6 +2654,9 @@ mod tests {
                 .with_max_epochs(19)
                 .with_max_events(88),
         );
+        let config = config
+            .with_spill_limit(88 << 20)
+            .with_query_memory_limit(19 << 20);
         #[cfg(feature = "encryption")]
         let config = config.with_encryption(EncryptionConfig::new(std::sync::Arc::new(
             grafeo_common::encryption::KeyChain::new([3; 32]),
@@ -2262,11 +2696,38 @@ mod tests {
             wal_salvage,
             checkpoint_wal_size,
             history_retention,
+            wal_retention_limit,
+            wal_segment_size,
             // What the builders set: see the stored-configuration tests.
             set: _,
+            memory_fraction,
+            memory_fraction_bytes,
+            spill_limit,
+            query_memory_limit,
         } = config;
 
+        assert_eq!(
+            spill_limit,
+            SpillLimit::Bytes(88 << 20),
+            "with_spill_limit sets the cap"
+        );
+        assert_eq!(
+            query_memory_limit,
+            Some(19 << 20),
+            "with_query_memory_limit sets the limit"
+        );
+
+        assert_eq!(
+            wal_segment_size,
+            3 * 1024 * 1024,
+            "with_wal_segment_size sets the size"
+        );
         assert_eq!(checkpoint_wal_size, Some(19 * 1024 * 1024));
+        assert_eq!(
+            wal_retention_limit,
+            19 * 1024 * 1024,
+            "with_wal_retention_limit sets the limit"
+        );
         assert_eq!(
             history_retention,
             HistoryRetention::Duration(Duration::from_secs(88)),
@@ -2281,6 +2742,8 @@ mod tests {
             Some(std::path::Path::new("amsterdam.grafeo"))
         );
         assert_eq!(memory_limit, Some(88 * 1024 * 1024));
+        // `with_memory_fraction` is the other way to set the limit; the explicit one is set here.
+        assert_eq!((memory_fraction, memory_fraction_bytes), (None, None));
         assert_eq!(
             spill_path.as_deref(),
             Some(std::path::Path::new("amsterdam.spill"))

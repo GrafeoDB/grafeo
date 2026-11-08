@@ -3,13 +3,13 @@
 //! These algorithms find optimal flow through a network with capacity
 //! constraints on edges.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::VecDeque;
 use std::sync::OnceLock;
 
 #[cfg(test)]
 use grafeo_common::types::PropertyKey;
-use grafeo_common::types::{NodeId, Value};
-use grafeo_common::utils::error::Error;
+use grafeo_common::types::{EdgeId, NodeId, Value};
+use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind};
 use grafeo_common::utils::hash::FxHashMap;
 use grafeo_core::graph::Direction;
 use grafeo_core::graph::GraphStore;
@@ -17,8 +17,23 @@ use grafeo_core::graph::GraphStore;
 #[cfg(test)]
 use grafeo_core::graph::rowgroup::RowGroupStore;
 
-use super::super::{AlgorithmResult, ParameterDef, ParameterType};
-use super::traits::{impl_algorithm, node_id_from_param};
+use super::super::{AlgorithmResult, Domain, ParameterDef, ParameterType};
+use super::traits::{EdgeWeight, Ticker, impl_algorithm, node_id_from_param};
+
+/// A capacity: what an edge carries at most, so zero or more.
+const CAPACITY: EdgeWeight = EdgeWeight {
+    what: "capacity",
+    default: 1.0,
+    domain: Domain::NonNegative,
+};
+
+/// A cost per unit of flow, negative ones too: min-cost flow is defined for them, without a
+/// negative cycle (see [`refuse_a_negative_cycle`]).
+const COST: EdgeWeight = EdgeWeight {
+    what: "cost",
+    default: 0.0,
+    domain: Domain::OfType,
+};
 
 // ============================================================================
 // Max Flow Result
@@ -72,7 +87,7 @@ pub fn max_flow(
 ) -> grafeo_common::utils::error::Result<Option<MaxFlowResult>> {
     let graph = super::traits::GraphView::new(store, view);
     let found = max_flow_on(&graph, source, sink, capacity_property);
-    graph.finish(found)
+    graph.finish(found)?
 }
 
 /// [`max_flow`] on the graph a [`GraphView`](super::traits::GraphView) reads.
@@ -81,17 +96,18 @@ pub(crate) fn max_flow_on(
     source: NodeId,
     sink: NodeId,
     capacity_property: Option<&str>,
-) -> Option<MaxFlowResult> {
+) -> grafeo_common::utils::error::Result<Option<MaxFlowResult>> {
+    let mut ticker = Ticker::new();
     // Verify source and sink exist
     if store.node(source).is_none() || store.node(sink).is_none() {
-        return None;
+        return Ok(None);
     }
 
     if source == sink {
-        return Some(MaxFlowResult {
+        return Ok(Some(MaxFlowResult {
             max_flow: 0.0,
             flow_edges: Vec::new(),
-        });
+        }));
     }
 
     let nodes = store.node_ids();
@@ -105,100 +121,61 @@ pub(crate) fn max_flow_on(
         idx_to_node.push(node);
     }
 
-    let source_idx = *node_to_idx.get(&source)?;
-    let sink_idx = *node_to_idx.get(&sink)?;
+    let (Some(&source_idx), Some(&sink_idx)) = (node_to_idx.get(&source), node_to_idx.get(&sink))
+    else {
+        return Ok(None);
+    };
 
-    // Build capacity matrix (using adjacency list for sparse graphs)
-    // capacity[i][j] = capacity of edge i -> j. Ordered maps: the search
-    // and the result follow the indices, which are in node-id order.
-    let mut capacity: Vec<BTreeMap<usize, f64>> = vec![BTreeMap::new(); n];
-
-    for (i, &node) in nodes.iter().enumerate() {
-        for (neighbor, edge_id) in store.edges(node, Direction::Outgoing) {
-            if let Some(&j) = node_to_idx.get(&neighbor) {
-                let cap = store.edge_number(edge_id, capacity_property, 1.0);
-                *capacity[i].entry(j).or_insert(0.0) += cap;
-            }
-        }
-    }
-
-    // Residual graph (initially same as capacity)
-    let mut residual: Vec<BTreeMap<usize, f64>> = capacity.clone();
-
-    // Ensure reverse edges exist in residual (with 0 capacity initially)
-    for i in 0..n {
-        let neighbors: Vec<usize> = residual[i].keys().copied().collect();
-        for j in neighbors {
-            residual[j].entry(i).or_insert(0.0);
-        }
-    }
-
+    let mut residual = Residual::of(
+        store,
+        &nodes,
+        &node_to_idx,
+        capacity_property,
+        None,
+        &mut ticker,
+    )?;
     let mut total_flow = 0.0;
 
-    // BFS to find augmenting path
+    // Shortest augmenting paths, each found by a BFS over the arcs with capacity left.
     loop {
         let mut parent: Vec<Option<usize>> = vec![None; n];
         let mut visited = vec![false; n];
         let mut queue: VecDeque<usize> = VecDeque::new();
-
         visited[source_idx] = true;
         queue.push_back(source_idx);
-
         while let Some(u) = queue.pop_front() {
             if u == sink_idx {
                 break;
             }
-
-            for (&v, &cap) in &residual[u] {
-                if !visited[v] && cap > 1e-9 {
-                    visited[v] = true;
-                    parent[v] = Some(u);
-                    queue.push_back(v);
+            for &arc in &residual.out[u] {
+                ticker.tick()?;
+                let ResidualArc {
+                    to, residual: left, ..
+                } = residual.arcs[arc];
+                if !visited[to] && left > FLOW_EPSILON {
+                    visited[to] = true;
+                    parent[to] = Some(arc);
+                    queue.push_back(to);
                 }
             }
         }
-
-        // No augmenting path found
         if !visited[sink_idx] {
             break;
         }
-
-        // Find minimum capacity along path
-        let mut path_flow = f64::INFINITY;
-        let mut v = sink_idx;
-        while let Some(u) = parent[v] {
-            let cap = *residual[u].get(&v).unwrap_or(&0.0);
-            path_flow = path_flow.min(cap);
-            v = u;
-        }
-
-        // Update residual capacities
-        v = sink_idx;
-        while let Some(u) = parent[v] {
-            *residual[u].entry(v).or_insert(0.0) -= path_flow;
-            *residual[v].entry(u).or_insert(0.0) += path_flow;
-            v = u;
-        }
-
+        let path_flow = residual.bottleneck(&parent, sink_idx);
+        residual.augment(&parent, sink_idx, path_flow);
         total_flow += path_flow;
     }
 
-    // Extract flow on original edges
-    let mut flow_edges: Vec<(NodeId, NodeId, f64)> = Vec::new();
-    for i in 0..n {
-        for (&j, &original_cap) in &capacity[i] {
-            let residual_cap = *residual[i].get(&j).unwrap_or(&0.0);
-            let flow = original_cap - residual_cap;
-            if flow > 1e-9 {
-                flow_edges.push((idx_to_node[i], idx_to_node[j], flow));
-            }
-        }
-    }
+    let flow_edges = residual
+        .flows()
+        .map(|(from, to, flow, _)| (idx_to_node[from], idx_to_node[to], flow))
+        .collect();
 
-    Some(MaxFlowResult {
+    Ok(Some(MaxFlowResult {
         max_flow: total_flow,
         flow_edges,
-    })
+    }))
 }
 
 // ============================================================================
@@ -212,8 +189,8 @@ pub struct MinCostFlowResult {
     pub max_flow: f64,
     /// Total cost of the flow.
     pub total_cost: f64,
-    /// Flow on each edge: (source, target, flow, cost), by source, then
-    /// target.
+    /// Flow on each edge that carries some: (source, target, flow, cost), by
+    /// source, then target; parallel edges are a row each.
     pub flow_edges: Vec<(NodeId, NodeId, f64, f64)>,
 }
 
@@ -258,7 +235,7 @@ pub fn min_cost_max_flow(
 ) -> grafeo_common::utils::error::Result<Option<MinCostFlowResult>> {
     let graph = super::traits::GraphView::new(store, view);
     let found = min_cost_max_flow_on(&graph, source, sink, capacity_property, cost_property);
-    graph.finish(found)
+    graph.finish(found)?
 }
 
 /// [`min_cost_max_flow`] on the graph a [`GraphView`](super::traits::GraphView) reads.
@@ -268,18 +245,19 @@ pub(crate) fn min_cost_max_flow_on(
     sink: NodeId,
     capacity_property: Option<&str>,
     cost_property: Option<&str>,
-) -> Option<MinCostFlowResult> {
+) -> grafeo_common::utils::error::Result<Option<MinCostFlowResult>> {
+    let mut ticker = Ticker::new();
     // Verify source and sink exist
     if store.node(source).is_none() || store.node(sink).is_none() {
-        return None;
+        return Ok(None);
     }
 
     if source == sink {
-        return Some(MinCostFlowResult {
+        return Ok(Some(MinCostFlowResult {
             max_flow: 0.0,
             total_cost: 0.0,
             flow_edges: Vec::new(),
-        });
+        }));
     }
 
     let nodes = store.node_ids();
@@ -293,117 +271,249 @@ pub(crate) fn min_cost_max_flow_on(
         idx_to_node.push(node);
     }
 
-    let source_idx = *node_to_idx.get(&source)?;
-    let sink_idx = *node_to_idx.get(&sink)?;
+    let (Some(&source_idx), Some(&sink_idx)) = (node_to_idx.get(&source), node_to_idx.get(&sink))
+    else {
+        return Ok(None);
+    };
 
-    // Build capacity and cost matrices. Ordered maps: the search and the
-    // result follow the indices, which are in node-id order.
-    let mut capacity: Vec<BTreeMap<usize, f64>> = vec![BTreeMap::new(); n];
-    let mut cost: Vec<BTreeMap<usize, f64>> = vec![BTreeMap::new(); n];
-
-    for (i, &node) in nodes.iter().enumerate() {
-        for (neighbor, edge_id) in store.edges(node, Direction::Outgoing) {
-            if let Some(&j) = node_to_idx.get(&neighbor) {
-                let cap = store.edge_number(edge_id, capacity_property, 1.0);
-                let edge_cost = store.edge_number(edge_id, cost_property, 0.0);
-                *capacity[i].entry(j).or_insert(0.0) += cap;
-                *cost[i].entry(j).or_insert(0.0) = edge_cost;
-            }
-        }
-    }
-
-    // Residual graph
-    let mut residual: Vec<BTreeMap<usize, f64>> = capacity.clone();
-    let mut residual_cost: Vec<BTreeMap<usize, f64>> = cost.clone();
-
-    // Ensure reverse edges exist
-    for i in 0..n {
-        let neighbors: Vec<usize> = residual[i].keys().copied().collect();
-        for j in neighbors {
-            residual[j].entry(i).or_insert(0.0);
-            let c = *cost[i].get(&j).unwrap_or(&0.0);
-            residual_cost[j].entry(i).or_insert(-c);
-        }
-    }
+    let mut residual = Residual::of(
+        store,
+        &nodes,
+        &node_to_idx,
+        capacity_property,
+        cost_property,
+        &mut ticker,
+    )?;
+    refuse_a_negative_cycle(
+        &residual.arcs,
+        &residual.out,
+        source_idx,
+        cost_property,
+        &mut ticker,
+    )?;
 
     let mut total_flow = 0.0;
     let mut total_cost_val = 0.0;
 
-    // Successive shortest paths using Bellman-Ford
-    loop {
-        // Bellman-Ford from source
-        let mut dist = vec![f64::INFINITY; n];
-        let mut parent: Vec<Option<usize>> = vec![None; n];
-        dist[source_idx] = 0.0;
-
-        for _ in 0..n {
-            let mut changed = false;
-            for u in 0..n {
-                if dist[u] == f64::INFINITY {
-                    continue;
-                }
-                for (&v, &cap) in &residual[u] {
-                    if cap > 1e-9 {
-                        let c = *residual_cost[u].get(&v).unwrap_or(&0.0);
-                        if dist[u] + c < dist[v] {
-                            dist[v] = dist[u] + c;
-                            parent[v] = Some(u);
-                            changed = true;
-                        }
-                    }
-                }
-            }
-            if !changed {
-                break;
-            }
-        }
-
-        // No path to sink
-        if dist[sink_idx] == f64::INFINITY {
-            break;
-        }
-
-        // Find minimum capacity along path
-        let mut path_flow = f64::INFINITY;
-        let mut v = sink_idx;
-        while let Some(u) = parent[v] {
-            let cap = *residual[u].get(&v).unwrap_or(&0.0);
-            path_flow = path_flow.min(cap);
-            v = u;
-        }
-
-        // Update flow and cost
-        let path_cost = dist[sink_idx];
+    // Successive shortest paths, each found by Bellman-Ford over the arcs with capacity left.
+    while let Some((path_cost, parent)) = cheapest_paths(
+        &residual.arcs,
+        &residual.out,
+        source_idx,
+        sink_idx,
+        &mut ticker,
+    )? {
+        let path_flow = residual.bottleneck(&parent, sink_idx);
+        residual.augment(&parent, sink_idx, path_flow);
         total_flow += path_flow;
         total_cost_val += path_flow * path_cost;
-
-        // Update residual
-        v = sink_idx;
-        while let Some(u) = parent[v] {
-            *residual[u].entry(v).or_insert(0.0) -= path_flow;
-            *residual[v].entry(u).or_insert(0.0) += path_flow;
-            v = u;
-        }
     }
 
-    // Extract flow on original edges
-    let mut flow_edges: Vec<(NodeId, NodeId, f64, f64)> = Vec::new();
-    for i in 0..n {
-        for (&j, &original_cap) in &capacity[i] {
-            let residual_cap = *residual[i].get(&j).unwrap_or(&0.0);
-            let flow = original_cap - residual_cap;
-            if flow > 1e-9 {
-                let edge_cost = *cost[i].get(&j).unwrap_or(&0.0);
-                flow_edges.push((idx_to_node[i], idx_to_node[j], flow, edge_cost));
-            }
-        }
-    }
+    let flow_edges = residual
+        .flows()
+        .map(|(from, to, flow, cost)| (idx_to_node[from], idx_to_node[to], flow, cost))
+        .collect();
 
-    Some(MinCostFlowResult {
+    Ok(Some(MinCostFlowResult {
         max_flow: total_flow,
         total_cost: total_cost_val,
         flow_edges,
-    })
+    }))
+}
+
+/// Residual capacity below which an arc counts as full.
+const FLOW_EPSILON: f64 = 1e-9;
+
+/// The residual graph both flow procedures search: each edge a forward arc with its own capacity
+/// and cost, and the reverse arc that undoes its flow next to it (`arc ^ 1`), so parallel edges
+/// and an edge with its opposite stay arcs of their own. A node's arcs follow the node-id order of
+/// the edges' sources, then the store's order of each node's edges.
+struct Residual {
+    arcs: Vec<ResidualArc>,
+    /// The arcs from each node, by index.
+    out: Vec<Vec<usize>>,
+}
+
+impl Residual {
+    /// The residual graph of the edges between `nodes`, each with its capacity and cost (as
+    /// [`CAPACITY`] and [`COST`] read them, a cost of 0 without a property), one unit of work per
+    /// edge.
+    fn of(
+        store: &super::traits::GraphView<'_>,
+        nodes: &[NodeId],
+        node_to_idx: &FxHashMap<NodeId, usize>,
+        capacity_property: Option<&str>,
+        cost_property: Option<&str>,
+        ticker: &mut Ticker,
+    ) -> grafeo_common::utils::error::Result<Self> {
+        let mut arcs: Vec<ResidualArc> = Vec::new();
+        let mut out: Vec<Vec<usize>> = vec![Vec::new(); nodes.len()];
+        for (i, &node) in nodes.iter().enumerate() {
+            for (neighbor, edge_id) in store.edges(node, Direction::Outgoing) {
+                ticker.tick()?;
+                let Some(&j) = node_to_idx.get(&neighbor) else {
+                    continue;
+                };
+                let capacity = store.edge_weight(edge_id, capacity_property, CAPACITY)?;
+                let cost = store.edge_weight(edge_id, cost_property, COST)?;
+                out[i].push(arcs.len());
+                arcs.push(ResidualArc {
+                    from: i,
+                    to: j,
+                    residual: capacity,
+                    cost,
+                    edge: edge_id,
+                });
+                out[j].push(arcs.len());
+                arcs.push(ResidualArc {
+                    from: j,
+                    to: i,
+                    residual: 0.0,
+                    cost: -cost,
+                    edge: edge_id,
+                });
+            }
+        }
+        Ok(Self { arcs, out })
+    }
+
+    /// The capacity left on the path `parent` gives back from `sink`, an arc into each node.
+    fn bottleneck(&self, parent: &[Option<usize>], sink: usize) -> f64 {
+        let mut least = f64::INFINITY;
+        let mut at = sink;
+        while let Some(arc) = parent[at] {
+            least = least.min(self.arcs[arc].residual);
+            at = self.arcs[arc].from;
+        }
+        least
+    }
+
+    /// Pushes `flow` along the path `parent` gives back from `sink`.
+    fn augment(&mut self, parent: &[Option<usize>], sink: usize, flow: f64) {
+        let mut at = sink;
+        while let Some(arc) = parent[at] {
+            self.arcs[arc].residual -= flow;
+            self.arcs[arc ^ 1].residual += flow;
+            at = self.arcs[arc].from;
+        }
+    }
+
+    /// Each edge that carries flow, as (source index, target index, flow, cost), by source, then
+    /// target, parallel edges in the store's order: the flow of an edge is what its reverse arc
+    /// can undo.
+    fn flows(&self) -> impl Iterator<Item = (usize, usize, f64, f64)> {
+        let mut flows: Vec<(usize, usize, f64, f64)> = self
+            .arcs
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .filter(|[_, back]| back.residual > FLOW_EPSILON)
+            .map(|[forward, back]| (forward.from, forward.to, back.residual, forward.cost))
+            .collect();
+        flows.sort_by_key(|&(from, to, _, _)| (from, to));
+        flows.into_iter()
+    }
+}
+
+/// An arc of the [`Residual`] graph: an edge's forward arc, or its reverse arc, which undoes the
+/// edge's flow.
+#[derive(Clone, Copy)]
+struct ResidualArc {
+    from: usize,
+    to: usize,
+    /// Capacity left.
+    residual: f64,
+    cost: f64,
+    /// The edge it belongs to, for an error.
+    edge: EdgeId,
+}
+
+/// The cheapest path cost from `source` to `sink` over the arcs with capacity left, and the arc
+/// into each node on the cheapest paths; `None` when the sink cannot be reached.
+fn cheapest_paths(
+    arcs: &[ResidualArc],
+    out: &[Vec<usize>],
+    source: usize,
+    sink: usize,
+    ticker: &mut Ticker,
+) -> grafeo_common::utils::error::Result<Option<(f64, Vec<Option<usize>>)>> {
+    let (dist, parent, _) = bellman_ford_over(arcs, out, source, ticker)?;
+    Ok((dist[sink] != f64::INFINITY).then(|| (dist[sink], parent)))
+}
+
+/// Bellman-Ford from `source` over the arcs with capacity left: the distances, the arc into each
+/// node, and a node relaxed in round `n`, which only a negative cycle leaves.
+fn bellman_ford_over(
+    arcs: &[ResidualArc],
+    out: &[Vec<usize>],
+    source: usize,
+    ticker: &mut Ticker,
+) -> grafeo_common::utils::error::Result<(Vec<f64>, Vec<Option<usize>>, Option<usize>)> {
+    let n = out.len();
+    let mut dist = vec![f64::INFINITY; n];
+    let mut parent: Vec<Option<usize>> = vec![None; n];
+    dist[source] = 0.0;
+    let mut last_relaxed = None;
+    for _ in 0..n {
+        let mut relaxed = None;
+        for u in 0..n {
+            ticker.tick()?;
+            if dist[u] == f64::INFINITY {
+                continue;
+            }
+            for &arc in &out[u] {
+                let ResidualArc {
+                    to, residual, cost, ..
+                } = arcs[arc];
+                if residual > FLOW_EPSILON && dist[u] + cost < dist[to] {
+                    dist[to] = dist[u] + cost;
+                    parent[to] = Some(arc);
+                    relaxed = Some(to);
+                }
+            }
+        }
+        if relaxed.is_none() {
+            return Ok((dist, parent, None));
+        }
+        last_relaxed = relaxed;
+    }
+    Ok((dist, parent, last_relaxed))
+}
+
+/// Refuses costs that hold a negative cycle the source reaches through arcs with capacity left,
+/// as an invalid parameter value (22023) naming an edge of the cycle and the cost property: the
+/// flow of least cost is then not defined, and the successive shortest paths never end. They keep
+/// the residual graph free of such a cycle once the start has none, so one check before the first
+/// augmentation suffices: Bellman-Ford from the source, where a relaxation in round `n` means a
+/// cycle. A cycle the source cannot reach is never met, and a zero-cost cycle relaxes nothing.
+fn refuse_a_negative_cycle(
+    arcs: &[ResidualArc],
+    out: &[Vec<usize>],
+    source: usize,
+    cost_property: Option<&str>,
+    ticker: &mut Ticker,
+) -> grafeo_common::utils::error::Result<()> {
+    let (_, parent, relaxed) = bellman_ford_over(arcs, out, source, ticker)?;
+    let Some(mut on_cycle) = relaxed else {
+        return Ok(());
+    };
+    // `n` steps back along the arcs from a node relaxed in round `n` land on the cycle.
+    for _ in 0..out.len() {
+        if let Some(arc) = parent[on_cycle] {
+            on_cycle = arcs[arc].from;
+        }
+    }
+    let edge = parent[on_cycle].map_or_else(String::new, |arc| {
+        format!(" through edge {}", arcs[arc].edge.as_u64())
+    });
+    Err(Error::from(QueryError::new(
+        QueryErrorKind::InvalidParameterValue,
+        format!(
+            "min_cost_max_flow: the costs '{}' hold a negative cycle the source reaches{edge}, so \
+             no flow of least cost exists",
+            cost_property.unwrap_or("cost")
+        ),
+    )))
 }
 
 // ============================================================================
@@ -422,6 +532,7 @@ fn max_flow_params() -> &'static [ParameterDef] {
                 param_type: ParameterType::NodeId,
                 required: true,
                 default: None,
+                domain: Domain::OfType,
             },
             ParameterDef {
                 name: "sink".to_string(),
@@ -429,6 +540,7 @@ fn max_flow_params() -> &'static [ParameterDef] {
                 param_type: ParameterType::NodeId,
                 required: true,
                 default: None,
+                domain: Domain::OfType,
             },
             ParameterDef {
                 name: "capacity".to_string(),
@@ -436,6 +548,7 @@ fn max_flow_params() -> &'static [ParameterDef] {
                 param_type: ParameterType::String,
                 required: false,
                 default: None,
+                domain: Domain::OfType,
             },
         ]
     })
@@ -449,19 +562,15 @@ impl_algorithm! {
     name: "max_flow",
     description: "Maximum flow using Edmonds-Karp algorithm",
     params: max_flow_params,
-    execute(store, params) {
-        let source_id = params
-            .get_int("source")
-            .ok_or_else(|| Error::InvalidValue("source parameter required".to_string()))?;
-        let sink_id = params
-            .get_int("sink")
-            .ok_or_else(|| Error::InvalidValue("sink parameter required".to_string()))?;
+    compute(store, params) {
+        let source_id = params.required_int("source")?;
+        let sink_id = params.required_int("sink")?;
 
         let source = node_id_from_param(source_id, "source")?;
         let sink = node_id_from_param(sink_id, "sink")?;
         let capacity_prop = params.get_string("capacity");
 
-        let result = max_flow_on(store, source, sink, capacity_prop)
+        let result = max_flow_on(store, source, sink, capacity_prop)?
             .ok_or_else(|| Error::InvalidValue("Invalid source or sink node".to_string()))?;
 
         let mut output = AlgorithmResult::new(vec![
@@ -509,6 +618,7 @@ fn min_cost_flow_params() -> &'static [ParameterDef] {
                 param_type: ParameterType::NodeId,
                 required: true,
                 default: None,
+                domain: Domain::OfType,
             },
             ParameterDef {
                 name: "sink".to_string(),
@@ -516,6 +626,7 @@ fn min_cost_flow_params() -> &'static [ParameterDef] {
                 param_type: ParameterType::NodeId,
                 required: true,
                 default: None,
+                domain: Domain::OfType,
             },
             ParameterDef {
                 name: "capacity".to_string(),
@@ -523,6 +634,7 @@ fn min_cost_flow_params() -> &'static [ParameterDef] {
                 param_type: ParameterType::String,
                 required: false,
                 default: None,
+                domain: Domain::OfType,
             },
             ParameterDef {
                 name: "cost".to_string(),
@@ -530,6 +642,7 @@ fn min_cost_flow_params() -> &'static [ParameterDef] {
                 param_type: ParameterType::String,
                 required: false,
                 default: None,
+                domain: Domain::OfType,
             },
         ]
     })
@@ -543,20 +656,16 @@ impl_algorithm! {
     name: "min_cost_max_flow",
     description: "Minimum cost maximum flow using successive shortest paths",
     params: min_cost_flow_params,
-    execute(store, params) {
-        let source_id = params
-            .get_int("source")
-            .ok_or_else(|| Error::InvalidValue("source parameter required".to_string()))?;
-        let sink_id = params
-            .get_int("sink")
-            .ok_or_else(|| Error::InvalidValue("sink parameter required".to_string()))?;
+    compute(store, params) {
+        let source_id = params.required_int("source")?;
+        let sink_id = params.required_int("sink")?;
 
         let source = node_id_from_param(source_id, "source")?;
         let sink = node_id_from_param(sink_id, "sink")?;
         let capacity_prop = params.get_string("capacity");
         let cost_prop = params.get_string("cost");
 
-        let result = min_cost_max_flow_on(store, source, sink, capacity_prop, cost_prop)
+        let result = min_cost_max_flow_on(store, source, sink, capacity_prop, cost_prop)?
             .ok_or_else(|| Error::InvalidValue("Invalid source or sink node".to_string()))?;
 
         let mut output = AlgorithmResult::new(vec![

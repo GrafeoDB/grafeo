@@ -2,9 +2,8 @@
 //!
 //! SPARQL 1.1 section 18.6 substitutes the row's values into the pattern, so `EXISTS` answers per row
 //! by them, also where the sub-query has no variable in common with the row. A variable the row
-//! leaves unbound stays unbound. A sub-query that reads the row other than in its top filter is
-//! refused for now, with an error and never a wrong answer. `correlated_exists.gtest` runs the same
-//! table on every binding.
+//! leaves unbound stays unbound. `correlated_exists.gtest` runs the same table on every binding, and
+//! `sparql_exists_per_row.rs` holds the forms that read the row anywhere in the pattern.
 //!
 //! ```bash
 //! cargo test -p grafeo-engine --all-features --test main sparql_correlated_exists:: -- --ignored
@@ -173,69 +172,6 @@ const UPDATES: &[(&str, &str, &str, &[&str])] = &[(
     &["urn:a"],
 )];
 
-const REFUSED: &[(&str, &str)] = &[
-    (
-        "a_filter_in_a_nested_group",
-        "SELECT ?s WHERE { ?s <urn:p> ?o FILTER(EXISTS { ?s <urn:q> ?x { FILTER(?x > ?o) } }) }",
-    ),
-    (
-        "a_filter_in_a_nested_group_beside_a_triple",
-        "SELECT ?s WHERE { ?s <urn:p> ?o FILTER(EXISTS { ?s <urn:q> ?x { ?s <urn:q> ?y FILTER(?y > ?o) } }) }",
-    ),
-    (
-        "a_filter_in_optional",
-        "SELECT ?s WHERE { ?s <urn:p> ?o FILTER(EXISTS { ?s <urn:q> ?x OPTIONAL { ?s <urn:r> ?y FILTER(?y > ?o) } }) }",
-    ),
-    (
-        "a_filter_in_union",
-        "SELECT ?s WHERE { ?s <urn:p> ?o FILTER(EXISTS { { ?s <urn:q> ?x FILTER(?x > ?o) } UNION { ?s <urn:r> ?x } }) }",
-    ),
-    (
-        "a_filter_in_minus",
-        "SELECT ?s WHERE { ?s <urn:p> ?o FILTER(EXISTS { ?s <urn:q> ?x MINUS { ?s <urn:r> ?y FILTER(?y > ?o) } }) }",
-    ),
-    (
-        "a_filter_in_graph",
-        "SELECT ?s WHERE { ?s <urn:p> ?o FILTER(EXISTS { GRAPH ?h { ?s <urn:q> ?x FILTER(?x > ?o) } }) }",
-    ),
-    (
-        "a_bind",
-        "SELECT ?s WHERE { ?s <urn:p> ?o FILTER(EXISTS { ?s <urn:q> ?x BIND(?x + ?o AS ?y) }) }",
-    ),
-    (
-        "a_nested_exists",
-        "SELECT ?s WHERE { ?s <urn:p> ?o FILTER(EXISTS { ?s <urn:q> ?x FILTER(EXISTS { ?s <urn:r> ?y FILTER(?y > ?o) }) }) }",
-    ),
-    (
-        "a_nested_not_exists",
-        "SELECT ?s WHERE { ?s <urn:p> ?o FILTER(EXISTS { ?s <urn:q> ?x FILTER(NOT EXISTS { ?s <urn:r> ?y FILTER(?y > ?o) }) }) }",
-    ),
-    (
-        "a_sub_select",
-        "SELECT ?s WHERE { ?s <urn:p> ?o FILTER(EXISTS { { SELECT ?s WHERE { ?s <urn:q> ?x FILTER(?x > ?o) } } }) }",
-    ),
-    (
-        "a_sub_select_having",
-        "SELECT ?s WHERE { ?s <urn:p> ?o FILTER(EXISTS { { SELECT ?s WHERE { ?s <urn:q> ?x } GROUP BY ?s HAVING(COUNT(?x) > ?o) } }) }",
-    ),
-    (
-        "may_leave_unbound_and_the_row_binds",
-        "SELECT ?s WHERE { ?s <urn:p> ?o FILTER(EXISTS { ?t <urn:q> ?x OPTIONAL { ?t <urn:r> ?o } }) }",
-    ),
-    (
-        "may_leave_unbound_read_by_a_filter",
-        "SELECT ?s WHERE { ?s <urn:p> ?o FILTER(EXISTS { ?t <urn:q> ?x OPTIONAL { ?t <urn:r> ?o } FILTER(?o = 1) }) }",
-    ),
-    (
-        "in_a_bind",
-        "SELECT ?s ?e WHERE { ?s <urn:p> ?o BIND(EXISTS { ?s <urn:q> ?x BIND(?x + ?o AS ?y) } AS ?e) }",
-    ),
-    (
-        "in_a_projection",
-        "SELECT ?s (EXISTS { ?s <urn:q> ?x BIND(?x + ?o AS ?y) } AS ?e) WHERE { ?s <urn:p> ?o }",
-    ),
-];
-
 /// Name, query, the columns, and rows: a mark for `EXISTS` must not show in the columns.
 const POSITIONS: &[(&str, &str, &[&str], &[&str])] = &[
     (
@@ -359,7 +295,6 @@ fn sorted(rows: &[&str]) -> Vec<String> {
 }
 
 #[test]
-#[ignore = "waits for #740: EXISTS reads the row by the Architect's ruling"]
 fn exists_answers_per_row_by_the_rows_values() {
     let db = data();
     let mut wrong = Vec::new();
@@ -373,7 +308,6 @@ fn exists_answers_per_row_by_the_rows_values() {
 }
 
 #[test]
-#[ignore = "waits for #740: EXISTS reads the row by the Architect's ruling"]
 fn exists_that_reads_the_row_orders_rows() {
     let db = data();
     for (name, query, wanted) in ORDERED {
@@ -383,7 +317,6 @@ fn exists_that_reads_the_row_orders_rows() {
 }
 
 #[test]
-#[ignore = "waits for #740: EXISTS reads the row by the Architect's ruling"]
 fn an_update_reads_the_row_in_its_exists() {
     for (name, statement, read, wanted) in UPDATES {
         let db = data();
@@ -392,24 +325,8 @@ fn an_update_reads_the_row_in_its_exists() {
     }
 }
 
-/// An error, naming `EXISTS`, and not rows of any kind: on 0.6.1 these answered wrongly.
-#[test]
-#[ignore = "waits for #740: EXISTS reads the row by the Architect's ruling"]
-fn exists_that_reads_the_row_elsewhere_is_refused() {
-    let db = data();
-    let mut wrong = Vec::new();
-    for (name, query) in REFUSED {
-        match rows_of(&db, query) {
-            Err(error) if error.contains("EXISTS") => {}
-            other => wrong.push(format!("{name}: {query}: {other:?}")),
-        }
-    }
-    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
-}
-
 /// Each position holds an `EXISTS`, and what it adds to a row stays out of the columns.
 #[test]
-#[ignore = "waits for #740: EXISTS outside a FILTER"]
 fn exists_holds_at_each_position() {
     let db = data();
     let mut wrong = Vec::new();
@@ -433,4 +350,186 @@ fn exists_holds_at_each_position() {
         }
     }
     assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
+
+/// Name, data, query, rows.
+const WITH_THEIR_DATA: &[(&str, &str, &str, &[&str])] = &[
+    (
+        "a_filter_in_graph",
+        "INSERT DATA { <urn:a> <urn:p> 1 . <urn:a> <urn:q> 2 . <urn:b> <urn:p> 3 . <urn:b> <urn:q> 2 . <urn:c> <urn:p> 1 . <urn:d> <urn:p> 3 . GRAPH <urn:g1> { <urn:c> <urn:q> 2 . <urn:d> <urn:q> 2 } }",
+        "SELECT ?s WHERE { ?s <urn:p> ?o FILTER(EXISTS { GRAPH ?h { ?s <urn:q> ?x FILTER(?x > ?o) } }) }",
+        &["urn:c"],
+    ),
+    (
+        "a_filter_in_graph_not",
+        "INSERT DATA { <urn:a> <urn:p> 1 . <urn:a> <urn:q> 2 . <urn:b> <urn:p> 3 . <urn:b> <urn:q> 2 . <urn:c> <urn:p> 1 . <urn:d> <urn:p> 3 . GRAPH <urn:g1> { <urn:c> <urn:q> 2 . <urn:d> <urn:q> 2 } }",
+        "SELECT ?s WHERE { ?s <urn:p> ?o FILTER(NOT EXISTS { GRAPH ?h { ?s <urn:q> ?x FILTER(?x > ?o) } }) }",
+        &["urn:a", "urn:b", "urn:d"],
+    ),
+    (
+        "a_filter_in_a_named_graph",
+        "INSERT DATA { <urn:a> <urn:p> 1 . <urn:a> <urn:q> 2 . <urn:b> <urn:p> 3 . <urn:b> <urn:q> 2 . <urn:c> <urn:p> 1 . <urn:d> <urn:p> 3 . GRAPH <urn:g1> { <urn:c> <urn:q> 2 . <urn:d> <urn:q> 2 } }",
+        "SELECT ?s WHERE { ?s <urn:p> ?o FILTER(EXISTS { GRAPH <urn:g1> { ?s <urn:q> ?x FILTER(?x > ?o) } }) }",
+        &["urn:c"],
+    ),
+    (
+        "sub_select_lists_the_graph_over_an_optional",
+        "INSERT DATA { GRAPH <urn:g1> { <urn:c> <urn:p> 1 . <urn:c> <urn:link> <urn:g1> . <urn:x> <urn:p> 2 . <urn:x> <urn:link> <urn:other> . <urn:y> <urn:p> 3 } GRAPH <urn:g2> { <urn:d> <urn:p> 4 . <urn:d> <urn:away> <urn:g1> } }",
+        "SELECT ?g ?s WHERE { GRAPH ?g { { SELECT ?g ?s WHERE { ?s <urn:p> ?o OPTIONAL { ?s <urn:link> ?g } } } } }",
+        &["urn:g1|urn:c", "urn:g1|urn:y", "urn:g2|urn:d"],
+    ),
+    (
+        "sub_select_lists_the_graph_it_never_binds_is_filled",
+        "INSERT DATA { GRAPH <urn:g1> { <urn:c> <urn:p> 1 . <urn:c> <urn:link> <urn:g1> . <urn:x> <urn:p> 2 . <urn:x> <urn:link> <urn:other> . <urn:y> <urn:p> 3 } GRAPH <urn:g2> { <urn:d> <urn:p> 4 . <urn:d> <urn:away> <urn:g1> } }",
+        "SELECT ?g ?s WHERE { GRAPH ?g { { SELECT ?g ?s WHERE { ?s <urn:p> ?o OPTIONAL { ?s <urn:none> ?g } } } } }",
+        &[
+            "urn:g1|urn:c",
+            "urn:g1|urn:x",
+            "urn:g1|urn:y",
+            "urn:g2|urn:d",
+        ],
+    ),
+    (
+        "sub_select_lists_another_value_of_the_graph_is_dropped",
+        "INSERT DATA { GRAPH <urn:g1> { <urn:c> <urn:p> 1 . <urn:c> <urn:link> <urn:g1> . <urn:x> <urn:p> 2 . <urn:x> <urn:link> <urn:other> . <urn:y> <urn:p> 3 } GRAPH <urn:g2> { <urn:d> <urn:p> 4 . <urn:d> <urn:away> <urn:g1> } }",
+        "SELECT ?g ?s WHERE { GRAPH ?g { { SELECT ?g ?s WHERE { ?s <urn:away> ?g } } } }",
+        &[],
+    ),
+    (
+        "sub_select_lists_the_graph_as_its_only_value",
+        "INSERT DATA { GRAPH <urn:g1> { <urn:c> <urn:p> 1 . <urn:c> <urn:link> <urn:g1> . <urn:x> <urn:p> 2 . <urn:x> <urn:link> <urn:other> . <urn:y> <urn:p> 3 } GRAPH <urn:g2> { <urn:d> <urn:p> 4 . <urn:d> <urn:away> <urn:g1> } }",
+        "SELECT ?g WHERE { GRAPH ?g { { SELECT ?g WHERE { ?s <urn:link> ?g } } } }",
+        &["urn:g1"],
+    ),
+    (
+        "row_key_unbound_is_free",
+        "INSERT DATA { <urn:a> <urn:p> 1 . <urn:b> <urn:p> 3 . <urn:a> <urn:z> <urn:b> . <urn:a> <urn:w> 2 . <urn:b> <urn:q> 2 . <urn:e> <urn:q> 9 }",
+        "SELECT ?s WHERE { ?s <urn:p> ?o OPTIONAL { ?s <urn:z> ?k } FILTER(EXISTS { ?k <urn:q> ?x FILTER(?x > 2) }) }",
+        &["urn:b"],
+    ),
+    (
+        "row_key_unbound_is_free_not",
+        "INSERT DATA { <urn:a> <urn:p> 1 . <urn:b> <urn:p> 3 . <urn:a> <urn:z> <urn:b> . <urn:a> <urn:w> 2 . <urn:b> <urn:q> 2 . <urn:e> <urn:q> 9 }",
+        "SELECT ?s WHERE { ?s <urn:p> ?o OPTIONAL { ?s <urn:z> ?k } FILTER(NOT EXISTS { ?k <urn:q> ?x FILTER(?x > 2) }) }",
+        &["urn:a"],
+    ),
+    (
+        "row_key_unbound_with_a_filter_on_the_row",
+        "INSERT DATA { <urn:a> <urn:p> 1 . <urn:b> <urn:p> 3 . <urn:a> <urn:z> <urn:b> . <urn:a> <urn:w> 2 . <urn:b> <urn:q> 2 . <urn:e> <urn:q> 9 }",
+        "SELECT ?s WHERE { ?s <urn:p> ?o OPTIONAL { ?s <urn:z> ?k } FILTER(EXISTS { ?k <urn:q> ?x FILTER(?x > ?o && ?x < 5) }) }",
+        &["urn:a"],
+    ),
+    (
+        "row_key_unbound_with_a_filter_on_the_row_not",
+        "INSERT DATA { <urn:a> <urn:p> 1 . <urn:b> <urn:p> 3 . <urn:a> <urn:z> <urn:b> . <urn:a> <urn:w> 2 . <urn:b> <urn:q> 2 . <urn:e> <urn:q> 9 }",
+        "SELECT ?s WHERE { ?s <urn:p> ?o OPTIONAL { ?s <urn:z> ?k } FILTER(NOT EXISTS { ?k <urn:q> ?x FILTER(?x > ?o && ?x < 5) }) }",
+        &["urn:b"],
+    ),
+    (
+        "a_filter_reading_a_row_value_left_unbound_is_false",
+        "INSERT DATA { <urn:a> <urn:p> 1 . <urn:b> <urn:p> 3 . <urn:a> <urn:z> <urn:b> . <urn:a> <urn:w> 2 . <urn:b> <urn:q> 2 . <urn:e> <urn:q> 9 }",
+        "SELECT ?s WHERE { ?s <urn:p> ?o OPTIONAL { ?s <urn:w> ?k } FILTER(EXISTS { ?t <urn:q> ?x FILTER(?x = ?k) }) }",
+        &["urn:a"],
+    ),
+    (
+        "a_filter_reading_a_row_value_left_unbound_is_false_not",
+        "INSERT DATA { <urn:a> <urn:p> 1 . <urn:b> <urn:p> 3 . <urn:a> <urn:z> <urn:b> . <urn:a> <urn:w> 2 . <urn:b> <urn:q> 2 . <urn:e> <urn:q> 9 }",
+        "SELECT ?s WHERE { ?s <urn:p> ?o OPTIONAL { ?s <urn:w> ?k } FILTER(NOT EXISTS { ?t <urn:q> ?x FILTER(?x = ?k) }) }",
+        &["urn:b"],
+    ),
+];
+
+/// Name, data, query, rows of the statement it profiles.
+const PROFILED: &[(&str, &str, &str, usize)] = &[
+    (
+        "graph_variable",
+        "INSERT DATA { GRAPH <urn:g1> { <urn:c> <urn:p> 1 . <urn:c> <urn:link> <urn:g1> . <urn:x> <urn:p> 2 . <urn:x> <urn:link> <urn:other> . <urn:y> <urn:p> 3 } GRAPH <urn:g2> { <urn:d> <urn:p> 4 . <urn:d> <urn:away> <urn:g1> } }",
+        "SELECT ?g ?s WHERE { GRAPH ?g { ?s <urn:p> ?o } }",
+        4,
+    ),
+    (
+        "graph_variable_empty_group",
+        "INSERT DATA { GRAPH <urn:g1> { <urn:c> <urn:p> 1 . <urn:c> <urn:link> <urn:g1> . <urn:x> <urn:p> 2 . <urn:x> <urn:link> <urn:other> . <urn:y> <urn:p> 3 } GRAPH <urn:g2> { <urn:d> <urn:p> 4 . <urn:d> <urn:away> <urn:g1> } }",
+        "SELECT ?g WHERE { GRAPH ?g { } }",
+        2,
+    ),
+    (
+        "graph_of_a_sub_select",
+        "INSERT DATA { GRAPH <urn:g1> { <urn:c> <urn:p> 1 . <urn:c> <urn:link> <urn:g1> . <urn:x> <urn:p> 2 . <urn:x> <urn:link> <urn:other> . <urn:y> <urn:p> 3 } GRAPH <urn:g2> { <urn:d> <urn:p> 4 . <urn:d> <urn:away> <urn:g1> } }",
+        "SELECT ?g ?c WHERE { GRAPH ?g { { SELECT (COUNT(*) AS ?c) WHERE { ?s ?p ?o } } } }",
+        2,
+    ),
+    (
+        "graph_not_in_the_dataset",
+        "INSERT DATA { GRAPH <urn:g1> { <urn:c> <urn:p> 1 . <urn:c> <urn:link> <urn:g1> . <urn:x> <urn:p> 2 . <urn:x> <urn:link> <urn:other> . <urn:y> <urn:p> 3 } GRAPH <urn:g2> { <urn:d> <urn:p> 4 . <urn:d> <urn:away> <urn:g1> } }",
+        "SELECT ?x WHERE { GRAPH <urn:nograph> { BIND(1 AS ?x) } }",
+        0,
+    ),
+    (
+        "marked_exists",
+        "INSERT DATA { <urn:a> <urn:p> 1 . <urn:b> <urn:p> 3 . <urn:a> <urn:z> <urn:b> . <urn:a> <urn:w> 2 . <urn:b> <urn:q> 2 . <urn:e> <urn:q> 9 }",
+        "SELECT ?s WHERE { ?s <urn:p> ?o FILTER(EXISTS { ?s <urn:w> ?y }) }",
+        1,
+    ),
+    (
+        "marked_not_exists",
+        "INSERT DATA { <urn:a> <urn:p> 1 . <urn:b> <urn:p> 3 . <urn:a> <urn:z> <urn:b> . <urn:a> <urn:w> 2 . <urn:b> <urn:q> 2 . <urn:e> <urn:q> 9 }",
+        "SELECT ?s WHERE { ?s <urn:p> ?o FILTER(NOT EXISTS { ?s <urn:w> ?y }) }",
+        1,
+    ),
+    (
+        "marked_reading_the_row",
+        "INSERT DATA { <urn:a> <urn:p> 1 . <urn:b> <urn:p> 3 . <urn:a> <urn:z> <urn:b> . <urn:a> <urn:w> 2 . <urn:b> <urn:q> 2 . <urn:e> <urn:q> 9 }",
+        "SELECT ?s WHERE { ?s <urn:p> ?o FILTER(EXISTS { ?t <urn:q> ?x FILTER(?x > ?o) }) }",
+        2,
+    ),
+    (
+        "marked_in_a_bind",
+        "INSERT DATA { <urn:a> <urn:p> 1 . <urn:b> <urn:p> 3 . <urn:a> <urn:z> <urn:b> . <urn:a> <urn:w> 2 . <urn:b> <urn:q> 2 . <urn:e> <urn:q> 9 }",
+        "SELECT ?s ?e WHERE { ?s <urn:p> ?o BIND(EXISTS { ?s <urn:w> ?y } AS ?e) }",
+        2,
+    ),
+];
+
+/// A sub-SELECT listing the graph's variable joins with the graph, and a row key the row leaves
+/// unbound is free in the sub-query.
+#[test]
+fn a_listed_graph_and_an_unbound_row_key_answer_by_the_join() {
+    let mut wrong = Vec::new();
+    for (name, data, query, want) in WITH_THEIR_DATA {
+        let db = GrafeoDB::new_in_memory();
+        db.session().execute_sparql(data).unwrap();
+        let found = rows_of(&db, query);
+        if found.as_ref() != Ok(&sorted(want)) {
+            wrong.push(format!(
+                "{name}: {query}\n  found {found:?}\n  want {want:?}"
+            ));
+        }
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
+
+/// `PROFILE` runs what the plain statement runs: it shows each operator, and its rows are the
+/// statement's, over `GRAPH ?g` and over a test of `EXISTS`, which the plan marks.
+#[test]
+fn profile_reads_a_graph_variable_and_a_marked_query() {
+    for (name, data, query, rows) in PROFILED {
+        let db = GrafeoDB::new_in_memory();
+        let session = db.session();
+        session.execute_sparql(data).unwrap();
+        let plain = session.execute_sparql(query).unwrap();
+        assert_eq!(plain.row_count(), *rows, "{name}");
+        let profiled = session.execute_sparql(&format!("PROFILE {query}"));
+        let profiled = profiled.unwrap_or_else(|error| panic!("{name}: {error}"));
+        let text = format!("{:?}", profiled.rows());
+        assert!(text.contains("rows"), "{name}: {text}");
+        let explained = session.execute_sparql(&format!("EXPLAIN {query}"));
+        explained.unwrap_or_else(|error| panic!("{name}: {error}"));
+        // Profiling runs the statement once and leaves the next run as it was.
+        assert_eq!(
+            session.execute_sparql(query).unwrap().rows(),
+            plain.rows(),
+            "{name}"
+        );
+    }
 }

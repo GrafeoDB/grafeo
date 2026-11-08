@@ -528,7 +528,8 @@ impl SqlPgqTranslator {
 
     // ==================== CALL Translation ====================
 
-    fn translate_call(&self, call: &ast::CallStatement) -> Result<LogicalPlan> {
+    fn translate_call(&self, query: &ast::CallQuery) -> Result<LogicalPlan> {
+        let call = &query.call;
         let arguments = call
             .arguments
             .iter()
@@ -557,63 +558,26 @@ impl SqlPgqTranslator {
             plan = wrap_filter(plan, predicate);
         }
 
-        // Apply RETURN clause (ORDER BY, SKIP, LIMIT, projection)
-        if let Some(return_clause) = &call.return_clause {
-            // Apply ORDER BY
-            if let Some(order_by) = &return_clause.order_by {
-                let keys = order_by
-                    .items
-                    .iter()
-                    .map(|item| {
-                        Ok(SortKey {
-                            expression: self.translate_expression(&item.expression, None)?,
-                            order: match item.order {
-                                ast::GqlSortOrder::Asc => SortOrder::Ascending,
-                                ast::GqlSortOrder::Desc => SortOrder::Descending,
-                            },
-                            nulls: None,
-                        })
+        if let Some(order_by) = &query.order_by {
+            let keys = order_by
+                .items
+                .iter()
+                .map(|item| {
+                    Ok(SortKey {
+                        expression: self.translate_expression(&item.expression, None)?,
+                        order: match item.order {
+                            ast::GqlSortOrder::Asc => SortOrder::Ascending,
+                            ast::GqlSortOrder::Desc => SortOrder::Descending,
+                        },
+                        nulls: None,
                     })
-                    .collect::<Result<Vec<_>>>()?;
-
-                plan = wrap_sort(plan, keys);
-            }
-
-            // Apply SKIP
-            if let Some(skip_expr) = &return_clause.skip
-                && let ast::Expression::Literal(ast::Literal::Integer(n)) = skip_expr
-            {
-                // reason: SKIP/LIMIT literals are non-negative in practice
-                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-                let count = *n as usize;
-                plan = wrap_skip(plan, count);
-            }
-
-            // Apply LIMIT
-            if let Some(limit_expr) = &return_clause.limit
-                && let ast::Expression::Literal(ast::Literal::Integer(n)) = limit_expr
-            {
-                // reason: SKIP/LIMIT literals are non-negative in practice
-                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-                let count = *n as usize;
-                plan = wrap_limit(plan, count);
-            }
-
-            // Apply RETURN projection (only when explicit items are present)
-            if !return_clause.items.is_empty() {
-                let return_items = return_clause
-                    .items
-                    .iter()
-                    .map(|item| {
-                        Ok(ReturnItem {
-                            expression: self.translate_expression(&item.expression, None)?,
-                            alias: item.alias.clone(),
-                        })
-                    })
-                    .collect::<Result<Vec<_>>>()?;
-
-                plan = wrap_return(plan, return_items, return_clause.distinct);
-            }
+                })
+                .collect::<Result<Vec<_>>>()?;
+            plan = wrap_sort(plan, keys);
+        }
+        // A LIMIT counts as a SELECT's does: a number, or a parameter filled in before planning.
+        if let Some(limit) = &query.limit {
+            plan = wrap_limit(plan, row_count(limit, "LIMIT")?);
         }
 
         Ok(LogicalPlan::new(plan))
@@ -1387,25 +1351,31 @@ fn wrap_offset_and_limit(
     mut plan: LogicalOperator,
     select: &ast::SelectStatement,
 ) -> Result<LogicalOperator> {
-    let count =
-        |value: &ast::RowCount, clause: &str| match value {
-            ast::RowCount::Literal(value) => usize::try_from(*value)
+    if let Some(offset) = &select.offset {
+        plan = wrap_skip(plan, row_count(offset, "OFFSET")?);
+    }
+    if let Some(limit) = &select.limit {
+        plan = wrap_limit(plan, row_count(limit, "LIMIT")?);
+    }
+    Ok(plan)
+}
+
+/// The count of an `OFFSET` or `LIMIT` (`clause`): a number this platform can count, or a
+/// parameter, which planning fills in and checks (see `CountExpr`).
+fn row_count(value: &ast::RowCount, clause: &str) -> Result<CountExpr> {
+    match value {
+        ast::RowCount::Literal(value) => {
+            usize::try_from(*value)
                 .map(CountExpr::Literal)
                 .map_err(|_| {
                     Error::from(QueryError::new(
                         QueryErrorKind::Semantic,
                         format!("{clause} {value} is larger than this platform can count"),
                     ))
-                }),
-            ast::RowCount::Parameter(name) => Ok(CountExpr::Parameter(name.clone())),
-        };
-    if let Some(offset) = &select.offset {
-        plan = wrap_skip(plan, count(offset, "OFFSET")?);
+                })
+        }
+        ast::RowCount::Parameter(name) => Ok(CountExpr::Parameter(name.clone())),
     }
-    if let Some(limit) = &select.limit {
-        plan = wrap_limit(plan, count(limit, "LIMIT")?);
-    }
-    Ok(plan)
 }
 
 /// The name of the first aggregate function `expr` calls, as written.

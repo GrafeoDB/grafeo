@@ -255,7 +255,9 @@ impl<V: Clone + Send + Sync + 'static> PartitionedState<V> {
         }
 
         // Create spill file
-        let mut spill_file = self.manager.create_file("partition")?;
+        let mut spill_file = self
+            .manager
+            .create_file(super::SpillOwner::Aggregate, "partition")?;
 
         // Write partition data
         let mut buf = Vec::new();

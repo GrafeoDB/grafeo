@@ -404,13 +404,14 @@ fn a_key_several_nodes_hold_none_hold_and_a_null_key() {
 }
 
 /// A key the index does not read alike is found as `=` finds it: one type's key against another's.
+/// A float of the value equals the integer 7; a string equals no number (GA04).
 #[test]
 fn a_key_of_another_kind_finds_what_equals_finds() {
-    for key in ["7.0", "'7'", "'07'"] {
+    for (key, count) in [("7.0", 3), ("'7'", 0), ("'07'", 0)] {
         let db = in_memory();
         let query = format!("MATCH (a:Start)-[:R]->(m:Far) WHERE m.k = {key} RETURN a.name");
         let wanted = rows_of(&plain(&db), Language::Gql, &query, &no_params());
-        assert_eq!(wanted.len(), 3, "{key} equals 7");
+        assert_eq!(wanted.len(), count, "{key} against 7");
         assert_eq!(
             rows_of(&db.session(), Language::Gql, &query, &no_params()),
             wanted,
@@ -1095,16 +1096,35 @@ mod cost_rule {
         }
     }
 
-    /// A source with no label and no key has nothing to compare: it turns, as it did.
+    /// A source with no label and no check has nothing to compare: it reads every node's list, which
+    /// holds all the far end's, so it turns, onto a far hub too.
     #[test]
-    fn no_label_and_no_key_always_turns() {
+    fn no_label_and_no_check_always_turns() {
         let db = hub_among_many(&[
             "MATCH (a:Start {s: 1}), (m:Far {k: 1}) UNWIND range(1, 5000) AS i INSERT (a)-[:R]->(m)",
         ]);
-        let query = "MATCH (a)-[:R]->(m:Far {k: 1}) WHERE a.s = 1 RETURN a.s, m.k";
+        let query = "MATCH (a)-[:R]->(m:Far {k: 1}) RETURN a.s, m.k";
         same_rows(&db, query);
         let plan = plan(&db, query);
         assert!(starts_at(&plan, "m"), "{plan}");
+    }
+
+    /// With a check on such a source it turns too, as 0.6.1 did: on the far hub and on a value
+    /// of one far node, the walk back reads fewer lists than every node's.
+    #[test]
+    fn no_label_and_a_check_turns_as_released() {
+        let db = hub_among_many(&[
+            "MATCH (a:Start {s: 1}), (m:Far {k: 1}) UNWIND range(1, 5000) AS i INSERT (a)-[:R]->(m)",
+        ]);
+        for query in [
+            "MATCH (a)-[:R]->(m:Far {k: 1}) WHERE a.s = 1 RETURN a.s, m.k",
+            "MATCH (a)-[:R]->(m:Far {k: 2}) WHERE a.s = 1 RETURN a.s, m.k",
+            "MATCH (a {s: 1})-[:R]->(m:Far {k: 1}) RETURN a.s, m.k",
+        ] {
+            same_rows(&db, query);
+            let plan = plan(&db, query);
+            assert!(starts_at(&plan, "m"), "{query}\n{plan}");
+        }
     }
 
     #[test]
@@ -1231,4 +1251,316 @@ mod cost_rule {
         let plan = plan(&db, query);
         assert!(starts_at(&plan, "m"), "{plan}");
     }
+}
+
+// ---------------------------------------------------------------------------
+// A check on the source lowers what the source costs
+// ---------------------------------------------------------------------------
+
+/// 512 starts, `keyed` far nodes of each with `k: 1`, and a long list on the first.
+fn pinned_source(keyed: i64, degree: i64) -> GrafeoDB {
+    let db = GrafeoDB::new_in_memory();
+    for s in 0..512 {
+        let start = db
+            .create_node_with_props(&["Start"], [("s", Value::Int64(s))])
+            .unwrap();
+        for d in 0..degree.min(if s == 0 { degree } else { 64 }) {
+            let key = if d < keyed { 1 } else { 1_000 + d };
+            let far = db
+                .create_node_with_props(&["Far"], [("k", Value::Int64(key))])
+                .unwrap();
+            db.create_edge(start, far, "R").unwrap();
+        }
+    }
+    db.session()
+        .execute("CREATE INDEX far_k FOR (n:Far) ON (n.k)")
+        .unwrap();
+    db
+}
+
+/// A source an equality pins reads few rows, with no index on its key too: the walk back through
+/// every far node holding the key loses, whatever the source's list.
+#[test]
+fn a_source_an_equality_pins_stays_at_the_source() {
+    for keyed in [1, 8] {
+        for degree in [128, 256, 512, 1_024, 4_096] {
+            let db = pinned_source(keyed, degree);
+            for (language, query) in [
+                (
+                    Language::Gql,
+                    "MATCH (a:Start {s: 0})-[:R]->(m:Far {k: 1}) RETURN m.k",
+                ),
+                (
+                    Language::Gql,
+                    "MATCH (a:Start)-[:R]->(m:Far {k: 1}) WHERE a.s = 0 RETURN m.k",
+                ),
+                (
+                    Language::Cypher,
+                    "MATCH (a:Start {s: 0})-[:R]->(m:Far {k: 1}) RETURN m.k",
+                ),
+            ] {
+                stays_at_the_source(&db, language, query);
+                assert_eq!(
+                    rows_of(&db.session(), language, query, &no_params()).len(),
+                    usize::try_from(keyed).unwrap(),
+                    "keyed {keyed}, degree {degree}: {query}"
+                );
+            }
+        }
+    }
+}
+
+/// A label of many starts, one edge each, and a far key one node holds: the source's plan reads the
+/// whole label, for an equality with no index too, and the walk back one list. It still turns, so the
+/// price of a check does not keep every source that has one.
+#[test]
+fn a_rare_far_value_on_a_large_label_still_turns() {
+    let db = GrafeoDB::new_in_memory();
+    for s in 0..100_000 {
+        let start = db
+            .create_node_with_props(&["Start"], [("s", Value::Int64(s))])
+            .unwrap();
+        let far = db
+            .create_node_with_props(&["Far"], [("k", Value::Int64(s))])
+            .unwrap();
+        db.create_edge(start, far, "R").unwrap();
+    }
+    db.session()
+        .execute("CREATE INDEX far_k FOR (n:Far) ON (n.k)")
+        .unwrap();
+    for (query, rows) in [
+        ("MATCH (a:Start)-[:R]->(m:Far {k: 77}) RETURN a.s", 1),
+        (
+            "MATCH (a:Start {s: 77})-[:R]->(m:Far {k: 77}) RETURN a.s",
+            1,
+        ),
+        (
+            "MATCH (a:Start {s: 78})-[:R]->(m:Far {k: 77}) RETURN a.s",
+            0,
+        ),
+        (
+            "MATCH (a:Start)-[:R]->(m:Far {k: 77}) WHERE a.s > 5 RETURN a.s",
+            1,
+        ),
+        (
+            "MATCH (a:Start)-[:R]->(m:Far {k: 77}) WHERE a.s > 500 RETURN a.s",
+            0,
+        ),
+        (
+            "MATCH (a)-[:R]->(m:Far {k: 77}) WHERE a.s = 77 RETURN a.s",
+            1,
+        ),
+    ] {
+        let found = rows_of(&db.session(), Language::Gql, query, &no_params());
+        assert_eq!(found.len(), rows, "{query}");
+        assert_eq!(
+            found,
+            rows_of(&unturned(&db), Language::Gql, query, &no_params()),
+            "{query}"
+        );
+        let plan = plan_of(&db.session(), Language::Gql, query, &no_params());
+        assert!(starts_at(&plan, "m"), "{query}\n{plan}");
+    }
+}
+
+/// A check of the source and a conjunct that reads both ends filter the rows the turned expand
+/// makes, the source's first, as they ran before; the target's own go with the seek.
+#[test]
+fn a_check_of_the_source_filters_after_the_turn() {
+    let db = GrafeoDB::new_in_memory();
+    for s in 0..20_000 {
+        let start = db
+            .create_node_with_props(&["Start"], [("s", Value::Int64(s))])
+            .unwrap();
+        let far = db
+            .create_node_with_props(&["Far"], [("k", Value::Int64(s)), ("n", Value::Int64(100))])
+            .unwrap();
+        db.create_edge(start, far, "R").unwrap();
+    }
+    db.session()
+        .execute("CREATE INDEX far_k FOR (n:Far) ON (n.k)")
+        .unwrap();
+    let query =
+        "MATCH (a:Start)-[:R]->(m:Far {k: 77}) WHERE m.n > a.s AND a.s > 5 AND m.n > 0 RETURN a.s";
+    let wanted = [vec![Value::Int64(77)]];
+    let found = rows_of(&db.session(), Language::Gql, query, &no_params());
+    assert_eq!(found, expected(&wanted));
+    assert_eq!(
+        found,
+        rows_of(&plain(&db), Language::Gql, query, &no_params())
+    );
+    let plan = plan_of(&db.session(), Language::Gql, query, &no_params());
+    assert!(starts_at(&plan, "m"), "{plan}");
+    let at = |text: &str| {
+        plan.find(text)
+            .unwrap_or_else(|| panic!("{text} is not in the plan\n{plan}"))
+    };
+    assert!(
+        at("a.s Gt 5") < at("m.n Gt a.s") && at("m.n Gt a.s") < at("Expand (m)"),
+        "the source's check first, both above the expand\n{plan}"
+    );
+    assert!(
+        at("Expand (m)") < at("m.n Gt 0"),
+        "the target's own under it, with the seek\n{plan}"
+    );
+}
+
+/// A source pinned by an equality, and a far value most far nodes hold: the far end is priced by a
+/// probe of the value in its index, so the common value keeps the source, and a value one far node
+/// holds still turns where the source's label is large.
+fn pinned_against_a_common_value(starts: i64, common: i64) -> GrafeoDB {
+    let db = GrafeoDB::new_in_memory();
+    let ids: Vec<_> = (0..starts)
+        .map(|s| {
+            db.create_node_with_props(&["Start"], [("s", Value::Int64(s))])
+                .unwrap()
+        })
+        .collect();
+    for n in 0..common + 4_096 {
+        let key = if n < common { 1 } else { n + 1_000 };
+        let far = db
+            .create_node_with_props(&["Far"], [("k", Value::Int64(key))])
+            .unwrap();
+        db.create_edge(ids[usize::try_from(n % starts).unwrap()], far, "R")
+            .unwrap();
+    }
+    db.session()
+        .execute("CREATE INDEX far_k FOR (n:Far) ON (n.k)")
+        .unwrap();
+    db
+}
+
+#[test]
+fn a_common_far_value_keeps_a_pinned_source() {
+    for (starts, common) in [(512, 4_096), (4_096, 32_768)] {
+        let db = pinned_against_a_common_value(starts, common);
+        for (language, query) in [
+            (
+                Language::Gql,
+                "MATCH (a:Start {s: 3})-[:R]->(m:Far {k: 1}) RETURN m.k",
+            ),
+            (
+                Language::Gql,
+                "MATCH (a:Start)-[:R]->(m:Far {k: 1}) WHERE a.s = 3 RETURN m.k",
+            ),
+            (
+                Language::Gql,
+                "MATCH (a)-[:R]->(m:Far {k: 1}) WHERE a.s = 3 RETURN m.k",
+            ),
+            (
+                Language::Cypher,
+                "MATCH (a:Start {s: 3})-[:R]->(m:Far {k: 1}) RETURN m.k",
+            ),
+        ] {
+            stays_at_the_source(&db, language, query);
+        }
+    }
+}
+
+/// The same graph, a value one far node holds: the probe finds one, so the walk back wins.
+#[test]
+fn a_rare_far_value_still_turns_a_large_pinned_source() {
+    let db = GrafeoDB::new_in_memory();
+    for s in 0..100_000 {
+        let start = db
+            .create_node_with_props(&["Start"], [("s", Value::Int64(s))])
+            .unwrap();
+        let far = db
+            .create_node_with_props(
+                &["Far"],
+                [("k", Value::Int64(if s < 50_000 { 1 } else { s }))],
+            )
+            .unwrap();
+        db.create_edge(start, far, "R").unwrap();
+    }
+    db.session()
+        .execute("CREATE INDEX far_k FOR (n:Far) ON (n.k)")
+        .unwrap();
+    for query in [
+        "MATCH (a:Start {s: 77777})-[:R]->(m:Far {k: 77777}) RETURN a.s",
+        "MATCH (a:Start)-[:R]->(m:Far {k: 77777}) WHERE a.s = 77777 RETURN a.s",
+    ] {
+        let found = rows_of(&db.session(), Language::Gql, query, &no_params());
+        assert_eq!(found.len(), 1, "{query}");
+        assert_eq!(
+            found,
+            rows_of(&unturned(&db), Language::Gql, query, &no_params()),
+            "{query}"
+        );
+        let plan = plan_of(&db.session(), Language::Gql, query, &no_params());
+        assert!(starts_at(&plan, "m"), "{query}\n{plan}");
+    }
+    // The common value on the same graph keeps the source.
+    stays_at_the_source(
+        &db,
+        Language::Gql,
+        "MATCH (a:Start {s: 3})-[:R]->(m:Far {k: 1}) RETURN m.k",
+    );
+}
+
+/// A far key most far nodes hold, and a label of few starts. The plan is made for any value, which
+/// is the limit a kept plan has, so a common value may read more than it would have: the rows hold
+/// for a common and a rare value, whichever comes first and through the same kept plan.
+#[test]
+fn a_common_far_value_on_a_small_label_gives_the_same_rows() {
+    let db = GrafeoDB::new_in_memory();
+    let starts: Vec<_> = (0..64)
+        .map(|s| {
+            db.create_node_with_props(&["Start"], [("s", Value::Int64(s))])
+                .unwrap()
+        })
+        .collect();
+    for n in 0..8_192_i64 {
+        let key = if n < 4_096 { 1 } else { n };
+        let far = db
+            .create_node_with_props(&["Far"], [("k", Value::Int64(key))])
+            .unwrap();
+        let start = starts[usize::try_from(n % 64).unwrap()];
+        db.create_edge(start, far, "R").unwrap();
+    }
+    db.session()
+        .execute("CREATE INDEX far_k FOR (n:Far) ON (n.k)")
+        .unwrap();
+    for query in [
+        "MATCH (a:Start)-[:R]->(m:Far {k: $v}) RETURN a.s, m.k",
+        "MATCH (a:Start {s: 3})-[:R]->(m:Far {k: $v}) RETURN a.s, m.k",
+        "MATCH (a:Start)-[:R]->(m:Far {k: $v}) WHERE a.s > 60 RETURN a.s, m.k",
+    ] {
+        for order in [[1, 5_000], [5_000, 1]] {
+            let kept = db.session();
+            for value in order {
+                let params = HashMap::from([("v".to_string(), Value::Int64(value))]);
+                assert_eq!(
+                    rows_of(&kept, Language::Gql, query, &params),
+                    rows_of(&plain(&db), Language::Gql, query, &params),
+                    "{query} with {value}"
+                );
+            }
+        }
+    }
+}
+
+/// No label on the source and a check few rows pass: the source's plan reads every node and few
+/// edges, the walk back every edge into the far node.
+#[test]
+fn a_selective_check_on_a_source_with_no_label_stays_at_the_source() {
+    let db = GrafeoDB::new_in_memory();
+    let hub = db
+        .create_node_with_props(&["Far"], [("id", Value::Int64(1))])
+        .unwrap();
+    for i in 0..40_000 {
+        let age = if i % 2_000 == 0 { 95 } else { 30 };
+        let a = db
+            .create_node_with_props(&["Person"], [("age", Value::Int64(age))])
+            .unwrap();
+        if i % 2 == 0 {
+            db.create_edge(a, hub, "R").unwrap();
+        }
+    }
+    db.create_property_index("id").unwrap();
+    stays_at_the_source(
+        &db,
+        Language::Gql,
+        "MATCH (a)-[:R]->(m {id: 1}) WHERE a.age > 90 RETURN a.age",
+    );
 }

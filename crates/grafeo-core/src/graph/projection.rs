@@ -533,6 +533,14 @@ impl GraphStore for GraphProjection {
         }
     }
 
+    fn index_kinds(
+        &self,
+        labels: &[&str],
+        property: &str,
+    ) -> Option<crate::execution::operators::value_utils::ValueKinds> {
+        self.inner.index_kinds(labels, property)
+    }
+
     fn find_nodes_maybe_equal(
         &self,
         property: &str,
@@ -548,23 +556,10 @@ impl GraphStore for GraphProjection {
     fn find_nodes_in_range(
         &self,
         property: &str,
-        min: Option<&Value>,
-        max: Option<&Value>,
-        min_inclusive: bool,
-        max_inclusive: bool,
+        range: &crate::graph::ValueRange,
         view: ReadView,
     ) -> Result<Vec<NodeId>> {
-        self.projected(
-            self.inner.find_nodes_in_range(
-                property,
-                min,
-                max,
-                min_inclusive,
-                max_inclusive,
-                view,
-            )?,
-            view,
-        )
+        self.projected(self.inner.find_nodes_in_range(property, range, view)?, view)
     }
 
     fn node_property_might_match(
@@ -1145,8 +1140,18 @@ mod tests {
                 [jules]
             );
             assert_eq!(
-                proj.find_nodes_in_range("age", Some(&age), None, true, false, own)
-                    .unwrap(),
+                proj.find_nodes_in_range(
+                    "age",
+                    &crate::graph::ValueRange::new(
+                        Some(&age),
+                        None,
+                        true,
+                        false,
+                        crate::execution::operators::value_utils::AcrossKinds::Apart
+                    ),
+                    own
+                )
+                .unwrap(),
                 [jules]
             );
             assert_eq!(
@@ -1692,10 +1697,13 @@ mod tests {
         let found = proj
             .find_nodes_in_range(
                 "age",
-                Some(&min),
-                Some(&max),
-                true,
-                true,
+                &crate::graph::ValueRange::new(
+                    Some(&min),
+                    Some(&max),
+                    true,
+                    true,
+                    crate::execution::operators::value_utils::AcrossKinds::Apart,
+                ),
                 ReadView::latest(),
             )
             .unwrap();
@@ -1716,10 +1724,13 @@ mod tests {
         let found = proj
             .find_nodes_in_range(
                 "age",
-                Some(&min),
-                Some(&max),
-                true,
-                true,
+                &crate::graph::ValueRange::new(
+                    Some(&min),
+                    Some(&max),
+                    true,
+                    true,
+                    crate::execution::operators::value_utils::AcrossKinds::Apart,
+                ),
                 ReadView::latest(),
             )
             .unwrap();

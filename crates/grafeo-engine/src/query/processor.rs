@@ -54,6 +54,20 @@ pub enum QueryLanguage {
 }
 
 impl QueryLanguage {
+    /// What this language's `=` gives two values of two kinds: an error in SQL/PGQ (its
+    /// comparands must be comparable, ISO/IEC 9075-2 8.2), false in the others.
+    #[must_use]
+    pub const fn equal_across_kinds(
+        &self,
+    ) -> grafeo_core::execution::operators::value_utils::EqualAcrossKinds {
+        use grafeo_core::execution::operators::value_utils::EqualAcrossKinds;
+        #[cfg(feature = "sql-pgq")]
+        if matches!(self, Self::SqlPgq) {
+            return EqualAcrossKinds::Raises;
+        }
+        EqualAcrossKinds::False
+    }
+
     /// Returns whether this language targets LPG (vs RDF).
     #[must_use]
     pub const fn is_lpg(&self) -> bool {
@@ -449,7 +463,8 @@ impl QueryProcessor {
 
         // 6. Execute and collect results
         let executor = Executor::with_columns(physical_plan.columns.clone())
-            .with_read_counter(planner.read_counter());
+            .with_read_counter(planner.read_counter())
+            .with_warnings(planner.warnings());
         let result = executor.execute(physical_plan.operator.as_mut())?;
 
         // Add execution metrics (the executor set `rows_scanned`).
@@ -648,11 +663,13 @@ impl QueryProcessor {
 
                 let tree =
                     crate::query::profile::build_profile_tree(&optimized_plan.root, entries)?;
-                return Ok(crate::query::profile::profile_result(&tree, elapsed_ms));
+                return Ok(crate::query::profile::profile_result(&tree, elapsed_ms)
+                    .with_warnings(planner.warnings().raised()));
             }
 
             let mut physical_plan = planner.plan(&optimized_plan)?;
-            let executor = Executor::with_columns(physical_plan.columns.clone());
+            let executor = Executor::with_columns(physical_plan.columns.clone())
+                .with_warnings(planner.warnings());
             executor
                 .execute(physical_plan.operator.as_mut())
                 .map(|result| result.with_kind(optimized_plan.result_kind))
@@ -1014,6 +1031,8 @@ pub(crate) fn explain_result(
         counters: Default::default(),
         profile: None,
         kind: crate::database::ResultKind::Rows,
+        // EXPLAIN runs nothing: the warnings its translation found.
+        warnings: plan.warnings.to_query_warnings(),
     }
 }
 
@@ -1040,6 +1059,7 @@ pub(crate) fn physical_explain_result(
         counters: Default::default(),
         profile: None,
         kind: crate::database::ResultKind::Rows,
+        warnings: plan.warnings.to_query_warnings(),
     })
 }
 
@@ -1119,6 +1139,15 @@ pub(crate) fn refuse_deep_params(
     )))
 }
 
+/// Whether `plan` still names a parameter no value fills (an `EXPLAIN` given no values):
+/// substituting no values fails exactly then, by the one walk that fills them. `EXPLAIN` asks
+/// it, in the languages that answer `EXPLAIN` (see the session's `explain_or_profile`).
+#[cfg(any(feature = "gql", feature = "gremlin"))]
+#[must_use]
+pub(crate) fn has_unresolved_parameters(plan: &LogicalPlan) -> bool {
+    substitute_params(&mut plan.clone(), &QueryParams::new()).is_err()
+}
+
 /// Substitutes parameters in a logical plan with their values.
 ///
 /// # Errors
@@ -1140,8 +1169,15 @@ pub fn substitute_params(plan: &mut LogicalPlan, params: &QueryParams) -> Result
     let params = Substitution {
         values: params,
         clauses: plan.count_clauses,
+        renamed_keys: std::cell::RefCell::new(HashMap::new()),
     };
-    substitute_in_operator(&mut plan.root, &params)
+    substitute_in_operator(&mut plan.root, &params)?;
+    // A grouping key is a column named by its text, which the operators above read it by: a key
+    // the values rewrote (`$p + 1` is now `1 + 1`) keeps being read so, under its new name.
+    if !params.renamed_keys.borrow().is_empty() {
+        substitute_in_operator(&mut plan.root, &params)?;
+    }
+    Ok(())
 }
 
 /// The values a plan's parameters take, and what its statement calls the
@@ -1149,6 +1185,8 @@ pub fn substitute_params(plan: &mut LogicalPlan, params: &QueryParams) -> Result
 struct Substitution<'a> {
     values: &'a QueryParams,
     clauses: crate::query::plan::CountClauses,
+    /// The grouping keys whose text the values changed: the old column name, then the new.
+    renamed_keys: std::cell::RefCell<HashMap<String, String>>,
 }
 
 /// Recursively substitutes parameters in an operator.
@@ -1214,7 +1252,12 @@ fn substitute_in_operator(op: &mut LogicalOperator, params: &Substitution<'_>) -
         }
         LogicalOperator::Aggregate(agg) => {
             for expr in &mut agg.group_by {
+                let before = crate::query::planner::common::expression_to_string(expr);
                 substitute_in_expression(expr, params)?;
+                let after = crate::query::planner::common::expression_to_string(expr);
+                if before != after {
+                    params.renamed_keys.borrow_mut().insert(before, after);
+                }
             }
             for agg_expr in &mut agg.aggregates {
                 for expr in [&mut agg_expr.expression, &mut agg_expr.expression2]
@@ -1297,7 +1340,9 @@ fn substitute_in_operator(op: &mut LogicalOperator, params: &Substitution<'_>) -
             substitute_in_expression(&mut bind.expression, params)?;
             substitute_in_operator(&mut bind.input, params)?;
         }
-        LogicalOperator::PropertyPath(_) | LogicalOperator::NamedGraphs(_) => {}
+        LogicalOperator::PropertyPath(_)
+        | LogicalOperator::NamedGraphs(_)
+        | LogicalOperator::RowValues(_) => {}
         LogicalOperator::InNamedGraph(graph) => substitute_in_operator(&mut graph.input, params)?,
         LogicalOperator::TripleScan(scan) => {
             if let Some(input) = &mut scan.input {
@@ -1521,8 +1566,13 @@ fn substitute_in_expression(expr: &mut LogicalExpression, params: &Substitution<
                 substitute_in_expression(el, params)?;
             }
         }
+        // A read of a grouping key the values renamed (see `Substitution::renamed_keys`).
+        LogicalExpression::Variable(name) => {
+            if let Some(renamed) = params.renamed_keys.borrow().get(name.as_str()) {
+                name.clone_from(renamed);
+            }
+        }
         LogicalExpression::Property { .. }
-        | LogicalExpression::Variable(_)
         | LogicalExpression::Literal(_)
         | LogicalExpression::Labels(_)
         | LogicalExpression::Type(_)
@@ -1594,6 +1644,77 @@ mod tests {
             .map(|(key, value)| (PropertyKey::new(key), value))
             .collect();
         store.create_node_with_props(labels, &properties)
+    }
+
+    /// #728 (`lpg/filter.rs:1399`): a lookup of `n.k` over `n:A|B` reads A's index and the column of
+    /// B's other nodes. Planned while A's index is there and run after it is dropped, it still finds
+    /// every node with the key: A's nodes come from the column then, as with no index at all.
+    #[cfg(feature = "gql")]
+    #[test]
+    fn an_index_dropped_between_planning_and_the_read_loses_no_row() {
+        let store = Arc::new(RowGroupStore::new());
+        for i in 0..300_i64 {
+            with_props(
+                &store,
+                &["A"],
+                [
+                    ("name", Value::from(format!("a{i}").as_str())),
+                    ("k", Value::Int64(i % 3)),
+                ],
+            );
+            with_props(
+                &store,
+                &["B"],
+                [
+                    ("name", Value::from(format!("b{i}").as_str())),
+                    ("k", Value::Int64(i % 3)),
+                ],
+            );
+        }
+        with_props(
+            &store,
+            &["A", "B"],
+            [("name", Value::from("ab")), ("k", Value::Int64(1))],
+        );
+        store.create_label_index("A", "k");
+        let processor = QueryProcessor::for_lpg(Arc::clone(&store));
+        let query = "MATCH (n:A|B) WHERE n.k = 1 RETURN n.name AS name";
+        let names = |result: QueryResult| -> Vec<String> {
+            let mut names: Vec<String> = result
+                .rows()
+                .iter()
+                .map(|row| row[0].as_str().unwrap().to_string())
+                .collect();
+            names.sort();
+            names
+        };
+        let wanted = names(processor.process(query, QueryLanguage::Gql, None).unwrap());
+        assert_eq!(wanted.len(), 201, "100 A, 100 B and the node with both");
+
+        // The route under test: A's index with the rest read from the column.
+        let plan = processor
+            .process(&format!("EXPLAIN {query}"), QueryLanguage::Gql, None)
+            .unwrap();
+        let plan_text = format!("{:?}", plan.rows());
+        assert!(
+            plan_text.contains("[indexes and remainder: k]"),
+            "the lookup reads A's index and the column: {plan_text}"
+        );
+
+        // Planned now, run after A's index is gone.
+        let logical = processor.translate_lpg(query, QueryLanguage::Gql).unwrap();
+        Binder::new().bind(&logical).unwrap();
+        let optimized = processor.optimizer.optimize(logical).unwrap();
+        let planner = Planner::new(
+            Arc::clone(&store) as Arc<dyn GraphStore>,
+            processor.transaction_manager.current_epoch(),
+        );
+        let mut physical = planner.plan(&optimized).unwrap();
+        assert!(store.drop_label_index("A", "k"), "A's index existed");
+        let result = Executor::with_columns(physical.columns.clone())
+            .execute(physical.operator.as_mut())
+            .unwrap();
+        assert_eq!(names(result), wanted, "A's nodes are read from the column");
     }
 
     #[test]

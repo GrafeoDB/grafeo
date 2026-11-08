@@ -117,7 +117,9 @@ pub use mutation::{
     CreateStep, DeleteEdgeOperator, DeleteNodeOperator, PropertySource, RemoveLabelOperator,
     SetPropertyOperator,
 };
-pub use node_seek::{NodeSeekOperator, SeekKey, find_through_label_indexes};
+pub use node_seek::{
+    NodeSeekOperator, SeekKey, find_indexed_as_compared, find_through_label_indexes,
+};
 pub use parameter_scan::{ParameterScanOperator, ParameterState};
 pub use project::{EntityValue, ProjectExpr, ProjectOperator};
 pub use push::{
@@ -247,6 +249,11 @@ pub trait ChangeRecorder: WriteClaims {
         before: Before,
         version: PendingVersion,
     ) -> Result<(), OperatorError>;
+
+    /// Notes a write the store committed at once without a before-image
+    /// ([`Applied::Committed`](crate::graph::apply::Applied::Committed)): nothing to
+    /// record, but something changed. The default does nothing.
+    fn committed(&self) {}
 
     /// Whether this recorder takes bulk writes (see
     /// [`GraphWriter::create_nodes`] and [`GraphWriter::create_edges`]), and
@@ -551,6 +558,16 @@ impl OperatorError {
     pub fn invalid_value_type(message: impl Into<String>) -> Self {
         Self::query_data(
             grafeo_common::utils::error::QueryErrorKind::InvalidValueType,
+            message,
+        )
+    }
+
+    /// An operand of a kind its operator does not take, found as the statement
+    /// runs (GQLSTATUS 22G12); `message` names the operator and the operands.
+    #[must_use]
+    pub fn wrong_kind(message: impl Into<String>) -> Self {
+        Self::query_data(
+            grafeo_common::utils::error::QueryErrorKind::WrongKind,
             message,
         )
     }

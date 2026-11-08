@@ -3,6 +3,8 @@ library;
 
 import 'dart:ffi';
 
+import 'package:ffi/ffi.dart';
+
 /// Opaque pointer to a Grafeo database.
 typedef GrafeoDatabasePtr = Pointer<Void>;
 
@@ -90,6 +92,11 @@ class QueryResult {
   /// (SPARQL CONSTRUCT and DESCRIBE).
   final ResultKind kind;
 
+  /// The warnings the statement raised, ordered by code: a deprecated form it
+  /// wrote or ran, or a notice; empty when there were none. Experimental
+  /// (0.6.2+).
+  final List<QueryWarning> warnings;
+
   const QueryResult({
     required this.columns,
     required this.rows,
@@ -99,6 +106,7 @@ class QueryResult {
     required this.rowsScanned,
     this.counters = WriteCounters.none,
     this.kind = ResultKind.rows,
+    this.warnings = const [],
   });
 
   /// The answer of a SPARQL ASK; `null` for every other result.
@@ -110,6 +118,50 @@ class QueryResult {
   String toString() =>
       'QueryResult(${rows.length} rows, ${nodes.length} nodes, '
       '${edges.length} edges, ${executionTimeMs.toStringAsFixed(2)}ms)';
+}
+
+/// A warning a statement raised. Experimental (0.6.2+): new warnings and
+/// kinds may be added in any release.
+class QueryWarning {
+  /// Its GQLSTATUS code, of class 01 (for example `01X01`).
+  final String code;
+
+  /// `deprecation` or `notice`.
+  final String kind;
+
+  /// What it says, naming the replacement of a deprecated form.
+  final String message;
+
+  const QueryWarning(this.code, this.kind, this.message);
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      (other is QueryWarning &&
+          other.code == code &&
+          other.kind == kind &&
+          other.message == message);
+
+  @override
+  int get hashCode => Object.hash(code, kind, message);
+
+  @override
+  String toString() => 'QueryWarning($code, $kind: $message)';
+}
+
+/// The warnings [count] says there are, read through the accessors.
+List<QueryWarning> readWarnings(
+  int count,
+  Pointer<Utf8> Function(int index) code,
+  Pointer<Utf8> Function(int index) kind,
+  Pointer<Utf8> Function(int index) message,
+) {
+  String text(Pointer<Utf8> pointer) =>
+      pointer == nullptr ? '' : pointer.toDartString();
+  return [
+    for (var index = 0; index < count; index++)
+      QueryWarning(text(code(index)), text(kind(index)), text(message(index))),
+  ];
 }
 
 /// What a write statement changed.

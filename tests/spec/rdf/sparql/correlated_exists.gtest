@@ -1,0 +1,442 @@
+# SPARQL EXISTS that reads the row: its values are substituted into the pattern (SPARQL 1.1 sec 18.6),
+# and what cannot yet be read so is refused, never answered wrongly. The positions of EXISTS as an
+# expression. Generated with the Rust tests in sparql_correlated_exists.rs.
+
+meta:
+  language: sparql
+  model: rdf
+  section: "18.6"
+  title: EXISTS that reads the row
+  dataset: empty
+  requires: [sparql, rdf]
+
+tests:
+
+  - name: reads_the_row_shared_exists
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:a> <urn:q> 2 . <urn:a> <urn:q> 3 . <urn:a> <urn:r> 0 . <urn:b> <urn:p> 3 . <urn:b> <urn:q> 2 . <urn:b> <urn:t> 0 . <urn:e> <urn:q> 9 . GRAPH <urn:g1> { <urn:c> <urn:p> 1 . <urn:c> <urn:q> 2 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:d> <urn:q> 2 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT ?s WHERE { ?s <urn:p> ?o FILTER(EXISTS { ?s <urn:q> ?x FILTER(?x > ?o) }) }"
+    expect:
+      rows:
+        - ["urn:a"]
+
+  - name: reads_the_row_shared_not_exists
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:a> <urn:q> 2 . <urn:a> <urn:q> 3 . <urn:a> <urn:r> 0 . <urn:b> <urn:p> 3 . <urn:b> <urn:q> 2 . <urn:b> <urn:t> 0 . <urn:e> <urn:q> 9 . GRAPH <urn:g1> { <urn:c> <urn:p> 1 . <urn:c> <urn:q> 2 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:d> <urn:q> 2 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT ?s WHERE { ?s <urn:p> ?o FILTER(NOT EXISTS { ?s <urn:q> ?x FILTER(?x > ?o) }) }"
+    expect:
+      rows:
+        - ["urn:b"]
+
+  - name: reads_the_row_no_shared_exists
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:a> <urn:q> 2 . <urn:a> <urn:q> 3 . <urn:a> <urn:r> 0 . <urn:b> <urn:p> 3 . <urn:b> <urn:q> 2 . <urn:b> <urn:t> 0 . <urn:e> <urn:q> 9 . GRAPH <urn:g1> { <urn:c> <urn:p> 1 . <urn:c> <urn:q> 2 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:d> <urn:q> 2 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT ?s WHERE { ?s <urn:p> ?o FILTER(EXISTS { ?t <urn:q> ?x FILTER(?x > ?o) }) }"
+    expect:
+      rows:
+        - ["urn:a"]
+        - ["urn:b"]
+
+  - name: reads_the_row_no_shared_not_exists
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:a> <urn:q> 2 . <urn:a> <urn:q> 3 . <urn:a> <urn:r> 0 . <urn:b> <urn:p> 3 . <urn:b> <urn:q> 2 . <urn:b> <urn:t> 0 . <urn:e> <urn:q> 9 . GRAPH <urn:g1> { <urn:c> <urn:p> 1 . <urn:c> <urn:q> 2 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:d> <urn:q> 2 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT ?s WHERE { ?s <urn:p> ?o FILTER(NOT EXISTS { ?t <urn:q> ?x FILTER(?x > ?o) }) }"
+    expect:
+      empty: true
+
+  - name: reads_the_row_no_shared_exists_none_above
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:a> <urn:q> 2 . <urn:a> <urn:q> 3 . <urn:a> <urn:r> 0 . <urn:b> <urn:p> 3 . <urn:b> <urn:q> 2 . <urn:b> <urn:t> 0 . <urn:e> <urn:q> 9 . GRAPH <urn:g1> { <urn:c> <urn:p> 1 . <urn:c> <urn:q> 2 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:d> <urn:q> 2 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT ?s WHERE { ?s <urn:p> ?o FILTER(EXISTS { ?t <urn:q> ?x FILTER(?x > ?o && ?x < 9) }) }"
+    expect:
+      rows:
+        - ["urn:a"]
+
+  - name: reads_the_row_no_shared_not_exists_none_above
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:a> <urn:q> 2 . <urn:a> <urn:q> 3 . <urn:a> <urn:r> 0 . <urn:b> <urn:p> 3 . <urn:b> <urn:q> 2 . <urn:b> <urn:t> 0 . <urn:e> <urn:q> 9 . GRAPH <urn:g1> { <urn:c> <urn:p> 1 . <urn:c> <urn:q> 2 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:d> <urn:q> 2 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT ?s WHERE { ?s <urn:p> ?o FILTER(NOT EXISTS { ?t <urn:q> ?x FILTER(?x > ?o && ?x < 9) }) }"
+    expect:
+      rows:
+        - ["urn:b"]
+
+  - name: reads_the_row_conjunct_and_a_local
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:a> <urn:q> 2 . <urn:a> <urn:q> 3 . <urn:a> <urn:r> 0 . <urn:b> <urn:p> 3 . <urn:b> <urn:q> 2 . <urn:b> <urn:t> 0 . <urn:e> <urn:q> 9 . GRAPH <urn:g1> { <urn:c> <urn:p> 1 . <urn:c> <urn:q> 2 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:d> <urn:q> 2 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT ?s WHERE { ?s <urn:p> ?o FILTER(EXISTS { ?s <urn:q> ?x FILTER(?x > ?o && ?x < 3) }) }"
+    expect:
+      rows:
+        - ["urn:a"]
+
+  - name: reads_the_row_conjunct_and_a_local_finds_none
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:a> <urn:q> 2 . <urn:a> <urn:q> 3 . <urn:a> <urn:r> 0 . <urn:b> <urn:p> 3 . <urn:b> <urn:q> 2 . <urn:b> <urn:t> 0 . <urn:e> <urn:q> 9 . GRAPH <urn:g1> { <urn:c> <urn:p> 1 . <urn:c> <urn:q> 2 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:d> <urn:q> 2 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT ?s WHERE { ?s <urn:p> ?o FILTER(EXISTS { ?s <urn:q> ?x FILTER(?x > ?o && ?x < 2) }) }"
+    expect:
+      empty: true
+
+  - name: reads_the_row_conjunct_and_a_local_not_exists
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:a> <urn:q> 2 . <urn:a> <urn:q> 3 . <urn:a> <urn:r> 0 . <urn:b> <urn:p> 3 . <urn:b> <urn:q> 2 . <urn:b> <urn:t> 0 . <urn:e> <urn:q> 9 . GRAPH <urn:g1> { <urn:c> <urn:p> 1 . <urn:c> <urn:q> 2 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:d> <urn:q> 2 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT ?s WHERE { ?s <urn:p> ?o FILTER(NOT EXISTS { ?s <urn:q> ?x FILTER(?x > ?o && ?x < 2) }) }"
+    expect:
+      rows:
+        - ["urn:a"]
+        - ["urn:b"]
+
+  - name: reads_the_row_two_filters
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:a> <urn:q> 2 . <urn:a> <urn:q> 3 . <urn:a> <urn:r> 0 . <urn:b> <urn:p> 3 . <urn:b> <urn:q> 2 . <urn:b> <urn:t> 0 . <urn:e> <urn:q> 9 . GRAPH <urn:g1> { <urn:c> <urn:p> 1 . <urn:c> <urn:q> 2 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:d> <urn:q> 2 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT ?s WHERE { ?s <urn:p> ?o FILTER(EXISTS { ?s <urn:q> ?x FILTER(?x > ?o) FILTER(?x = 3) }) }"
+    expect:
+      rows:
+        - ["urn:a"]
+
+  - name: reads_the_row_two_row_conjuncts
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:a> <urn:q> 2 . <urn:a> <urn:q> 3 . <urn:a> <urn:r> 0 . <urn:b> <urn:p> 3 . <urn:b> <urn:q> 2 . <urn:b> <urn:t> 0 . <urn:e> <urn:q> 9 . GRAPH <urn:g1> { <urn:c> <urn:p> 1 . <urn:c> <urn:q> 2 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:d> <urn:q> 2 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT ?s WHERE { ?s <urn:p> ?o FILTER(EXISTS { ?s <urn:q> ?x FILTER(?x > ?o) FILTER(?x <= ?o + 1) }) }"
+    expect:
+      rows:
+        - ["urn:a"]
+
+  - name: reads_the_row_an_or_is_one_conjunct
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:a> <urn:q> 2 . <urn:a> <urn:q> 3 . <urn:a> <urn:r> 0 . <urn:b> <urn:p> 3 . <urn:b> <urn:q> 2 . <urn:b> <urn:t> 0 . <urn:e> <urn:q> 9 . GRAPH <urn:g1> { <urn:c> <urn:p> 1 . <urn:c> <urn:q> 2 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:d> <urn:q> 2 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT ?s WHERE { ?s <urn:p> ?o FILTER(EXISTS { ?s <urn:q> ?x FILTER(?x > ?o || ?x = 2) }) }"
+    expect:
+      rows:
+        - ["urn:a"]
+        - ["urn:b"]
+
+  - name: reads_the_row_the_row_on_both_sides
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:a> <urn:q> 2 . <urn:a> <urn:q> 3 . <urn:a> <urn:r> 0 . <urn:b> <urn:p> 3 . <urn:b> <urn:q> 2 . <urn:b> <urn:t> 0 . <urn:e> <urn:q> 9 . GRAPH <urn:g1> { <urn:c> <urn:p> 1 . <urn:c> <urn:q> 2 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:d> <urn:q> 2 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT ?s WHERE { ?s <urn:p> ?o FILTER(EXISTS { ?s <urn:q> ?x FILTER(?o + ?x = 5) }) }"
+    expect:
+      rows:
+        - ["urn:b"]
+
+  - name: reads_the_row_the_row_alone
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:a> <urn:q> 2 . <urn:a> <urn:q> 3 . <urn:a> <urn:r> 0 . <urn:b> <urn:p> 3 . <urn:b> <urn:q> 2 . <urn:b> <urn:t> 0 . <urn:e> <urn:q> 9 . GRAPH <urn:g1> { <urn:c> <urn:p> 1 . <urn:c> <urn:q> 2 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:d> <urn:q> 2 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT ?s WHERE { ?s <urn:p> ?o FILTER(EXISTS { ?s <urn:q> ?x FILTER(?o = 3) }) }"
+    expect:
+      rows:
+        - ["urn:b"]
+
+  - name: reads_the_row_unbound_in_the_row_is_false
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:a> <urn:q> 2 . <urn:a> <urn:q> 3 . <urn:a> <urn:r> 0 . <urn:b> <urn:p> 3 . <urn:b> <urn:q> 2 . <urn:b> <urn:t> 0 . <urn:e> <urn:q> 9 . GRAPH <urn:g1> { <urn:c> <urn:p> 1 . <urn:c> <urn:q> 2 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:d> <urn:q> 2 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT ?s WHERE { ?s <urn:p> ?o OPTIONAL { ?s <urn:r> ?w } FILTER(EXISTS { ?s <urn:q> ?x FILTER(?x > ?w) }) }"
+    expect:
+      rows:
+        - ["urn:a"]
+
+  - name: reads_the_row_unbound_in_the_row_not_exists
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:a> <urn:q> 2 . <urn:a> <urn:q> 3 . <urn:a> <urn:r> 0 . <urn:b> <urn:p> 3 . <urn:b> <urn:q> 2 . <urn:b> <urn:t> 0 . <urn:e> <urn:q> 9 . GRAPH <urn:g1> { <urn:c> <urn:p> 1 . <urn:c> <urn:q> 2 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:d> <urn:q> 2 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT ?s WHERE { ?s <urn:p> ?o OPTIONAL { ?s <urn:r> ?w } FILTER(NOT EXISTS { ?s <urn:q> ?x FILTER(?x > ?w) }) }"
+    expect:
+      rows:
+        - ["urn:b"]
+
+  - name: reads_the_row_unbound_in_the_other_row
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:a> <urn:q> 2 . <urn:a> <urn:q> 3 . <urn:a> <urn:r> 0 . <urn:b> <urn:p> 3 . <urn:b> <urn:q> 2 . <urn:b> <urn:t> 0 . <urn:e> <urn:q> 9 . GRAPH <urn:g1> { <urn:c> <urn:p> 1 . <urn:c> <urn:q> 2 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:d> <urn:q> 2 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT ?s WHERE { ?s <urn:p> ?o OPTIONAL { ?s <urn:t> ?w } FILTER(EXISTS { ?s <urn:q> ?x FILTER(?x > ?w) }) }"
+    expect:
+      rows:
+        - ["urn:b"]
+
+  - name: reads_the_row_unbound_read_by_bound
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:a> <urn:q> 2 . <urn:a> <urn:q> 3 . <urn:a> <urn:r> 0 . <urn:b> <urn:p> 3 . <urn:b> <urn:q> 2 . <urn:b> <urn:t> 0 . <urn:e> <urn:q> 9 . GRAPH <urn:g1> { <urn:c> <urn:p> 1 . <urn:c> <urn:q> 2 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:d> <urn:q> 2 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT ?s WHERE { ?s <urn:p> ?o OPTIONAL { ?s <urn:r> ?w } FILTER(EXISTS { ?s <urn:q> ?x FILTER(BOUND(?w)) }) }"
+    expect:
+      rows:
+        - ["urn:a"]
+
+  - name: reads_the_row_unbound_read_by_coalesce
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:a> <urn:q> 2 . <urn:a> <urn:q> 3 . <urn:a> <urn:r> 0 . <urn:b> <urn:p> 3 . <urn:b> <urn:q> 2 . <urn:b> <urn:t> 0 . <urn:e> <urn:q> 9 . GRAPH <urn:g1> { <urn:c> <urn:p> 1 . <urn:c> <urn:q> 2 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:d> <urn:q> 2 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT ?s WHERE { ?s <urn:p> ?o OPTIONAL { ?s <urn:r> ?w } FILTER(EXISTS { ?s <urn:q> ?x FILTER(COALESCE(?w, 5) > 1) }) }"
+    expect:
+      rows:
+        - ["urn:b"]
+
+  - name: reads_the_row_two_found_one_row
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:a> <urn:q> 2 . <urn:a> <urn:q> 3 . <urn:a> <urn:r> 0 . <urn:b> <urn:p> 3 . <urn:b> <urn:q> 2 . <urn:b> <urn:t> 0 . <urn:e> <urn:q> 9 . GRAPH <urn:g1> { <urn:c> <urn:p> 1 . <urn:c> <urn:q> 2 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:d> <urn:q> 2 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT ?s ?o WHERE { ?s <urn:p> ?o FILTER(EXISTS { ?s <urn:q> ?x FILTER(?x > ?o) }) }"
+    expect:
+      rows:
+        - ["urn:a", 1]
+
+  - name: reads_the_row_count_of_rows
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:a> <urn:q> 2 . <urn:a> <urn:q> 3 . <urn:a> <urn:r> 0 . <urn:b> <urn:p> 3 . <urn:b> <urn:q> 2 . <urn:b> <urn:t> 0 . <urn:e> <urn:q> 9 . GRAPH <urn:g1> { <urn:c> <urn:p> 1 . <urn:c> <urn:q> 2 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:d> <urn:q> 2 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT (COUNT(*) AS ?c) WHERE { ?s <urn:p> ?o FILTER(EXISTS { ?t <urn:q> ?x FILTER(?x > ?o) }) }"
+    expect:
+      rows:
+        - [2]
+
+  - name: reads_the_row_no_row_variable_read
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:a> <urn:q> 2 . <urn:a> <urn:q> 3 . <urn:a> <urn:r> 0 . <urn:b> <urn:p> 3 . <urn:b> <urn:q> 2 . <urn:b> <urn:t> 0 . <urn:e> <urn:q> 9 . GRAPH <urn:g1> { <urn:c> <urn:p> 1 . <urn:c> <urn:q> 2 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:d> <urn:q> 2 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT ?s WHERE { ?s <urn:p> ?o FILTER(EXISTS { ?s <urn:q> ?x FILTER(?x > 2) }) }"
+    expect:
+      rows:
+        - ["urn:a"]
+
+  - name: reads_the_row_in_a_bind
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:a> <urn:q> 2 . <urn:a> <urn:q> 3 . <urn:a> <urn:r> 0 . <urn:b> <urn:p> 3 . <urn:b> <urn:q> 2 . <urn:b> <urn:t> 0 . <urn:e> <urn:q> 9 . GRAPH <urn:g1> { <urn:c> <urn:p> 1 . <urn:c> <urn:q> 2 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:d> <urn:q> 2 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT ?s ?e WHERE { ?s <urn:p> ?o BIND(EXISTS { ?s <urn:q> ?x FILTER(?x > ?o) } AS ?e) }"
+    expect:
+      rows:
+        - ["urn:a", true]
+        - ["urn:b", false]
+
+  - name: reads_the_row_in_a_projection
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:a> <urn:q> 2 . <urn:a> <urn:q> 3 . <urn:a> <urn:r> 0 . <urn:b> <urn:p> 3 . <urn:b> <urn:q> 2 . <urn:b> <urn:t> 0 . <urn:e> <urn:q> 9 . GRAPH <urn:g1> { <urn:c> <urn:p> 1 . <urn:c> <urn:q> 2 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:d> <urn:q> 2 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT ?s (EXISTS { ?s <urn:q> ?x FILTER(?x > ?o) } AS ?e) WHERE { ?s <urn:p> ?o }"
+    expect:
+      rows:
+        - ["urn:a", true]
+        - ["urn:b", false]
+
+  - name: reads_the_row_in_an_if
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:a> <urn:q> 2 . <urn:a> <urn:q> 3 . <urn:a> <urn:r> 0 . <urn:b> <urn:p> 3 . <urn:b> <urn:q> 2 . <urn:b> <urn:t> 0 . <urn:e> <urn:q> 9 . GRAPH <urn:g1> { <urn:c> <urn:p> 1 . <urn:c> <urn:q> 2 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:d> <urn:q> 2 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT ?s WHERE { ?s <urn:p> ?o FILTER(IF(EXISTS { ?s <urn:q> ?x FILTER(?x > ?o) }, ?o = 1, ?o = 9)) }"
+    expect:
+      rows:
+        - ["urn:a"]
+
+  - name: reads_the_row_under_an_and
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:a> <urn:q> 2 . <urn:a> <urn:q> 3 . <urn:a> <urn:r> 0 . <urn:b> <urn:p> 3 . <urn:b> <urn:q> 2 . <urn:b> <urn:t> 0 . <urn:e> <urn:q> 9 . GRAPH <urn:g1> { <urn:c> <urn:p> 1 . <urn:c> <urn:q> 2 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:d> <urn:q> 2 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT ?s WHERE { ?s <urn:p> ?o FILTER(?o > 0 && EXISTS { ?s <urn:q> ?x FILTER(?x > ?o) }) }"
+    expect:
+      rows:
+        - ["urn:a"]
+
+  - name: reads_the_row_inside_each_graph
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:a> <urn:q> 2 . <urn:a> <urn:q> 3 . <urn:a> <urn:r> 0 . <urn:b> <urn:p> 3 . <urn:b> <urn:q> 2 . <urn:b> <urn:t> 0 . <urn:e> <urn:q> 9 . GRAPH <urn:g1> { <urn:c> <urn:p> 1 . <urn:c> <urn:q> 2 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:d> <urn:q> 2 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT ?g ?s WHERE { GRAPH ?g { ?s <urn:p> ?o FILTER(EXISTS { ?s <urn:q> ?x FILTER(?x > ?o) }) } }"
+    expect:
+      rows:
+        - ["urn:g1", "urn:c"]
+
+  - name: reads_the_row_inside_each_graph_not_exists
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:a> <urn:q> 2 . <urn:a> <urn:q> 3 . <urn:a> <urn:r> 0 . <urn:b> <urn:p> 3 . <urn:b> <urn:q> 2 . <urn:b> <urn:t> 0 . <urn:e> <urn:q> 9 . GRAPH <urn:g1> { <urn:c> <urn:p> 1 . <urn:c> <urn:q> 2 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:d> <urn:q> 2 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT ?g ?s WHERE { GRAPH ?g { ?s <urn:p> ?o FILTER(NOT EXISTS { ?s <urn:q> ?x FILTER(?x > ?o) }) } }"
+    expect:
+      rows:
+        - ["urn:g2", "urn:d"]
+        - ["urn:g2", "urn:e"]
+
+  - name: reads_the_row_in_order_by
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:a> <urn:q> 2 . <urn:a> <urn:q> 3 . <urn:a> <urn:r> 0 . <urn:b> <urn:p> 3 . <urn:b> <urn:q> 2 . <urn:b> <urn:t> 0 . <urn:e> <urn:q> 9 . GRAPH <urn:g1> { <urn:c> <urn:p> 1 . <urn:c> <urn:q> 2 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:d> <urn:q> 2 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT ?s WHERE { ?s <urn:p> ?o } ORDER BY (EXISTS { ?s <urn:q> ?x FILTER(?x > ?o) })"
+    expect:
+      ordered: true
+      rows:
+        - ["urn:b"]
+        - ["urn:a"]
+
+  - name: reads_the_row_update_where
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:a> <urn:q> 2 . <urn:a> <urn:q> 3 . <urn:a> <urn:r> 0 . <urn:b> <urn:p> 3 . <urn:b> <urn:q> 2 . <urn:b> <urn:t> 0 . <urn:e> <urn:q> 9 . GRAPH <urn:g1> { <urn:c> <urn:p> 1 . <urn:c> <urn:q> 2 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:d> <urn:q> 2 . <urn:e> <urn:p> 6 } }"
+    statements:
+      - "INSERT { ?s <urn:w> 1 } WHERE { ?s <urn:p> ?o FILTER(EXISTS { ?s <urn:q> ?x FILTER(?x > ?o) }) }"
+      - "SELECT ?s WHERE { ?s <urn:w> 1 }"
+    expect:
+      rows:
+        - ["urn:a"]
+
+  - name: position_select_star_of_a_filter
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:a> <urn:q> 2 . <urn:a> <urn:q> 3 . <urn:a> <urn:r> 0 . <urn:b> <urn:p> 3 . <urn:b> <urn:q> 2 . <urn:b> <urn:t> 0 . <urn:e> <urn:q> 9 . GRAPH <urn:g1> { <urn:c> <urn:p> 1 . <urn:c> <urn:q> 2 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:d> <urn:q> 2 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT * WHERE { ?s <urn:p> ?o FILTER(EXISTS { ?s <urn:r> ?y }) }"
+    expect:
+      rows:
+        - ["urn:a", 1]
+
+  - name: position_select_star_of_a_bind
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:a> <urn:q> 2 . <urn:a> <urn:q> 3 . <urn:a> <urn:r> 0 . <urn:b> <urn:p> 3 . <urn:b> <urn:q> 2 . <urn:b> <urn:t> 0 . <urn:e> <urn:q> 9 . GRAPH <urn:g1> { <urn:c> <urn:p> 1 . <urn:c> <urn:q> 2 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:d> <urn:q> 2 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT * WHERE { ?s <urn:p> ?o BIND(EXISTS { ?s <urn:r> ?y } AS ?e) }"
+    expect:
+      rows:
+        - ["urn:a", 1, true]
+        - ["urn:b", 3, false]
+
+  - name: position_select_star_of_a_sub_select
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:a> <urn:q> 2 . <urn:a> <urn:q> 3 . <urn:a> <urn:r> 0 . <urn:b> <urn:p> 3 . <urn:b> <urn:q> 2 . <urn:b> <urn:t> 0 . <urn:e> <urn:q> 9 . GRAPH <urn:g1> { <urn:c> <urn:p> 1 . <urn:c> <urn:q> 2 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:d> <urn:q> 2 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT * WHERE { { SELECT ?s WHERE { ?s <urn:p> ?o FILTER(EXISTS { ?s <urn:r> ?y }) } } }"
+    expect:
+      rows:
+        - ["urn:a"]
+
+  - name: position_select_star_of_a_correlated
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:a> <urn:q> 2 . <urn:a> <urn:q> 3 . <urn:a> <urn:r> 0 . <urn:b> <urn:p> 3 . <urn:b> <urn:q> 2 . <urn:b> <urn:t> 0 . <urn:e> <urn:q> 9 . GRAPH <urn:g1> { <urn:c> <urn:p> 1 . <urn:c> <urn:q> 2 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:d> <urn:q> 2 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT * WHERE { ?s <urn:p> ?o FILTER(EXISTS { ?s <urn:q> ?x FILTER(?x > ?o) }) }"
+    expect:
+      rows:
+        - ["urn:a", 1]
+
+  - name: position_having
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:a> <urn:q> 2 . <urn:a> <urn:q> 3 . <urn:a> <urn:r> 0 . <urn:b> <urn:p> 3 . <urn:b> <urn:q> 2 . <urn:b> <urn:t> 0 . <urn:e> <urn:q> 9 . GRAPH <urn:g1> { <urn:c> <urn:p> 1 . <urn:c> <urn:q> 2 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:d> <urn:q> 2 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT ?s (COUNT(?v) AS ?c) WHERE { ?s ?p ?v } GROUP BY ?s HAVING(EXISTS { ?s <urn:r> ?x })"
+    expect:
+      rows:
+        - ["urn:a", 4]
+
+  - name: position_having_not_exists
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:a> <urn:q> 2 . <urn:a> <urn:q> 3 . <urn:a> <urn:r> 0 . <urn:b> <urn:p> 3 . <urn:b> <urn:q> 2 . <urn:b> <urn:t> 0 . <urn:e> <urn:q> 9 . GRAPH <urn:g1> { <urn:c> <urn:p> 1 . <urn:c> <urn:q> 2 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:d> <urn:q> 2 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT ?s (COUNT(?v) AS ?c) WHERE { ?s ?p ?v } GROUP BY ?s HAVING(NOT EXISTS { ?s <urn:r> ?x })"
+    expect:
+      rows:
+        - ["urn:b", 3]
+        - ["urn:e", 1]
+
+  - name: position_an_aggregates_argument
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:a> <urn:q> 2 . <urn:a> <urn:q> 3 . <urn:a> <urn:r> 0 . <urn:b> <urn:p> 3 . <urn:b> <urn:q> 2 . <urn:b> <urn:t> 0 . <urn:e> <urn:q> 9 . GRAPH <urn:g1> { <urn:c> <urn:p> 1 . <urn:c> <urn:q> 2 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:d> <urn:q> 2 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT (SUM(IF(EXISTS { ?s <urn:r> ?x }, 1, 0)) AS ?c) WHERE { ?s <urn:p> ?o }"
+    expect:
+      rows:
+        - [1]
+
+  - name: position_an_aggregates_argument_per_group
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:a> <urn:q> 2 . <urn:a> <urn:q> 3 . <urn:a> <urn:r> 0 . <urn:b> <urn:p> 3 . <urn:b> <urn:q> 2 . <urn:b> <urn:t> 0 . <urn:e> <urn:q> 9 . GRAPH <urn:g1> { <urn:c> <urn:p> 1 . <urn:c> <urn:q> 2 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:d> <urn:q> 2 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT ?o (SUM(IF(EXISTS { ?s <urn:r> ?x }, 1, 0)) AS ?c) WHERE { ?s <urn:p> ?o } GROUP BY ?o"
+    expect:
+      rows:
+        - [1, 1]
+        - [3, 0]
+
+  - name: position_inside_graph_a_filter
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:a> <urn:q> 2 . <urn:a> <urn:q> 3 . <urn:a> <urn:r> 0 . <urn:b> <urn:p> 3 . <urn:b> <urn:q> 2 . <urn:b> <urn:t> 0 . <urn:e> <urn:q> 9 . GRAPH <urn:g1> { <urn:c> <urn:p> 1 . <urn:c> <urn:q> 2 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:d> <urn:q> 2 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT ?g ?s WHERE { GRAPH ?g { ?s <urn:p> ?o FILTER(EXISTS { ?s <urn:q> ?x }) } }"
+    expect:
+      rows:
+        - ["urn:g1", "urn:c"]
+        - ["urn:g2", "urn:d"]
+
+  - name: position_inside_graph_a_bind
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:a> <urn:q> 2 . <urn:a> <urn:q> 3 . <urn:a> <urn:r> 0 . <urn:b> <urn:p> 3 . <urn:b> <urn:q> 2 . <urn:b> <urn:t> 0 . <urn:e> <urn:q> 9 . GRAPH <urn:g1> { <urn:c> <urn:p> 1 . <urn:c> <urn:q> 2 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:d> <urn:q> 2 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT ?g ?s ?e WHERE { GRAPH ?g { ?s <urn:p> ?o BIND(EXISTS { ?s <urn:q> ?x } AS ?e) } }"
+    expect:
+      rows:
+        - ["urn:g1", "urn:c", true]
+        - ["urn:g2", "urn:d", true]
+        - ["urn:g2", "urn:e", false]
+
+  - name: position_distinct_of_a_projection
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:a> <urn:q> 2 . <urn:a> <urn:q> 3 . <urn:a> <urn:r> 0 . <urn:b> <urn:p> 3 . <urn:b> <urn:q> 2 . <urn:b> <urn:t> 0 . <urn:e> <urn:q> 9 . GRAPH <urn:g1> { <urn:c> <urn:p> 1 . <urn:c> <urn:q> 2 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:d> <urn:q> 2 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT DISTINCT (EXISTS { ?s <urn:r> ?x } AS ?e) WHERE { ?s <urn:p> ?o }"
+    expect:
+      rows:
+        - [true]
+        - [false]
+
+  # A listed graph, and a row key the row leaves unbound
+
+  - name: sub_select_lists_the_graph_over_an_optional
+    setup:
+      - "INSERT DATA { GRAPH <urn:g1> { <urn:c> <urn:p> 1 . <urn:c> <urn:link> <urn:g1> . <urn:x> <urn:p> 2 . <urn:x> <urn:link> <urn:other> . <urn:y> <urn:p> 3 } GRAPH <urn:g2> { <urn:d> <urn:p> 4 . <urn:d> <urn:away> <urn:g1> } }"
+    query: "SELECT ?g ?s WHERE { GRAPH ?g { { SELECT ?g ?s WHERE { ?s <urn:p> ?o OPTIONAL { ?s <urn:link> ?g } } } } }"
+    expect:
+      rows:
+        - ["urn:g1", "urn:c"]
+        - ["urn:g1", "urn:y"]
+        - ["urn:g2", "urn:d"]
+
+  - name: sub_select_lists_the_graph_it_never_binds_is_filled
+    setup:
+      - "INSERT DATA { GRAPH <urn:g1> { <urn:c> <urn:p> 1 . <urn:c> <urn:link> <urn:g1> . <urn:x> <urn:p> 2 . <urn:x> <urn:link> <urn:other> . <urn:y> <urn:p> 3 } GRAPH <urn:g2> { <urn:d> <urn:p> 4 . <urn:d> <urn:away> <urn:g1> } }"
+    query: "SELECT ?g ?s WHERE { GRAPH ?g { { SELECT ?g ?s WHERE { ?s <urn:p> ?o OPTIONAL { ?s <urn:none> ?g } } } } }"
+    expect:
+      rows:
+        - ["urn:g1", "urn:c"]
+        - ["urn:g1", "urn:x"]
+        - ["urn:g1", "urn:y"]
+        - ["urn:g2", "urn:d"]
+
+  - name: sub_select_lists_another_value_of_the_graph_is_dropped
+    setup:
+      - "INSERT DATA { GRAPH <urn:g1> { <urn:c> <urn:p> 1 . <urn:c> <urn:link> <urn:g1> . <urn:x> <urn:p> 2 . <urn:x> <urn:link> <urn:other> . <urn:y> <urn:p> 3 } GRAPH <urn:g2> { <urn:d> <urn:p> 4 . <urn:d> <urn:away> <urn:g1> } }"
+    query: "SELECT ?g ?s WHERE { GRAPH ?g { { SELECT ?g ?s WHERE { ?s <urn:away> ?g } } } }"
+    expect:
+      empty: true
+
+  - name: sub_select_lists_the_graph_as_its_only_value
+    setup:
+      - "INSERT DATA { GRAPH <urn:g1> { <urn:c> <urn:p> 1 . <urn:c> <urn:link> <urn:g1> . <urn:x> <urn:p> 2 . <urn:x> <urn:link> <urn:other> . <urn:y> <urn:p> 3 } GRAPH <urn:g2> { <urn:d> <urn:p> 4 . <urn:d> <urn:away> <urn:g1> } }"
+    query: "SELECT ?g WHERE { GRAPH ?g { { SELECT ?g WHERE { ?s <urn:link> ?g } } } }"
+    expect:
+      rows:
+        - ["urn:g1"]
+
+  - name: row_key_unbound_is_free
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:b> <urn:p> 3 . <urn:a> <urn:z> <urn:b> . <urn:a> <urn:w> 2 . <urn:b> <urn:q> 2 . <urn:e> <urn:q> 9 }"
+    query: "SELECT ?s WHERE { ?s <urn:p> ?o OPTIONAL { ?s <urn:z> ?k } FILTER(EXISTS { ?k <urn:q> ?x FILTER(?x > 2) }) }"
+    expect:
+      rows:
+        - ["urn:b"]
+
+  - name: row_key_unbound_is_free_not
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:b> <urn:p> 3 . <urn:a> <urn:z> <urn:b> . <urn:a> <urn:w> 2 . <urn:b> <urn:q> 2 . <urn:e> <urn:q> 9 }"
+    query: "SELECT ?s WHERE { ?s <urn:p> ?o OPTIONAL { ?s <urn:z> ?k } FILTER(NOT EXISTS { ?k <urn:q> ?x FILTER(?x > 2) }) }"
+    expect:
+      rows:
+        - ["urn:a"]
+
+  - name: row_key_unbound_with_a_filter_on_the_row
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:b> <urn:p> 3 . <urn:a> <urn:z> <urn:b> . <urn:a> <urn:w> 2 . <urn:b> <urn:q> 2 . <urn:e> <urn:q> 9 }"
+    query: "SELECT ?s WHERE { ?s <urn:p> ?o OPTIONAL { ?s <urn:z> ?k } FILTER(EXISTS { ?k <urn:q> ?x FILTER(?x > ?o && ?x < 5) }) }"
+    expect:
+      rows:
+        - ["urn:a"]
+
+  - name: row_key_unbound_with_a_filter_on_the_row_not
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:b> <urn:p> 3 . <urn:a> <urn:z> <urn:b> . <urn:a> <urn:w> 2 . <urn:b> <urn:q> 2 . <urn:e> <urn:q> 9 }"
+    query: "SELECT ?s WHERE { ?s <urn:p> ?o OPTIONAL { ?s <urn:z> ?k } FILTER(NOT EXISTS { ?k <urn:q> ?x FILTER(?x > ?o && ?x < 5) }) }"
+    expect:
+      rows:
+        - ["urn:b"]
+
+  - name: a_filter_reading_a_row_value_left_unbound_is_false
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:b> <urn:p> 3 . <urn:a> <urn:z> <urn:b> . <urn:a> <urn:w> 2 . <urn:b> <urn:q> 2 . <urn:e> <urn:q> 9 }"
+    query: "SELECT ?s WHERE { ?s <urn:p> ?o OPTIONAL { ?s <urn:w> ?k } FILTER(EXISTS { ?t <urn:q> ?x FILTER(?x = ?k) }) }"
+    expect:
+      rows:
+        - ["urn:a"]
+
+  - name: a_filter_reading_a_row_value_left_unbound_is_false_not
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:b> <urn:p> 3 . <urn:a> <urn:z> <urn:b> . <urn:a> <urn:w> 2 . <urn:b> <urn:q> 2 . <urn:e> <urn:q> 9 }"
+    query: "SELECT ?s WHERE { ?s <urn:p> ?o OPTIONAL { ?s <urn:w> ?k } FILTER(NOT EXISTS { ?t <urn:q> ?x FILTER(?x = ?k) }) }"
+    expect:
+      rows:
+        - ["urn:b"]

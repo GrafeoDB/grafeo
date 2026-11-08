@@ -67,11 +67,14 @@ pub enum PlannerRule {
     /// An equality on a key no index serves reads the key's column instead
     /// of filtering every node of the scan.
     KeyColumnLookup,
+    /// An `EXISTS` that a run without the row answers runs once; off, every `EXISTS` runs per row,
+    /// which must give the same answers.
+    ExistsRunOnce,
 }
 
 impl PlannerRule {
     /// Every rule.
-    pub const ALL: [Self; 16] = [
+    pub const ALL: [Self; 17] = [
         Self::JoinOrder,
         Self::SoughtEnd,
         Self::FactorizedExecution,
@@ -88,6 +91,7 @@ impl PlannerRule {
         Self::ValueJoin,
         Self::ExistsEdgeCheck,
         Self::KeyColumnLookup,
+        Self::ExistsRunOnce,
     ];
 
     /// The rule's bit in a [`PlannerRules`].

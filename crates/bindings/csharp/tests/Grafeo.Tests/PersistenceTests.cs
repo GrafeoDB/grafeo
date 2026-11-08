@@ -70,7 +70,7 @@ public sealed class PersistenceTests
     public void CheckpointTriggersRefusedInMemory()
     {
         using var db = GrafeoDB.Memory();
-        Assert.ThrowsAny<GrafeoException>(() => db.SetCheckpointTriggers(walBytes: 1024));
+        Assert.ThrowsAny<GrafeoException>(() => db.SetCheckpointTriggers(walBytes: 1UL << 20));
     }
 
     [Fact]

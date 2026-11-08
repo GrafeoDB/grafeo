@@ -22,7 +22,7 @@ print(f"Nodes: {db.node_count}")
 print(f"Edges: {db.edge_count}")
 
 # Additional metrics via algorithms
-algs = db.algorithms()
+algs = db.algorithms
 ```
 
 ## Transitivity (Clustering Coefficient)
@@ -30,7 +30,7 @@ algs = db.algorithms()
 Global measure of how clustered the graph is.
 
 ```python
-algs = db.algorithms()
+algs = db.algorithms
 transitivity = algs.transitivity()
 print(f"Transitivity: {transitivity:.4f}")
 ```
@@ -40,12 +40,12 @@ print(f"Transitivity: {transitivity:.4f}")
 Count triangles for clustering analysis.
 
 ```python
-algs = db.algorithms()
-triangles = algs.triangles()
+algs = db.algorithms
+triangles = algs.total_triangles()
 print(f"Total triangles: {triangles}")
 
-# Parallel version for large graphs (degree-ordered, merge intersection)
-triangles = algs.triangles(parallel=True)
+# The triangles each node is in
+per_node = algs.triangle_count()
 ```
 
 ## K-Truss Decomposition
@@ -53,7 +53,7 @@ triangles = algs.triangles(parallel=True)
 Find dense subgraphs where every edge is supported by at least k-2 triangles. The truss number of an edge is the maximum k for which it belongs to the k-truss.
 
 ```python
-algs = db.algorithms()
+algs = db.algorithms
 
 # Full decomposition: truss number for every edge
 result = algs.ktruss()
@@ -68,10 +68,15 @@ print(f"Edges in 4-truss: {len(edges)}")
 
 Count occurrences of a pattern subgraph within the graph. Uses VF2 backtracking with degree pruning.
 
-```python
-algs = db.algorithms()
+The count is of non-induced copies: every pattern edge must map to a graph edge, while the
+graph may have more edges between the mapped nodes. Edge direction is ignored. Each distinct
+copy counts once per automorphism of the pattern, so a triangle pattern counts six per
+triangle. A pattern self-loop needs a self-loop in the graph.
 
-# Count triangles via subgraph isomorphism (should match triangles() * 6)
+```python
+algs = db.algorithms
+
+# Count triangles via subgraph isomorphism (matches total_triangles() * 6)
 count = algs.subgraph_isomorphism_count(
     pattern_edges=[(0, 1), (1, 2), (2, 0)],
     pattern_nodes=3

@@ -4,7 +4,7 @@
 //! high-performance graph algorithms, inspired by rustworkx patterns.
 
 use grafeo_common::types::{EdgeId, NodeId, PropertyKey, ReadView, Value};
-use grafeo_common::utils::error::{Error, Result};
+use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind, Result};
 use grafeo_core::graph::lpg::{Edge, Node};
 use grafeo_core::graph::{Direction, GraphStore};
 use parking_lot::Mutex;
@@ -12,7 +12,91 @@ use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 
-use super::super::{AlgorithmResult, ParameterDef, Parameters};
+use super::super::{AlgorithmResult, Domain, ParameterDef, Parameters, Prepared, prepare};
+
+/// The check of the running query's deadline an algorithm makes in its work loops: a
+/// [`deadline::Ticker`](grafeo_core::execution::deadline::Ticker), whose timeout is the query
+/// timeout error, so a procedure past its deadline fails as any statement does. One serves a
+/// whole run; a helper called once per pass of a loop takes the run's by reference.
+#[derive(Debug, Clone, Default)]
+pub struct Ticker(grafeo_core::execution::deadline::Ticker);
+
+impl Ticker {
+    /// A ticker of this thread's deadline, the running query's.
+    #[must_use]
+    pub fn new() -> Self {
+        Self(grafeo_core::execution::deadline::Ticker::new())
+    }
+
+    /// A worker thread's ticker of the deadline its caller handed over (see
+    /// [`deadline::handoff`](grafeo_core::execution::deadline::handoff)).
+    #[cfg(feature = "parallel")]
+    #[must_use]
+    pub fn with_handoff(handoff: grafeo_core::execution::deadline::Handoff) -> Self {
+        Self(grafeo_core::execution::deadline::Ticker::with_handoff(
+            handoff,
+        ))
+    }
+
+    /// Counts a unit of work, reading the clock on the first and every 1,024th.
+    ///
+    /// # Errors
+    ///
+    /// The query timeout once the deadline has passed.
+    #[inline]
+    pub fn tick(&mut self) -> Result<()> {
+        self.0
+            .tick()
+            .map_err(|_| Error::from(QueryError::timeout()))
+    }
+}
+
+/// The error of edge `id`'s `property`, holding `value`: a value that is no number (an invalid
+/// value type, 22G12), or with `outside` a number outside the weight's domain (an invalid
+/// parameter value, 22023).
+#[cold]
+#[inline(never)]
+fn weight_refused(
+    id: EdgeId,
+    property: &str,
+    weight: EdgeWeight,
+    value: &Value,
+    outside: bool,
+) -> Error {
+    if outside {
+        return Error::from(QueryError::new(
+            QueryErrorKind::InvalidParameterValue,
+            format!(
+                "the {} '{property}' of edge {} is {value}, where it must be {}",
+                weight.what,
+                id.as_u64(),
+                weight.domain.describe(None)
+            ),
+        ));
+    }
+    Error::from(QueryError::new(
+        QueryErrorKind::WrongKind,
+        format!(
+            "the {} '{property}' of edge {} is a {} ({value}), not a number",
+            weight.what,
+            id.as_u64(),
+            value.type_name()
+        ),
+    ))
+}
+
+/// An edge property an algorithm reads as a number: what it is to the algorithm, the value of an
+/// edge without it, and the values it allows (see [`GraphView::edge_weight`]). Each weighted
+/// algorithm declares its own, next to its parameters.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct EdgeWeight {
+    /// What the algorithm reads it as (`weight`, `capacity`, `cost`), for an error.
+    pub what: &'static str,
+    /// The value of an edge without the property, as released.
+    pub default: f64,
+    /// The values it allows; finite in every domain.
+    pub domain: Domain,
+}
 
 /// The graph an algorithm reads: a store at one view.
 ///
@@ -106,25 +190,51 @@ impl<'a> GraphView<'a> {
         self.read(self.store.edge(id, self.view), None)
     }
 
+    /// The value of property `key` of edge `id` as the view sees it: the one value, read
+    /// without the rest of the edge.
+    #[must_use]
+    pub fn edge_property(&self, id: EdgeId, key: &str) -> Option<Value> {
+        self.read(self.store.edge_property(id, key, self.view), None)
+    }
+
     /// The number in the property `property` of edge `id` as a float (an
     /// integer, a float or a decimal), the weight, capacity or cost an
-    /// algorithm reads; `default` without a property name, or when the edge
-    /// has no such property or it holds no number.
-    #[must_use]
-    pub fn edge_number(&self, id: EdgeId, property: Option<&str>, default: f64) -> f64 {
+    /// algorithm reads as `weight` says; its default without a property name,
+    /// or when the edge has no such property.
+    ///
+    /// # Errors
+    ///
+    /// Naming the edge and the property: an invalid value type (22G12) for a
+    /// value that is no number, and an invalid parameter value (22023) for one
+    /// outside the weight's domain.
+    // Inlined into each algorithm's loop over edges, as the read it replaced was (measured: about
+    // 130 instructions an edge out of line); the errors are built apart, in `weight_refused`.
+    #[inline]
+    pub fn edge_weight(
+        &self,
+        id: EdgeId,
+        property: Option<&str>,
+        weight: EdgeWeight,
+    ) -> Result<f64> {
         let Some(name) = property else {
-            return default;
+            return Ok(weight.default);
         };
-        match self
-            .edge(id)
-            .as_ref()
-            .and_then(|edge| edge.get_property(name))
-        {
-            Some(Value::Int64(i)) => *i as f64,
-            Some(Value::Float64(f)) => *f,
-            Some(Value::Decimal(d)) => d.to_f64(),
-            _ => default,
+        // One value read, not the whole edge: a weight is read once per edge an algorithm walks.
+        // The errors are built apart (`weight_refused`).
+        let Some(value) = self.edge_property(id, name) else {
+            return Ok(weight.default);
+        };
+        let number = match &value {
+            Value::Null => return Ok(weight.default),
+            Value::Int64(i) => *i as f64,
+            Value::Float64(f) => *f,
+            Value::Decimal(d) => d.to_f64(),
+            other => return Err(weight_refused(id, name, weight, other, false)),
+        };
+        if weight.domain.admits(number) {
+            return Ok(number);
         }
+        Err(weight_refused(id, name, weight, &value, true))
     }
 
     /// The edges from `node` in `direction` the view sees, each with the
@@ -308,21 +418,32 @@ impl TraversalEvent {
 // Priority Queue Support
 // ============================================================================
 
+/// The order of two scores in a heap or a sort: a total order, as both need one (`partial_cmp`
+/// with NaN taken as equal is not, and a sort may then panic), at the cost of one float
+/// comparison where neither is NaN, the case of every weight an algorithm reads. It is
+/// [`f64::total_cmp`] with `-0.0` and `0.0` taken as equal, the two being next to each other in
+/// that order, so it stays total.
+#[inline]
+#[must_use]
+pub fn score_order(a: f64, b: f64) -> Ordering {
+    a.partial_cmp(&b).unwrap_or_else(|| a.total_cmp(&b))
+}
+
 /// Wrapper for priority queue ordering (min-heap behavior).
 ///
 /// Rust's `BinaryHeap` is a max-heap, so we reverse the ordering
 /// to get min-heap behavior for Dijkstra and A*.
 #[derive(Clone, Copy, Debug)]
-pub struct MinScored<K, T>(pub K, pub T);
+pub struct MinScored<T>(pub f64, pub T);
 
-impl<K, T> MinScored<K, T> {
+impl<T> MinScored<T> {
     /// Creates a new `MinScored` with the given score and value.
-    pub fn new(score: K, value: T) -> Self {
+    pub fn new(score: f64, value: T) -> Self {
         MinScored(score, value)
     }
 
     /// Returns the score.
-    pub fn score(&self) -> &K {
+    pub fn score(&self) -> &f64 {
         &self.0
     }
 
@@ -337,22 +458,22 @@ impl<K, T> MinScored<K, T> {
     }
 }
 
-impl<K: PartialOrd, T> PartialEq for MinScored<K, T> {
+impl<T> PartialEq for MinScored<T> {
     fn eq(&self, other: &Self) -> bool {
-        self.0 == other.0
+        self.cmp(other).is_eq()
     }
 }
 
-impl<K: PartialOrd, T> Eq for MinScored<K, T> {}
+impl<T> Eq for MinScored<T> {}
 
-impl<K: PartialOrd, T> Ord for MinScored<K, T> {
+impl<T> Ord for MinScored<T> {
     fn cmp(&self, other: &Self) -> Ordering {
-        // Reverse ordering for min-heap
-        other.0.partial_cmp(&self.0).unwrap_or(Ordering::Equal)
+        // Reversed for a min-heap.
+        score_order(other.0, self.0)
     }
 }
 
-impl<K: PartialOrd, T> PartialOrd for MinScored<K, T> {
+impl<T> PartialOrd for MinScored<T> {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
@@ -376,17 +497,51 @@ pub trait GraphAlgorithm: Send + Sync {
     /// Returns the parameter definitions for this algorithm.
     fn parameters(&self) -> &[ParameterDef];
 
-    /// Executes the algorithm on the given graph store.
+    /// Runs the algorithm on the given graph store with the arguments `params`, prepared first
+    /// (see [`prepare`]): a required argument without a value, or one outside its domain, is
+    /// refused before any work, and an optional one left out takes its declared default.
+    ///
+    /// Implement [`compute`](Self::compute), never this: an override would skip the check.
     ///
     /// # Errors
     ///
-    /// Returns an error if the algorithm fails (e.g., invalid parameters or graph state).
+    /// The invalid parameter value of [`prepare`], and the errors of
+    /// [`compute`](Self::compute).
     fn execute(
         &self,
         store: &dyn GraphStore,
         view: ReadView,
         params: &Parameters,
+    ) -> Result<AlgorithmResult> {
+        let prepared = prepare(self.name(), self.parameters(), params)?;
+        self.compute(store, view, &prepared)
+    }
+
+    /// The algorithm's work on the given graph store, with arguments [`prepare`] checked and
+    /// completed: a required one has a value, and an optional one that declares a default has it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the algorithm fails (for example, on the graph's state).
+    fn compute(
+        &self,
+        store: &dyn GraphStore,
+        view: ReadView,
+        params: &Prepared,
     ) -> Result<AlgorithmResult>;
+}
+
+impl Parameters {
+    /// These arguments prepared for `algorithm` (see [`prepare`]), for a caller that runs its
+    /// work some other way than [`GraphAlgorithm::execute`] (the bindings' algorithm methods,
+    /// which run its functions on a projection).
+    ///
+    /// # Errors
+    ///
+    /// The errors of [`prepare`].
+    pub fn resolved(self, algorithm: &dyn GraphAlgorithm) -> Result<Prepared> {
+        self.prepared(algorithm.name(), algorithm.parameters())
+    }
 }
 
 /// A graph algorithm that supports parallel execution.
@@ -402,16 +557,38 @@ pub trait ParallelGraphAlgorithm: GraphAlgorithm {
         50
     }
 
-    /// Executes the algorithm with explicit parallelism control.
+    /// Runs the algorithm with explicit parallelism control, with the arguments `params`
+    /// prepared first, as [`GraphAlgorithm::execute`] prepares them.
+    ///
+    /// Implement [`compute_parallel`](Self::compute_parallel), never this: an override would
+    /// skip the check.
     ///
     /// # Errors
     ///
-    /// Returns an error if the algorithm fails (e.g., invalid parameters or graph state).
+    /// The invalid parameter value of [`prepare`], and the errors of
+    /// [`compute_parallel`](Self::compute_parallel).
     fn execute_parallel(
         &self,
         store: &dyn GraphStore,
         view: ReadView,
         params: &Parameters,
+        num_threads: usize,
+    ) -> Result<AlgorithmResult> {
+        let prepared = prepare(self.name(), self.parameters(), params)?;
+        self.compute_parallel(store, view, &prepared, num_threads)
+    }
+
+    /// The algorithm's work with explicit parallelism control, with arguments [`prepare`]
+    /// checked and completed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the algorithm fails (for example, on the graph's state).
+    fn compute_parallel(
+        &self,
+        store: &dyn GraphStore,
+        view: ReadView,
+        params: &Prepared,
         num_threads: usize,
     ) -> Result<AlgorithmResult>;
 }
@@ -461,13 +638,14 @@ impl<V> DistanceMap<V> for HashMap<NodeId, V> {
 ///     name: "algorithm_name",
 ///     description: "What the algorithm does",
 ///     params: params_fn,            // fn() -> &'static [ParameterDef]
-///     execute(store, params) { ... } // body that returns Result<AlgorithmResult>,
-///                                    // `store` the `GraphView` it reads
+///     compute(store, params) { ... } // body that returns Result<AlgorithmResult>,
+///                                    // `store` the `GraphView` it reads, `params`
+///                                    // the prepared arguments
 /// }
 /// ```
 ///
 /// For algorithms with no parameters, use `params: &[]` instead of a function name.
-/// If the execute body does not use `params`, prefix it with `_` to silence warnings:
+/// If the compute body does not use `params`, prefix it with `_` to silence warnings:
 ///
 /// ```ignore
 /// impl_algorithm! {
@@ -475,7 +653,7 @@ impl<V> DistanceMap<V> for HashMap<NodeId, V> {
 ///     name: "algorithm_name",
 ///     description: "What the algorithm does",
 ///     params: &[],
-///     execute(store, _params) { ... }
+///     compute(store, _params) { ... }
 /// }
 /// ```
 macro_rules! impl_algorithm {
@@ -484,7 +662,7 @@ macro_rules! impl_algorithm {
         name: $name:expr,
         description: $desc:expr,
         params: &[],
-        execute($store:ident, $params:ident) $body:block
+        compute($store:ident, $params:ident) $body:block
     ) => {
         impl $crate::plugins::algorithms::GraphAlgorithm for $struct_name {
             fn name(&self) -> &str {
@@ -499,11 +677,11 @@ macro_rules! impl_algorithm {
                 &[]
             }
 
-            fn execute(
+            fn compute(
                 &self,
                 store: &dyn grafeo_core::graph::GraphStore,
                 view: grafeo_common::types::ReadView,
-                $params: &super::super::Parameters,
+                $params: &super::super::Prepared,
             ) -> grafeo_common::utils::error::Result<super::super::AlgorithmResult> {
                 let graph = $crate::plugins::algorithms::GraphView::new(store, view);
                 let $store = &graph;
@@ -517,7 +695,7 @@ macro_rules! impl_algorithm {
         name: $name:expr,
         description: $desc:expr,
         params: $params_fn:expr,
-        execute($store:ident, $params:ident) $body:block
+        compute($store:ident, $params:ident) $body:block
     ) => {
         impl $crate::plugins::algorithms::GraphAlgorithm for $struct_name {
             fn name(&self) -> &str {
@@ -532,11 +710,11 @@ macro_rules! impl_algorithm {
                 $params_fn()
             }
 
-            fn execute(
+            fn compute(
                 &self,
                 store: &dyn grafeo_core::graph::GraphStore,
                 view: grafeo_common::types::ReadView,
-                $params: &super::super::Parameters,
+                $params: &super::super::Prepared,
             ) -> grafeo_common::utils::error::Result<super::super::AlgorithmResult> {
                 let graph = $crate::plugins::algorithms::GraphView::new(store, view);
                 let $store = &graph;
@@ -550,8 +728,8 @@ macro_rules! impl_algorithm {
 pub(crate) use impl_algorithm;
 
 /// The result of an algorithm's `body`, which may return early: the
-/// execute bodies of [`impl_algorithm!`] and the hand-written ones run in a
-/// closure so a `return` leaves the body, not `execute`, and the
+/// compute bodies of [`impl_algorithm!`] and the hand-written ones run in a
+/// closure so a `return` leaves the body, not `compute`, and the
 /// [`GraphView`]'s read error is still checked after it.
 pub(crate) fn evaluated<T>(body: impl FnOnce() -> T) -> T {
     body()

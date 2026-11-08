@@ -4,8 +4,10 @@
 //! first, and it is a function of the data only: the same ranks on every platform,
 //! whichever chunks are resident. It costs no write and no file format.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
+use grafeo_common::memory::buffer::{BufferManager, MemoryGrant, MemoryRegion};
 use grafeo_common::types::{ArcStr, NodeId, ReadView};
 use grafeo_common::utils::hash::FxHashMap;
 use parking_lot::Mutex;
@@ -35,6 +37,8 @@ const MOST_REACHED_ENTRIES: usize = 256;
 #[derive(Debug, Clone, Copy)]
 struct Sample {
     degree: f64,
+    /// The largest count the sample saw.
+    max: f64,
     label_nodes: u64,
     type_edges: u64,
 }
@@ -70,32 +74,82 @@ pub(super) struct DegreeSamples {
     taken: AtomicU64,
     /// The reads samples of reached ends have spent.
     reached_reads: AtomicU64,
+    /// What [`memory_bytes`](Self::memory_bytes) walks, kept as samples come
+    /// and go.
+    counted: AtomicUsize,
+    /// The grant of those bytes, once a database attaches its memory: a
+    /// bounded cache, with a grant of its own.
+    grant: Mutex<Option<MemoryGrant>>,
+}
+
+/// What a sample of degrees holds on the heap.
+fn sample_bytes((label, edge_type, _): &(String, String, Direction)) -> usize {
+    label.len() + edge_type.len() + std::mem::size_of::<(String, String, Sample)>()
+}
+
+/// What a sample of reached ends holds on the heap.
+fn reached_bytes(key: &ReachedKey) -> usize {
+    let text = |texts: &[String]| texts.iter().map(String::len).sum::<usize>();
+    key.start_label.as_ref().map_or(0, String::len)
+        + text(&key.via_types)
+        + text(&key.on_types)
+        + std::mem::size_of::<(ReachedKey, ReachedSample)>()
 }
 
 impl DegreeSamples {
-    /// About what the samples hold on the heap.
+    /// About what the samples hold on the heap, by a walk of every sample:
+    /// the oracle of [`counted_bytes`](Self::counted_bytes).
     pub(super) fn memory_bytes(&self) -> usize {
-        let text = |texts: &[String]| texts.iter().map(String::len).sum::<usize>();
-        let samples: usize = self
-            .samples
-            .lock()
-            .keys()
-            .map(|(label, edge_type, _)| {
-                label.len() + edge_type.len() + std::mem::size_of::<(String, String, Sample)>()
-            })
-            .sum();
-        let reached: usize = self
-            .reached
-            .lock()
-            .keys()
-            .map(|key| {
-                key.start_label.as_ref().map_or(0, String::len)
-                    + text(&key.via_types)
-                    + text(&key.on_types)
-                    + std::mem::size_of::<(ReachedKey, ReachedSample)>()
-            })
-            .sum();
+        let samples: usize = self.samples.lock().keys().map(sample_bytes).sum();
+        let reached: usize = self.reached.lock().keys().map(reached_bytes).sum();
         samples + reached
+    }
+
+    /// [`memory_bytes`](Self::memory_bytes), as the samples keep it: one
+    /// load.
+    pub(super) fn counted_bytes(&self) -> usize {
+        self.counted.load(Ordering::Relaxed)
+    }
+
+    /// Takes the grant of its bytes from `manager` from now on.
+    pub(super) fn attach(&self, manager: &Arc<BufferManager>) {
+        let mut grant = self.grant.lock();
+        if grant.is_none() {
+            *grant = Some(manager.empty_grant(MemoryRegion::IndexBuffers));
+        }
+        drop(grant);
+        self.settle();
+    }
+
+    /// Notes `grown` more bytes, `freed` fewer: called with the lock of the
+    /// map that changed held, so a clear never takes out bytes an insert has
+    /// not added yet. Saturating: a count never below what it holds.
+    fn moved(&self, grown: usize, freed: usize) {
+        if grown == freed {
+            return;
+        }
+        let _ = self
+            .counted
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |counted| {
+                debug_assert!(counted + grown >= freed, "a degree sample count drifted");
+                Some((counted + grown).saturating_sub(freed))
+            });
+    }
+
+    /// Brings the grant to the counted bytes.
+    fn settle(&self) {
+        // Read under the grant's lock, so a settle that read an older count cannot shrink
+        // what a newer one just grew.
+        let mut grant = self.grant.lock();
+        let counted = self.counted_bytes();
+        if let Some(grant) = grant.as_mut() {
+            let held = grant.size();
+            if held < counted {
+                grant.grow_forced(counted - held);
+            } else {
+                grant.shrink(held - counted);
+            }
+        }
     }
 }
 
@@ -152,6 +206,18 @@ impl Sample {
 }
 
 impl RowGroupStore {
+    /// About [`SAMPLE_NODES`] committed nodes of `label`, and whether they are all of them (see
+    /// `sampled_nodes_with_label`): never the label's list.
+    fn sample_of_label(&self, label: &str, view: ReadView) -> (Vec<NodeId>, bool) {
+        let inner = self.inner.read();
+        match inner.label_id(label) {
+            Some(label) => {
+                inner.sampled_nodes_with_label(label, SAMPLE_NODES, super::Read::view(view))
+            }
+            None => (Vec::new(), true),
+        }
+    }
+
     /// How many samples it has read, for a test to see that a plain query reads
     /// none and a small change reads no more.
     #[doc(hidden)]
@@ -176,6 +242,24 @@ impl RowGroupStore {
         edge_type: &str,
         direction: Direction,
     ) -> Option<f64> {
+        self.degree_sample(label, edge_type, direction)
+            .map(|sample| sample.degree)
+    }
+
+    /// The largest count the sample of [`sample_degree`](Self::sample_degree) saw, from the same
+    /// read.
+    pub(super) fn sample_max_degree(
+        &self,
+        label: &str,
+        edge_type: &str,
+        direction: Direction,
+    ) -> Option<f64> {
+        self.degree_sample(label, edge_type, direction)
+            .map(|sample| sample.max)
+    }
+
+    /// The sample of `label`'s degrees over `edge_type` in `direction`, kept while it stands.
+    fn degree_sample(&self, label: &str, edge_type: &str, direction: Direction) -> Option<Sample> {
         let (label_nodes, type_edges) = self.committed_counts(label, edge_type);
         if label_nodes == 0 {
             return None;
@@ -184,19 +268,27 @@ impl RowGroupStore {
         if let Some(sample) = self.degree_samples.samples.lock().get(&key)
             && sample.stands(label_nodes, type_edges)
         {
-            return Some(sample.degree);
+            return Some(*sample);
         }
-        let degree = self.read_sample(label, edge_type, direction)?;
+        let (degree, max) = self.read_sample(label, edge_type, direction)?;
         self.degree_samples.taken.fetch_add(1, Ordering::Relaxed);
-        self.degree_samples.samples.lock().insert(
-            key,
-            Sample {
-                degree,
-                label_nodes,
-                type_edges,
-            },
-        );
-        Some(degree)
+        let sample = Sample {
+            degree,
+            max,
+            label_nodes,
+            type_edges,
+        };
+        let bytes = sample_bytes(&key);
+        {
+            let mut samples = self.degree_samples.samples.lock();
+            if samples.insert(key, sample).is_none() {
+                self.degree_samples.moved(bytes, 0);
+            }
+        }
+        // Rare: a sample is kept until its counts move. Forced: a sample is a
+        // read's, which never fails.
+        self.degree_samples.settle();
+        Some(sample)
     }
 
     /// See `GraphStore::sampled_reached_degree_within`.
@@ -238,10 +330,13 @@ impl RowGroupStore {
             .fetch_add(reads, Ordering::Relaxed);
         self.degree_samples.taken.fetch_add(1, Ordering::Relaxed);
         let mut reached = self.degree_samples.reached.lock();
+        let mut freed = 0;
         if reached.len() >= MOST_REACHED_ENTRIES {
+            freed = reached.keys().map(reached_bytes).sum();
             reached.clear();
         }
-        reached.insert(
+        let bytes = reached_bytes(&key);
+        let replaced = reached.insert(
             key,
             ReachedSample {
                 degree,
@@ -250,6 +345,10 @@ impl RowGroupStore {
                 on_edges,
             },
         );
+        let grown = if replaced.is_none() { bytes } else { 0 };
+        self.degree_samples.moved(grown, freed);
+        drop(reached);
+        self.degree_samples.settle();
         degree
     }
 
@@ -271,15 +370,7 @@ impl RowGroupStore {
             return None;
         }
         let view = ReadView::latest();
-        let nodes = self.nodes_by_label(far_label, view).ok()?;
-        let sample: Vec<NodeId> = if nodes.len() <= SAMPLE_NODES {
-            nodes
-        } else {
-            ranks(nodes.len() as u64)
-                .into_iter()
-                .filter_map(|rank| nodes.get(usize::try_from(rank).ok()?).copied())
-                .collect()
-        };
+        let (sample, _) = self.sample_of_label(far_label, view);
         let reads = sample.len() as u64;
         if sample.is_empty() || *budget < reads {
             return None;
@@ -361,18 +452,21 @@ impl RowGroupStore {
                 .collect()
         };
         let (via, on) = (types_of(&key.via_types), types_of(&key.on_types));
-        let nodes = match &key.start_label {
-            Some(label) => self.nodes_by_label(label, view).ok()?,
-            None => self.node_ids(view).ok()?,
-        };
-        let every_start_read = nodes.len() <= SAMPLE_NODES;
-        let starts: Vec<NodeId> = if every_start_read {
-            nodes
-        } else {
-            ranks(nodes.len() as u64)
-                .into_iter()
-                .filter_map(|rank| nodes.get(usize::try_from(rank).ok()?).copied())
-                .collect()
+        let (starts, every_start_read) = match &key.start_label {
+            Some(label) => self.sample_of_label(label, view),
+            // No label: every node is a start, sampled from the list of them.
+            None => {
+                let nodes = self.node_ids(view).ok()?;
+                if nodes.len() <= SAMPLE_NODES {
+                    (nodes, true)
+                } else {
+                    let sample = ranks(nodes.len() as u64)
+                        .into_iter()
+                        .filter_map(|rank| nodes.get(usize::try_from(rank).ok()?).copied())
+                        .collect();
+                    (sample, false)
+                }
+            }
         };
         let share = |spent_up_to: u64, reads: u64, parts: usize| {
             spent_up_to.saturating_sub(reads) / (parts.max(1) as u64)
@@ -494,26 +588,25 @@ impl RowGroupStore {
         )
     }
 
-    fn read_sample(&self, label: &str, edge_type: &str, direction: Direction) -> Option<f64> {
+    fn read_sample(
+        &self,
+        label: &str,
+        edge_type: &str,
+        direction: Direction,
+    ) -> Option<(f64, f64)> {
         let view = ReadView::latest();
-        let nodes = self.nodes_by_label(label, view).ok()?;
         let types = [ArcStr::from(edge_type)];
         let count = |node| {
             self.count_within(node, direction, &types, COUNTED_LIST, view)
                 .map(|(count, _)| count)
         };
-        let sampled: Vec<NodeId> = if nodes.len() <= SAMPLE_NODES {
-            nodes
-        } else {
-            ranks(nodes.len() as u64)
-                .into_iter()
-                .filter_map(|rank| nodes.get(usize::try_from(rank).ok()?).copied())
-                .collect()
-        };
-        let mut edges = 0;
+        let (sampled, _) = self.sample_of_label(label, view);
+        let (mut edges, mut max) = (0, 0);
         for node in &sampled {
-            edges += count(*node)?;
+            let counted = count(*node)?;
+            edges += counted;
+            max = max.max(counted);
         }
-        (!sampled.is_empty()).then(|| edges as f64 / sampled.len() as f64)
+        (!sampled.is_empty()).then(|| (edges as f64 / sampled.len() as f64, max as f64))
     }
 }

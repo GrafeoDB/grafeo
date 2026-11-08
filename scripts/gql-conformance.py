@@ -17,7 +17,7 @@ import argparse
 import json
 import re
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
@@ -130,7 +130,7 @@ def scan_tests(test_dir: Path) -> dict[str, list[dict[str, str]]]:
         lines = rs_file.read_text(encoding="utf-8").splitlines()
         pending_ids: list[str] = []
 
-        for i, line in enumerate(lines):
+        for line in lines:
             # Check for ISO annotation
             iso_match = ISO_ANNOTATION_RE.match(line.strip())
             if iso_match:
@@ -412,7 +412,7 @@ def cmd_dialect(
             "homepage": "https://grafeo.dev",
             "repository": "https://github.com/GrafeoDB/grafeo",
         },
-        "generated": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "generated": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "summary": {
             "total_features": len(features),
             "supported": supported_count,

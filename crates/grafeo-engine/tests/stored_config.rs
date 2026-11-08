@@ -305,7 +305,7 @@ fn force_disk_on_a_section_that_cannot_spill_is_refused() {
 
     let db = GrafeoDB::with_config(
         Config::persistent(&path)
-            .with_section_tier(SectionType::TextIndex, TierOverride::ForceDisk),
+            .with_section_tier(SectionType::VectorStore, TierOverride::ForceDisk),
     )
     .unwrap();
     let error = db
@@ -330,7 +330,7 @@ fn force_disk_on_a_section_that_cannot_spill_is_refused() {
         .collect();
     assert_eq!(
         tiers,
-        vec![(SectionType::TextIndex, TierOverride::ForceDisk)],
+        vec![(SectionType::VectorStore, TierOverride::ForceDisk)],
         "the refused change stored nothing"
     );
     db.close().unwrap();

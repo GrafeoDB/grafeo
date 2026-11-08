@@ -461,7 +461,8 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup and guidelines.
 
 Thank you to the people and organizations who supported Grafeo's development:
 
-- [**Thibaut MÃ©len**](https://github.com/ThibautMelen) from [Supernovae](https://github.com/supernovae-st)
+- [**Thibaut Mélen**](https://github.com/ThibautMelen)
+- [**Mintactus**](https://github.com/Mintactus)
 
 ## Acknowledgments
 

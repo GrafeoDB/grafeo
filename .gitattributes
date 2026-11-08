@@ -1,0 +1,45 @@
+# Line endings: every text file is stored and checked out with LF, whatever `core.autocrlf` says,
+# so a test or script that reads source text sees the same bytes on every platform.
+* text=auto eol=lf
+
+# Windows command scripts need CRLF.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Never converted, whatever their bytes look like: database files and WAL segments, the fixtures
+# written by released versions, native libraries, archives, images and fonts.
+*.grafeo binary
+*.wal binary
+*.spill binary
+*.bin binary
+*.chunks binary
+*.bincode binary
+*.snapshot binary
+*.meta binary
+**/fixtures/**/*.log binary
+**/fixtures/**/LOCK binary
+*.a binary
+*.lib binary
+*.dll binary
+*.so binary
+*.dylib binary
+*.exe binary
+*.pdb binary
+*.whl binary
+*.zip binary
+*.gz binary
+*.tgz binary
+*.parquet binary
+*.arrow binary
+*.onnx binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.webp binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.otf binary
+*.pdf binary

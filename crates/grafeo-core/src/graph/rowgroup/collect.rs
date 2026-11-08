@@ -40,10 +40,14 @@ use std::sync::atomic::Ordering;
 
 use grafeo_common::change::Table;
 use grafeo_common::types::EpochId;
+use grafeo_common::utils::hash::FxHashSet;
 
+use super::account::{LINES, Line, Lines, add_lines};
 use super::updates::VECTORS;
 use super::versions::{VECTOR_ROWS, Versions};
-use super::{Collected, EdgeGroup, Inner, NodeGroup, ROWS_PER_GROUP, RowGroupStore, locate};
+use super::{
+    Collected, EdgeGroup, Inner, NodeGroup, ROWS_PER_GROUP, RowGroupStore, Touched, locate,
+};
 
 const _: () = assert!(
     VECTORS == u32::BITS as usize,
@@ -65,6 +69,14 @@ impl Listed {
     /// Whether no row group has a listed vector.
     pub(super) fn is_empty(&self) -> bool {
         self.nodes.is_empty() && self.edges.is_empty()
+    }
+
+    /// The heap bytes of its lists of node and of edge row groups.
+    pub(super) fn heap_bytes(&self) -> (usize, usize) {
+        (
+            self.nodes.capacity() * std::mem::size_of::<u64>(),
+            self.edges.capacity() * std::mem::size_of::<u64>(),
+        )
     }
 }
 
@@ -94,12 +106,14 @@ fn mask_of(unsettled: impl Fn(usize) -> bool) -> u32 {
 
 /// Keeps in `listed` the row groups that still list a vector, dropping from
 /// `groups` the ones left without rows, as a load would not make them.
-/// `parts` gives a group's versions and its mask. In place, so the list
-/// keeps its buffer from one collect to the next.
+/// `parts` gives a group's versions and its mask, and `dropping` sees each
+/// group before it goes. In place, so the list keeps its buffer from one
+/// collect to the next.
 fn keep_listed<G>(
     groups: &mut BTreeMap<u64, G>,
     listed: &mut Vec<u64>,
     parts: impl Fn(&G) -> (&Versions, u32),
+    mut dropping: impl FnMut(&G),
 ) {
     listed.retain(|index| {
         let Some(group) = groups.get(index) else {
@@ -107,6 +121,7 @@ fn keep_listed<G>(
         };
         let (versions, mask) = parts(group);
         if versions.is_empty() {
+            dropping(group);
             groups.remove(index);
             false
         } else {
@@ -151,10 +166,20 @@ impl Inner {
         let Some(mask) = mask else {
             return false;
         };
+        let mut grown = 0;
         if *mask == 0 {
+            let before = groups.capacity();
             groups.push(index);
+            grown = (groups.capacity() - before) * std::mem::size_of::<u64>();
         }
         *mask |= bit(row);
+        // Counted here, not by the writes' bracket: rare, once per row group
+        // listed past the list's room.
+        let line = match table {
+            Table::Nodes => Line::NodeVersions,
+            Table::Edges => Line::EdgeVersions,
+        };
+        self.account.grown(line, grown);
         was_empty && !self.listed.is_empty()
     }
 
@@ -177,6 +202,7 @@ impl Inner {
             let Some(group) = self.edges.get_mut(index) else {
                 continue;
             };
+            let held = group.lines();
             let base = index * ROWS_PER_GROUP;
             let mut mask = group.listed;
             for vector in vectors(group.listed) {
@@ -190,6 +216,7 @@ impl Inner {
                 }
             }
             group.listed = mask;
+            self.account.moved(&held, &group.lines());
         }
         let mut rows = gone_edges.len();
         self.unlink_edges(&gone_edges);
@@ -197,6 +224,7 @@ impl Inner {
             let Some(group) = self.nodes.get_mut(index) else {
                 continue;
             };
+            let held = group.lines();
             let mut mask = group.listed;
             for vector in vectors(group.listed) {
                 for row in group.versions.collapse_vector(vector, horizon) {
@@ -210,16 +238,58 @@ impl Inner {
                 }
             }
             group.listed = mask;
+            self.account.moved(&held, &group.lines());
         }
-        keep_listed(&mut self.edges, &mut edges, |group| {
-            (&group.versions, group.listed)
-        });
-        keep_listed(&mut self.nodes, &mut nodes, |group| {
-            (&group.versions, group.listed)
-        });
-        // Nothing was listed meanwhile: the collect holds the lock.
-        self.listed.edges = edges;
-        self.listed.nodes = nodes;
+        // The rows taken out may leave a dead head: its slots go back, now
+        // that the collected edges are unlinked (which reads their ends).
+        for index in &edges {
+            if let Some(group) = self.edges.get_mut(index) {
+                let held = group.lines();
+                group.trim_head();
+                self.account.moved(&held, &group.lines());
+            }
+        }
+        for index in &nodes {
+            if let Some(group) = self.nodes.get_mut(index) {
+                let held = group.lines();
+                group.trim_head();
+                self.account.moved(&held, &group.lines());
+            }
+        }
+        // A row group left without rows leaves the account with what it
+        // holds, by its walk, and with its columns.
+        let mut dropped: Lines = [0; LINES];
+        let mut gone_columns: Vec<(Table, Vec<u32>)> = Vec::new();
+        keep_listed(
+            &mut self.edges,
+            &mut edges,
+            |group| (&group.versions, group.listed),
+            |group| {
+                add_lines(&mut dropped, &group.walk_lines());
+                gone_columns.push((Table::Edges, group.columns.keys().collect()));
+            },
+        );
+        keep_listed(
+            &mut self.nodes,
+            &mut nodes,
+            |group| (&group.versions, group.listed),
+            |group| {
+                add_lines(&mut dropped, &group.walk_lines());
+                gone_columns.push((Table::Nodes, group.columns.keys().collect()));
+            },
+        );
+        if dropped != [0; LINES] {
+            self.account.subtract(&dropped);
+        }
+        for (table, keys) in gone_columns {
+            self.account.columns_gone(table, keys);
+        }
+        // Nothing was listed meanwhile: the collect holds the lock. A list
+        // left empty gives its buffer back, so a store with nothing listed
+        // holds no list.
+        let kept = |list: Vec<u64>| if list.is_empty() { Vec::new() } else { list };
+        self.listed.edges = kept(edges);
+        self.listed.nodes = kept(nodes);
         Collected { rows, values }
     }
 
@@ -249,9 +319,16 @@ impl Inner {
                 values += group.label_updates.collect(horizon);
             }
         }
-        // A row group without rows goes whole, as a load would not make it.
+        // A row group without rows goes whole, as a load would not make it;
+        // the others give back the slots of a dead head.
         self.edges.retain(|_, group| !group.versions.is_empty());
         self.nodes.retain(|_, group| !group.versions.is_empty());
+        for group in self.edges.values_mut() {
+            group.trim_head();
+        }
+        for group in self.nodes.values_mut() {
+            group.trim_head();
+        }
         self.relist();
         Collected { rows, values }
     }
@@ -276,14 +353,38 @@ impl Inner {
     /// Takes the adjacency entries of the collected edge rows `edges` out
     /// of their nodes' rows; the edge rows still hold their ends.
     fn unlink_edges(&mut self, edges: &[u64]) {
+        let line = |outgoing: bool| {
+            if outgoing {
+                Line::Outgoing
+            } else {
+                Line::Incoming
+            }
+        };
+        // The adjacencies the edges leave, each merged once at the end when
+        // their removed edges are most of their lists.
+        let mut touched: FxHashSet<(u64, bool)> = FxHashSet::default();
         for edge in edges {
             let (group, row) = locate(*edge);
             let (src, dst, _) = self.edges[&group].ends(row);
             for (node, _, outgoing) in self.kept_ends(src, dst) {
-                let (group, row) = locate(node);
-                if let Some(group) = self.nodes.get_mut(&group) {
-                    group.adjacency_mut(outgoing).remove(row, *edge);
+                let (index, row) = locate(node);
+                if let Some(group) = self.nodes.get_mut(&index) {
+                    let adjacency = group.adjacency_mut(outgoing);
+                    let held = adjacency.counted_bytes();
+                    adjacency.remove(row, *edge);
+                    self.account
+                        .moved_line(line(outgoing), held, adjacency.counted_bytes());
+                    touched.insert((index, outgoing));
                 }
+            }
+        }
+        for (index, outgoing) in touched {
+            if let Some(group) = self.nodes.get_mut(&index) {
+                let adjacency = group.adjacency_mut(outgoing);
+                let held = adjacency.counted_bytes();
+                adjacency.merge_if_removed_dominate();
+                self.account
+                    .moved_line(line(outgoing), held, adjacency.counted_bytes());
             }
         }
     }
@@ -331,6 +432,8 @@ impl RowGroupStore {
     pub fn collect_all(&self, horizon: EpochId) -> usize {
         let mut inner = self.inner.write();
         let collected = inner.collect_all(horizon.as_u64());
+        // Every vector was walked: the account is counted again with them.
+        inner.recount();
         self.collected(&inner, horizon);
         collected.rows
     }
@@ -341,7 +444,10 @@ impl RowGroupStore {
             return Collected::default();
         }
         let mut inner = self.inner.write();
-        let collected = inner.collect_listed(horizon.as_u64());
+        let collected = inner.counting(Touched::none(), |inner| {
+            inner.collect_listed(horizon.as_u64())
+        });
+        inner.settle();
         self.collected(&inner, horizon);
         collected
     }
@@ -686,15 +792,33 @@ mod tests {
         assert_eq!(store.listed_vectors(), NOTHING);
     }
 
+    /// Writes each of `people`'s age once more, 30, as an immediate write,
+    /// and collects: the first write of a key in a row group marks it for the
+    /// next checkpoint, which the memory counts once per key and group, so
+    /// the memory is flat from then on.
+    fn mark_ages(store: &RowGroupStore, people: &[NodeId; 3]) {
+        for id in people {
+            let op = DataOp::SetNodeProperty {
+                id: *id,
+                key: PropertyKey::new("age"),
+                value: Value::Int64(30),
+            };
+            immediate(store, &op).unwrap();
+        }
+        store.collect(store.current_epoch());
+    }
+
     /// With no reader older than each write, immediate writes of an
     /// indexed value, each collected right after, leave the store's memory
-    /// and its index as they were: nothing is listed, no chain is left.
+    /// and its index as they were after the first write of the key in each
+    /// row group: nothing is listed, no chain is left.
     #[test]
     fn memory_returns_to_flat_after_each_write_when_no_reader_is_older() {
         let store = RowGroupStore::new();
         store.create_property_index("age");
         let people = spread_people(&store);
         store.collect(store.current_epoch());
+        mark_ages(&store, &people);
         let bytes = store.heap_bytes();
         for round in 0..1_000_i64 {
             let id = people[usize::try_from(round).unwrap() % people.len()];
@@ -731,14 +855,16 @@ mod tests {
 
     /// With no reader older than the writes, the collect after each write
     /// lets the first `COLLECT_BOUND - 1` writes keep what they replaced and
-    /// runs at the bound: the store's memory and its index return to flat,
-    /// nothing is listed, and the count starts again.
+    /// runs at the bound: the store's memory and its index return to flat
+    /// (after the first write of the key in each row group, see
+    /// `mark_ages`), nothing is listed, and the count starts again.
     #[test]
     fn a_collect_after_a_write_runs_at_the_bound_and_memory_returns_to_flat() {
         let store = RowGroupStore::new();
         store.create_property_index("age");
         let people = spread_people(&store);
         store.collect(store.current_epoch());
+        mark_ages(&store, &people);
         let bytes = store.heap_bytes();
         let mut write = 0;
         for round in 0..3 {
@@ -765,12 +891,15 @@ mod tests {
     /// A reader before the writes holds the collect back: the collect at
     /// the bound runs at its horizon and keeps what it reads, the writes
     /// after it skip the collect while the horizon stays, and the first
-    /// write once the reader ended collects everything, far from the bound.
+    /// write once the reader ended collects everything, far from the bound
+    /// (the memory flat after the first write of the key in each row group,
+    /// see `mark_ages`).
     #[test]
     fn an_older_reader_keeps_its_values_and_its_end_starts_the_next_collect() {
         let store = RowGroupStore::new();
         let people = spread_people(&store);
         store.collect(store.current_epoch());
+        mark_ages(&store, &people);
         let bytes = store.heap_bytes();
         let pinned = store.current_epoch();
         let ages_at = |view: ReadView| -> Vec<Option<Value>> {

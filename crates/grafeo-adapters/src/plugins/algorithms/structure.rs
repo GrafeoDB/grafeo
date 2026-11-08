@@ -13,8 +13,8 @@ use grafeo_core::graph::GraphStore;
 #[cfg(test)]
 use grafeo_core::graph::rowgroup::RowGroupStore;
 
-use super::super::{AlgorithmResult, ParameterDef, ParameterType, Parameters};
-use super::traits::{GraphAlgorithm, impl_algorithm};
+use super::super::{AlgorithmResult, Domain, ParameterDef, ParameterType, Prepared};
+use super::traits::{GraphAlgorithm, Ticker, impl_algorithm};
 
 // ============================================================================
 // Articulation Points (Cut Vertices)
@@ -52,19 +52,22 @@ pub fn articulation_points(
 ) -> grafeo_common::utils::error::Result<FxHashSet<NodeId>> {
     let graph = super::traits::GraphView::new(store, view);
     let found = articulation_points_on(&graph);
-    graph.finish(found)
+    graph.finish(found)?
 }
 
 /// [`articulation_points`] on the graph a [`GraphView`](super::traits::GraphView) reads.
-pub(crate) fn articulation_points_on(store: &super::traits::GraphView<'_>) -> FxHashSet<NodeId> {
+pub(crate) fn articulation_points_on(
+    store: &super::traits::GraphView<'_>,
+) -> grafeo_common::utils::error::Result<FxHashSet<NodeId>> {
+    let mut ticker = Ticker::new();
     let nodes = store.node_ids();
     let n = nodes.len();
 
     if n == 0 {
-        return FxHashSet::default();
+        return Ok(FxHashSet::default());
     }
 
-    let adj = simple_undirected_adjacency(store, &nodes);
+    let adj = simple_undirected_adjacency(store, &mut ticker, &nodes)?;
 
     let mut visited = vec![false; n];
     let mut disc = vec![0usize; n]; // Discovery time
@@ -84,6 +87,7 @@ pub(crate) fn articulation_points_on(store: &super::traits::GraphView<'_>) -> Fx
         let mut stack: Vec<(usize, usize)> = vec![(start, 0)];
 
         while let Some(&(u, idx)) = stack.last() {
+            ticker.tick()?;
             if !visited[u] {
                 visited[u] = true;
                 disc[u] = time;
@@ -121,11 +125,12 @@ pub(crate) fn articulation_points_on(store: &super::traits::GraphView<'_>) -> Fx
         }
     }
 
-    ap.iter()
+    Ok(ap
+        .iter()
         .enumerate()
         .filter(|&(_, is_ap)| *is_ap)
         .map(|(idx, _)| nodes[idx])
-        .collect()
+        .collect())
 }
 
 // ============================================================================
@@ -165,19 +170,22 @@ pub fn bridges(
 ) -> grafeo_common::utils::error::Result<Vec<(NodeId, NodeId)>> {
     let graph = super::traits::GraphView::new(store, view);
     let found = bridges_on(&graph);
-    graph.finish(found)
+    graph.finish(found)?
 }
 
 /// [`bridges`] on the graph a [`GraphView`](super::traits::GraphView) reads.
-pub(crate) fn bridges_on(store: &super::traits::GraphView<'_>) -> Vec<(NodeId, NodeId)> {
+pub(crate) fn bridges_on(
+    store: &super::traits::GraphView<'_>,
+) -> grafeo_common::utils::error::Result<Vec<(NodeId, NodeId)>> {
+    let mut ticker = Ticker::new();
     let nodes = store.node_ids();
     let n = nodes.len();
 
     if n == 0 {
-        return Vec::new();
+        return Ok(Vec::new());
     }
 
-    let adj = simple_undirected_adjacency(store, &nodes);
+    let adj = simple_undirected_adjacency(store, &mut ticker, &nodes)?;
 
     let mut visited = vec![false; n];
     let mut disc = vec![0usize; n];
@@ -195,6 +203,7 @@ pub(crate) fn bridges_on(store: &super::traits::GraphView<'_>) -> Vec<(NodeId, N
         let mut stack: Vec<(usize, usize)> = vec![(start, 0)];
 
         while let Some(&(u, idx)) = stack.last() {
+            ticker.tick()?;
             if !visited[u] {
                 visited[u] = true;
                 disc[u] = time;
@@ -229,10 +238,10 @@ pub(crate) fn bridges_on(store: &super::traits::GraphView<'_>) -> Vec<(NodeId, N
     // `node_ids` is in node-id order, so the index pairs in index order are
     // the bridges in node-id order.
     sort_index_pairs(&mut bridge_list, n);
-    bridge_list
+    Ok(bridge_list
         .into_iter()
         .map(|(i, j)| (nodes[i], nodes[j]))
-        .collect()
+        .collect())
 }
 
 /// The simple undirected graph of `nodes` (in the order of `node_ids`) as
@@ -241,8 +250,9 @@ pub(crate) fn bridges_on(store: &super::traits::GraphView<'_>) -> Vec<(NodeId, N
 /// are left out. O(V + E).
 fn simple_undirected_adjacency(
     store: &super::traits::GraphView<'_>,
+    ticker: &mut Ticker,
     nodes: &[NodeId],
-) -> Vec<Vec<usize>> {
+) -> grafeo_common::utils::error::Result<Vec<Vec<usize>>> {
     let n = nodes.len();
     let node_to_idx: FxHashMap<NodeId, usize> = nodes
         .iter()
@@ -253,6 +263,7 @@ fn simple_undirected_adjacency(
     let mut adj: Vec<Vec<usize>> = vec![Vec::new(); n];
     for (i, &node) in nodes.iter().enumerate() {
         for (neighbor, _) in store.edges(node, Direction::Outgoing) {
+            ticker.tick()?;
             if let Some(&j) = node_to_idx.get(&neighbor)
                 && j != i
             {
@@ -271,7 +282,7 @@ fn simple_undirected_adjacency(
             first
         });
     }
-    adj
+    Ok(adj)
 }
 
 /// Sorts pairs of indices below `n` by first, then second index, in
@@ -373,16 +384,19 @@ pub fn kcore_decomposition(
 ) -> grafeo_common::utils::error::Result<KCoreResult> {
     let graph = super::traits::GraphView::new(store, view);
     let found = kcore_decomposition_on(&graph);
-    graph.finish(found)
+    graph.finish(found)?
 }
 
 /// [`kcore_decomposition`] on the graph a [`GraphView`](super::traits::GraphView) reads.
-pub(crate) fn kcore_decomposition_on(store: &super::traits::GraphView<'_>) -> KCoreResult {
+pub(crate) fn kcore_decomposition_on(
+    store: &super::traits::GraphView<'_>,
+) -> grafeo_common::utils::error::Result<KCoreResult> {
+    let mut ticker = Ticker::new();
     let nodes = store.node_ids();
     let n = nodes.len();
 
     // Simple undirected adjacency: no self-loops, each neighbour once.
-    let adj = simple_undirected_adjacency(store, &nodes);
+    let adj = simple_undirected_adjacency(store, &mut ticker, &nodes)?;
 
     // `degree[v]` starts as the degree and ends as the core number of v.
     let mut degree: Vec<usize> = adj.iter().map(Vec::len).collect();
@@ -412,6 +426,7 @@ pub(crate) fn kcore_decomposition_on(store: &super::traits::GraphView<'_>) -> KC
     // Peel vertices in order of current degree. Moving a neighbour u from degree d to
     // d - 1 swaps it with the first vertex of bin d and shifts that bin's start by one.
     for i in 0..n {
+        ticker.tick()?;
         let v = order[i];
         for &u in &adj[v] {
             if degree[u] > degree[v] {
@@ -437,10 +452,10 @@ pub(crate) fn kcore_decomposition_on(store: &super::traits::GraphView<'_>) -> KC
         .map(|(&node, &core)| (node, core))
         .collect();
 
-    KCoreResult {
+    Ok(KCoreResult {
         core_numbers,
         max_core,
-    }
+    })
 }
 
 /// Extracts the k-core subgraph (nodes with core number >= k).
@@ -455,13 +470,15 @@ pub fn k_core(
 ) -> grafeo_common::utils::error::Result<Vec<NodeId>> {
     let graph = super::traits::GraphView::new(store, view);
     let found = k_core_on(&graph, k);
-    graph.finish(found)
+    graph.finish(found)?
 }
 
 /// [`k_core`] on the graph a [`GraphView`](super::traits::GraphView) reads.
-pub(crate) fn k_core_on(store: &super::traits::GraphView<'_>, k: usize) -> Vec<NodeId> {
-    let result = kcore_decomposition_on(store);
-    result.k_core(k)
+pub(crate) fn k_core_on(
+    store: &super::traits::GraphView<'_>,
+    k: usize,
+) -> grafeo_common::utils::error::Result<Vec<NodeId>> {
+    Ok(kcore_decomposition_on(store)?.k_core(k))
 }
 
 // ============================================================================
@@ -513,19 +530,20 @@ pub fn edge_triangle_support(
 ) -> grafeo_common::utils::error::Result<FxHashMap<(NodeId, NodeId), u64>> {
     let graph = super::traits::GraphView::new(store, view);
     let found = edge_triangle_support_on(&graph);
-    graph.finish(found)
+    graph.finish(found)?
 }
 
 /// [`edge_triangle_support`] on the graph a [`GraphView`](super::traits::GraphView) reads.
 pub(crate) fn edge_triangle_support_on(
     store: &super::traits::GraphView<'_>,
-) -> FxHashMap<(NodeId, NodeId), u64> {
+) -> grafeo_common::utils::error::Result<FxHashMap<(NodeId, NodeId), u64>> {
+    let mut ticker = Ticker::new();
     let nodes = store.node_ids();
     if nodes.is_empty() {
-        return FxHashMap::default();
+        return Ok(FxHashMap::default());
     }
 
-    let neighbors = simple_undirected_neighbor_sets(store, &nodes);
+    let neighbors = simple_undirected_neighbor_sets(store, &mut ticker, &nodes)?;
     let mut support: FxHashMap<(NodeId, NodeId), u64> = FxHashMap::default();
 
     // For each node u, for each pair of neighbors (v, w), if v-w is also
@@ -534,6 +552,7 @@ pub(crate) fn edge_triangle_support_on(
         let nb_list: Vec<NodeId> = node_neighbors.iter().copied().collect();
         for i in 0..nb_list.len() {
             for j in (i + 1)..nb_list.len() {
+                ticker.tick()?;
                 let v = nb_list[i];
                 let w = nb_list[j];
                 if neighbors.get(&v).is_some_and(|s| s.contains(&w)) {
@@ -556,7 +575,7 @@ pub(crate) fn edge_triangle_support_on(
         *val /= 3;
     }
 
-    support
+    Ok(support)
 }
 
 /// Full k-truss decomposition: compute the truss number of every edge.
@@ -585,21 +604,24 @@ pub fn ktruss_decomposition(
 ) -> grafeo_common::utils::error::Result<KTrussResult> {
     let graph = super::traits::GraphView::new(store, view);
     let found = ktruss_decomposition_on(&graph);
-    graph.finish(found)
+    graph.finish(found)?
 }
 
 /// [`ktruss_decomposition`] on the graph a [`GraphView`](super::traits::GraphView) reads.
-pub(crate) fn ktruss_decomposition_on(store: &super::traits::GraphView<'_>) -> KTrussResult {
+pub(crate) fn ktruss_decomposition_on(
+    store: &super::traits::GraphView<'_>,
+) -> grafeo_common::utils::error::Result<KTrussResult> {
+    let mut ticker = Ticker::new();
     let nodes = store.node_ids();
     if nodes.is_empty() {
-        return KTrussResult {
+        return Ok(KTrussResult {
             truss_numbers: FxHashMap::default(),
             max_truss: 0,
-        };
+        });
     }
 
     // The simple undirected graph, as sets for fast membership tests.
-    let mut neighbors = simple_undirected_neighbor_sets(store, &nodes);
+    let mut neighbors = simple_undirected_neighbor_sets(store, &mut ticker, &nodes)?;
 
     // Collect all undirected edges.
     let mut live_edges: FxHashSet<(NodeId, NodeId)> = FxHashSet::default();
@@ -610,15 +632,16 @@ pub(crate) fn ktruss_decomposition_on(store: &super::traits::GraphView<'_>) -> K
     }
 
     if live_edges.is_empty() {
-        return KTrussResult {
+        return Ok(KTrussResult {
             truss_numbers: FxHashMap::default(),
             max_truss: 0,
-        };
+        });
     }
 
     // Compute initial edge support (triangle count per edge).
     let mut support: FxHashMap<(NodeId, NodeId), usize> = FxHashMap::default();
     for &(u, v) in &live_edges {
+        ticker.tick()?;
         let u_nb = &neighbors[&u];
         let v_nb = &neighbors[&v];
         let common = u_nb.intersection(v_nb).count();
@@ -631,6 +654,7 @@ pub(crate) fn ktruss_decomposition_on(store: &super::traits::GraphView<'_>) -> K
     let mut k: usize = 2;
 
     while !live_edges.is_empty() {
+        ticker.tick()?;
         // Find all edges with support < k - 2.
         let threshold = k.saturating_sub(2);
         let mut to_remove: Vec<(NodeId, NodeId)> = live_edges
@@ -657,6 +681,7 @@ pub(crate) fn ktruss_decomposition_on(store: &super::traits::GraphView<'_>) -> K
 
         // Remove edges and update support.
         while let Some((u, v)) = to_remove.pop() {
+            ticker.tick()?;
             if !live_edges.contains(&(u, v)) {
                 continue;
             }
@@ -703,10 +728,10 @@ pub(crate) fn ktruss_decomposition_on(store: &super::traits::GraphView<'_>) -> K
         }
     }
 
-    KTrussResult {
+    Ok(KTrussResult {
         truss_numbers,
         max_truss,
-    }
+    })
 }
 
 /// Extracts edges in the k-truss subgraph (of the simple undirected graph, see
@@ -722,13 +747,15 @@ pub fn k_truss(
 ) -> grafeo_common::utils::error::Result<Vec<(NodeId, NodeId)>> {
     let graph = super::traits::GraphView::new(store, view);
     let found = k_truss_on(&graph, k);
-    graph.finish(found)
+    graph.finish(found)?
 }
 
 /// [`k_truss`] on the graph a [`GraphView`](super::traits::GraphView) reads.
-pub(crate) fn k_truss_on(store: &super::traits::GraphView<'_>, k: usize) -> Vec<(NodeId, NodeId)> {
-    let result = ktruss_decomposition_on(store);
-    result.k_truss(k)
+pub(crate) fn k_truss_on(
+    store: &super::traits::GraphView<'_>,
+    k: usize,
+) -> grafeo_common::utils::error::Result<Vec<(NodeId, NodeId)>> {
+    Ok(ktruss_decomposition_on(store)?.k_truss(k))
 }
 
 /// Orders a node pair so the smaller ID comes first (canonical edge representation).
@@ -741,14 +768,16 @@ fn ordered_pair(a: NodeId, b: NodeId) -> (NodeId, NodeId) {
 /// two, and self-loops are left out (a self-loop closes no triangle).
 fn simple_undirected_neighbor_sets(
     store: &super::traits::GraphView<'_>,
+    ticker: &mut Ticker,
     nodes: &[NodeId],
-) -> FxHashMap<NodeId, FxHashSet<NodeId>> {
+) -> grafeo_common::utils::error::Result<FxHashMap<NodeId, FxHashSet<NodeId>>> {
     let mut neighbors: FxHashMap<NodeId, FxHashSet<NodeId>> = nodes
         .iter()
         .map(|&node| (node, FxHashSet::default()))
         .collect();
     for &node in nodes {
         for (neighbor, _) in store.edges(node, Direction::Outgoing) {
+            ticker.tick()?;
             if neighbor == node || !neighbors.contains_key(&neighbor) {
                 continue;
             }
@@ -760,7 +789,7 @@ fn simple_undirected_neighbor_sets(
             }
         }
     }
-    neighbors
+    Ok(neighbors)
 }
 
 // ============================================================================
@@ -782,8 +811,8 @@ impl_algorithm! {
     name: "articulation_points",
     description: "Find articulation points (cut vertices) in the graph",
     params: articulation_params,
-    execute(store, _params) {
-        let points = articulation_points_on(store);
+    compute(store, _params) {
+        let points = articulation_points_on(store)?;
 
         let mut result = AlgorithmResult::new(vec!["node_id".to_string()]);
 
@@ -813,8 +842,8 @@ impl_algorithm! {
     name: "bridges",
     description: "Find bridges (cut edges) in the graph",
     params: bridges_params,
-    execute(store, _params) {
-        let bridge_list = bridges_on(store);
+    compute(store, _params) {
+        let bridge_list = bridges_on(store)?;
 
         let mut result = AlgorithmResult::new(vec!["source".to_string(), "target".to_string()]);
 
@@ -841,6 +870,7 @@ fn kcore_params() -> &'static [ParameterDef] {
             param_type: ParameterType::Integer,
             required: false,
             default: None,
+            domain: Domain::NonNegative,
         }]
     })
 }
@@ -863,28 +893,18 @@ impl GraphAlgorithm for KCoreAlgorithm {
 
     // reason: node IDs and core numbers are bounded by graph size
     #[allow(clippy::cast_possible_wrap)]
-    fn execute(
+    fn compute(
         &self,
         store: &dyn GraphStore,
         view: grafeo_common::types::ReadView,
-        params: &Parameters,
+        params: &Prepared,
     ) -> Result<AlgorithmResult> {
         let graph = super::traits::GraphView::new(store, view);
         let store = &graph;
         let found = super::traits::evaluated(|| {
-            let decomposition = kcore_decomposition_on(store);
+            let decomposition = kcore_decomposition_on(store)?;
 
-            if let Some(k) = params.get_int("k") {
-                if k < 0 {
-                    return Err(grafeo_common::utils::error::Error::InvalidValue(format!(
-                        "k-core requires a non-negative k value, got {k}"
-                    )));
-                }
-                let k_usize = usize::try_from(k).map_err(|_| {
-                    grafeo_common::utils::error::Error::InvalidValue(format!(
-                        "k-core k value {k} exceeds maximum supported size"
-                    ))
-                })?;
+            if let Some(k_usize) = params.get_count("k")? {
                 let k_core_nodes = decomposition.k_core(k_usize);
 
                 let mut result =
@@ -932,6 +952,7 @@ fn ktruss_params() -> &'static [ParameterDef] {
             param_type: ParameterType::Integer,
             required: false,
             default: None,
+            domain: Domain::NonNegative,
         }]
     })
 }
@@ -955,28 +976,18 @@ impl GraphAlgorithm for KTrussAlgorithm {
 
     // reason: node IDs and truss numbers are bounded by graph size
     #[allow(clippy::cast_possible_wrap)]
-    fn execute(
+    fn compute(
         &self,
         store: &dyn GraphStore,
         view: grafeo_common::types::ReadView,
-        params: &Parameters,
+        params: &Prepared,
     ) -> Result<AlgorithmResult> {
         let graph = super::traits::GraphView::new(store, view);
         let store = &graph;
         let found = super::traits::evaluated(|| {
-            let decomposition = ktruss_decomposition_on(store);
+            let decomposition = ktruss_decomposition_on(store)?;
 
-            if let Some(k) = params.get_int("k") {
-                if k < 0 {
-                    return Err(grafeo_common::utils::error::Error::InvalidValue(format!(
-                        "k-truss requires a non-negative k value, got {k}"
-                    )));
-                }
-                let k_usize = usize::try_from(k).map_err(|_| {
-                    grafeo_common::utils::error::Error::InvalidValue(format!(
-                        "k-truss k value {k} exceeds maximum supported size"
-                    ))
-                })?;
+            if let Some(k_usize) = params.get_count("k")? {
                 let edges = decomposition.k_truss(k_usize);
 
                 let mut result =
@@ -1019,6 +1030,7 @@ impl GraphAlgorithm for KTrussAlgorithm {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::plugins::Parameters;
     use grafeo_common::types::ReadView;
 
     fn create_simple_path() -> RowGroupStore {

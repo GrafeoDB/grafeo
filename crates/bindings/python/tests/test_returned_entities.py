@@ -70,6 +70,7 @@ def titles(db, ids):
     ]
 
 
+@pytest.mark.requires("text-index")
 def test_tied_text_scores_keep_the_lowest_node_ids(tmp_path):
     path = str(tmp_path / "docs.grafeo")
     db = GrafeoDB(path)

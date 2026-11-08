@@ -4,36 +4,116 @@ All notable changes to Grafeo, for future reference (and enjoyment).
 
 ## [0.6.2] - Unreleased
 
-### Faster queries
+Correctness release: comparisons, nulls and operands of the wrong kind follow ISO GQL and openCypher more closely, a refused permission has its own code, a session can be kept from reading local files, and a graph cleared and written back keeps its size. Results that change on upgrade: a string never equals a number, `{k: NULL}` in a pattern finds nothing, an operator given a value of the wrong kind raises 22G12 where it answered null, and a file database checkpoints by itself (Changed lists each). Plus join orders from sampled degrees, cycles closed by intersection and lookups that need no index.
+
+### Performance
 
 - **Planner**: comma patterns pick their join order from sampled degrees, cycles close by lookup or intersection, and same-type chains up to 6 hops count without listing paths. Common queries stay at their speed; the first plan of a comma pattern costs a little more.
 - **Pinned far nodes and `IN`**: a hop to a pinned node starts at that end when it costs less, a key on several nodes reads the shorter side, and a long constant `IN` list is a set.
 - **Lookups with no index**: an equality on a property reads its column directly, a `LIMIT` stops early, and reopened columns skip chunks by their stored bounds.
 - **Typed graphs**: a read no longer pays for a graph type's checks, which only a write needs.
 - **Constraints**: `UNIQUE` and `NODE KEY` build an index on their first property, so an insert under one no longer reads the whole label.
+- **Weighted algorithms**: Dijkstra, SSSP, A*, Bellman-Ford, Floyd-Warshall, Kruskal, Prim, `max_flow` and `min_cost_max_flow` read each edge's weight directly instead of loading the whole edge; Dijkstra takes about a third fewer instructions.
+- **Smaller default builds**: the `wal` feature no longer pulls in tokio; only `async-storage` and `server` do.
 
 ### Changed
 
 Queries that ran in 0.6.1 and now fail or behave differently.
 
 - **`CREATE INDEX`** holds its label only: writes on other labels no longer pay for it. A query on another label scans, with the same rows and a note in `EXPLAIN`; a query with no label reads the label indexes and scans only the rows they do not cover. Existing indexes stay as they are, and `create_property_index` still covers every label. A 0.6.1 release opens such a file with the same rows, without those indexes, and a checkpoint there drops them.
-- **Closed graph types**: `REMOVE` fails with `G2000` when it would take a node's last label or the label that declares a property it holds, and so does removing a label an edge type's endpoints need, wherever that rule applies. `import_tsv`, `import_tsv_str` and `import_mmio` fail the same way when the graph's rules refuse `_Imported` nodes or the edge, as does dropping or replacing a property nodes or edges still hold. `DROP NODE TYPE` and `DROP EDGE TYPE` are refused while a closed graph type bound to a graph lists the type. Files already holding such data still open.
+- **Closed graph types**: `REMOVE` fails with `G2000` when it would take a node's last label or the label that declares a property it holds, and so does removing a label an edge type's endpoints need, wherever that rule applies. `import_tsv`, `import_tsv_str` and `import_mmio` fail the same way when the graph's rules refuse `_Imported` nodes or the edge, as does dropping or replacing a property that nodes or edges still hold. `DROP NODE TYPE` and `DROP EDGE TYPE` are refused while a closed graph type bound to a graph lists the type. Files already holding such data still open.
 - **Writes**: `|`, `!`, `%` and parentheses in the labels of an `INSERT` or a single-node `MERGE` are an error naming the statement, as they name no labels.
 - **Rules**: a rule added over data that breaks it fails with `GRAFEO-V001`, and so does a commit whose writes break a rule added since the transaction began.
 - **Graph types**: a type a graph type lists applies only in graphs bound to it, so its rules and defaults no longer reach other graphs; `validate()` reports affected types, and Python warns at open. Dropping a graph type drops the types only it listed, and a second, different declaration of a type is refused. See the upgrade note.
 - **Transactions**: `START TRANSACTION`, `COMMIT` and `ROLLBACK` on a per-call `execute` are refused, `CREATE GRAPH ... AS COPY OF` is refused in a transaction, and no SPARQL statement runs after a SPARQL graph operation until the commit.
+- **A string and a number** are never equal: `'5' = 5` is false and `'5' <> 5` true, in GQL and Cypher, also in indexes, joins, `IN`, `MERGE` and upserts; `id(n) = '5'` finds nothing. In GQL, a node compared with `=` to another kind of value is false instead of an error.
+- **Lists and records containing a null** can compare as unknown: `[null] = [null]` and `[1] = [null]` drop the row in a `WHERE`, while a definite mismatch such as `[1, 2] = [null, 3]` is false. A value containing a null matches nothing in a join or a lookup. `DISTINCT`, grouping and `UNIQUE` still treat nulls as one value.
+- **Comparing values of two kinds** with `<`, `<=`, `>` and `>=`: GQL orders them as ORDER BY does (a string before every number, a boolean before every number), with or without an index; Cypher and Gremlin answer null; SQL/PGQ raises 22G04, as do its `=`, `<>` and `IN`, whichever plan reads them (an index or key-column read returned rows where the scan raised).
+- **Wrong kinds**: an operator or list index given an operand of a kind it does not take (`true + 1`, `-'a'`, `[1, 2, 3][1.5]`) raises invalid value type (22G12) instead of answering null; a sign on a non-number reports 22G12 rather than 22G03. A null operand still gives null.
+- **`+` of a string and another kind** in GQL raises invalid value type (22G12) in either order, for any non-null value that is not a string (`'x' + 3` gave `'x3'`, `'is:' + true` gave `'is:true'`).
+- **Procedure arguments**: a value outside what an argument allows raises invalid parameter value (22023), in CALL (the load procedures included) and in the Python `db.algorithms` methods; `grafeo.pagerank(2.0)`, a negative `max_iterations`, a NaN tolerance or a negative `k` ran with meaningless results or clamped values (in Python, `pagerank(damping=2.0)` returned scores like 39,602,142,754). A missing required argument, or null for it, raises 22023 too, naming the argument and its type (it raised 22000). In the Python algorithm methods, `None` for an optional argument means its default, and `None` for a required one raises `GrafeoError` 22023 instead of `TypeError`. The load procedures take their arguments in the map or the positional form (`path`, then `labels`, or `type`, `source` and `target`), raise 22023 for a delimiter that is not one character, an unknown column type, a wrong key in `source` or `target` (an unknown key was ignored) or a `projection` (it was ignored), and 22G03 for an argument of the wrong type.
+- **Edge weights**: weighted algorithms refuse an edge value they cannot use and name the edge and property: a non-number raises 22G12 (it read as 1.0); NaN, an infinity, or a negative weight in Dijkstra, A*, SSSP or a flow capacity raises 22023.
+- **Procedure timeouts**: graph algorithm, search, schema and CSV load procedures, and the Python algorithm methods, stop at the query timeout with the usual timeout error, never a partial answer; a run used to hold its thread until it ended.
+- **`grafeo.max_flow` and `grafeo.min_cost_max_flow` rows**: one row per edge that carries flow, so parallel edges each get a row; they gave one row per node pair.
+- **`grafeo.topological_sort` on a graph with a cycle** raises a data exception (22000) naming one cycle, such as `3 -> 5 -> 8 -> 3`; it returned a row in an undocumented `error` column. The Python method still returns `None` for a cycle.
+- **Minimum spanning trees of equal weight**: `grafeo.kruskal` and `grafeo.prim` return the one with the lowest edge ids (it depended on the order edges were read).
+- **A WAL with an empty segment**, which a crash in 0.6.1 could leave while starting one, is refused at open with an error naming `wal_salvage`: reopen it once with `wal_salvage`, which sets the empty file aside and loses no commit (#725).
+- **Incremental backups that cannot continue their chain** fail with `GRAFEO-S005`, naming the cause: no backup cursor, a chain behind the cursor, or log that was removed. Some of these raised an invalid-input error. A new full backup starts a new chain (#673).
+- **Automatic checkpoints are on**: a file database checkpoints by itself once its WAL holds 256 MiB past the last checkpoint, on a background thread that starts when it first has work; turn it off with `checkpoint_wal_size=None` (Python), `checkpointWalSize: null` (Node.js) or `Config::without_checkpoint_wal_size()`. The WAL's segment size is a setting (`wal_segment_size`, 1 MiB to 1 GiB, 64 MiB by default), and a checkpoint size below 1 MiB is refused.
+- **The default memory limit follows the process's real ceiling** ([#751](https://github.com/GrafeoDB/grafeo/issues/751)): 75% of the smaller of the machine's memory and any cgroup (Linux, at the process's cgroup or a parent) or job-object (Windows) limit. Windows and macOS now read their memory instead of assuming 1 GiB; WASM keeps 768 MiB.
+- **`Config::with_memory_fraction` applies per open**: it is taken of the memory detected when the database opens, and a database file no longer stores its bytes; `with_memory_limit` is stored as before.
+- **`file:` URLs follow RFC 8089**: in `LOAD CSV`, `LOAD DATA` and the load procedures, `file:///srv/data.csv` and `file://localhost/srv/data.csv` name the absolute path `/srv/data.csv` (`file:///` was stripped and the rest read as a relative path), and a `file:` URL with another host is refused.
+- **Permission refusals have their own codes**: GQLSTATUS `42501`, with `GRAFEO-Q007` for a write, DDL or writing procedure that the session's role or graph grants refuse and `GRAFEO-Q008` for a statement that reaches outside the database on a session without external access; both were `GRAFEO-Q002` with `42000`. Python raises `GrafeoPermissionError`, a subclass of `GrafeoError`.
+- **`memory_usage()` reports what the store holds**: its store, index, version and string-pool figures are the counted bytes, kept as each write grows them, instead of estimates.
+- **A negative `SKIP` or `LIMIT` after a GQL `CALL`** raises 22G02, as in every other `RETURN`; 0.6.1 ignored the count.
+- **`TierOverride::ForceDisk` is refused on sections that cannot spill**: only `VectorStore` can move to disk, so `ForceDisk` on another section (`TextIndex`, `PropertyIndex`, `LpgStore`, `RdfRing`, `CompactStore` and the rest) now fails `Config::validate`, where it was accepted and did nothing.
+
+### Added
+
+- **Graph procedures**: `CALL grafeo.ktruss()` and `grafeo.ktruss(k)`, `grafeo.total_triangles()` and `grafeo.subgraph_isomorphism(pattern_edges, pattern_nodes)`, and the Python methods `ktruss(k=None)` and `subgraph_isomorphism_count(pattern_edges, pattern_nodes)`.
+- **Query warnings**: a statement that uses a deprecated form or has something worth knowing returns its rows with warnings, each with a GQLSTATUS code (class 01), a kind and a message. They are on `QueryResult::warnings` and on streaming results, in every binding (Python also raises them through `warnings.warn`), and the CLI prints them on stderr. Experimental.
+- **SQL/PGQ `||`** concatenates strings and lists.
+- **Procedures in every build**: `CALL grafeo.procedures()` and the CSV load procedures are listed in every build, with each argument's type, default and allowed values where it declares them. A call of a procedure this build leaves out fails with `GRAFEO-Q004`, naming the feature that brings it, instead of as an unknown name.
+- **Sessions without external access**: `Identity::with_external_access(false)` refuses every statement that reads or writes outside the database, such as the CSV loads, before it runs.
+- **Sessions in the bindings**: `db.session(read_only=..., external_access=...)` in Python, `db.session({ readOnly, externalAccess })` in Node.js and `grafeo_session_open` in C run queries with those limits; `external_access=False` refuses every statement that reads or writes outside the database.
+- **The procedure listing says what each procedure does**: `CALL grafeo.procedures()` lists whether it writes the graph (`writes`, a BOOLEAN) and what it reaches outside the database (`external_access`: `'none'`, `'reads'` or `'writes'`).
+- **`grafeo.pagerank`** warns (01Y01) when it runs out of iterations before its scores settle within `tolerance`.
+- **WAL retention limit**: after a backup, checkpoints keep the WAL the next incremental backup needs, up to `Config::with_wal_retention_limit` (1 GiB by default; Python `wal_retention_limit`, Node `walRetentionLimit`). Past the limit the oldest log is removed with a warning, and the next incremental backup fails with `GRAFEO-S005`. `release_backup_cursor()` (Rust, Python, Node, C, C#) stops keeping log for backups (#673).
+
+### Deprecated
+
+- **`ZONED DATETIME '...'` and `ZONED TIME '...'` literals**: write `DATETIME '...'` or `TIME '...'` with an offset. They warn with 01X01 and 01X03, and 0.7.0 refuses them.
+- **`+` on two lists** in GQL and SQL/PGQ: use `||`. It warns with 01X02, and 0.7.0 refuses it.
 
 ### Fixed
 
 - **Label expressions on a path's first node**: `IS`, `&`, `|`, `!`, `%` and parentheses were ignored there, so `MATCH (x IS A)-[:R]->(t)` also matched nodes without `A`, and a `SET`, `REMOVE` or `DELETE` after it changed them. All GQL and SQL/PGQ path patterns now check them (#736).
 - **Label expressions in writes**: `INSERT (n IS Person)`, `INSERT (n:A&B)` and `MERGE (n IS Person)` created a node with no labels; `IS A` and `A & B` now set those labels. Databases written before this may hold such nodes, and nodes changed or deleted by the query above, which no fix can recover: find unlabelled nodes with `MATCH (n) WHERE size(labels(n)) = 0 RETURN n`.
 - **`UNIQUE`** refuses `0.0` and `-0.0` as duplicates whether or not the property has an index.
-- **SPARQL**: fixed a slowdown in multi-way joins from 0.6.1.
-- **SPARQL**: a `.` after a `FILTER`, `OPTIONAL`, `MINUS`, `GRAPH` or nested group parses again (#737), and `GRAPH <iri>` over a graph the dataset does not hold gives no row (#738).
+- **`UNIQUE`, `NODE KEY` and `MERGE`** treat `1`, `1.0e0` and the decimal `1.0`, and `[1]` and `[1.0]`, as one value, and `UNIQUE` and `NODE KEY` count every NaN, of either sign, as one value.
+- **SPARQL joins**: fixed a slowdown in multi-way joins from 0.6.1.
+- **SPARQL parsing**: a `.` after a `FILTER`, `OPTIONAL`, `MINUS`, `GRAPH` or nested group parses again (#737).
+- **SPARQL subqueries and paths**: a sub-select inside `GRAPH ?g` binds `?g` (#739), `BIND(EXISTS {...} AS ?v)` evaluates (#740), and `EXISTS` and `NOT EXISTS` read each row's values, as the SPARQL 1.2 draft says. `?s :p? :o` with a constant object returns `:o` and the subjects that reach it, each once (it returned every subject of `:p`, repeated), a subquery with an aggregate gives all its rows, and nested groups keep their rows.
+- **SPARQL graphs**: inside `GRAPH ?g { ... }`, `?g` is bound only after the group, as SPARQL says: a `FILTER` on `?g`, `?g` used as a term, and a nested `GRAPH ?g` inside `EXISTS`, `NOT EXISTS`, `OPTIONAL` or `MINUS` no longer see it bound early, which gave missing or extra rows. `GRAPH <iri>` over a graph the dataset does not hold gives no row (#738), `FROM` over two graphs returns a shared triple once, and `FROM` without `FROM NAMED` exposes no named graphs. A variable repeated within one triple pattern holds the same term in each position (`?x :r ?x`, `?g ?p ?g` inside `GRAPH ?g`, any pairing of subject, predicate, object and graph, also inside `OPTIONAL`); every matching triple was returned, and `COUNT(*)` counted them all.
 - **Booleans**: `<`, `<=`, `>` and `>=` order false below true in every plan; they could return null and lose rows.
+- **Comparing lists**: `<`, `<=`, `>` and `>=` on two lists or two paths compare element by element in GQL and Cypher; `[1] < [1]` is false (it was null).
+- **Lists**: GQL `||` concatenates lists, and Cypher `+` appends or prepends a single value to a list, a null included (`[1, 2] + 3`, `[1, 2] + null`); both gave null before.
+- **`+` with a string** in Cypher: a number and a string join in either order (`1 + 'a'` is `'1a'`, written as `toString()` writes it; it was null).
+- **Grouping by a parameter**: a grouping key built from a parameter (`RETURN $p + 1 AS x, count(*)`, `$m.k`, `$list[0]`, `size($list)`) no longer fails with an undefined variable.
 - **Schema statements** roll back with their transaction, also across a crash (#727).
 - **Conditions that can fail**, such as `100 / n.age > 0`, no longer fail on rows a label or an earlier condition rejects.
 - **Graph type patterns**: naming an existing type no longer wipes its properties, and several patterns of one edge type no longer lose all but the last.
+- **Closed graph types in a schema**: a node or edge type added with `ALTER GRAPH TYPE ... ADD` is held like one listed by `CREATE GRAPH TYPE`, so `DROP NODE TYPE` and `DROP EDGE TYPE` refuse it while listed, and `ALTER GRAPH TYPE ... DROP` takes it out, in files written by 0.6.1 too.
+- **Backups**: a restore checks the full backup's checksum, as it does an incremental backup's, and refuses a damaged file by name before it writes anything (#744); incremental backups and restores of a large WAL stream the log a segment and a frame at a time instead of reading it into memory (#673).
+- **A null optional procedure argument**, however computed, takes the parameter's default instead of failing.
+- **`grafeo.min_cost_max_flow`** gives each parallel edge its own capacity and cost (two edges costing 1 and 5 reported 50 where 30 is right), and refuses a negative-cost cycle the source reaches (22023), where the call never returned.
+- **`grafeo.kruskal` and `grafeo.prim`** take the lightest of the edges between two nodes, in either direction, and `grafeo.prim` from a start node returns the whole tree; Kruskal kept the first edge it met and Prim missed a lighter edge pointing back, both reporting a heavier tree, and Prim followed only outgoing edges.
+- **`grafeo.topological_sort`** gives the same order on every run (the lexicographically smallest by node id).
+- **GQL statements after `CALL ... YIELD`**: a statement that starts with a procedure call goes on with any clause, `MATCH`, `OPTIONAL MATCH`, `FILTER`, `LET`, `FOR`, `ORDER BY`, another `CALL`, `SET` or `INSERT`, as ISO GQL allows (14.3); only `RETURN` was accepted, and a following `MATCH` was a syntax error.
+- **GQL `NEXT` then `CALL`**: a procedure call after `NEXT` kept the earlier statement's columns, grouping the result by them; it now returns only its own columns, and the incoming fields stay in scope.
+- **`SKIP` and `LIMIT` after a GQL `CALL`**: `SKIP $n` and `LIMIT $n` in the `RETURN` after a procedure call take effect; they were ignored.
+- **`HAVING` and `FINISH` after a GQL `CALL`** are accepted; they were a syntax error.
+- **SQL/PGQ `CALL ... LIMIT $n`** takes its limit; it was ignored.
+- **Stored procedures** run in builds without the graph algorithms (the `lpg` and `edge` profiles, the CLI): `CREATE PROCEDURE` succeeded there and its `CALL` said the procedure was unknown.
+- **A null in a property map** (`MATCH (n {k: NULL})`, also on an edge, in GQL, Cypher and SQL/PGQ) finds nothing, as an equality with null does; it found the elements without the key. A null in a `MERGE` pattern still matches an absent property.
+- **A `DATETIME` literal keeps its offset**: `DATETIME '2024-01-01T10:00:00+01:00'` is a ZONED DATETIME at `+01:00` and `Z` is `+00:00`, as the `ZONED DATETIME '...'` deprecation names it; 0.6.1 gave the UTC time without the offset. Without an offset it stays a local datetime.
+- **SQL/PGQ `EXPLAIN`** returns the plan; it ran the statement and returned its rows, in Python's `explain_sql` too.
+- **`INTERSECT` and `EXCEPT` inside `CALL { }`**: the columns they return are visible after the call, as with `UNION` and `OTHERWISE`; reading them raised "Undefined variable".
+- **A `MERGE` after an `OTHERWISE` body in `CALL { }`** uses the node the body returns; it raised "Variable already declared outside the CALL subquery".
+- **`YIELD`**: a column a procedure does not have is refused when the call is planned, naming its columns; it failed only after the algorithm had run (4.5 s on 4,000 nodes).
+- **WAL segments**: a panic while the WAL started a new segment no longer makes every later checkpoint fail until a reopen (#725).
+- **Checkpoints** check free disk space first and fail with a clear error naming the space needed and available, changing nothing; a checkpoint that fails partway gives back the disk space it took (#726).
+- **Go and C# bindings**: a database, transaction, graph, stream or point-in-time view could be freed by the garbage collector while a call on it was still running, which could crash the process (for example on the last `Next` of a stream in Go); every native call now keeps its handle alive. In C#, an async call on a database disposed meanwhile throws `ObjectDisposedException`.
+- **WASM `importRdf`** is in every build with the RDF store, the `full` package (`@grafeo-db/wasm`) included; it was missing there.
+- **Vector search with a filter on a quantized index** could return fewer than `k` results, or none, when the allowed nodes lay far from the query; it now searches among the allowed nodes.
+- **Opening and closing without writes leaves the file unchanged**: `close()` checkpoints only when something changed since the last checkpoint, so a database opened only for reads keeps its file byte for byte (its header was rewritten on every close).
+- **The C header declares the backup functions**: `grafeo_backup_full`, `grafeo_backup_incremental`, `grafeo_restore_to_epoch` and `grafeo_clear_plan_cache`, exported since earlier releases, are now declared in `grafeo.h`.
+- **A crashed query's spill files are removed at open**: the next read-write open deletes the `<file>.spill/query_*` directories a crash left, with the vector cache, before it measures the spill volume.
+- **A graph cleared and written back keeps its size**: the slots of deleted rows (edge ends, property values, adjacency offsets) go back once a whole vector of 2,048 rows below the live ones is gone, in a session and across reopens. In 0.6.1 each clear and rewrite of 2,400 nodes and 4,800 edges added about 500 KB within a session.
+
+### Security
+
+- **Queries can be kept from reading local files**: a session without external access refuses `LOAD CSV`, `LOAD DATA`, the CSV load procedures and SPARQL `LOAD` before any file is opened; through a server, give remote sessions none.
 
 ### Contributors
 

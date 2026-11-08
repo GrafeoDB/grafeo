@@ -406,9 +406,9 @@ fn a_crash_at_every_checkpoint_point_keeps_the_history() {
 
     use grafeo_common::testing::crash::{CrashResult, with_crash_at};
 
-    /// The crash points of a checkpoint with a WAL, at least: one past the
-    /// last stops the loop.
-    const MOST_POINTS: u64 = 16;
+    /// A ceiling on the crash points of a checkpoint with a WAL (17 with the
+    /// retention release): the first point past the last stops the loop.
+    const MOST_POINTS: u64 = 24;
 
     let mut completed = false;
     for point in 1..=MOST_POINTS {

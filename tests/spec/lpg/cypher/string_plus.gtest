@@ -1,0 +1,110 @@
+# `+` with a string concatenates both ways in Cypher (GA04 step b, 2026-11-06, after openCypher): the
+# number's text is toString()'s, a list concatenates as lists, a null gives null, an entity is an
+# error. Generated with cypher_string_plus.rs.
+
+meta:
+  language: cypher
+  model: lpg
+  section: "string"
+  title: Plus with a string
+  dataset: empty
+
+tests:
+
+  - name: plus_1_plus_sa
+    query: "RETURN 1 + 'a' AS v"
+    expect:
+      rows:
+        - ["1a"]
+
+  - name: plus_sa_plus_1
+    query: "RETURN 'a' + 1 AS v"
+    expect:
+      rows:
+        - ["a1"]
+
+  - name: plus_sa_plus_1p5
+    query: "RETURN 'a' + 1.5 AS v"
+    expect:
+      rows:
+        - ["a1.5"]
+
+  - name: plus_1p5_plus_sa
+    query: "RETURN 1.5 + 'a' AS v"
+    expect:
+      rows:
+        - ["1.5a"]
+
+  - name: plus_3_plus_sa
+    query: "RETURN -3 + 'a' AS v"
+    expect:
+      rows:
+        - ["-3a"]
+
+  - name: plus_s_plus_7
+    query: "RETURN '' + 7 AS v"
+    expect:
+      rows:
+        - ["7"]
+
+  - name: plus_sa_plus_1_plus_2
+    query: "RETURN 'a' + 1 + 2 AS v"
+    expect:
+      rows:
+        - ["a12"]
+
+  - name: plus_1_plus_2_plus_sa
+    query: "RETURN 1 + 2 + 'a' AS v"
+    expect:
+      rows:
+        - ["3a"]
+
+  - name: plus_1p0_plus_sa_eq_tostring_1p0_plus_sa
+    query: "RETURN 1.0 + 'a' = toString(1.0) + 'a' AS v"
+    expect:
+      rows:
+        - [true]
+
+  - name: plus_sa_plus_2p5_eq_sa_plus_tostring_2p5
+    query: "RETURN 'a' + 2.5 = 'a' + toString(2.5) AS v"
+    expect:
+      rows:
+        - [true]
+
+  - name: plus_null_plus_sa
+    query: "RETURN null + 'a' AS v"
+    expect:
+      rows:
+        - [null]
+
+  - name: plus_sa_plus_null
+    query: "RETURN 'a' + null AS v"
+    expect:
+      rows:
+        - [null]
+
+  - name: plus_sa_plus_l_1_r
+    query: "RETURN 'a' + [1] AS v"
+    expect:
+      rows:
+        - ["[a, 1]"]
+
+  - name: plus_l_1_r_plus_sa
+    query: "RETURN [1] + 'a' AS v"
+    expect:
+      rows:
+        - ["[1, a]"]
+
+  - name: plus_a_node_on_the_left_is_an_error
+    setup:
+      - "CREATE (:P {name: 'Vincent'})"
+    query: "MATCH (n:P) RETURN n + 'a' AS v"
+    expect:
+      gql_status: "22G12"
+
+  - name: plus_a_node_on_the_right_is_an_error
+    setup:
+      - "CREATE (:P {name: 'Vincent'})"
+    query: "MATCH (n:P) RETURN 'a' + n AS v"
+    expect:
+      gql_status: "22G12"

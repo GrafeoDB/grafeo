@@ -197,6 +197,7 @@ func nodeRows(labels []string, rows []map[string]any) (*C.char, *C.char, error) 
 // BatchCreateNodesWithProps creates one node with labels per property map of rows, in one
 // transaction (a row the schema refuses creates none). Returns the node ids in row order.
 func (db *Database) BatchCreateNodesWithProps(labels []string, rows []map[string]any) ([]uint64, error) {
+	defer runtime.KeepAlive(db)
 	cLabels, cRows, err := nodeRows(labels, rows)
 	if err != nil {
 		return nil, err
@@ -211,6 +212,7 @@ func (db *Database) BatchCreateNodesWithProps(labels []string, rows []map[string
 // BatchCreateEdges creates the edges in one transaction (an edge naming a node that does not
 // exist creates none). Returns the edge ids in input order.
 func (db *Database) BatchCreateEdges(edges []BatchEdge) ([]uint64, error) {
+	defer runtime.KeepAlive(db)
 	if edges == nil {
 		edges = []BatchEdge{}
 	}
@@ -227,6 +229,7 @@ func (db *Database) BatchCreateEdges(edges []BatchEdge) ([]uint64, error) {
 // BatchVectorSearch finds the k nearest neighbours of each query vector, nearest first. ef 0
 // uses the index's default; filters (nil for none) are property equalities the results match.
 func (db *Database) BatchVectorSearch(label, property string, queries [][]float32, k, ef int, filters map[string]any) ([][]VectorResult, error) {
+	defer runtime.KeepAlive(db)
 	dims := 0
 	if len(queries) > 0 {
 		dims = len(queries[0])
@@ -273,26 +276,31 @@ func (db *Database) BatchVectorSearch(label, property string, queries [][]float3
 
 // SetCDCEnabled turns change data capture on or off for new sessions.
 func (db *Database) SetCDCEnabled(enabled bool) {
+	defer runtime.KeepAlive(db)
 	C.grafeo_set_cdc_enabled(db.handle, C.bool(enabled))
 }
 
 // IsCDCEnabled tells whether change data capture is on for new sessions.
 func (db *Database) IsCDCEnabled() bool {
+	defer runtime.KeepAlive(db)
 	return bool(C.grafeo_is_cdc_enabled(db.handle))
 }
 
 // NodeHistory returns every recorded change of a node, oldest first (requires change data capture).
 func (db *Database) NodeHistory(id uint64) ([]ChangeEvent, error) {
+	defer runtime.KeepAlive(db)
 	return eventsCall(func() *C.char { return C.grafeo_node_history(db.handle, C.uint64_t(id)) })
 }
 
 // EdgeHistory returns every recorded change of an edge, oldest first.
 func (db *Database) EdgeHistory(id uint64) ([]ChangeEvent, error) {
+	defer runtime.KeepAlive(db)
 	return eventsCall(func() *C.char { return C.grafeo_edge_history(db.handle, C.uint64_t(id)) })
 }
 
 // NodeHistorySince returns the changes of a node at or after an epoch.
 func (db *Database) NodeHistorySince(id, sinceEpoch uint64) ([]ChangeEvent, error) {
+	defer runtime.KeepAlive(db)
 	return eventsCall(func() *C.char {
 		return C.grafeo_node_history_since(db.handle, C.uint64_t(id), C.uint64_t(sinceEpoch))
 	})
@@ -300,6 +308,7 @@ func (db *Database) NodeHistorySince(id, sinceEpoch uint64) ([]ChangeEvent, erro
 
 // ChangesBetween returns every change in the epochs from start to end (both included), in commit order.
 func (db *Database) ChangesBetween(startEpoch, endEpoch uint64) ([]ChangeEvent, error) {
+	defer runtime.KeepAlive(db)
 	return eventsCall(func() *C.char {
 		return C.grafeo_changes_between(db.handle, C.uint64_t(startEpoch), C.uint64_t(endEpoch))
 	})
@@ -325,6 +334,7 @@ func upsertArgs(rows []map[string]any, options any) (*C.char, *C.char, error) {
 // UpsertNodes creates or updates one node per row, matched by the key and all labels, in one
 // statement. A row without the key is skipped.
 func (db *Database) UpsertNodes(labels []string, rows []map[string]any, options *UpsertNodesOptions) (*UpsertSummary, error) {
+	defer runtime.KeepAlive(db)
 	return upsertNodes(labels, rows, options, func(cLabels, cRows, cOptions *C.char, out **C.char) C.GrafeoStatus {
 		return C.grafeo_upsert_nodes(db.handle, cLabels, cRows, cOptions, out)
 	})
@@ -333,6 +343,7 @@ func (db *Database) UpsertNodes(labels []string, rows []map[string]any, options 
 // UpsertEdges creates or updates one edge of edgeType per row between existing nodes, in one
 // statement. Each row names its endpoints in the source and target fields ("src" and "dst").
 func (db *Database) UpsertEdges(edgeType string, rows []map[string]any, options *UpsertEdgesOptions) (*UpsertSummary, error) {
+	defer runtime.KeepAlive(db)
 	return upsertEdges(edgeType, rows, options, func(cType, cRows, cOptions *C.char, out **C.char) C.GrafeoStatus {
 		return C.grafeo_upsert_edges(db.handle, cType, cRows, cOptions, out)
 	})

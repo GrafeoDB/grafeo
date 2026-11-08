@@ -42,8 +42,50 @@ def self_contained():
                 line for line in block.splitlines() if line.strip() and not line.startswith("#")
             ]
             if code and re.match(r"(import grafeo|from grafeo import)", code[0]):
-                found.append(pytest.param(block, id=f"{name}-{index}"))
+                marks = (
+                    [pytest.mark.requires(*sorted(needs))] if (needs := features_of(block)) else []
+                )
+                found.append(pytest.param(block, id=f"{name}-{index}", marks=marks))
     return found
+
+
+# What a block calls that a build may leave out, and the feature it needs.
+FEATURE_CALLS = {
+    "create_vector_index": "vector-index",
+    "vector_search": "vector-index",
+    "mmr_search": "vector-index",
+    "create_text_index": "text-index",
+    "text_search": "text-index",
+    "hybrid_search": "hybrid-search",
+    ".algorithms": "algos",
+    "begin_transaction_with_cdc": "cdc",
+    "execute_sparql": "sparql",
+    "CREATE VECTOR INDEX": "vector-index",
+    "CREATE TEXT INDEX": "text-index",
+}
+
+# The procedures a `CALL grafeo.<name>` reaches that a build may leave out: the search ones need
+# their index, and every name not listed here or in NO_FEATURE is a graph algorithm.
+PROCEDURE_FEATURES = {
+    "search.vector": "vector-index",
+    "search.mmr": "vector-index",
+    "search.text": "text-index",
+}
+# The procedures every build registers: the catalog, the listing and the CSV loads.
+NO_FEATURE = {"labels", "relationshipTypes", "propertyKeys", "procedures"}
+
+
+def procedure_feature(name):
+    if name in NO_FEATURE or name.startswith("load_"):
+        return None
+    return PROCEDURE_FEATURES.get(name, "algos")
+
+
+def features_of(block):
+    called = {
+        procedure_feature(name) for name in re.findall(r"CALL\s+grafeo\.([A-Za-z_.]+)", block)
+    }
+    return {feature for call, feature in FEATURE_CALLS.items() if call in block} | (called - {None})
 
 
 def run(code, cwd):
@@ -75,6 +117,7 @@ db.execute("INSERT (:Person {name: 'Gus', age: 25})")
 """
 
 
+@pytest.mark.requires("cdc")
 def test_persona_first_time_user_follows_the_transaction_example(tmp_path):
     # The Python README's transaction block, after the quick start.
     block = next(b for b in python_blocks(READMES["python"]) if "begin_transaction()" in b)

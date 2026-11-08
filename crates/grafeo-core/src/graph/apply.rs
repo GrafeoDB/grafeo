@@ -151,6 +151,13 @@ pub enum ApplyError {
     /// cannot read (a spilled value whose file cannot be read). No value is
     /// refused for its type.
     Refused(String),
+    /// The memory limit refused the op before any change: it needs this many
+    /// more bytes. The store frees what it can outside its lock and applies
+    /// the op once more; a caller sees [`Limit`](Self::Limit) instead.
+    Memory(usize),
+    /// The memory limit refused the op, after the buffer manager's eviction
+    /// cycle: nothing changed (`GRAFEO-S001`).
+    Limit(Box<grafeo_common::utils::error::LimitRefusal>),
 }
 
 impl fmt::Display for ApplyError {
@@ -168,6 +175,11 @@ impl fmt::Display for ApplyError {
                 id.as_u64()
             ),
             Self::Refused(reason) => write!(f, "the store refused the write: {reason}"),
+            Self::Memory(needed) => write!(
+                f,
+                "the memory limit refused the write: it needs {needed} more bytes"
+            ),
+            Self::Limit(refusal) => write!(f, "{refusal}"),
         }
     }
 }

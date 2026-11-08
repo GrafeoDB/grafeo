@@ -254,6 +254,7 @@ def test_a_literal_of_xsd_string_is_the_simple_literal(fruit):
     assert (passed, repr(passed)) == (simple, "Literal('fresh')")
 
 
+@pytest.mark.requires("sparql")
 def test_a_term_python_cannot_build_raises_instead_of_being_a_value(tmp_path):
     """A term the conversion cannot build (here grafeo.terms.Literal fails,
     as for a kind the binding does not know) raises from every read of the

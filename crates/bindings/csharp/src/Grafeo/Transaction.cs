@@ -178,7 +178,7 @@ public sealed class Transaction : ITransaction, IDisposable, IAsyncDisposable
         {
             // Best-effort rollback; swallow errors during dispose.
             _finished = true;
-            NativeMethods.grafeo_rollback(_handle.DangerousGetHandle());
+            NativeMethods.grafeo_rollback(_handle);
         }
         _handle.Dispose();
     }
@@ -194,12 +194,12 @@ public sealed class Transaction : ITransaction, IDisposable, IAsyncDisposable
     // Internals
     // =========================================================================
 
-    private nint Handle
+    private TransactionHandle Handle
     {
         get
         {
             ThrowIfFinished();
-            return _handle.DangerousGetHandle();
+            return _handle;
         }
     }
 

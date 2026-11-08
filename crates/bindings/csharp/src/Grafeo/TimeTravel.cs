@@ -91,7 +91,7 @@ public sealed class AsOfView : IDisposable
     {
         _handle = new AsOfHandle();
         Marshal.InitHandle(_handle, ptr);
-        Epoch = NativeMethods.grafeo_as_of_epoch(ptr);
+        Epoch = NativeMethods.grafeo_as_of_epoch(_handle);
     }
 
     /// <summary>The epoch the view reads at.</summary>
@@ -105,12 +105,12 @@ public sealed class AsOfView : IDisposable
         _handle.Dispose();
     }
 
-    private nint Handle
+    private AsOfHandle Handle
     {
         get
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
-            return _handle.DangerousGetHandle();
+            return _handle;
         }
     }
 

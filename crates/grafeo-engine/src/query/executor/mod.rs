@@ -2,7 +2,6 @@
 //!
 //! Executes physical plans and produces results.
 
-#[cfg(feature = "algos")]
 pub mod procedure_call;
 #[cfg(feature = "gql")]
 pub mod stream;
@@ -17,6 +16,7 @@ use grafeo_common::clock::Instant;
 use grafeo_common::grafeo_debug_span;
 use grafeo_common::types::{LogicalType, Value};
 use grafeo_common::utils::error::{ConstraintKind, Error, QueryError, Result};
+use grafeo_common::utils::warning::WarningSink;
 use grafeo_core::execution::operators::{Operator, OperatorError, ReadCounter, WriteCounter};
 use grafeo_core::execution::{DataChunk, Pipeline, deadline};
 
@@ -34,6 +34,8 @@ pub struct Executor {
     write_counter: Option<Arc<WriteCounter>>,
     /// Counts the rows the statement reads, for the result's `rows_scanned`.
     read_counter: Option<Arc<ReadCounter>>,
+    /// Where the statement raises its warnings, for the result's `warnings`.
+    warnings: Option<Arc<WarningSink>>,
 }
 
 impl Executor {
@@ -47,6 +49,7 @@ impl Executor {
             query_timeout: None,
             write_counter: None,
             read_counter: None,
+            warnings: None,
         }
     }
 
@@ -61,6 +64,7 @@ impl Executor {
             query_timeout: None,
             write_counter: None,
             read_counter: None,
+            warnings: None,
         }
     }
 
@@ -74,6 +78,7 @@ impl Executor {
             query_timeout: None,
             write_counter: None,
             read_counter: None,
+            warnings: None,
         }
     }
 
@@ -105,14 +110,26 @@ impl Executor {
         self
     }
 
-    /// The result, with the counters of the writes it made and the rows it
-    /// read.
+    /// Reports the warnings raised into `sink` (the translation's and the
+    /// run's, see [`Planner::warnings`](crate::query::Planner::warnings)) as
+    /// the result's warnings.
+    #[must_use]
+    pub fn with_warnings(mut self, sink: Arc<WarningSink>) -> Self {
+        self.warnings = Some(sink);
+        self
+    }
+
+    /// The result, with the counters of the writes it made, the rows it
+    /// read and the warnings it raised.
     fn with_counters(&self, mut result: QueryResult) -> QueryResult {
         if let Some(counter) = &self.write_counter {
             result.counters = counter.counters();
         }
         if let Some(counter) = &self.read_counter {
             result.rows_scanned = Some(counter.get());
+        }
+        if let Some(sink) = &self.warnings {
+            result.warnings = sink.raised().to_query_warnings();
         }
         result
     }

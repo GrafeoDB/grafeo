@@ -104,8 +104,9 @@ impl KeyColumnScanOperator {
         self
     }
 
-    /// What the indexes hold for its values, ascending; an index gone since planning leaves its
-    /// nodes to the column.
+    /// What the indexes hold for its values, ascending; an index gone since planning, or one that
+    /// cannot answer as the statement compares (see [`super::find_indexed_as_compared`]), leaves
+    /// its nodes to the column.
     fn read_indexes(&mut self) -> Result<Vec<NodeId>, OperatorError> {
         let Some(indexes) = &self.indexes else {
             return Ok(Vec::new());
@@ -113,11 +114,13 @@ impl KeyColumnScanOperator {
         let mut found = Vec::new();
         for label in &indexes.labels {
             for value in &indexes.values {
-                let Some(nodes) = self.store.find_indexed_maybe_equal(
+                let Some(nodes) = super::find_indexed_as_compared(
+                    self.store.as_ref(),
                     &[label.as_str()],
                     self.query.property(),
                     value,
                     self.view,
+                    self.query.equal_across_kinds(),
                 )?
                 else {
                     self.query.read_every_label();
@@ -266,15 +269,16 @@ mod tests {
         }
     }
 
-    /// Rows of any values, read by slices: `k` is 3, as an integer, every fourth row.
+    /// Rows of any values, read by slices: `k` is 3, as an integer or a float, every other row; the
+    /// string '3' between them is no 3 (GA04).
     fn store() -> Arc<RowGroupStore> {
         let store = RowGroupStore::new();
         let ops: Vec<DataOp> = (0..7_000_u64)
             .map(|id| {
                 let k = match id % 4 {
                     0 => Value::Int64(3),
-                    1 => Value::from("3"),
-                    2 => Value::Float64(9.5),
+                    1 => Value::Float64(3.0),
+                    2 => Value::from("3"),
                     _ => Value::Bool(true),
                 };
                 DataOp::CreateNode {

@@ -251,19 +251,20 @@ tests:
     expect:
       error: "syntax error"
 
-  # False is below true (ISO/IEC 39075 19.3): the order is the same behind any plan, and a null or
-  # another type stays unknown.
+  # False is below true (ISO/IEC 39075 19.3): the order is the same behind any plan. Against another
+  # kind a boolean orders by GQL's order of kinds (after a string, before a number); a null stays
+  # unknown.
   - name: false_is_below_true
     query: "RETURN false < true AS a, true >= true AS b, true < false AS c"
     expect:
       rows:
         - [true, true, false]
 
-  - name: a_boolean_against_null_or_a_number_is_null
-    query: "RETURN true < null AS a, null <= false AS b, true < 1 AS c"
+  - name: a_boolean_against_null_is_null_and_below_a_number
+    query: "RETURN true < null AS a, null <= false AS b, true < 1 AS c, 1 < true AS d"
     expect:
       rows:
-        - [null, null, null]
+        - [null, null, true, false]
 
   - name: a_boolean_range_finds_its_rows_alone
     setup:
@@ -283,10 +284,11 @@ tests:
         - [true]
         - [false]
 
-  - name: a_boolean_range_above_false_is_true_alone
+  - name: a_boolean_range_above_false_finds_true_and_the_number
     setup:
       - "INSERT (:T {p: true}), (:T {p: false}), (:T {p: 1}), (:A)"
     query: "MATCH (a:A), (n:T) WHERE n.p > false RETURN n.p"
     expect:
       rows:
         - [true]
+        - [1]

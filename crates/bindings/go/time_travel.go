@@ -87,12 +87,14 @@ func openWithHistory(cPath *C.char, history HistoryRetention) (*Database, error)
 
 // CurrentEpoch returns the epoch of the last commit.
 func (db *Database) CurrentEpoch() uint64 {
+	defer runtime.KeepAlive(db)
 	return uint64(C.grafeo_current_epoch(db.handle))
 }
 
 // EpochAsOf returns the epoch point names: the last commit at or before it. It fails for a
 // point before the history the database keeps.
 func (db *Database) EpochAsOf(point TimePoint) (uint64, error) {
+	defer runtime.KeepAlive(db)
 	var epoch C.uint64_t
 	err := lockAndCheckStatus(func() C.GrafeoStatus {
 		return C.grafeo_epoch_as_of(db.handle, point.kind, point.value, &epoch)
@@ -103,6 +105,7 @@ func (db *Database) EpochAsOf(point TimePoint) (uint64, error) {
 // ExecuteAsOf runs one GQL query with parameters (nil for none) as the database was at
 // point; a query that writes fails.
 func (db *Database) ExecuteAsOf(query string, point TimePoint, params map[string]any) (*QueryResult, error) {
+	defer runtime.KeepAlive(db)
 	cQuery := C.CString(query)
 	defer C.free(unsafe.Pointer(cQuery))
 	cParams, err := optionalJSON(params)
@@ -126,6 +129,7 @@ type AsOfView struct {
 // AsOf returns a read-only view of the database as it was at point. It fails for a point
 // before the history the database keeps.
 func (db *Database) AsOf(point TimePoint) (*AsOfView, error) {
+	defer runtime.KeepAlive(db)
 	runtime.LockOSThread()
 	handle := C.grafeo_as_of(db.handle, point.kind, point.value)
 	if handle == nil {
@@ -146,6 +150,7 @@ func (v *AsOfView) Epoch() uint64 {
 
 // Close releases the view and the history it keeps; calling it again does nothing.
 func (v *AsOfView) Close() {
+	defer runtime.KeepAlive(v)
 	if v.handle != nil {
 		C.grafeo_free_as_of(v.handle)
 		v.handle = nil
@@ -161,6 +166,7 @@ func (v *AsOfView) Execute(query string) (*QueryResult, error) {
 // ExecuteParams runs a GQL query with parameters (nil for none) as the database was at the
 // view's epoch.
 func (v *AsOfView) ExecuteParams(query string, params map[string]any) (*QueryResult, error) {
+	defer runtime.KeepAlive(v)
 	if v.handle == nil {
 		return nil, errViewClosed
 	}
@@ -177,6 +183,7 @@ func (v *AsOfView) ExecuteParams(query string, params map[string]any) (*QueryRes
 // GetNode returns the node as it was at the view's epoch; ErrNotFound when it did not exist
 // then, as Database.GetNode.
 func (v *AsOfView) GetNode(id uint64) (*Node, error) {
+	defer runtime.KeepAlive(v)
 	if v.handle == nil {
 		return nil, errViewClosed
 	}
@@ -195,6 +202,7 @@ func (v *AsOfView) GetNode(id uint64) (*Node, error) {
 // GetEdge returns the edge as it was at the view's epoch; ErrNotFound when it did not exist
 // then, as Database.GetEdge.
 func (v *AsOfView) GetEdge(id uint64) (*Edge, error) {
+	defer runtime.KeepAlive(v)
 	if v.handle == nil {
 		return nil, errViewClosed
 	}
@@ -213,6 +221,7 @@ func (v *AsOfView) GetEdge(id uint64) (*Edge, error) {
 // GetNodeProperty returns a node's value of key as it was at the view's epoch: nil when the
 // node or the property did not exist then.
 func (v *AsOfView) GetNodeProperty(id uint64, key string) (any, error) {
+	defer runtime.KeepAlive(v)
 	if v.handle == nil {
 		return nil, errViewClosed
 	}

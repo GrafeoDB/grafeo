@@ -30,7 +30,7 @@ use grafeo_common::change::{
 };
 use grafeo_common::storage::value_codec::{MAX_PROPERTY_VALUE_DEPTH, nests_too_deep};
 use grafeo_common::types::{
-    ArcStr, EdgeId, NodeId, PropertyKey, PropertyMap, ReadView, TransactionId, Value,
+    ArcStr, EdgeId, EpochId, NodeId, PropertyKey, PropertyMap, ReadView, TransactionId, Value,
 };
 use grafeo_common::utils::hash::FxHashSet;
 
@@ -1425,8 +1425,11 @@ fn record_applied(
         }
         Applied::Unchanged => false,
         // Committed at once without a before-image (an immediate write whose
-        // entries nothing reads): nothing to record.
-        Applied::Committed => true,
+        // entries nothing reads): nothing to record, only that it changed.
+        Applied::Committed => {
+            recording.recorder.committed();
+            true
+        }
     };
     if changed {
         grafeo_common::testing::commit_hook::run_after_data_write()
@@ -1480,6 +1483,60 @@ impl ChangeRecorder for PendingWrites {
         _version: PendingVersion,
     ) -> Result<(), OperatorError> {
         Ok(())
+    }
+}
+
+/// The recorder of [`Recording::plan_only`]: it refuses every claim and every record, so a write
+/// through it fails before it changes anything (each write claims first).
+struct PlanOnlyWrites {
+    epoch: EpochId,
+}
+
+/// The refusal of a write through a plan that was only built.
+fn plan_only_refusal() -> OperatorError {
+    OperatorError::Execution(
+        "a plan built to be explained is never run: it writes nothing".to_string(),
+    )
+}
+
+impl WriteClaims for PlanOnlyWrites {
+    fn claim(&self, _claim: WriteClaim) -> Result<(), OperatorError> {
+        Err(plan_only_refusal())
+    }
+
+    fn write_in_progress(&self) -> Option<WriteInProgress<'_>> {
+        None
+    }
+}
+
+impl ChangeRecorder for PlanOnlyWrites {
+    fn writer(&self) -> Writer {
+        Writer::Immediate {
+            epoch: self.epoch,
+            before_images: false,
+        }
+    }
+
+    fn record(
+        &self,
+        _op: DataOp,
+        _before: Before,
+        _version: PendingVersion,
+    ) -> Result<(), OperatorError> {
+        Err(plan_only_refusal())
+    }
+}
+
+impl Recording {
+    /// The recording of a plan that is built and never run (`EXPLAIN` outside a transaction):
+    /// writers can be made for its write operators, and every write through it is refused
+    /// before it changes anything. It reads at `epoch`.
+    #[must_use]
+    pub fn plan_only(target: Arc<dyn GraphBackend>, epoch: EpochId) -> Self {
+        Self {
+            target,
+            recorder: Arc::new(PlanOnlyWrites { epoch }),
+        }
     }
 }
 

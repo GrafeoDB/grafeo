@@ -1,0 +1,137 @@
+# A statement that opens with a named procedure call goes on as any linear statement (ISO/IEC
+# 39075 14.3, 15.1): a MATCH, a write or a full result statement with its LIMIT, GROUP BY,
+# HAVING and FINISH may follow it, and a statement that ends without a result statement is a
+# syntax error naming what may end it. After NEXT, a CALL reads the whole working table, and a
+# lone CALL there returns the incoming fields with what it yields (15.1 GR 3 and 4).
+#
+# Alix knows Gus knows Vincent; Alix works at Grafeo OSS. The labels are Company and Person.
+
+meta:
+  language: gql
+  model: lpg
+  section: "14.3"
+  title: Leading procedure calls in a statement
+  dataset: social_network
+  requires: [algos]
+
+tests:
+
+  - name: a_match_after_a_leading_call
+    query: "CALL db.labels() YIELD label MATCH (n:Person) RETURN count(n) AS c"
+    expect:
+      rows:
+        - [6]
+
+  - name: a_match_reads_what_the_call_yields
+    query: "CALL grafeo.pagerank() YIELD node_id, score MATCH (n) WHERE id(n) = node_id RETURN n.name AS n ORDER BY score DESC LIMIT 1"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: a_match_from_a_yielded_node_after_next
+    query: "MATCH (p:Person {name: 'Alix'}) RETURN p NEXT CALL db.labels() YIELD label MATCH (p)-[:KNOWS]->(q) RETURN label, q.name AS q"
+    expect:
+      rows:
+        - [Company, Gus]
+        - [Person, Gus]
+
+  - name: group_by_and_having_after_a_leading_call
+    query: "CALL db.labels() YIELD label RETURN count(*) AS c GROUP BY label HAVING c > 0"
+    expect:
+      rows:
+        - [1]
+        - [1]
+
+  - name: finish_after_a_leading_call
+    query: "CALL db.labels() YIELD label FINISH"
+    expect:
+      empty: true
+
+  - name: a_negative_limit_after_a_leading_call
+    query: "CALL db.labels() YIELD label RETURN label LIMIT -1"
+    expect:
+      error: "SKIP/LIMIT must be non-negative"
+      gql_status: "22G02"
+
+  - name: a_fractional_limit_after_a_leading_call
+    query: "CALL db.labels() YIELD label RETURN label LIMIT 1.5"
+    expect:
+      error: "SKIP/LIMIT must be an integer"
+      gql_status: "22G03"
+
+  - name: a_limit_parameter_without_a_value
+    query: "CALL db.labels() YIELD label RETURN label LIMIT $k"
+    expect:
+      error: "Missing parameter for SKIP/LIMIT: $k"
+
+  - name: a_limit_parameter_after_a_leading_call
+    query: "CALL db.labels() YIELD label RETURN label ORDER BY label LIMIT $k"
+    params:
+      k: 1
+    expect:
+      rows:
+        - [Company]
+
+  - name: return_star_after_a_leading_call
+    query: "CALL db.labels() YIELD label RETURN *"
+    expect:
+      columns: [label]
+      rows:
+        - [Company]
+        - [Person]
+
+  - name: a_match_without_a_result_statement
+    query: "CALL db.labels() YIELD label MATCH (n)"
+    expect:
+      error: "Expected RETURN, FINISH, or SELECT"
+      gql_status: "42001"
+
+  - name: a_stray_word_after_a_leading_call
+    query: "CALL db.labels() YIELD label garbage"
+    expect:
+      error: "Expected RETURN, FINISH, or SELECT"
+      gql_status: "42001"
+
+  - name: a_second_return_stays_an_error
+    query: "CALL db.labels() YIELD label RETURN label RETURN 1"
+    expect:
+      error: "unexpected 'RETURN' after the end of the statement"
+      gql_status: "42001"
+
+  - name: an_empty_working_table_still_aggregates
+    query: "MATCH (n:Nobody) RETURN n NEXT CALL db.labels() YIELD label RETURN count(label) AS c"
+    expect:
+      columns: [c]
+      rows:
+        - [0]
+
+  - name: a_null_field_is_still_a_record
+    query: "UNWIND [null] AS x RETURN x NEXT CALL db.labels() YIELD label RETURN count(*) AS c"
+    expect:
+      columns: [c]
+      rows:
+        - [2]
+
+  - name: a_lone_call_after_a_write_and_next
+    query: "INSERT (:V {k: 3}) NEXT CALL db.labels()"
+    expect:
+      columns: [label]
+      rows:
+        - [Company]
+        - [Person]
+        - [V]
+
+  - name: a_lone_call_after_next_keeps_the_working_table
+    query: "UNWIND [1, 2] AS x RETURN x NEXT CALL db.labels() YIELD label"
+    expect:
+      columns: [x, label]
+      rows:
+        - [1, Company]
+        - [1, Person]
+        - [2, Company]
+        - [2, Person]
+
+  - name: a_yield_name_that_clashes_with_an_incoming_field
+    query: "UNWIND ['x'] AS label RETURN label NEXT CALL db.labels() YIELD label RETURN label"
+    expect:
+      error: "'label'"

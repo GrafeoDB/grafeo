@@ -119,7 +119,7 @@ Grafeo supports openCypher 9.0 with these differences:
 | `OPTIONAL MATCH` | Supported | Supported |
 | `CALL procedures` | Limited | Supported (built-in algorithms) |
 | `APOC functions` | No | Use Python instead |
-| `Graph algorithms` | Requires GDS | Built-in via `db.algorithms()` or `CALL` |
+| `Graph algorithms` | Requires GDS | Built-in via `db.algorithms` or `CALL` |
 
 ### Replacing APOC with Python
 
@@ -154,7 +154,7 @@ Neo4j's Graph Data Science library is replaced by Grafeo's built-in algorithms:
 === "Grafeo"
     ```python
     # PageRank is built-in
-    scores = db.algorithms().pagerank()
+    scores = db.algorithms.pagerank()
 
     # Get top 10
     sorted_scores = sorted(scores.items(), key=lambda x: x[1], reverse=True)

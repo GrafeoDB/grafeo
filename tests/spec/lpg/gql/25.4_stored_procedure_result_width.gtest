@@ -9,7 +9,6 @@ meta:
   model: lpg
   title: Stored procedure result width
   dataset: empty
-  requires: [algos]
 
 tests:
 

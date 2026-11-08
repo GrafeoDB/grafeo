@@ -1,6 +1,6 @@
 //! Unary plus is the number under it, exactly: a decimal keeps its scale and
 //! a negative zero its sign; like unary minus it reads numbers (and
-//! durations) only, and is a type error (22G03) for anything else, null
+//! durations) only, and is a type error (22G12) for anything else, null
 //! staying null. SQL/PGQ did not parse `+x`, and GQL and Cypher passed any
 //! value through it.
 
@@ -49,7 +49,7 @@ fn plus_reads_numbers_only_as_minus_does() {
                 .unwrap_err();
             assert_eq!(
                 grafeo_common::utils::gqlstatus::GqlStatus::from(&error).as_str(),
-                "22G03",
+                "22G12",
                 "{language}: {item}"
             );
         }
@@ -77,7 +77,7 @@ fn plus_of_a_constant_is_the_constant() {
     let error = db.execute("RETURN +'x' AS s").unwrap_err();
     assert_eq!(
         grafeo_common::utils::gqlstatus::GqlStatus::from(&error).as_str(),
-        "22G03"
+        "22G12"
     );
     // A write through a sign on a string fails, and writes nothing
     assert!(db.execute("INSERT (:Q {v: -'x'})").is_err());

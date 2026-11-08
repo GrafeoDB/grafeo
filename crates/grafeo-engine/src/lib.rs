@@ -49,7 +49,6 @@ pub mod loader;
 pub mod memory_usage;
 #[cfg(feature = "metrics")]
 pub mod metrics;
-#[cfg(feature = "algos")]
 pub mod procedures;
 pub mod query;
 pub mod session;
@@ -65,7 +64,10 @@ pub use admin::{
 };
 pub use auth::{Grant, Identity, Role, StatementKind};
 pub use catalog::{Catalog, CatalogError, IndexDefinition, IndexType};
-pub use config::{AccessMode, Config, ConfigError, DurabilityMode, GraphModel, HistoryRetention};
+pub use config::{
+    AccessMode, Config, ConfigError, DEFAULT_CHECKPOINT_WAL_SIZE, DEFAULT_WAL_RETENTION_LIMIT,
+    DEFAULT_WAL_SEGMENT_SIZE, DurabilityMode, GraphModel, HistoryRetention, SpillLimit,
+};
 pub use database::GrafeoDB;
 pub use database::GraphHandle;
 /// The syntax `GrafeoDB::load_rdf` reads.

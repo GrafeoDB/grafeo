@@ -1,0 +1,12 @@
+# Ruff for the repository's scripts: the Python binding's rule set, line length 88.
+# E501 is left to the formatter (the difftest corpus keeps its case lines unformatted).
+line-length = 88
+target-version = "py312"
+
+[lint]
+select = ["E", "F", "W", "I", "N", "UP", "B", "C4"]
+ignore = ["E501"]
+
+[lint.isort]
+# The difftest modules, imported from their own directory by the tests.
+known-first-party = ["corpus", "difftest"]

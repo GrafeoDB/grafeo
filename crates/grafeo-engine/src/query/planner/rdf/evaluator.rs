@@ -27,7 +27,25 @@ use regex::Regex;
 #[cfg(all(feature = "regex-lite", not(feature = "regex")))]
 use regex_lite::Regex;
 
+use super::exists_per_row::RowBinding;
+
 const XSD: &str = "http://www.w3.org/2001/XMLSchema#";
+
+/// What an expression reads besides its row.
+#[derive(Clone)]
+pub(super) struct ExpressionContext {
+    /// The instant the query started, which `NOW()` gives.
+    pub(super) clock: StatementClock,
+    /// The row an `EXISTS` is tested for, whose values a name reads where it has none.
+    pub(super) row: Option<Arc<RowBinding>>,
+}
+
+impl ExpressionContext {
+    /// The value of `name` in the row, if there is a row and it binds the name.
+    pub(super) fn row_value(&self, name: &str) -> Option<&Value> {
+        self.row.as_deref()?.value(name)
+    }
+}
 
 /// Evaluates one SPARQL expression over the rows of a chunk whose variable
 /// columns hold term ids.
@@ -39,8 +57,7 @@ pub(super) struct RdfExpressionPredicate {
     /// both sides have, so the condition reads the merged solution.
     fallback_columns: HashMap<String, usize>,
     terms: Arc<QueryTermIds>,
-    /// The instant the query started, which `NOW()` gives.
-    clock: StatementClock,
+    context: ExpressionContext,
 }
 
 /// An operand of a comparison: a variable's dictionary entry (whose value is
@@ -126,14 +143,14 @@ impl RdfExpressionPredicate {
         expression: FilterExpression,
         variable_columns: HashMap<String, usize>,
         terms: Arc<QueryTermIds>,
-        clock: StatementClock,
+        context: ExpressionContext,
     ) -> Self {
         Self {
             expression: fold_compared_constants(expression),
             variable_columns,
             fallback_columns: HashMap::new(),
             terms,
-            clock,
+            context,
         }
     }
 
@@ -148,7 +165,8 @@ impl RdfExpressionPredicate {
     }
 
     /// A variable's value at `row`, from its column or, unbound there, from
-    /// its fallback column; `None` when it is unbound.
+    /// its fallback column, then from the row an `EXISTS` is tested for; `None`
+    /// when it is unbound.
     fn bound_value(&self, name: &str, chunk: &DataChunk, row: usize) -> Option<Value> {
         let read = |column: usize| {
             chunk
@@ -156,7 +174,11 @@ impl RdfExpressionPredicate {
                 .get_value(row)
                 .filter(|value| !value.is_null())
         };
-        read(*self.variable_columns.get(name)?).or_else(|| read(*self.fallback_columns.get(name)?))
+        self.variable_columns
+            .get(name)
+            .and_then(|&column| read(column))
+            .or_else(|| read(*self.fallback_columns.get(name)?))
+            .or_else(|| self.context.row_value(name).cloned())
     }
 
     /// The expression's value at `row`; `None` for an error or an unbound
@@ -664,7 +686,7 @@ impl RdfExpressionPredicate {
 
             // ---- Functions on dates and times (17.4.5) ----
             // One instant for the whole query (17.4.5.1).
-            "NOW" => Some(Value::Timestamp(self.clock.instant())),
+            "NOW" => Some(Value::Timestamp(self.context.clock.instant())),
             "YEAR" | "MONTH" | "DAY" => {
                 let value = self.eval_expr(arg(0)?, chunk, row)?;
                 let date = match native(&value)?.into_owned() {

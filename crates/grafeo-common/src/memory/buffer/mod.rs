@@ -17,9 +17,9 @@
 //! │                         │                                  │
 //! │  Pressure Thresholds:   │                                  │
 //! │  < 70%  Normal          │                                  │
-//! │  70-85% Moderate (evict cold)                              │
-//! │  85-95% High (aggressive evict/spill)                      │
-//! │  > 95%  Critical (block allocations)                       │
+//! │  70-<85% Moderate (evict cold)                             │
+//! │  85-<100% High (aggressive evict/spill)                    │
+//! │  100%   Critical (refuse reservations)                     │
 //! └────────────────────────────────────────────────────────────┘
 //! ```
 //!
@@ -55,7 +55,7 @@ mod stats;
 mod tiered;
 
 pub use consumer::{ConsumerStats, MemoryConsumer, SpillError, priorities};
-pub use grant::{CompositeGrant, GrantReleaser, MemoryGrant};
+pub use grant::{CompositeGrant, GRANT_STEP, GrantReleaser, MemoryGrant};
 pub use manager::{BufferManager, BufferManagerConfig};
 pub use region::MemoryRegion;
 pub use stats::{BufferStats, PressureLevel};

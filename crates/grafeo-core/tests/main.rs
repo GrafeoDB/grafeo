@@ -17,3 +17,4 @@ mod rdf_parallel_load;
 mod rdf_statistics_counts;
 mod rdf_store_term_lookups;
 mod rdf_tests;
+mod spill_account;

@@ -779,6 +779,17 @@ pub trait GraphStore: Send + Sync {
         None
     }
 
+    /// The largest count [`sampled_degree`](Self::sampled_degree)'s sample saw, from the same
+    /// read: a node's list it may miss is longer. `None` as there.
+    fn sampled_max_degree(
+        &self,
+        _label: &str,
+        _edge_type: &str,
+        _direction: Direction,
+    ) -> Option<f64> {
+        None
+    }
+
     /// The mean count of `on_types`' edges in `on_direction` at the ends a hop reaches:
     /// over the edges of `via_types` in `via_direction` from a sample of `start_label`'s
     /// nodes (of all nodes for `None`), as committed, each end counted as often as an edge
@@ -910,6 +921,20 @@ pub trait GraphStore: Send + Sync {
         self.find_nodes_maybe_equal(property, value, view)
     }
 
+    /// The kinds of value (see
+    /// [`ValueKinds`](crate::execution::operators::value_utils::ValueKinds)) the index that
+    /// [`find_indexed_maybe_equal`](Self::find_indexed_maybe_equal) reads for `labels` and
+    /// `property` has held since it was made, deleted values too; `None` without that index, or
+    /// for a store that does not keep them, which a statement whose `=` raises across kinds then
+    /// does not read.
+    fn index_kinds(
+        &self,
+        _labels: &[&str],
+        _property: &str,
+    ) -> Option<crate::execution::operators::value_utils::ValueKinds> {
+        None
+    }
+
     /// [`find_few_nodes_maybe_equal`](Self::find_few_nodes_maybe_equal) through the index
     /// [`find_indexed_maybe_equal`](Self::find_indexed_maybe_equal) reads.
     ///
@@ -943,10 +968,9 @@ pub trait GraphStore: Send + Sync {
         self.find_nodes_by_properties(conditions, view)
     }
 
-    /// The nodes `view` sees whose `property` lies within the bounds, by
-    /// ascending id. Values compare as a filter compares them: integers,
-    /// floats and decimals by value, strings, booleans and temporal values
-    /// each among their kind.
+    /// The nodes `view` sees whose `property` lies within `range`, by
+    /// ascending id. Values compare as a filter of the range's rule compares
+    /// them (see [`ValueRange`]).
     ///
     /// # Errors
     ///
@@ -954,16 +978,13 @@ pub trait GraphStore: Send + Sync {
     fn find_nodes_in_range(
         &self,
         property: &str,
-        min: Option<&Value>,
-        max: Option<&Value>,
-        min_inclusive: bool,
-        max_inclusive: bool,
+        range: &ValueRange,
         view: ReadView,
     ) -> Result<Vec<NodeId>> {
         let mut found = Vec::new();
         for id in self.node_ids(view)? {
             if let Some(value) = self.node_property(id, property, view)?
-                && value_in_range(&value, min, max, min_inclusive, max_inclusive)
+                && range.contains(&value)
             {
                 found.push(id);
             }
@@ -1281,25 +1302,77 @@ pub(crate) fn compare_for_range(a: &Value, b: &Value) -> Option<CmpOrdering> {
     }
 }
 
-/// Whether `value` lies between the bounds of a range lookup.
-pub(crate) fn value_in_range(
-    value: &Value,
-    min: Option<&Value>,
-    max: Option<&Value>,
+/// The bounds of a range read of a property, and the rule by which a value of another kind than a
+/// bound compares with it: the rule of the statement's `<`, so a range read and a filter agree
+/// (ISO GQL orders two kinds, openCypher does not; see [`AcrossKinds`]).
+///
+/// [`AcrossKinds`]: crate::execution::operators::value_utils::AcrossKinds
+#[derive(Debug, Clone)]
+pub struct ValueRange {
+    min: Option<Value>,
+    max: Option<Value>,
     min_inclusive: bool,
     max_inclusive: bool,
-) -> bool {
-    let above = min.is_none_or(|min| match compare_for_range(value, min) {
-        Some(CmpOrdering::Greater) => true,
-        Some(CmpOrdering::Equal) => min_inclusive,
-        _ => false,
-    });
-    let below = max.is_none_or(|max| match compare_for_range(value, max) {
-        Some(CmpOrdering::Less) => true,
-        Some(CmpOrdering::Equal) => max_inclusive,
-        _ => false,
-    });
-    above && below
+    across_kinds: crate::execution::operators::value_utils::AcrossKinds,
+}
+
+impl ValueRange {
+    /// A range between the bounds (`None`: open), each inclusive or not, read by `across_kinds`.
+    #[must_use]
+    pub fn new(
+        min: Option<&Value>,
+        max: Option<&Value>,
+        min_inclusive: bool,
+        max_inclusive: bool,
+        across_kinds: crate::execution::operators::value_utils::AcrossKinds,
+    ) -> Self {
+        Self {
+            min: min.cloned(),
+            max: max.cloned(),
+            min_inclusive,
+            max_inclusive,
+            across_kinds,
+        }
+    }
+
+    /// Whether `value` lies between the bounds: of one kind with a bound, as a filter compares
+    /// them; of another, by the range's rule.
+    #[must_use]
+    pub fn contains(&self, value: &Value) -> bool {
+        let order = |bound: &Value| self.order(value, bound);
+        let above = self.min.as_ref().is_none_or(|min| match order(min) {
+            Some(CmpOrdering::Greater) => true,
+            Some(CmpOrdering::Equal) => self.min_inclusive,
+            _ => false,
+        });
+        let below = self.max.as_ref().is_none_or(|max| match order(max) {
+            Some(CmpOrdering::Less) => true,
+            Some(CmpOrdering::Equal) => self.max_inclusive,
+            _ => false,
+        });
+        above && below
+    }
+
+    /// The order of `value` against `bound` as the statement's `<` finds it; `None` when it is
+    /// unknown or neither less nor greater. Two lists, or two paths, at their first pair of
+    /// elements that are not equal, else by their lengths (see
+    /// [`walk_elements`](crate::execution::operators::value_utils::walk_elements)).
+    fn order(&self, value: &Value, bound: &Value) -> Option<CmpOrdering> {
+        use crate::execution::operators::value_utils::{
+            Walk, equals, order_beyond_kind, sequences, walk_elements,
+        };
+        if let Some((a, b)) = sequences(value, bound) {
+            let temporal = grafeo_common::types::TemporalComparison::default();
+            return match walk_elements(a, b, |x, y| {
+                (equals(x, y, temporal) != Some(true)).then(|| self.order(x, y))
+            }) {
+                Walk::Decided(order) => order,
+                Walk::Lengths(order) => Some(order),
+            };
+        }
+        compare_for_range(value, bound)
+            .or_else(|| order_beyond_kind(value, bound, self.across_kinds))
+    }
 }
 
 /// A no-op [`GraphStore`] that returns empty results for all queries.
@@ -1610,10 +1683,13 @@ mod tests {
             store
                 .find_nodes_in_range(
                     "age",
-                    Some(&Value::Float64(3.0)),
-                    Some(&Value::Int64(88)),
-                    false,
-                    true,
+                    &crate::graph::ValueRange::new(
+                        Some(&Value::Float64(3.0)),
+                        Some(&Value::Int64(88)),
+                        false,
+                        true,
+                        crate::execution::operators::value_utils::AcrossKinds::Apart
+                    ),
                     NOW
                 )
                 .unwrap(),

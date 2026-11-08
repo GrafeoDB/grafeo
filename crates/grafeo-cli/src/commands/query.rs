@@ -69,6 +69,7 @@ pub fn run(opts: QueryRunOptions<'_>) -> Result<()> {
 
     let rows = result.rows();
     output::print_value_rows(&result.columns, rows, fmt, max_width);
+    output::warnings(result.warnings());
 
     // Print row count + optional timing footer
     if !quiet && fmt == Format::Table {

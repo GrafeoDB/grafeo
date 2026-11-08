@@ -174,6 +174,7 @@ pub fn run(
                 if !settings.quiet {
                     output::print_value_rows(&qr.columns, rows, settings.format, None);
                 }
+                output::warnings(qr.warnings());
 
                 if !settings.quiet {
                     let timing_str = if settings.show_timing {

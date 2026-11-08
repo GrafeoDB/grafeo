@@ -33,6 +33,8 @@ use crate::transaction::RdfWriter;
 
 mod evaluator;
 mod exists_pair;
+mod exists_per_row;
+mod exists_read;
 mod named_graphs;
 mod order;
 mod path_per_row;
@@ -40,7 +42,8 @@ mod term_ids;
 mod terms;
 mod triple_lookup;
 
-use evaluator::RdfExpressionPredicate;
+use evaluator::{ExpressionContext, RdfExpressionPredicate};
+use exists_per_row::{ExistsPerRow, RowBinding, RowPlanParts};
 use grafeo_common::types::TermId;
 use term_ids::{QueryTermIds, id_of, id_value};
 
@@ -107,6 +110,8 @@ pub struct RdfPlanner {
     profiling: std::cell::Cell<bool>,
     /// Profile entries collected during planning (post-order).
     profile_entries: std::cell::RefCell<Vec<crate::query::profile::ProfileEntry>>,
+    /// How many `EXISTS` marks it has named.
+    exists_marks: std::cell::Cell<usize>,
     /// Set when the operator just planned is its input as it is (a
     /// projection of the input's columns in their order): it runs nothing,
     /// so the profile shows the input in its place.
@@ -126,9 +131,18 @@ pub struct RdfPlanner {
     /// Counts the triples the plan's scans read: the statement's
     /// `rows_scanned`.
     read_counter: Arc<grafeo_core::execution::operators::ReadCounter>,
+    /// Where the statement raises its warnings: the translation's, which
+    /// [`plan`](Self::plan) raises, and the run's.
+    warnings: Arc<grafeo_common::utils::warning::WarningSink>,
     /// The instant the query started, which `NOW()` gives in every row:
     /// the planner is made for one execution of the query.
     clock: StatementClock,
+    /// The row this plan is for, when it is the pattern of an `EXISTS` planned per row.
+    row: Option<Arc<RowBinding>>,
+    /// Whether an `EXISTS` that a run without the row answers runs once.
+    exists_run_once: bool,
+    /// The routes of the `EXISTS` tests of the operator being planned, which its PROFILE line names.
+    exists_routes: std::cell::RefCell<Vec<&'static str>>,
 }
 
 impl RdfPlanner {
@@ -142,6 +156,7 @@ impl RdfPlanner {
             writer: None,
             profiling: std::cell::Cell::new(false),
             profile_entries: std::cell::RefCell::new(Vec::new()),
+            exists_marks: std::cell::Cell::new(0),
             folded: std::cell::Cell::new(false),
             terms,
             query_values: false,
@@ -149,7 +164,103 @@ impl RdfPlanner {
             path_search_budget: grafeo_core::execution::operators::DEFAULT_PATH_SEARCH_BUDGET,
             deadline: None,
             read_counter: Arc::default(),
+            warnings: Arc::default(),
             clock: StatementClock::now(),
+            row: None,
+            exists_run_once: true,
+            exists_routes: std::cell::RefCell::new(Vec::new()),
+        }
+    }
+
+    /// A planner of the pattern of an `EXISTS` for the row `row`.
+    fn for_row(parts: &RowPlanParts, row: Arc<RowBinding>) -> Self {
+        Self {
+            store: Arc::clone(&parts.store),
+            chunk_size: parts.chunk_size,
+            writer: parts.writer.clone(),
+            profiling: std::cell::Cell::new(false),
+            profile_entries: std::cell::RefCell::new(Vec::new()),
+            exists_marks: std::cell::Cell::new(0),
+            folded: std::cell::Cell::new(false),
+            terms: Arc::clone(&parts.terms),
+            query_values: false,
+            shuffle_unordered: false,
+            path_search_budget: parts.path_search_budget,
+            deadline: parts.deadline,
+            read_counter: Arc::clone(&parts.read_counter),
+            warnings: Arc::clone(&parts.warnings),
+            clock: parts.clock,
+            row: Some(row),
+            exists_run_once: false,
+            exists_routes: std::cell::RefCell::new(Vec::new()),
+        }
+    }
+
+    /// Whether an `EXISTS` that a run without the row answers runs once; off, every one runs per
+    /// row, which must give the same answers.
+    #[must_use]
+    #[cfg(feature = "sparql")]
+    pub(crate) fn with_exists_run_once(mut self, run_once: bool) -> Self {
+        self.exists_run_once = run_once;
+        self
+    }
+
+    /// What planning an `EXISTS` per row needs.
+    fn row_plan_parts(&self) -> RowPlanParts {
+        RowPlanParts {
+            store: Arc::clone(&self.store),
+            chunk_size: self.chunk_size,
+            writer: self.writer.clone(),
+            terms: Arc::clone(&self.terms),
+            path_search_budget: self.path_search_budget,
+            deadline: self.deadline,
+            read_counter: Arc::clone(&self.read_counter),
+            warnings: Arc::clone(&self.warnings),
+            clock: self.clock,
+        }
+    }
+
+    /// What an expression over the row of the plan reads besides its row.
+    fn expression_context(&self) -> ExpressionContext {
+        ExpressionContext {
+            clock: self.clock,
+            row: self.row.clone(),
+        }
+    }
+
+    /// [`Self::expression_context`] for an expression over the rows of `input`: above an
+    /// aggregation the row is gone.
+    fn expression_context_over(&self, input: &LogicalOperator) -> ExpressionContext {
+        if exists_per_row::over_an_aggregate(input) {
+            self.expression_context_with_no_row()
+        } else {
+            self.expression_context()
+        }
+    }
+
+    fn expression_context_with_no_row(&self) -> ExpressionContext {
+        ExpressionContext {
+            clock: self.clock,
+            row: None,
+        }
+    }
+
+    /// How to run `subquery` once for rows of the columns `row`, `None` when it runs per row.
+    fn run_once_read<'a>(
+        &self,
+        subquery: &'a LogicalOperator,
+        row: &[String],
+    ) -> Option<exists_read::ExistsRead<'a>> {
+        if !self.exists_run_once {
+            return None;
+        }
+        exists_read::read_of_exists(subquery, row)
+    }
+
+    /// Notes the route of an `EXISTS` for the PROFILE line of the operator that holds it.
+    fn note_exists_route(&self, route: &'static str) {
+        if self.profiling.get() {
+            self.exists_routes.borrow_mut().push(route);
         }
     }
 
@@ -158,6 +269,20 @@ impl RdfPlanner {
     #[must_use]
     pub fn read_counter(&self) -> Arc<grafeo_core::execution::operators::ReadCounter> {
         Arc::clone(&self.read_counter)
+    }
+
+    /// Where the statement's warnings go (see [`with_warnings`](Self::with_warnings)).
+    #[must_use]
+    pub fn warnings(&self) -> Arc<grafeo_common::utils::warning::WarningSink> {
+        Arc::clone(&self.warnings)
+    }
+
+    /// Raises the statement's warnings into `sink`, which the session made
+    /// for it.
+    #[must_use]
+    pub fn with_warnings(mut self, sink: Arc<grafeo_common::utils::warning::WarningSink>) -> Self {
+        self.warnings = sink;
+        self
     }
 
     /// Sets the chunk size for vectorized execution.
@@ -221,7 +346,9 @@ impl RdfPlanner {
     ///
     /// Returns an error if planning fails.
     pub fn plan(&self, logical_plan: &LogicalPlan) -> Result<PhysicalPlan> {
-        let (operator, columns, types) = self.plan_operator(&logical_plan.root)?;
+        self.warnings.raise_all(logical_plan.warnings);
+        let (operator, columns, types) =
+            self.without_hidden_columns(self.plan_operator(&logical_plan.root)?);
         let operator = self.decode_results(operator, &types, logical_plan.result_kind);
         let operator: Box<dyn Operator> =
             if self.shuffle_unordered && !super::common::orders_rows(&logical_plan.root) {
@@ -248,15 +375,29 @@ impl RdfPlanner {
     ) -> Result<(PhysicalPlan, Vec<crate::query::profile::ProfileEntry>)> {
         self.profiling.set(true);
         self.profile_entries.borrow_mut().clear();
+        self.warnings.raise_all(logical_plan.warnings);
 
         let result = self.plan_operator(&logical_plan.root);
 
         self.profiling.set(false);
-        let (operator, columns, types) = result?;
+        let (operator, columns, types) = self.without_hidden_columns(result?);
         let operator = self.decode_results(operator, &types, logical_plan.result_kind);
         let entries = self.profile_entries.borrow_mut().drain(..).collect();
 
         Ok((PhysicalPlan { operator, columns }, entries))
+    }
+
+    /// `planned` without the columns of hidden names, which no solution shows (see
+    /// [`is_hidden_variable`](crate::query::plan::is_hidden_variable)).
+    fn without_hidden_columns(&self, planned: PlannedOperator) -> PlannedOperator {
+        let keep = planned
+            .1
+            .iter()
+            .enumerate()
+            .filter(|(_, name)| !crate::query::plan::is_hidden_variable(name))
+            .map(|(at, _)| at)
+            .collect();
+        self.keeping_columns(planned, keep)
     }
 
     /// Decodes the term id columns of a plan's result: each becomes the
@@ -328,8 +469,13 @@ impl RdfPlanner {
         }
         if self.profiling.get() {
             let (physical, columns, types) = result?;
-            let (entry, stats) =
-                crate::query::profile::ProfileEntry::new(physical.name(), op.display_label());
+            let mut label = op.display_label();
+            for route in self.exists_routes.borrow_mut().drain(..) {
+                label.push_str(" [");
+                label.push_str(route);
+                label.push(']');
+            }
+            let (entry, stats) = crate::query::profile::ProfileEntry::new(physical.name(), label);
             let profiled = grafeo_core::execution::ProfiledOperator::new(physical, stats);
             self.profile_entries.borrow_mut().push(entry);
             Ok((Box::new(profiled), columns, types))
@@ -362,6 +508,7 @@ impl RdfPlanner {
         let result = match op {
             LogicalOperator::TripleScan(scan) => self.plan_triple_scan(scan),
             LogicalOperator::PropertyPath(path) => self.plan_property_path(path),
+            LogicalOperator::RowValues(values) => self.plan_row_values(values),
             LogicalOperator::NamedGraphs(graphs) => {
                 let op: Box<dyn Operator> = Box::new(named_graphs::NamedGraphsOperator::new(
                     Arc::clone(&self.store),
@@ -420,6 +567,28 @@ impl RdfPlanner {
         self.maybe_profile(result, op)
     }
 
+    /// The one row of the values of the row this plan is for.
+    fn plan_row_values(
+        &self,
+        values: &crate::query::plan::RowValuesOp,
+    ) -> Result<(Box<dyn Operator>, Vec<String>, Vec<LogicalType>)> {
+        let row = self.row.as_deref().ok_or_else(|| {
+            Error::Internal("the values of a row in a plan for no row".to_string())
+        })?;
+        let held = values
+            .names
+            .iter()
+            .map(|name| {
+                row.value(name).cloned().ok_or_else(|| {
+                    Error::Internal(format!("the row being tested does not bind ?{name}"))
+                })
+            })
+            .collect::<Result<Vec<Value>>>()?;
+        let types = vec![LogicalType::RdfTermId; held.len()];
+        let operator = Box::new(exists_per_row::RowValuesOperator::new(held));
+        Ok((operator, values.names.clone(), types))
+    }
+
     fn plan_property_path(
         &self,
         path: &crate::query::plan::PropertyPathOp,
@@ -449,9 +618,12 @@ impl RdfPlanner {
     ) -> Result<grafeo_core::execution::operators::RdfPathConfig> {
         use grafeo_core::execution::operators::{RdfPathConfig, RdfPathGraph};
         let graph = match path.graph.as_ref() {
-            Some(TripleComponent::Variable(_)) => {
-                RdfPathGraph::NamedGraphs(path.dataset.as_ref().map(|ds| ds.named_graphs.clone()))
-            }
+            Some(TripleComponent::Variable(_)) => RdfPathGraph::NamedGraphs(
+                path.dataset
+                    .as_ref()
+                    .and_then(DatasetRestriction::listed_named_graphs)
+                    .map(<[String]>::to_vec),
+            ),
             Some(component) => {
                 let iri = match component {
                     TripleComponent::Iri(iri) => iri.clone(),
@@ -463,14 +635,16 @@ impl RdfPlanner {
                         )));
                     }
                 };
-                if path
+                match path
                     .dataset
                     .as_ref()
-                    .is_some_and(|ds| !ds.named_graphs.contains(&iri))
+                    .and_then(DatasetRestriction::listed_named_graphs)
                 {
-                    RdfPathGraph::NamedGraphs(Some(Vec::new()))
-                } else {
-                    RdfPathGraph::Named(iri)
+                    Some(listed) if listed.contains(&iri) => {
+                        RdfPathGraph::NamedGraphs(Some(vec![iri]))
+                    }
+                    Some(_) => RdfPathGraph::NamedGraphs(Some(Vec::new())),
+                    None => RdfPathGraph::Named(iri),
                 }
             }
             None => path.dataset.as_ref().map_or(RdfPathGraph::Default, |ds| {
@@ -488,6 +662,7 @@ impl RdfPlanner {
                 .and_then(TripleComponent::as_variable)
                 .map(str::to_string),
             min_hops: !path.zero_length,
+            repeats: path.repeats,
             path: path.path.clone(),
             graph,
             transaction_id: None,
@@ -573,24 +748,33 @@ impl RdfPlanner {
         // Build the triple pattern for querying the store
         let pattern = self.build_triple_pattern(scan);
 
-        // Determine which columns are variables (and thus in output)
-        let mut columns = Vec::new();
+        // Determine which columns are variables (and thus in output). A variable repeated in
+        // the pattern is one column, and the scan keeps the rows whose positions hold the same
+        // term there.
+        let mut columns: Vec<String> = Vec::new();
         let mut output_mask = [false, false, false, false]; // s, p, o, g
-
+        let mut same_as: [Option<usize>; 4] = [None; 4];
+        let mut first_at: Vec<(&str, usize)> = Vec::with_capacity(4);
+        let graph = scan.graph.as_ref();
         for (position, component) in [&scan.subject, &scan.predicate, &scan.object]
             .into_iter()
+            .chain(graph)
             .enumerate()
         {
-            if let TripleComponent::Variable(name) = component
-                && !left_out[position]
-            {
-                columns.push(name.clone());
-                output_mask[position] = true;
+            if position < 3 && left_out[position] {
+                continue;
             }
-        }
-        if let Some(TripleComponent::Variable(name)) = &scan.graph {
-            columns.push(name.clone());
-            output_mask[3] = true;
+            let TripleComponent::Variable(name) = component else {
+                continue;
+            };
+            match first_at.iter().find(|(seen, _)| *seen == name) {
+                Some(&(_, first)) => same_as[position] = Some(first),
+                None => {
+                    first_at.push((name, position));
+                    columns.push(name.clone());
+                    output_mask[position] = true;
+                }
+            }
         }
 
         // Resolve graph context
@@ -614,6 +798,7 @@ impl RdfPlanner {
             },
             Arc::clone(&self.terms),
         )
+        .with_same_terms(same_as)
         .with_writer(self.writer.clone())
         .with_read_counter(self.read_counter());
         (scan_op, columns)
@@ -894,17 +1079,31 @@ impl RdfPlanner {
 
     /// Plans a filter operator.
     ///
-    /// Handles EXISTS/NOT EXISTS patterns by transforming them into semi-joins/anti-joins.
+    /// A whole predicate of `EXISTS` or `NOT EXISTS` that a run without the row answers becomes a
+    /// semi-join or anti-join; any other `EXISTS` a column the predicate reads.
     fn plan_filter(
         &self,
         filter: &FilterOp,
     ) -> Result<(Box<dyn Operator>, Vec<String>, Vec<LogicalType>)> {
-        // Check for EXISTS/NOT EXISTS patterns and transform to semi/anti joins
+        let planned = self.plan_operator(&filter.input)?;
         if let Some((subquery, is_negated)) = self.extract_exists_pattern(&filter.predicate) {
-            return self.plan_exists_as_join(&filter.input, subquery, is_negated);
+            // The join compares what both bind, so a key either may leave unbound, which matches
+            // any value, is left to the mark.
+            if let Some(read) = self.run_once_read(subquery, &planned.1) {
+                let binds_the_keys = |plan: &LogicalOperator| {
+                    crate::query::plan::always_bound(plan)
+                        .is_none_or(|bound| read.shared.iter().all(|name| bound.contains(name)))
+                };
+                if read.row_conjuncts.is_empty()
+                    && binds_the_keys(&filter.input)
+                    && binds_the_keys(subquery)
+                {
+                    return self.plan_exists_as_join(planned, subquery, is_negated);
+                }
+            }
         }
-
-        let (input_op, columns, types) = self.plan_operator(&filter.input)?;
+        let width = planned.1.len();
+        let (predicate, (input_op, columns, types)) = self.marked(&filter.predicate, planned)?;
 
         // Build variable to column index mapping
         let variable_columns: HashMap<String, usize> = columns
@@ -914,17 +1113,19 @@ impl RdfPlanner {
             .collect();
 
         // Convert logical expression to filter expression
-        let filter_expr = convert_filter_expression(&filter.predicate)?;
+        let filter_expr = convert_filter_expression(&predicate)?;
 
+        // Above an aggregation the row is gone, as for a projection or a sort.
         let predicate = RdfExpressionPredicate::new(
             filter_expr,
             variable_columns,
             Arc::clone(&self.terms),
-            self.clock,
+            self.expression_context_over(&filter.input),
         );
 
-        let operator = Box::new(FilterOperator::new(input_op, Box::new(predicate)));
-        Ok((operator, columns, types))
+        let operator: Box<dyn Operator> =
+            Box::new(FilterOperator::new(input_op, Box::new(predicate)));
+        Ok(self.keeping_columns((operator, columns, types), (0..width).collect()))
     }
 
     /// Extracts an EXISTS or NOT EXISTS pattern from a filter predicate.
@@ -956,13 +1157,12 @@ impl RdfPlanner {
     /// Plans an EXISTS/NOT EXISTS pattern as a semi-join or anti-join.
     fn plan_exists_as_join(
         &self,
-        input: &LogicalOperator,
+        (left_op, left_columns, left_types): PlannedOperator,
         subquery: &LogicalOperator,
         is_negated: bool,
     ) -> Result<(Box<dyn Operator>, Vec<String>, Vec<LogicalType>)> {
         use crate::query::planner::common;
 
-        let (left_op, left_columns, left_types) = self.plan_operator(input)?;
         let (right_op, right_columns, _right_types) = self.plan_exists_subquery(subquery)?;
 
         // Use Anti for NOT EXISTS, Semi for EXISTS
@@ -987,6 +1187,124 @@ impl RdfPlanner {
         Ok((result_op, result_columns, left_types))
     }
 
+    /// `expression` with each `EXISTS` in it reading a column, and `planned` with those columns:
+    /// one evaluation for every position an expression holds. The operator that reads a column
+    /// leaves it out of what it returns, so a `SELECT *` or a parent never sees one, and its name
+    /// is none a variable can have.
+    fn marked(
+        &self,
+        expression: &LogicalExpression,
+        mut planned: PlannedOperator,
+    ) -> Result<(LogicalExpression, PlannedOperator)> {
+        let mut tests = Vec::new();
+        let expression = exists_read::take_exists(expression.clone(), &mut |subquery| {
+            let number = self.exists_marks.get();
+            self.exists_marks.set(number + 1);
+            let mark = format!("{}{number}", exists_per_row::MARK_PREFIX);
+            tests.push((mark.clone(), subquery));
+            LogicalExpression::Variable(mark)
+        });
+        for (mark, subquery) in tests {
+            planned = self.plan_exists_mark(planned, mark, &subquery)?;
+        }
+        Ok((expression, planned))
+    }
+
+    /// `planned` with the columns `keep` alone, in that order: nothing to do when they are all
+    /// of them, as they are unless an `EXISTS` was marked.
+    #[inline(never)]
+    fn keeping_columns(
+        &self,
+        (operator, columns, types): PlannedOperator,
+        keep: Vec<usize>,
+    ) -> PlannedOperator {
+        if keep.len() == columns.len() {
+            return (operator, columns, types);
+        }
+        let kept_columns = keep.iter().map(|&at| columns[at].clone()).collect();
+        let kept_types: Vec<LogicalType> = keep.iter().map(|&at| types[at].clone()).collect();
+        let operator = Box::new(RdfProjectOperator::new(
+            operator,
+            keep.into_iter().map(RdfProjectExpr::Column).collect(),
+            kept_types.clone(),
+            Arc::clone(&self.terms),
+            self.expression_context(),
+        ));
+        (operator, kept_columns, kept_types)
+    }
+
+    /// As [`marked`](Self::marked), of an expression that may be absent.
+    fn marked_if_any(
+        &self,
+        expression: Option<&LogicalExpression>,
+        planned: PlannedOperator,
+    ) -> Result<(Option<LogicalExpression>, PlannedOperator)> {
+        match expression {
+            Some(expression) => {
+                let (expression, planned) = self.marked(expression, planned)?;
+                Ok((Some(expression), planned))
+            }
+            None => Ok((None, planned)),
+        }
+    }
+
+    /// `planned` with a column `mark`: whether `subquery` holds for the row.
+    #[inline(never)]
+    fn plan_exists_mark(
+        &self,
+        (child, mut columns, mut types): PlannedOperator,
+        mark: String,
+        subquery: &LogicalOperator,
+    ) -> Result<PlannedOperator> {
+        use exists_pair::{ExistsMarkOperator, ExistsTest, MarkTest, RowCheck};
+
+        let Some(read) = self.run_once_read(subquery, &columns) else {
+            self.note_exists_route("ExistsPerRow");
+            let test = MarkTest::EachRow(Box::new(ExistsPerRow::new(
+                self.row_plan_parts(),
+                subquery.clone(),
+                &columns,
+                &[],
+                self.row.clone(),
+            )));
+            columns.push(mark);
+            types.push(LogicalType::RdfTermId);
+            let operator = ExistsMarkOperator::new(child, test, Arc::clone(&self.terms));
+            return Ok((Box::new(operator), columns, types));
+        };
+        let (operator, subquery_columns, _) = self.plan_exists_subquery(&read.subquery)?;
+        let shared = || {
+            subquery_columns
+                .iter()
+                .enumerate()
+                .filter_map(|(at, name)| {
+                    let in_row = columns.iter().position(|column| column == name)?;
+                    Some((in_row, at))
+                })
+        };
+        let test = match LogicalExpression::conjunction(read.row_conjuncts) {
+            Some(conjuncts) => {
+                self.note_exists_route("ExistsRowCheck");
+                MarkTest::PerRow(RowCheck::new(
+                    operator,
+                    shared().collect(),
+                    self.merged_row_condition(&conjuncts, &columns, &subquery_columns)?,
+                ))
+            }
+            None => {
+                self.note_exists_route("ExistsMark");
+                let (keys, at) = shared()
+                    .map(|(in_row, at)| ((Some(in_row), None), at))
+                    .unzip();
+                MarkTest::Lookup(ExistsTest::new(operator, false, keys, at))
+            }
+        };
+        columns.push(mark);
+        types.push(LogicalType::RdfTermId);
+        let operator = ExistsMarkOperator::new(child, test, Arc::clone(&self.terms));
+        Ok((Box::new(operator), columns, types))
+    }
+
     /// The condition of an `OPTIONAL`'s left join, over the merged solution
     /// of a pair (SPARQL 1.1 sec 18.5): a variable both sides have reads the
     /// right side's value where the left leaves it unbound, and each
@@ -998,65 +1316,132 @@ impl RdfPlanner {
         left_columns: &[String],
         right_columns: &[String],
     ) -> Result<Box<dyn grafeo_core::execution::operators::JoinCondition>> {
-        use grafeo_core::execution::operators::{JoinCondition, JoinedRowCondition};
-
         let mut conjuncts = Vec::new();
         conjuncts_of(condition, &mut conjuncts);
         let mut tests = Vec::new();
         let mut rest = Vec::new();
+        // An `EXISTS` deeper in a conjunct is the same test, its answer a column of the pair that
+        // the conjunct reads: a mark.
+        let mut marks = Vec::new();
+        let mut marked_right = right_columns.to_vec();
         for conjunct in conjuncts {
             match self.extract_exists_pattern(conjunct) {
                 Some((subquery, negated)) => {
-                    let (op, columns, _) = self.plan_exists_subquery(subquery)?;
-                    let (keys, subquery_columns) = columns
-                        .iter()
-                        .enumerate()
-                        .filter_map(|(at, name)| {
-                            let left = left_columns.iter().position(|c| c == name);
-                            let right = right_columns.iter().position(|c| c == name);
-                            (left.is_some() || right.is_some()).then_some(((left, right), at))
-                        })
-                        .unzip();
-                    tests.push(exists_pair::ExistsTest::new(
-                        op,
-                        negated,
-                        keys,
-                        subquery_columns,
-                    ));
+                    tests.push(self.pair_test(subquery, negated, left_columns, right_columns)?);
+                }
+                None if crate::query::plan::has_subquery(conjunct) => {
+                    let mut found = Vec::new();
+                    let expression = exists_read::take_exists(conjunct.clone(), &mut |subquery| {
+                        let number = self.exists_marks.get();
+                        self.exists_marks.set(number + 1);
+                        let mark = format!("{}{number}", exists_per_row::MARK_PREFIX);
+                        found.push((mark.clone(), subquery));
+                        LogicalExpression::Variable(mark)
+                    });
+                    for (mark, subquery) in found {
+                        marks.push(self.pair_test(
+                            &subquery,
+                            false,
+                            left_columns,
+                            right_columns,
+                        )?);
+                        marked_right.push(mark);
+                    }
+                    rest.push(expression);
                 }
                 None => rest.push(conjunct.clone()),
             }
         }
         let rest = LogicalExpression::conjunction(rest)
-            .map(|rest| -> Result<Box<dyn JoinCondition>> {
-                let mut variable_columns: HashMap<String, usize> = HashMap::new();
-                for (i, name) in left_columns.iter().chain(right_columns).enumerate() {
-                    variable_columns.entry(name.clone()).or_insert(i);
-                }
-                // A variable both sides have reads the right side's value
-                // where the left leaves it unbound (sec 18.5, LeftJoin).
-                let fallback_columns: HashMap<String, usize> = right_columns
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, name)| left_columns.contains(name))
-                    .map(|(i, name)| (name.clone(), left_columns.len() + i))
-                    .collect();
-                let predicate = RdfExpressionPredicate::new(
-                    convert_filter_expression(&rest)?,
-                    variable_columns,
-                    Arc::clone(&self.terms),
-                    self.clock,
-                )
-                .with_fallback_columns(fallback_columns);
-                Ok(Box::new(JoinedRowCondition::new(Box::new(predicate))))
-            })
+            .map(|rest| self.merged_row_condition(&rest, left_columns, &marked_right))
             .transpose()?;
-        if tests.is_empty() {
+        if tests.is_empty() && marks.is_empty() {
             return rest.ok_or_else(|| {
                 Error::Internal("a left join condition with no conjunct".to_string())
             });
         }
-        Ok(Box::new(exists_pair::ExistsPairCondition::new(tests, rest)))
+        Ok(Box::new(exists_pair::ExistsPairCondition::new(
+            tests,
+            marks,
+            rest,
+            Arc::clone(&self.terms),
+        )))
+    }
+
+    /// The test of `subquery` for a joined pair: the row is the left columns, then the right ones.
+    #[inline(never)]
+    fn pair_test(
+        &self,
+        subquery: &LogicalOperator,
+        negated: bool,
+        left_columns: &[String],
+        right_columns: &[String],
+    ) -> Result<exists_pair::PairTest> {
+        let mut row = left_columns.to_vec();
+        row.extend_from_slice(right_columns);
+        let read = self
+            .run_once_read(subquery, &row)
+            .filter(|read| read.row_conjuncts.is_empty());
+        let Some(read) = read else {
+            self.note_exists_route("ExistsPerRow");
+            return Ok(exists_pair::PairTest::each_pair(
+                ExistsPerRow::new(
+                    self.row_plan_parts(),
+                    subquery.clone(),
+                    left_columns,
+                    right_columns,
+                    self.row.clone(),
+                ),
+                negated,
+            ));
+        };
+        self.note_exists_route("ExistsMark");
+        let (op, columns, _) = self.plan_exists_subquery(&read.subquery)?;
+        let (keys, subquery_columns) = columns
+            .iter()
+            .enumerate()
+            .filter_map(|(at, name)| {
+                let left = left_columns.iter().position(|c| c == name);
+                let right = right_columns.iter().position(|c| c == name);
+                (left.is_some() || right.is_some()).then_some(((left, right), at))
+            })
+            .unzip();
+        Ok(exists_pair::PairTest::Lookup(exists_pair::ExistsTest::new(
+            op,
+            negated,
+            keys,
+            subquery_columns,
+        )))
+    }
+
+    /// `condition` over a row followed by another: a variable both have reads the second's value
+    /// where the first leaves it unbound (sec 18.5, LeftJoin).
+    fn merged_row_condition(
+        &self,
+        condition: &LogicalExpression,
+        left_columns: &[String],
+        right_columns: &[String],
+    ) -> Result<Box<dyn grafeo_core::execution::operators::JoinCondition>> {
+        let mut variable_columns: HashMap<String, usize> = HashMap::new();
+        for (i, name) in left_columns.iter().chain(right_columns).enumerate() {
+            variable_columns.entry(name.clone()).or_insert(i);
+        }
+        let fallback_columns: HashMap<String, usize> = right_columns
+            .iter()
+            .enumerate()
+            .filter(|(_, name)| left_columns.contains(name))
+            .map(|(i, name)| (name.clone(), left_columns.len() + i))
+            .collect();
+        let predicate = RdfExpressionPredicate::new(
+            convert_filter_expression(condition)?,
+            variable_columns,
+            Arc::clone(&self.terms),
+            self.expression_context(),
+        )
+        .with_fallback_columns(fallback_columns);
+        Ok(Box::new(
+            grafeo_core::execution::operators::JoinedRowCondition::new(Box::new(predicate)),
+        ))
     }
 
     /// Plans a DISTINCT operator.
@@ -1106,23 +1491,45 @@ impl RdfPlanner {
     ) -> Result<(Box<dyn Operator>, Vec<String>, Vec<LogicalType>)> {
         use crate::query::plan::SortOrder;
 
-        let (input_op, columns, types) = self.plan_operator(&sort.input)?;
+        let mut planned = self.plan_operator(&sort.input)?;
+        let width = planned.1.len();
+        let mut key_expressions = Vec::with_capacity(sort.keys.len());
+        for key in &sort.keys {
+            let (expression, next) = self.marked(&key.expression, planned)?;
+            key_expressions.push(expression);
+            planned = next;
+        }
+        let (input_op, mut columns, mut types) = planned;
         let variable_columns = column_map(&columns);
+        let context = self.expression_context_over(&sort.input);
 
         let mut projections: Vec<RdfProjectExpr> =
             (0..columns.len()).map(RdfProjectExpr::Column).collect();
         let mut output_types = types.clone();
         let mut keys = Vec::with_capacity(sort.keys.len());
-        for key in &sort.keys {
+        for (key, expression) in sort.keys.iter().zip(&key_expressions) {
             // A variable's key is its own id column; an expression's value is
             // projected as a term after the returned columns. A variable the
             // pattern does not bind is unbound in every solution: a key that
             // orders nothing.
-            let column = match &key.expression {
+            let column = match expression {
                 LogicalExpression::Variable(name) => match variable_columns.get(name) {
+                    // The row's value where its own column is unbound, as a
+                    // projection reads it.
+                    Some(_) if context.row_value(name).is_some() => {
+                        projections.push(RdfProjectExpr::Evaluated {
+                            expr: convert_filter_expression(expression)?,
+                            variable_columns: variable_columns.clone(),
+                            output: EvaluatedOutput::Term,
+                        });
+                        output_types.push(LogicalType::Any);
+                        projections.len() - 1
+                    }
                     Some(&column) => column,
                     None => {
-                        projections.push(RdfProjectExpr::Constant(Value::Null));
+                        projections.push(RdfProjectExpr::Constant(
+                            context.row_value(name).cloned().unwrap_or(Value::Null),
+                        ));
                         output_types.push(LogicalType::Any);
                         projections.len() - 1
                     }
@@ -1157,30 +1564,51 @@ impl RdfPlanner {
                 projections,
                 output_types,
                 Arc::clone(&self.terms),
-                self.clock,
+                context,
             ))
         };
-        // The key columns come last and are not returned.
+        // The key columns come last and are not returned, the columns of an `EXISTS` key with them.
+        columns.truncate(width);
+        types.truncate(width);
         let sort_op =
             order::RdfSortOperator::new(projected, keys, types.clone(), Arc::clone(&self.terms));
         Ok((Box::new(sort_op), columns, types))
     }
 
-    /// Plans a PROJECT operator: a variable's ids are copied, a constant and
-    /// an expression's value are interned.
     /// A pattern in a named graph: its plan, or with no such graph in the dataset now, nothing
     /// under the same columns (SPARQL 1.1 sec 18.6).
     fn plan_in_named_graph(
         &self,
         graph: &crate::query::plan::InNamedGraphOp,
     ) -> Result<(Box<dyn Operator>, Vec<String>, Vec<LogicalType>)> {
-        let (operator, columns, types) = self.plan_operator(&graph.input)?;
+        let first_entry = self.profile_entries.borrow().len();
+        let (operator, mut columns, mut types) = self.plan_operator(&graph.input)?;
         let names = named_graphs::named_graph_names(
             &self.store,
             self.writer.as_ref(),
             graph.dataset.as_ref(),
         );
-        if names.binary_search(&graph.graph).is_ok() {
+        let found = match &graph.graph {
+            crate::query::plan::NamedGraph::Iri(iri) => names.binary_search(iri).is_ok(),
+            crate::query::plan::NamedGraph::Variable(variable) => {
+                // The branches below run in its place: their rows and time count in this line.
+                let entries = first_entry..self.profile_entries.borrow().len();
+                if let Some(entries) = self.profile_entries.borrow_mut().get_mut(entries) {
+                    for entry in entries {
+                        entry.absorbed = true;
+                    }
+                }
+                if !names.is_empty() {
+                    return self.plan_in_each_graph(graph, variable, &names);
+                }
+                if !columns.contains(variable) {
+                    columns.push(variable.clone());
+                    types.push(LogicalType::RdfTermId);
+                }
+                false
+            }
+        };
+        if found {
             return Ok((operator, columns, types));
         }
         let empty: Box<dyn Operator> = Box::new(
@@ -1189,29 +1617,88 @@ impl RdfPlanner {
         Ok((empty, columns, types))
     }
 
+    /// `GRAPH ?g` over a pattern that must run once per graph: a branch per graph of `names`, each
+    /// reading its graph alone and joined with that graph's row. The join binds `?g` where the
+    /// pattern does not, and where the pattern lists it, fills an unbound and drops another value,
+    /// as SPARQL's join of the pattern with the graph's binding does (18.6).
+    #[inline(never)]
+    fn plan_in_each_graph(
+        &self,
+        graph: &crate::query::plan::InNamedGraphOp,
+        variable: &str,
+        names: &[String],
+    ) -> Result<(Box<dyn Operator>, Vec<String>, Vec<LogicalType>)> {
+        use crate::query::plan::{JoinOp, JoinType, NamedGraphsOp, UnionOp};
+        let inputs = names
+            .iter()
+            .map(|name| {
+                let mut graphs = NamedGraphsOp {
+                    variable: variable.to_string(),
+                    dataset: graph.dataset.clone(),
+                };
+                named_graphs::read_only_graph(&mut graphs.dataset, name);
+                LogicalOperator::Join(JoinOp {
+                    left: Box::new(LogicalOperator::NamedGraphs(graphs)),
+                    right: Box::new(named_graphs::in_one_graph(
+                        (*graph.input).clone(),
+                        variable,
+                        graph.read_as.as_ref(),
+                        name,
+                    )),
+                    join_type: JoinType::Inner,
+                    conditions: Vec::new(),
+                })
+            })
+            .collect();
+        let profiling = self.profiling.replace(false);
+        let planned = self.plan_union(&UnionOp { inputs });
+        self.profiling.set(profiling);
+        planned
+    }
+
+    /// Plans a PROJECT operator: a variable's ids are copied, a constant and
+    /// an expression's value are interned.
     fn plan_project(
         &self,
         project: &crate::query::plan::ProjectOp,
     ) -> Result<(Box<dyn Operator>, Vec<String>, Vec<LogicalType>)> {
-        let (input_op, input_columns, input_types) = self.plan_operator(&project.input)?;
+        let mut planned = self.plan_operator(&project.input)?;
+        let mut expressions = Vec::with_capacity(project.projections.len());
+        for proj in &project.projections {
+            let (expression, next) = self.marked(&proj.expression, planned)?;
+            expressions.push(expression);
+            planned = next;
+        }
+        let (input_op, input_columns, input_types) = planned;
         let variable_columns = column_map(&input_columns);
+        let context = self.expression_context_over(&project.input);
 
         let mut projections = Vec::new();
         let mut output_columns = Vec::new();
         let mut output_types = Vec::new();
 
-        for proj in &project.projections {
-            match &proj.expression {
+        for (proj, expression) in project.projections.iter().zip(&expressions) {
+            match expression {
                 LogicalExpression::Variable(name) => {
                     match variable_columns.get(name) {
+                        // The row's value where its own column is unbound.
+                        Some(_) if context.row_value(name).is_some() => {
+                            projections.push(RdfProjectExpr::Expression {
+                                expr: convert_filter_expression(expression)?,
+                                variable_columns: variable_columns.clone(),
+                            });
+                            output_types.push(LogicalType::RdfTermId);
+                        }
                         Some(&col_idx) => {
                             projections.push(RdfProjectExpr::Column(col_idx));
                             output_types.push(input_types[col_idx].clone());
                         }
                         // A variable the pattern does not bind is unbound in
-                        // every solution (SPARQL 1.1, 18.2.5).
+                        // every solution (SPARQL 1.1, 18.2.5), or is the row's.
                         None => {
-                            projections.push(RdfProjectExpr::Constant(Value::Null));
+                            projections.push(RdfProjectExpr::Constant(
+                                context.row_value(name).cloned().unwrap_or(Value::Null),
+                            ));
                             output_types.push(LogicalType::RdfTermId);
                         }
                     }
@@ -1256,7 +1743,7 @@ impl RdfPlanner {
             projections,
             output_types.clone(),
             Arc::clone(&self.terms),
-            self.clock,
+            context,
         ));
         Ok((operator, output_columns, output_types))
     }
@@ -1268,10 +1755,18 @@ impl RdfPlanner {
         &self,
         bind: &BindOp,
     ) -> Result<(Box<dyn Operator>, Vec<String>, Vec<LogicalType>)> {
-        let (input_op, input_columns, mut input_types) = self.plan_operator(&bind.input)?;
+        let planned = self.plan_operator(&bind.input)?;
+        let width = planned.1.len();
+        let (expression, (input_op, input_columns, mut input_types)) =
+            self.marked(&bind.expression, planned)?;
         let variable_columns = column_map(&input_columns);
-        let filter_expr = convert_filter_expression(&bind.expression)?;
+        let filter_expr = convert_filter_expression(&expression)?;
 
+        // A BIND onto a name the input binds replaces its column: SPARQL refuses one in a query
+        // (sec 18.2.1), and `GRAPH ?g` binds `?g` so after a pattern that names it.
+        let replaced = input_columns
+            .iter()
+            .position(|column| *column == bind.variable);
         let mut output_columns = input_columns;
         output_columns.push(bind.variable.clone());
         input_types.push(LogicalType::RdfTermId);
@@ -1282,11 +1777,18 @@ impl RdfPlanner {
                 filter_expr,
                 variable_columns,
                 Arc::clone(&self.terms),
-                self.clock,
+                self.expression_context(),
             ),
             terms: Arc::clone(&self.terms),
         });
-        Ok((operator, output_columns, input_types))
+        let bound = output_columns.len() - 1;
+        let keep = match replaced {
+            Some(at) if at < width => (0..width)
+                .map(|column| if column == at { bound } else { column })
+                .collect(),
+            _ => (0..width).chain([bound]).collect(),
+        };
+        Ok(self.keeping_columns((operator, output_columns, input_types), keep))
     }
 
     /// Plans a CONSTRUCT operator.
@@ -1367,7 +1869,21 @@ impl RdfPlanner {
 
         use grafeo_core::execution::operators::AggregateExpr as PhysicalAggregateExpr;
 
-        let (input_op, input_columns, input_types) = self.plan_operator(&agg.input)?;
+        let mut planned = self.plan_operator(&agg.input)?;
+        let mut group_by = Vec::with_capacity(agg.group_by.len());
+        for expr in &agg.group_by {
+            let (expression, next) = self.marked(expr, planned)?;
+            group_by.push(expression);
+            planned = next;
+        }
+        let mut arguments = Vec::with_capacity(agg.aggregates.len());
+        for agg_expr in &agg.aggregates {
+            let (first, next) = self.marked_if_any(agg_expr.expression.as_ref(), planned)?;
+            let (second, next) = self.marked_if_any(agg_expr.expression2.as_ref(), next)?;
+            arguments.push((first, second));
+            planned = next;
+        }
+        let (input_op, input_columns, input_types) = planned;
         let input_map = column_map(&input_columns);
         let mut variable_columns = input_map.clone();
         let mut projections: Vec<RdfProjectExpr> = (0..input_columns.len())
@@ -1376,7 +1892,7 @@ impl RdfPlanner {
         let mut projected_types = input_types;
 
         let mut group_columns = Vec::with_capacity(agg.group_by.len());
-        for expr in &agg.group_by {
+        for expr in &group_by {
             let column = match expr {
                 LogicalExpression::Variable(_) => resolve_expression(expr, &variable_columns)?,
                 other => {
@@ -1424,7 +1940,7 @@ impl RdfPlanner {
         };
 
         let mut physical_aggregates = Vec::with_capacity(agg.aggregates.len());
-        for agg_expr in &agg.aggregates {
+        for (agg_expr, (first, second)) in agg.aggregates.iter().zip(&arguments) {
             let output = match agg_expr.function {
                 LogicalAggregateFunction::Count | LogicalAggregateFunction::CountNonNull => None,
                 LogicalAggregateFunction::Sum | LogicalAggregateFunction::Avg => {
@@ -1433,13 +1949,11 @@ impl RdfPlanner {
                 LogicalAggregateFunction::GroupConcat => Some(EvaluatedOutput::Lexical),
                 _ => Some(EvaluatedOutput::Term),
             };
-            let column = agg_expr
-                .expression
+            let column = first
                 .as_ref()
                 .map(|expr| argument(expr, output))
                 .transpose()?;
-            let column2 = agg_expr
-                .expression2
+            let column2 = second
                 .as_ref()
                 .map(|expr| argument(expr, Some(EvaluatedOutput::Term)))
                 .transpose()?;
@@ -1468,7 +1982,7 @@ impl RdfPlanner {
                 projections,
                 projected_types,
                 Arc::clone(&self.terms),
-                self.clock,
+                self.expression_context(),
             ))
         } else {
             input_op
@@ -1507,20 +2021,28 @@ impl RdfPlanner {
             ))
         };
         // The aggregates' values become terms of the dictionary.
-        let mut operator = self.intern(operator, (group_count..output_columns.len()).collect());
+        let operator = self.intern(operator, (group_count..output_columns.len()).collect());
         let output_schema = vec![LogicalType::RdfTermId; output_columns.len()];
+        let width = output_columns.len();
+        let planned = (operator, output_columns, output_schema);
 
-        if let Some(having_expr) = &agg.having {
-            let predicate = RdfExpressionPredicate::new(
-                convert_filter_expression(having_expr)?,
-                column_map(&output_columns),
-                Arc::clone(&self.terms),
-                self.clock,
-            );
-            operator = Box::new(FilterOperator::new(operator, Box::new(predicate)));
-        }
-
-        Ok((operator, output_columns, output_schema))
+        let Some(having_expr) = &agg.having else {
+            return Ok(planned);
+        };
+        let (having, (operator, output_columns, output_schema)) =
+            self.marked(having_expr, planned)?;
+        let predicate = RdfExpressionPredicate::new(
+            convert_filter_expression(&having)?,
+            column_map(&output_columns),
+            Arc::clone(&self.terms),
+            self.expression_context_with_no_row(),
+        );
+        let operator: Box<dyn Operator> =
+            Box::new(FilterOperator::new(operator, Box::new(predicate)));
+        Ok(self.keeping_columns(
+            (operator, output_columns, output_schema),
+            (0..width).collect(),
+        ))
     }
 
     /// Detects COUNT(*) over a TripleScan and returns the count directly when possible.
@@ -1576,6 +2098,10 @@ impl RdfPlanner {
         let s_var = scan.subject.as_variable().is_some();
         let p_var = scan.predicate.as_variable().is_some();
         let o_var = scan.object.as_variable().is_some();
+        // A variable the pattern repeats keeps fewer triples than the store counts.
+        if repeats_a_variable(scan) {
+            return None;
+        }
 
         // Per-graph count: GRAPH <iri> { ?s ?p ?o }
         if let Some(graph) = &scan.graph {
@@ -2000,6 +2526,18 @@ impl RdfPlanner {
         use crate::query::planner::common;
         let (left_op, left_columns, left_types) = self.plan_operator(&join.left)?;
         let (right_op, right_columns, _right_types) = self.plan_operator(&join.right)?;
+        // Both sides start from a row that binds something, so their domains are never disjoint:
+        // any right row compatible with a left row removes it.
+        if self.row.as_deref().is_some_and(RowBinding::binds_anything) {
+            let (op, cols) = common::build_not_exists_join(
+                left_op,
+                right_op,
+                left_columns,
+                &right_columns,
+                left_types.clone(),
+            );
+            return Ok((op, cols, left_types));
+        }
         let (op, cols) = common::build_anti_join(
             left_op,
             right_op,
@@ -2050,7 +2588,7 @@ impl RdfPlanner {
         }
 
         // Sort by cardinality (smallest first) so we build on smaller inputs
-        planned.sort_by(|a, b| a.3.partial_cmp(&b.3).unwrap_or(std::cmp::Ordering::Equal));
+        planned.sort_by(|a, b| a.3.total_cmp(&b.3));
 
         // Fold with pairwise hash joins, each time on the smallest input that
         // shares a variable with the rows so far (see `next_join_input`); a
@@ -2218,7 +2756,7 @@ impl RdfPlanner {
                     &unified_columns,
                     &unified_types,
                     &self.terms,
-                    self.clock,
+                    self.expression_context(),
                 )
             })
             .collect();
@@ -3049,30 +3587,11 @@ impl Operator for RdfBindOperator {
             return Ok(None);
         };
         let rows: Vec<usize> = input.selected_indices().collect();
-        let mut output_types: Vec<LogicalType> = (0..input.column_count())
-            .map(|i| {
-                input
-                    .column(i)
-                    .map_or(LogicalType::Any, |c| c.data_type().clone())
-            })
-            .collect();
-        output_types.push(LogicalType::RdfTermId);
-        let mut output = DataChunk::with_capacity(&output_types, rows.len());
-        for col_idx in 0..input.column_count() {
-            copy_column(&input, col_idx, &rows, &mut output, col_idx);
-        }
         let ids = rows
             .iter()
             .map(|&row| intern_value(&self.terms, self.evaluator.eval(&input, row)))
             .collect::<std::result::Result<Vec<_>, _>>()?;
-        let bind_col = output
-            .column_mut(input.column_count())
-            .expect("column exists: bind column is last in schema");
-        for id in ids {
-            bind_col.push_value(id);
-        }
-        output.set_count(rows.len());
-        Ok(Some(output))
+        Ok(Some(chunk_with_column(&input, &rows, ids)))
     }
 
     fn reset(&mut self) {
@@ -3140,7 +3659,7 @@ impl RdfProjectOperator {
         projections: Vec<RdfProjectExpr>,
         output_types: Vec<LogicalType>,
         terms: Arc<QueryTermIds>,
-        clock: StatementClock,
+        context: ExpressionContext,
     ) -> Self {
         assert_eq!(projections.len(), output_types.len());
         let projections = projections
@@ -3159,7 +3678,7 @@ impl RdfProjectOperator {
                         expr.clone(),
                         variable_columns.clone(),
                         Arc::clone(&terms),
-                        clock,
+                        context.clone(),
                     )),
                     _ => None,
                 };
@@ -3269,6 +3788,37 @@ fn intern_value(
         Some(term) => Ok(id_value(terms.intern(&term)?)),
         None => Ok(Value::Null),
     }
+}
+
+/// `rows` of `input` with a column more, of term ids, one per row.
+fn id_at(chunk: &DataChunk, column: usize, row: usize) -> Option<i64> {
+    match chunk.column(column)?.get_value(row)? {
+        Value::Int64(id) => Some(id),
+        _ => None,
+    }
+}
+
+fn chunk_with_column(input: &DataChunk, rows: &[usize], ids: Vec<Value>) -> DataChunk {
+    let mut output_types: Vec<LogicalType> = (0..input.column_count())
+        .map(|i| {
+            input
+                .column(i)
+                .map_or(LogicalType::Any, |c| c.data_type().clone())
+        })
+        .collect();
+    output_types.push(LogicalType::RdfTermId);
+    let mut output = DataChunk::with_capacity(&output_types, rows.len());
+    for col_idx in 0..input.column_count() {
+        copy_column(input, col_idx, rows, &mut output, col_idx);
+    }
+    let column = output
+        .column_mut(input.column_count())
+        .expect("column exists: the new column is last in the schema");
+    for id in ids {
+        column.push_value(id);
+    }
+    output.set_count(rows.len());
+    output
 }
 
 /// Copies column `from` of `input` at `rows` into column `to` of `output`.
@@ -3765,6 +4315,9 @@ struct RdfTripleScanOperator {
     writer: Option<RdfWriter>,
     /// Counts the triples the scan reads.
     reads: Option<Arc<grafeo_core::execution::operators::ReadCounter>>,
+    /// For each position [s, p, o, g], the earlier position that must hold the same term: a
+    /// variable repeated in the pattern (`?x :p ?x`).
+    same_as: [Option<usize>; 4],
 }
 
 impl RdfTripleScanOperator {
@@ -3787,6 +4340,7 @@ impl RdfTripleScanOperator {
             terms,
             writer: None,
             reads: None,
+            same_as: [None; 4],
         }
     }
 
@@ -3804,7 +4358,15 @@ impl RdfTripleScanOperator {
             terms: Arc::clone(&self.terms),
             writer: self.writer.clone(),
             reads: self.reads.clone(),
+            same_as: self.same_as,
         }
+    }
+
+    /// Keeps the rows whose position `i` holds the same term as position `same_as[i]` (see
+    /// [`same_as`](Self::same_as)).
+    fn with_same_terms(mut self, same_as: [Option<usize>; 4]) -> Self {
+        self.same_as = same_as;
+        self
     }
 
     /// Makes the scan see the writes of the transaction of `writer`
@@ -3841,33 +4403,25 @@ impl RdfTripleScanOperator {
     fn ensure_triples(&mut self) {
         if self.triples.is_none() {
             let ctx = &self.graph_context;
+            let listed = ctx
+                .dataset
+                .as_ref()
+                .and_then(DatasetRestriction::listed_named_graphs);
             self.triples = Some(if ctx.scan_all_graphs {
-                // GRAPH ?var: scan named graphs (restricted by FROM NAMED if present)
-                if let Some(ref ds) = ctx.dataset {
-                    if !ds.named_graphs.is_empty() {
-                        // FROM NAMED restricts which named graphs are visible
-                        let graph_refs: Vec<&str> =
-                            ds.named_graphs.iter().map(String::as_str).collect();
+                // GRAPH ?var: the graphs the dataset lists, or every graph of the store. An empty
+                // list to `find_in` means every graph, so listing none is answered here.
+                match listed {
+                    Some([]) => Vec::new(),
+                    Some(names) => {
+                        let graph_refs: Vec<&str> = names.iter().map(String::as_str).collect();
                         self.find_in(Some(&graph_refs))
-                    } else {
-                        // No FROM NAMED: all graphs visible
-                        self.find_in(Some(&[]))
                     }
-                } else {
-                    // No dataset restriction: scan all graphs
-                    self.find_in(Some(&[]))
+                    None => self.find_in(Some(&[])),
                 }
             } else if let Some(ref graph_iri) = ctx.graph {
-                // GRAPH <iri>: scan specific named graph (restricted by FROM NAMED if present)
-                if let Some(ref ds) = ctx.dataset {
-                    if !ds.named_graphs.is_empty()
-                        && !ds.named_graphs.iter().any(|g| g == graph_iri)
-                    {
-                        // The specified graph is not in the FROM NAMED list: empty result
-                        Vec::new()
-                    } else {
-                        self.find_in(Some(&[graph_iri.as_str()]))
-                    }
+                // GRAPH <iri>: a graph the dataset does not list is empty.
+                if listed.is_some_and(|names| !names.contains(graph_iri)) {
+                    Vec::new()
                 } else {
                     self.find_in(Some(&[graph_iri.as_str()]))
                 }
@@ -3954,7 +4508,10 @@ impl Operator for RdfTripleScanOperator {
         // pending write, the ring's) gets them here. A graph name is an IRI
         // (the same for runs of rows), and a default-graph triple's graph is
         // unbound.
-        let mut last_graph: Option<(&str, Value)> = None;
+        let mut last_graph: Option<(&str, TermId)> = None;
+        let constrained = self.same_as.iter().any(Option::is_some);
+        let graph_read = self.output_mask[3] || self.same_as[3].is_some();
+        let mut kept = 0;
         for (graph, triple) in &triples[self.position..end] {
             let ids = match triple.ids() {
                 Some(ids) => ids,
@@ -3967,6 +4524,32 @@ impl Operator for RdfTripleScanOperator {
                     [ids[0], ids[1], ids[2]]
                 }
             };
+            // A graph name's id, the same for runs of rows; a default-graph triple's graph is
+            // unbound, and equals no term.
+            let graph_id = match (graph_read, graph.as_deref()) {
+                (true, Some(name)) => Some(match last_graph {
+                    Some((last, id)) if last == name => id,
+                    _ => {
+                        let id = self.terms.intern(&Term::iri(name))?;
+                        last_graph = Some((name, id));
+                        id
+                    }
+                }),
+                _ => None,
+            };
+            if constrained {
+                let id_at = |position: usize| match position {
+                    3 => graph_id,
+                    position => Some(ids[position]),
+                };
+                let holds = self.same_as.iter().enumerate().all(|(position, first)| {
+                    first.is_none_or(|first| id_at(position) == id_at(first))
+                });
+                if !holds {
+                    continue;
+                }
+            }
+            kept += 1;
             let mut col_idx = 0;
             for (component, id) in ids.into_iter().enumerate() {
                 if self.output_mask[component] {
@@ -3978,17 +4561,7 @@ impl Operator for RdfTripleScanOperator {
                 }
             }
             if self.output_mask[3] {
-                let value = match graph.as_deref() {
-                    None => Value::Null,
-                    Some(name) => match &last_graph {
-                        Some((last, id)) if *last == name => id.clone(),
-                        _ => {
-                            let id = id_value(self.terms.intern(&Term::iri(name))?);
-                            last_graph = Some((name, id.clone()));
-                            id
-                        }
-                    },
-                };
+                let value = graph_id.map_or(Value::Null, id_value);
                 chunk
                     .column_mut(col_idx)
                     .expect("column exists")
@@ -3996,7 +4569,7 @@ impl Operator for RdfTripleScanOperator {
             }
         }
 
-        chunk.set_count(batch_size);
+        chunk.set_count(kept);
         self.position = end;
 
         Ok(Some(chunk))
@@ -4020,6 +4593,20 @@ impl Operator for RdfTripleScanOperator {
 // Helper Functions
 // ============================================================================
 
+/// Whether `scan`'s pattern names one variable in two positions (subject, predicate, object or
+/// graph).
+fn repeats_a_variable(scan: &TripleScanOp) -> bool {
+    let names: Vec<&str> = [&scan.subject, &scan.predicate, &scan.object]
+        .into_iter()
+        .chain(scan.graph.as_ref())
+        .filter_map(TripleComponent::as_variable)
+        .collect();
+    names
+        .iter()
+        .enumerate()
+        .any(|(at, name)| names[..at].contains(name))
+}
+
 /// Aligns a UNION branch to the unified columns by name, filling columns the
 /// branch does not bind with NULL.
 ///
@@ -4031,7 +4618,7 @@ fn pad_union_branch(
     unified_columns: &[String],
     unified_types: &[LogicalType],
     terms: &Arc<QueryTermIds>,
-    clock: StatementClock,
+    context: ExpressionContext,
 ) -> Box<dyn Operator> {
     if branch_columns == unified_columns {
         return branch;
@@ -4056,7 +4643,7 @@ fn pad_union_branch(
         projections,
         unified_types.to_vec(),
         Arc::clone(terms),
-        clock,
+        context,
     ))
 }
 
@@ -4161,6 +4748,7 @@ fn estimate_operator_cardinality(
 ) -> Option<f64> {
     use crate::query::plan::LogicalOperator;
     match op {
+        LogicalOperator::RowValues(_) => Some(1.0),
         LogicalOperator::TripleScan(scan) => {
             let stats = store.stats();
             let total = stats.triple_count as f64;
@@ -6295,7 +6883,10 @@ mod tests {
                 expr,
                 HashMap::new(),
                 Arc::clone(&terms),
-                StatementClock::now(),
+                ExpressionContext {
+                    clock: StatementClock::now(),
+                    row: None,
+                },
             ),
             terms,
         });
@@ -6311,7 +6902,10 @@ mod tests {
             vec![RdfProjectExpr::Constant(Value::Null)],
             vec![LogicalType::RdfTermId],
             Arc::default(),
-            StatementClock::now(),
+            ExpressionContext {
+                clock: StatementClock::now(),
+                row: None,
+            },
         ));
         let any = op.into_any();
         assert!(any.downcast::<RdfProjectOperator>().is_ok());

@@ -1,0 +1,1915 @@
+# EXISTS reads the row by the SPARQL 1.2 draft's definition (sec 17.4.1.4, 18.3.2.7). Generated with sparql_exists_per_row.rs.
+
+meta:
+  language: sparql
+  model: rdf
+  section: "17.4.1.4"
+  title: EXISTS reads the row
+  dataset: empty
+  requires: [sparql, rdf]
+
+tests:
+
+  - name: case_1
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER EXISTS { ?s :p ?o } }"
+    expect:
+      rows:
+        - ["urn:a"]
+
+  - name: case_1_not
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER NOT EXISTS { ?s :p ?o } }"
+    expect:
+      rows:
+        - ["urn:b"]
+
+  - name: case_2
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER EXISTS { FILTER(?s = :a) } }"
+    expect:
+      rows:
+        - ["urn:a"]
+
+  - name: case_2_not
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER NOT EXISTS { FILTER(?s = :a) } }"
+    expect:
+      rows:
+        - ["urn:b"]
+
+  - name: case_3
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER EXISTS { :d :q ?o FILTER(?s = :a) } }"
+    expect:
+      rows:
+        - ["urn:a"]
+
+  - name: case_3_not
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER NOT EXISTS { :d :q ?o FILTER(?s = :a) } }"
+    expect:
+      rows:
+        - ["urn:b"]
+
+  - name: case_4
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER EXISTS { :d :q ?o { FILTER(?s = :a) } } }"
+    expect:
+      rows:
+        - ["urn:a"]
+
+  - name: case_4_not
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER NOT EXISTS { :d :q ?o { FILTER(?s = :a) } } }"
+    expect:
+      rows:
+        - ["urn:b"]
+
+  - name: case_5
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER EXISTS { :d :q ?o OPTIONAL { ?s :p ?y } } }"
+    expect:
+      rows:
+        - ["urn:a"]
+        - ["urn:b"]
+
+  - name: case_5_not
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER NOT EXISTS { :d :q ?o OPTIONAL { ?s :p ?y } } }"
+    expect:
+      empty: true
+
+  - name: case_6
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER EXISTS { :d :q ?o OPTIONAL { :d :q ?y FILTER(?s = :a) } } }"
+    expect:
+      rows:
+        - ["urn:a"]
+        - ["urn:b"]
+
+  - name: case_6_not
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER NOT EXISTS { :d :q ?o OPTIONAL { :d :q ?y FILTER(?s = :a) } } }"
+    expect:
+      empty: true
+
+  - name: case_7
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER EXISTS { ?s :t :k MINUS { ?s :t :k } } }"
+    expect:
+      empty: true
+
+  - name: case_7_not
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER NOT EXISTS { ?s :t :k MINUS { ?s :t :k } } }"
+    expect:
+      rows:
+        - ["urn:a"]
+        - ["urn:b"]
+
+  - name: case_8
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER EXISTS { :d :q ?o MINUS { :d :q :e } } }"
+    expect:
+      empty: true
+
+  - name: case_8_not
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER NOT EXISTS { :d :q ?o MINUS { :d :q :e } } }"
+    expect:
+      rows:
+        - ["urn:a"]
+        - ["urn:b"]
+
+  - name: case_9
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER EXISTS { :d :q ?o MINUS { :nobody :q ?z } } }"
+    expect:
+      rows:
+        - ["urn:a"]
+        - ["urn:b"]
+
+  - name: case_9_not
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER NOT EXISTS { :d :q ?o MINUS { :nobody :q ?z } } }"
+    expect:
+      empty: true
+
+  - name: case_10
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER EXISTS { BIND(:a AS ?s) } }"
+    expect:
+      rows:
+        - ["urn:a"]
+
+  - name: case_10_not
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER NOT EXISTS { BIND(:a AS ?s) } }"
+    expect:
+      rows:
+        - ["urn:b"]
+
+  - name: case_11
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER EXISTS { BIND(?s AS ?y) FILTER(?y = :a) } }"
+    expect:
+      rows:
+        - ["urn:a"]
+
+  - name: case_11_not
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER NOT EXISTS { BIND(?s AS ?y) FILTER(?y = :a) } }"
+    expect:
+      rows:
+        - ["urn:b"]
+
+  - name: case_12
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER EXISTS { SELECT ?s { ?s :p ?o } } }"
+    expect:
+      rows:
+        - ["urn:a"]
+
+  - name: case_12_not
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER NOT EXISTS { SELECT ?s { ?s :p ?o } } }"
+    expect:
+      rows:
+        - ["urn:b"]
+
+  - name: case_13
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER EXISTS { SELECT ?o { ?s :p ?o } } }"
+    expect:
+      rows:
+        - ["urn:a"]
+
+  - name: case_13_not
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER NOT EXISTS { SELECT ?o { ?s :p ?o } } }"
+    expect:
+      rows:
+        - ["urn:b"]
+
+  - name: case_14
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER EXISTS { SELECT ?o { ?x :p ?o FILTER(?x = ?s) } } }"
+    expect:
+      rows:
+        - ["urn:a"]
+
+  - name: case_14_not
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER NOT EXISTS { SELECT ?o { ?x :p ?o FILTER(?x = ?s) } } }"
+    expect:
+      rows:
+        - ["urn:b"]
+
+  - name: case_15
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER EXISTS { SELECT ?s { ?s :t :k } LIMIT 1 } }"
+    expect:
+      rows:
+        - ["urn:a"]
+        - ["urn:b"]
+
+  - name: case_15_not
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER NOT EXISTS { SELECT ?s { ?s :t :k } LIMIT 1 } }"
+    expect:
+      empty: true
+
+  - name: case_16
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER EXISTS { SELECT (COUNT(*) AS ?n) { ?s :p ?o } } }"
+    expect:
+      rows:
+        - ["urn:a"]
+        - ["urn:b"]
+
+  - name: case_16_not
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER NOT EXISTS { SELECT (COUNT(*) AS ?n) { ?s :p ?o } } }"
+    expect:
+      empty: true
+
+  - name: case_17
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER EXISTS { SELECT ?s (COUNT(*) AS ?n) { ?s :p ?o } GROUP BY ?s } }"
+    expect:
+      rows:
+        - ["urn:a"]
+
+  - name: case_17_not
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER NOT EXISTS { SELECT ?s (COUNT(*) AS ?n) { ?s :p ?o } GROUP BY ?s } }"
+    expect:
+      rows:
+        - ["urn:b"]
+
+  - name: case_18
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER EXISTS { SELECT ?k { :d :q ?k } GROUP BY ?k HAVING(?s = :a) } }"
+    expect:
+      empty: true
+
+  - name: case_18_not
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER NOT EXISTS { SELECT ?k { :d :q ?k } GROUP BY ?k HAVING(?s = :a) } }"
+    expect:
+      rows:
+        - ["urn:a"]
+        - ["urn:b"]
+
+  - name: case_19
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER EXISTS { SELECT (?s AS ?y) { :d :q ?o } } }"
+    expect:
+      rows:
+        - ["urn:a"]
+        - ["urn:b"]
+
+  - name: case_19_not
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER NOT EXISTS { SELECT (?s AS ?y) { :d :q ?o } } }"
+    expect:
+      empty: true
+
+  - name: case_20
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER EXISTS { { ?s :p ?o } UNION { :d :q ?z FILTER(?s = :b) } } }"
+    expect:
+      rows:
+        - ["urn:a"]
+        - ["urn:b"]
+
+  - name: case_20_not
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER NOT EXISTS { { ?s :p ?o } UNION { :d :q ?z FILTER(?s = :b) } } }"
+    expect:
+      empty: true
+
+  - name: case_21
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER EXISTS { GRAPH <urn:g> { ?s :r* ?y } } }"
+    expect:
+      empty: true
+
+  - name: case_21_not
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER NOT EXISTS { GRAPH <urn:g> { ?s :r* ?y } } }"
+    expect:
+      rows:
+        - ["urn:a"]
+        - ["urn:b"]
+
+  - name: case_22
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER EXISTS { :d :q ?o FILTER EXISTS { ?s :p ?y } } }"
+    expect:
+      rows:
+        - ["urn:a"]
+
+  - name: case_22_not
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER NOT EXISTS { :d :q ?o FILTER EXISTS { ?s :p ?y } } }"
+    expect:
+      rows:
+        - ["urn:b"]
+
+  - name: case_23
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER EXISTS { :d :q ?o FILTER(BOUND(?s)) } }"
+    expect:
+      rows:
+        - ["urn:a"]
+        - ["urn:b"]
+
+  - name: case_23_not
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER NOT EXISTS { :d :q ?o FILTER(BOUND(?s)) } }"
+    expect:
+      empty: true
+
+  - name: case_1_conjunct
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER(EXISTS { ?s :p ?o } && true) }"
+    expect:
+      rows:
+        - ["urn:a"]
+
+  - name: case_1_if
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER(IF(EXISTS { ?s :p ?o }, true, false)) }"
+    expect:
+      rows:
+        - ["urn:a"]
+
+  - name: case_1_bind
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s ?e WHERE { ?s :t :k BIND(EXISTS { ?s :p ?o } AS ?e) }"
+    expect:
+      rows:
+        - ["urn:a", true]
+        - ["urn:b", false]
+
+  - name: case_1_select
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s (EXISTS { ?s :p ?o } AS ?e) WHERE { ?s :t :k }"
+    expect:
+      rows:
+        - ["urn:a", true]
+        - ["urn:b", false]
+
+  - name: case_1_optional_filter
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s ?z WHERE { ?s :t :k OPTIONAL { :d :q ?z FILTER(EXISTS { ?s :p ?o }) } }"
+    expect:
+      rows:
+        - ["urn:a", "urn:e"]
+        - ["urn:b", null]
+
+  - name: case_2_conjunct
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER(EXISTS { FILTER(?s = :a) } && true) }"
+    expect:
+      rows:
+        - ["urn:a"]
+
+  - name: case_2_if
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER(IF(EXISTS { FILTER(?s = :a) }, true, false)) }"
+    expect:
+      rows:
+        - ["urn:a"]
+
+  - name: case_2_bind
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s ?e WHERE { ?s :t :k BIND(EXISTS { FILTER(?s = :a) } AS ?e) }"
+    expect:
+      rows:
+        - ["urn:a", true]
+        - ["urn:b", false]
+
+  - name: case_2_select
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s (EXISTS { FILTER(?s = :a) } AS ?e) WHERE { ?s :t :k }"
+    expect:
+      rows:
+        - ["urn:a", true]
+        - ["urn:b", false]
+
+  - name: case_2_optional_filter
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s ?z WHERE { ?s :t :k OPTIONAL { :d :q ?z FILTER(EXISTS { FILTER(?s = :a) }) } }"
+    expect:
+      rows:
+        - ["urn:a", "urn:e"]
+        - ["urn:b", null]
+
+  - name: case_3_conjunct
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER(EXISTS { :d :q ?o FILTER(?s = :a) } && true) }"
+    expect:
+      rows:
+        - ["urn:a"]
+
+  - name: case_3_if
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER(IF(EXISTS { :d :q ?o FILTER(?s = :a) }, true, false)) }"
+    expect:
+      rows:
+        - ["urn:a"]
+
+  - name: case_3_bind
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s ?e WHERE { ?s :t :k BIND(EXISTS { :d :q ?o FILTER(?s = :a) } AS ?e) }"
+    expect:
+      rows:
+        - ["urn:a", true]
+        - ["urn:b", false]
+
+  - name: case_3_select
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s (EXISTS { :d :q ?o FILTER(?s = :a) } AS ?e) WHERE { ?s :t :k }"
+    expect:
+      rows:
+        - ["urn:a", true]
+        - ["urn:b", false]
+
+  - name: case_3_optional_filter
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s ?z WHERE { ?s :t :k OPTIONAL { :d :q ?z FILTER(EXISTS { :d :q ?o FILTER(?s = :a) }) } }"
+    expect:
+      rows:
+        - ["urn:a", "urn:e"]
+        - ["urn:b", null]
+
+  - name: case_4_conjunct
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER(EXISTS { :d :q ?o { FILTER(?s = :a) } } && true) }"
+    expect:
+      rows:
+        - ["urn:a"]
+
+  - name: case_4_if
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER(IF(EXISTS { :d :q ?o { FILTER(?s = :a) } }, true, false)) }"
+    expect:
+      rows:
+        - ["urn:a"]
+
+  - name: case_4_bind
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s ?e WHERE { ?s :t :k BIND(EXISTS { :d :q ?o { FILTER(?s = :a) } } AS ?e) }"
+    expect:
+      rows:
+        - ["urn:a", true]
+        - ["urn:b", false]
+
+  - name: case_4_select
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s (EXISTS { :d :q ?o { FILTER(?s = :a) } } AS ?e) WHERE { ?s :t :k }"
+    expect:
+      rows:
+        - ["urn:a", true]
+        - ["urn:b", false]
+
+  - name: case_4_optional_filter
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s ?z WHERE { ?s :t :k OPTIONAL { :d :q ?z FILTER(EXISTS { :d :q ?o { FILTER(?s = :a) } }) } }"
+    expect:
+      rows:
+        - ["urn:a", "urn:e"]
+        - ["urn:b", null]
+
+  - name: case_5_conjunct
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER(EXISTS { :d :q ?o OPTIONAL { ?s :p ?y } } && true) }"
+    expect:
+      rows:
+        - ["urn:a"]
+        - ["urn:b"]
+
+  - name: case_5_if
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER(IF(EXISTS { :d :q ?o OPTIONAL { ?s :p ?y } }, true, false)) }"
+    expect:
+      rows:
+        - ["urn:a"]
+        - ["urn:b"]
+
+  - name: case_5_bind
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s ?e WHERE { ?s :t :k BIND(EXISTS { :d :q ?o OPTIONAL { ?s :p ?y } } AS ?e) }"
+    expect:
+      rows:
+        - ["urn:a", true]
+        - ["urn:b", true]
+
+  - name: case_5_select
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s (EXISTS { :d :q ?o OPTIONAL { ?s :p ?y } } AS ?e) WHERE { ?s :t :k }"
+    expect:
+      rows:
+        - ["urn:a", true]
+        - ["urn:b", true]
+
+  - name: case_5_optional_filter
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s ?z WHERE { ?s :t :k OPTIONAL { :d :q ?z FILTER(EXISTS { :d :q ?o OPTIONAL { ?s :p ?y } }) } }"
+    expect:
+      rows:
+        - ["urn:a", "urn:e"]
+        - ["urn:b", "urn:e"]
+
+  - name: case_6_conjunct
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER(EXISTS { :d :q ?o OPTIONAL { :d :q ?y FILTER(?s = :a) } } && true) }"
+    expect:
+      rows:
+        - ["urn:a"]
+        - ["urn:b"]
+
+  - name: case_6_if
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER(IF(EXISTS { :d :q ?o OPTIONAL { :d :q ?y FILTER(?s = :a) } }, true, false)) }"
+    expect:
+      rows:
+        - ["urn:a"]
+        - ["urn:b"]
+
+  - name: case_6_bind
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s ?e WHERE { ?s :t :k BIND(EXISTS { :d :q ?o OPTIONAL { :d :q ?y FILTER(?s = :a) } } AS ?e) }"
+    expect:
+      rows:
+        - ["urn:a", true]
+        - ["urn:b", true]
+
+  - name: case_6_select
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s (EXISTS { :d :q ?o OPTIONAL { :d :q ?y FILTER(?s = :a) } } AS ?e) WHERE { ?s :t :k }"
+    expect:
+      rows:
+        - ["urn:a", true]
+        - ["urn:b", true]
+
+  - name: case_6_optional_filter
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s ?z WHERE { ?s :t :k OPTIONAL { :d :q ?z FILTER(EXISTS { :d :q ?o OPTIONAL { :d :q ?y FILTER(?s = :a) } }) } }"
+    expect:
+      rows:
+        - ["urn:a", "urn:e"]
+        - ["urn:b", "urn:e"]
+
+  - name: case_7_conjunct
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER(EXISTS { ?s :t :k MINUS { ?s :t :k } } && true) }"
+    expect:
+      empty: true
+
+  - name: case_7_if
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER(IF(EXISTS { ?s :t :k MINUS { ?s :t :k } }, true, false)) }"
+    expect:
+      empty: true
+
+  - name: case_7_bind
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s ?e WHERE { ?s :t :k BIND(EXISTS { ?s :t :k MINUS { ?s :t :k } } AS ?e) }"
+    expect:
+      rows:
+        - ["urn:a", false]
+        - ["urn:b", false]
+
+  - name: case_7_select
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s (EXISTS { ?s :t :k MINUS { ?s :t :k } } AS ?e) WHERE { ?s :t :k }"
+    expect:
+      rows:
+        - ["urn:a", false]
+        - ["urn:b", false]
+
+  - name: case_7_optional_filter
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s ?z WHERE { ?s :t :k OPTIONAL { :d :q ?z FILTER(EXISTS { ?s :t :k MINUS { ?s :t :k } }) } }"
+    expect:
+      rows:
+        - ["urn:a", null]
+        - ["urn:b", null]
+
+  - name: case_8_conjunct
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER(EXISTS { :d :q ?o MINUS { :d :q :e } } && true) }"
+    expect:
+      empty: true
+
+  - name: case_8_if
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER(IF(EXISTS { :d :q ?o MINUS { :d :q :e } }, true, false)) }"
+    expect:
+      empty: true
+
+  - name: case_8_bind
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s ?e WHERE { ?s :t :k BIND(EXISTS { :d :q ?o MINUS { :d :q :e } } AS ?e) }"
+    expect:
+      rows:
+        - ["urn:a", false]
+        - ["urn:b", false]
+
+  - name: case_8_select
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s (EXISTS { :d :q ?o MINUS { :d :q :e } } AS ?e) WHERE { ?s :t :k }"
+    expect:
+      rows:
+        - ["urn:a", false]
+        - ["urn:b", false]
+
+  - name: case_8_optional_filter
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s ?z WHERE { ?s :t :k OPTIONAL { :d :q ?z FILTER(EXISTS { :d :q ?o MINUS { :d :q :e } }) } }"
+    expect:
+      rows:
+        - ["urn:a", null]
+        - ["urn:b", null]
+
+  - name: case_9_conjunct
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER(EXISTS { :d :q ?o MINUS { :nobody :q ?z } } && true) }"
+    expect:
+      rows:
+        - ["urn:a"]
+        - ["urn:b"]
+
+  - name: case_9_if
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER(IF(EXISTS { :d :q ?o MINUS { :nobody :q ?z } }, true, false)) }"
+    expect:
+      rows:
+        - ["urn:a"]
+        - ["urn:b"]
+
+  - name: case_9_bind
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s ?e WHERE { ?s :t :k BIND(EXISTS { :d :q ?o MINUS { :nobody :q ?z } } AS ?e) }"
+    expect:
+      rows:
+        - ["urn:a", true]
+        - ["urn:b", true]
+
+  - name: case_9_select
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s (EXISTS { :d :q ?o MINUS { :nobody :q ?z } } AS ?e) WHERE { ?s :t :k }"
+    expect:
+      rows:
+        - ["urn:a", true]
+        - ["urn:b", true]
+
+  - name: case_9_optional_filter
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s ?z WHERE { ?s :t :k OPTIONAL { :d :q ?z FILTER(EXISTS { :d :q ?o MINUS { :nobody :q ?z } }) } }"
+    expect:
+      rows:
+        - ["urn:a", "urn:e"]
+        - ["urn:b", "urn:e"]
+
+  - name: case_10_conjunct
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER(EXISTS { BIND(:a AS ?s) } && true) }"
+    expect:
+      rows:
+        - ["urn:a"]
+
+  - name: case_10_if
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER(IF(EXISTS { BIND(:a AS ?s) }, true, false)) }"
+    expect:
+      rows:
+        - ["urn:a"]
+
+  - name: case_10_bind
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s ?e WHERE { ?s :t :k BIND(EXISTS { BIND(:a AS ?s) } AS ?e) }"
+    expect:
+      rows:
+        - ["urn:a", true]
+        - ["urn:b", false]
+
+  - name: case_10_select
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s (EXISTS { BIND(:a AS ?s) } AS ?e) WHERE { ?s :t :k }"
+    expect:
+      rows:
+        - ["urn:a", true]
+        - ["urn:b", false]
+
+  - name: case_10_optional_filter
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s ?z WHERE { ?s :t :k OPTIONAL { :d :q ?z FILTER(EXISTS { BIND(:a AS ?s) }) } }"
+    expect:
+      rows:
+        - ["urn:a", "urn:e"]
+        - ["urn:b", null]
+
+  - name: case_11_conjunct
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER(EXISTS { BIND(?s AS ?y) FILTER(?y = :a) } && true) }"
+    expect:
+      rows:
+        - ["urn:a"]
+
+  - name: case_11_if
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER(IF(EXISTS { BIND(?s AS ?y) FILTER(?y = :a) }, true, false)) }"
+    expect:
+      rows:
+        - ["urn:a"]
+
+  - name: case_11_bind
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s ?e WHERE { ?s :t :k BIND(EXISTS { BIND(?s AS ?y) FILTER(?y = :a) } AS ?e) }"
+    expect:
+      rows:
+        - ["urn:a", true]
+        - ["urn:b", false]
+
+  - name: case_11_select
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s (EXISTS { BIND(?s AS ?y) FILTER(?y = :a) } AS ?e) WHERE { ?s :t :k }"
+    expect:
+      rows:
+        - ["urn:a", true]
+        - ["urn:b", false]
+
+  - name: case_11_optional_filter
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s ?z WHERE { ?s :t :k OPTIONAL { :d :q ?z FILTER(EXISTS { BIND(?s AS ?y) FILTER(?y = :a) }) } }"
+    expect:
+      rows:
+        - ["urn:a", "urn:e"]
+        - ["urn:b", null]
+
+  - name: case_12_conjunct
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER(EXISTS { SELECT ?s { ?s :p ?o } } && true) }"
+    expect:
+      rows:
+        - ["urn:a"]
+
+  - name: case_12_if
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER(IF(EXISTS { SELECT ?s { ?s :p ?o } }, true, false)) }"
+    expect:
+      rows:
+        - ["urn:a"]
+
+  - name: case_12_bind
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s ?e WHERE { ?s :t :k BIND(EXISTS { SELECT ?s { ?s :p ?o } } AS ?e) }"
+    expect:
+      rows:
+        - ["urn:a", true]
+        - ["urn:b", false]
+
+  - name: case_12_select
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s (EXISTS { SELECT ?s { ?s :p ?o } } AS ?e) WHERE { ?s :t :k }"
+    expect:
+      rows:
+        - ["urn:a", true]
+        - ["urn:b", false]
+
+  - name: case_12_optional_filter
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s ?z WHERE { ?s :t :k OPTIONAL { :d :q ?z FILTER(EXISTS { SELECT ?s { ?s :p ?o } }) } }"
+    expect:
+      rows:
+        - ["urn:a", "urn:e"]
+        - ["urn:b", null]
+
+  - name: case_13_conjunct
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER(EXISTS { SELECT ?o { ?s :p ?o } } && true) }"
+    expect:
+      rows:
+        - ["urn:a"]
+
+  - name: case_13_if
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER(IF(EXISTS { SELECT ?o { ?s :p ?o } }, true, false)) }"
+    expect:
+      rows:
+        - ["urn:a"]
+
+  - name: case_13_bind
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s ?e WHERE { ?s :t :k BIND(EXISTS { SELECT ?o { ?s :p ?o } } AS ?e) }"
+    expect:
+      rows:
+        - ["urn:a", true]
+        - ["urn:b", false]
+
+  - name: case_13_select
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s (EXISTS { SELECT ?o { ?s :p ?o } } AS ?e) WHERE { ?s :t :k }"
+    expect:
+      rows:
+        - ["urn:a", true]
+        - ["urn:b", false]
+
+  - name: case_13_optional_filter
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s ?z WHERE { ?s :t :k OPTIONAL { :d :q ?z FILTER(EXISTS { SELECT ?o { ?s :p ?o } }) } }"
+    expect:
+      rows:
+        - ["urn:a", "urn:e"]
+        - ["urn:b", null]
+
+  - name: case_14_conjunct
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER(EXISTS { SELECT ?o { ?x :p ?o FILTER(?x = ?s) } } && true) }"
+    expect:
+      rows:
+        - ["urn:a"]
+
+  - name: case_14_if
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER(IF(EXISTS { SELECT ?o { ?x :p ?o FILTER(?x = ?s) } }, true, false)) }"
+    expect:
+      rows:
+        - ["urn:a"]
+
+  - name: case_14_bind
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s ?e WHERE { ?s :t :k BIND(EXISTS { SELECT ?o { ?x :p ?o FILTER(?x = ?s) } } AS ?e) }"
+    expect:
+      rows:
+        - ["urn:a", true]
+        - ["urn:b", false]
+
+  - name: case_14_select
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s (EXISTS { SELECT ?o { ?x :p ?o FILTER(?x = ?s) } } AS ?e) WHERE { ?s :t :k }"
+    expect:
+      rows:
+        - ["urn:a", true]
+        - ["urn:b", false]
+
+  - name: case_14_optional_filter
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s ?z WHERE { ?s :t :k OPTIONAL { :d :q ?z FILTER(EXISTS { SELECT ?o { ?x :p ?o FILTER(?x = ?s) } }) } }"
+    expect:
+      rows:
+        - ["urn:a", "urn:e"]
+        - ["urn:b", null]
+
+  - name: case_15_conjunct
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER(EXISTS { SELECT ?s { ?s :t :k } LIMIT 1 } && true) }"
+    expect:
+      rows:
+        - ["urn:a"]
+        - ["urn:b"]
+
+  - name: case_15_if
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER(IF(EXISTS { SELECT ?s { ?s :t :k } LIMIT 1 }, true, false)) }"
+    expect:
+      rows:
+        - ["urn:a"]
+        - ["urn:b"]
+
+  - name: case_15_bind
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s ?e WHERE { ?s :t :k BIND(EXISTS { SELECT ?s { ?s :t :k } LIMIT 1 } AS ?e) }"
+    expect:
+      rows:
+        - ["urn:a", true]
+        - ["urn:b", true]
+
+  - name: case_15_select
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s (EXISTS { SELECT ?s { ?s :t :k } LIMIT 1 } AS ?e) WHERE { ?s :t :k }"
+    expect:
+      rows:
+        - ["urn:a", true]
+        - ["urn:b", true]
+
+  - name: case_15_optional_filter
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s ?z WHERE { ?s :t :k OPTIONAL { :d :q ?z FILTER(EXISTS { SELECT ?s { ?s :t :k } LIMIT 1 }) } }"
+    expect:
+      rows:
+        - ["urn:a", "urn:e"]
+        - ["urn:b", "urn:e"]
+
+  - name: case_16_conjunct
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER(EXISTS { SELECT (COUNT(*) AS ?n) { ?s :p ?o } } && true) }"
+    expect:
+      rows:
+        - ["urn:a"]
+        - ["urn:b"]
+
+  - name: case_16_if
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER(IF(EXISTS { SELECT (COUNT(*) AS ?n) { ?s :p ?o } }, true, false)) }"
+    expect:
+      rows:
+        - ["urn:a"]
+        - ["urn:b"]
+
+  - name: case_16_bind
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s ?e WHERE { ?s :t :k BIND(EXISTS { SELECT (COUNT(*) AS ?n) { ?s :p ?o } } AS ?e) }"
+    expect:
+      rows:
+        - ["urn:a", true]
+        - ["urn:b", true]
+
+  - name: case_16_select
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s (EXISTS { SELECT (COUNT(*) AS ?n) { ?s :p ?o } } AS ?e) WHERE { ?s :t :k }"
+    expect:
+      rows:
+        - ["urn:a", true]
+        - ["urn:b", true]
+
+  - name: case_16_optional_filter
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s ?z WHERE { ?s :t :k OPTIONAL { :d :q ?z FILTER(EXISTS { SELECT (COUNT(*) AS ?n) { ?s :p ?o } }) } }"
+    expect:
+      rows:
+        - ["urn:a", "urn:e"]
+        - ["urn:b", "urn:e"]
+
+  - name: case_17_conjunct
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER(EXISTS { SELECT ?s (COUNT(*) AS ?n) { ?s :p ?o } GROUP BY ?s } && true) }"
+    expect:
+      rows:
+        - ["urn:a"]
+
+  - name: case_17_if
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER(IF(EXISTS { SELECT ?s (COUNT(*) AS ?n) { ?s :p ?o } GROUP BY ?s }, true, false)) }"
+    expect:
+      rows:
+        - ["urn:a"]
+
+  - name: case_17_bind
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s ?e WHERE { ?s :t :k BIND(EXISTS { SELECT ?s (COUNT(*) AS ?n) { ?s :p ?o } GROUP BY ?s } AS ?e) }"
+    expect:
+      rows:
+        - ["urn:a", true]
+        - ["urn:b", false]
+
+  - name: case_17_select
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s (EXISTS { SELECT ?s (COUNT(*) AS ?n) { ?s :p ?o } GROUP BY ?s } AS ?e) WHERE { ?s :t :k }"
+    expect:
+      rows:
+        - ["urn:a", true]
+        - ["urn:b", false]
+
+  - name: case_17_optional_filter
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s ?z WHERE { ?s :t :k OPTIONAL { :d :q ?z FILTER(EXISTS { SELECT ?s (COUNT(*) AS ?n) { ?s :p ?o } GROUP BY ?s }) } }"
+    expect:
+      rows:
+        - ["urn:a", "urn:e"]
+        - ["urn:b", null]
+
+  - name: case_18_conjunct
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER(EXISTS { SELECT ?k { :d :q ?k } GROUP BY ?k HAVING(?s = :a) } && true) }"
+    expect:
+      empty: true
+
+  - name: case_18_if
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER(IF(EXISTS { SELECT ?k { :d :q ?k } GROUP BY ?k HAVING(?s = :a) }, true, false)) }"
+    expect:
+      empty: true
+
+  - name: case_18_bind
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s ?e WHERE { ?s :t :k BIND(EXISTS { SELECT ?k { :d :q ?k } GROUP BY ?k HAVING(?s = :a) } AS ?e) }"
+    expect:
+      rows:
+        - ["urn:a", false]
+        - ["urn:b", false]
+
+  - name: case_18_select
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s (EXISTS { SELECT ?k { :d :q ?k } GROUP BY ?k HAVING(?s = :a) } AS ?e) WHERE { ?s :t :k }"
+    expect:
+      rows:
+        - ["urn:a", false]
+        - ["urn:b", false]
+
+  - name: case_18_optional_filter
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s ?z WHERE { ?s :t :k OPTIONAL { :d :q ?z FILTER(EXISTS { SELECT ?k { :d :q ?k } GROUP BY ?k HAVING(?s = :a) }) } }"
+    expect:
+      rows:
+        - ["urn:a", null]
+        - ["urn:b", null]
+
+  - name: case_19_conjunct
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER(EXISTS { SELECT (?s AS ?y) { :d :q ?o } } && true) }"
+    expect:
+      rows:
+        - ["urn:a"]
+        - ["urn:b"]
+
+  - name: case_19_if
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER(IF(EXISTS { SELECT (?s AS ?y) { :d :q ?o } }, true, false)) }"
+    expect:
+      rows:
+        - ["urn:a"]
+        - ["urn:b"]
+
+  - name: case_19_bind
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s ?e WHERE { ?s :t :k BIND(EXISTS { SELECT (?s AS ?y) { :d :q ?o } } AS ?e) }"
+    expect:
+      rows:
+        - ["urn:a", true]
+        - ["urn:b", true]
+
+  - name: case_19_select
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s (EXISTS { SELECT (?s AS ?y) { :d :q ?o } } AS ?e) WHERE { ?s :t :k }"
+    expect:
+      rows:
+        - ["urn:a", true]
+        - ["urn:b", true]
+
+  - name: case_19_optional_filter
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s ?z WHERE { ?s :t :k OPTIONAL { :d :q ?z FILTER(EXISTS { SELECT (?s AS ?y) { :d :q ?o } }) } }"
+    expect:
+      rows:
+        - ["urn:a", "urn:e"]
+        - ["urn:b", "urn:e"]
+
+  - name: case_20_conjunct
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER(EXISTS { { ?s :p ?o } UNION { :d :q ?z FILTER(?s = :b) } } && true) }"
+    expect:
+      rows:
+        - ["urn:a"]
+        - ["urn:b"]
+
+  - name: case_20_if
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER(IF(EXISTS { { ?s :p ?o } UNION { :d :q ?z FILTER(?s = :b) } }, true, false)) }"
+    expect:
+      rows:
+        - ["urn:a"]
+        - ["urn:b"]
+
+  - name: case_20_bind
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s ?e WHERE { ?s :t :k BIND(EXISTS { { ?s :p ?o } UNION { :d :q ?z FILTER(?s = :b) } } AS ?e) }"
+    expect:
+      rows:
+        - ["urn:a", true]
+        - ["urn:b", true]
+
+  - name: case_20_select
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s (EXISTS { { ?s :p ?o } UNION { :d :q ?z FILTER(?s = :b) } } AS ?e) WHERE { ?s :t :k }"
+    expect:
+      rows:
+        - ["urn:a", true]
+        - ["urn:b", true]
+
+  - name: case_20_optional_filter
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s ?z WHERE { ?s :t :k OPTIONAL { :d :q ?z FILTER(EXISTS { { ?s :p ?o } UNION { :d :q ?z FILTER(?s = :b) } }) } }"
+    expect:
+      rows:
+        - ["urn:a", "urn:e"]
+        - ["urn:b", "urn:e"]
+
+  - name: case_21_conjunct
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER(EXISTS { GRAPH <urn:g> { ?s :r* ?y } } && true) }"
+    expect:
+      empty: true
+
+  - name: case_21_if
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER(IF(EXISTS { GRAPH <urn:g> { ?s :r* ?y } }, true, false)) }"
+    expect:
+      empty: true
+
+  - name: case_21_bind
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s ?e WHERE { ?s :t :k BIND(EXISTS { GRAPH <urn:g> { ?s :r* ?y } } AS ?e) }"
+    expect:
+      rows:
+        - ["urn:a", false]
+        - ["urn:b", false]
+
+  - name: case_21_select
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s (EXISTS { GRAPH <urn:g> { ?s :r* ?y } } AS ?e) WHERE { ?s :t :k }"
+    expect:
+      rows:
+        - ["urn:a", false]
+        - ["urn:b", false]
+
+  - name: case_21_optional_filter
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s ?z WHERE { ?s :t :k OPTIONAL { :d :q ?z FILTER(EXISTS { GRAPH <urn:g> { ?s :r* ?y } }) } }"
+    expect:
+      rows:
+        - ["urn:a", null]
+        - ["urn:b", null]
+
+  - name: case_22_conjunct
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER(EXISTS { :d :q ?o FILTER EXISTS { ?s :p ?y } } && true) }"
+    expect:
+      rows:
+        - ["urn:a"]
+
+  - name: case_22_if
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER(IF(EXISTS { :d :q ?o FILTER EXISTS { ?s :p ?y } }, true, false)) }"
+    expect:
+      rows:
+        - ["urn:a"]
+
+  - name: case_22_bind
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s ?e WHERE { ?s :t :k BIND(EXISTS { :d :q ?o FILTER EXISTS { ?s :p ?y } } AS ?e) }"
+    expect:
+      rows:
+        - ["urn:a", true]
+        - ["urn:b", false]
+
+  - name: case_22_select
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s (EXISTS { :d :q ?o FILTER EXISTS { ?s :p ?y } } AS ?e) WHERE { ?s :t :k }"
+    expect:
+      rows:
+        - ["urn:a", true]
+        - ["urn:b", false]
+
+  - name: case_22_optional_filter
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s ?z WHERE { ?s :t :k OPTIONAL { :d :q ?z FILTER(EXISTS { :d :q ?o FILTER EXISTS { ?s :p ?y } }) } }"
+    expect:
+      rows:
+        - ["urn:a", "urn:e"]
+        - ["urn:b", null]
+
+  - name: case_23_conjunct
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER(EXISTS { :d :q ?o FILTER(BOUND(?s)) } && true) }"
+    expect:
+      rows:
+        - ["urn:a"]
+        - ["urn:b"]
+
+  - name: case_23_if
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER(IF(EXISTS { :d :q ?o FILTER(BOUND(?s)) }, true, false)) }"
+    expect:
+      rows:
+        - ["urn:a"]
+        - ["urn:b"]
+
+  - name: case_23_bind
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s ?e WHERE { ?s :t :k BIND(EXISTS { :d :q ?o FILTER(BOUND(?s)) } AS ?e) }"
+    expect:
+      rows:
+        - ["urn:a", true]
+        - ["urn:b", true]
+
+  - name: case_23_select
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s (EXISTS { :d :q ?o FILTER(BOUND(?s)) } AS ?e) WHERE { ?s :t :k }"
+    expect:
+      rows:
+        - ["urn:a", true]
+        - ["urn:b", true]
+
+  - name: case_23_optional_filter
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s ?z WHERE { ?s :t :k OPTIONAL { :d :q ?z FILTER(EXISTS { :d :q ?o FILTER(BOUND(?s)) }) } }"
+    expect:
+      rows:
+        - ["urn:a", "urn:e"]
+        - ["urn:b", "urn:e"]
+
+  - name: a_rows_unbound_variable_stays_open
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k OPTIONAL { ?s :w ?u } FILTER EXISTS { :a :p ?u } }"
+    expect:
+      rows:
+        - ["urn:a"]
+        - ["urn:b"]
+
+  - name: a_rows_unbound_variable_stays_open_not
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k OPTIONAL { ?s :w ?u } FILTER NOT EXISTS { :a :p ?u } }"
+    expect:
+      empty: true
+
+  - name: a_blank_node_in_the_row_is_a_term
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . _:n :t :k . :a :p :c }"
+    query: "PREFIX : <urn:> SELECT (COUNT(*) AS ?c) WHERE { ?s :t :k FILTER EXISTS { :a :p ?z OPTIONAL { ?s :p ?y } FILTER(BOUND(?y)) } }"
+    expect:
+      rows:
+        - [1]
+
+  - name: a_blank_node_in_the_row_keeps_its_rows
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . _:n :t :k . :a :p :c }"
+    query: "PREFIX : <urn:> SELECT (COUNT(*) AS ?c) WHERE { ?s :t :k FILTER EXISTS { :a :p ?o OPTIONAL { ?s :p ?y } } }"
+    expect:
+      rows:
+        - [2]
+
+  - name: the_row_binds_the_graph_variable
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { GRAPH :g1 { :a :t :k . :a :p :c } GRAPH :g2 { :b :t :k . :d :p :c } }"
+    query: "PREFIX : <urn:> SELECT ?g ?s WHERE { GRAPH ?g { ?s :t :k } FILTER EXISTS { GRAPH ?g { ?x :p ?o FILTER(?x = ?s) } } }"
+    expect:
+      rows:
+        - ["urn:g1", "urn:a"]
+
+  - name: the_row_binds_the_graph_variable_not
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { GRAPH :g1 { :a :t :k . :a :p :c } GRAPH :g2 { :b :t :k . :d :p :c } }"
+    query: "PREFIX : <urn:> SELECT ?g ?s WHERE { GRAPH ?g { ?s :t :k } FILTER NOT EXISTS { GRAPH ?g { ?x :p ?o FILTER(?x = ?s) } } }"
+    expect:
+      rows:
+        - ["urn:g2", "urn:b"]
+
+  - name: from_named_chooses_the_graph_of_a_per_row_form
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . GRAPH :g1 { :x :p :c } GRAPH :g2 { :a :p :c } }"
+    query: "PREFIX : <urn:> SELECT ?s FROM :a0 FROM NAMED :g1 WHERE { BIND(:a AS ?s) FILTER EXISTS { GRAPH ?h { ?y :p ?o FILTER(?y = ?s) } } }"
+    expect:
+      empty: true
+
+  - name: bind_agrees_with_the_row
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER EXISTS { BIND(:a AS ?s) } }"
+    expect:
+      rows:
+        - ["urn:a"]
+
+  - name: bind_of_an_error_leaves_the_rows_value
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER EXISTS { BIND(1 / 0 AS ?s) } }"
+    expect:
+      rows:
+        - ["urn:a"]
+        - ["urn:b"]
+
+  - name: an_alias_must_agree_with_the_row
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER EXISTS { SELECT (:a AS ?s) { :d :q ?o } } }"
+    expect:
+      rows:
+        - ["urn:a"]
+
+  - name: a_nested_exists_reads_the_outer_row
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER EXISTS { :d :q ?o FILTER EXISTS { :d :q ?y FILTER(?s = :a) } } }"
+    expect:
+      rows:
+        - ["urn:a"]
+
+  - name: a_nested_not_exists_reads_the_outer_row
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER EXISTS { :d :q ?o FILTER NOT EXISTS { :d :q ?y FILTER(?s = :a) } } }"
+    expect:
+      rows:
+        - ["urn:b"]
+
+  - name: a_zero_length_path_of_a_bound_end_is_not_in_the_graph
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { BIND(:nowhere AS ?s) FILTER EXISTS { ?s :r* ?y } }"
+    expect:
+      empty: true
+
+  - name: a_zero_length_path_of_a_constant_keeps_its_row
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER EXISTS { :nowhere :r* ?y } }"
+    expect:
+      rows:
+        - ["urn:a"]
+        - ["urn:b"]
+
+  - name: offset_of_a_sub_select_reads_per_row
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER EXISTS { SELECT ?s { ?s :t :k } OFFSET 1 } }"
+    expect:
+      empty: true
+
+  - name: below_an_aggregation_a_key_reads_the_row
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k FILTER EXISTS { SELECT (COUNT(*) AS ?n) { ?s :p ?o } HAVING(COUNT(*) > 0) } }"
+    expect:
+      rows:
+        - ["urn:a"]
+
+  - name: a_filter_in_a_nested_group
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:a> <urn:q> 2 . <urn:a> <urn:q> 3 . <urn:a> <urn:r> 0 . <urn:b> <urn:p> 3 . <urn:b> <urn:q> 2 . <urn:b> <urn:t> 0 . <urn:e> <urn:q> 9 . GRAPH <urn:g1> { <urn:c> <urn:p> 1 . <urn:c> <urn:q> 2 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:d> <urn:q> 2 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT ?s WHERE { ?s <urn:p> ?o FILTER(EXISTS { ?s <urn:q> ?x { FILTER(?x > ?o) } }) }"
+    expect:
+      empty: true
+
+  - name: a_filter_in_a_nested_group_beside_a_triple
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:a> <urn:q> 2 . <urn:a> <urn:q> 3 . <urn:a> <urn:r> 0 . <urn:b> <urn:p> 3 . <urn:b> <urn:q> 2 . <urn:b> <urn:t> 0 . <urn:e> <urn:q> 9 . GRAPH <urn:g1> { <urn:c> <urn:p> 1 . <urn:c> <urn:q> 2 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:d> <urn:q> 2 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT ?s WHERE { ?s <urn:p> ?o FILTER(EXISTS { ?s <urn:q> ?x { ?s <urn:q> ?y FILTER(?y > ?o) } }) }"
+    expect:
+      rows:
+        - ["urn:a"]
+
+  - name: a_filter_in_optional
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:a> <urn:q> 2 . <urn:a> <urn:q> 3 . <urn:a> <urn:r> 0 . <urn:b> <urn:p> 3 . <urn:b> <urn:q> 2 . <urn:b> <urn:t> 0 . <urn:e> <urn:q> 9 . GRAPH <urn:g1> { <urn:c> <urn:p> 1 . <urn:c> <urn:q> 2 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:d> <urn:q> 2 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT ?s WHERE { ?s <urn:p> ?o FILTER(EXISTS { ?s <urn:q> ?x OPTIONAL { ?s <urn:r> ?y FILTER(?y > ?o) } }) }"
+    expect:
+      rows:
+        - ["urn:a"]
+        - ["urn:b"]
+
+  - name: a_filter_in_union
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:a> <urn:q> 2 . <urn:a> <urn:q> 3 . <urn:a> <urn:r> 0 . <urn:b> <urn:p> 3 . <urn:b> <urn:q> 2 . <urn:b> <urn:t> 0 . <urn:e> <urn:q> 9 . GRAPH <urn:g1> { <urn:c> <urn:p> 1 . <urn:c> <urn:q> 2 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:d> <urn:q> 2 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT ?s WHERE { ?s <urn:p> ?o FILTER(EXISTS { { ?s <urn:q> ?x FILTER(?x > ?o) } UNION { ?s <urn:r> ?x } }) }"
+    expect:
+      rows:
+        - ["urn:a"]
+
+  - name: a_filter_in_minus
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:a> <urn:q> 2 . <urn:a> <urn:q> 3 . <urn:a> <urn:r> 0 . <urn:b> <urn:p> 3 . <urn:b> <urn:q> 2 . <urn:b> <urn:t> 0 . <urn:e> <urn:q> 9 . GRAPH <urn:g1> { <urn:c> <urn:p> 1 . <urn:c> <urn:q> 2 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:d> <urn:q> 2 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT ?s WHERE { ?s <urn:p> ?o FILTER(EXISTS { ?s <urn:q> ?x MINUS { ?s <urn:r> ?y FILTER(?y > ?o) } }) }"
+    expect:
+      rows:
+        - ["urn:a"]
+        - ["urn:b"]
+
+  - name: a_bind
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:a> <urn:q> 2 . <urn:a> <urn:q> 3 . <urn:a> <urn:r> 0 . <urn:b> <urn:p> 3 . <urn:b> <urn:q> 2 . <urn:b> <urn:t> 0 . <urn:e> <urn:q> 9 . GRAPH <urn:g1> { <urn:c> <urn:p> 1 . <urn:c> <urn:q> 2 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:d> <urn:q> 2 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT ?s WHERE { ?s <urn:p> ?o FILTER(EXISTS { ?s <urn:q> ?x BIND(?x + ?o AS ?y) }) }"
+    expect:
+      rows:
+        - ["urn:a"]
+        - ["urn:b"]
+
+  - name: a_nested_exists
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:a> <urn:q> 2 . <urn:a> <urn:q> 3 . <urn:a> <urn:r> 0 . <urn:b> <urn:p> 3 . <urn:b> <urn:q> 2 . <urn:b> <urn:t> 0 . <urn:e> <urn:q> 9 . GRAPH <urn:g1> { <urn:c> <urn:p> 1 . <urn:c> <urn:q> 2 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:d> <urn:q> 2 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT ?s WHERE { ?s <urn:p> ?o FILTER(EXISTS { ?s <urn:q> ?x FILTER(EXISTS { ?s <urn:r> ?y FILTER(?y > ?o) }) }) }"
+    expect:
+      empty: true
+
+  - name: a_nested_not_exists
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:a> <urn:q> 2 . <urn:a> <urn:q> 3 . <urn:a> <urn:r> 0 . <urn:b> <urn:p> 3 . <urn:b> <urn:q> 2 . <urn:b> <urn:t> 0 . <urn:e> <urn:q> 9 . GRAPH <urn:g1> { <urn:c> <urn:p> 1 . <urn:c> <urn:q> 2 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:d> <urn:q> 2 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT ?s WHERE { ?s <urn:p> ?o FILTER(EXISTS { ?s <urn:q> ?x FILTER(NOT EXISTS { ?s <urn:r> ?y FILTER(?y > ?o) }) }) }"
+    expect:
+      rows:
+        - ["urn:a"]
+        - ["urn:b"]
+
+  - name: a_sub_select
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:a> <urn:q> 2 . <urn:a> <urn:q> 3 . <urn:a> <urn:r> 0 . <urn:b> <urn:p> 3 . <urn:b> <urn:q> 2 . <urn:b> <urn:t> 0 . <urn:e> <urn:q> 9 . GRAPH <urn:g1> { <urn:c> <urn:p> 1 . <urn:c> <urn:q> 2 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:d> <urn:q> 2 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT ?s WHERE { ?s <urn:p> ?o FILTER(EXISTS { { SELECT ?s WHERE { ?s <urn:q> ?x FILTER(?x > ?o) } } }) }"
+    expect:
+      rows:
+        - ["urn:a"]
+
+  - name: a_sub_select_having
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:a> <urn:q> 2 . <urn:a> <urn:q> 3 . <urn:a> <urn:r> 0 . <urn:b> <urn:p> 3 . <urn:b> <urn:q> 2 . <urn:b> <urn:t> 0 . <urn:e> <urn:q> 9 . GRAPH <urn:g1> { <urn:c> <urn:p> 1 . <urn:c> <urn:q> 2 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:d> <urn:q> 2 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT ?s WHERE { ?s <urn:p> ?o FILTER(EXISTS { { SELECT ?s WHERE { ?s <urn:q> ?x } GROUP BY ?s HAVING(COUNT(?x) > ?o) } }) }"
+    expect:
+      empty: true
+
+  - name: may_leave_unbound_and_the_row_binds
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:a> <urn:q> 2 . <urn:a> <urn:q> 3 . <urn:a> <urn:r> 0 . <urn:b> <urn:p> 3 . <urn:b> <urn:q> 2 . <urn:b> <urn:t> 0 . <urn:e> <urn:q> 9 . GRAPH <urn:g1> { <urn:c> <urn:p> 1 . <urn:c> <urn:q> 2 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:d> <urn:q> 2 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT ?s WHERE { ?s <urn:p> ?o FILTER(EXISTS { ?t <urn:q> ?x OPTIONAL { ?t <urn:r> ?o } }) }"
+    expect:
+      rows:
+        - ["urn:a"]
+        - ["urn:b"]
+
+  - name: may_leave_unbound_read_by_a_filter
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:a> <urn:q> 2 . <urn:a> <urn:q> 3 . <urn:a> <urn:r> 0 . <urn:b> <urn:p> 3 . <urn:b> <urn:q> 2 . <urn:b> <urn:t> 0 . <urn:e> <urn:q> 9 . GRAPH <urn:g1> { <urn:c> <urn:p> 1 . <urn:c> <urn:q> 2 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:d> <urn:q> 2 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT ?s WHERE { ?s <urn:p> ?o FILTER(EXISTS { ?t <urn:q> ?x OPTIONAL { ?t <urn:r> ?o } FILTER(?o = 1) }) }"
+    expect:
+      rows:
+        - ["urn:a"]
+
+  - name: in_a_bind
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:a> <urn:q> 2 . <urn:a> <urn:q> 3 . <urn:a> <urn:r> 0 . <urn:b> <urn:p> 3 . <urn:b> <urn:q> 2 . <urn:b> <urn:t> 0 . <urn:e> <urn:q> 9 . GRAPH <urn:g1> { <urn:c> <urn:p> 1 . <urn:c> <urn:q> 2 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:d> <urn:q> 2 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT ?s ?e WHERE { ?s <urn:p> ?o BIND(EXISTS { ?s <urn:q> ?x BIND(?x + ?o AS ?y) } AS ?e) }"
+    expect:
+      rows:
+        - ["urn:a", true]
+        - ["urn:b", true]
+
+  - name: in_a_projection
+    setup:
+      - "INSERT DATA { <urn:a> <urn:p> 1 . <urn:a> <urn:q> 2 . <urn:a> <urn:q> 3 . <urn:a> <urn:r> 0 . <urn:b> <urn:p> 3 . <urn:b> <urn:q> 2 . <urn:b> <urn:t> 0 . <urn:e> <urn:q> 9 . GRAPH <urn:g1> { <urn:c> <urn:p> 1 . <urn:c> <urn:q> 2 } GRAPH <urn:g2> { <urn:d> <urn:p> 5 . <urn:d> <urn:q> 2 . <urn:e> <urn:p> 6 } }"
+    query: "SELECT ?s (EXISTS { ?s <urn:q> ?x BIND(?x + ?o AS ?y) } AS ?e) WHERE { ?s <urn:p> ?o }"
+    expect:
+      rows:
+        - ["urn:a", true]
+        - ["urn:b", true]
+
+  - name: case_1_update
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    statements:
+      - "PREFIX : <urn:> INSERT { ?s :hit 1 } WHERE { ?s :t :k FILTER EXISTS { ?s :p ?o } }"
+      - "PREFIX : <urn:> SELECT ?s WHERE { ?s :hit 1 }"
+    expect:
+      rows:
+        - ["urn:a"]
+
+  - name: case_2_update
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    statements:
+      - "PREFIX : <urn:> INSERT { ?s :hit 1 } WHERE { ?s :t :k FILTER EXISTS { FILTER(?s = :a) } }"
+      - "PREFIX : <urn:> SELECT ?s WHERE { ?s :hit 1 }"
+    expect:
+      rows:
+        - ["urn:a"]
+
+  - name: case_3_update
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    statements:
+      - "PREFIX : <urn:> INSERT { ?s :hit 1 } WHERE { ?s :t :k FILTER EXISTS { :d :q ?o FILTER(?s = :a) } }"
+      - "PREFIX : <urn:> SELECT ?s WHERE { ?s :hit 1 }"
+    expect:
+      rows:
+        - ["urn:a"]
+
+  - name: case_4_update
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    statements:
+      - "PREFIX : <urn:> INSERT { ?s :hit 1 } WHERE { ?s :t :k FILTER EXISTS { :d :q ?o { FILTER(?s = :a) } } }"
+      - "PREFIX : <urn:> SELECT ?s WHERE { ?s :hit 1 }"
+    expect:
+      rows:
+        - ["urn:a"]
+
+  - name: case_5_update
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    statements:
+      - "PREFIX : <urn:> INSERT { ?s :hit 1 } WHERE { ?s :t :k FILTER EXISTS { :d :q ?o OPTIONAL { ?s :p ?y } } }"
+      - "PREFIX : <urn:> SELECT ?s WHERE { ?s :hit 1 }"
+    expect:
+      rows:
+        - ["urn:a"]
+        - ["urn:b"]
+
+  - name: case_6_update
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    statements:
+      - "PREFIX : <urn:> INSERT { ?s :hit 1 } WHERE { ?s :t :k FILTER EXISTS { :d :q ?o OPTIONAL { :d :q ?y FILTER(?s = :a) } } }"
+      - "PREFIX : <urn:> SELECT ?s WHERE { ?s :hit 1 }"
+    expect:
+      rows:
+        - ["urn:a"]
+        - ["urn:b"]
+
+  - name: case_7_update
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    statements:
+      - "PREFIX : <urn:> INSERT { ?s :hit 1 } WHERE { ?s :t :k FILTER EXISTS { ?s :t :k MINUS { ?s :t :k } } }"
+      - "PREFIX : <urn:> SELECT ?s WHERE { ?s :hit 1 }"
+    expect:
+      empty: true
+
+  - name: case_8_update
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    statements:
+      - "PREFIX : <urn:> INSERT { ?s :hit 1 } WHERE { ?s :t :k FILTER EXISTS { :d :q ?o MINUS { :d :q :e } } }"
+      - "PREFIX : <urn:> SELECT ?s WHERE { ?s :hit 1 }"
+    expect:
+      empty: true
+
+  - name: case_9_update
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    statements:
+      - "PREFIX : <urn:> INSERT { ?s :hit 1 } WHERE { ?s :t :k FILTER EXISTS { :d :q ?o MINUS { :nobody :q ?z } } }"
+      - "PREFIX : <urn:> SELECT ?s WHERE { ?s :hit 1 }"
+    expect:
+      rows:
+        - ["urn:a"]
+        - ["urn:b"]
+
+  - name: case_10_update
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    statements:
+      - "PREFIX : <urn:> INSERT { ?s :hit 1 } WHERE { ?s :t :k FILTER EXISTS { BIND(:a AS ?s) } }"
+      - "PREFIX : <urn:> SELECT ?s WHERE { ?s :hit 1 }"
+    expect:
+      rows:
+        - ["urn:a"]
+
+  - name: case_11_update
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    statements:
+      - "PREFIX : <urn:> INSERT { ?s :hit 1 } WHERE { ?s :t :k FILTER EXISTS { BIND(?s AS ?y) FILTER(?y = :a) } }"
+      - "PREFIX : <urn:> SELECT ?s WHERE { ?s :hit 1 }"
+    expect:
+      rows:
+        - ["urn:a"]
+
+  - name: case_12_update
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    statements:
+      - "PREFIX : <urn:> INSERT { ?s :hit 1 } WHERE { ?s :t :k FILTER EXISTS { SELECT ?s { ?s :p ?o } } }"
+      - "PREFIX : <urn:> SELECT ?s WHERE { ?s :hit 1 }"
+    expect:
+      rows:
+        - ["urn:a"]
+
+  - name: case_13_update
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    statements:
+      - "PREFIX : <urn:> INSERT { ?s :hit 1 } WHERE { ?s :t :k FILTER EXISTS { SELECT ?o { ?s :p ?o } } }"
+      - "PREFIX : <urn:> SELECT ?s WHERE { ?s :hit 1 }"
+    expect:
+      rows:
+        - ["urn:a"]
+
+  - name: case_14_update
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    statements:
+      - "PREFIX : <urn:> INSERT { ?s :hit 1 } WHERE { ?s :t :k FILTER EXISTS { SELECT ?o { ?x :p ?o FILTER(?x = ?s) } } }"
+      - "PREFIX : <urn:> SELECT ?s WHERE { ?s :hit 1 }"
+    expect:
+      rows:
+        - ["urn:a"]
+
+  - name: case_15_update
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    statements:
+      - "PREFIX : <urn:> INSERT { ?s :hit 1 } WHERE { ?s :t :k FILTER EXISTS { SELECT ?s { ?s :t :k } LIMIT 1 } }"
+      - "PREFIX : <urn:> SELECT ?s WHERE { ?s :hit 1 }"
+    expect:
+      rows:
+        - ["urn:a"]
+        - ["urn:b"]
+
+  - name: case_16_update
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    statements:
+      - "PREFIX : <urn:> INSERT { ?s :hit 1 } WHERE { ?s :t :k FILTER EXISTS { SELECT (COUNT(*) AS ?n) { ?s :p ?o } } }"
+      - "PREFIX : <urn:> SELECT ?s WHERE { ?s :hit 1 }"
+    expect:
+      rows:
+        - ["urn:a"]
+        - ["urn:b"]
+
+  - name: case_17_update
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    statements:
+      - "PREFIX : <urn:> INSERT { ?s :hit 1 } WHERE { ?s :t :k FILTER EXISTS { SELECT ?s (COUNT(*) AS ?n) { ?s :p ?o } GROUP BY ?s } }"
+      - "PREFIX : <urn:> SELECT ?s WHERE { ?s :hit 1 }"
+    expect:
+      rows:
+        - ["urn:a"]
+
+  - name: case_18_update
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    statements:
+      - "PREFIX : <urn:> INSERT { ?s :hit 1 } WHERE { ?s :t :k FILTER EXISTS { SELECT ?k { :d :q ?k } GROUP BY ?k HAVING(?s = :a) } }"
+      - "PREFIX : <urn:> SELECT ?s WHERE { ?s :hit 1 }"
+    expect:
+      empty: true
+
+  - name: case_19_update
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    statements:
+      - "PREFIX : <urn:> INSERT { ?s :hit 1 } WHERE { ?s :t :k FILTER EXISTS { SELECT (?s AS ?y) { :d :q ?o } } }"
+      - "PREFIX : <urn:> SELECT ?s WHERE { ?s :hit 1 }"
+    expect:
+      rows:
+        - ["urn:a"]
+        - ["urn:b"]
+
+  - name: case_20_update
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    statements:
+      - "PREFIX : <urn:> INSERT { ?s :hit 1 } WHERE { ?s :t :k FILTER EXISTS { { ?s :p ?o } UNION { :d :q ?z FILTER(?s = :b) } } }"
+      - "PREFIX : <urn:> SELECT ?s WHERE { ?s :hit 1 }"
+    expect:
+      rows:
+        - ["urn:a"]
+        - ["urn:b"]
+
+  - name: case_21_update
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    statements:
+      - "PREFIX : <urn:> INSERT { ?s :hit 1 } WHERE { ?s :t :k FILTER EXISTS { GRAPH <urn:g> { ?s :r* ?y } } }"
+      - "PREFIX : <urn:> SELECT ?s WHERE { ?s :hit 1 }"
+    expect:
+      empty: true
+
+  - name: case_22_update
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    statements:
+      - "PREFIX : <urn:> INSERT { ?s :hit 1 } WHERE { ?s :t :k FILTER EXISTS { :d :q ?o FILTER EXISTS { ?s :p ?y } } }"
+      - "PREFIX : <urn:> SELECT ?s WHERE { ?s :hit 1 }"
+    expect:
+      rows:
+        - ["urn:a"]
+
+  - name: case_23_update
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    statements:
+      - "PREFIX : <urn:> INSERT { ?s :hit 1 } WHERE { ?s :t :k FILTER EXISTS { :d :q ?o FILTER(BOUND(?s)) } }"
+      - "PREFIX : <urn:> SELECT ?s WHERE { ?s :hit 1 }"
+    expect:
+      rows:
+        - ["urn:a"]
+        - ["urn:b"]
+
+  # Above an aggregation the row is gone (the design of EXISTS per row): a filter over a grouped
+  # sub-SELECT reads `?o` as unbound, though the outer row binds it.
+  - name: a_filter_above_an_aggregation_reads_no_row_value
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k BIND(:z AS ?o) FILTER EXISTS { SELECT (COUNT(*) AS ?n) WHERE { ?x :p ?y } HAVING (!BOUND(?o)) } }"
+    expect:
+      rows:
+        - ["urn:a"]
+        - ["urn:b"]
+
+  - name: a_filter_above_an_aggregation_reads_no_row_value_not
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k BIND(:z AS ?o) FILTER NOT EXISTS { SELECT (COUNT(*) AS ?n) WHERE { ?x :p ?y } HAVING (!BOUND(?o)) } }"
+    expect:
+      empty: true
+
+  # The row joins every group, so `?x` is the row's in each inner row, also where the OPTIONAL left
+  # it out: ORDER BY ?x ?y then puts :a first, and LIMIT 1 keeps it, not :b.
+  - name: order_by_a_row_variable_in_a_sub_select_reads_the_row
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k BIND(:c AS ?x) FILTER EXISTS { { SELECT ?y WHERE { ?y :t :k OPTIONAL { ?y :p ?x } } ORDER BY ?x ?y LIMIT 1 } FILTER(?y = :b) } }"
+    expect:
+      empty: true
+
+  - name: order_by_a_row_variable_in_a_sub_select_reads_the_row_kept
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k BIND(:c AS ?x) FILTER EXISTS { { SELECT ?y WHERE { ?y :t :k OPTIONAL { ?y :p ?x } } ORDER BY ?x ?y LIMIT 1 } FILTER(?y = :a) } }"
+    expect:
+      rows:
+        - ["urn:a"]
+        - ["urn:b"]
+
+  # An EXISTS mark inside a per-row EXISTS runs again for each outer row: no answer of the row
+  # before carries over, whichever row comes first.
+  - name: a_mark_inside_a_per_row_exists_reads_each_row
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { VALUES ?s { :a :b } FILTER EXISTS { BIND(EXISTS { ?s :p ?o } AS ?w) FILTER(?w) } }"
+    expect:
+      rows:
+        - ["urn:a"]
+
+  - name: a_mark_inside_a_per_row_exists_reads_each_row_reversed
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { VALUES ?s { :b :a } FILTER EXISTS { BIND(EXISTS { ?s :p ?o } AS ?w) FILTER(?w) } }"
+    expect:
+      rows:
+        - ["urn:a"]
+
+  - name: a_mark_inside_a_per_row_exists_reads_each_row_negated
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :d :q :e . GRAPH :g { :c :r :e } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { VALUES ?s { :a :b } FILTER EXISTS { BIND(NOT EXISTS { ?s :p ?o } AS ?w) FILTER(?w) } }"
+    expect:
+      rows:
+        - ["urn:b"]

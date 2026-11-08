@@ -145,7 +145,7 @@ fn test_gql_call_procedures_list() {
     let session = db.session();
     let result = session.execute("CALL grafeo.procedures()").unwrap();
 
-    assert_eq!(result.columns.len(), 4);
+    assert_eq!(result.columns.len(), 6);
     assert_eq!(result.columns[0], "name");
     assert_eq!(result.columns[1], "description");
     assert!(result.row_count() >= 22, "Expected at least 22 procedures");

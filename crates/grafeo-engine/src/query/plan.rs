@@ -8,12 +8,36 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 use grafeo_common::types::Value;
+
+use crate::auth::ExternalAccess;
 pub use grafeo_core::execution::operators::BuiltinFunction;
 
 #[cfg(any(feature = "sparql", feature = "triple-store"))]
 mod always_bound;
 #[cfg(any(feature = "sparql", feature = "triple-store"))]
 pub(crate) use always_bound::always_bound;
+
+#[cfg(any(feature = "sparql", feature = "triple-store"))]
+pub(crate) mod subqueries;
+
+#[cfg(any(
+    feature = "gql",
+    feature = "cypher",
+    feature = "sparql",
+    feature = "sql-pgq",
+    feature = "triple-store",
+    test
+))]
+mod expression_variables;
+#[cfg(any(
+    feature = "gql",
+    feature = "cypher",
+    feature = "sparql",
+    feature = "sql-pgq",
+    feature = "triple-store",
+    test
+))]
+pub(crate) use expression_variables::collect_expression_variables;
 
 /// A count expression for SKIP/LIMIT: either a resolved literal or an unresolved parameter.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -173,6 +197,9 @@ pub struct LogicalPlan {
     /// What the statement calls its SKIP and LIMIT clauses, for the errors
     /// of a count given as a parameter (set by the SQL/PGQ translator).
     pub count_clauses: CountClauses,
+    /// The warnings translation found (a deprecated literal): every run of
+    /// the plan, a cached one too, reports them.
+    pub warnings: grafeo_common::utils::warning::WarningSet,
 }
 
 impl LogicalPlan {
@@ -186,6 +213,7 @@ impl LogicalPlan {
             graph: None,
             result_kind: crate::database::ResultKind::Rows,
             count_clauses: CountClauses::SkipLimit,
+            warnings: grafeo_common::utils::warning::WarningSet::EMPTY,
         }
     }
 
@@ -199,6 +227,7 @@ impl LogicalPlan {
             graph: None,
             result_kind: crate::database::ResultKind::Rows,
             count_clauses: CountClauses::SkipLimit,
+            warnings: grafeo_common::utils::warning::WarningSet::EMPTY,
         }
     }
 
@@ -219,6 +248,7 @@ impl LogicalPlan {
             graph: None,
             result_kind: crate::database::ResultKind::Rows,
             count_clauses: CountClauses::SkipLimit,
+            warnings: grafeo_common::utils::warning::WarningSet::EMPTY,
         }
     }
 }
@@ -300,6 +330,10 @@ pub enum LogicalOperator {
 
     /// The named graphs of the dataset, one row per graph.
     NamedGraphs(NamedGraphsOp),
+
+    /// One row: the values an `EXISTS` read for the row it tests. Made only while planning that
+    /// `EXISTS`, so nothing before the planner meets it.
+    RowValues(RowValuesOp),
 
     /// A pattern evaluated in a named graph, empty when the dataset has none of that name.
     InNamedGraph(InNamedGraphOp),
@@ -435,7 +469,221 @@ pub enum LogicalOperator {
     LoadData(LoadDataOp),
 }
 
+/// Something a statement reaches outside the database with (a file it loads, a procedure that
+/// reads or writes outside), which a session without external access refuses (see
+/// [`Identity::with_external_access`](crate::auth::Identity::with_external_access)).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutsideReach {
+    /// What reaches outside, as the refusal names it: `LOAD DATA FROM 'people.csv'`, a
+    /// procedure's name.
+    pub what: String,
+    /// How it reaches outside.
+    pub how: ExternalAccess,
+}
+
 impl LogicalOperator {
+    /// The first part of this plan that reaches outside the database, if any: a `LOAD DATA` (and
+    /// Cypher's `LOAD CSV`), a SPARQL `LOAD`, or a procedure call `call` answers for (a built-in
+    /// procedure by its declared access, a stored one by its body), in this operator, its
+    /// expressions, the subqueries inside them and the operators below. It reads the plan only:
+    /// no argument needs a value.
+    ///
+    /// Every operator and every expression is matched by name, so a new one states what it
+    /// reaches before it compiles.
+    pub fn reaches_outside(
+        &self,
+        call: &mut dyn FnMut(&CallProcedureOp) -> Option<OutsideReach>,
+    ) -> Option<OutsideReach> {
+        let own = match self {
+            Self::LoadData(op) => Some(OutsideReach {
+                what: format!("LOAD DATA FROM '{}'", op.path),
+                how: ExternalAccess::Reads,
+            }),
+            Self::LoadGraph(op) => Some(OutsideReach {
+                what: format!("LOAD <{}>", op.source),
+                how: ExternalAccess::Reads,
+            }),
+            Self::CallProcedure(op) => call(op),
+            Self::NodeScan(_)
+            | Self::EdgeScan(_)
+            | Self::Expand(_)
+            | Self::Join(_)
+            | Self::LeftJoin(_)
+            | Self::AntiJoin(_)
+            | Self::MarkJoin(_)
+            | Self::MultiWayJoin(_)
+            | Self::Aggregate(_)
+            | Self::HorizontalAggregate(_)
+            | Self::Filter(_)
+            | Self::Project(_)
+            | Self::Limit(_)
+            | Self::Skip(_)
+            | Self::Sort(_)
+            | Self::Distinct(_)
+            | Self::Create(_)
+            | Self::CreateNode(_)
+            | Self::CreateEdge(_)
+            | Self::DeleteNode(_)
+            | Self::DeleteEdge(_)
+            | Self::SetProperty(_)
+            | Self::AddLabel(_)
+            | Self::RemoveLabel(_)
+            | Self::InNamedGraph(_)
+            | Self::TripleScan(_)
+            | Self::Union(_)
+            | Self::Except(_)
+            | Self::Intersect(_)
+            | Self::Otherwise(_)
+            | Self::Apply(_)
+            | Self::ParameterScan(_)
+            | Self::DelimScan(_)
+            | Self::Empty
+            | Self::Return(_)
+            | Self::Bind(_)
+            | Self::Unwind(_)
+            | Self::MapCollect(_)
+            | Self::Merge(_)
+            | Self::MergeRelationship(_)
+            | Self::ShortestPath(_)
+            | Self::PropertyPath(_)
+            | Self::NamedGraphs(_)
+            | Self::RowValues(_)
+            | Self::InsertTriple(_)
+            | Self::DeleteTriple(_)
+            | Self::Modify(_)
+            | Self::ClearGraph(_)
+            | Self::CreateGraph(_)
+            | Self::DropGraph(_)
+            | Self::CopyGraph(_)
+            | Self::MoveGraph(_)
+            | Self::AddGraph(_)
+            | Self::Construct(_)
+            | Self::VectorScan(_)
+            | Self::VectorJoin(_)
+            | Self::TextScan(_)
+            | Self::CreatePropertyGraph(_)
+            | Self::DropPropertyGraph(_) => None,
+        };
+        own.or_else(|| {
+            self.expressions()
+                .into_iter()
+                .find_map(|expression| expression.reaches_outside(call))
+        })
+        .or_else(|| {
+            self.children()
+                .into_iter()
+                .find_map(|child| child.reaches_outside(call))
+        })
+    }
+
+    /// The expressions this operator evaluates itself (not those of the operators below, see
+    /// [`children`](Self::children)): its predicates, projections, keys, property values and
+    /// arguments.
+    #[must_use]
+    pub fn expressions(&self) -> Vec<&LogicalExpression> {
+        fn values(properties: &[(String, LogicalExpression)]) -> Vec<&LogicalExpression> {
+            properties.iter().map(|(_, value)| value).collect()
+        }
+        match self {
+            Self::Join(op) => op
+                .conditions
+                .iter()
+                .flat_map(|condition| [&condition.left, &condition.right])
+                .collect(),
+            Self::MultiWayJoin(op) => op
+                .conditions
+                .iter()
+                .flat_map(|condition| [&condition.left, &condition.right])
+                .collect(),
+            Self::LeftJoin(op) => op.condition.iter().collect(),
+            Self::Aggregate(op) => op
+                .group_by
+                .iter()
+                .chain(op.aggregates.iter().flat_map(|aggregate| {
+                    aggregate
+                        .expression
+                        .iter()
+                        .chain(aggregate.expression2.iter())
+                }))
+                .chain(op.having.iter())
+                .collect(),
+            Self::Filter(op) => vec![&op.predicate],
+            Self::Project(op) => op
+                .projections
+                .iter()
+                .map(|projection| &projection.expression)
+                .collect(),
+            Self::Sort(op) => op.keys.iter().map(|key| &key.expression).collect(),
+            Self::Create(op) => op.property_values().collect(),
+            Self::CreateNode(op) => values(&op.properties),
+            Self::CreateEdge(op) => values(&op.properties),
+            Self::SetProperty(op) => values(&op.properties),
+            Self::Return(op) => op.items.iter().map(|item| &item.expression).collect(),
+            Self::Bind(op) => vec![&op.expression],
+            Self::Unwind(op) => vec![&op.expression],
+            Self::Merge(op) => values(&op.match_properties)
+                .into_iter()
+                .chain(values(&op.on_create))
+                .chain(values(&op.on_match))
+                .collect(),
+            Self::MergeRelationship(op) => values(&op.match_properties)
+                .into_iter()
+                .chain(values(&op.on_create))
+                .chain(values(&op.on_match))
+                .collect(),
+            Self::ShortestPath(op) => op
+                .edge_condition
+                .iter()
+                .map(|condition| &condition.predicate)
+                .collect(),
+            Self::VectorScan(op) => vec![&op.query_vector],
+            Self::VectorJoin(op) => vec![&op.query_vector],
+            Self::TextScan(op) => vec![&op.query],
+            Self::CallProcedure(op) => op.arguments.iter().collect(),
+            Self::NodeScan(_)
+            | Self::EdgeScan(_)
+            | Self::Expand(_)
+            | Self::AntiJoin(_)
+            | Self::MarkJoin(_)
+            | Self::HorizontalAggregate(_)
+            | Self::Limit(_)
+            | Self::Skip(_)
+            | Self::Distinct(_)
+            | Self::DeleteNode(_)
+            | Self::DeleteEdge(_)
+            | Self::AddLabel(_)
+            | Self::RemoveLabel(_)
+            | Self::InNamedGraph(_)
+            | Self::TripleScan(_)
+            | Self::Union(_)
+            | Self::Except(_)
+            | Self::Intersect(_)
+            | Self::Otherwise(_)
+            | Self::Apply(_)
+            | Self::ParameterScan(_)
+            | Self::DelimScan(_)
+            | Self::Empty
+            | Self::MapCollect(_)
+            | Self::PropertyPath(_)
+            | Self::NamedGraphs(_)
+            | Self::RowValues(_)
+            | Self::InsertTriple(_)
+            | Self::DeleteTriple(_)
+            | Self::Modify(_)
+            | Self::ClearGraph(_)
+            | Self::CreateGraph(_)
+            | Self::DropGraph(_)
+            | Self::LoadGraph(_)
+            | Self::CopyGraph(_)
+            | Self::MoveGraph(_)
+            | Self::AddGraph(_)
+            | Self::Construct(_)
+            | Self::CreatePropertyGraph(_)
+            | Self::DropPropertyGraph(_)
+            | Self::LoadData(_) => Vec::new(),
+        }
+    }
+
     /// Returns `true` if this operator or any of its children perform mutations.
     #[must_use]
     pub fn has_mutations(&self) -> bool {
@@ -506,6 +754,7 @@ impl LogicalOperator {
             // Leaf operators (read-only)
             Self::PropertyPath(_)
             | Self::NamedGraphs(_)
+            | Self::RowValues(_)
             | Self::Empty
             | Self::ParameterScan(_)
             | Self::DelimScan(_)
@@ -581,6 +830,7 @@ impl LogicalOperator {
             Self::Empty
             | Self::PropertyPath(_)
             | Self::NamedGraphs(_)
+            | Self::RowValues(_)
             | Self::ParameterScan(_)
             | Self::DelimScan(_)
             | Self::CallProcedure(_)
@@ -806,6 +1056,7 @@ impl LogicalOperator {
             leaf @ (Self::Empty
             | Self::PropertyPath(_)
             | Self::NamedGraphs(_)
+            | Self::RowValues(_)
             | Self::ParameterScan(_)
             | Self::DelimScan(_)
             | Self::CallProcedure(_)
@@ -828,12 +1079,17 @@ impl LogicalOperator {
     pub fn display_label(&self) -> String {
         match self {
             Self::NamedGraphs(op) => format!("GRAPH ?{}", op.variable),
-            Self::InNamedGraph(op) => format!("GRAPH <{}>", op.graph),
+            Self::RowValues(op) => format!("Row ({})", op.names.join(", ")),
+            Self::InNamedGraph(op) => format!("GRAPH {}", op.graph),
             Self::PropertyPath(op) => format!(
                 "{} {:?}{} {}",
                 fmt_triple_component(&op.subject),
                 op.path,
-                if op.zero_length { "*" } else { "+" },
+                match (op.zero_length, op.repeats) {
+                    (false, _) => "+",
+                    (true, true) => "*",
+                    (true, false) => "?",
+                },
                 fmt_triple_component(&op.object),
             ),
             Self::NodeScan(op) => {
@@ -968,7 +1224,7 @@ impl LogicalOperator {
 
 /// Whether `expr` has an `EXISTS`, `COUNT` or value subquery or a pattern
 /// comprehension, whose plan may read variables of the row that
-/// `translators::common::collect_expression_variables` does not list, and reads the store
+/// `collect_expression_variables` does not list, and reads the store
 /// again for each row.
 pub(crate) fn has_subquery(expr: &LogicalExpression) -> bool {
     match expr {
@@ -1072,7 +1328,12 @@ impl LogicalOperator {
                 bound.extend(expand.path_alias.iter().cloned());
             }
             Self::Filter(filter) => return filter.input.bound_variables(imports),
-            Self::InNamedGraph(graph) => return graph.input.bound_variables(imports),
+            Self::InNamedGraph(graph) => {
+                bound = graph.input.bound_variables(imports)?;
+                if let NamedGraph::Variable(variable) = &graph.graph {
+                    bound.insert(variable.clone());
+                }
+            }
             Self::Limit(limit) => return limit.input.bound_variables(imports),
             Self::Skip(skip) => return skip.input.bound_variables(imports),
             Self::Sort(sort) => return sort.input.bound_variables(imports),
@@ -1228,15 +1489,16 @@ impl LogicalOperator {
                 bound.insert(join.column.clone());
                 return Some(bound);
             }
-            Self::Except(op) => return op.left.bound_variables(imports),
-            Self::Intersect(op) => return op.left.bound_variables(imports),
-            Self::Otherwise(op) => return op.left.bound_variables(imports),
-            Self::Union(union) => return union.inputs.first()?.bound_variables(imports),
+            Self::Union(_) | Self::Except(_) | Self::Intersect(_) | Self::Otherwise(_) => {
+                return self.set_operation_columns()?.bound_variables(imports);
+            }
             Self::MultiWayJoin(join) => {
                 for input in &join.inputs {
                     bound.extend(input.bound_variables(imports)?);
                 }
             }
+            // The row an EXISTS runs for: its names are its columns.
+            Self::RowValues(values) => bound.extend(values.names.iter().cloned()),
             // RDF and graph management plans have no node patterns to close.
             Self::PropertyPath(_)
             | Self::NamedGraphs(_)
@@ -1282,12 +1544,26 @@ impl LogicalOperator {
             Self::Limit(limit) => limit.input.add_returned_variables(bound),
             Self::Skip(skip) => skip.input.add_returned_variables(bound),
             Self::Distinct(distinct) => distinct.input.add_returned_variables(bound),
-            // The branches of a UNION return the same names.
-            Self::Union(union) => union
-                .inputs
-                .first()
-                .map_or(Some(()), |first| first.add_returned_variables(bound)),
+            // The branches of a set operation return the same names.
+            Self::Union(_) | Self::Except(_) | Self::Intersect(_) | Self::Otherwise(_) => self
+                .set_operation_columns()
+                .map_or(Some(()), |branch| branch.add_returned_variables(bound)),
             _ => Some(()),
+        }
+    }
+
+    /// The branch whose columns a set operation returns: the first input of a `UNION`, the left
+    /// side of `EXCEPT`, `INTERSECT` and `OTHERWISE` (the translators check that the branches
+    /// agree, `check_branch_columns`). `None` for any other operator, and for a `UNION` without
+    /// inputs.
+    #[must_use]
+    pub(crate) fn set_operation_columns(&self) -> Option<&LogicalOperator> {
+        match self {
+            Self::Union(union) => union.inputs.first(),
+            Self::Except(op) => Some(&op.left),
+            Self::Intersect(op) => Some(&op.left),
+            Self::Otherwise(op) => Some(&op.left),
+            _ => None,
         }
     }
 }
@@ -1460,7 +1736,7 @@ impl LogicalOperator {
                 op.input.fmt_tree(out, depth + 1);
             }
             Self::InNamedGraph(op) => {
-                let _ = writeln!(out, "{indent}InNamedGraph (<{}>){after}", op.graph);
+                let _ = writeln!(out, "{indent}InNamedGraph ({}){after}", op.graph);
                 op.input.fmt_tree(out, depth + 1);
             }
             Self::Limit(op) => {
@@ -2760,36 +3036,86 @@ pub struct RemoveLabelOp {
 
 // ==================== RDF/SPARQL Operators ====================
 
-/// SPARQL dataset restriction from FROM / FROM NAMED clauses.
-///
-/// When present, restricts which graphs are visible to a triple scan:
-/// - `default_graphs`: IRIs whose union forms the default graph (basic patterns).
-/// - `named_graphs`: IRIs that enumerate the available named graphs (GRAPH patterns).
+/// The dataset of a query with a `FROM` or `FROM NAMED` clause, or of an update's `WHERE` under
+/// `WITH`: what its basic patterns and its `GRAPH` patterns read.
 #[derive(Debug, Clone, Default)]
 pub struct DatasetRestriction {
-    /// FROM IRIs: the default graph is the union of these named graphs.
-    /// Empty means no FROM clause was specified (unrestricted default graph).
+    /// The graphs whose merge is the default graph; none: an empty default graph, as `FROM NAMED`
+    /// alone makes (SPARQL 1.1 sec 13.2).
     pub default_graphs: Vec<String>,
-    /// FROM NAMED IRIs: only these named graphs are available to GRAPH patterns.
-    /// Empty means no FROM NAMED clause was specified (all named graphs visible).
-    pub named_graphs: Vec<String>,
+    /// The graphs a `GRAPH` pattern visits.
+    pub named_graphs: DatasetNamedGraphs,
 }
 
-/// Endpoint reachability for an outer SPARQL `+` or `*` property path.
+impl DatasetRestriction {
+    /// The named graphs when the dataset lists them, rather than having the store's.
+    #[must_use]
+    pub fn listed_named_graphs(&self) -> Option<&[String]> {
+        match &self.named_graphs {
+            DatasetNamedGraphs::OfTheStore => None,
+            DatasetNamedGraphs::Listed(names) => Some(names),
+        }
+    }
+}
+
+/// The named graphs of a dataset.
+#[derive(Debug, Clone, Default)]
+pub enum DatasetNamedGraphs {
+    /// The store's: `WITH` sets the default graph alone (SPARQL 1.1 Update sec 3.1.3).
+    #[default]
+    OfTheStore,
+    /// These alone: what `FROM NAMED` lists, and none with `FROM` alone (SPARQL 1.1 sec 13.2).
+    Listed(Vec<String>),
+}
+
+/// Endpoint reachability for an outer SPARQL `+`, `*` or `?` property path.
 #[derive(Debug, Clone)]
 pub struct PropertyPathOp {
     /// Starting term or variable.
     pub subject: TripleComponent,
     /// Ending term or variable.
     pub object: TripleComponent,
-    /// Finite path repeated by the outer quantifier.
+    /// Finite path the outer quantifier applies to.
     pub path: grafeo_core::execution::operators::PathStep,
-    /// Whether the zero-length path is included (`*`).
+    /// Whether the zero-length path is included (`*` and `?`).
     pub zero_length: bool,
+    /// Whether the path may be taken more than once (`+` and `*`).
+    pub repeats: bool,
     /// Active named graph or graph variable; absent for the default graph.
     pub graph: Option<TripleComponent>,
     /// Dataset restriction from FROM / FROM NAMED.
     pub dataset: Option<DatasetRestriction>,
+}
+
+/// The hidden name the pattern of a `GRAPH ?variable` group reads its graph under where its reads
+/// are not `?variable`'s (see [`GroupGraph`]); `depth` counts the `GRAPH` groups around the group,
+/// so nested groups of one variable read theirs apart. No query can write the name
+/// ([`is_hidden_variable`]).
+#[must_use]
+pub fn group_graph_name(variable: &str, depth: usize) -> String {
+    format!("{HIDDEN_PREFIX}{variable} at {depth}")
+}
+
+/// Whether `name` is a hidden name: one no query can write, which no solution shows (`SELECT *`
+/// leaves it out) and no pattern shares as a variable of its own (see [`group_graph_name`]).
+#[must_use]
+pub fn is_hidden_variable(name: &str) -> bool {
+    name.starts_with(HIDDEN_PREFIX)
+}
+
+/// The start of every hidden name: a variable has no space.
+const HIDDEN_PREFIX: &str = "graph of GRAPH ?";
+
+/// How the pattern of a `GRAPH ?g` group reads its graph where that is not `?g` (SPARQL 1.1 sec
+/// 18.6 evaluates the pattern in each graph, then joins it with `?g` bound to that graph).
+#[derive(Debug, Clone)]
+pub struct GroupGraph {
+    /// The hidden name it reads the graph under (see [`group_graph_name`]).
+    pub name: String,
+    /// Whether the whole pattern reads it so: the pattern names `?g` itself, which is then free in
+    /// it. Otherwise only its sub-selects do, whose names are their own, and its other reads bind
+    /// `?g`.
+    pub whole_pattern: bool,
 }
 
 /// The named graphs of the dataset, one row per graph with `variable` bound
@@ -2803,17 +3129,45 @@ pub struct NamedGraphsOp {
     pub dataset: Option<DatasetRestriction>,
 }
 
+/// One row of the values of `names`, as the row an `EXISTS` is tested for binds them.
+#[derive(Debug, Clone)]
+pub struct RowValuesOp {
+    /// The names, which are the columns.
+    pub names: Vec<String>,
+}
+
+/// The graph of a `GRAPH` pattern.
+#[derive(Debug, Clone)]
+pub enum NamedGraph {
+    /// One graph, by its IRI.
+    Iri(String),
+    /// Every named graph of the dataset in turn, this variable bound to its IRI.
+    Variable(String),
+}
+
+impl fmt::Display for NamedGraph {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Iri(iri) => write!(f, "<{iri}>"),
+            Self::Variable(variable) => write!(f, "?{variable}"),
+        }
+    }
+}
+
 /// A pattern evaluated in a named graph of the dataset (SPARQL 1.1 sec 18.6): nothing when the
-/// dataset has no such graph, whatever the pattern gives without reading it. The planner lists the
-/// graphs per run, so a cached plan holds no list.
+/// dataset has no such graph, whatever the pattern gives without reading it, and with a variable
+/// once per graph, so a sub-SELECT's aggregate, `ORDER BY` and `LIMIT` are per graph. The planner
+/// lists the graphs per run, so a cached plan holds no list.
 #[derive(Debug, Clone)]
 pub struct InNamedGraphOp {
-    /// The graph's IRI.
-    pub graph: String,
+    /// The graph or graphs it is evaluated in.
+    pub graph: NamedGraph,
     /// FROM NAMED: when it lists graphs, those are the named graphs.
     pub dataset: Option<DatasetRestriction>,
     /// The pattern, its scans already reading the graph.
     pub input: Box<LogicalOperator>,
+    /// With a variable, how the pattern reads the graph where it is not the variable's.
+    pub read_as: Option<GroupGraph>,
 }
 
 /// Scan RDF triples matching a pattern.
@@ -3554,13 +3908,17 @@ pub struct CallProcedureOp {
 }
 
 impl CallProcedureOp {
-    /// Whether the procedure writes: the load procedures
-    /// (`grafeo.load_nodes_csv`, `grafeo.load_edges_csv`, see
-    /// [`crate::loader`]); every other one reads.
+    /// Whether the procedure writes the graph, as the built-in procedure it
+    /// names declares it (see [`Procedure::graph_access`](crate::procedures::Procedure::graph_access)):
+    /// the load procedures do. A name the registry does not hold writes
+    /// nothing here: planning resolves it, or refuses it.
     #[must_use]
     pub fn writes(&self) -> bool {
-        let name = self.name.join(".");
-        name == crate::loader::NODES_PROCEDURE || name == crate::loader::EDGES_PROCEDURE
+        crate::procedures::registry()
+            .get(&self.name)
+            .is_some_and(|procedure| {
+                procedure.graph_access() == crate::procedures::GraphAccess::Writes
+            })
     }
 }
 
@@ -3777,6 +4135,94 @@ pub enum LogicalExpression {
 }
 
 impl LogicalExpression {
+    /// The first subquery inside this expression that reaches outside the database (see
+    /// [`LogicalOperator::reaches_outside`]), if any.
+    pub fn reaches_outside(
+        &self,
+        call: &mut dyn FnMut(&CallProcedureOp) -> Option<OutsideReach>,
+    ) -> Option<OutsideReach> {
+        let mut first = |expressions: &mut dyn Iterator<Item = &LogicalExpression>| {
+            for expression in expressions {
+                if let Some(reach) = expression.reaches_outside(call) {
+                    return Some(reach);
+                }
+            }
+            None
+        };
+        match self {
+            Self::ExistsSubquery(plan) | Self::CountSubquery(plan) | Self::ValueSubquery(plan) => {
+                plan.reaches_outside(call)
+            }
+            Self::PatternComprehension {
+                subplan,
+                projection,
+            } => subplan
+                .reaches_outside(call)
+                .or_else(|| projection.reaches_outside(call)),
+            Self::Binary { left, right, .. } => first(&mut [&**left, &**right].into_iter()),
+            Self::Unary { operand, .. } => operand.reaches_outside(call),
+            Self::FunctionCall { args, .. } | Self::SparqlCall { args, .. } => {
+                first(&mut args.iter())
+            }
+            Self::List(items) => first(&mut items.iter()),
+            Self::Map(entries) => first(&mut entries.iter().map(|(_, value)| value)),
+            Self::IndexAccess { base, index } => first(&mut [&**base, &**index].into_iter()),
+            Self::MapAccess { base, .. } => base.reaches_outside(call),
+            Self::SliceAccess { base, start, end } => first(
+                &mut std::iter::once(&**base)
+                    .chain(start.as_deref())
+                    .chain(end.as_deref()),
+            ),
+            Self::Case {
+                operand,
+                when_clauses,
+                else_clause,
+            } => first(
+                &mut operand
+                    .as_deref()
+                    .into_iter()
+                    .chain(when_clauses.iter().flat_map(|(when, then)| [when, then]))
+                    .chain(else_clause.as_deref()),
+            ),
+            Self::ListComprehension {
+                list_expr,
+                filter_expr,
+                map_expr,
+                ..
+            } => first(
+                &mut [&**list_expr, &**map_expr]
+                    .into_iter()
+                    .chain(filter_expr.as_deref()),
+            ),
+            Self::ListPredicate {
+                list_expr,
+                predicate,
+                ..
+            } => first(&mut [&**list_expr, &**predicate].into_iter()),
+            Self::MapProjection { entries, .. } => {
+                first(&mut entries.iter().filter_map(|entry| match entry {
+                    MapProjectionEntry::LiteralEntry(_, value) => Some(value),
+                    MapProjectionEntry::PropertySelector(_) | MapProjectionEntry::AllProperties => {
+                        None
+                    }
+                }))
+            }
+            Self::Reduce {
+                initial,
+                list,
+                expression,
+                ..
+            } => first(&mut [&**initial, &**list, &**expression].into_iter()),
+            Self::Literal(_)
+            | Self::Variable(_)
+            | Self::Property { .. }
+            | Self::Parameter(_)
+            | Self::Labels(_)
+            | Self::Type(_)
+            | Self::Id(_) => None,
+        }
+    }
+
     /// The `AND` of `conjuncts`, or `None` when there are none.
     ///
     /// See [`Self::balanced`]: an `AND` of any number of conjuncts stays
@@ -3784,6 +4230,135 @@ impl LogicalExpression {
     #[must_use]
     pub fn conjunction(conjuncts: impl IntoIterator<Item = Self>) -> Option<Self> {
         Self::balanced(BinaryOp::And, conjuncts)
+    }
+
+    /// This expression with each expression directly in it replaced by `f(child)`. A plan inside it
+    /// (an `EXISTS`, a pattern comprehension's) is not an expression and stays as it is. A new
+    /// variant fails to compile here until it says what it holds.
+    #[must_use]
+    pub fn map_children<F: FnMut(Self) -> Self>(self, mut f: F) -> Self {
+        match self {
+            Self::Literal(_)
+            | Self::Variable(_)
+            | Self::Property { .. }
+            | Self::Parameter(_)
+            | Self::Labels(_)
+            | Self::Type(_)
+            | Self::Id(_)
+            | Self::ExistsSubquery(_)
+            | Self::CountSubquery(_)
+            | Self::ValueSubquery(_) => self,
+            Self::Binary { left, op, right } => Self::Binary {
+                left: Box::new(f(*left)),
+                op,
+                right: Box::new(f(*right)),
+            },
+            Self::Unary { op, operand } => Self::Unary {
+                op,
+                operand: Box::new(f(*operand)),
+            },
+            Self::FunctionCall {
+                callee,
+                name,
+                args,
+                distinct,
+            } => Self::FunctionCall {
+                callee,
+                name,
+                args: args.into_iter().map(f).collect(),
+                distinct,
+            },
+            Self::SparqlCall { name, args } => Self::SparqlCall {
+                name,
+                args: args.into_iter().map(f).collect(),
+            },
+            Self::List(items) => Self::List(items.into_iter().map(f).collect()),
+            Self::Map(pairs) => Self::Map(
+                pairs
+                    .into_iter()
+                    .map(|(key, value)| (key, f(value)))
+                    .collect(),
+            ),
+            Self::IndexAccess { base, index } => Self::IndexAccess {
+                base: Box::new(f(*base)),
+                index: Box::new(f(*index)),
+            },
+            Self::MapAccess { base, key } => Self::MapAccess {
+                base: Box::new(f(*base)),
+                key,
+            },
+            Self::SliceAccess { base, start, end } => Self::SliceAccess {
+                base: Box::new(f(*base)),
+                start: start.map(|start| Box::new(f(*start))),
+                end: end.map(|end| Box::new(f(*end))),
+            },
+            Self::Case {
+                operand,
+                when_clauses,
+                else_clause,
+            } => Self::Case {
+                operand: operand.map(|operand| Box::new(f(*operand))),
+                when_clauses: when_clauses
+                    .into_iter()
+                    .map(|(condition, result)| (f(condition), f(result)))
+                    .collect(),
+                else_clause: else_clause.map(|clause| Box::new(f(*clause))),
+            },
+            Self::ListComprehension {
+                variable,
+                list_expr,
+                filter_expr,
+                map_expr,
+            } => Self::ListComprehension {
+                variable,
+                list_expr: Box::new(f(*list_expr)),
+                filter_expr: filter_expr.map(|filter| Box::new(f(*filter))),
+                map_expr: Box::new(f(*map_expr)),
+            },
+            Self::ListPredicate {
+                kind,
+                variable,
+                list_expr,
+                predicate,
+            } => Self::ListPredicate {
+                kind,
+                variable,
+                list_expr: Box::new(f(*list_expr)),
+                predicate: Box::new(f(*predicate)),
+            },
+            Self::MapProjection { base, entries } => Self::MapProjection {
+                base,
+                entries: entries
+                    .into_iter()
+                    .map(|entry| match entry {
+                        MapProjectionEntry::LiteralEntry(key, value) => {
+                            MapProjectionEntry::LiteralEntry(key, f(value))
+                        }
+                        other => other,
+                    })
+                    .collect(),
+            },
+            Self::Reduce {
+                accumulator,
+                initial,
+                variable,
+                list,
+                expression,
+            } => Self::Reduce {
+                accumulator,
+                initial: Box::new(f(*initial)),
+                variable,
+                list: Box::new(f(*list)),
+                expression: Box::new(f(*expression)),
+            },
+            Self::PatternComprehension {
+                subplan,
+                projection,
+            } => Self::PatternComprehension {
+                subplan,
+                projection: Box::new(f(*projection)),
+            },
+        }
     }
 
     /// The `OR` of `disjuncts`, or `None` when there are none (see
@@ -6029,5 +6604,126 @@ mod tests {
             Some(HashSet::from(["a".to_string(), "b".to_string()]))
         );
         assert_eq!(call(vec![item("*")]).bound_variables(None), None);
+    }
+
+    /// The row an `EXISTS` runs for binds its names: its columns are known.
+    #[test]
+    fn bound_variables_of_a_row() {
+        let row = LogicalOperator::RowValues(RowValuesOp {
+            names: vec!["s".into(), "o".into()],
+        });
+        assert_eq!(
+            row.bound_variables(None),
+            Some(HashSet::from(["s".to_string(), "o".to_string()]))
+        );
+    }
+}
+
+#[cfg(test)]
+mod catalogue {
+    //! Class test 0: the catalogue of this file's enums (`tests/catalogue/`), as the class tests
+    //! read it.
+
+    use super::{AggregateFunction, BinaryOp, LogicalExpression, LogicalOperator, UnaryOp};
+
+    /// Takes the variant list once: an exhaustive match, which fails to compile when the enum gains a
+    /// variant this list does not name, and the names, which the test holds to the checked-in file.
+    macro_rules! catalogue {
+        ($name_of:ident, $names:ident, $enum:ident: $($variant:ident),+ $(,)?) => {
+            fn $name_of(value: &$enum) -> &'static str {
+                match value {
+                    $($enum::$variant { .. } => stringify!($variant),)+
+                }
+            }
+            const $names: &[&str] = &[$(stringify!($variant)),+];
+        };
+    }
+
+    /// The names a catalogue file lists: one per line, `#` lines and blank lines aside.
+    fn listed(file: &str) -> Vec<&str> {
+        file.lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+            .collect()
+    }
+
+    catalogue!(
+        logical_operator_name,
+        LOGICAL_OPERATOR_NAMES,
+        LogicalOperator: NodeScan, EdgeScan, Expand, Filter, Project, Join, Aggregate, Limit, Skip, Sort, Distinct, CreateNode, CreateEdge, Create, DeleteNode, DeleteEdge, SetProperty, AddLabel, RemoveLabel, Return, Empty, TripleScan, PropertyPath, NamedGraphs, RowValues, InNamedGraph, Union, LeftJoin, AntiJoin, MarkJoin, Construct, Bind, Unwind, MapCollect, Merge, MergeRelationship, ShortestPath, InsertTriple, DeleteTriple, Modify, ClearGraph, CreateGraph, DropGraph, LoadGraph, CopyGraph, MoveGraph, AddGraph, HorizontalAggregate, VectorScan, VectorJoin, TextScan, Except, Intersect, Otherwise, Apply, ParameterScan, DelimScan, CreatePropertyGraph, DropPropertyGraph, MultiWayJoin, CallProcedure, LoadData
+    );
+
+    catalogue!(
+        logical_expression_name,
+        LOGICAL_EXPRESSION_NAMES,
+        LogicalExpression: Literal, Variable, Property, Binary, Unary, FunctionCall, SparqlCall, List, Map, IndexAccess, MapAccess, SliceAccess, Case, Parameter, Labels, Type, Id, ListComprehension, ListPredicate, ExistsSubquery, CountSubquery, ValueSubquery, MapProjection, Reduce, PatternComprehension
+    );
+
+    catalogue!(
+        binary_op_name,
+        BINARY_OP_NAMES,
+        BinaryOp: Eq, Ne, Lt, Le, Gt, Ge, And, Or, Xor, Add, Sub, Mul, Div, Mod, Concat, StartsWith, EndsWith, Contains, In, Like, Regex, Pow
+    );
+
+    catalogue!(
+        unary_op_name,
+        UNARY_OP_NAMES,
+        UnaryOp: Not, Neg, Pos, IsNull, IsNotNull
+    );
+
+    catalogue!(
+        aggregate_function_name,
+        AGGREGATE_FUNCTION_NAMES,
+        AggregateFunction: Count, CountNonNull, Sum, Avg, Min, Max, Collect, StdDev, StdDevPop, Variance, VariancePop, PercentileDisc, PercentileCont, GroupConcat, Sample, CovarSamp, CovarPop, Corr, RegrSlope, RegrIntercept, RegrR2, RegrCount, RegrSxx, RegrSyy, RegrSxy, RegrAvgx, RegrAvgy
+    );
+
+    #[test]
+    fn logical_operator_catalogue_names_every_variant() {
+        std::hint::black_box(logical_operator_name as fn(&LogicalOperator) -> &'static str);
+        let file = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tests/catalogue/logical_operator.txt"
+        ));
+        assert_eq!(listed(file), LOGICAL_OPERATOR_NAMES);
+    }
+
+    #[test]
+    fn logical_expression_catalogue_names_every_variant() {
+        std::hint::black_box(logical_expression_name as fn(&LogicalExpression) -> &'static str);
+        let file = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tests/catalogue/logical_expression.txt"
+        ));
+        assert_eq!(listed(file), LOGICAL_EXPRESSION_NAMES);
+    }
+
+    #[test]
+    fn binary_op_catalogue_names_every_variant() {
+        std::hint::black_box(binary_op_name as fn(&BinaryOp) -> &'static str);
+        let file = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tests/catalogue/binary_op.txt"
+        ));
+        assert_eq!(listed(file), BINARY_OP_NAMES);
+    }
+
+    #[test]
+    fn unary_op_catalogue_names_every_variant() {
+        std::hint::black_box(unary_op_name as fn(&UnaryOp) -> &'static str);
+        let file = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tests/catalogue/unary_op.txt"
+        ));
+        assert_eq!(listed(file), UNARY_OP_NAMES);
+    }
+
+    #[test]
+    fn aggregate_function_catalogue_names_every_variant() {
+        std::hint::black_box(aggregate_function_name as fn(&AggregateFunction) -> &'static str);
+        let file = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tests/catalogue/aggregate_function.txt"
+        ));
+        assert_eq!(listed(file), AGGREGATE_FUNCTION_NAMES);
     }
 }

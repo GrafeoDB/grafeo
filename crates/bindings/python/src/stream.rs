@@ -34,6 +34,9 @@ pub struct PyResultStream {
     _database: Arc<RwLock<GrafeoDB>>,
     columns: Vec<String>,
     iter: Option<OwnedRowIterator>,
+    /// The warnings raised through `warnings.warn` so far: at the open, and
+    /// once the stream is exhausted; what the stream had when it ended.
+    warned: Vec<grafeo_bindings_common::warning::Warning>,
 }
 
 impl PyResultStream {
@@ -49,7 +52,33 @@ impl PyResultStream {
             _database: database,
             columns,
             iter: Some(stream.into_row_iter()),
+            warned: Vec::new(),
         }
+    }
+
+    /// The warnings the statement raised so far.
+    fn current(&self) -> Vec<grafeo_bindings_common::warning::Warning> {
+        match &self.iter {
+            Some(iter) => grafeo_bindings_common::warning::of_warnings(&iter.warnings()),
+            None => self.warned.clone(),
+        }
+    }
+
+    /// Raises through `warnings.warn` each warning raised since the last
+    /// call, once.
+    ///
+    /// # Errors
+    ///
+    /// A warning a filter turned into an exception.
+    pub(crate) fn warn_new(&mut self, py: Python<'_>) -> PyResult<()> {
+        let current = self.current();
+        let new: Vec<_> = current
+            .iter()
+            .filter(|warning| !self.warned.contains(warning))
+            .cloned()
+            .collect();
+        self.warned = current;
+        crate::warning::raise(py, &new)
     }
 }
 
@@ -59,6 +88,16 @@ impl PyResultStream {
     #[getter]
     fn columns(&self) -> Vec<String> {
         self.columns.clone()
+    }
+
+    /// The warnings the statement raised so far, ordered by code: its
+    /// translation's from the start, its run's as the rows that raise them
+    /// are pulled, all of them once the stream is exhausted. The ones there
+    /// at the open are raised through `warnings.warn` by `execute_lazy`,
+    /// the rest when the stream is exhausted.
+    #[getter]
+    fn warnings(&self) -> Vec<crate::warning::PyQueryWarning> {
+        crate::warning::to_py(&self.current())
     }
 
     /// Returns self for `iter()`.
@@ -90,11 +129,15 @@ impl PyResultStream {
                 Ok(Some(dict.unbind().into_any()))
             }
             Some(Err(err)) => {
-                // Drop the iterator so subsequent __next__ returns cleanly.
+                // Keep what was raised, then drop the iterator so subsequent
+                // __next__ returns cleanly.
+                let current = slf.current();
+                slf.warned = current;
                 slf.iter = None;
                 Err(PyGrafeoError::from(err).into())
             }
             None => {
+                slf.warn_new(py)?;
                 slf.iter = None;
                 Ok(None)
             }

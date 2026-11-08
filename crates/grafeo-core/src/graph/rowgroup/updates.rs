@@ -66,6 +66,50 @@ fn spilled_bytes<A: smallvec::Array>(list: &SmallVec<A>) -> usize {
     }
 }
 
+/// What a kept entry holds on the heap besides its place in a node, as the
+/// chains' count reads it (the walk takes the same figure as a closure).
+pub(super) trait Held {
+    /// The heap bytes it holds.
+    fn held_bytes(&self) -> usize;
+}
+
+impl Held for Option<grafeo_common::types::Value> {
+    fn held_bytes(&self) -> usize {
+        self.as_ref()
+            .map_or(0, grafeo_common::types::Value::estimated_size_bytes)
+    }
+}
+
+impl Held for super::LabelIds {
+    fn held_bytes(&self) -> usize {
+        spilled_bytes(self)
+    }
+}
+
+#[cfg(test)]
+impl Held for Option<u64> {
+    fn held_bytes(&self) -> usize {
+        0
+    }
+}
+
+/// The heap bytes of one vector's chain, with what its kept entries hold.
+fn chain_bytes<T: Held>(chain: &Chain<T>) -> usize {
+    spilled_bytes(&chain.nodes)
+        + chain
+            .nodes
+            .iter()
+            .map(|node| {
+                spilled_bytes(&node.rows)
+                    + node
+                        .rows
+                        .iter()
+                        .map(|(_, kept)| kept.held_bytes())
+                        .sum::<usize>()
+            })
+            .sum::<usize>()
+}
+
 /// One writer's undo node: what the rows it wrote held before.
 #[derive(Debug)]
 struct UndoNode<T> {
@@ -156,12 +200,25 @@ const _: () = assert!(VECTORS * VECTOR_ROWS == 65_536);
 /// order of their vectors, the first inline, and per vector where its chain
 /// is. No allocation while one vector has a chain of one node, and none at
 /// all while no vector has one.
-#[derive(Debug)]
 pub(super) struct Updates<T> {
     /// Per vector, one past the place of its chain in `chains`; 0 for a
     /// vector without one.
     places: [u8; VECTORS],
     chains: SmallVec<[Chain<T>; 1]>,
+    /// The heap bytes the chains take, with what their entries hold (see
+    /// [`heap_bytes`](Self::heap_bytes)), kept as they change.
+    counted: usize,
+}
+
+/// Its chains, without the count: what the chains hold, which two stores
+/// with the same chains show alike.
+impl<T: std::fmt::Debug> std::fmt::Debug for Updates<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Updates")
+            .field("places", &self.places)
+            .field("chains", &self.chains)
+            .finish()
+    }
 }
 
 impl<T> Default for Updates<T> {
@@ -169,6 +226,7 @@ impl<T> Default for Updates<T> {
         Self {
             places: [0; VECTORS],
             chains: SmallVec::new(),
+            counted: 0,
         }
     }
 }
@@ -226,6 +284,12 @@ impl<T> Updates<T> {
         self.chains.is_empty()
     }
 
+    /// The heap bytes the chains take, with what their entries hold: what
+    /// [`heap_bytes`](Self::heap_bytes) walks, kept as the chains change.
+    pub(super) fn counted_bytes(&self) -> usize {
+        self.counted
+    }
+
     /// What `row` held for `read`, when a node `read` does not see holds
     /// it; `None` when the column's value is what it reads.
     pub(super) fn saved(&self, row: usize, read: Read) -> Option<&T> {
@@ -264,6 +328,22 @@ impl<T> Updates<T> {
         stamp: u64,
         snapshot: u64,
         current: impl FnOnce() -> T,
+    ) -> bool
+    where
+        T: Held,
+    {
+        self.keep_with(row, stamp, snapshot, current, T::held_bytes)
+    }
+
+    /// [`keep`](Self::keep), with `held` saying what the kept value holds on
+    /// the heap (a caller that measured it already passes it on).
+    pub(super) fn keep_with(
+        &mut self,
+        row: usize,
+        stamp: u64,
+        snapshot: u64,
+        current: impl FnOnce() -> T,
+        held: impl FnOnce(&T) -> usize,
     ) -> bool {
         let at = offset(row);
         if let Some(chain) = self.chain(row) {
@@ -280,22 +360,31 @@ impl<T> Updates<T> {
         let place = match self.find(vector) {
             Ok(place) => place,
             Err(place) => {
+                let before = spilled_bytes(&self.chains);
                 self.insert_chain(place, vector, Chain::new());
+                self.counted += spilled_bytes(&self.chains) - before;
                 place
             }
         };
+        let kept = current();
+        let held = held(&kept);
         let chain = &mut self.chains[place];
-        match chain.nodes.last_mut() {
+        let grown = match chain.nodes.last_mut() {
             Some(node) if node.stamp == stamp => {
+                let before = spilled_bytes(&node.rows);
                 let position = node.find(at).unwrap_err();
-                node.rows.insert(position, (at, current()));
+                node.rows.insert(position, (at, kept));
+                spilled_bytes(&node.rows) - before
             }
             _ => {
+                let before = spilled_bytes(&chain.nodes);
                 let mut rows = SmallVec::new();
-                rows.push((at, current()));
+                rows.push((at, kept));
                 chain.push(UndoNode { stamp, rows });
+                spilled_bytes(&chain.nodes) - before
             }
-        }
+        };
+        self.counted += grown + held;
         true
     }
 
@@ -320,7 +409,10 @@ impl<T> Updates<T> {
     /// stamp `pending` made that node, and returns what the row held before
     /// the transaction wrote it: a rollback of the transaction's first
     /// write of the row. A node left empty goes, and a chain left empty.
-    pub(super) fn undo(&mut self, row: usize, pending: u64) -> Option<T> {
+    pub(super) fn undo(&mut self, row: usize, pending: u64) -> Option<T>
+    where
+        T: Held,
+    {
         let at = offset(row);
         let (place, chain) = self.chain_mut(row)?;
         let index = chain.newest_with(at)?;
@@ -330,20 +422,30 @@ impl<T> Updates<T> {
         let node = &mut chain.nodes[index];
         let position = node.find(at).ok()?;
         let (_, saved) = node.rows.remove(position);
+        let mut freed = saved.held_bytes();
         if node.rows.is_empty() {
+            freed += spilled_bytes(&node.rows);
             chain.nodes.remove(index);
             chain.pending -= 1;
         }
-        if chain.nodes.is_empty() {
+        let emptied = chain.nodes.is_empty();
+        if emptied {
+            freed += spilled_bytes(&chain.nodes);
+            let before = spilled_bytes(&self.chains);
             self.remove_chain(place, vector_of(row));
+            freed += before - spilled_bytes(&self.chains);
         }
+        self.counted = super::sub_count(self.counted, freed);
         Some(saved)
     }
 
     /// Drops every node committed at or before `horizon`: every reader at
     /// the horizon or later sees it, and so the newer values it replaced.
     /// Returns the kept values (or label sets) it dropped.
-    pub(super) fn collect(&mut self, horizon: u64) -> usize {
+    pub(super) fn collect(&mut self, horizon: u64) -> usize
+    where
+        T: Held,
+    {
         if self.chains.is_empty() {
             return 0;
         }
@@ -366,19 +468,29 @@ impl<T> Updates<T> {
             }
         }
         self.trim();
+        // Every chain was visited: counted again with them.
+        self.counted = self.heap_bytes(T::held_bytes);
         dropped
     }
 
     /// [`collect`](Self::collect) of vector `vector` alone.
-    pub(super) fn collect_vector(&mut self, vector: usize, horizon: u64) -> usize {
+    pub(super) fn collect_vector(&mut self, vector: usize, horizon: u64) -> usize
+    where
+        T: Held,
+    {
         let Ok(place) = self.find(vector) else {
             return 0;
         };
+        let before = spilled_bytes(&self.chains) + chain_bytes(&self.chains[place]);
         let chain = &mut self.chains[place];
         let dropped = Self::collect_chain(chain, horizon);
-        if chain.nodes.is_empty() {
+        let after = if chain.nodes.is_empty() {
             self.remove_chain(place, vector);
-        }
+            spilled_bytes(&self.chains)
+        } else {
+            spilled_bytes(&self.chains) + chain_bytes(&self.chains[place])
+        };
+        self.counted = super::sub_count(self.counted + after, before);
         dropped
     }
 
@@ -410,11 +522,16 @@ impl<T> Updates<T> {
     }
 
     /// Takes `row` out of every node, for a row that is gone.
-    pub(super) fn remove_row(&mut self, row: usize) {
+    pub(super) fn remove_row(&mut self, row: usize)
+    where
+        T: Held,
+    {
         let at = offset(row);
-        let Some((place, chain)) = self.chain_mut(row) else {
+        let Ok(place) = self.find(vector_of(row)) else {
             return;
         };
+        let before = spilled_bytes(&self.chains) + chain_bytes(&self.chains[place]);
+        let chain = &mut self.chains[place];
         for node in &mut chain.nodes {
             if let Ok(position) = node.find(at) {
                 node.rows.remove(position);
@@ -422,9 +539,13 @@ impl<T> Updates<T> {
         }
         chain.nodes.retain(|node| !node.rows.is_empty());
         chain.recount();
-        if chain.nodes.is_empty() {
+        let after = if chain.nodes.is_empty() {
             self.remove_chain(place, vector_of(row));
-        }
+            spilled_bytes(&self.chains)
+        } else {
+            spilled_bytes(&self.chains) + chain_bytes(&self.chains[place])
+        };
+        self.counted = super::sub_count(self.counted + after, before);
     }
 
     /// Gives back the list's heap once no vector has a chain.
@@ -484,7 +605,10 @@ impl<T> Updates<T> {
     /// row and epoch). Each vector gets one node per epoch, oldest first, as
     /// the commits in epoch order would have made them; the store holds no
     /// chain of these rows before.
-    pub(super) fn load(&mut self, mut kept: Vec<(usize, u64, T)>) {
+    pub(super) fn load(&mut self, mut kept: Vec<(usize, u64, T)>)
+    where
+        T: Held,
+    {
         kept.sort_unstable_by_key(|(row, stamp, _)| (vector_of(*row), *stamp, *row));
         for (row, stamp, value) in kept {
             let vector = vector_of(row);
@@ -505,6 +629,7 @@ impl<T> Updates<T> {
                 }
             }
         }
+        self.counted = self.heap_bytes(T::held_bytes);
     }
 
     /// The heap bytes the chains take, with what `held` says each kept

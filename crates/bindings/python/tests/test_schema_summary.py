@@ -73,6 +73,7 @@ def test_the_summary_is_plain_json(db):
     assert json.loads(json.dumps(schema)) == schema
 
 
+@pytest.mark.requires("gql")
 def test_the_summary_agrees_with_the_db_procedures(db):
     schema = db.schema()
 

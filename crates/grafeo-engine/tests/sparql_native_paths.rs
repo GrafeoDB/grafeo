@@ -800,17 +800,24 @@ fn pending_empty_named_graph_keeps_bound_star_reflexivity_after_commit() {
             count,
             expected_endpoints,
         );
-        for query in [
-            "SELECT ?g ?o WHERE { GRAPH ?g { e:s e:p* ?o } }".to_owned(),
-            format!("SELECT ?g ?o FROM NAMED e:{graph} WHERE {{ GRAPH ?g {{ e:s e:p* ?o }} }}"),
-        ] {
-            let expected = if present {
-                pairs(&[(graph, "s")])
-            } else {
-                vec![]
-            };
-            assert_session_rows(session, &query, count, expected);
-        }
+        let expected = if present {
+            pairs(&[(graph, "s")])
+        } else {
+            vec![]
+        };
+        assert_session_rows(
+            session,
+            "SELECT ?g ?o WHERE { GRAPH ?g { e:s e:p* ?o } }",
+            count,
+            expected,
+        );
+        // FROM NAMED lists it, and a listed IRI is a graph of the dataset, held or not.
+        assert_session_rows(
+            session,
+            &format!("SELECT ?g ?o FROM NAMED e:{graph} WHERE {{ GRAPH ?g {{ e:s e:p* ?o }} }}"),
+            1,
+            pairs(&[(graph, "s")]),
+        );
     };
 
     let db = rdf_db();
@@ -874,16 +881,12 @@ fn pending_empty_named_graph_keeps_bound_star_reflexivity_after_commit() {
             1 + count,
             expected_graphs,
         );
-        let expected_named = if present {
-            pairs(&[(graph, "s")])
-        } else {
-            vec![]
-        };
+        // As above: a listed IRI is a graph of the dataset, held or not.
         assert_session_rows(
             session,
             &format!("SELECT ?g ?o FROM NAMED e:{graph} WHERE {{ GRAPH ?g {{ e:s e:p* ?o }} }}"),
-            count,
-            expected_named,
+            1,
+            pairs(&[(graph, "s")]),
         );
     };
     let insert_then_delete = |session: &Session, graph: &str| {

@@ -14,7 +14,7 @@ use crate::graph::GraphStore;
 use crate::graph::lpg::Node;
 use arcstr::ArcStr;
 use grafeo_common::change::ChangeMark;
-use grafeo_common::types::{EdgeId, LogicalType, NodeId, PropertyKey, Value};
+use grafeo_common::types::{EdgeId, LogicalType, NodeId, PropertyKey, TemporalComparison, Value};
 use grafeo_common::utils::hash::FxHashMap;
 use smallvec::SmallVec;
 use std::sync::Arc;
@@ -122,10 +122,11 @@ struct NodeKeys {
 /// The match values of a node or a row.
 type MatchKey = SmallVec<[KeyPart; 1]>;
 
-/// A match value as a key: the kinds whose `==` compares their parts, so
-/// equal values have equal keys. A row with a value of another kind (a
-/// float, whose `-0.0` equals `0.0`, a temporal value, a list or map, a
-/// null) reads the store as before.
+/// A match value as a key: the kinds whose `=` compares their parts, so
+/// equal values have equal keys. A number that equals an integer (`1.0`, a
+/// whole decimal) is keyed as that integer, as `=` reads numbers by value. A
+/// row with a value of another kind (another float, a temporal value, a list
+/// or map, a null) reads the store as before.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum KeyPart {
     Bool(bool),
@@ -139,11 +140,24 @@ impl KeyPart {
         match value {
             Value::Bool(value) => Some(Self::Bool(*value)),
             Value::Int64(value) => Some(Self::Int64(*value)),
+            Value::Float64(_) | Value::Decimal(_) => {
+                match super::accumulator::HashableValue::from(value).representative() {
+                    Value::Int64(integer) => Some(Self::Int64(*integer)),
+                    _ => None,
+                }
+            }
             Value::String(value) => Some(Self::String(value.clone())),
             Value::Bytes(value) => Some(Self::Bytes(Arc::clone(value))),
             _ => None,
         }
     }
+}
+
+/// Whether a stored value matches a MERGE pattern's value: when `=` is True (`1` and `1.0`, and
+/// `[1]` and `[1.0]`, match; `[null]` matches nothing), with a zoned and a local datetime or time
+/// kept apart, as before.
+fn matches_by_equals(stored: &Value, expected: &Value) -> bool {
+    super::value_utils::equals(stored, expected, TemporalComparison::TypesApart) == Some(true)
 }
 
 impl NodeKeys {
@@ -392,18 +406,23 @@ impl MergeOperator {
         &mut self,
         resolved_match_props: &[(String, Value)],
     ) -> Result<Vec<NodeId>, OperatorError> {
-        // Use a property index when available to avoid a full label scan.
-        // Null conditions are excluded from the index query and verified in the loop.
-        let use_index = {
+        // A property index, when one serves a match value, gives the
+        // candidates instead of a label scan. It is read for every value `=`
+        // finds equal (`1` and `1.0`, `[1]` and `[1.0]`), as the filter
+        // compares, and maybe others: the loop below checks each candidate's
+        // labels and every match value, a null one included.
+        let indexed = {
             let labels = self.label_names();
             resolved_match_props
                 .iter()
-                .any(|(k, v)| !v.is_null() && self.writer.store().index_serves(&labels, k))
+                .find(|(k, v)| !v.is_null() && self.writer.store().index_serves(&labels, k))
         };
 
         // Without an index, the row's values looked up among the pattern's
         // nodes, when they have a key (see `NodeKeys`).
-        if !use_index && let Some(candidates) = self.keyed_candidates(resolved_match_props)? {
+        if indexed.is_none()
+            && let Some(candidates) = self.keyed_candidates(resolved_match_props)?
+        {
             let mut matches = Vec::with_capacity(candidates.len());
             for node_id in candidates {
                 if self.node_matches(node_id, resolved_match_props)? {
@@ -419,13 +438,17 @@ impl MergeOperator {
         // way.
         let store = self.writer.store();
         let view = self.writer.view();
-        let candidates: Vec<NodeId> = if use_index {
-            let conditions: Vec<(&str, Value)> = resolved_match_props
-                .iter()
-                .filter(|(_, v)| !v.is_null())
-                .map(|(k, v)| (k.as_str(), v.clone()))
-                .collect();
-            store.find_indexed_by_properties(&self.label_names(), &conditions, view)?
+        let found = match indexed {
+            Some((key, value)) => {
+                store.find_indexed_maybe_equal(&self.label_names(), key, value, view)?
+            }
+            None => None,
+        };
+        let candidates: Vec<NodeId> = if let Some(mut found) = found {
+            // In ID order, as a scan reads them.
+            found.sort_unstable();
+            found.dedup();
+            found
         } else if let Some(label) = self.scan_label()? {
             store.nodes_by_label(label, view)?
         } else {
@@ -460,7 +483,7 @@ impl MergeOperator {
                     // Null in a MERGE pattern matches both absent and explicitly null properties
                     prop.map_or(true, |v| v.is_null())
                 } else {
-                    prop.is_some_and(|v| v == expected_value)
+                    prop.is_some_and(|v| matches_by_equals(v, expected_value))
                 }
             }))
     }
@@ -932,7 +955,7 @@ impl MergeRelationshipOperator {
                         // Null in a MERGE pattern matches both absent and explicitly null properties
                         prop.is_none_or(Value::is_null)
                     } else {
-                        prop.is_some_and(|v| v == expected)
+                        prop.is_some_and(|v| matches_by_equals(v, expected))
                     }
                 });
 

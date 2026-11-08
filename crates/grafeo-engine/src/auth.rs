@@ -78,6 +78,9 @@ pub struct Identity {
     /// Per-graph access grants. Empty means unrestricted (all graphs accessible
     /// at the identity's role level).
     grants: Vec<Grant>,
+    /// Whether its queries may reach outside the database, as set with
+    /// [`with_external_access`](Self::with_external_access); `None` follows the role.
+    external_access: Option<bool>,
 }
 
 impl Identity {
@@ -88,6 +91,7 @@ impl Identity {
             user_id: user_id.into(),
             roles: roles.into_iter().collect(),
             grants: Vec::new(),
+            external_access: None,
         }
     }
 
@@ -101,6 +105,7 @@ impl Identity {
             user_id: "anonymous".to_owned(),
             roles: [Role::Admin].into_iter().collect(),
             grants: Vec::new(),
+            external_access: None,
         }
     }
 
@@ -153,6 +158,29 @@ impl Identity {
     #[must_use]
     pub fn can_admin(&self) -> bool {
         self.has_role(Role::Admin)
+    }
+
+    /// This identity with external access granted (`true`) or withheld (`false`): whether its
+    /// queries may read or write anything outside the database, a file, a URL or a model (LOAD
+    /// DATA and `LOAD CSV`, the load procedures, SPARQL `LOAD`). The setting decides, whatever
+    /// the role; without one, external access follows the role (see
+    /// [`can_access_external`](Self::can_access_external)). No statement can raise it.
+    ///
+    /// It bounds query text only: the caller's own API calls (`load_nodes_csv`, an import or a
+    /// save from Rust or a binding) are the application acting and are not bound by it.
+    #[must_use]
+    pub fn with_external_access(mut self, allowed: bool) -> Self {
+        self.external_access = Some(allowed);
+        self
+    }
+
+    /// Whether this identity's queries may reach outside the database: as set with
+    /// [`with_external_access`](Self::with_external_access), else only with the
+    /// [`Role::Admin`] role, so a ReadOnly or ReadWrite identity has none unless granted. The
+    /// anonymous identity of `GrafeoDB::session` is Admin and has it.
+    #[must_use]
+    pub fn can_access_external(&self) -> bool {
+        self.external_access.unwrap_or_else(|| self.can_admin())
     }
 
     /// Returns the per-graph grants, if any.
@@ -322,6 +350,52 @@ pub(crate) fn check_permission(
     }
 }
 
+/// How a statement or procedure reaches outside the database.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ExternalAccess {
+    /// It reaches nothing outside.
+    None,
+    /// It reads something outside: a file, a URL or a model.
+    Reads,
+    /// It writes something outside: an export.
+    Writes,
+}
+
+impl ExternalAccess {
+    /// Its name as `grafeo.procedures()` lists it: "none", "reads" or "writes".
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Reads => "reads",
+            Self::Writes => "writes",
+        }
+    }
+
+    /// What it does outside, for the refusal: "reads" or "writes".
+    #[must_use]
+    pub const fn verb(self) -> &'static str {
+        match self {
+            Self::None => "reaches",
+            Self::Reads => "reads",
+            Self::Writes => "writes",
+        }
+    }
+}
+
+/// The refusal of a statement that reaches outside the database on a session whose identity
+/// has no external access (see [`Identity::with_external_access`]): `what` names the statement
+/// or procedure, `how` what it does there.
+#[cfg(query_language)]
+#[must_use]
+pub(crate) fn external_access_denied(what: &str, how: ExternalAccess) -> String {
+    format!(
+        "this session has no external access: {what} {} data outside the database \
+         (Identity::with_external_access)",
+        how.verb()
+    )
+}
+
 /// Permission denied error with context about what was attempted.
 #[derive(Debug, Clone)]
 pub struct PermissionDenied {
@@ -333,17 +407,30 @@ pub struct PermissionDenied {
     pub user_id: String,
 }
 
-impl fmt::Display for PermissionDenied {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "permission denied: {} operations require {} role (user: {})",
+impl PermissionDenied {
+    /// Why the statement is refused, after the "permission denied" its error says.
+    fn reason(&self) -> String {
+        format!(
+            "{} operations require {} role (user: {})",
             self.operation, self.required, self.user_id
         )
     }
 }
 
+impl fmt::Display for PermissionDenied {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "permission denied: {}", self.reason())
+    }
+}
+
 impl std::error::Error for PermissionDenied {}
+
+/// A role's refusal as a statement's error: `GRAFEO-Q007`, GQLSTATUS 42501.
+impl From<PermissionDenied> for grafeo_common::utils::error::Error {
+    fn from(denied: PermissionDenied) -> Self {
+        grafeo_common::utils::error::QueryError::permission_denied(denied.reason()).into()
+    }
+}
 
 #[cfg(test)]
 mod tests {

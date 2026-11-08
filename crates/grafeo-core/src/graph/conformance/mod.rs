@@ -1385,10 +1385,13 @@ pub(crate) fn paths_at<S: Store + ?Sized>(
             &ok(
                 store.find_nodes_in_range(
                     "age",
-                    min.as_ref(),
-                    max.as_ref(),
-                    min_inclusive,
-                    max_inclusive,
+                    &crate::graph::ValueRange::new(
+                        min.as_ref(),
+                        max.as_ref(),
+                        min_inclusive,
+                        max_inclusive,
+                        crate::execution::operators::value_utils::AcrossKinds::Apart,
+                    ),
                     view,
                 ),
                 "find_nodes_in_range",

@@ -88,8 +88,14 @@ impl GqlStatus {
     /// `22G03` - invalid value type.
     pub const DATA_INVALID_VALUE_TYPE: Self = Self::from_bytes(*b"22G03");
 
+    /// `22G12` - invalid value type, of a dynamically typed operand (ISO/IEC 39075 4.14.4).
+    pub const DATA_INVALID_OPERAND_TYPE: Self = Self::from_bytes(*b"22G12");
+
     /// `22G04` - values not comparable.
     pub const DATA_VALUES_NOT_COMPARABLE: Self = Self::from_bytes(*b"22G04");
+
+    /// `22023` - invalid parameter value (ISO/IEC 9075-2 13.3 General Rule 7).
+    pub const DATA_INVALID_PARAMETER_VALUE: Self = Self::from_bytes(*b"22023");
 
     // ── Invalid transaction state (class 25) ──────────────────────────
 
@@ -126,6 +132,11 @@ impl GqlStatus {
     /// `42002` - invalid reference.
     pub const SYNTAX_INVALID_REFERENCE: Self = Self::from_bytes(*b"42002");
 
+    /// `42501` - insufficient privilege: the session may not do what the
+    /// statement does (ISO/IEC 9075-2; GQL leaves an access rule violation
+    /// in class 42 without a subclass of its own).
+    pub const SYNTAX_INSUFFICIENT_PRIVILEGE: Self = Self::from_bytes(*b"42501");
+
     // ── Dependent object error (class G1) ─────────────────────────────
 
     /// `G1000` - dependent object error, no subclass.
@@ -143,7 +154,7 @@ impl GqlStatus {
 
     /// Creates a `GqlStatus` from a 5-byte array. Panics if bytes are not ASCII.
     #[must_use]
-    const fn from_bytes(bytes: [u8; 5]) -> Self {
+    pub(crate) const fn from_bytes(bytes: [u8; 5]) -> Self {
         Self { code: bytes }
     }
 
@@ -236,12 +247,17 @@ impl From<&super::error::Error> for GqlStatus {
                 QueryErrorKind::DivisionByZero => GqlStatus::DATA_DIVISION_BY_ZERO,
                 QueryErrorKind::NegativeLimit => GqlStatus::DATA_NEGATIVE_LIMIT,
                 QueryErrorKind::InvalidValueType => GqlStatus::DATA_INVALID_VALUE_TYPE,
+                QueryErrorKind::WrongKind => GqlStatus::DATA_INVALID_OPERAND_TYPE,
                 QueryErrorKind::InvalidTimeZoneDisplacement => {
                     GqlStatus::DATA_INVALID_TIME_ZONE_DISPLACEMENT
                 }
                 QueryErrorKind::ValuesNotComparable => GqlStatus::DATA_VALUES_NOT_COMPARABLE,
+                QueryErrorKind::InvalidParameterValue => GqlStatus::DATA_INVALID_PARAMETER_VALUE,
                 // GQL defines no class for a feature an implementation lacks.
                 QueryErrorKind::Unsupported => GqlStatus::SYNTAX_ERROR,
+                QueryErrorKind::PermissionDenied | QueryErrorKind::ExternalAccessDenied => {
+                    GqlStatus::SYNTAX_INSUFFICIENT_PRIVILEGE
+                }
             },
             Error::Transaction(t) => match t {
                 TransactionError::ReadOnly => GqlStatus::INVALID_TX_READ_ONLY,
@@ -459,62 +475,75 @@ mod tests {
     fn every_query_error_kind_has_its_gqlstatus() {
         use super::super::error::{Error, ErrorCode, QueryError, QueryErrorKind};
 
-        for (kind, status, code) in [
-            (QueryErrorKind::Lexer, "42001", ErrorCode::QuerySyntax),
-            (QueryErrorKind::Syntax, "42001", ErrorCode::QuerySyntax),
-            (QueryErrorKind::Semantic, "42000", ErrorCode::QuerySemantic),
-            (
-                QueryErrorKind::InvalidReference,
-                "42002",
-                ErrorCode::QuerySemantic,
-            ),
-            (
-                QueryErrorKind::Optimization,
-                "42000",
-                ErrorCode::QueryOptimization,
-            ),
-            (
-                QueryErrorKind::Unsupported,
-                "42000",
-                ErrorCode::QueryUnsupported,
-            ),
-            (
-                QueryErrorKind::Execution,
-                "22000",
-                ErrorCode::QueryExecution,
-            ),
-            (QueryErrorKind::Timeout, "22000", ErrorCode::QueryTimeout),
-            (
-                QueryErrorKind::NumericOutOfRange,
-                "22003",
-                ErrorCode::QueryExecution,
-            ),
-            (
-                QueryErrorKind::DivisionByZero,
-                "22012",
-                ErrorCode::QueryExecution,
-            ),
-            (
-                QueryErrorKind::NegativeLimit,
-                "22G02",
-                ErrorCode::QueryExecution,
-            ),
-            (
-                QueryErrorKind::InvalidValueType,
-                "22G03",
-                ErrorCode::QueryExecution,
-            ),
-            (
-                QueryErrorKind::InvalidTimeZoneDisplacement,
-                "22009",
-                ErrorCode::QueryExecution,
-            ),
-            (
-                QueryErrorKind::ValuesNotComparable,
-                "22G04",
-                ErrorCode::QueryExecution,
-            ),
-        ] {
+        /// The decided status and error code of each kind, by an exhaustive match: a kind
+        /// added to `QueryErrorKind` fails to compile here until it has its row (and a place in
+        /// `KINDS` below).
+        fn decided(kind: QueryErrorKind) -> (&'static str, ErrorCode) {
+            match kind {
+                QueryErrorKind::Lexer | QueryErrorKind::Syntax => ("42001", ErrorCode::QuerySyntax),
+                QueryErrorKind::Semantic => ("42000", ErrorCode::QuerySemantic),
+                QueryErrorKind::InvalidReference => ("42002", ErrorCode::QuerySemantic),
+                QueryErrorKind::Optimization => ("42000", ErrorCode::QueryOptimization),
+                QueryErrorKind::Unsupported => ("42000", ErrorCode::QueryUnsupported),
+                QueryErrorKind::Execution => ("22000", ErrorCode::QueryExecution),
+                QueryErrorKind::Timeout => ("22000", ErrorCode::QueryTimeout),
+                QueryErrorKind::NumericOutOfRange => ("22003", ErrorCode::QueryExecution),
+                QueryErrorKind::InvalidCharacterValueForCast => {
+                    ("22018", ErrorCode::QueryExecution)
+                }
+                QueryErrorKind::DivisionByZero => ("22012", ErrorCode::QueryExecution),
+                QueryErrorKind::NegativeLimit => ("22G02", ErrorCode::QueryExecution),
+                QueryErrorKind::InvalidValueType => ("22G03", ErrorCode::QueryExecution),
+                QueryErrorKind::WrongKind => ("22G12", ErrorCode::QueryExecution),
+                QueryErrorKind::InvalidTimeZoneDisplacement => ("22009", ErrorCode::QueryExecution),
+                QueryErrorKind::ValuesNotComparable => ("22G04", ErrorCode::QueryExecution),
+                QueryErrorKind::InvalidParameterValue => ("22023", ErrorCode::QueryExecution),
+                QueryErrorKind::PermissionDenied => ("42501", ErrorCode::QueryPermissionDenied),
+                QueryErrorKind::ExternalAccessDenied => {
+                    ("42501", ErrorCode::QueryExternalAccessDenied)
+                }
+            }
+        }
+
+        /// The kind after `kind` (the first after `None`), by an exhaustive match: a kind added
+        /// to `QueryErrorKind` fails to compile here until it has its place, so the loop below
+        /// reaches every kind.
+        fn next(kind: Option<QueryErrorKind>) -> Option<QueryErrorKind> {
+            use QueryErrorKind as K;
+            match kind {
+                None => Some(K::Lexer),
+                Some(K::Lexer) => Some(K::Syntax),
+                Some(K::Syntax) => Some(K::Semantic),
+                Some(K::Semantic) => Some(K::InvalidReference),
+                Some(K::InvalidReference) => Some(K::Optimization),
+                Some(K::Optimization) => Some(K::Unsupported),
+                Some(K::Unsupported) => Some(K::Execution),
+                Some(K::Execution) => Some(K::Timeout),
+                Some(K::Timeout) => Some(K::NumericOutOfRange),
+                Some(K::NumericOutOfRange) => Some(K::InvalidCharacterValueForCast),
+                Some(K::InvalidCharacterValueForCast) => Some(K::DivisionByZero),
+                Some(K::DivisionByZero) => Some(K::NegativeLimit),
+                Some(K::NegativeLimit) => Some(K::InvalidValueType),
+                Some(K::InvalidValueType) => Some(K::WrongKind),
+                Some(K::WrongKind) => Some(K::InvalidTimeZoneDisplacement),
+                Some(K::InvalidTimeZoneDisplacement) => Some(K::ValuesNotComparable),
+                Some(K::ValuesNotComparable) => Some(K::InvalidParameterValue),
+                Some(K::InvalidParameterValue) => Some(K::PermissionDenied),
+                Some(K::PermissionDenied) => Some(K::ExternalAccessDenied),
+                Some(K::ExternalAccessDenied) => None,
+            }
+        }
+
+        let mut kinds = Vec::new();
+        let mut at = next(None);
+        while let Some(kind) = at {
+            assert!(!kinds.contains(&kind), "{kind:?} twice: `next` loops");
+            kinds.push(kind);
+            at = next(Some(kind));
+        }
+        assert_eq!(kinds.len(), 19, "{kinds:?}");
+        for kind in kinds {
+            let (status, code) = decided(kind);
             let error = QueryError::new(kind, "message");
             assert_eq!(error.error_code(), code, "{kind:?}");
             assert_eq!(

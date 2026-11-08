@@ -1,0 +1,283 @@
+# A group is its own scope (SPARQL 1.1 sec 18.2.2, 18.3.2.7). Generated with sparql_nested_groups.rs.
+
+meta:
+  language: sparql
+  model: rdf
+  section: "18.3.2.7"
+  title: Nested groups
+  dataset: empty
+  requires: [sparql, rdf]
+
+tests:
+
+  - name: filter_reads_the_outer_variable
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :a :q 2 . :b :q 2 . GRAPH :g { :a :t :k } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :q ?x { FILTER(?x > 0) } }"
+    expect:
+      empty: true
+
+  - name: filter_bound_of_the_outer_variable
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :a :q 2 . :b :q 2 . GRAPH :g { :a :t :k } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k { FILTER(BOUND(?s)) } }"
+    expect:
+      empty: true
+
+  - name: filter_not_bound_of_the_outer_variable
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :a :q 2 . :b :q 2 . GRAPH :g { :a :t :k } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k { FILTER(!BOUND(?s)) } }"
+    expect:
+      rows:
+        - ["urn:a"]
+        - ["urn:b"]
+
+  - name: filter_with_no_variable_true
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :a :q 2 . :b :q 2 . GRAPH :g { :a :t :k } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k { FILTER(1 > 0) } }"
+    expect:
+      rows:
+        - ["urn:a"]
+        - ["urn:b"]
+
+  - name: filter_with_no_variable_false
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :a :q 2 . :b :q 2 . GRAPH :g { :a :t :k } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k { FILTER(1 > 2) } }"
+    expect:
+      empty: true
+
+  - name: filter_in_two_groups
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :a :q 2 . :b :q 2 . GRAPH :g { :a :t :k } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :q ?x { { FILTER(?x > 0) } } }"
+    expect:
+      empty: true
+
+  - name: filter_group_first
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :a :q 2 . :b :q 2 . GRAPH :g { :a :t :k } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { { FILTER(?s = :a) } ?s :t :k }"
+    expect:
+      empty: true
+
+  - name: filter_group_between
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :a :q 2 . :b :q 2 . GRAPH :g { :a :t :k } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k { FILTER(?s = :a) } ?s :q ?x }"
+    expect:
+      empty: true
+
+  - name: filter_beside_a_triple_is_right
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :a :q 2 . :b :q 2 . GRAPH :g { :a :t :k } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :q ?x { ?s :q ?y FILTER(?x > 0) } }"
+    expect:
+      empty: true
+
+  - name: filter_of_its_own_triple
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :a :q 2 . :b :q 2 . GRAPH :g { :a :t :k } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :q ?x { ?s :q ?y FILTER(?y > 0) } }"
+    expect:
+      rows:
+        - ["urn:a"]
+        - ["urn:b"]
+
+  - name: filter_at_the_same_level_reads_it
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :a :q 2 . :b :q 2 . GRAPH :g { :a :t :k } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :q ?x FILTER(?x > 0) }"
+    expect:
+      rows:
+        - ["urn:a"]
+        - ["urn:b"]
+
+  - name: bind_reads_the_outer_variable
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :a :q 2 . :b :q 2 . GRAPH :g { :a :t :k } }"
+    query: "PREFIX : <urn:> SELECT ?s ?y WHERE { ?s :t :k { BIND(?s AS ?y) } }"
+    expect:
+      rows:
+        - ["urn:a", null]
+        - ["urn:b", null]
+
+  - name: bind_of_a_literal
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :a :q 2 . :b :q 2 . GRAPH :g { :a :t :k } }"
+    query: "PREFIX : <urn:> SELECT ?s ?y WHERE { ?s :t :k { BIND(1 AS ?y) } }"
+    expect:
+      rows:
+        - ["urn:a", 1]
+        - ["urn:b", 1]
+
+  - name: bind_of_an_outer_variable_name
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :a :q 2 . :b :q 2 . GRAPH :g { :a :t :k } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k { BIND(:a AS ?s) } }"
+    expect:
+      rows:
+        - ["urn:a"]
+
+  - name: optional_joins_as_a_group
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :a :q 2 . :b :q 2 . GRAPH :g { :a :t :k } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k { OPTIONAL { ?s :p ?o } } }"
+    expect:
+      rows:
+        - ["urn:a"]
+
+  - name: optional_with_no_match_keeps_all
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :a :q 2 . :b :q 2 . GRAPH :g { :a :t :k } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k { OPTIONAL { ?s :none ?o } } }"
+    expect:
+      rows:
+        - ["urn:a"]
+        - ["urn:b"]
+
+  - name: optional_with_a_filter
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :a :q 2 . :b :q 2 . GRAPH :g { :a :t :k } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k { OPTIONAL { ?s :p ?o FILTER(?o = :c) } } }"
+    expect:
+      rows:
+        - ["urn:a"]
+
+  - name: optional_at_the_same_level_keeps_all
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :a :q 2 . :b :q 2 . GRAPH :g { :a :t :k } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k OPTIONAL { ?s :p ?o } }"
+    expect:
+      rows:
+        - ["urn:a"]
+        - ["urn:b"]
+
+  - name: minus_takes_nothing_from_a_group_of_none
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :a :q 2 . :b :q 2 . GRAPH :g { :a :t :k } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k { MINUS { ?s :p ?o } } }"
+    expect:
+      rows:
+        - ["urn:a"]
+        - ["urn:b"]
+
+  - name: minus_at_the_same_level_takes
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :a :q 2 . :b :q 2 . GRAPH :g { :a :t :k } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k MINUS { ?s :p ?o } }"
+    expect:
+      rows:
+        - ["urn:b"]
+
+  - name: optional_of_a_filter_alone_keeps_the_left
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :a :q 2 . :b :q 2 . GRAPH :g { :a :t :k } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :q ?x OPTIONAL { FILTER(?x > 5) } }"
+    expect:
+      rows:
+        - ["urn:a"]
+        - ["urn:b"]
+
+  - name: optional_of_a_group_of_a_filter
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :a :q 2 . :b :q 2 . GRAPH :g { :a :t :k } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k OPTIONAL { { FILTER(?s = :a) } } }"
+    expect:
+      rows:
+        - ["urn:a"]
+        - ["urn:b"]
+
+  - name: union_branch_of_a_filter
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :a :q 2 . :b :q 2 . GRAPH :g { :a :t :k } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { { { FILTER(1 > 2) } } UNION { ?s :p ?o } }"
+    expect:
+      rows:
+        - ["urn:a"]
+
+  - name: filter_group_in_a_graph
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :a :q 2 . :b :q 2 . GRAPH :g { :a :t :k } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { GRAPH :g { ?s :t :k { FILTER(BOUND(?s)) } } }"
+    expect:
+      empty: true
+
+  - name: a_triple_alone
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :a :q 2 . :b :q 2 . GRAPH :g { :a :t :k } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k { ?s :p ?o } }"
+    expect:
+      rows:
+        - ["urn:a"]
+
+  - name: a_union_alone
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :a :q 2 . :b :q 2 . GRAPH :g { :a :t :k } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k { { ?s :p ?o } UNION { ?s :none ?o } } }"
+    expect:
+      rows:
+        - ["urn:a"]
+
+  - name: a_graph_alone
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :a :q 2 . :b :q 2 . GRAPH :g { :a :t :k } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k { GRAPH :g { ?s :t :k } } }"
+    expect:
+      rows:
+        - ["urn:a"]
+
+  - name: a_sub_select_alone
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :a :q 2 . :b :q 2 . GRAPH :g { :a :t :k } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k { SELECT ?s WHERE { ?s :p ?o } } }"
+    expect:
+      rows:
+        - ["urn:a"]
+
+  - name: values_alone
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :a :q 2 . :b :q 2 . GRAPH :g { :a :t :k } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k { VALUES ?s { :a } } }"
+    expect:
+      rows:
+        - ["urn:a"]
+
+  - name: an_empty_group
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :a :q 2 . :b :q 2 . GRAPH :g { :a :t :k } }"
+    query: "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k { } }"
+    expect:
+      rows:
+        - ["urn:a"]
+        - ["urn:b"]
+
+  - name: update_filter_group
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :a :q 2 . :b :q 2 . GRAPH :g { :a :t :k } }"
+    statements:
+      - "PREFIX : <urn:> INSERT { :r :saw ?s } WHERE { ?s :q ?x { FILTER(?x > 0) } }"
+      - "PREFIX : <urn:> SELECT ?s WHERE { :r :saw ?s }"
+    expect:
+      empty: true
+
+  - name: update_optional_group
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :a :q 2 . :b :q 2 . GRAPH :g { :a :t :k } }"
+    statements:
+      - "PREFIX : <urn:> INSERT { :r :saw ?s } WHERE { ?s :t :k { OPTIONAL { ?s :p ?o } } }"
+      - "PREFIX : <urn:> SELECT ?s WHERE { :r :saw ?s }"
+    expect:
+      rows:
+        - ["urn:a"]
+
+  - name: update_minus_group
+    setup:
+      - "PREFIX : <urn:> INSERT DATA { :a :t :k . :b :t :k . :a :p :c . :a :q 2 . :b :q 2 . GRAPH :g { :a :t :k } }"
+    statements:
+      - "PREFIX : <urn:> DELETE { ?s :t :k } WHERE { ?s :t :k { MINUS { ?s :p ?o } } }"
+      - "PREFIX : <urn:> SELECT ?s WHERE { ?s :t :k }"
+    expect:
+      empty: true

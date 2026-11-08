@@ -10,6 +10,8 @@ order, counting toward k.
 import pytest
 from grafeo import GrafeoDB
 
+pytestmark = pytest.mark.requires("vector-index")
+
 DUPLICATES = 40
 DISTANT = 5
 

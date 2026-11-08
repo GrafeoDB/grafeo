@@ -34,7 +34,8 @@
 //! # }
 //! ```
 //!
-//! Choose [`WalManager`] for sync code, [`AsyncWalManager`] for async.
+//! Choose [`WalManager`] for sync code, and `AsyncWalManager` (with the
+//! `async-storage` feature, deprecated since 0.6.1) for async.
 //!
 //! ## WAL v2
 //!
@@ -58,6 +59,7 @@
 /// the log position up to which backups hold the WAL.
 pub const BACKUP_CURSOR_FILE: &str = "backup_cursor.meta";
 
+#[cfg(feature = "async-storage")]
 mod async_log;
 #[cfg(feature = "async-storage")]
 mod async_typed;
@@ -73,6 +75,7 @@ mod segment;
 mod typed;
 mod writer;
 
+#[cfg(feature = "async-storage")]
 pub use async_log::AsyncWalManager;
 #[cfg(feature = "async-storage")]
 pub use async_typed::{AsyncLpgWal, AsyncTypedWal};
@@ -84,7 +87,9 @@ pub use frame::{
     MAX_FRAME_PAYLOAD, MAX_FRAME_RECORD_BYTES, SEALED_OVERHEAD,
 };
 pub use log::{CheckpointMetadata, DurabilityMode, WalCipher, WalConfig, WalManager};
-pub use reader::{GROUP_BUFFER_BYTES, GroupFrames, ScanEnd, ScanOptions, Tail, TailKind, WalScan};
+pub use reader::{
+    GROUP_BUFFER_BYTES, GroupFrames, ScanEnd, ScanOptions, SegmentSource, Tail, TailKind, WalScan,
+};
 pub use record::{
     GraphTypeAlterationKind, NamedConstraintKind, PropertyAlterationKind, TypeConstraintKind,
     WalEntry, WalRecord,
@@ -93,8 +98,9 @@ pub use recovery::{RecoveredWal, WalRecovery};
 pub use segment::{
     DirectoryLock, KEY_CHECK_AAD_BYTES, KEY_CHECK_BYTES, SALT_BYTES, SEGMENT_HEADER_BYTES,
     SEGMENT_MAGIC, SEGMENT_VERSION, SegmentHeader, WalDirectory, first_segment_header,
-    is_unfinished_segment, list_wal_directory, lock_wal_directory, parse_segment_file_name,
-    segment_file_name, stored_key_check_aad,
+    is_segment_temp_file_name, is_unfinished_segment, list_wal_directory, lock_wal_directory,
+    parse_segment_file_name, segment_file_name, segment_may_hold_frames, segment_temp_file_name,
+    stored_key_check_aad,
 };
 pub use typed::{LpgWal, TypedWal};
-pub use writer::{DEFAULT_SEGMENT_BYTES, GroupEnd, GroupWriter, Wal, WalOptions};
+pub use writer::{DEFAULT_SEGMENT_BYTES, GroupEnd, GroupWriter, Waker, Wal, WalOptions};

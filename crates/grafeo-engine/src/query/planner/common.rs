@@ -245,7 +245,10 @@ pub(crate) fn build_inner_join(
 /// Per the SPARQL 1.1 spec, MINUS with no shared variables between left and
 /// right is a no-op: two solutions are compatible only if they agree on all
 /// shared variables, so when there are none, no solutions are compatible and
-/// nothing is removed.
+/// nothing is removed. A hidden name (the graph a `GRAPH ?g` group reads) is
+/// no variable of the solutions, so sharing it alone is sharing none; with a
+/// variable shared, it stays a join key, and a right row removes only rows of
+/// its own graph.
 pub(crate) fn build_anti_join(
     left: Box<dyn Operator>,
     right: Box<dyn Operator>,
@@ -254,10 +257,10 @@ pub(crate) fn build_anti_join(
     schema: Vec<LogicalType>,
 ) -> (Box<dyn Operator>, Vec<String>) {
     // No shared variables: MINUS is a no-op (keep all left rows).
-    if find_shared_join_keys(&left_columns, right_columns)
-        .0
-        .is_empty()
-    {
+    let shares_a_variable = left_columns.iter().any(|column| {
+        !crate::query::plan::is_hidden_variable(column) && right_columns.contains(column)
+    });
+    if !shares_a_variable {
         return (left, left_columns);
     }
     build_not_exists_join(left, right, left_columns, right_columns, schema)

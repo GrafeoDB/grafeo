@@ -9,16 +9,25 @@ use std::sync::OnceLock;
 #[cfg(test)]
 use grafeo_common::types::PropertyKey;
 use grafeo_common::types::{EdgeId, NodeId, Value};
-use grafeo_common::utils::hash::FxHashMap;
+use grafeo_common::utils::hash::{FxHashMap, FxHashSet};
 use grafeo_core::graph::Direction;
 use grafeo_core::graph::GraphStore;
 #[cfg(test)]
 #[cfg(test)]
 use grafeo_core::graph::rowgroup::RowGroupStore;
 
+use super::super::Domain;
 use super::super::{AlgorithmResult, ParameterDef, ParameterType};
 use super::components::UnionFind;
-use super::traits::{MinScored, impl_algorithm, node_id_from_param};
+use super::traits::{EdgeWeight, Ticker, impl_algorithm, node_id_from_param, score_order};
+
+/// The weight Kruskal and Prim read: a spanning tree of least weight is defined for any finite
+/// weights, negative ones too.
+const WEIGHT: EdgeWeight = EdgeWeight {
+    what: "weight",
+    default: 1.0,
+    domain: Domain::OfType,
+};
 
 // ============================================================================
 // MST Result
@@ -80,22 +89,23 @@ pub fn kruskal(
 ) -> grafeo_common::utils::error::Result<MstResult> {
     let graph = super::traits::GraphView::new(store, view);
     let found = kruskal_on(&graph, weight_property);
-    graph.finish(found)
+    graph.finish(found)?
 }
 
 /// [`kruskal`] on the graph a [`GraphView`](super::traits::GraphView) reads.
 pub(crate) fn kruskal_on(
     store: &super::traits::GraphView<'_>,
     weight_property: Option<&str>,
-) -> MstResult {
+) -> grafeo_common::utils::error::Result<MstResult> {
+    let mut ticker = Ticker::new();
     let nodes = store.node_ids();
     let n = nodes.len();
 
     if n == 0 {
-        return MstResult {
+        return Ok(MstResult {
             edges: Vec::new(),
             total_weight: 0.0,
-        };
+        });
     }
 
     // Build node index mapping
@@ -104,27 +114,21 @@ pub(crate) fn kruskal_on(
         node_to_idx.insert(node, idx);
     }
 
-    // Collect all edges with weights (treating as undirected)
+    // Every edge once, from its source, in either direction as the tree reads them: of the edges
+    // between two nodes, the union-find keeps the lightest and skips the rest.
     let mut edges: Vec<(f64, NodeId, NodeId, EdgeId)> = Vec::new();
-    let mut seen_edges: std::collections::HashSet<(usize, usize)> =
-        std::collections::HashSet::new();
-
-    for (i, &node) in nodes.iter().enumerate() {
+    for &node in &nodes {
         for (neighbor, edge_id) in store.edges(node, Direction::Outgoing) {
-            if let Some(&j) = node_to_idx.get(&neighbor) {
-                // For undirected: only add each edge once
-                let key = if i < j { (i, j) } else { (j, i) };
-                if !seen_edges.contains(&key) {
-                    seen_edges.insert(key);
-                    let weight = store.edge_number(edge_id, weight_property, 1.0);
-                    edges.push((weight, node, neighbor, edge_id));
-                }
+            ticker.tick()?;
+            if node_to_idx.contains_key(&neighbor) {
+                let weight = store.edge_weight(edge_id, weight_property, WEIGHT)?;
+                edges.push((weight, node, neighbor, edge_id));
             }
         }
     }
 
-    // Sort edges by weight
-    edges.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    // By weight, then edge id, so of two edges of one weight the lower id is taken.
+    edges.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.3.cmp(&b.3)));
 
     // Initialize Union-Find
     let mut uf = UnionFind::new(n);
@@ -133,6 +137,7 @@ pub(crate) fn kruskal_on(
     let mut total_weight = 0.0;
 
     for (weight, src, dst, edge_id) in edges {
+        ticker.tick()?;
         let Some(&i) = node_to_idx.get(&src) else {
             continue;
         };
@@ -152,10 +157,10 @@ pub(crate) fn kruskal_on(
         }
     }
 
-    MstResult {
+    Ok(MstResult {
         edges: mst_edges,
         total_weight,
-    }
+    })
 }
 
 // ============================================================================
@@ -192,7 +197,7 @@ pub fn prim(
 ) -> grafeo_common::utils::error::Result<MstResult> {
     let graph = super::traits::GraphView::new(store, view);
     let found = prim_on(&graph, weight_property, start);
-    graph.finish(found)
+    graph.finish(found)?
 }
 
 /// [`prim`] on the graph a [`GraphView`](super::traits::GraphView) reads.
@@ -200,15 +205,16 @@ pub(crate) fn prim_on(
     store: &super::traits::GraphView<'_>,
     weight_property: Option<&str>,
     start: Option<NodeId>,
-) -> MstResult {
+) -> grafeo_common::utils::error::Result<MstResult> {
+    let mut ticker = Ticker::new();
     let nodes = store.node_ids();
     let n = nodes.len();
 
     if n == 0 {
-        return MstResult {
+        return Ok(MstResult {
             edges: Vec::new(),
             total_weight: 0.0,
-        };
+        });
     }
 
     // Start from the first node or specified start
@@ -216,80 +222,107 @@ pub(crate) fn prim_on(
 
     // Verify start node exists
     if store.node(start_node).is_none() {
-        return MstResult {
+        return Ok(MstResult {
             edges: Vec::new(),
             total_weight: 0.0,
-        };
+        });
     }
 
-    let mut in_tree: FxHashMap<NodeId, bool> = FxHashMap::default();
+    let mut in_tree: FxHashSet<NodeId> = FxHashSet::default();
     let mut mst_edges: Vec<(NodeId, NodeId, EdgeId, f64)> = Vec::new();
     let mut total_weight = 0.0;
+    let mut heap: BinaryHeap<Candidate> = BinaryHeap::new();
 
-    // Priority queue: (weight, source, target, edge_id)
-    let mut heap: BinaryHeap<MinScored<f64, (NodeId, NodeId, EdgeId)>> = BinaryHeap::new();
-
-    // Start with the first node
-    in_tree.insert(start_node, true);
-
-    // Add edges from start node
-    for (neighbor, edge_id) in store.edges(start_node, Direction::Outgoing) {
-        let weight = store.edge_number(edge_id, weight_property, 1.0);
-        heap.push(MinScored::new(weight, (start_node, neighbor, edge_id)));
-    }
-
-    // Also consider incoming edges (for undirected behavior)
-    for &other in &nodes {
-        for (neighbor, edge_id) in store.edges(other, Direction::Outgoing) {
-            if neighbor == start_node {
-                let weight = store.edge_number(edge_id, weight_property, 1.0);
-                heap.push(MinScored::new(weight, (other, start_node, edge_id)));
+    // The edges of a node that joins the tree, in either direction, each toward the node it would
+    // add, as stored.
+    let push_edges = |node: NodeId,
+                      in_tree: &FxHashSet<NodeId>,
+                      heap: &mut BinaryHeap<Candidate>,
+                      ticker: &mut Ticker|
+     -> grafeo_common::utils::error::Result<()> {
+        for (direction, outgoing) in [(Direction::Outgoing, true), (Direction::Incoming, false)] {
+            for (other, edge) in store.edges(node, direction) {
+                ticker.tick()?;
+                if in_tree.contains(&other) {
+                    continue;
+                }
+                let weight = store.edge_weight(edge, weight_property, WEIGHT)?;
+                let (src, dst) = if outgoing {
+                    (node, other)
+                } else {
+                    (other, node)
+                };
+                heap.push(Candidate {
+                    weight,
+                    edge,
+                    src,
+                    dst,
+                    adds: other,
+                });
             }
         }
-    }
+        Ok(())
+    };
 
-    while let Some(MinScored(weight, (src, dst, edge_id))) = heap.pop() {
-        // Skip if target already in tree
-        if *in_tree.get(&dst).unwrap_or(&false) {
+    in_tree.insert(start_node);
+    push_edges(start_node, &in_tree, &mut heap, &mut ticker)?;
+
+    while let Some(candidate) = heap.pop() {
+        ticker.tick()?;
+        if !in_tree.insert(candidate.adds) {
             continue;
         }
-
-        // Add edge to MST
-        in_tree.insert(dst, true);
-        mst_edges.push((src, dst, edge_id, weight));
-        total_weight += weight;
-
-        // Add edges from new node
-        for (neighbor, new_edge_id) in store.edges(dst, Direction::Outgoing) {
-            if !*in_tree.get(&neighbor).unwrap_or(&false) {
-                let new_weight = store.edge_number(new_edge_id, weight_property, 1.0);
-                heap.push(MinScored::new(new_weight, (dst, neighbor, new_edge_id)));
-            }
-        }
-
-        // Also consider incoming edges
-        for &other in &nodes {
-            if !*in_tree.get(&other).unwrap_or(&false) {
-                for (neighbor, new_edge_id) in store.edges(other, Direction::Outgoing) {
-                    if neighbor == dst {
-                        let new_weight = store.edge_number(new_edge_id, weight_property, 1.0);
-                        heap.push(MinScored::new(new_weight, (other, dst, new_edge_id)));
-                    }
-                }
-            }
-        }
-
-        // MST has n-1 edges
+        mst_edges.push((
+            candidate.src,
+            candidate.dst,
+            candidate.edge,
+            candidate.weight,
+        ));
+        total_weight += candidate.weight;
         if mst_edges.len() == n - 1 {
             break;
         }
+        push_edges(candidate.adds, &in_tree, &mut heap, &mut ticker)?;
     }
 
-    MstResult {
+    Ok(MstResult {
         edges: mst_edges,
         total_weight,
+    })
+}
+
+/// An edge Prim's search may take next: the lightest first, then the lowest edge id, so of
+/// several edges between two nodes, in either direction, the lightest is taken.
+struct Candidate {
+    weight: f64,
+    edge: EdgeId,
+    /// The edge as stored.
+    src: NodeId,
+    dst: NodeId,
+    /// The node outside the tree that it adds.
+    adds: NodeId,
+}
+
+impl Ord for Candidate {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        // Reversed for a min-heap.
+        score_order(other.weight, self.weight).then(other.edge.cmp(&self.edge))
     }
 }
+
+impl PartialOrd for Candidate {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl PartialEq for Candidate {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other).is_eq()
+    }
+}
+
+impl Eq for Candidate {}
 
 // ============================================================================
 // Algorithm Wrappers for Plugin Registry
@@ -306,6 +339,7 @@ fn kruskal_params() -> &'static [ParameterDef] {
             param_type: ParameterType::String,
             required: false,
             default: None,
+            domain: Domain::OfType,
         }]
     })
 }
@@ -318,10 +352,10 @@ impl_algorithm! {
     name: "kruskal",
     description: "Kruskal's Minimum Spanning Tree algorithm",
     params: kruskal_params,
-    execute(store, params) {
+    compute(store, params) {
         let weight_prop = params.get_string("weight");
 
-        let result = kruskal_on(store, weight_prop);
+        let result = kruskal_on(store, weight_prop)?;
 
         let mut output = AlgorithmResult::new(vec![
             "source".to_string(),
@@ -357,6 +391,7 @@ fn prim_params() -> &'static [ParameterDef] {
                 param_type: ParameterType::String,
                 required: false,
                 default: None,
+                domain: Domain::OfType,
             },
             ParameterDef {
                 name: "start".to_string(),
@@ -364,6 +399,7 @@ fn prim_params() -> &'static [ParameterDef] {
                 param_type: ParameterType::NodeId,
                 required: false,
                 default: None,
+                domain: Domain::OfType,
             },
         ]
     })
@@ -377,11 +413,11 @@ impl_algorithm! {
     name: "prim",
     description: "Prim's Minimum Spanning Tree algorithm",
     params: prim_params,
-    execute(store, params) {
+    compute(store, params) {
         let weight_prop = params.get_string("weight");
         let start = params.get_int("start").map(|id| node_id_from_param(id, "start")).transpose()?;
 
-        let result = prim_on(store, weight_prop, start);
+        let result = prim_on(store, weight_prop, start)?;
 
         let mut output = AlgorithmResult::new(vec![
             "source".to_string(),

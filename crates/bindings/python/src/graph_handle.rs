@@ -70,10 +70,11 @@ impl PyGraphHandle {
         params: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PyQueryResult> {
         let params = direct::params(params)?;
-        without_gil(py, || {
+        let result = without_gil(py, || {
             let db = self.db.read();
             direct::run(&self.session(&db)?, language, query, params)
-        })
+        });
+        direct::surfaced(py, result)
     }
 
     /// Runs `call` with a session working in this graph.

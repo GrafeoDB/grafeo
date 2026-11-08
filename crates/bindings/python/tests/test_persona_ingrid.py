@@ -59,6 +59,7 @@ def upgraded(tmp_path):
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.requires("triple-store")
 def test_persona_ingrid_looks_at_the_old_file_read_only_first(tmp_path):
     path = tmp_path / "prod.grafeo"
     shutil.copy(RELEASED, path)
@@ -70,6 +71,7 @@ def test_persona_ingrid_looks_at_the_old_file_read_only_first(tmp_path):
     assert path.read_bytes() == before
 
 
+@pytest.mark.requires("triple-store")
 def test_persona_ingrid_upgrades_and_keeps_the_old_file(tmp_path):
     path = tmp_path / "prod.grafeo"
     shutil.copy(RELEASED, path)
@@ -104,6 +106,7 @@ def test_persona_ingrid_upgrades_and_keeps_the_old_file(tmp_path):
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.requires("triple-store")
 def test_persona_ingrid_restores_each_epoch_of_a_backup_chain(upgraded, tmp_path):
     backups = tmp_path / "backups"
     db = grafeo.GrafeoDB.open(str(upgraded))
@@ -124,6 +127,7 @@ def test_persona_ingrid_restores_each_epoch_of_a_backup_chain(upgraded, tmp_path
         restored.close()
 
 
+@pytest.mark.requires("triple-store")
 def test_persona_ingrid_will_not_restore_over_a_database(upgraded, tmp_path):
     backups = tmp_path / "backups"
     db = grafeo.GrafeoDB.open(str(upgraded))
@@ -197,6 +201,7 @@ def test_persona_ingrid_backs_up_an_in_memory_database(tmp_path):
     "mistake",
     ["a folder with no backup", "an incremental before any full", "an epoch no backup covers"],
 )
+@pytest.mark.requires("triple-store")
 def test_persona_ingrid_gets_a_clear_error_for_an_operator_mistake(mistake, upgraded, tmp_path):
     backups = tmp_path / "backups"
     with pytest.raises(grafeo.GrafeoError) as caught:

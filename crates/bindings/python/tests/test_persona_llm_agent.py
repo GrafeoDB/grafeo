@@ -71,6 +71,7 @@ def test_persona_llm_agent_queries_built_from_the_schema_agree_with_it(db):
         assert nodes + edges > 0, f"{key} is listed but no element holds it"
 
 
+@pytest.mark.requires("algos")
 def test_persona_llm_agent_the_procedure_listing_names_its_columns(db):
     listing = db.execute("CALL grafeo.procedures()").to_list()
     pagerank = next(row for row in listing if row["name"] == "grafeo.pagerank")
@@ -181,7 +182,14 @@ RETRIES = [
 ]
 
 
-@pytest.mark.parametrize("query, params, words, status, retry", RETRIES)
+# A query that calls a procedure needs a build with the procedures.
+RETRY_CASES = [
+    pytest.param(*case, marks=pytest.mark.requires("algos")) if "CALL grafeo." in case[0] else case
+    for case in RETRIES
+]
+
+
+@pytest.mark.parametrize("query, params, words, status, retry", RETRY_CASES)
 def test_persona_llm_agent_retries_from_the_error(db, query, params, words, status, retry):
     with pytest.raises(grafeo.GrafeoError) as caught:
         db.execute(query, params) if params else db.execute(query)

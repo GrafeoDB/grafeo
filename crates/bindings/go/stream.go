@@ -28,6 +28,8 @@ import (
 type ResultStream struct {
 	handle  *C.GrafeoStream
 	columns []string
+	// warnings is what the stream had when it was closed.
+	warnings []QueryWarning
 }
 
 // ErrStreamClosed is returned by Next after Close has been called.
@@ -35,6 +37,7 @@ var ErrStreamClosed = errors.New("grafeo: stream is closed")
 
 // ExecuteStream opens a lazy cursor over a read-only GQL query.
 func (db *Database) ExecuteStream(query string) (*ResultStream, error) {
+	defer runtime.KeepAlive(db)
 	cQuery := C.CString(query)
 	defer C.free(unsafe.Pointer(cQuery))
 
@@ -63,9 +66,34 @@ func (s *ResultStream) Columns() []string {
 	return s.columns
 }
 
+// Warnings returns the warnings the statement raised so far, ordered by
+// code: its translation's from the open, its run's as the rows that raise
+// them are pulled, all of them once Next returned (nil, nil). After Close it
+// returns what the stream had when it was closed.
+//
+// Experimental (0.6.2+).
+func (s *ResultStream) Warnings() []QueryWarning {
+	defer runtime.KeepAlive(s)
+	if s.handle == nil {
+		return s.warnings
+	}
+	count := int(C.grafeo_stream_warning_count(s.handle))
+	warnings := make([]QueryWarning, 0, count)
+	for i := 0; i < count; i++ {
+		index := C.size_t(i)
+		warnings = append(warnings, QueryWarning{
+			Code:    C.GoString(C.grafeo_stream_warning_code(s.handle, index)),
+			Kind:    C.GoString(C.grafeo_stream_warning_kind(s.handle, index)),
+			Message: C.GoString(C.grafeo_stream_warning_message(s.handle, index)),
+		})
+	}
+	return warnings
+}
+
 // Next pulls the next row as a map keyed by column name. Returns (nil, nil)
 // when the stream is exhausted.
 func (s *ResultStream) Next() (map[string]any, error) {
+	defer runtime.KeepAlive(s)
 	if s.handle == nil {
 		return nil, ErrStreamClosed
 	}
@@ -122,7 +150,9 @@ func (s *ResultStream) Collect() ([]map[string]any, error) {
 
 // Close releases the underlying Rust iterator. Safe to call multiple times.
 func (s *ResultStream) Close() {
+	defer runtime.KeepAlive(s)
 	if s.handle != nil {
+		s.warnings = s.Warnings()
 		C.grafeo_stream_free(s.handle)
 		s.handle = nil
 		runtime.SetFinalizer(s, nil)
@@ -131,6 +161,7 @@ func (s *ResultStream) Close() {
 
 // finalize is the Go finalizer for leak prevention.
 func (s *ResultStream) finalize() {
+	defer runtime.KeepAlive(s)
 	if s.handle != nil {
 		C.grafeo_stream_free(s.handle)
 		s.handle = nil

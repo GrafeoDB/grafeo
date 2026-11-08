@@ -15,8 +15,8 @@ use grafeo_core::graph::GraphStore;
 #[cfg(test)]
 use grafeo_core::graph::rowgroup::RowGroupStore;
 
-use super::super::{AlgorithmResult, ParameterDef, ParameterType, Parameters};
-use super::traits::{GraphAlgorithm, NodeValueResultBuilder, impl_algorithm, int_value};
+use super::super::{AlgorithmResult, Domain, ParameterDef, ParameterType, Prepared};
+use super::traits::{GraphAlgorithm, NodeValueResultBuilder, Ticker, impl_algorithm, int_value};
 
 // ============================================================================
 // Degree Centrality
@@ -59,11 +59,14 @@ pub fn degree_centrality(
 ) -> grafeo_common::utils::error::Result<DegreeCentralityResult> {
     let graph = super::traits::GraphView::new(store, view);
     let found = degree_centrality_on(&graph);
-    graph.finish(found)
+    graph.finish(found)?
 }
 
 /// [`degree_centrality`] on the graph a [`GraphView`](super::traits::GraphView) reads.
-pub(crate) fn degree_centrality_on(store: &super::traits::GraphView<'_>) -> DegreeCentralityResult {
+pub(crate) fn degree_centrality_on(
+    store: &super::traits::GraphView<'_>,
+) -> grafeo_common::utils::error::Result<DegreeCentralityResult> {
+    let mut ticker = Ticker::new();
     let mut in_degree: FxHashMap<NodeId, usize> = FxHashMap::default();
     let mut out_degree: FxHashMap<NodeId, usize> = FxHashMap::default();
 
@@ -77,11 +80,13 @@ pub(crate) fn degree_centrality_on(store: &super::traits::GraphView<'_>) -> Degr
 
     // Count degrees
     for &node in &nodes {
+        ticker.tick()?;
         let out_edges = store.edges(node, Direction::Outgoing);
         out_degree.insert(node, out_edges.len());
 
         // For incoming edges, we count edges targeting this node
         for (neighbor, _) in out_edges {
+            ticker.tick()?;
             *in_degree.entry(neighbor).or_insert(0) += 1;
         }
     }
@@ -96,11 +101,11 @@ pub(crate) fn degree_centrality_on(store: &super::traits::GraphView<'_>) -> Degr
         })
         .collect();
 
-    DegreeCentralityResult {
+    Ok(DegreeCentralityResult {
         in_degree,
         out_degree,
         total_degree,
-    }
+    })
 }
 
 /// Computes normalized degree centrality.
@@ -116,30 +121,30 @@ pub fn degree_centrality_normalized(
 ) -> grafeo_common::utils::error::Result<FxHashMap<NodeId, f64>> {
     let graph = super::traits::GraphView::new(store, view);
     let found = degree_centrality_normalized_on(&graph);
-    graph.finish(found)
+    graph.finish(found)?
 }
 
 /// [`degree_centrality_normalized`] on the graph a [`GraphView`](super::traits::GraphView) reads.
 pub(crate) fn degree_centrality_normalized_on(
     store: &super::traits::GraphView<'_>,
-) -> FxHashMap<NodeId, f64> {
-    let result = degree_centrality_on(store);
+) -> grafeo_common::utils::error::Result<FxHashMap<NodeId, f64>> {
+    let result = degree_centrality_on(store)?;
     let n = result.total_degree.len();
 
     if n <= 1 {
-        return result
+        return Ok(result
             .total_degree
             .into_iter()
             .map(|(k, _)| (k, 0.0))
-            .collect();
+            .collect());
     }
 
     let norm = (n - 1) as f64;
-    result
+    Ok(result
         .total_degree
         .into_iter()
         .map(|(k, v)| (k, v as f64 / norm))
-        .collect()
+        .collect())
 }
 
 // ============================================================================
@@ -182,8 +187,16 @@ pub fn pagerank(
     directed: bool,
 ) -> grafeo_common::utils::error::Result<FxHashMap<NodeId, f64>> {
     let graph = super::traits::GraphView::new(store, view);
-    let found = pagerank_on(&graph, damping, max_iterations, tolerance, directed);
-    graph.finish(found)
+    let found =
+        pagerank_on(&graph, damping, max_iterations, tolerance, directed).map(|found| found.scores);
+    graph.finish(found)?
+}
+
+/// The scores of a power iteration, and whether they settled: an iteration changed none of
+/// them by `tolerance` or more before `max_iterations` ran out.
+pub(crate) struct Scores {
+    pub(crate) scores: FxHashMap<NodeId, f64>,
+    pub(crate) converged: bool,
 }
 
 /// [`pagerank`] on the graph a [`GraphView`](super::traits::GraphView) reads.
@@ -193,7 +206,7 @@ pub(crate) fn pagerank_on(
     max_iterations: usize,
     tolerance: f64,
     directed: bool,
-) -> FxHashMap<NodeId, f64> {
+) -> grafeo_common::utils::error::Result<Scores> {
     pagerank_in_order_on(
         store,
         &store.node_ids(),
@@ -228,8 +241,9 @@ pub fn pagerank_in_order(
     directed: bool,
 ) -> grafeo_common::utils::error::Result<FxHashMap<NodeId, f64>> {
     let graph = super::traits::GraphView::new(store, view);
-    let found = pagerank_in_order_on(&graph, nodes, damping, max_iterations, tolerance, directed);
-    graph.finish(found)
+    let found = pagerank_in_order_on(&graph, nodes, damping, max_iterations, tolerance, directed)
+        .map(|found| found.scores);
+    graph.finish(found)?
 }
 
 /// [`pagerank_in_order`] on the graph a [`GraphView`](super::traits::GraphView) reads.
@@ -240,11 +254,15 @@ pub(crate) fn pagerank_in_order_on(
     max_iterations: usize,
     tolerance: f64,
     directed: bool,
-) -> FxHashMap<NodeId, f64> {
+) -> grafeo_common::utils::error::Result<Scores> {
+    let mut ticker = Ticker::new();
     let n = nodes.len();
 
     if n == 0 {
-        return FxHashMap::default();
+        return Ok(Scores {
+            scores: FxHashMap::default(),
+            converged: true,
+        });
     }
 
     // Build node index mapping for efficient access
@@ -257,6 +275,7 @@ pub(crate) fn pagerank_in_order_on(
     let mut out_edges: Vec<Vec<usize>> = vec![Vec::new(); n];
     for (idx, &node) in nodes.iter().enumerate() {
         for (neighbor, _) in store.edges(node, Direction::Outgoing) {
+            ticker.tick()?;
             let Some(&j) = node_to_idx.get(&neighbor) else {
                 continue;
             };
@@ -292,6 +311,7 @@ pub(crate) fn pagerank_in_order_on(
     let dangling: Vec<usize> = (0..n).filter(|&i| out_degree[i] == 0).collect();
 
     // Power iteration
+    let mut converged = false;
     for _ in 0..max_iterations {
         // Compute dangling contribution
         let dangling_sum: f64 = dangling.iter().map(|&i| scores[i]).sum();
@@ -301,8 +321,10 @@ pub(crate) fn pagerank_in_order_on(
         let teleport = (1.0 - damping) / n as f64;
         new_scores.fill(teleport + dangling_contrib);
 
-        // Add contributions from incoming edges
+        // Add contributions from incoming edges, a unit of work per node: the inner loop is the
+        // hot one, and a node's edges are bounded by the graph's.
         for (i, edges) in out_edges.iter().enumerate() {
+            ticker.tick()?;
             if !edges.is_empty() {
                 let contrib = damping * scores[i] / edges.len() as f64;
                 for &j in edges {
@@ -321,16 +343,20 @@ pub(crate) fn pagerank_in_order_on(
         std::mem::swap(&mut scores, &mut new_scores);
 
         if max_diff < tolerance {
+            converged = true;
             break;
         }
     }
 
     // Convert back to NodeId map
-    nodes
-        .iter()
-        .enumerate()
-        .map(|(idx, &node)| (node, scores[idx]))
-        .collect()
+    Ok(Scores {
+        scores: nodes
+            .iter()
+            .enumerate()
+            .map(|(idx, &node)| (node, scores[idx]))
+            .collect(),
+        converged,
+    })
 }
 
 /// The visible out-neighbours of each of `nodes` among `nodes`, in adjacency
@@ -339,19 +365,21 @@ pub(crate) fn pagerank_in_order_on(
 /// node outside them.
 fn out_neighbors(
     store: &super::traits::GraphView<'_>,
+    ticker: &mut Ticker,
     nodes: &[NodeId],
-) -> FxHashMap<NodeId, Vec<NodeId>> {
+) -> grafeo_common::utils::error::Result<FxHashMap<NodeId, Vec<NodeId>>> {
     let members: FxHashSet<NodeId> = nodes.iter().copied().collect();
     nodes
         .iter()
         .map(|&node| {
+            ticker.tick()?;
             let neighbors = store
                 .edges(node, Direction::Outgoing)
                 .into_iter()
                 .map(|(neighbor, _)| neighbor)
                 .filter(|neighbor| members.contains(neighbor))
                 .collect();
-            (node, neighbors)
+            Ok((node, neighbors))
         })
         .collect()
 }
@@ -392,14 +420,15 @@ pub fn betweenness_centrality(
 ) -> grafeo_common::utils::error::Result<FxHashMap<NodeId, f64>> {
     let graph = super::traits::GraphView::new(store, view);
     let found = betweenness_centrality_on(&graph, normalized);
-    graph.finish(found)
+    graph.finish(found)?
 }
 
 /// [`betweenness_centrality`] on the graph a [`GraphView`](super::traits::GraphView) reads.
 pub(crate) fn betweenness_centrality_on(
     store: &super::traits::GraphView<'_>,
     normalized: bool,
-) -> FxHashMap<NodeId, f64> {
+) -> grafeo_common::utils::error::Result<FxHashMap<NodeId, f64>> {
+    let mut ticker = Ticker::new();
     let nodes = store.node_ids();
     let n = nodes.len();
 
@@ -409,10 +438,10 @@ pub(crate) fn betweenness_centrality_on(
     }
 
     if n <= 2 {
-        return centrality;
+        return Ok(centrality);
     }
 
-    let neighbors = out_neighbors(store, &nodes);
+    let neighbors = out_neighbors(store, &mut ticker, &nodes)?;
 
     // Brandes' algorithm: run BFS from each source
     for &source in &nodes {
@@ -440,6 +469,7 @@ pub(crate) fn betweenness_centrality_on(
             let dist_v = *dist.get(&v).expect("BFS: node popped from queue has dist");
 
             for &w in &neighbors[&v] {
+                ticker.tick()?;
                 // First visit?
                 if *dist.get(&w).expect("BFS: all nodes initialized with dist") < 0 {
                     dist.insert(w, dist_v + 1);
@@ -476,6 +506,7 @@ pub(crate) fn betweenness_centrality_on(
                 .expect("BFS: all nodes initialized with delta");
 
             for v in predecessors.get(&w).unwrap_or(&Vec::new()) {
+                ticker.tick()?;
                 let sigma_v = *sigma.get(v).expect("BFS: all nodes initialized with sigma");
                 let coeff = (sigma_v / sigma_w) * (1.0 + delta_w);
                 *delta.entry(*v).or_insert(0.0) += coeff;
@@ -493,7 +524,7 @@ pub(crate) fn betweenness_centrality_on(
         }
     }
 
-    centrality
+    Ok(centrality)
 }
 
 // ============================================================================
@@ -532,14 +563,15 @@ pub fn closeness_centrality(
 ) -> grafeo_common::utils::error::Result<FxHashMap<NodeId, f64>> {
     let graph = super::traits::GraphView::new(store, view);
     let found = closeness_centrality_on(&graph, wf_improved);
-    graph.finish(found)
+    graph.finish(found)?
 }
 
 /// [`closeness_centrality`] on the graph a [`GraphView`](super::traits::GraphView) reads.
 pub(crate) fn closeness_centrality_on(
     store: &super::traits::GraphView<'_>,
     wf_improved: bool,
-) -> FxHashMap<NodeId, f64> {
+) -> grafeo_common::utils::error::Result<FxHashMap<NodeId, f64>> {
+    let mut ticker = Ticker::new();
     let nodes = store.node_ids();
     let n = nodes.len();
 
@@ -549,10 +581,10 @@ pub(crate) fn closeness_centrality_on(
         for &node in &nodes {
             centrality.insert(node, 0.0);
         }
-        return centrality;
+        return Ok(centrality);
     }
 
-    let neighbors = out_neighbors(store, &nodes);
+    let neighbors = out_neighbors(store, &mut ticker, &nodes)?;
 
     for &source in &nodes {
         // BFS to find shortest paths
@@ -566,6 +598,7 @@ pub(crate) fn closeness_centrality_on(
             let dist_v = *dist.get(&v).expect("BFS: node popped from queue has dist");
 
             for &w in &neighbors[&v] {
+                ticker.tick()?;
                 if !dist.contains_key(&w) {
                     dist.insert(w, dist_v + 1);
                     queue.push_back(w);
@@ -594,7 +627,7 @@ pub(crate) fn closeness_centrality_on(
         centrality.insert(source, closeness);
     }
 
-    centrality
+    Ok(centrality)
 }
 
 // ============================================================================
@@ -613,6 +646,7 @@ fn pagerank_params() -> &'static [ParameterDef] {
                 param_type: ParameterType::Float,
                 required: false,
                 default: Some("0.85".to_string()),
+                domain: Domain::Unit,
             },
             ParameterDef {
                 name: "max_iterations".to_string(),
@@ -620,6 +654,7 @@ fn pagerank_params() -> &'static [ParameterDef] {
                 param_type: ParameterType::Integer,
                 required: false,
                 default: Some("100".to_string()),
+                domain: Domain::NonNegative,
             },
             ParameterDef {
                 name: "tolerance".to_string(),
@@ -627,6 +662,7 @@ fn pagerank_params() -> &'static [ParameterDef] {
                 param_type: ParameterType::Float,
                 required: false,
                 default: Some("1e-6".to_string()),
+                domain: Domain::NonNegative,
             },
             ParameterDef {
                 name: "directed".to_string(),
@@ -635,6 +671,7 @@ fn pagerank_params() -> &'static [ParameterDef] {
                 param_type: ParameterType::Boolean,
                 required: false,
                 default: Some("true".to_string()),
+                domain: Domain::OfType,
             },
         ]
     })
@@ -648,22 +685,26 @@ impl_algorithm! {
     name: "pagerank",
     description: "PageRank algorithm for measuring node importance",
     params: pagerank_params,
-    execute(store, params) {
-        let damping = params.get_float("damping").unwrap_or(0.85);
+    compute(store, params) {
+        let damping = params.required_float("damping")?;
         // Clamp to non-negative: negative iterations treated as 0
-        let max_iter = usize::try_from(params.get_int("max_iterations").unwrap_or(100)).unwrap_or(0);
-        let tolerance = params.get_float("tolerance").unwrap_or(1e-6);
-        let directed = params.get_bool("directed").unwrap_or(true);
+        let max_iter = params.required_count("max_iterations")?;
+        let tolerance = params.required_float("tolerance")?;
+        let directed = params.required_bool("directed")?;
 
-        let scores = pagerank_on(store, damping, max_iter, tolerance, directed);
+        let found = pagerank_on(store, damping, max_iter, tolerance, directed)?;
 
-        let mut builder = NodeValueResultBuilder::with_capacity("pagerank", scores.len());
-        for (node, score) in scores {
+        let mut builder = NodeValueResultBuilder::with_capacity("pagerank", found.scores.len());
+        for (node, score) in found.scores {
             builder.push(node, Value::Float64(score));
         }
 
         let mut result = builder.build();
         result.sort_by_id_columns(1);
+        // A tolerance of 0 asks for every iteration, so running them all is no news.
+        if !found.converged && tolerance > 0.0 {
+            result = result.with_warning(grafeo_common::utils::warning::Warning::NotConverged);
+        }
         Ok(result)
     }
 }
@@ -679,6 +720,7 @@ fn betweenness_params() -> &'static [ParameterDef] {
             param_type: ParameterType::Boolean,
             required: false,
             default: Some("true".to_string()),
+            domain: Domain::OfType,
         }]
     })
 }
@@ -691,10 +733,10 @@ impl_algorithm! {
     name: "betweenness_centrality",
     description: "Betweenness centrality using Brandes' algorithm",
     params: betweenness_params,
-    execute(store, params) {
-        let normalized = params.get_bool("normalized").unwrap_or(true);
+    compute(store, params) {
+        let normalized = params.required_bool("normalized")?;
 
-        let scores = betweenness_centrality_on(store, normalized);
+        let scores = betweenness_centrality_on(store, normalized)?;
 
         let mut builder = NodeValueResultBuilder::with_capacity("betweenness", scores.len());
         for (node, score) in scores {
@@ -719,6 +761,7 @@ fn closeness_params() -> &'static [ParameterDef] {
             param_type: ParameterType::Boolean,
             required: false,
             default: Some("false".to_string()),
+            domain: Domain::OfType,
         }]
     })
 }
@@ -731,10 +774,10 @@ impl_algorithm! {
     name: "closeness_centrality",
     description: "Closeness centrality based on shortest path distances",
     params: closeness_params,
-    execute(store, params) {
-        let wf_improved = params.get_bool("wf_improved").unwrap_or(false);
+    compute(store, params) {
+        let wf_improved = params.required_bool("wf_improved")?;
 
-        let scores = closeness_centrality_on(store, wf_improved);
+        let scores = closeness_centrality_on(store, wf_improved)?;
 
         let mut builder = NodeValueResultBuilder::with_capacity("closeness", scores.len());
         for (node, score) in scores {
@@ -758,6 +801,7 @@ fn degree_params() -> &'static [ParameterDef] {
             param_type: ParameterType::Boolean,
             required: false,
             default: Some("false".to_string()),
+            domain: Domain::OfType,
         }]
     })
 }
@@ -778,19 +822,19 @@ impl GraphAlgorithm for DegreeCentralityAlgorithm {
         degree_params()
     }
 
-    fn execute(
+    fn compute(
         &self,
         store: &dyn GraphStore,
         view: grafeo_common::types::ReadView,
-        params: &Parameters,
+        params: &Prepared,
     ) -> Result<AlgorithmResult> {
         let graph = super::traits::GraphView::new(store, view);
         let store = &graph;
         let found = super::traits::evaluated(|| {
-            let normalized = params.get_bool("normalized").unwrap_or(false);
+            let normalized = params.required_bool("normalized")?;
 
             if normalized {
-                let scores = degree_centrality_normalized_on(store);
+                let scores = degree_centrality_normalized_on(store)?;
 
                 let mut builder =
                     NodeValueResultBuilder::with_capacity("degree_centrality", scores.len());
@@ -801,7 +845,7 @@ impl GraphAlgorithm for DegreeCentralityAlgorithm {
                 result.sort_by_id_columns(1);
                 Ok(result)
             } else {
-                let result = degree_centrality_on(store);
+                let result = degree_centrality_on(store)?;
 
                 let mut output = AlgorithmResult::new(vec![
                     "node_id".to_string(),
@@ -837,6 +881,7 @@ impl GraphAlgorithm for DegreeCentralityAlgorithm {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::plugins::Parameters;
     use grafeo_common::types::ReadView;
 
     fn create_test_graph() -> RowGroupStore {

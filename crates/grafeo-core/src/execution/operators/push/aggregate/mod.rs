@@ -442,7 +442,7 @@ impl SpillableAggregatePushOperator {
         if should_spill && let Some(ref mut partitioned) = self.partitioned_groups {
             partitioned
                 .spill_largest()
-                .map_err(|e| OperatorError::from(grafeo_common::utils::error::Error::Io(e)))?;
+                .map_err(crate::execution::spill::spill_error)?;
         }
 
         Ok(())
@@ -455,7 +455,7 @@ impl SpillableAggregatePushOperator {
             if partitioned.total_size() >= self.spill_threshold {
                 partitioned
                     .spill_largest()
-                    .map_err(|e| OperatorError::from(grafeo_common::utils::error::Error::Io(e)))?;
+                    .map_err(crate::execution::spill::spill_error)?;
             }
         } else if self.groups.len() >= self.spill_threshold {
             // Not using partitioned state yet, but reached threshold
@@ -473,9 +473,7 @@ impl SpillableAggregatePushOperator {
                 for (key, state) in self.groups.drain(..) {
                     partitioned
                         .insert(key.representatives(), state)
-                        .map_err(|e| {
-                            OperatorError::from(grafeo_common::utils::error::Error::Io(e))
-                        })?;
+                        .map_err(crate::execution::spill::spill_error)?;
                 }
 
                 self.partitioned_groups = Some(partitioned);
@@ -526,9 +524,7 @@ impl PushOperator for SpillableAggregatePushOperator {
                             key_values: RowKey::values_of(&chunk, row, group_by),
                             accumulators: aggregates.iter().map(AggregateState::for_expr).collect(),
                         })
-                        .map_err(|e| {
-                            OperatorError::from(grafeo_common::utils::error::Error::Io(e))
-                        })?;
+                        .map_err(crate::execution::spill::spill_error)?;
 
                     for (acc, expr) in state.accumulators.iter_mut().zip(&self.aggregates) {
                         update_accumulator(acc, expr, &chunk, row);
@@ -590,7 +586,7 @@ impl PushOperator for SpillableAggregatePushOperator {
             if let Some(ref mut partitioned) = self.partitioned_groups {
                 let groups = partitioned
                     .drain_all()
-                    .map_err(|e| OperatorError::from(grafeo_common::utils::error::Error::Io(e)))?;
+                    .map_err(crate::execution::spill::spill_error)?;
 
                 for (_key, state) in groups {
                     // Output group key columns

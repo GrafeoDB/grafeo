@@ -22,6 +22,11 @@ use crate::types;
 
 /// The property filters of a search, converted by [`types::js_to_value`]
 /// when the call is made.
+#[cfg(any(
+    feature = "vector-index",
+    feature = "text-index",
+    feature = "hybrid-search"
+))]
 fn convert_json_filters(
     filters: Option<types::Properties>,
 ) -> Result<Option<HashMap<String, Value>>> {
@@ -59,6 +64,7 @@ pub(crate) fn validate_edge_id(id: f64) -> Result<EdgeId> {
 }
 
 /// Validate a JavaScript number as an epoch (see [`whole_id`]).
+#[cfg(any(feature = "storage", feature = "cdc"))]
 fn validate_epoch(epoch: f64) -> Result<grafeo_common::types::EpochId> {
     whole_id(epoch)
         .map(grafeo_common::types::EpochId::new)
@@ -179,6 +185,32 @@ pub struct CreateOptions {
     /// default); `null` or `Infinity` runs queries without a limit.
     #[napi(ts_type = "number | null")]
     pub query_timeout: Option<Either<f64, Null>>,
+    /// How many bytes of WAL a checkpoint keeps at most for the next
+    /// incremental backup (1 GiB by default). Past it, the oldest part goes
+    /// and the next incremental backup fails, asking for a full backup. For
+    /// this open only.
+    pub wal_retention_limit: Option<i64>,
+    /// How many bytes of WAL past the last checkpoint make the database
+    /// checkpoint by itself, on a background thread: 256 MiB when left out,
+    /// at least 1 MiB. `null` turns automatic checkpoints off: the WAL then
+    /// grows until close or `walCheckpoint()`. For this open only.
+    #[napi(ts_type = "number | null")]
+    pub checkpoint_wal_size: Option<Either<i64, Null>>,
+    /// The size a WAL file grows to before the log goes on in a new one:
+    /// 64 MiB by default, from 1 MiB to 1 GiB. A checkpoint removes whole
+    /// files and keeps one segment of free disk space for the WAL. For this
+    /// open only.
+    pub wal_segment_size: Option<i64>,
+}
+
+/// A size in bytes from the option `what`: an error for a negative number.
+fn size_option(bytes: i64, what: &str) -> Result<u64> {
+    u64::try_from(bytes).map_err(|_| {
+        NodeGrafeoError::InvalidArgument(format!(
+            "{what} must be a number of bytes, not negative: {bytes}"
+        ))
+        .into()
+    })
 }
 
 /// The query timeout `options.queryTimeout` sets: `None` for `null` or
@@ -222,14 +254,23 @@ impl JsGrafeoDB {
             .and_then(|options| options.shuffle_unordered)
             .unwrap_or(false);
         let mut config = config.with_shuffle_unordered(shuffle_unordered);
-        let (wal_salvage, history_retention, timeout) =
-            options.map_or((None, None, None), |options| {
-                (
-                    options.wal_salvage,
-                    options.history_retention,
-                    options.query_timeout,
-                )
-            });
+        let (
+            wal_salvage,
+            history_retention,
+            timeout,
+            wal_retention_limit,
+            checkpoint_wal_size,
+            wal_segment_size,
+        ) = options.map_or((None, None, None, None, None, None), |options| {
+            (
+                options.wal_salvage,
+                options.history_retention,
+                options.query_timeout,
+                options.wal_retention_limit,
+                options.checkpoint_wal_size,
+                options.wal_segment_size,
+            )
+        });
         if wal_salvage.unwrap_or(false) {
             config = config.with_wal_salvage();
         }
@@ -242,6 +283,19 @@ impl JsGrafeoDB {
         if let Some(retention) = history_retention {
             config =
                 config.with_history_retention(crate::time_travel::history_retention(retention)?);
+        }
+        if let Some(bytes) = wal_retention_limit {
+            config = config.with_wal_retention_limit(size_option(bytes, "walRetentionLimit")?);
+        }
+        match checkpoint_wal_size {
+            Some(Either::A(bytes)) => {
+                config = config.with_checkpoint_wal_size(size_option(bytes, "checkpointWalSize")?);
+            }
+            Some(Either::B(_)) => config = config.without_checkpoint_wal_size(),
+            None => {}
+        }
+        if let Some(bytes) = wal_segment_size {
+            config = config.with_wal_segment_size(size_option(bytes, "walSegmentSize")?);
         }
         let db = GrafeoDB::with_config(config).map_err(NodeGrafeoError::from)?;
         Ok(Self {
@@ -591,6 +645,21 @@ impl JsGrafeoDB {
         Transaction::new(self.inner.clone(), isolation_level.as_deref())
     }
 
+    /// Open a session whose limits bind every statement run through it: its
+    /// `execute` methods, its transactions and its streams.
+    ///
+    /// `readOnly: true` refuses writes. `externalAccess: false` refuses every
+    /// statement that reads or writes outside the database (`LOAD DATA`,
+    /// `LOAD CSV`, the load procedures, SPARQL `LOAD`) before any file is
+    /// opened, with an error of GQLSTATUS class 42 that names external
+    /// access. The two are independent: `readOnly: true` keeps file access
+    /// unless `externalAccess: false` is passed too. With no options the
+    /// session runs as `db.execute` does. An unknown option is an error.
+    #[napi(ts_args_type = "options?: { readOnly?: boolean; externalAccess?: boolean }")]
+    pub fn session(&self, options: Option<Object<'_>>) -> Result<crate::session::JsSession> {
+        crate::session::JsSession::open(Arc::clone(&self.inner), options.as_ref())
+    }
+
     /// Create a vector similarity index on a node property.
     #[napi(js_name = "createVectorIndex")]
     #[allow(clippy::too_many_arguments)]
@@ -618,51 +687,6 @@ impl JsGrafeoDB {
             )
             .map_err(NodeGrafeoError::from)
             .map_err(napi::Error::from)
-        })
-        .await
-        .map_err(|e| napi::Error::from_reason(e.to_string()))?
-    }
-
-    /// Search for the k nearest neighbors of a query vector.
-    ///
-    /// Returns an array of [nodeId, distance] pairs sorted by distance
-    /// ascending (lower = more similar). The distance scale depends on
-    /// the metric configured at index creation.
-    #[napi(js_name = "vectorSearch")]
-    // reason: f64->f32 is intentional: HNSW index uses f32 vectors
-    #[allow(clippy::cast_possible_truncation)]
-    pub async fn vector_search(
-        &self,
-        label: String,
-        property: String,
-        query: Vec<f64>,
-        k: u32,
-        ef: Option<u32>,
-        #[napi(ts_arg_type = "Record<string, any> | undefined | null")] filters: Option<
-            types::Properties,
-        >,
-    ) -> Result<Vec<Vec<f64>>> {
-        let filter_map = convert_json_filters(filters)?;
-        let db = self.inner.clone();
-        tokio::task::spawn_blocking(move || {
-            let db = db.read();
-            let query_f32: Vec<f32> = query.iter().map(|&v| v as f32).collect();
-            let results = db
-                .vector_search(
-                    &label,
-                    &property,
-                    &query_f32,
-                    k as usize,
-                    ef.map(|v| v as usize),
-                    filter_map.as_ref(),
-                )
-                .map_err(NodeGrafeoError::from)
-                .map_err(napi::Error::from)?;
-            // Return as [[nodeId, distance], ...] since napi doesn't have tuples
-            Ok(results
-                .into_iter()
-                .map(|(id, dist)| vec![id.as_u64() as f64, dist as f64])
-                .collect::<Vec<Vec<f64>>>())
         })
         .await
         .map_err(|e| napi::Error::from_reason(e.to_string()))?
@@ -781,7 +805,8 @@ impl JsGrafeoDB {
     /// Sets when the database checkpoints by itself: every
     /// `triggers.intervalMs` milliseconds, and once the WAL holds
     /// `triggers.walBytes` bytes since the last checkpoint. Leave both out to
-    /// turn automatic checkpoints off (the default). For this open only.
+    /// turn automatic checkpoints off. For this open only.
+    /// A file database opens with a WAL size of 256 MiB (at least 1 MiB) and no interval.
     /// Throws for a database in memory or opened read-only, and for zero.
     #[napi(js_name = "setCheckpointTriggers")]
     pub fn set_checkpoint_triggers(&self, triggers: CheckpointTriggers) -> Result<()> {
@@ -830,54 +855,6 @@ impl JsGrafeoDB {
         db.wal_checkpoint()
             .map_err(NodeGrafeoError::from)
             .map_err(napi::Error::from)
-    }
-
-    /// Saves the database to a file path.
-    ///
-    /// If in-memory, creates a new persistent database at the given path.
-    /// If file-backed, creates a copy at the new path.
-    /// The copy is a single file, whatever the extension; fails if `path`
-    /// exists. The original database remains unchanged.
-    #[napi]
-    pub fn save(&self, path: String) -> Result<()> {
-        let db = self.inner.read();
-        db.save(path)
-            .map_err(NodeGrafeoError::from)
-            .map_err(napi::Error::from)
-    }
-
-    /// Create a full backup of the database.
-    #[napi]
-    pub fn backup_full(&self, backup_dir: String) -> Result<()> {
-        let db = self.inner.read();
-        db.backup_full(std::path::Path::new(&backup_dir))
-            .map(|_| ())
-            .map_err(NodeGrafeoError::from)
-            .map_err(napi::Error::from)
-    }
-
-    /// Create an incremental backup (WAL records since last backup).
-    #[napi]
-    pub fn backup_incremental(&self, backup_dir: String) -> Result<()> {
-        let db = self.inner.read();
-        db.backup_incremental(std::path::Path::new(&backup_dir))
-            .map(|_| ())
-            .map_err(NodeGrafeoError::from)
-            .map_err(napi::Error::from)
-    }
-
-    /// Restore a database to a specific epoch from a backup chain. An epoch
-    /// past the end of the chain restores the latest state the chain holds.
-    #[napi]
-    pub fn restore_to_epoch(backup_dir: String, epoch: f64, output_path: String) -> Result<()> {
-        let epoch_id = validate_epoch(epoch)?;
-        grafeo_engine::GrafeoDB::restore_to_epoch(
-            std::path::Path::new(&backup_dir),
-            epoch_id,
-            std::path::Path::new(&output_path),
-        )
-        .map_err(NodeGrafeoError::from)
-        .map_err(napi::Error::from)
     }
 
     /// Close the database.
@@ -969,6 +946,55 @@ impl JsGrafeoDB {
 #[cfg(feature = "vector-index")]
 #[napi]
 impl JsGrafeoDB {
+    /// Search for the k nearest neighbors of a query vector.
+    ///
+    /// Returns an array of [nodeId, distance] pairs sorted by distance
+    /// ascending (lower = more similar). The distance scale depends on
+    /// the metric configured at index creation.
+    ///
+    /// Needs the `vector-index` feature (in the default and `full` builds).
+    #[napi(js_name = "vectorSearch")]
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "f64 to f32 is intended: the HNSW index holds f32 vectors"
+    )]
+    pub async fn vector_search(
+        &self,
+        label: String,
+        property: String,
+        query: Vec<f64>,
+        k: u32,
+        ef: Option<u32>,
+        #[napi(ts_arg_type = "Record<string, any> | undefined | null")] filters: Option<
+            types::Properties,
+        >,
+    ) -> Result<Vec<Vec<f64>>> {
+        let filter_map = convert_json_filters(filters)?;
+        let db = self.inner.clone();
+        tokio::task::spawn_blocking(move || {
+            let db = db.read();
+            let query_f32: Vec<f32> = query.iter().map(|&v| v as f32).collect();
+            let results = db
+                .vector_search(
+                    &label,
+                    &property,
+                    &query_f32,
+                    k as usize,
+                    ef.map(|v| v as usize),
+                    filter_map.as_ref(),
+                )
+                .map_err(NodeGrafeoError::from)
+                .map_err(napi::Error::from)?;
+            // Return as [[nodeId, distance], ...] since napi doesn't have tuples
+            Ok(results
+                .into_iter()
+                .map(|(id, dist)| vec![id.as_u64() as f64, dist as f64])
+                .collect::<Vec<Vec<f64>>>())
+        })
+        .await
+        .map_err(|e| napi::Error::from_reason(e.to_string()))?
+    }
+
     /// Drop a vector index for the given label and property.
     /// Returns true if the index existed and was removed.
     #[napi(js_name = "dropVectorIndex")]
@@ -1100,6 +1126,81 @@ impl JsGrafeoDB {
         })
         .await
         .map_err(|e| napi::Error::from_reason(e.to_string()))?
+    }
+}
+
+// Saving, backups and restores need the `storage` feature: a block of its
+// own for the same reason.
+#[cfg(feature = "storage")]
+#[napi]
+impl JsGrafeoDB {
+    /// Saves the database to a file path.
+    ///
+    /// If in-memory, creates a new persistent database at the given path.
+    /// If file-backed, creates a copy at the new path.
+    /// The copy is a single file, whatever the extension; fails if `path`
+    /// exists. The original database remains unchanged.
+    ///
+    /// Needs the `storage` feature (in the default and `full` builds).
+    #[napi]
+    pub fn save(&self, path: String) -> Result<()> {
+        let db = self.inner.read();
+        db.save(path)
+            .map_err(NodeGrafeoError::from)
+            .map_err(napi::Error::from)
+    }
+
+    /// Create a full backup of the database.
+    ///
+    /// Needs the `storage` feature (in the default and `full` builds).
+    #[napi]
+    pub fn backup_full(&self, backup_dir: String) -> Result<()> {
+        let db = self.inner.read();
+        db.backup_full(std::path::Path::new(&backup_dir))
+            .map(|_| ())
+            .map_err(NodeGrafeoError::from)
+            .map_err(napi::Error::from)
+    }
+
+    /// Create an incremental backup (WAL records since last backup).
+    ///
+    /// Needs the `storage` feature (in the default and `full` builds).
+    #[napi]
+    pub fn backup_incremental(&self, backup_dir: String) -> Result<()> {
+        let db = self.inner.read();
+        db.backup_incremental(std::path::Path::new(&backup_dir))
+            .map(|_| ())
+            .map_err(NodeGrafeoError::from)
+            .map_err(napi::Error::from)
+    }
+
+    /// Release the backup cursor: the next backup must be a full one.
+    /// Checkpoints then keep only the WAL a reopen needs. Returns whether
+    /// there was a cursor to release.
+    ///
+    /// Needs the `storage` feature (in the default and `full` builds).
+    #[napi]
+    pub fn release_backup_cursor(&self) -> Result<bool> {
+        let db = self.inner.read();
+        db.release_backup_cursor()
+            .map_err(NodeGrafeoError::from)
+            .map_err(napi::Error::from)
+    }
+
+    /// Restore a database to a specific epoch from a backup chain. An epoch
+    /// past the end of the chain restores the latest state the chain holds.
+    ///
+    /// Needs the `storage` feature (in the default and `full` builds).
+    #[napi]
+    pub fn restore_to_epoch(backup_dir: String, epoch: f64, output_path: String) -> Result<()> {
+        let epoch_id = validate_epoch(epoch)?;
+        grafeo_engine::GrafeoDB::restore_to_epoch(
+            std::path::Path::new(&backup_dir),
+            epoch_id,
+            std::path::Path::new(&output_path),
+        )
+        .map_err(NodeGrafeoError::from)
+        .map_err(napi::Error::from)
     }
 }
 
@@ -1586,7 +1687,12 @@ impl JsGrafeoDB {
     ) -> Result<QueryResult> {
         self.execute_language_impl("sparql", query, params).await
     }
+}
 
+// The general entry point: in every build, whichever languages it has (a
+// language it lacks is an error of the call, as in Python).
+#[napi]
+impl JsGrafeoDB {
     /// Execute a query in a named language (e.g. `"graphql-rdf"`).
     #[napi(js_name = "executeLanguage")]
     pub async fn execute_language(
@@ -1676,6 +1782,7 @@ impl JsGrafeoDB {
 }
 
 /// Options for `createTextIndex`: each the default when absent.
+#[cfg(feature = "text-index")]
 #[napi(object)]
 pub struct TextIndexOptions {
     /// BM25 term frequency saturation, a number of at least 0 (default 1.2).
@@ -1778,6 +1885,7 @@ pub(crate) fn js_result(mut result: EngineQueryResult) -> QueryResult {
     let counters = result.counters;
     let profile = result.profile.take();
     let kind = result.kind;
+    let warnings = grafeo_bindings_common::warning::of_result(&result);
     QueryResult::with_metrics(
         columns,
         result.into_rows(),
@@ -1789,6 +1897,7 @@ pub(crate) fn js_result(mut result: EngineQueryResult) -> QueryResult {
     .with_counters(counters)
     .with_profile(profile)
     .with_kind(kind)
+    .with_warnings(warnings)
 }
 
 /// A node of the engine as a JavaScript node.

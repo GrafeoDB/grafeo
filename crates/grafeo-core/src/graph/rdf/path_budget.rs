@@ -9,15 +9,20 @@ use grafeo_common::clock::Instant;
 use grafeo_common::utils::hash::{FxHashMap, FxHashSet};
 use parking_lot::{RwLock, RwLockReadGuard};
 
+use crate::execution::deadline::Ticker;
 use crate::execution::operators::OperatorError;
 
 /// Local only: charging never calls an allocator manager or evicts a store.
+///
+/// A deadline is read two ways, through a [`Ticker`]. A wait or a retry (a lock wait, an
+/// overlay's poll) reads the clock every time ([`check`](Self::check)). Small work (a visited
+/// state, a scanned candidate, an origin, a row, a charge) counts a unit and reads it on the first
+/// and every [`CLOCK_EVERY`](crate::execution::deadline::CLOCK_EVERY)th ([`tick`](Self::tick)),
+/// so a search that emits nothing still meets its deadline.
 pub(crate) struct PathBudget {
     limit: usize,
     used: usize,
-    deadline: Option<Instant>,
-    #[cfg(test)]
-    polls_left: Option<usize>,
+    ticker: Ticker,
 }
 
 impl PathBudget {
@@ -25,27 +30,19 @@ impl PathBudget {
         Self {
             limit,
             used: 0,
-            deadline,
-            #[cfg(test)]
-            polls_left: None,
+            ticker: Ticker::with_deadline(deadline),
         }
     }
 
+    /// Reads the clock: for a wait or a retry, which may take any time.
     pub(crate) fn check(&mut self) -> Result<(), OperatorError> {
-        #[cfg(test)]
-        if let Some(left) = &mut self.polls_left {
-            if *left == 0 {
-                return Err(OperatorError::Timeout);
-            }
-            *left -= 1;
-        }
-        if self
-            .deadline
-            .is_some_and(|deadline| Instant::now() >= deadline)
-        {
-            return Err(OperatorError::Timeout);
-        }
-        Ok(())
+        self.ticker.check()
+    }
+
+    /// Counts a unit of small work and reads the clock on the first and every
+    /// [`CLOCK_EVERY`](crate::execution::deadline::CLOCK_EVERY)th.
+    pub(crate) fn tick(&mut self) -> Result<(), OperatorError> {
+        self.ticker.tick()
     }
 
     fn exceeded(&self) -> OperatorError {
@@ -56,7 +53,7 @@ impl PathBudget {
     }
 
     pub(crate) fn charge(&mut self, bytes: usize) -> Result<(), OperatorError> {
-        self.check()?;
+        self.tick()?;
         let used = self
             .used
             .checked_add(bytes)
@@ -77,7 +74,7 @@ impl PathBudget {
     pub(crate) fn lock_wait(&mut self) -> Result<Duration, OperatorError> {
         self.check()?;
         let interval = Duration::from_millis(10);
-        Ok(self.deadline.map_or(interval, |deadline| {
+        Ok(self.ticker.deadline().map_or(interval, |deadline| {
             deadline
                 .saturating_duration_since(Instant::now())
                 .min(interval)
@@ -143,7 +140,7 @@ impl PathBudget {
         values: &mut FxHashMap<K, V>,
         additional: usize,
     ) -> Result<(), OperatorError> {
-        self.check()?;
+        self.tick()?;
         if additional <= values.capacity().saturating_sub(values.len()) {
             return Ok(());
         }
@@ -163,7 +160,7 @@ impl PathBudget {
         values: &mut FxHashSet<T>,
         additional: usize,
     ) -> Result<(), OperatorError> {
-        self.check()?;
+        self.tick()?;
         if additional <= values.capacity().saturating_sub(values.len()) {
             return Ok(());
         }
@@ -183,7 +180,7 @@ impl PathBudget {
         values: &mut Vec<T>,
         additional: usize,
     ) -> Result<(), OperatorError> {
-        self.check()?;
+        self.tick()?;
         if additional <= values.capacity().saturating_sub(values.len()) {
             return Ok(());
         }
@@ -210,7 +207,7 @@ impl PathBudget {
         values: &mut VecDeque<T>,
         additional: usize,
     ) -> Result<(), OperatorError> {
-        self.check()?;
+        self.tick()?;
         if additional <= values.capacity().saturating_sub(values.len()) {
             return Ok(());
         }
@@ -232,9 +229,11 @@ impl PathBudget {
         )
     }
 
+    /// Lets the deadline pass after `polls` reads of the clock (see
+    /// [`Ticker::expire_after_polls`]).
     #[cfg(test)]
-    pub(crate) fn expire_after_polls(&mut self, polls: usize) {
-        self.polls_left = Some(polls);
+    pub(crate) fn expire_after_polls(&mut self, polls: u32) {
+        self.ticker.expire_after_polls(polls);
     }
 
     #[cfg(test)]

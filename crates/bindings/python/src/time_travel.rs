@@ -179,7 +179,7 @@ impl PyAsOfView {
                     None => view.execute(query),
                 }?)
             })?;
-            Ok(crate::direct::query_result(result))
+            crate::direct::surfaced(py, Ok(crate::direct::query_result(result)))
         })
     }
 

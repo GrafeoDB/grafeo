@@ -321,6 +321,23 @@ pub struct TransactionManager {
     /// ([`current_epoch`](Self::current_epoch)). It trails `assigned_epoch`
     /// while a commit is being written, so no snapshot holds part of one.
     published_epoch: AtomicU64,
+    /// Called once, after the first commit published while it is set: what
+    /// starts a database's interval checkpoints when no WAL group can.
+    #[cfg(feature = "grafeo-file")]
+    first_commit_hook: parking_lot::Mutex<Option<FirstCommitHook>>,
+    /// Whether a first-commit hook is set: one relaxed load per commit.
+    #[cfg(feature = "grafeo-file")]
+    first_commit_armed: AtomicBool,
+    /// The committed changes since the open: one per commit with changes
+    /// (a read-only commit, or one that matched nothing, counts none) and
+    /// one per standalone change. Bumped in the publish turn.
+    #[cfg(feature = "grafeo-file")]
+    change_count: AtomicU64,
+    /// The `change_count` the last successful checkpoint covered: with
+    /// `change_count` above it, a database without a WAL has changes its
+    /// file lacks.
+    #[cfg(feature = "grafeo-file")]
+    checkpointed_count: AtomicU64,
     /// Number of currently active transactions (for fast-path conflict skip).
     active_count: AtomicU64,
     /// Active transactions.
@@ -411,6 +428,11 @@ pub struct TransactionManager {
     /// with their buffers (see [`recycle`](Self::recycle)): an autocommit
     /// write allocates no new set. At most [`SPARE_CHANGE_SETS`].
     spare_changes: Mutex<Vec<Arc<TransactionChanges>>>,
+    /// The buffer manager the change sets take their grants from, once the
+    /// database attaches it. Weak: the manager holds consumers that hold this
+    /// manager (the vector consumer's collect horizon), and a strong handle
+    /// would keep both, and the spill directory, past the database.
+    memory: std::sync::OnceLock<std::sync::Weak<grafeo_common::memory::buffer::BufferManager>>,
 }
 
 /// The most emptied change sets the manager keeps for new transactions.
@@ -527,12 +549,51 @@ impl Drop for ReadPin {
 /// transaction start or write outside a transaction can begin. Held for a
 /// checkpoint or a copy of the store, it also freezes the store: no store
 /// change of an open transaction is in progress or can begin.
+///
+/// Held for a standalone change ([`changed`](Self::changed)), it counts one
+/// committed change as it is released.
 #[must_use = "commits are held off only while the guard lives"]
 pub(crate) struct CommitsHeld<'a> {
     // Fields drop in order: the freeze is released before the commit lock,
     // the reverse of the order they are taken in.
-    _writes: Option<RwLockWriteGuard<'a, ()>>,
-    _commit: MutexGuard<'a, ()>,
+    writes: Option<RwLockWriteGuard<'a, ()>>,
+    commit: Option<MutexGuard<'a, ()>>,
+    /// The manager that counts the change, for a hold of a standalone
+    /// change.
+    #[cfg(feature = "grafeo-file")]
+    change: Option<&'a TransactionManager>,
+}
+
+#[cfg(feature = "grafeo-file")]
+impl<'a> CommitsHeld<'a> {
+    /// Counts this hold's change as committed when it is released: for a
+    /// standalone change, which commits no transaction (a hold for a
+    /// checkpoint, a copy or a backup changes nothing). A change that cannot
+    /// tell whether it changed anything counts.
+    pub(crate) fn changed(&mut self, manager: &'a TransactionManager) {
+        self.change = Some(manager);
+    }
+}
+
+/// The count of a standalone change: after the write freeze goes and before
+/// the commit lock does, in the publish turn (the commit lock comes before
+/// the turn, as for a commit that holds it), so a checkpoint sees the change
+/// and its count or neither; the first-commit hook then runs with no lock
+/// held.
+impl Drop for CommitsHeld<'_> {
+    fn drop(&mut self) {
+        drop(self.writes.take());
+        #[cfg(feature = "grafeo-file")]
+        if let Some(manager) = self.change.take() {
+            {
+                let _turn = manager.publish_turn.lock();
+                manager.change_count.fetch_add(1, Ordering::AcqRel);
+            }
+            drop(self.commit.take());
+            manager.run_first_commit_hook();
+        }
+        drop(self.commit.take());
+    }
 }
 
 /// A commit in progress, from [`TransactionManager::start_commit`] until it
@@ -621,6 +682,14 @@ impl CommitGuard<'_> {
 }
 
 impl<'a> CommitGuard<'a> {
+    /// Whether the commit has changes, the fact that decides whether the WAL
+    /// records it: a commit without (a read, or a write that matched nothing)
+    /// is no committed change for the checkpointer.
+    #[cfg(feature = "grafeo-file")]
+    pub(crate) fn set_changed(&mut self, changed: bool) {
+        self.commit.changed = changed;
+    }
+
     /// The commit's group is in the log: releases the commit lock, so the
     /// next commit can take its epoch and write, and returns the handle that
     /// publishes this one after every commit below it.
@@ -651,6 +720,11 @@ pub(crate) struct Publish<'a> {
     commit_time: Option<u64>,
     /// Whether the commit was published or taken back.
     finished: bool,
+    /// Whether the commit has changes (what its WAL group records): only
+    /// such a commit counts as a committed change. Set by
+    /// [`CommitGuard::set_changed`]; a commit counts as one unless told.
+    #[cfg(feature = "grafeo-file")]
+    changed: bool,
 }
 
 /// A commit whose group is written, on its way to being published.
@@ -761,6 +835,12 @@ impl Publish<'_> {
                 .published_epoch
                 .fetch_max(self.epoch.as_u64(), Ordering::Release);
         }
+        // In the turn: the hook's arming reads it there (see
+        // `arm_first_commit_hook`).
+        #[cfg(feature = "grafeo-file")]
+        if self.changed {
+            manager.change_count.fetch_add(1, Ordering::AcqRel);
+        }
         // In the turn, so the times are recorded in epoch order.
         if let Some(time) = self.commit_time {
             manager.history.record(self.epoch, time);
@@ -768,7 +848,73 @@ impl Publish<'_> {
         self.finished = true;
         drop(turn);
         manager.published.notify_all();
+        #[cfg(feature = "grafeo-file")]
+        if self.changed {
+            manager.run_first_commit_hook();
+        }
         Ok(())
+    }
+}
+
+/// What [`TransactionManager::set_first_commit_hook`] calls.
+#[cfg(feature = "grafeo-file")]
+pub(crate) type FirstCommitHook = std::sync::Arc<dyn Fn() + Send + Sync>;
+
+/// The first-commit hook: only a database with a file has interval
+/// checkpoints to start.
+#[cfg(feature = "grafeo-file")]
+impl TransactionManager {
+    /// Arms `hook` for the next committed change, once, unless one came
+    /// after the last checkpoint already: then it arms nothing and returns
+    /// `true`, for the caller to do what the hook would. Taken in the publish
+    /// turn, where every committed change is counted: a change committed
+    /// meanwhile is either seen here or runs the hook. The hook runs with no
+    /// lock of the commit held and must not wait for another commit.
+    pub(crate) fn arm_first_commit_hook(&self, hook: FirstCommitHook) -> bool {
+        let _turn = self.publish_turn.lock();
+        if self.changed_since_checkpoint() {
+            return true;
+        }
+        *self.first_commit_hook.lock() = Some(hook);
+        self.first_commit_armed.store(true, Ordering::Release);
+        false
+    }
+
+    /// Clears the first-commit hook.
+    pub(crate) fn clear_first_commit_hook(&self) {
+        *self.first_commit_hook.lock() = None;
+        self.first_commit_armed.store(false, Ordering::Release);
+    }
+
+    /// Whether a change was committed after the last successful checkpoint
+    /// (since the open, when none ran): what a database without a WAL has
+    /// and its file lacks.
+    pub(crate) fn changed_since_checkpoint(&self) -> bool {
+        self.change_count.load(Ordering::Acquire) > self.checkpointed_count.load(Ordering::Acquire)
+    }
+
+    /// The committed changes counted so far: what a checkpoint taken now
+    /// covers, read while it holds commits off.
+    pub(crate) fn change_count(&self) -> u64 {
+        self.change_count.load(Ordering::Acquire)
+    }
+
+    /// Records that a checkpoint covering `count` changes succeeded.
+    pub(crate) fn checkpointed(&self, count: u64) {
+        self.checkpointed_count.fetch_max(count, Ordering::AcqRel);
+    }
+
+    /// Runs and clears the first-commit hook, if one is set.
+    fn run_first_commit_hook(&self) {
+        if !self.first_commit_armed.load(Ordering::Relaxed)
+            || !self.first_commit_armed.swap(false, Ordering::AcqRel)
+        {
+            return;
+        }
+        let hook = self.first_commit_hook.lock().take();
+        if let Some(hook) = hook {
+            hook();
+        }
     }
 }
 
@@ -797,6 +943,14 @@ impl TransactionManager {
             next_transaction_id: AtomicU64::new(2),
             assigned_epoch: AtomicU64::new(0),
             published_epoch: AtomicU64::new(0),
+            #[cfg(feature = "grafeo-file")]
+            first_commit_hook: parking_lot::Mutex::new(None),
+            #[cfg(feature = "grafeo-file")]
+            first_commit_armed: AtomicBool::new(false),
+            #[cfg(feature = "grafeo-file")]
+            change_count: AtomicU64::new(0),
+            #[cfg(feature = "grafeo-file")]
+            checkpointed_count: AtomicU64::new(0),
             active_count: AtomicU64::new(0),
             transactions: RwLock::new(FxHashMap::default()),
             committed_epochs: RwLock::new(FxHashMap::default()),
@@ -811,7 +965,15 @@ impl TransactionManager {
             reads: Arc::new(ReadPins::default()),
             history: History::default(),
             spare_changes: Mutex::new(Vec::new()),
+            memory: std::sync::OnceLock::new(),
         }
+    }
+
+    /// Gives the change sets made from now on their grants from `manager`
+    /// (see `TransactionChanges`). A manager keeps the first it gets.
+    pub(crate) fn attach_memory(&self, manager: Arc<grafeo_common::memory::buffer::BufferManager>) {
+        // A second attach changes nothing.
+        let _ = self.memory.set(Arc::downgrade(&manager));
     }
 
     /// A manager whose commits take their times from `clock` (milliseconds
@@ -919,9 +1081,18 @@ impl TransactionManager {
             && let Some(set) = Arc::get_mut(&mut changes)
         {
             set.reuse(transaction_id, epoch);
+            set.memory = self.memory_manager();
             return changes;
         }
-        Arc::new(TransactionChanges::new(transaction_id, epoch))
+        let mut changes = TransactionChanges::new(transaction_id, epoch);
+        changes.memory = self.memory_manager();
+        Arc::new(changes)
+    }
+
+    /// The manager a new change set takes its grant from: one upgrade per
+    /// transaction, none per write.
+    fn memory_manager(&self) -> Option<Arc<grafeo_common::memory::buffer::BufferManager>> {
+        self.memory.get().and_then(std::sync::Weak::upgrade)
     }
 
     /// Keeps the change set of a transaction that ended (committed or rolled
@@ -1529,6 +1700,8 @@ impl TransactionManager {
                 // Under the commit lock: the times follow the epochs.
                 commit_time: self.history.commit_time(),
                 finished: false,
+                #[cfg(feature = "grafeo-file")]
+                changed: true,
             },
             _commit: commit_lock,
         })
@@ -1559,8 +1732,10 @@ impl TransactionManager {
         self.check_no_incomplete_commit()?;
         let writes = self.write_freeze.write();
         Ok(CommitsHeld {
-            _writes: Some(writes),
-            _commit: commit,
+            writes: Some(writes),
+            commit: Some(commit),
+            #[cfg(feature = "grafeo-file")]
+            change: None,
         })
     }
 
@@ -1585,8 +1760,10 @@ impl TransactionManager {
         self.check_no_incomplete_commit()?;
         self.check_open()?;
         Ok(CommitsHeld {
-            _writes: None,
-            _commit: commit,
+            writes: None,
+            commit: Some(commit),
+            #[cfg(feature = "grafeo-file")]
+            change: None,
         })
     }
 
@@ -4033,5 +4210,44 @@ mod tests {
             .unwrap();
         mgr.commit(linker).unwrap();
         mgr.commit(deleter).unwrap();
+    }
+
+    /// The change set's grant covers it after the backends committed: the
+    /// commit still applies its triples, schema ops and change events from
+    /// it. The grant goes with the set.
+    #[cfg(feature = "triple-store")]
+    #[test]
+    fn a_commit_keeps_the_change_set_grant_until_the_set_goes() {
+        use grafeo_common::memory::buffer::BufferManager;
+        use grafeo_core::graph::rdf::{Term, Triple};
+
+        let memory = BufferManager::with_budget(1 << 30);
+        let manager = TransactionManager::new();
+        manager.attach_memory(Arc::clone(&memory));
+        let (_transaction, changes) = manager.begin_private().unwrap();
+        for i in 0..20_000 {
+            changes
+                .record_triple(
+                    None,
+                    Triple::new(
+                        Term::iri(format!("http://ex.org/vincent{i}")),
+                        Term::iri("http://ex.org/knows"),
+                        Term::iri("http://ex.org/mia"),
+                    ),
+                    true,
+                )
+                .unwrap();
+        }
+        let held = memory.allocated();
+        assert!(held > 0, "the set holds a grant");
+        changes.commit(EpochId::new(1)).unwrap();
+        assert_eq!(
+            memory.allocated(),
+            held,
+            "the set lives on through the rest of the commit"
+        );
+        drop(changes);
+        drop(manager);
+        assert_eq!(memory.allocated(), 0, "the grant went with the set");
     }
 }

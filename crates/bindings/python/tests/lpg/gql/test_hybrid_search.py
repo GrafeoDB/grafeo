@@ -2,6 +2,8 @@
 
 import pytest
 
+pytestmark = pytest.mark.requires("text-index", "hybrid-search")
+
 try:
     from grafeo import GrafeoDB
 

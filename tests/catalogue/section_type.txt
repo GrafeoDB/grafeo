@@ -1,0 +1,13 @@
+# The variants of `SectionType`, as its crate's catalogue test holds them (class test 0). The class
+# tests key their rows by these names, and require a row, or "not reachable" with a reason, for
+# each. A new variant fails the crate's exhaustive match until it is named in the macro and here.
+Catalog
+LpgStore
+RdfStore
+CompactStore
+OverlayDeletions
+TimeIndex
+VectorStore
+TextIndex
+RdfRing
+PropertyIndex

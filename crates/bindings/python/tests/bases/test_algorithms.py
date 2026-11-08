@@ -11,7 +11,10 @@ This module defines test logic for graph algorithms:
 
 from abc import ABC, abstractmethod
 
+import pytest
 
+
+@pytest.mark.requires("algos")
 class BaseAlgorithmsTest(ABC):
     """Abstract base class for algorithm tests."""
 

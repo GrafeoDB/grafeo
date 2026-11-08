@@ -6,7 +6,7 @@
 //! of value to 2,000 nodes and checks that the node property bytes grow by
 //! at least what the values hold and at most that plus two slots per row
 //! and 64 KiB, in memory and in a reopened file, and that the parts of the
-//! breakdown add up to its totals.
+//! breakdown add up to its totals, each byte counted once.
 //!
 //! ```bash
 //! cargo test -p grafeo-engine --all-features --test main memory_usage_values::
@@ -99,10 +99,11 @@ fn assert_sums(usage: &MemoryUsage, what: &str) {
             + usage.mvcc.total_bytes
             + usage.caches.total_bytes
             + usage.string_pool.total_bytes
-            + usage.buffer_manager.allocated_bytes
             + usage.rdf.total_bytes
-            + usage.cdc.total_bytes,
-        "{what}: the total"
+            + usage.cdc.total_bytes
+            + usage.buffer_manager.execution_buffers_bytes
+            + usage.buffer_manager.spill_staging_bytes,
+        "{what}: the total counts each byte once: the components, and of the buffer manager only the regions no component reports"
     );
 }
 

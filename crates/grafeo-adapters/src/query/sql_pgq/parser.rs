@@ -285,50 +285,35 @@ impl<'a> Parser<'a> {
             None
         };
 
-        // Parse optional ORDER BY / LIMIT (SQL-style, no RETURN keyword)
-        let return_clause = if yield_items.is_some()
-            && (self.current.kind == TokenKind::Order || self.current.kind == TokenKind::Limit)
-        {
-            let order_by = if self.current.kind == TokenKind::Order {
-                Some(self.parse_call_order_by()?)
-            } else {
-                None
-            };
-
-            let limit = if self.current.kind == TokenKind::Limit {
-                self.advance();
-                Some(self.parse_expression()?)
-            } else {
-                None
-            };
-
-            Some(ReturnClause {
-                distinct: false,
-                items: vec![],
-                is_wildcard: false,
-                group_by: vec![],
-                order_by,
-                skip: None,
-                limit,
-                is_finish: false,
-                span: None,
-            })
+        // Parse optional ORDER BY / LIMIT (SQL-style, no RETURN keyword), after YIELD; a LIMIT
+        // is a number or a parameter, as a SELECT's.
+        let order_by = if yield_items.is_some() && self.current.kind == TokenKind::Order {
+            Some(self.parse_call_order_by()?)
+        } else {
+            None
+        };
+        let limit = if yield_items.is_some() && self.current.kind == TokenKind::Limit {
+            self.advance();
+            Some(self.parse_row_count()?)
         } else {
             None
         };
 
-        Ok(Statement::Call(CallStatement {
-            procedure_name: name_parts,
-            arguments,
-            yield_items,
-            where_clause,
-            return_clause,
-            span: Some(grafeo_common::utils::error::SourceSpan::new(
-                span_start,
-                self.current.span.start,
-                1,
-                1,
-            )),
+        Ok(Statement::Call(CallQuery {
+            call: CallStatement {
+                procedure_name: name_parts,
+                arguments,
+                yield_items,
+                where_clause,
+                span: Some(grafeo_common::utils::error::SourceSpan::new(
+                    span_start,
+                    self.current.span.start,
+                    1,
+                    1,
+                )),
+            },
+            order_by,
+            limit,
         }))
     }
 
@@ -667,9 +652,11 @@ impl<'a> Parser<'a> {
         let mut left = self.parse_multiplicative_expression()?;
 
         loop {
+            // SQL's `||` joins strings and lists, at the precedence of `+`.
             let op = match self.current.kind {
                 TokenKind::Plus => BinaryOp::Add,
                 TokenKind::Minus => BinaryOp::Sub,
+                TokenKind::Concat => BinaryOp::Concat,
                 _ => break,
             };
 

@@ -12,6 +12,7 @@ import (
 
 // CreatePropertyIndex creates a property index for fast lookups.
 func (db *Database) CreatePropertyIndex(property string) error {
+	defer runtime.KeepAlive(db)
 	cProp := C.CString(property)
 	defer C.free(unsafe.Pointer(cProp))
 	return lockAndCheckStatus(func() C.GrafeoStatus {
@@ -21,6 +22,7 @@ func (db *Database) CreatePropertyIndex(property string) error {
 
 // DropPropertyIndex drops a property index. Returns true if it existed.
 func (db *Database) DropPropertyIndex(property string) (bool, error) {
+	defer runtime.KeepAlive(db)
 	cProp := C.CString(property)
 	defer C.free(unsafe.Pointer(cProp))
 	runtime.LockOSThread()
@@ -36,6 +38,7 @@ func (db *Database) DropPropertyIndex(property string) (bool, error) {
 
 // HasPropertyIndex checks whether a property index exists.
 func (db *Database) HasPropertyIndex(property string) bool {
+	defer runtime.KeepAlive(db)
 	cProp := C.CString(property)
 	defer C.free(unsafe.Pointer(cProp))
 	runtime.LockOSThread()
@@ -46,6 +49,7 @@ func (db *Database) HasPropertyIndex(property string) bool {
 
 // FindNodesByProperty finds nodes with a matching property value.
 func (db *Database) FindNodesByProperty(property string, value any) ([]uint64, error) {
+	defer runtime.KeepAlive(db)
 	cProp := C.CString(property)
 	defer C.free(unsafe.Pointer(cProp))
 

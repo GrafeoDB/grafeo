@@ -32,10 +32,8 @@ is-terminal = "0.4"
 rustyline = "19"
 
 # Progress bars
-indicatif = "0.18"
 
 # Error handling
-thiserror.workspace = true
 anyhow.workspace = true
 
 # Logging

@@ -40,7 +40,7 @@ for u, v, score in preds:
 Basic similarity through the algorithms interface:
 
 ```python
-algs = db.algorithms()
+algs = db.algorithms
 
 # Use clustering coefficient as a similarity proxy
 transitivity = algs.transitivity()

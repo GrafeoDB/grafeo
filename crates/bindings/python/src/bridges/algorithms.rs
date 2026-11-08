@@ -11,7 +11,8 @@ use parking_lot::RwLock;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
-use grafeo_adapters::plugins::algorithms::{self, KeyOrderError};
+use grafeo_adapters::plugins::algorithms::{self, GraphAlgorithm, KeyOrderError};
+use grafeo_adapters::plugins::{Parameters, Prepared};
 use grafeo_common::types::{NodeId, ReadView, Value};
 use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind};
 use grafeo_core::graph::GraphStore;
@@ -234,8 +235,10 @@ impl PyAlgorithms {
     }
 
     /// Runs `compute` on a snapshot of what the algorithm reads (see
-    /// [`snapshot_for`](Self::snapshot_for)) with the GIL released; a read the
-    /// store cannot do raises its error.
+    /// [`snapshot_for`](Self::snapshot_for)) with the GIL released, under the
+    /// database's query deadline from the call's start
+    /// ([`GrafeoDB::query_deadline`]); a read the store cannot do raises its
+    /// error, and a run past the deadline the query timeout, as `execute` does.
     fn compute<T: Send, E: Into<PyGrafeoError>>(
         &self,
         py: Python<'_>,
@@ -244,6 +247,7 @@ impl PyAlgorithms {
     ) -> PyResult<T> {
         without_gil(py, || {
             let db = self.db.read();
+            let _deadline = grafeo_core::execution::deadline::enter(db.query_deadline());
             let snapshot = self.snapshot_for(&db, projection)?;
             compute(snapshot.store(), snapshot.view()).map_err(Into::into)
         })
@@ -252,6 +256,7 @@ impl PyAlgorithms {
     /// Like [`compute`](Self::compute), in the node order of `key=` (see
     /// [`ordered_by_key`]): `compute` gets the ordered nodes, read with the
     /// algorithm, and the order comes back with its keys as Python objects.
+    /// Under the database's query deadline, as [`compute`](Self::compute).
     fn compute_keyed<T: Send, E: Into<PyGrafeoError>>(
         &self,
         py: Python<'_>,
@@ -261,6 +266,7 @@ impl PyAlgorithms {
     ) -> PyResult<(T, Option<KeyOrder>)> {
         let (result, ordered) = without_gil(py, || {
             let db = self.db.read();
+            let _deadline = grafeo_core::execution::deadline::enter(db.query_deadline());
             let snapshot = self.snapshot_for(&db, projection)?;
             let (store, view) = (snapshot.store(), snapshot.view());
             let ordered = ordered_by_key(store, view, key)?;
@@ -288,9 +294,15 @@ impl PyAlgorithms {
     /// Returns:
     ///     List of node IDs in BFS order
     #[pyo3(signature = (start, *, projection=None))]
-    fn bfs(&self, start: u64, projection: Option<&str>, py: Python<'_>) -> PyResult<Vec<u64>> {
+    fn bfs(
+        &self,
+        start: Option<u64>,
+        projection: Option<&str>,
+        py: Python<'_>,
+    ) -> PyResult<Vec<u64>> {
+        let [start] = required_nodes(&algorithms::BfsAlgorithm, [("start", start)])?;
         let result = self.compute(py, projection, |store, view| {
-            algorithms::bfs(store, view, NodeId::new(start))
+            algorithms::bfs(store, view, start)
         })?;
         Ok(result.into_iter().map(|n| n.0).collect())
     }
@@ -326,9 +338,15 @@ impl PyAlgorithms {
     /// Returns:
     ///     List of node IDs in post-order (finished order)
     #[pyo3(signature = (start, *, projection=None))]
-    fn dfs(&self, start: u64, projection: Option<&str>, py: Python<'_>) -> PyResult<Vec<u64>> {
+    fn dfs(
+        &self,
+        start: Option<u64>,
+        projection: Option<&str>,
+        py: Python<'_>,
+    ) -> PyResult<Vec<u64>> {
+        let [start] = required_nodes(&algorithms::DfsAlgorithm, [("start", start)])?;
         let result = self.compute(py, projection, |store, view| {
-            algorithms::dfs(store, view, NodeId::new(start))
+            algorithms::dfs(store, view, start)
         })?;
         Ok(result.into_iter().map(|n| n.0).collect())
     }
@@ -456,21 +474,16 @@ impl PyAlgorithms {
     #[pyo3(signature = (source, target=None, weight=None, *, projection=None))]
     fn dijkstra(
         &self,
-        source: u64,
+        source: Option<u64>,
         target: Option<u64>,
         weight: Option<&str>,
         projection: Option<&str>,
         py: Python<'_>,
     ) -> PyResult<Py<PyAny>> {
+        let [source] = required_nodes(&algorithms::DijkstraAlgorithm, [("source", source)])?;
         if let Some(target_id) = target {
             let path = self.compute(py, projection, |store, view| {
-                algorithms::dijkstra_path(
-                    store,
-                    view,
-                    NodeId::new(source),
-                    NodeId::new(target_id),
-                    weight,
-                )
+                algorithms::dijkstra_path(store, view, source, NodeId::new(target_id), weight)
             })?;
             match path {
                 Some((dist, path)) => {
@@ -481,7 +494,7 @@ impl PyAlgorithms {
             }
         } else {
             let result = self.compute(py, projection, |store, view| {
-                algorithms::dijkstra(store, view, NodeId::new(source), weight)
+                algorithms::dijkstra(store, view, source, weight)
             })?;
             let distances: BTreeMap<u64, f64> = result
                 .distances
@@ -506,11 +519,18 @@ impl PyAlgorithms {
     #[pyo3(signature = (source, weight_attr=None, *, projection=None))]
     fn sssp(
         &self,
-        source: &str,
+        source: Option<&str>,
         weight_attr: Option<&str>,
         projection: Option<&str>,
         py: Python<'_>,
     ) -> PyResult<Py<PyAny>> {
+        let params = checked(&algorithms::SsspAlgorithm, |params| match source {
+            Some(source) => params.set_string("source", source),
+            None => params.set_null("source"),
+        })?;
+        let source = params
+            .required_string("source")
+            .map_err(PyGrafeoError::from)?;
         let distances = self.compute(py, projection, |store, view| {
             // Resolve source: try integer parse first, then name property lookup
             let source_id = if let Ok(id) = source.parse::<u64>() {
@@ -615,13 +635,14 @@ impl PyAlgorithms {
     #[pyo3(signature = (source, weight=None, *, projection=None))]
     fn bellman_ford(
         &self,
-        source: u64,
+        source: Option<u64>,
         weight: Option<&str>,
         projection: Option<&str>,
         py: Python<'_>,
     ) -> PyResult<Py<PyAny>> {
+        let [source] = required_nodes(&algorithms::BellmanFordAlgorithm, [("source", source)])?;
         let result = self.compute(py, projection, |store, view| {
-            algorithms::bellman_ford(store, view, NodeId::new(source), weight)
+            algorithms::bellman_ford(store, view, source, weight)
         })?;
 
         let distances: BTreeMap<u64, f64> = result
@@ -690,15 +711,23 @@ impl PyAlgorithms {
     ///
     /// Returns:
     ///     Dict mapping node ID (or key) to centrality score
-    #[pyo3(signature = (normalized=false, *, projection=None, key=None))]
+    #[pyo3(signature = (normalized=None, *, projection=None, key=None))]
     fn degree_centrality(
         &self,
-        normalized: bool,
+        normalized: Option<bool>,
         projection: Option<&str>,
         key: Option<&str>,
         py: Python<'_>,
     ) -> PyResult<Py<PyAny>> {
-        if normalized {
+        let params = checked(&algorithms::DegreeCentralityAlgorithm, |params| {
+            if let Some(normalized) = normalized {
+                params.set_bool("normalized", normalized);
+            }
+        })?;
+        if params
+            .required_bool("normalized")
+            .map_err(PyGrafeoError::from)?
+        {
             let (result, order) = self.compute_keyed(py, projection, key, |store, view, _| {
                 algorithms::degree_centrality_normalized(store, view)
             })?;
@@ -741,16 +770,42 @@ impl PyAlgorithms {
     ///
     /// Returns:
     ///     Dict mapping node ID (or key) to PageRank score
-    #[pyo3(signature = (damping=0.85, max_iterations=100, tolerance=1e-6, directed=true, *, projection=None, key=None))]
+    #[pyo3(signature = (damping=None, max_iterations=None, tolerance=None, directed=None, *, projection=None, key=None))]
     fn pagerank(
         &self,
-        damping: f64,
-        max_iterations: usize,
-        tolerance: f64,
-        directed: bool,
+        damping: Option<f64>,
+        max_iterations: Option<i64>,
+        tolerance: Option<f64>,
+        directed: Option<bool>,
         projection: Option<&str>,
         key: Option<&str>,
     ) -> PyResult<Py<PyAny>> {
+        let params = checked(&algorithms::PageRankAlgorithm, |params| {
+            if let Some(damping) = damping {
+                params.set_float("damping", damping);
+            }
+            if let Some(max_iterations) = max_iterations {
+                params.set_int("max_iterations", max_iterations);
+            }
+            if let Some(tolerance) = tolerance {
+                params.set_float("tolerance", tolerance);
+            }
+            if let Some(directed) = directed {
+                params.set_bool("directed", directed);
+            }
+        })?;
+        let damping = params
+            .required_float("damping")
+            .map_err(PyGrafeoError::from)?;
+        let max_iterations = params
+            .required_count("max_iterations")
+            .map_err(PyGrafeoError::from)?;
+        let tolerance = params
+            .required_float("tolerance")
+            .map_err(PyGrafeoError::from)?;
+        let directed = params
+            .required_bool("directed")
+            .map_err(PyGrafeoError::from)?;
         // The GIL is held: `attach` hands out its token without an eighth
         // argument.
         Python::attach(|py| {
@@ -790,14 +845,22 @@ impl PyAlgorithms {
     ///
     /// Returns:
     ///     Dict mapping node ID (or key) to betweenness score
-    #[pyo3(signature = (normalized=true, *, projection=None, key=None))]
+    #[pyo3(signature = (normalized=None, *, projection=None, key=None))]
     fn betweenness_centrality(
         &self,
-        normalized: bool,
+        normalized: Option<bool>,
         projection: Option<&str>,
         key: Option<&str>,
         py: Python<'_>,
     ) -> PyResult<Py<PyAny>> {
+        let params = checked(&algorithms::BetweennessCentralityAlgorithm, |params| {
+            if let Some(normalized) = normalized {
+                params.set_bool("normalized", normalized);
+            }
+        })?;
+        let normalized = params
+            .required_bool("normalized")
+            .map_err(PyGrafeoError::from)?;
         let (result, order) = self.compute_keyed(py, projection, key, |store, view, _| {
             algorithms::betweenness_centrality(store, view, normalized)
         })?;
@@ -816,14 +879,22 @@ impl PyAlgorithms {
     ///
     /// Returns:
     ///     Dict mapping node ID (or key) to closeness score
-    #[pyo3(signature = (wf_improved=false, *, projection=None, key=None))]
+    #[pyo3(signature = (wf_improved=None, *, projection=None, key=None))]
     fn closeness_centrality(
         &self,
-        wf_improved: bool,
+        wf_improved: Option<bool>,
         projection: Option<&str>,
         key: Option<&str>,
         py: Python<'_>,
     ) -> PyResult<Py<PyAny>> {
+        let params = checked(&algorithms::ClosenessCentralityAlgorithm, |params| {
+            if let Some(wf_improved) = wf_improved {
+                params.set_bool("wf_improved", wf_improved);
+            }
+        })?;
+        let wf_improved = params
+            .required_bool("wf_improved")
+            .map_err(PyGrafeoError::from)?;
         let (result, order) = self.compute_keyed(py, projection, key, |store, view, _| {
             algorithms::closeness_centrality(store, view, wf_improved)
         })?;
@@ -848,14 +919,22 @@ impl PyAlgorithms {
     /// Returns:
     ///     Dict mapping node ID (or key) to community ID; communities are
     ///     numbered 0, 1, 2, ... in the order of their smallest node ID (or key)
-    #[pyo3(signature = (max_iterations=100, *, projection=None, key=None))]
+    #[pyo3(signature = (max_iterations=None, *, projection=None, key=None))]
     fn label_propagation(
         &self,
-        max_iterations: usize,
+        max_iterations: Option<i64>,
         projection: Option<&str>,
         key: Option<&str>,
         py: Python<'_>,
     ) -> PyResult<Py<PyAny>> {
+        let params = checked(&algorithms::LabelPropagationAlgorithm, |params| {
+            if let Some(max_iterations) = max_iterations {
+                params.set_int("max_iterations", max_iterations);
+            }
+        })?;
+        let max_iterations = params
+            .required_count("max_iterations")
+            .map_err(PyGrafeoError::from)?;
         let (result, order) =
             self.compute_keyed(py, projection, key, |store, view, nodes| match nodes {
                 Some(nodes) => {
@@ -881,14 +960,22 @@ impl PyAlgorithms {
     ///     Dict with 'communities' (node ID or key to community, numbered 0, 1,
     ///     2, ... in the order of their smallest node ID or key), 'modularity',
     ///     and 'num_communities' keys
-    #[pyo3(signature = (resolution=1.0, *, projection=None, key=None))]
+    #[pyo3(signature = (resolution=None, *, projection=None, key=None))]
     fn louvain(
         &self,
-        resolution: f64,
+        resolution: Option<f64>,
         projection: Option<&str>,
         key: Option<&str>,
         py: Python<'_>,
     ) -> PyResult<Py<PyAny>> {
+        let params = checked(&algorithms::LouvainAlgorithm, |params| {
+            if let Some(resolution) = resolution {
+                params.set_float("resolution", resolution);
+            }
+        })?;
+        let resolution = params
+            .required_float("resolution")
+            .map_err(PyGrafeoError::from)?;
         let (result, order) =
             self.compute_keyed(py, projection, key, |store, view, nodes| match nodes {
                 Some(nodes) => algorithms::louvain_in_order(store, view, nodes, resolution),
@@ -991,20 +1078,18 @@ impl PyAlgorithms {
     #[pyo3(signature = (source, sink, capacity=None, *, projection=None))]
     fn max_flow(
         &self,
-        source: u64,
-        sink: u64,
+        source: Option<u64>,
+        sink: Option<u64>,
         capacity: Option<&str>,
         projection: Option<&str>,
         py: Python<'_>,
     ) -> PyResult<Py<PyAny>> {
+        let [source, sink] = required_nodes(
+            &algorithms::MaxFlowAlgorithm,
+            [("source", source), ("sink", sink)],
+        )?;
         let result = self.compute(py, projection, |store, view| {
-            algorithms::max_flow(
-                store,
-                view,
-                NodeId::new(source),
-                NodeId::new(sink),
-                capacity,
-            )
+            algorithms::max_flow(store, view, source, sink, capacity)
         })?;
         match result {
             Some(result) => {
@@ -1039,22 +1124,19 @@ impl PyAlgorithms {
     #[pyo3(signature = (source, sink, capacity=None, cost=None, *, projection=None))]
     fn min_cost_max_flow(
         &self,
-        source: u64,
-        sink: u64,
+        source: Option<u64>,
+        sink: Option<u64>,
         capacity: Option<&str>,
         cost: Option<&str>,
         projection: Option<&str>,
         py: Python<'_>,
     ) -> PyResult<Py<PyAny>> {
+        let [source, sink] = required_nodes(
+            &algorithms::MinCostFlowAlgorithm,
+            [("source", source), ("sink", sink)],
+        )?;
         let result = self.compute(py, projection, |store, view| {
-            algorithms::min_cost_max_flow(
-                store,
-                view,
-                NodeId::new(source),
-                NodeId::new(sink),
-                capacity,
-                cost,
-            )
+            algorithms::min_cost_max_flow(store, view, source, sink, capacity, cost)
         })?;
         match result {
             Some(result) => {
@@ -1097,14 +1179,22 @@ impl PyAlgorithms {
     ///     Dict with 'coefficients' and 'triangle_counts' (node ID or key to
     ///     value, in node-id or key order), 'total_triangles', and
     ///     'global_coefficient' keys
-    #[pyo3(signature = (parallel=true, *, projection=None, key=None))]
+    #[pyo3(signature = (parallel=None, *, projection=None, key=None))]
     fn clustering_coefficient(
         &self,
-        parallel: bool,
+        parallel: Option<bool>,
         projection: Option<&str>,
         key: Option<&str>,
         py: Python<'_>,
     ) -> PyResult<Py<PyAny>> {
+        let params = checked(&algorithms::ClusteringCoefficientAlgorithm, |params| {
+            if let Some(parallel) = parallel {
+                params.set_bool("parallel", parallel);
+            }
+        })?;
+        let parallel = params
+            .required_bool("parallel")
+            .map_err(PyGrafeoError::from)?;
         let (result, order) = self.compute_keyed(py, projection, key, |store, view, _| {
             if parallel {
                 algorithms::clustering_coefficient_parallel(store, view, 50)
@@ -1263,11 +1353,17 @@ impl PyAlgorithms {
     #[pyo3(signature = (k=None, *, projection=None, key=None))]
     fn kcore(
         &self,
-        k: Option<usize>,
+        k: Option<i64>,
         projection: Option<&str>,
         key: Option<&str>,
         py: Python<'_>,
     ) -> PyResult<Py<PyAny>> {
+        let params = checked(&algorithms::KCoreAlgorithm, |params| {
+            if let Some(k) = k {
+                params.set_int("k", k);
+            }
+        })?;
+        let k = params.get_count("k").map_err(PyGrafeoError::from)?;
         let (result, order) = self.compute_keyed(py, projection, key, |store, view, _| {
             algorithms::kcore_decomposition(store, view)
         })?;
@@ -1284,7 +1380,166 @@ impl PyAlgorithms {
         }
     }
 
+    /// Compute the k-truss decomposition.
+    ///
+    /// The truss number of an edge is the largest k for which the edge is in
+    /// the k-truss: the subgraph where every edge lies in at least k - 2
+    /// triangles. The graph is treated as simple and undirected: edge
+    /// direction is ignored, parallel edges count once and self-loops are in
+    /// no truss.
+    ///
+    /// Args:
+    ///     k: If provided, return only the edges in the k-truss
+    ///
+    /// Returns:
+    ///     If k is None: Dict with 'truss_numbers' ((source, target) to truss
+    ///     number, one entry per edge with source < target, in node-id order)
+    ///     and 'max_truss' (the largest truss number) keys
+    ///     If k is provided: List of (source, target) tuples in the k-truss,
+    ///     source < target, in node-id order
+    #[pyo3(signature = (k=None, *, projection=None))]
+    fn ktruss(
+        &self,
+        k: Option<i64>,
+        projection: Option<&str>,
+        py: Python<'_>,
+    ) -> PyResult<Py<PyAny>> {
+        let params = checked(&algorithms::KTrussAlgorithm, |params| {
+            if let Some(k) = k {
+                params.set_int("k", k);
+            }
+        })?;
+        let k = params.get_count("k").map_err(PyGrafeoError::from)?;
+        let result = self.compute(py, projection, |store, view| {
+            algorithms::ktruss_decomposition(store, view)
+        })?;
+
+        if let Some(k_val) = k {
+            let edges: Vec<(u64, u64)> = result
+                .k_truss(k_val)
+                .into_iter()
+                .map(|(source, target)| (source.0, target.0))
+                .collect();
+            Ok(edges.into_pyobject(py)?.into_any().unbind())
+        } else {
+            // In node-id order, the same in every process.
+            let by_edge: BTreeMap<(u64, u64), usize> = result
+                .truss_numbers
+                .into_iter()
+                .map(|((source, target), truss)| ((source.0, target.0), truss))
+                .collect();
+            let truss_numbers = PyDict::new(py);
+            for (edge, truss) in by_edge {
+                truss_numbers.set_item(edge, truss)?;
+            }
+            let dict = PyDict::new(py);
+            dict.set_item("truss_numbers", truss_numbers)?;
+            dict.set_item("max_truss", result.max_truss)?;
+            Ok(dict.into_any().unbind())
+        }
+    }
+
+    // ==========================================================================
+    // Pattern Matching
+    // ==========================================================================
+
+    /// Count the copies of a pattern graph in the graph.
+    ///
+    /// The count is of non-induced subgraph isomorphisms (monomorphisms):
+    /// every pattern edge must map to a graph edge, while graph edges between
+    /// mapped nodes that the pattern lacks are allowed. Edge direction is
+    /// ignored. Each distinct copy counts once per automorphism of the
+    /// pattern, so a triangle pattern counts six per triangle. A pattern
+    /// self-loop needs a self-loop in the graph.
+    ///
+    /// Args:
+    ///     pattern_edges: The pattern's edges as (u, v) pairs of node numbers,
+    ///         each from 0 up to pattern_nodes - 1
+    ///     pattern_nodes: The number of nodes in the pattern
+    ///
+    /// Returns:
+    ///     The number of mappings of the pattern into the graph
+    #[pyo3(signature = (pattern_edges, pattern_nodes, *, projection=None))]
+    fn subgraph_isomorphism_count(
+        &self,
+        pattern_edges: Vec<(i64, i64)>,
+        pattern_nodes: i64,
+        projection: Option<&str>,
+        py: Python<'_>,
+    ) -> PyResult<i64> {
+        // The pairs in the form `CALL` gives them, `"0-1,1-2"`, so the algorithm's own parse and
+        // domain checks serve both ways in (a negative number is no pair of node numbers there).
+        let text = pattern_edges
+            .iter()
+            .map(|(from, to)| format!("{from}-{to}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let mut params = Parameters::new();
+        params.set_string("pattern_edges", text);
+        params.set_int("pattern_nodes", pattern_nodes);
+        let result = self.compute(py, projection, |store, view| {
+            algorithms::SubgraphIsomorphismAlgorithm.execute(store, view, &params)
+        })?;
+        match result.rows.first().and_then(|row| row.first()) {
+            Some(Value::Int64(count)) => Ok(*count),
+            _ => Err(PyErr::from(PyGrafeoError::from(Error::Internal(
+                "subgraph_isomorphism gave no count".to_string(),
+            )))),
+        }
+    }
+
     fn __repr__(&self) -> String {
         "Algorithms()".to_string()
     }
+}
+
+/// The keyword arguments `fill` sets, prepared for `algorithm` as `CALL` prepares them (see
+/// [`Parameters::resolved`]): a required one without a value is refused, and one outside its
+/// domain, so neither way in runs it on a missing value or one outside it; an optional one
+/// without a value (a None) takes the default its definition declares, the one
+/// `CALL grafeo.procedures()` lists, so a method holds no default of its own. For a method that
+/// runs the algorithm's functions on a projection, which `GraphAlgorithm::execute` cannot.
+fn checked(
+    algorithm: &dyn GraphAlgorithm,
+    fill: impl FnOnce(&mut Parameters),
+) -> Result<Prepared, PyGrafeoError> {
+    let mut params = Parameters::new();
+    fill(&mut params);
+    Ok(params.resolved(algorithm)?)
+}
+
+/// The node ids of the required node-id arguments `nodes` of `algorithm`, checked as `CALL`
+/// checks them (see [`Parameters::resolved`]): a None is refused as a null, naming the argument.
+/// An id above the largest `CALL` can give is refused too, as no node has it.
+fn required_nodes<const N: usize>(
+    algorithm: &dyn GraphAlgorithm,
+    nodes: [(&str, Option<u64>); N],
+) -> Result<[NodeId; N], PyGrafeoError> {
+    let mut params = Parameters::new();
+    for (name, id) in nodes {
+        match id.map(|id| (id, i64::try_from(id))) {
+            Some((_, Ok(id))) => params.set_int(name, id),
+            Some((id, Err(_))) => {
+                return Err(PyGrafeoError::from(Error::from(QueryError::new(
+                    QueryErrorKind::InvalidParameterValue,
+                    format!(
+                        "argument '{name}' of {} must be a node id, got {id}",
+                        algorithm.name()
+                    ),
+                ))));
+            }
+            None => params.set_null(name),
+        }
+    }
+    params.resolved(algorithm)?;
+    let mut ids = [NodeId::INVALID; N];
+    for (slot, (name, id)) in ids.iter_mut().zip(nodes) {
+        let id = id.ok_or_else(|| {
+            PyGrafeoError::from(Error::Internal(format!(
+                "required argument '{name}' passed the check without a value"
+            )))
+        })?;
+        *slot = NodeId::new(id);
+    }
+    Ok(ids)
 }

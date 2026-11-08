@@ -53,6 +53,16 @@ fn rows(db: &GrafeoDB, query: &str) -> Vec<String> {
     rows
 }
 
+fn explain(db: &GrafeoDB, query: &str) -> String {
+    db.execute_with_params(&format!("EXPLAIN {query}"), params())
+        .unwrap()
+        .rows()
+        .iter()
+        .map(|row| format!("{:?}", row[0]))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn profile(db: &GrafeoDB, query: &str) -> String {
     db.execute_with_params(&format!("PROFILE {query}"), params())
         .unwrap()
@@ -111,6 +121,9 @@ fn compound_in_lists_take_the_index_instead_of_a_scan() {
             "{query}:\n{plan}"
         );
         assert!(!plan.contains("rows=1000"), "{query}:\n{plan}");
+        // The index itself, not a read of the key's column that a KeyColumnScan can also be.
+        let shown = explain(&indexed, query);
+        assert!(shown.contains("[index"), "{query}:\n{shown}");
     }
 }
 

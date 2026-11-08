@@ -56,6 +56,7 @@ class TestRDFGraphQLAlgorithms(BaseAlgorithmsTest):
         return {"node_ids": node_ids, "edge_count": len(edges)}
 
 
+@pytest.mark.requires("algos")
 class TestRDFGraphQLAlgorithmVerification:
     """Tests that verify algorithm results on RDF-style graphs (uses Python API only)."""
 

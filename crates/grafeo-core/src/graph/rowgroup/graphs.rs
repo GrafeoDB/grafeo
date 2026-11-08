@@ -25,7 +25,7 @@ use parking_lot::RwLock;
 
 use super::RowGroupStore;
 use super::section::{
-    GraphToWrite, LoadedGraph, read_lpg_section_with_backward_edges, write_lpg_section_with_history,
+    GraphToWrite, LoadedGraph, read_lpg_section_into, write_lpg_section_with_history,
 };
 use crate::graph::apply::ApplyError;
 
@@ -79,6 +79,9 @@ impl Graphs {
         let store = RowGroupStore::with_backward_edges(root.keeps_backward_edges());
         store.graphs.id.store(self.take_id()?, Ordering::Release);
         store.set_keeps_history(root.keeps_history());
+        if let Some(manager) = root.memory_manager() {
+            store.attach_memory(Arc::clone(manager));
+        }
         Ok(Arc::new(store))
     }
 }
@@ -279,10 +282,13 @@ impl RowGroupStore {
         let backward_edges = self.keeps_backward_edges();
         let mut restored = Vec::with_capacity(graphs.len());
         for &(id, name) in graphs {
-            let graph =
-                Arc::clone(named.entry(name.to_string()).or_insert_with(|| {
-                    Arc::new(RowGroupStore::with_backward_edges(backward_edges))
-                }));
+            let graph = Arc::clone(named.entry(name.to_string()).or_insert_with(|| {
+                let graph = RowGroupStore::with_backward_edges(backward_edges);
+                if let Some(manager) = self.memory_manager() {
+                    graph.attach_memory(Arc::clone(manager));
+                }
+                Arc::new(graph)
+            }));
             graph.graphs.id.store(id, Ordering::Release);
             graph.set_keeps_history(self.keeps_history());
             restored.push(graph);
@@ -397,16 +403,16 @@ impl RowGroupStore {
     /// and next graph id. What a graph held before is replaced; a graph
     /// the section does not name keeps its data. The graphs keep the
     /// adjacency this store keeps, whatever the section holds (see
-    /// [`read_lpg_section_with_backward_edges`]).
+    /// [`read_lpg_section_with_backward_edges`](super::section::read_lpg_section_with_backward_edges)).
     ///
     /// # Errors
     ///
-    /// As [`read_lpg_section_with_backward_edges`], and
+    /// As [`read_lpg_section_with_backward_edges`](super::section::read_lpg_section_with_backward_edges), and
     /// [`Error::Corruption`] for a default graph with a name or a name two
     /// graphs share. Nothing changed then.
     pub fn read_section(&self, source: &dyn SectionSource) -> Result<()> {
         let (next_graph_id, loaded) =
-            read_lpg_section_with_backward_edges(source, self.keeps_backward_edges())?;
+            read_lpg_section_into(source, self.keeps_backward_edges(), self.memory_manager())?;
         let mut default: Option<RowGroupStore> = None;
         let mut named: Vec<LoadedGraph> = Vec::with_capacity(loaded.len());
         let mut names: FxHashSet<String> = FxHashSet::default();
@@ -451,7 +457,14 @@ impl RowGroupStore {
     /// The named graphs and the graph id stay.
     fn install(&self, loaded: RowGroupStore) {
         let listed = loaded.has_listed();
-        *self.inner.write() = loaded.inner.into_inner();
+        let mut inner = loaded.inner.into_inner();
+        // The load counted what it loaded by one walk (its rows bypass
+        // `apply`); the account takes its grants from this store's manager,
+        // as the load's cold chunks did.
+        if let Some(manager) = self.memory_manager() {
+            inner.account.attach(Arc::clone(manager));
+        }
+        *self.inner.write() = inner;
         if listed {
             // The history it loaded: the next collect has work.
             self.note_listed();

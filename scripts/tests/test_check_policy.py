@@ -124,6 +124,51 @@ def test_d2_dashes_in_docs_and_comments_only(repo: Path) -> None:
     ]
 
 
+def test_d7_text_addressed_to_the_private_workflow(repo: Path) -> None:
+    lines = [
+        # Each a finding: a session role by name, the inbox, a private note.
+        "// openCypher List4; the Architect's ruling, 2026-11-05",
+        "/// confirmed by the Engineer against each algorithm",
+        "/// groups as a literal (Architect, 2026-11-06)",
+        "// a sweep (Review, 2026-11-06)",
+        "//! answers (the review's oracle)",
+        "// Review's sweep of the procedure errors",
+        "// the Orchestrator asked for it",
+        "// fails today (inbox, 2026-11-06)",
+        "// the table in entity-values-design.md",
+        "// see decisions.md",
+        # None a finding: ordinary words.
+        "fn review_threads() {}",
+        "// Decided (#728 review): the change goes through",
+        "// Review the plan before it runs",
+        "// the architecture of the planner",
+        "// an engineer reading the code",
+        "// a code review found it",
+    ]
+    write(repo, "crates/grafeo-core/src/notes.rs", "\n".join(lines) + "\n")
+    write(
+        repo,
+        "tests/spec/lpg/gql/notes.gtest",
+        "# openCypher List4, the Architect's ruling\n",
+    )
+    write(repo, "docs/guide.md", "The plan is in the inbox.\n")
+    result = policy(repo, "diff", "--base", "HEAD")
+    assert found(result) == [
+        "D7 crates/grafeo-core/src/notes.rs:1",
+        "D7 crates/grafeo-core/src/notes.rs:2",
+        "D7 crates/grafeo-core/src/notes.rs:3",
+        "D7 crates/grafeo-core/src/notes.rs:4",
+        "D7 crates/grafeo-core/src/notes.rs:5",
+        "D7 crates/grafeo-core/src/notes.rs:6",
+        "D7 crates/grafeo-core/src/notes.rs:7",
+        "D7 crates/grafeo-core/src/notes.rs:8",
+        "D7 crates/grafeo-core/src/notes.rs:9",
+        "D7 crates/grafeo-core/src/notes.rs:10",
+        "D7 docs/guide.md:1",
+        "D7 tests/spec/lpg/gql/notes.gtest:1",
+    ]
+
+
 def test_d3_internal_references(repo: Path) -> None:
     write(
         repo,
@@ -1257,3 +1302,986 @@ def test_t8_a_folder_with_no_manifest_is_a_folder(tmp_path: Path) -> None:
             "no napi target builds this folder",
         )
     ]
+
+
+# ------------------------------------------------------------------ T9: expected failures
+
+# T9: an expected failure names the spec it is held against and the issue that fixes it, in each
+# of its three forms: the gtest `xfail:` key, pytest's xfail mark, and the Rust `xfail(...)`
+# helper. `issue` is `#N` or `fix in X.Y.Z`, the version not below the first `## [X.Y.Z]` heading
+# of CHANGELOG.md (the release being made); a pytest mark is also strict and names the error it
+# expects, so a fixed test reports itself (XPASS) and a crash is never taken for the failure.
+
+T9_CHANGELOG = "# Changelog\n\n## [Unreleased]\n\n## [0.6.2] - Unreleased\n\n## [0.6.1] - 2026-10-30\n"
+
+T9_GTEST = """meta:
+  model: lpg
+  section: probes
+
+tests:
+  - name: a_numbered_issue
+    xfail:
+      spec: "ISO/IEC 39075 20.2"
+      issue: "#748"
+    query: "RETURN 1 AS v"
+
+  - name: the_release_being_made
+    xfail:
+      spec: "ISO/IEC 39075 20.2"
+      issue: "fix in 0.6.2"
+    query: "RETURN 1 AS v"
+
+  - name: a_later_release
+    xfail:
+      spec: "openCypher 9, 6.3"
+      issue: "fix in 0.7.0"
+    query: "RETURN 1 AS v"
+
+  - name: not_an_xfail
+    query: "RETURN 1 AS v"
+    expect:
+      rows:
+        - [1]
+
+  - name: an_empty_spec
+    xfail:
+      spec: ""
+      issue: "#748"
+    query: "RETURN 1 AS v"
+
+  - name: no_spec
+    xfail:
+      issue: "#748"
+    query: "RETURN 1 AS v"
+
+  - name: no_issue
+    xfail:
+      spec: "ISO/IEC 39075 20.2"
+    query: "RETURN 1 AS v"
+
+  - name: no_issue_yet
+    xfail:
+      spec: "ISO/IEC 39075 20.2"
+      issue: "none yet"
+    query: "RETURN 1 AS v"
+
+  - name: not_a_number
+    xfail:
+      spec: "ISO/IEC 39075 20.2"
+      issue: "#12a"
+    query: "RETURN 1 AS v"
+
+  - name: a_release_already_made
+    xfail:
+      spec: "ISO/IEC 39075 20.2"
+      issue: "fix in 0.6.1"
+    query: "RETURN 1 AS v"
+"""
+
+T9_PYTEST = """import pytest
+
+
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason="spec: ISO/IEC 39075 20.2; issue: #748")
+def test_a_numbered_issue():
+    assert False
+
+
+@pytest.mark.xfail(
+    strict=True,
+    raises=AssertionError,
+    reason="spec: openCypher 9, 6.3; issue: fix in 0.6.2",
+)
+def test_written_over_lines():
+    assert False
+
+
+@pytest.mark.parametrize(
+    "v",
+    [
+        1,
+        pytest.param(
+            2,
+            marks=pytest.mark.xfail(
+                strict=True, raises=AssertionError, reason="spec: SQL:2023 9.1; issue: #19"
+            ),
+        ),
+    ],
+)
+def test_a_param(v):
+    assert v == 1
+
+
+@pytest.mark.xfail(reason="Spatial types not implemented")
+def test_the_old_form():
+    assert False
+
+
+@pytest.mark.xfail(raises=AssertionError, reason="spec: ISO/IEC 39075 20.2; issue: #748")
+def test_not_strict():
+    assert False
+
+
+@pytest.mark.xfail(strict=True, reason="spec: ISO/IEC 39075 20.2; issue: #748")
+def test_no_raises():
+    assert False
+
+
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason="spec: ; issue: #748")
+def test_an_empty_spec():
+    assert False
+
+
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason="spec: ISO/IEC 39075 20.2; issue: soon")
+def test_no_issue_yet():
+    assert False
+
+
+@pytest.mark.xfail(
+    strict=True,
+    raises=AssertionError,
+    reason="spec: ISO/IEC 39075 20.2; issue: fix in 0.6.1",
+)
+def test_a_release_already_made_over_lines():
+    assert False
+
+
+@pytest.mark.parametrize("v", [pytest.param(3, marks=pytest.mark.xfail(reason="later"))])
+def test_an_old_param(v):
+    assert False
+
+
+def test_an_imperative_xfail():
+    pytest.xfail("not yet")
+"""
+
+T9_RUST = """/// Asserts the found value differs from the spec's while the bug is open (`xfail`).
+fn xfail<T: PartialEq + std::fmt::Debug>(spec: &str, issue: &str, found: T, expected: T) {
+    assert_ne!(found, expected, "{spec}, {issue}: fixed");
+}
+
+#[test]
+fn a_numbered_issue() {
+    xfail("ISO/IEC 39075 20.2", "#748", 1, 2);
+}
+
+#[test]
+fn written_over_lines() {
+    xfail(
+        "openCypher 9, 6.3",
+        "fix in 0.7.0",
+        1,
+        2,
+    );
+}
+
+#[test]
+fn an_empty_spec() {
+    xfail("", "#748", 1, 2);
+}
+
+#[test]
+fn no_issue_yet() {
+    xfail("ISO/IEC 39075 20.2", "none yet", 1, 2);
+}
+
+#[test]
+fn a_release_already_made_over_lines() {
+    xfail(
+        "ISO/IEC 39075 20.2",
+        "fix in 0.6.1",
+        1,
+        2,
+    );
+}
+
+#[test]
+fn not_a_literal() {
+    let spec = "ISO/IEC 39075 20.2";
+    xfail(spec, "#748", 1, 2);
+}
+"""
+
+T9_FILES = {
+    "CHANGELOG.md": T9_CHANGELOG,
+    "tests/spec/lpg/gql/xfail_rows.gtest": T9_GTEST,
+    "crates/bindings/python/tests/test_xfail_rows.py": T9_PYTEST,
+    "crates/grafeo-engine/tests/xfail_rows.rs": T9_RUST,
+}
+
+
+def t9_line(text: str, after: str, needle: str) -> int:
+    """The 1-based line of the first `needle` at or after the first line holding `after`."""
+    lines = text.splitlines()
+    start = next(i for i, line in enumerate(lines) if after in line)
+    return next(i for i in range(start, len(lines)) if needle in lines[i]) + 1
+
+
+def t9_found(tmp_path: Path, files: dict[str, str]) -> list[tuple[str, int | None]]:
+    for rel, text in files.items():
+        write_lf(tmp_path, rel, text)
+    found = check_policy.xfail_findings(tmp_path, sorted(files))
+    assert all(f.rule == "T9" for f in found), found
+    return sorted((f.path, f.line) for f in found)
+
+
+def test_t9_a_gtest_xfail_names_its_spec_and_a_valid_issue(tmp_path: Path) -> None:
+    gtest = "tests/spec/lpg/gql/xfail_rows.gtest"
+    found = [row for row in t9_found(tmp_path, T9_FILES) if row[0] == gtest]
+    assert found == sorted(
+        [
+            (gtest, t9_line(T9_GTEST, "name: an_empty_spec", "spec:")),
+            (gtest, t9_line(T9_GTEST, "name: no_spec", "xfail:")),
+            (gtest, t9_line(T9_GTEST, "name: no_issue", "xfail:")),
+            (gtest, t9_line(T9_GTEST, "name: no_issue_yet", "issue:")),
+            (gtest, t9_line(T9_GTEST, "name: not_a_number", "issue:")),
+            (gtest, t9_line(T9_GTEST, "name: a_release_already_made", "issue:")),
+        ]
+    )
+
+
+def test_t9_a_pytest_xfail_is_strict_names_its_error_its_spec_and_a_valid_issue(
+    tmp_path: Path,
+) -> None:
+    test = "crates/bindings/python/tests/test_xfail_rows.py"
+    found = [row for row in t9_found(tmp_path, T9_FILES) if row[0] == test]
+    assert found == sorted(
+        [
+            (test, t9_line(T9_PYTEST, 'reason="Spatial types', "xfail(")),
+            (test, t9_line(T9_PYTEST, "xfail(raises=AssertionError", "xfail(")),
+            (test, t9_line(T9_PYTEST, 'xfail(strict=True, reason="spec', "xfail(")),
+            (test, t9_line(T9_PYTEST, 'reason="spec: ; issue', "reason=")),
+            (test, t9_line(T9_PYTEST, "issue: soon", "reason=")),
+            (test, t9_line(T9_PYTEST, "issue: fix in 0.6.1", "reason=")),
+            (
+                test,
+                t9_line(T9_PYTEST, 'marks=pytest.mark.xfail(reason="later")', "xfail("),
+            ),
+            (test, t9_line(T9_PYTEST, 'pytest.xfail("not yet")', "xfail(")),
+        ]
+    )
+
+
+def test_t9_a_rust_xfail_names_its_spec_and_a_valid_issue_as_literals(
+    tmp_path: Path,
+) -> None:
+    rust = "crates/grafeo-engine/tests/xfail_rows.rs"
+    found = [row for row in t9_found(tmp_path, T9_FILES) if row[0] == rust]
+    assert found == sorted(
+        [
+            (rust, t9_line(T9_RUST, "fn an_empty_spec", 'xfail("", ')),
+            (rust, t9_line(T9_RUST, "fn no_issue_yet", "xfail(")),
+            (
+                rust,
+                t9_line(
+                    T9_RUST, "fn a_release_already_made_over_lines", '"fix in 0.6.1"'
+                ),
+            ),
+            (rust, t9_line(T9_RUST, "fn not_a_literal", "xfail(spec")),
+        ]
+    )
+
+
+def test_t9_without_a_release_heading_in_the_changelog_the_rule_cannot_check(
+    tmp_path: Path,
+) -> None:
+    files = {
+        "CHANGELOG.md": "# Changelog\n\n## [Unreleased]\n\nNothing yet.\n",
+        "tests/spec/lpg/gql/one.gtest": T9_GTEST.split("  - name: not_an_xfail")[0],
+    }
+    assert t9_found(tmp_path, files) == [("CHANGELOG.md", None)]
+
+
+def test_t9_the_changelog_matters_only_for_a_placeholder_version(
+    tmp_path: Path,
+) -> None:
+    """The heading is read only to judge a `fix in X.Y.Z`: with numbered issues alone neither a
+    missing heading nor a missing CHANGELOG is a finding, and a placeholder with no CHANGELOG at
+    all is the same finding as one with no heading."""
+    numbered = T9_GTEST.split("  - name: the_release_being_made")[0]
+    placeholder = T9_GTEST.split("  - name: a_later_release")[0]
+    gtest = "tests/spec/lpg/gql/one.gtest"
+    no_heading = "# Changelog\n\n## [Unreleased]\n"
+    assert t9_found(tmp_path / "a", {"CHANGELOG.md": no_heading, gtest: numbered}) == []
+    assert t9_found(tmp_path / "b", {gtest: numbered}) == []
+    assert t9_found(tmp_path / "c", {gtest: placeholder}) == [("CHANGELOG.md", None)]
+
+
+def test_t9_the_floor_is_the_first_release_heading(tmp_path: Path) -> None:
+    gtest = "tests/spec/lpg/gql/one.gtest"
+    text = """tests:
+  - name: the_release_being_made
+    xfail:
+      spec: "ISO/IEC 39075 20.2"
+      issue: "fix in 0.7.0"
+    query: "RETURN 1 AS v"
+"""
+    files = {
+        "CHANGELOG.md": "## [0.7.0] - Unreleased\n\n## [0.6.2] - 2026-11-10\n",
+        gtest: text,
+    }
+    assert t9_found(tmp_path, files) == []
+    files["CHANGELOG.md"] = "## [0.7.1] - Unreleased\n\n## [0.7.0] - 2026-12-01\n"
+    assert t9_found(tmp_path, files) == [(gtest, t9_line(text, "name:", "issue:"))]
+
+
+def test_t9_the_harness_probes_are_fixtures_not_expected_failures(
+    tmp_path: Path,
+) -> None:
+    # tests/spec-probes holds the gtest harness's own fixtures, some refused on
+    # purpose (an xfail without an issue): T9 judges the spec suite, not them. The
+    # match is on a whole path component, as the runners' `probe` key is.
+    files = {"CHANGELOG.md": T9_CHANGELOG}
+    probe = "tests/spec-probes/xfail/rows/rows.gtest"
+    near = [
+        "tests/my-spec-probes/rows.gtest",
+        "tests/spec/spec-probes-notes/rows.gtest",
+    ]
+    files[probe] = T9_GTEST
+    for rel in near:
+        files[rel] = T9_GTEST
+    paths = {path for path, _ in t9_found(tmp_path, files)}
+    assert paths == set(near)
+
+
+def test_t9_the_repository_is_in_step() -> None:
+    root = Path(__file__).resolve().parents[2]
+    files = subprocess.run(
+        ["git", "ls-files"], cwd=root, capture_output=True, text=True, check=True
+    ).stdout.splitlines()
+    assert check_policy.xfail_findings(root, files) == []
+
+
+# ------------------------------------------------------------------ T10
+
+STORAGE_TOKIO = """0tokio v1.54.1
+1grafeo-storage v0.6.1 (/repo/crates/grafeo-storage)
+2grafeo-engine v0.6.1 (/repo/crates/grafeo-engine)
+3grafeo v0.6.1 (/repo/crates/grafeo)
+"""
+
+PYTHON_TOKIO = """0tokio v1.54.1
+1grafeo-python v0.6.1 (/repo/crates/bindings/python)
+1pyo3-async-runtimes v0.30.0
+2grafeo-python v0.6.1 (/repo/crates/bindings/python) (*)
+1grafeo-storage v0.6.1 (/repo/crates/grafeo-storage)
+2grafeo-engine v0.6.1 (/repo/crates/grafeo-engine)
+3grafeo-python v0.6.1 (/repo/crates/bindings/python) (*)
+"""
+
+
+def runtime(trees: dict) -> list[str]:
+    """T10 messages with `trees[(package, features, crate)]` as cargo's output, a reached control
+    unless the key says otherwise."""
+    control = check_policy.RUNTIME_CONTROL
+    trees = {control: STORAGE_TOKIO, **trees}
+    return [
+        f"{f.rule} {f.message}"
+        for f in check_policy.runtime_findings(
+            lambda package, features, crate: trees.get((package, features, crate))
+        )
+    ]
+
+
+def test_t10_inverse_chains_name_each_direct_dependent_with_a_path_from_the_root() -> (
+    None
+):
+    assert check_policy.inverse_chains(PYTHON_TOKIO, "grafeo-python") == {
+        "grafeo-python": ["grafeo-python", "tokio"],
+        "pyo3-async-runtimes": ["grafeo-python", "pyo3-async-runtimes", "tokio"],
+        "grafeo-storage": ["grafeo-python", "grafeo-engine", "grafeo-storage", "tokio"],
+    }
+
+
+def test_t10_clean_builds_pass() -> None:
+    assert runtime({}) == []
+
+
+def test_t10_the_wal_reaching_tokio_in_the_embedded_profile_names_the_path() -> None:
+    assert runtime({("grafeo", "embedded", "tokio"): STORAGE_TOKIO}) == [
+        "T10 grafeo with --features embedded reaches tokio through "
+        "grafeo -> grafeo-engine -> grafeo-storage -> tokio",
+    ]
+
+
+def test_t10_a_binding_may_depend_on_tokio_itself_but_not_through_storage() -> None:
+    assert runtime({("grafeo-python", None, "tokio"): PYTHON_TOKIO}) == [
+        "T10 grafeo-python with its default features reaches tokio through "
+        "grafeo-python -> grafeo-engine -> grafeo-storage -> tokio",
+    ]
+
+
+def test_t10_a_control_that_reaches_nothing_is_an_error() -> None:
+    assert runtime({check_policy.RUNTIME_CONTROL: None}) == [
+        "T10 grafeo with --features async-storage reaches no tokio: the check reads nothing; "
+        "update RUNTIME_CONTROL",
+    ]
+
+
+def test_t10_every_rule_names_a_workspace_crate_and_its_features() -> None:
+    import re
+
+    root = Path(__file__).resolve().parents[2]
+    for package, features, _, _ in check_policy.RUNTIME_RULES:
+        manifests = [
+            path
+            for path in root.glob("crates/**/Cargo.toml")
+            if re.search(
+                r'\[package\]\s+name = "' + re.escape(package) + '"',
+                path.read_text(encoding="utf-8"),
+            )
+        ]
+        assert manifests, package
+        if features is not None:
+            text = manifests[0].read_text(encoding="utf-8")
+            for feature in features.split(","):
+                assert f"\n{feature} = " in text, (package, feature)
+
+
+# ------------------------------------------------------------------ T11
+
+# `cargo tree -p grafeo-python --no-default-features --features lpg -e features
+# -i grafeo-engine --prefix depth`, cut down: the binding depends on
+# grafeo-bindings-common with its default features, whose `embedded` turns on the
+# engine's vector-index and algos.
+PYTHON_LPG_FEATURES = """0grafeo-engine v0.6.1 (/repo/crates/grafeo-engine)
+1grafeo-bindings-common v0.6.1 (/repo/crates/bindings/common)
+2grafeo-python v0.6.1 (/repo/crates/bindings/python)
+1grafeo-engine feature "algos"
+2grafeo-bindings-common feature "algos"
+3grafeo-bindings-common feature "embedded"
+4grafeo-bindings-common feature "default"
+5grafeo-python v0.6.1 (/repo/crates/bindings/python) (*)
+1grafeo-engine feature "gql"
+2grafeo-python feature "gql"
+3grafeo-python feature "lpg"
+2grafeo-bindings-common feature "gql"
+3grafeo-bindings-common feature "embedded" (*)
+1grafeo-engine feature "regex"
+2grafeo-python feature "lpg" (*)
+1grafeo-engine feature "vector-index"
+2grafeo-bindings-common feature "vector-index"
+3grafeo-bindings-common feature "ai"
+4grafeo-bindings-common feature "embedded" (*)
+2grafeo-engine feature "hybrid-search"
+3grafeo-bindings-common feature "hybrid-search"
+4grafeo-bindings-common feature "ai" (*)
+"""
+
+# The same build once the binding forwards only what it enables.
+PYTHON_LPG_CLEAN = """0grafeo-engine v0.6.1 (/repo/crates/grafeo-engine)
+1grafeo-python v0.6.1 (/repo/crates/bindings/python)
+1grafeo-engine feature "gql"
+2grafeo-python feature "gql"
+3grafeo-python feature "lpg"
+1grafeo-engine feature "regex"
+2grafeo-python feature "lpg" (*)
+"""
+
+# The control build: the full profile reports vector-index itself.
+PYTHON_FULL_FEATURES = """0grafeo-engine v0.6.1 (/repo/crates/grafeo-engine)
+1grafeo-python v0.6.1 (/repo/crates/bindings/python)
+1grafeo-engine feature "vector-index"
+2grafeo-python feature "vector-index"
+3grafeo-python feature "ai"
+4grafeo-python feature "full"
+"""
+
+PYTHON_MANIFEST = """[package]
+name = "grafeo-python"
+
+[features]
+default = ["embedded"]
+gql = ["grafeo-engine/gql"]
+sparql = ["grafeo-engine/sparql", "triple-store"]
+vector-index = ["grafeo-engine/vector-index"]
+algos = ["grafeo-engine/algos"]
+hybrid-search = ["grafeo-engine/hybrid-search"]
+triple-store = ["grafeo-engine/triple-store", "grafeo-engine/regex"]
+compact-store = []
+ai = ["vector-index", "hybrid-search"]
+lpg = ["gql", "storage", "grafeo-engine/regex"]
+storage = ["grafeo-engine/storage"]
+
+[lints]
+workspace = true
+"""
+
+
+def profiles(trees: dict) -> list[str]:
+    """T11 messages with `trees[(package, features)]` as cargo's output, the control
+    build reporting vector-index unless the key says otherwise."""
+    trees = {check_policy.PROFILE_CONTROL[:2]: PYTHON_FULL_FEATURES, **trees}
+    manifests = {"grafeo-python": PYTHON_MANIFEST}
+    return [
+        f"{f.rule} {f.message}"
+        for f in check_policy.profile_findings(
+            lambda package, features: trees.get((package, features)), manifests
+        )
+    ]
+
+
+def test_t11_a_binding_reports_each_feature_it_forwards_by_the_same_name() -> None:
+    # A feature counts when its list names the engine feature of its own name
+    # (`storage` too); a group (`ai`), a profile (`lpg`), an engine feature of
+    # another name (`regex`) or an empty one (`compact-store`) does not.
+    assert check_policy.reportable_features(PYTHON_MANIFEST) == {
+        "gql",
+        "sparql",
+        "vector-index",
+        "algos",
+        "hybrid-search",
+        "triple-store",
+        "storage",
+    }
+
+
+def test_t11_the_tree_gives_each_engine_feature_its_direct_enablers() -> None:
+    engine, own = check_policy.compiled_features(PYTHON_LPG_FEATURES, "grafeo-python")
+    assert engine == {
+        "algos": ["grafeo-bindings-common/algos"],
+        "gql": ["grafeo-python/gql", "grafeo-bindings-common/gql"],
+        "regex": ["grafeo-python/lpg"],
+        "vector-index": [
+            "grafeo-bindings-common/vector-index",
+            "grafeo-engine/hybrid-search",
+        ],
+    }
+    assert own == {"gql", "lpg"}
+
+
+def test_t11_a_profile_compiling_an_engine_feature_it_leaves_off_names_the_enabler() -> (
+    None
+):
+    assert profiles({("grafeo-python", "lpg"): PYTHON_LPG_FEATURES}) == [
+        "T11 grafeo-python with --features lpg compiles the engine's algos, which its "
+        "own algos feature leaves off: enabled by grafeo-bindings-common/algos",
+        "T11 grafeo-python with --features lpg compiles the engine's vector-index, "
+        "which its own vector-index feature leaves off: enabled by "
+        "grafeo-bindings-common/vector-index, grafeo-engine/hybrid-search",
+    ]
+
+
+def test_t11_a_profile_compiling_only_what_it_enables_passes() -> None:
+    assert profiles({("grafeo-python", "lpg"): PYTHON_LPG_CLEAN}) == []
+    assert profiles({}) == [], "only the builds cargo gives a tree for are judged"
+
+
+def test_t11_a_control_that_reports_nothing_is_an_error() -> None:
+    package, features, feature = check_policy.PROFILE_CONTROL
+    assert profiles({(package, features): None}) == [
+        f"T11 {package} with --features {features} compiles no engine {feature}: "
+        "the check reads nothing; update PROFILE_CONTROL",
+    ]
+    assert profiles({(package, features): PYTHON_LPG_CLEAN}) != []
+
+
+def test_t11_every_binding_and_every_profile_it_defines_is_checked() -> None:
+    # The class: each binding crate that depends on the engine, with its default
+    # build and every persona or deployment profile its manifest defines.
+    root = Path(__file__).resolve().parents[2]
+    names = ["lpg", "rdf", "ai", "analytics", "edge", "enterprise", "embedded", "full"]
+    expected = set()
+    for manifest in sorted(root.glob("crates/bindings/*/Cargo.toml")):
+        text = manifest.read_text(encoding="utf-8")
+        package = text.split('name = "', 1)[1].split('"', 1)[0]
+        if "\ngrafeo-engine = " not in text or package == "grafeo-bindings-common":
+            continue
+        expected.add((package, None))
+        expected |= {(package, name) for name in names if f"\n{name} = [" in text}
+    assert len({package for package, _ in expected}) >= 4, expected
+    assert set(check_policy.PROFILE_BUILDS) == expected
+    assert check_policy.PROFILE_CONTROL[:2] in expected
+
+
+def test_t10_every_facade_profile_without_async_io_has_a_rule() -> None:
+    """Each persona and deployment profile of the facade that does not turn on
+    `async-storage` (directly or through another feature) is a T10 build: a tokio
+    dependency added to it must not pass unseen. The async ones (enterprise, server
+    and what builds on them) are left out, as tokio is theirs."""
+    import tomllib
+
+    root = Path(__file__).resolve().parents[2]
+    manifest = tomllib.loads(
+        (root / "crates/grafeo/Cargo.toml").read_text(encoding="utf-8")
+    )
+    table = manifest["features"]
+
+    def turns_on(feature: str, seen: set[str]) -> set[str]:
+        for item in table.get(feature, []):
+            if "/" not in item and item not in seen:
+                seen.add(item)
+                turns_on(item, seen)
+        return seen
+
+    names = [
+        "lpg",
+        "rdf",
+        "analytics",
+        "ai",
+        "edge",
+        "enterprise",
+        "embedded",
+        "browser",
+        "server",
+        "full",
+    ]
+    profiles = [name for name in names if name in table]
+    assert len(profiles) >= 8, profiles
+    without_async = {
+        name for name in profiles if "async-storage" not in turns_on(name, set())
+    }
+    assert {"lpg", "edge", "embedded"} <= without_async
+    assert "enterprise" not in without_async
+    ruled = {
+        features
+        for package, features, crate, _ in check_policy.RUNTIME_RULES
+        if package == "grafeo" and crate == "tokio"
+    }
+    assert sorted(without_async - ruled) == []
+
+
+# --------------------------------------------------------------------- T12
+
+
+def profile_cfg_findings(
+    repo: Path, rel: str, text: str
+) -> list[tuple[str, int | None, str]]:
+    write(repo, rel, text)
+    return [
+        (f.path, f.line, f.message.split(";")[0])
+        for f in check_policy.binding_profile_cfg_findings(repo, [rel])
+    ]
+
+
+WASM_LIB = "crates/bindings/wasm/src/lib.rs"
+
+
+def test_t12_a_capability_gate_reports_nothing(tmp_path: Path) -> None:
+    text = (
+        '#[cfg(feature = "rdf-model")]\n'
+        "fn import_rdf() {}\n"
+        '#[cfg(all(feature = "sparql", feature = "vector-index"))]\n'
+        "fn search() {}\n"
+        'const LPG: bool = cfg!(feature = "lpg-model");\n'
+    )
+    assert profile_cfg_findings(tmp_path, WASM_LIB, text) == []
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "lpg",
+        "rdf",
+        "ai",
+        "analytics",
+        "edge",
+        "browser",
+        "full",
+        "languages",
+        "embedded",
+        "server",
+    ],
+)
+def test_t12_every_profile_and_group_is_named(tmp_path: Path, name: str) -> None:
+    text = f'fn a() {{}}\n#[cfg(feature = "{name}")]\nfn b() {{}}\n'
+    assert profile_cfg_findings(tmp_path, WASM_LIB, text) == [
+        (WASM_LIB, 2, f"gates on the profile or group `{name}`")
+    ]
+
+
+def test_t12_every_form_of_cfg_is_read(tmp_path: Path) -> None:
+    text = (
+        '#[cfg(any(feature = "gql", feature = "rdf"))]\n'
+        'let on = cfg!(feature = "full");\n'
+        '#[cfg_attr(feature = "ai", allow(unused))]\n'
+        '#![cfg(not(feature = "edge"))]\n'
+    )
+    assert [line for _, line, _ in profile_cfg_findings(tmp_path, WASM_LIB, text)] == [
+        1,
+        2,
+        3,
+        4,
+    ]
+
+
+def test_t12_a_condition_over_several_lines_is_read_at_its_start(
+    tmp_path: Path,
+) -> None:
+    text = 'fn a() {}\n#[cfg(all(\n    feature = "gql",\n    feature = "languages",\n))]\nfn b() {}\n'
+    assert profile_cfg_findings(tmp_path, WASM_LIB, text) == [
+        (WASM_LIB, 2, "gates on the profile or group `languages`")
+    ]
+
+
+def test_t12_comments_and_strings_outside_cfg_are_not_gates(tmp_path: Path) -> None:
+    text = (
+        '// #[cfg(feature = "rdf")] was the old gate\n'
+        '/* cfg(feature = "full") */\n'
+        'let note = "feature = \\"rdf\\"";\n'
+        "fn configure() {}\n"
+    )
+    assert profile_cfg_findings(tmp_path, WASM_LIB, text) == []
+
+
+@pytest.mark.parametrize(
+    "rel",
+    [
+        "crates/bindings/python/src/database.rs",
+        "crates/bindings/node/src/database.rs",
+        "crates/bindings/c/src/database.rs",
+        "crates/bindings/wasm/src/lib.rs",
+    ],
+)
+def test_t12_covers_each_binding(tmp_path: Path, rel: str) -> None:
+    text = '#[cfg(feature = "rdf")]\nfn a() {}\n'
+    assert len(profile_cfg_findings(tmp_path, rel, text)) == 1
+
+
+@pytest.mark.parametrize(
+    "rel",
+    [
+        "crates/grafeo/src/lib.rs",
+        "crates/grafeo-engine/src/database/mod.rs",
+        "crates/bindings/wasm/tests/web.rs",
+        "crates/bindings/python/build.rs",
+    ],
+)
+def test_t12_leaves_other_code_alone(tmp_path: Path, rel: str) -> None:
+    """The facade and the engine define the profiles; tests and build scripts are not a
+    binding's compiled surface."""
+    text = '#[cfg(feature = "full")]\nfn a() {}\n'
+    assert profile_cfg_findings(tmp_path, rel, text) == []
+
+
+# ------------------------------------------------- T12 and T7: the shared Rust scanner
+
+
+@pytest.mark.parametrize(
+    "literal",
+    [
+        'let s = "#[cfg(feature = \\"rdf\\")]";\n',
+        'let s = r#"#[cfg(feature = "rdf")]"#;\n',
+        'let s = b"#[cfg(feature = \\"rdf\\")]";\n',
+        'let s = br#"#[cfg(feature = "rdf")]"#;\n',
+    ],
+    ids=["normal", "raw", "byte", "raw-byte"],
+)
+def test_t12_a_gate_inside_a_string_literal_is_no_finding(
+    tmp_path: Path, literal: str
+) -> None:
+    assert profile_cfg_findings(tmp_path, WASM_LIB, "fn a() {}\n" + literal) == []
+
+
+def test_t12_two_slashes_inside_a_string_start_no_comment(tmp_path: Path) -> None:
+    text = 'let url = "https://grafeo.dev"; #[cfg(feature = "full")]\nfn a() {}\n'
+    assert profile_cfg_findings(tmp_path, WASM_LIB, text) == [
+        (WASM_LIB, 1, "gates on the profile or group `full`")
+    ]
+
+
+def test_t12_a_finding_after_a_block_comment_names_its_line(tmp_path: Path) -> None:
+    text = '/*\n a note\n over lines\n*/\n#[cfg(feature = "rdf")]\nfn a() {}\n'
+    assert profile_cfg_findings(tmp_path, WASM_LIB, text) == [
+        (WASM_LIB, 5, "gates on the profile or group `rdf`")
+    ]
+
+
+def test_t12_a_string_over_lines_keeps_the_line_count(tmp_path: Path) -> None:
+    text = 'let s = "one\ntwo\nthree";\n#[cfg(feature = "edge")]\nfn a() {}\n'
+    assert profile_cfg_findings(tmp_path, WASM_LIB, text) == [
+        (WASM_LIB, 4, "gates on the profile or group `edge`")
+    ]
+
+
+def test_t7_a_module_inside_a_string_builds_nothing(tmp_path: Path) -> None:
+    assert t7_found(
+        tmp_path,
+        {
+            "crates/grafeo-core/Cargo.toml": MAIN_ONLY,
+            "crates/grafeo-core/tests/main.rs": 'const S: &str = "mod a_file;";\n',
+            "crates/grafeo-core/tests/a_file.rs": "",
+        },
+    ) == [("crates/grafeo-core/tests/a_file.rs", "this test file is never built")]
+
+
+def test_t7_two_slashes_inside_a_string_hide_no_module(tmp_path: Path) -> None:
+    assert (
+        t7_found(
+            tmp_path,
+            {
+                "crates/grafeo-core/Cargo.toml": MAIN_ONLY,
+                "crates/grafeo-core/tests/main.rs": (
+                    'const URL: &str = "https://grafeo.dev"; mod a_file;\n'
+                ),
+                "crates/grafeo-core/tests/a_file.rs": "",
+            },
+        )
+        == []
+    )
+
+
+# ------------------------------------------------- T13: the C header, its Go copy, the Go import list
+
+C_SRC = "crates/bindings/c/src/lib.rs"
+C_HEADER = "crates/bindings/c/grafeo.h"
+GO_HEADER = "crates/bindings/go/grafeo.h"
+GO_DEF = "crates/bindings/go/grafeo_c.def"
+
+C_EXPORTS = """#[unsafe(no_mangle)]
+pub extern "C" fn grafeo_open(path: *const c_char) -> *mut GrafeoDatabase {
+    todo!()
+}
+
+/// Not an export: no `no_mangle`.
+pub extern "C" fn grafeo_helper() {}
+
+macro_rules! counter {
+    ($(#[$doc:meta])* $name:ident, $field:ident) => {
+        $(#[$doc])*
+        #[unsafe(no_mangle)]
+        pub extern "C" fn $name(result: *const GrafeoResult) -> u64 {
+            0
+        }
+    };
+}
+
+counter!(
+    /// Nodes made.
+    grafeo_result_nodes_created,
+    nodes_created
+);
+"""
+
+HEADER = """#ifndef GRAFEO_H
+#define GRAFEO_H
+typedef struct GrafeoDatabase GrafeoDatabase;
+GrafeoDatabase* grafeo_open(const char* path);
+uint64_t grafeo_result_nodes_created(const GrafeoResult* result);
+#endif
+"""
+
+DEF = """;
+; Definition file of grafeo_c.dll
+LIBRARY grafeo_c.dll
+EXPORTS
+grafeo_open
+grafeo_result_nodes_created
+"""
+
+
+def t13_found(tmp_path: Path, files: dict[str, str]) -> list[tuple[str | None, str]]:
+    tree = {C_SRC: C_EXPORTS, C_HEADER: HEADER, GO_HEADER: HEADER, GO_DEF: DEF}
+    tree.update(files)
+    for rel, text in tree.items():
+        if text is not None:
+            write_lf(tmp_path, rel, text)
+    present = sorted(rel for rel, text in tree.items() if text is not None)
+    return [
+        (f.path, f.message) for f in check_policy.c_header_findings(tmp_path, present)
+    ]
+
+
+def test_t13_headers_and_import_list_that_agree_report_nothing(tmp_path: Path) -> None:
+    assert t13_found(tmp_path, {}) == []
+
+
+def test_t13_a_go_header_that_differs_from_the_c_header_is_a_finding(
+    tmp_path: Path,
+) -> None:
+    changed = HEADER.replace("#endif", "/* a note only in Go's copy */\n#endif")
+    found = t13_found(tmp_path, {GO_HEADER: changed})
+    assert [path for path, _ in found] == [GO_HEADER]
+    assert C_HEADER in found[0][1], "names the header it must equal"
+
+
+def test_t13_line_endings_alone_are_no_difference(tmp_path: Path) -> None:
+    crlf = HEADER.replace("\n", "\r\n")
+    write_lf(tmp_path, GO_HEADER, "")
+    (tmp_path / GO_HEADER).write_bytes(crlf.encode())
+    for rel, text in {C_SRC: C_EXPORTS, C_HEADER: HEADER, GO_DEF: DEF}.items():
+        write_lf(tmp_path, rel, text)
+    present = sorted([C_SRC, C_HEADER, GO_HEADER, GO_DEF])
+    assert check_policy.c_header_findings(tmp_path, present) == []
+
+
+def test_t13_an_export_the_header_does_not_declare_is_a_finding(tmp_path: Path) -> None:
+    source = C_EXPORTS + (
+        '\n#[unsafe(no_mangle)]\npub extern "C" fn grafeo_backup_full(db: *mut GrafeoDatabase) '
+        "-> i32 {\n    0\n}\n"
+    )
+    found = t13_found(tmp_path, {C_SRC: source, GO_DEF: DEF + "grafeo_backup_full\n"})
+    assert len(found) == 1, found
+    assert found[0][0] == C_HEADER and "grafeo_backup_full" in found[0][1]
+
+
+def test_t13_an_export_made_by_a_macro_counts_as_an_export(tmp_path: Path) -> None:
+    without = HEADER.replace(
+        "uint64_t grafeo_result_nodes_created(const GrafeoResult* result);\n", ""
+    )
+    found = t13_found(tmp_path, {C_HEADER: without, GO_HEADER: without})
+    assert [
+        (path, "grafeo_result_nodes_created" in message) for path, message in found
+    ] == [(C_HEADER, True)]
+
+
+def test_t13_a_declaration_with_no_export_is_a_finding(tmp_path: Path) -> None:
+    extra = HEADER.replace(
+        "#endif", "int32_t grafeo_close(GrafeoDatabase* db);\n#endif"
+    )
+    found = t13_found(tmp_path, {C_HEADER: extra, GO_HEADER: extra})
+    assert len(found) == 1, found
+    assert found[0][0] == C_HEADER and "grafeo_close" in found[0][1]
+
+
+def test_t13_a_function_without_no_mangle_is_no_export(tmp_path: Path) -> None:
+    extra = HEADER.replace("#endif", "void grafeo_helper(void);\n#endif")
+    found = t13_found(tmp_path, {C_HEADER: extra, GO_HEADER: extra})
+    assert [path for path, _ in found] == [C_HEADER]
+    assert "grafeo_helper" in found[0][1]
+
+
+def test_t13_the_go_import_list_names_exactly_the_exports(tmp_path: Path) -> None:
+    missing = DEF.replace("grafeo_result_nodes_created\n", "")
+    found = t13_found(tmp_path, {GO_DEF: missing})
+    assert [
+        (path, "grafeo_result_nodes_created" in message) for path, message in found
+    ] == [(GO_DEF, True)]
+    stale = DEF + "grafeo_gone\n"
+    found = t13_found(tmp_path, {GO_DEF: stale})
+    assert [(path, "grafeo_gone" in message) for path, message in found] == [
+        (GO_DEF, True)
+    ]
+
+
+def test_t13_a_declaration_inside_a_comment_declares_nothing(tmp_path: Path) -> None:
+    commented = HEADER.replace(
+        "#endif", "/* call grafeo_close(db) before grafeo_free_database(db) */\n#endif"
+    )
+    assert t13_found(tmp_path, {C_HEADER: commented, GO_HEADER: commented}) == []
+
+
+def test_t13_has_a_hint() -> None:
+    assert "T13" in check_policy.HINTS
+
+
+@pytest.mark.parametrize(
+    "commented",
+    [
+        '// #[unsafe(no_mangle)]\n// pub extern "C" fn grafeo_old() {}\n',
+        '/*\n#[unsafe(no_mangle)]\npub extern "C" fn grafeo_old() {}\n*/\n',
+        '/// #[unsafe(no_mangle)] pub extern "C" fn grafeo_old() {}\n',
+    ],
+    ids=["line", "block", "doc"],
+)
+def test_t13_a_commented_out_export_is_no_export(
+    tmp_path: Path, commented: str
+) -> None:
+    assert t13_found(tmp_path, {C_SRC: C_EXPORTS + commented}) == []
+
+
+@pytest.mark.parametrize("missing", [C_HEADER, GO_HEADER, GO_DEF])
+def test_t13_a_missing_header_or_import_list_is_a_finding(
+    tmp_path: Path, missing: str
+) -> None:
+    found = t13_found(tmp_path, {missing: None})
+    assert [path for path, _ in found] == [missing], found

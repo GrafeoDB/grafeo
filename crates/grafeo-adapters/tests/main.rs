@@ -15,5 +15,6 @@ mod algorithm_determinism;
 mod algorithm_key_order;
 mod algorithms_read_visible_graph;
 mod gql_fuzz_test;
+mod pattern_edges_rules;
 mod sparql_parser_tests;
 mod sparql_w3c_parser_tests;

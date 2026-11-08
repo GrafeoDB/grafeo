@@ -33,6 +33,7 @@ def test_default_tiers_are_in_memory():
     assert tiers.get("LpgStore") == "in_memory"
 
 
+@pytest.mark.requires("vector-index")
 def test_force_disk_on_vector_store_at_open():
     """section_tiers={'VectorStore': 'force_disk'} triggers spill at open.
 

@@ -96,21 +96,11 @@ impl RdfPathReadOverlay for PathReadOverlay {
             &mut RdfPathReadControl<'_>,
         ) -> std::result::Result<(), OperatorError>,
     ) -> std::result::Result<(), OperatorError> {
+        // Borrows the surviving records, so a rollback removes that existence too.
         self.changes.with_path_pending(control, |_, set, control| {
-            // An insert creates its graph even if a later delete leaves the
-            // graph empty. Borrow the surviving records, so rollback removes
-            // that existence too; delete-only references create no graph.
             for change in set.entries() {
                 control.poll()?;
-                let Change::Data {
-                    graph,
-                    op: DataOp::InsertTriple { .. },
-                    ..
-                } = change
-                else {
-                    continue;
-                };
-                if let Some(name) = set.graph(*graph).and_then(|graph| graph.key.as_deref()) {
+                if let Some(name) = graph_inserted_into(set, change) {
                     visit(name, control)?;
                 }
             }
@@ -121,6 +111,23 @@ impl RdfPathReadOverlay for PathReadOverlay {
     fn retained_bytes(&self) -> usize {
         std::mem::size_of::<Self>().saturating_add(2 * std::mem::size_of::<usize>())
     }
+}
+
+/// The named graph `change`, an entry of `set`, inserts a triple into: the commit creates it, even
+/// when a later delete leaves it empty. A delete creates no graph.
+pub(super) fn graph_inserted_into<'set>(
+    set: &'set ChangeSet,
+    change: &Change,
+) -> Option<&'set str> {
+    let Change::Data {
+        graph,
+        op: DataOp::InsertTriple { .. },
+        ..
+    } = change
+    else {
+        return None;
+    };
+    set.graph(*graph).and_then(|graph| graph.key.as_deref())
 }
 
 /// The net effect of a transaction's RDF entries, per graph: for each triple
@@ -352,6 +359,12 @@ impl RdfWriter {
     /// Whether the transaction wrote a triple that it has not committed.
     pub(crate) fn has_pending(&self) -> bool {
         self.changes.has_pending_triples()
+    }
+
+    /// The named graphs the transaction inserted a triple into, which its commit creates (see
+    /// [`TransactionChanges::rdf_graphs_inserted_into`]).
+    pub(crate) fn graphs_inserted_into(&self) -> Vec<String> {
+        self.changes.rdf_graphs_inserted_into()
     }
 
     /// The triples matching `pattern` in the graphs `graphs` names (as

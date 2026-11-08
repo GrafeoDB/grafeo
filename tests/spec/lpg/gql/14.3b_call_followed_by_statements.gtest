@@ -1,0 +1,186 @@
+# A named procedure call is a call query statement, one of the simple query statements a linear
+# query statement is a sequence of (ISO/IEC 39075 14.3, 15.1): any simple statement may follow a
+# leading CALL ... YIELD, not only RETURN. MATCH, OPTIONAL MATCH, FILTER, LET, FOR, ORDER BY with
+# LIMIT, a second CALL, and the data-modifying INSERT and SET each follow one here, across several
+# procedures. The expected answers are those of the same statement with the MATCH first, or with
+# NEXT, which already parse.
+#
+# Alix knows Gus knows Vincent, and Mia stands apart: 4 nodes, labels P and Q, one edge type.
+
+meta:
+  language: gql
+  model: lpg
+  section: "14.3"
+  title: Statements after a procedure call
+  dataset: empty
+  requires: [algos]
+
+tests:
+
+  - name: match_after_call
+    setup:
+      - "INSERT (:P {name: 'Alix'})-[:K]->(:P {name: 'Gus'})-[:K]->(:P {name: 'Vincent'}), (:Q {name: 'Mia'})"
+    query: "CALL grafeo.pagerank() YIELD node_id MATCH (n:P) RETURN count(*) AS c"
+    expect:
+      rows:
+        - [12]
+
+  - name: match_after_call_reads_the_yielded_value
+    setup:
+      - "INSERT (:P {name: 'Alix'})-[:K]->(:P {name: 'Gus'})-[:K]->(:P {name: 'Vincent'}), (:Q {name: 'Mia'})"
+    query: "CALL grafeo.pagerank() YIELD node_id MATCH (n) WHERE id(n) = node_id RETURN n.name AS a ORDER BY a"
+    expect:
+      ordered: true
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Mia]
+        - [Vincent]
+
+  - name: match_after_call_with_two_columns
+    setup:
+      - "INSERT (:P {name: 'Alix'})-[:K]->(:P {name: 'Gus'})-[:K]->(:P {name: 'Vincent'}), (:Q {name: 'Mia'})"
+    query: "CALL grafeo.connected_components() YIELD node_id, component_id MATCH (n:P) WHERE id(n) = node_id RETURN count(DISTINCT component_id) AS c"
+    expect:
+      rows:
+        - [1]
+
+  - name: match_after_call_with_an_alias
+    setup:
+      - "INSERT (:P {name: 'Alix'})-[:K]->(:P {name: 'Gus'})-[:K]->(:P {name: 'Vincent'}), (:Q {name: 'Mia'})"
+    query: "CALL grafeo.pagerank() YIELD node_id AS nid MATCH (n) WHERE id(n) = nid RETURN count(n) AS c"
+    expect:
+      rows:
+        - [4]
+
+  - name: match_after_call_without_yield
+    setup:
+      - "INSERT (:P {name: 'Alix'})-[:K]->(:P {name: 'Gus'})-[:K]->(:P {name: 'Vincent'}), (:Q {name: 'Mia'})"
+    query: "CALL grafeo.labels() MATCH (n:Q) RETURN count(*) AS c"
+    expect:
+      rows:
+        - [2]
+
+  - name: match_after_a_call_of_no_rows
+    setup:
+      - "INSERT (:P {name: 'Alix'})-[:K]->(:P {name: 'Gus'})-[:K]->(:P {name: 'Vincent'}), (:Q {name: 'Mia'})"
+    query: "CALL grafeo.labels() YIELD label MATCH (n:Nobody) RETURN count(*) AS c"
+    expect:
+      rows:
+        - [0]
+
+  - name: optional_match_after_call
+    setup:
+      - "INSERT (:P {name: 'Alix'})-[:K]->(:P {name: 'Gus'})-[:K]->(:P {name: 'Vincent'}), (:Q {name: 'Mia'})"
+    query: "CALL grafeo.labels() YIELD label OPTIONAL MATCH (n:P {name: 'Nobody'}) RETURN label, n.name AS who ORDER BY label"
+    expect:
+      ordered: true
+      rows:
+        - [P, null]
+        - [Q, null]
+
+  - name: filter_after_call
+    setup:
+      - "INSERT (:P {name: 'Alix'})-[:K]->(:P {name: 'Gus'})-[:K]->(:P {name: 'Vincent'}), (:Q {name: 'Mia'})"
+    query: "CALL grafeo.pagerank() YIELD node_id, score FILTER score > 0 RETURN count(*) AS c"
+    expect:
+      rows:
+        - [4]
+
+  - name: filter_after_call_removes_rows
+    setup:
+      - "INSERT (:P {name: 'Alix'})-[:K]->(:P {name: 'Gus'})-[:K]->(:P {name: 'Vincent'}), (:Q {name: 'Mia'})"
+    query: "CALL grafeo.pagerank() YIELD node_id, score FILTER score < 0 RETURN count(*) AS c"
+    expect:
+      rows:
+        - [0]
+
+  - name: let_after_call
+    setup:
+      - "INSERT (:P {name: 'Alix'})-[:K]->(:P {name: 'Gus'})-[:K]->(:P {name: 'Vincent'}), (:Q {name: 'Mia'})"
+    query: "CALL grafeo.pagerank() YIELD node_id LET x = node_id + 1 RETURN count(x) AS c"
+    expect:
+      rows:
+        - [4]
+
+  - name: for_after_call
+    setup:
+      - "INSERT (:P {name: 'Alix'})-[:K]->(:P {name: 'Gus'})-[:K]->(:P {name: 'Vincent'}), (:Q {name: 'Mia'})"
+    query: "CALL grafeo.labels() YIELD label FOR x IN [1, 2] RETURN count(*) AS c"
+    expect:
+      rows:
+        - [4]
+
+  - name: order_by_and_limit_after_call
+    setup:
+      - "INSERT (:P {name: 'Alix'})-[:K]->(:P {name: 'Gus'})-[:K]->(:P {name: 'Vincent'}), (:Q {name: 'Mia'})"
+    query: "CALL grafeo.labels() YIELD label ORDER BY label LIMIT 1 RETURN label"
+    expect:
+      rows:
+        - [P]
+
+  - name: call_after_call
+    setup:
+      - "INSERT (:P {name: 'Alix'})-[:K]->(:P {name: 'Gus'})-[:K]->(:P {name: 'Vincent'}), (:Q {name: 'Mia'})"
+    query: "CALL grafeo.labels() YIELD label CALL grafeo.relationshipTypes() YIELD relationshipType RETURN count(*) AS c"
+    expect:
+      rows:
+        - [2]
+
+  - name: match_call_match
+    setup:
+      - "INSERT (:P {name: 'Alix'})-[:K]->(:P {name: 'Gus'})-[:K]->(:P {name: 'Vincent'}), (:Q {name: 'Mia'})"
+    query: "MATCH (a:P {name: 'Alix'}) CALL grafeo.labels() YIELD label MATCH (a)-[:K]->(b) RETURN label, b.name AS b ORDER BY label"
+    expect:
+      ordered: true
+      rows:
+        - [P, Gus]
+        - [Q, Gus]
+
+  - name: set_after_call
+    setup:
+      - "INSERT (:P {name: 'Alix'})-[:K]->(:P {name: 'Gus'})-[:K]->(:P {name: 'Vincent'}), (:Q {name: 'Mia'})"
+      - "CALL grafeo.pagerank() YIELD node_id MATCH (n) WHERE id(n) = node_id SET n.seen = true"
+    query: "MATCH (n) WHERE n.seen = true RETURN count(n) AS c"
+    expect:
+      rows:
+        - [4]
+
+  - name: insert_after_call
+    setup:
+      - "INSERT (:P {name: 'Alix'})-[:K]->(:P {name: 'Gus'})-[:K]->(:P {name: 'Vincent'}), (:Q {name: 'Mia'})"
+      - "CALL grafeo.labels() YIELD label INSERT (:Seen {label: label})"
+    query: "MATCH (s:Seen) RETURN s.label AS l ORDER BY l"
+    expect:
+      ordered: true
+      rows:
+        - [P]
+        - [Q]
+
+  - name: the_next_form_answers_alike
+    setup:
+      - "INSERT (:P {name: 'Alix'})-[:K]->(:P {name: 'Gus'})-[:K]->(:P {name: 'Vincent'}), (:Q {name: 'Mia'})"
+    query: "CALL grafeo.pagerank() YIELD node_id RETURN node_id NEXT MATCH (n:P) RETURN count(*) AS c"
+    expect:
+      rows:
+        - [12]
+
+  - name: return_after_call_stays
+    setup:
+      - "INSERT (:P {name: 'Alix'})-[:K]->(:P {name: 'Gus'})-[:K]->(:P {name: 'Vincent'}), (:Q {name: 'Mia'})"
+    query: "CALL grafeo.labels() YIELD label RETURN label ORDER BY label"
+    expect:
+      ordered: true
+      rows:
+        - [P]
+        - [Q]
+
+  - name: cypher_match_after_call
+    language: cypher
+    requires: [cypher]
+    setup:
+      - "CREATE (:P {name: 'Alix'})-[:K]->(:P {name: 'Gus'})-[:K]->(:P {name: 'Vincent'}), (:Q {name: 'Mia'})"
+    query: "CALL grafeo.pagerank() YIELD node_id MATCH (n:P) RETURN count(*) AS c"
+    expect:
+      rows:
+        - [12]

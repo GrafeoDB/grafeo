@@ -54,6 +54,7 @@ impl FlushContext {
 }
 
 /// Result of a flush operation.
+#[derive(Debug, Default)]
 pub(super) struct FlushResult {
     /// Number of sections written to the container.
     pub sections_written: usize,
@@ -140,23 +141,33 @@ pub(super) fn flush_held(
     let image = sources.snapshot(&commits)?;
     let section_refs: Vec<&dyn Section> = image.sections.iter().map(AsRef::as_ref).collect();
     let held = image.held;
+    // The changes the image holds: commits are held off, so none comes
+    // between the image and this count.
+    let covered = sources.transaction_manager.change_count();
 
     #[cfg(feature = "testing-statement-injection")]
     grafeo_common::testing::commit_hook::run_during_checkpoint();
 
-    write_sections(
+    let result = write_sections(
         fm,
         (&section_refs, held),
         &image.context,
         Some(&image),
         #[cfg(feature = "wal")]
-        sources
-            .wal
-            .as_deref()
-            .map(|wal| (wal, &*sources.wal_records_at_checkpoint)),
+        sources.wal.as_deref().map(|wal| {
+            (
+                wal,
+                &*sources.wal_records_at_checkpoint,
+                &*sources.wal_retention,
+            )
+        }),
         covered_lsn,
         commits,
-    )
+    )?;
+    // Only a checkpoint that succeeded covers the changes: after a failed
+    // one the database stays changed, and the next tick tries again.
+    sources.transaction_manager.checkpointed(covered);
+    Ok(result)
 }
 
 /// Steps 1 to 3 of [`flush`] for `sections`, the sections of `image` when
@@ -172,7 +183,11 @@ fn write_sections(
     (sections, held): (&[&dyn Section], usize),
     context: &FlushContext,
     image: Option<&CheckpointImage>,
-    #[cfg(feature = "wal")] log: Option<(&grafeo_storage::wal::Wal, &AtomicU64)>,
+    #[cfg(feature = "wal")] log: Option<(
+        &grafeo_storage::wal::Wal,
+        &AtomicU64,
+        &super::wal_retention::WalRetention,
+    )>,
     covered_lsn: Option<u64>,
     commits: CommitsHeld<'_>,
 ) -> Result<FlushResult> {
@@ -186,12 +201,16 @@ fn write_sections(
         });
     }
 
+    // Too little disk space refuses the checkpoint before it starts a new
+    // WAL segment, so the refusal changes nothing (#726).
+    fm.check_checkpoint_space()?;
+
     // Step 1: the groups logged before the checkpoint LSN are in sealed
     // segments, and their effects are in the snapshot below (commits are
     // held, so no group follows them until the image is written).
     #[cfg(feature = "wal")]
     let covered = match log {
-        Some((wal, _)) => Some((wal.rotate()?, wal.records_written())),
+        Some((wal, _, _)) => Some((wal.rotate()?, wal.records_written())),
         None => None,
     };
     // Without a WAL the image covers the log the previous one did, or the
@@ -240,25 +259,53 @@ fn write_sections(
     // Step 3: the image is durable and active (`write_checkpoint` synced the
     // image and its header).
     #[cfg(feature = "wal")]
-    if let (Some((wal, records)), Some((lsn, written))) = (log, covered) {
+    if let (Some((wal, records, retention)), Some((lsn, written))) = (log, covered) {
+        use super::wal_retention::CursorPosition;
+
         records.store(written, Ordering::Release);
 
         maybe_crash("flush:before_remove_segments");
 
         // An incremental backup reads the segments after its cursor: keep
-        // those.
-        let keep_from = match super::backup::read_backup_cursor(wal.dir()) {
-            Ok(Some(cursor)) => cursor.wal_lsn.map_or(lsn, |backed_up| lsn.min(backed_up)),
-            Ok(None) => lsn,
-            Err(e) => {
-                grafeo_common::grafeo_warn!(
-                    "keeping WAL segments after checkpoint: cannot read backup cursor: {}",
-                    e
-                );
-                0
+        // those, up to the retention limit (#673).
+        let cursor = match super::backup::read_backup_cursor(wal.dir()) {
+            Ok(cursor) => cursor
+                .and_then(|cursor| cursor.wal_lsn)
+                .map(CursorPosition::At),
+            Err(error) => {
+                if retention.first_unreadable() {
+                    grafeo_common::grafeo_warn!(
+                        "cannot read the backup cursor of {} ({error}): checkpoints keep the WAL \
+                         for it up to the retention limit of {} bytes",
+                        wal.dir().display(),
+                        retention.limit
+                    );
+                }
+                Some(CursorPosition::Unreadable)
             }
         };
-        wal.remove_segments_before(keep_from)?;
+        // A running backup's pin keeps the log it has not copied yet. Only
+        // checkpoints remove segments, one at a time, so the starts listed
+        // here are still there when the floor is decided.
+        let segment_starts: Vec<u64> = grafeo_storage::wal::list_wal_directory(wal.dir())?
+            .segments
+            .iter()
+            .map(|(first_lsn, _)| *first_lsn)
+            .collect();
+        let floor = retention.release_below_floor(lsn, cursor, &segment_starts, |floor| {
+            wal.remove_segments_before(floor).map(|_| ())
+        })?;
+        maybe_crash("flush:after_retention_release");
+        if floor.limited && retention.first_limited() {
+            grafeo_common::grafeo_warn!(
+                "the WAL kept for the next incremental backup of {} passed the retention limit \
+                 of {} bytes, so a checkpoint removed its oldest part: the next incremental \
+                 backup fails, and a full backup starts a new chain (raise the limit with \
+                 Config::with_wal_retention_limit)",
+                wal.dir().display(),
+                retention.limit
+            );
+        }
     }
 
     Ok(FlushResult { sections_written })

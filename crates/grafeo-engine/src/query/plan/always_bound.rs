@@ -8,7 +8,7 @@
 
 use std::collections::HashSet;
 
-use super::{LogicalExpression, LogicalOperator, TripleComponent};
+use super::{LogicalExpression, LogicalOperator, NamedGraph, TripleComponent};
 
 /// The variables every row of `op` binds, or `None` for an operator this does
 /// not know, whose variables are then taken as always bound.
@@ -102,7 +102,14 @@ pub(crate) fn always_bound(op: &LogicalOperator) -> Option<HashSet<String>> {
                 .collect()
         }
         LogicalOperator::NamedGraphs(graphs) => HashSet::from([graphs.variable.clone()]),
-        LogicalOperator::InNamedGraph(graph) => always_bound(&graph.input)?,
+        LogicalOperator::RowValues(values) => values.names.iter().cloned().collect(),
+        LogicalOperator::InNamedGraph(graph) => {
+            let mut bound = always_bound(&graph.input)?;
+            if let NamedGraph::Variable(variable) = &graph.graph {
+                bound.insert(variable.clone());
+            }
+            bound
+        }
         LogicalOperator::Empty => HashSet::new(),
         _ => return None,
     })

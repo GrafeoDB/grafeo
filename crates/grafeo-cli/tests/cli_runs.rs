@@ -187,6 +187,61 @@ fn an_incremental_backup_extends_the_chain() {
     assert_eq!(names(&restored), strings(&["Alix", "Gus"]));
 }
 
+/// #744 through the CLI: `grafeo backup restore-to-epoch` checks the full backup's checksum, as it
+/// checks an incremental one's. A flipped byte in the full backup fails the command, says the file is
+/// damaged and names it, and writes no database; the intact chain restores.
+#[test]
+fn a_damaged_full_backup_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("people.grafeo");
+    let backups = dir.path().join("backups");
+    let (path, backups_arg) = (db.to_str().unwrap(), backups.to_str().unwrap());
+    grafeo(&["init", path]);
+    grafeo(&["query", path, "INSERT (:Person {name: 'Alix'})"]);
+    grafeo(&["backup", "full", path, "-o", backups_arg]);
+    let epoch = latest_full_epoch(&backups);
+    let full = GrafeoDB::read_backup_manifest(&backups)
+        .unwrap()
+        .unwrap()
+        .latest_full()
+        .unwrap()
+        .filename
+        .clone();
+    let restore = |out: &Path| {
+        Command::new(env!("CARGO_BIN_EXE_grafeo"))
+            .arg("--no-color")
+            .args([
+                "backup",
+                "restore-to-epoch",
+                backups_arg,
+                "--epoch",
+                &epoch,
+                "-o",
+                out.to_str().unwrap(),
+            ])
+            .output()
+            .expect("run grafeo")
+    };
+    let intact = dir.path().join("intact.grafeo");
+    assert!(restore(&intact).status.success());
+    assert_eq!(names(&intact), strings(&["Alix"]));
+
+    let file = backups.join(&full);
+    let mut bytes = std::fs::read(&file).unwrap();
+    let middle = bytes.len() / 2;
+    bytes[middle] ^= 0x5A;
+    std::fs::write(&file, bytes).unwrap();
+    let damaged = dir.path().join("damaged.grafeo");
+    let output = restore(&damaged);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "the restore failed: {stderr}");
+    assert!(
+        stderr.contains("damaged") && stderr.contains(&full),
+        "it says the file is damaged and names it: {stderr}"
+    );
+    assert!(!damaged.exists(), "no database written");
+}
+
 /// `--format json` prints each row as an object of JSON values, its keys in
 /// the order of the columns: numbers, booleans and null as themselves,
 /// strings without the quotes of their display text, lists as arrays, a

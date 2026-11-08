@@ -23,16 +23,20 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use arcstr::ArcStr;
+use grafeo_adapters::plugins::{AlgorithmResult, Domain, ParameterDef, ParameterType, Prepared};
 use grafeo_common::types::{
     Date, LogicalType, NodeId, PropertyKey, Time, Timestamp, Value, ZonedDatetime,
 };
 use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind};
 use grafeo_common::utils::hash::FxHashMap;
 use grafeo_core::execution::DataChunk;
+use grafeo_core::execution::deadline;
 use grafeo_core::execution::operators::{
     GraphWriter, HashKey, NewEdge, Operator, OperatorError, OperatorResult,
 };
 use grafeo_core::execution::vector::ValueVector;
+
+use crate::auth::ExternalAccess;
 
 /// How a column's text becomes a value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -231,7 +235,10 @@ pub(crate) fn load_nodes(
     let mut seen_keys: FxHashMap<ExactKey, u64> = FxHashMap::default();
     let mut rows = Vec::new();
     let mut count = 0_u64;
+    // A load in a query stops at the query's deadline, a record at a time.
+    let mut ticker = deadline::Ticker::new();
     while let Some((line, fields)) = records.next_record()? {
+        ticker.tick()?;
         count += 1;
         let values = layout.values(&fields, line, &spec.nulls)?;
         if let Some(position) = key {
@@ -275,18 +282,21 @@ pub(crate) fn load_edges(
     let layout = Layout::of(&mut records, spec.header, &spec.columns, path)?;
     let source_column = layout.position(&spec.source.column, path)?;
     let target_column = layout.position(&spec.target.column, path)?;
-    let source_keys = key_map(writer, &spec.source)?;
+    // A load in a query stops at the query's deadline, a node or a record at a time.
+    let mut ticker = deadline::Ticker::new();
+    let source_keys = key_map(writer, &spec.source, &mut ticker)?;
     let same_keys =
         spec.source.label == spec.target.label && spec.source.property == spec.target.property;
     let target_keys = if same_keys {
         None
     } else {
-        Some(key_map(writer, &spec.target)?)
+        Some(key_map(writer, &spec.target, &mut ticker)?)
     };
     let target_keys = target_keys.as_ref().unwrap_or(&source_keys);
     let mut edges = Vec::new();
     let (mut count, mut skipped) = (0_u64, 0_u64);
     while let Some((line, fields)) = records.next_record()? {
+        ticker.tick()?;
         count += 1;
         let values = layout.values(&fields, line, &spec.nulls)?;
         let ends = [
@@ -331,16 +341,18 @@ pub(crate) fn load_edges(
 }
 
 /// The nodes of `end`'s label that the writer sees, by their value of its
-/// property (compared exactly, see [`exact_key`]).
+/// property (compared exactly, see [`exact_key`]), each counted on `ticker`.
 fn key_map(
     writer: &GraphWriter,
     end: &EndKey,
+    ticker: &mut deadline::Ticker,
 ) -> Result<FxHashMap<ExactKey, NodeId>, OperatorError> {
     let store = writer.store();
     let view = writer.view();
     let nodes = store.nodes_by_label(&end.label, view)?;
     let mut keys = FxHashMap::with_capacity_and_hasher(nodes.len(), Default::default());
     for node in nodes {
+        ticker.tick()?;
         if let Some(value) = store.node_property(node, &end.property, view)? {
             keys.entry(exact_key(&value)).or_insert(node);
         }
@@ -638,7 +650,203 @@ pub(crate) const EDGES_PROCEDURE: &str = "grafeo.load_edges_csv";
 /// The columns a load procedure yields.
 pub(crate) const REPORT_COLUMNS: [&str; 3] = ["rows", "created", "skipped"];
 
-/// What a load procedure loads, from its one map argument.
+/// Whether the procedure `name` (dotted, as a call writes it: `grafeo.load_nodes_csv`,
+/// `load_nodes_csv`) is a load procedure.
+pub(crate) fn is_load(name: &[String]) -> bool {
+    let key = crate::procedures::resolve_name(name);
+    [NODES_PROCEDURE, EDGES_PROCEDURE]
+        .iter()
+        .any(|procedure| procedure.strip_prefix("grafeo.") == Some(key.as_str()))
+}
+
+/// A load procedure as the registry lists it: its parameters, which `CALL` prepares as every
+/// procedure's, and the file it reads. It runs only as a `CALL`, which plans it with the
+/// statement's writer (see the planner's `plan_load_call`).
+pub(crate) struct LoadProcedure {
+    nodes: bool,
+    parameters: Vec<ParameterDef>,
+}
+
+impl LoadProcedure {
+    /// `grafeo.load_nodes_csv`: `path`, `labels`, then the options.
+    pub(crate) fn nodes() -> Self {
+        let mut parameters = vec![
+            parameter("path", ParameterType::String, true, "The CSV file to read"),
+            ParameterDef {
+                domain: Domain::ListOrOne,
+                ..parameter(
+                    "labels",
+                    ParameterType::List,
+                    true,
+                    "The labels of every node: one or a list",
+                )
+            },
+            parameter(
+                "key",
+                ParameterType::String,
+                false,
+                "The key column: present in every record and unique in the file",
+            ),
+        ];
+        parameters.extend(file_parameters());
+        Self {
+            nodes: true,
+            parameters,
+        }
+    }
+
+    /// `grafeo.load_edges_csv`: `path`, `type`, `source`, `target`, then the options.
+    pub(crate) fn edges() -> Self {
+        let end = |name: &str, which: &str| {
+            parameter(
+                name,
+                ParameterType::Map,
+                true,
+                &format!(
+                    "How the {which} of each edge is found: a map of label, property and column"
+                ),
+            )
+        };
+        let mut parameters = vec![
+            parameter("path", ParameterType::String, true, "The CSV file to read"),
+            parameter(
+                "type",
+                ParameterType::String,
+                true,
+                "The type of every edge",
+            ),
+            end("source", "source"),
+            end("target", "target"),
+            ParameterDef {
+                default: Some("error".into()),
+                domain: Domain::OneOf(&["error", "skip"]),
+                ..parameter(
+                    "missing",
+                    ParameterType::String,
+                    false,
+                    "A record whose end no node has: an error, or skipped",
+                )
+            },
+        ];
+        parameters.extend(file_parameters());
+        Self {
+            nodes: false,
+            parameters,
+        }
+    }
+}
+
+/// A parameter of a load procedure, without a default or a domain.
+fn parameter(name: &str, param_type: ParameterType, required: bool, about: &str) -> ParameterDef {
+    ParameterDef {
+        name: name.into(),
+        description: about.into(),
+        param_type,
+        required,
+        default: None,
+        domain: Domain::OfType,
+    }
+}
+
+/// The options both loads take: how the file is read.
+fn file_parameters() -> Vec<ParameterDef> {
+    vec![
+        parameter(
+            "types",
+            ParameterType::Map,
+            false,
+            "The type of each column, by name (string, int64, float64, bool, date, timestamp, \
+             skip); a column not named is a string",
+        ),
+        ParameterDef {
+            domain: Domain::ListOrOne,
+            ..parameter(
+                "columns",
+                ParameterType::List,
+                false,
+                "The column names in file order, for a file without a header",
+            )
+        },
+        ParameterDef {
+            default: Some(",".into()),
+            domain: Domain::OneCharacter,
+            ..parameter(
+                "delimiter",
+                ParameterType::String,
+                false,
+                "The field separator",
+            )
+        },
+        ParameterDef {
+            default: Some("true".into()),
+            ..parameter(
+                "header",
+                ParameterType::Boolean,
+                false,
+                "Whether the first record names the columns",
+            )
+        },
+        ParameterDef {
+            domain: Domain::ListOrOne,
+            ..parameter(
+                "nulls",
+                ParameterType::List,
+                false,
+                "Fields that stand for no value, besides an empty one",
+            )
+        },
+    ]
+}
+
+impl crate::procedures::Procedure for LoadProcedure {
+    fn name(&self) -> &str {
+        let name = if self.nodes {
+            NODES_PROCEDURE
+        } else {
+            EDGES_PROCEDURE
+        };
+        name.strip_prefix("grafeo.").unwrap_or(name)
+    }
+
+    fn description(&self) -> &str {
+        if self.nodes {
+            "Loads the nodes of a CSV file, one per record"
+        } else {
+            "Loads the edges of a CSV file, one per record, between nodes found by key"
+        }
+    }
+
+    fn parameters(&self) -> &[ParameterDef] {
+        &self.parameters
+    }
+
+    fn output_columns(&self) -> Vec<String> {
+        REPORT_COLUMNS.iter().map(ToString::to_string).collect()
+    }
+
+    fn external_access(&self) -> ExternalAccess {
+        ExternalAccess::Reads
+    }
+
+    fn graph_access(&self) -> crate::procedures::GraphAccess {
+        crate::procedures::GraphAccess::Writes
+    }
+
+    fn compute(
+        &self,
+        _ctx: &crate::procedures::ProcedureContext<'_>,
+        _params: &Prepared,
+    ) -> grafeo_common::utils::error::Result<AlgorithmResult> {
+        Err(Error::from(QueryError::unsupported(format!(
+            "grafeo.{} loads with the writer of the statement that calls it: run it as a CALL, \
+             or call GrafeoDB::{} from code",
+            self.name(),
+            self.name()
+        ))))
+    }
+}
+
+/// What a load procedure loads, from its arguments.
 pub(crate) enum LoadCall {
     /// `grafeo.load_nodes_csv`.
     Nodes(PathBuf, NodeLoad),
@@ -647,87 +855,49 @@ pub(crate) enum LoadCall {
 }
 
 impl LoadCall {
-    /// The load `procedure` (one of the two names) describes with
-    /// `options`: `path`, then for nodes `labels` (a string or a list),
-    /// `key`; for edges `type`, `source` and `target` (maps of `label`,
-    /// `property`, `column`), `missing` (`'error'` or `'skip'`); and for both
-    /// `types` (column to type name, in any case), `columns` (the column
-    /// names in file order, for a file without a header), `delimiter`,
-    /// `header`, `nulls`.
+    /// The load `procedure` (one of the two names) describes with `params`, prepared for its
+    /// parameters (see [`LoadProcedure`]): the type of each argument, the required ones, the
+    /// delimiter's length and `missing`'s choice are checked, and the defaults filled in. What
+    /// is left is the meaning of the lists and maps: each label, column name and null a string,
+    /// the type names of `types`, and the keys of an end map (`label`, `property`, `column`).
     ///
     /// # Errors
     ///
-    /// A missing or unknown option, or one of another type.
-    pub(crate) fn from_options(
-        procedure: &str,
-        options: &BTreeMap<PropertyKey, Value>,
-    ) -> Result<Self, Error> {
-        let nodes = procedure == NODES_PROCEDURE;
-        let allowed: &[&str] = if nodes {
-            &[
-                "path",
-                "labels",
-                "key",
-                "types",
-                "columns",
-                "delimiter",
-                "header",
-                "nulls",
-            ]
-        } else {
-            &[
-                "path",
-                "type",
-                "source",
-                "target",
-                "missing",
-                "types",
-                "columns",
-                "delimiter",
-                "header",
-                "nulls",
-            ]
-        };
-        if let Some(unknown) = options.keys().find(|key| !allowed.contains(&key.as_str())) {
-            return Err(option_error(
-                procedure,
-                unknown.as_str(),
-                &format!("is no option; the options are {}", allowed.join(", ")),
-            ));
-        }
-        let option = |name: &str| options.get(&PropertyKey::new(name));
-        let path = PathBuf::from(
-            text(procedure, "path", option("path"))?
-                .ok_or_else(|| option_error(procedure, "path", "is required"))?,
-        );
-        let header = match option("header") {
-            None => true,
-            Some(Value::Bool(header)) => *header,
-            Some(_) => return Err(option_error(procedure, "header", "must be a boolean")),
-        };
-        let delimiter = match text(procedure, "delimiter", option("delimiter"))? {
-            None => b',',
-            Some(text) if text.len() == 1 => text.as_bytes()[0],
-            Some(_) => {
-                return Err(option_error(
+    /// An invalid parameter value (22023) naming the procedure, the argument and the key or
+    /// element at fault.
+    pub(crate) fn from_prepared(procedure: &str, params: &Prepared) -> Result<Self, Error> {
+        let path = grafeo_common::utils::file_url::local_path(params.required_string("path")?)
+            .map_err(|error| {
+                argument_error(procedure, "path", &format!("names no local file: {error}"))
+            })?;
+        let header = params.required_bool("header")?;
+        // The domain makes it one ASCII character, so one byte.
+        let delimiter = match params.required_string("delimiter")?.as_bytes() {
+            [byte] => *byte,
+            _ => {
+                return Err(argument_error(
                     procedure,
                     "delimiter",
                     "must be one character",
                 ));
             }
         };
-        let nulls = texts(procedure, "nulls", option("nulls"))?.unwrap_or_default();
-        let columns = columns(procedure, option("types"), option("columns"), header)?;
-        if nodes {
-            let labels = texts(procedure, "labels", option("labels"))?
+        let nulls = strings(procedure, "nulls", params.get_list("nulls"))?.unwrap_or_default();
+        let columns = columns(
+            procedure,
+            params.get_map("types"),
+            strings(procedure, "columns", params.get_list("columns"))?,
+            header,
+        )?;
+        if procedure == NODES_PROCEDURE {
+            let labels = strings(procedure, "labels", params.get_list("labels"))?
                 .filter(|labels| !labels.is_empty())
-                .ok_or_else(|| option_error(procedure, "labels", "is required"))?;
-            let key = text(procedure, "key", option("key"))?;
+                .ok_or_else(|| argument_error(procedure, "labels", "must name a label"))?;
             return Ok(Self::Nodes(
                 path,
                 NodeLoad {
                     labels,
-                    key,
+                    key: params.get_string("key").map(ToString::to_string),
                     columns,
                     delimiter,
                     header,
@@ -735,19 +905,22 @@ impl LoadCall {
                 },
             ));
         }
-        let edge_type = text(procedure, "type", option("type"))?
-            .ok_or_else(|| option_error(procedure, "type", "is required"))?;
-        let missing = match text(procedure, "missing", option("missing"))?.as_deref() {
-            None | Some("error") => MissingEnd::Error,
-            Some("skip") => MissingEnd::Skip,
-            Some(_) => return Err(option_error(procedure, "missing", "is 'error' or 'skip'")),
+        let missing = match params.required_string("missing")? {
+            "skip" => MissingEnd::Skip,
+            _ => MissingEnd::Error,
+        };
+        let end = |which: &str| {
+            params
+                .get_map(which)
+                .ok_or_else(|| argument_error(procedure, which, "is required"))
+                .and_then(|end| end_key(procedure, which, end))
         };
         Ok(Self::Edges(
             path,
             EdgeLoad {
-                edge_type,
-                source: end_key(procedure, "source", option("source"))?,
-                target: end_key(procedure, "target", option("target"))?,
+                edge_type: params.required_string("type")?.to_string(),
+                source: end("source")?,
+                target: end("target")?,
                 columns,
                 delimiter,
                 header,
@@ -766,82 +939,76 @@ impl LoadCall {
     }
 }
 
-/// The error of option `option` of `procedure`.
-fn option_error(procedure: &str, option: &str, problem: &str) -> Error {
+/// The error of argument `argument` of `procedure`, whose value the argument does not allow:
+/// an invalid parameter value (22023), as `prepare` raises for a value outside its domain.
+fn argument_error(procedure: &str, argument: &str, problem: &str) -> Error {
     Error::from(QueryError::new(
-        QueryErrorKind::InvalidValueType,
-        format!("Option '{option}' of {procedure} {problem}"),
+        QueryErrorKind::InvalidParameterValue,
+        format!("argument '{argument}' of {procedure} {problem}"),
     ))
 }
 
-/// A text option, if given.
-fn text(procedure: &str, option: &str, value: Option<&Value>) -> Result<Option<String>, Error> {
-    match value {
-        None | Some(Value::Null) => Ok(None),
-        Some(Value::String(text)) => Ok(Some(text.to_string())),
-        Some(_) => Err(option_error(procedure, option, "must be a string")),
-    }
-}
-
-/// A list-of-texts option (one text counts as a list of one), if given.
-fn texts(
+/// The strings of the list argument `argument`, if given.
+fn strings(
     procedure: &str,
-    option: &str,
-    value: Option<&Value>,
+    argument: &str,
+    list: Option<&[Value]>,
 ) -> Result<Option<Vec<String>>, Error> {
-    match value {
-        None | Some(Value::Null) => Ok(None),
-        Some(Value::String(text)) => Ok(Some(vec![text.to_string()])),
-        Some(Value::List(items)) => items
+    list.map(|items| {
+        items
             .iter()
             .map(|item| match item {
                 Value::String(text) => Ok(text.to_string()),
-                _ => Err(option_error(procedure, option, "must be a list of strings")),
+                other => Err(argument_error(
+                    procedure,
+                    argument,
+                    &format!(
+                        "must be a list of strings, got a {} value",
+                        other.type_name()
+                    ),
+                )),
             })
-            .collect::<Result<Vec<_>, _>>()
-            .map(Some),
-        Some(_) => Err(option_error(procedure, option, "must be a list of strings")),
-    }
+            .collect()
+    })
+    .transpose()
 }
 
-/// The columns of `types` (name to type name) and `columns` (the names in
-/// file order, which a file without a header needs).
+/// The columns of `types` (name to type name) and `order` (the names in file order, which a
+/// file without a header needs).
 fn columns(
     procedure: &str,
-    types: Option<&Value>,
-    order: Option<&Value>,
+    types: Option<&BTreeMap<PropertyKey, Value>>,
+    order: Option<Vec<String>>,
     header: bool,
 ) -> Result<Vec<Column>, Error> {
-    let kinds: Vec<(String, ColumnKind)> = match types {
-        None | Some(Value::Null) => Vec::new(),
-        Some(Value::Map(types)) => types
-            .iter()
-            .map(|(name, kind)| {
-                let kind = match kind {
-                    Value::String(kind) => ColumnKind::from_name(kind),
-                    _ => None,
-                }
-                .ok_or_else(|| {
-                    option_error(
-                        procedure,
-                        "types",
-                        &format!(
-                            "gives column '{name}' no type it knows (string, int64, float64,                              bool, date, timestamp, skip)"
-                        ),
-                    )
-                })?;
-                Ok((name.as_str().to_string(), kind))
-            })
-            .collect::<Result<_, Error>>()?,
-        Some(_) => return Err(option_error(procedure, "types", "must be a map")),
-    };
+    let kinds: Vec<(String, ColumnKind)> = types
+        .into_iter()
+        .flatten()
+        .map(|(name, kind)| {
+            let kind = match kind {
+                Value::String(kind) => ColumnKind::from_name(kind),
+                _ => None,
+            }
+            .ok_or_else(|| {
+                argument_error(
+                    procedure,
+                    "types",
+                    &format!(
+                        "gives column '{name}' no type it knows (string, int64, float64, bool, \
+                         date, timestamp, skip)"
+                    ),
+                )
+            })?;
+            Ok((name.as_str().to_string(), kind))
+        })
+        .collect::<Result<_, Error>>()?;
     let kind_of = |name: &str| {
         kinds
             .iter()
             .find(|(column, _)| column == name)
             .map_or(ColumnKind::String, |(_, kind)| *kind)
     };
-    match texts(procedure, "columns", order)? {
+    match order {
         Some(names) => Ok(names
             .into_iter()
             .map(|name| Column {
@@ -849,7 +1016,7 @@ fn columns(
                 name,
             })
             .collect()),
-        None if !header && !kinds.is_empty() => Err(option_error(
+        None if !header && !kinds.is_empty() => Err(argument_error(
             procedure,
             "columns",
             "is required for a file without a header: the names in file order",
@@ -861,18 +1028,38 @@ fn columns(
     }
 }
 
-/// An end option: a map of `label`, `property` and `column`.
-fn end_key(procedure: &str, option: &str, value: Option<&Value>) -> Result<EndKey, Error> {
-    let Some(Value::Map(end)) = value else {
-        return Err(option_error(
+/// The keys of an end map.
+const END_KEYS: [&str; 3] = ["label", "property", "column"];
+
+/// The end argument `argument` (`source` or `target`): a map of `label`, `property` and
+/// `column`, each a string, and nothing else.
+fn end_key(
+    procedure: &str,
+    argument: &str,
+    end: &BTreeMap<PropertyKey, Value>,
+) -> Result<EndKey, Error> {
+    if let Some(unknown) = end.keys().find(|key| !END_KEYS.contains(&key.as_str())) {
+        return Err(argument_error(
             procedure,
-            option,
-            "is required: a map of label, property and column",
+            argument,
+            &format!("has no key '{unknown}' (its keys: {})", END_KEYS.join(", ")),
         ));
-    };
-    let part = |name: &str| {
-        text(procedure, option, end.get(&PropertyKey::new(name)))?
-            .ok_or_else(|| option_error(procedure, option, &format!("needs '{name}'")))
+    }
+    let part = |name: &str| match end.get(&PropertyKey::new(name)) {
+        Some(Value::String(text)) => Ok(text.to_string()),
+        None | Some(Value::Null) => Err(argument_error(
+            procedure,
+            argument,
+            &format!("needs the key '{name}'"),
+        )),
+        Some(other) => Err(argument_error(
+            procedure,
+            argument,
+            &format!(
+                "needs a string for '{name}', got a {} value",
+                other.type_name()
+            ),
+        )),
     };
     Ok(EndKey {
         label: part("label")?,

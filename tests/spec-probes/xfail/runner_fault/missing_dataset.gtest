@@ -1,0 +1,20 @@
+# A runner fault in a case marked xfail is a fault, not an expected failure: the dataset this
+# file names does not exist, so the run fails and counts no xfail.
+
+meta:
+  language: gql
+  model: lpg
+  section: probes
+  title: "xfail probe: a missing dataset is a fault"
+  dataset: no_such_dataset
+
+tests:
+
+  - name: probe_fault_missing_dataset
+    xfail:
+      spec: "harness probe: a runner fault is no expected failure"
+      issue: "fix in 0.6.2"
+    query: "RETURN 1 AS v"
+    expect:
+      rows:
+        - [1]

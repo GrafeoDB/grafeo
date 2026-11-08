@@ -58,7 +58,7 @@ mod traversal;
 
 // Core traits
 pub use traits::{
-    Control, DistanceMap, GraphAlgorithm, GraphView, MinScored, ParallelGraphAlgorithm,
+    Control, DistanceMap, EdgeWeight, GraphAlgorithm, GraphView, MinScored, ParallelGraphAlgorithm,
     TraversalEvent,
 };
 

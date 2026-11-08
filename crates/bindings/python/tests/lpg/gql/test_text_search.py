@@ -28,19 +28,23 @@ def text_db(db):
 
 
 class TestTextSearch:
+    @pytest.mark.requires("text-index")
     def test_text_search_basic(self, text_db):
         results = text_db.text_search("Article", "title", "Rust", k=10)
         assert len(results) >= 2
 
+    @pytest.mark.requires("text-index")
     def test_text_search_no_matches(self, text_db):
         results = text_db.text_search("Article", "title", "nonexistentxyz", k=10)
         assert len(results) == 0
 
+    @pytest.mark.requires("text-index")
     def test_text_search_after_mutation(self, text_db):
         text_db.create_node(["Article"], {"title": "Rust web framework"})
         results = text_db.text_search("Article", "title", "Rust", k=10)
         assert len(results) >= 3
 
+    @pytest.mark.requires("text-index")
     def test_drop_and_rebuild_text_index(self, text_db):
         # Search works
         r1 = text_db.text_search("Article", "title", "Rust", k=10)
@@ -79,6 +83,7 @@ def _owners(db, results):
     return sorted(db.get_node(node_id).properties()["owner"] for node_id, _ in results)
 
 
+@pytest.mark.requires("text-index")
 class TestTextIndexOptions:
     def test_the_cjk_bigram_tokenizer_finds_words_inside_sentences(self, notes_db):
         notes_db.create_text_index(
@@ -104,6 +109,7 @@ class TestTextIndexOptions:
         assert _owners(notes_db, notes_db.text_search("Note", "body", "柏林", 10)) == ["Alix"]
 
 
+@pytest.mark.requires("text-index")
 class TestTextSearchFilters:
     def test_filters_keep_the_matching_nodes_with_their_scores(self, notes_db):
         notes_db.create_text_index("Note", "body", tokenizer="cjk_bigram")

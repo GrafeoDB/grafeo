@@ -48,12 +48,25 @@ public sealed record QueryResult(
     /// </summary>
     public ResultKind Kind { get; init; } = ResultKind.Rows;
 
+    /// <summary>
+    /// The warnings the statement raised, ordered by code: a deprecated form
+    /// it wrote or ran, or a notice; empty when there were none.
+    /// Experimental (0.6.2+).
+    /// </summary>
+    public IReadOnlyList<QueryWarning> Warnings { get; init; } = [];
+
     /// <summary>The answer of a SPARQL ASK; <c>null</c> for every other result.</summary>
     public bool? Boolean =>
         Kind == ResultKind.Boolean && Rows.Count == 1 && Rows[0].TryGetValue("boolean", out var answer)
             ? answer as bool?
             : null;
 }
+
+/// <summary>A warning a statement raised. Experimental (0.6.2+).</summary>
+/// <param name="Code">Its GQLSTATUS code, of class 01 (for example "01X01").</param>
+/// <param name="Kind">"deprecation" or "notice".</param>
+/// <param name="Message">What it says, naming the replacement of a deprecated form.</param>
+public sealed record QueryWarning(string Code, string Kind, string Message);
 
 /// <summary>What a write statement changed.</summary>
 /// <param name="NodesCreated">Nodes created.</param>

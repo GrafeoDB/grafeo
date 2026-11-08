@@ -5,7 +5,7 @@ description: Built-in graph algorithms in Grafeo.
 
 # Graph Algorithms
 
-Grafeo includes a library of built-in graph algorithms for common analysis tasks, accessible via the `db.algorithms()` API.
+Grafeo includes a library of built-in graph algorithms for common analysis tasks, accessible via the `db.algorithms` property.
 
 ## Algorithm Categories
 
@@ -78,7 +78,7 @@ Grafeo includes a library of built-in graph algorithms for common analysis tasks
 
 ### From Python
 
-Algorithms are accessed through the `db.algorithms()` method:
+Algorithms are accessed through the `db.algorithms` property:
 
 ```python
 import grafeo
@@ -86,25 +86,27 @@ import grafeo
 db = grafeo.GrafeoDB()
 
 # Get the algorithms interface
-algs = db.algorithms()
+algs = db.algorithms
 
 # Run PageRank
 scores = algs.pagerank()
 for node_id, score in scores.items():
     print(f"Node {node_id}: {score:.4f}")
 
-# Find shortest path
-path = algs.shortest_path(source=1, target=100)
-print(f"Path length: {len(path)}")
+# Find a shortest path: (distance, path), or None when 100 is unreachable.
+# Without a weight, the distance is the number of hops.
+found = algs.dijkstra(1, target=100)
+if found is not None:
+    distance, path = found
+    print(f"Distance {distance}: {path}")
 
 # Connected components
-components = algs.connected_components()
-print(f"Found {len(components)} components")
+print(f"Found {algs.connected_component_count()} components")
 ```
 
 ### Available Methods
 
-The `algorithms()` object provides these methods:
+The `db.algorithms` object provides these methods:
 
 **Traversal:**
 
@@ -113,10 +115,10 @@ The `algorithms()` object provides these methods:
 
 **Shortest Paths:**
 
-- `dijkstra(source, target)` - Dijkstra's algorithm
-- `shortest_path(source, target)` - Generic shortest path
+- `dijkstra(source)` - Dijkstra's algorithm: the distance to every reachable node
+- `dijkstra(source, target=...)` - One shortest path: `(distance, path)`, or `None` when the target is unreachable
 - `sssp(source, weight_attr)` - Single-source shortest paths (weighted)
-- `all_pairs_shortest_path()` - All-to-all shortest paths
+- `floyd_warshall()` - All-pairs shortest distances (distances, not paths): O(n^3) time, O(n^2) memory
 
 **Centrality:**
 
@@ -135,12 +137,12 @@ The `algorithms()` object provides these methods:
 
 **Structure:**
 
-- `triangles()` - Triangle counting
-- `triangles(parallel=True)` - Parallel triangle counting (degree-ordered, merge intersection)
+- `total_triangles()` - Triangle counting: each triangle once
+- `triangle_count()` - The triangles each node is in
 - `transitivity()` - Global clustering coefficient
 - `ktruss(k=None)` - K-truss decomposition (dense subgraph discovery)
-- `subgraph_isomorphism_count(pattern)` - Count subgraph isomorphisms
-- `minimum_spanning_tree()` - MST construction
+- `subgraph_isomorphism_count(pattern_edges, pattern_nodes)` - Count non-induced subgraph isomorphisms of a pattern
+- `kruskal()` and `prim()` - Minimum spanning tree (forest) construction
 - `max_flow(source, sink)` - Maximum flow
 
 ### From Query Languages (GQL, Cypher, SQL/PGQ)
@@ -169,6 +171,11 @@ CALL grafeo.pagerank({projection: 'people'})
 -- List all available procedures
 CALL grafeo.procedures()
 ```
+
+`grafeo.procedures()` lists each procedure's `name`, `description`, `parameters` and
+`output_columns`, whether it writes the graph (`writes`, a BOOLEAN, refused on a read-only
+session) and what it reaches outside the database (`external_access`: `'none'`, `'reads'` or
+`'writes'`, refused on a session without external access).
 
 A `CALL` reads the graph the session selects (`USE GRAPH`, or `set_graph()` in
 Python), unless its `projection` argument names a projection.
@@ -224,6 +231,7 @@ Works the same way across all three languages:
 | `grafeo.kcore()` | Structure | node_id, core_number, max_core |
 | `grafeo.kcore(k)` | Structure | node_id, in_k_core |
 | `grafeo.ktruss()` | Structure | source, target, truss_number |
+| `grafeo.ktruss(k)` | Structure | source, target |
 | `grafeo.total_triangles()` | Clustering | total_triangles |
 | `grafeo.stochastic_block_partition()` | Community | node_id, block_id, description_length |
 | `grafeo.subgraph_isomorphism()` | Structure | count |
@@ -252,6 +260,10 @@ threads:
   component too), and the lists the Rust functions return (flow edges by
   source, then target). Results whose order is the answer (paths, BFS and DFS
   order, topological order, spanning tree edges) keep their own order.
+- The flow procedures give one row per edge that carries flow: two parallel
+  edges are two rows, each with its own capacity and cost.
+- `grafeo.topological_sort` gives the smallest order by node id: of the nodes
+  whose predecessors are all placed, the one with the smallest id comes next.
 - Ties are broken by node id. Louvain and label propagation visit nodes in
   node-id order, a node that gains equally from several communities joins the
   one with the smallest index, and communities are numbered 0, 1, 2, ... in

@@ -49,6 +49,7 @@ Queries that ran in 0.6.1 and now fail or behave differently.
 - **`memory_usage()` reports what the store holds**: its store, index, version and string-pool figures are the counted bytes, kept as each write grows them, instead of estimates.
 - **A negative `SKIP` or `LIMIT` after a GQL `CALL`** raises 22G02, as in every other `RETURN`; 0.6.1 ignored the count.
 - **`TierOverride::ForceDisk` is refused on sections that cannot spill**: only `VectorStore` can move to disk, so `ForceDisk` on another section (`TextIndex`, `PropertyIndex`, `LpgStore`, `RdfRing`, `CompactStore` and the rest) now fails `Config::validate`, where it was accepted and did nothing.
+- **Temporal literals whose text is not a date, time, datetime or duration** fail with `22007` (`22G0H` for a duration) instead of becoming a string; a `LOCAL DATETIME` property refuses `DATETIME '...'` with an offset, and a schema error names the value as the query writes it (`DATETIME '...'`, offset kept).
 
 ### Added
 

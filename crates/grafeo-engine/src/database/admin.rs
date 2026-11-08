@@ -178,6 +178,7 @@ impl super::GrafeoDB {
         let buffer_manager = BufferManagerMemory {
             budget_bytes: bm_stats.budget,
             allocated_bytes: bm_stats.total_allocated,
+            hard_limit_bytes: self.buffer_manager.hard_limit(),
             graph_storage_bytes: bm_stats.region_usage(MemoryRegion::GraphStorage),
             index_buffers_bytes: bm_stats.region_usage(MemoryRegion::IndexBuffers),
             execution_buffers_bytes: bm_stats.region_usage(MemoryRegion::ExecutionBuffers),
@@ -227,6 +228,7 @@ impl super::GrafeoDB {
             };
         }
 
+        usage.limit_bytes = self.buffer_manager.hard_limit();
         usage.spill = self.spill_memory();
         usage.compute_total();
         usage

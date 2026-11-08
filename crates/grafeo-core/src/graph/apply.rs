@@ -186,6 +186,22 @@ impl fmt::Display for ApplyError {
 
 impl std::error::Error for ApplyError {}
 
+impl ApplyError {
+    /// The crate's error for this refusal: a memory refusal is its own
+    /// error (`GRAFEO-S001`, naming the bound), any other `make` of its
+    /// message.
+    #[must_use]
+    pub fn into_error(
+        self,
+        make: impl FnOnce(String) -> grafeo_common::utils::error::Error,
+    ) -> grafeo_common::utils::error::Error {
+        match self {
+            Self::Limit(refusal) => (*refusal).into(),
+            other => make(other.to_string()),
+        }
+    }
+}
+
 /// How an error names an entity.
 pub(crate) fn describe(entity: Entity) -> String {
     match entity {

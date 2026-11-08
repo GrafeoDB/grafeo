@@ -237,6 +237,9 @@ pub struct GrafeoDB {
     /// Where spilled vector columns write their cache files.
     #[cfg(all(feature = "vector-index", feature = "wal"))]
     vector_cache: Option<Arc<spill_directory::SpillDirectory>>,
+    /// What the open found that its caller should know (see
+    /// [`open_warnings`](Self::open_warnings)).
+    open_warnings: Vec<crate::admin::OpenWarning>,
     /// What the open spills, against its cap and room (see `spill_budget`);
     /// `None` without a spill directory.
     pub(super) spill_account: Option<Arc<grafeo_core::execution::spill::SpillAccount>>,
@@ -327,12 +330,38 @@ impl GrafeoDB {
         Self::with_config(Config::in_memory()).expect("In-memory database creation should not fail")
     }
 
-    /// Logs [`graph_type_scope_warnings`](Self::graph_type_scope_warnings), at open, where a
-    /// build has a log.
-    fn warn_of_types_scoped_to_their_graphs(&self) {
-        for warning in self.graph_type_scope_warnings() {
-            grafeo_common::grafeo_warn!("{}", warning.message);
+    /// The warnings of an open that just finished (`fallback`: the memory
+    /// detection's): the graph type scopes, and whether the database holds
+    /// more than its memory limit (an open never refuses, O1).
+    fn open_warnings_after_open(
+        &self,
+        fallback: Option<crate::admin::OpenWarning>,
+    ) -> Vec<crate::admin::OpenWarning> {
+        let mut warnings: Vec<crate::admin::OpenWarning> = fallback.into_iter().collect();
+        warnings.extend(self.graph_type_scope_warnings().into_iter().map(|warning| {
+            crate::admin::OpenWarning::GraphTypeScope {
+                message: warning.message,
+                context: warning.context,
+            }
+        }));
+        let used = self.buffer_manager.allocated();
+        let limit = self.buffer_manager.hard_limit();
+        if used >= limit {
+            warnings.push(crate::admin::OpenWarning::OverMemoryLimit {
+                used: used as u64,
+                limit: limit as u64,
+            });
         }
+        warnings
+    }
+
+    /// What the open found that the caller should know, without failing:
+    /// a graph type's rules that no longer reach elements, a memory limit
+    /// taken of a fallback figure, a database over its memory limit. Each
+    /// was logged at the open too.
+    #[must_use]
+    pub fn open_warnings(&self) -> &[crate::admin::OpenWarning] {
+        &self.open_warnings
     }
 
     /// Opens a database at the given path, creating it if it doesn't exist.
@@ -1015,6 +1044,7 @@ impl GrafeoDB {
             read_only: is_read_only,
             projections: Arc::new(RwLock::new(std::collections::HashMap::new())),
             immediate_writes: std::sync::OnceLock::new(),
+            open_warnings: Vec::new(),
         };
 
         // Register storage sections as memory consumers for pressure tracking
@@ -1022,8 +1052,13 @@ impl GrafeoDB {
 
         // The indexes the sections did not hold are built from all the data,
         // now that WAL recovery is done.
+        // They run unrefused: an open never refuses (O1), and a rebuild's
+        // reads of cold columns thaw them whatever the limit.
         #[cfg(feature = "grafeo-file")]
-        db.finish_load(loaded_sections);
+        match db.store.clone() {
+            Some(store) => store.with_unrefused(|| db.finish_load(loaded_sections)),
+            None => db.finish_load(loaded_sections),
+        }
 
         // With `wal_enabled` off, no WAL of this handle marks or trims the
         // sidecar WAL it replayed: left in place, a crash after a later
@@ -1119,8 +1154,10 @@ impl GrafeoDB {
             db.checkpoint_to_file(&fm)?;
         }
 
-        db.warn_of_types_scoped_to_their_graphs();
-        warn_of_undetected_memory(budget, detected_memory);
+        db.open_warnings = db.open_warnings_after_open(undetected_memory(budget, detected_memory));
+        for warning in &db.open_warnings {
+            grafeo_common::grafeo_warn!("{warning}");
+        }
         Ok(db)
     }
 
@@ -1182,7 +1219,10 @@ impl GrafeoDB {
 
         let (budget, detected_memory) = memory_budget(&config);
         let config = config.with_open_memory_budget(budget);
-        warn_of_undetected_memory(budget, detected_memory);
+        let memory_warning = undetected_memory(budget, detected_memory);
+        if let Some(warning) = &memory_warning {
+            grafeo_common::grafeo_warn!("{warning}");
+        }
         let buffer_config = BufferManagerConfig::with_budget(budget);
         let buffer_manager = BufferManager::new(buffer_config);
         transaction_manager.attach_memory(Arc::clone(&buffer_manager));
@@ -1259,6 +1299,7 @@ impl GrafeoDB {
             read_only: false,
             projections: Arc::new(RwLock::new(std::collections::HashMap::new())),
             immediate_writes: std::sync::OnceLock::new(),
+            open_warnings: memory_warning.into_iter().collect(),
         };
         // What it holds besides the backend (its RDF store and ring, its CDC
         // log) reports to the buffer manager, as on the built-in store.
@@ -1305,7 +1346,10 @@ impl GrafeoDB {
 
         let (budget, detected_memory) = memory_budget(&config);
         let config = config.with_open_memory_budget(budget);
-        warn_of_undetected_memory(budget, detected_memory);
+        let memory_warning = undetected_memory(budget, detected_memory);
+        if let Some(warning) = &memory_warning {
+            grafeo_common::grafeo_warn!("{warning}");
+        }
         let buffer_config = BufferManagerConfig::with_budget(budget);
         let buffer_manager = BufferManager::new(buffer_config);
         transaction_manager.attach_memory(Arc::clone(&buffer_manager));
@@ -1382,6 +1426,7 @@ impl GrafeoDB {
             read_only: true,
             projections: Arc::new(RwLock::new(std::collections::HashMap::new())),
             immediate_writes: std::sync::OnceLock::new(),
+            open_warnings: memory_warning.into_iter().collect(),
         };
         // What it holds besides the store reports to the buffer manager, as
         // on the built-in store.
@@ -3943,16 +3988,17 @@ fn memory_budget(config: &Config) -> (usize, Option<DetectedMemory>) {
     (budget, Some(detected))
 }
 
-/// Logs, where a build has a log, that the memory budget rests on the fallback figure because
-/// the memory this process may use could not be detected.
-fn warn_of_undetected_memory(budget: usize, detected: Option<DetectedMemory>) {
-    if detected.is_some_and(|detected| detected.source == MemorySource::Fallback) {
-        grafeo_common::grafeo_warn!(
-            "could not detect the memory this process may use: the memory limit is {} MiB, \
-             taken of a 1 GiB fallback; set it with Config::with_memory_limit",
-            budget >> 20
-        );
-    }
+/// The warning that the memory budget rests on the fallback figure because the memory this
+/// process may use could not be detected, when it does.
+fn undetected_memory(
+    budget: usize,
+    detected: Option<DetectedMemory>,
+) -> Option<crate::admin::OpenWarning> {
+    detected
+        .is_some_and(|detected| detected.source == MemorySource::Fallback)
+        .then_some(crate::admin::OpenWarning::MemoryDetectionFallback {
+            budget: budget as u64,
+        })
 }
 
 /// The error of a configuration [`Config::validate`] refuses: a setting the

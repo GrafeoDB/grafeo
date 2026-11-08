@@ -22,16 +22,16 @@ use std::sync::{Arc, OnceLock};
 
 use bytes::Bytes;
 use grafeo_common::change::PendingVersion;
-use grafeo_common::memory::buffer::BufferManager;
+use grafeo_common::memory::buffer::{BufferManager, MemoryGrant};
 use grafeo_common::types::{ArcStr, Value};
 use grafeo_common::utils::error::{Error, Result};
 use grafeo_common::utils::hash::FxHashMap;
 use parking_lot::Mutex;
 
 use super::Read;
-use super::account::{ThawSink, granted_chunk};
+use super::account::{ThawGrant, ThawSink, granted_chunk};
 use super::bitset::Bitset;
-use super::slots::GroupRows;
+use super::slots::{GroupRows, vector_start};
 use super::updates::Updates;
 use super::versions::VECTOR_ROWS;
 use crate::codec::column_chunk::{
@@ -391,14 +391,123 @@ struct ColdChunk {
     bytes: Bytes,
     point: Option<Arc<PointView>>,
     home: Home,
+    /// What it takes decoded ([`decoded_size`]).
+    decoded: usize,
 }
 
 impl ColdChunk {
-    /// About what the chunk takes decoded, at most: a value a row, for the
-    /// headroom an op that thaws it asks for.
+    /// What the chunk takes decoded (see [`decoded_size`]), for the grant a
+    /// thaw of it asks for.
     fn decoded_bytes(&self) -> usize {
-        self.row_count as usize * std::mem::size_of::<Value>()
+        self.decoded
     }
+}
+
+/// How a vector grows as [`grow_rows`] (or a [`Bitset`]) grows it to a
+/// length at a time: as the standard library's amortized growth does, to
+/// twice its capacity, at least the length asked for, at least four.
+#[derive(Debug, Default, Clone, Copy)]
+struct Growth {
+    len: usize,
+    cap: usize,
+}
+
+impl Growth {
+    fn to(&mut self, len: usize) {
+        if len > self.len {
+            if len > self.cap {
+                self.cap = (self.cap * 2).max(len).max(4);
+            }
+            self.len = len;
+        }
+    }
+}
+
+/// What a chunk's `values` (its rows' offsets from `first_row`, in order,
+/// none null) take decoded in a column of their own, as
+/// [`Hot::counted_bytes`] counts a [`Hot::decode`] of the chunk: the
+/// vector of values to the last row and the presence bits as they grow,
+/// what the values hold, and the bounds' values. Measured from the decode a
+/// load makes to check the chunk, or the values a spill encodes.
+pub(super) fn decoded_size(first_row: usize, values: &[(u32, Value)]) -> usize {
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Kind {
+        Int64,
+        Float64,
+        Bool,
+        String,
+        Any,
+    }
+    let kind_of = |value: &Value| match value {
+        Value::Int64(_) => Kind::Int64,
+        Value::Float64(_) => Kind::Float64,
+        Value::Bool(_) => Kind::Bool,
+        Value::String(_) => Kind::String,
+        _ => Kind::Any,
+    };
+    let held = |kind: Kind, value: &Value| match (kind, value) {
+        (Kind::String, Value::String(text)) => text.len(),
+        (Kind::Any, value) => value.estimated_size_bytes(),
+        _ => 0,
+    };
+    let mut kind: Option<Kind> = None;
+    let mut data = Growth::default();
+    let mut present = Growth::default();
+    let mut payload = 0;
+    let mut bound = Bound::Empty;
+    // A typed column's values start at the vector of its first row with a
+    // value (see [`GroupRows::put`]): a put past the end fills to the row,
+    // then pushes it.
+    let start = values
+        .first()
+        .map_or(0, |(offset, _)| vector_start(first_row + *offset as usize));
+    let put = |data: &mut Growth, row: usize| {
+        data.to(row - start);
+        data.to(row - start + 1);
+    };
+    for (index, (offset, value)) in values.iter().enumerate() {
+        let row = first_row + *offset as usize;
+        bound.widen(value);
+        let this = kind_of(value);
+        let current = match kind {
+            None => this,
+            Some(current) if current == this || current == Kind::Any => current,
+            // Another type: the rows so far move to a column of any values,
+            // rebuilt row by row.
+            Some(_) => {
+                data = Growth::default();
+                for (offset, _) in &values[..index] {
+                    put(&mut data, first_row + *offset as usize);
+                }
+                payload = values[..index]
+                    .iter()
+                    .map(|(_, value)| value.estimated_size_bytes())
+                    .sum();
+                Kind::Any
+            }
+        };
+        kind = Some(current);
+        match current {
+            // A false is a bit left unset: nothing grows.
+            Kind::Bool => {
+                if matches!(value, Value::Bool(true)) {
+                    data.to(row / 64 + 1);
+                }
+            }
+            _ => put(&mut data, row),
+        }
+        payload += held(current, value);
+        present.to(row / 64 + 1);
+    }
+    let slot = match kind {
+        Some(Kind::Int64) => std::mem::size_of::<i64>(),
+        Some(Kind::Float64) => std::mem::size_of::<f64>(),
+        Some(Kind::Bool) => std::mem::size_of::<u64>(),
+        Some(Kind::String) => std::mem::size_of::<ArcStr>(),
+        Some(Kind::Any) => std::mem::size_of::<Value>(),
+        None => 0,
+    };
+    present.cap * std::mem::size_of::<u64>() + data.cap * slot + payload + bound.payload_bytes()
 }
 
 /// The heap bytes of a cold column's chunk list and point views, besides
@@ -590,6 +699,8 @@ struct ChunkPlace {
     row_count: u32,
     codec: u8,
     range: Range<usize>,
+    /// What the chunk takes decoded ([`decoded_size`]).
+    decoded: usize,
 }
 
 impl SpillChunks {
@@ -601,7 +712,7 @@ impl SpillChunks {
         }
     }
 
-    fn push(&mut self, first_row: usize, row_count: u32, codec: u8, bytes: &[u8]) {
+    fn push(&mut self, first_row: usize, row_count: u32, codec: u8, bytes: &[u8], decoded: usize) {
         let start = self.bytes.len();
         self.bytes.extend_from_slice(bytes);
         self.places.push(ChunkPlace {
@@ -609,6 +720,7 @@ impl SpillChunks {
             row_count,
             codec,
             range: start..self.bytes.len(),
+            decoded,
         });
     }
 }
@@ -732,15 +844,56 @@ impl Column {
         (hot, counts)
     }
 
-    /// Reports the thaw of `cold` into `hot` to the store's thaws.
-    fn report_thaw(&self, cold: &Vec<ColdChunk>, hot: &Hot) {
+    /// Reports the thaw of `cold` into `hot` to the store's thaws, with the
+    /// grant a read took for it.
+    fn report_thaw(&self, cold: &Vec<ColdChunk>, hot: &Hot, granted: Option<MemoryGrant>) {
         if let Some(thaws) = &self.thaws {
             thaws.thawed(
                 hot.counted_bytes() + hot.updates.counted_bytes(),
                 cold_meta_bytes(cold),
                 cold_chunk_bytes(cold),
+                granted,
             );
         }
+    }
+
+    /// The decoded values for a read, thawing the column when the memory
+    /// limit has room for them; `None` when it has not (C4): the read then
+    /// decodes the one chunk it needs ([`decode_one`](Self::decode_one)),
+    /// slower but within the limit.
+    fn hot_for_read(&self) -> Option<&Hot> {
+        if let Some(hot) = self.hot.get() {
+            return Some(hot);
+        }
+        let Some(thaws) = &self.thaws else {
+            return Some(self.hot());
+        };
+        match thaws.grant_thaw(self.thaw_bytes()) {
+            ThawGrant::Refused => None,
+            grant => Some(self.hot_granted(grant.into_grant())),
+        }
+    }
+
+    /// The value at `row`, decoded from its chunk alone (a thaw the memory
+    /// limit refused).
+    fn decode_one(&self, row: usize) -> Option<Value> {
+        let cold = self.cold.lock();
+        if let Some(hot) = self.hot.get() {
+            return hot.get(row);
+        }
+        let chunk = cold.iter().find(|chunk| {
+            row.checked_sub(chunk.first_row)
+                .is_some_and(|offset| offset < chunk.row_count as usize)
+        })?;
+        let offset = u32::try_from(row - chunk.first_row).ok()?;
+        // The load decoded each chunk once to check it, and a spill checked
+        // that its file holds the chunks it encoded.
+        let decoded = decode_column_chunk_bytes(&chunk.bytes, chunk.codec, chunk.row_count)
+            .expect("a chunk the load or the spill checked");
+        decoded
+            .values
+            .into_iter()
+            .find_map(|(at, value)| (at == offset).then_some(value))
     }
 
     /// The column as a read of all its rows finds it.
@@ -811,8 +964,16 @@ impl Column {
         }
     }
 
-    /// The decoded values, decoding the cold chunks when needed.
+    /// The decoded values, decoding the cold chunks when needed (a grant
+    /// whatever the limit: a write's admission covered it).
     fn hot(&self) -> &Hot {
+        self.hot_granted(None)
+    }
+
+    /// [`hot`](Self::hot), the thaw holding `granted` when it is this
+    /// call's (a read's grant; dropped, so given back, when another call
+    /// thawed the column first).
+    fn hot_granted(&self, granted: Option<MemoryGrant>) -> &Hot {
         if let Some(hot) = self.hot.get() {
             return hot;
         }
@@ -823,7 +984,7 @@ impl Column {
             // The load decoded each chunk once to check it, and a spill
             // checked that its file holds the chunks it encoded.
             let hot = Hot::decode(&cold).expect("a chunk the load or the spill checked");
-            self.report_thaw(&cold, &hot);
+            self.report_thaw(&cold, &hot, granted);
             *cold = Vec::new();
             hot
         })
@@ -844,7 +1005,7 @@ impl Column {
                 return Err(error);
             }
         };
-        self.report_thaw(&cold, &hot);
+        self.report_thaw(&cold, &hot, None);
         self.hot = OnceLock::from(hot);
         Ok(())
     }
@@ -869,7 +1030,10 @@ impl Column {
             (Some(point), Ok(offset)) => point.has(offset),
             _ => {
                 drop(cold);
-                self.hot().present.get(row)
+                match self.hot_for_read() {
+                    Some(hot) => hot.present.get(row),
+                    None => self.decode_one(row).is_some(),
+                }
             }
         }
     }
@@ -907,11 +1071,12 @@ impl Column {
                 return Ok(true);
             }
             let (codec, bytes) = encode_column_chunk(rows, window, None)?;
+            let decoded = decoded_size(first_row, window);
             window.clear();
             if !PointView::supports(codec) {
                 return Ok(false);
             }
-            chunks.push(first_row, rows, codec.to_byte(), &bytes);
+            chunks.push(first_row, rows, codec.to_byte(), &bytes, decoded);
             Ok(true)
         };
         for row in hot.present.rows() {
@@ -943,7 +1108,13 @@ impl Column {
         let resident = cold.iter().map(|chunk| chunk.bytes.len()).sum();
         let mut chunks = SpillChunks::new(resident);
         for chunk in cold {
-            chunks.push(chunk.first_row, chunk.row_count, chunk.codec, &chunk.bytes);
+            chunks.push(
+                chunk.first_row,
+                chunk.row_count,
+                chunk.codec,
+                &chunk.bytes,
+                chunk.decoded,
+            );
         }
         SpillPlan::Write(chunks)
     }
@@ -1013,6 +1184,7 @@ impl Column {
                 bytes,
                 point: Some(Arc::new(point)),
                 home,
+                decoded: place.decoded,
             });
         }
         *self.cold.get_mut() = cold;
@@ -1051,7 +1223,10 @@ impl Column {
             return point.get(offset);
         }
         drop(cold);
-        self.hot().get(row)
+        match self.hot_for_read() {
+            Some(hot) => hot.get(row),
+            None => self.decode_one(row),
+        }
     }
 
     fn hot_mut(&mut self) -> &mut Hot {
@@ -1297,12 +1472,19 @@ impl Columns {
         codec: u8,
         bytes: Bytes,
     ) {
-        self.add_cold_reporting(key, first_row, row_count, codec, bytes, None);
+        let decoded = decode_column_chunk_bytes(&bytes, codec, row_count)
+            .map_or(0, |decoded| decoded_size(first_row, &decoded.values));
+        self.add_cold_reporting(key, first_row, row_count, codec, bytes, None, decoded);
     }
 
     /// Adds a chunk of key `key` as the file holds it, for rows from
     /// `first_row`, a new column reporting its thaw to `thaws`. The load has
-    /// already decoded and validated the chunk.
+    /// already decoded and validated the chunk, and measured what it takes
+    /// decoded ([`decoded_size`]).
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "a chunk's directory entry, its bytes and the measure of its decode, as the load has them"
+    )]
     pub(super) fn add_cold_reporting(
         &mut self,
         key: u32,
@@ -1311,6 +1493,7 @@ impl Columns {
         codec: u8,
         bytes: Bytes,
         thaws: Option<ThawSink>,
+        decoded: usize,
     ) {
         let column = self
             .by_key
@@ -1328,6 +1511,7 @@ impl Columns {
                 bytes,
                 point,
                 home: Home::Memory,
+                decoded,
             });
         } else {
             // Written to already: decode into the hot values.
@@ -1778,6 +1962,51 @@ mod tests {
 
     use super::{Columns, Data, Hot};
     use crate::codec::column_chunk::{decode_column_chunk_bytes, encode_column_chunk};
+
+    /// What [`super::decoded_size`] says a chunk takes decoded is what a
+    /// thaw of it holds, for each kind of column and a column whose rows'
+    /// types differ, from a row group's first row and from further in.
+    #[test]
+    fn a_chunks_decoded_size_is_what_its_thaw_holds() {
+        let cases: Vec<Vec<(u32, Value)>> = vec![
+            (0..300).map(|i| (i, Value::Int64(i64::from(i)))).collect(),
+            (0..70)
+                .map(|i| (i * 3, Value::Float64(f64::from(i))))
+                .collect(),
+            (0..130).map(|i| (i, Value::Bool(i % 3 == 0))).collect(),
+            (0..90)
+                .map(|i| (i, Value::from(format!("Vincent {i}").as_str())))
+                .collect(),
+            vec![
+                (0, Value::Int64(5)),
+                (4, Value::from("Jules")),
+                (9, Value::Float64(0.5)),
+                (11, Value::Bool(true)),
+            ],
+        ];
+        for first_row in [0, 128] {
+            for values in &cases {
+                let rows = values.last().unwrap().0 + 1;
+                let (codec, bytes) = encode_column_chunk(rows, values, None).unwrap();
+                let chunk = super::ColdChunk {
+                    first_row,
+                    row_count: rows,
+                    codec: codec.to_byte(),
+                    bytes: Bytes::from(bytes),
+                    point: None,
+                    home: super::Home::Memory,
+                    decoded: 0,
+                };
+                let hot = Hot::decode(std::slice::from_ref(&chunk)).unwrap();
+                assert_eq!(
+                    super::decoded_size(first_row, values),
+                    hot.counted_bytes(),
+                    "{:?} from row {first_row}",
+                    values.first()
+                );
+            }
+        }
+    }
 
     fn add_chunk(columns: &mut Columns, first: usize, rows: u32, values: &[(u32, Value)]) {
         let epochs = vec![17; values.len()];

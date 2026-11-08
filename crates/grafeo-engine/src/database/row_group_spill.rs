@@ -36,9 +36,9 @@ use std::sync::{Arc, Weak};
 #[cfg(all(feature = "wal", feature = "vector-index"))]
 use bytes::Bytes;
 use grafeo_common::memory::buffer::BufferManager;
-#[cfg(feature = "vector-index")]
-use grafeo_common::memory::buffer::SpillError;
 use grafeo_common::memory::buffer::{MemoryConsumer, MemoryRegion, priorities};
+#[cfg(feature = "vector-index")]
+use grafeo_common::memory::buffer::{SpillCause, SpillError};
 #[cfg(all(feature = "wal", feature = "vector-index"))]
 use grafeo_common::storage::SectionType;
 #[cfg(feature = "vector-index")]
@@ -268,19 +268,34 @@ impl MemoryConsumer for RowGroupVectorConsumer {
         "section:VectorStore"
     }
 
-    /// What its spill frees: the heap bytes of the indexed embedding
-    /// columns that are not spilled yet. The indexes' graphs (the HNSW
-    /// topology) stay in memory through a spill, so they are not reported
-    /// here; the store's account counts them. Walks the row groups of each
-    /// indexed property: read on the eviction path, not by statements.
+    /// What an explicit spill frees: the heap bytes of the indexed
+    /// embedding columns that are not spilled yet (see
+    /// [`spillable_bytes`](MemoryConsumer::spillable_bytes) for a spill
+    /// under pressure). The indexes' graphs (the HNSW topology) stay in
+    /// memory through a spill, so they are not reported here; the store's
+    /// account counts them. Walks the row groups of each indexed property:
+    /// read on the eviction path, not by statements.
     fn memory_usage(&self) -> usize {
+        self.spillable_bytes(SpillCause::Explicit)
+    }
+
+    /// What a spill for `cause` frees: under pressure, each graph's newest
+    /// row group keeps its column (its next creates would read it back).
+    fn spillable_bytes(&self, cause: SpillCause) -> usize {
         self.root.upgrade().map_or(0, |root| {
             graphs(&root)
                 .iter()
                 .map(|graph| {
                     Self::indexed_properties(graph)
                         .iter()
-                        .map(|property| graph.node_property_column_spillable_bytes(property))
+                        .map(|property| match cause {
+                            SpillCause::Explicit => {
+                                graph.node_property_column_spillable_bytes(property)
+                            }
+                            SpillCause::Pressure => {
+                                graph.node_property_column_spillable_bytes_but_newest(property)
+                            }
+                        })
                         .sum::<usize>()
                 })
                 .sum()
@@ -305,7 +320,15 @@ impl MemoryConsumer for RowGroupVectorConsumer {
     }
 
     #[cfg(all(feature = "wal", feature = "vector-index"))]
-    fn spill(&self, _target_bytes: usize) -> Result<usize, SpillError> {
+    fn spill(&self, target_bytes: usize) -> Result<usize, SpillError> {
+        self.spill_for(target_bytes, SpillCause::Explicit)
+    }
+
+    /// Spills the indexed embedding columns of every graph: all their row
+    /// groups for an explicit spill, all but each graph's newest under
+    /// pressure (see [`SpillCause`]).
+    #[cfg(all(feature = "wal", feature = "vector-index"))]
+    fn spill_for(&self, _target_bytes: usize, cause: SpillCause) -> Result<usize, SpillError> {
         let files = self.files.as_ref().ok_or(SpillError::NoSpillDirectory)?;
         let root = self.root()?;
         let mut freed = 0;
@@ -315,12 +338,18 @@ impl MemoryConsumer for RowGroupVectorConsumer {
             root.gc_versions(horizon());
         }
         for graph in graphs(&root) {
-            let spilled = graph.spilled_node_property_columns();
+            // A row group already spilled is left as it is by the store, so
+            // a column some group spilled still spills its other groups.
             for property in Self::indexed_properties(&graph) {
-                if spilled.contains(&property) {
-                    continue;
-                }
-                match graph.spill_node_property_column(&property, files) {
+                let spilled = match cause {
+                    SpillCause::Explicit => graph.spill_node_property_column(&property, files),
+                    // Each graph's newest row group stays: its next creates
+                    // would read a spilled column back.
+                    SpillCause::Pressure => {
+                        graph.spill_node_property_column_but_newest(&property, files)
+                    }
+                };
+                match spilled {
                     Ok(report) => freed += report.freed_bytes,
                     // The spill account refused: this column stays in memory,
                     // and a smaller one after it may still fit.

@@ -49,6 +49,15 @@ pub trait ColumnSpill: Send + Sync {
     fn write(&self, bytes: &[u8]) -> std::io::Result<Bytes>;
 }
 
+/// The highest-numbered of `nodes` that holds a row.
+fn append_group(nodes: &std::collections::BTreeMap<u64, super::NodeGroup>) -> Option<u64> {
+    nodes
+        .iter()
+        .rev()
+        .find(|(_, group)| !group.versions.is_empty())
+        .map(|(number, _)| *number)
+}
+
 /// What a spill of a column did, over its row groups.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[non_exhaustive]
@@ -89,13 +98,57 @@ impl RowGroupStore {
         key: &PropertyKey,
         spill: &dyn ColumnSpill,
     ) -> Result<ColumnSpillReport> {
+        self.spill_node_property_column_of(key, spill, false)
+    }
+
+    /// [`spill_node_property_column`](Self::spill_node_property_column) of
+    /// every row group but the newest ([`append_node_group`](Self::append_node_group)),
+    /// which the next creates write into: spilling it would make the next
+    /// write read the column back. What the memory limit spills (the vector
+    /// consumer).
+    ///
+    /// # Errors
+    ///
+    /// As [`spill_node_property_column`](Self::spill_node_property_column).
+    pub fn spill_node_property_column_but_newest(
+        &self,
+        key: &PropertyKey,
+        spill: &dyn ColumnSpill,
+    ) -> Result<ColumnSpillReport> {
+        self.spill_node_property_column_of(key, spill, true)
+    }
+
+    /// The highest-numbered node row group that holds rows: where this
+    /// store's next creates go. Each named graph has its own.
+    #[must_use]
+    pub fn append_node_group(&self) -> Option<u64> {
+        append_group(&self.inner.read().nodes)
+    }
+
+    /// The spill of `key`'s column, the newest group's kept when
+    /// `but_newest`.
+    fn spill_node_property_column_of(
+        &self,
+        key: &PropertyKey,
+        spill: &dyn ColumnSpill,
+        but_newest: bool,
+    ) -> Result<ColumnSpillReport> {
         let mut report = ColumnSpillReport::default();
         let (key, groups) = {
             let inner = self.inner.read();
             let Some(key) = inner.keys.get_id(key.as_str()) else {
                 return Ok(report);
             };
-            (key, inner.nodes.keys().copied().collect::<Vec<u64>>())
+            let newest = but_newest.then(|| append_group(&inner.nodes)).flatten();
+            (
+                key,
+                inner
+                    .nodes
+                    .keys()
+                    .copied()
+                    .filter(|number| Some(*number) != newest)
+                    .collect::<Vec<u64>>(),
+            )
         };
         for number in groups {
             let inner = self.inner.upgradable_read();
@@ -145,14 +198,31 @@ impl RowGroupStore {
     /// group's column with update chains, or already spilled, counts none.
     #[must_use]
     pub fn node_property_column_spillable_bytes(&self, key: &PropertyKey) -> usize {
+        self.spillable_bytes_of(key, false)
+    }
+
+    /// [`node_property_column_spillable_bytes`](Self::node_property_column_spillable_bytes)
+    /// but the newest row group's: what
+    /// [`spill_node_property_column_but_newest`](Self::spill_node_property_column_but_newest)
+    /// frees.
+    #[must_use]
+    pub fn node_property_column_spillable_bytes_but_newest(&self, key: &PropertyKey) -> usize {
+        self.spillable_bytes_of(key, true)
+    }
+
+    /// The spillable bytes of `key`'s column, the newest group's left out
+    /// when `but_newest`.
+    fn spillable_bytes_of(&self, key: &PropertyKey, but_newest: bool) -> usize {
         let inner = self.inner.read();
         let Some(key) = inner.keys.get_id(key.as_str()) else {
             return 0;
         };
+        let newest = but_newest.then(|| append_group(&inner.nodes)).flatten();
         inner
             .nodes
-            .values()
-            .map(|group| group.columns.spillable_bytes(key))
+            .iter()
+            .filter(|(number, _)| Some(**number) != newest)
+            .map(|(_, group)| group.columns.spillable_bytes(key))
             .sum()
     }
 

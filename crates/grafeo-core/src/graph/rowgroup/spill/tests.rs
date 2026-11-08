@@ -196,6 +196,63 @@ fn a_spilled_column_reads_every_row_from_its_files_and_stays_spilled() {
     assert_eq!(files.written(), 2);
 }
 
+/// The memory limit's spill keeps the newest row group's column: it stays
+/// hot, and a write into that group takes no thaw, while the older group's
+/// column stays spilled.
+#[test]
+fn the_newest_row_group_stays_in_memory_and_takes_its_writes() {
+    let store = RowGroupStore::new();
+    let ids = items(&store);
+    assert_eq!(store.append_node_group(), Some(1));
+    let reported = store.node_property_column_spillable_bytes_but_newest(&embedding());
+    assert!(
+        reported < store.node_property_column_spillable_bytes(&embedding()),
+        "the newest group's column is not counted as freeable"
+    );
+    let files = Files::default();
+    let report = store
+        .spill_node_property_column_but_newest(&embedding(), &files)
+        .unwrap();
+    assert_eq!(report.spilled_groups, 1, "only the full group: {report:?}");
+    assert_eq!(files.written(), 1);
+    assert!(
+        report.freed_bytes.abs_diff(reported) * 10 <= reported,
+        "it reported what it freed: {reported} for {report:?}"
+    );
+    assert_eq!(store.memory().spilled_columns, 1);
+    assert_eq!(
+        store.node_property_column_spillable_bytes_but_newest(&embedding()),
+        0,
+        "nothing more to free but the newest group's"
+    );
+
+    let mia = NodeId::new(ROWS_PER_GROUP + 2);
+    apply_all(
+        &store,
+        &[DataOp::CreateNode {
+            id: mia,
+            labels: labels(&["Item"]),
+            properties: properties(&[("embedding", vector(&[19.0, 88.0]))]),
+        }],
+        Writer::Replay {
+            epoch: next_epoch(&store),
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        store.memory().spilled_columns,
+        1,
+        "the write thawed nothing: the older group stays spilled"
+    );
+    assert_eq!(
+        store
+            .node_property(mia, embedding().as_str(), ReadView::latest())
+            .unwrap(),
+        Some(vector(&[19.0, 88.0]))
+    );
+    assert_embeddings(&store, &ids, "after the write");
+}
+
 /// A string column stays in memory: its chunks would have no point view,
 /// so its first read would decode it back; and a key no node has spills
 /// nothing.

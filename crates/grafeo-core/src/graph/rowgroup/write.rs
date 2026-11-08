@@ -16,9 +16,10 @@ use super::RowGroupStore;
 use crate::graph::Direction;
 use crate::graph::apply::{Applied, ApplyError, GraphBackend, Writer};
 
-/// The crate's error for an `apply` that refused.
+/// The crate's error for an `apply` that refused: `GRAFEO-S001` for the
+/// memory limit.
 fn error(refused: &ApplyError) -> Error {
-    Error::Internal(refused.to_string())
+    refused.clone().into_error(Error::Internal)
 }
 
 /// Whether `apply` changed something.

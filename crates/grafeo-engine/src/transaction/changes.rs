@@ -95,6 +95,50 @@ struct State {
     /// leave a change the statement's undo cannot see), and given back when
     /// the transaction ends.
     grant: Option<MemoryGrant>,
+    /// The reservation of what its triple inserts will add to the RDF store
+    /// at the commit (C7): taken as each is recorded, refusable, since the
+    /// commit cannot fail; the store adopts it at the commit, and a
+    /// rollback gives it back.
+    #[cfg(feature = "triple-store")]
+    rdf: RdfReservation,
+}
+
+/// What a transaction's triple inserts reserved (see `State::rdf`).
+#[cfg(feature = "triple-store")]
+#[derive(Default)]
+struct RdfReservation {
+    /// The bytes the inserts recorded so far estimate.
+    bytes: usize,
+    /// Their grant, grown a step at a time.
+    grant: Option<MemoryGrant>,
+}
+
+#[cfg(feature = "triple-store")]
+impl RdfReservation {
+    /// Reserves `bytes` more from `manager`: an atomic only when they pass
+    /// the grant's step; whether the memory limit had room.
+    fn reserve(&mut self, manager: &Arc<BufferManager>, bytes: usize) -> bool {
+        let wanted = self.bytes.saturating_add(bytes);
+        let held = self.grant.as_ref().map_or(0, MemoryGrant::size);
+        if wanted > held {
+            let step = wanted
+                .checked_next_multiple_of(manager.grant_step())
+                .unwrap_or(usize::MAX);
+            let grant = self
+                .grant
+                .get_or_insert_with(|| manager.empty_grant(MemoryRegion::GraphStorage));
+            if !grant.try_grow(step - held) {
+                return false;
+            }
+        }
+        self.bytes = wanted;
+        true
+    }
+
+    /// Gives back `bytes` of the inserts a statement undo dropped.
+    fn release(&mut self, bytes: usize) {
+        self.bytes = self.bytes.saturating_sub(bytes);
+    }
 }
 
 impl State {
@@ -153,6 +197,8 @@ impl TransactionChanges {
                 triples: super::rdf::PendingTriples::default(),
                 schema: Vec::new(),
                 grant: None,
+                #[cfg(feature = "triple-store")]
+                rdf: RdfReservation::default(),
             }),
             memory: None,
         }
@@ -202,6 +248,10 @@ impl TransactionChanges {
         self.memory = None;
         let state = self.state.get_mut();
         state.grant = None;
+        #[cfg(feature = "triple-store")]
+        {
+            state.rdf = RdfReservation::default();
+        }
         state.set.clear();
         state.targets.clear();
         state.schema.clear();
@@ -389,8 +439,12 @@ impl TransactionChanges {
     /// backend is asked either way, and the entries are dropped.
     pub(crate) fn rollback(&self) -> std::result::Result<(), ApplyError> {
         let mut state = self.state.lock();
-        // The transaction ends: its grant goes back.
+        // The transaction ends: its grants go back.
         state.grant = None;
+        #[cfg(feature = "triple-store")]
+        {
+            state.rdf = RdfReservation::default();
+        }
         state.schema.clear();
         let start = state.start;
         let all = state.set.split_off(start);
@@ -442,6 +496,21 @@ impl TransactionChanges {
             .any(|change| matches!(change, Change::Data { op, .. } if op.model() == DataModel::Rdf))
         {
             state.triples = super::rdf::PendingTriples::of(&state.set);
+            // What the dropped inserts reserved goes back (the grant keeps
+            // its step until the commit or the rollback).
+            let reserved = dropped
+                .iter()
+                .filter_map(|change| match change {
+                    Change::Data {
+                        op: DataOp::InsertTriple { triple },
+                        ..
+                    } => Some(grafeo_core::graph::rdf::RdfStore::insert_bytes_estimate(
+                        &grafeo_core::graph::rdf::Triple::from(&**triple),
+                    )),
+                    _ => None,
+                })
+                .sum();
+            state.rdf.release(reserved);
         }
     }
 
@@ -490,8 +559,25 @@ impl TransactionChanges {
         insert: bool,
     ) -> Result<()> {
         use grafeo_common::storage::log_record::TripleRecord;
+        use grafeo_common::utils::error::LimitBound;
 
         let mut state = self.state.lock();
+        // Reserved before anything is recorded: a refusal records nothing.
+        // On a refusal the lock goes while the buffer manager makes room,
+        // and the reservation is tried once more.
+        if insert && let Some(manager) = &self.memory {
+            let bytes = grafeo_core::graph::rdf::RdfStore::insert_bytes_estimate(&triple);
+            if !state.rdf.reserve(manager, bytes) {
+                drop(state);
+                if !manager.make_room(bytes) {
+                    return Err(manager.refusal(LimitBound::MemoryLimit, bytes).into());
+                }
+                state = self.state.lock();
+                if !state.rdf.reserve(manager, bytes) {
+                    return Err(manager.refusal(LimitBound::MemoryLimit, bytes).into());
+                }
+            }
+        }
         let slot = state.set.slot(GraphRef {
             model: DataModel::Rdf,
             key: graph.map(ArcStr::from),
@@ -608,6 +694,11 @@ impl TransactionChanges {
         use grafeo_core::graph::rdf::Triple;
 
         let mut state = self.state.lock();
+        // The store takes what the inserts reserved: they grow its count
+        // within it.
+        if let Some(grant) = std::mem::take(&mut state.rdf).grant {
+            store.adopt_grant(grant);
+        }
         if state.triples.is_empty() {
             return Ok(());
         }
@@ -1052,7 +1143,7 @@ impl StreamingChanges<'_> {
                 })?;
                 let transaction = target
                     .begin(self.transaction, self.snapshot)
-                    .map_err(|error| Error::Internal(error.to_string()))?;
+                    .map_err(|error| error.into_error(Error::Internal))?;
                 self.target = Some(Bound {
                     slot,
                     backend: Arc::clone(target),
@@ -1067,7 +1158,7 @@ impl StreamingChanges<'_> {
             Table::Nodes => target.reserve_node_ids(count),
             Table::Edges => target.reserve_edge_ids(count),
         }
-        .map_err(|error| Error::Internal(error.to_string()))?;
+        .map_err(|error| error.into_error(Error::Internal))?;
         self.set.push_bulk(BulkRange {
             graph: slot,
             table,
@@ -1094,7 +1185,7 @@ impl StreamingChanges<'_> {
         bound
             .backend
             .apply_bulk_row(&op, bound.transaction.writer())
-            .map_err(|error| Error::Internal(error.to_string()))?;
+            .map_err(|error| error.into_error(Error::Internal))?;
         #[cfg(feature = "wal")]
         if let Some(log) = &mut self.log {
             log.push(
@@ -1284,6 +1375,8 @@ pub(crate) struct StandaloneChange {
     /// The ops, in the order they apply, each with the index a statement
     /// built for it (a vector or text index put), installed as it applies.
     ops: Vec<(StandaloneOp, Option<BuiltIndex>)>,
+    /// The reservations of the indexes it builds, held until it is applied.
+    reserved: Vec<MemoryGrant>,
 }
 
 impl StandaloneChange {
@@ -1313,6 +1406,24 @@ impl StandaloneChange {
     /// The ops, in the order they apply.
     pub(crate) fn ops(&self) -> impl Iterator<Item = &StandaloneOp> {
         self.ops.iter().map(|(op, _)| op)
+    }
+
+    /// The ops with the indexes built for them, in the order they apply.
+    pub(crate) fn entries(&self) -> impl Iterator<Item = &(StandaloneOp, Option<BuiltIndex>)> {
+        self.ops.iter()
+    }
+
+    /// Holds `grant`, the reservation of an index it builds, until the
+    /// change is applied (see `standalone::commit`).
+    #[cfg(all(feature = "gql", any(feature = "vector-index", feature = "text-index")))]
+    pub(crate) fn hold(&mut self, grant: MemoryGrant) {
+        self.reserved.push(grant);
+    }
+
+    /// The reservations it holds, for the commit to keep until the change
+    /// is in.
+    pub(crate) fn take_reserved(&mut self) -> Vec<MemoryGrant> {
+        std::mem::take(&mut self.reserved)
     }
 
     /// The ops with the indexes built for them, in the order they apply.

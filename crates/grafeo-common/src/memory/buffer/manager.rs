@@ -1,6 +1,6 @@
 //! Unified buffer manager implementation.
 
-use super::consumer::{ConsumerStats, MemoryConsumer};
+use super::consumer::{ConsumerStats, MemoryConsumer, SpillCause};
 use super::grant::{GRANT_STEP, GrantReleaser, MemoryGrant};
 use super::region::MemoryRegion;
 use super::stats::{BufferStats, PressureLevel};
@@ -89,8 +89,15 @@ pub struct BufferManager {
     evict_limit: usize,
     /// Computed hard limit in bytes.
     hard_limit: usize,
+    /// The step its grants grow and shrink by (see [`grant_step`](Self::grant_step)).
+    grant_step: usize,
     /// Shutdown flag.
     shutdown: AtomicBool,
+}
+
+/// The grant step of a manager of `budget` bytes (see [`BufferManager::grant_step`]).
+fn grant_step_of(budget: usize) -> usize {
+    (budget / 64).clamp(4 << 10, GRANT_STEP)
 }
 
 impl BufferManager {
@@ -106,6 +113,7 @@ impl BufferManager {
         // reason: limit fractions (0.0..1.0) of a positive usize are always valid positive usizes
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let hard_limit = (config.budget as f64 * config.hard_limit_fraction) as usize;
+        let grant_step = grant_step_of(config.budget);
 
         Arc::new(Self {
             config,
@@ -121,6 +129,7 @@ impl BufferManager {
             soft_limit,
             evict_limit,
             hard_limit,
+            grant_step,
             shutdown: AtomicBool::new(false),
         })
     }
@@ -186,7 +195,8 @@ impl BufferManager {
     /// Brings `grant` (an empty one of `region` from this manager when it is `None`) to cover
     /// `counted` bytes whatever the limit, for memory a part holds already (a commit's, a read's,
     /// a load's): it grows to the step at or above `counted` when short, and gives back what it
-    /// holds two steps past `counted`, so `counted <= size < counted + 2 * GRANT_STEP`. A
+    /// holds two steps past `counted`, so `counted <= size < counted + 2 * step` (the
+    /// [`grant_step`](Self::grant_step)). A
     /// compare while it is within that bound; an atomic only when it crosses a step.
     pub fn settle_forced(
         self: &Arc<Self>,
@@ -194,9 +204,10 @@ impl BufferManager {
         region: MemoryRegion,
         counted: usize,
     ) {
+        let grant_step = self.grant_step;
         let step = |bytes: usize| {
             bytes
-                .checked_next_multiple_of(GRANT_STEP)
+                .checked_next_multiple_of(grant_step)
                 .unwrap_or(usize::MAX)
         };
         let held = grant.as_ref().map_or(0, MemoryGrant::size);
@@ -204,10 +215,10 @@ impl BufferManager {
             grant
                 .get_or_insert_with(|| self.empty_grant(region))
                 .grow_forced(step(counted).saturating_sub(held));
-        } else if held - counted >= 2 * GRANT_STEP
+        } else if held - counted >= 2 * grant_step
             && let Some(grant) = grant.as_mut()
         {
-            grant.shrink(held.saturating_sub(step(counted.saturating_add(GRANT_STEP))));
+            grant.shrink(held.saturating_sub(step(counted.saturating_add(grant_step))));
         }
     }
 
@@ -238,6 +249,15 @@ impl BufferManager {
     #[must_use]
     pub fn hard_limit(&self) -> usize {
         self.hard_limit
+    }
+
+    /// The step the grants of what it counts grow and shrink by: a 64th of
+    /// the budget, from 4 KiB to [`GRANT_STEP`] (1 MiB). A small limit
+    /// keeps small steps, so the grants' rounding does not eat it; the
+    /// default budget's step is 1 MiB.
+    #[must_use]
+    pub fn grant_step(&self) -> usize {
+        self.grant_step
     }
 
     /// The refusal of `requested` more bytes against `bound`, with this moment's figures: the
@@ -365,7 +385,7 @@ impl BufferManager {
                 continue;
             }
             if consumer.can_spill()
-                && let Ok(freed) = consumer.spill(usize::MAX)
+                && let Ok(freed) = consumer.spill_for(usize::MAX, SpillCause::Explicit)
             {
                 total_freed += freed;
             }
@@ -400,7 +420,7 @@ impl BufferManager {
         for consumer in consumers.iter() {
             if consumer.name() == name
                 && consumer.can_spill()
-                && let Ok(freed) = consumer.spill(usize::MAX)
+                && let Ok(freed) = consumer.spill_for(usize::MAX, SpillCause::Explicit)
             {
                 total_freed += freed;
             }
@@ -633,11 +653,13 @@ impl BufferManager {
                 if force_ram.contains(consumer.name()) {
                     continue;
                 }
-                if !consumer.can_spill() {
+                // A consumer that can free nothing under pressure is not
+                // asked (its spill would write and free nothing).
+                if !consumer.can_spill() || consumer.spillable_bytes(SpillCause::Pressure) == 0 {
                     continue;
                 }
                 let remaining = to_free - total_freed;
-                match consumer.spill(remaining) {
+                match consumer.spill_for(remaining, SpillCause::Pressure) {
                     Ok(freed) => total_freed += freed,
                     Err(_) => continue,
                 }
@@ -692,6 +714,30 @@ impl Drop for BufferManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The grant step is a 64th of the budget, from 4 KiB to 1 MiB.
+    #[test]
+    fn the_grant_step_follows_the_budget() {
+        assert_eq!(BufferManager::with_budget(64 << 20).grant_step(), 1 << 20);
+        assert_eq!(BufferManager::with_budget(1 << 30).grant_step(), GRANT_STEP);
+        assert_eq!(BufferManager::with_budget(4 << 20).grant_step(), 64 << 10);
+        assert_eq!(BufferManager::with_budget(64 << 10).grant_step(), 4 << 10);
+        assert_eq!(BufferManager::with_budget(1).grant_step(), 4 << 10);
+    }
+
+    /// A forced settle grows and shrinks by the manager's step.
+    #[test]
+    fn a_forced_settle_keeps_to_the_managers_step() {
+        let manager = BufferManager::with_budget(4 << 20);
+        let step = manager.grant_step();
+        let mut grant = None;
+        manager.settle_forced(&mut grant, MemoryRegion::GraphStorage, 1);
+        assert_eq!(grant.as_ref().map(MemoryGrant::size), Some(step));
+        manager.settle_forced(&mut grant, MemoryRegion::GraphStorage, 5 * step);
+        assert_eq!(grant.as_ref().map(MemoryGrant::size), Some(5 * step));
+        manager.settle_forced(&mut grant, MemoryRegion::GraphStorage, step);
+        assert_eq!(grant.as_ref().map(MemoryGrant::size), Some(2 * step));
+    }
     use crate::memory::buffer::consumer::priorities;
     use std::sync::atomic::AtomicUsize;
 

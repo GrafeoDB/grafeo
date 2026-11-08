@@ -38,8 +38,17 @@ impl ActiveFiles {
         self.0.lock().retain(|file| file.path != path);
     }
 
-    /// `path` stays on disk: its reservation is kept with it.
+    /// `path` stays on disk: its reservation is kept with it. A path already
+    /// gone (a cleanup removed it while its file was still open) is no
+    /// longer tracked, and its reservation goes back.
     pub(super) fn keep(&self, path: &Path, reservation: SpillReservation) {
+        if std::fs::symlink_metadata(path)
+            .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+        {
+            self.removed(path);
+            drop(reservation);
+            return;
+        }
         let mut files = self.0.lock();
         match files.iter_mut().find(|file| file.path == path) {
             Some(file) => file.reservation = Some(reservation),
@@ -627,6 +636,54 @@ mod tests {
         file.delete().unwrap();
         assert_eq!(manager.active_file_count(), 1);
         assert_eq!(account.used(), SPILL_FILE_STEP, "the other file's step");
+    }
+
+    /// A cleanup that removes the file of a live handle: the handle's delete
+    /// finds it gone, which counts as removed, and its bytes go back.
+    #[test]
+    fn a_delete_after_a_cleanup_removed_the_file_gives_its_bytes_back() {
+        use crate::execution::spill::SpillCap;
+
+        let temp_dir = TempDir::new().unwrap();
+        let account = SpillAccount::new(SpillCap::Unlimited, None);
+        let manager = SpillManager::new(temp_dir.path().join("query_7"))
+            .unwrap()
+            .with_account(Arc::clone(&account));
+        let mut file = manager.create_file(SpillOwner::Sort, "sort").unwrap();
+        file.write_all(&[3; 2048]).unwrap();
+        file.finish_write().unwrap();
+        let path = file.path().to_path_buf();
+
+        manager.cleanup().unwrap();
+        assert!(!path.exists());
+        file.delete()
+            .expect("a file already gone counts as removed");
+        assert_eq!(account.used(), 0, "nothing of it is on disk");
+        assert_eq!(manager.active_file_count(), 0);
+    }
+
+    /// A cleanup that removes the file of a live handle: the handle dropped
+    /// after it hands nothing to the manager, and its bytes go back.
+    #[test]
+    fn a_drop_after_a_cleanup_removed_the_file_gives_its_bytes_back() {
+        use crate::execution::spill::SpillCap;
+
+        let temp_dir = TempDir::new().unwrap();
+        let account = SpillAccount::new(SpillCap::Unlimited, None);
+        let manager = SpillManager::new(temp_dir.path().join("query_8"))
+            .unwrap()
+            .with_account(Arc::clone(&account));
+        let mut file = manager
+            .create_file(SpillOwner::Aggregate, "partition")
+            .unwrap();
+        file.write_all(&[4; 1000]).unwrap();
+        let path = file.path().to_path_buf();
+
+        manager.cleanup().unwrap();
+        assert!(!path.exists());
+        drop(file);
+        assert_eq!(account.used(), 0, "nothing of it is on disk");
+        assert_eq!(manager.active_file_count(), 0, "not tracked again");
     }
 
     #[test]

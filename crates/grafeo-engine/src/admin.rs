@@ -508,6 +508,72 @@ pub struct ValidationWarning {
     pub context: Option<String>,
 }
 
+/// What an open found that the caller should know, without failing:
+/// [`GrafeoDB::open_warnings`](crate::GrafeoDB::open_warnings). Each is also
+/// logged where a build has a log.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum OpenWarning {
+    /// A node or edge type's rules apply only in graphs bound to the graph
+    /// type that lists it, and a graph not bound to it holds such elements
+    /// (see `GrafeoDB::graph_type_scope_warnings`).
+    GraphTypeScope {
+        /// What holds them, and what to do.
+        message: String,
+        /// The type, as `node_type:<name>` or `edge_type:<name>`.
+        context: Option<String>,
+    },
+    /// The memory this process may use could not be detected: the memory
+    /// limit is `budget` bytes, taken of a 1 GiB fallback.
+    MemoryDetectionFallback {
+        /// The memory limit in force, in bytes.
+        budget: u64,
+    },
+    /// The database holds `used` bytes, past its memory limit of `limit`:
+    /// reads work, and writes that need memory fail with `GRAFEO-S001`
+    /// until the limit is raised. An open never refuses (what the file and
+    /// the WAL hold is loaded whole).
+    OverMemoryLimit {
+        /// The bytes the database holds after the open.
+        used: u64,
+        /// The memory limit, in bytes.
+        limit: u64,
+    },
+}
+
+impl OpenWarning {
+    /// The warning's code: `GRAPH_TYPE_NOT_BOUND`,
+    /// `MEMORY_DETECTION_FALLBACK` or `MEMORY_LIMIT_PASSED`.
+    #[must_use]
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::GraphTypeScope { .. } => "GRAPH_TYPE_NOT_BOUND",
+            Self::MemoryDetectionFallback { .. } => "MEMORY_DETECTION_FALLBACK",
+            Self::OverMemoryLimit { .. } => "MEMORY_LIMIT_PASSED",
+        }
+    }
+}
+
+impl std::fmt::Display for OpenWarning {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::GraphTypeScope { message, .. } => f.write_str(message),
+            Self::MemoryDetectionFallback { budget } => write!(
+                f,
+                "could not detect the memory this process may use: the memory limit is {} MiB, \
+                 taken of a 1 GiB fallback; set it with Config::with_memory_limit",
+                budget >> 20
+            ),
+            Self::OverMemoryLimit { used, limit } => write!(
+                f,
+                "the database holds {used} bytes, past its memory limit of {limit}: reads work, \
+                 writes that need memory fail with GRAFEO-S001 until Config::with_memory_limit \
+                 is raised"
+            ),
+        }
+    }
+}
+
 /// Dump format for export operations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]

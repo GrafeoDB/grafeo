@@ -452,12 +452,25 @@ mod consumers {
     }
 
     /// Under memory pressure the buffer manager asks the consumers to spill,
-    /// and the row-group store's embeddings go to their files; its reload
-    /// brings them back once the pressure is gone.
+    /// and the row-group store's embeddings go to their files, but for each
+    /// graph's newest row group; its reload brings them back once the
+    /// pressure is gone. The root gets a second row group (a few items past
+    /// the first group's ids), so its first group spills; the graph trips
+    /// holds one group, its newest, which stays.
     #[test]
     fn memory_pressure_spills_the_embeddings_and_a_reload_brings_them_back() {
+        use grafeo_core::graph::apply::GraphBackend;
+
+        /// The rows of a row group.
+        const ROW_GROUP: u64 = 65_536;
+
         let dir = tempfile::tempdir().unwrap();
         let (database, ids) = indexed();
+        let next = database.root.reserve_node_ids(0).unwrap().start;
+        database.root.reserve_node_ids(ROW_GROUP - next).unwrap();
+        let newest = items(&database, None, 5);
+        assert!(newest.iter().all(|id| id.as_u64() >= ROW_GROUP));
+        assert_eq!(database.root.append_node_group(), Some(1));
         let manager = BufferManager::with_budget(1 << 20);
         register_row_group_consumers(
             &manager,
@@ -484,7 +497,18 @@ mod consumers {
             [embedding()],
             "the pressure spilled the root's embeddings"
         );
-        assert_eq!(files_in(&dir.path().join("cache")).len(), 2);
+        assert_eq!(
+            database
+                .store(Some("trips"))
+                .spilled_node_property_columns(),
+            Vec::<PropertyKey>::new(),
+            "the newest group of trips stays"
+        );
+        assert_eq!(
+            files_in(&dir.path().join("cache")).len(),
+            1,
+            "a file for the root's first group, none for its newest or for trips"
+        );
         drop(grant);
 
         assert!(manager.reload_eligible(1.0) >= 1);

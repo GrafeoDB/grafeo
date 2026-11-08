@@ -128,7 +128,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use grafeo_common::memory::buffer::{
-    BufferManager, GRANT_STEP, MemoryConsumer, MemoryGrant, MemoryRegion, priorities,
+    BufferManager, MemoryConsumer, MemoryGrant, MemoryRegion, priorities,
 };
 use grafeo_common::types::{EdgeId, EpochId, HlcClock, HlcTimestamp, NodeId, Value};
 use hashbrown::HashMap as HbHashMap;
@@ -430,11 +430,9 @@ fn event_heap_bytes(event: &ChangeEvent) -> usize {
         + properties(&event.after)
 }
 
-/// `bytes` rounded up to the grant step.
-fn step_above(bytes: usize) -> usize {
-    bytes
-        .checked_next_multiple_of(GRANT_STEP)
-        .unwrap_or(usize::MAX)
+/// `bytes` rounded up to the grant step `step`.
+fn step_above(bytes: usize, step: usize) -> usize {
+    bytes.checked_next_multiple_of(step).unwrap_or(usize::MAX)
 }
 
 impl CdcLog {
@@ -484,7 +482,7 @@ impl CdcLog {
         };
         let counted = self.counted.load(Ordering::Relaxed);
         let granted = self.memory.granted.load(Ordering::Relaxed);
-        if counted <= granted && granted - counted < 2 * GRANT_STEP {
+        if counted <= granted && granted - counted < 2 * manager.grant_step() {
             return;
         }
         let mut grant = self.memory.grant.lock();
@@ -513,7 +511,7 @@ impl CdcLog {
         if held < counted {
             manager.settle_forced(&mut grant, MemoryRegion::ExecutionBuffers, counted);
         } else if let Some(grant) = grant.as_mut() {
-            given_back = held.saturating_sub(step_above(counted));
+            given_back = held.saturating_sub(step_above(counted, manager.grant_step()));
             grant.shrink(given_back);
         }
         self.memory.granted.store(
@@ -1772,7 +1770,10 @@ mod tests {
         }
         let granted = log.granted_bytes();
         let counted = log.counted_memory_bytes().0;
-        assert!(granted >= counted && counted > 2 * GRANT_STEP, "{counted}");
+        assert!(
+            granted >= counted && counted > 2 * manager.grant_step(),
+            "{counted}"
+        );
 
         // The eviction removes an event per 256 bytes asked for: the 30
         // oldest go, the 10 newest (about 640 KiB) stay.
@@ -1782,7 +1783,8 @@ mod tests {
         assert_eq!(freed, granted - log.granted_bytes());
         assert!(freed > 0);
         assert!(
-            log.granted_bytes() >= counted && log.granted_bytes() <= step_above(counted),
+            log.granted_bytes() >= counted
+                && log.granted_bytes() <= step_above(counted, manager.grant_step()),
             "granted {} for {counted}",
             log.granted_bytes()
         );

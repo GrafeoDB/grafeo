@@ -3514,6 +3514,14 @@ impl Session {
             let store = self
                 .active_lpg_store()
                 .map_or_else(|| self.require_root_store("a vector index"), Ok)?;
+            // Held by the change until the index is in.
+            if let Some(grant) = crate::database::index::reserve_index_build(
+                &store,
+                label,
+                crate::database::index::vector_index_bytes_per_node(dimensions),
+            )? {
+                change.hold(grant);
+            }
             let index = crate::database::index::vector_index_from_data(
                 &*store, label, property, dimensions, metric, None, None, None,
             )?;
@@ -3737,6 +3745,14 @@ impl Session {
             let store = self
                 .active_lpg_store()
                 .map_or_else(|| self.require_root_store("a text index"), Ok)?;
+            // Held by the change until the index is in.
+            if let Some(grant) = crate::database::index::reserve_index_build(
+                &store,
+                label,
+                crate::database::index::TEXT_INDEX_BYTES_PER_NODE,
+            )? {
+                change.hold(grant);
+            }
             let index =
                 crate::database::index::text_index_from_data(&*store, label, property, &options)?;
             change.push_built(

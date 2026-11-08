@@ -1475,6 +1475,29 @@ impl RowGroupStore {
         self.registered.add(manager, name);
     }
 
+    /// Runs `f` with this store's reads' thaws, and its named graphs',
+    /// granted whatever the memory limit: for the work an open must finish
+    /// (the index and text rebuilds), which never refuses (O1). Outside it,
+    /// a read whose thaw the limit has no room for decodes the one chunk it
+    /// needs instead.
+    pub fn with_unrefused<T>(&self, f: impl FnOnce() -> T) -> T {
+        let others: Vec<_> = self
+            .graph_names()
+            .iter()
+            .filter_map(|name| self.graph(name))
+            .map(|graph| graph.inner.read().account.thaws())
+            .collect();
+        let _unrefused = self.inner.read().account.unrefused(others);
+        f()
+    }
+
+    /// The nodes it counts at its latest epoch, without a scan: the figure
+    /// of an index build's estimate.
+    #[must_use]
+    pub fn nodes_counted(&self) -> usize {
+        usize::try_from(self.inner.read().counts.nodes.max(0)).unwrap_or(usize::MAX)
+    }
+
     /// The buffer manager it takes its memory from, once attached.
     #[must_use]
     pub fn memory_manager(&self) -> Option<&Arc<BufferManager>> {

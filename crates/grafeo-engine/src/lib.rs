@@ -59,7 +59,7 @@ pub mod validation;
 
 pub use admin::{
     AdminService, CheckpointStatus, CheckpointTriggers, CompactReport, DatabaseInfo, DatabaseMode,
-    DatabaseStats, DumpFormat, IndexInfo, LpgSchemaInfo, RdfSchemaInfo, SchemaInfo,
+    DatabaseStats, DumpFormat, IndexInfo, LpgSchemaInfo, OpenWarning, RdfSchemaInfo, SchemaInfo,
     ValidationError, ValidationResult, ValidationWarning, WalStatus,
 };
 pub use auth::{Grant, Identity, Role, StatementKind};

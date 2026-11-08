@@ -54,7 +54,7 @@ mod region;
 mod stats;
 mod tiered;
 
-pub use consumer::{ConsumerStats, MemoryConsumer, SpillError, priorities};
+pub use consumer::{ConsumerStats, MemoryConsumer, SpillCause, SpillError, priorities};
 pub use grant::{CompositeGrant, GRANT_STEP, GrantReleaser, MemoryGrant};
 pub use manager::{BufferManager, BufferManagerConfig};
 pub use region::MemoryRegion;

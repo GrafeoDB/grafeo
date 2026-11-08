@@ -51,6 +51,12 @@ use serde::{Deserialize, Serialize};
 pub struct MemoryUsage {
     /// Total estimated memory usage in bytes.
     pub total_bytes: usize,
+    /// The memory limit in force, in bytes: the one set
+    /// ([`Config::with_memory_limit`](crate::config::Config::with_memory_limit))
+    /// or the default share of the detected memory. A write past it is
+    /// refused with `GRAFEO-S001`.
+    #[serde(default)]
+    pub limit_bytes: usize,
     /// Graph storage (nodes, edges, properties).
     pub store: StoreMemory,
     /// Index structures.
@@ -255,6 +261,9 @@ pub struct BufferManagerMemory {
     pub budget_bytes: usize,
     /// Currently allocated via grants.
     pub allocated_bytes: usize,
+    /// The line past which a reservation is refused: the memory limit.
+    #[serde(default)]
+    pub hard_limit_bytes: usize,
     /// Graph storage region.
     pub graph_storage_bytes: usize,
     /// Index buffers region.

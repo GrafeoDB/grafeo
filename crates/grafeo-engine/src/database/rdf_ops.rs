@@ -173,8 +173,43 @@ impl GrafeoDB {
                  an IRI; nothing was inserted"
             )));
         }
+        // Their estimate is reserved first (refused before anything is
+        // inserted, after the buffer manager made what room it could), and
+        // the store takes it: the inserts grow its count within it.
+        let reservation = self.reserve_rdf_insert(&triples)?;
         let held = self.hold_commits_for_import()?;
+        if let Some(grant) = reservation {
+            match graph.and_then(|name| self.rdf_store.graph(name)) {
+                Some(store) => store.adopt_grant(grant),
+                None => self.rdf_store.adopt_grant(grant),
+            }
+        }
         self.insert_triples_streamed(&held, triples, graph)
+    }
+
+    /// A grant of what inserting `triples` adds to the RDF store, about
+    /// (`RdfStore::insert_bytes_estimate`), or the memory limit's refusal:
+    /// it makes room once before it refuses.
+    fn reserve_rdf_insert(
+        &self,
+        triples: &[grafeo_core::graph::rdf::Triple],
+    ) -> Result<Option<grafeo_common::memory::buffer::MemoryGrant>> {
+        use grafeo_common::memory::buffer::MemoryRegion;
+        use grafeo_common::utils::error::LimitBound;
+
+        let Some(manager) = self.rdf_store.memory_manager() else {
+            return Ok(None);
+        };
+        let bytes: usize = triples
+            .iter()
+            .map(grafeo_core::graph::rdf::RdfStore::insert_bytes_estimate)
+            .sum();
+        let mut grant = manager.empty_grant(MemoryRegion::GraphStorage);
+        if grant.try_grow(bytes) || (manager.make_room(bytes) && grant.try_grow(bytes)) {
+            Ok(Some(grant))
+        } else {
+            Err(manager.refusal(LimitBound::MemoryLimit, bytes).into())
+        }
     }
 
     /// Loads the RDF file at `path` into the default graph as one bulk write,

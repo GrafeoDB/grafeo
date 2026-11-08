@@ -31,7 +31,11 @@ use crate::graph::load::{LoadTarget, LoadedNames};
 
 /// The crate's error for a load the store refused.
 fn refused(error: &ApplyError) -> Error {
-    Error::Internal(format!("the row-group store refused a loaded row: {error}"))
+    error.clone().into_error(|message| {
+        Error::Internal(format!(
+            "the row-group store refused a loaded row: {message}"
+        ))
+    })
 }
 
 impl RowGroupStore {

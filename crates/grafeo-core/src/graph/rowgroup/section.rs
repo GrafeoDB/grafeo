@@ -2627,6 +2627,12 @@ pub(super) fn read_lpg_section_into(
                 // (caps below the store's group) is decoded here.
                 let (group, first_row) = locate(chunk.row_start);
                 let cold = locate(end - 1).0 == group;
+                // What a thaw of the chunk takes, from this decode.
+                let decoded_bytes = if cold {
+                    super::column::decoded_size(first_row, &decoded.values)
+                } else {
+                    0
+                };
                 for (offset, value) in decoded.values {
                     let id = chunk.row_start + u64::from(offset);
                     if value.is_null() {
@@ -2683,6 +2689,7 @@ pub(super) fn read_lpg_section_into(
                         chunk.codec,
                         super::account::granted_chunk(bytes, memory),
                         Some(thaws),
+                        decoded_bytes,
                     );
                 }
             }

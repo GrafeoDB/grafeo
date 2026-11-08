@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.2
+
+- Version bump to match workspace release
+
 ## 0.6.1
 
 - Dates, times, durations and zoned datetimes come back as `GrafeoDate`, `GrafeoTime`, `GrafeoDuration` and `GrafeoZonedDateTime`, and go back in as the same GQL type; a `Duration` parameter keeps its fraction of a second and its sign.

@@ -2,7 +2,7 @@
 
 All notable changes to Grafeo, for future reference (and enjoyment).
 
-## [0.6.2] - Unreleased
+## [0.6.2] - 2026-11-8
 
 Correctness release: comparisons, nulls and operands of the wrong kind follow ISO GQL and openCypher more closely, a refused permission has its own code, a session can be kept from reading local files, and a graph cleared and written back keeps its size. Results that change on upgrade: a string never equals a number, `{k: NULL}` in a pattern finds nothing, an operator given a value of the wrong kind raises 22G12 where it answered null, and a file database checkpoints by itself (Changed lists each). Plus join orders from sampled degrees, cycles closed by intersection and lookups that need no index.
 

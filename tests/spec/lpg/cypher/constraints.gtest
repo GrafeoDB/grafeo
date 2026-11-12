@@ -117,6 +117,54 @@ tests:
     expect:
       error: "missing primary key property"
 
+  - name: node_key_violation_set_null
+    setup:
+      - "CREATE CONSTRAINT person_key FOR (p:Person) REQUIRE (p.name, p.city) IS NODE KEY"
+      - "CREATE (:Person {name: 'Alix', city: 'Amsterdam'})"
+    query: "MATCH (p:Person) SET p.city = null"
+    expect:
+      error: "GRAFEO-V001"
+
+  - name: node_key_violation_remove
+    setup:
+      - "CREATE CONSTRAINT person_key FOR (p:Person) REQUIRE (p.name, p.city) IS NODE KEY"
+      - "CREATE (:Person {name: 'Alix', city: 'Amsterdam'})"
+    query: "MATCH (p:Person) REMOVE p.name"
+    expect:
+      error: "GRAFEO-V001"
+
+  - name: node_key_swap_in_one_set_refused
+    setup:
+      - "CREATE CONSTRAINT person_key FOR (p:Person) REQUIRE (p.name, p.city) IS NODE KEY"
+      - "CREATE (:Person {name: 'Alix', city: 'Amsterdam', n: 1}), (:Person {name: 'Alix', city: 'Berlin', n: 2})"
+    query: "MATCH (a:Person {n: 1}), (b:Person {n: 2}) SET a.city = 'Berlin', b.city = 'Amsterdam'"
+    expect:
+      error: "GRAFEO-V001"
+
+  - name: node_key_moves_through_a_free_value
+    setup:
+      - "CREATE CONSTRAINT person_key FOR (p:Person) REQUIRE (p.name, p.city) IS NODE KEY"
+      - "CREATE (:Person {name: 'Alix', city: 'Amsterdam', n: 1}), (:Person {name: 'Alix', city: 'Berlin', n: 2})"
+      - "MATCH (a:Person {n: 1}) SET a.city = 'Prague'"
+      - "MATCH (b:Person {n: 2}) SET b.city = 'Amsterdam'"
+      - "MATCH (a:Person {n: 1}) SET a.city = 'Berlin'"
+    query: "MATCH (p:Person) RETURN p.n AS n, p.city AS city ORDER BY n"
+    expect:
+      ordered: true
+      rows:
+        - [1, "Berlin"]
+        - [2, "Amsterdam"]
+
+  - name: node_key_another_label_is_not_held
+    setup:
+      - "CREATE CONSTRAINT person_key FOR (p:Person) REQUIRE (p.name, p.city) IS NODE KEY"
+      - "CREATE (:Person {name: 'Alix', city: 'Amsterdam'})"
+      - "CREATE (:Guest {name: 'Alix', city: 'Amsterdam'}), (:Guest {name: 'Mia'})"
+    query: "MATCH (g:Guest) RETURN count(g) AS c"
+    expect:
+      rows:
+        - [2]
+
   # ---------------------------------------------------------------------------
   # DROP CONSTRAINT
   # ---------------------------------------------------------------------------

@@ -329,11 +329,25 @@ CREATE CONSTRAINT FOR (p:Person) ON (p.email) UNIQUE
 
 ### NODE KEY
 
-Composite uniqueness across multiple properties:
+A node key names the properties that together identify a node of a label, as a primary key does for a row in SQL:
 
 ```sql
-CREATE CONSTRAINT FOR (p:Person) ON (p.firstName, p.lastName) NODE KEY
+CREATE CONSTRAINT person_key FOR (p:Person) ON (p.firstName, p.lastName) NODE KEY
 ```
+
+- **Required**: every node with the label has a value for each key property. A write that leaves one out or sets it to `NULL` fails: an insert without it, `SET p.lastName = NULL`, `REMOVE p.lastName`, `SET p = {...}` without it, and `SET n:Person` on a node that lacks it.
+- **Unique together**: no two nodes with the label hold the same values for all key properties. A key over several properties is unique as a whole, so `('Alix', 'Gus')` and `('Alix', 'Mia')` are two keys. Values compare as `=` does: `1` and `1.0` are one key, `1` and `'1'` are two, and lists compare element by element.
+- **Changeable**: a key property may be updated to values no other node holds; an update to a key another node holds fails. Deleting a node, or removing the label from it, frees its key.
+- **Checked at each write**: a key is checked as each property is written, not at the end of the statement, so two nodes cannot swap their keys in one `SET`. Move one of them to a free value first.
+- **By label**: a node is held to the key when it has the label, whatever other labels it has. A label may have more than one key, and each holds.
+- **Per graph**: the constraint belongs to the database and applies in every graph, those created later included, but each graph has its own keys: the same key may be used once in each graph.
+- **Concurrent writers**: of two open transactions that write the same key, the second write fails with a write conflict (GQLSTATUS `40000`) right away, without waiting for the first to commit.
+
+A write that breaks a key fails with `GRAFEO-V001`, and nothing of the statement is kept. Like `UNIQUE`, a node key builds an index on its first property, which lookups that name that property use (see below).
+
+A `NODE KEY` on several properties does what `UNIQUE` on those properties together and `NOT NULL` on each of them do, in one constraint with one name. `UNIQUE` alone accepts nodes that lack a key property, as a missing value is never a duplicate.
+
+`NODE KEY` is a Grafeo extension: ISO GQL has no constraint statements, and its `KEY` in a graph type is a set of labels that identifies an element type, not a property key. Cypher's spelling, `REQUIRE (p.firstName, p.lastName) IS NODE KEY`, is accepted too, and a `PRIMARY KEY` column in [SQL/PGQ](../sql-pgq/index.md) `CREATE PROPERTY GRAPH` is the same rule. It is part of the stable query language (see [Stability](../../stability.md)).
 
 ### NOT NULL
 

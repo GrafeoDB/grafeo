@@ -1,8 +1,10 @@
 //! #743: what a `NODE KEY` constraint does, each claim its docs make pinned here. A node key is the
 //! values of its properties taken together: no two nodes of the label hold the same values, and every
 //! node of the label holds a value for each property, so it is UNIQUE over the tuple plus NOT NULL on
-//! each property. It holds on insert, on update, on a label added, over existing data and across
-//! transactions, builds an index on its first property, and reads the same in GQL and Cypher.
+//! each property. It holds on insert, on update, on a label added, over existing data, across
+//! transactions, in the direct API and after a reopen or a crash; it is checked at each write, binds
+//! by label and holds in each graph on its own; it builds an index on its first property, which a
+//! lookup by the key reads, and reads the same in GQL and Cypher.
 //!
 //! ```bash
 //! cargo test -p grafeo-engine --all-features --test main node_key_claims::
@@ -361,4 +363,339 @@ fn compared_with_unique_and_not_null() {
             "{statement}"
         );
     }
+}
+
+/// A key holds in each graph on its own: the default graph's nodes do not take a key in another
+/// graph, a graph made after the constraint gets it and its index, and within that graph the key
+/// is required and unique.
+#[test]
+fn a_key_holds_in_each_graph_on_its_own() {
+    let db = keyed();
+    let session = db.session();
+    session.execute("CREATE GRAPH branch").unwrap();
+    session.execute("USE GRAPH branch").unwrap();
+    for (statement, accepted, why) in [
+        (
+            "INSERT (:Person {first: 'Alix', last: 'Gus'})",
+            true,
+            "the default graph's key is free here",
+        ),
+        (
+            "INSERT (:Person {first: 'Alix', last: 'Gus'})",
+            false,
+            "taken in this graph",
+        ),
+        (
+            "INSERT (:Person {first: 'Mia'})",
+            false,
+            "required here too",
+        ),
+    ] {
+        assert_eq!(outcome(&session, statement).is_ok(), accepted, "{why}");
+    }
+    assert_eq!(count(&session), 1, "this graph");
+    let plan = format!(
+        "{:?}",
+        session
+            .execute("EXPLAIN MATCH (p:Person {first: 'Alix', last: 'Gus'}) RETURN p")
+            .unwrap()
+            .rows()
+    );
+    assert!(plan.contains("[index: first]"), "the index here: {plan}");
+    session.execute("USE GRAPH default").unwrap();
+    assert_eq!(count(&session), 1, "the default graph");
+}
+
+/// The label decides: a node that holds it among others is held to the key, one without it is not,
+/// and removing the label frees the node from the key and the key for another node.
+#[test]
+fn the_label_decides() {
+    let db = keyed();
+    let session = db.session();
+    for (statement, accepted, why) in [
+        (
+            "INSERT (:Person:Employee {first: 'Alix', last: 'Gus'})",
+            false,
+            "another label besides",
+        ),
+        (
+            "INSERT (:Employee {first: 'Alix', last: 'Gus'})",
+            true,
+            "without the label",
+        ),
+        (
+            "MATCH (p:Person {first: 'Alix'}) REMOVE p:Person",
+            true,
+            "the label removed",
+        ),
+        (
+            "MATCH (n {city: 'Amsterdam'}) REMOVE n.last",
+            true,
+            "no longer held to the key",
+        ),
+        (
+            "INSERT (:Person {first: 'Alix', last: 'Gus'})",
+            true,
+            "the key is free again",
+        ),
+    ] {
+        assert_eq!(outcome(&session, statement).is_ok(), accepted, "{why}");
+    }
+    assert_eq!(count(&session), 1);
+}
+
+/// Deleting a node frees its key, in the same transaction too; a rolled-back insert takes none.
+#[test]
+fn a_delete_frees_the_key() {
+    let db = keyed();
+    let mut session = db.session();
+    session
+        .execute("MATCH (p:Person {first: 'Alix'}) DELETE p")
+        .unwrap();
+    assert!(outcome(&session, "INSERT (:Person {first: 'Alix', last: 'Gus'})").is_ok());
+    session.begin_transaction().unwrap();
+    let deleted = outcome(&session, "MATCH (p:Person {first: 'Alix'}) DELETE p");
+    let inserted = outcome(&session, "INSERT (:Person {first: 'Alix', last: 'Gus'})");
+    let committed = session.commit().map_err(|error| error.to_string());
+    assert!(deleted.is_ok(), "{deleted:?}");
+    assert!(
+        inserted.is_ok(),
+        "deleted in this transaction: {inserted:?}"
+    );
+    assert!(committed.is_ok(), "{committed:?}");
+    session.begin_transaction().unwrap();
+    session
+        .execute("INSERT (:Person {first: 'Mia', last: 'Hans'})")
+        .unwrap();
+    session.rollback().unwrap();
+    assert!(
+        outcome(&session, "INSERT (:Person {first: 'Mia', last: 'Hans'})").is_ok(),
+        "the rolled-back insert took no key"
+    );
+    assert_eq!(count(&session), 2);
+}
+
+/// A key is checked at each write, not at the end of the statement: two nodes that swap their keys
+/// in one `SET` are refused at the first assignment, for a NODE KEY as for a UNIQUE constraint,
+/// and nothing changes. Moving one key through a free value first does the swap.
+#[test]
+fn a_key_is_checked_at_each_write() {
+    for constraint in [
+        KEY,
+        "CREATE CONSTRAINT person_unique FOR (p:Person) ON (p.first, p.last) UNIQUE",
+    ] {
+        let db = GrafeoDB::new_in_memory();
+        let session = db.session();
+        session.execute(constraint).unwrap();
+        session
+            .execute("INSERT (:Person {first: 'Alix', last: 'Gus', n: 1}), (:Person {first: 'Alix', last: 'Mia', n: 2})")
+            .unwrap();
+        let swapped = outcome(
+            &session,
+            "MATCH (a:Person {n: 1}), (b:Person {n: 2}) SET a.last = 'Mia', b.last = 'Gus'",
+        );
+        assert!(
+            matches!(&swapped, Err(text) if text.contains("GRAFEO-V001")),
+            "{constraint}: {swapped:?}"
+        );
+        let lasts = "MATCH (p:Person) RETURN p.last AS last ORDER BY p.n";
+        assert_eq!(
+            session.execute(lasts).unwrap().rows(),
+            [[Value::from("Gus")], [Value::from("Mia")]],
+            "{constraint}: nothing changed"
+        );
+        for statement in [
+            "MATCH (a:Person {n: 1}) SET a.last = 'Gus (moving)'",
+            "MATCH (b:Person {n: 2}) SET b.last = 'Gus'",
+            "MATCH (a:Person {n: 1}) SET a.last = 'Mia'",
+        ] {
+            session.execute(statement).unwrap();
+        }
+        assert_eq!(
+            session.execute(lasts).unwrap().rows(),
+            [[Value::from("Mia")], [Value::from("Gus")]],
+            "{constraint}: swapped through a free value"
+        );
+    }
+}
+
+/// A label may have more than one key, and each holds.
+#[test]
+fn a_label_may_have_two_keys() {
+    let db = keyed();
+    let session = db.session();
+    session
+        .execute("CREATE CONSTRAINT person_city FOR (p:Person) ON (p.city) NODE KEY")
+        .unwrap();
+    for (statement, accepted, why) in [
+        (
+            "INSERT (:Person {first: 'Mia', last: 'Hans'})",
+            false,
+            "no city",
+        ),
+        (
+            "INSERT (:Person {first: 'Mia', last: 'Hans', city: 'Amsterdam'})",
+            false,
+            "the city is taken",
+        ),
+        (
+            "INSERT (:Person {first: 'Mia', last: 'Hans', city: 'Berlin'})",
+            true,
+            "both keys free",
+        ),
+    ] {
+        assert_eq!(outcome(&session, statement).is_ok(), accepted, "{why}");
+    }
+}
+
+/// A lookup by the key reads the index on its first property and finds the node; a lookup by the
+/// other property alone has no index to read.
+#[test]
+fn a_lookup_by_the_key_reads_its_index() {
+    let db = keyed();
+    let session = db.session();
+    let plan = |query: &str| {
+        format!(
+            "{:?}",
+            session.execute(&format!("EXPLAIN {query}")).unwrap().rows()
+        )
+    };
+    let by_key = "MATCH (p:Person {first: 'Alix', last: 'Gus'}) RETURN p.city AS city";
+    assert!(plan(by_key).contains("[index: first]"), "{}", plan(by_key));
+    assert_eq!(
+        session.execute(by_key).unwrap().rows(),
+        [[Value::from("Amsterdam")]]
+    );
+    let by_last = "MATCH (p:Person {last: 'Gus'}) RETURN p.city AS city";
+    assert!(!plan(by_last).contains("[index:"), "{}", plan(by_last));
+}
+
+/// Every way a write breaks the key is refused with `GRAFEO-V001`, a schema violation.
+#[test]
+fn a_broken_key_is_a_schema_violation() {
+    let db = keyed();
+    let session = db.session();
+    session
+        .execute("INSERT (:Guest {first: 'Alix', last: 'Gus'})")
+        .unwrap();
+    for statement in [
+        "INSERT (:Person {first: 'Alix', last: 'Gus'})",
+        "INSERT (:Person {first: 'Mia'})",
+        "MATCH (p:Person) SET p.last = null",
+        "MATCH (p:Person) REMOVE p.first",
+        "MATCH (g:Guest) SET g:Person",
+    ] {
+        let error = session.execute(statement).expect_err(statement).to_string();
+        assert!(error.contains("GRAFEO-V001"), "{statement}: {error}");
+    }
+}
+
+/// Lists are key values, compared element by element.
+#[test]
+fn a_list_is_a_key_value() {
+    let db = GrafeoDB::new_in_memory();
+    let session = db.session();
+    session
+        .execute("CREATE CONSTRAINT n_key FOR (n:N) ON (n.k) NODE KEY")
+        .unwrap();
+    for (statement, accepted) in [
+        ("INSERT (:N {k: [1, 2]})", true),
+        ("INSERT (:N {k: [1, 2]})", false),
+        ("INSERT (:N {k: [2, 1]})", true),
+        ("INSERT (:N {k: []})", true),
+        ("INSERT (:N {k: []})", false),
+    ] {
+        assert_eq!(
+            outcome(&session, statement).is_ok(),
+            accepted,
+            "{statement}"
+        );
+    }
+}
+
+/// The direct API is held to the key as a query is.
+#[test]
+fn the_direct_api_keeps_the_key() {
+    let db = keyed();
+    assert!(
+        db.create_node_with_props(&["Person"], [("first", "Alix"), ("last", "Gus")])
+            .is_err(),
+        "a duplicate"
+    );
+    assert!(
+        db.create_node_with_props(&["Person"], [("first", "Mia")])
+            .is_err(),
+        "a missing property"
+    );
+    assert!(db.create_node(&["Person"]).is_err(), "no properties");
+    let mia = db
+        .create_node_with_props(&["Person"], [("first", "Mia"), ("last", "Hans")])
+        .unwrap();
+    assert!(db.remove_node_property(mia, "last").is_err(), "a removal");
+    assert!(
+        db.set_node_property(mia, "last", Value::Null).is_err(),
+        "a null"
+    );
+    assert!(
+        db.set_node_property(mia, "first", Value::from("Alix"))
+            .is_ok(),
+        "Alix Hans is free"
+    );
+    assert!(
+        db.set_node_property(mia, "last", Value::from("Gus"))
+            .is_err(),
+        "Alix Gus is taken"
+    );
+    let guest = db
+        .create_node_with_props(&["Guest"], [("first", "Alix"), ("last", "Gus")])
+        .unwrap();
+    assert!(db.add_node_label(guest, "Person").is_err(), "a label added");
+    assert_eq!(count(&db.session()), 2);
+}
+
+const CRASH_PATH_VAR: &str = "GRAFEO_NODE_KEY_CRASH_PATH";
+
+/// Creates the key and one node in the database at `GRAFEO_NODE_KEY_CRASH_PATH`, then exits with
+/// the database open: the reopen replays both from the log.
+#[test]
+fn key_crash_child() {
+    let Some(path) = std::env::var_os(CRASH_PATH_VAR) else {
+        return;
+    };
+    let db = GrafeoDB::open(std::path::PathBuf::from(path)).unwrap();
+    let session = db.session();
+    session.execute(KEY).unwrap();
+    session
+        .execute("INSERT (:Person {first: 'Alix', last: 'Gus'})")
+        .unwrap();
+    std::process::exit(0);
+}
+
+/// After a crash, as after a close, the key holds, is listed, and keeps its index.
+#[test]
+fn it_holds_after_a_crash() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("key.grafeo");
+    let status = grafeo_common::testing::child_process::run(
+        grafeo_common::child_test!("key_crash_child").env(CRASH_PATH_VAR, &path),
+    )
+    .unwrap();
+    assert!(status.success(), "the child process failed");
+    let db = GrafeoDB::open(&path).unwrap();
+    let session = db.session();
+    assert!(outcome(&session, "INSERT (:Person {first: 'Alix', last: 'Gus'})").is_err());
+    assert!(outcome(&session, "INSERT (:Person {first: 'Mia'})").is_err());
+    let constraints = format!("{:?}", session.execute("SHOW CONSTRAINTS").unwrap().rows());
+    assert!(constraints.contains("NODE KEY"), "{constraints}");
+    let plan = format!(
+        "{:?}",
+        session
+            .execute("EXPLAIN MATCH (p:Person {first: 'Alix', last: 'Gus'}) RETURN p")
+            .unwrap()
+            .rows()
+    );
+    assert!(plan.contains("[index: first]"), "{plan}");
+    assert_eq!(count(&session), 1);
+    drop(session);
+    db.close().unwrap();
 }

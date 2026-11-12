@@ -387,6 +387,7 @@ mod sparql_path_deadline;
 mod sparql_path_per_row;
 mod sparql_regression_external;
 mod sparql_result_kind;
+mod sparql_snapshot_isolation;
 mod sparql_string_tests_on_term_ids;
 mod sparql_term_round_trip;
 mod sparql_transactions;

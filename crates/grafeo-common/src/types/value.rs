@@ -566,7 +566,7 @@ impl Value {
     /// is already accounted for on the stack).
     ///
     /// Inline for the fixed-size kinds and strings, which operators count per
-    /// row; the other kinds take [`nested_size_bytes`](Self::nested_size_bytes).
+    /// row; the other kinds go through a separate, out-of-line helper.
     #[must_use]
     #[inline]
     pub fn estimated_size_bytes(&self) -> usize {

@@ -38,6 +38,42 @@ pub fn open_existing_read_only(path: &Path) -> Result<GrafeoDB> {
         .with_context(|| format!("Failed to open database at {} to read it", path.display()))
 }
 
+/// The features of this CLI that read data a database can hold, each with whether this build
+/// has it. A build without one refuses to open a database holding its data, and the refusal
+/// names the engine feature, which the CLI's feature of the same name enables.
+const DATA_FEATURES: [(&str, bool); 3] = [
+    ("triple-store", cfg!(feature = "triple-store")),
+    ("vector-index", cfg!(feature = "vector-index")),
+    ("text-index", cfg!(feature = "text-index")),
+];
+
+/// How to install a CLI that reads what `message` (an error with its causes) says this build
+/// cannot: the `cargo install` line with each feature of [`DATA_FEATURES`] that the message names
+/// and this build lacks (#763). `None` when it names none.
+#[must_use]
+pub fn install_hint(message: &str) -> Option<String> {
+    let missing: Vec<&str> = DATA_FEATURES
+        .iter()
+        .filter(|(feature, built)| {
+            !built && message.contains(&format!("build with the `{feature}` feature"))
+        })
+        .map(|(feature, _)| *feature)
+        .collect();
+    if missing.is_empty() {
+        return None;
+    }
+    let names: Vec<String> = missing.iter().map(|name| format!("`{name}`")).collect();
+    let them = if missing.len() == 1 { "it" } else { "them" };
+    Some(format!(
+        "this grafeo CLI was built without {}; install one that has {them} with{}",
+        names.join(" and "),
+        format_args!(
+            "\n  cargo install grafeo-cli --features {}",
+            missing.join(",")
+        )
+    ))
+}
+
 /// `path` without trailing separators, or an error when nothing is there:
 /// `db/` names the database file `db` too, but no longer reaches it as a
 /// path once a 0.5.x directory became a file.
@@ -57,6 +93,50 @@ fn existing_path(path: &Path) -> Result<std::path::PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::open_existing;
+
+    /// The engine's refusal for data of a feature this build has, or a message that names no
+    /// feature, gives no install line.
+    #[test]
+    fn no_install_hint_for_a_feature_in_the_build_or_none_named() {
+        assert_eq!(super::install_hint("Database not found: db"), None);
+        for (feature, built) in super::DATA_FEATURES {
+            let refusal = format!(
+                "db holds data that only a build with the `{feature}` feature can read: {}",
+                "open it with such a build"
+            );
+            assert_eq!(
+                super::install_hint(&refusal).is_some(),
+                !built,
+                "{feature}: {refusal}"
+            );
+        }
+    }
+
+    /// Each feature the refusal names and this build lacks is in the one install line.
+    #[test]
+    fn the_install_hint_lists_every_missing_feature_once() {
+        let refusal = [
+            "db holds RDF triples (sections RdfStore), data that only a build with the",
+            "`triple-store` feature can read; and vector indexes (on :Doc(e)), data that only a",
+            "build with the `vector-index` feature can read: open it with a build that has these",
+            "features",
+        ]
+        .join(" ");
+        let missing: Vec<&str> = ["triple-store", "vector-index"]
+            .into_iter()
+            .filter(|name| super::DATA_FEATURES.contains(&(name, false)))
+            .collect();
+        match super::install_hint(&refusal) {
+            None => assert_eq!(missing, Vec::<&str>::new()),
+            Some(hint) => assert!(
+                hint.ends_with(&format!(
+                    "cargo install grafeo-cli --features {}",
+                    missing.join(",")
+                )),
+                "{hint}"
+            ),
+        }
+    }
 
     /// `db/` names the database file `db`: the CLI opens it, as a 0.5.x WAL
     /// directory named `db/` becomes the file `db` when 0.6 migrates it.

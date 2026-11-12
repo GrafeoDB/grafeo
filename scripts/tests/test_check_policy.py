@@ -2285,3 +2285,104 @@ def test_t13_a_missing_header_or_import_list_is_a_finding(
 ) -> None:
     found = t13_found(tmp_path, {missing: None})
     assert [path for path, _ in found] == [missing], found
+
+
+# T14 (#763): the CLI's default build compiles every engine feature that writes data
+# which the `grafeo` crate's default build compiles, so the default CLI opens every file
+# the default library writes. `cli_coverage_findings(tree)` judges the two default builds,
+# `tree(package, None)` giving `cargo tree -e features -i grafeo-engine` of the package's
+# defaults, as T11's `profile_findings` does.
+
+FACADE_DEFAULT = """0grafeo-engine v0.6.2 (/repo/crates/grafeo-engine)
+1grafeo v0.6.2 (/repo/crates/grafeo)
+1grafeo-engine feature "gql"
+2grafeo feature "gql"
+3grafeo feature "embedded"
+4grafeo feature "default"
+1grafeo-engine feature "vector-index"
+2grafeo feature "vector-index"
+3grafeo feature "ai"
+4grafeo feature "embedded" (*)
+1grafeo-engine feature "text-index"
+2grafeo feature "text-index"
+3grafeo feature "ai" (*)
+1grafeo-engine feature "cdc"
+2grafeo feature "cdc"
+3grafeo feature "ai" (*)
+1grafeo-engine feature "parallel"
+2grafeo feature "embedded" (*)
+1grafeo-engine feature "arrow-export"
+2grafeo feature "embedded" (*)
+"""
+
+# The CLI of 0.6.2: GQL and storage, none of the index features.
+CLI_DEFAULT_BEFORE = """0grafeo-engine v0.6.2 (/repo/crates/grafeo-engine)
+1grafeo-cli v0.6.2 (/repo/crates/grafeo-cli)
+1grafeo-engine feature "gql"
+2grafeo-cli feature "gql"
+3grafeo-cli feature "default"
+1grafeo-engine feature "storage"
+2grafeo-cli v0.6.2 (/repo/crates/grafeo-cli) (*)
+"""
+
+CLI_DEFAULT_COVERING = """0grafeo-engine v0.6.2 (/repo/crates/grafeo-engine)
+1grafeo-cli v0.6.2 (/repo/crates/grafeo-cli)
+1grafeo-engine feature "gql"
+2grafeo-cli feature "gql"
+3grafeo-cli feature "default"
+1grafeo-engine feature "vector-index"
+2grafeo-cli feature "vector-index"
+3grafeo-cli feature "ai"
+4grafeo-cli feature "default" (*)
+1grafeo-engine feature "text-index"
+2grafeo-cli feature "text-index"
+3grafeo-cli feature "ai" (*)
+1grafeo-engine feature "cdc"
+2grafeo-cli feature "cdc"
+3grafeo-cli feature "ai" (*)
+"""
+
+
+def cli_coverage(facade: str | None, cli: str | None) -> list[check_policy.Finding]:
+    trees = {"grafeo": facade, "grafeo-cli": cli}
+    return check_policy.cli_coverage_findings(
+        lambda package, features: trees.get(package) if features is None else None
+    )
+
+
+def test_t14_a_cli_default_without_a_data_feature_of_the_facade_names_each() -> None:
+    findings = cli_coverage(FACADE_DEFAULT, CLI_DEFAULT_BEFORE)
+    assert {f.rule for f in findings} == {"T14"}, findings
+    for feature in ["vector-index", "text-index", "cdc"]:
+        assert sum(feature in f.message for f in findings) == 1, (feature, findings)
+
+
+def test_t14_a_cli_default_covering_the_facade_passes() -> None:
+    assert cli_coverage(FACADE_DEFAULT, CLI_DEFAULT_COVERING) == []
+
+
+def test_t14_features_that_write_nothing_are_not_required() -> None:
+    # `parallel` and `arrow-export` change how a build runs or exports, not what a
+    # file holds: the CLI may leave them off.
+    messages = " ".join(
+        f.message for f in cli_coverage(FACADE_DEFAULT, CLI_DEFAULT_COVERING)
+    )
+    assert "parallel" not in messages and "arrow-export" not in messages
+
+
+def test_t14_a_build_without_a_tree_is_an_error_not_a_pass() -> None:
+    # A check that reads nothing must not report success (a renamed package, a
+    # cargo failure).
+    for facade, cli in [(None, CLI_DEFAULT_COVERING), (FACADE_DEFAULT, None)]:
+        findings = cli_coverage(facade, cli)
+        assert [f.rule for f in findings] == ["T14"], findings
+
+
+def test_t14_the_repository_passes() -> None:
+    root = Path(__file__).resolve().parents[2]
+    findings = check_policy.cli_coverage_findings(
+        lambda package, features: check_policy.cargo_tree_features(
+            root, package, features
+        )
+    )
+    assert findings == [], findings

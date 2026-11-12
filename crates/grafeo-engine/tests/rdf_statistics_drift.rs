@@ -257,14 +257,14 @@ fn the_ring_index_goes_at_the_first_change() {
     for change in ["insert", "remove", "batch"] {
         let store = RdfStore::new();
         store.bulk_load((0..500).map(|i| triple(i, "p")));
-        assert!(store.ring().is_some(), "{change}");
+        assert!(store.ring_latest().is_some(), "{change}");
         let before = store.get_or_collect_statistics();
         match change {
             "insert" => assert!(store.insert(triple(500, "p"))),
             "remove" => assert!(store.remove(&triple(0, "p"))),
             _ => assert_eq!(store.batch_insert([triple(500, "q")]), 1),
         }
-        assert!(store.ring().is_none(), "{change}: the ring is stale");
+        assert!(store.ring_latest().is_none(), "{change}: the ring is stale");
         assert!(kept(&store, &before), "{change}: the statistics are kept");
     }
 }

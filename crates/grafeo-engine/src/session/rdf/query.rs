@@ -11,30 +11,71 @@ use crate::database::QueryResult;
 use super::super::Session;
 
 impl Session {
-    /// Plans native RDF paths with the session's pending writes and resource limits.
+    /// The RDF view a statement reads at: its transaction's snapshot (built
+    /// at the transaction's first RDF statement and kept with its changes),
+    /// or, outside a transaction, the published epoch, read inside the
+    /// statement's pin (see `in_statement_transaction`), so no entry above
+    /// it is pruned while the statement runs.
+    ///
+    /// # Errors
+    ///
+    /// While the session has a viewing epoch set: RDF data keeps no
+    /// history, so a read at an earlier epoch is refused rather than read
+    /// at the present.
+    pub(crate) fn rdf_view(&self) -> Result<grafeo_core::graph::rdf::RdfView> {
+        if self.viewing_epoch().is_some() {
+            return Err(grafeo_common::utils::error::QueryError::unsupported(
+                "RDF data keeps no history: a SPARQL or RDF read cannot run at a viewing epoch; \
+                 clear it with set_viewing_epoch(None) first",
+            )
+            .into());
+        }
+        if let Some(changes) = self.changes.lock().clone() {
+            return changes.rdf_view(&self.rdf_store);
+        }
+        self.rdf_store
+            .view_at(self.transaction_manager.current_epoch())
+            .map_err(|error| grafeo_common::utils::error::Error::Internal(error.to_string()))
+    }
+
+    /// Runs `read`, a read of the RDF store outside a query plan (SHACL
+    /// validation), at one view: in the open transaction at its snapshot, or
+    /// in a pinned read at the published epoch.
+    #[cfg(feature = "shacl")]
+    pub(crate) fn with_rdf_view<T>(
+        &self,
+        read: impl FnOnce(&grafeo_core::graph::rdf::RdfView) -> Result<T>,
+    ) -> Result<T> {
+        self.in_statement_transaction(false, || read(&self.rdf_view()?))
+    }
+
+    /// Plans native RDF paths with the session's pending writes and resource
+    /// limits, reading the store at `view`.
     fn make_rdf_planner(
         &self,
         deadline: Option<Instant>,
-    ) -> crate::query::planner::rdf::RdfPlanner {
+        view: grafeo_core::graph::rdf::RdfView,
+    ) -> Result<crate::query::planner::rdf::RdfPlanner> {
         let budget = self.plan_options.path_search_budget;
         #[cfg(feature = "spill")]
         let budget = self
             .buffer_manager
             .as_ref()
             .map_or(budget, |bm| budget.min(bm.available()));
-        let planner = crate::query::planner::rdf::RdfPlanner::new(Arc::clone(&self.rdf_store))
-            .with_shuffle_unordered(self.plan_options.shuffle_unordered)
-            .with_writer(self.rdf_writer())
-            .with_path_search_budget(budget)
-            .with_deadline(deadline)
-            .with_warnings(self.statement_warnings());
+        let planner =
+            crate::query::planner::rdf::RdfPlanner::new(Arc::clone(&self.rdf_store), view)
+                .with_shuffle_unordered(self.plan_options.shuffle_unordered)
+                .with_writer(self.rdf_writer()?)
+                .with_path_search_budget(budget)
+                .with_deadline(deadline)
+                .with_warnings(self.statement_warnings());
         #[cfg(feature = "spill")]
         let planner = planner.with_operator_memory(self.make_operator_memory_context());
-        planner.with_exists_run_once(
+        Ok(planner.with_exists_run_once(
             self.plan_options
                 .rules
                 .has(crate::query::optimizer::PlannerRule::ExistsRunOnce),
-        )
+        ))
     }
 
     /// Executes a GraphQL query against the RDF store.
@@ -203,7 +244,7 @@ impl Session {
         let deadline = self.query_deadline();
         let result = self.in_statement_transaction(mutates, || {
             let planner = self
-                .make_rdf_planner(deadline)
+                .make_rdf_planner(deadline, self.rdf_view()?)?
                 .with_query_values(language == "graphql");
             if optimized_plan.profile {
                 let (mut physical_plan, entries) = planner.plan_profiled(optimized_plan)?;
@@ -243,18 +284,20 @@ impl Session {
 
     /// The writer of the session's open transaction, through which an RDF
     /// update records its triples and a read sees them; `None` without one.
-    fn rdf_writer(&self) -> Option<crate::transaction::RdfWriter> {
-        let changes = self.changes.lock().clone()?;
-        Some(
+    fn rdf_writer(&self) -> Result<Option<crate::transaction::RdfWriter>> {
+        let Some(changes) = self.changes.lock().clone() else {
+            return Ok(None);
+        };
+        Ok(Some(
             crate::transaction::RdfWriter::new(
                 Arc::clone(&self.rdf_store),
                 changes,
                 Arc::clone(&self.transaction_manager),
                 #[cfg(feature = "wal")]
                 self.wal().cloned(),
-            )
+            )?
             .queuing_graph_ops(),
-        )
+        ))
     }
 
     /// Validates the default graph against SHACL shapes in a named graph.
@@ -284,19 +327,33 @@ impl Session {
         data_graph_name: &str,
         shapes_graph_name: &str,
     ) -> Result<grafeo_core::graph::rdf::shacl::ValidationReport> {
-        let data_store = self.rdf_store.graph(data_graph_name).ok_or_else(|| {
-            grafeo_common::utils::error::Error::InvalidValue(format!(
-                "there is no named graph '{data_graph_name}' to validate"
-            ))
-        })?;
-        let shapes_store = self.rdf_store.graph(shapes_graph_name).ok_or_else(|| {
-            grafeo_common::utils::error::Error::InvalidValue(format!(
-                "there is no named graph '{shapes_graph_name}' to read the shapes from"
-            ))
-        })?;
-        let executor =
-            crate::validation::SessionSparqlExecutor::with_graph(self, data_graph_name.to_string());
-        grafeo_core::graph::rdf::shacl::validate(&data_store, &shapes_store, Some(&executor))
+        self.with_rdf_view(|view| {
+            let data_store = self
+                .rdf_store
+                .graph_at(view, data_graph_name)
+                .ok_or_else(|| {
+                    grafeo_common::utils::error::Error::InvalidValue(format!(
+                        "there is no named graph '{data_graph_name}' to validate"
+                    ))
+                })?;
+            let shapes_store = self
+                .rdf_store
+                .graph_at(view, shapes_graph_name)
+                .ok_or_else(|| {
+                    grafeo_common::utils::error::Error::InvalidValue(format!(
+                        "there is no named graph '{shapes_graph_name}' to read the shapes from"
+                    ))
+                })?;
+            let executor = crate::validation::SessionSparqlExecutor::with_graph(
+                self,
+                data_graph_name.to_string(),
+            );
+            grafeo_core::graph::rdf::shacl::validate(
+                data_store.at(view),
+                shapes_store.at(view),
+                Some(&executor),
+            )
             .map_err(|e| grafeo_common::utils::error::Error::Internal(e.to_string()))
+        })
     }
 }

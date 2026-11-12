@@ -102,6 +102,8 @@ fn update_writer(writer: &Option<RdfWriter>) -> std::result::Result<&RdfWriter, 
 pub struct RdfPlanner {
     /// The RDF store to query.
     store: Arc<RdfStore>,
+    /// The view the plan reads the store at: the statement's snapshot.
+    view: RdfView,
     /// Chunk size for vectorized execution.
     chunk_size: usize,
     /// The writer of the transaction the plan runs in: updates record their
@@ -151,12 +153,13 @@ pub struct RdfPlanner {
 }
 
 impl RdfPlanner {
-    /// Creates a new RDF planner with the given store.
+    /// Creates a new RDF planner whose plans read `store` at `view`.
     #[must_use]
-    pub fn new(store: Arc<RdfStore>) -> Self {
+    pub fn new(store: Arc<RdfStore>, view: RdfView) -> Self {
         let terms = Arc::new(QueryTermIds::new(Arc::clone(store.dictionary())));
         Self {
             store,
+            view,
             chunk_size: DEFAULT_CHUNK_SIZE,
             writer: None,
             profiling: std::cell::Cell::new(false),
@@ -188,6 +191,7 @@ impl RdfPlanner {
     fn for_row(parts: &RowPlanParts, row: Arc<RowBinding>) -> Self {
         Self {
             store: Arc::clone(&parts.store),
+            view: parts.view.clone(),
             chunk_size: parts.chunk_size,
             writer: parts.writer.clone(),
             profiling: std::cell::Cell::new(false),
@@ -228,6 +232,7 @@ impl RdfPlanner {
     fn row_plan_parts(&self) -> RowPlanParts {
         RowPlanParts {
             store: Arc::clone(&self.store),
+            view: self.view.clone(),
             chunk_size: self.chunk_size,
             writer: self.writer.clone(),
             terms: Arc::clone(&self.terms),
@@ -553,6 +558,7 @@ impl RdfPlanner {
             LogicalOperator::NamedGraphs(graphs) => {
                 let op: Box<dyn Operator> = Box::new(named_graphs::NamedGraphsOperator::new(
                     Arc::clone(&self.store),
+                    self.view.clone(),
                     self.writer.clone(),
                     graphs.dataset.clone(),
                     Arc::clone(&self.terms),
@@ -646,6 +652,7 @@ impl RdfPlanner {
     fn path_source(&self) -> path_per_row::PathSource {
         path_per_row::PathSource {
             store: Arc::clone(&self.store),
+            view: self.view.clone(),
             budget: self.path_search_budget,
             deadline: self.deadline,
             overlay: self.writer.as_ref().map(RdfWriter::path_overlay),
@@ -751,6 +758,7 @@ impl RdfPlanner {
         }
         let columns = grafeo_core::execution::operators::RdfPathOperator::new(
             Arc::clone(&self.store),
+            self.view.clone(),
             config.clone(),
         )
         .columns();
@@ -829,6 +837,7 @@ impl RdfPlanner {
         // Create the lazy scanning operator
         let scan_op = RdfTripleScanOperator::new(
             Arc::clone(&self.store),
+            self.view.clone(),
             pattern,
             output_mask,
             self.chunk_size,
@@ -1626,6 +1635,7 @@ impl RdfPlanner {
         let (operator, mut columns, mut types) = self.plan_operator(&graph.input)?;
         let names = named_graphs::named_graph_names(
             &self.store,
+            &self.view,
             self.writer.as_ref(),
             graph.dataset.as_ref(),
         );
@@ -2151,24 +2161,20 @@ impl RdfPlanner {
                 && o_var
                 && let TripleComponent::Iri(graph_iri) = graph
             {
-                let ng = self.store.graph(graph_iri)?;
-                // reason: triple count will not exceed i64::MAX
-                #[allow(clippy::cast_possible_wrap)]
-                return Some(ng.len() as i64);
+                let ng = self.store.graph_at(&self.view, graph_iri)?;
+                return i64::try_from(ng.count_at(&self.view, &TriplePattern::any())).ok();
             }
             return None;
         }
 
         // Fully unbound: ?s ?p ?o
         if s_var && p_var && o_var {
-            // reason: triple count will not exceed i64::MAX
-            #[allow(clippy::cast_possible_wrap)]
-            return Some(self.store.len() as i64);
+            return i64::try_from(self.store.count_at(&self.view, &TriplePattern::any())).ok();
         }
 
         // Ring Index: use ring.count() for any partially-bound pattern (O(log sigma))
         #[cfg(feature = "ring-index")]
-        if let Some(ring) = self.store.ring() {
+        if let Some(ring) = self.store.ring_at(&self.view) {
             let pattern = self.build_triple_pattern(scan);
             // reason: triple count will not exceed i64::MAX
             #[allow(clippy::cast_possible_wrap)]
@@ -2178,10 +2184,16 @@ impl RdfPlanner {
         // Predicate-bound: ?s <pred> ?o
         if s_var && !p_var && o_var {
             if let TripleComponent::Iri(pred_iri) = &scan.predicate {
-                // From the index, not the statistics: they may be stale.
-                let count = self
-                    .store
-                    .count_with_predicate(&Term::iri(pred_iri.clone()));
+                // From the index at the view, not the statistics: they may
+                // be stale.
+                let count = self.store.count_at(
+                    &self.view,
+                    &TriplePattern {
+                        subject: None,
+                        predicate: Some(Term::iri(pred_iri.clone())),
+                        object: None,
+                    },
+                );
                 return i64::try_from(count).ok();
             }
             return None;
@@ -2701,7 +2713,7 @@ impl RdfPlanner {
         if self.has_pending_writes() {
             return None;
         }
-        let ring = self.store.ring()?;
+        let ring = self.store.ring_at(&self.view)?;
 
         // All inputs must be simple TripleScans (no chained input, no graph context)
         let mut annotated = Vec::new();
@@ -3401,20 +3413,25 @@ impl Operator for RdfGraphOperator {
         self.done = true;
         let skips_missing = matches!(self.op, RdfGraphOp::Drop { .. });
         let check = &self.check;
-        update_writer(&self.writer)?.graph_op(self.op.clone(), |store| match check {
+        let writer = update_writer(&self.writer)?;
+        // Whether a graph exists, as the transaction's snapshot has it.
+        let view = writer.view().clone();
+        writer.graph_op(self.op.clone(), |store| match check {
             GraphCheck::None => Ok(true),
-            GraphCheck::Absent { graph, silent } => match (store.graph(graph).is_some(), silent) {
-                (false, _) => Ok(true),
-                (true, true) => Ok(false),
-                (true, false) => Err(OperatorError::Execution(format!(
-                    "Graph <{graph}> already exists"
-                ))),
-            },
+            GraphCheck::Absent { graph, silent } => {
+                match (store.graph_at(&view, graph).is_some(), silent) {
+                    (false, _) => Ok(true),
+                    (true, true) => Ok(false),
+                    (true, false) => Err(OperatorError::Execution(format!(
+                        "Graph <{graph}> already exists"
+                    ))),
+                }
+            }
             GraphCheck::Present {
                 graph,
                 silent,
                 what,
-            } => match (store.graph(graph).is_some(), silent) {
+            } => match (store.graph_at(&view, graph).is_some(), silent) {
                 (true, _) => Ok(true),
                 (false, true) => Ok(!skips_missing),
                 (false, false) => Err(OperatorError::Execution(format!(
@@ -4338,6 +4355,8 @@ impl Operator for TermInternOperator {
 struct RdfTripleScanOperator {
     /// The RDF store to scan.
     store: Arc<RdfStore>,
+    /// The view it reads the store at.
+    view: RdfView,
     /// The pattern to match.
     pattern: TriplePattern,
     /// Which components to include in output [s, p, o, g].
@@ -4364,6 +4383,7 @@ struct RdfTripleScanOperator {
 impl RdfTripleScanOperator {
     fn new(
         store: Arc<RdfStore>,
+        view: RdfView,
         pattern: TriplePattern,
         output_mask: [bool; 4],
         chunk_size: usize,
@@ -4372,6 +4392,7 @@ impl RdfTripleScanOperator {
     ) -> Self {
         Self {
             store,
+            view,
             pattern,
             output_mask,
             graph_context,
@@ -4390,6 +4411,7 @@ impl RdfTripleScanOperator {
     fn with_pattern(&self, pattern: TriplePattern) -> Self {
         Self {
             store: Arc::clone(&self.store),
+            view: self.view.clone(),
             pattern,
             output_mask: self.output_mask,
             graph_context: self.graph_context.clone(),
@@ -4432,9 +4454,7 @@ impl RdfTripleScanOperator {
     fn find_in(&self, graphs: Option<&[&str]>) -> Vec<(Option<String>, Arc<Triple>)> {
         match &self.writer {
             Some(writer) => writer.find(&self.pattern, graphs),
-            None => self
-                .store
-                .find_in_graphs(&RdfView::Latest, &self.pattern, graphs),
+            None => self.store.find_in_graphs(&self.view, &self.pattern, graphs),
         }
     }
 
@@ -4499,13 +4519,13 @@ impl RdfTripleScanOperator {
                     // Prefer Ring Index when available (O(log sigma) access).
                     #[cfg(feature = "ring-index")]
                     {
-                        if let Some(ring) = self.store.ring() {
+                        if let Some(ring) = self.store.ring_at(&self.view) {
                             ring.find(&self.pattern)
                                 .map(|t| (None, Arc::new(t)))
                                 .collect()
                         } else {
                             self.store
-                                .find(&RdfView::Latest, &self.pattern)
+                                .find(&self.view, &self.pattern)
                                 .into_iter()
                                 .map(|t| (None, t))
                                 .collect()
@@ -4514,7 +4534,7 @@ impl RdfTripleScanOperator {
                     #[cfg(not(feature = "ring-index"))]
                     {
                         self.store
-                            .find(&RdfView::Latest, &self.pattern)
+                            .find(&self.view, &self.pattern)
                             .into_iter()
                             .map(|t| (None, t))
                             .collect()
@@ -5051,7 +5071,10 @@ mod tests {
             Term::literal("Alix"),
         ));
 
-        let planner = RdfPlanner::new(store);
+        let planner = RdfPlanner::new(
+            store,
+            grafeo_core::graph::rdf::RdfView::latest(grafeo_core::graph::rdf::LatestUse::Test),
+        );
 
         let scan = TripleScanOp {
             subject: TripleComponent::Variable("s".to_string()),
@@ -5088,7 +5111,10 @@ mod tests {
             Term::typed_literal("30", "http://www.w3.org/2001/XMLSchema#integer"),
         ));
 
-        let planner = RdfPlanner::new(store);
+        let planner = RdfPlanner::new(
+            store,
+            grafeo_core::graph::rdf::RdfView::latest(grafeo_core::graph::rdf::LatestUse::Test),
+        );
 
         let scan = TripleScanOp {
             subject: TripleComponent::Variable("s".to_string()),
@@ -5127,6 +5153,7 @@ mod tests {
 
         let mut operator = RdfTripleScanOperator::new(
             Arc::clone(&store),
+            grafeo_core::graph::rdf::RdfView::latest(grafeo_core::graph::rdf::LatestUse::Test),
             pattern,
             [true, true, true, false],
             30,
@@ -5153,7 +5180,7 @@ mod tests {
 
         // Insert triples into a named graph
         store.create_graph("http://example.org/src");
-        let src = store.graph("http://example.org/src").unwrap();
+        let src = store.graph_latest("http://example.org/src").unwrap();
         src.insert(Triple::new(
             Term::iri("http://example.org/a"),
             Term::iri("http://example.org/p"),
@@ -5170,9 +5197,15 @@ mod tests {
         execute_update(&store, &plan).unwrap();
 
         // Source still has its data
-        assert_eq!(store.graph("http://example.org/src").unwrap().len(), 1);
+        assert_eq!(
+            store.graph_latest("http://example.org/src").unwrap().len(),
+            1
+        );
         // Destination has a copy
-        assert_eq!(store.graph("http://example.org/dst").unwrap().len(), 1);
+        assert_eq!(
+            store.graph_latest("http://example.org/dst").unwrap().len(),
+            1
+        );
     }
 
     #[test]
@@ -5180,7 +5213,7 @@ mod tests {
         let store = Arc::new(RdfStore::new());
 
         store.create_graph("http://example.org/src");
-        let src = store.graph("http://example.org/src").unwrap();
+        let src = store.graph_latest("http://example.org/src").unwrap();
         src.insert(Triple::new(
             Term::iri("http://example.org/a"),
             Term::iri("http://example.org/p"),
@@ -5196,9 +5229,12 @@ mod tests {
         execute_update(&store, &plan).unwrap();
 
         // Source is gone (move drops it)
-        assert!(store.graph("http://example.org/src").is_none());
+        assert!(store.graph_latest("http://example.org/src").is_none());
         // Destination has the data
-        assert_eq!(store.graph("http://example.org/dst").unwrap().len(), 1);
+        assert_eq!(
+            store.graph_latest("http://example.org/dst").unwrap().len(),
+            1
+        );
     }
 
     #[test]
@@ -5208,7 +5244,7 @@ mod tests {
         // Create src with 1 triple
         store.create_graph("http://example.org/src");
         store
-            .graph("http://example.org/src")
+            .graph_latest("http://example.org/src")
             .unwrap()
             .insert(Triple::new(
                 Term::iri("http://example.org/a"),
@@ -5219,7 +5255,7 @@ mod tests {
         // Create dst with 1 different triple
         store.create_graph("http://example.org/dst");
         store
-            .graph("http://example.org/dst")
+            .graph_latest("http://example.org/dst")
             .unwrap()
             .insert(Triple::new(
                 Term::iri("http://example.org/b"),
@@ -5236,9 +5272,15 @@ mod tests {
         execute_update(&store, &plan).unwrap();
 
         // Source unchanged
-        assert_eq!(store.graph("http://example.org/src").unwrap().len(), 1);
+        assert_eq!(
+            store.graph_latest("http://example.org/src").unwrap().len(),
+            1
+        );
         // Destination has both triples (union)
-        assert_eq!(store.graph("http://example.org/dst").unwrap().len(), 2);
+        assert_eq!(
+            store.graph_latest("http://example.org/dst").unwrap().len(),
+            2
+        );
     }
 
     #[test]
@@ -5258,7 +5300,7 @@ mod tests {
                 .contains("Source graph <http://example.org/nope> does not exist"),
             "{error}"
         );
-        assert!(store.graph("http://example.org/dst").is_none());
+        assert!(store.graph_latest("http://example.org/dst").is_none());
     }
 
     #[test]
@@ -5285,7 +5327,10 @@ mod tests {
             Term::literal("Alix"),
         ));
 
-        let planner = RdfPlanner::new(store);
+        let planner = RdfPlanner::new(
+            store,
+            grafeo_core::graph::rdf::RdfView::latest(grafeo_core::graph::rdf::LatestUse::Test),
+        );
         let scan = LogicalOperator::TripleScan(TripleScanOp {
             subject: TripleComponent::Variable("s".to_string()),
             predicate: TripleComponent::Variable("p".to_string()),
@@ -5320,7 +5365,10 @@ mod tests {
             Term::typed_literal("30", "http://www.w3.org/2001/XMLSchema#integer"),
         ));
 
-        let planner = RdfPlanner::new(store);
+        let planner = RdfPlanner::new(
+            store,
+            grafeo_core::graph::rdf::RdfView::latest(grafeo_core::graph::rdf::LatestUse::Test),
+        );
 
         let left = LogicalOperator::TripleScan(TripleScanOp {
             subject: TripleComponent::Variable("s".to_string()),
@@ -5368,7 +5416,10 @@ mod tests {
             Term::literal("Alix"),
         ));
 
-        let planner = RdfPlanner::new(store);
+        let planner = RdfPlanner::new(
+            store,
+            grafeo_core::graph::rdf::RdfView::latest(grafeo_core::graph::rdf::LatestUse::Test),
+        );
 
         let scan = LogicalOperator::TripleScan(TripleScanOp {
             subject: TripleComponent::Variable("s".to_string()),
@@ -5407,7 +5458,10 @@ mod tests {
             Term::literal("Alix"),
         ));
 
-        let planner = RdfPlanner::new(store);
+        let planner = RdfPlanner::new(
+            store,
+            grafeo_core::graph::rdf::RdfView::latest(grafeo_core::graph::rdf::LatestUse::Test),
+        );
 
         let scan = LogicalOperator::TripleScan(TripleScanOp {
             subject: TripleComponent::Variable("s".to_string()),
@@ -5455,7 +5509,10 @@ mod tests {
             Term::literal("Alix"),
         ));
 
-        let planner = RdfPlanner::new(store);
+        let planner = RdfPlanner::new(
+            store,
+            grafeo_core::graph::rdf::RdfView::latest(grafeo_core::graph::rdf::LatestUse::Test),
+        );
 
         let scan = LogicalOperator::TripleScan(TripleScanOp {
             subject: TripleComponent::Variable("s".to_string()),
@@ -5507,7 +5564,10 @@ mod tests {
             Term::iri("http://xmlns.com/foaf/0.1/age"),
             Term::typed_literal("20", "http://www.w3.org/2001/XMLSchema#integer"),
         ));
-        let planner = RdfPlanner::new(Arc::clone(&store));
+        let planner = RdfPlanner::new(
+            Arc::clone(&store),
+            grafeo_core::graph::rdf::RdfView::latest(grafeo_core::graph::rdf::LatestUse::Test),
+        );
         let scan = LogicalOperator::TripleScan(TripleScanOp {
             subject: TripleComponent::Variable("s".to_string()),
             predicate: TripleComponent::Iri("http://xmlns.com/foaf/0.1/age".to_string()),
@@ -5546,7 +5606,10 @@ mod tests {
                 Term::literal(i.to_string()),
             ));
         }
-        let planner = RdfPlanner::new(Arc::clone(&store));
+        let planner = RdfPlanner::new(
+            Arc::clone(&store),
+            grafeo_core::graph::rdf::RdfView::latest(grafeo_core::graph::rdf::LatestUse::Test),
+        );
         let scan = LogicalOperator::TripleScan(TripleScanOp {
             subject: TripleComponent::Variable("s".to_string()),
             predicate: TripleComponent::Variable("p".to_string()),
@@ -5591,7 +5654,10 @@ mod tests {
             Term::iri("http://example.org/p0"),
             Term::literal("gus_val"),
         ));
-        let planner = RdfPlanner::new(Arc::clone(&store));
+        let planner = RdfPlanner::new(
+            Arc::clone(&store),
+            grafeo_core::graph::rdf::RdfView::latest(grafeo_core::graph::rdf::LatestUse::Test),
+        );
         let scan = LogicalOperator::TripleScan(TripleScanOp {
             subject: TripleComponent::Variable("s".to_string()),
             predicate: TripleComponent::Variable("p".to_string()),
@@ -5638,7 +5704,10 @@ mod tests {
                 Term::typed_literal(i.to_string(), "http://www.w3.org/2001/XMLSchema#integer"),
             ));
         }
-        let planner = RdfPlanner::new(Arc::clone(&store));
+        let planner = RdfPlanner::new(
+            Arc::clone(&store),
+            grafeo_core::graph::rdf::RdfView::latest(grafeo_core::graph::rdf::LatestUse::Test),
+        );
         let scan = LogicalOperator::TripleScan(TripleScanOp {
             subject: TripleComponent::Variable("s".to_string()),
             predicate: TripleComponent::Iri("http://example.org/val".to_string()),
@@ -5695,7 +5764,10 @@ mod tests {
             Term::iri("http://xmlns.com/foaf/0.1/name"),
             Term::literal("Gus"),
         ));
-        let planner = RdfPlanner::new(Arc::clone(&store));
+        let planner = RdfPlanner::new(
+            Arc::clone(&store),
+            grafeo_core::graph::rdf::RdfView::latest(grafeo_core::graph::rdf::LatestUse::Test),
+        );
         let left = LogicalOperator::TripleScan(TripleScanOp {
             subject: TripleComponent::Variable("s".to_string()),
             predicate: TripleComponent::Iri("http://xmlns.com/foaf/0.1/name".to_string()),
@@ -5746,7 +5818,10 @@ mod tests {
             Term::iri("http://xmlns.com/foaf/0.1/age"),
             Term::typed_literal("30", "http://www.w3.org/2001/XMLSchema#integer"),
         ));
-        let planner = RdfPlanner::new(Arc::clone(&store));
+        let planner = RdfPlanner::new(
+            Arc::clone(&store),
+            grafeo_core::graph::rdf::RdfView::latest(grafeo_core::graph::rdf::LatestUse::Test),
+        );
         let left = LogicalOperator::TripleScan(TripleScanOp {
             subject: TripleComponent::Variable("s".to_string()),
             predicate: TripleComponent::Iri("http://xmlns.com/foaf/0.1/name".to_string()),
@@ -5796,7 +5871,10 @@ mod tests {
             Term::iri("http://xmlns.com/foaf/0.1/age"),
             Term::typed_literal("30", "http://www.w3.org/2001/XMLSchema#integer"),
         ));
-        let planner = RdfPlanner::new(Arc::clone(&store));
+        let planner = RdfPlanner::new(
+            Arc::clone(&store),
+            grafeo_core::graph::rdf::RdfView::latest(grafeo_core::graph::rdf::LatestUse::Test),
+        );
         let left = LogicalOperator::TripleScan(TripleScanOp {
             subject: TripleComponent::Variable("s".to_string()),
             predicate: TripleComponent::Iri("http://xmlns.com/foaf/0.1/name".to_string()),
@@ -5845,7 +5923,10 @@ mod tests {
             Term::iri("http://example.org/val"),
             Term::literal("2"),
         ));
-        let planner = RdfPlanner::new(Arc::clone(&store));
+        let planner = RdfPlanner::new(
+            Arc::clone(&store),
+            grafeo_core::graph::rdf::RdfView::latest(grafeo_core::graph::rdf::LatestUse::Test),
+        );
         let scan = LogicalOperator::TripleScan(TripleScanOp {
             subject: TripleComponent::Variable("s".to_string()),
             predicate: TripleComponent::Iri("http://example.org/val".to_string()),
@@ -5925,9 +6006,12 @@ mod tests {
                     condition: None,
                 })),
             });
-            let physical = RdfPlanner::new(Arc::clone(&store))
-                .plan(&LogicalPlan::new(sort))
-                .unwrap();
+            let physical = RdfPlanner::new(
+                Arc::clone(&store),
+                grafeo_core::graph::rdf::RdfView::latest(grafeo_core::graph::rdf::LatestUse::Test),
+            )
+            .plan(&LogicalPlan::new(sort))
+            .unwrap();
             let column = physical.columns.iter().position(|c| c == "age").unwrap();
             let mut op = physical.operator;
             let mut ages = Vec::new();
@@ -5981,7 +6065,10 @@ mod tests {
             input: None,
         });
         execute_update(&store, &LogicalPlan::new(insert)).unwrap();
-        assert_eq!(store.graph("http://example.org/g1").unwrap().len(), 1);
+        assert_eq!(
+            store.graph_latest("http://example.org/g1").unwrap().len(),
+            1
+        );
     }
 
     #[test]
@@ -6097,7 +6184,7 @@ mod tests {
         execute_update(&store, &LogicalPlan::new(modify)).unwrap();
         assert_eq!(store.len(), 1);
         let all = store.find(
-            &RdfView::Latest,
+            &RdfView::latest(grafeo_core::graph::rdf::LatestUse::Test),
             &TriplePattern {
                 subject: None,
                 predicate: None,
@@ -6120,7 +6207,10 @@ mod tests {
             Term::iri("http://example.org/label"),
             Term::literal("Gus"),
         ));
-        let planner = RdfPlanner::new(Arc::clone(&store));
+        let planner = RdfPlanner::new(
+            Arc::clone(&store),
+            grafeo_core::graph::rdf::RdfView::latest(grafeo_core::graph::rdf::LatestUse::Test),
+        );
         let scan1 = LogicalOperator::TripleScan(TripleScanOp {
             subject: TripleComponent::Variable("s".to_string()),
             predicate: TripleComponent::Iri("http://xmlns.com/foaf/0.1/name".to_string()),
@@ -6170,7 +6260,10 @@ mod tests {
             Term::iri("http://example.org/q"),
             Term::literal("QVAL"),
         ));
-        let planner = RdfPlanner::new(Arc::clone(&store));
+        let planner = RdfPlanner::new(
+            Arc::clone(&store),
+            grafeo_core::graph::rdf::RdfView::latest(grafeo_core::graph::rdf::LatestUse::Test),
+        );
         let scan1 = LogicalOperator::TripleScan(TripleScanOp {
             subject: TripleComponent::Variable("s".to_string()),
             predicate: TripleComponent::Iri("http://example.org/p".to_string()),
@@ -6244,7 +6337,10 @@ mod tests {
             Term::iri("http://xmlns.com/foaf/0.1/name"),
             Term::literal("Alix"),
         ));
-        let planner = RdfPlanner::new(Arc::clone(&store));
+        let planner = RdfPlanner::new(
+            Arc::clone(&store),
+            grafeo_core::graph::rdf::RdfView::latest(grafeo_core::graph::rdf::LatestUse::Test),
+        );
         let scan = LogicalOperator::TripleScan(TripleScanOp {
             subject: TripleComponent::Variable("s".to_string()),
             predicate: TripleComponent::Iri("http://xmlns.com/foaf/0.1/name".to_string()),
@@ -6280,7 +6376,10 @@ mod tests {
             Term::iri("http://xmlns.com/foaf/0.1/name"),
             Term::literal("Alix"),
         ));
-        let planner = RdfPlanner::new(Arc::clone(&store));
+        let planner = RdfPlanner::new(
+            Arc::clone(&store),
+            grafeo_core::graph::rdf::RdfView::latest(grafeo_core::graph::rdf::LatestUse::Test),
+        );
         let scan = LogicalOperator::TripleScan(TripleScanOp {
             subject: TripleComponent::Variable("s".to_string()),
             predicate: TripleComponent::Iri("http://xmlns.com/foaf/0.1/name".to_string()),
@@ -6319,7 +6418,10 @@ mod tests {
             Term::iri("http://xmlns.com/foaf/0.1/name"),
             Term::literal("Alix"),
         ));
-        let planner = RdfPlanner::new(Arc::clone(&store));
+        let planner = RdfPlanner::new(
+            Arc::clone(&store),
+            grafeo_core::graph::rdf::RdfView::latest(grafeo_core::graph::rdf::LatestUse::Test),
+        );
         let scan = LogicalOperator::TripleScan(TripleScanOp {
             subject: TripleComponent::Variable("s".to_string()),
             predicate: TripleComponent::Iri("http://xmlns.com/foaf/0.1/name".to_string()),
@@ -6364,7 +6466,7 @@ mod tests {
             })),
         )
         .unwrap();
-        assert!(store.graph("http://example.org/g1").is_some());
+        assert!(store.graph_latest("http://example.org/g1").is_some());
     }
 
     #[test]
@@ -6414,7 +6516,7 @@ mod tests {
             })),
         )
         .unwrap();
-        assert!(store.graph("http://example.org/g1").is_none());
+        assert!(store.graph_latest("http://example.org/g1").is_none());
     }
 
     #[test]
@@ -6483,7 +6585,7 @@ mod tests {
         ));
         store.create_graph("http://example.org/g1");
         store
-            .graph("http://example.org/g1")
+            .graph_latest("http://example.org/g1")
             .unwrap()
             .insert(Triple::new(
                 Term::iri("http://example.org/x"),
@@ -6519,7 +6621,10 @@ mod tests {
             Term::iri("http://xmlns.com/foaf/0.1/knows"),
             Term::iri("http://example.org/gus"),
         ));
-        let planner = RdfPlanner::new(Arc::clone(&store));
+        let planner = RdfPlanner::new(
+            Arc::clone(&store),
+            grafeo_core::graph::rdf::RdfView::latest(grafeo_core::graph::rdf::LatestUse::Test),
+        );
         let scan1 = LogicalOperator::TripleScan(TripleScanOp {
             subject: TripleComponent::Variable("s".to_string()),
             predicate: TripleComponent::Iri("http://xmlns.com/foaf/0.1/name".to_string()),
@@ -6660,7 +6765,10 @@ mod tests {
             Term::iri("http://xmlns.com/foaf/0.1/name"),
             Term::literal("Alix"),
         ));
-        let planner = RdfPlanner::new(store);
+        let planner = RdfPlanner::new(
+            store,
+            grafeo_core::graph::rdf::RdfView::latest(grafeo_core::graph::rdf::LatestUse::Test),
+        );
         let plan = LogicalPlan::new(LogicalOperator::TripleScan(TripleScanOp {
             subject: TripleComponent::Variable("s".to_string()),
             predicate: TripleComponent::Variable("p".to_string()),
@@ -6677,7 +6785,10 @@ mod tests {
     #[test]
     fn test_plan_unsupported_operator_returns_error() {
         let store = Arc::new(RdfStore::new());
-        let planner = RdfPlanner::new(store);
+        let planner = RdfPlanner::new(
+            store,
+            grafeo_core::graph::rdf::RdfView::latest(grafeo_core::graph::rdf::LatestUse::Test),
+        );
         let map = LogicalOperator::MapCollect(crate::query::plan::MapCollectOp {
             input: Box::new(LogicalOperator::Empty),
             key_var: "k".to_string(),
@@ -6690,7 +6801,10 @@ mod tests {
     #[test]
     fn test_plan_empty_operator() {
         let store = Arc::new(RdfStore::new());
-        let planner = RdfPlanner::new(store);
+        let planner = RdfPlanner::new(
+            store,
+            grafeo_core::graph::rdf::RdfView::latest(grafeo_core::graph::rdf::LatestUse::Test),
+        );
         let physical = planner
             .plan(&LogicalPlan::new(LogicalOperator::Empty))
             .unwrap();
@@ -6700,7 +6814,10 @@ mod tests {
     #[test]
     fn test_component_to_term_conversions() {
         let store = Arc::new(RdfStore::new());
-        let planner = RdfPlanner::new(store);
+        let planner = RdfPlanner::new(
+            store,
+            grafeo_core::graph::rdf::RdfView::latest(grafeo_core::graph::rdf::LatestUse::Test),
+        );
         assert!(matches!(
             planner
                 .component_to_term(&TripleComponent::Iri("http://example.org/x".to_string()))
@@ -6769,7 +6886,10 @@ mod tests {
             Term::iri("http://example.org/other_pred"),
             Term::literal("x"),
         ));
-        let planner = RdfPlanner::new(Arc::clone(&store));
+        let planner = RdfPlanner::new(
+            Arc::clone(&store),
+            grafeo_core::graph::rdf::RdfView::latest(grafeo_core::graph::rdf::LatestUse::Test),
+        );
         let scan = LogicalOperator::TripleScan(TripleScanOp {
             subject: TripleComponent::Variable("s".to_string()),
             predicate: TripleComponent::Iri("http://example.org/type".to_string()),
@@ -6804,7 +6924,7 @@ mod tests {
     fn execute_update(store: &Arc<RdfStore>, plan: &LogicalPlan) -> Result<()> {
         let manager = Arc::new(crate::transaction::TransactionManager::new());
         crate::transaction::update_privately(store, &manager, |writer| {
-            let mut physical = RdfPlanner::new(Arc::clone(store))
+            let mut physical = RdfPlanner::new(Arc::clone(store), writer.view().clone())
                 .with_writer(Some(writer))
                 .plan(plan)?;
             while physical
@@ -7001,6 +7121,7 @@ mod tests {
         };
         let op: Box<dyn Operator> = Box::new(RdfTripleScanOperator::new(
             store,
+            grafeo_core::graph::rdf::RdfView::latest(grafeo_core::graph::rdf::LatestUse::Test),
             pattern,
             [true, true, true, false],
             1024,

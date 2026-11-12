@@ -370,7 +370,7 @@ fn read_rdf_blocks(data: &[u8], store: &RdfStore, graph: &str) -> Result<()> {
         })?;
 
         store.create_graph(graph_name);
-        if let Some(graph_store) = store.graph(graph_name) {
+        if let Some(graph_store) = store.graph_latest(graph_name) {
             read_rdf_blocks(graph_data, &graph_store, &format!("graph {graph_name:?}"))?;
         }
     }
@@ -438,7 +438,7 @@ impl Section for RdfStoreSection {
             .into_iter()
             .filter_map(|name| {
                 self.store
-                    .graph(&name)
+                    .graph_latest(&name)
                     .map(|graph| (name, Arc::clone(&graph)))
             })
             .collect();
@@ -486,7 +486,7 @@ impl Section for RdfStoreSection {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::graph::rdf::overlay::RdfView;
+    use crate::graph::rdf::overlay::{LatestUse, RdfView};
 
     #[test]
     fn rdf_section_round_trip() {
@@ -579,7 +579,7 @@ mod tests {
         ));
 
         store.create_graph("http://example.org/graph/butch");
-        if let Some(named) = store.graph("http://example.org/graph/butch") {
+        if let Some(named) = store.graph_latest("http://example.org/graph/butch") {
             named.insert(Triple::new(
                 Term::iri("http://example.org/butch"),
                 Term::iri("http://xmlns.com/foaf/0.1/name"),
@@ -603,13 +603,15 @@ mod tests {
 
         assert_eq!(section2.store().len(), 1);
 
-        let names = section2.store().graph_names(&RdfView::Latest);
+        let names = section2
+            .store()
+            .graph_names(&RdfView::latest(LatestUse::Test));
         assert_eq!(names.len(), 1);
         assert_eq!(names[0], "http://example.org/graph/butch");
 
         let named = section2
             .store()
-            .graph("http://example.org/graph/butch")
+            .graph_latest("http://example.org/graph/butch")
             .expect("named graph should exist");
         assert_eq!(named.len(), 2);
     }
@@ -735,7 +737,7 @@ mod tests {
             .deserialize(&good)
             .unwrap();
         assert!(store.contains(
-            &RdfView::Latest,
+            &RdfView::latest(LatestUse::Test),
             &Triple::new(
                 Term::iri("http://example.org/alix"),
                 Term::iri("http://example.org/name"),

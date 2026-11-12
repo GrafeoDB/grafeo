@@ -43,7 +43,9 @@ fn asks(session: &grafeo_engine::session::Session, ask: &str) -> bool {
 fn subjects(db: &GrafeoDB) -> Vec<String> {
     let mut subjects: Vec<String> = db
         .rdf_store()
-        .triples(&grafeo_core::graph::rdf::RdfView::Latest)
+        .triples(&grafeo_core::graph::rdf::RdfView::latest(
+            grafeo_core::graph::rdf::LatestUse::Test,
+        ))
         .iter()
         .map(|triple| triple.subject().to_string())
         .collect();
@@ -210,10 +212,12 @@ fn a_transaction_reads_its_own_rdf_writes_and_others_do_not() {
 fn subjects_in(db: &GrafeoDB, graph: &str) -> Vec<String> {
     let mut subjects: Vec<String> = db
         .rdf_store()
-        .graph(graph)
+        .graph_latest(graph)
         .map(|graph| {
             graph
-                .triples(&grafeo_core::graph::rdf::RdfView::Latest)
+                .triples(&grafeo_core::graph::rdf::RdfView::latest(
+                    grafeo_core::graph::rdf::LatestUse::Test,
+                ))
                 .iter()
                 .map(|triple| triple.subject().to_string())
                 .collect()
@@ -290,7 +294,7 @@ fn a_graph_operation_waits_for_the_open_changes_in_the_graphs_it_changes() {
         .unwrap();
     assert_eq!(subjects_in(&db, BERLIN), both);
     assert!(
-        db.rdf_store().graph(PARIS).is_none(),
+        db.rdf_store().graph_latest(PARIS).is_none(),
         "a move drops its source"
     );
 }
@@ -356,12 +360,12 @@ fn a_graph_operation_in_a_transaction_goes_with_its_rollback() {
         .execute_sparql(&format!("CREATE GRAPH <{PARIS}>"))
         .unwrap();
     assert!(
-        db.rdf_store().graph(PARIS).is_none(),
+        db.rdf_store().graph_latest(PARIS).is_none(),
         "another reader does not see the graph before the commit"
     );
     session.rollback().unwrap();
     assert!(
-        db.rdf_store().graph(PARIS).is_none(),
+        db.rdf_store().graph_latest(PARIS).is_none(),
         "the rollback undoes it"
     );
 }
@@ -374,7 +378,7 @@ fn a_rolled_back_insert_leaves_no_graph() {
     session.begin_transaction().unwrap();
     insert_into(&session, BERLIN, "vincent");
     session.rollback().unwrap();
-    assert!(db.rdf_store().graph(BERLIN).is_none());
+    assert!(db.rdf_store().graph_latest(BERLIN).is_none());
 }
 
 /// `DROP ALL` empties the default graph and removes every named graph.
@@ -388,7 +392,9 @@ fn drop_all_drops_every_graph() {
     assert_eq!(subjects(&db), Vec::<String>::new());
     assert_eq!(
         db.rdf_store()
-            .graph_names(&grafeo_core::graph::rdf::RdfView::Latest),
+            .graph_names(&grafeo_core::graph::rdf::RdfView::latest(
+                grafeo_core::graph::rdf::LatestUse::Test
+            )),
         Vec::<String>::new()
     );
 }

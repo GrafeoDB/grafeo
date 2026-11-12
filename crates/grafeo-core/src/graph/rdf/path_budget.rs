@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use grafeo_common::clock::Instant;
 use grafeo_common::utils::hash::{FxHashMap, FxHashSet};
-use parking_lot::{RwLock, RwLockReadGuard};
+use parking_lot::{RecursiveRwLock, RecursiveRwLockReadGuard, RwLock, RwLockReadGuard};
 
 use crate::execution::deadline::Ticker;
 use crate::execution::operators::OperatorError;
@@ -91,6 +91,22 @@ impl PathBudget {
             if let Some(guard) = lock.try_read_for(wait) {
                 self.check()?;
                 return Ok(guard);
+            }
+        }
+    }
+
+    /// The shared side of a dataset's apply guard, waited for in bounded
+    /// intervals as [`read`](Self::read) waits: a path search behind a long
+    /// commit meets its deadline.
+    pub(crate) fn read_guard<'a>(
+        &mut self,
+        guard: &'a RecursiveRwLock<()>,
+    ) -> Result<RecursiveRwLockReadGuard<'a, ()>, OperatorError> {
+        loop {
+            let wait = self.lock_wait()?;
+            if let Some(held) = guard.try_read_for(wait) {
+                self.check()?;
+                return Ok(held);
             }
         }
     }

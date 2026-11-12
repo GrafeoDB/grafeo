@@ -98,9 +98,15 @@ impl GrafeoDB {
         // EXPLAIN: return the physical plan tree without executing
         if optimized_plan.explain {
             let path_budget = self.config.path_search_budget();
-            let planner = RdfPlanner::new(Arc::clone(&self.rdf_store))
-                .with_shuffle_unordered(self.config.shuffle_unordered())
-                .with_path_search_budget(path_budget);
+            // Planned, not run: the plan reads nothing.
+            let planner = RdfPlanner::new(
+                Arc::clone(&self.rdf_store),
+                grafeo_core::graph::rdf::RdfView::latest(
+                    grafeo_core::graph::rdf::LatestUse::Statistics,
+                ),
+            )
+            .with_shuffle_unordered(self.config.shuffle_unordered())
+            .with_path_search_budget(path_budget);
             #[cfg(feature = "spill")]
             let planner = planner.with_operator_memory(self.operator_memory_context());
             let (_, entries) = planner.plan_profiled(&optimized_plan)?;
@@ -120,6 +126,24 @@ impl GrafeoDB {
     #[must_use]
     pub fn rdf_store(&self) -> &Arc<RdfStore> {
         &self.rdf_store
+    }
+
+    /// How many overlay entries the RDF store keeps for readers at earlier
+    /// snapshots: 0 once every commit finished with no reader open.
+    #[cfg(feature = "testing-statement-injection")]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn rdf_overlay_len(&self) -> usize {
+        self.rdf_store.overlay().len()
+    }
+
+    /// How many times an RDF view worked out the commits after its
+    /// snapshot: 0 while every reader takes the fast path.
+    #[cfg(feature = "testing-statement-injection")]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn rdf_overlay_views_extended(&self) -> u64 {
+        self.rdf_store.overlay().views_extended()
     }
 }
 
@@ -182,7 +206,7 @@ impl GrafeoDB {
         let reservation = self.reserve_rdf_insert(&triples)?;
         let held = self.hold_commits_for_import()?;
         if let Some(grant) = reservation {
-            match graph.and_then(|name| self.rdf_store.graph(name)) {
+            match graph.and_then(|name| self.rdf_store.graph_latest(name)) {
                 Some(store) => store.adopt_grant(grant),
                 None => self.rdf_store.adopt_grant(grant),
             }
@@ -350,7 +374,7 @@ impl GrafeoDB {
     ) -> Result<usize> {
         if triples.is_empty() {
             if let Some(name) = graph
-                && self.rdf_store.graph(name).is_none()
+                && self.rdf_store.graph_latest(name).is_none()
             {
                 crate::database::standalone::commit_rdf(
                     grafeo_common::change::RdfGraphOp::Create {
@@ -365,7 +389,7 @@ impl GrafeoDB {
             }
             return Ok(0);
         }
-        let changes = self.streaming_changes(held, false);
+        let changes = self.streaming_changes(held, true);
         #[cfg(feature = "wal")]
         let changes = {
             use grafeo_common::storage::log_record::TripleRecord;
@@ -388,13 +412,28 @@ impl GrafeoDB {
             }
             changes
         };
-        // No epoch: the RDF store has none, and the triples apply once the
-        // group is written.
-        changes.commit(None)?;
-        Ok(match graph {
-            None => self.rdf_store.batch_insert(triples),
-            Some(name) => self.rdf_store.graph_or_create(name).batch_insert(triples),
-        })
+        // Commits are held, so no commit is between the published epoch and
+        // this one's completion: the next epoch is free, and the triples
+        // commit at it once the group is written, published for readers at
+        // an earlier snapshot, as a transaction's commit is.
+        let epoch = grafeo_common::types::EpochId::new(
+            self.transaction_manager.current_epoch().as_u64() + 1,
+        );
+        changes.commit(Some(epoch))?;
+        let key: grafeo_core::graph::rdf::overlay::GraphKey = graph.map(Arc::from);
+        let applied = self.rdf_store.apply_commit(
+            grafeo_core::graph::rdf::ApplyMode::Publish(epoch),
+            triples
+                .into_iter()
+                .map(|triple| grafeo_core::graph::rdf::CommitChange::Insert {
+                    graph: key.clone(),
+                    triple,
+                })
+                .collect(),
+        );
+        self.transaction_manager.sync_epoch(epoch);
+        crate::transaction::prune_rdf_overlay(&self.rdf_store, &self.transaction_manager);
+        Ok(applied.changed.iter().filter(|changed| **changed).count())
     }
 }
 
@@ -442,12 +481,17 @@ impl GrafeoDB {
 
         let predicates = self
             .rdf_store
-            .predicates(&RdfView::Latest)
+            .predicates(&RdfView::latest(
+                grafeo_core::graph::rdf::LatestUse::Statistics,
+            ))
             .into_iter()
             .map(|predicate| {
                 let count = self
                     .rdf_store
-                    .triples_with_predicate(&RdfView::Latest, &predicate)
+                    .triples_with_predicate(
+                        &RdfView::latest(grafeo_core::graph::rdf::LatestUse::Statistics),
+                        &predicate,
+                    )
                     .len();
                 crate::admin::PredicateInfo {
                     iri: predicate.to_string(),
@@ -636,7 +680,7 @@ mod tests {
                 replay_rdf_wal_record(&store, &record).unwrap();
             }
         }
-        let named = store.graph("http://example.org/Kraków").unwrap();
+        let named = store.graph_latest("http://example.org/Kraków").unwrap();
         for term in terms {
             let triple = Triple::new(
                 Term::blank("gus "),
@@ -644,11 +688,21 @@ mod tests {
                 term,
             );
             assert!(
-                store.contains(&grafeo_core::graph::rdf::RdfView::Latest, &triple),
+                store.contains(
+                    &grafeo_core::graph::rdf::RdfView::latest(
+                        grafeo_core::graph::rdf::LatestUse::Test
+                    ),
+                    &triple
+                ),
                 "{triple}"
             );
             assert!(
-                named.contains(&grafeo_core::graph::rdf::RdfView::Latest, &triple),
+                named.contains(
+                    &grafeo_core::graph::rdf::RdfView::latest(
+                        grafeo_core::graph::rdf::LatestUse::Test
+                    ),
+                    &triple
+                ),
                 "{triple}"
             );
         }

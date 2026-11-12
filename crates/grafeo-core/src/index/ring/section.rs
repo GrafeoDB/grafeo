@@ -233,7 +233,7 @@ impl Section for RdfRingSection {
 
     /// The version 2 envelope (see the module doc), for the spill path.
     fn serialize(&self) -> Result<Vec<u8>> {
-        match self.store.ring() {
+        match self.store.ring_latest() {
             Some(ring) => Ok(super::serialize_triple_ring(&ring)),
             None => Ok(Vec::new()),
         }
@@ -268,7 +268,7 @@ impl Section for RdfRingSection {
     /// Returns an error when the caps are 0, a part cannot be encoded, or
     /// the sink refuses a chunk.
     fn write_to(&self, sink: &mut dyn SectionSink) -> Result<()> {
-        let Some(ring) = self.store.ring() else {
+        let Some(ring) = self.store.ring_latest() else {
             return Ok(());
         };
         if ring.store_ids().len() != ring.num_terms() {
@@ -423,7 +423,7 @@ impl Section for RdfRingSection {
     }
 
     fn memory_usage(&self) -> usize {
-        self.store.ring().map_or(0, |r| r.size_bytes())
+        self.store.ring_latest().map_or(0, |r| r.size_bytes())
     }
 
     /// Swaps the ring backing to a `Bytes` view sourced from `fetcher`.
@@ -631,7 +631,7 @@ mod tests {
         section2.deserialize(&bytes).unwrap();
 
         // The loaded ring should have the same triple count
-        let ring = store2.ring().expect("ring should be loaded");
+        let ring = store2.ring_latest().expect("ring should be loaded");
         assert_eq!(ring.len(), 3);
 
         // Verify count operations work
@@ -670,7 +670,7 @@ mod tests {
     #[test]
     fn gus_section_v1_bincode_buffer_still_loads() {
         let original = test_store();
-        let ring = original.ring().expect("ring built").as_ref().clone();
+        let ring = original.ring_latest().expect("ring built").as_ref().clone();
         // Encode as v1 bincode directly (bypass the section entry point).
         let v1_bytes = ring.save_to_bytes().unwrap();
         // Sanity: v1 bytes do NOT start with GRFR.
@@ -685,7 +685,7 @@ mod tests {
         let store2 = Arc::new(RdfStore::new());
         let mut section2 = RdfRingSection::new(Arc::clone(&store2));
         section2.deserialize(&v1_bytes).unwrap();
-        let restored = store2.ring().expect("ring loaded");
+        let restored = store2.ring_latest().expect("ring loaded");
         assert_eq!(restored.len(), 3);
     }
 
@@ -730,14 +730,14 @@ mod tests {
 
         // Fresh empty store; section starts with no ring.
         let store = Arc::new(RdfStore::new());
-        assert!(store.ring().is_none());
+        assert!(store.ring_latest().is_none());
 
         let section = RdfRingSection::new(Arc::clone(&store));
         let fetcher: Arc<dyn PageFetcher> = Arc::new(MemFetcher(v2_bytes));
         section.swap_to_mmap(fetcher).expect("swap_to_mmap");
 
         // Ring is now populated from the fetcher bytes.
-        let ring = store.ring().expect("ring loaded via swap_to_mmap");
+        let ring = store.ring_latest().expect("ring loaded via swap_to_mmap");
         assert_eq!(ring.len(), 3);
 
         // Query semantics still work against the post-swap ring.
@@ -757,14 +757,14 @@ mod tests {
         let section = RdfRingSection::new(Arc::clone(&store));
         let fetcher: Arc<dyn PageFetcher> = Arc::new(MemFetcher(Vec::new()));
         section.swap_to_mmap(fetcher).expect("empty swap is ok");
-        assert!(store.ring().is_none());
+        assert!(store.ring_latest().is_none());
     }
 
     /// v1 bincode-encoded fetcher bytes still load via the legacy fallback.
     #[test]
     fn django_swap_to_mmap_v1_bincode_fetcher_still_loads() {
         let original = test_store();
-        let ring = original.ring().expect("ring built").as_ref().clone();
+        let ring = original.ring_latest().expect("ring built").as_ref().clone();
         let v1_bytes = ring.save_to_bytes().unwrap();
         assert_ne!(&v1_bytes[0..4], V2_MAGIC);
 
@@ -773,7 +773,7 @@ mod tests {
         let fetcher: Arc<dyn PageFetcher> = Arc::new(MemFetcher(v1_bytes));
         section.swap_to_mmap(fetcher).expect("v1 fallback in swap");
 
-        assert_eq!(store.ring().unwrap().len(), 3);
+        assert_eq!(store.ring_latest().unwrap().len(), 3);
     }
 
     /// After a v1 read + a re-serialize, the new buffer is v2.
@@ -781,7 +781,7 @@ mod tests {
     #[test]
     fn vincent_section_v1_then_resersialize_yields_v2() {
         let original = test_store();
-        let ring = original.ring().expect("ring built").as_ref().clone();
+        let ring = original.ring_latest().expect("ring built").as_ref().clone();
         let v1_bytes = ring.save_to_bytes().unwrap();
 
         let store2 = Arc::new(RdfStore::new());
@@ -796,7 +796,7 @@ mod tests {
         let store3 = Arc::new(RdfStore::new());
         let mut section3 = RdfRingSection::new(Arc::clone(&store3));
         section3.deserialize(&v2_bytes).unwrap();
-        assert_eq!(store3.ring().unwrap().len(), 3);
+        assert_eq!(store3.ring_latest().unwrap().len(), 3);
     }
 
     // ── Version 3: the ring in streams ───────────────────────────────
@@ -861,7 +861,13 @@ mod tests {
     fn ringed_store() -> Arc<RdfStore> {
         let store = Arc::new(RdfStore::new());
         store.bulk_load(five_hundred_triples());
-        assert_eq!(store.ring().expect("bulk_load builds the ring").len(), 500);
+        assert_eq!(
+            store
+                .ring_latest()
+                .expect("bulk_load builds the ring")
+                .len(),
+            500
+        );
         store
     }
 
@@ -1006,7 +1012,7 @@ mod tests {
         // The section writes streams 1 to 5 as these parts, and stream 0 as
         // the ring's terms by their ids (a count, then an id per term).
         let store = ringed_store();
-        let ring = store.ring().unwrap();
+        let ring = store.ring_latest().unwrap();
         let serialized = [
             Vec::new(),
             serialize_wavelet_tree(ring.subjects_wt()),
@@ -1070,8 +1076,8 @@ mod tests {
         );
 
         let restored = read_back(&image).unwrap();
-        let ring = restored.ring().expect("a ring");
-        assert_same_ring(&store.ring().unwrap(), &ring);
+        let ring = restored.ring_latest().expect("a ring");
+        assert_same_ring(&store.ring_latest().unwrap(), &ring);
         // The ring reads its terms as the store's ids: each names the term
         // the ring holds, in the store the load filled.
         assert_eq!(ring.store_ids().len(), ring.num_terms());
@@ -1152,7 +1158,7 @@ mod tests {
     #[test]
     fn a_0_5_ring_section_still_loads() {
         let store = ringed_store();
-        let original = store.ring().unwrap();
+        let original = store.ring_latest().unwrap();
         let envelope = RdfRingSection::new(Arc::clone(&store)).serialize().unwrap();
         assert_eq!(&envelope[..4], V2_MAGIC);
         let bincode = original.save_to_bytes().unwrap();
@@ -1160,12 +1166,12 @@ mod tests {
             let image = MemoryImage::from_raw(vec![(SectionType::RdfRing, bytes)]).unwrap();
             let restored = read_back(&image).unwrap();
             let ring = restored
-                .ring()
+                .ring_latest()
                 .unwrap_or_else(|| panic!("{version}: a ring"));
             assert_same_ring(&original, &ring);
         }
         let image = MemoryImage::from_raw(vec![(SectionType::RdfRing, Vec::new())]).unwrap();
-        assert!(read_back(&image).unwrap().ring().is_none());
+        assert!(read_back(&image).unwrap().ring_latest().is_none());
     }
 
     /// Chunk sequences no writer of this release produces are refused,
@@ -1340,7 +1346,7 @@ mod tests {
             for needle in expected {
                 assert!(error.contains(needle), "{case}: {error}");
             }
-            assert!(store.ring().is_none(), "{case}: no ring is set");
+            assert!(store.ring_latest().is_none(), "{case}: no ring is set");
         }
     }
 
@@ -1356,7 +1362,7 @@ mod tests {
             .unwrap();
         chunks[objects].1[0] ^= 0xFF;
         let store = test_store();
-        let before = store.ring().unwrap();
+        let before = store.ring_latest().unwrap();
         let image = crafted(RING_SECTION_VERSION, &chunks);
         let source = image.section_source(SectionType::RdfRing).unwrap();
         let error = RdfRingSection::new(Arc::clone(&store))
@@ -1365,7 +1371,7 @@ mod tests {
             .to_string();
         assert!(error.contains("bad magic"), "{error}");
         assert!(
-            Arc::ptr_eq(&store.ring().unwrap(), &before),
+            Arc::ptr_eq(&store.ring_latest().unwrap(), &before),
             "the store keeps its ring"
         );
     }
@@ -1444,7 +1450,7 @@ mod tests {
                 error.contains(part) && error.contains(&format!("{}", length + 20)),
                 "{part}: {error}"
             );
-            assert!(store.ring().is_none(), "{part}: no ring is set");
+            assert!(store.ring_latest().is_none(), "{part}: no ring is set");
         }
     }
 
@@ -1487,13 +1493,13 @@ mod tests {
             let count = triples.len();
             let store = Arc::new(RdfStore::new());
             store.bulk_load(triples);
-            let original = store.ring().expect(case);
+            let original = store.ring_latest().expect(case);
             assert_eq!(original.len(), count, "{case}: the ring holds every triple");
             let image = image_of(&RdfRingSection::with_caps(store, TINY));
             let restored = read_back(&image).unwrap_or_else(|error| panic!("{case}: {error}"));
             // Every term is compared, not counted: a term that comes back
             // changed (a trimmed language tag) keeps both counts.
-            assert_same_ring(&original, &restored.ring().expect(case));
+            assert_same_ring(&original, &restored.ring_latest().expect(case));
         }
     }
 
@@ -1557,7 +1563,7 @@ mod tests {
             .collect();
         assert_eq!(bytes.len(), 566);
         let image = MemoryImage::from_raw(vec![(SectionType::RdfRing, bytes)]).unwrap();
-        let ring = read_back(&image).unwrap().ring().expect("a ring");
+        let ring = read_back(&image).unwrap().ring_latest().expect("a ring");
         let vincent_knows_mia = Triple::new(
             Term::iri("http://example.org/vincent"),
             Term::iri("http://example.org/knows"),

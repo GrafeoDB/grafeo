@@ -13,7 +13,7 @@
 
 #![cfg(feature = "triple-store")]
 
-use grafeo_core::graph::rdf::RdfView;
+use grafeo_core::graph::rdf::{LatestUse, RdfView};
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
@@ -131,7 +131,7 @@ fn pattern(
 fn agrees(store: &RdfStore, held: &[Triple], context: &str) {
     assert_eq!(store.len(), held.len(), "{context}: len");
     assert_eq!(
-        names(&store.triples(&RdfView::Latest)),
+        names(&store.triples(&RdfView::latest(LatestUse::Test))),
         held.iter().map(ToString::to_string).collect(),
         "{context}: triples"
     );
@@ -163,40 +163,43 @@ fn agrees(store: &RdfStore, held: &[Triple], context: &str) {
         ] {
             let query = pattern(bs.then_some(s), bp.then_some(p), bo.then_some(o));
             assert_eq!(
-                names(&store.find(&RdfView::Latest, &query)),
+                names(&store.find(&RdfView::latest(LatestUse::Test), &query)),
                 brute(held, &query),
                 "{context}: {query:?}"
             );
         }
         assert!(
-            store.contains(&RdfView::Latest, triple),
+            store.contains(&RdfView::latest(LatestUse::Test), triple),
             "{context}: contains {triple}"
         );
     }
     assert_eq!(
-        names(&store.find(&RdfView::Latest, &pattern(None, None, None))),
+        names(&store.find(
+            &RdfView::latest(LatestUse::Test),
+            &pattern(None, None, None)
+        )),
         brute(held, &pattern(None, None, None)),
         "{context}: all"
     );
     for term in &terms {
         let by = |s, p, o| brute(held, &pattern(s, p, o));
         assert_eq!(
-            names(&store.triples_with_subject(&RdfView::Latest, term)),
+            names(&store.triples_with_subject(&RdfView::latest(LatestUse::Test), term)),
             by(Some(term), None, None),
             "{context}: s {term}"
         );
         assert_eq!(
-            names(&store.triples_with_predicate(&RdfView::Latest, term)),
+            names(&store.triples_with_predicate(&RdfView::latest(LatestUse::Test), term)),
             by(None, Some(term), None),
             "{context}: p {term}"
         );
         assert_eq!(
-            names(&store.triples_with_object(&RdfView::Latest, term)),
+            names(&store.triples_with_object(&RdfView::latest(LatestUse::Test), term)),
             by(None, None, Some(term)),
             "{context}: o {term}"
         );
         assert_eq!(
-            store.count_with_predicate(term),
+            store.count_with_predicate_latest(term),
             by(None, Some(term), None).len(),
             "{context}: count {term}"
         );
@@ -208,7 +211,7 @@ fn agrees(store: &RdfStore, held: &[Triple], context: &str) {
                 pattern(None, Some(other), Some(term)),
             ] {
                 assert_eq!(
-                    store.find(&RdfView::Latest, &query).len(),
+                    store.find(&RdfView::latest(LatestUse::Test), &query).len(),
                     0,
                     "{context}: {query:?}"
                 );
@@ -218,7 +221,7 @@ fn agrees(store: &RdfStore, held: &[Triple], context: &str) {
     for other in &missing {
         let triple = Triple::new(iri("alix"), iri("name"), other.clone());
         assert!(
-            !store.contains(&RdfView::Latest, &triple),
+            !store.contains(&RdfView::latest(LatestUse::Test), &triple),
             "{context}: contains {triple}"
         );
     }
@@ -228,17 +231,17 @@ fn agrees(store: &RdfStore, held: &[Triple], context: &str) {
     let listed =
         |terms: Vec<Term>| -> BTreeSet<String> { terms.iter().map(ToString::to_string).collect() };
     assert_eq!(
-        listed(store.subjects(&RdfView::Latest)),
+        listed(store.subjects(&RdfView::latest(LatestUse::Test))),
         distinct(Triple::subject),
         "{context}: subjects"
     );
     assert_eq!(
-        listed(store.predicates(&RdfView::Latest)),
+        listed(store.predicates(&RdfView::latest(LatestUse::Test))),
         distinct(Triple::predicate),
         "{context}: predicates"
     );
     assert_eq!(
-        listed(store.objects(&RdfView::Latest)),
+        listed(store.objects(&RdfView::latest(LatestUse::Test))),
         distinct(Triple::object),
         "{context}: objects"
     );
@@ -285,7 +288,10 @@ fn literals_equal_as_values_are_different_terms() {
         assert!(store.insert(first.clone()), "{first}");
         assert!(store.insert(second.clone()), "{second}");
         for (term, own) in [(a, &first), (b, &second)] {
-            let found = store.find(&RdfView::Latest, &pattern(Some(&subject), None, Some(term)));
+            let found = store.find(
+                &RdfView::latest(LatestUse::Test),
+                &pattern(Some(&subject), None, Some(term)),
+            );
             assert_eq!(names(&found), BTreeSet::from([own.to_string()]), "{term}");
         }
     }
@@ -295,7 +301,7 @@ fn literals_equal_as_values_are_different_terms() {
     let string = Triple::new(iri("s"), iri("value"), typed("x", "string"));
     assert!(store.insert(plain));
     assert!(!store.insert(string.clone()), "the same term");
-    assert!(store.contains(&RdfView::Latest, &string));
+    assert!(store.contains(&RdfView::latest(LatestUse::Test), &string));
 }
 
 #[test]
@@ -306,16 +312,20 @@ fn removing_and_looking_up_terms_the_store_never_had() {
         let triple = Triple::new(iri("alix"), iri("name"), term.clone());
         assert!(!store.remove(&triple), "{triple}");
         assert_eq!(
-            store.triples_with_subject(&RdfView::Latest, &term).len(),
+            store
+                .triples_with_subject(&RdfView::latest(LatestUse::Test), &term)
+                .len(),
             0,
             "{term}"
         );
         assert_eq!(
-            store.triples_with_object(&RdfView::Latest, &term).len(),
+            store
+                .triples_with_object(&RdfView::latest(LatestUse::Test), &term)
+                .len(),
             0,
             "{term}"
         );
-        assert_eq!(store.count_with_predicate(&term), 0);
+        assert_eq!(store.count_with_predicate_latest(&term), 0);
     }
     agrees(&store, &held, "after absent removes");
 }
@@ -359,7 +369,7 @@ fn named_graphs_share_terms_and_keep_their_triples_apart() {
     agrees(&first, &half_left, "g1 after remove");
     agrees(&store, &held, "default after a g1 remove");
     assert_eq!(
-        second.contains(&RdfView::Latest, &gone),
+        second.contains(&RdfView::latest(LatestUse::Test), &gone),
         other.contains(&gone)
     );
 }
@@ -384,11 +394,14 @@ fn a_triple_from_another_store_is_found_by_its_terms() {
     let reversed: Vec<Triple> = held.iter().rev().cloned().collect();
     second.batch_insert(reversed);
 
-    let from_first = first.triples(&RdfView::Latest);
+    let from_first = first.triples(&RdfView::latest(LatestUse::Test));
     for triple in &from_first {
-        assert!(second.contains(&RdfView::Latest, triple), "{triple}");
+        assert!(
+            second.contains(&RdfView::latest(LatestUse::Test), triple),
+            "{triple}"
+        );
         let found = second.find(
-            &RdfView::Latest,
+            &RdfView::latest(LatestUse::Test),
             &pattern(
                 Some(triple.subject()),
                 Some(triple.predicate()),
@@ -397,9 +410,9 @@ fn a_triple_from_another_store_is_found_by_its_terms() {
         );
         assert_eq!(names(&found), BTreeSet::from([triple.to_string()]));
     }
-    for triple in second.triples(&RdfView::Latest) {
+    for triple in second.triples(&RdfView::latest(LatestUse::Test)) {
         assert_eq!(
-            first.contains(&RdfView::Latest, &triple),
+            first.contains(&RdfView::latest(LatestUse::Test), &triple),
             !extra.contains(&triple),
             "{triple}"
         );
@@ -441,7 +454,7 @@ fn a_saved_and_reloaded_store_answers_the_same() {
     for (back, how) in [(&from_bytes, "bytes"), (&from_chunks, "chunks")] {
         agrees(back, &held, how);
         let graph = back
-            .graph("http://ex.org/g1")
+            .graph_latest("http://ex.org/g1")
             .expect("the named graph is back");
         agrees(&graph, &named, how);
         // The reloaded store takes new triples over its known terms.

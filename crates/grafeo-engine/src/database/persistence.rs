@@ -443,7 +443,9 @@ fn push_index_on(held: &mut String, label: &str, property: &str) {
 #[cfg(feature = "triple-store")]
 fn collect_rdf_triples(store: &grafeo_core::graph::rdf::RdfStore) -> Vec<SnapshotTriple> {
     let mut triples: Vec<SnapshotTriple> = store
-        .triples(&grafeo_core::graph::rdf::RdfView::Latest)
+        .triples(&grafeo_core::graph::rdf::RdfView::latest(
+            grafeo_core::graph::rdf::LatestUse::Checkpoint,
+        ))
         .into_iter()
         .map(|t| SnapshotTriple {
             subject: t.subject().to_string(),
@@ -464,15 +466,19 @@ fn collect_rdf_triples(store: &grafeo_core::graph::rdf::RdfStore) -> Vec<Snapsho
 fn rdf_snapshot(
     store: &grafeo_core::graph::rdf::RdfStore,
 ) -> (Vec<SnapshotTriple>, Vec<RdfNamedGraphSnapshot>) {
-    let mut names = store.graph_names(&grafeo_core::graph::rdf::RdfView::Latest);
+    let mut names = store.graph_names(&grafeo_core::graph::rdf::RdfView::latest(
+        grafeo_core::graph::rdf::LatestUse::Checkpoint,
+    ));
     names.sort_unstable();
     let named = names
         .into_iter()
         .filter_map(|name| {
-            store.graph(&name).map(|graph| RdfNamedGraphSnapshot {
-                name,
-                triples: collect_rdf_triples(&graph),
-            })
+            store
+                .graph_latest(&name)
+                .map(|graph| RdfNamedGraphSnapshot {
+                    name,
+                    triples: collect_rdf_triples(&graph),
+                })
         })
         .collect();
     (collect_rdf_triples(store), named)
@@ -1543,7 +1549,9 @@ pub(super) mod row_groups {
             parts.rdf.clear();
             for name in parts
                 .rdf
-                .graph_names(&grafeo_core::graph::rdf::RdfView::Latest)
+                .graph_names(&grafeo_core::graph::rdf::RdfView::latest(
+                    grafeo_core::graph::rdf::LatestUse::Apply,
+                ))
             {
                 parts.rdf.drop_graph(&name);
             }

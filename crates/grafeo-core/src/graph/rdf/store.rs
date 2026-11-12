@@ -24,7 +24,7 @@ pub use apply::{Applied, ApplyMode, CommitChange};
 mod path_lookup_tests {
     use std::time::{Duration, Instant};
 
-    use super::super::overlay::RdfView;
+    use super::super::overlay::{LatestUse, RdfView};
     use super::super::path_budget::PathBudget;
     use super::*;
     use crate::execution::operators::OperatorError;
@@ -59,7 +59,7 @@ mod path_lookup_tests {
         budget.expire_after_polls(1);
         let mut visits = 0;
         let result = store.visit_matches_with_pending(
-            &RdfView::Latest,
+            &RdfView::latest(LatestUse::Test),
             &pattern,
             None,
             &mut budget,
@@ -100,7 +100,7 @@ mod path_lookup_tests {
             let mut visits = 0;
             store
                 .visit_matches_with_pending(
-                    &RdfView::Latest,
+                    &RdfView::latest(LatestUse::Test),
                     &pattern,
                     None,
                     &mut budget,
@@ -136,7 +136,7 @@ mod path_lookup_tests {
         let mut budget = PathBudget::new(4096, None);
         budget.expire_after_polls(1);
         let result = store.visit_matches_with_pending(
-            &RdfView::Latest,
+            &RdfView::latest(LatestUse::Test),
             &TriplePattern::with_predicate(Term::iri("p")),
             Some(tx),
             &mut budget,
@@ -176,7 +176,7 @@ mod path_lookup_tests {
                 object: None,
             };
             let result = store.visit_matches_with_pending(
-                &RdfView::Latest,
+                &RdfView::latest(LatestUse::Test),
                 &pattern,
                 None,
                 &mut budget,
@@ -204,7 +204,7 @@ mod path_lookup_tests {
         let mut empty_budget = PathBudget::new(0, None);
         assert!(matches!(
             store.visit_matches_with_pending(
-                &RdfView::Latest,
+                &RdfView::latest(LatestUse::Test),
                 &TriplePattern::any(),
                 Some(tx),
                 &mut empty_budget,
@@ -217,7 +217,7 @@ mod path_lookup_tests {
         let mut visits = 0;
         store
             .visit_matches_with_pending(
-                &RdfView::Latest,
+                &RdfView::latest(LatestUse::Test),
                 &TriplePattern::any(),
                 Some(tx),
                 &mut budget,
@@ -1375,7 +1375,7 @@ impl RdfStore {
     ) -> Result<(), crate::execution::operators::OperatorError> {
         use super::overlay::Partition;
 
-        let _apply = self.apply_guard.read();
+        let _apply = budget.read_guard(&self.apply_guard)?;
         let changes = view.changes();
         let Some(graph) = changes.as_ref().and_then(|c| c.graph(&self.key)) else {
             return self.visit_path_latest(pattern, budget, visit);
@@ -1545,7 +1545,7 @@ impl RdfStore {
     ) -> Result<(), crate::execution::operators::OperatorError> {
         use super::overlay::Partition;
 
-        let _apply = self.apply_guard.read();
+        let _apply = budget.read_guard(&self.apply_guard)?;
         let changes = view.changes();
         let graphs = budget.read(&self.named_graphs)?;
         // The named graphs a commit after the snapshot changed, by name: few,
@@ -1643,12 +1643,67 @@ impl RdfStore {
         })
     }
 
-    /// How many triples have `predicate`: exact, from the predicate index.
+    /// How many triples have `predicate` in the newest committed state:
+    /// exact, from the predicate index. A query counts at its view
+    /// ([`count_at`](Self::count_at)).
     #[must_use]
-    pub fn count_with_predicate(&self, predicate: &Term) -> usize {
+    pub fn count_with_predicate_latest(&self, predicate: &Term) -> usize {
         self.key_of(predicate).map_or(0, |key| {
             self.predicate_index.read().get(&key).map_or(0, Vec::len)
         })
+    }
+
+    /// How many triples of this graph match `pattern` at `view`: the index
+    /// count, corrected by the view's changes in this graph (O(changes)).
+    #[must_use]
+    pub fn count_at(&self, view: &super::overlay::RdfView, pattern: &TriplePattern) -> usize {
+        self.read_at(view, |store, changes| {
+            let counted = store.count_latest(pattern);
+            let Some(changes) = changes else {
+                return counted;
+            };
+            let held = store.triples.read();
+            let absent = changes
+                .absent
+                .iter()
+                .filter(|ids| held.get(*ids).is_some_and(|held| pattern.matches(&held.0)))
+                .count();
+            let present = changes
+                .present
+                .iter()
+                .filter(|triple| pattern.matches(triple) && !held.contains(triple.raw_ids()))
+                .count();
+            counted - absent + present
+        })
+    }
+
+    /// How many triples match `pattern` in the newest committed state: an
+    /// index list's length where one answers, a filtered scan otherwise.
+    fn count_latest(&self, pattern: &TriplePattern) -> usize {
+        let Some([subject, predicate, object]) = self.pattern_keys(pattern) else {
+            return 0;
+        };
+        let len = |triples: Option<&Vec<Arc<Triple>>>| triples.map_or(0, Vec::len);
+        match (subject, predicate, object) {
+            (Some(s), Some(p), Some(o)) => usize::from(self.triples.read().contains(&[s, p, o])),
+            (Some(s), Some(p), None) => len(self.sp_index.read().get(&(s, p))),
+            (Some(s), None, Some(o)) => len(self.os_index.read().get(&(o, s))),
+            (None, Some(p), Some(o)) => len(self.po_index.read().get(&(p, o))),
+            (Some(s), None, None) => len(self.subject_index.read().get(&s)),
+            (None, Some(p), None) => len(self.predicate_index.read().get(&p)),
+            (None, None, Some(o)) if self.config.index_objects => self
+                .object_index
+                .read()
+                .as_ref()
+                .map_or(0, |index| len(index.get(&o))),
+            (None, None, None) => self.triples.read().len(),
+            _ => self
+                .triples
+                .read()
+                .iter()
+                .filter(|held| pattern.matches(&held.0))
+                .count(),
+        }
     }
 
     /// Returns the triples with the given object that `view` sees.
@@ -1670,9 +1725,11 @@ impl RdfStore {
     /// The distinct terms at `position` (0 subject, 1 predicate, 2 object) of
     /// the triples `view` sees, or `None` when the view sees this graph as it
     /// is (the indexes then answer).
+    /// Called under the apply guard, so no commit applies between the check
+    /// and the read.
     fn terms_at(&self, view: &super::overlay::RdfView, position: usize) -> Option<Vec<Term>> {
         {
-            // Released before the read below, which takes it again.
+            // Released before the read below, which takes them again.
             let changes = view.changes()?;
             changes.graph(&self.key)?;
         }
@@ -1693,6 +1750,7 @@ impl RdfStore {
 
     /// Returns the distinct subjects `view` sees.
     pub fn subjects(&self, view: &super::overlay::RdfView) -> Vec<Term> {
+        let _apply = self.apply_guard.read();
         if let Some(terms) = self.terms_at(view, 0) {
             return terms;
         }
@@ -1705,6 +1763,7 @@ impl RdfStore {
 
     /// Returns the distinct predicates `view` sees.
     pub fn predicates(&self, view: &super::overlay::RdfView) -> Vec<Term> {
+        let _apply = self.apply_guard.read();
         if let Some(terms) = self.terms_at(view, 1) {
             return terms;
         }
@@ -1717,6 +1776,7 @@ impl RdfStore {
 
     /// Returns the distinct objects `view` sees.
     pub fn objects(&self, view: &super::overlay::RdfView) -> Vec<Term> {
+        let _apply = self.apply_guard.read();
         if let Some(terms) = self.terms_at(view, 2) {
             return terms;
         }
@@ -1833,14 +1893,36 @@ impl RdfStore {
         }
     }
 
-    /// Returns the Ring Index if it exists and is not stale.
+    /// The Ring Index of the newest committed state, if it exists and is
+    /// not stale: for checkpoints and memory accounting. A query takes it at
+    /// its view ([`ring_at`](Self::ring_at)).
     #[cfg(feature = "ring-index")]
     #[must_use]
-    pub fn ring(&self) -> Option<Arc<crate::index::ring::TripleRing>> {
+    pub fn ring_latest(&self) -> Option<Arc<crate::index::ring::TripleRing>> {
         if self.ring_stale.load(std::sync::atomic::Ordering::Relaxed) {
             return None;
         }
         self.ring.read().clone()
+    }
+
+    /// The Ring Index, only when `view` sees this graph as it is (no commit
+    /// after its snapshot changed it); `None` otherwise, and the caller reads
+    /// the triples. A ring is never changed, only dropped by a commit, so the
+    /// one taken here stays the view's.
+    #[cfg(feature = "ring-index")]
+    #[must_use]
+    pub fn ring_at(
+        &self,
+        view: &super::overlay::RdfView,
+    ) -> Option<Arc<crate::index::ring::TripleRing>> {
+        let _apply = self.apply_guard.read();
+        if view
+            .changes()
+            .is_some_and(|changes| changes.graph(&self.key).is_some())
+        {
+            return None;
+        }
+        self.ring_latest()
     }
 
     /// Builds or rebuilds the Ring Index from current triples.
@@ -2126,10 +2208,20 @@ impl RdfStore {
         }
     }
 
-    /// Returns a named graph by IRI, or `None` if it doesn't exist.
+    /// The partition of the named graph `name` in the newest committed
+    /// state, `None` if it does not exist: for applying commits and for the
+    /// serializers. A query takes it at its view
+    /// ([`graph_at`](Self::graph_at)).
     #[must_use]
-    pub fn graph(&self, name: &str) -> Option<Arc<RdfStore>> {
+    pub fn graph_latest(&self, name: &str) -> Option<Arc<RdfStore>> {
         self.named_graphs.read().get(name).cloned()
+    }
+
+    /// This graph read at `view`: what a reader that is handed one graph
+    /// (SHACL's data and shapes graphs) reads through.
+    #[must_use]
+    pub fn at<'a>(&'a self, view: &'a super::overlay::RdfView) -> GraphAt<'a> {
+        GraphAt { store: self, view }
     }
 
     /// Returns a named graph, creating it if it doesn't exist.
@@ -2194,7 +2286,7 @@ impl RdfStore {
             .as_ref()
             .and_then(|changes| changes.graph(&Some(Arc::from(name))));
         match changed.map(|graph| &graph.partition) {
-            None | Some(Partition::Current) => self.graph(name),
+            None | Some(Partition::Current) => self.graph_latest(name),
             Some(Partition::Retained(before)) => Some(Arc::clone(before)),
             Some(Partition::Absent) => None,
         }
@@ -2288,7 +2380,7 @@ impl RdfStore {
         let triples = match source {
             None => self.triples_latest(),
             Some(n) => self
-                .graph(n)
+                .graph_latest(n)
                 .map(|g| g.triples_latest())
                 .unwrap_or_default(),
         };
@@ -2339,7 +2431,7 @@ impl RdfStore {
         let triples = match source {
             None => self.triples_latest(),
             Some(n) => self
-                .graph(n)
+                .graph_latest(n)
                 .map(|g| g.triples_latest())
                 .unwrap_or_default(),
         };
@@ -2425,7 +2517,9 @@ impl RdfStore {
     pub fn remove_from(&self, graph: Option<&str>, triple: &Triple) -> bool {
         match graph {
             None => self.remove(triple),
-            Some(name) => self.graph(name).is_some_and(|store| store.remove(triple)),
+            Some(name) => self
+                .graph_latest(name)
+                .is_some_and(|store| store.remove(triple)),
         }
     }
 
@@ -2487,7 +2581,11 @@ impl RdfStore {
         transaction_id: Option<TransactionId>,
     ) -> Vec<(Option<String>, Arc<Triple>)> {
         let Some(transaction_id) = transaction_id else {
-            return self.find_in_graphs(&super::overlay::RdfView::Latest, pattern, graphs);
+            return self.find_in_graphs(
+                &super::overlay::RdfView::latest(super::overlay::LatestUse::Test),
+                pattern,
+                graphs,
+            );
         };
         let tx = Some(transaction_id);
         match graphs {
@@ -2654,7 +2752,10 @@ impl RdfStore {
         pattern: &TriplePattern,
         transaction_id: Option<TransactionId>,
     ) -> Vec<Arc<Triple>> {
-        let mut results = self.find(&super::overlay::RdfView::Latest, pattern);
+        let mut results = self.find(
+            &super::overlay::RdfView::latest(super::overlay::LatestUse::Test),
+            pattern,
+        );
 
         let Some(tx) = transaction_id else {
             return results;
@@ -2712,6 +2813,45 @@ impl RdfStore {
         !self
             .buffered_find(&pattern, Some(transaction_id))
             .is_empty()
+    }
+}
+
+/// One graph of a dataset read at one view (see [`RdfStore::at`]).
+#[derive(Debug, Clone, Copy)]
+pub struct GraphAt<'a> {
+    store: &'a RdfStore,
+    view: &'a super::overlay::RdfView,
+}
+
+impl GraphAt<'_> {
+    /// The triples matching `pattern` ([`RdfStore::find`]).
+    #[must_use]
+    pub fn find(&self, pattern: &TriplePattern) -> Vec<Arc<Triple>> {
+        self.store.find(self.view, pattern)
+    }
+
+    /// The triples with `subject` ([`RdfStore::triples_with_subject`]).
+    #[must_use]
+    pub fn triples_with_subject(&self, subject: &Term) -> Vec<Arc<Triple>> {
+        self.store.triples_with_subject(self.view, subject)
+    }
+
+    /// The triples with `predicate` ([`RdfStore::triples_with_predicate`]).
+    #[must_use]
+    pub fn triples_with_predicate(&self, predicate: &Term) -> Vec<Arc<Triple>> {
+        self.store.triples_with_predicate(self.view, predicate)
+    }
+
+    /// The distinct subjects ([`RdfStore::subjects`]).
+    #[must_use]
+    pub fn subjects(&self) -> Vec<Term> {
+        self.store.subjects(self.view)
+    }
+
+    /// The distinct objects ([`RdfStore::objects`]).
+    #[must_use]
+    pub fn objects(&self) -> Vec<Term> {
+        self.store.objects(self.view)
     }
 }
 
@@ -3137,7 +3277,7 @@ fn ntriples_term(text: &str) -> Result<Term, super::TermParseError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::graph::rdf::overlay::RdfView;
+    use crate::graph::rdf::overlay::{LatestUse, RdfView};
 
     fn sample_triples() -> Vec<Triple> {
         vec![
@@ -3190,7 +3330,7 @@ mod tests {
             .insert(Triple::new(iri("mia"), iri("visits"), iri("paris")));
         let mut visited = Vec::new();
         store
-            .for_each_triple(&RdfView::Latest, &mut |triple| {
+            .for_each_triple(&RdfView::latest(LatestUse::Test), &mut |triple| {
                 visited.push(triple.clone());
                 Ok(())
             })
@@ -3200,7 +3340,7 @@ mod tests {
         // The first error ends the walk.
         let mut seen = 0;
         let error = store
-            .for_each_triple(&RdfView::Latest, &mut |_| {
+            .for_each_triple(&RdfView::latest(LatestUse::Test), &mut |_| {
                 seen += 1;
                 if seen == 2 {
                     Err(grafeo_common::utils::error::Error::Internal(
@@ -3226,7 +3366,7 @@ mod tests {
         let store = RdfStore::new();
         store.load_ntriples(input.as_bytes()).unwrap();
         assert!(store.contains(
-            &RdfView::Latest,
+            &RdfView::latest(LatestUse::Test),
             &Triple::new(
                 Term::iri("http://example.org/Kraków"),
                 Term::iri("http://example.org/name"),
@@ -3234,7 +3374,7 @@ mod tests {
             )
         ));
         assert!(store.contains(
-            &RdfView::Latest,
+            &RdfView::latest(LatestUse::Test),
             &Triple::new(
                 Term::blank("b0"),
                 Term::iri("http://example.org/name"),
@@ -3394,21 +3534,21 @@ mod tests {
             store.graph_or_create(&format!("http://example.org/visits/{index}"));
         }
         assert_eq!(store.graph_count(), 600);
-        for name in store.graph_names(&RdfView::Latest) {
-            let graph = store.graph(&name).unwrap();
+        for name in store.graph_names(&RdfView::latest(LatestUse::Test)) {
+            let graph = store.graph_latest(&name).unwrap();
             assert_eq!(graph.index_allocation_bytes(), 0, "{name}");
         }
-        let trips = store.graph("http://example.org/trips/3").unwrap();
+        let trips = store.graph_latest("http://example.org/trips/3").unwrap();
         let visit = Triple::new(
             Term::iri("http://example.org/mia"),
             Term::iri("http://example.org/visits"),
             Term::iri("http://example.org/prague"),
         );
         trips.insert(visit.clone());
-        assert!(trips.contains(&RdfView::Latest, &visit));
+        assert!(trips.contains(&RdfView::latest(LatestUse::Test), &visit));
         assert_eq!(
             trips
-                .triples_with_subject(&RdfView::Latest, visit.subject())
+                .triples_with_subject(&RdfView::latest(LatestUse::Test), visit.subject())
                 .len(),
             1
         );
@@ -3450,7 +3590,7 @@ mod tests {
         assert_eq!(store.len(), 4);
 
         for triple in &triples {
-            assert!(store.contains(&RdfView::Latest, triple));
+            assert!(store.contains(&RdfView::latest(LatestUse::Test), triple));
         }
 
         // Inserting duplicate should return false
@@ -3469,7 +3609,7 @@ mod tests {
 
         assert!(store.remove(&triples[0]));
         assert_eq!(store.len(), 3);
-        assert!(!store.contains(&RdfView::Latest, &triples[0]));
+        assert!(!store.contains(&RdfView::latest(LatestUse::Test), &triples[0]));
 
         // Removing non-existent should return false
         assert!(!store.remove(&triples[0]));
@@ -3483,7 +3623,7 @@ mod tests {
         }
 
         let alix = Term::iri("http://example.org/alix");
-        let alice_triples = store.triples_with_subject(&RdfView::Latest, &alix);
+        let alice_triples = store.triples_with_subject(&RdfView::latest(LatestUse::Test), &alix);
 
         assert_eq!(alice_triples.len(), 3);
         for triple in &alice_triples {
@@ -3499,7 +3639,8 @@ mod tests {
         }
 
         let name_pred = Term::iri("http://xmlns.com/foaf/0.1/name");
-        let name_triples = store.triples_with_predicate(&RdfView::Latest, &name_pred);
+        let name_triples =
+            store.triples_with_predicate(&RdfView::latest(LatestUse::Test), &name_pred);
 
         assert_eq!(name_triples.len(), 2);
         for triple in &name_triples {
@@ -3515,7 +3656,7 @@ mod tests {
         }
 
         let gus = Term::iri("http://example.org/gus");
-        let bob_triples = store.triples_with_object(&RdfView::Latest, &gus);
+        let bob_triples = store.triples_with_object(&RdfView::latest(LatestUse::Test), &gus);
 
         assert_eq!(bob_triples.len(), 1);
         assert_eq!(bob_triples[0].object(), &gus);
@@ -3535,7 +3676,7 @@ mod tests {
             object: None,
         };
 
-        let results = store.find(&RdfView::Latest, &pattern);
+        let results = store.find(&RdfView::latest(LatestUse::Test), &pattern);
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].object(), &Term::iri("http://example.org/gus"));
     }
@@ -3676,7 +3817,7 @@ mod tests {
         // Commit produces exactly what the transaction saw.
         store.commit_transaction(tx);
         assert_eq!(store.len(), 1);
-        assert!(store.contains(&RdfView::Latest, &committed));
+        assert!(store.contains(&RdfView::latest(LatestUse::Test), &committed));
     }
 
     #[test]
@@ -3710,12 +3851,12 @@ mod tests {
         );
         assert!(
             store
-                .find_in_graphs(&RdfView::Latest, &everything, Some(&[]))
+                .find_in_graphs(&RdfView::latest(LatestUse::Test), &everything, Some(&[]))
                 .is_empty(),
             "other readers do not"
         );
         assert_eq!(store.rollback_transaction(tx), 1);
-        let graph = store.graph("http://example.org/g").unwrap();
+        let graph = store.graph_latest("http://example.org/g").unwrap();
         assert!(graph.is_empty());
         assert!(!graph.has_pending_ops(tx));
 
@@ -3723,7 +3864,7 @@ mod tests {
         let tx = TransactionId::new(2);
         graph.insert_in_transaction(tx, triple.clone());
         assert_eq!(store.commit_transaction(tx), 1);
-        assert!(graph.contains(&RdfView::Latest, &triple));
+        assert!(graph.contains(&RdfView::latest(LatestUse::Test), &triple));
         assert!(!graph.has_pending_ops(tx));
     }
 
@@ -3737,7 +3878,7 @@ mod tests {
         assert_eq!(store.graph_count(), 1);
 
         // Insert into named graph
-        let g1 = store.graph("http://example.org/g1").unwrap();
+        let g1 = store.graph_latest("http://example.org/g1").unwrap();
         g1.insert(Triple::new(
             Term::iri("http://example.org/s1"),
             Term::iri("http://example.org/p1"),
@@ -3750,7 +3891,7 @@ mod tests {
 
         // Query named graph
         let results = g1.find(
-            &RdfView::Latest,
+            &RdfView::latest(LatestUse::Test),
             &TriplePattern {
                 subject: None,
                 predicate: None,
@@ -3788,11 +3929,11 @@ mod tests {
         assert_eq!(store.len(), 1);
         assert_eq!(g1.len(), 1);
         assert_eq!(
-            store.triples(&RdfView::Latest)[0].object(),
+            store.triples(&RdfView::latest(LatestUse::Test))[0].object(),
             &Term::literal("default")
         );
         assert_eq!(
-            g1.triples(&RdfView::Latest)[0].object(),
+            g1.triples(&RdfView::latest(LatestUse::Test))[0].object(),
             &Term::literal("named")
         );
     }
@@ -3820,18 +3961,21 @@ mod tests {
         ));
 
         // Default only
-        let results = store.find_in_graphs(&RdfView::Latest, &pattern, None);
+        let results = store.find_in_graphs(&RdfView::latest(LatestUse::Test), &pattern, None);
         assert_eq!(results.len(), 1);
         assert!(results[0].0.is_none());
 
         // All named graphs (excludes default)
-        let results = store.find_in_graphs(&RdfView::Latest, &pattern, Some(&[]));
+        let results = store.find_in_graphs(&RdfView::latest(LatestUse::Test), &pattern, Some(&[]));
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].0.as_deref(), Some("http://example.org/g1"));
 
         // Specific named graph
-        let results =
-            store.find_in_graphs(&RdfView::Latest, &pattern, Some(&["http://example.org/g1"]));
+        let results = store.find_in_graphs(
+            &RdfView::latest(LatestUse::Test),
+            &pattern,
+            Some(&["http://example.org/g1"]),
+        );
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].0.as_deref(), Some("http://example.org/g1"));
     }
@@ -3860,10 +4004,10 @@ mod tests {
         // (graph, triple count) of the default graph, then of each named graph.
         let shape = |store: &RdfStore| {
             let mut named: Vec<(String, usize)> = store
-                .graph_names(&RdfView::Latest)
+                .graph_names(&RdfView::latest(LatestUse::Test))
                 .into_iter()
                 .map(|name| {
-                    let len = store.graph(&name).unwrap().len();
+                    let len = store.graph_latest(&name).unwrap().len();
                     (name, len)
                 })
                 .collect();
@@ -3969,10 +4113,10 @@ mod tests {
             store.add_graph(graph, graph);
         }
         assert_eq!(store.len(), 1);
-        assert_eq!(store.graph(paris).map(|graph| graph.len()), Some(1));
+        assert_eq!(store.graph_latest(paris).map(|graph| graph.len()), Some(1));
         let prague = Some("http://example.org/prague");
         store.move_graph(prague, prague);
-        assert!(store.graph("http://example.org/prague").is_none());
+        assert!(store.graph_latest("http://example.org/prague").is_none());
     }
 
     /// A triple applied to a named graph that does not exist creates it on
@@ -3988,7 +4132,7 @@ mod tests {
         let prague = Some("http://example.org/prague");
         assert!(!store.remove_from(prague, &triple));
         assert_eq!(
-            store.graph_names(&RdfView::Latest),
+            store.graph_names(&RdfView::latest(LatestUse::Test)),
             Vec::<String>::new(),
             "a remove creates no graph"
         );
@@ -4017,7 +4161,7 @@ mod tests {
             target: Some("http://example.org/copy".to_string()),
         }));
         assert_eq!(store.len(), 1); // default still has it
-        let copy = store.graph("http://example.org/copy").unwrap();
+        let copy = store.graph_latest("http://example.org/copy").unwrap();
         assert_eq!(copy.len(), 1);
 
         // Add named -> another named (union)
@@ -4035,8 +4179,8 @@ mod tests {
 
         // Move named -> named
         store.move_graph(Some("http://example.org/g2"), Some("http://example.org/g3"));
-        assert!(store.graph("http://example.org/g2").is_none());
-        let g3 = store.graph("http://example.org/g3").unwrap();
+        assert!(store.graph_latest("http://example.org/g2").is_none());
+        let g3 = store.graph_latest("http://example.org/g3").unwrap();
         assert_eq!(g3.len(), 2);
     }
 
@@ -4072,7 +4216,7 @@ mod tests {
         let applied = store.commit_transaction(tx2);
         assert_eq!(applied, 1);
         assert_eq!(store.len(), 3); // Triple removed
-        assert!(!store.contains(&RdfView::Latest, &triples[0]));
+        assert!(!store.contains(&RdfView::latest(LatestUse::Test), &triples[0]));
     }
 
     #[test]
@@ -4086,12 +4230,17 @@ mod tests {
 
         // All triples should be queryable
         for triple in &triples {
-            assert!(store.contains(&RdfView::Latest, triple));
+            assert!(store.contains(&RdfView::latest(LatestUse::Test), triple));
         }
 
         // Indexes should be populated correctly
         let alix = Term::iri("http://example.org/alix");
-        assert_eq!(store.triples_with_subject(&RdfView::Latest, &alix).len(), 3);
+        assert_eq!(
+            store
+                .triples_with_subject(&RdfView::latest(LatestUse::Test), &alix)
+                .len(),
+            3
+        );
     }
 
     #[test]
@@ -4130,7 +4279,7 @@ mod tests {
             predicate: Some(Term::iri("http://xmlns.com/foaf/0.1/name")),
             object: None,
         };
-        let results = store.find(&RdfView::Latest, &pattern);
+        let results = store.find(&RdfView::latest(LatestUse::Test), &pattern);
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].object(), &Term::literal("Alix"));
     }
@@ -4148,7 +4297,7 @@ mod tests {
             predicate: Some(Term::iri("http://xmlns.com/foaf/0.1/name")),
             object: Some(Term::literal("Alix")),
         };
-        let results = store.find(&RdfView::Latest, &pattern);
+        let results = store.find(&RdfView::latest(LatestUse::Test), &pattern);
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].subject(), &Term::iri("http://example.org/alix"));
     }
@@ -4166,7 +4315,7 @@ mod tests {
             predicate: None,
             object: Some(Term::iri("http://example.org/gus")),
         };
-        let results = store.find(&RdfView::Latest, &pattern);
+        let results = store.find(&RdfView::latest(LatestUse::Test), &pattern);
         assert_eq!(results.len(), 1);
         assert_eq!(
             results[0].predicate(),
@@ -4187,7 +4336,7 @@ mod tests {
             predicate: Some(Term::iri("http://xmlns.com/foaf/0.1/name")),
             object: Some(Term::literal("Alix")),
         };
-        let results = store.find(&RdfView::Latest, &pattern);
+        let results = store.find(&RdfView::latest(LatestUse::Test), &pattern);
         assert_eq!(results.len(), 1);
 
         // Non-existent triple
@@ -4196,7 +4345,7 @@ mod tests {
             predicate: Some(Term::iri("http://xmlns.com/foaf/0.1/name")),
             object: Some(Term::literal("NotAlix")),
         };
-        let results = store.find(&RdfView::Latest, &pattern);
+        let results = store.find(&RdfView::latest(LatestUse::Test), &pattern);
         assert_eq!(results.len(), 0);
     }
 
@@ -4217,7 +4366,7 @@ mod tests {
             predicate: Some(Term::iri("http://xmlns.com/foaf/0.1/name")),
             object: None,
         };
-        let results = store.find(&RdfView::Latest, &pattern);
+        let results = store.find(&RdfView::latest(LatestUse::Test), &pattern);
         assert_eq!(results.len(), 0);
 
         // PO lookup should only find gus's name
@@ -4226,7 +4375,7 @@ mod tests {
             predicate: Some(Term::iri("http://xmlns.com/foaf/0.1/name")),
             object: Some(Term::literal("Alix")),
         };
-        let results = store.find(&RdfView::Latest, &pattern);
+        let results = store.find(&RdfView::latest(LatestUse::Test), &pattern);
         assert_eq!(results.len(), 0);
     }
 
@@ -4242,7 +4391,7 @@ mod tests {
             predicate: Some(Term::iri("http://xmlns.com/foaf/0.1/knows")),
             object: None,
         };
-        let results = store.find(&RdfView::Latest, &pattern);
+        let results = store.find(&RdfView::latest(LatestUse::Test), &pattern);
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].object(), &Term::iri("http://example.org/gus"));
 
@@ -4251,7 +4400,7 @@ mod tests {
             predicate: Some(Term::iri("http://xmlns.com/foaf/0.1/name")),
             object: Some(Term::literal("Gus")),
         };
-        let results = store.find(&RdfView::Latest, &pattern);
+        let results = store.find(&RdfView::latest(LatestUse::Test), &pattern);
         assert_eq!(results.len(), 1);
     }
 
@@ -4272,7 +4421,7 @@ mod tests {
 
         // Old data should be gone
         assert!(!store.contains(
-            &RdfView::Latest,
+            &RdfView::latest(LatestUse::Test),
             &Triple::new(
                 Term::iri("http://example.org/old"),
                 Term::iri("http://example.org/p"),
@@ -4282,7 +4431,12 @@ mod tests {
 
         // All indexes should work (single-term)
         let alix = Term::iri("http://example.org/alix");
-        assert_eq!(store.triples_with_subject(&RdfView::Latest, &alix).len(), 3);
+        assert_eq!(
+            store
+                .triples_with_subject(&RdfView::latest(LatestUse::Test), &alix)
+                .len(),
+            3
+        );
 
         // Composite indexes should work
         let pattern = TriplePattern {
@@ -4290,7 +4444,12 @@ mod tests {
             predicate: Some(Term::iri("http://xmlns.com/foaf/0.1/name")),
             object: None,
         };
-        assert_eq!(store.find(&RdfView::Latest, &pattern).len(), 1);
+        assert_eq!(
+            store
+                .find(&RdfView::latest(LatestUse::Test), &pattern)
+                .len(),
+            1
+        );
 
         // Statistics should be computed
         assert_eq!(result.statistics.total_triples, 4);
@@ -4388,7 +4547,12 @@ mod tests {
             predicate: Some(Term::iri("http://xmlns.com/foaf/0.1/name")),
             object: Some(Term::literal("Gus")),
         };
-        assert_eq!(store.find(&RdfView::Latest, &pattern).len(), 1);
+        assert_eq!(
+            store
+                .find(&RdfView::latest(LatestUse::Test), &pattern)
+                .len(),
+            1
+        );
     }
 
     #[test]
@@ -4411,7 +4575,12 @@ mod tests {
 
         // Verify subject/predicate indexes are populated.
         let alix = Term::iri("http://example.org/alix");
-        assert_eq!(store.triples_with_subject(&RdfView::Latest, &alix).len(), 3);
+        assert_eq!(
+            store
+                .triples_with_subject(&RdfView::latest(LatestUse::Test), &alix)
+                .len(),
+            3
+        );
     }
 
     #[test]
@@ -4444,7 +4613,7 @@ mod tests {
             predicate: Some(Term::iri("http://xmlns.com/foaf/0.1/name")),
             object: None,
         };
-        let results = store2.find(&RdfView::Latest, &pattern);
+        let results = store2.find(&RdfView::latest(LatestUse::Test), &pattern);
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].object(), &Term::literal("Alix"));
 
@@ -4453,7 +4622,7 @@ mod tests {
             predicate: Some(Term::iri("http://xmlns.com/foaf/0.1/name")),
             object: None,
         };
-        let results = store2.find(&RdfView::Latest, &pattern);
+        let results = store2.find(&RdfView::latest(LatestUse::Test), &pattern);
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].object(), &Term::literal("Gus"));
     }
@@ -4499,7 +4668,12 @@ this is not valid ntriples
 
         // Verify indexes work
         let alix = Term::iri("http://example.org/alix");
-        assert_eq!(store.triples_with_subject(&RdfView::Latest, &alix).len(), 3);
+        assert_eq!(
+            store
+                .triples_with_subject(&RdfView::latest(LatestUse::Test), &alix)
+                .len(),
+            3
+        );
     }
 
     #[test]
@@ -4635,7 +4809,7 @@ this is not valid ntriples
     fn test_ring_built_during_bulk_load() {
         let store = RdfStore::new();
         assert!(
-            store.ring().is_none(),
+            store.ring_latest().is_none(),
             "ring should not exist before bulk load"
         );
 
@@ -4652,7 +4826,9 @@ this is not valid ntriples
             ),
         ]);
 
-        let ring = store.ring().expect("ring should exist after bulk load");
+        let ring = store
+            .ring_latest()
+            .expect("ring should exist after bulk load");
         assert_eq!(ring.len(), 2);
     }
 
@@ -4680,7 +4856,7 @@ this is not valid ntriples
         assert!(store.counted_bytes() > 2 * GRANT_STEP);
 
         store.rebuild_ring();
-        assert!(store.ring().is_none());
+        assert!(store.ring_latest().is_none());
         assert!(
             store.granted_bytes() < store.counted_bytes() + 2 * GRANT_STEP,
             "granted {} for {}",
@@ -4698,7 +4874,7 @@ this is not valid ntriples
             Term::iri("http://ex.org/p"),
             Term::iri("http://ex.org/b"),
         )]);
-        assert!(store.ring().is_some());
+        assert!(store.ring_latest().is_some());
 
         // Incremental insert marks ring stale
         store.insert(Triple::new(
@@ -4707,13 +4883,15 @@ this is not valid ntriples
             Term::iri("http://ex.org/d"),
         ));
         assert!(
-            store.ring().is_none(),
+            store.ring_latest().is_none(),
             "ring should be stale after incremental insert"
         );
 
         // Rebuild restores ring
         store.rebuild_ring();
-        let ring = store.ring().expect("ring should exist after rebuild");
+        let ring = store
+            .ring_latest()
+            .expect("ring should exist after rebuild");
         assert_eq!(ring.len(), 2);
     }
 
@@ -4741,7 +4919,7 @@ this is not valid ntriples
         let store = RdfStore::new();
         store.bulk_load(triples);
 
-        let ring = store.ring().expect("ring should exist");
+        let ring = store.ring_latest().expect("ring should exist");
 
         // Fully unbound: ring.count should match store.len
         let all_pattern = TriplePattern {
@@ -4794,7 +4972,7 @@ this is not valid ntriples
 
         // Verify composite indexes via find
         let sp_result = store.find(
-            &RdfView::Latest,
+            &RdfView::latest(LatestUse::Test),
             &TriplePattern {
                 subject: Some(Term::iri("http://ex.org/alix")),
                 predicate: Some(Term::iri("http://ex.org/name")),
@@ -4803,7 +4981,7 @@ this is not valid ntriples
         );
         assert_eq!(sp_result.len(), 1);
         let po_result = store.find(
-            &RdfView::Latest,
+            &RdfView::latest(LatestUse::Test),
             &TriplePattern {
                 subject: None,
                 predicate: Some(Term::iri("http://ex.org/name")),
@@ -4812,7 +4990,7 @@ this is not valid ntriples
         );
         assert_eq!(po_result.len(), 1);
         let os_result = store.find(
-            &RdfView::Latest,
+            &RdfView::latest(LatestUse::Test),
             &TriplePattern {
                 subject: Some(Term::iri("http://ex.org/alix")),
                 predicate: None,
@@ -4853,7 +5031,7 @@ this is not valid ntriples
         assert_eq!(
             store
                 .find(
-                    &RdfView::Latest,
+                    &RdfView::latest(LatestUse::Test),
                     &TriplePattern {
                         subject: Some(Term::iri("http://ex.org/a")),
                         predicate: Some(Term::iri("http://ex.org/p")),
@@ -4867,7 +5045,7 @@ this is not valid ntriples
         assert_eq!(
             store
                 .find(
-                    &RdfView::Latest,
+                    &RdfView::latest(LatestUse::Test),
                     &TriplePattern {
                         subject: Some(Term::iri("http://ex.org/a")),
                         predicate: Some(Term::iri("http://ex.org/p")),
@@ -4884,7 +5062,7 @@ this is not valid ntriples
         let store = RdfStore::new();
         assert!(store.create_graph("http://ex.org/g1"));
         assert!(!store.create_graph("http://ex.org/g1")); // already exists
-        let g = store.graph("http://ex.org/g1").unwrap();
+        let g = store.graph_latest("http://ex.org/g1").unwrap();
         g.insert(Triple::new(
             Term::iri("http://ex.org/a"),
             Term::iri("http://ex.org/b"),
@@ -4892,7 +5070,7 @@ this is not valid ntriples
         ));
         assert_eq!(g.len(), 1);
         assert!(store.drop_graph("http://ex.org/g1"));
-        assert!(store.graph("http://ex.org/g1").is_none());
+        assert!(store.graph_latest("http://ex.org/g1").is_none());
     }
 
     #[test]
@@ -4946,7 +5124,7 @@ this is not valid ntriples
             Term::literal("other"),
         ));
         let result = store.find(
-            &RdfView::Latest,
+            &RdfView::latest(LatestUse::Test),
             &TriplePattern {
                 subject: Some(Term::iri("http://ex.org/a")),
                 predicate: Some(Term::iri("http://ex.org/p")),
@@ -4981,7 +5159,10 @@ this is not valid ntriples
         );
 
         let ids_of = |terms: [&Term; 3]| terms.map(|t| store.dictionary().lookup(t).unwrap());
-        let stored = store.find(&RdfView::Latest, &TriplePattern::with_subject(alix.clone()));
+        let stored = store.find(
+            &RdfView::latest(LatestUse::Test),
+            &TriplePattern::with_subject(alix.clone()),
+        );
         assert_eq!(stored.len(), 2);
         for triple in &stored {
             assert_eq!(
@@ -4993,9 +5174,9 @@ this is not valid ntriples
                 ]))
             );
         }
-        let named = store.graph("http://example.org/g").unwrap();
+        let named = store.graph_latest("http://example.org/g").unwrap();
         assert!(Arc::ptr_eq(named.dictionary(), store.dictionary()));
-        let in_named = named.triples(&RdfView::Latest);
+        let in_named = named.triples(&RdfView::latest(LatestUse::Test));
         assert_eq!(in_named[0].ids(), Some(ids_of([&gus, &knows, &alix])));
         assert_eq!(
             store.dictionary().lookup(&age),

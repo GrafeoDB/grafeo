@@ -53,7 +53,7 @@ impl<'a> RdfGraphsAhead<'a> {
         self.changed
             .get(name)
             .copied()
-            .unwrap_or_else(|| !self.all_gone && self.store.graph(name).is_some())
+            .unwrap_or_else(|| !self.all_gone && self.store.graph_latest(name).is_some())
     }
 
     /// Whether `op` applies after those before it, as `RdfStore::apply_graph_op` would.
@@ -843,19 +843,10 @@ impl Session {
                 (StandaloneOp::CreateGraph { name }, Some(graph), Some(root)) => {
                     root.install_graph(name, Arc::clone(graph));
                 }
+                // Applied with the commit's RDF triples, in one apply that
+                // publishes them (`TransactionChanges::apply_rdf`).
                 #[cfg(feature = "triple-store")]
-                (op @ StandaloneOp::RdfGraph(_), _, _) => {
-                    // A repeat is no error: it was checked at its statement, and an
-                    // operation outside a transaction may have got there first.
-                    let mut unbuilt = Vec::new();
-                    crate::database::standalone::apply_rdf(
-                        op,
-                        &self.rdf_store,
-                        &Applying::Replay {
-                            unbuilt: &mut unbuilt,
-                        },
-                    )?;
-                }
+                (StandaloneOp::RdfGraph(_), _, _) => {}
                 (op, _, root) => {
                     apply(op, index, root.as_ref(), &self.catalog, &mut Applying::Live)?;
                 }

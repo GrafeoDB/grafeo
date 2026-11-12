@@ -5727,11 +5727,24 @@ impl Session {
                 )));
             }
 
-            // Apply the RDF triples, in recorded order: the store holds only
-            // committed triples, so readers see them from now on.
+            // Apply the RDF triples, in recorded order, and the RDF graph
+            // operations the transaction queued, in one apply that publishes
+            // what it changed at the commit epoch: the store holds only
+            // committed triples, readers that began after the commit see them
+            // from now on, and readers at an earlier snapshot read around them.
             #[cfg(feature = "triple-store")]
             if let Some(changes) = &changes
-                && let Err(error) = changes.apply_triples(&self.rdf_store)
+                && let Err(error) = changes.apply_rdf(
+                    &self.rdf_store,
+                    grafeo_core::graph::rdf::ApplyMode::Publish(commit_epoch),
+                    schema
+                        .iter()
+                        .filter_map(|queued| match &queued.op {
+                            grafeo_common::change::StandaloneOp::RdfGraph(op) => Some(op.clone()),
+                            _ => None,
+                        })
+                        .collect(),
+                )
             {
                 return Err(grafeo_common::utils::error::Error::Internal(format!(
                     "the commit of transaction {transaction_id:?} could not apply its RDF \
@@ -5776,6 +5789,8 @@ impl Session {
         self.schema_committed(&schema);
         published?;
         *self.last_commit_epoch.lock() = Some(commit_epoch);
+        #[cfg(feature = "triple-store")]
+        crate::transaction::prune_rdf_overlay(&self.rdf_store, &self.transaction_manager);
         let written = changes
             .as_ref()
             .map(|changes| changes.written_graphs())

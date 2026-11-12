@@ -22,6 +22,7 @@ use crate::transaction::RdfWriter;
 /// transaction wrote to but has not committed.
 pub(super) struct NamedGraphsOperator {
     store: Arc<RdfStore>,
+    view: RdfView,
     writer: Option<RdfWriter>,
     dataset: Option<DatasetRestriction>,
     terms: Arc<QueryTermIds>,
@@ -34,13 +35,14 @@ pub(super) struct NamedGraphsOperator {
 /// committed, an emptied one too, as its commit creates them.
 pub(super) fn named_graph_names(
     store: &RdfStore,
+    view: &RdfView,
     writer: Option<&RdfWriter>,
     dataset: Option<&DatasetRestriction>,
 ) -> Vec<String> {
     let mut names = match dataset.and_then(DatasetRestriction::listed_named_graphs) {
         Some(listed) => listed.to_vec(),
         None => {
-            let mut names = store.graph_names(&RdfView::Latest);
+            let mut names = store.graph_names(view);
             if let Some(writer) = writer {
                 names.extend(writer.graphs_inserted_into());
             }
@@ -189,12 +191,14 @@ fn in_the_graph_of_an_expression(
 impl NamedGraphsOperator {
     pub(super) fn new(
         store: Arc<RdfStore>,
+        view: RdfView,
         writer: Option<RdfWriter>,
         dataset: Option<DatasetRestriction>,
         terms: Arc<QueryTermIds>,
     ) -> Self {
         Self {
             store,
+            view,
             writer,
             dataset,
             terms,
@@ -209,7 +213,12 @@ impl Operator for NamedGraphsOperator {
             return Ok(None);
         }
         self.done = true;
-        let names = named_graph_names(&self.store, self.writer.as_ref(), self.dataset.as_ref());
+        let names = named_graph_names(
+            &self.store,
+            &self.view,
+            self.writer.as_ref(),
+            self.dataset.as_ref(),
+        );
         if names.is_empty() {
             return Ok(None);
         }

@@ -654,6 +654,17 @@ fn log(
     change: &StandaloneChange,
     manager: &TransactionManager,
 ) -> Result<()> {
+    log_at(wal, change, manager, manager.current_epoch())
+}
+
+/// [`log`] at `epoch`: for a change that commits at an epoch of its own.
+#[cfg(feature = "wal")]
+fn log_at(
+    wal: &grafeo_storage::wal::Wal,
+    change: &StandaloneChange,
+    manager: &TransactionManager,
+    epoch: EpochId,
+) -> Result<()> {
     use grafeo_common::storage::log_record::Origin;
     use grafeo_common::types::TransactionId;
     use grafeo_storage::wal::GroupError;
@@ -663,7 +674,7 @@ fn log(
     let mut group = wal
         .begin_group(TransactionId::SYSTEM)
         .map_err(commit_error)?;
-    write_standalone(&mut group, change, manager.current_epoch(), Origin::Schema)?;
+    write_standalone(&mut group, change, epoch, Origin::Schema)?;
     match group.finish() {
         Ok(_) => Ok(()),
         Err(error @ GroupError::OutcomeUnknown(_)) => {
@@ -790,14 +801,36 @@ pub(crate) fn commit_rdf(
     rdf: &grafeo_core::graph::rdf::RdfStore,
     manager: &TransactionManager,
 ) -> Result<()> {
+    // Commits are held, so no commit is between the published epoch and
+    // this one's completion: the next epoch is free. It is the operation's
+    // own, above every reader's snapshot, so a reader before it still reads
+    // the graphs it changes as they were.
+    let epoch = EpochId::new(manager.current_epoch().as_u64() + 1);
     let op = StandaloneOp::RdfGraph(op);
     #[cfg(feature = "wal")]
     if let Some(wal) = wal {
         let mut change = StandaloneChange::new();
         change.push(op.clone());
-        log(wal, &change, manager)?;
+        log_at(wal, &change, manager, epoch)?;
     }
-    if let Err(error) = apply_rdf(&op, rdf, &Applying::Live) {
+    let StandaloneOp::RdfGraph(graph_op) = &op else {
+        unreachable!("made an RDF graph operation above")
+    };
+    let applied = rdf.apply_commit(
+        grafeo_core::graph::rdf::ApplyMode::Publish(epoch),
+        vec![grafeo_core::graph::rdf::CommitChange::Graph(
+            graph_op.clone(),
+        )],
+    );
+    manager.sync_epoch(epoch);
+    crate::transaction::prune_rdf_overlay(rdf, manager);
+    if applied.changed.first() == Some(&false) {
+        let error = match graph_op {
+            grafeo_common::change::RdfGraphOp::Create { .. } => {
+                not_applied(&op, "the graph exists")
+            }
+            _ => not_applied(&op, "the graph does not exist"),
+        };
         manager.poison(&format!("a logged change did not apply: {error}"));
         return Err(error);
     }

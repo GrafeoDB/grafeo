@@ -19,7 +19,7 @@
 
 #![cfg(feature = "triple-store")]
 
-use grafeo_core::graph::rdf::RdfView;
+use grafeo_core::graph::rdf::{LatestUse, RdfView};
 use std::collections::{BTreeSet, HashSet};
 
 use grafeo_core::graph::rdf::{
@@ -199,8 +199,8 @@ fn names(triples: Vec<std::sync::Arc<Triple>>) -> BTreeSet<String> {
 fn same_lookups(batched: &RdfStore, single: &RdfStore, triples: &[Triple]) {
     assert_eq!(batched.len(), single.len());
     assert_eq!(
-        names(batched.triples(&RdfView::Latest)),
-        names(single.triples(&RdfView::Latest))
+        names(batched.triples(&RdfView::latest(LatestUse::Test))),
+        names(single.triples(&RdfView::latest(LatestUse::Test)))
     );
     let mut subjects = HashSet::new();
     let mut predicates = HashSet::new();
@@ -218,22 +218,22 @@ fn same_lookups(batched: &RdfStore, single: &RdfStore, triples: &[Triple]) {
     }
     for s in &subjects {
         assert_eq!(
-            names(batched.triples_with_subject(&RdfView::Latest, s)),
-            names(single.triples_with_subject(&RdfView::Latest, s)),
+            names(batched.triples_with_subject(&RdfView::latest(LatestUse::Test), s)),
+            names(single.triples_with_subject(&RdfView::latest(LatestUse::Test), s)),
             "{s}"
         );
     }
     for p in &predicates {
         assert_eq!(
-            names(batched.triples_with_predicate(&RdfView::Latest, p)),
-            names(single.triples_with_predicate(&RdfView::Latest, p)),
+            names(batched.triples_with_predicate(&RdfView::latest(LatestUse::Test), p)),
+            names(single.triples_with_predicate(&RdfView::latest(LatestUse::Test), p)),
             "{p}"
         );
     }
     for o in &objects {
         assert_eq!(
-            names(batched.triples_with_object(&RdfView::Latest, o)),
-            names(single.triples_with_object(&RdfView::Latest, o)),
+            names(batched.triples_with_object(&RdfView::latest(LatestUse::Test), o)),
+            names(single.triples_with_object(&RdfView::latest(LatestUse::Test), o)),
             "{o}"
         );
     }
@@ -243,11 +243,11 @@ fn same_lookups(batched: &RdfStore, single: &RdfStore, triples: &[Triple]) {
             predicate,
             object,
         };
-        let found = names(batched.find(&RdfView::Latest, &pattern));
+        let found = names(batched.find(&RdfView::latest(LatestUse::Test), &pattern));
         assert!(!found.is_empty(), "{pattern:?}");
         assert_eq!(
             found,
-            names(single.find(&RdfView::Latest, &pattern)),
+            names(single.find(&RdfView::latest(LatestUse::Test), &pattern)),
             "{pattern:?}"
         );
     }

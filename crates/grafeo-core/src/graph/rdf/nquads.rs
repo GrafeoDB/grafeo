@@ -24,7 +24,7 @@ pub fn write_nquads<W: Write>(writer: &mut W, store: &RdfStore) -> io::Result<()
 
     // Named graph triples.
     for name in store.graph_names_latest() {
-        if let Some(graph) = store.graph(&name) {
+        if let Some(graph) = store.graph_latest(&name) {
             for triple in graph.triples_latest() {
                 write_nquad_line(writer, &triple, Some(&name))?;
             }

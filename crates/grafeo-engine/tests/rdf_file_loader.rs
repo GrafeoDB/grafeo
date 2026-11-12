@@ -475,7 +475,9 @@ fn a_load_without_triples_creates_its_named_graph() {
     );
     let mut names = db
         .rdf_store()
-        .graph_names(&grafeo_core::graph::rdf::RdfView::Latest);
+        .graph_names(&grafeo_core::graph::rdf::RdfView::latest(
+            grafeo_core::graph::rdf::LatestUse::Test,
+        ));
     names.sort();
     assert_eq!(
         names,
@@ -497,7 +499,9 @@ fn a_load_without_triples_creates_its_named_graph() {
     assert_eq!(db.load_rdf_text("", RdfFormat::NTriples, None).unwrap(), 0);
     assert_eq!(
         db.rdf_store()
-            .graph_names(&grafeo_core::graph::rdf::RdfView::Latest)
+            .graph_names(&grafeo_core::graph::rdf::RdfView::latest(
+                grafeo_core::graph::rdf::LatestUse::Test
+            ))
             .len(),
         3
     );
@@ -520,7 +524,9 @@ fn a_persistent_database_keeps_the_graph_an_empty_load_creates() {
     let db = GrafeoDB::open(&path).unwrap();
     assert_eq!(
         db.rdf_store()
-            .graph_names(&grafeo_core::graph::rdf::RdfView::Latest),
+            .graph_names(&grafeo_core::graph::rdf::RdfView::latest(
+                grafeo_core::graph::rdf::LatestUse::Test
+            )),
         [PEOPLE_GRAPH]
     );
     db.close().unwrap();
@@ -543,7 +549,9 @@ fn an_empty_graph_name_is_refused() {
     assert_eq!(db.rdf_store().len(), 0);
     assert_eq!(
         db.rdf_store()
-            .graph_names(&grafeo_core::graph::rdf::RdfView::Latest),
+            .graph_names(&grafeo_core::graph::rdf::RdfView::latest(
+                grafeo_core::graph::rdf::LatestUse::Test
+            )),
         Vec::<String>::new()
     );
 }
@@ -665,7 +673,9 @@ mod crash {
         );
         let mut names = db
             .rdf_store()
-            .graph_names(&grafeo_core::graph::rdf::RdfView::Latest);
+            .graph_names(&grafeo_core::graph::rdf::RdfView::latest(
+                grafeo_core::graph::rdf::LatestUse::Test,
+            ));
         names.sort();
         assert_eq!(names, [EMPTY_GRAPH, super::PEOPLE_GRAPH]);
         db.close().unwrap();

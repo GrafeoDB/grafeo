@@ -133,7 +133,7 @@ impl CheckpointSources {
         }
 
         #[cfg(feature = "ring-index")]
-        if self.rdf_store.ring().is_some() {
+        if self.rdf_store.ring_latest().is_some() {
             sections.push(Box::new(grafeo_core::index::ring::RdfRingSection::new(
                 Arc::clone(&self.rdf_store),
             )));
@@ -1088,7 +1088,7 @@ mod tests {
         .unwrap();
         assert_eq!(rdf_store.len(), 2, "the triples are loaded");
         assert_eq!(
-            rdf_store.ring().map(|ring| ring.len()),
+            rdf_store.ring_latest().map(|ring| ring.len()),
             Some(2),
             "the ring is loaded from its section"
         );
@@ -1178,7 +1178,7 @@ mod tests {
         .expect("the load succeeds");
         assert_eq!(rdf_store.len(), 2, "the triples are loaded");
         let ring = rdf_store
-            .ring()
+            .ring_latest()
             .expect("the ring is built from the triples");
         assert_eq!(ring.len(), 2);
         let knows = TriplePattern {
@@ -1232,7 +1232,7 @@ mod tests {
         )
         .expect("the load succeeds");
         let ring = rdf_store
-            .ring()
+            .ring_latest()
             .expect("the ring is built from the triples");
         let lives_in = TriplePattern {
             subject: None,
@@ -1284,8 +1284,10 @@ mod tests {
             &rdf_store,
         )
         .expect("the load succeeds");
-        let ring = rdf_store.ring().expect("a ring");
-        let loaded = rdf_store.triples(&grafeo_core::graph::rdf::RdfView::Latest);
+        let ring = rdf_store.ring_latest().expect("a ring");
+        let loaded = rdf_store.triples(&grafeo_core::graph::rdf::RdfView::latest(
+            grafeo_core::graph::rdf::LatestUse::Test,
+        ));
         assert_eq!(ring.len(), loaded.len(), "one ring entry per loaded triple");
         for triple in &loaded {
             let pattern = TriplePattern {
@@ -1437,7 +1439,7 @@ mod tests {
         assert_eq!(db.rdf_store().len(), 2, "the triples are loaded");
         let ring = db
             .rdf_store()
-            .ring()
+            .ring_latest()
             .expect("the ring is built from the triples");
         let lives_in = TriplePattern {
             subject: None,
@@ -1660,7 +1662,7 @@ mod tests {
         let copy = db.to_memory().unwrap();
         assert_eq!(copy.rdf_store().len(), 1);
         assert_eq!(
-            copy.rdf_store().ring().map(|ring| ring.len()),
+            copy.rdf_store().ring_latest().map(|ring| ring.len()),
             Some(1),
             "the copy has the ring"
         );
@@ -1707,7 +1709,7 @@ mod tests {
         .expect("the load succeeds");
         assert_eq!(rdf_store.len(), 2, "the triples are loaded");
         let ring = rdf_store
-            .ring()
+            .ring_latest()
             .expect("the ring is built from the triples");
         assert_eq!(ring.len(), 2);
     }

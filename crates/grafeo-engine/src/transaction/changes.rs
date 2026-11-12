@@ -218,7 +218,7 @@ impl TransactionChanges {
     ///
     /// When the overlay is pruned past the snapshot, which the transaction's
     /// pin of it prevents (a broken invariant).
-    #[cfg(feature = "triple-store")]
+    #[cfg(any(rdf_language, all(test, feature = "triple-store")))]
     pub(crate) fn rdf_view(
         &self,
         store: &grafeo_core::graph::rdf::RdfStore,

@@ -32,21 +32,23 @@ pub type TripleIds = [u64; 3];
 pub type GraphKey = Option<Arc<str>>;
 
 /// One change a commit made, in the order it made them.
+///
+/// A triple change names no graph: it is in the graph of the last
+/// [`In`](Self::In) before it, or the default graph when there is none, so
+/// a run of changes in one graph names it once.
 #[derive(Debug, Clone)]
 pub enum OverlayChange {
-    /// `triple` (with its `ids`) was inserted into `graph`.
+    /// The triple changes that follow, up to the next `In`, are in `graph`.
+    In(GraphKey),
+    /// `triple` (with its `ids`) was inserted.
     Insert {
-        /// The graph.
-        graph: GraphKey,
         /// The triple's term ids.
         ids: TripleIds,
         /// The triple.
         triple: Arc<Triple>,
     },
-    /// `triple` was deleted from `graph`.
+    /// `triple` was deleted.
     Delete {
-        /// The graph.
-        graph: GraphKey,
         /// The triple's term ids.
         ids: TripleIds,
         /// The triple.
@@ -269,9 +271,12 @@ impl SnapshotChanges {
     /// Adds the changes of `entry`, a commit after the snapshot and after
     /// every entry added so far.
     fn add(&mut self, entry: &OverlayEntry) {
+        static DEFAULT: GraphKey = None;
+        let mut graph = &DEFAULT;
         for change in &entry.changes {
             match change {
-                OverlayChange::Insert { graph, ids, .. } => {
+                OverlayChange::In(next) => graph = next,
+                OverlayChange::Insert { ids, .. } => {
                     if self.first_change(graph, *ids) {
                         self.graphs
                             .entry(graph.clone())
@@ -280,7 +285,7 @@ impl SnapshotChanges {
                             .insert(*ids);
                     }
                 }
-                OverlayChange::Delete { graph, ids, triple } => {
+                OverlayChange::Delete { ids, triple } => {
                     if self.first_change(graph, *ids) {
                         self.graphs
                             .entry(graph.clone())
@@ -289,11 +294,14 @@ impl SnapshotChanges {
                             .push(Arc::clone(triple));
                     }
                 }
-                OverlayChange::Graph { graph, change } => {
-                    if !self.swapped.insert(graph.clone()) {
+                OverlayChange::Graph {
+                    graph: swapped,
+                    change,
+                } => {
+                    if !self.swapped.insert(swapped.clone()) {
                         continue;
                     }
-                    self.graphs.entry(graph.clone()).or_default().partition = match change {
+                    self.graphs.entry(swapped.clone()).or_default().partition = match change {
                         // Created after the snapshot: it did not exist then.
                         GraphChange::Created => Partition::Absent,
                         GraphChange::Dropped { before } | GraphChange::Cleared { before } => {
@@ -510,20 +518,26 @@ mod tests {
         ))
     }
 
-    fn insert(graph: Option<&str>, ids: TripleIds, name: &str) -> OverlayChange {
-        OverlayChange::Insert {
-            graph: graph.map(Arc::from),
-            ids,
-            triple: triple(name),
-        }
+    /// An insert into `graph`, after the `In` that names it.
+    fn insert(graph: Option<&str>, ids: TripleIds, name: &str) -> Vec<OverlayChange> {
+        vec![
+            OverlayChange::In(graph.map(Arc::from)),
+            OverlayChange::Insert {
+                ids,
+                triple: triple(name),
+            },
+        ]
     }
 
-    fn delete(graph: Option<&str>, ids: TripleIds, name: &str) -> OverlayChange {
-        OverlayChange::Delete {
-            graph: graph.map(Arc::from),
-            ids,
-            triple: triple(name),
-        }
+    /// A delete from `graph`, after the `In` that names it.
+    fn delete(graph: Option<&str>, ids: TripleIds, name: &str) -> Vec<OverlayChange> {
+        vec![
+            OverlayChange::In(graph.map(Arc::from)),
+            OverlayChange::Delete {
+                ids,
+                triple: triple(name),
+            },
+        ]
     }
 
     fn overlay(entries: Vec<(u64, Vec<OverlayChange>)>) -> Arc<RdfOverlay> {
@@ -536,7 +550,7 @@ mod tests {
 
     #[test]
     fn a_snapshot_no_commit_followed_needs_no_changes() {
-        let overlay = overlay(vec![(3, vec![insert(None, [1, 2, 3], "Alix")])]);
+        let overlay = overlay(vec![(3, insert(None, [1, 2, 3], "Alix"))]);
         assert!(RdfView::at(&overlay, EpochId::new(3)).changes().is_none());
         assert!(RdfView::at(&overlay, EpochId::new(19)).changes().is_none());
         assert!(RdfView::latest(LatestUse::Test).changes().is_none());
@@ -549,17 +563,19 @@ mod tests {
         let overlay = overlay(vec![
             (
                 3,
-                vec![
+                [
                     delete(None, [7, 2, 7], "Gus"),
                     insert(None, [1, 2, 1], "Alix"),
-                ],
+                ]
+                .concat(),
             ),
             (
                 4,
-                vec![
+                [
                     insert(None, [7, 2, 7], "Gus"),
                     delete(None, [1, 2, 1], "Alix"),
-                ],
+                ]
+                .concat(),
             ),
         ]);
         let view = RdfView::at(&overlay, EpochId::new(2));
@@ -585,18 +601,19 @@ mod tests {
     fn a_swapped_graph_is_read_from_its_retained_partition() {
         let before = Arc::new(RdfStore::new());
         let overlay = overlay(vec![
-            (3, vec![insert(Some("g"), [1, 2, 1], "Alix")]),
+            (3, insert(Some("g"), [1, 2, 1], "Alix")),
             (
                 4,
-                vec![
-                    OverlayChange::Graph {
+                [
+                    vec![OverlayChange::Graph {
                         graph: Some(Arc::from("g")),
                         change: GraphChange::Cleared {
                             before: Arc::clone(&before),
                         },
-                    },
+                    }],
                     insert(Some("g"), [7, 2, 7], "Gus"),
-                ],
+                ]
+                .concat(),
             ),
             (
                 5,
@@ -622,11 +639,44 @@ mod tests {
         assert!(matches!(h.partition, Partition::Absent), "created after 2");
     }
 
+    /// A triple change is in the graph of the last `In` before it, and in the
+    /// default graph before the first.
+    #[test]
+    fn a_triple_change_is_in_the_graph_of_the_last_in() {
+        let overlay = overlay(vec![(
+            3,
+            vec![
+                OverlayChange::Insert {
+                    ids: [1, 2, 1],
+                    triple: triple("Alix"),
+                },
+                OverlayChange::In(Some(Arc::from("g"))),
+                OverlayChange::Insert {
+                    ids: [7, 2, 7],
+                    triple: triple("Gus"),
+                },
+                OverlayChange::In(None),
+                OverlayChange::Delete {
+                    ids: [8, 2, 8],
+                    triple: triple("Vincent"),
+                },
+            ],
+        )]);
+        let view = RdfView::at(&overlay, EpochId::new(2));
+        let changes = view.changes().unwrap();
+        let default = changes.graph(&None).unwrap();
+        assert!(default.absent.contains(&[1, 2, 1]) && !default.absent.contains(&[7, 2, 7]));
+        assert_eq!(default.present.len(), 1, "Vincent, after In(None)");
+        let g = changes.graph(&Some(Arc::from("g"))).unwrap();
+        assert!(g.absent.contains(&[7, 2, 7]) && g.absent.len() == 1);
+        assert_eq!(g.present, Vec::new());
+    }
+
     /// The fast path builds nothing: a snapshot no commit followed reads
     /// the store as it is.
     #[test]
     fn the_fast_path_builds_no_changes() {
-        let overlay = overlay(vec![(3, vec![insert(None, [1, 2, 1], "Alix")])]);
+        let overlay = overlay(vec![(3, insert(None, [1, 2, 1], "Alix"))]);
         let RdfView(ViewKind::Snapshot(snapshot)) = RdfView::at(&overlay, EpochId::new(3)) else {
             unreachable!()
         };
@@ -639,7 +689,7 @@ mod tests {
     /// and a first change already recorded is never replaced.
     #[test]
     fn later_commits_extend_the_changes() {
-        let overlay = overlay(vec![(3, vec![insert(None, [1, 2, 1], "Alix")])]);
+        let overlay = overlay(vec![(3, insert(None, [1, 2, 1], "Alix"))]);
         let view = RdfView::at(&overlay, EpochId::new(2));
         {
             let changes = view.changes().unwrap();
@@ -651,10 +701,11 @@ mod tests {
         // later delete is past her first change after 2.
         overlay.publish(OverlayEntry::new(
             EpochId::new(4),
-            vec![
+            [
                 delete(None, [7, 2, 7], "Gus"),
                 delete(None, [1, 2, 1], "Alix"),
-            ],
+            ]
+            .concat(),
         ));
         let changes = view.changes().unwrap();
         let graph = changes.graph(&None).unwrap();
@@ -685,8 +736,8 @@ mod tests {
                     },
                 }],
             ),
-            (4, vec![insert(Some("g"), [1, 2, 1], "Alix")]),
-            (5, vec![delete(Some("g"), [1, 2, 1], "Alix")]),
+            (4, insert(Some("g"), [1, 2, 1], "Alix")),
+            (5, delete(Some("g"), [1, 2, 1], "Alix")),
         ]);
         let view = RdfView::at(&overlay, EpochId::new(2));
         let changes = view.changes().unwrap();
@@ -698,9 +749,9 @@ mod tests {
     #[test]
     fn pruning_keeps_the_entries_a_reader_may_need() {
         let overlay = overlay(vec![
-            (3, vec![insert(None, [1, 2, 1], "Alix")]),
-            (4, vec![insert(None, [7, 2, 7], "Gus")]),
-            (5, vec![insert(None, [8, 2, 8], "Vincent")]),
+            (3, insert(None, [1, 2, 1], "Alix")),
+            (4, insert(None, [7, 2, 7], "Gus")),
+            (5, insert(None, [8, 2, 8], "Vincent")),
         ]);
         overlay.prune_below(EpochId::new(3));
         assert_eq!(overlay.len(), 2);

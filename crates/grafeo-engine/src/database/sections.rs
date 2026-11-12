@@ -1027,7 +1027,7 @@ mod tests {
             )
             .unwrap();
             #[cfg(feature = "ring-index")]
-            db.rdf_store().rebuild_ring();
+            db.rdf_store.rebuild_ring();
         }
         db.execute("INSERT (:Doc {emb: vector([3.0, 19.0]), body: 'Prague'})")
             .unwrap();
@@ -1101,7 +1101,7 @@ mod tests {
              <http://example.org/lives_in> <http://example.org/berlin> }",
         )
         .unwrap();
-        db.rdf_store().rebuild_ring();
+        db.rdf_store.rebuild_ring();
         let image = image_of(&db);
         assert!(
             image.section_types().contains(&SectionType::RdfRing),
@@ -1135,7 +1135,7 @@ mod tests {
              <http://example.org/lives_in> <http://example.org/berlin> }",
         )
         .unwrap();
-        db.rdf_store().rebuild_ring();
+        db.rdf_store.rebuild_ring();
         db
     }
 
@@ -1301,9 +1301,9 @@ mod tests {
                 Term::lang_literal("gezellig", "nl "),
             ),
         ] {
-            db.rdf_store().insert(triple);
+            db.rdf_store.insert(triple);
         }
-        db.rdf_store().rebuild_ring();
+        db.rdf_store.rebuild_ring();
         let image = image_of(&db);
 
         let rdf_store = Arc::new(RdfStore::new());
@@ -1407,7 +1407,7 @@ mod tests {
              <http://example.org/lives_in> <http://example.org/amsterdam> }",
         )
         .unwrap();
-        db.rdf_store().rebuild_ring();
+        db.rdf_store.rebuild_ring();
         db.close().unwrap();
         drop(db);
 
@@ -1467,9 +1467,9 @@ mod tests {
         drop(fm);
 
         let db = GrafeoDB::open(&path).expect("the open succeeds");
-        assert_eq!(db.rdf_store().len(), 2, "the triples are loaded");
+        assert_eq!(db.rdf_store.len(), 2, "the triples are loaded");
         let ring = db
-            .rdf_store()
+            .rdf_store
             .ring_latest()
             .expect("the ring is built from the triples");
         let lives_in = TriplePattern {
@@ -1688,12 +1688,12 @@ mod tests {
              <http://example.org/prague> }",
         )
         .unwrap();
-        db.rdf_store().rebuild_ring();
+        db.rdf_store.rebuild_ring();
 
         let copy = db.to_memory().unwrap();
-        assert_eq!(copy.rdf_store().len(), 1);
+        assert_eq!(copy.rdf_store.len(), 1);
         assert_eq!(
-            copy.rdf_store().ring_latest().map(|ring| ring.len()),
+            copy.rdf_store.ring_latest().map(|ring| ring.len()),
             Some(1),
             "the copy has the ring"
         );
@@ -1961,7 +1961,7 @@ mod tests {
             )
             .unwrap();
             #[cfg(feature = "ring-index")]
-            db.rdf_store().rebuild_ring();
+            db.rdf_store.rebuild_ring();
         }
         db
     }

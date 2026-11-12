@@ -124,7 +124,13 @@ impl GrafeoDB {
 
     /// Returns the RDF store.
     ///
-    /// This provides direct access to the RDF store for triple operations.
+    /// Writes through it bypass transactions, the log, change data capture
+    /// and the snapshots readers hold: a query that runs meanwhile can see
+    /// half of one. Reads through it read the newest state, not a snapshot.
+    #[deprecated(
+        since = "0.6.3",
+        note = "writes through the RDF store bypass transactions, snapshots and the log; write with SPARQL updates in a session or transaction, or `batch_insert_rdf`; read with SPARQL in a session. Removed in 0.7.0"
+    )]
     #[must_use]
     pub fn rdf_store(&self) -> &Arc<RdfStore> {
         &self.rdf_store

@@ -25,8 +25,7 @@ use grafeo_common::change::StandaloneOp;
 use grafeo_common::storage::catalog_record::{
     CatalogKey, CatalogRecord, IndexKeyRecord, IndexKindRecord, IndexNameRecord, IndexRecord,
 };
-#[cfg(feature = "wal")]
-#[cfg(query_language)]
+#[cfg(any(feature = "wal", feature = "triple-store"))]
 use grafeo_common::types::EpochId;
 use grafeo_common::utils::error::{Error, QueryError, Result};
 
@@ -51,10 +50,10 @@ pub(crate) enum Applying<'a> {
     /// text indexes it puts are kept in `unbuilt`, built from the data once
     /// the whole WAL is replayed. A snapshot's catalog applies the same way.
     #[cfg_attr(
-        not(any(feature = "wal", feature = "triple-store")),
+        not(feature = "wal"),
         expect(
             dead_code,
-            reason = "WAL replay and a transaction's RDF graph ops apply this way; neither is built"
+            reason = "only WAL replay applies this way, and it is not built"
         )
     )]
     Replay {
@@ -877,7 +876,7 @@ pub(crate) fn commit_rdf(
 /// # Errors
 ///
 /// Live: an op the statement's checks should have refused.
-#[cfg(feature = "triple-store")]
+#[cfg(all(feature = "triple-store", feature = "wal"))]
 pub(crate) fn apply_rdf(
     op: &StandaloneOp,
     rdf: &grafeo_core::graph::rdf::RdfStore,

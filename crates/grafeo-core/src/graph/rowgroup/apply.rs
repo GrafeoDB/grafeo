@@ -1302,7 +1302,7 @@ impl Inner {
                         .node(raw)
                         .is_some_and(|(group, row)| group.version(row).created == pending)
                     {
-                        self.touch(Touched::Groups {
+                        self.touch(Touched {
                             nodes: [Some(locate(raw).0), None],
                             edge: None,
                         });
@@ -1316,7 +1316,7 @@ impl Inner {
                         .map(|(group, row)| group.ends(row));
                     if let Some((src, dst, _)) = ends {
                         let (src, dst) = (locate(src).0, locate(dst).0);
-                        self.touch(Touched::Groups {
+                        self.touch(Touched {
                             nodes: [Some(src), (dst != src).then_some(dst)],
                             edge: Some(locate(raw).0),
                         });

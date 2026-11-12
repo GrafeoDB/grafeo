@@ -707,16 +707,12 @@ impl Bracket {
     }
 }
 
-/// The row groups an op may change, each once.
+/// The row groups an op may change, each once: up to two node row groups
+/// (an edge's ends) and an edge row group.
 #[derive(Debug, Clone, Copy)]
-enum Touched {
-    /// Up to two node row groups (an edge's ends) and an edge row group.
-    Groups {
-        nodes: [Option<u64>; 2],
-        edge: Option<u64>,
-    },
-    /// The row groups `first..=last` of a table (a bulk range).
-    Range { table: Table, first: u64, last: u64 },
+struct Touched {
+    nodes: [Option<u64>; 2],
+    edge: Option<u64>,
 }
 
 impl Touched {
@@ -742,27 +738,15 @@ impl Touched {
             | DataOp::RemoveEdgeProperty { id, .. } => ([None, None], Some(group(id.as_u64()))),
             DataOp::InsertTriple { .. } | DataOp::DeleteTriple { .. } => ([None, None], None),
         };
-        Self::Groups { nodes, edge }
+        Self { nodes, edge }
     }
 
     /// No row group: an op on the shared parts alone (an index, a
     /// dictionary).
     const fn none() -> Self {
-        Self::Groups {
+        Self {
             nodes: [None, None],
             edge: None,
-        }
-    }
-
-    /// The row groups a bulk range of `table` over `ids` spans.
-    fn range(table: Table, ids: &std::ops::Range<u64>) -> Self {
-        if ids.is_empty() {
-            return Self::none();
-        }
-        Self::Range {
-            table,
-            first: locate(ids.start).0,
-            last: locate(ids.end - 1).0,
         }
     }
 }
@@ -826,35 +810,14 @@ impl Inner {
     /// is what the op changed.
     fn lines_of(&self, touched: Touched) -> Lines {
         let mut lines = self.shared_lines();
-        match touched {
-            Touched::Groups { nodes, edge } => {
-                for index in nodes.into_iter().flatten() {
-                    if let Some(group) = self.nodes.get(&index) {
-                        group.add_lines_to(&mut lines);
-                    }
-                }
-                if let Some(group) = edge.and_then(|index| self.edges.get(&index)) {
-                    group.add_lines_to(&mut lines);
-                }
+        let Touched { nodes, edge } = touched;
+        for index in nodes.into_iter().flatten() {
+            if let Some(group) = self.nodes.get(&index) {
+                group.add_lines_to(&mut lines);
             }
-            Touched::Range {
-                table: Table::Nodes,
-                first,
-                last,
-            } => {
-                for group in self.nodes.range(first..=last).map(|(_, group)| group) {
-                    group.add_lines_to(&mut lines);
-                }
-            }
-            Touched::Range {
-                table: Table::Edges,
-                first,
-                last,
-            } => {
-                for group in self.edges.range(first..=last).map(|(_, group)| group) {
-                    group.add_lines_to(&mut lines);
-                }
-            }
+        }
+        if let Some(group) = edge.and_then(|index| self.edges.get(&index)) {
+            group.add_lines_to(&mut lines);
         }
         lines
     }
@@ -866,8 +829,8 @@ impl Inner {
     /// took its ops, closes first.
     #[inline]
     fn touch(&mut self, touched: Touched) {
-        if let Touched::Groups { nodes, edge } = touched
-            && self.bracket.open
+        let Touched { nodes, edge } = touched;
+        if self.bracket.open
             && self.bracket.ops < BRACKET_OPS
             && nodes[0].is_none_or(|index| self.bracket.holds(Table::Nodes, index))
             && nodes[1].is_none_or(|index| self.bracket.holds(Table::Nodes, index))
@@ -882,11 +845,7 @@ impl Inner {
     /// [`touch`](Self::touch) of row groups the bracket does not hold yet, or
     /// of a closed or full bracket.
     fn touch_new(&mut self, touched: Touched) {
-        let Touched::Groups { nodes, edge } = touched else {
-            // A bulk range: counted on its own.
-            self.close_bracket();
-            return;
-        };
+        let Touched { nodes, edge } = touched;
         let wanted = [
             nodes[0].map(|index| (Table::Nodes, index)),
             nodes[1].map(|index| (Table::Nodes, index)),
@@ -1078,19 +1037,17 @@ impl Inner {
         for change in entries {
             match change {
                 Change::Data { op, .. } => {
-                    if let Touched::Groups { nodes, edge } = Touched::of(op) {
-                        groups.extend(nodes.into_iter().flatten().map(|index| (true, index)));
-                        groups.extend(edge.map(|index| (false, index)));
-                    }
+                    let Touched { nodes, edge } = Touched::of(op);
+                    groups.extend(nodes.into_iter().flatten().map(|index| (true, index)));
+                    groups.extend(edge.map(|index| (false, index)));
                 }
-                Change::Bulk(range) => {
-                    if let Touched::Range { table, first, last } =
-                        Touched::range(range.table, &range.ids)
-                    {
-                        let nodes = table == Table::Nodes;
-                        groups.extend((first..=last).map(|index| (nodes, index)));
-                    }
+                // The row groups the bulk range spans.
+                Change::Bulk(range) if !range.ids.is_empty() => {
+                    let nodes = range.table == Table::Nodes;
+                    let (first, last) = (locate(range.ids.start).0, locate(range.ids.end - 1).0);
+                    groups.extend((first..=last).map(|index| (nodes, index)));
                 }
+                Change::Bulk(_) => {}
                 Change::RdfGraph { .. } => {}
             }
         }

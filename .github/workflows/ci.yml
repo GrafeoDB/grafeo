@@ -763,6 +763,75 @@ jobs:
         env:
           RUSTC_WRAPPER: sccache
 
+  # Feature builds: the library and its unit tests in reduced feature sets, linted with
+  # `-D warnings`. The feature matrix builds the engine library without lints and without its
+  # unit tests, and `--all-features` hides a test or an item gated on the wrong feature, an
+  # import a set leaves unused, and code only another feature calls. One row per set that broke
+  # before; a set added here stays building. `grafeo-core` also in the release profile, as its
+  # debug-only checks call code a release build may not.
+  rust-feature-builds:
+    name: Feature Builds (${{ matrix.name }})
+    needs: [rust-check]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: engine defaults
+            args: "-p grafeo-engine"
+            lint_unit_tests: true
+          - name: engine vector-index
+            args: "-p grafeo-engine --no-default-features --features vector-index"
+          - name: engine wal
+            args: "-p grafeo-engine --no-default-features --features wal"
+          - name: engine triple-store ring-index
+            args: "-p grafeo-engine --no-default-features --features triple-store,regex,ring-index"
+          - name: engine sparql ring-index cdc
+            args: "-p grafeo-engine --no-default-features --features sparql,regex,ring-index,cdc"
+          - name: core release
+            args: "--release -p grafeo-core"
+            lib_only: true
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@1.99.0
+        with:
+          components: clippy
+
+      - name: Configure sccache
+        uses: mozilla-actions/sccache-action@v0.0.11
+
+      - name: Cache cargo registry
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-feature-builds-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-feature-builds-
+
+      - name: Clippy, library (${{ matrix.name }})
+        run: cargo clippy ${{ matrix.args }} --lib -- -D warnings
+        env:
+          RUSTC_WRAPPER: sccache
+
+      # The library's unit tests (`cfg(test)`), not the integration tests, which assume
+      # more features: linted with the default features, compiled in the reduced sets (their
+      # test-only items are not yet gated per feature).
+      - name: Clippy, unit tests (${{ matrix.name }})
+        if: ${{ matrix.lint_unit_tests }}
+        run: cargo clippy ${{ matrix.args }} --lib --profile test -- -D warnings
+        env:
+          RUSTC_WRAPPER: sccache
+
+      - name: Check, unit tests (${{ matrix.name }})
+        if: ${{ !matrix.lib_only && !matrix.lint_unit_tests }}
+        run: cargo check ${{ matrix.args }} --lib --profile test
+        env:
+          RUSTC_WRAPPER: sccache
+
   # Miri undefined behavior check
   miri:
     name: Miri UB Check
@@ -1474,6 +1543,7 @@ jobs:
       - minimal-features
       - shipped-features
       - rust-feature-matrix
+      - rust-feature-builds
       - miri
       - python-test
       - python-test-lpg

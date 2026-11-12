@@ -6425,8 +6425,8 @@ impl Session {
 
     /// How the statement with the plan `root` writes (see [`PlanWrites`]):
     /// whether at all, as [`plan_writes`](Self::plan_writes) answers, and
-    /// whether in the graph it runs on.
-    #[cfg(query_language)]
+    /// whether in the graph it runs on. Only the LPG languages ask.
+    #[cfg(lpg_language)]
     fn plan_write_kinds(&self, root: &crate::query::plan::LogicalOperator) -> PlanWrites {
         if root.has_mutations() {
             return PlanWrites::from(true);
@@ -8164,6 +8164,7 @@ fn params_to_fill<'a>(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "gql")]
     use super::parse_default_literal;
     use crate::database::GrafeoDB;
     use grafeo_common::types::ReadView;
@@ -8174,6 +8175,7 @@ mod tests {
     // parse_default_literal
     // -----------------------------------------------------------------------
 
+    #[cfg(feature = "gql")]
     #[test]
     fn parse_default_literal_null() {
         assert_eq!(parse_default_literal("null"), Value::Null);
@@ -8181,6 +8183,7 @@ mod tests {
         assert_eq!(parse_default_literal("Null"), Value::Null);
     }
 
+    #[cfg(feature = "gql")]
     #[test]
     fn parse_default_literal_bool() {
         assert_eq!(parse_default_literal("true"), Value::Bool(true));
@@ -8189,6 +8192,7 @@ mod tests {
         assert_eq!(parse_default_literal("FALSE"), Value::Bool(false));
     }
 
+    #[cfg(feature = "gql")]
     #[test]
     fn parse_default_literal_string_single_quoted() {
         assert_eq!(
@@ -8197,6 +8201,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "gql")]
     #[test]
     fn parse_default_literal_string_double_quoted() {
         assert_eq!(
@@ -8205,6 +8210,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "gql")]
     #[test]
     fn parse_default_literal_integer() {
         assert_eq!(parse_default_literal("42"), Value::Int64(42));
@@ -8212,12 +8218,14 @@ mod tests {
         assert_eq!(parse_default_literal("0"), Value::Int64(0));
     }
 
+    #[cfg(feature = "gql")]
     #[test]
     fn parse_default_literal_float() {
         assert_eq!(parse_default_literal("9.81"), Value::Float64(9.81_f64));
         assert_eq!(parse_default_literal("-0.5"), Value::Float64(-0.5));
     }
 
+    #[cfg(feature = "gql")]
     #[test]
     fn parse_default_literal_fallback_string() {
         // Not a recognized literal, not quoted, not a number
@@ -9198,6 +9206,7 @@ mod tests {
         assert_eq!(db.node_count().unwrap(), 2);
     }
 
+    #[cfg(query_language)]
     #[test]
     fn test_query_timeout_config_propagates_to_session() {
         use crate::config::Config;
@@ -9211,6 +9220,7 @@ mod tests {
         assert!(session.query_deadline().is_some());
     }
 
+    #[cfg(query_language)]
     #[test]
     fn test_default_query_timeout_returns_deadline() {
         let db = GrafeoDB::new_in_memory();
@@ -9220,6 +9230,7 @@ mod tests {
         assert!(session.query_deadline().is_some());
     }
 
+    #[cfg(query_language)]
     #[test]
     fn test_no_query_timeout_returns_no_deadline() {
         use crate::config::Config;

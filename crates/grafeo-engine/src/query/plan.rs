@@ -34,8 +34,7 @@ mod expression_variables;
     feature = "cypher",
     feature = "sparql",
     feature = "sql-pgq",
-    feature = "triple-store",
-    test
+    feature = "triple-store"
 ))]
 pub(crate) use expression_variables::collect_expression_variables;
 

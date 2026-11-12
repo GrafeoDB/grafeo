@@ -175,8 +175,13 @@ impl CheckpointSources {
         Ok(sections)
     }
 
-    /// The sections at the capture's epoch, for tests.
-    #[cfg(test)]
+    /// The sections at the capture's epoch, for the tests below, which need these features.
+    #[cfg(all(
+        test,
+        feature = "gql",
+        feature = "vector-index",
+        feature = "text-index"
+    ))]
     pub fn sections(&self, commits: &CommitsHeld<'_>) -> Vec<Box<dyn Section>> {
         self.sections_at(commits, self.epoch(commits))
             .expect("the published epoch has an RDF view")

@@ -6,6 +6,10 @@ All notable changes to Grafeo, for future reference (and enjoyment).
 
 Performance release: faster queries, a memory limit that holds, and fixes for the regressions of 0.6.2.
 
+### Changed
+
+- **SPARQL reads at a viewing epoch are refused**: with `set_viewing_epoch` set, a SPARQL query or SHACL validation fails with `GRAFEO-Q004` (RDF data keeps no history) instead of reading the present.
+
 ### Fixed
 
 - **SQL/PGQ ranges on one-kind columns use the range scan again**: a `<`, `<=`, `>`, `>=` or `BETWEEN` on a property whose values are all of the bound's kind reads its index by range and skips chunks by their stored bounds, as in 0.6.1. A column holding values of several kinds still scans and raises 22G04.

@@ -1,0 +1,307 @@
+# SQL/PGQ ranges (<, <=, >, >=, BETWEEN) on a column of one kind and of two, with and without an
+# index: a one-kind column answers by range, a column holding a second kind raises 22G04 until it
+# holds one kind again. From the 0.6.3 user-scenario sweep (an analyst's product catalogue); the
+# plans and the row groups are covered in Rust. The setup runs in GQL, each query in SQL/PGQ.
+
+meta:
+  language: gql
+  model: lpg
+  section: "8.2"
+  title: Ranges across kinds
+  dataset: empty
+  requires: [sql-pgq]
+
+tests:
+
+  - name: a_bound_below
+    language: sql-pgq
+    setup:
+      - "INSERT (:Product {sku: 'p1', name: 'Pen', price: 3, rating: 4.5}), (:Product {sku: 'p2', name: 'Notebook', price: 12, rating: 4}), (:Product {sku: 'p3', name: 'Backpack', price: 45, rating: 3.5}), (:Product {sku: 'p4', name: 'Lamp', price: 19}), (:Product {sku: 'p5', name: 'Mug', price: -2, rating: 5}), (:Product {sku: 'p6', name: 'Chair'})"
+    query: "SELECT * FROM GRAPH_TABLE (MATCH (p:Product) WHERE p.price < 20 COLUMNS (p.sku AS sku))"
+    expect:
+      rows:
+        - ["p1"]
+        - ["p2"]
+        - ["p4"]
+        - ["p5"]
+
+  - name: between
+    language: sql-pgq
+    setup:
+      - "INSERT (:Product {sku: 'p1', name: 'Pen', price: 3, rating: 4.5}), (:Product {sku: 'p2', name: 'Notebook', price: 12, rating: 4}), (:Product {sku: 'p3', name: 'Backpack', price: 45, rating: 3.5}), (:Product {sku: 'p4', name: 'Lamp', price: 19}), (:Product {sku: 'p5', name: 'Mug', price: -2, rating: 5}), (:Product {sku: 'p6', name: 'Chair'})"
+    query: "SELECT * FROM GRAPH_TABLE (MATCH (p:Product) WHERE p.price BETWEEN 3 AND 19 COLUMNS (p.sku AS sku))"
+    expect:
+      rows:
+        - ["p1"]
+        - ["p2"]
+        - ["p4"]
+
+  - name: between_with_its_bounds_reversed_is_empty
+    language: sql-pgq
+    setup:
+      - "INSERT (:Product {sku: 'p1', name: 'Pen', price: 3, rating: 4.5}), (:Product {sku: 'p2', name: 'Notebook', price: 12, rating: 4}), (:Product {sku: 'p3', name: 'Backpack', price: 45, rating: 3.5}), (:Product {sku: 'p4', name: 'Lamp', price: 19}), (:Product {sku: 'p5', name: 'Mug', price: -2, rating: 5}), (:Product {sku: 'p6', name: 'Chair'})"
+    query: "SELECT * FROM GRAPH_TABLE (MATCH (p:Product) WHERE p.price BETWEEN 19 AND 3 COLUMNS (p.sku AS sku))"
+    expect:
+      empty: true
+
+  - name: float_bounds_on_integers
+    language: sql-pgq
+    setup:
+      - "INSERT (:Product {sku: 'p1', name: 'Pen', price: 3, rating: 4.5}), (:Product {sku: 'p2', name: 'Notebook', price: 12, rating: 4}), (:Product {sku: 'p3', name: 'Backpack', price: 45, rating: 3.5}), (:Product {sku: 'p4', name: 'Lamp', price: 19}), (:Product {sku: 'p5', name: 'Mug', price: -2, rating: 5}), (:Product {sku: 'p6', name: 'Chair'})"
+    query: "SELECT * FROM GRAPH_TABLE (MATCH (p:Product) WHERE p.price > 2.5 AND p.price <= 19.0 COLUMNS (p.sku AS sku))"
+    expect:
+      rows:
+        - ["p1"]
+        - ["p2"]
+        - ["p4"]
+
+  - name: a_negative_bound
+    language: sql-pgq
+    setup:
+      - "INSERT (:Product {sku: 'p1', name: 'Pen', price: 3, rating: 4.5}), (:Product {sku: 'p2', name: 'Notebook', price: 12, rating: 4}), (:Product {sku: 'p3', name: 'Backpack', price: 45, rating: 3.5}), (:Product {sku: 'p4', name: 'Lamp', price: 19}), (:Product {sku: 'p5', name: 'Mug', price: -2, rating: 5}), (:Product {sku: 'p6', name: 'Chair'})"
+    query: "SELECT * FROM GRAPH_TABLE (MATCH (p:Product) WHERE p.price < 0 COLUMNS (p.sku AS sku))"
+    expect:
+      rows:
+        - ["p5"]
+
+  - name: the_top_three
+    language: sql-pgq
+    setup:
+      - "INSERT (:Product {sku: 'p1', name: 'Pen', price: 3, rating: 4.5}), (:Product {sku: 'p2', name: 'Notebook', price: 12, rating: 4}), (:Product {sku: 'p3', name: 'Backpack', price: 45, rating: 3.5}), (:Product {sku: 'p4', name: 'Lamp', price: 19}), (:Product {sku: 'p5', name: 'Mug', price: -2, rating: 5}), (:Product {sku: 'p6', name: 'Chair'})"
+    query: "SELECT * FROM GRAPH_TABLE (MATCH (p:Product) WHERE p.price >= 0 COLUMNS (p.sku AS sku, p.price AS price)) ORDER BY price DESC LIMIT 3"
+    expect:
+      ordered: true
+      rows:
+        - ["p3", 45]
+        - ["p4", 19]
+        - ["p2", 12]
+
+  - name: a_string_bound_on_integers_raises
+    language: sql-pgq
+    setup:
+      - "INSERT (:Product {sku: 'p1', name: 'Pen', price: 3, rating: 4.5}), (:Product {sku: 'p2', name: 'Notebook', price: 12, rating: 4}), (:Product {sku: 'p3', name: 'Backpack', price: 45, rating: 3.5}), (:Product {sku: 'p4', name: 'Lamp', price: 19}), (:Product {sku: 'p5', name: 'Mug', price: -2, rating: 5}), (:Product {sku: 'p6', name: 'Chair'})"
+    query: "SELECT * FROM GRAPH_TABLE (MATCH (p:Product) WHERE p.price < '20' COLUMNS (p.sku AS sku))"
+    expect:
+      gql_status: "22G04"
+
+  - name: a_column_of_two_kinds_raises
+    language: sql-pgq
+    setup:
+      - "INSERT (:Product {sku: 'p1', name: 'Pen', price: 3, rating: 4.5}), (:Product {sku: 'p2', name: 'Notebook', price: 12, rating: 4}), (:Product {sku: 'p3', name: 'Backpack', price: 45, rating: 3.5}), (:Product {sku: 'p4', name: 'Lamp', price: 19}), (:Product {sku: 'p5', name: 'Mug', price: -2, rating: 5}), (:Product {sku: 'p6', name: 'Chair'})"
+      - "MATCH (p:Product {sku: 'p4'}) SET p.price = '19'"
+    query: "SELECT * FROM GRAPH_TABLE (MATCH (p:Product) WHERE p.price < 20 COLUMNS (p.sku AS sku))"
+    expect:
+      gql_status: "22G04"
+
+  - name: a_column_fixed_back_to_one_kind_reads_by_range
+    language: sql-pgq
+    setup:
+      - "INSERT (:Product {sku: 'p1', name: 'Pen', price: 3, rating: 4.5}), (:Product {sku: 'p2', name: 'Notebook', price: 12, rating: 4}), (:Product {sku: 'p3', name: 'Backpack', price: 45, rating: 3.5}), (:Product {sku: 'p4', name: 'Lamp', price: 19}), (:Product {sku: 'p5', name: 'Mug', price: -2, rating: 5}), (:Product {sku: 'p6', name: 'Chair'})"
+      - "MATCH (p:Product {sku: 'p4'}) SET p.price = '19'"
+      - "MATCH (p:Product {sku: 'p4'}) SET p.price = 19"
+    query: "SELECT * FROM GRAPH_TABLE (MATCH (p:Product) WHERE p.price < 20 COLUMNS (p.sku AS sku))"
+    expect:
+      rows:
+        - ["p1"]
+        - ["p2"]
+        - ["p4"]
+        - ["p5"]
+
+  - name: a_column_without_its_odd_value_reads_by_range
+    language: sql-pgq
+    setup:
+      - "INSERT (:Product {sku: 'p1', name: 'Pen', price: 3, rating: 4.5}), (:Product {sku: 'p2', name: 'Notebook', price: 12, rating: 4}), (:Product {sku: 'p3', name: 'Backpack', price: 45, rating: 3.5}), (:Product {sku: 'p4', name: 'Lamp', price: 19}), (:Product {sku: 'p5', name: 'Mug', price: -2, rating: 5}), (:Product {sku: 'p6', name: 'Chair'})"
+      - "MATCH (p:Product {sku: 'p4'}) SET p.price = '19'"
+      - "MATCH (p:Product {sku: 'p4'}) DETACH DELETE p"
+    query: "SELECT * FROM GRAPH_TABLE (MATCH (p:Product) WHERE p.price < 20 COLUMNS (p.sku AS sku))"
+    expect:
+      rows:
+        - ["p1"]
+        - ["p2"]
+        - ["p5"]
+
+  - name: a_missing_property_meets_no_bound
+    language: sql-pgq
+    setup:
+      - "INSERT (:Product {sku: 'p1', name: 'Pen', price: 3, rating: 4.5}), (:Product {sku: 'p2', name: 'Notebook', price: 12, rating: 4}), (:Product {sku: 'p3', name: 'Backpack', price: 45, rating: 3.5}), (:Product {sku: 'p4', name: 'Lamp', price: 19}), (:Product {sku: 'p5', name: 'Mug', price: -2, rating: 5}), (:Product {sku: 'p6', name: 'Chair'})"
+    query: "SELECT * FROM GRAPH_TABLE (MATCH (p:Product) WHERE p.rating < 10 OR p.rating >= 10 COLUMNS (p.sku AS sku))"
+    expect:
+      rows:
+        - ["p1"]
+        - ["p2"]
+        - ["p3"]
+        - ["p5"]
+
+  - name: an_integer_bound_on_floats
+    language: sql-pgq
+    setup:
+      - "INSERT (:Product {sku: 'p1', name: 'Pen', price: 3, rating: 4.5}), (:Product {sku: 'p2', name: 'Notebook', price: 12, rating: 4}), (:Product {sku: 'p3', name: 'Backpack', price: 45, rating: 3.5}), (:Product {sku: 'p4', name: 'Lamp', price: 19}), (:Product {sku: 'p5', name: 'Mug', price: -2, rating: 5}), (:Product {sku: 'p6', name: 'Chair'})"
+    query: "SELECT * FROM GRAPH_TABLE (MATCH (p:Product) WHERE p.rating > 4 COLUMNS (p.sku AS sku))"
+    expect:
+      rows:
+        - ["p1"]
+        - ["p5"]
+
+  - name: a_string_range
+    language: sql-pgq
+    setup:
+      - "INSERT (:Product {sku: 'p1', name: 'Pen', price: 3, rating: 4.5}), (:Product {sku: 'p2', name: 'Notebook', price: 12, rating: 4}), (:Product {sku: 'p3', name: 'Backpack', price: 45, rating: 3.5}), (:Product {sku: 'p4', name: 'Lamp', price: 19}), (:Product {sku: 'p5', name: 'Mug', price: -2, rating: 5}), (:Product {sku: 'p6', name: 'Chair'})"
+    query: "SELECT * FROM GRAPH_TABLE (MATCH (p:Product) WHERE p.name >= 'M' COLUMNS (p.sku AS sku))"
+    expect:
+      rows:
+        - ["p1"]
+        - ["p2"]
+        - ["p5"]
+
+  - name: a_bound_below_with_an_index
+    language: sql-pgq
+    setup:
+      - "INSERT (:Product {sku: 'p1', name: 'Pen', price: 3, rating: 4.5}), (:Product {sku: 'p2', name: 'Notebook', price: 12, rating: 4}), (:Product {sku: 'p3', name: 'Backpack', price: 45, rating: 3.5}), (:Product {sku: 'p4', name: 'Lamp', price: 19}), (:Product {sku: 'p5', name: 'Mug', price: -2, rating: 5}), (:Product {sku: 'p6', name: 'Chair'})"
+      - "CREATE INDEX on_price FOR (p:Product) ON (p.price)"
+    query: "SELECT * FROM GRAPH_TABLE (MATCH (p:Product) WHERE p.price < 20 COLUMNS (p.sku AS sku))"
+    expect:
+      rows:
+        - ["p1"]
+        - ["p2"]
+        - ["p4"]
+        - ["p5"]
+
+  - name: between_with_an_index
+    language: sql-pgq
+    setup:
+      - "INSERT (:Product {sku: 'p1', name: 'Pen', price: 3, rating: 4.5}), (:Product {sku: 'p2', name: 'Notebook', price: 12, rating: 4}), (:Product {sku: 'p3', name: 'Backpack', price: 45, rating: 3.5}), (:Product {sku: 'p4', name: 'Lamp', price: 19}), (:Product {sku: 'p5', name: 'Mug', price: -2, rating: 5}), (:Product {sku: 'p6', name: 'Chair'})"
+      - "CREATE INDEX on_price FOR (p:Product) ON (p.price)"
+    query: "SELECT * FROM GRAPH_TABLE (MATCH (p:Product) WHERE p.price BETWEEN 3 AND 19 COLUMNS (p.sku AS sku))"
+    expect:
+      rows:
+        - ["p1"]
+        - ["p2"]
+        - ["p4"]
+
+  - name: between_with_its_bounds_reversed_is_empty_with_an_index
+    language: sql-pgq
+    setup:
+      - "INSERT (:Product {sku: 'p1', name: 'Pen', price: 3, rating: 4.5}), (:Product {sku: 'p2', name: 'Notebook', price: 12, rating: 4}), (:Product {sku: 'p3', name: 'Backpack', price: 45, rating: 3.5}), (:Product {sku: 'p4', name: 'Lamp', price: 19}), (:Product {sku: 'p5', name: 'Mug', price: -2, rating: 5}), (:Product {sku: 'p6', name: 'Chair'})"
+      - "CREATE INDEX on_price FOR (p:Product) ON (p.price)"
+    query: "SELECT * FROM GRAPH_TABLE (MATCH (p:Product) WHERE p.price BETWEEN 19 AND 3 COLUMNS (p.sku AS sku))"
+    expect:
+      empty: true
+
+  - name: float_bounds_on_integers_with_an_index
+    language: sql-pgq
+    setup:
+      - "INSERT (:Product {sku: 'p1', name: 'Pen', price: 3, rating: 4.5}), (:Product {sku: 'p2', name: 'Notebook', price: 12, rating: 4}), (:Product {sku: 'p3', name: 'Backpack', price: 45, rating: 3.5}), (:Product {sku: 'p4', name: 'Lamp', price: 19}), (:Product {sku: 'p5', name: 'Mug', price: -2, rating: 5}), (:Product {sku: 'p6', name: 'Chair'})"
+      - "CREATE INDEX on_price FOR (p:Product) ON (p.price)"
+    query: "SELECT * FROM GRAPH_TABLE (MATCH (p:Product) WHERE p.price > 2.5 AND p.price <= 19.0 COLUMNS (p.sku AS sku))"
+    expect:
+      rows:
+        - ["p1"]
+        - ["p2"]
+        - ["p4"]
+
+  - name: a_negative_bound_with_an_index
+    language: sql-pgq
+    setup:
+      - "INSERT (:Product {sku: 'p1', name: 'Pen', price: 3, rating: 4.5}), (:Product {sku: 'p2', name: 'Notebook', price: 12, rating: 4}), (:Product {sku: 'p3', name: 'Backpack', price: 45, rating: 3.5}), (:Product {sku: 'p4', name: 'Lamp', price: 19}), (:Product {sku: 'p5', name: 'Mug', price: -2, rating: 5}), (:Product {sku: 'p6', name: 'Chair'})"
+      - "CREATE INDEX on_price FOR (p:Product) ON (p.price)"
+    query: "SELECT * FROM GRAPH_TABLE (MATCH (p:Product) WHERE p.price < 0 COLUMNS (p.sku AS sku))"
+    expect:
+      rows:
+        - ["p5"]
+
+  - name: the_top_three_with_an_index
+    language: sql-pgq
+    setup:
+      - "INSERT (:Product {sku: 'p1', name: 'Pen', price: 3, rating: 4.5}), (:Product {sku: 'p2', name: 'Notebook', price: 12, rating: 4}), (:Product {sku: 'p3', name: 'Backpack', price: 45, rating: 3.5}), (:Product {sku: 'p4', name: 'Lamp', price: 19}), (:Product {sku: 'p5', name: 'Mug', price: -2, rating: 5}), (:Product {sku: 'p6', name: 'Chair'})"
+      - "CREATE INDEX on_price FOR (p:Product) ON (p.price)"
+    query: "SELECT * FROM GRAPH_TABLE (MATCH (p:Product) WHERE p.price >= 0 COLUMNS (p.sku AS sku, p.price AS price)) ORDER BY price DESC LIMIT 3"
+    expect:
+      ordered: true
+      rows:
+        - ["p3", 45]
+        - ["p4", 19]
+        - ["p2", 12]
+
+  - name: a_string_bound_on_integers_raises_with_an_index
+    language: sql-pgq
+    setup:
+      - "INSERT (:Product {sku: 'p1', name: 'Pen', price: 3, rating: 4.5}), (:Product {sku: 'p2', name: 'Notebook', price: 12, rating: 4}), (:Product {sku: 'p3', name: 'Backpack', price: 45, rating: 3.5}), (:Product {sku: 'p4', name: 'Lamp', price: 19}), (:Product {sku: 'p5', name: 'Mug', price: -2, rating: 5}), (:Product {sku: 'p6', name: 'Chair'})"
+      - "CREATE INDEX on_price FOR (p:Product) ON (p.price)"
+    query: "SELECT * FROM GRAPH_TABLE (MATCH (p:Product) WHERE p.price < '20' COLUMNS (p.sku AS sku))"
+    expect:
+      gql_status: "22G04"
+
+  - name: a_column_of_two_kinds_raises_with_an_index
+    language: sql-pgq
+    setup:
+      - "INSERT (:Product {sku: 'p1', name: 'Pen', price: 3, rating: 4.5}), (:Product {sku: 'p2', name: 'Notebook', price: 12, rating: 4}), (:Product {sku: 'p3', name: 'Backpack', price: 45, rating: 3.5}), (:Product {sku: 'p4', name: 'Lamp', price: 19}), (:Product {sku: 'p5', name: 'Mug', price: -2, rating: 5}), (:Product {sku: 'p6', name: 'Chair'})"
+      - "CREATE INDEX on_price FOR (p:Product) ON (p.price)"
+      - "MATCH (p:Product {sku: 'p4'}) SET p.price = '19'"
+    query: "SELECT * FROM GRAPH_TABLE (MATCH (p:Product) WHERE p.price < 20 COLUMNS (p.sku AS sku))"
+    expect:
+      gql_status: "22G04"
+
+  - name: a_column_fixed_back_to_one_kind_reads_by_range_with_an_index
+    language: sql-pgq
+    setup:
+      - "INSERT (:Product {sku: 'p1', name: 'Pen', price: 3, rating: 4.5}), (:Product {sku: 'p2', name: 'Notebook', price: 12, rating: 4}), (:Product {sku: 'p3', name: 'Backpack', price: 45, rating: 3.5}), (:Product {sku: 'p4', name: 'Lamp', price: 19}), (:Product {sku: 'p5', name: 'Mug', price: -2, rating: 5}), (:Product {sku: 'p6', name: 'Chair'})"
+      - "CREATE INDEX on_price FOR (p:Product) ON (p.price)"
+      - "MATCH (p:Product {sku: 'p4'}) SET p.price = '19'"
+      - "MATCH (p:Product {sku: 'p4'}) SET p.price = 19"
+    query: "SELECT * FROM GRAPH_TABLE (MATCH (p:Product) WHERE p.price < 20 COLUMNS (p.sku AS sku))"
+    expect:
+      rows:
+        - ["p1"]
+        - ["p2"]
+        - ["p4"]
+        - ["p5"]
+
+  - name: a_column_without_its_odd_value_reads_by_range_with_an_index
+    language: sql-pgq
+    setup:
+      - "INSERT (:Product {sku: 'p1', name: 'Pen', price: 3, rating: 4.5}), (:Product {sku: 'p2', name: 'Notebook', price: 12, rating: 4}), (:Product {sku: 'p3', name: 'Backpack', price: 45, rating: 3.5}), (:Product {sku: 'p4', name: 'Lamp', price: 19}), (:Product {sku: 'p5', name: 'Mug', price: -2, rating: 5}), (:Product {sku: 'p6', name: 'Chair'})"
+      - "CREATE INDEX on_price FOR (p:Product) ON (p.price)"
+      - "MATCH (p:Product {sku: 'p4'}) SET p.price = '19'"
+      - "MATCH (p:Product {sku: 'p4'}) DETACH DELETE p"
+    query: "SELECT * FROM GRAPH_TABLE (MATCH (p:Product) WHERE p.price < 20 COLUMNS (p.sku AS sku))"
+    expect:
+      rows:
+        - ["p1"]
+        - ["p2"]
+        - ["p5"]
+
+  - name: a_missing_property_meets_no_bound_with_an_index
+    language: sql-pgq
+    setup:
+      - "INSERT (:Product {sku: 'p1', name: 'Pen', price: 3, rating: 4.5}), (:Product {sku: 'p2', name: 'Notebook', price: 12, rating: 4}), (:Product {sku: 'p3', name: 'Backpack', price: 45, rating: 3.5}), (:Product {sku: 'p4', name: 'Lamp', price: 19}), (:Product {sku: 'p5', name: 'Mug', price: -2, rating: 5}), (:Product {sku: 'p6', name: 'Chair'})"
+      - "CREATE INDEX on_price FOR (p:Product) ON (p.price)"
+    query: "SELECT * FROM GRAPH_TABLE (MATCH (p:Product) WHERE p.rating < 10 OR p.rating >= 10 COLUMNS (p.sku AS sku))"
+    expect:
+      rows:
+        - ["p1"]
+        - ["p2"]
+        - ["p3"]
+        - ["p5"]
+
+  - name: an_integer_bound_on_floats_with_an_index
+    language: sql-pgq
+    setup:
+      - "INSERT (:Product {sku: 'p1', name: 'Pen', price: 3, rating: 4.5}), (:Product {sku: 'p2', name: 'Notebook', price: 12, rating: 4}), (:Product {sku: 'p3', name: 'Backpack', price: 45, rating: 3.5}), (:Product {sku: 'p4', name: 'Lamp', price: 19}), (:Product {sku: 'p5', name: 'Mug', price: -2, rating: 5}), (:Product {sku: 'p6', name: 'Chair'})"
+      - "CREATE INDEX on_price FOR (p:Product) ON (p.price)"
+    query: "SELECT * FROM GRAPH_TABLE (MATCH (p:Product) WHERE p.rating > 4 COLUMNS (p.sku AS sku))"
+    expect:
+      rows:
+        - ["p1"]
+        - ["p5"]
+
+  - name: a_string_range_with_an_index
+    language: sql-pgq
+    setup:
+      - "INSERT (:Product {sku: 'p1', name: 'Pen', price: 3, rating: 4.5}), (:Product {sku: 'p2', name: 'Notebook', price: 12, rating: 4}), (:Product {sku: 'p3', name: 'Backpack', price: 45, rating: 3.5}), (:Product {sku: 'p4', name: 'Lamp', price: 19}), (:Product {sku: 'p5', name: 'Mug', price: -2, rating: 5}), (:Product {sku: 'p6', name: 'Chair'})"
+      - "CREATE INDEX on_price FOR (p:Product) ON (p.price)"
+    query: "SELECT * FROM GRAPH_TABLE (MATCH (p:Product) WHERE p.name >= 'M' COLUMNS (p.sku AS sku))"
+    expect:
+      rows:
+        - ["p1"]
+        - ["p2"]
+        - ["p5"]

@@ -141,6 +141,12 @@ harness = false
 name = "memory_bench"
 harness = false
 
+# Bytes per node, edge and property value (#431); its CI job checks them against
+# benches/memory_per_entity.baseline.json.
+[[bench]]
+name = "memory_per_entity"
+harness = false
+
 [[bench]]
 name = "topk_e2e"
 harness = false

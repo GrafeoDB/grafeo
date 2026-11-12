@@ -832,6 +832,39 @@ jobs:
         env:
           RUSTC_WRAPPER: sccache
 
+  # Memory per entity (#431): bytes per node, per edge and per property value on a fixed
+  # workload, counted by an allocator and as `memory_usage()` reports them. Fails when a count
+  # rises more than 5% over benches/memory_per_entity.baseline.json; a change that lowers memory
+  # updates the baseline in the same commit (`-- --update-baseline`). The table goes to the job
+  # summary, with the compact store's targets beside it.
+  memory-per-entity:
+    name: Memory per Entity
+    needs: [rust-check]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@1.99.0
+
+      - name: Configure sccache
+        uses: mozilla-actions/sccache-action@v0.0.11
+
+      - name: Cache cargo registry
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-memory-per-entity-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-memory-per-entity-
+
+      - name: Measure and check against the baseline
+        run: cargo bench -p grafeo-engine --bench memory_per_entity -- --check
+        env:
+          RUSTC_WRAPPER: sccache
+
   # Miri undefined behavior check
   miri:
     name: Miri UB Check
@@ -1544,6 +1577,7 @@ jobs:
       - shipped-features
       - rust-feature-matrix
       - rust-feature-builds
+      - memory-per-entity
       - miri
       - python-test
       - python-test-lpg

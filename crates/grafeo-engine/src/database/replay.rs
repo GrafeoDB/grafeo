@@ -5,10 +5,12 @@
 //! from there and applies each complete group, in log order, at the epoch its
 //! [`GroupBegin`] names, through the functions the live writes use: a data
 //! record through [`GraphBackend::apply`] as a [`Writer::Replay`] (strict: a
-//! record that does not fit the store fails the open), a triple through the
-//! RDF store's own insert and remove, a standalone op through
-//! [`standalone::apply`] or [`standalone::apply_rdf`]. A group the scan finds
-//! incomplete (no LAST frame) was never committed and is not applied.
+//! record that does not fit the store fails the open), a standalone op through
+//! [`standalone::apply`]. A group's RDF records (its triples and graph
+//! operations, in their order) apply at the group's end in one
+//! [`RdfStore::apply_commit`], as the live commit applied them. A group the
+//! scan finds incomplete (no LAST frame) was never committed and is not
+//! applied.
 //!
 //! While the database keeps history, each group's time is recorded in the
 //! history's time index (the time its commit recorded live), and the store,
@@ -18,6 +20,7 @@
 //! [`GroupBegin`]: grafeo_common::storage::log_record::GroupBegin
 //! [`GraphBackend::apply`]: grafeo_core::graph::apply::GraphBackend::apply
 //! [`Writer::Replay`]: grafeo_core::graph::apply::Writer::Replay
+//! [`RdfStore::apply_commit`]: grafeo_core::graph::rdf::RdfStore::apply_commit
 
 use std::path::Path;
 use std::sync::Arc;
@@ -102,10 +105,13 @@ pub(crate) fn replay<S: RootStore>(
         let Some(LogRecord::GroupBegin(begin)) = records.next() else {
             return Err(failed("it does not start with its GroupBegin".to_string()));
         };
+        let mut rdf = RdfGroup::default();
         for record in records {
-            apply_record(record, begin.epoch, targets)
+            apply_record(record, begin.epoch, targets, &mut rdf)
                 .map_err(|error| failed(error.to_string()))?;
         }
+        rdf.apply(targets)
+            .map_err(|error| failed(error.to_string()))?;
         targets.store.sync_epoch(begin.epoch);
         if let Some(manager) = targets.history {
             manager.record_commit_time(begin.epoch, begin.timestamp_ms);
@@ -116,18 +122,25 @@ pub(crate) fn replay<S: RootStore>(
     Ok(Replayed { end, groups })
 }
 
-/// Applies one record of a group at `epoch`.
+/// Applies one record of a group at `epoch`; an RDF record joins `rdf`,
+/// which the group applies at its end.
 fn apply_record<S: RootStore>(
     record: LogRecord,
     epoch: EpochId,
     targets: &mut Targets<'_, S>,
+    rdf: &mut RdfGroup,
 ) -> Result<()> {
     match record {
         LogRecord::GroupBegin(_) => Err(Error::Internal(
             "a second GroupBegin inside a group".to_string(),
         )),
         LogRecord::Data { graph, op } if op.model() == DataModel::Rdf => {
-            apply_triple(graph.as_deref(), op, targets)
+            rdf.records.push(RdfRecord::Triple(graph, op));
+            Ok(())
+        }
+        LogRecord::Standalone(StandaloneOp::RdfGraph(op)) => {
+            rdf.records.push(RdfRecord::Graph(op));
+            Ok(())
         }
         LogRecord::Data { graph, op } => {
             let store = match graph.as_deref() {
@@ -145,62 +158,93 @@ fn apply_record<S: RootStore>(
     }
 }
 
-/// Applies a logged triple insert or delete to the RDF store.
-#[cfg(feature = "triple-store")]
-fn apply_triple<S: RootStore>(
-    graph: Option<&str>,
-    op: DataOp,
-    targets: &Targets<'_, S>,
-) -> Result<()> {
-    use grafeo_core::graph::rdf::Triple;
+/// A logged RDF record: a triple insert or delete in a graph (`None` for
+/// the default graph), or a graph operation.
+#[derive(Debug)]
+enum RdfRecord {
+    Triple(Option<String>, DataOp),
+    Graph(grafeo_common::change::RdfGraphOp),
+}
 
-    match op {
-        DataOp::InsertTriple { triple } => {
-            targets.rdf.insert_into(graph, Triple::from(&*triple));
-            Ok(())
+/// The RDF records of one group, in log order: its triples and its graph
+/// operations, applied at the group's end in one apply, as the live commit
+/// (or statement) that logged them applied them.
+#[derive(Debug, Default)]
+struct RdfGroup {
+    records: Vec<RdfRecord>,
+}
+
+impl RdfGroup {
+    /// Applies the group's RDF records to the RDF store in one
+    /// [`RdfStore::apply_commit`](grafeo_core::graph::rdf::RdfStore::apply_commit).
+    /// A graph operation that changed nothing (a create of a graph that
+    /// exists, a drop of a named graph that does not) is skipped, as an
+    /// insert of a triple the graph holds is: the statement checked it live.
+    ///
+    /// # Errors
+    ///
+    /// A data record that is no triple op.
+    #[cfg(feature = "triple-store")]
+    fn apply<S: RootStore>(self, targets: &Targets<'_, S>) -> Result<()> {
+        use grafeo_core::graph::rdf::{ApplyMode, CommitChange, Triple};
+
+        if self.records.is_empty() {
+            return Ok(());
         }
-        DataOp::DeleteTriple { triple } => {
-            targets.rdf.remove_from(graph, &Triple::from(&*triple));
-            Ok(())
+        let changes = self
+            .records
+            .into_iter()
+            .map(|record| {
+                Ok(match record {
+                    RdfRecord::Triple(graph, op) => {
+                        let graph = graph.map(std::sync::Arc::from);
+                        match op {
+                            DataOp::InsertTriple { triple } => CommitChange::Insert {
+                                graph,
+                                triple: Triple::from(&*triple),
+                            },
+                            DataOp::DeleteTriple { triple } => CommitChange::Delete {
+                                graph,
+                                triple: Triple::from(&*triple),
+                            },
+                            other => {
+                                return Err(Error::Internal(format!("{other:?} is no RDF op")));
+                            }
+                        }
+                    }
+                    RdfRecord::Graph(op) => CommitChange::Graph(op),
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        targets.rdf.apply_commit(ApplyMode::Recovery, changes);
+        Ok(())
+    }
+
+    /// A build without the triple store cannot replay an RDF record: the
+    /// next checkpoint would write the file without it.
+    ///
+    /// # Errors
+    ///
+    /// Any RDF record.
+    #[cfg(not(feature = "triple-store"))]
+    fn apply<S: RootStore>(self, _targets: &Targets<'_, S>) -> Result<()> {
+        match self.records.first() {
+            None => Ok(()),
+            Some(RdfRecord::Triple(graph, op)) => Err(Error::Internal(format!(
+                "the log holds RDF triples (the first of kind {} in {}), which this build (without the triple store) cannot keep",
+                op.kind(),
+                graph.as_deref().unwrap_or("the default graph")
+            ))),
+            Some(RdfRecord::Graph(op)) => Err(Error::Internal(format!(
+                "the log holds the RDF graph operation {op:?}, which this build (without the triple store) cannot apply"
+            ))),
         }
-        other => Err(Error::Internal(format!("{other:?} is no RDF op"))),
     }
 }
 
-/// A build without the triple store cannot replay a triple: the next
-/// checkpoint would write the file without it.
-#[cfg(not(feature = "triple-store"))]
-fn apply_triple<S: RootStore>(
-    _graph: Option<&str>,
-    _op: DataOp,
-    _targets: &Targets<'_, S>,
-) -> Result<()> {
-    Err(Error::Internal(
-        "the log holds RDF triples, which this build (without the triple store) cannot keep"
-            .to_string(),
-    ))
-}
-
-/// Applies a logged standalone op as the statement that logged it did.
+/// Applies a logged standalone op, other than an RDF graph operation, as the
+/// statement that logged it did.
 fn apply_standalone<S: RootStore>(op: &StandaloneOp, targets: &mut Targets<'_, S>) -> Result<()> {
-    if matches!(op, StandaloneOp::RdfGraph(_)) {
-        #[cfg(feature = "triple-store")]
-        {
-            return standalone::apply_rdf(
-                op,
-                targets.rdf,
-                &Applying::Replay {
-                    unbuilt: targets.unbuilt,
-                },
-            );
-        }
-        #[cfg(not(feature = "triple-store"))]
-        {
-            return Err(Error::Internal(
-                "the log holds an RDF graph operation, which this build cannot apply".to_string(),
-            ));
-        }
-    }
     standalone::apply(
         op,
         None,
@@ -641,5 +685,158 @@ mod tests {
             &Triple::from(&record)
         ));
         assert_eq!(rdf.len(), 0, "not in the default graph");
+    }
+
+    /// A transaction's group holds its graph operations in their place among
+    /// its triples, and replay applies them in that order: the state the
+    /// statements left one after the other.
+    #[cfg(feature = "triple-store")]
+    #[test]
+    fn a_groups_graph_operations_replay_in_order_with_its_triples() {
+        use grafeo_common::change::RdfGraphOp;
+        use grafeo_common::storage::log_record::{RdfGraphTarget, TermRecord, TripleRecord};
+        use grafeo_core::graph::rdf::{LatestUse, RdfStore, RdfView, TriplePattern};
+
+        const G: &str = "http://example.org/g";
+
+        /// A write of the transaction, in the graph of its slot.
+        enum Step {
+            Insert(Option<&'static str>, &'static str),
+            Graph(Option<&'static str>, RdfGraphOp),
+        }
+
+        fn record(name: &str) -> TripleRecord {
+            TripleRecord {
+                subject: TermRecord::Iri(format!("http://example.org/{name}")),
+                predicate: TermRecord::Iri("http://example.org/p".to_string()),
+                object: TermRecord::Iri("http://example.org/o".to_string()),
+            }
+        }
+
+        fn set_of(steps: Vec<Step>) -> ChangeSet {
+            let mut set = ChangeSet::new();
+            for step in steps {
+                let (Step::Insert(key, _) | Step::Graph(key, _)) = &step;
+                let slot = set
+                    .slot(GraphRef {
+                        model: DataModel::Rdf,
+                        key: key.map(ArcStr::from),
+                    })
+                    .unwrap();
+                match step {
+                    Step::Insert(_, name) => set
+                        .push(
+                            slot,
+                            DataOp::InsertTriple {
+                                triple: Box::new(record(name)),
+                            },
+                            Before::Absent,
+                            PendingVersion::Created,
+                        )
+                        .unwrap(),
+                    Step::Graph(_, op) => set.push_rdf_graph(slot, op).unwrap(),
+                }
+            }
+            set
+        }
+
+        /// The subjects' names in the default graph and in g (`None` when g
+        /// does not exist), sorted.
+        fn state(rdf: &RdfStore) -> (Vec<String>, Option<Vec<String>>) {
+            let view = RdfView::latest(LatestUse::Test);
+            let names = |store: &RdfStore| {
+                let mut names: Vec<String> = store
+                    .find(&view, &TriplePattern::any())
+                    .iter()
+                    .map(|triple| {
+                        triple
+                            .subject()
+                            .to_string()
+                            .trim_start_matches("<http://example.org/")
+                            .trim_end_matches('>')
+                            .to_string()
+                    })
+                    .collect();
+                names.sort();
+                names
+            };
+            (names(rdf), rdf.graph_latest(G).map(|g| names(&g)))
+        }
+
+        let target = |target| RdfGraphTarget::Named(target);
+        let scenarios: Vec<(&str, Vec<Step>, (Vec<&str>, Option<Vec<&str>>))> = vec![
+            (
+                "DROP g; INSERT g",
+                vec![
+                    Step::Graph(
+                        Some(G),
+                        RdfGraphOp::Drop {
+                            target: target(G.to_string()),
+                        },
+                    ),
+                    Step::Insert(Some(G), "Jules"),
+                ],
+                (vec!["Alix"], Some(vec!["Jules"])),
+            ),
+            (
+                "INSERT g; CLEAR g",
+                vec![
+                    Step::Insert(Some(G), "Jules"),
+                    Step::Graph(
+                        Some(G),
+                        RdfGraphOp::Clear {
+                            target: target(G.to_string()),
+                        },
+                    ),
+                ],
+                (vec!["Alix"], Some(vec![])),
+            ),
+            (
+                "CLEAR DEFAULT; INSERT",
+                vec![
+                    Step::Graph(
+                        None,
+                        RdfGraphOp::Clear {
+                            target: RdfGraphTarget::Default,
+                        },
+                    ),
+                    Step::Insert(None, "Jules"),
+                ],
+                (vec!["Jules"], Some(vec!["Vincent"])),
+            ),
+        ];
+        for (name, steps, (default, g)) in scenarios {
+            let dir = tempfile::tempdir().unwrap();
+            {
+                let wal = wal(dir.path(), 0);
+                let seed = set_of(vec![
+                    Step::Insert(None, "Alix"),
+                    Step::Insert(Some(G), "Vincent"),
+                ]);
+                commit(&wal, 2, &seed, 1);
+                commit(&wal, 3, &set_of(steps), 2);
+            }
+            let store = Arc::new(RowGroupStore::new());
+            let rdf = RdfStore::new();
+            let mut unbuilt = Vec::new();
+            let replayed = replay(
+                dir.path(),
+                ScanOptions::new(DATABASE, 0),
+                &mut Targets {
+                    store: &store,
+                    rdf: &rdf,
+                    catalog: &Catalog::new(),
+                    unbuilt: &mut unbuilt,
+                    history: None,
+                },
+            )
+            .unwrap();
+            assert_eq!(replayed.groups, 2, "{name}");
+            let expected = (
+                default.iter().map(ToString::to_string).collect(),
+                g.map(|g| g.iter().map(ToString::to_string).collect()),
+            );
+            assert_eq!(state(&rdf), expected, "{name}");
+        }
     }
 }

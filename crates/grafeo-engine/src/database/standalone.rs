@@ -837,11 +837,13 @@ pub(crate) fn commit_rdf(
     Ok(())
 }
 
-/// Applies `op`, an RDF graph operation, to `rdf`: what a statement does
-/// once it is logged, and what replay does with the logged op. A create of a
-/// graph that exists, or a drop of a named graph that does not, applies
-/// nothing: an error live (the statement's checks refuse it), skipped on
-/// replay.
+/// Applies `op`, an RDF graph operation, to `rdf` through the apply a live
+/// commit uses ([`RdfStore::apply_commit`]), with nothing published: what
+/// replay does with the logged op. A create of a graph that exists, or a
+/// drop of a named graph that does not, applies nothing: an error live (the
+/// statement's checks refuse it), skipped on replay.
+///
+/// [`RdfStore::apply_commit`]: grafeo_core::graph::rdf::RdfStore::apply_commit
 ///
 /// # Errors
 ///
@@ -852,10 +854,16 @@ pub(crate) fn apply_rdf(
     rdf: &grafeo_core::graph::rdf::RdfStore,
     applying: &Applying<'_>,
 ) -> Result<()> {
+    use grafeo_core::graph::rdf::{ApplyMode, CommitChange};
+
     let StandaloneOp::RdfGraph(graph_op) = op else {
         return Err(not_applied(op, "it is no RDF graph operation"));
     };
-    if rdf.apply_graph_op(graph_op) {
+    let applied = rdf.apply_commit(
+        ApplyMode::Recovery,
+        vec![CommitChange::Graph(graph_op.clone())],
+    );
+    if applied.changed.first() == Some(&true) {
         return Ok(());
     }
     match graph_op {

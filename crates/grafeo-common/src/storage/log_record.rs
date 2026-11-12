@@ -288,6 +288,10 @@ pub enum LogRecordRef<'a> {
     },
     /// A change applied on its own.
     Standalone(&'a StandaloneOp),
+    /// A transaction's whole-graph RDF operation, in its place among its
+    /// writes: the bytes of `LogRecord::Standalone(StandaloneOp::RdfGraph(op))`
+    /// (kinds 66 to 71), so replay reads it as that record.
+    RdfGraph(&'a RdfGraphOp),
 }
 
 impl DataOp {
@@ -583,6 +587,7 @@ impl LogRecordRef<'_> {
             Self::GroupBegin(_) => KIND_GROUP_BEGIN,
             Self::Data { op, .. } => op.kind(),
             Self::Standalone(op) => op.kind(),
+            Self::RdfGraph(op) => op.kind(),
         }
     }
 
@@ -624,6 +629,7 @@ impl LogRecordRef<'_> {
                     encode_data(graph, op, out)
                 }
                 Self::Standalone(op) => encode_standalone(op, out),
+                Self::RdfGraph(op) => encode_rdf_graph(op, out),
             }
         })
     }
@@ -730,15 +736,20 @@ fn encode_standalone(op: &StandaloneOp, out: &mut PayloadWriter<'_>) -> Result<(
         }
         StandaloneOp::PutCatalog(record) => encode_catalog_record(record, out),
         StandaloneOp::DropCatalog(key) => encode_catalog_key(key, out),
-        StandaloneOp::RdfGraph(op) => match op {
-            RdfGraphOp::Create { name } => encode_bincode_payload(name, out),
-            RdfGraphOp::Drop { target } | RdfGraphOp::Clear { target } => {
-                encode_bincode_payload(target, out)
-            }
-            RdfGraphOp::Copy { source, target }
-            | RdfGraphOp::Move { source, target }
-            | RdfGraphOp::Add { source, target } => encode_bincode_payload(&(source, target), out),
-        },
+        StandaloneOp::RdfGraph(op) => encode_rdf_graph(op, out),
+    }
+}
+
+/// Writes the payload of an RDF graph operation's record.
+fn encode_rdf_graph(op: &RdfGraphOp, out: &mut PayloadWriter<'_>) -> Result<()> {
+    match op {
+        RdfGraphOp::Create { name } => encode_bincode_payload(name, out),
+        RdfGraphOp::Drop { target } | RdfGraphOp::Clear { target } => {
+            encode_bincode_payload(target, out)
+        }
+        RdfGraphOp::Copy { source, target }
+        | RdfGraphOp::Move { source, target }
+        | RdfGraphOp::Add { source, target } => encode_bincode_payload(&(source, target), out),
     }
 }
 
@@ -2830,5 +2841,27 @@ mod tests {
         labels.rotate_right(1);
         let record = node_of(labels, Vec::new());
         assert_eq!(read_all(&framed(&record)).unwrap(), [record]);
+    }
+
+    /// A transaction's graph operation, borrowed from its change set, is
+    /// written as the standalone record of that operation: the same kind,
+    /// flags and bytes, so replay reads it as one.
+    #[test]
+    fn a_borrowed_graph_operation_encodes_as_its_standalone_record() {
+        let mut seen = 0;
+        for record in every_variant() {
+            let LogRecord::Standalone(StandaloneOp::RdfGraph(op)) = &record else {
+                continue;
+            };
+            let borrowed = LogRecordRef::RdfGraph(op);
+            assert_eq!(borrowed.kind(), record.borrowed().kind(), "{op:?}");
+            assert_eq!(borrowed.flags(), record.borrowed().flags(), "{op:?}");
+            let mut bytes = Vec::new();
+            borrowed.encode_framed(&mut bytes).unwrap();
+            assert_eq!(bytes, framed(&record), "{op:?}");
+            assert_eq!(read_all(&bytes).unwrap(), std::slice::from_ref(&record));
+            seen += 1;
+        }
+        assert!(seen >= 6, "every graph operation, {seen} seen");
     }
 }

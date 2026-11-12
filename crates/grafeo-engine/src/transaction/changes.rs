@@ -742,9 +742,10 @@ impl TransactionChanges {
         self.state.lock().triples.written_graph(graph)
     }
 
-    /// Applies the RDF entries to `store` in recorded order, then
-    /// `graph_ops` (the RDF graph operations the transaction queued), in one
-    /// apply at the commit ([`RdfStore::apply_commit`]), which with
+    /// Applies the RDF entries to `store` in recorded order (triples, and
+    /// graph operations in their place among them), then `graph_ops` (the
+    /// RDF graph operations the transaction queued), in one apply at the
+    /// commit ([`RdfStore::apply_commit`]), which with
     /// [`ApplyMode::Publish`] publishes what it changed for readers at
     /// earlier snapshots. Drops the entries that changed nothing (a triple
     /// another transaction inserted or deleted first since this one wrote
@@ -776,14 +777,20 @@ impl TransactionChanges {
         if state.triples.is_empty() && graph_ops.is_empty() {
             return Ok(());
         }
-        // The entries' positions, and the commit's changes in their order;
-        // the graph key is made once per run of one graph.
+        // Each triple entry's position with its change's, and the commit's
+        // changes in their order; the graph key is made once per run of one
+        // graph.
         let mut positions = Vec::new();
         let mut changes = Vec::new();
         let mut last: Option<(GraphSlot, Option<Arc<str>>)> = None;
         for (at, change) in state.set.entries().iter().enumerate() {
-            let Change::Data { graph, op, .. } = change else {
-                continue;
+            let (graph, op) = match change {
+                Change::Data { graph, op, .. } => (graph, op),
+                Change::RdfGraph { op, .. } => {
+                    changes.push(CommitChange::Graph(op.clone()));
+                    continue;
+                }
+                Change::Bulk(_) => continue,
             };
             let (DataOp::InsertTriple { triple } | DataOp::DeleteTriple { triple }) = op else {
                 continue;
@@ -801,19 +808,17 @@ impl TransactionChanges {
                 }
             };
             let triple = Triple::from(&**triple);
-            positions.push(at);
+            positions.push((at, changes.len()));
             changes.push(match op {
                 DataOp::InsertTriple { .. } => CommitChange::Insert { graph: key, triple },
                 _ => CommitChange::Delete { graph: key, triple },
             });
         }
-        let triples = changes.len();
         changes.extend(graph_ops.into_iter().map(CommitChange::Graph));
         let applied = store.apply_commit(mode, changes);
         let unchanged: Vec<usize> = positions
             .into_iter()
-            .zip(&applied.changed[..triples])
-            .filter_map(|(at, changed)| (!changed).then_some(at))
+            .filter_map(|(at, change)| (!applied.changed[change]).then_some(at))
             .collect();
         if unchanged.is_empty() {
             return Ok(());
@@ -834,6 +839,7 @@ impl TransactionChanges {
                     version,
                 } => state.set.push(graph, op, before, version)?,
                 Change::Bulk(range) => state.set.push_bulk(range)?,
+                Change::RdfGraph { graph, op } => state.set.push_rdf_graph(graph, op)?,
             }
         }
         Ok(())
@@ -876,6 +882,7 @@ impl TransactionChanges {
                         Table::Edges => bulk_edges += ids,
                     }
                 }
+                Change::RdfGraph { .. } => {}
             }
         }
         let nodes = seen

@@ -90,6 +90,7 @@ conformance = []
 
 # Testing utilities (zero overhead when disabled)
 testing-crash-injection = ["grafeo-common/testing-crash-injection"]  # Deterministic crash injection for recovery testing
+testing-statement-injection = ["grafeo-common/testing-statement-injection"]  # Test only: hooks at the steps of an RDF commit's apply (`commit_hook::during_next_rdf_apply`)
 
 [lints]
 workspace = true

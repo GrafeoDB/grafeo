@@ -61,12 +61,12 @@ pub mod shacl;
 
 pub use dictionary::{DictionaryEntry, DictionaryFull, TermDictionary};
 pub use graph_store_adapter::RdfGraphStoreAdapter;
-pub use overlay::{RdfOverlay, RdfView};
+pub use overlay::{RdfOverlay, RdfView, SnapshotGone};
 pub use section::RdfStoreSection;
 pub use sink::{BatchInsertSink, CountSink, TripleSink, VecSink};
 pub use store::{
-    BulkLoadResult, NTriplesError, RdfStore, RdfStoreConfig, STATISTICS_MIN_DRIFT, parse_ntriples,
-    parse_ntriples_text,
+    Applied, ApplyMode, BulkLoadResult, CommitChange, NTriplesError, RdfStore, RdfStoreConfig,
+    STATISTICS_MIN_DRIFT, parse_ntriples, parse_ntriples_text,
 };
 pub use term::{BlankNode, Iri, Literal, Term, TermParseError};
 pub use triple::{Triple, TriplePattern};

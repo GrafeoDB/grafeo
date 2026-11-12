@@ -14,7 +14,9 @@
 //! RDF update, a direct write, a direct graph or index call, an import or an
 //! RDF batch insert) once it holds commits off and before it changes anything
 //! ([`during_next_held_change`]), or after a backend write has been applied
-//! and recorded ([`after_next_data_write`]). [`fail_next_change_record`]
+//! and recorded ([`after_next_data_write`]), or at a step of the next RDF
+//! commit's apply under the dataset guard ([`during_next_rdf_apply`]).
+//! [`fail_next_change_record`]
 //! makes the recording of a direct write's change fail.
 //! [`checkpoints_started`] counts the checkpoints started on a database
 //! file, from any thread (the engine calls [`count_checkpoint`]).
@@ -50,6 +52,33 @@ mod inner {
         static DURING_CHECKPOINT_ARM: RefCell<Option<Hook>> = const { RefCell::new(None) };
         static BEFORE_FIRST_COMMIT_ARMING: RefCell<Option<Hook>> = const { RefCell::new(None) };
         static AFTER_FIRST_COMMIT_ARMING: RefCell<Option<Hook>> = const { RefCell::new(None) };
+        static DURING_RDF_APPLY: RefCell<Option<(super::RdfApplyStep, Hook)>> =
+            const { RefCell::new(None) };
+    }
+
+    /// Arms `hook` to run once, inside the next RDF commit apply on this
+    /// thread, at `step`: while it holds the dataset's apply guard.
+    pub fn during_next_rdf_apply(step: super::RdfApplyStep, hook: impl FnOnce() + 'static) {
+        DURING_RDF_APPLY.with(|slot| *slot.borrow_mut() = Some((step, Box::new(hook))));
+    }
+
+    /// Runs the [`during_next_rdf_apply`] hook armed on this thread for
+    /// `step`, if any. Called by the RDF store's commit apply at each step.
+    #[inline]
+    pub fn run_during_rdf_apply(step: super::RdfApplyStep) {
+        let hook = DURING_RDF_APPLY.with(|slot| {
+            let mut slot = slot.borrow_mut();
+            match slot.take() {
+                Some((armed, hook)) if armed == step => Some(hook),
+                other => {
+                    *slot = other;
+                    None
+                }
+            }
+        });
+        if let Some(hook) = hook {
+            hook();
+        }
     }
 
     /// Arms `hook` to run once inside the next arming of the automatic
@@ -447,9 +476,29 @@ mod inner {
     pub fn checkpoints_started(_path: &Path) -> usize {
         0
     }
+
+    /// No-op when injection is disabled.
+    pub fn during_next_rdf_apply(_step: super::RdfApplyStep, _hook: impl FnOnce() + 'static) {}
+
+    /// No-op when injection is disabled.
+    #[inline]
+    pub fn run_during_rdf_apply(_step: super::RdfApplyStep) {}
 }
 
 pub use inner::*;
+
+/// A step of an RDF commit's apply, all while it holds the dataset's apply
+/// guard (see [`during_next_rdf_apply`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RdfApplyStep {
+    /// The guard is taken; nothing is applied yet.
+    GuardTaken,
+    /// The first change (or run of inserts into one graph) is applied, and
+    /// more follow.
+    Halfway,
+    /// Every change is applied; the overlay entry is not published yet.
+    BeforePublish,
+}
 
 #[cfg(all(test, feature = "testing-statement-injection"))]
 mod tests {
@@ -464,6 +513,20 @@ mod tests {
         after_next_commit_epoch(move || counter.set(counter.get() + 1));
         run_after_commit_epoch();
         run_after_commit_epoch();
+        assert_eq!(runs.get(), 1);
+    }
+
+    #[test]
+    fn an_rdf_apply_hook_runs_at_its_step_only() {
+        let runs = Rc::new(Cell::new(0));
+        let counter = Rc::clone(&runs);
+        during_next_rdf_apply(RdfApplyStep::Halfway, move || {
+            counter.set(counter.get() + 1);
+        });
+        run_during_rdf_apply(RdfApplyStep::GuardTaken);
+        assert_eq!(runs.get(), 0, "another step keeps it armed");
+        run_during_rdf_apply(RdfApplyStep::Halfway);
+        run_during_rdf_apply(RdfApplyStep::Halfway);
         assert_eq!(runs.get(), 1);
     }
 

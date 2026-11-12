@@ -2,6 +2,14 @@
 
 All notable changes to Grafeo, for future reference (and enjoyment).
 
+## [0.6.3] - Unreleased
+
+Performance release: faster queries, a memory limit that holds, and fixes for the regressions of 0.6.2.
+
+### Fixed
+
+- **SQL/PGQ ranges on one-kind columns use the range scan again**: a `<`, `<=`, `>`, `>=` or `BETWEEN` on a property whose values are all of the bound's kind reads its index by range and skips chunks by their stored bounds, as in 0.6.1. A column holding values of several kinds still scans and raises 22G04.
+
 ## [0.6.2] - 2026-11-08
 
 Correctness release: comparisons, nulls and operands of the wrong kind follow ISO GQL and openCypher more closely, a refused permission has its own code, a session can be kept from reading local files, and a graph cleared and written back keeps its size. Results that change on upgrade: a string never equals a number, `{k: NULL}` in a pattern finds nothing, an operator given a value of the wrong kind raises 22G12 where it answered null, and a file database checkpoints by itself (Changed lists each). Plus join orders from sampled degrees, cycles closed by intersection and lookups that need no index.

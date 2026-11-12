@@ -621,12 +621,7 @@ fn serial(statements: &[&str]) -> Vec<String> {
 
 #[test]
 fn own_graph_operations_apply_in_order_and_are_seen() {
-    // Comes off with #718 D2.
-    xfail(
-        "SPARQL Update in a transaction: its graph operations apply in order with its triple writes, and its later reads see them",
-        "#718",
-        own_graph_operations_apply_in_order_and_are_seen_holds,
-    );
+    own_graph_operations_apply_in_order_and_are_seen_holds();
 }
 
 /// A transaction's own graph operations run in order with its triple writes, and its later reads
@@ -729,12 +724,7 @@ fn a_savepoint_rollback_takes_back_a_graph_operation() {
 
 #[test]
 fn a_drop_and_insert_commit_reads_old_before_and_new_after() {
-    // Comes off with #718 D2.
-    xfail(
-        "snapshot isolation: a reader that began before a DROP GRAPH and INSERT commit reads the old graph",
-        "#718",
-        a_drop_and_insert_commit_reads_old_before_and_new_after_holds,
-    );
+    a_drop_and_insert_commit_reads_old_before_and_new_after_holds();
 }
 
 /// `DROP GRAPH g; INSERT DATA { GRAPH g ... }` committed by another transaction: a reader that
@@ -776,7 +766,7 @@ mod replay {
     use grafeo_engine::config::StorageFormat;
     use grafeo_engine::{Config, GrafeoDB};
 
-    use super::{ALL, SEED, answer, q, serial, xfail};
+    use super::{ALL, SEED, answer, q, serial};
 
     const SCENARIO_VAR: &str = "GRAFEO_SPARQL_SNAPSHOT_REPLAY_SCENARIO";
     const PATH_VAR: &str = "GRAFEO_SPARQL_SNAPSHOT_REPLAY_PATH";
@@ -807,13 +797,7 @@ mod replay {
 
     #[test]
     fn a_transactions_graph_operations_replay_in_order_after_a_crash() {
-        // Comes off with #718 D2: D1 logs and replays a graph operation in its place, but until D2
-        // a transaction cannot run SPARQL after one, so the child fails before the crash.
-        xfail(
-            "WAL replay: a transaction's graph operations replay in order with its triple writes",
-            "#718",
-            a_transactions_graph_operations_replay_in_order_after_a_crash_holds,
-        );
+        a_transactions_graph_operations_replay_in_order_after_a_crash_holds();
     }
 
     /// A child seeds a database file, commits one scenario's transaction and exits without
@@ -1041,12 +1025,7 @@ fn triple_conflicts_follow_what_each_transaction_changed() {
 
 #[test]
 fn graph_key_conflicts_follow_what_each_transaction_changed() {
-    // Comes off with #718 D2.
-    xfail(
-        "snapshot isolation: a graph operation conflicts with a committed one of the same graph",
-        "#718",
-        graph_key_conflicts_follow_what_each_transaction_changed_holds,
-    );
+    graph_key_conflicts_follow_what_each_transaction_changed_holds();
 }
 
 /// The graph-key rules (D): a graph operation conflicts with a committed one of the same graph;

@@ -1,50 +1,126 @@
-//! RDF writes in a transaction's change set (#414).
+//! RDF writes in a transaction's change set (#414, #718).
 //!
-//! An RDF update records each triple it inserts or deletes in its
-//! transaction's change set, as an entry of the triple's graph, and changes
-//! nothing in the store: the commit applies the entries in order
-//! ([`TransactionChanges::apply_rdf`]), then logs and reports to change
-//! data capture the ones that changed the store. A rollback, a rollback to a
-//! savepoint and a failed statement drop entries with the rest of the set,
-//! so they leave nothing in the store, the WAL or the change feed.
+//! An RDF update records each triple it inserts or deletes, and each
+//! whole-graph operation (`CREATE`, `DROP`, `CLEAR`, `COPY`, `MOVE`, `ADD`),
+//! in its transaction's change set, in order, and changes nothing in the
+//! store: the commit applies the entries in that order
+//! ([`TransactionChanges::apply_rdf`]) and logs them as one group. A
+//! rollback, a rollback to a savepoint and a failed statement drop entries
+//! with the rest of the set, so they leave nothing in the store, the WAL or
+//! the change feed.
 //!
 //! The transaction's reads see its own writes: [`PendingTriples`] keeps, per
-//! graph, whether each triple it wrote is there once it commits, and
-//! [`RdfWriter::find`] lays that over the store.
+//! graph, what the transaction's graph operations left of it (its base) and
+//! whether each triple it wrote is there once it commits, and
+//! [`RdfWriter::find`] lays that over the store at the transaction's view.
 //!
-//! A whole-graph operation (`CREATE`, `DROP`, `CLEAR`, `COPY`, `MOVE`,
-//! `ADD`) is a standalone change (see `database::standalone`): it takes
-//! effect at once, also inside a transaction, and is refused with a write
-//! conflict while an open transaction, the caller's own included, has RDF
-//! entries in a graph it changes.
+//! A graph operation claims each graph it changes: a second transaction that
+//! changes one of them fails with a write conflict, at its statement while
+//! the first is open and at its commit when the first committed after it
+//! began. A graph operation and a triple write in the same graph do not
+//! conflict.
 
 use grafeo_core::graph::rdf::RdfView;
 use std::sync::Arc;
 
 use grafeo_common::change::{Change, ChangeSet, DataOp, RdfGraphOp};
 use grafeo_common::storage::log_record::RdfGraphTarget;
-use grafeo_common::utils::error::{Error, Result, TransactionError};
+#[cfg(any(rdf_language, test))]
+use grafeo_common::utils::error::Result;
+use grafeo_common::utils::error::{Error, TransactionError};
 use grafeo_common::utils::hash::{FxHashMap, FxHashSet};
 use grafeo_core::execution::operators::{
     OperatorError, RdfPathPendingGraph, RdfPathReadControl, RdfPathReadOverlay,
 };
 use grafeo_core::graph::rdf::{RdfStore, Triple, TriplePattern};
 
-use super::{CommitsHeld, TransactionChanges, TransactionManager};
+use super::{TransactionChanges, TransactionManager};
 
 /// The triples of one graph a transaction wrote: whether each is there once
 /// the transaction commits.
 type GraphTriples = FxHashMap<Arc<Triple>, bool>;
 
+/// What the transaction's own graph operations left of a graph, under the
+/// triples it wrote there since.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum PendingBase {
+    /// The graph as the transaction's view has it.
+    #[default]
+    View,
+    /// Emptied (`CLEAR`, or `DROP` of the default graph): it exists and holds
+    /// only what the transaction inserted since.
+    Emptied,
+    /// Created by the transaction: it exists, empty but for its inserts.
+    Created,
+    /// Dropped: absent, unless the transaction inserted into it since.
+    Dropped,
+}
+
+/// One graph as the transaction's own writes leave it.
+#[derive(Debug, Default)]
+struct PendingGraph {
+    /// What its graph operations left of it.
+    base: PendingBase,
+    /// Its triple writes since: whether each triple is there.
+    triples: GraphTriples,
+    /// Whether it inserted a triple since its last graph operation: the
+    /// commit creates the graph, even when a later delete leaves it empty.
+    inserted: bool,
+}
+
+impl PendingGraph {
+    /// The graph after an operation that left it `base`.
+    fn based(base: PendingBase) -> Self {
+        Self {
+            base,
+            ..Self::default()
+        }
+    }
+
+    /// Whether the transaction's committed triples are hidden: its graph
+    /// operations replaced them.
+    fn hides_store(&self) -> bool {
+        self.base != PendingBase::View
+    }
+
+    /// Whether `triple` is there for the transaction, when its own writes
+    /// decide: its last write of the triple, or a base that hides the store.
+    fn state(&self, triple: &Triple) -> Option<bool> {
+        self.triples
+            .get(triple)
+            .copied()
+            .or_else(|| self.hides_store().then_some(false))
+    }
+
+    /// Whether the graph exists for the transaction, when its own writes
+    /// decide; `None` leaves it to the view.
+    fn exists(&self) -> Option<bool> {
+        match self.base {
+            PendingBase::Created | PendingBase::Emptied => Some(true),
+            PendingBase::Dropped => Some(self.inserted),
+            PendingBase::View => self.inserted.then_some(true),
+        }
+    }
+
+    /// Whether nothing of the transaction is in the graph.
+    fn is_untouched(&self) -> bool {
+        self.base == PendingBase::View && self.triples.is_empty()
+    }
+}
+
 /// One graph's existing transaction-owned net, borrowed only while its
 /// change-set lock is held. Reading it makes no copy of pending triples.
 struct PathPendingGraph<'a> {
-    triples: Option<&'a GraphTriples>,
+    graph: Option<&'a PendingGraph>,
 }
 
 impl RdfPathPendingGraph for PathPendingGraph<'_> {
     fn state(&self, triple: &Triple) -> Option<bool> {
-        self.triples?.get(triple).copied()
+        self.graph?.triples.get(triple).copied()
+    }
+
+    fn hides_store(&self) -> bool {
+        self.graph.is_some_and(PendingGraph::hides_store)
     }
 
     fn visit_present(
@@ -56,8 +132,8 @@ impl RdfPathPendingGraph for PathPendingGraph<'_> {
             &mut RdfPathReadControl<'_>,
         ) -> std::result::Result<(), OperatorError>,
     ) -> std::result::Result<(), OperatorError> {
-        if let Some(triples) = self.triples {
-            for (triple, &present) in triples {
+        if let Some(graph) = self.graph {
+            for (triple, &present) in &graph.triples {
                 control.poll()?;
                 if present && pattern.matches(triple) {
                     visit(triple, control)?;
@@ -94,19 +170,22 @@ impl RdfPathReadOverlay for PathReadOverlay {
         control: &mut RdfPathReadControl<'_>,
         visit: &mut dyn FnMut(
             &str,
+            bool,
             &mut RdfPathReadControl<'_>,
         ) -> std::result::Result<(), OperatorError>,
     ) -> std::result::Result<(), OperatorError> {
-        // Borrows the surviving records, so a rollback removes that existence too.
-        self.changes.with_path_pending(control, |_, set, control| {
-            for change in set.entries() {
-                control.poll()?;
-                if let Some(name) = graph_inserted_into(set, change) {
-                    visit(name, control)?;
+        // The pending state is recomputed on a rollback, so it holds only what
+        // survives.
+        self.changes
+            .with_path_pending(control, |pending, _, control| {
+                for (name, graph) in &pending.named {
+                    control.poll()?;
+                    if let Some(exists) = graph.exists() {
+                        visit(name, exists, control)?;
+                    }
                 }
-            }
-            Ok(())
-        })
+                Ok(())
+            })
     }
 
     fn retained_bytes(&self) -> usize {
@@ -114,42 +193,27 @@ impl RdfPathReadOverlay for PathReadOverlay {
     }
 }
 
-/// The named graph `change`, an entry of `set`, inserts a triple into: the commit creates it, even
-/// when a later delete leaves it empty. A delete creates no graph.
-pub(super) fn graph_inserted_into<'set>(
-    set: &'set ChangeSet,
-    change: &Change,
-) -> Option<&'set str> {
-    let Change::Data {
-        graph,
-        op: DataOp::InsertTriple { .. },
-        ..
-    } = change
-    else {
-        return None;
-    };
-    set.graph(*graph).and_then(|graph| graph.key.as_deref())
-}
-
-/// The net effect of a transaction's RDF entries, per graph: for each triple
-/// it inserted or deleted, whether the triple is there once it commits (its
-/// last write of the triple decides).
-#[derive(Default)]
+/// The net effect of a transaction's RDF entries, per graph: what its graph
+/// operations left of each graph, and for each triple it inserted or deleted
+/// since, whether the triple is there once it commits (its last write of the
+/// triple decides).
+#[derive(Debug, Default)]
 pub(crate) struct PendingTriples {
     /// The default graph's.
-    default: GraphTriples,
+    default: PendingGraph,
     /// Each named graph's, by name.
-    named: FxHashMap<String, GraphTriples>,
+    named: FxHashMap<String, PendingGraph>,
+    /// How many graph operations the transaction recorded: one of a
+    /// statement's own transaction (`COPY`, `MOVE` or `ADD` applied whole at
+    /// its commit) leaves no base, but the commit still has it to apply.
+    graph_ops: usize,
 }
 
 impl PendingTriples {
     /// Borrows one graph's net for a native path lookup.
     fn path_graph(&self, graph: Option<&str>) -> PathPendingGraph<'_> {
         PathPendingGraph {
-            triples: match graph {
-                None => Some(&self.default),
-                Some(name) => self.named.get(name),
-            },
+            graph: self.graph(graph),
         }
     }
 
@@ -157,54 +221,131 @@ impl PendingTriples {
     pub(crate) fn of(set: &ChangeSet) -> Self {
         let mut pending = Self::default();
         for change in set.entries() {
-            let Change::Data { graph, op, .. } = change else {
-                continue;
-            };
-            let (triple, present) = match op {
-                DataOp::InsertTriple { triple } => (triple, true),
-                DataOp::DeleteTriple { triple } => (triple, false),
-                _ => continue,
-            };
-            let key = set.graph(*graph).and_then(|graph| graph.key.as_deref());
-            pending.note(key, Arc::new(Triple::from(&**triple)), present);
+            match change {
+                Change::Data { graph, op, .. } => {
+                    let (triple, present) = match op {
+                        DataOp::InsertTriple { triple } => (triple, true),
+                        DataOp::DeleteTriple { triple } => (triple, false),
+                        _ => continue,
+                    };
+                    let key = set.graph(*graph).and_then(|graph| graph.key.as_deref());
+                    pending.note(key, Arc::new(Triple::from(&**triple)), present);
+                }
+                Change::RdfGraph { op, .. } => pending.note_graph_op(op),
+                Change::Bulk(_) => {}
+            }
         }
         pending
+    }
+
+    /// The graph `graph` (`None` for the default graph), if the transaction
+    /// touched it.
+    fn graph(&self, graph: Option<&str>) -> Option<&PendingGraph> {
+        match graph {
+            None => Some(&self.default),
+            Some(name) => self.named.get(name),
+        }
     }
 
     /// Notes a write of `triple` in `graph` (`None` for the default graph):
     /// the triple is there after it (`present`) or not.
     pub(crate) fn note(&mut self, graph: Option<&str>, triple: Arc<Triple>, present: bool) {
-        let triples = match graph {
+        let graph = match graph {
             None => &mut self.default,
             Some(name) => self.named.entry(name.to_string()).or_default(),
         };
-        triples.insert(triple, present);
+        graph.inserted |= present;
+        graph.triples.insert(triple, present);
+    }
+
+    /// Notes a graph operation: the graph it changes starts over from the
+    /// base it leaves, and the triple writes before it in that graph are
+    /// gone. An operation on several graphs, and a `COPY`, `MOVE` or `ADD`,
+    /// is recorded expanded where a read can follow it (see
+    /// [`RdfWriter::graph_op`]), so only the count notes it here.
+    pub(crate) fn note_graph_op(&mut self, op: &RdfGraphOp) {
+        self.graph_ops += 1;
+        match op {
+            RdfGraphOp::Create { name } => {
+                self.named
+                    .insert(name.clone(), PendingGraph::based(PendingBase::Created));
+            }
+            RdfGraphOp::Drop {
+                target: RdfGraphTarget::Named(name),
+            } => {
+                self.named
+                    .insert(name.clone(), PendingGraph::based(PendingBase::Dropped));
+            }
+            RdfGraphOp::Clear {
+                target: RdfGraphTarget::Named(name),
+            } => {
+                let base = match self.named.get(name).map(|graph| graph.base) {
+                    Some(PendingBase::Created) => PendingBase::Created,
+                    _ => PendingBase::Emptied,
+                };
+                self.named.insert(name.clone(), PendingGraph::based(base));
+            }
+            RdfGraphOp::Drop {
+                target: RdfGraphTarget::Default,
+            }
+            | RdfGraphOp::Clear {
+                target: RdfGraphTarget::Default,
+            } => self.default = PendingGraph::based(PendingBase::Emptied),
+            RdfGraphOp::Drop { .. }
+            | RdfGraphOp::Clear { .. }
+            | RdfGraphOp::Copy { .. }
+            | RdfGraphOp::Move { .. }
+            | RdfGraphOp::Add { .. } => {}
+        }
     }
 
     /// Whether `triple` is in `graph` once the transaction commits, if the
-    /// transaction wrote it there.
+    /// transaction's own writes decide: its last write of the triple there,
+    /// or a graph operation that replaced the graph's committed triples.
     pub(crate) fn state(&self, graph: Option<&str>, triple: &Triple) -> Option<bool> {
-        match graph {
-            None => self.default.get(triple).copied(),
-            Some(name) => self.named.get(name)?.get(triple).copied(),
-        }
+        self.graph(graph)?.state(triple)
     }
 
-    /// Whether the transaction wrote no triple.
+    /// Whether the transaction wrote no triple and ran no graph operation.
     pub(crate) fn is_empty(&self) -> bool {
-        self.default.is_empty() && self.named.is_empty()
+        self.default.is_untouched() && self.named.is_empty() && self.graph_ops == 0
     }
 
-    /// The first graph the transaction wrote that `graph` takes, as an
-    /// error names it: "the default graph", or the name in angle brackets.
-    pub(crate) fn written_graph(&self, graph: impl Fn(Option<&str>) -> bool) -> Option<String> {
-        if !self.default.is_empty() && graph(None) {
-            return Some("the default graph".to_string());
-        }
-        self.named
-            .keys()
-            .find(|name| graph(Some(name)))
-            .map(|name| format!("<{name}>"))
+    /// Whether the named graph `name` exists for the transaction, when its
+    /// own writes decide; `None` leaves it to the view.
+    pub(crate) fn graph_exists(&self, name: &str) -> Option<bool> {
+        self.named.get(name).and_then(PendingGraph::exists)
+    }
+
+    /// The named graphs the transaction sees, from `view`, its view's: without
+    /// those it dropped, with those it created or inserted into (an emptied
+    /// one too, as its commit creates them).
+    pub(crate) fn graph_names(&self, mut view: Vec<String>) -> Vec<String> {
+        view.retain(|name| self.graph_exists(name) != Some(false));
+        view.extend(
+            self.named
+                .iter()
+                .filter(|(_, graph)| graph.exists() == Some(true))
+                .map(|(name, _)| name.clone()),
+        );
+        view.sort_unstable();
+        view.dedup();
+        view
+    }
+
+    /// The graphs whose committed triples the transaction's graph operations
+    /// hide (`None` for the default graph).
+    pub(crate) fn hidden_graphs(&self) -> Vec<Option<String>> {
+        let default = self.default.hides_store().then_some(None);
+        default
+            .into_iter()
+            .chain(
+                self.named
+                    .iter()
+                    .filter(|(_, graph)| graph.hides_store())
+                    .map(|(name, _)| Some(name.clone())),
+            )
+            .collect()
     }
 
     /// The triples the transaction wrote that match `pattern`, in the graphs
@@ -224,16 +365,16 @@ impl PendingTriples {
             }
         };
         match graphs {
-            None => add(None, &self.default),
+            None => add(None, &self.default.triples),
             Some([]) => {
-                for (name, triples) in &self.named {
-                    add(Some(name), triples);
+                for (name, graph) in &self.named {
+                    add(Some(name), &graph.triples);
                 }
             }
             Some(names) => {
                 for name in names {
-                    if let Some(triples) = self.named.get(*name) {
-                        add(Some(name), triples);
+                    if let Some(graph) = self.named.get(*name) {
+                        add(Some(name), &graph.triples);
                     }
                 }
             }
@@ -250,7 +391,7 @@ impl PendingTriples {
         &'a self,
         other: &'a Self,
     ) -> Option<(Option<&'a str>, &'a Triple)> {
-        if let Some(triple) = graph_conflict(&self.default, &other.default) {
+        if let Some(triple) = graph_conflict(&self.default.triples, &other.default.triples) {
             return Some((None, triple));
         }
         let (small, large) = if self.named.len() <= other.named.len() {
@@ -258,9 +399,10 @@ impl PendingTriples {
         } else {
             (&other.named, &self.named)
         };
-        small.iter().find_map(|(name, triples)| {
+        small.iter().find_map(|(name, graph)| {
             let theirs = large.get(name)?;
-            graph_conflict(triples, theirs).map(|triple| (Some(name.as_str()), triple))
+            graph_conflict(&graph.triples, &theirs.triples)
+                .map(|triple| (Some(name.as_str()), triple))
         })
     }
 }
@@ -300,33 +442,33 @@ pub(crate) fn triple_conflict(graph: Option<&str>, triple: &Triple) -> Error {
     )))
 }
 
-/// How a statement of a transaction writes RDF: its triples go to the
-/// transaction's change set, and its reads see them over the store.
+/// How a statement of a transaction writes RDF: its triples and graph
+/// operations go to the transaction's change set, and its reads see them
+/// over the store.
 #[derive(Clone)]
 pub(crate) struct RdfWriter {
-    /// The store the commit applies the triples to.
+    /// The store the commit applies the entries to.
     store: Arc<RdfStore>,
     /// The transaction's changes.
     changes: Arc<TransactionChanges>,
-    /// The transaction manager: the write freeze around each record, and
-    /// the hold of a whole-graph operation.
+    /// The transaction manager: the write freeze around each record, and the
+    /// claims of graph operations.
     manager: Arc<TransactionManager>,
-    /// The WAL a whole-graph operation is logged to, when the database logs.
-    #[cfg(feature = "wal")]
-    wal: Option<Arc<grafeo_storage::wal::Wal>>,
-    /// Whether whole-graph operations wait for the commit of a transaction the session
-    /// opened, as its other schema statements do.
-    queues_graph_ops: bool,
+    /// Whether a `COPY`, `MOVE` or `ADD` is recorded as what the transaction
+    /// read (the target's swap and one insert per source triple): in a
+    /// transaction later statements read. A statement's own transaction
+    /// records it whole, applied at its commit.
+    expands_copies: bool,
     /// The view the transaction reads the store at: its snapshot.
     view: RdfView,
 }
 
 impl RdfWriter {
-    /// This writer, in a transaction a session opened: a whole-graph operation queues for
-    /// its commit.
+    /// This writer, in a transaction later statements read: a `COPY`, `MOVE`
+    /// or `ADD` is recorded as what the transaction read.
     #[cfg(rdf_language)]
-    pub(crate) fn queuing_graph_ops(mut self) -> Self {
-        self.queues_graph_ops = true;
+    pub(crate) fn expanding_copies(mut self) -> Self {
+        self.expands_copies = true;
         self
     }
 
@@ -351,16 +493,13 @@ impl RdfWriter {
         store: Arc<RdfStore>,
         changes: Arc<TransactionChanges>,
         manager: Arc<TransactionManager>,
-        #[cfg(feature = "wal")] wal: Option<Arc<grafeo_storage::wal::Wal>>,
     ) -> Result<Self> {
         let view = changes.rdf_view(&store)?;
         Ok(Self {
             store,
             changes,
             manager,
-            #[cfg(feature = "wal")]
-            wal,
-            queues_graph_ops: false,
+            expands_copies: false,
             view,
         })
     }
@@ -378,14 +517,13 @@ impl RdfWriter {
             store,
             changes,
             manager,
-            #[cfg(feature = "wal")]
-            wal: None,
-            queues_graph_ops: false,
+            expands_copies: false,
             view: RdfView::latest(grafeo_core::graph::rdf::LatestUse::Test),
         }
     }
 
     /// The view the transaction reads the store at.
+    #[cfg(any(rdf_language, test))]
     pub(crate) fn view(&self) -> &RdfView {
         &self.view
     }
@@ -442,37 +580,55 @@ impl RdfWriter {
             .map_err(OperatorError::from)
     }
 
-    /// Whether the transaction sees `triple` in `graph`: its own last write
-    /// of it decides, the store otherwise.
+    /// Whether the transaction sees `triple` in `graph`: its own writes
+    /// decide (its last write of the triple, or a graph operation that
+    /// replaced the graph's committed triples), the store otherwise.
     fn sees(&self, graph: Option<&str>, triple: &Triple) -> bool {
         self.changes
             .pending_triple(graph, triple)
             .unwrap_or_else(|| holds(&self.store, &self.view, graph, triple))
     }
 
-    /// Whether the transaction wrote a triple that it has not committed.
+    /// Whether the transaction wrote a triple or ran a graph operation that
+    /// it has not committed.
     pub(crate) fn has_pending(&self) -> bool {
         self.changes.has_pending_triples()
     }
 
-    /// The named graphs the transaction inserted a triple into, which its commit creates (see
-    /// [`TransactionChanges::rdf_graphs_inserted_into`]).
-    pub(crate) fn graphs_inserted_into(&self) -> Vec<String> {
-        self.changes.rdf_graphs_inserted_into()
+    /// Whether the named graph `name` exists for the transaction: as its own
+    /// graph operations and inserts leave it, the view otherwise.
+    pub(crate) fn graph_exists(&self, name: &str) -> bool {
+        self.changes
+            .read_pending(|pending| pending.graph_exists(name))
+            .unwrap_or_else(|| self.store.graph_at(&self.view, name).is_some())
+    }
+
+    /// The named graphs the transaction sees, sorted: the view's, without
+    /// those it dropped, with those it created or inserted into.
+    pub(crate) fn graph_names(&self) -> Vec<String> {
+        let view = self.store.graph_names(&self.view);
+        self.changes
+            .read_pending(|pending| pending.graph_names(view))
     }
 
     /// The triples matching `pattern` in the graphs `graphs` names (as
     /// [`RdfStore::find_in_graphs`] reads them), each with its graph, as the
-    /// transaction sees them: what the store holds, without the triples the
-    /// transaction deleted, with those it inserted.
+    /// transaction sees them: what the store holds in the graphs its graph
+    /// operations left as they were, without the triples it deleted, with
+    /// those it inserted.
     pub(crate) fn find(
         &self,
         pattern: &TriplePattern,
         graphs: Option<&[&str]>,
     ) -> Vec<(Option<String>, Arc<Triple>)> {
         let mut found = self.store.find_in_graphs(&self.view, pattern, graphs);
-        let pending = self.changes.pending_triples_matching(pattern, graphs);
-        if pending.is_empty() {
+        let (pending, hidden) = self.changes.read_pending(|pending| {
+            if pending.is_empty() {
+                return (Vec::new(), Vec::new());
+            }
+            (pending.matching(pattern, graphs), pending.hidden_graphs())
+        });
+        if pending.is_empty() && hidden.is_empty() {
             return found;
         }
         {
@@ -481,76 +637,139 @@ impl RdfWriter {
                 .filter(|(_, _, present)| !present)
                 .map(|(graph, triple, _)| (graph.as_deref(), triple.as_ref()))
                 .collect();
-            if !deleted.is_empty() {
+            if !deleted.is_empty() || !hidden.is_empty() {
                 found.retain(|(graph, triple)| {
-                    !deleted.contains(&(graph.as_deref(), triple.as_ref()))
+                    !hidden.contains(graph)
+                        && !deleted.contains(&(graph.as_deref(), triple.as_ref()))
                 });
             }
         }
         for (graph, triple, present) in pending {
-            // A triple the store holds already is in `found`.
-            if present && !holds(&self.store, &self.view, graph.as_deref(), &triple) {
+            // A triple the store holds already is in `found`, unless its
+            // graph's committed triples are hidden.
+            if present
+                && (hidden.contains(&graph)
+                    || !holds(&self.store, &self.view, graph.as_deref(), &triple))
+            {
                 found.push((graph, triple));
             }
         }
         found
     }
 
-    /// Runs the whole-graph operation `op` as a standalone change: holds
-    /// commits and the writes of open transactions off, refuses it while an
-    /// open transaction has RDF entries in a graph it changes, runs `check`
-    /// (whether the operation applies: `false` skips it, as `SILENT` does
-    /// for a graph that is not there), then logs it as a WAL group of its
-    /// own and applies it.
+    /// The triples of `graph` (`None` for the default graph) as the
+    /// transaction sees them.
+    fn graph_triples(&self, graph: Option<&str>) -> Vec<Arc<Triple>> {
+        let names = graph.map(|name| [name]);
+        self.find(
+            &TriplePattern::any(),
+            names.as_ref().map(<[&str; 1]>::as_slice),
+        )
+        .into_iter()
+        .map(|(_, triple)| triple)
+        .collect()
+    }
+
+    /// Records the whole-graph operation `op` in the transaction, once
+    /// `check` passed (whether it applies: `false` skips it, as `SILENT` does
+    /// for a graph that is not there). Each graph it changes is claimed
+    /// first: another open transaction that changes one fails it. An
+    /// operation on `NAMED` or `ALL` is recorded per graph the transaction
+    /// sees; with [`expanding_copies`](Self::expanding_copies), a `COPY`,
+    /// `MOVE` or `ADD` as the target's swap, one insert per source triple the
+    /// transaction sees and, for a `MOVE`, the source's drop or clear. A copy,
+    /// move or add of a graph onto itself changes nothing (SPARQL 1.1 Update,
+    /// sections 3.2.3 and 3.2.4): once its check passed, it records nothing.
     ///
     /// # Errors
     ///
     /// A write conflict naming the graph (`GRAFEO-T001`); the error of
-    /// `check`; the error of the hold (the database is closed, or a commit did
-    /// not complete) or of writing the group, which applies nothing. Each
-    /// keeps its code.
+    /// `check`; the change set's refusal (a memory limit, a broken
+    /// invariant).
     pub(crate) fn graph_op(
         &self,
         op: RdfGraphOp,
-        check: impl FnOnce(&RdfStore) -> std::result::Result<bool, OperatorError>,
+        check: impl FnOnce(&Self) -> std::result::Result<bool, OperatorError>,
     ) -> std::result::Result<(), OperatorError> {
-        // A copy, move or add of a graph onto itself changes nothing (SPARQL
-        // 1.1 Update, sections 3.2.3 and 3.2.4): once its source check
-        // passed, it is not held, checked against open changes or logged.
-        if onto_itself(&op) {
-            check(&self.store)?;
+        if !check(self)? || onto_itself(&op) {
             return Ok(());
         }
-        if self.queues_graph_ops {
-            if !check(&self.store)? {
-                return Ok(());
+        let (drops, adds, moves) = (
+            matches!(op, RdfGraphOp::Drop { .. }),
+            matches!(op, RdfGraphOp::Add { .. }),
+            matches!(op, RdfGraphOp::Move { .. }),
+        );
+        match op {
+            RdfGraphOp::Drop { target } | RdfGraphOp::Clear { target }
+                if matches!(target, RdfGraphTarget::AllNamed | RdfGraphTarget::All) =>
+            {
+                // As the store applies them: `CLEAR` of `NAMED` or `ALL` takes
+                // the named graphs away, as `DROP` does.
+                if matches!(target, RdfGraphTarget::All) {
+                    self.record_graph_op(if drops {
+                        RdfGraphOp::Drop {
+                            target: RdfGraphTarget::Default,
+                        }
+                    } else {
+                        RdfGraphOp::Clear {
+                            target: RdfGraphTarget::Default,
+                        }
+                    })?;
+                }
+                for name in self.graph_names() {
+                    self.record_graph_op(RdfGraphOp::Drop {
+                        target: RdfGraphTarget::Named(name),
+                    })?;
+                }
+                Ok(())
             }
-            let op = grafeo_common::change::StandaloneOp::RdfGraph(op);
-            for claim in crate::database::standalone::claims_of(&op) {
-                self.manager
-                    .record_key(self.changes.id(), claim)
-                    .map_err(OperatorError::from)?;
+            RdfGraphOp::Copy { source, target }
+            | RdfGraphOp::Move { source, target }
+            | RdfGraphOp::Add { source, target }
+                if self.expands_copies =>
+            {
+                let triples = self.graph_triples(source.as_deref());
+                if !adds {
+                    self.record_graph_op(match &target {
+                        None => RdfGraphOp::Clear {
+                            target: RdfGraphTarget::Default,
+                        },
+                        Some(name) if self.graph_exists(name) => RdfGraphOp::Clear {
+                            target: RdfGraphTarget::Named(name.clone()),
+                        },
+                        Some(name) => RdfGraphOp::Create { name: name.clone() },
+                    })?;
+                }
+                for triple in triples {
+                    self.insert(target.as_deref(), Triple::clone(&triple))?;
+                }
+                if moves {
+                    self.record_graph_op(match source {
+                        None => RdfGraphOp::Clear {
+                            target: RdfGraphTarget::Default,
+                        },
+                        Some(name) => RdfGraphOp::Drop {
+                            target: RdfGraphTarget::Named(name),
+                        },
+                    })?;
+                }
+                Ok(())
             }
-            self.changes.queue_schema(op, None);
-            return Ok(());
+            op => self.record_graph_op(op),
         }
-        let held = crate::database::standalone::hold(&self.manager, true)?;
-        refuse_graph_op_with_open_changes(&self.manager, &held, &op)?;
-        self.manager
-            .refuse_claimed(&crate::database::standalone::rdf_graph_ops_claim(), None)
-            .map_err(OperatorError::from)?;
-        if !check(&self.store)? {
-            return Ok(());
+    }
+
+    /// Claims the graphs `op` changes, then records it, in the write freeze.
+    fn record_graph_op(&self, op: RdfGraphOp) -> std::result::Result<(), OperatorError> {
+        for claim in crate::database::standalone::rdf_graph_claims(&op) {
+            self.manager
+                .record_key(self.changes.id(), claim)
+                .map_err(OperatorError::from)?;
         }
-        crate::database::standalone::commit_rdf(
-            op,
-            &held,
-            #[cfg(feature = "wal")]
-            self.wal.as_deref(),
-            &self.store,
-            &self.manager,
-        )
-        .map_err(OperatorError::from)
+        let _writing = self.manager.write_in_progress();
+        self.changes
+            .record_rdf_graph(op)
+            .map_err(OperatorError::from)
     }
 }
 
@@ -594,11 +813,7 @@ pub(crate) fn update_privately<T>(
     };
     // A set that fails to apply drops the guard uncompleted, which poisons
     // the manager.
-    changes.apply_rdf(
-        store,
-        grafeo_core::graph::rdf::ApplyMode::Unversioned,
-        Vec::new(),
-    )?;
+    changes.apply_rdf(store, grafeo_core::graph::rdf::ApplyMode::Unversioned)?;
     commit.complete()?;
     Ok(value)
 }
@@ -643,65 +858,6 @@ fn onto_itself(op: &RdfGraphOp) -> bool {
         | RdfGraphOp::Move { source, target }
         | RdfGraphOp::Add { source, target } => source == target,
         RdfGraphOp::Create { .. } | RdfGraphOp::Drop { .. } | RdfGraphOp::Clear { .. } => false,
-    }
-}
-
-/// Whether the whole-graph operation `op` changes `graph` (`None` for the
-/// default graph): the target of each operation, and the source of a move.
-/// A create changes no triple an open transaction wrote.
-fn changes_graph(op: &RdfGraphOp, graph: Option<&str>) -> bool {
-    let named = |target: &Option<String>| target.as_deref() == graph;
-    match op {
-        RdfGraphOp::Create { .. } => false,
-        RdfGraphOp::Drop { target } | RdfGraphOp::Clear { target } => match target {
-            RdfGraphTarget::Default => graph.is_none(),
-            RdfGraphTarget::Named(name) => graph == Some(name.as_str()),
-            RdfGraphTarget::AllNamed => graph.is_some(),
-            RdfGraphTarget::All => true,
-        },
-        RdfGraphOp::Copy { target, .. } | RdfGraphOp::Add { target, .. } => named(target),
-        RdfGraphOp::Move { source, target } => named(source) || named(target),
-    }
-}
-
-/// Refuses the whole-graph operation `op` while an open transaction (the
-/// caller's own too) has RDF entries in a graph it changes: they would apply
-/// at that transaction's commit, after the operation. The caller holds
-/// commits off and the writes of open transactions out (`held`), so no
-/// transaction records an entry in the graph between this check and the
-/// operation.
-///
-/// # Errors
-///
-/// A write conflict naming the graph.
-fn refuse_graph_op_with_open_changes(
-    manager: &TransactionManager,
-    held: &CommitsHeld<'_>,
-    op: &RdfGraphOp,
-) -> Result<()> {
-    refuse_graph_op_with_changes_in(&manager.open_change_sets(held), op)
-}
-
-/// Fails when one of `open` has RDF entries in a graph `op` changes.
-///
-/// # Errors
-///
-/// A write conflict naming the graph.
-pub(crate) fn refuse_graph_op_with_changes_in(
-    open: &[Arc<TransactionChanges>],
-    op: &RdfGraphOp,
-) -> Result<()> {
-    let written = open
-        .iter()
-        .find_map(|changes| changes.written_rdf_graph(|graph| changes_graph(op, graph)));
-    match written {
-        None => Ok(()),
-        Some(name) => Err(Error::Transaction(TransactionError::WriteConflict(
-            format!(
-                "RDF graph {name} has changes of an open transaction: run the graph operation \
-                 once that transaction commits or rolls back"
-            ),
-        ))),
     }
 }
 
@@ -759,80 +915,117 @@ mod tests {
         assert_eq!(graphs(Some(&[])), named);
         assert_eq!(graphs(Some(&[paris])), named);
         assert_eq!(graphs(Some(&["http://example.org/berlin"])), Vec::new());
-
-        assert_eq!(
-            pending.written_graph(|graph| graph.is_none()).as_deref(),
-            Some("the default graph")
-        );
-        assert_eq!(
-            pending.written_graph(|graph| graph.is_some()),
-            Some(format!("<{paris}>"))
-        );
-        assert_eq!(pending.written_graph(|graph| graph == Some("x")), None);
     }
 
-    /// The graphs an operation changes, for the check against open
-    /// transactions: every target, and a move's source.
+    fn named(name: &str) -> RdfGraphTarget {
+        RdfGraphTarget::Named(name.to_string())
+    }
+
+    /// A graph operation starts the graph over from the base it leaves: the
+    /// triple writes before it there are gone, its committed triples are
+    /// hidden, and the writes after it are what the graph holds.
     #[test]
-    fn a_graph_operation_changes_its_targets_and_a_moves_source() {
-        let named = |name: &str| Some(name.to_string());
-        let paris = Some("paris");
-        let cases = [
-            (
-                RdfGraphOp::Create {
-                    name: "paris".into(),
-                },
-                [false, false, false],
-            ),
-            (
-                RdfGraphOp::Clear {
-                    target: RdfGraphTarget::Default,
-                },
-                [true, false, false],
-            ),
-            (
-                RdfGraphOp::Drop {
-                    target: RdfGraphTarget::Named("paris".into()),
-                },
-                [false, true, false],
-            ),
-            (
-                RdfGraphOp::Clear {
-                    target: RdfGraphTarget::AllNamed,
-                },
-                [false, true, true],
-            ),
-            (
-                RdfGraphOp::Drop {
-                    target: RdfGraphTarget::All,
-                },
-                [true, true, true],
-            ),
-            (
-                RdfGraphOp::Copy {
-                    source: named("paris"),
-                    target: None,
-                },
-                [true, false, false],
-            ),
-            (
-                RdfGraphOp::Add {
-                    source: None,
-                    target: named("paris"),
-                },
-                [false, true, false],
-            ),
-            (
-                RdfGraphOp::Move {
-                    source: named("paris"),
-                    target: named("berlin"),
-                },
-                [false, true, true],
-            ),
-        ];
-        for (op, expected) in cases {
-            let seen = [None, paris, Some("berlin")].map(|graph| changes_graph(&op, graph));
-            assert_eq!(seen, expected, "{op:?}");
-        }
+    fn a_graph_operation_replaces_what_the_transaction_reads_of_its_graph() {
+        let (g, h) = ("http://example.org/g", "http://example.org/h");
+        let mut pending = PendingTriples::default();
+        pending.note(Some(g), triple("alix"), true);
+        pending.note_graph_op(&RdfGraphOp::Clear { target: named(g) });
+        assert_eq!(pending.state(Some(g), &triple("alix")), Some(false));
+        assert_eq!(
+            pending.state(Some(g), &triple("gus")),
+            Some(false),
+            "the committed triples are hidden"
+        );
+        assert_eq!(
+            pending.state(Some(h), &triple("gus")),
+            None,
+            "h is the view's"
+        );
+        assert_eq!(
+            pending.graph_exists(g),
+            Some(true),
+            "a cleared graph exists"
+        );
+
+        pending.note_graph_op(&RdfGraphOp::Drop { target: named(g) });
+        assert_eq!(pending.graph_exists(g), Some(false));
+        pending.note(Some(g), triple("mia"), true);
+        assert_eq!(
+            pending.graph_exists(g),
+            Some(true),
+            "an insert recreates it"
+        );
+        assert_eq!(pending.state(Some(g), &triple("mia")), Some(true));
+
+        pending.note_graph_op(&RdfGraphOp::Clear {
+            target: RdfGraphTarget::Default,
+        });
+        assert_eq!(pending.state(None, &triple("vincent")), Some(false));
+        assert_eq!(pending.hidden_graphs(), [None, Some(g.to_string())]);
+        assert!(!pending.is_empty());
+    }
+
+    /// The graphs the transaction sees: the view's without those it dropped,
+    /// with those it created, cleared or inserted into; a graph whose only
+    /// own write is a delete stays the view's.
+    #[test]
+    fn the_graph_list_follows_the_transactions_operations() {
+        let mut pending = PendingTriples::default();
+        pending.note_graph_op(&RdfGraphOp::Drop {
+            target: named("berlin"),
+        });
+        pending.note_graph_op(&RdfGraphOp::Create {
+            name: "paris".into(),
+        });
+        pending.note_graph_op(&RdfGraphOp::Clear {
+            target: named("paris"),
+        });
+        pending.note(Some("rome"), triple("alix"), true);
+        pending.note(Some("rome"), triple("alix"), false);
+        pending.note(Some("oslo"), triple("gus"), false);
+        let view = ["berlin", "oslo", "vienna"].map(String::from).to_vec();
+        assert_eq!(
+            pending.graph_names(view),
+            ["oslo", "paris", "rome", "vienna"],
+            "rome: its commit creates it even with its triple deleted again"
+        );
+        assert_eq!(
+            pending.graph_exists("paris"),
+            Some(true),
+            "a created graph stays created when cleared"
+        );
+        assert_eq!(pending.graph_exists("oslo"), None);
+    }
+
+    /// The count of graph operations keeps a transaction with only a whole
+    /// `COPY` (a statement's own) from reading as empty: its commit has it to
+    /// apply. A savepoint rollback recomputes the state from the entries.
+    #[test]
+    fn a_whole_copy_counts_and_the_state_follows_the_entries() {
+        let mut pending = PendingTriples::default();
+        pending.note_graph_op(&RdfGraphOp::Copy {
+            source: None,
+            target: Some("paris".into()),
+        });
+        assert!(!pending.is_empty());
+        assert_eq!(pending.graph_exists("paris"), None);
+
+        let mut set = ChangeSet::new();
+        let slot = set
+            .slot(grafeo_common::change::GraphRef {
+                model: grafeo_common::change::DataModel::Rdf,
+                key: Some("paris".into()),
+            })
+            .unwrap();
+        set.push_rdf_graph(
+            slot,
+            RdfGraphOp::Drop {
+                target: named("paris"),
+            },
+        )
+        .unwrap();
+        let recomputed = PendingTriples::of(&set);
+        assert_eq!(recomputed.graph_exists("paris"), Some(false));
+        assert!(PendingTriples::of(&ChangeSet::new()).is_empty());
     }
 }

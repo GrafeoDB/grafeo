@@ -41,13 +41,10 @@ pub(super) fn named_graph_names(
 ) -> Vec<String> {
     let mut names = match dataset.and_then(DatasetRestriction::listed_named_graphs) {
         Some(listed) => listed.to_vec(),
-        None => {
-            let mut names = store.graph_names(view);
-            if let Some(writer) = writer {
-                names.extend(writer.graphs_inserted_into());
-            }
-            names
-        }
+        None => match writer {
+            Some(writer) => writer.graph_names(),
+            None => store.graph_names(view),
+        },
     };
     names.sort_unstable();
     names.dedup();

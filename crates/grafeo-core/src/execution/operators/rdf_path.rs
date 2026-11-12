@@ -80,6 +80,10 @@ mod physical {
         /// The last write of a triple, if it has one in this graph.
         fn state(&self, triple: &crate::graph::rdf::Triple) -> Option<bool>;
 
+        /// Whether the transaction emptied, dropped or created the graph: its
+        /// committed triples are then not read, only its own writes.
+        fn hides_store(&self) -> bool;
+
         /// Visits matching pending insertions once, polling rejected entries.
         /// The callback only updates query-local state, never storage.
         ///
@@ -115,14 +119,21 @@ mod physical {
             ) -> Result<(), OperatorError>,
         ) -> Result<(), OperatorError>;
 
-        /// Visits names with pending insertions without allocating a list.
+        /// Visits the named graphs whose existence the transaction's own
+        /// writes decide, without allocating a list: each with whether it
+        /// exists for the transaction (created, emptied or inserted into) or
+        /// not (dropped).
         ///
         /// # Errors
         /// Returns a deadline or callback error.
         fn visit_graph_names(
             &self,
             control: &mut RdfPathReadControl<'_>,
-            visit: &mut dyn FnMut(&str, &mut RdfPathReadControl<'_>) -> Result<(), OperatorError>,
+            visit: &mut dyn FnMut(
+                &str,
+                bool,
+                &mut RdfPathReadControl<'_>,
+            ) -> Result<(), OperatorError>,
         ) -> Result<(), OperatorError>;
 
         /// The adapter's own allocation, excluding transaction-owned state.
@@ -500,7 +511,9 @@ mod physical {
                 pending.visit_present(pattern, control, &mut |triple, control| {
                     visit(triple, control.budget)
                 })?;
-                if let Some(store) = &self.store {
+                if let Some(store) = &self.store
+                    && !pending.hides_store()
+                {
                     store.visit_path_base(
                         &self.view,
                         pattern,
@@ -588,6 +601,32 @@ mod physical {
         Ok(())
     }
 
+    /// Takes the named graph `name`, which the transaction dropped, out of
+    /// `contexts`: out of the union of a `FROM`, and as a context of its own
+    /// unless the dataset lists it, where it stays as an empty graph.
+    fn drop_graph(contexts: &mut Vec<GraphContext>, graph: &RdfPathGraph, name: &str) {
+        let named = |term: &Option<Term>| {
+            term.as_ref()
+                .and_then(Term::as_iri)
+                .is_some_and(|iri| iri.as_str() == name)
+        };
+        let listed = matches!(graph, RdfPathGraph::NamedGraphs(Some(listed))
+            if listed.iter().any(|listed| listed == name));
+        if let RdfPathGraph::Union(_) = graph {
+            for context in contexts.iter_mut() {
+                context.sources.retain(|source| !named(&source.name));
+            }
+        } else if listed {
+            for context in contexts.iter_mut().filter(|context| named(&context.name)) {
+                for source in &mut context.sources {
+                    source.store = None;
+                }
+            }
+        } else {
+            contexts.retain(|context| !named(&context.name));
+        }
+    }
+
     fn selects_name(
         names: &[String],
         name: &str,
@@ -655,8 +694,12 @@ mod physical {
             && !matches!(config.graph, RdfPathGraph::Default)
         {
             let mut control = RdfPathReadControl { budget };
-            overlay.visit_graph_names(&mut control, &mut |name, control| {
+            overlay.visit_graph_names(&mut control, &mut |name, exists, control| {
                 let budget = &mut *control.budget;
+                if !exists {
+                    drop_graph(&mut contexts, &config.graph, name);
+                    return Ok(());
+                }
                 match &config.graph {
                     RdfPathGraph::Default => {}
                     RdfPathGraph::Union(names) => {

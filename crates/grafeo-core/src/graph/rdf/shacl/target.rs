@@ -5,6 +5,7 @@
 
 use std::collections::HashSet;
 
+use crate::graph::rdf::overlay::RdfView;
 use crate::graph::rdf::{RdfStore, Term, TriplePattern};
 
 use super::shape::{RDF, Shape, Target};
@@ -25,12 +26,12 @@ pub fn resolve_targets(shape: &Shape, data_graph: &RdfStore) -> Vec<Term> {
                 focus_nodes.insert(node.clone());
             }
             Target::SubjectsOf(predicate) => {
-                for triple in data_graph.triples_with_predicate(predicate) {
+                for triple in data_graph.triples_with_predicate(&RdfView::Latest, predicate) {
                     focus_nodes.insert(triple.subject().clone());
                 }
             }
             Target::ObjectsOf(predicate) => {
-                for triple in data_graph.triples_with_predicate(predicate) {
+                for triple in data_graph.triples_with_predicate(&RdfView::Latest, predicate) {
                     focus_nodes.insert(triple.object().clone());
                 }
             }
@@ -54,7 +55,7 @@ fn resolve_class_target(class: &Term, data_graph: &RdfStore, out: &mut HashSet<T
         predicate: Some(rdf_type),
         object: Some(class.clone()),
     };
-    for triple in data_graph.find(&pattern) {
+    for triple in data_graph.find(&RdfView::Latest, &pattern) {
         out.insert(triple.subject().clone());
     }
 }

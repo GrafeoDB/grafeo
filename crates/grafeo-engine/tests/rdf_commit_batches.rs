@@ -66,13 +66,18 @@ fn run(db: &GrafeoDB, statements: &[&str]) {
 fn held(db: &GrafeoDB) -> BTreeSet<String> {
     let store = db.rdf_store();
     let mut held: BTreeSet<String> = store
-        .triples()
+        .triples(&grafeo_core::graph::rdf::RdfView::Latest)
         .iter()
         .map(|triple| format!("- {triple}"))
         .collect();
-    for name in store.graph_names() {
+    for name in store.graph_names(&grafeo_core::graph::rdf::RdfView::Latest) {
         let graph = store.graph(&name).unwrap();
-        held.extend(graph.triples().iter().map(|t| format!("{name} {t}")));
+        held.extend(
+            graph
+                .triples(&grafeo_core::graph::rdf::RdfView::Latest)
+                .iter()
+                .map(|t| format!("{name} {t}")),
+        );
     }
     held
 }
@@ -158,15 +163,23 @@ fn a_large_transaction_leaves_the_store_single_inserts_leave() {
             single.insert(triple.clone());
         }
         let names = |store: &RdfStore| -> BTreeSet<String> {
-            store.triples().iter().map(ToString::to_string).collect()
+            store
+                .triples(&grafeo_core::graph::rdf::RdfView::Latest)
+                .iter()
+                .map(ToString::to_string)
+                .collect()
         };
         assert_eq!(db.rdf_store().len(), new + 100);
         assert_eq!(names(db.rdf_store()), names(&single), "{new}");
         for subject in ["s0", "s500", "s996", "h7"] {
             let subject = Term::iri(format!("http://ex.org/{subject}"));
             assert_eq!(
-                db.rdf_store().triples_with_subject(&subject).len(),
-                single.triples_with_subject(&subject).len()
+                db.rdf_store()
+                    .triples_with_subject(&grafeo_core::graph::rdf::RdfView::Latest, &subject)
+                    .len(),
+                single
+                    .triples_with_subject(&grafeo_core::graph::rdf::RdfView::Latest, &subject)
+                    .len()
             );
         }
     }

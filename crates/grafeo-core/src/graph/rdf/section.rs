@@ -149,7 +149,7 @@ fn write_rdf_blocks(store: &RdfStore, named_graphs: &[(String, Arc<RdfStore>)]) 
     // Named graph triple strings are NOT interned here: each named graph
     // serializes its own string table via the recursive write_rdf_blocks
     // call, so interning them at the top level would only waste space.
-    let triples: Vec<_> = store.triples().into_iter().collect();
+    let triples: Vec<_> = store.triples_latest().into_iter().collect();
     for t in &triples {
         strings.intern(&t.subject().to_string());
         strings.intern(&t.predicate().to_string());
@@ -434,7 +434,7 @@ impl Section for RdfStoreSection {
     fn serialize(&self) -> Result<Vec<u8>> {
         let named_graphs: Vec<(String, Arc<RdfStore>)> = self
             .store
-            .graph_names()
+            .graph_names_latest()
             .into_iter()
             .filter_map(|name| {
                 self.store
@@ -486,6 +486,7 @@ impl Section for RdfStoreSection {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::graph::rdf::overlay::RdfView;
 
     #[test]
     fn rdf_section_round_trip() {
@@ -602,7 +603,7 @@ mod tests {
 
         assert_eq!(section2.store().len(), 1);
 
-        let names = section2.store().graph_names();
+        let names = section2.store().graph_names(&RdfView::Latest);
         assert_eq!(names.len(), 1);
         assert_eq!(names[0], "http://example.org/graph/butch");
 
@@ -733,11 +734,14 @@ mod tests {
         RdfStoreSection::new(Arc::clone(&store))
             .deserialize(&good)
             .unwrap();
-        assert!(store.contains(&Triple::new(
-            Term::iri("http://example.org/alix"),
-            Term::iri("http://example.org/name"),
-            Term::lang_literal("Kraków", "pl"),
-        )));
+        assert!(store.contains(
+            &RdfView::Latest,
+            &Triple::new(
+                Term::iri("http://example.org/alix"),
+                Term::iri("http://example.org/name"),
+                Term::lang_literal("Kraków", "pl"),
+            )
+        ));
 
         let bad = block_bytes([alix[0], alix[1], "<<not a term"], &[]);
         let error = RdfStoreSection::new(Arc::new(RdfStore::new()))

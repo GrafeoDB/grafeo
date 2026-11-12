@@ -5,6 +5,7 @@
 
 use std::collections::HashSet;
 
+use crate::graph::rdf::overlay::RdfView;
 use crate::graph::rdf::{RdfStore, Term, TriplePattern};
 
 use super::shape::PropertyPath;
@@ -23,7 +24,7 @@ pub fn evaluate_path(path: &PropertyPath, focus: &Term, data_graph: &RdfStore) -
                 object: None,
             };
             data_graph
-                .find(&pattern)
+                .find(&RdfView::Latest, &pattern)
                 .iter()
                 .map(|t| t.object().clone())
                 .collect()
@@ -80,7 +81,7 @@ fn evaluate_inverse(inner: &PropertyPath, focus: &Term, data_graph: &RdfStore) -
                 object: Some(focus.clone()),
             };
             data_graph
-                .find(&pattern)
+                .find(&RdfView::Latest, &pattern)
                 .iter()
                 .map(|t| t.subject().clone())
                 .collect()
@@ -90,8 +91,9 @@ fn evaluate_inverse(inner: &PropertyPath, focus: &Term, data_graph: &RdfStore) -
             // General case: find all nodes N such that evaluate_path(other, N, graph) contains focus
             // This is expensive but correct for arbitrary nested paths
             let mut results = Vec::new();
-            let mut all_nodes: HashSet<Term> = data_graph.subjects().into_iter().collect();
-            all_nodes.extend(data_graph.objects());
+            let mut all_nodes: HashSet<Term> =
+                data_graph.subjects(&RdfView::Latest).into_iter().collect();
+            all_nodes.extend(data_graph.objects(&RdfView::Latest));
             for candidate in &all_nodes {
                 let reachable = evaluate_path(other, candidate, data_graph);
                 if reachable.contains(focus) {

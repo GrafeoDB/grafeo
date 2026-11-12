@@ -77,7 +77,7 @@ fn rdf_sections(path: &Path) -> Vec<SectionType> {
 #[cfg(feature = "triple-store")]
 fn stored(store: &grafeo_core::graph::rdf::RdfStore) -> Vec<[String; 3]> {
     let mut triples: Vec<[String; 3]> = store
-        .triples()
+        .triples(&grafeo_core::graph::rdf::RdfView::Latest)
         .iter()
         .map(|triple| {
             [

@@ -18,6 +18,7 @@
 //! conflict while an open transaction, the caller's own included, has RDF
 //! entries in a graph it changes.
 
+use grafeo_core::graph::rdf::RdfView;
 use std::sync::Arc;
 
 use grafeo_common::change::{Change, ChangeSet, DataOp, RdfGraphOp};
@@ -376,7 +377,7 @@ impl RdfWriter {
         pattern: &TriplePattern,
         graphs: Option<&[&str]>,
     ) -> Vec<(Option<String>, Arc<Triple>)> {
-        let mut found = self.store.find_in_graphs(pattern, graphs);
+        let mut found = self.store.find_in_graphs(&RdfView::Latest, pattern, graphs);
         let pending = self.changes.pending_triples_matching(pattern, graphs);
         if pending.is_empty() {
             return found;
@@ -522,10 +523,10 @@ pub(crate) fn ntriples_terms(
 /// graph).
 fn holds(store: &RdfStore, graph: Option<&str>, triple: &Triple) -> bool {
     match graph {
-        None => store.contains(triple),
+        None => store.contains(&RdfView::Latest, triple),
         Some(name) => store
             .graph(name)
-            .is_some_and(|graph| graph.contains(triple)),
+            .is_some_and(|graph| graph.contains(&RdfView::Latest, triple)),
     }
 }
 

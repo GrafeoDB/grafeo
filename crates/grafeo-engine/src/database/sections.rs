@@ -1285,7 +1285,7 @@ mod tests {
         )
         .expect("the load succeeds");
         let ring = rdf_store.ring().expect("a ring");
-        let loaded = rdf_store.triples();
+        let loaded = rdf_store.triples(&grafeo_core::graph::rdf::RdfView::Latest);
         assert_eq!(ring.len(), loaded.len(), "one ring entry per loaded triple");
         for triple in &loaded {
             let pattern = TriplePattern {

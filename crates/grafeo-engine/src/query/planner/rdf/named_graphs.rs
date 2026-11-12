@@ -1,6 +1,7 @@
 //! The named graphs of the dataset as rows: the physical operator of
 //! [`NamedGraphsOp`](crate::query::plan::NamedGraphsOp).
 
+use grafeo_core::graph::rdf::RdfView;
 use std::sync::Arc;
 
 use grafeo_common::types::rdf::Term;
@@ -39,7 +40,7 @@ pub(super) fn named_graph_names(
     let mut names = match dataset.and_then(DatasetRestriction::listed_named_graphs) {
         Some(listed) => listed.to_vec(),
         None => {
-            let mut names = store.graph_names();
+            let mut names = store.graph_names(&RdfView::Latest);
             if let Some(writer) = writer {
                 names.extend(writer.graphs_inserted_into());
             }

@@ -6,6 +6,7 @@
 
 use std::collections::HashSet;
 
+use crate::graph::rdf::overlay::RdfView;
 use crate::graph::rdf::{RdfStore, Term, TriplePattern};
 
 use super::shape::{
@@ -38,12 +39,18 @@ pub fn parse_shapes(shapes_graph: &RdfStore) -> Result<Vec<Shape>, ShaclError> {
     let mut shape_ids: HashSet<Term> = HashSet::new();
 
     let node_shape_type = Term::iri(SH::NODE_SHAPE);
-    for triple in shapes_graph.find(&pat(None, Some(&rdf_type), Some(&node_shape_type))) {
+    for triple in shapes_graph.find(
+        &RdfView::Latest,
+        &pat(None, Some(&rdf_type), Some(&node_shape_type)),
+    ) {
         shape_ids.insert(triple.subject().clone());
     }
 
     let prop_shape_type = Term::iri(SH::PROPERTY_SHAPE);
-    for triple in shapes_graph.find(&pat(None, Some(&rdf_type), Some(&prop_shape_type))) {
+    for triple in shapes_graph.find(
+        &RdfView::Latest,
+        &pat(None, Some(&rdf_type), Some(&prop_shape_type)),
+    ) {
         shape_ids.insert(triple.subject().clone());
     }
 
@@ -58,7 +65,7 @@ pub fn parse_shapes(shapes_graph: &RdfStore) -> Result<Vec<Shape>, ShaclError> {
     ];
     for pred_iri in &implicit_predicates {
         let pred = Term::iri(*pred_iri);
-        for triple in shapes_graph.triples_with_predicate(&pred) {
+        for triple in shapes_graph.triples_with_predicate(&RdfView::Latest, &pred) {
             shape_ids.insert(triple.subject().clone());
         }
     }
@@ -102,7 +109,10 @@ fn parse_shape_inner(
 
     // Determine if this is a property shape (has sh:path)
     let path_pred = Term::iri(SH::PATH);
-    let path_triples = graph.find(&pat(Some(shape_id), Some(&path_pred), None));
+    let path_triples = graph.find(
+        &RdfView::Latest,
+        &pat(Some(shape_id), Some(&path_pred), None),
+    );
 
     if let Some(path_triple) = path_triples.first() {
         // Property shape
@@ -129,11 +139,14 @@ fn parse_shape_inner(
     } else {
         // Check explicit type
         let is_prop_shape = !graph
-            .find(&pat(
-                Some(shape_id),
-                Some(&rdf_type),
-                Some(&Term::iri(SH::PROPERTY_SHAPE)),
-            ))
+            .find(
+                &RdfView::Latest,
+                &pat(
+                    Some(shape_id),
+                    Some(&rdf_type),
+                    Some(&Term::iri(SH::PROPERTY_SHAPE)),
+                ),
+            )
             .is_empty();
 
         if is_prop_shape {
@@ -171,22 +184,34 @@ fn parse_targets(graph: &RdfStore, shape_id: &Term) -> Vec<Target> {
     let mut targets = Vec::new();
 
     let target_class = Term::iri(SH::TARGET_CLASS);
-    for triple in graph.find(&pat(Some(shape_id), Some(&target_class), None)) {
+    for triple in graph.find(
+        &RdfView::Latest,
+        &pat(Some(shape_id), Some(&target_class), None),
+    ) {
         targets.push(Target::Class(triple.object().clone()));
     }
 
     let target_node = Term::iri(SH::TARGET_NODE);
-    for triple in graph.find(&pat(Some(shape_id), Some(&target_node), None)) {
+    for triple in graph.find(
+        &RdfView::Latest,
+        &pat(Some(shape_id), Some(&target_node), None),
+    ) {
         targets.push(Target::Node(triple.object().clone()));
     }
 
     let target_subjects_of = Term::iri(SH::TARGET_SUBJECTS_OF);
-    for triple in graph.find(&pat(Some(shape_id), Some(&target_subjects_of), None)) {
+    for triple in graph.find(
+        &RdfView::Latest,
+        &pat(Some(shape_id), Some(&target_subjects_of), None),
+    ) {
         targets.push(Target::SubjectsOf(triple.object().clone()));
     }
 
     let target_objects_of = Term::iri(SH::TARGET_OBJECTS_OF);
-    for triple in graph.find(&pat(Some(shape_id), Some(&target_objects_of), None)) {
+    for triple in graph.find(
+        &RdfView::Latest,
+        &pat(Some(shape_id), Some(&target_objects_of), None),
+    ) {
         targets.push(Target::ObjectsOf(triple.object().clone()));
     }
 
@@ -206,10 +231,16 @@ fn parse_property_shapes(
     let property_pred = Term::iri(SH::PROPERTY);
     let mut result = Vec::new();
 
-    for triple in graph.find(&pat(Some(node_shape_id), Some(&property_pred), None)) {
+    for triple in graph.find(
+        &RdfView::Latest,
+        &pat(Some(node_shape_id), Some(&property_pred), None),
+    ) {
         let prop_id = triple.object();
         let path_pred = Term::iri(SH::PATH);
-        let path_triples = graph.find(&pat(Some(prop_id), Some(&path_pred), None));
+        let path_triples = graph.find(
+            &RdfView::Latest,
+            &pat(Some(prop_id), Some(&path_pred), None),
+        );
 
         let path = match path_triples.first() {
             Some(pt) => parse_path(graph, pt.object())?,
@@ -263,7 +294,10 @@ fn parse_path(graph: &RdfStore, term: &Term) -> Result<PropertyPath, ShaclError>
     if term.is_blank_node() {
         // sh:inversePath
         let inverse_pred = Term::iri(SH::INVERSE_PATH);
-        let inverse = graph.find(&pat(Some(term), Some(&inverse_pred), None));
+        let inverse = graph.find(
+            &RdfView::Latest,
+            &pat(Some(term), Some(&inverse_pred), None),
+        );
         if let Some(t) = inverse.first() {
             let inner = parse_path(graph, t.object())?;
             return Ok(PropertyPath::Inverse(Box::new(inner)));
@@ -271,7 +305,7 @@ fn parse_path(graph: &RdfStore, term: &Term) -> Result<PropertyPath, ShaclError>
 
         // sh:alternativePath
         let alt_pred = Term::iri(SH::ALTERNATIVE_PATH);
-        let alt = graph.find(&pat(Some(term), Some(&alt_pred), None));
+        let alt = graph.find(&RdfView::Latest, &pat(Some(term), Some(&alt_pred), None));
         if let Some(t) = alt.first() {
             let items = collect_rdf_list(graph, t.object());
             let mut paths = Vec::new();
@@ -283,7 +317,7 @@ fn parse_path(graph: &RdfStore, term: &Term) -> Result<PropertyPath, ShaclError>
 
         // sh:zeroOrMorePath
         let zom_pred = Term::iri(SH::ZERO_OR_MORE_PATH);
-        let zom = graph.find(&pat(Some(term), Some(&zom_pred), None));
+        let zom = graph.find(&RdfView::Latest, &pat(Some(term), Some(&zom_pred), None));
         if let Some(t) = zom.first() {
             let inner = parse_path(graph, t.object())?;
             return Ok(PropertyPath::ZeroOrMore(Box::new(inner)));
@@ -291,7 +325,7 @@ fn parse_path(graph: &RdfStore, term: &Term) -> Result<PropertyPath, ShaclError>
 
         // sh:oneOrMorePath
         let oom_pred = Term::iri(SH::ONE_OR_MORE_PATH);
-        let oom = graph.find(&pat(Some(term), Some(&oom_pred), None));
+        let oom = graph.find(&RdfView::Latest, &pat(Some(term), Some(&oom_pred), None));
         if let Some(t) = oom.first() {
             let inner = parse_path(graph, t.object())?;
             return Ok(PropertyPath::OneOrMore(Box::new(inner)));
@@ -299,7 +333,7 @@ fn parse_path(graph: &RdfStore, term: &Term) -> Result<PropertyPath, ShaclError>
 
         // sh:zeroOrOnePath
         let zoo_pred = Term::iri(SH::ZERO_OR_ONE_PATH);
-        let zoo = graph.find(&pat(Some(term), Some(&zoo_pred), None));
+        let zoo = graph.find(&RdfView::Latest, &pat(Some(term), Some(&zoo_pred), None));
         if let Some(t) = zoo.first() {
             let inner = parse_path(graph, t.object())?;
             return Ok(PropertyPath::ZeroOrOne(Box::new(inner)));
@@ -308,7 +342,7 @@ fn parse_path(graph: &RdfStore, term: &Term) -> Result<PropertyPath, ShaclError>
         // Sequence path: blank node is the head of an RDF list
         let first_pred = Term::iri(RDF::FIRST);
         let has_first = !graph
-            .find(&pat(Some(term), Some(&first_pred), None))
+            .find(&RdfView::Latest, &pat(Some(term), Some(&first_pred), None))
             .is_empty();
         if has_first {
             let items = collect_rdf_list(graph, term);
@@ -448,7 +482,10 @@ fn parse_constraints(
 
     // Shape-based: sh:node
     let node_pred = Term::iri(SH::NODE);
-    for triple in graph.find(&pat(Some(shape_id), Some(&node_pred), None)) {
+    for triple in graph.find(
+        &RdfView::Latest,
+        &pat(Some(shape_id), Some(&node_pred), None),
+    ) {
         let inner = parse_inline_shape(graph, triple.object(), all_shape_ids, visiting)?;
         constraints.push(Constraint::ShapeNode(Box::new(inner)));
     }
@@ -485,7 +522,7 @@ fn parse_term_constraints(
     constructor: fn(Term) -> Constraint,
 ) {
     let pred = Term::iri(predicate_iri);
-    for triple in graph.find(&pat(Some(shape_id), Some(&pred), None)) {
+    for triple in graph.find(&RdfView::Latest, &pat(Some(shape_id), Some(&pred), None)) {
         constraints.push(constructor(triple.object().clone()));
     }
 }
@@ -496,7 +533,7 @@ fn parse_node_kind_constraints(
     constraints: &mut Vec<Constraint>,
 ) -> Result<(), ShaclError> {
     let pred = Term::iri(SH::NODE_KIND);
-    for triple in graph.find(&pat(Some(shape_id), Some(&pred), None)) {
+    for triple in graph.find(&RdfView::Latest, &pat(Some(shape_id), Some(&pred), None)) {
         // sh:nodeKind values must be IRIs per the SHACL spec
         let iri_str = match triple.object() {
             Term::Iri(iri) => iri.as_str(),
@@ -526,11 +563,17 @@ fn parse_node_kind_constraints(
 
 fn parse_pattern_constraint(graph: &RdfStore, shape_id: &Term, constraints: &mut Vec<Constraint>) {
     let pattern_pred = Term::iri(SH::PATTERN);
-    for triple in graph.find(&pat(Some(shape_id), Some(&pattern_pred), None)) {
+    for triple in graph.find(
+        &RdfView::Latest,
+        &pat(Some(shape_id), Some(&pattern_pred), None),
+    ) {
         if let Some(pattern) = term_string_value(triple.object()) {
             let flags_pred = Term::iri(SH::FLAGS);
             let flags = graph
-                .find(&pat(Some(shape_id), Some(&flags_pred), None))
+                .find(
+                    &RdfView::Latest,
+                    &pat(Some(shape_id), Some(&flags_pred), None),
+                )
                 .first()
                 .and_then(|t| term_string_value(t.object()));
             constraints.push(Constraint::Pattern { pattern, flags });
@@ -544,7 +587,7 @@ fn parse_language_in_constraint(
     constraints: &mut Vec<Constraint>,
 ) {
     let pred = Term::iri(SH::LANGUAGE_IN);
-    for triple in graph.find(&pat(Some(shape_id), Some(&pred), None)) {
+    for triple in graph.find(&RdfView::Latest, &pat(Some(shape_id), Some(&pred), None)) {
         let items = collect_rdf_list(graph, triple.object());
         let langs: Vec<String> = items.iter().filter_map(term_string_value).collect();
         if !langs.is_empty() {
@@ -562,14 +605,20 @@ fn parse_logical_constraints(
 ) -> Result<(), ShaclError> {
     // sh:not
     let not_pred = Term::iri(SH::NOT);
-    for triple in graph.find(&pat(Some(shape_id), Some(&not_pred), None)) {
+    for triple in graph.find(
+        &RdfView::Latest,
+        &pat(Some(shape_id), Some(&not_pred), None),
+    ) {
         let inner = parse_inline_shape(graph, triple.object(), all_shape_ids, visiting)?;
         constraints.push(Constraint::Not(Box::new(inner)));
     }
 
     // sh:and
     let and_pred = Term::iri(SH::AND);
-    for triple in graph.find(&pat(Some(shape_id), Some(&and_pred), None)) {
+    for triple in graph.find(
+        &RdfView::Latest,
+        &pat(Some(shape_id), Some(&and_pred), None),
+    ) {
         let items = collect_rdf_list(graph, triple.object());
         let mut shapes = Vec::new();
         for item in &items {
@@ -580,7 +629,7 @@ fn parse_logical_constraints(
 
     // sh:or
     let or_pred = Term::iri(SH::OR);
-    for triple in graph.find(&pat(Some(shape_id), Some(&or_pred), None)) {
+    for triple in graph.find(&RdfView::Latest, &pat(Some(shape_id), Some(&or_pred), None)) {
         let items = collect_rdf_list(graph, triple.object());
         let mut shapes = Vec::new();
         for item in &items {
@@ -591,7 +640,10 @@ fn parse_logical_constraints(
 
     // sh:xone
     let xone_pred = Term::iri(SH::XONE);
-    for triple in graph.find(&pat(Some(shape_id), Some(&xone_pred), None)) {
+    for triple in graph.find(
+        &RdfView::Latest,
+        &pat(Some(shape_id), Some(&xone_pred), None),
+    ) {
         let items = collect_rdf_list(graph, triple.object());
         let mut shapes = Vec::new();
         for item in &items {
@@ -611,7 +663,10 @@ fn parse_qualified_value_shape(
     constraints: &mut Vec<Constraint>,
 ) -> Result<(), ShaclError> {
     let qvs_pred = Term::iri(SH::QUALIFIED_VALUE_SHAPE);
-    for triple in graph.find(&pat(Some(shape_id), Some(&qvs_pred), None)) {
+    for triple in graph.find(
+        &RdfView::Latest,
+        &pat(Some(shape_id), Some(&qvs_pred), None),
+    ) {
         let inner = parse_inline_shape(graph, triple.object(), all_shape_ids, visiting)?;
         let min_count = parse_integer_property(graph, shape_id, SH::QUALIFIED_MIN_COUNT)
             .and_then(|n| usize::try_from(n).ok());
@@ -633,7 +688,10 @@ fn parse_closed_constraint(graph: &RdfStore, shape_id: &Term, constraints: &mut 
     if parse_boolean_property(graph, shape_id, SH::CLOSED) {
         let ignored_pred = Term::iri(SH::IGNORED_PROPERTIES);
         let ignored = graph
-            .find(&pat(Some(shape_id), Some(&ignored_pred), None))
+            .find(
+                &RdfView::Latest,
+                &pat(Some(shape_id), Some(&ignored_pred), None),
+            )
             .first()
             .map(|t| collect_rdf_list(graph, t.object()))
             .unwrap_or_default();
@@ -645,7 +703,7 @@ fn parse_closed_constraint(graph: &RdfStore, shape_id: &Term, constraints: &mut 
 
 fn parse_in_constraint(graph: &RdfStore, shape_id: &Term, constraints: &mut Vec<Constraint>) {
     let pred = Term::iri(SH::IN);
-    for triple in graph.find(&pat(Some(shape_id), Some(&pred), None)) {
+    for triple in graph.find(&RdfView::Latest, &pat(Some(shape_id), Some(&pred), None)) {
         let items = collect_rdf_list(graph, triple.object());
         constraints.push(Constraint::In(items));
     }
@@ -657,13 +715,19 @@ fn parse_sparql_constraints(
     constraints: &mut Vec<Constraint>,
 ) -> Result<(), ShaclError> {
     let sparql_pred = Term::iri(SH::SPARQL);
-    for triple in graph.find(&pat(Some(shape_id), Some(&sparql_pred), None)) {
+    for triple in graph.find(
+        &RdfView::Latest,
+        &pat(Some(shape_id), Some(&sparql_pred), None),
+    ) {
         let constraint_node = triple.object();
 
         // sh:select (required)
         let select_pred = Term::iri(SH::SELECT);
         let select = graph
-            .find(&pat(Some(constraint_node), Some(&select_pred), None))
+            .find(
+                &RdfView::Latest,
+                &pat(Some(constraint_node), Some(&select_pred), None),
+            )
             .first()
             .and_then(|t| term_string_value(t.object()));
 
@@ -699,16 +763,28 @@ fn parse_prefix_declarations(graph: &RdfStore, constraint_node: &Term) -> Vec<Pr
     let prefix_pred = Term::iri(SH::PREFIX_DECL);
     let namespace_pred = Term::iri(SH::NAMESPACE);
 
-    for pref_triple in graph.find(&pat(Some(constraint_node), Some(&prefixes_pred), None)) {
+    for pref_triple in graph.find(
+        &RdfView::Latest,
+        &pat(Some(constraint_node), Some(&prefixes_pred), None),
+    ) {
         let pref_node = pref_triple.object();
-        for decl_triple in graph.find(&pat(Some(pref_node), Some(&declare_pred), None)) {
+        for decl_triple in graph.find(
+            &RdfView::Latest,
+            &pat(Some(pref_node), Some(&declare_pred), None),
+        ) {
             let decl_node = decl_triple.object();
             let prefix = graph
-                .find(&pat(Some(decl_node), Some(&prefix_pred), None))
+                .find(
+                    &RdfView::Latest,
+                    &pat(Some(decl_node), Some(&prefix_pred), None),
+                )
                 .first()
                 .and_then(|t| term_string_value(t.object()));
             let namespace = graph
-                .find(&pat(Some(decl_node), Some(&namespace_pred), None))
+                .find(
+                    &RdfView::Latest,
+                    &pat(Some(decl_node), Some(&namespace_pred), None),
+                )
                 .first()
                 .and_then(|t| term_string_value(t.object()));
 
@@ -742,7 +818,7 @@ fn parse_inline_shape(
 fn parse_severity(graph: &RdfStore, shape_id: &Term) -> Severity {
     let pred = Term::iri(SH::SEVERITY);
     graph
-        .find(&pat(Some(shape_id), Some(&pred), None))
+        .find(&RdfView::Latest, &pat(Some(shape_id), Some(&pred), None))
         .first()
         .and_then(|t| term_as_str(t.object()))
         .map_or(Severity::Violation, |s| match s {
@@ -759,7 +835,7 @@ fn parse_deactivated(graph: &RdfStore, shape_id: &Term) -> bool {
 fn parse_messages(graph: &RdfStore, shape_id: &Term) -> Vec<String> {
     let pred = Term::iri(SH::MESSAGE);
     graph
-        .find(&pat(Some(shape_id), Some(&pred), None))
+        .find(&RdfView::Latest, &pat(Some(shape_id), Some(&pred), None))
         .iter()
         .filter_map(|t| term_string_value(t.object()))
         .collect()
@@ -772,7 +848,7 @@ fn parse_messages(graph: &RdfStore, shape_id: &Term) -> Vec<String> {
 fn parse_string_property(graph: &RdfStore, subject: &Term, predicate_iri: &str) -> Option<String> {
     let pred = Term::iri(predicate_iri);
     graph
-        .find(&pat(Some(subject), Some(&pred), None))
+        .find(&RdfView::Latest, &pat(Some(subject), Some(&pred), None))
         .first()
         .and_then(|t| term_string_value(t.object()))
 }
@@ -780,7 +856,7 @@ fn parse_string_property(graph: &RdfStore, subject: &Term, predicate_iri: &str) 
 fn parse_integer_property(graph: &RdfStore, subject: &Term, predicate_iri: &str) -> Option<i64> {
     let pred = Term::iri(predicate_iri);
     graph
-        .find(&pat(Some(subject), Some(&pred), None))
+        .find(&RdfView::Latest, &pat(Some(subject), Some(&pred), None))
         .first()
         .and_then(|t| match t.object() {
             Term::Literal(lit) => lit.as_integer(),
@@ -791,7 +867,7 @@ fn parse_integer_property(graph: &RdfStore, subject: &Term, predicate_iri: &str)
 fn parse_boolean_property(graph: &RdfStore, subject: &Term, predicate_iri: &str) -> bool {
     let pred = Term::iri(predicate_iri);
     graph
-        .find(&pat(Some(subject), Some(&pred), None))
+        .find(&RdfView::Latest, &pat(Some(subject), Some(&pred), None))
         .first()
         .and_then(|t| term_string_value(t.object()))
         .is_some_and(|s| s == "true" || s == "1")
@@ -836,7 +912,10 @@ pub(super) fn collect_rdf_list(graph: &RdfStore, head: &Term) -> Vec<Term> {
         }
 
         // Get rdf:first value
-        let first = graph.find(&pat(Some(&current), Some(&first_pred), None));
+        let first = graph.find(
+            &RdfView::Latest,
+            &pat(Some(&current), Some(&first_pred), None),
+        );
         if let Some(t) = first.first() {
             items.push(t.object().clone());
         } else {
@@ -844,7 +923,10 @@ pub(super) fn collect_rdf_list(graph: &RdfStore, head: &Term) -> Vec<Term> {
         }
 
         // Follow rdf:rest
-        let rest = graph.find(&pat(Some(&current), Some(&rest_pred), None));
+        let rest = graph.find(
+            &RdfView::Latest,
+            &pat(Some(&current), Some(&rest_pred), None),
+        );
         match rest.first() {
             Some(t) => current = t.object().clone(),
             None => break,

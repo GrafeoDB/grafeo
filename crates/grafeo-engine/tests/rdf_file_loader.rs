@@ -473,7 +473,9 @@ fn a_load_without_triples_creates_its_named_graph() {
             .unwrap(),
         0
     );
-    let mut names = db.rdf_store().graph_names();
+    let mut names = db
+        .rdf_store()
+        .graph_names(&grafeo_core::graph::rdf::RdfView::Latest);
     names.sort();
     assert_eq!(
         names,
@@ -493,7 +495,12 @@ fn a_load_without_triples_creates_its_named_graph() {
         0
     );
     assert_eq!(db.load_rdf_text("", RdfFormat::NTriples, None).unwrap(), 0);
-    assert_eq!(db.rdf_store().graph_names().len(), 3);
+    assert_eq!(
+        db.rdf_store()
+            .graph_names(&grafeo_core::graph::rdf::RdfView::Latest)
+            .len(),
+        3
+    );
     assert_eq!(db.rdf_store().len(), 0);
 }
 
@@ -511,7 +518,11 @@ fn a_persistent_database_keeps_the_graph_an_empty_load_creates() {
         db.close().unwrap();
     }
     let db = GrafeoDB::open(&path).unwrap();
-    assert_eq!(db.rdf_store().graph_names(), [PEOPLE_GRAPH]);
+    assert_eq!(
+        db.rdf_store()
+            .graph_names(&grafeo_core::graph::rdf::RdfView::Latest),
+        [PEOPLE_GRAPH]
+    );
     db.close().unwrap();
 }
 
@@ -530,7 +541,11 @@ fn an_empty_graph_name_is_refused() {
         assert!(error.to_string().contains("empty name"), "{error}");
     }
     assert_eq!(db.rdf_store().len(), 0);
-    assert_eq!(db.rdf_store().graph_names(), Vec::<String>::new());
+    assert_eq!(
+        db.rdf_store()
+            .graph_names(&grafeo_core::graph::rdf::RdfView::Latest),
+        Vec::<String>::new()
+    );
 }
 
 /// SPARQL `LOAD` is not supported: its error names the loader to use.
@@ -648,7 +663,9 @@ mod crash {
             super::triples(&db),
             super::triples(&super::inserted(super::NTRIPLES))
         );
-        let mut names = db.rdf_store().graph_names();
+        let mut names = db
+            .rdf_store()
+            .graph_names(&grafeo_core::graph::rdf::RdfView::Latest);
         names.sort();
         assert_eq!(names, [EMPTY_GRAPH, super::PEOPLE_GRAPH]);
         db.close().unwrap();

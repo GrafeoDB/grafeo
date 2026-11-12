@@ -44,6 +44,7 @@ mod physical {
     use super::super::{DEFAULT_PATH_SEARCH_BUDGET, Operator, OperatorError, OperatorResult};
     use super::{PathStep, RdfPathGraph};
     use crate::execution::{DataChunk, ValueVector};
+    use crate::graph::rdf::overlay::RdfView;
     use crate::graph::rdf::path_budget::{PathBudget, term_payload};
     use crate::graph::rdf::{RdfStore, Term, TriplePattern};
 
@@ -472,9 +473,13 @@ mod physical {
         ) -> Result<(), OperatorError> {
             let Some(overlay) = overlay else {
                 return match &self.store {
-                    Some(store) => {
-                        store.visit_matches_with_pending(pattern, transaction_id, budget, visit)
-                    }
+                    Some(store) => store.visit_matches_with_pending(
+                        &RdfView::Latest,
+                        pattern,
+                        transaction_id,
+                        budget,
+                        visit,
+                    ),
                     None => Ok(()),
                 };
             };
@@ -489,14 +494,19 @@ mod physical {
                     visit(triple, control.budget)
                 })?;
                 if let Some(store) = &self.store {
-                    store.visit_path_base(pattern, control.budget, &mut |triple, budget| {
-                        // A pending insertion was emitted above; a pending
-                        // deletion suppresses the committed triple entirely.
-                        if pending.state(triple).is_none() {
-                            visit(triple, budget)?;
-                        }
-                        Ok(())
-                    })?;
+                    store.visit_path_base(
+                        &RdfView::Latest,
+                        pattern,
+                        control.budget,
+                        &mut |triple, budget| {
+                            // A pending insertion was emitted above; a pending
+                            // deletion suppresses the committed triple entirely.
+                            if pending.state(triple).is_none() {
+                                visit(triple, budget)?;
+                            }
+                            Ok(())
+                        },
+                    )?;
                 }
                 Ok(())
             })
@@ -593,9 +603,14 @@ mod physical {
             RdfPathGraph::Default | RdfPathGraph::Union(_) => {
                 let mut sources = Vec::new();
                 if let RdfPathGraph::Union(names) = &config.graph {
-                    store.visit_path_graphs(Some(names), budget, &mut |name, graph, budget| {
-                        add_source(&mut sources, Some(name), Some(graph), budget)
-                    })?;
+                    store.visit_path_graphs(
+                        &RdfView::Latest,
+                        Some(names),
+                        budget,
+                        &mut |name, graph, budget| {
+                            add_source(&mut sources, Some(name), Some(graph), budget)
+                        },
+                    )?;
                 } else {
                     add_source(&mut sources, None, Some(store), budget)?;
                 }
@@ -611,9 +626,14 @@ mod physical {
                     RdfPathGraph::NamedGraphs(names) => names.as_deref(),
                     _ => unreachable!(),
                 };
-                store.visit_path_graphs(names, budget, &mut |name, graph, budget| {
-                    add_named_context(&mut contexts, name, Some(graph), budget)
-                })?;
+                store.visit_path_graphs(
+                    &RdfView::Latest,
+                    names,
+                    budget,
+                    &mut |name, graph, budget| {
+                        add_named_context(&mut contexts, name, Some(graph), budget)
+                    },
+                )?;
                 // A listed IRI is in the dataset whether or not a graph holds it (SPARQL 1.1 sec
                 // 13.2): an empty graph, where a constant end still has its zero-length solution.
                 if let RdfPathGraph::NamedGraphs(Some(listed)) = &config.graph {

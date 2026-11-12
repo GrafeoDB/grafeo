@@ -91,7 +91,7 @@ impl RdfGraphStoreAdapter {
     /// This performs a single pass over all triples to build node/edge
     /// mappings, adjacency lists, labels, and properties.
     pub fn new(store: &RdfStore) -> Self {
-        let triples = store.triples();
+        let triples = store.triples_latest();
         Self::from_triples(&triples)
     }
 

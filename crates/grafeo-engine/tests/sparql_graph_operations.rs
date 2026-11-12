@@ -39,7 +39,7 @@ fn loaded() -> GrafeoDB {
 fn shape(db: &GrafeoDB) -> (usize, Vec<(String, usize)>) {
     let store = db.rdf_store();
     let mut named: Vec<(String, usize)> = store
-        .graph_names()
+        .graph_names(&grafeo_core::graph::rdf::RdfView::Latest)
         .into_iter()
         .map(|name| {
             let len = store.graph(&name).map_or(0, |graph| graph.len());

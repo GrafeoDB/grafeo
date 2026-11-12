@@ -18,14 +18,14 @@ use std::sync::Arc;
 /// Returns an I/O error if writing fails.
 pub fn write_nquads<W: Write>(writer: &mut W, store: &RdfStore) -> io::Result<()> {
     // Default graph triples (no graph name).
-    for triple in store.triples() {
+    for triple in store.triples_latest() {
         write_nquad_line(writer, &triple, None)?;
     }
 
     // Named graph triples.
-    for name in store.graph_names() {
+    for name in store.graph_names_latest() {
         if let Some(graph) = store.graph(&name) {
-            for triple in graph.triples() {
+            for triple in graph.triples_latest() {
                 write_nquad_line(writer, &triple, Some(&name))?;
             }
         }

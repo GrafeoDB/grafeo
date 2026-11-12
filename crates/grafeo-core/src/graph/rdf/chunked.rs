@@ -51,7 +51,7 @@ use grafeo_common::types::rdf::UnsupportedTermKind;
 use grafeo_common::types::{TermId, TermIdKind, Value};
 use grafeo_common::utils::error::{Error, Result};
 
-use super::overlay::{LatestUse, RdfView};
+use super::overlay::RdfView;
 use super::{RdfStore, Term, Triple};
 use crate::codec::column_chunk::decode_column_chunk_bytes;
 use crate::codec::{ChunkColumn, RowsChunker};
@@ -154,25 +154,12 @@ pub(crate) struct GraphMeta {
 /// query); the row chunker's and the sink's errors.
 pub(crate) fn write_rdf_chunks(
     store: &RdfStore,
+    view: &RdfView,
     caps: ChunkCaps,
     sink: &mut dyn SectionSink,
 ) -> Result<()> {
     caps.validate()?;
-    let mut names = store.graph_names_latest();
-    names.sort_unstable();
-    let mut graphs = vec![(
-        String::new(),
-        store.sorted_triples(&RdfView::latest(LatestUse::Checkpoint))?,
-    )];
-    for name in names {
-        // A graph dropped since the names were read is left out.
-        if let Some(graph) = store.graph_latest(&name) {
-            graphs.push((
-                name,
-                graph.sorted_triples(&RdfView::latest(LatestUse::Checkpoint))?,
-            ));
-        }
-    }
+    let graphs = graphs_at(store, view)?;
     let numbering = FileNumbering::of(store, graphs.iter().flat_map(|(_, triples)| triples))?;
     let meta = RdfMeta {
         layout: RDF_META_LAYOUT,
@@ -211,16 +198,24 @@ pub(crate) fn write_rdf_chunks(
 ///
 /// As [`write_rdf_chunks`] for the ids of a stored triple.
 #[cfg(feature = "ring-index")]
-pub(crate) fn file_numbering(store: &RdfStore) -> Result<FileNumbering> {
-    let mut names = store.graph_names_latest();
+pub(crate) fn file_numbering(store: &RdfStore, view: &RdfView) -> Result<FileNumbering> {
+    let graphs = graphs_at(store, view)?;
+    FileNumbering::of(store, graphs.iter().flat_map(|(_, triples)| triples))
+}
+
+/// The graphs of `store` as `view` sees them, each with its triples sorted:
+/// the default graph first (named `""`), then the named graphs by name. A
+/// graph dropped after the view is read from the partition the drop kept.
+fn graphs_at(store: &RdfStore, view: &RdfView) -> Result<Vec<(String, Vec<Arc<Triple>>)>> {
+    let mut names = store.graph_names(view);
     names.sort_unstable();
-    let mut graphs = vec![store.sorted_triples(&RdfView::latest(LatestUse::Checkpoint))?];
+    let mut graphs = vec![(String::new(), store.sorted_triples(view)?)];
     for name in names {
-        if let Some(graph) = store.graph_latest(&name) {
-            graphs.push(graph.sorted_triples(&RdfView::latest(LatestUse::Checkpoint))?);
+        if let Some(graph) = store.graph_at(view, &name) {
+            graphs.push((name, graph.sorted_triples(view)?));
         }
     }
-    FileNumbering::of(store, graphs.iter().flatten())
+    Ok(graphs)
 }
 
 /// The file's numbers of the dictionary terms a checkpoint writes. It holds
@@ -1211,7 +1206,7 @@ mod tests {
         image
             .begin_section(SectionType::RdfStore, RDF_SECTION_VERSION)
             .unwrap();
-        write_rdf_chunks(store, caps, &mut image).unwrap();
+        write_rdf_chunks(store, &RdfView::latest(LatestUse::Test), caps, &mut image).unwrap();
         let source = image.section_source(SectionType::RdfStore).unwrap();
         (0..source.chunks().len())
             .map(|index| (source.chunks()[index], source.fetch(index).unwrap()))
@@ -2338,15 +2333,28 @@ mod tests {
     fn a_sink_error_ends_the_write() {
         let store = RdfStore::new();
         store.insert(Triple::new(iri("jules"), iri("knows"), iri("vincent")));
-        let error = write_rdf_chunks(&store, ChunkCaps::DEFAULT, &mut RefusesThird(0))
-            .unwrap_err()
-            .to_string();
+        let error = write_rdf_chunks(
+            &store,
+            &RdfView::latest(LatestUse::Test),
+            ChunkCaps::DEFAULT,
+            &mut RefusesThird(0),
+        )
+        .unwrap_err()
+        .to_string();
         assert!(error.contains("Jules refuses"), "{error}");
         let zero = ChunkCaps {
             max_rows: 0,
             max_bytes: 1,
         };
-        assert!(write_rdf_chunks(&store, zero, &mut RefusesThird(0)).is_err());
+        assert!(
+            write_rdf_chunks(
+                &store,
+                &RdfView::latest(LatestUse::Test),
+                zero,
+                &mut RefusesThird(0),
+            )
+            .is_err()
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -2515,9 +2523,14 @@ mod tests {
         image
             .begin_section(SectionType::RdfStore, RDF_SECTION_VERSION)
             .unwrap();
-        let error = write_rdf_chunks(&store, ChunkCaps::DEFAULT, &mut image)
-            .unwrap_err()
-            .to_string();
+        let error = write_rdf_chunks(
+            &store,
+            &RdfView::latest(LatestUse::Test),
+            ChunkCaps::DEFAULT,
+            &mut image,
+        )
+        .unwrap_err()
+        .to_string();
         assert!(error.contains("query's own term id"), "{error}");
     }
 
@@ -2584,5 +2597,58 @@ mod tests {
         };
         refused(unknown, "which is no term id");
         assert_ne!(TermId::dictionary(0).unwrap().kind(), TermIdKind::Query);
+    }
+
+    /// A section written at a view holds the view's state: a commit after
+    /// it (a delete, an insert, a graph dropped, a graph created) is not in
+    /// the image, and nothing of the view is missing.
+    #[test]
+    fn a_section_at_a_view_writes_the_views_state() {
+        use crate::graph::rdf::{ApplyMode, CommitChange};
+        use grafeo_common::change::RdfGraphOp;
+        use grafeo_common::storage::log_record::RdfGraphTarget;
+        use grafeo_common::types::EpochId;
+
+        let (g, h) = ("http://example.org/g", "http://example.org/h");
+        let triple = |name: &str| Triple::new(iri(name), iri("name"), Term::literal(name));
+        let insert = |graph: Option<&str>, name: &str| CommitChange::Insert {
+            graph: graph.map(Arc::from),
+            triple: triple(name),
+        };
+        let store = Arc::new(RdfStore::new());
+        store.apply_commit(
+            ApplyMode::Publish(EpochId::new(1)),
+            vec![
+                insert(None, "alix"),
+                insert(None, "butch"),
+                insert(Some(g), "vincent"),
+            ],
+        );
+        let at_one = sorted(&store);
+        let view = store.view_at(EpochId::new(1)).unwrap();
+        store.apply_commit(
+            ApplyMode::Publish(EpochId::new(2)),
+            vec![
+                CommitChange::Delete {
+                    graph: None,
+                    triple: triple("alix"),
+                },
+                insert(None, "gus"),
+                CommitChange::Graph(RdfGraphOp::Drop {
+                    target: RdfGraphTarget::Named(g.to_string()),
+                }),
+                insert(Some(h), "mia"),
+            ],
+        );
+        assert_ne!(sorted(&store), at_one, "the commit changed the store");
+
+        let section = RdfStoreSection::with_caps(Arc::clone(&store), ChunkCaps::current()).at(view);
+        let image = MemoryImage::from_sections(&[&section]).unwrap();
+        let source = image.section_source(SectionType::RdfStore).unwrap();
+        let back = Arc::new(RdfStore::new());
+        RdfStoreSection::new(Arc::clone(&back))
+            .read_from(&*source)
+            .unwrap();
+        assert_eq!(sorted(&back), at_one);
     }
 }

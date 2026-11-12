@@ -105,8 +105,21 @@ impl CheckpointSources {
     /// `row_group_sections::load_row_group_sections`).
     ///
     /// `epoch` is the capture's, from [`epoch`](Self::epoch) under the same
-    /// hold: one capture takes one epoch.
-    pub fn sections_at(&self, commits: &CommitsHeld<'_>, epoch: EpochId) -> Vec<Box<dyn Section>> {
+    /// hold: one capture takes one epoch. The RDF section reads the store at
+    /// that epoch's view, and the ring section writes the ring the store
+    /// holds now, the epoch's (a commit drops the ring, never changes one),
+    /// so both may be written once commits go on, while a read pinned at or
+    /// below the epoch keeps the view's overlay entries.
+    ///
+    /// # Errors
+    ///
+    /// When the RDF store has no view at `epoch` (pruned past it): under the
+    /// hold `epoch` is the published epoch, which no prune passes.
+    pub fn sections_at(
+        &self,
+        commits: &CommitsHeld<'_>,
+        epoch: EpochId,
+    ) -> grafeo_common::utils::error::Result<Vec<Box<dyn Section>>> {
         // The hold is what makes the sections consistent; nothing reads it.
         let _ = commits;
         let mut sections: Vec<Box<dyn Section>> = Vec::new();
@@ -126,17 +139,28 @@ impl CheckpointSources {
         sections.push(Box::new(section));
 
         #[cfg(feature = "triple-store")]
+        let view = self.rdf_store.view_at(epoch).map_err(|gone| {
+            grafeo_common::utils::error::Error::Internal(format!(
+                "a checkpoint at epoch {} has no RDF view: {gone}",
+                epoch.as_u64()
+            ))
+        })?;
+
+        #[cfg(feature = "triple-store")]
         if !self.rdf_store.is_empty() || self.rdf_store.graph_count() > 0 {
-            sections.push(Box::new(grafeo_core::graph::rdf::RdfStoreSection::new(
-                Arc::clone(&self.rdf_store),
-            )));
+            sections.push(Box::new(
+                grafeo_core::graph::rdf::RdfStoreSection::new(Arc::clone(&self.rdf_store))
+                    .at(view.clone()),
+            ));
         }
 
         #[cfg(feature = "ring-index")]
-        if self.rdf_store.ring_latest().is_some() {
-            sections.push(Box::new(grafeo_core::index::ring::RdfRingSection::new(
-                Arc::clone(&self.rdf_store),
-            )));
+        if let Some(ring) = self.rdf_store.ring_latest() {
+            sections.push(Box::new(
+                grafeo_core::index::ring::RdfRingSection::new(Arc::clone(&self.rdf_store))
+                    .with_ring(ring)
+                    .at(view),
+            ));
         }
 
         // The history's time index, only while the database keeps history:
@@ -148,13 +172,14 @@ impl CheckpointSources {
             )));
         }
 
-        sections
+        Ok(sections)
     }
 
     /// The sections at the capture's epoch, for tests.
     #[cfg(test)]
     pub fn sections(&self, commits: &CommitsHeld<'_>) -> Vec<Box<dyn Section>> {
         self.sections_at(commits, self.epoch(commits))
+            .expect("the published epoch has an RDF view")
     }
 
     /// Takes what a checkpoint writes, while the caller holds commits off
@@ -229,15 +254,21 @@ impl CheckpointSources {
         } else {
             CheckpointSnapshot::take(&self.store, epoch, history_from)
         });
-        for section in self.sections_at(commits, epoch) {
-            if section.section_type() == SectionType::LpgStore {
-                after.push(Box::new(RowGroupStoreSection::from_snapshot(
-                    Arc::clone(&self.store),
-                    Arc::clone(&lpg),
-                )));
-                continue;
+        for section in self.sections_at(commits, epoch)? {
+            match section.section_type() {
+                SectionType::LpgStore => {
+                    after.push(Box::new(RowGroupStoreSection::from_snapshot(
+                        Arc::clone(&self.store),
+                        Arc::clone(&lpg),
+                    )));
+                }
+                // Read at the epoch's view (the ring taken now), so written
+                // once commits go on, under the read pinned above.
+                SectionType::RdfStore | SectionType::RdfRing => {
+                    after.push(Box::new(ReuseIdentical(section)));
+                }
+                _ => held.push(Box::new(ReuseIdentical(section))),
             }
-            held.push(Box::new(ReuseIdentical(section)));
         }
         let held_count = held.len();
         held.extend(after);

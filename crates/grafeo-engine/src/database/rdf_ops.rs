@@ -474,26 +474,30 @@ fn check_graph_name(graph: Option<&str>) -> Result<()> {
 // =========================================================================
 
 impl GrafeoDB {
-    /// Returns RDF schema information.
+    /// Returns RDF schema information: the predicates with their triple
+    /// counts, the named graphs, and the distinct subjects and objects of the
+    /// default graph, all read at one committed epoch, so a commit running
+    /// meanwhile is in all of it or none.
     ///
     /// Only available when the RDF feature is enabled.
     #[must_use]
     pub fn rdf_schema(&self) -> crate::admin::SchemaInfo {
-        let stats = self.rdf_store.stats();
+        // Pinned at the published epoch: no prune passes a pinned epoch, so
+        // the view is there (the newest state is the fallback in name only).
+        let pin = self.transaction_manager.pin_read();
+        let view = self
+            .rdf_store
+            .view_at(pin.epoch())
+            .unwrap_or_else(|_| RdfView::latest(grafeo_core::graph::rdf::LatestUse::Statistics));
 
         let predicates = self
             .rdf_store
-            .predicates(&RdfView::latest(
-                grafeo_core::graph::rdf::LatestUse::Statistics,
-            ))
+            .predicates(&view)
             .into_iter()
             .map(|predicate| {
                 let count = self
                     .rdf_store
-                    .triples_with_predicate(
-                        &RdfView::latest(grafeo_core::graph::rdf::LatestUse::Statistics),
-                        &predicate,
-                    )
+                    .triples_with_predicate(&view, &predicate)
                     .len();
                 crate::admin::PredicateInfo {
                     iri: predicate.to_string(),
@@ -501,12 +505,17 @@ impl GrafeoDB {
                 }
             })
             .collect();
+        let mut named_graphs = self.rdf_store.graph_names(&view);
+        named_graphs.sort_unstable();
+        let subject_count = self.rdf_store.subjects(&view).len();
+        let object_count = self.rdf_store.objects(&view).len();
+        drop(pin);
 
         crate::admin::SchemaInfo::Rdf(crate::admin::RdfSchemaInfo {
             predicates,
-            named_graphs: Vec::new(),
-            subject_count: stats.subject_count,
-            object_count: stats.object_count,
+            named_graphs,
+            subject_count,
+            object_count,
         })
     }
 }

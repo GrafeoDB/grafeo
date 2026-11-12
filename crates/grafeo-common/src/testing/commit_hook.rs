@@ -253,16 +253,19 @@ mod inner {
         DURING_CHECKPOINT.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
     }
 
-    /// Arms `hook` to run once, inside the next checkpoint on this thread,
-    /// once it let commits go on again (its snapshot is taken) and wrote the
-    /// chunks of its first row group, before it writes the others.
+    /// Arms `hook` to run once, inside the next checkpoint, copy or export on
+    /// this thread, as soon as it let commits go on again (its snapshot is
+    /// taken), before it writes the sections it reads at the snapshot (the
+    /// LPG and RDF sections). An image written without letting commits go
+    /// first runs it in the LPG section's writer, after its first row group.
     pub fn during_next_checkpoint_write(hook: impl FnOnce() + 'static) {
         DURING_CHECKPOINT_WRITE.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
     }
 
     /// Runs the [`during_next_checkpoint_write`] hook armed on this thread,
-    /// if any. Called by the LPG section's writer after it handed a row
-    /// group's chunks to the file, holding no lock of the store.
+    /// if any. Called where a checkpoint, copy or export lets commits go on,
+    /// and by the LPG section's writer after it handed a row group's chunks
+    /// to the file, holding no lock of the store.
     #[inline]
     pub fn run_during_checkpoint_write() {
         if let Some(hook) = DURING_CHECKPOINT_WRITE.with(|slot| slot.borrow_mut().take()) {

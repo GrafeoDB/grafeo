@@ -456,8 +456,9 @@ fn a_snapshot_export_during_open_writes_round_trips() {
     let open = open_writes(&database, travellers);
     let data = {
         let _commits = database.transaction_manager.hold_commits().unwrap();
-        let held = row_groups::export_held(&parts(&database)).unwrap();
-        row_groups::export_rows(held, database.transaction_manager.current_epoch()).unwrap()
+        let epoch = database.transaction_manager.current_epoch();
+        let held = row_groups::export_held(&parts(&database), epoch).unwrap();
+        row_groups::export_rows(held, epoch).unwrap()
     };
     drop(open);
 
@@ -501,8 +502,9 @@ fn a_snapshot_restore_replaces_the_row_group_database() {
             )
             .unwrap();
     });
-    let held = row_groups::export_held(&parts(&source)).unwrap();
-    let data = row_groups::export_rows(held, source.transaction_manager.current_epoch()).unwrap();
+    let epoch = source.transaction_manager.current_epoch();
+    let held = row_groups::export_held(&parts(&source), epoch).unwrap();
+    let data = row_groups::export_rows(held, epoch).unwrap();
 
     let database = Database::new();
     travels(&database);

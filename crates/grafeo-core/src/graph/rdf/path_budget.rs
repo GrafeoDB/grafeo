@@ -97,11 +97,16 @@ impl PathBudget {
 
     /// The shared side of a dataset's apply guard, waited for in bounded
     /// intervals as [`read`](Self::read) waits: a path search behind a long
-    /// commit meets its deadline.
+    /// commit meets its deadline. A free guard, the common case (no commit
+    /// applies), is taken at once, with no clock read: the search polls its
+    /// deadline at every node anyway.
     pub(crate) fn read_guard<'a>(
         &mut self,
         guard: &'a RecursiveRwLock<()>,
     ) -> Result<RecursiveRwLockReadGuard<'a, ()>, OperatorError> {
+        if let Some(held) = guard.try_read() {
+            return Ok(held);
+        }
         loop {
             let wait = self.lock_wait()?;
             if let Some(held) = guard.try_read_for(wait) {

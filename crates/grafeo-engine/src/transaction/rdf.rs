@@ -240,6 +240,64 @@ impl PendingTriples {
         }
         found
     }
+
+    /// The first triple that these writes and `other`'s, two transactions',
+    /// both wrote in one graph where either deletes it, with its graph: the
+    /// writes conflict there. Two inserts of one triple do not: the state
+    /// after both is the same in either order. Probes the larger side with
+    /// the smaller.
+    pub(crate) fn conflict_with<'a>(
+        &'a self,
+        other: &'a Self,
+    ) -> Option<(Option<&'a str>, &'a Triple)> {
+        if let Some(triple) = graph_conflict(&self.default, &other.default) {
+            return Some((None, triple));
+        }
+        let (small, large) = if self.named.len() <= other.named.len() {
+            (&self.named, &other.named)
+        } else {
+            (&other.named, &self.named)
+        };
+        small.iter().find_map(|(name, triples)| {
+            let theirs = large.get(name)?;
+            graph_conflict(triples, theirs).map(|triple| (Some(name.as_str()), triple))
+        })
+    }
+}
+
+/// The first triple both graphs' writes hold where either deletes it (see
+/// [`PendingTriples::conflict_with`]).
+fn graph_conflict<'a>(one: &'a GraphTriples, other: &'a GraphTriples) -> Option<&'a Triple> {
+    let (small, large) = if one.len() <= other.len() {
+        (one, other)
+    } else {
+        (other, one)
+    };
+    small
+        .iter()
+        .find(|(triple, present)| {
+            large
+                .get(*triple)
+                .is_some_and(|theirs| !(**present && *theirs))
+        })
+        .map(|(triple, _)| &**triple)
+}
+
+/// The error of a commit that loses to a transaction that committed after it
+/// began and wrote `triple` in `graph` (`None` for the default graph) where
+/// one of the two deletes it.
+pub(crate) fn triple_conflict(graph: Option<&str>, triple: &Triple) -> Error {
+    let graph = graph.map_or_else(
+        || "the default graph".to_string(),
+        |name| format!("<{name}>"),
+    );
+    Error::Transaction(TransactionError::WriteConflict(format!(
+        "on RDF triple {} {} {} in {graph}: a transaction that committed after this one began \
+         wrote it",
+        triple.subject(),
+        triple.predicate(),
+        triple.object()
+    )))
 }
 
 /// How a statement of a transaction writes RDF: its triples go to the

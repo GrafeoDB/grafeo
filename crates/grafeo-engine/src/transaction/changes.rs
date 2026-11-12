@@ -682,6 +682,38 @@ impl TransactionChanges {
         !self.state.lock().triples.is_empty()
     }
 
+    /// The conflict of this transaction's RDF writes with `theirs`, another
+    /// transaction's (see `PendingTriples::conflict_with`), as the error a
+    /// commit fails with.
+    #[cfg(feature = "triple-store")]
+    pub(crate) fn rdf_conflict_with(&self, theirs: &super::rdf::PendingTriples) -> Option<Error> {
+        let state = self.state.lock();
+        state
+            .triples
+            .conflict_with(theirs)
+            .map(|(graph, triple)| super::rdf::triple_conflict(graph, triple))
+    }
+
+    /// The conflict of this transaction's RDF writes with those `theirs`,
+    /// another transaction's change set, holds. Their lock first, then ours:
+    /// only a commit's conflict check, under the `transactions` lock, holds
+    /// two change sets' locks.
+    #[cfg(feature = "triple-store")]
+    pub(crate) fn rdf_conflict_with_set(&self, theirs: &Self) -> Option<Error> {
+        let state = theirs.state.lock();
+        if state.triples.is_empty() {
+            return None;
+        }
+        self.rdf_conflict_with(&state.triples)
+    }
+
+    /// Takes the transaction's RDF writes out, at its publish, for the
+    /// conflict checks of the transactions still open that began before it.
+    #[cfg(feature = "triple-store")]
+    pub(crate) fn take_rdf_writes(&self) -> super::rdf::PendingTriples {
+        std::mem::take(&mut self.state.lock().triples)
+    }
+
     /// The named graphs the transaction inserted a triple into, each once: its commit creates
     /// them, an emptied one too. One pass over the transaction's own entries. A `CREATE GRAPH` it
     /// queued is not among them: no SPARQL statement runs after one until the commit

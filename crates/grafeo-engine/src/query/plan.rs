@@ -230,6 +230,23 @@ impl LogicalPlan {
         }
     }
 
+    /// An estimate of the memory the plan holds, in bytes: its operators and
+    /// expressions, and the names, values and subplans they own, each
+    /// counted once. What the plan cache charges an entry for its plan
+    /// (computed once, when the plan is stored).
+    #[must_use]
+    pub fn estimated_bytes(&self) -> usize {
+        let params = self
+            .default_params
+            .iter()
+            .map(|(name, value)| name.capacity() + value.estimated_size_bytes())
+            .fold(0, usize::saturating_add);
+        std::mem::size_of::<Self>()
+            .saturating_add(operator_heap_bytes(&self.root))
+            .saturating_add(params)
+            .saturating_add(self.graph.as_ref().map_or(0, String::capacity))
+    }
+
     /// Returns the plan marked as returning `kind`.
     #[must_use]
     pub fn with_result_kind(mut self, kind: crate::database::ResultKind) -> Self {
@@ -466,6 +483,128 @@ pub enum LogicalOperator {
     // ==================== Data Import Operators ====================
     /// Load data from a file (CSV, JSONL, or Parquet), producing one row per record.
     LoadData(LoadDataOp),
+}
+
+/// The bytes `operator` holds outside its own value: the operators below it
+/// (each boxed, so counted whole) and the expressions it evaluates.
+fn operator_heap_bytes(operator: &LogicalOperator) -> usize {
+    let children = operator
+        .children()
+        .into_iter()
+        .map(|child| {
+            std::mem::size_of::<LogicalOperator>().saturating_add(operator_heap_bytes(child))
+        })
+        .fold(0, usize::saturating_add);
+    let expressions = operator
+        .expressions()
+        .into_iter()
+        .map(expression_bytes)
+        .fold(0, usize::saturating_add);
+    children.saturating_add(expressions)
+}
+
+/// The bytes `expression` holds: its own value, the expressions below it,
+/// and the names, values and subplans it owns. Every kind is matched by
+/// name, so a new one says what it holds before it compiles.
+fn expression_bytes(expression: &LogicalExpression) -> usize {
+    let below = |expressions: &mut dyn Iterator<Item = &LogicalExpression>| {
+        expressions
+            .map(expression_bytes)
+            .fold(0, usize::saturating_add)
+    };
+    let subplan = |plan: &LogicalOperator| {
+        std::mem::size_of::<LogicalOperator>().saturating_add(operator_heap_bytes(plan))
+    };
+    let owned = match expression {
+        LogicalExpression::Literal(value) => value.estimated_size_bytes(),
+        LogicalExpression::Variable(name)
+        | LogicalExpression::Parameter(name)
+        | LogicalExpression::Labels(name)
+        | LogicalExpression::Type(name)
+        | LogicalExpression::Id(name) => name.capacity(),
+        LogicalExpression::Property { variable, property } => {
+            variable.capacity() + property.capacity()
+        }
+        LogicalExpression::Binary { left, right, .. } => {
+            below(&mut [&**left, &**right].into_iter())
+        }
+        LogicalExpression::Unary { operand, .. } => expression_bytes(operand),
+        LogicalExpression::FunctionCall { name, args, .. }
+        | LogicalExpression::SparqlCall { name, args } => {
+            name.capacity().saturating_add(below(&mut args.iter()))
+        }
+        LogicalExpression::List(items) => below(&mut items.iter()),
+        LogicalExpression::Map(entries) => entries
+            .iter()
+            .map(|(key, value)| key.capacity().saturating_add(expression_bytes(value)))
+            .fold(0, usize::saturating_add),
+        LogicalExpression::IndexAccess { base, index } => {
+            below(&mut [&**base, &**index].into_iter())
+        }
+        LogicalExpression::MapAccess { base, key } => {
+            key.capacity().saturating_add(expression_bytes(base))
+        }
+        LogicalExpression::SliceAccess { base, start, end } => below(
+            &mut std::iter::once(&**base)
+                .chain(start.as_deref())
+                .chain(end.as_deref()),
+        ),
+        LogicalExpression::Case {
+            operand,
+            when_clauses,
+            else_clause,
+        } => below(
+            &mut operand
+                .as_deref()
+                .into_iter()
+                .chain(when_clauses.iter().flat_map(|(when, then)| [when, then]))
+                .chain(else_clause.as_deref()),
+        ),
+        LogicalExpression::ListComprehension {
+            variable,
+            list_expr,
+            filter_expr,
+            map_expr,
+        } => variable.capacity().saturating_add(below(
+            &mut [&**list_expr, &**map_expr]
+                .into_iter()
+                .chain(filter_expr.as_deref()),
+        )),
+        LogicalExpression::ListPredicate {
+            variable,
+            list_expr,
+            predicate,
+            ..
+        } => variable
+            .capacity()
+            .saturating_add(below(&mut [&**list_expr, &**predicate].into_iter())),
+        LogicalExpression::ExistsSubquery(plan)
+        | LogicalExpression::CountSubquery(plan)
+        | LogicalExpression::ValueSubquery(plan) => subplan(plan),
+        LogicalExpression::MapProjection { base, entries } => entries
+            .iter()
+            .map(|entry| match entry {
+                MapProjectionEntry::PropertySelector(name) => name.capacity(),
+                MapProjectionEntry::LiteralEntry(key, value) => {
+                    key.capacity().saturating_add(expression_bytes(value))
+                }
+                MapProjectionEntry::AllProperties => 0,
+            })
+            .fold(base.capacity(), usize::saturating_add),
+        LogicalExpression::Reduce {
+            accumulator,
+            initial,
+            variable,
+            list,
+            expression,
+        } => (accumulator.capacity() + variable.capacity())
+            .saturating_add(below(&mut [&**initial, &**list, &**expression].into_iter())),
+        LogicalExpression::PatternComprehension {
+            subplan: plan,
+            projection,
+        } => subplan(plan).saturating_add(expression_bytes(projection)),
+    };
+    std::mem::size_of::<LogicalExpression>().saturating_add(owned)
 }
 
 /// Something a statement reaches outside the database with (a file it loads, a procedure that

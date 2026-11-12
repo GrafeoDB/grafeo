@@ -265,6 +265,7 @@ mod pattern_after_write;
 mod per_label_index;
 mod persistent_transaction_rollback;
 mod pinned_far_end;
+mod plan_cache_bounds;
 mod plan_shapes;
 mod planner_coverage;
 mod planner_lpg_coverage;

@@ -1,36 +1,41 @@
-//! Query cache for parsed and planned queries.
+//! The plan cache: parsed and optimized plans, shared by a database's
+//! sessions, so a repeated statement skips translation and optimization.
 //!
-//! This module provides an LRU cache for query plans to avoid repeated
-//! parsing and optimization of frequently executed queries.
-//!
-//! ## Cache Levels
-//!
-//! - **Parsed cache**: Caches logical plans after translation (language-specific parsing)
-//! - **Optimized cache**: Caches logical plans after optimization
+//! - **One bound:** both stages share one byte bound and one recency order
+//!   ([`QueryCache::with_limit`]); a plan larger than the whole bound runs
+//!   and is not stored.
+//! - **Shared plans:** a hit hands out the cached plan as an `Arc`
+//!   ([`CachedPlan`]), never a copy.
+//! - **One generation:** a clear moves the cache's generation, and a plan
+//!   planned under an older one is not stored, so a plan made before a
+//!   change of the schema never outlives it.
 //!
 //! ## Usage
 //!
 //! ```no_run
-//! use grafeo_engine::query::cache::{QueryCache, CacheKey};
+//! use grafeo_engine::query::cache::{CacheKey, QueryCache, Stage};
 //! use grafeo_engine::query::processor::QueryLanguage;
-//! use grafeo_engine::query::plan::{LogicalPlan, LogicalOperator};
+//! use grafeo_engine::query::plan::{LogicalOperator, LogicalPlan};
 //!
-//! let cache = QueryCache::new(1000);
-//! let cache_key = CacheKey::new("MATCH (n) RETURN n", QueryLanguage::Gql);
+//! let cache = QueryCache::with_limit(4 << 20);
+//! let key = CacheKey::new("MATCH (n) RETURN n", QueryLanguage::Gql);
 //!
-//! // Check cache first
-//! if let Some(plan) = cache.get_optimized(&cache_key) {
-//!     // use cached plan
-//! }
-//!
-//! // Parse and optimize, then cache
-//! let plan = LogicalPlan::new(LogicalOperator::Empty);
-//! cache.put_optimized(cache_key, plan);
+//! let plan = match cache.get(&key, Stage::Optimized) {
+//!     Some(cached) => cached,
+//!     None => {
+//!         // Read the generation before planning, so a change meanwhile
+//!         // keeps the plan out of the cache.
+//!         let generation = cache.generation();
+//!         let plan = LogicalPlan::new(LogicalOperator::Empty);
+//!         cache.put(key, Stage::Optimized, plan, generation)
+//!     }
+//! };
+//! # let _ = plan.plan();
 //! ```
 
 use parking_lot::Mutex;
 use std::collections::HashMap;
-use std::hash::Hash;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::query::plan::LogicalPlan;
@@ -149,277 +154,460 @@ fn normalize_query(query: &str) -> String {
     query.trim().to_string()
 }
 
-/// Entry in the cache with metadata.
-struct CacheEntry<T> {
-    /// The cached value.
-    value: T,
-    /// Number of times this entry was accessed.
-    access_count: u64,
+/// The stage a cached plan is at: as the statement's language translated it,
+/// or optimized too. One text is cached at each stage apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Stage {
+    /// Translated, not yet optimized (a plan whose parameters a call fills).
+    Parsed,
+    /// Optimized, ready to run.
+    Optimized,
 }
 
-impl<T: Clone> CacheEntry<T> {
-    fn new(value: T) -> Self {
-        Self {
-            value,
-            access_count: 0,
+impl Stage {
+    /// The stage's place in a key's pair of slots.
+    const fn at(self) -> usize {
+        match self {
+            Self::Parsed => 0,
+            Self::Optimized => 1,
+        }
+    }
+}
+
+/// A plan the cache holds, shared by every statement that hits it: a hit
+/// hands out the same plan, never a copy.
+#[derive(Debug)]
+pub struct CachedPlan {
+    plan: LogicalPlan,
+    /// What the entry is charged: the plan's deep estimate, its key's text
+    /// and the cache's bookkeeping.
+    bytes: usize,
+}
+
+impl std::ops::Deref for CachedPlan {
+    type Target = LogicalPlan;
+
+    fn deref(&self) -> &LogicalPlan {
+        &self.plan
+    }
+}
+
+/// The plan a statement runs: a cached plan, shared, or one made for this
+/// run (filled with its values). Either reads as a [`LogicalPlan`].
+pub(crate) enum RunPlan {
+    /// A plan the cache holds or just stored.
+    Shared(Arc<CachedPlan>),
+    /// A plan of this run alone.
+    Owned(LogicalPlan),
+}
+
+impl std::ops::Deref for RunPlan {
+    type Target = LogicalPlan;
+
+    fn deref(&self) -> &LogicalPlan {
+        match self {
+            Self::Shared(cached) => cached.plan(),
+            Self::Owned(plan) => plan,
+        }
+    }
+}
+
+impl CachedPlan {
+    /// The plan. A caller that changes it (a parameter filled in) clones it.
+    #[must_use]
+    pub fn plan(&self) -> &LogicalPlan {
+        &self.plan
+    }
+
+    /// What the cache charges the entry, in bytes.
+    #[must_use]
+    pub fn bytes(&self) -> usize {
+        self.bytes
+    }
+}
+
+/// No slot: the end of the recency list.
+const NONE: usize = usize::MAX;
+
+/// One cached entry, linked in the recency order.
+struct Slot {
+    key: CacheKey,
+    stage: Stage,
+    plan: Arc<CachedPlan>,
+    /// The next newer slot, `NONE` for the newest.
+    newer: usize,
+    /// The next older slot, `NONE` for the oldest.
+    older: usize,
+}
+
+/// The entries of both stages in one recency order, bounded in bytes: a map
+/// from a key to its slot at each stage, into a slab of slots linked from the
+/// newest to the oldest, so a hit, a put and an eviction are each O(1), and a
+/// lookup borrows its key.
+#[derive(Default)]
+struct Lru {
+    index: HashMap<CacheKey, [usize; 2]>,
+    slots: Vec<Option<Slot>>,
+    free: Vec<usize>,
+    newest: Option<usize>,
+    oldest: Option<usize>,
+    /// What the entries are charged together.
+    held_bytes: usize,
+}
+
+impl Lru {
+    fn slot(&self, at: usize) -> &Slot {
+        self.slots[at].as_ref().expect("a linked slot is filled")
+    }
+
+    fn slot_mut(&mut self, at: usize) -> &mut Slot {
+        self.slots[at].as_mut().expect("a linked slot is filled")
+    }
+
+    /// Takes the slot at `at` out of the recency list.
+    fn unlink(&mut self, at: usize) {
+        let (newer, older) = {
+            let slot = self.slot(at);
+            (slot.newer, slot.older)
+        };
+        match newer {
+            NONE => self.newest = (older != NONE).then_some(older),
+            newer => self.slot_mut(newer).older = older,
+        }
+        match older {
+            NONE => self.oldest = (newer != NONE).then_some(newer),
+            older => self.slot_mut(older).newer = newer,
         }
     }
 
-    fn access(&mut self) -> T {
-        self.access_count += 1;
-        self.value.clone()
-    }
-}
-
-/// LRU cache implementation.
-struct LruCache<K, V> {
-    /// The cache storage.
-    entries: HashMap<K, CacheEntry<V>>,
-    /// Maximum number of entries.
-    capacity: usize,
-    /// Order of access (for LRU eviction).
-    access_order: Vec<K>,
-}
-
-impl<K: Clone + Eq + Hash, V: Clone> LruCache<K, V> {
-    fn new(capacity: usize) -> Self {
-        Self {
-            entries: HashMap::with_capacity(capacity),
-            capacity,
-            access_order: Vec::with_capacity(capacity),
+    /// Puts the slot at `at` at the newest end.
+    fn link_newest(&mut self, at: usize) {
+        let previous = self.newest.unwrap_or(NONE);
+        {
+            let slot = self.slot_mut(at);
+            slot.newer = NONE;
+            slot.older = previous;
+        }
+        if previous != NONE {
+            self.slot_mut(previous).newer = at;
+        }
+        self.newest = Some(at);
+        if self.oldest.is_none() {
+            self.oldest = Some(at);
         }
     }
 
-    fn get(&mut self, key: &K) -> Option<V> {
-        if let Some(entry) = self.entries.get_mut(key) {
-            // Move to end of access order (most recently used)
-            if let Some(pos) = self.access_order.iter().position(|k| k == key) {
-                self.access_order.remove(pos);
+    fn find(&self, key: &CacheKey, stage: Stage) -> Option<usize> {
+        let at = self.index.get(key)?[stage.at()];
+        (at != NONE).then_some(at)
+    }
+
+    fn get(&mut self, key: &CacheKey, stage: Stage) -> Option<Arc<CachedPlan>> {
+        let at = self.find(key, stage)?;
+        if self.newest != Some(at) {
+            self.unlink(at);
+            self.link_newest(at);
+        }
+        Some(Arc::clone(&self.slot(at).plan))
+    }
+
+    /// Takes the entry at `at` out, returning its plan.
+    fn remove_at(&mut self, at: usize) -> Arc<CachedPlan> {
+        self.unlink(at);
+        let slot = self.slots[at].take().expect("a linked slot is filled");
+        if let Some(pair) = self.index.get_mut(&slot.key) {
+            pair[slot.stage.at()] = NONE;
+            if *pair == [NONE; 2] {
+                self.index.remove(&slot.key);
             }
-            self.access_order.push(key.clone());
-            Some(entry.access())
-        } else {
-            None
         }
+        self.free.push(at);
+        self.held_bytes -= slot.plan.bytes;
+        slot.plan
     }
 
-    fn put(&mut self, key: K, value: V) {
-        // Evict if at capacity
-        if self.entries.len() >= self.capacity && !self.entries.contains_key(&key) {
-            self.evict_lru();
-        }
-
-        // Remove from current position in access order
-        if let Some(pos) = self.access_order.iter().position(|k| k == &key) {
-            self.access_order.remove(pos);
-        }
-
-        // Add to end (most recently used)
-        self.access_order.push(key.clone());
-        self.entries.insert(key, CacheEntry::new(value));
+    fn remove(&mut self, key: &CacheKey, stage: Stage) -> Option<Arc<CachedPlan>> {
+        let at = self.find(key, stage)?;
+        Some(self.remove_at(at))
     }
 
-    fn evict_lru(&mut self) {
-        if let Some(key) = self.access_order.first().cloned() {
-            self.access_order.remove(0);
-            self.entries.remove(&key);
+    /// Stores `plan` under `key` as the newest entry, evicting the oldest
+    /// until it fits in `limit`. The caller checked that it fits alone.
+    fn put(&mut self, key: CacheKey, stage: Stage, plan: Arc<CachedPlan>, limit: usize) {
+        // An entry the key held goes first: its bytes do not count twice.
+        self.remove(&key, stage);
+        while self.held_bytes + plan.bytes > limit
+            && let Some(oldest) = self.oldest
+        {
+            self.remove_at(oldest);
         }
+        self.held_bytes += plan.bytes;
+        let slot = Slot {
+            key: key.clone(),
+            stage,
+            plan,
+            newer: NONE,
+            older: NONE,
+        };
+        let at = match self.free.pop() {
+            Some(at) => {
+                self.slots[at] = Some(slot);
+                at
+            }
+            None => {
+                self.slots.push(Some(slot));
+                self.slots.len() - 1
+            }
+        };
+        self.index.entry(key).or_insert([NONE; 2])[stage.at()] = at;
+        self.link_newest(at);
     }
 
     fn clear(&mut self) {
-        self.entries.clear();
-        self.access_order.clear();
+        *self = Self::default();
     }
 
     fn len(&self) -> usize {
-        self.entries.len()
+        self.slots.len() - self.free.len()
     }
 
-    fn remove(&mut self, key: &K) -> Option<V> {
-        if let Some(pos) = self.access_order.iter().position(|k| k == key) {
-            self.access_order.remove(pos);
+    /// The bytes and the count of each stage's entries.
+    fn by_stage(&self) -> (usize, usize, usize) {
+        let mut parsed = 0;
+        let mut optimized = 0;
+        for slot in self.slots.iter().flatten() {
+            match slot.stage {
+                Stage::Parsed => parsed += slot.plan.bytes,
+                Stage::Optimized => optimized += slot.plan.bytes,
+            }
         }
-        self.entries.remove(key).map(|e| e.value)
-    }
-
-    /// Estimates heap memory used by this cache (map buckets + access order vec).
-    fn heap_memory_bytes(&self) -> usize {
-        let entry_size = std::mem::size_of::<K>() + std::mem::size_of::<CacheEntry<V>>() + 1;
-        let map_bytes = self.entries.capacity() * entry_size;
-        let vec_bytes = self.access_order.capacity() * std::mem::size_of::<K>();
-        map_bytes + vec_bytes
+        (parsed, optimized, self.len())
     }
 }
 
-/// Query cache for parsed and optimized plans.
+/// What the cache's bookkeeping takes per entry besides the plan and the
+/// key's text: its slot, the map's entry and the key's own value.
+const ENTRY_OVERHEAD: usize = std::mem::size_of::<Option<Slot>>()
+    + std::mem::size_of::<(CacheKey, [usize; 2])>()
+    + std::mem::size_of::<CachedPlan>();
+
+impl CacheKey {
+    /// The bytes the key's text takes (a map key holds it once, a slot once).
+    fn text_bytes(&self) -> usize {
+        2 * (self.query.capacity()
+            + self.schema.as_ref().map_or(0, String::capacity)
+            + self.graph.as_ref().map_or(0, String::capacity))
+    }
+}
+
+/// The plan cache: parsed and optimized plans under one byte bound and one
+/// recency order, shared by every session of a database.
+///
+/// A hit returns the cached plan as an `Arc`: the lock is held only to find
+/// it and move it to the newest end. A put stores a plan only when it was
+/// planned under the cache's generation, so a plan built before a change of
+/// the schema is never kept after it.
 pub struct QueryCache {
-    /// Cache for parsed (translated) logical plans.
-    parsed_cache: Mutex<LruCache<CacheKey, LogicalPlan>>,
-    /// Cache for optimized logical plans.
-    optimized_cache: Mutex<LruCache<CacheKey, LogicalPlan>>,
-    /// Cache hit count for parsed plans.
+    lru: Mutex<Lru>,
+    /// The byte bound; 0 turns the cache off.
+    limit: usize,
+    /// The planning generation the entries were planned under.
+    generation: AtomicU64,
     parsed_hits: AtomicU64,
-    /// Cache miss count for parsed plans.
     parsed_misses: AtomicU64,
-    /// Cache hit count for optimized plans.
     optimized_hits: AtomicU64,
-    /// Cache miss count for optimized plans.
     optimized_misses: AtomicU64,
-    /// Number of times the cache was invalidated (cleared due to DDL).
+    /// How many times a clear moved the generation.
     invalidations: AtomicU64,
-    /// Whether caching is enabled.
-    enabled: bool,
+    /// How many plans were not stored because they exceed the whole limit.
+    oversized: AtomicU64,
 }
 
 impl QueryCache {
-    /// Creates a new query cache with the specified capacity.
-    ///
-    /// The capacity is shared between parsed and optimized caches
-    /// (each gets half the capacity).
+    /// A cache that holds at most `limit` bytes of plans, both stages
+    /// together; 0 turns it off.
     #[must_use]
-    pub fn new(capacity: usize) -> Self {
-        let half_capacity = capacity / 2;
+    pub fn with_limit(limit: usize) -> Self {
         Self {
-            parsed_cache: Mutex::new(LruCache::new(half_capacity.max(1))),
-            optimized_cache: Mutex::new(LruCache::new(half_capacity.max(1))),
+            lru: Mutex::new(Lru::default()),
+            limit,
+            generation: AtomicU64::new(0),
             parsed_hits: AtomicU64::new(0),
             parsed_misses: AtomicU64::new(0),
             optimized_hits: AtomicU64::new(0),
             optimized_misses: AtomicU64::new(0),
             invalidations: AtomicU64::new(0),
-            enabled: true,
+            oversized: AtomicU64::new(0),
         }
     }
 
-    /// Creates a disabled cache (for testing or when caching is not desired).
+    /// A cache that stores nothing: every statement plans.
     #[must_use]
     pub fn disabled() -> Self {
-        Self {
-            parsed_cache: Mutex::new(LruCache::new(0)),
-            optimized_cache: Mutex::new(LruCache::new(0)),
-            parsed_hits: AtomicU64::new(0),
-            parsed_misses: AtomicU64::new(0),
-            optimized_hits: AtomicU64::new(0),
-            optimized_misses: AtomicU64::new(0),
-            invalidations: AtomicU64::new(0),
-            enabled: false,
-        }
+        Self::with_limit(0)
     }
 
-    /// Returns whether caching is enabled.
+    /// Whether the cache stores plans.
     #[must_use]
     pub fn is_enabled(&self) -> bool {
-        self.enabled
+        self.limit > 0
     }
 
-    /// Gets a parsed plan from the cache.
-    pub fn get_parsed(&self, key: &CacheKey) -> Option<LogicalPlan> {
-        if !self.enabled {
+    /// The byte bound in force (0: off).
+    #[must_use]
+    pub fn limit(&self) -> usize {
+        self.limit
+    }
+
+    /// The planning generation the cache's entries were planned under: a
+    /// statement reads it before it plans and passes it to [`put`](Self::put).
+    #[must_use]
+    pub fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Acquire)
+    }
+
+    /// The plan cached for `key` at `stage`, as the newest entry from now on.
+    pub fn get(&self, key: &CacheKey, stage: Stage) -> Option<Arc<CachedPlan>> {
+        if !self.is_enabled() {
             return None;
         }
-
-        let result = self.parsed_cache.lock().get(key);
-        if result.is_some() {
-            self.parsed_hits.fetch_add(1, Ordering::Relaxed);
+        let found = self.lru.lock().get(key, stage);
+        let (hits, misses) = match stage {
+            Stage::Parsed => (&self.parsed_hits, &self.parsed_misses),
+            Stage::Optimized => (&self.optimized_hits, &self.optimized_misses),
+        };
+        if found.is_some() {
+            hits.fetch_add(1, Ordering::Relaxed);
         } else {
-            self.parsed_misses.fetch_add(1, Ordering::Relaxed);
+            misses.fetch_add(1, Ordering::Relaxed);
         }
-        result
+        found
     }
 
-    /// Puts a parsed plan into the cache.
-    pub fn put_parsed(&self, key: CacheKey, plan: LogicalPlan) {
-        if !self.enabled {
-            return;
-        }
-        self.parsed_cache.lock().put(key, plan);
-    }
-
-    /// Gets an optimized plan from the cache.
-    pub fn get_optimized(&self, key: &CacheKey) -> Option<LogicalPlan> {
-        if !self.enabled {
-            return None;
-        }
-
-        let result = self.optimized_cache.lock().get(key);
-        if result.is_some() {
-            self.optimized_hits.fetch_add(1, Ordering::Relaxed);
+    /// Stores `plan`, planned under `generation`, for `key` at `stage`, and
+    /// returns it shared. The entry's bytes are estimated here, outside the
+    /// lock. It is not stored when the cache is off, when it was planned
+    /// under an older generation than the cache's (a change came while it was
+    /// planned), or when it alone exceeds the limit (counted in
+    /// [`CacheStats::oversized`]); the oldest entries make room for it
+    /// otherwise.
+    pub fn put(
+        &self,
+        key: CacheKey,
+        stage: Stage,
+        plan: LogicalPlan,
+        generation: u64,
+    ) -> Arc<CachedPlan> {
+        let bytes = if self.is_enabled() {
+            plan.estimated_bytes()
+                .saturating_add(key.text_bytes())
+                .saturating_add(ENTRY_OVERHEAD)
         } else {
-            self.optimized_misses.fetch_add(1, Ordering::Relaxed);
+            0
+        };
+        let cached = Arc::new(CachedPlan { plan, bytes });
+        if !self.is_enabled() {
+            return cached;
         }
-        result
+        if bytes > self.limit {
+            self.oversized.fetch_add(1, Ordering::Relaxed);
+            return cached;
+        }
+        let mut lru = self.lru.lock();
+        // Read under the lock, as a clear moves it: no put of an older
+        // generation lands after the clear.
+        if generation < self.generation.load(Ordering::Acquire) {
+            return cached;
+        }
+        lru.put(key, stage, Arc::clone(&cached), self.limit);
+        cached
     }
 
-    /// Puts an optimized plan into the cache.
-    pub fn put_optimized(&self, key: CacheKey, plan: LogicalPlan) {
-        if !self.enabled {
-            return;
-        }
-        self.optimized_cache.lock().put(key, plan);
-    }
-
-    /// Invalidates a specific query from both caches.
+    /// Takes the plans of `key` out of both stages.
     pub fn invalidate(&self, key: &CacheKey) {
-        self.parsed_cache.lock().remove(key);
-        self.optimized_cache.lock().remove(key);
+        let mut lru = self.lru.lock();
+        lru.remove(key, Stage::Parsed);
+        lru.remove(key, Stage::Optimized);
     }
 
-    /// Clears all cached entries and increments the invalidation counter
-    /// (only when the cache was non-empty).
-    pub fn clear(&self) {
-        let had_entries =
-            self.parsed_cache.lock().len() > 0 || self.optimized_cache.lock().len() > 0;
-        self.parsed_cache.lock().clear();
-        self.optimized_cache.lock().clear();
-        if had_entries {
+    /// Empties the cache and moves its generation to `generation`, when that
+    /// is newer: a plan planned under an older generation is not stored from
+    /// now on. Each move counts one invalidation.
+    pub fn clear(&self, generation: u64) {
+        let mut lru = self.lru.lock();
+        let previous = self.generation.fetch_max(generation, Ordering::AcqRel);
+        if generation > previous {
             self.invalidations.fetch_add(1, Ordering::Relaxed);
         }
+        lru.clear();
     }
 
-    /// Returns cache statistics.
+    /// What the entries are charged together, in bytes.
+    #[must_use]
+    pub fn held_bytes(&self) -> usize {
+        self.lru.lock().held_bytes
+    }
+
+    /// The cache's counters.
     #[must_use]
     pub fn stats(&self) -> CacheStats {
+        let (parsed_size, optimized_size) = {
+            let lru = self.lru.lock();
+            let parsed = lru
+                .index
+                .values()
+                .filter(|pair| pair[Stage::Parsed.at()] != NONE)
+                .count();
+            (parsed, lru.len() - parsed)
+        };
         CacheStats {
-            parsed_size: self.parsed_cache.lock().len(),
-            optimized_size: self.optimized_cache.lock().len(),
+            parsed_size,
+            optimized_size,
             parsed_hits: self.parsed_hits.load(Ordering::Relaxed),
             parsed_misses: self.parsed_misses.load(Ordering::Relaxed),
             optimized_hits: self.optimized_hits.load(Ordering::Relaxed),
             optimized_misses: self.optimized_misses.load(Ordering::Relaxed),
             invalidations: self.invalidations.load(Ordering::Relaxed),
+            generation: self.generation(),
+            session_hits: 0,
+            oversized: self.oversized.load(Ordering::Relaxed),
         }
     }
 
-    /// Estimates heap memory used by both caches.
+    /// The bytes the parsed and the optimized entries are charged, and how
+    /// many entries there are: the deep estimates the entries were stored
+    /// with.
     #[must_use]
     pub fn heap_memory_bytes(&self) -> (usize, usize, usize) {
-        let parsed = self.parsed_cache.lock();
-        let optimized = self.optimized_cache.lock();
-        let parsed_bytes = parsed.heap_memory_bytes();
-        let optimized_bytes = optimized.heap_memory_bytes();
-        let count = parsed.len() + optimized.len();
-        (parsed_bytes, optimized_bytes, count)
+        self.lru.lock().by_stage()
     }
 
-    /// Resets hit/miss counters and invalidation counter.
+    /// Resets the hit, miss, invalidation and oversized counters.
     pub fn reset_stats(&self) {
         self.parsed_hits.store(0, Ordering::Relaxed);
         self.parsed_misses.store(0, Ordering::Relaxed);
         self.optimized_hits.store(0, Ordering::Relaxed);
         self.optimized_misses.store(0, Ordering::Relaxed);
         self.invalidations.store(0, Ordering::Relaxed);
+        self.oversized.store(0, Ordering::Relaxed);
     }
 }
 
 impl Default for QueryCache {
+    /// A cache of [`DEFAULT_LIMIT`] bytes, for a cache made outside a
+    /// database (which sizes its own from the memory budget).
     fn default() -> Self {
-        // Default capacity of 1000 queries
-        Self::new(1000)
+        Self::with_limit(DEFAULT_LIMIT)
     }
 }
 
+/// The byte bound of a cache made outside a database: the smallest bound a
+/// database's default gives.
+pub const DEFAULT_LIMIT: usize = 4 * 1024 * 1024;
+
 /// Cache statistics.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct CacheStats {
     /// Number of entries in parsed cache.
     pub parsed_size: usize,
@@ -433,8 +621,14 @@ pub struct CacheStats {
     pub optimized_hits: u64,
     /// Number of optimized cache misses.
     pub optimized_misses: u64,
-    /// Number of times the cache was invalidated (cleared due to DDL).
+    /// How many times a clear moved the cache's generation.
     pub invalidations: u64,
+    /// The planning generation the entries were planned under.
+    pub generation: u64,
+    /// Hits a session's own cache answered without the shared one.
+    pub session_hits: u64,
+    /// Plans not stored because they alone exceed the limit.
+    pub oversized: u64,
 }
 
 impl CacheStats {
@@ -520,9 +714,9 @@ impl<P> CachingQueryProcessor<P> {
         self.cache.stats()
     }
 
-    /// Clears the cache.
+    /// Clears the cache, moving it to its next generation.
     pub fn clear_cache(&self) {
-        self.cache.clear();
+        self.cache.clear(self.cache.generation() + 1);
     }
 }
 
@@ -567,117 +761,94 @@ mod tests {
         assert_ne!(spaced.query(), single.query());
     }
 
-    #[test]
-    fn test_cache_basic_operations() {
-        let cache = QueryCache::new(10);
-        let key = CacheKey::new("MATCH (n) RETURN n", test_language());
+    use crate::query::plan::{LogicalOperator, LogicalPlan};
 
-        // Create a simple logical plan for testing
-        use crate::query::plan::{LogicalOperator, LogicalPlan};
-        let plan = LogicalPlan::new(LogicalOperator::Empty);
-
-        // Initially empty
-        assert!(cache.get_parsed(&key).is_none());
-
-        // Put and get
-        cache.put_parsed(key.clone(), plan.clone());
-        assert!(cache.get_parsed(&key).is_some());
-
-        // Stats
-        let stats = cache.stats();
-        assert_eq!(stats.parsed_size, 1);
-        assert_eq!(stats.parsed_hits, 1);
-        assert_eq!(stats.parsed_misses, 1);
+    fn plan() -> LogicalPlan {
+        LogicalPlan::new(LogicalOperator::Empty)
     }
 
     #[test]
-    fn test_cache_lru_eviction() {
-        let cache = QueryCache::new(4); // 2 entries per cache level
-
-        use crate::query::plan::{LogicalOperator, LogicalPlan};
-
-        // Add 3 entries to parsed cache (capacity is 2)
-        for i in 0..3 {
-            let key = CacheKey::new(format!("QUERY {}", i), test_language());
-            cache.put_parsed(key, LogicalPlan::new(LogicalOperator::Empty));
-        }
-
-        // First entry should be evicted
-        let key0 = CacheKey::new("QUERY 0", test_language());
-        assert!(cache.get_parsed(&key0).is_none());
-
-        // Entry 1 and 2 should still be present
-        let key1 = CacheKey::new("QUERY 1", test_language());
-        let key2 = CacheKey::new("QUERY 2", test_language());
-        assert!(cache.get_parsed(&key1).is_some());
-        assert!(cache.get_parsed(&key2).is_some());
+    fn test_cache_basic_operations() {
+        let cache = QueryCache::with_limit(1 << 20);
+        let key = CacheKey::new("MATCH (n) RETURN n", test_language());
+        assert!(cache.get(&key, Stage::Parsed).is_none());
+        cache.put(key.clone(), Stage::Parsed, plan(), 0);
+        assert!(cache.get(&key, Stage::Parsed).is_some());
+        let stats = cache.stats();
+        assert_eq!(
+            (stats.parsed_size, stats.parsed_hits, stats.parsed_misses),
+            (1, 1, 1)
+        );
     }
 
     #[test]
     fn test_cache_invalidation() {
-        let cache = QueryCache::new(10);
+        let cache = QueryCache::with_limit(1 << 20);
         let key = CacheKey::new("MATCH (n) RETURN n", test_language());
-
-        use crate::query::plan::{LogicalOperator, LogicalPlan};
-        let plan = LogicalPlan::new(LogicalOperator::Empty);
-
-        cache.put_parsed(key.clone(), plan.clone());
-        cache.put_optimized(key.clone(), plan);
-
-        assert!(cache.get_parsed(&key).is_some());
-        assert!(cache.get_optimized(&key).is_some());
-
-        // Invalidate
+        cache.put(key.clone(), Stage::Parsed, plan(), 0);
+        cache.put(key.clone(), Stage::Optimized, plan(), 0);
         cache.invalidate(&key);
-
-        // Clear stats from previous gets
-        cache.reset_stats();
-
-        assert!(cache.get_parsed(&key).is_none());
-        assert!(cache.get_optimized(&key).is_none());
+        assert!(cache.get(&key, Stage::Parsed).is_none());
+        assert!(cache.get(&key, Stage::Optimized).is_none());
+        assert_eq!(cache.held_bytes(), 0);
     }
 
     #[test]
     fn test_cache_disabled() {
         let cache = QueryCache::disabled();
         let key = CacheKey::new("MATCH (n) RETURN n", test_language());
-
-        use crate::query::plan::{LogicalOperator, LogicalPlan};
-        let plan = LogicalPlan::new(LogicalOperator::Empty);
-
-        // Should not store anything
-        cache.put_parsed(key.clone(), plan);
-        assert!(cache.get_parsed(&key).is_none());
-
-        // Stats should be zero
-        let stats = cache.stats();
-        assert_eq!(stats.parsed_size, 0);
+        cache.put(key.clone(), Stage::Parsed, plan(), 0);
+        assert!(cache.get(&key, Stage::Parsed).is_none());
+        assert_eq!(cache.stats().parsed_size, 0);
+        assert_eq!(cache.held_bytes(), 0);
     }
 
     #[test]
     fn test_cache_stats() {
-        let cache = QueryCache::new(10);
-
-        use crate::query::plan::{LogicalOperator, LogicalPlan};
-
+        let cache = QueryCache::with_limit(1 << 20);
         let key1 = CacheKey::new("QUERY 1", test_language());
         let key2 = CacheKey::new("QUERY 2", test_language());
-        let plan = LogicalPlan::new(LogicalOperator::Empty);
-
-        // Miss
-        cache.get_optimized(&key1);
-
-        // Put and hit
-        cache.put_optimized(key1.clone(), plan);
-        cache.get_optimized(&key1);
-        cache.get_optimized(&key1);
-
-        // Another miss
-        cache.get_optimized(&key2);
-
+        cache.get(&key1, Stage::Optimized);
+        cache.put(key1.clone(), Stage::Optimized, plan(), 0);
+        cache.get(&key1, Stage::Optimized);
+        cache.get(&key1, Stage::Optimized);
+        cache.get(&key2, Stage::Optimized);
         let stats = cache.stats();
-        assert_eq!(stats.optimized_hits, 2);
-        assert_eq!(stats.optimized_misses, 2);
+        assert_eq!((stats.optimized_hits, stats.optimized_misses), (2, 2));
         assert!((stats.optimized_hit_rate() - 0.5).abs() < 0.01);
+    }
+
+    /// A put under a key it holds replaces the entry: its bytes count once.
+    #[test]
+    fn a_put_replaces_the_entry_of_its_key() {
+        let cache = QueryCache::with_limit(1 << 20);
+        let key = CacheKey::new("QUERY 1", test_language());
+        cache.put(key.clone(), Stage::Optimized, plan(), 0);
+        let once = cache.held_bytes();
+        cache.put(key.clone(), Stage::Optimized, plan(), 0);
+        assert_eq!(cache.held_bytes(), once);
+        assert_eq!(cache.stats().optimized_size, 1);
+    }
+
+    /// The deep estimate grows with what a plan owns: a long literal costs
+    /// its length.
+    #[test]
+    fn a_plan_is_charged_for_its_literal() {
+        use crate::query::plan::{LogicalExpression, ProjectOp, Projection};
+        use grafeo_common::types::Value;
+
+        let literal = |len: usize| {
+            LogicalPlan::new(LogicalOperator::Project(ProjectOp {
+                projections: vec![Projection {
+                    expression: LogicalExpression::Literal(Value::from("x".repeat(len))),
+                    alias: Some("s".to_string()),
+                }],
+                input: Box::new(LogicalOperator::Empty),
+                pass_through_input: false,
+            }))
+        };
+        let short = literal(8).estimated_bytes();
+        let long = literal(64 * 1024).estimated_bytes();
+        assert!(long >= short + 64 * 1024 - 8, "{short} then {long}");
     }
 }

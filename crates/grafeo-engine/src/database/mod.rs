@@ -969,8 +969,12 @@ impl GrafeoDB {
         #[cfg(feature = "wal")]
         let wal_flusher: Option<grafeo_storage::wal::AdaptiveFlusher> = None;
 
-        // Create query cache with default capacity (1000 queries)
-        let query_cache = Arc::new(QueryCache::default());
+        // The plan cache, bounded by the setting under the memory budget.
+        let query_cache = Arc::new(QueryCache::with_limit(
+            config
+                .plan_cache_limit()
+                .bytes_under(buffer_manager.hard_limit()),
+        ));
 
         // After all snapshot/WAL recovery, the database continues at the
         // highest epoch the file, its WAL or any graph reached, collected at
@@ -1237,7 +1241,12 @@ impl GrafeoDB {
         #[cfg(feature = "cdc")]
         cdc_log.attach_memory(Arc::clone(&buffer_manager));
 
-        let query_cache = Arc::new(QueryCache::default());
+        // The plan cache, bounded by the setting under the memory budget.
+        let query_cache = Arc::new(QueryCache::with_limit(
+            config
+                .plan_cache_limit()
+                .bytes_under(buffer_manager.hard_limit()),
+        ));
 
         #[cfg(feature = "cdc")]
         let cdc_enabled_val = config.cdc_enabled();
@@ -1364,7 +1373,12 @@ impl GrafeoDB {
         #[cfg(feature = "cdc")]
         cdc_log.attach_memory(Arc::clone(&buffer_manager));
 
-        let query_cache = Arc::new(QueryCache::default());
+        // The plan cache, bounded by the setting under the memory budget.
+        let query_cache = Arc::new(QueryCache::with_limit(
+            config
+                .plan_cache_limit()
+                .bytes_under(buffer_manager.hard_limit()),
+        ));
 
         #[cfg(feature = "cdc")]
         let cdc_enabled_val = config.cdc_enabled();
@@ -2864,7 +2878,7 @@ impl GrafeoDB {
     /// invoked manually after external schema changes (e.g., WAL replay,
     /// import) or when you want to force re-optimization of all queries.
     pub fn clear_plan_cache(&self) {
-        self.query_cache.clear();
+        self.query_cache.clear(self.query_cache.generation() + 1);
     }
 
     // =========================================================================
@@ -3256,7 +3270,7 @@ impl GrafeoDB {
         // A graph, index, constraint or type changed: a cached plan may have
         // been optimized for what was there before (an index it now lacks or
         // could use), so every plan is made again.
-        self.query_cache.clear();
+        self.query_cache.clear(self.query_cache.generation() + 1);
         Ok(())
     }
 

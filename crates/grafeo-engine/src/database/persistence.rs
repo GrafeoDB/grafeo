@@ -1202,7 +1202,7 @@ impl super::GrafeoDB {
         Self::continue_epochs(&root, &self.transaction_manager);
         // Its graphs, indexes and types are the snapshot's now: no cached
         // plan was made for them.
-        self.query_cache.clear();
+        self.query_cache.clear(self.query_cache.generation() + 1);
         // Durable before it returns: the file holds the restored state and
         // the WAL starts after it, with no commit between, so a crash from
         // here reopens what the restore put in place, not what it replaced.

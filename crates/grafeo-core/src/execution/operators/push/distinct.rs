@@ -24,6 +24,13 @@ pub struct DistinctPushOperator {
     /// [`TemporalComparison::normalize`]); `TypesApart` reads every value
     /// as itself.
     temporal: TemporalComparison,
+    /// What it holds under the statement's memory, captured at construction
+    /// (see [`capture`](crate::execution::memory::capture)); it counts nothing
+    /// outside a budgeted statement. It cannot spill: past the query memory limit or the
+    /// memory limit it fails with `GRAFEO-S001`.
+    memory: crate::execution::memory::OperatorMemory,
+    /// What the seen keys' values hold on the heap, counted as they are kept.
+    seen_heap: usize,
 }
 
 impl DistinctPushOperator {
@@ -41,6 +48,8 @@ impl DistinctPushOperator {
             columns: None,
             seen: HashSet::default(),
             temporal: TemporalComparison::TypesApart,
+            memory: crate::execution::memory::capture(),
+            seen_heap: 0,
         }
     }
 
@@ -50,6 +59,8 @@ impl DistinctPushOperator {
             columns: Some(columns),
             seen: HashSet::default(),
             temporal: TemporalComparison::TypesApart,
+            memory: crate::execution::memory::capture(),
+            seen_heap: 0,
         }
     }
 
@@ -84,6 +95,23 @@ impl PushOperator for DistinctPushOperator {
                 new_indices.push(row);
             }
         }
+
+        // The seen keys' table and what the new keys' values hold on the
+        // heap, against the statement's memory: a chunk at a time, a compare
+        // within the grant.
+        let width = self.columns.as_ref().map_or(chunk.column_count(), Vec::len);
+        let heap = crate::execution::memory::HeapColumns::counted(
+            &self.memory,
+            &chunk,
+            self.columns.as_deref(),
+        );
+        self.seen_heap = self
+            .seen_heap
+            .saturating_add(heap.rows_bytes(new_indices.iter().copied()));
+        self.memory.set(
+            crate::execution::operators::distinct::seen_bytes(self.seen.capacity(), width)
+                .saturating_add(self.seen_heap),
+        )?;
 
         if new_indices.is_empty() {
             return Ok(true);
@@ -128,6 +156,13 @@ pub struct DistinctMaterializingOperator {
     temporal: TemporalComparison,
     /// Number of columns.
     num_columns: Option<usize>,
+    /// What it holds under the statement's memory, captured at construction
+    /// (see [`capture`](crate::execution::memory::capture)); it counts nothing
+    /// outside a budgeted statement. It cannot spill: past the query memory limit or
+    /// the memory limit it fails with `GRAFEO-S001`.
+    memory: crate::execution::memory::OperatorMemory,
+    /// What the kept rows' values hold on the heap, counted as they are kept.
+    rows_heap: usize,
 }
 
 impl DistinctMaterializingOperator {
@@ -139,6 +174,8 @@ impl DistinctMaterializingOperator {
             seen: HashSet::default(),
             temporal: TemporalComparison::TypesApart,
             num_columns: None,
+            memory: crate::execution::memory::capture(),
+            rows_heap: 0,
         }
     }
 
@@ -150,6 +187,8 @@ impl DistinctMaterializingOperator {
             seen: HashSet::default(),
             temporal: TemporalComparison::TypesApart,
             num_columns: None,
+            memory: crate::execution::memory::capture(),
+            rows_heap: 0,
         }
     }
 }
@@ -171,6 +210,7 @@ impl PushOperator for DistinctMaterializingOperator {
         }
 
         let num_cols = chunk.column_count();
+        let heap = crate::execution::memory::HeapColumns::counted(&self.memory, &chunk, None);
 
         for row in chunk.selected_indices() {
             let key = match &self.columns {
@@ -179,6 +219,9 @@ impl PushOperator for DistinctMaterializingOperator {
             };
 
             if self.seen.insert(key) {
+                if !heap.is_empty() {
+                    self.rows_heap = self.rows_heap.saturating_add(heap.row_bytes(row));
+                }
                 // Store the full row
                 let row_values: Vec<Value> = (0..num_cols)
                     .map(|col| {
@@ -191,6 +234,19 @@ impl PushOperator for DistinctMaterializingOperator {
                 self.rows.push(row_values);
             }
         }
+
+        // The rows it keeps and their keys, against the statement's memory: a
+        // chunk at a time, a compare within the grant.
+        let row_bytes = std::mem::size_of::<Vec<Value>>() + num_cols * std::mem::size_of::<Value>();
+        self.memory.set(
+            self.rows.len().saturating_mul(row_bytes).saturating_add(
+                crate::execution::operators::distinct::seen_bytes(
+                    self.seen.capacity(),
+                    self.columns.as_ref().map_or(num_cols, Vec::len),
+                )
+                .saturating_add(self.rows_heap),
+            ),
+        )?;
 
         Ok(true)
     }

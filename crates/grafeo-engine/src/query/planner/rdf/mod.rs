@@ -146,10 +146,10 @@ pub struct RdfPlanner {
     exists_run_once: bool,
     /// The routes of the `EXISTS` tests of the operator being planned, which its PROFILE line names.
     exists_routes: std::cell::RefCell<Vec<&'static str>>,
-    /// The statement's operator memory context, set as the ambient scope while
-    /// this planner plans and converts one statement (patch 9, #751).
-    #[cfg(feature = "spill")]
-    operator_memory: Option<grafeo_core::execution::OperatorMemoryContext>,
+    /// Who it plans for: a session's plans run
+    /// inside the statement's memory scope (see [`Self::in_session`]).
+    #[cfg(any(lpg_language, rdf_language))]
+    planned_for: super::PlannedFor,
 }
 
 impl RdfPlanner {
@@ -177,13 +177,8 @@ impl RdfPlanner {
             row: None,
             exists_run_once: true,
             exists_routes: std::cell::RefCell::new(Vec::new()),
-            #[cfg(feature = "spill")]
-            operator_memory: Some(grafeo_core::execution::OperatorMemoryContext::new(
-                grafeo_common::memory::buffer::BufferManager::new(
-                    grafeo_common::memory::buffer::BufferManagerConfig::default(),
-                ),
-                None,
-            )),
+            #[cfg(any(lpg_language, rdf_language))]
+            planned_for: super::PlannedFor::Standalone,
         }
     }
 
@@ -209,13 +204,8 @@ impl RdfPlanner {
             row: Some(row),
             exists_run_once: false,
             exists_routes: std::cell::RefCell::new(Vec::new()),
-            #[cfg(feature = "spill")]
-            operator_memory: Some(grafeo_core::execution::OperatorMemoryContext::new(
-                grafeo_common::memory::buffer::BufferManager::new(
-                    grafeo_common::memory::buffer::BufferManagerConfig::default(),
-                ),
-                None,
-            )),
+            #[cfg(any(lpg_language, rdf_language))]
+            planned_for: parts.planned_for,
         }
     }
 
@@ -241,6 +231,9 @@ impl RdfPlanner {
             read_counter: Arc::clone(&self.read_counter),
             warnings: Arc::clone(&self.warnings),
             clock: self.clock,
+            #[cfg(any(lpg_language, rdf_language))]
+            planned_for: self.planned_for,
+            memory: grafeo_core::execution::current_statement_memory(),
         }
     }
 
@@ -324,16 +317,32 @@ impl RdfPlanner {
         self
     }
 
-    /// Sets the statement's operator memory context, entered as the ambient
-    /// scope while this planner plans one statement (patch 9, #751).
-    #[cfg(feature = "spill")]
+    /// Marks the planner as a session's: every plan it makes must run inside
+    /// the statement's memory scope
+    /// ([`enter_operator_memory`](grafeo_core::execution::enter_operator_memory),
+    /// which its materializing operators capture at construction), and a debug
+    /// build fails a plan outside one instead of leaving its operators'
+    /// memory uncounted.
+    #[cfg(rdf_language)]
     #[must_use]
-    pub fn with_operator_memory(
-        mut self,
-        ctx: Option<grafeo_core::execution::OperatorMemoryContext>,
-    ) -> Self {
-        self.operator_memory = ctx;
-        self
+    pub(crate) fn in_session(self) -> Self {
+        Self {
+            #[cfg(any(lpg_language, rdf_language))]
+            planned_for: super::PlannedFor::Session,
+            ..self
+        }
+    }
+
+    /// Checks, in a debug build, that a session's plan runs inside its
+    /// statement's memory scope (see [`Self::in_session`]).
+    fn check_statement_scope(&self) {
+        #[cfg(any(lpg_language, rdf_language))]
+        debug_assert!(
+            self.planned_for == super::PlannedFor::Standalone
+                || grafeo_core::execution::in_operator_memory_scope(),
+            "a session plans a statement outside its memory scope: enter the statement's \
+             memory (StatementMemory::Unbudgeted where its operators never run)"
+        );
     }
 
     /// Sets the memory one native property-path traversal may retain.
@@ -382,11 +391,7 @@ impl RdfPlanner {
     ///
     /// Returns an error if planning fails.
     pub fn plan(&self, logical_plan: &LogicalPlan) -> Result<PhysicalPlan> {
-        #[cfg(feature = "spill")]
-        let _memory_scope = self
-            .operator_memory
-            .clone()
-            .map(grafeo_core::execution::enter_operator_memory);
+        self.check_statement_scope();
         self.warnings.raise_all(logical_plan.warnings);
         let (operator, columns, types) =
             self.without_hidden_columns(self.plan_operator(&logical_plan.root)?);
@@ -416,11 +421,7 @@ impl RdfPlanner {
     ) -> Result<(PhysicalPlan, Vec<crate::query::profile::ProfileEntry>)> {
         self.profiling.set(true);
         self.profile_entries.borrow_mut().clear();
-        #[cfg(feature = "spill")]
-        let _memory_scope = self
-            .operator_memory
-            .clone()
-            .map(grafeo_core::execution::enter_operator_memory);
+        self.check_statement_scope();
         self.warnings.raise_all(logical_plan.warnings);
 
         let result = self.plan_operator(&logical_plan.root);
@@ -1893,6 +1894,7 @@ impl RdfPlanner {
             templates,
             terms: Arc::clone(&self.terms),
             seen: grafeo_common::utils::hash::FxHashSet::default(),
+            memory: grafeo_core::execution::memory::capture(),
         });
 
         let columns = vec![
@@ -4065,6 +4067,11 @@ struct ConstructOperator {
     templates: Vec<[TemplateSlot; 3]>,
     terms: Arc<QueryTermIds>,
     seen: grafeo_common::utils::hash::FxHashSet<[TermId; 3]>,
+    /// What it holds under the statement's memory, captured at construction
+    /// (see [`capture`](grafeo_core::execution::memory::capture)); it counts
+    /// nothing outside a budgeted statement. Past the query memory limit or
+    /// the memory limit it fails with `GRAFEO-S001`.
+    memory: grafeo_core::execution::OperatorMemory,
 }
 
 impl ConstructOperator {
@@ -4132,6 +4139,13 @@ impl Operator for ConstructOperator {
                     count += 1;
                 }
             }
+            // The triples seen, against the statement's memory: a table
+            // resize at a time, a compare otherwise.
+            self.memory.set(
+                self.seen
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<[TermId; 3]>() + 1),
+            )?;
             if count > 0 {
                 output.set_count(count);
                 return Ok(Some(output));
@@ -4142,6 +4156,7 @@ impl Operator for ConstructOperator {
     fn reset(&mut self) {
         self.input.reset();
         self.seen.clear();
+        self.memory.clear();
     }
 
     fn name(&self) -> &'static str {
@@ -7085,6 +7100,7 @@ mod tests {
             templates: vec![],
             terms: Arc::default(),
             seen: grafeo_common::utils::hash::FxHashSet::default(),
+            memory: grafeo_core::execution::memory::capture(),
         });
         let any = op.into_any();
         assert!(any.downcast::<ConstructOperator>().is_ok());

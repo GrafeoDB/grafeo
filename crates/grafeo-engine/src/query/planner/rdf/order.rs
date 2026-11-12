@@ -44,6 +44,11 @@ pub(super) struct RdfSortOperator {
     rows: Vec<Row>,
     sorted: bool,
     position: usize,
+    /// What it holds under the statement's memory, captured at construction
+    /// (see [`capture`](grafeo_core::execution::memory::capture)); it counts
+    /// nothing outside a budgeted statement. The sort cannot spill: past the
+    /// query memory limit or the memory limit it fails with `GRAFEO-S001`.
+    memory: grafeo_core::execution::OperatorMemory,
 }
 
 impl RdfSortOperator {
@@ -64,6 +69,7 @@ impl RdfSortOperator {
             rows: Vec::new(),
             sorted: false,
             position: 0,
+            memory: grafeo_core::execution::memory::capture(),
         }
     }
 
@@ -99,6 +105,14 @@ impl RdfSortOperator {
                     keys,
                 });
             }
+            // The chunk and its rows' keys, against the statement's memory: a
+            // chunk at a time, a compare within the grant.
+            self.memory.add_with(|| {
+                grafeo_core::execution::memory::chunk_bytes(&chunk)
+                    + chunk.row_count()
+                        * (std::mem::size_of::<Row>()
+                            + self.keys.len() * std::mem::size_of::<Option<SparqlOrderKey>>())
+            })?;
             self.chunks.push(chunk);
         }
         let order = &self.keys;
@@ -158,6 +172,7 @@ impl Operator for RdfSortOperator {
         self.rows.clear();
         self.sorted = false;
         self.position = 0;
+        self.memory.clear();
     }
 
     fn name(&self) -> &'static str {

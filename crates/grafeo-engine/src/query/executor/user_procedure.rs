@@ -104,6 +104,15 @@ pub struct UserProcedureOperator {
     row_index: usize,
     /// Output column names after YIELD filtering.
     output_columns: Vec<String>,
+    /// The calling statement's memory, captured when the call was planned:
+    /// the body is planned when it runs, in the same statement's memory.
+    memory: Option<grafeo_core::execution::StatementMemory>,
+    /// What its buffered result holds under that statement's memory,
+    /// captured at construction (see
+    /// [`capture`](grafeo_core::execution::memory::capture)); it counts
+    /// nothing outside a budgeted statement. Past the query memory limit or
+    /// the memory limit the call fails with `GRAFEO-S001`.
+    held: grafeo_core::execution::OperatorMemory,
 }
 
 impl UserProcedureOperator {
@@ -130,6 +139,8 @@ impl UserProcedureOperator {
             result_rows: None,
             row_index: 0,
             output_columns,
+            memory: grafeo_core::execution::current_statement_memory(),
+            held: grafeo_core::execution::memory::capture(),
         }
     }
 
@@ -147,6 +158,13 @@ impl UserProcedureOperator {
             .with_write_counter(Arc::clone(&self.write_counter))
             .with_read_counter(Arc::clone(&self.read_counter));
 
+        // In the calling statement's memory; a call planned outside any
+        // statement (a planner of no session) runs its body unbudgeted.
+        let _memory = grafeo_core::execution::enter_operator_memory(
+            self.memory
+                .clone()
+                .unwrap_or(grafeo_core::execution::StatementMemory::Unbudgeted),
+        );
         let physical = planner.plan(logical_plan).map_err(OperatorError::from)?;
         // Checked before the body runs, so a body that does not fit writes
         // nothing.
@@ -176,6 +194,10 @@ impl UserProcedureOperator {
                 .collect(),
         };
 
+        // The result kept until its rows are read, against the statement's
+        // memory: the rows, their values and what those hold on the heap (one
+        // pass over the values, only when it counts).
+        self.held.set_with(|| rows_bytes(&rows))?;
         self.result_rows = Some(rows);
         Ok(())
     }
@@ -235,6 +257,19 @@ impl UserProcedureOperator {
     }
 }
 
+/// What `rows` hold, about: a slot per row and value, and what the values
+/// hold on the heap.
+fn rows_bytes(rows: &[Vec<Value>]) -> usize {
+    rows.iter()
+        .map(|row| {
+            row.iter().map(Value::estimated_size_bytes).fold(
+                std::mem::size_of::<Vec<Value>>() + row.len() * std::mem::size_of::<Value>(),
+                usize::saturating_add,
+            )
+        })
+        .fold(0, usize::saturating_add)
+}
+
 /// A semantic error from the operator.
 fn semantic(message: String) -> OperatorError {
     Error::from(QueryError::semantic(message)).into()
@@ -283,6 +318,7 @@ impl Operator for UserProcedureOperator {
     fn reset(&mut self) {
         self.row_index = 0;
         self.result_rows = None;
+        self.held.clear();
     }
 
     fn name(&self) -> &'static str {

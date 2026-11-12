@@ -238,10 +238,10 @@ pub struct Planner {
     /// Whether the rows are collected or streamed (a stream is shuffled per
     /// chunk).
     delivery: Delivery,
-    /// The statement's operator memory context, set as the ambient scope while
-    /// this planner plans and converts one statement (patch 9, #751).
-    #[cfg(feature = "spill")]
-    operator_memory: Option<grafeo_core::execution::OperatorMemoryContext>,
+    /// Who it plans for: a session's plans run
+    /// inside the statement's memory scope (see [`Self::in_session`]).
+    #[cfg(any(lpg_language, rdf_language))]
+    planned_for: super::PlannedFor,
     /// Variables that hold scalar values (from UNWIND/FOR), not node/edge IDs.
     /// Used by plan_return to assign `LogicalType::Any` instead of `Node`.
     pub(super) scalar_columns: std::cell::RefCell<std::collections::HashSet<String>>,
@@ -361,13 +361,8 @@ impl Planner {
             hop_targets: std::cell::RefCell::new(std::collections::HashMap::new()),
             shuffle_unordered: false,
             delivery: Delivery::Collected,
-            #[cfg(feature = "spill")]
-            operator_memory: Some(grafeo_core::execution::OperatorMemoryContext::new(
-                grafeo_common::memory::buffer::BufferManager::new(
-                    grafeo_common::memory::buffer::BufferManagerConfig::default(),
-                ),
-                None,
-            )),
+            #[cfg(any(lpg_language, rdf_language))]
+            planned_for: super::PlannedFor::Standalone,
             scalar_columns: std::cell::RefCell::new(std::collections::HashSet::new()),
             edge_columns: std::cell::RefCell::new(std::collections::HashSet::new()),
             entity_list_columns: std::cell::RefCell::new(std::collections::HashMap::new()),
@@ -433,13 +428,8 @@ impl Planner {
             hop_targets: std::cell::RefCell::new(std::collections::HashMap::new()),
             shuffle_unordered: false,
             delivery: Delivery::Collected,
-            #[cfg(feature = "spill")]
-            operator_memory: Some(grafeo_core::execution::OperatorMemoryContext::new(
-                grafeo_common::memory::buffer::BufferManager::new(
-                    grafeo_common::memory::buffer::BufferManagerConfig::default(),
-                ),
-                None,
-            )),
+            #[cfg(any(lpg_language, rdf_language))]
+            planned_for: super::PlannedFor::Standalone,
             scalar_columns: std::cell::RefCell::new(std::collections::HashSet::new()),
             edge_columns: std::cell::RefCell::new(std::collections::HashSet::new()),
             entity_list_columns: std::cell::RefCell::new(std::collections::HashMap::new()),
@@ -676,16 +666,32 @@ impl Planner {
         self
     }
 
-    /// Sets the statement's operator memory context, entered as the ambient
-    /// scope while this planner plans one statement (patch 9, #751).
-    #[cfg(feature = "spill")]
+    /// Marks the planner as a session's: every plan it makes must run inside
+    /// the statement's memory scope
+    /// ([`enter_operator_memory`](grafeo_core::execution::enter_operator_memory),
+    /// which its materializing operators capture at construction), and a debug
+    /// build fails a plan outside one instead of leaving its operators'
+    /// memory uncounted.
+    #[cfg(lpg_language)]
     #[must_use]
-    pub fn with_operator_memory(
-        mut self,
-        ctx: Option<grafeo_core::execution::OperatorMemoryContext>,
-    ) -> Self {
-        self.operator_memory = ctx;
-        self
+    pub(crate) fn in_session(self) -> Self {
+        Self {
+            #[cfg(any(lpg_language, rdf_language))]
+            planned_for: super::PlannedFor::Session,
+            ..self
+        }
+    }
+
+    /// Checks, in a debug build, that a session's plan runs inside its
+    /// statement's memory scope (see [`Self::in_session`]).
+    fn check_statement_scope(&self) {
+        #[cfg(any(lpg_language, rdf_language))]
+        debug_assert!(
+            self.planned_for == super::PlannedFor::Standalone
+                || grafeo_core::execution::in_operator_memory_scope(),
+            "a session plans a statement outside its memory scope: enter the statement's \
+             memory (StatementMemory::Unbudgeted where its operators never run)"
+        );
     }
 
     /// Plans for a stream: with `shuffle_unordered`, the rows of each chunk
@@ -942,11 +948,7 @@ impl Planner {
     /// or invalid expressions.
     pub fn plan(&self, logical_plan: &LogicalPlan) -> Result<PhysicalPlan> {
         let _span = grafeo_debug_span!("grafeo::query::plan");
-        #[cfg(feature = "spill")]
-        let _memory_scope = self
-            .operator_memory
-            .clone()
-            .map(grafeo_core::execution::enter_operator_memory);
+        self.check_statement_scope();
         self.take_plan_names(logical_plan);
         self.find_reachability_expands(&logical_plan.root);
         self.session_context
@@ -973,11 +975,7 @@ impl Planner {
     ) -> Result<(PhysicalPlan, Vec<crate::query::profile::ProfileEntry>)> {
         self.profiling.set(true);
         self.profile_entries.borrow_mut().clear();
-        #[cfg(feature = "spill")]
-        let _memory_scope = self
-            .operator_memory
-            .clone()
-            .map(grafeo_core::execution::enter_operator_memory);
+        self.check_statement_scope();
         self.take_plan_names(logical_plan);
         self.find_reachability_expands(&logical_plan.root);
         self.session_context

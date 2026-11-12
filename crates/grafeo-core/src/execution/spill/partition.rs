@@ -233,6 +233,14 @@ impl<V: Clone + Send + Sync + 'static> PartitionedState<V> {
         self.partitions.iter().filter(|p| p.is_some()).count()
     }
 
+    /// The values of the in-memory partitions.
+    pub fn in_memory_values(&self) -> impl Iterator<Item = &V> {
+        self.partitions
+            .iter()
+            .flatten()
+            .flat_map(|partition| partition.values().map(|entry| &entry.value))
+    }
+
     /// Returns the number of spilled partitions.
     #[must_use]
     pub fn spilled_count(&self) -> usize {

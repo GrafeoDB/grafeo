@@ -296,8 +296,11 @@ pub struct SpillableSortPushOperator {
     /// Running total of estimated buffer memory in bytes (incremental tracking).
     estimated_bytes: usize,
     /// The grant of the buffer's bytes, grown per chunk against the statement's
-    /// query memory limit (patch 9, #751).
-    grant: Option<grafeo_common::memory::buffer::MemoryGrant>,
+    /// memory (its query memory limit and the memory limit).
+    grant: crate::execution::memory::OperatorGrant,
+    /// Its memory consumer's registration, unregistered when it drops (the
+    /// sort ended or failed): only its own consumer.
+    registration: Option<crate::execution::memory::ConsumerRegistration>,
 }
 
 #[cfg(feature = "spill")]
@@ -317,7 +320,8 @@ impl SpillableSortPushOperator {
             external_sort: None,
             spill_threshold: DEFAULT_SPILL_THRESHOLD,
             memory_ctx: None,
-            grant: None,
+            grant: crate::execution::memory::OperatorGrant::default(),
+            registration: None,
             spill_state: None,
             estimated_bytes: 0,
         }
@@ -336,7 +340,8 @@ impl SpillableSortPushOperator {
             external_sort: None,
             spill_threshold: threshold,
             memory_ctx: None,
-            grant: None,
+            grant: crate::execution::memory::OperatorGrant::default(),
+            registration: None,
             spill_state: None,
             estimated_bytes: 0,
         }
@@ -352,10 +357,13 @@ impl SpillableSortPushOperator {
     ) -> Self {
         use super::spill_state::{OperatorConsumerAdapter, OperatorSpillState};
 
-        let state = std::sync::Arc::new(OperatorSpillState::new("SpillableSortPush".to_string()));
+        // A name of its own: one sort's end unregisters only its own consumer.
+        let state = std::sync::Arc::new(OperatorSpillState::new(
+            crate::execution::memory::OperatorMemoryContext::consumer_name("SpillableSortPush"),
+        ));
         let adapter =
             std::sync::Arc::new(OperatorConsumerAdapter::new(std::sync::Arc::clone(&state)));
-        ctx.register_consumer(adapter);
+        let registration = ctx.register_consumer(adapter);
 
         Self {
             keys,
@@ -368,7 +376,8 @@ impl SpillableSortPushOperator {
             external_sort: None,
             spill_threshold: DEFAULT_SPILL_THRESHOLD,
             memory_ctx: Some(ctx),
-            grant: None,
+            grant: crate::execution::memory::OperatorGrant::default(),
+            registration: Some(registration),
             spill_state: Some(state),
             estimated_bytes: 0,
         }
@@ -492,7 +501,9 @@ impl SpillableSortPushOperator {
 
         // Reset memory tracking after spill; the grant goes with the buffer.
         self.estimated_bytes = 0;
-        self.grant = None;
+        if let Some(ctx) = &self.memory_ctx {
+            ctx.release(&mut self.grant);
+        }
         if let Some(ref state) = self.spill_state {
             state.set_usage(0);
         }
@@ -500,10 +511,11 @@ impl SpillableSortPushOperator {
         Ok(())
     }
 
-    /// Unregisters this operator's consumer from the BufferManager.
-    fn unregister_consumer(&self) {
-        if let (Some(ctx), Some(state)) = (&self.memory_ctx, &self.spill_state) {
-            ctx.unregister_consumer(state.name());
+    /// Unregisters this operator's consumer and gives back its grant.
+    fn unregister_consumer(&mut self) {
+        self.registration = None;
+        if let Some(ctx) = &self.memory_ctx {
+            ctx.release(&mut self.grant);
         }
     }
 }
@@ -544,15 +556,17 @@ impl PushOperator for SpillableSortPushOperator {
             state.set_usage(self.estimated_bytes);
         }
 
-        // The statement's query memory limit bounds the buffer: grow the grant
-        // per chunk. Over it, spill first (the spill resets the estimate and
-        // the grant goes with it); what cannot spill refuses, naming the
-        // query limit (patch 9, #751).
-        let over_limit = self
-            .memory_ctx
-            .clone()
-            .map(|ctx| ctx.grow(&mut self.grant, self.estimated_bytes));
-        if let Some(Err(error)) = over_limit {
+        // The statement's memory bounds the buffer: grow the grant per chunk
+        // (a compare within it). Over the query memory limit or the memory
+        // limit, spill first (the spill resets the estimate and the grant goes
+        // with it); what cannot spill refuses, naming the bound.
+        let over_limit = match &self.memory_ctx {
+            Some(ctx) if self.estimated_bytes > self.grant.size() => {
+                ctx.grow(&mut self.grant, self.estimated_bytes).err()
+            }
+            _ => None,
+        };
+        if let Some(error) = over_limit {
             // Over the query limit the buffer spills whatever it holds
             // (the minimum-buffer guard is only for pressure noise); what
             // cannot spill refuses, naming the query limit.
@@ -565,10 +579,8 @@ impl PushOperator for SpillableSortPushOperator {
             if can_spill {
                 self.spill_buffer()?;
             }
-            if self.estimated_bytes == 0 {
-                self.grant = None;
-            } else {
-                return Err(OperatorError::Wrapped(Box::new(error)));
+            if self.estimated_bytes != 0 {
+                return Err(OperatorError::from(error));
             }
         }
 

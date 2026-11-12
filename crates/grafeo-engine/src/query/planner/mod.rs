@@ -30,6 +30,17 @@ use grafeo_core::execution::operators::{
     UnaryFilterOp,
 };
 
+/// Who a planner plans for (`Planner::in_session`): a session's statement
+/// plans inside its memory scope, which a debug build checks.
+#[cfg(any(lpg_language, rdf_language))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PlannedFor {
+    /// A session's statement.
+    Session,
+    /// Anything else: unit tests, the query processor, a per-row `EXISTS`.
+    Standalone,
+}
+
 /// A physical plan ready for execution.
 pub struct PhysicalPlan {
     /// The root physical operator.

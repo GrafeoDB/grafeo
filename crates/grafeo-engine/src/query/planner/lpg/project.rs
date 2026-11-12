@@ -1074,16 +1074,8 @@ impl super::Planner {
             })
             .collect::<Result<Vec<_>>>()?;
 
-        let sort = SortOperator::new(input_op, physical_keys)
+        let mut sort = SortOperator::new(input_op, physical_keys)
             .with_temporal(self.session_context.temporal_comparison);
-        // The in-memory sort takes the statement's ambient memory context (its
-        // chunks' grant is bounded by the query limit; patch 9, #751). Built
-        // outside a statement's scope, that fails loudly in debug builds.
-        #[cfg(feature = "spill")]
-        let mut sort =
-            sort.with_memory_context(grafeo_core::execution::capture_operator_memory(false));
-        #[cfg(not(feature = "spill"))]
-        let mut sort = sort;
 
         // The sort drops the columns added for ORDER BY, which come last: the
         // pre-Return projections (sort_extra_count) and every projection added

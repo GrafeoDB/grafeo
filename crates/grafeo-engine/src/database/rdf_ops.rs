@@ -98,7 +98,8 @@ impl GrafeoDB {
         // EXPLAIN: return the physical plan tree without executing
         if optimized_plan.explain {
             let path_budget = self.config.path_search_budget();
-            // Planned, not run: the plan reads nothing.
+            // Planned, not run: the plan reads nothing, and its operators hold
+            // nothing, so they take no grants.
             let planner = RdfPlanner::new(
                 Arc::clone(&self.rdf_store),
                 grafeo_core::graph::rdf::RdfView::latest(
@@ -107,8 +108,9 @@ impl GrafeoDB {
             )
             .with_shuffle_unordered(self.config.shuffle_unordered())
             .with_path_search_budget(path_budget);
-            #[cfg(feature = "spill")]
-            let planner = planner.with_operator_memory(self.operator_memory_context());
+            let _memory = grafeo_core::execution::enter_operator_memory(
+                grafeo_core::execution::StatementMemory::Unbudgeted,
+            );
             let (_, entries) = planner.plan_profiled(&optimized_plan)?;
             use crate::query::processor::physical_explain_result;
             return physical_explain_result(&optimized_plan, entries);

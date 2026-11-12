@@ -47,6 +47,11 @@ pub struct ProcedureCallOperator {
     output_columns: Vec<String>,
     /// Column indices to extract from each result row (resolved after YIELD filtering).
     column_indices: Vec<usize>,
+    /// What its cached result holds under the statement's memory, captured
+    /// at construction (see [`capture`](grafeo_core::execution::memory::capture));
+    /// it counts nothing outside a budgeted statement. Past the query memory
+    /// limit or the memory limit the call fails with `GRAFEO-S001`.
+    memory: grafeo_core::execution::OperatorMemory,
 }
 
 /// Number of rows per DataChunk.
@@ -74,6 +79,7 @@ impl ProcedureCallOperator {
             row_index: 0,
             output_columns: Vec::new(),
             column_indices: Vec::new(),
+            memory: grafeo_core::execution::memory::capture(),
         }
     }
 
@@ -108,6 +114,11 @@ impl ProcedureCallOperator {
             // arguments stays one (a query vector the index cannot measure,
             // #593), with the procedure's own message.
             .map_err(OperatorError::from)?;
+        // The result the procedure returned whole, kept until its rows are
+        // read: against the statement's memory.
+        self.memory.set(result.rows.capacity().saturating_mul(
+            std::mem::size_of::<Vec<Value>>() + result.columns.len() * std::mem::size_of::<Value>(),
+        ))?;
         if let Some(sink) = &self.warnings {
             sink.raise_all(result.warnings);
         }

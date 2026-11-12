@@ -97,6 +97,11 @@ pub struct MergeOperator {
     keys: Option<NodeKeys>,
     /// How many rows read the store without an index or keys.
     scanned_rows: usize,
+    /// What its keys hold under the statement's memory, captured at
+    /// construction (see [`capture`](crate::execution::memory::capture)); it
+    /// counts nothing outside a budgeted statement. Past the query memory
+    /// limit or the memory limit it fails with `GRAFEO-S001`.
+    memory: crate::execution::memory::OperatorMemory,
 }
 
 /// The nodes with the pattern's labels by their values of the match
@@ -117,6 +122,9 @@ struct NodeKeys {
     by_key: FxHashMap<MatchKey, Vec<NodeId>>,
     /// The position in the transaction's changes up to which they are filed.
     mark: ChangeMark,
+    /// What the keys' strings and bytes hold on the heap (shared with the
+    /// store's values, counted as the table's own).
+    heap: usize,
 }
 
 /// The match values of a node or a row.
@@ -151,6 +159,15 @@ impl KeyPart {
             _ => None,
         }
     }
+
+    /// What the part holds on the heap.
+    fn heap_bytes(&self) -> usize {
+        match self {
+            Self::Bool(_) | Self::Int64(_) => 0,
+            Self::String(value) => value.len(),
+            Self::Bytes(value) => value.len(),
+        }
+    }
 }
 
 /// Whether a stored value matches a MERGE pattern's value: when `=` is True (`1` and `1.0`, and
@@ -161,6 +178,17 @@ fn matches_by_equals(stored: &Value, expected: &Value) -> bool {
 }
 
 impl NodeKeys {
+    /// What the table holds, about: a slot per key, its key and one node,
+    /// and what the keys hold on the heap.
+    fn held_bytes(&self) -> usize {
+        self.by_key
+            .capacity()
+            .saturating_mul(
+                std::mem::size_of::<(MatchKey, Vec<NodeId>)>() + std::mem::size_of::<NodeId>(),
+            )
+            .saturating_add(self.heap)
+    }
+
     /// The key of a row's resolved match values, `None` when one has no key.
     fn of_row(&self, resolved: &[(String, Value)]) -> Option<MatchKey> {
         if resolved.len() != self.names.len()
@@ -194,9 +222,15 @@ impl NodeKeys {
             })
             .collect();
         if let Some(key) = key {
-            let nodes = self.by_key.entry(key).or_default();
-            if !nodes.contains(&node.id) {
-                nodes.push(node.id);
+            if let Some(nodes) = self.by_key.get_mut(&key) {
+                if !nodes.contains(&node.id) {
+                    nodes.push(node.id);
+                }
+            } else {
+                // A new key: what it holds on the heap counts once.
+                let held: usize = key.iter().map(KeyPart::heap_bytes).sum();
+                self.heap = self.heap.saturating_add(held);
+                self.by_key.insert(key, vec![node.id]);
             }
         }
     }
@@ -225,6 +259,7 @@ impl MergeOperator {
             match_expressions: None,
             session_context: SessionContext::default(),
             keys: None,
+            memory: crate::execution::memory::capture(),
             scanned_rows: 0,
         }
     }
@@ -506,6 +541,10 @@ impl MergeOperator {
                 return Ok(None);
             }
             self.keys = self.build_keys(resolved_match_props)?;
+            // The table it built, against the statement's memory.
+            if let Some(keys) = &self.keys {
+                self.memory.set(keys.held_bytes())?;
+            }
         }
         let Some(keys) = self.keys.as_mut() else {
             return Ok(None);
@@ -521,13 +560,20 @@ impl MergeOperator {
         keys.mark = mark;
         written.sort_unstable();
         written.dedup();
+        let held = keys.held_bytes();
         for node_id in written {
             if let Some(node) = self.writer.store().node(node_id, self.writer.view())? {
                 keys.file(&node, &self.config.labels);
             }
         }
+        // A table resize or new keys, against the statement's memory (a
+        // compare otherwise).
+        let resized = Some(keys.held_bytes()).filter(|now| *now != held);
         let mut candidates = keys.by_key.get(&key).cloned().unwrap_or_default();
         candidates.sort_unstable();
+        if let Some(held) = resized {
+            self.memory.set(held)?;
+        }
         Ok(Some(candidates))
     }
 
@@ -551,6 +597,7 @@ impl MergeOperator {
                 .collect(),
             by_key: FxHashMap::default(),
             mark,
+            heap: 0,
         };
         let store = self.writer.store();
         let view = self.writer.view();
@@ -743,6 +790,7 @@ impl Operator for MergeOperator {
         self.executed = false;
         self.keys = None;
         self.scanned_rows = 0;
+        self.memory.clear();
         if let Some(ref mut input) = self.input {
             input.reset();
         }

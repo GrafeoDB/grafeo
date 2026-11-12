@@ -122,6 +122,73 @@ pub enum AggregateState {
     SparqlError,
 }
 
+/// When an aggregate reads what its groups' growing states hold (see
+/// [`AggregateState::held_bytes`]): after a chunk once as many rows as there
+/// are groups have come since the last read, so a few groups are read every
+/// chunk and many at most once per as many rows, and the reads stay linear in
+/// the input. Off when no aggregate's state grows.
+///
+/// The count lags by design: between two reads, what up to as many rows as
+/// there are groups add to the DISTINCT sets and collected values is not
+/// counted yet (the figure of the last read stands). The lag is bounded by
+/// one group's worth of rows per group, and the next read counts it all.
+#[derive(Debug, Default)]
+pub(crate) struct GrowingStates {
+    /// Whether an aggregate's state grows with its input.
+    on: bool,
+    /// Rows since the last read.
+    rows: usize,
+    /// What the growing states held at the last read.
+    bytes: usize,
+}
+
+impl GrowingStates {
+    /// The tally of `aggregates`, on when one of their states grows.
+    pub(crate) fn of(aggregates: &[AggregateExpr]) -> Self {
+        Self {
+            on: aggregates
+                .iter()
+                .any(|aggregate| AggregateState::for_expr(aggregate).can_grow()),
+            rows: 0,
+            bytes: 0,
+        }
+    }
+
+    /// What the growing states hold, read from `states` when `rows` more
+    /// rows make a read due among `groups` groups; the last read otherwise.
+    pub(crate) fn after<'a>(
+        &mut self,
+        rows: usize,
+        groups: usize,
+        states: impl FnOnce() -> Box<dyn Iterator<Item = &'a AggregateState> + 'a>,
+    ) -> usize {
+        if !self.on {
+            return 0;
+        }
+        self.rows = self.rows.saturating_add(rows);
+        if self.rows >= groups {
+            return self.read(states());
+        }
+        self.bytes
+    }
+
+    /// Reads what `states` hold now, whatever rows came since the last read.
+    fn read<'a>(&mut self, states: impl Iterator<Item = &'a AggregateState>) -> usize {
+        if !self.on {
+            return 0;
+        }
+        self.rows = 0;
+        self.bytes = states.map(AggregateState::held_bytes).sum();
+        self.bytes
+    }
+
+    /// Forgets the last read (the groups went).
+    pub(crate) fn clear(&mut self) {
+        self.rows = 0;
+        self.bytes = 0;
+    }
+}
+
 /// The error of a sum of durations past the duration range.
 fn duration_sum_out_of_range() -> OperatorError {
     OperatorError::numeric_out_of_range("sum of durations past the duration range")
@@ -152,7 +219,60 @@ fn exact_whole(sum: f64) -> Option<Decimal> {
     }
 }
 
+/// What one entry of a DISTINCT set holds, about: the value and its slot.
+const SEEN_ENTRY_BYTES: usize = std::mem::size_of::<HashableValue>() + 1;
+
 impl AggregateState {
+    /// Whether the state grows with its input: a DISTINCT set, or collected
+    /// values (`collect`, the percentiles, `GROUP_CONCAT`). Those are what
+    /// [`held_bytes`](Self::held_bytes) counts.
+    #[must_use]
+    pub fn can_grow(&self) -> bool {
+        match self {
+            Self::CountDistinct(..)
+            | Self::SumIntDistinct(..)
+            | Self::SumFloatDistinct(..)
+            | Self::AvgDistinct(..)
+            | Self::Collect(..)
+            | Self::CollectDistinct(..)
+            | Self::PercentileDisc { .. }
+            | Self::PercentileCont { .. }
+            | Self::GroupConcat(..)
+            | Self::GroupConcatDistinct(..)
+            | Self::Distinct { .. } => true,
+            Self::SparqlNumbers(inner) => inner.can_grow(),
+            _ => false,
+        }
+    }
+
+    /// What the state holds beyond its own size, about: its DISTINCT set's
+    /// capacity and its collected values (a read of their capacities, no
+    /// walk of the values).
+    #[must_use]
+    pub fn held_bytes(&self) -> usize {
+        let seen = |set: &HashSet<HashableValue>| set.capacity().saturating_mul(SEEN_ENTRY_BYTES);
+        match self {
+            Self::CountDistinct(_, set)
+            | Self::SumIntDistinct(_, _, set)
+            | Self::SumFloatDistinct(_, _, _, set)
+            | Self::AvgDistinct(_, _, set) => seen(set),
+            Self::Collect(values) => values.capacity() * std::mem::size_of::<Value>(),
+            Self::CollectDistinct(values, set) => {
+                values.capacity() * std::mem::size_of::<Value>() + seen(set)
+            }
+            Self::PercentileDisc { values, .. } | Self::PercentileCont { values, .. } => {
+                values.capacity() * std::mem::size_of::<f64>()
+            }
+            Self::GroupConcat(values, _) => values.capacity() * std::mem::size_of::<String>(),
+            Self::GroupConcatDistinct(values, _, set) => {
+                values.capacity() * std::mem::size_of::<String>() + seen(set)
+            }
+            Self::Distinct { seen: set, inner } => seen(set) + inner.held_bytes(),
+            Self::SparqlNumbers(inner) => inner.held_bytes(),
+            _ => 0,
+        }
+    }
+
     /// Creates the initial state of `expr`'s aggregate: [`new`](Self::new)
     /// with its parameters, and SPARQL's SUM and AVG for RDF operands.
     #[must_use]
@@ -1099,6 +1219,16 @@ pub struct HashAggregateOperator {
     /// [`TemporalComparison::normalize`]); `TypesApart` reads every value
     /// as itself.
     temporal: TemporalComparison,
+    /// What it holds under the statement's memory, captured at construction
+    /// (see [`capture`](crate::execution::memory::capture)); it counts nothing
+    /// outside a budgeted statement. The pull aggregate cannot spill: past
+    /// the query memory limit or the memory limit it fails with
+    /// `GRAFEO-S001`.
+    memory: crate::execution::memory::OperatorMemory,
+    /// What the groups' DISTINCT sets and collected values hold.
+    growing: GrowingStates,
+    /// What the groups' key values hold on the heap, counted as groups come.
+    keys_heap: usize,
 }
 
 impl HashAggregateOperator {
@@ -1125,7 +1255,17 @@ impl HashAggregateOperator {
             aggregation_complete: false,
             results: None,
             temporal: TemporalComparison::TypesApart,
+            memory: crate::execution::memory::capture(),
+            growing: GrowingStates::default(),
+            keys_heap: 0,
         }
+        .with_growing_states()
+    }
+
+    /// The tally of its aggregates' growing states.
+    fn with_growing_states(mut self) -> Self {
+        self.growing = GrowingStates::of(&self.aggregates);
+        self
     }
 
     /// The operator with `temporal` as the reading of its group keys and of
@@ -1169,6 +1309,13 @@ impl HashAggregateOperator {
         while let Some(chunk) = self.child.next()? {
             crate::execution::deadline::check()?;
             self.input_types.add(&chunk);
+            // The key columns that hold heap memory, picked once per chunk.
+            let heap = crate::execution::memory::HeapColumns::counted(
+                &self.memory,
+                &chunk,
+                Some(self.group_columns.as_slice()),
+            );
+            let mut new_keys_heap: usize = 0;
             for row in chunk.selected_indices() {
                 // Get or create aggregate states for this group; a new group
                 // keeps the key values of its first row.
@@ -1177,9 +1324,14 @@ impl HashAggregateOperator {
                 let states = &mut self
                     .groups
                     .entry(RowKey::from_row(&chunk, row, group_columns, self.temporal))
-                    .or_insert_with(|| Group {
-                        key_values: RowKey::values_of(&chunk, row, group_columns),
-                        states: aggregates.iter().map(AggregateState::for_expr).collect(),
+                    .or_insert_with(|| {
+                        if !heap.is_empty() {
+                            new_keys_heap = new_keys_heap.saturating_add(heap.row_bytes(row));
+                        }
+                        Group {
+                            key_values: RowKey::values_of(&chunk, row, group_columns),
+                            states: aggregates.iter().map(AggregateState::for_expr).collect(),
+                        }
                     })
                     .states;
 
@@ -1233,6 +1385,25 @@ impl HashAggregateOperator {
                     }
                 }
             }
+            // The groups' table and their growing states, against the
+            // statement's memory: a chunk at a time, a compare within the
+            // grant.
+            self.keys_heap = self.keys_heap.saturating_add(new_keys_heap);
+            let groups = &self.groups;
+            let growing = self.growing.after(chunk.row_count(), groups.len(), || {
+                Box::new(groups.values().flat_map(|group| group.states.iter()))
+            });
+            self.memory.set(
+                self.groups
+                    .capacity()
+                    .saturating_mul(
+                        std::mem::size_of::<(RowKey, Group)>()
+                            + self.group_columns.len() * std::mem::size_of::<Value>()
+                            + self.aggregates.len() * 64,
+                    )
+                    .saturating_add(growing)
+                    .saturating_add(self.keys_heap),
+            )?;
         }
 
         self.aggregation_complete = true;
@@ -1295,6 +1466,9 @@ impl Operator for HashAggregateOperator {
         self.groups.clear();
         self.aggregation_complete = false;
         self.results = None;
+        self.memory.clear();
+        self.growing.clear();
+        self.keys_heap = 0;
     }
 
     fn name(&self) -> &'static str {
@@ -1320,6 +1494,14 @@ pub struct SimpleAggregateOperator {
     states: Vec<AggregateState>,
     /// Whether aggregation is complete.
     done: bool,
+    /// What its DISTINCT sets and collected values hold under the
+    /// statement's memory, captured at construction (see
+    /// [`capture`](crate::execution::memory::capture)); it counts nothing
+    /// outside a budgeted statement. Past the query memory limit or the
+    /// memory limit it fails with `GRAFEO-S001`.
+    memory: crate::execution::memory::OperatorMemory,
+    /// When those are read.
+    growing: GrowingStates,
 }
 
 impl SimpleAggregateOperator {
@@ -1330,6 +1512,7 @@ impl SimpleAggregateOperator {
         output_schema: Vec<LogicalType>,
     ) -> Self {
         let states = aggregates.iter().map(AggregateState::for_expr).collect();
+        let growing = GrowingStates::of(&aggregates);
 
         Self {
             child,
@@ -1337,6 +1520,8 @@ impl SimpleAggregateOperator {
             output_schema,
             states,
             done: false,
+            memory: crate::execution::memory::capture(),
+            growing,
         }
     }
 
@@ -1409,6 +1594,13 @@ impl Operator for SimpleAggregateOperator {
                     }
                 }
             }
+            // Its growing states, against the statement's memory: a chunk at
+            // a time, a compare within the grant.
+            let states = &self.states;
+            let held = self
+                .growing
+                .after(chunk.row_count(), 1, || Box::new(states.iter()));
+            self.memory.set(held)?;
         }
 
         // Output single result row
@@ -1433,6 +1625,8 @@ impl Operator for SimpleAggregateOperator {
             .map(AggregateState::for_expr)
             .collect();
         self.done = false;
+        self.memory.clear();
+        self.growing.clear();
     }
 
     fn name(&self) -> &'static str {

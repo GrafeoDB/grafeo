@@ -204,6 +204,12 @@ A `NODE TYPE` or `EDGE TYPE` with a property list, even an empty one (`EDGE TYPE
 clause, defines the type in the graph type. A bare name (`EDGE TYPE KNOWS`) refers to a type that already exists
 in the catalog.
 
+A type the graph type defines applies only in the graphs bound to the graph type. A type made on its own with
+`CREATE NODE TYPE` or `CREATE EDGE TYPE` applies by its label in every graph, and still does once a graph type
+lists it; it then also applies in that graph type's graphs. A graph type names such a type only as it is: a pattern
+that gives it other properties or endpoints is refused. `DROP GRAPH TYPE` and `ALTER GRAPH TYPE ... DROP` leave
+it, and `DROP NODE TYPE` or `DROP EDGE TYPE` is refused while a graph type lists it.
+
 The element types can also be written as patterns, in braces as ISO GQL writes them or in parentheses. An edge pattern declares its edge type with the node types at its ends as the only sources and targets:
 
 ```sql

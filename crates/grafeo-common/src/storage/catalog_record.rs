@@ -26,6 +26,13 @@
 //! | 9 | [`ProcedureRecord`] |
 //! | 10 | [`StoredConfigRecord`] |
 //! | 11 | [`LabelIndexRecord`] |
+//! | 12 | [`NodeTypeRecord`] of a standalone type a graph type lists |
+//! | 13 | [`EdgeTypeRecord`] of a standalone type a graph type lists |
+//!
+//! Kinds 12 and 13 hold the payload of kinds 2 and 3: they mark a type made on its own
+//! (`CREATE NODE TYPE`, `CREATE EDGE TYPE`) that a graph type lists, which stays a rule by its
+//! label in every graph (#764). A type a graph type declares, or took over before 0.6.3, is
+//! written as kind 2 or 3.
 //!
 //! Kind 0 is never written. A reader skips a record of a kind it does not
 //! know when the record's required flag is clear, and refuses the catalog
@@ -172,6 +179,8 @@ const KIND_INDEX_NAME: u8 = 8;
 const KIND_PROCEDURE: u8 = 9;
 const KIND_STORED_CONFIG: u8 = 10;
 const KIND_LABEL_INDEX: u8 = 11;
+const KIND_STANDALONE_NODE_TYPE: u8 = 12;
+const KIND_STANDALONE_EDGE_TYPE: u8 = 13;
 
 // ── Record types ────────────────────────────────────────────────────
 
@@ -516,6 +525,10 @@ pub struct NodeTypeRecord {
     pub parent_types: Vec<String>,
     /// The labels of its `KEY (...)` clause in a graph type.
     pub key_labels: Vec<String>,
+    /// Whether it is a standalone type a graph type lists: written as kind 12, not in the
+    /// payload.
+    #[serde(skip)]
+    pub standalone: bool,
 }
 
 /// One (source, target) pair of node types an edge type connects; `None`
@@ -542,6 +555,10 @@ pub struct EdgeTypeRecord {
     pub endpoints: Vec<EndpointPair>,
     /// The labels of its `KEY (...)` clause in a graph type.
     pub key_labels: Vec<String>,
+    /// Whether it is a standalone type a graph type lists: written as kind 13, not in the
+    /// payload.
+    #[serde(skip)]
+    pub standalone: bool,
 }
 
 /// A graph type: the node and edge types a graph of it may hold.
@@ -915,7 +932,8 @@ pub enum CatalogKey {
 
 impl CatalogKey {
     /// The kind of the catalog records the key identifies, as
-    /// [`CatalogRecord::kind`] numbers them: 1 `Schema` to 9 `Procedure`.
+    /// [`CatalogRecord::kind`] numbers them: 1 `Schema` to 11 `LabelIndex`. A
+    /// standalone type's records (kinds 12 and 13) have the key of kinds 2 and 3.
     #[must_use]
     pub const fn kind(&self) -> u8 {
         match self {
@@ -949,9 +967,9 @@ impl CatalogKey {
 pub enum CatalogRecord {
     /// A schema namespace (kind 1).
     Schema(SchemaRecord),
-    /// A node type (kind 2).
+    /// A node type (kind 2, or 12 when standalone).
     NodeType(NodeTypeRecord),
-    /// An edge type (kind 3).
+    /// An edge type (kind 3, or 13 when standalone).
     EdgeType(EdgeTypeRecord),
     /// A graph type (kind 4).
     GraphType(GraphTypeRecord),
@@ -975,12 +993,15 @@ impl CatalogRecord {
     /// The record's kind, the first byte of its frame: 1 `Schema`,
     /// 2 `NodeType`, 3 `EdgeType`, 4 `GraphType`, 5 `GraphBinding`,
     /// 6 `Constraint`, 7 `Index`, 8 `IndexName`, 9 `Procedure`,
-    /// 10 `StoredConfig`.
+    /// 10 `StoredConfig`, 11 `LabelIndex`; 12 and 13 for a standalone node or
+    /// edge type a graph type lists.
     #[must_use]
     pub const fn kind(&self) -> u8 {
         match self {
             Self::Schema(_) => KIND_SCHEMA,
+            Self::NodeType(record) if record.standalone => KIND_STANDALONE_NODE_TYPE,
             Self::NodeType(_) => KIND_NODE_TYPE,
+            Self::EdgeType(record) if record.standalone => KIND_STANDALONE_EDGE_TYPE,
             Self::EdgeType(_) => KIND_EDGE_TYPE,
             Self::GraphType(_) => KIND_GRAPH_TYPE,
             Self::GraphBinding(_) => KIND_GRAPH_BINDING,
@@ -1160,6 +1181,14 @@ impl CatalogRecord {
             KIND_PROCEDURE => Self::Procedure(decode(payload)?),
             KIND_STORED_CONFIG => Self::StoredConfig(decode(payload)?),
             KIND_LABEL_INDEX => Self::LabelIndex(decode(payload)?),
+            KIND_STANDALONE_NODE_TYPE => Self::NodeType(NodeTypeRecord {
+                standalone: true,
+                ..decode(payload)?
+            }),
+            KIND_STANDALONE_EDGE_TYPE => Self::EdgeType(EdgeTypeRecord {
+                standalone: true,
+                ..decode(payload)?
+            }),
             _ => return Ok(None),
         };
         Ok(Some(record))
@@ -1668,6 +1697,7 @@ mod tests {
                 constraints: vec![TypeConstraintRecord::Unique(names(&["name"]))],
                 parent_types: names(&["Place"]),
                 key_labels: names(&["CityKey"]),
+                standalone: false,
             }),
             CatalogRecord::EdgeType(EdgeTypeRecord {
                 name: "ROUTE".into(),
@@ -1683,6 +1713,7 @@ mod tests {
                     target: Some("City".into()),
                 }],
                 key_labels: Vec::new(),
+                standalone: false,
             }),
             CatalogRecord::GraphType(GraphTypeRecord {
                 name: "travel".into(),
@@ -1814,6 +1845,7 @@ mod tests {
                 ],
                 parent_types: names(&["Happening", "Gathering"]),
                 key_labels: names(&["EventKey", "Dated"]),
+                standalone: false,
             }),
             CatalogRecord::EdgeType(EdgeTypeRecord {
                 name: "VISITS".into(),
@@ -1834,6 +1866,7 @@ mod tests {
                     },
                 ],
                 key_labels: names(&["VisitKey"]),
+                standalone: false,
             }),
             CatalogRecord::GraphType(GraphTypeRecord {
                 name: "open_city".into(),
@@ -1925,6 +1958,69 @@ mod tests {
             [1, 2, 3, 4, 5, 6, 7, 7, 7, 8, 9, 10],
             "one kind per record type, numbered as the module documents"
         );
+    }
+
+    /// The node and edge types of [`one_of_each`], each as written (kind 2 or 3) and marked as a
+    /// standalone type a graph type lists (#764).
+    fn plain_and_marked_types() -> Vec<(CatalogRecord, CatalogRecord)> {
+        one_of_each()
+            .into_iter()
+            .filter_map(|record| match &record {
+                CatalogRecord::NodeType(node) => {
+                    let marked = CatalogRecord::NodeType(NodeTypeRecord {
+                        standalone: true,
+                        ..node.clone()
+                    });
+                    Some((record, marked))
+                }
+                CatalogRecord::EdgeType(edge) => {
+                    let marked = CatalogRecord::EdgeType(EdgeTypeRecord {
+                        standalone: true,
+                        ..edge.clone()
+                    });
+                    Some((record, marked))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A standalone type a graph type lists (#764) is written as kind 12 (a node type) or 13 (an
+    /// edge type), required, with the payload of kind 2 or 3 byte for byte, and reads back
+    /// marked; kinds 2 and 3 read back unmarked, as the types of a 0.6.2 file do. Its key is the
+    /// type's, as a drop names it.
+    #[test]
+    fn a_standalone_type_is_kind_12_or_13_with_the_payload_of_2_or_3() {
+        let pairs = plain_and_marked_types();
+        assert_eq!(pairs.len(), 2, "a node type and an edge type");
+        for (plain, marked) in pairs {
+            let (plain_bytes, marked_bytes) = (framed(&plain), framed(&marked));
+            assert_eq!(
+                (plain_bytes[0], marked_bytes[0]),
+                (plain.kind(), plain.kind() + 10),
+                "{plain:?}"
+            );
+            assert_eq!(
+                plain_bytes[1..],
+                marked_bytes[1..],
+                "the flags, the length and the payload of kind {}",
+                plain.kind()
+            );
+            assert_eq!(
+                marked_bytes[1], RECORD_REQUIRED,
+                "a release before must refuse it"
+            );
+            assert_eq!(
+                read_all(&marked_bytes).unwrap(),
+                std::slice::from_ref(&marked)
+            );
+            assert_eq!(
+                read_all(&plain_bytes).unwrap(),
+                std::slice::from_ref(&plain)
+            );
+            assert_eq!(marked.key(), plain.key());
+            assert_eq!(marked.key().kind(), plain.kind());
+        }
     }
 
     /// A record's key names it by what identifies it (a name, the graph of
@@ -2563,6 +2659,7 @@ mod tests {
             constraints: Vec::new(),
             parent_types: Vec::new(),
             key_labels: Vec::new(),
+            standalone: false,
         })
     }
 
@@ -2573,6 +2670,7 @@ mod tests {
             constraints: Vec::new(),
             endpoints: Vec::new(),
             key_labels: Vec::new(),
+            standalone: false,
         })
     }
 
@@ -2916,6 +3014,7 @@ mod tests {
                 constraints: Vec::new(),
                 parent_types: Vec::new(),
                 key_labels: Vec::new(),
+                standalone: false,
             })
         };
         let deepest = node(list_of(MAX_LIST_TYPE_DEPTH, PropertyTypeRecord::Int64));
@@ -2963,6 +3062,7 @@ mod tests {
             constraints: Vec::new(),
             parent_types: Vec::new(),
             key_labels: Vec::new(),
+            standalone: false,
         });
         let mut bytes = framed(&node);
         let code_at = RECORD_HEADER_BYTES + (1 + "Event".len()) + 1 + (1 + "seen".len()) + 1;
@@ -3011,6 +3111,7 @@ mod tests {
             constraints: Vec::new(),
             parent_types: Vec::new(),
             key_labels: Vec::new(),
+            standalone: false,
         });
         assert_eq!(read_all(&framed(&node)).unwrap(), [node]);
     }

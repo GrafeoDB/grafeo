@@ -1322,6 +1322,28 @@ impl IndexCatalog {
 
 pub use grafeo_common::types::{PropertyDataType, PropertyTypeTooDeep};
 
+/// Whether a node whose properties `property` looks up breaks the node type `def` (resolved,
+/// with what it inherits), as a write of it would: a value of another type than its property's,
+/// a null where the type forbids one, or a required property missing. Uniqueness, which reads
+/// other nodes, is not checked. For `validate()` (#764).
+pub(crate) fn breaks_node_type<'a>(
+    def: &NodeTypeDefinition,
+    property: impl Fn(&str) -> Option<&'a Value>,
+) -> bool {
+    let breaks_property = |typed: &TypedProperty| match property(&typed.name) {
+        None => !typed.nullable && typed.default_value.is_none(),
+        Some(value) if value.is_null() => !typed.nullable,
+        Some(value) => !typed.data_type.matches(value),
+    };
+    let missing = |name: &String| property(name).is_none_or(Value::is_null);
+    def.properties.iter().any(breaks_property)
+        || def.constraints.iter().any(|constraint| match constraint {
+            TypeConstraint::NotNull(name) => missing(name),
+            TypeConstraint::PrimaryKey(names) => names.iter().any(missing),
+            TypeConstraint::Unique(_) => false,
+        })
+}
+
 /// The error for a property value that is not of the property's type.
 fn type_mismatch(
     key: &str,
@@ -1560,6 +1582,16 @@ pub struct NodeTypeDefinition {
     /// catalog records of version 2 hold it.
     #[serde(skip)]
     pub key_labels: Vec<String>,
+    /// Whether it is a type made on its own (`CREATE NODE TYPE`) that a graph
+    /// type lists (#764): it stays a rule by its label in every graph, and
+    /// also governs the graphs bound to the graph types that list it. Set when
+    /// a graph type first lists it; a type a graph type declares, or took over
+    /// before 0.6.3, has it unset and applies only in its graph types' graphs.
+    ///
+    /// Not serialized, as `key_labels`: the catalog records hold it as their
+    /// kind (12).
+    #[serde(skip)]
+    pub standalone: bool,
 }
 
 /// Definition of an edge type (relationship type schema).
@@ -1582,6 +1614,10 @@ pub struct EdgeTypeDefinition {
     /// catalog records of version 2 hold it.
     #[serde(skip)]
     pub key_labels: Vec<String>,
+    /// Whether it is a type made on its own (`CREATE EDGE TYPE`) that a graph
+    /// type lists, as [`NodeTypeDefinition::standalone`] (kind 13).
+    #[serde(skip)]
+    pub standalone: bool,
 }
 
 /// Definition of a graph type (constrains which node/edge types a graph allows).
@@ -1817,6 +1853,7 @@ impl SchemaCatalog {
             constraints: all_constraints,
             parent_types: base.parent_types.clone(),
             key_labels: base.key_labels.clone(),
+            standalone: base.standalone,
         })
     }
 
@@ -1960,7 +1997,7 @@ impl SchemaCatalog {
     /// Whether a graph type lists the node type stored as `name`. Cypher's
     /// `ALTER CURRENT GRAPH TYPE` keeps its types in `__current__`, which no graph is
     /// bound to: they are rules by label, as it declares them for the graph in use.
-    fn lists_node_type(&self, name: &str) -> bool {
+    pub(crate) fn lists_node_type(&self, name: &str) -> bool {
         self.graph_types.read().values().any(|def| {
             !is_current_graph_type(&def.name)
                 && def.allowed_node_types.iter().any(|listed| listed == name)
@@ -1969,7 +2006,7 @@ impl SchemaCatalog {
 
     /// Whether a graph type lists the edge type stored as `name`, as
     /// [`lists_node_type`](Self::lists_node_type) counts it.
-    fn lists_edge_type(&self, name: &str) -> bool {
+    pub(crate) fn lists_edge_type(&self, name: &str) -> bool {
         self.graph_types.read().values().any(|def| {
             !is_current_graph_type(&def.name)
                 && def.allowed_edge_types.iter().any(|listed| listed == name)
@@ -2058,6 +2095,7 @@ impl SchemaCatalog {
                     constraints: vec![constraint],
                     parent_types: Vec::new(),
                     key_labels: Vec::new(),
+                    standalone: false,
                 },
             );
         }
@@ -2614,11 +2652,13 @@ impl CatalogConstraintValidator {
         }
         let name = self.type_key(label);
         let def = self.catalog.resolved_node_type(&name)?;
-        // A type a graph type lists is that graph type's, not a rule by label.
-        let listed = self
-            .catalog
-            .schema()
-            .is_some_and(|schema| schema.lists_node_type(&name));
+        // A type a graph type lists is that graph type's, not a rule by label,
+        // unless it was made on its own (#764).
+        let listed = !def.standalone
+            && self
+                .catalog
+                .schema()
+                .is_some_and(|schema| schema.lists_node_type(&name));
         (!listed).then_some(def)
     }
 
@@ -2633,10 +2673,11 @@ impl CatalogConstraintValidator {
         }
         let name = self.type_key(edge_type);
         let def = self.catalog.get_edge_type_def(&name)?;
-        let listed = self
-            .catalog
-            .schema()
-            .is_some_and(|schema| schema.lists_edge_type(&name));
+        let listed = !def.standalone
+            && self
+                .catalog
+                .schema()
+                .is_some_and(|schema| schema.lists_edge_type(&name));
         (!listed).then_some(def)
     }
 
@@ -3786,6 +3827,7 @@ mod tests {
                     constraints: Vec::new(),
                     parent_types: Vec::new(),
                     key_labels: Vec::new(),
+                    standalone: false,
                 })
                 .unwrap();
         }

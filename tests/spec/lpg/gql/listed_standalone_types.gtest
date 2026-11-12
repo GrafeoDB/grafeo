@@ -1,0 +1,226 @@
+# A standalone type that a graph type lists (#764)
+#
+# A node or edge type made on its own (CREATE NODE TYPE, CREATE EDGE TYPE) is a rule by its label
+# in every graph without a closed type of its own. When a graph type lists it, it stays in force
+# where it was, and governs the graphs bound to that graph type too. A type a graph type declares
+# inline governs only that graph type's graphs (#730). DROP GRAPH TYPE leaves a standalone type it
+# listed; the type itself cannot be dropped while a graph type lists it.
+#
+# The first case is the reporter's own.
+
+meta:
+  language: gql
+  model: lpg
+  section: "20.1"
+  title: A standalone type a graph type lists
+  dataset: empty
+
+tests:
+
+  # ---------------------------------------------------------------------------
+  # Still in force in the default graph
+  # ---------------------------------------------------------------------------
+
+  - name: node_type_listed_by_a_graph_type_still_applies_in_the_default_graph
+    setup:
+      - "CREATE NODE TYPE A (h FLOAT64)"
+      - "INSERT (:A {k: 1, h: 1.5e0})"
+      - "CREATE GRAPH TYPE t (NODE TYPE A)"
+    query: "MATCH (n:A {k: 1}) SET n.h = 'y'"
+    expect:
+      error: "expects FLOAT64"
+
+  - name: an_insert_of_the_wrong_type_is_refused_after_the_listing
+    statements:
+      - "CREATE NODE TYPE A (h FLOAT64)"
+      - "CREATE GRAPH TYPE t (NODE TYPE A)"
+      - "INSERT (:A {k: 3, h: 'z'})"
+    expect:
+      error: "expects FLOAT64"
+
+  - name: a_value_of_the_right_type_is_written_after_the_listing
+    statements:
+      - "CREATE NODE TYPE A (h FLOAT64)"
+      - "INSERT (:A {k: 1, h: 1.5e0})"
+      - "CREATE GRAPH TYPE t (NODE TYPE A)"
+      - "MATCH (n:A {k: 1}) SET n.h = 2.5e0"
+      - "INSERT (:A {k: 2, h: 3.5e0})"
+      - "MATCH (n:A) RETURN n.k, n.h ORDER BY n.k"
+    expect:
+      ordered: true
+      rows:
+        - [1, 2.5]
+        - [2, 3.5]
+
+  - name: a_graph_of_the_type_leaves_the_default_graph_checked
+    statements:
+      - "CREATE NODE TYPE A (h FLOAT64)"
+      - "CREATE GRAPH TYPE t (NODE TYPE A)"
+      - "CREATE GRAPH g TYPED t"
+      - "INSERT (:A {k: 1, h: 'x'})"
+    expect:
+      error: "expects FLOAT64"
+
+  - name: a_listed_type_with_a_required_property_still_applies
+    statements:
+      - "CREATE NODE TYPE Person (name STRING NOT NULL)"
+      - "CREATE GRAPH TYPE social (NODE TYPE Person)"
+      - "INSERT (:Person {age: 30})"
+    expect:
+      error: name
+      gql_status: "G2000"
+
+  # ---------------------------------------------------------------------------
+  # And in the graphs bound to the graph type
+  # ---------------------------------------------------------------------------
+
+  - name: a_listed_standalone_type_governs_the_graph_types_graphs
+    statements:
+      - "CREATE NODE TYPE A (h FLOAT64)"
+      - "CREATE GRAPH TYPE t (NODE TYPE A)"
+      - "CREATE GRAPH g TYPED t"
+      - "USE GRAPH g"
+      - "INSERT (:A {h: 'x'})"
+    expect:
+      error: "expects FLOAT64"
+
+  - name: a_listed_standalone_type_admits_its_values_in_the_bound_graph
+    statements:
+      - "CREATE NODE TYPE A (h FLOAT64)"
+      - "CREATE GRAPH TYPE t (NODE TYPE A)"
+      - "CREATE GRAPH g TYPED t"
+      - "USE GRAPH g"
+      - "INSERT (:A {h: 1.5e0})"
+      - "MATCH (n:A) RETURN n.h"
+    expect:
+      rows:
+        - [1.5]
+
+  # ---------------------------------------------------------------------------
+  # An inline type keeps the rule of its graph type
+  # ---------------------------------------------------------------------------
+
+  - name: an_inline_type_governs_only_its_graph_types_graphs
+    statements:
+      - "CREATE GRAPH TYPE u (NODE TYPE C (h FLOAT64))"
+      - "INSERT (:C {k: 1, h: 'w'})"
+      - "MATCH (c:C) RETURN c.k, c.h"
+    expect:
+      rows:
+        - [1, w]
+
+  - name: an_inline_type_holds_in_a_graph_of_its_type
+    statements:
+      - "CREATE GRAPH TYPE u (NODE TYPE C (h FLOAT64))"
+      - "CREATE GRAPH gu TYPED u"
+      - "USE GRAPH gu"
+      - "INSERT (:C {h: 'w'})"
+    expect:
+      error: "expects FLOAT64"
+
+  - name: an_inline_type_leaves_other_standalone_types_alone
+    statements:
+      - "CREATE NODE TYPE B (h FLOAT64)"
+      - "CREATE GRAPH TYPE u (NODE TYPE C (h FLOAT64))"
+      - "INSERT (:B {k: 1, h: 'w'})"
+    expect:
+      error: "expects FLOAT64"
+
+  # ---------------------------------------------------------------------------
+  # Drops
+  # ---------------------------------------------------------------------------
+
+  - name: dropping_the_graph_type_leaves_the_standalone_type_in_force
+    statements:
+      - "CREATE NODE TYPE A (h FLOAT64)"
+      - "CREATE GRAPH TYPE t (NODE TYPE A)"
+      - "DROP GRAPH TYPE t"
+      - "INSERT (:A {k: 1, h: 'x'})"
+    expect:
+      error: "expects FLOAT64"
+
+  - name: a_listed_standalone_type_cannot_be_dropped
+    statements:
+      - "CREATE NODE TYPE A (h FLOAT64)"
+      - "CREATE GRAPH TYPE t (NODE TYPE A)"
+      - "DROP NODE TYPE A"
+    expect:
+      error: "graph type 't'"
+
+  - name: a_standalone_type_drops_once_no_graph_type_lists_it
+    statements:
+      - "CREATE NODE TYPE A (h FLOAT64)"
+      - "CREATE GRAPH TYPE t (NODE TYPE A)"
+      - "DROP GRAPH TYPE t"
+      - "DROP NODE TYPE A"
+      - "INSERT (:A {k: 1, h: 'x'})"
+      - "MATCH (n:A) RETURN n.h"
+    expect:
+      rows:
+        - [x]
+
+  # ---------------------------------------------------------------------------
+  # Edge types follow the same rule
+  # ---------------------------------------------------------------------------
+
+  - name: edge_type_listed_by_a_graph_type_still_applies_in_the_default_graph
+    statements:
+      - "CREATE EDGE TYPE ROAD (km INT64)"
+      - "INSERT (:Town {k: 1})-[:ROAD {km: 5}]->(:Town {k: 2})"
+      - "CREATE GRAPH TYPE t (EDGE TYPE ROAD)"
+      - "INSERT (:Town {k: 3})-[:ROAD {km: 'far'}]->(:Town {k: 4})"
+    expect:
+      error: "expects INT64"
+
+  - name: a_listed_standalone_edge_type_governs_the_graph_types_graphs
+    statements:
+      - "CREATE NODE TYPE Town (name STRING)"
+      - "CREATE EDGE TYPE ROAD (km INT64)"
+      - "CREATE GRAPH TYPE t (NODE TYPE Town, EDGE TYPE ROAD)"
+      - "CREATE GRAPH g TYPED t"
+      - "USE GRAPH g"
+      - "INSERT (:Town)-[:ROAD {km: 'far'}]->(:Town)"
+    expect:
+      error: "expects INT64"
+
+  - name: dropping_the_graph_type_leaves_the_standalone_edge_type_in_force
+    statements:
+      - "CREATE EDGE TYPE ROAD (km INT64)"
+      - "CREATE GRAPH TYPE t (EDGE TYPE ROAD)"
+      - "DROP GRAPH TYPE t"
+      - "INSERT (:Town)-[:ROAD {km: 'far'}]->(:Town)"
+    expect:
+      error: "expects INT64"
+
+  - name: a_listed_standalone_edge_type_cannot_be_dropped
+    statements:
+      - "CREATE EDGE TYPE ROAD (km INT64)"
+      - "CREATE GRAPH TYPE t (EDGE TYPE ROAD)"
+      - "DROP EDGE TYPE ROAD"
+    expect:
+      error: "graph type 't'"
+
+  - name: a_pattern_cannot_add_endpoints_to_a_standalone_edge_type
+    statements:
+      - "CREATE EDGE TYPE ROAD (km INT64)"
+      - "CREATE GRAPH TYPE t { (:Town)-[:ROAD {km INT64}]->(:Town) }"
+    expect:
+      error: "declared differently"
+      gql_status: "42000"
+
+  - name: a_pattern_names_a_standalone_edge_type_as_it_is
+    statements:
+      - "CREATE EDGE TYPE ROAD CONNECTING (Town) TO (Town) (km INT64)"
+      - "CREATE GRAPH TYPE t { (:Town)-[:ROAD]->(:Town) }"
+      - "INSERT (:Town)-[:ROAD {km: 'far'}]->(:Town)"
+    expect:
+      error: "expects INT64"
+
+  - name: a_replace_cannot_change_the_endpoints_of_a_standalone_edge_type
+    statements:
+      - "CREATE EDGE TYPE ROAD CONNECTING (Town) TO (Town) (km INT64)"
+      - "CREATE GRAPH TYPE t { (:Town)-[:ROAD]->(:Town) }"
+      - "CREATE OR REPLACE GRAPH TYPE t { (:City)-[:ROAD]->(:City) }"
+    expect:
+      error: "declared differently"
+      gql_status: "42000"

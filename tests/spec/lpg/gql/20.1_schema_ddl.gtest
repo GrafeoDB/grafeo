@@ -580,7 +580,9 @@ tests:
       # type that a graph has as its type.
       - "DROP GRAPH hr_graph"
       - "DROP GRAPH TYPE org_chart"
-      # The types only it listed went with it.
+      # The types stand on their own, so they stayed (#764): the first drop
+      # takes Employee, the second finds nothing.
+      - "DROP NODE TYPE Employee"
       - "DROP NODE TYPE Employee"
     expect:
       error: "Type not found: Employee"

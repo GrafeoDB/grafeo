@@ -2,10 +2,12 @@
 #
 # A graph type's rules hold in the graphs bound to it, and nowhere else: the
 # default graph and other named graphs store what is written, under any label
-# the type declares. A node or edge type no graph type lists is a rule by its
-# label, in every graph without a type of its own. A closed graph type with
-# nothing in it allows no nodes. A rule over data that breaks it is refused
-# with G2000; a graph type alone has no data to check.
+# a type declares inline in the graph type. A node or edge type made on its own
+# (CREATE NODE TYPE, CREATE EDGE TYPE) is a rule by its label in every graph
+# without a type of its own, also once a graph type lists it, which then
+# governs that graph type's graphs too (#764). A closed graph type with nothing
+# in it allows no nodes. A rule over data that breaks it is refused with
+# G2000; a graph type alone has no data to check.
 
 meta:
   language: gql
@@ -87,7 +89,7 @@ tests:
         - [2, Mia]
 
   # ---------------------------------------------------------------------------
-  # A type by its label, until a graph type lists it
+  # A standalone type by its label, also when a graph type lists it
   # ---------------------------------------------------------------------------
 
   - name: a_type_no_graph_type_lists_is_a_rule_by_its_label
@@ -108,10 +110,18 @@ tests:
       error: name
       gql_status: "G2000"
 
-  - name: a_type_a_graph_type_lists_holds_only_through_that_graph_type
+  - name: a_type_a_graph_type_lists_still_holds_by_its_label
     statements:
       - "CREATE NODE TYPE Person (name STRING NOT NULL)"
       - "CREATE GRAPH TYPE social (NODE TYPE Person)"
+      - "INSERT (:Person {age: 30})"
+    expect:
+      error: name
+      gql_status: "G2000"
+
+  - name: a_type_a_graph_type_declares_inline_holds_only_through_that_graph_type
+    statements:
+      - "CREATE GRAPH TYPE social (NODE TYPE Person (name STRING NOT NULL))"
       - "INSERT (:Person {age: 30})"
       - "MATCH (p:Person) RETURN p.age"
     expect:
@@ -199,19 +209,32 @@ tests:
         - [Paris]
 
   # ---------------------------------------------------------------------------
-  # A drop or a replace takes the types only it listed
+  # A drop or a replace takes the types only it declared inline; a standalone
+  # type it listed stays in force
   # ---------------------------------------------------------------------------
 
-  - name: a_drop_takes_a_standalone_type_only_it_listed
+  - name: a_drop_takes_an_inline_type_only_it_declared
     statements:
-      - "CREATE NODE TYPE City (name STRING NOT NULL)"
-      - "CREATE GRAPH TYPE atlas (NODE TYPE City)"
+      - "CREATE GRAPH TYPE atlas (NODE TYPE City (name STRING NOT NULL))"
       - "DROP GRAPH TYPE atlas"
+      - "CREATE GRAPH TYPE plain (NODE TYPE City (size INT64))"
+      - "CREATE GRAPH g TYPED plain"
+      - "USE GRAPH g"
       - "INSERT (:City {size: 1})"
       - "MATCH (c:City) RETURN c.size"
     expect:
       rows:
         - [1]
+
+  - name: a_drop_leaves_a_standalone_type_it_listed_in_force
+    statements:
+      - "CREATE NODE TYPE City (name STRING NOT NULL)"
+      - "CREATE GRAPH TYPE atlas (NODE TYPE City)"
+      - "DROP GRAPH TYPE atlas"
+      - "INSERT (:City {size: 1})"
+    expect:
+      error: name
+      gql_status: "G2000"
 
   - name: a_drop_leaves_a_type_another_graph_type_lists
     statements:
@@ -228,45 +251,52 @@ tests:
 
   - name: a_named_constraint_refuses_the_drop
     statements:
-      - "CREATE NODE TYPE City (name STRING NOT NULL)"
-      - "CREATE GRAPH TYPE atlas (NODE TYPE City)"
+      - "CREATE GRAPH TYPE atlas (NODE TYPE City (name STRING NOT NULL))"
       - "CREATE CONSTRAINT city_names FOR (n:City) ON (n.name) UNIQUE"
       - "DROP GRAPH TYPE atlas"
     expect:
       error: "constraint 'city_names' is on it: drop the constraint first"
       gql_status: "42000"
 
-  - name: an_altered_drop_takes_a_type_only_it_listed
+  - name: a_named_constraint_does_not_refuse_a_drop_that_leaves_its_type
+    statements:
+      - "CREATE NODE TYPE City (name STRING NOT NULL)"
+      - "CREATE GRAPH TYPE atlas (NODE TYPE City)"
+      - "CREATE CONSTRAINT city_names FOR (n:City) ON (n.name) UNIQUE"
+      - "DROP GRAPH TYPE atlas"
+      - "INSERT (:City {name: 'Utrecht'})"
+      - "MATCH (c:City) RETURN c.name"
+    expect:
+      rows:
+        - [Utrecht]
+
+  - name: an_altered_drop_leaves_a_standalone_type_in_force
     statements:
       - "CREATE NODE TYPE City (name STRING NOT NULL)"
       - "CREATE NODE TYPE Town (name STRING NOT NULL)"
       - "CREATE GRAPH TYPE atlas (NODE TYPE City, NODE TYPE Town)"
       - "ALTER GRAPH TYPE atlas DROP NODE TYPE City"
       - "INSERT (:City {size: 1})"
-      - "MATCH (c:City) RETURN c.size"
     expect:
-      rows:
-        - [1]
+      error: name
+      gql_status: "G2000"
 
-  - name: a_replace_takes_what_it_stops_listing
+  - name: a_replace_leaves_a_standalone_type_it_stops_listing_in_force
     statements:
       - "CREATE NODE TYPE City (name STRING NOT NULL)"
       - "CREATE NODE TYPE Town (name STRING NOT NULL)"
       - "CREATE GRAPH TYPE atlas (NODE TYPE City)"
       - "CREATE OR REPLACE GRAPH TYPE atlas (NODE TYPE Town)"
       - "INSERT (:City {size: 1})"
-      - "MATCH (c:City) RETURN c.size"
     expect:
-      rows:
-        - [1]
+      error: name
+      gql_status: "G2000"
 
-  - name: a_named_constraint_refuses_a_replace_that_stops_listing_its_type
+  - name: a_named_constraint_refuses_a_replace_that_stops_declaring_its_type
     statements:
-      - "CREATE NODE TYPE City (name STRING NOT NULL)"
-      - "CREATE NODE TYPE Town (name STRING NOT NULL)"
-      - "CREATE GRAPH TYPE atlas (NODE TYPE City)"
+      - "CREATE GRAPH TYPE atlas (NODE TYPE City (name STRING NOT NULL))"
       - "CREATE CONSTRAINT city_names FOR (n:City) ON (n.name) UNIQUE"
-      - "CREATE OR REPLACE GRAPH TYPE atlas (NODE TYPE Town)"
+      - "CREATE OR REPLACE GRAPH TYPE atlas (NODE TYPE Town (name STRING NOT NULL))"
     expect:
       error: city_names
       gql_status: "42000"

@@ -205,6 +205,12 @@ path = "tests/path_search_budget.rs"
 name = "typed_read_allocations"
 path = "tests/typed_read_allocations.rs"
 
+# Zeroes freed blocks and lists the live ones with its own global allocator.
+[[test]]
+name = "deleted_values_leave_memory"
+path = "tests/deleted_values_leave_memory.rs"
+required-features = ["gql", "wal", "grafeo-file"]
+
 # Installs the global tracing subscriber. CI also runs it with only these features, where a crate
 # whose tracing feature the engine does not turn on loses its events (all features would hide it).
 [[test]]

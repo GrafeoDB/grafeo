@@ -428,20 +428,24 @@ impl GrafeoDB {
             self.transaction_manager.current_epoch().as_u64() + 1,
         );
         changes.commit(Some(epoch))?;
-        let key: grafeo_core::graph::rdf::overlay::GraphKey = graph.map(Arc::from);
-        let applied = self.rdf_store.apply_commit(
+        // One run through the insert core a commit uses, published at the
+        // epoch for readers at an earlier snapshot.
+        let new = self.rdf_store.apply_load(
             grafeo_core::graph::rdf::ApplyMode::Publish(epoch),
-            triples
-                .into_iter()
-                .map(|triple| grafeo_core::graph::rdf::CommitChange::Insert {
-                    graph: key.clone(),
-                    triple,
-                })
-                .collect(),
+            graph.map(Arc::from),
+            triples,
         );
-        self.transaction_manager.sync_epoch(epoch);
+        // A transaction open across the load checks its commit against the
+        // load's run, which the published entry holds.
+        self.transaction_manager.publish_load(held, epoch, || {
+            self.rdf_store
+                .overlay()
+                .entry_at(epoch)
+                .map(|entry| crate::transaction::writes_of_entry(&entry))
+                .unwrap_or_default()
+        });
         crate::transaction::prune_rdf_overlay(&self.rdf_store, &self.transaction_manager);
-        Ok(applied.changed.iter().filter(|changed| **changed).count())
+        Ok(new)
     }
 }
 

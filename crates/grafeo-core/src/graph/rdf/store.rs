@@ -820,16 +820,18 @@ impl RdfStore {
         // One apply against reads at a snapshot: the primary set and the six
         // indexes change together.
         let _apply = self.apply_guard.write();
-        self.insert_stored_unguarded(triples, each)
+        self.insert_stored_unguarded(triples, each).len()
     }
 
     /// [`insert_stored`](Self::insert_stored), for a caller that holds the
-    /// dataset's apply guard.
-    fn insert_stored_unguarded(
+    /// dataset's apply guard: the insert core of every write, a commit's and
+    /// a load's alike. Returns the triples that were new, in order: the run
+    /// a commit records for readers at an earlier snapshot.
+    pub(super) fn insert_stored_unguarded(
         &self,
         triples: impl Iterator<Item = Arc<Triple>>,
         mut each: impl FnMut(&Arc<Triple>, bool),
-    ) -> usize {
+    ) -> Vec<Arc<Triple>> {
         // Phase 1: deduplicate against primary storage (single lock)
         let mut new_triples = Vec::with_capacity(triples.size_hint().0);
         {
@@ -854,13 +856,13 @@ impl RdfStore {
 
         if new_triples.is_empty() {
             self.settle();
-            return 0;
+            return new_triples;
         }
 
         self.index_new(&new_triples);
         self.note_changes(new_triples.len());
         self.settle();
-        new_triples.len()
+        new_triples
     }
 
     /// Adds `triples`, new to the store, to its six indexes. A batch of

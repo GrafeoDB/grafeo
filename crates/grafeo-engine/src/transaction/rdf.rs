@@ -818,6 +818,33 @@ pub(crate) fn update_privately<T>(
     Ok(value)
 }
 
+/// The RDF writes of the commit whose overlay entry is `entry`, net per
+/// triple: what a committed writer that kept no change set (a load) wrote,
+/// for the conflict checks of the transactions open across it.
+pub(crate) fn writes_of_entry(
+    entry: &grafeo_core::graph::rdf::overlay::OverlayEntry,
+) -> PendingTriples {
+    use grafeo_core::graph::rdf::overlay::OverlayChange;
+
+    let mut writes = PendingTriples::default();
+    let mut graph: Option<Arc<str>> = None;
+    for change in entry.changes() {
+        match change {
+            OverlayChange::In(next) => graph.clone_from(next),
+            OverlayChange::Inserts(run) => {
+                for triple in run {
+                    writes.note(graph.as_deref(), Arc::clone(triple), true);
+                }
+            }
+            OverlayChange::Delete { triple, .. } => {
+                writes.note(graph.as_deref(), Arc::clone(triple), false);
+            }
+            OverlayChange::Graph { .. } => {}
+        }
+    }
+    writes
+}
+
 /// Drops the overlay entries of `store` that no reader of `manager` needs,
 /// after a commit published one: those at or below the read horizon. A
 /// store with none pays one atomic load.

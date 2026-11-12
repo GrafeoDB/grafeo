@@ -1262,6 +1262,235 @@ fn conflicts_key_on_the_exact_rdf_term() {
     assert!(wrong.is_empty(), "{}", wrong.join("\n"));
 }
 
+// ------------------------------------------------------------------ loads against transactions (E2)
+//
+// A load (`load_rdf_text`, `batch_insert_rdf`) that commits while a transaction is open is a
+// committed writer whose write set is its net inserts, so C1's rule applies to it as to a
+// transaction: a transaction's recorded delete of a triple the load inserted fails its commit with
+// `GRAFEO-T001`; a no-op insert (the triple exists) records nothing; two inserts of one triple both
+// commit. A load with no transaction open records nothing a later transaction meets.
+
+mod loads_against_transactions {
+    use grafeo_core::graph::rdf::{Term, Triple};
+    use grafeo_engine::{GrafeoDB, RdfFormat};
+
+    use super::{ALL, answer, is_conflict, q, seeded};
+
+    /// How a triple is loaded.
+    #[derive(Clone, Copy, Debug)]
+    enum Load {
+        /// `load_rdf_text` of Turtle into the default graph.
+        TextDefault,
+        /// `load_rdf_text` of Turtle into graph g.
+        TextNamed,
+        /// `batch_insert_rdf` into the default graph.
+        Batch,
+    }
+
+    const LOADS: [Load; 3] = [Load::TextDefault, Load::TextNamed, Load::Batch];
+
+    const EX: &str = "http://ex.org/";
+
+    impl Load {
+        fn graph(self) -> Option<String> {
+            matches!(self, Self::TextNamed).then(|| format!("{EX}g"))
+        }
+
+        /// Loads `<ex:subject> <ex:p> "object"`.
+        fn run(self, db: &GrafeoDB, subject: &str, object: &str) {
+            match self {
+                Self::TextDefault | Self::TextNamed => {
+                    let turtle = format!("<{EX}{subject}> <{EX}p> \"{object}\" .");
+                    db.load_rdf_text(&turtle, RdfFormat::Turtle, self.graph().as_deref())
+                        .unwrap_or_else(|error| panic!("{self:?}: {error}"));
+                }
+                Self::Batch => {
+                    db.batch_insert_rdf([Triple::new(
+                        Term::iri(format!("{EX}{subject}")),
+                        Term::iri(format!("{EX}p")),
+                        Term::literal(object),
+                    )])
+                    .unwrap_or_else(|error| panic!("{self:?}: {error}"));
+                }
+            }
+        }
+
+        /// The triple as `INSERT DATA` or `DELETE DATA` writes it, in the load's graph.
+        fn data(self, subject: &str, object: &str) -> String {
+            let triple = format!("ex:{subject} ex:p \"{object}\" .");
+            match self {
+                Self::TextNamed => format!("{{ GRAPH ex:g {{ {triple} }} }}"),
+                Self::TextDefault | Self::Batch => format!("{{ {triple} }}"),
+            }
+        }
+
+        /// How many times the triple is stored, read by a fresh session.
+        fn count(self, db: &GrafeoDB, subject: &str, object: &str) -> usize {
+            let pattern = format!("ex:{subject} ex:p \"{object}\"");
+            let query = match self {
+                Self::TextNamed => format!("SELECT ?s WHERE {{ GRAPH ex:g {{ {pattern} }} }}"),
+                Self::TextDefault | Self::Batch => format!("SELECT ?s WHERE {{ {pattern} }}"),
+            };
+            db.session().execute_sparql(&q(&query)).unwrap().row_count()
+        }
+
+        /// A triple of the seed in the load's graph: Alix's "1", or Vincent's "3" in g.
+        fn seeded_triple(self) -> (&'static str, &'static str) {
+            match self {
+                Self::TextNamed => ("vincent", "3"),
+                Self::TextDefault | Self::Batch => ("alix", "1"),
+            }
+        }
+    }
+
+    /// A transaction inserts a fresh triple and deletes it again (a recorded delete), and a load
+    /// inserts it meanwhile, before or after the transaction's statements: the transaction's commit
+    /// fails with `GRAFEO-T001`, no transaction stays open, and the loaded triple is stored once.
+    #[test]
+    fn a_net_delete_against_a_load_of_the_triple_fails_its_commit() {
+        let mut wrong = Vec::new();
+        for load in LOADS {
+            for load_first in [false, true] {
+                let db = seeded();
+                let mut session = db.session();
+                session.begin_transaction().unwrap();
+                let insert = q(&format!("INSERT DATA {}", load.data("hans", "new")));
+                let delete = q(&format!("DELETE DATA {}", load.data("hans", "new")));
+                if load_first {
+                    load.run(&db, "hans", "new");
+                }
+                session.execute_sparql(&insert).unwrap();
+                session.execute_sparql(&delete).unwrap();
+                if !load_first {
+                    load.run(&db, "hans", "new");
+                }
+                match session.commit() {
+                    Ok(()) => wrong.push(format!("{load:?}, load first {load_first}: committed")),
+                    Err(error) if is_conflict(&error) => {}
+                    Err(error) => {
+                        wrong.push(format!("{load:?}, load first {load_first}: {error}"));
+                    }
+                }
+                if session.in_transaction() {
+                    wrong.push(format!("{load:?}, load first {load_first}: still open"));
+                }
+                let stored = load.count(&db, "hans", "new");
+                if stored != 1 {
+                    wrong.push(format!(
+                        "{load:?}, load first {load_first}: stored {stored} times"
+                    ));
+                }
+            }
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    /// A transaction deletes a triple the snapshot holds, and a load inserts it again meanwhile:
+    /// the load's insert is a no-op (the triple exists), records nothing, and the commit succeeds
+    /// and leaves the triple deleted.
+    #[test]
+    fn a_delete_against_a_no_op_load_of_the_triple_commits() {
+        for load in LOADS {
+            let (subject, object) = load.seeded_triple();
+            let db = seeded();
+            let mut session = db.session();
+            session.begin_transaction().unwrap();
+            session
+                .execute_sparql(&q(&format!("DELETE DATA {}", load.data(subject, object))))
+                .unwrap();
+            load.run(&db, subject, object);
+            session
+                .commit()
+                .unwrap_or_else(|error| panic!("{load:?}: {error}"));
+            assert_eq!(load.count(&db, subject, object), 0, "{load:?}: deleted");
+        }
+    }
+
+    /// A load and a transaction insert one fresh triple: both commit, and it is stored once.
+    #[test]
+    fn a_load_and_a_transaction_inserting_one_triple_both_commit() {
+        for load in LOADS {
+            for load_first in [false, true] {
+                let db = seeded();
+                let mut session = db.session();
+                session.begin_transaction().unwrap();
+                let insert = q(&format!("INSERT DATA {}", load.data("django", "8")));
+                if load_first {
+                    load.run(&db, "django", "8");
+                }
+                session.execute_sparql(&insert).unwrap();
+                if !load_first {
+                    load.run(&db, "django", "8");
+                }
+                session
+                    .commit()
+                    .unwrap_or_else(|error| panic!("{load:?}, load first {load_first}: {error}"));
+                assert_eq!(
+                    load.count(&db, "django", "8"),
+                    1,
+                    "{load:?}, load first {load_first}: stored once"
+                );
+            }
+        }
+    }
+
+    /// A load with no transaction open records nothing: a transaction that begins after it and
+    /// deletes the loaded triple commits, and so does one that inserts it then deletes it.
+    #[test]
+    fn a_load_before_a_transaction_records_nothing_it_meets() {
+        for load in LOADS {
+            let db = seeded();
+            load.run(&db, "hans", "new");
+            let mut session = db.session();
+            session.begin_transaction().unwrap();
+            session
+                .execute_sparql(&q(&format!("DELETE DATA {}", load.data("hans", "new"))))
+                .unwrap();
+            session
+                .commit()
+                .unwrap_or_else(|error| panic!("{load:?}: {error}"));
+            assert_eq!(load.count(&db, "hans", "new"), 0, "{load:?}: deleted");
+
+            load.run(&db, "jules", "5");
+            let mut session = db.session();
+            session.begin_transaction().unwrap();
+            session
+                .execute_sparql(&q(&format!("INSERT DATA {}", load.data("jules", "5"))))
+                .unwrap();
+            session
+                .execute_sparql(&q(&format!("DELETE DATA {}", load.data("jules", "5"))))
+                .unwrap();
+            session
+                .commit()
+                .unwrap_or_else(|error| panic!("{load:?}, insert and delete: {error}"));
+            assert_eq!(load.count(&db, "jules", "5"), 0, "{load:?}: deleted again");
+        }
+    }
+
+    /// A transaction that began before a load of several triples reads none of them, whatever it
+    /// asks; one that begins after reads all of them; and the first, once it ends, reads them too.
+    #[test]
+    fn a_reader_reads_a_load_whole_or_not_at_all() {
+        for load in LOADS {
+            let db = seeded();
+            let mut before = db.session();
+            before.begin_transaction().unwrap();
+            let seen = answer(&before, ALL);
+            for (subject, object) in [("hans", "9"), ("butch", "6"), ("mia", "4")] {
+                load.run(&db, subject, object);
+            }
+            assert_eq!(answer(&before, ALL), seen, "{load:?}: began before");
+            let mut after = db.session();
+            after.begin_transaction().unwrap();
+            let read = answer(&after, ALL);
+            assert_eq!(read.len(), seen.len() + 3, "{load:?}: began after");
+            after.commit().unwrap();
+            before.commit().unwrap();
+            assert_eq!(answer(&before, ALL), read, "{load:?}: once it ended");
+        }
+    }
+}
+
 // ------------------------------------------------------------------ checkpoints and the schema (E)
 
 /// A checkpoint while a reader is open leaves the reader's snapshot, and the checkpointed file

@@ -121,6 +121,7 @@ testing-crash-injection = ["dep:grafeo-storage", "grafeo-common/testing-crash-in
 testing-statement-injection = ["grafeo-common/testing-statement-injection", "grafeo-core/testing-statement-injection"]  # Failure injection at statement / commit entry for rollback atomicity tests, and a hook inside commit
 testing-warning-probe = ["grafeo-common/testing-warning-probe"]  # `Session::set_warning_probe`, which raises the 01Z99 notice at translation or at run time for the warning channel's tests
 testing-deadline-probe = ["grafeo-core/testing-deadline-probe", "grafeo-adapters/testing-deadline-probe"]  # Test only: a deadline that passes after N clock reads in procedures and paths
+testing-plan-cache = []  # Test only: `GrafeoDB::hold_plan_puts`, which pauses a statement between its planning and its plan-cache put
 
 [lints]
 workspace = true

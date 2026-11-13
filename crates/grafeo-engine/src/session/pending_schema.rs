@@ -131,8 +131,8 @@ impl Session {
             changes.queue_schema(op, graph);
         }
         self.refresh_pending_graphs(&changes);
-        let plans = self.plan_cache();
-        plans.clear(plans.generation() + 1);
+        // The transaction's own plans only: the change is not committed.
+        self.plan_cache().advance();
         Ok(())
     }
 
@@ -782,7 +782,8 @@ impl Session {
                 _ => {}
             }
         }
-        self.query_cache.clear(self.query_cache.generation() + 1);
+        // Committed: every session's plans are made again.
+        self.query_cache.advance();
     }
 }
 

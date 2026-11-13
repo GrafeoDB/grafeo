@@ -221,3 +221,57 @@ fn a_node_only_load_is_refused_at_a_small_limit() {
         usage.total_bytes
     );
 }
+
+/// A strict expected failure: `body` must panic (the behavior `spec` names is not there yet,
+/// `issue` tracks it); if it passes, the test fails so the mark is removed.
+fn xfail(spec: &str, issue: &str, body: impl FnOnce()) {
+    let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(body)).is_err();
+    assert!(
+        failed,
+        "XPASS: {spec} ({issue}) holds now; remove the xfail"
+    );
+}
+
+/// Many labels and edge types: what the store and the planner keep per label and per edge type
+/// id (the label and type dictionaries, their bitmaps, and the planner's statistics anchors, marks
+/// and changed-id lists of #674) is in the account. After 20,000 nodes of distinct labels and
+/// 20,000 edges of distinct types, and one planned read that takes the statistics, the allocator
+/// and the report differ by the fixed margin only, and the account equals the walk. A list of
+/// 13 bytes per id left out of both would show here as about 500 KiB, which the walk cannot see.
+///
+/// The planner's lists are counted (taking them out of the account lowers the report by their
+/// 512 KiB), but about 41 B per label and 27 B per edge type outside them are not: about 1.3 MB
+/// apart here, so the allocator check fails until the account holds them.
+#[test]
+fn per_label_and_edge_type_lists_are_counted() {
+    const KINDS: usize = 20_000;
+    let _serial = SERIAL
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let db = GrafeoDB::with_config(Config::in_memory()).unwrap();
+    // The ids are the test's: reserved before the measurement, so it holds none of them.
+    let mut ids = Vec::with_capacity(KINDS);
+    let (allocated, reported) = grown(&db, |db| {
+        for i in 0..KINDS {
+            ids.push(db.create_node(&[format!("L{i}").as_str()]).unwrap());
+        }
+        for i in 0..KINDS {
+            db.create_edge(ids[i], ids[(i + 1) % KINDS], &format!("T{i}"))
+                .unwrap();
+        }
+        db.execute("MATCH (n:L7)-[:T7]->(m) RETURN count(m) AS n")
+            .unwrap();
+    });
+    assert_eq!(ids.capacity(), KINDS, "the reserved vector never grew");
+    assert_counted_is_walked(&db, "many labels and edge types");
+    xfail(
+        "the memory account holds what the store keeps per label and per edge type",
+        "fix in 0.6.3",
+        || {
+            assert!(
+                allocated.abs_diff(reported) <= MARGIN,
+                "{KINDS} labels and edge types: {allocated} B allocated, {reported} B reported"
+            );
+        },
+    );
+}

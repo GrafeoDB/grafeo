@@ -981,6 +981,11 @@ impl GrafeoDB {
         // the collect horizon; the history goes on from here: a read at a
         // time from now on finds its epoch.
         Self::continue_epochs(&store, &transaction_manager);
+        // The counts the planner reads, as the open found them, anchor the
+        // plans; a large move of one from now on moves the planning
+        // generation.
+        store.attach_planning_generation(Arc::clone(query_cache.planning_generation()));
+        store.anchor_plan_statistics();
 
         #[cfg(feature = "cdc")]
         let cdc_enabled_val = config.cdc_enabled();
@@ -2872,13 +2877,22 @@ impl GrafeoDB {
         &self.query_cache
     }
 
+    /// Holds the plan cache's puts until the returned guard drops: a
+    /// statement that planned waits before it stores its plan (feature
+    /// `testing-plan-cache`, for tests of a change racing a statement's plan).
+    #[cfg(feature = "testing-plan-cache")]
+    #[must_use]
+    pub fn hold_plan_puts(&self) -> crate::query::cache::PlanPutHold {
+        self.query_cache.hold_puts()
+    }
+
     /// Clears all cached query plans.
     ///
     /// This is called automatically after DDL operations, but can also be
     /// invoked manually after external schema changes (e.g., WAL replay,
     /// import) or when you want to force re-optimization of all queries.
     pub fn clear_plan_cache(&self) {
-        self.query_cache.clear(self.query_cache.generation() + 1);
+        self.query_cache.advance();
     }
 
     // =========================================================================
@@ -3270,7 +3284,7 @@ impl GrafeoDB {
         // A graph, index, constraint or type changed: a cached plan may have
         // been optimized for what was there before (an index it now lacks or
         // could use), so every plan is made again.
-        self.query_cache.clear(self.query_cache.generation() + 1);
+        self.query_cache.advance();
         Ok(())
     }
 

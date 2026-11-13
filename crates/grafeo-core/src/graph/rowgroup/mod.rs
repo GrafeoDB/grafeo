@@ -596,27 +596,138 @@ struct Counts {
     edges: i64,
     labels: Vec<i64>,
     edge_types: Vec<i64>,
+    /// What the planning generation compares the counts with (#674).
+    plan: PlanCounts,
 }
 
 impl Counts {
-    /// Moves label id `id`'s count by `delta`; returns the bytes its list
+    /// Moves label id `id`'s count by `delta`; returns the bytes its lists
     /// grew by (counted by the caller: rare, at a new label id).
     fn label(&mut self, id: u32, delta: i64) -> usize {
         let index = id as usize;
         let before = self.labels.capacity();
         grow(&mut self.labels, index, 0);
         self.labels[index] += delta;
-        (self.labels.capacity() - before) * std::mem::size_of::<i64>()
+        (self.labels.capacity() - before) * std::mem::size_of::<i64>() + self.plan.labels.note(id)
     }
 
     /// Moves edge type id `id`'s count by `delta`; returns the bytes its
-    /// list grew by.
+    /// lists grew by.
     fn edge_type(&mut self, id: u32, delta: i64) -> usize {
         let index = id as usize;
         let before = self.edge_types.capacity();
         grow(&mut self.edge_types, index, 0);
         self.edge_types[index] += delta;
         (self.edge_types.capacity() - before) * std::mem::size_of::<i64>()
+            + self.plan.edge_types.note(id)
+    }
+
+    /// Whether a count the writes since the last call moved went far enough
+    /// from its anchor (see [`count_moved`]), resetting the anchor of each
+    /// that did: O(the label and edge type ids they moved), which are
+    /// forgotten.
+    fn plan_statistics_moved(&mut self) -> bool {
+        let plan = &mut self.plan;
+        let mut any = anchor_moved(&mut plan.nodes, self.nodes);
+        any |= anchor_moved(&mut plan.edges, self.edges);
+        any |= plan.labels.moved(&self.labels);
+        any |= plan.edge_types.moved(&self.edge_types);
+        any
+    }
+
+    /// Takes the counts as they are as the anchors.
+    fn anchor_plan_statistics(&mut self) {
+        self.plan_statistics_moved();
+        self.plan.nodes = self.nodes;
+        self.plan.edges = self.edges;
+        self.plan.labels.anchor(&self.labels);
+        self.plan.edge_types.anchor(&self.edge_types);
+    }
+}
+
+/// How far a count the planner reads moves before the plans made from it
+/// are made again: by a factor of 2, and by at least this many rows (#674).
+pub const PLAN_STATISTICS_MIN_ROWS: i64 = 1_000;
+
+/// Whether a count moved from `anchor` to `count` far enough for the plans
+/// made at the anchor to be made again: doubled or halved, by at least
+/// [`PLAN_STATISTICS_MIN_ROWS`]; a count rising from 0 moves at that many.
+fn count_moved(anchor: i64, count: i64) -> bool {
+    count.abs_diff(anchor) >= PLAN_STATISTICS_MIN_ROWS.unsigned_abs()
+        && (count >= anchor.saturating_mul(2) || count <= anchor / 2)
+}
+
+/// Whether `count` moved far enough from `anchor`, which then becomes it.
+fn anchor_moved(anchor: &mut i64, count: i64) -> bool {
+    let moved = count_moved(*anchor, count);
+    if moved {
+        *anchor = count;
+    }
+    moved
+}
+
+/// The value of each count the planner reads (total nodes and edges, each
+/// label's nodes, each edge type's edges) at its last move: set when the
+/// store opens or loads, reset where a count moves.
+#[derive(Debug, Default)]
+struct PlanCounts {
+    nodes: i64,
+    edges: i64,
+    labels: PlanCountsById,
+    edge_types: PlanCountsById,
+}
+
+/// The anchors of one kind of count by id, and the ids whose counts moved
+/// since the last compare, each listed once: a mark per id keeps a bulk
+/// write's per-row moves O(1). The anchors and marks grow with the counts,
+/// so each has the counts' length.
+#[derive(Debug, Default)]
+struct PlanCountsById {
+    anchors: Vec<i64>,
+    marks: Vec<bool>,
+    changed: Vec<u32>,
+}
+
+impl PlanCountsById {
+    /// Notes that id `id`'s count moved; returns the bytes the lists grew
+    /// by.
+    fn note(&mut self, id: u32) -> usize {
+        let index = id as usize;
+        let before = self.heap_bytes();
+        grow(&mut self.anchors, index, 0);
+        grow(&mut self.marks, index, false);
+        if !self.marks[index] {
+            self.marks[index] = true;
+            self.changed.push(id);
+        }
+        self.heap_bytes() - before
+    }
+
+    /// Whether the count of an id noted since the last call moved far
+    /// enough from its anchor; the noted ids are forgotten.
+    fn moved(&mut self, counts: &[i64]) -> bool {
+        let mut any = false;
+        for &id in &self.changed {
+            let index = id as usize;
+            self.marks[index] = false;
+            any |= anchor_moved(&mut self.anchors[index], counts[index]);
+        }
+        self.changed.clear();
+        any
+    }
+
+    /// Takes `counts` as the anchors.
+    fn anchor(&mut self, counts: &[i64]) {
+        for (anchor, &count) in self.anchors.iter_mut().zip(counts) {
+            *anchor = count;
+        }
+    }
+
+    /// The bytes the lists hold, as the account counts them.
+    fn heap_bytes(&self) -> usize {
+        self.anchors.capacity() * std::mem::size_of::<i64>()
+            + self.marks.capacity()
+            + self.changed.capacity() * std::mem::size_of::<u32>()
     }
 }
 
@@ -761,9 +872,11 @@ impl Inner {
         lines[Line::NodeVersions.index()] = listed_nodes;
         lines[Line::EdgeVersions.index()] = listed_edges;
         lines[Line::Labels.index()] = self.labels.counted_bytes()
-            + self.counts.labels.capacity() * std::mem::size_of::<i64>();
+            + self.counts.labels.capacity() * std::mem::size_of::<i64>()
+            + self.counts.plan.labels.heap_bytes();
         lines[Line::EdgeTypes.index()] = self.edge_types.counted_bytes()
-            + self.counts.edge_types.capacity() * std::mem::size_of::<i64>();
+            + self.counts.edge_types.capacity() * std::mem::size_of::<i64>()
+            + self.counts.plan.edge_types.heap_bytes();
         lines[Line::Keys.index()] = self.keys.counted_bytes();
         if !self.indexes.is_empty() {
             let [property, text, vector] = self.indexes.counted_bytes();
@@ -780,10 +893,12 @@ impl Inner {
         let (listed_nodes, listed_edges) = self.listed.heap_bytes();
         lines[Line::NodeVersions.index()] = listed_nodes;
         lines[Line::EdgeVersions.index()] = listed_edges;
-        lines[Line::Labels.index()] =
-            self.labels.heap_bytes() + self.counts.labels.capacity() * std::mem::size_of::<i64>();
+        lines[Line::Labels.index()] = self.labels.heap_bytes()
+            + self.counts.labels.capacity() * std::mem::size_of::<i64>()
+            + self.counts.plan.labels.heap_bytes();
         lines[Line::EdgeTypes.index()] = self.edge_types.heap_bytes()
-            + self.counts.edge_types.capacity() * std::mem::size_of::<i64>();
+            + self.counts.edge_types.capacity() * std::mem::size_of::<i64>()
+            + self.counts.plan.edge_types.heap_bytes();
         lines[Line::Keys.index()] = self.keys.heap_bytes();
         let [property, text, vector] = self.indexes.walk_bytes();
         lines[Line::PropertyIndexes.index()] = property;
@@ -1373,6 +1488,9 @@ pub struct RowGroupStore {
     /// The memory consumers a database registered for it, unregistered when
     /// it drops.
     registered: account::Registered,
+    /// The database's planning generation, which a large move of a count
+    /// moves, once a database attaches it.
+    planning: std::sync::OnceLock<Arc<AtomicU64>>,
 }
 
 /// What a collect took out: rows, and the values and label sets kept for
@@ -1424,6 +1542,46 @@ impl RowGroupStore {
                 graph.attach_memory(Arc::clone(&manager));
             }
         }
+    }
+
+    /// Moves `generation`, the database's planning generation, when a commit
+    /// or a write moves a count the planner reads far enough (see
+    /// [`PLAN_STATISTICS_MIN_ROWS`]): the plans cached from the old counts
+    /// are made again. A database attaches it once; each named graph gets
+    /// the root's. A store keeps the first it gets.
+    pub fn attach_planning_generation(&self, generation: Arc<AtomicU64>) {
+        if self.planning.set(Arc::clone(&generation)).is_err() {
+            return;
+        }
+        for name in self.graph_names() {
+            if let Some(graph) = self.graph(&name) {
+                graph.attach_planning_generation(Arc::clone(&generation));
+            }
+        }
+    }
+
+    /// Takes the counts as they are now as the planning anchors, of this
+    /// store and its named graphs: what an open does once its loads and
+    /// replay are done.
+    pub fn anchor_plan_statistics(&self) {
+        self.inner.write().counts.anchor_plan_statistics();
+        for name in self.graph_names() {
+            if let Some(graph) = self.graph(&name) {
+                graph.anchor_plan_statistics();
+            }
+        }
+    }
+
+    /// Moves the attached planning generation when `moved`.
+    fn note_plan_statistics(&self, moved: bool) {
+        if moved && let Some(generation) = self.planning.get() {
+            generation.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+
+    /// The planning generation, for a named graph built for this store.
+    fn planning_generation(&self) -> Option<&Arc<AtomicU64>> {
+        self.planning.get()
     }
 
     /// Unregisters the memory consumer `name` from `manager` when the store

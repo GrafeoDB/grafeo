@@ -38,27 +38,28 @@ pub fn open_existing_read_only(path: &Path) -> Result<GrafeoDB> {
         .with_context(|| format!("Failed to open database at {} to read it", path.display()))
 }
 
-/// The features of this CLI that read data a database can hold, each with whether this build
-/// has it. A build without one refuses to open a database holding its data, and the refusal
-/// names the engine feature, which the CLI's feature of the same name enables.
-const DATA_FEATURES: [(&str, bool); 3] = [
-    ("triple-store", cfg!(feature = "triple-store")),
-    ("vector-index", cfg!(feature = "vector-index")),
-    ("text-index", cfg!(feature = "text-index")),
-];
-
 /// How to install a CLI that reads what `message` (an error with its causes) says this build
-/// cannot: the `cargo install` line with each feature of [`DATA_FEATURES`] that the message names
-/// and this build lacks (#763). `None` when it names none.
+/// cannot (#763): the `cargo install` line with each feature the message names as one "a build
+/// with the `X` feature" can read with, in the order named, each once. The engine names only
+/// features this build lacks, and the CLI's features have the engine's names. `None` when it
+/// names none.
 #[must_use]
 pub fn install_hint(message: &str) -> Option<String> {
-    let missing: Vec<&str> = DATA_FEATURES
-        .iter()
-        .filter(|(feature, built)| {
-            !built && message.contains(&format!("build with the `{feature}` feature"))
-        })
-        .map(|(feature, _)| *feature)
-        .collect();
+    const BEFORE: &str = "build with the `";
+    const AFTER: &str = "` feature";
+    let mut missing: Vec<&str> = Vec::new();
+    let mut rest = message;
+    while let Some(at) = rest.find(BEFORE) {
+        rest = &rest[at + BEFORE.len()..];
+        let Some(end) = rest.find(AFTER) else {
+            break;
+        };
+        let name = &rest[..end];
+        if !name.is_empty() && !name.contains('`') && !missing.contains(&name) {
+            missing.push(name);
+        }
+        rest = &rest[end + AFTER.len()..];
+    }
     if missing.is_empty() {
         return None;
     }
@@ -94,48 +95,48 @@ fn existing_path(path: &Path) -> Result<std::path::PathBuf> {
 mod tests {
     use super::open_existing;
 
-    /// The engine's refusal for data of a feature this build has, or a message that names no
-    /// feature, gives no install line.
+    /// A message that names no feature to build with gives no install line.
     #[test]
-    fn no_install_hint_for_a_feature_in_the_build_or_none_named() {
-        assert_eq!(super::install_hint("Database not found: db"), None);
-        for (feature, built) in super::DATA_FEATURES {
-            let refusal = format!(
-                "db holds data that only a build with the `{feature}` feature can read: {}",
-                "open it with such a build"
-            );
-            assert_eq!(
-                super::install_hint(&refusal).is_some(),
-                !built,
-                "{feature}: {refusal}"
-            );
+    fn no_install_hint_when_no_feature_is_named() {
+        for message in [
+            "Database not found: db",
+            "a build with the `` feature can read",
+            "a build with the `triple-store",
+        ] {
+            assert_eq!(super::install_hint(message), None, "{message}");
         }
     }
 
-    /// Each feature the refusal names and this build lacks is in the one install line.
+    /// Every feature the refusal names is in the one install line, in the order named, each
+    /// once, whatever the features: a fourth kind of data needs no change here.
     #[test]
-    fn the_install_hint_lists_every_missing_feature_once() {
+    fn the_install_hint_lists_every_named_feature_once() {
         let refusal = [
             "db holds RDF triples (sections RdfStore), data that only a build with the",
             "`triple-store` feature can read; and vector indexes (on :Doc(e)), data that only a",
-            "build with the `vector-index` feature can read: open it with a build that has these",
-            "features",
+            "build with the `vector-index` feature can read; and graph shapes, data that only a",
+            "build with the `some-new-feature` feature can read; and more RDF triples, data that",
+            "only a build with the `triple-store` feature can read: open it with a build that has",
+            "these features",
         ]
         .join(" ");
-        let missing: Vec<&str> = ["triple-store", "vector-index"]
-            .into_iter()
-            .filter(|name| super::DATA_FEATURES.contains(&(name, false)))
-            .collect();
-        match super::install_hint(&refusal) {
-            None => assert_eq!(missing, Vec::<&str>::new()),
-            Some(hint) => assert!(
-                hint.ends_with(&format!(
-                    "cargo install grafeo-cli --features {}",
-                    missing.join(",")
-                )),
-                "{hint}"
+        let hint = super::install_hint(&refusal).expect("the refusal names features");
+        assert!(
+            hint.ends_with(
+                "cargo install grafeo-cli --features triple-store,vector-index,some-new-feature"
             ),
-        }
+            "{hint}"
+        );
+        assert!(
+            hint.starts_with(
+                "this grafeo CLI was built without `triple-store` and `vector-index` and \
+                 `some-new-feature`; install one that has them with"
+            ),
+            "{hint}"
+        );
+        let one = super::install_hint("only a build with the `text-index` feature can read")
+            .expect("one feature");
+        assert!(one.contains("install one that has it with"), "{one}");
     }
 
     /// `db/` names the database file `db`: the CLI opens it, as a 0.5.x WAL

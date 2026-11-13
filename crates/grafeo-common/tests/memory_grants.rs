@@ -337,6 +337,7 @@ fn a_refusal_carries_the_figures_of_its_moment() {
             requested: 2 * MIB as u64,
             used: 3 * MIB as u64,
             limit: 4 * MIB as u64,
+            detail: None,
         }
     );
     assert_eq!(refusal.bound(), LimitBound::MemoryLimit);
@@ -406,6 +407,7 @@ fn a_refusal_is_grafeo_s001_with_the_bound_the_bytes_and_the_setting() {
                 requested: 2_097_152,
                 used: 3_145_728,
                 limit: 4_194_304,
+                detail: None,
             },
             &[
                 "the statement needs 2097152 more bytes",
@@ -419,6 +421,7 @@ fn a_refusal_is_grafeo_s001_with_the_bound_the_bytes_and_the_setting() {
                 requested: 10,
                 used: 20,
                 limit: 30,
+                detail: None,
             },
             &[
                 "the statement needs 10 more bytes",

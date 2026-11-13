@@ -45,11 +45,19 @@ impl PathBudget {
         self.ticker.tick()
     }
 
-    fn exceeded(&self) -> OperatorError {
-        OperatorError::LimitExceeded(format!(
-            "RDF property path exceeds its {}-byte memory budget",
-            self.limit
-        ))
+    /// The refusal of `requested` more bytes over what the path holds: the LPG path
+    /// searches' (#492), `GRAFEO-S001` naming the budget and its setting.
+    fn exceeded(&self, requested: usize) -> OperatorError {
+        crate::execution::operators::path_search_refused(
+            format!(
+                "An RDF property path would hold more than the {} of memory a path search may \
+                 use: bound the path's repetition, or start it from fewer terms",
+                crate::execution::operators::budget_text(self.limit)
+            ),
+            requested,
+            self.used,
+            self.limit,
+        )
     }
 
     pub(crate) fn charge(&mut self, bytes: usize) -> Result<(), OperatorError> {
@@ -57,9 +65,9 @@ impl PathBudget {
         let used = self
             .used
             .checked_add(bytes)
-            .ok_or_else(|| self.exceeded())?;
+            .ok_or_else(|| self.exceeded(bytes))?;
         if used > self.limit {
-            return Err(self.exceeded());
+            return Err(self.exceeded(bytes));
         }
         self.used = used;
         Ok(())
@@ -122,8 +130,12 @@ impl PathBudget {
         capacity: usize,
         additional: usize,
     ) -> Result<usize, OperatorError> {
-        let needed = len.checked_add(additional).ok_or_else(|| self.exceeded())?;
-        let doubled = capacity.checked_mul(2).ok_or_else(|| self.exceeded())?;
+        let needed = len
+            .checked_add(additional)
+            .ok_or_else(|| self.exceeded(usize::MAX))?;
+        let doubled = capacity
+            .checked_mul(2)
+            .ok_or_else(|| self.exceeded(usize::MAX))?;
         Ok(needed.max(doubled).max(4))
     }
 
@@ -132,15 +144,18 @@ impl PathBudget {
     // allocate, including the old table during a reallocation; afterwards
     // keep only the actual allocation_size charge.
     fn table_reservation<T>(&self, target: usize) -> Result<usize, OperatorError> {
-        let buckets = (target.checked_mul(8).ok_or_else(|| self.exceeded())? / 7)
-            .checked_next_power_of_two()
-            .ok_or_else(|| self.exceeded())?
-            .max(16);
+        let buckets = (target
+            .checked_mul(8)
+            .ok_or_else(|| self.exceeded(usize::MAX))?
+            / 7)
+        .checked_next_power_of_two()
+        .ok_or_else(|| self.exceeded(usize::MAX))?
+        .max(16);
         buckets
             .checked_mul(size_of::<T>())
             .and_then(|data| data.checked_add(buckets))
             .and_then(|data| data.checked_add(align_of::<T>().max(16) + 16))
-            .ok_or_else(|| self.exceeded())
+            .ok_or_else(|| self.exceeded(usize::MAX))
     }
 
     fn reconcile(
@@ -150,7 +165,7 @@ impl PathBudget {
         actual: usize,
     ) -> Result<(), OperatorError> {
         if actual > reserved {
-            return Err(self.exceeded());
+            return Err(self.exceeded(actual - reserved));
         }
         self.release(reserved - actual + old);
         Ok(())
@@ -171,7 +186,7 @@ impl PathBudget {
         self.charge(reservation)?;
         if values.try_reserve(target - values.len()).is_err() {
             self.release(reservation);
-            return Err(self.exceeded());
+            return Err(self.exceeded(reservation));
         }
         self.reconcile(reservation, old, values.allocation_size())
     }
@@ -191,7 +206,7 @@ impl PathBudget {
         self.charge(reservation)?;
         if values.try_reserve(target - values.len()).is_err() {
             self.release(reservation);
-            return Err(self.exceeded());
+            return Err(self.exceeded(reservation));
         }
         self.reconcile(reservation, old, values.allocation_size())
     }
@@ -209,12 +224,12 @@ impl PathBudget {
         let reservation = target
             .checked_add(16)
             .and_then(|n| n.checked_mul(size_of::<T>()))
-            .ok_or_else(|| self.exceeded())?;
+            .ok_or_else(|| self.exceeded(usize::MAX))?;
         let old = values.capacity().saturating_mul(size_of::<T>());
         self.charge(reservation)?;
         if values.try_reserve_exact(target - values.len()).is_err() {
             self.release(reservation);
-            return Err(self.exceeded());
+            return Err(self.exceeded(reservation));
         }
         self.reconcile(
             reservation,
@@ -236,12 +251,12 @@ impl PathBudget {
         let reservation = target
             .checked_add(16)
             .and_then(|n| n.checked_mul(size_of::<T>()))
-            .ok_or_else(|| self.exceeded())?;
+            .ok_or_else(|| self.exceeded(usize::MAX))?;
         let old = values.capacity().saturating_mul(size_of::<T>());
         self.charge(reservation)?;
         if values.try_reserve_exact(target - values.len()).is_err() {
             self.release(reservation);
-            return Err(self.exceeded());
+            return Err(self.exceeded(reservation));
         }
         self.reconcile(
             reservation,
@@ -291,10 +306,9 @@ mod tests {
     fn rejected_growth_does_not_allocate_or_charge_a_hash_table() {
         let mut budget = PathBudget::new(0, None);
         let mut values = grafeo_common::utils::hash::FxHashSet::<usize>::default();
-        assert!(matches!(
-            budget.reserve_set(&mut values, 1),
-            Err(OperatorError::LimitExceeded(_))
-        ));
+        assert!(budget.reserve_set(&mut values, 1).is_err_and(|error| {
+            crate::execution::operators::path_budget_message(&error).is_some()
+        }));
         assert_eq!(values.allocation_size(), 0);
         assert_eq!(budget.used(), 0);
     }

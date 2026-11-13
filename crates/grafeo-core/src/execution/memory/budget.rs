@@ -64,6 +64,7 @@ impl QueryMemory {
                 requested: as_u64(bytes),
                 used: as_u64(used),
                 limit: as_u64(self.limit),
+                detail: None,
             })
     }
 

@@ -204,10 +204,11 @@ mod physical {
             }
         }
 
-        /// Narrows the default path cap to the available query budget.
+        /// Sets the bytes the search may hold: `Config::path_search_budget`, which
+        /// already caps it (at the memory limit when one is set), so it is kept as given.
         #[must_use]
         pub fn with_memory_budget(mut self, budget: usize) -> Self {
-            self.budget = budget.min(DEFAULT_PATH_SEARCH_BUDGET);
+            self.budget = budget;
             self
         }
 
@@ -1291,10 +1292,9 @@ mod physical {
             cfg.chunk_capacity = 16;
             let mut path = RdfPathOperator::new(chain(), RdfView::latest(LatestUse::Test), cfg)
                 .with_memory_budget(1);
-            assert!(matches!(
-                path.next(),
-                Err(super::OperatorError::LimitExceeded(_))
-            ));
+            assert!(path.next().is_err_and(|error| {
+                crate::execution::operators::path_budget_message(&error).is_some()
+            }));
             assert!(path.state.is_none());
             assert!(path.next().unwrap().is_none());
         }
@@ -1407,7 +1407,9 @@ mod physical {
             assert!(initialized_bytes > 0);
             assert!(initialized_bytes <= cap);
             path.state = Some(state);
-            assert!(matches!(path.next(), Err(OperatorError::LimitExceeded(_))));
+            assert!(path.next().is_err_and(|error| {
+                crate::execution::operators::path_budget_message(&error).is_some()
+            }));
             assert!(path.state.is_none());
             assert_eq!(Arc::strong_count(&store), idle_references);
             assert!(path.next().unwrap().is_none());
@@ -1420,6 +1422,19 @@ mod physical {
             assert_eq!(rows, 257);
             assert!(path.state.is_none());
             assert_eq!(Arc::strong_count(&store), idle_references);
+        }
+
+        /// The budget an RDF property path is given is the one it keeps, above
+        /// the 256 MiB default too: `Config::path_search_budget` caps it, not
+        /// the operator (#492).
+        #[test]
+        fn the_memory_budget_is_kept_as_given() {
+            for budget in [8 << 20, DEFAULT_PATH_SEARCH_BUDGET, 512 << 20, 2 << 30] {
+                let path =
+                    RdfPathOperator::new(chain(), RdfView::latest(LatestUse::Test), config())
+                        .with_memory_budget(budget);
+                assert_eq!(path.budget, budget);
+            }
         }
 
         #[test]

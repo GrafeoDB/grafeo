@@ -258,6 +258,7 @@ mod parameter_depth;
 mod parameterized_queries;
 mod parameters_against_literals;
 mod parameters_match_literals;
+mod path_search_budget_setting;
 mod path_search_capacity;
 mod path_search_prefixes;
 mod path_semantics;

@@ -16,23 +16,26 @@ pub fn run(quiet: bool) {
     println!("  target:   {}", std::env::consts::ARCH);
     println!("  os:       {}", std::env::consts::OS);
 
-    // Features
-    let mut features = Vec::new();
-    if cfg!(feature = "gql") {
-        features.push("gql");
-    }
-    if cfg!(feature = "cypher") {
-        features.push("cypher");
-    }
-    if cfg!(feature = "sparql") {
-        features.push("sparql");
-    }
-    if cfg!(feature = "sql-pgq") {
-        features.push("sql-pgq");
-    }
-    if cfg!(feature = "triple-store") {
-        features.push("rdf");
-    }
+    // Features: the CLI's own names, as `cargo install grafeo-cli --features` takes them.
+    let features: Vec<&str> = [
+        ("gql", cfg!(feature = "gql")),
+        ("cypher", cfg!(feature = "cypher")),
+        ("sparql", cfg!(feature = "sparql")),
+        ("gremlin", cfg!(feature = "gremlin")),
+        ("graphql", cfg!(feature = "graphql")),
+        ("sql-pgq", cfg!(feature = "sql-pgq")),
+        ("triple-store", cfg!(feature = "triple-store")),
+        ("vector-index", cfg!(feature = "vector-index")),
+        ("text-index", cfg!(feature = "text-index")),
+        ("hybrid-search", cfg!(feature = "hybrid-search")),
+        ("cdc", cfg!(feature = "cdc")),
+        ("algos", cfg!(feature = "algos")),
+        ("jsonl-import", cfg!(feature = "jsonl-import")),
+        ("arrow-export", cfg!(feature = "arrow-export")),
+    ]
+    .into_iter()
+    .filter_map(|(name, built)| built.then_some(name))
+    .collect();
     let feature_str = features.join(", ");
     println!(
         "  features: {}",

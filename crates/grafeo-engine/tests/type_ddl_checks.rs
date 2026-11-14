@@ -524,7 +524,7 @@ fn type_of_europe(db: &GrafeoDB) -> Value {
 const RECREATED: &[&str] = &[
     "DROP GRAPH europe",
     "DROP GRAPH TYPE atlas",
-    "CREATE NODE TYPE City (name STRING)",
+    // `City` stands on its own, so it stayed (#764): the new atlas lists it again.
     "CREATE GRAPH TYPE atlas (NODE TYPE City)",
     "CREATE GRAPH europe",
 ];

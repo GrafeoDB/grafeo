@@ -1035,16 +1035,21 @@ fn dropping_a_listed_type_is_refused_while_a_closed_graph_is_bound() {
     }
 }
 
-/// An open type's, an unbound type's and an unlisted type's definitions go as they did.
+/// A type no graph type lists, and a type the bound closed type does not list, go as they
+/// did. A standalone type an open or unbound graph type lists stays while it lists it (#764).
 #[test]
 fn dropping_a_type_goes_where_nothing_closed_is_bound_to_it() {
-    for kind in [Kind::Open, Kind::Untyped] {
-        for statement in ["DROP NODE TYPE Held", "DROP EDGE TYPE Link"] {
-            let (_db, session) = held(kind);
-            session
-                .execute(statement)
-                .unwrap_or_else(|error| panic!("{kind:?}, {statement}: {error}"));
-        }
+    for statement in ["DROP NODE TYPE Held", "DROP EDGE TYPE Link"] {
+        let (_db, session) = held(Kind::Untyped);
+        session
+            .execute(statement)
+            .unwrap_or_else(|error| panic!("untyped, {statement}: {error}"));
+        let (_db, session) = held(Kind::Open);
+        let error = session.execute(statement).expect_err(statement).to_string();
+        assert!(
+            error.contains("graph type 'held'"),
+            "open, {statement}: {error}"
+        );
     }
     // A closed type no graph is bound to.
     let db = GrafeoDB::new_in_memory();
@@ -1052,12 +1057,15 @@ fn dropping_a_type_goes_where_nothing_closed_is_bound_to_it() {
     run_all(&session, HELD_TYPES);
     run_all(
         &session,
-        &[
-            "CREATE GRAPH TYPE held (NODE TYPE Held, EDGE TYPE Link)",
-            "DROP NODE TYPE Held",
-            "DROP EDGE TYPE Link",
-        ],
+        &["CREATE GRAPH TYPE held (NODE TYPE Held, EDGE TYPE Link)"],
     );
+    for statement in ["DROP NODE TYPE Held", "DROP EDGE TYPE Link"] {
+        let error = session.execute(statement).expect_err(statement).to_string();
+        assert!(
+            error.contains("graph type 'held'"),
+            "unbound, {statement}: {error}"
+        );
+    }
     // A type the bound closed type does not list.
     let db = GrafeoDB::new_in_memory();
     let session = db.session();

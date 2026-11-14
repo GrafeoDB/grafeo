@@ -6,7 +6,7 @@
 use std::cmp::Ordering;
 use std::collections::HashSet;
 
-use crate::graph::rdf::{Literal, RdfStore, Term, TriplePattern};
+use crate::graph::rdf::{GraphAt, Literal, Term, TriplePattern};
 
 use super::path::evaluate_path;
 use super::report::ValidationResult;
@@ -21,7 +21,7 @@ pub struct EvalContext<'a> {
     /// The property path (for property shapes, None for node shapes).
     pub path: Option<&'a PropertyPath>,
     /// The data graph.
-    pub data_graph: &'a RdfStore,
+    pub data_graph: GraphAt<'a>,
     /// All parsed shapes (for recursive references).
     pub all_shapes: &'a [Shape],
     /// Visited (focus_node, shape_id) pairs for cycle detection.
@@ -876,6 +876,10 @@ mod tests {
     use super::*;
     use crate::graph::rdf::{RdfStore, Triple};
 
+    /// The view the tests read through.
+    static LATEST: crate::graph::rdf::RdfView =
+        crate::graph::rdf::RdfView::latest(crate::graph::rdf::LatestUse::Test);
+
     fn data_store() -> RdfStore {
         let store = RdfStore::new();
         let rdf_type = Term::iri("http://www.w3.org/1999/02/22-rdf-syntax-ns#type");
@@ -917,7 +921,7 @@ mod tests {
             focus_node: focus,
             shape,
             path: None,
-            data_graph: store,
+            data_graph: store.at(&LATEST),
             all_shapes: &[],
             visited,
         }
@@ -1327,7 +1331,7 @@ mod tests {
             focus_node: &alix,
             shape: &owner_shape,
             path: None,
-            data_graph: &store,
+            data_graph: store.at(&LATEST),
             all_shapes: &[],
             visited: &mut visited,
         };
@@ -1352,7 +1356,7 @@ mod tests {
             focus_node: &alix,
             shape: &owner_shape,
             path: None,
-            data_graph: &store,
+            data_graph: store.at(&LATEST),
             all_shapes: &[],
             visited: &mut visited,
         };

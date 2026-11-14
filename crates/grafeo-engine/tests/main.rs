@@ -11,6 +11,14 @@
 //! this crate. A file that needs a process of its own, or a build with few features,
 //! is a `[[test]]` entry in `Cargo.toml` instead, with a comment saying why.
 
+#![cfg_attr(
+    feature = "triple-store",
+    expect(
+        deprecated,
+        reason = "tests read the RDF store directly to check what was committed; GrafeoDB::rdf_store() is deprecated for users and goes crate-private in 0.7.0"
+    )
+)]
+
 mod agent_memory_migration;
 mod aggregate_calls;
 mod aggregate_computed_columns;
@@ -203,6 +211,7 @@ mod leapfrog_integration;
 mod legacy_vector_topology;
 mod limit_zero_after_a_write;
 mod list_concatenation;
+mod listed_standalone_types;
 mod lpg_graph_isolation;
 mod lpg_repeated_variables;
 mod memory_account;
@@ -211,6 +220,7 @@ mod memory_enforcement;
 mod memory_leak_detection;
 mod memory_limit_enforcement;
 mod memory_query_limit;
+mod memory_query_limit_operators;
 mod memory_usage_values;
 mod merge_after_write;
 mod merge_null_entries;
@@ -248,6 +258,7 @@ mod parameter_depth;
 mod parameterized_queries;
 mod parameters_against_literals;
 mod parameters_match_literals;
+mod path_search_budget_setting;
 mod path_search_capacity;
 mod path_search_prefixes;
 mod path_semantics;
@@ -255,6 +266,7 @@ mod pattern_after_write;
 mod per_label_index;
 mod persistent_transaction_rollback;
 mod pinned_far_end;
+mod plan_cache_bounds;
 mod plan_shapes;
 mod planner_coverage;
 mod planner_lpg_coverage;
@@ -387,6 +399,7 @@ mod sparql_path_deadline;
 mod sparql_path_per_row;
 mod sparql_regression_external;
 mod sparql_result_kind;
+mod sparql_snapshot_isolation;
 mod sparql_string_tests_on_term_ids;
 mod sparql_term_round_trip;
 mod sparql_transactions;
@@ -411,11 +424,13 @@ mod sql_pgq_outer_aliases_and_keyword_parameters;
 mod sql_pgq_path_components;
 mod sql_pgq_paths_through_gql;
 mod sql_pgq_property_graph_ddl;
+mod sql_pgq_ranges_across_kinds;
 mod sql_pgq_row_count_errors;
 mod sql_pgq_select_semantics;
 mod standalone_changes;
 mod statement_clock;
 mod statement_depth;
+mod statement_memory_scope;
 mod statement_without_a_result;
 mod statement_writes;
 mod storage_tier_overrides;

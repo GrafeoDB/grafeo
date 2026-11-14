@@ -20,6 +20,11 @@ pub struct EagerOperator {
     input: Box<dyn Operator>,
     /// The input's chunks, once it is read.
     chunks: Option<VecDeque<DataChunk>>,
+    /// What it holds under the statement's memory, captured at construction
+    /// (see [`capture`](crate::execution::memory::capture)); it counts nothing
+    /// outside a budgeted statement. It cannot spill: past the query memory limit or the
+    /// memory limit it fails with `GRAFEO-S001`.
+    memory: crate::execution::memory::OperatorMemory,
 }
 
 impl EagerOperator {
@@ -28,6 +33,7 @@ impl EagerOperator {
         Self {
             input,
             chunks: None,
+            memory: crate::execution::memory::capture(),
         }
     }
 }
@@ -38,6 +44,9 @@ impl Operator for EagerOperator {
             let mut chunks = VecDeque::new();
             while let Some(chunk) = self.input.next()? {
                 crate::execution::deadline::check()?;
+                // Each chunk it keeps, against the statement's memory.
+                self.memory
+                    .add_with(|| crate::execution::memory::chunk_bytes(&chunk))?;
                 chunks.push_back(chunk);
             }
             self.chunks = Some(chunks);
@@ -48,6 +57,7 @@ impl Operator for EagerOperator {
     fn reset(&mut self) {
         self.input.reset();
         self.chunks = None;
+        self.memory.clear();
     }
 
     fn name(&self) -> &'static str {

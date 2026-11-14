@@ -6,7 +6,7 @@
 
 use std::collections::HashSet;
 
-use crate::graph::rdf::{RdfStore, Term, TriplePattern};
+use crate::graph::rdf::{GraphAt, Term, TriplePattern};
 
 use super::shape::{
     Constraint, NodeKindValue, NodeShape, PrefixDeclaration, PropertyPath, PropertyShape, RDF, SH,
@@ -31,7 +31,7 @@ fn pat(subject: Option<&Term>, predicate: Option<&Term>, object: Option<&Term>) 
 ///
 /// Returns `ShaclError::InvalidShape` if a shape is structurally invalid
 /// (e.g., a property shape without `sh:path`).
-pub fn parse_shapes(shapes_graph: &RdfStore) -> Result<Vec<Shape>, ShaclError> {
+pub fn parse_shapes(shapes_graph: GraphAt<'_>) -> Result<Vec<Shape>, ShaclError> {
     let rdf_type = Term::iri(RDF::TYPE);
 
     // Collect all explicitly typed shapes
@@ -76,7 +76,7 @@ pub fn parse_shapes(shapes_graph: &RdfStore) -> Result<Vec<Shape>, ShaclError> {
 
 /// Parses a single shape from the shapes graph.
 fn parse_shape(
-    graph: &RdfStore,
+    graph: GraphAt<'_>,
     shape_id: &Term,
     all_shape_ids: &HashSet<Term>,
     visiting: &mut HashSet<Term>,
@@ -93,7 +93,7 @@ fn parse_shape(
 }
 
 fn parse_shape_inner(
-    graph: &RdfStore,
+    graph: GraphAt<'_>,
     shape_id: &Term,
     all_shape_ids: &HashSet<Term>,
     visiting: &mut HashSet<Term>,
@@ -167,7 +167,7 @@ fn parse_shape_inner(
 // Target parsing
 // =========================================================================
 
-fn parse_targets(graph: &RdfStore, shape_id: &Term) -> Vec<Target> {
+fn parse_targets(graph: GraphAt<'_>, shape_id: &Term) -> Vec<Target> {
     let mut targets = Vec::new();
 
     let target_class = Term::iri(SH::TARGET_CLASS);
@@ -198,7 +198,7 @@ fn parse_targets(graph: &RdfStore, shape_id: &Term) -> Vec<Target> {
 // =========================================================================
 
 fn parse_property_shapes(
-    graph: &RdfStore,
+    graph: GraphAt<'_>,
     node_shape_id: &Term,
     all_shape_ids: &HashSet<Term>,
     visiting: &mut HashSet<Term>,
@@ -253,7 +253,7 @@ fn parse_property_shapes(
 /// Simple paths are IRIs. Complex paths are blank nodes with path modifier
 /// properties (`sh:inversePath`, `sh:alternativePath`, etc.) or RDF lists
 /// (sequence paths).
-fn parse_path(graph: &RdfStore, term: &Term) -> Result<PropertyPath, ShaclError> {
+fn parse_path(graph: GraphAt<'_>, term: &Term) -> Result<PropertyPath, ShaclError> {
     // Simple predicate path: the term is an IRI
     if term.is_iri() {
         return Ok(PropertyPath::Predicate(term.clone()));
@@ -330,7 +330,7 @@ fn parse_path(graph: &RdfStore, term: &Term) -> Result<PropertyPath, ShaclError>
 // =========================================================================
 
 fn parse_constraints(
-    graph: &RdfStore,
+    graph: GraphAt<'_>,
     shape_id: &Term,
     all_shape_ids: &HashSet<Term>,
     visiting: &mut HashSet<Term>,
@@ -478,7 +478,7 @@ fn parse_constraints(
 // =========================================================================
 
 fn parse_term_constraints(
-    graph: &RdfStore,
+    graph: GraphAt<'_>,
     shape_id: &Term,
     predicate_iri: &str,
     constraints: &mut Vec<Constraint>,
@@ -491,7 +491,7 @@ fn parse_term_constraints(
 }
 
 fn parse_node_kind_constraints(
-    graph: &RdfStore,
+    graph: GraphAt<'_>,
     shape_id: &Term,
     constraints: &mut Vec<Constraint>,
 ) -> Result<(), ShaclError> {
@@ -524,7 +524,11 @@ fn parse_node_kind_constraints(
     Ok(())
 }
 
-fn parse_pattern_constraint(graph: &RdfStore, shape_id: &Term, constraints: &mut Vec<Constraint>) {
+fn parse_pattern_constraint(
+    graph: GraphAt<'_>,
+    shape_id: &Term,
+    constraints: &mut Vec<Constraint>,
+) {
     let pattern_pred = Term::iri(SH::PATTERN);
     for triple in graph.find(&pat(Some(shape_id), Some(&pattern_pred), None)) {
         if let Some(pattern) = term_string_value(triple.object()) {
@@ -539,7 +543,7 @@ fn parse_pattern_constraint(graph: &RdfStore, shape_id: &Term, constraints: &mut
 }
 
 fn parse_language_in_constraint(
-    graph: &RdfStore,
+    graph: GraphAt<'_>,
     shape_id: &Term,
     constraints: &mut Vec<Constraint>,
 ) {
@@ -554,7 +558,7 @@ fn parse_language_in_constraint(
 }
 
 fn parse_logical_constraints(
-    graph: &RdfStore,
+    graph: GraphAt<'_>,
     shape_id: &Term,
     all_shape_ids: &HashSet<Term>,
     visiting: &mut HashSet<Term>,
@@ -604,7 +608,7 @@ fn parse_logical_constraints(
 }
 
 fn parse_qualified_value_shape(
-    graph: &RdfStore,
+    graph: GraphAt<'_>,
     shape_id: &Term,
     all_shape_ids: &HashSet<Term>,
     visiting: &mut HashSet<Term>,
@@ -629,7 +633,7 @@ fn parse_qualified_value_shape(
     Ok(())
 }
 
-fn parse_closed_constraint(graph: &RdfStore, shape_id: &Term, constraints: &mut Vec<Constraint>) {
+fn parse_closed_constraint(graph: GraphAt<'_>, shape_id: &Term, constraints: &mut Vec<Constraint>) {
     if parse_boolean_property(graph, shape_id, SH::CLOSED) {
         let ignored_pred = Term::iri(SH::IGNORED_PROPERTIES);
         let ignored = graph
@@ -643,7 +647,7 @@ fn parse_closed_constraint(graph: &RdfStore, shape_id: &Term, constraints: &mut 
     }
 }
 
-fn parse_in_constraint(graph: &RdfStore, shape_id: &Term, constraints: &mut Vec<Constraint>) {
+fn parse_in_constraint(graph: GraphAt<'_>, shape_id: &Term, constraints: &mut Vec<Constraint>) {
     let pred = Term::iri(SH::IN);
     for triple in graph.find(&pat(Some(shape_id), Some(&pred), None)) {
         let items = collect_rdf_list(graph, triple.object());
@@ -652,7 +656,7 @@ fn parse_in_constraint(graph: &RdfStore, shape_id: &Term, constraints: &mut Vec<
 }
 
 fn parse_sparql_constraints(
-    graph: &RdfStore,
+    graph: GraphAt<'_>,
     shape_id: &Term,
     constraints: &mut Vec<Constraint>,
 ) -> Result<(), ShaclError> {
@@ -692,7 +696,7 @@ fn parse_sparql_constraints(
     Ok(())
 }
 
-fn parse_prefix_declarations(graph: &RdfStore, constraint_node: &Term) -> Vec<PrefixDeclaration> {
+fn parse_prefix_declarations(graph: GraphAt<'_>, constraint_node: &Term) -> Vec<PrefixDeclaration> {
     let mut declarations = Vec::new();
     let prefixes_pred = Term::iri(SH::PREFIXES);
     let declare_pred = Term::iri(SH::DECLARE);
@@ -726,7 +730,7 @@ fn parse_prefix_declarations(graph: &RdfStore, constraint_node: &Term) -> Vec<Pr
 /// If the term refers to a known shape, it is parsed recursively.
 /// Otherwise, it is parsed as an anonymous inline shape.
 fn parse_inline_shape(
-    graph: &RdfStore,
+    graph: GraphAt<'_>,
     term: &Term,
     all_shape_ids: &HashSet<Term>,
     visiting: &mut HashSet<Term>,
@@ -739,7 +743,7 @@ fn parse_inline_shape(
 // Metadata helpers
 // =========================================================================
 
-fn parse_severity(graph: &RdfStore, shape_id: &Term) -> Severity {
+fn parse_severity(graph: GraphAt<'_>, shape_id: &Term) -> Severity {
     let pred = Term::iri(SH::SEVERITY);
     graph
         .find(&pat(Some(shape_id), Some(&pred), None))
@@ -752,11 +756,11 @@ fn parse_severity(graph: &RdfStore, shape_id: &Term) -> Severity {
         })
 }
 
-fn parse_deactivated(graph: &RdfStore, shape_id: &Term) -> bool {
+fn parse_deactivated(graph: GraphAt<'_>, shape_id: &Term) -> bool {
     parse_boolean_property(graph, shape_id, SH::DEACTIVATED)
 }
 
-fn parse_messages(graph: &RdfStore, shape_id: &Term) -> Vec<String> {
+fn parse_messages(graph: GraphAt<'_>, shape_id: &Term) -> Vec<String> {
     let pred = Term::iri(SH::MESSAGE);
     graph
         .find(&pat(Some(shape_id), Some(&pred), None))
@@ -769,7 +773,11 @@ fn parse_messages(graph: &RdfStore, shape_id: &Term) -> Vec<String> {
 // Primitive helpers
 // =========================================================================
 
-fn parse_string_property(graph: &RdfStore, subject: &Term, predicate_iri: &str) -> Option<String> {
+fn parse_string_property(
+    graph: GraphAt<'_>,
+    subject: &Term,
+    predicate_iri: &str,
+) -> Option<String> {
     let pred = Term::iri(predicate_iri);
     graph
         .find(&pat(Some(subject), Some(&pred), None))
@@ -777,7 +785,7 @@ fn parse_string_property(graph: &RdfStore, subject: &Term, predicate_iri: &str) 
         .and_then(|t| term_string_value(t.object()))
 }
 
-fn parse_integer_property(graph: &RdfStore, subject: &Term, predicate_iri: &str) -> Option<i64> {
+fn parse_integer_property(graph: GraphAt<'_>, subject: &Term, predicate_iri: &str) -> Option<i64> {
     let pred = Term::iri(predicate_iri);
     graph
         .find(&pat(Some(subject), Some(&pred), None))
@@ -788,7 +796,7 @@ fn parse_integer_property(graph: &RdfStore, subject: &Term, predicate_iri: &str)
         })
 }
 
-fn parse_boolean_property(graph: &RdfStore, subject: &Term, predicate_iri: &str) -> bool {
+fn parse_boolean_property(graph: GraphAt<'_>, subject: &Term, predicate_iri: &str) -> bool {
     let pred = Term::iri(predicate_iri);
     graph
         .find(&pat(Some(subject), Some(&pred), None))
@@ -821,7 +829,7 @@ fn term_string_value(term: &Term) -> Option<String> {
 
 /// Collects the elements of an RDF list (rdf:first/rdf:rest chain) starting
 /// from the given head node.
-pub(super) fn collect_rdf_list(graph: &RdfStore, head: &Term) -> Vec<Term> {
+pub(super) fn collect_rdf_list(graph: GraphAt<'_>, head: &Term) -> Vec<Term> {
     let first_pred = Term::iri(RDF::FIRST);
     let rest_pred = Term::iri(RDF::REST);
     let nil = Term::iri(RDF::NIL);
@@ -862,6 +870,10 @@ pub(super) fn collect_rdf_list(graph: &RdfStore, head: &Term) -> Vec<Term> {
 mod tests {
     use super::*;
     use crate::graph::rdf::{RdfStore, Term, Triple};
+
+    /// The view the tests read through.
+    static LATEST: crate::graph::rdf::RdfView =
+        crate::graph::rdf::RdfView::latest(crate::graph::rdf::LatestUse::Test);
 
     fn shapes_store() -> RdfStore {
         let store = RdfStore::new();
@@ -907,7 +919,7 @@ mod tests {
     #[test]
     fn parse_simple_node_shape() {
         let store = shapes_store();
-        let shapes = parse_shapes(&store).unwrap();
+        let shapes = parse_shapes(store.at(&LATEST)).unwrap();
 
         // Should find the PersonShape
         let person_shapes: Vec<_> = shapes
@@ -926,7 +938,7 @@ mod tests {
     #[test]
     fn parse_target_class() {
         let store = shapes_store();
-        let shapes = parse_shapes(&store).unwrap();
+        let shapes = parse_shapes(store.at(&LATEST)).unwrap();
 
         let person_shape = shapes
             .iter()
@@ -945,7 +957,7 @@ mod tests {
     #[test]
     fn parse_property_shape_with_cardinality() {
         let store = shapes_store();
-        let shapes = parse_shapes(&store).unwrap();
+        let shapes = parse_shapes(store.at(&LATEST)).unwrap();
 
         let person_shape = shapes
             .iter()
@@ -995,7 +1007,7 @@ mod tests {
             Term::iri("http://example.org/knows"),
         ));
 
-        let shapes = parse_shapes(&store).unwrap();
+        let shapes = parse_shapes(store.at(&LATEST)).unwrap();
         assert_eq!(shapes.len(), 1);
         if let Shape::Property(ps) = &shapes[0] {
             assert!(
@@ -1026,7 +1038,7 @@ mod tests {
             Term::iri("http://example.org/x"),
         ));
 
-        let shapes = parse_shapes(&store).unwrap();
+        let shapes = parse_shapes(store.at(&LATEST)).unwrap();
         assert_eq!(shapes[0].severity(), Severity::Warning);
     }
 
@@ -1050,7 +1062,7 @@ mod tests {
             Term::iri("http://example.org/x"),
         ));
 
-        let shapes = parse_shapes(&store).unwrap();
+        let shapes = parse_shapes(store.at(&LATEST)).unwrap();
         assert!(shapes[0].is_deactivated());
     }
 
@@ -1074,7 +1086,7 @@ mod tests {
             Term::iri("http://example.org/x"),
         ));
 
-        let shapes = parse_shapes(&store).unwrap();
+        let shapes = parse_shapes(store.at(&LATEST)).unwrap();
         assert_eq!(shapes[0].messages(), &["Name is required"]);
     }
 
@@ -1089,7 +1101,7 @@ mod tests {
             Term::iri("http://example.org/Person"),
         ));
 
-        let shapes = parse_shapes(&store).unwrap();
+        let shapes = parse_shapes(store.at(&LATEST)).unwrap();
         assert_eq!(shapes.len(), 1);
         // Should be parsed as a node shape (no sh:path)
         assert!(matches!(shapes[0], Shape::Node(_)));
@@ -1115,7 +1127,7 @@ mod tests {
             Term::iri("http://example.org/x"),
         ));
 
-        let shapes = parse_shapes(&store).unwrap();
+        let shapes = parse_shapes(store.at(&LATEST)).unwrap();
         let constraints = shapes[0].constraints();
         assert!(matches!(
             constraints[0],
@@ -1164,7 +1176,7 @@ mod tests {
         ));
         store.insert(Triple::new(list3, Term::iri(RDF::REST), nil));
 
-        let shapes = parse_shapes(&store).unwrap();
+        let shapes = parse_shapes(store.at(&LATEST)).unwrap();
         let constraints = shapes[0].constraints();
         let in_constraint = constraints.iter().find(|c| matches!(c, Constraint::In(_)));
         assert!(in_constraint.is_some());
@@ -1184,7 +1196,7 @@ mod tests {
         ));
         // No sh:path
 
-        let result = parse_shapes(&store);
+        let result = parse_shapes(store.at(&LATEST));
         assert!(result.is_err());
     }
 
@@ -1229,7 +1241,7 @@ mod tests {
         ));
         store.insert(Triple::new(shape_b, Term::iri(SH::NODE), shape_a));
 
-        let result = parse_shapes(&store);
+        let result = parse_shapes(store.at(&LATEST));
         assert!(result.is_err(), "Should detect cyclic reference");
         let err_msg = format!("{}", result.unwrap_err());
         assert!(
@@ -1257,7 +1269,7 @@ mod tests {
         ));
         store.insert(Triple::new(shape_a.clone(), Term::iri(SH::NOT), shape_a));
 
-        let result = parse_shapes(&store);
+        let result = parse_shapes(store.at(&LATEST));
         assert!(result.is_err(), "Should detect self-referencing shape");
         let err_msg = format!("{}", result.unwrap_err());
         assert!(
@@ -1292,7 +1304,7 @@ mod tests {
             Term::literal("http://www.w3.org/ns/shacl#IRI"),
         ));
 
-        let result = parse_shapes(&store);
+        let result = parse_shapes(store.at(&LATEST));
         assert!(result.is_err(), "Literal sh:nodeKind should be rejected");
         let err_msg = format!("{}", result.unwrap_err());
         assert!(
@@ -1323,7 +1335,7 @@ mod tests {
             Term::iri(SH::IRI),
         ));
 
-        let shapes = parse_shapes(&store).expect("IRI-valued sh:nodeKind should parse");
+        let shapes = parse_shapes(store.at(&LATEST)).expect("IRI-valued sh:nodeKind should parse");
         let constraints = shapes[0].constraints();
         assert!(
             constraints
@@ -1367,7 +1379,8 @@ mod tests {
             Term::typed_literal("2", "http://www.w3.org/2001/XMLSchema#integer"),
         ));
 
-        let shapes = parse_shapes(&store).expect("sh:not with inline shape should parse");
+        let shapes =
+            parse_shapes(store.at(&LATEST)).expect("sh:not with inline shape should parse");
 
         // Find the outer shape (the one with a target)
         let outer = shapes
@@ -1440,7 +1453,7 @@ mod tests {
             Term::typed_literal("5", "http://www.w3.org/2001/XMLSchema#integer"),
         ));
 
-        let shapes = parse_shapes(&store).expect("sh:and with RDF list should parse");
+        let shapes = parse_shapes(store.at(&LATEST)).expect("sh:and with RDF list should parse");
 
         let combined = shapes
             .iter()
@@ -1477,7 +1490,7 @@ mod tests {
             Term::iri("http://ex.org/knows"),
         ));
 
-        let shapes = parse_shapes(&store).unwrap();
+        let shapes = parse_shapes(store.at(&LATEST)).unwrap();
         assert_eq!(shapes.len(), 1);
         if let Shape::Property(ps) = &shapes[0] {
             assert!(
@@ -1505,7 +1518,7 @@ mod tests {
             Term::iri("http://ex.org/knows"),
         ));
 
-        let shapes = parse_shapes(&store).unwrap();
+        let shapes = parse_shapes(store.at(&LATEST)).unwrap();
         if let Shape::Property(ps) = &shapes[0] {
             assert!(matches!(&ps.path, PropertyPath::OneOrMore(_)));
         } else {
@@ -1530,7 +1543,7 @@ mod tests {
             Term::iri("http://ex.org/knows"),
         ));
 
-        let shapes = parse_shapes(&store).unwrap();
+        let shapes = parse_shapes(store.at(&LATEST)).unwrap();
         if let Shape::Property(ps) = &shapes[0] {
             assert!(matches!(&ps.path, PropertyPath::ZeroOrOne(_)));
         } else {
@@ -1566,7 +1579,7 @@ mod tests {
         ));
         store.insert(Triple::new(l2, Term::iri(RDF::REST), nil));
 
-        let shapes = parse_shapes(&store).unwrap();
+        let shapes = parse_shapes(store.at(&LATEST)).unwrap();
         if let Shape::Property(ps) = &shapes[0] {
             if let PropertyPath::Sequence(steps) = &ps.path {
                 assert_eq!(steps.len(), 2);
@@ -1612,7 +1625,7 @@ mod tests {
         ));
         store.insert(Triple::new(l2, Term::iri(RDF::REST), nil));
 
-        let shapes = parse_shapes(&store).unwrap();
+        let shapes = parse_shapes(store.at(&LATEST)).unwrap();
         if let Shape::Property(ps) = &shapes[0] {
             if let PropertyPath::Alternative(alts) = &ps.path {
                 assert_eq!(alts.len(), 2);
@@ -1645,7 +1658,7 @@ mod tests {
         ));
         store.insert(Triple::new(shape, Term::iri(SH::FLAGS), Term::literal("i")));
 
-        let shapes = parse_shapes(&store).unwrap();
+        let shapes = parse_shapes(store.at(&LATEST)).unwrap();
         let c = shapes[0]
             .constraints()
             .iter()
@@ -1689,7 +1702,7 @@ mod tests {
         ));
         store.insert(Triple::new(l2, Term::iri(RDF::REST), nil));
 
-        let shapes = parse_shapes(&store).unwrap();
+        let shapes = parse_shapes(store.at(&LATEST)).unwrap();
         let c = shapes[0]
             .constraints()
             .iter()
@@ -1720,7 +1733,7 @@ mod tests {
             Term::typed_literal("true", "http://www.w3.org/2001/XMLSchema#boolean"),
         ));
 
-        let shapes = parse_shapes(&store).unwrap();
+        let shapes = parse_shapes(store.at(&LATEST)).unwrap();
         assert!(
             shapes[0]
                 .constraints()
@@ -1763,7 +1776,7 @@ mod tests {
         ));
         store.insert(Triple::new(l1, Term::iri(RDF::REST), nil));
 
-        let shapes = parse_shapes(&store).unwrap();
+        let shapes = parse_shapes(store.at(&LATEST)).unwrap();
         let c = shapes[0]
             .constraints()
             .iter()
@@ -1812,7 +1825,7 @@ mod tests {
             Term::typed_literal("3", "http://www.w3.org/2001/XMLSchema#integer"),
         ));
 
-        let shapes = parse_shapes(&store).unwrap();
+        let shapes = parse_shapes(store.at(&LATEST)).unwrap();
         let c = shapes[0]
             .constraints()
             .iter()
@@ -1852,7 +1865,7 @@ mod tests {
         ));
         store.insert(Triple::new(shape, Term::iri(SH::NOT), inner));
 
-        let shapes = parse_shapes(&store).unwrap();
+        let shapes = parse_shapes(store.at(&LATEST)).unwrap();
         assert!(
             shapes[0]
                 .constraints()
@@ -1898,7 +1911,7 @@ mod tests {
         store.insert(Triple::new(l2.clone(), Term::iri(RDF::FIRST), s2));
         store.insert(Triple::new(l2, Term::iri(RDF::REST), nil));
 
-        let shapes = parse_shapes(&store).unwrap();
+        let shapes = parse_shapes(store.at(&LATEST)).unwrap();
         let c = shapes[0]
             .constraints()
             .iter()
@@ -1937,7 +1950,7 @@ mod tests {
         store.insert(Triple::new(l1.clone(), Term::iri(RDF::FIRST), s1));
         store.insert(Triple::new(l1, Term::iri(RDF::REST), nil));
 
-        let shapes = parse_shapes(&store).unwrap();
+        let shapes = parse_shapes(store.at(&LATEST)).unwrap();
         assert!(
             shapes[0]
                 .constraints()
@@ -1978,7 +1991,7 @@ mod tests {
             Term::literal("Custom violation"),
         ));
 
-        let shapes = parse_shapes(&store).unwrap();
+        let shapes = parse_shapes(store.at(&LATEST)).unwrap();
         let c = shapes[0]
             .constraints()
             .iter()
@@ -2009,7 +2022,7 @@ mod tests {
         store.insert(Triple::new(shape, Term::iri(SH::SPARQL), sparql_node));
         // Missing sh:select
 
-        let result = parse_shapes(&store);
+        let result = parse_shapes(store.at(&LATEST));
         assert!(result.is_err(), "sh:sparql without sh:select should error");
     }
 
@@ -2048,7 +2061,7 @@ mod tests {
             Term::iri("http://ex.org/max"),
         ));
 
-        let shapes = parse_shapes(&store).unwrap();
+        let shapes = parse_shapes(store.at(&LATEST)).unwrap();
         let cs = shapes[0].constraints();
         assert!(cs.iter().any(|c| matches!(c, Constraint::Equals(_))));
         assert!(cs.iter().any(|c| matches!(c, Constraint::Disjoint(_))));
@@ -2094,7 +2107,7 @@ mod tests {
             Term::typed_literal("99", "http://www.w3.org/2001/XMLSchema#integer"),
         ));
 
-        let shapes = parse_shapes(&store).unwrap();
+        let shapes = parse_shapes(store.at(&LATEST)).unwrap();
         let cs = shapes[0].constraints();
         assert!(cs.iter().any(|c| matches!(c, Constraint::MinExclusive(_))));
         assert!(cs.iter().any(|c| matches!(c, Constraint::MaxExclusive(_))));
@@ -2127,7 +2140,7 @@ mod tests {
             Term::typed_literal("50", "http://www.w3.org/2001/XMLSchema#integer"),
         ));
 
-        let shapes = parse_shapes(&store).unwrap();
+        let shapes = parse_shapes(store.at(&LATEST)).unwrap();
         let cs = shapes[0].constraints();
         assert!(cs.iter().any(|c| matches!(c, Constraint::MinLength(3))));
         assert!(cs.iter().any(|c| matches!(c, Constraint::MaxLength(50))));
@@ -2153,7 +2166,7 @@ mod tests {
             Term::literal("required"),
         ));
 
-        let shapes = parse_shapes(&store).unwrap();
+        let shapes = parse_shapes(store.at(&LATEST)).unwrap();
         assert!(
             shapes[0]
                 .constraints()
@@ -2185,7 +2198,7 @@ mod tests {
         ));
         store.insert(Triple::new(shape, Term::iri(SH::NODE), inner));
 
-        let shapes = parse_shapes(&store).unwrap();
+        let shapes = parse_shapes(store.at(&LATEST)).unwrap();
         assert!(
             shapes[0]
                 .constraints()
@@ -2219,7 +2232,7 @@ mod tests {
             Term::literal("The person's full name"),
         ));
 
-        let shapes = parse_shapes(&store).unwrap();
+        let shapes = parse_shapes(store.at(&LATEST)).unwrap();
         if let Shape::Property(ps) = &shapes[0] {
             assert_eq!(ps.name.as_deref(), Some("Full Name"));
             assert_eq!(ps.description.as_deref(), Some("The person's full name"));

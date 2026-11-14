@@ -38,6 +38,43 @@ pub fn open_existing_read_only(path: &Path) -> Result<GrafeoDB> {
         .with_context(|| format!("Failed to open database at {} to read it", path.display()))
 }
 
+/// How to install a CLI that reads what `message` (an error with its causes) says this build
+/// cannot (#763): the `cargo install` line with each feature the message names as one "a build
+/// with the `X` feature" can read with, in the order named, each once. The engine names only
+/// features this build lacks, and the CLI's features have the engine's names. `None` when it
+/// names none.
+#[must_use]
+pub fn install_hint(message: &str) -> Option<String> {
+    const BEFORE: &str = "build with the `";
+    const AFTER: &str = "` feature";
+    let mut missing: Vec<&str> = Vec::new();
+    let mut rest = message;
+    while let Some(at) = rest.find(BEFORE) {
+        rest = &rest[at + BEFORE.len()..];
+        let Some(end) = rest.find(AFTER) else {
+            break;
+        };
+        let name = &rest[..end];
+        if !name.is_empty() && !name.contains('`') && !missing.contains(&name) {
+            missing.push(name);
+        }
+        rest = &rest[end + AFTER.len()..];
+    }
+    if missing.is_empty() {
+        return None;
+    }
+    let names: Vec<String> = missing.iter().map(|name| format!("`{name}`")).collect();
+    let them = if missing.len() == 1 { "it" } else { "them" };
+    Some(format!(
+        "this grafeo CLI was built without {}; install one that has {them} with{}",
+        names.join(" and "),
+        format_args!(
+            "\n  cargo install grafeo-cli --features {}",
+            missing.join(",")
+        )
+    ))
+}
+
 /// `path` without trailing separators, or an error when nothing is there:
 /// `db/` names the database file `db` too, but no longer reaches it as a
 /// path once a 0.5.x directory became a file.
@@ -57,6 +94,50 @@ fn existing_path(path: &Path) -> Result<std::path::PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::open_existing;
+
+    /// A message that names no feature to build with gives no install line.
+    #[test]
+    fn no_install_hint_when_no_feature_is_named() {
+        for message in [
+            "Database not found: db",
+            "a build with the `` feature can read",
+            "a build with the `triple-store",
+        ] {
+            assert_eq!(super::install_hint(message), None, "{message}");
+        }
+    }
+
+    /// Every feature the refusal names is in the one install line, in the order named, each
+    /// once, whatever the features: a fourth kind of data needs no change here.
+    #[test]
+    fn the_install_hint_lists_every_named_feature_once() {
+        let refusal = [
+            "db holds RDF triples (sections RdfStore), data that only a build with the",
+            "`triple-store` feature can read; and vector indexes (on :Doc(e)), data that only a",
+            "build with the `vector-index` feature can read; and graph shapes, data that only a",
+            "build with the `some-new-feature` feature can read; and more RDF triples, data that",
+            "only a build with the `triple-store` feature can read: open it with a build that has",
+            "these features",
+        ]
+        .join(" ");
+        let hint = super::install_hint(&refusal).expect("the refusal names features");
+        assert!(
+            hint.ends_with(
+                "cargo install grafeo-cli --features triple-store,vector-index,some-new-feature"
+            ),
+            "{hint}"
+        );
+        assert!(
+            hint.starts_with(
+                "this grafeo CLI was built without `triple-store` and `vector-index` and \
+                 `some-new-feature`; install one that has them with"
+            ),
+            "{hint}"
+        );
+        let one = super::install_hint("only a build with the `text-index` feature can read")
+            .expect("one feature");
+        assert!(one.contains("install one that has it with"), "{one}");
+    }
 
     /// `db/` names the database file `db`: the CLI opens it, as a 0.5.x WAL
     /// directory named `db/` becomes the file `db` when 0.6 migrates it.

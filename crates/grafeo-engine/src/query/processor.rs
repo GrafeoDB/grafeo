@@ -316,9 +316,12 @@ impl QueryProcessor {
         language: QueryLanguage,
         params: Option<&QueryParams>,
     ) -> Result<QueryResult> {
-        // The old entry point (dead code D1, deleted in 0.6.3): its planners
-        // carry the detected default budget, and its materializing operators
-        // are built unbudgeted by design.
+        // The old entry point (dead code D1, deleted in 0.6.3) plans no
+        // statement of a session: its materializing operators are built
+        // unbudgeted, on purpose.
+        let _memory = grafeo_core::execution::enter_operator_memory(
+            grafeo_core::execution::StatementMemory::Unbudgeted,
+        );
         if language.is_lpg() {
             self.process_lpg(query, language, params)
         } else {
@@ -638,7 +641,13 @@ impl QueryProcessor {
         // 3a. EXPLAIN: return the plan tree without executing.
         // Includes physical operator names by planning with profiling to collect entries.
         if optimized_plan.explain {
-            let planner = RdfPlanner::new(Arc::clone(rdf_store));
+            // Planned, not run: the plan reads nothing.
+            let planner = RdfPlanner::new(
+                Arc::clone(rdf_store),
+                grafeo_core::graph::rdf::RdfView::latest(
+                    grafeo_core::graph::rdf::LatestUse::Statistics,
+                ),
+            );
             let (_, entries) = planner.plan_profiled(&optimized_plan)?;
             return physical_explain_result(&optimized_plan, entries);
         }
@@ -650,8 +659,16 @@ impl QueryProcessor {
         let query_values = language == QueryLanguage::GraphQLRdf;
         #[cfg(not(all(feature = "graphql", feature = "triple-store")))]
         let query_values = false;
+        // The processor's transaction manager keeps no epochs of the store
+        // (it may be a database's store): it reads the newest committed state.
         let run = |writer: Option<crate::transaction::RdfWriter>| -> Result<QueryResult> {
-            let planner = RdfPlanner::new(Arc::clone(rdf_store))
+            let view = match &writer {
+                Some(writer) => writer.view().clone(),
+                None => grafeo_core::graph::rdf::RdfView::latest(
+                    grafeo_core::graph::rdf::LatestUse::Test,
+                ),
+            };
+            let planner = RdfPlanner::new(Arc::clone(rdf_store), view)
                 .with_writer(writer)
                 .with_query_values(query_values);
 

@@ -43,6 +43,11 @@ struct State {
     subquery: Box<dyn Operator>,
     /// The subquery's rows, `None` until it runs (again after a reset).
     matches: Option<Matches>,
+    /// What it holds under the statement's memory, captured at construction
+    /// (see [`capture`](grafeo_core::execution::memory::capture)); it counts
+    /// nothing outside a budgeted statement. Past the query memory limit or
+    /// the memory limit it fails with `GRAFEO-S001`.
+    memory: grafeo_core::execution::OperatorMemory,
 }
 
 /// The subquery's rows on the shared variables: those with every variable
@@ -95,6 +100,7 @@ impl ExistsTest {
             state: parking_lot::Mutex::new(State {
                 subquery,
                 matches: None,
+                memory: grafeo_core::execution::memory::capture(),
             }),
         }
     }
@@ -105,6 +111,7 @@ impl ExistsTest {
         let state = self.state.get_mut();
         state.subquery.reset();
         state.matches = None;
+        state.memory.clear();
     }
 
     fn holds(
@@ -140,6 +147,23 @@ impl ExistsTest {
                         None => matches.partly_bound.push(values),
                     }
                 }
+                // The subquery's rows kept, against the statement's memory: a
+                // chunk at a time, a compare within the grant.
+                let width = self.subquery_columns.len();
+                state.memory.set(
+                    matches
+                        .bound
+                        .capacity()
+                        .saturating_mul(
+                            std::mem::size_of::<Vec<i64>>()
+                                + 1
+                                + width * std::mem::size_of::<i64>(),
+                        )
+                        .saturating_add(matches.partly_bound.capacity().saturating_mul(
+                            std::mem::size_of::<Vec<Option<i64>>>()
+                                + width * std::mem::size_of::<Option<i64>>(),
+                        )),
+                )?;
             }
             state.matches = Some(matches);
         }
@@ -163,6 +187,11 @@ pub(super) struct RowCheck {
     rows: FxHashMap<Vec<Option<i64>>, Vec<(usize, usize)>>,
     /// Whether a key of `rows` leaves a variable unbound, which a lookup would not find.
     partly_bound: bool,
+    /// What it holds under the statement's memory, captured at construction
+    /// (see [`capture`](grafeo_core::execution::memory::capture)); it counts
+    /// nothing outside a budgeted statement. Past the query memory limit or
+    /// the memory limit it fails with `GRAFEO-S001`.
+    memory: grafeo_core::execution::OperatorMemory,
 }
 
 impl RowCheck {
@@ -179,6 +208,7 @@ impl RowCheck {
             chunks: Vec::new(),
             rows: FxHashMap::default(),
             partly_bound: false,
+            memory: grafeo_core::execution::memory::capture(),
         }
     }
 
@@ -190,6 +220,7 @@ impl RowCheck {
         self.chunks.clear();
         self.rows.clear();
         self.partly_bound = false;
+        self.memory.clear();
     }
 
     fn run(&mut self) -> Result<(), OperatorError> {
@@ -205,6 +236,15 @@ impl RowCheck {
                 self.partly_bound |= key.iter().any(Option::is_none);
                 self.rows.entry(key).or_default().push((at, row));
             }
+            // The subquery's chunk and its rows by key, against the
+            // statement's memory: a chunk at a time, a compare within the
+            // grant.
+            self.memory.add_with(|| {
+                grafeo_core::execution::memory::chunk_bytes(&chunk)
+                    + chunk.row_count()
+                        * (std::mem::size_of::<(usize, usize)>()
+                            + self.keys.len() * std::mem::size_of::<Option<i64>>())
+            })?;
             self.chunks.push(chunk);
         }
         Ok(())

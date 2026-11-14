@@ -57,6 +57,13 @@ pub struct ApplyOperator {
     state: ApplyState,
     /// Output chunks built and not yet returned, in order.
     ready: VecDeque<DataChunk>,
+    /// What it holds under the statement's memory, captured at construction
+    /// (see [`capture`](crate::execution::memory::capture)); it counts nothing
+    /// outside a budgeted statement. What it buffers (the outer input read first, the joined rows of one outer row) cannot spill: past the query memory limit or
+    /// the memory limit it fails with `GRAFEO-S001`.
+    memory: crate::execution::memory::OperatorMemory,
+    /// What the outer input read first holds, counted in `memory`.
+    outer_bytes: usize,
 }
 
 /// What the Apply makes of an outer row, given the rows the inner plan
@@ -123,6 +130,8 @@ impl ApplyOperator {
             guard: None,
             outer_first: false,
             outer_chunks: None,
+            memory: crate::execution::memory::capture(),
+            outer_bytes: 0,
             state: ApplyState::Init,
             ready: VecDeque::new(),
         }
@@ -147,6 +156,8 @@ impl ApplyOperator {
             guard: None,
             outer_first: false,
             outer_chunks: None,
+            memory: crate::execution::memory::capture(),
+            outer_bytes: 0,
             state: ApplyState::Init,
             ready: VecDeque::new(),
         }
@@ -294,6 +305,13 @@ impl Operator for ApplyOperator {
             let mut chunks = VecDeque::new();
             while let Some(chunk) = self.outer.next()? {
                 crate::execution::deadline::check()?;
+                // The outer input read first, against the statement's memory.
+                if self.memory.counts() {
+                    self.outer_bytes = self
+                        .outer_bytes
+                        .saturating_add(crate::execution::memory::chunk_bytes(&chunk));
+                    self.memory.set(self.outer_bytes)?;
+                }
                 chunks.push_back(chunk);
             }
             self.outer_chunks = Some(chunks);
@@ -417,6 +435,17 @@ impl Operator for ApplyOperator {
                                             combined.extend(inner_values);
                                             output.push(combined);
                                         }
+                                        // One outer row's joined rows wait
+                                        // for its inner plan to end: against
+                                        // the statement's memory, an inner
+                                        // chunk at a time.
+                                        let width = outer_values.len() + inner_chunk.column_count();
+                                        self.memory.set(self.outer_bytes.saturating_add(
+                                            output.len().saturating_mul(
+                                                std::mem::size_of::<Vec<Value>>()
+                                                    + width * std::mem::size_of::<Value>(),
+                                            ),
+                                        ))?;
                                     }
 
                                     // OPTIONAL: emit outer row with NULLs when inner
@@ -474,6 +503,8 @@ impl Operator for ApplyOperator {
         self.outer_chunks = None;
         self.state = ApplyState::Init;
         self.ready.clear();
+        self.outer_bytes = 0;
+        self.memory.clear();
     }
 
     fn name(&self) -> &'static str {

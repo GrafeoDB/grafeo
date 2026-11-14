@@ -384,6 +384,40 @@ impl ValueVector {
         }
     }
 
+    /// Whether its entries can hold heap memory beyond their slots: a string
+    /// or generic vector. Flat vectors (booleans, integers, floats, node and
+    /// edge ids) hold none.
+    #[must_use]
+    #[inline]
+    pub fn holds_heap(&self) -> bool {
+        matches!(self.data, VectorData::String(_) | VectorData::Generic(_))
+    }
+
+    /// What its entries hold on the heap beyond their slots, about: string
+    /// lengths, [`Value::estimated_size_bytes`] for generic values. A flat
+    /// vector returns 0 without reading its entries. A string shared with the
+    /// store counts as if it were the vector's own.
+    #[must_use]
+    pub fn heap_bytes(&self) -> usize {
+        match &self.data {
+            VectorData::String(values) => values.iter().map(|value| value.len()).sum(),
+            VectorData::Generic(values) => values.iter().map(Value::estimated_size_bytes).sum(),
+            _ => 0,
+        }
+    }
+
+    /// What the entry at `index` holds on the heap beyond its slot (see
+    /// [`heap_bytes`](Self::heap_bytes)); 0 in a flat vector.
+    #[must_use]
+    #[inline]
+    pub fn heap_bytes_at(&self, index: usize) -> usize {
+        match &self.data {
+            VectorData::String(values) => values.get(index).map_or(0, |value| value.len()),
+            VectorData::Generic(values) => values.get(index).map_or(0, Value::estimated_size_bytes),
+            _ => 0,
+        }
+    }
+
     /// Alias for get_value.
     #[must_use]
     pub fn get(&self, index: usize) -> Option<Value> {

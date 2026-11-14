@@ -969,14 +969,23 @@ impl GrafeoDB {
         #[cfg(feature = "wal")]
         let wal_flusher: Option<grafeo_storage::wal::AdaptiveFlusher> = None;
 
-        // Create query cache with default capacity (1000 queries)
-        let query_cache = Arc::new(QueryCache::default());
+        // The plan cache, bounded by the setting under the memory budget.
+        let query_cache = Arc::new(QueryCache::with_limit(
+            config
+                .plan_cache_limit()
+                .bytes_under(buffer_manager.hard_limit()),
+        ));
 
         // After all snapshot/WAL recovery, the database continues at the
         // highest epoch the file, its WAL or any graph reached, collected at
         // the collect horizon; the history goes on from here: a read at a
         // time from now on finds its epoch.
         Self::continue_epochs(&store, &transaction_manager);
+        // The counts the planner reads, as the open found them, anchor the
+        // plans; a large move of one from now on moves the planning
+        // generation.
+        store.attach_planning_generation(Arc::clone(query_cache.planning_generation()));
+        store.anchor_plan_statistics();
 
         #[cfg(feature = "cdc")]
         let cdc_enabled_val = config.cdc_enabled();
@@ -1237,7 +1246,12 @@ impl GrafeoDB {
         #[cfg(feature = "cdc")]
         cdc_log.attach_memory(Arc::clone(&buffer_manager));
 
-        let query_cache = Arc::new(QueryCache::default());
+        // The plan cache, bounded by the setting under the memory budget.
+        let query_cache = Arc::new(QueryCache::with_limit(
+            config
+                .plan_cache_limit()
+                .bytes_under(buffer_manager.hard_limit()),
+        ));
 
         #[cfg(feature = "cdc")]
         let cdc_enabled_val = config.cdc_enabled();
@@ -1364,7 +1378,12 @@ impl GrafeoDB {
         #[cfg(feature = "cdc")]
         cdc_log.attach_memory(Arc::clone(&buffer_manager));
 
-        let query_cache = Arc::new(QueryCache::default());
+        // The plan cache, bounded by the setting under the memory budget.
+        let query_cache = Arc::new(QueryCache::with_limit(
+            config
+                .plan_cache_limit()
+                .bytes_under(buffer_manager.hard_limit()),
+        ));
 
         #[cfg(feature = "cdc")]
         let cdc_enabled_val = config.cdc_enabled();
@@ -2509,41 +2528,6 @@ impl GrafeoDB {
         &self.config
     }
 
-    /// Creates a per-query `OperatorMemoryContext` for one statement: the
-    /// buffer manager, the open's spill account when the open has a spill
-    /// path, and the query memory limit the statement's operators are bounded
-    /// by (patch 9, #751).
-    #[cfg(feature = "spill")]
-    pub(crate) fn operator_memory_context(
-        &self,
-    ) -> Option<grafeo_core::execution::OperatorMemoryContext> {
-        static NEXT_QUERY_DIR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let bm = &self.buffer_manager;
-        let query_limit = self
-            .config
-            .query_memory_limit()
-            .map_or_else(|| bm.budget(), |query| query.min(bm.budget()));
-        let spill_manager = bm.config().spill_path.as_ref().and_then(|spill_path| {
-            let query_id = NEXT_QUERY_DIR.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            let mut manager = grafeo_core::execution::SpillManager::new(
-                spill_path.join(format!("query_{query_id}")),
-            )
-            .ok()?
-            .with_owned_dir();
-            if let Some(account) = &self.spill_account {
-                manager = manager.with_account(std::sync::Arc::clone(account));
-            }
-            Some(std::sync::Arc::new(manager))
-        });
-        Some(
-            grafeo_core::execution::OperatorMemoryContext::new(
-                std::sync::Arc::clone(bm),
-                spill_manager,
-            )
-            .with_query_limit(query_limit),
-        )
-    }
-
     /// The deadline of a statement that starts now under the database's query timeout
     /// ([`Config::query_timeout`]), as a query reckons it; `None` without a timeout. A binding's
     /// algorithm call runs under it, so it stops as `execute` past its timeout does.
@@ -2893,13 +2877,22 @@ impl GrafeoDB {
         &self.query_cache
     }
 
+    /// Holds the plan cache's puts until the returned guard drops: a
+    /// statement that planned waits before it stores its plan (feature
+    /// `testing-plan-cache`, for tests of a change racing a statement's plan).
+    #[cfg(feature = "testing-plan-cache")]
+    #[must_use]
+    pub fn hold_plan_puts(&self) -> crate::query::cache::PlanPutHold {
+        self.query_cache.hold_puts()
+    }
+
     /// Clears all cached query plans.
     ///
     /// This is called automatically after DDL operations, but can also be
     /// invoked manually after external schema changes (e.g., WAL replay,
     /// import) or when you want to force re-optimization of all queries.
     pub fn clear_plan_cache(&self) {
-        self.query_cache.clear();
+        self.query_cache.advance();
     }
 
     // =========================================================================
@@ -3291,7 +3284,7 @@ impl GrafeoDB {
         // A graph, index, constraint or type changed: a cached plan may have
         // been optimized for what was there before (an index it now lacks or
         // could use), so every plan is made again.
-        self.query_cache.clear();
+        self.query_cache.advance();
         Ok(())
     }
 
@@ -5032,6 +5025,7 @@ mod tests {
         assert!(db.close().is_ok());
     }
 
+    #[cfg(feature = "gql")]
     #[test]
     fn test_with_store_external_backend() {
         use grafeo_core::graph::rowgroup::RowGroupStore;
@@ -5051,11 +5045,8 @@ mod tests {
         let session = db.session();
 
         // Session should see data from the external store via execute
-        #[cfg(feature = "gql")]
-        {
-            let result = session.execute("MATCH (p:Person) RETURN p.name").unwrap();
-            assert_eq!(result.rows.len(), 1);
-        }
+        let result = session.execute("MATCH (p:Person) RETURN p.name").unwrap();
+        assert_eq!(result.rows.len(), 1);
     }
 
     #[test]
@@ -5732,6 +5723,7 @@ mod tests {
     // session_read_only
     // =========================================================================
 
+    #[cfg(feature = "gql")]
     #[test]
     #[allow(deprecated)]
     fn test_session_read_only() {
@@ -5740,11 +5732,8 @@ mod tests {
 
         let session = db.session_read_only();
         // Read queries should work
-        #[cfg(feature = "gql")]
-        {
-            let result = session.execute("MATCH (n) RETURN count(n)").unwrap();
-            assert_eq!(result.rows.len(), 1);
-        }
+        let result = session.execute("MATCH (n) RETURN count(n)").unwrap();
+        assert_eq!(result.rows.len(), 1);
     }
 
     // =========================================================================

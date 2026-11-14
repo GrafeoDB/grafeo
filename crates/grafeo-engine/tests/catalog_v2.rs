@@ -289,8 +289,10 @@ fn the_schema_survives_a_reopen_after_a_checkpoint_in_small_chunks() {
 /// After a close, the catalog section of the file is version 2: its
 /// metadata chunk (the layout byte and the byte cap), then the framed
 /// records as pieces of stream 0 of graph 0, each piece but the last as long
-/// as the cap. The records come grouped by kind, in the order of their
-/// kinds, and every kind of this release is there.
+/// as the cap. The records come grouped by the kind of their key, in the
+/// order of those kinds (a standalone type a graph type lists, kind 12 or 13,
+/// has the key of kind 2 or 3 and comes among those), and every kind of this
+/// release is there.
 #[test]
 fn the_catalog_section_is_version_2_and_has_no_raw_chunk() {
     let dir = tempfile::tempdir().unwrap();
@@ -331,19 +333,23 @@ fn the_catalog_section_is_version_2_and_has_no_raw_chunk() {
             let mut kinds = Vec::new();
             let mut reader = ChunkStreamReader::new(source.as_ref(), 0, 0);
             read_catalog_records(&mut reader, &mut |record| {
-                kinds.push(record.kind());
+                kinds.push((record.key().kind(), record.kind()));
                 Ok(())
             })?;
             Ok(kinds)
         })
         .unwrap();
+    let key_kinds: Vec<u8> = kinds.iter().map(|(key, _)| *key).collect();
     assert!(
-        kinds.is_sorted(),
-        "the records come grouped by kind, in the order of their kinds: {kinds:?}"
+        key_kinds.is_sorted(),
+        "the records come grouped by the kind of their key, in the order of those kinds: \
+         {kinds:?}"
     );
-    let mut distinct = kinds.clone();
+    let mut distinct: Vec<u8> = kinds.iter().map(|(_, kind)| *kind).collect();
+    distinct.sort_unstable();
     distinct.dedup();
     // Kind 10, the stored configuration, which a database created as a
-    // file stores, and kind 11, the index of one label, which `CREATE INDEX` makes.
-    assert_eq!(distinct, (1..=11).collect::<Vec<u8>>(), "{kinds:?}");
+    // file stores; kind 11, the index of one label, which `CREATE INDEX` makes;
+    // kinds 12 and 13, `City` and `ROUTE`, standalone types `travel` lists.
+    assert_eq!(distinct, (1..=13).collect::<Vec<u8>>(), "{kinds:?}");
 }

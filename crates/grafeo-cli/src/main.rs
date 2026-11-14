@@ -487,7 +487,11 @@ fn main() {
             } else {
                 // The whole chain: the context says what failed, the causes
                 // after it why.
-                output::error(&format!("{e:#}"));
+                let message = format!("{e:#}");
+                output::error(&message);
+                if let Some(hint) = commands::install_hint(&message) {
+                    output::hint(&hint);
+                }
                 ExitCode::GeneralError
             }
         }

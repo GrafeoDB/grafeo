@@ -165,7 +165,7 @@ impl Database {
         let commits = self.transaction_manager.hold_commits().unwrap();
         let sources = self.sources();
         let epoch = sources.epoch(&commits);
-        for section in sources.sections_at(&commits, epoch) {
+        for section in sources.sections_at(&commits, epoch).unwrap() {
             image
                 .begin_section(section.section_type(), section.version())
                 .unwrap();

@@ -33,6 +33,11 @@ Add `--json` for machine-readable output. Exit code 1 when an error is found.
         no crossbeam, but through the crates allowed to depend on them (cargo tree)
     T11 per binding build (its default and each profile): no engine feature is compiled whose
         same-name feature of the binding is off (cargo tree)
+    T12 a binding's source gates code on capability features, never on a profile or group
+    T13 grafeo-c's header, its Go copy and the Go import list agree with grafeo-c's exports
+    T14 the CLI's default build compiles every engine feature the `grafeo` crate's default
+        build compiles, but those that change how a build runs (cargo tree), so the default
+        CLI opens every file the default library writes
     D1  an added #[allow(...)] states a reason = "..."
     D2  no em or en dashes in added Markdown lines or code comments
     D3  no added references to private planning notes; no internal phase wording in docs
@@ -229,6 +234,9 @@ HINTS = {
     "T13": "copy crates/bindings/c/grafeo.h to crates/bindings/go/grafeo.h; declare each "
     "export in the header; regenerate crates/bindings/go/grafeo_c.def and libgrafeo_c.dll.a "
     "from the built grafeo_c.dll (gendef, then dlltool)",
+    "T14": "add the feature to grafeo-cli's `default` list in crates/grafeo-cli/Cargo.toml "
+    "(release.yml builds the CLI binaries with the same features), or to CLI_EXEMPT when it "
+    "changes only how a build runs, never what a file holds or a query reads",
     "D1": 'add reason = "..." naming the bound or invariant that makes it safe',
     "D2": "em or en dash; rewrite with a comma, colon or parentheses",
     "D3": "public text must stand on its own; restate the content or link a public issue",
@@ -587,6 +595,48 @@ def profile_findings(tree, manifests: dict[str, str]) -> list[Finding]:
                     f"feature leaves off: enabled by {', '.join(engine[name])}",
                 )
             )
+    return findings
+
+
+# Engine features the CLI's default build may leave off although the `grafeo` crate's default
+# build compiles them: they change how a build runs or what it exports, never what a file holds
+# or what a query reads.
+CLI_EXEMPT = frozenset({"parallel", "arrow-export"})
+
+
+def cli_coverage_findings(tree) -> list[Finding]:
+    """T14: the CLI's default build compiles every engine feature the `grafeo` crate's default
+    build compiles, but those of CLI_EXEMPT, so the default CLI opens every file the default
+    library writes and runs what it runs (#763). `tree(package, features)` is the build's
+    `cargo tree` output, as for `profile_findings`; a build with no tree is a finding."""
+    compiled: dict[str, set[str]] = {}
+    findings: list[Finding] = []
+    for package in ("grafeo", "grafeo-cli"):
+        text = tree(package, None)
+        engine = compiled_features(text, package)[0] if text else {}
+        if not engine:
+            findings.append(
+                Finding(
+                    "T14",
+                    "Cargo.toml",
+                    None,
+                    f"the default build of {package} compiles no engine feature: the check "
+                    "reads nothing",
+                )
+            )
+        compiled[package] = set(engine)
+    if findings:
+        return findings
+    for name in sorted(compiled["grafeo"] - compiled["grafeo-cli"] - CLI_EXEMPT):
+        findings.append(
+            Finding(
+                "T14",
+                "crates/grafeo-cli/Cargo.toml",
+                None,
+                f"the CLI's default build leaves off the engine's {name}, which the grafeo "
+                "crate's default build compiles",
+            )
+        )
     return findings
 
 
@@ -1725,6 +1775,9 @@ def tree_findings(root: Path, metadata_arg: str | None) -> list[Finding]:
         findings += profile_findings(
             lambda package, features: cargo_tree_features(root, package, features),
             binding_manifests(root),
+        )
+        findings += cli_coverage_findings(
+            lambda package, features: cargo_tree_features(root, package, features)
         )
     return findings
 

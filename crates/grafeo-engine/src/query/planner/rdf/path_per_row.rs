@@ -21,6 +21,7 @@ use super::term_ids::QueryTermIds;
 #[derive(Clone)]
 pub(super) struct PathSource {
     pub(super) store: Arc<RdfStore>,
+    pub(super) view: grafeo_core::graph::rdf::RdfView,
     pub(super) budget: usize,
     pub(super) deadline: Option<Instant>,
     pub(super) overlay: Option<Arc<dyn RdfPathReadOverlay>>,
@@ -29,7 +30,7 @@ pub(super) struct PathSource {
 impl PathSource {
     /// The search `config` describes.
     pub(super) fn operator(&self, config: RdfPathConfig) -> RdfPathOperator {
-        RdfPathOperator::new(Arc::clone(&self.store), config)
+        RdfPathOperator::new(Arc::clone(&self.store), self.view.clone(), config)
             .with_memory_budget(self.budget)
             .with_deadline(self.deadline)
             .with_read_overlay(self.overlay.clone())

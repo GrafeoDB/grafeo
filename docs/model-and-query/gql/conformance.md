@@ -70,7 +70,7 @@ Per the standard, minimum conformance requires:
 | DROP EDGE TYPE | Supported | |
 | ALTER NODE/EDGE/GRAPH TYPE | Supported | ADD/DROP property, ADD/DROP type |
 | CREATE INDEX | Supported | Property, text, vector, B-tree |
-| CREATE CONSTRAINT | Supported | UNIQUE, NOT NULL, NODE KEY, EXISTS |
+| CREATE CONSTRAINT | Supported | Extension: ISO GQL has no constraint statements. UNIQUE, NOT NULL, NODE KEY, EXISTS (see [Constraints](schema.md#constraints)) |
 | CREATE PROCEDURE | Supported | Params, returns, GQL body |
 
 ### Session Management (Section 7)

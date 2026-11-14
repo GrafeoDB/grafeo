@@ -233,6 +233,9 @@ pub(crate) use rdf::RdfWriter;
 #[cfg(all(feature = "triple-store", feature = "cdc"))]
 pub(crate) use rdf::ntriples_terms;
 #[cfg(feature = "triple-store")]
-pub(crate) use rdf::refuse_graph_op_with_changes_in;
+pub(crate) use rdf::prune_rdf_overlay;
+#[cfg(feature = "triple-store")]
 #[cfg(any(rdf_language, all(test, feature = "triple-store")))]
 pub(crate) use rdf::update_privately;
+#[cfg(feature = "triple-store")]
+pub(crate) use rdf::writes_of_entry;

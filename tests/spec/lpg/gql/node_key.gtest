@@ -1,7 +1,9 @@
 # #743: a NODE KEY is the values of its properties taken together. No two nodes of the label hold the
 # same values, and every node of the label holds a value for each property: UNIQUE over the tuple plus
-# NOT NULL on each property, on insert, update and a label added. node_key_claims.rs also covers existing
-# data, transactions, the index it builds, a reopen and the comparison with UNIQUE and NOT NULL.
+# NOT NULL on each property, on insert, update and a label added, checked at each write (a swap in one
+# SET is refused), in each graph on its own, and refused with GRAFEO-V001. node_key_claims.rs also
+# covers existing data, transactions, the index it builds, the direct API, a reopen, a crash and replay,
+# and the comparison with UNIQUE and NOT NULL.
 
 meta:
   language: gql
@@ -111,3 +113,87 @@ tests:
       - "CREATE (:Person {first: 'Alix', last: 'Gus'})"
     expect:
       error: ""
+
+  - name: setting_a_key_property_to_null_is_refused
+    setup:
+      - "CREATE CONSTRAINT person_key FOR (p:Person) ON (p.first, p.last) NODE KEY"
+      - "INSERT (:Person {first: 'Alix', last: 'Gus'})"
+    query: "MATCH (p:Person) SET p.last = null"
+    expect:
+      error: "GRAFEO-V001"
+
+  - name: a_swap_in_one_set_is_refused_at_its_first_write
+    setup:
+      - "CREATE CONSTRAINT person_key FOR (p:Person) ON (p.first, p.last) NODE KEY"
+      - "INSERT (:Person {first: 'Alix', last: 'Gus', n: 1}), (:Person {first: 'Alix', last: 'Mia', n: 2})"
+    query: "MATCH (a:Person {n: 1}), (b:Person {n: 2}) SET a.last = 'Mia', b.last = 'Gus'"
+    expect:
+      error: "GRAFEO-V001"
+
+  - name: a_key_moves_through_a_free_value
+    setup:
+      - "CREATE CONSTRAINT person_key FOR (p:Person) ON (p.first, p.last) NODE KEY"
+      - "INSERT (:Person {first: 'Alix', last: 'Gus', n: 1}), (:Person {first: 'Alix', last: 'Mia', n: 2})"
+      - "MATCH (a:Person {n: 1}) SET a.last = 'Gus (moving)'"
+      - "MATCH (b:Person {n: 2}) SET b.last = 'Gus'"
+      - "MATCH (a:Person {n: 1}) SET a.last = 'Mia'"
+    query: "MATCH (p:Person) RETURN p.n AS n, p.last AS last ORDER BY n"
+    expect:
+      ordered: true
+      rows:
+        - [1, "Mia"]
+        - [2, "Gus"]
+
+  - name: a_key_taken_in_another_graph_is_free_here
+    setup:
+      - "CREATE CONSTRAINT person_key FOR (p:Person) ON (p.first, p.last) NODE KEY"
+      - "INSERT (:Person {first: 'Alix', last: 'Gus'})"
+      - "CREATE GRAPH branch"
+      - "USE GRAPH branch"
+      - "INSERT (:Person {first: 'Alix', last: 'Gus'})"
+    query: "MATCH (p:Person) RETURN count(p) AS c"
+    expect:
+      rows:
+        - [1]
+
+  - name: a_key_taken_in_this_graph_is_refused_here
+    setup:
+      - "CREATE CONSTRAINT person_key FOR (p:Person) ON (p.first, p.last) NODE KEY"
+      - "CREATE GRAPH branch"
+      - "USE GRAPH branch"
+      - "INSERT (:Person {first: 'Alix', last: 'Gus'})"
+    query: "INSERT (:Person {first: 'Alix', last: 'Gus'})"
+    expect:
+      error: "GRAFEO-V001"
+
+  - name: the_key_is_required_in_every_graph
+    setup:
+      - "CREATE CONSTRAINT person_key FOR (p:Person) ON (p.first, p.last) NODE KEY"
+      - "CREATE GRAPH branch"
+      - "USE GRAPH branch"
+    query: "INSERT (:Person {first: 'Mia'})"
+    expect:
+      error: "GRAFEO-V001"
+
+  - name: a_duplicate_is_a_schema_violation
+    setup:
+      - "CREATE CONSTRAINT person_key FOR (p:Person) ON (p.first, p.last) NODE KEY"
+      - "INSERT (:Person {first: 'Alix', last: 'Gus'})"
+    query: "INSERT (:Person {first: 'Alix', last: 'Gus'})"
+    expect:
+      error: "GRAFEO-V001"
+
+  - name: a_missing_key_property_is_a_schema_violation
+    setup:
+      - "CREATE CONSTRAINT person_key FOR (p:Person) ON (p.first, p.last) NODE KEY"
+    query: "INSERT (:Person {first: 'Mia'})"
+    expect:
+      error: "GRAFEO-V001"
+
+  - name: a_removed_key_property_is_a_schema_violation
+    setup:
+      - "CREATE CONSTRAINT person_key FOR (p:Person) ON (p.first, p.last) NODE KEY"
+      - "INSERT (:Person {first: 'Alix', last: 'Gus'})"
+    query: "MATCH (p:Person) REMOVE p.first"
+    expect:
+      error: "GRAFEO-V001"

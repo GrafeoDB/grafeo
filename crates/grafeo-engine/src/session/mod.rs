@@ -985,6 +985,125 @@ impl Session {
                 ),
             )));
         }
+        // A standalone type a graph type lists governs that graph type's graphs too (#764):
+        // the graph type would go on naming a type that no longer exists.
+        let standalone = if is_edge {
+            catalog
+                .get_edge_type_def(type_key)
+                .is_some_and(|def| def.standalone)
+        } else {
+            catalog
+                .get_node_type(type_key)
+                .is_some_and(|def| def.standalone)
+        };
+        if !standalone {
+            return Ok(());
+        }
+        let mut listing: Vec<String> = catalog
+            .all_graph_type_defs()
+            .into_iter()
+            .filter(|def| {
+                let listed = if is_edge {
+                    &def.allowed_edge_types
+                } else {
+                    &def.allowed_node_types
+                };
+                !crate::catalog::is_current_graph_type(&def.name)
+                    && listed.iter().any(|on| on == type_key)
+            })
+            .map(|def| def.name)
+            .collect();
+        listing.sort();
+        let Some(graph_type) = listing.first() else {
+            return Ok(());
+        };
+        let kind = if is_edge { "EDGE" } else { "NODE" };
+        let graph_type = crate::catalog::unqualified(graph_type);
+        Err(Error::from(QueryError::new(
+            QueryErrorKind::Semantic,
+            format!(
+                "graph type '{graph_type}' lists type '{name}': take it out first with ALTER \
+                 GRAPH TYPE {graph_type} DROP {kind} TYPE {name}"
+            ),
+        )))
+    }
+
+    /// Whether the node type (with `is_edge`, the edge type) stored as `type_key` stands on its
+    /// own (#764): made by `CREATE NODE TYPE` or `CREATE EDGE TYPE`, so it stays a rule by its
+    /// label when a graph type lists it. That is a type marked so, or one that no graph type
+    /// lists, which only those statements leave (Cypher's `__current__` lists rules by label).
+    /// `false` for a type that does not exist.
+    #[cfg(feature = "gql")]
+    fn stands_alone(&self, type_key: &str, is_edge: bool) -> bool {
+        let catalog = self.effective_catalog();
+        let Some(schema) = catalog.schema() else {
+            return false;
+        };
+        if is_edge {
+            catalog
+                .get_edge_type_def(type_key)
+                .is_some_and(|def| def.standalone || !schema.lists_edge_type(type_key))
+        } else {
+            catalog
+                .get_node_type(type_key)
+                .is_some_and(|def| def.standalone || !schema.lists_node_type(type_key))
+        }
+    }
+
+    /// Adds to `change` the mark of each of `nodes` and `edges`, the types a graph type is about
+    /// to list, that stands on its own unmarked (see [`stands_alone`](Self::stands_alone)) and
+    /// that `change` does not put already: marked, it keeps applying by its label (#764).
+    ///
+    /// # Errors
+    ///
+    /// An edge type whose record would not fit (see `edge_type_record`).
+    #[cfg(feature = "gql")]
+    fn mark_standalone_types(
+        &self,
+        nodes: &[String],
+        edges: &[String],
+        change: &mut crate::transaction::StandaloneChange,
+    ) -> Result<()> {
+        use crate::database::catalog_records::{edge_type_record, node_type_record};
+        use grafeo_common::change::StandaloneOp;
+        use grafeo_common::storage::catalog_record::CatalogRecord;
+
+        let puts = |change: &crate::transaction::StandaloneChange, is_edge: bool, name: &str| {
+            change.ops().any(|op| match op {
+                StandaloneOp::PutCatalog(CatalogRecord::NodeType(record)) => {
+                    !is_edge && record.name == name
+                }
+                StandaloneOp::PutCatalog(CatalogRecord::EdgeType(record)) => {
+                    is_edge && record.name == name
+                }
+                _ => false,
+            })
+        };
+        let catalog = self.effective_catalog();
+        for name in nodes {
+            if let Some(mut def) = catalog.get_node_type(name).filter(|def| !def.standalone)
+                && self.stands_alone(name, false)
+                && !puts(change, false, name)
+            {
+                def.standalone = true;
+                change.push(StandaloneOp::PutCatalog(CatalogRecord::NodeType(
+                    node_type_record(&def),
+                )));
+            }
+        }
+        for name in edges {
+            if let Some(mut def) = catalog
+                .get_edge_type_def(name)
+                .filter(|def| !def.standalone)
+                && self.stands_alone(name, true)
+                && !puts(change, true, name)
+            {
+                def.standalone = true;
+                change.push(StandaloneOp::PutCatalog(CatalogRecord::EdgeType(
+                    edge_type_record(&def)?,
+                )));
+            }
+        }
         Ok(())
     }
 
@@ -1780,8 +1899,8 @@ impl Session {
             &self.transaction_manager,
         )?;
         // As the database's: every cached plan is made again after a change
-        // of the catalog.
-        self.query_cache.clear();
+        // of the catalog, which committed here.
+        self.query_cache.advance();
         Ok(())
     }
 
@@ -1952,6 +2071,7 @@ impl Session {
                 },
                 parent_types: Vec::new(),
                 key_labels: Vec::new(),
+                standalone: false,
             };
             change.push(StandaloneOp::PutCatalog(CatalogRecord::NodeType(
                 node_type_record(&def),
@@ -1976,6 +2096,7 @@ impl Session {
                 source_node_types: vec![self.effective_type_key(&table.source_table)],
                 target_node_types: vec![self.effective_type_key(&table.target_table)],
                 key_labels: Vec::new(),
+                standalone: false,
             };
             change.push(StandaloneOp::PutCatalog(CatalogRecord::EdgeType(
                 edge_type_record(&def)?,
@@ -2205,9 +2326,9 @@ impl Session {
                 }
             }
         }
-        // Invalidate all cached query plans after any successful DDL change.
-        // DDL is rare, so clearing the entire cache is cheap and correct.
-        self.query_cache.clear();
+        // The cached plans are made again where the change commits: at once
+        // outside a transaction (`commit_standalone`), at the transaction's
+        // commit otherwise (`schema_committed`), never at a rollback.
         Ok(result)
     }
 
@@ -2238,7 +2359,7 @@ impl Session {
             .all_graph_type_defs()
             .iter()
             .any(|other| other.name != graph_type && other.allowed_node_types.contains(&def.name));
-        if (own && !listed_elsewhere)
+        if (own && !listed_elsewhere && !existing.standalone)
             || (declared_properties(&existing.properties) == declared_properties(&def.properties)
                 && same_names(&existing.parent_types, &def.parent_types)
                 && same_names(&existing.key_labels, &def.key_labels))
@@ -2254,10 +2375,11 @@ impl Session {
     /// [`declares_node_type`](Self::declares_node_type), a different declaration fails,
     /// and a replace may change a type only it lists (`own`).
     ///
-    /// A type with no endpoints on a side says nothing they could differ from, so a pattern
-    /// may add them, unless they would reach further than this graph type: another graph
-    /// type lists it, or `graph_type` is Cypher's `__current__`, whose types are rules by
-    /// label in every graph.
+    /// A pattern names a type that is not its own only as it is, endpoints included: a type
+    /// that stands on its own (#764, see [`stands_alone`](Self::stands_alone)), whose endpoints
+    /// reach every graph it governs, so a replace may not change it either; one another graph
+    /// type lists; or one of Cypher's `__current__`, whose types are rules by label in every
+    /// graph.
     ///
     /// # Errors
     ///
@@ -2285,28 +2407,17 @@ impl Session {
             .all_graph_type_defs()
             .iter()
             .any(|other| other.name != graph_type && other.allowed_edge_types.contains(&def.name));
-        if own && !listed_elsewhere {
+        if own && !listed_elsewhere && !existing.standalone {
             return Ok(Some(def));
         }
-        let same_sources = same_names(&existing.source_node_types, &def.source_node_types);
-        let same_targets = same_names(&existing.target_node_types, &def.target_node_types);
         if declared_properties(&existing.properties) != declared_properties(&def.properties)
             || !same_names(&existing.key_labels, &def.key_labels)
+            || !same_names(&existing.source_node_types, &def.source_node_types)
+            || !same_names(&existing.target_node_types, &def.target_node_types)
         {
             return Err(other_declaration("edge type", &def.name));
         }
-        if same_sources && same_targets {
-            return Ok(None);
-        }
-        let only_adds_endpoints = (same_sources || existing.source_node_types.is_empty())
-            && (same_targets || existing.target_node_types.is_empty());
-        if only_adds_endpoints
-            && !listed_elsewhere
-            && !crate::catalog::is_current_graph_type(graph_type)
-        {
-            return Ok(Some(def));
-        }
-        Err(other_declaration("edge type", &def.name))
+        Ok(None)
     }
 
     /// Adds the index a uniqueness rule's check reads to `change`, which adds the rule: on
@@ -2402,8 +2513,8 @@ impl Session {
     /// Adds the drop of each of `nodes` and `edges`, types the graph type `graph_type`
     /// stops listing, that no other graph type lists, to `change`: the types of a graph
     /// type go with it (ISO/IEC 39075 12.7 and 4.13.2.2), also one it named by reference.
-    /// Cypher's `__current__` keeps its types, which are rules by label. The names of the
-    /// types going.
+    /// Cypher's `__current__` keeps its types, which are rules by label, and every graph type
+    /// leaves a type that stands on its own (#764). The names of the types going.
     ///
     /// # Errors
     ///
@@ -2432,7 +2543,7 @@ impl Session {
         let short = |name: &str| crate::catalog::unqualified(name).to_string();
         let mut gone = Vec::new();
         for name in nodes {
-            if catalog.get_node_type(name).is_none()
+            if catalog.get_node_type(name).is_none_or(|def| def.standalone)
                 || others
                     .iter()
                     .any(|def| def.allowed_node_types.contains(name))
@@ -2456,7 +2567,9 @@ impl Session {
             gone.push(label);
         }
         for name in edges {
-            if catalog.get_edge_type_def(name).is_some()
+            if catalog
+                .get_edge_type_def(name)
+                .is_some_and(|def| !def.standalone)
                 && !others
                     .iter()
                     .any(|def| def.allowed_edge_types.contains(name))
@@ -2507,12 +2620,17 @@ impl Session {
         match cmd {
             SchemaStatement::CreateNodeType(stmt) => {
                 let effective_name = self.effective_type_key(&stmt.name);
+                // A replace keeps the mark of a standalone type a graph type lists (#764).
                 let def = NodeTypeDefinition {
                     name: effective_name.clone(),
                     properties: typed_properties(&stmt.properties)?,
                     constraints: Vec::new(),
                     parent_types: stmt.parent_types.clone(),
                     key_labels: Vec::new(),
+                    standalone: self
+                        .effective_catalog()
+                        .get_node_type(&effective_name)
+                        .is_some_and(|def| def.standalone),
                 };
                 if !stmt.or_replace
                     && self
@@ -2544,6 +2662,10 @@ impl Session {
                     source_node_types: stmt.source_node_types.clone(),
                     target_node_types: stmt.target_node_types.clone(),
                     key_labels: Vec::new(),
+                    standalone: self
+                        .effective_catalog()
+                        .get_edge_type_def(&effective_name)
+                        .is_some_and(|def| def.standalone),
                 };
                 if !stmt.or_replace
                     && self
@@ -3010,6 +3132,7 @@ impl Session {
                                     constraints: Vec::new(),
                                     parent_types: key_labels.clone(),
                                     key_labels: key_labels.clone(),
+                                    standalone: self.stands_alone(&inline_effective, false),
                                 };
                                 let own = replaced.as_ref().is_some_and(|old| {
                                     old.allowed_node_types.contains(&inline_effective)
@@ -3049,6 +3172,7 @@ impl Session {
                                     source_node_types,
                                     target_node_types,
                                     key_labels: key_labels.clone(),
+                                    standalone: self.stands_alone(&inline_effective, true),
                                 };
                                 let own = replaced.as_ref().is_some_and(|old| {
                                     old.allowed_edge_types.contains(&inline_effective)
@@ -3091,6 +3215,12 @@ impl Session {
                     )?,
                     None => Vec::new(),
                 };
+                // A standalone type it lists keeps applying by its label (#764).
+                self.mark_standalone_types(
+                    &def.allowed_node_types,
+                    &def.allowed_edge_types,
+                    change,
+                )?;
                 // The type it replaces is dropped first, which also drops
                 // the bindings a dropped graph left to its name.
                 if exists {
@@ -3347,6 +3477,18 @@ impl Session {
                         .filter(|name| !after.contains(name))
                         .collect()
                 };
+                let added = |before: &[String], after: &[String]| -> Vec<String> {
+                    after
+                        .iter()
+                        .filter(|name| !before.contains(name))
+                        .cloned()
+                        .collect()
+                };
+                self.mark_standalone_types(
+                    &added(&nodes_before, &def.allowed_node_types),
+                    &added(&edges_before, &def.allowed_edge_types),
+                    change,
+                )?;
                 let gone = self.drop_types_only_listed_by(
                     &effective_name,
                     &removed(nodes_before, &def.allowed_node_types),
@@ -4241,6 +4383,9 @@ impl Session {
         // with values takes its prepared plan, which keeps the parameters,
         // and fills a copy of it with this call's values (`fill_prepared`).
         let cache_key = self.plan_cache_key(query, QueryLanguage::Gql);
+        // Read before planning: a change of the schema meanwhile keeps the
+        // plan out of the cache.
+        let generation = self.plan_cache().generation();
         let cached = self.cached_plan(&cache_key, params);
         // The graph a `USE g` focuses the statement on, from here to its end.
         let mut _focus = None;
@@ -4253,12 +4398,16 @@ impl Session {
             // A statement with values that binds by value keeps its parsed
             // plan, which each call fills, binds and optimizes with its values
             // (`plan_with_values`).
-            let parsed = params.and_then(|_| self.plan_cache().get_parsed(&cache_key));
+            let parsed = params.and_then(|_| {
+                self.plan_cache()
+                    .get(&cache_key, crate::query::cache::Stage::Parsed)
+            });
             let bound_by_value = parsed.is_some();
             let mut logical_plan = match parsed {
                 Some(plan) => {
                     self.check_external_access(&plan)?;
-                    plan
+                    // Filled and bound per call: this run's copy.
+                    plan.plan().clone()
                 }
                 None => match gql::translate_full(query)? {
                     gql::GqlTranslationResult::SessionCommand(cmd) => {
@@ -4280,9 +4429,20 @@ impl Session {
             let params = params_to_fill(&mut logical_plan, params)?;
             if let Some(params) = params {
                 let active = self.active_store();
-                self.plan_with_values(&cache_key, logical_plan, params, &active, bound_by_value)?
-            } else if given && let Some(cached_plan) = self.plan_cache().get_optimized(&cache_key) {
-                cached_plan
+                self.plan_with_values(
+                    &cache_key,
+                    logical_plan,
+                    params,
+                    &active,
+                    bound_by_value,
+                    generation,
+                )?
+            } else if given
+                && let Some(cached_plan) = self
+                    .plan_cache()
+                    .get(&cache_key, crate::query::cache::Stage::Optimized)
+            {
+                prepared::RunPlan::Shared(cached_plan)
             } else {
                 // Semantic validation
                 let mut binder = Binder::new();
@@ -4294,10 +4454,13 @@ impl Session {
                     self.optimizer_for(&active, crate::query::processor::QueryLanguage::Gql);
                 let plan = optimizer.optimize(logical_plan)?;
 
-                // Cache the optimized plan for future use
-                self.plan_cache().put_optimized(cache_key, plan.clone());
-
-                plan
+                // Cached for future use, and run from the cache's copy.
+                prepared::RunPlan::Shared(self.plan_cache().put(
+                    cache_key,
+                    crate::query::cache::Stage::Optimized,
+                    plan,
+                    generation,
+                ))
             }
         };
 
@@ -4326,6 +4489,9 @@ impl Session {
             // there is no active transaction that may have prior uncommitted writes.
             let has_active_tx = self.current_transaction.lock().is_some();
             let read_only = !has_mutations && !has_active_tx;
+            // The statement's memory, which its operators capture while it
+            // is planned and converted.
+            let _memory = self.enter_statement_memory();
             let planner = self.create_planner_for_store_with_read_only(
                 Arc::clone(&active),
                 viewing_epoch,
@@ -4340,10 +4506,9 @@ impl Session {
             let (mut source, push_ops) = {
                 #[cfg(feature = "spill")]
                 {
-                    let memory_ctx = self.make_operator_memory_context();
                     grafeo_core::execution::pipeline_convert::convert_to_pipeline_with_memory(
                         physical_plan.into_operator(),
-                        memory_ctx,
+                        grafeo_core::execution::current_operator_memory(),
                     )
                 }
                 #[cfg(not(feature = "spill"))]
@@ -4507,8 +4672,14 @@ impl Session {
 
         // Cache + bind + optimize (same path as execute).
         let cache_key = self.plan_cache_key(query, QueryLanguage::Gql);
-        let optimized_plan = if let Some(cached) = self.plan_cache().get_optimized(&cache_key) {
-            cached
+        // Read before planning: a change of the schema meanwhile keeps the
+        // plan out of the cache.
+        let generation = self.plan_cache().generation();
+        let optimized_plan = if let Some(cached) = self
+            .plan_cache()
+            .get(&cache_key, crate::query::cache::Stage::Optimized)
+        {
+            prepared::RunPlan::Shared(cached)
         } else {
             // A stream takes no parameters: the plan's defaults fill what they
             // can and a parameter nobody supplied fails here, as `execute`
@@ -4521,8 +4692,12 @@ impl Session {
             let optimizer =
                 self.optimizer_for(&active, crate::query::processor::QueryLanguage::Gql);
             let plan = optimizer.optimize(logical_plan)?;
-            self.plan_cache().put_optimized(cache_key, plan.clone());
-            plan
+            prepared::RunPlan::Shared(self.plan_cache().put(
+                cache_key,
+                crate::query::cache::Stage::Optimized,
+                plan,
+                generation,
+            ))
         };
 
         if optimized_plan.explain || optimized_plan.profile {
@@ -4549,6 +4724,9 @@ impl Session {
             read => read,
         };
         let (viewing_epoch, transaction_id) = (view.epoch, view.transaction);
+        // The statement's memory, which its operators capture while it is
+        // planned and converted.
+        let _memory = self.enter_statement_memory();
         let planner = self
             .create_planner_for_store_with_read_only(
                 Arc::clone(&active),
@@ -4568,10 +4746,9 @@ impl Session {
         let (source, push_ops) = {
             #[cfg(feature = "spill")]
             {
-                let memory_ctx = self.make_operator_memory_context();
                 grafeo_core::execution::pipeline_convert::convert_to_pipeline_with_memory(
                     physical_plan.into_operator(),
-                    memory_ctx,
+                    grafeo_core::execution::current_operator_memory(),
                 )
             }
             #[cfg(not(feature = "spill"))]
@@ -4728,6 +4905,7 @@ impl Session {
         // A statement without parameters whose optimized plan is cached
         // skips the parse and translation (see execute_gql).
         let cache_key = self.plan_cache_key(query, QueryLanguage::Cypher);
+        let generation = self.plan_cache().generation();
         let cached = self.cached_plan(&cache_key, params);
         let optimized_plan = if let Some(plan) = cached {
             self.check_external_access(&plan)?;
@@ -4735,12 +4913,16 @@ impl Session {
         } else {
             // A statement that binds by value keeps its parsed plan (see
             // execute_gql).
-            let parsed = params.and_then(|_| self.plan_cache().get_parsed(&cache_key));
+            let parsed = params.and_then(|_| {
+                self.plan_cache()
+                    .get(&cache_key, crate::query::cache::Stage::Parsed)
+            });
             let bound_by_value = parsed.is_some();
             let mut logical_plan = match parsed {
                 Some(plan) => {
                     self.check_external_access(&plan)?;
-                    plan
+                    // Filled and bound per call: this run's copy.
+                    plan.plan().clone()
                 }
                 // Schema DDL and SHOW commands run before the normal query path.
                 None => match cypher::translate_full(query)? {
@@ -4772,10 +4954,15 @@ impl Session {
                         params,
                         &active,
                         bound_by_value,
+                        generation,
                     )?
                 }
-            } else if given && let Some(cached_plan) = self.plan_cache().get_optimized(&cache_key) {
-                cached_plan
+            } else if given
+                && let Some(cached_plan) = self
+                    .plan_cache()
+                    .get(&cache_key, crate::query::cache::Stage::Optimized)
+            {
+                prepared::RunPlan::Shared(cached_plan)
             } else {
                 // Semantic validation
                 let mut binder = Binder::new();
@@ -4787,10 +4974,13 @@ impl Session {
                     self.optimizer_for(&active, crate::query::processor::QueryLanguage::Cypher);
                 let plan = optimizer.optimize(logical_plan)?;
 
-                // Cache the optimized plan
-                self.plan_cache().put_optimized(cache_key, plan.clone());
-
-                plan
+                // Cached, and run from the cache's copy.
+                prepared::RunPlan::Shared(self.plan_cache().put(
+                    cache_key,
+                    crate::query::cache::Stage::Optimized,
+                    plan,
+                    generation,
+                ))
             }
         };
 
@@ -4818,6 +5008,9 @@ impl Session {
             let (viewing_epoch, transaction_id, _view_pin) = self.get_transaction_context()?;
 
             // Convert to physical plan with transaction context
+            // The statement's memory, which its operators capture while it
+            // is planned and converted.
+            let _memory = self.enter_statement_memory();
             let planner = self.create_planner_for_store(
                 Arc::clone(&active),
                 viewing_epoch,
@@ -4910,6 +5103,9 @@ impl Session {
             let (viewing_epoch, transaction_id, _view_pin) = self.get_transaction_context()?;
 
             // Convert to physical plan with transaction context
+            // The statement's memory, which its operators capture while it
+            // is planned and converted.
+            let _memory = self.enter_statement_memory();
             let planner = self.create_planner_for_store(
                 Arc::clone(&active),
                 viewing_epoch,
@@ -4990,6 +5186,9 @@ impl Session {
 
         let result = self.with_auto_commit(writes, || {
             let (viewing_epoch, transaction_id, _view_pin) = self.get_transaction_context()?;
+            // The statement's memory, which its operators capture while it
+            // is planned and converted.
+            let _memory = self.enter_statement_memory();
             let planner = self.create_planner_for_store(
                 Arc::clone(&active),
                 viewing_epoch,
@@ -5068,6 +5267,9 @@ impl Session {
 
         let result = self.with_auto_commit(writes, || {
             let (viewing_epoch, transaction_id, _view_pin) = self.get_transaction_context()?;
+            // The statement's memory, which its operators capture while it
+            // is planned and converted.
+            let _memory = self.enter_statement_memory();
             let planner = self.create_planner_for_store(
                 Arc::clone(&active),
                 viewing_epoch,
@@ -5145,6 +5347,9 @@ impl Session {
 
         let result = self.with_auto_commit(writes, || {
             let (viewing_epoch, transaction_id, _view_pin) = self.get_transaction_context()?;
+            // The statement's memory, which its operators capture while it
+            // is planned and converted.
+            let _memory = self.enter_statement_memory();
             let planner = self.create_planner_for_store(
                 Arc::clone(&active),
                 viewing_epoch,
@@ -5213,6 +5418,7 @@ impl Session {
         // skips the parse and translation (see execute_gql); DDL is never
         // cached.
         let cache_key = self.plan_cache_key(query, QueryLanguage::SqlPgq);
+        let generation = self.plan_cache().generation();
         let cached = self.cached_plan(&cache_key, params);
         let optimized_plan = if let Some(plan) = cached {
             self.check_external_access(&plan)?;
@@ -5220,12 +5426,16 @@ impl Session {
         } else {
             // A statement that binds by value keeps its parsed plan (see
             // execute_gql).
-            let parsed = params.and_then(|_| self.plan_cache().get_parsed(&cache_key));
+            let parsed = params.and_then(|_| {
+                self.plan_cache()
+                    .get(&cache_key, crate::query::cache::Stage::Parsed)
+            });
             let bound_by_value = parsed.is_some();
             let mut logical_plan = match parsed {
                 Some(plan) => {
                     self.check_external_access(&plan)?;
-                    plan
+                    // Filled and bound per call: this run's copy.
+                    plan.plan().clone()
                 }
                 None => {
                     // Parse and translate
@@ -5260,10 +5470,15 @@ impl Session {
                         params,
                         &active,
                         bound_by_value,
+                        generation,
                     )?
                 }
-            } else if given && let Some(cached_plan) = self.plan_cache().get_optimized(&cache_key) {
-                cached_plan
+            } else if given
+                && let Some(cached_plan) = self
+                    .plan_cache()
+                    .get(&cache_key, crate::query::cache::Stage::Optimized)
+            {
+                prepared::RunPlan::Shared(cached_plan)
             } else {
                 let mut binder = Binder::new();
                 let _binding_context = binder.bind(&logical_plan)?;
@@ -5271,8 +5486,12 @@ impl Session {
                 let optimizer =
                     self.optimizer_for(&active, crate::query::processor::QueryLanguage::SqlPgq);
                 let plan = optimizer.optimize(logical_plan)?;
-                self.plan_cache().put_optimized(cache_key, plan.clone());
-                plan
+                prepared::RunPlan::Shared(self.plan_cache().put(
+                    cache_key,
+                    crate::query::cache::Stage::Optimized,
+                    plan,
+                    generation,
+                ))
             }
         };
 
@@ -5294,6 +5513,9 @@ impl Session {
 
         let result = self.with_auto_commit(writes, || {
             let (viewing_epoch, transaction_id, _view_pin) = self.get_transaction_context()?;
+            // The statement's memory, which its operators capture while it
+            // is planned and converted.
+            let _memory = self.enter_statement_memory();
             let planner = self.create_planner_for_store(
                 Arc::clone(&active),
                 viewing_epoch,
@@ -5435,7 +5657,7 @@ impl Session {
     /// The plan cache is shared across all sessions on the same database,
     /// so clearing from one session affects all sessions.
     pub fn clear_plan_cache(&self) {
-        self.query_cache.clear();
+        self.query_cache.advance();
     }
 
     /// Begins a new transaction on this session.
@@ -5647,7 +5869,6 @@ impl Session {
                 matches!(
                     queued.op,
                     grafeo_common::change::StandaloneOp::DropGraph { .. }
-                        | grafeo_common::change::StandaloneOp::RdfGraph(_)
                 )
             })
             .then(|| self.transaction_manager.freeze_writes());
@@ -5727,11 +5948,17 @@ impl Session {
                 )));
             }
 
-            // Apply the RDF triples, in recorded order: the store holds only
-            // committed triples, so readers see them from now on.
+            // Apply the RDF triples and graph operations, in recorded order,
+            // in one apply that publishes what it changed at the commit epoch:
+            // the store holds only committed triples, readers that began after
+            // the commit see them from now on, and readers at an earlier
+            // snapshot read around them.
             #[cfg(feature = "triple-store")]
             if let Some(changes) = &changes
-                && let Err(error) = changes.apply_triples(&self.rdf_store)
+                && let Err(error) = changes.apply_rdf(
+                    &self.rdf_store,
+                    grafeo_core::graph::rdf::ApplyMode::Publish(commit_epoch),
+                )
             {
                 return Err(grafeo_common::utils::error::Error::Internal(format!(
                     "the commit of transaction {transaction_id:?} could not apply its RDF \
@@ -5776,6 +6003,8 @@ impl Session {
         self.schema_committed(&schema);
         published?;
         *self.last_commit_epoch.lock() = Some(commit_epoch);
+        #[cfg(feature = "triple-store")]
+        crate::transaction::prune_rdf_overlay(&self.rdf_store, &self.transaction_manager);
         let written = changes
             .as_ref()
             .map(|changes| changes.written_graphs())
@@ -6254,8 +6483,8 @@ impl Session {
 
     /// How the statement with the plan `root` writes (see [`PlanWrites`]):
     /// whether at all, as [`plan_writes`](Self::plan_writes) answers, and
-    /// whether in the graph it runs on.
-    #[cfg(query_language)]
+    /// whether in the graph it runs on. Only the LPG languages ask.
+    #[cfg(lpg_language)]
     fn plan_write_kinds(&self, root: &crate::query::plan::LogicalOperator) -> PlanWrites {
         if root.has_mutations() {
             return PlanWrites::from(true);
@@ -6662,14 +6891,23 @@ impl Session {
             .with_warnings(planner.warnings())
     }
 
+    /// Enters the memory of one statement on this thread, until the returned
+    /// scope drops: the operators built while it is planned and converted
+    /// capture it at construction.
+    #[cfg(any(lpg_language, rdf_language))]
+    pub(crate) fn enter_statement_memory(&self) -> grafeo_core::execution::MemoryScope {
+        grafeo_core::execution::enter_operator_memory(statement_memory(self))
+    }
+
     /// Creates a per-query `OperatorMemoryContext`: the buffer manager, the
     /// open's spill account when the open has a spill path (a per-query
     /// subdirectory), and the query memory limit the statement's operators
-    /// are bounded by (the configured one, never above the global limit).
+    /// are bounded by together (the configured one, never above the global
+    /// limit).
     ///
     /// Returns `None` only when the database has no buffer manager, in which
     /// case its operators run without a budget.
-    #[cfg(feature = "spill")]
+    #[cfg(all(feature = "spill", any(lpg_language, rdf_language)))]
     pub(crate) fn make_operator_memory_context(
         &self,
     ) -> Option<grafeo_core::execution::OperatorMemoryContext> {
@@ -6881,8 +7119,11 @@ impl Session {
         let mut planning = self.statement_planning(viewing_epoch, transaction_id, false, language);
         planning.session.plan_only = true;
         let planner = planning.planner(Arc::clone(active))?;
-        #[cfg(feature = "spill")]
-        let planner = planner.with_operator_memory(self.make_operator_memory_context());
+        // Planned to be dropped, never run (EXPLAIN): its operators hold
+        // nothing, so they take no grants.
+        let _memory = grafeo_core::execution::enter_operator_memory(
+            grafeo_core::execution::StatementMemory::Unbudgeted,
+        );
         drop(planner.plan(plan)?);
         Ok(())
     }
@@ -6923,6 +7164,9 @@ impl Session {
         let writes = self.plan_write_kinds(&plan.root);
         Some(self.with_auto_commit(writes, || {
             let (viewing_epoch, transaction_id, _view_pin) = self.get_transaction_context()?;
+            // The statement's memory, which its operators capture while it
+            // is planned and converted.
+            let _memory = self.enter_statement_memory();
             let planner = self.create_planner_for_store(
                 Arc::clone(active),
                 viewing_epoch,
@@ -6978,12 +7222,8 @@ impl Session {
         read_only: bool,
         language: grafeo_common::types::StatementLanguage,
     ) -> Result<crate::query::Planner> {
-        let planner = self
-            .statement_planning(viewing_epoch, transaction_id, read_only, language)
-            .planner(store)?;
-        #[cfg(feature = "spill")]
-        let planner = planner.with_operator_memory(self.make_operator_memory_context());
-        Ok(planner)
+        self.statement_planning(viewing_epoch, transaction_id, read_only, language)
+            .planner(store)
     }
 
     /// How the planner of the statement being run is built (see
@@ -7939,6 +8179,20 @@ impl Drop for Session {
     }
 }
 
+/// The memory of one statement of `session`: its cap and the buffer manager
+/// its operators take their grants from (see
+/// [`Session::make_operator_memory_context`]).
+#[cfg(all(feature = "spill", any(lpg_language, rdf_language)))]
+fn statement_memory(session: &Session) -> grafeo_core::execution::StatementMemory {
+    grafeo_core::execution::StatementMemory::of(session.make_operator_memory_context())
+}
+
+/// The memory of one statement: without spilling, operators take no grants.
+#[cfg(all(not(feature = "spill"), any(lpg_language, rdf_language)))]
+fn statement_memory(_session: &Session) -> grafeo_core::execution::StatementMemory {
+    grafeo_core::execution::StatementMemory::Unbudgeted
+}
+
 /// The parameter values to fill into `plan`: `None` for an empty map when the
 /// plan has no defaults either, after checking that the plan names no
 /// parameter (it fails like any missing value). A statement without
@@ -7968,6 +8222,7 @@ fn params_to_fill<'a>(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "gql")]
     use super::parse_default_literal;
     use crate::database::GrafeoDB;
     use grafeo_common::types::ReadView;
@@ -7978,6 +8233,7 @@ mod tests {
     // parse_default_literal
     // -----------------------------------------------------------------------
 
+    #[cfg(feature = "gql")]
     #[test]
     fn parse_default_literal_null() {
         assert_eq!(parse_default_literal("null"), Value::Null);
@@ -7985,6 +8241,7 @@ mod tests {
         assert_eq!(parse_default_literal("Null"), Value::Null);
     }
 
+    #[cfg(feature = "gql")]
     #[test]
     fn parse_default_literal_bool() {
         assert_eq!(parse_default_literal("true"), Value::Bool(true));
@@ -7993,6 +8250,7 @@ mod tests {
         assert_eq!(parse_default_literal("FALSE"), Value::Bool(false));
     }
 
+    #[cfg(feature = "gql")]
     #[test]
     fn parse_default_literal_string_single_quoted() {
         assert_eq!(
@@ -8001,6 +8259,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "gql")]
     #[test]
     fn parse_default_literal_string_double_quoted() {
         assert_eq!(
@@ -8009,6 +8268,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "gql")]
     #[test]
     fn parse_default_literal_integer() {
         assert_eq!(parse_default_literal("42"), Value::Int64(42));
@@ -8016,12 +8276,14 @@ mod tests {
         assert_eq!(parse_default_literal("0"), Value::Int64(0));
     }
 
+    #[cfg(feature = "gql")]
     #[test]
     fn parse_default_literal_float() {
         assert_eq!(parse_default_literal("9.81"), Value::Float64(9.81_f64));
         assert_eq!(parse_default_literal("-0.5"), Value::Float64(-0.5));
     }
 
+    #[cfg(feature = "gql")]
     #[test]
     fn parse_default_literal_fallback_string() {
         // Not a recognized literal, not quoted, not a number
@@ -9002,6 +9264,7 @@ mod tests {
         assert_eq!(db.node_count().unwrap(), 2);
     }
 
+    #[cfg(query_language)]
     #[test]
     fn test_query_timeout_config_propagates_to_session() {
         use crate::config::Config;
@@ -9015,6 +9278,7 @@ mod tests {
         assert!(session.query_deadline().is_some());
     }
 
+    #[cfg(query_language)]
     #[test]
     fn test_default_query_timeout_returns_deadline() {
         let db = GrafeoDB::new_in_memory();
@@ -9024,6 +9288,7 @@ mod tests {
         assert!(session.query_deadline().is_some());
     }
 
+    #[cfg(query_language)]
     #[test]
     fn test_no_query_timeout_returns_no_deadline() {
         use crate::config::Config;
@@ -9560,10 +9825,13 @@ mod tests {
             session
                 .execute("CREATE NODE TYPE City (name STRING)")
                 .unwrap();
+            // A pattern names a standalone edge type only as it is, endpoints included (#764).
             session
-                .execute("CREATE EDGE TYPE KNOWS (since INTEGER)")
+                .execute("CREATE EDGE TYPE KNOWS CONNECTING (Person) TO (Person) (since INTEGER)")
                 .unwrap();
-            session.execute("CREATE EDGE TYPE LIVES_IN").unwrap();
+            session
+                .execute("CREATE EDGE TYPE LIVES_IN CONNECTING (Person) TO (City)")
+                .unwrap();
 
             // Create graph type using pattern form
             session

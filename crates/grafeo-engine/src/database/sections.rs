@@ -105,8 +105,21 @@ impl CheckpointSources {
     /// `row_group_sections::load_row_group_sections`).
     ///
     /// `epoch` is the capture's, from [`epoch`](Self::epoch) under the same
-    /// hold: one capture takes one epoch.
-    pub fn sections_at(&self, commits: &CommitsHeld<'_>, epoch: EpochId) -> Vec<Box<dyn Section>> {
+    /// hold: one capture takes one epoch. The RDF section reads the store at
+    /// that epoch's view, and the ring section writes the ring the store
+    /// holds now, the epoch's (a commit drops the ring, never changes one),
+    /// so both may be written once commits go on, while a read pinned at or
+    /// below the epoch keeps the view's overlay entries.
+    ///
+    /// # Errors
+    ///
+    /// When the RDF store has no view at `epoch` (pruned past it): under the
+    /// hold `epoch` is the published epoch, which no prune passes.
+    pub fn sections_at(
+        &self,
+        commits: &CommitsHeld<'_>,
+        epoch: EpochId,
+    ) -> grafeo_common::utils::error::Result<Vec<Box<dyn Section>>> {
         // The hold is what makes the sections consistent; nothing reads it.
         let _ = commits;
         let mut sections: Vec<Box<dyn Section>> = Vec::new();
@@ -126,17 +139,28 @@ impl CheckpointSources {
         sections.push(Box::new(section));
 
         #[cfg(feature = "triple-store")]
+        let view = self.rdf_store.view_at(epoch).map_err(|gone| {
+            grafeo_common::utils::error::Error::Internal(format!(
+                "a checkpoint at epoch {} has no RDF view: {gone}",
+                epoch.as_u64()
+            ))
+        })?;
+
+        #[cfg(feature = "triple-store")]
         if !self.rdf_store.is_empty() || self.rdf_store.graph_count() > 0 {
-            sections.push(Box::new(grafeo_core::graph::rdf::RdfStoreSection::new(
-                Arc::clone(&self.rdf_store),
-            )));
+            sections.push(Box::new(
+                grafeo_core::graph::rdf::RdfStoreSection::new(Arc::clone(&self.rdf_store))
+                    .at(view.clone()),
+            ));
         }
 
         #[cfg(feature = "ring-index")]
-        if self.rdf_store.ring().is_some() {
-            sections.push(Box::new(grafeo_core::index::ring::RdfRingSection::new(
-                Arc::clone(&self.rdf_store),
-            )));
+        if let Some(ring) = self.rdf_store.ring_latest() {
+            sections.push(Box::new(
+                grafeo_core::index::ring::RdfRingSection::new(Arc::clone(&self.rdf_store))
+                    .with_ring(ring)
+                    .at(view),
+            ));
         }
 
         // The history's time index, only while the database keeps history:
@@ -148,13 +172,19 @@ impl CheckpointSources {
             )));
         }
 
-        sections
+        Ok(sections)
     }
 
-    /// The sections at the capture's epoch, for tests.
-    #[cfg(test)]
+    /// The sections at the capture's epoch, for the tests below, which need these features.
+    #[cfg(all(
+        test,
+        feature = "gql",
+        feature = "vector-index",
+        feature = "text-index"
+    ))]
     pub fn sections(&self, commits: &CommitsHeld<'_>) -> Vec<Box<dyn Section>> {
         self.sections_at(commits, self.epoch(commits))
+            .expect("the published epoch has an RDF view")
     }
 
     /// Takes what a checkpoint writes, while the caller holds commits off
@@ -229,15 +259,21 @@ impl CheckpointSources {
         } else {
             CheckpointSnapshot::take(&self.store, epoch, history_from)
         });
-        for section in self.sections_at(commits, epoch) {
-            if section.section_type() == SectionType::LpgStore {
-                after.push(Box::new(RowGroupStoreSection::from_snapshot(
-                    Arc::clone(&self.store),
-                    Arc::clone(&lpg),
-                )));
-                continue;
+        for section in self.sections_at(commits, epoch)? {
+            match section.section_type() {
+                SectionType::LpgStore => {
+                    after.push(Box::new(RowGroupStoreSection::from_snapshot(
+                        Arc::clone(&self.store),
+                        Arc::clone(&lpg),
+                    )));
+                }
+                // Read at the epoch's view (the ring taken now), so written
+                // once commits go on, under the read pinned above.
+                SectionType::RdfStore | SectionType::RdfRing => {
+                    after.push(Box::new(ReuseIdentical(section)));
+                }
+                _ => held.push(Box::new(ReuseIdentical(section))),
             }
-            held.push(Box::new(ReuseIdentical(section)));
         }
         let held_count = held.len();
         held.extend(after);
@@ -996,7 +1032,7 @@ mod tests {
             )
             .unwrap();
             #[cfg(feature = "ring-index")]
-            db.rdf_store().rebuild_ring();
+            db.rdf_store.rebuild_ring();
         }
         db.execute("INSERT (:Doc {emb: vector([3.0, 19.0]), body: 'Prague'})")
             .unwrap();
@@ -1070,7 +1106,7 @@ mod tests {
              <http://example.org/lives_in> <http://example.org/berlin> }",
         )
         .unwrap();
-        db.rdf_store().rebuild_ring();
+        db.rdf_store.rebuild_ring();
         let image = image_of(&db);
         assert!(
             image.section_types().contains(&SectionType::RdfRing),
@@ -1088,7 +1124,7 @@ mod tests {
         .unwrap();
         assert_eq!(rdf_store.len(), 2, "the triples are loaded");
         assert_eq!(
-            rdf_store.ring().map(|ring| ring.len()),
+            rdf_store.ring_latest().map(|ring| ring.len()),
             Some(2),
             "the ring is loaded from its section"
         );
@@ -1104,7 +1140,7 @@ mod tests {
              <http://example.org/lives_in> <http://example.org/berlin> }",
         )
         .unwrap();
-        db.rdf_store().rebuild_ring();
+        db.rdf_store.rebuild_ring();
         db
     }
 
@@ -1178,7 +1214,7 @@ mod tests {
         .expect("the load succeeds");
         assert_eq!(rdf_store.len(), 2, "the triples are loaded");
         let ring = rdf_store
-            .ring()
+            .ring_latest()
             .expect("the ring is built from the triples");
         assert_eq!(ring.len(), 2);
         let knows = TriplePattern {
@@ -1232,7 +1268,7 @@ mod tests {
         )
         .expect("the load succeeds");
         let ring = rdf_store
-            .ring()
+            .ring_latest()
             .expect("the ring is built from the triples");
         let lives_in = TriplePattern {
             subject: None,
@@ -1270,9 +1306,9 @@ mod tests {
                 Term::lang_literal("gezellig", "nl "),
             ),
         ] {
-            db.rdf_store().insert(triple);
+            db.rdf_store.insert(triple);
         }
-        db.rdf_store().rebuild_ring();
+        db.rdf_store.rebuild_ring();
         let image = image_of(&db);
 
         let rdf_store = Arc::new(RdfStore::new());
@@ -1284,8 +1320,10 @@ mod tests {
             &rdf_store,
         )
         .expect("the load succeeds");
-        let ring = rdf_store.ring().expect("a ring");
-        let loaded = rdf_store.triples();
+        let ring = rdf_store.ring_latest().expect("a ring");
+        let loaded = rdf_store.triples(&grafeo_core::graph::rdf::RdfView::latest(
+            grafeo_core::graph::rdf::LatestUse::Test,
+        ));
         assert_eq!(ring.len(), loaded.len(), "one ring entry per loaded triple");
         for triple in &loaded {
             let pattern = TriplePattern {
@@ -1374,7 +1412,7 @@ mod tests {
              <http://example.org/lives_in> <http://example.org/amsterdam> }",
         )
         .unwrap();
-        db.rdf_store().rebuild_ring();
+        db.rdf_store.rebuild_ring();
         db.close().unwrap();
         drop(db);
 
@@ -1434,10 +1472,10 @@ mod tests {
         drop(fm);
 
         let db = GrafeoDB::open(&path).expect("the open succeeds");
-        assert_eq!(db.rdf_store().len(), 2, "the triples are loaded");
+        assert_eq!(db.rdf_store.len(), 2, "the triples are loaded");
         let ring = db
-            .rdf_store()
-            .ring()
+            .rdf_store
+            .ring_latest()
             .expect("the ring is built from the triples");
         let lives_in = TriplePattern {
             subject: None,
@@ -1655,12 +1693,12 @@ mod tests {
              <http://example.org/prague> }",
         )
         .unwrap();
-        db.rdf_store().rebuild_ring();
+        db.rdf_store.rebuild_ring();
 
         let copy = db.to_memory().unwrap();
-        assert_eq!(copy.rdf_store().len(), 1);
+        assert_eq!(copy.rdf_store.len(), 1);
         assert_eq!(
-            copy.rdf_store().ring().map(|ring| ring.len()),
+            copy.rdf_store.ring_latest().map(|ring| ring.len()),
             Some(1),
             "the copy has the ring"
         );
@@ -1707,7 +1745,7 @@ mod tests {
         .expect("the load succeeds");
         assert_eq!(rdf_store.len(), 2, "the triples are loaded");
         let ring = rdf_store
-            .ring()
+            .ring_latest()
             .expect("the ring is built from the triples");
         assert_eq!(ring.len(), 2);
     }
@@ -1928,7 +1966,7 @@ mod tests {
             )
             .unwrap();
             #[cfg(feature = "ring-index")]
-            db.rdf_store().rebuild_ring();
+            db.rdf_store.rebuild_ring();
         }
         db
     }

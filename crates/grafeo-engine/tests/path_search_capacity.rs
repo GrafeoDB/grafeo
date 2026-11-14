@@ -18,7 +18,7 @@ use std::collections::BTreeSet;
 use std::time::Duration;
 
 use grafeo_common::types::{NodeId, Value};
-use grafeo_common::utils::error::{Error, Result};
+use grafeo_common::utils::error::{Error, LimitBound, LimitRefusal, Result};
 use grafeo_engine::database::QueryResult;
 use grafeo_engine::{Config, GrafeoDB};
 
@@ -118,11 +118,16 @@ fn run(db: &GrafeoDB, language: &str, query: &str) -> Result<QueryResult> {
     db.execute_language(query, language, None)
 }
 
-/// The path count a GRAFEO-Q006 budget error names: "would hold more than
-/// N paths".
+/// The path count a path search budget's refusal names: "would hold more
+/// than N paths". The refusal is `GRAFEO-S001` naming the budget (#492).
 fn paths_held(error: &Error) -> usize {
     let message = error.to_string();
-    assert!(message.contains("GRAFEO-Q006"), "{message}");
+    assert!(message.contains("GRAFEO-S001"), "{message}");
+    assert_eq!(
+        error.limit_refusal().map(LimitRefusal::bound),
+        Some(LimitBound::PathSearchBudget),
+        "{message}"
+    );
     let after = message
         .split("would hold more than ")
         .nth(1)

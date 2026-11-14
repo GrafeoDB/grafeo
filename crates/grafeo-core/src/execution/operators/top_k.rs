@@ -46,6 +46,11 @@ pub struct TopKOperator {
     /// [`TemporalComparison::normalize`]); `TypesApart` reads every value
     /// as itself.
     temporal: TemporalComparison,
+    /// What it holds under the statement's memory, captured at construction
+    /// (see [`capture`](crate::execution::memory::capture)); it counts nothing
+    /// outside a budgeted statement. Its heap of up to `limit` rows cannot spill: past the query memory limit or
+    /// the memory limit it fails with `GRAFEO-S001`.
+    memory: crate::execution::memory::OperatorMemory,
     #[cfg(test)]
     materialized_rows: std::sync::atomic::AtomicUsize,
 }
@@ -60,6 +65,17 @@ enum TopKState {
         position: usize,
     },
     Done,
+}
+
+/// What the values of a kept row hold on the heap, as
+/// [`HeapColumns::row_bytes`](crate::execution::memory::HeapColumns::row_bytes)
+/// counted them when the row came in.
+fn row_heap_bytes(values: &[Option<Value>]) -> usize {
+    values
+        .iter()
+        .flatten()
+        .map(Value::estimated_size_bytes)
+        .fold(0, usize::saturating_add)
 }
 
 struct HeapEntry {
@@ -128,6 +144,7 @@ impl TopKOperator {
                 next_insertion_id: 0,
             },
             temporal: TemporalComparison::TypesApart,
+            memory: crate::execution::memory::capture(),
             #[cfg(test)]
             materialized_rows: std::sync::atomic::AtomicUsize::new(0),
         }
@@ -173,10 +190,15 @@ impl Operator for TopKOperator {
                 unreachable!("matches! guard above")
             };
 
+            // What the kept rows' values hold on the heap (strings, lists).
+            let mut kept_heap: usize = 0;
             while let Some(chunk) = self.child.next()? {
                 crate::execution::deadline::check()?;
                 self.column_types.add(&chunk);
                 let width = self.column_types.types().len();
+                // The columns that hold heap memory, picked once per chunk.
+                let heap_columns =
+                    crate::execution::memory::HeapColumns::counted(&self.memory, &chunk, None);
 
                 for row_idx in chunk.selected_indices() {
                     let new_sort_values = extract_sort_values(
@@ -210,6 +232,9 @@ impl Operator for TopKOperator {
                         sort_keys: Arc::clone(&self.sort_keys),
                     };
                     next_insertion_id += 1;
+                    if !heap_columns.is_empty() {
+                        kept_heap = kept_heap.saturating_add(heap_columns.row_bytes(row_idx));
+                    }
                     if heap.len() < self.limit {
                         heap.push(entry);
                     } else {
@@ -217,9 +242,24 @@ impl Operator for TopKOperator {
                         // the heap's max in place. One sift-down vs push+pop's
                         // two reheapifies, significant for large N.
                         let mut top = heap.peek_mut().expect("heap.len() == limit > 0");
+                        if kept_heap > 0 {
+                            kept_heap = kept_heap.saturating_sub(row_heap_bytes(&top.row_values));
+                        }
                         *top = entry;
                     }
                 }
+                // The heap and what its rows' values hold, against the
+                // statement's memory: a chunk at a time, a compare within the
+                // grant (a literal LIMIT can be large).
+                self.memory.set(
+                    heap.capacity()
+                        .saturating_mul(
+                            std::mem::size_of::<HeapEntry>()
+                                + (width + self.sort_keys.len())
+                                    * std::mem::size_of::<Option<Value>>(),
+                        )
+                        .saturating_add(kept_heap),
+                )?;
             }
 
             let rows = heap.into_sorted_vec();
@@ -258,6 +298,7 @@ impl Operator for TopKOperator {
             heap: BinaryHeap::new(),
             next_insertion_id: 0,
         };
+        self.memory.clear();
         #[cfg(test)]
         self.materialized_rows
             .store(0, std::sync::atomic::Ordering::Relaxed);

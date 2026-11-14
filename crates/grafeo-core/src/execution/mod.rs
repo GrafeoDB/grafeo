@@ -47,11 +47,15 @@ pub use collector::{
     Collector, CollectorStats, CountCollector, LimitCollector, MaterializeCollector,
     PartitionCollector, StatsCollector,
 };
-pub use memory::{ExecutionMemoryContext, ExecutionMemoryContextBuilder};
 #[cfg(feature = "spill")]
 pub use memory::{
-    MemoryScope, OperatorMemoryContext, capture as capture_operator_memory,
-    current as current_operator_memory, enter as enter_operator_memory,
+    ConsumerRegistration, OperatorGrant, OperatorMemoryContext, QueryMemory,
+    current as current_operator_memory,
+};
+pub use memory::{ExecutionMemoryContext, ExecutionMemoryContextBuilder};
+pub use memory::{
+    MemoryScope, OperatorMemory, StatementMemory, enter as enter_operator_memory,
+    in_scope as in_operator_memory_scope, statement as current_statement_memory,
 };
 #[cfg(feature = "parallel")]
 pub use parallel::{

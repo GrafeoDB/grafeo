@@ -11,6 +11,7 @@
 //! this crate. A file that needs a process of its own, or a build with few features,
 //! is a `[[test]]` entry in `Cargo.toml` instead, with a comment saying why.
 
+mod operator_memory_parallel;
 mod rdf_insert_each;
 mod rdf_invalid_triples;
 mod rdf_parallel_load;

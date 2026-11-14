@@ -39,6 +39,7 @@ pub(super) fn apply_schema_record(catalog: &Catalog, record: &WalRecord) -> Resu
                 constraints: type_constraints(record, constraints)?,
                 parent_types: Vec::new(),
                 key_labels: Vec::new(),
+                standalone: false,
             };
             tolerate_repeat(record, catalog.register_node_type(def))
         }
@@ -55,6 +56,7 @@ pub(super) fn apply_schema_record(catalog: &Catalog, record: &WalRecord) -> Resu
                 source_node_types: Vec::new(),
                 target_node_types: Vec::new(),
                 key_labels: Vec::new(),
+                standalone: false,
             };
             tolerate_repeat(record, catalog.register_edge_type_def(def))
         }

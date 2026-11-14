@@ -44,6 +44,7 @@ mod physical {
     use super::super::{DEFAULT_PATH_SEARCH_BUDGET, Operator, OperatorError, OperatorResult};
     use super::{PathStep, RdfPathGraph};
     use crate::execution::{DataChunk, ValueVector};
+    use crate::graph::rdf::overlay::RdfView;
     use crate::graph::rdf::path_budget::{PathBudget, term_payload};
     use crate::graph::rdf::{RdfStore, Term, TriplePattern};
 
@@ -78,6 +79,10 @@ mod physical {
     pub trait RdfPathPendingGraph {
         /// The last write of a triple, if it has one in this graph.
         fn state(&self, triple: &crate::graph::rdf::Triple) -> Option<bool>;
+
+        /// Whether the transaction emptied, dropped or created the graph: its
+        /// committed triples are then not read, only its own writes.
+        fn hides_store(&self) -> bool;
 
         /// Visits matching pending insertions once, polling rejected entries.
         /// The callback only updates query-local state, never storage.
@@ -114,14 +119,21 @@ mod physical {
             ) -> Result<(), OperatorError>,
         ) -> Result<(), OperatorError>;
 
-        /// Visits names with pending insertions without allocating a list.
+        /// Visits the named graphs whose existence the transaction's own
+        /// writes decide, without allocating a list: each with whether it
+        /// exists for the transaction (created, emptied or inserted into) or
+        /// not (dropped).
         ///
         /// # Errors
         /// Returns a deadline or callback error.
         fn visit_graph_names(
             &self,
             control: &mut RdfPathReadControl<'_>,
-            visit: &mut dyn FnMut(&str, &mut RdfPathReadControl<'_>) -> Result<(), OperatorError>,
+            visit: &mut dyn FnMut(
+                &str,
+                bool,
+                &mut RdfPathReadControl<'_>,
+            ) -> Result<(), OperatorError>,
         ) -> Result<(), OperatorError>;
 
         /// The adapter's own allocation, excluding transaction-owned state.
@@ -165,6 +177,8 @@ mod physical {
     /// Only one origin's traversal is retained; endpoint pairs stream as chunks.
     pub struct RdfPathOperator {
         store: Arc<RdfStore>,
+        /// What the search reads: the reader's snapshot.
+        view: RdfView,
         config: RdfPathConfig,
         budget: usize,
         deadline: Option<Instant>,
@@ -174,11 +188,13 @@ mod physical {
     }
 
     impl RdfPathOperator {
-        /// Creates an operator. Charged traversal state is allocated on first next.
+        /// Creates an operator that reads `store` at `view`. Charged traversal
+        /// state is allocated on first next.
         #[must_use]
-        pub fn new(store: Arc<RdfStore>, config: RdfPathConfig) -> Self {
+        pub fn new(store: Arc<RdfStore>, view: RdfView, config: RdfPathConfig) -> Self {
             Self {
                 store,
+                view,
                 config,
                 budget: DEFAULT_PATH_SEARCH_BUDGET,
                 deadline: None,
@@ -188,10 +204,11 @@ mod physical {
             }
         }
 
-        /// Narrows the default path cap to the available query budget.
+        /// Sets the bytes the search may hold: `Config::path_search_budget`, which
+        /// already caps it (at the memory limit when one is set), so it is kept as given.
         #[must_use]
         pub fn with_memory_budget(mut self, budget: usize) -> Self {
-            self.budget = budget.min(DEFAULT_PATH_SEARCH_BUDGET);
+            self.budget = budget;
             self
         }
 
@@ -227,6 +244,7 @@ mod physical {
             if self.state.is_none() {
                 self.state = Some(State::new(
                     &self.store,
+                    &self.view,
                     &self.config,
                     self.budget,
                     self.deadline,
@@ -456,6 +474,8 @@ mod physical {
     struct GraphSource {
         name: Option<Term>,
         store: Option<Arc<RdfStore>>,
+        /// The view the store is read at.
+        view: RdfView,
     }
 
     impl GraphSource {
@@ -472,9 +492,13 @@ mod physical {
         ) -> Result<(), OperatorError> {
             let Some(overlay) = overlay else {
                 return match &self.store {
-                    Some(store) => {
-                        store.visit_matches_with_pending(pattern, transaction_id, budget, visit)
-                    }
+                    Some(store) => store.visit_matches_with_pending(
+                        &self.view,
+                        pattern,
+                        transaction_id,
+                        budget,
+                        visit,
+                    ),
                     None => Ok(()),
                 };
             };
@@ -488,15 +512,22 @@ mod physical {
                 pending.visit_present(pattern, control, &mut |triple, control| {
                     visit(triple, control.budget)
                 })?;
-                if let Some(store) = &self.store {
-                    store.visit_path_base(pattern, control.budget, &mut |triple, budget| {
-                        // A pending insertion was emitted above; a pending
-                        // deletion suppresses the committed triple entirely.
-                        if pending.state(triple).is_none() {
-                            visit(triple, budget)?;
-                        }
-                        Ok(())
-                    })?;
+                if let Some(store) = &self.store
+                    && !pending.hides_store()
+                {
+                    store.visit_path_base(
+                        &self.view,
+                        pattern,
+                        control.budget,
+                        &mut |triple, budget| {
+                            // A pending insertion was emitted above; a pending
+                            // deletion suppresses the committed triple entirely.
+                            if pending.state(triple).is_none() {
+                                visit(triple, budget)?;
+                            }
+                            Ok(())
+                        },
+                    )?;
                 }
                 Ok(())
             })
@@ -512,6 +543,7 @@ mod physical {
         sources: &mut Vec<GraphSource>,
         name: Option<&str>,
         store: Option<&Arc<RdfStore>>,
+        view: &RdfView,
         budget: &mut PathBudget,
     ) -> Result<(), OperatorError> {
         for source in sources.iter_mut() {
@@ -536,6 +568,7 @@ mod physical {
         sources.push(GraphSource {
             name: name.map(Term::iri),
             store: store.cloned(),
+            view: view.clone(),
         });
         Ok(())
     }
@@ -544,6 +577,7 @@ mod physical {
         contexts: &mut Vec<GraphContext>,
         name: &str,
         store: Option<&Arc<RdfStore>>,
+        view: &RdfView,
         budget: &mut PathBudget,
     ) -> Result<(), OperatorError> {
         for context in contexts.iter_mut() {
@@ -554,11 +588,11 @@ mod physical {
                 .and_then(Term::as_iri)
                 .is_some_and(|iri| iri.as_str() == name)
             {
-                return add_source(&mut context.sources, Some(name), store, budget);
+                return add_source(&mut context.sources, Some(name), store, view, budget);
             }
         }
         let mut sources = Vec::new();
-        add_source(&mut sources, Some(name), store, budget)?;
+        add_source(&mut sources, Some(name), store, view, budget)?;
         budget.reserve_vec(contexts, 1)?;
         budget.charge(name.len().saturating_add(2 * size_of::<usize>()))?;
         contexts.push(GraphContext {
@@ -566,6 +600,32 @@ mod physical {
             sources,
         });
         Ok(())
+    }
+
+    /// Takes the named graph `name`, which the transaction dropped, out of
+    /// `contexts`: out of the union of a `FROM`, and as a context of its own
+    /// unless the dataset lists it, where it stays as an empty graph.
+    fn drop_graph(contexts: &mut Vec<GraphContext>, graph: &RdfPathGraph, name: &str) {
+        let named = |term: &Option<Term>| {
+            term.as_ref()
+                .and_then(Term::as_iri)
+                .is_some_and(|iri| iri.as_str() == name)
+        };
+        let listed = matches!(graph, RdfPathGraph::NamedGraphs(Some(listed))
+            if listed.iter().any(|listed| listed == name));
+        if let RdfPathGraph::Union(_) = graph {
+            for context in contexts.iter_mut() {
+                context.sources.retain(|source| !named(&source.name));
+            }
+        } else if listed {
+            for context in contexts.iter_mut().filter(|context| named(&context.name)) {
+                for source in &mut context.sources {
+                    source.store = None;
+                }
+            }
+        } else {
+            contexts.retain(|context| !named(&context.name));
+        }
     }
 
     fn selects_name(
@@ -584,6 +644,7 @@ mod physical {
 
     fn graph_contexts(
         store: &Arc<RdfStore>,
+        view: &RdfView,
         config: &RdfPathConfig,
         overlay: Option<&dyn RdfPathReadOverlay>,
         budget: &mut PathBudget,
@@ -593,11 +654,16 @@ mod physical {
             RdfPathGraph::Default | RdfPathGraph::Union(_) => {
                 let mut sources = Vec::new();
                 if let RdfPathGraph::Union(names) = &config.graph {
-                    store.visit_path_graphs(Some(names), budget, &mut |name, graph, budget| {
-                        add_source(&mut sources, Some(name), Some(graph), budget)
-                    })?;
+                    store.visit_path_graphs(
+                        view,
+                        Some(names),
+                        budget,
+                        &mut |name, graph, budget| {
+                            add_source(&mut sources, Some(name), Some(graph), view, budget)
+                        },
+                    )?;
                 } else {
-                    add_source(&mut sources, None, Some(store), budget)?;
+                    add_source(&mut sources, None, Some(store), view, budget)?;
                 }
                 budget.reserve_vec(&mut contexts, 1)?;
                 contexts.push(GraphContext {
@@ -611,14 +677,14 @@ mod physical {
                     RdfPathGraph::NamedGraphs(names) => names.as_deref(),
                     _ => unreachable!(),
                 };
-                store.visit_path_graphs(names, budget, &mut |name, graph, budget| {
-                    add_named_context(&mut contexts, name, Some(graph), budget)
+                store.visit_path_graphs(view, names, budget, &mut |name, graph, budget| {
+                    add_named_context(&mut contexts, name, Some(graph), view, budget)
                 })?;
                 // A listed IRI is in the dataset whether or not a graph holds it (SPARQL 1.1 sec
                 // 13.2): an empty graph, where a constant end still has its zero-length solution.
                 if let RdfPathGraph::NamedGraphs(Some(listed)) = &config.graph {
                     for name in listed {
-                        add_named_context(&mut contexts, name, None, budget)?;
+                        add_named_context(&mut contexts, name, None, view, budget)?;
                     }
                 }
             }
@@ -629,18 +695,22 @@ mod physical {
             && !matches!(config.graph, RdfPathGraph::Default)
         {
             let mut control = RdfPathReadControl { budget };
-            overlay.visit_graph_names(&mut control, &mut |name, control| {
+            overlay.visit_graph_names(&mut control, &mut |name, exists, control| {
                 let budget = &mut *control.budget;
+                if !exists {
+                    drop_graph(&mut contexts, &config.graph, name);
+                    return Ok(());
+                }
                 match &config.graph {
                     RdfPathGraph::Default => {}
                     RdfPathGraph::Union(names) => {
                         if selects_name(names, name, budget)? {
-                            add_source(&mut contexts[0].sources, Some(name), None, budget)?;
+                            add_source(&mut contexts[0].sources, Some(name), None, view, budget)?;
                         }
                     }
                     RdfPathGraph::Named(selected) => {
                         if selected == name {
-                            add_named_context(&mut contexts, name, None, budget)?;
+                            add_named_context(&mut contexts, name, None, view, budget)?;
                         }
                     }
                     RdfPathGraph::NamedGraphs(names) => {
@@ -648,7 +718,7 @@ mod physical {
                             Some(names) => selects_name(names, name, budget)?,
                             None => true,
                         } {
-                            add_named_context(&mut contexts, name, None, budget)?;
+                            add_named_context(&mut contexts, name, None, view, budget)?;
                         }
                     }
                 }
@@ -756,6 +826,7 @@ mod physical {
     impl State {
         fn new(
             store: &Arc<RdfStore>,
+            view: &RdfView,
             config: &RdfPathConfig,
             limit: usize,
             deadline: Option<Instant>,
@@ -787,7 +858,8 @@ mod physical {
             }
             let reverse = config.subject.is_none() && config.object.is_some();
             let nfa = Nfa::compile(&config.path, reverse, config.repeats, &mut budget)?;
-            let contexts = graph_contexts(store, config, read_overlay.as_deref(), &mut budget)?;
+            let contexts =
+                graph_contexts(store, view, config, read_overlay.as_deref(), &mut budget)?;
             Ok(Self {
                 budget,
                 nfa,
@@ -1169,6 +1241,7 @@ mod physical {
     #[cfg(test)]
     mod tests {
         use super::*;
+        use crate::graph::rdf::overlay::LatestUse;
         use crate::graph::rdf::{Term, Triple};
         use std::sync::Arc;
 
@@ -1199,7 +1272,8 @@ mod physical {
 
         #[test]
         fn reset_releases_search_and_replays_all_endpoints() {
-            let mut path = RdfPathOperator::new(chain(), config());
+            let mut path =
+                RdfPathOperator::new(chain(), RdfView::latest(LatestUse::Test), config());
             assert_eq!(path.next().unwrap().unwrap().len(), 1);
             assert!(path.state.is_some());
             path.reset();
@@ -1216,11 +1290,11 @@ mod physical {
         fn memory_error_releases_state_without_returning_a_partial_chunk() {
             let mut cfg = config();
             cfg.chunk_capacity = 16;
-            let mut path = RdfPathOperator::new(chain(), cfg).with_memory_budget(1);
-            assert!(matches!(
-                path.next(),
-                Err(super::OperatorError::LimitExceeded(_))
-            ));
+            let mut path = RdfPathOperator::new(chain(), RdfView::latest(LatestUse::Test), cfg)
+                .with_memory_budget(1);
+            assert!(path.next().is_err_and(|error| {
+                crate::execution::operators::path_budget_message(&error).is_some()
+            }));
             assert!(path.state.is_none());
             assert!(path.next().unwrap().is_none());
         }
@@ -1240,10 +1314,19 @@ mod physical {
             cfg.min_hops = true;
             cfg.object_var = None;
             cfg.chunk_capacity = 2_048;
-            let mut path = RdfPathOperator::new(Arc::clone(&store), cfg);
+            let mut path =
+                RdfPathOperator::new(Arc::clone(&store), RdfView::latest(LatestUse::Test), cfg);
             let idle_references = Arc::strong_count(&store);
             path.state = Some(
-                State::new(&path.store, &path.config, path.budget, path.deadline, None).unwrap(),
+                State::new(
+                    &path.store,
+                    &path.view,
+                    &path.config,
+                    path.budget,
+                    path.deadline,
+                    None,
+                )
+                .unwrap(),
             );
             let state = path.state.as_mut().unwrap();
             let (_, object, _) = state.next_row(&path.config).unwrap().unwrap();
@@ -1291,10 +1374,19 @@ mod physical {
             cfg.object_var = None;
             cfg.chunk_capacity = 16;
             let cap = 8 * 1024;
-            let mut path = RdfPathOperator::new(Arc::clone(&store), cfg).with_memory_budget(cap);
+            let mut path =
+                RdfPathOperator::new(Arc::clone(&store), RdfView::latest(LatestUse::Test), cfg)
+                    .with_memory_budget(cap);
             let idle_references = Arc::strong_count(&store);
-            let mut state =
-                State::new(&path.store, &path.config, path.budget, path.deadline, None).unwrap();
+            let mut state = State::new(
+                &path.store,
+                &path.view,
+                &path.config,
+                path.budget,
+                path.deadline,
+                None,
+            )
+            .unwrap();
             state.prepare_origins(&path.config).unwrap();
             state.search = Some(
                 Search::new(
@@ -1315,7 +1407,9 @@ mod physical {
             assert!(initialized_bytes > 0);
             assert!(initialized_bytes <= cap);
             path.state = Some(state);
-            assert!(matches!(path.next(), Err(OperatorError::LimitExceeded(_))));
+            assert!(path.next().is_err_and(|error| {
+                crate::execution::operators::path_budget_message(&error).is_some()
+            }));
             assert!(path.state.is_none());
             assert_eq!(Arc::strong_count(&store), idle_references);
             assert!(path.next().unwrap().is_none());
@@ -1330,13 +1424,26 @@ mod physical {
             assert_eq!(Arc::strong_count(&store), idle_references);
         }
 
+        /// The budget an RDF property path is given is the one it keeps, above
+        /// the 256 MiB default too: `Config::path_search_budget` caps it, not
+        /// the operator (#492).
+        #[test]
+        fn the_memory_budget_is_kept_as_given() {
+            for budget in [8 << 20, DEFAULT_PATH_SEARCH_BUDGET, 512 << 20, 2 << 30] {
+                let path =
+                    RdfPathOperator::new(chain(), RdfView::latest(LatestUse::Test), config())
+                        .with_memory_budget(budget);
+                assert_eq!(path.budget, budget);
+            }
+        }
+
         #[test]
         fn bound_reflexive_match_has_cardinality_with_no_output_columns() {
             let mut cfg = config();
             cfg.subject = Some(Term::literal("absent"));
             cfg.object = cfg.subject.clone();
             cfg.object_var = None;
-            let mut path = RdfPathOperator::new(chain(), cfg);
+            let mut path = RdfPathOperator::new(chain(), RdfView::latest(LatestUse::Test), cfg);
             let chunk = path.next().unwrap().unwrap();
             assert_eq!(chunk.column_count(), 0);
             assert_eq!(chunk.len(), 1);

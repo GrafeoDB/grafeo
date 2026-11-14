@@ -48,6 +48,34 @@ Verify the installation:
 grafeo version
 ```
 
+### Features
+
+Every method installs the same default build. It opens every database the `grafeo` crate's
+default build writes: GQL, persistent storage, vector, text and hybrid search indexes, change
+data capture, graph algorithms and JSON Lines import. `grafeo version` lists the features of the
+build you run.
+
+Other features come with `cargo install`:
+
+```bash
+cargo install grafeo-cli --features triple-store    # RDF databases (grafeo init --mode rdf)
+cargo install grafeo-cli --features cypher,sparql   # more query languages
+cargo install grafeo-cli --features full            # every language, RDF and the defaults
+```
+
+| Feature | Adds |
+| --- | --- |
+| `cypher`, `gremlin`, `graphql`, `sql-pgq` | that query language (`--lang`) |
+| `sparql` | SPARQL, with `triple-store` |
+| `languages` | every query language |
+| `triple-store` | RDF triples: databases created with `--mode rdf`, or by a `grafeo` build with the `rdf` profile |
+| `arrow-export` | `grafeo data dump --export-format arrow` |
+| `full` | every language, `triple-store` and the default features |
+
+A database that holds data the build cannot read (RDF triples without `triple-store`, for
+example) is refused before anything on disk changes, and the error names the `cargo install`
+line that adds the feature.
+
 ## Quick Start
 
 ```bash
@@ -79,7 +107,7 @@ echo "MATCH (n) RETURN count(n)" | grafeo query ./mydb --stdin
 # With parameters
 grafeo query ./mydb "MATCH (n {name: \$name}) RETURN n" -p name=Alix
 
-# Choose query language (default: gql)
+# Choose query language (default: gql; the others need their feature, see Features)
 grafeo query ./mydb "MATCH (n) RETURN n" --lang cypher
 grafeo query ./mydb "SELECT * FROM GRAPH_TABLE ..." --lang sql
 
@@ -139,7 +167,7 @@ Transaction keywords (`BEGIN`, `COMMIT`, `ROLLBACK`) also work as plain text.
 # Create an LPG database (default)
 grafeo init ./mydb
 
-# Create an RDF database
+# Create an RDF database (needs the triple-store feature)
 grafeo init ./mydb --mode rdf
 ```
 
@@ -253,7 +281,7 @@ Build:
   rustc:    1.99.0
   target:   x86_64
   os:       linux
-  features: gql, cypher, sparql, sql-pgq
+  features: gql, vector-index, text-index, hybrid-search, cdc, algos, jsonl-import
 
 Paths:
   config:   /home/user/.config/grafeo

@@ -429,7 +429,8 @@ impl<'s, S: Store> Tx<'s, S> {
             .iter()
             .filter_map(|change| match change {
                 grafeo_common::change::Change::Data { op, .. } => Some(op.clone()),
-                grafeo_common::change::Change::Bulk(_) => None,
+                grafeo_common::change::Change::Bulk(_)
+                | grafeo_common::change::Change::RdfGraph { .. } => None,
             })
             .collect()
     }

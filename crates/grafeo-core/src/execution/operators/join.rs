@@ -385,6 +385,11 @@ pub struct HashJoinOperator {
     unmatched_chunk_idx: usize,
     /// Current row index when emitting unmatched rows.
     unmatched_row_idx: usize,
+    /// What it holds under the statement's memory, captured at construction
+    /// (see [`capture`](crate::execution::memory::capture)); it counts nothing
+    /// outside a budgeted statement. Its build side cannot spill: past the query memory limit or the
+    /// memory limit it fails with `GRAFEO-S001`.
+    memory: crate::execution::memory::OperatorMemory,
 }
 
 impl HashJoinOperator {
@@ -430,6 +435,7 @@ impl HashJoinOperator {
             emitting_unmatched: false,
             unmatched_chunk_idx: 0,
             unmatched_row_idx: 0,
+            memory: crate::execution::memory::capture(),
         }
     }
 
@@ -505,6 +511,17 @@ impl HashJoinOperator {
                     .push((chunk_idx, row));
             }
 
+            // The build chunk, its table entries and what their keys hold on
+            // the heap, against the statement's memory: a chunk at a time, a
+            // compare within the grant.
+            let build_keys = &self.build_keys;
+            self.memory.add_with(|| {
+                crate::execution::memory::chunk_bytes(&chunk)
+                    + chunk.row_count()
+                        * (std::mem::size_of::<(usize, usize)>() + std::mem::size_of::<HashKey>())
+                    + crate::execution::memory::HeapColumns::of(&chunk, Some(build_keys.as_slice()))
+                        .rows_bytes(chunk.selected_indices())
+            })?;
             self.build_types.add(&chunk);
             self.build_chunks.push(chunk);
         }
@@ -775,6 +792,10 @@ impl Operator for HashJoinOperator {
             let mut chunks = VecDeque::new();
             while let Some(chunk) = self.probe_side.next()? {
                 crate::execution::deadline::check()?;
+                // The probe side read first, against the statement's memory as
+                // the build side is.
+                self.memory
+                    .add_with(|| crate::execution::memory::chunk_bytes(&chunk))?;
                 chunks.push_back(chunk);
             }
             *read = Some(chunks);
@@ -1023,6 +1044,7 @@ impl Operator for HashJoinOperator {
         self.emitting_unmatched = false;
         self.unmatched_chunk_idx = 0;
         self.unmatched_row_idx = 0;
+        self.memory.clear();
     }
 
     fn name(&self) -> &'static str {
@@ -1071,6 +1093,11 @@ pub struct NestedLoopJoinOperator {
     current_left_matched: bool,
     /// Current row in the current right chunk.
     current_right_row: usize,
+    /// What it holds under the statement's memory, captured at construction
+    /// (see [`capture`](crate::execution::memory::capture)); it counts nothing
+    /// outside a budgeted statement. Its materialized sides cannot spill: past the query memory limit or
+    /// the memory limit it fails with `GRAFEO-S001`.
+    memory: crate::execution::memory::OperatorMemory,
 }
 
 /// Trait for join conditions.
@@ -1266,6 +1293,7 @@ impl NestedLoopJoinOperator {
             current_right_chunk: 0,
             current_right_row: 0,
             current_left_matched: false,
+            memory: crate::execution::memory::capture(),
         }
     }
 
@@ -1290,6 +1318,9 @@ impl NestedLoopJoinOperator {
     fn materialize_right(&mut self) -> Result<(), OperatorError> {
         while let Some(chunk) = self.right.next()? {
             crate::execution::deadline::check()?;
+            // The right side it keeps, against the statement's memory.
+            self.memory
+                .add_with(|| crate::execution::memory::chunk_bytes(&chunk))?;
             self.right_types.add(&chunk);
             self.right_chunks.push(chunk);
         }
@@ -1395,6 +1426,9 @@ impl Operator for NestedLoopJoinOperator {
             let mut chunks = VecDeque::new();
             while let Some(chunk) = self.left.next()? {
                 crate::execution::deadline::check()?;
+                // The left side read first, against the statement's memory.
+                self.memory
+                    .add_with(|| crate::execution::memory::chunk_bytes(&chunk))?;
                 chunks.push_back(chunk);
             }
             self.left_chunks = Some(chunks);
@@ -1546,6 +1580,7 @@ impl Operator for NestedLoopJoinOperator {
         self.current_right_chunk = 0;
         self.current_right_row = 0;
         self.current_left_matched = false;
+        self.memory.clear();
     }
 
     fn name(&self) -> &'static str {

@@ -29,7 +29,7 @@
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use grafeo_common::types::{NodeId, Value};
-use grafeo_common::utils::error::{Error, Result};
+use grafeo_common::utils::error::{Error, ErrorCode, LimitBound, LimitRefusal, Result};
 use grafeo_engine::database::QueryResult;
 use grafeo_engine::{Config, GrafeoDB, Session};
 
@@ -303,10 +303,28 @@ fn count(db: &GrafeoDB, language: &str, query: &str) -> i64 {
         .unwrap_or_else(|| panic!("{language}: {query}: {:?}", rows[0][0]))
 }
 
+/// The budget a path search's refusal names: the typed refusal of
+/// [`LimitBound::PathSearchBudget`] behind `GRAFEO-S001` (#492).
+fn refused_budget(error: &Error) -> u64 {
+    assert_eq!(
+        error.error_code(),
+        ErrorCode::StorageFull,
+        "GRAFEO-S001, a memory bound: {error}"
+    );
+    match error.limit_refusal() {
+        Some(LimitRefusal::Memory {
+            bound: LimitBound::PathSearchBudget,
+            limit,
+            ..
+        }) => *limit,
+        other => panic!("the path search budget's refusal, got {other:?}: {error}"),
+    }
+}
+
 /// Asserts that `query` fails with the error of a path search over its
-/// budget, which names what to do instead, and holds at most [`QUERY_PEAK`]
-/// on the way.
-fn assert_over_budget(db: &GrafeoDB, language: &str, query: &str) {
+/// budget, which names what to do instead and the setting that moves it, and
+/// holds at most [`QUERY_PEAK`] on the way; returns the budget it names.
+fn assert_over_budget(db: &GrafeoDB, language: &str, query: &str) -> u64 {
     let (result, peak) = measure(|| run(db, language, query));
     let error = match result {
         Ok(result) => panic!(
@@ -316,9 +334,10 @@ fn assert_over_budget(db: &GrafeoDB, language: &str, query: &str) {
         Err(error) => error,
     };
     let message = error.to_string();
+    let budget = refused_budget(&error);
     assert!(
-        matches!(&error, Error::Query(_)),
-        "{language}: {query}: a query error, got {error:?}"
+        message.contains(LimitBound::PathSearchBudget.setting()),
+        "{language}: {query}: the message names the setting: {message}"
     );
     for advice in ["bound the quantifier", "DISTINCT", "shortest"] {
         assert!(
@@ -332,6 +351,7 @@ fn assert_over_budget(db: &GrafeoDB, language: &str, query: &str) {
         peak >> 20,
         QUERY_PEAK >> 20
     );
+    budget
 }
 
 #[test]
@@ -364,7 +384,11 @@ fn an_unbounded_pattern_over_cycles_fails_with_an_error_not_an_abort() {
             format!("MATCH p = (repo:Repository)-[*]->(f:File) {filter} RETURN count(p)"),
         ),
     ] {
-        assert_over_budget(&db, language, &query);
+        assert_eq!(
+            assert_over_budget(&db, language, &query),
+            256 << 20,
+            "{language}: {query}: the default budget"
+        );
     }
     // The database still answers
     assert_eq!(
@@ -458,10 +482,50 @@ fn a_memory_limit_sets_the_path_search_budget() {
             message.contains("16 MiB"),
             "{language}: the budget is a quarter of 64 MiB: {message}"
         );
+        assert_eq!(
+            refused_budget(&run(&db, language, query).unwrap_err()),
+            16 << 20,
+            "{language}: a quarter of 64 MiB"
+        );
         assert!(
             peak <= 64 * 1024 * 1024,
             "{language}: held {} MiB at most, more than the 64 MiB memory limit",
             peak >> 20
+        );
+    }
+}
+
+/// A large memory limit does not let one path search hold a quarter of it:
+/// with 4 GiB (a 1 GiB quarter) the reported query fails at a bounded budget
+/// and holds no more than a query on the default budget, as the RDF path
+/// search already does (#492). A machine of 64 GiB would otherwise let one
+/// search hold 12 GiB before it fails.
+#[test]
+fn a_large_memory_limit_keeps_the_path_search_budget_bounded() {
+    let _turn = measuring();
+    let config = Config::in_memory().with_memory_limit(4 * 1024 * 1024 * 1024);
+    let CodeGraph { db, .. } = code_graph_in(GrafeoDB::with_config(config).unwrap());
+    let query =
+        "MATCH (repo:Repository)-[*]->(f:File) WHERE repo.repoName = 'deriva' RETURN count(f)";
+    for language in ["gql", "cypher"] {
+        assert_over_budget(&db, language, query);
+    }
+}
+
+/// `with_path_search_budget` sets the budget itself: at 8 MiB the reported
+/// query fails at 8 MiB, named with the setting, in GQL and Cypher (#492).
+#[test]
+fn an_explicit_path_search_budget_is_the_budget() {
+    let _turn = measuring();
+    let config = Config::in_memory().with_path_search_budget(8 * 1024 * 1024);
+    let CodeGraph { db, .. } = code_graph_in(GrafeoDB::with_config(config).unwrap());
+    let query =
+        "MATCH (repo:Repository)-[*]->(f:File) WHERE repo.repoName = 'deriva' RETURN count(f)";
+    for language in ["gql", "cypher"] {
+        assert_eq!(
+            assert_over_budget(&db, language, query),
+            8 << 20,
+            "{language}"
         );
     }
 }

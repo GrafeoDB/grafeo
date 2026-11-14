@@ -123,21 +123,21 @@ fn fill(db: &GrafeoDB) {
     }
 }
 
-/// One claim for all queued RDF graph operations: a second transaction's
-/// operation fails at its statement, with `GRAFEO-T001`, whichever graphs the two name.
+/// A graph operation claims each graph it changes (`ALL` and `NAMED`: each graph the
+/// transaction sees; a `COPY` inside a transaction creates its target and claims it): a second
+/// transaction's operation on a graph the first claimed fails at its statement, with
+/// `GRAFEO-T001` (#718, item 8).
 #[test]
-fn two_transactions_with_graph_operations_conflict_at_the_second_statement() {
+fn two_transactions_with_graph_operations_on_one_graph_conflict_at_the_second_statement() {
     let new = "http://example.org/new";
     for (one, other) in [
         ("CLEAR ALL".to_string(), format!("DROP GRAPH <{G}>")),
         (format!("DROP GRAPH <{G}>"), "CLEAR ALL".to_string()),
         (format!("CLEAR GRAPH <{G}>"), format!("DROP GRAPH <{G}>")),
-        (format!("CLEAR GRAPH <{G}>"), format!("CLEAR GRAPH <{H}>")),
         (
             format!("CREATE GRAPH <{new}>"),
             format!("COPY <{G}> TO <{new}>"),
         ),
-        (format!("ADD <{G}> TO <{H}>"), "CLEAR DEFAULT".to_string()),
     ] {
         let db = rdf_db();
         let mut first = db.session();
@@ -157,18 +157,98 @@ fn two_transactions_with_graph_operations_conflict_at_the_second_statement() {
     }
 }
 
-/// A standalone operation meets an open transaction's the same way.
+/// Operations on different graphs claim different graphs and both commit, in either order of
+/// their commits; an `ADD` inside a transaction only inserts into its target and claims no graph,
+/// so it meets a `CLEAR DEFAULT` without a conflict (the Q-2 ruling).
+#[test]
+fn graph_operations_on_different_graphs_both_commit() {
+    for (one, other) in [
+        (format!("CLEAR GRAPH <{G}>"), format!("CLEAR GRAPH <{H}>")),
+        (format!("ADD <{G}> TO <{H}>"), "CLEAR DEFAULT".to_string()),
+    ] {
+        for first_commits_first in [true, false] {
+            let db = rdf_db();
+            let mut first = db.session();
+            let mut second = db.session();
+            first.begin_transaction().unwrap();
+            second.begin_transaction().unwrap();
+            first.execute_sparql(&one).unwrap();
+            second
+                .execute_sparql(&other)
+                .unwrap_or_else(|error| panic!("{one} is open, then {other}: {error}"));
+            if first_commits_first {
+                first.commit().unwrap();
+                second.commit().unwrap();
+            } else {
+                second.commit().unwrap();
+                first.commit().unwrap();
+            }
+            db.session()
+                .execute_sparql(
+                    "INSERT DATA { <http://example.org/mia> <http://example.org/knows> <http://example.org/gus> }",
+                )
+                .unwrap_or_else(|error| panic!("{one} and {other}, then a write: {error}"));
+        }
+    }
+}
+
+/// `DROP ALL` claims each graph its transaction sees at the statement; a `CREATE` of a graph no one
+/// saw claims only that one. Both commit, in the serial order of their commits: the drop first,
+/// then the new graph with its triple, so the new graph survives and the old ones are gone.
+#[test]
+fn drop_all_and_a_create_of_a_new_graph_both_commit() {
+    let fresh = "http://example.org/fresh";
+    let db = rdf_db();
+    let mut dropping = db.session();
+    let mut creating = db.session();
+    dropping.begin_transaction().unwrap();
+    creating.begin_transaction().unwrap();
+    dropping.execute_sparql("DROP ALL").unwrap();
+    creating
+        .execute_sparql(&format!("CREATE GRAPH <{fresh}>"))
+        .unwrap();
+    creating
+        .execute_sparql(&format!(
+            "INSERT DATA {{ GRAPH <{fresh}> {{ <http://example.org/beatrix> <http://example.org/knows> <http://example.org/django> }} }}"
+        ))
+        .unwrap();
+    dropping.commit().unwrap();
+    creating.commit().unwrap();
+    let session = db.session();
+    let count = |graph: &str| {
+        session
+            .execute_sparql(&format!(
+                "SELECT ?s WHERE {{ GRAPH <{graph}> {{ ?s ?p ?o }} }}"
+            ))
+            .unwrap()
+            .row_count()
+    };
+    assert_eq!(count(fresh), 1, "the new graph survives the drop");
+    assert_eq!(count(G), 0, "the drop took G");
+    assert_eq!(count(H), 0, "the drop took H");
+}
+
+/// A standalone operation meets an open transaction's by the graphs it names: on another graph it
+/// commits; on the graph the open transaction claimed, its own transaction fails with `GRAFEO-T001`.
 #[test]
 fn a_standalone_graph_operation_meets_an_open_transaction() {
     let db = rdf_db();
     let mut open = db.session();
     open.begin_transaction().unwrap();
     open.execute_sparql(&format!("CLEAR GRAPH <{G}>")).unwrap();
-    let error = db
-        .session()
+    db.session()
         .execute_sparql(&format!("DROP GRAPH <{H}>"))
-        .expect_err("a graph operation is open");
-    assert!(error.to_string().contains("GRAFEO-T001"), "{error}");
+        .unwrap_or_else(|error| panic!("another graph: {error}"));
+    for statement in [format!("DROP GRAPH <{G}>"), format!("CLEAR GRAPH <{G}>")] {
+        let error = db
+            .session()
+            .execute_sparql(&statement)
+            .expect_err("the open transaction claimed G");
+        assert!(
+            error.to_string().contains("GRAFEO-T001"),
+            "{statement}: {error}"
+        );
+    }
     open.commit().unwrap();
 }
 
@@ -704,15 +784,17 @@ fn a_comparison_of_booleans_answers_alike_in_every_plan() {
 }
 
 // ---------------------------------------------------------------------------
-// A queued graph operation that would not apply
+// A graph operation and a write in its graph
 // ---------------------------------------------------------------------------
 
 const X: &str = "http://example.org/x";
 
-/// A standalone write made the graph meanwhile: the commit's `CREATE GRAPH` would not apply, so it
-/// fails before anything is logged. The database stays writable, and the graph stays as written.
+/// A standalone write made the graph meanwhile: a graph operation and a triple write in its graph
+/// do not conflict (#718, item 8), so the `CREATE GRAPH` commits too and has nothing to do (the
+/// serial order: the create, then the insert). The graph holds the inserted triple, and the
+/// database stays writable.
 #[test]
-fn a_graph_op_that_no_longer_applies_fails_its_commit() {
+fn a_create_of_a_graph_written_meanwhile_commits() {
     let db = GrafeoDB::new_in_memory();
     let mut open = db.session();
     open.begin_transaction().unwrap();
@@ -722,12 +804,12 @@ fn a_graph_op_that_no_longer_applies_fails_its_commit() {
             "INSERT DATA {{ GRAPH <{X}> {{ <http://example.org/gus> <http://example.org/knows> <http://example.org/mia> }} }}"
         ))
         .unwrap();
-    let error = open.commit().expect_err("the graph is there now");
-    assert!(error.to_string().contains("GRAFEO-T001"), "{error}");
+    open.commit()
+        .unwrap_or_else(|error| panic!("a create and a write in its graph both commit: {error}"));
     let after = db.session();
     after
         .execute_sparql("INSERT DATA { <http://example.org/mia> <http://example.org/knows> <http://example.org/gus> }")
-        .unwrap_or_else(|error| panic!("a write after the refused commit: {error}"));
+        .unwrap_or_else(|error| panic!("a write after the commit: {error}"));
     after.execute("INSERT (:Person {name: 'Vincent'})").unwrap();
     let rows = after
         .execute_sparql(&format!("SELECT ?s WHERE {{ GRAPH <{X}> {{ ?s ?p ?o }} }}"))
@@ -760,12 +842,12 @@ fn a_drop_of_a_graph_emptied_meanwhile_leaves_the_database_writable() {
         .unwrap_or_else(|error| panic!("a write after the commit: {error}"));
 }
 
-const REFUSED_PATH: &str = "GRAFEO_REVIEW_THREADS_REFUSED_PATH";
+const CREATED_PATH: &str = "GRAFEO_REVIEW_THREADS_CREATED_PATH";
 
-/// The commit is refused, then the process ends without a close.
+/// The create commits after a write in its graph, then the process ends without a close.
 #[test]
-fn refused_commit_child() {
-    let Some(path) = std::env::var_os(REFUSED_PATH) else {
+fn create_after_a_write_child() {
+    let Some(path) = std::env::var_os(CREATED_PATH) else {
         return;
     };
     let db = GrafeoDB::open(std::path::PathBuf::from(path)).unwrap();
@@ -777,20 +859,22 @@ fn refused_commit_child() {
             "INSERT DATA {{ GRAPH <{X}> {{ <http://example.org/gus> <http://example.org/knows> <http://example.org/mia> }} }}"
         ))
         .unwrap();
-    open.commit().expect_err("the graph is there now");
+    open.commit()
+        .unwrap_or_else(|error| panic!("a create and a write in its graph both commit: {error}"));
     db.session()
         .execute("INSERT (:Person {name: 'Vincent'})")
         .unwrap();
     std::process::exit(0);
 }
 
-/// Nothing in the log trips a replay, and what committed around the refusal is there.
+/// The log replays: the replayed `CREATE GRAPH` of a graph that exists has nothing to do, the graph
+/// holds its triple, and what committed around it is there.
 #[test]
-fn a_refused_graph_op_leaves_a_log_that_replays() {
+fn a_create_of_a_graph_written_meanwhile_leaves_a_log_that_replays() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("refused.grafeo");
+    let path = dir.path().join("created.grafeo");
     let status = grafeo_common::testing::child_process::run(
-        grafeo_common::child_test!("refused_commit_child").env(REFUSED_PATH, &path),
+        grafeo_common::child_test!("create_after_a_write_child").env(CREATED_PATH, &path),
     )
     .unwrap();
     assert!(status.success(), "the child process failed");

@@ -457,6 +457,7 @@ fn types_with_a_check() -> [(&'static str, CatalogRecord); 2] {
                 }],
                 parent_types: Vec::new(),
                 key_labels: Vec::new(),
+                standalone: false,
             }),
         ),
         (
@@ -470,6 +471,7 @@ fn types_with_a_check() -> [(&'static str, CatalogRecord); 2] {
                 }],
                 endpoints: Vec::new(),
                 key_labels: Vec::new(),
+                standalone: false,
             }),
         ),
     ]

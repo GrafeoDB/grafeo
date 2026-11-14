@@ -358,6 +358,15 @@ pub fn error(msg: &str) {
     }
 }
 
+/// Print a hint after an error to stderr: what to do about it.
+pub fn hint(msg: &str) {
+    if no_color() {
+        eprintln!("hint: {msg}");
+    } else {
+        eprintln!("\x1b[36mhint\x1b[0m: {msg}");
+    }
+}
+
 /// Format a string with ANSI color for console output.
 pub fn colored(text: &str, color: Color) -> String {
     if no_color() {
@@ -375,6 +384,19 @@ pub fn colored(text: &str, color: Color) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The colours are written as escapes (`\x1b`), never as raw control bytes, which diffs and
+    /// editors do not show.
+    #[test]
+    fn the_source_holds_no_raw_control_bytes() {
+        let source = include_str!("mod.rs");
+        assert!(
+            !source
+                .chars()
+                .any(|c| c.is_control() && !matches!(c, '\n' | '\r' | '\t')),
+            "a raw control byte in output/mod.rs"
+        );
+    }
 
     #[test]
     fn test_format_is_copy() {

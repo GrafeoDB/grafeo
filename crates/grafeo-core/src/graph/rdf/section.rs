@@ -32,6 +32,7 @@ use grafeo_common::utils::error::{Error, Result};
 use super::chunked::{
     RDF_SECTION_VERSION, RDF_SECTION_VERSION_STRINGS, read_rdf_chunks, write_rdf_chunks,
 };
+use crate::graph::rdf::overlay::{LatestUse, RdfView};
 use crate::graph::rdf::{RdfStore, Term, Triple};
 
 /// The version byte in the header of the block format (0.5.x).
@@ -149,7 +150,7 @@ fn write_rdf_blocks(store: &RdfStore, named_graphs: &[(String, Arc<RdfStore>)]) 
     // Named graph triple strings are NOT interned here: each named graph
     // serializes its own string table via the recursive write_rdf_blocks
     // call, so interning them at the top level would only waste space.
-    let triples: Vec<_> = store.triples().into_iter().collect();
+    let triples: Vec<_> = store.triples_latest().into_iter().collect();
     for t in &triples {
         strings.intern(&t.subject().to_string());
         strings.intern(&t.predicate().to_string());
@@ -370,7 +371,7 @@ fn read_rdf_blocks(data: &[u8], store: &RdfStore, graph: &str) -> Result<()> {
         })?;
 
         store.create_graph(graph_name);
-        if let Some(graph_store) = store.graph(graph_name) {
+        if let Some(graph_store) = store.graph_latest(graph_name) {
             read_rdf_blocks(graph_data, &graph_store, &format!("graph {graph_name:?}"))?;
         }
     }
@@ -390,6 +391,9 @@ pub struct RdfStoreSection {
     store: Arc<RdfStore>,
     dirty: AtomicBool,
     caps: ChunkCaps,
+    /// The view the chunks are written at: a checkpoint's epoch, or the
+    /// newest state.
+    view: RdfView,
 }
 
 impl RdfStoreSection {
@@ -407,7 +411,17 @@ impl RdfStoreSection {
             store,
             dirty: AtomicBool::new(false),
             caps,
+            view: RdfView::latest(LatestUse::Checkpoint),
         }
+    }
+
+    /// This section, writing its chunks as `view` sees the store: a
+    /// checkpoint's epoch, so a commit applied while the image is written is
+    /// not in it.
+    #[must_use]
+    pub fn at(mut self, view: RdfView) -> Self {
+        self.view = view;
+        self
     }
 
     /// Mark this section as dirty.
@@ -434,11 +448,11 @@ impl Section for RdfStoreSection {
     fn serialize(&self) -> Result<Vec<u8>> {
         let named_graphs: Vec<(String, Arc<RdfStore>)> = self
             .store
-            .graph_names()
+            .graph_names_latest()
             .into_iter()
             .filter_map(|name| {
                 self.store
-                    .graph(&name)
+                    .graph_latest(&name)
                     .map(|graph| (name, Arc::clone(&graph)))
             })
             .collect();
@@ -450,10 +464,10 @@ impl Section for RdfStoreSection {
         read_rdf_blocks(data, &self.store, "the default graph")
     }
 
-    /// Streams the store as chunks of version 3: a metadata chunk, then per
-    /// graph its triples.
+    /// Streams the store as chunks of version 3, as the section's view sees
+    /// it: a metadata chunk, then per graph its triples.
     fn write_to(&self, sink: &mut dyn SectionSink) -> Result<()> {
-        write_rdf_chunks(&self.store, self.caps, sink)
+        write_rdf_chunks(&self.store, &self.view, self.caps, sink)
     }
 
     /// Reads 0.5.x bytes (one raw chunk) with [`deserialize`](Section::deserialize),
@@ -486,6 +500,7 @@ impl Section for RdfStoreSection {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::graph::rdf::overlay::{LatestUse, RdfView};
 
     #[test]
     fn rdf_section_round_trip() {
@@ -578,7 +593,7 @@ mod tests {
         ));
 
         store.create_graph("http://example.org/graph/butch");
-        if let Some(named) = store.graph("http://example.org/graph/butch") {
+        if let Some(named) = store.graph_latest("http://example.org/graph/butch") {
             named.insert(Triple::new(
                 Term::iri("http://example.org/butch"),
                 Term::iri("http://xmlns.com/foaf/0.1/name"),
@@ -602,13 +617,15 @@ mod tests {
 
         assert_eq!(section2.store().len(), 1);
 
-        let names = section2.store().graph_names();
+        let names = section2
+            .store()
+            .graph_names(&RdfView::latest(LatestUse::Test));
         assert_eq!(names.len(), 1);
         assert_eq!(names[0], "http://example.org/graph/butch");
 
         let named = section2
             .store()
-            .graph("http://example.org/graph/butch")
+            .graph_latest("http://example.org/graph/butch")
             .expect("named graph should exist");
         assert_eq!(named.len(), 2);
     }
@@ -733,11 +750,14 @@ mod tests {
         RdfStoreSection::new(Arc::clone(&store))
             .deserialize(&good)
             .unwrap();
-        assert!(store.contains(&Triple::new(
-            Term::iri("http://example.org/alix"),
-            Term::iri("http://example.org/name"),
-            Term::lang_literal("Kraków", "pl"),
-        )));
+        assert!(store.contains(
+            &RdfView::latest(LatestUse::Test),
+            &Triple::new(
+                Term::iri("http://example.org/alix"),
+                Term::iri("http://example.org/name"),
+                Term::lang_literal("Kraków", "pl"),
+            )
+        ));
 
         let bad = block_bytes([alix[0], alix[1], "<<not a term"], &[]);
         let error = RdfStoreSection::new(Arc::new(RdfStore::new()))

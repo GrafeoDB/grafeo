@@ -5,7 +5,7 @@
 
 use std::collections::HashSet;
 
-use crate::graph::rdf::{RdfStore, Term, TriplePattern};
+use crate::graph::rdf::{GraphAt, Term, TriplePattern};
 
 use super::shape::PropertyPath;
 
@@ -14,7 +14,7 @@ const MAX_TRANSITIVE_DEPTH: usize = 1000;
 
 /// Evaluates a property path starting from a focus node, returning all
 /// reachable value nodes.
-pub fn evaluate_path(path: &PropertyPath, focus: &Term, data_graph: &RdfStore) -> Vec<Term> {
+pub fn evaluate_path(path: &PropertyPath, focus: &Term, data_graph: GraphAt<'_>) -> Vec<Term> {
     match path {
         PropertyPath::Predicate(pred) => {
             let pattern = TriplePattern {
@@ -71,7 +71,7 @@ pub fn evaluate_path(path: &PropertyPath, focus: &Term, data_graph: &RdfStore) -
 }
 
 /// Evaluates an inverse path: finds subjects where `focus` is the object.
-fn evaluate_inverse(inner: &PropertyPath, focus: &Term, data_graph: &RdfStore) -> Vec<Term> {
+fn evaluate_inverse(inner: &PropertyPath, focus: &Term, data_graph: GraphAt<'_>) -> Vec<Term> {
     match inner {
         PropertyPath::Predicate(pred) => {
             let pattern = TriplePattern {
@@ -104,7 +104,7 @@ fn evaluate_inverse(inner: &PropertyPath, focus: &Term, data_graph: &RdfStore) -
 }
 
 /// Evaluates a sequence path: chains evaluation through each step.
-fn evaluate_sequence(paths: &[PropertyPath], focus: &Term, data_graph: &RdfStore) -> Vec<Term> {
+fn evaluate_sequence(paths: &[PropertyPath], focus: &Term, data_graph: GraphAt<'_>) -> Vec<Term> {
     if paths.is_empty() {
         return vec![focus.clone()];
     }
@@ -127,7 +127,7 @@ fn evaluate_sequence(paths: &[PropertyPath], focus: &Term, data_graph: &RdfStore
 /// application of `path` to the `visited` set.
 fn expand_transitive(
     path: &PropertyPath,
-    data_graph: &RdfStore,
+    data_graph: GraphAt<'_>,
     visited: &mut HashSet<Term>,
     depth: usize,
 ) {
@@ -162,6 +162,10 @@ mod tests {
     use super::*;
     use crate::graph::rdf::{RdfStore, Triple};
 
+    /// The view the tests read through.
+    static LATEST: crate::graph::rdf::RdfView =
+        crate::graph::rdf::RdfView::latest(crate::graph::rdf::LatestUse::Test);
+
     fn chain_store() -> RdfStore {
         // a -knows-> b -knows-> c -knows-> d
         let store = RdfStore::new();
@@ -194,7 +198,7 @@ mod tests {
     fn simple_predicate_path() {
         let store = chain_store();
         let path = PropertyPath::Predicate(Term::iri("http://ex.org/knows"));
-        let result = evaluate_path(&path, &Term::iri("http://ex.org/a"), &store);
+        let result = evaluate_path(&path, &Term::iri("http://ex.org/a"), store.at(&LATEST));
         assert_eq!(result.len(), 1);
         assert!(result.contains(&Term::iri("http://ex.org/b")));
     }
@@ -205,7 +209,7 @@ mod tests {
         let path = PropertyPath::Inverse(Box::new(PropertyPath::Predicate(Term::iri(
             "http://ex.org/knows",
         ))));
-        let result = evaluate_path(&path, &Term::iri("http://ex.org/b"), &store);
+        let result = evaluate_path(&path, &Term::iri("http://ex.org/b"), store.at(&LATEST));
         assert_eq!(result.len(), 1);
         assert!(result.contains(&Term::iri("http://ex.org/a")));
     }
@@ -217,7 +221,7 @@ mod tests {
             PropertyPath::Predicate(Term::iri("http://ex.org/knows")),
             PropertyPath::Predicate(Term::iri("http://ex.org/knows")),
         ]);
-        let result = evaluate_path(&path, &Term::iri("http://ex.org/a"), &store);
+        let result = evaluate_path(&path, &Term::iri("http://ex.org/a"), store.at(&LATEST));
         assert_eq!(result.len(), 1);
         assert!(result.contains(&Term::iri("http://ex.org/c")));
     }
@@ -230,7 +234,7 @@ mod tests {
             PropertyPath::Predicate(Term::iri("http://ex.org/knows")),
             PropertyPath::Predicate(Term::iri("http://ex.org/knows")),
         ]);
-        let result = evaluate_path(&path, &Term::iri("http://ex.org/a"), &store);
+        let result = evaluate_path(&path, &Term::iri("http://ex.org/a"), store.at(&LATEST));
         assert_eq!(result.len(), 1);
         assert!(result.contains(&Term::iri("http://ex.org/d")));
     }
@@ -242,7 +246,7 @@ mod tests {
             PropertyPath::Predicate(Term::iri("http://ex.org/knows")),
             PropertyPath::Predicate(Term::iri("http://ex.org/name")),
         ]);
-        let result = evaluate_path(&path, &Term::iri("http://ex.org/a"), &store);
+        let result = evaluate_path(&path, &Term::iri("http://ex.org/a"), store.at(&LATEST));
         assert_eq!(result.len(), 2); // b and "Alix"
     }
 
@@ -252,7 +256,7 @@ mod tests {
         let path = PropertyPath::ZeroOrMore(Box::new(PropertyPath::Predicate(Term::iri(
             "http://ex.org/knows",
         ))));
-        let result = evaluate_path(&path, &Term::iri("http://ex.org/a"), &store);
+        let result = evaluate_path(&path, &Term::iri("http://ex.org/a"), store.at(&LATEST));
         // a (zero steps), b (one), c (two), d (three)
         assert_eq!(result.len(), 4);
     }
@@ -281,7 +285,7 @@ mod tests {
         let path = PropertyPath::ZeroOrMore(Box::new(PropertyPath::Predicate(Term::iri(
             "http://ex.org/knows",
         ))));
-        let result = evaluate_path(&path, &Term::iri("http://ex.org/a"), &store);
+        let result = evaluate_path(&path, &Term::iri("http://ex.org/a"), store.at(&LATEST));
         assert_eq!(result.len(), 3); // a, b, c (cycle detected, no infinite loop)
     }
 
@@ -291,7 +295,7 @@ mod tests {
         let path = PropertyPath::OneOrMore(Box::new(PropertyPath::Predicate(Term::iri(
             "http://ex.org/knows",
         ))));
-        let result = evaluate_path(&path, &Term::iri("http://ex.org/a"), &store);
+        let result = evaluate_path(&path, &Term::iri("http://ex.org/a"), store.at(&LATEST));
         // b (one), c (two), d (three) — NOT a (zero steps excluded)
         assert_eq!(result.len(), 3);
         assert!(!result.contains(&Term::iri("http://ex.org/a")));
@@ -303,7 +307,7 @@ mod tests {
         let path = PropertyPath::ZeroOrOne(Box::new(PropertyPath::Predicate(Term::iri(
             "http://ex.org/knows",
         ))));
-        let result = evaluate_path(&path, &Term::iri("http://ex.org/a"), &store);
+        let result = evaluate_path(&path, &Term::iri("http://ex.org/a"), store.at(&LATEST));
         assert_eq!(result.len(), 2); // a (zero) and b (one)
     }
 
@@ -317,7 +321,7 @@ mod tests {
                 "http://ex.org/knows",
             )))),
         ]);
-        let result = evaluate_path(&path, &Term::iri("http://ex.org/a"), &store);
+        let result = evaluate_path(&path, &Term::iri("http://ex.org/a"), store.at(&LATEST));
         // a -knows-> b, then inverse(knows) from b = a
         assert!(result.contains(&Term::iri("http://ex.org/a")));
     }

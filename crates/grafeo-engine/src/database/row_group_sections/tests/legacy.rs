@@ -6,12 +6,10 @@
 //! copy holds what a reader at its epoch sees; embeddings a 0.5.x build
 //! spilled come back.
 
-use grafeo_common::types::ReadView;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use grafeo_common::change::StandaloneOp;
-use grafeo_common::types::{EpochId, PropertyKey, Value};
+use grafeo_common::types::{EpochId, Value};
 use grafeo_common::utils::error::Result;
 use grafeo_core::graph::GraphStore;
 use grafeo_storage::file::GrafeoFileManager;
@@ -20,13 +18,11 @@ use grafeo_storage::file::detect::{OnDisk, detect};
 use super::super::super::catalog_section::CatalogStore;
 use super::super::super::persistence::row_groups::{self, Parts};
 use super::super::super::sections::LoadedSections;
-use super::super::super::standalone;
 use super::super::{continue_row_group_epochs, load_row_group_sections, restore_row_group_indexes};
 use super::{
     Database, EdgeView, NodeView, assert_holds, committed_of, images, open_writes, travels,
 };
 use crate::GrafeoDB;
-use crate::transaction::StandaloneChange;
 
 /// A copy of the fixture directory `relative` (under `tests/fixtures`) in a
 /// new temporary directory, and the path of `name` in it: a fixture is read
@@ -384,6 +380,8 @@ fn beta_files_of_version_3_open_into_row_groups() {
 #[cfg(feature = "vector-index")]
 #[test]
 fn embeddings_a_0_5_build_spilled_fold_into_row_groups() {
+    use grafeo_common::types::{PropertyKey, ReadView};
+
     use super::super::super::legacy_spill;
 
     let (dir, path) = fixture("closed-while-spilled/0.5.44", "spilled.grafeo");
@@ -456,8 +454,9 @@ fn a_snapshot_export_during_open_writes_round_trips() {
     let open = open_writes(&database, travellers);
     let data = {
         let _commits = database.transaction_manager.hold_commits().unwrap();
-        let held = row_groups::export_held(&parts(&database)).unwrap();
-        row_groups::export_rows(held, database.transaction_manager.current_epoch()).unwrap()
+        let epoch = database.transaction_manager.current_epoch();
+        let held = row_groups::export_held(&parts(&database), epoch).unwrap();
+        row_groups::export_rows(held, epoch).unwrap()
     };
     drop(open);
 
@@ -501,8 +500,9 @@ fn a_snapshot_restore_replaces_the_row_group_database() {
             )
             .unwrap();
     });
-    let held = row_groups::export_held(&parts(&source)).unwrap();
-    let data = row_groups::export_rows(held, source.transaction_manager.current_epoch()).unwrap();
+    let epoch = source.transaction_manager.current_epoch();
+    let held = row_groups::export_held(&parts(&source), epoch).unwrap();
+    let data = row_groups::export_rows(held, epoch).unwrap();
 
     let database = Database::new();
     travels(&database);
@@ -526,8 +526,14 @@ fn a_snapshot_restore_replaces_the_row_group_database() {
 /// `CREATE GRAPH ... AS COPY OF` on a row-group root: the copy holds every
 /// node and edge a reader at the published epoch sees, through the replay
 /// writer, with nothing of the transactions still open.
+#[cfg(feature = "gql")]
 #[test]
 fn a_graph_copy_holds_the_committed_state() {
+    use super::super::super::standalone;
+    use crate::transaction::StandaloneChange;
+    use grafeo_common::change::StandaloneOp;
+    use grafeo_common::types::{PropertyKey, ReadView};
+
     let database = Database::new();
     let travellers = travels(&database);
     let committed = images(&database);

@@ -1,7 +1,9 @@
 //! A schema's closed graph type lists its node and edge types however they came into it: by `CREATE
 //! GRAPH TYPE`, by `ALTER GRAPH TYPE ... ADD`, or bare, as 0.6.1's `ALTER` stored an added one under a
 //! schema. Each is held while a graph is bound to the type (`DROP NODE TYPE` is refused), `ALTER GRAPH
-//! TYPE ... DROP` takes each out, and the refusal names a statement that runs as written.
+//! TYPE ... DROP` takes each out, and the refusal names a statement that runs as written. A type the
+//! graph type declared goes with that statement; a standalone type (`CREATE NODE TYPE`) stays, in
+//! force, and can be dropped once no graph type lists it (#764).
 //!
 //! ```bash
 //! cargo test -p grafeo-engine --all-features --test main schema_graph_type_entries::
@@ -34,8 +36,8 @@ fn run_all(session: &Session, statements: &[&str]) {
     }
 }
 
-/// The schema `s`, its types, the closed graph type `held` and the empty graph `g` bound to it, with
-/// `Extra` and `Added` taken in by `ALTER GRAPH TYPE ... ADD`.
+/// The schema `s`, its standalone types, the closed graph type `held` and the empty graph `g` bound
+/// to it, with `Extra` and `Added` taken in by `ALTER GRAPH TYPE ... ADD`.
 fn in_a_schema() -> (GrafeoDB, Session) {
     let db = GrafeoDB::new_in_memory();
     let session = db.session();
@@ -45,6 +47,30 @@ fn in_a_schema() -> (GrafeoDB, Session) {
         &[
             "ALTER GRAPH TYPE held ADD NODE TYPE Extra",
             "ALTER GRAPH TYPE held ADD EDGE TYPE Added",
+        ],
+    );
+    (db, session)
+}
+
+/// The same shape with types the graph types declare: `held` declares `Held`, `Other`, `Link` and
+/// `Lone`, and `Extra` and `Added` are declared by `donor`, taken in by `ALTER GRAPH TYPE ... ADD`,
+/// and left to `held` alone when `donor` is dropped. No type here is standalone, so a drop takes
+/// the types only it lists.
+fn in_a_schema_declared() -> (GrafeoDB, Session) {
+    let db = GrafeoDB::new_in_memory();
+    let session = db.session();
+    run_all(
+        &session,
+        &[
+            "CREATE SCHEMA s",
+            "SESSION SET SCHEMA s",
+            "CREATE GRAPH TYPE donor (NODE TYPE Extra (k INTEGER), EDGE TYPE Added (w INTEGER))",
+            "CREATE GRAPH TYPE held (NODE TYPE Held (name STRING), NODE TYPE Other (k INTEGER), \
+             EDGE TYPE Link (w INTEGER), EDGE TYPE Lone (w INTEGER))",
+            "CREATE GRAPH g TYPED held",
+            "ALTER GRAPH TYPE held ADD NODE TYPE Extra",
+            "ALTER GRAPH TYPE held ADD EDGE TYPE Added",
+            "DROP GRAPH TYPE donor",
         ],
     );
     (db, session)
@@ -68,8 +94,9 @@ fn lists(session: &Session, kind: &str, name: &str) -> bool {
 }
 
 /// `ALTER GRAPH TYPE held DROP {kind} TYPE {name}` takes the type out, and the type goes with it, as
-/// no other graph type lists it (ISO/IEC 39075 12.7, as
-/// `type_scope_across_graphs::an_altered_drop_takes_a_type_only_it_listed` pins).
+/// it is no standalone type and no other graph type lists it (ISO/IEC 39075 12.7, as
+/// `type_scope_across_graphs::an_altered_drop_takes_a_type_only_it_listed` pins). A 0.6.1 file's
+/// listed types count as declared by their graph type.
 fn alter_drop_takes(session: &Session, kind: &str, name: &str) {
     let statement = format!("ALTER GRAPH TYPE held DROP {kind} TYPE {name}");
     let status = session
@@ -84,6 +111,23 @@ fn alter_drop_takes(session: &Session, kind: &str, name: &str) {
     assert!(
         !lists(session, kind, name),
         "{statement}: the type went with it"
+    );
+}
+
+/// `ALTER GRAPH TYPE held DROP {kind} TYPE {name}` of a standalone type takes it out of `held` only:
+/// the status names no type, and the type stays (#764, as
+/// `type_scope_across_graphs::an_altered_drop_leaves_a_standalone_type_in_force` pins).
+fn alter_drop_leaves(session: &Session, kind: &str, name: &str) {
+    let statement = format!("ALTER GRAPH TYPE held DROP {kind} TYPE {name}");
+    let status = session
+        .execute(&statement)
+        .unwrap_or_else(|error| panic!("{statement}: {error}"))
+        .status_message
+        .unwrap_or_default();
+    assert!(!status.contains("and its types"), "{statement}: {status}");
+    assert!(
+        lists(session, kind, name),
+        "{statement}: the standalone type stays"
     );
 }
 
@@ -112,8 +156,8 @@ fn an_added_type_is_held_like_a_created_one() {
     }
 }
 
-/// `ALTER GRAPH TYPE ... DROP` takes a type out, whether `CREATE GRAPH TYPE` listed it or `ALTER ...
-/// ADD` took it in: the type goes with it, and the graph refuses it from then on.
+/// `ALTER GRAPH TYPE ... DROP` takes a declared type out, whether `CREATE GRAPH TYPE` listed it or
+/// `ALTER ... ADD` took it in: the type goes with it, and the graph refuses it from then on.
 #[test]
 fn alter_drop_takes_a_type_out_however_it_came_in() {
     for (kind, name, write) in [
@@ -130,8 +174,52 @@ fn alter_drop_takes_a_type_out_however_it_came_in() {
             "INSERT (:Held {name: 'Gus'})-[:Added {w: 1}]->(:Held {name: 'Mia'})",
         ),
     ] {
-        let (_db, session) = in_a_schema();
+        let (_db, session) = in_a_schema_declared();
         alter_drop_takes(&session, kind, name);
+        run_all(&session, &["USE GRAPH g"]);
+        assert!(
+            session.execute(write).is_err(),
+            "{name}: the closed type no longer lists it"
+        );
+    }
+}
+
+/// The same for standalone types, however they came in: the graph refuses the type from then on,
+/// while the type stays in force in the schema's other graphs (#764).
+#[test]
+fn alter_drop_takes_a_standalone_type_out_and_leaves_it_in_force() {
+    for (kind, name, write, wrong) in [
+        (
+            "NODE",
+            "Other",
+            "INSERT (:Other {k: 1})",
+            "INSERT (:Other {k: 'one'})",
+        ),
+        (
+            "NODE",
+            "Extra",
+            "INSERT (:Extra {k: 1})",
+            "INSERT (:Extra {k: 'one'})",
+        ),
+        (
+            "EDGE",
+            "Lone",
+            "INSERT (:Held {name: 'Gus'})-[:Lone {w: 1}]->(:Held {name: 'Mia'})",
+            "INSERT (:Held {name: 'Gus'})-[:Lone {w: 'one'}]->(:Held {name: 'Mia'})",
+        ),
+        (
+            "EDGE",
+            "Added",
+            "INSERT (:Held {name: 'Gus'})-[:Added {w: 1}]->(:Held {name: 'Mia'})",
+            "INSERT (:Held {name: 'Gus'})-[:Added {w: 'one'}]->(:Held {name: 'Mia'})",
+        ),
+    ] {
+        let (_db, session) = in_a_schema();
+        alter_drop_leaves(&session, kind, name);
+        let error = session
+            .execute(wrong)
+            .expect_err(&format!("{name}: in force in the default graph"));
+        assert!(error.to_string().contains("GRAFEO-V001"), "{name}: {error}");
         run_all(&session, &["USE GRAPH g"]);
         assert!(
             session.execute(write).is_err(),
@@ -142,9 +230,32 @@ fn alter_drop_takes_a_type_out_however_it_came_in() {
 
 /// The refusal suggests the `ALTER GRAPH TYPE` statement that takes the type out, with the graph type
 /// named as a statement writes it (`held`, not the stored `s/held`), and that statement runs and takes
-/// the type with it.
+/// the declared type with it.
 #[test]
 fn the_refusal_names_a_statement_that_runs() {
+    for (kind, name) in [
+        ("NODE", "Held"),
+        ("NODE", "Extra"),
+        ("EDGE", "Link"),
+        ("EDGE", "Added"),
+    ] {
+        let (_db, session) = in_a_schema_declared();
+        let statement = format!("DROP {kind} TYPE {name}");
+        let error = session
+            .execute(&statement)
+            .expect_err(&statement)
+            .to_string();
+        let suggested = format!("ALTER GRAPH TYPE held DROP {kind} TYPE {name}");
+        assert!(error.contains(&suggested), "{statement}: {error}");
+        assert!(!error.contains("s/held"), "{statement}: {error}");
+        alter_drop_takes(&session, kind, name);
+    }
+}
+
+/// The same refusal of a standalone type names the graph type and the statement, which runs and
+/// leaves the type (#764); with no graph type listing it any more, the type's own drop then runs.
+#[test]
+fn the_refusal_of_a_standalone_type_names_a_statement_that_runs() {
     for (kind, name) in [
         ("NODE", "Held"),
         ("NODE", "Extra"),
@@ -157,10 +268,13 @@ fn the_refusal_names_a_statement_that_runs() {
             .execute(&statement)
             .expect_err(&statement)
             .to_string();
+        assert!(error.contains("graph type 'held'"), "{statement}: {error}");
         let suggested = format!("ALTER GRAPH TYPE held DROP {kind} TYPE {name}");
         assert!(error.contains(&suggested), "{statement}: {error}");
         assert!(!error.contains("s/held"), "{statement}: {error}");
-        alter_drop_takes(&session, kind, name);
+        alter_drop_leaves(&session, kind, name);
+        run_all(&session, &[statement.as_str()]);
+        assert!(!lists(&session, kind, name), "{statement}: dropped now");
     }
 }
 

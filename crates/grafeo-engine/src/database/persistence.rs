@@ -441,9 +441,12 @@ fn push_index_on(held: &mut String, label: &str, property: &str) {
 
 /// Collects all triples from an RDF store into snapshot format.
 #[cfg(feature = "triple-store")]
-fn collect_rdf_triples(store: &grafeo_core::graph::rdf::RdfStore) -> Vec<SnapshotTriple> {
+fn collect_rdf_triples(
+    store: &grafeo_core::graph::rdf::RdfStore,
+    view: &grafeo_core::graph::rdf::RdfView,
+) -> Vec<SnapshotTriple> {
     let mut triples: Vec<SnapshotTriple> = store
-        .triples()
+        .triples(view)
         .into_iter()
         .map(|t| SnapshotTriple {
             subject: t.subject().to_string(),
@@ -458,24 +461,27 @@ fn collect_rdf_triples(store: &grafeo_core::graph::rdf::RdfStore) -> Vec<Snapsho
     triples
 }
 
-/// The RDF data of a snapshot of `store`: the default graph's triples, and
-/// each named graph's, by name.
+/// The RDF data of a snapshot of `store` as `view` sees it: the default
+/// graph's triples, and each named graph's, by name.
 #[cfg(feature = "triple-store")]
 fn rdf_snapshot(
     store: &grafeo_core::graph::rdf::RdfStore,
+    view: &grafeo_core::graph::rdf::RdfView,
 ) -> (Vec<SnapshotTriple>, Vec<RdfNamedGraphSnapshot>) {
-    let mut names = store.graph_names();
+    let mut names = store.graph_names(view);
     names.sort_unstable();
     let named = names
         .into_iter()
         .filter_map(|name| {
-            store.graph(&name).map(|graph| RdfNamedGraphSnapshot {
-                name,
-                triples: collect_rdf_triples(&graph),
-            })
+            store
+                .graph_at(view, &name)
+                .map(|graph| RdfNamedGraphSnapshot {
+                    name,
+                    triples: collect_rdf_triples(&graph, view),
+                })
         })
         .collect();
-    (collect_rdf_triples(store), named)
+    (collect_rdf_triples(store, view), named)
 }
 
 /// The RDF graphs of a snapshot with their terms read: the default graph's
@@ -900,8 +906,11 @@ impl super::GrafeoDB {
             let mut commits = Some(commits);
             for (index, section) in snapshot.sections.iter().enumerate() {
                 if index == snapshot.held {
-                    // The LPG section is read at E with commits going on.
+                    // The LPG and RDF sections are read at E with commits
+                    // going on.
                     drop(commits.take());
+                    #[cfg(feature = "testing-statement-injection")]
+                    grafeo_common::testing::commit_hook::run_during_checkpoint_write();
                 }
                 image.begin_section(section.section_type(), section.version())?;
                 section.write_to(&mut image)?;
@@ -928,7 +937,7 @@ impl super::GrafeoDB {
         // continue from once its stores are loaded.
         let epoch = sources.epoch(commits);
         target.transaction_manager.sync_epoch(epoch);
-        for section in sources.sections_at(commits, epoch) {
+        for section in sources.sections_at(commits, epoch)? {
             image.begin_section(section.section_type(), section.version())?;
             section.write_to(&mut image)?;
         }
@@ -1030,7 +1039,7 @@ impl super::GrafeoDB {
         // read pinned at it keeps their versions (#362); the rest is taken
         // under the hold.
         let pin = self.transaction_manager.pin_read_at(epoch)?;
-        let held = row_groups::export_held(&self.snapshot_parts(&root));
+        let held = row_groups::export_held(&self.snapshot_parts(&root), epoch);
         drop(commits);
         #[cfg(feature = "testing-statement-injection")]
         grafeo_common::testing::commit_hook::run_during_checkpoint_write();
@@ -1192,8 +1201,9 @@ impl super::GrafeoDB {
         // it had committed further (epochs never go back).
         Self::continue_epochs(&root, &self.transaction_manager);
         // Its graphs, indexes and types are the snapshot's now: no cached
-        // plan was made for them.
-        self.query_cache.clear();
+        // plan was made for them, and their counts anchor the next.
+        root.anchor_plan_statistics();
+        self.query_cache.advance();
         // Durable before it returns: the file holds the restored state and
         // the WAL starts after it, with no commit between, so a crash from
         // here reopens what the restore put in place, not what it replaced.
@@ -1357,18 +1367,27 @@ pub(super) mod row_groups {
         root: Arc<RowGroupStore>,
         /// The named graphs, by name.
         named: Vec<(String, Arc<RowGroupStore>)>,
-        rdf_triples: Vec<super::SnapshotTriple>,
-        rdf_named_graphs: Vec<super::RdfNamedGraphSnapshot>,
+        /// The RDF store and its view at the export's epoch, read once
+        /// commits go on.
+        #[cfg(feature = "triple-store")]
+        rdf: (
+            Arc<grafeo_core::graph::rdf::RdfStore>,
+            grafeo_core::graph::rdf::RdfView,
+        ),
         catalog: Vec<u8>,
     }
 
-    /// Takes the [`ExportHeld`] of `parts`, while the caller holds commits
-    /// off.
+    /// Takes the [`ExportHeld`] of `parts` at `epoch`, the published epoch,
+    /// while the caller holds commits off.
     ///
     /// # Errors
     ///
-    /// The error of a catalog record that does not encode.
-    pub(in crate::database) fn export_held(parts: &Parts<'_>) -> Result<ExportHeld> {
+    /// The error of a catalog record that does not encode; the RDF store has
+    /// no view at `epoch` (which the hold rules out).
+    pub(in crate::database) fn export_held(
+        parts: &Parts<'_>,
+        epoch: EpochId,
+    ) -> Result<ExportHeld> {
         let root = parts.root;
         let mut names = root.graph_names();
         names.sort_unstable();
@@ -1380,16 +1399,24 @@ pub(super) mod row_groups {
             })
             .collect();
         #[cfg(feature = "triple-store")]
-        let (rdf_triples, rdf_named_graphs) = super::rdf_snapshot(parts.rdf);
+        let rdf = (
+            Arc::clone(parts.rdf),
+            parts.rdf.view_at(epoch).map_err(|gone| {
+                Error::Internal(format!(
+                    "an export at epoch {} has no RDF view: {gone}",
+                    epoch.as_u64()
+                ))
+            })?,
+        );
         #[cfg(not(feature = "triple-store"))]
-        let (rdf_triples, rdf_named_graphs) = (Vec::new(), Vec::new());
+        let _ = epoch;
         let catalog = CatalogSection::new(Arc::clone(parts.catalog), Arc::clone(root), || 0)
             .snapshot_records()?;
         Ok(ExportHeld {
             root: Arc::clone(root),
             named,
-            rdf_triples,
-            rdf_named_graphs,
+            #[cfg(feature = "triple-store")]
+            rdf,
             catalog,
         })
     }
@@ -1406,10 +1433,14 @@ pub(super) mod row_groups {
         let ExportHeld {
             root,
             named,
-            rdf_triples,
-            rdf_named_graphs,
+            #[cfg(feature = "triple-store")]
+            rdf,
             catalog,
         } = held;
+        #[cfg(feature = "triple-store")]
+        let (rdf_triples, rdf_named_graphs) = super::rdf_snapshot(&rdf.0, &rdf.1);
+        #[cfg(not(feature = "triple-store"))]
+        let (rdf_triples, rdf_named_graphs) = (Vec::new(), Vec::new());
         let nodes = root.nodes_at(epoch).map(snapshot_node).collect();
         let edges = root.edges_at(epoch).map(snapshot_edge).collect();
         let named_graphs = named
@@ -1541,7 +1572,12 @@ pub(super) mod row_groups {
         #[cfg(feature = "triple-store")]
         {
             parts.rdf.clear();
-            for name in parts.rdf.graph_names() {
+            for name in parts
+                .rdf
+                .graph_names(&grafeo_core::graph::rdf::RdfView::latest(
+                    grafeo_core::graph::rdf::LatestUse::Apply,
+                ))
+            {
                 parts.rdf.drop_graph(&name);
             }
             super::populate_rdf_store(parts.rdf, rdf_graphs);

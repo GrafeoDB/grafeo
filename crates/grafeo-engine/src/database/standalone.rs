@@ -25,8 +25,7 @@ use grafeo_common::change::StandaloneOp;
 use grafeo_common::storage::catalog_record::{
     CatalogKey, CatalogRecord, IndexKeyRecord, IndexKindRecord, IndexNameRecord, IndexRecord,
 };
-#[cfg(feature = "wal")]
-#[cfg(query_language)]
+#[cfg(any(feature = "wal", feature = "triple-store"))]
 use grafeo_common::types::EpochId;
 use grafeo_common::utils::error::{Error, QueryError, Result};
 
@@ -51,10 +50,10 @@ pub(crate) enum Applying<'a> {
     /// text indexes it puts are kept in `unbuilt`, built from the data once
     /// the whole WAL is replayed. A snapshot's catalog applies the same way.
     #[cfg_attr(
-        not(any(feature = "wal", feature = "triple-store")),
+        not(feature = "wal"),
         expect(
             dead_code,
-            reason = "WAL replay and a transaction's RDF graph ops apply this way; neither is built"
+            reason = "only WAL replay applies this way, and it is not built"
         )
     )]
     Replay {
@@ -338,10 +337,39 @@ pub(crate) fn name_claim(kind: &str, name: &str) -> crate::transaction::KeyClaim
     }
 }
 
-/// The claim of every RDF graph operation, whichever graphs it names: one key, as `DROP ALL`
-/// overlaps them all, until reads of RDF are isolated by triple (#718).
-pub(crate) fn rdf_graph_ops_claim() -> crate::transaction::KeyClaim {
-    name_claim("RDF graph operations", "")
+/// The claims of the RDF graph operation `op`: each graph whose triples it
+/// replaces, by name (`""` for the default graph). A `CREATE`, `DROP` or `CLEAR`
+/// claims its graph, a `COPY` its target, a `MOVE` its source and target; an
+/// `ADD` only inserts, which claims nothing, as triple writes claim nothing.
+/// An operation on `NAMED` or `ALL` claims nothing here: it is recorded per
+/// graph (see `RdfWriter::graph_op`), and each of those claims its graph.
+pub(crate) fn rdf_graph_claims(
+    op: &grafeo_common::change::RdfGraphOp,
+) -> Vec<crate::transaction::KeyClaim> {
+    use grafeo_common::change::RdfGraphOp;
+    use grafeo_common::storage::log_record::RdfGraphTarget;
+
+    let claim = |graph: Option<&str>| name_claim("RDF graph", graph.unwrap_or(""));
+    match op {
+        RdfGraphOp::Create { name }
+        | RdfGraphOp::Drop {
+            target: RdfGraphTarget::Named(name),
+        }
+        | RdfGraphOp::Clear {
+            target: RdfGraphTarget::Named(name),
+        } => vec![claim(Some(name))],
+        RdfGraphOp::Drop {
+            target: RdfGraphTarget::Default,
+        }
+        | RdfGraphOp::Clear {
+            target: RdfGraphTarget::Default,
+        } => vec![claim(None)],
+        RdfGraphOp::Drop { .. } | RdfGraphOp::Clear { .. } | RdfGraphOp::Add { .. } => Vec::new(),
+        RdfGraphOp::Copy { target, .. } => vec![claim(target.as_deref())],
+        RdfGraphOp::Move { source, target } => {
+            vec![claim(source.as_deref()), claim(target.as_deref())]
+        }
+    }
 }
 
 /// The names `op` changes, which a transaction claims at its statement: another that
@@ -386,7 +414,7 @@ pub(crate) fn claims_of(op: &StandaloneOp) -> Vec<crate::transaction::KeyClaim> 
                 claim("index", label_index_claim(graph.as_ref(), label, key))
             }
         }],
-        StandaloneOp::RdfGraph(_) => vec![rdf_graph_ops_claim()],
+        StandaloneOp::RdfGraph(op) => rdf_graph_claims(op),
     }
 }
 
@@ -654,6 +682,17 @@ fn log(
     change: &StandaloneChange,
     manager: &TransactionManager,
 ) -> Result<()> {
+    log_at(wal, change, manager, manager.current_epoch())
+}
+
+/// [`log`] at `epoch`: for a change that commits at an epoch of its own.
+#[cfg(feature = "wal")]
+fn log_at(
+    wal: &grafeo_storage::wal::Wal,
+    change: &StandaloneChange,
+    manager: &TransactionManager,
+    epoch: EpochId,
+) -> Result<()> {
     use grafeo_common::storage::log_record::Origin;
     use grafeo_common::types::TransactionId;
     use grafeo_storage::wal::GroupError;
@@ -663,7 +702,7 @@ fn log(
     let mut group = wal
         .begin_group(TransactionId::SYSTEM)
         .map_err(commit_error)?;
-    write_standalone(&mut group, change, manager.current_epoch(), Origin::Schema)?;
+    write_standalone(&mut group, change, epoch, Origin::Schema)?;
     match group.finish() {
         Ok(_) => Ok(()),
         Err(error @ GroupError::OutcomeUnknown(_)) => {
@@ -790,39 +829,69 @@ pub(crate) fn commit_rdf(
     rdf: &grafeo_core::graph::rdf::RdfStore,
     manager: &TransactionManager,
 ) -> Result<()> {
+    // Commits are held, so no commit is between the published epoch and
+    // this one's completion: the next epoch is free. It is the operation's
+    // own, above every reader's snapshot, so a reader before it still reads
+    // the graphs it changes as they were.
+    let epoch = EpochId::new(manager.current_epoch().as_u64() + 1);
     let op = StandaloneOp::RdfGraph(op);
     #[cfg(feature = "wal")]
     if let Some(wal) = wal {
         let mut change = StandaloneChange::new();
         change.push(op.clone());
-        log(wal, &change, manager)?;
+        log_at(wal, &change, manager, epoch)?;
     }
-    if let Err(error) = apply_rdf(&op, rdf, &Applying::Live) {
+    let StandaloneOp::RdfGraph(graph_op) = &op else {
+        unreachable!("made an RDF graph operation above")
+    };
+    let applied = rdf.apply_commit(
+        grafeo_core::graph::rdf::ApplyMode::Publish(epoch),
+        vec![grafeo_core::graph::rdf::CommitChange::Graph(
+            graph_op.clone(),
+        )],
+    );
+    manager.sync_epoch(epoch);
+    crate::transaction::prune_rdf_overlay(rdf, manager);
+    if applied.changed.first() == Some(&false) {
+        let error = match graph_op {
+            grafeo_common::change::RdfGraphOp::Create { .. } => {
+                not_applied(&op, "the graph exists")
+            }
+            _ => not_applied(&op, "the graph does not exist"),
+        };
         manager.poison(&format!("a logged change did not apply: {error}"));
         return Err(error);
     }
     Ok(())
 }
 
-/// Applies `op`, an RDF graph operation, to `rdf`: what a statement does
-/// once it is logged, and what replay does with the logged op. A create of a
-/// graph that exists, or a drop of a named graph that does not, applies
-/// nothing: an error live (the statement's checks refuse it), skipped on
-/// replay.
+/// Applies `op`, an RDF graph operation, to `rdf` through the apply a live
+/// commit uses ([`RdfStore::apply_commit`]), with nothing published: what
+/// replay does with the logged op. A create of a graph that exists, or a
+/// drop of a named graph that does not, applies nothing: an error live (the
+/// statement's checks refuse it), skipped on replay.
+///
+/// [`RdfStore::apply_commit`]: grafeo_core::graph::rdf::RdfStore::apply_commit
 ///
 /// # Errors
 ///
 /// Live: an op the statement's checks should have refused.
-#[cfg(feature = "triple-store")]
+#[cfg(all(feature = "triple-store", feature = "wal"))]
 pub(crate) fn apply_rdf(
     op: &StandaloneOp,
     rdf: &grafeo_core::graph::rdf::RdfStore,
     applying: &Applying<'_>,
 ) -> Result<()> {
+    use grafeo_core::graph::rdf::{ApplyMode, CommitChange};
+
     let StandaloneOp::RdfGraph(graph_op) = op else {
         return Err(not_applied(op, "it is no RDF graph operation"));
     };
-    if rdf.apply_graph_op(graph_op) {
+    let applied = rdf.apply_commit(
+        ApplyMode::Recovery,
+        vec![CommitChange::Graph(graph_op.clone())],
+    );
+    if applied.changed.first() == Some(&true) {
         return Ok(());
     }
     match graph_op {

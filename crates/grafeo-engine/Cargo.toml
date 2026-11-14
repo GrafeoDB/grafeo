@@ -118,9 +118,10 @@ arrow-export = ["dep:arrow-schema", "dep:arrow-array", "dep:arrow-ipc"]  # Arrow
 
 # Testing utilities (zero overhead when disabled)
 testing-crash-injection = ["dep:grafeo-storage", "grafeo-common/testing-crash-injection", "grafeo-storage/testing-crash-injection"]  # Crash injection for recovery testing
-testing-statement-injection = ["grafeo-common/testing-statement-injection"]  # Failure injection at statement / commit entry for rollback atomicity tests, and a hook inside commit
+testing-statement-injection = ["grafeo-common/testing-statement-injection", "grafeo-core/testing-statement-injection"]  # Failure injection at statement / commit entry for rollback atomicity tests, and a hook inside commit
 testing-warning-probe = ["grafeo-common/testing-warning-probe"]  # `Session::set_warning_probe`, which raises the 01Z99 notice at translation or at run time for the warning channel's tests
 testing-deadline-probe = ["grafeo-core/testing-deadline-probe", "grafeo-adapters/testing-deadline-probe"]  # Test only: a deadline that passes after N clock reads in procedures and paths
+testing-plan-cache = []  # Test only: `GrafeoDB::hold_plan_puts`, which pauses a statement between its planning and its plan-cache put
 
 [lints]
 workspace = true
@@ -139,6 +140,12 @@ harness = false
 
 [[bench]]
 name = "memory_bench"
+harness = false
+
+# Bytes per node, edge and property value (#431); its CI job checks them against
+# benches/memory_per_entity.baseline.json.
+[[bench]]
+name = "memory_per_entity"
 harness = false
 
 [[bench]]
@@ -205,6 +212,12 @@ path = "tests/path_search_budget.rs"
 name = "typed_read_allocations"
 path = "tests/typed_read_allocations.rs"
 
+# Zeroes freed blocks and lists the live ones with its own global allocator.
+[[test]]
+name = "deleted_values_leave_memory"
+path = "tests/deleted_values_leave_memory.rs"
+required-features = ["gql", "wal", "grafeo-file"]
+
 # Installs the global tracing subscriber. CI also runs it with only these features, where a crate
 # whose tracing feature the engine does not turn on loses its events (all features would hide it).
 [[test]]
@@ -217,6 +230,11 @@ required-features = ["gql", "wal", "grafeo-file", "tracing", "testing-crash-inje
 name = "turn_sample_allocations"
 path = "tests/turn_sample_allocations.rs"
 required-features = ["gql", "grafeo-file"]
+
+# Counts allocated bytes with its own global allocator.
+[[test]]
+name = "node_rows_in_the_account"
+path = "tests/node_rows_in_the_account.rs"
 
 # Counts allocations with its own global allocator.
 [[test]]

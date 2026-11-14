@@ -1020,6 +1020,40 @@ impl Inner {
         matched || !held
     }
 
+    /// Whether every value the nodes' (`nodes` true) or edges' column of
+    /// `property` holds is of `kind`'s kind or a null, by the zone maps of the
+    /// hot columns and of the cold chunks. `None` when a part of the column
+    /// keeps no bounds. A key no row group has a column of holds nothing, so
+    /// it holds only `kind` vacuously.
+    fn column_holds_only_kind(
+        &self,
+        nodes: bool,
+        property: &PropertyKey,
+        kind: crate::execution::operators::value_utils::ValueKinds,
+    ) -> Option<bool> {
+        let Some(key) = self.keys.get_id(property.as_str()) else {
+            return Some(true);
+        };
+        if nodes {
+            for group in self.nodes.values() {
+                match group.columns.holds_only_kind(key, kind) {
+                    Some(true) => {}
+                    Some(false) => return Some(false),
+                    None => return None,
+                }
+            }
+        } else {
+            for group in self.edges.values() {
+                match group.columns.holds_only_kind(key, kind) {
+                    Some(true) => {}
+                    Some(false) => return Some(false),
+                    None => return None,
+                }
+            }
+        }
+        Some(true)
+    }
+
     fn statistics(&self) -> Statistics {
         let mut statistics = Statistics::new();
         statistics.total_nodes = size(self.counts.nodes) as u64;
@@ -1666,6 +1700,17 @@ impl GraphStore for RowGroupStore {
         property: &str,
     ) -> Option<crate::execution::operators::value_utils::ValueKinds> {
         self.inner.read().index_kinds(labels, property)
+    }
+
+    fn column_holds_only_kind(
+        &self,
+        nodes: bool,
+        property: &str,
+        kind: crate::execution::operators::value_utils::ValueKinds,
+    ) -> Option<bool> {
+        self.inner
+            .read()
+            .column_holds_only_kind(nodes, &PropertyKey::from(property), kind)
     }
 
     fn find_nodes_in_range(

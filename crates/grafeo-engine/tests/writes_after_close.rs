@@ -18,7 +18,7 @@
 #![cfg(all(feature = "gql", feature = "grafeo-file"))]
 #![allow(
     deprecated,
-    reason = "the test reaches the row-group store itself, which only the deprecated GrafeoDB::store() gives, until 0.7.0 removes it"
+    reason = "the test reaches the row-group store and the RDF store themselves, which only the deprecated GrafeoDB::store() and GrafeoDB::rdf_store() give, until 0.7.0 makes them crate-private"
 )]
 
 use std::path::Path;

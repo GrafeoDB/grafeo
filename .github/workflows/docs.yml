@@ -7,6 +7,7 @@ on:
     paths:
       - 'docs/**'
       - 'docs-snippets/**'
+      - 'CHANGELOG.md'
       - 'zensical.toml'
       - 'scripts/docs_extras.py'
       - '.github/workflows/docs.yml'
@@ -16,6 +17,7 @@ on:
     paths:
       - 'docs/**'
       - 'docs-snippets/**'
+      - 'CHANGELOG.md'
       - 'zensical.toml'
       - 'scripts/docs_extras.py'
   workflow_dispatch:

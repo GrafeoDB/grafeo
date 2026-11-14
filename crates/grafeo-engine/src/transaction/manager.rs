@@ -214,6 +214,12 @@ pub struct TransactionInfo {
     /// changed from it (see [`TransactionManager::open_change_sets`]).
     /// Dropped once the transaction is committed or aborted.
     pub(crate) changes: Option<Arc<TransactionChanges>>,
+    /// Its RDF writes once it is committed (the net of each triple it wrote,
+    /// per graph), for the conflict checks of the transactions that began
+    /// before its commit was published; `None` when none was open then.
+    /// Until then a check reads them from `changes`.
+    #[cfg(feature = "triple-store")]
+    rdf_writes: Option<Box<super::rdf::PendingTriples>>,
     /// Whether this is a private transaction (a direct call, see
     /// [`TransactionManager::begin_private`]): nobody asks for its state, so
     /// it leaves the manager as soon as no other transaction can conflict
@@ -254,7 +260,30 @@ impl TransactionInfo {
             endpoint_set: FxHashSet::default(),
             key_set: FxHashSet::default(),
             changes: Some(changes),
+            #[cfg(feature = "triple-store")]
+            rdf_writes: None,
             private,
+            claim_undo: None,
+        }
+    }
+
+    /// A committed writer that was no transaction (a bulk RDF load), kept
+    /// for the conflict checks of the transactions open across it: its RDF
+    /// `writes` at `epoch`, nothing else.
+    #[cfg(feature = "triple-store")]
+    fn committed_writer(epoch: EpochId, writes: super::rdf::PendingTriples) -> Self {
+        Self {
+            state: TransactionState::Committed,
+            isolation_level: IsolationLevel::default(),
+            start_epoch: epoch,
+            write_set: FxHashSet::default(),
+            read_set: FxHashSet::default(),
+            delete_set: FxHashSet::default(),
+            endpoint_set: FxHashSet::default(),
+            key_set: FxHashSet::default(),
+            changes: None,
+            rdf_writes: Some(Box::new(writes)),
+            private: false,
             claim_undo: None,
         }
     }
@@ -275,6 +304,18 @@ impl TransactionInfo {
                  transaction creates an edge to"
             )),
             _ => None,
+        }
+    }
+
+    /// The conflict of `ours`, the RDF writes of a transaction that commits
+    /// now, with this transaction's, which committed after it began: from
+    /// its change set until its commit is published, then from what it kept.
+    #[cfg(feature = "triple-store")]
+    fn rdf_conflict(&self, ours: &TransactionChanges) -> Option<Error> {
+        match (&self.rdf_writes, &self.changes) {
+            (Some(theirs), _) => ours.rdf_conflict_with(theirs),
+            (None, Some(theirs)) => ours.rdf_conflict_with_set(theirs),
+            (None, None) => None,
         }
     }
 }
@@ -809,6 +850,17 @@ impl Publish<'_> {
             if let Some(info) = transactions.get_mut(&self.transaction_id) {
                 info.state = TransactionState::Committed;
                 info.claim_undo = None;
+                // A transaction still open began before this publish: its
+                // commit checks its RDF writes against this one's, which the
+                // change set gives up now. Counted under this lock (see
+                // `register`): with no other, none begins below the epoch.
+                #[cfg(feature = "triple-store")]
+                if manager.active_count.load(Ordering::Acquire) > 1
+                    && let Some(changes) = &info.changes
+                    && changes.has_pending_triples()
+                {
+                    info.rdf_writes = Some(Box::new(changes.take_rdf_writes()));
+                }
                 // Stamped: what it changed is committed state now.
                 info.changes = None;
                 // It reads no more: its snapshot holds the horizon no more.
@@ -1648,6 +1700,28 @@ impl TransactionManager {
             }
         }
 
+        // The same for RDF triples: a transaction that committed after our
+        // snapshot wrote a triple we wrote, and one of the two deletes it.
+        // Its writes are in its change set until its commit is published,
+        // which needs no commit lock (the next commit may check meanwhile),
+        // and kept with it after while a transaction that began before is
+        // open (see `Publish::complete_with`).
+        #[cfg(feature = "triple-store")]
+        if others_committed
+            && let Some(our_changes) = &ours.changes
+            && our_changes.has_pending_triples()
+        {
+            for (other_tx, commit_epoch) in committed.iter() {
+                if *other_tx != transaction_id
+                    && commit_epoch.as_u64() > our_start_epoch.as_u64()
+                    && let Some(other_info) = txns.get(other_tx)
+                    && let Some(conflict) = other_info.rdf_conflict(our_changes)
+                {
+                    return Err(conflict);
+                }
+            }
+        }
+
         // SSI validation for Serializable isolation level.
         // Check for read-write conflicts: if we read an entity that another
         // transaction (that committed after we started) wrote, we have a
@@ -2040,6 +2114,44 @@ impl TransactionManager {
             .fetch_max(epoch.as_u64(), Ordering::SeqCst);
         self.published_epoch
             .fetch_max(epoch.as_u64(), Ordering::SeqCst);
+        self.wake_publish_waiters();
+    }
+
+    /// Publishes `epoch`, a bulk RDF load's, which the caller applied while
+    /// it holds commits off (`_commits`). While a transaction is open, the
+    /// load is first recorded as a committed writer whose RDF writes
+    /// `writes` gives (its net inserts), so the commit of a transaction open
+    /// across it checks against them as against a transaction's. Recorded
+    /// and published under the `transactions` lock, under which a
+    /// transaction begins: none begins between the check and the publish
+    /// and reads below the load unrecorded. The load itself conflicts with
+    /// nothing: it applied against the newest state at its own epoch.
+    #[cfg(feature = "triple-store")]
+    pub(crate) fn publish_load(
+        &self,
+        _commits: &CommitsHeld<'_>,
+        epoch: EpochId,
+        writes: impl FnOnce() -> super::rdf::PendingTriples,
+    ) {
+        {
+            let mut transactions = self.transactions.write();
+            if self.active_count.load(Ordering::Acquire) > 0 {
+                let transaction_id =
+                    TransactionId::new(self.next_transaction_id.fetch_add(1, Ordering::Relaxed));
+                transactions.insert(
+                    transaction_id,
+                    TransactionInfo::committed_writer(epoch, writes()),
+                );
+                // Transactions, then committed epochs, as `gc` takes them.
+                self.committed_epochs.write().insert(transaction_id, epoch);
+            }
+            self.assigned_epoch
+                .fetch_max(epoch.as_u64(), Ordering::SeqCst);
+            self.published_epoch
+                .fetch_max(epoch.as_u64(), Ordering::SeqCst);
+        }
+        // After the `transactions` lock: a commit's publish takes the publish
+        // turn first, then that lock.
         self.wake_publish_waiters();
     }
 

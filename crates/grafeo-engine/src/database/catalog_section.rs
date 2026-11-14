@@ -1410,6 +1410,7 @@ mod tests {
                 constraints: vec![],
                 parent_types: vec![],
                 key_labels: vec![],
+                standalone: false,
             });
 
         let bytes = section.serialize().unwrap();
@@ -1437,6 +1438,7 @@ mod tests {
                 source_node_types: vec![],
                 target_node_types: vec![],
                 key_labels: vec![],
+                standalone: false,
             });
 
         let bytes = section.serialize().unwrap();
@@ -1719,6 +1721,7 @@ mod tests {
             ],
             parent_types: vec!["Place".to_string()],
             key_labels: Vec::new(),
+            standalone: false,
         });
         catalog.register_or_replace_edge_type_def(EdgeTypeDefinition {
             name: "ROAD".to_string(),
@@ -1732,6 +1735,7 @@ mod tests {
             source_node_types: vec!["City".to_string()],
             target_node_types: vec!["City".to_string(), "Place".to_string()],
             key_labels: Vec::new(),
+            standalone: false,
         });
         catalog
             .register_graph_type(GraphTypeDefinition {
@@ -2004,6 +2008,7 @@ mod tests {
             constraints: Vec::new(),
             parent_types: vec!["EventKey".to_string()],
             key_labels: vec!["EventKey".to_string()],
+            standalone: false,
         });
         catalog.register_or_replace_edge_type_def(EdgeTypeDefinition {
             name: "BOOKED".to_string(),
@@ -2012,6 +2017,7 @@ mod tests {
             source_node_types: vec!["Person".to_string(), "Museum".to_string()],
             target_node_types: vec!["Event".to_string()],
             key_labels: vec!["BookingKey".to_string()],
+            standalone: false,
         });
         catalog
             .register_schema_namespace("archive".to_string())
@@ -2207,6 +2213,7 @@ mod tests {
                     constraints: Vec::new(),
                     parent_types: Vec::new(),
                     key_labels: Vec::new(),
+                    standalone: false,
                 });
                 catalog.register_or_replace_edge_type_def(EdgeTypeDefinition {
                     name: name.to_uppercase(),
@@ -2215,6 +2222,7 @@ mod tests {
                     source_node_types: Vec::new(),
                     target_node_types: Vec::new(),
                     key_labels: Vec::new(),
+                    standalone: false,
                 });
                 catalog
                     .register_graph_type(GraphTypeDefinition {
@@ -2288,6 +2296,7 @@ mod tests {
             constraints: Vec::new(),
             parent_types: Vec::new(),
             key_labels: Vec::new(),
+            standalone: false,
         }
     }
 
@@ -2306,6 +2315,7 @@ mod tests {
             source_node_types: Vec::new(),
             target_node_types: Vec::new(),
             key_labels: vec!["KnowsKey".into()],
+            standalone: false,
         };
         section
             .catalog
@@ -2518,6 +2528,7 @@ mod tests {
                 constraints: Vec::new(),
                 parent_types: Vec::new(),
                 key_labels: Vec::new(),
+                standalone: false,
             })
         };
         let schema = |name: &str| {
@@ -2660,6 +2671,7 @@ mod tests {
                         source_node_types: vec![],
                         target_node_types: vec![],
                         key_labels: vec![],
+                        standalone: false,
                     });
             } else {
                 section
@@ -2670,6 +2682,7 @@ mod tests {
                         constraints: vec![],
                         parent_types: vec![],
                         key_labels: vec![],
+                        standalone: false,
                     });
             }
             let error = MemoryImage::from_sections(&[&section])
@@ -2701,6 +2714,7 @@ mod tests {
                 source_node_types: cities.clone(),
                 target_node_types: cities,
                 key_labels: vec![],
+                standalone: false,
             });
         let error = MemoryImage::from_sections(&[&section])
             .unwrap_err()

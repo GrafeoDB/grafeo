@@ -422,7 +422,8 @@ impl StatementPlanning {
         #[cfg(stored_procedures)]
         let planner = planner.with_session_planning(session);
 
-        Ok(planner)
+        // A session's: its plans run inside the statement's memory scope.
+        Ok(planner.in_session())
     }
 
     /// The planner of a stored procedure's body (see

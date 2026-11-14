@@ -935,6 +935,20 @@ pub trait GraphStore: Send + Sync {
         None
     }
 
+    /// Whether every value the column of `property` holds for nodes (`nodes` true) or edges is of
+    /// `kind`'s kind or a null, by each chunk's zone map and the hot columns' bounds: a null never
+    /// compares, so it never raises. `None` when a part of the column keeps no bounds, or for a
+    /// store that does not keep them, which a statement whose comparison raises across kinds then
+    /// does not read.
+    fn column_holds_only_kind(
+        &self,
+        _nodes: bool,
+        _property: &str,
+        _kind: crate::execution::operators::value_utils::ValueKinds,
+    ) -> Option<bool> {
+        None
+    }
+
     /// [`find_few_nodes_maybe_equal`](Self::find_few_nodes_maybe_equal) through the index
     /// [`find_indexed_maybe_equal`](Self::find_indexed_maybe_equal) reads.
     ///

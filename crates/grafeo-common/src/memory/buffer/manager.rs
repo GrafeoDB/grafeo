@@ -270,6 +270,7 @@ impl BufferManager {
             requested: bytes(requested),
             used: bytes(self.allocated.load(Ordering::Relaxed)),
             limit: bytes(self.config.budget),
+            detail: None,
         }
     }
 

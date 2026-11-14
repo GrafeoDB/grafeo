@@ -253,7 +253,7 @@ fn a_prepared_plan_holds_no_value() {
     let key = CacheKey::in_scope(statement, QueryLanguage::Gql, None, None).prepared();
     let plan = db
         .query_cache()
-        .get_optimized(&key)
+        .get(&key, grafeo_engine::query::cache::Stage::Optimized)
         .expect("the statement is prepared");
     let text = format!("{plan:?}");
     assert!(text.contains("Parameter(\"name\")"), "{text}");

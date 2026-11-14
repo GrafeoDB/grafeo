@@ -11,7 +11,7 @@ grafeo-server wraps the Grafeo engine in a REST API, GQL Wire Protocol (gRPC) an
 
 - **REST API** with auto-commit and explicit transaction modes
 - **GQL Wire Protocol** (gRPC) on port 7688 for binary wire-protocol clients
-- **Bolt v5.x** on port 7687 for Neo4j driver compatibility
+- **Bolt v5.x** on port 7687, so existing Bolt drivers connect
 - **Multi-language queries**: GQL, Cypher, GraphQL, Gremlin, SPARQL, SQL/PGQ
 - **Admin API**: database stats, WAL management, integrity validation, index management
 - **Search API**: vector (KNN/HNSW), text (BM25) and hybrid search
@@ -25,14 +25,16 @@ grafeo-server wraps the Grafeo engine in a REST API, GQL Wire Protocol (gRPC) an
 
 Four tiers are published to Docker Hub on every release:
 
-| Tier | Tag | Transport | Languages | AI/Search | Web UI | Binary |
-|------|-----|-----------|-----------|-----------|--------|--------|
-| **gwp** | `grafeo-server:gwp` | GWP (gRPC :7688) | GQL | No | No | ~7 MB |
-| **bolt** | `grafeo-server:bolt` | Bolt v5 (:7687) | Cypher | No | No | ~8 MB |
-| **standard** | `grafeo-server:latest` | HTTP (:7474) | All 6 | No | Studio | ~21 MB |
-| **full** | `grafeo-server:full` | HTTP + GWP + Bolt | All 6 | Yes + embed | Studio | ~25 MB |
+| Tier | Tag | Transport | Languages | AI/Search | Web UI | Image (amd64) |
+|------|-----|-----------|-----------|-----------|--------|---------------|
+| **gwp** | `grafeo-server:gwp` | GWP (gRPC :7688) | GQL | No | No | 37.2 MB |
+| **bolt** | `grafeo-server:bolt` | Bolt v5 (:7687) | Cypher | No | No | 36.6 MB |
+| **standard** | `grafeo-server:latest` | HTTP (:7474) | All 6 | No | Studio | 48.0 MB |
+| **full** | `grafeo-server:full` | HTTP + GWP + Bolt | All 6 | Yes + embed | Studio | 52.6 MB |
 
-Versioned tags follow the pattern: `0.5.38`, `0.5.38-gwp`, `0.5.38-bolt`, `0.5.38-full`.
+Versioned tags follow the pattern: `0.6.2`, `0.6.2-gwp`, `0.6.2-bolt`, `0.6.2-full`.
+
+The images listen on `0.0.0.0`, so they refuse to start without credentials: set `GRAFEO_AUTH_TOKEN` (or `GRAFEO_AUTH_USER` and `GRAFEO_AUTH_PASSWORD`), or `GRAFEO_ALLOW_UNAUTHENTICATED=true` on a trusted network only. Their command is `--host 0.0.0.0 --data-dir /data`; arguments given to `docker run` replace it, so pass `--host 0.0.0.0` with them.
 
 ### GWP
 
@@ -43,15 +45,15 @@ GQL-only gRPC wire protocol. Minimal footprint for machine-to-machine communicat
 - Edge deployments
 
 ```bash
-docker run -p 7688:7688 grafeo/grafeo-server:gwp --data-dir /data
+docker run -p 7688:7688 -e GRAFEO_AUTH_TOKEN=my-secret-token grafeo/grafeo-server:gwp
 ```
 
 ### Bolt
 
-Cypher-only Bolt v5 wire protocol. Compatible with existing Neo4j drivers (Python `neo4j`, JavaScript `neo4j-driver`, etc.).
+Cypher-only Bolt v5 wire protocol. Existing Bolt drivers connect to it as they are.
 
 ```bash
-docker run -p 7687:7687 grafeo/grafeo-server:bolt --data-dir /data
+docker run -p 7687:7687 -e GRAFEO_AUTH_TOKEN=my-secret-token grafeo/grafeo-server:bolt
 ```
 
 ### Standard (default)
@@ -59,15 +61,15 @@ docker run -p 7687:7687 grafeo/grafeo-server:bolt --data-dir /data
 HTTP REST API with all query languages, graph algorithms and the Studio web UI. This is the default `grafeo-server:latest` image.
 
 ```bash
-docker run -p 7474:7474 grafeo/grafeo-server
+docker run -p 7474:7474 -e GRAFEO_AUTH_TOKEN=my-secret-token grafeo/grafeo-server
 ```
 
 ### Full
 
-Everything in standard plus GWP, Bolt, AI/search features, ONNX embedding generation, authentication (bearer token, HTTP Basic), TLS and JSON Schema validation. Production-ready with all features and security built in.
+Everything in standard plus GWP, Bolt, AI/search features, ONNX embedding generation, TLS and JSON Schema validation. Authentication (bearer token, HTTP Basic) is in every image.
 
 ```bash
-docker run -p 7474:7474 -p 7687:7687 -p 7688:7688 grafeo/grafeo-server:full
+docker run -p 7474:7474 -p 7687:7687 -p 7688:7688 -e GRAFEO_AUTH_TOKEN=my-secret-token grafeo/grafeo-server:full
 ```
 
 ## Quick Start
@@ -75,17 +77,22 @@ docker run -p 7474:7474 -p 7687:7687 -p 7688:7688 grafeo/grafeo-server:full
 ### Docker
 
 ```bash
-# In-memory (ephemeral)
-docker run -p 7474:7474 grafeo/grafeo-server
+# Data in /data inside the container, gone when the container is removed
+docker run -p 7474:7474 -e GRAFEO_AUTH_TOKEN=my-secret-token grafeo/grafeo-server
 
-# Persistent storage
-docker run -p 7474:7474 -v grafeo-data:/data grafeo/grafeo-server --data-dir /data
+# Persistent storage in a named volume
+docker run -p 7474:7474 -v grafeo-data:/data -e GRAFEO_AUTH_TOKEN=my-secret-token grafeo/grafeo-server
+
+# In-memory: arguments replace the image's command, so pass --host again
+docker run -p 7474:7474 -e GRAFEO_AUTH_TOKEN=my-secret-token grafeo/grafeo-server --host 0.0.0.0
 ```
 
 ### Docker Compose
 
+From a grafeo-server checkout, with its `docker-compose.yml`:
+
 ```bash
-docker compose up -d
+GRAFEO_AUTH_TOKEN=my-secret-token docker compose up -d
 ```
 
 Server at `http://localhost:7474`. Web UI at `http://localhost:7474/studio/`.
@@ -96,6 +103,8 @@ Server at `http://localhost:7474`. Web UI at `http://localhost:7474/studio/`.
 grafeo-server --data-dir ./mydata    # persistent
 grafeo-server                        # in-memory
 ```
+
+The binary listens on `127.0.0.1`. To serve other machines, pass `--host 0.0.0.0` with credentials.
 
 ## API Endpoints
 
@@ -171,7 +180,7 @@ The gwp and full builds include a gRPC-based binary wire protocol on port 7688. 
 
 ### Bolt v5.x (BOLTR)
 
-The bolt and full builds include a Bolt v5.x wire protocol on port 7687, compatible with Neo4j drivers. Configure with `--bolt-port` or `GRAFEO_BOLT_PORT`.
+The bolt and full builds include a Bolt v5.x wire protocol on port 7687, for existing Bolt drivers. Configure with `--bolt-port` or `GRAFEO_BOLT_PORT`.
 
 ### Health & Feature Discovery
 
@@ -198,7 +207,8 @@ Environment variables (prefix `GRAFEO_`), overridden by CLI flags:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `GRAFEO_HOST` | `0.0.0.0` | Bind address |
+| `GRAFEO_HOST` | `127.0.0.1` | Bind address (the images set `0.0.0.0`); a non-loopback address needs credentials or `GRAFEO_ALLOW_UNAUTHENTICATED` |
+| `GRAFEO_ALLOW_UNAUTHENTICATED` | `false` | Start on a non-loopback address without credentials |
 | `GRAFEO_PORT` | `7474` | Bind port |
 | `GRAFEO_DATA_DIR` | _(none)_ | Persistence directory (omit for in-memory) |
 | `GRAFEO_SESSION_TTL` | `300` | Transaction session timeout (seconds) |
@@ -207,12 +217,12 @@ Environment variables (prefix `GRAFEO_`), overridden by CLI flags:
 | `GRAFEO_LOG_LEVEL` | `info` | Tracing log level |
 | `GRAFEO_LOG_FORMAT` | `pretty` | Log format: `pretty` or `json` |
 | `GRAFEO_GWP_PORT` | `7688` | GQL Wire Protocol (gRPC) port |
-| `GRAFEO_GWP_MAX_SESSIONS` | `0` | Max concurrent GWP sessions (0 = unlimited) |
+| `GRAFEO_GWP_MAX_SESSIONS` | `1000` | Max concurrent GWP sessions (0 = unlimited) |
 | `GRAFEO_BOLT_PORT` | `7687` | Bolt v5.x wire protocol port |
-| `GRAFEO_BOLT_MAX_SESSIONS` | `0` | Max concurrent Bolt sessions (0 = unlimited) |
+| `GRAFEO_BOLT_MAX_SESSIONS` | `1000` | Max concurrent Bolt sessions (0 = unlimited) |
 | `GRAFEO_RATE_LIMIT` | `0` | Max requests per window per IP (0 = disabled) |
 
-### Authentication (feature: `auth`)
+### Authentication (feature: `auth`, in the default build and every image)
 
 | Variable | Description |
 |----------|-------------|
@@ -281,14 +291,14 @@ A pure Rust gRPC wire protocol for [GQL (ISO/IEC 39075)](https://www.iso.org/sta
 | Go | [gwp/go](https://github.com/GrafeoDB/gql-wire-protocol) | `go get github.com/GrafeoDB/gwp/go` |
 | Java | [dev.grafeo:gwp](https://central.sonatype.com/) | Maven Central |
 
-**Status:** v0.1.6, active development. The type system and service architecture are stable. Recent work has focused on aligning the catalog hierarchy (catalog > schema > graph) with the GQL specification.
+**Status:** v0.4.0, active development. The type system and service architecture are stable.
 
 ### BOLTR (Bolt Wire Protocol)
 
 [:octicons-mark-github-16: GitHub](https://github.com/GrafeoDB/boltr){ .md-button }
 [:material-package-variant: crates.io](https://crates.io/crates/boltr){ .md-button }
 
-A pure Rust implementation of the [Bolt v5.x wire protocol](https://neo4j.com/docs/bolt/current/), the binary protocol used by Neo4j for client-server communication. BOLTR enables compatibility with existing Neo4j drivers and tooling.
+A pure Rust implementation of the [Bolt v5.x wire protocol](https://neo4j.com/docs/bolt/current/), a binary protocol for graph database clients. BOLTR lets existing Bolt drivers and tooling connect.
 
 **Key features:**
 
@@ -301,19 +311,19 @@ A pure Rust implementation of the [Bolt v5.x wire protocol](https://neo4j.com/do
 - ROUTE message support for cluster-aware drivers
 - Graceful connection draining on shutdown
 
-**Status:** v0.1.2, active development. Spec-complete for Bolt 5.1-5.4 including ROUTE and TELEMETRY messages. Rust-only at this time (existing Neo4j drivers in other languages work out of the box).
+**Status:** v0.3.0, active development. Spec-complete for Bolt 5.1-5.4 including ROUTE and TELEMETRY messages. Rust-only at this time; existing Bolt drivers in other languages connect as they are.
 
 ### Protocol Comparison
 
 | Aspect | GWP | BOLTR |
 |--------|-----|-------|
-| **Standard** | GQL (ISO/IEC 39075) | Bolt v5.x (Neo4j) |
+| **Standard** | GQL (ISO/IEC 39075) | Bolt v5.x |
 | **Transport** | gRPC + Protocol Buffers | TCP + PackStream |
 | **Streaming** | Server-side gRPC streaming | Pull-based (PULL/DISCARD) |
-| **Error model** | GQLSTATUS codes (ISO) | Neo4j error codes |
-| **Client bindings** | Rust, Python, JS, Go, Java | Rust (Neo4j drivers compatible) |
+| **Error model** | GQLSTATUS codes (ISO) | Bolt FAILURE messages |
+| **Client bindings** | Rust, Python, JS, Go, Java | Rust, plus existing Bolt drivers |
 | **Default port** | 7688 | 7687 |
-| **Use case** | Standards-based GQL clients | Neo4j driver compatibility |
+| **Use case** | Standards-based GQL clients | Existing Bolt drivers |
 
 ## When to Use
 

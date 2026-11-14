@@ -58,11 +58,11 @@ npm install @grafeo-db/js
 ### Verify Installation
 
 ```js
-const { GrafeoDB } = require('@grafeo-db/js');
+import { GrafeoDB } from '@grafeo-db/js';
 
-const db = await GrafeoDB.create();
+const db = GrafeoDB.create();
 console.log('Grafeo installed successfully!');
-await db.close();
+db.close();
 ```
 
 ## Go
@@ -107,7 +107,7 @@ console.log('Grafeo WASM installed successfully!');
 ## C# / .NET
 
 ```bash
-dotnet add package GrafeoDB
+dotnet add package Grafeo
 ```
 
 ### Verify Installation
@@ -115,7 +115,7 @@ dotnet add package GrafeoDB
 ```csharp
 using Grafeo;
 
-var db = new GrafeoDB();
+using var db = GrafeoDB.Memory();
 Console.WriteLine("Grafeo installed successfully!");
 ```
 
@@ -163,17 +163,21 @@ Grafeo uses **persona-based feature profiles** that describe use cases rather th
 
 ```toml
 [dependencies]
-# Default: GQL + AI + algorithms + parallel + the database file, without a write-ahead log
+# Default: the deprecated `embedded` profile (GQL, search, algorithms, parallel
+# execution, the database file and Arrow export), without a write-ahead log
 grafeo = "0.6"
 
-# Add RDF/SPARQL support
+# LPG application with search
+grafeo = { version = "0.6", default-features = false, features = ["lpg", "ai"] }
+
+# Add RDF, SPARQL and SHACL
 grafeo = { version = "0.6", features = ["rdf"] }
 
-# Graph analytics
+# Add graph algorithms, search and bulk import
 grafeo = { version = "0.6", features = ["analytics"] }
 
-# Full feature set
-grafeo = { version = "0.6", default-features = false, features = ["enterprise"] }
+# Every language and model
+grafeo = { version = "0.6", default-features = false, features = ["lpg", "rdf", "analytics", "ai"] }
 
 # Minimal: GQL only
 grafeo = { version = "0.6", default-features = false, features = ["gql"] }
@@ -183,7 +187,7 @@ grafeo = { version = "0.6", features = ["embed"] }
 ```
 
 !!! warning "The default features have no write-ahead log"
-    `GrafeoDB::open(path)` works with the default features, but they have no write-ahead log: commits reach the file only when the database checkpoints (`close()`, dropping it, or `wal_checkpoint()`). **A process that crashes loses every commit since the last checkpoint.** For commits that survive a crash, add the `wal` feature (also in the `storage` group and the `lpg` profile):
+    `GrafeoDB::open(path)` works with the default features, but they have no write-ahead log: commits reach the file only when the database checkpoints (`close()`, dropping it, or `wal_checkpoint()`). **A process that crashes loses every commit since the last checkpoint.** For commits that survive a crash, add the `wal` feature (also in the `storage` group and the `lpg` and `rdf` profiles):
 
     ```toml
     grafeo = { version = "0.6", features = ["wal"] }
@@ -195,15 +199,17 @@ grafeo = { version = "0.6", features = ["embed"] }
 
 | Profile | Contents | Use case |
 |---------|----------|----------|
-| `lpg` | GQL, Cypher, Gremlin, SQL/PGQ, storage (write-ahead log, spill, mmap) | Graph applications |
-| `rdf` | SPARQL, triple-store, ring-index | Knowledge graphs, linked data |
-| `analytics` | Algorithms, parallel | Graph analytics pipelines |
-| `ai` | Vector, text, hybrid search, CDC | RAG, semantic search |
-| `edge` | GQL, compact, regex-lite | WASM, resource-constrained |
-| `enterprise` | All features | Full-featured deployments |
+| `lpg` | GQL, Cypher, Gremlin, SQL/PGQ, storage (write-ahead log, database file, spill, mmap) | Graph applications |
+| `rdf` | RDF triple store, GQL, SPARQL, GraphQL, SHACL, storage | Knowledge graphs, linked data |
+| `analytics` | Graph algorithms, vector, text and hybrid search, JSON Lines and Parquet import | Graph analytics pipelines |
+| `ai` | Vector, text and hybrid search, change data capture | RAG, semantic search, agent memory |
+| `edge` | GQL, lightweight regex | WebAssembly, resource-constrained |
+| `enterprise` | Metrics, tracing, async storage (deprecated) | Platform operators, observability |
+
+`rdf` leaves out the compact RDF index: add the `ring-index` feature for it.
 
 !!! note "Deprecated profiles"
-    The old deployment-target profiles (`embedded`, `browser`, `server`, `full`) still work as aliases but are deprecated and scheduled for removal in 0.7.0. Migrate to persona profiles when convenient.
+    The old deployment-target profiles (`embedded`, `browser`, `server`, `full`) still work as aliases but are deprecated and scheduled for removal in 0.7.0. `embedded` is the default until then. Migrate to persona profiles when convenient: `full` is `lpg`, `rdf`, `analytics` and `ai`.
 
 #### Convenience Groups
 
@@ -252,25 +258,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 For a standalone database server accessible via REST API, use [grafeo-server](../project/ecosystem/grafeo-server.md):
 
 ```bash
-# Standard: all query languages, AI/search, web UI
-docker run -p 7474:7474 grafeo/grafeo-server
+# Standard: all query languages over HTTP, web UI
+docker run -p 7474:7474 -e GRAFEO_AUTH_TOKEN=my-secret-token grafeo/grafeo-server
 ```
 
-Three image variants are available:
+The images listen on `0.0.0.0`, so they refuse to start without credentials: set `GRAFEO_AUTH_TOKEN` (or `GRAFEO_AUTH_USER` and `GRAFEO_AUTH_PASSWORD`), or `GRAFEO_ALLOW_UNAUTHENTICATED=true` on a trusted network only.
+
+Four image variants are available:
 
 | Variant | Tag | Description |
 |---------|-----|-------------|
-| **lite** | `grafeo-server:lite` | GQL only, no UI, smallest footprint |
-| **standard** | `grafeo-server:latest` | All languages + AI/search + web UI |
-| **full** | `grafeo-server:full` | Everything + auth + TLS + ONNX embed |
+| **gwp** | `grafeo-server:gwp` | GQL over the GQL Wire Protocol (gRPC, port 7688), no UI |
+| **bolt** | `grafeo-server:bolt` | Cypher over Bolt v5 (port 7687), no UI |
+| **standard** | `grafeo-server:latest` | All six languages over HTTP (port 7474), web UI |
+| **full** | `grafeo-server:full` | HTTP, GQL Wire Protocol and Bolt, AI and search with ONNX embeddings, TLS, web UI |
 
 ```bash
-# Lite: minimal, GQL only
-docker run -p 7474:7474 grafeo/grafeo-server:lite
+# GQL Wire Protocol: GQL over gRPC
+docker run -p 7688:7688 -e GRAFEO_AUTH_TOKEN=my-secret-token grafeo/grafeo-server:gwp
 
-# Full: production with auth and TLS
-docker run -p 7474:7474 grafeo/grafeo-server:full \
-  --auth-token my-secret --data-dir /data
+# Full: every transport, AI and search
+docker run -p 7474:7474 -p 7687:7687 -p 7688:7688 -e GRAFEO_AUTH_TOKEN=my-secret-token grafeo/grafeo-server:full
 ```
 
 Server at `http://localhost:7474`. Web UI (standard/full) at `http://localhost:7474/studio/`.
@@ -329,8 +337,10 @@ npm run build
 ### Build WASM Package
 
 ```bash
-wasm-pack build crates/bindings/wasm --target web --release
+./scripts/build-wasm.sh --features full
 ```
+
+This builds the variant `@grafeo-db/wasm` publishes into `crates/bindings/wasm/pkg`. Without `--features`, the build has the `edge` profile (GQL only), as `@grafeo-db/wasm-lite` does.
 
 ## Next Steps
 

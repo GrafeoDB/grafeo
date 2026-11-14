@@ -78,7 +78,7 @@ jobs:
         run: cargo build -p grafeo-examples --bins --features full
 
       # Validate that all // ISO: annotations in tests reference valid
-      # feature IDs from docs/user-guide/gql/conformance.md.
+      # feature IDs from docs/model-and-query/gql/conformance.md.
       - name: Validate GQL conformance annotations
         run: python scripts/gql-conformance.py validate
 
@@ -908,6 +908,20 @@ jobs:
           # The wheel above has the release features: check every language is in.
           GRAFEO_RELEASE_BUILD: "1"
         run: pytest crates/bindings/python/tests/ -v --ignore=crates/bindings/python/tests/benchmark_phases.py
+
+      # The docs' Python and query examples run against the wheel built above.
+      - name: Test the docs example checker
+        if: matrix.os == 'ubuntu-latest' && matrix.python == '3.13'
+        run: |
+          uv pip install --system networkx numpy pandas pyarrow polars duckdb matplotlib rdflib umap-learn
+          pytest scripts/tests/test_check_docs_examples.py -q
+
+      # Reports failing examples without failing the build while the docs sections are being
+      # rewritten; remove continue-on-error once every example passes.
+      - name: Check docs examples
+        if: matrix.os == 'ubuntu-latest' && matrix.python == '3.13'
+        continue-on-error: true
+        run: python scripts/check_docs_examples.py docs
 
   # Python tests on a reduced build: the wheel with the `lpg` profile (GQL, Cypher, Gremlin and
   # SQL/PGQ with storage; no algorithms, no vector or text index, no RDF) runs the whole suite,

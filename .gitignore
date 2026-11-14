@@ -98,5 +98,4 @@ cargo-timing*.html
 *.proptest-regressions
 
 # ── Documentation (auto-generated) ───────────────────────────────────
-docs/changelog.md
 site/

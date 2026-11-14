@@ -1,4 +1,4 @@
-name: mkdocs
+name: docs
 
 on:
   push:
@@ -6,14 +6,18 @@ on:
       - main
     paths:
       - 'docs/**'
-      - 'mkdocs.yml'
+      - 'docs-snippets/**'
+      - 'zensical.toml'
+      - 'scripts/docs_extras.py'
       - '.github/workflows/docs.yml'
   pull_request:
     branches:
       - main
     paths:
       - 'docs/**'
-      - 'mkdocs.yml'
+      - 'docs-snippets/**'
+      - 'zensical.toml'
+      - 'scripts/docs_extras.py'
   workflow_dispatch:
 
 permissions:
@@ -27,8 +31,6 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
-        with:
-          fetch-depth: 0  # Needed for git-revision-date-localized plugin
 
       - name: Setup Python
         uses: actions/setup-python@v7
@@ -39,9 +41,10 @@ jobs:
         uses: astral-sh/setup-uv@v7
 
       - name: Install dependencies
-        run: uv pip install --system -r docs/requirements.txt
+        run: uv pip install --system -r docs/requirements-docs.txt
 
       - name: Build and validate
         run: |
-          mkdocs build --strict
+          zensical build --strict
+          python scripts/docs_extras.py
           echo "Documentation built successfully!"

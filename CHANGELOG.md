@@ -2,6 +2,42 @@
 
 All notable changes to Grafeo, for future reference (and enjoyment).
 
+## [0.6.3] - Unreleased
+
+SPARQL transactions release: SPARQL in a transaction reads one snapshot, conflicting updates fail at commit and graph operations run inside transactions; the plan cache, the per-query memory limit and path searches are bounded. Results that change on upgrade: a statement over the per-query memory limit fails with `GRAFEO-S001` in builds with disk spilling, a path search over its budget fails with `GRAFEO-S001` instead of `GRAFEO-Q006`, and a standalone type that a graph type lists keeps applying in the default graph.
+
+### Added
+
+- **`Config::with_path_search_budget`** ([#492](https://github.com/GrafeoDB/grafeo/issues/492)): sets the bytes one variable-length, shortest-path or RDF property path search may hold, never above the memory limit.
+- **`Config::with_plan_cache_limit`** ([#674](https://github.com/GrafeoDB/grafeo/issues/674)): bounds the plan cache in bytes, by a deep estimate of each plan. The default is a sixty-fourth of the memory limit, at least 4 MiB and at most 64 MiB; 0 turns the cache off.
+- **`validate()` names the nodes a listed type would refuse** ([#764](https://github.com/GrafeoDB/grafeo/issues/764)): the warning `LISTED_TYPE_ROWS` gives, per node type and graph not bound to a graph type that lists it, the count and the first ids of the nodes that break the type, with the steps to make it a type of its own again. Run it after upgrading a file in which 0.6.2 took a standalone type over.
+
+### Changed
+
+- **The documentation has a new structure**: its pages are grouped in seven sections, and every old link redirects to its new page.
+- **A path search over its budget fails with `GRAFEO-S001`** ([#492](https://github.com/GrafeoDB/grafeo/issues/492)): it names the path search budget and its setting, in GQL, Cypher and SPARQL; it was `GRAFEO-Q006`. An RDF property path reads the same budget as the others, no longer narrowed to the memory free when it was planned.
+- **The plan cache is bounded by bytes and reported deeply** ([#674](https://github.com/GrafeoDB/grafeo/issues/674)): it held 1,000 plans whatever their size, and `memory_usage()` counted only its map. Now one byte bound holds parsed and optimized plans, a plan larger than the bound runs uncached, a repeated statement shares the cached plan instead of copying it, and `memory_usage().caches` reports what the plans hold plus `plan_cache_limit_bytes`.
+- **A standalone type a graph type lists stays in force** ([#764](https://github.com/GrafeoDB/grafeo/issues/764)): a type made with `CREATE NODE TYPE` or `CREATE EDGE TYPE` keeps applying by its label in every graph once a graph type lists it, and also in that graph type's graphs, which reverses 0.6.2 for this case; `DROP GRAPH TYPE` leaves it, `DROP NODE TYPE` of it is refused while a graph type lists it, and a pattern may name it only as it is. Types a graph type declares itself, and files in which 0.6.2 already took a type over, keep the 0.6.2 rule.
+- **Conflicting SPARQL triple updates fail at commit** ([#718](https://github.com/GrafeoDB/grafeo/issues/718)): when two transactions write the same triple in one graph and one of them deletes it, the second to commit fails with `GRAFEO-T001` and is rolled back; both committed before, so a delete could silently undo the other's insert. Two inserts of one triple both commit, and a transaction also conflicts with a bulk load (`load_rdf_text`, `load_rdf_into`, `batch_insert_rdf`) that commits while it is open; the load itself is never refused.
+- **SPARQL graph operations in a transaction** ([#718](https://github.com/GrafeoDB/grafeo/issues/718)): `CREATE`, `DROP`, `CLEAR`, `COPY`, `MOVE` and `ADD` apply at the commit in order with the transaction's triple updates, and its later statements see them; 0.6.2 refused any SPARQL statement after one with `GRAFEO-T004`. Graph operations on different graphs, or a graph operation and a triple update in one graph, no longer conflict; two transactions changing one graph still fail with `GRAFEO-T001`.
+- **The per-query memory limit covers every operator that holds rows** ([#674](https://github.com/GrafeoDB/grafeo/issues/674)): `Config::with_query_memory_limit` now caps what one statement's sorts, groupings, hash and nested-loop joins, distincts, set operations, top-k heaps, correlated subqueries, eager reads and stored procedure results hold together, their strings and lists included, where it covered sorts and groupings only. At the cap a GQL sort spills first; the others fail with `GRAFEO-S001` naming the limit, and the statement changes nothing. The limit holds in builds with disk spilling, such as the Python package, grafeo-server and the CLI; the default `grafeo` crate, `edge` and WebAssembly builds do not enforce it yet.
+- **SPARQL reads at a viewing epoch are refused**: with `set_viewing_epoch` set, a SPARQL query or SHACL validation fails with `GRAFEO-Q004` (RDF data keeps no history) instead of reading the present.
+
+### Deprecated
+
+- **`GrafeoDB::rdf_store()`**: writes through the RDF store bypass transactions and snapshot reads; use SPARQL updates in a session or transaction, or `batch_insert_rdf`. Removed in 0.7.0.
+
+### Fixed
+
+- **A plan chosen on an empty graph replans after a bulk load** ([#674](https://github.com/GrafeoDB/grafeo/issues/674)): a cached plan is made again once a count the planner reads (nodes, edges, a label's nodes, an edge type's edges) doubles or halves by at least 1,000 rows.
+- **A plan built before a schema change is no longer cached after it** ([#674](https://github.com/GrafeoDB/grafeo/issues/674)): a statement planned while an index, constraint, type or graph changed runs once and is planned again next time; a schema change queued in an open transaction no longer drops other sessions' plans, and a rollback keeps them.
+- **The default path search budget is at most 256 MiB** ([#492](https://github.com/GrafeoDB/grafeo/issues/492)): a quarter of the memory limit, so a 64 GiB limit let one search hold 16 GiB before it failed.
+- **SPARQL reads in a transaction are snapshot isolated** ([#718](https://github.com/GrafeoDB/grafeo/issues/718)): every SPARQL query in a transaction reads the triples and named graphs as they were when the transaction began, with its own updates, at the same point as its GQL and Cypher reads; an auto-commit query reads one committed state for its whole run. It saw triples, graphs and clears that other sessions committed meanwhile.
+- **RDF in checkpoints, copies and exports is the epoch's** ([#718](https://github.com/GrafeoDB/grafeo/issues/718)): a checkpoint, `save`, a copy or `export_snapshot` that runs while SPARQL updates commit writes the RDF triples and named graphs as of its epoch, with commits going on while it writes. `rdf_schema()` lists the named graphs (it returned an empty list) and reads at one epoch.
+- **The CLI opens every database the default `grafeo` build writes** ([#763](https://github.com/GrafeoDB/grafeo/issues/763)): `cargo install grafeo-cli` and the pre-built binaries now have the same features, vector, text and hybrid search, change data capture and graph algorithms included, so a file with a vector or text index opens. A database holding data the build cannot read, such as RDF triples, is refused with the `cargo install grafeo-cli --features ...` line that adds the feature.
+- **SQL/PGQ ranges on one-kind columns use the range scan again**: a `<`, `<=`, `>`, `>=` or `BETWEEN` on a property whose values are all of the bound's kind reads its index by range and skips chunks by their stored bounds, as in 0.6.1. A column holding values of several kinds still scans and raises 22G04.
+- **Concurrent sorts and groupings keep their memory consumers**: each spillable sort and aggregate registers under a name of its own and unregisters only that one when it finishes or fails.
+
 ## [0.6.2] - 2026-11-08
 
 Correctness release: comparisons, nulls and operands of the wrong kind follow ISO GQL and openCypher more closely, a refused permission has its own code, a session can be kept from reading local files, and a graph cleared and written back keeps its size. Results that change on upgrade: a string never equals a number, `{k: NULL}` in a pattern finds nothing, an operator given a value of the wrong kind raises 22G12 where it answered null, and a file database checkpoints by itself (Changed lists each). Plus join orders from sampled degrees, cycles closed by intersection and lookups that need no index.

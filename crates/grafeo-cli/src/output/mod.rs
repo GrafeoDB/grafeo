@@ -358,6 +358,15 @@ pub fn error(msg: &str) {
     }
 }
 
+/// Print a hint after an error to stderr: what to do about it.
+pub fn hint(msg: &str) {
+    if no_color() {
+        eprintln!("hint: {msg}");
+    } else {
+        eprintln!("[36mhint[0m: {msg}");
+    }
+}
+
 /// Format a string with ANSI color for console output.
 pub fn colored(text: &str, color: Color) -> String {
     if no_color() {

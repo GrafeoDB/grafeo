@@ -119,7 +119,14 @@ jobs:
           sudo apt-get install -y gcc-aarch64-linux-gnu
 
       - name: Build release binaries
-        run: cargo build --release --workspace --target ${{ matrix.target }} --exclude grafeo-python
+        run: cargo build --release --workspace --target ${{ matrix.target }} --exclude grafeo-python --exclude grafeo-cli
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+
+      # The CLI on its own, so its features are those of `cargo install grafeo-cli` (a workspace
+      # build would add the features other crates ask of the engine).
+      - name: Build the CLI
+        run: cargo build --release -p grafeo-cli --target ${{ matrix.target }}
         env:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
 

@@ -438,6 +438,7 @@ impl GrafeoDB {
         // A transaction open across the load checks its commit against the
         // load's run, which the published entry holds.
         self.transaction_manager.publish_load(held, epoch, || {
+            grafeo_common::testing::commit_hook::run_during_load_writes();
             self.rdf_store
                 .overlay()
                 .entry_at(epoch)

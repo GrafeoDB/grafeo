@@ -2138,14 +2138,27 @@ impl TransactionManager {
         epoch: EpochId,
         writes: impl FnOnce() -> super::rdf::PendingTriples,
     ) {
+        // Built before the `transactions` lock while a transaction is open,
+        // which every begin and commit check takes: a load's run is walked
+        // whole. Commits are held, so only a begin can come between.
+        let mut writes = Some(writes);
+        let built = (self.active_count.load(Ordering::Acquire) > 0)
+            .then(|| writes.take().map(|writes| writes()))
+            .flatten();
         {
             let mut transactions = self.transactions.write();
+            // Counted under this lock (see `register`): one that began since
+            // the read above is open across the load too, and its writes are
+            // built here then, a rare case.
             if self.active_count.load(Ordering::Acquire) > 0 {
+                let writes = built
+                    .or_else(|| writes.take().map(|writes| writes()))
+                    .unwrap_or_default();
                 let transaction_id =
                     TransactionId::new(self.next_transaction_id.fetch_add(1, Ordering::Relaxed));
                 transactions.insert(
                     transaction_id,
-                    TransactionInfo::committed_writer(epoch, writes()),
+                    TransactionInfo::committed_writer(epoch, writes),
                 );
                 // Transactions, then committed epochs, as `gc` takes them.
                 self.committed_epochs.write().insert(transaction_id, epoch);

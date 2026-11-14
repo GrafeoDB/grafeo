@@ -271,12 +271,32 @@ impl PendingTriples {
     /// Notes a write of `triple` in `graph` (`None` for the default graph):
     /// the triple is there after it (`present`) or not.
     pub(crate) fn note(&mut self, graph: Option<&str>, triple: Arc<Triple>, present: bool) {
-        let graph = match graph {
-            None => &mut self.default,
-            Some(name) => self.named.entry(name.to_string()).or_default(),
-        };
+        let graph = self.graph_mut(graph);
         graph.inserted |= present;
         graph.triples.insert(triple, present);
+    }
+
+    /// Notes the inserts of `run` in `graph`, a load's run of one graph: the
+    /// graph is found once, and its map grows once for the run.
+    pub(crate) fn note_run(&mut self, graph: Option<&str>, run: &[Arc<Triple>]) {
+        if run.is_empty() {
+            return;
+        }
+        let graph = self.graph_mut(graph);
+        graph.inserted = true;
+        graph.triples.reserve(run.len());
+        for triple in run {
+            graph.triples.insert(Arc::clone(triple), true);
+        }
+    }
+
+    /// The pending state of `graph` (`None` for the default graph), made
+    /// for a named graph the first time; the name is copied only then.
+    fn graph_mut(&mut self, graph: Option<&str>) -> &mut PendingGraph {
+        match graph {
+            None => &mut self.default,
+            Some(name) => self.named.entry_ref(name).or_default(),
+        }
     }
 
     /// Notes a graph operation: the graph it changes starts over from the
@@ -860,11 +880,7 @@ pub(crate) fn writes_of_entry(
     for change in entry.changes() {
         match change {
             OverlayChange::In(next) => graph.clone_from(next),
-            OverlayChange::Inserts(run) => {
-                for triple in run {
-                    writes.note(graph.as_deref(), Arc::clone(triple), true);
-                }
-            }
+            OverlayChange::Inserts(run) => writes.note_run(graph.as_deref(), run),
             OverlayChange::Delete { triple, .. } => {
                 writes.note(graph.as_deref(), Arc::clone(triple), false);
             }

@@ -14,8 +14,10 @@
 //! RDF update, a direct write, a direct graph or index call, an import or an
 //! RDF batch insert) once it holds commits off and before it changes anything
 //! ([`during_next_held_change`]), or after a backend write has been applied
-//! and recorded ([`after_next_data_write`]), or at a step of the next RDF
-//! commit's apply under the dataset guard ([`during_next_rdf_apply`]).
+//! and recorded ([`after_next_data_write`]), at a step of the next RDF
+//! commit's apply under the dataset guard ([`during_next_rdf_apply`]), or
+//! while the next RDF load builds the write set that the transactions open
+//! across it check their commits against ([`during_next_load_writes`]).
 //! [`fail_next_change_record`]
 //! makes the recording of a direct write's change fail.
 //! [`checkpoints_started`] counts the checkpoints started on a database
@@ -54,6 +56,23 @@ mod inner {
         static AFTER_FIRST_COMMIT_ARMING: RefCell<Option<Hook>> = const { RefCell::new(None) };
         static DURING_RDF_APPLY: RefCell<Option<(super::RdfApplyStep, Hook)>> =
             const { RefCell::new(None) };
+        static DURING_LOAD_WRITES: RefCell<Option<Hook>> = const { RefCell::new(None) };
+    }
+
+    /// Arms `hook` to run once, inside the next RDF load on this thread,
+    /// while it builds the write set that the transactions open across it
+    /// check their commits against.
+    pub fn during_next_load_writes(hook: impl FnOnce() + 'static) {
+        DURING_LOAD_WRITES.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+    }
+
+    /// Runs the [`during_next_load_writes`] hook armed on this thread, if
+    /// any. Called by an RDF load where it builds its write set.
+    #[inline]
+    pub fn run_during_load_writes() {
+        if let Some(hook) = DURING_LOAD_WRITES.with(|slot| slot.borrow_mut().take()) {
+            hook();
+        }
     }
 
     /// Arms `hook` to run once, inside the next RDF commit apply on this
@@ -486,6 +505,13 @@ mod inner {
     /// No-op when injection is disabled.
     #[inline]
     pub fn run_during_rdf_apply(_step: super::RdfApplyStep) {}
+
+    /// No-op when injection is disabled.
+    pub fn during_next_load_writes(_hook: impl FnOnce() + 'static) {}
+
+    /// No-op when injection is disabled.
+    #[inline]
+    pub fn run_during_load_writes() {}
 }
 
 pub use inner::*;

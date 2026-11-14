@@ -4,6 +4,8 @@
 //!   take nested reads, never keep a commit (and the LPG commits after it) waiting.
 //! - A commit's conflict check never waits for another commit's RDF apply while it holds the
 //!   transactions lock, so begins and writes elsewhere go on.
+//! - A load's publish builds the write set of the transactions open across it before it takes
+//!   the transactions lock, so a begin never waits for that build.
 //!
 //! The oracle is a deadline far above what the work takes.
 //!
@@ -174,4 +176,61 @@ fn a_conflict_check_does_not_wait_for_another_commits_apply() {
     second_result.expect("T2 wrote another triple: it commits");
     let session = db.session();
     assert_eq!(count(&session, "SELECT ?s WHERE { ?s ex:p ?o }"), 3);
+}
+
+/// A begin never waits for a load's write set (#718, E2): with a transaction open, a load into a
+/// named graph builds the writes that transaction's commit checks against, held here by the
+/// `during_next_load_writes` hook. Meanwhile another session begins a transaction and writes,
+/// which needs the transactions lock; it finishes within the deadline, and the load lands whole.
+#[cfg(feature = "testing-statement-injection")]
+#[test]
+fn a_begin_does_not_wait_for_a_loads_write_set() {
+    use grafeo_common::testing::commit_hook::during_next_load_writes;
+    use grafeo_engine::RdfFormat;
+
+    const LOADED: usize = 1_000;
+    let db = Arc::new(GrafeoDB::new_in_memory());
+    let mut open = db.session();
+    open.begin_transaction().unwrap();
+    assert_eq!(count(&open, "SELECT ?s WHERE { ?s ?p ?o }"), 0);
+
+    let (answer, answered) = mpsc::channel();
+    let in_hook = Arc::clone(&db);
+    during_next_load_writes(move || {
+        let other = Arc::clone(&in_hook);
+        let (done, finished) = mpsc::channel();
+        let writer = std::thread::spawn(move || {
+            let mut session = other.session();
+            session.begin_transaction().unwrap();
+            session.execute("INSERT (:Person {name: 'Jules'})").unwrap();
+            session.rollback().unwrap();
+            // The hook stops listening at its deadline: a late send is not an error here.
+            let _ = done.send(());
+        });
+        answer
+            .send((finished.recv_timeout(Duration::from_secs(10)), writer))
+            .unwrap();
+    });
+    let mut text = String::new();
+    for i in 0..LOADED {
+        writeln!(text, "<http://ex.org/s{i}> <http://ex.org/v> \"{i}\" .").unwrap();
+    }
+    db.load_rdf_text(&text, RdfFormat::NTriples, Some("http://ex.org/g"))
+        .unwrap();
+    let (waited, writer) = answered
+        .recv()
+        .expect("the load built its write set for the open transaction");
+    writer.join().unwrap();
+    assert!(
+        waited.is_ok(),
+        "a begin and a write waited for the load's write set"
+    );
+    open.rollback().unwrap();
+    assert_eq!(
+        count(
+            &db.session(),
+            "SELECT ?s WHERE { GRAPH <http://ex.org/g> { ?s ?p ?o } }"
+        ),
+        LOADED
+    );
 }

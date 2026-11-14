@@ -28,6 +28,8 @@ Performance release: faster queries, a memory limit that holds, and fixes for th
 
 ### Fixed
 
+- **A plan chosen on an empty graph replans after a bulk load** ([#674](https://github.com/GrafeoDB/grafeo/issues/674)): a cached plan is made again once a count the planner reads (nodes, edges, a label's nodes, an edge type's edges) doubles or halves by at least 1,000 rows.
+- **A plan built before a schema change is no longer cached after it** ([#674](https://github.com/GrafeoDB/grafeo/issues/674)): a statement planned while an index, constraint, type or graph changed runs once and is planned again next time; a schema change queued in an open transaction no longer drops other sessions' plans, and a rollback keeps them.
 - **The default path search budget is at most 256 MiB** ([#492](https://github.com/GrafeoDB/grafeo/issues/492)): a quarter of the memory limit, so a 64 GiB limit let one search hold 16 GiB before it failed.
 - **SPARQL reads in a transaction are snapshot isolated** ([#718](https://github.com/GrafeoDB/grafeo/issues/718)): every SPARQL query in a transaction reads the triples and named graphs as they were when the transaction began, with its own updates, at the same point as its GQL and Cypher reads; an auto-commit query reads one committed state for its whole run. It saw triples, graphs and clears that other sessions committed meanwhile.
 - **RDF in checkpoints, copies and exports is the epoch's** ([#718](https://github.com/GrafeoDB/grafeo/issues/718)): a checkpoint, `save`, a copy or `export_snapshot` that runs while SPARQL updates commit writes the RDF triples and named graphs as of its epoch, with commits going on while it writes. `rdf_schema()` lists the named graphs (it returned an empty list) and reads at one epoch.

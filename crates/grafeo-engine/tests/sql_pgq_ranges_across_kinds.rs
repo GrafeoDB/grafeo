@@ -293,3 +293,112 @@ fn gql_and_cypher_keep_their_range_scans() {
         assert!(profile.contains("RangeScan"), "{language}: {profile}");
     }
 }
+
+/// The conditions the write cases below read: one range with rows, one past every row.
+const AFTER_WRITES: [&str; 2] = ["n.k >= 5 AND n.k < 7", "n.k > 100"];
+
+/// Writes that change the kinds a column holds: a number set to a string, the one string
+/// deleted, the one string set to a number. Hot and reopened, the planner's plan answers each
+/// range as the plain scan does, its 22G04 included.
+#[test]
+fn ranges_answer_alike_after_writes_that_change_a_columns_kinds() {
+    let cases: [(&str, &[&str]); 3] = [
+        (
+            "a number set to a string",
+            &[NUMBERS, "MATCH (n:L {row: 1}) SET n.k = 'x'"],
+        ),
+        (
+            "the one string deleted",
+            &[
+                NUMBERS,
+                "INSERT (:L {row: 5, k: 'x'})",
+                "MATCH (n:L {row: 5}) DELETE n",
+            ],
+        ),
+        (
+            "the one string set to a number",
+            &[
+                NUMBERS,
+                "INSERT (:L {row: 5, k: 'x'})",
+                "MATCH (n:L {row: 5}) SET n.k = 6",
+            ],
+        ),
+    ];
+    let mut wrong = Vec::new();
+    for (name, setup) in cases {
+        let hot = GrafeoDB::new_in_memory();
+        run_all(&hot, setup);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("kinds.grafeo");
+        {
+            let db = GrafeoDB::open(&path).unwrap();
+            run_all(&db, setup);
+            db.close().unwrap();
+        }
+        let reopened = GrafeoDB::open(&path).unwrap();
+        for (stage, db) in [("hot", &hot), ("reopened", &reopened)] {
+            let [(_, planner), (_, plain)] = sessions(db);
+            for condition in AFTER_WRITES {
+                let (chosen, scanned) = (sql(&planner, condition), sql(&plain, condition));
+                if chosen != scanned {
+                    wrong.push(format!(
+                        "{name}, {stage}: `{condition}` gave {chosen:?}, the plain scan {scanned:?}"
+                    ));
+                }
+            }
+        }
+        reopened.close().unwrap();
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
+
+/// A range in a transaction meets the transaction's own write of another kind: 22G04 under
+/// every plan, as the plain scan raises.
+#[test]
+fn a_range_in_a_transaction_meets_its_own_write_of_another_kind() {
+    let db = GrafeoDB::new_in_memory();
+    run_all(&db, &[NUMBERS]);
+    for (plan_name, mut session) in sessions(&db) {
+        session.begin_transaction().unwrap();
+        session.execute("INSERT (:L {row: 9, k: 'x'})").unwrap();
+        let found = sql(&session, "n.k >= 5 AND n.k < 7");
+        assert_eq!(found, raises(), "{plan_name}");
+        session.rollback().unwrap();
+    }
+}
+
+/// A transaction whose snapshot holds a string in a column that a later commit made all
+/// numbers, and a checkpoint then wrote: its range meets the string it sees and raises 22G04
+/// under every plan, as the plain scan does, though the column's zone maps now hold numbers
+/// only. A session after it reads the numbers.
+#[test]
+fn a_snapshot_older_than_a_checkpoint_meets_the_values_it_sees() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("older.grafeo");
+    let db = GrafeoDB::open(&path).unwrap();
+    run_all(&db, &[NUMBERS, "INSERT (:L {row: 5, k: 'x'})"]);
+    let mut older = sessions(&db);
+    for (_, session) in &mut older {
+        session.begin_transaction().unwrap();
+    }
+    run_all(&db, &["MATCH (n:L {row: 5}) SET n.k = 6"]);
+    db.wal_checkpoint().unwrap();
+    for (plan_name, session) in &older {
+        assert_eq!(
+            sql(session, "n.k >= 5 AND n.k < 7"),
+            raises(),
+            "{plan_name}: the snapshot holds the string"
+        );
+    }
+    for (_, mut session) in older {
+        session.rollback().unwrap();
+    }
+    for (plan_name, session) in sessions(&db) {
+        assert_eq!(
+            sql(&session, "n.k >= 5 AND n.k < 7"),
+            rows(&[1, 2, 5]),
+            "{plan_name}: after the commit"
+        );
+    }
+    db.close().unwrap();
+}

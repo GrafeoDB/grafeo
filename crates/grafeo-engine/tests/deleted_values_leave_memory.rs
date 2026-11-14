@@ -166,7 +166,7 @@ mod heap {
         unsafe fn dealloc(&self, block: *mut u8, layout: Layout) {
             Locked::take().remove(block as usize);
             // SAFETY: the block is allocated with `layout` (the caller's contract).
-            unsafe { std::ptr::write_bytes(block, 0, layout.size()) };
+            unsafe { zero(block, layout.size()) };
             // SAFETY: the caller's contract, passed on.
             unsafe { System.dealloc(block, layout) };
         }
@@ -185,6 +185,21 @@ mod heap {
                 unsafe { self.dealloc(block, layout) };
             }
             moved
+        }
+    }
+
+    /// Zeroes `size` bytes at `block` with volatile writes. A plain `write_bytes` just before the
+    /// free is a dead store the optimizer may drop (LLVM knows glibc's `free` as a free), so in an
+    /// optimized build on Linux freed blocks kept their bytes, and a later block that got the same
+    /// memory showed them as copies.
+    ///
+    /// # Safety
+    ///
+    /// `block` is allocated and at least `size` bytes long.
+    unsafe fn zero(block: *mut u8, size: usize) {
+        for offset in 0..size {
+            // SAFETY: within the block (the caller's contract).
+            unsafe { block.add(offset).write_volatile(0) };
         }
     }
 
@@ -565,6 +580,58 @@ fn the_files_hold_no_deleted_value_after_compact() {
             "{shape}: {counts:?}"
         );
     }
+}
+
+/// The probe's own guarantee: a freed block is zeroed, so a block that gets its memory again
+/// holds none of it. Freed and allocated again with one layout, the system allocator hands back
+/// the same block (glibc's cache does at once; elsewhere one of the next few may be it); its bytes
+/// past the allocator's own bookkeeping (the first 16) must hold no byte of the marker. Without
+/// this the counts after the drop and the reopen read freed memory, which no allocator zeroes.
+/// It must find the block to pass: glibc's per-thread cache and the Windows heap hand it back
+/// (checked on both); elsewhere the allocator need not, so the test does not run there.
+#[test]
+#[cfg_attr(
+    not(any(all(target_os = "linux", target_env = "gnu"), windows)),
+    ignore = "the system allocator need not hand a freed block back at once"
+)]
+fn the_probe_zeroes_what_it_frees() {
+    use std::alloc::{Layout, alloc, dealloc};
+
+    let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+    let layout = Layout::from_size_align(96, 8).unwrap();
+    // SAFETY: a non-zero layout; each block is freed with it below.
+    let block = unsafe { alloc(layout) };
+    assert!(!block.is_null());
+    // SAFETY: the block is 96 bytes long.
+    unsafe { std::ptr::write_bytes(block, b'm', 96) };
+    let address = block as usize;
+    // SAFETY: allocated above with `layout`.
+    unsafe { dealloc(block, layout) };
+    let mut again = Vec::new();
+    let mut found = false;
+    for _ in 0..64 {
+        // SAFETY: as above.
+        let next = unsafe { alloc(layout) };
+        assert!(!next.is_null());
+        again.push(next);
+        if next as usize == address {
+            let stale = (16..96)
+                // SAFETY: within the block just allocated; read as bytes, as the scan does.
+                .filter(|&offset| unsafe { next.add(offset).read_volatile() } == b'm')
+                .count();
+            assert_eq!(stale, 0, "{stale} bytes of a freed block are still there");
+            found = true;
+            break;
+        }
+    }
+    for next in again {
+        // SAFETY: allocated above with `layout`.
+        unsafe { dealloc(next, layout) };
+    }
+    assert!(
+        found,
+        "the system allocator handed the freed block back within 64 allocations"
+    );
 }
 
 /// Once the database is dropped Grafeo holds none of its values, and a reopen of the compacted

@@ -45,8 +45,10 @@ public sealed class GrafeoOptions : IDisposable
     }
 
     /// <summary>
-    /// How many bytes one path search may hold, never more than the memory limit. A search over
-    /// it fails with GRAFEO-S001. A zero or negative budget fails at the open.
+    /// How many bytes one path search may hold: the paths a variable-length or shortest-path
+    /// search keeps at once, or what an RDF property path search visits (the nodes an ANY SHORTEST
+    /// or shortestPath search visits are not counted yet). Never more than the memory limit. A
+    /// search over it fails with GRAFEO-S001. A zero or negative budget fails at the open.
     /// </summary>
     public GrafeoOptions SetPathSearchBudget(long bytes)
     {

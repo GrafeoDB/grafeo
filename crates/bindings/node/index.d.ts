@@ -972,10 +972,12 @@ export interface CreateOptions {
    */
   queryMemoryLimit?: number
   /**
-   * How many bytes one path search (a variable-length or shortest path)
-   * may hold: by default a quarter of `memoryLimit`, at most 256 MiB, and
-   * never more than `memoryLimit`. A search over it throws `GRAFEO-S001`.
-   * For this open only.
+   * How many bytes one path search may hold: the paths a variable-length
+   * or shortest-path search keeps at once, or what an RDF property path
+   * search visits (the nodes an `ANY SHORTEST` or `shortestPath` search
+   * visits are not counted yet). By default a quarter of `memoryLimit`, at
+   * most 256 MiB, and never more than `memoryLimit`. A search over it
+   * throws `GRAFEO-S001`. For this open only.
    */
   pathSearchBudget?: number
   /**

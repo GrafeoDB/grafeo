@@ -127,6 +127,10 @@ const char*     grafeo_version(void);
      - grafeo_options_new returns an object to free with grafeo_options_free
        (NULL is ignored); it may open several databases and be freed once the
        open returns.
+     - The path search budget counts the paths a variable-length or
+       shortest-path search keeps at once, or what an RDF property path
+       search visits; the nodes an ANY SHORTEST or shortestPath search
+       visits are not counted yet.
      - The memory and query memory limits and the path search budget must be
        above zero (another status otherwise); a spill limit of 0 means
        nothing spills, and unlimited spill, once set, wins over a spill limit.

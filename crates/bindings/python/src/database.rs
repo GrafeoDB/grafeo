@@ -562,8 +562,10 @@ impl PyGrafeoDB {
     /// it they spill to disk where they can, else the statement raises
     /// GRAFEO-S001. For this open only.
     ///
-    /// path_search_budget is how many bytes one path search (a variable-length
-    /// or shortest path, an RDF property path) may hold: by default a quarter
+    /// path_search_budget is how many bytes one path search may hold: the
+    /// paths a variable-length or shortest-path search keeps at once, or what
+    /// an RDF property path search visits (the nodes an ANY SHORTEST or
+    /// shortestPath search visits are not counted yet). By default a quarter
     /// of memory_limit, at most 256 MiB, and never more than memory_limit. A
     /// search over it raises GRAFEO-S001. For this open only.
     ///

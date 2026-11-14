@@ -482,6 +482,15 @@ fn sparql_queries_nest_up_to_their_limits_and_no_deeper() {
             MAX_PLAN_DEPTH,
             MAX_PLAN_DEPTH / 2 - 8,
         ),
+        (
+            "MINUS chain",
+            |size| {
+                let minuses = joined(size, " ", |i| format!("MINUS {{ ?x <p{i}> ?o{i} }}"));
+                format!("SELECT ?x WHERE {{ ?x ?p ?o {minuses} }}")
+            },
+            MAX_PLAN_DEPTH,
+            MAX_PLAN_DEPTH / 2 - 8,
+        ),
     ];
     assert_bounded(Language::Sparql, &shapes);
 }

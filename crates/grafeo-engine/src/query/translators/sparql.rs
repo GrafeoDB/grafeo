@@ -1358,7 +1358,12 @@ impl SparqlTranslator {
                     plan = self.translate_optional(plan, inner)?;
                 }
                 ast::GraphPattern::Minus(inner) => {
-                    let inner_plan = self.translate_graph_pattern(inner)?;
+                    let mut inner_plan = self.translate_graph_pattern(inner)?;
+                    // The variables of each side are collected recursively: a
+                    // chain of MINUS nests one anti join per link, so stop
+                    // before that is too deep.
+                    crate::query::limits::check_partial_plan_depth(&mut plan)?;
+                    crate::query::limits::check_partial_plan_depth(&mut inner_plan)?;
                     // Minus(Z, P) is Z; MINUS removes a solution only through
                     // a variable both sides bind.
                     if self.exists_depth > 0
@@ -2513,65 +2518,59 @@ impl SparqlTranslator {
         }))
     }
 
-    /// Collects all variable names produced by an operator subtree.
-    ///
-    /// Walks `TripleScan`, `Join`, `LeftJoin`, `Union`, `Filter`, `Bind`,
-    /// and `Project` operators to gather the set of variable names that
-    /// appear in the output.
+    /// The variables the rows of `op` may bind, in the order they first
+    /// appear: the columns its plan gives, so a MINUS removes solutions
+    /// exactly when its pattern shares one of them (SPARQL 1.1, 18.4) and a
+    /// join builds its conditions on them.
     fn collect_operator_variables(op: &LogicalOperator) -> Vec<String> {
         let mut vars = Vec::new();
         Self::collect_variables_recursive(op, &mut vars);
         vars
     }
 
+    /// Every operator has an arm, so a new one says what its rows bind
+    /// before it compiles: one without read as binding nothing, and every
+    /// MINUS after it was dropped.
     fn collect_variables_recursive(op: &LogicalOperator, vars: &mut Vec<String>) {
+        fn add(vars: &mut Vec<String>, name: &str) {
+            if !vars.iter().any(|known| known == name) {
+                vars.push(name.to_string());
+            }
+        }
+        fn add_components<'a>(
+            vars: &mut Vec<String>,
+            components: impl IntoIterator<Item = Option<&'a TripleComponent>>,
+        ) {
+            for name in components
+                .into_iter()
+                .flatten()
+                .filter_map(TripleComponent::as_variable)
+            {
+                add(vars, name);
+            }
+        }
         match op {
             LogicalOperator::InNamedGraph(graph) => {
                 Self::collect_variables_recursive(&graph.input, vars);
-                if let NamedGraph::Variable(variable) = &graph.graph
-                    && !vars.contains(variable)
-                {
-                    vars.push(variable.clone());
+                if let NamedGraph::Variable(variable) = &graph.graph {
+                    add(vars, variable);
                 }
             }
-            LogicalOperator::NamedGraphs(graphs) => {
-                if !vars.contains(&graphs.variable) {
-                    vars.push(graphs.variable.clone());
-                }
-            }
-            LogicalOperator::PropertyPath(path) => {
-                for component in [Some(&path.subject), Some(&path.object), path.graph.as_ref()]
-                    .into_iter()
-                    .flatten()
-                {
-                    if let Some(v) = component.as_variable()
-                        && !vars.iter().any(|name| name == v)
-                    {
-                        vars.push(v.to_string());
-                    }
-                }
-            }
+            LogicalOperator::NamedGraphs(graphs) => add(vars, &graphs.variable),
+            LogicalOperator::PropertyPath(path) => add_components(
+                vars,
+                [Some(&path.subject), Some(&path.object), path.graph.as_ref()],
+            ),
             LogicalOperator::TripleScan(scan) => {
-                if let TripleComponent::Variable(v) = &scan.subject
-                    && !vars.contains(v)
-                {
-                    vars.push(v.clone());
-                }
-                if let TripleComponent::Variable(v) = &scan.predicate
-                    && !vars.contains(v)
-                {
-                    vars.push(v.clone());
-                }
-                if let TripleComponent::Variable(v) = &scan.object
-                    && !vars.contains(v)
-                {
-                    vars.push(v.clone());
-                }
-                if let Some(TripleComponent::Variable(v)) = &scan.graph
-                    && !vars.contains(v)
-                {
-                    vars.push(v.clone());
-                }
+                add_components(
+                    vars,
+                    [
+                        Some(&scan.subject),
+                        Some(&scan.predicate),
+                        Some(&scan.object),
+                        scan.graph.as_ref(),
+                    ],
+                );
                 if let Some(input) = &scan.input {
                     Self::collect_variables_recursive(input, vars);
                 }
@@ -2584,8 +2583,18 @@ impl SparqlTranslator {
                 Self::collect_variables_recursive(&join.left, vars);
                 Self::collect_variables_recursive(&join.right, vars);
             }
+            LogicalOperator::MultiWayJoin(join) => {
+                for input in &join.inputs {
+                    Self::collect_variables_recursive(input, vars);
+                }
+            }
+            // A MINUS passes on left rows as they are.
+            LogicalOperator::AntiJoin(join) => Self::collect_variables_recursive(&join.left, vars),
+            LogicalOperator::MarkJoin(join) => {
+                Self::collect_variables_recursive(&join.left, vars);
+                add(vars, &join.column);
+            }
             LogicalOperator::Union(union) => {
-                // Union outputs variables from both branches
                 for input in &union.inputs {
                     Self::collect_variables_recursive(input, vars);
                 }
@@ -2593,16 +2602,92 @@ impl SparqlTranslator {
             LogicalOperator::Filter(filter) => {
                 Self::collect_variables_recursive(&filter.input, vars);
             }
+            LogicalOperator::Distinct(distinct) => {
+                Self::collect_variables_recursive(&distinct.input, vars);
+            }
+            LogicalOperator::Sort(sort) => Self::collect_variables_recursive(&sort.input, vars),
+            LogicalOperator::Limit(limit) => Self::collect_variables_recursive(&limit.input, vars),
+            LogicalOperator::Skip(skip) => Self::collect_variables_recursive(&skip.input, vars),
             LogicalOperator::Bind(bind) => {
                 Self::collect_variables_recursive(&bind.input, vars);
-                if !vars.contains(&bind.variable) {
-                    vars.push(bind.variable.clone());
+                add(vars, &bind.variable);
+            }
+            // A sub-SELECT's rows hold what it selects, under the names it
+            // gives them.
+            LogicalOperator::Project(project) => {
+                if project.pass_through_input {
+                    Self::collect_variables_recursive(&project.input, vars);
+                }
+                for projection in &project.projections {
+                    add(
+                        vars,
+                        &crate::query::planner::common::output_column_name(
+                            projection.alias.as_deref(),
+                            &projection.expression,
+                        ),
+                    );
                 }
             }
-            LogicalOperator::Project(proj) => {
-                Self::collect_variables_recursive(&proj.input, vars);
+            LogicalOperator::Aggregate(aggregate) => {
+                for key in &aggregate.group_by {
+                    if let LogicalExpression::Variable(name) = key {
+                        add(vars, name);
+                    }
+                }
+                for name in aggregate.aggregates.iter().filter_map(|a| a.alias.as_ref()) {
+                    add(vars, name);
+                }
             }
-            _ => {}
+            LogicalOperator::RowValues(values) => {
+                for name in &values.names {
+                    add(vars, name);
+                }
+            }
+            LogicalOperator::Empty => {}
+            // Never part of a SPARQL pattern: updates, graph management and
+            // the property graph operators.
+            LogicalOperator::Construct(_)
+            | LogicalOperator::InsertTriple(_)
+            | LogicalOperator::DeleteTriple(_)
+            | LogicalOperator::Modify(_)
+            | LogicalOperator::ClearGraph(_)
+            | LogicalOperator::CreateGraph(_)
+            | LogicalOperator::DropGraph(_)
+            | LogicalOperator::LoadGraph(_)
+            | LogicalOperator::CopyGraph(_)
+            | LogicalOperator::MoveGraph(_)
+            | LogicalOperator::AddGraph(_)
+            | LogicalOperator::NodeScan(_)
+            | LogicalOperator::EdgeScan(_)
+            | LogicalOperator::Expand(_)
+            | LogicalOperator::CreateNode(_)
+            | LogicalOperator::CreateEdge(_)
+            | LogicalOperator::Create(_)
+            | LogicalOperator::DeleteNode(_)
+            | LogicalOperator::DeleteEdge(_)
+            | LogicalOperator::SetProperty(_)
+            | LogicalOperator::AddLabel(_)
+            | LogicalOperator::RemoveLabel(_)
+            | LogicalOperator::Return(_)
+            | LogicalOperator::Unwind(_)
+            | LogicalOperator::MapCollect(_)
+            | LogicalOperator::Merge(_)
+            | LogicalOperator::MergeRelationship(_)
+            | LogicalOperator::ShortestPath(_)
+            | LogicalOperator::HorizontalAggregate(_)
+            | LogicalOperator::VectorScan(_)
+            | LogicalOperator::VectorJoin(_)
+            | LogicalOperator::TextScan(_)
+            | LogicalOperator::Except(_)
+            | LogicalOperator::Intersect(_)
+            | LogicalOperator::Otherwise(_)
+            | LogicalOperator::Apply(_)
+            | LogicalOperator::ParameterScan(_)
+            | LogicalOperator::DelimScan(_)
+            | LogicalOperator::CreatePropertyGraph(_)
+            | LogicalOperator::DropPropertyGraph(_)
+            | LogicalOperator::CallProcedure(_)
+            | LogicalOperator::LoadData(_) => {}
         }
     }
 

@@ -325,3 +325,267 @@ tests:
       }
     expect:
       empty: true
+
+  # A MINUS after another MINUS, or after VALUES, still removes the solutions it
+  # matches: each MINUS applies to the solutions of everything before it in the
+  # group (SPARQL 1.1, 18.2.2.6), whatever the operator that produced them.
+
+  - name: a_second_minus_in_a_chain_excludes_too
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/a> <http://ex.org/name> "Alix" .
+          <http://ex.org/a> <http://ex.org/flag> "yes" .
+          <http://ex.org/b> <http://ex.org/name> "Gus" .
+          <http://ex.org/b> <http://ex.org/banned> "yes" .
+          <http://ex.org/c> <http://ex.org/name> "Vincent" .
+        }
+    query: |
+      SELECT ?name WHERE {
+        ?s <http://ex.org/name> ?name .
+        MINUS { ?s <http://ex.org/flag> "yes" . }
+        MINUS { ?s <http://ex.org/banned> "yes" . }
+      }
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: a_third_minus_in_a_chain_excludes_too
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/a> <http://ex.org/name> "Alix" .
+          <http://ex.org/a> <http://ex.org/flag> "yes" .
+          <http://ex.org/b> <http://ex.org/name> "Gus" .
+          <http://ex.org/b> <http://ex.org/banned> "yes" .
+          <http://ex.org/c> <http://ex.org/name> "Vincent" .
+          <http://ex.org/c> <http://ex.org/left> "yes" .
+          <http://ex.org/d> <http://ex.org/name> "Mia" .
+        }
+    query: |
+      SELECT ?name WHERE {
+        ?s <http://ex.org/name> ?name .
+        MINUS { ?s <http://ex.org/flag> "yes" . }
+        MINUS { ?s <http://ex.org/banned> "yes" . }
+        MINUS { ?s <http://ex.org/left> "yes" . }
+      }
+    expect:
+      rows:
+        - [Mia]
+
+  - name: a_minus_after_values_excludes
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/a> <http://ex.org/flag> "yes" .
+        }
+    query: |
+      SELECT ?s WHERE {
+        VALUES ?s { <http://ex.org/a> <http://ex.org/b> }
+        MINUS { ?s <http://ex.org/flag> "yes" . }
+      }
+    expect:
+      rows:
+        - [http://ex.org/b]
+
+  # A MINUS after a group element of any shape: a sub-SELECT that ends in DISTINCT, an
+  # ORDER BY (with LIMIT or OFFSET or alone), a GROUP BY (its key, and an aggregate's alias),
+  # or a projected alias. The MINUS shares the variable the sub-SELECT returns.
+
+  - name: a_minus_after_a_distinct_subselect_excludes
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/a> <http://ex.org/name> "Alix" .
+          <http://ex.org/a> <http://ex.org/flag> "yes" .
+          <http://ex.org/b> <http://ex.org/name> "Gus" .
+          <http://ex.org/c> <http://ex.org/name> "Vincent" .
+        }
+    query: |
+      SELECT ?s WHERE {
+        { SELECT DISTINCT ?s WHERE { ?s <http://ex.org/name> ?n } }
+        MINUS { ?s <http://ex.org/flag> "yes" . }
+      }
+    expect:
+      rows:
+        - [http://ex.org/b]
+        - [http://ex.org/c]
+
+  - name: a_minus_after_an_ordered_subselect_with_limit_excludes
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/a> <http://ex.org/name> "Alix" .
+          <http://ex.org/a> <http://ex.org/flag> "yes" .
+          <http://ex.org/b> <http://ex.org/name> "Gus" .
+          <http://ex.org/c> <http://ex.org/name> "Vincent" .
+        }
+    query: |
+      SELECT ?s WHERE {
+        { SELECT ?s WHERE { ?s <http://ex.org/name> ?n } ORDER BY ?s LIMIT 2 }
+        MINUS { ?s <http://ex.org/flag> "yes" . }
+      }
+    expect:
+      rows:
+        - [http://ex.org/b]
+
+  - name: a_minus_after_an_ordered_subselect_with_offset_excludes
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/a> <http://ex.org/name> "Alix" .
+          <http://ex.org/a> <http://ex.org/flag> "yes" .
+          <http://ex.org/b> <http://ex.org/name> "Gus" .
+          <http://ex.org/c> <http://ex.org/name> "Vincent" .
+        }
+    query: |
+      SELECT ?s WHERE {
+        { SELECT ?s WHERE { ?s <http://ex.org/name> ?n } ORDER BY ?s OFFSET 0 }
+        MINUS { ?s <http://ex.org/flag> "yes" . }
+      }
+    expect:
+      rows:
+        - [http://ex.org/b]
+        - [http://ex.org/c]
+
+  - name: a_minus_after_an_ordered_subselect_excludes
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/a> <http://ex.org/name> "Alix" .
+          <http://ex.org/a> <http://ex.org/flag> "yes" .
+          <http://ex.org/b> <http://ex.org/name> "Gus" .
+          <http://ex.org/c> <http://ex.org/name> "Vincent" .
+        }
+    query: |
+      SELECT ?s WHERE {
+        { SELECT ?s WHERE { ?s <http://ex.org/name> ?n } ORDER BY ?s }
+        MINUS { ?s <http://ex.org/flag> "yes" . }
+      }
+    expect:
+      rows:
+        - [http://ex.org/b]
+        - [http://ex.org/c]
+
+  - name: a_minus_on_a_group_key_excludes
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/a> <http://ex.org/name> "Alix" .
+          <http://ex.org/a> <http://ex.org/flag> "yes" .
+          <http://ex.org/b> <http://ex.org/name> "Gus" .
+          <http://ex.org/c> <http://ex.org/name> "Vincent" .
+        }
+    query: |
+      SELECT ?s WHERE {
+        { SELECT ?s (COUNT(*) AS ?k) WHERE { ?s <http://ex.org/name> ?n } GROUP BY ?s }
+        MINUS { ?s <http://ex.org/flag> "yes" . }
+      }
+    expect:
+      rows:
+        - [http://ex.org/b]
+        - [http://ex.org/c]
+
+  - name: a_minus_on_an_aggregate_alias_excludes
+    # Alix has two names, so only her count is 2: the MINUS removes the counts of 1.
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/a> <http://ex.org/name> "Alix" .
+          <http://ex.org/a> <http://ex.org/flag> "yes" .
+          <http://ex.org/b> <http://ex.org/name> "Gus" .
+          <http://ex.org/c> <http://ex.org/name> "Vincent" .
+        }
+      - |
+        INSERT DATA { <http://ex.org/a> <http://ex.org/name> "Alix Amsterdam" . }
+    query: |
+      SELECT ?s WHERE {
+        { SELECT ?s (COUNT(*) AS ?k) WHERE { ?s <http://ex.org/name> ?n } GROUP BY ?s }
+        MINUS { VALUES ?k { 1 } }
+      }
+    expect:
+      rows:
+        - [http://ex.org/a]
+
+  - name: a_minus_on_a_projected_alias_excludes
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/a> <http://ex.org/name> "Alix" .
+          <http://ex.org/a> <http://ex.org/flag> "yes" .
+          <http://ex.org/b> <http://ex.org/name> "Gus" .
+          <http://ex.org/c> <http://ex.org/name> "Vincent" .
+        }
+    query: |
+      SELECT ?t WHERE {
+        { SELECT (?s AS ?t) WHERE { ?s <http://ex.org/name> ?n } }
+        MINUS { ?t <http://ex.org/flag> "yes" . }
+      }
+    expect:
+      rows:
+        - [http://ex.org/b]
+        - [http://ex.org/c]
+
+  # Shapes MINUS already handled, kept as guards of the same class.
+
+  - name: a_minus_after_filter_not_exists_excludes
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/a> <http://ex.org/name> "Alix" .
+          <http://ex.org/a> <http://ex.org/flag> "yes" .
+          <http://ex.org/b> <http://ex.org/name> "Gus" .
+          <http://ex.org/c> <http://ex.org/name> "Vincent" .
+        }
+      - |
+        INSERT DATA { <http://ex.org/b> <http://ex.org/banned> "yes" . }
+    query: |
+      SELECT ?s WHERE {
+        ?s <http://ex.org/name> ?n .
+        FILTER NOT EXISTS { ?s <http://ex.org/banned> "yes" }
+        MINUS { ?s <http://ex.org/flag> "yes" . }
+      }
+    expect:
+      rows:
+        - [http://ex.org/c]
+
+  - name: a_minus_on_an_optional_variable_excludes
+    # Vincent has no city: his ?c is unbound, which shares nothing, so he stays.
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/a> <http://ex.org/name> "Alix" .
+          <http://ex.org/a> <http://ex.org/city> <http://ex.org/amsterdam> .
+          <http://ex.org/b> <http://ex.org/name> "Gus" .
+          <http://ex.org/b> <http://ex.org/city> <http://ex.org/rotterdam> .
+          <http://ex.org/c> <http://ex.org/name> "Vincent" .
+          <http://ex.org/amsterdam> <http://ex.org/closed> "yes" .
+        }
+    query: |
+      SELECT ?s WHERE {
+        ?s <http://ex.org/name> ?n .
+        OPTIONAL { ?s <http://ex.org/city> ?c }
+        MINUS { ?c <http://ex.org/closed> "yes" . }
+      }
+    expect:
+      rows:
+        - [http://ex.org/b]
+        - [http://ex.org/c]
+
+  - name: a_minus_after_a_property_path_excludes
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/a> <http://ex.org/knows> <http://ex.org/b> .
+          <http://ex.org/b> <http://ex.org/knows> <http://ex.org/c> .
+          <http://ex.org/b> <http://ex.org/flag> "yes" .
+        }
+    query: |
+      SELECT ?s ?o WHERE {
+        ?s <http://ex.org/knows>+ ?o .
+        MINUS { ?o <http://ex.org/flag> "yes" . }
+      }
+    expect:
+      rows:
+        - [http://ex.org/a, http://ex.org/c]
+        - [http://ex.org/b, http://ex.org/c]

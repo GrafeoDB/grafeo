@@ -2630,14 +2630,24 @@ impl RdfPlanner {
     /// Plans an ANTI JOIN operator (for SPARQL MINUS).
     ///
     /// A shared variable a side may leave unbound still hashes here (see
-    /// [`loosely_shared`] for the joins that check it per pair).
-    fn plan_anti_join(
+    /// [`loosely_shared`] for the joins that check it per pair). The inputs
+    /// are planned in this small frame and the join built in another: a
+    /// chain of `MINUS`es plans each input below the next (see
+    /// `crate::query::limits`).
+    fn plan_anti_join(&self, join: &AntiJoinOp) -> Result<PlannedOperator> {
+        let left = self.plan_operator(&join.left)?;
+        let right = self.plan_operator(&join.right)?;
+        Ok(self.build_anti_join(left, right))
+    }
+
+    /// Builds the anti join over its planned inputs, `left` and `right`.
+    #[inline(never)]
+    fn build_anti_join(
         &self,
-        join: &AntiJoinOp,
-    ) -> Result<(Box<dyn Operator>, Vec<String>, Vec<LogicalType>)> {
+        (left_op, left_columns, left_types): PlannedOperator,
+        (right_op, right_columns, _right_types): PlannedOperator,
+    ) -> PlannedOperator {
         use crate::query::planner::common;
-        let (left_op, left_columns, left_types) = self.plan_operator(&join.left)?;
-        let (right_op, right_columns, _right_types) = self.plan_operator(&join.right)?;
         // Both sides start from a row that binds something, so their domains are never disjoint:
         // any right row compatible with a left row removes it.
         if self.row.as_deref().is_some_and(RowBinding::binds_anything) {
@@ -2648,7 +2658,7 @@ impl RdfPlanner {
                 &right_columns,
                 left_types.clone(),
             );
-            return Ok((op, cols, left_types));
+            return (op, cols, left_types);
         }
         let (op, cols) = common::build_anti_join(
             left_op,
@@ -2657,7 +2667,7 @@ impl RdfPlanner {
             &right_columns,
             left_types.clone(),
         );
-        Ok((op, cols, left_types))
+        (op, cols, left_types)
     }
 
     /// Plans a multi-way join. When the Ring Index is available and all inputs

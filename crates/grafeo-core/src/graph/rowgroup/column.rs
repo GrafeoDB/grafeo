@@ -1414,9 +1414,10 @@ impl Columns {
         }
     }
 
-    /// The heap bytes of the columns' entries in the map.
+    /// The heap bytes of the columns' entries in the map: its whole table as hashbrown
+    /// allocates it (buckets, padded entries, control bytes).
     fn entries_bytes(&self) -> usize {
-        self.by_key.capacity() * (std::mem::size_of::<u32>() + std::mem::size_of::<Column>())
+        self.by_key.allocation_size()
     }
 
     /// What a compression of the hot columns encodes: each hot column with
@@ -1897,8 +1898,7 @@ impl Columns {
 
     /// The heap bytes of the decoded values and of the columns themselves.
     pub(super) fn hot_bytes(&self) -> usize {
-        self.by_key.values().map(Column::hot_bytes).sum::<usize>()
-            + self.by_key.capacity() * (std::mem::size_of::<u32>() + std::mem::size_of::<Column>())
+        self.by_key.values().map(Column::hot_bytes).sum::<usize>() + self.entries_bytes()
     }
 
     /// The heap bytes of the chunks its columns still hold encoded.

@@ -265,9 +265,10 @@ const fn table_entry_bytes<G>() -> usize {
 }
 
 /// The heap bytes of the map of a node row group's label bitmaps, without
-/// their words.
+/// their words: its whole table as hashbrown allocates it (buckets, padded
+/// entries, control bytes), not its capacity times an entry's fields.
 fn label_map_bytes(labels: &FxHashMap<u32, Bitset>) -> usize {
-    labels.capacity() * (std::mem::size_of::<u32>() + std::mem::size_of::<Bitset>())
+    labels.allocation_size()
 }
 
 impl NodeGroup {

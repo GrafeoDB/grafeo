@@ -222,16 +222,6 @@ fn a_node_only_load_is_refused_at_a_small_limit() {
     );
 }
 
-/// A strict expected failure: `body` must panic (the behavior `spec` names is not there yet,
-/// `issue` tracks it); if it passes, the test fails so the mark is removed.
-fn xfail(spec: &str, issue: &str, body: impl FnOnce()) {
-    let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(body)).is_err();
-    assert!(
-        failed,
-        "XPASS: {spec} ({issue}) holds now; remove the xfail"
-    );
-}
-
 /// Many labels and edge types: what the store and the planner keep per label and per edge type
 /// id (the label and type dictionaries, their bitmaps, and the planner's statistics anchors, marks
 /// and changed-id lists of #674) is in the account. After 20,000 nodes of distinct labels and
@@ -239,9 +229,9 @@ fn xfail(spec: &str, issue: &str, body: impl FnOnce()) {
 /// and the report differ by the fixed margin only, and the account equals the walk. A list of
 /// 13 bytes per id left out of both would show here as about 500 KiB, which the walk cannot see.
 ///
-/// The planner's lists are counted (taking them out of the account lowers the report by their
-/// 512 KiB), but about 41 B per label and 27 B per edge type outside them are not: about 1.3 MB
-/// apart here, so the allocator check fails until the account holds them.
+/// The account once left out about 41 B per label and 27 B per edge type (1.3 MB here): the
+/// dictionaries' and the row groups' hash tables were counted as their capacity times an entry's
+/// fields, without empty buckets, padding and control bytes, and each name without its header.
 #[test]
 fn per_label_and_edge_type_lists_are_counted() {
     const KINDS: usize = 20_000;
@@ -263,15 +253,9 @@ fn per_label_and_edge_type_lists_are_counted() {
             .unwrap();
     });
     assert_eq!(ids.capacity(), KINDS, "the reserved vector never grew");
-    assert_counted_is_walked(&db, "many labels and edge types");
-    xfail(
-        "the memory account holds what the store keeps per label and per edge type",
-        "fix in 0.6.3",
-        || {
-            assert!(
-                allocated.abs_diff(reported) <= MARGIN,
-                "{KINDS} labels and edge types: {allocated} B allocated, {reported} B reported"
-            );
-        },
+    assert!(
+        allocated.abs_diff(reported) <= MARGIN,
+        "{KINDS} labels and edge types: {allocated} B allocated, {reported} B reported"
     );
+    assert_counted_is_walked(&db, "many labels and edge types");
 }

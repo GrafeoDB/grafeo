@@ -22,8 +22,18 @@ pub(crate) struct NameDictionary {
     by_name: FxHashMap<ArcStr, u32>,
     /// Id to name (index = id); `None` for an id that names nothing.
     by_id: Vec<Option<ArcStr>>,
-    /// The bytes of the names it holds, kept as names come and go.
+    /// The heap bytes of the names it holds ([`name_heap`]), kept as names come and go.
     name_bytes: usize,
+}
+
+/// The heap bytes of one name: an `ArcStr` holds its bytes after a header of two words (its
+/// length and its count) in one allocation, and the empty name is static, with none.
+fn name_heap(name: &str) -> usize {
+    if name.is_empty() {
+        0
+    } else {
+        name.len() + 2 * std::mem::size_of::<usize>()
+    }
 }
 
 impl NameDictionary {
@@ -50,7 +60,7 @@ impl NameDictionary {
         let id = u32::try_from(self.by_id.len())
             .expect("a name dictionary holds at most 4,294,967,296 ids");
         let name: ArcStr = name.into();
-        self.name_bytes += name.len();
+        self.name_bytes += name_heap(&name);
         self.by_name.insert(name.clone(), id);
         self.by_id.push(Some(name));
         id
@@ -86,7 +96,7 @@ impl NameDictionary {
             self.by_id.resize(at + 1, None);
         }
         let name: ArcStr = name.into();
-        self.name_bytes += name.len();
+        self.name_bytes += name_heap(&name);
         self.by_name.insert(name.clone(), id);
         self.by_id[at] = Some(name);
         Ok(())
@@ -98,8 +108,8 @@ impl NameDictionary {
     /// (see `LoadTarget::load_forget_label`).
     pub(crate) fn remove(&mut self, name: &str) -> Option<u32> {
         let id = self.by_name.remove(name)?;
-        debug_assert!(self.name_bytes >= name.len(), "a name count drifted");
-        self.name_bytes = self.name_bytes.saturating_sub(name.len());
+        debug_assert!(self.name_bytes >= name_heap(name), "a name count drifted");
+        self.name_bytes = self.name_bytes.saturating_sub(name_heap(name));
         if let Some(slot) = self.by_id.get_mut(id as usize) {
             *slot = None;
         }
@@ -142,7 +152,7 @@ impl NameDictionary {
     /// Estimates heap memory usage in bytes: a walk of every name, for the
     /// oracle of the counted figure.
     pub(crate) fn heap_bytes(&self) -> usize {
-        let string_bytes: usize = self.by_name.keys().map(|name| name.len()).sum();
+        let string_bytes: usize = self.by_name.keys().map(|name| name_heap(name)).sum();
         self.table_bytes() + string_bytes
     }
 
@@ -152,9 +162,11 @@ impl NameDictionary {
         self.table_bytes() + self.name_bytes
     }
 
-    /// The heap bytes of its map and its list, without the names.
+    /// The heap bytes of its map and its list, without the names: the map's whole table (its
+    /// buckets, padded entries and control bytes, as hashbrown allocates it), not its capacity
+    /// times an entry's fields.
     fn table_bytes(&self) -> usize {
-        self.by_name.capacity() * (std::mem::size_of::<ArcStr>() + std::mem::size_of::<u32>())
+        self.by_name.allocation_size()
             + self.by_id.capacity() * std::mem::size_of::<Option<ArcStr>>()
     }
 }

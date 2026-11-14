@@ -97,9 +97,11 @@ When a conflict is detected, the application should:
 2. Optionally retry the transaction
 3. Or report the conflict
 
-## Important Limitation: RDF Reads Are Not Isolated Yet
+## RDF and SPARQL
 
-The guarantees above hold for property graph queries (GQL, Cypher, SQL/PGQ and the others). A SPARQL query in a transaction does not read a snapshot yet: it sees the triples that other transactions commit after it started, and two transactions that delete the same triple both commit. A transaction's own uncommitted triples stay private to it, and a rollback still leaves nothing behind. Snapshot isolation for RDF is planned for 0.6.2 ([#718](https://github.com/GrafeoDB/grafeo/issues/718)).
+The same guarantees hold for RDF data. A SPARQL query in a transaction reads the triples and named graphs as they were when the transaction started, with its own updates, and at the same point as its property graph queries; what other transactions commit meanwhile stays invisible to it. A SPARQL query outside a transaction reads one committed state for its whole run.
+
+Two transactions conflict on a triple when both write it in the same graph and one of them deletes it: the second to commit fails with a write conflict (`GRAFEO-T001`). Two inserts of the same triple both commit, and the triple is stored once. Graph operations (`CREATE`, `DROP`, `CLEAR`, `COPY`, `MOVE`) conflict when two transactions change the same graph; see [SPARQL updates](sparql/update.md#graph-operations-and-transactions).
 
 ## Important Limitation: Write Skew
 

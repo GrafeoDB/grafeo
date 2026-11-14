@@ -1,0 +1,47 @@
+/* Grafeo site rules on top of the generated identity in extra.css */
+
+/* The logo follows the site's toggle, not the system: light mode shows the light mark, as a
+   background (replacing an <img> through the content property does not work in every browser) */
+[data-md-color-scheme="default"] .md-logo img {
+  visibility: hidden;
+}
+[data-md-color-scheme="default"] .md-logo {
+  background-image: url("../assets/logo-light.svg");
+  background-repeat: no-repeat;
+  background-position: center;
+  background-size: 1.2rem 1.2rem;
+}
+
+/* Cards: hairline borders and the template's box corner, no shadow */
+.md-typeset .grid.cards > ul > li,
+.md-typeset .grid > .card {
+  border: 1px solid var(--md-default-fg-color--lightest);
+  border-radius: var(--radius-box);
+  box-shadow: none;
+}
+.md-typeset .grid.cards > ul > li:hover,
+.md-typeset .grid > .card:hover {
+  border-color: var(--md-default-fg-color--lighter);
+  box-shadow: none;
+}
+.md-typeset .grid.cards > ul > li > hr {
+  border-color: var(--md-default-fg-color--lightest);
+}
+
+/* Mermaid: Zensical reads the --md-mermaid-* variables. Node fills are the template data colour
+   (--sig-data-1); node and label text and edges come from the template variables (labels sit on a
+   node-coloured chip) */
+[data-md-color-scheme="default"] {
+  --md-mermaid-node-bg-color: var(--sig-data-1);
+  --md-mermaid-node-fg-color: var(--md-default-bg-color--light);
+  --md-mermaid-label-bg-color: var(--md-mermaid-node-bg-color);
+  --md-mermaid-label-fg-color: var(--md-mermaid-node-fg-color);
+  --md-mermaid-edge-color: var(--md-default-fg-color--lighter);
+}
+[data-md-color-scheme="slate"] {
+  --md-mermaid-node-bg-color: var(--sig-data-1);
+  --md-mermaid-node-fg-color: var(--md-default-bg-color--light);
+  --md-mermaid-label-bg-color: var(--md-mermaid-node-bg-color);
+  --md-mermaid-label-fg-color: var(--md-mermaid-node-fg-color);
+  --md-mermaid-edge-color: var(--md-default-fg-color--lighter);
+}

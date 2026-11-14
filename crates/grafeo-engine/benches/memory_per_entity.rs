@@ -126,11 +126,14 @@ fn measure(db: &GrafeoDB) -> Measure {
 /// The three phases, each measured after it: the nodes, their properties, the edges.
 fn run() -> [Measure; 4] {
     let db = GrafeoDB::new_in_memory();
+    // The ids' vector is the bench's, not the database's: reserved whole before the first
+    // measurement, so no phase's difference holds it (its 8 bytes per node were once counted as
+    // the nodes').
+    let mut nodes: Vec<NodeId> = Vec::with_capacity(NODES);
     let empty = measure(&db);
 
-    let nodes: Vec<NodeId> = (0..NODES)
-        .map(|_| db.create_node(&["Person"]).expect("create a node"))
-        .collect();
+    nodes.extend((0..NODES).map(|_| db.create_node(&["Person"]).expect("create a node")));
+    assert_eq!(nodes.capacity(), NODES, "the reserved vector never grew");
     let with_nodes = measure(&db);
 
     for (index, &node) in nodes.iter().enumerate() {
@@ -153,8 +156,6 @@ fn run() -> [Measure; 4] {
         }
     }
     let with_edges = measure(&db);
-    // The vector the ids were in is the bench's, not the database's: it was held through
-    // every phase, so it is in no difference.
     drop(nodes);
     [empty, with_nodes, with_properties, with_edges]
 }

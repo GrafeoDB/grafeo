@@ -1,7 +1,7 @@
 {
   "bytes per entity": {
     "allocated per edge": 95.6,
-    "allocated per node": 8.4,
+    "allocated per node": 0.4,
     "allocated per property value": 10.7,
     "backward adjacency": 43.4,
     "edge records": 21.8,

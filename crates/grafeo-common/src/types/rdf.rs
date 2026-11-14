@@ -62,6 +62,18 @@ impl Term {
         self.text_bytes_where(|text| Arc::strong_count(text) == 1)
     }
 
+    /// Whether this term holds `other`'s text, the same allocation, not a
+    /// copy of it: a term cloned from the other (or the other from it).
+    #[must_use]
+    pub fn shares_text_with(&self, other: &Term) -> bool {
+        match (self, other) {
+            (Term::Iri(a), Term::Iri(b)) => Arc::ptr_eq(&a.value, &b.value),
+            (Term::BlankNode(a), Term::BlankNode(b)) => Arc::ptr_eq(&a.id, &b.id),
+            (Term::Literal(a), Term::Literal(b)) => Arc::ptr_eq(&a.value, &b.value),
+            _ => false,
+        }
+    }
+
     fn text_bytes_where(&self, counts: impl Fn(&Arc<str>) -> bool) -> usize {
         let string = |text: &Arc<str>| {
             if counts(text) {

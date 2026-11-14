@@ -789,7 +789,7 @@ impl RdfStore {
             .dictionary
             .intern_all([triple.subject(), triple.predicate(), triple.object()])
             .expect("an RDF dataset holds fewer than 2^60 distinct terms");
-        self.held_triple(&triple, [ids[0], ids[1], ids[2]])
+        self.held_triple(triple, [ids[0], ids[1], ids[2]])
     }
 
     /// The triple as the store keeps it, with `ids`, the dataset's: a
@@ -797,20 +797,22 @@ impl RdfStore {
     /// once however many triples name it, and an inlined id's term (which
     /// has no entry) is the given one. Every triple the store holds is built
     /// here.
-    fn held_triple(&self, triple: &Triple, ids: [grafeo_common::types::TermId; 3]) -> Arc<Triple> {
-        let term = |id: grafeo_common::types::TermId, own: &Term| {
-            id.index()
-                .and_then(|index| self.dictionary.get(index))
-                .map_or_else(|| own.clone(), |entry| Term::clone(entry.term()))
-        };
-        Arc::new(
-            Triple::new_unchecked(
-                term(ids[0], triple.subject()),
-                term(ids[1], triple.predicate()),
-                term(ids[2], triple.object()),
-            )
-            .with_ids(ids),
-        )
+    fn held_triple(
+        &self,
+        mut triple: Triple,
+        ids: [grafeo_common::types::TermId; 3],
+    ) -> Arc<Triple> {
+        for (term, id) in triple.terms_mut().into_iter().zip(ids) {
+            // A term the dictionary added for this triple is its own already
+            // (the dictionary keeps a clone of it): only one it held before
+            // is swapped, and the triple's copy of the text goes.
+            if let Some(entry) = id.index().and_then(|index| self.dictionary.get(index))
+                && !term.shares_text_with(entry.term())
+            {
+                *term = Term::clone(entry.term());
+            }
+        }
+        Arc::new(triple.with_ids(ids))
     }
 
     /// Inserts a triple into the store.
@@ -848,9 +850,10 @@ impl RdfStore {
         // The terms as the dictionary holds them: a loaded term table's own
         // terms are copies wherever the dictionary held the term already.
         self.insert_stored(
-            triples
-                .iter()
-                .filter_map(|triple| triple.ids().map(|ids| self.held_triple(triple, ids))),
+            triples.into_iter().filter_map(|triple| {
+                let ids = triple.ids()?;
+                Some(self.held_triple(triple, ids))
+            }),
             |_, _| {},
         )
     }

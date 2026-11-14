@@ -107,6 +107,12 @@ impl Triple {
         self
     }
 
+    /// The subject, predicate and object, for a store that swaps one for
+    /// the dictionary's equal term.
+    pub(crate) fn terms_mut(&mut self) -> [&mut Term; 3] {
+        [&mut self.subject, &mut self.predicate, &mut self.object]
+    }
+
     /// What a stored triple holds of its own: its shared allocation, with
     /// the text of its inlined terms. A dictionary term's text is the
     /// dictionary's, which the stored triple shares.

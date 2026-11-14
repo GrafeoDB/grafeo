@@ -317,7 +317,7 @@ tests:
   # CREATE / DROP / SHOW CONSTRAINT: constraints are stored by name (#420)
   # ---------------------------------------------------------------------------
 
-  # The examples of the GQL schema guide (docs/user-guide/gql/schema.md), which
+  # The examples of the GQL schema guide (docs/model-and-query/gql/schema.md), which
   # showed the Cypher `REQUIRE ... IS UNIQUE` form (#344).
   - name: schema_guide_constraint_examples
     statements:

@@ -470,7 +470,7 @@ fn a_grouping_past_the_query_limit_spills_or_names_the_limit() {
         )
         .unwrap();
         xfail(
-            "docs/architecture/memory: at the query memory limit a grouping spills and answers as in memory",
+            "docs/internals/memory: at the query memory limit a grouping spills and answers as in memory",
             "#674",
             || {
                 let rows = spilling.execute(query)?;

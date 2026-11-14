@@ -82,7 +82,7 @@ tests:
         - [3]
 
   - name: the_let_expression_of_the_docs_reads_its_definitions_in_order
-    # docs/user-guide/gql/expressions.md
+    # docs/model-and-query/gql/expressions.md
     setup:
       - "INSERT (:Person {name: 'Alix', salary: 101})"
     query: "MATCH (p:Person) RETURN p.name AS n, LET base = p.salary, bonus = base * 0.5e0 IN base + bonus END AS total"

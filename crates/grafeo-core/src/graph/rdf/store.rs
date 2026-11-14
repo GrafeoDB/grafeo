@@ -201,17 +201,21 @@ mod path_lookup_tests {
         store.insert(triple.clone());
         store.remove_in_transaction(tx, triple.clone());
         store.insert_in_transaction(tx, triple);
+        // A budget of nothing refuses as every path budget does: GRAFEO-S001 (#492).
         let mut empty_budget = PathBudget::new(0, None);
-        assert!(matches!(
-            store.visit_matches_with_pending(
+        let refused = store
+            .visit_matches_with_pending(
                 &RdfView::latest(LatestUse::Test),
                 &TriplePattern::any(),
                 Some(tx),
                 &mut empty_budget,
-                &mut |_, _| Ok(())
-            ),
-            Err(OperatorError::LimitExceeded(_))
-        ));
+                &mut |_, _| Ok(()),
+            )
+            .expect_err("a budget of nothing refuses the lookup");
+        assert!(
+            crate::execution::operators::path_budget_message(&refused).is_some(),
+            "{refused:?}"
+        );
         assert_eq!(empty_budget.used(), 0);
         let mut budget = PathBudget::new(4096, None);
         let mut visits = 0;

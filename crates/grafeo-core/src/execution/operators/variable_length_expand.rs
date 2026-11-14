@@ -18,8 +18,8 @@ use std::sync::Arc;
 ///
 /// Paths multiply with every hop on a graph with cycles, so a search that
 /// held them without a bound could run the process out of memory, which
-/// aborts it. A search over its budget fails with `GRAFEO-S001` instead
-/// ([`path_search_refused`]). `Config::with_path_search_budget` sets it.
+/// aborts it. A search over its budget fails with `GRAFEO-S001` instead,
+/// naming the path search budget. `Config::with_path_search_budget` sets it.
 pub const DEFAULT_PATH_SEARCH_BUDGET: usize = 256 * 1024 * 1024;
 
 /// `bytes` as a message gives a budget: `8 MiB`, `64 KiB`, `1000 bytes`.
@@ -554,8 +554,8 @@ impl VariableLengthExpandOperator {
     /// Sets the memory the search from one input row may hold, in bytes:
     /// the paths it has found and not yet emitted or extended (the default
     /// is [`DEFAULT_PATH_SEARCH_BUDGET`]). A search that would hold more
-    /// fails with `GRAFEO-S001` ([`path_search_refused`]), whose message names
-    /// the ways to need fewer paths and the setting. A reachability search (see
+    /// fails with `GRAFEO-S001`, naming the path search budget, whose message
+    /// names the ways to need fewer paths and the setting. A reachability search (see
     /// [`Self::with_reachability`]) holds each node at most once, and needs
     /// no budget.
     pub fn with_memory_budget(mut self, bytes: usize) -> Self {

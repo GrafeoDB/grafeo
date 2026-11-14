@@ -396,6 +396,7 @@ mod sparql_one_step_paths;
 mod sparql_optional_lookup;
 mod sparql_order_by_and_having;
 mod sparql_order_under_limit;
+mod sparql_overlay_guarantees;
 mod sparql_parser_never_aborts;
 mod sparql_path_deadline;
 mod sparql_path_per_row;

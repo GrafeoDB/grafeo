@@ -214,10 +214,11 @@ pub struct TransactionInfo {
     /// changed from it (see [`TransactionManager::open_change_sets`]).
     /// Dropped once the transaction is committed or aborted.
     pub(crate) changes: Option<Arc<TransactionChanges>>,
-    /// Its RDF writes once it is committed (the net of each triple it wrote,
-    /// per graph), for the conflict checks of the transactions that began
-    /// before its commit was published; `None` when none was open then.
-    /// Until then a check reads them from `changes`.
+    /// Its RDF writes from the start of its commit (the net of each triple
+    /// it wrote, per graph), for the conflict checks of the commits after
+    /// it: read without its change set, whose lock its commit holds while it
+    /// applies them. Dropped at its publish when no transaction is open that
+    /// began before it.
     #[cfg(feature = "triple-store")]
     rdf_writes: Option<Box<super::rdf::PendingTriples>>,
     /// Whether this is a private transaction (a direct call, see
@@ -312,11 +313,9 @@ impl TransactionInfo {
     /// its change set until its commit is published, then from what it kept.
     #[cfg(feature = "triple-store")]
     fn rdf_conflict(&self, ours: &TransactionChanges) -> Option<Error> {
-        match (&self.rdf_writes, &self.changes) {
-            (Some(theirs), _) => ours.rdf_conflict_with(theirs),
-            (None, Some(theirs)) => ours.rdf_conflict_with_set(theirs),
-            (None, None) => None,
-        }
+        self.rdf_writes
+            .as_deref()
+            .and_then(|theirs| ours.rdf_conflict_with(theirs))
     }
 }
 
@@ -850,16 +849,13 @@ impl Publish<'_> {
             if let Some(info) = transactions.get_mut(&self.transaction_id) {
                 info.state = TransactionState::Committed;
                 info.claim_undo = None;
-                // A transaction still open began before this publish: its
-                // commit checks its RDF writes against this one's, which the
-                // change set gives up now. Counted under this lock (see
-                // `register`): with no other, none begins below the epoch.
+                // Its RDF writes serve the commits of the transactions still
+                // open, which began before this publish. Counted under this
+                // lock (see `register`): with no other, none begins below the
+                // epoch, and they serve no check.
                 #[cfg(feature = "triple-store")]
-                if manager.active_count.load(Ordering::Acquire) > 1
-                    && let Some(changes) = &info.changes
-                    && changes.has_pending_triples()
-                {
-                    info.rdf_writes = Some(Box::new(changes.take_rdf_writes()));
+                if manager.active_count.load(Ordering::Acquire) <= 1 {
+                    info.rdf_writes = None;
                 }
                 // Stamped: what it changed is committed state now.
                 info.changes = None;
@@ -1763,6 +1759,14 @@ impl TransactionManager {
         // dropped.
         if let Some(info) = txns.get_mut(&transaction_id) {
             info.state = TransactionState::Committing;
+            // Its RDF writes, for the checks of the commits after it, which
+            // then never wait on its change set while they hold this lock.
+            #[cfg(feature = "triple-store")]
+            if let Some(changes) = &info.changes
+                && changes.has_pending_triples()
+            {
+                info.rdf_writes = Some(Box::new(changes.take_rdf_writes()));
+            }
         }
         committed.insert(transaction_id, commit_epoch);
 

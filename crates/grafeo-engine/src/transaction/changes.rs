@@ -85,7 +85,10 @@ struct State {
     /// The position before the first entry, which a rollback undoes to.
     start: ChangeMark,
     /// The net effect of the RDF entries, which the transaction's reads lay
-    /// over the store.
+    /// over the store. The commit's start takes it out for the conflict
+    /// checks of the commits after it ([`take_rdf_writes`]).
+    ///
+    /// [`take_rdf_writes`]: TransactionChanges::take_rdf_writes
     #[cfg(feature = "triple-store")]
     triples: super::rdf::PendingTriples,
     /// The schema statements and graph operations it ran, which apply at its commit.
@@ -732,24 +735,13 @@ impl TransactionChanges {
             .map(|(graph, triple)| super::rdf::triple_conflict(graph, triple))
     }
 
-    /// The conflict of this transaction's RDF writes with those `theirs`,
-    /// another transaction's change set, holds. Their lock first, then ours:
-    /// only a commit's conflict check, under the `transactions` lock, holds
-    /// two change sets' locks.
-    #[cfg(feature = "triple-store")]
-    pub(crate) fn rdf_conflict_with_set(&self, theirs: &Self) -> Option<Error> {
-        let state = theirs.state.lock();
-        if state.triples.is_empty() {
-            return None;
-        }
-        self.rdf_conflict_with(&state.triples)
-    }
-
-    /// Takes the transaction's RDF writes out, at its publish, for the
-    /// conflict checks of the transactions still open that began before it.
+    /// Takes the transaction's RDF writes out, at the start of its commit,
+    /// for the conflict checks of the commits after it: a check then reads
+    /// them without the change set's lock, which the commit holds while it
+    /// applies them. The entries stay, for the apply.
     #[cfg(feature = "triple-store")]
     pub(crate) fn take_rdf_writes(&self) -> super::rdf::PendingTriples {
-        std::mem::take(&mut self.state.lock().triples)
+        self.state.lock().triples.take_for_commit()
     }
 
     /// Applies the RDF entries to `store` in recorded order (triples, and
@@ -782,7 +774,7 @@ impl TransactionChanges {
         if let Some(grant) = std::mem::take(&mut state.rdf).grant {
             store.adopt_grant(grant);
         }
-        if state.triples.is_empty() {
+        if !state.triples.applies() {
             return Ok(());
         }
         // Each triple entry's position with its change's, and the commit's

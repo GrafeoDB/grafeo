@@ -207,9 +207,30 @@ pub(crate) struct PendingTriples {
     /// statement's own transaction (`COPY`, `MOVE` or `ADD` applied whole at
     /// its commit) leaves no base, but the commit still has it to apply.
     graph_ops: usize,
+    /// Whether the commit's start took the writes out for the conflict
+    /// checks of the commits after it ([`take_for_commit`]): the change set
+    /// still has the entries to apply.
+    ///
+    /// [`take_for_commit`]: Self::take_for_commit
+    taken: bool,
 }
 
 impl PendingTriples {
+    /// Takes the writes out at the start of the commit, for the conflict
+    /// checks of the commits after it, and leaves an empty net that still
+    /// [`applies`](Self::applies) when the writes did.
+    pub(crate) fn take_for_commit(&mut self) -> Self {
+        let writes = std::mem::take(self);
+        self.taken = !writes.is_empty();
+        writes
+    }
+
+    /// Whether the change set has RDF entries to apply at the commit: a
+    /// triple or a graph operation, here or taken out by the commit's start.
+    pub(crate) fn applies(&self) -> bool {
+        self.taken || !self.is_empty()
+    }
+
     /// Borrows one graph's net for a native path lookup.
     fn path_graph(&self, graph: Option<&str>) -> PathPendingGraph<'_> {
         PathPendingGraph {

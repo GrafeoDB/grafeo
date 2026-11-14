@@ -124,6 +124,7 @@ mod detach_delete;
 mod direct_api;
 mod direct_reads;
 mod direct_write_atomicity;
+mod downgrade_fixtures;
 mod duplicate_column_disambiguation;
 mod edge_endpoint_conflicts;
 mod edge_type_lists;

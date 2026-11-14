@@ -1,0 +1,24 @@
+{
+  "bytes per entity": {
+    "allocated per edge": 95.6,
+    "allocated per node": 8.4,
+    "allocated per property value": 10.7,
+    "backward adjacency": 43.4,
+    "edge records": 21.8,
+    "edge version chains": 0.1,
+    "forward adjacency": 30.2,
+    "label index": 0.2,
+    "node labels": 0.0,
+    "node properties": 10.7,
+    "node records": 0.0,
+    "node version chains": 0.1,
+    "reported per edge": 95.6,
+    "reported per node": 0.3,
+    "reported per property value": 10.7
+  },
+  "workload": {
+    "edges": 300000,
+    "nodes": 100000,
+    "properties per node": 3
+  }
+}

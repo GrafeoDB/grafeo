@@ -48,3 +48,48 @@ jobs:
           zensical build --strict
           python scripts/docs_extras.py
           echo "Documentation built successfully!"
+
+  # Publish to GitHub Pages on a push to main (and by hand), so the docs do not wait for a release tag
+  deploy:
+    name: Deploy Documentation
+    needs: validate
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    concurrency:
+      group: "pages"
+      cancel-in-progress: false
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Setup Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Install dependencies
+        run: uv pip install --system -r docs/requirements-docs.txt
+
+      - name: Build documentation
+        run: |
+          zensical build --strict
+          python scripts/docs_extras.py
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: site/
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v5

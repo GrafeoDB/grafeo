@@ -107,6 +107,20 @@ impl Triple {
         self
     }
 
+    /// What a stored triple holds of its own: its shared allocation, with
+    /// the text of its inlined terms. A dictionary term's text is the
+    /// dictionary's, which the stored triple shares.
+    #[must_use]
+    pub(crate) fn stored_bytes(&self) -> usize {
+        let inlined = [&self.subject, &self.predicate, &self.object]
+            .into_iter()
+            .zip(self.ids)
+            .filter(|(_, id)| TermId::from_raw(*id).is_some_and(|id| id.index().is_none()))
+            .map(|(term, _)| term.text_bytes())
+            .sum::<usize>();
+        2 * std::mem::size_of::<usize>() + std::mem::size_of::<Self>() + inlined
+    }
+
     /// The ids of subject, predicate and object when a store holds the
     /// triple; `None` for a triple no store has taken (a pending write, a
     /// triple a query builds).

@@ -537,13 +537,20 @@ impl RdfStore {
     }
 
     /// The bytes this graph holds as it counts them: its triples and
-    /// indexes, its ring, and the dictionary when it owns it.
-    fn counted_total(&self) -> usize {
+    /// indexes, its ring, and, for the dataset's default graph (which owns
+    /// the dictionary), the dictionary and what the overlay holds for
+    /// readers at older snapshots.
+    pub(super) fn counted_total(&self) -> usize {
         let counted = self.counted.load(std::sync::atomic::Ordering::Relaxed);
         let sane = isize::try_from(counted).is_ok();
         debug_assert!(sane, "an RDF graph's count drifted: {counted}");
         let counted = if sane { counted } else { 0 };
-        counted + self.ring_bytes() + self.dictionary_bytes()
+        let snapshots = if self.owns_dictionary {
+            self.overlay.held_bytes()
+        } else {
+            0
+        };
+        counted + self.ring_bytes() + self.dictionary_bytes() + snapshots
     }
 
     /// The bytes of the dictionary this graph counts: the dataset's for the
@@ -554,6 +561,24 @@ impl RdfStore {
         } else {
             0
         }
+    }
+
+    /// The overlay's counted bytes of its entries and the partitions they
+    /// swapped out, against a walk of the entries it holds now, when they
+    /// differ; `None` when the count is right. For tests and explicit
+    /// checks: it walks every entry.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn snapshot_account_mismatch(&self) -> Option<((usize, usize), (usize, usize))> {
+        let (counted, walked) = self.overlay.account();
+        (counted != walked).then_some((counted, walked))
+    }
+
+    /// What the dataset keeps for readers at older snapshots: what its
+    /// overlay holds, and the partitions it swapped out for them.
+    #[must_use]
+    pub fn snapshot_bytes(&self) -> usize {
+        self.overlay.held_bytes() + self.overlay.retained_bytes()
     }
 
     /// The bytes of this graph's ring.
@@ -630,11 +655,12 @@ impl RdfStore {
     /// The heap bytes of this graph's triples and indexes by a walk of every
     /// index entry: the oracle of its count.
     fn own_walk_bytes(&self) -> usize {
-        use std::mem::size_of;
-
         let triples = self.triples.read();
-        let held = triples.capacity() * (size_of::<Held>() + size_of::<u64>())
-            + triples.len() * size_of::<Triple>();
+        let held = triples.allocation_size()
+            + triples
+                .iter()
+                .map(|held| held.0.stored_bytes())
+                .sum::<usize>();
         drop(triples);
         held + index_walk_bytes(&self.subject_index.read())
             + index_walk_bytes(&self.predicate_index.read())
@@ -763,7 +789,28 @@ impl RdfStore {
             .dictionary
             .intern_all([triple.subject(), triple.predicate(), triple.object()])
             .expect("an RDF dataset holds fewer than 2^60 distinct terms");
-        Arc::new(triple.with_ids([ids[0], ids[1], ids[2]]))
+        self.held_triple(&triple, [ids[0], ids[1], ids[2]])
+    }
+
+    /// The triple as the store keeps it, with `ids`, the dataset's: a
+    /// dictionary id's term is the dictionary's own, so its strings are held
+    /// once however many triples name it, and an inlined id's term (which
+    /// has no entry) is the given one. Every triple the store holds is built
+    /// here.
+    fn held_triple(&self, triple: &Triple, ids: [grafeo_common::types::TermId; 3]) -> Arc<Triple> {
+        let term = |id: grafeo_common::types::TermId, own: &Term| {
+            id.index()
+                .and_then(|index| self.dictionary.get(index))
+                .map_or_else(|| own.clone(), |entry| Term::clone(entry.term()))
+        };
+        Arc::new(
+            Triple::new_unchecked(
+                term(ids[0], triple.subject()),
+                term(ids[1], triple.predicate()),
+                term(ids[2], triple.object()),
+            )
+            .with_ids(ids),
+        )
     }
 
     /// Inserts a triple into the store.
@@ -798,7 +845,14 @@ impl RdfStore {
     /// terms up again. Returns how many were new.
     pub(crate) fn batch_insert_with_dataset_ids(&self, triples: Vec<Triple>) -> usize {
         debug_assert!(triples.iter().all(|triple| triple.ids().is_some()));
-        self.insert_stored(triples.into_iter().map(Arc::new), |_, _| {})
+        // The terms as the dictionary holds them: a loaded term table's own
+        // terms are copies wherever the dictionary held the term already.
+        self.insert_stored(
+            triples
+                .iter()
+                .filter_map(|triple| triple.ids().map(|ids| self.held_triple(triple, ids))),
+            |_, _| {},
+        )
     }
 
     /// Inserts `triples` in one batch, as [`batch_insert`](Self::batch_insert)
@@ -849,7 +903,7 @@ impl RdfStore {
         let mut new_triples = Vec::with_capacity(triples.size_hint().0);
         {
             let mut primary = self.triples.write();
-            let before = primary.capacity();
+            let before = primary.allocation_size();
             primary.reserve(triples.size_hint().0);
             for arc in triples {
                 let inserted = primary.insert(Held(Arc::clone(&arc)));
@@ -860,10 +914,9 @@ impl RdfStore {
             }
             self.count(
                 primary
-                    .capacity()
+                    .allocation_size()
                     .wrapping_sub(before)
-                    .wrapping_mul(std::mem::size_of::<Held>() + std::mem::size_of::<u64>())
-                    .wrapping_add(new_triples.len() * std::mem::size_of::<Triple>()),
+                    .wrapping_add(new_triples.iter().map(|triple| triple.stored_bytes()).sum()),
             );
         }
 
@@ -952,14 +1005,13 @@ impl RdfStore {
         let ids = self.keys_of(triple)?;
         let removed = {
             let mut primary = self.triples.write();
-            let before = primary.capacity();
+            let before = primary.allocation_size();
             let removed = primary.take(&ids)?;
             self.count(
                 primary
-                    .capacity()
+                    .allocation_size()
                     .wrapping_sub(before)
-                    .wrapping_mul(std::mem::size_of::<Held>() + std::mem::size_of::<u64>())
-                    .wrapping_sub(std::mem::size_of::<Triple>()),
+                    .wrapping_sub(removed.0.stored_bytes()),
             );
             removed.0
         };
@@ -1028,18 +1080,18 @@ impl RdfStore {
     /// ring_index_bytes, named_graph_count)`. Recurses into named graphs so the
     /// totals reflect the full RDF memory, not just the default graph.
     ///
-    /// The index-bytes figure is an approximation: each `HashMap` entry is
-    /// charged for a pointer-sized key plus capacity-based Vec overhead. It
-    /// undercounts the per-`Term` heap (a `Term::IRI(String)` carries its
-    /// payload) and overcounts hash-map empty buckets. Good enough to surface
-    /// "RDF is eating the heap" in an introspection breakdown.
+    /// A walk of what the store allocated: each map and set by its
+    /// allocation, each list by its room, each stored triple by its own
+    /// allocation and its inlined terms' text, and the dictionary's parts and
+    /// text (see [`TermDictionary::heap_bytes`](super::dictionary::TermDictionary::heap_bytes)).
     #[must_use]
     pub fn heap_memory_bytes(&self) -> (usize, usize, usize, usize, usize) {
-        use std::mem::size_of;
-
         let triples = self.triples.read();
-        let triple_arc_bytes = triples.capacity() * (size_of::<Held>() + size_of::<u64>());
-        let triple_payload_bytes = triples.len() * size_of::<Triple>();
+        let triple_arc_bytes = triples.allocation_size();
+        let triple_payload_bytes = triples
+            .iter()
+            .map(|held| held.0.stored_bytes())
+            .sum::<usize>();
         drop(triples);
 
         let subject_bytes = index_walk_bytes(&self.subject_index.read());
@@ -1071,7 +1123,7 @@ impl RdfStore {
             .ring
             .read()
             .as_ref()
-            .map_or(0, |r| r.len() * size_of::<(u32, u32, u32)>());
+            .map_or(0, |r| r.len() * std::mem::size_of::<(u32, u32, u32)>());
         #[cfg(not(feature = "ring-index"))]
         let ring_bytes = 0usize;
 
@@ -3096,7 +3148,7 @@ fn index_by<K: Eq + std::hash::Hash>(
     triples: &[Arc<Triple>],
     key: impl Fn(&[Key; 3]) -> K,
 ) -> usize {
-    let entries = index.capacity();
+    let entries = index.allocation_size();
     let mut lists = 0_usize;
     for triple in triples {
         let list = index.entry(key(triple.raw_ids())).or_default();
@@ -3104,11 +3156,10 @@ fn index_by<K: Eq + std::hash::Hash>(
         list.push(Arc::clone(triple));
         lists += list.capacity() - before;
     }
-    // Differences, wrapping: a map's capacity can move either way.
+    // Differences, wrapping: a map's allocation can move either way.
     index
-        .capacity()
+        .allocation_size()
         .wrapping_sub(entries)
-        .wrapping_mul(index_entry_bytes::<K>())
         .wrapping_add(lists * std::mem::size_of::<Arc<Triple>>())
 }
 
@@ -3119,8 +3170,8 @@ const fn index_entry_bytes<K>() -> usize {
 
 /// The heap bytes of `index` by a walk of its lists: its slots and every
 /// list's room.
-fn index_walk_bytes<K>(index: &Index<K>) -> usize {
-    index.capacity() * index_entry_bytes::<K>()
+fn index_walk_bytes<K: Eq + std::hash::Hash>(index: &Index<K>) -> usize {
+    index.allocation_size()
         + index
             .values()
             .map(|list| list.capacity() * std::mem::size_of::<Arc<Triple>>())
@@ -3130,7 +3181,7 @@ fn index_walk_bytes<K>(index: &Index<K>) -> usize {
 /// Takes the triple of ids `ids` out of the entry of `index` that `key`
 /// names, and the entry with it once empty.
 fn unindex<K: Eq + std::hash::Hash>(index: &mut Index<K>, key: &K, ids: &[Key; 3]) -> usize {
-    let entries = index.capacity();
+    let entries = index.allocation_size();
     let mut freed = 0;
     if let Some(triples) = index.get_mut(key) {
         triples.retain(|triple| triple.raw_ids() != ids);
@@ -3139,11 +3190,10 @@ fn unindex<K: Eq + std::hash::Hash>(index: &mut Index<K>, key: &K, ids: &[Key; 3
             index.remove(key);
         }
     }
-    // Differences, wrapping: a removal can lower the map's capacity.
+    // Differences, wrapping: a removal can lower the map's allocation.
     index
-        .capacity()
+        .allocation_size()
         .wrapping_sub(entries)
-        .wrapping_mul(index_entry_bytes::<K>())
         .wrapping_sub(freed)
 }
 

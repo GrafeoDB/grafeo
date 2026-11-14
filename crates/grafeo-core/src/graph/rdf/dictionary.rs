@@ -65,6 +65,13 @@ pub struct TermDictionary {
     segments: Box<[OnceLock<Box<[OnceLock<DictionaryEntry>]>>]>,
     len: std::sync::atomic::AtomicU64,
     index: RwLock<Index>,
+    /// The heap bytes of the terms' text (`Term::text_bytes`), counted as
+    /// each term is added; terms are never removed.
+    text: std::sync::atomic::AtomicUsize,
+    /// The heap bytes of the dictionary's own parts, as they are allocated:
+    /// each segment's slots, each entry's shared term, and the writers'
+    /// index table. Only an add grows them, under the index's write lock.
+    parts: std::sync::atomic::AtomicUsize,
 }
 
 impl Default for TermDictionary {
@@ -101,6 +108,11 @@ impl TermDictionary {
             segments: (0..SEGMENTS).map(|_| OnceLock::new()).collect(),
             len: std::sync::atomic::AtomicU64::new(0),
             index: RwLock::new(Index::default()),
+            text: std::sync::atomic::AtomicUsize::new(0),
+            // The table of segments, allocated here.
+            parts: std::sync::atomic::AtomicUsize::new(
+                SEGMENTS * std::mem::size_of::<OnceLock<Box<[OnceLock<DictionaryEntry>]>>>(),
+            ),
         }
     }
 
@@ -110,19 +122,15 @@ impl TermDictionary {
         self.len.load(std::sync::atomic::Ordering::Acquire)
     }
 
-    /// An estimate of the heap the dictionary holds beyond the terms'
-    /// strings (which the triples share): per entry its term, the slot and
-    /// the writers' index.
+    /// The heap the dictionary holds: per entry its term, the slot and the
+    /// writers' index, and the terms' text, which the stored triples share
+    /// (see [`RdfStore`](super::RdfStore): a stored triple takes the
+    /// dictionary's terms).
     #[must_use]
     pub fn heap_bytes(&self) -> usize {
-        let per_entry = std::mem::size_of::<Term>()
-            + 2 * std::mem::size_of::<usize>()
-            + std::mem::size_of::<OnceLock<DictionaryEntry>>()
-            + std::mem::size_of::<u64>()
-            + 1;
-        usize::try_from(self.len())
-            .unwrap_or(usize::MAX)
-            .saturating_mul(per_entry)
+        self.parts
+            .load(std::sync::atomic::Ordering::Relaxed)
+            .saturating_add(self.text.load(std::sync::atomic::Ordering::Relaxed))
     }
 
     /// Whether no term has an index.
@@ -217,17 +225,37 @@ impl TermDictionary {
             .segments
             .get(segment)
             .ok_or(DictionaryFull)?
-            .get_or_init(|| (0..FIRST << segment).map(|_| OnceLock::new()).collect());
+            .get_or_init(|| {
+                let slots = FIRST << segment;
+                self.parts.fetch_add(
+                    slots * std::mem::size_of::<OnceLock<DictionaryEntry>>(),
+                    std::sync::atomic::Ordering::Relaxed,
+                );
+                (0..slots).map(|_| OnceLock::new()).collect()
+            });
+        // The entry's shared term, and its text.
+        self.parts.fetch_add(
+            2 * std::mem::size_of::<usize>() + std::mem::size_of::<Term>(),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        self.text
+            .fetch_add(term.text_bytes(), std::sync::atomic::Ordering::Relaxed);
         let _ = entries[slot].set(DictionaryEntry {
             term: Arc::new(term.clone()),
             native: OnceLock::new(),
         });
         self.len.store(at + 1, std::sync::atomic::Ordering::Release);
         let Index { hasher, indexes } = index;
+        let table = indexes.allocation_size();
         indexes.insert_unique(hash, at, |&known| {
             self.get(known)
                 .map_or(0, |entry| hasher.hash_one(&**entry.term()))
         });
+        // The table only grows (no term is removed).
+        self.parts.fetch_add(
+            indexes.allocation_size() - table,
+            std::sync::atomic::Ordering::Relaxed,
+        );
         Ok(id)
     }
 }

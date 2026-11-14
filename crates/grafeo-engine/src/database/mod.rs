@@ -577,6 +577,10 @@ impl GrafeoDB {
         // So do the RDF store's and the change sets'.
         #[cfg(feature = "triple-store")]
         rdf_store.attach_memory(Arc::clone(&buffer_manager));
+        // What it keeps for readers at an older snapshot goes when the last
+        // of them ends.
+        #[cfg(feature = "triple-store")]
+        Self::watch_rdf_snapshots(&rdf_store, &transaction_manager);
         transaction_manager.attach_memory(Arc::clone(&buffer_manager));
 
         // Create catalog early so WAL replay can restore schema definitions
@@ -1239,6 +1243,10 @@ impl GrafeoDB {
         let rdf_store = Arc::new(RdfStore::new());
         #[cfg(feature = "triple-store")]
         rdf_store.attach_memory(Arc::clone(&buffer_manager));
+        // What it keeps for readers at an older snapshot goes when the last
+        // of them ends.
+        #[cfg(feature = "triple-store")]
+        Self::watch_rdf_snapshots(&rdf_store, &transaction_manager);
         #[cfg(feature = "cdc")]
         let cdc_log = Arc::new(crate::cdc::CdcLog::with_retention(
             config.cdc_retention().clone(),
@@ -1371,6 +1379,10 @@ impl GrafeoDB {
         let rdf_store = Arc::new(RdfStore::new());
         #[cfg(feature = "triple-store")]
         rdf_store.attach_memory(Arc::clone(&buffer_manager));
+        // What it keeps for readers at an older snapshot goes when the last
+        // of them ends.
+        #[cfg(feature = "triple-store")]
+        Self::watch_rdf_snapshots(&rdf_store, &transaction_manager);
         #[cfg(feature = "cdc")]
         let cdc_log = Arc::new(crate::cdc::CdcLog::with_retention(
             config.cdc_retention().clone(),
@@ -1505,6 +1517,37 @@ impl GrafeoDB {
     #[deprecated(since = "0.6.0", note = "use `compact()`, which this calls")]
     pub fn recompact(&mut self) -> Result<crate::admin::CompactReport> {
         self.compact()
+    }
+
+    /// Lets what `rdf_store` keeps for readers at an older snapshot go once
+    /// the last reader that needs it ends, without waiting for a commit:
+    /// at a reader's end (a read pin drops, a transaction aborts or
+    /// publishes), the RDF writes kept for older commits' conflict checks
+    /// and the overlay entries below the read horizon are released. Both are
+    /// one atomic load when nothing is kept.
+    #[cfg(feature = "triple-store")]
+    fn watch_rdf_snapshots(
+        rdf_store: &Arc<RdfStore>,
+        transaction_manager: &Arc<TransactionManager>,
+    ) {
+        let store = Arc::clone(rdf_store);
+        let kept = transaction_manager.kept_rdf_writes_counter();
+        // Weak: the manager holds this work.
+        let manager = Arc::downgrade(transaction_manager);
+        transaction_manager.on_reader_end(move || {
+            // Every read outside a transaction ends here: two atomic loads
+            // when nothing is kept, no upgrade.
+            if kept.load(std::sync::atomic::Ordering::Relaxed) == 0
+                && !store.overlay_holds_entries()
+            {
+                return;
+            }
+            let Some(manager) = manager.upgrade() else {
+                return;
+            };
+            manager.release_kept_rdf_writes();
+            crate::transaction::prune_rdf_overlay(&store, &manager);
+        });
     }
 
     /// Moves the root store, every named graph and the transaction manager

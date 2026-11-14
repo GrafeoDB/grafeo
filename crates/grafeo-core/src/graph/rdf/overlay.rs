@@ -81,13 +81,57 @@ pub enum GraphChange {
 pub struct OverlayEntry {
     epoch: EpochId,
     changes: Vec<OverlayChange>,
+    /// The heap bytes the entry holds that nothing else does: its changes,
+    /// and the triples it deleted (the store holds them no more). An insert
+    /// run's triples are the store's.
+    bytes: usize,
+    /// The bytes of the partitions its graph operations swapped out, which
+    /// keep their own count and grant.
+    retained: usize,
 }
 
 impl OverlayEntry {
     /// The changes of the commit at `epoch`, in recorded order.
     #[must_use]
     pub fn new(epoch: EpochId, changes: Vec<OverlayChange>) -> Self {
-        Self { epoch, changes }
+        let (bytes, retained) = Self::measure(&changes);
+        Self {
+            epoch,
+            changes,
+            bytes,
+            retained,
+        }
+    }
+
+    /// The heap bytes `changes` hold that nothing else does, and those of
+    /// the partitions they swapped out (see the fields): measured once, when
+    /// the entry is made, and again by a walk of the overlay.
+    fn measure(changes: &Vec<OverlayChange>) -> (usize, usize) {
+        let mut bytes = changes.capacity() * std::mem::size_of::<OverlayChange>();
+        let mut retained = 0;
+        for change in changes {
+            match change {
+                OverlayChange::Inserts(run) => {
+                    bytes += run.capacity() * std::mem::size_of::<Arc<Triple>>();
+                }
+                // The triple as the store held and counted it.
+                OverlayChange::Delete { triple, .. } => bytes += triple.stored_bytes(),
+                OverlayChange::Graph {
+                    change: GraphChange::Dropped { before } | GraphChange::Cleared { before },
+                    ..
+                } => retained += before.counted_total(),
+                OverlayChange::In(_) | OverlayChange::Graph { .. } => {}
+            }
+        }
+        (bytes, retained)
+    }
+
+    /// What an entry holds for a delete it records, besides the triple the
+    /// store held and counted until then: its change. A write reserves it
+    /// before its commit applies.
+    #[must_use]
+    pub const fn delete_bytes() -> usize {
+        std::mem::size_of::<OverlayChange>()
     }
 
     /// The epoch of the commit.
@@ -142,6 +186,13 @@ pub struct RdfOverlay {
     /// How many times a view extended its changes, over all views: for
     /// tests (none on the fast path).
     views_extended: AtomicU64,
+    /// The bytes the entries hold that nothing else does.
+    bytes: AtomicUsize,
+    /// What the open views worked out of the entries ([`view_bytes`](Self::view_bytes)).
+    views: AtomicUsize,
+    /// The bytes of the partitions the entries swapped out
+    /// ([`retained_bytes`](Self::retained_bytes)).
+    retained: AtomicUsize,
 }
 
 impl RdfOverlay {
@@ -158,6 +209,8 @@ impl RdfOverlay {
             "overlay entries are published in epoch order"
         );
         let epoch = entry.epoch.as_u64();
+        self.bytes.fetch_add(entry.bytes, Ordering::Relaxed);
+        self.retained.fetch_add(entry.retained, Ordering::Relaxed);
         entries.push_back(Arc::new(entry));
         self.held.store(entries.len(), Ordering::Release);
         self.newest.store(epoch, Ordering::Release);
@@ -199,15 +252,80 @@ impl RdfOverlay {
 
     /// Drops the entries at or below `epoch`: no reader pins an epoch below
     /// it, so none needs them. A view below `epoch` is refused from now on
-    /// ([`pruned_through`](Self::pruned_through)).
-    pub fn prune_below(&self, epoch: EpochId) {
-        let mut entries = self.entries.write();
-        self.pruned_through
-            .fetch_max(epoch.as_u64(), Ordering::AcqRel);
-        while entries.front().is_some_and(|entry| entry.epoch <= epoch) {
-            entries.pop_front();
+    /// ([`pruned_through`](Self::pruned_through)). Whether it dropped any;
+    /// with none to drop it takes only the read side.
+    pub fn prune_below(&self, epoch: EpochId) -> bool {
+        // Nothing at or below `epoch`: no write lock (a view between the last
+        // prune and `epoch` still finds every entry after it).
+        if self
+            .entries
+            .read()
+            .front()
+            .is_none_or(|entry| entry.epoch > epoch)
+        {
+            return false;
         }
-        self.held.store(entries.len(), Ordering::Release);
+        let mut pruned = Vec::new();
+        {
+            let mut entries = self.entries.write();
+            self.pruned_through
+                .fetch_max(epoch.as_u64(), Ordering::AcqRel);
+            while let Some(entry) = entries.pop_front_if(|entry| entry.epoch <= epoch) {
+                // Counted out under the lock, as a publish counts in: a walk
+                // of the entries agrees with the count at any time.
+                self.bytes.fetch_sub(entry.bytes, Ordering::Relaxed);
+                self.retained.fetch_sub(entry.retained, Ordering::Relaxed);
+                pruned.push(entry);
+            }
+            self.held.store(entries.len(), Ordering::Release);
+        }
+        // Dropped here, after the lock: a pruned entry can hold a whole
+        // partition.
+        let any = !pruned.is_empty();
+        drop(pruned);
+        any
+    }
+
+    /// The bytes the overlay holds that nothing else does: its entries'
+    /// changes, the triples they deleted, and what the views of readers
+    /// worked out of them. The dataset's default graph counts them.
+    #[must_use]
+    pub fn held_bytes(&self) -> usize {
+        self.bytes.load(Ordering::Relaxed) + self.view_bytes()
+    }
+
+    /// What the open views of readers worked out of the entries: 0 once
+    /// every view has dropped.
+    #[must_use]
+    pub fn view_bytes(&self) -> usize {
+        self.views.load(Ordering::Relaxed)
+    }
+
+    /// The entries' counted bytes (their own, then their swapped-out
+    /// partitions'), and the same by a walk of the entries held now: the
+    /// count's oracle.
+    #[must_use]
+    pub fn account(&self) -> ((usize, usize), (usize, usize)) {
+        let entries = self.entries.read();
+        let counted = (
+            self.bytes.load(Ordering::Relaxed),
+            self.retained.load(Ordering::Relaxed),
+        );
+        let walked = entries
+            .iter()
+            .map(|entry| OverlayEntry::measure(&entry.changes))
+            .fold((0, 0), |(bytes, retained), (own, swapped)| {
+                (bytes + own, retained + swapped)
+            });
+        (counted, walked)
+    }
+
+    /// The bytes of the partitions the entries swapped out for readers at an
+    /// older snapshot (a `CLEAR` or `DROP`): each keeps its own count and
+    /// grant.
+    #[must_use]
+    pub fn retained_bytes(&self) -> usize {
+        self.retained.load(Ordering::Relaxed)
     }
 
     /// The epoch the entries are pruned through, 0 before the first prune.
@@ -257,25 +375,34 @@ pub struct GraphAtSnapshot {
 #[derive(Debug, Default)]
 pub struct PresentTriples {
     triples: Vec<Arc<Triple>>,
-    /// Each triple's position in `triples`, by its ids.
-    positions: FxHashMap<TripleIds, usize>,
+    /// The ids of the triples.
+    ids: FxHashSet<TripleIds>,
     /// The positions of the triples of each subject id.
     by_subject: FxHashMap<u64, Vec<usize>>,
     /// The positions of the triples of each object id.
     by_object: FxHashMap<u64, Vec<usize>>,
+    /// The heap bytes of the buckets' lists, kept as they grow.
+    bucket_bytes: usize,
 }
 
 impl PresentTriples {
     /// Adds `triple` unless it is there.
     fn insert(&mut self, triple: &Arc<Triple>) {
         let ids = *triple.raw_ids();
-        let at = self.triples.len();
-        if self.positions.insert(ids, at).is_some() {
+        if !self.ids.insert(ids) {
             return;
         }
+        let at = self.triples.len();
         self.triples.push(Arc::clone(triple));
-        self.by_subject.entry(ids[0]).or_default().push(at);
-        self.by_object.entry(ids[2]).or_default().push(at);
+        for (bucket, id) in [
+            (&mut self.by_subject, ids[0]),
+            (&mut self.by_object, ids[2]),
+        ] {
+            let positions = bucket.entry(id).or_default();
+            let before = positions.capacity();
+            positions.push(at);
+            self.bucket_bytes += (positions.capacity() - before) * std::mem::size_of::<usize>();
+        }
     }
 
     /// Whether there is none.
@@ -293,7 +420,17 @@ impl PresentTriples {
     /// Whether the triple with `ids` is one of them.
     #[must_use]
     pub fn contains(&self, ids: &TripleIds) -> bool {
-        self.positions.contains_key(ids)
+        self.ids.contains(ids)
+    }
+
+    /// The heap bytes of the lists and maps (the triples are the
+    /// overlay entries').
+    fn heap_bytes(&self) -> usize {
+        self.triples.capacity() * std::mem::size_of::<Arc<Triple>>()
+            + self.ids.allocation_size()
+            + self.by_subject.allocation_size()
+            + self.by_object.allocation_size()
+            + self.bucket_bytes
     }
 
     /// All of them, in the order of their deletes.
@@ -410,6 +547,19 @@ impl SnapshotChanges {
         }
     }
 
+    /// The heap bytes of what the commits after the snapshot changed, as
+    /// worked out for a reader.
+    fn heap_bytes(&self) -> usize {
+        self.graphs.allocation_size()
+            + self
+                .graphs
+                .values()
+                .map(|graph| graph.absent.allocation_size() + graph.present.heap_bytes())
+                .sum::<usize>()
+            + self.seen.allocation_size()
+            + self.swapped.allocation_size()
+    }
+
     /// Whether a change of `ids` in `graph` is its first after the
     /// snapshot, in the partition the reader reads: one after the graph's
     /// first swap is in the new partition.
@@ -437,6 +587,8 @@ struct SnapshotState {
     /// the first).
     cursor: u64,
     changes: SnapshotChanges,
+    /// The bytes of `changes` the overlay counts for this snapshot.
+    counted: usize,
 }
 
 /// A reader's snapshot: its epoch, and what the commits after it changed.
@@ -467,6 +619,7 @@ impl Snapshot {
             state: RecursiveRwLock::new(SnapshotState {
                 cursor: epoch.as_u64(),
                 changes: SnapshotChanges::default(),
+                counted: 0,
             }),
             extensions: AtomicU64::new(0),
         }
@@ -504,6 +657,19 @@ impl Snapshot {
             }
             self.extensions.fetch_add(1, Ordering::Relaxed);
             self.overlay.views_extended.fetch_add(1, Ordering::Relaxed);
+            // What the reader holds now is in the overlay's count, until the
+            // snapshot drops.
+            let bytes = state.changes.heap_bytes();
+            if bytes > state.counted {
+                self.overlay
+                    .views
+                    .fetch_add(bytes - state.counted, Ordering::Relaxed);
+            } else {
+                self.overlay
+                    .views
+                    .fetch_sub(state.counted - bytes, Ordering::Relaxed);
+            }
+            state.counted = bytes;
         }
         Some(ChangesGuard(
             parking_lot::RecursiveRwLockWriteGuard::downgrade(state),
@@ -514,6 +680,13 @@ impl Snapshot {
     #[must_use]
     pub fn extensions(&self) -> u64 {
         self.extensions.load(Ordering::Relaxed)
+    }
+}
+
+impl Drop for Snapshot {
+    fn drop(&mut self) {
+        let counted = self.state.get_mut().counted;
+        self.overlay.views.fetch_sub(counted, Ordering::Relaxed);
     }
 }
 

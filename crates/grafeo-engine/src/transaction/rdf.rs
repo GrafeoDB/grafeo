@@ -225,6 +225,38 @@ impl PendingTriples {
         writes
     }
 
+    /// The heap bytes the net holds: its maps, and the triples only it
+    /// holds (a transaction's own; a load's are the store's). Walks every
+    /// triple: measured outside the manager's locks.
+    pub(crate) fn heap_bytes(&self) -> usize {
+        // A triple only this net holds: its allocation, and the text of
+        // its terms that nothing else holds (a parsed write's own strings).
+        let own = |triple: &Triple| {
+            2 * std::mem::size_of::<usize>()
+                + std::mem::size_of::<Triple>()
+                + triple.subject().unshared_text_bytes()
+                + triple.predicate().unshared_text_bytes()
+                + triple.object().unshared_text_bytes()
+        };
+        let graph = |graph: &PendingGraph| {
+            graph.triples.allocation_size()
+                + graph
+                    .triples
+                    .keys()
+                    .filter(|triple| Arc::strong_count(triple) == 1)
+                    .map(|triple| own(triple))
+                    .sum::<usize>()
+        };
+        std::mem::size_of::<Self>()
+            + graph(&self.default)
+            + self.named.allocation_size()
+            + self
+                .named
+                .iter()
+                .map(|(name, pending)| name.capacity() + graph(pending))
+                .sum::<usize>()
+    }
+
     /// Whether the change set has RDF entries to apply at the commit: a
     /// triple or a graph operation, here or taken out by the commit's start.
     pub(crate) fn applies(&self) -> bool {

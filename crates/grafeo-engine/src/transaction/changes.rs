@@ -600,9 +600,15 @@ impl TransactionChanges {
         let mut state = self.state.lock();
         // Reserved before anything is recorded: a refusal records nothing.
         // On a refusal the lock goes while the buffer manager makes room,
-        // and the reservation is tried once more.
-        if insert && let Some(manager) = &self.memory {
-            let bytes = grafeo_core::graph::rdf::RdfStore::insert_bytes_estimate(&triple);
+        // and the reservation is tried once more. A delete reserves the
+        // overlay's record of it, which keeps the triple for readers at an
+        // older snapshot.
+        if let Some(manager) = &self.memory {
+            let bytes = if insert {
+                grafeo_core::graph::rdf::RdfStore::insert_bytes_estimate(&triple)
+            } else {
+                grafeo_core::graph::rdf::overlay::OverlayEntry::delete_bytes()
+            };
             if !state.rdf.reserve(manager, bytes) {
                 drop(state);
                 if !manager.make_room(bytes) {
@@ -733,6 +739,14 @@ impl TransactionChanges {
             .triples
             .conflict_with(theirs)
             .map(|(graph, triple)| super::rdf::triple_conflict(graph, triple))
+    }
+
+    /// The heap bytes of the transaction's RDF writes, which its commit
+    /// keeps while an older transaction is open: measured before the commit
+    /// takes the manager's locks (it walks them).
+    #[cfg(feature = "triple-store")]
+    pub(crate) fn rdf_writes_bytes(&self) -> usize {
+        self.state.lock().triples.heap_bytes()
     }
 
     /// Takes the transaction's RDF writes out, at the start of its commit,

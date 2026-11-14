@@ -214,6 +214,8 @@ impl super::GrafeoDB {
                 term_dictionary_bytes,
                 ring_index_bytes,
                 named_graph_count,
+                snapshot_bytes: self.rdf_store.snapshot_bytes()
+                    + self.transaction_manager.kept_rdf_writes_bytes(),
                 total_bytes: 0,
             };
             usage.rdf.compute_total();

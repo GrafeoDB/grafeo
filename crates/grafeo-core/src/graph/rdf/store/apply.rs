@@ -207,7 +207,10 @@ impl RdfStore {
     /// Drops the overlay entries at or below `horizon`, the read horizon: no
     /// reader pins an epoch below it.
     pub fn prune_overlay(&self, horizon: EpochId) {
-        self.overlay.prune_below(horizon);
+        // What the pruned entries held leaves the grant.
+        if self.overlay.prune_below(horizon) {
+            self.settle();
+        }
     }
 
     /// Whether the overlay holds an entry: one atomic load, so a commit with

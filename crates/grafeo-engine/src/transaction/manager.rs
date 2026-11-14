@@ -220,7 +220,7 @@ pub struct TransactionInfo {
     /// applies them. Dropped at its publish when no transaction is open that
     /// began before it.
     #[cfg(feature = "triple-store")]
-    rdf_writes: Option<Box<super::rdf::PendingTriples>>,
+    rdf_writes: Option<KeptRdfWrites>,
     /// Whether this is a private transaction (a direct call, see
     /// [`TransactionManager::begin_private`]): nobody asks for its state, so
     /// it leaves the manager as soon as no other transaction can conflict
@@ -272,7 +272,7 @@ impl TransactionInfo {
     /// for the conflict checks of the transactions open across it: its RDF
     /// `writes` at `epoch`, nothing else.
     #[cfg(feature = "triple-store")]
-    fn committed_writer(epoch: EpochId, writes: super::rdf::PendingTriples) -> Self {
+    fn committed_writer(epoch: EpochId, writes: KeptRdfWrites) -> Self {
         Self {
             state: TransactionState::Committed,
             isolation_level: IsolationLevel::default(),
@@ -283,7 +283,7 @@ impl TransactionInfo {
             endpoint_set: FxHashSet::default(),
             key_set: FxHashSet::default(),
             changes: None,
-            rdf_writes: Some(Box::new(writes)),
+            rdf_writes: Some(writes),
             private: false,
             claim_undo: None,
         }
@@ -315,8 +315,57 @@ impl TransactionInfo {
     #[cfg(feature = "triple-store")]
     fn rdf_conflict(&self, ours: &TransactionChanges) -> Option<Error> {
         self.rdf_writes
-            .as_deref()
-            .and_then(|theirs| ours.rdf_conflict_with(theirs))
+            .as_ref()
+            .and_then(|theirs| ours.rdf_conflict_with(&theirs.writes))
+    }
+}
+
+/// The RDF writes a committed transaction (or a load) keeps for the
+/// conflict checks of the transactions that began before it: in the memory
+/// report while kept (`TransactionManager::kept_rdf_writes_bytes`), and
+/// counted out when dropped.
+#[cfg(feature = "triple-store")]
+#[derive(Debug)]
+struct KeptRdfWrites {
+    writes: Box<super::rdf::PendingTriples>,
+    /// Their heap bytes, measured before they were kept.
+    bytes: usize,
+    /// The manager's count of every kept write set's bytes.
+    counted: Arc<std::sync::atomic::AtomicUsize>,
+    /// Their grant from the database's buffer manager, forced (the commit
+    /// holds them already), given back when they drop.
+    _grant: Option<grafeo_common::memory::buffer::MemoryGrant>,
+}
+
+#[cfg(feature = "triple-store")]
+impl KeptRdfWrites {
+    /// Keeps `writes`, of `bytes` heap bytes, counted in `counted` and
+    /// granted by `memory`.
+    fn new(
+        writes: super::rdf::PendingTriples,
+        bytes: usize,
+        counted: &Arc<std::sync::atomic::AtomicUsize>,
+        memory: Option<Arc<grafeo_common::memory::buffer::BufferManager>>,
+    ) -> Self {
+        counted.fetch_add(bytes, Ordering::Relaxed);
+        Self {
+            writes: Box::new(writes),
+            bytes,
+            counted: Arc::clone(counted),
+            _grant: memory.map(|memory| {
+                memory.reserve_forced(
+                    bytes,
+                    grafeo_common::memory::buffer::MemoryRegion::GraphStorage,
+                )
+            }),
+        }
+    }
+}
+
+#[cfg(feature = "triple-store")]
+impl Drop for KeptRdfWrites {
+    fn drop(&mut self) {
+        self.counted.fetch_sub(self.bytes, Ordering::Relaxed);
     }
 }
 
@@ -474,6 +523,10 @@ pub struct TransactionManager {
     /// manager (the vector consumer's collect horizon), and a strong handle
     /// would keep both, and the spill directory, past the database.
     memory: std::sync::OnceLock<std::sync::Weak<grafeo_common::memory::buffer::BufferManager>>,
+    /// The heap bytes of the RDF writes committed transactions keep for the
+    /// conflict checks of older ones (see `KeptRdfWrites`).
+    #[cfg(feature = "triple-store")]
+    kept_rdf_bytes: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 /// The most emptied change sets the manager keeps for new transactions.
@@ -491,9 +544,28 @@ const SPARE_CHANGE_SETS: usize = 16;
 #[derive(Debug, Default)]
 struct ReadPins {
     epochs: Mutex<VecDeque<(u64, usize)>>,
+    /// What runs once a reader ends, its pin or its transaction (see
+    /// [`TransactionManager::on_reader_end`]), with no lock held.
+    reader_end: std::sync::OnceLock<ReaderEnd>,
+}
+
+/// The work a reader's end may let go (see `ReadPins::reader_end`).
+struct ReaderEnd(Box<dyn Fn() + Send + Sync>);
+
+impl std::fmt::Debug for ReaderEnd {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ReaderEnd")
+    }
 }
 
 impl ReadPins {
+    /// Runs the reader-end work, if any is set: called with no lock held.
+    fn reader_ended(&self) {
+        if let Some(ReaderEnd(work)) = self.reader_end.get() {
+            work();
+        }
+    }
+
     /// Counts a reader at the published epoch, read while the lock is held,
     /// and returns that epoch: the read horizon reads the published epoch
     /// under the same lock, so it never passes a reader it has not counted.
@@ -582,6 +654,7 @@ impl std::fmt::Debug for ReadPin {
 impl Drop for ReadPin {
     fn drop(&mut self) {
         self.pins.release(self.epoch);
+        self.pins.reader_ended();
     }
 }
 
@@ -845,6 +918,9 @@ impl Publish<'_> {
             drop(turn);
             return Err(error);
         }
+        // Writes kept for nobody, dropped once the lock is released.
+        #[cfg(feature = "triple-store")]
+        let mut released: Option<KeptRdfWrites> = None;
         {
             let mut transactions = manager.transactions.write();
             if let Some(info) = transactions.get_mut(&self.transaction_id) {
@@ -856,7 +932,7 @@ impl Publish<'_> {
                 // epoch, and they serve no check.
                 #[cfg(feature = "triple-store")]
                 if manager.active_count.load(Ordering::Acquire) <= 1 {
-                    info.rdf_writes = None;
+                    released = info.rdf_writes.take();
                 }
                 // Stamped: what it changed is committed state now.
                 info.changes = None;
@@ -901,6 +977,11 @@ impl Publish<'_> {
         if self.changed {
             manager.run_first_commit_hook();
         }
+        // After every lock: the writes kept for nobody go, and what older
+        // readers needed may go too.
+        #[cfg(feature = "triple-store")]
+        drop(released);
+        manager.reads.reader_ended();
         Ok(())
     }
 }
@@ -1015,7 +1096,85 @@ impl TransactionManager {
             history: History::default(),
             spare_changes: Mutex::new(Vec::new()),
             memory: std::sync::OnceLock::new(),
+            #[cfg(feature = "triple-store")]
+            kept_rdf_bytes: Arc::default(),
         }
+    }
+
+    /// Sets the work that runs once a reader ends (a read pin drops, a
+    /// transaction aborts or publishes), with no lock of the manager held:
+    /// what was kept for older readers may go then. Set once; later calls
+    /// keep the first.
+    #[cfg(feature = "triple-store")]
+    pub(crate) fn on_reader_end(&self, work: impl Fn() + Send + Sync + 'static) {
+        let _ = self.reads.reader_end.set(ReaderEnd(Box::new(work)));
+    }
+
+    /// The heap bytes of the RDF writes kept for the conflict checks of
+    /// transactions that began before their commits.
+    #[cfg(feature = "triple-store")]
+    #[must_use]
+    pub(crate) fn kept_rdf_writes_bytes(&self) -> usize {
+        self.kept_rdf_bytes.load(Ordering::Relaxed)
+    }
+
+    /// The count behind [`kept_rdf_writes_bytes`](Self::kept_rdf_writes_bytes),
+    /// for a check at a reader's end that needs no handle on the manager.
+    #[cfg(feature = "triple-store")]
+    #[must_use]
+    pub(crate) fn kept_rdf_writes_counter(&self) -> Arc<std::sync::atomic::AtomicUsize> {
+        Arc::clone(&self.kept_rdf_bytes)
+    }
+
+    /// Lets go of the RDF writes no open transaction's commit is checked
+    /// against any more: those of commits before every open transaction
+    /// began. One atomic load when none is kept; what goes is dropped after
+    /// the lock.
+    #[cfg(feature = "triple-store")]
+    pub(crate) fn release_kept_rdf_writes(&self) {
+        if self.kept_rdf_bytes.load(Ordering::Relaxed) == 0 {
+            return;
+        }
+        // The commits whose writes no open transaction is checked against:
+        // found under the read side, so a reader's end while an older
+        // transaction stays open takes no write lock.
+        let releasable = |transactions: &FxHashMap<TransactionId, TransactionInfo>,
+                          committed: &FxHashMap<TransactionId, EpochId>| {
+            let oldest_open = transactions
+                .values()
+                .filter(|info| {
+                    matches!(
+                        info.state,
+                        TransactionState::Active | TransactionState::Committing
+                    )
+                })
+                .map(|info| info.start_epoch)
+                .min();
+            transactions
+                .iter()
+                .filter(|(id, info)| {
+                    info.state == TransactionState::Committed
+                        && info.rdf_writes.is_some()
+                        && oldest_open.is_none_or(|oldest| {
+                            committed.get(*id).is_some_and(|epoch| *epoch < oldest)
+                        })
+                })
+                .map(|(id, _)| *id)
+                .collect::<Vec<_>>()
+        };
+        if releasable(&self.transactions.read(), &self.committed_epochs.read()).is_empty() {
+            return;
+        }
+        let released: Vec<KeptRdfWrites> = {
+            let mut transactions = self.transactions.write();
+            let committed = self.committed_epochs.read();
+            // Again under the write side: a transaction may have begun since.
+            releasable(&transactions, &committed)
+                .into_iter()
+                .filter_map(|id| transactions.get_mut(&id)?.rdf_writes.take())
+                .collect()
+        };
+        drop(released);
     }
 
     /// Gives the change sets made from now on their grants from `manager`
@@ -1589,6 +1748,18 @@ impl TransactionManager {
         transaction_id: TransactionId,
         quiet: bool,
     ) -> Result<CommitGuard<'_>> {
+        // The bytes of the RDF writes the commit keeps, measured before any
+        // lock of the manager is taken (it walks them): only this thread
+        // changes them now.
+        #[cfg(feature = "triple-store")]
+        let kept_bytes = {
+            let changes = self
+                .transactions
+                .read()
+                .get(&transaction_id)
+                .and_then(|info| info.changes.clone());
+            changes.map_or(0, |changes| changes.rdf_writes_bytes())
+        };
         let commit_lock = self.commit_lock.lock();
         if quiet {
             self.wait_for_written_commits();
@@ -1766,7 +1937,12 @@ impl TransactionManager {
             if let Some(changes) = &info.changes
                 && changes.has_pending_triples()
             {
-                info.rdf_writes = Some(Box::new(changes.take_rdf_writes()));
+                info.rdf_writes = Some(KeptRdfWrites::new(
+                    changes.take_rdf_writes(),
+                    kept_bytes,
+                    &self.kept_rdf_bytes,
+                    self.memory_manager(),
+                ));
             }
         }
         committed.insert(transaction_id, commit_epoch);
@@ -1945,6 +2121,8 @@ impl TransactionManager {
             Ok(()) => None,
         };
         self.abort_registered(transaction_id)?;
+        // After the lock: what was kept for this reader may go.
+        self.reads.reader_ended();
         undo_error.map_or(Ok(()), Err)
     }
 
@@ -2141,9 +2319,13 @@ impl TransactionManager {
         // Built before the `transactions` lock while a transaction is open,
         // which every begin and commit check takes: a load's run is walked
         // whole. Commits are held, so only a begin can come between.
+        let measured = |writes: super::rdf::PendingTriples| {
+            let bytes = writes.heap_bytes();
+            (writes, bytes)
+        };
         let mut writes = Some(writes);
         let built = (self.active_count.load(Ordering::Acquire) > 0)
-            .then(|| writes.take().map(|writes| writes()))
+            .then(|| writes.take().map(|writes| measured(writes())))
             .flatten();
         {
             let mut transactions = self.transactions.write();
@@ -2151,14 +2333,22 @@ impl TransactionManager {
             // the read above is open across the load too, and its writes are
             // built here then, a rare case.
             if self.active_count.load(Ordering::Acquire) > 0 {
-                let writes = built
-                    .or_else(|| writes.take().map(|writes| writes()))
+                let (writes, bytes) = built
+                    .or_else(|| writes.take().map(|writes| measured(writes())))
                     .unwrap_or_default();
                 let transaction_id =
                     TransactionId::new(self.next_transaction_id.fetch_add(1, Ordering::Relaxed));
                 transactions.insert(
                     transaction_id,
-                    TransactionInfo::committed_writer(epoch, writes),
+                    TransactionInfo::committed_writer(
+                        epoch,
+                        KeptRdfWrites::new(
+                            writes,
+                            bytes,
+                            &self.kept_rdf_bytes,
+                            self.memory_manager(),
+                        ),
+                    ),
                 );
                 // Transactions, then committed epochs, as `gc` takes them.
                 self.committed_epochs.write().insert(transaction_id, epoch);

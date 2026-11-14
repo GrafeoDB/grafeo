@@ -86,7 +86,7 @@ def test_markdown_copies_old_and_new(tmp_site, tmp_docs):
 
 def test_llms_txt_links_resolve():
     text = (ROOT / "docs/llms.txt").read_text(encoding="utf-8")
-    links = re.findall(r"https://grafeo\.dev(/[^\s)]*)", text)
+    links = re.findall(r"https://docs\.grafeo\.dev(/[^\s)]*)", text)
     assert links
     for link in links:
         path = link.strip("/")

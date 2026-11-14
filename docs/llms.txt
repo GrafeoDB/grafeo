@@ -324,12 +324,12 @@ SELECT * FROM GRAPH_TABLE (
 
 ## Documentation
 
-Full documentation: https://grafeo.dev
+Full documentation: https://docs.grafeo.dev
 
-- Getting Started: https://grafeo.dev/get-started/
-- User Guide: https://grafeo.dev/model-and-query/
-- API Reference: https://grafeo.dev/languages/
-- Architecture: https://grafeo.dev/internals/
+- Getting Started: https://docs.grafeo.dev/get-started/
+- User Guide: https://docs.grafeo.dev/model-and-query/
+- API Reference: https://docs.grafeo.dev/languages/
+- Architecture: https://docs.grafeo.dev/internals/
 
 ## Source Code
 

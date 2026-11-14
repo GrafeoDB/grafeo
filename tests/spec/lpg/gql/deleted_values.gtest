@@ -1,0 +1,119 @@
+# #712: a deleted, overwritten or removed value is returned by no read, whatever path the read
+# takes: a label scan, a range filter only the deleted value meets (the column's bound may still hold
+# it), a property index lookup, a list or map, an edge, a named graph. What stays in memory and in the
+# file after compact() and a reopen is checked in deleted_values_leave_memory.rs, which scans the
+# memory Grafeo allocated; a .gtest cannot compact, reopen or roll back.
+
+meta:
+  language: gql
+  model: lpg
+  title: Deleted values are returned by no read
+  dataset: empty
+
+tests:
+
+  - name: a_scan_returns_only_what_is_left
+    setup:
+      - "INSERT (:Item {id: 'I0', text: 'Gus said something'}), (:Item {id: 'I1', text: 'Jules said something'})"
+      - "INSERT (:Item {id: 'M0', text: 'Moment 0: Alix told Gus'}), (:Item {id: 'M1', text: 'Moment 1: Alix told Mia'})"
+      - "MATCH (n:Item) WHERE n.id IN ['M0', 'M1'] DETACH DELETE n"
+    query: "MATCH (n:Item) RETURN n.text AS text"
+    expect:
+      rows:
+        - ["Gus said something"]
+        - ["Jules said something"]
+
+  - name: a_range_only_the_deleted_largest_meets_returns_nothing
+    setup:
+      - "INSERT (:Item {id: 'I0', text: 'Gus said something'})"
+      - "INSERT (:Item {id: 'M0', text: 'Moment 0: Alix told Gus'}), (:Item {id: 'M1', text: 'Moment 1: Alix told Mia'})"
+      - "MATCH (n:Item) WHERE n.id IN ['M0', 'M1'] DETACH DELETE n"
+    query: "MATCH (n:Item) WHERE n.text >= 'Moment' RETURN n.text AS text"
+    expect:
+      empty: true
+
+  - name: a_range_only_the_deleted_smallest_meets_returns_nothing
+    setup:
+      - "INSERT (:Item {id: 'I0', text: 'Gus said something'})"
+      - "INSERT (:Item {id: 'M0', text: 'Alix told Gus'})"
+      - "MATCH (n:Item {id: 'M0'}) DETACH DELETE n"
+    query: "MATCH (n:Item) WHERE n.text < 'B' RETURN n.text AS text"
+    expect:
+      empty: true
+
+  - name: an_index_lookup_of_a_deleted_text_returns_nothing
+    setup:
+      - "CREATE INDEX item_text FOR (n:Item) ON (n.text)"
+      - "INSERT (:Item {id: 'I0', text: 'Gus said something'})"
+      - "INSERT (:Item {id: 'M0', text: 'Moment 0: Alix told Gus'})"
+      - "MATCH (n:Item {id: 'M0'}) DETACH DELETE n"
+    query: "MATCH (n:Item {text: 'Moment 0: Alix told Gus'}) RETURN n.id AS id"
+    expect:
+      empty: true
+
+  - name: an_overwritten_text_is_found_by_its_new_value_only
+    setup:
+      - "CREATE INDEX item_text FOR (n:Item) ON (n.text)"
+      - "INSERT (:Item {id: 'M0', text: 'Moment 0: Alix told Gus'})"
+      - "MATCH (n:Item {id: 'M0'}) SET n.text = 'Vincent said nothing'"
+    query: "MATCH (n:Item) WHERE n.text = 'Moment 0: Alix told Gus' OR n.text >= 'Moment' RETURN n.text AS text"
+    expect:
+      rows:
+        - ["Vincent said nothing"]
+
+  - name: a_removed_property_is_null
+    setup:
+      - "INSERT (:Item {id: 'M0', text: 'Moment 0: Alix told Gus'})"
+      - "MATCH (n:Item {id: 'M0'}) REMOVE n.text"
+    query: "MATCH (n:Item) RETURN n.id AS id, n.text AS text"
+    expect:
+      rows:
+        - ["M0", null]
+
+  - name: a_deleted_list_is_not_returned
+    setup:
+      - "INSERT (:Item {id: 'I0', tags: ['Gus']})"
+      - "INSERT (:Item {id: 'M0', tags: ['Moment 0: Alix told Gus', 'Mia']})"
+      - "MATCH (n:Item {id: 'M0'}) DETACH DELETE n"
+    query: "MATCH (n:Item) WHERE 'Mia' IN n.tags RETURN n.id AS id"
+    expect:
+      empty: true
+
+  - name: a_deleted_map_is_not_returned
+    setup:
+      - "INSERT (:Item {id: 'M0', note: {said: 'Moment 0: Alix told Gus', by: 'Mia'}})"
+      - "INSERT (:Item {id: 'I0'})"
+      - "MATCH (n:Item {id: 'M0'}) DETACH DELETE n"
+    query: "MATCH (n:Item) RETURN n.id AS id, n.note AS note"
+    expect:
+      rows:
+        - ["I0", null]
+
+  - name: a_deleted_edge_property_is_not_returned
+    setup:
+      - "INSERT (:Item {id: 'M0'})-[:TOLD {text: 'Moment 0: Alix told Gus'}]->(:Item {id: 'M1'})"
+      - "MATCH (n:Item {id: 'M0'}) DETACH DELETE n"
+    query: "MATCH ()-[r:TOLD]->() RETURN r.text AS text"
+    expect:
+      empty: true
+
+  - name: a_deleted_text_in_a_named_graph_is_not_returned
+    setup:
+      - "CREATE GRAPH g"
+      - "USE GRAPH g"
+      - "INSERT (:Item {id: 'I0', text: 'Gus said something'})"
+      - "INSERT (:Item {id: 'M0', text: 'Moment 0: Alix told Gus'})"
+      - "MATCH (n:Item {id: 'M0'}) DETACH DELETE n"
+    query: "MATCH (n:Item) WHERE n.text >= 'Moment' RETURN n.text AS text"
+    expect:
+      empty: true
+
+  - name: cypher_reads_no_deleted_text
+    language: cypher
+    requires: [cypher]
+    statements:
+      - "CREATE (:Item {id: 'I0', text: 'Gus said something'}), (:Item {id: 'M0', text: 'Moment 0: Alix told Gus'})"
+      - "MATCH (n:Item {id: 'M0'}) DETACH DELETE n"
+      - "MATCH (n:Item) WHERE n.text >= 'Moment' OR n.text CONTAINS 'Alix' RETURN n.text AS text"
+    expect:
+      empty: true

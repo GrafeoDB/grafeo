@@ -179,7 +179,7 @@ pub struct RdfOverlay {
     newest: AtomicU64,
     /// How many entries are kept: one atomic for a commit that checks
     /// whether there is anything to prune.
-    held: AtomicUsize,
+    held: Arc<AtomicUsize>,
     /// The epoch the entries are pruned through: a view below it would miss
     /// commits.
     pruned_through: AtomicU64,
@@ -338,6 +338,13 @@ impl RdfOverlay {
     #[must_use]
     pub fn len(&self) -> usize {
         self.held.load(Ordering::Acquire)
+    }
+
+    /// How many entries are kept, as a count a watcher holds without
+    /// holding the overlay (or anything its entries keep alive).
+    #[must_use]
+    pub fn len_counter(&self) -> Arc<AtomicUsize> {
+        Arc::clone(&self.held)
     }
 
     /// Whether no entry is kept: one atomic load.

@@ -1530,19 +1530,24 @@ impl GrafeoDB {
         rdf_store: &Arc<RdfStore>,
         transaction_manager: &Arc<TransactionManager>,
     ) {
-        let store = Arc::clone(rdf_store);
+        // The manager holds this work, so it holds nothing that holds data:
+        // the store and the manager weakly, and two counts. A strong store
+        // would close a cycle (the store's buffer manager holds consumers
+        // that hold the manager) and keep the store, its dictionary and its
+        // overlay alive past the database (#712).
+        let store = Arc::downgrade(rdf_store);
+        let entries = rdf_store.overlay().len_counter();
         let kept = transaction_manager.kept_rdf_writes_counter();
-        // Weak: the manager holds this work.
         let manager = Arc::downgrade(transaction_manager);
         transaction_manager.on_reader_end(move || {
             // Every read outside a transaction ends here: two atomic loads
             // when nothing is kept, no upgrade.
             if kept.load(std::sync::atomic::Ordering::Relaxed) == 0
-                && !store.overlay_holds_entries()
+                && entries.load(std::sync::atomic::Ordering::Acquire) == 0
             {
                 return;
             }
-            let Some(manager) = manager.upgrade() else {
+            let (Some(store), Some(manager)) = (store.upgrade(), manager.upgrade()) else {
                 return;
             };
             manager.release_kept_rdf_writes();

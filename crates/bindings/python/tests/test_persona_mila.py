@@ -1,7 +1,8 @@
 """Persona: Mila moves a Python app from Neo4j and Cypher to GQL.
 
-She starts from the "Coming from Cypher" page (docs/user-guide/gql/coming-from-cypher.md),
-keeps her Cypher habits in GQL, and runs a shadow comparison: each query in
+She starts from the "Coming from Cypher" page
+(docs/model-and-query/comparisons/coming-from-cypher.md), keeps her Cypher
+habits in GQL, and runs a shadow comparison: each query in
 both languages over the same data, where the rows must agree except where the
 page says GQL differs (walks against trails, exact decimals, sum() of no
 values, zoned against local datetimes). Her app is shaped like a code graph:

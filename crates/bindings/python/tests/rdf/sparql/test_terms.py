@@ -347,7 +347,7 @@ def test_terms_export_to_dataframes_as_native_values(db):
 
 
 def test_the_duckdb_tutorial_averages_sparql_numbers(db):
-    """docs/tutorials/examples/duckdb-integration.md: SPARQL to Arrow to DuckDB."""
+    """docs/get-started/examples/duckdb-integration.md: SPARQL to Arrow to DuckDB."""
     duckdb = pytest.importorskip("duckdb")
     pytest.importorskip("pyarrow")
     db.execute_sparql(PEOPLE)

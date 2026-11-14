@@ -353,7 +353,7 @@ A write that breaks a key fails with `GRAFEO-V001`, and nothing of the statement
 
 A `NODE KEY` on several properties does what `UNIQUE` on those properties together and `NOT NULL` on each of them do, in one constraint with one name. `UNIQUE` alone accepts nodes that lack a key property, as a missing value is never a duplicate.
 
-`NODE KEY` is a Grafeo extension: ISO GQL has no constraint statements, and its `KEY` in a graph type is a set of labels that identifies an element type, not a property key. Cypher's spelling, `REQUIRE (p.firstName, p.lastName) IS NODE KEY`, is accepted too, and a `PRIMARY KEY` column in [SQL/PGQ](../sql-pgq/index.md) `CREATE PROPERTY GRAPH` is the same rule. It is part of the stable query language (see [Stability](../../stability.md)).
+`NODE KEY` is a Grafeo extension: ISO GQL has no constraint statements, and its `KEY` in a graph type is a set of labels that identifies an element type, not a property key. Cypher's spelling, `REQUIRE (p.firstName, p.lastName) IS NODE KEY`, is accepted too, and a `PRIMARY KEY` column in [SQL/PGQ](../sql-pgq/index.md) `CREATE PROPERTY GRAPH` is the same rule. It is part of the stable query language (see [Stability](../../project/stability.md)).
 
 ### NOT NULL
 

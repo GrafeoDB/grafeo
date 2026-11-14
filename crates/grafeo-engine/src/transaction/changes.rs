@@ -519,13 +519,15 @@ impl TransactionChanges {
         failure.map_or(Ok(()), Err)
     }
 
-    /// Recomputes the pending triples when `dropped` held RDF entries.
+    /// Recomputes the pending triples when `dropped` held RDF entries
+    /// (triples or graph operations).
     #[cfg(feature = "triple-store")]
     fn forget_triples(state: &mut State, dropped: &[Change]) {
-        if dropped
-            .iter()
-            .any(|change| matches!(change, Change::Data { op, .. } if op.model() == DataModel::Rdf))
-        {
+        if dropped.iter().any(|change| match change {
+            Change::Data { op, .. } => op.model() == DataModel::Rdf,
+            Change::RdfGraph { .. } => true,
+            Change::Bulk(_) => false,
+        }) {
             state.triples = super::rdf::PendingTriples::of(&state.set);
             // What the dropped inserts reserved goes back (the grant keeps
             // its step until the commit or the rollback).
@@ -627,8 +629,59 @@ impl TransactionChanges {
         Ok(())
     }
 
+    /// Records the whole-graph RDF operation `op`, in its place after the
+    /// entries so far, in the slot of the graph it names (the default
+    /// graph's for one on several graphs, the target's for a `COPY`, `MOVE`
+    /// or `ADD`). The store changes at the commit
+    /// ([`apply_rdf`](Self::apply_rdf)); the transaction's reads see it
+    /// before (see [`pending_triple`](Self::pending_triple)).
+    ///
+    /// # Errors
+    ///
+    /// When the set refuses the entry: it then records nothing.
+    #[cfg(feature = "triple-store")]
+    pub(crate) fn record_rdf_graph(&self, op: grafeo_common::change::RdfGraphOp) -> Result<()> {
+        use grafeo_common::change::RdfGraphOp;
+        use grafeo_common::storage::log_record::RdfGraphTarget;
+
+        let graph = match &op {
+            RdfGraphOp::Create { name }
+            | RdfGraphOp::Drop {
+                target: RdfGraphTarget::Named(name),
+            }
+            | RdfGraphOp::Clear {
+                target: RdfGraphTarget::Named(name),
+            } => Some(name.as_str()),
+            RdfGraphOp::Drop { .. } | RdfGraphOp::Clear { .. } => None,
+            RdfGraphOp::Copy { target, .. }
+            | RdfGraphOp::Move { target, .. }
+            | RdfGraphOp::Add { target, .. } => target.as_deref(),
+        };
+        let mut state = self.state.lock();
+        let slot = state.set.slot(GraphRef {
+            model: DataModel::Rdf,
+            key: graph.map(ArcStr::from),
+        })?;
+        state.triples.note_graph_op(&op);
+        if let Err(error) = state.set.push_rdf_graph(slot, op) {
+            // Recorded nothing: the pending state follows the entries.
+            state.triples = super::rdf::PendingTriples::of(&state.set);
+            return Err(error);
+        }
+        state.settle(self.memory.as_ref());
+        Ok(())
+    }
+
+    /// Runs `read` on the transaction's pending RDF state.
+    #[cfg(feature = "triple-store")]
+    pub(crate) fn read_pending<T>(&self, read: impl FnOnce(&super::rdf::PendingTriples) -> T) -> T {
+        read(&self.state.lock().triples)
+    }
+
     /// Whether `triple` is in the RDF graph `graph` once the transaction
-    /// commits, if the transaction wrote it there.
+    /// commits, if the transaction's own writes decide: its last write of
+    /// the triple there, or a graph operation that replaced the graph's
+    /// committed triples.
     #[cfg(feature = "triple-store")]
     pub(crate) fn pending_triple(
         &self,
@@ -660,23 +713,8 @@ impl TransactionChanges {
         }
     }
 
-    /// The triples the transaction wrote that match `pattern` in the graphs
-    /// `graphs` names, each with its graph and whether it is there once the
-    /// transaction commits (see `PendingTriples::matching`).
-    #[cfg(feature = "triple-store")]
-    pub(crate) fn pending_triples_matching(
-        &self,
-        pattern: &grafeo_core::graph::rdf::TriplePattern,
-        graphs: Option<&[&str]>,
-    ) -> Vec<(Option<String>, Arc<grafeo_core::graph::rdf::Triple>, bool)> {
-        let state = self.state.lock();
-        if state.triples.is_empty() {
-            return Vec::new();
-        }
-        state.triples.matching(pattern, graphs)
-    }
-
-    /// Whether the transaction has an RDF entry.
+    /// Whether the transaction has an RDF entry: a triple or a graph
+    /// operation.
     #[cfg(feature = "triple-store")]
     pub(crate) fn has_pending_triples(&self) -> bool {
         !self.state.lock().triples.is_empty()
@@ -714,37 +752,8 @@ impl TransactionChanges {
         std::mem::take(&mut self.state.lock().triples)
     }
 
-    /// The named graphs the transaction inserted a triple into, each once: its commit creates
-    /// them, an emptied one too. One pass over the transaction's own entries. A `CREATE GRAPH` it
-    /// queued is not among them: no SPARQL statement runs after one until the commit
-    /// (`refuse_sparql_after_graph_op`), so no read could list it.
-    #[cfg(feature = "triple-store")]
-    pub(crate) fn rdf_graphs_inserted_into(&self) -> Vec<String> {
-        let state = self.state.lock();
-        if state.triples.is_empty() {
-            return Vec::new();
-        }
-        let mut names: Vec<String> = Vec::new();
-        for change in state.set.entries() {
-            if let Some(name) = super::rdf::graph_inserted_into(&state.set, change)
-                && !names.iter().any(|known| known == name)
-            {
-                names.push(name.to_string());
-            }
-        }
-        names
-    }
-
-    /// The first RDF graph that `graph` takes in which the transaction has
-    /// an entry, as an error names it (see `PendingTriples::written_graph`).
-    #[cfg(feature = "triple-store")]
-    pub(crate) fn written_rdf_graph(&self, graph: impl Fn(Option<&str>) -> bool) -> Option<String> {
-        self.state.lock().triples.written_graph(graph)
-    }
-
     /// Applies the RDF entries to `store` in recorded order (triples, and
-    /// graph operations in their place among them), then `graph_ops` (the
-    /// RDF graph operations the transaction queued), in one apply at the
+    /// graph operations in their place among them), in one apply at the
     /// commit ([`RdfStore::apply_commit`]), which with
     /// [`ApplyMode::Publish`] publishes what it changed for readers at
     /// earlier snapshots. Drops the entries that changed nothing (a triple
@@ -764,7 +773,6 @@ impl TransactionChanges {
         &self,
         store: &grafeo_core::graph::rdf::RdfStore,
         mode: grafeo_core::graph::rdf::ApplyMode,
-        graph_ops: Vec<grafeo_common::change::RdfGraphOp>,
     ) -> Result<()> {
         use grafeo_core::graph::rdf::{CommitChange, Triple};
 
@@ -774,7 +782,7 @@ impl TransactionChanges {
         if let Some(grant) = std::mem::take(&mut state.rdf).grant {
             store.adopt_grant(grant);
         }
-        if state.triples.is_empty() && graph_ops.is_empty() {
+        if state.triples.is_empty() {
             return Ok(());
         }
         // Each triple entry's position with its change's, and the commit's
@@ -814,7 +822,6 @@ impl TransactionChanges {
                 _ => CommitChange::Delete { graph: key, triple },
             });
         }
-        changes.extend(graph_ops.into_iter().map(CommitChange::Graph));
         let applied = store.apply_commit(mode, changes);
         let unchanged: Vec<usize> = positions
             .into_iter()
@@ -1602,7 +1609,11 @@ mod path_overlay_tests {
         fn visit_graph_names(
             &self,
             control: &mut RdfPathReadControl<'_>,
-            visit: &mut dyn FnMut(&str, &mut RdfPathReadControl<'_>) -> Result<(), OperatorError>,
+            visit: &mut dyn FnMut(
+                &str,
+                bool,
+                &mut RdfPathReadControl<'_>,
+            ) -> Result<(), OperatorError>,
         ) -> Result<(), OperatorError> {
             self.inner.visit_graph_names(control, visit)
         }

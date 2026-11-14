@@ -338,10 +338,39 @@ pub(crate) fn name_claim(kind: &str, name: &str) -> crate::transaction::KeyClaim
     }
 }
 
-/// The claim of every RDF graph operation, whichever graphs it names: one key, as `DROP ALL`
-/// overlaps them all, until reads of RDF are isolated by triple (#718).
-pub(crate) fn rdf_graph_ops_claim() -> crate::transaction::KeyClaim {
-    name_claim("RDF graph operations", "")
+/// The claims of the RDF graph operation `op`: each graph whose triples it
+/// replaces, by name (`""` for the default graph). A `CREATE`, `DROP` or `CLEAR`
+/// claims its graph, a `COPY` its target, a `MOVE` its source and target; an
+/// `ADD` only inserts, which claims nothing, as triple writes claim nothing.
+/// An operation on `NAMED` or `ALL` claims nothing here: it is recorded per
+/// graph (see `RdfWriter::graph_op`), and each of those claims its graph.
+pub(crate) fn rdf_graph_claims(
+    op: &grafeo_common::change::RdfGraphOp,
+) -> Vec<crate::transaction::KeyClaim> {
+    use grafeo_common::change::RdfGraphOp;
+    use grafeo_common::storage::log_record::RdfGraphTarget;
+
+    let claim = |graph: Option<&str>| name_claim("RDF graph", graph.unwrap_or(""));
+    match op {
+        RdfGraphOp::Create { name }
+        | RdfGraphOp::Drop {
+            target: RdfGraphTarget::Named(name),
+        }
+        | RdfGraphOp::Clear {
+            target: RdfGraphTarget::Named(name),
+        } => vec![claim(Some(name))],
+        RdfGraphOp::Drop {
+            target: RdfGraphTarget::Default,
+        }
+        | RdfGraphOp::Clear {
+            target: RdfGraphTarget::Default,
+        } => vec![claim(None)],
+        RdfGraphOp::Drop { .. } | RdfGraphOp::Clear { .. } | RdfGraphOp::Add { .. } => Vec::new(),
+        RdfGraphOp::Copy { target, .. } => vec![claim(target.as_deref())],
+        RdfGraphOp::Move { source, target } => {
+            vec![claim(source.as_deref()), claim(target.as_deref())]
+        }
+    }
 }
 
 /// The names `op` changes, which a transaction claims at its statement: another that
@@ -386,7 +415,7 @@ pub(crate) fn claims_of(op: &StandaloneOp) -> Vec<crate::transaction::KeyClaim> 
                 claim("index", label_index_claim(graph.as_ref(), label, key))
             }
         }],
-        StandaloneOp::RdfGraph(_) => vec![rdf_graph_ops_claim()],
+        StandaloneOp::RdfGraph(op) => rdf_graph_claims(op),
     }
 }
 

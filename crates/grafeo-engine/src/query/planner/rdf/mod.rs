@@ -3395,9 +3395,9 @@ impl GraphCheck {
     }
 }
 
-/// Operator that runs a whole-graph operation as a standalone change (see
-/// [`RdfWriter::graph_op`]): it takes effect at once, also inside a
-/// transaction, whose rollback keeps it.
+/// Operator that records a whole-graph operation in the transaction (see
+/// [`RdfWriter::graph_op`]): it applies at the commit, in its place among the
+/// transaction's triple writes, and the transaction's later reads see it.
 struct RdfGraphOperator {
     writer: Option<RdfWriter>,
     /// The operator's name in a plan.
@@ -3416,24 +3416,22 @@ impl Operator for RdfGraphOperator {
         let skips_missing = matches!(self.op, RdfGraphOp::Drop { .. });
         let check = &self.check;
         let writer = update_writer(&self.writer)?;
-        // Whether a graph exists, as the transaction's snapshot has it.
-        let view = writer.view().clone();
-        writer.graph_op(self.op.clone(), |store| match check {
+        // Whether a graph exists, as the transaction sees it: its snapshot
+        // with its own graph operations and inserts.
+        writer.graph_op(self.op.clone(), |writer| match check {
             GraphCheck::None => Ok(true),
-            GraphCheck::Absent { graph, silent } => {
-                match (store.graph_at(&view, graph).is_some(), silent) {
-                    (false, _) => Ok(true),
-                    (true, true) => Ok(false),
-                    (true, false) => Err(OperatorError::Execution(format!(
-                        "Graph <{graph}> already exists"
-                    ))),
-                }
-            }
+            GraphCheck::Absent { graph, silent } => match (writer.graph_exists(graph), silent) {
+                (false, _) => Ok(true),
+                (true, true) => Ok(false),
+                (true, false) => Err(OperatorError::Execution(format!(
+                    "Graph <{graph}> already exists"
+                ))),
+            },
             GraphCheck::Present {
                 graph,
                 silent,
                 what,
-            } => match (store.graph_at(&view, graph).is_some(), silent) {
+            } => match (writer.graph_exists(graph), silent) {
                 (true, _) => Ok(true),
                 (false, true) => Ok(!skips_missing),
                 (false, false) => Err(OperatorError::Execution(format!(

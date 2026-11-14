@@ -5669,7 +5669,6 @@ impl Session {
                 matches!(
                     queued.op,
                     grafeo_common::change::StandaloneOp::DropGraph { .. }
-                        | grafeo_common::change::StandaloneOp::RdfGraph(_)
                 )
             })
             .then(|| self.transaction_manager.freeze_writes());
@@ -5749,23 +5748,16 @@ impl Session {
                 )));
             }
 
-            // Apply the RDF triples, in recorded order, and the RDF graph
-            // operations the transaction queued, in one apply that publishes
-            // what it changed at the commit epoch: the store holds only
-            // committed triples, readers that began after the commit see them
-            // from now on, and readers at an earlier snapshot read around them.
+            // Apply the RDF triples and graph operations, in recorded order,
+            // in one apply that publishes what it changed at the commit epoch:
+            // the store holds only committed triples, readers that began after
+            // the commit see them from now on, and readers at an earlier
+            // snapshot read around them.
             #[cfg(feature = "triple-store")]
             if let Some(changes) = &changes
                 && let Err(error) = changes.apply_rdf(
                     &self.rdf_store,
                     grafeo_core::graph::rdf::ApplyMode::Publish(commit_epoch),
-                    schema
-                        .iter()
-                        .filter_map(|queued| match &queued.op {
-                            grafeo_common::change::StandaloneOp::RdfGraph(op) => Some(op.clone()),
-                            _ => None,
-                        })
-                        .collect(),
                 )
             {
                 return Err(grafeo_common::utils::error::Error::Internal(format!(

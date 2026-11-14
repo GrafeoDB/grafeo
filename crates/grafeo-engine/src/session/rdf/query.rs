@@ -50,11 +50,13 @@ impl Session {
     }
 
     /// Plans native RDF paths with the session's pending writes and resource
-    /// limits, reading the store at `view`.
+    /// limits, reading the store at `view`; `expands_copies` as
+    /// [`rdf_writer`](Self::rdf_writer) takes it.
     fn make_rdf_planner(
         &self,
         deadline: Option<Instant>,
         view: grafeo_core::graph::rdf::RdfView,
+        expands_copies: bool,
     ) -> Result<crate::query::planner::rdf::RdfPlanner> {
         let budget = self.plan_options.path_search_budget;
         #[cfg(feature = "spill")]
@@ -66,7 +68,7 @@ impl Session {
             crate::query::planner::rdf::RdfPlanner::new(Arc::clone(&self.rdf_store), view)
                 .in_session()
                 .with_shuffle_unordered(self.plan_options.shuffle_unordered)
-                .with_writer(self.rdf_writer()?)
+                .with_writer(self.rdf_writer(expands_copies)?)
                 .with_path_search_budget(budget)
                 .with_deadline(deadline)
                 .with_warnings(self.statement_warnings())
@@ -216,7 +218,10 @@ impl Session {
         language: &'static str,
     ) -> Result<QueryResult> {
         let start_time = Instant::now();
-        self.refuse_sparql_after_graph_op()?;
+        // In a transaction the session opened, later statements read what a
+        // `COPY`, `MOVE` or `ADD` wrote; a statement's own transaction
+        // commits it whole.
+        let expands_copies = self.current_transaction.lock().is_some();
 
         // A write needs a writable session: a writing role, and no read-only
         // transaction or database.
@@ -247,7 +252,7 @@ impl Session {
             // is planned.
             let _memory = self.enter_statement_memory();
             let planner = self
-                .make_rdf_planner(deadline, self.rdf_view()?)?
+                .make_rdf_planner(deadline, self.rdf_view()?, expands_copies)?
                 .with_query_values(language == "graphql");
             if optimized_plan.profile {
                 let (mut physical_plan, entries) = planner.plan_profiled(optimized_plan)?;
@@ -286,21 +291,24 @@ impl Session {
     }
 
     /// The writer of the session's open transaction, through which an RDF
-    /// update records its triples and a read sees them; `None` without one.
-    fn rdf_writer(&self) -> Result<Option<crate::transaction::RdfWriter>> {
+    /// update records its triples and graph operations and a read sees them;
+    /// `None` without one. With `expands_copies` (a transaction the session
+    /// opened, which later statements read), a `COPY`, `MOVE` or `ADD` is
+    /// recorded as what it read.
+    fn rdf_writer(&self, expands_copies: bool) -> Result<Option<crate::transaction::RdfWriter>> {
         let Some(changes) = self.changes.lock().clone() else {
             return Ok(None);
         };
-        Ok(Some(
-            crate::transaction::RdfWriter::new(
-                Arc::clone(&self.rdf_store),
-                changes,
-                Arc::clone(&self.transaction_manager),
-                #[cfg(feature = "wal")]
-                self.wal().cloned(),
-            )?
-            .queuing_graph_ops(),
-        ))
+        let writer = crate::transaction::RdfWriter::new(
+            Arc::clone(&self.rdf_store),
+            changes,
+            Arc::clone(&self.transaction_manager),
+        )?;
+        Ok(Some(if expands_copies {
+            writer.expanding_copies()
+        } else {
+            writer
+        }))
     }
 
     /// Validates the default graph against SHACL shapes in a named graph.

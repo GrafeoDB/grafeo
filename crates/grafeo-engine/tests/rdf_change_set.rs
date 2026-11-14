@@ -239,70 +239,65 @@ fn insert_into(session: &grafeo_engine::session::Session, graph: &str, subject: 
         .unwrap();
 }
 
-/// The code of the error of `outcome`, which must fail.
-fn code_of(
-    outcome: grafeo_common::utils::error::Result<grafeo_engine::database::QueryResult>,
-) -> String {
-    outcome.unwrap_err().error_code().as_str().to_string()
-}
-
-/// Outside a transaction a graph operation is refused with a write conflict
-/// while an open transaction has changes in a graph it changes: the target of
-/// each operation, and the source of a move. It runs once that transaction ends.
-/// A copy reads its source as committed.
+/// A graph operation and an open transaction's triple writes in the same graph do not conflict
+/// (#718, item 8): outside a transaction the operation runs and commits at once, and the open
+/// writer's triples apply at its later commit, after it. So the end state is the serial order of
+/// the two commits: the operation, then the writer's insert of `alix` into Paris. A copy, an add
+/// or a move reads its source as committed at its own statement, without the writer's triple.
 #[test]
-fn a_graph_operation_waits_for_the_open_changes_in_the_graphs_it_changes() {
-    let db = rdf_db();
-    insert_into(&db.session(), BERLIN, "mia");
-    insert_into(&db.session(), PARIS, "jules");
-    let mut writer = db.session();
-    writer.begin_transaction().unwrap();
-    insert_into(&writer, PARIS, "alix");
-
-    let other = db.session();
-    for refused in [
-        format!("CLEAR GRAPH <{PARIS}>"),
-        format!("DROP GRAPH <{PARIS}>"),
-        "CLEAR ALL".to_string(),
-        "DROP ALL".to_string(),
-        format!("COPY <{BERLIN}> TO <{PARIS}>"),
-        format!("ADD <{BERLIN}> TO <{PARIS}>"),
-        format!("MOVE <{PARIS}> TO <{BERLIN}>"),
+fn a_graph_operation_runs_beside_open_changes_in_the_graphs_it_changes() {
+    let alix = "<http://example.org/alix>";
+    let jules = "<http://example.org/jules>";
+    let mia = "<http://example.org/mia>";
+    for (operation, paris, berlin) in [
+        (format!("CLEAR GRAPH <{PARIS}>"), vec![alix], vec![mia]),
+        (format!("DROP GRAPH <{PARIS}>"), vec![alix], vec![mia]),
+        ("CLEAR ALL".to_string(), vec![alix], vec![]),
+        ("DROP ALL".to_string(), vec![alix], vec![]),
+        (
+            format!("COPY <{BERLIN}> TO <{PARIS}>"),
+            vec![alix, mia],
+            vec![mia],
+        ),
+        (
+            format!("ADD <{BERLIN}> TO <{PARIS}>"),
+            vec![alix, jules, mia],
+            vec![mia],
+        ),
+        (
+            format!("MOVE <{PARIS}> TO <{BERLIN}>"),
+            vec![alix],
+            vec![jules],
+        ),
+        (
+            format!("COPY <{PARIS}> TO <{BERLIN}>"),
+            vec![alix, jules],
+            vec![jules],
+        ),
     ] {
-        let outcome = other.execute_sparql(&refused);
-        assert_eq!(code_of(outcome), "GRAFEO-T001", "{refused}");
+        let db = rdf_db();
+        insert_into(&db.session(), BERLIN, "mia");
+        insert_into(&db.session(), PARIS, "jules");
+        let mut writer = db.session();
+        writer.begin_transaction().unwrap();
+        insert_into(&writer, PARIS, "alix");
+
+        db.session()
+            .execute_sparql(&operation)
+            .unwrap_or_else(|error| panic!("{operation} beside an open insert: {error}"));
+        writer
+            .commit()
+            .unwrap_or_else(|error| panic!("{operation}, then the writer's commit: {error}"));
+        assert_eq!(subjects_in(&db, PARIS), paris, "{operation}: Paris");
+        assert_eq!(subjects_in(&db, BERLIN), berlin, "{operation}: Berlin");
     }
-    let error = other
-        .execute_sparql(&format!("CLEAR GRAPH <{PARIS}>"))
-        .unwrap_err();
-    assert!(error.to_string().contains(&format!("<{PARIS}>")), "{error}");
-    // The default graph and Berlin have no open changes.
-    other.execute_sparql("CLEAR DEFAULT").unwrap();
-    other
-        .execute_sparql(&format!("COPY <{PARIS}> TO <{BERLIN}>"))
-        .unwrap();
-    assert_eq!(
-        subjects_in(&db, BERLIN),
-        ["<http://example.org/jules>"],
-        "a copy reads its source as committed"
-    );
-    writer.commit().unwrap();
-    let both = ["<http://example.org/alix>", "<http://example.org/jules>"];
-    assert_eq!(subjects_in(&db, PARIS), both);
-    other
-        .execute_sparql(&format!("MOVE <{PARIS}> TO <{BERLIN}>"))
-        .unwrap();
-    assert_eq!(subjects_in(&db, BERLIN), both);
-    assert!(
-        db.rdf_store().graph_latest(PARIS).is_none(),
-        "a move drops its source"
-    );
 }
 
-/// In a transaction a graph operation queues for the commit: against another
-/// transaction's open changes it fails there, and nothing of it stays.
+/// In a transaction a graph operation is recorded for the commit: against another transaction's
+/// open triple changes in its graph both commit (#718, item 8), in the serial order of their
+/// commits. The clear commits first and takes Jules; the writer's Alix comes after it.
 #[test]
-fn a_queued_graph_operation_meets_open_changes_at_its_commit() {
+fn a_queued_graph_operation_and_open_changes_both_commit() {
     let db = rdf_db();
     insert_into(&db.session(), PARIS, "jules");
     let mut writer = db.session();
@@ -314,14 +309,16 @@ fn a_queued_graph_operation_meets_open_changes_at_its_commit() {
     other
         .execute_sparql(&format!("CLEAR GRAPH <{PARIS}>"))
         .unwrap();
-    let error = other.commit().unwrap_err();
-    assert_eq!(error.error_code().as_str(), "GRAFEO-T001", "{error}");
-    assert!(!other.in_transaction(), "the refused commit rolled it back");
-    writer.commit().unwrap();
+    other
+        .commit()
+        .unwrap_or_else(|error| panic!("the clear commits: {error}"));
+    writer
+        .commit()
+        .unwrap_or_else(|error| panic!("the insert commits after it: {error}"));
     assert_eq!(
         subjects_in(&db, PARIS),
-        ["<http://example.org/alix>", "<http://example.org/jules>"],
-        "the clear left nothing"
+        ["<http://example.org/alix>"],
+        "cleared, then Alix"
     );
 }
 

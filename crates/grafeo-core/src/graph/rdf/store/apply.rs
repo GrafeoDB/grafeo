@@ -79,11 +79,20 @@ struct Collecting {
 }
 
 impl Collecting {
-    /// Room for `changes` changes, in the default graph.
-    fn with_capacity(changes: usize) -> Self {
+    /// No change yet, in the default graph.
+    fn new() -> Self {
         Self {
-            changes: Vec::with_capacity(changes),
+            changes: Vec::new(),
             graph: None,
+        }
+    }
+
+    /// Records `run`, the triples one insert made new in `graph`, as one
+    /// change; an empty run records nothing.
+    fn inserts(&mut self, graph: &GraphKey, run: Vec<Arc<Triple>>) {
+        if !run.is_empty() {
+            self.enter(graph);
+            self.changes.push(OverlayChange::Inserts(run));
         }
     }
 
@@ -112,7 +121,7 @@ impl RdfStore {
         let guard = self.apply_guard.write();
         run_during_rdf_apply(RdfApplyStep::GuardTaken);
         let mut collected: Collected = match mode {
-            ApplyMode::Publish(_) => Some(Collecting::with_capacity(changes.len())),
+            ApplyMode::Publish(_) => Some(Collecting::new()),
             ApplyMode::Recovery | ApplyMode::Unversioned => None,
         };
         let mut changed = Vec::with_capacity(changes.len());
@@ -153,6 +162,46 @@ impl RdfStore {
         }
         drop(guard);
         Applied { changed }
+    }
+
+    /// Inserts `triples` into `graph` (`None` for the default graph), which
+    /// a named graph that does not exist comes into being for, as one run
+    /// under one hold of the dataset's apply guard: the insert core of
+    /// [`apply_commit`](Self::apply_commit) without its per-change results,
+    /// for a load. With [`ApplyMode::Publish`] the run is published as the
+    /// commit's overlay entry before the guard is released. Returns how many
+    /// were new; a triple that is no RDF triple is not stored.
+    pub fn apply_load(&self, mode: ApplyMode, graph: GraphKey, triples: Vec<Triple>) -> usize {
+        let guard = self.apply_guard.write();
+        run_during_rdf_apply(RdfApplyStep::GuardTaken);
+        let mut collected: Collected = match mode {
+            ApplyMode::Publish(_) => Some(Collecting::new()),
+            ApplyMode::Recovery | ApplyMode::Unversioned => None,
+        };
+        let target = graph
+            .as_ref()
+            .map(|name| self.partition_or_create(name, &mut collected));
+        let target = target.as_deref().unwrap_or(self);
+        let run = target.insert_stored_unguarded(
+            triples
+                .into_iter()
+                .filter(Triple::is_valid)
+                .map(|triple| self.stored(triple)),
+            |_, _| {},
+        );
+        let new = run.len();
+        if let Some(collected) = collected.as_mut() {
+            collected.inserts(&graph, run);
+        }
+        run_during_rdf_apply(RdfApplyStep::BeforePublish);
+        if let (ApplyMode::Publish(epoch), Some(collected)) = (mode, collected)
+            && !collected.changes.is_empty()
+        {
+            self.overlay
+                .publish(OverlayEntry::new(epoch, collected.changes));
+        }
+        drop(guard);
+        new
     }
 
     /// Drops the overlay entries at or below `horizon`, the read horizon: no
@@ -207,24 +256,16 @@ impl RdfStore {
         let start = changed.len();
         let valid: Vec<bool> = triples.iter().map(Triple::is_valid).collect();
         let mut new = Vec::with_capacity(triples.len());
-        if let Some(collected) = collected.as_mut() {
-            collected.enter(graph);
-        }
-        target.insert_stored_unguarded(
+        let run = target.insert_stored_unguarded(
             triples
                 .into_iter()
                 .filter(Triple::is_valid)
                 .map(|triple| self.stored(triple)),
-            |triple, inserted| {
-                new.push(inserted);
-                if inserted && let Some(collected) = collected.as_mut() {
-                    collected.changes.push(OverlayChange::Insert {
-                        ids: *triple.raw_ids(),
-                        triple: Arc::clone(triple),
-                    });
-                }
-            },
+            |_, inserted| new.push(inserted),
         );
+        if let Some(collected) = collected.as_mut() {
+            collected.inserts(graph, run);
+        }
         let mut new = new.into_iter();
         changed.extend(
             valid
@@ -426,17 +467,10 @@ impl RdfStore {
         let key: GraphKey = graph.map(Arc::from);
         let target = graph.map(|name| self.partition_or_create(name, collected));
         let target = target.as_deref().unwrap_or(self);
+        let run = target.insert_stored_unguarded(triples.into_iter(), |_, _| {});
         if let Some(collected) = collected.as_mut() {
-            collected.enter(&key);
+            collected.inserts(&key, run);
         }
-        target.insert_stored_unguarded(triples.into_iter(), |triple, inserted| {
-            if inserted && let Some(collected) = collected.as_mut() {
-                collected.changes.push(OverlayChange::Insert {
-                    ids: *triple.raw_ids(),
-                    triple: Arc::clone(triple),
-                });
-            }
-        });
     }
 
     /// The default graph's triples and indexes, moved into a partition of
@@ -569,18 +603,19 @@ mod tests {
                 entry
                     .changes()
                     .iter()
-                    .filter_map(|change| match change {
+                    .flat_map(|change| match change {
                         OverlayChange::In(next) => {
                             graph.clone_from(next);
-                            None
+                            Vec::new()
                         }
-                        OverlayChange::Insert { triple, .. } => {
-                            Some(format!("{} +{}", key(&graph), triple.subject()))
-                        }
+                        OverlayChange::Inserts(run) => run
+                            .iter()
+                            .map(|triple| format!("{} +{}", key(&graph), triple.subject()))
+                            .collect(),
                         OverlayChange::Delete { triple, .. } => {
-                            Some(format!("{} -{}", key(&graph), triple.subject()))
+                            vec![format!("{} -{}", key(&graph), triple.subject())]
                         }
-                        OverlayChange::Graph { graph, change } => Some(format!(
+                        OverlayChange::Graph { graph, change } => vec![format!(
                             "{} {}",
                             key(graph),
                             match change {
@@ -588,7 +623,7 @@ mod tests {
                                 GraphChange::Dropped { .. } => "dropped",
                                 GraphChange::Cleared { .. } => "cleared",
                             }
-                        )),
+                        )],
                     })
                     .collect()
             })

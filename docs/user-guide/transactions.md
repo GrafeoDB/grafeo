@@ -101,7 +101,7 @@ When a conflict is detected, the application should:
 
 The same guarantees hold for RDF data. A SPARQL query in a transaction reads the triples and named graphs as they were when the transaction started, with its own updates, and at the same point as its property graph queries; what other transactions commit meanwhile stays invisible to it. A SPARQL query outside a transaction reads one committed state for its whole run.
 
-Two transactions conflict on a triple when both write it in the same graph and one of them deletes it: the second to commit fails with a write conflict (`GRAFEO-T001`). Two inserts of the same triple both commit, and the triple is stored once. Graph operations (`CREATE`, `DROP`, `CLEAR`, `COPY`, `MOVE`) conflict when two transactions change the same graph; see [SPARQL updates](sparql/update.md#graph-operations-and-transactions).
+Two transactions conflict on a triple when both write it in the same graph and one of them deletes it: the second to commit fails with a write conflict (`GRAFEO-T001`). Two inserts of the same triple both commit, and the triple is stored once. A bulk load (`load_rdf_text`, `load_rdf_into`, `batch_insert_rdf`) counts as a commit of the triples it adds: a transaction open across it conflicts with it by the same rule. The load itself is never refused: it applies to the newest state at its own point. Graph operations (`CREATE`, `DROP`, `CLEAR`, `COPY`, `MOVE`) conflict when two transactions change the same graph; see [SPARQL updates](sparql/update.md#graph-operations-and-transactions).
 
 ## Important Limitation: Write Skew
 

@@ -40,13 +40,9 @@ pub type GraphKey = Option<Arc<str>>;
 pub enum OverlayChange {
     /// The triple changes that follow, up to the next `In`, are in `graph`.
     In(GraphKey),
-    /// `triple` (with its `ids`) was inserted.
-    Insert {
-        /// The triple's term ids.
-        ids: TripleIds,
-        /// The triple.
-        triple: Arc<Triple>,
-    },
+    /// A run of triples one apply inserted, each new to the graph and
+    /// carrying the ids the store keys it by.
+    Inserts(Vec<Arc<Triple>>),
     /// `triple` was deleted.
     Delete {
         /// The triple's term ids.
@@ -173,6 +169,20 @@ impl RdfOverlay {
         self.newest.load(Ordering::Acquire)
     }
 
+    /// The entry of the commit at `epoch`, while it is kept.
+    #[must_use]
+    pub fn entry_at(&self, epoch: EpochId) -> Option<Arc<OverlayEntry>> {
+        if self.newest_epoch() < epoch.as_u64() {
+            return None;
+        }
+        self.entries
+            .read()
+            .iter()
+            .rev()
+            .find(|entry| entry.epoch == epoch)
+            .cloned()
+    }
+
     /// The entries of the commits after `epoch`, in commit order.
     #[must_use]
     pub fn since(&self, epoch: EpochId) -> Vec<Arc<OverlayEntry>> {
@@ -276,13 +286,16 @@ impl SnapshotChanges {
         for change in &entry.changes {
             match change {
                 OverlayChange::In(next) => graph = next,
-                OverlayChange::Insert { ids, .. } => {
-                    if self.first_change(graph, *ids) {
-                        self.graphs
-                            .entry(graph.clone())
-                            .or_default()
-                            .absent
-                            .insert(*ids);
+                OverlayChange::Inserts(run) => {
+                    for triple in run {
+                        let ids = *triple.raw_ids();
+                        if self.first_change(graph, ids) {
+                            self.graphs
+                                .entry(graph.clone())
+                                .or_default()
+                                .absent
+                                .insert(ids);
+                        }
                     }
                 }
                 OverlayChange::Delete { ids, triple } => {
@@ -518,14 +531,23 @@ mod tests {
         ))
     }
 
+    /// The triple of `subject` as a store holds it, with the raw ids `ids`.
+    fn stored(subject: &str, ids: TripleIds) -> Arc<Triple> {
+        Arc::new(
+            Triple::new(
+                Term::iri(format!("http://example.org/{subject}")),
+                Term::iri("http://example.org/name"),
+                Term::literal(subject),
+            )
+            .with_raw_ids(ids),
+        )
+    }
+
     /// An insert into `graph`, after the `In` that names it.
     fn insert(graph: Option<&str>, ids: TripleIds, name: &str) -> Vec<OverlayChange> {
         vec![
             OverlayChange::In(graph.map(Arc::from)),
-            OverlayChange::Insert {
-                ids,
-                triple: triple(name),
-            },
+            OverlayChange::Inserts(vec![stored(name, ids)]),
         ]
     }
 
@@ -646,15 +668,9 @@ mod tests {
         let overlay = overlay(vec![(
             3,
             vec![
-                OverlayChange::Insert {
-                    ids: [1, 2, 1],
-                    triple: triple("Alix"),
-                },
+                OverlayChange::Inserts(vec![stored("Alix", [1, 2, 1])]),
                 OverlayChange::In(Some(Arc::from("g"))),
-                OverlayChange::Insert {
-                    ids: [7, 2, 7],
-                    triple: triple("Gus"),
-                },
+                OverlayChange::Inserts(vec![stored("Gus", [7, 2, 7])]),
                 OverlayChange::In(None),
                 OverlayChange::Delete {
                     ids: [8, 2, 8],
@@ -771,5 +787,71 @@ mod tests {
     fn entries_are_published_in_epoch_order() {
         let overlay = overlay(vec![(4, vec![])]);
         overlay.publish(OverlayEntry::new(EpochId::new(4), vec![]));
+    }
+
+    /// A run of inserts reads as each of its triples: a view before it sees
+    /// none of them, a view at it or after sees all of them (no change map),
+    /// and the first change after a view decides across runs.
+    #[test]
+    fn a_run_of_inserts_reads_triple_by_triple() {
+        let run = vec![
+            stored("Alix", [1, 2, 1]),
+            stored("Gus", [7, 2, 7]),
+            stored("Mia", [8, 2, 8]),
+        ];
+        let overlay = overlay(vec![
+            (3, vec![OverlayChange::Inserts(run.clone())]),
+            (
+                4,
+                vec![OverlayChange::Delete {
+                    ids: [7, 2, 7],
+                    triple: Arc::clone(&run[1]),
+                }],
+            ),
+            (5, vec![OverlayChange::Inserts(vec![Arc::clone(&run[1])])]),
+        ]);
+        let before = RdfView::at(&overlay, EpochId::new(2));
+        let changes = before.changes().unwrap();
+        let graph = changes.graph(&None).unwrap();
+        assert_eq!(graph.absent.len(), 3, "none of the run at 2");
+        assert_eq!(graph.present, Vec::new());
+        drop(changes);
+
+        let between = RdfView::at(&overlay, EpochId::new(3));
+        let changes = between.changes().unwrap();
+        let graph = changes.graph(&None).unwrap();
+        assert!(graph.absent.is_empty(), "the run is there at 3");
+        assert_eq!(
+            graph
+                .present
+                .iter()
+                .map(|t| *t.raw_ids())
+                .collect::<Vec<_>>(),
+            [[7, 2, 7]],
+            "Gus is present at 3: deleted after it, inserted again later"
+        );
+        drop(changes);
+
+        assert!(RdfView::at(&overlay, EpochId::new(5)).changes().is_none());
+    }
+
+    /// A pruned entry drops its run: the run's triples are held by nothing
+    /// else of the overlay.
+    #[test]
+    fn a_pruned_run_drops_its_triples() {
+        let alix = stored("Alix", [1, 2, 1]);
+        let overlay = overlay(vec![(
+            3,
+            vec![OverlayChange::Inserts(vec![Arc::clone(&alix)])],
+        )]);
+        assert_eq!(Arc::strong_count(&alix), 2);
+        assert!(overlay.entry_at(EpochId::new(3)).is_some());
+        overlay.prune_below(EpochId::new(3));
+        assert_eq!(
+            Arc::strong_count(&alix),
+            1,
+            "the entry and its run are gone"
+        );
+        assert!(overlay.entry_at(EpochId::new(3)).is_none());
     }
 }

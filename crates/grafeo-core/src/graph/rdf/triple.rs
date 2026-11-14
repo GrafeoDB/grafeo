@@ -120,6 +120,15 @@ impl Triple {
         Some([subject?, predicate?, object?])
     }
 
+    /// This triple with the raw ids `ids`, as a store would give them: for
+    /// tests of what keys a triple by its ids.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn with_raw_ids(mut self, ids: [u64; 3]) -> Self {
+        self.ids = ids;
+        self
+    }
+
     /// The raw ids of a triple a store holds, which its indexes key it by
     /// (see [`ids`](Self::ids)); [`NO_IDS`] for one no store took.
     #[must_use]

@@ -16,6 +16,10 @@ use hashbrown::HashMap;
 use parking_lot::RwLock;
 use std::sync::Arc;
 
+mod apply;
+
+pub use apply::{Applied, ApplyMode, CommitChange};
+
 #[cfg(test)]
 mod path_lookup_tests {
     use std::time::{Duration, Instant};
@@ -409,12 +413,18 @@ pub struct RdfStore {
     /// Whether this graph counts the dataset's dictionary: the default
     /// graph's does, its named graphs share it.
     owns_dictionary: bool,
-    /// Orders applying a commit against reading at a snapshot (#718): a
-    /// commit applies under the write side; a read holds the shared side
-    /// while it checks the overlay and reads the indexes, so it never sees
-    /// part of a commit the overlay does not correct for yet. Reads take it
-    /// recursively, since a read may read again while a commit waits.
-    apply_guard: parking_lot::RecursiveRwLock<()>,
+    /// Orders applying a commit against reading at a snapshot (#718), for
+    /// the whole dataset: the default graph, its named graphs and the
+    /// partitions a swap retained share it, so a commit that writes several
+    /// graphs takes it once. A commit applies and publishes its overlay entry
+    /// under the write side; a read holds the shared side while it checks the
+    /// overlay and reads the indexes, so it never sees part of a commit, or a
+    /// commit its entry does not correct for yet. Reads take it recursively,
+    /// since a read may read again while a commit waits.
+    apply_guard: Arc<parking_lot::RecursiveRwLock<()>>,
+    /// What the commits after a reader's snapshot changed: the dataset's,
+    /// shared like the guard.
+    overlay: Arc<super::overlay::RdfOverlay>,
     /// The graph this store holds: `None` for the default graph (the root
     /// store), the name for a named graph's partition. A view's changes are
     /// per graph.
@@ -476,7 +486,8 @@ impl RdfStore {
             memory: Arc::new(std::sync::OnceLock::new()),
             grant: parking_lot::Mutex::new(None),
             owns_dictionary: true,
-            apply_guard: parking_lot::RecursiveRwLock::new(()),
+            apply_guard: Arc::new(parking_lot::RecursiveRwLock::new(())),
+            overlay: Arc::new(super::overlay::RdfOverlay::default()),
             key: None,
             config,
         }
@@ -751,7 +762,7 @@ impl RdfStore {
         if !triple.is_valid() {
             return false;
         }
-        self.insert_stored(std::iter::once(self.stored(triple)), |_| {}) == 1
+        self.insert_stored(std::iter::once(self.stored(triple)), |_, _| {}) == 1
     }
 
     /// Inserts a batch of triples with single lock acquisition per index.
@@ -765,7 +776,7 @@ impl RdfStore {
     pub fn batch_insert(&self, triples: impl IntoIterator<Item = Triple>) -> usize {
         self.insert_stored(
             triples.into_iter().map(|triple| self.stored(triple)),
-            |_| {},
+            |_, _| {},
         )
     }
 
@@ -774,7 +785,7 @@ impl RdfStore {
     /// terms up again. Returns how many were new.
     pub(crate) fn batch_insert_with_dataset_ids(&self, triples: Vec<Triple>) -> usize {
         debug_assert!(triples.iter().all(|triple| triple.ids().is_some()));
-        self.insert_stored(triples.into_iter().map(Arc::new), |_| {})
+        self.insert_stored(triples.into_iter().map(Arc::new), |_, _| {})
     }
 
     /// Inserts `triples` in one batch, as [`batch_insert`](Self::batch_insert)
@@ -790,7 +801,7 @@ impl RdfStore {
                 .into_iter()
                 .filter(Triple::is_valid)
                 .map(|triple| self.stored(triple)),
-            |inserted| new.push(inserted),
+            |_, inserted| new.push(inserted),
         );
         let mut new = new.into_iter();
         valid
@@ -804,11 +815,21 @@ impl RdfStore {
     fn insert_stored(
         &self,
         triples: impl Iterator<Item = Arc<Triple>>,
-        mut each: impl FnMut(bool),
+        each: impl FnMut(&Arc<Triple>, bool),
     ) -> usize {
         // One apply against reads at a snapshot: the primary set and the six
         // indexes change together.
         let _apply = self.apply_guard.write();
+        self.insert_stored_unguarded(triples, each)
+    }
+
+    /// [`insert_stored`](Self::insert_stored), for a caller that holds the
+    /// dataset's apply guard.
+    fn insert_stored_unguarded(
+        &self,
+        triples: impl Iterator<Item = Arc<Triple>>,
+        mut each: impl FnMut(&Arc<Triple>, bool),
+    ) -> usize {
         // Phase 1: deduplicate against primary storage (single lock)
         let mut new_triples = Vec::with_capacity(triples.size_hint().0);
         {
@@ -817,7 +838,7 @@ impl RdfStore {
             primary.reserve(triples.size_hint().0);
             for arc in triples {
                 let inserted = primary.insert(Held(Arc::clone(&arc)));
-                each(inserted);
+                each(&arc, inserted);
                 if inserted {
                     new_triples.push(arc);
                 }
@@ -905,16 +926,19 @@ impl RdfStore {
     ///
     /// Returns `true` if the triple was found and removed.
     pub fn remove(&self, triple: &Triple) -> bool {
-        let Some(ids) = self.keys_of(triple) else {
-            return false;
-        };
         let _apply = self.apply_guard.write();
-        {
+        self.remove_unguarded(triple).is_some()
+    }
+
+    /// Removes `triple`, for a caller that holds the dataset's apply guard:
+    /// the triple as the store held it (with its ids), `None` when it held
+    /// none.
+    fn remove_unguarded(&self, triple: &Triple) -> Option<Arc<Triple>> {
+        let ids = self.keys_of(triple)?;
+        let removed = {
             let mut primary = self.triples.write();
             let before = primary.capacity();
-            if !primary.remove(&ids) {
-                return false;
-            }
+            let removed = primary.take(&ids)?;
             self.count(
                 primary
                     .capacity()
@@ -922,7 +946,8 @@ impl RdfStore {
                     .wrapping_mul(std::mem::size_of::<Held>() + std::mem::size_of::<u64>())
                     .wrapping_sub(std::mem::size_of::<Triple>()),
             );
-        }
+            removed.0
+        };
         let [subject, predicate, object] = ids;
         self.count(unindex(&mut self.subject_index.write(), &subject, &ids));
         self.count(unindex(&mut self.predicate_index.write(), &predicate, &ids));
@@ -948,7 +973,7 @@ impl RdfStore {
         ));
         self.note_changes(1);
         self.settle();
-        true
+        Some(removed)
     }
 
     /// The key of `term` here: `None` for a term no triple of the dataset
@@ -2088,6 +2113,8 @@ impl RdfStore {
         store.memory = Arc::clone(&self.memory);
         store.owns_dictionary = false;
         store.settle();
+        store.apply_guard = Arc::clone(&self.apply_guard);
+        store.overlay = Arc::clone(&self.overlay);
         store.key = Some(Arc::from(name));
         store
     }

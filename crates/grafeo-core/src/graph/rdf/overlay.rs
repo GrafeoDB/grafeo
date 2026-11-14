@@ -2,9 +2,10 @@
 //! (#718).
 //!
 //! The store holds the latest committed triples only. Each commit also
-//! publishes an [`OverlayEntry`] at its epoch, before it applies its changes:
-//! the triples it inserted and deleted, and the graph operations it ran, in
-//! recorded order. A reader at snapshot `S` reads the store and undoes what
+//! publishes an [`OverlayEntry`] at its epoch, in the same hold of the
+//! dataset's apply guard as its apply: the triples it inserted and deleted,
+//! and the graph operations it ran, in recorded order, leaving out the ones
+//! that changed nothing. A reader at snapshot `S` reads the store and undoes what
 //! the entries after `S` did ([`Snapshot`]): a triple's state at `S` is the
 //! one before its first change after `S`, present when that change was a
 //! delete and absent when it was an insert. A graph that a `DROP` or `CLEAR`
@@ -15,7 +16,7 @@
 
 use std::collections::VecDeque;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use grafeo_common::types::EpochId;
 use grafeo_common::utils::hash::{FxHashMap, FxHashSet};
@@ -96,7 +97,36 @@ impl OverlayEntry {
     pub fn epoch(&self) -> EpochId {
         self.epoch
     }
+
+    /// The changes of the commit, in recorded order.
+    #[must_use]
+    pub fn changes(&self) -> &[OverlayChange] {
+        &self.changes
+    }
 }
+
+/// A view at an epoch whose overlay entries are pruned: it would miss the
+/// commits after it. A reader that pins its epoch never meets it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SnapshotGone {
+    /// The epoch asked for.
+    pub epoch: EpochId,
+    /// The epoch the overlay is pruned through.
+    pub pruned_through: EpochId,
+}
+
+impl std::fmt::Display for SnapshotGone {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "no RDF snapshot at epoch {}: the changes after it are pruned through epoch {}",
+            self.epoch.as_u64(),
+            self.pruned_through.as_u64()
+        )
+    }
+}
+
+impl std::error::Error for SnapshotGone {}
 
 /// The entries of the commits a reader may still need, in commit order.
 #[derive(Debug, Default)]
@@ -105,6 +135,15 @@ pub struct RdfOverlay {
     /// The epoch of the newest entry, 0 with none: one atomic for a reader
     /// that finds no commit after its snapshot, the common case.
     newest: AtomicU64,
+    /// How many entries are kept: one atomic for a commit that checks
+    /// whether there is anything to prune.
+    held: AtomicUsize,
+    /// The epoch the entries are pruned through: a view below it would miss
+    /// commits.
+    pruned_through: AtomicU64,
+    /// How many times a view extended its changes, over all views: for
+    /// tests (none on the fast path).
+    views_extended: AtomicU64,
 }
 
 impl RdfOverlay {
@@ -122,6 +161,7 @@ impl RdfOverlay {
         );
         let epoch = entry.epoch.as_u64();
         entries.push_back(Arc::new(entry));
+        self.held.store(entries.len(), Ordering::Release);
         self.newest.store(epoch, Ordering::Release);
     }
 
@@ -146,24 +186,41 @@ impl RdfOverlay {
     }
 
     /// Drops the entries at or below `epoch`: no reader pins an epoch below
-    /// it, so none needs them.
+    /// it, so none needs them. A view below `epoch` is refused from now on
+    /// ([`pruned_through`](Self::pruned_through)).
     pub fn prune_below(&self, epoch: EpochId) {
         let mut entries = self.entries.write();
+        self.pruned_through
+            .fetch_max(epoch.as_u64(), Ordering::AcqRel);
         while entries.front().is_some_and(|entry| entry.epoch <= epoch) {
             entries.pop_front();
         }
+        self.held.store(entries.len(), Ordering::Release);
+    }
+
+    /// The epoch the entries are pruned through, 0 before the first prune.
+    #[must_use]
+    pub fn pruned_through(&self) -> EpochId {
+        EpochId::new(self.pruned_through.load(Ordering::Acquire))
     }
 
     /// How many entries are kept.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.entries.read().len()
+        self.held.load(Ordering::Acquire)
     }
 
-    /// Whether no entry is kept.
+    /// Whether no entry is kept: one atomic load.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.entries.read().is_empty()
+        self.len() == 0
+    }
+
+    /// How many times a view extended its changes, over all views of this
+    /// overlay: 0 while every reader takes the fast path.
+    #[must_use]
+    pub fn views_extended(&self) -> u64 {
+        self.views_extended.load(Ordering::Relaxed)
     }
 }
 
@@ -340,6 +397,7 @@ impl Snapshot {
                 state.cursor = state.cursor.max(entry.epoch.as_u64());
             }
             self.extensions.fetch_add(1, Ordering::Relaxed);
+            self.overlay.views_extended.fetch_add(1, Ordering::Relaxed);
         }
         Some(ChangesGuard(parking_lot::RwLockWriteGuard::downgrade(
             state,

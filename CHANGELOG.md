@@ -14,6 +14,7 @@ Performance release: faster queries, a memory limit that holds, and fixes for th
 
 ### Fixed
 
+- **RDF in checkpoints, copies and exports is the epoch's** ([#718](https://github.com/GrafeoDB/grafeo/issues/718)): a checkpoint, `save`, a copy or `export_snapshot` that runs while SPARQL updates commit writes the RDF triples and named graphs as of its epoch, with commits going on while it writes. `rdf_schema()` lists the named graphs (it returned an empty list) and reads at one epoch.
 - **The CLI opens every database the default `grafeo` build writes** ([#763](https://github.com/GrafeoDB/grafeo/issues/763)): `cargo install grafeo-cli` and the pre-built binaries now have the same features, vector, text and hybrid search, change data capture and graph algorithms included, so a file with a vector or text index opens. A database holding data the build cannot read, such as RDF triples, is refused with the `cargo install grafeo-cli --features ...` line that adds the feature.
 - **SQL/PGQ ranges on one-kind columns use the range scan again**: a `<`, `<=`, `>`, `>=` or `BETWEEN` on a property whose values are all of the bound's kind reads its index by range and skips chunks by their stored bounds, as in 0.6.1. A column holding values of several kinds still scans and raises 22G04.
 - **Concurrent sorts and groupings keep their memory consumers**: each spillable sort and aggregate registers under a name of its own and unregisters only that one when it finishes or fails.

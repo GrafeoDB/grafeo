@@ -228,6 +228,9 @@ fn write_sections(
     // written as of the snapshot (the log is cut at it).
     let release = move || {
         drop(commits);
+        // Commits go on from here: a test's commit during the image write.
+        #[cfg(feature = "testing-statement-injection")]
+        grafeo_common::testing::commit_hook::run_during_checkpoint_write();
         maybe_crash("flush:after_snapshot");
     };
     match fm.write_checkpoint_releasing(
@@ -437,6 +440,9 @@ fn write_copy_into(
     let section_refs: Vec<&dyn Section> = image.sections.iter().map(AsRef::as_ref).collect();
     let release = move || {
         drop(commits);
+        // Commits go on from here: a test's commit during the image write.
+        #[cfg(feature = "testing-statement-injection")]
+        grafeo_common::testing::commit_hook::run_during_checkpoint_write();
         maybe_crash("copy:after_release");
     };
     fm.write_checkpoint_releasing(

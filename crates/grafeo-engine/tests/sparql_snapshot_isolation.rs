@@ -19,7 +19,10 @@
 //! - own writes and own graph operations, in order, with a savepoint, read by another session
 //!   before and after, and replayed from the log after a crash;
 //! - the conflict rules, in both commit orders, on exact RDF terms;
-//! - a checkpoint during an open reader, and `rdf_schema()`'s named graphs.
+//! - a checkpoint during an open reader, and `rdf_schema()`'s named graphs, read at one epoch;
+//! - checkpoints, copies and exports while commits run during their write hold the state at their
+//!   epoch, the ring section included, and a crash after such a checkpoint reopens to the serial
+//!   state.
 //!
 //! ```bash
 //! cargo test -p grafeo-engine --all-features --test main sparql_snapshot_isolation::
@@ -201,16 +204,6 @@ fn begin(session: &mut Session, mode: Mode) {
 /// A `GRAFEO-T001` conflict.
 fn is_conflict(error: &Error) -> bool {
     error.error_code() == ErrorCode::TransactionConflict
-}
-
-/// A strict expected failure: `body` must panic (the behavior `spec` names is not there yet,
-/// `issue` tracks it); if it passes, the test fails so the mark is removed.
-fn xfail(spec: &str, issue: &str, body: impl FnOnce()) {
-    let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(body)).is_err();
-    assert!(
-        failed,
-        "XPASS: {spec} ({issue}) holds now; remove the xfail"
-    );
 }
 
 // ------------------------------------------------------------------ snapshot reads (B)
@@ -1307,18 +1300,9 @@ fn a_checkpoint_during_a_reader_keeps_its_snapshot() {
     assert_eq!(read_back, after);
 }
 
+/// `rdf_schema()` lists the named graphs.
 #[test]
 fn rdf_schema_lists_the_named_graphs() {
-    // Comes off with #718 E1.
-    xfail(
-        "rdf_schema(): it lists the named graphs",
-        "#718",
-        rdf_schema_lists_the_named_graphs_holds,
-    );
-}
-
-/// `rdf_schema()` lists the named graphs.
-fn rdf_schema_lists_the_named_graphs_holds() {
     let db = seeded();
     let grafeo_engine::admin::SchemaInfo::Rdf(info) = db.rdf_schema() else {
         panic!("rdf_schema() returns the RDF schema");
@@ -1459,5 +1443,351 @@ mod apply_steps {
             "a read after a commit builds the map, so the counter counts"
         );
         reader.commit().unwrap();
+    }
+}
+
+// ------------------------------------------------------------------ images at their epoch (E1)
+//
+// A checkpoint, a copy (`to_memory`, `save`) and a snapshot export take their epoch while they hold
+// commits off, then write while commits go on. Each test arms `during_next_checkpoint_write` to run
+// [`change`] on another thread while the image is written: the commits finish during the write
+// (they do not wait for it), and the image holds the state at its epoch, the answers a fresh
+// session gave before them. `change` deletes and inserts triples in the default graph and in g,
+// drops h, creates k, and adds terms the seed does not hold (`ex:jules`, `ex:butch`, `ex:k`).
+
+/// What `rdf_schema()` reports, in a fixed order: the named graphs, each predicate with its count,
+/// and the subject and object counts.
+fn schema(db: &GrafeoDB) -> (Vec<String>, Vec<(String, usize)>, usize, usize) {
+    let grafeo_engine::admin::SchemaInfo::Rdf(info) = db.rdf_schema() else {
+        panic!("rdf_schema() returns the RDF schema");
+    };
+    let mut graphs = info.named_graphs.clone();
+    graphs.sort();
+    let mut predicates: Vec<(String, usize)> = info
+        .predicates
+        .iter()
+        .map(|predicate| (predicate.iri.clone(), predicate.count))
+        .collect();
+    predicates.sort();
+    (graphs, predicates, info.subject_count, info.object_count)
+}
+
+/// [`change`] as one transaction: the triple changes in the default graph and in g, the drop of h
+/// and the creation of k commit together, so the apply changes several graphs.
+#[cfg(feature = "testing-statement-injection")]
+const ONE_CHANGE: [&str; 4] = [
+    r#"DELETE DATA { ex:alix ex:p "1" . ex:gus ex:knows ex:mia .
+        GRAPH ex:g { ex:vincent ex:p "3" . } }"#,
+    r#"INSERT DATA { ex:mia ex:p "4" . ex:jules ex:p "5" . ex:gus ex:knows ex:butch .
+        GRAPH ex:g { ex:mia ex:p "4" . ex:jules ex:p "5" . } }"#,
+    "DROP GRAPH ex:h",
+    r#"INSERT DATA { GRAPH ex:k { ex:butch ex:p "6" . } }"#,
+];
+
+/// `rdf_schema()` reads one pinned epoch: called while a commit that changes several graphs is
+/// halfway through its apply, it reports the state before the commit or the state after it, never
+/// a mix (its graphs from one, its counts from the other).
+#[cfg(feature = "testing-statement-injection")]
+#[test]
+fn rdf_schema_reads_one_epoch_while_a_commit_applies() {
+    use grafeo_common::testing::commit_hook::{RdfApplyStep, during_next_rdf_apply};
+
+    let before = schema(&seeded());
+    let after = {
+        let db = seeded();
+        change(&db);
+        schema(&db)
+    };
+    assert_ne!(before, after, "the commit changes the schema");
+    let db = Arc::new(seeded());
+    let reader = Arc::clone(&db);
+    let (sender, read) = mpsc::channel();
+    during_next_rdf_apply(RdfApplyStep::Halfway, move || {
+        // The reader may wait for the apply guard: it runs on its own thread, joined after.
+        let handle = std::thread::spawn(move || schema(&reader));
+        sender.send(handle).unwrap();
+    });
+    let mut writer = db.session();
+    writer.begin_transaction().unwrap();
+    for statement in ONE_CHANGE {
+        writer.execute_sparql(&q(statement)).unwrap();
+    }
+    writer.commit().unwrap();
+    let seen = read
+        .recv()
+        .expect("the commit reached its halfway step")
+        .join()
+        .unwrap();
+    assert!(
+        seen == before || seen == after,
+        "rdf_schema() during the apply: {seen:?}\nbefore: {before:?}\nafter: {after:?}"
+    );
+    assert_eq!(schema(&db), after, "after the commit");
+}
+
+#[cfg(all(
+    feature = "testing-statement-injection",
+    feature = "wal",
+    feature = "grafeo-file"
+))]
+mod images_at_their_epoch {
+    use std::path::{Path, PathBuf};
+    use std::sync::{Arc, mpsc};
+
+    use grafeo_common::testing::child_process;
+    use grafeo_common::testing::commit_hook::during_next_checkpoint_write;
+    use grafeo_engine::GrafeoDB;
+
+    use crate::common::started::Started;
+
+    use super::{SEED, answer, change, forms, q, seeded};
+
+    /// A commit after the checkpoint, in the crash test.
+    const DJANGO: &str = r#"INSERT DATA { ex:django ex:p "8" . }"#;
+
+    /// Every form's answer, in a fresh session of `db`.
+    fn answers(db: &GrafeoDB) -> Vec<Vec<String>> {
+        let session = db.session();
+        forms()
+            .iter()
+            .map(|(_, query)| answer(&session, query))
+            .collect()
+    }
+
+    /// The answers after [`change`] (and `extra`): the serial state, on a database of its own.
+    fn changed(extra: &[&str]) -> Vec<Vec<String>> {
+        let db = seeded();
+        change(&db);
+        for statement in extra {
+            db.execute_sparql(&q(statement)).unwrap();
+        }
+        answers(&db)
+    }
+
+    /// A database file at `path` with Alix as a node, so the LPG section has a row group (its
+    /// write runs the hook), and the seed's triples.
+    fn seeded_file(path: &Path) -> Arc<GrafeoDB> {
+        let db = GrafeoDB::open(path).unwrap();
+        db.execute("INSERT (:Person {name: 'Alix'})").unwrap();
+        db.execute_sparql(&q(SEED)).unwrap();
+        Arc::new(db)
+    }
+
+    /// Arms the next image write on this thread to run [`change`] on another thread. The receiver
+    /// says whether the commits finished while the write was in progress.
+    fn change_during_the_next_write(db: &Arc<GrafeoDB>) -> mpsc::Receiver<bool> {
+        let (sender, finished) = mpsc::channel();
+        let writer = Arc::clone(db);
+        during_next_checkpoint_write(move || {
+            let commits = Started::spawn(move || change(&writer));
+            let briefly = commits.finishes_briefly();
+            if briefly {
+                commits.join();
+            }
+            sender.send(briefly).unwrap();
+        });
+        finished
+    }
+
+    fn assert_went_on(finished: &mpsc::Receiver<bool>) {
+        assert!(
+            finished.recv().expect("the write ran the hook"),
+            "the commits went on while the image was written"
+        );
+    }
+
+    /// The image of `db`'s file alone: a copy of the file without its log, opened.
+    fn image_of(db: &GrafeoDB, dir: &Path, name: &str) -> GrafeoDB {
+        let copy = dir.join(name);
+        db.file_manager().unwrap().copy_to(&copy).unwrap();
+        GrafeoDB::open(&copy).unwrap()
+    }
+
+    fn sidecar_wal(path: &Path) -> PathBuf {
+        let mut sidecar = path.as_os_str().to_owned();
+        sidecar.push(".wal");
+        PathBuf::from(sidecar)
+    }
+
+    /// A checkpoint during commits writes the state at its epoch: its image alone answers as
+    /// before them, and the database reopened with its log answers as after them.
+    #[test]
+    fn a_checkpoint_during_commits_holds_the_epochs_rdf_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("lyon.grafeo");
+        let db = seeded_file(&path);
+        let before = answers(&db);
+        let finished = change_during_the_next_write(&db);
+        db.wal_checkpoint().unwrap();
+        assert_went_on(&finished);
+
+        let image = image_of(&db, dir.path(), "image.grafeo");
+        assert_eq!(
+            answers(&image),
+            before,
+            "the image is the state at its epoch"
+        );
+        image.close().unwrap();
+        assert_eq!(answers(&db), changed(&[]), "the live state");
+        Arc::into_inner(db).unwrap().close().unwrap();
+        let reopened = GrafeoDB::open(&path).unwrap();
+        assert_eq!(
+            answers(&reopened),
+            changed(&[]),
+            "the commits during the write come back from the log"
+        );
+        reopened.close().unwrap();
+    }
+
+    /// Partly bound counts, which the ring answers when the store has one: some change with
+    /// [`change`], and two name terms the seed does not hold.
+    #[cfg(feature = "ring-index")]
+    const RING_COUNTS: [&str; 7] = [
+        "SELECT (COUNT(*) AS ?c) WHERE { ?s ex:p ?o }",
+        "SELECT (COUNT(*) AS ?c) WHERE { ?s ex:knows ?o }",
+        "SELECT (COUNT(*) AS ?c) WHERE { ex:gus ?p ?o }",
+        "SELECT (COUNT(*) AS ?c) WHERE { ?s ?p ex:mia }",
+        "SELECT (COUNT(*) AS ?c) WHERE { ?s ?p ex:butch }",
+        r#"SELECT (COUNT(*) AS ?c) WHERE { ?s ex:p "5" }"#,
+        r#"SELECT (COUNT(*) AS ?c) WHERE { ?s ex:p "2" }"#,
+    ];
+
+    #[cfg(feature = "ring-index")]
+    fn ring_counts(db: &GrafeoDB) -> Vec<Vec<String>> {
+        let session = db.session();
+        RING_COUNTS
+            .iter()
+            .map(|query| answer(&session, query))
+            .collect()
+    }
+
+    /// The ring section of a checkpoint during commits is the ring at its epoch, numbered as the
+    /// RDF section it is written with: the image opens with a ring, and its counts are the epoch's,
+    /// for terms the commits added too.
+    #[cfg(feature = "ring-index")]
+    #[test]
+    fn the_ring_of_a_checkpoint_during_commits_is_the_epochs() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("lille.grafeo");
+        let db = seeded_file(&path);
+        db.rdf_store().rebuild_ring();
+        assert!(db.rdf_store().ring_latest().is_some(), "the ring is built");
+        let before = ring_counts(&db);
+        let finished = change_during_the_next_write(&db);
+        db.wal_checkpoint().unwrap();
+        assert_went_on(&finished);
+
+        let image = image_of(&db, dir.path(), "image.grafeo");
+        assert!(
+            image.rdf_store().ring_latest().is_some(),
+            "the image holds the epoch's ring"
+        );
+        assert_eq!(ring_counts(&image), before, "the image's ring counts");
+        assert_eq!(answers(&image), answers(&seeded()), "the image's triples");
+        image.close().unwrap();
+        let after = {
+            let db = seeded();
+            change(&db);
+            ring_counts(&db)
+        };
+        assert_ne!(before, after, "the commits change the counts");
+        Arc::into_inner(db).unwrap().close().unwrap();
+    }
+
+    /// A copy during commits holds the state at its epoch, in memory (`to_memory`) and in a new
+    /// file (`save`); the source goes on with the commits.
+    #[test]
+    fn a_copy_during_commits_holds_the_epochs_rdf_state() {
+        type Copy = fn(&GrafeoDB, &Path) -> GrafeoDB;
+        let copies: [(&str, Copy); 2] = [
+            ("to_memory", |db, _| db.to_memory().unwrap()),
+            ("save", |db, dir| {
+                let saved = dir.join("saved.grafeo");
+                db.save(&saved).unwrap();
+                GrafeoDB::open(&saved).unwrap()
+            }),
+        ];
+        for (name, copy) in copies {
+            let dir = tempfile::tempdir().unwrap();
+            let db = seeded_file(&dir.path().join("nantes.grafeo"));
+            let before = answers(&db);
+            let finished = change_during_the_next_write(&db);
+            let copied = copy(&db, dir.path());
+            assert_went_on(&finished);
+            assert_eq!(answers(&copied), before, "{name}: the state at its epoch");
+            assert_eq!(answers(&db), changed(&[]), "{name}: the source");
+            drop(copied);
+            Arc::into_inner(db).unwrap().close().unwrap();
+        }
+    }
+
+    /// A snapshot export during commits holds the state at its epoch: the import answers as
+    /// before them.
+    #[test]
+    fn an_export_during_commits_holds_the_epochs_rdf_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = seeded_file(&dir.path().join("rennes.grafeo"));
+        let before = answers(&db);
+        let finished = change_during_the_next_write(&db);
+        let exported = db.export_snapshot().unwrap();
+        assert_went_on(&finished);
+        let imported = GrafeoDB::import_snapshot(&exported).unwrap();
+        assert_eq!(answers(&imported), before, "the state at its epoch");
+        assert_eq!(answers(&db), changed(&[]), "the source");
+        Arc::into_inner(db).unwrap().close().unwrap();
+    }
+
+    const CRASH_PATH: &str = "GRAFEO_SPARQL_SNAPSHOT_CHECKPOINT_CRASH_PATH";
+
+    /// A crash after a checkpoint during commits: the image alone is the state at its epoch, and
+    /// the reopened database replays the commits during the write and the one after it from the
+    /// log, to the serial state.
+    #[test]
+    fn a_crash_after_a_checkpoint_during_commits_reopens_to_the_serial_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("toulouse.grafeo");
+        let output = child_process::output_with_deadline(
+            grafeo_common::child_test!("checkpoint_during_commits_child").env(CRASH_PATH, &path),
+            std::time::Duration::from_secs(60),
+        )
+        .unwrap();
+        assert!(
+            output.status.success(),
+            "the child failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(sidecar_wal(&path).exists(), "the crash left the WAL");
+
+        let copy = dir.path().join("image.grafeo");
+        std::fs::copy(&path, &copy).unwrap();
+        let image = GrafeoDB::open(&copy).unwrap();
+        assert_eq!(
+            answers(&image),
+            answers(&seeded()),
+            "the image is the state at its epoch"
+        );
+        image.close().unwrap();
+
+        let reopened = GrafeoDB::open(&path).unwrap();
+        assert_eq!(answers(&reopened), changed(&[DJANGO]), "the serial state");
+        reopened.close().unwrap();
+    }
+
+    /// Child-process entry for the test above; a no-op when run directly. It checkpoints with
+    /// [`change`] committing during the write, commits once more, and exits with the database
+    /// open, so nothing unwinds into its `Drop`.
+    #[test]
+    fn checkpoint_during_commits_child() {
+        let Some(path) = std::env::var_os(CRASH_PATH) else {
+            return;
+        };
+        let db = seeded_file(&PathBuf::from(path));
+        #[cfg(feature = "ring-index")]
+        db.rdf_store().rebuild_ring();
+        let finished = change_during_the_next_write(&db);
+        db.wal_checkpoint().unwrap();
+        assert_went_on(&finished);
+        db.execute_sparql(&q(DJANGO)).unwrap();
+        std::process::exit(0);
     }
 }

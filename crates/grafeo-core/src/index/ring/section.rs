@@ -51,6 +51,8 @@ use grafeo_common::storage::section::{
 };
 use grafeo_common::utils::error::{Error, Result};
 
+use crate::graph::rdf::overlay::{LatestUse, RdfView};
+
 use super::{write_permutation, write_wavelet_tree};
 use crate::graph::rdf::RdfStore;
 
@@ -97,6 +99,12 @@ pub struct RdfRingSection {
     store: Arc<RdfStore>,
     caps: ChunkCaps,
     dirty: AtomicBool,
+    /// The ring to write, taken earlier (a checkpoint takes it while it
+    /// holds commits off); `None` writes the store's ring as it is then.
+    ring: Option<Arc<super::TripleRing>>,
+    /// The view the RDF section is written at, whose term numbering the
+    /// ring's term ids follow.
+    view: RdfView,
 }
 
 impl RdfRingSection {
@@ -115,7 +123,27 @@ impl RdfRingSection {
             store,
             caps,
             dirty: AtomicBool::new(false),
+            ring: None,
+            view: RdfView::latest(LatestUse::Checkpoint),
         }
+    }
+
+    /// This section, writing `ring`, taken earlier, in place of the
+    /// store's ring when it writes: a commit drops the store's ring, never
+    /// changes one, so a ring taken while commits are held off is the
+    /// epoch's.
+    #[must_use]
+    pub fn with_ring(mut self, ring: Arc<super::TripleRing>) -> Self {
+        self.ring = Some(ring);
+        self
+    }
+
+    /// This section, numbering the ring's terms as the RDF section written
+    /// at `view` numbers them.
+    #[must_use]
+    pub fn at(mut self, view: RdfView) -> Self {
+        self.view = view;
+        self
     }
 
     /// Marks the section as dirty (Ring was rebuilt or invalidated).
@@ -268,7 +296,7 @@ impl Section for RdfRingSection {
     /// Returns an error when the caps are 0, a part cannot be encoded, or
     /// the sink refuses a chunk.
     fn write_to(&self, sink: &mut dyn SectionSink) -> Result<()> {
-        let Some(ring) = self.store.ring_latest() else {
+        let Some(ring) = self.ring.clone().or_else(|| self.store.ring_latest()) else {
             return Ok(());
         };
         if ring.store_ids().len() != ring.num_terms() {
@@ -276,8 +304,9 @@ impl Section for RdfRingSection {
         }
         self.caps.validate()?;
         // The file ids of the ring's terms, numbered as the RDF section
-        // numbers them (from the same triples: a write drops the ring).
-        let numbering = crate::graph::rdf::chunked::file_numbering(&self.store)?;
+        // written at the same view numbers them (from the same triples: a
+        // write drops the ring, so a ring taken at the view holds the view's).
+        let numbering = crate::graph::rdf::chunked::file_numbering(&self.store, &self.view)?;
         let mut ids = Vec::with_capacity(8 * (ring.num_terms() + 1));
         ids.extend_from_slice(&(ring.num_terms() as u64).to_le_bytes());
         for &id in ring.store_ids() {
@@ -1590,5 +1619,41 @@ mod tests {
             object: Some(Term::iri("http://example.org/mia")),
         };
         assert_eq!(ring.count(&mia), 1);
+    }
+
+    /// A ring taken at a view, written with the view's term numbering, reads
+    /// back as that ring after a commit that brought new terms (and dropped
+    /// the store's ring): the ring and the RDF section number their terms
+    /// alike.
+    #[test]
+    fn a_ring_taken_at_a_view_reads_back_after_a_commit_with_new_terms() {
+        use crate::graph::rdf::{ApplyMode, CommitChange, RdfStoreSection, Term, Triple};
+        use grafeo_common::types::EpochId;
+
+        let store = ringed_store();
+        let view = store.view_at(EpochId::new(0)).unwrap();
+        let ring = store.ring_latest().expect("bulk_load builds the ring");
+        store.apply_commit(
+            ApplyMode::Publish(EpochId::new(1)),
+            vec![CommitChange::Insert {
+                graph: None,
+                triple: Triple::new(
+                    Term::iri("http://ex.org/aaa-first"),
+                    Term::iri("http://ex.org/aaa-knows"),
+                    Term::literal("aaa"),
+                ),
+            }],
+        );
+
+        let triples = RdfStoreSection::new(Arc::clone(&store)).at(view.clone());
+        let section = RdfRingSection::with_caps(Arc::clone(&store), TINY)
+            .with_ring(Arc::clone(&ring))
+            .at(view);
+        let image =
+            MemoryImage::from_sections(&[&triples as &dyn Section, &section as &dyn Section])
+                .unwrap();
+        let restored = read_back(&image).unwrap();
+        assert_eq!(restored.len(), 500, "the view's triples");
+        assert_same_ring(&ring, &restored.ring_latest().expect("a ring"));
     }
 }

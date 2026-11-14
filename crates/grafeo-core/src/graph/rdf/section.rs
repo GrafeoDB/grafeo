@@ -32,6 +32,7 @@ use grafeo_common::utils::error::{Error, Result};
 use super::chunked::{
     RDF_SECTION_VERSION, RDF_SECTION_VERSION_STRINGS, read_rdf_chunks, write_rdf_chunks,
 };
+use crate::graph::rdf::overlay::{LatestUse, RdfView};
 use crate::graph::rdf::{RdfStore, Term, Triple};
 
 /// The version byte in the header of the block format (0.5.x).
@@ -390,6 +391,9 @@ pub struct RdfStoreSection {
     store: Arc<RdfStore>,
     dirty: AtomicBool,
     caps: ChunkCaps,
+    /// The view the chunks are written at: a checkpoint's epoch, or the
+    /// newest state.
+    view: RdfView,
 }
 
 impl RdfStoreSection {
@@ -407,7 +411,17 @@ impl RdfStoreSection {
             store,
             dirty: AtomicBool::new(false),
             caps,
+            view: RdfView::latest(LatestUse::Checkpoint),
         }
+    }
+
+    /// This section, writing its chunks as `view` sees the store: a
+    /// checkpoint's epoch, so a commit applied while the image is written is
+    /// not in it.
+    #[must_use]
+    pub fn at(mut self, view: RdfView) -> Self {
+        self.view = view;
+        self
     }
 
     /// Mark this section as dirty.
@@ -450,10 +464,10 @@ impl Section for RdfStoreSection {
         read_rdf_blocks(data, &self.store, "the default graph")
     }
 
-    /// Streams the store as chunks of version 3: a metadata chunk, then per
-    /// graph its triples.
+    /// Streams the store as chunks of version 3, as the section's view sees
+    /// it: a metadata chunk, then per graph its triples.
     fn write_to(&self, sink: &mut dyn SectionSink) -> Result<()> {
-        write_rdf_chunks(&self.store, self.caps, sink)
+        write_rdf_chunks(&self.store, &self.view, self.caps, sink)
     }
 
     /// Reads 0.5.x bytes (one raw chunk) with [`deserialize`](Section::deserialize),

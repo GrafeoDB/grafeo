@@ -1,313 +1,77 @@
 ---
-title: Grafeo - High-Performance Graph Database
-description: A high-performance, embeddable graph database with a Rust core and no required C dependencies. Python, Node.js, Go, C, C#, Dart and WebAssembly bindings. GQL (ISO standard) query language.
+title: Grafeo documentation
+description: Documentation for Grafeo, an embeddable graph database with a Rust core. Install, query, operate and extend it.
 hide:
   - navigation
   - toc
 ---
 
-<style>
-.md-typeset h1 {
-  display: none;
-}
-</style>
+# Grafeo documentation
 
-<div class="hero" markdown>
+Grafeo is an embeddable graph database with a Rust core. It stores labeled property graphs and RDF triples, and answers queries in GQL, Cypher, Gremlin, GraphQL, SPARQL and SQL/PGQ.
 
-# **Grafeo**
+## Install
 
-### A fast, lean, embeddable graph database built in Rust
+```bash
+uv add grafeo
+npm install @grafeo-db/js
+cargo add grafeo
+```
 
-[Get Started](getting-started/index.md){ .md-button .md-button--primary }
-[View on GitHub](https://github.com/GrafeoDB/grafeo){ .md-button }
-[Join Discord](https://discord.gg/nqU6RUVaxW){ .md-button }
+Other languages are covered under [Installation](get-started/install.md).
 
-</div>
+## A first query
 
-[![Grafeo Playground](assets/playground.png)](https://grafeo.ai)
+```python
+import grafeo
 
----
+db = grafeo.GrafeoDB()
 
-## Why Grafeo?
+db.execute("INSERT (:Person {name: 'Alix'}), (:Person {name: 'Gus'})")
+db.execute("""
+    MATCH (a:Person {name: 'Alix'}), (b:Person {name: 'Gus'})
+    INSERT (a)-[:KNOWS {since: 2024}]->(b)
+""")
+
+result = db.execute("MATCH (p:Person)-[:KNOWS]->(f) RETURN p.name, f.name")
+for row in result:
+    print(f"{row['p.name']} knows {row['f.name']}")
+```
+
+The [quick start](get-started/quick-start.md) walks through the same steps in each language. Benchmark numbers are published with their method in [graph-bench](https://github.com/GrafeoDB/graph-bench).
+
+## Sections
 
 <div class="grid cards" markdown>
 
--   :material-lightning-bolt:{ .lg .middle } **High Performance**
+-   **[Get started](get-started/index.md)**
 
-    ---
+    Install, first graph, configuration, tutorials and upgrade notes.
 
-    Fastest graph database in our [graph-bench](ecosystem/graph-bench.md) suite (includes [LDBC-inspired](https://ldbcouncil.org/benchmarks/snb/) workloads), both embedded and as a server, with a lower memory footprint than other in-memory databases. Built in Rust with vectorized execution, adaptive chunking and SIMD-optimized operations.
+-   **[Model & query](model-and-query/index.md)**
 
--   :material-database-search:{ .lg .middle } **Multi-Language Queries**
+    The data model, the six query languages, vector and text search, algorithms.
 
-    ---
+-   **[Languages](languages/index.md)**
 
-    GQL, Cypher, Gremlin, GraphQL, SPARQL and SQL/PGQ. Choose the query language that fits the project and expertise level.
+    Guides and API references for Python, Node.js, Rust, Go, WebAssembly, C, C# and Dart.
 
--   :material-graph:{ .lg .middle } **LPG & RDF Support**
+-   **[Operate](operate/persistence/index.md)**
 
-    ---
+    Persistence, transactions, deployment, observability and security.
 
-    Dual data model support for both Labeled Property Graphs and RDF triples. Choose the model that fits the domain.
+-   **[Extend](extend/index.md)**
 
--   :material-vector-line:{ .lg .middle } **Vector Search**
+    Plugins, storage backends, custom functions and Rust extensions.
 
-    ---
+-   **[Internals](internals/index.md)**
 
-    HNSW-based similarity search with quantization (Scalar, Binary, Product). Combine graph traversal with semantic similarity.
+    Architecture: crates, storage, execution, optimization, memory and transactions.
 
--   :material-memory:{ .lg .middle } **Embedded or Standalone**
+-   **[Project](project/ecosystem/index.md)**
 
-    ---
-
-    Embed directly into applications with zero external dependencies, or run as a standalone server with REST API and web UI. From edge devices to production clusters.
-
--   :fontawesome-brands-rust:{ .lg .middle } **Rust Core**
-
-    ---
-
-    Core database engine written in Rust with no required C dependencies. Optional allocators (jemalloc/mimalloc) and TLS use C libraries for performance. Memory-safe by design with fearless concurrency.
-
--   :material-shield-check:{ .lg .middle } **ACID Transactions**
-
-    ---
-
-    Full ACID compliance with MVCC-based snapshot isolation. Reliable transactions for production workloads.
-
--   :material-language-python:{ .lg .middle } **Multi-Language Bindings**
-
-    ---
-
-    Python (PyO3), Node.js/TypeScript (napi-rs), Go (CGO), C (FFI), C# (.NET 8 P/Invoke), Dart (dart:ffi) and WebAssembly (wasm-bindgen). Use Grafeo from the language of choice.
-
--   :material-puzzle:{ .lg .middle } **Ecosystem**
-
-    ---
-
-    AI integrations (LangChain, LlamaIndex, MCP), interactive notebook widgets, browser-based graphs via WebAssembly, standalone server with web UI and benchmarking tools.
+    Ecosystem, contributing, versioning, API stability, roadmap and changelog.
 
 </div>
-
----
-
-## Quick Start
-
-=== "Python"
-
-    ```bash
-    uv add grafeo
-    ```
-
-    ```python
-    import grafeo
-
-    # Create an in-memory database
-    db = grafeo.GrafeoDB()
-
-    # Create nodes and edges
-    db.execute("""
-        INSERT (:Person {name: 'Alix', age: 30})
-        INSERT (:Person {name: 'Gus', age: 25})
-    """)
-
-    db.execute("""
-        MATCH (a:Person {name: 'Alix'}), (b:Person {name: 'Gus'})
-        INSERT (a)-[:KNOWS {since: 2024}]->(b)
-    """)
-
-    # Query the graph
-    result = db.execute("""
-        MATCH (p:Person)-[:KNOWS]->(friend)
-        RETURN p.name, friend.name
-    """)
-
-    for row in result:
-        print(f"{row['p.name']} knows {row['friend.name']}")
-    ```
-
-=== "Rust"
-
-    ```bash
-    cargo add grafeo
-    ```
-
-    ```rust
-    use grafeo::GrafeoDB;
-
-    fn main() -> Result<(), grafeo::Error> {
-        // Create an in-memory database
-        let db = GrafeoDB::new_in_memory();
-
-        // Create a session and execute queries
-        let mut session = db.session();
-
-        session.execute(r#"
-            INSERT (:Person {name: 'Alix', age: 30})
-            INSERT (:Person {name: 'Gus', age: 25})
-        "#)?;
-
-        session.execute(r#"
-            MATCH (a:Person {name: 'Alix'}), (b:Person {name: 'Gus'})
-            INSERT (a)-[:KNOWS {since: 2024}]->(b)
-        "#)?;
-
-        // Query the graph
-        let result = session.execute(r#"
-            MATCH (p:Person)-[:KNOWS]->(friend)
-            RETURN p.name, friend.name
-        "#)?;
-
-        for row in result.rows() {
-            println!("{:?}", row);
-        }
-
-        Ok(())
-    }
-    ```
-
----
-
-## Features
-
-### Dual Data Model Support
-
-Grafeo supports both major graph data models with optimized storage for each:
-
-=== "LPG (Labeled Property Graph)"
-
-    - **Nodes** with labels and properties
-    - **Edges** with types and properties
-    - **Properties** supporting rich data types
-    - Ideal for social networks, knowledge graphs, application data
-
-=== "RDF (Resource Description Framework)"
-
-    - **Triples**: subject-predicate-object statements
-    - **SPO/POS/OSP indexes** for efficient querying
-    - W3C standard compliance
-    - Ideal for semantic web, linked data, ontologies
-
-### Query Languages
-
-Choose the query language that fits the project:
-
-| Language | Data Model | Style |
-|----------|------------|-------|
-| **GQL** (default) | LPG | ISO standard, declarative pattern matching |
-| **Cypher** | LPG | openCypher, ASCII-art patterns |
-| **Gremlin** | LPG | Apache TinkerPop, traversal-based |
-| **GraphQL** | LPG, RDF | Schema-driven, familiar to web developers |
-| **SPARQL** | RDF | W3C standard for RDF queries |
-| **SQL/PGQ** | LPG | SQL:2023 GRAPH_TABLE for SQL-native graph queries |
-
-!!! note "GQL first"
-    Grafeo is a GQL-first database: [GQL](user-guide/gql/index.md), the ISO/IEC 39075 standard, sets its semantics, and the other languages are translated onto them. Where the languages disagree, each follows its own specification wherever Grafeo's translator can tell the cases apart: [Cypher](user-guide/cypher/index.md) follows openCypher and [SQL/PGQ](user-guide/sql-pgq/index.md) follows SQL:2023. Otherwise GQL's semantics apply, also for [Gremlin](user-guide/gremlin/index.md) and [GraphQL](user-guide/graphql/index.md). On RDF data, [SPARQL](user-guide/sparql/index.md) follows SPARQL 1.1.
-
-=== "GQL"
-
-    ```sql
-    MATCH (me:Person {name: 'Alix'})-[:KNOWS]->(friend)-[:KNOWS]->(fof)
-    WHERE fof <> me
-    RETURN DISTINCT fof.name
-    ```
-
-=== "Cypher"
-
-    ```cypher
-    MATCH (me:Person {name: 'Alix'})-[:KNOWS]->(friend)-[:KNOWS]->(fof)
-    WHERE fof <> me
-    RETURN DISTINCT fof.name
-    ```
-
-=== "Gremlin"
-
-    ```gremlin
-    g.V().has('name', 'Alix').out('KNOWS').out('KNOWS').
-      where(neq('me')).values('name').dedup()
-    ```
-
-=== "GraphQL"
-
-    ```graphql
-    {
-      Person(name: "Alix") {
-        friends { friends { name } }
-      }
-    }
-    ```
-
-=== "SPARQL"
-
-    ```sparql
-    PREFIX foaf: <http://xmlns.com/foaf/0.1/>
-
-    SELECT DISTINCT ?fofName WHERE {
-      ?me foaf:name "Alix" .
-      ?me foaf:knows ?friend .
-      ?friend foaf:knows ?fof .
-      ?fof foaf:name ?fofName .
-      FILTER(?fof != ?me)
-    }
-    ```
-
-### Architecture Highlights
-
-- **Push-based vectorized execution engine**, one thread per query
-- **Columnar storage** with type-specific compression
-- **Cost-based query optimizer** with cardinality estimation
-- **MVCC transactions** with snapshot isolation
-- **Zone maps** for intelligent data skipping
-
----
-
-## Installation
-
-=== "Python"
-
-    ```bash
-    uv add grafeo
-    ```
-
-=== "Node.js"
-
-    ```bash
-    npm install @grafeo-db/js
-    ```
-
-=== "Go"
-
-    ```bash
-    go get github.com/GrafeoDB/grafeo/crates/bindings/go
-    ```
-
-=== "Rust"
-
-    ```bash
-    cargo add grafeo
-    ```
-
-=== "C#"
-
-    ```bash
-    dotnet add package GrafeoDB
-    ```
-
-=== "Dart"
-
-    ```yaml
-    # pubspec.yaml
-    dependencies:
-      grafeo: ^0.6.2
-    ```
-
-=== "WASM"
-
-    ```bash
-    npm install @grafeo-db/wasm
-    ```
-
----
-
-## License
 
 Grafeo is licensed under the [Apache-2.0 License](https://github.com/GrafeoDB/grafeo/blob/main/LICENSE).

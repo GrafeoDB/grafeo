@@ -19,7 +19,7 @@ Add `--json` for machine-readable output. Exit code 1 when an error is found.
     T3  the private planning directory is never tracked or referenced
     T4  no em or en dashes in public docs, README, CHANGELOG, CONTRIBUTING, .github
     T5  every published workspace crate declares the workspace's rust-version (the MSRV)
-    T6  docs/stability.md's Experimental table and the `# Stability: Experimental` sections
+    T6  docs/project/stability.md's Experimental table and the `# Stability: Experimental` sections
         of the facade's crates agree both ways; the facade and its modules have a
         `# Stability` section
     T7  in a crate with `autotests = false`, every test file is a `mod` of tests/main.rs or a
@@ -82,6 +82,8 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
+# The page that holds the Experimental table (T6).
+STABILITY_PAGE = Path("docs/project/stability.md")
 DASH = re.compile("[\u2013\u2014]")
 PRIVATE_DIR = re.compile(r"(?<![\w])\.claude(?![\w.-])")
 PRIVATE_ALLOWED = {
@@ -102,7 +104,8 @@ WORKFLOW_TEXT = re.compile(
     r"|\bReview(?:'s| Expert| session)\b|\b(?:by|from|for|with) Review\b|\(Review\b"
     r"|\bthe review's\b"
     r"|\binbox\b"
-    r"|[\w.-]+-design\.md\b|\bdecisions\.md\b|\bquestions-pending\.md\b"
+    # A private note named exactly decisions.md, not a public page whose name ends in it
+    r"|[\w.-]+-design\.md\b|(?<![\w.-])decisions\.md\b|\bquestions-pending\.md\b"
 )
 ALLOW_ATTRIBUTE = re.compile(r"#!?\[\s*(?:cfg_attr\s*\(.*?,\s*)?allow\s*\(")
 IGNORE_ATTRIBUTE = re.compile(r"#\[\s*ignore\b")
@@ -214,7 +217,7 @@ HINTS = {
     "T3": "restate what matters inline or link a public issue",
     "T4": "rewrite with a comma, colon or parentheses",
     "T5": "add `rust-version.workspace = true` to the crate's [package]",
-    "T6": "an experimental item has a `# Stability: Experimental` section and a row in docs/stability.md; a module the facade exports has a `# Stability` section",
+    "T6": "an experimental item has a `# Stability: Experimental` section and a row in docs/project/stability.md; a module the facade exports has a `# Stability` section",
     "T7": "declare a test file with `mod name;` in tests/main.rs; a separate `[[test]]` entry has a comment above it saying why it cannot be there",
     "T8": "a platform needs its target in `napi.targets`, in the build matrix of release.yml, and a folder under npm/; the release adds the platform packages to the manifest (scripts/node-platform-deps.sh)",
     "T9": "an expected failure names its spec and an issue (`#N`, or `fix in X.Y.Z` for "
@@ -1236,8 +1239,8 @@ CONTAINER = re.compile(
 
 
 def experimental_table(root: Path) -> list[tuple[int, str]]:
-    """The Rust paths of the Experimental table in docs/stability.md, with their lines."""
-    text = read_text(root / "docs" / "stability.md")
+    """The Rust paths of the Experimental table in docs/project/stability.md, with their lines."""
+    text = read_text(root / STABILITY_PAGE)
     if text is None:
         return []
     paths, inside = [], False
@@ -1359,7 +1362,7 @@ def rust_items(
 
 
 def stability_findings(root: Path, files: list[str]) -> list[Finding]:
-    """T6: the Experimental table of docs/stability.md and the code agree, and every module
+    """T6: the Experimental table of docs/project/stability.md and the code agree, and every module
     the facade re-exports says what is stable.
 
     Both ways: each Rust path the table names has a `# Stability: Experimental` section where it
@@ -1367,9 +1370,16 @@ def stability_findings(root: Path, files: list[str]) -> list[Finding]:
     table names. The `grafeo` crate's root documentation, each `grafeo_engine` module it
     re-exports and each module it defines has a `# Stability` section.
     """
-    if not (root / "docs" / "stability.md").exists():
-        return []
     findings = []
+    if not (root / STABILITY_PAGE).exists():
+        return [
+            finding(
+                "T6",
+                STABILITY_PAGE.as_posix(),
+                1,
+                f"the stability page {STABILITY_PAGE.as_posix()} is missing, so the Experimental table cannot be checked",
+            )
+        ]
     table = experimental_table(root)
     items, modules = rust_items(root, files)
     named = {segment for _, path in table for segment in path.split("::")}
@@ -1404,7 +1414,7 @@ def stability_findings(root: Path, files: list[str]) -> list[Finding]:
             findings.append(
                 finding(
                     "T6",
-                    "docs/stability.md",
+                    STABILITY_PAGE.as_posix(),
                     line,
                     f"`{path}` is not defined in the facade's crates",
                 )
@@ -1426,7 +1436,7 @@ def stability_findings(root: Path, files: list[str]) -> list[Finding]:
                     "T6",
                     item.path,
                     item.line,
-                    f"`{item.name}` is marked experimental but not in the Experimental table of docs/stability.md",
+                    f"`{item.name}` is marked experimental but not in the Experimental table of docs/project/stability.md",
                 )
             )
     marked_files = {

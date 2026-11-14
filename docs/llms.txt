@@ -326,10 +326,10 @@ SELECT * FROM GRAPH_TABLE (
 
 Full documentation: https://grafeo.dev
 
-- Getting Started: https://grafeo.dev/getting-started/
-- User Guide: https://grafeo.dev/user-guide/
-- API Reference: https://grafeo.dev/api/
-- Architecture: https://grafeo.dev/architecture/
+- Getting Started: https://grafeo.dev/get-started/
+- User Guide: https://grafeo.dev/model-and-query/
+- API Reference: https://grafeo.dev/languages/
+- Architecture: https://grafeo.dev/internals/
 
 ## Source Code
 

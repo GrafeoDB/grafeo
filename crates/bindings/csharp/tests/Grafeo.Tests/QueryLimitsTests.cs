@@ -24,9 +24,12 @@ public sealed class QueryLimitsTests
         return db;
     }
 
+    // Any GrafeoException: the code and the setting in the message are what the refusal promises.
+    // Execute raises every failure as a QueryException today, where the native category of a
+    // limit refusal is Storage.
     private static void AssertRefused(GrafeoDB db, string query, string code, string setting)
     {
-        var error = Assert.Throws<GrafeoException>(() => db.Execute(query));
+        var error = Assert.ThrowsAny<GrafeoException>(() => db.Execute(query));
         Assert.Contains(code, error.Message);
         Assert.Contains(setting, error.Message);
     }

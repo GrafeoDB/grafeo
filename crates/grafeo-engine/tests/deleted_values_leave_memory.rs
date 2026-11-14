@@ -583,54 +583,70 @@ fn the_files_hold_no_deleted_value_after_compact() {
 }
 
 /// The probe's own guarantee: a freed block is zeroed, so a block that gets its memory again
-/// holds none of it. Freed and allocated again with one layout, the system allocator hands back
-/// the same block (glibc's cache does at once; elsewhere one of the next few may be it); its bytes
-/// past the allocator's own bookkeeping (the first 16) must hold no byte of the marker. Without
-/// this the counts after the drop and the reopen read freed memory, which no allocator zeroes.
-/// It must find the block to pass: glibc's per-thread cache and the Windows heap hand it back
-/// (checked on both); elsewhere the allocator need not, so the test does not run there.
+/// holds none of it. Its bytes past the allocator's own bookkeeping (the first 16) must hold no
+/// byte of the marker; without this the counts after the drop and the reopen read freed memory,
+/// which no allocator zeroes. Each attempt runs on a thread of its own: glibc's per-thread cache
+/// then has room for the freed block and hands it to the next allocation of its size on that
+/// thread, where no other thread can take it (a long-lived thread's cache may be full, and the
+/// block then goes to a list the threads share). The Windows heap hands it back within a few
+/// allocations. Every attempt that gets the block back must find it zeroed, and one at least must
+/// get it back (checked on both); elsewhere the allocator need not, so the test does not run there.
 #[test]
 #[cfg_attr(
     not(any(all(target_os = "linux", target_env = "gnu"), windows)),
     ignore = "the system allocator need not hand a freed block back at once"
 )]
 fn the_probe_zeroes_what_it_frees() {
-    use std::alloc::{Layout, alloc, dealloc};
+    /// Frees a block full of the marker byte and allocates blocks of its layout until one is
+    /// it: the marker bytes that block still holds, or `None` when none of 64 is it.
+    fn reclaim() -> Option<usize> {
+        use std::alloc::{Layout, alloc, dealloc};
 
-    let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
-    let layout = Layout::from_size_align(96, 8).unwrap();
-    // SAFETY: a non-zero layout; each block is freed with it below.
-    let block = unsafe { alloc(layout) };
-    assert!(!block.is_null());
-    // SAFETY: the block is 96 bytes long.
-    unsafe { std::ptr::write_bytes(block, b'm', 96) };
-    let address = block as usize;
-    // SAFETY: allocated above with `layout`.
-    unsafe { dealloc(block, layout) };
-    let mut again = Vec::new();
-    let mut found = false;
-    for _ in 0..64 {
-        // SAFETY: as above.
-        let next = unsafe { alloc(layout) };
-        assert!(!next.is_null());
-        again.push(next);
-        if next as usize == address {
-            let stale = (16..96)
-                // SAFETY: within the block just allocated; read as bytes, as the scan does.
-                .filter(|&offset| unsafe { next.add(offset).read_volatile() } == b'm')
-                .count();
-            assert_eq!(stale, 0, "{stale} bytes of a freed block are still there");
-            found = true;
-            break;
-        }
-    }
-    for next in again {
+        let layout = Layout::from_size_align(96, 8).unwrap();
+        // SAFETY: a non-zero layout; each block is freed with it below.
+        let block = unsafe { alloc(layout) };
+        assert!(!block.is_null());
+        // SAFETY: the block is 96 bytes long.
+        unsafe { std::ptr::write_bytes(block, b'm', 96) };
+        let address = block as usize;
         // SAFETY: allocated above with `layout`.
-        unsafe { dealloc(next, layout) };
+        unsafe { dealloc(block, layout) };
+        let mut again = Vec::with_capacity(64);
+        let mut stale = None;
+        for _ in 0..64 {
+            // SAFETY: as above.
+            let next = unsafe { alloc(layout) };
+            assert!(!next.is_null());
+            again.push(next);
+            if next as usize == address {
+                stale = Some(
+                    (16..96)
+                        // SAFETY: within the block just allocated; read as bytes, as the scan does.
+                        .filter(|&offset| unsafe { next.add(offset).read_volatile() } == b'm')
+                        .count(),
+                );
+                break;
+            }
+        }
+        for next in again {
+            // SAFETY: allocated above with `layout`.
+            unsafe { dealloc(next, layout) };
+        }
+        stale
     }
+
+    const ATTEMPTS: usize = 8;
+    let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+    let reclaimed: Vec<usize> = (0..ATTEMPTS)
+        .filter_map(|_| std::thread::spawn(reclaim).join().expect("the attempt ran"))
+        .collect();
     assert!(
-        found,
-        "the system allocator handed the freed block back within 64 allocations"
+        reclaimed.iter().all(|&stale| stale == 0),
+        "bytes of a freed block are still there, per attempt that got it back: {reclaimed:?}"
+    );
+    assert!(
+        !reclaimed.is_empty(),
+        "none of {ATTEMPTS} attempts got the freed block back"
     );
 }
 

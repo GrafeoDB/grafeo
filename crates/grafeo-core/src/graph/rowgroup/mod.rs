@@ -1091,6 +1091,7 @@ impl Inner {
                         groups.extend((first..=last).map(|index| (nodes, index)));
                     }
                 }
+                Change::RdfGraph { .. } => {}
             }
         }
         groups.sort_unstable();

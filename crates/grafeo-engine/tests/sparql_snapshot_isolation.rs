@@ -807,7 +807,8 @@ mod replay {
 
     #[test]
     fn a_transactions_graph_operations_replay_in_order_after_a_crash() {
-        // Comes off with #718 D1.
+        // Comes off with #718 D2: D1 logs and replays a graph operation in its place, but until D2
+        // a transaction cannot run SPARQL after one, so the child fails before the crash.
         xfail(
             "WAL replay: a transaction's graph operations replay in order with its triple writes",
             "#718",

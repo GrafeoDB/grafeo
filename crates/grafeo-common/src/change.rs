@@ -506,6 +506,15 @@ pub enum Change {
     },
     /// The ids a bulk write reserved.
     Bulk(BulkRange),
+    /// A whole-graph RDF operation, applied in its place among the triples.
+    RdfGraph {
+        /// The RDF slot of the graph it names (the default graph's for an
+        /// operation on several graphs): it keeps [`graph`](Self::graph)
+        /// total; nothing filters RDF entries by slot.
+        graph: GraphSlot,
+        /// The operation; logged as its standalone record.
+        op: RdfGraphOp,
+    },
 }
 
 impl Change {
@@ -513,7 +522,7 @@ impl Change {
     #[must_use]
     pub const fn graph(&self) -> GraphSlot {
         match self {
-            Self::Data { graph, .. } => *graph,
+            Self::Data { graph, .. } | Self::RdfGraph { graph, .. } => *graph,
             Self::Bulk(range) => range.graph,
         }
     }
@@ -730,6 +739,24 @@ impl ChangeSet {
         Ok(())
     }
 
+    /// Records a whole-graph RDF operation, in its place after the entries
+    /// recorded so far. `graph` is an RDF slot: the graph the operation names,
+    /// or the default graph for one on several graphs.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Internal`], and records nothing, when `graph` is not
+    /// a slot of this set or not an RDF graph.
+    pub fn push_rdf_graph(&mut self, graph: GraphSlot, op: RdfGraphOp) -> Result<()> {
+        self.check_graph(graph, DataModel::Rdf, || {
+            format!("the RDF graph operation of kind {}", op.kind())
+        })?;
+        let change = Change::RdfGraph { graph, op };
+        self.held.change(&change, Count::Add);
+        self.entries.push(change);
+        Ok(())
+    }
+
     /// Keeps `rows`, which a bulk write applied in the range it recorded
     /// last ([`push_bulk`](Self::push_bulk)), with that range for the
     /// commit's log and change data capture ([`ops`](Self::ops),
@@ -788,7 +815,8 @@ impl ChangeSet {
     /// graph of each and what it replaced: the op of each data entry, and at
     /// a bulk range's place the rows kept with it (see
     /// [`push_bulk_rows`](Self::push_bulk_rows)), creates that replaced
-    /// nothing. What the commit logs and reports to change data capture.
+    /// nothing. What change data capture reports; a graph operation is no
+    /// data op, and the log takes it from [`log_records`](Self::log_records).
     pub fn ops(&self) -> impl Iterator<Item = (GraphSlot, &DataOp, &Before)> {
         self.entries
             .iter()
@@ -799,6 +827,7 @@ impl ChangeSet {
                         graph, op, before, ..
                     } => (Some((*graph, op, before)), &[][..]),
                     Change::Bulk(_) => (None, self.rows_of(index)),
+                    Change::RdfGraph { .. } => (None, &[][..]),
                 };
                 let graph = change.graph();
                 data.into_iter()
@@ -914,7 +943,7 @@ impl ChangeSet {
                 Change::Bulk(range) if range.graph == graph && range.table == Table::Nodes => {
                     nodes.extend(range.ids.clone().map(NodeId));
                 }
-                Change::Data { .. } | Change::Bulk(_) => {}
+                Change::Data { .. } | Change::Bulk(_) | Change::RdfGraph { .. } => {}
             }
         }
         self.mark()
@@ -1012,6 +1041,7 @@ impl ChangeSet {
                     Table::Nodes => of_graph.nodes.extend(range.ids.clone().map(NodeId::new)),
                     Table::Edges => of_graph.edges.extend(range.ids.clone().map(EdgeId::new)),
                 },
+                Change::RdfGraph { .. } => {}
             }
         }
         for of_graph in &mut written {
@@ -1023,18 +1053,36 @@ impl ChangeSet {
         written
     }
 
-    /// The log records of the set's writes, in the order they were applied
-    /// (see [`ops`](Self::ops)), each naming its graph by storage key: the
-    /// op of each data entry and the rows kept with a bulk range. A range
-    /// whose rows were logged as they were applied has none. Before-images
-    /// and pending versions are never logged.
+    /// The log records of the set's writes, in the order they were applied,
+    /// each data record naming its graph by storage key: the op of each data
+    /// entry, the rows kept with a bulk range (see [`ops`](Self::ops)), and
+    /// a graph operation's standalone record in its place. A range whose rows
+    /// were logged as they were applied has none. Before-images and pending
+    /// versions are never logged.
     pub fn log_records(&self) -> impl Iterator<Item = LogRecordRef<'_>> {
-        self.ops().map(|(graph, op, _)| LogRecordRef::Data {
-            // `push` and `push_bulk` took only slots of this set, and slots
-            // stay.
-            graph: self.graphs[graph.index()].key.as_deref(),
-            op,
-        })
+        // `push`, `push_bulk` and `push_rdf_graph` took only slots of this
+        // set, and slots stay.
+        let key = |graph: GraphSlot| self.graphs[graph.index()].key.as_deref();
+        self.entries
+            .iter()
+            .enumerate()
+            .flat_map(move |(index, change)| {
+                let (record, rows) = match change {
+                    Change::Data { graph, op, .. } => (
+                        Some(LogRecordRef::Data {
+                            graph: key(*graph),
+                            op,
+                        }),
+                        &[][..],
+                    ),
+                    Change::Bulk(_) => (None, self.rows_of(index)),
+                    Change::RdfGraph { op, .. } => (Some(LogRecordRef::RdfGraph(op)), &[][..]),
+                };
+                let graph = key(change.graph());
+                record
+                    .into_iter()
+                    .chain(rows.iter().map(move |op| LogRecordRef::Data { graph, op }))
+            })
     }
 }
 
@@ -1080,6 +1128,24 @@ impl Held {
                 self.before(before, count);
             }
             Change::Bulk(_) => {}
+            Change::RdfGraph { op, .. } => {
+                let names = match op {
+                    RdfGraphOp::Create { name } => name.len(),
+                    RdfGraphOp::Drop { target } | RdfGraphOp::Clear { target } => match target {
+                        RdfGraphTarget::Named(name) => name.len(),
+                        RdfGraphTarget::Default
+                        | RdfGraphTarget::AllNamed
+                        | RdfGraphTarget::All => 0,
+                    },
+                    RdfGraphOp::Copy { source, target }
+                    | RdfGraphOp::Move { source, target }
+                    | RdfGraphOp::Add { source, target } => {
+                        source.as_ref().map_or(0, String::len)
+                            + target.as_ref().map_or(0, String::len)
+                    }
+                };
+                self.own(names, count);
+            }
         }
     }
 
@@ -1350,6 +1416,7 @@ mod tests {
             .map(|change| match change {
                 Change::Data { op, .. } => op.kind(),
                 Change::Bulk(_) => 0,
+                Change::RdfGraph { op, .. } => op.kind(),
             })
             .collect()
     }
@@ -1359,7 +1426,7 @@ mod tests {
             .iter()
             .map(|change| match change {
                 Change::Data { version, .. } => *version,
-                Change::Bulk(_) => panic!("{change:?}"),
+                Change::Bulk(_) | Change::RdfGraph { .. } => panic!("{change:?}"),
             })
             .collect()
     }
@@ -2118,7 +2185,7 @@ mod tests {
             .rev()
             .map(|change| match change {
                 Change::Bulk(range) => range.table,
-                Change::Data { .. } => panic!("{change:?}"),
+                Change::Data { .. } | Change::RdfGraph { .. } => panic!("{change:?}"),
             })
             .collect();
         assert_eq!(undo, [Table::Edges, Table::Nodes], "edges undone first");
@@ -2317,7 +2384,7 @@ mod tests {
             .rev()
             .map(|change| match change {
                 Change::Data { op, .. } => op.entity(),
-                Change::Bulk(_) => None,
+                Change::Bulk(_) | Change::RdfGraph { .. } => None,
             })
             .collect();
         assert_eq!(
@@ -2557,7 +2624,7 @@ mod tests {
                 .into_iter()
                 .map(|change| match change {
                     Change::Data { op, .. } => op.entity(),
-                    Change::Bulk(_) => None,
+                    Change::Bulk(_) | Change::RdfGraph { .. } => None,
                 })
                 .collect()
         };
@@ -2588,7 +2655,7 @@ mod tests {
                     op.entity(),
                     op.property_key().map(PropertyKey::as_str),
                 ),
-                Change::Bulk(_) => panic!("{change:?}"),
+                Change::Bulk(_) | Change::RdfGraph { .. } => panic!("{change:?}"),
             })
             .collect();
         let node = |id| Some(Entity::Node(NodeId::new(id)));
@@ -2619,6 +2686,99 @@ mod tests {
             index: IndexKeyRecord::Property { key: "city".into() },
         };
         assert_eq!(dropped.kind(), 7);
+    }
+
+    fn insert_triple(subject: &str) -> DataOp {
+        DataOp::InsertTriple {
+            triple: triple(iri(subject), iri("ex:name"), iri("ex:Amsterdam")),
+        }
+    }
+
+    /// A graph operation is an entry in its place among the triples: the log
+    /// holds its standalone record between theirs, and change data capture,
+    /// which reports data ops, does not see it.
+    #[test]
+    fn a_graph_operation_is_logged_in_its_place_among_the_triples() {
+        let mut set = ChangeSet::new();
+        let g = set.slot(rdf(Some("ex:g"))).unwrap();
+        let default = set.slot(rdf(None)).unwrap();
+        let clear = RdfGraphOp::Clear {
+            target: RdfGraphTarget::Named("ex:g".into()),
+        };
+        set.push(g, insert_triple("ex:Jules"), Before::Absent, Created)
+            .unwrap();
+        set.push_rdf_graph(g, clear.clone()).unwrap();
+        set.push(default, insert_triple("ex:Mia"), Before::Absent, Created)
+            .unwrap();
+
+        assert_eq!(set.len(), 3);
+        assert_eq!(set.entries()[1].graph(), g);
+        let back: Vec<LogRecord> = encoded(&set)
+            .iter()
+            .flat_map(|bytes| read_all(bytes))
+            .collect();
+        assert_eq!(
+            back.iter().map(LogRecord::kind).collect::<Vec<_>>(),
+            [64, 68, 64]
+        );
+        assert_eq!(
+            back[1],
+            LogRecord::Standalone(StandaloneOp::RdfGraph(clear))
+        );
+        assert!(matches!(&back[2], LogRecord::Data { graph: None, .. }));
+        assert_eq!(set.ops().count(), 2, "the data ops only");
+        let written = set.written_entities();
+        assert!(
+            written
+                .iter()
+                .all(|graph| graph.nodes.is_empty() && graph.edges.is_empty())
+        );
+        let mut nodes = Vec::new();
+        set.nodes_written_after(g, ChangeMark(0), &mut nodes);
+        assert_eq!(nodes, Vec::new());
+    }
+
+    /// A graph operation goes in an RDF graph's slot of the set; any other
+    /// is refused, and nothing is recorded.
+    #[test]
+    fn a_graph_operation_needs_an_rdf_slot() {
+        let mut set = ChangeSet::new();
+        let lpg_slot = set.slot(lpg(None)).unwrap();
+        let op = RdfGraphOp::Create {
+            name: "ex:g".into(),
+        };
+        let error = set.push_rdf_graph(lpg_slot, op.clone()).unwrap_err();
+        assert!(error.to_string().contains("Lpg"), "{error}");
+        let error = set.push_rdf_graph(GraphSlot(7), op).unwrap_err();
+        assert!(error.to_string().contains("graph slot 7"), "{error}");
+        assert!(set.is_empty());
+    }
+
+    /// The names a graph operation holds count in the set's memory, and a
+    /// rollback to a savepoint before it takes it out again.
+    #[test]
+    fn a_graph_operation_counts_its_names_and_rolls_back() {
+        let mut set = ChangeSet::new();
+        let g = set.slot(rdf(Some("ex:g"))).unwrap();
+        let mark = set.mark();
+        let before = set.approx_bytes();
+        let source = "ex:source".repeat(40);
+        set.push_rdf_graph(
+            g,
+            RdfGraphOp::Copy {
+                source: Some(source.clone()),
+                target: Some("ex:g".into()),
+            },
+        )
+        .unwrap();
+        assert!(
+            set.approx_bytes() >= before + size_of::<Change>() + source.len(),
+            "{} after {before}",
+            set.approx_bytes()
+        );
+        let tail = set.split_off(mark);
+        assert!(matches!(tail.as_slice(), [Change::RdfGraph { .. }]));
+        assert_eq!(set.approx_bytes(), before);
     }
 }
 

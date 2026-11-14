@@ -716,6 +716,9 @@ impl GraphBackend for RowGroupStore {
                         inner.stamp_bulk(range, pending, at);
                         inner.mark_bulk(range);
                     }
+                    // An RDF graph operation is the RDF store's; a commit
+                    // passes a backend only the entries of its own graphs.
+                    Change::RdfGraph { .. } => {}
                 }
                 if stamped.is_err() {
                     break;
@@ -795,6 +798,8 @@ impl RowGroupStore {
                     undone = inner.undo_op(op, before, *version, pending);
                 }
                 Change::Bulk(range) => inner.undo_bulk(range, pending),
+                // The RDF store's, never a backend's (see `commit`).
+                Change::RdfGraph { .. } => {}
             }
             if undone.is_err() {
                 break;

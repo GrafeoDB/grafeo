@@ -61,6 +61,7 @@ def repo(tmp_path: Path) -> Path:
     root.mkdir()
     git(root, "init", "-q")
     write(root, "README.md", "Grafeo\n")
+    write(root, "docs/project/stability.md", "# API Stability\n")
     write(
         root,
         "crates/grafeo-core/src/lib.rs",
@@ -137,7 +138,9 @@ def test_d7_text_addressed_to_the_private_workflow(repo: Path) -> None:
         "// fails today (inbox, 2026-11-06)",
         "// the table in entity-values-design.md",
         "// see decisions.md",
-        # None a finding: ordinary words.
+        "// see notes/decisions.md",
+        # None a finding: ordinary words, and a public page whose name only ends in "decisions.md".
+        "// internals/storage/disk-storage-decisions.md",
         "fn review_threads() {}",
         "// Decided (#728 review): the change goes through",
         "// Review the plan before it runs",
@@ -164,6 +167,7 @@ def test_d7_text_addressed_to_the_private_workflow(repo: Path) -> None:
         "D7 crates/grafeo-core/src/notes.rs:8",
         "D7 crates/grafeo-core/src/notes.rs:9",
         "D7 crates/grafeo-core/src/notes.rs:10",
+        "D7 crates/grafeo-core/src/notes.rs:11",
         "D7 docs/guide.md:1",
         "D7 tests/spec/lpg/gql/notes.gtest:1",
     ]
@@ -972,7 +976,7 @@ pub fn read_probe() {}
 def stability_tree(root: Path, **overrides: str) -> list[str]:
     """The T6 findings of a facade with an engine, as `path:line message` lines."""
     files = {
-        "docs/stability.md": STABILITY_DOC,
+        "docs/project/stability.md": STABILITY_DOC,
         "crates/grafeo/src/lib.rs": FACADE,
         "crates/grafeo-engine/src/session/mod.rs": SESSION,
         "crates/grafeo-engine/src/probe.rs": PROBE,
@@ -1047,7 +1051,7 @@ def test_t6_a_marker_needs_its_table_entry(tmp_path: Path) -> None:
     ) == [
         (
             "crates/grafeo-engine/src/session/mod.rs:13 `run` is marked experimental but not in "
-            "the Experimental table of docs/stability.md"
+            "the Experimental table of docs/project/stability.md"
         )
     ]
 
@@ -1056,8 +1060,8 @@ def test_t6_a_table_entry_must_exist(tmp_path: Path) -> None:
     doc = STABILITY_DOC.replace(
         "`Db::run_streaming` and", "`Db::run_streaming`, `Db::run_gone` and"
     )
-    assert stability_tree(tmp_path, **{"docs/stability.md": doc}) == [
-        "docs/stability.md:7 `Db::run_gone` is not defined in the facade's crates"
+    assert stability_tree(tmp_path, **{"docs/project/stability.md": doc}) == [
+        "docs/project/stability.md:7 `Db::run_gone` is not defined in the facade's crates"
     ]
 
 
@@ -1067,7 +1071,7 @@ def test_t6_the_member_of_another_type_does_not_count(tmp_path: Path) -> None:
         tmp_path, **{"crates/grafeo-engine/src/session/mod.rs": other}
     )
     assert (
-        "docs/stability.md:7 `Db::run_streaming` is not defined in the facade's crates"
+        "docs/project/stability.md:7 `Db::run_streaming` is not defined in the facade's crates"
         in found
     )
 
@@ -1076,11 +1080,11 @@ def test_t6_an_experimental_module_needs_its_table_entry(tmp_path: Path) -> None
     doc = STABILITY_DOC.replace(
         "| The `grafeo::probe` module and `probe::read_probe` | New |\n", ""
     )
-    found = stability_tree(tmp_path, **{"docs/stability.md": doc})
+    found = stability_tree(tmp_path, **{"docs/project/stability.md": doc})
     assert found == [
         (
             "crates/grafeo-engine/src/probe.rs:10 `read_probe` is marked experimental but not "
-            "in the Experimental table of docs/stability.md"
+            "in the Experimental table of docs/project/stability.md"
         ),
         (
             "crates/grafeo-engine/src/probe.rs:3 module `probe` is marked experimental but not "
@@ -1108,6 +1112,12 @@ def test_t6_the_facade_and_its_modules_say_what_is_stable(tmp_path: Path) -> Non
         "crates/grafeo/src/lib.rs:4 re-exported module `session` has no `# Stability` section",
         "crates/grafeo/src/lib.rs:7 module `store` has no `# Stability` section",
     ]
+
+
+def test_t6_missing_stability_page_is_a_finding(tmp_path: Path) -> None:
+    write(tmp_path, "crates/grafeo/src/lib.rs", FACADE)
+    found = check_policy.stability_findings(tmp_path, ["crates/grafeo/src/lib.rs"])
+    assert any(f.rule == "T6" and "stability" in f.message for f in found)
 
 
 def test_t6_holds_for_this_repository() -> None:

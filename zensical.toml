@@ -1,0 +1,414 @@
+# docs.grafeo.dev: built with Zensical from docs/ (zensical build --strict, output in site/).
+# The look is the Grafeo identity: docs/stylesheets/extra.css and the font, logo and palette
+# blocks below come from the Grafeo design tokens (do not edit them by hand); the site's own
+# rules live in docs/stylesheets/grafeo.css.
+
+[project]
+site_name = "Grafeo"
+site_description = "A high-performance, embeddable graph database with a Rust core and no required C dependencies. Python, Node.js, Go, WebAssembly, C#/.NET and Dart bindings. Supports LPG and RDF data models, multiple query languages (GQL, Cypher, Gremlin, GraphQL, SPARQL, SQL/PGQ), ACID transactions and extensible storage backends."
+site_author = "S.T. Grond"
+site_url = "https://grafeo.dev/"
+repo_url = "https://github.com/GrafeoDB/grafeo"
+repo_name = "GrafeoDB/grafeo"
+edit_uri = "edit/main/docs/"
+copyright = "Copyright &copy; 2026 S.T. Grond - Apache-2.0 License"
+docs_dir = "docs"
+extra_css = ["stylesheets/extra.css", "stylesheets/grafeo.css"]
+extra_javascript = [
+  "javascripts/mathjax.js",
+  "https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js",
+]
+# Navigation: the seven sections of the docs
+nav = [
+  { "Home" = "index.md" },
+  { "Get started" = [
+    { "Overview" = "get-started/index.md" },
+    { "Installation" = "get-started/install.md" },
+    { "Quick Start" = "get-started/quick-start.md" },
+    { "Your First Graph" = "get-started/first-graph.md" },
+    { "Configuration" = "get-started/configuration.md" },
+    { "Command-Line Interface" = "get-started/cli.md" },
+    { "Tutorials" = [
+      "get-started/tutorials/index.md",
+      { "Social Network Graph" = "get-started/tutorials/social-network.md" },
+      { "Knowledge Graph" = "get-started/tutorials/knowledge-graph.md" },
+      { "Recommendation Engine" = "get-started/tutorials/recommendations.md" },
+      { "Fraud Detection" = "get-started/tutorials/fraud-detection.md" },
+    ] },
+    { "Interactive Examples" = [
+      "get-started/examples/index.md",
+      { "Graph Visualization" = "get-started/examples/graph-visualization.md" },
+      { "Vector Search" = "get-started/examples/vector-search.md" },
+      { "Fraud Detection" = "get-started/examples/fraud-detection-example.md" },
+      { "NetworkX Integration" = "get-started/examples/networkx-integration.md" },
+      { "DuckDB Integration" = "get-started/examples/duckdb-integration.md" },
+      { "Arrow Export" = "get-started/examples/arrow-export-example.md" },
+    ] },
+    { "Upgrading" = [
+      "get-started/upgrading/index.md",
+      { "Upgrading to 0.6" = "get-started/upgrading/0.6.md" },
+      { "Migration Guide" = "get-started/upgrading/migration.md" },
+      { "Deprecations" = "get-started/upgrading/deprecations.md" },
+    ] },
+    { "Troubleshooting" = "get-started/troubleshooting.md" },
+    { "Glossary" = "get-started/glossary.md" },
+  ] },
+  { "Model & query" = [
+    "model-and-query/index.md",
+    { "Data Model" = [
+      "model-and-query/data-model/index.md",
+      { "Nodes and Labels" = "model-and-query/data-model/nodes.md" },
+      { "Edges and Types" = "model-and-query/data-model/edges.md" },
+      { "Properties" = "model-and-query/data-model/properties.md" },
+      { "LPG vs RDF" = "model-and-query/data-model/lpg-vs-rdf.md" },
+    ] },
+    { "GQL" = [
+      "model-and-query/gql/index.md",
+      { "Basic Queries" = "model-and-query/gql/basic-queries.md" },
+      { "Pattern Matching" = "model-and-query/gql/patterns.md" },
+      { "Filtering" = "model-and-query/gql/filtering.md" },
+      { "Expressions" = "model-and-query/gql/expressions.md" },
+      { "Aggregations" = "model-and-query/gql/aggregations.md" },
+      { "Path Queries" = "model-and-query/gql/paths.md" },
+      { "Mutations" = "model-and-query/gql/mutations.md" },
+      { "Composite Queries" = "model-and-query/gql/composite-queries.md" },
+      { "String Functions" = "model-and-query/gql/functions-string.md" },
+      { "Numeric Functions" = "model-and-query/gql/functions-numeric.md" },
+      { "Temporal Functions" = "model-and-query/gql/functions-temporal.md" },
+      { "Element & Path Functions" = "model-and-query/gql/functions-element.md" },
+      { "Type System" = "model-and-query/gql/types.md" },
+      { "Schema & DDL" = "model-and-query/gql/schema.md" },
+      { "Transactions & Sessions" = "model-and-query/gql/transactions.md" },
+      { "Conformance" = "model-and-query/gql/conformance.md" },
+    ] },
+    { "Cypher" = [
+      "model-and-query/cypher/index.md",
+      { "Basic Queries" = "model-and-query/cypher/basic-queries.md" },
+      { "Pattern Matching" = "model-and-query/cypher/patterns.md" },
+      { "Filtering" = "model-and-query/cypher/filtering.md" },
+      { "Aggregations" = "model-and-query/cypher/aggregations.md" },
+      { "Path Queries" = "model-and-query/cypher/paths.md" },
+      { "Mutations" = "model-and-query/cypher/mutations.md" },
+    ] },
+    { "Gremlin" = [
+      "model-and-query/gremlin/index.md",
+      { "Basic Traversals" = "model-and-query/gremlin/basic-traversals.md" },
+      { "Edge Traversals" = "model-and-query/gremlin/edge-traversals.md" },
+      { "Properties" = "model-and-query/gremlin/properties.md" },
+      { "Aggregations" = "model-and-query/gremlin/aggregations.md" },
+    ] },
+    { "GraphQL" = [
+      "model-and-query/graphql/index.md",
+      { "Basic Queries" = "model-and-query/graphql/basic-queries.md" },
+      { "Arguments" = "model-and-query/graphql/arguments.md" },
+      { "Relationships" = "model-and-query/graphql/relationships.md" },
+      { "Aliases & Fragments" = "model-and-query/graphql/aliases.md" },
+    ] },
+    { "SPARQL" = [
+      "model-and-query/sparql/index.md",
+      { "Basic Queries" = "model-and-query/sparql/basic-queries.md" },
+      { "Triple Patterns" = "model-and-query/sparql/patterns.md" },
+      { "Filtering" = "model-and-query/sparql/filtering.md" },
+      { "Aggregations" = "model-and-query/sparql/aggregations.md" },
+      { "Property Paths" = "model-and-query/sparql/paths.md" },
+      { "Built-in Functions" = "model-and-query/sparql/functions.md" },
+      { "Loading RDF Data" = "model-and-query/sparql/loading.md" },
+      { "SPARQL Update" = "model-and-query/sparql/update.md" },
+      { "EXPLAIN" = "model-and-query/sparql/explain.md" },
+      { "SHACL Validation" = "model-and-query/sparql/shacl-validation.md" },
+    ] },
+    { "SQL/PGQ" = [
+      "model-and-query/sql-pgq/index.md",
+    ] },
+    { "Comparisons" = [
+      "model-and-query/comparisons/index.md",
+      { "Cypher vs GQL" = "model-and-query/comparisons/cypher-vs-gql.md" },
+      { "Gremlin vs GQL" = "model-and-query/comparisons/gremlin-vs-gql.md" },
+      { "GraphQL vs GQL" = "model-and-query/comparisons/graphql-vs-gql.md" },
+      { "SPARQL vs GQL" = "model-and-query/comparisons/sparql-vs-gql.md" },
+      { "Coming from Cypher" = "model-and-query/comparisons/coming-from-cypher.md" },
+      { "GQL vs SPARQL" = "model-and-query/comparisons/gql-vs-sparql.md" },
+    ] },
+    { "Vector & Text Search" = [
+      "model-and-query/search/index.md",
+      { "Getting Started" = "model-and-query/search/basics.md" },
+      { "HNSW Index" = "model-and-query/search/hnsw-index.md" },
+      { "Text Search" = "model-and-query/search/text-search.md" },
+      { "Hybrid Search" = "model-and-query/search/hybrid-search.md" },
+      { "Filter Expressions" = "model-and-query/search/filter-expressions.md" },
+      { "MMR Search" = "model-and-query/search/mmr-search.md" },
+      { "Quantization" = "model-and-query/search/quantization.md" },
+    ] },
+    { "Algorithms" = [
+      "model-and-query/algorithms/index.md",
+      { "Path Finding" = "model-and-query/algorithms/path-finding.md" },
+      { "Centrality" = "model-and-query/algorithms/centrality.md" },
+      { "Community Detection" = "model-and-query/algorithms/community.md" },
+      { "Link Prediction" = "model-and-query/algorithms/link-prediction.md" },
+      { "Similarity" = "model-and-query/algorithms/similarity.md" },
+      { "Graph Metrics" = "model-and-query/algorithms/metrics.md" },
+    ] },
+  ] },
+  { "Languages" = [
+    "languages/index.md",
+    { "Python" = [
+      "languages/python/index.md",
+      { "Database Operations" = "languages/python/database.md" },
+      { "Working with Nodes" = "languages/python/nodes.md" },
+      { "Working with Edges" = "languages/python/edges.md" },
+      { "Transactions" = "languages/python/transactions.md" },
+      { "Query Results" = "languages/python/results.md" },
+      { "Python API" = "languages/python/vector-search.md" },
+      { "Reference" = [
+        "languages/python/reference/index.md",
+        { "grafeo.Database" = "languages/python/reference/database.md" },
+        { "grafeo.Node" = "languages/python/reference/node.md" },
+        { "grafeo.Edge" = "languages/python/reference/edge.md" },
+        { "grafeo.QueryResult" = "languages/python/reference/result.md" },
+        { "grafeo.Transaction" = "languages/python/reference/transaction.md" },
+      ] },
+    ] },
+    { "Node.js / TypeScript" = [
+      "languages/node/index.md",
+      { "Database Operations" = "languages/node/database.md" },
+      { "Queries" = "languages/node/queries.md" },
+      { "Nodes & Edges" = "languages/node/nodes-edges.md" },
+      { "Transactions" = "languages/node/transactions.md" },
+      { "Query Results" = "languages/node/results.md" },
+      { "Reference" = [
+        "languages/node/reference/index.md",
+        { "Database" = "languages/node/reference/database.md" },
+        { "Node" = "languages/node/reference/node.md" },
+        { "Edge" = "languages/node/reference/edge.md" },
+        { "Query" = "languages/node/reference/query.md" },
+        { "Transaction" = "languages/node/reference/transaction.md" },
+      ] },
+    ] },
+    { "Rust" = [
+      "languages/rust/index.md",
+      { "Database Setup" = "languages/rust/database.md" },
+      { "Graph Operations" = "languages/rust/operations.md" },
+      { "Sessions" = "languages/rust/sessions.md" },
+      { "Choosing an Allocator" = "languages/rust/allocator.md" },
+      { "Reference" = [
+        "languages/rust/reference/index.md",
+        { "grafeo-common" = "languages/rust/reference/common.md" },
+        { "grafeo-core" = "languages/rust/reference/core.md" },
+        { "grafeo-adapters" = "languages/rust/reference/adapters.md" },
+        { "grafeo-engine" = "languages/rust/reference/engine.md" },
+      ] },
+    ] },
+    { "Go" = [
+      "languages/go/index.md",
+    ] },
+    { "WebAssembly" = [
+      "languages/wasm/index.md",
+    ] },
+    { "C" = [
+      "languages/c/index.md",
+    ] },
+    { "C# / .NET" = [
+      "languages/csharp/index.md",
+    ] },
+    { "Dart / Flutter" = [
+      "languages/dart/index.md",
+      { "Flutter Integration" = "languages/dart/flutter.md" },
+    ] },
+  ] },
+  { "Operate" = [
+    { "Persistence" = [
+      "operate/persistence/index.md",
+      { "In-Memory Mode" = "operate/persistence/in-memory.md" },
+      { "Persistent Storage" = "operate/persistence/persistent.md" },
+      { "WAL Recovery" = "operate/persistence/wal.md" },
+      { "Compact Store" = "operate/persistence/compact-store.md" },
+    ] },
+    { "Transactions" = "operate/transactions.md" },
+    { "Named Graphs" = "operate/named-graphs.md" },
+    { "Catalog, Schemas & Graphs" = "operate/catalog-hierarchy.md" },
+    { "Temporal Properties & Time-Travel" = "operate/temporal.md" },
+    { "Change Data Capture" = "operate/cdc.md" },
+    { "Offline Sync" = "operate/offline-sync.md" },
+    { "Deployment" = [
+      "operate/deployment/index.md",
+      { "Docker" = "operate/deployment/docker.md" },
+      { "Kubernetes" = "operate/deployment/kubernetes.md" },
+      { "AWS" = "operate/deployment/aws.md" },
+      { "Azure" = "operate/deployment/azure.md" },
+      { "Google Cloud" = "operate/deployment/gcp.md" },
+    ] },
+    { "Observability" = "operate/observability.md" },
+    { "Error Codes" = "operate/error-codes.md" },
+    { "Security" = "operate/security.md" },
+  ] },
+  { "Extend" = [
+    "extend/index.md",
+    { "Plugins" = "extend/plugins.md" },
+    { "Storage Backends" = "extend/storage-backends.md" },
+    { "Custom Functions" = "extend/custom-functions.md" },
+    { "Rust Extensions" = "extend/rust-extensions.md" },
+  ] },
+  { "Internals" = [
+    "internals/index.md",
+    { "System Overview" = "internals/overview.md" },
+    { "Crate Structure" = "internals/crates.md" },
+    { "Storage Model" = [
+      "internals/storage/index.md",
+      { "Columnar Properties" = "internals/storage/columnar.md" },
+      { "Adjacency Lists" = "internals/storage/adjacency.md" },
+      { "Zone Maps" = "internals/storage/zone-maps.md" },
+      { "Compression" = "internals/storage/compression.md" },
+      { "Container Format" = "internals/storage/container-format.md" },
+      { "Ring Index" = "internals/storage/ring-index.md" },
+      { "Disk Storage Decisions" = "internals/storage/disk-storage-decisions.md" },
+    ] },
+    { "Feature Profiles" = "internals/feature-profiles.md" },
+    { "Execution Engine" = [
+      "internals/execution/index.md",
+    ] },
+    { "Query Optimization" = [
+      "internals/optimization/index.md",
+    ] },
+    { "Memory Management" = [
+      "internals/memory/index.md",
+      { "Storage Tiers" = "internals/memory/storage-tiers.md" },
+    ] },
+    { "Transactions" = [
+      "internals/transactions/index.md",
+    ] },
+  ] },
+  { "Project" = [
+    { "Contributing" = [
+      "project/contributing/index.md",
+      { "Development Setup" = "project/contributing/setup.md" },
+      { "Code Style" = "project/contributing/code-style.md" },
+      { "Testing" = "project/contributing/testing.md" },
+      { "Pull Requests" = "project/contributing/pull-requests.md" },
+    ] },
+    { "Ecosystem" = [
+      "project/ecosystem/index.md",
+      { "grafeo-server" = "project/ecosystem/grafeo-server.md" },
+      { "grafeo-web" = "project/ecosystem/grafeo-web.md" },
+      { "grafeo-langchain" = "project/ecosystem/grafeo-langchain.md" },
+      { "grafeo-llamaindex" = "project/ecosystem/grafeo-llamaindex.md" },
+      { "grafeo-mcp" = "project/ecosystem/grafeo-mcp.md" },
+      { "grafeo-memory" = "project/ecosystem/grafeo-memory.md" },
+      { "graph-bench" = "project/ecosystem/graph-bench.md" },
+      { "anywidget-vector" = "project/ecosystem/anywidget-vector.md" },
+      { "anywidget-graph" = "project/ecosystem/anywidget-graph.md" },
+      { "Performance Baselines" = "project/ecosystem/performance.md" },
+    ] },
+    { "Versioning" = "project/versioning.md" },
+    { "API Stability" = "project/stability.md" },
+    { "Roadmap" = "project/roadmap.md" },
+    { "Changelog" = "project/changelog.md" },
+  ] },
+]
+
+# No "Made with Zensical" line in the footer
+[project.extra]
+generator = false
+
+[[project.extra.social]]
+icon = "fontawesome/brands/github"
+link = "https://github.com/GrafeoDB/grafeo"
+name = "GitHub"
+
+[[project.extra.social]]
+icon = "fontawesome/brands/python"
+link = "https://pypi.org/project/grafeo/"
+name = "PyPI"
+
+[[project.extra.social]]
+icon = "fontawesome/brands/npm"
+link = "https://www.npmjs.com/package/@grafeo-db/js"
+name = "npm"
+
+[[project.extra.social]]
+icon = "simple/go"
+link = "https://pkg.go.dev/github.com/GrafeoDB/grafeo/crates/bindings/go"
+name = "Go"
+
+[[project.extra.social]]
+icon = "simple/rust"
+link = "https://crates.io/crates/grafeo"
+name = "crates.io"
+
+[[project.extra.social]]
+icon = "fontawesome/brands/discord"
+link = "https://discord.gg/nqU6RUVaxW"
+name = "Discord"
+
+[project.theme]
+logo = "assets/logo.svg"
+favicon = "assets/favicon.svg"
+font = false  # fonts are self-hosted: docs/stylesheets/extra.css and fonts/, nothing from Google
+features = [
+  "navigation.tabs",
+  "navigation.tabs.sticky",
+  "navigation.sections",
+  "navigation.path",
+  "navigation.top",
+  "navigation.footer",
+  "navigation.indexes",
+  "navigation.instant",
+  "navigation.instant.progress",
+  "navigation.tracking",
+  "navigation.prune",
+  "toc.follow",
+  "search.suggest",
+  "search.highlight",
+  "search.share",
+  "content.code.copy",
+  "content.code.annotate",
+  "content.tabs.link",
+  "content.tooltips",
+  "header.autohide",
+]
+
+# Sites open in dark; the toggle switches to light and the choice is remembered.
+[[project.theme.palette]]
+scheme = "slate"
+primary = "custom"
+accent = "custom"
+toggle.icon = "lucide/moon"
+toggle.name = "Switch to light mode"
+
+[[project.theme.palette]]
+scheme = "default"
+primary = "custom"
+accent = "custom"
+toggle.icon = "lucide/sun"
+toggle.name = "Switch to dark mode"
+
+[project.markdown_extensions]
+abbr = {}
+admonition = {}
+attr_list = {}
+def_list = {}
+footnotes = {}
+md_in_html = {}
+tables = {}
+toc.permalink = true
+toc.toc_depth = 3
+pymdownx.arithmatex.generic = true
+pymdownx.betterem.smart_enable = "all"
+pymdownx.caret = {}
+pymdownx.details = {}
+pymdownx.emoji.emoji_index = "zensical.extensions.emoji.twemoji"
+pymdownx.emoji.emoji_generator = "zensical.extensions.emoji.to_svg"
+pymdownx.highlight.anchor_linenums = true
+pymdownx.highlight.line_spans = "__span"
+pymdownx.highlight.pygments_lang_class = true
+pymdownx.inlinehilite = {}
+pymdownx.keys = {}
+pymdownx.mark = {}
+pymdownx.smartsymbols = {}
+pymdownx.snippets.base_path = ["."]
+pymdownx.snippets.auto_append = ["docs-snippets/abbreviations.md"]
+pymdownx.superfences.custom_fences = [
+  { name = "mermaid", class = "mermaid", format = "pymdownx.superfences.fence_code_format" },
+]
+pymdownx.tabbed.alternate_style = true
+pymdownx.tasklist.custom_checkbox = true
+pymdownx.tilde = {}

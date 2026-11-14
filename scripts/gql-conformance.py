@@ -3,7 +3,7 @@
 
 Scans Rust test files for ``// ISO:`` annotations and ``.gtest`` spec files for
 ``iso:`` metadata, then cross-references them against the conformance matrix in
-``docs/user-guide/gql/conformance.md``.
+``docs/model-and-query/gql/conformance.md``.
 
 Usage:
     python scripts/gql-conformance.py report      # Human-readable coverage report
@@ -19,6 +19,9 @@ import re
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
+
+# The conformance matrix page, relative to the repository root.
+CONFORMANCE_PAGE = Path("docs/model-and-query/gql/conformance.md")
 
 # ---------------------------------------------------------------------------
 # Regex patterns
@@ -490,7 +493,7 @@ def main() -> None:
     script_dir = Path(__file__).resolve().parent
     project_root = script_dir.parent
 
-    conformance_path = project_root / "docs" / "user-guide" / "gql" / "conformance.md"
+    conformance_path = project_root / CONFORMANCE_PAGE
     test_dir = project_root / "crates" / "grafeo-engine" / "tests"
     spec_dir = project_root / "tests" / "spec"
     cargo_toml = project_root / "Cargo.toml"

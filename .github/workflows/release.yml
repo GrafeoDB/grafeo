@@ -44,8 +44,6 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
 
       - name: Setup Python
         uses: actions/setup-python@v7
@@ -56,10 +54,12 @@ jobs:
         uses: astral-sh/setup-uv@v7
 
       - name: Install dependencies
-        run: uv pip install --system -r docs/requirements.txt
+        run: uv pip install --system -r docs/requirements-docs.txt
 
       - name: Build documentation
-        run: mkdocs build --strict
+        run: |
+          zensical build --strict
+          python scripts/docs_extras.py
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v5

@@ -230,6 +230,11 @@ name = "turn_sample_allocations"
 path = "tests/turn_sample_allocations.rs"
 required-features = ["gql", "grafeo-file"]
 
+# Counts allocated bytes with its own global allocator.
+[[test]]
+name = "node_rows_in_the_account"
+path = "tests/node_rows_in_the_account.rs"
+
 # Counts allocations with its own global allocator.
 [[test]]
 name = "peak_memory"

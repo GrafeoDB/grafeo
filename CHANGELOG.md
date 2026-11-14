@@ -6,8 +6,13 @@ All notable changes to Grafeo, for future reference (and enjoyment).
 
 Performance release: faster queries, a memory limit that holds, and fixes for the regressions of 0.6.2.
 
+### Added
+
+- **`validate()` names the nodes a listed type would refuse** ([#764](https://github.com/GrafeoDB/grafeo/issues/764)): the warning `LISTED_TYPE_ROWS` gives, per node type and graph not bound to a graph type that lists it, the count and the first ids of the nodes that break the type, with the steps to make it a type of its own again. Run it after upgrading a file in which 0.6.2 took a standalone type over.
+
 ### Changed
 
+- **A standalone type a graph type lists stays in force** ([#764](https://github.com/GrafeoDB/grafeo/issues/764)): a type made with `CREATE NODE TYPE` or `CREATE EDGE TYPE` keeps applying by its label in every graph once a graph type lists it, and also in that graph type's graphs, which reverses 0.6.2 for this case; `DROP GRAPH TYPE` leaves it, `DROP NODE TYPE` of it is refused while a graph type lists it, and a pattern may name it only as it is. Types a graph type declares itself, and files in which 0.6.2 already took a type over, keep the 0.6.2 rule.
 - **Conflicting SPARQL triple updates fail at commit** ([#718](https://github.com/GrafeoDB/grafeo/issues/718)): when two transactions write the same triple in one graph and one of them deletes it, the second to commit fails with `GRAFEO-T001` and is rolled back; both committed before, so a delete could silently undo the other's insert. Two inserts of one triple both commit.
 - **SPARQL graph operations in a transaction** ([#718](https://github.com/GrafeoDB/grafeo/issues/718)): `CREATE`, `DROP`, `CLEAR`, `COPY`, `MOVE` and `ADD` apply at the commit in order with the transaction's triple updates, and its later statements see them; 0.6.2 refused any SPARQL statement after one with `GRAFEO-T004`. Graph operations on different graphs, or a graph operation and a triple update in one graph, no longer conflict; two transactions changing one graph still fail with `GRAFEO-T001`.
 - **The per-query memory limit covers every operator that holds rows** ([#674](https://github.com/GrafeoDB/grafeo/issues/674)): `Config::with_query_memory_limit` now caps what one statement's sorts, groupings, hash and nested-loop joins, distincts, set operations, top-k heaps, correlated subqueries, eager reads and stored procedure results hold together, their strings and lists included, where it covered sorts and groupings only. At the cap a sort spills first; a grouping and the others fail with `GRAFEO-S001` naming the limit, and the statement changes nothing.

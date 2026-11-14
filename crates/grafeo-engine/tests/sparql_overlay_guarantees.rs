@@ -1,5 +1,9 @@
-//! What a SPARQL read at an older snapshot waits for, and what a commit waits for (#718).
+//! What a SPARQL read at an older snapshot costs and waits for, and what a commit waits for
+//! (#718).
 //!
+//! - A transaction whose snapshot predates many deletes reads and writes in time that does not
+//!   grow with those deletes: its triple lookups (a write's check of what its snapshot holds, a
+//!   property path's hop) find the deleted triples by key, not by a walk of every one.
 //! - A commit finishes while readers keep reading: steady SPARQL readers, whose property paths
 //!   take nested reads, never keep a commit (and the LPG commits after it) waiting.
 //! - A commit's conflict check never waits for another commit's RDF apply while it holds the
@@ -7,7 +11,9 @@
 //! - A load's publish builds the write set of the transactions open across it before it takes
 //!   the transactions lock, so a begin never waits for that build.
 //!
-//! The oracle is a deadline far above what the work takes.
+//! The first oracle is a ratio: the same work at an old snapshot with sixteen times the deletes
+//! takes less than four times as long (a walk of the deletes per lookup takes about sixteen).
+//! The others are deadlines far above what the work takes.
 //!
 //! ```bash
 //! cargo test -p grafeo-engine --all-features --test main sparql_overlay_guarantees::
@@ -19,11 +25,14 @@ use std::fmt::Write;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use grafeo_engine::GrafeoDB;
 
 const PREFIX: &str = "PREFIX ex: <http://ex.org/> ";
+
+/// The links a transaction writes at its old snapshot.
+const WRITES: usize = 8_000;
 
 /// How many rows the query returns.
 fn count(session: &grafeo_engine::session::Session, query: &str) -> usize {
@@ -31,6 +40,80 @@ fn count(session: &grafeo_engine::session::Session, query: &str) -> usize {
         .execute_sparql(&format!("{PREFIX}{query}"))
         .unwrap_or_else(|error| panic!("{query}: {error}"))
         .row_count()
+}
+
+/// An `INSERT DATA` of the chain `ex:d<i> ex:v ex:d<i + step>` for `i` in `0..count`.
+fn chain(count: usize, step: usize) -> String {
+    let mut text = format!("{PREFIX}INSERT DATA {{ ");
+    for i in 0..count {
+        write!(text, "ex:d{i} ex:v ex:d{} . ", i + step).unwrap();
+    }
+    text.push('}');
+    text
+}
+
+/// How long a transaction takes, at a snapshot that holds a chain of `deleted` links which a
+/// commit deleted after it began:
+/// - to read the chain by a property path (`ex:d0 ex:v+ ?o`), each hop a lookup at the
+///   snapshot;
+/// - to write [`WRITES`] new links between the chain's nodes, each checked against what the
+///   snapshot holds (every term of them is known, so each check reaches the deleted links).
+///
+/// Checks the answers on the way: the snapshot's, and the state after its commit.
+fn old_snapshot_work(deleted: usize) -> (Duration, Duration) {
+    let db = GrafeoDB::new_in_memory();
+    db.execute_sparql(&chain(deleted, 1)).unwrap();
+    let mut reader = db.session();
+    reader.begin_transaction().unwrap();
+    let links = "SELECT ?s WHERE { ?s ex:v ?o }";
+    assert_eq!(count(&reader, links), deleted, "the snapshot");
+    db.execute_sparql(&format!("{PREFIX}DELETE WHERE {{ ?s ex:v ?o }}"))
+        .unwrap();
+
+    let started = Instant::now();
+    let reached = count(&reader, "SELECT ?o WHERE { ex:d0 ex:v+ ?o }");
+    let path = started.elapsed();
+    assert_eq!(
+        reached, deleted,
+        "the path at the snapshot reaches the chain's end"
+    );
+
+    // Links two steps on: new triples between known nodes (the ones past the chain's end name
+    // new nodes, which cost nothing to check).
+    let started = Instant::now();
+    reader.execute_sparql(&chain(WRITES, 2)).unwrap();
+    let writes = started.elapsed();
+    assert_eq!(
+        count(&reader, links),
+        deleted + WRITES,
+        "the snapshot with the transaction's writes"
+    );
+
+    reader.commit().unwrap();
+    assert_eq!(
+        count(&db.session(), links),
+        WRITES,
+        "the delete and the transaction's writes stand"
+    );
+    (path, writes)
+}
+
+/// A transaction at a snapshot older than sixteen times the deleted links takes less than four
+/// times as long to read them by a path and to write new links among them: its lookups do not
+/// walk the deletes. The floor keeps two fast runs from failing on the timer's noise.
+#[test]
+fn lookups_at_an_old_snapshot_do_not_walk_its_deletes() {
+    const FLOOR: Duration = Duration::from_millis(100);
+    let (small_path, small_writes) = old_snapshot_work(1_000);
+    let (large_path, large_writes) = old_snapshot_work(16_000);
+    assert!(
+        large_path < small_path * 4 + FLOOR,
+        "the path: {small_path:?} at 1,000 deleted links, {large_path:?} at 16,000"
+    );
+    assert!(
+        large_writes < small_writes * 4 + FLOOR,
+        "the writes: {small_writes:?} at 1,000 deleted links, {large_writes:?} at 16,000"
+    );
 }
 
 /// A commit, and an LPG commit after it, finish while four sessions keep running property-path

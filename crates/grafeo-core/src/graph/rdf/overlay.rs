@@ -245,9 +245,93 @@ pub struct GraphAtSnapshot {
     pub absent: FxHashSet<TripleIds>,
     /// Triples present at the snapshot that a later commit deleted: their
     /// first change after it was a delete.
-    pub present: Vec<Arc<Triple>>,
+    pub present: PresentTriples,
     /// Where the graph's triples are read from.
     pub partition: Partition,
+}
+
+/// The triples present at a snapshot that a later commit deleted, in the
+/// order of their deletes, found by their ids, their subject or their
+/// object: a check of one triple is O(1), and a lookup at the snapshot visits
+/// only the triples its bound subject or object can match (#718).
+#[derive(Debug, Default)]
+pub struct PresentTriples {
+    triples: Vec<Arc<Triple>>,
+    /// Each triple's position in `triples`, by its ids.
+    positions: FxHashMap<TripleIds, usize>,
+    /// The positions of the triples of each subject id.
+    by_subject: FxHashMap<u64, Vec<usize>>,
+    /// The positions of the triples of each object id.
+    by_object: FxHashMap<u64, Vec<usize>>,
+}
+
+impl PresentTriples {
+    /// Adds `triple` unless it is there.
+    fn insert(&mut self, triple: &Arc<Triple>) {
+        let ids = *triple.raw_ids();
+        let at = self.triples.len();
+        if self.positions.insert(ids, at).is_some() {
+            return;
+        }
+        self.triples.push(Arc::clone(triple));
+        self.by_subject.entry(ids[0]).or_default().push(at);
+        self.by_object.entry(ids[2]).or_default().push(at);
+    }
+
+    /// Whether there is none.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.triples.is_empty()
+    }
+
+    /// How many there are.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.triples.len()
+    }
+
+    /// Whether the triple with `ids` is one of them.
+    #[must_use]
+    pub fn contains(&self, ids: &TripleIds) -> bool {
+        self.positions.contains_key(ids)
+    }
+
+    /// All of them, in the order of their deletes.
+    pub fn iter(&self) -> impl Iterator<Item = &Arc<Triple>> {
+        self.triples.iter()
+    }
+
+    /// The ones `keys` match, a pattern's term ids (`None` for a variable),
+    /// in the order of their deletes: from the bound subject's triples, else
+    /// the bound object's, else all of them.
+    pub fn matching(&self, keys: [Option<u64>; 3]) -> impl Iterator<Item = &Arc<Triple>> {
+        let bucket = match keys {
+            [Some(subject), ..] => Some(self.by_subject.get(&subject)),
+            [_, _, Some(object)] => Some(self.by_object.get(&object)),
+            _ => None,
+        };
+        let (bucket, all) = match bucket {
+            Some(positions) => (
+                Some(
+                    positions
+                        .map_or(&[][..], Vec::as_slice)
+                        .iter()
+                        .map(|&at| &self.triples[at]),
+                ),
+                None,
+            ),
+            None => (None, Some(self.triples.iter())),
+        };
+        bucket
+            .into_iter()
+            .flatten()
+            .chain(all.into_iter().flatten())
+            .filter(move |triple| {
+                keys.iter()
+                    .zip(triple.raw_ids())
+                    .all(|(key, id)| key.is_none_or(|key| key == *id))
+            })
+    }
 }
 
 /// Where a reader at a snapshot reads a graph's triples from.
@@ -304,7 +388,7 @@ impl SnapshotChanges {
                             .entry(graph.clone())
                             .or_default()
                             .present
-                            .push(Arc::clone(triple));
+                            .insert(triple);
                     }
                 }
                 OverlayChange::Graph {
@@ -685,7 +769,7 @@ mod tests {
         assert_eq!(default.present.len(), 1, "Vincent, after In(None)");
         let g = changes.graph(&Some(Arc::from("g"))).unwrap();
         assert!(g.absent.contains(&[7, 2, 7]) && g.absent.len() == 1);
-        assert_eq!(g.present, Vec::new());
+        assert!(g.present.is_empty());
     }
 
     /// The fast path builds nothing: a snapshot no commit followed reads
@@ -711,7 +795,7 @@ mod tests {
             let changes = view.changes().unwrap();
             let graph = changes.graph(&None).unwrap();
             assert!(graph.absent.contains(&[1, 2, 1]));
-            assert_eq!(graph.present, Vec::new());
+            assert!(graph.present.is_empty());
         }
         // Gus, untouched when the changes were built, is deleted later; Alix's
         // later delete is past her first change after 2.
@@ -814,7 +898,7 @@ mod tests {
         let changes = before.changes().unwrap();
         let graph = changes.graph(&None).unwrap();
         assert_eq!(graph.absent.len(), 3, "none of the run at 2");
-        assert_eq!(graph.present, Vec::new());
+        assert!(graph.present.is_empty());
         drop(changes);
 
         let between = RdfView::at(&overlay, EpochId::new(3));

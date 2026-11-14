@@ -291,17 +291,17 @@ pub const STATISTICS_MIN_DRIFT: usize = 64;
 /// and adds the ones present then that a later commit deleted.
 fn correct(
     found: &mut Vec<Arc<Triple>>,
-    pattern: &TriplePattern,
+    keys: Option<[Option<Key>; 3]>,
     changes: &super::overlay::GraphAtSnapshot,
 ) {
     if !changes.absent.is_empty() {
         found.retain(|triple| !changes.absent.contains(triple.raw_ids()));
     }
-    let present: Vec<&Arc<Triple>> = changes
-        .present
-        .iter()
-        .filter(|triple| pattern.matches(triple))
-        .collect();
+    // A pattern term the dictionary does not hold matches no triple.
+    let Some(keys) = keys else {
+        return;
+    };
+    let present: Vec<&Arc<Triple>> = changes.present.matching(keys).collect();
     if present.is_empty() {
         return;
     }
@@ -1107,7 +1107,7 @@ impl RdfStore {
                 if changes.absent.contains(&ids) {
                     return false;
                 }
-                if changes.present.iter().any(|held| *held.raw_ids() == ids) {
+                if changes.present.contains(&ids) {
                     return true;
                 }
             }
@@ -1245,7 +1245,7 @@ impl RdfStore {
         self.read_at(view, |store, changes| {
             let mut found = store.find_latest(pattern);
             if let Some(changes) = changes {
-                correct(&mut found, pattern, changes);
+                correct(&mut found, store.pattern_keys(pattern), changes);
             }
             found
         })
@@ -1414,12 +1414,16 @@ impl RdfStore {
         if graph.present.is_empty() {
             return Ok(());
         }
+        // A pattern term the dictionary does not hold matches no triple.
+        let Some(keys) = store.pattern_keys(pattern) else {
+            return Ok(());
+        };
         // A delete published but not applied yet leaves the triple in the
         // store, which visited it already: set semantics, each triple once.
         let held = budget.read(&store.triples)?;
-        for triple in &graph.present {
+        for triple in graph.present.matching(keys) {
             budget.tick()?;
-            if pattern.matches(triple) && !held.contains(triple.raw_ids()) {
+            if !held.contains(triple.raw_ids()) {
                 visit(triple, budget)?;
             }
         }
@@ -1629,7 +1633,7 @@ impl RdfStore {
                     predicate: None,
                     object: None,
                 };
-                correct(&mut found, &pattern, changes);
+                correct(&mut found, store.pattern_keys(&pattern), changes);
             }
             found
         })
@@ -1652,7 +1656,7 @@ impl RdfStore {
                     predicate: Some(predicate.clone()),
                     object: None,
                 };
-                correct(&mut found, &pattern, changes);
+                correct(&mut found, store.pattern_keys(&pattern), changes);
             }
             found
         })
@@ -1683,11 +1687,13 @@ impl RdfStore {
                 .iter()
                 .filter(|ids| held.get(*ids).is_some_and(|held| pattern.matches(&held.0)))
                 .count();
-            let present = changes
-                .present
-                .iter()
-                .filter(|triple| pattern.matches(triple) && !held.contains(triple.raw_ids()))
-                .count();
+            let present = store.pattern_keys(pattern).map_or(0, |keys| {
+                changes
+                    .present
+                    .matching(keys)
+                    .filter(|triple| !held.contains(triple.raw_ids()))
+                    .count()
+            });
             counted - absent + present
         })
     }

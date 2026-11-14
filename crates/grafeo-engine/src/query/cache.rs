@@ -6,9 +6,11 @@
 //!   and is not stored.
 //! - **Shared plans:** a hit hands out the cached plan as an `Arc`
 //!   ([`CachedPlan`]), never a copy.
-//! - **One generation:** a clear moves the cache's generation, and a plan
-//!   planned under an older one is not stored, so a plan made before a
-//!   change of the schema never outlives it.
+//! - **One generation:** the database's planning generation moves at a
+//!   committed change of the schema, a restore, `clear_plan_cache` and a
+//!   large move of the counts the planner reads. The cache empties once it
+//!   sees a newer one, and a plan planned under an older one is not stored,
+//!   so a plan made before such a change never outlives it.
 //!
 //! ## Usage
 //!
@@ -409,6 +411,9 @@ pub struct QueryCache {
     limit: usize,
     /// The planning generation the entries were planned under.
     generation: AtomicU64,
+    /// The planning generation now: the database's, which its changes and
+    /// its stores move ([`advance`](Self::advance)).
+    source: Arc<AtomicU64>,
     parsed_hits: AtomicU64,
     parsed_misses: AtomicU64,
     optimized_hits: AtomicU64,
@@ -417,6 +422,9 @@ pub struct QueryCache {
     invalidations: AtomicU64,
     /// How many plans were not stored because they exceed the whole limit.
     oversized: AtomicU64,
+    /// The pause before each put a test can hold (`hold_puts`).
+    #[cfg(feature = "testing-plan-cache")]
+    put_hold: Arc<PutHold>,
 }
 
 impl QueryCache {
@@ -428,12 +436,15 @@ impl QueryCache {
             lru: Mutex::new(Lru::default()),
             limit,
             generation: AtomicU64::new(0),
+            source: Arc::new(AtomicU64::new(0)),
             parsed_hits: AtomicU64::new(0),
             parsed_misses: AtomicU64::new(0),
             optimized_hits: AtomicU64::new(0),
             optimized_misses: AtomicU64::new(0),
             invalidations: AtomicU64::new(0),
             oversized: AtomicU64::new(0),
+            #[cfg(feature = "testing-plan-cache")]
+            put_hold: Arc::default(),
         }
     }
 
@@ -455,11 +466,36 @@ impl QueryCache {
         self.limit
     }
 
-    /// The planning generation the cache's entries were planned under: a
-    /// statement reads it before it plans and passes it to [`put`](Self::put).
+    /// The planning generation now: a statement reads it before it plans
+    /// and passes it to [`put`](Self::put).
     #[must_use]
     pub fn generation(&self) -> u64 {
-        self.generation.load(Ordering::Acquire)
+        self.source.load(Ordering::Acquire)
+    }
+
+    /// The planning generation as an atomic a store moves (see
+    /// `RowGroupStore::attach_planning_generation`).
+    #[must_use]
+    pub fn planning_generation(&self) -> &Arc<AtomicU64> {
+        &self.source
+    }
+
+    /// Moves the planning generation and empties the cache: a change that
+    /// any plan may have been made without (a committed change of the
+    /// schema, a restore, `clear_plan_cache`).
+    pub fn advance(&self) {
+        let next = self.source.fetch_add(1, Ordering::AcqRel) + 1;
+        self.clear(next);
+    }
+
+    /// Empties the cache when the planning generation moved past the one its
+    /// entries were planned under (a store's statistics moved it): one atomic
+    /// load otherwise.
+    fn catch_up(&self) {
+        let now = self.source.load(Ordering::Acquire);
+        if now > self.generation.load(Ordering::Acquire) {
+            self.clear(now);
+        }
     }
 
     /// The plan cached for `key` at `stage`, as the newest entry from now on.
@@ -467,6 +503,7 @@ impl QueryCache {
         if !self.is_enabled() {
             return None;
         }
+        self.catch_up();
         let found = self.lru.lock().get(key, stage);
         let (hits, misses) = match stage {
             Stage::Parsed => (&self.parsed_hits, &self.parsed_misses),
@@ -483,10 +520,10 @@ impl QueryCache {
     /// Stores `plan`, planned under `generation`, for `key` at `stage`, and
     /// returns it shared. The entry's bytes are estimated here, outside the
     /// lock. It is not stored when the cache is off, when it was planned
-    /// under an older generation than the cache's (a change came while it was
-    /// planned), or when it alone exceeds the limit (counted in
-    /// [`CacheStats::oversized`]); the oldest entries make room for it
-    /// otherwise.
+    /// under an older generation than the planning generation now (a change,
+    /// or a store's statistics, moved it while it was planned), or when it
+    /// alone exceeds the limit (counted in [`CacheStats::oversized`]); the
+    /// oldest entries make room for it otherwise.
     pub fn put(
         &self,
         key: CacheKey,
@@ -509,10 +546,16 @@ impl QueryCache {
             self.oversized.fetch_add(1, Ordering::Relaxed);
             return cached;
         }
+        #[cfg(feature = "testing-plan-cache")]
+        self.put_hold.pause();
+        // Entries of an older generation go first, so the new one is not
+        // cleared with them at the next lookup.
+        self.catch_up();
         let mut lru = self.lru.lock();
         // Read under the lock, as a clear moves it: no put of an older
-        // generation lands after the clear.
-        if generation < self.generation.load(Ordering::Acquire) {
+        // generation lands after the clear. A store moves it without the
+        // lock: a put that lands just before is cleared at the next lookup.
+        if generation < self.source.load(Ordering::Acquire) {
             return cached;
         }
         lru.put(key, stage, Arc::clone(&cached), self.limit);
@@ -527,10 +570,12 @@ impl QueryCache {
     }
 
     /// Empties the cache and moves its generation to `generation`, when that
-    /// is newer: a plan planned under an older generation is not stored from
-    /// now on. Each move counts one invalidation.
+    /// is newer (the planning generation too): a plan planned under an older
+    /// generation is not stored from now on. Each move counts one
+    /// invalidation.
     pub fn clear(&self, generation: u64) {
         let mut lru = self.lru.lock();
+        self.source.fetch_max(generation, Ordering::AcqRel);
         let previous = self.generation.fetch_max(generation, Ordering::AcqRel);
         if generation > previous {
             self.invalidations.fetch_add(1, Ordering::Relaxed);
@@ -547,6 +592,7 @@ impl QueryCache {
     /// The cache's counters.
     #[must_use]
     pub fn stats(&self) -> CacheStats {
+        self.catch_up();
         let (parsed_size, optimized_size) = {
             let lru = self.lru.lock();
             let parsed = lru
@@ -564,7 +610,7 @@ impl QueryCache {
             optimized_hits: self.optimized_hits.load(Ordering::Relaxed),
             optimized_misses: self.optimized_misses.load(Ordering::Relaxed),
             invalidations: self.invalidations.load(Ordering::Relaxed),
-            generation: self.generation(),
+            generation: self.generation.load(Ordering::Acquire),
             session_hits: 0,
             oversized: self.oversized.load(Ordering::Relaxed),
         }
@@ -576,6 +622,18 @@ impl QueryCache {
     #[must_use]
     pub fn heap_memory_bytes(&self) -> (usize, usize, usize) {
         self.lru.lock().by_stage()
+    }
+
+    /// Holds every put from now on until the returned guard drops: a
+    /// statement that planned waits before it stores its plan, holding no
+    /// lock (feature `testing-plan-cache`).
+    #[cfg(feature = "testing-plan-cache")]
+    #[must_use]
+    pub fn hold_puts(&self) -> PlanPutHold {
+        self.put_hold.state.lock().held = true;
+        PlanPutHold {
+            hold: Arc::clone(&self.put_hold),
+        }
     }
 
     /// Resets the hit, miss, invalidation and oversized counters.
@@ -594,6 +652,82 @@ impl Default for QueryCache {
     /// database (which sizes its own from the memory budget).
     fn default() -> Self {
         Self::with_limit(DEFAULT_LIMIT)
+    }
+}
+
+/// The pause a test holds before each put (feature `testing-plan-cache`).
+#[cfg(feature = "testing-plan-cache")]
+#[derive(Default)]
+struct PutHold {
+    state: Mutex<PutHoldState>,
+    changed: parking_lot::Condvar,
+}
+
+#[cfg(feature = "testing-plan-cache")]
+#[derive(Default)]
+struct PutHoldState {
+    held: bool,
+    waiting: usize,
+}
+
+#[cfg(feature = "testing-plan-cache")]
+impl PutHold {
+    /// Waits while the puts are held.
+    fn pause(&self) {
+        let mut state = self.state.lock();
+        if !state.held {
+            return;
+        }
+        state.waiting += 1;
+        self.changed.notify_all();
+        while state.held {
+            self.changed.wait(&mut state);
+        }
+        state.waiting -= 1;
+    }
+}
+
+/// A hold on the plan cache's puts: while it lives, a statement that planned
+/// waits before its put; dropping it lets them go on (feature
+/// `testing-plan-cache`).
+#[cfg(feature = "testing-plan-cache")]
+pub struct PlanPutHold {
+    hold: Arc<PutHold>,
+}
+
+#[cfg(feature = "testing-plan-cache")]
+impl PlanPutHold {
+    /// Waits until a statement waits at its put, at most `timeout`: whether
+    /// one does.
+    #[must_use]
+    pub fn wait_for_held(&self, timeout: std::time::Duration) -> bool {
+        // A timeout past what an instant holds waits without one.
+        let deadline = std::time::Instant::now().checked_add(timeout);
+        let mut state = self.hold.state.lock();
+        while state.waiting == 0 {
+            match deadline {
+                Some(deadline) => {
+                    if self
+                        .hold
+                        .changed
+                        .wait_until(&mut state, deadline)
+                        .timed_out()
+                    {
+                        return state.waiting > 0;
+                    }
+                }
+                None => self.hold.changed.wait(&mut state),
+            }
+        }
+        true
+    }
+}
+
+#[cfg(feature = "testing-plan-cache")]
+impl Drop for PlanPutHold {
+    fn drop(&mut self) {
+        self.hold.state.lock().held = false;
+        self.hold.changed.notify_all();
     }
 }
 
@@ -712,7 +846,7 @@ impl<P> CachingQueryProcessor<P> {
 
     /// Clears the cache, moving it to its next generation.
     pub fn clear_cache(&self) {
-        self.cache.clear(self.cache.generation() + 1);
+        self.cache.advance();
     }
 }
 

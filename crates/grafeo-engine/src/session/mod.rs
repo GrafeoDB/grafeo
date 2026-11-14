@@ -1899,8 +1899,8 @@ impl Session {
             &self.transaction_manager,
         )?;
         // As the database's: every cached plan is made again after a change
-        // of the catalog.
-        self.query_cache.clear(self.query_cache.generation() + 1);
+        // of the catalog, which committed here.
+        self.query_cache.advance();
         Ok(())
     }
 
@@ -2326,9 +2326,9 @@ impl Session {
                 }
             }
         }
-        // Invalidate all cached query plans after any successful DDL change.
-        // DDL is rare, so clearing the entire cache is cheap and correct.
-        self.query_cache.clear(self.query_cache.generation() + 1);
+        // The cached plans are made again where the change commits: at once
+        // outside a transaction (`commit_standalone`), at the transaction's
+        // commit otherwise (`schema_committed`), never at a rollback.
         Ok(result)
     }
 
@@ -5657,7 +5657,7 @@ impl Session {
     /// The plan cache is shared across all sessions on the same database,
     /// so clearing from one session affects all sessions.
     pub fn clear_plan_cache(&self) {
-        self.query_cache.clear(self.query_cache.generation() + 1);
+        self.query_cache.advance();
     }
 
     /// Begins a new transaction on this session.

@@ -82,6 +82,9 @@ impl Graphs {
         if let Some(manager) = root.memory_manager() {
             store.attach_memory(Arc::clone(manager));
         }
+        if let Some(generation) = root.planning_generation() {
+            store.attach_planning_generation(Arc::clone(generation));
+        }
         Ok(Arc::new(store))
     }
 }
@@ -286,6 +289,9 @@ impl RowGroupStore {
                 let graph = RowGroupStore::with_backward_edges(backward_edges);
                 if let Some(manager) = self.memory_manager() {
                     graph.attach_memory(Arc::clone(manager));
+                }
+                if let Some(generation) = self.planning_generation() {
+                    graph.attach_planning_generation(Arc::clone(generation));
                 }
                 Arc::new(graph)
             }));

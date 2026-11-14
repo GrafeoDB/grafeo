@@ -2,7 +2,7 @@
 
 All notable changes to Grafeo, for future reference (and enjoyment).
 
-## [0.6.3] - Unreleased
+## [0.6.3] - 2026-11-15
 
 SPARQL transactions release: SPARQL in a transaction reads one snapshot, conflicting updates fail at commit and graph operations run inside transactions; the plan cache, the per-query memory limit and path searches are bounded. Results that change on upgrade: a statement over the per-query memory limit fails with `GRAFEO-S001` in builds with disk spilling, a path search over its budget fails with `GRAFEO-S001` instead of `GRAFEO-Q006`, the second of two transactions that write one SPARQL triple, one of them deleting it, fails with `GRAFEO-T001`, SPARQL at a viewing epoch fails with `GRAFEO-Q004`, a standalone type that a graph type lists keeps applying in the default graph, `CLEAR GRAPH` of a missing graph fails unless `SILENT`, a SPARQL `MINUS` after another one or after a sub-SELECT removes its solutions, and reported RDF memory rises to what the store holds, so an RDF database near its memory limit reaches it sooner.
 

@@ -526,7 +526,8 @@ impl<P> CachingQueryProcessor<P> {
     }
 }
 
-#[cfg(test)]
+// A cache key names a query language: without one there is nothing to cache.
+#[cfg(all(test, query_language))]
 mod tests {
     use super::*;
 

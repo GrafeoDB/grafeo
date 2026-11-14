@@ -333,7 +333,8 @@ fn section_config(record: &SectionMemoryRecord) -> Option<(SectionType, SectionM
     ))
 }
 
-#[cfg(test)]
+// The test compares with the vector store, which spills only with its feature.
+#[cfg(all(test, feature = "vector-index"))]
 mod tests {
     use super::*;
 

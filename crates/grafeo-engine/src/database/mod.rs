@@ -4997,6 +4997,7 @@ mod tests {
         assert!(db.close().is_ok());
     }
 
+    #[cfg(feature = "gql")]
     #[test]
     fn test_with_store_external_backend() {
         use grafeo_core::graph::rowgroup::RowGroupStore;
@@ -5016,11 +5017,8 @@ mod tests {
         let session = db.session();
 
         // Session should see data from the external store via execute
-        #[cfg(feature = "gql")]
-        {
-            let result = session.execute("MATCH (p:Person) RETURN p.name").unwrap();
-            assert_eq!(result.rows.len(), 1);
-        }
+        let result = session.execute("MATCH (p:Person) RETURN p.name").unwrap();
+        assert_eq!(result.rows.len(), 1);
     }
 
     #[test]
@@ -5697,6 +5695,7 @@ mod tests {
     // session_read_only
     // =========================================================================
 
+    #[cfg(feature = "gql")]
     #[test]
     #[allow(deprecated)]
     fn test_session_read_only() {
@@ -5705,11 +5704,8 @@ mod tests {
 
         let session = db.session_read_only();
         // Read queries should work
-        #[cfg(feature = "gql")]
-        {
-            let result = session.execute("MATCH (n) RETURN count(n)").unwrap();
-            assert_eq!(result.rows.len(), 1);
-        }
+        let result = session.execute("MATCH (n) RETURN count(n)").unwrap();
+        assert_eq!(result.rows.len(), 1);
     }
 
     // =========================================================================

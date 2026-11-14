@@ -950,28 +950,32 @@ fn race(db: &GrafeoDB, order: Order, first: &[&str], second: &[&str]) -> Outcome
     }
 }
 
-#[test]
-fn conflicts_follow_what_each_transaction_changed() {
-    // Comes off with #718 D2 (its triple cases hold from C1, its graph-key cases from D2).
-    xfail(
-        "snapshot isolation: a delete conflicts with a committed write of the same triple, a graph operation with one of the same graph",
-        "#718",
-        conflicts_follow_what_each_transaction_changed_holds,
-    );
+/// One case of two racing transactions: its name, the first's and the second's statements, and
+/// how the second ends.
+type Case<'a> = (&'a str, Vec<&'a str>, Vec<&'a str>, Outcome);
+
+/// Each case in both orders, on a fresh database: the ones that end otherwise.
+fn wrong_outcomes(cases: &[Case<'_>]) -> Vec<String> {
+    let mut wrong = Vec::new();
+    for order in [Order::FirstOpen, Order::FirstCommitted] {
+        for (name, first, second, want) in cases {
+            let got = race(&seeded(), order, first, second);
+            if got != *want {
+                wrong.push(format!("{order:?} {name}: {got:?}, want {want:?}"));
+            }
+        }
+    }
+    wrong
 }
 
-/// The conflict rules: a recorded delete conflicts with a committed write of the same triple, a
-/// graph operation with one of the same graph; inserts of one triple, a delete of a triple the
-/// snapshot does not hold, writes of different triples (one subject, or one triple in two graphs)
-/// and a graph operation against a triple write in that graph do not. Each case in both orders.
-fn conflicts_follow_what_each_transaction_changed_holds() {
-    let in_g = r#"INSERT DATA { GRAPH ex:g { ex:jules ex:p "5" . } }"#;
-    let in_g_too = r#"INSERT DATA { GRAPH ex:g { ex:butch ex:p "6" . } }"#;
+/// The triple rules (C): a recorded delete conflicts with a committed write of the same triple;
+/// inserts of one triple, a delete of a triple the snapshot does not hold and writes of different
+/// triples (one subject, or one triple in two graphs) do not. Each case in both orders.
+#[test]
+fn triple_conflicts_follow_what_each_transaction_changed() {
     let delete_alix = r#"DELETE DATA { ex:alix ex:p "1" . }"#;
-    let delete_in_g = r#"DELETE DATA { GRAPH ex:g { ex:vincent ex:p "3" . } }"#;
     let fresh = r#"INSERT DATA { ex:hans ex:p "new" . }"#;
-    let cases: Vec<(&str, Vec<&str>, Vec<&str>, Outcome)> = vec![
-        // Triples (C).
+    let cases: Vec<Case<'_>> = vec![
         (
             "two deletes of one triple",
             vec![delete_alix],
@@ -1029,7 +1033,29 @@ fn conflicts_follow_what_each_transaction_changed_holds() {
             vec![r#"INSERT DATA { GRAPH ex:g { ex:alix ex:p "1" . } }"#],
             Outcome::Committed,
         ),
-        // Graph keys (D).
+    ];
+    let wrong = wrong_outcomes(&cases);
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
+
+#[test]
+fn graph_key_conflicts_follow_what_each_transaction_changed() {
+    // Comes off with #718 D2.
+    xfail(
+        "snapshot isolation: a graph operation conflicts with a committed one of the same graph",
+        "#718",
+        graph_key_conflicts_follow_what_each_transaction_changed_holds,
+    );
+}
+
+/// The graph-key rules (D): a graph operation conflicts with a committed one of the same graph;
+/// operations on different graphs and a graph operation against a triple write in that graph do
+/// not. Each case in both orders.
+fn graph_key_conflicts_follow_what_each_transaction_changed_holds() {
+    let in_g = r#"INSERT DATA { GRAPH ex:g { ex:jules ex:p "5" . } }"#;
+    let in_g_too = r#"INSERT DATA { GRAPH ex:g { ex:butch ex:p "6" . } }"#;
+    let delete_in_g = r#"DELETE DATA { GRAPH ex:g { ex:vincent ex:p "3" . } }"#;
+    let cases: Vec<Case<'_>> = vec![
         (
             "two DROP g then an insert into g",
             vec!["DROP GRAPH ex:g", in_g],
@@ -1079,16 +1105,123 @@ fn conflicts_follow_what_each_transaction_changed_holds() {
             Outcome::Committed,
         ),
     ];
-    let mut wrong = Vec::new();
-    for order in [Order::FirstOpen, Order::FirstCommitted] {
-        for (name, first, second, want) in &cases {
-            let got = race(&seeded(), order, first, second);
-            if got != *want {
-                wrong.push(format!("{order:?} {name}: {got:?}, want {want:?}"));
-            }
-        }
-    }
+    let wrong = wrong_outcomes(&cases);
     assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
+
+/// A transaction that begins while another's commit is written but not yet published reads below
+/// that commit, alone or not: a delete of the triple the commit deletes conflicts, when it commits
+/// inside that window (the other's writes are still in its change set) and when it commits after
+/// the other is published (the other kept them for it). The conflict may come at the delete or at
+/// the commit, as in `race`; the first commit stands either way.
+#[cfg(feature = "testing-statement-injection")]
+#[test]
+fn a_transaction_begun_during_a_commit_conflicts_with_it() {
+    use grafeo_common::testing::commit_hook::after_next_commit_written;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    let delete = q(r#"DELETE DATA { ex:alix ex:p "1" . }"#);
+    let alix = "SELECT ?o WHERE { ex:alix ex:p ?o }";
+    // Inside the window, on another thread: a commit that wrongly passes the check would wait
+    // for the first one's publish, which waits for this hook, so the receive times out.
+    let db = Arc::new(seeded());
+    let inside = Rc::new(RefCell::new(None));
+    {
+        let (db, inside, delete) = (Arc::clone(&db), Rc::clone(&inside), delete.clone());
+        after_next_commit_written(move || {
+            let (sent, outcome) = mpsc::channel();
+            std::thread::spawn(move || {
+                let mut late = db.session();
+                late.begin_transaction().unwrap();
+                let ended = late
+                    .execute_sparql(&delete)
+                    .map(|_| ())
+                    .and_then(|()| late.commit());
+                let _ = sent.send(ended.map_err(|error| is_conflict(&error)));
+            });
+            *inside.borrow_mut() = Some(outcome.recv_timeout(Duration::from_secs(10)));
+        });
+    }
+    let mut first = db.session();
+    first.begin_transaction().unwrap();
+    first.execute_sparql(&delete).unwrap();
+    first.commit().unwrap();
+    assert_eq!(
+        inside.borrow_mut().take(),
+        Some(Ok(Err(true))),
+        "a commit inside the window conflicts"
+    );
+    assert!(
+        answer(&db.session(), alix).is_empty(),
+        "the first commit stands"
+    );
+
+    // Begun inside the window, committed after the first one is published. The hook runs on the
+    // committing thread, so a statement error is kept for after the commit, never unwrapped there.
+    let db = Arc::new(seeded());
+    let late = Rc::new(RefCell::new(None));
+    {
+        let (db, late, delete) = (Arc::clone(&db), Rc::clone(&late), delete.clone());
+        after_next_commit_written(move || {
+            let mut session = db.session();
+            session.begin_transaction().unwrap();
+            let ran = session.execute_sparql(&delete).map(|_| ());
+            *late.borrow_mut() = Some((session, ran));
+        });
+    }
+    let mut first = db.session();
+    first.begin_transaction().unwrap();
+    first.execute_sparql(&delete).unwrap();
+    first.commit().unwrap();
+    let (mut late, ran) = late.borrow_mut().take().expect("the hook ran");
+    let error = ran
+        .and_then(|()| late.commit())
+        .expect_err("the delete lost to the published one");
+    assert!(is_conflict(&error), "{error}");
+    assert!(
+        answer(&db.session(), alix).is_empty(),
+        "the first commit stands"
+    );
+}
+
+/// The writes a commit keeps for the transactions begun before it conflict with none begun after
+/// it: with an older reader open (so the deleting commit keeps its writes), a transaction begun
+/// after the delete is published puts the triple back and commits.
+///
+/// An unrelated commit lands while that transaction is open, so its commit runs the RDF conflict
+/// check (it is skipped when nothing committed since the transaction began) and walks the
+/// deleting commit's kept writes, whose epoch is the transaction's start: only a strict
+/// `commit_epoch > start` passes them by.
+#[test]
+fn a_transaction_begun_after_a_commit_does_not_conflict_with_it() {
+    let db = seeded();
+    let alix = "SELECT ?o WHERE { ex:alix ex:p ?o }";
+    let mut reader = db.session();
+    reader.begin_transaction().unwrap();
+    let mut first = db.session();
+    first.begin_transaction().unwrap();
+    first
+        .execute_sparql(&q(r#"DELETE DATA { ex:alix ex:p "1" . }"#))
+        .unwrap();
+    first.commit().unwrap();
+
+    let mut after = db.session();
+    after.begin_transaction().unwrap();
+    after
+        .execute_sparql(&q(r#"INSERT DATA { ex:alix ex:p "1" . }"#))
+        .unwrap();
+    db.session()
+        .execute_sparql(&q(r#"INSERT DATA { ex:butch ex:p "9" . }"#))
+        .unwrap();
+    after.commit().unwrap();
+    assert_eq!(answer(&db.session(), alix).len(), 1, "the triple is back");
+    assert_eq!(
+        answer(&db.session(), "SELECT ?o WHERE { ex:butch ex:p ?o }").len(),
+        1,
+        "the unrelated commit stands"
+    );
+    reader.rollback().unwrap();
 }
 
 /// A no-op delete changes nothing and its transaction commits; the concurrent insert stays.
@@ -1111,19 +1244,10 @@ fn a_no_op_delete_leaves_a_concurrent_insert() {
     );
 }
 
-#[test]
-fn conflicts_key_on_the_exact_rdf_term() {
-    // Comes off with #718 C1.
-    xfail(
-        "snapshot isolation: RDF write conflicts key on the exact term",
-        "#718",
-        conflicts_key_on_the_exact_rdf_term_holds,
-    );
-}
-
 /// Conflicts key on the exact RDF term: two deletes of one term conflict, deletes of two terms
 /// that differ only in kind, language, datatype or lexical form do not.
-fn conflicts_key_on_the_exact_rdf_term_holds() {
+#[test]
+fn conflicts_key_on_the_exact_rdf_term() {
     let terms = [
         ("plain 1", r#""1""#),
         ("integer 1", r#""1"^^xsd:integer"#),

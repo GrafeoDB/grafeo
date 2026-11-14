@@ -206,14 +206,16 @@ pub(crate) fn file_numbering(store: &RdfStore, view: &RdfView) -> Result<FileNum
 /// The graphs of `store` as `view` sees them, each with its triples sorted:
 /// the default graph first (named `""`), then the named graphs by name. A
 /// graph dropped after the view is read from the partition the drop kept.
+///
+/// # Errors
+///
+/// As [`RdfStore::graphs_to_write_at`] for a graph the view sees whose
+/// partition is gone, and as [`RdfStore::sorted_triples`].
 fn graphs_at(store: &RdfStore, view: &RdfView) -> Result<Vec<(String, Vec<Arc<Triple>>)>> {
-    let mut names = store.graph_names(view);
-    names.sort_unstable();
     let mut graphs = vec![(String::new(), store.sorted_triples(view)?)];
-    for name in names {
-        if let Some(graph) = store.graph_at(view, &name) {
-            graphs.push((name, graph.sorted_triples(view)?));
-        }
+    for (name, graph) in store.graphs_to_write_at(view)? {
+        let triples = graph.sorted_triples(view)?;
+        graphs.push((name, triples));
     }
     Ok(graphs)
 }
@@ -2650,5 +2652,33 @@ mod tests {
             .read_from(&*source)
             .unwrap();
         assert_eq!(sorted(&back), at_one);
+    }
+
+    /// A graph the view sees whose partition is gone (here dropped outside a
+    /// published commit, after a commit changed it) fails the write, naming
+    /// the graph, instead of an image without it that reports success.
+    #[test]
+    fn a_section_at_a_view_refuses_a_graph_it_sees_without_its_partition() {
+        use crate::graph::rdf::{ApplyMode, CommitChange};
+        use grafeo_common::types::EpochId;
+        use grafeo_common::utils::error::Error;
+
+        let g = "http://example.org/g";
+        let insert = |name: &str| CommitChange::Insert {
+            graph: Some(Arc::from(g)),
+            triple: Triple::new(iri(name), iri("name"), Term::literal(name)),
+        };
+        let store = Arc::new(RdfStore::new());
+        store.apply_commit(ApplyMode::Publish(EpochId::new(1)), vec![insert("vincent")]);
+        let view = store.view_at(EpochId::new(1)).unwrap();
+        store.apply_commit(ApplyMode::Publish(EpochId::new(2)), vec![insert("jules")]);
+        assert!(store.drop_graph(g), "the unpublished drop");
+
+        let section = RdfStoreSection::with_caps(Arc::clone(&store), ChunkCaps::current()).at(view);
+        let error = MemoryImage::from_sections(&[&section]).unwrap_err();
+        assert!(
+            matches!(&error, Error::Internal(message) if message.contains(g)),
+            "{error}"
+        );
     }
 }

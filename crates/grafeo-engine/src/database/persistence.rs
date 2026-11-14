@@ -463,25 +463,25 @@ fn collect_rdf_triples(
 
 /// The RDF data of a snapshot of `store` as `view` sees it: the default
 /// graph's triples, and each named graph's, by name.
+///
+/// # Errors
+///
+/// As [`RdfStore::graphs_to_write_at`](grafeo_core::graph::rdf::RdfStore::graphs_to_write_at)
+/// for a graph the view sees whose partition is gone.
 #[cfg(feature = "triple-store")]
 fn rdf_snapshot(
     store: &grafeo_core::graph::rdf::RdfStore,
     view: &grafeo_core::graph::rdf::RdfView,
-) -> (Vec<SnapshotTriple>, Vec<RdfNamedGraphSnapshot>) {
-    let mut names = store.graph_names(view);
-    names.sort_unstable();
-    let named = names
+) -> Result<(Vec<SnapshotTriple>, Vec<RdfNamedGraphSnapshot>)> {
+    let named = store
+        .graphs_to_write_at(view)?
         .into_iter()
-        .filter_map(|name| {
-            store
-                .graph_at(view, &name)
-                .map(|graph| RdfNamedGraphSnapshot {
-                    name,
-                    triples: collect_rdf_triples(&graph, view),
-                })
+        .map(|(name, graph)| RdfNamedGraphSnapshot {
+            name,
+            triples: collect_rdf_triples(&graph, view),
         })
         .collect();
-    (collect_rdf_triples(store, view), named)
+    Ok((collect_rdf_triples(store, view), named))
 }
 
 /// The RDF graphs of a snapshot with their terms read: the default graph's
@@ -1438,7 +1438,7 @@ pub(super) mod row_groups {
             catalog,
         } = held;
         #[cfg(feature = "triple-store")]
-        let (rdf_triples, rdf_named_graphs) = super::rdf_snapshot(&rdf.0, &rdf.1);
+        let (rdf_triples, rdf_named_graphs) = super::rdf_snapshot(&rdf.0, &rdf.1)?;
         #[cfg(not(feature = "triple-store"))]
         let (rdf_triples, rdf_named_graphs) = (Vec::new(), Vec::new());
         let nodes = root.nodes_at(epoch).map(snapshot_node).collect();

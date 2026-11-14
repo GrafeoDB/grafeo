@@ -2322,6 +2322,46 @@ impl RdfStore {
 
     /// The named graphs `view` sees, each with the partition to read it from.
     fn graphs_at(&self, view: &super::overlay::RdfView) -> Vec<(String, Arc<RdfStore>)> {
+        self.graph_entries_at(view)
+            .into_iter()
+            .filter_map(|(name, store)| Some((name, store?)))
+            .collect()
+    }
+
+    /// The named graphs `view` sees, by name, each with the partition to read it from: what a
+    /// checkpoint or an export writes out.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Internal`](grafeo_common::utils::error::Error::Internal) naming the graph
+    /// when the view saw a graph whose partition the store no longer holds: an image written
+    /// without it would report success and lose the graph.
+    pub fn graphs_to_write_at(
+        &self,
+        view: &super::overlay::RdfView,
+    ) -> grafeo_common::utils::error::Result<Vec<(String, Arc<RdfStore>)>> {
+        let mut graphs = self
+            .graph_entries_at(view)
+            .into_iter()
+            .map(|(name, store)| match store {
+                Some(store) => Ok((name, store)),
+                None => Err(grafeo_common::utils::error::Error::Internal(format!(
+                    "RDF graph <{name}>: the view sees it, but the store holds no partition of it"
+                ))),
+            })
+            .collect::<grafeo_common::utils::error::Result<Vec<_>>>()?;
+        graphs.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+        Ok(graphs)
+    }
+
+    /// The named graphs `view` sees, in one hold of the apply guard, each with the partition to
+    /// read it from. The partition is `None` for a graph the view saw that the store no longer
+    /// holds, though no drop or clear after the view kept its partition: only a change outside
+    /// a published commit leaves that.
+    fn graph_entries_at(
+        &self,
+        view: &super::overlay::RdfView,
+    ) -> Vec<(String, Option<Arc<RdfStore>>)> {
         use super::overlay::Partition;
 
         let _apply = self.apply_guard.read();
@@ -2330,14 +2370,14 @@ impl RdfStore {
         let Some(changes) = changes else {
             return graphs
                 .iter()
-                .map(|(name, store)| (name.clone(), Arc::clone(store)))
+                .map(|(name, store)| (name.clone(), Some(Arc::clone(store))))
                 .collect();
         };
         let changed = |name: &str| changes.graph(&Some(Arc::from(name)));
-        let mut seen: Vec<(String, Arc<RdfStore>)> = graphs
+        let mut seen: Vec<(String, Option<Arc<RdfStore>>)> = graphs
             .iter()
             .filter(|(name, _)| changed(name.as_str()).is_none())
-            .map(|(name, store)| (name.clone(), Arc::clone(store)))
+            .map(|(name, store)| (name.clone(), Some(Arc::clone(store))))
             .collect();
         for (key, graph) in changes.graphs() {
             let Some(name) = key.as_deref() else {
@@ -2346,11 +2386,10 @@ impl RdfStore {
             let store = match &graph.partition {
                 Partition::Current => graphs.get(name).cloned(),
                 Partition::Retained(before) => Some(Arc::clone(before)),
-                Partition::Absent => None,
+                // Created after the view: it does not see it.
+                Partition::Absent => continue,
             };
-            if let Some(store) = store {
-                seen.push((name.to_string(), store));
-            }
+            seen.push((name.to_string(), store));
         }
         seen
     }

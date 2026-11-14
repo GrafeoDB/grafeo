@@ -16,6 +16,7 @@ mod rdf_insert_each;
 mod rdf_invalid_triples;
 mod rdf_parallel_load;
 mod rdf_statistics_counts;
+mod rdf_store_concurrency;
 mod rdf_store_term_lookups;
 mod rdf_tests;
 mod spill_account;

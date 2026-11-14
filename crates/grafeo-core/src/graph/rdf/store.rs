@@ -2,6 +2,15 @@
 //!
 //! Provides an in-memory triple store with efficient indexing for
 //! subject, predicate, and object queries.
+//!
+//! ## Lock order
+//!
+//! A dataset's apply guard (`apply_guard`, which its named graphs share)
+//! comes before its map of named graphs (`named_graphs`): a writer takes the
+//! guard, then the map. Nothing takes the guard, to read or to write, while
+//! it holds the map: code that needs graphs from the map clones their `Arc`s
+//! and releases the map first. A partition's own maps (its triples and
+//! indexes) come after both.
 
 use super::sink::TripleSink;
 use super::term::{Term, unescape_iri};
@@ -1806,6 +1815,13 @@ impl RdfStore {
     /// Clears all triples from the store.
     pub fn clear(&self) {
         let _apply = self.apply_guard.write();
+        self.clear_held();
+    }
+
+    /// [`clear`](Self::clear), with the dataset's apply guard held by the
+    /// caller (the guard is shared by the dataset's graphs, and a write of it
+    /// is taken once).
+    fn clear_held(&self) {
         self.triples.write().clear();
         self.subject_index.write().clear();
         self.predicate_index.write().clear();
@@ -2343,9 +2359,13 @@ impl RdfStore {
     pub fn clear_graph(&self, name: Option<&str>) {
         match name {
             None => self.clear(),
-            Some(n) => {
-                if let Some(g) = self.named_graphs.read().get(n) {
-                    g.clear();
+            Some(name) => {
+                // The guard before the map (see the module's lock order),
+                // and the map released before the graph is cleared.
+                let _apply = self.apply_guard.write();
+                let graph = self.named_graphs.read().get(name).cloned();
+                if let Some(graph) = graph {
+                    graph.clear_held();
                 }
             }
         }
@@ -2601,8 +2621,16 @@ impl RdfStore {
                 .map(|t| (None, t))
                 .collect(),
             Some([]) => {
+                // The map released before a graph's read takes the guard
+                // (see the module's lock order).
+                let graphs: Vec<(String, Arc<RdfStore>)> = self
+                    .named_graphs
+                    .read()
+                    .iter()
+                    .map(|(name, store)| (name.clone(), Arc::clone(store)))
+                    .collect();
                 let mut results = Vec::new();
-                for (name, store) in self.named_graphs.read().iter() {
+                for (name, store) in graphs {
                     for t in store.buffered_find(pattern, tx) {
                         results.push((Some(name.clone()), t));
                     }
@@ -2611,9 +2639,9 @@ impl RdfStore {
             }
             Some(names) => {
                 let mut results = Vec::new();
-                let graphs = self.named_graphs.read();
                 for name in names {
-                    if let Some(store) = graphs.get(*name) {
+                    let store = self.named_graphs.read().get(*name).cloned();
+                    if let Some(store) = store {
                         for t in store.buffered_find(pattern, tx) {
                             results.push((Some((*name).to_string()), t));
                         }

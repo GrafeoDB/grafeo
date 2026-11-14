@@ -46,7 +46,7 @@ const TRIGGERS: &[(&str, &str, &str, &str)] = &[
 ];
 
 /// The tracked page of deprecations, one row per live deprecation's code.
-const DEPRECATIONS_PAGE: &str = include_str!("../../../docs/upgrading/deprecations.md");
+const DEPRECATIONS_PAGE: &str = include_str!("../../../docs/get-started/upgrading/deprecations.md");
 
 /// The warning codes of `query` in `language`, in the order the result gives them.
 fn codes(
@@ -154,7 +154,7 @@ fn every_deprecation_has_a_row_on_the_deprecations_page() {
             DEPRECATIONS_PAGE
                 .lines()
                 .any(|line| line.starts_with('|') && line.contains(&code)),
-            "{warning:?}: no row for {code} in docs/upgrading/deprecations.md"
+            "{warning:?}: no row for {code} in docs/get-started/upgrading/deprecations.md"
         );
     }
 }

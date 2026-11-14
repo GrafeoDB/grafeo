@@ -4,7 +4,7 @@
 # statement, ordered by code. `expect: warnings:` lists the codes; without the key a test expects
 # none, so every other gtest also asserts that it raises no warning. A new warning is one row here.
 # The codes: 01X01 ZONED DATETIME literals, 01X02 GQL `+` on two lists, 01X03 ZONED TIME literals
-# (each deprecated in 0.6.2, refused from 0.7.0; docs/upgrading/deprecations.md).
+# (each deprecated in 0.6.2, refused from 0.7.0; docs/get-started/upgrading/deprecations.md).
 
 meta:
   language: gql

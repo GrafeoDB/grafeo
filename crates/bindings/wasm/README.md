@@ -76,7 +76,7 @@ Both are built for speed (opt-level `s`): about 1.6 times as fast as the smalles
 - [Documentation](https://grafeo.dev)
 - [API Stability](https://grafeo.dev/stability/): which calls are stable and which are experimental; a call here has the level of the Rust call it wraps
 - [GitHub](https://github.com/GrafeoDB/grafeo)
-- [Roadmap](https://github.com/GrafeoDB/grafeo/blob/main/docs/roadmap.md)
+- [Roadmap](https://github.com/GrafeoDB/grafeo/blob/main/docs/project/roadmap.md)
 
 ## License
 

@@ -11,9 +11,12 @@
 //! - A load's publish builds the write set of the transactions open across it before it takes
 //!   the transactions lock, so a begin never waits for that build.
 //!
-//! The first oracle is a ratio: the same work at an old snapshot with sixteen times the deletes
-//! takes less than four times as long (a walk of the deletes per lookup takes about sixteen).
-//! The others are deadlines far above what the work takes.
+//! The first two oracles are ratios between 1,000 and 16,000 deleted links. A property path's
+//! work is counted by the deadline probe (`testing-deadline-probe`), the same on every machine,
+//! and grows with its hops (sixteen times), where a walk of the deletes per hop would make it
+//! about 256 times. The writes are the same at both sizes and timed: less than four times as long,
+//! where a walk per write would take about sixteen. The others are deadlines far above what the
+//! work takes.
 //!
 //! ```bash
 //! cargo test -p grafeo-engine --all-features --test main sparql_overlay_guarantees::
@@ -52,67 +55,124 @@ fn chain(count: usize, step: usize) -> String {
     text
 }
 
-/// How long a transaction takes, at a snapshot that holds a chain of `deleted` links which a
-/// commit deleted after it began:
-/// - to read the chain by a property path (`ex:d0 ex:v+ ?o`), each hop a lookup at the
-///   snapshot;
-/// - to write [`WRITES`] new links between the chain's nodes, each checked against what the
-///   snapshot holds (every term of them is known, so each check reaches the deleted links).
-///
-/// Checks the answers on the way: the snapshot's, and the state after its commit.
-fn old_snapshot_work(deleted: usize) -> (Duration, Duration) {
+/// A database whose chain of `deleted` links a commit deleted after `reader` began: the
+/// reader's snapshot still holds every link, the store none.
+fn snapshot_of_a_deleted_chain(deleted: usize) -> (GrafeoDB, grafeo_engine::session::Session) {
     let db = GrafeoDB::new_in_memory();
     db.execute_sparql(&chain(deleted, 1)).unwrap();
     let mut reader = db.session();
     reader.begin_transaction().unwrap();
-    let links = "SELECT ?s WHERE { ?s ex:v ?o }";
-    assert_eq!(count(&reader, links), deleted, "the snapshot");
+    assert_eq!(count(&reader, LINKS), deleted, "the snapshot");
     db.execute_sparql(&format!("{PREFIX}DELETE WHERE {{ ?s ex:v ?o }}"))
         .unwrap();
+    (db, reader)
+}
 
-    let started = Instant::now();
-    let reached = count(&reader, "SELECT ?o WHERE { ex:d0 ex:v+ ?o }");
-    let path = started.elapsed();
-    assert_eq!(
-        reached, deleted,
-        "the path at the snapshot reaches the chain's end"
+/// Every link of the chain, as a pattern.
+const LINKS: &str = "SELECT ?s WHERE { ?s ex:v ?o }";
+
+/// Whether the property path `ex:d0 ex:v+ ?o` reads `reader`'s snapshot of a deleted chain of
+/// `deleted` links to its end within `polls` clock reads under the deadline probe. One path
+/// search counts its work on one ticker, which reads the clock on its first unit and every
+/// 1,024th, so the reads grow with the work. A timeout is the only other outcome.
+#[cfg(feature = "testing-deadline-probe")]
+fn path_finishes(reader: &grafeo_engine::session::Session, deleted: usize, polls: u32) -> bool {
+    use grafeo_common::utils::error::{Error, QueryErrorKind};
+    use grafeo_core::execution::deadline;
+
+    let query = format!("{PREFIX}SELECT ?o WHERE {{ ex:d0 ex:v+ ?o }}");
+    let _probe = deadline::expire_after_polls(polls);
+    match reader.execute_sparql(&query) {
+        Ok(result) => {
+            assert_eq!(
+                result.row_count(),
+                deleted,
+                "the path reaches the chain's end"
+            );
+            true
+        }
+        Err(Error::Query(error)) if error.kind == QueryErrorKind::Timeout => false,
+        Err(error) => panic!("{query} under {polls} clock reads: {error}"),
+    }
+}
+
+/// A property path at a snapshot older than sixteen times the deleted links finishes within
+/// twice sixteen times the clock reads: its hops find the snapshot's deleted triples by key. The
+/// work is counted by the deadline probe, not timed, so the bound is the same on every machine:
+/// a path of n hops is n lookups, sixteen times the work for sixteen times the links, where a
+/// walk of the deletes at each hop would be about 256 times.
+#[cfg(feature = "testing-deadline-probe")]
+#[test]
+fn a_path_at_an_old_snapshot_does_not_walk_its_deletes() {
+    let (_small_db, small) = snapshot_of_a_deleted_chain(1_000);
+    assert!(
+        !path_finishes(&small, 1_000, 0),
+        "the path counts its work on the probe"
     );
+    // The fewest clock reads the small path needs: more than `too_few`, at most `enough`.
+    let mut enough = 1;
+    while !path_finishes(&small, 1_000, enough) {
+        enough = enough.checked_mul(2).expect("the path finishes");
+    }
+    let mut too_few = enough / 2;
+    while enough - too_few > 1 {
+        let middle = too_few + (enough - too_few) / 2;
+        if path_finishes(&small, 1_000, middle) {
+            enough = middle;
+        } else {
+            too_few = middle;
+        }
+    }
+    let (_large_db, large) = snapshot_of_a_deleted_chain(16_000);
+    assert!(
+        path_finishes(&large, 16_000, enough * 32),
+        "the path needs {enough} clock reads at 1,000 deleted links, more than {} at 16,000",
+        enough * 32
+    );
+}
 
+/// How long a transaction at a snapshot of a deleted chain of `deleted` links takes to write
+/// [`WRITES`] new links between the chain's nodes, each checked against what the snapshot holds
+/// (every term of them is known, so each check reaches the deleted links). The same writes at
+/// every size. Checks the answers on the way: the snapshot's, and the state after its commit.
+fn writes_at_an_old_snapshot(deleted: usize) -> Duration {
+    let (db, mut reader) = snapshot_of_a_deleted_chain(deleted);
     // Links two steps on: new triples between known nodes (the ones past the chain's end name
     // new nodes, which cost nothing to check).
     let started = Instant::now();
     reader.execute_sparql(&chain(WRITES, 2)).unwrap();
     let writes = started.elapsed();
     assert_eq!(
-        count(&reader, links),
+        count(&reader, LINKS),
         deleted + WRITES,
         "the snapshot with the transaction's writes"
     );
-
     reader.commit().unwrap();
     assert_eq!(
-        count(&db.session(), links),
+        count(&db.session(), LINKS),
         WRITES,
         "the delete and the transaction's writes stand"
     );
-    (path, writes)
+    writes
 }
 
-/// A transaction at a snapshot older than sixteen times the deleted links takes less than four
-/// times as long to read them by a path and to write new links among them: its lookups do not
-/// walk the deletes. The floor keeps two fast runs from failing on the timer's noise.
+/// The same writes at a snapshot older than sixteen times the deleted links take less than four
+/// times as long: each write's check finds the deleted triples by key. The work does not change
+/// with the deletes, so the expected ratio is about one, and a walk of the deletes per write
+/// about sixteen. The fastest of three runs per size keeps a slow moment of the machine out.
 #[test]
-fn lookups_at_an_old_snapshot_do_not_walk_its_deletes() {
-    const FLOOR: Duration = Duration::from_millis(100);
-    let (small_path, small_writes) = old_snapshot_work(1_000);
-    let (large_path, large_writes) = old_snapshot_work(16_000);
+fn writes_at_an_old_snapshot_do_not_walk_its_deletes() {
+    let fastest = |deleted| {
+        (0..3)
+            .map(|_| writes_at_an_old_snapshot(deleted))
+            .min()
+            .expect("three runs")
+    };
+    let small = fastest(1_000);
+    let large = fastest(16_000);
     assert!(
-        large_path < small_path * 4 + FLOOR,
-        "the path: {small_path:?} at 1,000 deleted links, {large_path:?} at 16,000"
-    );
-    assert!(
-        large_writes < small_writes * 4 + FLOOR,
-        "the writes: {small_writes:?} at 1,000 deleted links, {large_writes:?} at 16,000"
+        large < small * 4,
+        "the writes: {small:?} at 1,000 deleted links, {large:?} at 16,000"
     );
 }
 

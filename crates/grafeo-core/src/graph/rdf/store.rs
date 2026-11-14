@@ -1476,9 +1476,14 @@ impl RdfStore {
         // A delete published but not applied yet leaves the triple in the
         // store, which visited it already: set semantics, each triple once.
         let held = budget.read(&store.triples)?;
-        for triple in graph.present.matching(keys) {
+        // Each candidate costs a tick, the rejected ones too: a pattern bound
+        // on neither its subject nor its object visits every one, and its
+        // deadline holds over them.
+        for triple in graph.present.candidates(keys) {
             budget.tick()?;
-            if !held.contains(triple.raw_ids()) {
+            if super::overlay::PresentTriples::matches(keys, triple)
+                && !held.contains(triple.raw_ids())
+            {
                 visit(triple, budget)?;
             }
         }

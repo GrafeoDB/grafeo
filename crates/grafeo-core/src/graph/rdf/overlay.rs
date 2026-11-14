@@ -449,6 +449,15 @@ impl PresentTriples {
     /// in the order of their deletes: from the bound subject's triples, else
     /// the bound object's, else all of them.
     pub fn matching(&self, keys: [Option<u64>; 3]) -> impl Iterator<Item = &Arc<Triple>> {
+        self.candidates(keys)
+            .filter(move |triple| Self::matches(keys, triple))
+    }
+
+    /// The ones `keys` may match, before the check of every bound key
+    /// ([`matches`](Self::matches)): the bound subject's triples, else the
+    /// bound object's, else all of them. A bounded search visits each one,
+    /// so it obeys its budget over candidates it rejects too.
+    pub fn candidates(&self, keys: [Option<u64>; 3]) -> impl Iterator<Item = &Arc<Triple>> {
         let bucket = match keys {
             [Some(subject), ..] => Some(self.by_subject.get(&subject)),
             [_, _, Some(object)] => Some(self.by_object.get(&object)),
@@ -470,11 +479,14 @@ impl PresentTriples {
             .into_iter()
             .flatten()
             .chain(all.into_iter().flatten())
-            .filter(move |triple| {
-                keys.iter()
-                    .zip(triple.raw_ids())
-                    .all(|(key, id)| key.is_none_or(|key| key == *id))
-            })
+    }
+
+    /// Whether `triple` holds every bound key of `keys`.
+    #[must_use]
+    pub fn matches(keys: [Option<u64>; 3], triple: &Triple) -> bool {
+        keys.iter()
+            .zip(triple.raw_ids())
+            .all(|(key, id)| key.is_none_or(|key| key == *id))
     }
 }
 

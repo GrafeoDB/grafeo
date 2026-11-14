@@ -25,8 +25,9 @@ use crate::database::standalone::{
 use crate::query::cache::QueryCache;
 use crate::transaction::{BuiltIndex, QueuedSchemaOp, StandaloneChange};
 
-/// The plans a transaction with its own catalog makes, kept from every other session.
-const PRIVATE_PLANS: usize = 64;
+/// The share of the plan cache's bound a transaction with its own catalog
+/// plans in, kept from every other session.
+const PRIVATE_SHARE: usize = 16;
 
 /// A transaction's own view of the catalog.
 pub(super) struct PendingSchema {
@@ -107,7 +108,9 @@ impl Session {
                 *pending = Some(PendingSchema {
                     base,
                     overlay: Arc::clone(&overlay),
-                    plans: Arc::new(QueryCache::new(PRIVATE_PLANS)),
+                    plans: Arc::new(QueryCache::with_limit(
+                        self.query_cache.limit() / PRIVATE_SHARE,
+                    )),
                 });
                 overlay
             }
@@ -128,7 +131,8 @@ impl Session {
             changes.queue_schema(op, graph);
         }
         self.refresh_pending_graphs(&changes);
-        self.plan_cache().clear();
+        let plans = self.plan_cache();
+        plans.clear(plans.generation() + 1);
         Ok(())
     }
 
@@ -175,7 +179,9 @@ impl Session {
                     .try_for_each(|queued| apply_to_catalog(&queued.op, &overlay))
             })?;
             pending.overlay = Arc::new(overlay);
-            pending.plans = Arc::new(QueryCache::new(PRIVATE_PLANS));
+            pending.plans = Arc::new(QueryCache::with_limit(
+                self.query_cache.limit() / PRIVATE_SHARE,
+            ));
         }
         drop(pending);
         self.refresh_pending_graphs(&changes);
@@ -776,7 +782,7 @@ impl Session {
                 _ => {}
             }
         }
-        self.query_cache.clear();
+        self.query_cache.clear(self.query_cache.generation() + 1);
     }
 }
 

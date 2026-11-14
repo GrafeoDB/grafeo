@@ -258,6 +258,51 @@ pub enum SpillLimit {
     Unlimited,
 }
 
+/// The bound of the plan cache in bytes (see
+/// [`Config::with_plan_cache_limit`]).
+///
+/// # Examples
+///
+/// ```
+/// use grafeo_engine::{Config, PlanCacheLimit};
+///
+/// assert_eq!(Config::in_memory().plan_cache_limit(), PlanCacheLimit::Default);
+/// assert_eq!(
+///     Config::in_memory().with_plan_cache_limit(8 << 20).plan_cache_limit(),
+///     PlanCacheLimit::Bytes(8 << 20)
+/// );
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum PlanCacheLimit {
+    /// A sixty-fourth of the memory budget, at least 4 MiB and at most 64 MiB
+    /// (and never above the budget).
+    #[default]
+    Default,
+    /// At most this many bytes, capped at the memory budget (0: no plan is
+    /// cached).
+    Bytes(usize),
+}
+
+impl PlanCacheLimit {
+    /// The share of the memory budget the default takes.
+    const DEFAULT_SHARE: usize = 64;
+    /// The least the default takes.
+    const FLOOR: usize = 4 << 20;
+    /// The most the default takes.
+    const CAP: usize = 64 << 20;
+
+    /// The bound in force under a memory budget of `budget` bytes.
+    #[must_use]
+    pub fn bytes_under(self, budget: usize) -> usize {
+        let bytes = match self {
+            Self::Bytes(bytes) => bytes,
+            Self::Default => (budget / Self::DEFAULT_SHARE).clamp(Self::FLOOR, Self::CAP),
+        };
+        bytes.min(budget)
+    }
+}
+
 /// WAL durability mode controlling the trade-off between safety and speed.
 ///
 /// This enum lives in config so that `Config` can always carry the desired
@@ -879,6 +924,10 @@ pub struct Config {
     /// The memory one query's operators may hold
     /// ([`with_query_memory_limit`](Self::with_query_memory_limit)): per open, never stored.
     query_memory_limit: Option<usize>,
+
+    /// The plan cache's bound ([`with_plan_cache_limit`](Self::with_plan_cache_limit)): per
+    /// open, never stored.
+    plan_cache_limit: PlanCacheLimit,
 }
 
 /// The settings of a [`Config`] a database file can store, as a set: a
@@ -1021,6 +1070,7 @@ impl Default for Config {
             memory_fraction_bytes: None,
             spill_limit: SpillLimit::Default,
             query_memory_limit: None,
+            plan_cache_limit: PlanCacheLimit::Default,
             spill_path: None,
             threads: num_cpus::get(),
             wal_enabled: true,
@@ -1267,6 +1317,19 @@ impl Config {
     #[must_use]
     pub fn with_query_memory_limit(mut self, bytes: usize) -> Self {
         self.query_memory_limit = Some(bytes);
+        self
+    }
+
+    /// Bounds the plan cache at `bytes`: the parsed and optimized plans the
+    /// database keeps for repeated statements, both together, by a deep
+    /// estimate of what each plan holds. A plan larger than the bound runs and
+    /// is not kept. 0 keeps no plan: every statement plans. The bound is
+    /// capped at the memory budget. The default is a sixty-fourth of the
+    /// memory budget, at least 4 MiB and at most 64 MiB (see
+    /// [`PlanCacheLimit`]). Per open, never stored.
+    #[must_use]
+    pub fn with_plan_cache_limit(mut self, bytes: usize) -> Self {
+        self.plan_cache_limit = PlanCacheLimit::Bytes(bytes);
         self
     }
 
@@ -1724,6 +1787,12 @@ impl Config {
     #[must_use]
     pub fn query_memory_limit(&self) -> Option<usize> {
         self.query_memory_limit
+    }
+
+    /// The plan cache's bound (see [`PlanCacheLimit`]).
+    #[must_use]
+    pub fn plan_cache_limit(&self) -> PlanCacheLimit {
+        self.plan_cache_limit
     }
 
     /// The number of worker threads, which has no effect.
@@ -2671,7 +2740,8 @@ mod tests {
         );
         let config = config
             .with_spill_limit(88 << 20)
-            .with_query_memory_limit(19 << 20);
+            .with_query_memory_limit(19 << 20)
+            .with_plan_cache_limit(8 << 20);
         #[cfg(feature = "encryption")]
         let config = config.with_encryption(EncryptionConfig::new(std::sync::Arc::new(
             grafeo_common::encryption::KeyChain::new([3; 32]),
@@ -2719,6 +2789,7 @@ mod tests {
             memory_fraction_bytes,
             spill_limit,
             query_memory_limit,
+            plan_cache_limit,
         } = config;
 
         assert_eq!(
@@ -2730,6 +2801,11 @@ mod tests {
             query_memory_limit,
             Some(19 << 20),
             "with_query_memory_limit sets the limit"
+        );
+        assert_eq!(
+            plan_cache_limit,
+            PlanCacheLimit::Bytes(8 << 20),
+            "with_plan_cache_limit sets the bound"
         );
 
         assert_eq!(

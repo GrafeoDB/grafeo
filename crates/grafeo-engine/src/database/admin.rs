@@ -172,6 +172,7 @@ impl super::GrafeoDB {
             parsed_plan_cache_bytes: parsed_bytes,
             optimized_plan_cache_bytes: optimized_bytes,
             cached_plan_count,
+            plan_cache_limit_bytes: self.query_cache.limit(),
             ..Default::default()
         };
         caches.compute_total();

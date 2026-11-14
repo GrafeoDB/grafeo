@@ -1900,7 +1900,7 @@ impl Session {
         )?;
         // As the database's: every cached plan is made again after a change
         // of the catalog.
-        self.query_cache.clear();
+        self.query_cache.clear(self.query_cache.generation() + 1);
         Ok(())
     }
 
@@ -2328,7 +2328,7 @@ impl Session {
         }
         // Invalidate all cached query plans after any successful DDL change.
         // DDL is rare, so clearing the entire cache is cheap and correct.
-        self.query_cache.clear();
+        self.query_cache.clear(self.query_cache.generation() + 1);
         Ok(result)
     }
 
@@ -4383,6 +4383,9 @@ impl Session {
         // with values takes its prepared plan, which keeps the parameters,
         // and fills a copy of it with this call's values (`fill_prepared`).
         let cache_key = self.plan_cache_key(query, QueryLanguage::Gql);
+        // Read before planning: a change of the schema meanwhile keeps the
+        // plan out of the cache.
+        let generation = self.plan_cache().generation();
         let cached = self.cached_plan(&cache_key, params);
         // The graph a `USE g` focuses the statement on, from here to its end.
         let mut _focus = None;
@@ -4395,12 +4398,16 @@ impl Session {
             // A statement with values that binds by value keeps its parsed
             // plan, which each call fills, binds and optimizes with its values
             // (`plan_with_values`).
-            let parsed = params.and_then(|_| self.plan_cache().get_parsed(&cache_key));
+            let parsed = params.and_then(|_| {
+                self.plan_cache()
+                    .get(&cache_key, crate::query::cache::Stage::Parsed)
+            });
             let bound_by_value = parsed.is_some();
             let mut logical_plan = match parsed {
                 Some(plan) => {
                     self.check_external_access(&plan)?;
-                    plan
+                    // Filled and bound per call: this run's copy.
+                    plan.plan().clone()
                 }
                 None => match gql::translate_full(query)? {
                     gql::GqlTranslationResult::SessionCommand(cmd) => {
@@ -4422,9 +4429,20 @@ impl Session {
             let params = params_to_fill(&mut logical_plan, params)?;
             if let Some(params) = params {
                 let active = self.active_store();
-                self.plan_with_values(&cache_key, logical_plan, params, &active, bound_by_value)?
-            } else if given && let Some(cached_plan) = self.plan_cache().get_optimized(&cache_key) {
-                cached_plan
+                self.plan_with_values(
+                    &cache_key,
+                    logical_plan,
+                    params,
+                    &active,
+                    bound_by_value,
+                    generation,
+                )?
+            } else if given
+                && let Some(cached_plan) = self
+                    .plan_cache()
+                    .get(&cache_key, crate::query::cache::Stage::Optimized)
+            {
+                crate::query::cache::RunPlan::Shared(cached_plan)
             } else {
                 // Semantic validation
                 let mut binder = Binder::new();
@@ -4436,10 +4454,13 @@ impl Session {
                     self.optimizer_for(&active, crate::query::processor::QueryLanguage::Gql);
                 let plan = optimizer.optimize(logical_plan)?;
 
-                // Cache the optimized plan for future use
-                self.plan_cache().put_optimized(cache_key, plan.clone());
-
-                plan
+                // Cached for future use, and run from the cache's copy.
+                crate::query::cache::RunPlan::Shared(self.plan_cache().put(
+                    cache_key,
+                    crate::query::cache::Stage::Optimized,
+                    plan,
+                    generation,
+                ))
             }
         };
 
@@ -4651,8 +4672,14 @@ impl Session {
 
         // Cache + bind + optimize (same path as execute).
         let cache_key = self.plan_cache_key(query, QueryLanguage::Gql);
-        let optimized_plan = if let Some(cached) = self.plan_cache().get_optimized(&cache_key) {
-            cached
+        // Read before planning: a change of the schema meanwhile keeps the
+        // plan out of the cache.
+        let generation = self.plan_cache().generation();
+        let optimized_plan = if let Some(cached) = self
+            .plan_cache()
+            .get(&cache_key, crate::query::cache::Stage::Optimized)
+        {
+            crate::query::cache::RunPlan::Shared(cached)
         } else {
             // A stream takes no parameters: the plan's defaults fill what they
             // can and a parameter nobody supplied fails here, as `execute`
@@ -4665,8 +4692,12 @@ impl Session {
             let optimizer =
                 self.optimizer_for(&active, crate::query::processor::QueryLanguage::Gql);
             let plan = optimizer.optimize(logical_plan)?;
-            self.plan_cache().put_optimized(cache_key, plan.clone());
-            plan
+            crate::query::cache::RunPlan::Shared(self.plan_cache().put(
+                cache_key,
+                crate::query::cache::Stage::Optimized,
+                plan,
+                generation,
+            ))
         };
 
         if optimized_plan.explain || optimized_plan.profile {
@@ -4874,6 +4905,7 @@ impl Session {
         // A statement without parameters whose optimized plan is cached
         // skips the parse and translation (see execute_gql).
         let cache_key = self.plan_cache_key(query, QueryLanguage::Cypher);
+        let generation = self.plan_cache().generation();
         let cached = self.cached_plan(&cache_key, params);
         let optimized_plan = if let Some(plan) = cached {
             self.check_external_access(&plan)?;
@@ -4881,12 +4913,16 @@ impl Session {
         } else {
             // A statement that binds by value keeps its parsed plan (see
             // execute_gql).
-            let parsed = params.and_then(|_| self.plan_cache().get_parsed(&cache_key));
+            let parsed = params.and_then(|_| {
+                self.plan_cache()
+                    .get(&cache_key, crate::query::cache::Stage::Parsed)
+            });
             let bound_by_value = parsed.is_some();
             let mut logical_plan = match parsed {
                 Some(plan) => {
                     self.check_external_access(&plan)?;
-                    plan
+                    // Filled and bound per call: this run's copy.
+                    plan.plan().clone()
                 }
                 // Schema DDL and SHOW commands run before the normal query path.
                 None => match cypher::translate_full(query)? {
@@ -4918,10 +4954,15 @@ impl Session {
                         params,
                         &active,
                         bound_by_value,
+                        generation,
                     )?
                 }
-            } else if given && let Some(cached_plan) = self.plan_cache().get_optimized(&cache_key) {
-                cached_plan
+            } else if given
+                && let Some(cached_plan) = self
+                    .plan_cache()
+                    .get(&cache_key, crate::query::cache::Stage::Optimized)
+            {
+                crate::query::cache::RunPlan::Shared(cached_plan)
             } else {
                 // Semantic validation
                 let mut binder = Binder::new();
@@ -4933,10 +4974,13 @@ impl Session {
                     self.optimizer_for(&active, crate::query::processor::QueryLanguage::Cypher);
                 let plan = optimizer.optimize(logical_plan)?;
 
-                // Cache the optimized plan
-                self.plan_cache().put_optimized(cache_key, plan.clone());
-
-                plan
+                // Cached, and run from the cache's copy.
+                crate::query::cache::RunPlan::Shared(self.plan_cache().put(
+                    cache_key,
+                    crate::query::cache::Stage::Optimized,
+                    plan,
+                    generation,
+                ))
             }
         };
 
@@ -5374,6 +5418,7 @@ impl Session {
         // skips the parse and translation (see execute_gql); DDL is never
         // cached.
         let cache_key = self.plan_cache_key(query, QueryLanguage::SqlPgq);
+        let generation = self.plan_cache().generation();
         let cached = self.cached_plan(&cache_key, params);
         let optimized_plan = if let Some(plan) = cached {
             self.check_external_access(&plan)?;
@@ -5381,12 +5426,16 @@ impl Session {
         } else {
             // A statement that binds by value keeps its parsed plan (see
             // execute_gql).
-            let parsed = params.and_then(|_| self.plan_cache().get_parsed(&cache_key));
+            let parsed = params.and_then(|_| {
+                self.plan_cache()
+                    .get(&cache_key, crate::query::cache::Stage::Parsed)
+            });
             let bound_by_value = parsed.is_some();
             let mut logical_plan = match parsed {
                 Some(plan) => {
                     self.check_external_access(&plan)?;
-                    plan
+                    // Filled and bound per call: this run's copy.
+                    plan.plan().clone()
                 }
                 None => {
                     // Parse and translate
@@ -5421,10 +5470,15 @@ impl Session {
                         params,
                         &active,
                         bound_by_value,
+                        generation,
                     )?
                 }
-            } else if given && let Some(cached_plan) = self.plan_cache().get_optimized(&cache_key) {
-                cached_plan
+            } else if given
+                && let Some(cached_plan) = self
+                    .plan_cache()
+                    .get(&cache_key, crate::query::cache::Stage::Optimized)
+            {
+                crate::query::cache::RunPlan::Shared(cached_plan)
             } else {
                 let mut binder = Binder::new();
                 let _binding_context = binder.bind(&logical_plan)?;
@@ -5432,8 +5486,12 @@ impl Session {
                 let optimizer =
                     self.optimizer_for(&active, crate::query::processor::QueryLanguage::SqlPgq);
                 let plan = optimizer.optimize(logical_plan)?;
-                self.plan_cache().put_optimized(cache_key, plan.clone());
-                plan
+                crate::query::cache::RunPlan::Shared(self.plan_cache().put(
+                    cache_key,
+                    crate::query::cache::Stage::Optimized,
+                    plan,
+                    generation,
+                ))
             }
         };
 
@@ -5599,7 +5657,7 @@ impl Session {
     /// The plan cache is shared across all sessions on the same database,
     /// so clearing from one session affects all sessions.
     pub fn clear_plan_cache(&self) {
-        self.query_cache.clear();
+        self.query_cache.clear(self.query_cache.generation() + 1);
     }
 
     /// Begins a new transaction on this session.

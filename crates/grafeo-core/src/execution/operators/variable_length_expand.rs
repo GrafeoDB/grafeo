@@ -18,31 +18,81 @@ use std::sync::Arc;
 ///
 /// Paths multiply with every hop on a graph with cycles, so a search that
 /// held them without a bound could run the process out of memory, which
-/// aborts it. A search over its budget fails with
-/// [`OperatorError::LimitExceeded`] instead.
+/// aborts it. A search over its budget fails with `GRAFEO-S001` instead
+/// ([`path_search_refused`]). `Config::with_path_search_budget` sets it.
 pub const DEFAULT_PATH_SEARCH_BUDGET: usize = 256 * 1024 * 1024;
 
+/// `bytes` as a message gives a budget: `8 MiB`, `64 KiB`, `1000 bytes`.
+pub(crate) fn budget_text(bytes: usize) -> String {
+    if bytes.is_multiple_of(1024 * 1024) {
+        format!("{} MiB", bytes / (1024 * 1024))
+    } else if bytes.is_multiple_of(1024) {
+        format!("{} KiB", bytes / 1024)
+    } else {
+        format!("{bytes} bytes")
+    }
+}
+
+/// The refusal of a path search that would pass its budget of `budget` bytes (#492): a
+/// `GRAFEO-S001` of [`LimitBound::PathSearchBudget`], as every memory bound refuses, asking for
+/// `requested` more bytes with `used` held. `detail` says what would pass it and how to need
+/// less; the message adds the setting that moves the budget.
+///
+/// [`LimitBound::PathSearchBudget`]: grafeo_common::utils::error::LimitBound::PathSearchBudget
+pub(crate) fn path_search_refused(
+    detail: String,
+    requested: usize,
+    used: usize,
+    budget: usize,
+) -> OperatorError {
+    use grafeo_common::utils::error::{Error, LimitBound, LimitRefusal};
+
+    let bytes = |value: usize| u64::try_from(value).unwrap_or(u64::MAX);
+    OperatorError::Wrapped(Box::new(Error::from(LimitRefusal::Memory {
+        bound: LimitBound::PathSearchBudget,
+        requested: bytes(requested),
+        used: bytes(used),
+        limit: bytes(budget),
+        detail: Some(detail.into()),
+    })))
+}
+
+/// The message of `error` when it is a path search's budget refusal ([`path_search_refused`]),
+/// for the tests of the path searches.
+#[cfg(test)]
+pub(crate) fn path_budget_message(error: &OperatorError) -> Option<String> {
+    use grafeo_common::utils::error::LimitBound;
+
+    let OperatorError::Wrapped(error) = error else {
+        return None;
+    };
+    error
+        .limit_refusal()
+        .filter(|refusal| refusal.bound() == LimitBound::PathSearchBudget)
+        .map(|_| error.to_string())
+}
+
 /// The error of a path search that would hold more paths than its budget of
-/// `budget` bytes allows: `what` holds `paths` already, and `advice` says how
-/// to need fewer.
+/// `budget` bytes allows: `what` holds `paths` already and asks for `requested`
+/// more bytes over the `used` it holds, and `advice` says how to need fewer.
 pub(super) fn path_budget_error(
     what: &str,
     paths: usize,
+    (requested, used): (usize, usize),
     budget: usize,
     advice: &str,
 ) -> OperatorError {
-    let budget = if budget.is_multiple_of(1024 * 1024) {
-        format!("{} MiB", budget / (1024 * 1024))
-    } else if budget.is_multiple_of(1024) {
-        format!("{} KiB", budget / 1024)
-    } else {
-        format!("{budget} bytes")
-    };
     let noun = if paths == 1 { "path" } else { "paths" };
-    OperatorError::LimitExceeded(format!(
-        "{what} would hold more than {paths} {noun} at once, more than the {budget} of memory \
-         a path search may use: {advice}"
-    ))
+    path_search_refused(
+        format!(
+            "{what} would hold more than {paths} {noun} at once, more than the {} of memory a \
+             path search may use: {advice}",
+            budget_text(budget)
+        ),
+        requested,
+        used,
+        budget,
+    )
 }
 
 /// What to do about a variable-length pattern over its budget: an unbounded
@@ -245,6 +295,7 @@ impl RowSearch {
             return Err(path_budget_error(
                 "A variable-length pattern",
                 paths,
+                (cost, self.held),
                 self.budget,
                 VARIABLE_LENGTH_ADVICE,
             ));
@@ -503,8 +554,8 @@ impl VariableLengthExpandOperator {
     /// Sets the memory the search from one input row may hold, in bytes:
     /// the paths it has found and not yet emitted or extended (the default
     /// is [`DEFAULT_PATH_SEARCH_BUDGET`]). A search that would hold more
-    /// fails with [`OperatorError::LimitExceeded`], whose message names the
-    /// ways to need fewer paths. A reachability search (see
+    /// fails with `GRAFEO-S001` ([`path_search_refused`]), whose message names
+    /// the ways to need fewer paths and the setting. A reachability search (see
     /// [`Self::with_reachability`]) holds each node at most once, and needs
     /// no budget.
     pub fn with_memory_budget(mut self, bytes: usize) -> Self {
@@ -2930,8 +2981,8 @@ mod tests {
             }
             let error =
                 lengths_and_chunks(&mut expand).expect_err("more paths than 64 KiB hold at once");
-            let OperatorError::LimitExceeded(message) = &error else {
-                panic!("{mode:?}: expected LimitExceeded, got {error:?}");
+            let Some(message) = path_budget_message(&error) else {
+                panic!("{mode:?}: expected the path search budget's refusal, got {error:?}");
             };
             for advice in [
                 "bound the quantifier",
@@ -2969,10 +3020,8 @@ mod tests {
         assert!(lengths.is_sorted(), "shorter walks first");
         assert_eq!(chunks, lengths.len().div_ceil(50), "full chunks of 50 rows");
         assert!(
-            matches!(
-                lengths_and_chunks(&mut expand(728)),
-                Err(OperatorError::LimitExceeded(_))
-            ),
+            lengths_and_chunks(&mut expand(728))
+                .is_err_and(|error| path_budget_message(&error).is_some()),
             "728 open paths are one too few"
         );
     }

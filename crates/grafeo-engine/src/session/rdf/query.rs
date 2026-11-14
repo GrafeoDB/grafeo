@@ -58,12 +58,8 @@ impl Session {
         view: grafeo_core::graph::rdf::RdfView,
         expands_copies: bool,
     ) -> Result<crate::query::planner::rdf::RdfPlanner> {
+        // The one budget LPG path searches read too (#492): not narrowed by the memory free now.
         let budget = self.plan_options.path_search_budget;
-        #[cfg(feature = "spill")]
-        let budget = self
-            .buffer_manager
-            .as_ref()
-            .map_or(budget, |bm| budget.min(bm.available()));
         Ok(
             crate::query::planner::rdf::RdfPlanner::new(Arc::clone(&self.rdf_store), view)
                 .in_session()

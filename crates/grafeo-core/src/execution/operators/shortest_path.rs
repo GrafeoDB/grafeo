@@ -54,22 +54,27 @@ impl KeptPaths {
     /// Keeps `path`, unless the search would then hold more than its
     /// budget, `other` bytes being held elsewhere.
     fn keep(&mut self, path: FoundPath, other: usize) -> Result<(), OperatorError> {
-        let held = self.held + Self::bytes_of(&path);
+        let requested = Self::bytes_of(&path);
+        let held = self.held + requested;
         if held.saturating_add(other) > self.budget {
-            return Err(self.over_budget());
+            return Err(self.over_budget(requested, self.held + other));
         }
         if self.paths.len() == self.paths.capacity() {
-            self.paths.try_reserve(1).map_err(|_| self.over_budget())?;
+            self.paths
+                .try_reserve(1)
+                .map_err(|_| self.over_budget(requested, self.held + other))?;
         }
         self.held = held;
         self.paths.push(path);
         Ok(())
     }
 
-    fn over_budget(&self) -> OperatorError {
+    /// The refusal of `requested` more bytes over the `used` the search holds.
+    fn over_budget(&self, requested: usize, used: usize) -> OperatorError {
         path_budget_error(
             "A shortest path search",
             self.paths.len(),
+            (requested, used),
             self.budget,
             SHORTEST_PATH_ADVICE,
         )
@@ -284,9 +289,8 @@ impl ShortestPathOperator {
     /// the paths a restrictive path mode follows, and the paths the search
     /// keeps (the default is
     /// [`DEFAULT_PATH_SEARCH_BUDGET`](super::DEFAULT_PATH_SEARCH_BUDGET)). A
-    /// search that would hold more fails with
-    /// [`OperatorError::LimitExceeded`], whose message names the ways to
-    /// need fewer paths.
+    /// search that would hold more fails with `GRAFEO-S001`, whose message
+    /// names the ways to need fewer paths and the setting.
     pub fn with_memory_budget(mut self, bytes: usize) -> Self {
         self.budget = bytes;
         self
@@ -723,16 +727,20 @@ impl PathSearch<'_> {
                     PathMode::Acyclic => !segment.contains_node(neighbor),
                 };
                 if allowed {
-                    if (queue.len() + 1) * QUEUED_BYTES + paths.held > op.budget {
+                    let used = queue.len() * QUEUED_BYTES + paths.held;
+                    if used + QUEUED_BYTES > op.budget {
                         return Err(path_budget_error(
                             "A shortest path search",
                             queue.len(),
+                            (QUEUED_BYTES, used),
                             op.budget,
                             SHORTEST_PATH_ADVICE,
                         ));
                     }
                     if queue.len() == queue.capacity() {
-                        queue.try_reserve(1).map_err(|_| paths.over_budget())?;
+                        queue
+                            .try_reserve(1)
+                            .map_err(|_| paths.over_budget(QUEUED_BYTES, used))?;
                     }
                     let next = PathSegment {
                         node: neighbor,
@@ -2901,8 +2909,12 @@ mod tests {
     }
 
     fn assert_over_budget(result: Result<(usize, usize), OperatorError>, context: &str) {
-        let Err(OperatorError::LimitExceeded(message)) = &result else {
-            panic!("{context}: expected LimitExceeded, got {result:?}");
+        let Some(message) = result
+            .as_ref()
+            .err()
+            .and_then(super::super::variable_length_expand::path_budget_message)
+        else {
+            panic!("{context}: expected the path search budget's refusal, got {result:?}");
         };
         for advice in ["bound the quantifier", "ALL SHORTEST", "64 KiB"] {
             assert!(

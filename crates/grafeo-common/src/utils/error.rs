@@ -707,11 +707,13 @@ pub enum LimitBound {
     SpillLimit,
     /// The free space the database keeps on the spill volume for its next checkpoint.
     CheckpointRoom,
+    /// The memory one path search may hold.
+    PathSearchBudget,
 }
 
 impl LimitBound {
     /// The bound's name in messages: "memory limit", "query memory limit", "spill limit",
-    /// "checkpoint room".
+    /// "checkpoint room", "path search budget".
     #[must_use]
     pub const fn name(self) -> &'static str {
         match self {
@@ -719,6 +721,7 @@ impl LimitBound {
             Self::QueryMemoryLimit => "query memory limit",
             Self::SpillLimit => "spill limit",
             Self::CheckpointRoom => "checkpoint room",
+            Self::PathSearchBudget => "path search budget",
         }
     }
 
@@ -734,6 +737,9 @@ impl LimitBound {
             }
             Self::SpillLimit => "Config::with_spill_limit (Python spill_limit, Node spillLimit)",
             Self::CheckpointRoom => "Config::with_spill_path",
+            Self::PathSearchBudget => {
+                "Config::with_path_search_budget (Python path_search_budget, Node pathSearchBudget)"
+            }
         }
     }
 }
@@ -742,10 +748,11 @@ impl LimitBound {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum LimitRefusal {
-    /// The memory limit or the query memory limit refused `requested` more bytes, with `used`
-    /// of `limit` in use.
+    /// The memory limit, the query memory limit or a path search's budget refused `requested`
+    /// more bytes, with `used` of `limit` in use.
     Memory {
-        /// [`LimitBound::MemoryLimit`] or [`LimitBound::QueryMemoryLimit`].
+        /// [`LimitBound::MemoryLimit`], [`LimitBound::QueryMemoryLimit`] or
+        /// [`LimitBound::PathSearchBudget`].
         bound: LimitBound,
         /// The bytes asked for.
         requested: u64,
@@ -753,6 +760,11 @@ pub enum LimitRefusal {
         used: u64,
         /// The bound as set.
         limit: u64,
+        /// What asked, and what to do instead, in the words of the part that asked (a path
+        /// search names its paths and how to need fewer): the message's first part, before the
+        /// bound's figures and setting, which every refusal states. `None` when nothing adds to
+        /// them.
+        detail: Option<Box<str>>,
     },
     /// The spill limit refused `requested` more bytes, with `used` of `limit` spilled.
     Spill {
@@ -797,13 +809,21 @@ impl fmt::Display for LimitRefusal {
                 requested,
                 used,
                 limit,
-            } => write!(
-                f,
-                "the statement needs {requested} more bytes: {used} bytes of the {} of {limit} \
-                 are in use; raise it with {}",
-                bound.name(),
-                bound.setting()
-            ),
+                detail,
+            } => {
+                // The part that asked says what for first; the bound, its figures and its
+                // setting follow, as in every refusal of a bound.
+                if let Some(detail) = detail {
+                    write!(f, "{detail}; ")?;
+                }
+                write!(
+                    f,
+                    "the statement needs {requested} more bytes: {used} bytes of the {} of \
+                     {limit} are in use; raise it with {}",
+                    bound.name(),
+                    bound.setting()
+                )
+            }
             Self::Spill {
                 requested,
                 used,

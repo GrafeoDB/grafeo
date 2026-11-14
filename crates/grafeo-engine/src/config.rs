@@ -409,6 +409,8 @@ pub enum ConfigError {
     ZeroMemoryLimit,
     /// [`Config::with_query_memory_limit`] must be greater than zero.
     ZeroQueryMemoryLimit,
+    /// [`Config::with_path_search_budget`] must be greater than zero.
+    ZeroPathSearchBudget,
     /// Thread count must be greater than zero.
     ZeroThreads,
     /// `DurabilityMode::Adaptive` needs an interval greater than zero.
@@ -479,6 +481,9 @@ impl fmt::Display for ConfigError {
             Self::MemoryFractionNotFinite => write!(f, "memory_fraction must be a finite number"),
             Self::ZeroQueryMemoryLimit => {
                 write!(f, "query_memory_limit must be greater than zero")
+            }
+            Self::ZeroPathSearchBudget => {
+                write!(f, "path_search_budget must be greater than zero")
             }
             Self::ZeroThreads => write!(f, "threads must be greater than zero"),
             Self::ZeroAdaptiveFlushInterval => write!(
@@ -925,6 +930,10 @@ pub struct Config {
     /// ([`with_query_memory_limit`](Self::with_query_memory_limit)): per open, never stored.
     query_memory_limit: Option<usize>,
 
+    /// The memory one path search may hold, when set
+    /// ([`with_path_search_budget`](Self::with_path_search_budget)): per open, never stored.
+    path_search_budget: Option<usize>,
+
     /// The plan cache's bound ([`with_plan_cache_limit`](Self::with_plan_cache_limit)): per
     /// open, never stored.
     plan_cache_limit: PlanCacheLimit,
@@ -1070,6 +1079,7 @@ impl Default for Config {
             memory_fraction_bytes: None,
             spill_limit: SpillLimit::Default,
             query_memory_limit: None,
+            path_search_budget: None,
             plan_cache_limit: PlanCacheLimit::Default,
             spill_path: None,
             threads: num_cpus::get(),
@@ -1138,11 +1148,12 @@ impl Config {
     ///
     /// Below it, the buffer manager evicts and spills (the indexed vector
     /// store's embedding columns, query operators with a spill directory);
-    /// each path search may hold a
-    /// quarter of it. A write that would pass it is refused before it
-    /// changes anything, with `GRAFEO-S001` naming the bytes used and the
-    /// limit; reads go on, and an open that reaches or exceeds the limit holds
-    /// succeeds with a warning ([`GrafeoDB::open_warnings`](crate::GrafeoDB::open_warnings)).
+    /// each path search may hold a quarter of it, at most 256 MiB, unless
+    /// [`with_path_search_budget`](Self::with_path_search_budget) sets it. A
+    /// write that would pass it is refused before it changes anything, with
+    /// `GRAFEO-S001` naming the bytes used and the limit; reads go on, and an
+    /// open that reaches or exceeds the limit holds succeeds with a warning
+    /// ([`GrafeoDB::open_warnings`](crate::GrafeoDB::open_warnings)).
     /// The limit bounds what the database's structures hold, and the
     /// process's private memory runs about a third above it (allocator
     /// bookkeeping, partial pages, thread stacks and caches it does not
@@ -1157,17 +1168,37 @@ impl Config {
         self
     }
 
-    /// The bytes one path search of a query may hold (the paths a
-    /// variable-length or shortest-path search keeps at once): a quarter of
-    /// [`memory_limit`](Self::memory_limit) when it is set, else 256 MiB. A
-    /// search that would hold more fails with an error instead of growing.
+    /// Sets the bytes one path search may hold: the paths a variable-length or
+    /// shortest-path search keeps at once, or what an RDF property path visits. A search that
+    /// would hold more fails with `GRAFEO-S001` naming the path search budget, and changes
+    /// nothing. Never above the memory limit when one is set. Without it, a quarter of the
+    /// memory limit, at most 256 MiB, or 256 MiB without a memory limit
+    /// ([`path_search_budget`](Self::path_search_budget)). Per open, never stored; 0 fails
+    /// [`validate`](Self::validate).
     #[must_use]
-    #[cfg(query_language)]
-    pub(crate) fn path_search_budget(&self) -> usize {
-        self.memory_limit().map_or(
-            grafeo_core::execution::operators::DEFAULT_PATH_SEARCH_BUDGET,
-            |limit| (limit / 4).max(1),
-        )
+    pub fn with_path_search_budget(mut self, bytes: usize) -> Self {
+        self.path_search_budget = Some(bytes);
+        self
+    }
+
+    /// The bytes one path search of a query may hold (the paths a
+    /// variable-length or shortest-path search keeps at once, what an RDF
+    /// property path visits): the [`with_path_search_budget`](Self::with_path_search_budget)
+    /// setting, at most the memory limit; without it a quarter of
+    /// [`memory_limit`](Self::memory_limit), at most 256 MiB, or 256 MiB
+    /// without a memory limit. A search that would hold more fails with
+    /// `GRAFEO-S001` instead of growing.
+    #[must_use]
+    pub fn path_search_budget(&self) -> usize {
+        use grafeo_core::execution::operators::DEFAULT_PATH_SEARCH_BUDGET;
+
+        let limit = self.memory_limit();
+        match self.path_search_budget {
+            Some(bytes) => limit.map_or(bytes, |limit| bytes.min(limit)),
+            None => limit.map_or(DEFAULT_PATH_SEARCH_BUDGET, |limit| {
+                (limit / 4).clamp(1, DEFAULT_PATH_SEARCH_BUDGET)
+            }),
+        }
     }
 
     /// Sets the number of worker threads, which has no effect: nothing sizes
@@ -1312,8 +1343,8 @@ impl Config {
     /// limit binds besides it: a query limit above the memory limit is the
     /// memory limit. Per open, never stored; 0 fails
     /// [`validate`](Self::validate). It applies in builds with spilling (the
-    /// `spill` feature); path searches keep their own budget (a quarter of
-    /// the memory limit).
+    /// `spill` feature); path searches keep their own budget
+    /// ([`with_path_search_budget`](Self::with_path_search_budget)).
     #[must_use]
     pub fn with_query_memory_limit(mut self, bytes: usize) -> Self {
         self.query_memory_limit = Some(bytes);
@@ -2007,6 +2038,9 @@ impl Config {
         }
         if self.query_memory_limit == Some(0) {
             return Err(ConfigError::ZeroQueryMemoryLimit);
+        }
+        if self.path_search_budget == Some(0) {
+            return Err(ConfigError::ZeroPathSearchBudget);
         }
         if let Some(fraction) = self.memory_fraction {
             if fraction.is_infinite() {
@@ -2741,6 +2775,7 @@ mod tests {
         let config = config
             .with_spill_limit(88 << 20)
             .with_query_memory_limit(19 << 20)
+            .with_path_search_budget(3 << 20)
             .with_plan_cache_limit(8 << 20);
         #[cfg(feature = "encryption")]
         let config = config.with_encryption(EncryptionConfig::new(std::sync::Arc::new(
@@ -2789,6 +2824,7 @@ mod tests {
             memory_fraction_bytes,
             spill_limit,
             query_memory_limit,
+            path_search_budget,
             plan_cache_limit,
         } = config;
 
@@ -2801,6 +2837,11 @@ mod tests {
             query_memory_limit,
             Some(19 << 20),
             "with_query_memory_limit sets the limit"
+        );
+        assert_eq!(
+            path_search_budget,
+            Some(3 << 20),
+            "with_path_search_budget sets the budget"
         );
         assert_eq!(
             plan_cache_limit,

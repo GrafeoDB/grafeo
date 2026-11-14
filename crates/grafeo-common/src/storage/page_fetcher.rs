@@ -7,7 +7,7 @@
 //! include vmcache (TUM, 2024) or an explicit pager with pointer
 //! swizzling (LeanStore, VLDB 2024).
 //!
-//! See `docs/architecture/storage/disk-storage-decisions.md` for the
+//! See `docs/internals/storage/disk-storage-decisions.md` for the
 //! rationale (decision D1).
 
 use std::io;

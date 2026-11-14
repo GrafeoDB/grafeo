@@ -43,7 +43,7 @@ fn asks(session: &grafeo_engine::session::Session, ask: &str) -> bool {
 fn subjects(db: &GrafeoDB) -> Vec<String> {
     let mut subjects: Vec<String> = db
         .rdf_store()
-        .triples()
+        .triples(&grafeo_core::graph::rdf::RdfView::Latest)
         .iter()
         .map(|triple| triple.subject().to_string())
         .collect();
@@ -213,7 +213,7 @@ fn subjects_in(db: &GrafeoDB, graph: &str) -> Vec<String> {
         .graph(graph)
         .map(|graph| {
             graph
-                .triples()
+                .triples(&grafeo_core::graph::rdf::RdfView::Latest)
                 .iter()
                 .map(|triple| triple.subject().to_string())
                 .collect()
@@ -386,7 +386,11 @@ fn drop_all_drops_every_graph() {
     insert_into(&session, PARIS, "jules");
     session.execute_sparql("DROP ALL").unwrap();
     assert_eq!(subjects(&db), Vec::<String>::new());
-    assert_eq!(db.rdf_store().graph_names(), Vec::<String>::new());
+    assert_eq!(
+        db.rdf_store()
+            .graph_names(&grafeo_core::graph::rdf::RdfView::Latest),
+        Vec::<String>::new()
+    );
 }
 
 #[cfg(feature = "cdc")]

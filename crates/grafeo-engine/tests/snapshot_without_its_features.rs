@@ -110,7 +110,7 @@ fn write_the_fixture() {
 ))]
 fn stored(store: &grafeo_core::graph::rdf::RdfStore) -> Vec<[String; 3]> {
     let mut triples: Vec<[String; 3]> = store
-        .triples()
+        .triples(&grafeo_core::graph::rdf::RdfView::Latest)
         .iter()
         .map(|triple| {
             [

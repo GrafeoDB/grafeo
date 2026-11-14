@@ -636,7 +636,10 @@ mod tests {
         let cities = rdf
             .graph("http://example.org/cities")
             .expect("the graph exists");
-        assert!(cities.contains(&Triple::from(&record)));
+        assert!(cities.contains(
+            &grafeo_core::graph::rdf::RdfView::Latest,
+            &Triple::from(&record)
+        ));
         assert_eq!(rdf.len(), 0, "not in the default graph");
     }
 }

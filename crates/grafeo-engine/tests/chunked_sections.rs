@@ -152,7 +152,7 @@ fn encoded(value: &Value) -> String {
 fn dump_triples(lines: &mut Vec<String>, db: &GrafeoDB) {
     let rdf = db.rdf_store();
     push_triples(lines, "rdf default graph", rdf);
-    let mut names = rdf.graph_names();
+    let mut names = rdf.graph_names(&grafeo_core::graph::rdf::RdfView::Latest);
     names.sort();
     for name in names {
         let graph = rdf
@@ -166,7 +166,7 @@ fn dump_triples(lines: &mut Vec<String>, db: &GrafeoDB) {
 fn push_triples(lines: &mut Vec<String>, title: &str, store: &grafeo_core::graph::rdf::RdfStore) {
     lines.push(title.to_string());
     let mut triples: Vec<String> = store
-        .triples()
+        .triples(&grafeo_core::graph::rdf::RdfView::Latest)
         .iter()
         .map(|triple| format!("  {triple}"))
         .collect();
@@ -684,7 +684,11 @@ fn every_section_kind_in_one_database_survives_a_reopen_in_small_chunks() {
             "{what}: the named graph"
         );
         let rdf = db.rdf_store();
-        let triples: Vec<String> = rdf.triples().iter().map(ToString::to_string).collect();
+        let triples: Vec<String> = rdf
+            .triples(&grafeo_core::graph::rdf::RdfView::Latest)
+            .iter()
+            .map(ToString::to_string)
+            .collect();
         assert_eq!(
             triples.len(),
             2,
@@ -699,7 +703,7 @@ fn every_section_kind_in_one_database_survives_a_reopen_in_small_chunks() {
         let named: Vec<String> = rdf
             .graph("http://example.org/trips")
             .unwrap_or_else(|| panic!("{what}: the RDF graph"))
-            .triples()
+            .triples(&grafeo_core::graph::rdf::RdfView::Latest)
             .iter()
             .map(ToString::to_string)
             .collect();

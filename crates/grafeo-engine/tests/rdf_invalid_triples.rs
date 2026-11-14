@@ -159,7 +159,7 @@ fn sparql_insert_template_skips_an_invalid_triple_and_inserts_the_others() {
     let store = db.rdf_store();
     for (subject, city) in [("alix", "amsterdam"), ("jules", "paris")] {
         let triple = Triple::new(iri(subject), iri("city"), iri(city));
-        if !store.contains(&triple) {
+        if !store.contains(&grafeo_core::graph::rdf::RdfView::Latest, &triple) {
             failures.push(format!("{triple} is missing"));
         }
     }
@@ -209,7 +209,8 @@ fn rdf_store_insert_does_not_store_an_invalid_triple() {
         }) {
             failures.push(format!("{shape}: {panic}"));
         }
-        if store.contains(&invalid) || !store.is_empty() {
+        if store.contains(&grafeo_core::graph::rdf::RdfView::Latest, &invalid) || !store.is_empty()
+        {
             failures.push(format!("{shape}: stored, where it is refused"));
         }
     }

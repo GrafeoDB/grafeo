@@ -4,6 +4,7 @@
 //! across `query.rs`, `crud.rs`, `admin.rs`, and `mod.rs`. The entire module
 //! is gated behind `#[cfg(feature = "triple-store")]` in the parent.
 
+use grafeo_core::graph::rdf::RdfView;
 use std::sync::Arc;
 
 use grafeo_common::utils::error::Result;
@@ -441,10 +442,13 @@ impl GrafeoDB {
 
         let predicates = self
             .rdf_store
-            .predicates()
+            .predicates(&RdfView::Latest)
             .into_iter()
             .map(|predicate| {
-                let count = self.rdf_store.triples_with_predicate(&predicate).len();
+                let count = self
+                    .rdf_store
+                    .triples_with_predicate(&RdfView::Latest, &predicate)
+                    .len();
                 crate::admin::PredicateInfo {
                     iri: predicate.to_string(),
                     count,
@@ -639,8 +643,14 @@ mod tests {
                 Term::iri("http://example.org/name"),
                 term,
             );
-            assert!(store.contains(&triple), "{triple}");
-            assert!(named.contains(&triple), "{triple}");
+            assert!(
+                store.contains(&grafeo_core::graph::rdf::RdfView::Latest, &triple),
+                "{triple}"
+            );
+            assert!(
+                named.contains(&grafeo_core::graph::rdf::RdfView::Latest, &triple),
+                "{triple}"
+            );
         }
         assert_eq!(store.len(), 5);
 

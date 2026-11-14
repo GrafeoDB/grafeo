@@ -13,6 +13,7 @@
 
 #![cfg(feature = "triple-store")]
 
+use grafeo_core::graph::rdf::RdfView;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
@@ -53,7 +54,10 @@ fn one_by_one(held: &[Triple], batch: &[Triple]) -> (Vec<bool>, RdfStore) {
 
 fn same_store(batched: &RdfStore, single: &RdfStore, batch: &[Triple]) {
     assert_eq!(batched.len(), single.len());
-    assert_eq!(names(batched.triples()), names(single.triples()));
+    assert_eq!(
+        names(batched.triples(&RdfView::Latest)),
+        names(single.triples(&RdfView::Latest))
+    );
     for triple in batch.iter().filter(|t| t.is_valid()) {
         for pattern in [
             TriplePattern {
@@ -67,7 +71,10 @@ fn same_store(batched: &RdfStore, single: &RdfStore, batch: &[Triple]) {
                 object: Some(triple.object().clone()),
             },
         ] {
-            assert_eq!(names(batched.find(&pattern)), names(single.find(&pattern)));
+            assert_eq!(
+                names(batched.find(&RdfView::Latest, &pattern)),
+                names(single.find(&RdfView::Latest, &pattern))
+            );
         }
     }
 }

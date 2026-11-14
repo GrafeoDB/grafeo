@@ -6,6 +6,7 @@
 //! This planner follows the same push-based, vectorized execution model as
 //! the LPG planner for consistent performance characteristics.
 
+use grafeo_core::graph::rdf::RdfView;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -4431,7 +4432,9 @@ impl RdfTripleScanOperator {
     fn find_in(&self, graphs: Option<&[&str]>) -> Vec<(Option<String>, Arc<Triple>)> {
         match &self.writer {
             Some(writer) => writer.find(&self.pattern, graphs),
-            None => self.store.find_in_graphs(&self.pattern, graphs),
+            None => self
+                .store
+                .find_in_graphs(&RdfView::Latest, &self.pattern, graphs),
         }
     }
 
@@ -4502,7 +4505,7 @@ impl RdfTripleScanOperator {
                                 .collect()
                         } else {
                             self.store
-                                .find(&self.pattern)
+                                .find(&RdfView::Latest, &self.pattern)
                                 .into_iter()
                                 .map(|t| (None, t))
                                 .collect()
@@ -4511,7 +4514,7 @@ impl RdfTripleScanOperator {
                     #[cfg(not(feature = "ring-index"))]
                     {
                         self.store
-                            .find(&self.pattern)
+                            .find(&RdfView::Latest, &self.pattern)
                             .into_iter()
                             .map(|t| (None, t))
                             .collect()
@@ -6093,11 +6096,14 @@ mod tests {
         });
         execute_update(&store, &LogicalPlan::new(modify)).unwrap();
         assert_eq!(store.len(), 1);
-        let all = store.find(&TriplePattern {
-            subject: None,
-            predicate: None,
-            object: None,
-        });
+        let all = store.find(
+            &RdfView::Latest,
+            &TriplePattern {
+                subject: None,
+                predicate: None,
+                object: None,
+            },
+        );
         assert_eq!(all[0].object().to_string(), "\"Alix R.\"");
     }
 

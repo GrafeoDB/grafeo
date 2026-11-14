@@ -51,6 +51,7 @@ use grafeo_common::types::rdf::UnsupportedTermKind;
 use grafeo_common::types::{TermId, TermIdKind, Value};
 use grafeo_common::utils::error::{Error, Result};
 
+use super::overlay::RdfView;
 use super::{RdfStore, Term, Triple};
 use crate::codec::column_chunk::decode_column_chunk_bytes;
 use crate::codec::{ChunkColumn, RowsChunker};
@@ -157,13 +158,13 @@ pub(crate) fn write_rdf_chunks(
     sink: &mut dyn SectionSink,
 ) -> Result<()> {
     caps.validate()?;
-    let mut names = store.graph_names();
+    let mut names = store.graph_names_latest();
     names.sort_unstable();
-    let mut graphs = vec![(String::new(), store.sorted_triples()?)];
+    let mut graphs = vec![(String::new(), store.sorted_triples(&RdfView::Latest)?)];
     for name in names {
         // A graph dropped since the names were read is left out.
         if let Some(graph) = store.graph(&name) {
-            graphs.push((name, graph.sorted_triples()?));
+            graphs.push((name, graph.sorted_triples(&RdfView::Latest)?));
         }
     }
     let numbering = FileNumbering::of(store, graphs.iter().flat_map(|(_, triples)| triples))?;
@@ -205,12 +206,12 @@ pub(crate) fn write_rdf_chunks(
 /// As [`write_rdf_chunks`] for the ids of a stored triple.
 #[cfg(feature = "ring-index")]
 pub(crate) fn file_numbering(store: &RdfStore) -> Result<FileNumbering> {
-    let mut names = store.graph_names();
+    let mut names = store.graph_names_latest();
     names.sort_unstable();
-    let mut graphs = vec![store.sorted_triples()?];
+    let mut graphs = vec![store.sorted_triples(&RdfView::Latest)?];
     for name in names {
         if let Some(graph) = store.graph(&name) {
-            graphs.push(graph.sorted_triples()?);
+            graphs.push(graph.sorted_triples(&RdfView::Latest)?);
         }
     }
     FileNumbering::of(store, graphs.iter().flatten())
@@ -1194,6 +1195,7 @@ mod tests {
         decode_rdf_meta, encode_rdf_meta, write_rdf_chunks,
     };
     use crate::codec::column_chunk::{ChunkCodec, decode_column_chunk, encode_column_chunk};
+    use crate::graph::rdf::overlay::RdfView;
     use crate::graph::rdf::term::unusual_terms;
     use crate::graph::rdf::{Literal, RdfStore, RdfStoreSection, Term, Triple};
 
@@ -1242,16 +1244,16 @@ mod tests {
     /// a named graph also as a line of its own, so empty graphs count.
     fn sorted(store: &RdfStore) -> Vec<String> {
         let mut lines: Vec<String> = store
-            .triples()
+            .triples(&RdfView::Latest)
             .iter()
             .map(|triple| format!("\"\" {triple}"))
             .collect();
-        for name in store.graph_names() {
+        for name in store.graph_names(&RdfView::Latest) {
             lines.push(format!("{name:?}"));
             let graph = store.graph(&name).unwrap();
             lines.extend(
                 graph
-                    .triples()
+                    .triples(&RdfView::Latest)
                     .iter()
                     .map(|triple| format!("{name:?} {triple}")),
             );
@@ -1265,13 +1267,13 @@ mod tests {
     fn same_triples(a: &RdfStore, b: &RdfStore) -> bool {
         let set = |store: &RdfStore| {
             store
-                .triples()
+                .triples(&RdfView::Latest)
                 .iter()
                 .map(|triple| (**triple).clone())
                 .collect::<std::collections::HashSet<Triple>>()
         };
-        let mut names_a = a.graph_names();
-        let mut names_b = b.graph_names();
+        let mut names_a = a.graph_names(&RdfView::Latest);
+        let mut names_b = b.graph_names(&RdfView::Latest);
         names_a.sort();
         names_b.sort();
         set(a) == set(b)
@@ -1323,7 +1325,11 @@ mod tests {
         );
         assert_eq!(sorted(&back), sorted(&store));
         assert!(same_triples(&back, &store));
-        assert_eq!(back.graph_names().len(), 2, "the empty graph is kept");
+        assert_eq!(
+            back.graph_names(&RdfView::Latest).len(),
+            2,
+            "the empty graph is kept"
+        );
     }
 
     #[test]
@@ -1854,7 +1860,7 @@ mod tests {
             Term::iri("http://xmlns.com/foaf/0.1/name"),
             Term::literal("Alix 3"),
         );
-        assert!(store.contains(&alix));
+        assert!(store.contains(&RdfView::Latest, &alix));
     }
 
     #[test]
@@ -2244,7 +2250,7 @@ mod tests {
         let store = load_crafted(vec![Chunk::MetaBytes(encode_meta(&meta))]).unwrap();
         assert_eq!(store.graph_count(), 2_000);
         let allocated: usize = store
-            .graph_names()
+            .graph_names(&RdfView::Latest)
             .iter()
             .map(|name| store.graph(name).unwrap().index_allocation_bytes())
             .sum();
@@ -2275,7 +2281,7 @@ mod tests {
         }
         let back = round_trip(&store, ChunkCaps::DEFAULT);
         let address = |term: &Term| term.as_iri().unwrap().as_str().as_ptr();
-        let triples = back.triples();
+        let triples = back.triples(&RdfView::Latest);
         for triple in &triples {
             assert_eq!(address(triple.predicate()), address(triples[0].predicate()));
             assert_eq!(address(triple.object()), address(triples[0].object()));
@@ -2441,7 +2447,7 @@ mod tests {
         );
         let back = round_trip(&store, ChunkCaps::DEFAULT);
         assert!(same_triples(&back, &store));
-        for triple in back.triples() {
+        for triple in back.triples(&RdfView::Latest) {
             let ids = triple.ids().expect("a loaded triple has its ids");
             for (term, id) in [triple.subject(), triple.predicate(), triple.object()]
                 .into_iter()
@@ -2470,7 +2476,7 @@ mod tests {
         assert!(same_triples(&back, &store));
         // The same triples give the same bytes, whatever the dictionary held.
         let fresh = Arc::new(RdfStore::new());
-        for triple in store.triples() {
+        for triple in store.triples(&RdfView::Latest) {
             fresh.insert(triple.as_ref().clone());
         }
         let bytes = |written: Vec<(ChunkMeta, Bytes)>| -> Vec<Bytes> {
@@ -2514,7 +2520,7 @@ mod tests {
         assert_eq!(written[subjects].0.column_id, COLUMN_SUBJECT);
         let table = first_chunk_of(&written, TERM_TABLE);
         let refused = |written: Vec<(ChunkMeta, Bytes)>, expected: &str| {
-            let error = load_written(written).err().expect("refused").to_string();
+            let error = load_written(written).expect_err("refused").to_string();
             assert!(error.contains(expected), "{expected:?} in {error}");
         };
         refused(

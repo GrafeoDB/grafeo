@@ -443,7 +443,7 @@ fn push_index_on(held: &mut String, label: &str, property: &str) {
 #[cfg(feature = "triple-store")]
 fn collect_rdf_triples(store: &grafeo_core::graph::rdf::RdfStore) -> Vec<SnapshotTriple> {
     let mut triples: Vec<SnapshotTriple> = store
-        .triples()
+        .triples(&grafeo_core::graph::rdf::RdfView::Latest)
         .into_iter()
         .map(|t| SnapshotTriple {
             subject: t.subject().to_string(),
@@ -464,7 +464,7 @@ fn collect_rdf_triples(store: &grafeo_core::graph::rdf::RdfStore) -> Vec<Snapsho
 fn rdf_snapshot(
     store: &grafeo_core::graph::rdf::RdfStore,
 ) -> (Vec<SnapshotTriple>, Vec<RdfNamedGraphSnapshot>) {
-    let mut names = store.graph_names();
+    let mut names = store.graph_names(&grafeo_core::graph::rdf::RdfView::Latest);
     names.sort_unstable();
     let named = names
         .into_iter()
@@ -1541,7 +1541,10 @@ pub(super) mod row_groups {
         #[cfg(feature = "triple-store")]
         {
             parts.rdf.clear();
-            for name in parts.rdf.graph_names() {
+            for name in parts
+                .rdf
+                .graph_names(&grafeo_core::graph::rdf::RdfView::Latest)
+            {
                 parts.rdf.drop_graph(&name);
             }
             super::populate_rdf_store(parts.rdf, rdf_graphs);

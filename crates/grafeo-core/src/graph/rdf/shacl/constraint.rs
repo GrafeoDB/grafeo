@@ -6,6 +6,7 @@
 use std::cmp::Ordering;
 use std::collections::HashSet;
 
+use crate::graph::rdf::overlay::RdfView;
 use crate::graph::rdf::{Literal, RdfStore, Term, TriplePattern};
 
 use super::path::evaluate_path;
@@ -139,11 +140,14 @@ fn eval_class(class: &Term, value_nodes: &[Term], ctx: &EvalContext<'_>) -> Vec<
     for vn in value_nodes {
         let has_type = !ctx
             .data_graph
-            .find(&TriplePattern {
-                subject: Some(vn.clone()),
-                predicate: Some(rdf_type.clone()),
-                object: Some(class.clone()),
-            })
+            .find(
+                &RdfView::Latest,
+                &TriplePattern {
+                    subject: Some(vn.clone()),
+                    predicate: Some(rdf_type.clone()),
+                    object: Some(class.clone()),
+                },
+            )
             .is_empty();
         if !has_type {
             results.push(result(
@@ -748,7 +752,10 @@ fn eval_closed(ignored: &[Term], ctx: &EvalContext<'_>) -> Vec<ValidationResult>
 
     // Check all outgoing predicates of the focus node
     let mut results = Vec::new();
-    for triple in ctx.data_graph.triples_with_subject(ctx.focus_node) {
+    for triple in ctx
+        .data_graph
+        .triples_with_subject(&RdfView::Latest, ctx.focus_node)
+    {
         if !allowed.contains(triple.predicate()) {
             results.push(result(
                 ctx,

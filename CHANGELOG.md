@@ -30,6 +30,7 @@ SPARQL transactions release: SPARQL in a transaction reads one snapshot, conflic
 
 ### Fixed
 
+- **Index names across graphs** ([#723](https://github.com/GrafeoDB/grafeo/issues/723)): `DROP INDEX` in one graph keeps the name of the same index in other graphs, `SHOW INDEXES` lists only the current graph's indexes, and the direct index drops and `DROP GRAPH` remove a name no graph uses any more.
 - **`CLEAR GRAPH` of a missing graph fails unless `SILENT`** ([#718](https://github.com/GrafeoDB/grafeo/issues/718)): as `DROP GRAPH` does (SPARQL 1.1 Update 3.1.5), in a transaction or not. Inside a transaction a `CLEAR` no longer makes a missing or dropped graph exist until the commit, so a later `CREATE GRAPH` of it succeeds and a later `DROP GRAPH` fails, as when run one by one.
 - **The memory limit counts label and edge-type names in full** ([#751](https://github.com/GrafeoDB/grafeo/issues/751)): `memory_usage()` and the limit's account missed about 41 bytes per label and 27 per edge type (1.35 MB at 20,000 of each), so a database with many labels held more than the limit saw.
 - **A plan chosen on an empty graph replans after a bulk load** ([#674](https://github.com/GrafeoDB/grafeo/issues/674)): a cached plan is made again once a count the planner reads (nodes, edges, a label's nodes, an edge type's edges) doubles or halves by at least 1,000 rows.

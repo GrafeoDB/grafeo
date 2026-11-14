@@ -119,6 +119,10 @@ pub struct RdfPlanner {
     /// projection of the input's columns in their order): it runs nothing,
     /// so the profile shows the input in its place.
     folded: std::cell::Cell<bool>,
+    /// The sort a `LIMIT` above plans as a top-k: the address of its
+    /// [`SortOp`] and its `k`, the offset plus the limit (see
+    /// [`top_k_of`]); set while the limit plans its input.
+    top_k: std::cell::Cell<Option<(usize, usize)>>,
     /// The term dictionary of the query: every variable column of the plan
     /// holds ids into it (see [`term_ids`]).
     terms: Arc<QueryTermIds>,
@@ -166,6 +170,7 @@ impl RdfPlanner {
             profile_entries: std::cell::RefCell::new(Vec::new()),
             exists_marks: std::cell::Cell::new(0),
             folded: std::cell::Cell::new(false),
+            top_k: std::cell::Cell::new(None),
             terms,
             query_values: false,
             shuffle_unordered: false,
@@ -193,6 +198,7 @@ impl RdfPlanner {
             profile_entries: std::cell::RefCell::new(Vec::new()),
             exists_marks: std::cell::Cell::new(0),
             folded: std::cell::Cell::new(false),
+            top_k: std::cell::Cell::new(None),
             terms: Arc::clone(&parts.terms),
             query_values: false,
             shuffle_unordered: false,
@@ -1517,7 +1523,16 @@ impl RdfPlanner {
         limit: &LimitOp,
     ) -> Result<(Box<dyn Operator>, Vec<String>, Vec<LogicalType>)> {
         use crate::query::planner::common;
-        let (input_op, columns, types) = self.plan_operator(&limit.input)?;
+        // Its sort keeps the rows the limit returns only.
+        let top_k = top_k_of(limit).map(|(sort, k)| (std::ptr::from_ref(sort).addr(), k));
+        if top_k.is_some() {
+            self.top_k.set(top_k);
+        }
+        let planned = self.plan_operator(&limit.input);
+        if top_k.is_some() && self.top_k.get() == top_k {
+            self.top_k.set(None);
+        }
+        let (input_op, columns, types) = planned?;
         let (op, cols) = common::build_limit(input_op, columns, limit.count.value());
         Ok((op, cols, types))
     }
@@ -1542,6 +1557,15 @@ impl RdfPlanner {
     ) -> Result<(Box<dyn Operator>, Vec<String>, Vec<LogicalType>)> {
         use crate::query::plan::SortOrder;
 
+        // A top-k when the limit above set one for this sort, taken before
+        // its input plans a sort of its own.
+        let top_k = match self.top_k.get() {
+            Some((address, k)) if address == std::ptr::from_ref(sort).addr() => {
+                self.top_k.set(None);
+                Some(k)
+            }
+            _ => None,
+        };
         let mut planned = self.plan_operator(&sort.input)?;
         let width = planned.1.len();
         let mut key_expressions = Vec::with_capacity(sort.keys.len());
@@ -1621,8 +1645,13 @@ impl RdfPlanner {
         // The key columns come last and are not returned, the columns of an `EXISTS` key with them.
         columns.truncate(width);
         types.truncate(width);
-        let sort_op =
-            order::RdfSortOperator::new(projected, keys, types.clone(), Arc::clone(&self.terms));
+        let sort_op = order::RdfSortOperator::new(
+            projected,
+            keys,
+            types.clone(),
+            Arc::clone(&self.terms),
+            top_k,
+        );
         Ok((Box::new(sort_op), columns, types))
     }
 
@@ -5070,6 +5099,37 @@ fn next_join_input<'a>(mut inputs: impl Iterator<Item = &'a [String]>, joined: &
         .unwrap_or(0)
 }
 
+/// The sort under `limit` that a top-k of its first rows can plan, and its
+/// `k` (the offset plus the limit): `ORDER BY ... LIMIT n` (`OFFSET m`) as the
+/// translator writes it, a `Skip` under the `Limit` and projections, which
+/// keep the rows one to one, above the `Sort`. Anything else between them
+/// (a `DISTINCT`) changes which rows the limit sees, so it has none, and so
+/// has a `LIMIT 0`, which reads no row.
+fn top_k_of(limit: &LimitOp) -> Option<(&SortOp, usize)> {
+    let crate::query::plan::CountExpr::Literal(count) = limit.count else {
+        return None;
+    };
+    if count == 0 {
+        return None;
+    }
+    let mut k = count;
+    let mut input = limit.input.as_ref();
+    if let LogicalOperator::Skip(skip) = input {
+        let crate::query::plan::CountExpr::Literal(offset) = skip.count else {
+            return None;
+        };
+        k = k.saturating_add(offset);
+        input = skip.input.as_ref();
+    }
+    loop {
+        match input {
+            LogicalOperator::Project(project) => input = project.input.as_ref(),
+            LogicalOperator::Sort(sort) => return Some((sort, k)),
+            _ => return None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -7159,5 +7219,93 @@ mod tests {
         ));
         let any = op.into_any();
         assert!(any.downcast::<RdfTripleScanOperator>().is_ok());
+    }
+
+    /// The sort a limit plans as a top-k: under `Skip` and projections only,
+    /// with `k` the offset plus the limit; none through a `DISTINCT`, for a
+    /// `LIMIT 0`, or without a sort.
+    #[test]
+    fn a_limit_plans_a_top_k_through_skip_and_projections_only() {
+        use crate::query::plan::{ProjectOp, Projection, SortKey, SortOrder};
+        let sort = || {
+            LogicalOperator::Sort(SortOp {
+                keys: vec![SortKey {
+                    expression: LogicalExpression::Variable("v".to_string()),
+                    order: SortOrder::Ascending,
+                    nulls: None,
+                }],
+                input: Box::new(LogicalOperator::Empty),
+            })
+        };
+        let project = |input: LogicalOperator| {
+            LogicalOperator::Project(ProjectOp {
+                projections: vec![Projection {
+                    expression: LogicalExpression::Variable("v".to_string()),
+                    alias: None,
+                }],
+                input: Box::new(input),
+                pass_through_input: false,
+            })
+        };
+        let skip = |input: LogicalOperator, count: usize| {
+            LogicalOperator::Skip(SkipOp {
+                input: Box::new(input),
+                count: CountExpr::Literal(count),
+            })
+        };
+        let distinct = |input: LogicalOperator| {
+            LogicalOperator::Distinct(DistinctOp {
+                input: Box::new(input),
+                columns: None,
+            })
+        };
+        let k_of = |input: LogicalOperator, count: usize| {
+            top_k_of(&LimitOp {
+                input: Box::new(input),
+                count: CountExpr::Literal(count),
+            })
+            .map(|(_, k)| k)
+        };
+        assert_eq!(k_of(sort(), 5), Some(5));
+        assert_eq!(k_of(skip(sort(), 17), 5), Some(22));
+        assert_eq!(k_of(skip(project(project(sort())), 17), 5), Some(22));
+        assert_eq!(k_of(project(sort()), 1), Some(1));
+        assert_eq!(k_of(skip(sort(), usize::MAX), 5), Some(usize::MAX));
+        assert_eq!(k_of(sort(), 0), None);
+        assert_eq!(k_of(skip(sort(), 17), 0), None);
+        assert_eq!(k_of(distinct(project(sort())), 5), None);
+        assert_eq!(k_of(skip(distinct(sort()), 17), 5), None);
+        assert_eq!(k_of(project(distinct(project(sort()))), 5), None);
+        assert_eq!(k_of(skip(skip(sort(), 1), 1), 5), None);
+        assert_eq!(k_of(LogicalOperator::Empty, 5), None);
+        let parameter = LimitOp {
+            input: Box::new(sort()),
+            count: CountExpr::Parameter("n".to_string()),
+        };
+        assert!(top_k_of(&parameter).is_none());
+    }
+
+    /// `SELECT DISTINCT ... ORDER BY ... LIMIT`: the limit counts distinct
+    /// rows, so the sort under the `DISTINCT` keeps every row (a top-k of 3
+    /// would keep three rows of the first key, one distinct row).
+    #[cfg(feature = "sparql")]
+    #[test]
+    fn a_limit_over_distinct_counts_distinct_rows() {
+        let db = crate::GrafeoDB::new_in_memory();
+        db.batch_insert_rdf((0..40).map(|i| {
+            Triple::new(
+                Term::iri(format!("http://ex.org/s{i}")),
+                Term::iri("http://ex.org/k"),
+                Term::Literal(Literal::integer(i % 4)),
+            )
+        }))
+        .unwrap();
+        let result = db
+            .execute_sparql(
+                "SELECT DISTINCT ?k WHERE { ?s <http://ex.org/k> ?k } ORDER BY ?k LIMIT 3",
+            )
+            .unwrap();
+        let keys: Vec<Value> = result.rows().iter().map(|row| row[0].clone()).collect();
+        assert_eq!(keys, vec![integer(0), integer(1), integer(2)]);
     }
 }

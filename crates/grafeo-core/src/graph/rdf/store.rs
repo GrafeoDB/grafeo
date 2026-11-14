@@ -2033,43 +2033,43 @@ impl RdfStore {
         index_by(&mut po_idx, &arcs, |ids| (ids[1], ids[2]));
         index_by(&mut os_idx, &arcs, |ids| (ids[2], ids[0]));
         let stats = statistics_of(arcs.iter().map(AsRef::as_ref));
-
-        // Swap indexes into the store (one lock acquisition per index), all
-        // under one apply against reads at a snapshot.
         let primary: FxHashSet<Held> = arcs.into_iter().map(Held).collect();
-        let apply = self.apply_guard.write();
-        *self.triples.write() = primary;
-        *self.subject_index.write() = subject_idx;
-        *self.predicate_index.write() = predicate_idx;
-        *self.object_index.write() = object_idx_map;
-        *self.sp_index.write() = sp_idx;
-        *self.po_index.write() = po_idx;
-        *self.os_index.write() = os_idx;
-        drop(apply);
-
-        // Every index was built anew: counted by a walk of what the load built.
-        self.counted
-            .store(self.own_walk_bytes(), std::sync::atomic::Ordering::Relaxed);
-
-        // Cache the freshly-computed statistics from the bulk load pass.
-        *self.statistics_cache.write() = Some(Arc::new(stats.clone()));
-        // The statistics count what the load left: no change since.
-        self.statistics_drift
-            .store(0, std::sync::atomic::Ordering::Relaxed);
-
-        // Build Ring Index automatically during bulk load (when feature is enabled).
+        // The ring index of the triples the store will hold (a triple the
+        // load lists twice is held once), built before the swap, as the
+        // other indexes are.
         #[cfg(feature = "ring-index")]
+        let ring = crate::index::ring::TripleRing::try_from_triples(
+            primary.iter().map(|held| held.0.as_ref().clone()),
+        )
+        .ok()
+        .map(Arc::new);
+
+        // Swap everything into the store under one hold of the apply guard,
+        // so no read sees the new triples with an old ring, statistics or
+        // count, and no write lands between the swap and the count.
         {
-            let ring = crate::index::ring::TripleRing::try_from_triples(
-                self.triples
-                    .read()
-                    .iter()
-                    .map(|held| held.0.as_ref().clone()),
-            )
-            .ok();
-            *self.ring.write() = ring.map(Arc::new);
-            self.ring_stale
-                .store(false, std::sync::atomic::Ordering::Relaxed);
+            let _apply = self.apply_guard.write();
+            *self.triples.write() = primary;
+            *self.subject_index.write() = subject_idx;
+            *self.predicate_index.write() = predicate_idx;
+            *self.object_index.write() = object_idx_map;
+            *self.sp_index.write() = sp_idx;
+            *self.po_index.write() = po_idx;
+            *self.os_index.write() = os_idx;
+            // Every index was built anew: counted by a walk of what the load
+            // built.
+            self.counted
+                .store(self.own_walk_bytes(), std::sync::atomic::Ordering::Relaxed);
+            // The statistics of the load's pass, which count what it left.
+            *self.statistics_cache.write() = Some(Arc::new(stats.clone()));
+            self.statistics_drift
+                .store(0, std::sync::atomic::Ordering::Relaxed);
+            #[cfg(feature = "ring-index")]
+            {
+                *self.ring.write() = ring;
+                self.ring_stale
+                    .store(false, std::sync::atomic::Ordering::Relaxed);
+            }
         }
         self.settle();
 

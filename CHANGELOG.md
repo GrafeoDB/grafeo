@@ -8,7 +8,7 @@ SPARQL transactions release: SPARQL in a transaction reads one snapshot, conflic
 
 ### Added
 
-- **`Config::with_path_search_budget`** ([#492](https://github.com/GrafeoDB/grafeo/issues/492)): sets the bytes one variable-length, shortest-path or RDF property path search may hold, never above the memory limit. In the bindings it is `path_search_budget` (Python), `pathSearchBudget` (Node, WASM, Dart), `SetPathSearchBudget` (C#), `PathSearchBudget` (Go) and `grafeo_options_set_path_search_budget` (C).
+- **`Config::with_path_search_budget`** ([#492](https://github.com/GrafeoDB/grafeo/issues/492)): sets the bytes the paths of one variable-length or shortest-path search, or one RDF property path search, may hold, never above the memory limit; the nodes an `ANY SHORTEST` or `shortestPath` search visits are not counted yet. In the bindings it is `path_search_budget` (Python), `pathSearchBudget` (Node, WASM, Dart), `SetPathSearchBudget` (C#), `PathSearchBudget` (Go) and `grafeo_options_set_path_search_budget` (C).
 - **`Config::with_plan_cache_limit`** ([#674](https://github.com/GrafeoDB/grafeo/issues/674)): bounds the plan cache in bytes, by a deep estimate of each plan. The default is a sixty-fourth of the memory limit, at least 4 MiB and at most 64 MiB; 0 turns the cache off.
 - **`validate()` names the nodes a listed type would refuse** ([#764](https://github.com/GrafeoDB/grafeo/issues/764)): the warning `LISTED_TYPE_ROWS` gives, per node type and graph not bound to a graph type that lists it, the count and the first ids of the nodes that break the type, with the steps to make it a type of its own again. Run it after upgrading a file in which 0.6.2 took a standalone type over.
 

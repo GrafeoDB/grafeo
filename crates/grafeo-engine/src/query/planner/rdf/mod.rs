@@ -2264,20 +2264,35 @@ impl RdfPlanner {
     /// Plans a JOIN operator using HashJoin.
     ///
     /// For SPARQL, we join on shared variables (equi-join). When no shared
-    /// variables exist, falls back to cross join.
-    fn plan_join(
+    /// variables exist, falls back to cross join. The inputs are planned in
+    /// this small frame and the join built in another: a chain of joins (the
+    /// triple patterns of a group) plans each input below the next (see
+    /// `crate::query::limits`).
+    fn plan_join(&self, join: &crate::query::plan::JoinOp) -> Result<PlannedOperator> {
+        let first_entry = self.profile_entries.borrow().len();
+        let left = self.plan_operator(&join.left)?;
+        let right_entry = self.profile_entries.borrow().len();
+        let right = self.plan_operator(&join.right)?;
+        self.build_join(join, left, right, first_entry, right_entry)
+    }
+
+    /// Builds the join of `join` over its planned inputs, `left` and
+    /// `right`; the PROFILE lines of `left` start at `first_entry`, those of
+    /// `right` at `right_entry`.
+    #[inline(never)]
+    fn build_join(
         &self,
         join: &crate::query::plan::JoinOp,
-    ) -> Result<(Box<dyn Operator>, Vec<String>, Vec<LogicalType>)> {
+        (left_op, left_columns, left_types): PlannedOperator,
+        (right_op, right_columns, right_types): PlannedOperator,
+        first_entry: usize,
+        right_entry: usize,
+    ) -> Result<PlannedOperator> {
         use crate::query::planner::common;
-        let first_entry = self.profile_entries.borrow().len();
-        let (left_op, left_columns, left_types) = self.plan_operator(&join.left)?;
-        let right_entry = self.profile_entries.borrow().len();
-        let (right_op, right_columns, right_types) = self.plan_operator(&join.right)?;
 
         // A path with an end the other side binds: one search per row from
-        // that end (the path's operator planned above reads nothing until it
-        // runs, and is dropped).
+        // that end (the path's operator planned as an input reads nothing
+        // until it runs, and is dropped).
         let per_row = match (join.left.as_ref(), join.right.as_ref()) {
             (_, LogicalOperator::PropertyPath(path)) => self
                 .path_per_row(path, &join.left, &left_columns)?
@@ -2315,9 +2330,9 @@ impl RdfPlanner {
         }
 
         // A triple pattern with a variable the other side binds: a lookup
-        // per row of that side (the scan planned above reads nothing until
-        // it runs, and is dropped). Of two patterns, the one estimated to
-        // match more triples is looked up; a wrong guess costs at most
+        // per row of that side (the scan planned as an input reads nothing
+        // until it runs, and is dropped). Of two patterns, the one estimated
+        // to match more triples is looked up; a wrong guess costs at most
         // `LOOKUP_ROWS` lookups before the join hashes the scan.
         let left_estimate = estimate_operator_cardinality(&join.left, &self.store);
         let right_estimate = estimate_operator_cardinality(&join.right, &self.store);
@@ -2495,14 +2510,27 @@ impl RdfPlanner {
     /// 18.5), so a left row none of whose pairs pass it is kept alone. It
     /// reads the joined row: the left columns, then the right ones (a name
     /// both sides have reads the left one, which the join keys make equal).
-    fn plan_left_join(
+    /// The inputs are planned in this small frame and the join built in
+    /// another: a chain of `OPTIONAL`s plans each input below the next (see
+    /// `crate::query::limits`).
+    fn plan_left_join(&self, join: &LeftJoinOp) -> Result<PlannedOperator> {
+        let left = self.plan_operator(&join.left)?;
+        let right_entry = self.profile_entries.borrow().len();
+        let right = self.plan_operator(&join.right)?;
+        self.build_left_join(join, left, right, right_entry)
+    }
+
+    /// Builds the left join of `join` over its planned inputs, `left` and
+    /// `right`; the PROFILE lines of `right` start at `right_entry`.
+    #[inline(never)]
+    fn build_left_join(
         &self,
         join: &LeftJoinOp,
-    ) -> Result<(Box<dyn Operator>, Vec<String>, Vec<LogicalType>)> {
+        (left_op, left_columns, left_types): PlannedOperator,
+        (right_op, right_columns, right_types): PlannedOperator,
+        right_entry: usize,
+    ) -> Result<PlannedOperator> {
         use crate::query::planner::common;
-        let (left_op, left_columns, left_types) = self.plan_operator(&join.left)?;
-        let right_entry = self.profile_entries.borrow().len();
-        let (right_op, right_columns, right_types) = self.plan_operator(&join.right)?;
 
         // `OPTIONAL { ?s p ?o }` whose subject or object the left side binds,
         // with no condition: a lookup per left row, which keeps a row with

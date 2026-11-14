@@ -154,7 +154,7 @@ fn every_deprecation_has_a_row_on_the_deprecations_page() {
             DEPRECATIONS_PAGE
                 .lines()
                 .any(|line| line.starts_with('|') && line.contains(&code)),
-            "{warning:?}: no row for {code} in docs/upgrading/deprecations.md"
+            "{warning:?}: no row for {code} in docs/get-started/upgrading/deprecations.md"
         );
     }
 }

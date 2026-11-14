@@ -1,3 +1,8 @@
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/GrafeoDB/grafeo/main/.github/readme/header-dark.svg">
+  <img alt="Grafeo: The embeddable graph database, written in Rust." src="https://raw.githubusercontent.com/GrafeoDB/grafeo/main/.github/readme/header-light.svg" width="100%">
+</picture>
+
 [![CI](https://github.com/GrafeoDB/grafeo/actions/workflows/ci.yml/badge.svg?branch=main&event=push)](https://github.com/GrafeoDB/grafeo/actions/workflows/ci.yml?query=branch%3Amain+event%3Apush)
 [![grafeo.dev](https://github.com/GrafeoDB/grafeo/actions/workflows/docs.yml/badge.svg?branch=main&event=push)](https://grafeo.dev)
 [![codecov](https://codecov.io/gh/GrafeoDB/grafeo/graph/badge.svg)](https://codecov.io/gh/GrafeoDB/grafeo)
@@ -15,8 +20,6 @@
 [![MSRV](https://img.shields.io/badge/MSRV-1.99.0-blue)](https://www.rust-lang.org)
 [![Python](https://img.shields.io/badge/python-3.12%2B-blue)](https://www.python.org)
 [![Discord](https://img.shields.io/badge/Discord-join-5865F2?logo=discord&logoColor=white)](https://discord.gg/nqU6RUVaxW)
-
-# Grafeo
 
 Grafeo is a graph database built in Rust from the ground up for speed and efficient memory use. It runs embedded as a library or as a standalone server, with in-memory or persistent storage and full ACID transactions.
 

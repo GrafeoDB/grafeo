@@ -4,7 +4,7 @@ All notable changes to Grafeo, for future reference (and enjoyment).
 
 ## [0.6.3] - Unreleased
 
-SPARQL transactions release: SPARQL in a transaction reads one snapshot, conflicting updates fail at commit and graph operations run inside transactions; the plan cache, the per-query memory limit and path searches are bounded. Results that change on upgrade: a statement over the per-query memory limit fails with `GRAFEO-S001` in builds with disk spilling, a path search over its budget fails with `GRAFEO-S001` instead of `GRAFEO-Q006`, and a standalone type that a graph type lists keeps applying in the default graph.
+SPARQL transactions release: SPARQL in a transaction reads one snapshot, conflicting updates fail at commit and graph operations run inside transactions; the plan cache, the per-query memory limit and path searches are bounded. Results that change on upgrade: a statement over the per-query memory limit fails with `GRAFEO-S001` in builds with disk spilling, a path search over its budget fails with `GRAFEO-S001` instead of `GRAFEO-Q006`, a standalone type that a graph type lists keeps applying in the default graph, and `CLEAR GRAPH` of a missing graph fails unless `SILENT`.
 
 ### Added
 
@@ -29,6 +29,8 @@ SPARQL transactions release: SPARQL in a transaction reads one snapshot, conflic
 
 ### Fixed
 
+- **`CLEAR GRAPH` of a missing graph fails unless `SILENT`** ([#718](https://github.com/GrafeoDB/grafeo/issues/718)): as `DROP GRAPH` does (SPARQL 1.1 Update 3.1.5), in a transaction or not. Inside a transaction a `CLEAR` no longer makes a missing or dropped graph exist until the commit, so a later `CREATE GRAPH` of it succeeds and a later `DROP GRAPH` fails, as when run one by one.
+- **The memory limit counts label and edge-type names in full** ([#751](https://github.com/GrafeoDB/grafeo/issues/751)): `memory_usage()` and the limit's account missed about 41 bytes per label and 27 per edge type (1.36 MB at 20,000 of each), so a database with many labels held more than the limit saw.
 - **A plan chosen on an empty graph replans after a bulk load** ([#674](https://github.com/GrafeoDB/grafeo/issues/674)): a cached plan is made again once a count the planner reads (nodes, edges, a label's nodes, an edge type's edges) doubles or halves by at least 1,000 rows.
 - **A plan built before a schema change is no longer cached after it** ([#674](https://github.com/GrafeoDB/grafeo/issues/674)): a statement planned while an index, constraint, type or graph changed runs once and is planned again next time; a schema change queued in an open transaction no longer drops other sessions' plans, and a rollback keeps them.
 - **The default path search budget is at most 256 MiB** ([#492](https://github.com/GrafeoDB/grafeo/issues/492)): a quarter of the memory limit, so a 64 GiB limit let one search hold 16 GiB before it failed.

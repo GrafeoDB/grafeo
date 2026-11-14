@@ -4,7 +4,7 @@ C FFI bindings for [Grafeo](https://grafeo.dev), a high-performance, embeddable 
 
 ## Prebuilt Libraries
 
-Every [GitHub release](https://github.com/GrafeoDB/grafeo/releases) has the library with `grafeo.h` for Linux and macOS (x64 and arm64) and Windows (x64), in two variants: `grafeo-c-<tag>-<target>-default` (the default features) and `grafeo-c-<tag>-<target>-all` (every profile: `lpg`, `rdf`, `analytics`, `ai`, so every query language). `FEATURES.txt` in each archive lists the features of its library. A function that `grafeo.h` declares but whose feature the library lacks is not exported. See the [C API docs](https://grafeo.dev/api/c/#prebuilt-libraries).
+Every [GitHub release](https://github.com/GrafeoDB/grafeo/releases) has the library with `grafeo.h` for Linux and macOS (x64 and arm64) and Windows (x64), in two variants: `grafeo-c-<tag>-<target>-default` (the default features) and `grafeo-c-<tag>-<target>-all` (every profile: `lpg`, `rdf`, `analytics`, `ai`, so every query language). `FEATURES.txt` in each archive lists the features of its library. A function that `grafeo.h` declares but whose feature the library lacks is not exported. See the [C API docs](https://docs.grafeo.dev/languages/c/#prebuilt-libraries).
 
 ## Building
 
@@ -184,8 +184,8 @@ if (!r) {
 
 ## Links
 
-- [Documentation](https://grafeo.dev)
-- [API Stability](https://grafeo.dev/stability/): which calls are stable and which are experimental; a call here has the level of the Rust call it wraps
+- [Documentation](https://docs.grafeo.dev/)
+- [API Stability](https://docs.grafeo.dev/project/stability/): which calls are stable and which are experimental; a call here has the level of the Rust call it wraps
 - [GitHub](https://github.com/GrafeoDB/grafeo)
 - [Go Bindings](https://github.com/GrafeoDB/grafeo/tree/main/crates/bindings/go) (uses this library via CGO)
 - [C# Bindings](https://github.com/GrafeoDB/grafeo/tree/main/crates/bindings/csharp) (uses this library via P/Invoke)

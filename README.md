@@ -6,7 +6,7 @@
 </picture>
 
 [![CI](https://github.com/GrafeoDB/grafeo/actions/workflows/ci.yml/badge.svg?branch=main&event=push)](https://github.com/GrafeoDB/grafeo/actions/workflows/ci.yml?query=branch%3Amain+event%3Apush)
-[![grafeo.dev](https://github.com/GrafeoDB/grafeo/actions/workflows/docs.yml/badge.svg?branch=main&event=push)](https://grafeo.dev)
+[![docs](https://github.com/GrafeoDB/grafeo/actions/workflows/docs.yml/badge.svg?branch=main&event=push)](https://docs.grafeo.dev/)
 [![codecov](https://codecov.io/gh/GrafeoDB/grafeo/graph/badge.svg)](https://codecov.io/gh/GrafeoDB/grafeo)
 [![CodSpeed Badge](https://img.shields.io/endpoint?url=https://codspeed.io/badge.json)](https://codspeed.io/GrafeoDB/grafeo?utm_source=badge)
 [![Crates.io](https://img.shields.io/crates/v/grafeo.svg?color=00ADD8)](https://crates.io/crates/grafeo)
@@ -25,9 +25,9 @@
 
 Grafeo is a graph database built in Rust from the ground up for speed and efficient memory use. It runs embedded as a library or as a standalone server, with in-memory or persistent storage and full ACID transactions.
 
-In our [graph-bench](https://github.com/GrafeoDB/graph-bench) suite (which includes workloads inspired by the [LDBC Social Network Benchmark](https://ldbcouncil.org/benchmarks/snb/)), Grafeo is the fastest tested graph database in both embedded and server configurations, while using a fraction of the memory of some of the alternatives.
+In [graph-bench](https://github.com/GrafeoDB/graph-bench) (which includes workloads inspired by the [LDBC Social Network Benchmark](https://ldbcouncil.org/benchmarks/snb/)), Grafeo answers every benchmark it supports correctly and is among the fastest embedded graph databases; see the [per-category results](https://github.com/GrafeoDB/graph-bench/blob/main/docs/results.md).
 
-[![Grafeo Playground](docs/assets/playground.png)](https://playground.grafeo.dev)
+[![The Grafeo Playground: a social network graph next to the GQL query that returns it](docs/assets/playground.png)](https://playground.grafeo.dev)
 
 Grafeo supports both **Labeled Property Graph (LPG)** and **Resource Description Framework (RDF)** data models and all major query languages.
 
@@ -58,7 +58,7 @@ Grafeo supports both **Labeled Property Graph (LPG)** and **Resource Description
 - **Vector as a first-class type**: `Value::Vector(Arc<[f32]>)` stored alongside graph data
 - **HNSW index**: O(log n) approximate nearest neighbor search with tunable recall
 - **Distance functions**: Cosine, Euclidean, Dot Product, Manhattan (SIMD-accelerated: AVX2, SSE, NEON)
-- **Vector quantization**: Scalar (f32 â†’ u8), Binary (1-bit) and Product Quantization (8-32x compression)
+- **Vector quantization**: Scalar (f32 to u8), Binary (1-bit) and Product Quantization (8-32x compression)
 - **BM25 text search**: Full-text inverted index with Unicode tokenizer and stop word removal
 - **Hybrid search**: Combined text + vector search with Reciprocal Rank Fusion (RRF) or weighted fusion
 - **Change data capture**: Before/after property snapshots for audit trails and history tracking
@@ -99,26 +99,11 @@ Grafeo supports both **Labeled Property Graph (LPG)** and **Resource Description
 <details>
 <summary><strong>Benchmarks</strong></summary>
 
-Tested with [graph-bench](https://github.com/GrafeoDB/graph-bench), which includes workloads inspired by the [LDBC Social Network Benchmark](https://ldbcouncil.org/benchmarks/snb/). These are not official LDBC Benchmark results (see [disclaimer](https://github.com/GrafeoDB/graph-bench#ldbc-disclaimer)).
+Measured with [graph-bench](https://github.com/GrafeoDB/graph-bench), which includes workloads inspired by the [LDBC Social Network Benchmark](https://ldbcouncil.org/benchmarks/snb/). These are not official LDBC Benchmark results (see [disclaimer](https://github.com/GrafeoDB/graph-bench#ldbc-disclaimer)).
 
-**Embedded** (SF0.1, in-process):
-
-| Database | SNB Interactive | Memory | Graph Analytics | Memory |
-|----------|---------------:|-------:|----------------:|-------:|
-| **Grafeo** | **2,904 ms** | 136 MB | **0.4 ms** | 43 MB |
-| LadybugDB(Kuzu) | 5,333 ms | 4,890 MB | 225 ms | 250 MB |
-| FalkorDB Lite | 7,454 ms | 156 MB | 89 ms | 88 MB |
-
-**Server** (SF0.1, over network):
-
-| Database | SNB Interactive | Graph Analytics |
-|----------|---------------:|----------------:|
-| **Grafeo Server** | **730 ms** | **15 ms** |
-| Memgraph | 4,113 ms | 19 ms |
-| Neo4j | 6,788 ms | 253 ms |
-| ArangoDB | 40,043 ms | 22,739 ms |
-
-Full results: [embedded](https://github.com/GrafeoDB/graph-bench/blob/main/RESULTS_EMBEDDED.md) | [server](https://github.com/GrafeoDB/graph-bench/blob/main/RESULTS_SERVER.md)
+<!-- graph-bench:start -->
+Full results per category, with every database named: [graph-bench results](https://github.com/GrafeoDB/graph-bench/blob/main/docs/results.md)
+<!-- graph-bench:end -->
 
 </details>
 
@@ -151,29 +136,33 @@ cargo add grafeo
 Grafeo uses persona-based feature profiles that describe use cases. Compose them freely:
 
 ```bash
-# Default: LPG with GQL, AI, algorithms, parallel execution
+# Default: the deprecated `embedded` profile (see the table)
 cargo add grafeo
 
-# Compose profiles for your use case
-cargo add grafeo --features rdf          # Add RDF/SPARQL support
-cargo add grafeo --features analytics    # Add graph algorithms
-cargo add grafeo --features ai           # Add vector/text/hybrid search
-cargo add grafeo --features enterprise   # Full feature set
+# Persona profiles
+cargo add grafeo --no-default-features --features lpg,ai   # LPG application with search
+cargo add grafeo --features rdf                            # Add RDF, SPARQL and SHACL
+cargo add grafeo --features analytics                      # Add algorithms, search and bulk import
+cargo add grafeo --features enterprise                     # Add metrics and tracing
+cargo add grafeo --no-default-features --features lpg,rdf,analytics,ai  # Every language and model
 
 # Or use individual flags
-cargo add grafeo --no-default-features --features gql       # Minimal: GQL only
+cargo add grafeo --no-default-features --features gql        # Minimal: GQL only
 cargo add grafeo --no-default-features --features languages  # All query languages
-cargo add grafeo --features embed                            # ONNX embeddings (opt-in, ~17MB)
+cargo add grafeo --features embed                            # ONNX embeddings (opt-in, about 17 MB)
 ```
 
 | Profile | Contents | Use case |
 |---------|----------|----------|
-| `lpg` | GQL, AI, algorithms, parallel | Default for libraries and apps |
-| `rdf` | SPARQL, triple-store, ring-index | Knowledge graphs, linked data |
-| `analytics` | Algorithms, parallel | Graph analytics pipelines |
-| `ai` | Vector, text, hybrid search, CDC | RAG, semantic search |
-| `edge` | GQL, compact, regex-lite | WASM, resource-constrained |
-| `enterprise` | Metrics, tracing, async I/O | Platform operators, observability |
+| `lpg` | GQL, Cypher, Gremlin, SQL/PGQ, storage (write-ahead log, database file, spill, mmap) | Graph applications |
+| `rdf` | RDF triple store, GQL, SPARQL, GraphQL, SHACL, storage | Knowledge graphs, linked data |
+| `analytics` | Graph algorithms, vector, text and hybrid search, JSON Lines and Parquet import | Graph analytics pipelines |
+| `ai` | Vector, text and hybrid search, change data capture | RAG, semantic search, agent memory |
+| `edge` | GQL, lightweight regex | WebAssembly, resource-constrained |
+| `enterprise` | Metrics, tracing, async storage (deprecated) | Platform operators, observability |
+| `embedded` | GQL, vector, text and hybrid search, change data capture, algorithms, parallel execution, database file, Arrow export | The default; deprecated, removed in 0.7.0 |
+
+The default build has no write-ahead log: commits reach the file at a checkpoint (`close()` or `wal_checkpoint()`). Add `wal` or `lpg` for commits that survive a crash; the Python, Node.js, C, C#, Dart and Go packages include it. See [Installation](https://docs.grafeo.dev/get-started/install/).
 
 ### Node.js / TypeScript
 
@@ -440,23 +429,25 @@ grafeo info ./mydb --format table # Human-readable table (default)
 
 | Project | Description |
 |---------|-------------|
-| [**grafeo-server**](https://github.com/GrafeoDB/grafeo-server) | HTTP server & web UI: REST API, transactions, single binary (~40MB Docker image) |
+| [**grafeo-server**](https://github.com/GrafeoDB/grafeo-server) | HTTP server & web UI: REST API, transactions, single binary (about 48 MB Docker image) |
 | [**grafeo-web**](https://github.com/GrafeoDB/grafeo-web) | Browser-based Grafeo via WebAssembly with IndexedDB persistence |
 | [**gwp**](https://github.com/GrafeoDB/gql-wire-protocol) | GQL Wire Protocol: gRPC wire protocol for GQL (ISO/IEC 39075) with client bindings in 5 languages |
-| [**boltr**](https://github.com/GrafeoDB/boltr) | Bolt Wire Protocol: pure Rust Bolt v5.x implementation for Neo4j driver compatibility |
+| [**boltr**](https://github.com/GrafeoDB/boltr) | Bolt Wire Protocol: pure Rust Bolt v5.x implementation, so Bolt drivers connect to Grafeo |
 | [**grafeo-langchain**](https://github.com/GrafeoDB/grafeo-langchain) | LangChain integration: graph store, vector store, Graph RAG retrieval |
 | [**grafeo-llamaindex**](https://github.com/GrafeoDB/grafeo-llamaindex) | LlamaIndex integration: PropertyGraphStore, vector search, knowledge graphs |
 | [**grafeo-mcp**](https://github.com/GrafeoDB/grafeo-mcp) | Model Context Protocol server: expose Grafeo as tools for LLM agents |
 | [**grafeo-memory**](https://github.com/GrafeoDB/grafeo-memory) | AI memory layer for LLM applications: fact extraction, deduplication, semantic search |
 | [**anywidget-graph**](https://github.com/GrafeoDB/anywidget-graph) | Interactive graph visualization for Python notebooks (Marimo, Jupyter, VS Code, Colab) |
 | [**anywidget-vector**](https://github.com/GrafeoDB/anywidget-vector) | 3D vector/embedding visualization for Python notebooks |
-| [**playground**](https://grafeo.ai) | Interactive browser playground: query in 6 languages, visualize graphs, explore schemas |
+| [**playground**](https://playground.grafeo.dev/) | Interactive browser playground: query in 6 languages, visualize graphs, explore schemas |
+| [**IDE**](https://ide.grafeo.dev/) | Graph database IDE in the browser: query tabs, transactions, vector search and 3D views; the data stays on the machine |
+| [**Grafeo AI**](https://grafeo.ai) | Agent memory, MCP tools and LangChain and LlamaIndex stores on Grafeo, in one file |
 | [**graph-bench**](https://github.com/GrafeoDB/graph-bench) | Benchmark suite comparing graph databases across 65 LDBC-inspired and custom benchmarks |
 | [**ann-benchmarks**](https://github.com/GrafeoDB/ann-benchmarks) | Fork of ann-benchmarks with a Grafeo HNSW adapter for vector search benchmarking |
 
 ## Documentation
 
-Full documentation is available at [grafeo.dev](https://grafeo.dev). [API Stability](https://grafeo.dev/stability/) says which APIs are stable and which are experimental, and the [upgrade guides](https://grafeo.dev/upgrading/) list what to change between versions.
+Full documentation is available at [docs.grafeo.dev](https://docs.grafeo.dev/). [API Stability](https://docs.grafeo.dev/project/stability/) says which APIs are stable and which are experimental, and the [upgrade guides](https://docs.grafeo.dev/get-started/upgrading/) list what to change between versions.
 
 ## Contributing
 

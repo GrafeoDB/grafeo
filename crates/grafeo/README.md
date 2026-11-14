@@ -11,14 +11,16 @@ A high-performance, embeddable graph database with a Rust core and no required C
 
 ## Query Language & Data Model Support
 
-| Query Language | LPG | RDF | Status |
-|----------------|-----|-----|--------|
-| GQL (ISO/IEC 39075) | ✅ | - | Default (`embedded` profile) |
-| Cypher (openCypher 9.0) | ✅ | - | `cypher` feature or `languages` group |
-| Gremlin (Apache TinkerPop) | ✅ | - | `gremlin` feature or `languages` group |
-| GraphQL | ✅ | ✅ | `graphql` feature or `languages` group |
-| SPARQL (W3C 1.1) | - | ✅ | `sparql` feature or `languages` group |
-| SQL/PGQ (SQL:2023) | ✅ | - | `sql-pgq` feature or `languages` group |
+| Query Language | LPG | RDF | Feature |
+|----------------|-----|-----|---------|
+| GQL (ISO/IEC 39075) | ✅ | - | `gql`: in `lpg`, `rdf`, `edge` and the default |
+| Cypher (openCypher 9.0) | ✅ | - | `cypher`: in `lpg` |
+| Gremlin (Apache TinkerPop) | ✅ | - | `gremlin`: in `lpg` |
+| GraphQL | ✅ | ✅ | `graphql`: in `rdf` |
+| SPARQL (W3C 1.1) | - | ✅ | `sparql`: in `rdf` |
+| SQL/PGQ (SQL:2023) | ✅ | - | `sql-pgq`: in `lpg` |
+
+The `languages` group enables all six.
 
 Grafeo uses a modular translator architecture where query languages are parsed into ASTs, then translated to a unified logical plan that executes against the appropriate storage backend (LPG or RDF).
 
@@ -33,16 +35,28 @@ Grafeo uses a modular translator architecture where query languages are parsed i
 cargo add grafeo
 ```
 
-By default, the `embedded` profile is enabled: GQL, AI features (vector/text/hybrid search, CDC), graph algorithms and parallel execution. Customize with feature groups:
+Features come in persona profiles that describe use cases. Compose them freely:
+
+| Profile | Contents | Use case |
+|---------|----------|----------|
+| `lpg` | GQL, Cypher, Gremlin, SQL/PGQ, storage (write-ahead log, database file, spill, mmap) | Graph applications |
+| `rdf` | RDF triple store, GQL, SPARQL, GraphQL, SHACL, storage | Knowledge graphs, linked data |
+| `analytics` | Graph algorithms, vector, text and hybrid search, JSON Lines and Parquet import | Graph analytics pipelines |
+| `ai` | Vector, text and hybrid search, change data capture | RAG, semantic search, agent memory |
+| `edge` | GQL, lightweight regex | WebAssembly, resource-constrained |
+| `enterprise` | Metrics, tracing, async storage (deprecated) | Platform operators, observability |
 
 ```bash
-cargo add grafeo                                             # Default (embedded profile)
-cargo add grafeo --no-default-features --features full       # All languages + AI + storage + RDF
-cargo add grafeo --no-default-features --features languages  # All languages, no AI
-cargo add grafeo --no-default-features --features gql,ai     # GQL + AI features
-cargo add grafeo --no-default-features --features gql        # Minimal: GQL only
-cargo add grafeo --features embed                            # Add ONNX embeddings (opt-in)
+cargo add grafeo --no-default-features --features lpg,ai   # LPG application with search
+cargo add grafeo --no-default-features --features rdf      # RDF, SPARQL and SHACL
+cargo add grafeo --no-default-features --features lpg,rdf,analytics,ai  # Every language and model
+cargo add grafeo --no-default-features --features edge     # Minimal, for WebAssembly
+cargo add grafeo --features embed                          # ONNX embeddings (opt-in, about 17 MB)
 ```
+
+The default, `cargo add grafeo` alone, is the deprecated `embedded` profile (GQL, vector, text and hybrid search, change data capture, algorithms, parallel execution, the database file and Arrow export), removed in 0.7.0. It has no write-ahead log: commits reach the file at a checkpoint (`close()` or `wal_checkpoint()`), so add `wal` or a persona profile with storage for commits that survive a crash.
+
+See [Installation](https://docs.grafeo.dev/get-started/install/) and [API Stability](https://docs.grafeo.dev/project/stability/).
 
 ## Quick Start
 

@@ -59,7 +59,7 @@ grafeo shell ./mydb
 grafeo info ./mydb
 ```
 
-The full guide: [Command-Line Interface](https://grafeo.dev/getting-started/cli/).
+The full guide: [Command-Line Interface](https://docs.grafeo.dev/get-started/cli/).
 
 ## License
 

@@ -219,6 +219,11 @@ impl Fixture {
         if self.has_search_indexes() {
             indexes.push(["NULL", "Vector", "Document", "embedding"]);
         }
+        if self.layout == Layout::Compacted {
+            // 0.5.44's `compact()` dropped the text index and kept its name: a name no graph
+            // has an index for, which no graph lists (#723).
+            indexes.retain(|[name, ..]| *name != "doc_content");
+        }
         indexes.sort_unstable();
         indexes
     }
@@ -226,8 +231,9 @@ impl Fixture {
     /// Whether the vector and text indexes of the first session are there. 0.5.43 wrote
     /// them to the file but lost them on reopen, so the checkpoint at the end of its second
     /// session wrote the file without them; in a WAL directory they are index records, which
-    /// the migration replays (#401). 0.5.44's `compact()` dropped both definitions (`SHOW
-    /// INDEXES` still lists the text index's name, which its catalog kept).
+    /// the migration replays (#401). 0.5.44's `compact()` dropped both definitions; its catalog
+    /// kept the text index's name, which `SHOW INDEXES` lists in no graph, as it has no index
+    /// (#723).
     fn has_search_indexes(self) -> bool {
         match self.layout {
             Layout::Closed => self.version != "0.5.43",

@@ -2687,11 +2687,15 @@ impl GrafeoDB {
         }
         let held = self.hold_for_standalone(true)?;
         // Checked under the hold, as every standalone change.
-        if self.lpg_store()?.graph(name).is_none() {
+        let Some(graph) = self.lpg_store()?.graph(name) else {
             return Ok(false);
-        }
+        };
         standalone::refuse_drop_with_open_changes(&self.transaction_manager, &held, name)?;
         let mut change = crate::transaction::StandaloneChange::new();
+        // The names only this graph has an index of go with it (#723).
+        self.drop_names_left_without_index(&mut change, Some(name), |target| {
+            index::store_has(&graph, target)
+        })?;
         change.push(grafeo_common::change::StandaloneOp::DropGraph {
             name: name.to_string(),
         });
@@ -3266,12 +3270,17 @@ impl GrafeoDB {
     ///
     /// # Errors
     ///
-    /// As [`standalone::commit`].
+    /// A write conflict (`GRAFEO-T001`) while an open transaction holds a
+    /// name the change claims without an op (an index name a direct drop
+    /// decides about); else as [`standalone::commit`].
     pub(crate) fn commit_standalone(
         &self,
         change: crate::transaction::StandaloneChange,
         held: &crate::transaction::CommitsHeld<'_>,
     ) -> Result<()> {
+        for claim in change.claims() {
+            self.transaction_manager.refuse_claimed(claim, None)?;
+        }
         standalone::commit(
             change,
             held,

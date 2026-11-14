@@ -190,6 +190,7 @@ mod index_after_delete;
 mod index_at_past_epoch;
 mod index_inventory;
 mod index_lookup_through_label_checks;
+mod index_names_across_graphs;
 mod index_persistence;
 mod index_upkeep;
 mod indexes_after_reopen;

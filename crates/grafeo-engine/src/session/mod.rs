@@ -131,6 +131,18 @@ enum AfterSchemaChange {
     LeaveSchema(String),
 }
 
+/// What `DROP INDEX` did with one definition of the name in the active graph.
+#[cfg(feature = "gql")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NamedDrop {
+    /// The active graph has no index of it.
+    NotHere,
+    /// The drop of the active graph's index is in the change.
+    Dropped,
+    /// The active graph's index stays: another name stands for it (hash or B-tree only).
+    KeptForAnotherName,
+}
+
 /// Parses a DDL default-value literal string into a [`Value`].
 ///
 /// Handles string literals (single- or double-quoted), integers, floats,
@@ -1600,6 +1612,7 @@ impl Session {
                     )?;
                 }
                 let mut change = crate::transaction::StandaloneChange::new();
+                self.drop_names_only_graph_had(&mut change, &storage_key);
                 change.push(StandaloneOp::DropGraph { name: storage_key });
                 self.commit_standalone(change, &held)?;
                 drop(held);
@@ -1884,10 +1897,12 @@ impl Session {
         if self.in_transaction() {
             return self.queue_schema_change(change);
         }
-        for op in change.ops() {
-            for claim in crate::database::standalone::claims_of(op) {
-                self.transaction_manager.refuse_claimed(&claim, None)?;
-            }
+        for claim in change
+            .ops()
+            .flat_map(crate::database::standalone::claims_of)
+            .chain(change.claims().cloned())
+        {
+            self.transaction_manager.refuse_claimed(&claim, None)?;
         }
         crate::database::standalone::commit(
             change,
@@ -2036,6 +2051,7 @@ impl Session {
                 &held,
                 &graph_key,
             )?;
+            self.drop_names_only_graph_had(&mut change, &graph_key);
             change.push(StandaloneOp::DropGraph {
                 name: graph_key.clone(),
             });
@@ -2192,6 +2208,7 @@ impl Session {
                 &held,
                 &graph_key,
             )?;
+            self.drop_names_only_graph_had(&mut change, &graph_key);
             change.push(StandaloneOp::DropGraph {
                 name: graph_key.clone(),
             });
@@ -2832,20 +2849,59 @@ impl Session {
                 )))
             }
             SchemaStatement::DropIndex { name, if_exists } => {
-                // The indexes the name stands for, one per property, and
-                // the property index of each property in the active graph.
-                let named = self.effective_catalog().indexes_named(&name);
+                // The definitions of the name, one per property: the active graph's index of
+                // each goes. The name belongs to the database, and stays while another graph
+                // has an index of it (#723).
+                let catalog = self.effective_catalog();
+                let named = catalog.indexes_named(&name);
                 if named.is_empty() {
                     if if_exists {
                         return done(QueryResult::status("No change".to_string()));
                     }
                     return Err(invalid_reference(format!("Index '{name}' does not exist")));
                 }
-                change.push(StandaloneOp::DropCatalog(CatalogKey::IndexName(
-                    name.clone(),
-                )));
-                for def in &named {
-                    self.drop_named_index(change, def);
+                let outcomes: Vec<NamedDrop> = named
+                    .iter()
+                    .map(|def| self.drop_named_index(change, def))
+                    .collect();
+                let targets: Vec<_> = named
+                    .iter()
+                    .filter_map(|def| crate::database::index::IndexTarget::of(&catalog, def))
+                    .collect();
+                let active = self.active_lpg_graph_key();
+                let others: Vec<_> = self
+                    .reachable_lpg_graphs()
+                    .into_iter()
+                    .filter(|(graph, _)| *graph != active)
+                    .collect();
+                let another_has = crate::database::index::any_graph_has(
+                    &others,
+                    &targets,
+                    |(graph, store), target| self.has_index_of(graph, store, target),
+                );
+                let here = outcomes
+                    .iter()
+                    .any(|outcome| *outcome != NamedDrop::NotHere);
+                if !here && another_has {
+                    // Another graph's index is not this graph's to drop.
+                    if if_exists {
+                        return done(QueryResult::status("No change".to_string()));
+                    }
+                    return Err(invalid_reference(format!(
+                        "Index '{name}' does not exist in this graph"
+                    )));
+                }
+                // Held whether the name goes or stays: a second drop of it elsewhere could
+                // count this graph's index as still there.
+                change.claim(crate::database::standalone::name_claim("index name", &name));
+                // The name stays while another graph lists its index under it, unless an
+                // index here stays for another name: then the name goes everywhere. No
+                // graph's index: a name an older release left behind, which this drop removes.
+                let stays = another_has && !outcomes.contains(&NamedDrop::KeptForAnotherName);
+                if !stays {
+                    change.push(StandaloneOp::DropCatalog(CatalogKey::IndexName(
+                        name.clone(),
+                    )));
                 }
                 done(QueryResult::status(format!("Dropped index '{name}'")))
             }
@@ -3348,6 +3404,7 @@ impl Session {
                             &default_graph_key,
                         )?;
                     }
+                    self.drop_names_only_graph_had(change, &default_graph_key);
                     change.push(StandaloneOp::DropGraph {
                         name: default_graph_key,
                     });
@@ -3705,8 +3762,9 @@ impl Session {
     /// Whether creating index `name` (of `kind`, on `label` and
     /// `properties`) would give the name a second meaning: the name stands
     /// for another label, property set or kind, or the active graph has the
-    /// index already. The same definition in another graph is not a second
-    /// meaning: index names are the catalog's, the indexes each graph's.
+    /// index already, as its transaction leaves it. The same definition in
+    /// another graph is not a second meaning: index names are the catalog's,
+    /// the indexes each graph's.
     #[cfg(feature = "gql")]
     fn index_name_in_use(
         &self,
@@ -3716,6 +3774,7 @@ impl Session {
         kind: grafeo_adapters::query::gql::ast::IndexKind,
     ) -> bool {
         use crate::catalog::IndexType;
+        use crate::database::index::IndexTarget;
         use grafeo_adapters::query::gql::ast::IndexKind;
 
         let named: Vec<_> = self
@@ -3751,122 +3810,78 @@ impl Session {
         let Some(store) = self.active_lpg_store() else {
             return false;
         };
-        properties.iter().all(|property| match kind {
-            IndexKind::Property | IndexKind::BTree => store.index_serves(&[label], property),
-            IndexKind::Text => {
-                #[cfg(feature = "text-index")]
-                {
-                    store.get_text_index(label, property).is_some()
-                }
-                #[cfg(not(feature = "text-index"))]
-                {
-                    false
-                }
-            }
-            IndexKind::Vector => {
-                #[cfg(feature = "vector-index")]
-                {
-                    store.get_vector_index(label, property).is_some()
-                }
-                #[cfg(not(feature = "vector-index"))]
-                {
-                    false
-                }
-            }
+        let graph = self.active_lpg_graph_key();
+        properties.iter().all(|property| {
+            let target = IndexTarget {
+                kind: index_type,
+                label: Arc::from(label),
+                property: Arc::from(property.as_str()),
+            };
+            self.has_index_of(&graph, &store, &target)
         })
     }
 
-    /// Drops the index of the active graph that `def`, a named index
-    /// `DROP INDEX` drops, stands for: the text or vector index of its label
-    /// and property for a full-text or vector one. Else the property index of its label and
-    /// property, or, without one, the index of its property on every label, unless another name
-    /// still stands for the index.
+    /// Drops the index of the active graph that `def`, a definition of the
+    /// name `DROP INDEX` drops, stands for, as the transaction leaves the
+    /// graph's indexes: the text or vector index of its label and property
+    /// for a full-text or vector one. Else the property index of its label
+    /// and property, or, without one, the index of its property on every
+    /// label, unless another name still stands for the index.
     #[cfg(feature = "gql")]
     fn drop_named_index(
         &self,
         change: &mut crate::transaction::StandaloneChange,
         def: &crate::catalog::IndexDefinition,
-    ) {
+    ) -> NamedDrop {
         use crate::catalog::IndexType;
         use grafeo_common::storage::catalog_record::IndexKeyRecord;
-        let Some(property) = self
-            .effective_catalog()
-            .get_property_key_name(def.property_key)
-        else {
-            return;
+
+        let catalog = self.effective_catalog();
+        let (Some(target), Some(store)) = (
+            crate::database::index::IndexTarget::of(&catalog, def),
+            self.active_lpg_store(),
+        ) else {
+            return NamedDrop::NotHere;
         };
-        let Some(store) = self.active_lpg_store() else {
-            return;
-        };
-        let key = match def.index_type {
-            IndexType::FullText => {
-                #[cfg(feature = "text-index")]
-                {
-                    let Some(label) = self.effective_catalog().get_label_name(def.label) else {
-                        return;
-                    };
-                    if store.get_text_index(&label, &property).is_none() {
-                        return;
-                    }
-                    IndexKeyRecord::Text {
-                        label: label.to_string(),
-                        property: property.to_string(),
-                    }
-                }
-                #[cfg(not(feature = "text-index"))]
-                return;
+        let graph = self.active_lpg_graph_key();
+        if let Some(key) = target.search_key() {
+            if !self.has_index_of(&graph, &store, &target) {
+                return NamedDrop::NotHere;
             }
-            IndexType::Vector => {
-                #[cfg(feature = "vector-index")]
-                {
-                    let Some(label) = self.effective_catalog().get_label_name(def.label) else {
-                        return;
-                    };
-                    if store.get_vector_index(&label, &property).is_none() {
-                        return;
-                    }
-                    IndexKeyRecord::Vector {
-                        label: label.to_string(),
-                        property: property.to_string(),
-                    }
-                }
-                #[cfg(not(feature = "vector-index"))]
-                return;
+            change.push(crate::database::index::drop_index(graph.as_deref(), key));
+            return NamedDrop::Dropped;
+        }
+        let there = self.property_indexes_on(&graph, &*store, &target.label, &target.property);
+        let others = catalog.all_indexes();
+        let mut others = others.iter().filter(|other| {
+            other.name != def.name
+                && other.property_key == def.property_key
+                && matches!(other.index_type, IndexType::Hash | IndexType::BTree)
+        });
+        if there.this_label {
+            if others.any(|other| other.label == def.label) {
+                return NamedDrop::KeptForAnotherName;
             }
-            IndexType::Hash | IndexType::BTree => {
-                let Some(label) = self.effective_catalog().get_label_name(def.label) else {
-                    return;
-                };
-                let graph = self.active_lpg_graph_key();
-                let there = self.property_indexes_on(&graph, &*store, &label, &property);
-                let others = self.effective_catalog().all_indexes();
-                let mut others = others.iter().filter(|other| {
-                    other.name != def.name
-                        && other.property_key == def.property_key
-                        && matches!(other.index_type, IndexType::Hash | IndexType::BTree)
-                });
-                if there.this_label {
-                    if !others.any(|other| other.label == def.label) {
-                        change.push(crate::database::index::drop_label_index(
-                            graph.as_deref(),
-                            &label,
-                            &property,
-                        ));
-                    }
-                    return;
-                }
-                if others.next().is_some() || !there.every_label {
-                    return;
-                }
-                IndexKeyRecord::Property {
-                    key: property.to_string(),
-                }
-            }
-        };
+            change.push(crate::database::index::drop_label_index(
+                graph.as_deref(),
+                &target.label,
+                &target.property,
+            ));
+            return NamedDrop::Dropped;
+        }
+        if !there.every_label {
+            return NamedDrop::NotHere;
+        }
+        if others.next().is_some() {
+            return NamedDrop::KeptForAnotherName;
+        }
         change.push(crate::database::index::drop_index(
-            self.active_lpg_graph_key().as_deref(),
-            key,
+            graph.as_deref(),
+            IndexKeyRecord::Property {
+                key: target.property.to_string(),
+            },
         ));
+        NamedDrop::Dropped
     }
 
     /// Adds to `change` the put of a text index of `property` on the nodes
@@ -3927,14 +3942,24 @@ impl Session {
         }
     }
 
-    /// Returns a table of all indexes: the ones `CREATE INDEX` made, and the
-    /// active graph's indexes made through the API, whose name is null (and
-    /// whose label is null for a property index, which covers every label).
+    /// Returns a table of the active graph's indexes, as its transaction
+    /// leaves them: the ones `CREATE INDEX` made, by name, and the ones made
+    /// through the API, whose name is null (and whose label is null for a
+    /// property index, which covers every label). A name whose index only
+    /// another graph has is not listed (#723).
     #[cfg(feature = "gql")]
     fn execute_show_indexes(&self) -> Result<QueryResult> {
         let store = self.active_lpg_store();
-        let mut indexes =
-            crate::database::index::listed_indexes(&self.effective_catalog(), store.as_deref());
+        let graph = self.active_lpg_graph_key();
+        let mut indexes = crate::database::index::listed_indexes(
+            &self.effective_catalog(),
+            store.as_deref(),
+            |target| {
+                store
+                    .as_deref()
+                    .is_some_and(|store| self.has_index_of(&graph, store, target))
+            },
+        );
         self.hide_indexes_dropped_here(&mut indexes);
         let columns = vec![
             "name".to_string(),
@@ -7808,12 +7833,9 @@ impl Session {
     /// As [`create_property_index`](Self::create_property_index).
     pub fn drop_property_index(&self, property: &str) -> Result<bool> {
         let held = self.hold_for_standalone(false)?;
+        let graph = self.active_lpg_graph_key();
         let drops = self.active_lpg_store().map(|store| {
-            crate::database::index::drops_of_property_indexes(
-                &store,
-                self.active_lpg_graph_key().as_deref(),
-                property,
-            )
+            crate::database::index::drops_of_property_indexes(&store, graph.as_deref(), property)
         });
         let Some(drops) = drops.filter(|drops| !drops.is_empty()) else {
             return Ok(false);
@@ -7822,6 +7844,10 @@ impl Session {
         for drop in drops {
             change.push(drop);
         }
+        // A name no graph has an index of any more goes with the indexes (#723).
+        self.drop_names_left_without_index(&mut change, graph.as_deref(), |target| {
+            crate::database::index::is_property_index_on(target, property)
+        });
         self.commit_standalone(change, &held)?;
         Ok(true)
     }

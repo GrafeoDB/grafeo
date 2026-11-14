@@ -561,37 +561,50 @@ mod replay {
         ] {
             assert_eq!(db.has_property_index(property), indexed, "{property}");
         }
-        let mut shown: Vec<Vec<String>> = rows(&db, "SHOW INDEXES")
-            .into_iter()
-            .map(|row| {
-                row.iter()
-                    .map(|cell| match cell {
-                        Value::String(text) => text.to_string(),
-                        Value::Null => "NULL".to_string(),
-                        other => panic!("a SHOW INDEXES cell: {other:?}"),
-                    })
-                    .collect()
-            })
-            .collect();
-        shown.sort();
+        let listing = |rows: &[Vec<Value>]| -> Vec<Vec<String>> {
+            let mut shown: Vec<Vec<String>> = rows
+                .iter()
+                .map(|row| {
+                    row.iter()
+                        .map(|cell| match cell {
+                            Value::String(text) => text.to_string(),
+                            Value::Null => "NULL".to_string(),
+                            other => panic!("a SHOW INDEXES cell: {other:?}"),
+                        })
+                        .collect()
+                })
+                .collect();
+            shown.sort();
+            shown
+        };
         // The DDL indexes carry names, vector ones included; those the API
         // made (email, Doc.emb, Doc.body) are listed with none, and the
-        // dropped ones are gone.
+        // dropped ones are gone. Each graph lists its own indexes (#723):
+        // the default graph's here, `model`'s below.
         assert_eq!(
-            shown,
+            listing(&rows(&db, "SHOW INDEXES")),
             [
                 ["NULL", "FullText", "Doc", "body"],
                 ["NULL", "Hash", "NULL", "email"],
                 ["NULL", "Vector", "Doc", "emb"],
                 ["note_emb", "Vector", "Note", "emb"],
-                ["part_emb", "Vector", "Part", "emb"],
-                ["part_serial", "Hash", "Part", "serial"],
                 ["person_bio", "FullText", "Person", "bio"],
                 ["person_city", "BTree", "Person", "city"],
                 ["person_name", "Hash", "Person", "name"],
             ]
             .map(|row| row.map(str::to_string).to_vec()),
-            "every index, without the ones dropped"
+            "every index of the default graph, without the ones dropped"
+        );
+        let in_model = db.session();
+        in_model.use_graph("model");
+        assert_eq!(
+            listing(in_model.execute("SHOW INDEXES").unwrap().rows()),
+            [
+                ["part_emb", "Vector", "Part", "emb"],
+                ["part_serial", "Hash", "Part", "serial"],
+            ]
+            .map(|row| row.map(str::to_string).to_vec()),
+            "the named graph's indexes"
         );
 
         let docs = store

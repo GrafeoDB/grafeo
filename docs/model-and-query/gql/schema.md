@@ -290,14 +290,24 @@ A property or B-tree index holds the nodes of its label only, so writes on other
 
 `create_property_index` in the API makes an index on a property of every label, which also serves a query with no label. An index on the label and property, or one on the property of every label, makes a later `CREATE INDEX` on them build nothing: its name stands for the index that is there. `drop_property_index` drops every index on the property in the current graph.
 
-Index names belong to the database, not to one graph: a name stands for one index definition in all of its graphs.
-`CREATE INDEX` with a name that already stands for another label, property or kind of index, in any graph, fails
-naming it, and `IF NOT EXISTS` (also on `CREATE VECTOR INDEX`) keeps the existing index.
-`DROP INDEX` drops the index the name stands for, whatever its kind, and every property of an index over several.
-`SHOW INDEXES` lists each index by name, with its type, label and property (one row per property), also the indexes
-made through the API (`create_property_index`, `create_vector_index`, `create_text_index`): those have a null name,
-and a property index made that way covers every label, so its label is null too. An index a constraint built without
-a name has a null name and its label.
+Index names belong to the database, and each graph has its own indexes: a name stands for one index definition,
+and each graph may have that index or not. `CREATE INDEX` with a name that already stands for another label,
+property or kind of index, in any graph, fails naming it, and `IF NOT EXISTS` (also on `CREATE VECTOR INDEX`) keeps
+the existing index. `CREATE INDEX` of the same definition in another graph builds that graph's index under the name.
+
+`SHOW INDEXES` lists the current graph's indexes, as its transaction leaves them: each named one by name, with its
+type, label and property (one row per property), and the indexes made through the API (`create_property_index`,
+`create_vector_index`, `create_text_index`), which have a null name; a property index made that way covers every
+label, so its label is null too. An index a constraint built without a name has a null name and its label. A name
+whose index only another graph has is not listed.
+
+`DROP INDEX` drops the current graph's index of the name, whatever its kind, and every property of an index over
+several. The name stays while another graph has its index, and goes with the last one; it is then free for another
+definition. In a graph without the index, `DROP INDEX` fails while another graph has it (`IF EXISTS` changes
+nothing), and removes a name that no graph has an index of. The direct drops (`drop_property_index`,
+`drop_text_index`, `drop_vector_index`) and dropping a graph or a schema also remove a name that no graph uses any
+more. `CREATE OR REPLACE PROPERTY GRAPH` drops the old graph's index names this way, so name its indexes again after
+a replace.
 
 ### Text Indexes
 

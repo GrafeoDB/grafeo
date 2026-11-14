@@ -169,3 +169,56 @@ tests:
     query: "INSERT (:File {id: -0.0e0})"
     expect:
       error: "UNIQUE constraint violation"
+
+  # A graph lists a name only when it has the index the name stands for (#723).
+  - name: show_indexes_in_a_graph_without_the_index_lists_no_name
+    setup:
+      - "CREATE GRAPH g"
+      - "CREATE INDEX by_id FOR (n:File) ON (n.id)"
+      - "USE GRAPH g"
+    query: "SHOW INDEXES"
+    expect:
+      empty: true
+
+  # DROP INDEX in one graph keeps the name while another graph has its index (#723).
+  - name: drop_index_keeps_the_name_for_another_graph
+    setup:
+      - "CREATE GRAPH g"
+      - "CREATE INDEX by_id FOR (n:File) ON (n.id)"
+      - "USE GRAPH g"
+      - "CREATE INDEX by_id FOR (n:File) ON (n.id)"
+      - "USE GRAPH default"
+      - "DROP INDEX by_id"
+      - "USE GRAPH g"
+    query: "SHOW INDEXES"
+    expect:
+      rows:
+        - [by_id, Hash, File, id]
+
+  # DROP SCHEMA drops its default graph: a name only that graph used is free again (#723).
+  - name: drop_schema_frees_an_index_name_only_its_default_graph_used
+    setup:
+      - "CREATE SCHEMA staging"
+      - "SESSION SET SCHEMA staging"
+      - "CREATE INDEX by_id FOR (n:File) ON (n.id)"
+      - "SESSION RESET"
+      - "DROP SCHEMA staging"
+      - "CREATE INDEX by_id FOR (n:Person) ON (n.nick)"
+    query: "SHOW INDEXES"
+    expect:
+      rows:
+        - [by_id, Hash, Person, nick]
+
+  # DROP SCHEMA keeps a name another graph still has (#723).
+  - name: drop_schema_keeps_an_index_name_another_graph_uses
+    setup:
+      - "CREATE INDEX by_id FOR (n:File) ON (n.id)"
+      - "CREATE SCHEMA staging"
+      - "SESSION SET SCHEMA staging"
+      - "CREATE INDEX by_id FOR (n:File) ON (n.id)"
+      - "SESSION RESET"
+      - "DROP SCHEMA staging"
+    query: "SHOW INDEXES"
+    expect:
+      rows:
+        - [by_id, Hash, File, id]

@@ -1447,6 +1447,9 @@ pub(crate) struct StandaloneChange {
     /// The ops, in the order they apply, each with the index a statement
     /// built for it (a vector or text index put), installed as it applies.
     ops: Vec<(StandaloneOp, Option<BuiltIndex>)>,
+    /// The names it decided about without an op that changes them (a `DROP INDEX` that
+    /// keeps a name another graph still has an index of): claimed as its ops' names are.
+    claims: Vec<super::KeyClaim>,
     /// The reservations of the indexes it builds, held until it is applied.
     reserved: Vec<MemoryGrant>,
 }
@@ -1468,6 +1471,17 @@ impl StandaloneChange {
     #[cfg(any(feature = "vector-index", feature = "text-index"))]
     pub(crate) fn push_built(&mut self, op: StandaloneOp, index: BuiltIndex) {
         self.ops.push((op, Some(index)));
+    }
+
+    /// Claims `claim`, a name the change decided about: the commit fails while another open
+    /// transaction holds it, and a transaction holds it from its statement on.
+    pub(crate) fn claim(&mut self, claim: super::KeyClaim) {
+        self.claims.push(claim);
+    }
+
+    /// The claims of the change that no op of it makes (see [`claim`](Self::claim)).
+    pub(crate) fn claims(&self) -> impl Iterator<Item = &super::KeyClaim> {
+        self.claims.iter()
     }
 
     /// Whether the change changes nothing: it logs no group then.

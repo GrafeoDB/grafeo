@@ -355,25 +355,30 @@ impl super::GrafeoDB {
         Ok(crate::admin::SchemaInfo::Lpg(summary))
     }
 
-    /// Returns detailed information about all indexes: the ones
-    /// `CREATE INDEX` made, by the name it gave them, as `SHOW INDEXES`
-    /// lists them, and the current graph's indexes made through the API,
-    /// whose `name` is empty. The target of a property index made through
-    /// the API, which covers every label, has an empty label (`:age`).
+    /// Returns detailed information about the current graph's indexes: the
+    /// ones `CREATE INDEX` made, by the name it gave them, as `SHOW INDEXES`
+    /// lists them, and the ones made through the API, whose `name` is empty.
+    /// A name whose index only another graph has is not listed. The target
+    /// of a property index made through the API, which covers every label,
+    /// has an empty label (`:age`).
     #[must_use]
     pub fn list_indexes(&self) -> Vec<crate::admin::IndexInfo> {
         let store = self.current_lpg_store().ok();
-        super::index::listed_indexes(&self.catalog, store.as_deref())
-            .into_iter()
-            .map(|index| crate::admin::IndexInfo {
-                name: index.name.unwrap_or_default(),
-                index_type: format!("{:?}", index.kind),
-                target: format!("{}:{}", index.label.unwrap_or_default(), index.property),
-                unique: false,
-                cardinality: None,
-                size_bytes: None,
-            })
-            .collect()
+        super::index::listed_indexes(&self.catalog, store.as_deref(), |target| {
+            store
+                .as_deref()
+                .is_some_and(|store| super::index::store_has(store, target))
+        })
+        .into_iter()
+        .map(|index| crate::admin::IndexInfo {
+            name: index.name.unwrap_or_default(),
+            index_type: format!("{:?}", index.kind),
+            target: format!("{}:{}", index.label.unwrap_or_default(), index.property),
+            unique: false,
+            cardinality: None,
+            size_bytes: None,
+        })
+        .collect()
     }
 
     /// The types whose rules an older release applied in graphs not bound to their graph

@@ -1095,7 +1095,7 @@ fn install<S: RootStore>(target: &S, kind: &IndexKindRecord, index: BuiltIndex) 
 }
 
 /// What identifies the index of `kind`.
-fn index_key(kind: &IndexKindRecord) -> IndexKeyRecord {
+pub(crate) fn index_key(kind: &IndexKindRecord) -> IndexKeyRecord {
     match kind {
         IndexKindRecord::Property { key } => IndexKeyRecord::Property { key: key.clone() },
         IndexKindRecord::Vector {

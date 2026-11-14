@@ -16,11 +16,14 @@ use grafeo_common::types::{EpochId, ReadView, TransactionId};
 use grafeo_common::utils::error::{Error, Result, TransactionError};
 
 use grafeo_core::graph::GraphStore;
+use grafeo_core::graph::rowgroup::RowGroupStore;
 
 use super::Session;
 use crate::catalog::{Catalog, CatalogConstraintValidator, RuleScope, check_data_against_rules};
+use crate::database::index::{IndexTarget, drop_names_left_without_index, store_has};
 use crate::database::standalone::{
-    Applying, apply, apply_to_catalog, claims_of, copy_of_catalog, refuse_drop_with_changes_in,
+    Applying, apply, apply_to_catalog, claims_of, copy_of_catalog, index_key,
+    refuse_drop_with_changes_in,
 };
 use crate::query::cache::QueryCache;
 use crate::transaction::{BuiltIndex, QueuedSchemaOp, StandaloneChange};
@@ -41,7 +44,6 @@ pub(super) struct PendingSchema {
 }
 
 /// The property indexes that serve a label and a key in a graph.
-#[cfg(feature = "gql")]
 #[derive(Clone, Copy)]
 pub(super) struct PropertyIndexesOn {
     /// The index on the key, on every label.
@@ -50,7 +52,6 @@ pub(super) struct PropertyIndexesOn {
     pub this_label: bool,
 }
 
-#[cfg(feature = "gql")]
 impl PropertyIndexesOn {
     /// Whether either is there.
     pub fn any(self) -> bool {
@@ -93,7 +94,11 @@ impl Session {
             )));
         };
         let mark = self.transaction_manager.mark_claims(transaction)?;
-        for claim in change.ops().flat_map(claims_of) {
+        for claim in change
+            .ops()
+            .flat_map(claims_of)
+            .chain(change.claims().cloned())
+        {
             if let Err(error) = self.transaction_manager.record_key(transaction, claim) {
                 self.transaction_manager.restore_claims(transaction, mark)?;
                 return Err(error);
@@ -326,7 +331,6 @@ impl Session {
 
     /// The property indexes that serve `label` and `key` in `store`, the graph `graph`, as the
     /// transaction's queue leaves them, in order: one it creates counts, one it drops does not.
-    #[cfg(feature = "gql")]
     pub(super) fn property_indexes_on(
         &self,
         graph: &Option<String>,
@@ -377,24 +381,119 @@ impl Session {
         there
     }
 
+    /// Whether the graph `graph` (`None` the default graph), whose store is `store`, has the
+    /// index `target` stands for, as the transaction's queue leaves it: the store's indexes
+    /// with the queued puts and drops of that graph applied in order, so an index it creates
+    /// counts and one it drops does not (#723).
+    pub(super) fn has_index_of(
+        &self,
+        graph: &Option<String>,
+        store: &RowGroupStore,
+        target: &IndexTarget,
+    ) -> bool {
+        use grafeo_common::storage::catalog_record::CatalogKey;
+
+        let Some(key) = target.search_key() else {
+            return self
+                .property_indexes_on(graph, store, &target.label, &target.property)
+                .any();
+        };
+        let mut there = store_has(store, target);
+        let Some(changes) = self.changes.lock().clone() else {
+            return there;
+        };
+        changes.read_schema(|queue| {
+            for queued in queue {
+                match &queued.op {
+                    StandaloneOp::PutCatalog(CatalogRecord::Index(record))
+                        if record.graph == *graph && index_key(&record.index) == key =>
+                    {
+                        there = true;
+                    }
+                    StandaloneOp::DropCatalog(CatalogKey::Index {
+                        graph: on_graph,
+                        index,
+                    }) if on_graph == graph && *index == key => there = false,
+                    _ => {}
+                }
+            }
+        });
+        there
+    }
+
+    /// Adds to `change` what dropping the indexes `dropped` matches in the graph `graph` does
+    /// to the index names, by every graph this session reaches as its transaction leaves them
+    /// (see [`drop_names_left_without_index`]).
+    pub(super) fn drop_names_left_without_index(
+        &self,
+        change: &mut StandaloneChange,
+        graph: Option<&str>,
+        dropped: impl Fn(&IndexTarget) -> bool,
+    ) {
+        drop_names_left_without_index(
+            change,
+            &self.effective_catalog(),
+            &self.reachable_lpg_graphs(),
+            graph,
+            dropped,
+            |(key, store), target| self.has_index_of(key, store, target),
+        );
+    }
+
+    /// Adds to `change`, which drops the named graph with storage key `key`, the drop of each
+    /// index name only that graph has an index of (#723).
+    #[cfg(feature = "gql")]
+    pub(super) fn drop_names_only_graph_had(&self, change: &mut StandaloneChange, key: &str) {
+        let Some(store) = self.named_graph(key) else {
+            return;
+        };
+        let graph = Some(key.to_string());
+        self.drop_names_left_without_index(change, Some(key), |target| {
+            self.has_index_of(&graph, &store, target)
+        });
+    }
+
     /// Every graph a statement of this session can reach, by storage key (`None` for the
     /// default graph).
     fn reachable_graphs(&self) -> Vec<(Option<String>, Arc<dyn GraphStore>)> {
-        let mut graphs: Vec<(Option<String>, Arc<dyn GraphStore>)> =
-            vec![(None, Arc::clone(&self.stores.graph_store))];
-        for name in self
+        std::iter::once((None, Arc::clone(&self.stores.graph_store)))
+            .chain(
+                self.reachable_named_graphs()
+                    .into_iter()
+                    .map(|(name, graph)| (Some(name), graph as Arc<dyn GraphStore>)),
+            )
+            .collect()
+    }
+
+    /// The built-in store of every graph a statement of this session can reach, by storage
+    /// key, as [`reachable_graphs`](Self::reachable_graphs): none on a backend of its own.
+    pub(super) fn reachable_lpg_graphs(&self) -> Vec<(Option<String>, Arc<RowGroupStore>)> {
+        let Some(root) = self.root_store() else {
+            return Vec::new();
+        };
+        std::iter::once((None, root))
+            .chain(
+                self.reachable_named_graphs()
+                    .into_iter()
+                    .map(|(name, graph)| (Some(name), graph)),
+            )
+            .collect()
+    }
+
+    /// The named graphs a statement of this session can reach, by storage key: the committed
+    /// ones its transaction did not drop, and the ones it created.
+    fn reachable_named_graphs(&self) -> Vec<(String, Arc<RowGroupStore>)> {
+        let mut graphs: Vec<(String, Arc<RowGroupStore>)> = self
             .root_store()
             .map(|root| root.graph_names())
             .unwrap_or_default()
-        {
-            if let Some(graph) = self.named_graph(&name) {
-                graphs.push((Some(name), graph as Arc<dyn GraphStore>));
-            }
-        }
+            .into_iter()
+            .filter_map(|name| self.named_graph(&name).map(|graph| (name, graph)))
+            .collect();
         let pending = self.stores.pending_graphs.read();
         for (name, graph) in &pending.created {
-            if !graphs.iter().any(|(key, _)| key.as_ref() == Some(name)) {
-                graphs.push((Some(name.clone()), Arc::clone(graph) as Arc<dyn GraphStore>));
+            if !graphs.iter().any(|(key, _)| key == name) {
+                graphs.push((name.clone(), Arc::clone(graph)));
             }
         }
         graphs

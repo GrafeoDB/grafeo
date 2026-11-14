@@ -2936,15 +2936,24 @@ impl RdfPlanner {
         Ok((operator, Vec::new(), Vec::new()))
     }
 
-    /// Plans a CLEAR GRAPH operator.
+    /// Plans a CLEAR GRAPH operator. A named graph must exist, as for
+    /// `DROP` (SPARQL 1.1 Update 3.1.5: a store that records empty graphs
+    /// fails a `CLEAR` of a missing one), and `SILENT` makes it a no-op;
+    /// `DEFAULT`, `NAMED` and `ALL` always apply.
     fn plan_clear_graph(
         &self,
         clear: &ClearGraphOp,
     ) -> Result<(Box<dyn Operator>, Vec<String>, Vec<LogicalType>)> {
-        let op = RdfGraphOp::Clear {
-            target: clear.target.clone(),
+        let target = clear.target.clone();
+        let check = match &target {
+            RdfGraphTarget::Named(name) => GraphCheck::Present {
+                graph: name.clone(),
+                silent: clear.silent,
+                what: "Graph",
+            },
+            _ => GraphCheck::None,
         };
-        Ok(self.graph_operator("RdfClearGraph", op, GraphCheck::None))
+        Ok(self.graph_operator("RdfClearGraph", RdfGraphOp::Clear { target }, check))
     }
 
     /// Plans a CREATE GRAPH operator.
@@ -3370,9 +3379,10 @@ enum GraphCheck {
     /// The graph must not exist (`CREATE`); `SILENT` skips the operation
     /// when it does.
     Absent { graph: String, silent: bool },
-    /// The named graph must exist (`DROP`, the source of `COPY`, `MOVE` and
-    /// `ADD`, which `what` names in the error); `SILENT` skips a `DROP` of a
-    /// graph that does not exist, and lets the others read it as empty.
+    /// The named graph must exist (`DROP`, `CLEAR`, the source of `COPY`,
+    /// `MOVE` and `ADD`, which `what` names in the error); `SILENT` skips a
+    /// `DROP` or `CLEAR` of a graph that does not exist, and lets the others
+    /// read it as empty.
     Present {
         graph: String,
         silent: bool,
@@ -3413,7 +3423,8 @@ impl Operator for RdfGraphOperator {
             return Ok(None);
         }
         self.done = true;
-        let skips_missing = matches!(self.op, RdfGraphOp::Drop { .. });
+        // `DROP` and `CLEAR SILENT` of a missing graph record nothing.
+        let skips_missing = matches!(self.op, RdfGraphOp::Drop { .. } | RdfGraphOp::Clear { .. });
         let check = &self.check;
         let writer = update_writer(&self.writer)?;
         // Whether a graph exists, as the transaction sees it: its snapshot

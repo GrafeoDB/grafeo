@@ -699,6 +699,142 @@ fn own_graph_operations_apply_in_order_and_are_seen_holds() {
     assert!(wrong.is_empty(), "{}", wrong.join("\n"));
 }
 
+/// The graphs [`existing`] probes: two the seed holds and one it does not.
+const PROBED: [&str; 3] = ["ex:g", "ex:h", "ex:k"];
+
+/// The graphs of [`PROBED`] that exist for `session`, which is in a transaction, empty ones
+/// included (a `GRAPH ?g` pattern cannot see those): each is probed by a `CREATE GRAPH`, which
+/// fails when it exists, taken back to a savepoint before the next.
+fn existing(session: &Session) -> Vec<&'static str> {
+    PROBED
+        .iter()
+        .enumerate()
+        .filter(|(at, name)| {
+            let savepoint = format!("probe_{at}");
+            session.savepoint(&savepoint).unwrap();
+            let created = session
+                .execute_sparql(&q(&format!("CREATE GRAPH {name}")))
+                .is_ok();
+            session.rollback_to_savepoint(&savepoint).unwrap();
+            !created
+        })
+        .map(|(_, name)| *name)
+        .collect()
+}
+
+/// What a statement left: whether it succeeded, the graphs that exist and every triple.
+type Step = (bool, Vec<&'static str>, Vec<String>);
+
+/// [`existing`] and every triple of `db` as a new transaction sees them, taken back after.
+fn committed_state(db: &GrafeoDB) -> (Vec<&'static str>, Vec<String>) {
+    let mut session = db.session();
+    session.begin_transaction().unwrap();
+    let graphs = existing(&session);
+    let triples = answer(&session, ALL);
+    session.rollback().unwrap();
+    (graphs, triples)
+}
+
+/// Each of `statements` run alone, one after another, on a seeded database: what each left. A
+/// statement that fails changes nothing and the next runs.
+fn serial_steps(statements: &[&str]) -> Vec<Step> {
+    let db = seeded();
+    statements
+        .iter()
+        .map(|statement| {
+            let ok = db.execute_sparql(&q(statement)).is_ok();
+            let (graphs, triples) = committed_state(&db);
+            (ok, graphs, triples)
+        })
+        .collect()
+}
+
+#[test]
+fn graph_operations_in_a_transaction_end_and_leave_as_the_serial_run() {
+    graph_operations_in_a_transaction_end_and_leave_as_the_serial_run_holds();
+}
+
+/// A transaction's graph operations end and leave what the same statements run one by one do
+/// (#718, D2): each statement succeeds or fails as its serial run does, and after each the
+/// graphs that exist (empty ones too) and the triples are the serial ones, inside the
+/// transaction and after its commit. `CLEAR GRAPH` of a graph that does not exist fails unless
+/// `SILENT`, as `DROP GRAPH` does; `CLEAR SILENT` of one changes nothing; `CLEAR DEFAULT`,
+/// `NAMED` and `ALL` never fail. `COPY`, `MOVE` and `ADD` run in a transaction as alone.
+fn graph_operations_in_a_transaction_end_and_leave_as_the_serial_run_holds() {
+    let jules_in_g = r#"INSERT DATA { GRAPH ex:g { ex:jules ex:p "5" . } }"#;
+    let jules_in_k = r#"INSERT DATA { GRAPH ex:k { ex:jules ex:p "5" . } }"#;
+    let cases: [&[&str]; 21] = [
+        // CLEAR of a graph the transaction dropped, or that never existed.
+        &["DROP GRAPH ex:g", "CLEAR GRAPH ex:g"],
+        &["DROP GRAPH ex:g", "CLEAR SILENT GRAPH ex:g"],
+        &["DROP GRAPH ex:g", "CLEAR GRAPH ex:g", "CREATE GRAPH ex:g"],
+        &[
+            "DROP GRAPH ex:g",
+            "CLEAR SILENT GRAPH ex:g",
+            "DROP GRAPH ex:g",
+        ],
+        &["CLEAR GRAPH ex:k"],
+        &["CLEAR SILENT GRAPH ex:k", "CREATE GRAPH ex:k"],
+        &["CLEAR SILENT GRAPH ex:k", "DROP GRAPH ex:k"],
+        &["CLEAR SILENT GRAPH ex:k", jules_in_k],
+        // CLEAR of a graph that exists, empty or made again by an insert, keeps it.
+        &["CREATE GRAPH ex:k", "CLEAR GRAPH ex:k", "DROP GRAPH ex:k"],
+        &[
+            "DROP GRAPH ex:g",
+            jules_in_g,
+            "CLEAR GRAPH ex:g",
+            "DROP GRAPH ex:g",
+        ],
+        // DEFAULT, NAMED and ALL never fail.
+        &["DROP ALL", "CLEAR ALL", "CLEAR NAMED", "CLEAR DEFAULT"],
+        &["DROP GRAPH ex:h", "CLEAR NAMED", "CREATE GRAPH ex:h"],
+        // COPY, MOVE and ADD, onto themselves, from a graph the transaction made, from and to a
+        // dropped graph.
+        &["COPY ex:g TO ex:h"],
+        &["MOVE ex:g TO ex:k"],
+        &["ADD ex:g TO ex:h"],
+        &["COPY ex:g TO ex:g", "MOVE ex:h TO ex:h"],
+        &["CREATE GRAPH ex:k", jules_in_k, "COPY ex:k TO ex:g"],
+        &["COPY DEFAULT TO ex:k", "MOVE ex:g TO DEFAULT"],
+        &["DROP GRAPH ex:g", "COPY ex:h TO ex:g"],
+        &["DROP GRAPH ex:g", "MOVE ex:g TO ex:h"],
+        &[
+            "DROP GRAPH ex:g",
+            "MOVE SILENT ex:g TO ex:h",
+            "ADD SILENT ex:g TO ex:h",
+        ],
+    ];
+    let mut wrong = Vec::new();
+    for statements in cases {
+        let name = statements.join("; ");
+        let want = serial_steps(statements);
+        let db = seeded();
+        let mut session = db.session();
+        session.begin_transaction().unwrap();
+        for (statement, wanted) in statements.iter().zip(&want) {
+            let ok = session.execute_sparql(&q(statement)).is_ok();
+            let step = (ok, existing(&session), answer(&session, ALL));
+            if step != *wanted {
+                wrong.push(format!(
+                    "{name}: after `{statement}` in the transaction, {step:?}; alone, {wanted:?}"
+                ));
+            }
+        }
+        if let Err(error) = session.commit() {
+            wrong.push(format!("{name}: the commit: {error}"));
+            continue;
+        }
+        let (_, graphs, triples) = want.last().unwrap();
+        if committed_state(&db) != (graphs.clone(), triples.clone()) {
+            wrong.push(format!(
+                "{name}: after the commit, {:?}, not the serial state",
+                committed_state(&db)
+            ));
+        }
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
+
 /// A savepoint rollback takes back a graph operation that followed it.
 #[test]
 fn a_savepoint_rollback_takes_back_a_graph_operation() {
@@ -759,13 +895,15 @@ mod replay {
     use grafeo_engine::config::StorageFormat;
     use grafeo_engine::{Config, GrafeoDB};
 
-    use super::{ALL, SEED, answer, q, serial};
+    use super::{SEED, committed_state, q, serial_steps};
 
     const SCENARIO_VAR: &str = "GRAFEO_SPARQL_SNAPSHOT_REPLAY_SCENARIO";
     const PATH_VAR: &str = "GRAFEO_SPARQL_SNAPSHOT_REPLAY_PATH";
 
-    /// One transaction each: a graph operation between triple writes, in its WAL group.
-    const SCENARIOS: [&[&str]; 3] = [
+    /// One transaction each: a graph operation between triple writes, in its WAL group, and the
+    /// operations on several graphs (`CLEAR ALL`, `CLEAR NAMED`, `COPY`, `MOVE`, `ADD`) that a
+    /// transaction expands per graph.
+    const SCENARIOS: [&[&str]; 7] = [
         &[
             "DROP GRAPH ex:g",
             r#"INSERT DATA { GRAPH ex:g { ex:jules ex:p "5" . } }"#,
@@ -775,6 +913,20 @@ mod replay {
             "CLEAR GRAPH ex:g",
         ],
         &["CLEAR DEFAULT", r#"INSERT DATA { ex:jules ex:p "5" . }"#],
+        &[
+            r#"INSERT DATA { GRAPH ex:k { ex:jules ex:p "5" . } }"#,
+            "CLEAR ALL",
+            r#"INSERT DATA { ex:jules ex:p "6" . }"#,
+        ],
+        &[
+            "CLEAR NAMED",
+            r#"INSERT DATA { GRAPH ex:h { ex:jules ex:p "5" . } }"#,
+        ],
+        &[
+            "COPY ex:g TO ex:h",
+            r#"INSERT DATA { GRAPH ex:h { ex:jules ex:p "5" . } }"#,
+        ],
+        &["MOVE ex:g TO ex:k", "ADD ex:h TO ex:k"],
     ];
 
     fn open(path: &Path) -> GrafeoDB {
@@ -824,7 +976,9 @@ mod replay {
             }
             assert!(sidecar_wal(&path).exists(), "the crash left the WAL");
             let reopened = open(&path);
-            if answer(&reopened.session(), ALL) != serial(statements) {
+            // The graphs that exist (empty ones too) and the triples, as alone.
+            let (_, graphs, triples) = serial_steps(statements).pop().unwrap();
+            if committed_state(&reopened) != (graphs, triples) {
                 wrong.push(statements.join("; "));
             }
         }
@@ -951,9 +1105,49 @@ fn wrong_outcomes(cases: &[Case<'_>]) -> Vec<String> {
 /// triples (one subject, or one triple in two graphs) do not. Each case in both orders.
 #[test]
 fn triple_conflicts_follow_what_each_transaction_changed() {
+    let wrong = wrong_outcomes(&triple_cases());
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
+
+/// Two racing transactions leave the state of a serial order (C): when the second conflicts,
+/// the first's commit and nothing of the second; when both commit, the state of the two run one
+/// after the other in one order or the other (a write that changed nothing at its snapshot
+/// records nothing, so the order may be the second's first). Two inserts of one triple leave it
+/// once. Each case of [`triple_cases`] in both orders.
+#[test]
+fn racing_triple_writes_leave_a_serial_state() {
+    let mut wrong = Vec::new();
+    for order in [Order::FirstOpen, Order::FirstCommitted] {
+        for (name, first, second, want) in triple_cases() {
+            let db = seeded();
+            let got = race(&db, order, &first, &second);
+            if got != want {
+                wrong.push(format!("{order:?} {name}: {got:?}, want {want:?}"));
+                continue;
+            }
+            let state = answer(&db.session(), ALL);
+            let then = |one: &[&str], other: &[&str]| -> Vec<String> {
+                serial(&one.iter().chain(other).copied().collect::<Vec<_>>())
+            };
+            let serial_states = match want {
+                Outcome::Conflict => vec![serial(&first)],
+                _ => vec![then(&first, &second), then(&second, &first)],
+            };
+            if !serial_states.contains(&state) {
+                wrong.push(format!(
+                    "{order:?} {name}: {state:?}, not the state of a serial order {serial_states:?}"
+                ));
+            }
+        }
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
+
+/// The cases of the triple rules (C), each with how the second transaction ends.
+fn triple_cases() -> Vec<Case<'static>> {
     let delete_alix = r#"DELETE DATA { ex:alix ex:p "1" . }"#;
     let fresh = r#"INSERT DATA { ex:hans ex:p "new" . }"#;
-    let cases: Vec<Case<'_>> = vec![
+    vec![
         (
             "two deletes of one triple",
             vec![delete_alix],
@@ -1011,9 +1205,7 @@ fn triple_conflicts_follow_what_each_transaction_changed() {
             vec![r#"INSERT DATA { GRAPH ex:g { ex:alix ex:p "1" . } }"#],
             Outcome::Committed,
         ),
-    ];
-    let wrong = wrong_outcomes(&cases);
-    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    ]
 }
 
 #[test]

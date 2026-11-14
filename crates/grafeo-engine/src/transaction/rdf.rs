@@ -279,8 +279,16 @@ impl PendingTriples {
             RdfGraphOp::Clear {
                 target: RdfGraphTarget::Named(name),
             } => {
-                let base = match self.named.get(name).map(|graph| graph.base) {
-                    Some(PendingBase::Created) => PendingBase::Created,
+                // A clear leaves a graph as it finds it, existing or not, as
+                // the store's apply does: one the transaction dropped and
+                // wrote nothing into since stays dropped.
+                let base = match self
+                    .named
+                    .get(name)
+                    .map(|graph| (graph.base, graph.exists()))
+                {
+                    Some((PendingBase::Created, _)) => PendingBase::Created,
+                    Some((PendingBase::Dropped, Some(false))) => PendingBase::Dropped,
                     _ => PendingBase::Emptied,
                 };
                 self.named.insert(name.clone(), PendingGraph::based(base));

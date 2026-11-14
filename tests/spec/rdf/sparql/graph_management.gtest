@@ -157,6 +157,79 @@ tests:
     expect:
       empty: true
 
+  # CLEAR of a graph that does not exist fails unless SILENT, as DROP does
+  # (SPARQL 1.1 Update, CLEAR); CLEAR SILENT of one changes nothing, and
+  # DEFAULT, NAMED and ALL never fail (#718).
+
+  - name: clear_graph_of_a_missing_graph_fails
+    query: "CLEAR GRAPH <http://ex.org/graph/nowhere>"
+    expect:
+      error: "does not exist"
+
+  - name: clear_graph_after_its_drop_fails
+    setup:
+      - |
+        INSERT DATA {
+          GRAPH <http://ex.org/graph/lyon> {
+            <http://ex.org/jules> <http://ex.org/livesIn> "Lyon" .
+          }
+        }
+      - "DROP GRAPH <http://ex.org/graph/lyon>"
+    query: "CLEAR GRAPH <http://ex.org/graph/lyon>"
+    expect:
+      error: "does not exist"
+
+  - name: clear_silent_of_a_missing_graph_creates_nothing
+    # The CREATE GRAPH after it succeeds only when the graph still does not exist.
+    setup:
+      - "CLEAR SILENT GRAPH <http://ex.org/graph/rome>"
+      - "CREATE GRAPH <http://ex.org/graph/rome>"
+      - |
+        INSERT DATA {
+          GRAPH <http://ex.org/graph/rome> {
+            <http://ex.org/jules> <http://ex.org/livesIn> "Rome" .
+          }
+        }
+    query: |
+      SELECT ?who WHERE {
+        GRAPH <http://ex.org/graph/rome> { ?who <http://ex.org/livesIn> ?city . }
+      }
+    expect:
+      rows:
+        - [http://ex.org/jules]
+
+  - name: drop_after_clear_silent_of_a_missing_graph_fails
+    setup:
+      - "CLEAR SILENT GRAPH <http://ex.org/graph/oslo>"
+    query: "DROP GRAPH <http://ex.org/graph/oslo>"
+    expect:
+      error: "does not exist"
+
+  - name: clear_default_named_and_all_never_fail
+    # On a store with no graph at all.
+    setup:
+      - "CLEAR DEFAULT"
+      - "CLEAR NAMED"
+      - "CLEAR ALL"
+    query: "SELECT ?s WHERE { ?s ?p ?o }"
+    expect:
+      empty: true
+
+  - name: clear_graph_keeps_an_empty_graph
+    # CLEAR empties a graph and keeps it: the DROP after it succeeds.
+    setup:
+      - "CREATE GRAPH <http://ex.org/graph/vienna>"
+      - "CLEAR GRAPH <http://ex.org/graph/vienna>"
+      - "DROP GRAPH <http://ex.org/graph/vienna>"
+      - |
+        INSERT DATA {
+          <http://ex.org/alix> <http://ex.org/name> "Alix" .
+        }
+    query: "SELECT ?n WHERE { <http://ex.org/alix> <http://ex.org/name> ?n }"
+    expect:
+      rows:
+        - [Alix]
+
   # ---------------------------------------------------------------------------
   # COPY
   # ---------------------------------------------------------------------------

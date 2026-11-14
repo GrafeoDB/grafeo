@@ -296,6 +296,9 @@ CREATE INDEX FOR (p:Person) ON (p.age) USING BTREE
 CREATE CONSTRAINT FOR (p:Person) REQUIRE p.email IS UNIQUE
 CREATE CONSTRAINT FOR (p:Person) REQUIRE p.name IS NOT NULL
 
+// Create a node key: required and unique together (see the GQL schema guide)
+CREATE CONSTRAINT person_key FOR (p:Person) REQUIRE (p.firstName, p.lastName) IS NODE KEY
+
 // List indexes and constraints
 SHOW INDEXES
 SHOW CONSTRAINTS

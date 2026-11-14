@@ -834,9 +834,10 @@ jobs:
 
   # Memory per entity (#431): bytes per node, per edge and per property value on a fixed
   # workload, counted by an allocator and as `memory_usage()` reports them. Fails when a count
-  # rises more than 5% over benches/memory_per_entity.baseline.json; a change that lowers memory
-  # updates the baseline in the same commit (`-- --update-baseline`). The table goes to the job
-  # summary, with the compact store's targets beside it.
+  # moves more than 5%, up or down, from benches/memory_per_entity.baseline.json, or is in one and
+  # not the other; a change that moves memory updates the baseline in the same commit
+  # (`-- --update-baseline`). The table goes to the job summary, with the compact store's targets
+  # beside it.
   memory-per-entity:
     name: Memory per Entity
     needs: [rust-check]

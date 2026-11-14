@@ -18,10 +18,11 @@
 //! cargo bench -p grafeo-engine --bench memory_per_entity -- --update-baseline # write the baseline
 //! ```
 //!
-//! `--check` fails when a count is more than 5% (and half a byte) above
-//! `benches/memory_per_entity.baseline.json`. A change that lowers memory updates the baseline
-//! in the same commit, so the drop shows in review. `--out <path>` also writes the counts as
-//! JSON.
+//! `--check` fails when a count moved more than 5% (and half a byte) from
+//! `benches/memory_per_entity.baseline.json`, up or down, or when a count is in one and not the
+//! other. A change that lowers memory updates the baseline in the same commit, so the drop shows
+//! in review and a later rise back to the old figure cannot pass. `--out <path>` also writes the
+//! counts as JSON.
 
 #![expect(
     unsafe_code,
@@ -43,10 +44,10 @@ const NODES: usize = 100_000;
 const EDGES_PER_NODE: usize = 3;
 /// The integer properties of each node.
 const PROPERTIES: [&str; 3] = ["id", "age", "score"];
-/// How far a count may rise over the baseline before `--check` fails, in percent.
-const MAX_RISE_PERCENT: f64 = 5.0;
-/// A rise this small (in bytes per entity) never fails: rounding, not memory.
-const MIN_RISE_BYTES: f64 = 0.5;
+/// How far a count may move from the baseline, up or down, before `--check` fails, in percent.
+const MAX_CHANGE_PERCENT: f64 = 5.0;
+/// A change this small (in bytes per entity) never fails: rounding, not memory.
+const MIN_CHANGE_BYTES: f64 = 0.5;
 
 // ── The counting allocator ──────────────────────────────────────────
 
@@ -284,25 +285,78 @@ fn read_baseline() -> Result<BTreeMap<String, f64>, String> {
         .collect()
 }
 
-/// Each count that rose too far over the baseline, or that the baseline lacks, as a line.
-fn rises(counts: &BTreeMap<&'static str, f64>, baseline: &BTreeMap<String, f64>) -> Vec<String> {
+/// Each count that moved more than the margin from the baseline, up or down, that the baseline
+/// lacks, and each count of the baseline the run did not measure, as a line. A drop fails too, so
+/// the baseline always holds what the store costs now: a later rise back cannot pass unseen.
+fn differences(
+    counts: &BTreeMap<&'static str, f64>,
+    baseline: &BTreeMap<String, f64>,
+) -> Vec<String> {
     let mut found = Vec::new();
     for (name, &now) in counts {
         match baseline.get(*name) {
             None => found.push(format!("{name}: {now} B, not in the baseline")),
-            Some(&before)
-                if now - before >= MIN_RISE_BYTES
-                    && now > before * (1.0 + MAX_RISE_PERCENT / 100.0) =>
-            {
-                found.push(format!(
-                    "{name}: {now} B, up from {before} B ({:+.1}%)",
+            Some(&before) if (now - before).abs() >= MIN_CHANGE_BYTES => {
+                let change = if before > 0.0 {
                     (now / before - 1.0) * 100.0
-                ));
+                } else {
+                    f64::INFINITY
+                };
+                if change.abs() > MAX_CHANGE_PERCENT {
+                    let way = if now > before { "up" } else { "down" };
+                    found.push(format!(
+                        "{name}: {now} B, {way} from {before} B ({change:+.1}%)"
+                    ));
+                }
             }
             Some(_) => {}
         }
     }
+    for name in baseline.keys() {
+        if !counts.contains_key(name.as_str()) {
+            found.push(format!("{name}: in the baseline, not measured any more"));
+        }
+    }
     found
+}
+
+/// The comparison `--check` applies, on fixed counts: checked before every check, as a bench
+/// target runs no `#[test]`.
+fn assert_the_comparison_holds() {
+    let counts = BTreeMap::from([
+        ("risen", 110.0),
+        ("dropped", 90.0),
+        ("within", 102.0),
+        ("rounding", 1.4),
+        ("new", 1.0),
+    ]);
+    let baseline: BTreeMap<String, f64> = [
+        ("risen", 100.0),
+        ("dropped", 100.0),
+        ("within", 100.0),
+        ("rounding", 1.0),
+        ("gone", 5.0),
+    ]
+    .into_iter()
+    .map(|(name, value)| (name.to_string(), value))
+    .collect();
+    let found = differences(&counts, &baseline);
+    let named = |name: &str| found.iter().filter(|line| line.starts_with(name)).count();
+    assert_eq!(named("risen:"), 1, "a rise over 5% fails: {found:?}");
+    assert_eq!(named("dropped:"), 1, "a drop over 5% fails: {found:?}");
+    assert_eq!(
+        named("new:"),
+        1,
+        "a count the baseline lacks fails: {found:?}"
+    );
+    assert_eq!(
+        named("gone:"),
+        1,
+        "a count no longer measured fails: {found:?}"
+    );
+    assert_eq!(named("within:"), 0, "2% passes: {found:?}");
+    assert_eq!(named("rounding:"), 0, "under half a byte passes: {found:?}");
+    assert_eq!(found.len(), 4, "{found:?}");
 }
 
 fn table(counts: &BTreeMap<&'static str, f64>, baseline: Option<&BTreeMap<String, f64>>) -> String {
@@ -367,15 +421,17 @@ fn main() {
             eprintln!("no baseline to check against: {error}");
             std::process::exit(2)
         });
-        let rises = rises(&counts, &baseline);
-        if !rises.is_empty() {
+        assert_the_comparison_holds();
+        let differences = differences(&counts, &baseline);
+        if !differences.is_empty() {
             eprintln!(
-                "Memory per entity rose more than {MAX_RISE_PERCENT}% over the baseline:\n  {}\n\
-                 If the rise is intended, run with --update-baseline and commit the baseline.",
-                rises.join("\n  ")
+                "Memory per entity moved more than {MAX_CHANGE_PERCENT}% from the baseline:\n  {}\n\
+                 For a change that is intended (a drop too), run with --update-baseline and commit \
+                 the baseline.",
+                differences.join("\n  ")
             );
             std::process::exit(1);
         }
-        println!("No count rose more than {MAX_RISE_PERCENT}% over the baseline.");
+        println!("No count moved more than {MAX_CHANGE_PERCENT}% from the baseline.");
     }
 }

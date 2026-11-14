@@ -582,72 +582,122 @@ fn the_files_hold_no_deleted_value_after_compact() {
     }
 }
 
-/// The probe's own guarantee: a freed block is zeroed, so a block that gets its memory again
-/// holds none of it. Its bytes past the allocator's own bookkeeping (the first 16) must hold no
-/// byte of the marker; without this the counts after the drop and the reopen read freed memory,
-/// which no allocator zeroes. Each attempt runs on a thread of its own: glibc's per-thread cache
-/// then has room for the freed block and hands it to the next allocation of its size on that
-/// thread, where no other thread can take it (a long-lived thread's cache may be full, and the
-/// block then goes to a list the threads share). The Windows heap hands it back within a few
-/// allocations. Every attempt that gets the block back must find it zeroed, and one at least must
-/// get it back (checked on both); elsewhere the allocator need not, so the test does not run there.
-#[test]
-#[cfg_attr(
-    not(any(all(target_os = "linux", target_env = "gnu"), windows)),
-    ignore = "the system allocator need not hand a freed block back at once"
-)]
-fn the_probe_zeroes_what_it_frees() {
-    /// Frees a block full of the marker byte and allocates blocks of its layout until one is
-    /// it: the marker bytes that block still holds, or `None` when none of 64 is it.
-    fn reclaim() -> Option<usize> {
-        use std::alloc::{Layout, alloc, dealloc};
+/// glibc's `free`, interposed in this binary: every call goes on to glibc's own (`__libc_free`,
+/// the same function), and the block the guard watches is read first, while it is still
+/// allocated. The symbol `free` is a jump in assembly to `watched`, so the optimizer never sees
+/// a body for it: the probe's call to `free` through the system allocator stays the call to
+/// glibc's free the optimizer knows, and would drop a plain zeroing before, in every profile (a
+/// Rust definition of `free` in this crate made the stores live in a single-unit release build).
+/// `watched` never allocates, locks or panics: it runs for every free in this binary, the
+/// threads' teardown included.
+#[cfg(all(
+    target_os = "linux",
+    target_env = "gnu",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+mod watched_free {
+    use std::ffi::c_void;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
-        let layout = Layout::from_size_align(96, 8).unwrap();
-        // SAFETY: a non-zero layout; each block is freed with it below.
-        let block = unsafe { alloc(layout) };
-        assert!(!block.is_null());
-        // SAFETY: the block is 96 bytes long.
-        unsafe { std::ptr::write_bytes(block, b'm', 96) };
-        let address = block as usize;
-        // SAFETY: allocated above with `layout`.
-        unsafe { dealloc(block, layout) };
-        let mut again = Vec::with_capacity(64);
-        let mut stale = None;
-        for _ in 0..64 {
-            // SAFETY: as above.
-            let next = unsafe { alloc(layout) };
-            assert!(!next.is_null());
-            again.push(next);
-            if next as usize == address {
-                stale = Some(
-                    (16..96)
-                        // SAFETY: within the block just allocated; read as bytes, as the scan does.
-                        .filter(|&offset| unsafe { next.add(offset).read_volatile() } == b'm')
-                        .count(),
-                );
-                break;
-            }
-        }
-        for next in again {
-            // SAFETY: allocated above with `layout`.
-            unsafe { dealloc(next, layout) };
-        }
-        stale
+    /// The block the guard watches, or 0.
+    pub static WATCHED: AtomicUsize = AtomicUsize::new(0);
+    /// The bytes of the watched block that still held the marker byte when it reached `free`;
+    /// `usize::MAX` until it does.
+    pub static STALE: AtomicUsize = AtomicUsize::new(usize::MAX);
+    /// The size of the watched block, and the marker byte it was filled with.
+    pub const SIZE: usize = 96;
+    pub const MARKER: u8 = b'm';
+
+    unsafe extern "C" {
+        fn __libc_free(block: *mut c_void);
     }
 
-    const ATTEMPTS: usize = 8;
-    let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
-    let reclaimed: Vec<usize> = (0..ATTEMPTS)
-        .filter_map(|_| std::thread::spawn(reclaim).join().expect("the attempt ran"))
-        .collect();
-    assert!(
-        reclaimed.iter().all(|&stale| stale == 0),
-        "bytes of a freed block are still there, per attempt that got it back: {reclaimed:?}"
+    #[cfg(target_arch = "x86_64")]
+    std::arch::global_asm!(
+        ".globl free",
+        ".type free, @function",
+        "free:",
+        "jmp {watched}",
+        watched = sym watched,
     );
-    assert!(
-        !reclaimed.is_empty(),
-        "none of {ATTEMPTS} attempts got the freed block back"
+    #[cfg(target_arch = "aarch64")]
+    std::arch::global_asm!(
+        ".globl free",
+        ".type free, %function",
+        "free:",
+        "b {watched}",
+        watched = sym watched,
     );
+
+    /// Frees `block` with glibc's `free`, after counting the marker bytes of the watched block.
+    ///
+    /// # Safety
+    ///
+    /// `free`'s own: `block` is null or a live block of glibc's allocator.
+    unsafe extern "C" fn watched(block: *mut c_void) {
+        if !block.is_null() && block as usize == WATCHED.load(Ordering::SeqCst) {
+            let bytes = block.cast::<u8>();
+            let stale = (0..SIZE)
+                // SAFETY: the watched block is SIZE bytes long and not yet freed.
+                .filter(|&offset| unsafe { bytes.add(offset).read_volatile() } == MARKER)
+                .count();
+            STALE.store(stale, Ordering::SeqCst);
+            WATCHED.store(0, Ordering::SeqCst);
+        }
+        // SAFETY: the caller's contract, passed on to glibc's own free.
+        unsafe { __libc_free(block) };
+    }
+}
+
+/// The probe's own guarantee: a block reaches the system allocator's free zeroed. Without it
+/// the counts after the drop and the reopen read freed memory that kept its bytes, as an
+/// optimized build did when the zeroing was a plain store the optimizer removed before `free`.
+/// The guard fills a block with the marker byte, frees it through the global allocator and
+/// reads it in glibc's `free`, where the probe hands it over (see `watched_free`): no reuse of
+/// the block is needed, so nothing depends on what the allocator does after. Linux with glibc
+/// only (x86_64 and aarch64): there the optimizer knows `free`; the Windows heap's free is a call
+/// it cannot see into.
+#[test]
+#[cfg_attr(
+    not(all(
+        target_os = "linux",
+        target_env = "gnu",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    )),
+    ignore = "the guard interposes glibc's free, on x86_64 and aarch64"
+)]
+fn the_probe_zeroes_what_it_frees() {
+    #[cfg(all(
+        target_os = "linux",
+        target_env = "gnu",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    {
+        use std::alloc::{Layout, alloc, dealloc};
+        use std::sync::atomic::Ordering;
+
+        use watched_free::{MARKER, SIZE, STALE, WATCHED};
+
+        let layout = Layout::from_size_align(SIZE, 8).unwrap();
+        // SAFETY: a non-zero layout; the block is freed with it below.
+        let block = unsafe { alloc(layout) };
+        assert!(!block.is_null());
+        for offset in 0..SIZE {
+            // SAFETY: within the block; volatile, so the fill is not a dead store before the free.
+            unsafe { block.add(offset).write_volatile(MARKER) };
+        }
+        STALE.store(usize::MAX, Ordering::SeqCst);
+        WATCHED.store(block as usize, Ordering::SeqCst);
+        // SAFETY: allocated above with `layout`.
+        unsafe { dealloc(block, layout) };
+        let stale = STALE.load(Ordering::SeqCst);
+        assert_ne!(
+            stale,
+            usize::MAX,
+            "the block's free went through the watched free"
+        );
+        assert_eq!(stale, 0, "{stale} bytes of the block reached free unzeroed");
+    }
 }
 
 /// Once the database is dropped Grafeo holds none of its values, and a reopen of the compacted

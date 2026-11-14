@@ -11,6 +11,14 @@
 //! this crate. A file that needs a process of its own, or a build with few features,
 //! is a `[[test]]` entry in `Cargo.toml` instead, with a comment saying why.
 
+#![cfg_attr(
+    feature = "triple-store",
+    expect(
+        deprecated,
+        reason = "tests read the RDF store directly to check what was committed; GrafeoDB::rdf_store() is deprecated for users and goes crate-private in 0.7.0"
+    )
+)]
+
 mod agent_memory_migration;
 mod aggregate_calls;
 mod aggregate_computed_columns;

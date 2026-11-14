@@ -25,6 +25,13 @@
 //! ```
 
 #![cfg(all(feature = "gql", feature = "grafeo-file", not(miri)))]
+#![cfg_attr(
+    feature = "triple-store",
+    expect(
+        deprecated,
+        reason = "tests read the RDF store directly to check what was committed; GrafeoDB::rdf_store() is deprecated for users and goes crate-private in 0.7.0"
+    )
+)]
 
 #[cfg(not(feature = "triple-store"))]
 #[path = "common/legacy_file.rs"]

@@ -25,6 +25,17 @@
 //! ```
 
 #![cfg(all(feature = "gql", not(miri)))]
+#![cfg_attr(
+    all(
+        feature = "triple-store",
+        feature = "vector-index",
+        feature = "text-index"
+    ),
+    expect(
+        deprecated,
+        reason = "tests read the RDF store directly to check what was committed; GrafeoDB::rdf_store() is deprecated for users and goes crate-private in 0.7.0"
+    )
+)]
 
 use std::path::Path;
 

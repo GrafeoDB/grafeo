@@ -38,10 +38,10 @@ def opened(path: Path) -> tuple[grafeo.GrafeoDB, list[str]]:
 @pytest.fixture
 def in_default_graph(tmp_path: Path) -> Path:
     path = tmp_path / "default.grafeo"
+    # Declared by the graph type: a standalone type it lists stays in force (#764).
     write(
         path,
-        "CREATE NODE TYPE City (name STRING NOT NULL)",
-        "CREATE GRAPH TYPE atlas (NODE TYPE City)",
+        "CREATE GRAPH TYPE atlas (NODE TYPE City (name STRING NOT NULL))",
         "INSERT (:City {size: 1})",
     )
     return path
@@ -149,6 +149,14 @@ def test_a_named_graph_not_bound_warns_and_says_which(tmp_path: Path):
                 "INSERT (:City {name: 'Paris'})",
             ),
             id="a_type_no_graph_type_lists",
+        ),
+        pytest.param(
+            (
+                "CREATE NODE TYPE City (name STRING NOT NULL)",
+                "CREATE GRAPH TYPE atlas (NODE TYPE City)",
+                "INSERT (:City {name: 'Paris'})",
+            ),
+            id="a_standalone_type_a_graph_type_lists",
         ),
     ],
 )

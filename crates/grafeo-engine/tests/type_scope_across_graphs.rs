@@ -37,6 +37,14 @@ fn string(text: &str) -> Value {
     Value::from(text)
 }
 
+/// `statement` is refused as a write that breaks a type's rule (`GRAFEO-V001`).
+fn breaks_a_type(session: &Session, statement: &str, why: &str) {
+    let error = session
+        .execute(statement)
+        .expect_err(&format!("{why}: {statement}"));
+    assert!(error.to_string().contains("GRAFEO-V001"), "{why}: {error}");
+}
+
 /// The issue's example: in the default graph and in an untyped one, what is written is stored.
 #[test]
 fn other_graphs_store_what_is_written() {
@@ -388,31 +396,35 @@ mod property_graphs {
 // A type of the database that a graph type names, and dropping
 // ---------------------------------------------------------------------------
 
-/// A standalone node type is a rule of the database until a graph type names it: from then on it
-/// applies in the graphs bound to that graph type, not everywhere.
+/// A standalone node type is a rule of the database, and a graph type that names it does not take
+/// it over (#764): it keeps applying in the default graph, and also applies in the graphs bound to
+/// that graph type.
 #[test]
-fn a_standalone_type_named_by_a_graph_type_stops_applying_everywhere() {
+fn a_standalone_type_named_by_a_graph_type_keeps_applying() {
     let db = GrafeoDB::new_in_memory();
     let session = db.session();
     session
         .execute("CREATE NODE TYPE Person (name STRING NOT NULL)")
         .unwrap();
-    assert!(
-        session.execute("INSERT (:Person {age: 1})").is_err(),
-        "no graph type names it yet: it applies"
+    breaks_a_type(
+        &session,
+        "INSERT (:Person {age: 1})",
+        "no graph type names it yet",
     );
     session
         .execute("CREATE GRAPH TYPE t (NODE TYPE Person)")
         .unwrap();
     session.execute("CREATE GRAPH typed TYPED t").unwrap();
+    breaks_a_type(
+        &session,
+        "INSERT (:Person {age: 1})",
+        "named by a graph type, the default graph",
+    );
     session
-        .execute("INSERT (:Person {age: 1})")
+        .execute("INSERT (:Person {name: 'Gus'})")
         .unwrap_or_else(|error| panic!("the default graph: {error}"));
     session.execute("USE GRAPH typed").unwrap();
-    assert!(
-        session.execute("INSERT (:Person {age: 1})").is_err(),
-        "the typed graph"
-    );
+    breaks_a_type(&session, "INSERT (:Person {age: 1})", "the typed graph");
     session.execute("INSERT (:Person {name: 'Gus'})").unwrap();
 }
 
@@ -450,8 +462,9 @@ fn a_bound_graph_type_cannot_be_dropped() {
     );
 }
 
-/// Two schemas, one type name: a listing is of the type in its own schema. In the schema whose
-/// type a graph type lists it stops applying, and the other schema's stays a rule by label.
+/// Two schemas, one type name: a listing is of the type in its own schema. Both standalone types
+/// stay rules by label (#764), and only s1's is held by the listing: its drop is refused, naming the
+/// graph type, while s2's goes.
 #[test]
 fn a_listing_is_of_the_type_in_its_schema() {
     let db = GrafeoDB::new_in_memory();
@@ -469,14 +482,24 @@ fn a_listing_is_of_the_type_in_its_schema() {
             .execute(statement)
             .unwrap_or_else(|error| panic!("{statement}: {error}"));
     }
-    assert!(
-        session.execute("INSERT (:Customer {age: 1})").is_err(),
-        "s2's type: no graph type lists it"
+    breaks_a_type(
+        &session,
+        "INSERT (:Customer {age: 1})",
+        "s2's type: no graph type lists it",
     );
-    session.execute("SESSION SET SCHEMA s1").unwrap();
     session
-        .execute("INSERT (:Customer {age: 1})")
-        .unwrap_or_else(|error| panic!("s1's type is listed: {error}"));
+        .execute("DROP NODE TYPE Customer")
+        .unwrap_or_else(|error| panic!("s2's type: no graph type lists it: {error}"));
+    session.execute("SESSION SET SCHEMA s1").unwrap();
+    breaks_a_type(
+        &session,
+        "INSERT (:Customer {age: 1})",
+        "s1's type is listed, and stays in force",
+    );
+    let error = session
+        .execute("DROP NODE TYPE Customer")
+        .expect_err("s1's type: shop lists it");
+    assert!(error.to_string().contains("graph type 'shop'"), "{error}");
 }
 
 // ---------------------------------------------------------------------------
@@ -489,8 +512,8 @@ fn standalone_person(session: &Session) {
         .unwrap();
 }
 
-/// An open bound type applies the types it lists and lets other labels through; a graph bound to
-/// it is one that applies them, and other graphs are not.
+/// An open bound type applies the types it lists and lets other labels through. A standalone type
+/// it lists stays a rule by label in the default graph too (#764).
 #[test]
 fn an_open_bound_type_applies_what_it_lists() {
     let db = GrafeoDB::new_in_memory();
@@ -509,19 +532,24 @@ fn an_open_bound_type_applies_what_it_lists() {
         .execute("INSERT (:Robot {serial: 1})")
         .unwrap_or_else(|error| panic!("another label, an open type: {error}"));
     session.execute("USE GRAPH default").unwrap();
+    breaks_a_type(
+        &session,
+        "INSERT (:Person {age: 1})",
+        "a standalone type, the default graph",
+    );
     session
-        .execute("INSERT (:Person {age: 1})")
-        .unwrap_or_else(|error| panic!("the default graph: {error}"));
+        .execute("INSERT (:Robot {serial: 1})")
+        .unwrap_or_else(|error| panic!("another label, the default graph: {error}"));
 }
 
-/// A type two graph types list applies in the graphs of each, and elsewhere in neither.
+/// A type two graph types list applies in the graphs of each, and elsewhere in neither. The type is
+/// declared inline by the first graph type: a standalone type would stay a rule by label (#764).
 #[test]
 fn a_type_two_graph_types_list_applies_in_both() {
     let db = GrafeoDB::new_in_memory();
     let session = db.session();
-    standalone_person(&session);
     for statement in [
-        "CREATE GRAPH TYPE first_type (NODE TYPE Person)",
+        "CREATE GRAPH TYPE first_type (NODE TYPE Person (name STRING NOT NULL))",
         "CREATE GRAPH TYPE second_type (NODE TYPE Person)",
         "CREATE GRAPH one TYPED first_type",
         "CREATE GRAPH two TYPED second_type",
@@ -586,29 +614,31 @@ fn a_named_constraint_on_an_unlisted_label_stays_everywhere() {
     }
 }
 
-/// A standalone type a new graph type lists stops applying elsewhere at once, with no graph bound
-/// yet, and the statement checks nothing as it removes a rule.
+/// A standalone type a new graph type lists stays in force elsewhere (#764), from the statement on,
+/// with no graph bound yet.
 #[test]
-fn a_new_listing_removes_the_rule_at_once() {
+fn a_new_listing_leaves_the_rule_in_force() {
     let db = GrafeoDB::new_in_memory();
     let session = db.session();
     standalone_person(&session);
-    assert!(
-        session.execute("INSERT (:Person {age: 1})").is_err(),
-        "no graph type yet"
-    );
+    breaks_a_type(&session, "INSERT (:Person {age: 1})", "no graph type yet");
     session
         .execute("CREATE GRAPH TYPE t (NODE TYPE Person)")
         .unwrap();
+    breaks_a_type(
+        &session,
+        "INSERT (:Person {age: 1})",
+        "listed, and no graph bound",
+    );
     session
-        .execute("INSERT (:Person {age: 1})")
-        .unwrap_or_else(|error| panic!("listed, and no graph bound: {error}"));
+        .execute("INSERT (:Person {name: 'Gus'})")
+        .unwrap_or_else(|error| panic!("what the type allows: {error}"));
 }
 
-/// `ALTER GRAPH TYPE ... ADD NODE TYPE` lists a type at once: elsewhere it stops, and in the bound
-/// graph it is checked whole under the new type.
+/// `ALTER GRAPH TYPE ... ADD NODE TYPE` lists a standalone type at once: in the bound graph it is
+/// checked under the new type, and elsewhere it stays in force (#764).
 #[test]
-fn adding_a_type_to_a_graph_type_moves_its_rule() {
+fn adding_a_standalone_type_to_a_graph_type_extends_its_rule() {
     let db = GrafeoDB::new_in_memory();
     let session = db.session();
     for statement in [
@@ -619,15 +649,17 @@ fn adding_a_type_to_a_graph_type_moves_its_rule() {
     ] {
         session.execute(statement).unwrap();
     }
-    assert!(
-        session.execute("INSERT (:City {size: 3})").is_err(),
-        "not listed yet"
-    );
+    breaks_a_type(&session, "INSERT (:City {size: 3})", "not listed yet");
     session
         .execute("ALTER GRAPH TYPE atlas ADD NODE TYPE City")
         .unwrap_or_else(|error| panic!("{error}"));
+    breaks_a_type(
+        &session,
+        "INSERT (:City {size: 3})",
+        "listed now, the default graph",
+    );
     session
-        .execute("INSERT (:City {size: 3})")
+        .execute("INSERT (:City {name: 'Lyon'})")
         .unwrap_or_else(|error| panic!("listed now, the default graph: {error}"));
     session.execute("USE GRAPH maps").unwrap();
     assert!(
@@ -680,15 +712,14 @@ fn a_closed_type_with_no_edge_types_refuses_edges() {
     assert_eq!(GqlStatus::from(&error).as_str(), "G2000", "{error}");
 }
 
-/// #729 by scope: a listed type's check reads the graphs bound to it, and another graph's rows
-/// neither stop it nor change.
+/// #729 by scope: the check of a type a graph type declares reads the graphs bound to it, and
+/// another graph's rows neither stop it nor change.
 #[test]
 fn a_listed_types_check_reads_its_own_graphs_only() {
     let db = GrafeoDB::new_in_memory();
     let session = db.session();
     for statement in [
-        "CREATE NODE TYPE City (name STRING)",
-        "CREATE GRAPH TYPE atlas (NODE TYPE City)",
+        "CREATE GRAPH TYPE atlas (NODE TYPE City (name STRING))",
         "CREATE GRAPH maps TYPED atlas",
         "INSERT (:City {size: 3})",
     ] {
@@ -713,6 +744,31 @@ fn a_listed_types_check_reads_its_own_graphs_only() {
         .execute("ALTER NODE TYPE City ADD PROPERTY code STRING NOT NULL")
         .expect_err("the bound graph's city has no code");
     assert!(error.to_string().contains("GRAFEO-V001"), "{error}");
+}
+
+/// A standalone type a graph type lists stays a rule by label (#764), so its check reads the
+/// default graph's rows as well as the bound graph's, and refuses a change they break.
+#[test]
+fn a_listed_standalone_types_check_reads_every_graph() {
+    let db = GrafeoDB::new_in_memory();
+    let session = db.session();
+    for statement in [
+        "CREATE NODE TYPE City (name STRING)",
+        "CREATE GRAPH TYPE atlas (NODE TYPE City)",
+        "CREATE GRAPH maps TYPED atlas",
+        "INSERT (:City {size: 3})",
+    ] {
+        session.execute(statement).unwrap();
+    }
+    let error = session
+        .execute("ALTER NODE TYPE City ADD PROPERTY code STRING NOT NULL")
+        .expect_err("the default graph's city has no code");
+    assert!(error.to_string().contains("GRAFEO-V001"), "{error}");
+    assert_eq!(
+        rows(&session, "MATCH (c:City) RETURN c.size, c.code"),
+        [[Value::Int64(3), Value::Null]],
+        "the row is not touched"
+    );
 }
 
 /// A type no graph type lists keeps its check over every graph, as #729 has it.
@@ -758,10 +814,11 @@ fn a_constraint_on_a_listed_label_checks_the_bound_graph_only() {
     assert!(error.to_string().contains("GRAFEO-V001"), "{error}");
 }
 
-/// A rule of each kind after a reopen: a listed type's stays in its graph, an unlisted type's
-/// stays everywhere, and a standalone type once listed stays listed.
+/// A rule of each kind after a reopen: a type the graph type declares stays in its graph, an
+/// unlisted type's stays everywhere, and a standalone type the graph type lists stays in force
+/// everywhere as well as in its graph (#764): the catalog keeps that it is standalone.
 #[test]
-fn both_kinds_of_type_hold_after_a_reopen() {
+fn each_kind_of_type_holds_after_a_reopen() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("kinds.grafeo");
     let db = GrafeoDB::open(&path).unwrap();
@@ -769,7 +826,7 @@ fn both_kinds_of_type_hold_after_a_reopen() {
     for statement in [
         "CREATE NODE TYPE City (name STRING NOT NULL)",
         "CREATE NODE TYPE Person (name STRING NOT NULL)",
-        "CREATE GRAPH TYPE t (NODE TYPE Person)",
+        "CREATE GRAPH TYPE t (NODE TYPE Person, NODE TYPE Museum (name STRING NOT NULL))",
         "CREATE GRAPH typed TYPED t",
     ] {
         session.execute(statement).unwrap();
@@ -778,9 +835,14 @@ fn both_kinds_of_type_hold_after_a_reopen() {
     db.close().unwrap();
     let db = GrafeoDB::open(&path).unwrap();
     let session = db.session();
+    breaks_a_type(
+        &session,
+        "INSERT (:Person {age: 1})",
+        "a listed standalone type, elsewhere",
+    );
     session
-        .execute("INSERT (:Person {age: 1})")
-        .unwrap_or_else(|error| panic!("a listed type, elsewhere: {error}"));
+        .execute("INSERT (:Museum {size: 1})")
+        .unwrap_or_else(|error| panic!("a declared type, elsewhere: {error}"));
     assert!(
         session.execute("INSERT (:City {size: 1})").is_err(),
         "an unlisted type"
@@ -789,6 +851,10 @@ fn both_kinds_of_type_hold_after_a_reopen() {
     assert!(
         session.execute("INSERT (:Person {age: 1})").is_err(),
         "a listed type, at home"
+    );
+    assert!(
+        session.execute("INSERT (:Museum {size: 1})").is_err(),
+        "a declared type, at home"
     );
     assert!(
         session.execute("INSERT (:City {size: 1})").is_err(),
@@ -822,8 +888,10 @@ fn kinds_crash_child() {
     std::process::exit(0);
 }
 
+/// The listed standalone `Person` gave its default in the default graph too (#764), and after the
+/// replay it is still in force there.
 #[test]
-fn both_kinds_of_type_hold_after_a_crash() {
+fn each_kind_of_type_holds_after_a_crash() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("kinds-crash.grafeo");
     let status = grafeo_common::testing::child_process::run(
@@ -835,7 +903,12 @@ fn both_kinds_of_type_hold_after_a_crash() {
     let session = db.session();
     assert_eq!(
         rows(&session, "MATCH (p:Person) RETURN p.age, p.name"),
-        [[Value::Int64(1), Value::Null]]
+        [[Value::Int64(1), string("Mia")]]
+    );
+    breaks_a_type(
+        &session,
+        "INSERT (:Person {age: 'one'})",
+        "a listed standalone type, after the replay",
     );
     assert!(
         session.execute("INSERT (:City {size: 1})").is_err(),
@@ -943,10 +1016,10 @@ fn a_drop_takes_the_types_only_it_listed_and_names_them() {
         .unwrap_or_else(|error| panic!("the name is free again: {error}"));
 }
 
-/// A standalone type it named by reference goes too, once only it listed the type: no rule by
-/// label comes back.
+/// A standalone type it named by reference belongs to no graph type, so it stays, in force, and the
+/// status names it not (#764). Once no graph type lists it, it can be dropped itself.
 #[test]
-fn a_standalone_type_named_by_reference_goes_too() {
+fn a_standalone_type_named_by_reference_stays_in_force() {
     let db = GrafeoDB::new_in_memory();
     let session = db.session();
     run_all(
@@ -957,20 +1030,26 @@ fn a_standalone_type_named_by_reference_goes_too() {
             "CREATE GRAPH TYPE atlas (NODE TYPE City, EDGE TYPE ROAD)",
         ],
     );
-    let status = dropped(&session, "DROP GRAPH TYPE atlas");
-    for name in ["City", "ROAD"] {
-        assert!(status.contains(name), "{name} in: {status}");
-    }
+    assert_eq!(
+        dropped(&session, "DROP GRAPH TYPE atlas"),
+        "Dropped graph type 'atlas'"
+    );
+    assert!(shows(&session, "SHOW NODE TYPES", "City"));
+    assert!(shows(&session, "SHOW EDGE TYPES", "ROAD"));
+    breaks_a_type(
+        &session,
+        "INSERT (:City {size: 1})-[:ROAD]->(:City)",
+        "the rules by label stay",
+    );
+    assert_eq!(rows(&session, "MATCH (c:City) RETURN c.size").len(), 0);
+    run_all(&session, &["DROP EDGE TYPE ROAD", "DROP NODE TYPE City"]);
     assert!(!shows(&session, "SHOW NODE TYPES", "City"));
     assert!(!shows(&session, "SHOW EDGE TYPES", "ROAD"));
-    session
-        .execute("INSERT (:City {size: 1})-[:ROAD]->(:City)")
-        .unwrap_or_else(|error| panic!("no rule by label is left: {error}"));
-    assert_eq!(rows(&session, "MATCH (c:City) RETURN c.size").len(), 2);
 }
 
 /// A type another graph type lists stays, with no name in the status, and its graphs keep their
-/// rule. Dropping the last graph type that lists it takes it.
+/// rule. Dropping the last graph type that lists it takes it. (`a` declares the type: a standalone
+/// type would stay after the last drop too, as the next test has it.)
 #[test]
 fn a_type_another_graph_type_lists_stays() {
     let db = GrafeoDB::new_in_memory();
@@ -978,8 +1057,7 @@ fn a_type_another_graph_type_lists_stays() {
     run_all(
         &session,
         &[
-            "CREATE NODE TYPE Person (name STRING NOT NULL)",
-            "CREATE GRAPH TYPE a (NODE TYPE Person)",
+            "CREATE GRAPH TYPE a (NODE TYPE Person (name STRING NOT NULL))",
             "CREATE GRAPH TYPE b (NODE TYPE Person)",
             "CREATE GRAPH circle TYPED b",
         ],
@@ -1003,6 +1081,46 @@ fn a_type_another_graph_type_lists_stays() {
     let status = dropped(&session, "DROP GRAPH TYPE b");
     assert!(status.contains("Person"), "the last listing: {status}");
     assert!(!shows(&session, "SHOW NODE TYPES", "Person"));
+}
+
+/// A standalone type two graph types list: each drop leaves it, the last one too, and it is in
+/// force in the default graph throughout (#764).
+#[test]
+fn a_standalone_type_stays_after_the_last_graph_type_that_lists_it() {
+    let db = GrafeoDB::new_in_memory();
+    let session = db.session();
+    run_all(
+        &session,
+        &[
+            "CREATE NODE TYPE Person (name STRING NOT NULL)",
+            "CREATE GRAPH TYPE a (NODE TYPE Person)",
+            "CREATE GRAPH TYPE b (NODE TYPE Person)",
+            "CREATE GRAPH circle TYPED b",
+        ],
+    );
+    assert_eq!(
+        dropped(&session, "DROP GRAPH TYPE a"),
+        "Dropped graph type 'a'"
+    );
+    session.execute("USE GRAPH circle").unwrap();
+    assert!(
+        session.execute("INSERT (:Person {age: 1})").is_err(),
+        "the other graph type's rule"
+    );
+    session.execute("USE GRAPH default").unwrap();
+    breaks_a_type(&session, "INSERT (:Person {age: 1})", "a rule by label");
+    session.execute("DROP GRAPH circle").unwrap();
+    assert_eq!(
+        dropped(&session, "DROP GRAPH TYPE b"),
+        "Dropped graph type 'b'",
+        "the last listing takes no standalone type"
+    );
+    assert!(shows(&session, "SHOW NODE TYPES", "Person"));
+    breaks_a_type(
+        &session,
+        "INSERT (:Person {age: 1})",
+        "still a rule by label",
+    );
 }
 
 /// A type it did not list is none of its business: it stays a rule by label.
@@ -1029,8 +1147,7 @@ fn a_named_constraint_on_such_a_type_refuses_the_drop() {
     run_all(
         &session,
         &[
-            "CREATE NODE TYPE City (name STRING NOT NULL)",
-            "CREATE GRAPH TYPE atlas (NODE TYPE City)",
+            "CREATE GRAPH TYPE atlas (NODE TYPE City (name STRING NOT NULL))",
             "CREATE CONSTRAINT city_names FOR (n:City) ON (n.name) UNIQUE",
         ],
     );
@@ -1057,6 +1174,32 @@ fn a_named_constraint_on_such_a_type_refuses_the_drop() {
     assert!(status.contains("City"), "{status}");
 }
 
+/// A standalone type the graph type lists does not go with it (#764), so a named constraint on it
+/// refuses nothing: the drop runs, and the type and the constraint stay, both in force.
+#[test]
+fn a_named_constraint_on_a_standalone_type_does_not_refuse_the_drop() {
+    let db = GrafeoDB::new_in_memory();
+    let session = db.session();
+    run_all(
+        &session,
+        &[
+            "CREATE NODE TYPE City (name STRING NOT NULL)",
+            "CREATE GRAPH TYPE atlas (NODE TYPE City)",
+            "CREATE CONSTRAINT city_names FOR (n:City) ON (n.name) UNIQUE",
+        ],
+    );
+    assert_eq!(
+        dropped(&session, "DROP GRAPH TYPE atlas"),
+        "Dropped graph type 'atlas'"
+    );
+    assert!(!shows(&session, "SHOW GRAPH TYPES", "atlas"));
+    assert!(shows(&session, "SHOW NODE TYPES", "City"));
+    assert_eq!(rows(&session, "SHOW CONSTRAINTS").len(), 1);
+    breaks_a_type(&session, "INSERT (:City {size: 1})", "the type");
+    session.execute("INSERT (:City {name: 'Paris'})").unwrap();
+    breaks_a_type(&session, "INSERT (:City {name: 'Paris'})", "the constraint");
+}
+
 /// The refusal is about types that would go: a constraint on a type another graph type lists, or
 /// on a label no graph type lists, stops nothing and stays.
 #[test]
@@ -1066,8 +1209,7 @@ fn a_named_constraint_elsewhere_does_not_refuse_the_drop() {
     run_all(
         &session,
         &[
-            "CREATE NODE TYPE Person (name STRING NOT NULL)",
-            "CREATE GRAPH TYPE a (NODE TYPE Person)",
+            "CREATE GRAPH TYPE a (NODE TYPE Person (name STRING NOT NULL))",
             "CREATE GRAPH TYPE b (NODE TYPE Person)",
             "CREATE CONSTRAINT person_names FOR (n:Person) ON (n.name) UNIQUE",
             "CREATE CONSTRAINT file_ids FOR (n:File) ON (n.id) UNIQUE",
@@ -1092,8 +1234,8 @@ fn if_exists_takes_the_same_types() {
     session.execute("DROP GRAPH TYPE IF EXISTS routes").unwrap();
 }
 
-/// `ALTER GRAPH TYPE ... DROP NODE TYPE` of a type no other graph type lists is the same drop: the
-/// type goes, and a named constraint on it refuses the statement.
+/// `ALTER GRAPH TYPE ... DROP NODE TYPE` of a type it declared and no other graph type lists is the
+/// same drop: the type goes, and a named constraint on it refuses the statement.
 #[test]
 fn an_altered_drop_takes_a_type_only_it_listed() {
     let db = GrafeoDB::new_in_memory();
@@ -1101,10 +1243,8 @@ fn an_altered_drop_takes_a_type_only_it_listed() {
     run_all(
         &session,
         &[
-            "CREATE NODE TYPE City (name STRING NOT NULL)",
-            "CREATE NODE TYPE Town (name STRING NOT NULL)",
-            "CREATE NODE TYPE Person (name STRING NOT NULL)",
-            "CREATE GRAPH TYPE atlas (NODE TYPE City, NODE TYPE Town, NODE TYPE Person)",
+            "CREATE GRAPH TYPE atlas (NODE TYPE City (name STRING NOT NULL), \
+             NODE TYPE Town (name STRING NOT NULL), NODE TYPE Person (name STRING NOT NULL))",
             "CREATE GRAPH TYPE people (NODE TYPE Person)",
             "CREATE CONSTRAINT town_names FOR (n:Town) ON (n.name) UNIQUE",
         ],
@@ -1136,9 +1276,8 @@ fn an_altered_drop_takes_an_edge_type_only_it_listed() {
     run_all(
         &session,
         &[
-            "CREATE EDGE TYPE ROAD (km INTEGER NOT NULL)",
-            "CREATE EDGE TYPE RAIL (km INTEGER NOT NULL)",
-            "CREATE GRAPH TYPE atlas (EDGE TYPE ROAD, EDGE TYPE RAIL)",
+            "CREATE GRAPH TYPE atlas (EDGE TYPE ROAD (km INTEGER NOT NULL), \
+             EDGE TYPE RAIL (km INTEGER NOT NULL))",
             "CREATE GRAPH TYPE lines (EDGE TYPE RAIL)",
         ],
     );
@@ -1157,6 +1296,51 @@ fn an_altered_drop_takes_an_edge_type_only_it_listed() {
         .unwrap_or_else(|error| panic!("no rule by label is left: {error}"));
 }
 
+/// `ALTER GRAPH TYPE ... DROP` of a standalone node or edge type takes it out of the graph type
+/// only: the type stays, in force, the status names it not, and a named constraint on it refuses
+/// nothing (#764).
+#[test]
+fn an_altered_drop_leaves_a_standalone_type_in_force() {
+    let db = GrafeoDB::new_in_memory();
+    let session = db.session();
+    run_all(
+        &session,
+        &[
+            "CREATE NODE TYPE City (name STRING NOT NULL)",
+            "CREATE NODE TYPE Town (name STRING NOT NULL)",
+            "CREATE EDGE TYPE ROAD (km INTEGER NOT NULL)",
+            "CREATE GRAPH TYPE atlas (NODE TYPE City, NODE TYPE Town, EDGE TYPE ROAD)",
+            "CREATE CONSTRAINT town_names FOR (n:Town) ON (n.name) UNIQUE",
+        ],
+    );
+    for (statement, kind, name) in [
+        ("ALTER GRAPH TYPE atlas DROP NODE TYPE City", "NODE", "City"),
+        ("ALTER GRAPH TYPE atlas DROP NODE TYPE Town", "NODE", "Town"),
+        ("ALTER GRAPH TYPE atlas DROP EDGE TYPE ROAD", "EDGE", "ROAD"),
+    ] {
+        assert_eq!(
+            dropped(&session, statement),
+            "Altered graph type 'atlas'",
+            "{statement}"
+        );
+        assert!(
+            shows(&session, &format!("SHOW {kind} TYPES"), name),
+            "{statement}"
+        );
+    }
+    assert_eq!(rows(&session, "SHOW CONSTRAINTS").len(), 1);
+    for (statement, why) in [
+        ("INSERT (:City {size: 1})", "City"),
+        ("INSERT (:Town {size: 1})", "Town"),
+        (
+            "INSERT (:City {name: 'Paris'})-[:ROAD]->(:City {name: 'Lyon'})",
+            "ROAD",
+        ),
+    ] {
+        breaks_a_type(&session, statement, why);
+    }
+}
+
 /// Cypher's current graph type is rules by label, not a listing: dropping from it takes no type,
 /// and the rule stands.
 #[test]
@@ -1171,8 +1355,8 @@ fn a_cypher_drop_from_the_current_graph_type_takes_no_type() {
     assert!(session.execute("INSERT (:Kept {name: 7})").is_err());
 }
 
-/// A replace drops the old graph type first (ISO/IEC 39075 12.6, General Rule 2), so what it stops
-/// listing goes as in a drop, and the status names it.
+/// A replace drops the old graph type first (ISO/IEC 39075 12.6, General Rule 2), so a type it
+/// declared and stops listing goes as in a drop, and the status names it.
 #[test]
 fn a_replace_takes_what_it_stops_listing() {
     let db = GrafeoDB::new_in_memory();
@@ -1180,9 +1364,8 @@ fn a_replace_takes_what_it_stops_listing() {
     run_all(
         &session,
         &[
-            "CREATE NODE TYPE City (name STRING NOT NULL)",
             "CREATE NODE TYPE Person (name STRING NOT NULL)",
-            "CREATE GRAPH TYPE atlas (NODE TYPE City)",
+            "CREATE GRAPH TYPE atlas (NODE TYPE City (name STRING NOT NULL))",
         ],
     );
     assert_eq!(
@@ -1199,7 +1382,47 @@ fn a_replace_takes_what_it_stops_listing() {
         .unwrap_or_else(|error| panic!("no rule by label is left: {error}"));
 }
 
-/// What it still lists stays, and what another graph type lists stays, with neither named.
+/// A standalone type the replace stops listing stays, in force, and the status names it not; a
+/// named constraint on it refuses nothing and stays (#764).
+#[test]
+fn a_replace_leaves_a_standalone_type_it_stops_listing() {
+    let db = GrafeoDB::new_in_memory();
+    let session = db.session();
+    run_all(
+        &session,
+        &[
+            "CREATE NODE TYPE City (name STRING NOT NULL)",
+            "CREATE GRAPH TYPE atlas (NODE TYPE City)",
+            "CREATE CONSTRAINT city_names FOR (n:City) ON (n.name) UNIQUE",
+        ],
+    );
+    assert_eq!(
+        dropped(
+            &session,
+            "CREATE OR REPLACE GRAPH TYPE atlas (NODE TYPE Person (name STRING NOT NULL))",
+        ),
+        "Created graph type 'atlas'"
+    );
+    assert!(shows(&session, "SHOW NODE TYPES", "City"));
+    assert!(shows(&session, "SHOW NODE TYPES", "Person"));
+    assert_eq!(rows(&session, "SHOW CONSTRAINTS").len(), 1);
+    breaks_a_type(
+        &session,
+        "INSERT (:City {size: 1})",
+        "the type stays in force",
+    );
+    run_all(
+        &session,
+        &["CREATE GRAPH maps TYPED atlas", "USE GRAPH maps"],
+    );
+    let error = session
+        .execute("INSERT (:City {name: 'Paris'})")
+        .expect_err("atlas no longer lists City");
+    assert_eq!(GqlStatus::from(&error).as_str(), "G2000", "{error}");
+}
+
+/// Of the types it declared, what it still lists stays, and what another graph type lists stays,
+/// with neither named.
 #[test]
 fn a_replace_keeps_what_is_still_listed() {
     let db = GrafeoDB::new_in_memory();
@@ -1207,15 +1430,14 @@ fn a_replace_keeps_what_is_still_listed() {
     run_all(
         &session,
         &[
-            "CREATE NODE TYPE City (name STRING NOT NULL)",
-            "CREATE NODE TYPE Person (name STRING NOT NULL)",
-            "CREATE GRAPH TYPE atlas (NODE TYPE City, NODE TYPE Person)",
+            "CREATE GRAPH TYPE atlas (NODE TYPE City (name STRING NOT NULL), \
+             NODE TYPE Person (name STRING NOT NULL))",
             "CREATE GRAPH TYPE people (NODE TYPE Person)",
         ],
     );
     let status = dropped(
         &session,
-        "CREATE OR REPLACE GRAPH TYPE atlas (NODE TYPE City)",
+        "CREATE OR REPLACE GRAPH TYPE atlas (NODE TYPE City (name STRING NOT NULL))",
     );
     assert!(!status.contains("City"), "{status}");
     assert!(!status.contains("Person"), "{status}");
@@ -1223,8 +1445,8 @@ fn a_replace_keeps_what_is_still_listed() {
     assert!(shows(&session, "SHOW NODE TYPES", "Person"));
 }
 
-/// A named constraint on a type the replace stops listing refuses the statement and names the
-/// constraint, and the old graph type stands. On a type it still lists, it stops nothing.
+/// A named constraint on a type it declared and the replace stops listing refuses the statement and
+/// names the constraint, and the old graph type stands. On a type it still lists, it stops nothing.
 #[test]
 fn a_named_constraint_refuses_a_replace_that_stops_listing_its_type() {
     let db = GrafeoDB::new_in_memory();
@@ -1232,15 +1454,14 @@ fn a_named_constraint_refuses_a_replace_that_stops_listing_its_type() {
     run_all(
         &session,
         &[
-            "CREATE NODE TYPE City (name STRING NOT NULL)",
-            "CREATE NODE TYPE Person (name STRING NOT NULL)",
-            "CREATE GRAPH TYPE atlas (NODE TYPE City, NODE TYPE Person)",
+            "CREATE GRAPH TYPE atlas (NODE TYPE City (name STRING NOT NULL), \
+             NODE TYPE Person (name STRING NOT NULL))",
             "CREATE CONSTRAINT city_names FOR (n:City) ON (n.name) UNIQUE",
             "CREATE CONSTRAINT person_names FOR (n:Person) ON (n.name) UNIQUE",
         ],
     );
     let error = session
-        .execute("CREATE OR REPLACE GRAPH TYPE atlas (NODE TYPE Person)")
+        .execute("CREATE OR REPLACE GRAPH TYPE atlas (NODE TYPE Person (name STRING NOT NULL))")
         .expect_err("a named constraint sits on the type it stops listing");
     assert_eq!(GqlStatus::from(&error).as_str(), "42000", "{error}");
     assert!(error.to_string().contains("city_names"), "{error}");
@@ -1261,7 +1482,7 @@ fn a_named_constraint_refuses_a_replace_that_stops_listing_its_type() {
     );
     let status = dropped(
         &session,
-        "CREATE OR REPLACE GRAPH TYPE atlas (NODE TYPE Person)",
+        "CREATE OR REPLACE GRAPH TYPE atlas (NODE TYPE Person (name STRING NOT NULL))",
     );
     assert!(status.contains("City"), "{status}");
     assert!(
@@ -1290,25 +1511,27 @@ fn a_replace_may_declare_its_own_type_again() {
     assert!(session.execute("INSERT (:City {name: 'Paris'})").is_err());
 }
 
-/// A rollback of a replace brings back the old listing and the type it stopped listing.
+/// A rollback of a replace brings back the old listing and the type it declared and stopped
+/// listing, and takes the type the replace declared.
 #[test]
 fn a_rolled_back_replace_takes_nothing() {
     let db = GrafeoDB::new_in_memory();
     let mut session = db.session();
     run_all(
         &session,
-        &[
-            "CREATE NODE TYPE City (name STRING NOT NULL)",
-            "CREATE NODE TYPE Person (name STRING NOT NULL)",
-            "CREATE GRAPH TYPE atlas (NODE TYPE City)",
-        ],
+        &["CREATE GRAPH TYPE atlas (NODE TYPE City (name STRING NOT NULL))"],
     );
     session.begin_transaction().unwrap();
     session
-        .execute("CREATE OR REPLACE GRAPH TYPE atlas (NODE TYPE Person)")
+        .execute("CREATE OR REPLACE GRAPH TYPE atlas (NODE TYPE Person (name STRING NOT NULL))")
         .unwrap();
+    assert!(
+        !shows(&session, "SHOW NODE TYPES", "City"),
+        "gone inside the transaction"
+    );
     session.rollback().unwrap();
     assert!(shows(&session, "SHOW NODE TYPES", "City"));
+    assert!(!shows(&session, "SHOW NODE TYPES", "Person"));
     run_all(
         &session,
         &["CREATE GRAPH maps TYPED atlas", "USE GRAPH maps"],
@@ -1384,8 +1607,7 @@ fn a_refused_drop_leaves_the_transaction_going() {
     run_all(
         &session,
         &[
-            "CREATE NODE TYPE City (name STRING NOT NULL)",
-            "CREATE GRAPH TYPE atlas (NODE TYPE City)",
+            "CREATE GRAPH TYPE atlas (NODE TYPE City (name STRING NOT NULL))",
             "CREATE CONSTRAINT city_names FOR (n:City) ON (n.name) UNIQUE",
         ],
     );
@@ -1399,7 +1621,7 @@ fn a_refused_drop_leaves_the_transaction_going() {
     assert_eq!(rows(&session, "MATCH (m:Museum) RETURN m.name").len(), 2);
 }
 
-/// After a reopen they are still gone, and no rule by label came back.
+/// After a reopen the types it declared are still gone, and no rule by label came back.
 #[test]
 fn a_drop_holds_after_a_reopen() {
     let dir = tempfile::tempdir().unwrap();
@@ -1409,8 +1631,7 @@ fn a_drop_holds_after_a_reopen() {
     run_all(
         &session,
         &[
-            "CREATE NODE TYPE City (name STRING NOT NULL)",
-            "CREATE GRAPH TYPE atlas (NODE TYPE City)",
+            "CREATE GRAPH TYPE atlas (NODE TYPE City (name STRING NOT NULL))",
             "DROP GRAPH TYPE atlas",
         ],
     );
@@ -1420,6 +1641,48 @@ fn a_drop_holds_after_a_reopen() {
     let session = db.session();
     assert!(!shows(&session, "SHOW NODE TYPES", "City"));
     session.execute("INSERT (:City {size: 1})").unwrap();
+    drop(session);
+    db.close().unwrap();
+}
+
+/// A standalone type a graph type lists is still known as standalone after a reopen (#764): it is
+/// in force, the drop of the graph type then leaves it, and it is still there after the next reopen.
+#[test]
+fn a_drop_leaves_a_standalone_type_across_reopens() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("drop-standalone.grafeo");
+    let db = GrafeoDB::open(&path).unwrap();
+    let session = db.session();
+    run_all(
+        &session,
+        &[
+            "CREATE NODE TYPE City (name STRING NOT NULL)",
+            "CREATE GRAPH TYPE atlas (NODE TYPE City)",
+        ],
+    );
+    drop(session);
+    db.close().unwrap();
+    let db = GrafeoDB::open(&path).unwrap();
+    let session = db.session();
+    breaks_a_type(
+        &session,
+        "INSERT (:City {size: 1})",
+        "listed, after a reopen",
+    );
+    assert_eq!(
+        dropped(&session, "DROP GRAPH TYPE atlas"),
+        "Dropped graph type 'atlas'"
+    );
+    drop(session);
+    db.close().unwrap();
+    let db = GrafeoDB::open(&path).unwrap();
+    let session = db.session();
+    assert!(shows(&session, "SHOW NODE TYPES", "City"));
+    breaks_a_type(
+        &session,
+        "INSERT (:City {size: 1})",
+        "after the drop and a reopen",
+    );
     drop(session);
     db.close().unwrap();
 }
@@ -1447,10 +1710,9 @@ fn drop_crash_child() {
     run_all(
         &session,
         &[
-            "CREATE NODE TYPE City (name STRING NOT NULL)",
             "CREATE NODE TYPE Museum (name STRING NOT NULL)",
-            "CREATE EDGE TYPE ROAD (km INTEGER NOT NULL)",
-            "CREATE GRAPH TYPE atlas (NODE TYPE City, EDGE TYPE ROAD)",
+            "CREATE GRAPH TYPE atlas (NODE TYPE City (name STRING NOT NULL), \
+             EDGE TYPE ROAD (km INTEGER NOT NULL), NODE TYPE Museum)",
         ],
     );
     match std::env::var(DROP_SCENARIO_VAR).unwrap().as_str() {
@@ -1477,8 +1739,8 @@ fn drop_crash_child() {
     std::process::exit(0);
 }
 
-/// The same from the log alone: the statement replays as one, in a transaction too, and a type it
-/// did not list stays.
+/// The same from the log alone: the statement replays as one, in a transaction too. The types it
+/// declared go, and the standalone `Museum` it listed stays, in force (#764).
 #[test]
 fn a_drop_holds_after_a_crash() {
     for scenario in ["statement", "transaction"] {
@@ -1726,18 +1988,15 @@ fn the_same_type_written_otherwise_is_one_type() {
     );
 }
 
-/// An edge type's endpoints: a pattern may add them to one that named none, and then they are part
-/// of what it is. Dropping or changing them is another declaration.
+/// An edge type's endpoints: a graph type's pattern declares them with the type, and then they are
+/// part of what it is. Dropping or changing them is another declaration.
 #[test]
 fn an_edge_types_endpoints_count_once_it_has_them() {
     let db = GrafeoDB::new_in_memory();
     let session = db.session();
     run_all(
         &session,
-        &[
-            "CREATE EDGE TYPE KNOWS (since INT64)",
-            "CREATE GRAPH TYPE a { (:Person)-[:KNOWS {since INT64}]->(:Person) }",
-        ],
+        &["CREATE GRAPH TYPE a { (:Person)-[:KNOWS {since INT64}]->(:Person) }"],
     );
     assert_eq!(
         rows(&session, "SHOW EDGE TYPES")
@@ -1756,6 +2015,27 @@ fn an_edge_types_endpoints_count_once_it_has_them() {
             .expect_err(&format!("the endpoints differ: {statement}"));
         assert!(error.to_string().contains("KNOWS"), "{error}");
     }
+}
+
+/// A pattern may not add endpoints to a standalone edge type (#764): the type stays in force in
+/// every graph without a type of its own, so endpoints a graph type added would change it there too.
+/// It is a different declaration, refused, and nothing changes.
+#[test]
+fn a_pattern_cannot_add_endpoints_to_a_standalone_edge_type() {
+    let db = GrafeoDB::new_in_memory();
+    let session = db.session();
+    run_all(&session, &["CREATE EDGE TYPE KNOWS (since INT64)"]);
+    let before = row_of_type(&session, "SHOW EDGE TYPES", "KNOWS");
+    let error = session
+        .execute("CREATE GRAPH TYPE a { (:Person)-[:KNOWS {since INT64}]->(:Person) }")
+        .expect_err("endpoints added to a standalone edge type");
+    assert_eq!(GqlStatus::from(&error).as_str(), "42000", "{error}");
+    assert!(
+        error.to_string().contains("declared differently"),
+        "{error}"
+    );
+    assert!(!shows(&session, "SHOW GRAPH TYPES", "a"), "leaves nothing");
+    assert_eq!(row_of_type(&session, "SHOW EDGE TYPES", "KNOWS"), before);
 }
 
 /// A replace may change a type only it lists, not one another graph type lists too.
@@ -1824,13 +2104,13 @@ fn the_warning_gives_the_kind_of_type_in_its_context() {
     assert_eq!(contexts, ["edge_type:ROAD", "node_type:City"]);
 }
 
-/// Nodes of a listed label in the default graph: a warning naming the type, the graph type and the
-/// graph.
+/// Nodes of a label a graph type declares, in the default graph: a warning naming the type, the
+/// graph type and the graph. (A standalone type a graph type lists stays in force there, #764, so
+/// it loses no rule and gives no warning.)
 #[test]
 fn a_listed_label_with_nodes_in_the_default_graph_warns() {
     let db = with_statements(&[
-        "CREATE NODE TYPE City (name STRING NOT NULL)",
-        "CREATE GRAPH TYPE atlas (NODE TYPE City)",
+        "CREATE GRAPH TYPE atlas (NODE TYPE City (name STRING NOT NULL))",
         "INSERT (:City {size: 1})",
     ]);
     let warnings = not_bound(&db);
@@ -1902,7 +2182,8 @@ fn one_warning_for_each_type() {
 }
 
 /// Nothing to warn of: nodes only in the bound graph, or in a graph of another graph type that
-/// lists the same type; a type no graph type lists; a listed label with no nodes.
+/// lists the same type; a type no graph type lists; a standalone type a graph type lists, which
+/// stays in force (#764); a listed label with no nodes.
 #[test]
 fn no_warning_where_no_rule_is_lost() {
     for (what, statements) in [
@@ -1930,6 +2211,17 @@ fn no_warning_where_no_rule_is_lost() {
             &[
                 "CREATE NODE TYPE City (name STRING NOT NULL)",
                 "INSERT (:City {name: 'Paris'})",
+            ][..],
+        ),
+        (
+            "a standalone type a graph type lists",
+            &[
+                "CREATE NODE TYPE City (name STRING NOT NULL)",
+                "CREATE GRAPH TYPE atlas (NODE TYPE City)",
+                "INSERT (:City {name: 'Paris'})",
+                "CREATE GRAPH plain",
+                "USE GRAPH plain",
+                "INSERT (:City {name: 'Lyon'})",
             ][..],
         ),
         (
@@ -2098,8 +2390,8 @@ fn a_bare_pattern_with_no_such_type_defines_an_empty_one() {
     assert_eq!(town[1], string(""), "no properties: {town:?}");
 }
 
-/// Endpoints a pattern adds: allowed when nothing else uses the edge type, which then has them.
-/// The rows of a graph of it obey them.
+/// Endpoints a pattern states for an edge type the graph type declares (a standalone edge type it
+/// may only name as it is, #764): the type has them, and the rows of a graph of it obey them.
 #[test]
 fn a_pattern_may_add_endpoints_to_an_edge_type_nothing_uses() {
     let db = GrafeoDB::new_in_memory();
@@ -2107,7 +2399,6 @@ fn a_pattern_may_add_endpoints_to_an_edge_type_nothing_uses() {
     run_all(
         &session,
         &[
-            "CREATE EDGE TYPE KNOWS (since INT64)",
             "CREATE GRAPH TYPE people { (:Person)-[:KNOWS {since INT64}]->(:Person), (:Town) }",
             "CREATE GRAPH circle TYPED people",
             "USE GRAPH circle",
@@ -2188,8 +2479,8 @@ fn row_of_type(session: &Session, statement: &str, name: &str) -> Vec<Value> {
         .unwrap_or_else(|| panic!("no {name} in {statement}"))
 }
 
-/// A pattern adds endpoints to a standalone edge type nothing lists: the stored type keeps its
-/// properties and gains them. 0.6.1 stored the pattern's empty properties over it.
+/// A pattern names standalone types as they are, writing no properties: the stored types keep
+/// their properties and endpoints. 0.6.1 stored the pattern's empty properties over them.
 #[test]
 fn a_pattern_keeps_the_properties_of_what_it_names() {
     let db = GrafeoDB::new_in_memory();
@@ -2198,7 +2489,7 @@ fn a_pattern_keeps_the_properties_of_what_it_names() {
         &session,
         &[
             "CREATE NODE TYPE A (name STRING NOT NULL)",
-            "CREATE EDGE TYPE E (km INT64 NOT NULL)",
+            "CREATE EDGE TYPE E CONNECTING (A) TO (B) (km INT64 NOT NULL)",
         ],
     );
     let node_before = row_of_type(&session, "SHOW NODE TYPES", "A");
@@ -2209,12 +2500,10 @@ fn a_pattern_keeps_the_properties_of_what_it_names() {
         node_before,
         "the node type"
     );
-    let edge = row_of_type(&session, "SHOW EDGE TYPES", "E");
-    assert_eq!(edge[1], edge_before[1], "the edge type's properties");
     assert_eq!(
-        edge[2..4],
-        [string("A"), string("B")],
-        "the endpoints added"
+        row_of_type(&session, "SHOW EDGE TYPES", "E"),
+        edge_before,
+        "the edge type, its properties and endpoints"
     );
 }
 
@@ -2252,8 +2541,8 @@ fn the_keyword_form_with_nothing_stated_only_names_the_type() {
     assert_eq!(row_of_type(&session, "SHOW EDGE TYPES", "E"), before);
 }
 
-/// A replace may change an edge type only it lists: a pattern with no properties keeps them and
-/// takes the new endpoints.
+/// A replace may change an edge type only it declares: the new pattern declares it again, with
+/// its properties and the new endpoints.
 #[test]
 fn a_replace_may_change_the_endpoints_of_an_edge_type_only_it_lists() {
     let db = GrafeoDB::new_in_memory();
@@ -2261,14 +2550,40 @@ fn a_replace_may_change_the_endpoints_of_an_edge_type_only_it_lists() {
     run_all(
         &session,
         &[
-            "CREATE EDGE TYPE E (km INT64)",
-            "CREATE GRAPH TYPE t { (:A)-[:E]->(:B) }",
-            "CREATE OR REPLACE GRAPH TYPE t { (:C)-[:E]->(:D) }",
+            "CREATE GRAPH TYPE t { (:A)-[:E {km INT64}]->(:B) }",
+            "CREATE OR REPLACE GRAPH TYPE t { (:C)-[:E {km INT64}]->(:D) }",
         ],
     );
     let edge = row_of_type(&session, "SHOW EDGE TYPES", "E");
     assert_eq!(edge[1], string("km INT64"), "{edge:?}");
     assert_eq!(edge[2..4], [string("C"), string("D")], "{edge:?}");
+}
+
+/// A replace cannot move a standalone edge type's endpoints (#764): after the old graph type goes,
+/// the standalone type keeps its own declaration, endpoints included, and a pattern stating others
+/// is a different declaration, refused. The old graph type stands.
+#[test]
+fn a_replace_cannot_change_the_endpoints_of_a_standalone_edge_type() {
+    let db = GrafeoDB::new_in_memory();
+    let session = db.session();
+    run_all(
+        &session,
+        &[
+            "CREATE EDGE TYPE E CONNECTING (A) TO (B) (km INT64)",
+            "CREATE GRAPH TYPE t { (:A)-[:E]->(:B) }",
+        ],
+    );
+    let before = row_of_type(&session, "SHOW EDGE TYPES", "E");
+    let error = session
+        .execute("CREATE OR REPLACE GRAPH TYPE t { (:C)-[:E]->(:D) }")
+        .expect_err("other endpoints for a standalone edge type");
+    assert!(
+        error.to_string().contains("declared differently"),
+        "{error}"
+    );
+    assert_eq!(GqlStatus::from(&error).as_str(), "42000", "{error}");
+    assert!(shows(&session, "SHOW GRAPH TYPES", "t"), "the old t stands");
+    assert_eq!(row_of_type(&session, "SHOW EDGE TYPES", "E"), before);
 }
 
 /// Different endpoints from the ones it has are another declaration, also with no properties
@@ -2313,9 +2628,8 @@ fn the_current_graph_type_cannot_add_endpoints_to_a_standalone_edge_type() {
     assert_eq!(row_of_type(&session, "SHOW EDGE TYPES", "E"), before);
 }
 
-/// One reading of "nothing else uses it": edges of a standalone type in an unbound graph
-/// do not stop a pattern from adding endpoints, and that graph's rules do not change through it:
-/// listing moved the rule off it, and the endpoints reach only the graph type's graphs.
+/// The endpoints a graph type's pattern declares reach only its graphs: edges of the label in an
+/// unbound graph do not stop the declaration, and that graph's rules do not change through it.
 #[test]
 fn endpoints_a_pattern_adds_do_not_reach_an_unbound_graph() {
     let db = GrafeoDB::new_in_memory();
@@ -2323,12 +2637,11 @@ fn endpoints_a_pattern_adds_do_not_reach_an_unbound_graph() {
     run_all(
         &session,
         &[
-            "CREATE EDGE TYPE E (km INT64)",
             "CREATE GRAPH plain",
             "USE GRAPH plain",
             "INSERT (:Z)-[:E {km: 1}]->(:Z)",
             "USE GRAPH default",
-            "CREATE GRAPH TYPE t { (:A {name STRING})-[:E]->(:B {name STRING}) }",
+            "CREATE GRAPH TYPE t { (:A {name STRING})-[:E {km INT64}]->(:B {name STRING}) }",
             "USE GRAPH plain",
         ],
     );
@@ -2353,6 +2666,37 @@ fn endpoints_a_pattern_adds_do_not_reach_an_unbound_graph() {
             .is_err(),
         "the other way round is no endpoint of E"
     );
+}
+
+/// A standalone edge type in an unbound graph (#764): a pattern adding endpoints to it is refused,
+/// and the type stays in force there, its properties checked.
+#[test]
+fn a_standalone_edge_types_endpoints_stay_its_own_in_an_unbound_graph() {
+    let db = GrafeoDB::new_in_memory();
+    let session = db.session();
+    run_all(
+        &session,
+        &[
+            "CREATE EDGE TYPE E (km INT64)",
+            "CREATE GRAPH plain",
+            "USE GRAPH plain",
+            "INSERT (:Z)-[:E {km: 1}]->(:Z)",
+            "USE GRAPH default",
+        ],
+    );
+    let error = session
+        .execute("CREATE GRAPH TYPE t { (:A {name STRING})-[:E]->(:B {name STRING}) }")
+        .expect_err("endpoints added to a standalone edge type");
+    assert!(
+        error.to_string().contains("declared differently"),
+        "{error}"
+    );
+    session.execute("USE GRAPH plain").unwrap();
+    let error = session
+        .execute("INSERT (:Y)-[:E {km: 'far'}]->(:Y)")
+        .expect_err("the standalone type is in force in plain");
+    assert!(error.to_string().contains("GRAFEO-V001"), "{error}");
+    assert_eq!(rows(&session, "MATCH ()-[e:E]->() RETURN e.km").len(), 1);
 }
 
 // ---------------------------------------------------------------------------
@@ -2511,16 +2855,30 @@ fn a_pattern_with_properties_and_one_without_are_refused() {
     assert_two_patterns_refused(&session, &error);
 }
 
-/// The merged type goes through the rule for a pattern over an existing type as one declaration.
+/// The merged type goes through the rule for a pattern over an existing type as one declaration:
+/// over a standalone edge type it adds endpoints, so each pattern is checked against the standalone
+/// declaration and the statement is refused (#764); declared by the statement itself, the merge
+/// holds in the graphs of the type.
 #[test]
 fn merged_patterns_over_an_existing_edge_type_are_one_declaration() {
+    let db = GrafeoDB::new_in_memory();
+    let session = db.session();
+    run_all(&session, &["CREATE EDGE TYPE E (km INT64)"]);
+    let error = session
+        .execute("CREATE GRAPH TYPE t { (:A)-[:E]->(:B), (:C)-[:E]->(:B) }")
+        .expect_err("endpoints added to a standalone edge type");
+    assert!(
+        error.to_string().contains("declared differently"),
+        "{error}"
+    );
+    assert!(!shows(&session, "SHOW GRAPH TYPES", "t"));
+
     let db = GrafeoDB::new_in_memory();
     let session = db.session();
     run_all(
         &session,
         &[
-            "CREATE EDGE TYPE E (km INT64)",
-            "CREATE GRAPH TYPE t { (:A)-[:E]->(:B), (:C)-[:E]->(:B) }",
+            "CREATE GRAPH TYPE t { (:A)-[:E {km INT64}]->(:B), (:C)-[:E {km INT64}]->(:B) }",
             "CREATE GRAPH g TYPED t",
             "USE GRAPH g",
             "INSERT (:A)-[:E {km: 1}]->(:B)",

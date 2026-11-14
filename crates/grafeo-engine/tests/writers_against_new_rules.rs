@@ -168,9 +168,9 @@ fn a_type_an_open_graph_type_starts_listing_fails_the_commit() {
     the_commit_fails(
         &[
             "CREATE NODE TYPE Town (name STRING)",
-            "CREATE NODE TYPE City (name STRING NOT NULL)",
-            // Another graph type lists it, so no rule by label holds in the open graph yet.
-            "CREATE GRAPH TYPE elsewhere (NODE TYPE City)",
+            // Another graph type declares it inline, so no rule by label holds in the open graph
+            // yet (a standalone type a graph type lists stays a rule by label, #764).
+            "CREATE GRAPH TYPE elsewhere (NODE TYPE City (name STRING NOT NULL))",
             "CREATE GRAPH TYPE o {node_types: [Town], edge_types: [], open: true}",
             "CREATE GRAPH free TYPED o",
         ],

@@ -1698,6 +1698,7 @@ mod tests {
                 constraints: Vec::new(),
                 parent_types: names(&["Place"]),
                 key_labels: Vec::new(),
+                standalone: false,
             }),
             CatalogRecord::EdgeType(EdgeTypeRecord {
                 name: "ROUTE".into(),
@@ -1708,6 +1709,7 @@ mod tests {
                     target: None,
                 }],
                 key_labels: Vec::new(),
+                standalone: false,
             }),
             CatalogRecord::GraphType(GraphTypeRecord {
                 name: "travel".into(),
@@ -1882,6 +1884,39 @@ mod tests {
             let back = read_all(&bytes).unwrap();
             assert_eq!(back, std::slice::from_ref(&record), "{record:?}");
             assert_eq!(framed(&back[0]), bytes, "{record:?}");
+        }
+    }
+
+    /// A standalone type a graph type lists (#764), put in the WAL, comes back marked; the same
+    /// type unmarked comes back unmarked. The catalog kind after the log kind is 12 or 13.
+    #[test]
+    fn a_put_of_a_standalone_type_round_trips_marked() {
+        for record in catalog_records() {
+            let (marked, kind) = match &record {
+                CatalogRecord::NodeType(node) => (
+                    CatalogRecord::NodeType(NodeTypeRecord {
+                        standalone: true,
+                        ..node.clone()
+                    }),
+                    12,
+                ),
+                CatalogRecord::EdgeType(edge) => (
+                    CatalogRecord::EdgeType(EdgeTypeRecord {
+                        standalone: true,
+                        ..edge.clone()
+                    }),
+                    13,
+                ),
+                _ => continue,
+            };
+            for put in [record, marked] {
+                let log = LogRecord::Standalone(StandaloneOp::PutCatalog(put.clone()));
+                let bytes = framed(&log);
+                assert_eq!(read_all(&bytes).unwrap(), [log], "{put:?}");
+                let catalog_kind = bytes[RECORD_HEADER_BYTES];
+                assert_eq!(catalog_kind, put.kind(), "{put:?}");
+                assert_eq!(catalog_kind == kind, put.kind() == kind);
+            }
         }
     }
 
@@ -2300,7 +2335,7 @@ mod tests {
             (KIND_PUT_CATALOG, "catalog record"),
             (KIND_DROP_CATALOG, "catalog key"),
         ] {
-            let optional = [&[kind, 0, 4, 0, 0, 0, 12, 3, 19, 88][..], &group].concat();
+            let optional = [&[kind, 0, 4, 0, 0, 0, 240, 3, 19, 88][..], &group].concat();
             assert_eq!(
                 read_all(&optional).unwrap(),
                 [one_of_each()[0].clone()],
@@ -2308,14 +2343,14 @@ mod tests {
             );
             let required = [
                 &group[..],
-                &[kind, RECORD_REQUIRED, 4, 0, 0, 0, 12, 3, 19, 88],
+                &[kind, RECORD_REQUIRED, 4, 0, 0, 0, 240, 3, 19, 88],
             ]
             .concat();
             let error = read_error(&required);
             assert!(
                 error.contains("log record 1 at byte 17")
                     && error.contains(&format!("kind {kind}"))
-                    && error.contains(&format!("{what} of kind 12")),
+                    && error.contains(&format!("{what} of kind 240")),
                 "kind {kind}, required: {error}"
             );
 
@@ -2340,7 +2375,18 @@ mod tests {
     /// a newer release wrote is refused as such, never as damage.
     #[test]
     fn damage_is_corruption_and_a_newer_catalog_kind_is_not() {
-        let newer = [KIND_PUT_CATALOG, RECORD_REQUIRED, 4, 0, 0, 0, 12, 3, 19, 88];
+        let newer = [
+            KIND_PUT_CATALOG,
+            RECORD_REQUIRED,
+            4,
+            0,
+            0,
+            0,
+            240,
+            3,
+            19,
+            88,
+        ];
         let error = read_all(&newer).unwrap_err();
         assert!(matches!(error, Error::Serialization(_)), "{error:?}");
         let group = framed(&one_of_each()[0]);

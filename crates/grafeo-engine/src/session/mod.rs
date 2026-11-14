@@ -985,6 +985,125 @@ impl Session {
                 ),
             )));
         }
+        // A standalone type a graph type lists governs that graph type's graphs too (#764):
+        // the graph type would go on naming a type that no longer exists.
+        let standalone = if is_edge {
+            catalog
+                .get_edge_type_def(type_key)
+                .is_some_and(|def| def.standalone)
+        } else {
+            catalog
+                .get_node_type(type_key)
+                .is_some_and(|def| def.standalone)
+        };
+        if !standalone {
+            return Ok(());
+        }
+        let mut listing: Vec<String> = catalog
+            .all_graph_type_defs()
+            .into_iter()
+            .filter(|def| {
+                let listed = if is_edge {
+                    &def.allowed_edge_types
+                } else {
+                    &def.allowed_node_types
+                };
+                !crate::catalog::is_current_graph_type(&def.name)
+                    && listed.iter().any(|on| on == type_key)
+            })
+            .map(|def| def.name)
+            .collect();
+        listing.sort();
+        let Some(graph_type) = listing.first() else {
+            return Ok(());
+        };
+        let kind = if is_edge { "EDGE" } else { "NODE" };
+        let graph_type = crate::catalog::unqualified(graph_type);
+        Err(Error::from(QueryError::new(
+            QueryErrorKind::Semantic,
+            format!(
+                "graph type '{graph_type}' lists type '{name}': take it out first with ALTER \
+                 GRAPH TYPE {graph_type} DROP {kind} TYPE {name}"
+            ),
+        )))
+    }
+
+    /// Whether the node type (with `is_edge`, the edge type) stored as `type_key` stands on its
+    /// own (#764): made by `CREATE NODE TYPE` or `CREATE EDGE TYPE`, so it stays a rule by its
+    /// label when a graph type lists it. That is a type marked so, or one that no graph type
+    /// lists, which only those statements leave (Cypher's `__current__` lists rules by label).
+    /// `false` for a type that does not exist.
+    #[cfg(feature = "gql")]
+    fn stands_alone(&self, type_key: &str, is_edge: bool) -> bool {
+        let catalog = self.effective_catalog();
+        let Some(schema) = catalog.schema() else {
+            return false;
+        };
+        if is_edge {
+            catalog
+                .get_edge_type_def(type_key)
+                .is_some_and(|def| def.standalone || !schema.lists_edge_type(type_key))
+        } else {
+            catalog
+                .get_node_type(type_key)
+                .is_some_and(|def| def.standalone || !schema.lists_node_type(type_key))
+        }
+    }
+
+    /// Adds to `change` the mark of each of `nodes` and `edges`, the types a graph type is about
+    /// to list, that stands on its own unmarked (see [`stands_alone`](Self::stands_alone)) and
+    /// that `change` does not put already: marked, it keeps applying by its label (#764).
+    ///
+    /// # Errors
+    ///
+    /// An edge type whose record would not fit (see `edge_type_record`).
+    #[cfg(feature = "gql")]
+    fn mark_standalone_types(
+        &self,
+        nodes: &[String],
+        edges: &[String],
+        change: &mut crate::transaction::StandaloneChange,
+    ) -> Result<()> {
+        use crate::database::catalog_records::{edge_type_record, node_type_record};
+        use grafeo_common::change::StandaloneOp;
+        use grafeo_common::storage::catalog_record::CatalogRecord;
+
+        let puts = |change: &crate::transaction::StandaloneChange, is_edge: bool, name: &str| {
+            change.ops().any(|op| match op {
+                StandaloneOp::PutCatalog(CatalogRecord::NodeType(record)) => {
+                    !is_edge && record.name == name
+                }
+                StandaloneOp::PutCatalog(CatalogRecord::EdgeType(record)) => {
+                    is_edge && record.name == name
+                }
+                _ => false,
+            })
+        };
+        let catalog = self.effective_catalog();
+        for name in nodes {
+            if let Some(mut def) = catalog.get_node_type(name).filter(|def| !def.standalone)
+                && self.stands_alone(name, false)
+                && !puts(change, false, name)
+            {
+                def.standalone = true;
+                change.push(StandaloneOp::PutCatalog(CatalogRecord::NodeType(
+                    node_type_record(&def),
+                )));
+            }
+        }
+        for name in edges {
+            if let Some(mut def) = catalog
+                .get_edge_type_def(name)
+                .filter(|def| !def.standalone)
+                && self.stands_alone(name, true)
+                && !puts(change, true, name)
+            {
+                def.standalone = true;
+                change.push(StandaloneOp::PutCatalog(CatalogRecord::EdgeType(
+                    edge_type_record(&def)?,
+                )));
+            }
+        }
         Ok(())
     }
 
@@ -1952,6 +2071,7 @@ impl Session {
                 },
                 parent_types: Vec::new(),
                 key_labels: Vec::new(),
+                standalone: false,
             };
             change.push(StandaloneOp::PutCatalog(CatalogRecord::NodeType(
                 node_type_record(&def),
@@ -1976,6 +2096,7 @@ impl Session {
                 source_node_types: vec![self.effective_type_key(&table.source_table)],
                 target_node_types: vec![self.effective_type_key(&table.target_table)],
                 key_labels: Vec::new(),
+                standalone: false,
             };
             change.push(StandaloneOp::PutCatalog(CatalogRecord::EdgeType(
                 edge_type_record(&def)?,
@@ -2238,7 +2359,7 @@ impl Session {
             .all_graph_type_defs()
             .iter()
             .any(|other| other.name != graph_type && other.allowed_node_types.contains(&def.name));
-        if (own && !listed_elsewhere)
+        if (own && !listed_elsewhere && !existing.standalone)
             || (declared_properties(&existing.properties) == declared_properties(&def.properties)
                 && same_names(&existing.parent_types, &def.parent_types)
                 && same_names(&existing.key_labels, &def.key_labels))
@@ -2254,10 +2375,11 @@ impl Session {
     /// [`declares_node_type`](Self::declares_node_type), a different declaration fails,
     /// and a replace may change a type only it lists (`own`).
     ///
-    /// A type with no endpoints on a side says nothing they could differ from, so a pattern
-    /// may add them, unless they would reach further than this graph type: another graph
-    /// type lists it, or `graph_type` is Cypher's `__current__`, whose types are rules by
-    /// label in every graph.
+    /// A pattern names a type that is not its own only as it is, endpoints included: a type
+    /// that stands on its own (#764, see [`stands_alone`](Self::stands_alone)), whose endpoints
+    /// reach every graph it governs, so a replace may not change it either; one another graph
+    /// type lists; or one of Cypher's `__current__`, whose types are rules by label in every
+    /// graph.
     ///
     /// # Errors
     ///
@@ -2285,28 +2407,17 @@ impl Session {
             .all_graph_type_defs()
             .iter()
             .any(|other| other.name != graph_type && other.allowed_edge_types.contains(&def.name));
-        if own && !listed_elsewhere {
+        if own && !listed_elsewhere && !existing.standalone {
             return Ok(Some(def));
         }
-        let same_sources = same_names(&existing.source_node_types, &def.source_node_types);
-        let same_targets = same_names(&existing.target_node_types, &def.target_node_types);
         if declared_properties(&existing.properties) != declared_properties(&def.properties)
             || !same_names(&existing.key_labels, &def.key_labels)
+            || !same_names(&existing.source_node_types, &def.source_node_types)
+            || !same_names(&existing.target_node_types, &def.target_node_types)
         {
             return Err(other_declaration("edge type", &def.name));
         }
-        if same_sources && same_targets {
-            return Ok(None);
-        }
-        let only_adds_endpoints = (same_sources || existing.source_node_types.is_empty())
-            && (same_targets || existing.target_node_types.is_empty());
-        if only_adds_endpoints
-            && !listed_elsewhere
-            && !crate::catalog::is_current_graph_type(graph_type)
-        {
-            return Ok(Some(def));
-        }
-        Err(other_declaration("edge type", &def.name))
+        Ok(None)
     }
 
     /// Adds the index a uniqueness rule's check reads to `change`, which adds the rule: on
@@ -2402,8 +2513,8 @@ impl Session {
     /// Adds the drop of each of `nodes` and `edges`, types the graph type `graph_type`
     /// stops listing, that no other graph type lists, to `change`: the types of a graph
     /// type go with it (ISO/IEC 39075 12.7 and 4.13.2.2), also one it named by reference.
-    /// Cypher's `__current__` keeps its types, which are rules by label. The names of the
-    /// types going.
+    /// Cypher's `__current__` keeps its types, which are rules by label, and every graph type
+    /// leaves a type that stands on its own (#764). The names of the types going.
     ///
     /// # Errors
     ///
@@ -2432,7 +2543,7 @@ impl Session {
         let short = |name: &str| crate::catalog::unqualified(name).to_string();
         let mut gone = Vec::new();
         for name in nodes {
-            if catalog.get_node_type(name).is_none()
+            if catalog.get_node_type(name).is_none_or(|def| def.standalone)
                 || others
                     .iter()
                     .any(|def| def.allowed_node_types.contains(name))
@@ -2456,7 +2567,9 @@ impl Session {
             gone.push(label);
         }
         for name in edges {
-            if catalog.get_edge_type_def(name).is_some()
+            if catalog
+                .get_edge_type_def(name)
+                .is_some_and(|def| !def.standalone)
                 && !others
                     .iter()
                     .any(|def| def.allowed_edge_types.contains(name))
@@ -2507,12 +2620,17 @@ impl Session {
         match cmd {
             SchemaStatement::CreateNodeType(stmt) => {
                 let effective_name = self.effective_type_key(&stmt.name);
+                // A replace keeps the mark of a standalone type a graph type lists (#764).
                 let def = NodeTypeDefinition {
                     name: effective_name.clone(),
                     properties: typed_properties(&stmt.properties)?,
                     constraints: Vec::new(),
                     parent_types: stmt.parent_types.clone(),
                     key_labels: Vec::new(),
+                    standalone: self
+                        .effective_catalog()
+                        .get_node_type(&effective_name)
+                        .is_some_and(|def| def.standalone),
                 };
                 if !stmt.or_replace
                     && self
@@ -2544,6 +2662,10 @@ impl Session {
                     source_node_types: stmt.source_node_types.clone(),
                     target_node_types: stmt.target_node_types.clone(),
                     key_labels: Vec::new(),
+                    standalone: self
+                        .effective_catalog()
+                        .get_edge_type_def(&effective_name)
+                        .is_some_and(|def| def.standalone),
                 };
                 if !stmt.or_replace
                     && self
@@ -3010,6 +3132,7 @@ impl Session {
                                     constraints: Vec::new(),
                                     parent_types: key_labels.clone(),
                                     key_labels: key_labels.clone(),
+                                    standalone: self.stands_alone(&inline_effective, false),
                                 };
                                 let own = replaced.as_ref().is_some_and(|old| {
                                     old.allowed_node_types.contains(&inline_effective)
@@ -3049,6 +3172,7 @@ impl Session {
                                     source_node_types,
                                     target_node_types,
                                     key_labels: key_labels.clone(),
+                                    standalone: self.stands_alone(&inline_effective, true),
                                 };
                                 let own = replaced.as_ref().is_some_and(|old| {
                                     old.allowed_edge_types.contains(&inline_effective)
@@ -3091,6 +3215,12 @@ impl Session {
                     )?,
                     None => Vec::new(),
                 };
+                // A standalone type it lists keeps applying by its label (#764).
+                self.mark_standalone_types(
+                    &def.allowed_node_types,
+                    &def.allowed_edge_types,
+                    change,
+                )?;
                 // The type it replaces is dropped first, which also drops
                 // the bindings a dropped graph left to its name.
                 if exists {
@@ -3347,6 +3477,18 @@ impl Session {
                         .filter(|name| !after.contains(name))
                         .collect()
                 };
+                let added = |before: &[String], after: &[String]| -> Vec<String> {
+                    after
+                        .iter()
+                        .filter(|name| !before.contains(name))
+                        .cloned()
+                        .collect()
+                };
+                self.mark_standalone_types(
+                    &added(&nodes_before, &def.allowed_node_types),
+                    &added(&edges_before, &def.allowed_edge_types),
+                    change,
+                )?;
                 let gone = self.drop_types_only_listed_by(
                     &effective_name,
                     &removed(nodes_before, &def.allowed_node_types),
@@ -9614,10 +9756,13 @@ mod tests {
             session
                 .execute("CREATE NODE TYPE City (name STRING)")
                 .unwrap();
+            // A pattern names a standalone edge type only as it is, endpoints included (#764).
             session
-                .execute("CREATE EDGE TYPE KNOWS (since INTEGER)")
+                .execute("CREATE EDGE TYPE KNOWS CONNECTING (Person) TO (Person) (since INTEGER)")
                 .unwrap();
-            session.execute("CREATE EDGE TYPE LIVES_IN").unwrap();
+            session
+                .execute("CREATE EDGE TYPE LIVES_IN CONNECTING (Person) TO (City)")
+                .unwrap();
 
             // Create graph type using pattern form
             session

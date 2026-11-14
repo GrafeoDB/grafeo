@@ -25,9 +25,10 @@ import 'value.dart';
 /// The memory and spill settings a database opens with, for
 /// [GrafeoDB.openWithOptions]. A null setting is the default: 75% of the
 /// memory the process may use for [memoryLimit], [memoryLimit] for
-/// [queryMemoryLimit], half the spill volume's free space for [spillLimit]. A
-/// write past the memory limit throws `GRAFEO-S001`. One object may open
-/// several databases.
+/// [queryMemoryLimit], a quarter of [memoryLimit] (at most 256 MiB) for
+/// [pathSearchBudget], half the spill volume's free space for [spillLimit]. A
+/// write past the memory limit throws `GRAFEO-S001`, and so does a path search
+/// over its budget. One object may open several databases.
 class GrafeoOptions {
   /// How many bytes the database may hold; zero fails at the open.
   final int? memoryLimit;
@@ -35,6 +36,10 @@ class GrafeoOptions {
   /// How many bytes one statement's sorts, joins and aggregates may hold,
   /// never more than [memoryLimit]; zero fails at the open.
   final int? queryMemoryLimit;
+
+  /// How many bytes one path search may hold, never more than [memoryLimit];
+  /// zero fails at the open.
+  final int? pathSearchBudget;
 
   /// How many bytes may spill to disk; zero means nothing spills.
   final int? spillLimit;
@@ -46,6 +51,7 @@ class GrafeoOptions {
   const GrafeoOptions({
     this.memoryLimit,
     this.queryMemoryLimit,
+    this.pathSearchBudget,
     this.spillLimit,
     this.unlimitedSpill = false,
   });
@@ -70,6 +76,13 @@ class GrafeoOptions {
         throw ArgumentError.value(query, 'queryMemoryLimit', 'must not be negative');
       }
       check(bindings.grafeoOptionsSetQueryMemoryLimit(native, query));
+    }
+    final paths = pathSearchBudget;
+    if (paths != null) {
+      if (paths < 0) {
+        throw ArgumentError.value(paths, 'pathSearchBudget', 'must not be negative');
+      }
+      check(bindings.grafeoOptionsSetPathSearchBudget(native, paths));
     }
     final spill = spillLimit;
     if (unlimitedSpill) {

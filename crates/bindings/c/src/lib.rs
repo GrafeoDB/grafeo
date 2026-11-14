@@ -33,6 +33,8 @@ mod graph;
 #[cfg(test)]
 mod memory_options_tests;
 mod options;
+#[cfg(test)]
+mod query_limits_tests;
 mod session;
 #[cfg(test)]
 mod session_tests;

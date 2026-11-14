@@ -562,6 +562,11 @@ impl PyGrafeoDB {
     /// it they spill to disk where they can, else the statement raises
     /// GRAFEO-S001. For this open only.
     ///
+    /// path_search_budget is how many bytes one path search (a variable-length
+    /// or shortest path, an RDF property path) may hold: by default a quarter
+    /// of memory_limit, at most 256 MiB, and never more than memory_limit. A
+    /// search over it raises GRAFEO-S001. For this open only.
+    ///
     /// spill_limit is how many bytes may spill to disk (0: nothing spills),
     /// half the spill volume's free space by default; unlimited_spill=True
     /// lifts it (and wins over spill_limit). An in-memory database spills
@@ -581,6 +586,7 @@ impl PyGrafeoDB {
         wal_segment_size=None,
         memory_limit=None,
         query_memory_limit=None,
+        path_search_budget=None,
         spill_limit=None,
         unlimited_spill=false
     ))]
@@ -602,6 +608,7 @@ impl PyGrafeoDB {
         wal_segment_size: Option<u64>,
         memory_limit: Option<usize>,
         query_memory_limit: Option<usize>,
+        path_search_budget: Option<usize>,
         spill_limit: Option<u64>,
         unlimited_spill: bool,
         py: Python<'_>,
@@ -637,6 +644,9 @@ impl PyGrafeoDB {
         }
         if let Some(bytes) = query_memory_limit {
             config = config.with_query_memory_limit(bytes);
+        }
+        if let Some(bytes) = path_search_budget {
+            config = config.with_path_search_budget(bytes);
         }
         if unlimited_spill {
             config = config.with_unlimited_spill();

@@ -117,6 +117,12 @@ export interface DatabaseOptions {
    * past it throws `GRAFEO-S001` and changes nothing; reads keep working.
    */
   memoryLimit?: number;
+  /**
+   * How many bytes one path search (a variable-length or shortest path) may hold, a positive whole
+   * number: a quarter of `memoryLimit` by default, at most 256 MiB, never more than `memoryLimit`.
+   * A search over it throws `GRAFEO-S001`.
+   */
+  pathSearchBudget?: number;
 }
 
 /**

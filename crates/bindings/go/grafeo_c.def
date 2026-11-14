@@ -125,6 +125,7 @@ grafeo_open_with_options
 grafeo_options_free
 grafeo_options_new
 grafeo_options_set_memory_limit
+grafeo_options_set_path_search_budget
 grafeo_options_set_query_memory_limit
 grafeo_options_set_spill_limit
 grafeo_options_set_unlimited_spill

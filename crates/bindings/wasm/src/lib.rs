@@ -46,13 +46,14 @@ pub(crate) fn js_error(message: &str) -> JsValue {
     JsError::new(message).into()
 }
 
-/// The memory limit `options.memoryLimit` sets, in bytes: `None` when the options or the key are
-/// left out, an error for a number that is not a positive whole number of bytes.
-fn memory_limit(options: Option<&js_sys::Object>) -> Result<Option<usize>, JsValue> {
+/// The bytes `options[key]` sets (`memoryLimit`, `pathSearchBudget`): `None` when the options or
+/// the key are left out, an error naming the key for a number that is not a positive whole
+/// number of bytes.
+fn positive_bytes(options: Option<&js_sys::Object>, key: &str) -> Result<Option<usize>, JsValue> {
     let Some(options) = options else {
         return Ok(None);
     };
-    let limit = js_sys::Reflect::get(options, &JsValue::from_str("memoryLimit"))?;
+    let limit = js_sys::Reflect::get(options, &JsValue::from_str(key))?;
     if limit.is_undefined() || limit.is_null() {
         return Ok(None);
     }
@@ -66,14 +67,14 @@ fn memory_limit(options: Option<&js_sys::Object>) -> Result<Option<usize>, JsVal
             )]
             Ok(Some(bytes as usize))
         }
-        _ => Err(js_error(
-            "memoryLimit must be a positive whole number of bytes",
-        )),
+        _ => Err(js_error(&format!(
+            "{key} must be a positive whole number of bytes"
+        ))),
     }
 }
 
-/// The in-memory configuration `options` set (`historyRetention`, `memoryLimit`), the defaults
-/// for `None`.
+/// The in-memory configuration `options` set (`historyRetention`, `memoryLimit`,
+/// `pathSearchBudget`), the defaults for `None`.
 fn in_memory_config(options: Option<&js_sys::Object>) -> Result<grafeo_engine::Config, JsValue> {
     let mut config = grafeo_engine::Config::in_memory();
     if let Some(options) = options
@@ -81,8 +82,11 @@ fn in_memory_config(options: Option<&js_sys::Object>) -> Result<grafeo_engine::C
     {
         config = config.with_history_retention(retention);
     }
-    if let Some(bytes) = memory_limit(options)? {
+    if let Some(bytes) = positive_bytes(options, "memoryLimit")? {
         config = config.with_memory_limit(bytes);
+    }
+    if let Some(bytes) = positive_bytes(options, "pathSearchBudget")? {
+        config = config.with_path_search_budget(bytes);
     }
     Ok(config)
 }

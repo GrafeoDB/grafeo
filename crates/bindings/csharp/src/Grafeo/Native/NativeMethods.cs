@@ -41,6 +41,10 @@ internal static partial class NativeMethods
     [LibraryImport(LibName)]
     internal static partial int grafeo_options_set_query_memory_limit(nint options, ulong bytes);
 
+    /// <summary>Sets the path search budget in bytes, above zero.</summary>
+    [LibraryImport(LibName)]
+    internal static partial int grafeo_options_set_path_search_budget(nint options, ulong bytes);
+
     /// <summary>Sets the spill limit in bytes; zero means nothing spills.</summary>
     [LibraryImport(LibName)]
     internal static partial int grafeo_options_set_spill_limit(nint options, ulong bytes);

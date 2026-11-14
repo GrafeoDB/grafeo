@@ -20,6 +20,7 @@ use crate::types::GrafeoDatabase;
 pub struct GrafeoOptions {
     memory_limit: Option<usize>,
     query_memory_limit: Option<usize>,
+    path_search_budget: Option<usize>,
     spill_limit: Option<u64>,
     unlimited_spill: bool,
 }
@@ -32,6 +33,9 @@ impl GrafeoOptions {
         }
         if let Some(bytes) = self.query_memory_limit {
             config = config.with_query_memory_limit(bytes);
+        }
+        if let Some(bytes) = self.path_search_budget {
+            config = config.with_path_search_budget(bytes);
         }
         if self.unlimited_spill {
             config = config.with_unlimited_spill();
@@ -110,6 +114,23 @@ pub extern "C" fn grafeo_options_set_query_memory_limit(
 ) -> GrafeoStatus {
     match options_mut(options).and_then(|options| {
         options.query_memory_limit = Some(positive(bytes, "query_memory_limit")?);
+        Ok(())
+    }) {
+        Ok(()) => GrafeoStatus::Ok,
+        Err(status) => status,
+    }
+}
+
+/// Sets the memory one path search may hold, in bytes, above zero (the default is a quarter of
+/// the memory limit, at most 256 MiB; never more than the memory limit). A search over it fails
+/// with GRAFEO-S001.
+#[unsafe(no_mangle)]
+pub extern "C" fn grafeo_options_set_path_search_budget(
+    options: *mut GrafeoOptions,
+    bytes: u64,
+) -> GrafeoStatus {
+    match options_mut(options).and_then(|options| {
+        options.path_search_budget = Some(positive(bytes, "path_search_budget")?);
         Ok(())
     }) {
         Ok(()) => GrafeoStatus::Ok,

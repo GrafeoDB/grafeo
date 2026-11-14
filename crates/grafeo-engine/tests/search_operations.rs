@@ -5,6 +5,7 @@
 //! - text_search error paths
 //! - batch_vector_search with filters
 //! - mmr_search with filters
+//! - hybrid_search_with and its options (the vector half's beam)
 //!
 //! ```bash
 //! cargo test -p grafeo-engine --features full --test main search_operations::
@@ -924,6 +925,439 @@ mod hybrid {
                 .expect("hybrid search");
             let found: Vec<_> = results.iter().map(|(id, _)| *id).collect();
             assert_eq!(found, expected);
+        }
+    }
+}
+
+// ============================================================================
+// Hybrid search options (grafeo-server#85)
+// ============================================================================
+
+/// `hybrid_search_with` and its `HybridSearchOptions`: the positional
+/// `hybrid_search` is the same search, and `ef` sets the beam of the vector
+/// half exactly as `vector_search` takes it, the text half having no beam.
+#[cfg(feature = "hybrid-search")]
+mod hybrid_options {
+    use std::collections::HashMap;
+    use std::sync::OnceLock;
+
+    use grafeo_common::types::{NodeId, Value};
+    use grafeo_core::index::text::{FusionMethod, fuse_results};
+    use grafeo_engine::GrafeoDB;
+    use grafeo_engine::database::HybridSearchOptions;
+
+    const DIMENSIONS: usize = 16;
+    const NODES: usize = 3000;
+    /// The results asked for; the search fetches twice as many per half.
+    const K: usize = 5;
+
+    /// A linear congruential generator, so every run builds the same vectors.
+    struct Lcg(u64);
+
+    impl Lcg {
+        /// The next value in [0, 1), from the generator's top 16 bits.
+        fn next_value(&mut self) -> f32 {
+            self.0 = self
+                .0
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            f32::from(u16::try_from(self.0 >> 48).expect("16 bits")) / 65_536.0
+        }
+
+        fn vector(&mut self) -> Vec<f32> {
+            (0..DIMENSIONS).map(|_| self.next_value()).collect()
+        }
+    }
+
+    struct Fixture {
+        db: GrafeoDB,
+        vectors: Vec<(NodeId, Vec<f32>)>,
+        /// The filter that keeps the documents in Lisbon, half of them.
+        lisbon: HashMap<String, Value>,
+    }
+
+    /// `NODES` documents of `DIMENSIONS` random values each, in an index with
+    /// the default `m` (16) and a narrow construction beam (8). Every node is
+    /// reachable from the entry point, and the default search beam (50) misses
+    /// an exact nearest neighbour for most queries (5 of the first 8 when
+    /// written), so `ef` changes what the vector half finds. Every third
+    /// document's text mentions the harbour, and every other one is in Lisbon.
+    fn fixture() -> &'static Fixture {
+        static FIXTURE: OnceLock<Fixture> = OnceLock::new();
+        FIXTURE.get_or_init(|| {
+            let db = GrafeoDB::new_in_memory();
+            let mut values = Lcg(0x5EED);
+            let mut vectors = Vec::with_capacity(NODES);
+            for i in 0..NODES {
+                let id = db.create_node(&["Doc"]).unwrap();
+                let text = if i % 3 == 0 {
+                    "Lisbon harbour at dawn"
+                } else {
+                    "Porto bridges at night"
+                };
+                db.set_node_property(id, "content", Value::String(text.into()))
+                    .unwrap();
+                let city = if i % 2 == 0 { "Lisbon" } else { "Porto" };
+                db.set_node_property(id, "city", Value::String(city.into()))
+                    .unwrap();
+                let vector = values.vector();
+                db.set_node_property(id, "emb", Value::Vector(vector.clone().into()))
+                    .unwrap();
+                vectors.push((id, vector));
+            }
+            db.create_property_index("city").unwrap();
+            db.create_text_index("Doc", "content")
+                .expect("create text index");
+            db.create_vector_index(
+                "Doc",
+                "emb",
+                Some(DIMENSIONS),
+                Some("euclidean"),
+                Some(16),
+                Some(8),
+                None,
+            )
+            .expect("create vector index");
+            let lisbon = HashMap::from([("city".to_string(), Value::String("Lisbon".into()))]);
+            Fixture {
+                db,
+                vectors,
+                lisbon,
+            }
+        })
+    }
+
+    /// The query vector of `seed`, from a generator apart from the fixture's.
+    fn query_vector(seed: u64) -> Vec<f32> {
+        Lcg(seed).vector()
+    }
+
+    /// The three ways to fuse: the default (RRF, k 60), RRF with another
+    /// constant, and weighted.
+    fn fusions() -> [FusionMethod; 3] {
+        [
+            FusionMethod::default(),
+            FusionMethod::Rrf { k: 10 },
+            FusionMethod::Weighted {
+                weights: vec![0.3, 0.7],
+            },
+        ]
+    }
+
+    /// The options of a call, each part set only when given.
+    fn options<'a>(
+        query_vector: Option<&'a [f32]>,
+        ef: Option<usize>,
+        fusion: Option<&FusionMethod>,
+        filters: Option<&'a HashMap<String, Value>>,
+    ) -> HybridSearchOptions<'a> {
+        let mut options = HybridSearchOptions::new();
+        if let Some(query_vector) = query_vector {
+            options = options.with_query_vector(query_vector);
+        }
+        if let Some(ef) = ef {
+            options = options.with_ef(ef);
+        }
+        if let Some(fusion) = fusion {
+            options = options.with_fusion(fusion.clone());
+        }
+        if let Some(filters) = filters {
+            options = options.with_filters(filters);
+        }
+        options
+    }
+
+    /// What a hybrid search of the fixture must return, built from the two
+    /// searches it combines: the text half as `text_search` finds it and the
+    /// vector half as `vector_search` finds it at `ef`, each fetching `2k`
+    /// and left out when it finds nothing, the distances negated (higher is
+    /// better, as for the text scores), then fused.
+    fn fused_halves(
+        db: &GrafeoDB,
+        query_text: &str,
+        query_vector: Option<&[f32]>,
+        ef: Option<usize>,
+        fusion: &FusionMethod,
+        filters: Option<&HashMap<String, Value>>,
+    ) -> Vec<(NodeId, f64)> {
+        let mut sources = Vec::new();
+        let text = db
+            .text_search("Doc", "content", query_text, 2 * K, filters)
+            .expect("text search");
+        if !text.is_empty() {
+            sources.push(text);
+        }
+        if let Some(query_vector) = query_vector {
+            let vector = db
+                .vector_search("Doc", "emb", query_vector, 2 * K, ef, filters)
+                .expect("vector search");
+            if !vector.is_empty() {
+                sources.push(
+                    vector
+                        .into_iter()
+                        .map(|(id, distance)| (id, -f64::from(distance)))
+                        .collect(),
+                );
+            }
+        }
+        fuse_results(&sources, fusion, K)
+    }
+
+    /// The `k` nodes nearest to `query` by a scan of every vector, nearest
+    /// first. The distances around the cut must differ, or the oracle would
+    /// pick one order of a tie.
+    fn nearest_by_scan(vectors: &[(NodeId, Vec<f32>)], query: &[f32], k: usize) -> Vec<NodeId> {
+        let mut by_distance: Vec<(f64, NodeId)> = vectors
+            .iter()
+            .map(|(id, vector)| {
+                let squared: f64 = vector
+                    .iter()
+                    .zip(query)
+                    .map(|(value, wanted)| f64::from(value - wanted).powi(2))
+                    .sum();
+                (squared, *id)
+            })
+            .collect();
+        by_distance.sort_by(|a, b| a.0.total_cmp(&b.0));
+        for pair in by_distance[..=k].windows(2) {
+            assert!(pair[0].0 < pair[1].0, "a tie among the nearest: {pair:?}");
+        }
+        by_distance.iter().take(k).map(|(_, id)| *id).collect()
+    }
+
+    /// `HybridSearchOptions::new()` sets nothing, and each `with_*` sets its
+    /// own part.
+    #[test]
+    fn the_options_start_empty_and_each_setter_sets_its_part() {
+        let empty = HybridSearchOptions::new();
+        assert!(empty.query_vector.is_none());
+        assert!(empty.ef.is_none());
+        assert!(empty.fusion.is_none());
+        assert!(empty.filters.is_none());
+        let default = HybridSearchOptions::default();
+        assert!(default.query_vector.is_none() && default.ef.is_none());
+        assert!(default.fusion.is_none() && default.filters.is_none());
+
+        let query = query_vector(1);
+        let lisbon = &fixture().lisbon;
+        let set = HybridSearchOptions::new()
+            .with_query_vector(&query)
+            .with_ef(64)
+            .with_fusion(FusionMethod::Rrf { k: 10 })
+            .with_filters(lisbon);
+        assert_eq!(set.query_vector, Some(query.as_slice()));
+        assert_eq!(set.ef, Some(64));
+        assert!(matches!(set.fusion, Some(FusionMethod::Rrf { k: 10 })));
+        assert!(
+            set.filters
+                .is_some_and(|filters| std::ptr::eq(filters, lisbon))
+        );
+    }
+
+    /// The positional `hybrid_search` is `hybrid_search_with` with the same
+    /// values: the same results, or the same error, for every fusion, with
+    /// and without filters and a query vector, a text that matches nothing,
+    /// and a query vector the index cannot measure.
+    #[test]
+    fn hybrid_search_is_hybrid_search_with_the_same_values() {
+        let Fixture { db, lisbon, .. } = fixture();
+        let query = query_vector(1);
+        let short = [0.5_f32, 0.5];
+        let vectors: [Option<&[f32]>; 3] = [None, Some(&query), Some(&short)];
+        let mut fusions_or_default: Vec<Option<FusionMethod>> = vec![None];
+        fusions_or_default.extend(fusions().into_iter().map(Some));
+        let mut cases = 0;
+        for query_text in ["harbour", "Reykjavik"] {
+            for query_vector in vectors {
+                for fusion in &fusions_or_default {
+                    for filters in [None, Some(lisbon)] {
+                        let positional = db.hybrid_search(
+                            "Doc",
+                            "content",
+                            "emb",
+                            query_text,
+                            query_vector,
+                            K,
+                            fusion.clone(),
+                            filters,
+                        );
+                        let with = db.hybrid_search_with(
+                            "Doc",
+                            "content",
+                            "emb",
+                            query_text,
+                            K,
+                            &options(query_vector, None, fusion.as_ref(), filters),
+                        );
+                        assert_eq!(
+                            format!("{with:?}"),
+                            format!("{positional:?}"),
+                            "{query_text}, vector {query_vector:?}, {fusion:?}, filters {}",
+                            filters.is_some()
+                        );
+                        cases += 1;
+                    }
+                }
+            }
+        }
+        assert_eq!(cases, 2 * 3 * 4 * 2);
+        // The rows hold results and errors both, so neither side is compared
+        // only on errors or only on empty lists.
+        assert!(
+            db.hybrid_search_with(
+                "Doc",
+                "content",
+                "emb",
+                "harbour",
+                K,
+                &options(Some(&query), None, None, None)
+            )
+            .is_ok_and(|results| results.len() == K)
+        );
+        assert!(
+            db.hybrid_search_with(
+                "Doc",
+                "content",
+                "emb",
+                "harbour",
+                K,
+                &options(Some(&short), None, None, None)
+            )
+            .is_err()
+        );
+    }
+
+    /// With `ef = Some(n)` the result is the text half fused with
+    /// `vector_search` at `n` for twice `k`, its distances negated: for beams
+    /// below, at and above the default, every fusion, with and without
+    /// filters, over several queries.
+    #[test]
+    fn the_vector_half_is_vector_search_at_the_given_beam() {
+        let Fixture { db, lisbon, .. } = fixture();
+        for seed in 1..=4 {
+            let query = query_vector(seed);
+            for ef in [2 * K, 32, 50, 200, NODES] {
+                for fusion in fusions() {
+                    for filters in [None, Some(lisbon)] {
+                        let found = db
+                            .hybrid_search_with(
+                                "Doc",
+                                "content",
+                                "emb",
+                                "harbour",
+                                K,
+                                &options(Some(&query), Some(ef), Some(&fusion), filters),
+                            )
+                            .expect("hybrid search");
+                        assert_eq!(
+                            found,
+                            fused_halves(db, "harbour", Some(&query), Some(ef), &fusion, filters),
+                            "query {seed}, ef {ef}, {fusion:?}, filters {}",
+                            filters.is_some()
+                        );
+                        assert_eq!(found.len(), K);
+                    }
+                }
+            }
+        }
+    }
+
+    /// With a beam over every node the vector half is exact: a hybrid search
+    /// whose text matches nothing returns the `k` nodes a scan of every
+    /// vector finds, nearest first. That the default beam misses some of them
+    /// on this fixture is not asserted: it depends on how the index was
+    /// built. That every node is reachable is, as without it no beam is exact.
+    #[test]
+    fn a_beam_over_every_node_finds_the_nearest_neighbours() {
+        let Fixture { db, vectors, .. } = fixture();
+        let reached = db
+            .vector_search("Doc", "emb", &query_vector(0), NODES, Some(NODES), None)
+            .expect("vector search")
+            .len();
+        assert_eq!(reached, NODES, "the index reaches every node");
+        for seed in 1..=8 {
+            let query = query_vector(seed);
+            let found: Vec<NodeId> = db
+                .hybrid_search_with(
+                    "Doc",
+                    "content",
+                    "emb",
+                    "Reykjavik",
+                    K,
+                    &options(Some(&query), Some(NODES), None, None),
+                )
+                .expect("hybrid search")
+                .into_iter()
+                .map(|(id, _)| id)
+                .collect();
+            assert_eq!(found, nearest_by_scan(vectors, &query, K), "query {seed}");
+        }
+    }
+
+    /// `ef` sets only the vector half's beam: a call without a query vector,
+    /// and one whose vector property has no index, return what the same call
+    /// without `ef` returns.
+    #[test]
+    fn a_beam_without_a_vector_half_changes_nothing() {
+        let Fixture { db, lisbon, .. } = fixture();
+        let query = query_vector(1);
+        for filters in [None, Some(lisbon)] {
+            for (vector_property, query_vector) in
+                [("emb", None), ("unindexed", Some(query.as_slice()))]
+            {
+                let search = |ef| {
+                    db.hybrid_search_with(
+                        "Doc",
+                        "content",
+                        vector_property,
+                        "harbour",
+                        K,
+                        &options(query_vector, ef, None, filters),
+                    )
+                    .expect("hybrid search")
+                };
+                let without = search(None);
+                assert_eq!(without.len(), K, "the text half finds results");
+                for ef in [0, 1, 2 * K, NODES] {
+                    assert_eq!(
+                        search(Some(ef)),
+                        without,
+                        "{vector_property}, ef {ef}, filters {}",
+                        filters.is_some()
+                    );
+                }
+            }
+        }
+    }
+
+    /// A beam of 0, or below the `2k` the vector half fetches, is what
+    /// `vector_search` makes of that beam (at least the fetch), with no error.
+    #[test]
+    fn a_beam_below_the_fetch_is_taken_as_vector_search_takes_it() {
+        let Fixture { db, lisbon, .. } = fixture();
+        for seed in 1..=4 {
+            let query = query_vector(seed);
+            for ef in [0, 1, K, 2 * K - 1] {
+                for filters in [None, Some(lisbon)] {
+                    let fusion = FusionMethod::default();
+                    let found = db
+                        .hybrid_search_with(
+                            "Doc",
+                            "content",
+                            "emb",
+                            "harbour",
+                            K,
+                            &options(Some(&query), Some(ef), None, filters),
+                        )
+                        .expect("hybrid search");
+                    assert_eq!(
+                        found,
+                        fused_halves(db, "harbour", Some(&query), Some(ef), &fusion, filters),
+                        "query {seed}, ef {ef}, filters {}",
+                        filters.is_some()
+                    );
+                }
+            }
         }
     }
 }

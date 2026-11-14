@@ -116,6 +116,10 @@ pub use grafeo_engine::{AsOfView, TimePoint};
 #[cfg(feature = "text-index")]
 pub use grafeo_engine::{TextIndexOptions, TokenizerKind};
 
+// Re-export what `hybrid_search` and `HybridSearchOptions` take
+#[cfg(feature = "hybrid-search")]
+pub use grafeo_engine::FusionMethod;
+
 // Re-export submodules for qualified access (e.g. grafeo::auth::Identity)
 pub use grafeo_engine::admin;
 pub use grafeo_engine::auth;

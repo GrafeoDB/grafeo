@@ -76,6 +76,9 @@ pub use database::GraphHandle;
 pub use database::RdfFormat;
 pub use database::{AsOfView, TimePoint};
 pub use grafeo_core::graph::{Direction, GraphStore, ProjectionSpec};
+/// The fusion `GrafeoDB::hybrid_search` and `HybridSearchOptions` take.
+#[cfg(feature = "hybrid-search")]
+pub use grafeo_core::index::text::FusionMethod;
 /// The options `GrafeoDB::create_text_index_with` takes.
 #[cfg(feature = "text-index")]
 pub use grafeo_core::index::text::{TextIndexOptions, TokenizerKind};

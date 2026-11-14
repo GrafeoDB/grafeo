@@ -45,8 +45,12 @@ mod graph_handle;
 mod stored_config;
 pub use direct::BatchEdge;
 pub use graph_handle::GraphHandle;
+#[cfg(feature = "hybrid-search")]
+pub use hybrid_search_options::HybridSearchOptions;
 #[cfg(feature = "gql")]
 pub use upsert::{EdgeUpsertOptions, UpsertSummary};
+#[cfg(feature = "hybrid-search")]
+mod hybrid_search_options;
 mod import;
 pub(crate) mod index;
 #[cfg(feature = "wal")]

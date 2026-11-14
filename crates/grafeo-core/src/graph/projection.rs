@@ -541,6 +541,15 @@ impl GraphStore for GraphProjection {
         self.inner.index_kinds(labels, property)
     }
 
+    fn column_holds_only_kind(
+        &self,
+        nodes: bool,
+        property: &str,
+        kind: crate::execution::operators::value_utils::ValueKinds,
+    ) -> Option<bool> {
+        self.inner.column_holds_only_kind(nodes, property, kind)
+    }
+
     fn find_nodes_maybe_equal(
         &self,
         property: &str,

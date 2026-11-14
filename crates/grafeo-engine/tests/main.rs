@@ -411,6 +411,7 @@ mod sql_pgq_outer_aliases_and_keyword_parameters;
 mod sql_pgq_path_components;
 mod sql_pgq_paths_through_gql;
 mod sql_pgq_property_graph_ddl;
+mod sql_pgq_ranges_across_kinds;
 mod sql_pgq_row_count_errors;
 mod sql_pgq_select_semantics;
 mod standalone_changes;

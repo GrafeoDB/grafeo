@@ -8,11 +8,13 @@ Performance release: faster queries, a memory limit that holds, and fixes for th
 
 ### Changed
 
+- **The per-query memory limit covers every operator that holds rows** ([#674](https://github.com/GrafeoDB/grafeo/issues/674)): `Config::with_query_memory_limit` now caps what one statement's sorts, groupings, hash and nested-loop joins, distincts, set operations, top-k heaps, correlated subqueries, eager reads and stored procedure results hold together, their strings and lists included, where it covered sorts and groupings only. At the cap a sort spills first; a grouping and the others fail with `GRAFEO-S001` naming the limit, and the statement changes nothing.
 - **SPARQL reads at a viewing epoch are refused**: with `set_viewing_epoch` set, a SPARQL query or SHACL validation fails with `GRAFEO-Q004` (RDF data keeps no history) instead of reading the present.
 
 ### Fixed
 
 - **SQL/PGQ ranges on one-kind columns use the range scan again**: a `<`, `<=`, `>`, `>=` or `BETWEEN` on a property whose values are all of the bound's kind reads its index by range and skips chunks by their stored bounds, as in 0.6.1. A column holding values of several kinds still scans and raises 22G04.
+- **Concurrent sorts and groupings keep their memory consumers**: each spillable sort and aggregate registers under a name of its own and unregisters only that one when it finishes or fails.
 
 ## [0.6.2] - 2026-11-08
 

@@ -192,26 +192,6 @@ impl std::ops::Deref for CachedPlan {
     }
 }
 
-/// The plan a statement runs: a cached plan, shared, or one made for this
-/// run (filled with its values). Either reads as a [`LogicalPlan`].
-pub(crate) enum RunPlan {
-    /// A plan the cache holds or just stored.
-    Shared(Arc<CachedPlan>),
-    /// A plan of this run alone.
-    Owned(LogicalPlan),
-}
-
-impl std::ops::Deref for RunPlan {
-    type Target = LogicalPlan;
-
-    fn deref(&self) -> &LogicalPlan {
-        match self {
-            Self::Shared(cached) => cached.plan(),
-            Self::Owned(plan) => plan,
-        }
-    }
-}
-
 impl CachedPlan {
     /// The plan. A caller that changes it (a parameter filled in) clones it.
     #[must_use]
@@ -230,8 +210,8 @@ impl CachedPlan {
 const NONE: usize = usize::MAX;
 
 /// One cached entry, linked in the recency order.
-struct Slot {
-    key: CacheKey,
+struct Slot<K> {
+    key: K,
     stage: Stage,
     plan: Arc<CachedPlan>,
     /// The next newer slot, `NONE` for the newest.
@@ -244,10 +224,13 @@ struct Slot {
 /// from a key to its slot at each stage, into a slab of slots linked from the
 /// newest to the oldest, so a hit, a put and an eviction are each O(1), and a
 /// lookup borrows its key.
-#[derive(Default)]
-struct Lru {
-    index: HashMap<CacheKey, [usize; 2]>,
-    slots: Vec<Option<Slot>>,
+///
+/// Generic over its key, which is a [`CacheKey`]: a build without a query
+/// language has no key value (its [`QueryLanguage`] has no variant), and a
+/// generic body is not linted as unreachable there.
+struct Lru<K> {
+    index: HashMap<K, [usize; 2]>,
+    slots: Vec<Option<Slot<K>>>,
     free: Vec<usize>,
     newest: Option<usize>,
     oldest: Option<usize>,
@@ -255,12 +238,25 @@ struct Lru {
     held_bytes: usize,
 }
 
-impl Lru {
-    fn slot(&self, at: usize) -> &Slot {
+impl<K> Default for Lru<K> {
+    fn default() -> Self {
+        Self {
+            index: HashMap::new(),
+            slots: Vec::new(),
+            free: Vec::new(),
+            newest: None,
+            oldest: None,
+            held_bytes: 0,
+        }
+    }
+}
+
+impl<K: std::hash::Hash + Eq + Clone> Lru<K> {
+    fn slot(&self, at: usize) -> &Slot<K> {
         self.slots[at].as_ref().expect("a linked slot is filled")
     }
 
-    fn slot_mut(&mut self, at: usize) -> &mut Slot {
+    fn slot_mut(&mut self, at: usize) -> &mut Slot<K> {
         self.slots[at].as_mut().expect("a linked slot is filled")
     }
 
@@ -297,12 +293,12 @@ impl Lru {
         }
     }
 
-    fn find(&self, key: &CacheKey, stage: Stage) -> Option<usize> {
+    fn find(&self, key: &K, stage: Stage) -> Option<usize> {
         let at = self.index.get(key)?[stage.at()];
         (at != NONE).then_some(at)
     }
 
-    fn get(&mut self, key: &CacheKey, stage: Stage) -> Option<Arc<CachedPlan>> {
+    fn get(&mut self, key: &K, stage: Stage) -> Option<Arc<CachedPlan>> {
         let at = self.find(key, stage)?;
         if self.newest != Some(at) {
             self.unlink(at);
@@ -326,14 +322,14 @@ impl Lru {
         slot.plan
     }
 
-    fn remove(&mut self, key: &CacheKey, stage: Stage) -> Option<Arc<CachedPlan>> {
+    fn remove(&mut self, key: &K, stage: Stage) -> Option<Arc<CachedPlan>> {
         let at = self.find(key, stage)?;
         Some(self.remove_at(at))
     }
 
     /// Stores `plan` under `key` as the newest entry, evicting the oldest
     /// until it fits in `limit`. The caller checked that it fits alone.
-    fn put(&mut self, key: CacheKey, stage: Stage, plan: Arc<CachedPlan>, limit: usize) {
+    fn put(&mut self, key: K, stage: Stage, plan: Arc<CachedPlan>, limit: usize) {
         // An entry the key held goes first: its bytes do not count twice.
         self.remove(&key, stage);
         while self.held_bytes + plan.bytes > limit
@@ -387,7 +383,7 @@ impl Lru {
 
 /// What the cache's bookkeeping takes per entry besides the plan and the
 /// key's text: its slot, the map's entry and the key's own value.
-const ENTRY_OVERHEAD: usize = std::mem::size_of::<Option<Slot>>()
+const ENTRY_OVERHEAD: usize = std::mem::size_of::<Option<Slot<CacheKey>>>()
     + std::mem::size_of::<(CacheKey, [usize; 2])>()
     + std::mem::size_of::<CachedPlan>();
 
@@ -408,7 +404,7 @@ impl CacheKey {
 /// planned under the cache's generation, so a plan built before a change of
 /// the schema is never kept after it.
 pub struct QueryCache {
-    lru: Mutex<Lru>,
+    lru: Mutex<Lru<CacheKey>>,
     /// The byte bound; 0 turns the cache off.
     limit: usize,
     /// The planning generation the entries were planned under.

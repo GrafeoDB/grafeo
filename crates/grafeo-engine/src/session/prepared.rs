@@ -9,8 +9,28 @@ use grafeo_common::utils::error::Result;
 use grafeo_core::graph::GraphStore;
 
 use super::Session;
-use crate::query::cache::{CacheKey, CachedPlan, RunPlan, Stage};
+use crate::query::cache::{CacheKey, CachedPlan, Stage};
 use crate::query::plan::LogicalPlan;
+
+/// The plan a statement runs: a cached plan, shared, or one made for this
+/// run (filled with its values). Either reads as a [`LogicalPlan`].
+pub(crate) enum RunPlan {
+    /// A plan the cache holds or just stored.
+    Shared(std::sync::Arc<CachedPlan>),
+    /// A plan of this run alone.
+    Owned(LogicalPlan),
+}
+
+impl std::ops::Deref for RunPlan {
+    type Target = LogicalPlan;
+
+    fn deref(&self) -> &LogicalPlan {
+        match self {
+            Self::Shared(cached) => cached.plan(),
+            Self::Owned(plan) => plan,
+        }
+    }
+}
 
 impl Session {
     /// The plan cache's key for `query` in `language` in this session: its

@@ -4442,7 +4442,7 @@ impl Session {
                     .plan_cache()
                     .get(&cache_key, crate::query::cache::Stage::Optimized)
             {
-                crate::query::cache::RunPlan::Shared(cached_plan)
+                prepared::RunPlan::Shared(cached_plan)
             } else {
                 // Semantic validation
                 let mut binder = Binder::new();
@@ -4455,7 +4455,7 @@ impl Session {
                 let plan = optimizer.optimize(logical_plan)?;
 
                 // Cached for future use, and run from the cache's copy.
-                crate::query::cache::RunPlan::Shared(self.plan_cache().put(
+                prepared::RunPlan::Shared(self.plan_cache().put(
                     cache_key,
                     crate::query::cache::Stage::Optimized,
                     plan,
@@ -4679,7 +4679,7 @@ impl Session {
             .plan_cache()
             .get(&cache_key, crate::query::cache::Stage::Optimized)
         {
-            crate::query::cache::RunPlan::Shared(cached)
+            prepared::RunPlan::Shared(cached)
         } else {
             // A stream takes no parameters: the plan's defaults fill what they
             // can and a parameter nobody supplied fails here, as `execute`
@@ -4692,7 +4692,7 @@ impl Session {
             let optimizer =
                 self.optimizer_for(&active, crate::query::processor::QueryLanguage::Gql);
             let plan = optimizer.optimize(logical_plan)?;
-            crate::query::cache::RunPlan::Shared(self.plan_cache().put(
+            prepared::RunPlan::Shared(self.plan_cache().put(
                 cache_key,
                 crate::query::cache::Stage::Optimized,
                 plan,
@@ -4962,7 +4962,7 @@ impl Session {
                     .plan_cache()
                     .get(&cache_key, crate::query::cache::Stage::Optimized)
             {
-                crate::query::cache::RunPlan::Shared(cached_plan)
+                prepared::RunPlan::Shared(cached_plan)
             } else {
                 // Semantic validation
                 let mut binder = Binder::new();
@@ -4975,7 +4975,7 @@ impl Session {
                 let plan = optimizer.optimize(logical_plan)?;
 
                 // Cached, and run from the cache's copy.
-                crate::query::cache::RunPlan::Shared(self.plan_cache().put(
+                prepared::RunPlan::Shared(self.plan_cache().put(
                     cache_key,
                     crate::query::cache::Stage::Optimized,
                     plan,
@@ -5478,7 +5478,7 @@ impl Session {
                     .plan_cache()
                     .get(&cache_key, crate::query::cache::Stage::Optimized)
             {
-                crate::query::cache::RunPlan::Shared(cached_plan)
+                prepared::RunPlan::Shared(cached_plan)
             } else {
                 let mut binder = Binder::new();
                 let _binding_context = binder.bind(&logical_plan)?;
@@ -5486,7 +5486,7 @@ impl Session {
                 let optimizer =
                     self.optimizer_for(&active, crate::query::processor::QueryLanguage::SqlPgq);
                 let plan = optimizer.optimize(logical_plan)?;
-                crate::query::cache::RunPlan::Shared(self.plan_cache().put(
+                prepared::RunPlan::Shared(self.plan_cache().put(
                     cache_key,
                     crate::query::cache::Stage::Optimized,
                     plan,

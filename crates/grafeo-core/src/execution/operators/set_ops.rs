@@ -25,11 +25,18 @@ struct Row {
 fn materialize(
     op: &mut dyn Operator,
     temporal: TemporalComparison,
+    memory: &mut crate::execution::memory::OperatorMemory,
 ) -> Result<(Vec<Row>, Vec<LogicalType>), OperatorError> {
     let mut rows = Vec::new();
     let mut column_types = ColumnTypes::default();
     while let Some(chunk) = op.next()? {
         crate::execution::deadline::check()?;
+        // Its rows (values and key each), against the statement's memory: a
+        // chunk at a time, a compare within the grant.
+        memory.add_with(|| {
+            crate::execution::memory::chunk_bytes(&chunk).saturating_mul(2)
+                + chunk.row_count() * std::mem::size_of::<Row>()
+        })?;
         column_types.add(&chunk);
         let columns: Vec<usize> = (0..chunk.num_columns()).collect();
         for row in chunk.selected_indices() {
@@ -74,6 +81,11 @@ pub struct ExceptOperator {
     /// [`TemporalComparison::normalize`]); `TypesApart` reads every value
     /// as itself.
     temporal: TemporalComparison,
+    /// What it holds under the statement's memory, captured at construction
+    /// (see [`capture`](crate::execution::memory::capture)); it counts nothing
+    /// outside a budgeted statement. It cannot spill: past the query memory limit or the
+    /// memory limit it fails with `GRAFEO-S001`.
+    memory: crate::execution::memory::OperatorMemory,
 }
 
 impl ExceptOperator {
@@ -87,6 +99,7 @@ impl ExceptOperator {
             result: None,
             position: 0,
             temporal: TemporalComparison::TypesApart,
+            memory: crate::execution::memory::capture(),
         }
     }
 
@@ -99,8 +112,9 @@ impl ExceptOperator {
     }
 
     fn compute(&mut self) -> Result<(), OperatorError> {
-        let (left_rows, column_types) = materialize(self.left.as_mut(), self.temporal)?;
-        let (right_rows, _) = materialize(self.right.as_mut(), self.temporal)?;
+        let (left_rows, column_types) =
+            materialize(self.left.as_mut(), self.temporal, &mut self.memory)?;
+        let (right_rows, _) = materialize(self.right.as_mut(), self.temporal, &mut self.memory)?;
         self.column_types = column_types;
 
         if self.all {
@@ -154,6 +168,7 @@ impl Operator for ExceptOperator {
         self.right.reset();
         self.result = None;
         self.position = 0;
+        self.memory.clear();
     }
 
     fn name(&self) -> &'static str {
@@ -178,6 +193,11 @@ pub struct IntersectOperator {
     /// [`TemporalComparison::normalize`]); `TypesApart` reads every value
     /// as itself.
     temporal: TemporalComparison,
+    /// What it holds under the statement's memory, captured at construction
+    /// (see [`capture`](crate::execution::memory::capture)); it counts nothing
+    /// outside a budgeted statement. It cannot spill: past the query memory limit or the
+    /// memory limit it fails with `GRAFEO-S001`.
+    memory: crate::execution::memory::OperatorMemory,
 }
 
 impl IntersectOperator {
@@ -191,6 +211,7 @@ impl IntersectOperator {
             result: None,
             position: 0,
             temporal: TemporalComparison::TypesApart,
+            memory: crate::execution::memory::capture(),
         }
     }
 
@@ -203,8 +224,9 @@ impl IntersectOperator {
     }
 
     fn compute(&mut self) -> Result<(), OperatorError> {
-        let (left_rows, column_types) = materialize(self.left.as_mut(), self.temporal)?;
-        let (right_rows, _) = materialize(self.right.as_mut(), self.temporal)?;
+        let (left_rows, column_types) =
+            materialize(self.left.as_mut(), self.temporal, &mut self.memory)?;
+        let (right_rows, _) = materialize(self.right.as_mut(), self.temporal, &mut self.memory)?;
         self.column_types = column_types;
 
         if self.all {
@@ -259,6 +281,7 @@ impl Operator for IntersectOperator {
         self.right.reset();
         self.result = None;
         self.position = 0;
+        self.memory.clear();
     }
 
     fn name(&self) -> &'static str {

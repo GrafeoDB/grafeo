@@ -15,6 +15,11 @@ pub struct MapCollectOperator {
     key_col: usize,
     value_col: usize,
     done: bool,
+    /// What it holds under the statement's memory, captured at construction
+    /// (see [`capture`](crate::execution::memory::capture)); it counts nothing
+    /// outside a budgeted statement. It cannot spill: past the query memory limit or the
+    /// memory limit it fails with `GRAFEO-S001`.
+    memory: crate::execution::memory::OperatorMemory,
 }
 
 impl MapCollectOperator {
@@ -26,6 +31,7 @@ impl MapCollectOperator {
             key_col,
             value_col,
             done: false,
+            memory: crate::execution::memory::capture(),
         }
     }
 }
@@ -51,6 +57,11 @@ impl Operator for MapCollectOperator {
                     map.insert(key_str, v);
                 }
             }
+            // The map's entries, against the statement's memory: a chunk at
+            // a time, a compare within the grant.
+            self.memory.set(map.len().saturating_mul(
+                std::mem::size_of::<PropertyKey>() + std::mem::size_of::<Value>() + 32,
+            ))?;
         }
 
         let mut output = DataChunk::with_capacity(&[LogicalType::Any], 1);
@@ -66,6 +77,7 @@ impl Operator for MapCollectOperator {
     fn reset(&mut self) {
         self.done = false;
         self.child.reset();
+        self.memory.clear();
     }
 
     fn name(&self) -> &'static str {

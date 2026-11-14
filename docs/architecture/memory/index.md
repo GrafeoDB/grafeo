@@ -73,9 +73,12 @@ Large operations can spill to disk when memory is exhausted. Spilling is trigger
 
 | Operator | Spill Strategy |
 | -------- | -------------- |
-| Hash Join | Partition both sides by hash, spill partitions that don't fit, process spilled partitions later |
-| Aggregate | Partition by group key |
+| Aggregate | Partition by group key, spill the largest partitions |
 | Sort | External merge sort: sort chunks in memory, write sorted runs to disk, merge runs |
+
+### Per-statement memory
+
+One statement's operators share one cap, the query memory limit (`Config::with_query_memory_limit`, never above the memory limit, which it is by default). Every operator that reads its whole input before it returns rows takes its memory from that cap and from the memory limit, a chunk or a hash table resize at a time: sorts and groupings, hash joins' build sides, distincts, set operations (`EXCEPT`, `INTERSECT`) and the operators that read a write's input whole. At the cap a sort spills first (with a spill path); a grouping (whose spilled groups count too) and the others fail with `GRAFEO-S001` naming the bound that refused (the query memory limit or the memory limit), and the statement changes nothing. Path searches keep their own budget. Builds without spilling (the `edge` profile) take no grants.
 
 Under memory pressure, embedding columns spill by row group, and each graph's newest row group keeps its column in memory, since new rows go there. After an explicit spill (`TierOverride::ForceDisk` through `Config::with_section_tier`, or a spill asked for by name) the newest group is on disk too, and a write into it reads its column back into memory first, so at the memory limit it can be refused until a later release, which writes such rows without reading the spilled part back ([#713](https://github.com/GrafeoDB/grafeo/issues/713)).
 

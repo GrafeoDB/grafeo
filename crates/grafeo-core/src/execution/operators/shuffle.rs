@@ -28,6 +28,11 @@ pub struct ShuffleOperator {
     shuffled: bool,
     /// Current position in `rows`.
     position: usize,
+    /// What it holds under the statement's memory, captured at construction
+    /// (see [`capture`](crate::execution::memory::capture)); it counts nothing
+    /// outside a budgeted statement. Read whole, it cannot spill: past the query memory limit or the
+    /// memory limit it fails with `GRAFEO-S001`.
+    memory: crate::execution::memory::OperatorMemory,
 }
 
 impl ShuffleOperator {
@@ -42,6 +47,7 @@ impl ShuffleOperator {
             rows: Vec::new(),
             shuffled: false,
             position: 0,
+            memory: crate::execution::memory::capture(),
         }
     }
 
@@ -58,6 +64,13 @@ impl ShuffleOperator {
     /// Materializes the input and puts its rows in random order.
     fn shuffle(&mut self) -> Result<(), OperatorError> {
         while let Some(chunk) = self.child.next()? {
+            // The whole input it keeps, against the statement's memory: a
+            // chunk at a time, a compare within the grant (one chunk at a
+            // time, a stream's shuffle holds one chunk).
+            self.memory.add_with(|| {
+                crate::execution::memory::chunk_bytes(&chunk)
+                    + chunk.row_count() * std::mem::size_of::<(usize, usize)>()
+            })?;
             self.take(chunk);
         }
         self.shuffle_rows();
@@ -158,6 +171,7 @@ impl Operator for ShuffleOperator {
         self.rows.clear();
         self.shuffled = false;
         self.position = 0;
+        self.memory.clear();
     }
 
     fn name(&self) -> &'static str {

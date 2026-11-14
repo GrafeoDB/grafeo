@@ -27,6 +27,14 @@ pub struct DistinctOperator {
     /// [`TemporalComparison::normalize`]); `TypesApart` reads every value
     /// as itself.
     temporal: TemporalComparison,
+    /// What it holds under the statement's memory, captured at construction
+    /// (see [`capture`](crate::execution::memory::capture)); it counts nothing
+    /// outside a budgeted statement. It cannot spill: past the query memory limit or the
+    /// memory limit it fails with `GRAFEO-S001`.
+    memory: crate::execution::memory::OperatorMemory,
+    /// What the seen keys' values hold on the heap (strings, lists), counted
+    /// as they are kept.
+    seen_heap: usize,
 }
 
 impl DistinctOperator {
@@ -37,6 +45,8 @@ impl DistinctOperator {
             distinct_columns: None,
             seen: HashSet::default(),
             temporal: TemporalComparison::TypesApart,
+            memory: crate::execution::memory::capture(),
+            seen_heap: 0,
         }
     }
 
@@ -54,6 +64,14 @@ impl DistinctOperator {
         self.temporal
     }
 
+    /// Counts the seen keys' table and what their values hold on the heap
+    /// against the statement's memory (a chunk at a time; a compare within
+    /// the grant), for keys `width` columns wide.
+    fn count_seen(&mut self, width: usize) -> Result<(), super::OperatorError> {
+        self.memory
+            .set(seen_bytes(self.seen.capacity(), width).saturating_add(self.seen_heap))
+    }
+
     /// Decomposes this operator for push-based conversion.
     pub fn into_parts(self) -> (Box<dyn Operator>, Option<Vec<usize>>) {
         (self.child, self.distinct_columns)
@@ -66,8 +84,17 @@ impl DistinctOperator {
             distinct_columns: Some(columns),
             seen: HashSet::default(),
             temporal: TemporalComparison::TypesApart,
+            memory: crate::execution::memory::capture(),
+            seen_heap: 0,
         }
     }
+}
+
+/// What a table of `capacity` seen keys `width` columns wide holds, about:
+/// the key and its values per slot.
+pub(crate) fn seen_bytes(capacity: usize, width: usize) -> usize {
+    capacity
+        .saturating_mul(std::mem::size_of::<RowKey>() + 1 + width * std::mem::size_of::<Value>())
 }
 
 impl Operator for DistinctOperator {
@@ -79,6 +106,13 @@ impl Operator for DistinctOperator {
             };
 
             let mut builder = DataChunkBuilder::with_capacity(&chunk.column_types(), 2048);
+            // The key columns that hold heap memory, picked once per chunk
+            // (none when the operator counts nothing, or every key is flat).
+            let heap = crate::execution::memory::HeapColumns::counted(
+                &self.memory,
+                &chunk,
+                self.distinct_columns.as_deref(),
+            );
 
             for row in chunk.selected_indices() {
                 // Rows whose values are the same values (`3` and `3.0`, two
@@ -89,6 +123,9 @@ impl Operator for DistinctOperator {
                 };
 
                 if self.seen.insert(key) {
+                    if !heap.is_empty() {
+                        self.seen_heap = self.seen_heap.saturating_add(heap.row_bytes(row));
+                    }
                     // New unique row - copy it
                     for col_idx in 0..chunk.column_count() {
                         if let (Some(src_col), Some(dst_col)) =
@@ -104,11 +141,21 @@ impl Operator for DistinctOperator {
                     builder.advance_row();
 
                     if builder.is_full() {
+                        self.count_seen(
+                            self.distinct_columns
+                                .as_ref()
+                                .map_or(chunk.column_count(), Vec::len),
+                        )?;
                         return Ok(Some(builder.finish()));
                     }
                 }
             }
 
+            self.count_seen(
+                self.distinct_columns
+                    .as_ref()
+                    .map_or(chunk.column_count(), Vec::len),
+            )?;
             if builder.row_count() > 0 {
                 return Ok(Some(builder.finish()));
             }
@@ -119,6 +166,8 @@ impl Operator for DistinctOperator {
     fn reset(&mut self) {
         self.child.reset();
         self.seen.clear();
+        self.seen_heap = 0;
+        self.memory.clear();
     }
 
     fn name(&self) -> &'static str {

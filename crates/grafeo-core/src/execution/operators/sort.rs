@@ -105,13 +105,11 @@ pub struct SortOperator {
     /// [`TemporalComparison::normalize`]); `TypesApart` reads every value
     /// as itself.
     temporal: TemporalComparison,
-    /// The statement's operator memory context, captured at construction (patch
-    /// 9, #751): the materialized chunks' grant is bounded by its query limit.
-    #[cfg(feature = "spill")]
-    memory_ctx: Option<crate::execution::memory::OperatorMemoryContext>,
-    /// The grant of the materialized chunks' bytes under the query limit.
-    #[cfg(feature = "spill")]
-    grant: Option<grafeo_common::memory::buffer::MemoryGrant>,
+    /// What it holds under the statement's memory, captured at construction
+    /// (see [`capture`](crate::execution::memory::capture)); it counts nothing
+    /// outside a budgeted statement. The in-memory sort does not spill: past the query
+    /// memory limit or the memory limit it fails with `GRAFEO-S001`.
+    memory: crate::execution::memory::OperatorMemory,
 }
 
 impl SortOperator {
@@ -127,25 +125,8 @@ impl SortOperator {
             sort_complete: false,
             output_position: 0,
             temporal: TemporalComparison::TypesApart,
-            #[cfg(feature = "spill")]
-            memory_ctx: None,
-            #[cfg(feature = "spill")]
-            grant: None,
+            memory: crate::execution::memory::capture(),
         }
-    }
-
-    /// The operator with the statement's memory context, captured at
-    /// construction: its materialized chunks take a grant under the query
-    /// memory limit (patch 9, #751). The in-memory sort does not spill: past
-    /// the limit it fails with `GRAFEO-S001` naming the limit.
-    #[cfg(feature = "spill")]
-    #[must_use]
-    pub fn with_memory_context(
-        mut self,
-        ctx: Option<crate::execution::memory::OperatorMemoryContext>,
-    ) -> Self {
-        self.memory_ctx = ctx;
-        self
     }
 
     /// The operator with `temporal` as the reading of its sort keys (the
@@ -196,22 +177,14 @@ impl SortOperator {
                     row_index: row_idx,
                 });
             }
+            // The chunk and its row references, against the statement's
+            // memory: a chunk at a time, a compare within the grant.
+            self.memory.add_with(|| {
+                crate::execution::memory::chunk_bytes(&chunk)
+                    + chunk.row_count() * std::mem::size_of::<SortRow>()
+            })?;
             self.column_types.add(&chunk);
             self.chunks.push(chunk);
-        }
-
-        // The statement's query memory limit bounds the materialized chunks
-        // (patch 9, #751): the in-memory sort does not spill, so past the
-        // limit it fails naming the limit.
-        #[cfg(feature = "spill")]
-        if let Some(ref ctx) = self.memory_ctx {
-            let rows = self.sorted_rows.len();
-            let cols = self.chunks.first().map_or(0, DataChunk::column_count);
-            let estimate = rows
-                * (std::mem::size_of::<SortRow>() + cols * std::mem::size_of::<Value>())
-                + self.chunks.len() * std::mem::size_of::<DataChunk>();
-            ctx.grow(&mut self.grant, estimate)
-                .map_err(|error| OperatorError::Wrapped(Box::new(error)))?;
         }
 
         // Sort the row references
@@ -303,10 +276,7 @@ impl Operator for SortOperator {
         self.sort_complete = false;
         self.output_position = 0;
         // The materialized chunks went; the grant goes with them.
-        #[cfg(feature = "spill")]
-        {
-            self.grant = None;
-        }
+        self.memory.clear();
     }
 
     fn name(&self) -> &'static str {

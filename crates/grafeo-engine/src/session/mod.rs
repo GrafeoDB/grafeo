@@ -4326,6 +4326,9 @@ impl Session {
             // there is no active transaction that may have prior uncommitted writes.
             let has_active_tx = self.current_transaction.lock().is_some();
             let read_only = !has_mutations && !has_active_tx;
+            // The statement's memory, which its operators capture while it
+            // is planned and converted.
+            let _memory = self.enter_statement_memory();
             let planner = self.create_planner_for_store_with_read_only(
                 Arc::clone(&active),
                 viewing_epoch,
@@ -4340,10 +4343,9 @@ impl Session {
             let (mut source, push_ops) = {
                 #[cfg(feature = "spill")]
                 {
-                    let memory_ctx = self.make_operator_memory_context();
                     grafeo_core::execution::pipeline_convert::convert_to_pipeline_with_memory(
                         physical_plan.into_operator(),
-                        memory_ctx,
+                        grafeo_core::execution::current_operator_memory(),
                     )
                 }
                 #[cfg(not(feature = "spill"))]
@@ -4549,6 +4551,9 @@ impl Session {
             read => read,
         };
         let (viewing_epoch, transaction_id) = (view.epoch, view.transaction);
+        // The statement's memory, which its operators capture while it is
+        // planned and converted.
+        let _memory = self.enter_statement_memory();
         let planner = self
             .create_planner_for_store_with_read_only(
                 Arc::clone(&active),
@@ -4568,10 +4573,9 @@ impl Session {
         let (source, push_ops) = {
             #[cfg(feature = "spill")]
             {
-                let memory_ctx = self.make_operator_memory_context();
                 grafeo_core::execution::pipeline_convert::convert_to_pipeline_with_memory(
                     physical_plan.into_operator(),
-                    memory_ctx,
+                    grafeo_core::execution::current_operator_memory(),
                 )
             }
             #[cfg(not(feature = "spill"))]
@@ -4818,6 +4822,9 @@ impl Session {
             let (viewing_epoch, transaction_id, _view_pin) = self.get_transaction_context()?;
 
             // Convert to physical plan with transaction context
+            // The statement's memory, which its operators capture while it
+            // is planned and converted.
+            let _memory = self.enter_statement_memory();
             let planner = self.create_planner_for_store(
                 Arc::clone(&active),
                 viewing_epoch,
@@ -4910,6 +4917,9 @@ impl Session {
             let (viewing_epoch, transaction_id, _view_pin) = self.get_transaction_context()?;
 
             // Convert to physical plan with transaction context
+            // The statement's memory, which its operators capture while it
+            // is planned and converted.
+            let _memory = self.enter_statement_memory();
             let planner = self.create_planner_for_store(
                 Arc::clone(&active),
                 viewing_epoch,
@@ -4990,6 +5000,9 @@ impl Session {
 
         let result = self.with_auto_commit(writes, || {
             let (viewing_epoch, transaction_id, _view_pin) = self.get_transaction_context()?;
+            // The statement's memory, which its operators capture while it
+            // is planned and converted.
+            let _memory = self.enter_statement_memory();
             let planner = self.create_planner_for_store(
                 Arc::clone(&active),
                 viewing_epoch,
@@ -5068,6 +5081,9 @@ impl Session {
 
         let result = self.with_auto_commit(writes, || {
             let (viewing_epoch, transaction_id, _view_pin) = self.get_transaction_context()?;
+            // The statement's memory, which its operators capture while it
+            // is planned and converted.
+            let _memory = self.enter_statement_memory();
             let planner = self.create_planner_for_store(
                 Arc::clone(&active),
                 viewing_epoch,
@@ -5145,6 +5161,9 @@ impl Session {
 
         let result = self.with_auto_commit(writes, || {
             let (viewing_epoch, transaction_id, _view_pin) = self.get_transaction_context()?;
+            // The statement's memory, which its operators capture while it
+            // is planned and converted.
+            let _memory = self.enter_statement_memory();
             let planner = self.create_planner_for_store(
                 Arc::clone(&active),
                 viewing_epoch,
@@ -5294,6 +5313,9 @@ impl Session {
 
         let result = self.with_auto_commit(writes, || {
             let (viewing_epoch, transaction_id, _view_pin) = self.get_transaction_context()?;
+            // The statement's memory, which its operators capture while it
+            // is planned and converted.
+            let _memory = self.enter_statement_memory();
             let planner = self.create_planner_for_store(
                 Arc::clone(&active),
                 viewing_epoch,
@@ -6677,14 +6699,23 @@ impl Session {
             .with_warnings(planner.warnings())
     }
 
+    /// Enters the memory of one statement on this thread, until the returned
+    /// scope drops: the operators built while it is planned and converted
+    /// capture it at construction.
+    #[cfg(any(lpg_language, rdf_language))]
+    pub(crate) fn enter_statement_memory(&self) -> grafeo_core::execution::MemoryScope {
+        grafeo_core::execution::enter_operator_memory(statement_memory(self))
+    }
+
     /// Creates a per-query `OperatorMemoryContext`: the buffer manager, the
     /// open's spill account when the open has a spill path (a per-query
     /// subdirectory), and the query memory limit the statement's operators
-    /// are bounded by (the configured one, never above the global limit).
+    /// are bounded by together (the configured one, never above the global
+    /// limit).
     ///
     /// Returns `None` only when the database has no buffer manager, in which
     /// case its operators run without a budget.
-    #[cfg(feature = "spill")]
+    #[cfg(all(feature = "spill", any(lpg_language, rdf_language)))]
     pub(crate) fn make_operator_memory_context(
         &self,
     ) -> Option<grafeo_core::execution::OperatorMemoryContext> {
@@ -6896,8 +6927,11 @@ impl Session {
         let mut planning = self.statement_planning(viewing_epoch, transaction_id, false, language);
         planning.session.plan_only = true;
         let planner = planning.planner(Arc::clone(active))?;
-        #[cfg(feature = "spill")]
-        let planner = planner.with_operator_memory(self.make_operator_memory_context());
+        // Planned to be dropped, never run (EXPLAIN): its operators hold
+        // nothing, so they take no grants.
+        let _memory = grafeo_core::execution::enter_operator_memory(
+            grafeo_core::execution::StatementMemory::Unbudgeted,
+        );
         drop(planner.plan(plan)?);
         Ok(())
     }
@@ -6938,6 +6972,9 @@ impl Session {
         let writes = self.plan_write_kinds(&plan.root);
         Some(self.with_auto_commit(writes, || {
             let (viewing_epoch, transaction_id, _view_pin) = self.get_transaction_context()?;
+            // The statement's memory, which its operators capture while it
+            // is planned and converted.
+            let _memory = self.enter_statement_memory();
             let planner = self.create_planner_for_store(
                 Arc::clone(active),
                 viewing_epoch,
@@ -6993,12 +7030,8 @@ impl Session {
         read_only: bool,
         language: grafeo_common::types::StatementLanguage,
     ) -> Result<crate::query::Planner> {
-        let planner = self
-            .statement_planning(viewing_epoch, transaction_id, read_only, language)
-            .planner(store)?;
-        #[cfg(feature = "spill")]
-        let planner = planner.with_operator_memory(self.make_operator_memory_context());
-        Ok(planner)
+        self.statement_planning(viewing_epoch, transaction_id, read_only, language)
+            .planner(store)
     }
 
     /// How the planner of the statement being run is built (see
@@ -7952,6 +7985,20 @@ impl Drop for Session {
                 .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
         }
     }
+}
+
+/// The memory of one statement of `session`: its cap and the buffer manager
+/// its operators take their grants from (see
+/// [`Session::make_operator_memory_context`]).
+#[cfg(all(feature = "spill", any(lpg_language, rdf_language)))]
+fn statement_memory(session: &Session) -> grafeo_core::execution::StatementMemory {
+    grafeo_core::execution::StatementMemory::of(session.make_operator_memory_context())
+}
+
+/// The memory of one statement: without spilling, operators take no grants.
+#[cfg(all(not(feature = "spill"), any(lpg_language, rdf_language)))]
+fn statement_memory(_session: &Session) -> grafeo_core::execution::StatementMemory {
+    grafeo_core::execution::StatementMemory::Unbudgeted
 }
 
 /// The parameter values to fill into `plan`: `None` for an empty map when the

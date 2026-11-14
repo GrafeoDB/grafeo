@@ -36,6 +36,11 @@ struct DelimState {
     distinct: Vec<DataChunk>,
     /// Counts the fills, so a reader of `distinct` sees a refill.
     generation: u64,
+    /// What it holds under the statement's memory, captured at construction
+    /// (see [`capture`](crate::execution::memory::capture)); it counts nothing
+    /// outside a budgeted statement. The buffer cannot spill: past the query memory limit or the
+    /// memory limit it fails with `GRAFEO-S001`.
+    memory: crate::execution::memory::OperatorMemory,
 }
 
 impl DelimBuffer {
@@ -51,6 +56,7 @@ impl DelimBuffer {
                 chunks: VecDeque::new(),
                 distinct: Vec::new(),
                 generation: 0,
+                memory: crate::execution::memory::capture(),
             }),
         })
     }
@@ -64,6 +70,7 @@ impl DelimBuffer {
         let mut types: Option<Vec<LogicalType>> = None;
         let mut builder: Option<Vec<ValueVector>> = None;
         let mut distinct = Vec::new();
+        let mut kept: usize = 0;
         while let Some(chunk) = state.source.next()? {
             let types = types.get_or_insert_with(|| {
                 state
@@ -107,6 +114,18 @@ impl DelimBuffer {
                     distinct.push(DataChunk::new(builder.take().unwrap_or_default()));
                 }
             }
+            // The left rows it keeps and their distinct keys, against the
+            // statement's memory: a chunk at a time, a compare within the
+            // grant.
+            if state.memory.counts() {
+                kept = kept.saturating_add(crate::execution::memory::chunk_bytes(&chunk));
+                let keys = seen.capacity().saturating_mul(
+                    state.key_columns.len().max(1)
+                        * 2
+                        * std::mem::size_of::<grafeo_common::types::Value>(),
+                );
+                state.memory.set(kept.saturating_add(keys))?;
+            }
             state.chunks.push_back(chunk);
         }
         if let Some(vectors) = builder.take()
@@ -127,6 +146,7 @@ impl DelimBuffer {
         state.filled = false;
         state.chunks.clear();
         state.distinct.clear();
+        state.memory.clear();
     }
 }
 

@@ -1251,11 +1251,19 @@ impl Config {
         self
     }
 
-    /// Caps the memory one query's operators (sorts, aggregates) may hold at
-    /// `bytes`; past it they spill, or fail with `GRAFEO-S001` without a
-    /// spill directory. Per open, never stored; 0 fails
-    /// [`validate`](Self::validate). Not enforced yet: operators take their
-    /// grants against it in a later patch of this release.
+    /// Caps the memory one statement's operators may hold together at
+    /// `bytes`: what its sorts, aggregates, hash joins' build sides,
+    /// distincts, set operations and other operators that read their whole
+    /// input materialize. At the cap a sort spills to the spill directory; a
+    /// sort that cannot spill (no spill directory, a spill the spill limit
+    /// refuses), a grouping (spilled groups count against the cap too) and
+    /// the other operators fail with `GRAFEO-S001` naming the query memory
+    /// limit, and the statement changes nothing. The memory
+    /// limit binds besides it: a query limit above the memory limit is the
+    /// memory limit. Per open, never stored; 0 fails
+    /// [`validate`](Self::validate). It applies in builds with spilling (the
+    /// `spill` feature); path searches keep their own budget (a quarter of
+    /// the memory limit).
     #[must_use]
     pub fn with_query_memory_limit(mut self, bytes: usize) -> Self {
         self.query_memory_limit = Some(bytes);

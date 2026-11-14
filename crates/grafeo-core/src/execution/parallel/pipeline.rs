@@ -222,10 +222,14 @@ impl ParallelPipeline {
         let rows_processed = Arc::new(AtomicUsize::new(0));
         let errors: Arc<Mutex<Option<OperatorError>>> = Arc::new(Mutex::new(None));
 
-        // Spawn workers, which work under the running query's deadline
+        // Spawn workers, which work under the running query's deadline and in
+        // its memory: the operators a worker builds take their grants under
+        // the statement's one cap, shared by every worker.
         let deadline = crate::execution::deadline::current();
+        let memory = crate::execution::memory::statement();
         thread::scope(|s| {
             for worker_id in 0..self.config.num_workers {
+                let memory = memory.clone();
                 let scheduler = Arc::clone(&scheduler);
                 let source = Arc::clone(&self.source);
                 let factory = Arc::clone(&self.operator_factory);
@@ -236,6 +240,7 @@ impl ParallelPipeline {
 
                 s.spawn(move || {
                     let _deadline = crate::execution::deadline::enter(deadline);
+                    let _memory = memory.map(crate::execution::memory::enter);
                     if let Err(e) = Self::worker_loop(
                         worker_id,
                         scheduler,

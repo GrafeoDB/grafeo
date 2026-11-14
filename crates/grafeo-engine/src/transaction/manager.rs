@@ -309,8 +309,9 @@ impl TransactionInfo {
     }
 
     /// The conflict of `ours`, the RDF writes of a transaction that commits
-    /// now, with this transaction's, which committed after it began: from
-    /// its change set until its commit is published, then from what it kept.
+    /// now, with this transaction's, which committed after it began: read
+    /// from the writes its commit's start took out (`rdf_writes`), never
+    /// from its change set.
     #[cfg(feature = "triple-store")]
     fn rdf_conflict(&self, ours: &TransactionChanges) -> Option<Error> {
         self.rdf_writes

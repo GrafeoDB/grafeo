@@ -1878,6 +1878,7 @@ mod apply_steps {
 
 /// What `rdf_schema()` reports, in a fixed order: the named graphs, each predicate with its count,
 /// and the subject and object counts.
+#[cfg(feature = "testing-statement-injection")]
 fn schema(db: &GrafeoDB) -> (Vec<String>, Vec<(String, usize)>, usize, usize) {
     let grafeo_engine::admin::SchemaInfo::Rdf(info) = db.rdf_schema() else {
         panic!("rdf_schema() returns the RDF schema");

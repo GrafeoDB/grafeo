@@ -110,7 +110,9 @@ fn write_the_fixture() {
 ))]
 fn stored(store: &grafeo_core::graph::rdf::RdfStore) -> Vec<[String; 3]> {
     let mut triples: Vec<[String; 3]> = store
-        .triples(&grafeo_core::graph::rdf::RdfView::Latest)
+        .triples(&grafeo_core::graph::rdf::RdfView::latest(
+            grafeo_core::graph::rdf::LatestUse::Test,
+        ))
         .iter()
         .map(|triple| {
             [
@@ -193,7 +195,7 @@ fn assert_documents(db: &GrafeoDB) {
     );
     assert_eq!(
         db.rdf_store()
-            .graph("http://example.org/trips")
+            .graph_latest("http://example.org/trips")
             .map(|graph| stored(&graph)),
         Some(vec![triple("gus", "visited", "prague")]),
         "the triples of the named graph"

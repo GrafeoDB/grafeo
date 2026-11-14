@@ -66,15 +66,21 @@ fn run(db: &GrafeoDB, statements: &[&str]) {
 fn held(db: &GrafeoDB) -> BTreeSet<String> {
     let store = db.rdf_store();
     let mut held: BTreeSet<String> = store
-        .triples(&grafeo_core::graph::rdf::RdfView::Latest)
+        .triples(&grafeo_core::graph::rdf::RdfView::latest(
+            grafeo_core::graph::rdf::LatestUse::Test,
+        ))
         .iter()
         .map(|triple| format!("- {triple}"))
         .collect();
-    for name in store.graph_names(&grafeo_core::graph::rdf::RdfView::Latest) {
-        let graph = store.graph(&name).unwrap();
+    for name in store.graph_names(&grafeo_core::graph::rdf::RdfView::latest(
+        grafeo_core::graph::rdf::LatestUse::Test,
+    )) {
+        let graph = store.graph_latest(&name).unwrap();
         held.extend(
             graph
-                .triples(&grafeo_core::graph::rdf::RdfView::Latest)
+                .triples(&grafeo_core::graph::rdf::RdfView::latest(
+                    grafeo_core::graph::rdf::LatestUse::Test,
+                ))
                 .iter()
                 .map(|t| format!("{name} {t}")),
         );
@@ -164,7 +170,9 @@ fn a_large_transaction_leaves_the_store_single_inserts_leave() {
         }
         let names = |store: &RdfStore| -> BTreeSet<String> {
             store
-                .triples(&grafeo_core::graph::rdf::RdfView::Latest)
+                .triples(&grafeo_core::graph::rdf::RdfView::latest(
+                    grafeo_core::graph::rdf::LatestUse::Test,
+                ))
                 .iter()
                 .map(ToString::to_string)
                 .collect()
@@ -175,10 +183,20 @@ fn a_large_transaction_leaves_the_store_single_inserts_leave() {
             let subject = Term::iri(format!("http://ex.org/{subject}"));
             assert_eq!(
                 db.rdf_store()
-                    .triples_with_subject(&grafeo_core::graph::rdf::RdfView::Latest, &subject)
+                    .triples_with_subject(
+                        &grafeo_core::graph::rdf::RdfView::latest(
+                            grafeo_core::graph::rdf::LatestUse::Test
+                        ),
+                        &subject
+                    )
                     .len(),
                 single
-                    .triples_with_subject(&grafeo_core::graph::rdf::RdfView::Latest, &subject)
+                    .triples_with_subject(
+                        &grafeo_core::graph::rdf::RdfView::latest(
+                            grafeo_core::graph::rdf::LatestUse::Test
+                        ),
+                        &subject
+                    )
                     .len()
             );
         }

@@ -77,7 +77,9 @@ fn rdf_sections(path: &Path) -> Vec<SectionType> {
 #[cfg(feature = "triple-store")]
 fn stored(store: &grafeo_core::graph::rdf::RdfStore) -> Vec<[String; 3]> {
     let mut triples: Vec<[String; 3]> = store
-        .triples(&grafeo_core::graph::rdf::RdfView::Latest)
+        .triples(&grafeo_core::graph::rdf::RdfView::latest(
+            grafeo_core::graph::rdf::LatestUse::Test,
+        ))
         .iter()
         .map(|triple| {
             [
@@ -102,7 +104,7 @@ fn triple(s: &str, p: &str, o: &str) -> [String; 3] {
 fn triples(db: &GrafeoDB) -> (Vec<[String; 3]>, Vec<[String; 3]>) {
     let trips = db
         .rdf_store()
-        .graph("http://example.org/trips")
+        .graph_latest("http://example.org/trips")
         .map(|graph| stored(&graph))
         .unwrap_or_default();
     (stored(db.rdf_store()), trips)
@@ -160,7 +162,10 @@ fn the_fixture_holds_rdf_triples() {
     let db = GrafeoDB::with_config(Config::persistent(&path)).unwrap();
     assert_eq!(triples(&db), every_triple());
     #[cfg(feature = "ring-index")]
-    assert!(db.rdf_store().ring().is_some(), "the Ring index is loaded");
+    assert!(
+        db.rdf_store().ring_latest().is_some(),
+        "the Ring index is loaded"
+    );
     assert_eq!(people(&db), [Value::from("Alix"), Value::from("Gus")]);
     db.close().unwrap();
 

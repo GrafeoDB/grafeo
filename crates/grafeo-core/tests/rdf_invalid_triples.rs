@@ -11,7 +11,7 @@
 
 #![cfg(feature = "triple-store")]
 
-use grafeo_core::graph::rdf::RdfView;
+use grafeo_core::graph::rdf::{LatestUse, RdfView};
 use std::io::Cursor;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
@@ -133,7 +133,7 @@ fn valid_documents_load() {
         .unwrap();
     assert_eq!(loaded.triple_count, 4);
     assert!(store.contains(
-        &RdfView::Latest,
+        &RdfView::latest(LatestUse::Test),
         &Triple::new(
             Term::iri("http://ex.org/alix"),
             Term::iri("http://ex.org/knows"),

@@ -101,6 +101,11 @@ struct State {
     /// rollback gives it back.
     #[cfg(feature = "triple-store")]
     rdf: RdfReservation,
+    /// The RDF view the transaction reads at, its snapshot, built at its
+    /// first RDF statement and kept with its changes, so what it worked out
+    /// of the commits after the snapshot serves its later statements too.
+    #[cfg(feature = "triple-store")]
+    rdf_view: Option<grafeo_core::graph::rdf::RdfView>,
 }
 
 /// What a transaction's triple inserts reserved (see `State::rdf`).
@@ -199,9 +204,34 @@ impl TransactionChanges {
                 grant: None,
                 #[cfg(feature = "triple-store")]
                 rdf: RdfReservation::default(),
+                #[cfg(feature = "triple-store")]
+                rdf_view: None,
             }),
             memory: None,
         }
+    }
+
+    /// The RDF view the transaction reads at: the dataset of `store` at its
+    /// snapshot, built at the first call.
+    ///
+    /// # Errors
+    ///
+    /// When the overlay is pruned past the snapshot, which the transaction's
+    /// pin of it prevents (a broken invariant).
+    #[cfg(feature = "triple-store")]
+    pub(crate) fn rdf_view(
+        &self,
+        store: &grafeo_core::graph::rdf::RdfStore,
+    ) -> Result<grafeo_core::graph::rdf::RdfView> {
+        let mut state = self.state.lock();
+        if let Some(view) = &state.rdf_view {
+            return Ok(view.clone());
+        }
+        let view = store
+            .view_at(self.snapshot)
+            .map_err(|error| grafeo_common::utils::error::Error::Internal(error.to_string()))?;
+        state.rdf_view = Some(view.clone());
+        Ok(view)
     }
 
     /// Queues `op` for the commit, after the writes recorded so far.
@@ -251,6 +281,7 @@ impl TransactionChanges {
         #[cfg(feature = "triple-store")]
         {
             state.rdf = RdfReservation::default();
+            state.rdf_view = None;
         }
         state.set.clear();
         state.targets.clear();
@@ -544,7 +575,7 @@ impl TransactionChanges {
 
     /// Records the insert (`insert`) or the delete of `triple` in the RDF
     /// graph `graph` (`None` for the default graph). The store changes at
-    /// the commit ([`apply_triples`](Self::apply_triples)); the
+    /// the commit ([`apply_rdf`](Self::apply_rdf)); the
     /// transaction's reads see it before (see
     /// [`pending_triple`](Self::pending_triple)).
     ///
@@ -608,7 +639,7 @@ impl TransactionChanges {
     }
 
     /// Borrows the existing RDF net and entries under a deadline-aware lock. The reader
-    /// may acquire a store index afterwards, matching `apply_triples`' lock
+    /// may acquire a store index afterwards, matching `apply_rdf`'s lock
     /// order, but its callbacks must not reenter storage or transaction state.
     #[cfg(feature = "triple-store")]
     pub(crate) fn with_path_pending(
@@ -679,19 +710,30 @@ impl TransactionChanges {
         self.state.lock().triples.written_graph(graph)
     }
 
-    /// Applies the RDF entries to `store`, in recorded order, at the commit,
-    /// and drops the ones that changed nothing there (a triple another
-    /// transaction inserted or deleted first since this one wrote it): the
-    /// log and change data capture then hear only of the triples the commit
+    /// Applies the RDF entries to `store` in recorded order, then
+    /// `graph_ops` (the RDF graph operations the transaction queued), in one
+    /// apply at the commit ([`RdfStore::apply_commit`]), which with
+    /// [`ApplyMode::Publish`] publishes what it changed for readers at
+    /// earlier snapshots. Drops the entries that changed nothing (a triple
+    /// another transaction inserted or deleted first since this one wrote
+    /// it): change data capture then hears only of the triples the commit
     /// changed.
+    ///
+    /// [`RdfStore::apply_commit`]: grafeo_core::graph::rdf::RdfStore::apply_commit
+    /// [`ApplyMode::Publish`]: grafeo_core::graph::rdf::ApplyMode::Publish
     ///
     /// # Errors
     ///
     /// When the set refuses an entry it held before (a broken invariant):
     /// the commit must not complete.
     #[cfg(feature = "triple-store")]
-    pub(crate) fn apply_triples(&self, store: &grafeo_core::graph::rdf::RdfStore) -> Result<()> {
-        use grafeo_core::graph::rdf::Triple;
+    pub(crate) fn apply_rdf(
+        &self,
+        store: &grafeo_core::graph::rdf::RdfStore,
+        mode: grafeo_core::graph::rdf::ApplyMode,
+        graph_ops: Vec<grafeo_common::change::RdfGraphOp>,
+    ) -> Result<()> {
+        use grafeo_core::graph::rdf::{CommitChange, Triple};
 
         let mut state = self.state.lock();
         // The store takes what the inserts reserved: they grow its count
@@ -699,56 +741,48 @@ impl TransactionChanges {
         if let Some(grant) = std::mem::take(&mut state.rdf).grant {
             store.adopt_grant(grant);
         }
-        if state.triples.is_empty() {
+        if state.triples.is_empty() && graph_ops.is_empty() {
             return Ok(());
         }
-        let mut unchanged = Vec::new();
-        // A run of inserts into one graph goes in as one batch (one pass per
-        // index); a delete or another graph ends it, so the order holds.
-        let mut run: Option<GraphSlot> = None;
+        // The entries' positions, and the commit's changes in their order;
+        // the graph key is made once per run of one graph.
         let mut positions = Vec::new();
-        let mut triples = Vec::new();
-        let flush = |slot: Option<GraphSlot>,
-                     positions: &mut Vec<usize>,
-                     triples: &mut Vec<Triple>,
-                     unchanged: &mut Vec<usize>| {
-            let Some(slot) = slot else { return };
-            let key = state.set.graph(slot).and_then(|graph| graph.key.as_deref());
-            let new = store.insert_each_into(key, std::mem::take(triples));
-            unchanged.extend(
-                positions
-                    .drain(..)
-                    .zip(new)
-                    .filter_map(|(at, new)| (!new).then_some(at)),
-            );
-        };
+        let mut changes = Vec::new();
+        let mut last: Option<(GraphSlot, Option<Arc<str>>)> = None;
         for (at, change) in state.set.entries().iter().enumerate() {
             let Change::Data { graph, op, .. } = change else {
                 continue;
             };
-            match op {
-                DataOp::InsertTriple { triple } => {
-                    if run != Some(*graph) {
-                        flush(run, &mut positions, &mut triples, &mut unchanged);
-                        run = Some(*graph);
-                    }
-                    positions.push(at);
-                    triples.push(Triple::from(&**triple));
-                }
-                DataOp::DeleteTriple { triple } => {
-                    flush(run.take(), &mut positions, &mut triples, &mut unchanged);
+            let (DataOp::InsertTriple { triple } | DataOp::DeleteTriple { triple }) = op else {
+                continue;
+            };
+            let key = match &last {
+                Some((slot, key)) if slot == graph => key.clone(),
+                _ => {
                     let key = state
                         .set
                         .graph(*graph)
-                        .and_then(|graph| graph.key.as_deref());
-                    if !store.remove_from(key, &Triple::from(&**triple)) {
-                        unchanged.push(at);
-                    }
+                        .and_then(|graph| graph.key.as_deref())
+                        .map(Arc::from);
+                    last = Some((*graph, key.clone()));
+                    key
                 }
-                _ => {}
-            }
+            };
+            let triple = Triple::from(&**triple);
+            positions.push(at);
+            changes.push(match op {
+                DataOp::InsertTriple { .. } => CommitChange::Insert { graph: key, triple },
+                _ => CommitChange::Delete { graph: key, triple },
+            });
         }
-        flush(run, &mut positions, &mut triples, &mut unchanged);
+        let triples = changes.len();
+        changes.extend(graph_ops.into_iter().map(CommitChange::Graph));
+        let applied = store.apply_commit(mode, changes);
+        let unchanged: Vec<usize> = positions
+            .into_iter()
+            .zip(&applied.changed[..triples])
+            .filter_map(|(at, changed)| (!changed).then_some(at))
+            .collect();
         if unchanged.is_empty() {
             return Ok(());
         }
@@ -1541,12 +1575,10 @@ mod path_overlay_tests {
 
     fn path(changes: &Arc<TransactionChanges>, probe: Probe) -> (RdfPathOperator, Arc<AtomicBool>) {
         let store = Arc::new(RdfStore::new());
-        let writer = RdfWriter::new(
+        let writer = RdfWriter::outside_any_database(
             Arc::clone(&store),
             Arc::clone(changes),
             Arc::new(TransactionManager::new()),
-            #[cfg(feature = "wal")]
-            None,
         );
         let deadline = Instant::now() + Duration::from_millis(100);
         let entered = Arc::new(AtomicBool::new(false));
@@ -1571,9 +1603,13 @@ mod path_overlay_tests {
             zero_length_in_graph: false,
         };
         (
-            RdfPathOperator::new(store, config)
-                .with_read_overlay(Some(overlay))
-                .with_deadline(Some(deadline)),
+            RdfPathOperator::new(
+                store,
+                grafeo_core::graph::rdf::RdfView::latest(grafeo_core::graph::rdf::LatestUse::Test),
+                config,
+            )
+            .with_read_overlay(Some(overlay))
+            .with_deadline(Some(deadline)),
             entered,
         )
     }

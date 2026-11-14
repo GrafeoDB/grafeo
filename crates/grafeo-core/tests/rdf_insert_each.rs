@@ -13,7 +13,7 @@
 
 #![cfg(feature = "triple-store")]
 
-use grafeo_core::graph::rdf::RdfView;
+use grafeo_core::graph::rdf::{LatestUse, RdfView};
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
@@ -55,8 +55,8 @@ fn one_by_one(held: &[Triple], batch: &[Triple]) -> (Vec<bool>, RdfStore) {
 fn same_store(batched: &RdfStore, single: &RdfStore, batch: &[Triple]) {
     assert_eq!(batched.len(), single.len());
     assert_eq!(
-        names(batched.triples(&RdfView::Latest)),
-        names(single.triples(&RdfView::Latest))
+        names(batched.triples(&RdfView::latest(LatestUse::Test))),
+        names(single.triples(&RdfView::latest(LatestUse::Test)))
     );
     for triple in batch.iter().filter(|t| t.is_valid()) {
         for pattern in [
@@ -72,8 +72,8 @@ fn same_store(batched: &RdfStore, single: &RdfStore, batch: &[Triple]) {
             },
         ] {
             assert_eq!(
-                names(batched.find(&RdfView::Latest, &pattern)),
-                names(single.find(&RdfView::Latest, &pattern))
+                names(batched.find(&RdfView::latest(LatestUse::Test), &pattern)),
+                names(single.find(&RdfView::latest(LatestUse::Test), &pattern))
             );
         }
     }
@@ -171,7 +171,7 @@ fn insert_each_into_a_named_graph_creates_it_and_leaves_the_default_alone() {
         [true, true, false, false],
         "the default graph's triple is new in g1"
     );
-    let named = store.graph(graph).expect("the insert created g1");
+    let named = store.graph_latest(graph).expect("the insert created g1");
     assert_eq!(named.len(), 2);
     assert_eq!(store.len(), 1, "the default graph is unchanged");
     assert_eq!(

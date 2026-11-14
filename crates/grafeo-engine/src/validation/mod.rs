@@ -189,15 +189,20 @@ pub fn validate_shacl(
     rdf_store: &Arc<RdfStore>,
     shapes_graph_name: &str,
 ) -> grafeo_common::utils::error::Result<ValidationReport> {
-    let shapes_store = rdf_store.graph(shapes_graph_name).ok_or_else(|| {
-        grafeo_common::utils::error::Error::InvalidValue(format!(
-            "there is no named graph '{shapes_graph_name}' to read the shapes from"
-        ))
-    })?;
-
-    let executor = SessionSparqlExecutor::new(session);
-    grafeo_core::graph::rdf::shacl::validate(rdf_store, &shapes_store, Some(&executor))
+    session.with_rdf_view(|view| {
+        let shapes_store = rdf_store.graph_at(view, shapes_graph_name).ok_or_else(|| {
+            grafeo_common::utils::error::Error::InvalidValue(format!(
+                "there is no named graph '{shapes_graph_name}' to read the shapes from"
+            ))
+        })?;
+        let executor = SessionSparqlExecutor::new(session);
+        grafeo_core::graph::rdf::shacl::validate(
+            rdf_store.at(view),
+            shapes_store.at(view),
+            Some(&executor),
+        )
         .map_err(|e| grafeo_common::utils::error::Error::Internal(e.to_string()))
+    })
 }
 
 #[cfg(test)]

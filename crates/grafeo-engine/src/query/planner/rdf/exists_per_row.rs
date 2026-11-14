@@ -55,6 +55,7 @@ impl RowBinding {
 #[derive(Clone)]
 pub(super) struct RowPlanParts {
     pub(super) store: Arc<RdfStore>,
+    pub(super) view: grafeo_core::graph::rdf::RdfView,
     pub(super) chunk_size: usize,
     pub(super) writer: Option<RdfWriter>,
     pub(super) terms: Arc<QueryTermIds>,

@@ -23,7 +23,7 @@ mod target;
 
 use std::collections::{HashMap, HashSet};
 
-use crate::graph::rdf::{RdfStore, Term};
+use crate::graph::rdf::{GraphAt, Term};
 
 pub use constraint::evaluate_constraint;
 pub use parser::parse_shapes;
@@ -77,8 +77,8 @@ pub trait SparqlExecutor {
 ///
 /// Returns `ShaclError` if shape parsing fails or a constraint cannot be evaluated.
 pub fn validate(
-    data_graph: &RdfStore,
-    shapes_graph: &RdfStore,
+    data_graph: GraphAt<'_>,
+    shapes_graph: GraphAt<'_>,
     sparql_executor: Option<&dyn SparqlExecutor>,
 ) -> Result<ValidationReport, ShaclError> {
     let shapes = parse_shapes(shapes_graph)?;
@@ -103,7 +103,7 @@ pub fn validate(
 fn validate_shape(
     shape: &Shape,
     focus_node: &Term,
-    data_graph: &RdfStore,
+    data_graph: GraphAt<'_>,
     all_shapes: &[Shape],
     sparql_executor: Option<&dyn SparqlExecutor>,
 ) -> Result<Vec<ValidationResult>, ShaclError> {
@@ -261,6 +261,10 @@ mod tests {
     use super::*;
     use crate::graph::rdf::{RdfStore, Triple};
 
+    /// The view the tests read through.
+    static LATEST: crate::graph::rdf::RdfView =
+        crate::graph::rdf::RdfView::latest(crate::graph::rdf::LatestUse::Test);
+
     #[test]
     fn validate_conforming_data() {
         let data = RdfStore::new();
@@ -301,7 +305,7 @@ mod tests {
             Term::typed_literal("1", "http://www.w3.org/2001/XMLSchema#integer"),
         ));
 
-        let report = validate(&data, &shapes, None).unwrap();
+        let report = validate(data.at(&LATEST), shapes.at(&LATEST), None).unwrap();
         assert!(report.conforms, "Data should conform: {report}");
     }
 
@@ -341,7 +345,7 @@ mod tests {
             Term::typed_literal("1", "http://www.w3.org/2001/XMLSchema#integer"),
         ));
 
-        let report = validate(&data, &shapes, None).unwrap();
+        let report = validate(data.at(&LATEST), shapes.at(&LATEST), None).unwrap();
         assert!(!report.conforms);
         assert_eq!(report.results.len(), 1);
     }
@@ -350,7 +354,7 @@ mod tests {
     fn empty_shapes_conforms() {
         let data = RdfStore::new();
         let shapes = RdfStore::new();
-        let report = validate(&data, &shapes, None).unwrap();
+        let report = validate(data.at(&LATEST), shapes.at(&LATEST), None).unwrap();
         assert!(report.conforms);
         assert!(report.results.is_empty());
     }
@@ -395,7 +399,7 @@ mod tests {
             Term::typed_literal("1", "http://www.w3.org/2001/XMLSchema#integer"),
         ));
 
-        let report = validate(&data, &shapes, None).unwrap();
+        let report = validate(data.at(&LATEST), shapes.at(&LATEST), None).unwrap();
         assert!(report.conforms, "Deactivated shape should be skipped");
     }
 
@@ -434,7 +438,7 @@ mod tests {
             Term::typed_literal("1", "http://www.w3.org/2001/XMLSchema#integer"),
         ));
 
-        let report = validate(&data, &shapes, None).unwrap();
+        let report = validate(data.at(&LATEST), shapes.at(&LATEST), None).unwrap();
         let triples = report.to_triples();
         // Should have: report type, conforms, result link, result type, focus, component, shape, severity, message
         assert!(
@@ -499,7 +503,7 @@ mod tests {
             Term::iri("http://www.w3.org/2001/XMLSchema#integer"),
         ));
 
-        let report = validate(&data, &shapes, None).unwrap();
+        let report = validate(data.at(&LATEST), shapes.at(&LATEST), None).unwrap();
         assert!(!report.conforms);
         assert_eq!(report.results.len(), 1);
         assert!(
@@ -564,7 +568,7 @@ mod tests {
             Term::typed_literal("1", "http://www.w3.org/2001/XMLSchema#integer"),
         ));
 
-        let report = validate(&data, &shapes, None).unwrap();
+        let report = validate(data.at(&LATEST), shapes.at(&LATEST), None).unwrap();
         assert!(!report.conforms);
         assert_eq!(
             report.results.len(),
@@ -606,7 +610,7 @@ mod tests {
             Term::typed_literal("1", "http://www.w3.org/2001/XMLSchema#integer"),
         ));
 
-        let report = validate(&data, &shapes, None).unwrap();
+        let report = validate(data.at(&LATEST), shapes.at(&LATEST), None).unwrap();
         assert!(
             !report.conforms,
             "Missing name should violate standalone property shape"
@@ -642,7 +646,7 @@ mod tests {
             Term::iri(SH::IRI),
         ));
 
-        let report = validate(&data, &shapes, None).unwrap();
+        let report = validate(data.at(&LATEST), shapes.at(&LATEST), None).unwrap();
         assert!(report.conforms, "alix is an IRI: {report}");
     }
 
@@ -693,7 +697,7 @@ mod tests {
         ));
 
         let executor = MockExecutor;
-        let report = validate(&data, &shapes, Some(&executor)).unwrap();
+        let report = validate(data.at(&LATEST), shapes.at(&LATEST), Some(&executor)).unwrap();
         assert!(!report.conforms);
         assert_eq!(report.results.len(), 1);
         assert_eq!(report.results[0].message.as_deref(), Some("Mock violation"));
@@ -743,7 +747,7 @@ mod tests {
         ));
 
         let executor = FailingExecutor;
-        let result = validate(&data, &shapes, Some(&executor));
+        let result = validate(data.at(&LATEST), shapes.at(&LATEST), Some(&executor));
         assert!(
             result.is_err(),
             "SPARQL errors should propagate as ShaclError"

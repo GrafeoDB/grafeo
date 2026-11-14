@@ -20,7 +20,7 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use grafeo_common::types::EpochId;
 use grafeo_common::utils::hash::{FxHashMap, FxHashSet};
-use parking_lot::RwLock;
+use parking_lot::{RecursiveRwLock, RwLock};
 
 use super::{RdfStore, Triple};
 
@@ -346,7 +346,7 @@ struct SnapshotState {
 pub struct Snapshot {
     epoch: EpochId,
     overlay: Arc<RdfOverlay>,
-    state: RwLock<SnapshotState>,
+    state: RecursiveRwLock<SnapshotState>,
     /// How many times the changes were extended, for tests: none on the
     /// fast path.
     extensions: AtomicU64,
@@ -359,7 +359,7 @@ impl Snapshot {
         Self {
             epoch,
             overlay: Arc::clone(overlay),
-            state: RwLock::new(SnapshotState {
+            state: RecursiveRwLock::new(SnapshotState {
                 cursor: epoch.as_u64(),
                 changes: SnapshotChanges::default(),
             }),
@@ -375,10 +375,11 @@ impl Snapshot {
 
     /// What the commits after the snapshot changed, up to the overlay's
     /// newest entry; `None` when no commit followed it (the store is then
-    /// read as it is, and nothing is built). Called inside the store's apply
-    /// guard; one guard per thread at a time: a second call while the first
-    /// is held can wait on another reader's extension, which waits on the
-    /// first.
+    /// read as it is, and nothing is built). Called inside the dataset's
+    /// apply guard, under which the newest entry does not move: a nested
+    /// call on the same thread finds the changes up to date and takes their
+    /// read side again (recursively, so a waiting extension by another
+    /// reader of the snapshot cannot block it).
     pub fn changes(&self) -> Option<ChangesGuard<'_>> {
         let newest = self.overlay.newest_epoch();
         if newest <= self.epoch.as_u64() {
@@ -399,9 +400,9 @@ impl Snapshot {
             self.extensions.fetch_add(1, Ordering::Relaxed);
             self.overlay.views_extended.fetch_add(1, Ordering::Relaxed);
         }
-        Some(ChangesGuard(parking_lot::RwLockWriteGuard::downgrade(
-            state,
-        )))
+        Some(ChangesGuard(
+            parking_lot::RecursiveRwLockWriteGuard::downgrade(state),
+        ))
     }
 
     /// How many times the changes were extended.
@@ -412,7 +413,7 @@ impl Snapshot {
 }
 
 /// The changes of a snapshot, held for one lookup.
-pub struct ChangesGuard<'a>(parking_lot::RwLockReadGuard<'a, SnapshotState>);
+pub struct ChangesGuard<'a>(parking_lot::RecursiveRwLockReadGuard<'a, SnapshotState>);
 
 impl std::ops::Deref for ChangesGuard<'_> {
     type Target = SnapshotChanges;
@@ -425,21 +426,63 @@ impl std::ops::Deref for ChangesGuard<'_> {
 /// The state a read sees.
 ///
 /// Every read of the store takes one, so a read that forgets the reader's
-/// snapshot does not compile: `Latest` is for applying commits, recovery and
-/// statistics, which read the newest committed state by design.
+/// snapshot does not compile. A reader takes the view at its pinned epoch
+/// ([`RdfStore::view_at`]); the newest committed state can only be named,
+/// with the reason it is the right one ([`LatestUse`]).
 #[derive(Debug, Clone)]
-pub enum RdfView {
-    /// The newest committed state.
-    Latest,
-    /// The committed state at a snapshot.
+pub struct RdfView(ViewKind);
+
+#[derive(Debug, Clone)]
+enum ViewKind {
+    Latest(LatestUse),
     Snapshot(Arc<Snapshot>),
 }
 
+/// Why a read takes the newest committed state instead of a snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LatestUse {
+    /// Applying a commit, which reads what it changes.
+    Apply,
+    /// Recovery and loads at open, before any reader exists.
+    Recovery,
+    /// A checkpoint, copy or export that holds commits off while it reads.
+    Checkpoint,
+    /// Optimizer statistics and memory accounting: estimates, not answers.
+    Statistics,
+    /// A test, or a caller of the store outside any database.
+    Test,
+}
+
 impl RdfView {
+    /// The newest committed state, for `why`.
+    #[must_use]
+    pub const fn latest(why: LatestUse) -> Self {
+        Self(ViewKind::Latest(why))
+    }
+
     /// The view at `epoch` of `overlay`.
     #[must_use]
     pub fn at(overlay: &Arc<RdfOverlay>, epoch: EpochId) -> Self {
-        Self::Snapshot(Arc::new(Snapshot::at(overlay, epoch)))
+        Self(ViewKind::Snapshot(Arc::new(Snapshot::at(overlay, epoch))))
+    }
+
+    /// Why the view takes the newest committed state, `None` for a
+    /// snapshot.
+    #[must_use]
+    pub fn latest_use(&self) -> Option<LatestUse> {
+        match &self.0 {
+            ViewKind::Latest(why) => Some(*why),
+            ViewKind::Snapshot(_) => None,
+        }
+    }
+
+    /// The epoch of the snapshot, `None` for the newest state.
+    #[must_use]
+    pub fn epoch(&self) -> Option<EpochId> {
+        match &self.0 {
+            ViewKind::Latest(_) => None,
+            ViewKind::Snapshot(snapshot) => Some(snapshot.epoch()),
+        }
     }
 
     /// What the commits after the view changed, `None` for the newest state
@@ -447,9 +490,9 @@ impl RdfView {
     /// guard.
     #[must_use]
     pub fn changes(&self) -> Option<ChangesGuard<'_>> {
-        match self {
-            Self::Latest => None,
-            Self::Snapshot(snapshot) => snapshot.changes(),
+        match &self.0 {
+            ViewKind::Latest(_) => None,
+            ViewKind::Snapshot(snapshot) => snapshot.changes(),
         }
     }
 }
@@ -496,7 +539,7 @@ mod tests {
         let overlay = overlay(vec![(3, vec![insert(None, [1, 2, 3], "Alix")])]);
         assert!(RdfView::at(&overlay, EpochId::new(3)).changes().is_none());
         assert!(RdfView::at(&overlay, EpochId::new(19)).changes().is_none());
-        assert!(RdfView::Latest.changes().is_none());
+        assert!(RdfView::latest(LatestUse::Test).changes().is_none());
     }
 
     #[test]
@@ -584,7 +627,7 @@ mod tests {
     #[test]
     fn the_fast_path_builds_no_changes() {
         let overlay = overlay(vec![(3, vec![insert(None, [1, 2, 1], "Alix")])]);
-        let RdfView::Snapshot(snapshot) = RdfView::at(&overlay, EpochId::new(3)) else {
+        let RdfView(ViewKind::Snapshot(snapshot)) = RdfView::at(&overlay, EpochId::new(3)) else {
             unreachable!()
         };
         assert!(snapshot.changes().is_none());
@@ -617,7 +660,7 @@ mod tests {
         let graph = changes.graph(&None).unwrap();
         assert_eq!(graph.present.len(), 1, "Gus was present at 2");
         assert!(graph.absent.contains(&[1, 2, 1]), "Alix stays absent at 2");
-        let RdfView::Snapshot(snapshot) = &view else {
+        let RdfView(ViewKind::Snapshot(snapshot)) = &view else {
             unreachable!()
         };
         assert_eq!(snapshot.extensions(), 2);

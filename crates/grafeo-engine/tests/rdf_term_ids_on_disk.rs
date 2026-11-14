@@ -271,7 +271,7 @@ fn the_golden_fixture_pins_the_format() {
         without_blank_labels(triples),
         without_blank_labels(expected(&[TERMS]))
     );
-    assert!(db.rdf_store().ring().is_some(), "the ring is read");
+    assert!(db.rdf_store().ring_latest().is_some(), "the ring is read");
     drop(db);
 
     let dir = tempfile::tempdir().unwrap();
@@ -500,7 +500,7 @@ fn a_beta_file_is_rewritten_and_its_copy_kept() {
     let db = open(&path);
     assert_eq!(every_triple(&db), beta_triples());
     #[cfg(feature = "ring-index")]
-    assert!(db.rdf_store().ring().is_some(), "the ring is read");
+    assert!(db.rdf_store().ring_latest().is_some(), "the ring is read");
     db.close().unwrap();
     drop(db);
 

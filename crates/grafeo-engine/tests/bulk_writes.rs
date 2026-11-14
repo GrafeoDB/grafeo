@@ -479,14 +479,14 @@ mod crash {
             3 + 19,
             "the two inserts that returned"
         );
-        assert!(
-            db.rdf_store()
-                .contains(&grafeo_core::graph::rdf::RdfView::Latest, &knows(2, 3))
-        );
-        assert!(
-            !db.rdf_store()
-                .contains(&grafeo_core::graph::rdf::RdfView::Latest, &knows(100, 101))
-        );
+        assert!(db.rdf_store().contains(
+            &grafeo_core::graph::rdf::RdfView::latest(grafeo_core::graph::rdf::LatestUse::Test),
+            &knows(2, 3)
+        ));
+        assert!(!db.rdf_store().contains(
+            &grafeo_core::graph::rdf::RdfView::latest(grafeo_core::graph::rdf::LatestUse::Test),
+            &knows(100, 101)
+        ));
         db.close().unwrap();
     }
 }

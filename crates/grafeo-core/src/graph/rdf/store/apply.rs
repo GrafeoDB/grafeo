@@ -51,6 +51,10 @@ pub enum ApplyMode {
     Publish(EpochId),
     /// Replay and loads at open: no reader exists, nothing is published.
     Recovery,
+    /// A write outside any database's epochs (a query processor of its own
+    /// over a store): nothing is published, and a reader at a snapshot sees
+    /// it once it applies, as it sees a write through the store itself.
+    Unversioned,
 }
 
 /// What an apply changed.
@@ -77,7 +81,7 @@ impl RdfStore {
         run_during_rdf_apply(RdfApplyStep::GuardTaken);
         let mut collected: Collected = match mode {
             ApplyMode::Publish(_) => Some(Vec::new()),
-            ApplyMode::Recovery => None,
+            ApplyMode::Recovery | ApplyMode::Unversioned => None,
         };
         let mut changed = Vec::with_capacity(changes.len());
         let mut changes = changes.into_iter().peekable();
@@ -199,7 +203,7 @@ impl RdfStore {
     fn apply_delete(&self, graph: &GraphKey, triple: &Triple, collected: &mut Collected) -> bool {
         let partition = match graph {
             None => None,
-            Some(name) => match self.graph(name) {
+            Some(name) => match self.graph_latest(name) {
                 Some(partition) => Some(partition),
                 None => return false,
             },
@@ -223,7 +227,7 @@ impl RdfStore {
     fn apply_graph_change(&self, op: &RdfGraphOp, collected: &mut Collected) -> bool {
         match op {
             RdfGraphOp::Create { name } => {
-                if self.graph(name).is_some() {
+                if self.graph_latest(name).is_some() {
                     return false;
                 }
                 self.partition_or_create(name, collected);
@@ -279,7 +283,7 @@ impl RdfStore {
     /// The partition of the named graph `name`, created (and recorded) when
     /// the dataset has none.
     fn partition_or_create(&self, name: &str, collected: &mut Collected) -> Arc<RdfStore> {
-        if let Some(partition) = self.graph(name) {
+        if let Some(partition) = self.graph_latest(name) {
             return partition;
         }
         let partition = Arc::new(self.named_graph_store(name));
@@ -369,7 +373,7 @@ impl RdfStore {
     fn empty_graph(&self, graph: Option<&str>, collected: &mut Collected) {
         match graph {
             None => self.swap_default(collected),
-            Some(name) if self.graph(name).is_some() => self.swap_named(name, collected),
+            Some(name) if self.graph_latest(name).is_some() => self.swap_named(name, collected),
             Some(name) => {
                 self.partition_or_create(name, collected);
             }
@@ -381,7 +385,7 @@ impl RdfStore {
         match graph {
             None => self.triples_latest(),
             Some(name) => self
-                .graph(name)
+                .graph_latest(name)
                 .map(|partition| partition.triples_latest())
                 .unwrap_or_default(),
         }
@@ -448,7 +452,7 @@ impl RdfStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::graph::rdf::{Term, TriplePattern};
+    use crate::graph::rdf::{LatestUse, Term, TriplePattern};
 
     const G: &str = "http://ex.org/g";
     const H: &str = "http://ex.org/h";
@@ -508,7 +512,7 @@ mod tests {
     }
 
     fn latest() -> RdfView {
-        RdfView::Latest
+        RdfView::latest(LatestUse::Test)
     }
 
     /// A store at epoch 1: Alix and Gus in the default graph, Vincent and
@@ -820,6 +824,109 @@ mod tests {
         assert_eq!(store.overlay().views_extended(), 1);
     }
 
+    fn pattern(subject: Option<&str>, predicate: bool, object: Option<&str>) -> TriplePattern {
+        TriplePattern {
+            subject: subject.map(|name| Term::iri(format!("http://ex.org/{name}"))),
+            predicate: predicate.then(|| Term::iri("http://ex.org/name")),
+            object: object.map(Term::literal),
+        }
+    }
+
+    /// A count at a view is the count of what a scan at the view finds, in
+    /// the default graph, a named graph and one a clear swapped out.
+    #[test]
+    fn a_count_at_a_view_is_its_corrected_scan() {
+        let store = seeded();
+        let patterns = [
+            pattern(None, false, None),
+            pattern(Some("Alix"), false, None),
+            pattern(None, true, None),
+            pattern(None, false, Some("Alix")),
+            pattern(Some("Alix"), true, None),
+            pattern(None, true, Some("Gus")),
+            pattern(Some("Alix"), false, Some("Alix")),
+            pattern(Some("Alix"), true, Some("Alix")),
+            pattern(Some("Mia"), true, Some("Mia")),
+        ];
+        let view = store.view_at(epoch(1)).unwrap();
+        let before: Vec<usize> = patterns
+            .iter()
+            .map(|pattern| store.find(&view, pattern).len())
+            .collect();
+        store.apply_commit(
+            ApplyMode::Publish(epoch(2)),
+            vec![
+                delete(None, "Alix"),
+                insert(None, "Mia"),
+                insert(Some(G), "Hans"),
+                op(RdfGraphOp::Clear {
+                    target: RdfGraphTarget::Named(G.to_string()),
+                }),
+            ],
+        );
+        for (pattern, before) in patterns.iter().zip(&before) {
+            assert_eq!(store.count_at(&view, pattern), *before, "{pattern:?}");
+            assert_eq!(
+                store.count_at(&latest(), pattern),
+                store.find(&latest(), pattern).len(),
+                "{pattern:?}"
+            );
+        }
+        let g = store.graph_at(&view, G).unwrap();
+        assert_eq!(g.count_at(&view, &pattern(None, false, None)), 2);
+        assert_eq!(
+            store
+                .graph_latest(G)
+                .unwrap()
+                .count_at(&latest(), &pattern(None, false, None)),
+            0
+        );
+    }
+
+    /// The ring answers a view only while no commit after its snapshot
+    /// changed the graph: a ring built on a later state is not the view's.
+    #[cfg(feature = "ring-index")]
+    #[test]
+    fn the_ring_answers_a_view_only_while_its_graph_is_unchanged() {
+        let store = seeded();
+        store.rebuild_ring();
+        let view = store.view_at(epoch(1)).unwrap();
+        assert!(store.ring_at(&view).is_some(), "nothing changed");
+        store.apply_commit(ApplyMode::Publish(epoch(2)), vec![insert(Some(G), "Mia")]);
+        assert!(store.ring_at(&view).is_some(), "only g changed");
+        store.apply_commit(ApplyMode::Publish(epoch(3)), vec![insert(None, "Hans")]);
+        store.rebuild_ring();
+        assert!(store.ring_latest().is_some(), "a ring of the newest state");
+        assert!(store.ring_at(&view).is_none(), "not the view's");
+        assert!(store.ring_at(&store.view_at(epoch(3)).unwrap()).is_some());
+    }
+
+    /// The distinct subjects, predicates and objects at a view are its
+    /// snapshot's, also once a commit removed a term from the indexes.
+    #[test]
+    fn the_terms_at_a_view_are_its_snapshots() {
+        let store = seeded();
+        let view = store.view_at(epoch(1)).unwrap();
+        store.apply_commit(
+            ApplyMode::Publish(epoch(2)),
+            vec![delete(None, "Alix"), insert(None, "Mia")],
+        );
+        let sorted = |mut terms: Vec<Term>| {
+            terms.sort_by_key(ToString::to_string);
+            terms.iter().map(ToString::to_string).collect::<Vec<_>>()
+        };
+        assert_eq!(
+            sorted(store.subjects(&view)),
+            ["<http://ex.org/Alix>", "<http://ex.org/Gus>"]
+        );
+        assert_eq!(sorted(store.predicates(&view)), ["<http://ex.org/name>"]);
+        assert_eq!(sorted(store.objects(&view)), ["\"Alix\"", "\"Gus\""]);
+        assert_eq!(
+            sorted(store.subjects(&latest())),
+            ["<http://ex.org/Gus>", "<http://ex.org/Mia>"]
+        );
+    }
+
     /// The default graph and its named graphs share one guard: a reader of
     /// either waits while a commit holds it, then reads its snapshot.
     #[cfg(feature = "testing-statement-injection")]
@@ -841,7 +948,7 @@ mod tests {
                 // before the commit: its reads take the dataset's guard too.
                 let read_from = match graph {
                     None => Arc::clone(&store),
-                    Some(name) => store.graph(name).unwrap(),
+                    Some(name) => store.graph_latest(name).unwrap(),
                 };
                 during_next_rdf_apply(step, move || {
                     let reader = std::thread::spawn(move || names(&read_from, &view, None));

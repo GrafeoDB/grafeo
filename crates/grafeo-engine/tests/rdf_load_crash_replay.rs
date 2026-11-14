@@ -117,7 +117,9 @@ mod tests {
 
     fn triples(db: &GrafeoDB) -> BTreeSet<String> {
         db.rdf_store()
-            .triples(&grafeo_core::graph::rdf::RdfView::Latest)
+            .triples(&grafeo_core::graph::rdf::RdfView::latest(
+                grafeo_core::graph::rdf::LatestUse::Test,
+            ))
             .iter()
             .map(ToString::to_string)
             .collect()

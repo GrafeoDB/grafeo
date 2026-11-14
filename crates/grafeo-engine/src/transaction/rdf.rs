@@ -3,7 +3,7 @@
 //! An RDF update records each triple it inserts or deletes in its
 //! transaction's change set, as an entry of the triple's graph, and changes
 //! nothing in the store: the commit applies the entries in order
-//! ([`TransactionChanges::apply_triples`]), then logs and reports to change
+//! ([`TransactionChanges::apply_rdf`]), then logs and reports to change
 //! data capture the ones that changed the store. A rollback, a rollback to a
 //! savepoint and a failed statement drop entries with the rest of the set,
 //! so they leave nothing in the store, the WAL or the change feed.
@@ -259,6 +259,8 @@ pub(crate) struct RdfWriter {
     /// Whether whole-graph operations wait for the commit of a transaction the session
     /// opened, as its other schema statements do.
     queues_graph_ops: bool,
+    /// The view the transaction reads the store at: its snapshot.
+    view: RdfView,
 }
 
 impl RdfWriter {
@@ -278,23 +280,56 @@ impl RdfWriter {
         })
     }
 
-    /// The writer of the transaction whose changes are `changes`. Only an
-    /// RDF query writes through one.
+    /// The writer of the transaction whose changes are `changes`, reading
+    /// `store` at the transaction's snapshot. Only an RDF query writes
+    /// through one.
+    ///
+    /// # Errors
+    ///
+    /// When the store has no view at the snapshot any more (see
+    /// [`TransactionChanges::rdf_view`]).
     #[cfg(any(rdf_language, test))]
     pub(crate) fn new(
         store: Arc<RdfStore>,
         changes: Arc<TransactionChanges>,
         manager: Arc<TransactionManager>,
         #[cfg(feature = "wal")] wal: Option<Arc<grafeo_storage::wal::Wal>>,
-    ) -> Self {
-        Self {
+    ) -> Result<Self> {
+        let view = changes.rdf_view(&store)?;
+        Ok(Self {
             store,
             changes,
             manager,
             #[cfg(feature = "wal")]
             wal,
             queues_graph_ops: false,
+            view,
+        })
+    }
+
+    /// The writer of a private transaction outside any database (see
+    /// [`update_privately`]): its manager's epochs are not the store's, so
+    /// it reads the newest committed state.
+    #[cfg(any(rdf_language, test))]
+    pub(crate) fn outside_any_database(
+        store: Arc<RdfStore>,
+        changes: Arc<TransactionChanges>,
+        manager: Arc<TransactionManager>,
+    ) -> Self {
+        Self {
+            store,
+            changes,
+            manager,
+            #[cfg(feature = "wal")]
+            wal: None,
+            queues_graph_ops: false,
+            view: RdfView::latest(grafeo_core::graph::rdf::LatestUse::Test),
         }
+    }
+
+    /// The view the transaction reads the store at.
+    pub(crate) fn view(&self) -> &RdfView {
+        &self.view
     }
 
     /// Records the insert of `triple` into `graph` (`None` for the default
@@ -354,7 +389,7 @@ impl RdfWriter {
     fn sees(&self, graph: Option<&str>, triple: &Triple) -> bool {
         self.changes
             .pending_triple(graph, triple)
-            .unwrap_or_else(|| holds(&self.store, graph, triple))
+            .unwrap_or_else(|| holds(&self.store, &self.view, graph, triple))
     }
 
     /// Whether the transaction wrote a triple that it has not committed.
@@ -377,7 +412,7 @@ impl RdfWriter {
         pattern: &TriplePattern,
         graphs: Option<&[&str]>,
     ) -> Vec<(Option<String>, Arc<Triple>)> {
-        let mut found = self.store.find_in_graphs(&RdfView::Latest, pattern, graphs);
+        let mut found = self.store.find_in_graphs(&self.view, pattern, graphs);
         let pending = self.changes.pending_triples_matching(pattern, graphs);
         if pending.is_empty() {
             return found;
@@ -396,7 +431,7 @@ impl RdfWriter {
         }
         for (graph, triple, present) in pending {
             // A triple the store holds already is in `found`.
-            if present && !holds(&self.store, graph.as_deref(), &triple) {
+            if present && !holds(&self.store, &self.view, graph.as_deref(), &triple) {
                 found.push((graph, triple));
             }
         }
@@ -464,7 +499,10 @@ impl RdfWriter {
 /// Runs `body`, an RDF update outside a session (a query processor of its
 /// own, a test), in a private transaction of `manager`: the triples it
 /// records apply to `store` once it succeeds, and none of them when it
-/// fails. Nothing is logged or reported to change data capture.
+/// fails. Nothing is logged or reported to change data capture. `manager`
+/// keeps no epochs of the store, so the update reads the newest committed
+/// state and publishes nothing for readers at a snapshot (as a write through
+/// the store itself).
 ///
 /// # Errors
 ///
@@ -477,12 +515,10 @@ pub(crate) fn update_privately<T>(
     body: impl FnOnce(RdfWriter) -> Result<T>,
 ) -> Result<T> {
     let (transaction, changes) = manager.begin_private()?;
-    let writer = RdfWriter::new(
+    let writer = RdfWriter::outside_any_database(
         Arc::clone(store),
         Arc::clone(&changes),
         Arc::clone(manager),
-        #[cfg(feature = "wal")]
-        None,
     );
     let value = match body(writer) {
         Ok(value) => value,
@@ -500,9 +536,22 @@ pub(crate) fn update_privately<T>(
     };
     // A set that fails to apply drops the guard uncompleted, which poisons
     // the manager.
-    changes.apply_triples(store)?;
+    changes.apply_rdf(
+        store,
+        grafeo_core::graph::rdf::ApplyMode::Unversioned,
+        Vec::new(),
+    )?;
     commit.complete()?;
     Ok(value)
+}
+
+/// Drops the overlay entries of `store` that no reader of `manager` needs,
+/// after a commit published one: those at or below the read horizon. A
+/// store with none pays one atomic load.
+pub(crate) fn prune_rdf_overlay(store: &RdfStore, manager: &TransactionManager) {
+    if store.overlay_holds_entries() {
+        store.prune_overlay(manager.read_horizon());
+    }
 }
 
 /// The N-Triples strings of a triple's terms, as a change event holds them.
@@ -519,14 +568,13 @@ pub(crate) fn ntriples_terms(
     )
 }
 
-/// Whether the store holds `triple` in `graph` (`None` for the default
-/// graph).
-fn holds(store: &RdfStore, graph: Option<&str>, triple: &Triple) -> bool {
+/// Whether `view` sees `triple` in `graph` (`None` for the default graph).
+fn holds(store: &RdfStore, view: &RdfView, graph: Option<&str>, triple: &Triple) -> bool {
     match graph {
-        None => store.contains(&RdfView::Latest, triple),
+        None => store.contains(view, triple),
         Some(name) => store
-            .graph(name)
-            .is_some_and(|graph| graph.contains(&RdfView::Latest, triple)),
+            .graph_at(view, name)
+            .is_some_and(|graph| graph.contains(view, triple)),
     }
 }
 

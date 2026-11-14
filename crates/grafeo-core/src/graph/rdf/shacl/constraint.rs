@@ -6,8 +6,7 @@
 use std::cmp::Ordering;
 use std::collections::HashSet;
 
-use crate::graph::rdf::overlay::RdfView;
-use crate::graph::rdf::{Literal, RdfStore, Term, TriplePattern};
+use crate::graph::rdf::{GraphAt, Literal, Term, TriplePattern};
 
 use super::path::evaluate_path;
 use super::report::ValidationResult;
@@ -22,7 +21,7 @@ pub struct EvalContext<'a> {
     /// The property path (for property shapes, None for node shapes).
     pub path: Option<&'a PropertyPath>,
     /// The data graph.
-    pub data_graph: &'a RdfStore,
+    pub data_graph: GraphAt<'a>,
     /// All parsed shapes (for recursive references).
     pub all_shapes: &'a [Shape],
     /// Visited (focus_node, shape_id) pairs for cycle detection.
@@ -140,14 +139,11 @@ fn eval_class(class: &Term, value_nodes: &[Term], ctx: &EvalContext<'_>) -> Vec<
     for vn in value_nodes {
         let has_type = !ctx
             .data_graph
-            .find(
-                &RdfView::Latest,
-                &TriplePattern {
-                    subject: Some(vn.clone()),
-                    predicate: Some(rdf_type.clone()),
-                    object: Some(class.clone()),
-                },
-            )
+            .find(&TriplePattern {
+                subject: Some(vn.clone()),
+                predicate: Some(rdf_type.clone()),
+                object: Some(class.clone()),
+            })
             .is_empty();
         if !has_type {
             results.push(result(
@@ -752,10 +748,7 @@ fn eval_closed(ignored: &[Term], ctx: &EvalContext<'_>) -> Vec<ValidationResult>
 
     // Check all outgoing predicates of the focus node
     let mut results = Vec::new();
-    for triple in ctx
-        .data_graph
-        .triples_with_subject(&RdfView::Latest, ctx.focus_node)
-    {
+    for triple in ctx.data_graph.triples_with_subject(ctx.focus_node) {
         if !allowed.contains(triple.predicate()) {
             results.push(result(
                 ctx,
@@ -883,6 +876,10 @@ mod tests {
     use super::*;
     use crate::graph::rdf::{RdfStore, Triple};
 
+    /// The view the tests read through.
+    static LATEST: crate::graph::rdf::RdfView =
+        crate::graph::rdf::RdfView::latest(crate::graph::rdf::LatestUse::Test);
+
     fn data_store() -> RdfStore {
         let store = RdfStore::new();
         let rdf_type = Term::iri("http://www.w3.org/1999/02/22-rdf-syntax-ns#type");
@@ -924,7 +921,7 @@ mod tests {
             focus_node: focus,
             shape,
             path: None,
-            data_graph: store,
+            data_graph: store.at(&LATEST),
             all_shapes: &[],
             visited,
         }
@@ -1334,7 +1331,7 @@ mod tests {
             focus_node: &alix,
             shape: &owner_shape,
             path: None,
-            data_graph: &store,
+            data_graph: store.at(&LATEST),
             all_shapes: &[],
             visited: &mut visited,
         };
@@ -1359,7 +1356,7 @@ mod tests {
             focus_node: &alix,
             shape: &owner_shape,
             path: None,
-            data_graph: &store,
+            data_graph: store.at(&LATEST),
             all_shapes: &[],
             visited: &mut visited,
         };

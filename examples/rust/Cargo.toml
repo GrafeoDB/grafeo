@@ -43,3 +43,6 @@ required-features = ["full"]
 default = []
 storage = ["grafeo/storage"]
 full = ["grafeo/full"]
+
+[lints]
+workspace = true

@@ -2768,8 +2768,7 @@ impl GrafeoDB {
     pub fn list_graphs(&self) -> Vec<String> {
         let mut names = self
             .root_store()
-            .map(|store| store.graph_names())
-            .unwrap_or_default();
+            .map_or_default(|store| store.graph_names());
         names.sort_unstable();
         names
     }

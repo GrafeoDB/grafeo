@@ -20,6 +20,10 @@ use grafeo_common::utils::warning::{Warning, WarningSink};
 use regex::Regex;
 #[cfg(all(feature = "regex-lite", not(feature = "regex")))]
 use regex_lite::Regex;
+// With both features on (a workspace build unifies them), `regex` wins and regex-lite is
+// compiled but unused.
+#[cfg(all(feature = "regex-lite", feature = "regex"))]
+use regex_lite as _;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 

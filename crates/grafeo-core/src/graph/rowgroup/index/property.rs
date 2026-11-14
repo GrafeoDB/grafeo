@@ -174,8 +174,7 @@ impl PropertyIndex {
     pub(crate) fn nodes(&self, value: &HashableValue) -> Vec<NodeId> {
         self.values
             .get(value)
-            .map(|nodes| nodes.iter().copied().collect())
-            .unwrap_or_default()
+            .map_or_default(|nodes| nodes.iter().copied().collect())
     }
 
     /// The nodes whose value `=` may find equal to `key`: every one it finds
@@ -193,8 +192,7 @@ impl PropertyIndex {
         let others: Vec<HashableValue> = self
             .others_by_class
             .get(&class)
-            .map(|others| others.iter().cloned().collect())
-            .unwrap_or_default();
+            .map_or_default(|others| others.iter().cloned().collect());
         for value in &others {
             if let Some(nodes) = self.values.get(value) {
                 found.extend(nodes.iter().copied());

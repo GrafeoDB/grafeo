@@ -740,7 +740,7 @@ impl RdfExpressionPredicate {
                 let value = self.eval_expr(arg(0)?, chunk, row)?;
                 Some(Value::from(match native(&value)?.into_owned() {
                     Value::ZonedDatetime(zdt) => format_tz_offset(zdt.offset_seconds()),
-                    Value::Time(t) => t.offset_seconds().map(format_tz_offset).unwrap_or_default(),
+                    Value::Time(t) => t.offset_seconds().map_or_default(format_tz_offset),
                     Value::Timestamp(_) => String::new(),
                     _ => return None,
                 }))

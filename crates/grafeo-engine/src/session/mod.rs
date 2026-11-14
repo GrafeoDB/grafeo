@@ -2026,8 +2026,7 @@ impl Session {
         // The element types the replaced graph type alone has go with it.
         let replaced = old_type
             .as_ref()
-            .map(|def| self.element_types_only_of(def))
-            .unwrap_or_default();
+            .map_or_default(|def| self.element_types_only_of(def));
 
         let properties = |columns: &[crate::query::plan::PropertyGraphColumn]| {
             let properties: Vec<TypedProperty> = columns
@@ -2267,8 +2266,7 @@ impl Session {
         let others: Vec<_> = self
             .effective_catalog()
             .schema()
-            .map(crate::catalog::SchemaCatalog::all_graph_type_defs)
-            .unwrap_or_default()
+            .map_or_default(crate::catalog::SchemaCatalog::all_graph_type_defs)
             .into_iter()
             .filter(|other| other.name != def.name)
             .collect();
@@ -3362,8 +3360,7 @@ impl Session {
                 let default_graph_key = format!("{name}/{SCHEMA_DEFAULT_GRAPH}");
                 let has_graphs = self
                     .root_store()
-                    .map(|store| store.graph_names())
-                    .unwrap_or_default()
+                    .map_or_default(|store| store.graph_names())
                     .iter()
                     .any(|g| g.starts_with(&prefix) && *g != default_graph_key);
                 let has_types = self
@@ -4190,8 +4187,7 @@ impl Session {
         let schema = self.current_schema.lock().clone();
         let mut all_names = self
             .root_store()
-            .map(|store| store.graph_names())
-            .unwrap_or_default();
+            .map_or_default(|store| store.graph_names());
         {
             let pending = self.stores.pending_graphs.read();
             all_names.retain(|name| !pending.dropped.contains(name));
@@ -6032,8 +6028,7 @@ impl Session {
         crate::transaction::prune_rdf_overlay(&self.rdf_store, &self.transaction_manager);
         let written = changes
             .as_ref()
-            .map(|changes| changes.written_graphs())
-            .unwrap_or_default();
+            .map_or_default(|changes| changes.written_graphs());
 
         // Collect the versions no reader needs any more in the root and the
         // stores the commit wrote (after every commit, when a collect is due

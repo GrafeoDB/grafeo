@@ -349,8 +349,7 @@ pub trait GraphStore: Send + Sync {
             .map(|&id| {
                 Ok(self
                     .node(id, view)?
-                    .map(|node| node.properties.iter().map(clone_pair).collect())
-                    .unwrap_or_default())
+                    .map_or_default(|node| node.properties.iter().map(clone_pair).collect()))
             })
             .collect()
     }

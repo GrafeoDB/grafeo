@@ -7280,8 +7280,7 @@ impl<'a> Parser<'a> {
     fn peek_text_upper(&self) -> String {
         self.peeked
             .as_ref()
-            .map(|t| t.text.to_uppercase())
-            .unwrap_or_default()
+            .map_or_default(|t| t.text.to_uppercase())
     }
 
     /// Checks whether CREATE is followed by [PROPERTY] GRAPH (for graph instances, not GRAPH TYPE).

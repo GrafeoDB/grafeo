@@ -412,8 +412,7 @@ impl Catalog {
     pub fn all_node_type_names(&self) -> Vec<String> {
         self.schema
             .as_ref()
-            .map(SchemaCatalog::all_node_types)
-            .unwrap_or_default()
+            .map_or_default(SchemaCatalog::all_node_types)
     }
 
     /// Returns all registered edge type definition names.
@@ -421,8 +420,7 @@ impl Catalog {
     pub fn all_edge_type_names(&self) -> Vec<String> {
         self.schema
             .as_ref()
-            .map(SchemaCatalog::all_edge_types)
-            .unwrap_or_default()
+            .map_or_default(SchemaCatalog::all_edge_types)
     }
 
     /// Registers an edge type definition.
@@ -502,8 +500,7 @@ impl Catalog {
     pub fn all_graph_type_names(&self) -> Vec<String> {
         self.schema
             .as_ref()
-            .map(SchemaCatalog::all_graph_types)
-            .unwrap_or_default()
+            .map_or_default(SchemaCatalog::all_graph_types)
     }
 
     /// Gets a graph type definition by name.
@@ -547,10 +544,7 @@ impl Catalog {
     /// Returns all registered schema namespace names.
     #[must_use]
     pub fn schema_names(&self) -> Vec<String> {
-        self.schema
-            .as_ref()
-            .map(|s| s.schema_names())
-            .unwrap_or_default()
+        self.schema.as_ref().map_or_default(|s| s.schema_names())
     }
 
     /// Adds a constraint to an existing node type, creating a minimal type if needed.
@@ -630,8 +624,7 @@ impl Catalog {
     pub fn constraints(&self) -> Vec<ConstraintDefinition> {
         self.schema
             .as_ref()
-            .map(SchemaCatalog::all_constraints)
-            .unwrap_or_default()
+            .map_or_default(SchemaCatalog::all_constraints)
     }
 
     /// Registers the names of constraints whose type constraints the loaded
@@ -908,8 +901,7 @@ impl Catalog {
     pub fn all_node_type_defs(&self) -> Vec<NodeTypeDefinition> {
         self.schema
             .as_ref()
-            .map(SchemaCatalog::all_node_type_defs)
-            .unwrap_or_default()
+            .map_or_default(SchemaCatalog::all_node_type_defs)
     }
 
     /// Returns all registered edge type definitions.
@@ -917,8 +909,7 @@ impl Catalog {
     pub fn all_edge_type_defs(&self) -> Vec<EdgeTypeDefinition> {
         self.schema
             .as_ref()
-            .map(SchemaCatalog::all_edge_type_defs)
-            .unwrap_or_default()
+            .map_or_default(SchemaCatalog::all_edge_type_defs)
     }
 
     /// Returns all registered graph type definitions.
@@ -926,8 +917,7 @@ impl Catalog {
     pub fn all_graph_type_defs(&self) -> Vec<GraphTypeDefinition> {
         self.schema
             .as_ref()
-            .map(SchemaCatalog::all_graph_type_defs)
-            .unwrap_or_default()
+            .map_or_default(SchemaCatalog::all_graph_type_defs)
     }
 
     /// Returns all registered procedure definitions.
@@ -935,8 +925,7 @@ impl Catalog {
     pub fn all_procedure_defs(&self) -> Vec<ProcedureDefinition> {
         self.schema
             .as_ref()
-            .map(SchemaCatalog::all_procedure_defs)
-            .unwrap_or_default()
+            .map_or_default(SchemaCatalog::all_procedure_defs)
     }
 
     /// Returns all graph type bindings (graph_name, type_name).
@@ -944,8 +933,7 @@ impl Catalog {
     pub fn all_graph_type_bindings(&self) -> Vec<(String, String)> {
         self.schema
             .as_ref()
-            .map(SchemaCatalog::all_graph_type_bindings)
-            .unwrap_or_default()
+            .map_or_default(SchemaCatalog::all_graph_type_bindings)
     }
 }
 

@@ -462,15 +462,13 @@ pub(super) fn search_index_covers(
 ) -> bool {
     let covered = |property: &str| {
         labels.iter().any(|label| {
-            #[cfg(feature = "vector-index")]
-            if store.has_vector_index(label, property) {
-                return true;
-            }
-            #[cfg(feature = "text-index")]
-            if store.has_text_index(label, property) {
-                return true;
-            }
-            false
+            [
+                #[cfg(feature = "vector-index")]
+                store.has_vector_index(label, property),
+                #[cfg(feature = "text-index")]
+                store.has_text_index(label, property),
+            ]
+            .contains(&true)
         })
     };
     reads_property(predicate, variable, &covered)

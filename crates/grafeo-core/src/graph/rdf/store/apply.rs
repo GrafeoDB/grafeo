@@ -454,8 +454,7 @@ impl RdfStore {
             None => self.triples_latest(),
             Some(name) => self
                 .graph_latest(name)
-                .map(|partition| partition.triples_latest())
-                .unwrap_or_default(),
+                .map_or_default(|partition| partition.triples_latest()),
         }
     }
 
@@ -560,8 +559,7 @@ mod tests {
             None => store.find(view, &TriplePattern::any()),
             Some(name) => store
                 .graph_at(view, name)
-                .map(|partition| partition.find(view, &TriplePattern::any()))
-                .unwrap_or_default(),
+                .map_or_default(|partition| partition.find(view, &TriplePattern::any())),
         };
         let mut names: Vec<String> = triples
             .iter()

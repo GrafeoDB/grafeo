@@ -442,8 +442,7 @@ impl GrafeoDB {
             self.rdf_store
                 .overlay()
                 .entry_at(epoch)
-                .map(|entry| crate::transaction::writes_of_entry(&entry))
-                .unwrap_or_default()
+                .map_or_default(|entry| crate::transaction::writes_of_entry(&entry))
         });
         crate::transaction::prune_rdf_overlay(&self.rdf_store, &self.transaction_manager);
         Ok(new)

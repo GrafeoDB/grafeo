@@ -112,8 +112,7 @@ fn triples(db: &GrafeoDB) -> (Vec<[String; 3]>, Vec<[String; 3]>) {
     let trips = db
         .rdf_store()
         .graph_latest("http://example.org/trips")
-        .map(|graph| stored(&graph))
-        .unwrap_or_default();
+        .map_or_default(|graph| stored(&graph));
     (stored(db.rdf_store()), trips)
 }
 

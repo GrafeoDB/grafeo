@@ -278,7 +278,7 @@ $ grafeo version
 grafeo 0.6.2
 
 Build:
-  rustc:    1.99.0
+  rustc:    1.100.0
   target:   x86_64
   os:       linux
   features: gql, vector-index, text-index, hybrid-search, cdc, algos, jsonl-import

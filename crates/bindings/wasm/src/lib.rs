@@ -2683,13 +2683,12 @@ mod tests {
     fn json_properties(item: &serde_json::Value) -> Vec<(PropertyKey, Value)> {
         item.get("properties")
             .and_then(serde_json::Value::as_object)
-            .map(|properties| {
+            .map_or_default(|properties| {
                 properties
                     .iter()
                     .map(|(k, v)| (PropertyKey::new(k.as_str()), json_to_value(v).unwrap()))
                     .collect()
             })
-            .unwrap_or_default()
     }
 
     #[test]

@@ -1212,9 +1212,7 @@ impl GraphWriter {
                 let others = if other == id {
                     remaining.clone()
                 } else {
-                    self.node(other)?
-                        .map(|node| node_labels(&node))
-                        .unwrap_or_default()
+                    self.node(other)?.map_or_default(|node| node_labels(&node))
                 };
                 let (source, target) = if is_source {
                     (&remaining, &others)
@@ -1239,10 +1237,7 @@ impl GraphWriter {
             return Ok(());
         }
         let labels_of = |id| -> Result<Vec<String>, OperatorError> {
-            Ok(self
-                .node(id)?
-                .map(|node| node_labels(&node))
-                .unwrap_or_default())
+            Ok(self.node(id)?.map_or_default(|node| node_labels(&node)))
         };
         validator.validate_edge_endpoints(edge_type, &labels_of(src)?, &labels_of(dst)?)
     }
@@ -1366,14 +1361,12 @@ impl GraphWriter {
             Entity::Node(id) => self.node(id)?.map(|node| node.properties),
             Entity::Edge(id) => self.edge(id)?.map(|edge| edge.properties),
         };
-        Ok(properties
-            .map(|properties| {
-                properties
-                    .iter()
-                    .map(|(key, _)| key.as_str().to_string())
-                    .collect()
-            })
-            .unwrap_or_default())
+        Ok(properties.map_or_default(|properties| {
+            properties
+                .iter()
+                .map(|(key, _)| key.as_str().to_string())
+                .collect()
+        }))
     }
 
     /// Applies a SET: plain assignments write their value, map entries write

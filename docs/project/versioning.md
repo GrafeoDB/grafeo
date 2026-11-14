@@ -18,6 +18,8 @@ breaking changes come only in major versions.
 | Patch (`0.6.0` to `0.6.1`) | Bug fixes, additive features, new options whose default keeps the current behavior, performance work, documentation, deprecations |
 | Minor (`0.6` to `0.7`) | All of the above, plus a new database file format, breaking changes to the stable surface, removal of deprecated items, a higher minimum Rust version |
 
+0.6.3 is the one exception: it raises the minimum Rust version from 1.99 to 1.100 in a patch release.
+
 A bug fix can change query results, or turn a query that returned a wrong answer into an error. It still ships in
 a patch release, because the old result was wrong. The [CHANGELOG](changelog.md) lists such changes under
 Fixed, and under Changed when a query that used to run now fails. Breaking changes are marked **Breaking** and

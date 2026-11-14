@@ -1314,18 +1314,15 @@ impl RdfStore {
         let found = |triples: Option<&Vec<Arc<Triple>>>| triples.cloned().unwrap_or_default();
         match (subject, predicate, object) {
             // 3-bound: use SP composite, filter on O (at most 1 result)
-            (Some(s), Some(p), Some(o)) => self
-                .sp_index
-                .read()
-                .get(&(s, p))
-                .map(|triples| {
+            (Some(s), Some(p), Some(o)) => {
+                self.sp_index.read().get(&(s, p)).map_or_default(|triples| {
                     triples
                         .iter()
                         .filter(|t| t.raw_ids()[2] == o)
                         .cloned()
                         .collect()
                 })
-                .unwrap_or_default(),
+            }
             // 2-bound: use composite indexes (O(1) lookup, no filtering)
             (Some(s), Some(p), None) => found(self.sp_index.read().get(&(s, p))),
             (Some(s), None, Some(o)) => found(self.os_index.read().get(&(o, s))),
@@ -1337,8 +1334,7 @@ impl RdfStore {
                 .object_index
                 .read()
                 .as_ref()
-                .map(|index| found(index.get(&o)))
-                .unwrap_or_default(),
+                .map_or_default(|index| found(index.get(&o))),
             (None, None, None) => self.triples_latest(),
             // O-only without object index: full scan
             _ => self
@@ -1629,15 +1625,13 @@ impl RdfStore {
         let graphs = budget.read(&self.named_graphs)?;
         // The named graphs a commit after the snapshot changed, by name: few,
         // and none on the fast path.
-        let changed: grafeo_common::utils::hash::FxHashMap<&str, &Partition> = changes
-            .as_ref()
-            .map(|changes| {
+        let changed: grafeo_common::utils::hash::FxHashMap<&str, &Partition> =
+            changes.as_ref().map_or_default(|changes| {
                 changes
                     .graphs()
                     .filter_map(|(key, graph)| Some((key.as_deref()?, &graph.partition)))
                     .collect()
-            })
-            .unwrap_or_default();
+            });
         let at = |name: &str| -> Option<&Arc<RdfStore>> {
             match changed.get(name) {
                 None | Some(Partition::Current) => graphs.get(name),
@@ -2510,10 +2504,7 @@ impl RdfStore {
         }
         let triples = match source {
             None => self.triples_latest(),
-            Some(n) => self
-                .graph_latest(n)
-                .map(|g| g.triples_latest())
-                .unwrap_or_default(),
+            Some(n) => self.graph_latest(n).map_or_default(|g| g.triples_latest()),
         };
         let dest_store: Arc<RdfStore> = match dest {
             None => {
@@ -2561,10 +2552,7 @@ impl RdfStore {
         }
         let triples = match source {
             None => self.triples_latest(),
-            Some(n) => self
-                .graph_latest(n)
-                .map(|g| g.triples_latest())
-                .unwrap_or_default(),
+            Some(n) => self.graph_latest(n).map_or_default(|g| g.triples_latest()),
         };
         match dest {
             None => {

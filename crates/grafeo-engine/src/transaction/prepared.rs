@@ -81,8 +81,7 @@ impl<'a> PreparedCommit<'a> {
         // change set.
         let (nodes_written, edges_written) = session
             .current_changes()
-            .map(|changes| changes.written_entities())
-            .unwrap_or_default();
+            .map_or_default(|changes| changes.written_entities());
 
         let info = CommitInfo {
             txn_id: transaction_id,

@@ -83,8 +83,7 @@ fn expected() -> Vec<(&'static str, Vec<(String, u64)>)> {
         found
             .iter()
             .find(|(asked, _)| *asked == query)
-            .map(|(_, hits)| hits.iter().map(|(owner, _)| owner.as_str()).collect())
-            .unwrap_or_default()
+            .map_or_default(|(_, hits)| hits.iter().map(|(owner, _)| owner.as_str()).collect())
     };
     assert_eq!(owners("柏林"), ["Alix"], "a word inside a Chinese sentence");
     assert_eq!(owners("住在"), Vec::<&str>::new(), "a stop word");

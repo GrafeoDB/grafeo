@@ -636,8 +636,7 @@ impl ChunkedAdjacency {
         let lists = self.lists.read();
         lists
             .get(&src)
-            .map(|list| list.neighbors().collect())
-            .unwrap_or_default()
+            .map_or_default(|list| list.neighbors().collect())
     }
 
     /// Returns all (neighbor, edge_id) pairs for outgoing edges from a node.
@@ -648,10 +647,7 @@ impl ChunkedAdjacency {
     #[must_use]
     pub fn edges_from(&self, src: NodeId) -> Vec<(NodeId, EdgeId)> {
         let lists = self.lists.read();
-        lists
-            .get(&src)
-            .map(|list| list.iter().collect())
-            .unwrap_or_default()
+        lists.get(&src).map_or_default(|list| list.iter().collect())
     }
 
     /// Returns the out-degree of a node (number of outgoing edges).
@@ -730,8 +726,7 @@ impl ChunkedAdjacency {
         let lists = self.lists.read();
         lists
             .get(&src)
-            .map(|list| list.destinations_in_range(min_dst, max_dst))
-            .unwrap_or_default()
+            .map_or_default(|list| list.destinations_in_range(min_dst, max_dst))
     }
 
     /// Clears all adjacency lists.

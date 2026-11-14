@@ -55,7 +55,7 @@ fn output_types(
     entity_column: usize,
     entity: LogicalType,
 ) -> Vec<LogicalType> {
-    let mut input = chunk.map(DataChunk::column_types).unwrap_or_default();
+    let mut input = chunk.map_or_default(DataChunk::column_types);
     input.truncate(declared.len());
     let mut types = copied_column_types(&input, declared);
     types.extend(declared.iter().skip(input.len()).cloned());

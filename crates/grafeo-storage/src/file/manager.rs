@@ -3084,8 +3084,7 @@ mod tests {
         fn write_to(&self, sink: &mut dyn SectionSink) -> Result<()> {
             let previous: Vec<ChunkMeta> = sink
                 .previous()
-                .map(|(_, source)| source.chunks().to_vec())
-                .unwrap_or_default();
+                .map_or_default(|(_, source)| source.chunks().to_vec());
             for (column, bytes) in &self.chunks {
                 let meta = ChunkMeta::column(0, *column, 0, 1, 0);
                 match previous.iter().position(|old| *old == meta) {
@@ -3394,8 +3393,7 @@ mod tests {
         fn write_to(&self, sink: &mut dyn SectionSink) -> Result<()> {
             let previous: Vec<ChunkMeta> = sink
                 .previous()
-                .map(|(_, source)| source.chunks().to_vec())
-                .unwrap_or_default();
+                .map_or_default(|(_, source)| source.chunks().to_vec());
             for (column, fill) in &self.chunks {
                 let meta = ChunkMeta::column(0, *column, 0, 1, *fill);
                 match previous.iter().position(|old| *old == meta) {

@@ -535,8 +535,7 @@ impl WalScan {
         let from_lsn = options.from_lsn;
         let dir = segments
             .first()
-            .map(|source| source.path.clone())
-            .unwrap_or_default();
+            .map_or_default(|source| source.path.clone());
         if options.salvage {
             return Err(WalError::RegionSource {
                 path: dir,

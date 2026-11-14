@@ -210,19 +210,15 @@ fn a_transaction_reads_its_own_rdf_writes_and_others_do_not() {
 
 /// The triples of the named graph `graph` as `[subject]`, sorted.
 fn subjects_in(db: &GrafeoDB, graph: &str) -> Vec<String> {
-    let mut subjects: Vec<String> = db
-        .rdf_store()
-        .graph_latest(graph)
-        .map(|graph| {
-            graph
-                .triples(&grafeo_core::graph::rdf::RdfView::latest(
-                    grafeo_core::graph::rdf::LatestUse::Test,
-                ))
-                .iter()
-                .map(|triple| triple.subject().to_string())
-                .collect()
-        })
-        .unwrap_or_default();
+    let mut subjects: Vec<String> = db.rdf_store().graph_latest(graph).map_or_default(|graph| {
+        graph
+            .triples(&grafeo_core::graph::rdf::RdfView::latest(
+                grafeo_core::graph::rdf::LatestUse::Test,
+            ))
+            .iter()
+            .map(|triple| triple.subject().to_string())
+            .collect()
+    });
     subjects.sort();
     subjects
 }

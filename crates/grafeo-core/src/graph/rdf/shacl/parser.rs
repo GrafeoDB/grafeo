@@ -639,8 +639,7 @@ fn parse_closed_constraint(graph: GraphAt<'_>, shape_id: &Term, constraints: &mu
         let ignored = graph
             .find(&pat(Some(shape_id), Some(&ignored_pred), None))
             .first()
-            .map(|t| collect_rdf_list(graph, t.object()))
-            .unwrap_or_default();
+            .map_or_default(|t| collect_rdf_list(graph, t.object()));
         constraints.push(Constraint::Closed {
             ignored_properties: ignored,
         });

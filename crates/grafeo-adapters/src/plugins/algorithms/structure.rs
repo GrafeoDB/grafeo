@@ -701,8 +701,7 @@ pub(crate) fn ktruss_decomposition_on(
             // decrement support of edges (u, w) and (v, w).
             let u_nb: Vec<NodeId> = neighbors
                 .get(&u)
-                .map(|s| s.iter().copied().collect())
-                .unwrap_or_default();
+                .map_or_default(|s| s.iter().copied().collect());
             let v_nb: FxHashSet<NodeId> = neighbors.get(&v).cloned().unwrap_or_default();
 
             for w in u_nb {

@@ -485,8 +485,7 @@ impl Session {
     fn reachable_named_graphs(&self) -> Vec<(String, Arc<RowGroupStore>)> {
         let mut graphs: Vec<(String, Arc<RowGroupStore>)> = self
             .root_store()
-            .map(|root| root.graph_names())
-            .unwrap_or_default()
+            .map_or_default(|root| root.graph_names())
             .into_iter()
             .filter_map(|name| self.named_graph(&name).map(|graph| (name, graph)))
             .collect();

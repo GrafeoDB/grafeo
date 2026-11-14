@@ -163,8 +163,7 @@ impl super::GrafeoDB {
 
         let (store, indexes, mvcc, string_pool) = self
             .root_store()
-            .map(|store| store.counted_breakdown())
-            .unwrap_or_default();
+            .map_or_default(|store| store.counted_breakdown());
 
         let (parsed_bytes, optimized_bytes, cached_plan_count) =
             self.query_cache.heap_memory_bytes();

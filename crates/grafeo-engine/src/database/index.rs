@@ -196,9 +196,7 @@ pub(crate) fn listed_indexes(
     // Whether a definition of one of `kinds` covers `property` (on `label`, when given). An
     // index on every label has a definition on any label, one a file made before indexes went
     // per label, unless an index of its own stands for that definition.
-    let on_label = store
-        .map(RowGroupStore::label_index_entries)
-        .unwrap_or_default();
+    let on_label = store.map_or_default(RowGroupStore::label_index_entries);
     let covers_every_label = |property: &str| {
         listed.iter().any(|index| {
             matches!(index.kind, IndexType::Hash | IndexType::BTree)

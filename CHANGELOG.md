@@ -8,6 +8,7 @@ Performance release: faster queries, a memory limit that holds, and fixes for th
 
 ### Changed
 
+- **SPARQL graph operations in a transaction** ([#718](https://github.com/GrafeoDB/grafeo/issues/718)): `CREATE`, `DROP`, `CLEAR`, `COPY`, `MOVE` and `ADD` apply at the commit in order with the transaction's triple updates, and its later statements see them; 0.6.2 refused any SPARQL statement after one with `GRAFEO-T004`. Graph operations on different graphs, or a graph operation and a triple update in one graph, no longer conflict; two transactions changing one graph still fail with `GRAFEO-T001`.
 - **The per-query memory limit covers every operator that holds rows** ([#674](https://github.com/GrafeoDB/grafeo/issues/674)): `Config::with_query_memory_limit` now caps what one statement's sorts, groupings, hash and nested-loop joins, distincts, set operations, top-k heaps, correlated subqueries, eager reads and stored procedure results hold together, their strings and lists included, where it covered sorts and groupings only. At the cap a sort spills first; a grouping and the others fail with `GRAFEO-S001` naming the limit, and the statement changes nothing.
 - **SPARQL reads at a viewing epoch are refused**: with `set_viewing_epoch` set, a SPARQL query or SHACL validation fails with `GRAFEO-Q004` (RDF data keeps no history) instead of reading the present.
 

@@ -14,6 +14,7 @@ Performance release: faster queries, a memory limit that holds, and fixes for th
 
 ### Changed
 
+- **The documentation has a new structure**: its pages are grouped in seven sections, and every old link redirects to its new page.
 - **A path search over its budget fails with `GRAFEO-S001`** ([#492](https://github.com/GrafeoDB/grafeo/issues/492)): it names the path search budget and its setting, in GQL, Cypher and SPARQL; it was `GRAFEO-Q006`. An RDF property path reads the same budget as the others, no longer narrowed to the memory free when it was planned.
 - **The plan cache is bounded by bytes and reported deeply** ([#674](https://github.com/GrafeoDB/grafeo/issues/674)): it held 1,000 plans whatever their size, and `memory_usage()` counted only its map. Now one byte bound holds parsed and optimized plans, a plan larger than the bound runs uncached, a repeated statement shares the cached plan instead of copying it, and `memory_usage().caches` reports what the plans hold plus `plan_cache_limit_bytes`.
 - **A standalone type a graph type lists stays in force** ([#764](https://github.com/GrafeoDB/grafeo/issues/764)): a type made with `CREATE NODE TYPE` or `CREATE EDGE TYPE` keeps applying by its label in every graph once a graph type lists it, and also in that graph type's graphs, which reverses 0.6.2 for this case; `DROP GRAPH TYPE` leaves it, `DROP NODE TYPE` of it is refused while a graph type lists it, and a pattern may name it only as it is. Types a graph type declares itself, and files in which 0.6.2 already took a type over, keep the 0.6.2 rule.

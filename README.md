@@ -1,8 +1,8 @@
 <picture>
-  <source media="(max-width: 556px) and (prefers-color-scheme: dark), (min-width: 768px) and (max-width: 844px) and (prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/GrafeoDB/grafeo/main/.github/readme/header-narrow-dark.svg">
-  <source media="(max-width: 556px), (min-width: 768px) and (max-width: 844px)" srcset="https://raw.githubusercontent.com/GrafeoDB/grafeo/main/.github/readme/header-narrow-light.svg">
-  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/GrafeoDB/grafeo/main/.github/readme/header-dark.svg">
-  <img alt="Grafeo: The embeddable graph database, written in Rust." src="https://raw.githubusercontent.com/GrafeoDB/grafeo/main/.github/readme/header-light.svg" width="100%">
+  <source media="(max-width: 556px) and (prefers-color-scheme: dark), (min-width: 768px) and (max-width: 844px) and (prefers-color-scheme: dark)" srcset=".github/readme/header-narrow-dark.svg">
+  <source media="(max-width: 556px), (min-width: 768px) and (max-width: 844px)" srcset=".github/readme/header-narrow-light.svg">
+  <source media="(prefers-color-scheme: dark)" srcset=".github/readme/header-dark.svg">
+  <img alt="Grafeo: The embeddable graph database, written in Rust." src=".github/readme/header-light.svg" width="100%">
 </picture>
 
 [![CI](https://github.com/GrafeoDB/grafeo/actions/workflows/ci.yml/badge.svg?branch=main&event=push)](https://github.com/GrafeoDB/grafeo/actions/workflows/ci.yml?query=branch%3Amain+event%3Apush)
@@ -193,7 +193,7 @@ dotnet add package Grafeo
 ```yaml
 # pubspec.yaml
 dependencies:
-  grafeo: ^0.6.2
+  grafeo: ^0.6.3
 ```
 
 ### Python

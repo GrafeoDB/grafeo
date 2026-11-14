@@ -8,12 +8,18 @@ Performance release: faster queries, a memory limit that holds, and fixes for th
 
 ### Changed
 
+- **Conflicting SPARQL triple updates fail at commit** ([#718](https://github.com/GrafeoDB/grafeo/issues/718)): when two transactions write the same triple in one graph and one of them deletes it, the second to commit fails with `GRAFEO-T001` and is rolled back; both committed before, so a delete could silently undo the other's insert. Two inserts of one triple both commit.
 - **SPARQL graph operations in a transaction** ([#718](https://github.com/GrafeoDB/grafeo/issues/718)): `CREATE`, `DROP`, `CLEAR`, `COPY`, `MOVE` and `ADD` apply at the commit in order with the transaction's triple updates, and its later statements see them; 0.6.2 refused any SPARQL statement after one with `GRAFEO-T004`. Graph operations on different graphs, or a graph operation and a triple update in one graph, no longer conflict; two transactions changing one graph still fail with `GRAFEO-T001`.
 - **The per-query memory limit covers every operator that holds rows** ([#674](https://github.com/GrafeoDB/grafeo/issues/674)): `Config::with_query_memory_limit` now caps what one statement's sorts, groupings, hash and nested-loop joins, distincts, set operations, top-k heaps, correlated subqueries, eager reads and stored procedure results hold together, their strings and lists included, where it covered sorts and groupings only. At the cap a sort spills first; a grouping and the others fail with `GRAFEO-S001` naming the limit, and the statement changes nothing.
 - **SPARQL reads at a viewing epoch are refused**: with `set_viewing_epoch` set, a SPARQL query or SHACL validation fails with `GRAFEO-Q004` (RDF data keeps no history) instead of reading the present.
 
+### Deprecated
+
+- **`GrafeoDB::rdf_store()`**: writes through the RDF store bypass transactions and snapshot reads; use SPARQL updates in a session or transaction, or `batch_insert_rdf`. Removed in 0.7.0.
+
 ### Fixed
 
+- **SPARQL reads in a transaction are snapshot isolated** ([#718](https://github.com/GrafeoDB/grafeo/issues/718)): every SPARQL query in a transaction reads the triples and named graphs as they were when the transaction began, with its own updates, at the same point as its GQL and Cypher reads; an auto-commit query reads one committed state for its whole run. It saw triples, graphs and clears that other sessions committed meanwhile.
 - **RDF in checkpoints, copies and exports is the epoch's** ([#718](https://github.com/GrafeoDB/grafeo/issues/718)): a checkpoint, `save`, a copy or `export_snapshot` that runs while SPARQL updates commit writes the RDF triples and named graphs as of its epoch, with commits going on while it writes. `rdf_schema()` lists the named graphs (it returned an empty list) and reads at one epoch.
 - **The CLI opens every database the default `grafeo` build writes** ([#763](https://github.com/GrafeoDB/grafeo/issues/763)): `cargo install grafeo-cli` and the pre-built binaries now have the same features, vector, text and hybrid search, change data capture and graph algorithms included, so a file with a vector or text index opens. A database holding data the build cannot read, such as RDF triples, is refused with the `cargo install grafeo-cli --features ...` line that adds the feature.
 - **SQL/PGQ ranges on one-kind columns use the range scan again**: a `<`, `<=`, `>`, `>=` or `BETWEEN` on a property whose values are all of the bound's kind reads its index by range and skips chunks by their stored bounds, as in 0.6.1. A column holding values of several kinds still scans and raises 22G04.

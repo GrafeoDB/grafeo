@@ -823,6 +823,82 @@ jobs:
           packages-dir: dist/
           skip-existing: true
 
+  # Publish the demo dataset to npm (@grafeo-db/datasets) at the tag's version. Runs once the
+  # repository variable PUBLISH_DATASETS is 'true' (set after registering the trusted
+  # publisher); until then the job is skipped.
+  publish-datasets-npm:
+    name: Publish @grafeo-db/datasets
+    runs-on: ubuntu-latest
+    needs: create-release
+    if: vars.PUBLISH_DATASETS == 'true'
+    environment: npm
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Update npm (trusted publishing needs 11.5.1 or later)
+        run: npm install -g npm@^11.5.1
+
+      - name: Set the version from the tag
+        run: node datasets/tools/set-version.mjs "${GITHUB_REF_NAME#v}"
+
+      - name: Stage the package
+        run: node datasets/tools/stage.mjs
+
+      - name: Publish @grafeo-db/datasets
+        working-directory: packages/grafeo-datasets-npm
+        run: bash "$GITHUB_WORKSPACE/scripts/npm-publish.sh"
+
+  # Publish the demo dataset to PyPI (grafeo-datasets) at the tag's version, under the same
+  # repository variable as the npm package.
+  publish-datasets-python:
+    name: Publish grafeo-datasets to PyPI
+    runs-on: ubuntu-latest
+    needs: create-release
+    if: vars.PUBLISH_DATASETS == 'true'
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+
+      - name: Set the version from the tag
+        run: node datasets/tools/set-version.mjs "${GITHUB_REF_NAME#v}"
+
+      - name: Stage the package
+        run: node datasets/tools/stage.mjs
+
+      - name: Build the wheel and source distribution
+        working-directory: packages/grafeo-datasets-python
+        run: |
+          pip install build twine
+          python -m build --outdir ../../dist-datasets
+          twine check ../../dist-datasets/*
+          ls -l ../../dist-datasets
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist-datasets/
+          skip-existing: true
+
   # Notify Discord about the new release
   notify-discord:
     name: Discord Release Notification

@@ -1,0 +1,3 @@
+node_modules/
+# The tools' lockfile is tracked, unlike the repository's other lockfiles.
+!package-lock.json

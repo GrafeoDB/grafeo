@@ -12,6 +12,7 @@ SPARQL transactions release: SPARQL in a transaction reads one snapshot, conflic
 - **`Config::with_plan_cache_limit`** ([#674](https://github.com/GrafeoDB/grafeo/issues/674)): bounds the plan cache in bytes, by a deep estimate of each plan. The default is a sixty-fourth of the memory limit, at least 4 MiB and at most 64 MiB; 0 turns the cache off.
 - **`validate()` names the nodes a listed type would refuse** ([#764](https://github.com/GrafeoDB/grafeo/issues/764)): the warning `LISTED_TYPE_ROWS` gives, per node type and graph not bound to a graph type that lists it, the count and the first ids of the nodes that break the type, with the steps to make it a type of its own again. Run it after upgrading a file in which 0.6.2 took a standalone type over.
 - **Hybrid search takes a beam width** ([grafeo-server#85](https://github.com/GrafeoDB/grafeo-server/issues/85)): `GrafeoDB::hybrid_search_with` with `HybridSearchOptions` sets the vector half's `ef`, as `vector_search` does, and `grafeo::FusionMethod` names the fusion both take; `hybrid_search` is unchanged.
+- **A Silicon Valley demo dataset ships on npm and PyPI**: `@grafeo-db/datasets` and `grafeo-datasets` hold one 64-node graph after the HBO series Silicon Valley, as nodes and edges, a timeline, GQL, Cypher, Turtle and MiniLM vectors (384 dimensions). Both follow the engine's version.
 
 ### Changed
 

@@ -1,0 +1,63 @@
+{
+  "name": "@grafeo-db/datasets",
+  "version": "0.6.3",
+  "description": "The Silicon Valley demo dataset for Grafeo: nodes and edges, a timeline, GQL, Cypher, Turtle and MiniLM vectors.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/GrafeoDB/grafeo",
+    "directory": "packages/grafeo-datasets-npm"
+  },
+  "homepage": "https://grafeo.dev",
+  "keywords": [
+    "grafeo",
+    "graph",
+    "dataset",
+    "demo",
+    "gql",
+    "cypher",
+    "rdf",
+    "vectors"
+  ],
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "types": "./types/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./silicon-valley/gql": {
+      "types": "./types/silicon-valley/gql.d.ts",
+      "default": "./dist/silicon-valley/gql.js"
+    },
+    "./silicon-valley/gql-with-vectors": {
+      "types": "./types/silicon-valley/gql-with-vectors.d.ts",
+      "default": "./dist/silicon-valley/gql-with-vectors.js"
+    },
+    "./silicon-valley/cypher": {
+      "types": "./types/silicon-valley/cypher.d.ts",
+      "default": "./dist/silicon-valley/cypher.js"
+    },
+    "./silicon-valley/turtle": {
+      "types": "./types/silicon-valley/turtle.d.ts",
+      "default": "./dist/silicon-valley/turtle.js"
+    },
+    "./silicon-valley/vectors": {
+      "types": "./types/silicon-valley/vectors.d.ts",
+      "default": "./dist/silicon-valley/vectors.js"
+    }
+  },
+  "files": [
+    "dist/",
+    "types/",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "prepack": "node ../../datasets/tools/stage.mjs",
+    "test": "node --test \"test/*.test.mjs\""
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

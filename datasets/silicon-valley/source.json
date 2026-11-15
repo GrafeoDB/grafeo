@@ -1,0 +1,1553 @@
+{
+  "name": "silicon-valley",
+  "nodes": [
+    {
+      "key": "richard-hendricks",
+      "label": "Person",
+      "name": "Richard Hendricks",
+      "description": "A gifted and anxious programmer who left Hooli to found Pied Piper on the strength of middle-out.",
+      "props": {
+        "hometown": "Tulsa",
+        "indentation": "tabs"
+      }
+    },
+    {
+      "key": "erlich-bachman",
+      "label": "Person",
+      "name": "Erlich Bachman",
+      "description": "The owner of the hacker hostel and self-appointed mentor to its residents, still living off the sale of Aviato.",
+      "props": {
+        "title": "Head of Incubation",
+        "catchphrase": "Aviato"
+      }
+    },
+    {
+      "key": "bertram-gilfoyle",
+      "label": "Person",
+      "name": "Bertram Gilfoyle",
+      "description": "Pied Piper's systems architect: dry, unhurried and sure of himself, he trusts the server he built more than most people.",
+      "props": {
+        "title": "Systems architect"
+      }
+    },
+    {
+      "key": "dinesh-chugtai",
+      "label": "Person",
+      "name": "Dinesh Chugtai",
+      "description": "A Pied Piper engineer who is good at his job and keen to be seen as better than Gilfoyle, which rarely works out.",
+      "props": {
+        "title": "Engineer",
+        "jewellery": "gold chain"
+      }
+    },
+    {
+      "key": "jared-dunn",
+      "label": "Person",
+      "name": "Jared Dunn",
+      "description": "Pied Piper's head of business development, who left Hooli to join Richard and is loyal beyond reason. He was renamed Jared at Hooli, and the name stuck.",
+      "props": {
+        "born_as": "Donald Dunn"
+      }
+    },
+    {
+      "key": "nelson-bighetti",
+      "label": "Person",
+      "name": "Nelson \"Big Head\" Bighetti",
+      "description": "Richard's oldest friend, whose career keeps rising with very little effort on his part.",
+      "props": {
+        "nickname": "Big Head",
+        "severance_usd": 20000000
+      }
+    },
+    {
+      "key": "jian-yang",
+      "label": "Person",
+      "name": "Jian-Yang",
+      "description": "An app developer who lives at the hacker hostel, ignores Erlich's house rules and outlasts most of the other residents.",
+      "props": {}
+    },
+    {
+      "key": "gavin-belson",
+      "label": "Person",
+      "name": "Gavin Belson",
+      "description": "The founder and CEO of Hooli, who wants to be seen as a visionary and takes every loss to Pied Piper personally.",
+      "props": {
+        "pledge": "Tethics"
+      }
+    },
+    {
+      "key": "peter-gregory",
+      "label": "Person",
+      "name": "Peter Gregory",
+      "description": "The founder of Raviga Capital and Pied Piper's first investor, who reads markets through patterns nobody else notices.",
+      "props": {}
+    },
+    {
+      "key": "monica-hall",
+      "label": "Person",
+      "name": "Monica Hall",
+      "description": "An investor who championed Pied Piper inside Raviga Capital and later co-founded Bream-Hall with Laurie Bream.",
+      "props": {}
+    },
+    {
+      "key": "laurie-bream",
+      "label": "Person",
+      "name": "Laurie Bream",
+      "description": "Raviga Capital's managing partner after Peter Gregory, who decides by the numbers and keeps small talk to a minimum.",
+      "props": {}
+    },
+    {
+      "key": "russ-hanneman",
+      "label": "Person",
+      "name": "Russ Hanneman",
+      "description": "A billionaire investor who made his fortune by putting radio on the internet, and who makes sure everyone knows it.",
+      "props": {
+        "net_worth_commas": 3,
+        "roi_stands_for": "Radio on internet"
+      }
+    },
+    {
+      "key": "jack-barker",
+      "label": "Person",
+      "name": "Jack Barker",
+      "description": "A veteran executive brought in as Pied Piper's CEO, who has a management diagram for every situation.",
+      "props": {
+        "nickname": "Action Jack",
+        "management_theory": "Conjoined Triangles of Success"
+      }
+    },
+    {
+      "key": "carla-walton",
+      "label": "Person",
+      "name": "Carla Walton",
+      "description": "A senior engineer who joined Pied Piper in 2016 and says plainly what she thinks of everyone's code.",
+      "props": {}
+    },
+    {
+      "key": "denpok",
+      "label": "Person",
+      "name": "Denpok",
+      "description": "Gavin Belson's spiritual advisor, paid to keep the head of Hooli calm and on message.",
+      "props": {}
+    },
+    {
+      "key": "hoover",
+      "label": "Person",
+      "name": "Hoover",
+      "description": "Hooli's head of security, loyal to Gavin Belson and very hard to surprise.",
+      "props": {}
+    },
+    {
+      "key": "ed-chen",
+      "label": "Person",
+      "name": "Ed Chen",
+      "description": "An associate at Raviga Capital who works on the firm's deals under Laurie Bream.",
+      "props": {}
+    },
+    {
+      "key": "ron-laflamme",
+      "label": "Person",
+      "name": "Ron LaFlamme",
+      "description": "Pied Piper's lawyer, who handles its contracts, its name and its frequent legal scares.",
+      "props": {}
+    },
+    {
+      "key": "keenan-feldspar",
+      "label": "Person",
+      "name": "Keenan Feldspar",
+      "description": "A virtual reality founder whose headset demos win investors over with ease.",
+      "props": {}
+    },
+    {
+      "key": "winnie",
+      "label": "Person",
+      "name": "Winnie",
+      "description": "A developer Richard dated until it emerged that she indents her code with spaces.",
+      "props": {
+        "indentation": "spaces"
+      }
+    },
+    {
+      "key": "pied-piper",
+      "label": "Company",
+      "name": "Pied Piper",
+      "description": "Richard Hendricks's startup, founded in March 2014 to turn middle-out into a business.",
+      "props": {
+        "founded": "2014-03",
+        "name_bought_from": "a sprinkler company in Gilroy",
+        "rejected_offer_usd": 10000000
+      }
+    },
+    {
+      "key": "hooli",
+      "label": "Company",
+      "name": "Hooli",
+      "description": "A large technology company led by Gavin Belson, with a campus in Mountain View and a product for nearly everything.",
+      "props": {
+        "motto": "Making the world a better place"
+      }
+    },
+    {
+      "key": "hooli-xyz",
+      "label": "Company",
+      "name": "Hooli XYZ",
+      "description": "Hooli's moonshot division, which Big Head was put in charge of by mistake.",
+      "props": {}
+    },
+    {
+      "key": "raviga",
+      "label": "Company",
+      "name": "Raviga Capital",
+      "description": "The venture capital firm Peter Gregory founded, with a long and uneasy stake in Pied Piper.",
+      "props": {}
+    },
+    {
+      "key": "aviato",
+      "label": "Company",
+      "name": "Aviato",
+      "description": "Erlich Bachman's first startup, a flight-data company whose sale paid for his house.",
+      "props": {}
+    },
+    {
+      "key": "bachmanity",
+      "label": "Company",
+      "name": "Bachmanity",
+      "description": "An investment company Erlich Bachman and Big Head started in 2016 with Big Head's Hooli severance.",
+      "props": {
+        "founded": "2016-04"
+      }
+    },
+    {
+      "key": "endframe",
+      "label": "Company",
+      "name": "Endframe",
+      "description": "A rival startup that tried to win Pied Piper's market with its own version of the technology.",
+      "props": {}
+    },
+    {
+      "key": "bream-hall",
+      "label": "Company",
+      "name": "Bream-Hall",
+      "description": "The venture firm Laurie Bream and Monica Hall founded in 2018 after leaving Raviga Capital.",
+      "props": {
+        "founded": "2018-03"
+      }
+    },
+    {
+      "key": "tres-commas",
+      "label": "Company",
+      "name": "Tres Commas",
+      "description": "Russ Hanneman's brand, named for the three commas in a billion dollars.",
+      "props": {}
+    },
+    {
+      "key": "pied-piper-app",
+      "label": "Product",
+      "name": "Pied Piper platform",
+      "description": "Pied Piper's platform for storing and streaming files at a fraction of their original size.",
+      "props": {}
+    },
+    {
+      "key": "pied-piper-music",
+      "label": "Product",
+      "name": "Pied Piper music app",
+      "description": "Richard's first product: a website that checks a songwriter's melody against existing music for copyright matches.",
+      "props": {}
+    },
+    {
+      "key": "nucleus",
+      "label": "Product",
+      "name": "Nucleus",
+      "description": "Hooli's rival to Pied Piper's platform, built in a hurry by a very large team. It never caught up on the Weissman scale.",
+      "props": {
+        "weissman_score": 2.89
+      }
+    },
+    {
+      "key": "the-box",
+      "label": "Product",
+      "name": "The Box (Signature Edition)",
+      "description": "A server appliance for companies that want their data in a box they can see. The Signature Edition carries Gavin Belson's signature.",
+      "props": {
+        "signed_by": "Gavin Belson",
+        "first_pitched_at": "Pied Piper"
+      }
+    },
+    {
+      "key": "pipernet",
+      "label": "Product",
+      "name": "PiperNet",
+      "description": "Pied Piper's decentralised internet, run on the phones of its users instead of on central servers.",
+      "props": {}
+    },
+    {
+      "key": "piper-chat",
+      "label": "Product",
+      "name": "PiperChat",
+      "description": "A video chat app Pied Piper launched in 2017 that grew fast, including among users too young to sign up.",
+      "props": {
+        "potential_fines_usd": 21000000000
+      }
+    },
+    {
+      "key": "pipercoin",
+      "label": "Product",
+      "name": "PiperCoin",
+      "description": "Pied Piper's own cryptocurrency, created to raise money for PiperNet.",
+      "props": {}
+    },
+    {
+      "key": "seefood",
+      "label": "Product",
+      "name": "SeeFood",
+      "description": "An app meant to identify any food from a photo. Its only working model can tell whether a photo shows a hot dog.",
+      "props": {
+        "working_models": 1
+      }
+    },
+    {
+      "key": "not-hotdog",
+      "label": "Product",
+      "name": "Not Hotdog",
+      "description": "An app that recognises hot dogs in photos and labels everything else as not hot dog.",
+      "props": {
+        "classes": 2
+      }
+    },
+    {
+      "key": "tres-commas-tequila",
+      "label": "Product",
+      "name": "Tres Commas tequila",
+      "description": "A tequila sold under Russ Hanneman's Tres Commas brand, with a label as loud as its owner.",
+      "props": {}
+    },
+    {
+      "key": "hooli-phone",
+      "label": "Product",
+      "name": "Hooli Phone",
+      "description": "Hooli's smartphone, sold with Hooli's own apps already on it.",
+      "props": {}
+    },
+    {
+      "key": "russ-car",
+      "label": "Product",
+      "name": "Russ Hanneman's car",
+      "description": "A sports car chosen so that nobody in the car park misses Russ Hanneman's arrival.",
+      "props": {
+        "doors": "open upwards"
+      }
+    },
+    {
+      "key": "bitcoin-alert",
+      "label": "Product",
+      "name": "Gilfoyle's Bitcoin alert",
+      "description": "A script on Gilfoyle's computer that plays a death metal song whenever the price of Bitcoin crosses a set level.",
+      "props": {
+        "trigger": "Bitcoin price crosses a set level"
+      }
+    },
+    {
+      "key": "middle-out",
+      "label": "Technology",
+      "name": "Middle-out compression",
+      "description": "A lossless compression algorithm that works on data from the middle outwards. It holds the record Weissman score of 5.2.",
+      "props": {
+        "weissman_score": 5.2,
+        "inventor": "Richard Hendricks"
+      }
+    },
+    {
+      "key": "blockchain",
+      "label": "Technology",
+      "name": "Blockchain",
+      "description": "A shared ledger kept in step by many computers, so that no single owner controls the record.",
+      "props": {}
+    },
+    {
+      "key": "anton",
+      "label": "AI",
+      "name": "Anton",
+      "description": "Gilfoyle's home-built server, which ran Pied Piper's early infrastructure and which he treats as a colleague.",
+      "props": {
+        "form": "server rack"
+      }
+    },
+    {
+      "key": "son-of-anton",
+      "label": "AI",
+      "name": "Son of Anton",
+      "description": "An AI that Gilfoyle trained on Anton's code to write and fix software. It reaches every goal by the shortest route, whether or not anyone wanted that route.",
+      "props": {
+        "bug_fix_strategy": "delete the code",
+        "meat_ordered_for_lunch_lb": 4000
+      }
+    },
+    {
+      "key": "fiona",
+      "label": "AI",
+      "name": "Fiona",
+      "description": "A humanoid robot with an emotional AI, built by a robotics startup to hold a natural conversation.",
+      "props": {}
+    },
+    {
+      "key": "jian-yangs-fridge",
+      "label": "AI",
+      "name": "Jian-Yang's fridge",
+      "description": "A smart fridge with a screen and a voice, owned by Jian-Yang and connected to more of the house network than it needs.",
+      "props": {
+        "talks": true
+      }
+    },
+    {
+      "key": "hacker-hostel",
+      "label": "Place",
+      "name": "Hacker Hostel",
+      "description": "Erlich Bachman's house in Palo Alto, run as a startup incubator: residents get a room, and he gets ten percent of their companies.",
+      "props": {
+        "terms": "a room for ten percent of the company"
+      }
+    },
+    {
+      "key": "erlichs-palapa",
+      "label": "Place",
+      "name": "Erlich's palapa",
+      "description": "A thatched shade hut beside the hacker hostel's pool, Erlich's pride and one of his larger expenses.",
+      "props": {
+        "roof": "thatched"
+      }
+    },
+    {
+      "key": "pied-piper-office",
+      "label": "Place",
+      "name": "Pied Piper office",
+      "description": "Pied Piper's own office in Mountain View, its base since it left the incubator in September 2014.",
+      "props": {}
+    },
+    {
+      "key": "hooli-campus",
+      "label": "Place",
+      "name": "Hooli campus",
+      "description": "Hooli's headquarters in Mountain View: glass buildings, company bikes and free food.",
+      "props": {}
+    },
+    {
+      "key": "hooli-rooftop",
+      "label": "Place",
+      "name": "Hooli rooftop",
+      "description": "A roof on the Hooli campus where employees Hooli would rather not lose are paid to wait for their stock to vest.",
+      "props": {
+        "activity": "rest and vest"
+      }
+    },
+    {
+      "key": "sand-hill-road",
+      "label": "Place",
+      "name": "Sand Hill Road",
+      "description": "The road in Menlo Park where venture firms keep their offices, Raviga Capital and Bream-Hall among them.",
+      "props": {}
+    },
+    {
+      "key": "palo-alto",
+      "label": "City",
+      "name": "Palo Alto",
+      "description": "A city on the San Francisco Peninsula and home to Erlich Bachman's hacker hostel.",
+      "props": {}
+    },
+    {
+      "key": "mountain-view",
+      "label": "City",
+      "name": "Mountain View",
+      "description": "A city in Silicon Valley, home to the Hooli campus and, from September 2014, Pied Piper's office.",
+      "props": {}
+    },
+    {
+      "key": "menlo-park",
+      "label": "City",
+      "name": "Menlo Park",
+      "description": "A city on the Peninsula where venture firms line Sand Hill Road.",
+      "props": {}
+    },
+    {
+      "key": "cupertino",
+      "label": "City",
+      "name": "Cupertino",
+      "description": "A city in Silicon Valley where Endframe has its office.",
+      "props": {}
+    },
+    {
+      "key": "san-francisco",
+      "label": "City",
+      "name": "San Francisco",
+      "description": "The city at the north end of the Peninsula, where Bachmanity keeps its office and TechCrunch Disrupt is held.",
+      "props": {}
+    },
+    {
+      "key": "los-altos",
+      "label": "City",
+      "name": "Los Altos",
+      "description": "A quiet, wealthy town in Silicon Valley, home to Russ Hanneman and Ed Chen.",
+      "props": {}
+    },
+    {
+      "key": "techcrunch-disrupt",
+      "label": "Event",
+      "name": "TechCrunch Disrupt",
+      "description": "A startup competition in San Francisco where Pied Piper beat Hooli's Nucleus on stage in 2014.",
+      "props": {
+        "prize_usd": 50000
+      }
+    },
+    {
+      "key": "condor-stream",
+      "label": "Event",
+      "name": "The condor egg live stream",
+      "description": "A live video of a condor egg in a remote nest, which Pied Piper streamed to show its platform could carry a large audience.",
+      "props": {}
+    },
+    {
+      "key": "bachmanity-insanity",
+      "label": "Event",
+      "name": "Bachmanity Insanity",
+      "description": "A lavish party Erlich Bachman and Big Head threw for Bachmanity, paid for with much of its money.",
+      "props": {}
+    },
+    {
+      "key": "hooli-con",
+      "label": "Event",
+      "name": "Hooli-Con",
+      "description": "Hooli's own conference, where Gavin Belson presents new products from a very large stage.",
+      "props": {}
+    }
+  ],
+  "edges": [
+    {
+      "type": "KNOWS",
+      "source": "richard-hendricks",
+      "target": "nelson-bighetti",
+      "props": {}
+    },
+    {
+      "type": "KNOWS",
+      "source": "richard-hendricks",
+      "target": "jared-dunn",
+      "props": {}
+    },
+    {
+      "type": "KNOWS",
+      "source": "richard-hendricks",
+      "target": "monica-hall",
+      "props": {}
+    },
+    {
+      "type": "KNOWS",
+      "source": "richard-hendricks",
+      "target": "bertram-gilfoyle",
+      "props": {}
+    },
+    {
+      "type": "KNOWS",
+      "source": "richard-hendricks",
+      "target": "winnie",
+      "props": {}
+    },
+    {
+      "type": "KNOWS",
+      "source": "bertram-gilfoyle",
+      "target": "dinesh-chugtai",
+      "props": {}
+    },
+    {
+      "type": "KNOWS",
+      "source": "dinesh-chugtai",
+      "target": "carla-walton",
+      "props": {}
+    },
+    {
+      "type": "KNOWS",
+      "source": "jared-dunn",
+      "target": "dinesh-chugtai",
+      "props": {}
+    },
+    {
+      "type": "KNOWS",
+      "source": "jian-yang",
+      "target": "erlich-bachman",
+      "props": {}
+    },
+    {
+      "type": "KNOWS",
+      "source": "erlich-bachman",
+      "target": "nelson-bighetti",
+      "props": {}
+    },
+    {
+      "type": "KNOWS",
+      "source": "erlich-bachman",
+      "target": "richard-hendricks",
+      "props": {}
+    },
+    {
+      "type": "KNOWS",
+      "source": "nelson-bighetti",
+      "target": "gavin-belson",
+      "props": {}
+    },
+    {
+      "type": "KNOWS",
+      "source": "gavin-belson",
+      "target": "hoover",
+      "props": {}
+    },
+    {
+      "type": "KNOWS",
+      "source": "gavin-belson",
+      "target": "denpok",
+      "props": {}
+    },
+    {
+      "type": "KNOWS",
+      "source": "gavin-belson",
+      "target": "jack-barker",
+      "props": {}
+    },
+    {
+      "type": "KNOWS",
+      "source": "jack-barker",
+      "target": "laurie-bream",
+      "props": {}
+    },
+    {
+      "type": "KNOWS",
+      "source": "monica-hall",
+      "target": "laurie-bream",
+      "props": {}
+    },
+    {
+      "type": "KNOWS",
+      "source": "monica-hall",
+      "target": "peter-gregory",
+      "props": {}
+    },
+    {
+      "type": "KNOWS",
+      "source": "laurie-bream",
+      "target": "ed-chen",
+      "props": {}
+    },
+    {
+      "type": "KNOWS",
+      "source": "laurie-bream",
+      "target": "keenan-feldspar",
+      "props": {}
+    },
+    {
+      "type": "KNOWS",
+      "source": "peter-gregory",
+      "target": "gavin-belson",
+      "props": {}
+    },
+    {
+      "type": "KNOWS",
+      "source": "russ-hanneman",
+      "target": "richard-hendricks",
+      "props": {}
+    },
+    {
+      "type": "KNOWS",
+      "source": "ron-laflamme",
+      "target": "richard-hendricks",
+      "props": {}
+    },
+    {
+      "type": "KNOWS",
+      "source": "richard-hendricks",
+      "target": "dinesh-chugtai",
+      "props": {}
+    },
+    {
+      "type": "KNOWS",
+      "source": "richard-hendricks",
+      "target": "jian-yang",
+      "props": {}
+    },
+    {
+      "type": "KNOWS",
+      "source": "richard-hendricks",
+      "target": "laurie-bream",
+      "props": {}
+    },
+    {
+      "type": "KNOWS",
+      "source": "erlich-bachman",
+      "target": "bertram-gilfoyle",
+      "props": {}
+    },
+    {
+      "type": "KNOWS",
+      "source": "erlich-bachman",
+      "target": "dinesh-chugtai",
+      "props": {}
+    },
+    {
+      "type": "KNOWS",
+      "source": "erlich-bachman",
+      "target": "jared-dunn",
+      "props": {}
+    },
+    {
+      "type": "KNOWS",
+      "source": "jared-dunn",
+      "target": "bertram-gilfoyle",
+      "props": {}
+    },
+    {
+      "type": "KNOWS",
+      "source": "bertram-gilfoyle",
+      "target": "jian-yang",
+      "props": {}
+    },
+    {
+      "type": "KNOWS",
+      "source": "carla-walton",
+      "target": "richard-hendricks",
+      "props": {}
+    },
+    {
+      "type": "KNOWS",
+      "source": "jack-barker",
+      "target": "richard-hendricks",
+      "props": {}
+    },
+    {
+      "type": "RIVAL_OF",
+      "source": "bertram-gilfoyle",
+      "target": "dinesh-chugtai",
+      "props": {}
+    },
+    {
+      "type": "RIVAL_OF",
+      "source": "dinesh-chugtai",
+      "target": "bertram-gilfoyle",
+      "props": {}
+    },
+    {
+      "type": "RIVAL_OF",
+      "source": "gavin-belson",
+      "target": "richard-hendricks",
+      "props": {}
+    },
+    {
+      "type": "RIVAL_OF",
+      "source": "jian-yang",
+      "target": "erlich-bachman",
+      "props": {}
+    },
+    {
+      "type": "MENTORS",
+      "source": "peter-gregory",
+      "target": "richard-hendricks",
+      "props": {}
+    },
+    {
+      "type": "MENTORS",
+      "source": "erlich-bachman",
+      "target": "richard-hendricks",
+      "props": {}
+    },
+    {
+      "type": "MENTORS",
+      "source": "denpok",
+      "target": "gavin-belson",
+      "props": {}
+    },
+    {
+      "type": "WORKS_AT",
+      "source": "richard-hendricks",
+      "target": "hooli",
+      "props": {
+        "to": "2014-03"
+      }
+    },
+    {
+      "type": "WORKS_AT",
+      "source": "richard-hendricks",
+      "target": "pied-piper",
+      "props": {
+        "role": "CEO",
+        "from": "2014-03",
+        "to": "2015-06"
+      }
+    },
+    {
+      "type": "WORKS_AT",
+      "source": "richard-hendricks",
+      "target": "pied-piper",
+      "props": {
+        "role": "CTO",
+        "from": "2016-04",
+        "to": "2016-05"
+      }
+    },
+    {
+      "type": "WORKS_AT",
+      "source": "richard-hendricks",
+      "target": "pied-piper",
+      "props": {
+        "role": "CEO",
+        "from": "2016-05"
+      }
+    },
+    {
+      "type": "WORKS_AT",
+      "source": "gavin-belson",
+      "target": "hooli",
+      "props": {
+        "role": "CEO"
+      }
+    },
+    {
+      "type": "WORKS_AT",
+      "source": "bertram-gilfoyle",
+      "target": "pied-piper",
+      "props": {
+        "from": "2014-03"
+      }
+    },
+    {
+      "type": "WORKS_AT",
+      "source": "dinesh-chugtai",
+      "target": "pied-piper",
+      "props": {
+        "from": "2014-03"
+      }
+    },
+    {
+      "type": "WORKS_AT",
+      "source": "jared-dunn",
+      "target": "hooli",
+      "props": {
+        "role": "Business development",
+        "to": "2014-04"
+      }
+    },
+    {
+      "type": "WORKS_AT",
+      "source": "jared-dunn",
+      "target": "pied-piper",
+      "props": {
+        "role": "Head of Business Development",
+        "from": "2014-04"
+      }
+    },
+    {
+      "type": "WORKS_AT",
+      "source": "nelson-bighetti",
+      "target": "hooli",
+      "props": {
+        "role": "Engineer",
+        "from": "2014-04",
+        "to": "2016-04"
+      }
+    },
+    {
+      "type": "WORKS_AT",
+      "source": "nelson-bighetti",
+      "target": "hooli-xyz",
+      "props": {
+        "role": "Head of Hooli XYZ",
+        "to": "2016-04"
+      }
+    },
+    {
+      "type": "WORKS_AT",
+      "source": "hoover",
+      "target": "hooli",
+      "props": {
+        "role": "Head of Security"
+      }
+    },
+    {
+      "type": "WORKS_AT",
+      "source": "denpok",
+      "target": "hooli",
+      "props": {
+        "role": "Spiritual Advisor"
+      }
+    },
+    {
+      "type": "WORKS_AT",
+      "source": "jack-barker",
+      "target": "pied-piper",
+      "props": {
+        "role": "CEO",
+        "from": "2016-04",
+        "to": "2016-05"
+      }
+    },
+    {
+      "type": "WORKS_AT",
+      "source": "jack-barker",
+      "target": "hooli",
+      "props": {
+        "role": "Executive"
+      }
+    },
+    {
+      "type": "WORKS_AT",
+      "source": "carla-walton",
+      "target": "pied-piper",
+      "props": {
+        "role": "Engineer",
+        "from": "2016-04"
+      }
+    },
+    {
+      "type": "WORKS_AT",
+      "source": "ron-laflamme",
+      "target": "pied-piper",
+      "props": {
+        "role": "Lawyer",
+        "from": "2014-03"
+      }
+    },
+    {
+      "type": "WORKS_AT",
+      "source": "peter-gregory",
+      "target": "raviga",
+      "props": {
+        "role": "Founder",
+        "to": "2015-04"
+      }
+    },
+    {
+      "type": "WORKS_AT",
+      "source": "monica-hall",
+      "target": "raviga",
+      "props": {
+        "role": "Associate",
+        "to": "2018-03"
+      }
+    },
+    {
+      "type": "WORKS_AT",
+      "source": "monica-hall",
+      "target": "bream-hall",
+      "props": {
+        "role": "Partner",
+        "from": "2018-03"
+      }
+    },
+    {
+      "type": "WORKS_AT",
+      "source": "laurie-bream",
+      "target": "raviga",
+      "props": {
+        "role": "Managing Partner",
+        "from": "2015-04",
+        "to": "2018-03"
+      }
+    },
+    {
+      "type": "WORKS_AT",
+      "source": "laurie-bream",
+      "target": "bream-hall",
+      "props": {
+        "role": "Managing Partner",
+        "from": "2018-03"
+      }
+    },
+    {
+      "type": "WORKS_AT",
+      "source": "ed-chen",
+      "target": "raviga",
+      "props": {
+        "role": "Associate"
+      }
+    },
+    {
+      "type": "FOUNDED",
+      "source": "richard-hendricks",
+      "target": "pied-piper",
+      "props": {
+        "date": "2014-03"
+      }
+    },
+    {
+      "type": "FOUNDED",
+      "source": "gavin-belson",
+      "target": "hooli",
+      "props": {}
+    },
+    {
+      "type": "FOUNDED",
+      "source": "peter-gregory",
+      "target": "raviga",
+      "props": {}
+    },
+    {
+      "type": "FOUNDED",
+      "source": "erlich-bachman",
+      "target": "aviato",
+      "props": {}
+    },
+    {
+      "type": "FOUNDED",
+      "source": "erlich-bachman",
+      "target": "bachmanity",
+      "props": {
+        "date": "2016-04"
+      }
+    },
+    {
+      "type": "FOUNDED",
+      "source": "nelson-bighetti",
+      "target": "bachmanity",
+      "props": {
+        "date": "2016-04"
+      }
+    },
+    {
+      "type": "FOUNDED",
+      "source": "laurie-bream",
+      "target": "bream-hall",
+      "props": {
+        "date": "2018-03"
+      }
+    },
+    {
+      "type": "FOUNDED",
+      "source": "monica-hall",
+      "target": "bream-hall",
+      "props": {
+        "date": "2018-03"
+      }
+    },
+    {
+      "type": "FOUNDED",
+      "source": "russ-hanneman",
+      "target": "tres-commas",
+      "props": {}
+    },
+    {
+      "type": "FOUNDED",
+      "source": "erlich-bachman",
+      "target": "seefood",
+      "props": {
+        "date": "2017-05"
+      }
+    },
+    {
+      "type": "FOUNDED",
+      "source": "jian-yang",
+      "target": "seefood",
+      "props": {
+        "date": "2017-05"
+      }
+    },
+    {
+      "type": "LIVES_IN",
+      "source": "richard-hendricks",
+      "target": "palo-alto",
+      "props": {}
+    },
+    {
+      "type": "LIVES_IN",
+      "source": "bertram-gilfoyle",
+      "target": "palo-alto",
+      "props": {}
+    },
+    {
+      "type": "LIVES_IN",
+      "source": "dinesh-chugtai",
+      "target": "palo-alto",
+      "props": {}
+    },
+    {
+      "type": "LIVES_IN",
+      "source": "jared-dunn",
+      "target": "menlo-park",
+      "props": {}
+    },
+    {
+      "type": "LIVES_IN",
+      "source": "carla-walton",
+      "target": "san-francisco",
+      "props": {}
+    },
+    {
+      "type": "LIVES_IN",
+      "source": "erlich-bachman",
+      "target": "palo-alto",
+      "props": {}
+    },
+    {
+      "type": "LIVES_IN",
+      "source": "jian-yang",
+      "target": "palo-alto",
+      "props": {}
+    },
+    {
+      "type": "LIVES_IN",
+      "source": "nelson-bighetti",
+      "target": "palo-alto",
+      "props": {}
+    },
+    {
+      "type": "LIVES_IN",
+      "source": "gavin-belson",
+      "target": "mountain-view",
+      "props": {}
+    },
+    {
+      "type": "LIVES_IN",
+      "source": "hoover",
+      "target": "mountain-view",
+      "props": {}
+    },
+    {
+      "type": "LIVES_IN",
+      "source": "denpok",
+      "target": "mountain-view",
+      "props": {}
+    },
+    {
+      "type": "LIVES_IN",
+      "source": "jack-barker",
+      "target": "san-francisco",
+      "props": {}
+    },
+    {
+      "type": "LIVES_IN",
+      "source": "monica-hall",
+      "target": "menlo-park",
+      "props": {}
+    },
+    {
+      "type": "LIVES_IN",
+      "source": "laurie-bream",
+      "target": "menlo-park",
+      "props": {}
+    },
+    {
+      "type": "LIVES_IN",
+      "source": "peter-gregory",
+      "target": "menlo-park",
+      "props": {
+        "to": "2015-04"
+      }
+    },
+    {
+      "type": "LIVES_IN",
+      "source": "ed-chen",
+      "target": "los-altos",
+      "props": {}
+    },
+    {
+      "type": "LIVES_IN",
+      "source": "russ-hanneman",
+      "target": "los-altos",
+      "props": {}
+    },
+    {
+      "type": "LIVES_IN",
+      "source": "ron-laflamme",
+      "target": "cupertino",
+      "props": {}
+    },
+    {
+      "type": "BASED_IN",
+      "source": "pied-piper",
+      "target": "hacker-hostel",
+      "props": {
+        "from": "2014-03",
+        "to": "2014-09"
+      }
+    },
+    {
+      "type": "BASED_IN",
+      "source": "pied-piper",
+      "target": "pied-piper-office",
+      "props": {
+        "from": "2014-09"
+      }
+    },
+    {
+      "type": "BASED_IN",
+      "source": "hooli",
+      "target": "hooli-campus",
+      "props": {}
+    },
+    {
+      "type": "BASED_IN",
+      "source": "hooli-xyz",
+      "target": "hooli-campus",
+      "props": {}
+    },
+    {
+      "type": "BASED_IN",
+      "source": "raviga",
+      "target": "sand-hill-road",
+      "props": {}
+    },
+    {
+      "type": "BASED_IN",
+      "source": "bream-hall",
+      "target": "sand-hill-road",
+      "props": {
+        "from": "2018-03"
+      }
+    },
+    {
+      "type": "BASED_IN",
+      "source": "aviato",
+      "target": "palo-alto",
+      "props": {}
+    },
+    {
+      "type": "BASED_IN",
+      "source": "bachmanity",
+      "target": "san-francisco",
+      "props": {}
+    },
+    {
+      "type": "BASED_IN",
+      "source": "endframe",
+      "target": "cupertino",
+      "props": {}
+    },
+    {
+      "type": "INVESTED_IN",
+      "source": "peter-gregory",
+      "target": "pied-piper",
+      "props": {
+        "round": "Seed",
+        "amount_usd": 200000,
+        "date": "2014-03",
+        "note": "From an investor who reads markets in the sesame seeds on burger buns"
+      }
+    },
+    {
+      "type": "INVESTED_IN",
+      "source": "erlich-bachman",
+      "target": "pied-piper",
+      "props": {
+        "round": "Incubator stake",
+        "date": "2014-03",
+        "note": "Ten percent of the company, in return for a room at the hacker hostel"
+      }
+    },
+    {
+      "type": "INVESTED_IN",
+      "source": "russ-hanneman",
+      "target": "pied-piper",
+      "props": {
+        "round": "Series A",
+        "amount_usd": 5000000,
+        "date": "2015-04"
+      }
+    },
+    {
+      "type": "INVESTED_IN",
+      "source": "raviga",
+      "target": "pied-piper",
+      "props": {
+        "round": "Secondary",
+        "date": "2015-06",
+        "note": "Bought Russ Hanneman's stake, and with it control of the board"
+      }
+    },
+    {
+      "type": "INVESTED_IN",
+      "source": "nelson-bighetti",
+      "target": "bachmanity",
+      "props": {
+        "round": "Founding capital",
+        "amount_usd": 20000000,
+        "date": "2016-04",
+        "note": "Paid from his Hooli severance"
+      }
+    },
+    {
+      "type": "MAKES",
+      "source": "pied-piper",
+      "target": "pied-piper-app",
+      "props": {}
+    },
+    {
+      "type": "MAKES",
+      "source": "pied-piper",
+      "target": "pipernet",
+      "props": {}
+    },
+    {
+      "type": "MAKES",
+      "source": "pied-piper",
+      "target": "piper-chat",
+      "props": {}
+    },
+    {
+      "type": "MAKES",
+      "source": "pied-piper",
+      "target": "pipercoin",
+      "props": {}
+    },
+    {
+      "type": "MAKES",
+      "source": "hooli",
+      "target": "nucleus",
+      "props": {}
+    },
+    {
+      "type": "MAKES",
+      "source": "hooli",
+      "target": "the-box",
+      "props": {}
+    },
+    {
+      "type": "MAKES",
+      "source": "hooli",
+      "target": "hooli-phone",
+      "props": {}
+    },
+    {
+      "type": "MAKES",
+      "source": "tres-commas",
+      "target": "tres-commas-tequila",
+      "props": {}
+    },
+    {
+      "type": "USES",
+      "source": "pied-piper-app",
+      "target": "middle-out",
+      "props": {}
+    },
+    {
+      "type": "USES",
+      "source": "pipernet",
+      "target": "middle-out",
+      "props": {}
+    },
+    {
+      "type": "USES",
+      "source": "piper-chat",
+      "target": "middle-out",
+      "props": {}
+    },
+    {
+      "type": "USES",
+      "source": "pipercoin",
+      "target": "blockchain",
+      "props": {}
+    },
+    {
+      "type": "COMPETES_WITH",
+      "source": "nucleus",
+      "target": "pied-piper-app",
+      "props": {}
+    },
+    {
+      "type": "COMPETES_WITH",
+      "source": "the-box",
+      "target": "pipernet",
+      "props": {}
+    },
+    {
+      "type": "BUILT",
+      "source": "bertram-gilfoyle",
+      "target": "anton",
+      "props": {}
+    },
+    {
+      "type": "BUILT",
+      "source": "bertram-gilfoyle",
+      "target": "son-of-anton",
+      "props": {}
+    },
+    {
+      "type": "BUILT",
+      "source": "bertram-gilfoyle",
+      "target": "bitcoin-alert",
+      "props": {}
+    },
+    {
+      "type": "BUILT",
+      "source": "bertram-gilfoyle",
+      "target": "pipercoin",
+      "props": {}
+    },
+    {
+      "type": "BUILT",
+      "source": "richard-hendricks",
+      "target": "pied-piper-app",
+      "props": {}
+    },
+    {
+      "type": "BUILT",
+      "source": "richard-hendricks",
+      "target": "pied-piper-music",
+      "props": {}
+    },
+    {
+      "type": "BUILT",
+      "source": "dinesh-chugtai",
+      "target": "piper-chat",
+      "props": {}
+    },
+    {
+      "type": "BUILT",
+      "source": "jian-yang",
+      "target": "seefood",
+      "props": {}
+    },
+    {
+      "type": "BUILT",
+      "source": "jian-yang",
+      "target": "not-hotdog",
+      "props": {}
+    },
+    {
+      "type": "OWNS",
+      "source": "erlich-bachman",
+      "target": "hacker-hostel",
+      "props": {}
+    },
+    {
+      "type": "OWNS",
+      "source": "erlich-bachman",
+      "target": "erlichs-palapa",
+      "props": {}
+    },
+    {
+      "type": "OWNS",
+      "source": "hooli",
+      "target": "hooli-campus",
+      "props": {}
+    },
+    {
+      "type": "OWNS",
+      "source": "hooli",
+      "target": "hooli-rooftop",
+      "props": {}
+    },
+    {
+      "type": "OWNS",
+      "source": "jian-yang",
+      "target": "jian-yangs-fridge",
+      "props": {}
+    },
+    {
+      "type": "OWNS",
+      "source": "russ-hanneman",
+      "target": "russ-car",
+      "props": {}
+    },
+    {
+      "type": "ATTENDED",
+      "source": "pied-piper",
+      "target": "techcrunch-disrupt",
+      "props": {
+        "date": "2014-06",
+        "outcome": "Won, with a Weissman score of 5.2"
+      }
+    },
+    {
+      "type": "ATTENDED",
+      "source": "hooli",
+      "target": "techcrunch-disrupt",
+      "props": {
+        "date": "2014-06",
+        "outcome": "Presented Nucleus, which scored 2.89"
+      }
+    },
+    {
+      "type": "ATTENDED",
+      "source": "richard-hendricks",
+      "target": "techcrunch-disrupt",
+      "props": {
+        "date": "2014-06",
+        "outcome": "Presented middle-out on stage"
+      }
+    },
+    {
+      "type": "ATTENDED",
+      "source": "pied-piper",
+      "target": "condor-stream",
+      "props": {
+        "date": "2015-06",
+        "outcome": "Kept the stream running as the audience grew"
+      }
+    },
+    {
+      "type": "ATTENDED",
+      "source": "erlich-bachman",
+      "target": "bachmanity-insanity",
+      "props": {
+        "date": "2016-05",
+        "outcome": "Hosted it"
+      }
+    },
+    {
+      "type": "ATTENDED",
+      "source": "nelson-bighetti",
+      "target": "bachmanity-insanity",
+      "props": {
+        "date": "2016-05",
+        "outcome": "Paid for it"
+      }
+    },
+    {
+      "type": "ATTENDED",
+      "source": "hooli",
+      "target": "hooli-con",
+      "props": {
+        "date": "2017-06",
+        "outcome": "Launched The Box (Signature Edition)"
+      }
+    },
+    {
+      "type": "ATTENDED",
+      "source": "jack-barker",
+      "target": "hooli-con",
+      "props": {
+        "date": "2017-06",
+        "outcome": "Gave the keynote"
+      }
+    },
+    {
+      "type": "LOCATED_IN",
+      "source": "hacker-hostel",
+      "target": "palo-alto",
+      "props": {}
+    },
+    {
+      "type": "LOCATED_IN",
+      "source": "erlichs-palapa",
+      "target": "palo-alto",
+      "props": {}
+    },
+    {
+      "type": "LOCATED_IN",
+      "source": "pied-piper-office",
+      "target": "mountain-view",
+      "props": {}
+    },
+    {
+      "type": "LOCATED_IN",
+      "source": "hooli-campus",
+      "target": "mountain-view",
+      "props": {}
+    },
+    {
+      "type": "LOCATED_IN",
+      "source": "hooli-rooftop",
+      "target": "mountain-view",
+      "props": {}
+    },
+    {
+      "type": "LOCATED_IN",
+      "source": "sand-hill-road",
+      "target": "menlo-park",
+      "props": {}
+    }
+  ]
+}

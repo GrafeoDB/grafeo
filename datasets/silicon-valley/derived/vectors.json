@@ -1,0 +1,327 @@
+{
+  "model": "Xenova/all-MiniLM-L6-v2",
+  "dtype": "q8",
+  "dimension": 384,
+  "nodes": [
+    {
+      "key": "anton",
+      "offset": 0,
+      "sha256": "d7f2d09c08219814db56df1bdbbd57643550563e68f830794aecd1e6c58754de"
+    },
+    {
+      "key": "aviato",
+      "offset": 384,
+      "sha256": "e22bc8471ca81f2c90cdbbe999cf89d163161bcdc404eff1c4621e6edcb3becb"
+    },
+    {
+      "key": "bachmanity",
+      "offset": 768,
+      "sha256": "57d6e3c87b521585324d6ac1014e4c7d3734f977577f7c033f6c06a041383f61"
+    },
+    {
+      "key": "bachmanity-insanity",
+      "offset": 1152,
+      "sha256": "913aa86d9678e4ea71cc464a932cd998cb2b280eac9cbb0879c79bd1098f67bc"
+    },
+    {
+      "key": "bertram-gilfoyle",
+      "offset": 1536,
+      "sha256": "805d75ff32b7344fd80c8cd1d1b1b5e1d91f546b62cc53067cc5f31e9635f34a"
+    },
+    {
+      "key": "bitcoin-alert",
+      "offset": 1920,
+      "sha256": "06eb98a7bd78095d9c271ce3fd232b915b147ba4a6685e84775d87e78fe92b9c"
+    },
+    {
+      "key": "blockchain",
+      "offset": 2304,
+      "sha256": "9eda82cf20f5c3f0e6df5d549347d3714d36d3d72fae27cd424211e8078c7931"
+    },
+    {
+      "key": "bream-hall",
+      "offset": 2688,
+      "sha256": "8ecf27adf0692b5dff3bc612edec8eb1c8ef83cf76b4123f9dfefb94f63d16a1"
+    },
+    {
+      "key": "carla-walton",
+      "offset": 3072,
+      "sha256": "4730a684281af0eb10ad252cde4315be324a07e10fc3795618dda40e5bdd29a8"
+    },
+    {
+      "key": "condor-stream",
+      "offset": 3456,
+      "sha256": "5da830c497d140661a3e76559318470acbd6f97ac8e2e7dcb303720ce8c44214"
+    },
+    {
+      "key": "cupertino",
+      "offset": 3840,
+      "sha256": "081d8626e9994c7e70bff028e82a6cb61697b2b18285d4fdf5ad8e2144a271f1"
+    },
+    {
+      "key": "denpok",
+      "offset": 4224,
+      "sha256": "b9022f4dbb2a7274fd8788fe09f3c76266bd385023d9363ac4fa9ad9263775fa"
+    },
+    {
+      "key": "dinesh-chugtai",
+      "offset": 4608,
+      "sha256": "79d3a93ad0e5c3a9a08a3eaaf51f99de64199d0e885320edf2e4bbdfd682f7d5"
+    },
+    {
+      "key": "ed-chen",
+      "offset": 4992,
+      "sha256": "be402af6b07d27dd51ebfb54e3329ceab9465d83b5ee3332f39e33825ef7e9a6"
+    },
+    {
+      "key": "endframe",
+      "offset": 5376,
+      "sha256": "755a7600033083adca8671624b97f76f0c2d00f402329fa11474d51b673f2af6"
+    },
+    {
+      "key": "erlich-bachman",
+      "offset": 5760,
+      "sha256": "7a19be282a91493556606d1332a09618f3c9cc0f34d46c1d1803039ad724d35a"
+    },
+    {
+      "key": "erlichs-palapa",
+      "offset": 6144,
+      "sha256": "c9bf78b059207f1525f8a8bf4f28462e4527ebaa9b7bfafa3cff0a16f283d21e"
+    },
+    {
+      "key": "fiona",
+      "offset": 6528,
+      "sha256": "582ac3796ba97409940b99080a149d2f6b3032c48eda4b432729a2ef6d2bb236"
+    },
+    {
+      "key": "gavin-belson",
+      "offset": 6912,
+      "sha256": "04aff54543c2ea61dc69044c82b538299d2faa331029483586ba9a06814da99a"
+    },
+    {
+      "key": "hacker-hostel",
+      "offset": 7296,
+      "sha256": "6d9f2d98d4881530e690fafbe08dcb81512d77407a5942f2dda8fb4954108764"
+    },
+    {
+      "key": "hooli",
+      "offset": 7680,
+      "sha256": "f855f7af2d5d35b1083724bc0b790dcefec34ae8016a37be5e87d7e9f6e2077e"
+    },
+    {
+      "key": "hooli-campus",
+      "offset": 8064,
+      "sha256": "35d587c6424b6c32625c01c12a0d2361f26c5ced627a8ea5180fbb93276e4bd5"
+    },
+    {
+      "key": "hooli-con",
+      "offset": 8448,
+      "sha256": "e47e9a3d286e836ac6433e0ba033d06d8ea00e3df05b609dba506d85b4bdcb0e"
+    },
+    {
+      "key": "hooli-phone",
+      "offset": 8832,
+      "sha256": "fdb5ecff29356559ffcaf5ccad8bf1d42d32101c54865a1bc843ac3cc6ed86bb"
+    },
+    {
+      "key": "hooli-rooftop",
+      "offset": 9216,
+      "sha256": "9b24abda7b86a5e4bfd819d6a9079ef2cb3b02e3c634ff89ebd1f5b2cff5a111"
+    },
+    {
+      "key": "hooli-xyz",
+      "offset": 9600,
+      "sha256": "fa12d0436bd9fe475247ba4f9f737fe2505f2225184b72577fe9a35896775c87"
+    },
+    {
+      "key": "hoover",
+      "offset": 9984,
+      "sha256": "55a0c5b2528b2bc9a5c0d803a2414c829bf4e1e478e465b983b884b057376e91"
+    },
+    {
+      "key": "jack-barker",
+      "offset": 10368,
+      "sha256": "096c050cfbec3aceb6bb15509137fab6d6cb7000cca015d409363c590a691e92"
+    },
+    {
+      "key": "jared-dunn",
+      "offset": 10752,
+      "sha256": "693be3163bd6f5c0047d970201888bf3cdcb071fca7f9308f02c1e49d4a0c0b8"
+    },
+    {
+      "key": "jian-yang",
+      "offset": 11136,
+      "sha256": "049019c9a640480f1eda0bb6a15d13a16b83468723d7639fde715b063df98ba7"
+    },
+    {
+      "key": "jian-yangs-fridge",
+      "offset": 11520,
+      "sha256": "c288e0738b20c19b8a239812fafdce54cc6a0cec064320ee342f594186f64fc2"
+    },
+    {
+      "key": "keenan-feldspar",
+      "offset": 11904,
+      "sha256": "9785de5063e003249b7d70a423779e27468096181edb89dd375955e4b5131ec7"
+    },
+    {
+      "key": "laurie-bream",
+      "offset": 12288,
+      "sha256": "697055f761237ffba50ac07250559f0e3af8de92d3065ac9ec5b8554d59e2c9e"
+    },
+    {
+      "key": "los-altos",
+      "offset": 12672,
+      "sha256": "702988e45c8f07c7acb0829b3d64a151ab72e6e911acb34102b814563f2f8e6d"
+    },
+    {
+      "key": "menlo-park",
+      "offset": 13056,
+      "sha256": "688e98bdcb884edea0e0168d2beca02635418e1038254c4568e34f2311b03dd2"
+    },
+    {
+      "key": "middle-out",
+      "offset": 13440,
+      "sha256": "c43e515d34c7a366d6ed6661b538ebf2af7f14f68162a4853412fed0996b56b7"
+    },
+    {
+      "key": "monica-hall",
+      "offset": 13824,
+      "sha256": "f72e91c9eda2881e3c5b8fa46897674771adc059f20a60c110982b11a94c247f"
+    },
+    {
+      "key": "mountain-view",
+      "offset": 14208,
+      "sha256": "703d1eadbc744f7ebf218fa2a375830756eccfa7bc80f1d7d33bab5fcbfa2548"
+    },
+    {
+      "key": "nelson-bighetti",
+      "offset": 14592,
+      "sha256": "1417f964b469718236677ca6d9f1bfbd8d8f95287fcc9c39d0af01463b9afc3a"
+    },
+    {
+      "key": "not-hotdog",
+      "offset": 14976,
+      "sha256": "efdc67f00c3f4b0e52bb3796ebb0b3e8b5f4f1de6a2b0fafe627e444626bcad5"
+    },
+    {
+      "key": "nucleus",
+      "offset": 15360,
+      "sha256": "ddabeb9ef339136a74fae0abb9dcd247c317703042b06ebf2fa43bd0f63d8b78"
+    },
+    {
+      "key": "palo-alto",
+      "offset": 15744,
+      "sha256": "93b41a2dd4c548a99a58efbb76dbcf425987e090a5bb9656daaf00909e838692"
+    },
+    {
+      "key": "peter-gregory",
+      "offset": 16128,
+      "sha256": "694de9a90293c8cfaad554237d7f795a356d7a6bf4eb342fee636f91aed5ced2"
+    },
+    {
+      "key": "pied-piper",
+      "offset": 16512,
+      "sha256": "d2f2f26f8bc30f003727145db0de51183d4a6c63f4009bfaa54fe5bb52553e9e"
+    },
+    {
+      "key": "pied-piper-app",
+      "offset": 16896,
+      "sha256": "5eec9e68546be0f472d324097a9b9e7afc55736b13ed690c5e594738b006707f"
+    },
+    {
+      "key": "pied-piper-music",
+      "offset": 17280,
+      "sha256": "04425c2b5eb4b3b2b1ac96216e0981a855d943e5ad7adfceb261b60119043d31"
+    },
+    {
+      "key": "pied-piper-office",
+      "offset": 17664,
+      "sha256": "767dcf0fccabb7a2060e43aef4e947624ec3c8a3ae6732583e6709de91b365de"
+    },
+    {
+      "key": "piper-chat",
+      "offset": 18048,
+      "sha256": "99b1dc46a129667eb80b534856130aea01d2909c8b6797a67e6aa7217e5cafc4"
+    },
+    {
+      "key": "pipercoin",
+      "offset": 18432,
+      "sha256": "c20b4897fca43c88741431c740dbe9aa15c9c54395b54a340ec73901adf8c4fc"
+    },
+    {
+      "key": "pipernet",
+      "offset": 18816,
+      "sha256": "6811d27e0df694f5fc139c4b2dca19510f7d428dd9283e346ccf3c8f7dfd65af"
+    },
+    {
+      "key": "raviga",
+      "offset": 19200,
+      "sha256": "27b807ad9d8b6e18a956ab13eef15a7b3e1bd44f17d0b43c4f8fe2390453cae4"
+    },
+    {
+      "key": "richard-hendricks",
+      "offset": 19584,
+      "sha256": "76cb0bf43efb1c45fe8934bcab5966c92bce6dfe41564c173aa5e6295566f7a9"
+    },
+    {
+      "key": "ron-laflamme",
+      "offset": 19968,
+      "sha256": "c4232a0058405a688d480bc63d390369bdde9713a35163677a50c2478b98779b"
+    },
+    {
+      "key": "russ-car",
+      "offset": 20352,
+      "sha256": "665144d78fe1c2a673ccc5b550f29c8e590cb451e5b2163a22b2c7dd52d920fb"
+    },
+    {
+      "key": "russ-hanneman",
+      "offset": 20736,
+      "sha256": "ac2dd7255f99ee0fbf584e46d4baa036c7618b3a39d14de29c0a3ac4e5c2b95a"
+    },
+    {
+      "key": "san-francisco",
+      "offset": 21120,
+      "sha256": "8e31d253aeadee05642de50526d6425d2a5d9d1969081721a80496e0f4018679"
+    },
+    {
+      "key": "sand-hill-road",
+      "offset": 21504,
+      "sha256": "c490365b0c93e5ef0312bf9e648d5487fb7981752dc8d5861c1fadba659a2ff5"
+    },
+    {
+      "key": "seefood",
+      "offset": 21888,
+      "sha256": "9c6bfa1e23f0abe64ebf43925fc6a58e2c5be0d498e640038c65ea69930f1163"
+    },
+    {
+      "key": "son-of-anton",
+      "offset": 22272,
+      "sha256": "a48edf63bebb456e4017ba723adaa0f69fce8b33e7d0ea60c5a690e2681c909e"
+    },
+    {
+      "key": "techcrunch-disrupt",
+      "offset": 22656,
+      "sha256": "dc344c390a497440c3472bbff6dc515e4d11934293a61e37e87f5d9403f58f08"
+    },
+    {
+      "key": "the-box",
+      "offset": 23040,
+      "sha256": "0c46c6cea9bc475df51633a53129e61c525f22d4664b1907dd6c7025aa9d4691"
+    },
+    {
+      "key": "tres-commas",
+      "offset": 23424,
+      "sha256": "02a43b80f0030ae9ff61f31252b19597c6d906c74970f498e091660ddaa1f5b1"
+    },
+    {
+      "key": "tres-commas-tequila",
+      "offset": 23808,
+      "sha256": "6f876fef745fd15e0f61ad0860adb91044fbdb8935406e12d986cfbbcc7155b5"
+    },
+    {
+      "key": "winnie",
+      "offset": 24192,
+      "sha256": "9a6d044eb8f9d2c96418355db1380f5da0ae7ade4cafecb5c684cc89348e2d2f"
+    }
+  ]
+}

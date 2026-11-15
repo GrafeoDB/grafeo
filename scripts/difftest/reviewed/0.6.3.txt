@@ -1,0 +1,21 @@
+# Reviewed differences between 0.6.2 and 0.6.3: case key, fingerprint of the reviewed result, why it changed.
+EP1|sparql 4d632cf09a A MINUS after another MINUS removes its solutions; 0.6.2 skipped the second MINUS and kept the solutions it should remove.
+EP2|sparql 84ef4763ae A MINUS after another MINUS removes its solutions; 0.6.2 skipped every MINUS after the first and kept the solutions they should remove.
+EP4|sparql 84d8de6dfb A MINUS after a sub-SELECT with DISTINCT removes its solutions; 0.6.2 skipped it and kept every solution.
+EP5|sparql 76c2b3953e A MINUS after a sub-SELECT with ORDER BY and LIMIT removes its solutions; 0.6.2 skipped it and kept every solution.
+EP6|sparql fe2c1706be A MINUS after a sub-SELECT with ORDER BY and OFFSET removes its solutions; 0.6.2 skipped it and kept every solution.
+EP7|sparql 84d8de6dfb A MINUS after a sub-SELECT with ORDER BY removes its solutions; 0.6.2 skipped it and kept every solution.
+EP8|sparql 66d194a3dc A MINUS after a sub-SELECT with GROUP BY removes its solutions; 0.6.2 skipped it and kept every solution.
+EP9|sparql 84d8de6dfb A MINUS after a sub-SELECT that renames its variable removes its solutions; 0.6.2 skipped it and kept every solution.
+EP10|sparql 9932bc4932 A MINUS of a VALUES block after an aggregating sub-SELECT removes the matching solution; 0.6.2 skipped it and kept the count.
+EP11|sparql 7e5ae41411 CLEAR GRAPH of a missing graph fails unless SILENT, as DROP GRAPH does (SPARQL 1.1 Update 3.1.5); 0.6.2 succeeded (#718).
+EP15|cypher 457b17ccc6 A variable-length search over the path search budget fails with GRAFEO-S001 naming the budget; 0.6.2 has no budget setting and answered (#492).
+EP15|gql 457b17ccc6 A variable-length search over the path search budget fails with GRAFEO-S001 naming the budget; 0.6.2 has no budget setting and answered (#492).
+EP16|gql 3446f2259e An ALL SHORTEST search over the path search budget fails with GRAFEO-S001 naming the budget; 0.6.2 has no budget setting and answered (#492).
+EP17|cypher 3446f2259e An allShortestPaths search over the path search budget fails with GRAFEO-S001 naming the budget; 0.6.2 has no budget setting and answered (#492).
+EP18|sparql a78ab91225 An RDF property path over the path search budget fails with GRAFEO-S001 naming the budget; 0.6.2 has no budget setting and answered (#492). The fingerprint holds the message's byte figures.
+EP19|sparql 870492e9ff A SPARQL ORDER BY over the per-query memory limit fails with GRAFEO-S001 naming the limit, as SPARQL sorts do not spill yet; 0.6.2 sorted past the limit (#674). The fingerprint holds the message's byte figures, so a change in what the statement holds changes it.
+EP22|gql aa1aba7956 SHOW INDEXES lists only the current graph's indexes, with their names; 0.6.2 listed another graph's index too, and the drop of a same-name index in that graph had erased this graph's index name (#723).
+EP23|gql 0174a4ed54 A standalone node type that a graph type lists stays in force in the default graph, so a write that breaks it is refused; 0.6.2 stopped enforcing it once a graph type listed it (#764).
+EP24|gql 4bba8d7ece A standalone node type that a graph type lists stays in force in the default graph, so an insert that breaks it is refused; 0.6.2 stopped enforcing it once a graph type listed it (#764).
+EP25|gql 2510a8bcce The node keeps its typed value and the refused insert left nothing, since EP23 and EP24 are refused; on 0.6.2 both writes went through (#764).

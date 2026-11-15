@@ -33,8 +33,21 @@ use std::sync::{Mutex, PoisonError, RwLock};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-/// How long [`run`] and [`output`] let a child run before they kill it.
-pub const DEADLINE: Duration = Duration::from_secs(120);
+/// How long [`run`] and [`output`] let a child run before they kill it: 120 seconds, five times
+/// that in a coverage build (`cargo llvm-cov` sets `cfg(coverage)`).
+///
+/// The deadline catches a hung child, so it sits well above a heavy child's normal time. A
+/// coverage build runs a child two to three times slower than a debug build, and its tests run
+/// as threads of one process, next to whatever else that process runs. On a normal coverage run
+/// the vector load of `memory_account_against_the_process` took 20 to 29 seconds in its child;
+/// on a runner 2.25 times slower than usual, next to the vector-spill tests, it ran past
+/// 120 seconds and was killed (2026-11-15). 600 seconds is 20 to 30 times that child's normal
+/// coverage time, so it holds on such a runner too.
+pub const DEADLINE: Duration = if cfg!(coverage) {
+    Duration::from_secs(600)
+} else {
+    Duration::from_secs(120)
+};
 
 /// How often a waiting call checks whether its child has exited.
 const POLL_INTERVAL: Duration = Duration::from_millis(5);

@@ -187,6 +187,107 @@ impl std::fmt::Display for KeyClaim {
     }
 }
 
+/// The fingerprints of the MERGE patterns a transaction created (see
+/// [`TransactionManager::record_pattern`]): the first few inline and the
+/// rest in a set, so a statement that claims one or two, as an auto-commit
+/// MERGE does, allocates nothing for them.
+#[derive(Debug, Default)]
+pub(crate) struct PatternSet {
+    /// The first fingerprints, `inline[..len]`.
+    inline: [u64; PatternSet::INLINE],
+    len: usize,
+    /// The fingerprints past the first `INLINE`, boxed: most transactions
+    /// claim fewer, and every one carries the set.
+    spilled: Option<Box<FingerprintSet>>,
+}
+
+/// A set of fingerprints, which are hashes already: the set takes each as
+/// its own hash.
+type FingerprintSet = hashbrown::HashSet<u64, std::hash::BuildHasherDefault<FingerprintHasher>>;
+
+/// The hasher of a [`FingerprintSet`]: a fingerprint is its own hash.
+#[derive(Default)]
+struct FingerprintHasher(u64);
+
+impl std::hash::Hasher for FingerprintHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        // Only `write_u64` is called for a `u64` key; any other input is
+        // folded in, so the hasher stays correct for it.
+        for byte in bytes {
+            self.0 = self.0.rotate_left(8) ^ u64::from(*byte);
+        }
+    }
+
+    fn write_u64(&mut self, fingerprint: u64) {
+        self.0 = fingerprint;
+    }
+}
+
+impl PatternSet {
+    /// How many fingerprints are kept inline.
+    const INLINE: usize = 4;
+
+    /// Whether the set holds `fingerprint`.
+    fn contains(&self, fingerprint: u64) -> bool {
+        self.inline[..self.len].contains(&fingerprint)
+            || self
+                .spilled
+                .as_ref()
+                .is_some_and(|spilled| spilled.contains(&fingerprint))
+    }
+
+    /// Adds `fingerprint`; whether it was new.
+    fn insert(&mut self, fingerprint: u64) -> bool {
+        if self.contains(fingerprint) {
+            return false;
+        }
+        if self.len < Self::INLINE {
+            self.inline[self.len] = fingerprint;
+            self.len += 1;
+        } else {
+            self.spilled
+                .get_or_insert_with(Box::default)
+                .insert(fingerprint);
+        }
+        true
+    }
+
+    /// Removes `fingerprint`.
+    fn remove(&mut self, fingerprint: u64) {
+        if let Some(index) = self.inline[..self.len]
+            .iter()
+            .position(|held| *held == fingerprint)
+        {
+            self.inline[index] = self.inline[self.len - 1];
+            self.len -= 1;
+        } else if let Some(spilled) = &mut self.spilled {
+            spilled.remove(&fingerprint);
+        }
+    }
+
+    /// How many fingerprints the set holds.
+    fn len(&self) -> usize {
+        self.len + self.spilled.as_ref().map_or(0, |spilled| spilled.len())
+    }
+
+    /// Whether the set holds none.
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// The fingerprints, in no order.
+    fn iter(&self) -> impl Iterator<Item = u64> + '_ {
+        self.inline[..self.len]
+            .iter()
+            .chain(self.spilled.iter().flat_map(|spilled| spilled.iter()))
+            .copied()
+    }
+}
+
 /// Information about an active transaction.
 pub struct TransactionInfo {
     /// Transaction state.
@@ -209,6 +310,9 @@ pub struct TransactionInfo {
     /// The values the transaction wrote under UNIQUE, PRIMARY KEY and NODE
     /// KEY constraints (see [`TransactionManager::record_key`]).
     pub(crate) key_set: FxHashSet<KeyClaim>,
+    /// The fingerprints of the MERGE patterns the transaction created (see
+    /// [`TransactionManager::record_pattern`]).
+    pub(crate) pattern_set: PatternSet,
     /// What the transaction changed, while it is open or committing: a
     /// checkpoint reads the committed state of what open transactions
     /// changed from it (see [`TransactionManager::open_change_sets`]).
@@ -241,6 +345,7 @@ enum ClaimUndo {
     Delete(GraphEntity),
     Endpoint(GraphEntity),
     Key(KeyClaim),
+    Pattern(u64),
 }
 
 impl TransactionInfo {
@@ -260,6 +365,7 @@ impl TransactionInfo {
             delete_set: FxHashSet::default(),
             endpoint_set: FxHashSet::default(),
             key_set: FxHashSet::default(),
+            pattern_set: PatternSet::default(),
             changes: Some(changes),
             #[cfg(feature = "triple-store")]
             rdf_writes: None,
@@ -282,6 +388,7 @@ impl TransactionInfo {
             delete_set: FxHashSet::default(),
             endpoint_set: FxHashSet::default(),
             key_set: FxHashSet::default(),
+            pattern_set: PatternSet::default(),
             changes: None,
             rdf_writes: Some(writes),
             private: false,
@@ -1643,6 +1750,63 @@ impl TransactionManager {
         Ok(())
     }
 
+    /// Claims `fingerprint`, a MERGE pattern the transaction creates (the
+    /// pattern `pattern` names, for the error), so two transactions that MERGE
+    /// one pattern do not both create it: when another open transaction
+    /// claimed it, this one fails, first writer wins, and at commit it fails
+    /// if one that claimed it committed after it began. A transaction may
+    /// claim one pattern any number of times. A MERGE calls this when nothing
+    /// matched, before it creates.
+    ///
+    /// # Errors
+    ///
+    /// Returns a write conflict if another open transaction claimed
+    /// `fingerprint`, and an error if the transaction is not active or an
+    /// earlier commit did not complete.
+    pub fn record_pattern(
+        &self,
+        transaction_id: TransactionId,
+        fingerprint: u64,
+        pattern: &dyn std::fmt::Display,
+    ) -> Result<()> {
+        self.check_no_incomplete_commit()?;
+        let mut txns = self.transactions.write();
+        if self.active_count.load(Ordering::Relaxed) > 1 {
+            for (other_tx, other_info) in txns.iter() {
+                if *other_tx != transaction_id
+                    && matches!(
+                        other_info.state,
+                        TransactionState::Active | TransactionState::Committing
+                    )
+                    && other_info.pattern_set.contains(fingerprint)
+                {
+                    return Err(Error::Transaction(TransactionError::WriteConflict(
+                        format!(
+                            "on MERGE {pattern}: another open transaction creates the same \
+                             pattern; retry the statement, or the transaction"
+                        ),
+                    )));
+                }
+            }
+        }
+        let info = txns.get_mut(&transaction_id).ok_or_else(|| {
+            Error::Transaction(TransactionError::InvalidState(
+                "Transaction not found".to_string(),
+            ))
+        })?;
+        if info.state != TransactionState::Active {
+            return Err(Error::Transaction(TransactionError::InvalidState(
+                "Transaction is not active".to_string(),
+            )));
+        }
+        if info.pattern_set.insert(fingerprint)
+            && let Some(undo) = &mut info.claim_undo
+        {
+            undo.push(ClaimUndo::Pattern(fingerprint));
+        }
+        Ok(())
+    }
+
     /// Records a read operation for the transaction (for serializable isolation).
     ///
     /// # Errors
@@ -1864,6 +2028,36 @@ impl TransactionManager {
                          one began wrote the same value of the key"
                         ),
                     )));
+                }
+            }
+        }
+
+        // The same for MERGE patterns: a transaction that committed after our
+        // snapshot created a pattern a MERGE of ours created, which neither
+        // MERGE could see. Only fingerprints are kept, so the message cannot
+        // name the pattern.
+        if others_committed && !ours.pattern_set.is_empty() {
+            for (other_tx, commit_epoch) in committed.iter() {
+                if *other_tx != transaction_id
+                    && commit_epoch.as_u64() > our_start_epoch.as_u64()
+                    && let Some(other_info) = txns.get(other_tx)
+                {
+                    let (smaller, larger) =
+                        if ours.pattern_set.len() <= other_info.pattern_set.len() {
+                            (&ours.pattern_set, &other_info.pattern_set)
+                        } else {
+                            (&other_info.pattern_set, &ours.pattern_set)
+                        };
+                    if smaller
+                        .iter()
+                        .any(|fingerprint| larger.contains(fingerprint))
+                    {
+                        return Err(Error::Transaction(TransactionError::WriteConflict(
+                            "a transaction that committed after this one began created a \
+                             pattern a MERGE of this transaction creates; retry the transaction"
+                                .to_string(),
+                        )));
+                    }
                 }
             }
         }
@@ -2213,6 +2407,9 @@ impl TransactionManager {
                 }
                 Some(ClaimUndo::Key(key)) => {
                     info.key_set.remove(&key);
+                }
+                Some(ClaimUndo::Pattern(fingerprint)) => {
+                    info.pattern_set.remove(fingerprint);
                 }
                 None => break,
             }
@@ -2649,6 +2846,30 @@ impl Default for TransactionManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The pattern set answers as a set past its inline fingerprints: each
+    /// held once, removed from either part, and its length both parts.
+    #[test]
+    fn the_pattern_set_holds_each_fingerprint_once_inline_or_spilled() {
+        let mut set = PatternSet::default();
+        assert!(set.is_empty());
+        for fingerprint in 0..10 {
+            assert!(set.insert(fingerprint));
+            assert!(!set.insert(fingerprint), "{fingerprint} twice");
+        }
+        assert_eq!(set.len(), 10);
+        set.remove(1);
+        set.remove(8);
+        assert_eq!(set.len(), 8);
+        assert!(!set.contains(1) && !set.contains(8));
+        let mut held: Vec<u64> = set.iter().collect();
+        held.sort_unstable();
+        assert_eq!(held, [0, 2, 3, 4, 5, 6, 7, 9]);
+        // A freed inline place takes the next one.
+        assert!(set.insert(1));
+        assert!(set.contains(1));
+        assert_eq!(set.len(), 9);
+    }
 
     #[cfg(feature = "gql")]
     mod failed_storage_undo {

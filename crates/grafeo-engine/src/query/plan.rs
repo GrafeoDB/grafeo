@@ -2991,6 +2991,25 @@ pub struct CreateOp {
     /// Input operator; `None` for a clause that starts the statement, which
     /// runs once.
     pub input: Option<Box<LogicalOperator>>,
+    /// The MERGE pattern the elements create, claimed for each row before
+    /// they are created: set on the create branch of a MERGE, `None` for an
+    /// INSERT or CREATE. Shared, as a cached plan is cloned for each run.
+    pub claim: Option<std::sync::Arc<PatternClaim>>,
+}
+
+/// The MERGE pattern a [`CreateOp`] creates, in path order, as its claim
+/// reads it: the labels, types and property values are the elements' own,
+/// the MERGE pattern's (see `grafeo_core::execution::operators::merge_claim`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PatternClaim {
+    /// The node variables in path order: the start, then each relationship's
+    /// far end. One the input rows hold is a bound node; any other is the
+    /// node the first [`CreateElement::Node`] of the variable creates.
+    pub nodes: Vec<String>,
+    /// Per relationship in path order: the index of its
+    /// [`CreateElement::Edge`] in the elements, and whether it matches either
+    /// way (an undirected relationship, created left to right).
+    pub relationships: Vec<(usize, bool)>,
 }
 
 impl CreateOp {
@@ -3044,7 +3063,12 @@ impl CreateOp {
                 ),
             })
             .collect();
-        elements.join(", ")
+        let elements = elements.join(", ");
+        if self.claim.is_some() {
+            format!("{elements} claims MERGE pattern")
+        } else {
+            elements
+        }
     }
 }
 

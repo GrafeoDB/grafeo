@@ -44,6 +44,7 @@ mod limit;
 mod load_data;
 mod map_collect;
 mod merge;
+pub mod merge_claim;
 mod mutation;
 mod node_seek;
 mod parameter_scan;

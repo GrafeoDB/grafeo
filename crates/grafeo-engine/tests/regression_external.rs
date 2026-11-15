@@ -872,29 +872,46 @@ mod cyclic_traversal {
 }
 
 // ============================================================================
-// Concurrent MERGE (stress test)
+// Concurrent MERGE
 // ============================================================================
 
 mod concurrent_merge {
     use super::*;
 
+    /// Ten sessions MERGE one node at once (a barrier). The ones that lose
+    /// to an open transaction's MERGE of the pattern fail with the retryable
+    /// `GRAFEO-T001` and retry, as an application does; the retry matches.
+    /// One node, and every session ends Ok.
     #[test]
-    #[ignore = "stress test: run locally before releases"]
     fn concurrent_merge_no_duplicates() {
-        let db = std::sync::Arc::new(db());
-        let handles: Vec<_> = (0..10)
-            .map(|_| {
-                let db = std::sync::Arc::clone(&db);
-                std::thread::spawn(move || {
-                    let s = db.session();
-                    s.execute("MERGE (:Singleton {key: 'only_one'})").unwrap();
+        let db = db();
+        let barrier = std::sync::Barrier::new(10);
+        std::thread::scope(|scope| {
+            let threads: Vec<_> = (0..10)
+                .map(|_| {
+                    scope.spawn(|| {
+                        let s = db.session();
+                        barrier.wait();
+                        for _ in 0..1_000 {
+                            match s.execute("MERGE (:Singleton {key: 'only_one'})") {
+                                Ok(_) => return,
+                                Err(error)
+                                    if error.error_code()
+                                        == grafeo_common::utils::error::ErrorCode::TransactionConflict =>
+                                {
+                                    std::thread::yield_now();
+                                }
+                                Err(error) => panic!("not a write conflict: {error}"),
+                            }
+                        }
+                        panic!("still in conflict after 1,000 retries");
+                    })
                 })
-            })
-            .collect();
-
-        for h in handles {
-            h.join().unwrap();
-        }
+                .collect();
+            for thread in threads {
+                thread.join().unwrap();
+            }
+        });
 
         let s = db.session();
         let r = s

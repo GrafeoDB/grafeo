@@ -2487,6 +2487,7 @@ impl std::error::Error for CatalogError {}
 
 use grafeo_core::execution::operators::ConstraintValidator;
 use grafeo_core::execution::operators::OperatorError;
+use grafeo_core::execution::operators::merge_claim::PatternKey;
 
 /// Validates schema constraints during mutation operations using the Catalog.
 ///
@@ -2590,21 +2591,24 @@ impl CatalogConstraintValidator {
                 })
                 .collect(),
         };
-        manager
-            .record_key(transaction, key)
-            .map_err(|error| match error {
-                // Not a conflict: nothing commits until a reopen, which the
-                // caller must learn (a conflict reads as retryable).
-                error @ grafeo_common::utils::error::Error::Transaction(
-                    grafeo_common::utils::error::TransactionError::IncompleteCommit,
-                ) => OperatorError::Wrapped(Box::new(error)),
-                // Already the conflict: passed on as it is, not wrapped in a
-                // second one.
-                error @ grafeo_common::utils::error::Error::Transaction(
-                    grafeo_common::utils::error::TransactionError::WriteConflict(_),
-                ) => OperatorError::Wrapped(Box::new(error)),
-                error => OperatorError::WriteConflict(error.to_string()),
-            })
+        manager.record_key(transaction, key).map_err(claim_error)
+    }
+
+    /// Claims each fingerprint of the MERGE pattern `key` in the graph written
+    /// to for the writing transaction (see
+    /// [`TransactionManager::record_pattern`](crate::transaction::TransactionManager::record_pattern)),
+    /// with the errors of [`claim_key`](Self::claim_key).
+    fn claim_merge_pattern(&self, key: &PatternKey<'_>) -> Result<(), OperatorError> {
+        let (Some((manager, graph)), Some((_, transaction))) = (&self.key_claims, self.transaction)
+        else {
+            return Ok(());
+        };
+        for fingerprint in key.fingerprints(graph.as_deref()) {
+            manager
+                .record_pattern(transaction, fingerprint, key)
+                .map_err(claim_error)?;
+        }
+        Ok(())
     }
 
     /// Checks the writes with the node and edge types of `schema`, the schema
@@ -3082,6 +3086,24 @@ fn key_identity(value: &Value) -> grafeo_core::execution::operators::HashableVal
     grafeo_core::execution::operators::HashableValue::from(value)
 }
 
+/// The error of a key or MERGE pattern claim that failed, for the writing
+/// operator.
+fn claim_error(error: grafeo_common::utils::error::Error) -> OperatorError {
+    match error {
+        // Not a conflict: nothing commits until a reopen, which the caller
+        // must learn (a conflict reads as retryable).
+        error @ grafeo_common::utils::error::Error::Transaction(
+            grafeo_common::utils::error::TransactionError::IncompleteCommit,
+        ) => OperatorError::Wrapped(Box::new(error)),
+        // Already the conflict: passed on as it is, not wrapped in a second
+        // one.
+        error @ grafeo_common::utils::error::Error::Transaction(
+            grafeo_common::utils::error::TransactionError::WriteConflict(_),
+        ) => OperatorError::Wrapped(Box::new(error)),
+        error => OperatorError::WriteConflict(error.to_string()),
+    }
+}
+
 /// Whether two key values are one value to a UNIQUE rule (see [`key_identity`]).
 fn same_key_value(held: &Value, value: &Value) -> bool {
     key_identity(held) == key_identity(value)
@@ -3139,6 +3161,10 @@ pub(crate) fn check_rule_over_nodes(
 }
 
 impl ConstraintValidator for CatalogConstraintValidator {
+    fn claim_pattern(&self, key: &PatternKey<'_>) -> Result<(), OperatorError> {
+        self.claim_merge_pattern(key)
+    }
+
     fn validate_node_property(
         &self,
         labels: &[String],

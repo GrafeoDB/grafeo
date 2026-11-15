@@ -3,7 +3,8 @@
 //!
 //! - **Equality form** (ISO/IEC 39075 19.3 General Rule 2): `a = b` as the evaluator answers it, three
 //!   valued. A filter, `<>`, `IN` (short and long), a lookup with and without an index (also after a
-//!   reopen), a join, `MERGE` and `update_nodes` find `a` for the key `b` exactly when `a = b` is true.
+//!   reopen), a join, `MERGE` and `update_nodes` find `a` for the key `b` exactly when `a = b` is true,
+//!   and the claims of two concurrent MERGEs of `a` and `b` collide exactly then.
 //! - **Grouping form** (22.12): `a` and `b` are the same when both are null, both NaN, two collections
 //!   whose elements are pairwise the same, or `a = b` is true. `DISTINCT`, GROUP BY, `UNION`,
 //!   `INTERSECT`, `EXCEPT`, `count(DISTINCT)`, `collect(DISTINCT)`, UNIQUE and NODE KEY keep one of each
@@ -570,6 +571,66 @@ fn merge_and_upsert_match_what_equals_finds() {
                  want {want:?} ({rows_wanted:?})"
             ));
         }
+    }
+    assert!(
+        wrong.is_empty(),
+        "{} wrong:\n{}",
+        wrong.len(),
+        wrong.join("\n")
+    );
+}
+
+/// Two concurrent MERGEs claim one pattern exactly when each matches what the other creates: while
+/// one open transaction MERGEs `(:V {v: $a})` on an empty graph, another transaction's MERGE of
+/// `(:V {v: $b})` fails with the write conflict (`GRAFEO-T001`) exactly when `a = b` is true. A
+/// value never equal to itself (NaN, a collection holding a null or NaN) claims nothing, so it
+/// conflicts with nothing. A null key is left out: MERGE refuses it.
+#[test]
+fn merge_claims_collide_exactly_when_equals_is_true() {
+    use grafeo_common::utils::error::ErrorCode;
+    let named = values();
+    let values: Vec<Value> = named.iter().map(|(_, v)| v.clone()).collect();
+    let db = GrafeoDB::new_in_memory();
+    let reference = Reference::new(&db, &values);
+    let merge = "MERGE (:V {v: $v})";
+    let mut wrong = Vec::new();
+    for (a, held) in values.iter().enumerate() {
+        if *held == Value::Null {
+            continue;
+        }
+        let mut holder = db.session();
+        holder.begin_transaction().unwrap();
+        if let Err(error) = holder.execute_with_params(merge, params(&[("v", held.clone())])) {
+            wrong.push(format!("MERGE {held:?} alone failed: {error}"));
+            holder.rollback().unwrap();
+            continue;
+        }
+        for (b, key) in values.iter().enumerate() {
+            if *key == Value::Null {
+                continue;
+            }
+            let mut other = db.session();
+            other.begin_transaction().unwrap();
+            let outcome = other.execute_with_params(merge, params(&[("v", key.clone())]));
+            let collided = match &outcome {
+                Ok(_) => false,
+                Err(error) if error.error_code() == ErrorCode::TransactionConflict => true,
+                Err(error) => {
+                    wrong.push(format!("MERGE {key:?} beside {held:?} failed: {error}"));
+                    false
+                }
+            };
+            if other.in_transaction() {
+                other.rollback().unwrap();
+            }
+            let want = reference.equal[a][b] == Some(true);
+            if collided != want {
+                wrong.push(format!(
+                    "MERGE {key:?} beside an open MERGE of {held:?}: collided {collided}, want {want}"
+                ));
+            }
+        }
+        holder.rollback().unwrap();
     }
     assert!(
         wrong.is_empty(),

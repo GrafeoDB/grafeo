@@ -665,8 +665,17 @@ impl MergeOperator {
                         .add_labels(existing_id, &self.config.on_match_labels)?;
                 }
             }
-            Ok(matches)
-        } else if Self::has_expression_source(&self.config.on_create_properties) {
+            return Ok(matches);
+        }
+        // Nothing matched: the pattern is claimed before it is created, so
+        // of two transactions that MERGE it the second fails and its retry
+        // matches (see `merge_claim`).
+        if let Some(key) =
+            super::merge_claim::PatternKey::node(&self.config.labels, &resolved_match)
+        {
+            self.writer.claim_pattern(&key)?;
+        }
+        if Self::has_expression_source(&self.config.on_create_properties) {
             // ON CREATE expressions read the new node, so it is created from
             // the match properties first; the whole property set is checked
             // before the ON CREATE values are written.

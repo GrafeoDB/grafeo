@@ -225,6 +225,7 @@ mod memory_query_limit;
 mod memory_query_limit_operators;
 mod memory_usage_values;
 mod merge_after_write;
+mod merge_claims;
 mod merge_null_entries;
 mod merge_paths;
 mod merge_rollback;

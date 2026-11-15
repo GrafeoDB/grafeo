@@ -245,6 +245,23 @@ impl GraphWriter {
         self
     }
 
+    /// Claims the MERGE pattern `key` for the writer's transaction before a
+    /// MERGE creates it (see [`ConstraintValidator::claim_pattern`]); nothing
+    /// without a validator.
+    ///
+    /// # Errors
+    ///
+    /// A write conflict when another transaction claimed the pattern.
+    pub fn claim_pattern(
+        &self,
+        key: &super::merge_claim::PatternKey<'_>,
+    ) -> Result<(), OperatorError> {
+        match &self.validator {
+            Some(validator) => validator.claim_pattern(key),
+            None => Ok(()),
+        }
+    }
+
     /// Adds `n` to the count `field` selects, if this writer counts.
     fn count(&self, field: impl Fn(&WriteCounter) -> &AtomicU64, n: usize) {
         if n > 0

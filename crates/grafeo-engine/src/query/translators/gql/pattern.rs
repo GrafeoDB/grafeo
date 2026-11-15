@@ -181,6 +181,21 @@ impl GqlTranslator {
             }
         }
 
+        // What the insert branch claims before it inserts (see
+        // `claim_merge_pattern`): the nodes in path order, and each edge with
+        // whether it matches either way.
+        let claim_nodes: Vec<String> = std::iter::once(&path.source)
+            .chain(path.edges.iter().map(|edge| &edge.target))
+            .filter_map(|node| node.variable.clone())
+            .collect();
+        let claim_edges: Vec<(String, bool)> = path
+            .edges
+            .iter()
+            .filter_map(|edge| {
+                let either = edge.direction == ast::EdgeDirection::Undirected;
+                edge.variable.clone().map(|variable| (variable, either))
+            })
+            .collect();
         // An undirected edge is matched either way and inserted from left to
         // right.
         let mut inserted = path.clone();
@@ -297,13 +312,32 @@ impl GqlTranslator {
             }),
             merge_clause.on_create.as_ref(),
         );
-        self.translate_inline_call(
+        let plan = self.translate_inline_call(
             &matched,
             &[(ast::CompositeOp::Otherwise, insert)],
             input,
             false,
             None,
-        )
+        )?;
+        // The insert branch claims the pattern: the right side of the
+        // OTHERWISE the call runs for each row.
+        let LogicalOperator::Apply(mut apply) = plan else {
+            return Err(Error::Internal(
+                "a MERGE of a path translates to a CALL".to_string(),
+            ));
+        };
+        let LogicalOperator::Otherwise(mut otherwise) = *apply.subplan else {
+            return Err(Error::Internal(
+                "a MERGE of a path runs a MATCH OTHERWISE INSERT".to_string(),
+            ));
+        };
+        otherwise.right = Box::new(super::super::common::claim_merge_pattern(
+            *otherwise.right,
+            claim_nodes,
+            &claim_edges,
+        )?);
+        apply.subplan = Box::new(LogicalOperator::Otherwise(otherwise));
+        Ok(LogicalOperator::Apply(apply))
     }
 
     /// Translates the patterns of an INSERT (or CREATE) that follows other
@@ -375,6 +409,7 @@ impl GqlTranslator {
         Ok(LogicalOperator::Create(CreateOp {
             elements,
             input: Some(Box::new(plan)),
+            claim: None,
         }))
     }
 

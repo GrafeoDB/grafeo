@@ -28,7 +28,7 @@ Grafeo supports two isolation levels, configurable per transaction:
 | `read_committed` | See committed data; non-repeatable reads possible |
 | `snapshot` | Default: consistent snapshot at transaction start; the strongest level |
 
-`serializable` is not available yet. Preventing write skew (two transactions that each read the same data and then each change something different based on it) needs the reads of queries recorded, and they are not yet, so asking for `serializable` fails with `GRAFEO-Q004` instead of running snapshot isolation under its name. Until then, a `UNIQUE` constraint keeps concurrent duplicates out, and a transaction that writes the data it decided on conflicts with one that writes it too.
+`serializable` is not available yet. Preventing write skew (two transactions that each read the same data and then each change something different based on it) needs the reads of queries recorded, and they are not yet, so asking for `serializable` fails with `GRAFEO-Q004` instead of running snapshot isolation under its name. Until then, a `UNIQUE` constraint keeps concurrent duplicates out, two MERGEs of one pattern conflict (see [MERGE and concurrent transactions](#merge-and-concurrent-transactions)), and a transaction that writes the data it decided on conflicts with one that writes it too.
 
 ```python
 # Default (snapshot isolation)
@@ -196,6 +196,28 @@ def withdraw(db, account, amount):
         # ... perform withdrawal ...
         tx.commit()
 ```
+
+### MERGE and concurrent transactions
+
+Two transactions that `MERGE` the same pattern do not both create it: a MERGE that finds no match claims its
+pattern before it creates it, and the second transaction to claim it fails with the retryable `GRAFEO-T001`. In
+auto-commit mode the statement fails; in an explicit transaction the MERGE fails while the other transaction is
+open, or the commit fails when the other one committed after this one began. Grafeo does not retry for the
+application: retry the statement (auto-commit) or the whole transaction (explicit), and the retry matches what the
+other one created. This holds for node, relationship and path MERGEs in GQL and Cypher, and for `upsert_nodes` and
+`upsert_edges`.
+
+Two MERGEs claim one pattern when each would match what the other creates: the same labels in any order, the same
+match properties by value (`1` and `1.0` are one value, `'1'` and `1` are two), and a path read either way. What
+stays out:
+
+- `INSERT` and `CREATE` of the same node still add one each time.
+- A concurrent `SET` that makes an existing node match a MERGE's pattern is not seen.
+- Different patterns that each match what the other creates (`MERGE (n:A {k: 1}) ON CREATE SET n:B` against
+  `MERGE (:A:B {k: 1})`) do not conflict.
+- A Gremlin `coalesce(V().has(...), addV(...))` upsert is a read and a create, not a MERGE.
+
+For a guarantee against every writer, add a `UNIQUE` or `NODE KEY` constraint.
 
 ## What Gets Rolled Back
 

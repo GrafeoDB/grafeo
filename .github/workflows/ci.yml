@@ -1387,6 +1387,12 @@ jobs:
           echo "WASM gzip size: $SIZE bytes ($(( SIZE / 1024 )) KB)"
           if [ "$SIZE" -gt 409600 ]; then echo "::warning::WASM exceeds 400KB gzip target"; fi
 
+      # The full package's size gate, the one the release applies (release.yml
+      # builds the published package with --features full). Without it a full
+      # build over its limit passes CI and fails only at release time.
+      - name: Build WASM (full, size gate)
+        run: bash scripts/build-wasm.sh --features full --out-dir target/wasm-full
+
   # Benchmark regression check (PR only, same-runner comparison)
   #
   # Runs both base and PR benchmarks on the same runner to eliminate

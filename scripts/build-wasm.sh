@@ -147,14 +147,17 @@ echo "  Gzip:   $(( GZ_SIZE / 1024 )) KB"
 # 0.6.2's planner rules took lite from 1170 KB to 1249 KB, so its limits rose.
 # 0.6.2 also adds external access, CALL with the procedure registry in every
 # build, and importRdf in the full package: full measured 1973 KB before
-# external access, so its limit is 2048 KB.
+# external access, so its limit was 2048 KB. 0.6.3 measured full at 2064 KB
+# (0.6.2 as published: 2020 KB; Rust 1.100 added under 1 KB) and lite at
+# 1396 KB, so the limits are 2304 KB and 1536 KB (full has room for about
+# five releases growing as 0.6.3 did, 44 KB); each warns 128 KB below.
 if [[ "$FEATURES" == *"full"* ]]; then
-    WARN_THRESHOLD=1835008   # 1.75 MB
-    FAIL_THRESHOLD=2097152   # 2048 KB
+    WARN_THRESHOLD=2228224   # 2176 KB
+    FAIL_THRESHOLD=2359296   # 2304 KB
     LABEL="full profile"
 else
-    WARN_THRESHOLD=1363149   # 1.3 MB
-    FAIL_THRESHOLD=1468006   # 1.4 MB
+    WARN_THRESHOLD=1441792   # 1408 KB
+    FAIL_THRESHOLD=1572864   # 1536 KB
     LABEL="browser profile"
 fi
 

@@ -16,7 +16,17 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier};
 use std::thread;
 
-use grafeo_engine::GrafeoDB;
+use grafeo_engine::{GrafeoDB, MemoryUsage};
+
+/// The reported memory that a leak would grow: the total without the shared plan cache. Its
+/// parsed and optimized plans grow with every distinct statement text until the cache's own byte
+/// bound (#674), which `plan_cache_bounds::the_cache_stays_within_its_limit` tests with distinct
+/// texts; the sessions' own plan caches stay in.
+fn leakable_bytes(usage: &MemoryUsage) -> usize {
+    usage.total_bytes
+        - usage.caches.parsed_plan_cache_bytes
+        - usage.caches.optimized_plan_cache_bytes
+}
 
 // ============================================================================
 // MVCC Version Chain Leak Detection
@@ -331,7 +341,8 @@ fn test_stress_concurrent_workload_memory_convergence() {
         }
 
         db.gc();
-        snapshots.push(db.memory_usage().total_bytes);
+        // Each round's labels are new statement texts, so the plan cache grows: left out.
+        snapshots.push(leakable_bytes(&db.memory_usage()));
     }
 
     // Memory between round 2 and round 3 should not grow by more than 25%.
@@ -374,7 +385,8 @@ fn test_stress_sustained_workload_slow_leak_detection() {
         s2.commit().unwrap();
     }
     db.gc();
-    let baseline = db.memory_usage().total_bytes;
+    // Each iteration's id is a new statement text, so the plan cache grows: left out.
+    let baseline = leakable_bytes(&db.memory_usage());
 
     // Sustained phase: 500 more iterations with GC every 50.
     for i in 0..500 {
@@ -398,7 +410,7 @@ fn test_stress_sustained_workload_slow_leak_detection() {
         }
     }
     db.gc();
-    let final_usage = db.memory_usage().total_bytes;
+    let final_usage = leakable_bytes(&db.memory_usage());
 
     // After 500 full cycles with periodic GC, memory should not have grown
     // more than 256 KiB from the post-warmup baseline.
@@ -463,7 +475,8 @@ fn test_stress_star_topology_churn() {
     // memory should converge back near baseline. Some residual overhead is
     // expected: Rust HashMaps do not shrink bucket arrays after removal, so
     // the store maps retain their high-water-mark capacity.
-    let growth = after.total_bytes.saturating_sub(baseline.total_bytes);
+    // Each round and spoke is a new statement text, so the plan cache grows: left out.
+    let growth = leakable_bytes(&after).saturating_sub(leakable_bytes(&baseline));
     assert!(
         growth < 2 * 1024 * 1024,
         "memory grew by {growth} bytes after 20 star topology cycles, expected < 2 MiB"
